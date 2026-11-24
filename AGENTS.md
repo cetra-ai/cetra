@@ -205,6 +205,7 @@ Run everything through `just`:
 | `just capture <group>/<case>` | record an OTLP fixture from a scenario, e.g. `just capture openinference/openai-chat-tool` |
 | `just capture-all` | recapture every scenario |
 | `just check-capture` | lint and type-check the capture scenarios, then recapture every scenario and compare (timing excluded) |
+| `just capture-tools` | download the pinned gateway binaries and the LiteLLM Proxy environment into `target/capture-tools` (checksummed; Linux x86_64) |
 | `just fetch-corpus` | download the pinned benchmark corpus (OpenAssistant oasst2, Apache-2.0) into `target/bench-corpus` |
 | `just soak` | the storage soak (D-R-11), configured by `CETRA_SOAK_*` |
 | `just soak-plot <out>` | plots and a summary table of a soak run |

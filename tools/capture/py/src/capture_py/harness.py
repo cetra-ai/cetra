@@ -178,15 +178,23 @@ def free_port() -> int:
 
 
 def wait_http(
-    url: str, timeout: float, ok: Callable[[int], bool] = lambda status: status == 200
+    url: str,
+    timeout: float,
+    ok: Callable[[int], bool] = lambda status: status == 200,
+    proc: subprocess.Popen[bytes] | None = None,
 ) -> None:
     """Poll ``GET url`` every 0.25 s and return once ``ok(status)`` is true.
 
     An HTTP error status counts as a status (``HTTPError.code``); connection errors are
     retried. Raises ``TimeoutError`` naming the URL once ``timeout`` seconds have passed.
+    With ``proc``, the gateway's process, it raises ``RuntimeError`` naming the URL and the
+    exit code as soon as ``proc`` has exited, instead of polling a gateway that is gone.
     """
     deadline = time.monotonic() + timeout
     while True:
+        code = proc.poll() if proc is not None else None
+        if code is not None:
+            raise RuntimeError(f"{url} was never ready: the gateway exited with code {code}")
         remaining = deadline - time.monotonic()
         if remaining <= 0:
             raise TimeoutError(f"{url} did not answer a ready status within {timeout} s")

@@ -76,6 +76,7 @@ An embedding call is an `embedding` span, with its token counts and the cost the
 - The fixtures were captured with LiteLLM Proxy 1.109.1 and the `openai` client 3.45.0.
 - `gen_ai.cost.input_cost` and `gen_ai.cost.output_cost` are the raw token costs, before the proxy's discount and margin, so the two parts need not add up to `gen_ai.cost.total_cost`. cetra keeps the total as the reported cost.
 - On an embedding call the proxy writes no provider: the provider column stays empty.
+- LiteLLM's other call types (rerank, image generation, transcription, responses, text completion) were not captured; their spans are read as `llm`.
 - `turn_off_message_logging: true` removes the messages, the tool definitions and the tool calls from the spans. A span keeps its token counts, its model and its cost.
 - The proxy exports about ten more spans per request (its HTTP handling, authentication and routing), as plain spans. Each HTTP request it serves is a trace of its own, so an HTTP health probe adds a trace every time it runs. cetra's SDK export filter does not apply to a gateway: use another probe type, or expect those traces.
 - Do not instrument both sides: an app with its own OpenTelemetry instrumentation behind a traced gateway counts each call twice, because the gateway joins the app's trace through `traceparent` and its span carries the same tokens and cost. Trace the gateway (it covers several apps and languages) or the app, not both.

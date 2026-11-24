@@ -126,6 +126,11 @@ pub enum CaptureError {
         code: Option<i32>,
     },
 
+    /// Ctrl-C stopped the run while the program was running; the program's
+    /// whole process group was killed first.
+    #[error("interrupted")]
+    Interrupted,
+
     /// Binding a port, spawning, or waiting on the program failed.
     #[error("failed to {step}: {source}")]
     Process {

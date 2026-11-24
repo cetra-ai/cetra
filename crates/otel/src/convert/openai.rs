@@ -267,8 +267,14 @@ fn tool_call(value: Json) -> Part {
         return Part::Unknown(value);
     };
     // A flattened call (Bifrost): `name` and `args` on the element itself,
-    // no `function` object (D-IN-25).
-    if !map.contains_key("function")
+    // no `function` object (D-IN-25). Only when `type` is absent or
+    // `"function"`: a Responses item such as `{"type": "function_call", …}`
+    // is not one and stays unknown.
+    let plain_function = map
+        .get("type")
+        .is_none_or(|kind| kind.as_str() == Some("function"));
+    if plain_function
+        && !map.contains_key("function")
         && let Some(name) = map.get("name").and_then(Json::as_str).map(str::to_owned)
     {
         return flattened_tool_call(map, name);
@@ -511,6 +517,38 @@ mod tests {
                 ]
             }])),
             r#"[{"role":"assistant","parts":[{"type":"tool_call","id":"call_1","name":"inner","arguments":{}}]}]"#
+        );
+    }
+
+    #[test]
+    fn a_responses_function_call_item_stays_unknown() {
+        // A Responses API item is flattened too (`name` and `arguments` on the
+        // element), but its `type` is `function_call`, not absent or
+        // `function`: it is not a Bifrost-style call and stays verbatim.
+        assert_eq!(
+            converted(&json!([{
+                "role": "assistant",
+                "tool_calls": [
+                    {
+                        "type": "function_call",
+                        "call_id": "call_1",
+                        "name": "get_weather",
+                        "arguments": "{\"city\":\"Paris\"}"
+                    }
+                ]
+            }])),
+            concat!(
+                r#"[{"role":"assistant","parts":["#,
+                r#"{"type":"function_call","call_id":"call_1","name":"get_weather","arguments":"{\"city\":\"Paris\"}"}]}]"#
+            )
+        );
+        // A `type` that is not a string is neither absent nor `function`.
+        assert_eq!(
+            converted(&json!([{
+                "role": "assistant",
+                "tool_calls": [{"type": 7, "name": "get_weather", "args": "{}"}]
+            }])),
+            r#"[{"role":"assistant","parts":[{"type":7,"name":"get_weather","args":"{}"}]}]"#
         );
     }
 

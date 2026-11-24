@@ -45,7 +45,7 @@ def main() -> None:
             env=gateway_env(),
         )
         try:
-            wait_http(f"http://127.0.0.1:{port}/health/liveliness", START_TIMEOUT)
+            wait_http(f"http://127.0.0.1:{port}/health/liveliness", START_TIMEOUT, proc=proc)
             client = OpenAI(
                 base_url=f"http://127.0.0.1:{port}/v1",
                 api_key=MASTER_KEY,

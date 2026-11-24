@@ -56,19 +56,25 @@ fn messages(ctx: &mut ReadContext<'_, '_>, prefix: &str) -> Option<(Payload, boo
     let completion = prefix == COMPLETION;
     let mut raw = openllmetry_messages(ctx.bag, prefix)?;
     consume_prefix(ctx, prefix);
-    if completion {
+    // The value stored on a conversion failure is the client's, so the role
+    // default goes on the copy that is converted.
+    let client_value = if completion {
+        let client_value = Json::Array(raw.clone());
         default_assistant_roles(&mut raw);
-    }
+        Some(client_value)
+    } else {
+        None
+    };
     let value = Json::Array(raw);
     match openai_messages(&value) {
         Ok(mut converted) => {
             lift_finish_reasons(&mut converted, &value);
-            if completion && !lift_function_calls(&mut converted) {
-                return Some((Payload::Json(value), true));
+            if completion {
+                lift_function_calls(&mut converted);
             }
             Some((Payload::Messages(converted), false))
         }
-        Err(_) => Some((Payload::Json(value), true)),
+        Err(_) => Some((Payload::Json(client_value.unwrap_or(value)), true)),
     }
 }
 
@@ -86,25 +92,29 @@ fn default_assistant_roles(raw: &mut [Json]) {
 }
 
 /// A completion message's `function_call` object becomes one tool-call part,
-/// after any text part (LiteLLM, D-IN-25). `false` when a call has no string
-/// `name`: the messages are then a conversion failure.
-fn lift_function_calls(messages: &mut [Message]) -> bool {
+/// after any text part (LiteLLM, D-IN-25). The value is read before it is
+/// removed: a value that is not an object, and an object whose `name` is
+/// missing or not a string, stay in the message's `extra`. Nothing fails.
+fn lift_function_calls(messages: &mut [Message]) {
     for message in messages {
-        let Some(Json::Object(call)) = message.extra.shift_remove("function_call") else {
+        let Some(Json::Object(call)) = message.extra.get("function_call") else {
             continue;
         };
-        let Some(name) = call.get("name").and_then(Json::as_str) else {
-            return false;
+        let lifted = call
+            .get("name")
+            .and_then(Json::as_str)
+            .map(|name| (name.to_owned(), call.get("arguments").cloned()));
+        let Some((name, arguments)) = lifted else {
+            continue;
         };
-        let arguments = call.get("arguments").cloned().map(parse_tool_arguments);
+        message.extra.shift_remove("function_call");
         message.parts.push(Part::ToolCall {
             id: None,
-            name: name.to_owned(),
-            arguments,
+            name,
+            arguments: arguments.map(parse_tool_arguments),
             extra: Map::new(),
         });
     }
-    true
 }
 
 fn lift_finish_reasons(messages: &mut [Message], value: &Json) {
@@ -202,16 +212,16 @@ fn consume_prefix(ctx: &mut ReadContext<'_, '_>, prefix: &str) {
 
 #[cfg(test)]
 mod tests {
-    use super::read;
+    use super::{lift_function_calls, read};
     use crate::bag::{AttrBag, Use};
     use crate::conventions::{READERS, REGISTRIES};
     use crate::payload::{Payload, ReadContext, assemble};
     use crate::warn::Warnings;
     use cetra_core::enums::SpanKind;
-    use cetra_core::message::messages_to_json;
+    use cetra_core::message::{Message, Role, messages_to_json};
     use opentelemetry_proto::tonic::common::v1::any_value::Value;
     use opentelemetry_proto::tonic::common::v1::{AnyValue, KeyValue};
-    use serde_json::json;
+    use serde_json::{Map, json};
 
     fn string_attr(key: &str, text: &str) -> KeyValue {
         KeyValue {
@@ -361,18 +371,37 @@ mod tests {
             r#"[{"role":"assistant","parts":[{"type":"tool_call","name":"get_weather"}]}]"#
         );
 
-        // A call without a name is a conversion failure, as today.
+        // A call without a name is not lifted and stays in `extra`: the
+        // message converts and nothing fails.
         let (io, _) = read_span(&[string_attr(
             "gen_ai.completion.0.function_call.arguments",
             r#"{"city":"Paris"}"#,
         )]);
+        let Payload::Messages(messages) = io.output.expect("messages") else {
+            panic!("output is messages");
+        };
         assert_eq!(
-            io.output,
-            Some(Payload::Json(json!([
-                {"role": "assistant", "function_call": {"arguments": "{\"city\":\"Paris\"}"}}
-            ])))
+            messages_to_json(&messages),
+            r#"[{"role":"assistant","parts":[],"function_call":{"arguments":"{\"city\":\"Paris\"}"}}]"#
         );
-        assert_eq!(io.errors, ["messages:openllmetry:output"]);
+        assert!(io.errors.is_empty());
+    }
+
+    #[test]
+    fn a_function_call_value_that_is_not_an_object_stays_in_extra() {
+        let mut message = Message {
+            role: Role::Assistant,
+            name: None,
+            parts: Vec::new(),
+            finish_reason: None,
+            extra: Map::new(),
+        };
+        message
+            .extra
+            .insert("function_call".to_owned(), json!("not an object"));
+        let mut messages = vec![message.clone()];
+        lift_function_calls(&mut messages);
+        assert_eq!(messages, vec![message]);
     }
 
     #[test]

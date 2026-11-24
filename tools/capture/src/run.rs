@@ -394,7 +394,8 @@ fn spawn_program(
 }
 
 /// Sends SIGTERM to every process of the group whose leader is `pid`. Errors are ignored:
-/// the group may be gone already.
+/// the group may be gone already. There is no escalation: a process that ignores or
+/// survives SIGTERM is never sent SIGKILL here. The callers kill the child itself.
 #[cfg(unix)]
 fn kill_process_group(pid: u32) {
     let _ = std::process::Command::new("kill")
@@ -468,25 +469,45 @@ impl Drop for Lines {
 }
 
 async fn wait_program(child: &mut Child) -> Result<(), CaptureError> {
-    match tokio::time::timeout(PROGRAM_TIMEOUT, child.wait()).await {
-        Ok(Ok(status)) if status.success() => Ok(()),
-        Ok(Ok(status)) => Err(CaptureError::ProgramFailed {
-            code: status.code(),
-        }),
-        Ok(Err(source)) => Err(CaptureError::Process {
-            step: "wait for the program",
-            source,
-        }),
-        Err(_elapsed) => {
-            #[cfg(unix)]
-            if let Some(pid) = child.id() {
-                kill_process_group(pid);
+    // The program runs in its own process group, so the terminal's Ctrl-C no
+    // longer reaches it: the runner catches it here, kills the program, and
+    // fails the case instead of leaving the group behind.
+    tokio::select! {
+        waited = tokio::time::timeout(PROGRAM_TIMEOUT, child.wait()) => match waited {
+            Ok(Ok(status)) if status.success() => Ok(()),
+            Ok(Ok(status)) => Err(CaptureError::ProgramFailed {
+                code: status.code(),
+            }),
+            Ok(Err(source)) => Err(CaptureError::Process {
+                step: "wait for the program",
+                source,
+            }),
+            Err(_elapsed) => {
+                kill_program(child).await;
+                Err(CaptureError::ProgramTimeout)
             }
-            let _ = child.kill().await;
-            let _ = child.wait().await;
-            Err(CaptureError::ProgramTimeout)
-        }
+        },
+        interrupted = tokio::signal::ctrl_c() => match interrupted {
+            Ok(()) => {
+                kill_program(child).await;
+                Err(CaptureError::Interrupted)
+            }
+            Err(source) => Err(CaptureError::Process {
+                step: "listen for Ctrl-C",
+                source,
+            }),
+        },
     }
+}
+
+/// Kills the program's whole group, then the child, and reaps it.
+async fn kill_program(child: &mut Child) {
+    #[cfg(unix)]
+    if let Some(pid) = child.id() {
+        kill_process_group(pid);
+    }
+    let _ = child.kill().await;
+    let _ = child.wait().await;
 }
 
 fn collect(

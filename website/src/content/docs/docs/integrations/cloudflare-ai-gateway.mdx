@@ -96,14 +96,14 @@ Replace `<ACCOUNT_TAG>` with your Cloudflare account tag and `<GATEWAY>` with yo
 
 The gateway can export its spans to an OTLP endpoint from its settings: **OTEL exporters** takes a URL, headers (the authorization can come from a Secrets Store reference) and a content type, JSON by default or protobuf. Send `cf-aig-otel-trace-id` and `cf-aig-otel-parent-span-id` request headers to link the export to your app's trace, and `cf-aig-metadata` to add span attributes (attribute names starting `gen_ai.` are reserved).
 
-Setup only: no recorded export exists and cetra has not verified this route. The export's provider key `gen_ai.model.provider` is not one cetra reads, and its content keys `gen_ai.prompt_json` and `gen_ai.completion_json` are not parsed, so through it the provider and the messages are not shown. Its cost key `gen_ai.usage.cost` is read as the reported cost.
+Setup only: no recorded export exists and cetra has not verified this route. The export's provider key `gen_ai.model.provider` is not one cetra reads, and its content keys `gen_ai.prompt_json` and `gen_ai.completion_json` are not parsed, so through it the provider and the messages are not shown. Its cost key `gen_ai.usage.cost` would be read as the reported cost.
 
 ## Limits
 
 - Setup only: no spans of the Cloudflare AI Gateway are captured in the repository.
 - Through the OTLP export, the provider and the content are not shown; the OpenAI-client route above shows both.
 - Cost is the model publisher's price when the model names its publisher (`vendor/model`, or a bare name a publisher has a row for); Cloudflare's fees are not included. Models no publisher row matches have no built-in price.
-- Do not instrument both sides: an app with its own OpenTelemetry instrumentation behind a traced gateway counts each call twice, because the gateway joins the app's trace through `traceparent` and its span carries the same tokens and cost. Trace the gateway (it covers several apps and languages) or the app, not both.
+- Do not instrument both sides: an app with its own OpenTelemetry instrumentation behind a traced gateway counts each call twice, because the gateway joins the app's trace through `traceparent` and its span carries the same tokens and cost. Trace the gateway (it covers several apps and languages) or the app, not both. On this gateway the trace link is its `cf-aig-otel-*` request headers, not `traceparent`, and neither is verified for the Cloudflare AI Gateway.
 - With plain OpenInference or the official OpenAI instrumentation in Python, the provider shows as `openai`: they do not record the endpoint. Use `cetra.init(instrument=["openai"])` or OpenLLMetry.
 - If a field is missing, look at the span's **Attributes** tab and compare it with [Span attributes](/docs/reference/attributes/).
 

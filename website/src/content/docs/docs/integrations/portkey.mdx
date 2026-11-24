@@ -109,7 +109,7 @@ Setup only: cetra has not verified this export. Portkey's docs do not say whethe
 - Setup only: no spans of Portkey are captured in the repository.
 - Cost is the model publisher's price when the model names its publisher (`vendor/model`, or a bare name a publisher has a row for); Portkey's fees are not included. Models no publisher row matches have no built-in price.
 - The OTLP export above is experimental and not verified by cetra.
-- Do not instrument both sides: an app with its own OpenTelemetry instrumentation behind a traced gateway counts each call twice, because the gateway joins the app's trace through `traceparent` and its span carries the same tokens and cost. Trace the gateway (it covers several apps and languages) or the app, not both.
+- Do not instrument both sides: an app with its own OpenTelemetry instrumentation behind a traced gateway counts each call twice, because the gateway joins the app's trace through `traceparent` and its span carries the same tokens and cost. Trace the gateway (it covers several apps and languages) or the app, not both. This is not verified for Portkey.
 - With plain OpenInference or the official OpenAI instrumentation in Python, the provider shows as `openai`: they do not record the endpoint. Use `cetra.init(instrument=["openai"])` or OpenLLMetry.
 - If a field is missing, look at the span's **Attributes** tab and compare it with [Span attributes](/docs/reference/attributes/).
 

@@ -15,7 +15,7 @@ use crate::payload::{
     Field, Io, KeyPattern, Payload, ReadContext, decode_json_text, non_message_payload,
     parse_tool_arguments, tool_definitions,
 };
-use crate::value::as_str;
+use crate::value::{as_str, to_json};
 use crate::warn::Warnings;
 
 const INPUT_MESSAGES: &str = "gen_ai.input.messages";
@@ -175,14 +175,42 @@ fn span_messages(ctx: &mut ReadContext<'_, '_>, key: &str) -> Option<(Payload, b
     let value = ctx.bag.take_payload(key)?;
     // D-IN-25 item 11: Bifrost's server root span repeats its `chat` child's
     // content as a bare string under the message keys: the last user text, a
-    // tool result or the answer. On that scope, a value that is not a JSON
-    // array is the field's plain value (rule 10), and nothing failed.
-    if ctx.scope == "bifrost"
-        && !decode_json_text(value, ctx.warnings).is_some_and(|json| json.is_array())
-    {
-        return Some((non_message_payload(value, ctx.warnings), false));
+    // tool result or the answer. That scope decodes the value once, in
+    // [`bifrost_payload`].
+    if ctx.scope != "bifrost" {
+        return Some(genai_messages(value, ctx.warnings));
     }
-    Some(genai_messages(value, ctx.warnings))
+    Some(bifrost_payload(value, ctx.warnings))
+}
+
+/// D-IN-25 item 11: on scope `bifrost`, only a JSON array whose every element
+/// is an object is messages; any other value is the field's plain value
+/// (rule 10), and nothing failed. The value is decoded once, and the decoded
+/// value is what the plain branch stores.
+fn bifrost_payload(value: &AnyValue, warnings: &mut Warnings) -> (Payload, bool) {
+    let decoded = decode_json_text(value, warnings);
+    let messages = decoded.as_ref().is_some_and(|json| {
+        json.as_array()
+            .is_some_and(|items| items.iter().all(Json::is_object))
+    });
+    if messages {
+        return genai_messages(value, warnings);
+    }
+    (plain_payload(value, decoded, warnings), false)
+}
+
+/// Rule 10 from a value decoded once: an object or array is `json`; a JSON
+/// scalar came from a string, which is the text it was sent as; a value that
+/// does not decode is that text, or its rule 1 encoding when it is not a
+/// string at all.
+fn plain_payload(value: &AnyValue, decoded: Option<Json>, warnings: &mut Warnings) -> Payload {
+    match decoded {
+        Some(json) if json.is_object() || json.is_array() => Payload::Json(json),
+        _ => match as_str(value) {
+            Some(text) => Payload::Text(text.to_owned()),
+            None => Payload::Json(to_json(value, warnings)),
+        },
+    }
 }
 
 fn details_messages(ctx: &mut ReadContext<'_, '_>, key: &str) -> Option<(Payload, bool)> {
@@ -822,6 +850,13 @@ mod tests {
         assert!(io.errors.is_empty());
         assert_eq!(bag.state("gen_ai.input.messages"), Some(Use::Payload));
         assert_eq!(bag.state("gen_ai.output.messages"), Some(Use::Payload));
+
+        // A JSON array that is not all objects is not messages either: it is
+        // a plain JSON value, and nothing failed.
+        let attrs = [string_attr("gen_ai.output.messages", "[1,2]")];
+        let (io, _) = read_span_with_bag("bifrost", &attrs);
+        assert_eq!(io.output, Some(Payload::Json(json!([1, 2]))));
+        assert!(io.errors.is_empty());
 
         // A message array still goes through the converter.
         let attrs = [string_attr(

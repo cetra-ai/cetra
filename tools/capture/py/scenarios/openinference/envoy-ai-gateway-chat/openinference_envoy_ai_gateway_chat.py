@@ -33,25 +33,27 @@ def main() -> None:
     """Run aigw, send one chat request, then stop it so the exporter flushes at once."""
     aigw = tool_binary("aigw", AIGW_VERSION, "aigw")
     envoy = tool_binary("envoy", ENVOY_VERSION, "envoy")
-    # A short base path: AIGW_RUNTIME_DIR holds a Unix socket, and a path longer than
-    # about 100 characters fails with `bind: invalid argument`.
-    base = tempfile.mkdtemp(prefix="aigw-", dir="/tmp")
     listen = free_port()
     admin = free_port()
-    config = str(Path(base) / "aigw.yaml")
-    template = (HERE / "aigw.tmpl.yaml").read_text(encoding="utf-8")
-    template = template.replace("@LISTEN@", str(listen)).replace("@FAKE@", mock_port())
-    Path(config).write_text(template, encoding="utf-8")
-    # Pre-place Envoy where aigw's func-e lookup expects it, so nothing is downloaded.
-    envoy_bin = Path(base) / "envoy-versions" / ENVOY_VERSION / "bin"
-    envoy_bin.mkdir(parents=True)
-    os.symlink(envoy, envoy_bin / "envoy")
-    proc = subprocess.Popen(  # noqa: S603 - a pinned binary
-        [aigw, "run", config, "--admin-port", str(admin)],
-        env=gateway_env(base),
-    )
+    proc: subprocess.Popen[bytes] | None = None
+    base: str | None = None
     try:
-        wait_http(f"http://127.0.0.1:{listen}/v1/models", START_TIMEOUT)
+        # A short base path: AIGW_RUNTIME_DIR holds a Unix socket, and a path longer than
+        # about 100 characters fails with `bind: invalid argument`.
+        base = tempfile.mkdtemp(prefix="aigw-", dir="/tmp")
+        config = str(Path(base) / "aigw.yaml")
+        template = (HERE / "aigw.tmpl.yaml").read_text(encoding="utf-8")
+        template = template.replace("@LISTEN@", str(listen)).replace("@FAKE@", mock_port())
+        Path(config).write_text(template, encoding="utf-8")
+        # Pre-place Envoy where aigw's func-e lookup expects it, so nothing is downloaded.
+        envoy_bin = Path(base) / "envoy-versions" / ENVOY_VERSION / "bin"
+        envoy_bin.mkdir(parents=True)
+        os.symlink(envoy, envoy_bin / "envoy")
+        proc = subprocess.Popen(  # noqa: S603 - a pinned binary
+            [aigw, "run", config, "--admin-port", str(admin)],
+            env=gateway_env(base),
+        )
+        wait_http(f"http://127.0.0.1:{listen}/v1/models", START_TIMEOUT, proc=proc)
         client = OpenAI(
             base_url=f"http://127.0.0.1:{listen}/v1",
             api_key=os.environ["OPENAI_API_KEY"],
@@ -63,8 +65,10 @@ def main() -> None:
         ]
         client.chat.completions.create(model="gpt-4o-mini", messages=messages, user="user-1")
     finally:
-        stop_gateway(proc, STOP_WAIT)
-        shutil.rmtree(base, ignore_errors=True)
+        if proc is not None:
+            stop_gateway(proc, STOP_WAIT)
+        if base is not None:
+            shutil.rmtree(base, ignore_errors=True)
     finish_tool(
         None,
         {"aigw": AIGW_VERSION, "envoy": ENVOY_VERSION, **importlib_versions(["openai"])},

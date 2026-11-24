@@ -31,10 +31,11 @@ fetch() {
     local dir
     dir="$(dirname -- "$final")"
     mkdir -p -- "$dir"
-    local download="$dir/download.tmp"
+    local download
+    download="$(mktemp --tmpdir="$dir")"
     temp_paths+=("$download")
     echo "capture-tools: fetching $(basename -- "$final")"
-    curl -fsSL --output "$download" "$url"
+    curl -fsSL --retry 3 --connect-timeout 30 --output "$download" "$url"
     echo "$sha  $download" | sha256sum -c -
     local binary="$download"
     if [ -n "$member" ]; then
@@ -45,7 +46,8 @@ fetch() {
         tar -xzf "$download" -C "$extract_dir" "$member"
         binary="$extract_dir/$member"
     fi
-    chmod +x -- "$binary"
+    # `mktemp` creates the download with mode 0600, so the mode is set in full.
+    chmod 755 -- "$binary"
     mv -f -- "$binary" "$final"
     echo "capture-tools: $(basename -- "$final") in place"
 }

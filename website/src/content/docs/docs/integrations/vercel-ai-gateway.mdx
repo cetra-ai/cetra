@@ -100,7 +100,7 @@ Setup only: cetra has not verified the drain, and no recorded one exists. The co
 - Setup only: no spans of the Vercel AI Gateway are captured in the repository. The drain needs a paid Vercel plan.
 - The drain carries no content and its cost key is not read; the OpenAI-client route above shows the messages and computes the publisher's price.
 - Cost is the model publisher's price when the model names its publisher (`vendor/model`, or a bare name a publisher has a row for); Vercel's fees are not included. Models no publisher row matches have no built-in price.
-- Do not instrument both sides: an app with its own OpenTelemetry instrumentation behind a traced gateway counts each call twice, because the gateway joins the app's trace through `traceparent` and its span carries the same tokens and cost. Trace the gateway (it covers several apps and languages) or the app, not both.
+- Do not instrument both sides: an app with its own OpenTelemetry instrumentation behind a traced gateway counts each call twice, because the gateway joins the app's trace through `traceparent` and its span carries the same tokens and cost. Trace the gateway (it covers several apps and languages) or the app, not both. This is not verified for the Vercel AI Gateway.
 - With plain OpenInference or the official OpenAI instrumentation in Python, the provider shows as `openai`: they do not record the endpoint. Use `cetra.init(instrument=["openai"])` or OpenLLMetry.
 - If a field is missing, look at the span's **Attributes** tab and compare it with [Span attributes](/docs/reference/attributes/).
 
