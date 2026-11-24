@@ -25,6 +25,16 @@ use crate::write::{Language, Source, write_case};
 
 const DEFAULT_INGEST_TIME: &str = "2026-01-01T00:00:00.000000000Z";
 const PROGRAM_TIMEOUT: Duration = Duration::from_secs(180);
+/// The JDK the Java scenarios run on: Temurin 21.0.13+9, fetched into
+/// `target/capture-tools` by `just capture-tools` (IN8.0).
+const JAVA_HOME_DIR: &str = "target/capture-tools/jdk/21.0.13+9";
+/// The `java` binary of [`JAVA_HOME_DIR`].
+const JAVA_BIN: &str = "target/capture-tools/jdk/21.0.13+9/bin/java";
+/// The .NET SDK the .NET scenarios run on: 10.0.404, fetched into
+/// `target/capture-tools` by `just capture-tools` (IN8.0).
+const DOTNET_ROOT_DIR: &str = "target/capture-tools/dotnet/10.0.404";
+/// The `dotnet` binary of [`DOTNET_ROOT_DIR`].
+const DOTNET_BIN: &str = "target/capture-tools/dotnet/10.0.404/dotnet";
 const QUIET: Duration = Duration::from_millis(300);
 const IDLE_MAX: Duration = Duration::from_secs(5);
 const DIFF_LIMIT: usize = 20;
@@ -41,13 +51,16 @@ pub struct Program {
 }
 
 impl Program {
-    /// `uv` for Python, or `node` for TypeScript. A Python scenario with an `env` runs in
-    /// `tools/capture/envs/<env>`; without one, in `tools/capture/py`. `env` is ignored for
-    /// TypeScript.
+    /// `uv` for Python, `node` for TypeScript, the pinned JDK for Java and the pinned
+    /// .NET SDK for .NET. A Python scenario with an `env` runs in
+    /// `tools/capture/envs/<env>`; without one, in `tools/capture/py`. `env` is ignored
+    /// for TypeScript, Java and .NET.
     pub fn for_language(repo_root: &Path, language: Language, env: Option<&str>) -> Self {
         match language {
             Language::Python => Self::python(repo_root, env),
             Language::Typescript => Self::typescript(),
+            Language::Java => Self::java(repo_root),
+            Language::Dotnet => Self::dotnet(repo_root),
         }
     }
 
@@ -79,6 +92,30 @@ impl Program {
             argv: vec!["node".to_owned(), "main.ts".to_owned()],
         }
     }
+
+    /// The JDK with the scenario module's `target/capture.args` argument file, written by
+    /// `just capture-tools` from the Maven build. The scenario directory is the working
+    /// directory, so the file's paths are relative to it.
+    fn java(repo_root: &Path) -> Self {
+        Self {
+            argv: vec![
+                repo_root.join(JAVA_BIN).to_string_lossy().into_owned(),
+                "@target/capture.args".to_owned(),
+            ],
+        }
+    }
+
+    /// The .NET SDK with the scenario project's built `Capture.dll`, written by
+    /// `just capture-tools`. The scenario directory is the working directory, so the
+    /// path is relative to it.
+    fn dotnet(repo_root: &Path) -> Self {
+        Self {
+            argv: vec![
+                repo_root.join(DOTNET_BIN).to_string_lossy().into_owned(),
+                "bin/capture/Capture.dll".to_owned(),
+            ],
+        }
+    }
 }
 
 /// A case that finished and was written or checked.
@@ -97,14 +134,14 @@ pub struct Discovered {
     pub case: CasePath,
     /// Language of its program.
     pub language: Language,
-    /// The environment under `tools/capture/envs/`, or `None` for `tools/capture/py` and
-    /// `tools/capture/ts`.
+    /// The environment under `tools/capture/envs/`, or `None` for `tools/capture/py`,
+    /// `tools/capture/ts` and every Java and .NET scenario.
     pub env: Option<String>,
     /// The scenario directory.
     pub dir: PathBuf,
 }
 
-/// Scans `tools/capture/{py,ts}/scenarios/*/*/scenario.json` and
+/// Scans `tools/capture/{py,ts,java,dotnet}/scenarios/*/*/scenario.json` and
 /// `tools/capture/envs/*/scenarios/*/*/scenario.json`.
 ///
 /// A missing `scenarios` directory is an empty result. An environment directory
@@ -122,6 +159,18 @@ pub fn discover(repo_root: &Path) -> Result<Vec<Discovered>, CaptureError> {
     scan(
         &capture.join("ts/scenarios"),
         Language::Typescript,
+        None,
+        &mut found,
+    )?;
+    scan(
+        &capture.join("java/scenarios"),
+        Language::Java,
+        None,
+        &mut found,
+    )?;
+    scan(
+        &capture.join("dotnet/scenarios"),
+        Language::Dotnet,
         None,
         &mut found,
     )?;
@@ -160,9 +209,15 @@ pub fn discover(repo_root: &Path) -> Result<Vec<Discovered>, CaptureError> {
 /// Environment for one program, built from `parent` rather than the process.
 ///
 /// `PATH`, `HOME`, and every `UV_*` and `XDG_*` variable are copied. The fixed
-/// capture and OTel variables replace anything copied. `scenario.env` is
-/// applied last. Nothing else from `parent` is present. `CETRA_CAPTURE_TOOLS`
-/// names the pinned binaries' directory.
+/// capture and OTel variables replace anything copied. Java additionally gets
+/// `JAVA_HOME` (the pinned JDK), .NET `DOTNET_ROOT`, `DOTNET_CLI_TELEMETRY_OPTOUT=1`,
+/// `DOTNET_NOLOGO=1` and `DOTNET_CLI_HOME` (the case's `scratch` directory);
+/// Python and TypeScript get none of those. `scenario.env` is applied last, so it
+/// wins. Nothing else from `parent` is present. `CETRA_CAPTURE_TOOLS` names the
+/// pinned binaries' directory.
+// The parameter list is the capture run's whole wiring; a struct would only
+// move the same eight values one hop out.
+#[allow(clippy::too_many_arguments)]
 pub fn program_env(
     parent: &HashMap<String, String>,
     scenario: &Scenario,
@@ -170,6 +225,8 @@ pub fn program_env(
     mock_port: u16,
     receiver_port: u16,
     meta_path: &str,
+    language: Language,
+    scratch: &Path,
 ) -> BTreeMap<String, String> {
     let mut env = BTreeMap::new();
     for (key, value) in parent {
@@ -218,6 +275,30 @@ pub fn program_env(
     );
     env.insert("OTEL_TRACES_SAMPLER".to_owned(), "always_on".to_owned());
     env.insert("OTEL_SERVICE_NAME".to_owned(), "capture-app".to_owned());
+    match language {
+        Language::Java => {
+            env.insert(
+                "JAVA_HOME".to_owned(),
+                repo_root.join(JAVA_HOME_DIR).to_string_lossy().into_owned(),
+            );
+        }
+        Language::Dotnet => {
+            env.insert(
+                "DOTNET_ROOT".to_owned(),
+                repo_root
+                    .join(DOTNET_ROOT_DIR)
+                    .to_string_lossy()
+                    .into_owned(),
+            );
+            env.insert("DOTNET_CLI_TELEMETRY_OPTOUT".to_owned(), "1".to_owned());
+            env.insert("DOTNET_NOLOGO".to_owned(), "1".to_owned());
+            env.insert(
+                "DOTNET_CLI_HOME".to_owned(),
+                scratch.to_string_lossy().into_owned(),
+            );
+        }
+        Language::Python | Language::Typescript => {}
+    }
     env.extend(scenario.env.clone());
     env
 }
@@ -235,12 +316,18 @@ pub async fn run_case(
     program: &Program,
 ) -> Result<Outcome, CaptureError> {
     let scenario = Scenario::load(scenario_dir)?;
+    // A Java or .NET program runs a toolchain `just capture-tools` fetches; a missing
+    // one is a setup problem, not a capture failure, and is reported as such.
+    if matches!(language, Language::Java | Language::Dotnet) {
+        check_tool_present(program)?;
+    }
     let mock = Mock::new(scenario.turns.clone());
     let receiver = Receiver::new();
     let (mock_port, mock_server) = bind(mock.router(), &scenario.mock_host).await?;
     let (receiver_port, receiver_server) = bind(receiver.router(), "127.0.0.1").await?;
     let meta = MetaFile::create(&scenario.case)?;
     let meta_path = utf8_path(meta.path())?;
+    let scratch = ScratchDir::create(&scenario.case)?;
     let parent = std::env::vars().collect();
     let env = program_env(
         &parent,
@@ -249,6 +336,8 @@ pub async fn run_case(
         mock_port,
         receiver_port,
         meta_path,
+        language,
+        scratch.path(),
     );
     let mut child = spawn_program(program, scenario_dir, &env)?;
     // Alive until `run_case` returns: it cleans up a group the scenario failed to stop.
@@ -272,7 +361,22 @@ pub async fn run_case(
     drop(mock_server);
     drop(receiver_server);
     drop(meta);
+    drop(scratch);
     Ok(outcome)
+}
+
+/// Fails with [`CaptureError::ToolMissing`] when the program's tool binary is not on
+/// disk, which means `just capture-tools` has not fetched it.
+fn check_tool_present(program: &Program) -> Result<(), CaptureError> {
+    let Some(tool) = program.argv.first() else {
+        return Err(CaptureError::ProgramCommand);
+    };
+    let path = PathBuf::from(tool);
+    if path.is_file() {
+        Ok(())
+    } else {
+        Err(CaptureError::ToolMissing { path })
+    }
 }
 
 /// Adds the scenarios under `dir` (a `scenarios` directory) to `found`.
@@ -401,6 +505,33 @@ impl MetaFile {
 impl Drop for MetaFile {
     fn drop(&mut self) {
         let _ = fs::remove_file(&self.path);
+    }
+}
+
+/// A per-case scratch directory (the .NET `DOTNET_CLI_HOME`, and any other tool
+/// that must not write to a real home), removed when the case ends.
+struct ScratchDir {
+    path: PathBuf,
+}
+
+impl ScratchDir {
+    fn create(case: &CasePath) -> Result<Self, CaptureError> {
+        let path = unique_temp("cetra-capture-scratch", case);
+        fs::create_dir_all(&path).map_err(|source| CaptureError::Process {
+            step: "prepare the scratch directory",
+            source,
+        })?;
+        Ok(Self { path })
+    }
+
+    fn path(&self) -> &Path {
+        &self.path
+    }
+}
+
+impl Drop for ScratchDir {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.path);
     }
 }
 
@@ -665,6 +796,7 @@ fn process(
         &scenario.timestamp_attributes,
         &scenario.span_names,
         &scenario.volatile_attributes,
+        &scenario.volatile_name_prefixes,
     )?;
     scrub(
         &mut request,
@@ -1224,6 +1356,8 @@ mod tests {
             .join(match language {
                 Language::Python => "py",
                 Language::Typescript => "ts",
+                Language::Java => "java",
+                Language::Dotnet => "dotnet",
             })
             .join("scenarios")
             .join(group)
@@ -1422,6 +1556,39 @@ mod tests {
     }
 
     #[test]
+    fn discover_reads_java_and_dotnet_scenarios() {
+        let tmp = Tmp::new("discover-jvm-dotnet");
+        write_scenario(&tmp.0, Language::Java, "genai", "koog-agent-tool");
+        write_scenario(
+            &tmp.0,
+            Language::Dotnet,
+            "genai",
+            "extensions-ai-dotnet-tool",
+        );
+        let found = discover(&tmp.0).unwrap();
+        let labels: Vec<_> = found
+            .iter()
+            .map(|found| (found.case.to_string(), found.language, found.env.as_deref()))
+            .collect();
+        assert_eq!(
+            labels,
+            vec![
+                (
+                    "genai/extensions-ai-dotnet-tool".to_owned(),
+                    Language::Dotnet,
+                    None
+                ),
+                ("genai/koog-agent-tool".to_owned(), Language::Java, None),
+            ]
+        );
+        assert_eq!(
+            found[1].dir,
+            tmp.0
+                .join("tools/capture/java/scenarios/genai/koog-agent-tool")
+        );
+    }
+
+    #[test]
     fn discover_rejects_an_unknown_group() {
         let tmp = Tmp::new("discover-group");
         write_scenario(&tmp.0, Language::Python, "not-a-group", "alpha");
@@ -1474,6 +1641,28 @@ mod tests {
                 "--frozen",
                 "python",
                 "main.py",
+            ]
+        );
+    }
+
+    #[test]
+    fn java_program_runs_the_args_file() {
+        assert_eq!(
+            Program::for_language(Path::new("/repo"), Language::Java, None).argv,
+            [
+                "/repo/target/capture-tools/jdk/21.0.13+9/bin/java",
+                "@target/capture.args",
+            ]
+        );
+    }
+
+    #[test]
+    fn dotnet_program_runs_the_built_dll() {
+        assert_eq!(
+            Program::for_language(Path::new("/repo"), Language::Dotnet, None).argv,
+            [
+                "/repo/target/capture-tools/dotnet/10.0.404/dotnet",
+                "bin/capture/Capture.dll",
             ]
         );
     }
@@ -1576,6 +1765,8 @@ mod tests {
             40123,
             40124,
             "/tmp/meta.json",
+            Language::Python,
+            Path::new("/tmp/cetra-capture-scratch"),
         );
         assert_eq!(env.get("PATH").map(String::as_str), Some("/usr/bin"));
         assert_eq!(
@@ -1603,6 +1794,8 @@ mod tests {
             40123,
             40124,
             "/tmp/meta.json",
+            Language::Python,
+            Path::new("/tmp/cetra-capture-scratch"),
         );
         assert_eq!(
             env.get("CETRA_CAPTURE_MOCK_URL").map(String::as_str),
@@ -1669,6 +1862,85 @@ mod tests {
         assert!(!rendered.contains("sk-parent-secret"));
         assert!(!rendered.contains("aws-parent-secret"));
         assert!(!rendered.contains("hello"));
+    }
+
+    #[test]
+    fn program_env_sets_the_java_and_dotnet_variables() {
+        let parent = HashMap::new();
+        let scenario = scenario(json!({}), None);
+        let scratch = Path::new("/tmp/cetra-capture-scratch-case");
+        let java = program_env(
+            &parent,
+            &scenario,
+            Path::new("/repo"),
+            40123,
+            40124,
+            "/tmp/meta.json",
+            Language::Java,
+            scratch,
+        );
+        assert_eq!(
+            java.get("JAVA_HOME").map(String::as_str),
+            Some("/repo/target/capture-tools/jdk/21.0.13+9")
+        );
+        for key in [
+            "DOTNET_ROOT",
+            "DOTNET_CLI_TELEMETRY_OPTOUT",
+            "DOTNET_NOLOGO",
+            "DOTNET_CLI_HOME",
+        ] {
+            assert!(!java.contains_key(key), "the java env must not set {key}");
+        }
+        let dotnet = program_env(
+            &parent,
+            &scenario,
+            Path::new("/repo"),
+            40123,
+            40124,
+            "/tmp/meta.json",
+            Language::Dotnet,
+            scratch,
+        );
+        assert_eq!(
+            dotnet.get("DOTNET_ROOT").map(String::as_str),
+            Some("/repo/target/capture-tools/dotnet/10.0.404")
+        );
+        assert_eq!(
+            dotnet
+                .get("DOTNET_CLI_TELEMETRY_OPTOUT")
+                .map(String::as_str),
+            Some("1")
+        );
+        assert_eq!(dotnet.get("DOTNET_NOLOGO").map(String::as_str), Some("1"));
+        assert_eq!(
+            dotnet.get("DOTNET_CLI_HOME").map(String::as_str),
+            Some("/tmp/cetra-capture-scratch-case")
+        );
+        assert!(!dotnet.contains_key("JAVA_HOME"));
+        for language in [Language::Python, Language::Typescript] {
+            let env = program_env(
+                &parent,
+                &scenario,
+                Path::new("/repo"),
+                40123,
+                40124,
+                "/tmp/meta.json",
+                language,
+                scratch,
+            );
+            for key in [
+                "JAVA_HOME",
+                "DOTNET_ROOT",
+                "DOTNET_CLI_TELEMETRY_OPTOUT",
+                "DOTNET_NOLOGO",
+                "DOTNET_CLI_HOME",
+            ] {
+                assert!(
+                    !env.contains_key(key),
+                    "the {language:?} env must not set {key}"
+                );
+            }
+        }
     }
 
     #[test]

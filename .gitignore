@@ -22,6 +22,11 @@ deploy/compose/cetra.env
 # Core dumps from the storage crash-harness tests
 core.[0-9]*
 
+# Java and .NET capture build outputs (IN8.1)
+tools/capture/java/**/target/
+tools/capture/dotnet/**/bin/
+tools/capture/dotnet/**/obj/
+
 website/.astro/
 website/src/generated/
 website/src/content/docs/docs/help/changelog.md

@@ -1,4 +1,4 @@
-//! Scenario files under `tools/capture/{py,ts}/scenarios/<group>/<case>/`.
+//! Scenario files under `tools/capture/{py,ts,java,dotnet}/scenarios/<group>/<case>/`.
 //!
 //! The JSON shape is `docs/plans/b2-capture/README.md` § The scenario format.
 //! Usage numbers use OTel semantics: `input` includes cache tokens and `output`
@@ -165,6 +165,12 @@ pub struct Scenario {
     /// Their values are replaced by `capture-volatile-<n>` everywhere they appear.
     #[serde(default)]
     pub volatile_attributes: Vec<String>,
+    /// Span-name prefixes whose remainder is random per run (Koog's session ids,
+    /// Agent Framework's agent ids). A span whose name starts with a listed prefix
+    /// has the rest of its name replaced by `<volatile>` when the fixture is written
+    /// and checked.
+    #[serde(default)]
+    pub volatile_name_prefixes: Vec<String>,
     /// The program ends its spans in any order, and each span's id can change between runs
     /// (Langflow runs two components at once). `--check` then masks span ids and sorts
     /// the spans before comparing. The fixture keeps its ids.
@@ -451,6 +457,7 @@ impl Scenario {
         for (field, values) in [
             ("span_names", &self.span_names),
             ("volatile_attributes", &self.volatile_attributes),
+            ("volatile_name_prefixes", &self.volatile_name_prefixes),
         ] {
             if values.iter().any(String::is_empty) {
                 return Err(format!("{field} entries must be non-empty"));
@@ -996,6 +1003,7 @@ mod tests {
         assert!(scenario.timing_attributes.is_empty());
         assert!(scenario.span_names.is_empty());
         assert!(scenario.volatile_attributes.is_empty());
+        assert!(scenario.volatile_name_prefixes.is_empty());
     }
 
     #[test]
@@ -1335,7 +1343,22 @@ mod tests {
         let mut value = chat();
         value["span_names"] = json!(["chat"]);
         value["volatile_attributes"] = json!(["session.id"]);
+        value["volatile_name_prefixes"] = json!(["invoke_agent "]);
         load_value(value).expect("valid span_names and volatile_attributes");
+    }
+
+    #[test]
+    fn an_empty_prefix_is_rejected() {
+        let mut value = chat();
+        value["volatile_name_prefixes"] = json!([""]);
+        assert_reason(value, "volatile_name_prefixes entries must be non-empty");
+
+        let mut value = chat();
+        value["volatile_name_prefixes"] = json!(["create_agent ", "create_agent "]);
+        assert_reason(
+            value,
+            "volatile_name_prefixes value \"create_agent \" is duplicated",
+        );
     }
 
     #[test]

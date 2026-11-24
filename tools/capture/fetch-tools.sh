@@ -5,6 +5,8 @@
 # with its hermes-otel plugin (IN7.9), the n8n, promptfoo, openclaw (with its
 # diagnostics-otel plugin), opencode and oh-my-pi pnpm tools, the Python
 # environments under tools/capture/envs/ (IN6.1) and Chromium for browser-use.
+# The last line then builds the Java and .NET capture scenarios online with the
+# JDK, Maven and .NET SDK above (build-jvm-dotnet.sh, IN8.1).
 # Linux x86_64 only; every download is checked against a pinned checksum
 # (SHA-256, or SHA-512 for Maven).
 # Each tool lands under its final name only once complete (whole trees carry a
@@ -303,3 +305,7 @@ else
     mkdir -p -- "$playwright_dir"
     cp -- "$browser_use_lock" "$browser_use_lock_copy"
 fi
+
+# Build the Java and .NET capture harnesses and scenarios (IN8.1): online, now
+# that every toolchain is in place, and skipped when their inputs are unchanged.
+bash "$repo_root/tools/capture/build-jvm-dotnet.sh"

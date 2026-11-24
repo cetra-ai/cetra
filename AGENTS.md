@@ -128,7 +128,7 @@ fixtures/server/golden/      golden server backups (meta.db, catalog.db, secret.
 fixtures/api/                example API responses (UI mocks), checked against the server types (spec 09)
 tools/                       dev tools (fixture capture, benchmarks); not shipped
 tools/soak/                  soak plots (uv)
-tools/capture/               fixture capture: mock provider, OTLP receiver, scenarios (B2); `harness/` (the Python harness package), `envs/<env>/` (scenario environments) and the tool projects `litellm-proxy/`, `langflow/`, `n8n/`, `promptfoo/` (D-IN-26)
+tools/capture/               fixture capture: mock provider, OTLP receiver, scenarios (B2); `harness/` (the Python harness package), `envs/<env>/` (scenario environments), the Java scenario reactor `java/` and .NET projects `dotnet/` (M8), and the tool projects `litellm-proxy/`, `langflow/`, `n8n/`, `promptfoo/` (D-IN-26)
 tools/e2e/                   run.sh for just e2e: a real cetra serve and both SDK suites (D-G-20)
 fuzz/                        cargo-fuzz targets (nightly only), committed corpus and regressions (track R M3)
 docs/                        decisions, specs, plans, research
@@ -229,7 +229,7 @@ Required tools:
 - `uv`
 - `actionlint` and `zizmor` (only when editing `.github/`)
 - for fuzzing: the nightly toolchain and cargo-fuzz 0.13.2 (`just fuzz-tools`)
-- for captures, `just capture-tools` downloads Temporal CLI, Bifrost, aigw and Envoy into `target/capture-tools` (pinned, checksummed), installs the LiteLLM Proxy environment (`tools/capture/litellm-proxy`, locked), Langflow (`tools/capture/langflow`), the n8n and Promptfoo tools (`tools/capture/{n8n,promptfoo}`, pnpm-locked) and the Python environments under `tools/capture/envs/` (uv-locked)
+- for captures, `just capture-tools` downloads Temporal CLI, Bifrost, aigw and Envoy into `target/capture-tools` (pinned, checksummed), installs the LiteLLM Proxy environment (`tools/capture/litellm-proxy`, locked), Langflow (`tools/capture/langflow`), the n8n and Promptfoo tools (`tools/capture/{n8n,promptfoo}`, pnpm-locked) and the Python environments under `tools/capture/envs/` (uv-locked); it also fetches the pinned JDK, Maven and .NET SDK and builds the Java and .NET capture scenarios with them (`build-jvm-dotnet.sh`)
 - for packaging (`just dist`, `just check-packaging`): `musl-tools` (Linux), `cargo-auditable` 0.7.7, `cargo-about` 0.9.3 (`--features cli`), Docker Engine 25+ with Compose 2.24+, helm 4.3.1, kubeconform 0.8.0; kind 0.33.0 and kubectl for `just helm-smoke`
 
 ## CI

@@ -542,7 +542,8 @@ prices-update litellm_json:
 
 # Fixture capture
 
-# Fetch the pinned gateway binaries (Temporal CLI, Bifrost, aigw, Envoy) into target/capture-tools
+# Fetch the pinned gateway binaries (Temporal CLI, Bifrost, aigw, Envoy), the JDK, Maven and the
+# .NET SDK into target/capture-tools, and build the Java and .NET capture scenarios (online)
 capture-tools:
     bash tools/capture/fetch-tools.sh
 
