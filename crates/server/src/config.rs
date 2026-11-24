@@ -446,7 +446,7 @@ const ANALYTICS_PAIR: &str = "set posthog_host and posthog_key together, or leav
 #[serde(deny_unknown_fields)]
 pub struct AnalyticsConfig {
     /// PostHog ingestion host, e.g. `https://eu.i.posthog.com`; batches go to `<host>/batch/`.
-    /// `https`, or `http` to a loopback IP. Stored without a trailing slash.
+    /// `https`, or plain `http` to a private IP address. Stored without a trailing slash.
     #[serde(default)]
     pub posthog_host: Option<String>,
     /// The PostHog project API key (`phc_…`).
@@ -1932,22 +1932,60 @@ fn validate_demo(demo: &DemoConfig) -> Result<(), ConfigError> {
     Ok(())
 }
 
+/// Which hosts `outbound_base_url` accepts over plain `http`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PlainHttp {
+    /// A loopback IP literal only (`telemetry.endpoint`: our relay is reached over the internet).
+    LoopbackOnly,
+    /// A private IP literal (`analytics.posthog_host`, user 2026-11-24: a PostHog on a tailnet).
+    Private,
+}
+
+/// A loopback, RFC 1918, CGNAT (`100.64.0.0/10`, Tailscale) or IPv6 unique local (`fc00::/7`) address.
+fn is_private_ip(host: &url::Host<&str>) -> bool {
+    match host {
+        url::Host::Ipv4(ip) => {
+            let [a, b, _, _] = ip.octets();
+            ip.is_loopback()
+                || a == 10
+                || (a == 172 && (16..=31).contains(&b))
+                || (a == 192 && b == 168)
+                || (a == 100 && (64..=127).contains(&b))
+        }
+        url::Host::Ipv6(ip) => ip.is_loopback() || (ip.segments()[0] & 0xfe00) == 0xfc00,
+        url::Host::Domain(_) => false,
+    }
+}
+
 /// An outbound base URL of operator config (`telemetry.endpoint`, `analytics.posthog_host`):
-/// `https`, or `http` to a loopback IP address; no user info, query or fragment. Returned
-/// without a trailing slash. Reasons are static and never quote the input.
-fn outbound_base_url(raw: &str, key: &'static str) -> Result<String, ConfigError> {
+/// `https`, or plain `http` to the hosts `plain_http` allows (an IP literal only; a host name
+/// is never allowed over `http`); no user info, query or fragment. Returned without a trailing
+/// slash. Reasons are static and never quote the input.
+fn outbound_base_url(
+    raw: &str,
+    key: &'static str,
+    plain_http: PlainHttp,
+) -> Result<String, ConfigError> {
     let invalid = |reason| ConfigError::Invalid { key, reason };
     let url = url::Url::parse(raw.trim())
         .map_err(|_| invalid("must be an absolute http or https URL"))?;
-    let loopback = match url.host() {
-        Some(url::Host::Ipv4(ip)) => ip.is_loopback(),
-        Some(url::Host::Ipv6(ip)) => ip.is_loopback(),
-        _ => false,
+    let allowed = match plain_http {
+        PlainHttp::LoopbackOnly => match url.host() {
+            Some(url::Host::Ipv4(ip)) => ip.is_loopback(),
+            Some(url::Host::Ipv6(ip)) => ip.is_loopback(),
+            _ => false,
+        },
+        PlainHttp::Private => url.host().is_some_and(|host| is_private_ip(&host)),
     };
     match url.scheme() {
         "https" => {}
-        "http" if loopback => {}
-        _ => return Err(invalid("must be https, or http to a loopback address")),
+        "http" if allowed => {}
+        _ => {
+            return Err(invalid(match plain_http {
+                PlainHttp::LoopbackOnly => "must be https, or http to a loopback address",
+                PlainHttp::Private => "must be https, or http to a private address",
+            }));
+        }
     }
     if !url.username().is_empty()
         || url.password().is_some()
@@ -1961,7 +1999,11 @@ fn outbound_base_url(raw: &str, key: &'static str) -> Result<String, ConfigError
 
 /// `telemetry.endpoint` (D-TL-10), by [`outbound_base_url`].
 fn validate_telemetry(telemetry: &mut TelemetryConfig) -> Result<(), ConfigError> {
-    telemetry.endpoint = outbound_base_url(&telemetry.endpoint, "telemetry.endpoint")?;
+    telemetry.endpoint = outbound_base_url(
+        &telemetry.endpoint,
+        "telemetry.endpoint",
+        PlainHttp::LoopbackOnly,
+    )?;
     Ok(())
 }
 
@@ -1993,7 +2035,11 @@ fn validate_analytics(analytics: &mut AnalyticsConfig) -> Result<(), ConfigError
         }
     }
     if let Some(host) = analytics.posthog_host.take() {
-        analytics.posthog_host = Some(outbound_base_url(&host, "analytics.posthog_host")?);
+        analytics.posthog_host = Some(outbound_base_url(
+            &host,
+            "analytics.posthog_host",
+            PlainHttp::Private,
+        )?);
     }
     if let Some(key) = &analytics.posthog_key {
         let value = key.expose();
@@ -2470,6 +2516,7 @@ fn merge_dict(into: &mut Dict, from: Dict) {
 
 #[cfg(test)]
 mod tests {
+    use super::is_private_ip;
     use std::collections::{BTreeMap, BTreeSet};
     use std::net::SocketAddr;
     use std::path::{Path, PathBuf};
@@ -2802,7 +2849,7 @@ mod tests {
     #[test]
     fn posthog_host_refuses() {
         let absolute = "must be an absolute http or https URL";
-        let scheme = "must be https, or http to a loopback address";
+        let scheme = "must be https, or http to a private address";
         let user_info = "must not contain user info, a query or a fragment";
         let cases = [
             ("not a url", absolute),
@@ -2841,6 +2888,89 @@ mod tests {
             config.analytics.posthog_host.as_deref(),
             Some("http://127.0.0.1:9999")
         );
+    }
+
+    #[test]
+    fn posthog_host_accepts_http_to_private_addresses() {
+        let hosts = [
+            "http://100.101.102.103:8000",
+            "http://10.0.0.5",
+            "http://192.168.1.2:8000",
+            "http://172.16.0.1",
+            "http://127.0.0.1:9",
+            "http://[fd7a:115c:a1e0::1]:8000",
+        ];
+        for raw in hosts {
+            let env = [
+                ("CETRA_ANALYTICS__POSTHOG_HOST", raw),
+                ("CETRA_ANALYTICS__POSTHOG_KEY", "phc_abc123"),
+            ];
+            let config = load_from(None, &env).unwrap_or_else(|error| panic!("{raw:?}: {error}"));
+            assert!(config.analytics.posthog_host.is_some(), "{raw:?}");
+        }
+    }
+
+    #[test]
+    fn posthog_host_refuses_http_to_public_or_named_hosts() {
+        let reason = "must be https, or http to a private address";
+        let hosts = [
+            "http://8.8.8.8",
+            "http://100.128.0.1",
+            "http://172.32.0.1",
+            "http://posthog.internal",
+            "http://169.254.1.1",
+        ];
+        for raw in hosts {
+            let env = [
+                ("CETRA_ANALYTICS__POSTHOG_HOST", raw),
+                ("CETRA_ANALYTICS__POSTHOG_KEY", "phc_abc123"),
+            ];
+            let result = load_from(None, &env);
+            assert!(
+                matches!(
+                    &result,
+                    Err(ConfigError::Invalid { key: "analytics.posthog_host", reason: got })
+                        if *got == reason
+                ),
+                "{raw:?}"
+            );
+            let text = result.err().unwrap().to_string();
+            assert!(!text.contains(raw), "{text}");
+        }
+    }
+
+    #[test]
+    fn telemetry_endpoint_still_refuses_http_to_a_private_address() {
+        let toml = "[telemetry]\nendpoint = \"http://100.101.102.103\"\n";
+        let result = load_from(Some(toml), &[]);
+        assert!(
+            matches!(
+                &result,
+                Err(ConfigError::Invalid { key: "telemetry.endpoint", reason: got })
+                    if *got == "must be https, or http to a loopback address"
+            ),
+            "{result:?}"
+        );
+    }
+
+    #[test]
+    fn is_private_ip_rules() {
+        let private = |raw: &str| {
+            let url = url::Url::parse(raw).unwrap();
+            is_private_ip(&url.host().unwrap())
+        };
+        assert!(!private("http://100.63.255.255"));
+        assert!(private("http://100.64.0.0"));
+        assert!(private("http://100.127.255.255"));
+        assert!(!private("http://172.15.0.1"));
+        assert!(private("http://172.31.255.255"));
+        assert!(!private("http://[fe80::1]"));
+        assert!(private("http://[fc00::1]"));
+        assert!(private("http://[fd00::1]"));
+        assert!(private("http://[::1]"));
+        assert!(!private("http://8.8.8.8"));
+        assert!(!private("http://169.254.1.1"));
+        assert!(!private("http://posthog.internal"));
     }
 
     #[test]

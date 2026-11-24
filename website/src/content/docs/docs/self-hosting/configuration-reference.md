@@ -239,5 +239,5 @@ Per-user product events sent through the server to a PostHog project of yours. O
 
 | Key | Environment | Type | Default | Description |
 |---|---|---|---|---|
-| `analytics.posthog_host` | | URL | unset (off) | Your PostHog ingestion host, such as `https://eu.i.posthog.com`. cetra posts batches to `<host>/batch/`. `https`, or `http` to a loopback IP address. No user info, query or fragment. Set together with `posthog_key`. |
+| `analytics.posthog_host` | | URL | unset (off) | Your PostHog ingestion host, such as `https://eu.i.posthog.com`. cetra posts batches to `<host>/batch/`. `https`, or plain `http` to a private IP address (loopback, RFC 1918, `100.64.0.0/10`, `fc00::/7`). No user info, query or fragment. Set together with `posthog_key`. |
 | `analytics.posthog_key` | | secret | unset | The PostHog project API key (`phc_…`). Set together with `posthog_host`. |
