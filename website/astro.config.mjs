@@ -293,6 +293,11 @@ export default defineConfig({
                     { label: "Temporal", link: "/docs/integrations/temporal/" },
                     { label: "Vercel AI SDK", link: "/docs/integrations/vercel-ai-sdk/" },
                     { label: "VoltAgent", link: "/docs/integrations/voltagent/" },
+                    { label: "Genkit Go", link: "/docs/integrations/genkit-go/" },
+                    { label: "openai-go", link: "/docs/integrations/openai-go/" },
+                    { label: "ruby_llm", link: "/docs/integrations/ruby-llm/" },
+                    { label: "rig", link: "/docs/integrations/rig/" },
+                    { label: "Arconia", link: "/docs/integrations/arconia/" },
                   ],
                 },
                 {

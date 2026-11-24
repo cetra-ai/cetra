@@ -122,6 +122,11 @@ Use this page to find how to connect your framework, provider or instrumentation
 | [Temporal](/docs/integrations/temporal/) | ✓ | — | Temporal's OpenAI Agents plugin | captured |
 | [Vercel AI SDK](/docs/integrations/vercel-ai-sdk/) | — | ✓ | `aiTelemetry()` | captured |
 | [VoltAgent](/docs/integrations/voltagent/) | — | ✓ | VoltAgent's own OpenTelemetry spans | captured |
+| [Genkit Go](/docs/integrations/genkit-go/) | — | — | Go, its `otelgenai` plugin | setup only |
+| [openai-go](/docs/integrations/openai-go/) | — | — | Go, OpenInference Go's middleware | setup only |
+| [ruby_llm](/docs/integrations/ruby-llm/) | — | — | Ruby, its built-in `RubyLLM::OpenTelemetry` | setup only |
+| [rig](/docs/integrations/rig/) | — | — | Rust, `tracing` spans exported by `tracing-opentelemetry` | setup only |
+| [Arconia](/docs/integrations/arconia/) | — | — | Java, its OpenInference starter for Spring AI | setup only |
 
 <CardGrid>
   <LinkCard title="AG2" description="Agent runs and tool calls." href="/docs/integrations/ag2/" />
@@ -249,6 +254,6 @@ Use this page to find how to connect your framework, provider or instrumentation
   <LinkCard title="From Langfuse" description="Keep the Langfuse SDK and send its spans to cetra." href="/docs/integrations/from-langfuse/" />
 </CardGrid>
 
-"Captured" means the repository holds spans recorded from the real library, and a test checks how cetra reads them. "Hand-written" means the spans in the repository were written from the vendor's attribute reference. "SDK test" means an SDK test checks the helper, and the repository holds no recorded spans. "Setup only" means the page shows the setup; nothing in the repository records this integration's spans. A ✓ for TypeScript means a helper in `@cetra-ai/sdk`, or a TypeScript library whose spans are captured. A — means no helper or captured run exists for that language: you can still use the library's own OpenTelemetry instrumentation with [Send OpenTelemetry](/docs/get-started/opentelemetry/).
+"Captured" means the repository holds spans recorded from the real library, and a test checks how cetra reads them. "Hand-written" means the spans in the repository were written from the vendor's attribute reference. "SDK test" means an SDK test checks the helper, and the repository holds no recorded spans. "Setup only" means the page shows the setup; nothing in the repository records this integration's spans. A ✓ for TypeScript means a helper in `@cetra-ai/sdk`, or a TypeScript library whose spans are captured. A — means no helper or captured run exists for that language: you can still use the library's own OpenTelemetry instrumentation with [Send OpenTelemetry](/docs/get-started/opentelemetry/). A dash in both language columns means the page is for another language, named in the How column (Java, .NET, Go, Ruby, Rust).
 
 Anything else that speaks OpenTelemetry works through [Send OpenTelemetry](/docs/get-started/opentelemetry/).
