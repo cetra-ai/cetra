@@ -99,8 +99,11 @@
     "path": "/acme/support-bot/traces",
     "waitFor": "100 loaded",
     "theme": "dark",
-    "viewport": { "width": 1200, "height": 760 },
-    "actions": [{ "click": "text=How can I export my traces to a CSV file?" }],
+    "viewport": { "width": 1920, "height": 760 },
+    "actions": [
+      { "click": "text=How can I export my traces to a CSV file?" },
+      { "click": "aside[aria-label=\"Trace\"] button:has-text(\"Timeline\")" }
+    ],
     "waitAfter": "Input / Output",
     "clip": "aside[aria-label=\"Trace\"]"
   },
