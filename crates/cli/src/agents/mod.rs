@@ -1,10 +1,11 @@
-//! `cetra agents`: connects coding agents (Claude Code, Codex, Gemini CLI, Copilot) to cetra
-//! (track CA, M4). `setup` writes the agent's user settings and `remove` takes them back;
-//! `hook` posts a session's repository, branch and person. `agents.toml` holds the server, key
-//! and person the hook posts with.
+//! `cetra agents`: connects coding agents (Claude Code, Codex, Gemini CLI, Copilot, Pi) to cetra
+//! (track CA, M4; Pi in track IN, M7). `setup` writes the agent's user settings and `remove` takes
+//! them back; `hook` posts a session's repository, branch and person. `agents.toml` holds the
+//! server, key and person the hook posts with.
 
 mod codex;
 pub(crate) mod hook;
+mod pi;
 mod setup;
 
 use std::fmt;
@@ -18,7 +19,7 @@ use serde::{Deserialize, Serialize};
 use crate::client::Token;
 use crate::credentials::write_private_file;
 
-/// The coding agents `cetra agents` configures (D-CA-1). Wire names are D-CA-4's.
+/// The coding agents `cetra agents` configures (D-CA-1, D-IN-28). Wire names are D-CA-4's.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
 pub(crate) enum Agent {
     #[value(name = "claude-code")]
@@ -29,6 +30,9 @@ pub(crate) enum Agent {
     GeminiCli,
     #[value(name = "copilot")]
     Copilot,
+    /// Pi: its extension file is written by setup; no hook (D-IN-28 item 9).
+    #[value(name = "pi")]
+    Pi,
 }
 
 impl Agent {
@@ -38,6 +42,7 @@ impl Agent {
             Self::Codex => "codex",
             Self::GeminiCli => "gemini-cli",
             Self::Copilot => "copilot",
+            Self::Pi => "pi",
         }
     }
 }

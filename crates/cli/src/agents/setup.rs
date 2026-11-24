@@ -1,6 +1,7 @@
 //! `cetra agents setup` and `remove` (D-CA-10): writes each agent's user-level settings so its
 //! traces reach cetra, and removes what setup wrote. Claude Code and Gemini CLI are JSON files
-//! here, Codex is in `codex.rs`, and Copilot has no file: setup prints its settings instead.
+//! here, Codex is in `codex.rs`, Pi's extension is in `pi.rs`, and Copilot has no file: setup
+//! prints its settings instead.
 
 use std::fs;
 use std::io::{self, Write};
@@ -12,6 +13,7 @@ use serde_json::{Map, Value, json};
 
 use super::codex;
 use super::hook::run_with_timeout;
+use super::pi;
 use super::{Agent, AgentsFile, Paths, SetupArgs};
 use crate::credentials::{self, write_private_file};
 
@@ -50,16 +52,18 @@ pub(crate) fn setup(args: &SetupArgs, paths: &Paths, out: &mut dyn Write) -> any
         anyhow::bail!("the key must be a project secret key (sk-cetra-…) with the ingest scope");
     }
     // agents.toml is saved last, and only when the agent's settings were written.
-    let agents_file = (args.agent != Agent::Copilot && !args.print).then(|| AgentsFile {
-        url: url.clone(),
-        key: key.to_owned(),
-        user: user_for(args.user.as_deref(), &[]),
-    });
+    let agents_file =
+        (!matches!(args.agent, Agent::Copilot | Agent::Pi) && !args.print).then(|| AgentsFile {
+            url: url.clone(),
+            key: key.to_owned(),
+            user: user_for(args.user.as_deref(), &[]),
+        });
     match args.agent {
         Agent::ClaudeCode => claude_code_setup(args, &url, paths, out)?,
         Agent::Codex => codex::setup(args, &url, paths, &codex::codex_home(paths), out)?,
         Agent::GeminiCli => gemini_cli_setup(args, &url, paths, out)?,
         Agent::Copilot => copilot(args, &url, out)?,
+        Agent::Pi => pi::setup(args, &url, paths, out)?,
     }
     if let Some(file) = agents_file {
         file.save(&paths.agents_file())?;
@@ -91,6 +95,7 @@ pub(crate) fn remove(agent: Agent, paths: &Paths, out: &mut dyn Write) -> anyhow
             )?;
             Ok(())
         }
+        Agent::Pi => pi::remove(paths, out),
     }
 }
 
@@ -131,7 +136,7 @@ pub(super) fn hook_command(paths: &Paths, agent: Agent) -> String {
 }
 
 /// The path as is when every character is safe in a shell word; otherwise single-quoted.
-fn shell_quote(path: &Path) -> String {
+pub(super) fn shell_quote(path: &Path) -> String {
     let text = path.to_string_lossy();
     let plain = !text.is_empty()
         && text
@@ -154,7 +159,7 @@ fn hook_timeout(agent: Agent) -> Option<u64> {
     match agent {
         Agent::ClaudeCode => Some(5),
         Agent::GeminiCli => Some(5000),
-        Agent::Codex | Agent::Copilot => None,
+        Agent::Codex | Agent::Copilot | Agent::Pi => None,
     }
 }
 
