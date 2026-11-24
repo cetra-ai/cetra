@@ -3,7 +3,7 @@ import type { Schema } from "@/api/types";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { formatCost, formatDuration, formatTimestamp, instantNs } from "@/lib/format";
 import { useTimeZone } from "@/lib/settings";
-import { type BarGeometry, barClipPath, labelPlacement, type SlowLevel } from "@/lib/timeline";
+import { type BarGeometry, barClipPath, labelPlacement } from "@/lib/timeline";
 
 // The labels are 10px mono text, about 6px a character, with a small gap to the bar.
 const LABEL_CHAR_PX = 6;
@@ -16,9 +16,9 @@ export function barLabel(span: { duration_ns: number; cost_total?: number }): st
 }
 
 /**
- * A span's bar on the timeline, outlined amber or red when slow, with its duration and cost
- * written inside it when they fit, else beside it (right, or left near the trace's end), and a
- * tooltip with the start, end and total time.
+ * A span's bar on the timeline, with its duration and cost written inside it when they fit,
+ * else beside it (right, or left near the trace's end), and a tooltip with the start, end,
+ * total and self time.
  */
 export function SpanBar({
   span,
@@ -26,7 +26,7 @@ export function SpanBar({
   colorClass,
   timelineWidth,
   traceStartNs,
-  slow,
+  selfNs,
   onDoubleClick,
 }: {
   span: Schema<"TreeSpan">["span"];
@@ -34,7 +34,8 @@ export function SpanBar({
   colorClass: string;
   timelineWidth: number;
   traceStartNs: number;
-  slow?: SlowLevel;
+  /** The span's duration minus the time its children cover. */
+  selfNs?: number;
   onDoubleClick: () => void;
 }) {
   const zone = useTimeZone();
@@ -63,16 +64,10 @@ export function SpanBar({
             type="button"
             tabIndex={-1}
             aria-label={`Timeline ${span.name}`}
-            data-slow={slow}
             className={cn(
               "absolute top-1/2 h-[18px] -translate-y-1/2 rounded-[4px] border-0 p-0",
               colorClass,
-              slow
-                ? cn(
-                    "outline-2 outline-offset-1 outline-solid",
-                    slow === "critical" ? "outline-status-error" : "outline-status-warn",
-                  )
-                : span.status === "error" && "outline outline-1 outline-status-error",
+              span.status === "error" && "outline outline-1 outline-status-error",
             )}
             style={{
               left: `${bar.leftPct}%`,
@@ -96,6 +91,9 @@ export function SpanBar({
             {formatDuration(endNs - traceStartNs)})
           </span>
           <span className="tabular-nums">Duration {duration}</span>
+          {selfNs === undefined ? null : (
+            <span className="tabular-nums">Self time {formatDuration(selfNs)}</span>
+          )}
         </TooltipContent>
       </Tooltip>
       <span
@@ -103,13 +101,7 @@ export function SpanBar({
         data-placement={placement}
         className={cn(
           "pointer-events-none absolute top-1/2 -translate-y-1/2 font-mono text-caption whitespace-pre tabular-nums",
-          placement === "inside"
-            ? "font-medium text-background"
-            : slow === "critical"
-              ? "text-status-error"
-              : slow === "warn"
-                ? "text-status-warn"
-                : "text-muted-foreground",
+          placement === "inside" ? "font-medium text-background" : "text-muted-foreground",
         )}
         style={labelStyle}
       >

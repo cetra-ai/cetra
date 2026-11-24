@@ -114,9 +114,10 @@ it("shows the metric columns in Tree mode only", () => {
 });
 
 // root (10s)
-// ├ plan (2.5s, amber)
-// │ └ draft (3.5s, red)
-// └ judge (2s, not slow: the boundary)
+// ├ a (0–4s, 3s self: slow)
+// │ └ b (1–2s)
+// ├ c (4–6.5s: slow)
+// └ d (6.5–8.5s: exactly 20 %, not slow)
 function span(id: string, depth: number, name: string, startMs: number, durationMs: number) {
   const start = Date.parse("2026-01-01T11:00:00.000Z") + startMs;
   return {
@@ -136,9 +137,10 @@ function span(id: string, depth: number, name: string, startMs: number, duration
 
 const TREE = [
   span("r", 0, "root", 0, 10_000),
-  span("p", 1, "plan", 0, 2_500),
-  span("d", 2, "draft", 1_000, 3_500),
-  span("j", 1, "judge", 8_000, 2_000),
+  span("a", 1, "plan", 0, 4_000),
+  span("b", 2, "lookup", 1_000, 1_000),
+  span("c", 1, "draft", 4_000, 2_500),
+  span("d", 1, "judge", 6_500, 2_000),
 ] as unknown as Schema<"TreeSpan">[];
 
 function renderTree(timeline: boolean) {
@@ -166,33 +168,24 @@ it.each([false, true])("draws the elbow lines of each row (timeline %s)", (timel
   const shapes = [...document.querySelectorAll("[data-guide]")].map((node) =>
     node.getAttribute("data-guide"),
   );
-  expect(shapes).toEqual(["┐", "├┐", "│ └", "└"]);
+  expect(shapes).toEqual(["┐", "├┐", "│ └", "├", "└"]);
 });
 
-it("colours slow durations in Tree mode, never the root", () => {
+it("colours slow durations amber in Tree mode, never the root", () => {
   renderTree(false);
   const slow = [...document.querySelectorAll("[role=row] [data-slow]")].map((node) => [
     node.textContent,
     node.getAttribute("data-slow"),
   ]);
   expect(slow).toEqual([
-    ["2.50s", "warn"],
-    ["3.50s", "critical"],
+    ["4.00s", "true"],
+    ["2.50s", "true"],
   ]);
 });
 
-it("outlines slow bars in Timeline mode and draws a gridline per tick", () => {
+it("marks no slow span in Timeline mode, and draws a gridline per tick", () => {
   renderTree(true);
-  expect(screen.getByRole("button", { name: "Timeline plan" })).toHaveAttribute(
-    "data-slow",
-    "warn",
-  );
-  expect(screen.getByRole("button", { name: "Timeline draft" })).toHaveAttribute(
-    "data-slow",
-    "critical",
-  );
-  expect(screen.getByRole("button", { name: "Timeline root" })).not.toHaveAttribute("data-slow");
-  expect(screen.getByRole("button", { name: "Timeline judge" })).not.toHaveAttribute("data-slow");
+  expect(document.querySelectorAll("[data-slow]")).toHaveLength(0);
   const ticks = document.querySelectorAll("[data-tick]").length;
   expect(ticks).toBeGreaterThanOrEqual(5);
   expect(document.querySelectorAll("[data-gridline]")).toHaveLength(ticks * TREE.length);

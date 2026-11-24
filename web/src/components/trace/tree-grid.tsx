@@ -35,7 +35,8 @@ import {
   barGeometry,
   clampView,
   panBy,
-  slowLevel,
+  selfTimes,
+  slowSpans,
   type TimeWindow,
   ticks,
   traceWindow,
@@ -198,7 +199,11 @@ export function TreeGrid({
     () => ticks(zoom, timeWindow.startNs, timelineWidth),
     [zoom, timeWindow.startNs, timelineWidth],
   );
-  const traceNs = timeWindow.endNs - timeWindow.startNs;
+  const self = useMemo(() => selfTimes(spans), [spans]);
+  const slowIds = useMemo(
+    () => slowSpans(spans, self, timeWindow.endNs - timeWindow.startNs),
+    [spans, self, timeWindow],
+  );
   const selectedIndex = spans.findIndex((row) => row.span.span_id === selectedSpanId);
   const needleQuery = query.trim().toLowerCase();
 
@@ -632,7 +637,7 @@ export function TreeGrid({
                 }
                 const span = row.span;
                 const guide = guides[item.index];
-                const slow = slowLevel(span.duration_ns, traceNs, row.depth === 0);
+                const slow = slowIds.has(span.span_id);
                 const selected = span.span_id === selectedSpanId;
                 const expandable = hasChildren(ends, spanIndex);
                 const isCollapsed = displayCollapsed.has(span.span_id);
@@ -719,11 +724,10 @@ export function TreeGrid({
                       <>
                         <div
                           role="gridcell"
-                          data-slow={slow}
+                          data-slow={slow ? "true" : undefined}
                           className={cn(
                             "num truncate px-2 text-caption",
-                            slow === "warn" && "font-medium text-status-warn",
-                            slow === "critical" && "font-medium text-status-error",
+                            slow && "font-medium text-status-warn",
                           )}
                         >
                           {formatDuration(span.duration_ns)}
@@ -754,7 +758,7 @@ export function TreeGrid({
                             colorClass={BAR[span.span_kind]}
                             timelineWidth={timelineWidth}
                             traceStartNs={timeWindow.startNs}
-                            slow={slow}
+                            selfNs={self[spanIndex]}
                             onDoubleClick={() => {
                               setView(zoomToSpan(timeWindow, span));
                             }}

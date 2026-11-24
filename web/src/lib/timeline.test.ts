@@ -5,9 +5,10 @@ import {
   formatTick,
   labelPlacement,
   panBy,
-  SLOW_CRITICAL_SHARE,
-  SLOW_WARN_SHARE,
-  slowLevel,
+  SLOW_MAX_SPANS,
+  SLOW_SELF_SHARE,
+  selfTimes,
+  slowSpans,
   ticks,
   traceWindow,
   zoomAt,
@@ -116,22 +117,64 @@ describe("ticks", () => {
   });
 });
 
-describe("slowLevel", () => {
-  const trace = 10 * SECOND;
-  it("never flags the root", () => {
-    expect(slowLevel(trace, trace, true)).toBeUndefined();
+function row(id: string, depth: number, startMs: number, endMs: number) {
+  const at = (ms: number) => new Date(Date.UTC(2026, 0, 1) + ms).toISOString();
+  return { depth, span: { span_id: id, start_time: at(startMs), end_time: at(endMs) } };
+}
+
+describe("selfTimes", () => {
+  it("subtracts the direct children, counting overlapping children once", () => {
+    const spans = [
+      row("root", 0, 0, 1_000),
+      row("a", 1, 0, 400),
+      row("a1", 2, 100, 300),
+      row("b", 1, 300, 600),
+      row("c", 1, 900, 1_200),
+    ];
+    // root: a, b and c cover 0–600 and 900–1000 → 300ms; a: 200ms; c runs past root's end.
+    // Epoch nanoseconds lose a few hundred ns of precision as numbers, so compare in ms.
+    expect([...selfTimes(spans)].map((ns) => Math.round(ns / MS))).toEqual([
+      300, 200, 200, 300, 300,
+    ]);
   });
-  it("flags above 20 % amber and above 30 % red, exclusive", () => {
-    expect(SLOW_WARN_SHARE).toBe(0.2);
-    expect(SLOW_CRITICAL_SHARE).toBe(0.3);
-    expect(slowLevel(2 * SECOND, trace, false)).toBeUndefined();
-    expect(slowLevel(2 * SECOND + 1, trace, false)).toBe("warn");
-    expect(slowLevel(3 * SECOND, trace, false)).toBe("warn");
-    expect(slowLevel(3 * SECOND + 1, trace, false)).toBe("critical");
-    expect(slowLevel(trace, trace, false)).toBe("critical");
+
+  it("gives a leaf its whole duration and never goes below zero", () => {
+    expect([...selfTimes([row("leaf", 0, 0, 50)])].map((ns) => Math.round(ns / MS))).toEqual([50]);
+    expect([...selfTimes([row("back", 0, 50, 0)])]).toEqual([0]);
   });
+});
+
+describe("slowSpans", () => {
+  const trace = 1_000 * MS;
+  it("flags self time above 20 % of the trace, never the root, boundary excluded", () => {
+    expect(SLOW_SELF_SHARE).toBe(0.2);
+    const spans = [
+      row("root", 0, 0, 1_000),
+      row("parent", 1, 0, 500),
+      row("child", 2, 0, 400),
+      row("edge", 1, 500, 700),
+      row("over", 1, 700, 901),
+    ];
+    // parent: 100ms self, child 400ms, edge exactly 200ms, over 201ms.
+    expect(slowSpans(spans, selfTimes(spans), trace)).toEqual(new Set(["child", "over"]));
+  });
+
+  it("keeps only the three largest, so parallel work isn't all flagged", () => {
+    expect(SLOW_MAX_SPANS).toBe(3);
+    const spans = [
+      row("root", 0, 0, 1_000),
+      row("p1", 1, 0, 300),
+      row("p2", 1, 0, 500),
+      row("p3", 1, 0, 400),
+      row("p4", 1, 0, 600),
+      row("p5", 1, 0, 250),
+    ];
+    expect(slowSpans(spans, selfTimes(spans), trace)).toEqual(new Set(["p4", "p2", "p3"]));
+  });
+
   it("flags nothing on an empty trace", () => {
-    expect(slowLevel(SECOND, 0, false)).toBeUndefined();
+    const spans = [row("root", 0, 0, 0), row("a", 1, 0, 0)];
+    expect(slowSpans(spans, selfTimes(spans), 0).size).toBe(0);
   });
 });
 

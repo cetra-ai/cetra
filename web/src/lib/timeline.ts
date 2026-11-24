@@ -1,4 +1,5 @@
 import { instantNs } from "@/lib/format";
+import { subtreeEnds } from "@/lib/tree";
 
 /** One microsecond. A window narrower than this is widened so bars have a scale. */
 const MIN_WINDOW_NS = 1_000;
@@ -217,29 +218,83 @@ export function formatTick(offsetNs: number, stepNs: number): string {
   return `${trim(offsetNs)}ns`;
 }
 
-// Placeholders to tune: a span slower than these shares of the trace is flagged.
-export const SLOW_WARN_SHARE = 0.2;
-export const SLOW_CRITICAL_SHARE = 0.3;
+// Placeholders to tune: a span is slow when its self time is above this share of the trace,
+// and only the slowest few are flagged, so a trace with parallel work isn't covered in them.
+export const SLOW_SELF_SHARE = 0.2;
+export const SLOW_MAX_SPANS = 3;
 
-export type SlowLevel = "warn" | "critical";
+type TimedRow = { depth: number; span: { start_time: string; end_time: string } };
 
-/** How slow a span is next to its trace: above 30 % critical, above 20 % warn. The root never is. */
-export function slowLevel(
-  durationNs: number,
+/**
+ * Each span's self time: its duration minus the time its direct children cover, with
+ * overlapping (parallel) children counted once and clipped to the span.
+ */
+export function selfTimes(spans: readonly TimedRow[]): Float64Array {
+  const self = new Float64Array(spans.length);
+  const ends = subtreeEnds(spans);
+  for (let index = 0; index < spans.length; index++) {
+    const row = spans[index];
+    if (!row) {
+      continue;
+    }
+    const start = instantNs(row.span.start_time);
+    const end = Math.max(start, instantNs(row.span.end_time));
+    const children: [number, number][] = [];
+    const last = ends[index] ?? index + 1;
+    for (let child = index + 1; child < last; child++) {
+      const node = spans[child];
+      if (node?.depth !== row.depth + 1) {
+        continue;
+      }
+      const from = Math.max(start, instantNs(node.span.start_time));
+      const to = Math.min(end, instantNs(node.span.end_time));
+      if (to > from) {
+        children.push([from, to]);
+      }
+    }
+    children.sort((left, right) => left[0] - right[0]);
+    // Merge the sorted intervals into runs; each run is counted once.
+    let covered = 0;
+    let runStart = start;
+    let runEnd = start;
+    for (const [from, to] of children) {
+      if (from > runEnd) {
+        covered += runEnd - runStart;
+        runStart = from;
+        runEnd = to;
+      } else {
+        runEnd = Math.max(runEnd, to);
+      }
+    }
+    covered += runEnd - runStart;
+    self[index] = Math.max(0, end - start - covered);
+  }
+  return self;
+}
+
+/**
+ * The spans to flag as slow: at most three, the largest self times above 20 % of the trace.
+ * Roots are never flagged.
+ */
+export function slowSpans(
+  spans: readonly (TimedRow & { span: { span_id: string } })[],
+  self: Float64Array,
   traceNs: number,
-  isRoot: boolean,
-): SlowLevel | undefined {
-  if (isRoot || !(traceNs > 0) || !Number.isFinite(durationNs)) {
-    return undefined;
+): Set<string> {
+  if (!(traceNs > 0)) {
+    return new Set();
   }
-  const share = durationNs / traceNs;
-  if (share > SLOW_CRITICAL_SHARE) {
-    return "critical";
+  const candidates: number[] = [];
+  for (let index = 0; index < spans.length; index++) {
+    const row = spans[index];
+    if (row && row.depth > 0 && (self[index] ?? 0) / traceNs > SLOW_SELF_SHARE) {
+      candidates.push(index);
+    }
   }
-  if (share > SLOW_WARN_SHARE) {
-    return "warn";
-  }
-  return undefined;
+  candidates.sort((left, right) => (self[right] ?? 0) - (self[left] ?? 0) || left - right);
+  return new Set(
+    candidates.slice(0, SLOW_MAX_SPANS).map((index) => spans[index]?.span.span_id ?? ""),
+  );
 }
 
 export type LabelPlacement = "inside" | "right" | "left";

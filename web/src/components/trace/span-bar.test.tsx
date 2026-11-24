@@ -4,7 +4,6 @@ import type { Schema } from "@/api/types";
 import { SpanBar } from "@/components/trace/span-bar";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { instantNs } from "@/lib/format";
-import type { SlowLevel } from "@/lib/timeline";
 
 const SPAN = {
   name: "get_order",
@@ -22,7 +21,6 @@ function bar(
   widthPct: number,
   timelineWidth = 400,
   extra: Partial<Schema<"TreeSpan">["span"]> = {},
-  slow?: SlowLevel,
 ) {
   render(
     <TooltipProvider>
@@ -33,7 +31,7 @@ function bar(
           colorClass="bg-primary"
           timelineWidth={timelineWidth}
           traceStartNs={TRACE_START}
-          slow={slow}
+          selfNs={200_000_000}
           onDoubleClick={() => {}}
         />
       </div>
@@ -66,21 +64,6 @@ it("writes it to the left of a short bar near the end of the trace", () => {
   expect(placement()).toBe("left");
 });
 
-it("outlines a slow bar and colours its outside label", () => {
-  bar(10, 2, 400, {}, "critical");
-  const button = screen.getByRole("button", { name: "Timeline get_order" });
-  expect(button).toHaveAttribute("data-slow", "critical");
-  expect(button).toHaveClass("outline-status-error");
-  expect(label()).toHaveClass("text-status-error");
-});
-
-it("leaves a normal bar without an outline", () => {
-  bar(10, 2);
-  expect(screen.getByRole("button", { name: "Timeline get_order" })).not.toHaveAttribute(
-    "data-slow",
-  );
-});
-
 it("shows the start, end and total time in a tooltip", async () => {
   bar(10, 20);
   fireEvent.focus(screen.getByRole("button", { name: "Timeline get_order" }));
@@ -89,4 +72,5 @@ it("shows the start, end and total time in a tooltip", async () => {
   expect(tip).toHaveTextContent(/Start \d\d:\d\d:\d\d\.500 \(\+1\.50s\)/);
   expect(tip).toHaveTextContent(/End \d\d:\d\d:\d\d\.000 \(\+2\.00s\)/);
   expect(tip).toHaveTextContent("Duration 500ms");
+  expect(tip).toHaveTextContent("Self time 200ms");
 });
