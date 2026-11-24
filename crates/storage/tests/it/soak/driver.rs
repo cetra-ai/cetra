@@ -994,7 +994,14 @@ pub(crate) async fn oracle(shared: Arc<Shared>, stop: watch::Receiver<bool>) {
 }
 
 /// Queries at `qps` per second, each kind by the mix weights, each project by rate share.
-pub(crate) async fn queries(shared: Arc<Shared>, stop: watch::Receiver<bool>) {
+/// A `qps` of 0 runs no query and only waits for the stop, since a task that ends
+/// before the stop fails the run.
+pub(crate) async fn queries(shared: Arc<Shared>, mut stop: watch::Receiver<bool>) {
+    if shared.config.qps == 0.0 {
+        // An error means the sender is gone, which is a stop too.
+        let _ = stop.wait_for(|stopped| *stopped).await;
+        return;
+    }
     let mut rng = Rng::new(0x9_0E_41);
     let projects = shared.config.projects;
     let mut interval = tokio::time::interval(Duration::from_secs_f64(1.0 / shared.config.qps));

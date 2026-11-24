@@ -732,6 +732,21 @@ fn config_defaults() {
 }
 
 #[test]
+fn a_zero_qps_is_accepted_and_a_negative_one_refused() {
+    let with_qps = |qps: &'static str| {
+        move |name: &str| match name {
+            "CETRA_SOAK_DIR" => Some("/home/tester/soak".to_owned()),
+            "CETRA_SOAK_OUT" => Some("/home/tester/soak-out".to_owned()),
+            "CETRA_SOAK_QPS" => Some(qps.to_owned()),
+            _ => None,
+        }
+    };
+    assert_eq!(SoakConfig::from_lookup(with_qps("0")).unwrap().qps, 0.0);
+    assert!(SoakConfig::from_lookup(with_qps("-1")).is_err());
+    assert!(SoakConfig::from_lookup(with_qps("inf")).is_err());
+}
+
+#[test]
 fn prepare_refuses_unmarked_dirs() {
     let root = tempfile::tempdir().unwrap();
 
