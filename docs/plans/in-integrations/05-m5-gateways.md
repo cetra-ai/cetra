@@ -549,3 +549,55 @@ The rule below is recorded in D-IN-25, item 11.
 - `just fixtures-fmt` and `just fixtures-check` pass.
 
 **Commit:** `Read Bifrost's root-span text`
+
+## Amendment D — review fixes
+
+The Sonnet code review of M5 found the items below. One GLM agent fixes them all in one commit, `Fix the M5 review's findings`.
+
+**Edit:**
+- `crates/otel/src/conventions/openllmetry.rs`
+- `crates/otel/src/convert/openai.rs`
+- `crates/otel/src/conventions/genai.rs`
+- `tools/capture/src/run.rs`
+- `tools/capture/fetch-tools.sh`
+- `tools/capture/py/src/capture_py/harness.py`
+- the scenario modules that call `wait_http`, under `tools/capture/py/scenarios/{genai,openinference}/…`
+- `website/src/content/docs/docs/integrations/{portkey,truefoundry,cloudflare-ai-gateway,vercel-ai-gateway,litellm-proxy}.mdx`
+- `AGENTS.md`
+- `docs/spec/02-ingestion.md`, where a rule's wording changes
+
+**1. OpenLLMetry `function_call`** (`lift_function_calls`, `default_assistant_roles`):
+- A `function_call` object whose `name` is missing or not a string stays in the message's `extra`, as before Amendment A. It is not a failure. Spec 02 and the test change to match: the "nameless call" case now converts and keeps `extra.function_call`.
+- `function_call` is read with `get` + `is_object` before removal. A non-object value stays in `extra`.
+- The raw value stored on a conversion failure is the client's value. Clone `raw` before the role default, or default the role only on the copy that is converted. Update the test that asserted the injected role.
+
+**2. Ctrl-C in the capture runner** (`run.rs`). While a case's program runs, the wait races `tokio::signal::ctrl_c()`. On Ctrl-C, call `kill_process_group(pid)`, kill the child, and return the existing error variant for an interrupted or failed program. If none fits, add `CaptureError::Interrupted` with message `interrupted`. The program runs in its own process group, so the terminal's Ctrl-C no longer reaches it. Test: none (signal handling); say so in the commit's body.
+
+**3. `kill_process_group`.** Unchanged: SIGTERM only. Its doc comment states the limit: no escalation.
+
+**4. Flattened tool call** (`convert/openai.rs`, `tool_call`): the flattened branch applies only when `type` is absent or equals `"function"`. A Responses-style `{"type":"function_call", …}` element stays `Part::Unknown`. Test: `a_responses_function_call_item_stays_unknown`.
+
+**5. Bifrost plain text** (`genai.rs`):
+- The value goes to message conversion only when it decodes to a JSON array whose every element is an object. Any other value is the plain value (rule 10).
+- The already-decoded value is passed on; do not decode it twice.
+- Test: `"[1,2]"` in scope `bifrost` is a plain JSON value with no error.
+
+**6. `fetch-tools.sh`:**
+- `curl` gains `--retry 3 --connect-timeout 30`.
+- The temporary download file comes from `mktemp` in the target directory, not a fixed `download.tmp`.
+
+**7. `harness.wait_http`** gains an optional `proc: subprocess.Popen[bytes] | None = None`. When given and `proc.poll()` is not `None`, it raises `RuntimeError` naming the URL and the exit code. Every gateway scenario passes its process.
+
+**8. Envoy scenario:** `mkdtemp` and `symlink` move inside the `try`, so the `finally` removes the directory.
+
+**9. Docs:**
+- On Portkey, TrueFoundry, Cloudflare AI Gateway and Vercel AI Gateway, the double-count bullet says it is unverified for that gateway, as Kong's does. On Cloudflare the trace link is its `cf-aig-otel-*` headers, and its cost key "would be read" as reported cost.
+- The LiteLLM Proxy page's Limits gains: "LiteLLM's other call types (rerank, image generation, transcription, responses, text completion) were not captured; their spans are read as `llm`."
+
+**10. `AGENTS.md` § Commands:** a row `just capture-tools` with the text "download the pinned gateway binaries and the LiteLLM Proxy environment into `target/capture-tools` (checksummed; Linux x86_64)".
+
+**Done when:**
+- `cargo nextest run -p cetra-otel -p cetra-capture`, clippy (`-D warnings`) and fmt for both;
+- `just fixtures-check`, with no `expected.json` changed (stop if one changes);
+- the Python lint trio;
+- from `website/`: `node scripts/check-terms.mjs` and `node scripts/skill-references.mjs`.
