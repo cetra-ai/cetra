@@ -16,6 +16,7 @@ const FEATURE_NAMES: Record<Schema<"Feature">, string> = {
   project_roles: "Per-project roles",
   sso_enforcement: "SSO enforcement",
   org_sso: "Single sign-on",
+  saml: "SAML single sign-on",
   scim: "SCIM provisioning",
   audit_log: "Audit log",
 };

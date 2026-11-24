@@ -595,6 +595,8 @@ mod tests {
         );
         assert_eq!(Feature::from_name("org_sso"), Some(Feature::OrgSso));
         assert!(Feature::OrgSso.is_ee());
+        assert_eq!(Feature::from_name("saml"), Some(Feature::Saml));
+        assert!(Feature::Saml.is_ee());
         assert_eq!(Feature::from_name("scim"), Some(Feature::Scim));
         assert!(Feature::Scim.is_ee());
         assert_eq!(Feature::from_name("audit_log"), Some(Feature::AuditLog));

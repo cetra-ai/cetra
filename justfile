@@ -163,7 +163,7 @@ fuzz-seed:
 
 # The fuzzing toolchain, updated by hand like rust-toolchain.toml (track R M3)
 fuzz_toolchain := "nightly-2026-11-03"
-fuzz_targets := "wal_record wal_replay parquet_file read_cache_block catalog_rows filter_dsl otlp_http_protobuf otlp_http_json otlp_grpc"
+fuzz_targets := "wal_record wal_replay parquet_file read_cache_block catalog_rows filter_dsl otlp_http_protobuf otlp_http_json otlp_grpc saml_response saml_metadata saml_assertion"
 
 # Install the fuzzing toolchain and cargo-fuzz (track R M3)
 # Install the fuzzing toolchain (track R M3); CI installs cargo-fuzz with taiki-e instead
@@ -229,7 +229,7 @@ _fuzz-max-len target:
     #!/usr/bin/env bash
     case "{{target}}" in
         parquet_file) echo 1048576 ;;
-        wal_replay|otlp_http_protobuf|otlp_http_json|otlp_grpc) echo 262144 ;;
+        wal_replay|otlp_http_protobuf|otlp_http_json|otlp_grpc|saml_response|saml_metadata|saml_assertion) echo 262144 ;;
         *) echo 65536 ;;
     esac
 
@@ -409,7 +409,7 @@ check-ee:
     expected=6448026f2e06ab3da9ed8ddda686694bba37179e88db92dea6d4aab516c957ea
     header='// SPDX-License-Identifier: Elastic-2.0'
     status=0
-    for dir in crates/server/src/ee web/src/ee tools/license crates/token; do
+    for dir in crates/server/src/ee web/src/ee tools/license crates/token crates/saml; do
         if [ ! -f "$dir/LICENSE" ]; then
             echo "$dir/LICENSE is missing"
             status=1
@@ -426,7 +426,7 @@ check-ee:
     done
     while IFS= read -r file; do
         case "$file" in
-            crates/server/src/ee/*|web/src/ee/*|tools/license/*|crates/token/*) ;;
+            crates/server/src/ee/*|web/src/ee/*|tools/license/*|crates/token/*|crates/saml/*) ;;
             *) echo "$file: Elastic-2.0 header outside an ee directory"; status=1 ;;
         esac
     done < <(git grep -l -F 'SPDX-License-Identifier: Elastic-2.0' -- '*.rs' '*.ts' '*.tsx' || true)

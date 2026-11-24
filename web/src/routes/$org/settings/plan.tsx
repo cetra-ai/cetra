@@ -38,6 +38,7 @@ const FEATURES: Feature[] = [
   "project_roles",
   "sso_enforcement",
   "org_sso",
+  "saml",
   "scim",
   "audit_log",
 ];
@@ -47,6 +48,7 @@ const FEATURE_NAMES: Record<Feature, string> = {
   project_roles: "Project roles",
   sso_enforcement: "SSO enforcement",
   org_sso: "Single sign-on",
+  saml: "SAML single sign-on",
   scim: "SCIM provisioning",
   audit_log: "Audit log",
 };

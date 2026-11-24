@@ -88,7 +88,7 @@ auto_provision = { org = "acme", role = "member" }
 
 Set the client secret in the environment, not in the file. The variable is `CETRA_AUTH__OIDC__<NAME>__CLIENT_SECRET`, with the provider's `name` in upper case and `-` written `_`: `my-idp` becomes `MY_IDP`.
 
-For every provider, register the callback URL `<public_url>/api/auth/callback/oidc:<name>`. cetra signs members in with the authorization code flow and PKCE, and checks the ID token's signature, issuer, audience, expiry and nonce. The provider must report the email as verified. SAML is not supported.
+For every provider, register the callback URL `<public_url>/api/auth/callback/oidc:<name>`. cetra signs members in with the authorization code flow and PKCE, and checks the ID token's signature, issuer, audience, expiry and nonce. The provider must report the email as verified. Instance providers use OIDC; an org can use SAML for its own provider ([Single sign-on](/docs/platform/sso/#set-up-saml)).
 
 ### Okta
 

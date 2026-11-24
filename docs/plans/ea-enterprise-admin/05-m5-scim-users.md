@@ -15,7 +15,7 @@
 - M1 is green.
 - M2 is fully committed and green (all of B1–B6 and its fix phase). M5 edits `audit/`, `routes/members.rs`, `routes/invites.rs`, `routes/datasets.rs`, `routes/annotation_queues.rs` and other files M1 and M2 touched, so it starts from a clean tree.
 - Branch `claude/ea-enterprise-admin` in `/home/sebastien/travaux/llm-observer/.claude/worktrees/ea-design`.
-- The next free migration number when C1a starts: check `crates/server/migrations/meta/`. It is `0033` (after main's `0031_connection_last_test.sql`) unless an M2 phase added one; use the next free number and say so.
+- The next free migration number when C1a starts: check `crates/server/migrations/meta/`. It is `0034` (after main's `0032_org_sso_saml.sql`) unless an M2 phase added one; use the next free number and say so.
 
 **Read first.**
 - `docs/plans/ea-enterprise-admin/README.md` § SCIM 2.0 (all of it), D-EA-12 to D-EA-19.

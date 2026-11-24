@@ -15,7 +15,7 @@ use crate::api::account::AuthProvider;
 use crate::config::{AuthSettings, ServerConfig};
 
 pub(crate) use github::GithubProvider;
-pub(crate) use provider::{IdpHttp, OidcProvider};
+pub(crate) use provider::{IdpHttp, IdpHttpError, OidcProvider};
 pub(crate) use state_cookie::random_key;
 
 /// Failure talking to an identity provider during login.

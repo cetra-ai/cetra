@@ -209,7 +209,8 @@ test("licence rows match the licence features", () => {
       row.selfHosted[0] === false &&
       row.selfHosted[1] === true,
   );
-  // The licence's features, plus its email support row: a service, not a gated feature (D197).
+  // Every licence feature has a row, plus its email support row: a service, not a gated
+  // feature (D197). SAML is licence-only, with no Teams cell (D-SA-3).
   assert.equal(licenceRows.length, SELF_HOSTED.licence.features.length + 1);
 });
 
@@ -223,7 +224,7 @@ test("retention controls are Pro and up", () => {
 test("each table has about 55 to 65 rows", () => {
   const count = (table) => groupsFor(table).reduce((sum, group) => sum + group.rows.length, 0);
   assert.equal(count("cloud"), 62);
-  assert.equal(count("selfHosted"), 60);
+  assert.equal(count("selfHosted"), 61);
 });
 
 test("groupsFor drops rows and empty groups", () => {

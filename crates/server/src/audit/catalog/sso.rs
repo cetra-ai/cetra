@@ -3,13 +3,20 @@
 #[derive(Debug, Clone, PartialEq, serde::Serialize)]
 #[serde(tag = "action", content = "details")]
 pub(crate) enum SsoAction {
-    /// Target `sso_provider`.
+    /// Target `sso_provider`. `protocol` is `oidc` or `saml`. `issuer_changed` marks a save
+    /// that changed the asserted identity (the issuer or the IdP entity ID, or a protocol
+    /// switch), which deleted the org's identities. The SAML metadata refresh writes it with
+    /// actor `system` when the IdP's certificates rotate.
     #[serde(rename = "sso.provider_saved")]
     #[serde(rename_all = "snake_case")]
-    ProviderSaved { issuer_changed: bool },
-    /// Target `sso_provider`.
+    ProviderSaved {
+        protocol: &'static str,
+        issuer_changed: bool,
+    },
+    /// Target `sso_provider`. `protocol` is `oidc` or `saml`.
     #[serde(rename = "sso.provider_removed")]
-    ProviderRemoved,
+    #[serde(rename_all = "snake_case")]
+    ProviderRemoved { protocol: &'static str },
     #[serde(rename = "sso.settings_changed")]
     #[serde(rename_all = "snake_case")]
     SettingsChanged {

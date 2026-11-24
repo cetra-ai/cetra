@@ -71,6 +71,10 @@ pub(crate) enum LoginError {
     SsoUnavailable,
     /// The email's domain is enforced by its org, and this person is not an instance admin (D-P-58).
     SsoRequired,
+    /// A SAML response failed validation, or did not match a pending request (D-SA-9, D-SA-10).
+    SamlInvalid,
+    /// A SAML response used a feature cetra refuses, such as an encrypted assertion (D-SA-8).
+    SamlUnsupported,
     /// The database or the random source failed.
     Internal(Box<dyn std::error::Error + Send + Sync>),
 }
@@ -91,6 +95,8 @@ impl LoginError {
             Self::SeatLimit => "seat_limit",
             Self::SsoUnavailable => "sso_unavailable",
             Self::SsoRequired => "sso_required",
+            Self::SamlInvalid => "saml_invalid",
+            Self::SamlUnsupported => "saml_unsupported",
             Self::Internal(_) => return None,
         })
     }

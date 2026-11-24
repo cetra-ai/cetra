@@ -491,6 +491,8 @@ pub(crate) struct Limits {
     /// Org SSO discovery and authorize, D-P-60: 300 per minute per client IP. Companies sit
     /// behind NAT, so the bucket is generous.
     pub(crate) sso_discover: KeyedLimiter<IpAddr>,
+    /// 60 per minute per client IP for the SAML ACS (D-SA-10).
+    pub(crate) saml_acs: KeyedLimiter<IpAddr>,
     /// `POST /api/auth/device/code`: 10 a minute per client IP, an IPv6 address counted by its
     /// /64 (D-AO-3).
     pub(crate) device_code: KeyedLimiter<IpAddr>,
@@ -575,6 +577,13 @@ impl Limits {
                 },
                 MAX_KEYS,
             ),
+            saml_acs: KeyedLimiter::new(
+                Bucket {
+                    capacity: 60,
+                    per: Duration::from_secs(60),
+                },
+                MAX_KEYS,
+            ),
             device_code: KeyedLimiter::new(
                 Bucket {
                     capacity: 10,
@@ -620,6 +629,7 @@ impl Limits {
         self.connection_tests.prune(now);
         self.sso_dns_checks.prune(now);
         self.sso_discover.prune(now);
+        self.saml_acs.prune(now);
         self.device_code.prune(now);
         self.device_lookup.prune(now);
         self.alert_tests_by_user.prune(now);

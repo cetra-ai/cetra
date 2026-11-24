@@ -67,7 +67,7 @@
           "auth"
         ],
         "summary": "Finish an OAuth or OIDC login",
-        "description": "Clears the login cookie. Success sets the session cookie and redirects to the saved relative path. Failure redirects to `/login?error=<code>`. Codes: `invalid_state`, `provider_error`, `provider_unavailable`, `email_not_verified`, `domain_not_allowed`, `signup_closed`, `account_disabled`, `link_refused`, `setup_required`, `seat_limit`, `sso_unavailable`, `sso_required`. The provider is `github`, `google`, `oidc:<name>`, or `sso` (an org's provider, started through `/api/auth/sso/authorize`).",
+        "description": "Clears the login cookie. Success sets the session cookie and redirects to the saved relative path. Failure redirects to `/login?error=<code>`. Codes: `invalid_state`, `provider_error`, `provider_unavailable`, `email_not_verified`, `domain_not_allowed`, `signup_closed`, `account_disabled`, `link_refused`, `setup_required`, `seat_limit`, `sso_unavailable`, `sso_required`, `saml_invalid`, `saml_unsupported`. The provider is `github`, `google`, `oidc:<name>`, or `sso` (an org's provider, started through `/api/auth/sso/authorize`).",
         "operationId": "get_oauth_callback",
         "parameters": [
           {
@@ -909,6 +909,164 @@
           },
           "429": {
             "description": "Too many requests.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": []
+      }
+    },
+    "/api/auth/saml/{org_id}": {
+      "get": {
+        "tags": [
+          "auth"
+        ],
+        "summary": "Read an org's SAML service provider metadata",
+        "description": "The SP metadata document of the org's SAML provider (D-SA-12): the entity ID and the assertion consumer service URL to register at the identity provider. Public, with no session. 404 when the org has no SAML provider.",
+        "operationId": "get_saml_metadata",
+        "parameters": [
+          {
+            "name": "org_id",
+            "in": "path",
+            "description": "Org UUID.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The SP metadata document.",
+            "content": {
+              "application/samlmetadata+xml": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "The resource does not exist.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": []
+      }
+    },
+    "/api/auth/saml/{org_id}/acs": {
+      "post": {
+        "tags": [
+          "auth"
+        ],
+        "summary": "Finish an org's SAML login",
+        "description": "The assertion consumer service (D-SA-10, D-SA-12). The identity provider posts the `SAMLResponse` form here, with the `RelayState` it received. The response is validated as D-SA-9 describes, and each login is single use. A failure redirects to `/login?error=saml_invalid`; a response the server does not accept, such as one with an encrypted assertion, redirects to `/login?error=saml_unsupported`. The route is exempt from the `Origin` check (D141): the pending login and its binder cookie are the check. The form is at most 256 KiB.",
+        "operationId": "post_saml_acs",
+        "parameters": [
+          {
+            "name": "org_id",
+            "in": "path",
+            "description": "Org UUID.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/x-www-form-urlencoded": {
+              "schema": {
+                "$ref": "#/components/schemas/SamlAcsForm"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "302": {
+            "description": "To the saved page, the start URL for an unsolicited response, or /login?error=<code>."
+          },
+          "404": {
+            "description": "The resource does not exist.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "The request body is larger than the limit.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Too many requests.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": []
+      }
+    },
+    "/api/auth/saml/{org_id}/start": {
+      "get": {
+        "tags": [
+          "auth"
+        ],
+        "summary": "Start an org's SAML login",
+        "description": "Starts a login through the org's SAML provider (D-SA-5, D-SA-10). The same URL is the identity provider's tile link. A missing or disabled provider redirects to `/login?error=sso_unavailable` with no cookie. Shares the per-IP bucket of 300 a minute with `/api/auth/sso/authorize`; over it is 429.",
+        "operationId": "get_saml_start",
+        "parameters": [
+          {
+            "name": "org_id",
+            "in": "path",
+            "description": "Org UUID.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "302": {
+            "description": "To the org's identity provider, or to `/login?error=sso_unavailable`."
+          },
+          "429": {
+            "description": "Too many requests.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The server is busy or a dependency is unavailable. Retry later.",
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -8901,6 +9059,114 @@
         "responses": {
           "204": {
             "description": "The provider is removed."
+          },
+          "401": {
+            "description": "No credentials, or the credentials are invalid.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The credentials do not allow this operation, or the organization's plan does not include it (code plan_required).",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "The resource does not exist.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The request conflicts with the current state.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Too many requests.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "session": []
+          }
+        ]
+      }
+    },
+    "/api/v1/orgs/{org}/sso/saml": {
+      "put": {
+        "tags": [
+          "orgs"
+        ],
+        "summary": "Save the org's SAML identity provider",
+        "description": "Creates or updates the org's one SAML provider (D-SA-17, D-SA-18). Give exactly one source: `metadata_url` (an `https` URL, fetched now and refreshed daily), `metadata_xml` (pasted), or `idp_entity_id`, `sso_url` and `certificates` together. With none of them, only the SAML settings are saved. Changing the IdP entity ID needs `confirm_entity_id_change: true` and deletes the org's identities. The server's public URL must be `https` (D-SA-19). Needs the org SSO and SAML features (D-P-61). Owners only, session only (D-P-51).",
+        "operationId": "put_org_saml_provider",
+        "parameters": [
+          {
+            "name": "org",
+            "in": "path",
+            "description": "Org UUID or slug.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PutOrgSamlProvider"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "The saved SSO settings.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OrgSso"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The request is malformed or a filter is invalid.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
           },
           "401": {
             "description": "No credentials, or the credentials are invalid.",
@@ -34478,6 +34744,7 @@
           "project_roles",
           "sso_enforcement",
           "org_sso",
+          "saml",
           "scim",
           "audit_log"
         ]
@@ -37449,6 +37716,7 @@
         "description": "`GET /api/v1/orgs/{org}/sso` and every settings write.",
         "required": [
           "callback_url",
+          "saml_sp",
           "domains"
         ],
         "properties": {
@@ -37466,6 +37734,35 @@
           "provider": {
             "$ref": "#/components/schemas/OrgSsoProvider",
             "description": "The provider, when the org has one."
+          },
+          "saml_sp": {
+            "$ref": "#/components/schemas/OrgSsoSamlSp",
+            "description": "The values for the org's SAML provider (D-SA-12). The same for every protocol."
+          }
+        }
+      },
+      "OrgSsoCertificate": {
+        "type": "object",
+        "description": "A trusted IdP signing certificate, shown by hash and validity (D-SA-11).",
+        "required": [
+          "sha256",
+          "not_before",
+          "not_after"
+        ],
+        "properties": {
+          "not_after": {
+            "type": "string",
+            "format": "date-time",
+            "description": "End of validity."
+          },
+          "not_before": {
+            "type": "string",
+            "format": "date-time",
+            "description": "Start of validity."
+          },
+          "sha256": {
+            "type": "string",
+            "description": "The hex SHA-256 of the certificate's DER encoding."
           }
         }
       },
@@ -37523,9 +37820,8 @@
         "type": "object",
         "description": "The org's identity provider. The client secret is write-only.",
         "required": [
+          "protocol",
           "display_name",
-          "issuer",
-          "client_id",
           "enabled",
           "enforced",
           "jit_role",
@@ -37535,7 +37831,7 @@
         "properties": {
           "client_id": {
             "type": "string",
-            "description": "The OAuth client id."
+            "description": "The OAuth client id. Set for an OIDC provider only."
           },
           "created_at": {
             "type": "string",
@@ -37556,7 +37852,7 @@
           },
           "issuer": {
             "type": "string",
-            "description": "The OIDC issuer URL."
+            "description": "The OIDC issuer URL. Set for an OIDC provider only."
           },
           "jit_role": {
             "$ref": "#/components/schemas/JitRole",
@@ -37567,10 +37863,90 @@
             "format": "date-time",
             "description": "The last successful sign-in through the provider. Absent before the first one."
           },
+          "protocol": {
+            "$ref": "#/components/schemas/SsoProtocol",
+            "description": "OpenID Connect or SAML. The OIDC fields are set for an OIDC provider, `saml` for a SAML one."
+          },
+          "saml": {
+            "$ref": "#/components/schemas/OrgSsoSaml",
+            "description": "The SAML settings. Set for a SAML provider only."
+          },
           "updated_at": {
             "type": "string",
             "format": "date-time",
             "description": "Last change to the settings."
+          }
+        }
+      },
+      "OrgSsoSaml": {
+        "type": "object",
+        "description": "A SAML provider's settings (D-SA-11, D-SA-18). Never contains the metadata document.",
+        "required": [
+          "idp_entity_id",
+          "sso_url",
+          "certificates",
+          "attributes"
+        ],
+        "properties": {
+          "attributes": {
+            "$ref": "#/components/schemas/SamlAttributeNames",
+            "description": "The attribute names the owner set. An absent field uses the default."
+          },
+          "certificates": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/OrgSsoCertificate"
+            },
+            "description": "The trusted IdP signing certificates."
+          },
+          "certificates_changed_at": {
+            "type": "string",
+            "format": "date-time",
+            "description": "When the set of certificates last changed. Omitted before the first change."
+          },
+          "idp_entity_id": {
+            "type": "string",
+            "description": "The IdP's entity ID (the `Issuer` of its responses)."
+          },
+          "metadata_url": {
+            "type": "string",
+            "description": "The metadata URL, when the metadata was fetched from one."
+          },
+          "refresh_error": {
+            "$ref": "#/components/schemas/SamlRefreshError",
+            "description": "Why the last scheduled refresh failed."
+          },
+          "refreshed_at": {
+            "type": "string",
+            "format": "date-time",
+            "description": "When the metadata was last fetched. Omitted for pasted metadata or manual fields."
+          },
+          "sso_url": {
+            "type": "string",
+            "description": "The IdP's HTTP-Redirect sign-on URL."
+          }
+        }
+      },
+      "OrgSsoSamlSp": {
+        "type": "object",
+        "description": "The values an owner copies into the IdP (D-SA-12).",
+        "required": [
+          "entity_id",
+          "acs_url",
+          "start_url"
+        ],
+        "properties": {
+          "acs_url": {
+            "type": "string",
+            "description": "The assertion consumer service URL."
+          },
+          "entity_id": {
+            "type": "string",
+            "description": "The SP entity ID."
+          },
+          "start_url": {
+            "type": "string",
+            "description": "Starts a login; also the IdP's tile URL."
           }
         }
       },
@@ -38839,6 +39215,56 @@
         },
         "additionalProperties": false
       },
+      "PutOrgSamlProvider": {
+        "type": "object",
+        "description": "`PUT /api/v1/orgs/{org}/sso/saml` (D-SA-18). Exactly one source: `metadata_url`,\n`metadata_xml`, or `idp_entity_id` + `sso_url` + `certificates`. With none of them, only the\nsettings of the org's SAML provider are saved. `Debug` omits the metadata and the fields.",
+        "required": [
+          "display_name",
+          "jit_role"
+        ],
+        "properties": {
+          "attributes": {
+            "$ref": "#/components/schemas/SamlAttributeNames",
+            "description": "Attribute names; an absent field uses the default."
+          },
+          "certificates": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "PEM certificates of the IdP's signing keys, with `idp_entity_id` and `sso_url`."
+          },
+          "confirm_entity_id_change": {
+            "type": "boolean",
+            "description": "Needed to change the IdP entity ID, which deletes the linked identities."
+          },
+          "display_name": {
+            "type": "string",
+            "description": "Shown on the login page; 1 to 100 characters."
+          },
+          "idp_entity_id": {
+            "type": "string",
+            "description": "The IdP's entity ID, with `sso_url` and `certificates`."
+          },
+          "jit_role": {
+            "$ref": "#/components/schemas/JitRole",
+            "description": "Role of people who join through the provider."
+          },
+          "metadata_url": {
+            "type": "string",
+            "description": "An `https` metadata URL, fetched now and refreshed daily."
+          },
+          "metadata_xml": {
+            "type": "string",
+            "description": "The IdP metadata document, pasted."
+          },
+          "sso_url": {
+            "type": "string",
+            "description": "The IdP's HTTP-Redirect sign-on URL, with `idp_entity_id` and `certificates`."
+          }
+        },
+        "additionalProperties": false
+      },
       "PutOrgSsoProvider": {
         "type": "object",
         "description": "`PUT /api/v1/orgs/{org}/sso/provider`. `Debug` omits the client secret.",
@@ -39371,6 +39797,55 @@
           }
         },
         "additionalProperties": false
+      },
+      "SamlAcsForm": {
+        "type": "object",
+        "description": "The form the identity provider posts to the SAML ACS (D-SA-10). Documentation only: the\nhandler reads the form itself. The names are fixed by SAML, so they keep their case.",
+        "required": [
+          "SAMLResponse"
+        ],
+        "properties": {
+          "RelayState": {
+            "type": "string"
+          },
+          "SAMLResponse": {
+            "type": "string"
+          }
+        }
+      },
+      "SamlAttributeNames": {
+        "type": "object",
+        "description": "Attribute names an owner set; an absent field uses the defaults (D-SA-6).",
+        "properties": {
+          "display_name": {
+            "type": "string",
+            "description": "The attribute that carries the display name."
+          },
+          "email": {
+            "type": "string",
+            "description": "The attribute that carries the email address."
+          },
+          "first_name": {
+            "type": "string",
+            "description": "The attribute that carries the first name."
+          },
+          "last_name": {
+            "type": "string",
+            "description": "The attribute that carries the last name."
+          }
+        }
+      },
+      "SamlRefreshError": {
+        "type": "string",
+        "description": "Why the last scheduled metadata refresh failed (`org_sso_saml.refresh_error`).",
+        "enum": [
+          "fetch_failed",
+          "status",
+          "too_large",
+          "denied",
+          "unusable",
+          "entity_id_changed"
+        ]
       },
       "SaveOverview": {
         "type": "object",
@@ -41473,6 +41948,14 @@
             "description": "True when the domain's org has an enabled provider."
           }
         }
+      },
+      "SsoProtocol": {
+        "type": "string",
+        "description": "The protocol of an org's provider (D-SA-2, D-SA-17).",
+        "enum": [
+          "oidc",
+          "saml"
+        ]
       },
       "StatsWindow": {
         "type": "object",

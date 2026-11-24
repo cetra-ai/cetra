@@ -125,10 +125,11 @@ fn samples() -> Vec<Action> {
         .into(),
         PatAction::Revoked.into(),
         SsoAction::ProviderSaved {
+            protocol: "saml",
             issuer_changed: true,
         }
         .into(),
-        SsoAction::ProviderRemoved.into(),
+        SsoAction::ProviderRemoved { protocol: "oidc" }.into(),
         SsoAction::SettingsChanged {
             enabled_before: false,
             enabled: true,

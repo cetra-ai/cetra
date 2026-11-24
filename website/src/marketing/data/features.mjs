@@ -404,6 +404,13 @@ export const FEATURE_GROUPS = [
         selfHosted: LICENCE,
       },
       {
+        // Self-hosted only for now: the cloud gets SAML for Enterprise orgs when the control
+        // plane federates it (D-SA-3).
+        label: "SAML 2.0 single sign-on",
+        doc: "platform/sso",
+        selfHosted: LICENCE,
+      },
+      {
         label: "Project-level roles",
         doc: "platform/plans-and-licence",
         cloud: TEAMS,

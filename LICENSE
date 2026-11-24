@@ -2,6 +2,7 @@ The cetra source code is licensed under the MIT License below, except for the
 contents of these directories, which are licensed under the Elastic License 2.0
 (see the LICENSE file in each of them):
 
+- crates/saml/
 - crates/server/src/ee/
 - crates/token/
 - web/src/ee/

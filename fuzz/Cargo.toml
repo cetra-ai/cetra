@@ -15,6 +15,7 @@ cargo-fuzz = true
 # Exact pin: `just fuzz-lock` resolves it on top of the root lock, and Dependabot bumps it here.
 libfuzzer-sys = "=0.4.13"
 cetra-otel = { path = "../crates/otel" }
+cetra-saml = { path = "../crates/saml" }
 cetra-storage = { path = "../crates/storage" }
 
 [[bin]]
@@ -76,6 +77,27 @@ bench = false
 [[bin]]
 name = "otlp_grpc"
 path = "fuzz_targets/otlp_grpc.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "saml_response"
+path = "fuzz_targets/saml_response.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "saml_metadata"
+path = "fuzz_targets/saml_metadata.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "saml_assertion"
+path = "fuzz_targets/saml_assertion.rs"
 test = false
 doc = false
 bench = false

@@ -147,10 +147,11 @@ test("licence features match the docs", () => {
     "audit_log",
     "org_sso",
     "project_roles",
+    "saml",
     "scim",
     "sso_enforcement",
   ]);
-  assert.equal(SELF_HOSTED.licence.features.length, 5);
+  assert.equal(SELF_HOSTED.licence.features.length, 6);
 });
 
 test("licence support matches D197 and the docs", () => {

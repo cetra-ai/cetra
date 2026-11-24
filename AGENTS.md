@@ -112,6 +112,7 @@ crates/
   storage/   cetra-storage  WAL, memtable, Parquet, catalog (catalog.db), compaction,
                              deletion, DataFusion providers, filter DSL, SQL sandbox  (specs 03, 05)
   token/     cetra-token    signed licence, org and control-plane tokens (Elastic-2.0, D-P-26)
+  saml/      cetra-saml     SAML 2.0 SP: IdP metadata, AuthnRequest, response validation (Elastic-2.0, D-SA-14)
   server/    cetra-server   API, auth, metadata DB, evaluation, alerts, email, MCP   (specs 04, 06–09)
   cli/       cetra-cli      the `cetra` binary                                       (spec 09 § CLI)
   ui/        cetra-ui       the web UI embedded at build time (D-G-18, D-G-35)
@@ -126,6 +127,7 @@ fixtures/storage/golden/     golden data directories, written from the first sta
 fixtures/server/golden/      golden server backups (meta.db, catalog.db, secret.key, manifest, socket lines), written
                              from the first stable release on (SF6, D-R-38, spec 04 § Format versions)
 fixtures/api/                example API responses (UI mocks), checked against the server types (spec 09)
+fixtures/saml/               test IdP keys and certificates for cetra-saml (track SA)
 fixtures/scim/               SCIM requests in the shape Okta and Entra ID send, replayed in tests (track EA M6; written from the vendors' documentation, not validator runs)
 tools/                       dev tools (fixture capture, benchmarks); not shipped
 tools/soak/                  soak plots (uv)
@@ -140,6 +142,7 @@ docs/                        decisions, specs, plans, research
 - `otel` and `storage` depend only on `core`. **They never depend on each other**, so they can be built in parallel; `server` connects them.
 - `eval` depends on `core` and `otel`.
 - `token` depends on no workspace crate. `server` and `tools/license` use it, and so does the control plane (by git commit).
+- `saml` depends on no workspace crate. `server` uses it from track SA's M2, and so does the control plane (by git commit).
 - `server` depends on `core`, `otel`, `storage`, `eval` and `token`; `cli` depends on `server`, `core` and `ui`.
 - `ui` depends on no workspace crate.
 - A `tools/` crate is never a dependency of a shipped crate. It may be a dev-dependency, for tests only: `cetra-cli`'s end-to-end test uses `cetra-capture`'s mock provider (D-I-43).

@@ -16,6 +16,7 @@ arrow.workspace = true
 cetra-core.workspace = true
 cetra-eval.workspace = true
 cetra-otel.workspace = true
+cetra-saml.workspace = true
 cetra-storage.workspace = true
 cetra-token.workspace = true
 utoipa.workspace = true
@@ -68,6 +69,7 @@ rmcp.workspace = true
 [dev-dependencies]
 # The playground's streamed runs are tested against the capture mock provider (D-I-43).
 cetra-capture.workspace = true
+cetra-saml = { workspace = true, features = ["test-idp"] }
 ed25519-dalek.workspace = true
 http-body.workspace = true
 tracing-subscriber.workspace = true

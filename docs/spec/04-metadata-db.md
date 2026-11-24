@@ -1006,22 +1006,47 @@ Usage counters are accumulated in memory and flushed to `usage_daily` every 10 s
 
 ## Per-org SSO (track P, `ee`)
 
-One OIDC provider and any number of email domains per org (D-P-52, D-P-54). The provider's client secret is sealed like an LLM connection key (§ Encryption of secrets); `org_sso_providers.client_secret_enc` is listed in `crypto::ENCRYPTED_COLUMNS`. The sealed value's associated data is the row's `id`, so a sealed secret is bound to its row. A domain is verified by at most one org at a time (the partial unique index). `jit_role` is the role of people who join through the provider (D-P-56). `last_login_at` is set by a successful sign-in through the provider and gates enforcement (D-P-57); changing the issuer or client id resets it, so a new Test sign-in is needed.
+One OIDC or SAML provider and any number of email domains per org (D-P-52, D-P-54, D-SA-2). The provider's client secret is sealed like an LLM connection key (§ Encryption of secrets); `org_sso_providers.client_secret_enc` is listed in `crypto::ENCRYPTED_COLUMNS`. The sealed value's associated data is the row's `id`, so a sealed secret is bound to its row. A domain is verified by at most one org at a time (the partial unique index). `jit_role` is the role of people who join through the provider (D-P-56). `last_login_at` is set by a successful sign-in through the provider and gates enforcement (D-P-57); changing the issuer or client id resets it, so a new Test sign-in is needed. A SAML provider keeps no sealed value: `client_secret_enc` is NULL, and its configuration is in the two SAML tables below (D-SA-17). Their certificates are DER rows, not JSON.
 
 ```sql
 CREATE TABLE org_sso_providers (
     id TEXT PRIMARY KEY,                -- UUIDv7; the row id in client_secret_enc's associated data
     org_id TEXT NOT NULL UNIQUE REFERENCES orgs(id) ON DELETE CASCADE,
+    protocol TEXT NOT NULL DEFAULT 'oidc',     -- 'oidc' | 'saml' (D-SA-2)
     display_name TEXT NOT NULL,
-    issuer TEXT NOT NULL,
-    client_id TEXT NOT NULL,
-    client_secret_enc BLOB NOT NULL,    -- sealed (D-I-2)
+    issuer TEXT,                        -- OIDC only
+    client_id TEXT,                     -- OIDC only
+    client_secret_enc BLOB,             -- OIDC only; sealed (D-I-2)
     enabled INTEGER NOT NULL DEFAULT 0,
     enforced INTEGER NOT NULL DEFAULT 0,
     jit_role TEXT NOT NULL DEFAULT 'viewer',   -- 'viewer' | 'member'
     last_login_at INTEGER,
     created_at INTEGER NOT NULL,
-    updated_at INTEGER NOT NULL
+    updated_at INTEGER NOT NULL,
+    CHECK ((protocol = 'oidc' AND issuer IS NOT NULL AND client_id IS NOT NULL AND client_secret_enc IS NOT NULL)
+        OR (protocol = 'saml' AND issuer IS NULL AND client_id IS NULL AND client_secret_enc IS NULL))
+);
+
+CREATE TABLE org_sso_saml (
+    provider_id TEXT PRIMARY KEY REFERENCES org_sso_providers(id) ON DELETE CASCADE,
+    metadata_url TEXT,                  -- https; the URL the metadata is refreshed from (D-SA-11)
+    idp_entity_id TEXT NOT NULL,        -- changes only by an explicit owner action (D-SA-11)
+    sso_url TEXT NOT NULL,              -- the HTTP-Redirect sign-on URL
+    email_attribute TEXT,
+    name_attribute TEXT,
+    first_name_attribute TEXT,
+    last_name_attribute TEXT,
+    refreshed_at INTEGER,
+    refresh_checked_at INTEGER,
+    refresh_error TEXT,
+    certificates_changed_at INTEGER
+);
+
+CREATE TABLE org_sso_saml_certificates (
+    provider_id TEXT NOT NULL REFERENCES org_sso_saml(provider_id) ON DELETE CASCADE,
+    position INTEGER NOT NULL,
+    der BLOB NOT NULL,                  -- one signing certificate, DER; at most 4 (D-SA-11)
+    PRIMARY KEY (provider_id, position)
 );
 
 CREATE TABLE org_sso_domains (
@@ -1038,7 +1063,7 @@ CREATE TABLE org_sso_domains (
 CREATE UNIQUE INDEX org_sso_domains_verified ON org_sso_domains(domain) WHERE verified_at IS NOT NULL;
 ```
 
-Deleting an org deletes its provider and domains by cascade, and its identities (`identities.provider = 'org:<org_id>'`) explicitly, since no key references the org from `identities`.
+Deleting an org deletes its provider and domains by cascade (the SAML tables cascade from the provider row), and its identities (`identities.provider = 'org:<org_id>'`) explicitly, since no key references the org from `identities`.
 
 ## Audit records (track EA, `audit_events`)
 
@@ -1093,13 +1118,13 @@ CREATE INDEX audit_events_at ON audit_events (at);
 
 ## Audit stream destinations (track EA M4, `ee`)
 
-Migration `0035_audit_stream.sql` (D-EA-11). One row of `audit_stream_destinations` per org, and one with `org_id` null for the instance; a unique index allows one row per scope. `config_enc` is the sealed stream config (the URL, the signing secret and the optional header), with the row id as associated data (D-I-2). `url_host` is the only part of the URL kept in clear. `cursor_seq` is the last `audit_events.seq` the destination accepted (D-EA-20). `attempts`, `next_attempt_at`, `last_success_at`, `last_error`, `failing_since` and `alerted_at` drive the backoff and the 24 h email. `lost_before_seq` is set when retention deletes records above the cursor (purge, § Audit records); it is kept across edits and secret rotations, and clears only when a new destination row is created. No text column has a `CHECK` (D-R-34).
+Migration `0036_audit_stream.sql` (D-EA-11). One row of `audit_stream_destinations` per org, and one with `org_id` null for the instance; a unique index allows one row per scope. `config_enc` is the sealed stream config (the URL, the signing secret and the optional header), with the row id as associated data (D-I-2). `url_host` is the only part of the URL kept in clear. `cursor_seq` is the last `audit_events.seq` the destination accepted (D-EA-20). `attempts`, `next_attempt_at`, `last_success_at`, `last_error`, `failing_since` and `alerted_at` drive the backoff and the 24 h email. `lost_before_seq` is set when retention deletes records above the cursor (purge, § Audit records); it is kept across edits and secret rotations, and clears only when a new destination row is created. No text column has a `CHECK` (D-R-34).
 
 The delivery task (every 10 s, off in restore mode) reads the records of each destination with `seq > cursor_seq`, oldest first, and moves `cursor_seq` only after a 2xx answer. Its writes match the `updated_at` the task read, so an edit or a delete made during a delivery is kept as the edit left it.
 
 ## SCIM provisioning (track EA M5, `ee`)
 
-Migration `0033_scim.sql` (D-EA-12 to D-EA-19). One row of `org_scim` per org; `scim_tokens` holds the SHA-256 of each `scim-cetra-…` token (at most two live per org, enforced in the write transaction). `scim_users` links an org's SCIM resource to the cetra user it provisions. Its `active` is the SCIM flag, and `disabled_account` records that SCIM disabled the account, so a reactivation can enable it again. No text column has a `CHECK` (D-R-34).
+Migration `0034_scim.sql` (D-EA-12 to D-EA-19). One row of `org_scim` per org; `scim_tokens` holds the SHA-256 of each `scim-cetra-…` token (at most two live per org, enforced in the write transaction). `scim_users` links an org's SCIM resource to the cetra user it provisions. Its `active` is the SCIM flag, and `disabled_account` records that SCIM disabled the account, so a reactivation can enable it again. No text column has a `CHECK` (D-R-34).
 
 ```sql
 CREATE TABLE org_scim (
@@ -1145,7 +1170,7 @@ CREATE UNIQUE INDEX scim_users_org_user ON scim_users (org_id, user_id);
 
 A member is SCIM-managed while an active `scim_users` row links to them (spec 08 § SCIM).
 
-Migration `0034_scim_groups.sql` (track EA M6, D-EA-12, D-EA-14). Groups are per org. `scim_group_members` links groups to `scim_users` rows, and `scim_group_mappings` and `scim_group_project_roles` hold the roles a group gives. A group with neither an org role nor project rows has no mapping row. No text column has a `CHECK` (D-R-34).
+Migration `0035_scim_groups.sql` (track EA M6, D-EA-12, D-EA-14). Groups are per org. `scim_group_members` links groups to `scim_users` rows, and `scim_group_mappings` and `scim_group_project_roles` hold the roles a group gives. A group with neither an org role nor project rows has no mapping row. No text column has a `CHECK` (D-R-34).
 
 ```sql
 CREATE TABLE scim_groups (
@@ -1194,7 +1219,7 @@ From the first public release (D185), a `meta.db`, `secret.key` and backup writt
 
 **Opening.** One check runs before any write, in this order: a `user_version` other than 0 or this build's is refused (`meta.db has format version N, which this build … does not read`); an applied migration this build does not embed is refused (`meta.db has applied migration N, which this build does not have`); `user_version` 0 with a row in `users` or `orgs` is a pre-release database and is refused (`PreFormat`); `user_version` 0 without rows is stamped after the migrations. `cetra serve`, `cetra admin migrate` and `cetra admin gc-orphans` run this check on `<data_dir>/meta.db` **before storage opens** (the preflight), so a newer `meta.db` stops them before `LOCK`, the WAL or the object store is touched; the other admin commands run it when they open `meta.db`. `reapply-deletions --from` accepts a newer schema of the same format (D-M-9) but not a newer format. Downgrading is not supported: restore the backup taken before the upgrade.
 
-**What is a format change.** Not one: a migration that only adds (`CREATE TABLE`, `CREATE INDEX`, `CREATE UNIQUE INDEX`, `ALTER TABLE … ADD COLUMN` that is nullable or has a default). A format change, which bumps `META_FORMAT_VERSION`: any other migration (a dropped or renamed column or table, an `UPDATE` of existing rows, a table rebuild); a new value in a TEXT enum column (roles, kinds, states, statuses); a changed JSON shape in a JSON column; a changed sealed envelope, key id label, check label or associated data; a changed `secret.key` format. A lint requires migrations to be additive unless listed as format-changing (the pre-release exceptions are `0008`, which drops `orgs.limits`, and `0030`, which sets `issue_sources.last_notified_at` and rebuilds `notification_deliveries`); every migration that alters a table has a test that its rows survive; the schema snapshot (`crates/server/tests/snapshots/meta_schema.snap`) shows every schema change. A migration that has been in a release is never edited.
+**What is a format change.** Not one: a migration that only adds (`CREATE TABLE`, `CREATE INDEX`, `CREATE UNIQUE INDEX`, `ALTER TABLE … ADD COLUMN` that is nullable or has a default). A format change, which bumps `META_FORMAT_VERSION`: any other migration (a dropped or renamed column or table, an `UPDATE` of existing rows, a table rebuild); a new value in a TEXT enum column (roles, kinds, states, statuses); a changed JSON shape in a JSON column; a changed sealed envelope, key id label, check label or associated data; a changed `secret.key` format. A lint requires migrations to be additive unless listed as format-changing (the pre-release exceptions are `0008`, which drops `orgs.limits`, `0030`, which sets `issue_sources.last_notified_at` and rebuilds `notification_deliveries`, and `0032`, which rebuilds `org_sso_providers` for SAML (D-SA-17)); every migration that alters a table has a test that its rows survive; the schema snapshot (`crates/server/tests/snapshots/meta_schema.snap`) shows every schema change. A migration that has been in a release is never edited.
 
 **`secret.key` and sealed values** keep the formats of § Encryption of secrets: no version byte in the file. A key file this build does not decode is refused and never rewritten; a new file format would bump `META_FORMAT_VERSION`, which is checked first. Key rotation is the offline `cetra admin rotate-encryption-key` (D-I-3). Known-answer tests pin the file text, the key id, the check value and one sealed value for a fixed public test key.
 
