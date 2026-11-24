@@ -240,3 +240,117 @@ Proposed facts, each from a run or a source read above. They are inputs to the p
 **Processes:** I started and stopped only the runs' own processes (`timeout` and the namespace wrapper). I killed nothing.
 
 **Not done:** no commit, no push, no build in the repo, no edits outside E and this file.
+
+## 10 Built-in telemetry with experimental.openTelemetry
+
+Written 2026-11-24, clock 09:50 UTC. Evidence in `m7d/` under E (`m7d/runs/<name>/`, analyzers `m7d/inv.py` and `m7d/rawinv.py`, raw inventories `m7d/raw-*.txt`, runner `m7d/runners/m7d-oc.sh`, driver `m7d/drive.sh`). Question: LangWatch documents `experimental.openTelemetry: true` in `~/.config/opencode/opencode.jsonc` plus the standard OTEL variables, and says OpenCode then sends tool arguments and results. § 5.1 credited the `com.opencode` spans to the community plugin, which this section does not use. Tags as in § 1.
+
+### 10.1 Versions and downloads
+
+- **OpenCode v2.3.0**: as § 2. The extracted binary `m7c/bin/oc-2.3.0/opencode` has sha256 `2e0e4656…381f`. The release tarball `m7c/dl/oc-2.3.0/opencode-linux-x64.tar.gz` has sha256 `fc0f8152…4d3b` (**run**: `sha256sum`, equal to the § 2 value). No download this section.
+- **OpenCode 1.x (npm `opencode-ai`)**: the newest stable release published before 2026-11-17T10:00Z is **1.19.6**, published **2026-11-17T07:22:20.263Z** (**run**: `npm view opencode-ai time --json`, `m7d/opencode-ai-time.json`; `npm view` on the host, registry.npmjs.org). Later entries are `0.0.0-dev-…` snapshots (2026-11-17T07:46Z and after), not releases, so they are not eligible. `dist.integrity` of `opencode-ai@1.19.6` is `sha512-x0yTvlq3…GwA==` and of `opencode-linux-x64@1.19.6` is `sha512-SUQS023u…1A==` (**run**: `npm view`). The copy already in `pkgs/opencode` is the same version (`node_modules/opencode-ai/package.json` `"version": "1.19.6"`), so nothing was reinstalled. Binary `pkgs/opencode/node_modules/opencode-linux-x64/bin/opencode`, sha256 `aab0a58c…1173`.
+
+### 10.2 Where the flag is read
+
+**v2.3.0: the flag is rejected, not read (docs, with run confirmation).**
+
+- `packages/core/src/config/normalize.ts:46-51`: `unsupportedExperimental` lists `"openTelemetry"`.
+- `normalize.ts:459-461`: each listed key goes through `unsupportedIfPresent`.
+- `normalize.ts:799-802`: that function pushes a diagnostic `kind: "unsupported"`, message "omitted unsupported legacy setting", and the key is not carried into the normalized config.
+- `packages/schema/src/config/experimental.ts`: `ConfigExperimental.Info` has no `openTelemetry` field (only `portable_shell_scanner`, `codemode_vm`, `all_flags`, the flag registry, `part_rows`, `image_generate`, `subagent_depth`, `location_idle_timeout`, `policies`).
+- `packages/core/test/config/normalization.test.ts:683-700` asserts the flag is reported as `unsupported` (`["experimental", "openTelemetry"]`).
+- No `experimental_telemetry` in `packages/*/src` (grep, no hit). The v2 binary contains neither `openTelemetry:` nor `experimental_telemetry` nor `experimental?.openTelemetry` (byte grep of the binary, 0 hits).
+- Run: `m7d/runs/oc230-flag` (flag set) and `oc230-cfgonly` (a global config without the flag) both give 702 spans, the same attribute keys (`m7d/raw-oc230-flag.txt`, `raw-oc230-flag-contentnames.txt`), and no `ai.*` attributes. The flag changes nothing.
+- The 4 extra `Config.parseInfo` and `ConfigVariable.substitute` spans in the flag runs versus `oc230-noflag` (698 spans) come from the presence of a global config file, not from the flag (**run**: `oc230-noflag` has no global file; `oc230-cfgonly` matches `oc230-flag`).
+
+**1.19.6: the flag is read and turns on the AI SDK's telemetry (binary strings, minified bundle; no source).**
+
+- Schema: `openTelemetry:c(z).annotate({description:"Enable OpenTelemetry spans for AI SDK calls (using the 'experimental_telemetry' flag)"})` at byte offset 110414828 of the binary.
+- Reads: `s.experimental?.openTelemetry` (offsets 126073976, 126074261) feeds `experimental_telemetry:{isEnabled:s.experimental?.openTelemetry,tracer:w,metadata:{userId,…}}` in the session prompt path. `L.experimental?.openTelemetry` (offsets 126815229, 126817569) builds the tracer and sets `experimental_telemetry:{isEnabled:L.experimental?.openTelemetry,functionId:"session.llm",tracer:C,…}`. The tracer factory names (`an`, `Ws`) are minified and were not identified.
+- Run: `npm119-flag` gives 3 `ai.streamText.doStream`, 3 `ai.streamText` and 1 `ai.toolCall`. `npm119-noflag` (same command, no flag) gives 0 `ai.*` spans (`m7d/raw-npm119-flag.txt`; norm and raw counts).
+
+### 10.3 Span inventory
+
+**v2.3.0 with the flag** (`m7d/runs/oc230-flag`, **run**): 702 spans, 31 traces for one turn, scope `effect`, service `opencode`. Kinds: internal 687, server 12, client 3.
+
+| Span | Kind | Count | Parent | GenAI and other attributes (raw) |
+|---|---|---|---|---|
+| `SessionStep.attempt` | llm (normalizer) | 2 | `SessionRunner.runStep` | `gen_ai.provider.name`=openai, `gen_ai.request.model`=gpt-4o-mini, `gen_ai.usage.input_tokens` 82 / 131, `gen_ai.usage.output_tokens` 17 / 12, `gen_ai.usage.cache_read.input_tokens`, `gen_ai.response.finish_reasons`, `gen_ai.agent.name`, `opencode.llm.first_output_ms`, `opencode.usage.cost_usd`, `session.id` |
+| `LLM.stream` | llm | 2 | `SessionStep.attempt` | `gen_ai.provider.name`, `gen_ai.request.model`, `session.id`; no tokens |
+| `Tool.execute` | tool | 1 | `SessionStep.attempt` | `gen_ai.tool.name`=read, `gen_ai.tool.call.id`, `gen_ai.agent.name`, `session.id`; status error (file not found, see § 7 item 10); no arguments, no result |
+| 697 other rows | span | 697 | mixed | `effect` internals (`PluginHost.make` 94, `Plugin.load` 94, `FileSystem.readFileStringSafe` 53, `State.notify` 22, `Config.*`, `Provider.*`, `Git.*`, `http.server` GET/POST); no `gen_ai.*` or `ai.*` attributes |
+
+- The binary's span names never start with `opencode.` (**run**: 0 rows). Its attribute names do (`opencode.llm.first_output_ms`, `opencode.usage.cost_usd`).
+
+**v2.3.0 without the flag** (`oc230-noflag`, **run**): 698 spans, same 4 llm rows and the same tool row. The per-name inventory of the flag run differs only in the `Config.*` counts above.
+
+**1.19.6 with the flag** (`m7d/runs/npm119-flag`, **run**): 1024 spans, 89 traces for one turn, scope `opencode`, service `opencode`. Kinds: span 1017, llm 3, chain 3, tool 1.
+
+| Span | Kind | Count | Parent | Attributes (raw) |
+|---|---|---|---|---|
+| `ai.streamText.doStream` | llm | 3 | `ai.streamText` | `ai.model.id`, `ai.model.provider`, `gen_ai.request.model`, `gen_ai.response.model`, `gen_ai.usage.input_tokens` (131, 82, 131), `gen_ai.usage.output_tokens` (12, 17, 12), `ai.usage.*`, `ai.prompt.messages` (full messages, system prompt included), `ai.prompt.tools`, `ai.prompt.toolChoice`, `ai.response.text`, `ai.response.toolCalls`, `ai.response.finishReason`, `ai.request.headers.X-Session-Id`; events `ai.stream.firstChunk`, `ai.stream.finish` |
+| `ai.streamText` | chain | 3 | `LLM.run` | `ai.prompt` (the same messages), `ai.response.text`, `ai.response.toolCalls`, `ai.usage.*` (totals), `session.id`, `operation.name`, `resource.name`; no `gen_ai.*` |
+| `ai.toolCall` | tool | 1 | `ai.streamText.doStream` | `ai.toolCall.name`=read, `ai.toolCall.id`, `ai.toolCall.args` (the arguments, JSON); no result attribute; status error; event `exception` |
+| `sql.execute` | span | 264 | mixed | `db.query.text` (SQL text, `INSERT … VALUES (?, ?)` parameterized; DDL and PRAGMA included; no bound values seen in 264 rows) |
+| `FileSystem.*` 66, `Config.*` 56, `Session.*`, `AISDK.hook` 39, `Plugin.*`, `http.server` | span | rest | mixed | no `gen_ai.*` or `ai.*` attributes |
+
+Keys with `gen_ai.*` on 1.x: 3 rows (the `ai.streamText.doStream` rows). Keys with `ai.*`: 7 rows.
+
+**Without the flag** (`npm119-noflag`, **run**): 1024 spans, all kind `span`, 0 `ai.*` names. The flag adds the llm, chain and tool rows; the generic rows are unchanged (timing varies the counts by a few).
+
+**Named `com.opencode` or `opencode.tool.*`**: absent from every run. Scopes are `effect` (v2) and `opencode` (1.x) (**run**, all 12 runs). LangWatch's matcher (`/home/sebastien/github/langwatch/modules/coding-agent/contract/src/telemetry/opencode.ts:3-17`: `matches: signalSays(signal, "opencode")`, `namePrefixes: ["opencode."]`, `OPENCODE_TOOL_SPAN = "opencode.tool."`; the file's comment says scope `com.opencode`) would match none of these rows.
+
+LangWatch's comment "without this flag its OTLP exporter never exports a span" (`/home/sebastien/github/langwatch/sdks/typescript/src/cli/utils/opencode-config-flag.ts:2-3`) is contradicted for both builds in these runs: v2 without the flag posts 698 spans, and 1.x without the flag posts 1024 `span` rows (**run**).
+
+**Scale.** One turn gives 31 traces (v2) and 89 traces (1.x). The 1.x run includes 264 `sql.execute` rows and 66 `FileSystem.*` rows.
+
+### 10.4 Where the content is
+
+- **v2.3.0 spans**: no prompt, completion, tool argument or tool result on any span. The raw attribute inventory has none (**run**: `raw-oc230-flag.txt`). Setting `OTEL_LOG_USER_PROMPTS=1 OTEL_LOG_TOOL_CONTENT=1 OTEL_LOG_ASSISTANT_RESPONSES=1 OTEL_LOG_TOOL_DETAILS=1` changes no attribute key (**run**: `oc230-flag-contentnames`). These names are in the v2 binary's strings (byte grep), but nothing reads them in the observed run.
+- **v2.3.0 logs** (4 posts, `/v1/logs`): one record, body `cli starting`, carries the CLI argument array, which includes the user's prompt text (`"args":["run","--standalone","--auto","Read hello.txt and tell me what …"]`). No switch. (**run**: `m7d/runs/oc230-flag/recv/0002-logs.json`.)
+- **1.19.6 spans, with the flag and no content variable set**: full content. `ai.streamText.doStream` and `ai.streamText` carry the complete system prompt and user message (`ai.prompt.messages`, `ai.prompt`), the tool definitions (`ai.prompt.tools`), and the completion (`ai.response.text`, `ai.response.toolCalls`). `ai.toolCall` carries the arguments (`ai.toolCall.args`, e.g. `{"filePath":"…/hello.txt","offset":0}`). The source of this default is the AI SDK's `experimental_telemetry`, which this run did not change (**run**: `npm119-flag/recv/0004-traces.json`, spans 291, 292, 444; the title-generation call at spans 320 and 321 of `0002-traces.json` carries its own prompt and completion).
+- **1.19.6 logs** (2 posts): 31 records, no prompt or completion text (**run**).
+- A switch that turns the 1.x content off was **not tested**. The only option tried was the flag itself. Open item (§ 10.8).
+
+### 10.5 What cetra's normalizer makes of each run
+
+Run with `m7d/norm-target/release/norm` (the existing binary), inventory from `m7d/inv.py`:
+
+- **v2.3.0 flag run** (`oc230-flag`): 702 rows kept, 0 discarded. llm 4 (`SessionStep.attempt` x2 with tokens 82/17 and 131/12, provider openai, model gpt-4o-mini; `LLM.stream` x2 without tokens), tool 1 (`Tool.execute`, error), span 697. I/O present on none. Same counts as `oc230-noflag` plus the 4 config spans.
+- **1.19.6 flag run** (`npm119-flag`): 1024 rows kept, 0 discarded (`norm.err`: `files=2 input_spans=1024 kept=1024 discarded=0`). llm 3 (`ai.streamText.doStream`: tokens 131/12 on model gpt-5.4-nano for the title call, and 82/17 and 131/12 on gpt-4o-mini; input and output present on all three), chain 3 (`ai.streamText`: input and output present, no tokens), tool 1 (`ai.toolCall`: input present, no output), span 1017.
+- **1.19.6 no-flag run** (`npm119-noflag`): 1024 rows, all `span`, no tokens, no I/O.
+
+### 10.6 Signals (run)
+
+- **Logs off**: `OTEL_LOGS_EXPORTER=none` does not stop logs in either build. v2 posts 4 log requests (`oc230-flag-signals-off`, same as `oc230-flag`); 1.x posts 2 (`npm119-flag-signals-off`, same as `npm119-flag`).
+- **Metrics off**: none of the 12 runs posts `/v1/metrics`, with or without `OTEL_METRICS_EXPORTER=otlp`. The builds send no metrics in these runs. (The plugin's metrics in § 5.1 came from the plugin.)
+- **Protocol**: `OTEL_EXPORTER_OTLP_PROTOCOL=http/protobuf` is ignored. `oc230-flag-protobuf` and `npm119-flag-protobuf` send only `Content-Type: application/json` on `/v1/traces` and `/v1/logs`. Whether cetra's server accepts JSON OTLP on those paths was not checked here (§ 7 item 4).
+
+### 10.7 Header form (run)
+
+- Plain space: `oc230-flag` and `npm119-flag` receive `Bearer sk-fake...` (17 characters), decoded.
+- `%20`: `oc230-flag-pct` and `npm119-flag-pct` receive `Bearer%20sk-fa...` (19 characters), literal. Both builds need the plain-space form.
+
+### 10.8 Proposed keep and drop lists (facts only; the plan decides)
+
+**v2.3.0**, keep rule `gen_ai.*` attribute present: 5 rows (`SessionStep.attempt` x2, `LLM.stream` x2, `Tool.execute` x1). The two `LLM.stream` rows duplicate the call of their parent and carry no tokens, so a token sum is not affected but a call count is. Candidate: keep `SessionStep.attempt` and `Tool.execute`, drop `LLM.stream`, drop the other 697 `span` rows. If a tree is wanted, `SessionRunner.runStep` is the parent of the model rows (run); it is not a GenAI row.
+
+**1.19.6**, keep rule `ai.*` attribute present: 7 rows (`ai.streamText.doStream` x3, `ai.streamText` x3, `ai.toolCall` x1). Candidate: keep `ai.streamText.doStream` and `ai.toolCall`, drop `ai.streamText` (it duplicates the prompt and response of its doStream child and carries the usage totals a second time; the normalizer already reads the tokens from the doStream row). Drop `sql.execute` (264), `FileSystem.*`, `Config.*`, `Session.*`, `AISDK.hook`, `http.server *` and the other generic rows.
+
+**Both**: the `com.opencode` scope and `opencode.*` span names are not present, so a matcher on them drops everything. A keep list must name the observed span names (above), not a prefix.
+
+### 10.9 What left loopback
+
+- Inside the namespace: no non-loopback connect. The 4 `connect()` calls per 1.x run go to `127.0.0.53` port 53 (the loopback address of the stub resolver; the namespace has only `lo`) (**run**: `m7d/runs/*/trace.strace`).
+- Real home: one read-only stat of the worktree directory `/home/sebastien/travaux/llm-observer/.claude/worktrees/integrations` per run (`real-home.txt`). No write, create, rename or unlink under the real home (grep of `trace.strace`).
+- Host, outside the namespace: `npm view opencode-ai time --json`, `npm view opencode-ai@1.19.6 dist.integrity dist.tarball`, and the same for `opencode-linux-x64@1.19.6` (registry.npmjs.org, metadata only; no tarball was downloaded). No GitHub download.
+- Fake keys only (`sk-fake-m7`). The fake provider is `tools/server.py` on loopback. Nothing was built in the repo. Nothing was killed.
+
+### 10.10 Open questions (not confirmed here)
+
+1. **1.x content switch.** Is there any setting that stops `ai.prompt*`, `ai.response.*` and `ai.toolCall.args` on 1.19.6 (for example an AI SDK option the OpenCode build exposes, or the flag's own value)? Not tested. The 1.x source is not in E, only the binary.
+2. **v2 content names.** The v2 binary contains `OTEL_LOG_USER_PROMPTS`, `OTEL_LOG_TOOL_CONTENT`, `OTEL_LOG_ASSISTANT_RESPONSES` and `OTEL_LOG_TOOL_DETAILS` as strings, but the run showed no effect. Whether any of them is read in another code path was not checked. Not needed for the routes.
+3. **Flag location.** Only the global `opencode.jsonc` was tested. v2 rejects the key by the schema (§ 10.2), so a project-level config would not change the result, but it was not run.
+4. **Plugin vs binary for the `com.opencode` scope.** The § 5.1 claim stands: the `com.opencode` spans come from the community plugin (`oc230-plugin`), not from either build here.
+5. **Logs of v2.** The `cli starting` record with the prompt text is in the logs, not in spans. Whether cetra stores log bodies, and so keeps this text, was not checked.
+6. **Title call.** The 1.x run's first model call (`gpt-5.4-nano`, system prompt "You are a title generator") is a separate call the agent makes; whether it should count as a model call for the plan is open.
