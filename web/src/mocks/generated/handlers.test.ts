@@ -325,9 +325,58 @@ it("lists only one user's traces for a user_id filter, and flags other filters a
   expect(body.data.map((trace) => trace.trace_id).sort()).toEqual(expected);
 
   const other = new URL(`${PROJECT}/traces`);
-  other.searchParams.set("filter", "user_id = 'a' and name = 'b'");
+  other.searchParams.set("filter", "metadata['plan'] = 'pro'");
   const flagged = await fetch(other);
   expect(flagged.headers.get("X-Mock-Filter-Ignored")).toBe("1");
+});
+
+it("applies a status filter to the trace list", async () => {
+  const dataset = createDataset({ seed: 1, now: NOW, traces: 400 });
+  server.use(...largeHandlers(dataset));
+  const expected = dataset.traces
+    .filter((trace) => isVisible(trace) && trace.status === "error")
+    .map((trace) => trace.trace_id)
+    .sort();
+
+  const url = new URL(`${PROJECT}/traces`);
+  url.searchParams.set("filter", "status = 'error'");
+  url.searchParams.set("limit", "1000");
+  const response = await fetch(url);
+  const body = (await response.json()) as Schema<"TracePage">;
+  expect(response.headers.get("X-Mock-Filter-Ignored")).toBeNull();
+  expect(body.data.map((trace) => trace.trace_id).sort()).toEqual(expected);
+});
+
+it("applies a tags filter combined with a name filter", async () => {
+  const dataset = createDataset({ seed: 1, now: NOW, traces: 400 });
+  server.use(...largeHandlers(dataset));
+
+  const url = new URL(`${PROJECT}/traces`);
+  url.searchParams.set("filter", "tags @> ['retry'] and name = 'coding-agent'");
+  url.searchParams.set("limit", "1000");
+  const response = await fetch(url);
+  const body = (await response.json()) as Schema<"TracePage">;
+  expect(response.headers.get("X-Mock-Filter-Ignored")).toBeNull();
+  expect(body.data.map((trace) => trace.trace_id)).toEqual([dataset.traces[4]?.trace_id]);
+});
+
+it("sorts a filtered list", async () => {
+  const dataset = createDataset({ seed: 1, now: NOW, traces: 400 });
+  server.use(...largeHandlers(dataset));
+
+  const url = new URL(`${PROJECT}/traces`);
+  url.searchParams.set("filter", "tags @> ['voice']");
+  url.searchParams.set("sort", "duration");
+  url.searchParams.set("order", "desc");
+  url.searchParams.set("limit", "1000");
+  const response = await fetch(url);
+  const body = (await response.json()) as Schema<"TracePage">;
+  const durations = body.data.map((trace) => trace.duration_ns);
+  expect(durations.length).toBeGreaterThan(0);
+  expect(durations).toEqual([...durations].sort((left, right) => right - left));
+  for (const trace of body.data) {
+    expect(trace.tags).toContain("voice");
+  }
 });
 
 it("lists only the spans of one user's traces for a user_id filter, without the ignored flag", async () => {

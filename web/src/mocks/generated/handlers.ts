@@ -13,7 +13,7 @@ import {
   itemsAt,
 } from "@/mocks/generated/datasets";
 import { experimentHandlers } from "@/mocks/generated/experiments";
-import { widgetQueryHandler } from "@/mocks/generated/widget-query";
+import { tracePredicate, widgetQueryHandler } from "@/mocks/generated/widget-query";
 import {
   type SpanStreamSource,
   type StreamEmit,
@@ -516,8 +516,13 @@ function listTraces(dataset: Dataset, request: Request): Response {
   if (parsed instanceof Response) {
     return parsed;
   }
-  const rows = sortTraces(filterTraces(dataset.traces, parsed), parsed.sort, parsed.order);
-  const filtered = userIdOfFilter(parsed.filter) !== undefined;
+  const predicate = parsed.filter ? tracePredicate(parsed.filter) : undefined;
+  const rows = sortTraces(
+    filterTraces(dataset.traces, parsed, predicate),
+    parsed.sort,
+    parsed.order,
+  );
+  const filtered = predicate !== undefined || userIdOfFilter(parsed.filter) !== undefined;
   return page(rows, parsed, filtered ? {} : ignoredFilter(parsed));
 }
 
@@ -1077,10 +1082,14 @@ function readQuery(url: URL): Query | Response {
 function filterTraces(
   traces: readonly Schema<"TraceSummary">[],
   query: Query,
+  predicate?: (trace: Schema<"TraceSummary">) => boolean,
 ): Schema<"TraceSummary">[] {
-  const userId = userIdOfFilter(query.filter);
+  const userId = predicate === undefined ? userIdOfFilter(query.filter) : undefined;
   return visibleTraces(traces, query.includeEval, query.includeExperiments).filter((trace) => {
     if (!inRange(trace.start_time, query.from, query.to)) {
+      return false;
+    }
+    if (predicate !== undefined && !predicate(trace)) {
       return false;
     }
     if (userId !== undefined && trace.user_id !== userId) {
