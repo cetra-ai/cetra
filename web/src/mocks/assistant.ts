@@ -1,7 +1,7 @@
 import { type HttpHandler, HttpResponse, http } from "msw";
-import type { Widget, WidgetQuery } from "@/lib/dashboards/types";
 import assistantConversations from "../../../fixtures/api/responses/assistant-conversations.json";
 import { turnStream } from "../test/turn-stream";
+import { STORY_DASHBOARD_IDS, storyDashboards } from "./story-dashboards";
 
 const PROJECT = "/api/v1/projects/:project/assistant";
 const NEW_CONVERSATION_ID = "01900000-0000-7000-8000-000000001a02";
@@ -24,8 +24,8 @@ const newConversation = {
   id: NEW_CONVERSATION_ID,
   title: "",
   message_count: 0,
-  created_at: "2026-01-02T00:00:00.000000000Z",
-  last_active_at: "2026-01-02T00:00:00.000000000Z",
+  created_at: "2026-11-19T12:00:00.000000000Z",
+  last_active_at: "2026-11-19T12:00:00.000000000Z",
 };
 
 const scriptedTitle = "Which trace errors spiked?";
@@ -225,7 +225,7 @@ type StreamEvent = { event: string; data: unknown };
 type StoredMessage = Fields & { seq: number };
 
 /** A script: the SSE events of a turn, and the messages the server stores for it, from `seq` 1. */
-export type Script = {
+type Script = {
   title: string;
   events: (turnId: number) => StreamEvent[];
   messages: (context: Fields | undefined) => StoredMessage[];
@@ -285,7 +285,7 @@ const DEFAULT_SCRIPT: Script = {
 
 /** The call id of a story turn's one tool call. */
 const CALL_ID = "call_1";
-const NEW_BASE = "2026-01-02T00:00:00Z";
+const NEW_BASE = "2026-11-19T12:00:00Z";
 
 /** What one story turn says and does. */
 type TurnSpec = {
@@ -418,32 +418,18 @@ function searchResult(indexes: number[]): { result: Fields; rows: number } {
 
 const STORY_CONTEXT = { page: "traces", range: "24h" };
 
-/** One chart widget on the 2 x 2 grid of the 60-column dashboard: `slot` 0 to 3, left to right, top to bottom. */
-function widget(
-  title: string,
-  slot: number,
-  type: "line" | "bar" | "bar_h" | "number",
-  query: WidgetQuery,
-): Widget {
+/** The turn-2 draft of a story: the story dashboard `id` (`story-dashboards.ts`), as the draft card shows it. */
+function dashboardDraft(id: string): Fields {
+  const dashboard = storyDashboards().find((item) => item.id === id);
+  if (dashboard === undefined) {
+    throw new Error(`no story dashboard ${id}`);
+  }
   return {
-    id: title.toLowerCase().replaceAll(" ", "-"),
-    title,
-    kind: "chart",
-    layout: { x: (slot % 2) * 30, y: Math.floor(slot / 2) * 6, w: 30, h: 6 },
-    chart: { type },
-    query,
+    name: dashboard.name,
+    description: dashboard.description,
+    definition: dashboard.definition,
   };
 }
-
-/** A traces query for a story dashboard, filtered by the dashboard's tag. */
-function traces(filter: string, measure: WidgetQuery["measures"][number]): WidgetQuery {
-  return { source: "traces", filter, measures: [measure] };
-}
-
-const SUPPORT_FILTER = "tags @> ['email']";
-const CODING_FILTER = "tags @> ['retry']";
-const VOICE_FILTER = "tags @> ['voice']";
-const BILLING_FILTER = "tags @> ['billing']";
 
 /** One story: its hero trace, its stored chat, and its two turns (an answer, then a dashboard draft). */
 export type Story = {
@@ -494,42 +480,15 @@ export const STORIES: Story[] = [
       searchTurn(
         "Which answers scored low today?",
         ["I'll look at today's support answers ", "and their scores. "],
-        SUPPORT_FILTER,
+        "tags @> ['email']",
         "2026-11-19T00:00:00Z",
         searchResult([11, 18, 23, 31, 38, 44]),
-        "Six answers scored under 0.5 today, most about refunds. The CSV export answer (support-agent) scored 0.9.",
+        "Answers about refunds scored lowest today. The CSV export answer (support-agent) scored 0.9.",
       ),
-      dashboardTurn("Build me a dashboard of answer quality.", {
-        name: "Answer quality",
-        description: "Support answers: quality, volume and cost.",
-        definition: {
-          widgets: [
-            widget("Correctness by day", 0, "line", {
-              source: "scores",
-              filter: "name = 'correctness'",
-              measures: [{ agg: "avg", field: "value_num", label: "Correctness" }],
-            }),
-            widget(
-              "Answers per day",
-              1,
-              "bar",
-              traces(SUPPORT_FILTER, { agg: "count", label: "Answers" }),
-            ),
-            widget(
-              "Cost per answer",
-              2,
-              "number",
-              traces(SUPPORT_FILTER, { agg: "avg", field: "cost_total", label: "Cost" }),
-            ),
-            widget("Answers by model", 3, "bar_h", {
-              source: "traces",
-              filter: SUPPORT_FILTER,
-              measures: [{ agg: "count", label: "Answers" }],
-              breakdown: { field: "models", limit: 5 },
-            }),
-          ],
-        },
-      }),
+      dashboardTurn(
+        "Build me a dashboard of answer quality.",
+        dashboardDraft(STORY_DASHBOARD_IDS.answerQuality),
+      ),
     ],
   },
   {
@@ -548,42 +507,7 @@ export const STORIES: Story[] = [
       ),
       dashboardTurn(
         "Build me a dashboard for code-agent: failed runs, cost per run and p95 duration.",
-        {
-          name: "Code agent health",
-          description: "Failed runs, cost and duration of the coding agent.",
-          definition: {
-            widgets: [
-              widget(
-                "Failed runs per day",
-                0,
-                "bar",
-                traces(CODING_FILTER, {
-                  agg: "count",
-                  where: "status = 'error'",
-                  label: "Failed runs",
-                }),
-              ),
-              widget(
-                "Error rate",
-                1,
-                "number",
-                traces(CODING_FILTER, { agg: "rate", where: "error_count > 0", label: "Errors" }),
-              ),
-              widget(
-                "Cost per run",
-                2,
-                "line",
-                traces(CODING_FILTER, { agg: "avg", field: "cost_total", label: "Cost" }),
-              ),
-              widget(
-                "p95 duration",
-                3,
-                "number",
-                traces(CODING_FILTER, { agg: "p95", field: "duration_ns", label: "p95" }),
-              ),
-            ],
-          },
-        },
+        dashboardDraft(STORY_DASHBOARD_IDS.codeAgentHealth),
       ),
     ],
   },
@@ -599,44 +523,12 @@ export const STORIES: Story[] = [
         "tags @> ['voice'] and duration_ns > 3000000000",
         "2026-11-19T00:00:00Z",
         searchResult([5, 9, 13, 16, 21, 25, 28, 33, 37, 40, 43, 47]),
-        "Twelve calls took over 3 s. In voice-agent (a0000000…0005), check_availability alone took 1.22 s.",
+        "Several calls took over 3 s. In voice-agent (a0000000…0005), check_availability alone took 1.22 s.",
       ),
-      dashboardTurn("Build me a dashboard of voice latency.", {
-        name: "Voice latency",
-        description: "How long callers wait for a reply.",
-        definition: {
-          widgets: [
-            widget(
-              "p95 reply time",
-              0,
-              "number",
-              traces(VOICE_FILTER, { agg: "p95", field: "duration_ns", label: "p95" }),
-            ),
-            widget(
-              "Reply time by day",
-              1,
-              "line",
-              traces(VOICE_FILTER, { agg: "p95", field: "duration_ns", label: "p95" }),
-            ),
-            widget(
-              "Calls over 3 s",
-              2,
-              "number",
-              traces(VOICE_FILTER, {
-                agg: "rate",
-                where: "duration_ns > 3000000000",
-                label: "Over 3 s",
-              }),
-            ),
-            widget(
-              "Calls per day",
-              3,
-              "bar",
-              traces(VOICE_FILTER, { agg: "count", label: "Calls" }),
-            ),
-          ],
-        },
-      }),
+      dashboardTurn(
+        "Build me a dashboard of voice latency.",
+        dashboardDraft(STORY_DASHBOARD_IDS.voiceLatency),
+      ),
     ],
   },
   {
@@ -648,43 +540,15 @@ export const STORIES: Story[] = [
       searchTurn(
         "Which invoices needed a retry?",
         ["I'll look for invoices ", "that ran more than once. "],
-        BILLING_FILTER,
+        "tags @> ['billing']",
         "2026-11-18T12:00:00Z",
         searchResult([6, 14, 29]),
-        "Three. In extract-invoice (a0000000…0006), the first model read the total as 1,248.00 instead of 1,284.00, and the retry fixed it.",
+        "In extract-invoice (a0000000…0006), the first model read the total as 1,248.00 instead of 1,284.00, and the retry fixed it.",
       ),
-      dashboardTurn("Build me a dashboard of invoices, schema-check failures and cost.", {
-        name: "Invoice extraction",
-        description: "Invoices read, schema-check failures and cost.",
-        definition: {
-          widgets: [
-            widget(
-              "Invoices per day",
-              0,
-              "bar",
-              traces(BILLING_FILTER, { agg: "count", label: "Invoices" }),
-            ),
-            widget(
-              "Schema check failures",
-              1,
-              "number",
-              traces(BILLING_FILTER, { agg: "rate", where: "status = 'error'", label: "Failures" }),
-            ),
-            widget(
-              "Cost per invoice",
-              2,
-              "line",
-              traces(BILLING_FILTER, { agg: "avg", field: "cost_total", label: "Cost" }),
-            ),
-            widget("Invoices by model", 3, "bar_h", {
-              source: "traces",
-              filter: BILLING_FILTER,
-              measures: [{ agg: "count", label: "Invoices" }],
-              breakdown: { field: "models", limit: 5 },
-            }),
-          ],
-        },
-      }),
+      dashboardTurn(
+        "Build me a dashboard of invoices, schema-check failures and cost.",
+        dashboardDraft(STORY_DASHBOARD_IDS.invoiceExtraction),
+      ),
     ],
   },
 ];

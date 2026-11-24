@@ -235,7 +235,7 @@ export const STORY_PROMPTS: StoryPrompt[] = [
 ];
 
 /** The story prompt called `name`, if any. */
-export function storyPrompt(name: unknown): StoryPrompt | undefined {
+function storyPrompt(name: unknown): StoryPrompt | undefined {
   if (typeof name !== "string") {
     return undefined;
   }

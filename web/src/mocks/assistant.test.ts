@@ -14,6 +14,7 @@ import {
 import { assistantHandlers, resetAssistantMock, STORIES, scriptFor } from "@/mocks/assistant";
 import { createDataset } from "@/mocks/generated/dataset";
 import { server } from "@/mocks/node";
+import { STORY_DASHBOARD_IDS, storyDashboards } from "@/mocks/story-dashboards";
 
 const BASE = `${window.location.origin}/api/v1/projects/acme%2Fsupport-bot/assistant`;
 const NEW_ID = "01900000-0000-7000-8000-000000001a02";
@@ -344,27 +345,31 @@ describe("assistant story conversations", () => {
   it("drafts dashboards the assistant card accepts", async () => {
     const expected: Record<
       string,
-      { name: string; description: string; widgets: string[]; ids: string[] }
+      { id: string; name: string; description: string; widgets: string[]; ids: string[] }
     > = {
       support: {
+        id: STORY_DASHBOARD_IDS.answerQuality,
         name: "Answer quality",
         description: "Support answers: quality, volume and cost.",
         widgets: ["Correctness by day", "Answers per day", "Cost per answer", "Answers by model"],
         ids: ["correctness-by-day", "answers-per-day", "cost-per-answer", "answers-by-model"],
       },
       coding: {
+        id: STORY_DASHBOARD_IDS.codeAgentHealth,
         name: "Code agent health",
         description: "Failed runs, cost and duration of the coding agent.",
         widgets: ["Failed runs per day", "Error rate", "Cost per run", "p95 duration"],
         ids: ["failed-runs-per-day", "error-rate", "cost-per-run", "p95-duration"],
       },
       voice: {
+        id: STORY_DASHBOARD_IDS.voiceLatency,
         name: "Voice latency",
         description: "How long callers wait for a reply.",
         widgets: ["p95 reply time", "Reply time by day", "Calls over 3 s", "Calls per day"],
         ids: ["p95-reply-time", "reply-time-by-day", "calls-over-3-s", "calls-per-day"],
       },
       extraction: {
+        id: STORY_DASHBOARD_IDS.invoiceExtraction,
         name: "Invoice extraction",
         description: "Invoices read, schema-check failures and cost.",
         widgets: [
@@ -390,6 +395,13 @@ describe("assistant story conversations", () => {
       if (want === undefined) {
         continue;
       }
+      const dashboard = storyDashboards().find((item) => item.id === want.id);
+      expect(dashboard).toBeDefined();
+      expect(draft).toEqual({
+        name: dashboard?.name,
+        description: dashboard?.description,
+        definition: dashboard?.definition,
+      });
       expect(parsed.draft.name).toBe(want.name);
       expect(parsed.draft.description).toBe(want.description);
       const widgets = parsed.draft.definition.widgets;

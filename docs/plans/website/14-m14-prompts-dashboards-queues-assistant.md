@@ -1908,3 +1908,10 @@ No other file. P5 runs on the plan's branch after P0 to P4 are merged (at least 
    - P3: the hero traces already carry `tests_pass` and `schema_valid` scores (source `check`); the new definitions colour them, which is intended.
    - P5 step 8: start the dev server with `./node_modules/.bin/vite` from `web/` (not `pnpm exec`), so the pid you record is vite's, and stop that pid.
    - For M15: the playground picks the story answer from `source.prompt.name`, so the story shots open `?prompt=<name>&version=<n>`, not `?trace=&span=`; and they type the variables.
+
+## Changes after implementation
+
+1. The assistant's turn-2 dashboard drafts are built from `storyDashboards()` (`web/src/mocks/story-dashboards.ts`), not a second copy in `assistant.ts`; the test checks each draft against it.
+2. The story answers drop the counts the search rows do not back: support "Answers about refunds scored lowest today", voice "Several calls took over 3 s", extraction starts "In extract-invoice".
+3. The new chat's base date is `2026-11-19T12:00:00Z` (`NEW_BASE`, `newConversation`), so a live chat is dated like the story chats.
+4. `Script` (`assistant.ts`) and `storyPrompt` (`stories-prompts.ts`) are no longer exported; nothing else imported them.
