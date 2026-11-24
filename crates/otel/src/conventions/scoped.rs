@@ -10,6 +10,8 @@
 //! by attribute (R-LK-3).
 //! Prompt Flow (scope `promptflow`): `inputs` and `output` (R-PF-3).
 //! Langflow (scope `langflow`): `inputs` and `outputs` (R-LF-2).
+//! Quarkus LangChain4j (scope `io.quarkus.opentelemetry`): `gen_ai.prompt` and
+//! `gen_ai.completion` (D-IN-30).
 
 use cetra_core::enums::SpanKind;
 use serde_json::Value as Json;
@@ -42,6 +44,14 @@ pub(crate) fn read(ctx: &mut ReadContext<'_, '_>, filled: &Io) -> Io {
         }
         if filled.output.is_none() {
             io.output = take_value(ctx, "outputs");
+        }
+    } else if ctx.scope == "io.quarkus.opentelemetry" {
+        // D-IN-30 item 4: Quarkus LangChain4j's content keys, plain values.
+        if filled.input.is_none() {
+            io.input = take_value(ctx, "gen_ai.prompt");
+        }
+        if filled.output.is_none() {
+            io.output = take_value(ctx, "gen_ai.completion");
         }
     } else if ctx.scope == "livekit-agents" {
         if filled.input.is_none() {
@@ -467,6 +477,46 @@ mod tests {
             assert_eq!(bag.state("inputs"), Some(Use::Unread), "{scope}");
             assert_eq!(bag.state("output"), Some(Use::Unread), "{scope}");
             assert_eq!(bag.state("outputs"), Some(Use::Unread), "{scope}");
+        }
+    }
+
+    #[test]
+    fn quarkus_prompt_and_completion_fill_input_and_output() {
+        // D-IN-30 item 4: Quarkus LangChain4j writes its content under
+        // `gen_ai.prompt` / `gen_ai.completion` on the
+        // `io.quarkus.opentelemetry` scope, as plain values (rule 10).
+        let attrs = [
+            string_attr("gen_ai.prompt", "What is the weather in Lyon?"),
+            string_attr("gen_ai.completion", "It is sunny in Lyon."),
+        ];
+        let (io, bag, _) = read_in("io.quarkus.opentelemetry", &attrs, &Io::default());
+        assert_eq!(
+            io.input,
+            Some(Payload::Text("What is the weather in Lyon?".to_owned()))
+        );
+        assert_eq!(
+            io.output,
+            Some(Payload::Text("It is sunny in Lyon.".to_owned()))
+        );
+        assert_eq!(bag.state("gen_ai.prompt"), Some(Use::Payload));
+        assert_eq!(bag.state("gen_ai.completion"), Some(Use::Payload));
+    }
+
+    #[test]
+    fn quarkus_keys_on_another_scope_are_untouched() {
+        let attrs = [
+            string_attr("gen_ai.prompt", "What is the weather in Lyon?"),
+            string_attr("gen_ai.completion", "It is sunny in Lyon."),
+        ];
+        for scope in [
+            "other.scope",
+            "io.quarkus",
+            "io.quarkus.opentelemetry.extra",
+        ] {
+            let (io, bag, _) = read_in(scope, &attrs, &Io::default());
+            assert_eq!(io, Io::default(), "{scope}");
+            assert_eq!(bag.state("gen_ai.prompt"), Some(Use::Unread), "{scope}");
+            assert_eq!(bag.state("gen_ai.completion"), Some(Use::Unread), "{scope}");
         }
     }
 

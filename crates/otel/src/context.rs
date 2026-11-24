@@ -42,12 +42,13 @@ const PROVIDER: &[Source] = &[
 const VERCEL_CONTEXT: &str = "ai.settings.context.";
 
 /// Values of `gen_ai.provider.name` and `gen_ai.system` that name a framework,
-/// never a provider (D-B1-8, D-IN-15, D-IN-23). Compared after lowercasing.
-/// Sorted (test `framework_names_are_sorted`).
+/// never a provider (D-B1-8, D-IN-15, D-IN-23, D-IN-30). Compared after
+/// lowercasing. Sorted (test `framework_names_are_sorted`).
 const FRAMEWORK_NAMES: &[&str] = &[
     "autogen",
     "browser_use",
     "gcp.vertex.agent",
+    "koog",
     "microsoft.agent_framework",
     "spring_ai",
     "strands-agents",
@@ -624,6 +625,8 @@ fn canonical_provider(value: &str, from_vercel: bool) -> String {
 fn exact_alias(value: &str) -> Option<&'static str> {
     Some(match value {
         "openai.chat" | "openai.responses" | "openai:completions" | "openai:responses" => "openai",
+        // Quarkus LangChain4j (D-IN-30).
+        "open_ai" => "openai",
         "anthropic.messages" => "anthropic",
         "xai" => "x_ai",
         "gemini" => "gcp.gemini",
@@ -1250,6 +1253,30 @@ mod tests {
         assert_eq!(bag.state("llm.provider"), Some(Use::Consumed));
     }
 
+    #[test]
+    fn koog_is_a_framework_not_a_provider() {
+        // D-IN-30 item 4: Koog names itself as the provider on its tool spans.
+        for (key, value) in [
+            ("gen_ai.provider.name", "koog"),
+            ("gen_ai.provider.name", "Koog"),
+            ("gen_ai.system", "koog"),
+        ] {
+            let attrs = [string_attr(key, value)];
+            let (fields, bag) = filled(&attrs, &[]);
+            assert_eq!(fields.provider, None, "{key}={value}");
+            assert_eq!(bag.state(key), Some(Use::Unread), "{key}={value}");
+        }
+        // Left unread, so the next source decides.
+        let attrs = [
+            string_attr("gen_ai.provider.name", "koog"),
+            string_attr("llm.provider", "openai"),
+        ];
+        let (fields, bag) = filled(&attrs, &[]);
+        assert_eq!(fields.provider.as_deref(), Some("openai"));
+        assert_eq!(bag.state("gen_ai.provider.name"), Some(Use::Unread));
+        assert_eq!(bag.state("llm.provider"), Some(Use::Consumed));
+    }
+
     /// The endpoint rule over one span: the attributes, its kind and the provider
     /// `fill` resolved.
     fn endpoint(attrs: &[KeyValue], kind: SpanKind, provider: Option<&str>) -> Option<String> {
@@ -1589,6 +1616,17 @@ mod tests {
         for (key, raw, expected) in cases {
             let (fields, _) = filled(&[string_attr(key, raw)], &[]);
             assert_eq!(fields.provider.as_deref(), Some(expected), "{key}={raw}");
+        }
+    }
+
+    #[test]
+    fn open_ai_is_openai() {
+        // D-IN-30 item 4: Quarkus LangChain4j writes `open_ai`.
+        for key in ["gen_ai.provider.name", "gen_ai.system"] {
+            let attrs = [string_attr(key, "open_ai")];
+            let (fields, bag) = filled(&attrs, &[]);
+            assert_eq!(fields.provider.as_deref(), Some("openai"), "{key}");
+            assert_eq!(bag.state(key), Some(Use::Consumed), "{key}");
         }
     }
 

@@ -28,6 +28,12 @@ const FINISH_REASONS: &str = "gen_ai.response.finish_reasons";
 const DETAILS: &str = "gen_ai.client.inference.operation.details";
 const OPERATION: &str = "gen_ai.operation.name";
 const CHOICE: &str = "gen_ai.choice";
+/// D-IN-30 item 4: Semantic Kernel .NET writes an event's whole message as a
+/// JSON object in this attribute.
+const EVENT_CONTENT: &str = "gen_ai.event.content";
+/// D-IN-30 item 4: Koog's non-verbose mode masks content as strings starting
+/// with this prefix. Such a key is consumed and records no payload.
+const MASKED_CONTENT: &str = "HIDDEN:";
 const LITELLM_CALL_NAME: &str = "gen_ai.completion.0.function_call.name";
 const LITELLM_CALL_ARGUMENTS: &str = "gen_ai.completion.0.function_call.arguments";
 
@@ -76,7 +82,9 @@ pub(crate) fn read(ctx: &mut ReadContext<'_, '_>) -> Io {
     );
     litellm_tool_call(ctx, &mut io);
     if io.system_instructions.is_none() {
-        io.system_instructions = instruction(ctx, SYSTEM);
+        // `None` inside is masked content (Koog, D-IN-30 item 4): consumed,
+        // and nothing recorded.
+        io.system_instructions = instruction(ctx, SYSTEM).flatten();
     }
     io.tool_definitions = definitions(ctx);
     fill_finish_reasons(ctx, &mut io);
@@ -143,7 +151,9 @@ fn read_messages(
     legacy: &mut Vec<usize>,
 ) {
     let found = if let Some(found) = span_messages(ctx, key) {
-        Some(found)
+        // `None` inside is masked content (Koog, D-IN-30 item 4): the key is
+        // consumed, and no payload, no error and no later source follows.
+        found
     } else if let Some(found) = details_messages(ctx, key) {
         Some(found)
     } else if let Some(found) = framework_payload(ctx, input) {
@@ -168,19 +178,26 @@ fn read_messages(
     }
 }
 
-fn span_messages(ctx: &mut ReadContext<'_, '_>, key: &str) -> Option<(Payload, bool)> {
+/// The span attribute, when the key is present. Outer `None`: the key is
+/// absent, and the later sources decide. `Some(None)`: masked content
+/// (`HIDDEN:`, Koog, D-IN-30 item 4), consumed, with no payload and no later
+/// source. `Some(Some(..))`: the payload, and whether it failed to convert.
+fn span_messages(ctx: &mut ReadContext<'_, '_>, key: &str) -> Option<Option<(Payload, bool)>> {
     if as_str(ctx.bag.get(key)?) == Some("") {
         return None;
     }
     let value = ctx.bag.take_payload(key)?;
+    if as_str(value).is_some_and(|text| text.starts_with(MASKED_CONTENT)) {
+        return Some(None);
+    }
     // D-IN-25 item 11: Bifrost's server root span repeats its `chat` child's
     // content as a bare string under the message keys: the last user text, a
     // tool result or the answer. That scope decodes the value once, in
     // [`bifrost_payload`].
     if ctx.scope != "bifrost" {
-        return Some(genai_messages(value, ctx.warnings));
+        return Some(Some(genai_messages(value, ctx.warnings)));
     }
-    Some(bifrost_payload(value, ctx.warnings))
+    Some(Some(bifrost_payload(value, ctx.warnings)))
 }
 
 /// D-IN-25 item 11: on scope `bifrost`, only a JSON array whose every element
@@ -272,16 +289,22 @@ fn openai_shaped(json: &Json) -> Option<&Vec<Json>> {
     shaped.then_some(items)
 }
 
-fn instruction(ctx: &mut ReadContext<'_, '_>, key: &str) -> Option<Json> {
+/// The same three states as [`span_messages`], for `gen_ai.system_instructions`:
+/// absent (the details event decides), masked (consumed, nothing recorded), or
+/// the value.
+fn instruction(ctx: &mut ReadContext<'_, '_>, key: &str) -> Option<Option<Json>> {
     if let Some(value) = ctx.bag.get(key)
         && as_str(value) != Some("")
     {
         let value = value.clone();
         ctx.bag.take_payload(key);
-        return present_json(&value, ctx.warnings);
+        if as_str(&value).is_some_and(|text| text.starts_with(MASKED_CONTENT)) {
+            return Some(None);
+        }
+        return Some(present_json(&value, ctx.warnings));
     }
     let value = details_attr(ctx.events, key)?.clone();
-    present_json(&value, ctx.warnings)
+    Some(present_json(&value, ctx.warnings))
 }
 
 fn definitions(ctx: &mut ReadContext<'_, '_>) -> Option<Vec<Json>> {
@@ -520,7 +543,7 @@ fn generic_legacy_messages(
         let Some(role) = legacy_role(event.name.as_str(), input) else {
             continue;
         };
-        messages.push(event_message(event, role, warnings));
+        messages.push(event_body(event, role, warnings));
     }
     if messages.is_empty() {
         return None;
@@ -530,6 +553,53 @@ fn generic_legacy_messages(
         Ok(converted) => Some((Payload::Messages(converted), false)),
         Err(_) => Some((Payload::Json(raw), true)),
     }
+}
+
+/// One legacy event's element: its `gen_ai.event.content` body when that
+/// attribute holds a JSON object (Semantic Kernel .NET, D-IN-30 item 4), else
+/// the event's own attributes ([`event_message`]).
+///
+/// The object's null-valued keys are dropped and its `role` lowercased
+/// (Semantic Kernel writes `Assistant`); the event's other attributes, such as
+/// `gen_ai.system`, are not merged in. A choice's `message` object is the
+/// element, with the choice's top-level `finish_reason` when that is a string.
+/// Any other `gen_ai.event.content` string is the raw element, which fails
+/// conversion in [`generic_legacy_messages`].
+fn event_body(event: &Event, role: &str, warnings: &mut Warnings) -> Json {
+    let Some(text) = event_attr(event, EVENT_CONTENT).and_then(as_str) else {
+        return event_message(event, role, warnings);
+    };
+    let Ok(Json::Object(object)) = serde_json::from_str::<Json>(text) else {
+        return Json::String(text.to_owned());
+    };
+    if event.name != CHOICE {
+        return Json::Object(message_body(object));
+    }
+    let Some(Json::Object(message)) = object.get("message") else {
+        return Json::Object(message_body(object));
+    };
+    let mut message = message_body(message.clone());
+    if let Some(reason) = object.get("finish_reason").and_then(Json::as_str) {
+        message.insert("finish_reason".to_owned(), Json::String(reason.to_owned()));
+    }
+    Json::Object(message)
+}
+
+/// An event body object with its null-valued keys dropped and its `role`
+/// lowercased.
+fn message_body(object: Map<String, Json>) -> Map<String, Json> {
+    object
+        .into_iter()
+        .filter(|(_, value)| !value.is_null())
+        .map(|(key, value)| {
+            if key == "role"
+                && let Json::String(text) = &value
+            {
+                return (key, Json::String(text.to_lowercase()));
+            }
+            (key, value)
+        })
+        .collect()
 }
 
 fn legacy_role(name: &str, input: bool) -> Option<&'static str> {
@@ -1315,6 +1385,139 @@ mod tests {
         let value: serde_json::Value =
             serde_json::from_str(&messages_to_json(&messages)).expect("json");
         assert_eq!(value[0]["finish_reason"], r#"{"a":1}"#);
+    }
+
+    #[test]
+    fn event_content_attribute_is_the_event_body() {
+        // D-IN-30 item 4: Semantic Kernel .NET writes an event's whole message
+        // as the JSON object of `gen_ai.event.content` (spike m8-followup § 9.4,
+        // chat span 3, `<RUN>` replaced by `/capture`). The event's other
+        // attributes (`gen_ai.system`) are not merged in.
+        let events = [
+            event(
+                "gen_ai.user.message",
+                &[
+                    (
+                        "gen_ai.event.content",
+                        r#"{"role":"user","name":null,"content":"Read hello.txt and tell me what it says.","tool_calls":[]}"#,
+                    ),
+                    ("gen_ai.system", "openai"),
+                ],
+            ),
+            event(
+                "gen_ai.assistant.message",
+                &[
+                    (
+                        "gen_ai.event.content",
+                        r#"{"role":"Assistant","name":null,"content":null,"tool_calls":[{"id":"call_m7_1","function":{"name":"read_file","arguments":{"path":"/capture/hello.txt"}},"type":"function"}]}"#,
+                    ),
+                    ("gen_ai.system", "openai"),
+                ],
+            ),
+            event(
+                "gen_ai.tool.message",
+                &[
+                    (
+                        "gen_ai.event.content",
+                        r#"{"role":"tool","name":null,"content":"hello from the M8 tool","tool_calls":[]}"#,
+                    ),
+                    ("gen_ai.system", "openai"),
+                ],
+            ),
+            event(
+                "gen_ai.choice",
+                &[
+                    (
+                        "gen_ai.event.content",
+                        r#"{"index":0,"message":{"role":"Assistant","name":null,"content":"hello.txt says: hello from the M7 spike.","tool_calls":[]},"tool_calls":[],"finish_reason":"Stop"}"#,
+                    ),
+                    ("gen_ai.system", "openai"),
+                ],
+            ),
+        ];
+        let io = read_span(&[], &events, SpanKind::Llm);
+        let Payload::Messages(messages) = io.input.expect("input") else {
+            panic!("input is messages");
+        };
+        assert_eq!(
+            messages_to_json(&messages),
+            concat!(
+                r#"[{"role":"user","parts":[{"type":"text","content":"Read hello.txt and tell me what it says."}]},"#,
+                r#"{"role":"assistant","parts":[{"type":"tool_call","id":"call_m7_1","name":"read_file","arguments":{"path":"/capture/hello.txt"}}]},"#,
+                r#"{"role":"tool","parts":[{"type":"text","content":"hello from the M8 tool"}]}]"#
+            )
+        );
+        let Payload::Messages(messages) = io.output.expect("output") else {
+            panic!("output is messages");
+        };
+        assert_eq!(
+            messages_to_json(&messages),
+            r#"[{"role":"assistant","parts":[{"type":"text","content":"hello.txt says: hello from the M7 spike."}],"finish_reason":"Stop"}]"#
+        );
+        assert!(io.errors.is_empty());
+    }
+
+    #[test]
+    fn event_content_that_is_not_an_object_is_a_normalize_error() {
+        // D-IN-30 item 4: a `gen_ai.event.content` string that is not a JSON
+        // object is the raw element, and the conversion fails as today.
+        let events = [event(
+            "gen_ai.user.message",
+            &[
+                ("gen_ai.event.content", "not json"),
+                ("gen_ai.system", "openai"),
+            ],
+        )];
+        let io = read_span(&[], &events, SpanKind::Llm);
+        assert_eq!(io.errors, ["messages:genai:input"]);
+        assert_eq!(io.input, Some(Payload::Json(json!(["not json"]))));
+    }
+
+    #[test]
+    fn hidden_messages_are_not_captured_and_not_errors() {
+        // D-IN-30 item 4: a `HIDDEN:` value under a message key is masked
+        // content (Koog): the key is consumed, nothing is captured, no error is
+        // recorded, and the later sources (a legacy event on the same span) are
+        // not read.
+        let attrs = [string_attr("gen_ai.input.messages", "HIDDEN:non-empty")];
+        let events = [event(
+            "gen_ai.user.message",
+            &[("content", r#"[{"text": "hi"}]"#)],
+        )];
+        let mut warnings = Warnings::default();
+        let mut bag = AttrBag::new(&attrs, &mut warnings);
+        let io = read(&mut ReadContext {
+            bag: &mut bag,
+            events: &events,
+            kind: SpanKind::Llm,
+            scope: "",
+            conventions: &[],
+            warnings: &mut warnings,
+        });
+        assert_eq!(io.input, None);
+        assert!(io.errors.is_empty());
+        assert_eq!(bag.state("gen_ai.input.messages"), Some(Use::Payload));
+
+        // The output key masks the same way.
+        let attrs = [string_attr("gen_ai.output.messages", "HIDDEN:non-empty")];
+        let (io, bag) = read_span_with_bag("", &attrs);
+        assert_eq!(io.output, None);
+        assert!(io.errors.is_empty());
+        assert_eq!(bag.state("gen_ai.output.messages"), Some(Use::Payload));
+    }
+
+    #[test]
+    fn hidden_system_instructions_are_not_captured() {
+        // D-IN-30 item 4: the `HIDDEN:` mask applies to
+        // `gen_ai.system_instructions` too (unit-tested only; Koog writes its
+        // system prompt unprefixed).
+        let attrs = [string_attr(
+            "gen_ai.system_instructions",
+            "HIDDEN:non-empty",
+        )];
+        let (io, bag) = read_span_with_bag("", &attrs);
+        assert_eq!(io.system_instructions, None);
+        assert_eq!(bag.state("gen_ai.system_instructions"), Some(Use::Payload));
     }
 
     #[test]
