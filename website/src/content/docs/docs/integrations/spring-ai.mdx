@@ -188,6 +188,7 @@ Route 1 records no message content. Route 2, the same call:
 - Route 2's exclusion turns Micrometer tracing off for the whole application, HTTP requests included. Open a span around the model calls to keep them in one trace; without one, each call is a trace of its own.
 - The `management.otlp.tracing.*` keys belong to Boot's Micrometer OTLP bridge and export nothing when the OpenTelemetry starter is present. Use the `management.opentelemetry.tracing.export.otlp.*` keys.
 - Boot's HTTP client creates a plain `POST` span for each model request. The fixtures drop those spans: they carry the mock provider's loopback address, which the capture's privacy check refuses.
+- The capture sent no Authorization header; the header setting above is the library's documented option, not part of the captured run.
 - The fixtures were captured with Spring Boot 4.1.2, Spring AI 2.0.2 and OpenInference Java 0.1.10.
 - If a field is missing, look at the span's **Attributes** tab and compare it with [Span attributes](/docs/reference/attributes/).
 

@@ -76,6 +76,7 @@ With one tool round, a call produces:
 
 - Content is off by default: without `EnableSensitiveData = true`, the spans carry no messages, tool arguments or results.
 - OpenTelemetry .NET 1.21.0 ignores `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT`. Set `OTEL_EXPORTER_OTLP_ENDPOINT`, the base URL without the `/v1/traces` path; the exporter appends the path itself.
+- The capture sent no Authorization header; the header setting above is the library's documented option, not part of the captured run.
 - The fixture was captured with `Microsoft.Extensions.AI` 11.0.0, `OpenAI` 2.15.0 and OpenTelemetry .NET 1.21.0.
 - If a field is missing, look at the span's **Attributes** tab and compare it with [Span attributes](/docs/reference/attributes/).
 

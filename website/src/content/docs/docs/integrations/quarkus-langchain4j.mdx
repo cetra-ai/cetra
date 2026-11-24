@@ -81,6 +81,7 @@ One AI service call with one tool round:
 - The model call's input and output are plain text, not parsed messages.
 - The turn that answers with a tool call writes no completion, so its `llm` span has an input but no output. The prompt of the following call then shows `null` in place of the model's tool call; that is how Quarkus serializes the conversation.
 - The HTTP client spans stay plain spans; cetra reads no model data from them.
+- The capture sent no Authorization header; the header setting above is the library's documented option, not part of the captured run.
 - The fixture was captured with Quarkus 3.40.1.2 and Quarkus LangChain4j 1.15.1.
 - If a field is missing, look at the span's **Attributes** tab and compare it with [Span attributes](/docs/reference/attributes/).
 

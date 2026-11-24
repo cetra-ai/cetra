@@ -114,6 +114,7 @@ One `AiServices` call with one tool round:
 - There are no agent or tool spans: the model listener sees the model calls only.
 - With no other span open, each model call is a trace of its own.
 - Content is captured by default. Hide it with a `TraceConfig` built by `TraceConfig.builder()` and passed to `LangChain4jInstrumentor.instrument(tracerProvider, traceConfig)`; there is no environment variable for it.
+- The capture sent no Authorization header; the header setting above is the library's documented option, not part of the captured run.
 - The fixture was captured with LangChain4j 1.23.0, OpenInference Java 0.1.9 and OpenTelemetry Java 1.68.0.
 - If a field is missing, look at the span's **Attributes** tab and compare it with [Span attributes](/docs/reference/attributes/).
 

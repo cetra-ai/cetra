@@ -84,6 +84,7 @@ Content is on by default: the messages and `input.value` and `output.value` land
 Each middleware span is a root. Open your own span and pass its context to get one trace per request:
 
 ```go
+// Needs the import "go.opentelemetry.io/otel/trace" for trace.Span.
 var appSpan trace.Span
 ctx, appSpan = otel.Tracer("my-app").Start(ctx, "app.request")
 defer appSpan.End()

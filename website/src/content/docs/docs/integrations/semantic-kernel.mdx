@@ -168,8 +168,9 @@ Semantic Kernel offers every plugin function to the model as `<Plugin>-<Function
 - .NET
   - Without the two AppContext switches, Semantic Kernel emits no model-call spans at all: only the tool spans arrive.
   - The spans have no parent links: every span is its own trace, so a tool span is not linked to the model call that requested it.
-  - The finish reasons (Semantic Kernel writes them capitalized, for example `Stop` and `ToolCalls`) and the URL-shaped `server.address` are not read.
+  - The per-message finish reason from Semantic Kernel's `gen_ai.choice` event is read and lowercased, so `ToolCalls` becomes `toolcalls` (not `tool_calls`). Only the span-level `gen_ai.response.finish_reason` and the URL-shaped `server.address` are not read.
   - OpenTelemetry .NET 1.21.0 ignores `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT`. Set `OTEL_EXPORTER_OTLP_ENDPOINT`, the base URL without the `/v1/traces` path; the exporter appends the path itself.
+  - The capture sent no Authorization header; the header setting above is the library's documented option, not part of the captured run.
   - The .NET fixture was captured with `Microsoft.SemanticKernel` 1.82.0 and OpenTelemetry .NET 1.21.0.
 - If a field is missing, look at the span's **Attributes** tab and compare it with [Span attributes](/docs/reference/attributes/).
 

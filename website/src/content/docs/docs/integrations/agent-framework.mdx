@@ -132,7 +132,7 @@ var answer = await agent.RunAsync("What is the weather in Lyon? Use the tool.");
 Console.WriteLine("answer: " + answer.Text);
 ```
 
-`EnableSensitiveData = true` makes the framework record the messages and the tool arguments and results. You can leave the code switch out and set `OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT=true` instead; the two have the same effect.
+`EnableSensitiveData = true` makes the framework record the messages and the tool arguments and results. You can leave the code switch out and set `OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT=true` instead; the library's documentation offers that variable as an alternative. The capture used `EnableSensitiveData = true`.
 
   </TabItem>
 </Tabs>
@@ -163,6 +163,7 @@ Console.WriteLine("answer: " + answer.Text);
   - Content is off by default: set `EnableSensitiveData = true` or `OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT=true` to record the messages and the tool arguments and results.
   - The agent span's name ends with the agent's instance id, which changes on every run.
   - OpenTelemetry .NET 1.21.0 ignores `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT`. Set `OTEL_EXPORTER_OTLP_ENDPOINT`, the base URL without the `/v1/traces` path; the exporter appends the path itself.
+  - The capture sent no Authorization header; the header setting above is the library's documented option, not part of the captured run.
   - The .NET fixture was captured with `Microsoft.Agents.AI` 1.28.0 and OpenTelemetry .NET 1.21.0. It covers one agent run; workflows were not captured.
 - If a field is missing, look at the span's **Attributes** tab and compare it with [Span attributes](/docs/reference/attributes/).
 
