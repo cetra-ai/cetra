@@ -148,12 +148,13 @@ export function TreeGrid({
   const scrollRef = useRef<HTMLDivElement>(null);
   const gridRef = useRef<HTMLDivElement>(null);
   const timelineRef = useRef<HTMLDivElement>(null);
+  const rowsRef = useRef<HTMLDivElement>(null);
   const [timelineWidth, setTimelineWidth] = useState(480);
   const [collapsed, setCollapsed] = useState(() => collapsedWithPath(spans, selectedSpanId));
   const [query, setQuery] = useState("");
   const [errorsOnly, setErrorsOnly] = useState(false);
   const [view, setView] = useState<TimeWindow | null>(null);
-  const [needle, setNeedle] = useState<{ x: number; label: string } | null>(null);
+  const [needle, setNeedle] = useState<{ x: number; label: string; height: number } | null>(null);
   const [drag, setDrag] = useState<{ startPct: number; endPct: number } | null>(null);
   const dragRef = useRef<{ startPct: number; endPct: number } | null>(null);
   const { org, project } = useProject();
@@ -477,8 +478,26 @@ export function TreeGrid({
       setNeedle(null);
       return;
     }
+    // The line runs from the top of the axis to the last row (or the visible area's bottom),
+    // like the gridlines, and goes away when the pointer is below the rows.
+    const rowsBox = rowsRef.current?.getBoundingClientRect();
+    const scroll = scrollRef.current;
+    if (!rowsBox || !scroll) {
+      setNeedle(null);
+      return;
+    }
+    const visibleBottom = scroll.getBoundingClientRect().top + scroll.clientHeight;
+    const bottom = Math.min(rowsBox.bottom, visibleBottom);
+    if (event.clientY > bottom) {
+      setNeedle(null);
+      return;
+    }
     const offset = zoom.startNs + (pct / 100) * (zoom.endNs - zoom.startNs) - timeWindow.startNs;
-    setNeedle({ x: event.clientX - host.left, label: formatDuration(offset) });
+    setNeedle({
+      x: event.clientX - host.left,
+      label: formatDuration(offset),
+      height: bottom - host.top,
+    });
   }
 
   function onHeaderDown(event: ReactPointerEvent<HTMLDivElement>) {
@@ -573,8 +592,9 @@ export function TreeGrid({
         >
           {shownNeedle ? (
             <div
-              className="pointer-events-none absolute top-0 bottom-0 z-10 w-px bg-foreground/70"
-              style={{ left: shownNeedle.x }}
+              data-needle
+              className="pointer-events-none absolute top-0 z-30 w-px bg-foreground/70"
+              style={{ left: shownNeedle.x, height: shownNeedle.height }}
             >
               <span className="absolute top-0.5 left-1 text-caption whitespace-nowrap text-foreground normal-case">
                 {shownNeedle.label}
@@ -671,7 +691,7 @@ export function TreeGrid({
               ) : null}
             </div>
 
-            <div className="relative" style={{ height: virtualizer.getTotalSize() }}>
+            <div ref={rowsRef} className="relative" style={{ height: virtualizer.getTotalSize() }}>
               {virtualRows.map((item) => {
                 const spanIndex = rows[item.index];
                 const row = spanIndex === undefined ? undefined : spans[spanIndex];

@@ -228,3 +228,47 @@ it("keeps the header inside the scroll area, above the rows", () => {
   expect(header?.closest("[data-scroll-container]")).not.toBeNull();
   expect(header).toHaveClass("sticky");
 });
+
+it("stops the hover line at the last row and hides it below the rows", () => {
+  render(gridElement(true));
+  const grid = screen.getByRole("grid", { name: "Trace" });
+  const axis = screen.getByRole("columnheader", { name: "Timeline" });
+  const scroll = grid.querySelector<HTMLElement>("[data-scroll-container]");
+  const rowsBox = axis.parentElement?.nextElementSibling as HTMLElement | null;
+  if (!scroll || !rowsBox) {
+    throw new Error("expected the scroll area and its rows");
+  }
+  const box = (left: number, top: number, width: number, height: number) =>
+    ({
+      left,
+      top,
+      width,
+      height,
+      right: left + width,
+      bottom: top + height,
+      x: left,
+      y: top,
+    }) as DOMRect;
+  const rects = new Map<Element, DOMRect>([
+    [grid, box(0, 0, 600, 800)],
+    [axis, box(200, 0, 400, 28)],
+    [scroll, box(0, 0, 600, 800)],
+    [rowsBox, box(0, 28, 600, 200)],
+  ]);
+  const original = HTMLElement.prototype.getBoundingClientRect;
+  HTMLElement.prototype.getBoundingClientRect = function (this: HTMLElement) {
+    return rects.get(this) ?? original.call(this);
+  };
+  Object.defineProperty(scroll, "clientHeight", { configurable: true, value: 800 });
+  try {
+    fireEvent.pointerMove(grid, { clientX: 400, clientY: 100 });
+    const needle = document.querySelector<HTMLElement>("[data-needle]");
+    expect(needle).not.toBeNull();
+    expect(needle?.style.height).toBe("228px");
+
+    fireEvent.pointerMove(grid, { clientX: 400, clientY: 400 });
+    expect(document.querySelector("[data-needle]")).toBeNull();
+  } finally {
+    HTMLElement.prototype.getBoundingClientRect = original;
+  }
+});
