@@ -274,7 +274,7 @@ export const TEMPLATES: readonly DashboardTemplate[] = [
     id: "coding_agents",
     name: "Coding agents",
     description:
-      "Cost, sessions and tool use of coding agents (Claude Code, Codex, Gemini CLI, Copilot, Qwen Code, Pi, OpenClaw) by person, repository and branch. Cost is API-equivalent cost: what the tokens would cost at API prices, whatever plan pays for them.",
+      "Cost, sessions and tool use of coding agents (Claude Code, Codex, Gemini CLI, Copilot, Qwen Code, Pi, OpenClaw, OpenCode, Goose and Oh My Pi) by person, repository and branch. Cost is API-equivalent cost: what the tokens would cost at API prices, whatever plan pays for them.",
     definition: {
       widgets: [
         numberAt(

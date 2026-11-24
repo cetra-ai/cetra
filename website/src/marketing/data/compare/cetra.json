@@ -66,7 +66,7 @@
       "sources": ["/docs/platform/assistant/"]
     },
     "codingAgents": {
-      "value": "Claude Code, Codex CLI, Gemini CLI, Qwen Code and OpenClaw via cetra agents setup; GitHub Copilot and Pi print settings",
+      "value": "Claude Code, Codex, Gemini CLI, Copilot, Qwen Code, Pi, OpenClaw, OpenCode, Goose and Oh My Pi via cetra agents setup",
       "sources": [
         "/docs/integrations/claude-code/",
         "/docs/integrations/codex/",
@@ -74,7 +74,10 @@
         "/docs/integrations/copilot/",
         "/docs/integrations/qwen-code/",
         "/docs/integrations/pi/",
-        "/docs/integrations/openclaw/"
+        "/docs/integrations/openclaw/",
+        "/docs/integrations/opencode/",
+        "/docs/integrations/goose/",
+        "/docs/integrations/oh-my-pi/"
       ]
     }
   },

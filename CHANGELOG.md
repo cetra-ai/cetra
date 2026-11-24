@@ -18,6 +18,7 @@ with an `### Upgrade notes` section (https://cetra.sh/docs/self-hosting/upgrade/
 - The capture harness is its own package (`tools/capture/harness/`), and capture scenarios whose packages cannot share the capture project's lock live under `tools/capture/envs/<env>/scenarios/`; `just capture-tools` installs every environment.
 - Vector database reads are `retriever` spans: OpenLIT's `vectordb` get, query and search, and the read spans of OpenLLMetry's Chroma, Qdrant, Milvus, Pinecone and Weaviate instrumentations. Writes stay `span`.
 - Qwen Code, Pi and OpenClaw are coding agents: `cetra agents setup qwen-code`, `cetra agents setup pi` and `cetra agents setup openclaw` connect them to cetra, and `cetra agents remove` undoes each. Pi gets an extension that cetra writes, and OpenClaw's setup installs its diagnostics plugin. Integration pages cover these three and Augment Code, Devin SDK and Omnigent (setup only).
+- OpenCode, Goose and Oh My Pi are coding agents: `cetra agents setup opencode` (which writes cetra's OpenCode plugin and its config file), `cetra agents setup goose` (which prints Goose's environment lines) and `cetra agents setup oh-my-pi` (which writes Oh My Pi's `.env` lines) connect them to cetra, and `cetra agents remove` undoes each. Integration pages cover these three and Hermes Agent, which is detected and captured but has no setup.
 
 ### Changed
 

@@ -191,7 +191,11 @@ Use this page to find how to connect your framework, provider or instrumentation
 | [Qwen Code](https://cetra.sh/docs/integrations/qwen-code/) | — | — | `cetra agents setup qwen-code` | captured |
 | [Pi](https://cetra.sh/docs/integrations/pi/) | — | — | `cetra agents setup pi` | captured |
 | [OpenClaw](https://cetra.sh/docs/integrations/openclaw/) | — | — | `cetra agents setup openclaw` | captured |
+| [OpenCode](https://cetra.sh/docs/integrations/opencode/) | — | — | `cetra agents setup opencode` | captured |
+| [Goose](https://cetra.sh/docs/integrations/goose/) | — | — | `cetra agents setup goose` | captured |
+| [Oh My Pi](https://cetra.sh/docs/integrations/oh-my-pi/) | — | — | `cetra agents setup oh-my-pi` | captured |
 | [GitHub Copilot](https://cetra.sh/docs/integrations/copilot/) | — | — | `cetra agents setup copilot` | hand-written |
+| [Hermes Agent](https://cetra.sh/docs/integrations/hermes-agent/) | — | — | the `hermes-otel` community plugin | captured |
 | [Augment Code](https://cetra.sh/docs/integrations/augment-code/) | — | — | its `otel` extension's environment variables | setup only |
 | [Devin SDK](https://cetra.sh/docs/integrations/devin-sdk/) | — | — | the SDK's session tracing | setup only |
 | [Omnigent](https://cetra.sh/docs/integrations/omnigent/) | — | — | Omnigent's telemetry environment variables | setup only |
@@ -202,7 +206,11 @@ Use this page to find how to connect your framework, provider or instrumentation
 - [Qwen Code](https://cetra.sh/docs/integrations/qwen-code/): Model calls and tool calls, with the session.
 - [Pi](https://cetra.sh/docs/integrations/pi/): Prompts, model calls and tools through cetra's pi extension.
 - [OpenClaw](https://cetra.sh/docs/integrations/openclaw/): Agent runs, model calls and tools through its diagnostics plugin.
+- [OpenCode](https://cetra.sh/docs/integrations/opencode/): Prompts, model calls and tools through cetra's OpenCode plugin.
+- [Goose](https://cetra.sh/docs/integrations/goose/): Replies, model calls and tools through its OpenTelemetry environment.
+- [Oh My Pi](https://cetra.sh/docs/integrations/oh-my-pi/): Runs, model calls and tools through its .env file.
 - [GitHub Copilot](https://cetra.sh/docs/integrations/copilot/): Copilot CLI and VS Code Copilot Chat.
+- [Hermes Agent](https://cetra.sh/docs/integrations/hermes-agent/): Turns, model calls and tools through its telemetry plugin.
 
 ## Instrumentation libraries
 
