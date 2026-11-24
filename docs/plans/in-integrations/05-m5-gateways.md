@@ -488,3 +488,31 @@ IN5.2 found that LiteLLM's tool turn (`gen_ai.completion.0.function_call.{name,a
 **Done when:** `cargo nextest run -p cetra-otel`, clippy, fmt pass; no `expected.json` changed (if one changes, stop and report).
 
 **Commit:** `Read OpenLLMetry completions without a role`
+
+## Amendment B — IN5.3: the LiteLLM Proxy environment and attribute order
+
+The IN5.3 run found two problems.
+1. `litellm[proxy]==1.109.1` cannot join `tools/capture/py`. It needs `mcp>=2.3,<3` (semantic-kernel 1.47.0 needs `mcp<2`) and `rich<14` (together 3.1.1 needs `rich>=14.2`). With both frozen by overrides, the proxy dies on import (`mcp.shared.exceptions.MCPError` is an mcp 2 name).
+2. Bifrost (Go) writes span attributes in a random order on every run, so `run --check` reports a difference on identical captures.
+
+**Decisions** (recorded in D-IN-25 as item 10):
+- **LiteLLM Proxy is a pinned tool, like the gateway binaries.**
+  - It gets its own uv project, `tools/capture/litellm-proxy/`, made of a `pyproject.toml` and a `uv.lock`, with no code:
+    - `name = "cetra-capture-litellm-proxy"`, `version = "0.0.0"`, `requires-python` as `tools/capture/py`;
+    - `dependencies = ["litellm[proxy]==1.109.1"]`;
+    - `[tool.uv] package = false`, `exclude-newer = "7 days"` with the same comment as `tools/capture/py`.
+  - `fetch-tools.sh` installs it after the binaries: `UV_PROJECT_ENVIRONMENT=<repo>/target/capture-tools/litellm-proxy/1.109.1 uv sync --frozen --project tools/capture/litellm-proxy`. Skip it when `<that dir>/bin/litellm` exists and the lock has not changed: compare a copy of `uv.lock` stored next to the environment.
+  - The LiteLLM scenarios launch `tool_binary("litellm-proxy", "1.109.1", "bin", "litellm")`. They take the proxy version for `finish_tool` from that constant.
+  - `tools/capture/py` gets no LiteLLM change. The scenario's OpenAI client stays in the capture project.
+  - Dependabot does not watch `tools/capture/` today; this changes nothing there.
+- **`--check` sorts attributes.** `json_differences` in `tools/capture/src/run.rs` already sorts resource attributes before comparing. It now also sorts every span's, event's and link's `attributes` by key, on both sides. This is a check-only change: no fixture is rewritten, and `determinism.rs` is not touched.
+  - Test: `check_ignores_span_attribute_order`. Two documents that differ only in span attribute order compare equal, and a changed value is still reported.
+- **Accepted from the run:**
+  - `metadata.requester_ip_address` is volatile in both LiteLLM scenarios.
+  - Temporal flushes and shuts down its provider, then calls `finish_tool(None, …)`, because temporalio's provider is not an SDK `TracerProvider`.
+
+**IN5.3 Edit list gains:**
+- `tools/capture/litellm-proxy/{pyproject.toml,uv.lock}`;
+- `tools/capture/fetch-tools.sh`;
+- `tools/capture/src/run.rs`, for `json_differences` and its test only;
+- the `AGENTS.md` capture-tools line, which gains "and the LiteLLM Proxy environment".
