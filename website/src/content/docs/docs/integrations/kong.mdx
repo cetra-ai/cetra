@@ -1,0 +1,68 @@
+---
+title: Kong AI Gateway
+description: "Send Kong AI Gateway model calls to cetra with the OpenTelemetry plugin."
+---
+
+Kong AI Gateway sends each model call it proxies to cetra as a span, through its `opentelemetry` plugin.
+
+## Install
+
+The Gen AI attributes this page describes need Kong Gateway 3.13 or later. Run it from its Docker image or its packages, in DB-less mode with a declarative configuration file.
+
+## Set up
+
+Add two plugins to the service that fronts your model provider: `ai-proxy` calls the provider, and `opentelemetry` exports the spans.
+
+```yaml
+_format_version: "3.0"
+
+services:
+  - name: openai-chat
+    routes:
+      - name: chat
+        paths:
+          - /v1/chat/completions
+    plugins:
+      - name: ai-proxy
+        config:
+          route_type: llm/v1/chat
+          model:
+            provider: openai
+            name: gpt-4o-mini
+            options:
+              upstream_url: https://api.openai.com/v1/chat/completions
+      - name: opentelemetry
+        config:
+          traces_endpoint: https://<CETRA_HOST>/v1/traces
+          headers:
+            Authorization: Bearer <SK_CETRA_KEY>
+```
+
+Replace `<CETRA_HOST>` with the host cetra runs on, and `<SK_CETRA_KEY>` with your `sk-cetra-…` API key. See [Send OpenTelemetry](/docs/get-started/opentelemetry/).
+
+Start Kong with request tracing on and every request sampled:
+
+```bash
+export KONG_TRACING_INSTRUMENTATIONS=request
+export KONG_TRACING_SAMPLING_RATE=1
+```
+
+## What you get
+
+- Each model call is one `llm` span named `chat <model>`, read with the OpenTelemetry GenAI convention: the provider, the request and response models, the token counts, and the messages when Kong is set to capture content.
+- Cost is computed from the built-in prices. Kong writes no cost attribute: its cost figures are metrics.
+
+## Limits
+
+- Setup only: this page is written from Kong's documentation, and no spans of Kong are captured in the repository.
+- The Gen AI attributes need Kong Gateway 3.13 or later. The `opentelemetry` plugin exports OTLP over HTTP, with protobuf only.
+- The plugin's `headers` field is taken from Kong's reference, not from a run against cetra.
+- A tool call gets a span of its own that repeats the usage attributes, so the tokens of one call can be counted twice. This comes from Kong's guides and is not verified.
+- Do not instrument both sides: an app with its own OpenTelemetry instrumentation behind a traced gateway counts each call twice, because the gateway joins the app's trace through `traceparent` and its span carries the same tokens and cost. Trace the gateway (it covers several apps and languages) or the app, not both.
+- If a field is missing, look at the span's **Attributes** tab and compare it with [Span attributes](/docs/reference/attributes/).
+
+## Next
+
+- [Traces](/docs/tracing/traces/): read the trace as a tree and a timeline.
+- [Cost and tokens](/docs/tracing/cost-and-tokens/): how cost is computed from the token counts.
+- [Custom model prices](/docs/tracing/cost-and-tokens/#custom-model-prices): price a model the built-in prices do not cover.

@@ -1,0 +1,120 @@
+---
+title: Portkey
+description: "Trace Portkey gateway calls with cetra through the OpenAI client, with the model publisher's price."
+---
+
+import { Tabs, TabItem } from "@astrojs/starlight/components";
+
+Trace Portkey gateway calls with cetra through the OpenAI client.
+
+## Install
+
+<Tabs syncKey="lang">
+  <TabItem label="Python">
+
+```bash
+pip install "cetra-sdk[openai]" openai
+```
+
+  </TabItem>
+  <TabItem label="TypeScript">
+
+```bash
+npm install @cetra-ai/sdk @arizeai/openinference-instrumentation-openai openai
+```
+
+  </TabItem>
+</Tabs>
+
+## Set up
+
+<Tabs syncKey="lang">
+  <TabItem label="Python">
+
+{/* untested: calls Portkey and needs PORTKEY_API_KEY and OPENAI_API_KEY */}
+```python
+import os
+
+import cetra
+from openai import OpenAI
+
+cetra.init(instrument=["openai"])
+
+client = OpenAI(
+    base_url="https://api.portkey.ai/v1",
+    api_key=os.environ["PORTKEY_API_KEY"],
+    default_headers={
+        "x-portkey-provider": "openai",
+        "Authorization": f"Bearer {os.environ['OPENAI_API_KEY']}",
+    },
+)
+response = client.chat.completions.create(
+    model="gpt-4o-mini",
+    messages=[{"role": "user", "content": "What is the capital of France?"}],
+)
+print(response.choices[0].message.content)
+
+cetra.flush()
+```
+
+  </TabItem>
+  <TabItem label="TypeScript">
+
+{/* untested: the imports of the example below */}
+```ts
+import { init } from "@cetra-ai/sdk";
+import { openai } from "@cetra-ai/sdk/openai";
+import OpenAI from "openai";
+```
+
+{/* example:integration-openai */}
+```ts
+init({ apiKey: process.env.CETRA_API_KEY, instrument: [openai(OpenAI)] });
+```
+
+{/* untested: calls Portkey and needs PORTKEY_API_KEY and OPENAI_API_KEY */}
+```ts
+const client = new OpenAI({
+  baseURL: "https://api.portkey.ai/v1",
+  apiKey: process.env.PORTKEY_API_KEY,
+  defaultHeaders: {
+    "x-portkey-provider": "openai",
+    Authorization: `Bearer ${process.env.OPENAI_API_KEY}`,
+  },
+});
+await client.chat.completions.create({
+  model: "gpt-4o-mini",
+  messages: [{ role: "user", content: "What is the capital of France?" }],
+});
+```
+
+  </TabItem>
+</Tabs>
+
+## What you get
+
+- Each chat completion is an `llm` span with the provider `portkey`.
+- Input and output token counts come from the response.
+- Cost is the model publisher's price, as described under Limits.
+- With `cetra.init(instrument=["openai"])`, the endpoint host is in `server.address`, and cetra names the provider from it.
+
+## Its own OTLP export
+
+The self-hosted and Enterprise gateway can export GenAI spans over OTLP behind experimental environment variables: `EXPERIMENTAL_GEN_AI_OTEL_TRACES_ENABLED=true`, `EXPERIMENTAL_GEN_AI_OTEL_EXPORTER_OTLP_ENDPOINT`, `EXPERIMENTAL_GEN_AI_OTEL_EXPORTER_OTLP_HEADERS` (comma-separated `key=value` pairs) and `EXPERIMENTAL_GEN_AI_OTEL_EXPORTER_OTLP_RESOURCE_ATTRIBUTES`. The hosted gateway has no export to an OTLP endpoint of your own, and the open-source npm gateway does not include this code.
+
+Setup only: cetra has not verified this export. Portkey's docs do not say whether it sends HTTP or gRPC, and their example's endpoint path differs from the documented one, so check what your instance sends before you rely on it.
+
+## Limits
+
+- Setup only: no spans of Portkey are captured in the repository.
+- Cost is the model publisher's price when the model names its publisher (`vendor/model`, or a bare name a publisher has a row for); Portkey's fees are not included. Models no publisher row matches have no built-in price.
+- The OTLP export above is experimental and not verified by cetra.
+- Do not instrument both sides: an app with its own OpenTelemetry instrumentation behind a traced gateway counts each call twice, because the gateway joins the app's trace through `traceparent` and its span carries the same tokens and cost. Trace the gateway (it covers several apps and languages) or the app, not both.
+- With plain OpenInference or the official OpenAI instrumentation in Python, the provider shows as `openai`: they do not record the endpoint. Use `cetra.init(instrument=["openai"])` or OpenLLMetry.
+- If a field is missing, look at the span's **Attributes** tab and compare it with [Span attributes](/docs/reference/attributes/).
+
+## Next
+
+- [Traces](/docs/tracing/traces/): read the trace as a tree and a timeline.
+- [Cost and tokens](/docs/tracing/cost-and-tokens/): how cost is computed from the token counts.
+- [Custom model prices](/docs/tracing/cost-and-tokens/#custom-model-prices): price a model the built-in prices do not cover.

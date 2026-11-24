@@ -79,6 +79,7 @@ Pydantic AI's conversation ID (`gen_ai.conversation.id`) becomes the cetra sessi
 
 ## Limits
 
+- The Pydantic AI Gateway exports its spans to Logfire only, so it is not a trace source for cetra; the calls your agents make through it are traced by this page's setup.
 - The fixture was captured with `pydantic-ai-slim` 2.68.0 and the OpenTelemetry SDK 1.45.2.
 - The fixture has the messages because `include_content` is on in the sample.
 - If a field is missing, look at the span's **Attributes** tab and compare it with [Span attributes](/docs/reference/attributes/).

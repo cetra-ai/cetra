@@ -1,0 +1,114 @@
+---
+title: Cloudflare AI Gateway
+description: "Trace Cloudflare AI Gateway calls with cetra through the OpenAI client, with the model publisher's price."
+---
+
+import { Tabs, TabItem } from "@astrojs/starlight/components";
+
+Trace Cloudflare AI Gateway calls with cetra through the OpenAI client.
+
+## Install
+
+<Tabs syncKey="lang">
+  <TabItem label="Python">
+
+```bash
+pip install "cetra-sdk[openai]" openai
+```
+
+  </TabItem>
+  <TabItem label="TypeScript">
+
+```bash
+npm install @cetra-ai/sdk @arizeai/openinference-instrumentation-openai openai
+```
+
+  </TabItem>
+</Tabs>
+
+## Set up
+
+<Tabs syncKey="lang">
+  <TabItem label="Python">
+
+{/* untested: calls the Cloudflare AI Gateway and needs OPENAI_API_KEY */}
+```python
+import os
+
+import cetra
+from openai import OpenAI
+
+cetra.init(instrument=["openai"])
+
+client = OpenAI(
+    base_url="https://gateway.ai.cloudflare.com/v1/<ACCOUNT_TAG>/<GATEWAY>/openai",
+    api_key=os.environ["OPENAI_API_KEY"],
+)
+response = client.chat.completions.create(
+    model="gpt-4o-mini",
+    messages=[{"role": "user", "content": "What is the capital of France?"}],
+)
+print(response.choices[0].message.content)
+
+cetra.flush()
+```
+
+  </TabItem>
+  <TabItem label="TypeScript">
+
+{/* untested: the imports of the example below */}
+```ts
+import { init } from "@cetra-ai/sdk";
+import { openai } from "@cetra-ai/sdk/openai";
+import OpenAI from "openai";
+```
+
+{/* example:integration-openai */}
+```ts
+init({ apiKey: process.env.CETRA_API_KEY, instrument: [openai(OpenAI)] });
+```
+
+{/* untested: calls the Cloudflare AI Gateway and needs OPENAI_API_KEY */}
+```ts
+const client = new OpenAI({
+  baseURL: "https://gateway.ai.cloudflare.com/v1/<ACCOUNT_TAG>/<GATEWAY>/openai",
+  apiKey: process.env.OPENAI_API_KEY,
+});
+await client.chat.completions.create({
+  model: "gpt-4o-mini",
+  messages: [{ role: "user", content: "What is the capital of France?" }],
+});
+```
+
+  </TabItem>
+</Tabs>
+
+Replace `<ACCOUNT_TAG>` with your Cloudflare account tag and `<GATEWAY>` with your gateway's name. The last path segment picks the provider (`openai` here); other providers have their own segment.
+
+## What you get
+
+- Each chat completion is an `llm` span with the provider `cloudflare_ai_gateway`.
+- Input and output token counts come from the response.
+- Cost is the model publisher's price, as described under Limits.
+- With `cetra.init(instrument=["openai"])`, the endpoint host is in `server.address`, and cetra names the provider from it.
+
+## Its own OTLP export
+
+The gateway can export its spans to an OTLP endpoint from its settings: **OTEL exporters** takes a URL, headers (the authorization can come from a Secrets Store reference) and a content type, JSON by default or protobuf. Send `cf-aig-otel-trace-id` and `cf-aig-otel-parent-span-id` request headers to link the export to your app's trace, and `cf-aig-metadata` to add span attributes (attribute names starting `gen_ai.` are reserved).
+
+Setup only: no recorded export exists and cetra has not verified this route. The export's provider key `gen_ai.model.provider` is not one cetra reads, and its content keys `gen_ai.prompt_json` and `gen_ai.completion_json` are not parsed, so through it the provider and the messages are not shown. Its cost key `gen_ai.usage.cost` is read as the reported cost.
+
+## Limits
+
+- Setup only: no spans of the Cloudflare AI Gateway are captured in the repository.
+- Through the OTLP export, the provider and the content are not shown; the OpenAI-client route above shows both.
+- Cost is the model publisher's price when the model names its publisher (`vendor/model`, or a bare name a publisher has a row for); Cloudflare's fees are not included. Models no publisher row matches have no built-in price.
+- Do not instrument both sides: an app with its own OpenTelemetry instrumentation behind a traced gateway counts each call twice, because the gateway joins the app's trace through `traceparent` and its span carries the same tokens and cost. Trace the gateway (it covers several apps and languages) or the app, not both.
+- With plain OpenInference or the official OpenAI instrumentation in Python, the provider shows as `openai`: they do not record the endpoint. Use `cetra.init(instrument=["openai"])` or OpenLLMetry.
+- If a field is missing, look at the span's **Attributes** tab and compare it with [Span attributes](/docs/reference/attributes/).
+
+## Next
+
+- [Traces](/docs/tracing/traces/): read the trace as a tree and a timeline.
+- [Cost and tokens](/docs/tracing/cost-and-tokens/): how cost is computed from the token counts.
+- [Custom model prices](/docs/tracing/cost-and-tokens/#custom-model-prices): price a model the built-in prices do not cover.

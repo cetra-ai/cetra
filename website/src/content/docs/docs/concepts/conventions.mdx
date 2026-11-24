@@ -23,6 +23,8 @@ Instrumentation libraries describe an LLM call with attributes, and they do not 
 
 [Span attributes](/docs/reference/attributes/) lists every attribute and the field it feeds.
 
+Bifrost writes the GenAI convention under the instrumentation scope `bifrost`; cetra reads its server root span as a chain, and reads its tool calls and cost keys (`bifrost.cost.*`).
+
 ## Precedence
 
 A span can carry several conventions. The Vercel AI SDK, for example, writes both `ai.*` and `gen_ai.*` attributes. For each field, cetra reads the conventions in this order and uses the first that has a value:

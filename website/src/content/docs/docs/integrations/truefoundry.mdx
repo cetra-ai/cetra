@@ -1,0 +1,110 @@
+---
+title: TrueFoundry
+description: "Trace TrueFoundry AI Gateway calls with cetra through the OpenAI client."
+---
+
+import { Tabs, TabItem } from "@astrojs/starlight/components";
+
+Trace TrueFoundry AI Gateway calls with cetra through the OpenAI client.
+
+## Install
+
+<Tabs syncKey="lang">
+  <TabItem label="Python">
+
+```bash
+pip install "cetra-sdk[openai]" openai
+```
+
+  </TabItem>
+  <TabItem label="TypeScript">
+
+```bash
+npm install @cetra-ai/sdk @arizeai/openinference-instrumentation-openai openai
+```
+
+  </TabItem>
+</Tabs>
+
+## Set up
+
+<Tabs syncKey="lang">
+  <TabItem label="Python">
+
+{/* untested: calls TrueFoundry and needs TRUEFOUNDRY_API_KEY */}
+```python
+import os
+
+import cetra
+from openai import OpenAI
+
+cetra.init(instrument=["openai"])
+
+client = OpenAI(base_url="https://gateway.truefoundry.ai/v1", api_key=os.environ["TRUEFOUNDRY_API_KEY"])
+response = client.chat.completions.create(
+    model="<MODEL_NAME>",
+    messages=[{"role": "user", "content": "What is the capital of France?"}],
+)
+print(response.choices[0].message.content)
+
+cetra.flush()
+```
+
+  </TabItem>
+  <TabItem label="TypeScript">
+
+{/* untested: the imports of the example below */}
+```ts
+import { init } from "@cetra-ai/sdk";
+import { openai } from "@cetra-ai/sdk/openai";
+import OpenAI from "openai";
+```
+
+{/* example:integration-openai */}
+```ts
+init({ apiKey: process.env.CETRA_API_KEY, instrument: [openai(OpenAI)] });
+```
+
+{/* untested: calls TrueFoundry and needs TRUEFOUNDRY_API_KEY */}
+```ts
+const client = new OpenAI({
+  baseURL: "https://gateway.truefoundry.ai/v1",
+  apiKey: process.env.TRUEFOUNDRY_API_KEY,
+});
+await client.chat.completions.create({
+  model: "<MODEL_NAME>",
+  messages: [{ role: "user", content: "What is the capital of France?" }],
+});
+```
+
+  </TabItem>
+</Tabs>
+
+Your tenant may serve the gateway on its own host, for example `*.truefoundry.cloud`.
+
+## What you get
+
+- Each chat completion is an `llm` span with the provider `openai`: no TrueFoundry host is in cetra's host table.
+- Input and output token counts come from the response.
+- No built-in price: add a custom model price in Settings → Model prices to get a cost.
+
+## Its own OTLP export
+
+The AI Gateway can send its spans to an OTLP endpoint from the dashboard: **AI Gateway**, **Controls**, **Settings**, **OTEL Config**. Set the traces endpoint (a full URL ending in `/v1/traces`), the encoding (protobuf over HTTP, or gRPC), an `Authorization`-style header and any extra resource attributes. The **Exclude Request Data** toggle removes the content. With `ENABLE_GEN_AI_OTEL_ATTRIBUTES=true`, the spans carry `gen_ai.operation.name`, `gen_ai.provider.name` (the upstream provider), the request and response models, the token counts and the messages, next to TrueFoundry's own `tfy.*` attributes.
+
+Setup only: cetra has not verified this export. The cost is reported only under a `tfy.*` key the docs do not name, which cetra does not read. One partner guide lists legacy token key names (`gen_ai.usage.prompt_tokens` and `completion_tokens`) where the docs list the current ones, so the token keys are unverified too.
+
+## Limits
+
+- Setup only: no spans of TrueFoundry are captured in the repository.
+- cetra maps no TrueFoundry host to a provider, so the provider stays what your instrumentation records (usually `openai`) and no built-in price applies. Add a custom model price in Settings → Model prices.
+- The OTLP export above is not verified by cetra; its cost key is not read.
+- Do not instrument both sides: an app with its own OpenTelemetry instrumentation behind a traced gateway counts each call twice, because the gateway joins the app's trace through `traceparent` and its span carries the same tokens and cost. Trace the gateway (it covers several apps and languages) or the app, not both.
+- With plain OpenInference or the official OpenAI instrumentation in Python, the provider shows as `openai`: they do not record the endpoint. Use `cetra.init(instrument=["openai"])` or OpenLLMetry.
+- If a field is missing, look at the span's **Attributes** tab and compare it with [Span attributes](/docs/reference/attributes/).
+
+## Next
+
+- [Traces](/docs/tracing/traces/): read the trace as a tree and a timeline.
+- [Cost and tokens](/docs/tracing/cost-and-tokens/): how cost is computed from the token counts.
+- [Custom model prices](/docs/tracing/cost-and-tokens/#custom-model-prices): price a model the built-in prices do not cover.

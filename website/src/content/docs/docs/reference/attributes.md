@@ -58,7 +58,7 @@ When a span carries no cetra attribute for a field, cetra reads the field from t
 
 | Attribute | Feeds |
 |---|---|
-| `gen_ai.operation.name` | Span kind and the operation |
+| `gen_ai.operation.name` | Span kind and the operation; `embeddings`, `embedding` and `aembedding` are embedding operations |
 | `gen_ai.provider.name`, `gen_ai.system` | Provider |
 | `gen_ai.request.model` | Request model |
 | `gen_ai.response.model` | Response model |
@@ -72,7 +72,8 @@ When a span carries no cetra attribute for a field, cetra reads the field from t
 | `gen_ai.usage.input_tokens`, `gen_ai.usage.output_tokens`, `gen_ai.usage.total_tokens` | Token counts |
 | `gen_ai.usage.cache_read.input_tokens`, `gen_ai.usage.cache_creation.input_tokens` | Cache token counts |
 | `gen_ai.usage.reasoning.output_tokens` | Reasoning token count |
-| `gen_ai.usage.cost`, `gen_ai.usage.total_cost`, `gen_ai.usage.input_cost`, `gen_ai.usage.output_cost` | Reported cost |
+| `gen_ai.usage.cost`, `gen_ai.usage.total_cost`, `gen_ai.usage.input_cost`, `gen_ai.usage.output_cost`, `gen_ai.cost.total_cost`, `gen_ai.cost.input_cost`, `gen_ai.cost.output_cost` | Reported cost |
+| `bifrost.cost.input`, `bifrost.cost.output` | Reported cost parts, on Bifrost gateway spans |
 | `gen_ai.response.time_to_first_chunk` | Time to first token |
 | `gen_ai.conversation.id` | Session |
 
