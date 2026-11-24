@@ -7,6 +7,11 @@ minimumReleaseAge: 10080
 # depends on 1.9.0. One copy has to be the global tracer.
 overrides:
   "@opentelemetry/api": "1.9.0"
+  # Flue 2.3.0's @earendil-works/pi-ai range (^1.1.0) resolves to 1.5.x, which drops the
+  # `Type` re-export @flue/runtime imports (spike F item 3). Scoped: only Flue's copy is pinned
+  # to 1.4.0; the capture project imports its own direct 1.4.0, and @earendil-works/pi-coding-agent
+  # keeps its 1.5.x.
+  "@flue/runtime>@earendil-works/pi-ai": "1.4.0"
 
 # Claude Code's install script only links its native binary from the platform
 # package (@anthropic-ai/claude-code-<platform>) into bin/claude.exe; without it

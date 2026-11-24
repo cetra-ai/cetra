@@ -1,0 +1,48 @@
+[project]
+name = "cetra-capture-env-atomic-agents"
+version = "0.0.0"
+requires-python = "==3.13.*"
+dependencies = [
+  # Atomic Agents (M9 captures, docs/plans/in-integrations/09-m9-long-tail.md § Versions), without
+  # its [phoenix] extra: its GenAI spans keep every attribute the capture needs without it (spike
+  # F item 2a). Its own environment (D-IN-26 item 1): it caps rich<14, which together
+  # (tools/capture/py, rich 14.3.4) does not allow.
+  "atomic-agents==2.16.0",
+  # The OpenAI client under the agent's instructor call, pinned to the version tools/capture/py
+  # pins: the harness's httpx2 transport (D-IN-3) subclasses its transport.
+  "openai==3.45.0",
+  # The capture harness, a package of its own (tools/capture/harness, module capture_py).
+  "cetra-capture-harness",
+]
+
+[dependency-groups]
+dev = ["ruff==0.17.3", "mypy==2.4.1"]
+
+[tool.uv]
+package = false
+exclude-newer = "7 days" # D74/D117: no release younger than 7 days
+# instructor (atomic-agents' dependency) caps jiter<0.15, which openai 3.45.0 does not allow.
+# The same override as tools/capture/py keeps the pins (M3 spike, finding 5).
+override-dependencies = [
+  "jiter>=0.16",
+]
+
+[tool.uv.sources]
+cetra-capture-harness = { path = "../../harness", editable = true }
+
+[tool.ruff]
+target-version = "py313"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "W", "F", "I", "B", "UP", "SIM", "RUF", "PT", "ANN", "S", "BLE", "N"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["capture_py"]
+
+[tool.mypy]
+strict = true
+python_version = "3.13"
+files = ["scenarios"]
+# Every scenario entry point is main.py. mypy maps those paths to one module.
+exclude = ["main\\.py$"]

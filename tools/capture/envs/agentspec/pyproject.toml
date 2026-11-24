@@ -1,0 +1,42 @@
+[project]
+name = "cetra-capture-env-agentspec"
+version = "0.0.0"
+requires-python = "==3.13.*"
+dependencies = [
+  # Agent Spec (M9 captures, docs/plans/in-integrations/09-m9-long-tail.md § Versions): pyagentspec
+  # with its own langgraph extra (the adapter the scenario runs, with the langgraph and
+  # langchain-openai it needs) and its OpenInference instrumentor. Its own environment
+  # (D-IN-26 item 1): the langgraph extra caps langchain-openai<1.3.0 and anyio<4.12, which
+  # tools/capture/py (langchain-openai 1.7.3, anyio 4.16.0) does not allow.
+  "pyagentspec[langgraph]==26.3.1",
+  "openinference-instrumentation-agentspec==0.1.22",
+  # The capture harness, a package of its own (tools/capture/harness, module capture_py).
+  "cetra-capture-harness",
+]
+
+[dependency-groups]
+dev = ["ruff==0.17.3", "mypy==2.4.1"]
+
+[tool.uv]
+package = false
+exclude-newer = "7 days" # D74/D117: no release younger than 7 days
+
+[tool.uv.sources]
+cetra-capture-harness = { path = "../../harness", editable = true }
+
+[tool.ruff]
+target-version = "py313"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "W", "F", "I", "B", "UP", "SIM", "RUF", "PT", "ANN", "S", "BLE", "N"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["capture_py"]
+
+[tool.mypy]
+strict = true
+python_version = "3.13"
+files = ["scenarios"]
+# Every scenario entry point is main.py. mypy maps those paths to one module.
+exclude = ["main\\.py$"]

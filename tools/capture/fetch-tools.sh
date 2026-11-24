@@ -275,6 +275,7 @@ pnpm_tool promptfoo 0.125.1 promptfoo/package.json
 pnpm_tool openclaw 2026.11.5 openclaw/package.json
 pnpm_tool opencode 1.19.6 opencode-ai/package.json
 pnpm_tool oh-my-pi 18.22.0 @oh-my-pi/pi-coding-agent/package.json
+pnpm_tool eve 1.0.1 eve/package.json
 
 # The OpenClaw diagnostics exporter (IN7.0), installed into a staged home so the capture never
 # writes to the operator's ~/.openclaw. Skipped when the staged home already lists the plugin.
