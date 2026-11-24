@@ -108,7 +108,7 @@ No new dependency.
 
 No phase runs full test suites while others run; a phase runs only the tests it names, and compiles and type-checks once, right before its commit.
 
-Setup for every phase, from the worktree root: `export PATH=$HOME/.local/share/nvm/v26.13.0/bin:$PATH`. Checks use `pnpm --dir web exec vitest run <paths> --maxWorkers=8`, `pnpm --dir web run typecheck`, and `./node_modules/.bin/biome check --write <files>` then the same without `--write`. Biome's formatting and import order win over code quoted in this plan; behaviour and strings stay as quoted. Never run `just check`. Every phase also checks `rtk proxy grep -rn "000000570[4-9]" fixtures web/src`: nothing under `fixtures/`, and under `web/src` only the files of the M14 phases.
+Setup for every phase, from the worktree root: `export PATH=$HOME/.local/share/nvm/v26.13.0/bin:$PATH`, then in a fresh worktree `pnpm install --frozen-lockfile` and `pnpm --dir web run gen:routes` (`web/src/routeTree.gen.ts` is git-ignored, and `vitest` alone doesn't generate it). Checks use `pnpm --dir web exec vitest run <paths> --maxWorkers=8`, `pnpm --dir web run typecheck`, and `./node_modules/.bin/biome check --write <files>` then the same without `--write`. Biome's formatting and import order win over code quoted in this plan; behaviour and strings stay as quoted. Never run `just check`. Every phase also checks `rtk proxy grep -rn "000000570[4-9]" fixtures web/src`: nothing under `fixtures/`, and under `web/src` only the files of the M14 phases.
 
 ---
 
@@ -248,7 +248,7 @@ Prompt ids (`…5707NN`, N = story number; N=1 is the fixture prompt `…1001`, 
 - voice-reply `01900000-0000-7000-8000-000000570703`
 - extract-invoice `01900000-0000-7000-8000-000000570704`
 
-Dates are fixed, before the screenshots' clock (`2026-01-01T11:00:00Z`), format `YYYY-MM-DDTHH:MM:SS.000000000Z` like the fixtures. Check afterwards: `rtk proxy grep -rn "000000570[4-9]" fixtures web/src` shows only this module and its tests for `570702`–`570704`.
+Dates are fixed, before the story screenshots' clock (`2026-11-19T12:00:00Z`), format `YYYY-MM-DDTHH:MM:SS.000000000Z` like the fixtures. Check afterwards: `rtk proxy grep -rn "000000570[4-9]" fixtures web/src` shows only this module and its tests for `570702`–`570704`.
 
 **Edit:**
 - `web/src/mocks/stories-prompts.ts` (new)
@@ -313,7 +313,7 @@ export const STORY_PROMPTS: StoryPrompt[] = [
         temperature: 0.2,
         maxTokens: 1024,
         commit: "First version",
-        at: "2025-12-12T10:15:00.000000000Z",
+        at: "2026-10-12T10:15:00.000000000Z",
       },
       {
         template: [
@@ -328,7 +328,7 @@ export const STORY_PROMPTS: StoryPrompt[] = [
         temperature: 0.2,
         maxTokens: 1024,
         commit: "Move to Sonnet and ask for a diff that fixes the issue",
-        at: "2025-12-19T14:40:00.000000000Z",
+        at: "2026-10-19T14:40:00.000000000Z",
       },
       {
         template: [
@@ -344,7 +344,7 @@ export const STORY_PROMPTS: StoryPrompt[] = [
         temperature: 0,
         maxTokens: 1024,
         commit: "Name the file and ask for the diff only",
-        at: "2025-12-29T09:05:00.000000000Z",
+        at: "2026-10-29T09:05:00.000000000Z",
       },
     ],
   },
@@ -364,7 +364,7 @@ export const STORY_PROMPTS: StoryPrompt[] = [
         temperature: 0.5,
         maxTokens: 256,
         commit: "First version",
-        at: "2025-12-10T16:20:00.000000000Z",
+        at: "2026-10-10T16:20:00.000000000Z",
       },
       {
         template: [
@@ -379,7 +379,7 @@ export const STORY_PROMPTS: StoryPrompt[] = [
         temperature: 0.4,
         maxTokens: 256,
         commit: "Keep replies short for speech",
-        at: "2025-12-16T11:00:00.000000000Z",
+        at: "2026-10-16T11:00:00.000000000Z",
       },
       {
         template: [
@@ -394,7 +394,7 @@ export const STORY_PROMPTS: StoryPrompt[] = [
         temperature: 0.4,
         maxTokens: 256,
         commit: "Offer the free slots",
-        at: "2025-12-22T15:30:00.000000000Z",
+        at: "2026-10-22T15:30:00.000000000Z",
       },
       {
         template: [
@@ -410,7 +410,7 @@ export const STORY_PROMPTS: StoryPrompt[] = [
         temperature: 0.3,
         maxTokens: 120,
         commit: "One or two sentences, so the reply starts sooner",
-        at: "2025-12-30T10:10:00.000000000Z",
+        at: "2026-10-30T10:10:00.000000000Z",
       },
     ],
   },
@@ -430,7 +430,7 @@ export const STORY_PROMPTS: StoryPrompt[] = [
         temperature: 0,
         maxTokens: 512,
         commit: "First version",
-        at: "2025-11-20T09:00:00.000000000Z",
+        at: "2026-09-20T09:00:00.000000000Z",
       },
       {
         template: [
@@ -445,7 +445,7 @@ export const STORY_PROMPTS: StoryPrompt[] = [
         temperature: 0,
         maxTokens: 512,
         commit: "Name the fields",
-        at: "2025-11-27T13:20:00.000000000Z",
+        at: "2026-09-27T13:20:00.000000000Z",
       },
       {
         template: [
@@ -461,7 +461,7 @@ export const STORY_PROMPTS: StoryPrompt[] = [
         temperature: 0.2,
         maxTokens: 512,
         commit: "Add the currency and the line items",
-        at: "2025-12-04T10:45:00.000000000Z",
+        at: "2026-10-04T10:45:00.000000000Z",
       },
       {
         template: [
@@ -477,7 +477,7 @@ export const STORY_PROMPTS: StoryPrompt[] = [
         temperature: 0,
         maxTokens: 512,
         commit: "Lower the temperature",
-        at: "2025-12-15T08:30:00.000000000Z",
+        at: "2026-10-15T08:30:00.000000000Z",
       },
       {
         template: [
@@ -493,7 +493,7 @@ export const STORY_PROMPTS: StoryPrompt[] = [
         temperature: 0,
         maxTokens: 600,
         commit: "Cap the output at 600 tokens",
-        at: "2025-12-29T15:50:00.000000000Z",
+        at: "2026-10-29T15:50:00.000000000Z",
       },
     ],
   },
@@ -737,7 +737,7 @@ import type { Dashboard, Widget, WidgetQuery } from "@/lib/dashboards/types";
 
 /** A fixture user (`fixtures/api/static/dashboard.json`). */
 const AUTHOR = "01900000-0000-7000-8000-000000000100";
-const CREATED_AT = "2026-11-24T09:00:00.000000000Z";
+const CREATED_AT = "2026-11-10T09:00:00.000000000Z";
 
 export const STORY_DASHBOARD_IDS = {
   answerQuality: "01900000-0000-7000-8000-000000570401",
@@ -905,7 +905,7 @@ export function storyDashboards(): Dashboard[] {
 }
 ```
 
-2. Create `web/src/mocks/story-dashboards.test.ts` (imports: `beforeEach, expect, it` from vitest; `createDataset`, `visibleTraces` from `@/mocks/generated/dataset`; `largeHandlers` from `@/mocks/generated/handlers`; `server` from `@/mocks/node`; `storyDashboards`, `STORY_DASHBOARD_IDS` from `@/mocks/story-dashboards`; `validateDashboard` from `@/lib/dashboards/validate`; `dashboardHandlers`, `seedDashboards` from `@/mocks/dashboards`; `Schema` from `@/api/types`). Constants: `NOW = Date.parse("2026-11-19T12:00:00.000Z")`, `DAY_MS = 86_400_000`, `PROJECT = \`${location.origin}/api/v1/projects/acme%2Fsupport-bot\``, range `from = NOW - 30 DAY`, `to = NOW + DAY`. Build `const dataset = createDataset({ seed: 1, now: NOW, traces: 5000 })` once at module level. Helper `ask(widget, shape)` posts `{ from, to, shape, bucket: "1d" (series only), query: widget.query, compare: true (number total only) }` to `${PROJECT}/dashboards/query` and returns `{ status, json }`. A `beforeEach` registers `server.use(...largeHandlers(dataset))`.
+2. Create `web/src/mocks/story-dashboards.test.ts` (imports: `beforeEach, expect, it` from vitest; `createDataset`, `visibleTraces` from `@/mocks/generated/dataset`; `largeHandlers` from `@/mocks/generated/handlers`; `server` from `@/mocks/node`; `storyDashboards`, `STORY_DASHBOARD_IDS` from `@/mocks/story-dashboards`; `validateDashboard` from `@/lib/dashboards/validate`; `dashboardHandlers`, `seedDashboards` from `@/mocks/dashboards`; `Schema` from `@/api/types`). Constants: `NOW = Date.parse("2026-11-19T12:00:00.000Z")`, `DAY_MS = 86_400_000`, `PROJECT = \`${location.origin}/api/v1/projects/acme%2Fsupport-bot\``, range `from = new Date(NOW - 30 * DAY_MS).toISOString()`, `to = new Date(NOW + DAY_MS).toISOString()` (the handler `Date.parse`s them). Build `const dataset = createDataset({ seed: 1, now: NOW, traces: 5000 })` once at module level. Helper `ask(widget, shape)` posts `{ from, to, shape, bucket: "1d" (series only), query: widget.query, compare: true (number total only) }` to `${PROJECT}/dashboards/query` and returns `{ status, json }`. A `beforeEach` registers `server.use(...largeHandlers(dataset))`.
 3. Run the tests below.
 
 **Tests** (all in `story-dashboards.test.ts`):
@@ -1238,7 +1238,7 @@ No other file. Do not edit `fixtures/api/static/annotation-queue*.json`: the Rus
         ran = [];
       }
       ```
-2. **Types and helpers.** Put this after `newConversation` (the `scriptedTitle`, `scriptedEvents`, `scriptedToolRows` and `scriptedMessages` stay where they are, unchanged):
+2. **Types and helpers.** Put the type declarations and the helpers (`Fields`, `StreamEvent`, `StoredMessage`, `Script`, `stamp`, `placed`, `storedMessages`, `isFields`, `readTurnRequest`) after `newConversation`, and `DEFAULT_SCRIPT` after `scriptedMessages()` (it reads `scriptedTitle`, declared after `newConversation`; using it earlier fails to load) (the `scriptedTitle`, `scriptedEvents`, `scriptedToolRows` and `scriptedMessages` stay where they are, unchanged):
    ```ts
    type Fields = Record<string, unknown>;
    type StreamEvent = { event: string; data: unknown };
@@ -1342,7 +1342,7 @@ No other file. Do not edit `fixtures/api/static/annotation-queue*.json`: the Rus
          event: "tool_call",
          data: { id: CALL_ID, name: spec.call.name, arguments: spec.call.arguments },
        },
-       { event: "tool_result", data: { id: CALL_ID, ok: true, summary: summaryOf(spec) } },
+       { event: "tool_result", data: { id: CALL_ID, ok: true, summary: turnSummaryOf(spec) } },
        ...(spec.draft === undefined
          ? []
          : [
@@ -1399,7 +1399,7 @@ No other file. Do not edit `fixtures/api/static/annotation-queue*.json`: the Rus
              name: spec.call.name,
              ok: true,
              result: spec.result,
-             ...summaryOf(spec),
+             ...turnSummaryOf(spec),
              stubbed: false,
            },
            ...(spec.draft === undefined
@@ -1900,3 +1900,10 @@ No other file. P5 runs on the plan's branch after P0 to P4 are merged (at least 
 
 1. **`support-reply` keeps its fixture labels** (`latest` and `staging` on v2). No override: the picture doesn't need `production`.
 2. **Measure labels may differ between P2's dashboards and P4's draft cards.** The cards show titles only, and the titles, ids, layouts and filters agree. That is accepted.
+3. **The cold review's points (2026-11-25), settled:**
+   - P1: every route that looks up a story prompt (`prompts/:prompt`, its versions, version, label events, metrics) returns `undefined` when `storyPrompt()` is undefined, so other prompts fall through to the fixtures and the manifest.
+   - P4: the step-3 helper is `turnSummaryOf`, distinct from step 5's `summaryOf(detail)`.
+   - P4: the search rows' extra trace ids and the coding answer's "One" are illustrative and accepted.
+   - P3: the hero traces already carry `tests_pass` and `schema_valid` scores (source `check`); the new definitions colour them, which is intended.
+   - P5 step 8: start the dev server with `./node_modules/.bin/vite` from `web/` (not `pnpm exec`), so the pid you record is vite's, and stop that pid.
+   - For M15: the playground picks the story answer from `source.prompt.name`, so the story shots open `?prompt=<name>&version=<n>`, not `?trace=&span=`; and they type the variables.
