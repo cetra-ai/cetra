@@ -88,6 +88,12 @@ pub(crate) fn span_kind(
 ///
 /// Prompt Flow (`span_type`, R-PF-1), Langflow (`trace_type`, `flow_id`, R-LF-1)
 /// and n8n (span name, R-N8N-2, R-N8N-3) decide on their own scope only.
+///
+/// OpenLIT (R-OL-1, D-IN-26 item 11) and Promptfoo (R4, D-IN-26 item 11) also
+/// decide on their own scope only: OpenLIT's `gen_ai.operation.type` names the
+/// operation when `gen_ai.operation.name` did not (the rows above run first, so
+/// reaching this function means it did not decide); a Promptfoo grader span
+/// carries `gen_ai.evaluation.name`.
 fn scope_gated(bag: &mut AttrBag<'_>, span_name: &str, scope_name: &str) -> Option<SpanKind> {
     // Pipecat's conversation and turn spans (D-IN-5) name no operation.
     if scope_name == "pipecat.turn" && matches!(span_name, "conversation" | "turn") {
@@ -145,6 +151,24 @@ fn scope_gated(bag: &mut AttrBag<'_>, span_name: &str, scope_name: &str) -> Opti
             "node.execute" if !present(bag, "gen_ai.operation.name") => Some(SpanKind::Span),
             _ => None,
         };
+    }
+    // OpenLIT (R-OL-1, D-IN-26 item 11): Browser Use 0.x writes its agent and
+    // step spans with a non-standard `gen_ai.operation.name` (`run`, `step`) and
+    // the operation in `gen_ai.operation.type`. Unit-tested only.
+    if scope_name.starts_with("openlit.instrumentation.") {
+        return decide(bag, "gen_ai.operation.type", |text| {
+            Some(match text {
+                "invoke_agent" => SpanKind::Agent,
+                "execute_task" => SpanKind::Chain,
+                _ => return None,
+            })
+        });
+    }
+    // Promptfoo (R4, D-IN-26 item 11): the grader span of an assertion. Its
+    // `chat` child is decided by its operation name and keeps the tokens. The
+    // key is peeked, not consumed.
+    if scope_name == "promptfoo.providers" && present(bag, "gen_ai.evaluation.name") {
+        return Some(SpanKind::Evaluator);
     }
     if !scope_name.starts_with("mirascope") {
         return None;
@@ -623,6 +647,75 @@ mod tests {
             SpanKind::Span
         );
         assert_eq!(bag.state("mirascope.type"), Some(Use::Unread));
+    }
+
+    #[test]
+    fn openlit_operation_type_decides_only_when_the_name_did_not() {
+        // Browser Use 0.x (R-OL-1): `run` and `step` are not standard names.
+        for (text, kind) in [
+            ("invoke_agent", SpanKind::Agent),
+            ("execute_task", SpanKind::Chain),
+        ] {
+            let attrs = [
+                string_attr("gen_ai.operation.name", "run"),
+                string_attr("gen_ai.operation.type", text),
+            ];
+            let mut bag = AttrBag::new(&attrs, &mut Warnings::default());
+            assert_eq!(
+                span_kind(&mut bag, "", "openlit.instrumentation.browser_use", &[]),
+                kind,
+                "{text}"
+            );
+            assert_eq!(bag.state("gen_ai.operation.type"), Some(Use::Consumed));
+            // The unmapped operation name decides nothing and stays unread.
+            assert_eq!(bag.state("gen_ai.operation.name"), Some(Use::Unread));
+        }
+        // A standard operation name decides first.
+        let attrs = [
+            string_attr("gen_ai.operation.name", "chat"),
+            string_attr("gen_ai.operation.type", "invoke_agent"),
+        ];
+        assert_eq!(
+            kind_in("openlit.instrumentation.openai", &attrs),
+            SpanKind::Llm
+        );
+        // An unmapped type decides nothing, and falls to the model fallback.
+        let attrs = [
+            string_attr("gen_ai.operation.name", "run"),
+            string_attr("gen_ai.operation.type", "other"),
+        ];
+        let mut bag = AttrBag::new(&attrs, &mut Warnings::default());
+        assert_eq!(
+            span_kind(&mut bag, "", "openlit.instrumentation.browser_use", &[]),
+            SpanKind::Span
+        );
+        assert_eq!(bag.state("gen_ai.operation.type"), Some(Use::Unread));
+        // Another scope does not read the type.
+        let attrs = [
+            string_attr("gen_ai.operation.name", "run"),
+            string_attr("gen_ai.operation.type", "invoke_agent"),
+        ];
+        assert_eq!(kind_in("browser_use", &attrs), SpanKind::Span);
+    }
+
+    #[test]
+    fn promptfoo_grader_spans_are_evaluators_only_on_its_scope() {
+        // R4: the grader span carries `gen_ai.evaluation.name`; the key is peeked.
+        let attrs = [string_attr("gen_ai.evaluation.name", "contains")];
+        let mut bag = AttrBag::new(&attrs, &mut Warnings::default());
+        assert_eq!(
+            span_kind(&mut bag, "", "promptfoo.providers", &[]),
+            SpanKind::Evaluator
+        );
+        assert_eq!(bag.state("gen_ai.evaluation.name"), Some(Use::Unread));
+        // Without the scope the key decides nothing.
+        assert_eq!(kind_in("", &attrs), SpanKind::Span);
+        // The grader's model call keeps its operation and is `llm`.
+        let attrs = [
+            string_attr("gen_ai.operation.name", "chat"),
+            string_attr("gen_ai.request.model", "gpt-4o-mini"),
+        ];
+        assert_eq!(kind_in("promptfoo.providers", &attrs), SpanKind::Llm);
     }
 
     #[test]

@@ -46,6 +46,7 @@ const VERCEL_CONTEXT: &str = "ai.settings.context.";
 /// Sorted (test `framework_names_are_sorted`).
 const FRAMEWORK_NAMES: &[&str] = &[
     "autogen",
+    "browser_use",
     "gcp.vertex.agent",
     "microsoft.agent_framework",
     "spring_ai",
@@ -1218,6 +1219,31 @@ mod tests {
         let (fields, bag) = filled(&attrs, &[]);
         assert_eq!(fields.provider.as_deref(), Some("openai"));
         assert_eq!(bag.state("gen_ai.provider.name"), Some(Use::Consumed));
+    }
+
+    #[test]
+    fn browser_use_is_a_framework_name_never_a_provider() {
+        // R-OL-3 (D-IN-15): OpenLIT writes `gen_ai.provider.name=browser_use`
+        // on its Browser Use spans. It is skipped and left unread.
+        for (key, value) in [
+            ("gen_ai.provider.name", "browser_use"),
+            ("gen_ai.provider.name", "Browser_Use"),
+            ("gen_ai.system", "browser_use"),
+        ] {
+            let attrs = [string_attr(key, value)];
+            let (fields, bag) = filled(&attrs, &[]);
+            assert_eq!(fields.provider, None, "{key}={value}");
+            assert_eq!(bag.state(key), Some(Use::Unread), "{key}={value}");
+        }
+        // The next source decides.
+        let attrs = [
+            string_attr("gen_ai.provider.name", "browser_use"),
+            string_attr("llm.provider", "openai"),
+        ];
+        let (fields, bag) = filled(&attrs, &[]);
+        assert_eq!(fields.provider.as_deref(), Some("openai"));
+        assert_eq!(bag.state("gen_ai.provider.name"), Some(Use::Unread));
+        assert_eq!(bag.state("llm.provider"), Some(Use::Consumed));
     }
 
     /// The endpoint rule over one span: the attributes, its kind and the provider
