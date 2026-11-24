@@ -386,138 +386,111 @@ const CODING_SHOWCASE: Showcase = {
   },
 };
 
-const RESEARCH_QUESTION =
-  "What are the current best practices to prevent CSV injection in exported files?";
-const RESEARCH_ANSWER = [
-  "Neutralize the cells a spreadsheet would read as a formula, and quote every field.",
-  "",
-  "- Prefix cells that start with `=`, `+`, `-` or `@` with a single quote (OWASP)",
-  "- Quote every field, and double the quotes inside it (RFC 4180)",
-].join("\n");
-const RESEARCH_QUERIES = [
-  "csv injection prevention",
-  "owasp csv injection",
-  "rfc 4180 quoting",
-  "spreadsheet formula injection export",
-  "csv injection escape single quote",
-] as const;
-const OWASP_CSV = {
-  title: "CSV Injection",
-  url: "https://owasp.org/www-community/attacks/CSV_Injection",
-};
-const RFC_4180 = {
-  title: "RFC 4180: Common Format and MIME Type for CSV Files",
-  url: "https://www.rfc-editor.org/rfc/rfc4180",
-};
+const VOICE_QUESTION = "Hi, can I move my dentist appointment to Friday afternoon?";
+const VOICE_ANSWER = "Sure. On Friday afternoon I have 2 pm or 4:30 pm. Which one works for you?";
 
-const RESEARCH_SHOWCASE: Showcase = {
+const VOICE_SHOWCASE: Showcase = {
   index: 5,
   ageMs: 180_000,
-  service: "research",
-  user: "user-021",
-  tags: [],
-  models: ["claude-sonnet-4-5", "gpt-4.1"],
+  service: "voice-agent",
+  user: "user-019",
+  tags: ["voice"],
+  models: ["gpt-4.1-mini", "gpt-4o-mini-transcribe", "gpt-4o-mini-tts"],
   scores: [
-    { name: "groundedness", source: "llm_judge", value: { data_type: "numeric", value: 0.95 } },
+    { name: "under_budget", source: "check", value: { data_type: "boolean", value: false } },
   ],
   spans: [
-    { name: "research-agent", kind: "agent", from: 0, to: 24_600 },
+    { name: "voice-agent", kind: "agent", from: 0, to: 3_100 },
+    { name: "detect end of turn", kind: "span", parent: 0, from: 0, to: 120 },
     {
-      name: "plan queries",
+      name: "speech to text",
       kind: "llm",
       parent: 0,
-      from: 100,
-      to: 1_900,
-      model: "gpt-4.1",
+      from: 130,
+      to: 520,
+      model: "gpt-4o-mini-transcribe",
       provider: "openai",
-      inputTokens: 820,
-      outputTokens: 140,
-      cost: 0.00276,
-      ttftMs: 450,
+      inputTokens: 310,
+      outputTokens: 22,
+      cost: 0.0003,
     },
-    { name: "search", kind: "chain", parent: 0, from: 1_950, to: 7_310 },
-    { name: "web_search", kind: "tool", parent: 2, from: 1_960, to: 5_200 },
-    { name: "web_search", kind: "tool", parent: 2, from: 1_960, to: 6_100 },
-    { name: "web_search", kind: "tool", parent: 2, from: 1_960, to: 4_700 },
-    { name: "web_search", kind: "tool", parent: 2, from: 1_960, to: 7_300 },
-    { name: "web_search", kind: "tool", parent: 2, from: 1_960, to: 5_600 },
-    { name: "read sources", kind: "chain", parent: 0, from: 7_350, to: 11_200 },
-    { name: "fetch_page", kind: "tool", parent: 8, from: 7_360, to: 9_800 },
-    { name: "fetch_page", kind: "tool", parent: 8, from: 7_360, to: 11_150 },
     {
-      name: "write report",
+      name: "detect intent",
       kind: "llm",
       parent: 0,
-      from: 11_250,
-      to: 23_900,
-      model: "claude-sonnet-4-5",
-      provider: "anthropic",
-      inputTokens: 14_200,
-      outputTokens: 1_650,
-      cost: 0.06735,
-      ttftMs: 900,
+      from: 530,
+      to: 880,
+      model: "gpt-4.1-mini",
+      provider: "openai",
+      inputTokens: 610,
+      outputTokens: 14,
+      cost: 0.00027,
+      ttftMs: 210,
     },
-    { name: "check citations", kind: "guardrail", parent: 0, from: 23_950, to: 24_500 },
+    { name: "check_availability", kind: "tool", parent: 0, from: 890, to: 2_110 },
+    {
+      name: "draft reply",
+      kind: "llm",
+      parent: 0,
+      from: 2_120,
+      to: 2_640,
+      model: "gpt-4.1-mini",
+      provider: "openai",
+      inputTokens: 980,
+      outputTokens: 46,
+      cost: 0.00047,
+      ttftMs: 180,
+    },
+    { name: "safety check", kind: "guardrail", parent: 0, from: 2_650, to: 2_700 },
+    {
+      name: "text to speech",
+      kind: "llm",
+      parent: 0,
+      from: 2_710,
+      to: 3_100,
+      model: "gpt-4o-mini-tts",
+      provider: "openai",
+      inputTokens: 46,
+      outputTokens: 820,
+      cost: 0.0098,
+      ttftMs: 90,
+    },
   ],
   story: {
-    inputPreview: RESEARCH_QUESTION,
-    outputPreview: firstLine(RESEARCH_ANSWER),
+    inputPreview: VOICE_QUESTION,
+    outputPreview: VOICE_ANSWER,
     payloads: [
-      { input: textPayload(RESEARCH_QUESTION), output: textPayload(RESEARCH_ANSWER) },
+      { input: textPayload(VOICE_QUESTION), output: textPayload(VOICE_ANSWER) },
+      {
+        input: jsonPayload({ speech_ms: 2_400, silence_ms: 600 }),
+        output: jsonPayload({ end_of_turn: true }),
+      },
+      {
+        input: jsonPayload({ audio: "caller-turn-3.wav", duration_ms: 2_400, language: "en" }),
+        output: textPayload(VOICE_QUESTION),
+      },
       chatPayload(
-        "You are a research agent. Write the web searches you need, one per line.",
-        RESEARCH_QUESTION,
-        RESEARCH_QUERIES.join("\n"),
-      ),
-      { input: jsonPayload({ queries: 5 }), output: jsonPayload({ results: 5 }) },
-      toolPayload(
-        "web_search",
-        { query: RESEARCH_QUERIES[0] },
-        jsonPayload({ results: [OWASP_CSV] }),
+        "Classify the caller's request: book, reschedule, cancel or question. Reply with JSON.",
+        VOICE_QUESTION,
+        '{"intent": "reschedule", "day": "friday", "part": "afternoon"}',
       ),
       toolPayload(
-        "web_search",
-        { query: RESEARCH_QUERIES[1] },
-        jsonPayload({ results: [OWASP_CSV] }),
-      ),
-      toolPayload(
-        "web_search",
-        { query: RESEARCH_QUERIES[2] },
-        jsonPayload({ results: [RFC_4180] }),
-      ),
-      toolPayload(
-        "web_search",
-        { query: RESEARCH_QUERIES[3] },
-        jsonPayload({ results: [OWASP_CSV] }),
-      ),
-      toolPayload(
-        "web_search",
-        { query: RESEARCH_QUERIES[4] },
-        jsonPayload({ results: [OWASP_CSV] }),
-      ),
-      { input: jsonPayload({ pages: 2 }), output: jsonPayload({ pages: 2, tokens: 12_400 }) },
-      toolPayload(
-        "fetch_page",
-        { url: OWASP_CSV.url },
-        textPayload(
-          "Cells that begin with =, +, - or @ can run as formulas when the file is opened in a spreadsheet. Prefix them with a single quote, and quote every cell.",
-        ),
-      ),
-      toolPayload(
-        "fetch_page",
-        { url: RFC_4180.url },
-        textPayload(
-          "Fields that contain a line break, a double quote or a comma should be enclosed in double quotes. A double quote inside a field is escaped with a second double quote.",
-        ),
+        "check_availability",
+        { clinic: "north", day: "friday", after: "12:00" },
+        jsonPayload({ slots: ["14:00", "16:30"], latency_ms: 1_220 }),
       ),
       chatPayload(
-        "Answer from the sources only, and name the source of each claim.",
-        RESEARCH_QUESTION,
-        RESEARCH_ANSWER,
+        "You are a receptionist on the phone. Answer in one or two short sentences.",
+        `${VOICE_QUESTION}\n\nFree slots: 14:00, 16:30`,
+        VOICE_ANSWER,
       ),
       {
-        input: jsonPayload({ citations: 2, sources: [OWASP_CSV.url, RFC_4180.url] }),
-        output: jsonPayload({ passed: true, unsupported_claims: 0 }),
+        input: jsonPayload({ text: VOICE_ANSWER }),
+        output: jsonPayload({ passed: true, reasons: [] }),
+      },
+      {
+        input: textPayload(VOICE_ANSWER),
+        output: jsonPayload({ audio: "reply-turn-3.wav", duration_ms: 3_900, first_audio_ms: 90 }),
       },
     ],
   },
@@ -625,7 +598,7 @@ const EXTRACTION_SHOWCASE: Showcase = {
 export const SHOWCASES: readonly Showcase[] = [
   SUPPORT_SHOWCASE,
   CODING_SHOWCASE,
-  RESEARCH_SHOWCASE,
+  VOICE_SHOWCASE,
   EXTRACTION_SHOWCASE,
 ];
 

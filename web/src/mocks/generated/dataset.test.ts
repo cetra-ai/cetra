@@ -555,12 +555,22 @@ it("fails the coding agent's first test run", () => {
   expect(passedDetail?.events).toEqual([]);
 });
 
-it("runs the research agent's five searches in parallel", () => {
-  const { spans } = scenarioOf(5);
-  const searches = spans.filter((row) => row.span.name === "web_search");
-  expect(searches.length).toBe(5);
-  const starts = new Set(searches.map((row) => row.span.start_time));
-  expect(starts.size).toBe(1);
+it("makes the voice agent's availability check its slowest span", () => {
+  const { trace, spans } = scenarioOf(5);
+  expect(trace.name).toBe("voice-agent");
+  expect(trace.duration_ns).toBe(3_100_000_000);
+  const slowest = spans
+    .slice(1)
+    .reduce((best, row) => (row.span.duration_ns > best.span.duration_ns ? row : best));
+  expect(slowest.span.name).toBe("check_availability");
+  expect(spans.indexOf(slowest)).toBe(4);
+  expect(slowest.span.span_id).toBe("0000000500000005");
+});
+
+it("scores the voice agent's reply over its latency budget", () => {
+  const { trace } = scenarioOf(5);
+  expect(trace.scores.map((score) => score.name)).toEqual(["under_budget"]);
+  expect(trace.scores[0]?.value).toEqual({ data_type: "boolean", value: false });
 });
 
 it("fails the invoice's first schema check and passes the second", () => {
