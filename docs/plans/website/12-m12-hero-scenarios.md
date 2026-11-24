@@ -20,7 +20,7 @@ The hero shows one hand-written trace, a support agent (M11). One support bot ma
 When it's done:
 - Traces 4, 5 and 6 of every generated dataset are the hand-written `coding-agent`, `research-agent` and `extract-invoice` traces, 150, 180 and 210 seconds old. Trace 3 stays the support agent.
   - Every other trace is unchanged: each trace's random numbers come from `mix(seed, index)`.
-  - The four hand-written traces sit near the top of the trace list.
+  - The four hand-written traces are within the trace list's first loaded page (100 rows).
 - Each new trace has hand-written payloads on every span, so no support-bot text shows inside it.
 - `website/screenshots.json` has three new hero shots, one per new trace, captured like `marketing-trace-view`.
 - The hero shows tabs above its picture: Support agent, Coding agent, Research agent, Document extraction.
@@ -49,6 +49,8 @@ A planner's reading, not asked:
 - The coding agent's first `run_tests` span has status `error`, as a real failing tool call would.
 - So the trace's status is `error` and its error count is 1. Spec 01 says a trace is `error` when any span errored.
 - The trace header then shows a red status, which is honest: the agent recovered, but one call failed.
+
+No `CHANGELOG.md` line: the product doesn't change. The mock dataset only feeds the UI's tests, the screenshots and the demo's sample data, and the site isn't in the changelog.
 
 ## Versions
 
@@ -84,6 +86,8 @@ They run one after the other.
      to: number;
      /** Absent: "ok". */
      status?: "error";
+     /** The span's `status_message`; set on error spans. */
+     statusMessage?: string;
      model?: string;
      provider?: string;
      inputTokens?: number;
@@ -121,7 +125,7 @@ They run one after the other.
      story?: { inputPreview: string; outputPreview: string; payloads: readonly ShowcasePayload[] };
    };
    ```
-   `story.payloads[i]` belongs to `spans[i]`. The two arrays have the same length; a test checks it.
+   `story.payloads[i]` belongs to `spans[i]`. The two arrays have the same length; a test checks it. Keep `Showcase`, `ShowcaseSpan` and `ShowcasePayload` unexported; a test that needs the type writes `(typeof SHOWCASES)[number]`.
 
 2. **Payload helpers.** Add these after `textPayload`, exactly (Biome may reformat):
    ```ts
@@ -202,7 +206,7 @@ They run one after the other.
        { name: "attempt 1", kind: "chain", parent: 0, from: 2_660, to: 10_240 },
        { name: "write patch", kind: "llm", parent: 5, from: 2_670, to: 6_900, model: "claude-sonnet-4-5", provider: "anthropic", inputTokens: 5_400, outputTokens: 620, cost: 0.0255, ttftMs: 610 },
        { name: "apply_patch", kind: "tool", parent: 5, from: 6_920, to: 7_010 },
-       { name: "run_tests", kind: "tool", parent: 5, from: 7_030, to: 10_230, status: "error" },
+       { name: "run_tests", kind: "tool", parent: 5, from: 7_030, to: 10_230, status: "error", statusMessage: "1 failed, 47 passed" },
        { name: "attempt 2", kind: "chain", parent: 0, from: 10_260, to: 17_060 },
        { name: "fix failing test", kind: "llm", parent: 9, from: 10_270, to: 13_700, model: "claude-sonnet-4-5", provider: "anthropic", inputTokens: 7_100, outputTokens: 380, cost: 0.027, ttftMs: 640 },
        { name: "apply_patch", kind: "tool", parent: 9, from: 13_720, to: 13_790 },
@@ -499,6 +503,8 @@ They run one after the other.
      - `metadata` is `showcase.user ? userTraceMetadata(showcase.user) : {}`.
      - `user_id` is set only when `showcase.user` is set, using `...(showcase.user ? { user_id: showcase.user } : {})`.
      - `environment` stays `"production"`, `release` `"v1.5.0"`, and there is still no `session_id`.
+   - Update its doc comment: the sums run over `showcase.spans`.
+   - The new score names (`tests_pass`, `groundedness`, `schema_valid`) have no entry in `SCORE_DEFINITIONS` (`web/src/mocks/handlers.ts`), so they show without a tone colour. That is accepted: don't add definitions (`handlers.test.ts` pins the list).
 
 5. **Previews.** In `createDataset`, change the line that builds `traces` to the code below. `timed` keeps the indices of `bases`; check that `spreadSessionTurns` returns a copy in the same order.
    ```ts
@@ -513,7 +519,8 @@ They run one after the other.
 6. **Tree.**
    - In `buildDetail`, replace the `SHOWCASE_INDEX` check with the same `showcaseAt` pattern, calling `showcaseDetail(showcase, index, trace)`.
    - In `showcaseDetail`, read `showcase.spans` instead of `SHOWCASE_SPANS`.
-   - Set `service_name: showcase.service` and `status: row.status ?? "ok"`.
+   - Set `service_name: showcase.service` and `status: row.status ?? "ok"`, and add `...(row.statusMessage ? { status_message: row.statusMessage } : {})` (generic error spans carry `status_message: "tool failed"` the same way).
+   - Update its doc comment: the spans come in `showcase.spans` order.
    - Nothing else changes.
 
 7. **Payloads.**
@@ -566,8 +573,10 @@ They run one after the other.
      - for every span, `dataset.spanDetail(traceId, spanId)` has `input` and `output` deep-equal to `story.payloads[position]`, and `truncated` equal to `[]`.
    - **Add** `"fails the coding agent's first test run"`:
      - trace 4 has `status` `"error"` and `error_count` 1;
-     - its span at position 8 (`run_tests`) has status `"error"`, and exactly one event, `exception`, whose `attributes["exception.message"]` is `"1 failed, 47 passed"`;
+     - its span at position 8 (`run_tests`) has status `"error"`, `status_message` `"1 failed, 47 passed"`, and exactly one event, named `exception`, with `expect(event.attributes).toMatchObject({ "exception.message": "1 failed, 47 passed" })` (`attributes` is typed `unknown`, so don't index it);
      - the span at position 12 (`run_tests`) has status `"ok"` and no event.
+   - Rows taken by position (`spans[8]`, `spans[12]`, …) can be `undefined` to the type checker: guard them as the existing showcase tests do (`if (!row) throw new Error(...)`).
+   - The other existing tests (those with `traces: 3`, `traces: 4`, and the session tests) stay valid unchanged: the showcases have no `session_id`, and `traces: 4` ends at index 3. Don't edit them.
    - **Add** `"runs the research agent's five searches in parallel"`: trace 5's five `web_search` spans share one `start_time`.
    - **Add** `"fails the invoice's first schema check and passes the second"`: trace 6's span at position 4 has output `passed: false`, and the one at position 6 has `passed: true`.
 
@@ -606,7 +615,7 @@ They run one after the other.
    - show no truncation badge;
    - show `run_tests` in red, in the coding agent's shot.
 
-   The other shots may change only in rows, counts and charts. Report any that changed another way: a different page, an error or an empty state.
+   `docs-screenshots` rewrites every PNG and anti-aliasing alone can change the bytes, so `git status` lists most shots: judge them by looking, not by the list. The other shots may change only in rows, counts and charts. Report any that changed another way: a different page, an error or an empty state. The commit may touch about 25 PNGs.
 4. If a new shot cuts off its root's Output card at the bottom, report it with `QUESTION:`. Don't change the viewport: all four hero shots share one size.
 
 **Done when:** `just check-docs` passes.
@@ -671,7 +680,7 @@ They run one after the other.
 3. Add to the `<style>` block:
    ```css
    .visual :global(.tablist) {
-     justify-content: center;
+     justify-content: safe center;
      border-bottom: 0;
      margin-bottom: var(--space-4);
    }
@@ -682,7 +691,7 @@ They run one after the other.
      color: var(--fg-muted);
    }
    ```
-   `Tabs.astro` sets `overflow-x: auto` on the tab list, so on phones the four tabs scroll sideways instead of overflowing the page.
+   `Tabs.astro` sets `overflow-x: auto` on the tab list, so on phones the four tabs scroll sideways instead of overflowing the page. `safe center` keeps the first tab reachable when the list overflows; plain `center` would clip it on the left.
 4. Build the site (`pnpm --dir website exec astro build`), then run the `pageshots.mjs` tool from the README conventions on `/`. At 1440 px:
    - the four tabs are centred above the picture;
    - "Support agent" is selected;
@@ -693,7 +702,8 @@ They run one after the other.
    2. Click "Coding agent".
    3. Check that its panel is visible, the other three are hidden, and its `img` has loaded (`naturalWidth > 0`).
    4. Check that, before the click, the coding picture's `img` had not loaded (`complete` false or `naturalWidth` 0).
-   5. Stop the server.
+   5. At a 390 px wide viewport, check that the "Support agent" tab's left edge is not left of the tab list's left edge (`getBoundingClientRect()`), so the first tab is fully visible.
+   6. Stop the server.
 
    Report what you saw.
 6. Set the M12 row's status in `docs/plans/website/README.md` to `done (E1–E3)`.
