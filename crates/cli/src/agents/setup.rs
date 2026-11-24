@@ -15,6 +15,7 @@ use serde_json::{Map, Value, json};
 use super::codex;
 use super::hook::run_with_timeout;
 use super::openclaw;
+use super::opencode;
 use super::pi;
 use super::qwen_code;
 use super::{Agent, AgentsFile, Paths, SetupArgs};
@@ -55,8 +56,9 @@ pub(crate) fn setup(args: &SetupArgs, paths: &Paths, out: &mut dyn Write) -> any
         anyhow::bail!("the key must be a project secret key (sk-cetra-…) with the ingest scope");
     }
     // agents.toml is saved last, and only when the agent's settings were written.
-    let agents_file =
-        (!matches!(args.agent, Agent::Copilot | Agent::Pi) && !args.print).then(|| AgentsFile {
+    let agents_file = (!matches!(args.agent, Agent::Copilot | Agent::Pi | Agent::OpenCode)
+        && !args.print)
+        .then(|| AgentsFile {
             url: url.clone(),
             key: key.to_owned(),
             user: user_for(args.user.as_deref(), &[]),
@@ -76,6 +78,7 @@ pub(crate) fn setup(args: &SetupArgs, paths: &Paths, out: &mut dyn Write) -> any
             &openclaw::installed_version,
             &openclaw::run_install,
         )?,
+        Agent::OpenCode => opencode::setup(args, &url, paths, out)?,
     }
     if let Some(file) = agents_file {
         // Saving replaces the server and key every agent's `remove` compares against; a warning
@@ -120,6 +123,7 @@ pub(crate) fn remove(agent: Agent, paths: &Paths, out: &mut dyn Write) -> anyhow
         }
         Agent::Pi => pi::remove(paths, out),
         Agent::OpenClaw => openclaw::remove(paths, out),
+        Agent::OpenCode => opencode::remove(paths, out),
     }
 }
 
@@ -184,7 +188,7 @@ fn hook_timeout(agent: Agent) -> Option<u64> {
     match agent {
         Agent::ClaudeCode | Agent::QwenCode => Some(5),
         Agent::GeminiCli => Some(5000),
-        Agent::Codex | Agent::Copilot | Agent::Pi | Agent::OpenClaw => None,
+        Agent::Codex | Agent::Copilot | Agent::Pi | Agent::OpenClaw | Agent::OpenCode => None,
     }
 }
 

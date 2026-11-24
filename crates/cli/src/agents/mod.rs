@@ -1,11 +1,12 @@
 //! `cetra agents`: connects coding agents (Claude Code, Codex, Gemini CLI, Copilot, Pi, Qwen Code,
-//! OpenClaw) to cetra (track CA, M4; Pi, Qwen Code and OpenClaw in track IN, M7). `setup` writes the agent's user settings and `remove` takes
+//! OpenClaw, OpenCode) to cetra (track CA, M4; Pi, Qwen Code, OpenClaw and OpenCode in track IN, M7). `setup` writes the agent's user settings and `remove` takes
 //! them back; `hook` posts a session's repository, branch and person. `agents.toml` holds the
 //! server, key and person the hook posts with.
 
 mod codex;
 pub(crate) mod hook;
 mod openclaw;
+mod opencode;
 mod pi;
 mod qwen_code;
 mod setup;
@@ -41,6 +42,9 @@ pub(crate) enum Agent {
     /// OpenClaw: setup installs its diagnostics plugin and merges its config (D-IN-28 items 5, 6).
     #[value(name = "openclaw")]
     OpenClaw,
+    /// OpenCode: cetra's plugin and its config file are written by setup; no hook (D-IN-29).
+    #[value(name = "opencode")]
+    OpenCode,
 }
 
 impl Agent {
@@ -53,6 +57,7 @@ impl Agent {
             Self::Pi => "pi",
             Self::QwenCode => "qwen-code",
             Self::OpenClaw => "openclaw",
+            Self::OpenCode => "opencode",
         }
     }
 }
