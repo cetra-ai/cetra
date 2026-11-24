@@ -147,6 +147,33 @@ Use this page to find how to connect your framework, provider or instrumentation
 - [Vercel AI SDK](https://cetra.sh/docs/integrations/vercel-ai-sdk/): Versions 4 to 7.
 - [VoltAgent](https://cetra.sh/docs/integrations/voltagent/): Agent runs, model calls and tools, with the session.
 
+## Apps and tools
+
+| Integration | Python | TypeScript | How | Tested against |
+|---|---|---|---|---|
+| [Browser Use](https://cetra.sh/docs/integrations/browser-use/) | ✓ | — | Pydantic AI's own OpenTelemetry spans | captured |
+| [Cleanlab](https://cetra.sh/docs/integrations/cleanlab/) | ✓ | — | `cetra.score` with Cleanlab's trustworthiness score | setup only |
+| [Gradio](https://cetra.sh/docs/integrations/gradio/) | ✓ | — | the instrumentation of the client library | setup only |
+| [Harbor and Terminal-Bench](https://cetra.sh/docs/integrations/harbor/) | ✓ | — | Harbor's OTLP protobuf export, sent as files | setup only |
+| [Langflow](https://cetra.sh/docs/integrations/langflow/) | ✓ | — | the Traceloop export that Langflow includes | captured |
+| [LiveKit Agents](https://cetra.sh/docs/integrations/livekit-agents/) | ✓ | — | LiveKit's own OpenTelemetry spans | captured |
+| [LobeChat](https://cetra.sh/docs/integrations/lobechat/) | — | — | LobeChat's telemetry variables | setup only |
+| [MCP](https://cetra.sh/docs/integrations/mcp/) | ✓ | — | the MCP SDK's own OpenTelemetry spans | captured |
+| [n8n](https://cetra.sh/docs/integrations/n8n/) | — | ✓ | n8n's OpenTelemetry export | captured |
+| [Pipecat](https://cetra.sh/docs/integrations/pipecat/) | ✓ | — | Pipecat's built-in tracing | captured |
+| [Prompt Flow](https://cetra.sh/docs/integrations/prompt-flow/) | ✓ | — | Prompt Flow's own OpenTelemetry setup | captured |
+| [Promptfoo](https://cetra.sh/docs/integrations/promptfoo/) | — | ✓ | Promptfoo's own OpenTelemetry export | captured |
+| [Stagehand](https://cetra.sh/docs/integrations/stagehand/) | — | ✓ | the `telemetry` option of the Stagehand SDK | setup only |
+
+- [Browser Use](https://cetra.sh/docs/integrations/browser-use/): Browser agent runs, model calls and tools.
+- [Langflow](https://cetra.sh/docs/integrations/langflow/): Flow runs, components and model calls.
+- [LiveKit Agents](https://cetra.sh/docs/integrations/livekit-agents/): Agent sessions, turns, model calls and tools.
+- [MCP](https://cetra.sh/docs/integrations/mcp/): Tool calls across MCP clients and servers.
+- [n8n](https://cetra.sh/docs/integrations/n8n/): Workflow runs, nodes and the tokens of AI nodes.
+- [Pipecat](https://cetra.sh/docs/integrations/pipecat/): Conversations, turns and each model call.
+- [Prompt Flow](https://cetra.sh/docs/integrations/prompt-flow/): Traced functions and their OpenAI calls.
+- [Promptfoo](https://cetra.sh/docs/integrations/promptfoo/): Eval cases, provider calls and graders.
+
 ## Coding agents
 
 | Integration | Python | TypeScript | How | Tested against |

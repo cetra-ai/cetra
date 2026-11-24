@@ -296,6 +296,28 @@ export default defineConfig({
                   ],
                 },
                 {
+                  label: "Apps and tools",
+                  collapsed: true,
+                  items: [
+                    { label: "Browser Use", link: "/docs/integrations/browser-use/" },
+                    { label: "Cleanlab", link: "/docs/integrations/cleanlab/" },
+                    { label: "Gradio", link: "/docs/integrations/gradio/" },
+                    {
+                      label: "Harbor and Terminal-Bench",
+                      link: "/docs/integrations/harbor/",
+                    },
+                    { label: "Langflow", link: "/docs/integrations/langflow/" },
+                    { label: "LiveKit Agents", link: "/docs/integrations/livekit-agents/" },
+                    { label: "LobeChat", link: "/docs/integrations/lobechat/" },
+                    { label: "MCP", link: "/docs/integrations/mcp/" },
+                    { label: "n8n", link: "/docs/integrations/n8n/" },
+                    { label: "Pipecat", link: "/docs/integrations/pipecat/" },
+                    { label: "Prompt Flow", link: "/docs/integrations/prompt-flow/" },
+                    { label: "Promptfoo", link: "/docs/integrations/promptfoo/" },
+                    { label: "Stagehand", link: "/docs/integrations/stagehand/" },
+                  ],
+                },
+                {
                   label: "Coding agents",
                   items: [
                     { label: "Claude Code", link: "/docs/integrations/claude-code/" },

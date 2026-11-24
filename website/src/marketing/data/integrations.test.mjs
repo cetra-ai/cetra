@@ -13,6 +13,7 @@ test("parses the real page", () => {
     "Providers",
     "Gateways",
     "Frameworks",
+    "Apps and tools",
     "Coding agents",
     "Instrumentation libraries",
     MIGRATING_GROUP,

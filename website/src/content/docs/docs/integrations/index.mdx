@@ -154,6 +154,35 @@ Use this page to find how to connect your framework, provider or instrumentation
   <LinkCard title="VoltAgent" description="Agent runs, model calls and tools, with the session." href="/docs/integrations/voltagent/" />
 </CardGrid>
 
+## Apps and tools
+
+| Integration | Python | TypeScript | How | Tested against |
+|---|---|---|---|---|
+| [Browser Use](/docs/integrations/browser-use/) | ✓ | — | Pydantic AI's own OpenTelemetry spans | captured |
+| [Cleanlab](/docs/integrations/cleanlab/) | ✓ | — | `cetra.score` with Cleanlab's trustworthiness score | setup only |
+| [Gradio](/docs/integrations/gradio/) | ✓ | — | the instrumentation of the client library | setup only |
+| [Harbor and Terminal-Bench](/docs/integrations/harbor/) | ✓ | — | Harbor's OTLP protobuf export, sent as files | setup only |
+| [Langflow](/docs/integrations/langflow/) | ✓ | — | the Traceloop export that Langflow includes | captured |
+| [LiveKit Agents](/docs/integrations/livekit-agents/) | ✓ | — | LiveKit's own OpenTelemetry spans | captured |
+| [LobeChat](/docs/integrations/lobechat/) | — | — | LobeChat's telemetry variables | setup only |
+| [MCP](/docs/integrations/mcp/) | ✓ | — | the MCP SDK's own OpenTelemetry spans | captured |
+| [n8n](/docs/integrations/n8n/) | — | ✓ | n8n's OpenTelemetry export | captured |
+| [Pipecat](/docs/integrations/pipecat/) | ✓ | — | Pipecat's built-in tracing | captured |
+| [Prompt Flow](/docs/integrations/prompt-flow/) | ✓ | — | Prompt Flow's own OpenTelemetry setup | captured |
+| [Promptfoo](/docs/integrations/promptfoo/) | — | ✓ | Promptfoo's own OpenTelemetry export | captured |
+| [Stagehand](/docs/integrations/stagehand/) | — | ✓ | the `telemetry` option of the Stagehand SDK | setup only |
+
+<CardGrid>
+  <LinkCard title="Browser Use" description="Browser agent runs, model calls and tools." href="/docs/integrations/browser-use/" />
+  <LinkCard title="Langflow" description="Flow runs, components and model calls." href="/docs/integrations/langflow/" />
+  <LinkCard title="LiveKit Agents" description="Agent sessions, turns, model calls and tools." href="/docs/integrations/livekit-agents/" />
+  <LinkCard title="MCP" description="Tool calls across MCP clients and servers." href="/docs/integrations/mcp/" />
+  <LinkCard title="n8n" description="Workflow runs, nodes and the tokens of AI nodes." href="/docs/integrations/n8n/" />
+  <LinkCard title="Pipecat" description="Conversations, turns and each model call." href="/docs/integrations/pipecat/" />
+  <LinkCard title="Prompt Flow" description="Traced functions and their OpenAI calls." href="/docs/integrations/prompt-flow/" />
+  <LinkCard title="Promptfoo" description="Eval cases, provider calls and graders." href="/docs/integrations/promptfoo/" />
+</CardGrid>
+
 ## Coding agents
 
 | Integration | Python | TypeScript | How | Tested against |
