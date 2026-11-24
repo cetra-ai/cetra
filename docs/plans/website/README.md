@@ -16,7 +16,7 @@ The design is `docs/website/00-design.md`. It has fifteen milestones, M1–M15, 
 | M10 Focused screenshots | [`10-m10-focused-shots.md`](10-m10-focused-shots.md) | done (Z1–Z2) |
 | M11 Showcase trace | [`11-m11-showcase-trace.md`](11-m11-showcase-trace.md) | done (T1–T2) |
 | M12 Hero scenarios | [`12-m12-hero-scenarios.md`](12-m12-hero-scenarios.md) | done (E1–E3) |
-| M13 Voice story, trace list, issues, alerts | not planned yet | — |
+| M13 Voice story, trace list, issues, alerts | [`13-m13-voice-issues-alerts.md`](13-m13-voice-issues-alerts.md) | planned (V1, L1, S1, V2) |
 | M14 Prompts, dashboards, queues, assistant | not planned yet | — |
 | M15 Story screenshots and switcher | not planned yet | — |
 
