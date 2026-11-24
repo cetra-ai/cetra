@@ -525,7 +525,7 @@ The IN5.3 capture showed what Bifrost's server root span (scope `bifrost`) carri
 
 The rule below is recorded in D-IN-25, item 11.
 
-**Goal:** on scope `bifrost`, a `gen_ai.input.messages` or `gen_ai.output.messages` value that is not a JSON array is the field's plain value. It is stored as a span's plain `input.value` string is stored (spec 02 rule 6: JSON text becomes a JSON value, other text stays text), and no normalize error is recorded. A JSON array goes through the message converter as today. Other scopes are unchanged: a non-array there is still a conversion failure.
+**Goal:** on scope `bifrost`, a `gen_ai.input.messages` or `gen_ai.output.messages` value that is not a JSON array is the field's plain value. It is stored as a plain value (spec 02 rule 10, `non_message_payload`: JSON object or array text becomes a JSON value, other text stays text), and no normalize error is recorded. A JSON array goes through the message converter as today. Other scopes are unchanged: a non-array there is still a conversion failure.
 
 **Edit:**
 - `crates/otel/src/conventions/genai.rs`; the scope is reachable there since IN4.4;
