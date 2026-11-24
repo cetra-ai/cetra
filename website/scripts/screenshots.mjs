@@ -8,6 +8,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { chromium } from "playwright";
 import { portIsFree } from "./port-free.mjs";
+import { checkStorage } from "./screenshot-storage.mjs";
 
 const SITE = dirname(dirname(fileURLToPath(import.meta.url)));
 const ROOT = dirname(SITE);
@@ -63,17 +64,22 @@ async function shoot(context, shot) {
   if (shot.viewport) await page.setViewportSize(shot.viewport);
   try {
     // Each shot starts from empty storage (no "Recent" items from an earlier shot). The docs show
-    // the light theme; a marketing shot sets `"theme": "dark"`, the UI's default.
+    // the light theme; a marketing shot sets `"theme": "dark"`, the UI's default. A shot's
+    // `storage` then sets its own keys, after the theme, so it can override `cetra.theme` too.
     const theme = shot.theme ?? "light";
     await page.emulateMedia({ colorScheme: theme });
-    await page.addInitScript((value) => {
-      try {
-        localStorage.clear();
-        localStorage.setItem("cetra.theme", value);
-      } catch {
-        // storage unavailable: the UI's default theme stays
-      }
-    }, theme);
+    await page.addInitScript(
+      ({ theme, storage }) => {
+        try {
+          localStorage.clear();
+          localStorage.setItem("cetra.theme", theme);
+          for (const [key, value] of Object.entries(storage)) localStorage.setItem(key, value);
+        } catch {
+          // storage unavailable: the UI's defaults stay
+        }
+      },
+      { theme, storage: shot.storage ?? {} },
+    );
     await page.clock.setFixedTime(new Date(shot.now ?? NOW));
     await page.goto(ORIGIN + shot.path);
     await page.getByText(shot.waitFor).first().waitFor();
@@ -113,6 +119,7 @@ const selected = names.length > 0 ? shots.filter((shot) => names.includes(shot.n
 if (selected.length !== (names.length || shots.length)) {
   throw new Error(`unknown shot name in: ${names.join(", ")}`);
 }
+checkStorage(selected);
 mkdirSync(OUT, { recursive: true });
 
 const server = await startServer();
