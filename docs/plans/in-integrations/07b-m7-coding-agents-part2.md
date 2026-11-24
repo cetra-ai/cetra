@@ -131,8 +131,8 @@ The implementer re-checks each with `npm view <pkg> time --json`, the GitHub rel
 | Goose | 1.59.2 | 2026-11-16T05:26:30Z | `https://github.com/aaif-goose/goose/releases/download/v1.59.2/goose-x86_64-unknown-linux-gnu.tar.gz`, sha256 `c63cf82953e968d84b7542eb38a621dfdb5050b967728ed363517be5cdc666ea` | `fetch` in `fetch-tools.sh` |
 | Oh My Pi (`@oh-my-pi/pi-coding-agent`) | 18.22.0 | 2026-11-16T22:10:38Z | npm | new pnpm tool project `tools/capture/oh-my-pi/` |
 | Bun (`bun`, Oh My Pi's runtime) | 1.4.4 | 2026-10-22T10:19:13Z | npm | the same project |
-| Hermes Agent | git tag `v0.23.2` | commit 2026-11-16T19:28:45-08:00 | `https://github.com/NousResearch/hermes-agent`, pinned by commit in `uv.lock` | new uv tool project `tools/capture/hermes/` |
-| `hermes-otel` | git tag `hermes-otel-v1.33.0` | commit 2026-11-11T14:50:22-05:00 | `https://github.com/briancaffey/hermes-otel`, pinned by commit in `uv.lock` | the same project |
+| Hermes Agent | git tag `v0.23.2` | commit `ae2a81ccc00e9b7c06301523e5bb09608397149c`, 2026-11-16T11:28:45-08:00 | `https://github.com/NousResearch/hermes-agent`, a clone synced from its own `uv.lock` | `fetch-tools.sh` |
+| `hermes-otel` | git tag `hermes-otel-v1.33.0` | commit `32554cf76c8dbeb8d382eaff9007112abf3f7b2c`, 2026-11-11T14:50:22-05:00 | `https://github.com/briancaffey/hermes-otel`, installed by commit into Hermes's environment | `fetch-tools.sh` |
 
 Neither Hermes package is on PyPI at these versions (PyPI's `hermes-agent` stops at 0.19.0, and `hermes-otel` is absent; checked 2026-11-24).
 
@@ -140,7 +140,7 @@ Neither Hermes package is on PyPI at these versions (PyPI's `hermes-agent` stops
 
 | Phase | Edits | Depends on |
 |---|---|---|
-| IN7.9 Installs | `tools/capture/fetch-tools.sh`; new `tools/capture/opencode/{package.json,pnpm-workspace.yaml,pnpm-lock.yaml}`, `tools/capture/oh-my-pi/{package.json,pnpm-workspace.yaml,pnpm-lock.yaml}`, `tools/capture/hermes/{pyproject.toml,uv.lock}` | part 1's IN7.0 (same script) |
+| IN7.9 Installs | `tools/capture/fetch-tools.sh`; new `tools/capture/opencode/{package.json,pnpm-workspace.yaml,pnpm-lock.yaml}`, `tools/capture/oh-my-pi/{package.json,pnpm-workspace.yaml,pnpm-lock.yaml}` | part 1's IN7.0 (same script) |
 | IN7.10 Detection | `crates/otel/src/agents/mod.rs`, new `crates/otel/src/agents/{goose,hermes}.rs`, new `crates/otel/src/agents/generic_agent_tests.rs`, deleted `crates/otel/src/agents/pi.rs`, `crates/otel/tests/proptest.rs`, `docs/spec/02-ingestion.md` | part 1's IN7.1 |
 | IN7.11 OpenCode setup and plugin | `crates/cli/src/agents/{mod,setup}.rs`, new `crates/cli/src/agents/{opencode.rs,opencode_plugin.ts,opencode_plugin.test.mjs}`, `crates/cli/src/main.rs` (the `Agents` doc string), `website/src/content/docs/docs/reference/cli.md` (regenerated) | part 1's IN7.4 |
 | IN7.12 Goose and Oh My Pi setup | `crates/cli/src/agents/{mod,setup}.rs`, new `crates/cli/src/agents/{goose,oh_my_pi}.rs`, `crates/cli/src/main.rs` (doc string), `website/src/content/docs/docs/reference/cli.md` (regenerated) | IN7.11 (same files) |
@@ -170,13 +170,12 @@ Neither Hermes package is on PyPI at these versions (PyPI's `hermes-agent` stops
    Each takes its archive member as the fourth argument. Read the member path with `tar -tzf <download>` first; if an archive holds more than one executable or the binary is not at a fixed path, stop and ask. After the fetch, check the OpenCode binary's sha256 against § Versions and run each binary's `--version`: expected `opencode v2.3.0` and `1.59.2` (as part of the output).
 2. **OpenCode 1.x.** Create `tools/capture/opencode/` in the shape of `tools/capture/n8n/`, with `opencode-ai` 1.19.6 (exact). Add `pnpm_tool opencode 1.19.6 opencode-ai/package.json` after the existing `pnpm_tool` lines. If pnpm blocks an install script, add the package to `allowBuilds` in that project's `pnpm-workspace.yaml` and report it. If pnpm refuses a transitive version as younger than 7 days, stop and report it (do not loosen `minimumReleaseAge`). Then run `<modules>/.bin/opencode --version` (expected `1.19.6`), where `<modules>` is `target/capture-tools/opencode/1.19.6/node_modules`, and check the sha256 of the binary that `find <modules> -path '*opencode-linux-x64/bin/opencode' -type f` finds against § Versions.
 3. **Oh My Pi.** Create `tools/capture/oh-my-pi/` the same way, with `@oh-my-pi/pi-coding-agent` 18.22.0 and `bun` 1.4.4 (both exact). Add `pnpm_tool oh-my-pi 18.22.0 @oh-my-pi/pi-coding-agent/package.json`. Bun's binary comes through its install script or its platform package; allow what pnpm names and report it. Run `<modules>/.bin/omp --version` with `<modules>/.bin` first on `PATH`: expected `omp/18.22.0`.
-4. **Hermes Agent.** Create `tools/capture/hermes/pyproject.toml` in the shape of `tools/capture/litellm-proxy/pyproject.toml`:
-   - `name = "cetra-capture-hermes"`, `package = false`, `exclude-newer = "7 days"` with the same comment;
-   - `requires-python`: the range `hermes-agent`'s own `pyproject.toml` declares at the tag, narrowed to one minor version, as `litellm-proxy` does (`==3.X.*`). The spike ran Python 3.14;
-   - `dependencies = ["hermes-agent", "hermes-otel"]`, with `[tool.uv.sources]` giving each its git URL and `tag` from § Versions.
-   - Run `uv lock --project tools/capture/hermes`. If a dependency cannot resolve under `exclude-newer`, stop and report it.
-   - Add a block to `fetch-tools.sh` in the shape of the LiteLLM one: environment `$tools_dir/hermes/0.23.2`, lock copy `$tools_dir/hermes/uv.lock`, check file `bin/hermes`.
-   - Then run `$tools_dir/hermes/0.23.2/bin/hermes --version` and report its output. Its version line is not known in advance; record it exactly.
+4. **Hermes Agent** (amended 2026-11-24: Hermes's `setup.py` refuses to build a wheel outside a Nix build, so it cannot be a dependency of a uv project of ours; it is installed the way the spike ran it, from its own clone and its own committed `uv.lock`). Add a block to `fetch-tools.sh`, skipped when `$tools_dir/hermes/0.23.2/.complete` exists:
+   - `git clone --depth 1 --branch v0.23.2 https://github.com/NousResearch/hermes-agent "$tools_dir/hermes/src-0.23.2"`, then check `git -C … rev-parse HEAD` is `ae2a81ccc00e9b7c06301523e5bb09608397149c` (fail otherwise);
+   - `UV_PROJECT_ENVIRONMENT="$tools_dir/hermes/0.23.2" uv sync --frozen --project "$tools_dir/hermes/src-0.23.2"`;
+   - `uv pip install --exclude-newer "7 days" --python "$tools_dir/hermes/0.23.2/bin/python" "hermes-otel @ git+https://github.com/briancaffey/hermes-otel@32554cf76c8dbeb8d382eaff9007112abf3f7b2c"` (the commit of tag `hermes-otel-v1.33.0`);
+   - touch `.complete` last. Hermes's transitive versions come from its own lock at that commit (pinned, not re-resolved); `hermes-otel`'s own dependencies are resolved at install, under the 7-day rule.
+   - Then run `$tools_dir/hermes/0.23.2/bin/hermes --version` and record its output (it prints no numeric version line, and an update notice).
 5. Run `just capture-tools` twice. Record each version and publish time.
 
 **Done when:** `just capture-tools` succeeds twice (the second run skips every new tool), the four known `--version` outputs match, and Hermes's is recorded.

@@ -143,7 +143,8 @@ else
         exit 1
     fi
     UV_PROJECT_ENVIRONMENT="$hermes_env" uv sync --frozen --project "$hermes_src"
-    uv pip install --python "$hermes_env/bin/python" "hermes-otel @ git+https://github.com/briancaffey/hermes-otel@32554cf76c8dbeb8d382eaff9007112abf3f7b2c"
+    # hermes-otel's own dependencies are resolved here, under the 7-day rule (D-IN-28 item 8).
+    uv pip install --exclude-newer "7 days" --python "$hermes_env/bin/python" "hermes-otel @ git+https://github.com/briancaffey/hermes-otel@32554cf76c8dbeb8d382eaff9007112abf3f7b2c"
     touch "$hermes_env/.complete"
 fi
 
