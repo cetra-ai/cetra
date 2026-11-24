@@ -1,0 +1,275 @@
+{
+  "spans": [
+    {
+      "project_id": "01900000-0000-7000-8000-000000000001",
+      "trace_id": "07ebf8e60611e81c0b7618dcff6339c3",
+      "span_id": "9f6585ff10059b05",
+      "name": "qdrant.query_points",
+      "span_kind": "retriever",
+      "start_time": "2025-12-31T23:59:50.018000000Z",
+      "end_time": "2025-12-31T23:59:50.019000000Z",
+      "status": "ok",
+      "service_name": "capture-app",
+      "attributes": {
+        "db.system": "Qdrant",
+        "db.vector.query.top_k": "1",
+        "qdrant.search.collection_name": "docs"
+      },
+      "resource_attributes": {
+        "telemetry.sdk.language": "python",
+        "telemetry.sdk.name": "opentelemetry",
+        "telemetry.sdk.version": "1.45.2"
+      },
+      "scope_name": "opentelemetry.instrumentation.qdrant",
+      "scope_version": "0.63.1",
+      "ingest_time": "2026-01-01T00:00:00.000000000Z",
+      "schema_version": 2
+    },
+    {
+      "project_id": "01900000-0000-7000-8000-000000000001",
+      "trace_id": "2a76d49ce42c323f4f0093fe8d79ec27",
+      "span_id": "2638b18ae5d74abd",
+      "name": "milvus.search",
+      "span_kind": "retriever",
+      "start_time": "2025-12-31T23:59:50.696000000Z",
+      "end_time": "2025-12-31T23:59:50.697000000Z",
+      "status": "unset",
+      "service_name": "capture-app",
+      "attributes": {
+        "db.milvus.search.data_count": "1",
+        "db.milvus.search.limit": "1",
+        "db.milvus.search.query_vector_dimension": "[2]",
+        "db.milvus.search.result_count": "1",
+        "db.operation": "search",
+        "db.system": "milvus"
+      },
+      "resource_attributes": {
+        "telemetry.sdk.language": "python",
+        "telemetry.sdk.name": "opentelemetry",
+        "telemetry.sdk.version": "1.45.2"
+      },
+      "scope_name": "opentelemetry.instrumentation.milvus",
+      "scope_version": "0.60.0",
+      "events": [
+        {
+          "time": "2025-12-31T23:59:50.697000000Z",
+          "name": "db.search.result",
+          "attributes": "{\"db.search.query.id\":0,\"db.search.result.id\":1,\"db.search.result.distance\":\"0.9970544576644897\",\"db.search.result.entity\":\"{'vector': [0.10000000149011612, 0.20000000298023224], 'text': 'sunny'}\"}"
+        }
+      ],
+      "ingest_time": "2026-01-01T00:00:00.000000000Z",
+      "schema_version": 2
+    },
+    {
+      "project_id": "01900000-0000-7000-8000-000000000001",
+      "trace_id": "31623891209710f7beef17b8a53f4238",
+      "span_id": "208a9feb4adfbd2a",
+      "name": "qdrant.upsert",
+      "span_kind": "span",
+      "start_time": "2025-12-31T23:59:50.018000000Z",
+      "end_time": "2025-12-31T23:59:50.018000000Z",
+      "status": "ok",
+      "service_name": "capture-app",
+      "attributes": {
+        "db.system": "Qdrant",
+        "qdrant.upsert.collection_name": "docs",
+        "qdrant.upsert.points_count": "2"
+      },
+      "resource_attributes": {
+        "telemetry.sdk.language": "python",
+        "telemetry.sdk.name": "opentelemetry",
+        "telemetry.sdk.version": "1.45.2"
+      },
+      "scope_name": "opentelemetry.instrumentation.qdrant",
+      "scope_version": "0.63.1",
+      "ingest_time": "2026-01-01T00:00:00.000000000Z",
+      "schema_version": 2
+    },
+    {
+      "project_id": "01900000-0000-7000-8000-000000000001",
+      "trace_id": "3de12f1274fe82f0e65c7ac98a3e621b",
+      "span_id": "accb3726337946a0",
+      "name": "milvus.create_collection",
+      "span_kind": "span",
+      "start_time": "2025-12-31T23:59:50.184000000Z",
+      "end_time": "2025-12-31T23:59:50.689000000Z",
+      "status": "unset",
+      "service_name": "capture-app",
+      "attributes": {
+        "db.milvus.create_collection.dimension": "2",
+        "db.operation": "create_collection",
+        "db.system": "milvus"
+      },
+      "resource_attributes": {
+        "telemetry.sdk.language": "python",
+        "telemetry.sdk.name": "opentelemetry",
+        "telemetry.sdk.version": "1.45.2"
+      },
+      "scope_name": "opentelemetry.instrumentation.milvus",
+      "scope_version": "0.60.0",
+      "ingest_time": "2026-01-01T00:00:00.000000000Z",
+      "schema_version": 2
+    },
+    {
+      "project_id": "01900000-0000-7000-8000-000000000001",
+      "trace_id": "5852e6e2b82c9ef76b19800a10f81efd",
+      "span_id": "39b83570d0733144",
+      "name": "chroma.add",
+      "span_kind": "span",
+      "start_time": "2025-12-31T23:59:50.000000000Z",
+      "end_time": "2025-12-31T23:59:50.007000000Z",
+      "status": "unset",
+      "service_name": "capture-app",
+      "attributes": {
+        "db.chroma.add.documents_count": "2",
+        "db.chroma.add.embeddings_count": "2",
+        "db.chroma.add.ids_count": "2",
+        "db.operation": "add",
+        "db.system": "chroma"
+      },
+      "resource_attributes": {
+        "telemetry.sdk.language": "python",
+        "telemetry.sdk.name": "opentelemetry",
+        "telemetry.sdk.version": "1.45.2"
+      },
+      "scope_name": "opentelemetry.instrumentation.chromadb",
+      "scope_version": "0.63.1",
+      "ingest_time": "2026-01-01T00:00:00.000000000Z",
+      "schema_version": 2
+    },
+    {
+      "project_id": "01900000-0000-7000-8000-000000000001",
+      "trace_id": "739c5e9a3e4c8a04c4e8405239504e55",
+      "span_id": "06d20f6ef22af557",
+      "name": "chroma.query",
+      "span_kind": "retriever",
+      "start_time": "2025-12-31T23:59:50.008000000Z",
+      "end_time": "2025-12-31T23:59:50.010000000Z",
+      "status": "unset",
+      "service_name": "capture-app",
+      "attributes": {
+        "db.chroma.query.embeddings_count": "1",
+        "db.chroma.query.n_results": "1",
+        "db.operation": "query",
+        "db.system": "chroma"
+      },
+      "resource_attributes": {
+        "telemetry.sdk.language": "python",
+        "telemetry.sdk.name": "opentelemetry",
+        "telemetry.sdk.version": "1.45.2"
+      },
+      "scope_name": "opentelemetry.instrumentation.chromadb",
+      "scope_version": "0.63.1",
+      "events": [
+        {
+          "time": "2025-12-31T23:59:50.010000000Z",
+          "name": "db.query.result",
+          "attributes": "{\"db.query.result.id\":\"a\",\"db.query.result.distance\":0.004999999888241291,\"db.query.result.document\":\"sunny\"}"
+        }
+      ],
+      "ingest_time": "2026-01-01T00:00:00.000000000Z",
+      "schema_version": 2
+    },
+    {
+      "project_id": "01900000-0000-7000-8000-000000000001",
+      "trace_id": "8b51736438f4b470620a51f8fe110dcc",
+      "span_id": "0cb694252546097a",
+      "name": "milvus.insert",
+      "span_kind": "span",
+      "start_time": "2025-12-31T23:59:50.690000000Z",
+      "end_time": "2025-12-31T23:59:50.695000000Z",
+      "status": "unset",
+      "service_name": "capture-app",
+      "attributes": {
+        "db.milvus.insert.data_count": "2",
+        "db.operation": "insert",
+        "db.system": "milvus"
+      },
+      "resource_attributes": {
+        "telemetry.sdk.language": "python",
+        "telemetry.sdk.name": "opentelemetry",
+        "telemetry.sdk.version": "1.45.2"
+      },
+      "scope_name": "opentelemetry.instrumentation.milvus",
+      "scope_version": "0.60.0",
+      "ingest_time": "2026-01-01T00:00:00.000000000Z",
+      "schema_version": 2
+    },
+    {
+      "project_id": "01900000-0000-7000-8000-000000000001",
+      "trace_id": "b86ad857b952e8019df5294e2aeb64cc",
+      "span_id": "22861588ab25e192",
+      "name": "chroma.delete",
+      "span_kind": "span",
+      "start_time": "2025-12-31T23:59:50.011000000Z",
+      "end_time": "2025-12-31T23:59:50.012000000Z",
+      "status": "unset",
+      "service_name": "capture-app",
+      "attributes": {
+        "db.chroma.delete.ids_count": "1",
+        "db.operation": "delete",
+        "db.system": "chroma"
+      },
+      "resource_attributes": {
+        "telemetry.sdk.language": "python",
+        "telemetry.sdk.name": "opentelemetry",
+        "telemetry.sdk.version": "1.45.2"
+      },
+      "scope_name": "opentelemetry.instrumentation.chromadb",
+      "scope_version": "0.63.1",
+      "ingest_time": "2026-01-01T00:00:00.000000000Z",
+      "schema_version": 2
+    },
+    {
+      "project_id": "01900000-0000-7000-8000-000000000001",
+      "trace_id": "bd52171ace85755e7575b485b9a1b8ba",
+      "span_id": "13964113cbe54c81",
+      "name": "milvus.delete",
+      "span_kind": "span",
+      "start_time": "2025-12-31T23:59:50.698000000Z",
+      "end_time": "2025-12-31T23:59:50.699000000Z",
+      "status": "unset",
+      "service_name": "capture-app",
+      "attributes": {
+        "db.milvus.delete.ids_count": "2",
+        "db.operation": "delete",
+        "db.system": "milvus"
+      },
+      "resource_attributes": {
+        "telemetry.sdk.language": "python",
+        "telemetry.sdk.name": "opentelemetry",
+        "telemetry.sdk.version": "1.45.2"
+      },
+      "scope_name": "opentelemetry.instrumentation.milvus",
+      "scope_version": "0.60.0",
+      "ingest_time": "2026-01-01T00:00:00.000000000Z",
+      "schema_version": 2
+    },
+    {
+      "project_id": "01900000-0000-7000-8000-000000000001",
+      "trace_id": "f0c04b7b2958c9e3827e299293ccb51a",
+      "span_id": "62feed7c21af63c6",
+      "name": "qdrant.delete",
+      "span_kind": "span",
+      "start_time": "2025-12-31T23:59:50.019000000Z",
+      "end_time": "2025-12-31T23:59:50.019000000Z",
+      "status": "ok",
+      "service_name": "capture-app",
+      "attributes": {
+        "db.system": "Qdrant",
+        "qdrant.delete.collection_name": "docs"
+      },
+      "resource_attributes": {
+        "telemetry.sdk.language": "python",
+        "telemetry.sdk.name": "opentelemetry",
+        "telemetry.sdk.version": "1.45.2"
+      },
+      "scope_name": "opentelemetry.instrumentation.qdrant",
+      "scope_version": "0.63.1",
+      "ingest_time": "2026-01-01T00:00:00.000000000Z",
+      "schema_version": 2
+    }
+  ],
+  "media": [],
+  "rejected_spans": 0
+}
