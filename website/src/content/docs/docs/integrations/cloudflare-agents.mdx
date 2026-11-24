@@ -1,0 +1,50 @@
+---
+title: Cloudflare Agents
+description: "Send Cloudflare Agents traces to cetra through a Workers observability OTLP destination. Setup only: not run; Cloudflare sends from its own servers."
+---
+
+The Cloudflare Agents SDK (the `agents` package on npm) runs agents on Cloudflare Workers and Durable Objects. Its traces go to Workers Observability and to the OpenTelemetry destinations configured for the Worker; this page points one of those destinations at cetra. It is setup only: the export was not run against cetra.
+
+## Install
+
+```bash
+npm install agents
+```
+
+`@cloudflare/agents` on npm is an old package, not this SDK.
+
+## Set up
+
+In the Cloudflare dashboard, add an OTLP destination under Observability > Destinations, at the account level. Cloudflare sends traces to the `/v1/traces` endpoint and logs to `/v1/logs`. Add a header `Authorization: Bearer sk-cetra-…` with your cetra API key.
+
+Then enable traces for the Worker in its `wrangler.jsonc`:
+
+```jsonc
+{
+  "observability": {
+    "traces": {
+      "enabled": true
+    }
+  }
+}
+```
+
+The Worker's `wrangler` config also names the destination to send to. That key is not given on this page; use the one Cloudflare's documentation names.
+
+## What you get
+
+- Model calls made through the AI SDK are recorded as spans with the OpenTelemetry GenAI semantic conventions when they go through the SDK's `wrapAISDK` helper.
+- The input and output messages (`gen_ai.input.messages` and `gen_ai.output.messages`) are opt-in.
+
+## Limits
+
+- Not run: the export is done by Cloudflare's servers, not by the Worker's local runtime, so no run against cetra was recorded for this page.
+- cetra's endpoint must be reachable from the public internet, because Cloudflare sends the spans from its own servers.
+- `wrangler dev` does not forward spans to destinations: in local development, Cloudflare records them in its Local Explorer only.
+- Cloudflare exports OTLP/HTTP with JSON encoding only; cetra accepts JSON bodies.
+- This page was written against the SDK's documentation in `agents` 0.33.0.
+
+## Next
+
+- [Send OpenTelemetry](/docs/get-started/opentelemetry/): the endpoint and the headers cetra expects.
+- [Vercel AI SDK](/docs/integrations/vercel-ai-sdk/): the AI SDK's GenAI spans, captured.
