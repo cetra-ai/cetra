@@ -313,3 +313,113 @@ it("has no user detail for a window without any of the user's traces", () => {
   const from = Date.parse("2000-01-01T00:00:00.000Z");
   expect(dataset.user(userId, false, false, { from, to: from + DAY_MS })).toBeUndefined();
 });
+
+/** The showcase trace (index 3) of a ten-trace dataset, with its tree. */
+function showcaseOf(): {
+  dataset: Dataset;
+  trace: Schema<"TraceSummary">;
+  spans: readonly Schema<"TreeSpan">[];
+} {
+  const dataset = createDataset({ seed: 1, now: NOW, traces: 10 });
+  const trace = dataset.traces[3];
+  if (!trace) {
+    throw new Error("a ten-trace dataset has trace 3");
+  }
+  return { dataset, trace, spans: dataset.traceDetail(trace.trace_id)?.spans ?? [] };
+}
+
+/** The detail of the showcase span named `name`. */
+function showcaseSpanNamed(name: string): Schema<"SpanDetail"> {
+  const { dataset, trace, spans } = showcaseOf();
+  const row = spans.find((item) => item.span.name === name);
+  const detail = row ? dataset.spanDetail(trace.trace_id, row.span.span_id) : undefined;
+  if (!detail) {
+    throw new Error(`the showcase trace has a span named ${name}`);
+  }
+  return detail;
+}
+
+it("makes trace 3 the hand-written showcase trace", () => {
+  const { trace, spans } = showcaseOf();
+  const nonRoot = spans.slice(1);
+  expect(trace.name).toBe("support-agent");
+  expect(trace.session_id).toBeUndefined();
+  expect(spans.length).toBe(13);
+  expect(trace.span_count).toBe(spans.length);
+  expect(trace.llm_count).toBe(3);
+  expect(trace.llm_count).toBe(spans.filter((row) => row.span.span_kind === "llm").length);
+
+  const inputSum = nonRoot.reduce((sum, row) => sum + (row.span.input_tokens ?? 0), 0);
+  const outputSum = nonRoot.reduce((sum, row) => sum + (row.span.output_tokens ?? 0), 0);
+  const costSum = nonRoot.reduce((sum, row) => sum + (row.span.cost_total ?? 0), 0);
+  expect(trace.input_tokens).toBe(inputSum);
+  expect(trace.output_tokens).toBe(outputSum);
+  expect(trace.cost_total).toBe(Math.round(costSum * 1_000_000) / 1_000_000);
+
+  expect(trace.input_preview).toBe("How can I export my traces to a CSV file?");
+  expect(Date.parse(trace.start_time)).toBe(NOW - 120_000);
+});
+
+it("nests every showcase span inside its parent, in pre-order", () => {
+  const { spans } = showcaseOf();
+  let children = 0;
+  spans.forEach((row, position) => {
+    const parentId = row.span.parent_span_id;
+    if (parentId === undefined) {
+      expect(row.depth).toBe(0);
+      return;
+    }
+    children += 1;
+    const parentPosition = spans.findIndex((item) => item.span.span_id === parentId);
+    expect(parentPosition).toBeGreaterThanOrEqual(0);
+    expect(parentPosition).toBeLessThan(position);
+    const parent = spans[parentPosition];
+    if (!parent) {
+      throw new Error("the parent is in the list");
+    }
+    expect(row.depth).toBe(parent.depth + 1);
+    expect(Date.parse(row.span.start_time)).toBeGreaterThanOrEqual(
+      Date.parse(parent.span.start_time),
+    );
+    expect(Date.parse(row.span.end_time)).toBeLessThanOrEqual(Date.parse(parent.span.end_time));
+  });
+  expect(children).toBe(12);
+});
+
+it("runs the two showcase tools in parallel", () => {
+  const { spans } = showcaseOf();
+  const accountTool = spans.find((row) => row.span.name === "get_account");
+  const exportTool = spans.find((row) => row.span.name === "check_export_limits");
+  expect(accountTool).toBeDefined();
+  expect(exportTool).toBeDefined();
+  expect(accountTool?.span.start_time).toBe(exportTool?.span.start_time);
+});
+
+it("gives the showcase spans their payloads", () => {
+  const classify = showcaseSpanNamed("classify intent");
+  expect(classify.output?.format).toBe("messages");
+  const classifyText =
+    classify.output?.format === "messages" ? classify.output.value[0]?.parts[0] : undefined;
+  expect(classifyText?.type === "text" ? classifyText.content : "").toContain("export_data");
+
+  const exportLimits = showcaseSpanNamed("check_export_limits");
+  expect(exportLimits.output?.format).toBe("json");
+  expect(exportLimits.output?.value).toMatchObject({ max_rows: 100_000 });
+
+  const judge = showcaseSpanNamed("judge helpfulness");
+  expect(judge.output?.value).toMatchObject({ score: 0.9 });
+
+  const draft = showcaseSpanNamed("draft answer");
+  const draftText =
+    draft.output?.format === "messages" ? draft.output.value[0]?.parts[0] : undefined;
+  expect(draftText?.type === "text" ? draftText.content : "").toContain("```");
+});
+
+it("gives no showcase span a truncation flag", () => {
+  const { dataset, trace, spans } = showcaseOf();
+  expect(spans.length).toBeGreaterThan(0);
+  for (const row of spans) {
+    const detail = dataset.spanDetail(trace.trace_id, row.span.span_id);
+    expect(detail?.truncated).toEqual([]);
+  }
+});

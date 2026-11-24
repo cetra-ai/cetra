@@ -51,6 +51,109 @@ const BUCKET_MS: Record<Exclude<Schema<"MetricsBucket">, "auto">, number> = {
   "1d": DAY_MS,
 };
 
+/** The hand-written trace the homepage hero and the docs' trace view show (M11). Its topic is `SUPPORT_TURNS[3]`. */
+const SHOWCASE_INDEX = 3;
+const SHOWCASE_AGE_MS = 120_000;
+const SHOWCASE_DURATION_MS = 6_200;
+const SHOWCASE_USER = "user-012";
+
+type ShowcaseSpan = {
+  name: string;
+  kind: Schema<"SpanKind">;
+  /** Index of the parent in SHOWCASE_SPANS; absent for the root. */
+  parent?: number;
+  /** Offsets from the trace's start, in ms. */
+  from: number;
+  to: number;
+  model?: string;
+  provider?: string;
+  inputTokens?: number;
+  outputTokens?: number;
+  cost?: number;
+  ttftMs?: number;
+  prompt?: { name: string; version: number };
+};
+
+const SHOWCASE_SPANS: readonly [ShowcaseSpan, ...ShowcaseSpan[]] = [
+  { name: "support-agent", kind: "agent", from: 0, to: 6_200 },
+  { name: "prompt-injection check", kind: "guardrail", parent: 0, from: 20, to: 140 },
+  {
+    name: "classify intent",
+    kind: "llm",
+    parent: 0,
+    from: 150,
+    to: 560,
+    model: "claude-haiku-4-5",
+    provider: "anthropic",
+    inputTokens: 412,
+    outputTokens: 9,
+    cost: 0.000457,
+    ttftMs: 310,
+  },
+  { name: "retrieve docs", kind: "retriever", parent: 0, from: 580, to: 1_480 },
+  {
+    name: "embed query",
+    kind: "embedding",
+    parent: 3,
+    from: 590,
+    to: 760,
+    model: "text-embedding-3-small",
+    provider: "openai",
+  },
+  { name: "vector search", kind: "retriever", parent: 3, from: 770, to: 1_150 },
+  {
+    name: "rerank",
+    kind: "reranker",
+    parent: 3,
+    from: 1_160,
+    to: 1_470,
+    model: "rerank-v3.5",
+    provider: "cohere",
+  },
+  {
+    name: "plan",
+    kind: "llm",
+    parent: 0,
+    from: 1_500,
+    to: 2_600,
+    model: "claude-sonnet-4-5",
+    provider: "anthropic",
+    inputTokens: 1_840,
+    outputTokens: 156,
+    cost: 0.00786,
+    ttftMs: 420,
+  },
+  { name: "get_account", kind: "tool", parent: 0, from: 2_620, to: 2_910 },
+  { name: "check_export_limits", kind: "tool", parent: 0, from: 2_620, to: 3_230 },
+  {
+    name: "draft answer",
+    kind: "llm",
+    parent: 0,
+    from: 3_250,
+    to: 5_560,
+    model: "claude-sonnet-4-5",
+    provider: "anthropic",
+    inputTokens: 2_310,
+    outputTokens: 248,
+    cost: 0.01065,
+    ttftMs: 380,
+    prompt: { name: "support-reply", version: 2 },
+  },
+  { name: "pii scrub", kind: "guardrail", parent: 0, from: 5_570, to: 5_650 },
+  {
+    name: "judge helpfulness",
+    kind: "evaluator",
+    parent: 0,
+    from: 5_660,
+    to: 6_190,
+    model: "gpt-4.1-mini",
+    provider: "openai",
+    inputTokens: 690,
+    outputTokens: 42,
+    cost: 0.000343,
+  },
+];
+
 type BuiltSpan = {
   depth: number;
   detached: boolean;
@@ -215,6 +318,9 @@ export function visibleTraces(
 }
 
 function traceSummary(seed: number, index: number, now: number): Schema<"TraceSummary"> {
+  if (index === SHOWCASE_INDEX) {
+    return showcaseSummary(index, now);
+  }
   const rng = mulberry32(mix(seed, index));
   const spanCount = index === 0 ? 10_000 : 3 + Math.floor(rng() * 58);
   const errored = rng() < 0.08;
@@ -267,6 +373,52 @@ function traceSummary(seed: number, index: number, now: number): Schema<"TraceSu
   };
 }
 
+/** The showcase trace's summary. Its tokens and cost are the sums over SHOWCASE_SPANS (M11). */
+function showcaseSummary(index: number, now: number): Schema<"TraceSummary"> {
+  const startMs = now - SHOWCASE_AGE_MS;
+  const inputTokens = SHOWCASE_SPANS.reduce((sum, row) => sum + (row.inputTokens ?? 0), 0);
+  const outputTokens = SHOWCASE_SPANS.reduce((sum, row) => sum + (row.outputTokens ?? 0), 0);
+  const cost = SHOWCASE_SPANS.reduce((sum, row) => sum + (row.cost ?? 0), 0);
+  return {
+    trace_id: `a${index.toString(16).padStart(31, "0")}`,
+    root_span_id: spanId(index, 0),
+    has_root: true,
+    name: "support-agent",
+    start_time: rfc3339(startMs),
+    end_time: rfc3339(startMs + SHOWCASE_DURATION_MS),
+    duration_ns: SHOWCASE_DURATION_MS * 1_000_000,
+    status: "ok",
+    environment: "production",
+    release: "v1.5.0",
+    tags: ["email"],
+    metadata: userTraceMetadata(SHOWCASE_USER),
+    span_count: SHOWCASE_SPANS.length,
+    error_count: 0,
+    llm_count: SHOWCASE_SPANS.filter((row) => row.kind === "llm").length,
+    input_tokens: inputTokens,
+    output_tokens: outputTokens,
+    total_tokens: inputTokens + outputTokens,
+    cost_total: Math.round(cost * 1_000_000) / 1_000_000,
+    // The generation models only: the embedding and rerank models appear on their spans.
+    models: ["claude-sonnet-4-5", "claude-haiku-4-5", "gpt-4.1-mini"],
+    scores: [
+      {
+        name: "correctness",
+        score_id: scoreUuid(index, 0),
+        source: "llm_judge",
+        value: { data_type: "numeric", value: 0.9 },
+      },
+      {
+        name: "relevance",
+        score_id: scoreUuid(index, 1),
+        source: "human",
+        value: { data_type: "boolean", value: true },
+      },
+    ],
+    user_id: SHOWCASE_USER,
+  };
+}
+
 /** `user.*` metadata of a user's traces, derived from the id `user-NNN` so it is stable. Values are JSON-encoded (spec 01). */
 function userTraceMetadata(userId: string): Record<string, string> {
   const index = Number.parseInt(userId.slice("user-".length), 10);
@@ -284,6 +436,9 @@ function buildDetail(
   index: number,
   trace: Schema<"TraceSummary">,
 ): Schema<"TraceDetail"> {
+  if (index === SHOWCASE_INDEX) {
+    return showcaseDetail(index, trace);
+  }
   const rng = mulberry32(mix(seed, index + 17));
   const spanCount = trace.span_count;
   const maxDepth = index === 0 ? 8 : 6;
@@ -292,6 +447,56 @@ function buildDetail(
   const endMs = Date.parse(trace.end_time);
   const built = layoutSpans(shape, startMs, endMs, trace.error_count, rng);
   const spans = built.map((span, spanIndex) => treeSpan(span, spanIndex, index, trace));
+  return { trace, spans, truncated: false };
+}
+
+/** The showcase trace's tree: its spans in SHOWCASE_SPANS order, so every parent comes before its children (M11). */
+function showcaseDetail(index: number, trace: Schema<"TraceSummary">): Schema<"TraceDetail"> {
+  const startMs = Date.parse(trace.start_time);
+  const depths: number[] = [];
+  const spans = SHOWCASE_SPANS.map((row, position): Schema<"TreeSpan"> => {
+    const depth = row.parent === undefined ? 0 : (depths[row.parent] ?? 0) + 1;
+    depths[position] = depth;
+    const summary: Schema<"SpanSummary"> = {
+      span_id: spanId(index, position),
+      trace_id: trace.trace_id,
+      span_kind: row.kind,
+      name: row.name,
+      start_time: rfc3339(startMs + row.from),
+      end_time: rfc3339(startMs + row.to),
+      duration_ns: (row.to - row.from) * 1_000_000,
+      status: "ok",
+      metadata: { ...trace.metadata },
+      tags: trace.tags,
+      ...(row.parent === undefined ? {} : { parent_span_id: spanId(index, row.parent) }),
+      ...(trace.environment ? { environment: trace.environment } : {}),
+      service_name: "support-bot",
+      ...(trace.user_id ? { user_id: trace.user_id } : {}),
+      ...(trace.release ? { release: trace.release } : {}),
+      ...(row.model ? { model: row.model } : {}),
+      ...(row.provider ? { provider: row.provider } : {}),
+      ...(row.inputTokens === undefined || row.outputTokens === undefined
+        ? {}
+        : {
+            input_tokens: row.inputTokens,
+            output_tokens: row.outputTokens,
+            total_tokens: row.inputTokens + row.outputTokens,
+          }),
+      ...(row.cost === undefined ? {} : { cost_total: row.cost }),
+      ...(row.ttftMs === undefined ? {} : { ttft_ns: row.ttftMs * 1_000_000 }),
+      ...(row.prompt ? { prompt_name: row.prompt.name, prompt_version: row.prompt.version } : {}),
+    };
+    if (position === 0) {
+      // The root carries the trace's totals and previews, as `treeSpan` gives every root.
+      summary.input_preview = trace.input_preview;
+      summary.output_preview = trace.output_preview;
+      summary.input_tokens = trace.input_tokens;
+      summary.output_tokens = trace.output_tokens;
+      summary.total_tokens = trace.total_tokens;
+      summary.cost_total = trace.cost_total;
+    }
+    return { depth, detached: false, span: summary };
+  });
   return { trace, spans, truncated: false };
 }
 
@@ -969,7 +1174,135 @@ function spanFromSummary(span: Schema<"SpanSummary">, context: SpanContext): Sch
       value: failed ? FAILED_ANSWER : shortAnswer(exchange),
     };
   }
+  if (context.traceIndex === SHOWCASE_INDEX) {
+    applyShowcasePayload(detail, context.traceIndex, context.turn.exchange.question);
+  }
   return detail;
+}
+
+/**
+ * The showcase trace's hand-written payloads (M11). Spans not listed here keep the generic payload of their kind.
+ * `traceIndex` is the trace's index, so the span ids are the trace's own.
+ */
+function applyShowcasePayload(
+  detail: Schema<"SpanDetail">,
+  traceIndex: number,
+  question: string,
+): void {
+  // The generic rule flags every 17th span's input, the root included; the showcase shows no truncation badge.
+  detail.truncated = [];
+  const at = (position: number) => spanId(traceIndex, position);
+  switch (detail.span_id) {
+    case at(1):
+      detail.input = { format: "text", value: question };
+      detail.output = { format: "json", value: { passed: true, reasons: [] } };
+      break;
+    case at(2):
+      detail.input = {
+        format: "messages",
+        value: [
+          {
+            role: "system",
+            parts: [
+              {
+                type: "text",
+                content:
+                  "Classify the user's request into one intent: billing, account, export_data, api_errors, other. Reply with JSON.",
+              },
+            ],
+          },
+          { role: "user", parts: [{ type: "text", content: question }] },
+        ],
+      };
+      detail.output = {
+        format: "messages",
+        value: [
+          {
+            role: "assistant",
+            parts: [
+              {
+                type: "text",
+                content: '{"intent": "export_data", "confidence": 0.97}',
+              },
+            ],
+          },
+        ],
+      };
+      break;
+    case at(7):
+      detail.input = {
+        format: "messages",
+        value: [
+          {
+            role: "system",
+            parts: [
+              {
+                type: "text",
+                content: "You are a support agent. Plan the tool calls you need before answering.",
+              },
+            ],
+          },
+          { role: "user", parts: [{ type: "text", content: question }] },
+        ],
+      };
+      detail.output = {
+        format: "messages",
+        value: [
+          {
+            role: "assistant",
+            parts: [
+              {
+                type: "text",
+                content: [
+                  "1. get_account: check the plan's export limits.",
+                  "2. check_export_limits: rows and formats allowed.",
+                  "3. Answer with the Traces page steps and the API for large ranges.",
+                ].join("\n"),
+              },
+            ],
+          },
+        ],
+      };
+      break;
+    case at(8):
+      detail.input = {
+        format: "json",
+        value: { name: "get_account", arguments: { user_id: SHOWCASE_USER } },
+      };
+      detail.output = { format: "json", value: { plan: "pro", seats: 8, region: "eu1" } };
+      break;
+    case at(9):
+      detail.input = {
+        format: "json",
+        value: { name: "check_export_limits", arguments: { plan: "pro", format: "csv" } },
+      };
+      detail.output = {
+        format: "json",
+        value: { max_rows: 100_000, formats: ["csv", "ndjson"], retention_days: 7 },
+      };
+      break;
+    case at(11):
+      detail.input = {
+        format: "json",
+        value: {
+          text: "Export from the Traces page, or call the export endpoint for large ranges.",
+        },
+      };
+      detail.output = { format: "json", value: { passed: true, redacted: 0 } };
+      break;
+    case at(12):
+      detail.input = { format: "text", value: question };
+      detail.output = {
+        format: "json",
+        value: {
+          score: 0.9,
+          reasoning: "The answer gives the steps and the API route for large exports.",
+        },
+      };
+      break;
+    default:
+      break;
+  }
 }
 
 function sessionsFrom(traces: readonly Schema<"TraceSummary">[]): Schema<"SessionSummary">[] {
