@@ -93,6 +93,10 @@ const SCOPE_GATES: &[&str] = &[
     "@voltagent/core",
     "cetra-pi",
     "openclaw",
+    "cetra-opencode",
+    "goose",
+    "@oh-my-pi/pi-agent-core",
+    "hermes-otel-plugin",
 ];
 
 /// Span attributes that select an operation or a span type a reader branches on.

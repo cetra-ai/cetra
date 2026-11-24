@@ -7,8 +7,11 @@ mod claude_code;
 mod codex;
 mod copilot;
 mod gemini_cli;
+#[cfg(test)]
+mod generic_agent_tests;
+mod goose;
+mod hermes;
 mod openclaw;
-mod pi;
 mod qwen_code;
 #[cfg(test)]
 mod test_support;
@@ -135,6 +138,10 @@ pub(crate) enum CodingAgent {
     QwenCode,
     Pi,
     OpenClaw,
+    OpenCode,
+    Goose,
+    OhMyPi,
+    Hermes,
 }
 
 impl CodingAgent {
@@ -148,6 +155,10 @@ impl CodingAgent {
             Self::QwenCode => "qwen-code",
             Self::Pi => "pi",
             Self::OpenClaw => "openclaw",
+            Self::OpenCode => "opencode",
+            Self::Goose => "goose",
+            Self::OhMyPi => "oh-my-pi",
+            Self::Hermes => "hermes-agent",
         }
     }
 }
@@ -212,6 +223,18 @@ pub(crate) fn detect_agent(
     if scope_name == Some("openclaw") {
         return Some(CodingAgent::OpenClaw);
     }
+    if scope_name == Some("cetra-opencode") {
+        return Some(CodingAgent::OpenCode);
+    }
+    if scope_name == Some("goose") {
+        return Some(CodingAgent::Goose);
+    }
+    if scope_name == Some("@oh-my-pi/pi-agent-core") {
+        return Some(CodingAgent::OhMyPi);
+    }
+    if scope_name == Some("hermes-otel-plugin") {
+        return Some(CodingAgent::Hermes);
+    }
     None
 }
 
@@ -239,7 +262,11 @@ pub(crate) fn discarded(
             CodingAgent::ClaudeCode
             | CodingAgent::GeminiCli
             | CodingAgent::Copilot
-            | CodingAgent::Pi,
+            | CodingAgent::Pi
+            | CodingAgent::OpenCode
+            | CodingAgent::Goose
+            | CodingAgent::OhMyPi
+            | CodingAgent::Hermes,
         )
         | None => false,
     }
@@ -261,7 +288,11 @@ pub(crate) fn finish_inputs(agent: Option<CodingAgent>, bag: &AttrBag<'_>) -> Fi
             | CodingAgent::Copilot
             | CodingAgent::QwenCode
             | CodingAgent::Pi
-            | CodingAgent::OpenClaw,
+            | CodingAgent::OpenClaw
+            | CodingAgent::OpenCode
+            | CodingAgent::Goose
+            | CodingAgent::OhMyPi
+            | CodingAgent::Hermes,
         ) => Finish {
             tool_name: peek_text(bag, "gen_ai.tool.name"),
             turn_id: None,
@@ -278,7 +309,11 @@ pub(crate) fn kind(agent: Option<CodingAgent>, span_name: &str) -> Option<SpanKi
         CodingAgent::GeminiCli => gemini_cli::kind(span_name),
         CodingAgent::QwenCode => qwen_code::kind(span_name),
         CodingAgent::OpenClaw => openclaw::kind(span_name),
-        CodingAgent::Copilot | CodingAgent::Pi => None,
+        CodingAgent::Goose => goose::kind(span_name),
+        CodingAgent::Hermes => hermes::kind(span_name),
+        CodingAgent::Copilot | CodingAgent::Pi | CodingAgent::OpenCode | CodingAgent::OhMyPi => {
+            None
+        }
     }
 }
 
@@ -302,7 +337,12 @@ pub(crate) fn context(
         CodingAgent::GeminiCli => gemini_cli::context(fields, agents),
         CodingAgent::Copilot => copilot::context(bag, fields),
         CodingAgent::QwenCode => qwen_code::context(fields, agents),
-        CodingAgent::Pi | CodingAgent::OpenClaw => {}
+        CodingAgent::Pi
+        | CodingAgent::OpenClaw
+        | CodingAgent::OpenCode
+        | CodingAgent::Goose
+        | CodingAgent::OhMyPi
+        | CodingAgent::Hermes => {}
     }
 }
 
@@ -321,7 +361,11 @@ pub(crate) fn usage(
         | CodingAgent::Copilot
         | CodingAgent::QwenCode
         | CodingAgent::Pi
-        | CodingAgent::OpenClaw => None,
+        | CodingAgent::OpenClaw
+        | CodingAgent::OpenCode
+        | CodingAgent::Goose
+        | CodingAgent::OhMyPi
+        | CodingAgent::Hermes => None,
     }
 }
 
@@ -338,7 +382,11 @@ pub(crate) fn ttft(
         | CodingAgent::GeminiCli
         | CodingAgent::Copilot
         | CodingAgent::QwenCode
-        | CodingAgent::Pi => None,
+        | CodingAgent::Pi
+        | CodingAgent::OpenCode
+        | CodingAgent::Goose
+        | CodingAgent::OhMyPi
+        | CodingAgent::Hermes => None,
     }
 }
 
@@ -361,6 +409,10 @@ pub(crate) fn payload(
             CodingAgent::QwenCode
             | CodingAgent::Pi
             | CodingAgent::OpenClaw
+            | CodingAgent::OpenCode
+            | CodingAgent::Goose
+            | CodingAgent::OhMyPi
+            | CodingAgent::Hermes
             | CodingAgent::Codex
             | CodingAgent::Copilot,
         )
@@ -382,8 +434,12 @@ pub(crate) fn finish(
         Some(CodingAgent::GeminiCli) => gemini_cli::finish(span_name, inputs, built),
         Some(CodingAgent::Copilot) => copilot::finish(kind, inputs, built),
         Some(CodingAgent::QwenCode) => qwen_code::finish(span_name, inputs, built),
-        Some(CodingAgent::Pi) => pi::finish(span_name, inputs, built),
+        Some(CodingAgent::Pi | CodingAgent::OpenCode | CodingAgent::OhMyPi) => {
+            rename_prefixed_tool(span_name, EXECUTE_TOOL_PREFIX, inputs, built);
+        }
         Some(CodingAgent::OpenClaw) => openclaw::finish(span_name, inputs, built),
+        Some(CodingAgent::Goose) => goose::finish(span_name, inputs, built),
+        Some(CodingAgent::Hermes) => hermes::finish(span_name, inputs, built),
         None => {}
     }
 }
@@ -398,6 +454,19 @@ pub(crate) fn rename_tool(built: &mut Span, name: &str) {
     built
         .attributes
         .insert(SPAN_NAME_ATTRIBUTE.to_owned(), original);
+}
+
+/// The prefix of the GenAI tool spans (`execute_tool <name>`) that Pi, OpenCode and Oh My Pi
+/// rename after their tool (D-CA-6).
+const EXECUTE_TOOL_PREFIX: &str = "execute_tool ";
+
+/// A span whose name starts with `prefix` takes the tool's name (D-CA-6).
+fn rename_prefixed_tool(span_name: &str, prefix: &str, inputs: &Finish, built: &mut Span) {
+    if span_name.starts_with(prefix)
+        && let Some(name) = inputs.tool_name.as_deref()
+    {
+        rename_tool(built, name);
+    }
 }
 
 /// A non-empty string, peeked: the bag keeps the key unread.
@@ -557,6 +626,32 @@ mod tests {
             Some(CodingAgent::OpenClaw)
         );
         assert_eq!(detect_agent(None, Some("openclaw.x"), "x", none), None);
+        assert_eq!(
+            detect_agent(None, Some("cetra-opencode"), "x", none),
+            Some(CodingAgent::OpenCode)
+        );
+        assert_eq!(
+            detect_agent(None, Some("cetra-opencode-x"), "x", none),
+            None
+        );
+        assert_eq!(
+            detect_agent(None, Some("goose"), "x", none),
+            Some(CodingAgent::Goose)
+        );
+        assert_eq!(detect_agent(None, Some("goose.x"), "x", none), None);
+        assert_eq!(
+            detect_agent(None, Some("@oh-my-pi/pi-agent-core"), "x", none),
+            Some(CodingAgent::OhMyPi)
+        );
+        assert_eq!(
+            detect_agent(None, Some("@oh-my-pi/pi-agent"), "x", none),
+            None
+        );
+        assert_eq!(
+            detect_agent(None, Some("hermes-otel-plugin"), "x", none),
+            Some(CodingAgent::Hermes)
+        );
+        assert_eq!(detect_agent(None, Some("hermes-otel"), "x", none), None);
     }
 
     #[test]
@@ -609,6 +704,10 @@ mod tests {
             CodingAgent::QwenCode,
             CodingAgent::Pi,
             CodingAgent::OpenClaw,
+            CodingAgent::OpenCode,
+            CodingAgent::Goose,
+            CodingAgent::OhMyPi,
+            CodingAgent::Hermes,
         ]
         .into_iter()
         .map(CodingAgent::wire_name)
@@ -622,7 +721,11 @@ mod tests {
                 "copilot",
                 "qwen-code",
                 "pi",
-                "openclaw"
+                "openclaw",
+                "opencode",
+                "goose",
+                "oh-my-pi",
+                "hermes-agent"
             ]
         );
     }

@@ -306,7 +306,7 @@ These rules resolve ambiguities in the tables above. They were fixed while writi
 
 ## Coding agents
 
-Claude Code, Codex CLI, Gemini CLI, GitHub Copilot, Qwen Code, Pi and OpenClaw write their spans in their own conventions. `normalize` recognizes them and fills the same columns as every other span (D-CA-3). Their rules run after the generic extraction and before cost. Each rule replaces a generic result only where it states one; a span the agent has no rule for keeps the generic result. The code is `crates/otel/src/agents/` (D-CA-3); `AgentContexts` and `canonical_repository` are its public items.
+Claude Code, Codex CLI, Gemini CLI, GitHub Copilot, Qwen Code, Pi, OpenClaw, OpenCode, Goose, Oh My Pi and Hermes Agent write their spans in their own conventions. `normalize` recognizes them and fills the same columns as every other span (D-CA-3). Their rules run after the generic extraction and before cost. Each rule replaces a generic result only where it states one; a span the agent has no rule for keeps the generic result. The code is `crates/otel/src/agents/` (D-CA-3); `AgentContexts` and `canonical_repository` are its public items.
 
 **Detection.** The first rule that matches wins. It reads the raw attributes, before any convention:
 
@@ -317,7 +317,11 @@ Claude Code, Codex CLI, Gemini CLI, GitHub Copilot, Qwen Code, Pi and OpenClaw w
 5. A scope name that starts with `github.copilot` or `copilot`, a `service.name` of `github-copilot` or `copilot-chat`, or any attribute key that starts with `github.copilot.`, is Copilot.
 6. A scope name of `cetra-pi` is Pi. That is the scope of cetra's own pi extension (D-IN-27 item 2).
 7. A scope name of `openclaw` is OpenClaw. OpenClaw's service name is configurable, so the scope is the key.
-8. Otherwise the span is not a coding-agent span, and no rule below applies.
+8. A scope name of `cetra-opencode` is OpenCode. That is the scope of cetra's own OpenCode plugin, which `cetra agents setup opencode` installs; OpenCode's spans come from that plugin, not from either build's own exporter (D-IN-29 item 1).
+9. A scope name of `goose` is Goose.
+10. A scope name of `@oh-my-pi/pi-agent-core` is Oh My Pi.
+11. A scope name of `hermes-otel-plugin` is Hermes Agent. Its telemetry is the community plugin `hermes-otel`.
+12. Otherwise the span is not a coding-agent span, and no rule below applies.
 
 **Codex discard.** Codex exports every internal `tracing` span of the process, about 700 for a one-tool prompt. A Codex span is kept only when it is `session_task.turn`, or when `codex.tool.phase` is `dispatch` and `tool_name` is a non-empty string. Every other Codex span is discarded before the id and time checks, so it is never counted as rejected. `normalize` counts it in `Normalized.discarded`. It is neither stored nor rejected, it does not appear in `partial_success`, and it is not a unit.
 
@@ -325,7 +329,7 @@ Claude Code, Codex CLI, Gemini CLI, GitHub Copilot, Qwen Code, Pi and OpenClaw w
 - Qwen Code: `qwen-code.hook`, and any span whose scope name starts with `@opentelemetry/instrumentation-`.
 - OpenClaw: `openclaw.model.usage` (a per-turn total of its `openclaw.model.call` spans, which it would double count), `openclaw.diagnostic.phase`, `openclaw.context.assembled`, and any name that starts with `openclaw.gateway.rpc.`.
 
-A span with one of these names under another service or scope is kept. Pi discards nothing.
+A span with one of these names under another service or scope is kept. Pi, OpenCode, Oh My Pi, Goose and Hermes discard nothing.
 
 **Re-link.** Codex's kept spans lose their real parents, so they are re-linked by rule (D-CA-6). `relink(turn id)` is the first 8 bytes of SHA-256(`cetra.codex.turn` ‖ turn id), and when that is all zeros, its last byte is set to 1. The turn id is `turn.id`, else `turn_id`. With a turn id, the turn span takes `relink(turn id)` as its `span_id` and has no parent, and a kept dispatch takes `relink(turn id)` as its parent. Without a turn id, nothing is re-linked: the ids and parents are kept. A kept dispatch takes its tool name in every case, with or without a turn id (§ Names).
 
@@ -350,6 +354,19 @@ A span with one of these names under another service or scope is kept. Pi discar
 | OpenClaw | `openclaw.run` | `agent` |
 | OpenClaw | `openclaw.harness.run` | `chain` |
 | OpenClaw | any other span | generic |
+| OpenCode | none | generic |
+| Goose | `reply` | `agent` |
+| Goose | `chat` | `chain` |
+| Goose | `stream_response_from_provider` | `llm` |
+| Goose | any other span | generic |
+| Oh My Pi | none | generic |
+| Hermes Agent | `agent` | `agent` |
+| Hermes Agent | a name starting `llm.` | `chain` |
+| Hermes Agent | a name starting `api.` | `llm` |
+| Hermes Agent | a name starting `tool.` | `tool` |
+| Hermes Agent | any other name | generic |
+
+A wrapper span is `chain`, not dropped, so its children keep their parent: Goose's `chat` repeats its child `stream_response_from_provider`'s tokens, and Hermes Agent's `llm.*` wrapper carries no tokens and parents the `api.*` calls and the tool.
 
 **Tokens.** The usage columns are read from the agent's own names, on `llm` spans only (rule 3). A count that is negative or not numeric is an invalid number (rule 20): it stays in `attributes` and `invalid_number` is recorded. When an agent gives no count on the span, the generic rules apply.
 
@@ -357,7 +374,7 @@ A span with one of these names under another service or scope is kept. Pi discar
 |---|---|---|
 | Claude Code | `claude_code.llm_request`: `input_tokens`, `output_tokens`, `cache_read_tokens`, `cache_creation_tokens` | `input_tokens` excludes the cache, so the input is `input_tokens + cache_read_tokens + cache_creation_tokens` (D110). Total is input plus output. The usage is `None` when neither `input_tokens` nor `output_tokens` is present. |
 | Codex | `session_task.turn`: `codex.turn.token_usage.input_tokens`, `cached_input_tokens`, `cache_write_input_tokens`, `output_tokens`, `reasoning_output_tokens`, `total_tokens` | `input_tokens` and `output_tokens` already include the cache and the reasoning, so nothing is added back. The total is `total_tokens`, else input plus output. The usage is `None` when neither input nor output is present. |
-| Gemini CLI, Copilot, Qwen Code, Pi, OpenClaw | none | generic |
+| Gemini CLI, Copilot, Qwen Code, Pi, OpenClaw, OpenCode, Goose, Oh My Pi, Hermes Agent | none | generic |
 
 **Time to first token.** On Claude Code spans, `ttft_ms` in milliseconds gives `ttft_ns`, when the generic rule gives none. On OpenClaw spans, `openclaw.model_call.time_to_first_byte_ms` in milliseconds gives `ttft_ns` by the same rule, on any OpenClaw span. The value is multiplied by 1 000 000; a value that overflows gives no `ttft_ns` and records `invalid_number`. A value that is not an integer is ignored and records `invalid_number`.
 
@@ -371,11 +388,11 @@ A span with one of these names under another service or scope is kept. Pi discar
 | Gemini CLI | `llm_call` | `gen_ai.tool.definitions`: the `functionDeclarations` of each element, flattened, become `tool_definitions`. `gen_ai.system_instructions` becomes `system_instructions`. | |
 | Gemini CLI | `tool_call`, `schedule_tool_calls` | `gen_ai.input.messages` as JSON, or as text when it is not JSON (rule 10). | `gen_ai.output.messages`, the same way. |
 
-On a Claude Code tool span, the agent's input and output replace the generic ones only when they are set, and the input and output errors of the convention that read them are removed. A Gemini conversion that fails leaves the generic result. Codex and Copilot spans have no payload rule. Codex spans carry no content, and Copilot's spans take the generic payload rules. Qwen Code, Pi and OpenClaw spans have no payload rule of their own either: the generic payload rules apply to them.
+On a Claude Code tool span, the agent's input and output replace the generic ones only when they are set, and the input and output errors of the convention that read them are removed. A Gemini conversion that fails leaves the generic result. Codex and Copilot spans have no payload rule. Codex spans carry no content, and Copilot's spans take the generic payload rules. Qwen Code, Pi, OpenClaw, OpenCode, Goose, Oh My Pi and Hermes Agent spans have no payload rule of their own either: the generic payload rules apply to them.
 
 Redacted content is no content. The placeholders `<REDACTED>` and `[REDACTED]` in Claude Code's `user_prompt` and tool output text mean that the agent did not capture the text, so no input or output is set from them.
 
-**Names.** A tool span takes the tool's name: Claude Code `gen_ai.tool.name`, else `tool_name`; Gemini CLI `tool_call`, Copilot tool spans, Qwen Code `qwen-code.tool`, Pi `execute_tool *` and OpenClaw `openclaw.tool.execution` take `gen_ai.tool.name`; Codex a kept dispatch `tool_name`. The name is then `tool_name`, and the original name moves to `attributes['cetra.span_name']`. `cetra.span_name` is written only when a rename changes the name. A Claude Code span whose name is not `claude_code.tool` keeps its name. The call id of Gemini (`gen_ai.tool.call_id`) and Codex (`call_id`) is not read: it stays in `attributes`.
+**Names.** A tool span takes the tool's name: Claude Code `gen_ai.tool.name`, else `tool_name`; Gemini CLI `tool_call`, Copilot tool spans, Qwen Code `qwen-code.tool`, Pi, OpenCode and Oh My Pi `execute_tool *`, Goose `execute_tool`, OpenClaw `openclaw.tool.execution` and Hermes Agent `tool.*` take `gen_ai.tool.name`; Codex a kept dispatch `tool_name`. The name is then `tool_name`, and the original name moves to `attributes['cetra.span_name']`. `cetra.span_name` is written only when a rename changes the name. A Claude Code span whose name is not `claude_code.tool` keeps its name. The call id of Gemini (`gen_ai.tool.call_id`) and Codex (`call_id`) is not read: it stays in `attributes`.
 
 **Person (D-CA-5).** `user_id` takes the first of these that has a value:
 
@@ -387,7 +404,7 @@ Copilot has no session context. Its `enduser.pseudo.id` is the last source in th
 
 **Session ids.** A Codex span, the turn or any other kept span, takes `conversation.id`, else its first non-empty string `thread.id`. An integer `thread.id` is the OS thread and is ignored. Gemini CLI, Qwen Code and Claude Code use the generic `session_id` sources. The Codex request model is `model`, when no other source gives one.
 
-**Metadata (D-CA-4).** Each coding-agent span gets `coding_agent`, one of `claude-code`, `codex`, `gemini-cli`, `copilot`, `qwen-code`, `pi` or `openclaw`. It also gets, when there is a value:
+**Metadata (D-CA-4).** Each coding-agent span gets `coding_agent`, one of `claude-code`, `codex`, `gemini-cli`, `copilot`, `qwen-code`, `pi`, `openclaw`, `opencode`, `goose`, `oh-my-pi` or `hermes-agent`. It also gets, when there is a value:
 
 - `repository`, in canonical form. The canonical form is `canonical_repository` of the URL: trimmed, lowercased, with the scheme, user-info and any port removed, `.git` and trailing slashes removed, and `host/seg1/…/segN`. It is `None` when the host is empty or there are fewer than two path segments. The source is the session context's repository, else Claude Code's `vcs.repository.url.full`, else Copilot's `github.copilot.git.repository`, else its `copilot_chat.repo.remote_url`.
 - `branch`: the session context's branch, else Copilot's `github.copilot.git.branch`, else its `copilot_chat.repo.head_branch_name`.
@@ -478,7 +495,7 @@ The fixture format is defined in `fixtures/otlp/README.md` (D66). Each case is a
 | Langfuse SDK (Python, 5.x) | drop-in client | — | — | the SDK's own observations |
 | Laminar (Python) | client | — | — | the SDK's own spans |
 | Google ADK | — | — | native model calls | native agent spans |
-| Coding agents (§ Coding agents) | Codex CLI (captured), Qwen Code (captured), Pi (captured), OpenClaw (captured) | Claude Code (captured) | Gemini CLI (captured) | Copilot (hand-written) |
+| Coding agents (§ Coding agents) | Codex CLI (captured), Qwen Code (captured), Pi (captured), OpenClaw (captured), OpenCode (captured), Goose (captured), Oh My Pi (captured), Hermes Agent (captured) | Claude Code (captured) | Gemini CLI (captured) | Copilot (hand-written) |
 
 OpenAI client to OpenRouter and Novita: OpenInference through cetra's SDK, and OpenLLMetry (D-IN-19).
 
