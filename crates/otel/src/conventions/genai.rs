@@ -4,7 +4,7 @@
 //! rule 16. Tool-call arguments and results are read only on tool spans.
 
 use cetra_core::enums::SpanKind;
-use cetra_core::message::{Message, Role};
+use cetra_core::message::{Message, Part, Role};
 use opentelemetry_proto::tonic::common::v1::AnyValue;
 use opentelemetry_proto::tonic::trace::v1::span::Event;
 use serde_json::{Map, Value as Json};
@@ -13,7 +13,7 @@ use super::{messages_from_value, present_json};
 use crate::convert::{converse_message, converse_text, openai_messages};
 use crate::payload::{
     Field, Io, KeyPattern, Payload, ReadContext, decode_json_text, non_message_payload,
-    tool_definitions,
+    parse_tool_arguments, tool_definitions,
 };
 use crate::value::as_str;
 use crate::warn::Warnings;
@@ -28,6 +28,8 @@ const FINISH_REASONS: &str = "gen_ai.response.finish_reasons";
 const DETAILS: &str = "gen_ai.client.inference.operation.details";
 const OPERATION: &str = "gen_ai.operation.name";
 const CHOICE: &str = "gen_ai.choice";
+const LITELLM_CALL_NAME: &str = "gen_ai.completion.0.function_call.name";
+const LITELLM_CALL_ARGUMENTS: &str = "gen_ai.completion.0.function_call.arguments";
 
 const INPUT_EVENTS: &[(&str, &str)] = &[
     ("gen_ai.system.message", "system"),
@@ -72,6 +74,7 @@ pub(crate) fn read(ctx: &mut ReadContext<'_, '_>) -> Io {
         false,
         &mut legacy,
     );
+    litellm_tool_call(ctx, &mut io);
     if io.system_instructions.is_none() {
         io.system_instructions = instruction(ctx, SYSTEM);
     }
@@ -79,6 +82,54 @@ pub(crate) fn read(ctx: &mut ReadContext<'_, '_>) -> Io {
     fill_finish_reasons(ctx, &mut io);
     io.events = payload_events(ctx, &legacy);
     io
+}
+
+/// LiteLLM writes a tool-calling turn's output as one assistant message with
+/// no parts, and the call only as `gen_ai.completion.0.function_call.{name,
+/// arguments}` (D-IN-25). When the output is exactly that message and the
+/// name is a non-empty string, the call becomes one `tool_call` part of it.
+///
+/// The keys fall under OpenLLMetry's `gen_ai.completion.` prefix, but every
+/// reader runs before `drop_lower_payloads`, so they are still in the bag
+/// here. This function marks them itself (`take_payload` ignores a missing
+/// key), so they never reach `attributes` whatever the detected conventions
+/// are; that is why GenAI's `PAYLOAD_KEYS` needs no entry for them.
+fn litellm_tool_call(ctx: &mut ReadContext<'_, '_>, io: &mut Io) {
+    let empty_assistant = matches!(
+        io.output.as_ref(),
+        Some(Payload::Messages(messages))
+            if messages.len() == 1
+                && messages[0].role == Role::Assistant
+                && messages[0].parts.is_empty()
+    );
+    if !empty_assistant {
+        return;
+    }
+    let Some(name) = ctx
+        .bag
+        .get(LITELLM_CALL_NAME)
+        .and_then(as_str)
+        .filter(|name| !name.is_empty())
+    else {
+        return;
+    };
+    let name = name.to_owned();
+    let arguments = ctx
+        .bag
+        .get(LITELLM_CALL_ARGUMENTS)
+        .and_then(as_str)
+        .map(|text| parse_tool_arguments(Json::String(text.to_owned())));
+    ctx.bag.take_payload(LITELLM_CALL_NAME);
+    ctx.bag.take_payload(LITELLM_CALL_ARGUMENTS);
+    let Some(Payload::Messages(messages)) = io.output.as_mut() else {
+        return;
+    };
+    messages[0].parts.push(Part::ToolCall {
+        id: None,
+        name,
+        arguments,
+        extra: Map::new(),
+    });
 }
 
 /// `legacy` collects the indices of the legacy events a reader read (Strands
@@ -565,7 +616,7 @@ fn details_attr<'a>(events: &'a [Event], key: &str) -> Option<&'a AnyValue> {
 #[cfg(test)]
 mod tests {
     use super::read;
-    use crate::bag::AttrBag;
+    use crate::bag::{AttrBag, Use};
     use crate::payload::{Io, Payload, ReadContext};
     use crate::warn::Warnings;
     use cetra_core::enums::SpanKind;
@@ -611,6 +662,128 @@ mod tests {
             conventions: &[],
             warnings: &mut warnings,
         })
+    }
+
+    /// Reads the span and keeps the bag, so a test can check how each key was used.
+    fn read_span_with_bag(attrs: &[KeyValue]) -> (Io, AttrBag<'_>) {
+        let mut warnings = Warnings::default();
+        let mut bag = AttrBag::new(attrs, &mut warnings);
+        let io = read(&mut ReadContext {
+            bag: &mut bag,
+            events: &[],
+            kind: SpanKind::Llm,
+            scope: "",
+            conventions: &[],
+            warnings: &mut warnings,
+        });
+        (io, bag)
+    }
+
+    const LITELLM_CALL_NAME: &str = "gen_ai.completion.0.function_call.name";
+    const LITELLM_CALL_ARGUMENTS: &str = "gen_ai.completion.0.function_call.arguments";
+
+    #[test]
+    fn litellm_function_call_keys_become_the_output_tool_call() {
+        // A span carrying both conventions (D-IN-25): the output is one
+        // assistant message with no parts, and the call is only in the
+        // OpenLLMetry-shaped keys.
+        let attrs = [
+            string_attr(
+                "gen_ai.output.messages",
+                r#"[{"role":"assistant","parts":[],"finish_reason":"tool_calls"}]"#,
+            ),
+            string_attr(LITELLM_CALL_NAME, "get_weather"),
+            string_attr(LITELLM_CALL_ARGUMENTS, r#"{"city":"Paris"}"#),
+        ];
+        let (io, bag) = read_span_with_bag(&attrs);
+        let Payload::Messages(messages) = io.output.expect("output") else {
+            panic!("output is messages");
+        };
+        assert_eq!(messages.len(), 1);
+        assert_eq!(
+            messages_to_json(&messages),
+            r#"[{"role":"assistant","parts":[{"type":"tool_call","name":"get_weather","arguments":{"city":"Paris"}}],"finish_reason":"tool_calls"}]"#
+        );
+        assert_eq!(bag.state(LITELLM_CALL_NAME), Some(Use::Payload));
+        assert_eq!(bag.state(LITELLM_CALL_ARGUMENTS), Some(Use::Payload));
+
+        // Without the arguments key the call has no arguments; a missing key is
+        // no problem for the marking.
+        let attrs = [
+            string_attr(
+                "gen_ai.output.messages",
+                r#"[{"role":"assistant","parts":[],"finish_reason":"tool_calls"}]"#,
+            ),
+            string_attr(LITELLM_CALL_NAME, "get_weather"),
+        ];
+        let (io, bag) = read_span_with_bag(&attrs);
+        let Payload::Messages(messages) = io.output.expect("output") else {
+            panic!("output is messages");
+        };
+        assert_eq!(
+            messages_to_json(&messages),
+            r#"[{"role":"assistant","parts":[{"type":"tool_call","name":"get_weather"}],"finish_reason":"tool_calls"}]"#
+        );
+        assert_eq!(bag.state(LITELLM_CALL_NAME), Some(Use::Payload));
+        assert_eq!(bag.state(LITELLM_CALL_ARGUMENTS), None);
+
+        // An output whose message has parts is left alone, and the keys stay
+        // unread for the OpenLLMetry reader.
+        let attrs = [
+            string_attr(
+                "gen_ai.output.messages",
+                r#"[{"role":"assistant","parts":[{"type":"text","content":"Paris."}]}]"#,
+            ),
+            string_attr(LITELLM_CALL_NAME, "get_weather"),
+            string_attr(LITELLM_CALL_ARGUMENTS, r#"{"city":"Paris"}"#),
+        ];
+        let (io, bag) = read_span_with_bag(&attrs);
+        let Payload::Messages(messages) = io.output.expect("output") else {
+            panic!("output is messages");
+        };
+        assert_eq!(
+            messages_to_json(&messages),
+            r#"[{"role":"assistant","parts":[{"type":"text","content":"Paris."}]}]"#
+        );
+        assert_eq!(bag.state(LITELLM_CALL_NAME), Some(Use::Unread));
+        assert_eq!(bag.state(LITELLM_CALL_ARGUMENTS), Some(Use::Unread));
+
+        // An empty name is no call: nothing is added and nothing is marked.
+        let attrs = [
+            string_attr(
+                "gen_ai.output.messages",
+                r#"[{"role":"assistant","parts":[]}]"#,
+            ),
+            string_attr(LITELLM_CALL_NAME, ""),
+            string_attr(LITELLM_CALL_ARGUMENTS, r#"{"city":"Paris"}"#),
+        ];
+        let (io, bag) = read_span_with_bag(&attrs);
+        let Payload::Messages(messages) = io.output.expect("output") else {
+            panic!("output is messages");
+        };
+        assert_eq!(
+            messages_to_json(&messages),
+            r#"[{"role":"assistant","parts":[]}]"#
+        );
+        assert_eq!(bag.state(LITELLM_CALL_NAME), Some(Use::Unread));
+        assert_eq!(bag.state(LITELLM_CALL_ARGUMENTS), Some(Use::Unread));
+
+        // Two messages, or a message of another role, are not LiteLLM's shape.
+        for output in [
+            r#"[{"role":"assistant","parts":[]},{"role":"assistant","parts":[]}]"#,
+            r#"[{"role":"user","parts":[]}]"#,
+        ] {
+            let attrs = [
+                string_attr("gen_ai.output.messages", output),
+                string_attr(LITELLM_CALL_NAME, "get_weather"),
+            ];
+            let (io, bag) = read_span_with_bag(&attrs);
+            let Payload::Messages(messages) = io.output.expect("output") else {
+                panic!("output is messages");
+            };
+            assert_eq!(messages_to_json(&messages), output);
+            assert_eq!(bag.state(LITELLM_CALL_NAME), Some(Use::Unread));
+        }
     }
 
     const TRACER: &str = "strands.telemetry.tracer";

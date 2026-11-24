@@ -24,9 +24,20 @@ const TOTAL_KEYS: &[&str] = &[
     "llm.cost.total",
     "gen_ai.usage.cost",
     "gen_ai.usage.total_cost",
+    "gen_ai.cost.total_cost",
 ];
-const INPUT_KEYS: &[&str] = &["llm.cost.prompt", "gen_ai.usage.input_cost"];
-const OUTPUT_KEYS: &[&str] = &["llm.cost.completion", "gen_ai.usage.output_cost"];
+const INPUT_KEYS: &[&str] = &[
+    "llm.cost.prompt",
+    "gen_ai.usage.input_cost",
+    "gen_ai.cost.input_cost",
+    "bifrost.cost.input",
+];
+const OUTPUT_KEYS: &[&str] = &[
+    "llm.cost.completion",
+    "gen_ai.usage.output_cost",
+    "gen_ai.cost.output_cost",
+    "bifrost.cost.output",
+];
 const COST_DETAILS: &str = "langfuse.observation.cost_details";
 /// Semconv provider for any Google GenAI endpoint. See [`same_provider`].
 const GCP_GEN_AI: &str = "gcp.gen_ai";
@@ -1435,5 +1446,106 @@ mod tests {
             bag.state("langfuse.observation.cost_details"),
             Some(Use::Unread)
         );
+    }
+
+    #[test]
+    fn gateway_cost_keys_fill_their_columns_alone() {
+        use crate::bag::Use;
+        use opentelemetry_proto::tonic::common::v1::any_value::Value;
+        use opentelemetry_proto::tonic::common::v1::{AnyValue, KeyValue};
+
+        fn double_attr(key: &str, value: f64) -> KeyValue {
+            KeyValue {
+                key: key.to_owned(),
+                value: Some(AnyValue {
+                    value: Some(Value::DoubleValue(value)),
+                }),
+                key_strindex: 0,
+            }
+        }
+
+        let prices = table(vec![row("gpt-4o-mini", PriceScope::Builtin, None, 0, 9.0)]);
+        let usage = usage_input(1_000_000);
+        let charge = Charge {
+            kind: SpanKind::Llm,
+            provider: None,
+            model: Some("gpt-4o-mini"),
+            request_model: None,
+            start_time: 0,
+            usage: &usage,
+        };
+        // Each gateway key alone fills its own column; the missing parts and
+        // the sum stay null (LiteLLM and Bifrost, D-IN-16).
+        for (key, input, output, total) in [
+            ("gen_ai.cost.total_cost", None, None, Some(2.5e-5)),
+            ("gen_ai.cost.input_cost", Some(1.2e-5), None, None),
+            ("gen_ai.cost.output_cost", None, Some(1.0e-5), None),
+            ("bifrost.cost.input", Some(4.65e-6), None, None),
+            ("bifrost.cost.output", None, Some(7.2e-6), None),
+        ] {
+            let attrs = [double_attr(
+                key,
+                total.or(input).or(output).expect("a value"),
+            )];
+            let mut warnings = Warnings::default();
+            let mut bag = AttrBag::new(&attrs, &mut warnings);
+            let priced = apply(&mut bag, &charge, &prices, &mut warnings);
+            assert_eq!(priced.source, Some(CostSource::Reported), "{key}");
+            assert_eq!(priced.input, input, "{key}");
+            assert_eq!(priced.output, output, "{key}");
+            assert_eq!(priced.total, total, "{key}");
+            assert_eq!(bag.state(key), Some(Use::Consumed), "{key}");
+        }
+    }
+
+    #[test]
+    fn a_gateway_total_with_margin_wins_over_the_price_table() {
+        use opentelemetry_proto::tonic::common::v1::any_value::Value;
+        use opentelemetry_proto::tonic::common::v1::{AnyValue, KeyValue};
+
+        fn double_attr(key: &str, value: f64) -> KeyValue {
+            KeyValue {
+                key: key.to_owned(),
+                value: Some(AnyValue {
+                    value: Some(Value::DoubleValue(value)),
+                }),
+                key_strindex: 0,
+            }
+        }
+
+        // 9 USD per 1M input tokens, 1M tokens: the table's figure is 9.
+        let prices = table(vec![row("gpt-4o-mini", PriceScope::Builtin, None, 0, 9.0)]);
+        let usage = usage_input(1_000_000);
+        let charge = Charge {
+            kind: SpanKind::Llm,
+            provider: None,
+            model: Some("gpt-4o-mini"),
+            request_model: None,
+            start_time: 0,
+            usage: &usage,
+        };
+        let mut warnings = Warnings::default();
+        let mut bag = AttrBag::new(&[], &mut warnings);
+        let computed = apply(&mut bag, &charge, &prices, &mut warnings);
+        assert_eq!(computed.source, Some(CostSource::Computed));
+        assert_eq!(computed.total, Some(9.0));
+
+        // The reported total differs from the table's figure and wins; the
+        // parts are LiteLLM's raw token costs, before its discount and margin,
+        // so they need not add up to the total (D-IN-16).
+        let attrs = [
+            double_attr("gen_ai.cost.total_cost", 2.35125e-5),
+            double_attr("gen_ai.cost.input_cost", 1.23e-5),
+            double_attr("gen_ai.cost.output_cost", 1.02e-5),
+        ];
+        let mut warnings = Warnings::default();
+        let mut bag = AttrBag::new(&attrs, &mut warnings);
+        let priced = apply(&mut bag, &charge, &prices, &mut warnings);
+        assert_eq!(priced.source, Some(CostSource::Reported));
+        assert_eq!(priced.input, Some(1.23e-5));
+        assert_eq!(priced.output, Some(1.02e-5));
+        assert_eq!(priced.total, Some(2.35125e-5));
+        let parts = priced.input.expect("input") + priced.output.expect("output");
+        assert!((priced.total.expect("total") - parts).abs() > 1e-12);
     }
 }

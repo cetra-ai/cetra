@@ -74,12 +74,23 @@ pub(crate) fn span_kind(
 /// presence of an executor, edge group or workflow id makes the span `chain`.
 /// The keys are peeked, not consumed. Mirascope (D-IN-23 item 6): its
 /// `@ops.trace` spans carry only `mirascope.type`.
+///
+/// Bifrost (D-IN-25): its server root span has no `gen_ai.operation.name` and
+/// repeats its `chat` child's model and content, so under the scope `bifrost`
+/// a model key makes such a span `chain`. The keys are peeked, not consumed,
+/// and its `chat` child is decided earlier by its operation name.
 fn scope_gated(bag: &mut AttrBag<'_>, scope_name: &str) -> Option<SpanKind> {
     if scope_name == "agent_framework"
         && !present(bag, "gen_ai.operation.name")
         && (present(bag, "executor.id")
             || present(bag, "edge_group.id")
             || present(bag, "workflow.id"))
+    {
+        return Some(SpanKind::Chain);
+    }
+    if scope_name == "bifrost"
+        && !present(bag, "gen_ai.operation.name")
+        && (present(bag, "gen_ai.request.model") || present(bag, "gen_ai.response.model"))
     {
         return Some(SpanKind::Chain);
     }
@@ -109,7 +120,7 @@ fn genai_operation(text: &str) -> Option<SpanKind> {
     Some(match text {
         "chat" | "text_completion" | "text_completions" | "generate_content" | "response"
         | "call_llm" => SpanKind::Llm,
-        "embeddings" => SpanKind::Embedding,
+        "embeddings" | "embedding" | "aembedding" => SpanKind::Embedding,
         "execute_tool" => SpanKind::Tool,
         "invoke_agent" | "create_agent" => SpanKind::Agent,
         "retrieval" => SpanKind::Retriever,
@@ -384,6 +395,8 @@ mod tests {
             ("response", SpanKind::Llm),
             ("call_llm", SpanKind::Llm),
             ("embeddings", SpanKind::Embedding),
+            ("embedding", SpanKind::Embedding),
+            ("aembedding", SpanKind::Embedding),
             ("execute_tool", SpanKind::Tool),
             ("invoke_agent", SpanKind::Agent),
             ("create_agent", SpanKind::Agent),
@@ -471,6 +484,47 @@ mod tests {
             kind_in("agent_framework", &[string_attr("message.type", "str")]),
             SpanKind::Span
         );
+    }
+
+    #[test]
+    fn bifrost_root_spans_are_chain_only_under_their_scope() {
+        // The server root span: scope `bifrost`, no operation name, a request
+        // model. The keys are peeked, never consumed.
+        let attrs = [string_attr("gen_ai.request.model", "gpt-4o-mini")];
+        let mut bag = AttrBag::new(&attrs, &mut Warnings::default());
+        assert_eq!(span_kind(&mut bag, "bifrost", &[]), SpanKind::Chain);
+        assert_eq!(bag.state("gen_ai.request.model"), Some(Use::Unread));
+        // The response model alone decides too.
+        let attrs = [string_attr(
+            "gen_ai.response.model",
+            "gpt-4o-mini-2024-07-18",
+        )];
+        let mut bag = AttrBag::new(&attrs, &mut Warnings::default());
+        assert_eq!(span_kind(&mut bag, "bifrost", &[]), SpanKind::Chain);
+        assert_eq!(bag.state("gen_ai.response.model"), Some(Use::Unread));
+        // The same attributes in another scope stay `llm` (model fallback).
+        assert_eq!(
+            kind_of(&[string_attr("gen_ai.request.model", "gpt-4o-mini")]),
+            SpanKind::Llm
+        );
+        assert_eq!(
+            kind_in(
+                "semantic_kernel",
+                &[string_attr("gen_ai.request.model", "gpt-4o-mini")]
+            ),
+            SpanKind::Llm
+        );
+        // Without a model (the 24 `plugin.*` spans carry no attributes) the
+        // scope decides nothing.
+        assert_eq!(kind_in("bifrost", &[]), SpanKind::Span);
+        // A `chat` span names its operation and stays `llm`.
+        let attrs = [
+            string_attr("gen_ai.operation.name", "chat"),
+            string_attr("gen_ai.request.model", "gpt-4o-mini"),
+        ];
+        let mut bag = AttrBag::new(&attrs, &mut Warnings::default());
+        assert_eq!(span_kind(&mut bag, "bifrost", &[]), SpanKind::Llm);
+        assert_eq!(bag.state("gen_ai.operation.name"), Some(Use::Consumed));
     }
 
     #[test]

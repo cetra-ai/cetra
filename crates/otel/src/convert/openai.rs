@@ -68,10 +68,21 @@ fn message(value: &Json, index: usize) -> Result<Message, ConvertError> {
             extra: Map::new(),
         });
     } else if let Some(content) = extra.shift_remove("content") {
-        match content_parts(content) {
-            Ok(converted) => parts.extend(converted),
-            Err(content) => {
-                extra.insert("content".to_owned(), content);
+        // Bifrost writes an empty string for the content of an assistant
+        // message that only calls tools; beside tool calls it is no text part
+        // (D-IN-25).
+        let beside_tool_calls = extra
+            .get("tool_calls")
+            .and_then(Json::as_array)
+            .is_some_and(|calls| !calls.is_empty());
+        let empty_content =
+            beside_tool_calls && matches!(&content, Json::String(text) if text.is_empty());
+        if !empty_content {
+            match content_parts(content) {
+                Ok(converted) => parts.extend(converted),
+                Err(content) => {
+                    extra.insert("content".to_owned(), content);
+                }
             }
         }
     }
@@ -255,6 +266,13 @@ fn tool_call(value: Json) -> Part {
     let Json::Object(map) = value else {
         return Part::Unknown(value);
     };
+    // A flattened call (Bifrost): `name` and `args` on the element itself,
+    // no `function` object (D-IN-25).
+    if !map.contains_key("function")
+        && let Some(name) = map.get("name").and_then(Json::as_str).map(str::to_owned)
+    {
+        return flattened_tool_call(map, name);
+    }
     let Some(name) = map
         .get("function")
         .and_then(Json::as_object)
@@ -287,6 +305,28 @@ fn tool_call(value: Json) -> Part {
     for (key, value) in function {
         map.entry(key).or_insert(value);
     }
+    Part::ToolCall {
+        id,
+        name,
+        arguments,
+        extra: map,
+    }
+}
+
+/// A flattened `tool_calls` element (Bifrost, D-IN-25): `id`, `name` and
+/// `args` on the element itself. `args` is parsed exactly as
+/// `function.arguments` is; every other key stays in `extra`.
+fn flattened_tool_call(mut map: Map<String, Json>, name: String) -> Part {
+    let id = match map.get("id") {
+        Some(Json::String(id)) => Some(id.clone()),
+        _ => None,
+    };
+    if id.is_some() {
+        map.shift_remove("id");
+    }
+    map.shift_remove("type");
+    map.shift_remove("name");
+    let arguments = map.shift_remove("args").map(parse_tool_arguments);
     Part::ToolCall {
         id,
         name,
@@ -398,6 +438,115 @@ mod tests {
                 r#"{"type":"tool_call","id":"call_3","name":"bare"},"#,
                 r#"{"type":"tool_call","name":"anon","arguments":{"ok":true}},"#,
                 r#""not-a-call"]}]"#
+            )
+        );
+    }
+
+    #[test]
+    fn a_flattened_tool_call_is_a_tool_call_part() {
+        // Bifrost writes `name` and `args` on the element, with no `function`
+        // object (D-IN-25). `args` is parsed as `function.arguments` is.
+        assert_eq!(
+            converted(&json!([{
+                "role": "assistant",
+                "tool_calls": [
+                    {"id": "call_1", "type": "function", "name": "get_weather", "args": "{\"city\":\"Paris\"}"}
+                ]
+            }])),
+            r#"[{"role":"assistant","parts":[{"type":"tool_call","id":"call_1","name":"get_weather","arguments":{"city":"Paris"}}]}]"#
+        );
+        // Every other key stays in `extra`.
+        assert_eq!(
+            converted(&json!([{
+                "role": "assistant",
+                "tool_calls": [
+                    {"id": "call_1", "type": "function", "name": "get_weather", "args": "{}", "index": 0}
+                ]
+            }])),
+            r#"[{"role":"assistant","parts":[{"type":"tool_call","id":"call_1","name":"get_weather","arguments":{},"index":0}]}]"#
+        );
+        // Without `args` there are no arguments.
+        assert_eq!(
+            converted(&json!([{
+                "role": "assistant",
+                "tool_calls": [{"id": "call_1", "type": "function", "name": "ping"}]
+            }])),
+            r#"[{"role":"assistant","parts":[{"type":"tool_call","id":"call_1","name":"ping"}]}]"#
+        );
+        // `args` that is already JSON is kept, and text that is not JSON stays
+        // text, as on the `function` path.
+        assert_eq!(
+            converted(&json!([{
+                "role": "assistant",
+                "tool_calls": [
+                    {"id": "call_1", "name": "ping", "args": {"ok": true}},
+                    {"id": "call_2", "name": "ping", "args": "not json"}
+                ]
+            }])),
+            concat!(
+                r#"[{"role":"assistant","parts":["#,
+                r#"{"type":"tool_call","id":"call_1","name":"ping","arguments":{"ok":true}},"#,
+                r#"{"type":"tool_call","id":"call_2","name":"ping","arguments":"not json"}]}]"#
+            )
+        );
+        // An `id` that is not a string stays in `extra`; no `id`, none.
+        assert_eq!(
+            converted(&json!([{
+                "role": "assistant",
+                "tool_calls": [{"id": 7, "name": "ping"}, {"name": "pong"}]
+            }])),
+            concat!(
+                r#"[{"role":"assistant","parts":["#,
+                r#"{"type":"tool_call","name":"ping","id":7},"#,
+                r#"{"type":"tool_call","name":"pong"}]}]"#
+            )
+        );
+        // A `function` object is still read the old way: its `name` wins over
+        // a top-level one (which stays out of the modelled fields).
+        assert_eq!(
+            converted(&json!([{
+                "role": "assistant",
+                "tool_calls": [
+                    {"id": "call_1", "name": "outer", "function": {"name": "inner", "arguments": "{}"}}
+                ]
+            }])),
+            r#"[{"role":"assistant","parts":[{"type":"tool_call","id":"call_1","name":"inner","arguments":{}}]}]"#
+        );
+    }
+
+    #[test]
+    fn an_empty_content_beside_tool_calls_adds_no_text_part() {
+        assert_eq!(
+            converted(&json!([{
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [
+                    {"id": "call_1", "type": "function", "name": "get_weather", "args": "{\"city\":\"Paris\"}"}
+                ]
+            }])),
+            r#"[{"role":"assistant","parts":[{"type":"tool_call","id":"call_1","name":"get_weather","arguments":{"city":"Paris"}}]}]"#
+        );
+        // Without tool calls the empty string is still a text part, and an
+        // empty array does not count as tool calls.
+        assert_eq!(
+            converted(&json!([{"role": "assistant", "content": ""}])),
+            r#"[{"role":"assistant","parts":[{"type":"text","content":""}]}]"#
+        );
+        assert_eq!(
+            converted(&json!([{"role": "assistant", "content": "", "tool_calls": []}])),
+            r#"[{"role":"assistant","parts":[{"type":"text","content":""}]}]"#
+        );
+        // Text beside tool calls keeps its part.
+        assert_eq!(
+            converted(&json!([{
+                "role": "assistant",
+                "content": "yes",
+                "tool_calls": [{"id": "call_1", "type": "function", "function": {"name": "ping", "arguments": "{}"}}]
+            }])),
+            concat!(
+                r#"[{"role":"assistant","parts":["#,
+                r#"{"type":"text","content":"yes"},"#,
+                r#"{"type":"tool_call","id":"call_1","name":"ping","arguments":{}}]}]"#
             )
         );
     }
