@@ -264,11 +264,12 @@ pub(crate) fn fill(
     let request_model = mirascope_model(bag, scope_name, request_model);
     let response_model = mirascope_model(bag, scope_name, response_model);
     let request_model = voltagent_model(bag, conventions, request_model);
-    let provider = provider(bag, resource);
+    let provider = provider(bag, resource, scope_name);
     let operation = string_field(bag, resource, OPERATION);
     let request_params = request_params(bag, warnings);
     let session_id = string_field(bag, resource, SESSION_ID);
     let session_id = voltagent_session(bag, conventions, session_id);
+    let session_id = pipecat_session(bag, scope_name, session_id);
     let user_id = string_field(bag, resource, USER_ID);
     let environment = string_field(bag, resource, ENVIRONMENT);
     let release = string_field(bag, resource, RELEASE);
@@ -333,7 +334,15 @@ fn prompt(bag: &mut AttrBag<'_>, warnings: &mut Warnings) -> (Option<String>, Op
 /// Rule 12 over [`PROVIDER`]. A `gen_ai.provider.name` or `gen_ai.system` value
 /// that names a framework ([`FRAMEWORK_NAMES`], D-IN-15, D-B1-8, D-IN-23) is
 /// skipped and left unread, so the next source or the price table decides.
-fn provider(bag: &mut AttrBag<'_>, resource: &ResourceView<'_>) -> Option<String> {
+/// On scope `livekit-agents` a host-shaped provider decides first ([`livekit_provider`]).
+fn provider(
+    bag: &mut AttrBag<'_>,
+    resource: &ResourceView<'_>,
+    scope_name: &str,
+) -> Option<String> {
+    if let Some(provider) = livekit_provider(bag, scope_name) {
+        return provider;
+    }
     let sources: Vec<Source> = PROVIDER
         .iter()
         .copied()
@@ -342,6 +351,30 @@ fn provider(bag: &mut AttrBag<'_>, resource: &ResourceView<'_>) -> Option<String
     first_string(bag, resource, &sources).map(|resolved| {
         canonical_provider(&resolved.value, resolved.source.key == "ai.model.provider")
     })
+}
+
+/// R-LK-1 (D-IN-5, D-IN-2): on scope `livekit-agents`, a `gen_ai.provider.name`
+/// that contains `.` or `:` is a host (LiveKit writes the netloc of its base
+/// URL). The key is consumed and the host goes through the endpoint table:
+/// `api.openai.com` is `openai`, other hosts their mapped provider. An unmapped
+/// host gives no provider, and no later source is read. `None` when the rule
+/// does not apply. No row is added to [`ENDPOINT_PROVIDERS`].
+fn livekit_provider(bag: &mut AttrBag<'_>, scope_name: &str) -> Option<Option<String>> {
+    if scope_name != "livekit-agents" {
+        return None;
+    }
+    let text = bag
+        .get("gen_ai.provider.name")
+        .and_then(as_str)
+        .filter(|text| text.contains(['.', ':']))?;
+    let host = host_of(text);
+    bag.take("gen_ai.provider.name");
+    let mapped = match host.as_deref() {
+        Some("api.openai.com") => Some("openai"),
+        Some(host) => match_endpoint(host),
+        None => None,
+    };
+    Some(mapped.map(str::to_owned))
 }
 
 /// Whether `key` is a framework-naming provider key whose value is in
@@ -406,6 +439,26 @@ fn voltagent_model(
         }
     }
     model
+}
+
+/// R-PC-3 (D-IN-5): on a span of scope `pipecat.turn` whose session is still
+/// empty, `conversation.id` fills it. Only the `conversation` and `turn` spans
+/// carry the key, so the scope is exact. A key is consumed when it fills the column.
+fn pipecat_session(
+    bag: &mut AttrBag<'_>,
+    scope_name: &str,
+    session: Option<String>,
+) -> Option<String> {
+    if session.is_some() || scope_name != "pipecat.turn" {
+        return session;
+    }
+    let text = bag
+        .get("conversation.id")
+        .and_then(as_str)
+        .filter(|text| !text.is_empty())?;
+    let text = text.to_owned();
+    bag.take("conversation.id");
+    Some(text)
 }
 
 /// V6 (D-IN-6): on a `voltagent` span whose session is still empty,
@@ -1848,5 +1901,82 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn livekit_hosts_in_the_provider_go_through_the_endpoint_table() {
+        let attrs = [
+            string_attr("gen_ai.provider.name", "api.openai.com"),
+            string_attr("gen_ai.request.model", "gpt-4o-mini"),
+        ];
+        let (fields, bag) = filled_in_scope("livekit-agents", &attrs);
+        assert_eq!(fields.provider.as_deref(), Some("openai"));
+        assert_eq!(bag.state("gen_ai.provider.name"), Some(Use::Consumed));
+
+        let attrs = [string_attr("gen_ai.provider.name", "openrouter.ai")];
+        let (fields, _) = filled_in_scope("livekit-agents", &attrs);
+        assert_eq!(fields.provider.as_deref(), Some("openrouter"));
+
+        // An unmapped host leaves the provider empty and is consumed; no later
+        // source of the provider is read.
+        let attrs = [
+            string_attr("gen_ai.provider.name", "127.0.0.1:1234"),
+            string_attr("gen_ai.system", "anthropic"),
+        ];
+        let (fields, bag) = filled_in_scope("livekit-agents", &attrs);
+        assert_eq!(fields.provider, None);
+        assert_eq!(bag.state("gen_ai.provider.name"), Some(Use::Consumed));
+        assert_eq!(bag.state("gen_ai.system"), Some(Use::Unread));
+
+        // A plain provider name is unchanged.
+        let attrs = [string_attr("gen_ai.provider.name", "openai")];
+        let (fields, _) = filled_in_scope("livekit-agents", &attrs);
+        assert_eq!(fields.provider.as_deref(), Some("openai"));
+
+        // Another scope keeps the host string as the provider, as today.
+        let attrs = [string_attr("gen_ai.provider.name", "127.0.0.1:1234")];
+        let (fields, bag) = filled_in_scope("other.scope", &attrs);
+        assert_eq!(fields.provider.as_deref(), Some("127.0.0.1:1234"));
+        assert_eq!(bag.state("gen_ai.provider.name"), Some(Use::Consumed));
+
+        // The endpoint table itself is unchanged (D-IN-2).
+        assert_eq!(match_endpoint("api.openai.com"), None);
+    }
+
+    #[test]
+    fn pipecat_conversation_id_fills_the_session_on_its_turn_scope_only() {
+        let attrs = [string_attr("conversation.id", "conv-1")];
+        let (fields, bag) = filled_in_scope("pipecat.turn", &attrs);
+        assert_eq!(fields.session_id.as_deref(), Some("conv-1"));
+        assert_eq!(bag.state("conversation.id"), Some(Use::Consumed));
+
+        let (fields, bag) = filled_in_scope("pipecat", &attrs);
+        assert_eq!(fields.session_id, None);
+        assert_eq!(bag.state("conversation.id"), Some(Use::Unread));
+
+        let (fields, bag) = filled_in_scope("other.scope", &attrs);
+        assert_eq!(fields.session_id, None);
+        assert_eq!(bag.state("conversation.id"), Some(Use::Unread));
+
+        // `gen_ai.conversation.id` still wins when present.
+        let attrs = [
+            string_attr("gen_ai.conversation.id", "genai-1"),
+            string_attr("conversation.id", "conv-1"),
+        ];
+        let (fields, bag) = filled_in_scope("pipecat.turn", &attrs);
+        assert_eq!(fields.session_id.as_deref(), Some("genai-1"));
+        assert_eq!(bag.state("conversation.id"), Some(Use::Unread));
+    }
+
+    #[test]
+    fn not_given_request_params_are_strings_without_a_warning() {
+        let attrs = [string_attr("gen_ai.request.top_k", "NOT_GIVEN")];
+        let (fields, bag, warnings) = filled_with_warnings(&attrs);
+        assert_eq!(
+            fields.request_params.as_deref(),
+            Some(r#"{"top_k":"NOT_GIVEN"}"#)
+        );
+        assert_eq!(bag.state("gen_ai.request.top_k"), Some(Use::Consumed));
+        assert_eq!(warnings.to_attribute(), None);
     }
 }

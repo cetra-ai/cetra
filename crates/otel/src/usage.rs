@@ -1628,4 +1628,28 @@ mod tests {
         assert!(!input_is_inclusive(Inclusive::VercelLegacy, true));
         assert!(input_is_inclusive(Inclusive::VercelLegacy, false));
     }
+
+    #[test]
+    fn the_genai_ttft_wins_over_the_langfuse_completion_start() {
+        // A `llm_request`-shaped span: both keys are set, and the GenAI value
+        // (seconds) is the one read, in nanoseconds. The Langfuse key stays unread.
+        let start = 1_767_225_600_000_000_000;
+        let attrs = [
+            double_attr("gen_ai.response.time_to_first_chunk", 0.25),
+            string_attr(
+                "langfuse.observation.completion_start_time",
+                "2026-01-01T00:00:01Z",
+            ),
+        ];
+        let mut warnings = Warnings::default();
+        let mut bag = AttrBag::new(&attrs, &mut warnings);
+        assert_eq!(
+            ttft(&mut bag, &[], start, "livekit-agents", &[], &mut warnings),
+            Some(250_000_000)
+        );
+        assert_eq!(
+            bag.state("langfuse.observation.completion_start_time"),
+            Some(Use::Unread)
+        );
+    }
 }

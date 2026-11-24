@@ -11,6 +11,7 @@ mod laminar;
 mod langfuse;
 pub(crate) mod openinference;
 mod openllmetry;
+pub(crate) mod scoped;
 mod vercel;
 mod voltagent;
 

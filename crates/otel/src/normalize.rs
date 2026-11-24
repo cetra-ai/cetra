@@ -256,7 +256,7 @@ fn accept_span(
     let conventions = detect(&bag, &span.events, scope);
     let span_kind = match agents::kind(agent, &span.name) {
         Some(kind) => kind,
-        None => span_kind(&mut bag, scope, &conventions),
+        None => span_kind(&mut bag, &span.name, scope, &conventions),
     };
     let mut fields = fill(&mut bag, &resource.view, scope, &conventions, &mut warnings);
     agents::context(agent, &span.attributes, &mut bag, &mut fields, batch.agents);

@@ -12,15 +12,21 @@ use crate::value::as_str;
 
 /// Kind of one span. Missing and unrecognized values fall through to `span`.
 ///
-/// `scope_name` is the span's instrumentation scope name (`""` when absent);
-/// the Agent Framework and Mirascope rows are gated on it. `conventions` is
-/// the conventions detected on the span; the VoltAgent row is gated on it.
+/// `span_name` is the span's name (`""` when absent); the LiveKit and Pipecat
+/// rows are gated on it. `scope_name` is the span's instrumentation scope name
+/// (`""` when absent); the Agent Framework and Mirascope rows are gated on it.
+/// `conventions` is the conventions detected on the span; the VoltAgent row is
+/// gated on it.
 pub(crate) fn span_kind(
     bag: &mut AttrBag<'_>,
+    span_name: &str,
     scope_name: &str,
     conventions: &[Convention],
 ) -> SpanKind {
     if let Some(kind) = decide(bag, "cetra.span.kind", |text| SpanKind::parse(text).ok()) {
+        return kind;
+    }
+    if let Some(kind) = livekit(span_name, scope_name) {
         return kind;
     }
     if let Some(kind) = decide(bag, "gen_ai.operation.name", genai_operation) {
@@ -58,7 +64,7 @@ pub(crate) fn span_kind(
     if present(bag, "gen_ai.tool.name") || present(bag, "gen_ai.tool.call.id") {
         return SpanKind::Tool;
     }
-    if let Some(kind) = scope_gated(bag, scope_name) {
+    if let Some(kind) = scope_gated(bag, span_name, scope_name) {
         return kind;
     }
     if present(bag, "gen_ai.request.model") || present(bag, "llm.model_name") {
@@ -79,7 +85,11 @@ pub(crate) fn span_kind(
 /// repeats its `chat` child's model and content, so under the scope `bifrost`
 /// a model key makes such a span `chain`. The keys are peeked, not consumed,
 /// and its `chat` child is decided earlier by its operation name.
-fn scope_gated(bag: &mut AttrBag<'_>, scope_name: &str) -> Option<SpanKind> {
+fn scope_gated(bag: &mut AttrBag<'_>, span_name: &str, scope_name: &str) -> Option<SpanKind> {
+    // Pipecat's conversation and turn spans (D-IN-5) name no operation.
+    if scope_name == "pipecat.turn" && matches!(span_name, "conversation" | "turn") {
+        return Some(SpanKind::Chain);
+    }
     if scope_name == "agent_framework"
         && !present(bag, "gen_ai.operation.name")
         && (present(bag, "executor.id")
@@ -127,6 +137,24 @@ fn genai_operation(text: &str) -> Option<SpanKind> {
         "invoke_workflow" | "invoke_runner" | "plan" | "execute_event_loop_cycle" => {
             SpanKind::Chain
         }
+        // Pipecat's speech spans (R-PC-2, D-IN-5): no other library writes them.
+        "tts" | "stt" => SpanKind::Span,
+        _ => return None,
+    })
+}
+
+/// The LiveKit Agents rows (R-LK-2, D-IN-5), on scope `livekit-agents`:
+/// `llm_node` is `chain`; `llm_request_run` and `start_agent_activity` are
+/// `span`. `llm_request` is not here: its `gen_ai.operation.name = chat`
+/// decides it `llm`. Consumes nothing: the operation key stays for the
+/// operation column.
+fn livekit(span_name: &str, scope_name: &str) -> Option<SpanKind> {
+    if scope_name != "livekit-agents" {
+        return None;
+    }
+    Some(match span_name {
+        "llm_node" => SpanKind::Chain,
+        "llm_request_run" | "start_agent_activity" => SpanKind::Span,
         _ => return None,
     })
 }
@@ -341,7 +369,7 @@ mod tests {
 
     fn kind_in(scope: &str, attrs: &[KeyValue]) -> SpanKind {
         let mut bag = AttrBag::new(attrs, &mut Warnings::default());
-        span_kind(&mut bag, scope, &[])
+        span_kind(&mut bag, "", scope, &[])
     }
 
     #[test]
@@ -363,7 +391,7 @@ mod tests {
                 string_attr("gen_ai.operation.name", "chat"),
             ];
             let mut bag = AttrBag::new(&attrs, &mut Warnings::default());
-            assert_eq!(span_kind(&mut bag, "", &[]), kind, "{text}");
+            assert_eq!(span_kind(&mut bag, "", "", &[]), kind, "{text}");
             assert_eq!(bag.state("cetra.span.kind"), Some(Use::Consumed));
             assert_eq!(bag.state("gen_ai.operation.name"), Some(Use::Unread));
         }
@@ -380,7 +408,7 @@ mod tests {
             string_attr("gen_ai.operation.name", "chat"),
         ];
         let mut bag = AttrBag::new(&attrs, &mut Warnings::default());
-        assert_eq!(span_kind(&mut bag, "", &[]), SpanKind::Llm);
+        assert_eq!(span_kind(&mut bag, "", "", &[]), SpanKind::Llm);
         assert_eq!(bag.state("cetra.span.kind"), Some(Use::Unread));
         assert_eq!(bag.state("gen_ai.operation.name"), Some(Use::Consumed));
     }
@@ -417,7 +445,7 @@ mod tests {
             string_attr("openinference.span.kind", "TOOL"),
         ];
         let mut bag = AttrBag::new(&attrs, &mut Warnings::default());
-        assert_eq!(span_kind(&mut bag, "", &[]), SpanKind::Tool);
+        assert_eq!(span_kind(&mut bag, "", "", &[]), SpanKind::Tool);
         assert_eq!(bag.state("gen_ai.operation.name"), Some(Use::Unread));
         assert_eq!(bag.state("openinference.span.kind"), Some(Use::Consumed));
     }
@@ -432,13 +460,13 @@ mod tests {
         ] {
             let attrs = [string_attr("mastra.span.type", text)];
             let mut bag = AttrBag::new(&attrs, &mut Warnings::default());
-            assert_eq!(span_kind(&mut bag, "", &[]), SpanKind::Chain, "{text}");
+            assert_eq!(span_kind(&mut bag, "", "", &[]), SpanKind::Chain, "{text}");
             assert_eq!(bag.state("mastra.span.type"), Some(Use::Consumed));
         }
         for text in ["generic", "model_chunk", "agent_run"] {
             let attrs = [string_attr("mastra.span.type", text)];
             let mut bag = AttrBag::new(&attrs, &mut Warnings::default());
-            assert_eq!(span_kind(&mut bag, "", &[]), SpanKind::Span, "{text}");
+            assert_eq!(span_kind(&mut bag, "", "", &[]), SpanKind::Span, "{text}");
             assert_eq!(bag.state("mastra.span.type"), Some(Use::Unread));
         }
         // The operation row comes first, so a Mastra span that names one is
@@ -448,7 +476,7 @@ mod tests {
             string_attr("mastra.span.type", "model_step"),
         ];
         let mut bag = AttrBag::new(&attrs, &mut Warnings::default());
-        assert_eq!(span_kind(&mut bag, "", &[]), SpanKind::Llm);
+        assert_eq!(span_kind(&mut bag, "", "", &[]), SpanKind::Llm);
         assert_eq!(bag.state("mastra.span.type"), Some(Use::Unread));
     }
 
@@ -458,7 +486,7 @@ mod tests {
             let attrs = [string_attr(key, "wf-1")];
             let mut bag = AttrBag::new(&attrs, &mut Warnings::default());
             assert_eq!(
-                span_kind(&mut bag, "agent_framework", &[]),
+                span_kind(&mut bag, "", "agent_framework", &[]),
                 SpanKind::Chain,
                 "{key}"
             );
@@ -492,7 +520,7 @@ mod tests {
         // model. The keys are peeked, never consumed.
         let attrs = [string_attr("gen_ai.request.model", "gpt-4o-mini")];
         let mut bag = AttrBag::new(&attrs, &mut Warnings::default());
-        assert_eq!(span_kind(&mut bag, "bifrost", &[]), SpanKind::Chain);
+        assert_eq!(span_kind(&mut bag, "", "bifrost", &[]), SpanKind::Chain);
         assert_eq!(bag.state("gen_ai.request.model"), Some(Use::Unread));
         // The response model alone decides too.
         let attrs = [string_attr(
@@ -500,7 +528,7 @@ mod tests {
             "gpt-4o-mini-2024-07-18",
         )];
         let mut bag = AttrBag::new(&attrs, &mut Warnings::default());
-        assert_eq!(span_kind(&mut bag, "bifrost", &[]), SpanKind::Chain);
+        assert_eq!(span_kind(&mut bag, "", "bifrost", &[]), SpanKind::Chain);
         assert_eq!(bag.state("gen_ai.response.model"), Some(Use::Unread));
         // The same attributes in another scope stay `llm` (model fallback).
         assert_eq!(
@@ -523,7 +551,7 @@ mod tests {
             string_attr("gen_ai.request.model", "gpt-4o-mini"),
         ];
         let mut bag = AttrBag::new(&attrs, &mut Warnings::default());
-        assert_eq!(span_kind(&mut bag, "bifrost", &[]), SpanKind::Llm);
+        assert_eq!(span_kind(&mut bag, "", "bifrost", &[]), SpanKind::Llm);
         assert_eq!(bag.state("gen_ai.operation.name"), Some(Use::Consumed));
     }
 
@@ -533,7 +561,7 @@ mod tests {
             let attrs = [string_attr("mirascope.type", text)];
             let mut bag = AttrBag::new(&attrs, &mut Warnings::default());
             assert_eq!(
-                span_kind(&mut bag, "mirascope.ops", &[]),
+                span_kind(&mut bag, "", "mirascope.ops", &[]),
                 SpanKind::Chain,
                 "{text}"
             );
@@ -542,13 +570,16 @@ mod tests {
         // Without the scope the key decides nothing.
         let attrs = [string_attr("mirascope.type", "trace")];
         let mut bag = AttrBag::new(&attrs, &mut Warnings::default());
-        assert_eq!(span_kind(&mut bag, "", &[]), SpanKind::Span);
+        assert_eq!(span_kind(&mut bag, "", "", &[]), SpanKind::Span);
         assert_eq!(bag.state("mirascope.type"), Some(Use::Unread));
         assert_eq!(kind_in("other.framework", &attrs), SpanKind::Span);
         // Another value under the scope does not decide either.
         let attrs = [string_attr("mirascope.type", "other")];
         let mut bag = AttrBag::new(&attrs, &mut Warnings::default());
-        assert_eq!(span_kind(&mut bag, "mirascope.ops", &[]), SpanKind::Span);
+        assert_eq!(
+            span_kind(&mut bag, "", "mirascope.ops", &[]),
+            SpanKind::Span
+        );
         assert_eq!(bag.state("mirascope.type"), Some(Use::Unread));
     }
 
@@ -561,7 +592,7 @@ mod tests {
         ];
         let mut bag = AttrBag::new(&llm, &mut Warnings::default());
         assert_eq!(
-            span_kind(&mut bag, "@voltagent/core", &[Convention::Voltagent]),
+            span_kind(&mut bag, "", "@voltagent/core", &[Convention::Voltagent]),
             SpanKind::Llm
         );
         assert_eq!(bag.state("span.type"), Some(Use::Consumed));
@@ -570,14 +601,14 @@ mod tests {
         let tool = [string_attr("span.type", "tool")];
         let mut bag = AttrBag::new(&tool, &mut Warnings::default());
         assert_eq!(
-            span_kind(&mut bag, "@voltagent/core", &[Convention::Voltagent]),
+            span_kind(&mut bag, "", "@voltagent/core", &[Convention::Voltagent]),
             SpanKind::Tool
         );
 
         let agent = [string_attr("entity.type", "agent")];
         let mut bag = AttrBag::new(&agent, &mut Warnings::default());
         assert_eq!(
-            span_kind(&mut bag, "@voltagent/core", &[Convention::Voltagent]),
+            span_kind(&mut bag, "", "@voltagent/core", &[Convention::Voltagent]),
             SpanKind::Agent
         );
         assert_eq!(bag.state("entity.type"), Some(Use::Consumed));
@@ -591,7 +622,7 @@ mod tests {
             ];
             let mut bag = AttrBag::new(&attrs, &mut Warnings::default());
             assert_eq!(
-                span_kind(&mut bag, "@voltagent/core", &[Convention::Voltagent]),
+                span_kind(&mut bag, "", "@voltagent/core", &[Convention::Voltagent]),
                 SpanKind::Span,
                 "{text}"
             );
@@ -604,11 +635,14 @@ mod tests {
             string_attr("entity.type", "agent"),
         ];
         let mut bag = AttrBag::new(&attrs, &mut Warnings::default());
-        assert_eq!(span_kind(&mut bag, "@voltagent/core", &[]), SpanKind::Span);
+        assert_eq!(
+            span_kind(&mut bag, "", "@voltagent/core", &[]),
+            SpanKind::Span
+        );
         assert_eq!(bag.state("span.type"), Some(Use::Unread));
         let mut bag = AttrBag::new(&attrs, &mut Warnings::default());
         assert_eq!(
-            span_kind(&mut bag, "", &[Convention::Openinference]),
+            span_kind(&mut bag, "", "", &[Convention::Openinference]),
             SpanKind::Span
         );
         assert_eq!(bag.state("entity.type"), Some(Use::Unread));
@@ -621,6 +655,7 @@ mod tests {
         assert_eq!(
             span_kind(
                 &mut AttrBag::new(&attrs, &mut Warnings::default()),
+                "",
                 "@voltagent/core",
                 &[Convention::Voltagent]
             ),
@@ -767,12 +802,12 @@ mod tests {
         ] {
             let attrs = [string_attr("lmnr.span.type", text)];
             let mut bag = AttrBag::new(&attrs, &mut Warnings::default());
-            assert_eq!(span_kind(&mut bag, "", &[]), kind, "{text}");
+            assert_eq!(span_kind(&mut bag, "", "", &[]), kind, "{text}");
             assert_eq!(bag.state("lmnr.span.type"), Some(Use::Consumed));
         }
         let attrs = [string_attr("lmnr.span.type", "")];
         let mut bag = AttrBag::new(&attrs, &mut Warnings::default());
-        assert_eq!(span_kind(&mut bag, "", &[]), SpanKind::Span);
+        assert_eq!(span_kind(&mut bag, "", "", &[]), SpanKind::Span);
         assert_eq!(bag.state("lmnr.span.type"), Some(Use::Unread));
         assert_eq!(kind_of(&[bool_attr("lmnr.span.type")]), SpanKind::Span);
     }
@@ -791,7 +826,11 @@ mod tests {
                     string_attr(key, "gpt-4o-mini"),
                 ];
                 let mut bag = AttrBag::new(&attrs, &mut Warnings::default());
-                assert_eq!(span_kind(&mut bag, "", &[]), SpanKind::Llm, "{text} {key}");
+                assert_eq!(
+                    span_kind(&mut bag, "", "", &[]),
+                    SpanKind::Llm,
+                    "{text} {key}"
+                );
                 assert_eq!(bag.state("lmnr.span.type"), Some(Use::Consumed));
                 // Peeked only: the model column still reads it.
                 assert_eq!(bag.state(key), Some(Use::Unread));
@@ -809,7 +848,11 @@ mod tests {
             ] {
                 let attrs = [string_attr("lmnr.span.type", text), int_attr(key, 12)];
                 let mut bag = AttrBag::new(&attrs, &mut Warnings::default());
-                assert_eq!(span_kind(&mut bag, "", &[]), SpanKind::Llm, "{text} {key}");
+                assert_eq!(
+                    span_kind(&mut bag, "", "", &[]),
+                    SpanKind::Llm,
+                    "{text} {key}"
+                );
                 assert_eq!(bag.state(key), Some(Use::Unread));
             }
         }
@@ -817,7 +860,7 @@ mod tests {
         for text in ["LLM", "CACHED"] {
             let attrs = [string_attr("lmnr.span.type", text)];
             let mut bag = AttrBag::new(&attrs, &mut Warnings::default());
-            assert_eq!(span_kind(&mut bag, "", &[]), SpanKind::Chain, "{text}");
+            assert_eq!(span_kind(&mut bag, "", "", &[]), SpanKind::Chain, "{text}");
             assert_eq!(bag.state("lmnr.span.type"), Some(Use::Consumed));
         }
         // A zero count and an empty model do not count.
@@ -828,7 +871,7 @@ mod tests {
             int_attr("gen_ai.usage.output_tokens", 0),
         ];
         let mut bag = AttrBag::new(&attrs, &mut Warnings::default());
-        assert_eq!(span_kind(&mut bag, "", &[]), SpanKind::Chain);
+        assert_eq!(span_kind(&mut bag, "", "", &[]), SpanKind::Chain);
         assert_eq!(bag.state("gen_ai.request.model"), Some(Use::Unread));
     }
 
@@ -839,7 +882,7 @@ mod tests {
             string_attr("gen_ai.request.model", "gpt"),
         ];
         let mut bag = AttrBag::new(&attrs, &mut Warnings::default());
-        assert_eq!(span_kind(&mut bag, "", &[]), SpanKind::Tool);
+        assert_eq!(span_kind(&mut bag, "", "", &[]), SpanKind::Tool);
         assert_eq!(bag.state("gen_ai.tool.name"), Some(Use::Unread));
         assert_eq!(bag.state("gen_ai.request.model"), Some(Use::Unread));
 
@@ -848,9 +891,91 @@ mod tests {
 
         let attrs = [string_attr("llm.model_name", "gpt")];
         let mut bag = AttrBag::new(&attrs, &mut Warnings::default());
-        assert_eq!(span_kind(&mut bag, "", &[]), SpanKind::Llm);
+        assert_eq!(span_kind(&mut bag, "", "", &[]), SpanKind::Llm);
         assert_eq!(bag.state("llm.model_name"), Some(Use::Unread));
 
         assert_eq!(kind_of(&[]), SpanKind::Span);
+    }
+
+    fn kind_named(name: &str, scope: &str, attrs: &[KeyValue]) -> SpanKind {
+        let mut bag = AttrBag::new(attrs, &mut Warnings::default());
+        span_kind(&mut bag, name, scope, &[])
+    }
+
+    #[test]
+    fn speech_operations_are_spans_and_keep_their_operation() {
+        for text in ["tts", "stt"] {
+            let attrs = [
+                string_attr("gen_ai.operation.name", text),
+                string_attr("gen_ai.request.model", "tts-1"),
+            ];
+            let mut warnings = Warnings::default();
+            let mut bag = AttrBag::new(&attrs, &mut warnings);
+            assert_eq!(
+                span_kind(&mut bag, "", "pipecat", &[]),
+                SpanKind::Span,
+                "{text}"
+            );
+            assert_eq!(bag.state("gen_ai.request.model"), Some(Use::Unread));
+            // The operation column still reads the consumed key.
+            let view = crate::fields::ResourceView::new(&[]);
+            let fields = crate::context::fill(&mut bag, &view, "pipecat", &[], &mut warnings);
+            assert_eq!(fields.operation.as_deref(), Some(text));
+        }
+    }
+
+    #[test]
+    fn livekit_span_names_decide_on_its_scope_only() {
+        let model = [string_attr("gen_ai.request.model", "gpt-4o-mini")];
+        assert_eq!(
+            kind_named("llm_node", "livekit-agents", &model),
+            SpanKind::Chain
+        );
+        assert_eq!(kind_named("llm_node", "other.scope", &model), SpanKind::Llm);
+
+        assert_eq!(
+            kind_named("llm_request_run", "livekit-agents", &model),
+            SpanKind::Span
+        );
+        assert_eq!(
+            kind_named("llm_request_run", "other.scope", &model),
+            SpanKind::Llm
+        );
+
+        // `llm_request` is decided by its `chat` operation, as before.
+        let chat = [string_attr("gen_ai.operation.name", "chat")];
+        assert_eq!(
+            kind_named("llm_request", "livekit-agents", &chat),
+            SpanKind::Llm
+        );
+
+        // The setup span is a span on LiveKit's scope, and an agent elsewhere.
+        let create = [string_attr("gen_ai.operation.name", "create_agent")];
+        assert_eq!(
+            kind_named("start_agent_activity", "livekit-agents", &create),
+            SpanKind::Span
+        );
+        assert_eq!(
+            kind_named("start_agent_activity", "other.scope", &create),
+            SpanKind::Agent
+        );
+        let mut bag = AttrBag::new(&create, &mut Warnings::default());
+        assert_eq!(
+            span_kind(&mut bag, "start_agent_activity", "livekit-agents", &[]),
+            SpanKind::Span
+        );
+        assert_eq!(bag.state("gen_ai.operation.name"), Some(Use::Unread));
+    }
+
+    #[test]
+    fn pipecat_turn_and_conversation_are_chains_on_its_turn_scope() {
+        for name in ["conversation", "turn"] {
+            assert_eq!(
+                kind_named(name, "pipecat.turn", &[]),
+                SpanKind::Chain,
+                "{name}"
+            );
+            assert_eq!(kind_named(name, "pipecat", &[]), SpanKind::Span, "{name}");
+        }
     }
 }

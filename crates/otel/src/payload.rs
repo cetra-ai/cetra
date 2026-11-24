@@ -257,6 +257,23 @@ pub(crate) fn assemble(
         dropped.extend(got.events);
         io.errors.extend(got.errors);
     }
+    let scoped = crate::conventions::scoped::read(
+        &mut ReadContext {
+            bag,
+            events,
+            kind,
+            scope,
+            conventions,
+            warnings,
+        },
+        &io,
+    );
+    if io.input.is_none() {
+        io.input = scoped.input;
+    }
+    if io.output.is_none() {
+        io.output = scoped.output;
+    }
     for (index, field) in FIELDS.iter().enumerate() {
         dropped.extend(drop_lower_payloads(
             bag,
