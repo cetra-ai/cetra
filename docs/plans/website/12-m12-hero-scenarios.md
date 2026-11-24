@@ -584,7 +584,7 @@ They run one after the other.
 - From the worktree root, after `export PATH=$HOME/.local/share/nvm/v26.13.0/bin:$PATH`, these pass with no errors:
   - `pnpm --dir web exec vitest run src/mocks 'src/routes/$org/$project/traces' src/components/trace src/test/quality-bar.test.tsx --maxWorkers=8`
   - `pnpm --dir web run typecheck`
-  - `./node_modules/.bin/biome check web/src/mocks/generated/dataset.ts web/src/mocks/generated/dataset.test.ts`
+  - `./node_modules/.bin/biome check web/src/mocks/generated/dataset.ts web/src/mocks/generated/dataset.test.ts`, after a first run with `--write` (it reflows the long span literals, changes string quoting and sorts the imports; don't change any text by hand to please it)
 - If a test outside `dataset.test.ts` fails because it relied on the generated content of traces 4–6, stop and report it with `QUESTION:`. Don't edit that test.
 - `just check-web` runs once, at the end of E3.
 
