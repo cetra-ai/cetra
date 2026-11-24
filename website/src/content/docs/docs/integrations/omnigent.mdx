@@ -1,0 +1,44 @@
+---
+title: Omnigent
+description: "Send the turn and tool spans of Omnigent to cetra with environment variables. Setup only: no fixture is recorded for it, and it has no per-call model spans."
+---
+
+Omnigent is an open-source (Apache-2.0) layer for building and running AI agents. It runs over Claude Code, Codex and Pi, and over its own runtimes. This page shows the environment variables that send its telemetry to cetra. It is setup only: no fixture is recorded for it.
+
+## Set up
+
+Omnigent reads its telemetry settings from the environment only. Set these variables in the shell where you start `omni` or `omnigent`. Replace `<CETRA_URL>` with your server, and `<SK_CETRA_KEY>` with a key that has the `ingest` scope, from the project's [API keys](/docs/platform/api-keys/) page. The header value is percent-encoded:
+
+{/* untested: the variables are set in the user's shell; Omnigent was run only against a fake model endpoint */}
+```bash
+export OMNIGENT_TELEMETRY_ENABLED=true
+export OTEL_EXPORTER_OTLP_ENDPOINT=<CETRA_URL>
+export OTEL_EXPORTER_OTLP_PROTOCOL=http/protobuf
+export OTEL_EXPORTER_OTLP_HEADERS="Authorization=Bearer%20<SK_CETRA_KEY>"
+export OMNIGENT_OTEL_HTTP_CLIENT_INSTRUMENTATION=false
+export OMNIGENT_OTEL_FASTAPI_INSTRUMENTATION=false
+```
+
+Telemetry stays off unless `OMNIGENT_TELEMETRY_ENABLED` is `true`.
+
+## Content
+
+Inputs and outputs are off by default. To send them on the spans, also set:
+
+{/* untested: a shell setting for the user's own Omnigent session; not run */}
+```bash
+export OMNIGENT_OTEL_CAPTURE_CONTENT=true
+```
+
+## Limits
+
+- No per-call model spans. Omnigent's model calls carry no GenAI fields, and the HTTP client flag above removes their HTTP spans, so cetra sees no model call from Omnigent.
+- The only token counts are the turn's total, on the `agent:<name>` span. That span's model field is the harness name, such as `openai-agents`, not the model that answered.
+- FastAPI's own telemetry still emits plumbing spans. The FastAPI flag above does not stop them.
+- Omnigent also sends logs and metrics. cetra accepts them and drops them.
+- The spans described here come from local runs against a fake model endpoint, not from a recorded fixture.
+
+## Next
+
+- [Traces](/docs/tracing/traces/): read a trace as a tree and a timeline.
+- [API keys](/docs/platform/api-keys/): create the `ingest` key that Omnigent sends.
