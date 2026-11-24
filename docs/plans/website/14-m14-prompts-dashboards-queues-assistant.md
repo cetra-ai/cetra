@@ -1835,8 +1835,8 @@ Cases:
    - voice, "Voice latency": `["p95 reply time", "Reply time by day", "Calls over 3 s", "Calls per day"]`;
    - extraction, "Invoice extraction": `["Invoices per day", "Schema check failures", "Cost per invoice", "Invoices by model"]`;
    the widget ids equal, in order, the ids listed in the cross-phase contract above, and the draft names and descriptions equal the table of the content (`Answer quality` / `Support answers: quality, volume and cost.`, `Code agent health` / `Failed runs, cost and duration of the coding agent.`, `Voice latency` / `How long callers wait for a reply.`, `Invoice extraction` / `Invoices read, schema-check failures and cost.`). Widget ids are unique within a draft, and `layout.x + layout.w <= 60`.
-8. `"a new chat starts empty"`: `createChat()`, `ask(NEW_ID, STORIES[0].turns[0].question)`, then `createChat()` again: `detail(NEW_ID).messages` is `[]` and its `message_count` 0.
-9. `"does not store a turn sent to another chat"`: `createChat()`, `ask(STORIES[0].conversationId, "hello")` streams events, and `detail(NEW_ID).messages` is `[]`; `detail(STORIES[0].conversationId).message_count` is still 8.
+8. (In cases 8 and 9, `noUncheckedIndexedAccess` is on: read `const [first] = STORIES;` and `const question = first?.turns[0]?.question;`, throw if either is undefined, and use `first` and `question` below.) `"a new chat starts empty"`: `createChat()`, `ask(NEW_ID, question)`, then `createChat()` again: `detail(NEW_ID).messages` is `[]` and its `message_count` 0.
+9. `"does not store a turn sent to another chat"`: `createChat()`, `ask(first.conversationId, "hello")` streams events, and `detail(NEW_ID).messages` is `[]`; `detail(first.conversationId).message_count` is still 8.
 
 **Done when:** from the worktree root, after `export PATH=$HOME/.local/share/nvm/v26.13.0/bin:$PATH`:
 - `pnpm --dir web exec vitest run src/mocks/assistant.test.ts src/components/assistant --maxWorkers=8` passes (the panel tests use their own `server.use` scripts and must still pass);
