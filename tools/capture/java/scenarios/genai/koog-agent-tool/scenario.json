@@ -8,7 +8,7 @@
     "agents-features-opentelemetry-jvm",
     "koog-agents-jvm"
   ],
-  "notes": "Koog puts random ids in span names (create_agent <session-uuid>, invoke_agent <uuid>), masked by volatile_name_prefixes, and in four attribute keys, masked by volatile_attributes: gen_ai.agent.id is a session UUID, gen_ai.conversation.id a conversation UUID, koog.event.id a per-span event UUID, and koog.node.output embeds the model response's wall-clock metaInfo.timestamp on the two LLM nodes (the key is masked everywhere, so the deterministic node passthroughs are masked too).",
+  "notes": "Koog puts random ids in span names (create_agent <session-uuid>, invoke_agent <uuid>), masked by volatile_name_prefixes, and in four attribute keys: gen_ai.agent.id is a session UUID, gen_ai.conversation.id a conversation UUID and koog.event.id a per-span event UUID, all masked by volatile_attributes; koog.node.output embeds the model response's wall-clock metaInfo.timestamp on the two LLM nodes. The key is a timing attribute: its values are ignored by --check and kept as captured, not rewritten, so the prompt and answer inside the chat spans' gen_ai.input.messages and gen_ai.output.messages stay valid JSON.",
   "volatile_name_prefixes": [
     "create_agent ",
     "invoke_agent "
@@ -16,7 +16,9 @@
   "volatile_attributes": [
     "gen_ai.agent.id",
     "gen_ai.conversation.id",
-    "koog.event.id",
+    "koog.event.id"
+  ],
+  "timing_attributes": [
     "koog.node.output"
   ],
   "turns": [

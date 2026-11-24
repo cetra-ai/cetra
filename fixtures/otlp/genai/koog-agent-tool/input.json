@@ -67,7 +67,7 @@
               "name": "create_agent <volatile>",
               "kind": 3,
               "startTimeUnixNano": "1767225590000000000",
-              "endTimeUnixNano": "1767225590431000000",
+              "endTimeUnixNano": "1767225590462000000",
               "attributes": [
                 {
                   "key": "gen_ai.agent.id",
@@ -124,8 +124,8 @@
               "flags": 257,
               "name": "invoke_agent <volatile>",
               "kind": 3,
-              "startTimeUnixNano": "1767225590007000000",
-              "endTimeUnixNano": "1767225590430000000",
+              "startTimeUnixNano": "1767225590006000000",
+              "endTimeUnixNano": "1767225590461000000",
               "attributes": [
                 {
                   "key": "gen_ai.agent.id",
@@ -236,8 +236,8 @@
               "flags": 257,
               "name": "strategy single_run",
               "kind": 1,
-              "startTimeUnixNano": "1767225590009000000",
-              "endTimeUnixNano": "1767225590429000000",
+              "startTimeUnixNano": "1767225590008000000",
+              "endTimeUnixNano": "1767225590460000000",
               "attributes": [
                 {
                   "key": "gen_ai.conversation.id",
@@ -276,7 +276,7 @@
               "flags": 257,
               "name": "node __start__",
               "kind": 1,
-              "startTimeUnixNano": "1767225590029000000",
+              "startTimeUnixNano": "1767225590028000000",
               "endTimeUnixNano": "1767225590030000000",
               "attributes": [
                 {
@@ -300,13 +300,13 @@
                 {
                   "key": "koog.node.input",
                   "value": {
-                    "stringValue": "capture-volatile-5"
+                    "stringValue": "\"What is the weather in Lyon? Use the tool.\""
                   }
                 },
                 {
                   "key": "koog.node.output",
                   "value": {
-                    "stringValue": "capture-volatile-5"
+                    "stringValue": "\"What is the weather in Lyon? Use the tool.\""
                   }
                 }
               ],
@@ -328,8 +328,8 @@
               "flags": 257,
               "name": "node nodeCallLLM",
               "kind": 1,
-              "startTimeUnixNano": "1767225590036000000",
-              "endTimeUnixNano": "1767225590371000000",
+              "startTimeUnixNano": "1767225590035000000",
+              "endTimeUnixNano": "1767225590403000000",
               "attributes": [
                 {
                   "key": "gen_ai.conversation.id",
@@ -340,7 +340,7 @@
                 {
                   "key": "koog.event.id",
                   "value": {
-                    "stringValue": "capture-volatile-6"
+                    "stringValue": "capture-volatile-5"
                   }
                 },
                 {
@@ -352,13 +352,13 @@
                 {
                   "key": "koog.node.input",
                   "value": {
-                    "stringValue": "capture-volatile-5"
+                    "stringValue": "\"What is the weather in Lyon? Use the tool.\""
                   }
                 },
                 {
                   "key": "koog.node.output",
                   "value": {
-                    "stringValue": "capture-volatile-7"
+                    "stringValue": "{\"parts\":[{\"type\":\"ai.koog.prompt.message.MessagePart.Tool.Call\",\"id\":\"call_capture_1\",\"tool\":\"get_weather\",\"args\":\"{\\\"city\\\":\\\"Lyon\\\"}\"}],\"metaInfo\":{\"timestamp\":\"2026-11-24T17:49:37.905465886Z\",\"totalTokensCount\":99,\"inputTokensCount\":82,\"outputTokensCount\":17},\"finishReason\":\"tool_calls\"}"
                   }
                 }
               ],
@@ -380,8 +380,8 @@
               "flags": 257,
               "name": "chat gpt-4o-mini",
               "kind": 3,
-              "startTimeUnixNano": "1767225590043000000",
-              "endTimeUnixNano": "1767225590365000000",
+              "startTimeUnixNano": "1767225590042000000",
+              "endTimeUnixNano": "1767225590397000000",
               "attributes": [
                 {
                   "key": "gen_ai.conversation.id",
@@ -392,7 +392,7 @@
                 {
                   "key": "gen_ai.input.messages",
                   "value": {
-                    "stringValue": "[{\"role\":\"System\",\"parts\":[{\"type\":\"text\",\"content\":\"You are a helpful assistant.\"}]},{\"role\":\"tool\",\"parts\":[]},{\"role\":\"User\",\"parts\":[{\"type\":\"text\",\"content\":capture-volatile-5}]}]"
+                    "stringValue": "[{\"role\":\"System\",\"parts\":[{\"type\":\"text\",\"content\":\"You are a helpful assistant.\"}]},{\"role\":\"tool\",\"parts\":[]},{\"role\":\"User\",\"parts\":[{\"type\":\"text\",\"content\":\"What is the weather in Lyon? Use the tool.\"}]}]"
                   }
                 },
                 {
@@ -458,7 +458,7 @@
                 {
                   "key": "koog.event.id",
                   "value": {
-                    "stringValue": "capture-volatile-8"
+                    "stringValue": "capture-volatile-6"
                   }
                 },
                 {
@@ -486,8 +486,8 @@
               "flags": 257,
               "name": "node nodeExecuteTool",
               "kind": 1,
-              "startTimeUnixNano": "1767225590373000000",
-              "endTimeUnixNano": "1767225590387000000",
+              "startTimeUnixNano": "1767225590404000000",
+              "endTimeUnixNano": "1767225590418000000",
               "attributes": [
                 {
                   "key": "gen_ai.conversation.id",
@@ -498,7 +498,7 @@
                 {
                   "key": "koog.event.id",
                   "value": {
-                    "stringValue": "capture-volatile-9"
+                    "stringValue": "capture-volatile-7"
                   }
                 },
                 {
@@ -516,7 +516,7 @@
                 {
                   "key": "koog.node.output",
                   "value": {
-                    "stringValue": "capture-volatile-10"
+                    "stringValue": "{\"toolResults\":[{\"id\":\"call_capture_1\",\"tool\":\"get_weather\",\"toolArgs\":{\"city\":\"Lyon\"},\"toolDescription\":\"Get the current weather for a city\",\"output\":\"Sunny in Lyon, 21 C\",\"resultKind\":{\"type\":\"ai.koog.agents.core.environment.ToolResultKind.Success\"},\"result\":\"Sunny in Lyon, 21 C\",\"parts\":[{\"type\":\"ai.koog.prompt.message.MessagePart.Text\",\"text\":\"Sunny in Lyon, 21 C\"}]}]}"
                   }
                 }
               ],
@@ -538,8 +538,8 @@
               "flags": 257,
               "name": "execute_tool get_weather",
               "kind": 1,
-              "startTimeUnixNano": "1767225590377000000",
-              "endTimeUnixNano": "1767225590383000000",
+              "startTimeUnixNano": "1767225590408000000",
+              "endTimeUnixNano": "1767225590414000000",
               "attributes": [
                 {
                   "key": "gen_ai.operation.name",
@@ -586,7 +586,7 @@
                 {
                   "key": "koog.event.id",
                   "value": {
-                    "stringValue": "capture-volatile-11"
+                    "stringValue": "capture-volatile-8"
                   }
                 }
               ],
@@ -608,8 +608,8 @@
               "flags": 257,
               "name": "node nodeSendToolResult",
               "kind": 1,
-              "startTimeUnixNano": "1767225590387000000",
-              "endTimeUnixNano": "1767225590428000000",
+              "startTimeUnixNano": "1767225590418000000",
+              "endTimeUnixNano": "1767225590458000000",
               "attributes": [
                 {
                   "key": "gen_ai.conversation.id",
@@ -620,7 +620,7 @@
                 {
                   "key": "koog.event.id",
                   "value": {
-                    "stringValue": "capture-volatile-12"
+                    "stringValue": "capture-volatile-9"
                   }
                 },
                 {
@@ -632,13 +632,13 @@
                 {
                   "key": "koog.node.input",
                   "value": {
-                    "stringValue": "capture-volatile-10"
+                    "stringValue": "{\"toolResults\":[{\"id\":\"call_capture_1\",\"tool\":\"get_weather\",\"toolArgs\":{\"city\":\"Lyon\"},\"toolDescription\":\"Get the current weather for a city\",\"output\":\"Sunny in Lyon, 21 C\",\"resultKind\":{\"type\":\"ai.koog.agents.core.environment.ToolResultKind.Success\"},\"result\":\"Sunny in Lyon, 21 C\",\"parts\":[{\"type\":\"ai.koog.prompt.message.MessagePart.Text\",\"text\":\"Sunny in Lyon, 21 C\"}]}]}"
                   }
                 },
                 {
                   "key": "koog.node.output",
                   "value": {
-                    "stringValue": "capture-volatile-13"
+                    "stringValue": "{\"parts\":[{\"type\":\"ai.koog.prompt.message.MessagePart.Text\",\"text\":\"It is sunny in Lyon.\"}],\"metaInfo\":{\"timestamp\":\"2026-11-24T17:49:37.969021462Z\",\"totalTokensCount\":143,\"inputTokensCount\":131,\"outputTokensCount\":12},\"finishReason\":\"stop\"}"
                   }
                 }
               ],
@@ -660,8 +660,8 @@
               "flags": 257,
               "name": "chat gpt-4o-mini",
               "kind": 3,
-              "startTimeUnixNano": "1767225590390000000",
-              "endTimeUnixNano": "1767225590427000000",
+              "startTimeUnixNano": "1767225590420000000",
+              "endTimeUnixNano": "1767225590457000000",
               "attributes": [
                 {
                   "key": "gen_ai.conversation.id",
@@ -672,7 +672,7 @@
                 {
                   "key": "gen_ai.input.messages",
                   "value": {
-                    "stringValue": "[{\"role\":\"System\",\"parts\":[{\"type\":\"text\",\"content\":\"You are a helpful assistant.\"}]},{\"role\":\"tool\",\"parts\":[]},{\"role\":\"User\",\"parts\":[{\"type\":\"text\",\"content\":capture-volatile-5}]},{\"role\":\"Assistant\",\"parts\":[{\"type\":\"tool_call\",\"id\":\"call_capture_1\",\"name\":\"get_weather\",\"arguments\":{\"city\":\"Lyon\"}}]},{\"role\":\"tool\",\"parts\":[{\"type\":\"tool_call_response\",\"id\":\"call_capture_1\",\"result\":\"Sunny in Lyon, 21 C\"}]},{\"role\":\"User\",\"parts\":[]}]"
+                    "stringValue": "[{\"role\":\"System\",\"parts\":[{\"type\":\"text\",\"content\":\"You are a helpful assistant.\"}]},{\"role\":\"tool\",\"parts\":[]},{\"role\":\"User\",\"parts\":[{\"type\":\"text\",\"content\":\"What is the weather in Lyon? Use the tool.\"}]},{\"role\":\"Assistant\",\"parts\":[{\"type\":\"tool_call\",\"id\":\"call_capture_1\",\"name\":\"get_weather\",\"arguments\":{\"city\":\"Lyon\"}}]},{\"role\":\"tool\",\"parts\":[{\"type\":\"tool_call_response\",\"id\":\"call_capture_1\",\"result\":\"Sunny in Lyon, 21 C\"}]},{\"role\":\"User\",\"parts\":[]}]"
                   }
                 },
                 {
@@ -684,7 +684,7 @@
                 {
                   "key": "gen_ai.output.messages",
                   "value": {
-                    "stringValue": "[{\"role\":\"Assistant\",\"parts\":[{\"type\":\"text\",\"content\":capture-volatile-16}]}]"
+                    "stringValue": "[{\"role\":\"Assistant\",\"parts\":[{\"type\":\"text\",\"content\":\"It is sunny in Lyon.\"}]}]"
                   }
                 },
                 {
@@ -738,7 +738,7 @@
                 {
                   "key": "koog.event.id",
                   "value": {
-                    "stringValue": "capture-volatile-14"
+                    "stringValue": "capture-volatile-10"
                   }
                 },
                 {
@@ -766,8 +766,8 @@
               "flags": 257,
               "name": "node __finish__",
               "kind": 1,
-              "startTimeUnixNano": "1767225590428000000",
-              "endTimeUnixNano": "1767225590428000000",
+              "startTimeUnixNano": "1767225590459000000",
+              "endTimeUnixNano": "1767225590459000000",
               "attributes": [
                 {
                   "key": "gen_ai.conversation.id",
@@ -778,7 +778,7 @@
                 {
                   "key": "koog.event.id",
                   "value": {
-                    "stringValue": "capture-volatile-15"
+                    "stringValue": "capture-volatile-11"
                   }
                 },
                 {
@@ -790,13 +790,13 @@
                 {
                   "key": "koog.node.input",
                   "value": {
-                    "stringValue": "capture-volatile-16"
+                    "stringValue": "\"It is sunny in Lyon.\""
                   }
                 },
                 {
                   "key": "koog.node.output",
                   "value": {
-                    "stringValue": "capture-volatile-16"
+                    "stringValue": "\"It is sunny in Lyon.\""
                   }
                 }
               ],
