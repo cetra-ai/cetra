@@ -197,6 +197,7 @@ mod tests {
             timing_attributes: Vec::new(),
             span_names: Vec::new(),
             volatile_attributes: Vec::new(),
+            unordered_spans: false,
             turns: vec![Turn {
                 api: Api::OpenaiChat,
                 model: "gpt-test".to_owned(),

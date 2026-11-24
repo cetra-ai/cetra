@@ -94,7 +94,7 @@ If the code has to deviate from the spec, update the spec **in the same change**
 - Python samples of the site run in `sdks/python/tests/test_examples.py` and TypeScript samples in `sdks/typescript/src/examples.test.ts`; the SDK reference pages are checked against the exports by `just check-py` and `just check-ts`.
 - Tests cover the current behaviour only.
 - UI tests use the MSW mocks from `fixtures/api/`; a page test overrides an endpoint with `server.use` instead of mocking modules.
-- Captured OTLP fixtures are recorded with `just capture` (tools/capture) and never edited by hand; `just check-capture` before committing one. A capture scenario whose packages cannot share `tools/capture/py`'s lock lives under `tools/capture/envs/<env>/scenarios/` (D-IN-26).
+- Captured OTLP fixtures are recorded with `just capture` (tools/capture) and never edited by hand; `just check-capture` before committing one. Every capture runs in a network namespace with only loopback (`unshare --user --net`, D-IN-26 item 11), so no scenario reaches the internet; the capture needs unprivileged user namespaces and `ip` (iproute2), and captures are not run in CI. A capture scenario whose packages cannot share `tools/capture/py`'s lock lives under `tools/capture/envs/<env>/scenarios/` (D-IN-26).
 - A fuzz crash is fixed with its input in `fuzz/regressions/<target>/` and a named unit test. `just test` replays every corpus and regression on stable. Regressions are never passed to libFuzzer, and a crashing input never goes into `fuzz/corpus/`.
 
 **Reference implementations.** The competitors' source code is checked out in `/home/sebastien/github/{lmnr,phoenix,langfuse,langwatch,helicone,opik,mlflow}`. Read it to compare designs and learn from their mistakes. Never copy code from it.
@@ -202,9 +202,9 @@ Run everything through `just`:
 | `just fuzz-seed` | write the fuzz seed files from the test fixtures (track R M3) |
 | `just fuzz-cmin` | minimize every corpus, then fit the size and file-count budgets |
 | `just fuzz-lock` · `just fuzz-tools` | write `fuzz/Cargo.lock` from the root lock · install the fuzz toolchain and cargo-fuzz |
-| `just capture <group>/<case>` | record an OTLP fixture from a scenario, e.g. `just capture openinference/openai-chat-tool` |
-| `just capture-all` | recapture every scenario |
-| `just check-capture` | lint and type-check the capture scenarios, then recapture every scenario and compare (timing excluded) |
+| `just capture <group>/<case>` | record an OTLP fixture from a scenario, in a loopback-only network namespace (D-IN-26 item 11), e.g. `just capture openinference/openai-chat-tool` |
+| `just capture-all` | recapture every scenario, in the loopback-only namespace |
+| `just check-capture` | lint and type-check the capture scenarios, then recapture every scenario in the loopback-only namespace and compare (timing excluded) |
 | `just capture-tools` | download the pinned gateway binaries and install the LiteLLM Proxy, Langflow, n8n and Promptfoo tools and the scenario environments into `target/capture-tools` (checksummed; Linux x86_64) |
 | `just fetch-corpus` | download the pinned benchmark corpus (OpenAssistant oasst2, Apache-2.0) into `target/bench-corpus` |
 | `just soak` | the storage soak (D-R-11), configured by `CETRA_SOAK_*` |

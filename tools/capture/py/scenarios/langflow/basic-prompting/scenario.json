@@ -1,0 +1,39 @@
+{
+  "description": "Langflow 1.13 runs the Basic Prompting starter flow through its run API; the Language Model call is traced by Langflow's Traceloop export.",
+  "spec_refs": [
+    "02 § Convention detection",
+    "02 § Mapping tables / Span kind",
+    "02 § Mapping tables / Input / output",
+    "02 § Mapping tables / Model, provider, usage",
+    "02 § Normalization rules"
+  ],
+  "notes": "Langflow runs as `langflow run --backend-only` from the tool environment, with its config directory and SQLite database in a temporary directory. Langflow rewrites 127.0.0.1 to the container host when it thinks it runs in a container, so the mock binds 127.0.0.2 (mock_host) and LANGFLOW_PROVIDER_CREDENTIAL_ALLOWED_HOSTS names that origin. OPENAI_BASE_URL points at the mock's /v1. Its PyPI version check at start-up (langflow's print_banner) fails inside the capture's loopback-only network namespace and build_version_notice suppresses the connection error (D-IN-26 item 11). LANGFLOW_MODELS_DEV_REFRESH=false turns off the models.dev fetch. Traceloop exports spans to the receiver with TRACELOOP_BASE_URL (the receiver origin; /v1/traces is appended) and a non-empty TRACELOOP_API_KEY; native tracing and telemetry are off. API sequence, derived from the installed langflow 1.13.2 source (api/v1/login.py auto_login, api/v1/flows.py POST /, api/v1/api_key.py POST /, api/v1/endpoints.py POST /run/{flow_id_or_name}, header x-api-key from services/auth/utils.py): (1) GET /api/v1/auto_login returns access_token (LANGFLOW_AUTO_LOGIN=true); (2) the Basic Prompting starter JSON (initial_setup/starter_projects) is loaded from the tool environment; its Language Model node gets the model gpt-4o-mini (metadata model_class ChatOpenAI) and the api_key capture-mock-key (the spike used sk-fake); (3) POST /api/v1/flows/ with the bearer token creates the flow; (4) POST /api/v1/api_key/ with the bearer token returns api_key; (5) POST /api/v1/run/<flow id>?stream=false with x-api-key and the bearer token, body input_value, input_type chat, output_type chat, session_id sess-1. Expected: trace A, the flow run, is a chain root with its component spans (the flow and its components are span or chain kinds, with no content read by the normalizer rules); trace B, the Traceloop ChatOpenAI.chat call, is a separate trace with one llm span. Langflow's trace_type of the Language Model component is not read as llm (R-LF-1). Volatile values come from the second capture. Two components run at once, so their spans end in either order, and a component's span id changes between runs: unordered_spans (check-only masking of span ids and sorting).",
+  "instrumentation": "langflow",
+  "libraries": [
+    "langflow"
+  ],
+  "mock_host": "127.0.0.2",
+  "volatile_attributes": [
+    "workflow_id"
+  ],
+  "timing_attributes": [
+    "start_time",
+    "end_time",
+    "time_elapsed"
+  ],
+  "unordered_spans": true,
+  "turns": [
+    {
+      "api": "openai.chat",
+      "model": "gpt-4o-mini-2024-07-18",
+      "message": {
+        "text": "It is 18C and sunny in Paris."
+      },
+      "finish": "stop",
+      "usage": {
+        "input": 31,
+        "output": 12
+      }
+    }
+  ]
+}

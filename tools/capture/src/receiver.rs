@@ -212,6 +212,11 @@ fn earliest(quiet_at: Option<Instant>, deadline: Option<Instant>) -> Option<Inst
     }
 }
 
+/// The three OTLP/HTTP signal paths, which a HEAD probe may name.
+fn is_otlp_path(path: &str) -> bool {
+    path.ends_with("/v1/traces") || path.ends_with("/v1/logs") || path.ends_with("/v1/metrics")
+}
+
 fn accepted(method: &Method, path: &str) -> Option<Signal> {
     if method != Method::POST {
         return None;
@@ -281,6 +286,11 @@ async fn handle(
 ) -> Response {
     let method = request.method().clone();
     let path = request.uri().path().to_owned();
+    if method == Method::HEAD && is_otlp_path(&path) {
+        // A startup probe (n8n sends HEAD to the exporter's URL before it exports). It is
+        // answered, not recorded: nothing is exported and no error is logged.
+        return empty(StatusCode::OK);
+    }
     let Some(signal) = accepted(&method, &path) else {
         return receiver.fail(
             StatusCode::NOT_FOUND,
@@ -523,6 +533,19 @@ mod tests {
         );
         let log = receiver.finish();
         assert_eq!(log.exports, vec![sample()]);
+        assert!(log.errors.is_empty(), "{:?}", log.errors);
+    }
+
+    #[tokio::test]
+    async fn a_head_probe_is_answered() {
+        let receiver = Receiver::new();
+        for path in ["/v1/traces", "/v1/metrics", "/v1/logs"] {
+            let response = send(&receiver, request("HEAD", path, None, None, Vec::new())).await;
+            assert_eq!(response.status(), 200, "{path}");
+            assert!(bytes(response).await.is_empty(), "{path}");
+        }
+        let log = receiver.finish();
+        assert!(log.exports.is_empty());
         assert!(log.errors.is_empty(), "{:?}", log.errors);
     }
 

@@ -45,8 +45,11 @@ def main() -> None:
         template = (HERE / "aigw.tmpl.yaml").read_text(encoding="utf-8")
         template = template.replace("@LISTEN@", str(listen)).replace("@FAKE@", mock_port())
         Path(config).write_text(template, encoding="utf-8")
-        # Pre-place Envoy where aigw's func-e lookup expects it, so nothing is downloaded.
-        envoy_bin = Path(base) / "envoy-versions" / ENVOY_VERSION / "bin"
+        # Pre-place Envoy where func-e looks for an installed version, so nothing is downloaded.
+        # All four homes are one directory, which is func-e's legacy mode: the binaries live
+        # in $DataHome/versions, not envoy-versions. ENVOY_VERSION names the version. func-e
+        # then needs no versions list, and envoy-gateway's infra runner gets none from aigw.
+        envoy_bin = Path(base) / "versions" / ENVOY_VERSION / "bin"
         envoy_bin.mkdir(parents=True)
         os.symlink(envoy, envoy_bin / "envoy")
         proc = subprocess.Popen(  # noqa: S603 - a pinned binary

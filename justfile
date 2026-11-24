@@ -546,13 +546,17 @@ prices-update litellm_json:
 capture-tools:
     bash tools/capture/fetch-tools.sh
 
-# Capture OTLP fixtures from real instrumentations (tools/capture), e.g. `just capture openinference/openai-chat-tool`
+# Capture OTLP fixtures from real instrumentations (tools/capture), e.g. `just capture openinference/openai-chat-tool`.
+# Runs in a network namespace with only loopback (D-IN-26 item 11): no capture reaches the internet.
+# /root is a throwaway tmpfs inside it, where envoy-gateway's certgen writes (aigw, Amendment A point 7).
 capture +cases: capture-tools capture-py-sync capture-ts-sync
-    cargo run -q -p cetra-capture -- run {{cases}}
+    unshare --user --map-root-user --net --mount true 2>/dev/null || { echo "captures need unprivileged user namespaces (unshare --user --net): see AGENTS.md" >&2; exit 1; }
+    UV_OFFLINE=1 CARGO_NET_OFFLINE=true unshare --user --map-root-user --net --mount sh -c 'ip link set lo up && mount -t tmpfs tmpfs /root && exec cargo run -q -p cetra-capture -- run "$@"' sh {{cases}}
 
 # Recapture every scenario
 capture-all: capture-tools capture-py-sync capture-ts-sync
-    cargo run -q -p cetra-capture -- run --all
+    unshare --user --map-root-user --net --mount true 2>/dev/null || { echo "captures need unprivileged user namespaces (unshare --user --net): see AGENTS.md" >&2; exit 1; }
+    UV_OFFLINE=1 CARGO_NET_OFFLINE=true unshare --user --map-root-user --net --mount sh -c 'ip link set lo up && mount -t tmpfs tmpfs /root && exec cargo run -q -p cetra-capture -- run "$@"' sh --all
 
 # Install the capture harness package (tools/capture/harness)
 capture-harness-sync:
@@ -573,7 +577,8 @@ check-capture: capture-tools capture-harness-sync capture-py-sync capture-ts-syn
     for env in tools/capture/envs/*/; do [ -d "${env}scenarios" ] || continue; (cd "$env" && uv run --locked ruff format --check && uv run --locked ruff check && uv run --locked mypy) || exit 1; done
     pnpm --dir tools/capture/ts run typecheck
     pnpm exec biome check tools/capture/ts
-    cargo run -q -p cetra-capture -- run --all --check
+    unshare --user --map-root-user --net --mount true 2>/dev/null || { echo "captures need unprivileged user namespaces (unshare --user --net): see AGENTS.md" >&2; exit 1; }
+    UV_OFFLINE=1 CARGO_NET_OFFLINE=true unshare --user --map-root-user --net --mount sh -c 'ip link set lo up && mount -t tmpfs tmpfs /root && exec cargo run -q -p cetra-capture -- run "$@"' sh --all --check
 
 # Packaging and release (track N, docs/plans/n-packaging/)
 

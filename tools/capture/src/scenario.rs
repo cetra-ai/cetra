@@ -158,6 +158,11 @@ pub struct Scenario {
     /// Their values are replaced by `capture-volatile-<n>` everywhere they appear.
     #[serde(default)]
     pub volatile_attributes: Vec<String>,
+    /// The program ends its spans in any order, and each span's id can change between runs
+    /// (Langflow runs two components at once). `--check` then masks span ids and sorts
+    /// the spans before comparing. The fixture keeps its ids.
+    #[serde(default)]
+    pub unordered_spans: bool,
     /// Scripted provider turns, served in order. At least one, all for the same provider.
     pub turns: Vec<Turn>,
     /// Fixture path, taken from the scenario directory by [`Scenario::load`].

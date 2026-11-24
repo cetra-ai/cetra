@@ -906,6 +906,10 @@ fn json_differences(
     let mut produced_case = produced_case.clone();
     let mut committed_input = committed_input.clone();
     let mut produced_input = produced_input.clone();
+    if scenario.unordered_spans {
+        mask_span_ids(&mut committed_input);
+        mask_span_ids(&mut produced_input);
+    }
     mask_captured_at(&mut committed_case);
     mask_captured_at(&mut produced_case);
     sort_attribute_arrays(&mut committed_input);
@@ -913,6 +917,9 @@ fn json_differences(
     let keys = attribute_keys(scenario);
     mask_tree(&mut committed_input, &keys);
     mask_tree(&mut produced_input, &keys);
+    // After masking, so the sort key holds no time or timing value.
+    sort_spans(&mut committed_input);
+    sort_spans(&mut produced_input);
     let mut paths = Vec::new();
     diff("case.json", "", &committed_case, &produced_case, &mut paths);
     diff(
@@ -985,6 +992,64 @@ fn sort_attribute_arrays(value: &mut Value) {
                     }
                 }
             }
+        }
+    }
+}
+
+/// Replaces every span's `spanId` and `parentSpanId` with null, for a case whose span ids
+/// change between runs (`unordered_spans`).
+fn mask_span_ids(value: &mut Value) {
+    let Some(resource_spans) = value.get_mut("resourceSpans").and_then(Value::as_array_mut) else {
+        return;
+    };
+    for resource_span in resource_spans {
+        let Some(scope_spans) = resource_span
+            .pointer_mut("/scopeSpans")
+            .and_then(Value::as_array_mut)
+        else {
+            continue;
+        };
+        for scope_span in scope_spans {
+            let Some(spans) = scope_span.get_mut("spans").and_then(Value::as_array_mut) else {
+                continue;
+            };
+            for span in spans {
+                for field in ["spanId", "parentSpanId"] {
+                    if let Some(id) = span.get_mut(field) {
+                        *id = Value::Null;
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Sorts every scope's `spans` array by name, then by the span's canonical JSON (after
+/// masking). Spans that run at the same time can end in either order (Langflow runs
+/// two components at once), so the order is not a difference; a changed span still is.
+fn sort_spans(value: &mut Value) {
+    let Some(resource_spans) = value.get_mut("resourceSpans").and_then(Value::as_array_mut) else {
+        return;
+    };
+    for resource_span in resource_spans {
+        let Some(scope_spans) = resource_span
+            .pointer_mut("/scopeSpans")
+            .and_then(Value::as_array_mut)
+        else {
+            continue;
+        };
+        for scope_span in scope_spans {
+            let Some(spans) = scope_span.get_mut("spans").and_then(Value::as_array_mut) else {
+                continue;
+            };
+            spans.sort_by_cached_key(|span| {
+                let name = span
+                    .get("name")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .to_owned();
+                (name, span.to_string())
+            });
         }
     }
 }
@@ -1689,6 +1754,55 @@ mod tests {
                 "input.json: resourceSpans[0].resource.attributes[1].value.stringValue".to_owned()
             ]
         );
+    }
+
+    #[test]
+    fn check_ignores_span_order() {
+        let scenario = scenario(json!({}), None);
+        let mut committed_input = input_export("chat", "100", "200", "150", "9", "gpt", "t0");
+        let other = input_export("tool", "300", "400", "350", "2", "gpt", "t1");
+        let other_spans = other["resourceSpans"][0]["scopeSpans"][0]["spans"].clone();
+        committed_input["resourceSpans"][0]["scopeSpans"][0]["spans"]
+            .as_array_mut()
+            .expect("spans are an array")
+            .extend(other_spans.as_array().expect("spans are an array").clone());
+        // The same two spans, the other way round: a run that ended the spans in another order.
+        let mut produced_input = committed_input.clone();
+        produced_input["resourceSpans"][0]["scopeSpans"][0]["spans"]
+            .as_array_mut()
+            .expect("spans are an array")
+            .reverse();
+        let case = case_file("Two spans.", "2026-01-01T00:00:00Z");
+        let paths = json_differences(&case, &case, &committed_input, &produced_input, &scenario);
+        assert!(paths.is_empty(), "{paths:?}");
+
+        // A changed span is still reported, wherever it sits after sorting.
+        produced_input["resourceSpans"][0]["scopeSpans"][0]["spans"][0]["attributes"][1]["value"]
+            ["stringValue"] = json!("changed");
+        let paths = json_differences(&case, &case, &committed_input, &produced_input, &scenario);
+        assert!(!paths.is_empty(), "a changed span must be reported");
+    }
+
+    #[test]
+    fn unordered_spans_mask_span_ids_in_the_check() {
+        let mut scenario = scenario(json!({}), None);
+        let mut committed_input = input_export("chat", "100", "200", "150", "9", "gpt", "t0");
+        committed_input["resourceSpans"][0]["scopeSpans"][0]["spans"][0]["spanId"] = json!("ab");
+        let mut produced_input = committed_input.clone();
+        produced_input["resourceSpans"][0]["scopeSpans"][0]["spans"][0]["spanId"] = json!("9f");
+        let case = case_file("A chat turn.", "2026-01-01T00:00:00Z");
+
+        // Default: a changed span id is a difference.
+        let paths = json_differences(&case, &case, &committed_input, &produced_input, &scenario);
+        assert!(
+            !paths.is_empty(),
+            "a changed span id must be reported by default"
+        );
+
+        // unordered_spans: span ids are masked, so the same spans with other ids compare equal.
+        scenario.unordered_spans = true;
+        let paths = json_differences(&case, &case, &committed_input, &produced_input, &scenario);
+        assert!(paths.is_empty(), "{paths:?}");
     }
 
     #[test]

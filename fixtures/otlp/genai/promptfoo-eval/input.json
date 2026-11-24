@@ -1,0 +1,678 @@
+{
+  "resourceSpans": [
+    {
+      "resource": {
+        "attributes": [
+          {
+            "key": "service.name",
+            "value": {
+              "stringValue": "promptfoo"
+            }
+          },
+          {
+            "key": "service.version",
+            "value": {
+              "stringValue": "0.125.1"
+            }
+          }
+        ],
+        "droppedAttributesCount": 0,
+        "entityRefs": []
+      },
+      "scopeSpans": [
+        {
+          "scope": {
+            "name": "promptfoo.providers",
+            "version": "1.0.0",
+            "attributes": [],
+            "droppedAttributesCount": 0
+          },
+          "spans": [
+            {
+              "traceId": "ea096ed33c84513e2142b244a17bdbc1",
+              "spanId": "65e9e769d4537dc0",
+              "traceState": "",
+              "parentSpanId": "",
+              "flags": 257,
+              "name": "promptfoo.test_case",
+              "kind": 1,
+              "startTimeUnixNano": "1767225590000000000",
+              "endTimeUnixNano": "1767225590361000000",
+              "attributes": [
+                {
+                  "key": "promptfoo.span.role",
+                  "value": {
+                    "stringValue": "test_case"
+                  }
+                },
+                {
+                  "key": "promptfoo.eval.id",
+                  "value": {
+                    "stringValue": "capture-volatile-1"
+                  }
+                },
+                {
+                  "key": "promptfoo.test.index",
+                  "value": {
+                    "intValue": "0"
+                  }
+                },
+                {
+                  "key": "promptfoo.test_case.id",
+                  "value": {
+                    "stringValue": "0-0"
+                  }
+                },
+                {
+                  "key": "promptfoo.prompt.index",
+                  "value": {
+                    "intValue": "0"
+                  }
+                },
+                {
+                  "key": "promptfoo.provider.id",
+                  "value": {
+                    "stringValue": "openai:chat:gpt-4o-mini"
+                  }
+                },
+                {
+                  "key": "promptfoo.prompt.label",
+                  "value": {
+                    "stringValue": "What is the capital of {{country}}?"
+                  }
+                },
+                {
+                  "key": "promptfoo.repeat.index",
+                  "value": {
+                    "intValue": "0"
+                  }
+                },
+                {
+                  "key": "promptfoo.test.success",
+                  "value": {
+                    "boolValue": true
+                  }
+                },
+                {
+                  "key": "promptfoo.test.score",
+                  "value": {
+                    "intValue": "1"
+                  }
+                }
+              ],
+              "droppedAttributesCount": 0,
+              "events": [],
+              "droppedEventsCount": 0,
+              "links": [],
+              "droppedLinksCount": 0,
+              "status": {
+                "message": "",
+                "code": 1
+              }
+            },
+            {
+              "traceId": "ea096ed33c84513e2142b244a17bdbc1",
+              "spanId": "87879ad5ef00a638",
+              "traceState": "",
+              "parentSpanId": "65e9e769d4537dc0",
+              "flags": 257,
+              "name": "openai:chat:gpt-4o-mini",
+              "kind": 3,
+              "startTimeUnixNano": "1767225590005000000",
+              "endTimeUnixNano": "1767225590161000000",
+              "attributes": [
+                {
+                  "key": "promptfoo.provider.id",
+                  "value": {
+                    "stringValue": "openai:chat:gpt-4o-mini"
+                  }
+                },
+                {
+                  "key": "promptfoo.span.role",
+                  "value": {
+                    "stringValue": "target"
+                  }
+                },
+                {
+                  "key": "promptfoo.target.type",
+                  "value": {
+                    "stringValue": "provider"
+                  }
+                },
+                {
+                  "key": "promptfoo.prompt.label",
+                  "value": {
+                    "stringValue": "What is the capital of {{country}}?"
+                  }
+                },
+                {
+                  "key": "promptfoo.eval.id",
+                  "value": {
+                    "stringValue": "capture-volatile-1"
+                  }
+                },
+                {
+                  "key": "promptfoo.test.index",
+                  "value": {
+                    "intValue": "0"
+                  }
+                },
+                {
+                  "key": "promptfoo.cache_hit",
+                  "value": {
+                    "boolValue": false
+                  }
+                }
+              ],
+              "droppedAttributesCount": 0,
+              "events": [],
+              "droppedEventsCount": 0,
+              "links": [],
+              "droppedLinksCount": 0,
+              "status": {
+                "message": "",
+                "code": 1
+              }
+            },
+            {
+              "traceId": "ea096ed33c84513e2142b244a17bdbc1",
+              "spanId": "c6d08ca588da5ba3",
+              "traceState": "",
+              "parentSpanId": "87879ad5ef00a638",
+              "flags": 257,
+              "name": "chat gpt-4o-mini",
+              "kind": 3,
+              "startTimeUnixNano": "1767225590007000000",
+              "endTimeUnixNano": "1767225590161000000",
+              "attributes": [
+                {
+                  "key": "gen_ai.provider.name",
+                  "value": {
+                    "stringValue": "openai"
+                  }
+                },
+                {
+                  "key": "gen_ai.operation.name",
+                  "value": {
+                    "stringValue": "chat"
+                  }
+                },
+                {
+                  "key": "promptfoo.provider.id",
+                  "value": {
+                    "stringValue": "openai:chat:gpt-4o-mini"
+                  }
+                },
+                {
+                  "key": "gen_ai.request.model",
+                  "value": {
+                    "stringValue": "gpt-4o-mini"
+                  }
+                },
+                {
+                  "key": "openai.api.type",
+                  "value": {
+                    "stringValue": "chat_completions"
+                  }
+                },
+                {
+                  "key": "promptfoo.span.role",
+                  "value": {
+                    "stringValue": "target"
+                  }
+                },
+                {
+                  "key": "gen_ai.request.max_tokens",
+                  "value": {
+                    "intValue": "1024"
+                  }
+                },
+                {
+                  "key": "gen_ai.request.temperature",
+                  "value": {
+                    "intValue": "0"
+                  }
+                },
+                {
+                  "key": "promptfoo.eval.id",
+                  "value": {
+                    "stringValue": "capture-volatile-1"
+                  }
+                },
+                {
+                  "key": "promptfoo.test.index",
+                  "value": {
+                    "intValue": "0"
+                  }
+                },
+                {
+                  "key": "promptfoo.prompt.label",
+                  "value": {
+                    "stringValue": "What is the capital of {{country}}?"
+                  }
+                },
+                {
+                  "key": "promptfoo.request.body",
+                  "value": {
+                    "stringValue": "What is the capital of France?"
+                  }
+                },
+                {
+                  "key": "gen_ai.usage.input_tokens",
+                  "value": {
+                    "intValue": "20"
+                  }
+                },
+                {
+                  "key": "gen_ai.usage.output_tokens",
+                  "value": {
+                    "intValue": "2"
+                  }
+                },
+                {
+                  "key": "promptfoo.usage.total_tokens",
+                  "value": {
+                    "intValue": "22"
+                  }
+                },
+                {
+                  "key": "gen_ai.usage.reasoning.output_tokens",
+                  "value": {
+                    "intValue": "0"
+                  }
+                },
+                {
+                  "key": "promptfoo.usage.accepted_prediction_tokens",
+                  "value": {
+                    "intValue": "0"
+                  }
+                },
+                {
+                  "key": "promptfoo.usage.rejected_prediction_tokens",
+                  "value": {
+                    "intValue": "0"
+                  }
+                },
+                {
+                  "key": "gen_ai.usage.cache_read.input_tokens",
+                  "value": {
+                    "intValue": "0"
+                  }
+                },
+                {
+                  "key": "gen_ai.response.finish_reasons",
+                  "value": {
+                    "arrayValue": {
+                      "values": [
+                        {
+                          "stringValue": "stop"
+                        }
+                      ]
+                    }
+                  }
+                },
+                {
+                  "key": "promptfoo.cache_hit",
+                  "value": {
+                    "boolValue": false
+                  }
+                },
+                {
+                  "key": "promptfoo.response.body",
+                  "value": {
+                    "stringValue": "Paris"
+                  }
+                }
+              ],
+              "droppedAttributesCount": 0,
+              "events": [],
+              "droppedEventsCount": 0,
+              "links": [],
+              "droppedLinksCount": 0,
+              "status": {
+                "message": "",
+                "code": 1
+              }
+            },
+            {
+              "traceId": "ea096ed33c84513e2142b244a17bdbc1",
+              "spanId": "8ba6a9df6b65b865",
+              "traceState": "",
+              "parentSpanId": "65e9e769d4537dc0",
+              "flags": 257,
+              "name": "grader contains",
+              "kind": 1,
+              "startTimeUnixNano": "1767225590167000000",
+              "endTimeUnixNano": "1767225590168000000",
+              "attributes": [
+                {
+                  "key": "promptfoo.grader.id",
+                  "value": {
+                    "stringValue": "contains"
+                  }
+                },
+                {
+                  "key": "gen_ai.evaluation.name",
+                  "value": {
+                    "stringValue": "contains"
+                  }
+                },
+                {
+                  "key": "promptfoo.span.role",
+                  "value": {
+                    "stringValue": "grader"
+                  }
+                },
+                {
+                  "key": "promptfoo.eval.id",
+                  "value": {
+                    "stringValue": "capture-volatile-1"
+                  }
+                },
+                {
+                  "key": "promptfoo.test.index",
+                  "value": {
+                    "intValue": "0"
+                  }
+                },
+                {
+                  "key": "gen_ai.evaluation.score.label",
+                  "value": {
+                    "stringValue": "pass"
+                  }
+                },
+                {
+                  "key": "gen_ai.evaluation.score.value",
+                  "value": {
+                    "intValue": "1"
+                  }
+                },
+                {
+                  "key": "gen_ai.evaluation.explanation",
+                  "value": {
+                    "stringValue": "Assertion passed"
+                  }
+                }
+              ],
+              "droppedAttributesCount": 0,
+              "events": [],
+              "droppedEventsCount": 0,
+              "links": [],
+              "droppedLinksCount": 0,
+              "status": {
+                "message": "",
+                "code": 1
+              }
+            },
+            {
+              "traceId": "ea096ed33c84513e2142b244a17bdbc1",
+              "spanId": "8fc80d568405b405",
+              "traceState": "",
+              "parentSpanId": "65e9e769d4537dc0",
+              "flags": 257,
+              "name": "grader llm-rubric",
+              "kind": 1,
+              "startTimeUnixNano": "1767225590168000000",
+              "endTimeUnixNano": "1767225590359000000",
+              "attributes": [
+                {
+                  "key": "promptfoo.grader.id",
+                  "value": {
+                    "stringValue": "llm-rubric"
+                  }
+                },
+                {
+                  "key": "gen_ai.evaluation.name",
+                  "value": {
+                    "stringValue": "llm-rubric"
+                  }
+                },
+                {
+                  "key": "promptfoo.span.role",
+                  "value": {
+                    "stringValue": "grader"
+                  }
+                },
+                {
+                  "key": "promptfoo.eval.id",
+                  "value": {
+                    "stringValue": "capture-volatile-1"
+                  }
+                },
+                {
+                  "key": "promptfoo.test.index",
+                  "value": {
+                    "intValue": "0"
+                  }
+                },
+                {
+                  "key": "gen_ai.evaluation.score.label",
+                  "value": {
+                    "stringValue": "pass"
+                  }
+                },
+                {
+                  "key": "gen_ai.evaluation.score.value",
+                  "value": {
+                    "intValue": "1"
+                  }
+                },
+                {
+                  "key": "gen_ai.evaluation.explanation",
+                  "value": {
+                    "stringValue": "The answer names a city."
+                  }
+                }
+              ],
+              "droppedAttributesCount": 0,
+              "events": [],
+              "droppedEventsCount": 0,
+              "links": [],
+              "droppedLinksCount": 0,
+              "status": {
+                "message": "",
+                "code": 1
+              }
+            },
+            {
+              "traceId": "ea096ed33c84513e2142b244a17bdbc1",
+              "spanId": "daa197c348cad1b8",
+              "traceState": "",
+              "parentSpanId": "8fc80d568405b405",
+              "flags": 257,
+              "name": "grader provider openai:chat:gpt-4o-mini",
+              "kind": 3,
+              "startTimeUnixNano": "1767225590224000000",
+              "endTimeUnixNano": "1767225590359000000",
+              "attributes": [
+                {
+                  "key": "promptfoo.provider.id",
+                  "value": {
+                    "stringValue": "openai:chat:gpt-4o-mini"
+                  }
+                },
+                {
+                  "key": "promptfoo.span.role",
+                  "value": {
+                    "stringValue": "grader"
+                  }
+                },
+                {
+                  "key": "promptfoo.prompt.label",
+                  "value": {
+                    "stringValue": "llm-rubric"
+                  }
+                },
+                {
+                  "key": "promptfoo.cache_hit",
+                  "value": {
+                    "boolValue": false
+                  }
+                }
+              ],
+              "droppedAttributesCount": 0,
+              "events": [],
+              "droppedEventsCount": 0,
+              "links": [],
+              "droppedLinksCount": 0,
+              "status": {
+                "message": "",
+                "code": 1
+              }
+            },
+            {
+              "traceId": "ea096ed33c84513e2142b244a17bdbc1",
+              "spanId": "31a4ab46838de94f",
+              "traceState": "",
+              "parentSpanId": "daa197c348cad1b8",
+              "flags": 257,
+              "name": "chat gpt-4o-mini",
+              "kind": 3,
+              "startTimeUnixNano": "1767225590224000000",
+              "endTimeUnixNano": "1767225590359000000",
+              "attributes": [
+                {
+                  "key": "gen_ai.provider.name",
+                  "value": {
+                    "stringValue": "openai"
+                  }
+                },
+                {
+                  "key": "gen_ai.operation.name",
+                  "value": {
+                    "stringValue": "chat"
+                  }
+                },
+                {
+                  "key": "promptfoo.provider.id",
+                  "value": {
+                    "stringValue": "openai:chat:gpt-4o-mini"
+                  }
+                },
+                {
+                  "key": "gen_ai.request.model",
+                  "value": {
+                    "stringValue": "gpt-4o-mini"
+                  }
+                },
+                {
+                  "key": "openai.api.type",
+                  "value": {
+                    "stringValue": "chat_completions"
+                  }
+                },
+                {
+                  "key": "promptfoo.span.role",
+                  "value": {
+                    "stringValue": "grader"
+                  }
+                },
+                {
+                  "key": "gen_ai.request.max_tokens",
+                  "value": {
+                    "intValue": "1024"
+                  }
+                },
+                {
+                  "key": "gen_ai.request.temperature",
+                  "value": {
+                    "intValue": "0"
+                  }
+                },
+                {
+                  "key": "promptfoo.prompt.label",
+                  "value": {
+                    "stringValue": "llm-rubric"
+                  }
+                },
+                {
+                  "key": "promptfoo.request.body",
+                  "value": {
+                    "stringValue": "[{\"role\":\"system\",\"content\":\"You are grading output according to a user-specified rubric. If the statement in the rubric is true, then the output passes the test. You respond with a JSON object with this structure: {reason: string, pass: boolean, score: number}\\n\\nExamples:\\n\\n<Output>Hello world</Output>\\n<Rubric>Content contains a greeting</Rubric>\\n{\\\"reason\\\": \\\"the content contains the word 'Hello'\\\", \\\"pass\\\": true, \\\"score\\\": 1.0}\\n\\n<Output>Avast ye swabs, repel the invaders!</Output>\\n<Rubric>Does not speak like a pirate</Rubric>\\n{\\\"reason\\\": \\\"'avast ye' is a common pirate term\\\", \\\"pass\\\": false, \\\"score\\\": 0.0}\"},{\"role\":\"user\",\"content\":\"<Output>\\nParis\\n</Output>\\n<Rubric>\\nanswers with a city\\n</Rubric>\"}]"
+                  }
+                },
+                {
+                  "key": "gen_ai.usage.input_tokens",
+                  "value": {
+                    "intValue": "30"
+                  }
+                },
+                {
+                  "key": "gen_ai.usage.output_tokens",
+                  "value": {
+                    "intValue": "8"
+                  }
+                },
+                {
+                  "key": "promptfoo.usage.total_tokens",
+                  "value": {
+                    "intValue": "38"
+                  }
+                },
+                {
+                  "key": "gen_ai.usage.reasoning.output_tokens",
+                  "value": {
+                    "intValue": "0"
+                  }
+                },
+                {
+                  "key": "promptfoo.usage.accepted_prediction_tokens",
+                  "value": {
+                    "intValue": "0"
+                  }
+                },
+                {
+                  "key": "promptfoo.usage.rejected_prediction_tokens",
+                  "value": {
+                    "intValue": "0"
+                  }
+                },
+                {
+                  "key": "gen_ai.usage.cache_read.input_tokens",
+                  "value": {
+                    "intValue": "0"
+                  }
+                },
+                {
+                  "key": "gen_ai.response.finish_reasons",
+                  "value": {
+                    "arrayValue": {
+                      "values": [
+                        {
+                          "stringValue": "stop"
+                        }
+                      ]
+                    }
+                  }
+                },
+                {
+                  "key": "promptfoo.cache_hit",
+                  "value": {
+                    "boolValue": false
+                  }
+                },
+                {
+                  "key": "promptfoo.response.body",
+                  "value": {
+                    "stringValue": "{\"pass\": true, \"score\": 1, \"reason\": \"The answer names a city.\"}"
+                  }
+                }
+              ],
+              "droppedAttributesCount": 0,
+              "events": [],
+              "droppedEventsCount": 0,
+              "links": [],
+              "droppedLinksCount": 0,
+              "status": {
+                "message": "",
+                "code": 1
+              }
+            }
+          ],
+          "schemaUrl": ""
+        }
+      ],
+      "schemaUrl": ""
+    }
+  ]
+}
