@@ -8,6 +8,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { chromium } from "playwright";
 import { portIsFree } from "./port-free.mjs";
+import { checkClipRect, checkStorage } from "./screenshot-checks.mjs";
 
 const SITE = dirname(dirname(fileURLToPath(import.meta.url)));
 const ROOT = dirname(SITE);
@@ -59,19 +60,26 @@ async function startServer() {
 
 async function shoot(context, shot) {
   const page = await context.newPage();
+  // A marketing shot sets its own window size; the docs' shots keep the context's 1440×900.
+  if (shot.viewport) await page.setViewportSize(shot.viewport);
   try {
     // Each shot starts from empty storage (no "Recent" items from an earlier shot). The docs show
-    // the light theme; a marketing shot sets `"theme": "dark"`, the UI's default.
+    // the light theme; a marketing shot sets `"theme": "dark"`, the UI's default. A shot's
+    // `storage` then sets its own keys, after the theme, so it can override `cetra.theme` too.
     const theme = shot.theme ?? "light";
     await page.emulateMedia({ colorScheme: theme });
-    await page.addInitScript((value) => {
-      try {
-        localStorage.clear();
-        localStorage.setItem("cetra.theme", value);
-      } catch {
-        // storage unavailable: the UI's default theme stays
-      }
-    }, theme);
+    await page.addInitScript(
+      ({ theme, storage }) => {
+        try {
+          localStorage.clear();
+          localStorage.setItem("cetra.theme", theme);
+          for (const [key, value] of Object.entries(storage)) localStorage.setItem(key, value);
+        } catch {
+          // storage unavailable: the UI's defaults stay
+        }
+      },
+      { theme, storage: shot.storage ?? {} },
+    );
     await page.clock.setFixedTime(new Date(shot.now ?? NOW));
     await page.goto(ORIGIN + shot.path);
     await page.getByText(shot.waitFor).first().waitFor();
@@ -95,7 +103,12 @@ async function shoot(context, shot) {
       }
     });
     const path = join(OUT, `${shot.name}.png`);
-    await page.screenshot({ path, fullPage: false, animations: "disabled", caret: "hide" });
+    const options = { path, animations: "disabled", caret: "hide" };
+    // `clip` captures one element (the panel a section talks about) instead of the window;
+    // `clipRect` captures a rectangle of the window in CSS px (a window over the page).
+    if (shot.clip) await page.locator(shot.clip).first().screenshot(options);
+    else if (shot.clipRect) await page.screenshot({ ...options, clip: shot.clipRect });
+    else await page.screenshot({ ...options, fullPage: false });
     console.log(`wrote ${path}`);
   } finally {
     await page.close();
@@ -108,6 +121,8 @@ const selected = names.length > 0 ? shots.filter((shot) => names.includes(shot.n
 if (selected.length !== (names.length || shots.length)) {
   throw new Error(`unknown shot name in: ${names.join(", ")}`);
 }
+checkStorage(selected);
+checkClipRect(selected);
 mkdirSync(OUT, { recursive: true });
 
 const server = await startServer();
