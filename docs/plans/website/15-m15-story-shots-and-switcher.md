@@ -805,10 +805,21 @@ Run from the worktree, with Node on the PATH:
 - **Q1, hero shots.** The all-shots run rewrites `marketing-trace-view*.png`. Keep the new PNGs, and look at each one: the hero captions and alts (in `stories.mjs`, Q2) must still be true of them.
 - **Q2, copy.** Step 7 checks the 28 captions too: each caption must be true of its picture (for example the coding alert's "in Slack": if the channel isn't visible, say "Know when the coding agent's error rate climbs." instead). Alts are one sentence describing the picture; they don't need to start with "The".
 - **Q2, design.** Add `docs/website/00-design.md` to Q2's Edit list. In §12, change the coding trace list's "`coding-agent` on top" to "only the failed traces", replace "`-research`" with "`-voice`", and keep the shot count at 28 (4 hero + 24 chapter).
-- **Q2, phones.** When the sync script selects a story in a picker the reader didn't click, it calls `tab.scrollIntoView({ inline: "nearest", block: "nearest" })` on that picker's selected tab, so the chosen chip is visible.
+- **Q2, phones.** When the sync script selects a story in a picker the reader didn't click, it scrolls only that picker's tab list horizontally so the chosen chip is visible, never the page (`scrollIntoView` would scroll the page). In the `for (const tabs of pickers)` branch, after `tabs[i].click()`:
+  ```ts
+  const tab = tabs[i];
+  const list = tab.parentElement as HTMLElement;
+  const t = tab.getBoundingClientRect();
+  const l = list.getBoundingClientRect();
+  if (t.left < l.left) list.scrollLeft -= l.left - t.left;
+  else if (t.right > l.right) list.scrollLeft += t.right - l.right;
+  ```
+  Add a Playwright check: at 390 px, click the hero chip "Document extraction"; `window.scrollY` is unchanged and the Alert picker's selected chip lies inside its tab list's visible rect.
 - **Q2, first load.** With `?story=voice`, the support hero picture is still fetched (it is the eager one). Accepted (design §12: the first load is as today); check 4 doesn't assert otherwise.
 - **Q2, checks.**
   - Check 3: a picture's shot name is the `/_astro/` file name cut at its first `.`.
   - Check 4: `history.length` is the same right after load and after a switch.
   - Check 11: compare the first tab's left edge with the tablist's content box (its left edge plus its padding), with 2 px tolerance.
-- **Q2, conventions.** Build with `pnpm --dir website exec astro build` only (never `pnpm build`). Don't export `DEFAULT_STORY` unless `StoryPicture` or the sync script uses it.
+- **Q2, conventions.** Build with `pnpm --dir website exec astro build` only (never `pnpm build`). Drop `DEFAULT_STORY` from the module; step 5's test 1 asserts `STORIES[0].id === "support"` instead.
+- **Q2, URL on load.** Loading with `?story=` may rewrite the URL through `replaceState` (same parameters and hash, no new history entry); that is accepted, whatever the plan said about not rewriting it.
+- **Q2, copy changes.** Any caption or alt changed in step 7 is changed in `stories.mjs` and in test 5's `EXPECTED` table together.
