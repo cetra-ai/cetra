@@ -1,6 +1,6 @@
 # Marketing site (cetra.sh)
 
-The design is `docs/website/00-design.md`. It has ten milestones, M1–M10, each with its own plan written just before it starts. M6 (benchmarks) waits for the benchmark and is not planned yet.
+The design is `docs/website/00-design.md`. It has eleven milestones, M1–M11, each with its own plan written just before it starts. M6 (benchmarks) waits for the benchmark and is not planned yet.
 
 | Milestone | Plan | Status |
 |---|---|---|
@@ -14,6 +14,7 @@ The design is `docs/website/00-design.md`. It has ten milestones, M1–M10, each
 | M8 Main sync | [`08-m8-main-sync.md`](08-m8-main-sync.md) | done (S1–S7) |
 | M9 Pricing feature table | [`09-m9-pricing-matrix.md`](09-m9-pricing-matrix.md) | done (X1–X2) |
 | M10 Focused screenshots | [`10-m10-focused-shots.md`](10-m10-focused-shots.md) | done (Z1–Z2) |
+| M11 Showcase trace | [`11-m11-showcase-trace.md`](11-m11-showcase-trace.md) | done (T1–T2) |
 
 ## Branches
 
