@@ -1,0 +1,198 @@
+---
+title: Spring AI
+description: "Trace Spring AI model calls with cetra on Spring Boot: Spring AI's own observations through Boot's OpenTelemetry starter, or OpenInference's handler."
+---
+
+import Backing from "../../../../components/Backing.astro";
+
+cetra traces Spring AI chat calls and tool executions from a Spring Boot application. There are two routes from Spring AI's observations to OTLP: Boot's OpenTelemetry starter on Spring AI's own observations (route 1), or OpenInference's Spring AI handler as the only observation handler (route 2). Pick one of the two; never both.
+
+<Backing fixtures={["genai/spring-ai-boot-tool", "openinference/spring-ai-tool"]} />
+
+## Install
+
+Route 1 needs Boot's OpenTelemetry starter and the actuator next to the OpenAI starter:
+
+```xml
+<dependency>
+    <groupId>org.springframework.boot</groupId>
+    <artifactId>spring-boot-starter-opentelemetry</artifactId>
+</dependency>
+<dependency>
+    <groupId>org.springframework.boot</groupId>
+    <artifactId>spring-boot-starter-actuator</artifactId>
+</dependency>
+<dependency>
+    <groupId>org.springframework.ai</groupId>
+    <artifactId>spring-ai-starter-model-openai</artifactId>
+    <version>2.0.2</version>
+</dependency>
+```
+
+Route 2 adds OpenInference's handler:
+
+```xml
+<dependency>
+    <groupId>com.arize</groupId>
+    <artifactId>openinference-instrumentation-springAI</artifactId>
+    <version>0.1.10</version>
+</dependency>
+```
+
+The fixtures were captured with Spring Boot 4.1.2 and the Spring AI BOM 2.0.2 imported in `dependencyManagement`.
+
+## Set up
+
+### Route 1: Boot's OpenTelemetry starter
+
+Point Boot's OTLP tracing export at cetra in `application.properties`:
+
+```properties
+management.tracing.sampling.probability=1.0
+management.opentelemetry.tracing.export.otlp.endpoint=http://localhost:8080/v1/traces
+management.opentelemetry.tracing.export.otlp.headers.Authorization=Bearer sk-cetra-…
+management.otlp.metrics.export.enabled=false
+```
+
+- The endpoint is the full traces URL: this starter does not append `/v1/traces` itself.
+- The sampling probability must be `1.0`: Boot samples 10% of the spans by default.
+- The starter also exports metrics over OTLP. Turn that off unless something collects them.
+
+Call the model as usual, with the tools registered on the `ChatClient`:
+
+```java
+import org.springframework.ai.chat.client.ChatClient;
+import org.springframework.ai.openai.OpenAiChatOptions;
+import org.springframework.ai.tool.annotation.Tool;
+import org.springframework.ai.tool.annotation.ToolParam;
+import org.springframework.boot.ApplicationRunner;
+import org.springframework.boot.SpringApplication;
+import org.springframework.boot.autoconfigure.SpringBootApplication;
+import org.springframework.context.annotation.Bean;
+
+@SpringBootApplication
+public class Main {
+
+    public static void main(String[] args) {
+        SpringApplication.run(Main.class, args);
+    }
+
+    public static class WeatherTools {
+        @Tool(name = "get_weather", description = "Get the current weather for a city")
+        public String getWeather(@ToolParam(description = "City name") String city) {
+            return "Sunny in " + city + ", 21 C";
+        }
+    }
+
+    @Bean
+    ApplicationRunner oneCall(ChatClient.Builder chat, WeatherTools tools) {
+        return args -> {
+            String answer = chat.defaultTools(tools).build().prompt()
+                    .options(OpenAiChatOptions.builder().model("gpt-4o-mini"))
+                    .user("What is the weather in Lyon? Use the tool.")
+                    .call()
+                    .content();
+            System.out.println("answer: " + answer);
+        };
+    }
+}
+```
+
+Set `spring.ai.openai.base-url` when your provider is OpenAI-compatible and is not OpenAI itself.
+
+### Route 2: OpenInference's handler
+
+Keep the route 1 properties and exclude Micrometer's own tracing auto-configuration, so the OpenInference handler is the only observation handler:
+
+```properties
+spring.autoconfigure.exclude=org.springframework.boot.micrometer.tracing.autoconfigure.MicrometerTracingAutoConfiguration
+```
+
+Register the handler as a bean, and open a span around the calls you want in one trace:
+
+```java
+import com.arize.instrumentation.OITracer;
+import com.arize.instrumentation.TraceConfig;
+import com.arize.instrumentation.springAI.SpringAIInstrumentor;
+import io.micrometer.observation.Observation;
+import io.micrometer.observation.ObservationHandler;
+import io.opentelemetry.api.OpenTelemetry;
+import io.opentelemetry.api.trace.Span;
+import io.opentelemetry.context.Scope;
+import org.springframework.ai.chat.client.ChatClient;
+import org.springframework.ai.openai.OpenAiChatOptions;
+import org.springframework.ai.tool.annotation.Tool;
+import org.springframework.ai.tool.annotation.ToolParam;
+import org.springframework.boot.ApplicationRunner;
+import org.springframework.context.annotation.Bean;
+import org.springframework.context.annotation.Configuration;
+
+@Configuration
+class Wiring {
+
+    public static class WeatherTools {
+        @Tool(name = "get_weather", description = "Get the current weather for a city")
+        public String getWeather(@ToolParam(description = "City name") String city) {
+            return "Sunny in " + city + ", 21 C";
+        }
+    }
+
+    @Bean
+    WeatherTools weatherTools() {
+        return new WeatherTools();
+    }
+
+    @Bean
+    ObservationHandler<Observation.Context> openInferenceHandler(OpenTelemetry otel) {
+        return new SpringAIInstrumentor(
+                new OITracer(otel.getTracer("my-app"), TraceConfig.getDefault()));
+    }
+
+    @Bean
+    ApplicationRunner oneCall(ChatClient.Builder chat, WeatherTools tools, OpenTelemetry otel) {
+        return args -> {
+            Span appSpan = otel.getTracer("my-app").spanBuilder("app.request").startSpan();
+            try (Scope ignored = appSpan.makeCurrent()) {
+                String answer = chat.defaultTools(tools).build().prompt()
+                        .options(OpenAiChatOptions.builder().model("gpt-4o-mini"))
+                        .user("What is the weather in Lyon? Use the tool.")
+                        .call()
+                        .content();
+                System.out.println("answer: " + answer);
+            } finally {
+                appSpan.end();
+            }
+        };
+    }
+}
+```
+
+## What you get
+
+Route 1, one `ChatClient` call with one tool round:
+
+- an `llm` span named `chat <model>` for each model call, with the provider `openai`, the model, the token counts and the cost computed from the built-in prices;
+- a `tool` span named `execute_tool <tool>` for each tool call, with the tool's name, description and schema in its attributes and no arguments or result;
+- plain spans for Spring AI's own observations: the chat client (`spring_ai chat_client`), the tool-calling advisor (named `tool _calling ` by Spring AI, with a leading and a trailing space) and one `call` span per model call.
+
+Route 1 records no message content. Route 2, the same call:
+
+- an `llm` span named `generate` for each model call under your application span, with the input and output messages, the token counts and the cost;
+- no framework spans and no tool spans: the handler records the model calls only.
+
+## Limits
+
+- Never enable both routes at once: each model call is recorded twice.
+- Route 1 records no messages: Spring AI 2.x writes prompts and completions as log records, and cetra does not store log records.
+- Route 2 captures content by default. The handler hides it only through code, with a `TraceConfig` built by `TraceConfig.builder()` and passed to the `OITracer`.
+- Route 2's exclusion turns Micrometer tracing off for the whole application, HTTP requests included. Open a span around the model calls to keep them in one trace; without one, each call is a trace of its own.
+- The `management.otlp.tracing.*` keys belong to Boot's Micrometer OTLP bridge and export nothing when the OpenTelemetry starter is present. Use the `management.opentelemetry.tracing.export.otlp.*` keys.
+- Boot's HTTP client creates a plain `POST` span for each model request. The fixtures drop those spans: they carry the mock provider's loopback address, which the capture's privacy check refuses.
+- The fixtures were captured with Spring Boot 4.1.2, Spring AI 2.0.2 and OpenInference Java 0.1.10.
+- If a field is missing, look at the span's **Attributes** tab and compare it with [Span attributes](/docs/reference/attributes/).
+
+## Next
+
+- [Send OpenTelemetry](/docs/get-started/opentelemetry/): the endpoint and the headers cetra expects.
+- [Traces](/docs/tracing/traces/): read the trace as a tree and a timeline.
+- [Cost and tokens](/docs/tracing/cost-and-tokens/): how cost is computed from the token counts.
