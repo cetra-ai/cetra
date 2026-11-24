@@ -309,11 +309,8 @@ They run one after the other.
    const RESEARCH_ANSWER = [
      "Neutralize the cells a spreadsheet would read as a formula, and quote every field.",
      "",
-     "- Prefix cells that start with `=`, `+`, `-`, `@`, a tab or a carriage return with a single quote [1]",
-     "- Quote every field, and double the quotes inside it [2]",
-     "- Escape on export, and keep the raw value in the API [1]",
-     "",
-     "[1] OWASP, CSV Injection · [2] RFC 4180",
+     "- Prefix cells that start with `=`, `+`, `-` or `@` with a single quote (OWASP)",
+     "- Quote every field, and double the quotes inside it (RFC 4180)",
    ].join("\n");
    const RESEARCH_QUERIES = [
      "csv injection prevention",
@@ -436,11 +433,11 @@ They run one after the other.
      ],
      story: {
        inputPreview: `${INVOICE_FILE} (2 pages)`,
-       outputPreview: "Northwind Supplies · INV-2026-0412 · 1,284.00 EUR",
+       outputPreview: "Northwind Supplies · INV-2026-0412 · 18 Nov 2026 · 3 line items · 1,284.00 EUR",
        payloads: [
          {
-           input: jsonPayload({ file: INVOICE_FILE, pages: 2 }),
-           output: jsonPayload({ ...INVOICE_FIELDS, total: 1284 }),
+           input: textPayload(`${INVOICE_FILE} (2 pages)`),
+           output: textPayload("Northwind Supplies · INV-2026-0412 · 18 Nov 2026 · 3 line items · 1,284.00 EUR"),
          },
          toolPayload("load_pdf", { file: INVOICE_FILE }, jsonPayload({ pages: 2, bytes: 184_320 })),
          toolPayload("ocr", { file: INVOICE_FILE, pages: 2 }, textPayload(INVOICE_OCR)),
