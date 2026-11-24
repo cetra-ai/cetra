@@ -148,10 +148,10 @@
   },
   {
     "name": "marketing-trace-list",
-    "path": "/acme/support-bot/traces?filter=tags%20%40%3E%20%5B'email'%5D&cols=start,name,input,duration,cost",
+    "path": "/acme/support-bot/traces?filter=tags%20%40%3E%20%5B'email'%5D&cols=start,name,duration,tokens,cost",
     "waitFor": "support-agent",
     "theme": "dark",
-    "viewport": { "width": 800, "height": 640 },
+    "viewport": { "width": 900, "height": 640 },
     "actions": [{ "click": "button[aria-pressed]:has-text(\"Filters\")" }],
     "clip": "main"
   },
@@ -165,9 +165,10 @@
       { "click": "[role=\"menuitem\"]:has-text(\"Which answers scored low today?\")" }
     ],
     "waitAfter": "Open in dashboard editor",
-    "storage": { "cetra.assistant.window": "{\"x\":16,\"y\":16,\"width\":480,\"height\":728}" },
+    "storage": { "cetra.assistant.window": "{\"x\":16,\"y\":16,\"width\":560,\"height\":968}" },
     "theme": "dark",
-    "viewport": { "width": 900, "height": 760 }
+    "viewport": { "width": 1024, "height": 1000 },
+    "clipRect": { "x": 0, "y": 0, "width": 900, "height": 1000 }
   },
   {
     "name": "marketing-issue",
@@ -182,8 +183,8 @@
     "path": "/acme/support-bot/annotation-queues/01900000-0000-7000-8000-000000570501/review/01900000-0000-7000-8000-000000570511",
     "waitFor": "Complete and next",
     "theme": "dark",
-    "viewport": { "width": 900, "height": 640 },
-    "clip": "main"
+    "viewport": { "width": 900, "height": 600 },
+    "clip": "section[aria-label=\"Review\"]"
   },
   {
     "name": "marketing-playground",
@@ -200,24 +201,25 @@
     ],
     "waitAfter": "Use the API for ranges",
     "theme": "dark",
-    "viewport": { "width": 900, "height": 640 },
+    "viewport": { "width": 960, "height": 640 },
     "clip": "main"
   },
   {
     "name": "marketing-alerts",
     "path": "/acme/support-bot/alerts?rule=01900000-0000-7000-8000-000000570201",
     "waitFor": "Answer correctness under 0.7 on support-bot",
+    "actions": [{ "click": "button[aria-label=\"Bottom\"]" }],
     "waitAfter": "History",
     "theme": "dark",
-    "viewport": { "width": 900, "height": 560 },
+    "viewport": { "width": 900, "height": 900 },
     "clip": "main"
   },
   {
     "name": "marketing-trace-list-coding",
-    "path": "/acme/support-bot/traces?filter=status%20%3D%20'error'&cols=start,name,input,duration,cost",
+    "path": "/acme/support-bot/traces?filter=status%20%3D%20'error'&cols=start,name,duration,tokens,cost",
     "waitFor": "coding-agent",
     "theme": "dark",
-    "viewport": { "width": 800, "height": 640 },
+    "viewport": { "width": 900, "height": 640 },
     "actions": [{ "click": "button[aria-pressed]:has-text(\"Filters\")" }],
     "clip": "main"
   },
@@ -231,9 +233,10 @@
       { "click": "[role=\"menuitem\"]:has-text(\"Which traces failed in the last day?\")" }
     ],
     "waitAfter": "Open in dashboard editor",
-    "storage": { "cetra.assistant.window": "{\"x\":16,\"y\":16,\"width\":480,\"height\":728}" },
+    "storage": { "cetra.assistant.window": "{\"x\":16,\"y\":16,\"width\":560,\"height\":968}" },
     "theme": "dark",
-    "viewport": { "width": 900, "height": 760 }
+    "viewport": { "width": 1024, "height": 1000 },
+    "clipRect": { "x": 0, "y": 0, "width": 900, "height": 1000 }
   },
   {
     "name": "marketing-issue-coding",
@@ -248,8 +251,8 @@
     "path": "/acme/support-bot/annotation-queues/01900000-0000-7000-8000-000000570502/review/01900000-0000-7000-8000-000000570512",
     "waitFor": "Complete and next",
     "theme": "dark",
-    "viewport": { "width": 900, "height": 640 },
-    "clip": "main"
+    "viewport": { "width": 900, "height": 600 },
+    "clip": "section[aria-label=\"Review\"]"
   },
   {
     "name": "marketing-playground-coding",
@@ -269,24 +272,25 @@
     ],
     "waitAfter": "needs_quotes",
     "theme": "dark",
-    "viewport": { "width": 900, "height": 640 },
+    "viewport": { "width": 960, "height": 640 },
     "clip": "main"
   },
   {
     "name": "marketing-alerts-coding",
     "path": "/acme/support-bot/alerts?rule=01900000-0000-7000-8000-000000570202",
     "waitFor": "Error rate above 5% on code-agent",
+    "actions": [{ "click": "button[aria-label=\"Bottom\"]" }],
     "waitAfter": "History",
     "theme": "dark",
-    "viewport": { "width": 900, "height": 560 },
+    "viewport": { "width": 900, "height": 900 },
     "clip": "main"
   },
   {
     "name": "marketing-trace-list-voice",
-    "path": "/acme/support-bot/traces?filter=tags%20%40%3E%20%5B'voice'%5D&sort=duration&order=desc&cols=start,name,input,duration,cost",
+    "path": "/acme/support-bot/traces?filter=tags%20%40%3E%20%5B'voice'%5D&sort=duration&order=desc&cols=start,name,duration,tokens,cost",
     "waitFor": "tags @> ['voice']",
     "theme": "dark",
-    "viewport": { "width": 800, "height": 640 },
+    "viewport": { "width": 900, "height": 640 },
     "actions": [{ "click": "button[aria-pressed]:has-text(\"Filters\")" }],
     "clip": "main"
   },
@@ -300,9 +304,10 @@
       { "click": "[role=\"menuitem\"]:has-text(\"Which calls were slow today?\")" }
     ],
     "waitAfter": "Open in dashboard editor",
-    "storage": { "cetra.assistant.window": "{\"x\":16,\"y\":16,\"width\":480,\"height\":728}" },
+    "storage": { "cetra.assistant.window": "{\"x\":16,\"y\":16,\"width\":560,\"height\":968}" },
     "theme": "dark",
-    "viewport": { "width": 900, "height": 760 }
+    "viewport": { "width": 1024, "height": 1000 },
+    "clipRect": { "x": 0, "y": 0, "width": 900, "height": 1000 }
   },
   {
     "name": "marketing-issue-voice",
@@ -317,8 +322,8 @@
     "path": "/acme/support-bot/annotation-queues/01900000-0000-7000-8000-000000570503/review/01900000-0000-7000-8000-000000570513",
     "waitFor": "Complete and next",
     "theme": "dark",
-    "viewport": { "width": 900, "height": 640 },
-    "clip": "main"
+    "viewport": { "width": 900, "height": 600 },
+    "clip": "section[aria-label=\"Review\"]"
   },
   {
     "name": "marketing-playground-voice",
@@ -334,24 +339,25 @@
     ],
     "waitAfter": "Which one works for you?",
     "theme": "dark",
-    "viewport": { "width": 900, "height": 640 },
+    "viewport": { "width": 960, "height": 640 },
     "clip": "main"
   },
   {
     "name": "marketing-alerts-voice",
     "path": "/acme/support-bot/alerts?rule=01900000-0000-7000-8000-000000570203",
     "waitFor": "Slow replies on voice-agent",
+    "actions": [{ "click": "button[aria-label=\"Bottom\"]" }],
     "waitAfter": "History",
     "theme": "dark",
-    "viewport": { "width": 900, "height": 560 },
+    "viewport": { "width": 900, "height": 900 },
     "clip": "main"
   },
   {
     "name": "marketing-trace-list-extraction",
-    "path": "/acme/support-bot/traces?filter=tags%20%40%3E%20%5B'billing'%5D&cols=start,name,input,duration,cost",
+    "path": "/acme/support-bot/traces?filter=tags%20%40%3E%20%5B'billing'%5D&cols=start,name,duration,tokens,cost",
     "waitFor": "extract-invoice",
     "theme": "dark",
-    "viewport": { "width": 800, "height": 640 },
+    "viewport": { "width": 900, "height": 640 },
     "actions": [{ "click": "button[aria-pressed]:has-text(\"Filters\")" }],
     "clip": "main"
   },
@@ -365,9 +371,10 @@
       { "click": "[role=\"menuitem\"]:has-text(\"Which invoices needed a retry?\")" }
     ],
     "waitAfter": "Open in dashboard editor",
-    "storage": { "cetra.assistant.window": "{\"x\":16,\"y\":16,\"width\":480,\"height\":728}" },
+    "storage": { "cetra.assistant.window": "{\"x\":16,\"y\":16,\"width\":560,\"height\":968}" },
     "theme": "dark",
-    "viewport": { "width": 900, "height": 760 }
+    "viewport": { "width": 1024, "height": 1000 },
+    "clipRect": { "x": 0, "y": 0, "width": 900, "height": 1000 }
   },
   {
     "name": "marketing-issue-extraction",
@@ -382,8 +389,8 @@
     "path": "/acme/support-bot/annotation-queues/01900000-0000-7000-8000-000000570504/review/01900000-0000-7000-8000-000000570514",
     "waitFor": "Complete and next",
     "theme": "dark",
-    "viewport": { "width": 900, "height": 640 },
-    "clip": "main"
+    "viewport": { "width": 900, "height": 600 },
+    "clip": "section[aria-label=\"Review\"]"
   },
   {
     "name": "marketing-playground-extraction",
@@ -403,16 +410,17 @@
     ],
     "waitAfter": "1284",
     "theme": "dark",
-    "viewport": { "width": 900, "height": 640 },
+    "viewport": { "width": 960, "height": 640 },
     "clip": "main"
   },
   {
     "name": "marketing-alerts-extraction",
     "path": "/acme/support-bot/alerts?rule=01900000-0000-7000-8000-000000570204",
     "waitFor": "Schema check pass rate under 97%",
+    "actions": [{ "click": "button[aria-label=\"Bottom\"]" }],
     "waitAfter": "History",
     "theme": "dark",
-    "viewport": { "width": 900, "height": 560 },
+    "viewport": { "width": 900, "height": 900 },
     "clip": "main"
   }
 ]

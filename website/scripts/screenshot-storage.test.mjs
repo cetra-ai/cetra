@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { checkStorage } from "./screenshot-storage.mjs";
+import { checkClipRect, checkStorage } from "./screenshot-storage.mjs";
 
 test("a shot without a storage map passes", () => {
   assert.doesNotThrow(() => checkStorage([{ name: "a" }]));
@@ -45,5 +45,49 @@ test("the first bad shot in a list is the one named", () => {
   assert.throws(
     () => checkStorage([{ name: "good" }, { name: "bad", storage: { a: 1 } }]),
     /shot "bad"/,
+  );
+});
+
+test("a clipRect of integers passes, with x and y at 0", () => {
+  assert.doesNotThrow(() =>
+    checkClipRect([{ name: "a", clipRect: { x: 0, y: 0, width: 900, height: 900 } }]),
+  );
+  assert.doesNotThrow(() => checkClipRect([{ name: "a" }]));
+});
+
+test("a clipRect that is not an object is rejected, naming the shot", () => {
+  for (const clipRect of ["x", 1, null, [1, 2, 3, 4]]) {
+    assert.throws(
+      () => checkClipRect([{ name: "bad-shot", clipRect }]),
+      /shot "bad-shot": clipRect must be an object/,
+    );
+  }
+});
+
+test("a clipRect side that is missing, not an integer, or out of range is rejected", () => {
+  const good = { x: 0, y: 0, width: 900, height: 900 };
+  const bad = [
+    { ...good, width: undefined },
+    { ...good, height: 0 },
+    { ...good, width: -5 },
+    { ...good, x: -1 },
+    { ...good, y: 1.5 },
+    { ...good, height: "900" },
+  ];
+  for (const clipRect of bad) {
+    assert.throws(
+      () => checkClipRect([{ name: "bad-shot", clipRect }]),
+      /shot "bad-shot": clipRect\.\w+ must be an integer/,
+    );
+  }
+});
+
+test("a shot with both clip and clipRect is rejected, naming the shot", () => {
+  assert.throws(
+    () =>
+      checkClipRect([
+        { name: "bad-shot", clip: "main", clipRect: { x: 0, y: 0, width: 1, height: 1 } },
+      ]),
+    /shot "bad-shot": a shot has clip or clipRect, not both/,
   );
 });

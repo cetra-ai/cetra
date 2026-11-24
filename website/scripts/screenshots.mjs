@@ -8,7 +8,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { chromium } from "playwright";
 import { portIsFree } from "./port-free.mjs";
-import { checkStorage } from "./screenshot-storage.mjs";
+import { checkClipRect, checkStorage } from "./screenshot-storage.mjs";
 
 const SITE = dirname(dirname(fileURLToPath(import.meta.url)));
 const ROOT = dirname(SITE);
@@ -104,8 +104,10 @@ async function shoot(context, shot) {
     });
     const path = join(OUT, `${shot.name}.png`);
     const options = { path, animations: "disabled", caret: "hide" };
-    // `clip` captures one element (the panel a section talks about) instead of the window.
+    // `clip` captures one element (the panel a section talks about) instead of the window;
+    // `clipRect` captures a rectangle of the window in CSS px (a window over the page).
     if (shot.clip) await page.locator(shot.clip).first().screenshot(options);
+    else if (shot.clipRect) await page.screenshot({ ...options, clip: shot.clipRect });
     else await page.screenshot({ ...options, fullPage: false });
     console.log(`wrote ${path}`);
   } finally {
@@ -120,6 +122,7 @@ if (selected.length !== (names.length || shots.length)) {
   throw new Error(`unknown shot name in: ${names.join(", ")}`);
 }
 checkStorage(selected);
+checkClipRect(selected);
 mkdirSync(OUT, { recursive: true });
 
 const server = await startServer();
