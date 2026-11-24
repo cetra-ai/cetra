@@ -66,10 +66,11 @@ const TREE_COLUMNS = "minmax(160px, 1fr) 72px 64px 72px";
 const TIMELINE_MIN_PX = 160;
 // Timeline rows are 4px shorter than the density's, so the bars sit close together.
 const TIMELINE_ROW_INSET_PX = 4;
-// Tree guides: each depth indents 12px after a 4px margin, and a chevron box is 16px wide.
-const INDENT_PX = 12;
-const INDENT_BASE_PX = 4;
-const CHEVRON_PX = 16;
+// The expand toggles sit in a 20px gutter at the cell's left edge, so the tree lines run
+// from icon to icon without crossing them. Each depth indents 16px; a kind icon is 14px wide.
+const GUTTER_PX = 20;
+const INDENT_PX = 16;
+const ICON_PX = 14;
 // A tick label past this share of the axis sits left of its gridline, so it isn't cut.
 const TICK_FLIP_PCT = 85;
 const NAME_MIN_PX = 140;
@@ -687,7 +688,7 @@ export function TreeGrid({
                       {guide ? <TreeGuideLines guide={guide} depth={row.depth} /> : null}
                       <div
                         className="flex h-full min-w-0 items-center gap-1 pr-2"
-                        style={{ paddingLeft: row.depth * INDENT_PX + INDENT_BASE_PX }}
+                        style={{ paddingLeft: GUTTER_PX + row.depth * INDENT_PX }}
                       >
                         {expandable ? (
                           <button
@@ -695,7 +696,7 @@ export function TreeGrid({
                             tabIndex={-1}
                             aria-expanded={!isCollapsed}
                             aria-label={isCollapsed ? "Expand" : "Collapse"}
-                            className="inline-flex size-4 shrink-0 items-center justify-center"
+                            className="absolute top-1/2 left-0.5 inline-flex size-4 -translate-y-1/2 items-center justify-center text-muted-foreground hover:text-foreground"
                             onClick={(event) => {
                               event.stopPropagation();
                               toggle(span.span_id);
@@ -707,9 +708,7 @@ export function TreeGrid({
                               <ChevronDown className="size-3" />
                             )}
                           </button>
-                        ) : (
-                          <span className="inline-block size-4 shrink-0" />
-                        )}
+                        ) : null}
                         <KindIcon kind={span.span_kind} />
                         <span className="min-w-0 truncate">{highlightName(span.name, query)}</span>
                         {span.status === "error" ? <StatusDot status="error" /> : null}
@@ -782,16 +781,15 @@ function markPct(ns: number, zoom: TimeWindow): number {
 }
 
 /**
- * The elbow lines in a row's indent: each level's line sits under its parent's chevron.
+ * The elbow lines in a row's indent: each level's line runs down from its parent's icon.
  * ├ and a tick for a child with later siblings, a rounded └ for the last child, a full line
- * for each ancestor level that continues, and a line down from an expanded parent's chevron.
+ * for each ancestor level that continues, and a line down from an expanded parent's icon.
  */
 function TreeGuideLines({ guide, depth }: { guide: TreeGuide; depth: number }) {
-  const lineX = (level: number) => (level - 1) * INDENT_PX + INDENT_BASE_PX + CHEVRON_PX / 2;
-  const chevronX = depth * INDENT_PX + INDENT_BASE_PX;
+  const lineX = (level: number) => GUTTER_PX + (level - 1) * INDENT_PX + ICON_PX / 2;
   const elbowX = lineX(depth);
-  // A leaf's tick runs through its empty chevron box to the icon; a parent's stops at its chevron.
-  const tickEnd = guide.down || depth === 0 ? chevronX + 3 : chevronX + CHEVRON_PX - 2;
+  // The tick stops 2px before this row's icon.
+  const tickEnd = GUTTER_PX + depth * INDENT_PX - 2;
   return (
     <span aria-hidden="true" data-guide={guideShape(guide)} className="pointer-events-none">
       {guide.through.map((through, offset) =>
@@ -821,7 +819,7 @@ function TreeGuideLines({ guide, depth }: { guide: TreeGuide; depth: number }) {
       ) : null}
       {guide.down ? (
         <span
-          className="absolute bottom-0 h-[calc(50%-7px)] w-px bg-border"
+          className="absolute bottom-0 h-[calc(50%-9px)] w-px bg-border"
           style={{ left: lineX(depth + 1) }}
         />
       ) : null}
