@@ -7,7 +7,6 @@
 import { useQueryClient } from "@tanstack/react-query";
 import { useVirtualizer } from "@tanstack/react-virtual";
 import { cn } from "cn";
-import { Minus, Plus } from "lucide-react";
 import {
   type KeyboardEvent,
   type ReactNode,
@@ -67,11 +66,14 @@ const TIMELINE_MIN_PX = 160;
 // Timeline rows are 4px shorter than the density's, so the bars sit close together.
 const TIMELINE_ROW_INSET_PX = 4;
 // Tree layout: a 4px margin, then 16px per depth. Each row starts with a 16px toggle slot
-// holding a 10px −/+ box centred in it; the tree lines run from a box's edges, never through it.
+// holding an 11px −/+ box 2px from its left; the tree lines run from a box's edges, never
+// through it. An odd box leaves a 9px inside, so the 1px strokes of − and + sit dead centre,
+// and the 1px tree line at x 7 meets the box's centre (7.5).
 const INDENT_BASE_PX = 4;
 const INDENT_PX = 16;
 const TOGGLE_SLOT_PX = 16;
-const TOGGLE_BOX_PX = 10;
+const TOGGLE_BOX_PX = 11;
+const TOGGLE_BOX_LEFT_PX = 2;
 // The kind icon starts after the slot and the row's 4px gap.
 const ICON_OFFSET_PX = TOGGLE_SLOT_PX + 4;
 // A tick label past this share of the axis sits left of its gridline, so it isn't cut.
@@ -692,7 +694,7 @@ export function TreeGrid({
                         <TreeGuideLines guide={guide} depth={row.depth} expandable={expandable} />
                       ) : null}
                       <div
-                        className="flex h-full min-w-0 items-center gap-1 pr-2"
+                        className="flex h-full min-w-0 items-center gap-[4px] pr-2"
                         style={{ paddingLeft: INDENT_BASE_PX + row.depth * INDENT_PX }}
                       >
                         {expandable ? (
@@ -701,25 +703,28 @@ export function TreeGrid({
                             tabIndex={-1}
                             aria-expanded={!isCollapsed}
                             aria-label={isCollapsed ? "Expand" : "Collapse"}
-                            className="group inline-flex size-4 shrink-0 items-center justify-center"
+                            className="group inline-flex size-[16px] shrink-0 items-center"
                             onClick={(event) => {
                               event.stopPropagation();
                               toggle(span.span_id);
                             }}
                           >
                             <span
-                              className="inline-flex items-center justify-center rounded-[2px] border border-muted-foreground/60 text-muted-foreground group-hover:border-foreground group-hover:text-foreground"
-                              style={{ width: TOGGLE_BOX_PX, height: TOGGLE_BOX_PX }}
+                              className="relative shrink-0 rounded-[2px] border border-muted-foreground/60 text-muted-foreground group-hover:border-foreground group-hover:text-foreground"
+                              style={{
+                                width: TOGGLE_BOX_PX,
+                                height: TOGGLE_BOX_PX,
+                                marginLeft: TOGGLE_BOX_LEFT_PX,
+                              }}
                             >
+                              <span className="absolute top-[4px] left-[2px] h-px w-[5px] bg-current" />
                               {isCollapsed ? (
-                                <Plus className="size-2" strokeWidth={3} />
-                              ) : (
-                                <Minus className="size-2" strokeWidth={3} />
-                              )}
+                                <span className="absolute top-[2px] left-[4px] h-[5px] w-px bg-current" />
+                              ) : null}
                             </span>
                           </button>
                         ) : (
-                          <span className="inline-block size-4 shrink-0" />
+                          <span className="inline-block size-[16px] shrink-0" />
                         )}
                         <KindIcon kind={span.span_kind} />
                         <span className="min-w-0 truncate">{highlightName(span.name, query)}</span>
@@ -808,11 +813,12 @@ function TreeGuideLines({
   expandable: boolean;
 }) {
   const slotX = (level: number) => INDENT_BASE_PX + level * INDENT_PX;
-  const lineX = (level: number) => slotX(level - 1) + TOGGLE_SLOT_PX / 2;
+  const lineX = (level: number) =>
+    slotX(level - 1) + TOGGLE_BOX_LEFT_PX + Math.floor(TOGGLE_BOX_PX / 2);
   const elbowX = lineX(depth);
   // The tick ends at this row's box, or, for a leaf, runs through the empty slot to its icon.
   const tickEnd = expandable
-    ? slotX(depth) + (TOGGLE_SLOT_PX - TOGGLE_BOX_PX) / 2
+    ? slotX(depth) + TOGGLE_BOX_LEFT_PX
     : slotX(depth) + ICON_OFFSET_PX - 2;
   return (
     <span aria-hidden="true" data-guide={guideShape(guide)} className="pointer-events-none">
