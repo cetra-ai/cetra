@@ -62,13 +62,22 @@ pub(crate) async fn reset_link(
     now: i64,
 ) -> Result<String, ResetError> {
     let minted = mint_reset(public_url, now)?;
-    let hash = minted.hash.clone();
-    let expires_at = minted.expires_at;
+    let url = minted.url.clone();
     meta.write(move |conn| {
-        Box::pin(async move { insert_reset(conn, &hash, user_id, now, expires_at).await })
+        Box::pin(async move { reset_link_tx(conn, &minted, user_id, now).await })
     })
     .await?;
-    Ok(minted.url)
+    Ok(url)
+}
+
+/// Stores `minted`'s reset token for `user_id` in the caller's transaction.
+pub(crate) async fn reset_link_tx(
+    conn: &mut sqlx::SqliteConnection,
+    minted: &MintedReset,
+    user_id: Uuid,
+    now: i64,
+) -> Result<(), MetaError> {
+    insert_reset(conn, &minted.hash, user_id, now, minted.expires_at).await
 }
 
 /// Stores a new verification token and returns its URL.

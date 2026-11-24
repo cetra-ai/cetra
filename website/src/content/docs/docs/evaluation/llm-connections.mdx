@@ -7,22 +7,25 @@ An LLM connection stores a provider and an API key, so evaluators can call a mod
 
 ## Supported providers
 
-A connection uses one of three provider APIs:
+The form offers four choices over three provider APIs:
 
 | Provider | Notes |
 |---|---|
-| OpenAI | Also any server with an OpenAI-compatible chat endpoint (Azure OpenAI, vLLM, Ollama, a gateway): set the base URL. |
+| OpenAI | OpenAI's API. The base URL is optional, under **Advanced**, for a proxy. |
+| OpenAI-compatible | Any server with an OpenAI-style chat API: Azure OpenAI, vLLM, Ollama, OpenRouter, LiteLLM. Enter its base URL. |
 | Anthropic | Messages API. |
 | Gemini | Google's `generateContent` API. |
+
+Over the API, OpenAI and OpenAI-compatible are both `"adapter": "openai"`; a compatible server sets `base_url`.
 
 ## Add a connection
 
 Connections belong to the organization, so every project of the org can use them. Every member can see them, and org admins add, edit, delete and test them.
 
 1. Open the organization's **LLM connections** page and select **Add connection**.
-2. Choose the provider, give the connection a name and paste the API key.
-3. Optional: set a base URL, a default model and extra headers.
-4. Save, then select **Test**. The test makes one small judge call and shows whether it worked and how long it took.
+2. Choose the provider, give the connection a name and paste the API key. For OpenAI-compatible, enter the server's base URL.
+3. Optional: pick a default model (the field suggests common model ids for the provider) and open **Advanced** for the structured output mode, the limits and extra headers.
+4. Select **Test connection** to check the values before you save them. The test makes one small judge call with the default model and shows whether it worked and how long it took. Then save.
 
 The same works over the API:
 
@@ -47,20 +50,24 @@ A judge must answer in a fixed shape. The connection's structured output mode sa
 
 If a provider rejects the mode, the judge fails with an error that names the setting to change. cetra does not switch modes by itself.
 
+## Test a connection
+
+**Test connection** checks the values in the form, saved or not. A test of changed values does not touch the saved connection. When you test the saved values with the default model, the panel shows when, as "Tested 5m ago", or "Last test failed 5m ago" when it did not work. Changing the provider, key, base URL, structured output mode or headers clears that line. Under **Advanced**, **Test embeddings** checks an embedding model for issue sources. Anthropic has no embeddings API.
+
 ## The assistant
 
 The in-app assistant uses one of your organization's connections. An org admin picks it in Organization settings → Assistant. Deleting that connection turns the assistant off. A connection marked failing still serves the assistant. See [Assistant](/docs/platform/assistant/).
 
 ## How keys are stored
 
-cetra encrypts the API key and any extra header values with the instance's encryption key before it writes them to the database. The UI and the API never show them again: they show only the last 4 characters of the key and the header names. To replace a key, edit the connection and enter a new one.
+cetra encrypts the API key and any extra header values with the instance's encryption key before it writes them to the database. The UI and the API never show them again: they show only the last 4 characters of the key and the header names. To replace a key, edit the connection and enter a new one. The key field shows its last 4 characters as a placeholder. If you change the provider or the base URL without entering a new key, cetra keeps the saved key: saving sends it to the new base URL from then on, and **Test connection** sends it there right away. cetra still refuses private addresses there unless `security.allow_private_network_egress` is on; see [Private networks](#private-networks).
 
 If you run cetra yourself, see [Configuration](/docs/self-hosting/configuration/#secrets) for how to set and rotate the instance key.
 
 ## Private networks
 
-cetra blocks outbound requests to private addresses (loopback, private ranges, link-local and similar), so a connection cannot reach services inside your network. To use a local model server such as Ollama or vLLM, an operator sets `security.allow_private_network_egress` to `true` in the server configuration. The UI cannot read that setting, so the connection form only explains it. The same setting covers webhook evaluators and other outbound calls.
+cetra blocks outbound requests to private addresses (loopback, private ranges, link-local and similar), so a connection cannot reach services inside your network. To use a local model server such as Ollama or vLLM, an operator sets `security.allow_private_network_egress` to `true` in the server configuration. The UI cannot read that setting. The same setting covers webhook evaluators and other outbound calls.
 
 ## When a connection fails
 
-If the provider answers with an authentication, billing, quota or not-found error, cetra marks the connection as failing and pauses every online rule that uses it. A successful test or a new key resumes them.
+If the provider answers with an authentication, billing, quota or not-found error, cetra marks the connection as failing and pauses every online rule that uses it. A successful test of the saved values with the default model, or a new key, resumes them.

@@ -8,12 +8,14 @@ use serde_json::{Map, Value, json};
 use uuid::Uuid;
 
 use super::output::{self, char_len, render};
+use super::record_tool;
 use super::sql::required_window;
 use super::tools::arguments;
 use crate::api::common::TimeParam;
 use crate::api::convert;
 use crate::api::saved_views::SavedViewKind;
 use crate::api::traces::{SpanDetail, build_tree};
+use crate::audit;
 use crate::auth::principal::AuthUser;
 use crate::auth::roles::ProjectPerm;
 use crate::http::AppState;
@@ -133,6 +135,7 @@ struct SearchTracesArguments {
 pub(crate) async fn search_traces(
     state: &AppState,
     user: &AuthUser,
+    audit: Option<&audit::Ctx>,
     raw: JsonObject,
 ) -> Result<Value, ApiError> {
     let args: SearchTracesArguments = arguments(raw)?;
@@ -145,6 +148,7 @@ pub(crate) async fn search_traces(
     )?;
     let max_chars = output::max_chars(args.max_chars)?;
     let access = user_project(state, user, &args.project, ProjectPerm::View).await?;
+    record_tool(state, audit, SEARCH_TRACES, &access, None).await?;
     let view = match args.view.as_deref() {
         Some(key) => view_state(state, access.project.id, user, key).await?,
         None => Map::new(),
@@ -314,11 +318,13 @@ struct GetTraceArguments {
 pub(crate) async fn get_trace(
     state: &AppState,
     user: &AuthUser,
+    audit: Option<&audit::Ctx>,
     raw: JsonObject,
 ) -> Result<Value, ApiError> {
     let args: GetTraceArguments = arguments(raw)?;
     let max_chars = output::max_chars(args.max_chars)?;
     let access = user_project(state, user, &args.project, ProjectPerm::View).await?;
+    record_tool(state, audit, GET_TRACE, &access, None).await?;
 
     let deadline = Deadline::start();
     let ctx = open_query(
@@ -405,11 +411,13 @@ struct GetSpanArguments {
 pub(crate) async fn get_span(
     state: &AppState,
     user: &AuthUser,
+    audit: Option<&audit::Ctx>,
     raw: JsonObject,
 ) -> Result<Value, ApiError> {
     let args: GetSpanArguments = arguments(raw)?;
     let max_chars = output::max_chars(args.max_chars)?;
     let access = user_project(state, user, &args.project, ProjectPerm::View).await?;
+    record_tool(state, audit, GET_SPAN, &access, None).await?;
 
     // The HTTP span endpoint opens its context with `None`; the tool takes `around` (D154).
     // It only speeds up the lookup.

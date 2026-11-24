@@ -4,12 +4,13 @@
 
 use std::collections::HashMap;
 use std::fmt;
-use std::sync::{Arc, PoisonError, RwLock};
+use std::sync::{Arc, Mutex, PoisonError, RwLock};
 
 use cetra_core::ids::OrgId;
+use uuid::Uuid;
 
-use crate::api::org_sso::JitRole;
-use crate::auth::oidc::{IdpHttp, OidcProvider};
+use crate::api::org_sso::{JitRole, SsoProtocol};
+use crate::auth::oidc::{IdpHttp, IdpHttpError, OidcProvider};
 use crate::config::{AuthSettings, Secret};
 use crate::crypto::SecretBox;
 use crate::http::AppState;
@@ -18,6 +19,9 @@ use crate::meta::{MetaDb, MetaError};
 pub(crate) mod dns;
 pub(crate) mod login;
 pub(crate) mod recheck;
+pub(crate) mod saml;
+pub(crate) mod saml_pending;
+pub(crate) mod saml_refresh;
 pub(crate) mod settings;
 pub(crate) mod store;
 
@@ -36,15 +40,26 @@ pub(crate) struct ProviderFlags {
     pub(crate) enforced: bool,
 }
 
-/// What the built provider depends on (D-P-62). `updated_at` is not used: tests run on a
-/// fixed manual clock, and flags changes must not rebuild the provider.
+/// What a built provider depends on (D-P-62, D-SA-2). `updated_at` is not used: tests run on a
+/// fixed manual clock, and flags changes must not rebuild the provider. A SAML provider keeps
+/// its IdP entity ID, SSO URL, certificates, attribute names, display name and JIT role here.
 #[derive(Clone, PartialEq, Eq)]
-struct ProviderConfig {
-    issuer: String,
-    client_id: String,
-    client_secret_enc: Vec<u8>,
-    display_name: String,
-    jit_role: JitRole,
+enum ProviderConfig {
+    Oidc {
+        issuer: String,
+        client_id: String,
+        client_secret_enc: Vec<u8>,
+        display_name: String,
+        jit_role: JitRole,
+    },
+    Saml {
+        idp_entity_id: String,
+        sso_url: String,
+        certificates: Vec<Vec<u8>>,
+        attributes: store::SamlAttributes,
+        display_name: String,
+        jit_role: JitRole,
+    },
 }
 
 impl fmt::Debug for ProviderConfig {
@@ -56,9 +71,78 @@ impl fmt::Debug for ProviderConfig {
 /// An org's built provider. `Debug` omits the client secret (OidcProvider's own `Debug` does).
 #[derive(Debug)]
 pub(crate) struct OrgProvider {
-    pub(crate) oidc: OidcProvider,
+    /// The `org_sso_providers` row this provider was built from (D-SA-21 checks it at sign-in).
+    pub(crate) id: Uuid,
+    pub(crate) kind: ProviderKind,
     pub(crate) jit_role: JitRole,
     config: ProviderConfig,
+}
+
+/// The protocol-specific part of a built provider.
+#[derive(Debug)]
+pub(crate) enum ProviderKind {
+    // Boxed: an `OidcProvider` is far larger than a `SamlProvider`.
+    Oidc(Box<OidcProvider>),
+    Saml(SamlProvider),
+}
+
+/// A built SAML provider: the trusted metadata and the attribute names to read.
+pub(crate) struct SamlProvider {
+    pub(crate) metadata: cetra_saml::IdpMetadata,
+    pub(crate) attributes: cetra_saml::AttributeNames,
+}
+
+/// `Debug` prints nothing of the metadata: its entity ID, SSO URL and certificates stay out of
+/// logs.
+impl fmt::Debug for SamlProvider {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("SamlProvider { .. }")
+    }
+}
+
+/// cetra's SAML endpoints for `org` (D-SA-12). Paths are absolute; URLs join `public_url`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct SpUrls {
+    pub(crate) entity_id: String,
+    pub(crate) acs_url: String,
+    pub(crate) start_url: String,
+    pub(crate) acs_path: String,
+    pub(crate) start_path: String,
+    pub(crate) saml_path: String,
+}
+
+/// The SP entity ID, ACS and start URLs of `org`, from the instance's public URL (D-SA-12).
+pub(crate) fn sp_urls(public_url: &crate::config::PublicUrl, org: OrgId) -> SpUrls {
+    let saml_path = format!("/api/auth/saml/{org}");
+    let acs_path = format!("{saml_path}/acs");
+    let start_path = format!("{saml_path}/start");
+    SpUrls {
+        entity_id: public_url.join(&saml_path),
+        acs_url: public_url.join(&acs_path),
+        start_url: public_url.join(&start_path),
+        acs_path,
+        start_path,
+        saml_path,
+    }
+}
+
+/// The attribute names to read: the crate's defaults, with each field the owner set replaced
+/// by that one name (D-SA-6).
+pub(crate) fn attribute_names(attributes: &store::SamlAttributes) -> cetra_saml::AttributeNames {
+    let mut names = cetra_saml::AttributeNames::default();
+    if let Some(name) = &attributes.email {
+        names.email = vec![name.clone()];
+    }
+    if let Some(name) = &attributes.display_name {
+        names.display_name = vec![name.clone()];
+    }
+    if let Some(name) = &attributes.first_name {
+        names.first_name = vec![name.clone()];
+    }
+    if let Some(name) = &attributes.last_name {
+        names.last_name = vec![name.clone()];
+    }
+    names
 }
 
 #[derive(Debug, Default)]
@@ -76,6 +160,11 @@ pub(crate) struct OrgSso {
     reload_lock: tokio::sync::Mutex<()>,
     /// `IdpHttp::guarded(identity_http_client(policy), policy)` (P2).
     http: IdpHttp,
+    /// The egress policy `http` enforces.
+    policy: cetra_eval::EgressPolicy,
+    /// Pending SAML AuthnRequests (D-SA-10).
+    // Boxed so `OrgSso` stays small inside the server's startup future (clippy::large_futures).
+    saml_pending: Box<Mutex<saml_pending::PendingTable>>,
     pub(crate) dns: dns::TxtResolver,
 }
 
@@ -111,6 +200,8 @@ impl OrgSso {
             index: RwLock::new(Arc::new(Index::default())),
             reload_lock: tokio::sync::Mutex::new(()),
             http: IdpHttp::guarded(client, policy),
+            policy,
+            saml_pending: Box::new(Mutex::new(saml_pending::PendingTable::default())),
             dns,
         })
     }
@@ -146,6 +237,7 @@ impl OrgSso {
         }
 
         let current = self.snapshot();
+        let saml = store::active_saml(meta.reader()).await?;
         let mut flags = HashMap::new();
         let mut providers = HashMap::new();
         let mut unreadable = 0;
@@ -157,39 +249,44 @@ impl OrgSso {
                     enforced: row.enforced,
                 },
             );
-            let config = ProviderConfig {
-                issuer: row.issuer.clone(),
-                client_id: row.client_id.clone(),
-                client_secret_enc: row.client_secret_enc.clone(),
-                display_name: row.display_name.clone(),
-                jit_role: row.jit_role,
+            let config = match row.protocol {
+                SsoProtocol::Oidc => row.oidc.as_ref().map(|oidc| ProviderConfig::Oidc {
+                    issuer: oidc.issuer.clone(),
+                    client_id: oidc.client_id.clone(),
+                    client_secret_enc: oidc.client_secret_enc.clone(),
+                    display_name: row.display_name.clone(),
+                    jit_role: row.jit_role,
+                }),
+                SsoProtocol::Saml => saml.get(&row.id).map(|saml| ProviderConfig::Saml {
+                    idp_entity_id: saml.idp_entity_id.clone(),
+                    sso_url: saml.sso_url.clone(),
+                    certificates: saml.certificates.clone(),
+                    attributes: saml.attributes.clone(),
+                    display_name: row.display_name.clone(),
+                    jit_role: row.jit_role,
+                }),
             };
+            let Some(config) = config else {
+                unreadable += 1;
+                tracing::warn!(org_id = %row.org_id, "org identity provider skipped");
+                continue;
+            };
+            // A rebuilt row (new id) is built again, so its sign-ins check the new id.
             if let Some(existing) = current.providers.get(&row.org_id)
+                && existing.id == row.id
                 && existing.config == config
             {
                 providers.insert(row.org_id, Arc::clone(existing));
                 continue;
             }
-            let secret = secrets
-                .open(&row.client_secret_enc, store::secret_aad(&row.id))
-                .ok()
-                .and_then(|bytes| String::from_utf8(bytes).ok());
-            let built = secret.and_then(|secret| {
-                self.build_provider(
-                    row.org_id,
-                    &row.display_name,
-                    &row.issuer,
-                    &row.client_id,
-                    Secret::new(secret),
-                )
-                .ok()
-            });
-            match built {
-                Some(oidc) => {
+            let kind = self.build_kind(&row, &config, secrets);
+            match kind {
+                Some(kind) => {
                     providers.insert(
                         row.org_id,
                         Arc::new(OrgProvider {
-                            oidc,
+                            id: row.id,
+                            kind,
                             jit_role: row.jit_role,
                             config,
                         }),
@@ -254,6 +351,76 @@ impl OrgSso {
         self.snapshot().domains.values().any(|route| route.enabled)
     }
 
+    /// Builds the protocol part of a provider from its stored configuration. `None` when a
+    /// secret cannot be opened, an issuer is refused, or the metadata is unusable.
+    fn build_kind(
+        &self,
+        row: &store::ProviderRow,
+        config: &ProviderConfig,
+        secrets: &SecretBox,
+    ) -> Option<ProviderKind> {
+        match config {
+            ProviderConfig::Oidc {
+                issuer,
+                client_id,
+                client_secret_enc,
+                display_name,
+                ..
+            } => {
+                let secret = secrets
+                    .open(client_secret_enc, store::secret_aad(&row.id))
+                    .ok()
+                    .and_then(|bytes| String::from_utf8(bytes).ok())?;
+                self.build_provider(
+                    row.org_id,
+                    display_name,
+                    issuer,
+                    client_id,
+                    Secret::new(secret),
+                )
+                .ok()
+                .map(|oidc| ProviderKind::Oidc(Box::new(oidc)))
+            }
+            ProviderConfig::Saml {
+                idp_entity_id,
+                sso_url,
+                certificates,
+                attributes,
+                ..
+            } => {
+                let certificates = certificates
+                    .iter()
+                    .map(|der| cetra_saml::IdpCertificate::from_der(der))
+                    .collect::<Result<Vec<_>, _>>()
+                    .ok()?;
+                let metadata =
+                    cetra_saml::IdpMetadata::from_fields(idp_entity_id, sso_url, certificates)
+                        .ok()?;
+                Some(ProviderKind::Saml(SamlProvider {
+                    metadata,
+                    attributes: attribute_names(attributes),
+                }))
+            }
+        }
+    }
+
+    /// The egress policy of the instance's identity provider client.
+    pub(crate) fn policy(&self) -> cetra_eval::EgressPolicy {
+        self.policy
+    }
+
+    /// Runs `f` on the pending SAML table. A poisoned lock is recovered, as `index` is.
+    pub(crate) fn with_pending<T>(
+        &self,
+        f: impl FnOnce(&mut saml_pending::PendingTable) -> T,
+    ) -> T {
+        let mut table = self
+            .saml_pending
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        f(&mut table)
+    }
+
     /// A provider built from settings (the save-time discovery check of P7 and `reload`).
     ///
     /// # Errors
@@ -277,9 +444,55 @@ impl OrgSso {
         )
     }
 
+    /// Fetches IdP metadata from `url` through the guarded client (D-SA-11, D-SA-19).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`MetadataFetchError`] when the URL is refused, the fetch fails or the answer
+    /// is not `200`.
+    pub(crate) async fn fetch_metadata(&self, url: &str) -> Result<Vec<u8>, MetadataFetchError> {
+        if crate::config::issuer_problem(url).is_some() {
+            return Err(MetadataFetchError::Url);
+        }
+        url::Url::parse(url).map_err(|_| MetadataFetchError::Url)?;
+        let request = oauth2::http::Request::builder()
+            .method("GET")
+            .uri(url)
+            .header(
+                "accept",
+                "application/samlmetadata+xml, application/xml, text/xml",
+            )
+            .body(Vec::new())
+            .map_err(|_| MetadataFetchError::Url)?;
+        let response = self.http.send(request).await.map_err(|error| match error {
+            IdpHttpError::Denied => MetadataFetchError::Denied,
+            IdpHttpError::TooLarge => MetadataFetchError::TooLarge,
+            IdpHttpError::Request => MetadataFetchError::Unavailable,
+        })?;
+        if response.status() != oauth2::http::StatusCode::OK {
+            return Err(MetadataFetchError::Status);
+        }
+        Ok(response.into_body())
+    }
+
     fn snapshot(&self) -> Arc<Index> {
         Arc::clone(&self.index.read().unwrap_or_else(PoisonError::into_inner))
     }
+}
+
+/// Why [`OrgSso::fetch_metadata`] failed. No variant holds the URL or a body.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum MetadataFetchError {
+    /// The URL is not usable as an IdP metadata address.
+    Url,
+    /// The egress policy refuses the address.
+    Denied,
+    /// The request could not be sent or read.
+    Unavailable,
+    /// The answer is not `200`.
+    Status,
+    /// The body passed the cap.
+    TooLarge,
 }
 
 /// A domain as stored: trimmed, lowercase ASCII, one trailing dot removed; at most 253
@@ -356,10 +569,12 @@ pub(crate) async fn refresh(state: &AppState) {
 mod tests {
     use uuid::Uuid;
 
+    use cetra_saml::test_idp::TestKey;
+
     use super::*;
     use crate::config::OidcAuth;
     use crate::meta::orgs::insert_org;
-    use crate::test_support::{TestApp, capture_logs};
+    use crate::test_support::{TestApp, capture_logs, configure_org_saml};
 
     const ISSUER: &str = "https://idp.example";
 
@@ -579,8 +794,76 @@ mod tests {
         reload(&app).await;
         let renamed = app.state.org_sso.provider(org).expect("provider");
         assert!(!Arc::ptr_eq(&first, &renamed));
-        assert_eq!(renamed.oidc.display_name(), "Renamed SSO");
+        match &renamed.kind {
+            ProviderKind::Oidc(oidc) => assert_eq!(oidc.display_name(), "Renamed SSO"),
+            ProviderKind::Saml(_) => panic!("an OIDC provider was rebuilt as SAML"),
+        }
         assert_eq!(renamed.jit_role, JitRole::Viewer);
+    }
+
+    #[tokio::test]
+    async fn unchanged_saml_providers_keep_their_arc() {
+        let app = TestApp::new().await;
+        let org = add_org(&app, "acme").await;
+        configure_org_saml(&app, org, &[TestKey::Idp], "acme.test", true, false).await;
+        let first = app.state.org_sso.provider(org).expect("provider");
+        assert!(matches!(first.kind, ProviderKind::Saml(_)));
+
+        reload(&app).await;
+        let second = app.state.org_sso.provider(org).expect("provider");
+        assert!(Arc::ptr_eq(&first, &second));
+
+        set_flags(&app, org, false, false).await;
+        reload(&app).await;
+        let third = app.state.org_sso.provider(org).expect("provider");
+        assert!(Arc::ptr_eq(&first, &third), "flags are not configuration");
+    }
+
+    #[tokio::test]
+    async fn a_saml_provider_with_an_unreadable_certificate_is_skipped() {
+        let app = TestApp::new().await;
+        let org = add_org(&app, "acme").await;
+        configure_org_saml(&app, org, &[TestKey::Idp], "acme.test", true, false).await;
+        assert!(app.state.org_sso.provider(org).is_some());
+
+        app.state
+            .meta
+            .write(move |conn| {
+                Box::pin(async move {
+                    sqlx::query("UPDATE org_sso_saml_certificates SET der = X'00'")
+                        .execute(&mut *conn)
+                        .await?;
+                    Ok(())
+                })
+            })
+            .await
+            .unwrap();
+        let (result, logs) = capture_logs(app.state.org_sso.reload(
+            &app.state.meta,
+            &app.state.secrets,
+            &app.state.config.auth,
+        ))
+        .await;
+        assert_eq!(result.expect("reload").unreadable, 1);
+        assert!(app.state.org_sso.provider(org).is_none());
+        assert!(logs.contains(&org.to_string()), "{logs}");
+    }
+
+    #[test]
+    fn sp_urls_follow_the_public_url() {
+        let public_url: crate::config::PublicUrl =
+            serde_json::from_str("\"https://cetra.example\"").expect("url");
+        let org = OrgId::new_v7();
+        let urls = sp_urls(&public_url, org);
+        assert_eq!(urls.saml_path, format!("/api/auth/saml/{org}"));
+        assert_eq!(urls.acs_path, format!("{}/acs", urls.saml_path));
+        assert_eq!(urls.start_path, format!("{}/start", urls.saml_path));
+        assert_eq!(
+            urls.entity_id,
+            format!("https://cetra.example/api/auth/saml/{org}")
+        );
+        assert_eq!(urls.acs_url, format!("{}/acs", urls.entity_id));
+        assert_eq!(urls.start_url, format!("{}/start", urls.entity_id));
     }
 
     #[test]

@@ -12,7 +12,10 @@ use super::provider::{AutoProvision, ProvisionRole};
 use super::state_cookie::{self, OAuthState};
 use super::{ExchangeError, LoginClaims, ProviderRef};
 use crate::api::account::SignupPolicy;
+use crate::audit::catalog::{AuthAction, JoinVia, MemberAction, SignupMethod};
+use crate::audit::{self, Actor, Event, TargetKind, Via};
 use crate::auth::OrgRole;
+use crate::auth::roles::org_role_str;
 use crate::auth::secret::{constant_time_eq, new_opaque_token};
 use crate::entitlements::over_limit;
 use crate::http::AppState;
@@ -68,6 +71,10 @@ pub(crate) enum LoginError {
     SsoUnavailable,
     /// The email's domain is enforced by its org, and this person is not an instance admin (D-P-58).
     SsoRequired,
+    /// A SAML response failed validation, or did not match a pending request (D-SA-9, D-SA-10).
+    SamlInvalid,
+    /// A SAML response used a feature cetra refuses, such as an encrypted assertion (D-SA-8).
+    SamlUnsupported,
     /// The database or the random source failed.
     Internal(Box<dyn std::error::Error + Send + Sync>),
 }
@@ -88,6 +95,8 @@ impl LoginError {
             Self::SeatLimit => "seat_limit",
             Self::SsoUnavailable => "sso_unavailable",
             Self::SsoRequired => "sso_required",
+            Self::SamlInvalid => "saml_invalid",
+            Self::SamlUnsupported => "saml_unsupported",
             Self::Internal(_) => return None,
         })
     }
@@ -182,6 +191,7 @@ pub(crate) async fn finish(
     query_state: Option<&str>,
     code: Option<&str>,
     provider_error_param: bool,
+    ctx: &audit::Ctx,
 ) -> Result<LoggedIn, LoginError> {
     let saved = state_cookie::open(
         &state.oauth_key,
@@ -198,7 +208,14 @@ pub(crate) async fn finish(
         return Err(LoginError::ProviderError);
     };
     let claims = exchange(state, provider_id, &saved, code).await?;
-    let user_id = resolve(state, provider_id, &claims, saved.setup_token.as_deref()).await?;
+    let user_id = resolve(
+        state,
+        provider_id,
+        &claims,
+        saved.setup_token.as_deref(),
+        ctx,
+    )
+    .await?;
     Ok(LoggedIn {
         user_id,
         redirect: saved.redirect,
@@ -250,6 +267,7 @@ async fn resolve(
     provider: &str,
     claims: &LoginClaims,
     setup_token: Option<&str>,
+    ctx: &audit::Ctx,
 ) -> Result<Uuid, LoginError> {
     let rules = rules(state, provider)?;
     check_domain(&rules, claims)?;
@@ -261,7 +279,7 @@ async fn resolve(
         if enforced_for_user(state, user_id).await? {
             return Err(LoginError::SsoRequired);
         }
-        provision_org(state, &rules, user_id).await?;
+        provision_org(state, &rules, user_id, ctx).await?;
         return Ok(user_id);
     }
     let Some(email) = verified_email(claims) else {
@@ -288,9 +306,10 @@ async fn resolve(
             setup_ok: setup_matches(state, setup_token)?,
             rules: &rules,
         },
+        ctx,
     )
     .await?;
-    provision_org(state, &rules, user_id).await?;
+    provision_org(state, &rules, user_id, ctx).await?;
     active(state, user_id).await
 }
 
@@ -392,7 +411,11 @@ enum Outcome {
     LinkRefused,
 }
 
-async fn admit(state: &AppState, login: &Admission<'_>) -> Result<Uuid, LoginError> {
+async fn admit(
+    state: &AppState,
+    login: &Admission<'_>,
+    ctx: &audit::Ctx,
+) -> Result<Uuid, LoginError> {
     let provider = login.provider.clone();
     let subject = login.subject.clone();
     let email = login.email.clone();
@@ -403,6 +426,7 @@ async fn admit(state: &AppState, login: &Admission<'_>) -> Result<Uuid, LoginErr
     let signup = state.config.auth.signup;
     let signup_domains = state.config.auth.signup_domains.clone();
     let now = state.clock.now_ns();
+    let ctx = ctx.clone();
     let written = state
         .meta
         .write(move |conn| {
@@ -419,6 +443,7 @@ async fn admit(state: &AppState, login: &Admission<'_>) -> Result<Uuid, LoginErr
                     signup,
                     &signup_domains,
                     now,
+                    &ctx,
                 )
                 .await
             })
@@ -428,19 +453,12 @@ async fn admit(state: &AppState, login: &Admission<'_>) -> Result<Uuid, LoginErr
         Ok(Outcome::User(id)) => Ok(id),
         Ok(Outcome::Setup(id)) => {
             state.setup.clear().map_err(internal)?;
-            tracing::info!(target: "audit", user_id = %id, "setup completed");
             Ok(id)
         }
         Ok(Outcome::Linked { user_id, revoked }) => {
             for hash in revoked {
                 state.pat_cache.evict(&hash);
             }
-            tracing::info!(
-                target: "audit",
-                user_id = %user_id,
-                provider = %login.provider,
-                "identity linked"
-            );
             Ok(user_id)
         }
         Ok(Outcome::SetupRequired) => Err(LoginError::SetupRequired),
@@ -473,6 +491,7 @@ async fn decide(
     signup: SignupPolicy,
     signup_domains: &[String],
     now: i64,
+    ctx: &audit::Ctx,
 ) -> Result<Outcome, MetaError> {
     if let Some(id) = identities::identity_user_tx(conn, provider, subject).await? {
         return Ok(Outcome::User(id));
@@ -495,6 +514,18 @@ async fn decide(
         )
         .await?;
         identities::insert_identity(conn, user.id, provider, subject, email, now).await?;
+        let actor = Actor::User {
+            id: user.id,
+            via: Via::Session,
+            credential_id: None,
+        };
+        audit::record(
+            conn,
+            &ctx.with_actor(actor),
+            Event::new(AuthAction::SetupCompleted),
+            now,
+        )
+        .await?;
         return Ok(Outcome::Setup(user.id));
     }
     if let Some(user) = users::user_by_email_tx(conn, email).await? {
@@ -509,6 +540,20 @@ async fn decide(
                 users::set_password_hash(conn, user.id, None, now).await?;
                 users::set_email_verified(conn, user.id, now, EmailVerifiedVia::Idp).await?;
             }
+            let actor = Actor::User {
+                id: user.id,
+                via: Via::Session,
+                credential_id: None,
+            };
+            audit::record(
+                conn,
+                &ctx.with_actor(actor),
+                Event::new(AuthAction::IdentityLinked {
+                    provider: provider.to_owned(),
+                }),
+                now,
+            )
+            .await?;
             return Ok(Outcome::Linked {
                 user_id: user.id,
                 revoked,
@@ -548,6 +593,21 @@ async fn decide(
         Err(error) => return Err(error),
     };
     identities::insert_identity(conn, user.id, provider, subject, email, now).await?;
+    let actor = Actor::User {
+        id: user.id,
+        via: Via::Session,
+        credential_id: None,
+    };
+    audit::record(
+        conn,
+        &ctx.with_actor(actor),
+        Event::new(AuthAction::Signup {
+            method: SignupMethod::Provider,
+        })
+        .target(TargetKind::User, user.id),
+        now,
+    )
+    .await?;
     Ok(Outcome::User(user.id))
 }
 
@@ -555,6 +615,7 @@ async fn provision_org(
     state: &AppState,
     rules: &LoginRules,
     user_id: Uuid,
+    ctx: &audit::Ctx,
 ) -> Result<(), LoginError> {
     let Some(provision) = &rules.auto_provision else {
         return Ok(());
@@ -575,6 +636,7 @@ async fn provision_org(
     let org_id = org.id;
     let now = state.clock.now_ns();
     let max_seats = state.entitlements.resolve(org_id, now).limits.max_seats;
+    let ctx = ctx.with_actor(Actor::System);
     state
         .meta
         .write(move |conn| {
@@ -592,7 +654,21 @@ async fn provision_org(
                     }
                 }
                 match members::add_org_member(conn, org_id, user_id, role, now).await {
-                    Ok(()) | Err(MetaError::Conflict(_)) => Ok(()),
+                    Ok(()) => {
+                        audit::record(
+                            conn,
+                            &ctx,
+                            Event::new(MemberAction::Added {
+                                role: org_role_str(role),
+                                via: JoinVia::AutoProvision,
+                            })
+                            .org(org_id)
+                            .target(TargetKind::User, user_id),
+                            now,
+                        )
+                        .await
+                    }
+                    Err(MetaError::Conflict(_)) => Ok(()),
                     Err(error) => Err(error),
                 }
             })

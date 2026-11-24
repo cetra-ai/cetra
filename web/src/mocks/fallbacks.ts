@@ -64,7 +64,7 @@ function versionsOf(prompt: Prompt) {
 }
 
 /** Plausible per-version numbers for a window, newest version first (spec 09, D-V-17). */
-function metricsOf(versions: number[], from: string, to: string) {
+export function metricsOf(versions: number[], from: string, to: string) {
   return {
     from,
     to,

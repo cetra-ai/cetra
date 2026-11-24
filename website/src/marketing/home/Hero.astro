@@ -1,9 +1,8 @@
 ---
-import traceView from "../../assets/screenshots/marketing-trace-view.png";
 import Button from "../components/Button.astro";
 import CopyCommand from "../components/CopyCommand.astro";
-import Frame from "../components/Frame.astro";
 import Section from "../components/Section.astro";
+import StoryPicture from "../components/StoryPicture.astro";
 import { CLOUD, DEMO_URL, INSTALL_COMMANDS } from "../site";
 ---
 
@@ -22,7 +21,7 @@ import { CLOUD, DEMO_URL, INSTALL_COMMANDS } from "../site";
       <CopyCommand id="hero-install" commands={INSTALL_COMMANDS} note="What does this run?" noteHref="/docs/self-hosting/install/" />
     </div>
     <div class="visual">
-      <Frame src={traceView} alt="The cetra trace view: the span tree of a handoff trace with durations and costs, and the root span's input and output." label="Traces · Support bot" bleed eager />
+      <StoryPicture picture="hero" fade={false} eager />
     </div>
   </div>
 </Section>

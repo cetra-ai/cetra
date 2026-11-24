@@ -6,7 +6,11 @@ import {
   filterRows,
   hasChildren,
   insertSpan,
+  METRIC_MAX_PX,
+  METRIC_MIN_PX,
+  metricColumnWidth,
   subtreeEnds,
+  treeGuides,
   visibleRows,
 } from "@/lib/tree";
 
@@ -245,5 +249,55 @@ describe("autoNameWidth", () => {
     expect(autoNameWidth([hidden, plain], [1])).toBe(autoNameWidth([plain], [0]));
     const flagged = { depth: 0, detached: true, span: { name: "n".repeat(25), status: "error" } };
     expect(autoNameWidth([flagged], [0])).toBeGreaterThan(autoNameWidth([plain], [0]));
+  });
+});
+
+describe("treeGuides", () => {
+  // The same text shape the grid writes in data-guide.
+  function shapes(depths: number[]): string[] {
+    return treeGuides(depths).map((guide) => {
+      const levels = guide.through.map((through) => (through ? "│" : " ")).join(" ");
+      const elbow = guide.elbow === "mid" ? "├" : guide.elbow === "last" ? "└" : "";
+      return `${levels}${levels && elbow ? " " : ""}${elbow}${guide.down ? "┐" : ""}`;
+    });
+  }
+
+  it("draws ├ before later siblings, └ on the last child, and continues open levels", () => {
+    // root
+    // ├ a
+    // │ ├ a1
+    // │ └ a2
+    // │   └ a2x
+    // └ b
+    //   └ b1
+    expect(shapes([0, 1, 2, 2, 3, 1, 2])).toEqual(["┐", "├┐", "│ ├", "│ └┐", "│   └", "└┐", "  └"]);
+  });
+
+  it("stops an ancestor's line once it has no later sibling", () => {
+    expect(shapes([0, 1, 1, 2, 3])).toEqual(["┐", "├", "└┐", "  └┐", "    └"]);
+  });
+
+  it("draws nothing for roots, including detached ones", () => {
+    expect(shapes([0, 0])).toEqual(["", ""]);
+  });
+
+  it("handles an empty tree", () => {
+    expect(treeGuides([])).toEqual([]);
+  });
+});
+
+describe("metricColumnWidth", () => {
+  it("fits the widest value", () => {
+    expect(metricColumnWidth("Cost", ["$0.02", "$0.006422"])).toBe(9 * 7 + 16);
+  });
+
+  it("never goes below its header label", () => {
+    expect(metricColumnWidth("Duration", ["1ms"])).toBe(8 * 7 + 16);
+    expect(metricColumnWidth("Tokens", [])).toBe(6 * 7 + 16);
+  });
+
+  it("stays between the minimum and the maximum", () => {
+    expect(metricColumnWidth("", [])).toBe(METRIC_MIN_PX);
+    expect(metricColumnWidth("Cost", ["x".repeat(40)])).toBe(METRIC_MAX_PX);
   });
 });

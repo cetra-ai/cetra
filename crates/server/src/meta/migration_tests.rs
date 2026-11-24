@@ -13,6 +13,7 @@ use super::{META_FORMAT_VERSION, MetaDb, connect, migrator};
 const PRE_RELEASE_NON_ADDITIVE: &[i64] = &[
     8,  // 0008 drops orgs.limits (D-P-11)
     30, // 0030 sets issue_sources.last_notified_at and rebuilds notification_deliveries (D-IC-21)
+    32, // 0032 rebuilds org_sso_providers for SAML (D-SA-17)
 ];
 /// Released migrations that changed the format; each came with a META_FORMAT_VERSION bump.
 const FORMAT_CHANGING_MIGRATIONS: &[i64] = &[];
@@ -177,6 +178,37 @@ const ALTERING_CASES: &[AlteringCase] = &[
             UNION ALL
             SELECT id || '|' || COALESCE(last_notified_at, 'NULL') FROM issue_sources",
         expected: "018f6b4e-7c1a-7c1a-8c1a-0000000001b7|018f6b4e-7c1a-7c1a-8c1a-0000000001b5|018f6b4e-7c1a-7c1a-8c1a-0000000001b6|failed|3|9|timeout|10|11|NULL\n018f6b4e-7c1a-7c1a-8c1a-0000000001b3|NULL",
+    },
+    AlteringCase {
+        version: 31,
+        seed: &[
+            "INSERT INTO orgs (id, name, slug, state, created_at, updated_at)
+            VALUES ('018f6b4e-7c1a-7c1a-8c1a-0000000001c1', 'Acme', 'acme', 'active', 1, 2)",
+            "INSERT INTO llm_connections (id, org_id, name, adapter, secret_enc, api_key_hint,
+            created_at, updated_at)
+            VALUES ('018f6b4e-7c1a-7c1a-8c1a-0000000001c2', '018f6b4e-7c1a-7c1a-8c1a-0000000001c1',
+            'kept', 'openai', x'01', 'WXYZ', 3, 4)",
+        ],
+        read: "SELECT id || '|' || name || '|' || adapter || '|' || api_key_hint || '|' || status
+            || '|' || created_at || '|' || updated_at || '|' || COALESCE(last_tested_at, 'NULL')
+            || '|' || COALESCE(last_test_ok, 'NULL') FROM llm_connections",
+        expected: "018f6b4e-7c1a-7c1a-8c1a-0000000001c2|kept|openai|WXYZ|ok|3|4|NULL|NULL",
+    },
+    AlteringCase {
+        version: 32,
+        seed: &[
+            "INSERT INTO orgs (id, name, slug, state, created_at, updated_at)
+            VALUES ('018f6b4e-7c1a-7c1a-8c1a-0000000000a7', 'Acme', 'acme', 'active', 1, 2)",
+            "INSERT INTO org_sso_providers (id, org_id, display_name, issuer, client_id,
+            client_secret_enc, enabled, enforced, jit_role, last_login_at, created_at, updated_at)
+            VALUES ('018f6b4e-7c1a-7c1a-8c1a-0000000000a8', '018f6b4e-7c1a-7c1a-8c1a-0000000000a7',
+            'Okta', 'https://idp.test', 'client', X'00', 1, 0, 'member', 5, 3, 4)",
+        ],
+        read: "SELECT id || '|' || org_id || '|' || protocol || '|' || display_name || '|' || issuer
+            || '|' || client_id || '|' || hex(client_secret_enc) || '|' || enabled || '|' || enforced
+            || '|' || jit_role || '|' || last_login_at || '|' || created_at || '|' || updated_at
+            FROM org_sso_providers",
+        expected: "018f6b4e-7c1a-7c1a-8c1a-0000000000a8|018f6b4e-7c1a-7c1a-8c1a-0000000000a7|oidc|Okta|https://idp.test|client|00|1|0|member|5|3|4",
     },
 ];
 

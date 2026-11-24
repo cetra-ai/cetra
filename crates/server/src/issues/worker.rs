@@ -307,7 +307,6 @@ async fn apply_pause(
         SourcePause::Budget => {
             issues::pause_source(conn, source, "budget", Some(BUDGET_DETAIL), now).await?;
             tracing::info!(
-                target: "audit",
                 source_id = %source,
                 reason = "budget",
                 "issue source paused"
@@ -340,7 +339,6 @@ pub(crate) async fn pause_connection_sources(
     let paused = issues::pause_sources_of_connection(conn, connection, Some(detail), now).await?;
     connections::set_connection_status(conn, connection, "failing", Some(detail), now).await?;
     tracing::info!(
-        target: "audit",
         connection_id = %connection,
         sources = paused.len(),
         "issue sources paused by a connection error"

@@ -110,6 +110,10 @@ pub(crate) enum ApiError {
         /// Static reason. Stores choose it (P6).
         detail: &'static str,
     },
+    /// The member is managed by the org's identity provider (409, D-EA-18). Problem
+    /// `scim_managed`.
+    #[error("managed by the identity provider")]
+    ScimManaged,
     /// A conflict that names the items in the way (D-I-19): each error's `field` is
     /// `rules.<rule id>` and its message says why.
     #[error("conflict")]
@@ -223,6 +227,17 @@ impl ApiError {
             Self::NotFound => not_found_problem(),
             Self::Conflict { detail } => {
                 Problem::new(ProblemCode::Conflict, Some((*detail).to_owned()))
+            }
+            Self::ScimManaged => {
+                let mut problem = Problem::new(
+                    ProblemCode::ScimManaged,
+                    Some(
+                        "This member is managed by your identity provider. Change it there."
+                            .to_owned(),
+                    ),
+                );
+                problem.title = "Managed by the identity provider".to_owned();
+                problem
             }
             Self::ConflictWith { detail, errors } => {
                 let mut problem = Problem::new(ProblemCode::Conflict, Some((*detail).to_owned()));

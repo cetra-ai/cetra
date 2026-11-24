@@ -1,0 +1,10 @@
+[
+  {
+    "method": "GET",
+    "path": "/scim/v2/Users?filter=userName eq \"tenant-probe-4c1e9a@acme.test\"",
+    "expect": {
+      "status": 200,
+      "json": { "/totalResults": 0 }
+    }
+  }
+]

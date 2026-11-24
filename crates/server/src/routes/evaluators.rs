@@ -28,6 +28,8 @@ use crate::api::evaluators::{
     OutputScoreBody, StatsWindow, UpdateEvaluatorRequest, builtin_template_list,
 };
 use crate::api::online_rules::RuleTarget;
+use crate::audit::catalog::EvaluatorAction;
+use crate::audit::{self, Event, TargetKind};
 use crate::auth::principal::{self, Principal};
 use crate::auth::roles::ProjectPerm;
 use crate::crypto::{Aad, SecretBox};
@@ -433,6 +435,7 @@ async fn create_evaluator(
     State(state): State<AppState>,
     Extension(principal): Extension<Principal>,
     Extension(access): Extension<ProjectAccess>,
+    ctx: audit::Ctx,
     error::Json(body): error::Json<CreateEvaluatorRequest>,
 ) -> Result<(StatusCode, error::Json<Evaluator>), ApiError> {
     let user = principal::session_user(&principal)?;
@@ -494,23 +497,21 @@ async fn create_evaluator(
                     now,
                 )
                 .await?;
+                let action = EvaluatorAction::Created {
+                    kind: kind.as_str(),
+                    url_host: host,
+                };
+                let event = Event::new(action)
+                    .org(org)
+                    .project(project)
+                    .target(TargetKind::Evaluator, id);
+                audit::record(conn, &ctx, event, now).await?;
                 Ok(Outcome::Updated(Box::new(row)))
             })
         })
         .await?;
     match outcome {
-        Outcome::Updated(row) => {
-            tracing::info!(
-                target: "audit",
-                evaluator_id = %id,
-                project_id = %project,
-                user_id = %user_id,
-                kind = kind.as_str(),
-                url_host = host.as_deref().unwrap_or(""),
-                "evaluator created"
-            );
-            Ok((StatusCode::CREATED, error::Json(evaluator_json(&row)?)))
-        }
+        Outcome::Updated(row) => Ok((StatusCode::CREATED, error::Json(evaluator_json(&row)?))),
         Outcome::ConnectionMissing => Err(bad_request(vec![connection_missing()])),
         Outcome::Gone => Err(ApiError::NotFound),
         // A new evaluator has no rules yet; the arm exists for the shared enum.
@@ -526,8 +527,23 @@ async fn update_evaluator(
     Extension(principal): Extension<Principal>,
     Extension(access): Extension<ProjectAccess>,
     error::Path(IdPath { id }): error::Path<IdPath>,
+    ctx: audit::Ctx,
     error::Json(body): error::Json<UpdateEvaluatorRequest>,
 ) -> Result<error::Json<Evaluator>, ApiError> {
+    // The request fields that were sent, by name (plan P-2): never their values.
+    let mut changed_fields: Vec<&'static str> = Vec::new();
+    if body.name.is_some() {
+        changed_fields.push("name");
+    }
+    if body.config.is_some() {
+        changed_fields.push("config");
+    }
+    if body.output_score.is_some() {
+        changed_fields.push("output_score");
+    }
+    if body.webhook_secret.is_some() {
+        changed_fields.push("webhook_secret");
+    }
     let user = principal::session_user(&principal)?;
     let project = access.project.id;
     let org = access.project.org_id;
@@ -601,11 +617,12 @@ async fn update_evaluator(
         version,
     };
     let user_id = user.id;
+    let now = checks.now;
     let outcome = state
         .meta
         .write(move |conn| {
             Box::pin(async move {
-                write_update(
+                let out = write_update(
                     conn,
                     org,
                     project,
@@ -615,24 +632,26 @@ async fn update_evaluator(
                     Some(user_id),
                     &checks,
                 )
-                .await
+                .await?;
+                if matches!(out, Outcome::Updated(_)) {
+                    let action = EvaluatorAction::Updated {
+                        fields: changed_fields,
+                        url_host: host,
+                    };
+                    let event = Event::new(action)
+                        .org(org)
+                        .project(project)
+                        .target(TargetKind::Evaluator, id);
+                    audit::record(conn, &ctx, event, now).await?;
+                }
+                Ok(out)
             })
         })
         .await;
     drop(prices_write);
     let outcome = outcome?;
     match outcome {
-        Outcome::Updated(row) => {
-            tracing::info!(
-                target: "audit",
-                evaluator_id = %id,
-                project_id = %project,
-                user_id = %user_id,
-                url_host = host.as_deref().unwrap_or(""),
-                "evaluator updated"
-            );
-            Ok(error::Json(evaluator_json(&row)?))
-        }
+        Outcome::Updated(row) => Ok(error::Json(evaluator_json(&row)?)),
         Outcome::Gone => Err(ApiError::NotFound),
         Outcome::ConnectionMissing => Err(bad_request(vec![connection_missing()])),
         Outcome::BreaksRules(errors) => Err(ApiError::ConflictWith {
@@ -647,10 +666,12 @@ async fn delete_evaluator(
     Extension(principal): Extension<Principal>,
     Extension(access): Extension<ProjectAccess>,
     error::Path(IdPath { id }): error::Path<IdPath>,
+    ctx: audit::Ctx,
 ) -> Result<StatusCode, ApiError> {
-    let user = principal::session_user(&principal)?;
+    principal::session_user(&principal)?;
     let project = access.project.id;
-    let user_id = user.id;
+    let org = access.project.org_id;
+    let now = state.clock.now_ns();
     let removal = state
         .meta
         .write(move |conn| {
@@ -662,11 +683,15 @@ async fn delete_evaluator(
                 if !rules.is_empty() {
                     return Ok(Removal::InUse(rules));
                 }
-                Ok(if store::delete_evaluator(conn, project, id).await? {
-                    Removal::Removed
-                } else {
-                    Removal::Missing
-                })
+                if !store::delete_evaluator(conn, project, id).await? {
+                    return Ok(Removal::Missing);
+                }
+                let event = Event::new(EvaluatorAction::Deleted)
+                    .org(org)
+                    .project(project)
+                    .target(TargetKind::Evaluator, id);
+                audit::record(conn, &ctx, event, now).await?;
+                Ok(Removal::Removed)
             })
         })
         .await?;
@@ -687,13 +712,6 @@ async fn delete_evaluator(
             });
         }
     }
-    tracing::info!(
-        target: "audit",
-        evaluator_id = %id,
-        project_id = %project,
-        user_id = %user_id,
-        "evaluator deleted"
-    );
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -2237,10 +2255,29 @@ mod tests {
         })
         .await;
         assert_eq!(outcome, 200);
-        assert!(logs.contains("evaluator created"), "{logs}");
-        assert!(logs.contains("evaluator updated"), "{logs}");
-        assert!(logs.contains("hooks.example.com"), "{logs}");
-        assert!(logs.contains("hooks.example.net"), "{logs}");
+        let rows = evaluator_audit_rows(&app).await;
+        let actions: Vec<&str> = rows.iter().map(|row| row.0.as_str()).collect();
+        assert_eq!(
+            actions,
+            [
+                "evaluator.created",
+                "evaluator.updated",
+                "evaluator.updated"
+            ]
+        );
+        // The host is recorded; the URL, the headers and the secrets are not.
+        assert_eq!(
+            rows[0].2,
+            r#"{"kind":"webhook","url_host":"hooks.example.com"}"#
+        );
+        assert_eq!(
+            rows[1].2,
+            r#"{"fields":["name"],"url_host":"hooks.example.com"}"#
+        );
+        assert_eq!(
+            rows[2].2,
+            r#"{"fields":["config","webhook_secret"],"url_host":"hooks.example.net"}"#
+        );
         for sealed in [
             WEBHOOK_SECRET,
             "/private/path",
@@ -2252,7 +2289,50 @@ mod tests {
             MOVED_HEADER,
         ] {
             assert!(!logs.contains(sealed), "logs show {sealed}");
+            for row in &rows {
+                assert!(!row.2.contains(sealed), "audit details show {sealed}");
+            }
         }
+    }
+
+    /// `(action, target_id, details)` of every audit row of an evaluator, oldest first.
+    async fn evaluator_audit_rows(app: &TestApp) -> Vec<(String, Option<String>, String)> {
+        sqlx::query_as(
+            "SELECT action, target_id, details FROM audit_events \
+             WHERE target_kind = 'evaluator' ORDER BY seq",
+        )
+        .fetch_all(app.state.meta.reader())
+        .await
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn evaluator_delete_in_use_records_nothing() {
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        fixture_connection(&app, &seeded).await;
+        let created = create_ok(&app, &seeded, &judge_body()).await;
+        let id = id_of(&created);
+        rule_on(
+            &app,
+            &seeded,
+            Uuid::from_str(&id).unwrap(),
+            "Blocks delete",
+            None,
+        )
+        .await;
+        let response = app
+            .request(Method::DELETE, &format!("{}/{id}", path(seeded.project.id)))
+            .header(header::COOKIE.as_str(), &seeded.cookie)
+            .send()
+            .await;
+        assert_eq!(response.status, 409, "{}", text(&response));
+        let actions: Vec<String> = evaluator_audit_rows(&app)
+            .await
+            .into_iter()
+            .map(|row| row.0)
+            .collect();
+        assert_eq!(actions, ["evaluator.created"]);
     }
 
     /// The trace of the test-run tests, and its root, child and evaluation-trace ids.

@@ -12,6 +12,11 @@ cetra is open core. The core is under the MIT licence. A small set of features l
 | `project_roles` | Project-level role overrides. See [Organizations and roles](/docs/platform/organizations/). |
 | `sso_enforcement` | Require single sign-on for listed email domains (`auth.enforce_sso_domains`). |
 | `org_sso` | Per-org single sign-on with verified domains. See [Single sign-on](/docs/platform/sso/). |
+| `saml` | SAML 2.0 for an org's own provider. See [Single sign-on](/docs/platform/sso/#set-up-saml). |
+| `scim` | Provision and deprovision the org's members from an identity provider over SCIM 2.0. See [SCIM provisioning](/docs/platform/scim/). |
+| `audit_log` | Read and export the audit log of the org and of the instance. See [Audit log](/docs/platform/audit-log/). Recording the log needs no feature. |
+
+Licence keys issued before SAML existed do not list `saml`; ask for a new key to use it.
 
 Everything else is core, including tracing, evaluation, datasets, experiments, alerts, the MCP server, deletion and retention.
 
@@ -52,6 +57,8 @@ A key is active before its expiry date, then in a grace period where features ke
 A self-hosted instance without a key has every core feature and no limits. To limit what orgs get, set `entitlements.defaults.*` in the configuration, for example `max_projects`, `max_seats`, `max_alert_rules` or `data_access_days`. The [configuration reference](/docs/self-hosting/configuration-reference/) lists them. A limit that is not set means unlimited.
 
 When an org reaches a count limit, such as seats or alert rules, the request fails with `403 plan_limit`. The limit `max_annotation_queues` caps the [annotation queues](/docs/evaluation/annotation-queues/) of an org. The Free plan allows one and Starter three.
+
+The limit `audit_retention_days` sets how many days an org's [audit log](/docs/platform/audit-log/) records are kept. `0` keeps them forever. Without it, the instance's `audit.retention_days` applies. When the limit is lapsed, the org returns to the instance's value.
 
 Issue sources are a count limit too: an org may have a number of enabled issue sources in its active projects. The Free cloud plan allows one and Starter three; Pro and Enterprise have no limit.
 

@@ -10,9 +10,11 @@ import {
   LayoutGrid,
   LockKeyhole,
   Plug,
+  ScrollText,
   Settings2,
   ShieldAlert,
   Users,
+  UsersRound,
 } from "lucide-react";
 
 export type SettingsNavItem = {
@@ -32,6 +34,7 @@ export const orgSettingsNav = [
     description: "Every organization setting in one place",
     keywords: ["home", "settings"],
     ownerOnly: false,
+    adminOnly: false,
   },
   {
     to: "/$org/settings/general",
@@ -40,6 +43,7 @@ export const orgSettingsNav = [
     description: "Organization name and URL",
     keywords: ["name", "slug", "delete"],
     ownerOnly: false,
+    adminOnly: false,
   },
   {
     to: "/$org/settings/plan",
@@ -48,6 +52,7 @@ export const orgSettingsNav = [
     description: "Plan, limits and usage",
     keywords: ["usage", "billing", "limits", "units"],
     ownerOnly: false,
+    adminOnly: false,
   },
   {
     to: "/$org/settings/members",
@@ -56,6 +61,7 @@ export const orgSettingsNav = [
     description: "Members and invites",
     keywords: ["invite", "roles", "owner"],
     ownerOnly: false,
+    adminOnly: false,
   },
   {
     to: "/$org/settings/llm-connections",
@@ -64,6 +70,7 @@ export const orgSettingsNav = [
     description: "Provider keys for LLM judges",
     keywords: ["openai", "anthropic", "judge", "provider"],
     ownerOnly: false,
+    adminOnly: false,
   },
   {
     to: "/$org/settings/assistant",
@@ -72,6 +79,7 @@ export const orgSettingsNav = [
     description: "Turn on the in-app assistant and pick its model.",
     keywords: ["assistant", "ai", "chat", "copilot"],
     ownerOnly: false,
+    adminOnly: false,
   },
   {
     to: "/$org/settings/models",
@@ -80,6 +88,7 @@ export const orgSettingsNav = [
     description: "Organization token prices",
     keywords: ["cost", "pricing"],
     ownerOnly: false,
+    adminOnly: false,
   },
   {
     to: "/$org/settings/sso",
@@ -88,6 +97,25 @@ export const orgSettingsNav = [
     description: "Identity provider and domains",
     keywords: ["sso", "oidc", "saml", "domain"],
     ownerOnly: true,
+    adminOnly: false,
+  },
+  {
+    to: "/$org/settings/provisioning",
+    label: "Provisioning",
+    icon: UsersRound,
+    description: "SCIM from your identity provider",
+    keywords: ["scim", "okta", "entra", "provisioning"],
+    ownerOnly: true,
+    adminOnly: false,
+  },
+  {
+    to: "/$org/settings/audit-log",
+    label: "Audit log",
+    icon: ScrollText,
+    description: "Who did what, and when",
+    keywords: ["audit", "log", "security", "compliance"],
+    ownerOnly: false,
+    adminOnly: true,
   },
 ] as const;
 

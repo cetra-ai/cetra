@@ -158,7 +158,6 @@ pub(super) async fn resolve(
     }
     if cascade.dataset_item_revisions > 0 || cascade.experiment_items > 0 || queue_items > 0 {
         tracing::info!(
-            target: "audit",
             deletion_id = %row.id,
             project_id = %project,
             dataset_item_revisions = cascade.dataset_item_revisions,

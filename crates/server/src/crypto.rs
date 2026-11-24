@@ -112,6 +112,7 @@ pub(crate) const ENCRYPTED_COLUMNS: &[(&str, &str)] = &[
     ("evaluators", "secret_enc"),
     ("notification_channels", "config_enc"),
     ("org_sso_providers", "client_secret_enc"),
+    ("audit_stream_destinations", "config_enc"),
 ];
 
 /// `<data_dir>/secret.key`.

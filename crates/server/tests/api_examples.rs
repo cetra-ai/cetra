@@ -25,6 +25,7 @@ use cetra_server::api::assistant::{
     AssistantSettings, AssistantStatus, AssistantTurnRequest, PutAssistantSettings,
     UpdateAssistantConversationRequest,
 };
+use cetra_server::api::audit::{AuditEvent, AuditStream};
 use cetra_server::api::backfills::{Backfill, BackfillEstimate, CreateBackfillRequest};
 use cetra_server::api::common::{Page, Problem};
 use cetra_server::api::connections::{
@@ -65,12 +66,14 @@ use cetra_server::api::openapi::openapi;
 use cetra_server::api::org_sso::OrgSso;
 use cetra_server::api::payload::Payload;
 use cetra_server::api::playground::PlaygroundRunRequest;
+use cetra_server::api::project_activity::ProjectsActivity;
 use cetra_server::api::prompts::{
     CreatePromptRequest, CreateVersionRequest, Prompt, PromptLabelEvent, PromptMetrics,
     PromptSettings, PromptVersion, SetLabelRequest,
 };
 use cetra_server::api::saved_views::SavedView;
 use cetra_server::api::schema::SchemaResponse;
+use cetra_server::api::scim::{CreatedScimToken, ScimGroup, ScimGroupList, ScimSettings};
 use cetra_server::api::score_definitions::{CreateScoreDefinitionRequest, ScoreDefinition};
 use cetra_server::api::scores::{FeedbackRequest, ScoreBatch};
 use cetra_server::api::sessions::{SessionDetail, SessionSummary};
@@ -408,7 +411,10 @@ fn static_files_match_their_types() {
     roundtrip::<OrgMembership>("static/org.json");
     roundtrip::<OrgEntitlements>("static/org-entitlements.json");
     roundtrip::<OrgUsage>("static/org-usage.json");
+    roundtrip::<ProjectsActivity>("static/projects-activity.json");
     roundtrip::<Page<OrgMember>>("static/org-members.json");
+    roundtrip::<CreatedScimToken>("static/scim-token-created.json");
+    roundtrip::<ScimGroup>("static/scim-group.json");
     roundtrip::<Page<Invite>>("static/invites.json");
     roundtrip::<Page<AdminUser>>("static/admin-users.json");
     roundtrip::<CreatedAdminUser>("static/admin-user-created.json");
@@ -447,6 +453,10 @@ fn static_files_match_their_types() {
     roundtrip::<Deletion>("static/deletion-resolving.json");
     roundtrip::<DeletionPreview>("static/deletion-preview.json");
     roundtrip::<Page<Deletion>>("static/org-deletions.json");
+    roundtrip::<Page<AuditEvent>>("static/org-audit-events.json");
+    roundtrip::<Page<AuditEvent>>("static/admin-audit-events.json");
+    roundtrip::<AuditStream>("static/org-audit-stream.json");
+    roundtrip::<AuditStream>("static/admin-audit-stream.json");
     roundtrip::<Deletion>("static/deletion-project.json");
     roundtrip::<Deletion>("static/deletion-org.json");
     roundtrip::<Page<Evaluator>>("static/evaluators.json");
@@ -753,7 +763,14 @@ fn generated_files_roundtrip() {
             "query_widget" => roundtrip::<WidgetQueryResponse>(&example.file),
             "list_deletions" => roundtrip::<Page<Deletion>>(&example.file),
             "list_org_deletions" => roundtrip::<Page<Deletion>>(&example.file),
+            "list_org_audit_events" | "list_admin_audit_events" => {
+                roundtrip::<Page<AuditEvent>>(&example.file);
+            }
+            "get_org_audit_stream" | "get_admin_audit_stream" => {
+                roundtrip::<AuditStream>(&example.file);
+            }
             "get_org_usage" => roundtrip::<OrgUsage>(&example.file),
+            "get_projects_activity" => roundtrip::<ProjectsActivity>(&example.file),
             "list_assistant_conversations" => {
                 roundtrip::<Page<AssistantConversation>>(&example.file);
             }
@@ -794,6 +811,10 @@ fn generated_files_roundtrip() {
             | "get_admin_license" => {}
             "get_device_request" => roundtrip::<DeviceRequest>(&example.file),
             "get_org_sso" => roundtrip::<OrgSso>(&example.file),
+            "get_org_scim" => roundtrip::<ScimSettings>(&example.file),
+            "create_org_scim_token" => roundtrip::<CreatedScimToken>(&example.file),
+            "list_org_scim_groups" => roundtrip::<ScimGroupList>(&example.file),
+            "put_org_scim_group_mapping" => roundtrip::<ScimGroup>(&example.file),
             "list_llm_connections" => roundtrip::<Page<LlmConnection>>(&example.file),
             "get_llm_connection" | "post_llm_connection" => {
                 roundtrip::<LlmConnection>(&example.file);
@@ -904,8 +925,12 @@ fn manifest_covers_the_read_operations() {
                 && id != "stream_traces"
                 && id != "stream_trace"
                 && id != "get_dataset_export"
+                && id != "get_org_audit_export"
+                && id != "get_admin_audit_export"
                 && id != "get_oauth_authorize"
                 && id != "get_sso_authorize"
+                && id != "get_saml_metadata"
+                && id != "get_saml_start"
                 && id != "get_oauth_callback"
             {
                 gets.insert(id.to_owned());

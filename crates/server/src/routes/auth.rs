@@ -13,9 +13,12 @@ use crate::api::account::{
     SignupRequest, SignupResponse, User, VerifyEmailRequest,
 };
 use crate::api::common::{FieldError, Problem, ProblemCode};
+use crate::audit::catalog::{AuthAction, InviteAction, SignupMethod};
+use crate::audit::{self, Actor, Event, TargetKind, Via};
 use crate::auth::password::check_policy;
 use crate::auth::principal::{self, Principal};
-use crate::auth::reset::{ResetError, reset_link, verification_link};
+use crate::auth::reset::{ResetError, mint_reset, reset_link_tx, verification_link};
+use crate::auth::roles::org_role_str;
 use crate::auth::secret::{constant_time_eq, hash_token, is_opaque_token};
 use crate::auth::session::{SessionOrigin, clear_cookie, resolve_cookie_header, start_session};
 use crate::bootstrap::{self, BootstrapError};
@@ -131,6 +134,7 @@ async fn config(State(state): State<AppState>) -> Result<error::Json<AuthConfig>
 async fn setup(
     State(state): State<AppState>,
     ClientIp(ip): ClientIp,
+    ctx: audit::Ctx,
     headers: HeaderMap,
     error::Json(body): error::Json<SetupRequest>,
 ) -> Result<Response, ApiError> {
@@ -160,10 +164,17 @@ async fn setup(
     let name = optional_name(body.name)?;
     let org_name = trimmed_name("org_name", &body.org_name)?;
     let project_name = trimmed_name("project_name", &body.project_name)?;
-    let created =
-        bootstrap::create_setup(&state, email, name, &body.password, org_name, project_name)
-            .await
-            .map_err(bootstrap_error)?;
+    let created = bootstrap::create_setup(
+        &state,
+        email,
+        name,
+        &body.password,
+        org_name,
+        project_name,
+        Some(ctx),
+    )
+    .await
+    .map_err(bootstrap_error)?;
     let Some(created) = created else {
         return Err(ApiError::Conflict {
             detail: "already set up",
@@ -171,14 +182,6 @@ async fn setup(
     };
     state.setup.clear().map_err(bootstrap_error)?;
     let user_id = created.created.user.id;
-    let org_id = created.created.org.id;
-    let project_id = created.created.project.id;
-    let key_id = created.created.key.as_ref().map(|key| key.id);
-    if let Some(key_id) = key_id {
-        tracing::info!(target: "audit", %user_id, %org_id, %project_id, %key_id, "setup completed");
-    } else {
-        tracing::info!(target: "audit", %user_id, %org_id, %project_id, "setup completed");
-    }
     let cookie = start_session(
         &state,
         user_id,
@@ -223,6 +226,7 @@ async fn setup(
 async fn login(
     State(state): State<AppState>,
     ClientIp(ip): ClientIp,
+    ctx: audit::Ctx,
     headers: HeaderMap,
     error::Json(body): error::Json<LoginRequest>,
 ) -> Result<Response, ApiError> {
@@ -273,11 +277,11 @@ async fn login(
         verified
     };
     let Some(user) = user else {
-        audit_login_failed(None);
+        audit_login_failed(&state, &ctx, None).await;
         return Err(ApiError::Unauthorized);
     };
     let Some(needs_rehash) = accepted else {
-        audit_login_failed(Some(user.id));
+        audit_login_failed(&state, &ctx, Some(user.id)).await;
         return Err(ApiError::Unauthorized);
     };
     // Checked after the password verifies, so a wrong password reveals nothing (D-P-58).
@@ -316,16 +320,36 @@ async fn login(
     state.limits.lockout.clear(&email);
     let me = me_from(&state, &user).await?;
     let cookie = session_cookie(&state, user.id, &headers, Some(ip)).await?;
-    tracing::info!(target: "audit", user_id = %user.id, "login");
     Ok(json_cookie(StatusCode::OK, &me, cookie))
 }
 
-async fn logout(State(state): State<AppState>, headers: HeaderMap) -> Result<Response, ApiError> {
-    if let Some((row, _)) = resolve_cookie_header(&state, &headers, state.clock.now_ns()).await? {
+async fn logout(
+    State(state): State<AppState>,
+    ctx: audit::Ctx,
+    headers: HeaderMap,
+) -> Result<Response, ApiError> {
+    let now = state.clock.now_ns();
+    if let Some((row, _)) = resolve_cookie_header(&state, &headers, now).await? {
+        let actor = Actor::User {
+            id: row.user.id,
+            via: Via::Session,
+            credential_id: None,
+        };
         let hash = row.hash;
         state
             .meta
-            .write(move |conn| Box::pin(async move { delete_session(conn, &hash).await }))
+            .write(move |conn| {
+                Box::pin(async move {
+                    delete_session(conn, &hash).await?;
+                    audit::record(
+                        conn,
+                        &ctx.with_actor(actor),
+                        Event::new(AuthAction::Logout),
+                        now,
+                    )
+                    .await
+                })
+            })
             .await?;
     }
     let mut response = StatusCode::NO_CONTENT.into_response();
@@ -338,6 +362,7 @@ async fn logout(State(state): State<AppState>, headers: HeaderMap) -> Result<Res
 async fn reset_password(
     State(state): State<AppState>,
     ClientIp(ip): ClientIp,
+    ctx: audit::Ctx,
     error::Json(body): error::Json<ResetPasswordRequest>,
 ) -> Result<Response, ApiError> {
     state
@@ -390,18 +415,29 @@ async fn reset_password(
                 delete_user_sessions(conn, id, None).await?;
                 delete_user_resets(conn, id).await?;
                 let hashes = revoke_user_tokens(conn, id, now).await?;
+                let actor = Actor::User {
+                    id,
+                    via: Via::Session,
+                    credential_id: None,
+                };
+                audit::record(
+                    conn,
+                    &ctx.with_actor(actor),
+                    Event::new(AuthAction::PasswordReset).target(TargetKind::User, id),
+                    now,
+                )
+                .await?;
                 Ok(Some((id, hashes)))
             })
         })
         .await?;
-    let Some((user_id, hashes)) = consumed else {
+    let Some((_, hashes)) = consumed else {
         return Err(invalid_link());
     };
     for hash in hashes {
         state.pat_cache.evict(&hash);
     }
     state.limits.lockout.clear(&email);
-    tracing::info!(target: "audit", %user_id, "password reset");
     Ok(StatusCode::NO_CONTENT.into_response())
 }
 
@@ -444,6 +480,7 @@ fn send_mail(state: &AppState, to: String, message: Email) {
 async fn forgot_password(
     State(state): State<AppState>,
     ClientIp(ip): ClientIp,
+    ctx: audit::Ctx,
     error::Json(body): error::Json<ForgotPasswordRequest>,
 ) -> Result<Response, ApiError> {
     if state.mailer.is_none() {
@@ -471,9 +508,25 @@ async fn forgot_password(
         && !(crate::ee::org_sso::enforces(&state, &email) && !user.is_instance_admin)
         && mail_allowed(&state, &email, now)
     {
-        let url = reset_link(&state.meta, &state.config.public_url, user.id, now)
-            .await
-            .map_err(reset_error)?;
+        let minted = mint_reset(&state.config.public_url, now).map_err(auth_error)?;
+        let url = minted.url.clone();
+        let user_id = user.id;
+        state
+            .meta
+            .write(move |conn| {
+                Box::pin(async move {
+                    reset_link_tx(conn, &minted, user_id, now).await?;
+                    audit::record(
+                        conn,
+                        &ctx,
+                        Event::new(AuthAction::PasswordResetRequested)
+                            .target(TargetKind::User, user_id),
+                        now,
+                    )
+                    .await
+                })
+            })
+            .await?;
         send_mail(&state, email, Email::PasswordReset { url });
     }
     Ok(StatusCode::NO_CONTENT.into_response())
@@ -481,6 +534,7 @@ async fn forgot_password(
 
 async fn verify_email(
     State(state): State<AppState>,
+    ctx: audit::Ctx,
     error::Json(body): error::Json<VerifyEmailRequest>,
 ) -> Result<Response, ApiError> {
     if !is_opaque_token(&body.token) {
@@ -498,6 +552,18 @@ async fn verify_email(
                     return Ok(None);
                 };
                 users::set_email_verified(conn, id, now, EmailVerifiedVia::MailToken).await?;
+                let actor = Actor::User {
+                    id,
+                    via: Via::Session,
+                    credential_id: None,
+                };
+                audit::record(
+                    conn,
+                    &ctx.with_actor(actor),
+                    Event::new(AuthAction::EmailVerified).target(TargetKind::User, id),
+                    now,
+                )
+                .await?;
                 Ok(Some(()))
             })
         })
@@ -577,6 +643,7 @@ async fn pending_signup_invite(
 async fn signup(
     State(state): State<AppState>,
     ClientIp(ip): ClientIp,
+    ctx: audit::Ctx,
     headers: HeaderMap,
     error::Json(body): error::Json<SignupRequest>,
 ) -> Result<Response, ApiError> {
@@ -673,6 +740,33 @@ async fn signup(
                     members::add_org_member(conn, pending.org_id, user.id, pending.role, now)
                         .await?;
                     invites::mark_accepted(conn, pending.id, now).await?;
+                    let actor = Actor::User {
+                        id: user.id,
+                        via: Via::Session,
+                        credential_id: None,
+                    };
+                    let ctx = ctx.with_actor(actor);
+                    audit::record(
+                        conn,
+                        &ctx,
+                        Event::new(AuthAction::Signup {
+                            method: SignupMethod::Invitation,
+                        })
+                        .target(TargetKind::User, user.id),
+                        now,
+                    )
+                    .await?;
+                    audit::record(
+                        conn,
+                        &ctx,
+                        Event::new(InviteAction::Accepted {
+                            role: org_role_str(pending.role),
+                        })
+                        .org(pending.org_id)
+                        .target(TargetKind::Invite, pending.id),
+                        now,
+                    )
+                    .await?;
                     Ok(InvitedSignup::User(user))
                 })
             })
@@ -700,7 +794,7 @@ async fn signup(
         .meta
         .write(move |conn| {
             Box::pin(async move {
-                users::insert_user(
+                let user = users::insert_user(
                     conn,
                     users::NewUser {
                         email: email_for_insert,
@@ -712,7 +806,23 @@ async fn signup(
                     },
                     now,
                 )
-                .await
+                .await?;
+                let actor = Actor::User {
+                    id: user.id,
+                    via: Via::Session,
+                    credential_id: None,
+                };
+                audit::record(
+                    conn,
+                    &ctx.with_actor(actor),
+                    Event::new(AuthAction::Signup {
+                        method: SignupMethod::Password,
+                    })
+                    .target(TargetKind::User, user.id),
+                    now,
+                )
+                .await?;
+                Ok(user)
             })
         })
         .await?;
@@ -801,11 +911,18 @@ pub(crate) fn domain_listed(domains: &[String], email: &str) -> bool {
     domains.iter().any(|item| item == domain)
 }
 
-fn audit_login_failed(user_id: Option<Uuid>) {
-    if let Some(user_id) = user_id {
-        tracing::info!(target: "audit", %user_id, "login failed");
-    } else {
+/// Records a failed sign-in of a known account, at most once a minute (plan P-4). An unknown
+/// account has no id, so it keeps its tracing line and writes no row. A failed write is logged,
+/// and the login still answers 401.
+async fn audit_login_failed(state: &AppState, ctx: &audit::Ctx, user_id: Option<Uuid>) {
+    let Some(user_id) = user_id else {
         tracing::info!(target: "audit", account = "unknown", "login failed");
+        return;
+    };
+    if let Err(error) =
+        audit::record_login_failed(&state.meta, ctx, user_id, state.clock.now_ns()).await
+    {
+        tracing::error!(error = %error, "audit write failed");
     }
 }
 
@@ -1232,6 +1349,33 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_second_failed_login_within_a_minute_writes_no_row() {
+        let app = TestApp::new().await;
+        insert_account(&app, "ada@example.com", Some(PASSWORD), true).await;
+        let first = app
+            .request(Method::POST, "/api/auth/login")
+            .json(&login_body("ada@example.com", "not-the-password"))
+            .send()
+            .await;
+        assert_eq!(first.status, 401);
+        app.state.clock.advance(Duration::from_secs(10));
+        let second = app
+            .request(Method::POST, "/api/auth/login")
+            .json(&login_body("ada@example.com", "not-the-password"))
+            .send()
+            .await;
+        assert_eq!(second.status, 401);
+
+        let failures: Vec<String> = sqlx::query_scalar(
+            "SELECT outcome FROM audit_events WHERE action = 'auth.login_failed'",
+        )
+        .fetch_all(app.state.meta.reader())
+        .await
+        .unwrap();
+        assert_eq!(failures, vec!["failure".to_owned()]);
+    }
+
+    #[tokio::test]
     async fn failed_logins_answer_the_same_and_each_verifies_once() {
         let app = TestApp::new().await;
         insert_account(&app, "ada@example.com", Some(PASSWORD), true).await;
@@ -1628,7 +1772,7 @@ mod tests {
     #[tokio::test]
     async fn login_without_origin_is_forbidden_and_passwords_are_not_logged() {
         let app = TestApp::new().await;
-        insert_account(&app, "ada@example.com", Some(PASSWORD), true).await;
+        let user_id = insert_account(&app, "ada@example.com", Some(PASSWORD), true).await;
         let missing_origin = app
             .request(Method::POST, "/api/auth/login")
             .origin(None)
@@ -1648,6 +1792,21 @@ mod tests {
         })
         .await;
         assert_eq!(failed.status, 401);
+        let failures: Vec<(String, Option<String>, String)> = sqlx::query_as(
+            "SELECT outcome, target_id, actor_kind FROM audit_events \
+             WHERE action = 'auth.login_failed'",
+        )
+        .fetch_all(app.state.meta.reader())
+        .await
+        .unwrap();
+        assert_eq!(
+            failures,
+            vec![(
+                "failure".to_owned(),
+                Some(user_id.to_string()),
+                "anonymous".to_owned()
+            )]
+        );
         let (_, unknown_logs) = capture_logs(async {
             app.request(Method::POST, "/api/auth/login")
                 .json(&login_body("missing@example.com", PASSWORD))
@@ -1662,6 +1821,13 @@ mod tests {
             "{unknown_logs}"
         );
         assert!(!unknown_logs.contains(PASSWORD), "{unknown_logs}");
+        let failures: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM audit_events WHERE action = 'auth.login_failed'",
+        )
+        .fetch_one(app.state.meta.reader())
+        .await
+        .unwrap();
+        assert_eq!(failures, 1, "an unknown account writes no row");
         let (logged_in, logs) = capture_logs(async {
             app.request(Method::POST, "/api/auth/login")
                 .json(&login_body("ada@example.com", PASSWORD))
@@ -1672,7 +1838,20 @@ mod tests {
         assert_eq!(logged_in.status, 200, "{logs}");
         assert!(!logs.contains(PASSWORD), "{logs}");
         assert!(!logs.contains("ada@example.com"), "{logs}");
-        assert!(logs.contains("login"), "{logs}");
+        let logins: Vec<(Option<String>, Option<String>, Option<String>)> = sqlx::query_as(
+            "SELECT actor_id, via, ip FROM audit_events WHERE action = 'auth.login'",
+        )
+        .fetch_all(app.state.meta.reader())
+        .await
+        .unwrap();
+        assert_eq!(
+            logins,
+            vec![(
+                Some(user_id.to_string()),
+                Some("session".to_owned()),
+                Some("127.0.0.1".to_owned())
+            )]
+        );
     }
 
     fn weak_hash(password: &str) -> String {
@@ -2532,6 +2711,215 @@ mod tests {
         for token in &tokens {
             assert!(!logs.contains(token), "{logs}");
         }
+    }
+
+    #[tokio::test]
+    async fn logout_is_recorded() {
+        let app = TestApp::new().await;
+        let user_id = insert_account(&app, "ada@example.com", Some(PASSWORD), true).await;
+        let logged_in = app
+            .request(Method::POST, "/api/auth/login")
+            .json(&login_body("ada@example.com", PASSWORD))
+            .send()
+            .await;
+        let cookie = session_cookie(&logged_in);
+        let gone = app
+            .request(Method::POST, "/api/auth/logout")
+            .header("cookie", &cookie)
+            .send()
+            .await;
+        assert_eq!(gone.status, 204);
+        let logouts: Vec<(String, Option<String>, Option<String>)> = sqlx::query_as(
+            "SELECT actor_kind, actor_id, via FROM audit_events WHERE action = 'auth.logout'",
+        )
+        .fetch_all(app.state.meta.reader())
+        .await
+        .unwrap();
+        assert_eq!(
+            logouts,
+            vec![(
+                "user".to_owned(),
+                Some(user_id.to_string()),
+                Some("session".to_owned())
+            )]
+        );
+    }
+
+    #[tokio::test]
+    async fn password_signup_is_recorded() {
+        let app = TestApp::with_config(|config| config.auth.signup = SignupPolicy::Open).await;
+        let signed_up = app
+            .request(Method::POST, "/api/auth/signup")
+            .json(&signup_body("ada@example.com", PASSWORD, None))
+            .send()
+            .await;
+        assert_eq!(signed_up.status, 201, "{}", text(&signed_up));
+        let user_id: String =
+            sqlx::query_scalar("SELECT id FROM users WHERE email = 'ada@example.com'")
+                .fetch_one(app.state.meta.reader())
+                .await
+                .unwrap();
+        let signups: Vec<(String, String, Option<String>, Option<String>)> = sqlx::query_as(
+            "SELECT details, actor_id, target_kind, target_id FROM audit_events \
+             WHERE action = 'auth.signup'",
+        )
+        .fetch_all(app.state.meta.reader())
+        .await
+        .unwrap();
+        assert_eq!(
+            signups,
+            vec![(
+                r#"{"method":"password"}"#.to_owned(),
+                user_id.clone(),
+                Some("user".to_owned()),
+                Some(user_id)
+            )]
+        );
+    }
+
+    #[tokio::test]
+    async fn invitation_signup_records_signup_and_invite() {
+        let app = TestApp::new().await;
+        let (cookie, slug) = invite_owner(&app).await;
+        let invite = invite_of(&app, &cookie, &slug, "guest@other.test", "member").await;
+        let joined = app
+            .request(Method::POST, "/api/auth/signup")
+            .json(&serde_json::json!({
+                "email": "guest@other.test",
+                "password": PASSWORD,
+                "invite_token": invite.token,
+            }))
+            .send()
+            .await;
+        assert_eq!(joined.status, 201, "{}", text(&joined));
+        let signups: Vec<(String, String)> = sqlx::query_as(
+            "SELECT details, actor_kind FROM audit_events WHERE action = 'auth.signup'",
+        )
+        .fetch_all(app.state.meta.reader())
+        .await
+        .unwrap();
+        assert_eq!(
+            signups,
+            vec![(r#"{"method":"invitation"}"#.to_owned(), "user".to_owned())]
+        );
+        let accepted: Vec<(Option<String>, String, String)> = sqlx::query_as(
+            "SELECT org_id, target_kind, details FROM audit_events \
+             WHERE action = 'invite.accepted'",
+        )
+        .fetch_all(app.state.meta.reader())
+        .await
+        .unwrap();
+        assert_eq!(accepted.len(), 1);
+        assert!(accepted[0].0.is_some(), "the invite names its org");
+        assert_eq!(accepted[0].1, "invite");
+        assert_eq!(accepted[0].2, r#"{"role":"member"}"#);
+    }
+
+    #[tokio::test]
+    async fn email_verification_is_recorded() {
+        let app = TestApp::with_mailer_config(|config| {
+            config.auth.signup = SignupPolicy::Open;
+            config.auth.require_email_verification = true;
+        })
+        .await;
+        let signed_up = app
+            .request(Method::POST, "/api/auth/signup")
+            .json(&signup_body("ada@example.com", PASSWORD, None))
+            .send()
+            .await;
+        assert_eq!(signed_up.status, 201, "{}", text(&signed_up));
+        wait_mail(&app, 1).await;
+        let verified = post_verify(&app, &link_token(&app.sent()[0].text)).await;
+        assert_eq!(verified.status, 204, "{}", text(&verified));
+        let rows: Vec<(String, Option<String>, Option<String>)> = sqlx::query_as(
+            "SELECT actor_kind, via, target_kind FROM audit_events \
+             WHERE action = 'auth.email_verified'",
+        )
+        .fetch_all(app.state.meta.reader())
+        .await
+        .unwrap();
+        assert_eq!(
+            rows,
+            vec![(
+                "user".to_owned(),
+                Some("session".to_owned()),
+                Some("user".to_owned())
+            )]
+        );
+    }
+
+    #[tokio::test]
+    async fn forgot_records_only_known_accounts() {
+        let app = TestApp::with_mailer().await;
+        let user_id = insert_account(&app, "ada@example.com", Some(PASSWORD), false).await;
+        let known = post_forgot(&app, "ada@example.com").await;
+        let unknown = post_forgot(&app, "missing@example.com").await;
+        assert_eq!(known.status, 204);
+        same_response(&known, &unknown);
+        let rows: Vec<(String, Option<String>, String)> = sqlx::query_as(
+            "SELECT actor_kind, target_id, outcome FROM audit_events \
+             WHERE action = 'auth.password_reset_requested'",
+        )
+        .fetch_all(app.state.meta.reader())
+        .await
+        .unwrap();
+        assert_eq!(
+            rows,
+            vec![(
+                "anonymous".to_owned(),
+                Some(user_id.to_string()),
+                "success".to_owned()
+            )]
+        );
+    }
+
+    #[tokio::test]
+    async fn password_reset_is_recorded() {
+        let app = TestApp::new().await;
+        let user_id = insert_account(&app, "ada@example.com", Some(PASSWORD), false).await;
+        let token = crate::auth::secret::new_opaque_token().unwrap();
+        let hash = token.hash.clone();
+        let now = app.state.clock.now_ns();
+        app.state
+            .meta
+            .write(move |conn| {
+                Box::pin(async move {
+                    crate::meta::password_resets::insert_reset(
+                        conn,
+                        &hash,
+                        user_id,
+                        now,
+                        now + 3_600_000_000_000,
+                    )
+                    .await
+                })
+            })
+            .await
+            .unwrap();
+        let reset = app
+            .request(Method::POST, "/api/auth/password/reset")
+            .json(&serde_json::json!({
+                "token": token.plaintext,
+                "password": "new-cetra-1",
+            }))
+            .send()
+            .await;
+        assert_eq!(reset.status, 204, "{}", text(&reset));
+        let rows: Vec<(String, Option<String>, Option<String>)> = sqlx::query_as(
+            "SELECT actor_kind, via, target_id FROM audit_events \
+             WHERE action = 'auth.password_reset'",
+        )
+        .fetch_all(app.state.meta.reader())
+        .await
+        .unwrap();
+        assert_eq!(
+            rows,
+            vec![(
+                "user".to_owned(),
+                Some("session".to_owned()),
+                Some(user_id.to_string())
+            )]
+        );
     }
 
     async fn post_forgot(app: &TestApp, email: &str) -> TestResponse {

@@ -132,6 +132,27 @@ pub(crate) fn org_token(
     features: &[&str],
     limits: &serde_json::Value,
 ) -> String {
+    org_token_with_domains(
+        org_id,
+        issued_at,
+        expires_at,
+        grace_ends_at,
+        features,
+        limits,
+        &[],
+    )
+}
+
+/// `org_token` with the `sso_domains` claim (D-EA-17) set to `sso_domains`.
+pub(crate) fn org_token_with_domains(
+    org_id: OrgId,
+    issued_at: &str,
+    expires_at: &str,
+    grace_ends_at: &str,
+    features: &[&str],
+    limits: &serde_json::Value,
+    sso_domains: &[&str],
+) -> String {
     sign_token(&serde_json::json!({
         "kind": "org",
         "id": Uuid::now_v7().to_string(),
@@ -143,6 +164,7 @@ pub(crate) fn org_token(
         "plan": {"id": "pro", "name": "Pro", "add_ons": ["teams"]},
         "features": features,
         "limits": limits,
+        "sso_domains": sso_domains,
     }))
 }
 
@@ -393,6 +415,8 @@ impl TestApp {
             pat_cache: crate::auth::principal::PatCache::new(),
             last_used: crate::auth::last_used::LastUsed::new(),
             token_last_used: crate::auth::last_used::LastUsed::tokens(),
+            scim_cache: crate::auth::principal::ScimCache::new(),
+            scim_last_used: crate::auth::last_used::LastUsed::scim_tokens(),
             setup: crate::bootstrap::SetupState::new(),
             password_hasher: tokio::sync::OnceCell::new(),
             mailer,
@@ -1284,6 +1308,7 @@ fn default_config(data_dir: &std::path::Path) -> ServerConfig {
         ingest: IngestConfig::default(),
         media: MediaConfig::default(),
         eval: EvalConfig::default(),
+        audit: crate::config::AuditConfig::default(),
         issues: crate::config::IssuesConfig::default(),
         security: SecurityConfig::default(),
         // Most tests act as a cloud cell (D-P-50); a test of the default turns it off.
@@ -1794,6 +1819,233 @@ pub(crate) async fn org_sso_app_with(
     (app, seeded, owner)
 }
 
+/// Saves the org's SAML provider from the test IdP's metadata for `keys`, with the flags given,
+/// verifies `domain`, sets `last_login_at` (as after a test sign-in), and reloads the routing.
+pub(crate) async fn configure_org_saml(
+    app: &TestApp,
+    org: OrgId,
+    keys: &[cetra_saml::test_idp::TestKey],
+    domain: &str,
+    enabled: bool,
+    enforced: bool,
+) {
+    use crate::api::org_sso::JitRole;
+    use crate::ee::org_sso::store::{self, DomainRow, SamlAttributes, SamlWrite};
+    let metadata = cetra_saml::parse_metadata(cetra_saml::test_idp::metadata_xml(keys).as_bytes())
+        .expect("the test IdP's metadata parses");
+    let certificates: Vec<Vec<u8>> = metadata
+        .certificates()
+        .iter()
+        .map(|certificate| certificate.der().to_vec())
+        .collect();
+    let idp_entity_id = metadata.entity_id().to_owned();
+    let sso_url = metadata.sso_url().to_owned();
+    let id = Uuid::now_v7();
+    let token = crate::ee::org_sso::dns::new_token().expect("token");
+    let now = app.state.clock.now_ns();
+    let domain = domain.to_owned();
+    app.state
+        .meta
+        .write(move |conn| {
+            Box::pin(async move {
+                let write = SamlWrite {
+                    display_name: "Acme SAML".to_owned(),
+                    jit_role: JitRole::Viewer,
+                    metadata_url: None,
+                    idp_entity_id,
+                    sso_url,
+                    certificates,
+                    attributes: SamlAttributes::default(),
+                    refreshed_at: None,
+                };
+                store::put_saml_provider(conn, org, id, write, now).await?;
+                store::set_flags(conn, org, enabled, enforced, now).await?;
+                store::set_last_login(conn, org, now).await?;
+                let row = DomainRow {
+                    id: Uuid::now_v7(),
+                    org_id: org,
+                    domain,
+                    token,
+                    verified_at: None,
+                    last_checked_at: None,
+                    created_at: now,
+                };
+                let domain_id = row.id;
+                store::insert_domain(conn, &row).await?;
+                store::mark_verified(conn, domain_id, now).await?;
+                Ok(())
+            })
+        })
+        .await
+        .unwrap();
+    reload_org_sso(app).await;
+}
+
+/// [`org_sso_app`] for SAML: an https public URL and a licence listing `org_sso` and `saml`.
+pub(crate) async fn saml_app() -> (TestApp, Seeded, Member) {
+    org_sso_app_with(|config| {
+        config.public_url = serde_json::from_str("\"https://cetra.example\"").expect("url");
+        config.license_key = Some(crate::config::Secret::new(license_key(&[
+            "org_sso", "saml",
+        ])));
+    })
+    .await
+}
+
+type MetadataReply = Arc<Mutex<(StatusCode, Vec<u8>)>>;
+
+/// A loopback HTTP server that answers every GET with the status and body the test set.
+pub(crate) struct MetadataServer {
+    port: u16,
+    reply: MetadataReply,
+    task: tokio::task::JoinHandle<()>,
+}
+
+impl MetadataServer {
+    /// A server answering `200` with `body`.
+    pub(crate) async fn start(body: Vec<u8>) -> Self {
+        let reply: MetadataReply = Arc::new(Mutex::new((StatusCode::OK, body)));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind the metadata server");
+        let port = listener.local_addr().expect("address").port();
+        let router = Router::<MetadataReply>::new()
+            .fallback(answer_metadata)
+            .with_state(Arc::clone(&reply));
+        let task = tokio::spawn(async move {
+            let _ = axum::serve(listener, router).await;
+        });
+        Self { port, reply, task }
+    }
+
+    /// The metadata URL of this server.
+    pub(crate) fn url(&self) -> String {
+        format!("http://127.0.0.1:{}/metadata", self.port)
+    }
+
+    /// Changes the status and body of every later answer.
+    pub(crate) fn set(&self, status: StatusCode, body: Vec<u8>) {
+        *self
+            .reply
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = (status, body);
+    }
+}
+
+impl Drop for MetadataServer {
+    fn drop(&mut self) {
+        self.task.abort();
+    }
+}
+
+async fn answer_metadata(
+    axum::extract::State(reply): axum::extract::State<MetadataReply>,
+) -> axum::response::Response {
+    let (status, body) = {
+        let current = reply
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        (current.0, current.1.clone())
+    };
+    axum::response::IntoResponse::into_response((status, body))
+}
+
+/// Starts a SAML login through `/api/auth/sso/authorize?domain=acme.test&redirect=%2Facme`,
+/// with `cookie` when given. Returns the request ID read back from the redirect's
+/// `SAMLRequest`, the binder cookie (`__Host-cetra_saml=…`) and the response.
+pub(crate) async fn begin_saml(
+    app: &TestApp,
+    cookie: Option<&str>,
+) -> (String, String, TestResponse) {
+    use base64::Engine as _;
+    use std::io::Read as _;
+
+    let mut request = app.request(
+        Method::GET,
+        "/api/auth/sso/authorize?domain=acme.test&redirect=%2Facme",
+    );
+    if let Some(cookie) = cookie {
+        request = request.header("cookie", cookie);
+    }
+    let response = request.send().await;
+    let location = response
+        .header("location")
+        .expect("a redirect to the IdP")
+        .to_owned();
+    let idp_url = url::Url::parse(&location).expect("the IdP URL");
+    let encoded = idp_url
+        .query_pairs()
+        .find(|(key, _)| key.as_ref() == "SAMLRequest")
+        .map(|(_, value)| value.into_owned())
+        .expect("a SAMLRequest parameter");
+    let deflated = base64::engine::general_purpose::STANDARD
+        .decode(encoded)
+        .expect("base64 SAMLRequest");
+    let mut xml = String::new();
+    flate2::read::DeflateDecoder::new(deflated.as_slice())
+        .read_to_string(&mut xml)
+        .expect("inflated SAMLRequest");
+    let marker = " ID=\"";
+    let start = xml.find(marker).expect("the request ID") + marker.len();
+    let request_id = xml[start..start + 33].to_owned();
+    let binder = oauth::one_cookie(&response, "__Host-cetra_saml");
+    (request_id, binder, response)
+}
+
+/// POSTs `SAMLResponse=<b64>&RelayState=cetra` to `org`'s ACS with `Origin: https://idp.test`
+/// and the given cookies, each `name=value`.
+pub(crate) async fn post_acs(
+    app: &TestApp,
+    org: OrgId,
+    b64: &str,
+    cookies: &[&str],
+) -> TestResponse {
+    let form = url::form_urlencoded::Serializer::new(String::new())
+        .append_pair("SAMLResponse", b64)
+        .append_pair("RelayState", "cetra")
+        .finish();
+    let mut request = app
+        .request(Method::POST, &format!("/api/auth/saml/{org}/acs"))
+        .header("content-type", "application/x-www-form-urlencoded")
+        .origin(Some("https://idp.test"))
+        .body(form.into_bytes());
+    if !cookies.is_empty() {
+        request = request.header("cookie", &cookies.join("; "));
+    }
+    request.send().await
+}
+
+/// The test IdP's defaults with this app's SP values: `request_id` in both `InResponseTo`
+/// fields, the NameID and email `ada@acme.test`, and the validity windows moved to the app's
+/// clock, so the Response stays valid after a test advances it.
+pub(crate) fn saml_options(
+    app: &TestApp,
+    org: OrgId,
+    request_id: &str,
+) -> cetra_saml::test_idp::ResponseOptions {
+    use cetra_saml::test_idp::{NOW_NS, ResponseOptions};
+    let sp = crate::ee::org_sso::sp_urls(&app.state.config.public_url, org);
+    let delta = app.state.clock.now_ns() - NOW_NS;
+    let defaults = ResponseOptions::default();
+    ResponseOptions {
+        issue_instant_ns: defaults.issue_instant_ns + delta,
+        not_before_ns: defaults.not_before_ns + delta,
+        not_on_or_after_ns: defaults.not_on_or_after_ns + delta,
+        confirmation_not_on_or_after_ns: defaults.confirmation_not_on_or_after_ns + delta,
+        audiences: vec![sp.entity_id.clone()],
+        recipient: sp.acs_url.clone(),
+        destination: Some(sp.acs_url),
+        response_in_response_to: Some(request_id.to_owned()),
+        confirmation_in_response_to: Some(request_id.to_owned()),
+        name_id: "ada@acme.test".to_owned(),
+        attributes: vec![
+            ("email".to_owned(), vec!["ada@acme.test".to_owned()]),
+            ("displayName".to_owned(), vec!["Ada Lovelace".to_owned()]),
+        ],
+        ..defaults
+    }
+}
+
 /// The OTLP key the tests send with, also the project key of [`with_init`].
 pub(crate) const OTLP_KEY: &str = "sk-cetra-0123456789ABCDEFGHIJKLMNOPQRSTUV";
 
@@ -1839,6 +2091,7 @@ pub(crate) fn config(data_dir: &std::path::Path) -> ServerConfig {
         ingest: IngestConfig::default(),
         media: MediaConfig::default(),
         eval: EvalConfig::default(),
+        audit: crate::config::AuditConfig::default(),
         issues: crate::config::IssuesConfig::default(),
         security: SecurityConfig::default(),
         entitlements: EntitlementsConfig::default(),

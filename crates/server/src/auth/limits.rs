@@ -491,6 +491,8 @@ pub(crate) struct Limits {
     /// Org SSO discovery and authorize, D-P-60: 300 per minute per client IP. Companies sit
     /// behind NAT, so the bucket is generous.
     pub(crate) sso_discover: KeyedLimiter<IpAddr>,
+    /// 60 per minute per client IP for the SAML ACS (D-SA-10).
+    pub(crate) saml_acs: KeyedLimiter<IpAddr>,
     /// `POST /api/auth/device/code`: 10 a minute per client IP, an IPv6 address counted by its
     /// /64 (D-AO-3).
     pub(crate) device_code: KeyedLimiter<IpAddr>,
@@ -503,6 +505,8 @@ pub(crate) struct Limits {
     pub(crate) alert_tests_by_channel: KeyedLimiter<Uuid>,
     /// 60 requests per minute and 4 at once per personal access token on `POST /mcp` (D-H-10).
     pub(crate) mcp: McpLimits,
+    /// 600 requests a minute per SCIM token, keyed by token id (track EA M5).
+    pub(crate) scim: KeyedLimiter<Uuid>,
     /// 20 failures lock password login for 15 minutes.
     pub(crate) lockout: Lockout,
     /// Implicit visitors of the demo org (D187, spec 08 § Demo org).
@@ -573,6 +577,13 @@ impl Limits {
                 },
                 MAX_KEYS,
             ),
+            saml_acs: KeyedLimiter::new(
+                Bucket {
+                    capacity: 60,
+                    per: Duration::from_secs(60),
+                },
+                MAX_KEYS,
+            ),
             device_code: KeyedLimiter::new(
                 Bucket {
                     capacity: 10,
@@ -595,6 +606,13 @@ impl Limits {
                 MAX_KEYS,
             ),
             mcp: McpLimits::new(MAX_KEYS),
+            scim: KeyedLimiter::new(
+                Bucket {
+                    capacity: 600,
+                    per: Duration::from_secs(60),
+                },
+                MAX_KEYS,
+            ),
             lockout: Lockout::new(20, Duration::from_secs(15 * 60), MAX_KEYS),
             demo: DemoLimits::new(demo),
             playground: PlaygroundLimits::new(MAX_KEYS),
@@ -611,11 +629,13 @@ impl Limits {
         self.connection_tests.prune(now);
         self.sso_dns_checks.prune(now);
         self.sso_discover.prune(now);
+        self.saml_acs.prune(now);
         self.device_code.prune(now);
         self.device_lookup.prune(now);
         self.alert_tests_by_user.prune(now);
         self.alert_tests_by_channel.prune(now);
         self.mcp.prune(now);
+        self.scim.prune(now);
         self.demo.prune(now);
         self.playground.prune(now);
         self.assistant.prune(now);
@@ -832,6 +852,19 @@ mod tests {
         }
         assert!(limits.device_lookup.check(&user, 0).is_err());
         limits.device_lookup.check(&Uuid::now_v7(), 0).unwrap();
+    }
+
+    #[test]
+    fn scim_bucket_allows_600_then_refuses() {
+        let limits = Limits::new(&DemoConfig::default());
+        let token = Uuid::now_v7();
+        for _ in 0..600 {
+            limits.scim.check(&token, 0).unwrap();
+        }
+        let retry = limits.scim.check(&token, 0).unwrap_err();
+        // One token refills in 100 ms; the retry is whole seconds, at least one.
+        assert_eq!(retry.0, Duration::from_secs(1));
+        limits.scim.check(&Uuid::now_v7(), 0).unwrap();
     }
 
     #[test]

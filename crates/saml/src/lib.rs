@@ -1,0 +1,30 @@
+// SPDX-License-Identifier: Elastic-2.0
+//! SAML 2.0 service provider for per-org single sign-on (track SA, `docs/plans/sa-saml/`).
+//!
+//! Pure functions over bytes and explicit inputs: no I/O, no clock, no randomness, no logging.
+//! The server (M2) and the control plane (by git) share it.
+
+mod cert;
+#[cfg(any(test, fuzzing))]
+pub mod fuzz_entry;
+#[cfg(test)]
+mod hostile_tests;
+mod metadata;
+mod request;
+mod response;
+pub(crate) mod xml;
+
+#[cfg(any(test, feature = "test-idp"))]
+pub mod test_idp;
+
+pub use cert::IdpCertificate;
+pub use metadata::{
+    IdpMetadata, MAX_CERTIFICATES, MAX_METADATA_BYTES, MetadataError, parse_metadata,
+};
+pub use request::{
+    AuthnRequest, RequestError, authn_request_redirect_url, is_valid_request_id, sp_metadata_xml,
+};
+pub use response::{
+    Assertion, AttributeNames, ExpectedResponse, MAX_DECODED_BYTES, MAX_ENCODED_BYTES,
+    ReceivedResponse, ResponseError, decode_response, validate_response,
+};

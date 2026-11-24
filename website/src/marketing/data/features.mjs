@@ -34,10 +34,7 @@ export const CLOUD_COLUMNS = [
 /** @type {Column[]} */
 export const SELF_HOSTED_COLUMNS = [
   { name: SELF_HOSTED.name, price: formatMoney(SELF_HOSTED.priceYearly) },
-  {
-    name: SELF_HOSTED.licence.name,
-    price: `${formatMoney(SELF_HOSTED.licence.priceYearly)} / year`,
-  },
+  { name: SELF_HOSTED.licence.name, price: "Custom" },
 ];
 
 const ALL = [true, true, true, true];
@@ -405,17 +402,29 @@ export const FEATURE_GROUPS = [
         selfHosted: LICENCE,
       },
       {
+        // Self-hosted only for now: the cloud gets SAML for Enterprise orgs when the control
+        // plane federates it (D-SA-3).
+        label: "SAML 2.0 single sign-on",
+        doc: "platform/sso",
+        selfHosted: LICENCE,
+      },
+      {
         label: "Project-level roles",
         doc: "platform/plans-and-licence",
         cloud: TEAMS,
         selfHosted: LICENCE,
       },
       {
-        label: "Audit logs and SCIM",
-        doc: null,
-        source: "D177",
-        claim: "audit logs, SCIM",
+        label: "Audit logs",
+        doc: "platform/audit-log",
         cloud: [false, false, false, true],
+        selfHosted: LICENCE,
+      },
+      {
+        label: "SCIM provisioning",
+        doc: "platform/scim",
+        cloud: [false, false, false, true],
+        selfHosted: LICENCE,
       },
       {
         label: "Dedicated cell",

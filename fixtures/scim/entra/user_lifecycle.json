@@ -1,0 +1,65 @@
+[
+  {
+    "method": "POST",
+    "path": "/scim/v2/Users",
+    "body": {
+      "schemas": [
+        "urn:ietf:params:scim:schemas:core:2.0:User",
+        "urn:ietf:params:scim:schemas:extension:enterprise:2.0:User"
+      ],
+      "externalId": "entra-bob-smith-1",
+      "userName": "bob.smith@acme.test",
+      "name": { "givenName": "Bob", "familyName": "Smith" },
+      "displayName": "Bob Smith",
+      "emails": [{ "type": "work", "value": "bob.smith@corp.example.org", "primary": true }],
+      "active": true,
+      "urn:ietf:params:scim:schemas:extension:enterprise:2.0:User": {
+        "employeeNumber": "1042",
+        "department": "Finance"
+      }
+    },
+    "expect": {
+      "status": 201,
+      "save": { "user": "/id" },
+      "json": { "/userName": "bob.smith@acme.test", "/emails/0/value": "bob.smith@acme.test" }
+    }
+  },
+  {
+    "method": "PATCH",
+    "path": "/scim/v2/Users/{user}",
+    "body": {
+      "schemas": ["urn:ietf:params:scim:api:messages:2.0:PatchOp"],
+      "Operations": [{ "op": "Replace", "path": "active", "value": "False" }]
+    },
+    "expect": {
+      "status": 200,
+      "json": { "/active": false }
+    }
+  },
+  {
+    "method": "PATCH",
+    "path": "/scim/v2/Users/{user}",
+    "body": {
+      "schemas": ["urn:ietf:params:scim:api:messages:2.0:PatchOp"],
+      "Operations": [
+        { "op": "Replace", "path": "name.givenName", "value": "Robert" },
+        {
+          "op": "Replace",
+          "path": "urn:ietf:params:scim:schemas:extension:enterprise:2.0:User:department",
+          "value": "Accounting"
+        }
+      ]
+    },
+    "expect": {
+      "status": 200,
+      "json": { "/name/givenName": "Robert", "/active": false }
+    }
+  },
+  {
+    "method": "DELETE",
+    "path": "/scim/v2/Users/{user}",
+    "expect": {
+      "status": 204
+    }
+  }
+]

@@ -1,0 +1,215 @@
+---
+title: SCIM provisioning
+description: Let your identity provider create, update and remove the members of an org over SCIM 2.0, and what that does to their access.
+---
+
+SCIM lets an identity provider, such as Okta or Entra ID, add, change and remove the members of an org in cetra, and set their roles from the groups it pushes. A provisioned member gets the role their groups map to, or the org's default role when no group maps them.
+
+## Before you start
+
+- An owner of the org.
+- A verified domain of the org on the [Single sign-on](/docs/platform/sso/) page. cetra provisions only people with an email address in a verified domain. Enabling SCIM needs at least one.
+- A licence with the `scim` feature on a self-hosted instance, and `org_sso` as well, since verifying a domain needs it. Enterprise on cetra Cloud includes SCIM. See [Plans and licence](/docs/platform/plans-and-licence/).
+- On cetra Cloud, the org's verified domains must reach the cloud instance before SCIM can be enabled. Until they do, enabling is refused.
+
+## Enable SCIM and create a token
+
+1. Open **Org settings**, then **Provisioning**.
+2. Turn on **SCIM provisioning**.
+3. Choose the default role, `viewer` or `member`, for members that no group maps. The default is `viewer`.
+4. Copy the base URL. It is `<PUBLIC_URL>/scim/v2`, where `<PUBLIC_URL>` is the public URL of your cetra instance.
+5. Click **Create token**, and copy the token. It starts with `scim-cetra-…`. cetra shows it once.
+6. In your identity provider, set the base URL as the SCIM endpoint and the token as the bearer token.
+
+For the steps in each provider, see [Okta SCIM setup](/docs/platform/scim-okta/) and [Entra ID SCIM setup](/docs/platform/scim-entra/).
+
+An org can have two live tokens at once. To rotate a token without downtime, create the new one, update your identity provider, then revoke the old one. Revoking a token stops every request that uses it.
+
+cetra sets a managed member's role from their groups, and recomputes it on every change that can affect it (see [Roles from groups](#roles-from-groups)). When the identity provider creates a user who is already a member, cetra links the membership and sets its role at once. If that member is an admin and none of their groups maps an org role, the role drops to the org's default role until the identity provider pushes their groups. An owner keeps the owner role.
+
+## Supported endpoints
+
+cetra serves SCIM 2.0 under `<PUBLIC_URL>/scim/v2`. The token names the org, so the same base URL serves every org.
+
+| Endpoint | Methods |
+|---|---|
+| `/ServiceProviderConfig`, `/ResourceTypes`, `/Schemas` | `GET` |
+| `/Users` | `GET` (list), `POST` |
+| `/Users/{id}` | `GET`, `PUT`, `PATCH`, `DELETE` |
+| `/Groups` | `GET` (list), `POST` |
+| `/Groups/{id}` | `GET`, `PUT`, `PATCH`, `DELETE` |
+
+The `{id}` in a Users or Groups path is the SCIM id that cetra returns in the `id` attribute. It is not a cetra user id.
+
+cetra does not support Bulk, sorting, ETags, password changes or `/Me`. Your identity provider can read the discovery documents to see what cetra supports.
+
+### Attributes
+
+| Attribute | Notes |
+|---|---|
+| `userName` | The person's email address. It must be in a verified domain of the org. |
+| `name.givenName`, `name.familyName` | Stored and returned. cetra uses them for the person's name when it has no `displayName`. |
+| `displayName` | Stored and returned. Sets the person's name in cetra while the person belongs to no other org. |
+| `emails` | Ignored. cetra uses `userName` as the account email, so an `emails` value that differs from `userName` is not an error. |
+| `active` | `false` deactivates the person (see below). |
+| `externalId` | Stored and returned. Unique within the org. |
+| Enterprise extension `department`, `employeeNumber` | Stored and returned. |
+
+`password` is ignored.
+
+Changing `userName` is allowed only when both the old and the new email are in verified domains of the org, the new email is not used by another account, and the person belongs to no other org. Otherwise the request fails with `409 mutability`.
+
+### Filters
+
+`GET /Users` accepts one `eq` filter on one of these attributes:
+
+- `userName eq "…"`
+- `externalId eq "…"`
+- `emails[type eq "work"].value eq "…"`
+
+Any other filter fails with `400 invalidFilter`. cetra does not ignore it. Lists use `startIndex` and `count`, and return at most 200 results per page.
+
+{/* untested: an HTTP request to a running server, which no test runs */}
+```http
+GET /scim/v2/Users?filter=userName%20eq%20%22ada%40example.com%22 HTTP/1.1
+Host: <HOST>
+Authorization: Bearer scim-cetra-…
+Accept: application/scim+json
+```
+
+Your identity provider's connection test sends `GET /Users?startIndex=1&count=1` with no filter.
+
+### Creating a user
+
+A create for an email address that already belongs to an account links that account. If the account's email is not proven, the account loses its password, web sessions and tokens, as it does on an org sign-in. A new account is created without a password, and its email counts as verified because the org proves its domain. The person then signs in through the org's sign-in provider.
+
+A create with `active: false` creates the person inactive. If the person is already a member of the org, cetra removes their membership, as a deactivation does.
+
+A create or update that uses an email that is not in a verified domain of the org fails with `400 invalidValue`. Invite people from outside the org's domains by hand.
+
+Creating a user that already exists in the org, by `userName` or `externalId`, fails with `409 uniqueness`.
+
+## Groups
+
+Your identity provider pushes groups to `<PUBLIC_URL>/scim/v2/Groups`. A group does nothing by itself. An owner maps it to roles, and cetra then sets the roles of the group's members (see [Roles from groups](#roles-from-groups)). The members of a group are the SCIM user ids of the org's users.
+
+| Request | Result |
+|---|---|
+| `GET /Groups` | Lists the groups. Accepts one `eq` filter, on `displayName` or `externalId`, and `startIndex` and `count` as for Users. `excludedAttributes=members` leaves out the members. |
+| `POST /Groups` | Creates a group with optional `members`. Answers `201` with `Location`. |
+| `GET`, `PUT`, `PATCH`, `DELETE /Groups/{id}` | Reads, replaces, patches or deletes one group. `PUT` and `PATCH` answer `200` with the group and its members. `DELETE` answers `204`. |
+
+A group's `displayName` and `externalId` are unique within the org, and names match case-sensitively. A duplicate answers `409 uniqueness`. Any filter other than an `eq` on `displayName` or `externalId` answers `400 invalidFilter`.
+
+### Patching group members
+
+cetra accepts the PATCH forms that Okta and Entra ID send. Operation names are case-insensitive.
+
+- Add members: `{"op": "add", "path": "members", "value": [{"value": "<user id>"}]}`.
+- Rename a group, as Okta sends it: `{"op": "replace", "value": {"displayName": "Renamed"}}`. Without a path, each key is handled as its own path.
+- Remove one member, by filter: `{"op": "remove", "path": "members[value eq \"<user id>\"]"}`.
+- Remove members, as Entra ID sends them: `{"op": "Remove", "path": "members", "value": [{"value": "<user id>"}]}`.
+- Replace the members: `{"op": "replace", "path": "members", "value": [{"value": "<user id>"}]}`. An empty list is the only way to remove every member. A `PUT` with an empty `members` list does the same.
+
+A `remove` of `members` that names no member, a `remove` that lists none, and an `add` or `replace` whose `members` is not a list are refused with `400 invalidValue`. So a malformed PATCH never empties a group. A list of members that matches no user of the org is refused the same way. Unknown or other-org ids in an `add` are ignored. A `PUT` that leaves out `members` keeps the current members.
+
+### Groups and SCIM lapses
+
+Without the `scim` feature, cetra refuses `POST /Groups`, adding members, renaming a group and any replace that adds a member. It still accepts removing members and deleting a group. See [Lapses](#lapses).
+
+## Roles from groups
+
+Owners set the mappings on **Org settings**, then **Provisioning**, in **Role mappings**. The card lists the groups your identity provider has pushed, with their member counts, org roles and project roles. The group names show only to owners. Each group can map to:
+
+- an org role: `admin`, `member`, `viewer`, or none;
+- project roles on named projects: `admin`, `member`, `viewer`, or `none`, which hides the project from the group's members.
+
+The rules:
+
+- **Highest role wins.** The roles are ordered `none` < `viewer` < `member` < `admin`. A member's org role is the highest org role of their groups. A member with no mapped group gets the org's default role.
+- **Project roles follow the same rule.** For each project, a member's project role is the highest that their groups give. A project that none of their groups maps has no override for the member, so an override set by hand or by an earlier group is removed.
+- **Owners are never changed.** A mapping cannot set the owner role. A provisioned owner stays an owner, whatever their groups map to.
+- **Admins get no project roles.** An org admin's project mappings are ignored, and any project override they have is removed.
+
+### When roles are recomputed
+
+cetra recomputes the roles of the affected members in the same transaction as the change that affects them. That covers:
+
+- a group's members change, or the group is deleted;
+- a group's mapping changes;
+- the default role changes, which recomputes the active managed members (only the members with no mapped group can change);
+- the identity provider links an existing member, or reactivates a user.
+
+Mapping and default-role changes recompute only while SCIM is enabled. A recompute can raise or lower a member's access. A change is a raise when the member's effective project access goes up, so removing a `none` override is a raise.
+
+### Seats and refused raises
+
+A member raised from `viewer` to `member` or `admin` needs a seat, and a raise past the org's seat limit is refused for that member. The member keeps their role, and gets none of the project roles that the raise would have given. The rest of the change still applies, so one full plan does not block the whole sync. Raising a `member` to `admin` needs no seat. Each request that refuses raises records one `scim.role_raise_refused` entry with the count and up to 20 SCIM user ids. The records hold no names.
+
+### Lapses
+
+When the org loses the `scim` feature, recomputes apply lowerings and skip raises. Roles stay as they were until the next change recomputes them. When the org renews, cetra does not recompute the existing roles. The next change to a member does.
+
+## Deprovisioning
+
+When your identity provider deactivates or deletes a user, cetra removes that person from the org. It also:
+
+- removes the person's project overrides in the org;
+- ends their web sessions and personal access tokens in every org of the instance, not only this one;
+- disables their account when they belong to no other org.
+
+Project API keys are not the person's credentials. They stay, and their audit records show who created them.
+
+A `PATCH` or `PUT` with `active: false` does the same. `DELETE` does the same and then removes the SCIM record. The person's account and their past work, such as scores and annotations, stay.
+
+Reactivation (`active: true`) adds the person back to the org with the role their groups give, or the default role when no group maps them. It also enables the account again if SCIM disabled it, even if the SCIM record was deleted in between. An account that an instance admin disabled stays disabled, and the request fails with `409`.
+
+An owner can be deprovisioned only if another owner remains. Otherwise the request fails with `409` and the message "an org needs an owner".
+
+An instance admin is removed from the org, but their account is never ended or disabled by SCIM.
+
+## Members managed by your identity provider
+
+A member is managed while an active SCIM user links to them. While SCIM is on, and the org has the `scim` feature:
+
+- Sign-in through the org's provider does not add new members. Only provisioned people join.
+- Invitations to people in the org's verified domains are refused with `409 scim_managed`. So is accepting one.
+- A managed member's role cannot be changed, their project overrides cannot be set or removed, and they cannot be removed. Each of these fails with `409 scim_managed`. The Members page shows "Managed by your identity provider".
+
+These locks apply to changes made in cetra's web UI and org API. They do not apply to the control plane's member API.
+
+A member who joined before SCIM was enabled becomes managed when your identity provider provisions them. Their role is then set from their groups.
+
+Email addresses outside the org's verified domains are still invited and managed by hand.
+
+Turning SCIM off lifts the locks. Every member and role stays as it is. Turning SCIM on again recomputes nothing: the next change that touches a member recomputes their role.
+
+## Lapses
+
+If the org loses the `scim` feature, for example because its licence expired, SCIM keeps working for removals:
+
+- Deactivations and deletes still work, so your identity provider can still remove access.
+- Creates and reactivations fail with `403` and the error `plan_required`. So do group creates, adding members to a group and renaming a group.
+- Removing members from a group, and deleting a group, still work.
+- Role changes that lower access still apply. Role changes that raise access are skipped, and nothing is recorded for them.
+- The locks lift, as when SCIM is turned off. Roles stay as they were until the next change recomputes them.
+
+## Errors
+
+SCIM errors are JSON with the `application/scim+json` content type. The `Type` column holds the SCIM `scimType` where SCIM defines one, and otherwise cetra's error code.
+
+| Status | Type | When |
+|---|---|---|
+| 400 | `invalidFilter` | A filter is not a supported `eq` filter. |
+| 400 | `invalidValue` | `userName` is not in a verified domain of the org, or a value is not allowed. |
+| 400 | `invalidSyntax` | The request body is not a valid SCIM resource. |
+| 401 | | The token is missing, unknown, revoked or expired. |
+| 403 | `plan_required` | The org does not have the `scim` feature, for a create or reactivation. |
+| 403 | `plan_limit` | The org is at its seat limit. |
+| 404 | | The SCIM id does not exist in this org. |
+| 409 | `uniqueness` | A user with the same `userName` or `externalId`, or a group with the same `displayName` or `externalId`, already exists in the org. |
+| 409 | `mutability` | The change would move an identity the org does not fully control. |
+| 409 | | The change would remove the org's last owner, or reactivate an account an instance admin disabled. |
+| 429 | | The token exceeded 600 requests a minute. The response has `Retry-After`. |
+
+Each SCIM token has its own limit of 600 requests a minute, with a burst of 600. That limit is per token, so a rotation starts with a fresh limit.

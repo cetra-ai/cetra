@@ -122,6 +122,10 @@ export default defineConfig({
                     { label: "API keys and tokens", link: "/docs/platform/api-keys/" },
                     { label: "Organizations and roles", link: "/docs/platform/organizations/" },
                     { label: "Single sign-on", link: "/docs/platform/sso/" },
+                    { label: "Audit log", link: "/docs/platform/audit-log/" },
+                    { label: "SCIM provisioning", link: "/docs/platform/scim/" },
+                    { label: "Okta SCIM setup", link: "/docs/platform/scim-okta/" },
+                    { label: "Entra ID SCIM setup", link: "/docs/platform/scim-entra/" },
                     {
                       label: "Deletion and retention",
                       link: "/docs/platform/deletion-and-retention/",

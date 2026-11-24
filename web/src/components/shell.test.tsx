@@ -39,7 +39,7 @@ it("uses the email initial when the user has no name", async () => {
   expect(screen.queryByText("Instance admin")).not.toBeInTheDocument();
 });
 
-it("exposes the header, the projects table, and a keyboard-operable org menu", async () => {
+it("exposes the header, the projects list, and a keyboard-operable org menu", async () => {
   server.use(
     http.get("/api/auth/me", () =>
       HttpResponse.json({
@@ -85,7 +85,7 @@ it("exposes the header, the projects table, and a keyboard-operable org menu", a
 
   const { router, user } = await renderApp("/");
   expect(screen.getByRole("banner")).toBeInTheDocument();
-  expect(screen.getByRole("table", { name: "Projects" })).toBeInTheDocument();
+  expect(screen.getByRole("list", { name: "Projects" })).toBeInTheDocument();
 
   const trigger = screen.getByRole("button", { name: "Acme" });
   trigger.focus();

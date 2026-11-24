@@ -104,8 +104,8 @@ A project with no traces shows setup snippets until the first trace arrives.
 
 The left side shows the spans of the trace. A switch above it picks how: **Tree**, **Timeline** or **Transcript**. Press `t` to cycle through them.
 
-- **Tree**: the spans as a tree. Each row has the span's name, kind and status, its duration, tokens and cost. Spans with an error are red. There is no time axis.
-- **Timeline**: the same rows with a bar on a shared time axis. The toolbar shows the zoom level. Select **Fit** or press `0` to fit the whole trace.
+- **Tree**: the spans as a tree, with lines from each parent to its children. Each row has the span's name, kind and status, its duration, tokens and cost. Spans with an error are red. Up to three slow spans show their duration in amber: those whose own time, not counting their children, is more than 20% of the trace. There is no time axis.
+- **Timeline**: the same tree with a bar per span on a shared time axis, in place of the duration, tokens and cost columns. Each bar shows the span's duration and cost, and its tooltip shows the span's own time. The toolbar shows the zoom level. Select **Fit** or press `0` to fit the whole trace.
 
 In Tree and Timeline, the toolbar has a search box with **Previous match** and **Next match**, **Errors only**, **Expand all** and **Collapse**, which folds the tree back to its first level. You can also collapse a single branch.
 

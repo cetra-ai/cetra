@@ -105,7 +105,7 @@ website/                          (one Astro project, one Cloudflare Pages proje
   - **JetBrains Mono** for code and for eyebrows/labels (the app's mono).
 
   All three load from the site, with fallbacks.
-- **Product (Linear):** screenshots in window frames that bleed off the edge of their band, with soft fades at the edges. Every product chapter repeats one layout: title, one line, UI scene, small feature list.
+- **Product (Linear):** screenshots in window frames. Every product chapter repeats one layout: title, one line and a small feature list beside the UI scene, alternating sides. Each scene is a crop of the one panel its chapter talks about, never the whole app, and is shown no larger than its CSS size (§9.10.2, D-W-23).
 - **Motion:** little of it. One orchestrated hero moment (the trace tree filling in), tab switches, copy feedback. Everything readable at rest, and `prefers-reduced-motion` respected. No scroll-triggered content that can render blank (an anti-pattern in `research.md` §6).
 - **Mobile:** every section stacks to one column; scenes become scrollable crops.
 
@@ -136,7 +136,7 @@ Copy here is **direction**, not final wording; M2 drafts it and reviews it with 
    - sub: one binary, nothing to babysit, your data stays on your server, or use our cloud;
    - buttons: **Try the demo** (main) and **Start free**;
    - under them, a copyable **install command** with OS tabs and a "what does this run?" link;
-   - a dark **screenshot of the trace view** (an agent trace's span tree, LLM messages, cost) that bleeds off the fold.
+   - a dark **screenshot of the trace view** (an agent trace's span tree, LLM messages, cost) under the text, full width: a crop of the trace panel with the timeline on, shown at its own size (D-W-23). Tabs above it switch between four example traces, Support agent, Coding agent, Voice agent and Document extraction, each with a one-line caption under the picture (D-W-24, M12).
 3. **Proof strip.** Until we have logos: open-source facts that are true at launch, such as the licence (MIT core), GitHub stars, OpenTelemetry-native, the number of integrations backed by fixtures. Engine numbers join only once measured (M6).
 4. **"Nothing else to run."** The stack contrast as a diagram: a typical self-hosted stack (Web, Worker, Postgres, Redis, ClickHouse, S3) against one cetra box. The "replaces X" framing comes from Bun. Each competitor is named only on its compare page, not here. Since 2026-11-23 (user) it is a 1:1 replacement: each service, labelled "What most alternatives make you run", points to the part of the one cetra box that replaces it (web UI and API, evaluations and alerts, embedded SQLite, built-in job queue, storage engine, local disk with S3 optional), and the caption links to `/compare/`.
 5. **Product chapters** (Linear's repeated layout, Braintrust's bands):
@@ -204,6 +204,13 @@ Answers of 2026-11-23, on a full feature table for `/pricing/` (M9), like the on
    4. About 55 rows, with the limits first. The table replaces the "Every plan" bullet list.
    5. *(Planner's reading, not asked; D-W-21.)* Enterprise has everything that Pro with the Teams add-on has: unlimited seats, projects and rules, retention controls, single sign-on, project roles and the shared channel. Its volume, overage, history and ingest values read "Custom", following D177. Starter and Pro show unlimited projects, as the control plane's catalogue sets them.
 
+Answers of 2026-11-24:
+
+10. **The licence price and the homepage screenshots.**
+   1. **The self-hosted licence shows no price** (D-W-22). It reads "Custom" with "Talk to us", like the Cloud Enterprise plan and the competitors' enterprise self-hosted tiers. It stays one licence with every enterprise feature, SAML included; the user chose this over a $5,400 Teams licence beside a custom-priced Enterprise one.
+   2. **The homepage screenshots show one panel each** (D-W-23, M10). The whole-app captures at 1440×900 read at about 9 px on the page, and no competitor shows the whole app: Laminar shows one cropped panel, Langfuse drawings, Helicone one simplified dashboard. Each `marketing-*` shot is a crop of the panel its section talks about, in a smaller window. The six chapters put their text beside the picture, alternating sides. The hero keeps its picture under the text, full width, with the trace timeline on (the user, 2026-11-24, after seeing the preview).
+   3. **The hero shows four example traces behind tabs** (D-W-24, M12): Support agent, Coding agent (a failed test run, then a fix), Research agent (searches in parallel, then a cited answer) and Document extraction (a cheap model, a failed schema check, a stronger model). The user chose labelled tabs over a carousel or a scroll strip. M13 replaces the research agent with a voice agent (§12).
+
 ## 10. Milestones
 
 Built in order, each milestone merged to `main` when done (no feature flag). Until M7, the new pages live at their URLs but the holding page stays at `/`, and the new pages carry `noindex` and are not linked from it.
@@ -218,6 +225,11 @@ Built in order, each milestone merged to `main` when done (no feature flag). Unt
 | **M6 Benchmarks** *(after launch, §9.2)* | `/benchmarks/` from a results file: machines, versions, dates, named competitors, tradeoffs, reproduction script; engine numbers added to the homepage proof strip | The benchmark itself (D23) | — |
 | **M8 Main sync** | The site matches main as of 2026-11-22: rebased onto it, the integrations parser takes the coding-agent rows, the web demo link (§9.6), six chapters and the coding-agents section, new compare rows (annotation queues, issue detection, coding-agent tracing, in-app assistant) with sourced facts, pricing and self-hosting updated | M1–M5, M7; main's D191–D195 | Benchmarks (M6) |
 | **M9 Pricing feature table** | A feature table on both tabs of `/pricing/` (§9.9): limits first, then grouped features. Every row links to its docs page or cites a decision, and a test checks both. On phones, one Cloud plan column shows at a time. It replaces the "Every plan" list | M3, M8; PR #227 (the Cloud / Self-hosted switcher) | Docs for the Enterprise-only rows |
+| **M10 Focused screenshots** | Each homepage screenshot is a crop of one panel, captured in its own window size (`viewport`, `clip` in `screenshots.json`). The product chapters show text beside the picture on wide screens, the hero keeps its picture under the text, and no picture is shown larger than its CSS size (§9.10.2) | M2, M8 | The docs' own screenshots |
+| **M12 Hero scenarios** | Three more hand-written traces in the mock dataset (a coding agent, a research agent, a document extraction pipeline), their screenshots, and tabs in the hero that switch between the four (§9.10.3) | M11 | One scenario per product chapter (M13 replaces the research agent with a voice agent, §12) |
+| **M13 Voice story, trace list, issues, alerts** | The voice trace replaces research (mocks, hero shot, tab); the mock trace list applies `status`, `tags` and `name` filters; each story's issue and alert rule in the mocks (§12) | M12 | The other mock objects |
+| **M14 Prompts, dashboards, queues, assistant** | Each story's prompt and playground answer, dashboard, annotation queue and assistant conversation in the mocks (§12) | M13 | Screenshots and the site |
+| **M15 Story screenshots and switcher** | One chapter shot per story (24), the stories module with outcome captions, hero tabs and chapter chips in sync through `?story=`, lazy panels (§12) | M14 | — |
 | **M7 Launch** | The holding page replaced by the homepage; `noindex` removed; sitemap, `robots.txt`, Open Graph images per page, canonical URLs, 404 page; Web Analytics on; final review pass on every page by the user | M2–M5 | Benchmarks (M6) |
 
 ## 11. Risks
@@ -226,3 +238,74 @@ Built in order, each milestone merged to `main` when done (no feature flag). Unt
 - **Comparison claims go stale or are wrong**, which costs trust (the Helicone anti-pattern). Mitigation: sources, dates, the staleness check, "when to choose them" honesty.
 - **"Everything at once" delays the launch.** Mitigation: M6 is outside the launch (§9.2). Every other milestone ships to `main` behind `noindex`, so nothing waits on a long branch.
 - **Font weight and page speed.** Three families is the most; subset them and preload only what's above the fold.
+
+## 12. Story switcher (M13–M15)
+
+Answers of 2026-11-24 (the user): every homepage picture follows one of four stories, in this order: **Support agent**, **Coding agent**, **Voice agent**, **Document extraction** (D-W-24, D-W-25). The voice agent replaces M12's research agent: research's point (cost) overlapped the other stories and fewer buyers build it, while voice agents are a fast-growing production use whose failure is latency, which the timeline shows best. Every caption names an outcome the reader wants (what they find or save), not what the picture contains. Each section shows the story's own data, tied to its hero trace, and a row of story chips above each picture switches the whole page (D-W-25).
+
+### Goals and non-goals
+
+Goals:
+- The reader picks a story once, and every picture on the page (the hero and the six product chapters) shows that story.
+- Each picture's content is hand-written and names the story's real objects. The coding story's issue, alert and dashboard are about `code-agent` and its failed `run_tests`, and their links open the hero's `coding-agent` trace in the demo.
+- The assistant chapter shows the assistant answering a question about the story, then building a dashboard from it, with that dashboard behind its window.
+
+Non-goals:
+- Per-section stories. One choice drives the whole page.
+- A fifth story.
+- Audio in the voice trace. The mocks serve only PNG media; the voice story sells latency, which needs none.
+- Changing the chapters' text. Only the picture, its alt and a one-line caption change with the story.
+- Product changes. The pictures use what the UI does today.
+
+### Architecture
+
+**Mock data (web/, M13–M14).** Each story adds hand-written objects to the web UI's mocks, next to the generated data. All four stories live in the same mock project at once, so the demo shows them all, and each object is reached by its own id or URL. There is no global "story mode".
+- **Traces.** The four hero traces already exist (`SHOWCASES`, M11–M12). The mock trace list learns to apply the filter language for `status`, `tags` and `name`, reusing the widget query's compiler, so a story's list can be a real filter.
+- **Issues, alert rules, prompts, dashboards.** One of each per story, with fixed ids. Those that need the dataset's traces or clock (issues, alert rules) are served by the large mock's handlers (`web/src/mocks/generated/`), before the fixtures; the others by browser-only mock modules, as `fallbacks.ts` and `dashboards.ts` do today. The checked fixtures under `fixtures/api/` stay as they are.
+- **Annotation queues.** One queue per story, with its own score fields, whose item is the story's hero trace. They are served by the large dataset's handlers, which own that route.
+- **Assistant.** One scripted conversation per story, chosen by the question sent. Its stored messages match the live ones, so the picture shows the real question. Every trace it names exists.
+- **Playground run.** The scripted answer depends on the prompt being run, so each story's prompt gets its own answer, tokens and cost.
+
+**Screenshots (M15).**
+- Each `marketing-*` shot gets one entry per story in `website/screenshots.json`.
+- The support story keeps today's names, and the others take a `-coding`, `-voice` or `-extraction` suffix.
+- That makes 28 marketing shots: 4 hero and 24 chapter.
+
+**The switcher (website/, M15).**
+- One data module lists the stories. For each story and each picture, it gives the screenshot, its alt and its caption.
+- The hero's tabs and a chip row above each chapter picture both show the four stories, and they stay in sync: picking a story anywhere switches every picture.
+- The choice is written to the URL as `?story=coding`, so a link opens that story.
+- Pictures of the stories not shown are in hidden panels and load lazily. The page's first load is the same as today.
+- Without JavaScript the page shows the support story.
+
+### The stories, section by section
+
+The content below is the direction; the plans fix the exact words. Captions are one line under the picture.
+
+| Section | Support agent | Coding agent | Voice agent | Document extraction |
+|---|---|---|---|---|
+| **Hero** (done, M12) | `support-agent` trace | `coding-agent` trace, failed then passed tests | `voice-agent` trace: one caller turn (speech to text, the LLM, a booking tool, text to speech) that took 3.1 s, its reply starting 2.8 s after the caller stopped talking | `extract-invoice` trace, a retry after a failed check |
+| **Trace list** | Traces tagged `email` | Only the failed traces (`status = 'error'`) | Voice traces sorted by duration (M15 fixes the exact URL) | Traces tagged `billing` |
+| **Explore: assistant** | "Which answers scored low today?", then "Build me a dashboard of answer quality" | "Which traces failed in the last day?" (answer names `coding-agent`), then "Build me a dashboard for code-agent: failed runs, cost per run and p95 duration" | "Which calls were slow today?", then "Build me a dashboard of voice latency" | "Which invoices needed a retry?", then "Build me a dashboard of invoices, schema-check failures and cost" |
+| **Issues** | "Customers ask how to export traces to CSV" (topic); its first example is the hero trace | "run_tests failed: 1 failed, 47 passed" (error); its example is the hero trace's `run_tests` span | "Reply started more than 800 ms after the caller" (score); its example is the hero trace's `check_availability` span | "Invoice total doesn't match its line items"; its example is the hero trace's first schema check |
+| **Evaluate: annotation queue** | "Support answers": correctness and relevance, on the support trace | "Patch review": tests pass and a review verdict, on the coding trace | "Call review": resolved and tone, on the voice trace | "Invoice fields": schema valid and fields correct, on the extraction trace |
+| **Prompts: playground** | `support-reply` v2, answering the CSV question | `write-patch`, producing a diff | `voice-reply`, a short spoken answer | `extract-invoice`, on two models side by side |
+| **Alert** | Correctness average under 0.7 on `support-bot` | Error rate above 5% on `code-agent`, firing | p95 latency above 1.5 s on `voice-agent`, firing | Schema check pass rate under 97% on `billing` traces |
+
+The assistant chapter's picture is wider than today: the story's dashboard fills the page, and the assistant window sits over it, showing the question, the answer, the build request and the "Drafted a dashboard" card. The picture shows the dashboard as saved; the caption doesn't describe the apply step.
+
+### Decisions and trade-offs
+
+- **One switcher for the page, with chips repeated per picture** (the user). Tabs per section with their own state were rejected: they make six independent choices and a busy page. Hero-only tabs were rejected because they're out of reach once the reader scrolls past the hero. A sticky bar was rejected because it's chrome that follows the reader for one feature.
+- **Objects per story, no story mode in the mocks** (planner). A `?story=` mode in the mocks would make the demo show one story at a time and would need every handler to branch. Separate objects keep the demo whole and each shot a plain URL. The exceptions are the assistant, chosen by the question, and the playground run, chosen by the prompt. Both have one endpoint whose answer must differ.
+- **The checked fixtures stay untouched** (planner). `fixtures/api/` is round-trip checked against the server types, and web tests count its rows. Story data lives in browser-only mock modules, which tests don't load unless they ask.
+
+### Milestones
+
+- **M13 Voice story, trace list, issues and alerts.** The voice trace replaces the research trace (mocks, hero shot and hero tab). The mock trace list applies `status`, `tags` and `name` filters. Each story has its issue and its alert rule in the mocks, reachable by URL in `just web-dev`. Depends on M12.
+- **M14 Prompts, dashboards, queues and the assistant.** Each story's prompt and playground answer, dashboard, annotation queue and assistant conversation in the mocks. Depends on M13.
+- **M15 Story screenshots and switcher.** 24 chapter shots from M13 and M14's data, the stories module with outcome captions, the hero tabs and chapter chips in sync through `?story=`, and lazy panels. Depends on M14.
+
+### Open questions
+
+None.

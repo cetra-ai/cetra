@@ -17,8 +17,10 @@ use crate::api::admin::{
     UpdateAdminUserRequest,
 };
 use crate::api::common::{FieldError, Page, PageParams, Problem, ProblemCode};
+use crate::audit::catalog::{InstanceAction, UserAction};
+use crate::audit::{self, Event, TargetKind};
 use crate::auth::principal::{self, Principal};
-use crate::auth::reset::{self, ResetError};
+use crate::auth::reset;
 use crate::ee::license::{InstanceLicense, LICENSE_STORE_URL, LicenseSource, LicenseState};
 use crate::email::Email;
 use crate::http::AppState;
@@ -139,9 +141,10 @@ async fn list_users(
 async fn create_user(
     axum::extract::State(state): axum::extract::State<AppState>,
     axum::extract::Extension(principal): axum::extract::Extension<Principal>,
+    ctx: audit::Ctx,
     error::Json(body): error::Json<CreateAdminUserRequest>,
 ) -> Result<Response, ApiError> {
-    let actor = principal::session_user(&principal)?;
+    principal::session_user(&principal)?;
     let email =
         users::normalize_email(&body.email).map_err(|_| field_error("email", "invalid email"))?;
     let name = optional_name(body.name)?;
@@ -150,7 +153,6 @@ async fn create_user(
     let hash = minted.hash.clone();
     let expires_at = minted.expires_at;
     let admin = body.is_instance_admin.unwrap_or(false);
-    let actor_id = actor.id;
     let user = state
         .meta
         .write(move |conn| {
@@ -169,16 +171,15 @@ async fn create_user(
                 )
                 .await?;
                 insert_reset(conn, &hash, user.id, now, expires_at).await?;
+                let event = Event::new(UserAction::Created {
+                    instance_admin: admin,
+                })
+                .target(TargetKind::User, user.id);
+                audit::record(conn, &ctx, event, now).await?;
                 Ok(user)
             })
         })
         .await?;
-    tracing::info!(
-        target: "audit",
-        %actor_id,
-        user_id = %user.id,
-        "admin user created"
-    );
     Ok((
         StatusCode::CREATED,
         error::Json(CreatedAdminUser {
@@ -192,6 +193,7 @@ async fn create_user(
 async fn update_user(
     axum::extract::State(state): axum::extract::State<AppState>,
     axum::extract::Extension(principal): axum::extract::Extension<Principal>,
+    ctx: audit::Ctx,
     error::Path(UserPath { id }): error::Path<UserPath>,
     error::Json(body): error::Json<UpdateAdminUserRequest>,
 ) -> Result<Response, ApiError> {
@@ -229,6 +231,12 @@ async fn update_user(
                 if disabled == Some(true) && user.disabled_at.is_none() {
                     delete_user_sessions(conn, id, None).await?;
                 }
+                let event = Event::new(UserAction::Updated {
+                    disabled,
+                    instance_admin,
+                })
+                .target(TargetKind::User, id);
+                audit::record(conn, &ctx, event, now).await?;
                 users::user_by_id_tx(conn, id).await
             })
         })
@@ -236,12 +244,6 @@ async fn update_user(
     let Some(user) = user else {
         return Err(ApiError::NotFound);
     };
-    tracing::info!(
-        target: "audit",
-        actor_id = %actor.id,
-        user_id = %user.id,
-        "admin user updated"
-    );
     let providers = identities::user_identities(state.meta.reader(), user.id).await?;
     Ok((StatusCode::OK, error::Json(view(&user, Some(&providers)))).into_response())
 }
@@ -249,6 +251,7 @@ async fn update_user(
 async fn reset_link(
     axum::extract::State(state): axum::extract::State<AppState>,
     axum::extract::Extension(principal): axum::extract::Extension<Principal>,
+    ctx: audit::Ctx,
     error::Path(UserPath { id }): error::Path<UserPath>,
 ) -> Result<Response, ApiError> {
     let actor = principal::session_user(&principal)?;
@@ -267,20 +270,19 @@ async fn reset_link(
             detail: "the user owns an organization you are not a member of",
         });
     }
-    let url = reset::reset_link(
-        &state.meta,
-        &state.config.public_url,
-        id,
-        state.clock.now_ns(),
-    )
-    .await
-    .map_err(reset_failure)?;
-    tracing::info!(
-        target: "audit",
-        actor_id = %actor.id,
-        user_id = %user.id,
-        "admin reset link"
-    );
+    let now = state.clock.now_ns();
+    let minted = reset::mint_reset(&state.config.public_url, now).map_err(auth_failure)?;
+    let url = minted.url.clone();
+    state
+        .meta
+        .write(move |conn| {
+            Box::pin(async move {
+                reset::reset_link_tx(conn, &minted, id, now).await?;
+                let event = Event::new(UserAction::ResetLinkIssued).target(TargetKind::User, id);
+                audit::record(conn, &ctx, event, now).await
+            })
+        })
+        .await?;
     Ok((StatusCode::OK, error::Json(AdminResetLink { url })).into_response())
 }
 
@@ -317,6 +319,7 @@ async fn get_license(
 /// `PUT /api/v1/admin/license` (D-P-75): stores the key and applies it at once.
 async fn put_license(
     axum::extract::State(state): axum::extract::State<AppState>,
+    ctx: audit::Ctx,
     error::Json(body): error::Json<InstallLicenseRequest>,
 ) -> Result<error::Json<AdminLicense>, ApiError> {
     if state.config.license_key.is_some() {
@@ -357,15 +360,23 @@ async fn put_license(
         ));
     }
     let _guard = state.entitlements.lock_license_writes().await;
+    let now = state.clock.now_ns();
+    let license_id = license.id.to_string();
+    let kid = license.kid.to_string();
     state
         .meta
-        .write(move |conn| Box::pin(async move { put_setting(conn, LICENSE_KEY, &key).await }))
+        .write(move |conn| {
+            Box::pin(async move {
+                put_setting(conn, LICENSE_KEY, &key).await?;
+                let event = Event::new(InstanceAction::LicenseInstalled {
+                    license_id: license_id.clone(),
+                    kid,
+                })
+                .target(TargetKind::License, license_id);
+                audit::record(conn, &ctx, event, now).await
+            })
+        })
         .await?;
-    tracing::info!(
-        license_id = %license.id,
-        kid = %license.kid,
-        "licence key installed"
-    );
     state.entitlements.set_license(InstanceLicense {
         state: LicenseState::Valid(license),
         source: LicenseSource::Stored,
@@ -517,13 +528,6 @@ fn field_error(field: &'static str, message: &'static str) -> ApiError {
 
 fn auth_failure(error: crate::auth::AuthError) -> ApiError {
     ApiError::Internal(Box::new(error))
-}
-
-fn reset_failure(error: ResetError) -> ApiError {
-    match error {
-        ResetError::Auth(error) => auth_failure(error),
-        ResetError::Meta(error) => error.into(),
-    }
 }
 
 #[derive(Deserialize)]
@@ -1290,6 +1294,32 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(loaded.source, LicenseSource::Stored);
+    }
+
+    #[tokio::test]
+    async fn licence_install_is_recorded_without_the_key() {
+        let (app, cookie, _) = admin().await;
+        let key = license_key(&["project_roles"]);
+        assert_eq!(install(&app, &cookie, &key).await.status, 200);
+        let shown = license(&app, &cookie).await;
+
+        let rows: Vec<(String, String, String, String, String)> = sqlx::query_as(
+            "SELECT action, actor_kind, target_kind, target_id, details FROM audit_events \
+             WHERE action = 'instance.license_installed'",
+        )
+        .fetch_all(app.state.meta.reader())
+        .await
+        .unwrap();
+        assert_eq!(rows.len(), 1);
+        let (_, actor_kind, target_kind, target_id, details) = &rows[0];
+        assert_eq!(actor_kind, "user");
+        assert_eq!(target_kind, "license");
+        assert_eq!(Some(target_id.as_str()), shown["id"].as_str());
+        let body: serde_json::Value = serde_json::from_str(details).unwrap();
+        assert_eq!(body["license_id"], json!(target_id));
+        assert!(body["kid"].is_string());
+        assert!(!details.contains("cetra1."), "{details}");
+        assert!(!details.contains(&key), "{details}");
     }
 
     #[tokio::test]
