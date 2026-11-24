@@ -14,6 +14,9 @@ use serde_json::{Map, Value};
 use super::setup::{emit_owned, read_optional_text, settings_bytes};
 use super::{Paths, SetupArgs};
 
+#[cfg(test)]
+use super::pi::node_version;
+
 const PLUGIN: &str = include_str!("opencode_plugin.ts");
 /// The plugin's first line. Setup overwrites, and remove deletes, only a file that starts
 /// with it (D-IN-29 item 3).
@@ -416,8 +419,15 @@ mod tests {
 
     #[test]
     fn opencode_plugin_node_tests_pass() {
-        if Command::new("node").arg("--version").output().is_err() {
+        let Some(version) = node_version() else {
             eprintln!("skipped: node is not on PATH");
+            return;
+        };
+        if version < (22, 18) {
+            eprintln!(
+                "skipped: node {}.{} is below 22.18 (type stripping is needed to import the .ts file)",
+                version.0, version.1
+            );
             return;
         }
         let test_file = concat!(

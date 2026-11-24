@@ -621,18 +621,17 @@ fn join_lines(lines: &[String]) -> String {
 }
 
 /// The `.env` text with its `name` line set to `line`, and whether an existing `name` line
-/// with another value was replaced. The first line starting with `<name>=` or
-/// `export <name>=` is replaced and keeps its `\r`; otherwise `line` is appended. Other
-/// lines keep their bytes and order.
+/// with another value was replaced or removed. The first line starting with `<name>=` or
+/// `export <name>=` is replaced and keeps its `\r`; every later such line is deleted, because
+/// dotenv readers take the last duplicate; otherwise `line` is appended. Other lines keep their
+/// bytes and order.
 pub(super) fn env_with_var(text: &str, name: &str, line: &str) -> (String, bool) {
     let plain = format!("{name}=");
     let exported = format!("export {name}=");
+    let is_var = |kept: &str| kept.starts_with(&plain) || kept.starts_with(&exported);
     let mut lines = split_lines(text);
     let mut replaced_other = false;
-    match lines
-        .iter()
-        .position(|kept| kept.starts_with(&plain) || kept.starts_with(&exported))
-    {
+    match lines.iter().position(|kept| is_var(kept)) {
         Some(index) => {
             let carriage = if lines[index].ends_with('\r') {
                 "\r"
@@ -640,7 +639,18 @@ pub(super) fn env_with_var(text: &str, name: &str, line: &str) -> (String, bool)
                 ""
             };
             replaced_other = lines[index].trim_end_matches('\r') != line;
-            lines[index] = format!("{line}{carriage}");
+            let mut kept_lines = Vec::with_capacity(lines.len());
+            for (position, kept) in lines.into_iter().enumerate() {
+                if position == index {
+                    kept_lines.push(format!("{line}{carriage}"));
+                } else if is_var(&kept) {
+                    // A later duplicate is removed: dotenv readers take the last one.
+                    replaced_other |= kept.trim_end_matches('\r') != line;
+                } else {
+                    kept_lines.push(kept);
+                }
+            }
+            lines = kept_lines;
         }
         None => lines.push(line.to_owned()),
     }
@@ -1352,6 +1362,42 @@ mod tests {
         let (env, replaced) = env_with_var("FOO=1\n", "OTEL_SERVICE_NAME", "OTEL_SERVICE_NAME=omp");
         assert!(!replaced);
         assert_eq!(env, "FOO=1\nOTEL_SERVICE_NAME=omp\n");
+    }
+
+    #[test]
+    fn env_with_var_removes_later_duplicates() {
+        // Dotenv readers take the last duplicate, so only the first line stays, replaced.
+        let (env, replaced) = env_with_var(
+            "FOO=1\nOTEL_EXPORTER_OTLP_ENDPOINT=old\nBAR=2\nexport OTEL_EXPORTER_OTLP_ENDPOINT=older\n",
+            "OTEL_EXPORTER_OTLP_ENDPOINT",
+            "OTEL_EXPORTER_OTLP_ENDPOINT=new",
+        );
+        assert!(replaced);
+        assert_eq!(env, "FOO=1\nOTEL_EXPORTER_OTLP_ENDPOINT=new\nBAR=2\n");
+        // A later duplicate holding `line` itself is removed without counting as a replace.
+        let (env, replaced) = env_with_var(
+            "OTEL_SERVICE_NAME=omp\nOTEL_SERVICE_NAME=omp\n",
+            "OTEL_SERVICE_NAME",
+            "OTEL_SERVICE_NAME=omp",
+        );
+        assert!(!replaced);
+        assert_eq!(env, "OTEL_SERVICE_NAME=omp\n");
+        // CRLF lines, with a last duplicate that has no `\n` to lose.
+        let (env, replaced) = env_with_var(
+            "A=1\r\nOTEL_EXPORTER_OTLP_ENDPOINT=old\r\nOTEL_EXPORTER_OTLP_ENDPOINT=dup",
+            "OTEL_EXPORTER_OTLP_ENDPOINT",
+            "OTEL_EXPORTER_OTLP_ENDPOINT=new",
+        );
+        assert!(replaced);
+        assert_eq!(env, "A=1\r\nOTEL_EXPORTER_OTLP_ENDPOINT=new\r\n");
+        // A kept last line without `\n` keeps its position and gains the final newline.
+        let (env, replaced) = env_with_var(
+            "OTEL_EXPORTER_OTLP_ENDPOINT=old\r\nA=1",
+            "OTEL_EXPORTER_OTLP_ENDPOINT",
+            "OTEL_EXPORTER_OTLP_ENDPOINT=new",
+        );
+        assert!(replaced);
+        assert_eq!(env, "OTEL_EXPORTER_OTLP_ENDPOINT=new\r\nA=1\n");
     }
 
     #[cfg(unix)]

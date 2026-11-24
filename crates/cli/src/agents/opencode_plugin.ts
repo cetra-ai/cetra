@@ -102,6 +102,26 @@ const loadConfig = (): Config | null => {
 const str = (key: string, value: unknown): Attr => ({ key, value: { stringValue: String(value) } });
 const json = (key: string, value: unknown): Attr => ({ key, value: { stringValue: JSON.stringify(value) } });
 
+// A non-empty plain identifier: the only form of an error's class name that may leave the process
+// with captureContent off.
+const IDENTIFIER = /^[A-Za-z_][A-Za-z0-9_.]*$/;
+
+// The status message for an error OpenCode reported, or undefined when there is none. With
+// captureContent on, the error's own text is kept: its message, or the string itself. With it off,
+// no error text leaves the process: the error's class name when that is a plain identifier, else
+// the fixed string the handler picks ("tool failed", "model call failed", "interrupted", …).
+const safeError = (error: unknown, fixed: string): string | undefined => {
+  if (!error) return undefined;
+  if (config?.captureContent) {
+    if (typeof error === "string") return error;
+    const message = (error as { message?: unknown }).message;
+    return typeof message === "string" && message !== "" ? message : fixed;
+  }
+  if (typeof error === "string") return IDENTIFIER.test(error) ? error : fixed;
+  const name = (error as { name?: unknown }).name;
+  return typeof name === "string" && IDENTIFIER.test(name) ? name : fixed;
+};
+
 // gen_ai.response.finish_reasons is a string array, as GenAI semconv types it.
 const finishReasons = (raw: string | undefined): Attr[] => {
   const value = finishReason(raw);
@@ -207,7 +227,9 @@ const turnStart = (sessionID: string, at: number): void => {
     ]),
   );
 };
-const turnEnd = (sessionID: string, at: number, error?: string): void => {
+// Ends a turn and flushes it. The flush is awaited only by v1's `session.idle`, which has no
+// disposer OpenCode would wait for; everywhere else the POST finishes in the background.
+const turnEnd = async (sessionID: string, at: number, error?: string): Promise<void> => {
   const span = turns.get(sessionID);
   if (!span) return;
   for (const [id, step] of steps) {
@@ -223,9 +245,9 @@ const turnEnd = (sessionID: string, at: number, error?: string): void => {
     }
   }
   turns.delete(sessionID);
+  requests.delete(sessionID);
   end(span, at, error);
-  // Not awaited: OpenCode goes on at once, and the POST finishes in the background.
-  void flush();
+  await flush();
 };
 const chatSpan = (sessionID: string, messageID: string, providerID: string, modelID: string, at: number): void => {
   const attrs = [
@@ -275,186 +297,223 @@ const toolEnd = (callID: string, at: number, result: unknown, error?: string): v
   end(span, at, error);
 };
 
-// OpenCode v2 (promise plugin API, @opencode/plugin 2.3.0: session.hook, event.subscribe).
+// OpenCode v2 (promise plugin API, @opencode/plugin 2.3.0: session.hook, event.subscribe). The
+// whole body is guarded: whatever fails, setup resolves to a no-op disposer and OpenCode runs
+// unchanged.
 async function setup(ctx: any): Promise<() => Promise<void>> {
-  config = loadConfig();
-  if (config === null) return async () => {};
-  const names = new Map<string, string>();
-  await ctx.session.hook("context", (event: any) => {
-    try {
-      const system = (Array.isArray(event?.system) ? event.system : []).map((part: any) => ({
-        role: "system",
-        content: part?.text ?? JSON.stringify(part),
-      }));
-      if (config?.captureContent && Array.isArray(event?.messages)) {
-        requests.set(event.sessionID, JSON.stringify([...system, ...event.messages]));
-      }
-    } catch {
-      // never break OpenCode
-    }
-  });
-  const types = [
-    "session.created",
-    "session.deleted",
-    "session.execution.started",
-    "session.execution.succeeded",
-    "session.execution.failed",
-    "session.execution.interrupted",
-    "session.step.started",
-    "session.step.ended",
-    "session.step.failed",
-    "session.text.ended",
-    "session.tool.input.started",
-    "session.tool.called",
-    "session.tool.success",
-    "session.tool.failed",
-  ];
-  void (async () => {
-    for await (const event of ctx.event.subscribe({ types })) {
+  try {
+    config = loadConfig();
+    if (config === null) return async () => {};
+    const names = new Map<string, string>();
+    await ctx.session.hook("context", (event: any) => {
       try {
-        const d = event.data;
-        const at = event.created;
-        switch (event.type) {
-          case "session.execution.started":
-            turnStart(d.sessionID, at);
-            break;
-          case "session.execution.succeeded":
-            turnEnd(d.sessionID, at);
-            break;
-          case "session.execution.failed":
-            turnEnd(d.sessionID, at, d.error?.message ?? "failed");
-            break;
-          case "session.execution.interrupted":
-            turnEnd(d.sessionID, at, `interrupted: ${d.reason}`);
-            break;
-          case "session.deleted":
-            turnEnd(d.sessionID, at, "session deleted");
-            break;
-          case "session.step.started":
-            turnStart(d.sessionID, at);
-            chatSpan(d.sessionID, d.assistantMessageID, d.model.providerID, d.model.id, d.started ?? at);
-            if (config?.captureContent) {
-              steps.get(d.assistantMessageID)?.span.attrs.push(
-                json("gen_ai.input.messages", JSON.parse(requests.get(d.sessionID) ?? "[]")),
-              );
-            }
-            requests.delete(d.sessionID);
-            break;
-          case "session.text.ended":
-            steps.get(d.assistantMessageID)?.text.push(d.text);
-            break;
-          case "session.step.ended":
-            chatEnd(d.assistantMessageID, at, d.tokens, d.finish);
-            break;
-          case "session.step.failed":
-            chatEnd(d.assistantMessageID, at, d.tokens, undefined, d.error?.message ?? "step failed");
-            break;
-          case "session.tool.input.started":
-            names.set(d.id, d.name);
-            break;
-          case "session.tool.called": {
-            const name = names.get(d.id) ?? "tool";
-            steps.get(d.assistantMessageID)?.calls.push({
-              id: d.id,
-              type: "function",
-              function: { name, arguments: JSON.stringify(d.input) },
-            });
-            toolStart(d.sessionID, d.id, name, d.input, at);
-            break;
-          }
-          case "session.tool.success":
-            toolEnd(d.id, at, textOf(d.content));
-            break;
-          case "session.tool.failed":
-            toolEnd(d.id, at, textOf(d.content), d.error?.message ?? "tool failed");
-            break;
+        const system = (Array.isArray(event?.system) ? event.system : []).map((part: any) => ({
+          role: "system",
+          content: part?.text ?? JSON.stringify(part),
+        }));
+        if (config?.captureContent && Array.isArray(event?.messages)) {
+          requests.set(event.sessionID, JSON.stringify([...system, ...event.messages]));
         }
       } catch {
-        // one bad event never stops the stream
+        // never break OpenCode
       }
-    }
-  })().catch(() => undefined);
-  return async () => {
-    await flush();
-  };
+    });
+    const types = [
+      "session.created",
+      "session.deleted",
+      "session.execution.started",
+      "session.execution.succeeded",
+      "session.execution.failed",
+      "session.execution.interrupted",
+      "session.step.started",
+      "session.step.ended",
+      "session.step.failed",
+      "session.text.ended",
+      "session.tool.input.started",
+      "session.tool.called",
+      "session.tool.success",
+      "session.tool.failed",
+    ];
+    void (async () => {
+      for await (const event of ctx.event.subscribe({ types })) {
+        try {
+          const d = event.data;
+          const at = event.created;
+          switch (event.type) {
+            case "session.execution.started":
+              turnStart(d.sessionID, at);
+              break;
+            case "session.execution.succeeded":
+              void turnEnd(d.sessionID, at);
+              break;
+            case "session.execution.failed":
+              void turnEnd(d.sessionID, at, safeError(d.error, "failed"));
+              break;
+            case "session.execution.interrupted":
+              // The interrupt reason is free text: with content off it never leaves the process.
+              void turnEnd(
+                d.sessionID,
+                at,
+                config?.captureContent ? `interrupted: ${d.reason}` : "interrupted",
+              );
+              break;
+            case "session.deleted":
+              void turnEnd(d.sessionID, at, "session deleted");
+              break;
+            case "session.step.started":
+              turnStart(d.sessionID, at);
+              chatSpan(d.sessionID, d.assistantMessageID, d.model.providerID, d.model.id, d.started ?? at);
+              if (config?.captureContent) {
+                steps.get(d.assistantMessageID)?.span.attrs.push(
+                  json("gen_ai.input.messages", JSON.parse(requests.get(d.sessionID) ?? "[]")),
+                );
+              }
+              requests.delete(d.sessionID);
+              break;
+            case "session.text.ended":
+              steps.get(d.assistantMessageID)?.text.push(d.text);
+              break;
+            case "session.step.ended":
+              chatEnd(d.assistantMessageID, at, d.tokens, d.finish);
+              break;
+            case "session.step.failed":
+              chatEnd(d.assistantMessageID, at, d.tokens, undefined, safeError(d.error, "model call failed"));
+              break;
+            case "session.tool.input.started":
+              names.set(d.id, d.name);
+              break;
+            case "session.tool.called": {
+              const name = names.get(d.id) ?? "tool";
+              steps.get(d.assistantMessageID)?.calls.push({
+                id: d.id,
+                type: "function",
+                function: { name, arguments: JSON.stringify(d.input) },
+              });
+              toolStart(d.sessionID, d.id, name, d.input, at);
+              break;
+            }
+            case "session.tool.success":
+              toolEnd(d.id, at, textOf(d.content));
+              names.delete(d.id);
+              break;
+            case "session.tool.failed":
+              toolEnd(d.id, at, textOf(d.content), safeError(d.error, "tool failed"));
+              names.delete(d.id);
+              break;
+          }
+        } catch {
+          // one bad event never stops the stream
+        }
+      }
+    })().catch(() => undefined);
+    return async () => {
+      await flush();
+    };
+  } catch {
+    // OpenCode must not fail to start because of us.
+    return async () => {};
+  }
 }
 
 // OpenCode v1 (@opencode-ai/plugin 1.19.6 Hooks: chat.message, event, tool.execute.before/after).
+// As setup, the whole body is guarded: on any error the plugin registers nothing.
 async function server(_input: any): Promise<Record<string, unknown>> {
-  config = loadConfig();
-  if (config === null) return {};
-  const textParts = new Map<string, { messageID: string; text: string }>();
-  const done = new Set<string>();
-  return {
-    "chat.message": async (input: any) => {
-      try {
-        turnStart(input?.sessionID, Date.now());
-      } catch {
-        // never break OpenCode
+  try {
+    config = loadConfig();
+    if (config === null) return {};
+    const textParts = new Map<string, { messageID: string; text: string }>();
+    // The message ids already recorded, with the session each belongs to so a turn's end can
+    // clear its own entries.
+    const done = new Map<string, string>();
+    // Clears the `done` entries of one session, at its turn's end.
+    const forget = (sessionID: unknown): void => {
+      for (const [id, session] of done) {
+        if (session === sessionID) done.delete(id);
       }
-    },
-    event: async ({ event }: any) => {
-      const p = event?.properties;
-      try {
-        switch (event.type) {
-          case "message.updated": {
-            const m = p?.info;
-            if (m?.role !== "assistant" || !m.time?.completed || done.has(m.id)) break;
-            done.add(m.id);
-            turnStart(m.sessionID, m.time.created);
-            const span = newSpan(`chat ${m.modelID}`, turns.get(m.sessionID), m.time.created, [
-              str("gen_ai.operation.name", "chat"),
-              str("gen_ai.provider.name", m.providerID),
-              str("gen_ai.request.model", m.modelID),
-              str("gen_ai.conversation.id", m.sessionID),
-            ]);
-            const text = [...textParts.values()].filter((t) => t.messageID === m.id).map((t) => t.text).join("");
-            // The parts of a finished message are not read again, so they never pile up.
-            for (const [id, part] of textParts) {
-              if (part.messageID === m.id) textParts.delete(id);
-            }
-            if (config?.captureContent && text) {
-              span.attrs.push(json("gen_ai.output.messages", [{ role: "assistant", content: text }]));
-            }
-            span.attrs.push(...usageAttributes(m.tokens));
-            span.attrs.push(...finishReasons(m.finish));
-            end(span, m.time.completed, m.error?.name);
-            break;
-          }
-          case "message.part.updated": {
-            const part = p?.part;
-            if (part?.type === "text") textParts.set(part.id, { messageID: part.messageID, text: part.text });
-            if (part?.type === "tool" && part.state?.status === "error") {
-              toolEnd(part.callID, Date.now(), undefined, part.state.error);
-            }
-            break;
-          }
-          case "session.idle":
-            turnEnd(p?.sessionID, Date.now());
-            break;
-          case "session.deleted":
-            turnEnd(p?.info?.id, Date.now(), "session deleted");
-            break;
+    };
+    return {
+      "chat.message": async (input: any) => {
+        try {
+          turnStart(input?.sessionID, Date.now());
+        } catch {
+          // never break OpenCode
         }
-      } catch {
-        // swallowed on purpose
-      }
-    },
-    "tool.execute.before": async (input: any, output: any) => {
-      try {
-        toolStart(input?.sessionID, input?.callID, input?.tool, output?.args, Date.now());
-      } catch {
-        // never break OpenCode
-      }
-    },
-    "tool.execute.after": async (input: any, output: any) => {
-      try {
-        toolEnd(input?.callID, Date.now(), output?.output);
-      } catch {
-        // never break OpenCode
-      }
-    },
-  };
+      },
+      event: async ({ event }: any) => {
+        const p = event?.properties;
+        try {
+          switch (event.type) {
+            case "message.updated": {
+              const m = p?.info;
+              if (m?.role !== "assistant" || !m.time?.completed || done.has(m.id)) break;
+              // A model call attaches to the current turn of its session, the one `chat.message`
+              // started: `message.updated` never starts a turn, and with no current turn nothing
+              // is recorded for it.
+              const turn = turns.get(m.sessionID);
+              if (!turn) break;
+              done.set(m.id, m.sessionID);
+              const span = newSpan(`chat ${m.modelID}`, turn, m.time.created, [
+                str("gen_ai.operation.name", "chat"),
+                str("gen_ai.provider.name", m.providerID),
+                str("gen_ai.request.model", m.modelID),
+                str("gen_ai.conversation.id", m.sessionID),
+              ]);
+              const text = [...textParts.values()].filter((t) => t.messageID === m.id).map((t) => t.text).join("");
+              // The parts of a finished message are not read again, so they never pile up.
+              for (const [id, part] of textParts) {
+                if (part.messageID === m.id) textParts.delete(id);
+              }
+              if (config?.captureContent && text) {
+                span.attrs.push(json("gen_ai.output.messages", [{ role: "assistant", content: text }]));
+              }
+              span.attrs.push(...usageAttributes(m.tokens));
+              span.attrs.push(...finishReasons(m.finish));
+              end(span, m.time.completed, safeError(m.error, "model call failed"));
+              break;
+            }
+            case "message.part.updated": {
+              const part = p?.part;
+              if (part?.type === "text") textParts.set(part.id, { messageID: part.messageID, text: part.text });
+              if (part?.type === "tool" && part.state?.status === "error") {
+                toolEnd(part.callID, Date.now(), undefined, safeError(part.state.error, "tool failed"));
+              }
+              break;
+            }
+            case "session.idle":
+              // The turn's flush is awaited here: v1 has no disposer OpenCode would wait for, and
+              // a one-shot `opencode run` may exit before an unawaited POST finishes (v2's turn
+              // end stays unawaited: its disposer awaits).
+              forget(p?.sessionID);
+              await turnEnd(p?.sessionID, Date.now());
+              break;
+            case "session.deleted":
+              forget(p?.info?.id);
+              void turnEnd(p?.info?.id, Date.now(), "session deleted");
+              break;
+          }
+        } catch {
+          // swallowed on purpose
+        }
+      },
+      "tool.execute.before": async (input: any, output: any) => {
+        try {
+          toolStart(input?.sessionID, input?.callID, input?.tool, output?.args, Date.now());
+        } catch {
+          // never break OpenCode
+        }
+      },
+      "tool.execute.after": async (input: any, output: any) => {
+        try {
+          toolEnd(input?.callID, Date.now(), output?.output);
+        } catch {
+          // never break OpenCode
+        }
+      },
+    };
+  } catch {
+    // OpenCode must not fail to start because of us.
+    return {};
+  }
 }
 
 export default { id: "cetra-opencode", setup, server };

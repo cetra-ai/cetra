@@ -67,7 +67,8 @@ fetch() {
 # run never leaves a tree that looks complete. `just capture` runs this script
 # for every case, so two runs can meet here while a tree is still downloading:
 # the lock makes the later run wait and then skip on the marker, instead of
-# racing the move into place.
+# racing the move into place. Sets TREE_FETCHED to yes when it fetched the tree and no when it
+# skipped, so the version checks below run only right after a fresh fetch.
 fetch_tree() {
     local final="$1" url="$2" kind="$3" checksum="$4" strip="$5"
     local dir
@@ -75,6 +76,7 @@ fetch_tree() {
     mkdir -p -- "$dir"
     exec 9>"$dir/.fetch.lock"
     flock 9
+    TREE_FETCHED=no
     if [ -e "$final/.complete" ]; then
         echo "capture-tools: $final already present"
         exec 9>&-
@@ -100,6 +102,7 @@ fetch_tree() {
     rm -rf -- "$final"
     mv -f -- "$extract_dir" "$final"
     touch "$final/.complete"
+    TREE_FETCHED=yes
     exec 9>&-
     echo "capture-tools: $(basename -- "$final") in place"
 }
@@ -133,37 +136,47 @@ fetch_tree "$tools_dir/jdk/21.0.13+9" \
     sha256 \
     "d7f5d5cf865a2902b70ff549b97586a7d3f234e016f041ab447ea740c7d66d1c" \
     1
+jdk_fetched=$TREE_FETCHED
 fetch_tree "$tools_dir/maven/3.9.16" \
     "https://repo1.maven.org/maven2/org/apache/maven/apache-maven/3.9.16/apache-maven-3.9.16-bin.tar.gz" \
     sha512 \
     "831a8591fe20c8243b1dbe7d71e3244f31d1665b0804b2e825e38cbbe5ce0cafb8338851f90780735568773e0a6cd07bbec107cda0b896b008b861075358b6f6" \
     1
+maven_fetched=$TREE_FETCHED
 fetch_tree "$tools_dir/dotnet/10.0.404" \
     "https://builds.dotnet.microsoft.com/dotnet/Sdk/10.0.404/dotnet-sdk-10.0.404-linux-x64.tar.gz" \
     sha256 \
     "c0610757a818fde4b960d27a0ac421f273068a05dc5ec7abafc01dbf84e9cb4d" \
     0
+dotnet_fetched=$TREE_FETCHED
 
-# The three toolchains report their versions on every run, and a mismatch fails
-# `just capture-tools` itself, so a wrong or broken tree never reaches a capture.
-java_version="$("$tools_dir/jdk/21.0.13+9/bin/java" -version 2>&1)"
-case "$java_version" in
-    *"21.0.13"*) echo "capture-tools: $(grep -m1 "openjdk version" <<<"$java_version")" ;;
-    *) echo "capture-tools: the JDK does not report 21.0.13" >&2; exit 1 ;;
-esac
-maven_version="$(JAVA_HOME="$tools_dir/jdk/21.0.13+9" "$tools_dir/maven/3.9.16/bin/mvn" -v)"
-case "$maven_version" in
-    *"Apache Maven 3.9.16"*) echo "capture-tools: $(grep -m1 "Apache Maven" <<<"$maven_version")" ;;
-    *) echo "capture-tools: Maven does not report 3.9.16" >&2; exit 1 ;;
-esac
-dotnet_cli_home="$(mktemp -d)"
-temp_paths+=("$dotnet_cli_home")
-dotnet_version="$(DOTNET_CLI_TELEMETRY_OPTOUT=1 DOTNET_NOLOGO=1 DOTNET_CLI_HOME="$dotnet_cli_home" \
-    "$tools_dir/dotnet/10.0.404/dotnet" --version)"
-case "$dotnet_version" in
-    *"10.0.404"*) echo "capture-tools: dotnet SDK ${dotnet_version%%$'\n'*}" ;;
-    *) echo "capture-tools: the .NET SDK does not report 10.0.404" >&2; exit 1 ;;
-esac
+# The three toolchains report their versions right after their tree is fetched (IN8.0), not on
+# every run (the checks add 2–3 s to every `just capture`), and a mismatch fails `just
+# capture-tools` itself, so a wrong or broken tree never reaches a capture.
+if [ "$jdk_fetched" = yes ]; then
+    java_version="$("$tools_dir/jdk/21.0.13+9/bin/java" -version 2>&1)"
+    case "$java_version" in
+        *"21.0.13"*) echo "capture-tools: $(grep -m1 "openjdk version" <<<"$java_version")" ;;
+        *) echo "capture-tools: the JDK does not report 21.0.13" >&2; exit 1 ;;
+    esac
+fi
+if [ "$maven_fetched" = yes ]; then
+    maven_version="$(JAVA_HOME="$tools_dir/jdk/21.0.13+9" "$tools_dir/maven/3.9.16/bin/mvn" -v)"
+    case "$maven_version" in
+        *"Apache Maven 3.9.16"*) echo "capture-tools: $(grep -m1 "Apache Maven" <<<"$maven_version")" ;;
+        *) echo "capture-tools: Maven does not report 3.9.16" >&2; exit 1 ;;
+    esac
+fi
+if [ "$dotnet_fetched" = yes ]; then
+    dotnet_cli_home="$(mktemp -d)"
+    temp_paths+=("$dotnet_cli_home")
+    dotnet_version="$(DOTNET_CLI_TELEMETRY_OPTOUT=1 DOTNET_NOLOGO=1 DOTNET_CLI_HOME="$dotnet_cli_home" \
+        "$tools_dir/dotnet/10.0.404/dotnet" --version)"
+    case "$dotnet_version" in
+        *"10.0.404"*) echo "capture-tools: dotnet SDK ${dotnet_version%%$'\n'*}" ;;
+        *) echo "capture-tools: the .NET SDK does not report 10.0.404" >&2; exit 1 ;;
+    esac
+fi
 
 # The LiteLLM Proxy environment: its own uv project (litellm[proxy] cannot share
 # tools/capture/py; its mcp and rich pins conflict with the frameworks there),
@@ -215,10 +228,13 @@ fi
 # Hermes Agent (IN7.9): its setup.py refuses to build a wheel outside a Nix build, so it cannot
 # be a dependency of a uv project of ours. It is installed the way the spike ran it: cloned at
 # the tag and synced from its own committed uv.lock (which pins its transitive versions, not our
-# 7-day rule), with the hermes-otel plugin installed by commit into that environment.
+# 7-day rule), with the hermes-otel plugin installed by commit into that environment. The
+# environment is skipped only when its .complete marker holds exactly the pin of everything it
+# was built from; anything else reinstalls it (the rm -rf below clears the old one).
 hermes_env="$tools_dir/hermes/0.23.2"
 hermes_src="$tools_dir/hermes/src-0.23.2"
-if [ -e "$hermes_env/.complete" ]; then
+hermes_pin="v0.23.2 ae2a81ccc00e9b7c06301523e5bb09608397149c hermes-otel 32554cf76c8dbeb8d382eaff9007112abf3f7b2c exclude-newer 7 days"
+if [ -f "$hermes_env/.complete" ] && [ "$(cat -- "$hermes_env/.complete")" = "$hermes_pin" ]; then
     echo "capture-tools: hermes 0.23.2 already present"
 else
     echo "capture-tools: installing hermes 0.23.2"
@@ -234,7 +250,7 @@ else
     UV_PROJECT_ENVIRONMENT="$hermes_env" uv sync --frozen --project "$hermes_src"
     # hermes-otel's own dependencies are resolved here, under the 7-day rule (D-IN-28 item 8).
     uv pip install --exclude-newer "7 days" --python "$hermes_env/bin/python" "hermes-otel @ git+https://github.com/briancaffey/hermes-otel@32554cf76c8dbeb8d382eaff9007112abf3f7b2c"
-    touch "$hermes_env/.complete"
+    printf '%s' "$hermes_pin" > "$hermes_env/.complete"
 fi
 
 pnpm_tool n8n 2.48.4 n8n/bin/n8n

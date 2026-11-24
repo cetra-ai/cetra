@@ -559,18 +559,19 @@ fn generic_legacy_messages(
 /// attribute holds a JSON object (Semantic Kernel .NET, D-IN-30 item 4), else
 /// the event's own attributes ([`event_message`]).
 ///
-/// The object's null-valued keys are dropped and its `role` lowercased
-/// (Semantic Kernel writes `Assistant`); the event's other attributes, such as
+/// The object's null-valued keys are dropped, its `role` lowercased
+/// (Semantic Kernel writes `Assistant`) and a choice's `finish_reason`
+/// lowercased too (it writes `Stop`); the event's other attributes, such as
 /// `gen_ai.system`, are not merged in. A choice's `message` object is the
 /// element, with the choice's top-level `finish_reason` when that is a string.
-/// Any other `gen_ai.event.content` string is the raw element, which fails
-/// conversion in [`generic_legacy_messages`].
+/// A `gen_ai.event.content` string that is not a JSON object is not Semantic
+/// Kernel's: the event is read as though the attribute were absent.
 fn event_body(event: &Event, role: &str, warnings: &mut Warnings) -> Json {
     let Some(text) = event_attr(event, EVENT_CONTENT).and_then(as_str) else {
         return event_message(event, role, warnings);
     };
     let Ok(Json::Object(object)) = serde_json::from_str::<Json>(text) else {
-        return Json::String(text.to_owned());
+        return event_message(event, role, warnings);
     };
     if event.name != CHOICE {
         return Json::Object(message_body(object));
@@ -580,7 +581,10 @@ fn event_body(event: &Event, role: &str, warnings: &mut Warnings) -> Json {
     };
     let mut message = message_body(message.clone());
     if let Some(reason) = object.get("finish_reason").and_then(Json::as_str) {
-        message.insert("finish_reason".to_owned(), Json::String(reason.to_owned()));
+        message.insert(
+            "finish_reason".to_owned(),
+            Json::String(reason.to_lowercase()),
+        );
     }
     Json::Object(message)
 }
@@ -1452,25 +1456,32 @@ mod tests {
         };
         assert_eq!(
             messages_to_json(&messages),
-            r#"[{"role":"assistant","parts":[{"type":"text","content":"hello.txt says: hello from the M7 spike."}],"finish_reason":"Stop"}]"#
+            r#"[{"role":"assistant","parts":[{"type":"text","content":"hello.txt says: hello from the M7 spike."}],"finish_reason":"stop"}]"#
         );
         assert!(io.errors.is_empty());
     }
 
     #[test]
-    fn event_content_that_is_not_an_object_is_a_normalize_error() {
+    fn event_content_that_is_not_an_object_is_ignored() {
         // D-IN-30 item 4: a `gen_ai.event.content` string that is not a JSON
-        // object is the raw element, and the conversion fails as today.
+        // object is not Semantic Kernel's, so the event is read from its own
+        // attributes exactly as before the rule, with no normalize error.
         let events = [event(
             "gen_ai.user.message",
             &[
-                ("gen_ai.event.content", "not json"),
-                ("gen_ai.system", "openai"),
+                ("gen_ai.event.content", "plain text"),
+                ("content", r#"[{"text": "hi"}]"#),
             ],
         )];
         let io = read_span(&[], &events, SpanKind::Llm);
-        assert_eq!(io.errors, ["messages:genai:input"]);
-        assert_eq!(io.input, Some(Payload::Json(json!(["not json"]))));
+        assert!(io.errors.is_empty());
+        let Payload::Messages(messages) = io.input.expect("input") else {
+            panic!("expected messages");
+        };
+        assert_eq!(
+            messages_to_json(&messages),
+            r#"[{"role":"user","parts":[{"text":"hi"}],"gen_ai.event.content":"plain text"}]"#
+        );
     }
 
     #[test]

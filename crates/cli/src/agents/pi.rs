@@ -7,6 +7,9 @@ use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
+#[cfg(test)]
+use std::process::Command;
+
 use anyhow::Context;
 
 use super::setup::{emit_owned, read_optional_text, shell_quote};
@@ -18,6 +21,18 @@ const EXTENSION: &str = include_str!("pi_extension.ts");
 const MARKER: &str =
     "// Managed by cetra (cetra agents setup pi). Delete this file or run: cetra agents remove pi";
 const EXTENSION_FILE: &str = "cetra.ts";
+
+/// The `node` on `PATH`'s (major, minor) version, or `None` when node is absent. The plugin and
+/// extension tests import their `.ts` file through Node's type stripping, which needs 22.18.
+#[cfg(test)]
+pub(super) fn node_version() -> Option<(u32, u32)> {
+    let output = Command::new("node").arg("--version").output().ok()?;
+    let version = String::from_utf8_lossy(&output.stdout);
+    let mut numbers = version.trim().strip_prefix('v')?.split('.');
+    let major = numbers.next()?.parse().ok()?;
+    let minor = numbers.next()?.parse().ok()?;
+    Some((major, minor))
+}
 
 /// `$PI_CODING_AGENT_DIR` when set and not empty, else `<home>/.pi/agent`.
 pub(super) fn pi_dir(paths: &Paths) -> PathBuf {
@@ -318,8 +333,15 @@ mod tests {
 
     #[test]
     fn pi_extension_node_tests_pass() {
-        if Command::new("node").arg("--version").output().is_err() {
+        let Some(version) = node_version() else {
             eprintln!("skipped: node is not on PATH");
+            return;
+        };
+        if version < (22, 18) {
+            eprintln!(
+                "skipped: node {}.{} is below 22.18 (type stripping is needed to import the .ts file)",
+                version.0, version.1
+            );
             return;
         }
         let test_file = concat!(
