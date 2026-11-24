@@ -105,7 +105,7 @@ website/                          (one Astro project, one Cloudflare Pages proje
   - **JetBrains Mono** for code and for eyebrows/labels (the app's mono).
 
   All three load from the site, with fallbacks.
-- **Product (Linear):** screenshots in window frames that bleed off the edge of their band, with soft fades at the edges. Every product chapter repeats one layout: title, one line, UI scene, small feature list.
+- **Product (Linear):** screenshots in window frames that bleed off the edge of their band. Every product chapter repeats one layout: title, one line and a small feature list beside the UI scene, alternating sides. Each scene is a crop of the one panel its chapter talks about, never the whole app, and is shown no larger than its CSS size (§9.10.2, D-W-23).
 - **Motion:** little of it. One orchestrated hero moment (the trace tree filling in), tab switches, copy feedback. Everything readable at rest, and `prefers-reduced-motion` respected. No scroll-triggered content that can render blank (an anti-pattern in `research.md` §6).
 - **Mobile:** every section stacks to one column; scenes become scrollable crops.
 
@@ -204,9 +204,11 @@ Answers of 2026-11-23, on a full feature table for `/pricing/` (M9), like the on
    4. About 55 rows, with the limits first. The table replaces the "Every plan" bullet list.
    5. *(Planner's reading, not asked; D-W-21.)* Enterprise has everything that Pro with the Teams add-on has: unlimited seats, projects and rules, retention controls, single sign-on, project roles and the shared channel. Its volume, overage, history and ingest values read "Custom", following D177. Starter and Pro show unlimited projects, as the control plane's catalogue sets them.
 
-Answer of 2026-11-24, on the licence price:
+Answers of 2026-11-24:
 
-10. **The self-hosted licence shows no price** (D-W-22). It reads "Custom" with "Talk to us", like the Cloud Enterprise plan and the competitors' enterprise self-hosted tiers. It stays one licence with every enterprise feature, SAML included; the user chose this over a $5,400 Teams licence beside a custom-priced Enterprise one.
+10. **The licence price and the homepage screenshots.**
+   1. **The self-hosted licence shows no price** (D-W-22). It reads "Custom" with "Talk to us", like the Cloud Enterprise plan and the competitors' enterprise self-hosted tiers. It stays one licence with every enterprise feature, SAML included; the user chose this over a $5,400 Teams licence beside a custom-priced Enterprise one.
+   2. **The homepage screenshots show one panel each** (D-W-23, M10). The whole-app captures at 1440×900 read at about 9 px on the page, and no competitor shows the whole app: Laminar shows one cropped panel, Langfuse drawings, Helicone one simplified dashboard. Each `marketing-*` shot is a crop of the panel its section talks about, in a smaller window. The six chapters put their text beside the picture, alternating sides, and the hero does the same on wide screens.
 
 ## 10. Milestones
 
@@ -222,6 +224,7 @@ Built in order, each milestone merged to `main` when done (no feature flag). Unt
 | **M6 Benchmarks** *(after launch, §9.2)* | `/benchmarks/` from a results file: machines, versions, dates, named competitors, tradeoffs, reproduction script; engine numbers added to the homepage proof strip | The benchmark itself (D23) | — |
 | **M8 Main sync** | The site matches main as of 2026-11-22: rebased onto it, the integrations parser takes the coding-agent rows, the web demo link (§9.6), six chapters and the coding-agents section, new compare rows (annotation queues, issue detection, coding-agent tracing, in-app assistant) with sourced facts, pricing and self-hosting updated | M1–M5, M7; main's D191–D195 | Benchmarks (M6) |
 | **M9 Pricing feature table** | A feature table on both tabs of `/pricing/` (§9.9): limits first, then grouped features. Every row links to its docs page or cites a decision, and a test checks both. On phones, one Cloud plan column shows at a time. It replaces the "Every plan" list | M3, M8; PR #227 (the Cloud / Self-hosted switcher) | Docs for the Enterprise-only rows |
+| **M10 Focused screenshots** | Each homepage screenshot is a crop of one panel, captured in its own window size (`viewport`, `clip` in `screenshots.json`). The product chapters and the hero show text beside the picture on wide screens, and no picture is shown larger than its CSS size (§9.10.2) | M2, M8 | The docs' own screenshots |
 | **M7 Launch** | The holding page replaced by the homepage; `noindex` removed; sitemap, `robots.txt`, Open Graph images per page, canonical URLs, 404 page; Web Analytics on; final review pass on every page by the user | M2–M5 | Benchmarks (M6) |
 
 ## 11. Risks
