@@ -1,8 +1,8 @@
 //! `cetra agents setup` and `remove` (D-CA-10): writes each agent's user-level settings so its
 //! traces reach cetra, and removes what setup wrote. Claude Code, Gemini CLI and Qwen Code are
 //! JSON files here (Gemini CLI and Qwen Code share one pair of functions), Codex is in
-//! `codex.rs`, Pi's extension is in `pi.rs`, and Copilot has no file: setup prints its settings
-//! instead.
+//! `codex.rs`, Pi's extension is in `pi.rs`, OpenClaw's plugin install and config are in
+//! `openclaw.rs`, and Copilot has no file: setup prints its settings instead.
 
 use std::fs;
 use std::io::{self, Write};
@@ -14,6 +14,7 @@ use serde_json::{Map, Value, json};
 
 use super::codex;
 use super::hook::run_with_timeout;
+use super::openclaw;
 use super::pi;
 use super::qwen_code;
 use super::{Agent, AgentsFile, Paths, SetupArgs};
@@ -67,6 +68,14 @@ pub(crate) fn setup(args: &SetupArgs, paths: &Paths, out: &mut dyn Write) -> any
         Agent::QwenCode => qwen_code::setup(args, &url, paths, out)?,
         Agent::Copilot => copilot(args, &url, out)?,
         Agent::Pi => pi::setup(args, &url, paths, out)?,
+        Agent::OpenClaw => openclaw::setup(
+            args,
+            &url,
+            paths,
+            out,
+            &openclaw::installed_version,
+            &openclaw::run_install,
+        )?,
     }
     if let Some(file) = agents_file {
         file.save(&paths.agents_file())?;
@@ -100,6 +109,7 @@ pub(crate) fn remove(agent: Agent, paths: &Paths, out: &mut dyn Write) -> anyhow
             Ok(())
         }
         Agent::Pi => pi::remove(paths, out),
+        Agent::OpenClaw => openclaw::remove(paths, out),
     }
 }
 
@@ -164,7 +174,7 @@ fn hook_timeout(agent: Agent) -> Option<u64> {
     match agent {
         Agent::ClaudeCode | Agent::QwenCode => Some(5),
         Agent::GeminiCli => Some(5000),
-        Agent::Codex | Agent::Copilot | Agent::Pi => None,
+        Agent::Codex | Agent::Copilot | Agent::Pi | Agent::OpenClaw => None,
     }
 }
 
@@ -287,7 +297,7 @@ pub(super) fn object_entry<'a>(
 }
 
 /// Whether `section[key]` is the string `url`.
-fn points_at(section: Option<&Value>, key: &str, url: &str) -> bool {
+pub(super) fn points_at(section: Option<&Value>, key: &str, url: &str) -> bool {
     section
         .and_then(|section| section.get(key))
         .and_then(Value::as_str)
