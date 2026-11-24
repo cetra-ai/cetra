@@ -148,7 +148,7 @@
   },
   {
     "name": "marketing-trace-list",
-    "path": "/acme/support-bot/traces?filter=tags%20%40%3E%20%5B'email'%5D&cols=start,name,duration,tokens,cost",
+    "path": "/acme/support-bot/traces?filter=tags%20%40%3E%20%5B'email'%5D&cols=start,name,duration,cost",
     "waitFor": "support-agent",
     "theme": "dark",
     "viewport": { "width": 900, "height": 640 },
@@ -216,7 +216,7 @@
   },
   {
     "name": "marketing-trace-list-coding",
-    "path": "/acme/support-bot/traces?filter=status%20%3D%20'error'&cols=start,name,duration,tokens,cost",
+    "path": "/acme/support-bot/traces?filter=status%20%3D%20'error'&cols=start,name,duration,cost",
     "waitFor": "coding-agent",
     "theme": "dark",
     "viewport": { "width": 900, "height": 640 },
@@ -287,7 +287,7 @@
   },
   {
     "name": "marketing-trace-list-voice",
-    "path": "/acme/support-bot/traces?filter=tags%20%40%3E%20%5B'voice'%5D&sort=duration&order=desc&cols=start,name,duration,tokens,cost",
+    "path": "/acme/support-bot/traces?filter=tags%20%40%3E%20%5B'voice'%5D&sort=duration&order=desc&cols=start,name,duration,cost",
     "waitFor": "tags @> ['voice']",
     "theme": "dark",
     "viewport": { "width": 900, "height": 640 },
@@ -354,7 +354,7 @@
   },
   {
     "name": "marketing-trace-list-extraction",
-    "path": "/acme/support-bot/traces?filter=tags%20%40%3E%20%5B'billing'%5D&cols=start,name,duration,tokens,cost",
+    "path": "/acme/support-bot/traces?filter=tags%20%40%3E%20%5B'billing'%5D&cols=start,name,duration,cost",
     "waitFor": "extract-invoice",
     "theme": "dark",
     "viewport": { "width": 900, "height": 640 },
