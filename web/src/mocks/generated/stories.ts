@@ -213,11 +213,11 @@ function distinctUsers(traces: readonly Trace[]): number {
     .size;
 }
 
+/** An issue's traces: the hero (if the dataset has it), the generated occurrences, and both. */
+type Occurrences = { hero: Trace | undefined; generated: Trace[]; matched: Trace[] };
+
 /** The hero trace (if the dataset has it), then the generated occurrences, newest first. */
-function occurrenceTraces(
-  dataset: Dataset,
-  issue: StoryIssue,
-): { hero: Trace | undefined; generated: Trace[]; matched: Trace[] } {
+function occurrenceTraces(dataset: Dataset, issue: StoryIssue): Occurrences {
   const hero: Trace | undefined = dataset.traces[issue.hero.index];
   const earliest = dataset.now - OCCURRENCE_WINDOW_MS;
   const generated = visibleTraces(dataset.traces, false, false)
@@ -230,13 +230,31 @@ function occurrenceTraces(
   return { hero, generated, matched: hero ? [hero, ...generated] : generated };
 }
 
+/** The traces of an issue that matches at least one, or undefined when none does. */
+function matchedTraces(dataset: Dataset, issue: StoryIssue): Occurrences | undefined {
+  const traces = occurrenceTraces(dataset, issue);
+  return traces.matched.length === 0 ? undefined : traces;
+}
+
+/** Oldest first. */
+function oldestFirst(traces: readonly Trace[]): Trace[] {
+  return [...traces].sort(
+    (left, right) => Date.parse(left.start_time) - Date.parse(right.start_time),
+  );
+}
+
 /** The issue's occurrences, grouped by UTC day, with the first examples. */
-export function storyOccurrences(dataset: Dataset, issue: StoryIssue): Schema<"IssueOccurrences"> {
-  const { hero, generated, matched } = occurrenceTraces(dataset, issue);
+function occurrencesOf(issue: StoryIssue, traces: Occurrences): Schema<"IssueOccurrences"> {
+  const { hero, generated, matched } = traces;
   const byDay = new Map<number, Trace[]>();
   for (const trace of matched) {
     const day = Math.floor(Date.parse(trace.start_time) / DAY_MS) * DAY_MS;
-    byDay.set(day, [...(byDay.get(day) ?? []), trace]);
+    let inDay = byDay.get(day);
+    if (inDay === undefined) {
+      inDay = [];
+      byDay.set(day, inDay);
+    }
+    inDay.push(trace);
   }
   const days = [...byDay.entries()]
     .sort(([left], [right]) => left - right)
@@ -268,14 +286,20 @@ export function storyOccurrences(dataset: Dataset, issue: StoryIssue): Schema<"I
   return { days, examples };
 }
 
+export function storyOccurrences(dataset: Dataset, issue: StoryIssue): Schema<"IssueOccurrences"> {
+  return occurrencesOf(issue, occurrenceTraces(dataset, issue));
+}
+
 /** The issue, or undefined when no trace of the dataset matches it. */
 export function storyIssue(dataset: Dataset, issue: StoryIssue): Schema<"Issue"> | undefined {
-  const { matched } = occurrenceTraces(dataset, issue);
-  const oldestFirst = [...matched].sort(
-    (left, right) => Date.parse(left.start_time) - Date.parse(right.start_time),
-  );
-  const oldest = oldestFirst[0];
-  const newest = oldestFirst[oldestFirst.length - 1];
+  const traces = matchedTraces(dataset, issue);
+  if (traces === undefined) {
+    return undefined;
+  }
+  const { matched } = traces;
+  const sorted = oldestFirst(matched);
+  const oldest = sorted[0];
+  const newest = sorted[sorted.length - 1];
   if (oldest === undefined || newest === undefined) {
     return undefined;
   }
@@ -304,11 +328,12 @@ export function storyIssueEvents(
   dataset: Dataset,
   issue: StoryIssue,
 ): Schema<"IssueEventPage"> | undefined {
-  const detail = storyIssue(dataset, issue);
-  if (detail === undefined) {
+  const traces = matchedTraces(dataset, issue);
+  const first = traces === undefined ? undefined : oldestFirst(traces.matched)[0];
+  if (first === undefined) {
     return undefined;
   }
-  return { data: [{ id: issue.eventId, kind: "created", at: detail.first_seen }] };
+  return { data: [{ id: issue.eventId, kind: "created", at: first.start_time }] };
 }
 
 export function storyAlertRule(dataset: Dataset, rule: StoryRule): Schema<"AlertRule"> {
@@ -393,9 +418,8 @@ export function storyHandlers(dataset: Dataset): HttpHandler[] {
     }),
     http.get(`${PROJECT}/issues/:id/occurrences`, ({ params }) => {
       const issue = issueById(idParam(params.id));
-      return issue && storyIssue(dataset, issue)
-        ? HttpResponse.json(storyOccurrences(dataset, issue))
-        : undefined;
+      const traces = issue ? matchedTraces(dataset, issue) : undefined;
+      return issue && traces ? HttpResponse.json(occurrencesOf(issue, traces)) : undefined;
     }),
     http.get(`${PROJECT}/issues/:id/events`, ({ params }) => {
       const issue = issueById(idParam(params.id));

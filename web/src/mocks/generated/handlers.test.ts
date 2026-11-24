@@ -330,6 +330,16 @@ it("lists only one user's traces for a user_id filter, and flags other filters a
   expect(flagged.headers.get("X-Mock-Filter-Ignored")).toBe("1");
 });
 
+it("still ignores a filter on the spans list other than user_id", async () => {
+  const dataset = createDataset({ seed: 1, now: NOW, traces: 400 });
+  server.use(...largeHandlers(dataset));
+  const url = new URL(`${PROJECT}/spans`);
+  url.searchParams.set("filter", "status = 'error'");
+  const response = await fetch(url);
+  expect(response.status).toBe(200);
+  expect(response.headers.get("X-Mock-Filter-Ignored")).toBe("1");
+});
+
 it("applies a status filter to the trace list", async () => {
   const dataset = createDataset({ seed: 1, now: NOW, traces: 400 });
   server.use(...largeHandlers(dataset));
