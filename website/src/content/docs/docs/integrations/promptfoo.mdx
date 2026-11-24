@@ -24,6 +24,7 @@ Promptfoo exports its spans when it is switched on by its own variables. Set the
 ```bash
 export PROMPTFOO_OTEL_ENABLED=true
 export PROMPTFOO_OTEL_ENDPOINT=http://localhost:8080/v1/traces
+export OTEL_EXPORTER_OTLP_HEADERS="Authorization=Bearer <SK_CETRA_KEY>"
 export PROMPTFOO_DISABLE_TELEMETRY=1
 export PROMPTFOO_DISABLE_UPDATE=1
 export PROMPTFOO_DISABLE_SHARING=1
@@ -31,11 +32,16 @@ export PROMPTFOO_DISABLE_SHARING=1
 npx promptfoo eval -c promptfooconfig.yaml --max-concurrency 1
 ```
 
+Replace `<SK_CETRA_KEY>` with your `sk-cetra-…` API key. See [Send OpenTelemetry](/docs/get-started/opentelemetry/).
+
+The config file needs `tracing: { enabled: true }`. Promptfoo starts its tracing only when the config enables it.
+
 The fixture's eval has one prompt, one provider, a `contains` assertion and an `llm-rubric` assertion. The `llm-rubric` assertion asks a model to grade the answer, so the eval makes a second model call. The fixture used `--max-concurrency 1`, which keeps the spans in a fixed order.
 
 `PROMPTFOO_OTEL_ENDPOINT` is passed to the exporter as it is given, so it must be the full `/v1/traces` URL.
 
-The fixture's capture sent no key. Promptfoo creates its exporter with the endpoint alone. Whether it also reads `OTEL_EXPORTER_OTLP_HEADERS` for the `Authorization` header was not tested, so this page does not show a working key.
+The header was checked with Promptfoo 0.125.1 and a local stand-in for cetra, not with cetra itself. With `OTEL_EXPORTER_OTLP_HEADERS` set, the trace POST carried `Authorization: Bearer sk-test`. With `OTEL_EXPORTER_OTLP_TRACES_HEADERS` set, it carried the same header. With neither, no `Authorization` header was sent. The fixture's own capture sent no key.
+
 
 ## What you get
 
