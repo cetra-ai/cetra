@@ -511,7 +511,7 @@ const RESEARCH_SHOWCASE: Showcase = {
         ),
       ),
       chatPayload(
-        "Answer from the sources only, with numbered citations.",
+        "Answer from the sources only, and name the source of each claim.",
         RESEARCH_QUESTION,
         RESEARCH_ANSWER,
       ),

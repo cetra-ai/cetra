@@ -441,7 +441,11 @@ function scenarioOf(index: number): {
   if (!trace) {
     throw new Error(`a ten-trace dataset has trace ${index}`);
   }
-  return { dataset, trace, spans: dataset.traceDetail(trace.trace_id)?.spans ?? [] };
+  const detail = dataset.traceDetail(trace.trace_id);
+  if (!detail) {
+    throw new Error(`trace ${index} has a detail`);
+  }
+  return { dataset, trace, spans: detail.spans };
 }
 
 it("makes traces 4 to 6 the hand-written scenario traces", () => {
@@ -477,8 +481,11 @@ it("makes traces 4 to 6 the hand-written scenario traces", () => {
 it("nests every span of every showcase inside its parent, in pre-order", () => {
   for (const showcase of SHOWCASES) {
     const { spans } = scenarioOf(showcase.index);
+    expect(spans.length).toBe(showcase.spans.length);
     spans.forEach((row, position) => {
       const parentId = row.span.parent_span_id;
+      const expected = showcase.spans[position]?.parent;
+      expect(parentId).toBe(expected === undefined ? undefined : spans[expected]?.span.span_id);
       if (parentId === undefined) {
         expect(row.depth).toBe(0);
         return;
