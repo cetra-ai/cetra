@@ -1,0 +1,61 @@
+---
+title: Promptfoo
+description: "Send Promptfoo eval spans to cetra from Promptfoo's own OpenTelemetry export: test cases, provider calls, graders and the model calls the graders make."
+---
+
+import Backing from "../../../../components/Backing.astro";
+
+cetra reads the spans Promptfoo exports for an eval: the test cases, the provider calls and the graders of each assertion. Its model calls are `llm` spans, and its graders are `evaluator` spans.
+
+<Backing fixtures={["genai/promptfoo-eval"]} />
+
+## Install
+
+Install Promptfoo from npm. The fixture was captured with Promptfoo 0.125.1.
+
+```bash
+npm install promptfoo@0.125.1
+```
+
+## Set up
+
+Promptfoo exports its spans when it is switched on by its own variables. Set them, with the full traces URL, then run the eval.
+
+```bash
+export PROMPTFOO_OTEL_ENABLED=true
+export PROMPTFOO_OTEL_ENDPOINT=http://localhost:8080/v1/traces
+export PROMPTFOO_DISABLE_TELEMETRY=1
+export PROMPTFOO_DISABLE_UPDATE=1
+export PROMPTFOO_DISABLE_SHARING=1
+
+npx promptfoo eval -c promptfooconfig.yaml --max-concurrency 1
+```
+
+The fixture's eval has one prompt, one provider, a `contains` assertion and an `llm-rubric` assertion. The `llm-rubric` assertion asks a model to grade the answer, so the eval makes a second model call. The fixture used `--max-concurrency 1`, which keeps the spans in a fixed order.
+
+`PROMPTFOO_OTEL_ENDPOINT` is passed to the exporter as it is given, so it must be the full `/v1/traces` URL.
+
+The fixture's capture sent no key. Promptfoo creates its exporter with the endpoint alone. Whether it also reads `OTEL_EXPORTER_OTLP_HEADERS` for the `Authorization` header was not tested, so this page does not show a working key.
+
+## What you get
+
+Each test case of the eval is a trace with these spans:
+
+- a `span` for the test case, `promptfoo.test_case`;
+- a `span` for the provider call, `openai:chat:gpt-4o-mini`, and an `llm` span for the model call inside it, `chat gpt-4o-mini`, with the token counts and the cost, which cetra computes from its price table;
+- an `evaluator` span for the `contains` assertion, `grader contains`. It makes no model call;
+- an `evaluator` span for the `llm-rubric` assertion, `grader llm-rubric`, with a `span` for the grader's provider call and an `llm` span for the grader's model call, with its own token counts and cost.
+
+## Limits
+
+- `PROMPTFOO_DISABLE_TELEMETRY=1` did not stop every request in version 0.125.1. Promptfoo still posts a `feature_used` event to its own servers.
+- No span has an input or an output, including the model calls. The messages and the answers of the eval are not in cetra.
+- The span names are Promptfoo's. The test case and the provider calls are plain `span`s.
+- The fixture covers one provider and two assertions. Other assertion types and other providers were not captured.
+- The fixture was captured with Promptfoo 0.125.1.
+- If a field is missing, look at the span's **Attributes** tab and compare it with [Span attributes](/docs/reference/attributes/).
+
+## Next
+
+- [Traces](/docs/tracing/traces/): read the trace as a tree and a timeline.
+- [Cost and tokens](/docs/tracing/cost-and-tokens/): how cost is computed from the token counts.

@@ -25,6 +25,16 @@ Instrumentation libraries describe an LLM call with attributes, and they do not 
 
 Bifrost writes the GenAI convention under the instrumentation scope `bifrost`; cetra reads its server root span as a chain, and reads its tool calls and cost keys (`bifrost.cost.*`).
 
+Some frameworks write their own keys under their instrumentation scope. cetra reads those keys only on that scope, so the same key on another scope is left as it is:
+
+- [Prompt Flow](/docs/integrations/prompt-flow/) (scope `promptflow`): `span_type` sets the kind, and `inputs`, `output`, `llm.response.model` and `llm.usage.*` set the input, output, model and tokens.
+- [Langflow](/docs/integrations/langflow/) (scope `langflow`): `trace_type` sets the kind, and `inputs` and `outputs` set the input and output.
+- [n8n](/docs/integrations/n8n/) (scope `n8n-workflow`): the span name sets the kind, unless a GenAI operation sets it.
+- [LiveKit Agents](/docs/integrations/livekit-agents/) (scope `livekit-agents`): the `lk.pii.*` keys set the content, and a host in the provider names the endpoint.
+- [Pipecat](/docs/integrations/pipecat/) (scopes starting with `pipecat`): `input` and `output` set the content, and `conversation.id` sets the session on the turn spans.
+- [Promptfoo](/docs/integrations/promptfoo/) (scope `promptfoo.providers`): `gen_ai.evaluation.name` marks a grader span as an evaluator.
+- OpenLIT (scopes starting with `openlit.instrumentation.`): `gen_ai.operation.type` sets the kind when the operation name is not a standard one.
+
 ## Precedence
 
 A span can carry several conventions. The Vercel AI SDK, for example, writes both `ai.*` and `gen_ai.*` attributes. For each field, cetra reads the conventions in this order and uses the first that has a value:
