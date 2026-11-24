@@ -1,0 +1,105 @@
+---
+title: OpenClaw
+description: "Connect OpenClaw to cetra with its diagnostics plugin: each run becomes one trace of model and tool calls, with tokens and prompts."
+---
+
+import Backing from "../../../../components/Backing.astro";
+
+This page shows how to send OpenClaw's traces to cetra with `cetra agents setup openclaw`, and what you see in the UI.
+
+<Backing fixtures={["openclaw/read-file"]} />
+
+The captured run used `openclaw agent --local`. The page also covers a run through the OpenClaw gateway.
+
+## Connect OpenClaw
+
+1. Create a project key with the `ingest` scope in the project's [API keys](/docs/platform/api-keys/) page. Copy the `sk-cetra-…` value.
+2. Install the `cetra` binary and run this in a terminal, with `<SK_CETRA_KEY>` set to your key and `<CETRA_URL>` set to your server:
+
+```bash
+export CETRA_INGEST_KEY=<SK_CETRA_KEY>
+cetra agents setup openclaw --url <CETRA_URL>
+```
+
+`openclaw` must be on your `PATH`. Setup reads its version with `openclaw --version`, then installs the `diagnostics-otel` plugin at that same version. The plugin is released with OpenClaw.
+
+3. Start the next run, and its traces go to cetra. Setup prints what to do next:
+   - a one-shot run, such as `openclaw agent --local`, picks up the change at once;
+   - a running gateway needs a restart, with `openclaw gateway restart`.
+
+## What setup writes
+
+`cetra agents setup openclaw` does two things.
+
+First, it installs the plugin. It runs this command, with the version that `openclaw --version` printed:
+
+```bash
+openclaw plugins install --pin --accept-capabilities npm:@openclaw/diagnostics-otel@<VERSION>
+```
+
+If the install fails, setup stops and writes nothing else.
+
+Second, it merges `~/.openclaw/openclaw.json`. It keeps every other key and plugin in the file, and sets these:
+
+| Key | Value |
+|---|---|
+| `plugins.allow` | includes `diagnostics-otel` |
+| `plugins.entries.diagnostics-otel.enabled` | `true` |
+| `diagnostics.enabled` | `true` |
+| `diagnostics.otel.enabled` | `true` |
+| `diagnostics.otel.endpoint` | your server URL |
+| `diagnostics.otel.protocol` | `http/protobuf` |
+| `diagnostics.otel.serviceName` | `openclaw` |
+| `diagnostics.otel.traces` | `true` |
+| `diagnostics.otel.metrics` | `false` |
+| `diagnostics.otel.logs` | `false` |
+| `diagnostics.otel.captureContent` | `true`, or `false` with `--no-content` |
+| `diagnostics.otel.headers` | `{"Authorization": "Bearer <SK_CETRA_KEY>"}` |
+
+Setup copies `openclaw.json` to `openclaw.json.cetra-backup` before its first change. It also saves `agents.toml`, with mode 0600, next to the credentials file of `cetra login` (`~/.config/cetra/` on Linux, `~/Library/Application Support/cetra/` on macOS). The `remove` command reads it.
+
+To see the install command and the merged file without running or writing them, add `--print`. It prints both and changes nothing.
+
+To undo setup, run this:
+
+```bash
+cetra agents remove openclaw
+```
+
+It takes back the `diagnostics.otel` keys and the plugin entries that setup set, when the endpoint is your server. It leaves `diagnostics.enabled` as it is, because it may have been on before setup. It keeps the plugin installed, and prints the command that removes it. Run that command yourself:
+
+```bash
+openclaw plugins uninstall diagnostics-otel
+```
+
+## What you get
+
+Each run is one trace. Its root is a `chain` span, `openclaw.harness.run`, and the run's `agent` span is under it. Each model call and tool call is a child of the run.
+
+- each model call is an `llm` span, `openclaw.model.call`, with the model, its provider and its input and output tokens. It also has the time to the first byte of the answer;
+- each tool call is a `tool` span named after the tool, such as `read`;
+- the prompts, the answers and the tool inputs and outputs are on the spans, when content is on.
+
+cetra drops OpenClaw's per-run usage total, `openclaw.model.usage`, and its context-assembly span. The usage total repeats the model calls' tokens, so keeping it would count them twice.
+
+Each trace has `metadata.coding_agent` set to `openclaw`. OpenClaw's spans carry no session id, so a run is one trace on its own. OpenClaw sends no repository, branch or person, because it has no hook.
+
+Use the [Coding agents dashboard template](/docs/tracing/custom-dashboards/) to see API-equivalent cost per run and tool usage.
+
+## API-equivalent cost
+
+cetra prices each model call from its token counts, using its price table. OpenClaw's spans carry the token counts, and cetra does not read a cost from OpenClaw.
+
+API-equivalent cost is what the same tokens would cost at API prices. If you use a subscription plan, it is not what you pay.
+
+## Limits
+
+- Tested with OpenClaw 2026.11.5. The captured run used `openclaw agent --local`. A run through the gateway was not captured.
+- Setup installs the plugin from npm. A plugin installed from a local file exports nothing, because OpenClaw grants the exporter permission only to plugins installed from npm or ClawHub.
+- The gateway also adds spans for its own startup and RPC calls. cetra drops them.
+- OpenClaw sends no repository, branch or person, and its spans carry no session id.
+
+## Next
+
+- [Traces](/docs/tracing/traces/): read the trace as a tree and a timeline.
+- [Custom dashboards](/docs/tracing/custom-dashboards/): build your own cost views, or start from the Coding agents template.
