@@ -1,0 +1,51 @@
+---
+title: Gradio
+description: "Trace the model calls of a Gradio app with the instrumentation of the client library it calls. Gradio adds no spans of its own."
+---
+
+Gradio adds no spans of its own. You trace a Gradio app's model calls with the instrumentation of the client library the app calls, so this page sets up that library and nothing else.
+
+## Set up
+
+Call `cetra.init` with the library's name before the Gradio interface starts. The example uses the OpenAI client; the [OpenAI](/docs/integrations/openai/) page covers that library, and the [Anthropic](/docs/integrations/anthropic/) and [LiteLLM](/docs/integrations/litellm/) pages cover theirs.
+
+{/* untested: needs a Gradio app, OPENAI_API_KEY and CETRA_API_KEY; not run */}
+```python
+import os
+
+import cetra
+import gradio as gr
+from openai import OpenAI
+
+cetra.init(instrument=["openai"])
+
+client = OpenAI(api_key=os.environ["OPENAI_API_KEY"])
+
+
+def reply(message: str) -> str:
+    response = client.chat.completions.create(
+        model="gpt-4o-mini",
+        messages=[{"role": "user", "content": message}],
+    )
+    return response.choices[0].message.content
+
+
+gr.Interface(fn=reply, inputs="text", outputs="text").launch()
+```
+
+Each call the handler makes to the model is traced. Set `CETRA_API_KEY` to your `sk-cetra-…` key first.
+
+## What you get
+
+- The model calls of the handler, with the spans the client library's instrumentation writes: the model, the token counts and the cost, as on that library's page.
+- No span for Gradio's own HTTP requests, because Gradio writes no spans of its own.
+
+## Limits
+
+- Not run: the example was not run, and the spans above are what the library's instrumentation writes, not what a Gradio app was seen to produce.
+- A Gradio app with a library that has no instrumentation in cetra gets no model spans. Check the library's page first.
+
+## Next
+
+- [Traces](/docs/tracing/traces/): read the trace as a tree and a timeline.
+- [OpenAI](/docs/integrations/openai/): the instrumentation the example uses.
