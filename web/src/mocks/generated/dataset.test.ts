@@ -1,6 +1,6 @@
 import { expect, it } from "vitest";
 import type { Schema } from "@/api/types";
-import { createDataset, type Dataset, SUPPORT_TURNS } from "@/mocks/generated/dataset";
+import { createDataset, type Dataset, SHOWCASES, SUPPORT_TURNS } from "@/mocks/generated/dataset";
 
 const NOW = Date.parse("2026-06-01T00:00:00.000Z");
 
@@ -174,7 +174,13 @@ it("starts a session's turns 30 s to 8 min apart, and no session lasts 7 hours",
 
 it("gives a trace without a session a topic of its own", () => {
   const dataset = createDataset({ seed: 1, now: NOW, traces: 40 });
-  const sessionless = dataset.traces.slice(1).filter((trace) => !trace.session_id);
+  const sessionless = dataset.traces
+    .slice(1)
+    .filter(
+      (trace, i) =>
+        !trace.session_id &&
+        !SHOWCASES.some((showcase) => showcase.index === i + 1 && showcase.story),
+    );
   expect(sessionless.length).toBeGreaterThan(0);
   for (const trace of sessionless.slice(0, 5)) {
     expect(topicOf(trace.input_preview)).toBeDefined();
@@ -422,4 +428,147 @@ it("gives no showcase span a truncation flag", () => {
     const detail = dataset.spanDetail(trace.trace_id, row.span.span_id);
     expect(detail?.truncated).toEqual([]);
   }
+});
+
+/** The scenario showcase `index` of a ten-trace dataset, with its trace and tree. */
+function scenarioOf(index: number): {
+  dataset: Dataset;
+  trace: Schema<"TraceSummary">;
+  spans: readonly Schema<"TreeSpan">[];
+} {
+  const dataset = createDataset({ seed: 1, now: NOW, traces: 10 });
+  const trace = dataset.traces[index];
+  if (!trace) {
+    throw new Error(`a ten-trace dataset has trace ${index}`);
+  }
+  return { dataset, trace, spans: dataset.traceDetail(trace.trace_id)?.spans ?? [] };
+}
+
+it("makes traces 4 to 6 the hand-written scenario traces", () => {
+  const dataset = createDataset({ seed: 1, now: NOW, traces: 10 });
+  for (const index of [4, 5, 6]) {
+    const showcase = SHOWCASES.find((s) => s.index === index);
+    const story = showcase?.story;
+    const trace = dataset.traces[index];
+    if (!showcase || !story || !trace) {
+      throw new Error(`trace ${index} and its showcase with a story exist`);
+    }
+    const spans = dataset.traceDetail(trace.trace_id)?.spans ?? [];
+    const nonRoot = spans.slice(1);
+    expect(trace.name).toBe(showcase.spans[0].name);
+    expect(trace.session_id).toBeUndefined();
+    expect(trace.span_count).toBe(spans.length);
+    expect(trace.llm_count).toBe(spans.filter((row) => row.span.span_kind === "llm").length);
+
+    const inputSum = nonRoot.reduce((sum, row) => sum + (row.span.input_tokens ?? 0), 0);
+    const outputSum = nonRoot.reduce((sum, row) => sum + (row.span.output_tokens ?? 0), 0);
+    const costSum = nonRoot.reduce((sum, row) => sum + (row.span.cost_total ?? 0), 0);
+    expect(trace.input_tokens).toBe(inputSum);
+    expect(trace.output_tokens).toBe(outputSum);
+    expect(trace.cost_total).toBe(Math.round(costSum * 1_000_000) / 1_000_000);
+
+    expect(trace.input_preview).toBe(story.inputPreview);
+    expect(trace.output_preview).toBe(story.outputPreview);
+    expect(Date.parse(trace.start_time)).toBe(NOW - showcase.ageMs);
+    expect(trace.duration_ns).toBe(showcase.spans[0].to * 1_000_000);
+  }
+});
+
+it("nests every span of every showcase inside its parent, in pre-order", () => {
+  for (const showcase of SHOWCASES) {
+    const { spans } = scenarioOf(showcase.index);
+    spans.forEach((row, position) => {
+      const parentId = row.span.parent_span_id;
+      if (parentId === undefined) {
+        expect(row.depth).toBe(0);
+        return;
+      }
+      const parentPosition = spans.findIndex((item) => item.span.span_id === parentId);
+      expect(parentPosition).toBeGreaterThanOrEqual(0);
+      expect(parentPosition).toBeLessThan(position);
+      const parent = spans[parentPosition];
+      if (!parent) {
+        throw new Error("the parent is in the list");
+      }
+      expect(row.depth).toBe(parent.depth + 1);
+      expect(Date.parse(row.span.start_time)).toBeGreaterThanOrEqual(
+        Date.parse(parent.span.start_time),
+      );
+      expect(Date.parse(row.span.end_time)).toBeLessThanOrEqual(Date.parse(parent.span.end_time));
+    });
+  }
+});
+
+it("gives every span of a scenario its hand-written payloads", () => {
+  for (const showcase of SHOWCASES) {
+    const story = showcase.story;
+    if (!story) {
+      continue;
+    }
+    const { dataset, trace, spans } = scenarioOf(showcase.index);
+    expect(story.payloads.length).toBe(spans.length);
+    spans.forEach((row, position) => {
+      const payload = story.payloads[position];
+      const detail = dataset.spanDetail(trace.trace_id, row.span.span_id);
+      expect(detail?.input).toEqual(payload?.input);
+      expect(detail?.output).toEqual(payload?.output);
+      expect(detail?.truncated).toEqual([]);
+    });
+  }
+});
+
+it("fails the coding agent's first test run", () => {
+  const { dataset, trace, spans } = scenarioOf(4);
+  expect(trace.status).toBe("error");
+  expect(trace.error_count).toBe(1);
+
+  const failed = spans[8];
+  if (!failed) {
+    throw new Error("the coding agent has a span at position 8");
+  }
+  expect(failed.span.name).toBe("run_tests");
+  expect(failed.span.status).toBe("error");
+  expect(failed.span.status_message).toBe("1 failed, 47 passed");
+  const failedDetail = dataset.spanDetail(trace.trace_id, failed.span.span_id);
+  expect(failedDetail?.events.length).toBe(1);
+  const event = failedDetail?.events[0];
+  if (!event) {
+    throw new Error("the failed test run has one event");
+  }
+  expect(event.name).toBe("exception");
+  expect(event.attributes).toMatchObject({ "exception.message": "1 failed, 47 passed" });
+
+  const passed = spans[12];
+  if (!passed) {
+    throw new Error("the coding agent has a span at position 12");
+  }
+  expect(passed.span.name).toBe("run_tests");
+  expect(passed.span.status).toBe("ok");
+  const passedDetail = dataset.spanDetail(trace.trace_id, passed.span.span_id);
+  expect(passedDetail?.events).toEqual([]);
+});
+
+it("runs the research agent's five searches in parallel", () => {
+  const { spans } = scenarioOf(5);
+  const searches = spans.filter((row) => row.span.name === "web_search");
+  expect(searches.length).toBe(5);
+  const starts = new Set(searches.map((row) => row.span.start_time));
+  expect(starts.size).toBe(1);
+});
+
+it("fails the invoice's first schema check and passes the second", () => {
+  const { dataset, trace, spans } = scenarioOf(6);
+  const first = spans[4];
+  if (!first) {
+    throw new Error("the invoice trace has a span at position 4");
+  }
+  const firstDetail = dataset.spanDetail(trace.trace_id, first.span.span_id);
+  expect(firstDetail?.output?.value).toMatchObject({ passed: false });
+
+  const second = spans[6];
+  if (!second) {
+    throw new Error("the invoice trace has a span at position 6");
+  }
+  const secondDetail = dataset.spanDetail(trace.trace_id, second.span.span_id);
+  expect(secondDetail?.output?.value).toMatchObject({ passed: true });
 });

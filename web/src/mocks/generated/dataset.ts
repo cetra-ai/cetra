@@ -51,20 +51,18 @@ const BUCKET_MS: Record<Exclude<Schema<"MetricsBucket">, "auto">, number> = {
   "1d": DAY_MS,
 };
 
-/** The hand-written trace the homepage hero and the docs' trace view show (M11). Its topic is `SUPPORT_TURNS[3]`. */
-const SHOWCASE_INDEX = 3;
-const SHOWCASE_AGE_MS = 120_000;
-const SHOWCASE_DURATION_MS = 6_200;
-const SHOWCASE_USER = "user-012";
-
 type ShowcaseSpan = {
   name: string;
   kind: Schema<"SpanKind">;
-  /** Index of the parent in SHOWCASE_SPANS; absent for the root. */
+  /** Index of the parent in the showcase's spans; absent for the root. */
   parent?: number;
   /** Offsets from the trace's start, in ms. */
   from: number;
   to: number;
+  /** Absent: "ok". */
+  status?: "error";
+  /** The span's `status_message`; set on error spans. */
+  statusMessage?: string;
   model?: string;
   provider?: string;
   inputTokens?: number;
@@ -74,7 +72,35 @@ type ShowcaseSpan = {
   prompt?: { name: string; version: number };
 };
 
-const SHOWCASE_SPANS: readonly [ShowcaseSpan, ...ShowcaseSpan[]] = [
+/** A span's hand-written payloads; `error` adds the span's exception event. */
+type ShowcasePayload = {
+  input: Schema<"Payload">;
+  output: Schema<"Payload">;
+  error?: { type: string; message: string; stacktrace: string };
+};
+
+/**
+ * A hand-written trace of the mock dataset (M11, M12). The homepage hero shows them, and the docs' trace view
+ * shows the support agent. The trace's duration is its root span's `to`.
+ */
+type Showcase = {
+  index: number;
+  ageMs: number;
+  service: string;
+  user?: string;
+  tags: string[];
+  /** The generation models only; embedding and rerank models appear on their spans. */
+  models: string[];
+  scores: { name: string; source: Schema<"ScoreSource">; value: Schema<"ScoreValue"> }[];
+  spans: readonly [ShowcaseSpan, ...ShowcaseSpan[]];
+  /**
+   * The trace's input and output previews, and every span's payloads by position in `spans`. Absent for the
+   * support agent, whose previews and generic payloads come from its support turn (`SUPPORT_TURNS[3]`).
+   */
+  story?: { inputPreview: string; outputPreview: string; payloads: readonly ShowcasePayload[] };
+};
+
+const SUPPORT_SPANS: readonly [ShowcaseSpan, ...ShowcaseSpan[]] = [
   { name: "support-agent", kind: "agent", from: 0, to: 6_200 },
   { name: "prompt-injection check", kind: "guardrail", parent: 0, from: 20, to: 140 },
   {
@@ -154,6 +180,460 @@ const SHOWCASE_SPANS: readonly [ShowcaseSpan, ...ShowcaseSpan[]] = [
   },
 ];
 
+const SUPPORT_SHOWCASE: Showcase = {
+  index: 3,
+  ageMs: 120_000,
+  service: "support-bot",
+  user: "user-012",
+  tags: ["email"],
+  models: ["claude-sonnet-4-5", "claude-haiku-4-5", "gpt-4.1-mini"],
+  scores: [
+    { name: "correctness", source: "llm_judge", value: { data_type: "numeric", value: 0.9 } },
+    { name: "relevance", source: "human", value: { data_type: "boolean", value: true } },
+  ],
+  spans: SUPPORT_SPANS,
+};
+
+const CODING_QUESTION =
+  "Fix the CSV export: fields that contain a comma break the columns (issue #412).";
+const CODING_ANSWER = [
+  "Fixed `escape_field` so it quotes fields that contain a comma, a quote or a line break.",
+  "",
+  "- Patched `src/export/csv.py`",
+  "- Updated the expected row in `tests/test_csv.py`",
+  "- 48 tests pass",
+].join("\n");
+const PATCH_SYSTEM = "Write a unified diff that fixes the issue.";
+
+const CODING_SHOWCASE: Showcase = {
+  index: 4,
+  ageMs: 150_000,
+  service: "code-agent",
+  user: "user-007",
+  tags: ["retry"],
+  models: ["claude-sonnet-4-5", "claude-haiku-4-5"],
+  scores: [{ name: "tests_pass", source: "check", value: { data_type: "boolean", value: true } }],
+  spans: [
+    { name: "coding-agent", kind: "agent", from: 0, to: 18_400 },
+    {
+      name: "plan",
+      kind: "llm",
+      parent: 0,
+      from: 120,
+      to: 2_300,
+      model: "claude-sonnet-4-5",
+      provider: "anthropic",
+      inputTokens: 3_120,
+      outputTokens: 210,
+      cost: 0.01251,
+      ttftMs: 520,
+    },
+    { name: "gather context", kind: "chain", parent: 0, from: 2_330, to: 2_640 },
+    { name: "read_file", kind: "tool", parent: 2, from: 2_340, to: 2_410 },
+    { name: "search_code", kind: "tool", parent: 2, from: 2_340, to: 2_630 },
+    { name: "attempt 1", kind: "chain", parent: 0, from: 2_660, to: 10_240 },
+    {
+      name: "write patch",
+      kind: "llm",
+      parent: 5,
+      from: 2_670,
+      to: 6_900,
+      model: "claude-sonnet-4-5",
+      provider: "anthropic",
+      inputTokens: 5_400,
+      outputTokens: 620,
+      cost: 0.0255,
+      ttftMs: 610,
+    },
+    { name: "apply_patch", kind: "tool", parent: 5, from: 6_920, to: 7_010 },
+    {
+      name: "run_tests",
+      kind: "tool",
+      parent: 5,
+      from: 7_030,
+      to: 10_230,
+      status: "error",
+      statusMessage: "1 failed, 47 passed",
+    },
+    { name: "attempt 2", kind: "chain", parent: 0, from: 10_260, to: 17_060 },
+    {
+      name: "fix failing test",
+      kind: "llm",
+      parent: 9,
+      from: 10_270,
+      to: 13_700,
+      model: "claude-sonnet-4-5",
+      provider: "anthropic",
+      inputTokens: 7_100,
+      outputTokens: 380,
+      cost: 0.027,
+      ttftMs: 640,
+    },
+    { name: "apply_patch", kind: "tool", parent: 9, from: 13_720, to: 13_790 },
+    { name: "run_tests", kind: "tool", parent: 9, from: 13_810, to: 17_050 },
+    {
+      name: "summarize",
+      kind: "llm",
+      parent: 0,
+      from: 17_080,
+      to: 18_350,
+      model: "claude-haiku-4-5",
+      provider: "anthropic",
+      inputTokens: 1_900,
+      outputTokens: 120,
+      cost: 0.0025,
+      ttftMs: 280,
+    },
+  ],
+  story: {
+    inputPreview: CODING_QUESTION,
+    outputPreview: firstLine(CODING_ANSWER),
+    payloads: [
+      { input: textPayload(CODING_QUESTION), output: textPayload(CODING_ANSWER) },
+      chatPayload(
+        "You are a coding agent. Plan the steps, then use the tools to read, edit and test the code.",
+        CODING_QUESTION,
+        [
+          "1. Find where CSV fields are escaped.",
+          "2. Quote fields that contain a comma, a quote or a line break.",
+          "3. Run the CSV tests.",
+        ].join("\n"),
+      ),
+      {
+        input: jsonPayload({ goal: "Find the CSV escaping code." }),
+        output: jsonPayload({ files: ["src/export/csv.py", "tests/test_csv.py"] }),
+      },
+      toolPayload(
+        "read_file",
+        { path: "src/export/csv.py" },
+        textPayload(
+          ["def escape_field(value: str) -> str:", "    return value.replace('\"', '\"\"')"].join(
+            "\n",
+          ),
+        ),
+      ),
+      toolPayload(
+        "search_code",
+        { query: "escape_field" },
+        jsonPayload({
+          matches: [
+            { path: "src/export/csv.py", line: 12 },
+            { path: "tests/test_csv.py", line: 30 },
+          ],
+        }),
+      ),
+      { input: jsonPayload({ attempt: 1 }), output: jsonPayload({ tests: "failed" }) },
+      chatPayload(
+        PATCH_SYSTEM,
+        "Quote the fields that contain a comma, a quote or a line break in escape_field.",
+        [
+          "```diff",
+          "-    return value.replace('\"', '\"\"')",
+          "+    escaped = value.replace('\"', '\"\"')",
+          "+    return f'\"{escaped}\"' if needs_quotes(value) else escaped",
+          "```",
+        ].join("\n"),
+      ),
+      toolPayload(
+        "apply_patch",
+        { path: "src/export/csv.py" },
+        jsonPayload({ applied: true, hunks: 1 }),
+      ),
+      {
+        ...toolPayload(
+          "run_tests",
+          { command: "pytest tests/test_csv.py" },
+          textPayload(
+            [
+              "FAILED tests/test_csv.py::test_comma_field - assert '\"a,b\"' == 'a,b'",
+              "1 failed, 47 passed in 3.1s",
+            ].join("\n"),
+          ),
+        ),
+        error: {
+          type: "TestFailure",
+          message: "1 failed, 47 passed",
+          stacktrace: "tests/test_csv.py:31: AssertionError",
+        },
+      },
+      { input: jsonPayload({ attempt: 2 }), output: jsonPayload({ tests: "passed" }) },
+      chatPayload(
+        PATCH_SYSTEM,
+        "test_comma_field expects the old, unquoted output. Update the test.",
+        [
+          "```diff",
+          '-    assert escape_field("a,b") == "a,b"',
+          '+    assert escape_field("a,b") == \'"a,b"\'',
+          "```",
+        ].join("\n"),
+      ),
+      toolPayload(
+        "apply_patch",
+        { path: "tests/test_csv.py" },
+        jsonPayload({ applied: true, hunks: 1 }),
+      ),
+      toolPayload(
+        "run_tests",
+        { command: "pytest tests/test_csv.py" },
+        textPayload("48 passed in 3.2s"),
+      ),
+      chatPayload(
+        "Summarize the change for the pull request.",
+        "Summarize the patch and the test runs.",
+        CODING_ANSWER,
+      ),
+    ],
+  },
+};
+
+const RESEARCH_QUESTION =
+  "What are the current best practices to prevent CSV injection in exported files?";
+const RESEARCH_ANSWER = [
+  "Neutralize the cells a spreadsheet would read as a formula, and quote every field.",
+  "",
+  "- Prefix cells that start with `=`, `+`, `-`, `@`, a tab or a carriage return with a single quote [1]",
+  "- Quote every field, and double the quotes inside it [2]",
+  "- Escape on export, and keep the raw value in the API [1]",
+  "",
+  "[1] OWASP, CSV Injection · [2] RFC 4180",
+].join("\n");
+const RESEARCH_QUERIES = [
+  "csv injection prevention",
+  "owasp csv injection",
+  "rfc 4180 quoting",
+  "spreadsheet formula injection export",
+  "csv injection escape single quote",
+] as const;
+const OWASP_CSV = {
+  title: "CSV Injection",
+  url: "https://owasp.org/www-community/attacks/CSV_Injection",
+};
+const RFC_4180 = {
+  title: "RFC 4180: Common Format and MIME Type for CSV Files",
+  url: "https://www.rfc-editor.org/rfc/rfc4180",
+};
+
+const RESEARCH_SHOWCASE: Showcase = {
+  index: 5,
+  ageMs: 180_000,
+  service: "research",
+  user: "user-021",
+  tags: [],
+  models: ["claude-sonnet-4-5", "gpt-4.1"],
+  scores: [
+    { name: "groundedness", source: "llm_judge", value: { data_type: "numeric", value: 0.95 } },
+  ],
+  spans: [
+    { name: "research-agent", kind: "agent", from: 0, to: 24_600 },
+    {
+      name: "plan queries",
+      kind: "llm",
+      parent: 0,
+      from: 100,
+      to: 1_900,
+      model: "gpt-4.1",
+      provider: "openai",
+      inputTokens: 820,
+      outputTokens: 140,
+      cost: 0.00276,
+      ttftMs: 450,
+    },
+    { name: "search", kind: "chain", parent: 0, from: 1_950, to: 7_310 },
+    { name: "web_search", kind: "tool", parent: 2, from: 1_960, to: 5_200 },
+    { name: "web_search", kind: "tool", parent: 2, from: 1_960, to: 6_100 },
+    { name: "web_search", kind: "tool", parent: 2, from: 1_960, to: 4_700 },
+    { name: "web_search", kind: "tool", parent: 2, from: 1_960, to: 7_300 },
+    { name: "web_search", kind: "tool", parent: 2, from: 1_960, to: 5_600 },
+    { name: "read sources", kind: "chain", parent: 0, from: 7_350, to: 11_200 },
+    { name: "fetch_page", kind: "tool", parent: 8, from: 7_360, to: 9_800 },
+    { name: "fetch_page", kind: "tool", parent: 8, from: 7_360, to: 11_150 },
+    {
+      name: "write report",
+      kind: "llm",
+      parent: 0,
+      from: 11_250,
+      to: 23_900,
+      model: "claude-sonnet-4-5",
+      provider: "anthropic",
+      inputTokens: 14_200,
+      outputTokens: 1_650,
+      cost: 0.06735,
+      ttftMs: 900,
+    },
+    { name: "check citations", kind: "guardrail", parent: 0, from: 23_950, to: 24_500 },
+  ],
+  story: {
+    inputPreview: RESEARCH_QUESTION,
+    outputPreview: firstLine(RESEARCH_ANSWER),
+    payloads: [
+      { input: textPayload(RESEARCH_QUESTION), output: textPayload(RESEARCH_ANSWER) },
+      chatPayload(
+        "You are a research agent. Write the web searches you need, one per line.",
+        RESEARCH_QUESTION,
+        RESEARCH_QUERIES.join("\n"),
+      ),
+      { input: jsonPayload({ queries: 5 }), output: jsonPayload({ results: 5 }) },
+      toolPayload(
+        "web_search",
+        { query: RESEARCH_QUERIES[0] },
+        jsonPayload({ results: [OWASP_CSV] }),
+      ),
+      toolPayload(
+        "web_search",
+        { query: RESEARCH_QUERIES[1] },
+        jsonPayload({ results: [OWASP_CSV] }),
+      ),
+      toolPayload(
+        "web_search",
+        { query: RESEARCH_QUERIES[2] },
+        jsonPayload({ results: [RFC_4180] }),
+      ),
+      toolPayload(
+        "web_search",
+        { query: RESEARCH_QUERIES[3] },
+        jsonPayload({ results: [OWASP_CSV] }),
+      ),
+      toolPayload(
+        "web_search",
+        { query: RESEARCH_QUERIES[4] },
+        jsonPayload({ results: [OWASP_CSV] }),
+      ),
+      { input: jsonPayload({ pages: 2 }), output: jsonPayload({ pages: 2, tokens: 12_400 }) },
+      toolPayload(
+        "fetch_page",
+        { url: OWASP_CSV.url },
+        textPayload(
+          "Cells that begin with =, +, - or @ can run as formulas when the file is opened in a spreadsheet. Prefix them with a single quote, and quote every cell.",
+        ),
+      ),
+      toolPayload(
+        "fetch_page",
+        { url: RFC_4180.url },
+        textPayload(
+          "Fields that contain a line break, a double quote or a comma should be enclosed in double quotes. A double quote inside a field is escaped with a second double quote.",
+        ),
+      ),
+      chatPayload(
+        "Answer from the sources only, with numbered citations.",
+        RESEARCH_QUESTION,
+        RESEARCH_ANSWER,
+      ),
+      {
+        input: jsonPayload({ citations: 2, sources: [OWASP_CSV.url, RFC_4180.url] }),
+        output: jsonPayload({ passed: true, unsupported_claims: 0 }),
+      },
+    ],
+  },
+};
+
+const INVOICE_FILE = "invoice-2026-0412.pdf";
+const INVOICE_OCR = [
+  "NORTHWIND SUPPLIES",
+  "Invoice INV-2026-0412 · 18 Nov 2026",
+  "Desk lamp × 4 .......... 236.00",
+  "Office chair × 2 ....... 698.00",
+  "Monitor arm × 2 ........ 350.00",
+  "Total ................ 1,284.00 EUR",
+].join("\n");
+const INVOICE_FIELDS = {
+  vendor: "Northwind Supplies",
+  invoice_number: "INV-2026-0412",
+  date: "2026-11-18",
+  currency: "EUR",
+  line_items: 3,
+};
+const EXTRACT_SYSTEM =
+  "Extract the invoice as JSON: vendor, invoice_number, date, currency, line_items, total.";
+
+const EXTRACTION_SHOWCASE: Showcase = {
+  index: 6,
+  ageMs: 210_000,
+  service: "doc-pipeline",
+  tags: ["billing"],
+  models: ["claude-sonnet-4-5", "gemini-2.5-flash"],
+  scores: [{ name: "schema_valid", source: "check", value: { data_type: "boolean", value: true } }],
+  spans: [
+    { name: "extract-invoice", kind: "chain", from: 0, to: 7_800 },
+    { name: "load_pdf", kind: "tool", parent: 0, from: 30, to: 260 },
+    { name: "ocr", kind: "tool", parent: 0, from: 270, to: 2_650 },
+    {
+      name: "extract fields",
+      kind: "llm",
+      parent: 0,
+      from: 2_670,
+      to: 3_900,
+      model: "gemini-2.5-flash",
+      provider: "google",
+      inputTokens: 2_900,
+      outputTokens: 180,
+      cost: 0.00132,
+      ttftMs: 240,
+    },
+    { name: "validate schema", kind: "guardrail", parent: 0, from: 3_910, to: 3_960 },
+    {
+      name: "re-extract fields",
+      kind: "llm",
+      parent: 0,
+      from: 3_980,
+      to: 7_300,
+      model: "claude-sonnet-4-5",
+      provider: "anthropic",
+      inputTokens: 3_100,
+      outputTokens: 260,
+      cost: 0.0132,
+      ttftMs: 520,
+    },
+    { name: "validate schema", kind: "guardrail", parent: 0, from: 7_310, to: 7_350 },
+    { name: "save_invoice", kind: "tool", parent: 0, from: 7_370, to: 7_760 },
+  ],
+  story: {
+    inputPreview: `${INVOICE_FILE} (2 pages)`,
+    outputPreview: "Northwind Supplies · INV-2026-0412 · 1,284.00 EUR",
+    payloads: [
+      {
+        input: jsonPayload({ file: INVOICE_FILE, pages: 2 }),
+        output: jsonPayload({ ...INVOICE_FIELDS, total: 1284 }),
+      },
+      toolPayload("load_pdf", { file: INVOICE_FILE }, jsonPayload({ pages: 2, bytes: 184_320 })),
+      toolPayload("ocr", { file: INVOICE_FILE, pages: 2 }, textPayload(INVOICE_OCR)),
+      chatPayload(EXTRACT_SYSTEM, INVOICE_OCR, JSON.stringify({ ...INVOICE_FIELDS, total: 1248 })),
+      {
+        input: jsonPayload({ total: 1248, line_items_sum: 1284 }),
+        output: jsonPayload({
+          passed: false,
+          reasons: ["The total does not match the sum of the line items."],
+        }),
+      },
+      chatPayload(
+        EXTRACT_SYSTEM,
+        `${INVOICE_OCR}\n\nThe total did not match the line items. Read it again.`,
+        JSON.stringify({ ...INVOICE_FIELDS, total: 1284 }),
+      ),
+      {
+        input: jsonPayload({ total: 1284, line_items_sum: 1284 }),
+        output: jsonPayload({ passed: true, reasons: [] }),
+      },
+      toolPayload(
+        "save_invoice",
+        { invoice_number: "INV-2026-0412" },
+        jsonPayload({ id: "inv_8f3a", status: "saved" }),
+      ),
+    ],
+  },
+};
+
+/** The hand-written traces, by dataset index (M11, M12). Exported for the tests. */
+export const SHOWCASES: readonly Showcase[] = [
+  SUPPORT_SHOWCASE,
+  CODING_SHOWCASE,
+  RESEARCH_SHOWCASE,
+  EXTRACTION_SHOWCASE,
+];
+
+function showcaseAt(index: number): Showcase | undefined {
+  return SHOWCASES.find((showcase) => showcase.index === index);
+}
+
 type BuiltSpan = {
   depth: number;
   detached: boolean;
@@ -204,7 +684,12 @@ export function createDataset(options: { seed: number; now: number; traces: numb
     const slot = slots.get(index);
     return turnOf(slot?.topic ?? index, slot?.turn ?? 1);
   };
-  const traces = timed.map((trace, index) => withPreviews(trace, turnAt(index)));
+  const traces = timed.map((trace, index) => {
+    const story = showcaseAt(index)?.story;
+    return story
+      ? { ...trace, input_preview: story.inputPreview, output_preview: story.outputPreview }
+      : withPreviews(trace, turnAt(index));
+  });
   const indexById = new Map<string, number>();
   for (const [index, trace] of traces.entries()) {
     indexById.set(trace.trace_id, index);
@@ -318,8 +803,9 @@ export function visibleTraces(
 }
 
 function traceSummary(seed: number, index: number, now: number): Schema<"TraceSummary"> {
-  if (index === SHOWCASE_INDEX) {
-    return showcaseSummary(index, now);
+  const showcase = showcaseAt(index);
+  if (showcase) {
+    return showcaseSummary(showcase, index, now);
   }
   const rng = mulberry32(mix(seed, index));
   const spanCount = index === 0 ? 10_000 : 3 + Math.floor(rng() * 58);
@@ -373,49 +859,43 @@ function traceSummary(seed: number, index: number, now: number): Schema<"TraceSu
   };
 }
 
-/** The showcase trace's summary. Its tokens and cost are the sums over SHOWCASE_SPANS (M11). */
-function showcaseSummary(index: number, now: number): Schema<"TraceSummary"> {
-  const startMs = now - SHOWCASE_AGE_MS;
-  const inputTokens = SHOWCASE_SPANS.reduce((sum, row) => sum + (row.inputTokens ?? 0), 0);
-  const outputTokens = SHOWCASE_SPANS.reduce((sum, row) => sum + (row.outputTokens ?? 0), 0);
-  const cost = SHOWCASE_SPANS.reduce((sum, row) => sum + (row.cost ?? 0), 0);
+/** A showcase trace's summary (M11, M12). Its tokens and cost are the sums over `showcase.spans`. */
+function showcaseSummary(showcase: Showcase, index: number, now: number): Schema<"TraceSummary"> {
+  const startMs = now - showcase.ageMs;
+  const durationMs = showcase.spans[0].to;
+  const inputTokens = showcase.spans.reduce((sum, row) => sum + (row.inputTokens ?? 0), 0);
+  const outputTokens = showcase.spans.reduce((sum, row) => sum + (row.outputTokens ?? 0), 0);
+  const cost = showcase.spans.reduce((sum, row) => sum + (row.cost ?? 0), 0);
+  const errorCount = showcase.spans.filter((row) => row.status === "error").length;
   return {
     trace_id: `a${index.toString(16).padStart(31, "0")}`,
     root_span_id: spanId(index, 0),
     has_root: true,
-    name: "support-agent",
+    name: showcase.spans[0].name,
     start_time: rfc3339(startMs),
-    end_time: rfc3339(startMs + SHOWCASE_DURATION_MS),
-    duration_ns: SHOWCASE_DURATION_MS * 1_000_000,
-    status: "ok",
+    end_time: rfc3339(startMs + durationMs),
+    duration_ns: durationMs * 1_000_000,
+    status: errorCount > 0 ? "error" : "ok",
     environment: "production",
     release: "v1.5.0",
-    tags: ["email"],
-    metadata: userTraceMetadata(SHOWCASE_USER),
-    span_count: SHOWCASE_SPANS.length,
-    error_count: 0,
-    llm_count: SHOWCASE_SPANS.filter((row) => row.kind === "llm").length,
+    tags: showcase.tags,
+    metadata: showcase.user ? userTraceMetadata(showcase.user) : {},
+    span_count: showcase.spans.length,
+    error_count: errorCount,
+    llm_count: showcase.spans.filter((row) => row.kind === "llm").length,
     input_tokens: inputTokens,
     output_tokens: outputTokens,
     total_tokens: inputTokens + outputTokens,
     cost_total: Math.round(cost * 1_000_000) / 1_000_000,
     // The generation models only: the embedding and rerank models appear on their spans.
-    models: ["claude-sonnet-4-5", "claude-haiku-4-5", "gpt-4.1-mini"],
-    scores: [
-      {
-        name: "correctness",
-        score_id: scoreUuid(index, 0),
-        source: "llm_judge",
-        value: { data_type: "numeric", value: 0.9 },
-      },
-      {
-        name: "relevance",
-        score_id: scoreUuid(index, 1),
-        source: "human",
-        value: { data_type: "boolean", value: true },
-      },
-    ],
-    user_id: SHOWCASE_USER,
+    models: showcase.models,
+    scores: showcase.scores.map((score, i) => ({
+      name: score.name,
+      score_id: scoreUuid(index, i),
+      source: score.source,
+      value: score.value,
+    })),
+    ...(showcase.user ? { user_id: showcase.user } : {}),
   };
 }
 
@@ -436,8 +916,9 @@ function buildDetail(
   index: number,
   trace: Schema<"TraceSummary">,
 ): Schema<"TraceDetail"> {
-  if (index === SHOWCASE_INDEX) {
-    return showcaseDetail(index, trace);
+  const showcase = showcaseAt(index);
+  if (showcase) {
+    return showcaseDetail(showcase, index, trace);
   }
   const rng = mulberry32(mix(seed, index + 17));
   const spanCount = trace.span_count;
@@ -450,11 +931,15 @@ function buildDetail(
   return { trace, spans, truncated: false };
 }
 
-/** The showcase trace's tree: its spans in SHOWCASE_SPANS order, so every parent comes before its children (M11). */
-function showcaseDetail(index: number, trace: Schema<"TraceSummary">): Schema<"TraceDetail"> {
+/** A showcase trace's tree: its spans come in `showcase.spans` order, so every parent comes before its children (M11, M12). */
+function showcaseDetail(
+  showcase: Showcase,
+  index: number,
+  trace: Schema<"TraceSummary">,
+): Schema<"TraceDetail"> {
   const startMs = Date.parse(trace.start_time);
   const depths: number[] = [];
-  const spans = SHOWCASE_SPANS.map((row, position): Schema<"TreeSpan"> => {
+  const spans = showcase.spans.map((row, position): Schema<"TreeSpan"> => {
     const depth = row.parent === undefined ? 0 : (depths[row.parent] ?? 0) + 1;
     depths[position] = depth;
     const summary: Schema<"SpanSummary"> = {
@@ -465,12 +950,13 @@ function showcaseDetail(index: number, trace: Schema<"TraceSummary">): Schema<"T
       start_time: rfc3339(startMs + row.from),
       end_time: rfc3339(startMs + row.to),
       duration_ns: (row.to - row.from) * 1_000_000,
-      status: "ok",
+      status: row.status ?? "ok",
+      ...(row.statusMessage ? { status_message: row.statusMessage } : {}),
       metadata: { ...trace.metadata },
       tags: trace.tags,
       ...(row.parent === undefined ? {} : { parent_span_id: spanId(index, row.parent) }),
       ...(trace.environment ? { environment: trace.environment } : {}),
-      service_name: "support-bot",
+      service_name: showcase.service,
       ...(trace.user_id ? { user_id: trace.user_id } : {}),
       ...(trace.release ? { release: trace.release } : {}),
       ...(row.model ? { model: row.model } : {}),
@@ -1174,23 +1660,53 @@ function spanFromSummary(span: Schema<"SpanSummary">, context: SpanContext): Sch
       value: failed ? FAILED_ANSWER : shortAnswer(exchange),
     };
   }
-  if (context.traceIndex === SHOWCASE_INDEX) {
-    applyShowcasePayload(detail, context.traceIndex, context.turn.exchange.question);
+  const showcase = showcaseAt(context.traceIndex);
+  if (showcase) {
+    // The generic rule flags every 17th span's input, the root included; the hero shows no truncation badge.
+    detail.truncated = [];
+    if (showcase.story) {
+      applyStoryPayload(detail, showcase.story.payloads[spanIndex(detail.span_id)]);
+    } else {
+      applySupportPayload(detail, context.traceIndex, context.turn.exchange.question);
+    }
   }
   return detail;
 }
 
+/** A story span's hand-written payloads; `error` replaces the generic exception event of an error span. */
+function applyStoryPayload(
+  detail: Schema<"SpanDetail">,
+  payload: ShowcasePayload | undefined,
+): void {
+  if (!payload) {
+    return;
+  }
+  detail.input = payload.input;
+  detail.output = payload.output;
+  if (payload.error) {
+    detail.events = [
+      {
+        name: "exception",
+        time: detail.end_time,
+        attributes: {
+          "exception.type": payload.error.type,
+          "exception.message": payload.error.message,
+          "exception.stacktrace": payload.error.stacktrace,
+        },
+      },
+    ];
+  }
+}
+
 /**
- * The showcase trace's hand-written payloads (M11). Spans not listed here keep the generic payload of their kind.
+ * The support trace's hand-written payloads (M11). Spans not listed here keep the generic payload of their kind.
  * `traceIndex` is the trace's index, so the span ids are the trace's own.
  */
-function applyShowcasePayload(
+function applySupportPayload(
   detail: Schema<"SpanDetail">,
   traceIndex: number,
   question: string,
 ): void {
-  // The generic rule flags every 17th span's input, the root included; the showcase shows no truncation badge.
-  detail.truncated = [];
   const at = (position: number) => spanId(traceIndex, position);
   switch (detail.span_id) {
     case at(1):
@@ -1267,7 +1783,7 @@ function applyShowcasePayload(
     case at(8):
       detail.input = {
         format: "json",
-        value: { name: "get_account", arguments: { user_id: SHOWCASE_USER } },
+        value: { name: "get_account", arguments: { user_id: "user-012" } },
       };
       detail.output = { format: "json", value: { plan: "pro", seats: 8, region: "eu1" } };
       break;
@@ -1641,6 +2157,36 @@ function spanIndex(spanIdValue: string): number {
 
 function textPayload(value: string): Schema<"Payload"> {
   return { format: "text", value };
+}
+
+function jsonPayload(value: unknown): Schema<"Payload"> {
+  return { format: "json", value };
+}
+
+/** An llm span's payloads: a system and a user message in, one assistant message out. */
+function chatPayload(system: string, user: string, answer: string): ShowcasePayload {
+  return {
+    input: {
+      format: "messages",
+      value: [
+        { role: "system", parts: [{ type: "text", content: system }] },
+        { role: "user", parts: [{ type: "text", content: user }] },
+      ],
+    },
+    output: {
+      format: "messages",
+      value: [{ role: "assistant", parts: [{ type: "text", content: answer }] }],
+    },
+  };
+}
+
+/** A tool span's payloads: the call as JSON in, `output` out. */
+function toolPayload(
+  name: string,
+  args: Record<string, unknown>,
+  output: Schema<"Payload">,
+): ShowcasePayload {
+  return { input: jsonPayload({ name, arguments: args }), output };
 }
 
 export function rfc3339(ms: number): string {
