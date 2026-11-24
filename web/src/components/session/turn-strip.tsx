@@ -1,4 +1,5 @@
 import { cn } from "cn";
+import { memo } from "react";
 import type { Schema } from "@/api/types";
 import { formatDuration } from "@/lib/format";
 import { stripWeight } from "@/lib/session-turns";
@@ -7,7 +8,7 @@ import { stripWeight } from "@/lib/session-turns";
  * One cell per turn, sized by its duration and coloured by its status (D-C-28). A click selects
  * the turn. The cells are not tab stops: the conversation's j and k keys are the keyboard path.
  */
-export function TurnStrip({
+export const TurnStrip = memo(function TurnStrip({
   turns,
   visible,
   selectedTraceId,
@@ -23,7 +24,10 @@ export function TurnStrip({
     return null;
   }
   return (
-    <div role="group" aria-label="Turns overview" className="flex h-4 gap-px px-4 py-1">
+    <fieldset
+      aria-label="Turns overview"
+      className="m-0 flex h-4 min-w-0 gap-px overflow-hidden border-0 px-4 py-1"
+    >
       {turns.map((turn, offset) => {
         const traceId = turn.trace.trace_id;
         const failed = turn.trace.status === "error";
@@ -48,6 +52,6 @@ export function TurnStrip({
           />
         );
       })}
-    </div>
+    </fieldset>
   );
-}
+});

@@ -1,4 +1,4 @@
-import { useQueries, type UseQueryResult } from "@tanstack/react-query";
+import { keepPreviousData, type UseQueryResult, useQueries } from "@tanstack/react-query";
 import { useCallback } from "react";
 import { spanListOptions } from "@/api/queries";
 import type { Schema } from "@/api/types";
@@ -116,6 +116,8 @@ export function useSessionSteps(args: {
         includeExperiments,
       }),
       staleTime: 30_000,
+      // A live session whose window moves keeps its steps until the new answer arrives.
+      placeholderData: keepPreviousData,
     })),
     combine: combineSteps,
   });

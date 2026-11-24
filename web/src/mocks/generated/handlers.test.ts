@@ -528,19 +528,19 @@ it("the span list keeps only the listed traces' steps for the steps filter", asy
   const dataset = createDataset({ seed: 1, now: NOW, traces: 400 });
   server.use(...largeHandlers(dataset));
   const picked = dataset.traces
-    .filter((trace) =>
-      isVisible(trace) &&
-      (dataset.traceDetail(trace.trace_id)?.spans ?? []).some(
-        (row) => row.span.span_kind === "llm" || row.span.span_kind === "tool",
-      ),
+    .filter(
+      (trace) =>
+        isVisible(trace) &&
+        (dataset.traceDetail(trace.trace_id)?.spans ?? []).some(
+          (row) => row.span.span_kind === "llm" || row.span.span_kind === "tool",
+        ),
     )
     .slice(0, 2);
   if (picked.length < 2) {
     throw new Error("the dataset has two visible traces with llm or tool spans");
   }
   const ids = picked.map((trace) => trace.trace_id);
-  const filter =
-    `trace_id IN (${ids.map((id) => `'${id}'`).join(", ")}) AND span_kind IN ('llm', 'tool')`;
+  const filter = `trace_id IN (${ids.map((id) => `'${id}'`).join(", ")}) AND span_kind IN ('llm', 'tool')`;
   const expected = picked
     .flatMap((trace) => dataset.traceDetail(trace.trace_id)?.spans ?? [])
     .map((row) => row.span)
@@ -575,7 +575,10 @@ it("the span list keeps only the listed traces' steps for the steps filter", asy
   for (const sort of [undefined, "duration"]) {
     const { spans, flagged } = await allSteps(sort);
     expect(flagged, String(sort)).toBe(false);
-    expect(spans.some((span) => !ids.includes(span.trace_id)), String(sort)).toBe(false);
+    expect(
+      spans.some((span) => !ids.includes(span.trace_id)),
+      String(sort),
+    ).toBe(false);
     expect(
       spans.every((span) => span.span_kind === "llm" || span.span_kind === "tool"),
       String(sort),

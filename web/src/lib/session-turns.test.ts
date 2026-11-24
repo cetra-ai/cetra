@@ -93,11 +93,7 @@ describe("stepsFilter", () => {
 describe("chunk", () => {
   it("splits into slices of the size", () => {
     expect(chunk([], 3)).toEqual([]);
-    expect(chunk([1, 2, 3, 4, 5], 2)).toEqual([
-      [1, 2],
-      [3, 4],
-      [5],
-    ]);
+    expect(chunk([1, 2, 3, 4, 5], 2)).toEqual([[1, 2], [3, 4], [5]]);
     expect(chunk([1, 2], 5)).toEqual([[1, 2]]);
   });
 });
@@ -145,9 +141,7 @@ describe("groupSteps", () => {
       }),
     ]);
     expect([...grouped.keys()]).toEqual([FIRST, SECOND]);
-    expect(
-      grouped.get(FIRST)?.map((step) => [step.span_id, step.span_kind]),
-    ).toEqual([
+    expect(grouped.get(FIRST)?.map((step) => [step.span_id, step.span_kind])).toEqual([
       ["b3000000000000000000000000000003", "tool"],
       ["b0000000000000000000000000000006", "llm"],
       ["b0000000000000000000000000000007", "tool"],

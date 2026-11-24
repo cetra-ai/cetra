@@ -1,4 +1,5 @@
 import { screen, waitFor, within } from "@testing-library/react";
+import type { UserEvent } from "@testing-library/user-event";
 import { HttpResponse, http } from "msw";
 import { expect, it } from "vitest";
 import type { Schema } from "@/api/types";
@@ -539,7 +540,7 @@ function serveTurns(session: Schema<"SessionSummary">, turns: Schema<"SessionTur
 it("filters turns by search text", async () => {
   const { user } = await renderApp("/acme/support-bot/sessions/sess-001");
   const conversation = await screen.findByRole("region", { name: "Conversation" });
-  await user.type(screen.getByRole("textbox", { name: "Search turns" }), "address");
+  await searchTurns(user, "address");
   const turns = within(conversation).getAllByRole("button", { name: /support-agent/ });
   expect(turns).toHaveLength(1);
   expect(turns[0]).toHaveTextContent("#2");
@@ -589,7 +590,7 @@ it("hides the Uses tools chip until the steps load, then filters on it", async (
 it("says when no turn matches", async () => {
   const { user } = await renderApp("/acme/support-bot/sessions/sess-001");
   await screen.findByRole("region", { name: "Conversation" });
-  await user.type(screen.getByRole("textbox", { name: "Search turns" }), "zzz-no-match");
+  await searchTurns(user, "zzz-no-match");
   expect(await screen.findByText("No turns match.")).toBeInTheDocument();
 });
 
@@ -686,8 +687,7 @@ it("a hidden failed turn clears the search when the errors chip selects it", asy
   serveErrorSession();
   const { user } = await renderApp("/acme/support-bot/sessions/sess-errors");
   const conversation = await screen.findByRole("region", { name: "Conversation" });
-  const search = screen.getByRole("textbox", { name: "Search turns" });
-  await user.type(search, "Where is");
+  await searchTurns(user, "Where is");
   expect(
     within(conversation).queryByRole("button", { name: /refund-flow/ }),
   ).not.toBeInTheDocument();
@@ -699,3 +699,25 @@ it("a hidden failed turn clears the search when the errors chip selects it", asy
     "true",
   );
 });
+
+it("a strip cell of a hidden turn brings it back", async () => {
+  const { router, user } = await renderApp("/acme/support-bot/sessions/sess-001");
+  const conversation = await screen.findByRole("region", { name: "Conversation" });
+  await searchTurns(user, "address");
+  expect(within(conversation).getAllByRole("button", { name: /support-agent/ })).toHaveLength(1);
+
+  const strip = screen.getByRole("group", { name: "Turns overview" });
+  await user.click(within(strip).getByRole("button", { name: /^#1 / }));
+  expect(screen.getByRole("textbox", { name: "Search turns" })).toHaveValue("");
+  expect(within(conversation).getAllByRole("button", { name: /support-agent/ })).toHaveLength(2);
+  expect(router.state.location.search).toMatchObject({ trace: TRACE });
+});
+
+/**
+ * Types into the turn search box. It is focused directly: in jsdom the split pane's resize handle
+ * takes the focus of a click inside the pane (it has no layout to hit-test), so `user.type` misses.
+ */
+async function searchTurns(user: UserEvent, text: string) {
+  screen.getByRole("textbox", { name: "Search turns" }).focus();
+  await user.keyboard(text);
+}

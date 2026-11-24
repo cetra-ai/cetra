@@ -145,9 +145,7 @@ describe("useSessionSteps", () => {
     const { result } = renderSteps([turnOf(FIRST), turnOf(SECOND)]);
 
     await waitFor(() => expect(result.current.status).toBe("ready"));
-    expect(result.current.stepsOf(FIRST)?.map((span) => span.name)).toEqual([
-      "get_order_status",
-    ]);
+    expect(result.current.stepsOf(FIRST)?.map((span) => span.name)).toEqual(["get_order_status"]);
     expect(result.current.stepsOf(SECOND)?.map((span) => span.name)).toEqual(["chat"]);
     expect(result.current.stepsOf("a1000000000000000000000000000003")).toEqual([]);
   });
@@ -168,13 +166,11 @@ describe("useSessionSteps", () => {
 
   it("reports an error and no steps", async () => {
     server.use(
-      http.get(
-        "/api/v1/projects/:project/spans",
-        () =>
-          HttpResponse.json(
-            { type: "about:blank", title: "Internal error", status: 500, code: "internal" },
-            { status: 500 },
-          ),
+      http.get("/api/v1/projects/:project/spans", () =>
+        HttpResponse.json(
+          { type: "about:blank", title: "Internal error", status: 500, code: "internal" },
+          { status: 500 },
+        ),
       ),
     );
     const { result } = renderSteps([turnOf(FIRST)]);

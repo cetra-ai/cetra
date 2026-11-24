@@ -187,10 +187,7 @@ export function turnMatches(
   if (filters.has("scored") && turn.trace.scores.length === 0) {
     return false;
   }
-  if (
-    filters.has("tools") &&
-    !(steps !== undefined && steps.some((step) => step.span_kind === "tool"))
-  ) {
+  if (filters.has("tools") && !steps?.some((step) => step.span_kind === "tool")) {
     return false;
   }
   return true;

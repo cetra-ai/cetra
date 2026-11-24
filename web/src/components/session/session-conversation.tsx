@@ -1,7 +1,15 @@
 import { useVirtualizer } from "@tanstack/react-virtual";
 import { cn } from "cn";
 import { ChevronRight, MoreHorizontal, Wrench } from "lucide-react";
-import { type KeyboardEvent, type MouseEvent, useEffect, useRef, useState } from "react";
+import {
+  type KeyboardEvent,
+  type MouseEvent,
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 import type { Schema } from "@/api/types";
 import { KindIcon } from "@/components/kind-icon";
 import { ChatView } from "@/components/payload/chat-view";
@@ -25,7 +33,6 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { formatCost, formatDuration, formatTokens } from "@/lib/format";
-import { isTypingTarget, matchesBinding } from "@/lib/shortcuts";
 import {
   type Bubble,
   bubbleOf,
@@ -37,8 +44,10 @@ import {
   type TurnDensity,
   type TurnFilter,
   turnMatches,
+  turnText,
   useTurnDensity,
 } from "@/lib/session-turns";
+import { isTypingTarget, matchesBinding } from "@/lib/shortcuts";
 
 const TURN_ESTIMATE = 96;
 const COMPACT_ESTIMATE = 28;
@@ -54,6 +63,12 @@ type ConversationEntry = {
   index: number;
   previous: Schema<"SessionTurn"> | undefined;
 };
+
+/**
+ * The turn the list scrolls to once it is rendered. The keys use "auto" (the list moves only as far
+ * as needed); the strip, the errors chip and the URL use "center".
+ */
+type PendingScroll = { traceId: string; align: "auto" | "center" };
 
 /**
  * The session's turns beside the selected turn's trace. The session page drives it from the URL
@@ -86,33 +101,57 @@ export function SessionConversation({
   const spanId = span.traceId === trace ? span.spanId : undefined;
   const [query, setQuery] = useState("");
   const [filters, setFilters] = useState<ReadonlySet<TurnFilter>>(new Set());
-  // The trace id the list scrolls to once that turn is rendered, or null.
-  const [pendingScroll, setPendingScroll] = useState<string | null>(null);
+  // The turn the list scrolls to once that turn is rendered, or null.
+  const [pendingScroll, setPendingScroll] = useState<PendingScroll | null>(null);
   const density = useTurnDensity();
   const stepsReady = steps.status === "ready";
-  // "Uses tools" needs the steps: until they are ready the filter does not apply.
-  const activeFilters: ReadonlySet<TurnFilter> = stepsReady
-    ? filters
-    : new Set([...filters].filter((filter) => filter !== "tools"));
-  const entries: ConversationEntry[] = turns.flatMap((turn, offset) =>
-    turnMatches(turn, steps.stepsOf(turn.trace.trace_id), query, activeFilters)
-      ? [{ turn, index: offset + 1, previous: offset > 0 ? turns[offset - 1] : undefined }]
-      : [],
+  // The lower-cased text each turn is searched by, rebuilt only when the turns change.
+  const searchTexts = useMemo(
+    () => new Map(turns.map((turn) => [turn.trace.trace_id, turnText(turn).toLowerCase()])),
+    [turns],
   );
-  const visibleIds = new Set(entries.map((entry) => entry.turn.trace.trace_id));
-  const counts = filterCounts(turns, steps.stepsOf);
+  const { activeFilters, entries, visibleIds } = useMemo(() => {
+    // "Uses tools" needs the steps: until they are ready the filter does not apply.
+    const active: ReadonlySet<TurnFilter> = stepsReady
+      ? filters
+      : new Set([...filters].filter((filter) => filter !== "tools"));
+    const needle = query.trim().toLowerCase();
+    const matched: ConversationEntry[] = turns.flatMap((turn, offset) => {
+      const traceId = turn.trace.trace_id;
+      const textMatches = needle === "" || (searchTexts.get(traceId)?.includes(needle) ?? false);
+      return textMatches && turnMatches(turn, steps.stepsOf(traceId), "", active)
+        ? [{ turn, index: offset + 1, previous: offset > 0 ? turns[offset - 1] : undefined }]
+        : [];
+    });
+    return {
+      activeFilters: active,
+      entries: matched,
+      visibleIds: new Set(matched.map((entry) => entry.turn.trace.trace_id)),
+    };
+  }, [turns, searchTexts, steps.stepsOf, query, filters, stepsReady]);
+  const counts = useMemo(() => filterCounts(turns, steps.stepsOf), [turns, steps.stepsOf]);
+
+  // The effect below reads these through refs, so it runs only when its target changes.
+  const visibleRef = useRef(visibleIds);
+  visibleRef.current = visibleIds;
+  const filtersRef = useRef(filters);
+  filtersRef.current = filters;
+  const onScrolledRef = useRef(onScrolled);
+  onScrolledRef.current = onScrolled;
 
   useEffect(() => {
     if (scrollTarget === null) {
       return;
     }
-    if (!visibleIds.has(scrollTarget)) {
+    if (!visibleRef.current.has(scrollTarget)) {
       setQuery("");
-      setFilters(new Set());
+      if (filtersRef.current.size > 0) {
+        setFilters(new Set());
+      }
     }
-    setPendingScroll(scrollTarget);
-    onScrolled();
-  }, [scrollTarget, visibleIds, onScrolled]);
+    setPendingScroll({ traceId: scrollTarget, align: "center" });
+    onScrolledRef.current();
+  }, [scrollTarget]);
 
   function selectStep(traceId: string, spanId: string) {
     setSpan({ traceId, spanId });
@@ -121,11 +160,21 @@ export function SessionConversation({
     }
   }
 
-  /** Selects a turn from the strip or the keys, and scrolls the list to it. */
-  function pick(traceId: string) {
-    setPendingScroll(traceId);
-    onSelectTrace(traceId);
-  }
+  /**
+   * Selects a turn from the strip or the keys, and scrolls the list to it. A turn the search or
+   * the filters hide clears them first, so the selection brings it back.
+   */
+  const pick = useCallback(
+    (traceId: string, align: PendingScroll["align"] = "center") => {
+      if (!visibleIds.has(traceId)) {
+        setQuery("");
+        setFilters(new Set());
+      }
+      setPendingScroll({ traceId, align });
+      onSelectTrace(traceId);
+    },
+    [onSelectTrace, visibleIds],
+  );
 
   function toggleFilter(filter: TurnFilter) {
     setFilters((current) => {
@@ -169,7 +218,7 @@ export function SessionConversation({
       selected === -1 ? 0 : Math.min(Math.max(selected + step, 0), entries.length - 1);
     const entry = entries[nextIndex];
     if (entry) {
-      pick(entry.turn.trace.trace_id);
+      pick(entry.turn.trace.trace_id, "auto");
     }
   }
 
@@ -188,14 +237,10 @@ export function SessionConversation({
                 counts={counts}
                 stepsReady={stepsReady}
               />
-              <TurnStrip
-                turns={turns}
-                visible={visibleIds}
-                selectedTraceId={trace}
-                onPick={pick}
-              />
+              <TurnStrip turns={turns} visible={visibleIds} selectedTraceId={trace} onPick={pick} />
               <section
                 aria-label="Conversation"
+                // biome-ignore lint/a11y/noNoninteractiveTabindex: the conversation is one keyboard stop that takes j and k, like a list
                 tabIndex={0}
                 onKeyDown={onKeyDown}
                 className="focus-ring flex min-h-0 flex-1 flex-col"
@@ -256,8 +301,8 @@ function TurnList({
   selectedTraceId?: string;
   steps: SessionSteps;
   density: TurnDensity;
-  /** Scrolls the list to this trace id's turn once it is rendered. */
-  scrollTo: string | null;
+  /** Scrolls the list to this turn once it is rendered. */
+  scrollTo: PendingScroll | null;
   /** Called once the list has scrolled to `scrollTo`. */
   onScrolled: () => void;
   onSelect: (traceId: string) => void;
@@ -270,6 +315,8 @@ function TurnList({
   const virtualizer = useVirtualizer({
     count: entries.length,
     getScrollElement: () => scrollRef.current,
+    // Keyed by trace id, so a turn keeps its measured size when the search or filters move it.
+    getItemKey: (index) => entries[index]?.turn.trace.trace_id ?? index,
     estimateSize: () => (density === "compact" ? COMPACT_ESTIMATE : TURN_ESTIMATE),
     measureElement: (element) => {
       const height = element.getBoundingClientRect().height;
@@ -278,21 +325,25 @@ function TurnList({
     overscan: OVERSCAN,
   });
 
+  // biome-ignore lint/correctness/useExhaustiveDependencies: a density change changes the row heights, so the rows are measured again
   useEffect(() => {
     virtualizer.measure();
   }, [density, virtualizer]);
 
+  // Read through a ref, so the scroll runs when the target or the rendered list changes only.
+  const onScrolledRef = useRef(onScrolled);
+  onScrolledRef.current = onScrolled;
   useEffect(() => {
     if (scrollTo === null) {
       return;
     }
-    const index = entries.findIndex((entry) => entry.turn.trace.trace_id === scrollTo);
+    const index = entries.findIndex((entry) => entry.turn.trace.trace_id === scrollTo.traceId);
     // Not rendered yet (the filters are clearing): wait for the next render.
     if (index >= 0) {
-      virtualizer.scrollToIndex(index, { align: "center" });
-      onScrolled();
+      virtualizer.scrollToIndex(index, { align: scrollTo.align });
+      onScrolledRef.current();
     }
-  }, [scrollTo, entries, virtualizer, onScrolled]);
+  }, [scrollTo, entries, virtualizer]);
 
   return (
     <div ref={scrollRef} data-scroll-container className="min-h-0 flex-1 overflow-auto">
