@@ -178,6 +178,23 @@ pub(crate) fn is_redacted(text: &str) -> bool {
     matches!(text, "<REDACTED>" | "[REDACTED]")
 }
 
+/// The scope Vercel's Workflow SDK writes its spans under (D-IN-31 item 5).
+const WORKFLOW_SDK_SCOPE: &str = "workflow";
+/// The name prefixes of the Workflow SDK's spans (D-IN-31 item 5).
+const WORKFLOW_SDK_PREFIXES: &[&str] = &["workflow.", "step.", "queue."];
+
+/// D-IN-31 item 5: Vercel's Workflow SDK, which eve runs on, exports its internal
+/// spans under the scope `workflow`. It is not a coding agent, but its spans are
+/// discarded and counted like the coding agents' (D-CA-6): `true` when the scope is
+/// exactly `workflow` and the name starts with `workflow.`, `step.` or `queue.`.
+/// Any other scope or name: `false`.
+pub(crate) fn scoped_discard(scope_name: &str, span_name: &str) -> bool {
+    scope_name == WORKFLOW_SDK_SCOPE
+        && WORKFLOW_SDK_PREFIXES
+            .iter()
+            .any(|prefix| span_name.starts_with(prefix))
+}
+
 /// Values the post-build step needs, read from the bag before it is consumed.
 #[derive(Debug, Default)]
 pub(crate) struct Finish {
@@ -799,5 +816,62 @@ mod tests {
                 .map(String::as_str),
             Some("copilot")
         );
+    }
+
+    #[test]
+    fn workflow_sdk_spans_are_discarded() {
+        use crate::agents::test_support::{request, run, span};
+
+        let mut workflow_start = span("workflow.start", vec![], vec![]);
+        workflow_start.span_id = vec![0x31; 8];
+        let mut step_execute = span("step.execute", vec![], vec![]);
+        step_execute.span_id = vec![0x32; 8];
+        let mut queue_publish = span("queue.publish", vec![], vec![]);
+        queue_publish.span_id = vec![0x33; 8];
+        let normalized = run(
+            &request(
+                "capture-eve",
+                "workflow",
+                vec![workflow_start, step_execute, queue_publish],
+            ),
+            &AgentContexts::default(),
+        );
+        assert_eq!(normalized.discarded, 3);
+        assert!(normalized.spans.is_empty());
+        assert_eq!(normalized.rejections.total(), 0);
+    }
+
+    #[test]
+    fn workflow_scope_other_names_are_kept() {
+        use crate::agents::test_support::{request, run, span};
+
+        let normalized = run(
+            &request(
+                "capture-eve",
+                "workflow",
+                vec![span("chat gpt-4o-mini", vec![], vec![])],
+            ),
+            &AgentContexts::default(),
+        );
+        assert_eq!(normalized.discarded, 0);
+        assert_eq!(normalized.spans.len(), 1);
+        assert_eq!(normalized.spans[0].name, "chat gpt-4o-mini");
+    }
+
+    #[test]
+    fn workflow_names_on_another_scope_are_kept() {
+        use crate::agents::test_support::{request, run, span};
+
+        let normalized = run(
+            &request(
+                "capture-eve",
+                "eve.agent",
+                vec![span("workflow.start", vec![], vec![])],
+            ),
+            &AgentContexts::default(),
+        );
+        assert_eq!(normalized.discarded, 0);
+        assert_eq!(normalized.spans.len(), 1);
+        assert_eq!(normalized.spans[0].name, "workflow.start");
     }
 }

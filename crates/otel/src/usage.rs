@@ -15,7 +15,7 @@ use opentelemetry_proto::tonic::common::v1::any_value::Value;
 use opentelemetry_proto::tonic::trace::v1::span::Event;
 use serde_json::Value as Json;
 
-use crate::bag::AttrBag;
+use crate::bag::{AttrBag, Use};
 use crate::fields::{ResourceView, Source, first_i64, span};
 use crate::value::{InvalidNumber, as_f64, as_i64, as_str};
 use crate::warn::{Warning, Warnings};
@@ -23,6 +23,19 @@ use crate::warn::{Warning, Warnings};
 const USAGE_DETAILS: &str = "langfuse.observation.usage_details";
 const NO_CACHE_TOKENS: &str = "ai.usage.inputTokenDetails.noCacheTokens";
 const INPUT_TOKEN_DETAILS: &str = "ai.usage.inputTokenDetails.";
+/// Agent Spec's model-call span name (D-IN-31 item 5). Its spans carry no
+/// instrumentation scope, so the `"null"` rule is gated on the span name.
+const AGENTSPEC_LLM_SPAN: &str = "LlmGenerationSpan";
+/// The token keys Agent Spec writes the string `"null"` into when it does not
+/// know the count (D-IN-31 item 5).
+const AGENTSPEC_NULL_KEYS: &[&str] = &[
+    "llm.token_count.prompt",
+    "llm.token_count.completion",
+    "llm.token_count.total",
+    "llm.token_count.prompt_details.cache_read",
+    "llm.token_count.prompt_details.cache_write",
+    "llm.token_count.completion_details.reasoning",
+];
 
 /// Whether a usage count already contains the related tokens.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -313,12 +326,15 @@ pub(crate) struct Usage {
 
 /// Resolve token columns. On any other kind the usage attributes stay unread.
 ///
-/// `scope_name` is the span's instrumentation scope name (`""` when absent);
-/// Prompt Flow's counts (R-PF-2) are gated on it. `conventions` is the
-/// conventions detected on the span; VoltAgent's counts (V4) are gated on it.
+/// `span_name` is the span's name; Agent Spec's `"null"` token counts
+/// (D-IN-31 item 5) are gated on it. `scope_name` is the span's instrumentation
+/// scope name (`""` when absent); Prompt Flow's counts (R-PF-2) are gated on
+/// it. `conventions` is the conventions detected on the span; VoltAgent's
+/// counts (V4) are gated on it.
 pub(crate) fn usage(
     bag: &mut AttrBag<'_>,
     kind: SpanKind,
+    span_name: &str,
     provider: Option<&str>,
     scope_name: &str,
     conventions: &[Convention],
@@ -327,6 +343,8 @@ pub(crate) fn usage(
     if !matches!(kind, SpanKind::Llm | SpanKind::Embedding) {
         return Usage::default();
     }
+    // Before the first_count calls, so a consumed "null" is never a candidate.
+    agentspec_null_tokens(bag, kind, span_name);
     let resource = ResourceView::new(&[]);
     let legacy = vercel_legacy(bag, provider);
     let mut input = first_count(bag, &resource, INPUT, warnings);
@@ -483,6 +501,34 @@ pub(crate) fn usage(
         reasoning_tokens: reasoning,
         total_tokens,
     }
+}
+
+/// D-IN-31 item 5: Agent Spec writes the string `"null"` into every token count
+/// it does not know. Its spans have no instrumentation scope, so the rule is
+/// gated on its model-call span name: on `LlmGenerationSpan` (and an `llm`
+/// span), each of [`AGENTSPEC_NULL_KEYS`] whose value is exactly `"null"`
+/// (case-sensitive) is consumed — no count, no `invalid_number` (an amendment
+/// to rule 20). Every other span name keeps rule 20's behaviour. The bag keeps
+/// the value, so [`first_count`] skips what this consumed
+/// ([`agentspec_null_consumed`]).
+fn agentspec_null_tokens(bag: &mut AttrBag<'_>, kind: SpanKind, span_name: &str) {
+    if kind != SpanKind::Llm || span_name != AGENTSPEC_LLM_SPAN {
+        return;
+    }
+    for key in AGENTSPEC_NULL_KEYS {
+        if bag.get(key).and_then(as_str) == Some("null") {
+            bag.take(key);
+        }
+    }
+}
+
+/// A key the Agent Spec rule above consumed: absent for the tables, never an
+/// invalid number. Only that rule consumes a `"null"` value, so the state tells
+/// it apart from a `"null"` it has not taken, which keeps rule 20.
+fn agentspec_null_consumed(bag: &AttrBag<'_>, key: &str) -> bool {
+    bag.state(key) == Some(Use::Consumed)
+        && AGENTSPEC_NULL_KEYS.contains(&key)
+        && bag.get(key).and_then(as_str) == Some("null")
 }
 
 struct GeminiUsage {
@@ -788,6 +834,10 @@ fn first_count(
     warnings: &mut Warnings,
 ) -> Option<(i64, Inclusive, Inclusive)> {
     for item in table {
+        // D-IN-31 item 5: a "null" the Agent Spec rule consumed is absent.
+        if agentspec_null_consumed(bag, item.source.key) {
+            continue;
+        }
         if let Some(resolved) = first_i64(bag, resource, &[item.source], warnings) {
             return Some((
                 resolved.value,
@@ -1090,7 +1140,7 @@ mod tests {
     ) -> (Usage, Warnings, AttrBag<'a>) {
         let mut warnings = Warnings::default();
         let mut bag = AttrBag::new(attrs, &mut warnings);
-        let usage = usage(&mut bag, kind, provider, "", &[], &mut warnings);
+        let usage = usage(&mut bag, kind, "generate", provider, "", &[], &mut warnings);
         (usage, warnings, bag)
     }
 
@@ -1395,6 +1445,7 @@ mod tests {
         let counts = usage(
             &mut bag,
             SpanKind::Llm,
+            "",
             None,
             "@voltagent/core",
             VOLTAGENT,
@@ -1426,7 +1477,15 @@ mod tests {
         ];
         let mut warnings = Warnings::default();
         let mut bag = AttrBag::new(&attrs, &mut warnings);
-        let counts = usage(&mut bag, SpanKind::Llm, None, "", VOLTAGENT, &mut warnings);
+        let counts = usage(
+            &mut bag,
+            SpanKind::Llm,
+            "",
+            None,
+            "",
+            VOLTAGENT,
+            &mut warnings,
+        );
         assert_eq!(counts.input_tokens, Some(50));
         assert_eq!(counts.output_tokens, Some(12));
         assert_eq!(bag.state("gen_ai.usage.input_tokens"), Some(Use::Consumed));
@@ -1448,7 +1507,7 @@ mod tests {
         ] {
             let mut warnings = Warnings::default();
             let mut bag = AttrBag::new(&attrs, &mut warnings);
-            let counts = usage(&mut bag, kind, None, scope, &[], &mut warnings);
+            let counts = usage(&mut bag, kind, "", None, scope, &[], &mut warnings);
             let key = "llm.usage.prompt_tokens";
             if filled {
                 assert_eq!(counts.input_tokens, Some(7), "{kind:?} {scope}");
@@ -1474,6 +1533,7 @@ mod tests {
             let counts = usage(
                 &mut bag,
                 SpanKind::Llm,
+                "",
                 None,
                 "",
                 conventions,
@@ -1489,6 +1549,7 @@ mod tests {
         let counts = usage(
             &mut bag,
             SpanKind::Agent,
+            "",
             None,
             "@voltagent/core",
             &[Convention::Voltagent],
@@ -1502,6 +1563,7 @@ mod tests {
         let counts = usage(
             &mut bag,
             SpanKind::Llm,
+            "",
             None,
             "@voltagent/core",
             &[Convention::Voltagent],
@@ -1692,6 +1754,7 @@ mod tests {
         let counts = usage(
             &mut bag,
             SpanKind::Llm,
+            "",
             None,
             "promptflow",
             &[],
@@ -1720,10 +1783,87 @@ mod tests {
         ] {
             let mut warnings = Warnings::default();
             let mut bag = AttrBag::new(&attrs, &mut warnings);
-            let counts = usage(&mut bag, kind, None, scope, &[], &mut warnings);
+            let counts = usage(&mut bag, kind, "", None, scope, &[], &mut warnings);
             assert_eq!(counts.input_tokens, None, "{kind:?} {scope}");
             assert_eq!(counts.output_tokens, None, "{kind:?} {scope}");
             assert_eq!(bag.state("llm.usage.prompt_tokens"), Some(Use::Unread));
+        }
+    }
+
+    #[test]
+    fn agentspec_null_tokens_are_absent_without_warning() {
+        // D-IN-31 item 5: Agent Spec's spans have no scope, so the rule is
+        // gated on its model-call span name. "null" means absent: consumed,
+        // no count, no invalid_number.
+        let attrs = [
+            string_attr("llm.token_count.prompt", "null"),
+            string_attr("llm.token_count.completion", "null"),
+            string_attr("llm.token_count.total", "null"),
+            string_attr("llm.token_count.prompt_details.cache_read", "null"),
+            string_attr("llm.token_count.prompt_details.cache_write", "null"),
+            string_attr("llm.token_count.completion_details.reasoning", "null"),
+        ];
+        let mut warnings = Warnings::default();
+        let mut bag = AttrBag::new(&attrs, &mut warnings);
+        let counts = usage(
+            &mut bag,
+            SpanKind::Llm,
+            AGENTSPEC_LLM_SPAN,
+            None,
+            "",
+            &[],
+            &mut warnings,
+        );
+        assert_eq!(counts, Usage::default());
+        assert_eq!(warnings.to_attribute(), None);
+        for key in AGENTSPEC_NULL_KEYS {
+            assert_eq!(bag.state(key), Some(Use::Consumed), "{key}");
+        }
+    }
+
+    #[test]
+    fn agentspec_numeric_tokens_are_read() {
+        let attrs = [
+            int_attr("llm.token_count.prompt", 82),
+            int_attr("llm.token_count.completion", 17),
+        ];
+        let mut warnings = Warnings::default();
+        let mut bag = AttrBag::new(&attrs, &mut warnings);
+        let counts = usage(
+            &mut bag,
+            SpanKind::Llm,
+            AGENTSPEC_LLM_SPAN,
+            None,
+            "",
+            &[],
+            &mut warnings,
+        );
+        assert_eq!(counts.input_tokens, Some(82));
+        assert_eq!(counts.output_tokens, Some(17));
+        assert_eq!(counts.total_tokens, Some(99));
+        assert_eq!(warnings.to_attribute(), None);
+    }
+
+    #[test]
+    fn null_tokens_on_another_span_still_warn() {
+        // `counted` passes the span name `generate`: rule 20 applies, so the
+        // values stay unread and invalid_number is recorded.
+        let attrs = [
+            string_attr("llm.token_count.prompt", "null"),
+            string_attr("llm.token_count.completion", "null"),
+            string_attr("llm.token_count.total", "null"),
+            string_attr("llm.token_count.prompt_details.cache_read", "null"),
+            string_attr("llm.token_count.prompt_details.cache_write", "null"),
+            string_attr("llm.token_count.completion_details.reasoning", "null"),
+        ];
+        let (counts, warnings, bag) = counted(&attrs, SpanKind::Llm, None);
+        assert_eq!(counts, Usage::default());
+        assert_eq!(
+            warnings.to_attribute().as_deref(),
+            Some("[\"invalid_number\"]")
+        );
+        for key in AGENTSPEC_NULL_KEYS {
+            assert_eq!(bag.state(key), Some(Use::Unread), "{key}");
         }
     }
 }

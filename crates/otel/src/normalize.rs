@@ -223,6 +223,10 @@ fn accept_span(
         tally.discarded += 1;
         return None;
     }
+    if agents::scoped_discard(scope_name.as_deref().unwrap_or(""), &span.name) {
+        tally.discarded += 1;
+        return None;
+    }
     let trace_id = match TraceId::from_slice(&span.trace_id) {
         Ok(id) => id,
         Err(_) => {
@@ -271,6 +275,7 @@ fn accept_span(
         None => usage(
             &mut bag,
             span_kind,
+            &span.name,
             fields.provider.as_deref(),
             scope,
             &conventions,
