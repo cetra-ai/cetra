@@ -82,7 +82,7 @@ D-IN-25 records these decisions:
 8. **Azure API Management and Gravitee** go to § Not supported; **Pydantic AI Gateway and Databricks AI Gateway** are merged into their providers' pages.
 9. **Deviations from the spike's verdicts.**
    - OrcaRouter and Anannas AI: the spike suggested setup-only OpenAI-client pages in step (4) of each entry but recommended appendix lines; the plan follows the recommendation. No page, one appendix line each.
-   - Gravitee: the spike's summary table offered an OpenAI-client page. It goes to § Not supported instead: its spans are HTTP spans without LLM attributes, so there is nothing for a page to show. An OpenAI-compatible endpoint behind Gravitee is covered by the OpenAI-compatible page.
+   - Gravitee: the spike's summary table offered an OpenAI-client page. It goes to § Not supported instead: its spans are HTTP spans without LLM attributes, so there is nothing for a page to show. An OpenAI-compatible endpoint behind Gravitee is traced by the app's own instrumentation, as on the OpenAI page.
 
 ## Versions
 
@@ -443,7 +443,7 @@ All pass. `node scripts/check-integrations.mjs` checks the index against the pag
    - amend D-IN-16's cell (line 314): the keys are LiteLLM's `gen_ai.cost.*` and Bifrost's `bifrost.cost.input` and `bifrost.cost.output`, as captured;
    - amend D-IN-22's cell (line 320): Temporal is captured in M5, with a pinned dev-server binary (D-IN-25), so "setup only until a pinned dev-server binary exists" goes;
    - § Gateways rows as built (line 187): the Temporal row (line 212 sits in § Agent frameworks) changes "setup only until a pinned dev-server binary exists" to "captured (M5)"; Vercel AI Gateway's row notes its trace drain; Kong stays setup only; Azure API Management and Gravitee leave the "spike decides" row;
-   - § Not supported gains Azure API Management (no OTLP trace export, Application Insights only) and Gravitee (HTTP spans without LLM attributes; an OpenAI-compatible endpoint behind it is covered by the OpenAI-compatible page);
+   - § Not supported gains Azure API Management (no OTLP trace export, Application Insights only) and Gravitee (HTTP spans without LLM attributes; an OpenAI-compatible endpoint behind it is traced by the app's own instrumentation, as on the OpenAI page);
    - the appendix (§ Appendix, from line 385) gains one line each for OrcaRouter and Anannas AI: OpenAI-compatible routers with no OTLP export, no page, no host row.
    - **In `docs/mvp-decisions.md`,** the same: D-IN-16's row (line 1033) amended with the Bifrost keys, D-IN-22's row (line 1039) amended, D-IN-25 added after D-IN-24 (line 1041). D109 (line 164) lists no keys, so it is not edited.
 3. **Changelog and roadmap:**
