@@ -78,6 +78,8 @@ const TOGGLE_BOX_LEFT_PX = 2;
 // The slot is centred in an even-height row, so its top is a whole pixel; 3px down puts the
 // box's centre half a pixel below the row's middle, on the centre of the 1px elbow ticks.
 const TOGGLE_BOX_TOP_PX = 3;
+// The corner where a branch leaves the trunk, for every child (├ and └ alike).
+const ELBOW_RADIUS_PX = 4;
 // The kind icon starts after the slot and the row's 4px gap.
 const ICON_OFFSET_PX = TOGGLE_SLOT_PX + 4;
 // A tick label past this share of the axis sits left of its gridline, so it isn't cut.
@@ -865,8 +867,9 @@ function markPct(ns: number, zoom: TimeWindow): number {
 
 /**
  * The elbow lines in a row's indent: each level's line runs down from its parent's −/+ box.
- * ├ and a tick for a child with later siblings, a rounded └ for the last child, a full line
- * for each ancestor level that continues, and a line down from an expanded parent's box.
+ * ├ (a branch curving off the trunk) for a child with later siblings, a rounded └ for the
+ * last child, a full line for each ancestor level that continues, and a line down from an
+ * expanded parent's box.
  */
 function TreeGuideLines({
   guide,
@@ -901,9 +904,15 @@ function TreeGuideLines({
       {guide.elbow === "mid" ? (
         <>
           <span className="absolute inset-y-0 w-px bg-border" style={{ left: elbowX }} />
+          {/* The branch curves off the trunk with the same 4px corner as the last child's └. */}
           <span
-            className="absolute top-1/2 h-px bg-border"
-            style={{ left: elbowX, width: tickEnd - elbowX }}
+            className="absolute rounded-bl-[4px] border-b border-l border-border"
+            style={{
+              left: elbowX,
+              top: `calc(50% - ${ELBOW_RADIUS_PX}px)`,
+              height: ELBOW_RADIUS_PX + 1,
+              width: tickEnd - elbowX,
+            }}
           />
         </>
       ) : null}
