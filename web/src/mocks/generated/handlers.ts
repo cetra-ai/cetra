@@ -13,6 +13,7 @@ import {
   itemsAt,
 } from "@/mocks/generated/datasets";
 import { experimentHandlers } from "@/mocks/generated/experiments";
+import { storyHandlers } from "@/mocks/generated/stories";
 import { tracePredicate, widgetQueryHandler } from "@/mocks/generated/widget-query";
 import {
   type SpanStreamSource,
@@ -117,6 +118,7 @@ function queueItemHandlers(dataset: Dataset): HttpHandler[] {
 
 export function largeHandlers(dataset: Dataset): HttpHandler[] {
   return [
+    ...storyHandlers(dataset),
     ...queueItemHandlers(dataset),
     widgetQueryHandler(dataset),
     traceStreamHandler(liveTraceSource(dataset)),
