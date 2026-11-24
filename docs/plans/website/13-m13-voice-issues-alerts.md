@@ -541,3 +541,12 @@ No other file.
 **Done when:** both checks pass and step 5 holds.
 
 **Commit:** `Show the voice agent in the hero`
+
+## Changes after implementation
+
+- **A story issue with no matched trace is left out** (ddfaf17). `storyIssue` and `storyIssueEvents` return `undefined` for it. It is omitted from `GET …/issues`, and its detail, occurrences and events routes fall through like an unknown id. Before this change it threw; route tests build datasets smaller than seven traces.
+- **The code review's test fixes:**
+  - Occurrences are recomputed independently in the tests: the count, the day keys, ascending days, distinct users, the first and last seen times, the 14-day window, and no double-counted hero.
+  - Example order is checked, including the tie-break, along with the reasons.
+  - Every story route is covered, including the fall-through for non-story ids, and `last_fired_at` is set only on firing rules.
+  - A spans-list filter is shown to stay ignored.
