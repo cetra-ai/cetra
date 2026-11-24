@@ -94,12 +94,13 @@ const needs = [
   <Section tone="ink" divider labelledby="sh-licence-title">
     <SectionHeading
       eyebrow="For companies"
-      title="Add a licence for single sign-on."
+      title="Add a licence for your company."
       id="sh-licence-title"
-      lede="The core is MIT and free. A licence key, checked offline with no call home, unlocks the enterprise features in the same binary. Paste it in the admin settings: it applies at once, with no restart."
+      lede="The core is MIT and free. A licence key, checked offline with no call home, unlocks the enterprise features in the same binary, and comes with email support. Paste it in the admin settings: it applies at once, with no restart."
     />
     <ul class="points bullets">
       {SELF_HOSTED.licence.features.map((feature) => <li>{feature}</li>)}
+      <li>{SELF_HOSTED.licence.support}</li>
     </ul>
     <div class="actions">
       <Button href={`mailto:${CONTACT_EMAIL}`}>Talk to us</Button>
