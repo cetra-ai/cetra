@@ -48,6 +48,7 @@ import {
   defaultCollapsed,
   filterRows,
   hasChildren,
+  metricColumnWidth,
   subtreeEnds,
   type TreeGuide,
   treeGuides,
@@ -58,8 +59,8 @@ import { STORAGE_PREFIX } from "@/product";
 /** A row must rest under the pointer this long before its span detail is prefetched. */
 const HOVER_PREFETCH_MS = 100;
 const OVERSCAN = 12;
-// Tree mode: Name, then Duration, Tokens and Cost.
-const TREE_COLUMNS = "minmax(160px, 1fr) 72px 64px 72px";
+// Tree mode: Name, then Duration, Tokens and Cost, each sized to its widest visible value.
+const NAME_FLEX_COLUMN = "minmax(160px, 1fr)";
 // Timeline mode has no metric columns: the bars take the room beside the Name column,
 // which is sized apart (auto or dragged).
 const TIMELINE_MIN_PX = 160;
@@ -260,7 +261,32 @@ export function TreeGrid({
   const [userNameWidth, setUserNameWidth] = useState<number | null>(readNameWidth);
   const autoWidth = useMemo(() => autoNameWidth(spans, rows), [spans, rows]);
   const nameWidth = userNameWidth ?? autoWidth;
-  const template = timeline ? `${nameWidth}px minmax(${TIMELINE_MIN_PX}px, 1fr)` : TREE_COLUMNS;
+  const metricWidths = useMemo(() => {
+    const durations: string[] = [];
+    const tokens: string[] = [];
+    const costs: string[] = [];
+    for (const index of rows) {
+      const span = spans[index]?.span;
+      if (!span) {
+        continue;
+      }
+      durations.push(formatDuration(span.duration_ns));
+      if (showsTokens(span.span_kind)) {
+        tokens.push(formatTokens(span.total_tokens));
+      }
+      if (span.cost_total !== undefined) {
+        costs.push(formatCost(span.cost_total));
+      }
+    }
+    return [
+      metricColumnWidth("Duration", durations),
+      metricColumnWidth("Tokens", tokens),
+      metricColumnWidth("Cost", costs),
+    ];
+  }, [spans, rows]);
+  const template = timeline
+    ? `${nameWidth}px minmax(${TIMELINE_MIN_PX}px, 1fr)`
+    : `${NAME_FLEX_COLUMN} ${metricWidths.map((px) => `${px}px`).join(" ")}`;
 
   function clampName(width: number): number {
     const gridWidth = gridRef.current?.clientWidth;
@@ -302,12 +328,17 @@ export function TreeGrid({
     writeNameWidth(next);
   }
 
-  const rowHeight = useRowHeight() - (timeline ? TIMELINE_ROW_INSET_PX : 0);
+  // The header row is as tall as the density's row, and sticks at the top of the scroll area,
+  // so the rows start below it and a row scrolled into view isn't left under it.
+  const headerHeight = useRowHeight();
+  const rowHeight = headerHeight - (timeline ? TIMELINE_ROW_INSET_PX : 0);
   const virtualizer = useVirtualizer({
     count: rows.length,
     getScrollElement: () => scrollRef.current,
     estimateSize: () => rowHeight,
     overscan: OVERSCAN,
+    scrollMargin: headerHeight,
+    scrollPaddingStart: headerHeight,
   });
 
   // A density change alters every row's height, so the measurements must be redone.
@@ -546,94 +577,95 @@ export function TreeGrid({
             </div>
           ) : null}
           <div
-            role="row"
-            aria-rowindex={1}
-            className="grid h-row shrink-0 items-center border-b bg-background text-caption font-medium text-muted-foreground uppercase"
-            style={{ gridTemplateColumns: template }}
-          >
-            <div role="columnheader" className="relative min-w-0 truncate px-2">
-              Name
-              {timeline ? (
-                <div
-                  role="separator"
-                  aria-orientation="vertical"
-                  aria-label="Resize Name column"
-                  aria-valuemin={NAME_MIN_PX}
-                  aria-valuemax={NAME_MAX_PX}
-                  aria-valuenow={Math.round(nameWidth)}
-                  tabIndex={0}
-                  title="Drag to resize, double-click to reset"
-                  onPointerDown={onNameResizeDown}
-                  onKeyDown={onNameResizeKey}
-                  onClick={(event) => {
-                    event.stopPropagation();
-                  }}
-                  onDoubleClick={() => {
-                    setUserNameWidth(null);
-                    writeNameWidth(null);
-                  }}
-                  className="absolute inset-y-0 -right-1 z-20 w-2 cursor-col-resize touch-none hover:bg-ring/40 focus-visible:bg-ring/60 focus-visible:outline-hidden"
-                />
-              ) : null}
-            </div>
-            {timeline ? null : (
-              <>
-                <div role="columnheader" className="px-2 text-right">
-                  Duration
-                </div>
-                <div role="columnheader" className="px-2 text-right">
-                  Tokens
-                </div>
-                <div role="columnheader" className="px-2 text-right">
-                  Cost
-                </div>
-              </>
-            )}
-            {timeline ? (
-              <div
-                role="columnheader"
-                aria-label="Timeline"
-                className="relative h-full"
-                ref={timelineRef}
-                onPointerDown={onHeaderDown}
-                onPointerMove={onHeaderMove}
-                onPointerUp={onHeaderUp}
-              >
-                <span className="sr-only">Timeline</span>
-                {drag ? (
-                  <span
-                    className="absolute top-0 h-full bg-primary/20"
-                    style={{
-                      left: `${Math.min(drag.startPct, drag.endPct)}%`,
-                      width: `${Math.abs(drag.endPct - drag.startPct)}%`,
-                    }}
-                  />
-                ) : null}
-                {marks.map((mark) => {
-                  const pct = markPct(mark.ns, zoom);
-                  return (
-                    <span
-                      key={mark.ns}
-                      aria-hidden="true"
-                      data-tick
-                      className={cn(
-                        "absolute inset-y-0 flex items-center border-border text-caption whitespace-nowrap normal-case tabular-nums",
-                        pct > TICK_FLIP_PCT ? "-translate-x-full border-r pr-1" : "border-l pl-1",
-                      )}
-                      style={{ left: `${pct}%` }}
-                    >
-                      {mark.label}
-                    </span>
-                  );
-                })}
-              </div>
-            ) : null}
-          </div>
-          <div
             ref={scrollRef}
             data-scroll-container
             className="relative min-h-0 flex-1 overflow-auto"
           >
+            <div
+              role="row"
+              aria-rowindex={1}
+              className="sticky top-0 z-20 grid h-row items-center border-b bg-background text-caption font-medium text-muted-foreground uppercase"
+              style={{ gridTemplateColumns: template }}
+            >
+              <div role="columnheader" className="relative min-w-0 truncate px-2">
+                Name
+                {timeline ? (
+                  <div
+                    role="separator"
+                    aria-orientation="vertical"
+                    aria-label="Resize Name column"
+                    aria-valuemin={NAME_MIN_PX}
+                    aria-valuemax={NAME_MAX_PX}
+                    aria-valuenow={Math.round(nameWidth)}
+                    tabIndex={0}
+                    title="Drag to resize, double-click to reset"
+                    onPointerDown={onNameResizeDown}
+                    onKeyDown={onNameResizeKey}
+                    onClick={(event) => {
+                      event.stopPropagation();
+                    }}
+                    onDoubleClick={() => {
+                      setUserNameWidth(null);
+                      writeNameWidth(null);
+                    }}
+                    className="absolute inset-y-0 -right-1 z-20 w-2 cursor-col-resize touch-none hover:bg-ring/40 focus-visible:bg-ring/60 focus-visible:outline-hidden"
+                  />
+                ) : null}
+              </div>
+              {timeline ? null : (
+                <>
+                  <div role="columnheader" className="px-2 text-right">
+                    Duration
+                  </div>
+                  <div role="columnheader" className="px-2 text-right">
+                    Tokens
+                  </div>
+                  <div role="columnheader" className="px-2 text-right">
+                    Cost
+                  </div>
+                </>
+              )}
+              {timeline ? (
+                <div
+                  role="columnheader"
+                  aria-label="Timeline"
+                  className="relative h-full"
+                  ref={timelineRef}
+                  onPointerDown={onHeaderDown}
+                  onPointerMove={onHeaderMove}
+                  onPointerUp={onHeaderUp}
+                >
+                  <span className="sr-only">Timeline</span>
+                  {drag ? (
+                    <span
+                      className="absolute top-0 h-full bg-primary/20"
+                      style={{
+                        left: `${Math.min(drag.startPct, drag.endPct)}%`,
+                        width: `${Math.abs(drag.endPct - drag.startPct)}%`,
+                      }}
+                    />
+                  ) : null}
+                  {marks.map((mark) => {
+                    const pct = markPct(mark.ns, zoom);
+                    return (
+                      <span
+                        key={mark.ns}
+                        aria-hidden="true"
+                        data-tick
+                        className={cn(
+                          "absolute inset-y-0 flex items-center border-border text-caption whitespace-nowrap normal-case tabular-nums",
+                          pct > TICK_FLIP_PCT ? "-translate-x-full border-r pr-1" : "border-l pl-1",
+                        )}
+                        style={{ left: `${pct}%` }}
+                      >
+                        {mark.label}
+                      </span>
+                    );
+                  })}
+                </div>
+              ) : null}
+            </div>
+
             <div className="relative" style={{ height: virtualizer.getTotalSize() }}>
               {virtualRows.map((item) => {
                 const spanIndex = rows[item.index];
@@ -648,7 +680,7 @@ export function TreeGrid({
                 const expandable = hasChildren(ends, spanIndex);
                 const isCollapsed = displayCollapsed.has(span.span_id);
                 const bar = timeline ? barGeometry(span, zoom) : undefined;
-                const showTokens = span.span_kind === "llm" || span.span_kind === "embedding";
+                const showTokens = showsTokens(span.span_kind);
                 const isMatch = matchSet.has(spanIndex);
                 const dim = needleQuery.length > 0 && !isMatch;
                 return (
@@ -671,7 +703,7 @@ export function TreeGrid({
                     )}
                     style={{
                       height: rowHeight,
-                      transform: `translateY(${item.start}px)`,
+                      transform: `translateY(${item.start - headerHeight}px)`,
                       gridTemplateColumns: template,
                     }}
                     onClick={() => {
@@ -791,6 +823,11 @@ export function TreeGrid({
       </div>
     </TooltipProvider>
   );
+}
+
+/** Only model spans have tokens worth a cell. */
+function showsTokens(kind: Schema<"SpanKind">): boolean {
+  return kind === "llm" || kind === "embedding";
 }
 
 function markPct(ns: number, zoom: TimeWindow): number {

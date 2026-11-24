@@ -6,6 +6,9 @@ import {
   filterRows,
   hasChildren,
   insertSpan,
+  METRIC_MAX_PX,
+  METRIC_MIN_PX,
+  metricColumnWidth,
   subtreeEnds,
   treeGuides,
   visibleRows,
@@ -280,5 +283,21 @@ describe("treeGuides", () => {
 
   it("handles an empty tree", () => {
     expect(treeGuides([])).toEqual([]);
+  });
+});
+
+describe("metricColumnWidth", () => {
+  it("fits the widest value", () => {
+    expect(metricColumnWidth("Cost", ["$0.02", "$0.006422"])).toBe(9 * 7 + 16);
+  });
+
+  it("never goes below its header label", () => {
+    expect(metricColumnWidth("Duration", ["1ms"])).toBe(8 * 7 + 16);
+    expect(metricColumnWidth("Tokens", [])).toBe(6 * 7 + 16);
+  });
+
+  it("stays between the minimum and the maximum", () => {
+    expect(metricColumnWidth("", [])).toBe(METRIC_MIN_PX);
+    expect(metricColumnWidth("Cost", ["x".repeat(40)])).toBe(METRIC_MAX_PX);
   });
 });

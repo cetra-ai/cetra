@@ -297,3 +297,22 @@ export function treeGuides(depths: readonly number[]): TreeGuide[] {
   }
   return guides;
 }
+
+// The metric cells are 11px tabular text, about 7px a character, with 8px padding each side.
+// The header labels are 11px capitals, about 7px a character too.
+const METRIC_CHAR_PX = 7;
+const METRIC_PADDING_PX = 16;
+export const METRIC_MIN_PX = 44;
+export const METRIC_MAX_PX = 120;
+
+/** A metric column's width: its header label or its widest value, kept between 44px and 120px. */
+export function metricColumnWidth(label: string, values: Iterable<string>): number {
+  let chars = label.length;
+  for (const value of values) {
+    chars = Math.max(chars, value.length);
+  }
+  return Math.min(
+    METRIC_MAX_PX,
+    Math.max(METRIC_MIN_PX, chars * METRIC_CHAR_PX + METRIC_PADDING_PX),
+  );
+}

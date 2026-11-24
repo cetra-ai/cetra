@@ -195,3 +195,36 @@ it("falls back to the content-fitted width for an invalid stored width", () => {
   localStorage.setItem("cetra.tree.name_width", "10");
   expect(renderGrid()).toHaveAttribute("aria-valuenow", "220");
 });
+
+it("sizes the metric columns to their widest visible value in Tree mode", () => {
+  const spans = [
+    { ...SPANS[0], span: { ...SPANS[0]?.span, cost_total: 0.006422 } },
+  ] as unknown as Schema<"TreeSpan">[];
+  render(
+    <QueryClientProvider client={new QueryClient()}>
+      <ProjectProvider
+        value={{ org: "acme", project: "support-bot", ref: "p1", data: {} as Schema<"Project"> }}
+      >
+        <TreeGrid
+          spans={spans}
+          trace={TRACE}
+          selectedSpanId="s1"
+          onSelectSpan={() => {}}
+          mode="tree"
+          onMode={() => {}}
+          timeline={false}
+        />
+      </ProjectProvider>
+    </QueryClientProvider>,
+  );
+  const header = screen.getByRole("columnheader", { name: "Cost" }).parentElement;
+  // Duration and Tokens fit their labels; Cost fits "$0.006422".
+  expect(header).toHaveStyle({ gridTemplateColumns: "minmax(160px, 1fr) 72px 58px 79px" });
+});
+
+it("keeps the header inside the scroll area, above the rows", () => {
+  render(gridElement(false));
+  const header = screen.getByRole("columnheader", { name: "Name" }).parentElement;
+  expect(header?.closest("[data-scroll-container]")).not.toBeNull();
+  expect(header).toHaveClass("sticky");
+});
