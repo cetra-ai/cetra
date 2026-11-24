@@ -34,10 +34,7 @@ export const CLOUD_COLUMNS = [
 /** @type {Column[]} */
 export const SELF_HOSTED_COLUMNS = [
   { name: SELF_HOSTED.name, price: formatMoney(SELF_HOSTED.priceYearly) },
-  {
-    name: SELF_HOSTED.licence.name,
-    price: `${formatMoney(SELF_HOSTED.licence.priceYearly)} / year`,
-  },
+  { name: SELF_HOSTED.licence.name, price: "Custom" },
 ];
 
 const ALL = [true, true, true, true];
