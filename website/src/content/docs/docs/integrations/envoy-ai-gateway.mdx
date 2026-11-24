@@ -1,0 +1,65 @@
+---
+title: Envoy AI Gateway
+description: "Send Envoy AI Gateway model calls to cetra from the gateway's OpenTelemetry environment, priced from the built-in table."
+---
+
+import Backing from "../../../../components/Backing.astro";
+
+cetra reads the spans Envoy AI Gateway sends for every model call it proxies, and prices them from the built-in table.
+
+<Backing fixtures={["openinference/envoy-ai-gateway-chat"]} />
+
+## Install
+
+Install the `aigw` CLI from the project's GitHub releases. It runs Envoy itself, and it is the route this page shows: the vendor's documentation deploys the same Gateway API resources on Kubernetes with Envoy Gateway.
+
+## Set up
+
+The gateway reads the standard OpenTelemetry environment variables:
+
+```bash
+export OTEL_EXPORTER_OTLP_TRACES_ENDPOINT=http://localhost:8080/v1/traces
+export OTEL_EXPORTER_OTLP_PROTOCOL=http/protobuf
+export OTEL_EXPORTER_OTLP_HEADERS="Authorization=Bearer $CETRA_API_KEY"
+export OTEL_SERVICE_NAME=aigw
+export OTEL_TRACES_EXPORTER=otlp
+export OTEL_METRICS_EXPORTER=none
+export OTEL_LOGS_EXPORTER=none
+
+aigw run config.yaml --admin-port <ADMIN_PORT>
+```
+
+Use your `sk-cetra-…` key for `$CETRA_API_KEY`. See [Send OpenTelemetry](/docs/get-started/opentelemetry/).
+
+The configuration file holds Gateway API resources: a `Gateway` with a listener, an `AIGatewayRoute` that routes to an `AIServiceBackend` with `schema: OpenAI` (or `Anthropic` for the Messages API route), and a `BackendSecurityPolicy` that carries the provider's API key. Start from aigw's own example configurations.
+
+On first start aigw downloads the Envoy binary from Tetrate's archive. To bring your own Envoy instead, place the binary at `$AIGW_DATA_HOME/envoy-versions/<VERSION>/bin/envoy` and set `ENVOY_VERSION` to that version.
+
+Your applications call the listener with any OpenAI-compatible client, at `http://<LISTENER_HOST>:<LISTENER_PORT>/v1`.
+
+## What you get
+
+Each model call is one `llm` span named `ChatCompletion`, read with the OpenInference convention:
+
+- the provider from `llm.system`, the token counts, and the messages, with the tool definitions and tool calls when the call has them;
+- the request and response JSON in the span's `input.value` and `output.value` attributes;
+- the model the response names, for example `gpt-4o-mini-2024-07-18`. The model your client sent stays in the invocation parameters, and on a failed call the span carries the request model.
+
+aigw reports no cost, so cetra computes it from the token counts and the built-in prices.
+
+## Limits
+
+- The fixture was captured with aigw 1.2.1, Envoy 1.39.1 and the `openai` client 3.45.0.
+- The model column shows the response model, because aigw writes a single model name and cetra maps it to the model column; on a failed call that name is the request model. The model your client sent stays in the invocation parameters.
+- The export is batched: with the default schedule delay, a span leaves about 2.4 s after the response. Stopping aigw with `SIGINT` flushes at once.
+- `llm.system` names the API family of the route: `openai` for `/v1/chat/completions`, `anthropic` for the Messages API route at `/anthropic/v1/messages` (whose span is named `Message` and was not captured). Whether it names the backend's provider when the backend is Bedrock, Azure or Vertex was not verified.
+- aigw binds several fixed ports besides the listener and the admin port (1061, 8081, 9856, 18000, 18002, 19000, 19001 and 19003), so two instances cannot run on one host.
+- The project was renamed Agent Router; its repository and its pages redirect.
+- Do not instrument both sides: an app with its own OpenTelemetry instrumentation behind a traced gateway counts each call twice, because the gateway joins the app's trace through `traceparent` and its span carries the same tokens and cost. Trace the gateway (it covers several apps and languages) or the app, not both.
+- If a field is missing, look at the span's **Attributes** tab and compare it with [Span attributes](/docs/reference/attributes/).
+
+## Next
+
+- [Traces](/docs/tracing/traces/): read the trace as a tree and a timeline.
+- [Cost and tokens](/docs/tracing/cost-and-tokens/): how cost is computed from the token counts.
+- [Custom model prices](/docs/tracing/cost-and-tokens/#custom-model-prices): price a model the built-in prices do not cover.
