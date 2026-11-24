@@ -99,7 +99,7 @@
     "path": "/acme/support-bot/traces",
     "waitFor": "100 loaded",
     "theme": "dark",
-    "viewport": { "width": 1920, "height": 600 },
+    "viewport": { "width": 1920, "height": 500 },
     "actions": [
       { "click": "div[role=\"grid\"][aria-label=\"Traces\"] >> text=support-agent" },
       { "click": "aside[aria-label=\"Trace\"] button:has-text(\"Timeline\")" }
