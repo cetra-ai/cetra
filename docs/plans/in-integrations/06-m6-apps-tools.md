@@ -166,13 +166,13 @@ The implementer:
 
 | Phase | Edits | Depends on |
 |---|---|---|
-| IN6.0 Harness package | `tools/capture/harness/` (moved files, new project files), `tools/capture/py/{pyproject.toml,uv.lock}`, `justfile`, `tools/packaging/release-prep.sh`, `tools/README.md` | — |
-| IN6.1 Capture tool | `tools/capture/src/{scenario,run,scrub,receiver,lib,main}.rs`, `tools/capture/fetch-tools.sh`, `justfile`, `docs/plans/b2-capture/README.md`, new `tools/capture/{n8n,promptfoo,langflow}/` and `tools/capture/envs/{browser-use,mcp,openlit,vector}/` (project and lock files only), `crates/otel/tests/support/mod.rs`, `fixtures/otlp/README.md`, `website/scripts/check-backing.{mjs,test.mjs}`, `tools/packaging/release-prep.sh`, `tools/README.md`, `AGENTS.md` | IN6.0 |
+| IN6.0 Harness package | `tools/capture/harness/` (moved files, new project files), `tools/capture/py/{pyproject.toml,uv.lock}`, `justfile`, `tools/packaging/release-prep.sh`, `tools/README.md` | IN6.S (so the capture locks are made after the extra exists) |
+| IN6.1 Capture tool | `tools/capture/src/{scenario,run,scrub,receiver,write,error,lib,main}.rs`, `tools/capture/fetch-tools.sh`, `justfile`, `docs/plans/b2-capture/README.md`, new `tools/capture/{n8n,promptfoo,langflow}/` and `tools/capture/envs/{browser-use,mcp,openlit,vector}/` (project and lock files only), `crates/otel/tests/support/mod.rs`, `fixtures/otlp/README.md`, `website/scripts/check-backing.{mjs,test.mjs}`, `tools/packaging/release-prep.sh`, `tools/README.md`, `AGENTS.md` | IN6.0 |
 | IN6.2 Voice rules | `crates/otel/src/{kind,context,payload,usage,normalize}.rs`, `crates/otel/src/conventions/{mod,scoped}.rs`, `docs/spec/02-ingestion.md` | — |
 | IN6.3 App rules | `crates/otel/src/{kind,context,usage}.rs`, `crates/otel/src/conventions/scoped.rs`, `docs/spec/02-ingestion.md` | IN6.2 (same files) |
 | IN6.4a OpenLIT, Browser Use and Promptfoo rules | `crates/otel/src/{kind,context}.rs`, `docs/spec/02-ingestion.md` | IN6.3 (same files) |
 | IN6.4b Vector and zero-cost rules | `crates/otel/src/{kind,cost,normalize}.rs`, `docs/spec/02-ingestion.md`, `docs/mvp-decisions.md` | IN6.4a; Q1, Q2 |
-| IN6.S SDK registry row `mcp` | `sdks/python/{pyproject.toml,uv.lock,README.md,src/cetra/_instrument.py,tests/test_instrument.py}`, `docs/spec/10-sdk.md`, `website/src/content/docs/docs/reference/python/index.mdx`, `skills/cetra/references/python.md` (generated) | — |
+| IN6.S SDK registry row `mcp` (runs first) | `sdks/python/{pyproject.toml,uv.lock,README.md,src/cetra/_instrument.py,tests/test_instrument.py}`, `tools/capture/py/uv.lock`, `docs/spec/10-sdk.md`, `website/src/content/docs/docs/reference/python/index.mdx`, `skills/cetra/references/python.md` (generated) | — |
 | IN6.5 Captures A | scenarios + fixtures: promptflow, livekit, pipecat, browser-use, mcp; `tools/capture/harness/src/capture_py/harness.py`; `tools/capture/py/{pyproject.toml,uv.lock}` (or a new `envs/<name>/`) | IN6.1, IN6.3 (includes IN6.2) |
 | IN6.6 Captures B | scenarios + fixtures: openlit-chat, openlit-vector, openllmetry vector | IN6.1, IN6.4b |
 | IN6.7 Captures C | scenarios + fixtures: n8n, langflow, promptfoo | IN6.1, IN6.4a (includes IN6.3) |
@@ -180,14 +180,35 @@ The implementer:
 | IN6.9 Index, sidebar, records | as IN5.5 | IN6.8, IN6.S |
 
 **Parallel runs:**
-- IN6.0 first: it moves files. IN6.1 starts after its commit.
-- IN6.0, IN6.2 and IN6.S have disjoint files and can run at the same time.
+- IN6.S first: it changes `cetra-sdk`'s extras, which every capture lock embeds, so the capture locks are made after it. Then IN6.0, which moves files; IN6.1 starts after its commit.
+- IN6.2 has files disjoint from IN6.S, IN6.0 and IN6.1 and can run beside any of them.
 - IN6.2 → IN6.3 → IN6.4a → IN6.4b run in order: they edit the same files.
 - IN6.5, IN6.6 and IN6.7 have disjoint files (no shared-file edits between capture phases: only IN6.5 edits the harness and `tools/capture/py`'s project files; IN6.6 and IN6.7 add new directories only). They may run at the same time; machine load rules apply (run the captures one at a time).
 - The setup-only half of IN6.8 can run beside any phase.
 - IN6.5 needs IN6.3 only for blessing. It may capture to the scratchpad first, as M5's IN5.3 did.
 
 ---
+
+## IN6.S — SDK registry row `mcp`
+
+**Runs first** (before IN6.0).
+
+**Goal:** `instrument=["mcp"]` and the `cetra-sdk[mcp]` extra, as D-IN-7 lists (the registry has no `mcp` row today). Mirror how the M3 rows were added (commit `26f6243`: `git show 26f6243` shows every file).
+
+**Steps.**
+1. **Verify before writing:** in `openinference-instrumentation-mcp` at the newest version on or before the 7-day cutoff (2.1.5 at 2026-11-17), the module is `openinference.instrumentation.mcp` and the class `MCPInstrumentor`, and read its `requires-python`. If either name differs, stop. If it excludes a Python version the SDK supports (≥ 3.11), add the marker as `instructor` and `beeai` do (`; python_version < "…"`), and say so in spec 10's table.
+2. `sdks/python/src/cetra/_instrument.py`: a row in `REGISTRY`: `Instrumentor(name="mcp", extra="mcp", module="openinference.instrumentation.mcp", cls="MCPInstrumentor")`.
+3. `sdks/python/pyproject.toml`: the extra `mcp = ["openinference-instrumentation-mcp>=<version>"]` and the same requirement in `all`. The dev group does not grow (D-IN-21). Run `uv lock` in `sdks/python`.
+4. `sdks/python/tests/test_instrument.py`: the docstring of `test_other_registry_entries_import` counts the names ("The nineteen other names": now twenty). The parametrized test covers the row; it skips when the extra is not installed.
+5. Docs: `docs/spec/10-sdk.md` (the `## Python API` heading's extras list, the `### Instrumentors` table row, and one sentence: the row records no spans of its own, it joins an `mcp<2` server's spans to the client trace, and `mcp>=2` traces natively); `sdks/python/README.md` and `website/src/content/docs/docs/reference/python/index.mdx` (the extras table); then `cd website && CETRA_DOCS_WRITE=1 node scripts/skill-references.mjs` for `skills/cetra/references/python.md`.
+
+**Tests:** the parametrized import test (step 4). With the extra installed, `resolve(["mcp"])` returns the class.
+
+6. `tools/capture/py/uv.lock` embeds `cetra-sdk`'s metadata (the only capture lock that exists at this point): run `uv lock` in `tools/capture/py` and commit the result.
+
+**Done when:** `just check-py`; `cd website && node scripts/skill-references.mjs`; `cd tools/capture/py && uv lock --check`.
+
+**Commit:** `Add MCP to the instrumentor registry`
 
 ## IN6.0 — Harness package
 
@@ -232,7 +253,7 @@ The implementer:
 **Done when:**
 - `cd tools/capture/harness && uv lock --check && uv run ruff format --check && uv run ruff check && uv run mypy`;
 - `cd tools/capture/py && uv lock --check && uv run ruff format --check && uv run ruff check && uv run mypy`;
-- `cargo run -q -p cetra-capture -- run genai/openai-v2-chat-tool genai/litellm-proxy-chat --check` (an in-process scenario and a tool scenario) passes with no fixture change;
+- `just capture-tools` first (the `litellm-proxy` case needs its tool environment), then `cargo run -q -p cetra-capture -- run genai/openai-v2-chat-tool genai/litellm-proxy-chat --check` (an in-process scenario and a tool scenario) passes with no fixture change;
 - `git status` shows no change under `fixtures/`.
 
 **Commit:** `Move the capture harness into its own package`
@@ -246,6 +267,7 @@ The implementer:
    - `GROUPS`: add `n8n`, `livekit`, `pipecat`, `promptflow` and `langflow`.
    - `Scenario` gains `#[serde(default = "default_mock_host")] pub mock_host: String`, default `"127.0.0.1"`. Validation (in `check`): the value parses as `std::net::Ipv4Addr` and `is_loopback()`.
    - Update the module doc and `docs/plans/b2-capture/README.md` § The scenario format with `mock_host`.
+   - `write.rs`'s test helper `scenario()` builds a `Scenario { … }` literal (line ~186): it gets `mock_host: "127.0.0.1".to_owned()`. No other `Scenario { … }` literal exists (`run.rs` and `scenario.rs` tests build from JSON, where the default applies).
    - Tests: the default; `127.0.0.2` accepted; `10.0.0.1`, `localhost` and `::1` rejected; `full_scenario_round_trips` carries a non-default value.
 2. **`run.rs`, discovery:**
    - `discover` returns `Vec<Discovered>` instead of 3-tuples. `pub struct Discovered { pub case: CasePath, pub language: Language, pub env: Option<String>, pub dir: PathBuf }`, exported from `lib.rs`. Update the callers: `main.rs` (`list`, `run`, `select`) and the `discover` tests in `run.rs`.
@@ -282,6 +304,7 @@ The implementer:
 
    - Each pnpm `pnpm-workspace.yaml` has the shape of `tools/capture/ts/pnpm-workspace.yaml`: `packages: []`, `minimumReleaseAge: 10080`, and an `allowBuilds` map. The implementer lists every package of the lock that has a build script, sets each `true` or `false` with a one-line reason (as `tools/capture/ts` does), and reports the list. **Stop** if an install fails on a build script.
    - Each Python environment also has a `.python-version` (copy the project's).
+   - Each environment's `[tool.mypy]` gets a `[[tool.mypy.overrides]]` with `ignore_missing_imports = true` for each of its packages that ships no types, as `tools/capture/py` does for `smolagents` and `guardrails`. The implementer lists the packages in the report.
 8. **`fetch-tools.sh`:** after the LiteLLM Proxy environment, install, each skipped when its lock copy matches (M5's rule):
    - Langflow, into `target/capture-tools/langflow/<version>`, as LiteLLM;
    - n8n and Promptfoo: `pnpm install --frozen-lockfile --dir tools/capture/<name> --modules-dir target/capture-tools/<name>/<version>/node_modules`, lock copy `target/capture-tools/<name>/pnpm-lock.yaml`;
@@ -327,9 +350,9 @@ The implementer:
    - a mapped host gives that provider; an unmapped host gives an empty provider, and no later source of `PROVIDER` is read;
    - any span kind (the provider column is filled for every kind);
    - elsewhere nothing changes.
-   - `ENDPOINT_PROVIDERS` gains the row `("api.openai.com", "openai")`. `openai` is a priced provider, so the test `endpoint_providers_are_rule_12_fixed_points_and_priced_or_listed` needs no list change. A scan of every committed `expected.json` found no `llm` or `embedding` span with host `api.openai.com` and a provider other than `openai`, so no fixture changes; if one does, stop and report it.
-   - Spec 02: add the row to the § Provider from the endpoint table, and one sentence under § Model, provider, usage for the LiveKit rule.
-   - Tests: `api.openai.com` gives `openai`; `127.0.0.1:1234` gives an empty provider and the key is consumed; a plain `openai` value is unchanged; the same host string on another scope stays the provider string (as today); an `llm` span with `server.address = api.openai.com` and no provider is `openai` (the new row).
+   - No row is added to `ENDPOINT_PROVIDERS`: `match_endpoint("api.openai.com")` stays `None` (the assertion at `context.rs:1172`) and D-IN-2 is unchanged. Inside this branch, a host equal to `api.openai.com` gives `openai`; any other host goes through `match_endpoint`.
+   - Spec 02: one sentence under § Model, provider, usage for the LiveKit rule (host `api.openai.com` gives `openai`, other mapped hosts their provider, an unmapped host an empty provider). The § Provider from the endpoint table does not change.
+   - Tests: `api.openai.com` gives `openai`; `127.0.0.1:1234` gives an empty provider and the key is consumed; a mapped host such as `openrouter.ai` gives `openrouter`; a plain `openai` value is unchanged; the same host string on another scope stays the provider string (as today); `match_endpoint("api.openai.com")` is still `None`.
 7. **Scoped content** (R-PC-1, R-LK-3; M6). New module `crates/otel/src/conventions/scoped.rs` (`mod scoped;` in `conventions/mod.rs`) with one function `pub(crate) fn read(ctx: &mut ReadContext<'_, '_>, filled: &Io) -> Io`.
    - `payload::assemble` calls it after the loop over `readers` and before the `drop_lower_payloads` loop, for every span. It sets `io.input` and `io.output` from the result only where they are still `None`. It adds no convention to `winners`.
    - `read` acts only on a fixed scope table and returns only the fields `filled` lacks. A key is consumed (`bag.take_payload`) only when it fills its field. An empty string is absent (as `voltagent.rs`'s `plain`).
@@ -337,9 +360,9 @@ The implementer:
    - **Pipecat** (scope starts with `pipecat`): `input` and `output`.
      - `input`: `decode_json_text`; when it is an array and `crate::convert::openai_messages(&json)` is `Ok`, the payload is `Payload::Messages`; otherwise `non_message_payload`.
      - `output`: `non_message_payload`.
-   - **LiveKit** (scope `livekit-agents`), keyed by attribute (each key is written by one span only, spike § 4): input from `lk.pii.user_input`, else `lk.pii.chat_ctx` (LiveKit's own JSON, stored as JSON), else `lk.pii.function_tool.arguments`; output from `lk.pii.response.text`, else `lk.pii.function_tool.output`. Because `read` fills only empty fields, the GenAI keys (`gen_ai.tool.call.arguments`, `.result`) win on `function_tool`. `lk.pii.input_text` and `lk.pii.user_transcript` are **not** read: no span in text mode writes them.
+   - **LiveKit** (scope `livekit-agents`), keyed by attribute (each input key is written by one span only, spike § 4): input from `lk.pii.user_input` (`agent_turn`), else `lk.pii.chat_ctx` (`llm_node`; LiveKit's own JSON, stored as JSON), else `lk.pii.function_tool.arguments`; output from `lk.pii.response.text` (written by both `agent_turn` and `llm_node`), else `lk.pii.function_tool.output`. The read order is the order written here. Because `read` fills only empty fields, the GenAI keys (`gen_ai.tool.call.arguments`, `.result`) win on `function_tool`. `lk.pii.input_text` and `lk.pii.user_transcript` are **not** read: no span in text mode writes them.
    - Add the scope table's entries for `promptflow` and `langflow` in IN6.3, not here.
-   - Spec 02 § Input and output: one row for the scoped keys.
+   - Spec 02 `### Input / output`: one row for the scoped keys.
    - Tests:
      - Pipecat: an OpenAI message array `input` gives messages; a non-array, a non-OpenAI array and invalid JSON give the plain value with no `cetra.normalize_error`; text `output`; plain `input`/`output` on another scope stay unread; a Pipecat span whose convention reader already filled `input` keeps it and leaves `input` unconsumed.
      - LiveKit: each key fills its field; `function_tool` keeps `gen_ai.tool.call.*` over `lk.pii.function_tool.*`; the same keys on another scope stay unread.
@@ -364,10 +387,10 @@ The implementer:
      - `Retrieval` → `retriever`;
      - `Flow` and `LangChain` → `chain`;
      - `Function` → `span`.
-   - **Models**, in `context.rs`: a new function `promptflow_models(bag, scope_name, request, response, warnings)` called in `fill` after `voltagent_model`. On scope `promptflow`, an empty response model is filled from `llm.response.model` (consumed), and an empty request model from the `model` field of the `inputs` JSON (read with `decode_json_text`; `inputs` is not consumed here, it is the span's input).
+   - **Models**, in `context.rs`: a new function `promptflow_models(bag, scope_name, request, response, warnings)` called in `fill` after `voltagent_model`. On scope `promptflow`, only on a span whose `span_type` is `LLM` or `Embedding` (peeked with `bag.get`; the key is consumed later by the kind row), an empty response model is filled from `llm.response.model` (consumed), and an empty request model from the `model` field of the `inputs` JSON (read with `decode_json_text`; `inputs` is not consumed here, it is the span's input).
    - **Tokens**, in `usage.rs`: `voltagent_usage` and its struct `VoltagentUsage` become `scoped_usage` and `ScopedUsage`; their gate is `kind == Llm && (conventions contains Voltagent || scope_name == "promptflow")`. `usage()`'s unused `_scope_name` parameter becomes `scope_name` and is passed in. Update the doc comments. `llm.usage.total_tokens` is already a source of `TOTAL`.
    - **IO**, in `scoped.rs` (add the scope to the table): input from `inputs`, output from `output`.
-     - On an `llm` span, `inputs` holds the OpenAI request parameters. When it is an object with a `messages` array and `openai_messages` accepts it, the input is `Payload::Messages`; otherwise the plain value.
+     - On an `llm` span, `inputs` holds the OpenAI request parameters. When it is an object with a `messages` array and `openai_messages(&inputs["messages"])` (the array itself) is `Ok`, the input is `Payload::Messages`; otherwise the plain value.
      - `output` is the OpenAI response object. When `choices[0].message` exists and `openai_messages` accepts `[that message]`, the output is `Payload::Messages`; otherwise the plain value.
      - Before writing this, check what the capture's dump holds (IN6.5 captures it; until then the spike § 3 only describes it). If it differs, stop.
    - **Detection.** `detect.rs` marks the `llm.` prefix as OpenInference. Write a test with both conventions on one span (`input.value` and `inputs`): OpenInference's reader wins and `inputs` stays unread; with only `inputs`, the scoped read fills it.
@@ -382,7 +405,7 @@ The implementer:
    - n8n spans carry no content; nothing is read.
 
 **Tests:**
-- Prompt Flow: each `span_type` value; models from `llm.response.model` and `inputs.model`; an `inputs` without `model` leaves the request model empty; tokens (`llm.usage.prompt_tokens`, `completion_tokens`, `total_tokens`) fill an `llm` span and are not read on another scope or on a non-`llm` kind; VoltAgent's `llm.usage.*` still works; IO with and without `messages` and `choices`.
+- Prompt Flow: each `span_type` value; models from `llm.response.model` and `inputs.model`; a `Function` span whose `inputs` has a `model` field gets no model; an `inputs` without `model` leaves the request model empty; tokens (`llm.usage.prompt_tokens`, `completion_tokens`, `total_tokens`) fill an `llm` span and are not read on another scope or on a non-`llm` kind; VoltAgent's `llm.usage.*` still works; IO with and without `messages` and `choices`.
 - Langflow: root with `flow_id`; each `trace_type`; a component span with `flow_id` and `trace_type = llm` is `chain`; IO as the plain value.
 - n8n: `workflow.execute`, `node.execute` without and with `invoke_agent` and `chat`.
 - Every rule: the same keys on another scope are unchanged.
@@ -397,7 +420,7 @@ The implementer:
 
 **Steps.**
 1. **R-OL-1** (scope starts with `openlit.instrumentation.`), in `scope_gated`: when `gen_ai.operation.name` did not decide (its value is not in `genai_operation`), `decide(bag, "gen_ai.operation.type", …)`: `invoke_agent` → `agent`, `execute_task` → `chain`. Unit-tested only (D-IN-26 item 11).
-2. **R-OL-3:** `browser_use` joins `FRAMEWORK_NAMES` in `context.rs` (sorted: it goes between `autogen` and `gcp.vertex.agent`; the test `framework_names_are_sorted` checks). Spec 02's two mentions of the list (§ Model, provider, usage and § Normalization rules, "Framework names, never providers") gain it. Unit-tested only.
+2. **R-OL-3:** `browser_use` joins `FRAMEWORK_NAMES` in `context.rs` (sorted: it goes between `autogen` and `gcp.vertex.agent`; the test `framework_names_are_sorted` checks). Spec 02 has one list, the "Framework names, never providers" bullet in `## Normalization rules (clarifications)` (line ~277); it gains `browser_use`. Check that the `provider` row of `### Model, provider, usage` (line ~141) only points at that list. Unit-tested only.
 3. **R4, Promptfoo** (scope `promptfoo.providers`, exact), in `scope_gated`: a span with `gen_ai.evaluation.name` is `evaluator`. The key is peeked, not consumed. Read `spikes/m6-tools-eval.md` § Evaluation tools (the Promptfoo table) for the keys. The request and response bodies are not read (D-IN-26 item 11).
 
 **Tests:** each rule; the same keys on another scope are unchanged; `browser_use` is skipped as a provider and the next source decides.
@@ -437,23 +460,6 @@ The implementer:
 
 **Commit:** `Read vector database spans and ignore a zero reported cost`
 
-## IN6.S — SDK registry row `mcp`
-
-**Goal:** `instrument=["mcp"]` and the `cetra-sdk[mcp]` extra, as D-IN-7 lists (the registry has no `mcp` row today). Mirror how the M3 rows were added (commit `26f6243`: `git show 26f6243` shows every file).
-
-**Steps.**
-1. **Verify before writing:** in `openinference-instrumentation-mcp` at the newest version on or before the 7-day cutoff (2.1.5 at 2026-11-17), the module is `openinference.instrumentation.mcp` and the class `MCPInstrumentor`, and read its `requires-python`. If either name differs, stop. If it excludes a Python version the SDK supports (≥ 3.11), add the marker as `instructor` and `beeai` do (`; python_version < "…"`), and say so in spec 10's table.
-2. `sdks/python/src/cetra/_instrument.py`: a row in `REGISTRY`: `Instrumentor(name="mcp", extra="mcp", module="openinference.instrumentation.mcp", cls="MCPInstrumentor")`.
-3. `sdks/python/pyproject.toml`: the extra `mcp = ["openinference-instrumentation-mcp>=<version>"]` and the same requirement in `all`. The dev group does not grow (D-IN-21). Run `uv lock` in `sdks/python`.
-4. `sdks/python/tests/test_instrument.py`: the docstring of `test_other_registry_entries_import` counts the names ("The nineteen other names": now twenty). The parametrized test covers the row; it skips when the extra is not installed.
-5. Docs: `docs/spec/10-sdk.md` (the `## Python API` heading's extras list, the `### Instrumentors` table row, and one sentence: the row records no spans of its own, it joins an `mcp<2` server's spans to the client trace, and `mcp>=2` traces natively); `sdks/python/README.md` and `website/src/content/docs/docs/reference/python/index.mdx` (the extras table); then `cd website && CETRA_DOCS_WRITE=1 node scripts/skill-references.mjs` for `skills/cetra/references/python.md`.
-
-**Tests:** the parametrized import test (step 4). With the extra installed, `resolve(["mcp"])` returns the class.
-
-**Done when:** `just check-py`; `cd website && node scripts/skill-references.mjs`.
-
-**Commit:** `Add MCP to the instrumentor registry`
-
 ## IN6.5 — Captures A: Prompt Flow, LiveKit, Pipecat, Browser Use, MCP
 
 **Goal:** five captured cases, each written from the spike's sketch:
@@ -474,10 +480,10 @@ The spike scripts live in the scratchpad and may be gone. The dumps in the spike
    | Case | Program |
    |---|---|
    | `promptflow/openai-trace` | Two `@trace` functions around two chat calls (a tool call, then text); `setup_exporter_from_environ()` with `OTEL_EXPORTER_OTLP_ENDPOINT` set to the full traces URL (Prompt Flow posts to it as given) |
-   | `livekit/text-session` | `AgentSession` text mode with one `get_weather` function tool and `set_tracer_provider(provider, allow_pii=True)`. The model is `openai.LLM(client=openai.AsyncClient(base_url="https://api.openai.com/v1", api_key=…, http_client=real_host_async_client()))`, or the plugin's equivalent: read `livekit-plugins-openai`'s source for how `LLM` takes a client and where `provider` comes from (the spike says `self._client._base_url.netloc`). **Stop** if the plugin cannot be given a client. The turns carry `"host": "api.openai.com"` |
+   | `livekit/text-session` | `AgentSession` text mode with one `get_weather` function tool and `set_tracer_provider(provider, allow_pii=True)`. The model is `openai.LLM(client=openai.AsyncClient(base_url="https://api.openai.com/v1", api_key=…, http_client=real_host_async_client()))`, or the plugin's equivalent: read `livekit-plugins-openai`'s source for how `LLM` takes a client and where `provider` comes from (the spike says `self._client._base_url.netloc`). **Stop** if the plugin cannot be given a client. If the captured `llm_request` span has no provider or host key at all, stop and report. The turns carry `"host": "api.openai.com"` |
    | `pipecat/openai-pipeline` | The aggregator pipeline with `OpenAILLMService`, a registered `get_weather`, `enable_tracing=True` and `conversation_id` |
    | `genai/browser-use-agent` | `browser-use` 1.0 with `pydantic_ai.Agent.instrument_all(True)` and plain OTel; headless Chromium from `PLAYWRIGHT_BROWSERS_PATH=<CETRA_CAPTURE_TOOLS>/playwright`; the mock returns the `done` JSON; `ANONYMIZED_TELEMETRY=false`, `BROWSER_USE_CLOUD_SYNC=false` |
-   | `genai/mcp-tool` | **No chat, no mock turn.** The scenario runs MCP over stdio with the client and the server in separate processes (client in `main`, server a script of the scenario directory started with `sys.executable`), `mcp==2.3.0`, `instrumentation: "mcp"`. It calls `get_weather` once, then `tools/list`. Both processes export through `capture_py.harness.setup()`; the server flushes its provider before it exits, and the client waits for the server process to end before `finish`. The stdio transport hands the server only a short default environment, so the client passes the server the `OTEL_*`, `CETRA_CAPTURE_*` and `PATH` variables explicitly (`StdioServerParameters(env=…)`) |
+   | `genai/mcp-tool` | **No chat, no mock turn (`"turns": []` in `scenario.json`).** The scenario runs MCP over stdio with the client and the server in separate processes (client in `main`, server a script of the scenario directory started with `sys.executable`), `mcp==2.3.0`, `instrumentation: "mcp"`. It calls `get_weather` once, then `tools/list`. Both processes export through `capture_py.harness.setup()`; the server flushes its provider before it exits, and the client waits for the server process to end before `finish`. The stdio transport hands the server only a short default environment, so the client passes the server the `OTEL_*`, `CETRA_CAPTURE_*` and `PATH` variables explicitly (`StdioServerParameters(env=…)`) |
 
    - Variables beyond the instrumentation switches in `scenario.json`'s `env` (whose keys must start with `OTEL_`, `OPENINFERENCE_`, `TRACELOOP_`, `LANGFUSE_`, `LMNR_`, `ANTHROPIC_` or `ADK_`) are set by the scenario code: for a subprocess in its `env`, for an in-process library with `os.environ[…] = …` before the import. `program_env` passes only a fixed list.
    - The mock turns follow existing tool-call scenarios, such as `openinference/openai-agents-tool`. Volatile and timing attributes are found by two runs, as in M5.
@@ -527,6 +533,7 @@ The spike scripts live in the scratchpad and may be gone. The dumps in the spike
 **Steps.** Write the scenarios from `spikes/m6-apps.md` §§ 1–2 and `spikes/m6-tools-eval.md` § Promptfoo. Each is a Python scenario in `tools/capture/py` that launches a tool from `target/capture-tools` with `harness.tool_binary`, as M5's gateways do. Use `free_port`, `wait_http(proc=…)` and `stop_gateway`. Modules are named `n8n_agent_webhook.py`, `langflow_basic_prompting.py` and `genai_promptfoo_eval.py`.
 
 - **`scenario.json` of a tool scenario:** `instrumentation` is the tool's name (`n8n`, `langflow`, `promptfoo`); `libraries` is that name plus the Python libraries the scenario imports and records; the scenario ends with `finish_tool(None, {tool: version, **importlib_versions([…])})`, whose keys must cover every entry of `libraries`.
+- **Export settings, all three tools.** Each scenario passes `OTEL_EXPORTER_OTLP_COMPRESSION=none` to the tool (or confirms from the first run that its bodies are identity: the receiver refuses gzip). Each waits a fixed `EXPORT_DELAY` after its last request, then calls `stop_gateway`. The runner's `PROGRAM_TIMEOUT` stays 180 s; if a case exceeds it, stop and report.
 - **Environment of the tool process.** `scenario.json`'s `env` only takes the prefixes of IN6.5 step 3, and `program_env` passes a fixed list. Every variable below is set by the scenario code in the tool subprocess's `env` (the runner clears the parent's, so it also passes `PATH` and `HOME`, as `genai_litellm_proxy_chat.py` does).
 
 1. **`n8n/agent-webhook`:**
@@ -534,7 +541,7 @@ The spike scripts live in the scratchpad and may be gone. The dumps in the spike
    - Setup: `n8n import:workflow` and `import:credentials` from files in the scenario directory, then `update:workflow --active=true`, then `n8n start`. The binary is `tool_binary("n8n", <version>, "node_modules", ".bin", "n8n")`.
    - Environment: `N8N_USER_FOLDER` (a temp dir), `N8N_DIAGNOSTICS_ENABLED=false`, `N8N_VERSION_NOTIFICATIONS_ENABLED=false`, `N8N_TEMPLATES_ENABLED=false`, `N8N_AI_ENABLED=false`, the `N8N_OTEL_*` of the spike (`N8N_OTEL_ENABLED=true`, `N8N_OTEL_EXPORTER_OTLP_ENDPOINT` as the receiver origin, `N8N_OTEL_EXPORTER_OTLP_PROTOCOL=http/protobuf`), `N8N_OTEL_TRACES_PRODUCTION_ONLY=false`, and `N8N_PORT` from `free_port()`.
    - Request: one `POST /webhook/<path>`.
-   - Wait for the export, then stop.
+   - Wait with a fixed `EXPORT_DELAY` (as `genai_litellm_proxy_chat.py` does), then `stop_gateway`.
    - Expected: `chain`, `span`, `agent`, `llm`. Every `node.execute` keeps its name (D-IN-26 item 8). There is no content.
 2. **`langflow/basic-prompting`:**
    - `scenario.json` sets `"mock_host": "127.0.0.2"` (IN6.1): Langflow rewrites `127.0.0.1` when it thinks it runs in a container, so the mock binds `127.0.0.2`. The scenario sets `OPENAI_BASE_URL` from `mock_url("/v1")` and `LANGFLOW_PROVIDER_CREDENTIAL_ALLOWED_HOSTS` to `http://127.0.0.2` in the Langflow process's environment, plus the spike's `TRACELOOP_*`, `LANGFLOW_NATIVE_TRACING=false` and `DO_NOT_TRACK` variables.
@@ -631,7 +638,7 @@ Setup-only pages follow M5's setup-only pages. Every `python`, `ts` or `js` fenc
 
 **Goal:** as IN5.5.
 
-**Edit:** as IN5.5: `website/src/content/docs/docs/integrations/index.mdx`, `website/astro.config.mjs`, `website/src/marketing/data/integrations.test.mjs`, `docs/plans/in-integrations/00-design.md`, `docs/mvp-decisions.md`, `CHANGELOG.md`, `docs/roadmap.md`.
+**Edit:** as IN5.5: `website/src/content/docs/docs/integrations/index.mdx`, `website/astro.config.mjs`, `website/src/marketing/data/integrations.test.mjs`, `docs/plans/in-integrations/00-design.md`, `docs/mvp-decisions.md`, `CHANGELOG.md`, `docs/roadmap.md`, `skills/cetra/references/integrations.md` (generated).
 
 **Steps.**
 1. **`index.mdx`:**
@@ -642,6 +649,7 @@ Setup-only pages follow M5's setup-only pages. Every `python`, `ts` or `js` fenc
 2. **Design and `mvp-decisions.md`:**
    - D-IN-26, with Q1–Q4's answers (items 13 to 15 are Q1–Q3's);
    - amend the "New fixture group names" bullet (`00-design.md` line 84): `promptflow` and `langflow` are added, and `check-backing.mjs` now accepts `[a-z0-9_]+`;
+   - amend D-IN-6 (design line 306, `mvp-decisions.md` line 1023): plain `output`/`inputs` are also read on scope `promptflow`, and `input`/`output` on scopes starting `pipecat`, by `conventions/scoped.rs` without a convention (D-IN-26 item 9);
    - amend D-IN-7's `mcp (M6)` cell: the row is added by M6;
    - the § M6 rows as built;
    - § Not supported gains the list in § What it is;
@@ -650,6 +658,7 @@ Setup-only pages follow M5's setup-only pages. Every `python`, `ts` or `js` fenc
    - `Added`: the pages, the captured integrations, `instrument=["mcp"]` and the `cetra-sdk[mcp]` extra, and the capture harness package with per-environment scenario roots;
    - `Changed`: the scope-gated rules, `tts`/`stt` as spans, LiveKit's provider host (`api.openai.com` gives `openai`), and Q2's zero-cost rule if (a) or (b).
 4. **Roadmap:** the M6 plan link, status "M1–M6 implemented", decisions `D-IN-1`–`D-IN-26`.
+5. **Regenerate:** `cd website && CETRA_DOCS_WRITE=1 node scripts/skill-references.mjs` (`just docs-gen`): the index changes `skills/cetra/references/integrations.md`. Commit what it rewrites.
 
 **Done when:** as IN5.5.
 
