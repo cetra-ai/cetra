@@ -1156,6 +1156,14 @@ mod tests {
     }
 
     #[test]
+    fn embedding_dims_4096_passes_validation() {
+        // The bound itself is valid (IN9.6): EverOS asks for 1024, Cognee's model 3072.
+        let mut value = embedding("openai.embeddings");
+        value["turns"][0]["dims"] = json!(4096);
+        load_value(value).expect("dims 4096 is inside the bound");
+    }
+
+    #[test]
     fn usage_is_consistent() {
         let mut value = chat();
         value["turns"][0]["usage"]["cache_read"] = json!(11);

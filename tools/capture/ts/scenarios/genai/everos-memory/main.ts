@@ -48,9 +48,14 @@ function freePort(): Promise<number> {
   });
 }
 
-async function waitForHealth(url: string): Promise<void> {
+/** Reads the spawn error on each poll, so a server that cannot start fails at once. */
+async function waitForHealth(url: string, startError: () => Error | undefined): Promise<void> {
   const deadline = Date.now() + HEALTH_TIMEOUT_MS;
   for (;;) {
+    const failed = startError();
+    if (failed !== undefined) {
+      throw failed;
+    }
     if (Date.now() > deadline) {
       throw new Error(`everos did not answer 200 on ${url} within ${HEALTH_TIMEOUT_MS} ms`);
     }
@@ -74,15 +79,16 @@ async function main(): Promise<void> {
   const mockUrl = requiredEnv("CETRA_CAPTURE_MOCK_URL");
   const endpoint = requiredEnv("CETRA_CAPTURE_OTLP_ENDPOINT");
   // The work directory holds EverOS's root (EVEROS_ROOT, where `everos init`
-  // writes its config) beside the temp directories the server is pointed at,
-  // so a run writes nothing outside the scenario folder.
+  // writes its config) beside the home and temp directories the server is
+  // pointed at, so a run writes nothing outside the scenario folder.
   const work = path.join(scenarioDir, "work");
   const root = path.join(work, "root");
+  const home = path.join(work, "home");
   const xdgHome = path.join(work, "xdg");
   const tmp = path.join(work, "tmp");
   const env: NodeJS.ProcessEnv = {
     PATH: requiredEnv("PATH"),
-    HOME: requiredEnv("HOME"),
+    HOME: home,
     TZ: requiredEnv("TZ"),
     LANG: requiredEnv("LANG"),
     EVEROS_ROOT: root,
@@ -101,6 +107,7 @@ async function main(): Promise<void> {
     TMPDIR: tmp,
   };
   rmSync(work, { recursive: true, force: true });
+  mkdirSync(home, { recursive: true });
   mkdirSync(xdgHome, { recursive: true });
   mkdirSync(tmp, { recursive: true });
   await new Promise<void>((resolve, reject) => {
@@ -119,6 +126,9 @@ async function main(): Promise<void> {
   const port = await freePort();
   const server = spawn(everosBin, ["server", "start"], {
     cwd: work,
+    // The server leads its own process group, so the group kill below also
+    // takes down anything it spawns.
+    detached: true,
     stdio: ["ignore", 2, "inherit"],
     env: { ...env, EVEROS_API__PORT: String(port) },
   });
@@ -133,7 +143,7 @@ async function main(): Promise<void> {
     });
   });
   try {
-    await waitForHealth(`http://127.0.0.1:${port}/health`);
+    await waitForHealth(`http://127.0.0.1:${port}/health`, () => startError);
     const add = await fetch(`http://127.0.0.1:${port}/api/v2/memory/add`, {
       method: "POST",
       headers: { "content-type": "application/json" },
@@ -154,14 +164,25 @@ async function main(): Promise<void> {
     }
     await add.body?.cancel();
     // The flush's extraction spans run with the mock's one fixed answer, which
-    // only the boundary call's Reply model accepts, so its HTTP envelope is an
-    // error by design; the call is made for the spans it produces.
+    // only the boundary call's Reply model accepts, so the flush answers its
+    // designed error: 503 with the external-service error envelope. Anything
+    // else is a difference; the error message carries the status only, never
+    // the body.
     const flush = await fetch(`http://127.0.0.1:${port}/api/v2/memory/flush`, {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ session_id: "capture-s1" }),
     });
-    await flush.body?.cancel();
+    const flushEnvelope = (await flush.json().catch(() => null)) as {
+      error?: { code?: unknown };
+    } | null;
+    if (
+      flush.status !== 503 ||
+      flushEnvelope === null ||
+      flushEnvelope.error?.code !== "EXTERNAL_SERVICE_UNAVAILABLE"
+    ) {
+      throw new Error(`the flush POST answered ${flush.status}`);
+    }
     await sleep(EXTRACTION_DRAIN_MS);
     const search = await fetch(`http://127.0.0.1:${port}/api/v2/memory/search`, {
       method: "POST",
@@ -182,8 +203,17 @@ async function main(): Promise<void> {
     }
     writeMeta({}, { everos: "1.7.0" });
   } finally {
-    if (server.exitCode === null && server.signalCode === null) {
-      server.kill("SIGKILL");
+    // The group kill runs on failure too; ESRCH means the group is gone already.
+    // A failure is reported, never thrown: a throw here would swallow the
+    // error the try block is already carrying.
+    if (server.pid !== undefined) {
+      try {
+        process.kill(-server.pid, "SIGKILL");
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "ESRCH") {
+          process.stderr.write(`everos group kill failed: ${error}\n`);
+        }
+      }
     }
     rmSync(work, { recursive: true, force: true });
   }

@@ -186,13 +186,21 @@ const WORKFLOW_SDK_PREFIXES: &[&str] = &["workflow.", "step.", "queue."];
 /// D-IN-31 item 5: Vercel's Workflow SDK, which eve runs on, exports its internal
 /// spans under the scope `workflow`. It is not a coding agent, but its spans are
 /// discarded and counted like the coding agents' (D-CA-6): `true` when the scope is
-/// exactly `workflow` and the name starts with `workflow.`, `step.` or `queue.`.
-/// Any other scope or name: `false`.
-pub(crate) fn scoped_discard(scope_name: &str, span_name: &str) -> bool {
+/// exactly `workflow` and the name starts with `workflow.`, `step.` or `queue.` —
+/// unless the span carries model or convention attributes (any `gen_ai.*` or `llm.*`
+/// key, or `openinference.span.kind`): a tracer named `workflow` in a user's own app
+/// may write model spans named `step.*`, and those must never be dropped. Any other
+/// scope or name: `false`.
+pub(crate) fn scoped_discard(scope_name: &str, span_name: &str, attributes: &[KeyValue]) -> bool {
     scope_name == WORKFLOW_SDK_SCOPE
         && WORKFLOW_SDK_PREFIXES
             .iter()
             .any(|prefix| span_name.starts_with(prefix))
+        && !attributes.iter().any(|attr| {
+            attr.key.starts_with("gen_ai.")
+                || attr.key.starts_with("llm.")
+                || attr.key == "openinference.span.kind"
+        })
 }
 
 /// Values the post-build step needs, read from the bag before it is consumed.
@@ -873,5 +881,51 @@ mod tests {
         assert_eq!(normalized.discarded, 0);
         assert_eq!(normalized.spans.len(), 1);
         assert_eq!(normalized.spans[0].name, "workflow.start");
+    }
+
+    #[test]
+    fn a_workflow_scope_model_span_is_kept() {
+        use crate::agents::test_support::{request, run, span};
+
+        // The scope alone does not identify the Workflow SDK: a user's own tracer
+        // named `workflow` may write model spans named `step.*` (D-IN-31 item 5).
+        let normalized = run(
+            &request(
+                "my-app",
+                "workflow",
+                vec![span(
+                    "step.generate",
+                    vec![kv("gen_ai.request.model", s("gpt-4o-mini"))],
+                    vec![],
+                )],
+            ),
+            &AgentContexts::default(),
+        );
+        assert_eq!(normalized.discarded, 0);
+        assert_eq!(normalized.spans.len(), 1);
+        assert_eq!(normalized.spans[0].name, "step.generate");
+        assert_eq!(normalized.spans[0].span_kind, SpanKind::Llm);
+    }
+
+    #[test]
+    fn a_workflow_scope_openinference_span_is_kept() {
+        use crate::agents::test_support::{request, run, span};
+
+        let normalized = run(
+            &request(
+                "my-app",
+                "workflow",
+                vec![span(
+                    "step.run",
+                    vec![kv("openinference.span.kind", s("LLM"))],
+                    vec![],
+                )],
+            ),
+            &AgentContexts::default(),
+        );
+        assert_eq!(normalized.discarded, 0);
+        assert_eq!(normalized.spans.len(), 1);
+        assert_eq!(normalized.spans[0].name, "step.run");
+        assert_eq!(normalized.spans[0].span_kind, SpanKind::Llm);
     }
 }

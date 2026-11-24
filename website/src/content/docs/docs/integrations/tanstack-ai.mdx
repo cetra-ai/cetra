@@ -86,7 +86,7 @@ With one tool call, a chat produces:
 
 ## Limits
 
-- This page's route is OpenInference's middleware. TanStack's own `otelMiddleware` also exports spans, but its root span repeats the run's token counts and cetra reads it as a model call, so the tokens count twice.
+- This page's route is OpenInference's middleware. TanStack's own `otelMiddleware` also exports spans, but its root span repeats the run's token counts and cetra reads it as a model call, so the tokens count twice (from TanStack AI's source, not captured; the citation is in the fixture's case notes).
 - The OpenAI adapter calls the Responses API, streamed.
 - The fixture was captured with `@tanstack/ai` 1.5.0, `@tanstack/ai-openai` 1.1.1 and `@arizeai/openinference-tanstack-ai` 0.3.5.
 - If a field is missing, look at the span's **Attributes** tab and compare it with [Span attributes](/docs/reference/attributes/).

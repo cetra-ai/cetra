@@ -223,7 +223,11 @@ fn accept_span(
         tally.discarded += 1;
         return None;
     }
-    if agents::scoped_discard(scope_name.as_deref().unwrap_or(""), &span.name) {
+    if agents::scoped_discard(
+        scope_name.as_deref().unwrap_or(""),
+        &span.name,
+        &span.attributes,
+    ) {
         tally.discarded += 1;
         return None;
     }

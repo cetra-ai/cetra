@@ -207,7 +207,7 @@ fn prices() {
             if span.cost_source != Some(CostSource::Computed) {
                 continue;
             }
-            let models = price_models(span);
+            let models = support::price_models(span);
             if models.is_empty() {
                 failures.push(format!(
                     "{}: computed cost span {} has no model",
@@ -681,18 +681,27 @@ fn check_media(case: &Case, failures: &mut Vec<String>) {
     }
 }
 
+/// Cases whose `llm` and `embedding` spans may carry cost source `none` with no
+/// token counts at all while a price row matches their model. D-B1-7 (cost.rs):
+/// no token count at all is unknown usage, not a free call, so production keeps
+/// `none` for any such span — but only these cases legitimately produce one,
+/// because their instrumentation writes model spans with no counts (Agent Spec's
+/// LangGraph adapter) or the discard rule keeps one on purpose (the eve discard
+/// fixture's `step.generate`). Anywhere else a tokenless model span that a row
+/// prices is a normalization bug, and the check below must catch it.
+const TOKENLESS_COST_NONE_CASES: &[&str] = &[
+    "openinference/agentspec-agent",
+    "genai/eve-workflow-discard",
+];
+
 fn check_cost(label: &str, span: &Span, rows: &[PriceRow], failures: &mut Vec<String>) {
     match span.cost_source {
         Some(CostSource::Computed) => check_computed(label, span, rows, failures),
         Some(CostSource::None) => {
-            // A span with no token counts at all is exempt: D-B1-7 (cost.rs,
-            // "no token count at all is unknown usage, not a free call") keeps
-            // it `none` even when a price row matches, as on the Agent Spec
-            // fixture's spans, whose instrumentation writes no counts.
             let tokenless = span.input_tokens.is_none() && span.output_tokens.is_none();
-            let priced =
-                !tokenless && matches!(span.span_kind, SpanKind::Llm | SpanKind::Embedding);
-            let matched = price_models(span).into_iter().any(|model| {
+            let exempt = tokenless && TOKENLESS_COST_NONE_CASES.contains(&label);
+            let carries_cost = matches!(span.span_kind, SpanKind::Llm | SpanKind::Embedding);
+            let matched = support::price_models(span).into_iter().any(|model| {
                 rows.iter().any(|row| {
                     let Ok(pattern) = compile_anchored(&row.match_pattern) else {
                         return false;
@@ -712,7 +721,7 @@ fn check_cost(label: &str, span: &Span, rows: &[PriceRow], failures: &mut Vec<St
                 )
                 .is_some()
             });
-            if priced && matched {
+            if carries_cost && !exempt && matched {
                 failures.push(format!(
                     "{label}: {} has cost_source none but a price row matches",
                     span.span_id
@@ -731,7 +740,7 @@ fn check_cost(label: &str, span: &Span, rows: &[PriceRow], failures: &mut Vec<St
 }
 
 fn check_computed(label: &str, span: &Span, rows: &[PriceRow], failures: &mut Vec<String>) {
-    let models = price_models(span);
+    let models = support::price_models(span);
     if models.is_empty() {
         failures.push(format!(
             "{label}: {} cost_source computed but model is absent",
@@ -933,27 +942,6 @@ fn price_row_matches(
 fn same_provider(row_provider: &str, span_provider: &str) -> bool {
     row_provider == span_provider
         || (span_provider == "gcp.gen_ai" && matches!(row_provider, "gcp.gemini" | "gcp.vertex_ai"))
-}
-
-/// The models that price a span, in order: the response model, then the request model when the
-/// response model is the request model with its `vendor/` prefix stripped (D-IN-20). Mirrors
-/// `normalize::retry_model`, which `cost::apply` retries with.
-fn price_models(span: &Span) -> Vec<&str> {
-    let response = span.response_model.as_deref();
-    let request = span.request_model.as_deref();
-    match (response, request) {
-        (Some(response), Some(request)) => {
-            let stripped = request
-                .rsplit_once('/')
-                .is_some_and(|(_, bare)| bare == response);
-            if stripped {
-                vec![response, request]
-            } else {
-                vec![response]
-            }
-        }
-        _ => response.or(request).into_iter().collect(),
-    }
 }
 
 fn check_media_bounds(case: &Case, failures: &mut Vec<String>) {

@@ -40,8 +40,9 @@ const IDLE_MAX: Duration = Duration::from_secs(5);
 const DIFF_LIMIT: usize = 20;
 const MOCK_KEY: &str = "capture-mock-key";
 const TIME_FIELDS: &[&str] = &["startTimeUnixNano", "endTimeUnixNano", "timeUnixNano"];
-/// Label `--check` gives a link whose target is not a span of the request ([`label_span_ids`]).
-const EXTERNAL_SPAN_LABEL: &str = "external";
+/// Prefix of the label `--check` gives a link whose target is not a span of the request
+/// ([`label_span_ids`]): `external-0`, `external-1`, … by first-seen order.
+const EXTERNAL_SPAN_LABEL_PREFIX: &str = "external-";
 
 /// Command that runs one scenario program.
 ///
@@ -1176,9 +1177,10 @@ fn spans_mut(value: &mut Value) -> Vec<&mut Value> {
 /// `parentSpanId` and each link's `spanId` becomes the target's placeholder through the same
 /// map. A span without a parent (absent, null or empty) gets null. A parent id that no span of
 /// the document has stays as it is, so the check still reports it; a link to such an id takes
-/// the fixed [`EXTERNAL_SPAN_LABEL`] instead, because links point at spans an export can leave
-/// out (`span_names` filters them away), which is not a difference. A re-parented span or a
-/// link that changes target differs.
+/// a numbered external label (`external-0`, `external-1`, …, one per distinct target in
+/// first-seen order), because links point at spans an export can leave out (`span_names`
+/// filters them away), which is not a difference. A re-parented span or a link that changes
+/// target differs.
 fn label_span_ids(value: &mut Value) {
     let mut spans = spans_mut(value);
     let labels: HashMap<String, String> = spans
@@ -1189,6 +1191,7 @@ fn label_span_ids(value: &mut Value) {
             Some((id.to_owned(), format!("span-{index}")))
         })
         .collect();
+    let mut external_labels: HashMap<String, String> = HashMap::new();
     for (index, span) in spans.iter_mut().enumerate() {
         if let Some(id) = span.get_mut("spanId") {
             *id = Value::String(format!("span-{index}"));
@@ -1207,7 +1210,17 @@ fn label_span_ids(value: &mut Value) {
                     *id = match id.as_str() {
                         None | Some("") => id.clone(),
                         Some(id) => labels.get(id).map_or_else(
-                            || Value::String(EXTERNAL_SPAN_LABEL.to_owned()),
+                            || {
+                                let next = external_labels.len();
+                                Value::String(
+                                    external_labels
+                                        .entry(id.to_owned())
+                                        .or_insert_with(|| {
+                                            format!("{EXTERNAL_SPAN_LABEL_PREFIX}{next}")
+                                        })
+                                        .clone(),
+                                )
+                            },
                             |label| Value::String(label.clone()),
                         ),
                     };
@@ -2277,7 +2290,7 @@ mod tests {
         let case = case_file("Two spans.", "2026-01-01T00:00:00Z");
 
         // The same links with other span ids compare equal: a known target takes the
-        // target's placeholder, an unknown one the fixed external label.
+        // target's placeholder, an unknown one a numbered external label.
         let mut produced_input = committed_input.clone();
         let produced_spans = produced_input["resourceSpans"][0]["scopeSpans"][0]["spans"]
             .as_array_mut()
@@ -2303,6 +2316,23 @@ mod tests {
         ]);
         let paths = json_differences(&case, &case, &committed_input, &retargeted, &scenario);
         assert!(!paths.is_empty(), "a retargeted link must be reported");
+    }
+
+    #[test]
+    fn two_unknown_link_targets_get_distinct_labels() {
+        let mut value = input_export("chat", "100", "200", "150", "9", "gpt", "t0");
+        value["resourceSpans"][0]["scopeSpans"][0]["spans"][0]["spanId"] = json!("aa");
+        value["resourceSpans"][0]["scopeSpans"][0]["spans"][0]["links"] = json!([
+            {"spanId": "xx", "traceId": "111"},
+            {"spanId": "yy", "traceId": "222"},
+            {"spanId": "xx", "traceId": "111"},
+        ]);
+        label_span_ids(&mut value);
+        let links = &value["resourceSpans"][0]["scopeSpans"][0]["spans"][0]["links"];
+        assert_eq!(links[0]["spanId"], json!("external-0"));
+        assert_eq!(links[1]["spanId"], json!("external-1"));
+        // The same unknown target keeps the label it was first given.
+        assert_eq!(links[2]["spanId"], json!("external-0"));
     }
 
     #[test]

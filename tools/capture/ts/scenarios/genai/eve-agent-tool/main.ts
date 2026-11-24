@@ -46,9 +46,14 @@ function freePort(): Promise<number> {
   });
 }
 
-async function waitForServer(url: string): Promise<void> {
+/** Reads the spawn error on each poll, so a server that cannot start fails at once. */
+async function waitForServer(url: string, startError: () => Error | undefined): Promise<void> {
   const deadline = Date.now() + POLL_TIMEOUT_MS;
   for (;;) {
+    const failed = startError();
+    if (failed !== undefined) {
+      throw failed;
+    }
     if (Date.now() > deadline) {
       throw new Error(`eve did not answer 200 on ${url} within ${POLL_TIMEOUT_MS} ms`);
     }
@@ -104,24 +109,33 @@ async function waitTurnSettled(url: string): Promise<void> {
 async function main(): Promise<void> {
   const tools = requiredEnv("CETRA_CAPTURE_TOOLS");
   const eveBin = path.join(tools, EVE_TOOLS, "eve/bin/eve.js");
-  // The work directory holds hello.txt beside the config and temp directories
-  // eve is pointed at, so a run writes nothing outside the scenario folder.
+  // The work directory holds hello.txt beside the home, config and temp
+  // directories eve is pointed at, so a run writes nothing outside the scenario
+  // folder.
   const work = path.join(scenarioDir, "work");
+  const home = path.join(work, "home");
+  const link = path.join(scenarioDir, "node_modules");
   rmSync(work, { recursive: true, force: true });
+  mkdirSync(home, { recursive: true });
   mkdirSync(path.join(work, "xdg"), { recursive: true });
   mkdirSync(path.join(work, "tmp"), { recursive: true });
   writeFileSync(path.join(work, "hello.txt"), "hello from cetra\n");
   const port = await freePort();
-  symlinkSync(path.join(tools, EVE_TOOLS), path.join(scenarioDir, "node_modules"), "dir");
+  // A link left by an interrupted run would make symlinkSync fail.
+  rmSync(link, { force: true });
+  symlinkSync(path.join(tools, EVE_TOOLS), link, "dir");
   // An explicit environment: no OTEL_* variable reaches eve, so the service name
   // stays capture-eve (the package.json name) and the exporter URL is the one
   // the instrumentation file reads.
   const child = spawn(process.execPath, [eveBin, "dev", "--no-ui", "--port", String(port)], {
     cwd: scenarioDir,
+    // The dev server leads its own process group, so the group kill below also
+    // takes down anything it spawns.
+    detached: true,
     stdio: ["ignore", 2, "inherit"],
     env: {
       PATH: requiredEnv("PATH"),
-      HOME: requiredEnv("HOME"),
+      HOME: home,
       TZ: requiredEnv("TZ"),
       LANG: requiredEnv("LANG"),
       CETRA_CAPTURE_MOCK_URL: requiredEnv("CETRA_CAPTURE_MOCK_URL"),
@@ -143,7 +157,7 @@ async function main(): Promise<void> {
     });
   });
   try {
-    await waitForServer(`http://127.0.0.1:${port}/`);
+    await waitForServer(`http://127.0.0.1:${port}/`, () => startError);
     const response = await fetch(`http://127.0.0.1:${port}/eve/v1/session`, {
       method: "POST",
       headers: { "content-type": "application/json" },
@@ -164,16 +178,25 @@ async function main(): Promise<void> {
     if (startError !== undefined) {
       throw startError;
     }
-    rmSync(work, { recursive: true, force: true });
     writeMeta({
       eve: "../../../../target/capture-tools/eve/1.0.1/node_modules/eve",
       "@vercel/otel": "../../../../target/capture-tools/eve/1.0.1/node_modules/@vercel/otel",
     });
   } finally {
-    if (child.exitCode === null && child.signalCode === null) {
-      child.kill("SIGKILL");
+    // The group kill runs on failure too; ESRCH means the group is gone already.
+    // A failure is reported, never thrown: a throw here would swallow the
+    // error the try block is already carrying.
+    if (child.pid !== undefined) {
+      try {
+        process.kill(-child.pid, "SIGKILL");
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "ESRCH") {
+          process.stderr.write(`eve group kill failed: ${error}\n`);
+        }
+      }
     }
-    rmSync(path.join(scenarioDir, "node_modules"), { force: true });
+    rmSync(work, { recursive: true, force: true });
+    rmSync(link, { force: true });
   }
 }
 

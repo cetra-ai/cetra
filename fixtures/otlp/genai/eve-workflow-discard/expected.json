@@ -1,0 +1,91 @@
+{
+  "spans": [
+    {
+      "project_id": "01900000-0000-7000-8000-000000000001",
+      "trace_id": "3f18774f5d9926624c9050c77c84f601",
+      "span_id": "4444444444444444",
+      "parent_span_id": "2222222222222222",
+      "name": "invoke_agent capture-eve",
+      "span_kind": "agent",
+      "start_time": "2025-12-31T23:59:51.500000000Z",
+      "end_time": "2025-12-31T23:59:55.500000000Z",
+      "status": "unset",
+      "service_name": "my-app",
+      "operation": "invoke_agent",
+      "attributes": {
+        "gen_ai.agent.name": "capture-eve",
+        "gen_ai.operation.name": "invoke_agent"
+      },
+      "scope_name": "eve.agent",
+      "conventions": [
+        "genai"
+      ],
+      "ingest_time": "2026-01-01T00:00:00.000000000Z",
+      "schema_version": 2
+    },
+    {
+      "project_id": "01900000-0000-7000-8000-000000000001",
+      "trace_id": "3f18774f5d9926624c9050c77c84f601",
+      "span_id": "5555555555555555",
+      "parent_span_id": "4444444444444444",
+      "name": "chat gpt-4o-mini",
+      "span_kind": "llm",
+      "start_time": "2025-12-31T23:59:52.000000000Z",
+      "end_time": "2025-12-31T23:59:53.000000000Z",
+      "status": "unset",
+      "service_name": "my-app",
+      "provider": "openai",
+      "request_model": "gpt-4o-mini",
+      "response_model": "gpt-4o-mini-2024-07-18",
+      "operation": "chat",
+      "input_tokens": 82,
+      "output_tokens": 17,
+      "total_tokens": 99,
+      "cost_input": 0.000082,
+      "cost_output": 0.000068,
+      "cost_total": 0.00015000000000000001,
+      "cost_source": "computed",
+      "attributes": {
+        "gen_ai.operation.name": "chat",
+        "gen_ai.provider.name": "openai.chat",
+        "gen_ai.request.model": "gpt-4o-mini",
+        "gen_ai.response.model": "gpt-4o-mini-2024-07-18",
+        "gen_ai.usage.input_tokens": "82",
+        "gen_ai.usage.output_tokens": "17"
+      },
+      "scope_name": "eve.agent",
+      "conventions": [
+        "genai"
+      ],
+      "ingest_time": "2026-01-01T00:00:00.000000000Z",
+      "schema_version": 2
+    },
+    {
+      "project_id": "01900000-0000-7000-8000-000000000001",
+      "trace_id": "3f18774f5d9926624c9050c77c84f601",
+      "span_id": "6666666666666666",
+      "parent_span_id": "2222222222222222",
+      "name": "step.generate",
+      "span_kind": "llm",
+      "start_time": "2025-12-31T23:59:54.000000000Z",
+      "end_time": "2025-12-31T23:59:55.000000000Z",
+      "status": "unset",
+      "service_name": "my-app",
+      "provider": "openai",
+      "request_model": "gpt-4o-mini",
+      "cost_source": "none",
+      "attributes": {
+        "gen_ai.request.model": "gpt-4o-mini"
+      },
+      "scope_name": "workflow",
+      "conventions": [
+        "genai"
+      ],
+      "ingest_time": "2026-01-01T00:00:00.000000000Z",
+      "schema_version": 2
+    }
+  ],
+  "media": [],
+  "rejected_spans": 0,
+  "discarded": 3
+}

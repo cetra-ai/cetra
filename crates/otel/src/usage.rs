@@ -15,7 +15,7 @@ use opentelemetry_proto::tonic::common::v1::any_value::Value;
 use opentelemetry_proto::tonic::trace::v1::span::Event;
 use serde_json::Value as Json;
 
-use crate::bag::{AttrBag, Use};
+use crate::bag::AttrBag;
 use crate::fields::{ResourceView, Source, first_i64, span};
 use crate::value::{InvalidNumber, as_f64, as_i64, as_str};
 use crate::warn::{Warning, Warnings};
@@ -344,26 +344,28 @@ pub(crate) fn usage(
         return Usage::default();
     }
     // Before the first_count calls, so a consumed "null" is never a candidate.
-    agentspec_null_tokens(bag, kind, span_name);
+    let agentspec_null = agentspec_null_tokens(bag, kind, span_name);
     let resource = ResourceView::new(&[]);
     let legacy = vercel_legacy(bag, provider);
-    let mut input = first_count(bag, &resource, INPUT, warnings);
+    let mut input = first_count(bag, &resource, INPUT, warnings, &agentspec_null);
     if input.is_none() && kind == SpanKind::Embedding {
         // Vercel `embed`/`embedMany` report one count, which is the input (D-B1-6).
-        input = first_count(bag, &resource, EMBEDDING_INPUT, warnings);
+        input = first_count(bag, &resource, EMBEDDING_INPUT, warnings, &agentspec_null);
     }
-    let output = first_count(bag, &resource, OUTPUT, warnings);
-    let mut cache_read = match first_count(bag, &resource, CACHE_READ, warnings) {
+    let output = first_count(bag, &resource, OUTPUT, warnings, &agentspec_null);
+    let mut cache_read = match first_count(bag, &resource, CACHE_READ, warnings, &agentspec_null) {
         Some((value, _, _)) => Some(value),
         None => provider_cache_count(bag, ANTHROPIC_CACHE_READ, warnings),
     };
-    let mut cache_write = match first_count(bag, &resource, CACHE_WRITE, warnings) {
+    let mut cache_write = match first_count(bag, &resource, CACHE_WRITE, warnings, &agentspec_null)
+    {
         Some((value, _, _)) => Some(value),
         None => provider_cache_count(bag, ANTHROPIC_CACHE_WRITE, warnings),
     };
-    let mut reasoning = first_count(bag, &resource, REASONING, warnings).map(|(value, _, _)| value);
+    let mut reasoning = first_count(bag, &resource, REASONING, warnings, &agentspec_null)
+        .map(|(value, _, _)| value);
     let mut reported_total =
-        first_count(bag, &resource, TOTAL, warnings).map(|(value, _, _)| value);
+        first_count(bag, &resource, TOTAL, warnings, &agentspec_null).map(|(value, _, _)| value);
     let details = langfuse_usage(bag, warnings);
     let mut from_details = false;
     let input = match input {
@@ -505,30 +507,27 @@ pub(crate) fn usage(
 
 /// D-IN-31 item 5: Agent Spec writes the string `"null"` into every token count
 /// it does not know. Its spans have no instrumentation scope, so the rule is
-/// gated on its model-call span name: on `LlmGenerationSpan` (and an `llm`
-/// span), each of [`AGENTSPEC_NULL_KEYS`] whose value is exactly `"null"`
+/// gated on its model-call span: kind `Llm` and span name `LlmGenerationSpan`.
+/// Each of [`AGENTSPEC_NULL_KEYS`] whose value is exactly `"null"`
 /// (case-sensitive) is consumed — no count, no `invalid_number` (an amendment
-/// to rule 20). Every other span name keeps rule 20's behaviour. The bag keeps
-/// the value, so [`first_count`] skips what this consumed
-/// ([`agentspec_null_consumed`]).
-fn agentspec_null_tokens(bag: &mut AttrBag<'_>, kind: SpanKind, span_name: &str) {
+/// to rule 20) — and returned, so [`first_count`] skips exactly what this rule
+/// consumed. Every other span keeps rule 20's behaviour and an empty list.
+fn agentspec_null_tokens(
+    bag: &mut AttrBag<'_>,
+    kind: SpanKind,
+    span_name: &str,
+) -> Vec<&'static str> {
     if kind != SpanKind::Llm || span_name != AGENTSPEC_LLM_SPAN {
-        return;
+        return Vec::new();
     }
-    for key in AGENTSPEC_NULL_KEYS {
+    let mut consumed = Vec::new();
+    for &key in AGENTSPEC_NULL_KEYS {
         if bag.get(key).and_then(as_str) == Some("null") {
             bag.take(key);
+            consumed.push(key);
         }
     }
-}
-
-/// A key the Agent Spec rule above consumed: absent for the tables, never an
-/// invalid number. Only that rule consumes a `"null"` value, so the state tells
-/// it apart from a `"null"` it has not taken, which keeps rule 20.
-fn agentspec_null_consumed(bag: &AttrBag<'_>, key: &str) -> bool {
-    bag.state(key) == Some(Use::Consumed)
-        && AGENTSPEC_NULL_KEYS.contains(&key)
-        && bag.get(key).and_then(as_str) == Some("null")
+    consumed
 }
 
 struct GeminiUsage {
@@ -832,10 +831,11 @@ fn first_count(
     resource: &ResourceView<'_>,
     table: &[UsageSource],
     warnings: &mut Warnings,
+    agentspec_null: &[&'static str],
 ) -> Option<(i64, Inclusive, Inclusive)> {
     for item in table {
         // D-IN-31 item 5: a "null" the Agent Spec rule consumed is absent.
-        if agentspec_null_consumed(bag, item.source.key) {
+        if agentspec_null.contains(&item.source.key) {
             continue;
         }
         if let Some(resolved) = first_i64(bag, resource, &[item.source], warnings) {
@@ -1865,5 +1865,30 @@ mod tests {
         for key in AGENTSPEC_NULL_KEYS {
             assert_eq!(bag.state(key), Some(Use::Unread), "{key}");
         }
+    }
+
+    #[test]
+    fn null_tokens_consumed_earlier_on_another_span_still_warn() {
+        // Another stage consumed `llm.token_count.prompt` before usage ran. The
+        // Agent Spec rule does not run on this span, so rule 20 still applies to
+        // that key: it is an invalid number, not an absent count.
+        let attrs = [string_attr("llm.token_count.prompt", "null")];
+        let mut warnings = Warnings::default();
+        let mut bag = AttrBag::new(&attrs, &mut warnings);
+        bag.take("llm.token_count.prompt");
+        let counts = usage(
+            &mut bag,
+            SpanKind::Llm,
+            "generate",
+            None,
+            "",
+            &[],
+            &mut warnings,
+        );
+        assert_eq!(counts, Usage::default());
+        assert_eq!(
+            warnings.to_attribute().as_deref(),
+            Some("[\"invalid_number\"]")
+        );
     }
 }
