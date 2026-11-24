@@ -8,7 +8,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { chromium } from "playwright";
 import { portIsFree } from "./port-free.mjs";
-import { checkClipRect, checkStorage } from "./screenshot-storage.mjs";
+import { checkClipRect, checkStorage } from "./screenshot-checks.mjs";
 
 const SITE = dirname(dirname(fileURLToPath(import.meta.url)));
 const ROOT = dirname(SITE);

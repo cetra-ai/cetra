@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { checkClipRect, checkStorage } from "./screenshot-storage.mjs";
+import { checkClipRect, checkStorage } from "./screenshot-checks.mjs";
 
 test("a shot without a storage map passes", () => {
   assert.doesNotThrow(() => checkStorage([{ name: "a" }]));

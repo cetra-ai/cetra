@@ -22,7 +22,7 @@ const EXPECTED = {
     support: "Every support conversation, with its cost and latency.",
     coding: "Only the failed runs, so nothing broken hides in the traffic.",
     voice: "The slowest calls first, so you fix what callers feel.",
-    extraction: "Spot the costly billing traces, with what each one cost.",
+    extraction: "Every billing trace in one list, with its duration and cost.",
   },
   explore: {
     support: "Ask which answers scored low, then get a quality dashboard built for you.",

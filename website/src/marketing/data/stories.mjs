@@ -4,12 +4,6 @@
 // a name into an image, because only a bundler import gives Astro's image pipeline its metadata.
 // stories.test.mjs checks the shapes, the names and the words.
 
-/**
- * @typedef {object} Story
- * @property {string} id    the `?story=` value
- * @property {string} label the tab's and chip's text
- */
-
 /** In the order they are shown. The first is the default (no JavaScript, or no or an unknown `?story=`). */
 export const STORIES = /** @type {const} */ ([
   { id: "support", label: "Support agent" },
@@ -17,9 +11,6 @@ export const STORIES = /** @type {const} */ ([
   { id: "voice", label: "Voice agent" },
   { id: "extraction", label: "Document extraction" },
 ]);
-
-/** The suffix a story adds to a shot's base name; support keeps the bare name. */
-const SUFFIX = { support: "", coding: "-coding", voice: "-voice", extraction: "-extraction" };
 
 /**
  * @typedef {object} PictureContent
@@ -88,7 +79,7 @@ export const PICTURES = [
       },
       extraction: {
         alt: "The trace list filtered to traces tagged billing: start time, name, duration and cost, with extract-invoice among the rows.",
-        caption: "Spot the costly billing traces, with what each one cost.",
+        caption: "Every billing trace in one list, with its duration and cost.",
       },
     },
   },
@@ -217,8 +208,10 @@ export const PICTURES = [
 /** The shot's name in screenshots.json, e.g. `shotName("hero", "voice")` is "marketing-trace-view-voice". */
 export function shotName(pictureId, storyId) {
   const picture = pictureById(pictureId);
-  const suffix = SUFFIX[/** @type {keyof typeof SUFFIX} */ (storyId)];
-  if (suffix === undefined) throw new Error(`stories: unknown story "${storyId}"`);
+  const story = STORIES.find((s) => s.id === storyId);
+  if (!story) throw new Error(`stories: unknown story "${storyId}"`);
+  // The first story keeps the bare name; the others add their id.
+  const suffix = story.id === STORIES[0].id ? "" : `-${story.id}`;
   return `${picture.base}${suffix}`;
 }
 

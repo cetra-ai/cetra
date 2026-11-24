@@ -35,11 +35,10 @@ const section = pictureById(picture).section;
 <div
   class:list={["story", `story--${align}`]}
   data-story-picker
-  data-stories={STORIES.map((story) => story.id).join(" ")}
 >
   <Tabs id={`story-${picture}`} label={`Story: ${section}`} labels={STORIES.map((story) => story.label)}>
     {panels.map((panel, i) => (
-      <div data-tab-panel hidden={i !== 0}>
+      <div data-tab-panel data-story={panel.story} hidden={i !== 0}>
         <Frame src={shotOf(panel.shot)} alt={panel.alt} label={panel.label} fade={fade} eager={eager && i === 0} />
         <p class="caption">{panel.caption}</p>
       </div>
@@ -86,7 +85,12 @@ const section = pictureById(picture).section;
           root.querySelectorAll<HTMLElement>(":scope > [data-tabs] > [role=tablist] > [role=tab]"),
         ),
     );
-    const ids = (document.querySelector<HTMLElement>("[data-story-picker]")?.dataset.stories ?? "").split(" ");
+    // The story ids, in order, from the first picker's panels (each carries its data-story).
+    const ids = Array.from(
+      document.querySelector<HTMLElement>("[data-story-picker]")?.querySelectorAll<HTMLElement>(
+        ":scope > [data-tabs] > [data-tab-panel]",
+      ) ?? [],
+    ).map((panel) => panel.dataset.story ?? "");
     if (pickers.length === 0 || pickers.some((tabs) => tabs.length !== ids.length)) {
       console.error("Story pickers: the tabs and the stories differ");
       return;
