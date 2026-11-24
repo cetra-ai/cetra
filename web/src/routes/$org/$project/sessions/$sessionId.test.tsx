@@ -2,6 +2,7 @@ import { screen, waitFor, within } from "@testing-library/react";
 import { HttpResponse, http } from "msw";
 import { expect, it } from "vitest";
 import type { Schema } from "@/api/types";
+import { setTurnDensity, TURN_DENSITY_STORAGE_KEY } from "@/lib/session-turns";
 import { server } from "@/mocks/node";
 import { ADA_ID, PROJECT_ID } from "@/test/fixtures";
 import { renderApp } from "@/test/render";
@@ -521,4 +522,180 @@ it("names the session in the breadcrumb", async () => {
     throw new Error("no breadcrumb navigation");
   }
   expect(await within(crumbs).findByText("sess-001")).toBeInTheDocument();
+});
+
+/** Serves a session with the given turns and the error session's one tool call (D-C-28). */
+function serveTurns(session: Schema<"SessionSummary">, turns: Schema<"SessionTurn">[]) {
+  server.use(
+    http.get("/api/v1/projects/:project/sessions/:sessionId", () =>
+      HttpResponse.json({ session, turns, truncated: false }),
+    ),
+    http.get("/api/v1/projects/:project/spans", () =>
+      HttpResponse.json({ data: ERROR_SESSION_STEPS, next_cursor: null }),
+    ),
+  );
+}
+
+it("filters turns by search text", async () => {
+  const { user } = await renderApp("/acme/support-bot/sessions/sess-001");
+  const conversation = await screen.findByRole("region", { name: "Conversation" });
+  await user.type(screen.getByRole("textbox", { name: "Search turns" }), "address");
+  const turns = within(conversation).getAllByRole("button", { name: /support-agent/ });
+  expect(turns).toHaveLength(1);
+  expect(turns[0]).toHaveTextContent("#2");
+  expect(within(conversation).queryByText("My order 1234 hasn't arrived.")).not.toBeInTheDocument();
+});
+
+it("filters turns by the Failed chip and shows the counts", async () => {
+  serveErrorSession();
+  const { user } = await renderApp("/acme/support-bot/sessions/sess-errors");
+  const conversation = await screen.findByRole("region", { name: "Conversation" });
+  expect(screen.getByRole("button", { name: "Failed 1" })).toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "Scored 0" })).toBeInTheDocument();
+  expect(await screen.findByRole("button", { name: "Uses tools 1" })).toBeInTheDocument();
+
+  await user.click(screen.getByRole("button", { name: "Failed 1" }));
+  expect(within(conversation).getByRole("button", { name: /refund-flow/ })).toBeInTheDocument();
+  expect(
+    within(conversation).queryByRole("button", { name: /lookup-order/ }),
+  ).not.toBeInTheDocument();
+});
+
+it("hides the Uses tools chip until the steps load, then filters on it", async () => {
+  let release: () => void = () => undefined;
+  const gate = new Promise<void>((resolve) => {
+    release = () => resolve();
+  });
+  server.use(
+    http.get("/api/v1/projects/:project/spans", async () => {
+      await gate;
+      return HttpResponse.json({
+        data: [stepSummary(TRACE, "b1000000000000f1", "get_order_status", "tool")],
+        next_cursor: null,
+      });
+    }),
+  );
+  const { user } = await renderApp("/acme/support-bot/sessions/sess-001");
+  const conversation = await screen.findByRole("region", { name: "Conversation" });
+  expect(screen.queryByRole("button", { name: /^Uses tools/ })).not.toBeInTheDocument();
+
+  release();
+  await user.click(await screen.findByRole("button", { name: "Uses tools 1" }));
+  const turns = within(conversation).getAllByRole("button", { name: /support-agent/ });
+  expect(turns).toHaveLength(1);
+  expect(turns[0]).toHaveTextContent("#1");
+});
+
+it("says when no turn matches", async () => {
+  const { user } = await renderApp("/acme/support-bot/sessions/sess-001");
+  await screen.findByRole("region", { name: "Conversation" });
+  await user.type(screen.getByRole("textbox", { name: "Search turns" }), "zzz-no-match");
+  expect(await screen.findByText("No turns match.")).toBeInTheDocument();
+});
+
+it("keeps the gap to the real previous turn while filtered", async () => {
+  // The failed turn starts one minute after the first one, which the Failed filter hides.
+  const spacedTurns: Schema<"SessionTurn">[] = ERROR_SESSION_TURNS.map((turn, offset) => ({
+    ...turn,
+    trace: { ...turn.trace, start_time: `2026-01-01T10:0${offset}:00.000000000Z` },
+  }));
+  serveTurns(ERROR_SESSION, spacedTurns);
+  const { user } = await renderApp("/acme/support-bot/sessions/sess-errors");
+  const conversation = await screen.findByRole("region", { name: "Conversation" });
+  expect(within(conversation).getByRole("button", { name: /refund-flow/ })).toHaveTextContent(
+    "+1m 00s",
+  );
+
+  await user.click(screen.getByRole("button", { name: "Failed 1" }));
+  expect(within(conversation).getByRole("button", { name: /refund-flow/ })).toHaveTextContent(
+    "+1m 00s",
+  );
+});
+
+it("remembers the compact density and shows one line per turn", async () => {
+  const { user } = await renderApp("/acme/support-bot/sessions/sess-001");
+  const conversation = await screen.findByRole("region", { name: "Conversation" });
+  try {
+    await user.click(screen.getByRole("radio", { name: "Compact" }));
+    expect(within(conversation).getAllByText(/→/)).toHaveLength(2);
+    expect(localStorage.getItem(TURN_DENSITY_STORAGE_KEY)).toBe("compact");
+  } finally {
+    setTurnDensity("chat");
+    localStorage.clear();
+  }
+});
+
+it("selects a turn from the strip", async () => {
+  const { router, user } = await renderApp("/acme/support-bot/sessions/sess-001");
+  await screen.findByRole("region", { name: "Conversation" });
+  const strip = screen.getByRole("group", { name: "Turns overview" });
+  await user.click(within(strip).getByRole("button", { name: /^#2 / }));
+  expect(router.state.location.search).toMatchObject({ trace: SECOND });
+});
+
+it("moves between turns with j and k", async () => {
+  const { router, user } = await renderApp("/acme/support-bot/sessions/sess-001");
+  const conversation = await screen.findByRole("region", { name: "Conversation" });
+  conversation.focus();
+  await user.keyboard("j");
+  await user.keyboard("j");
+  expect(router.state.location.search).toMatchObject({ trace: SECOND });
+  await user.keyboard("k");
+  expect(router.state.location.search).toMatchObject({ trace: TRACE });
+});
+
+it("the menu's arrow keys do not move the selection", async () => {
+  const { router, user } = await renderApp("/acme/support-bot/sessions/sess-001");
+  const conversation = await screen.findByRole("region", { name: "Conversation" });
+  const turns = within(conversation).getAllByRole("button", { name: /support-agent/ });
+  const first = turns[0];
+  if (!first) {
+    throw new Error("missing first turn");
+  }
+  await user.click(first);
+  expect(router.state.location.search).toMatchObject({ trace: TRACE });
+
+  const actions = within(conversation).getAllByRole("button", { name: "Turn actions" });
+  const firstActions = actions[0];
+  if (!firstActions) {
+    throw new Error("missing first turn actions");
+  }
+  await user.click(firstActions);
+  await user.keyboard("{ArrowDown}");
+  expect(router.state.location.search).toMatchObject({ trace: TRACE });
+});
+
+it("the errors chip walks through the failed turns", async () => {
+  // The first turn fails too, so the chip has two failed turns to walk through.
+  const turns: Schema<"SessionTurn">[] = ERROR_SESSION_TURNS.map((turn, offset) =>
+    offset === 0 ? { ...turn, trace: { ...turn.trace, status: "error" as const } } : turn,
+  );
+  serveTurns({ ...ERROR_SESSION, error_count: 2 }, turns);
+  const { router, user } = await renderApp("/acme/support-bot/sessions/sess-errors");
+  await screen.findByRole("region", { name: "Conversation" });
+
+  await user.click(screen.getByRole("button", { name: "2 errors" }));
+  expect(router.state.location.search).toMatchObject({ trace: OK_TRACE });
+  await user.click(screen.getByRole("button", { name: "2 errors" }));
+  expect(router.state.location.search).toMatchObject({ trace: FAILED_TRACE });
+  await user.click(screen.getByRole("button", { name: "2 errors" }));
+  expect(router.state.location.search).toMatchObject({ trace: OK_TRACE });
+});
+
+it("a hidden failed turn clears the search when the errors chip selects it", async () => {
+  serveErrorSession();
+  const { user } = await renderApp("/acme/support-bot/sessions/sess-errors");
+  const conversation = await screen.findByRole("region", { name: "Conversation" });
+  const search = screen.getByRole("textbox", { name: "Search turns" });
+  await user.type(search, "Where is");
+  expect(
+    within(conversation).queryByRole("button", { name: /refund-flow/ }),
+  ).not.toBeInTheDocument();
+
+  await user.click(screen.getByRole("button", { name: "1 errors" }));
+  expect(screen.getByRole("textbox", { name: "Search turns" })).toHaveValue("");
+  expect(within(conversation).getByRole("button", { name: /refund-flow/ })).toHaveAttribute(
+    "aria-current",
+    "true",
+  );
 });

@@ -1,7 +1,7 @@
 import { useVirtualizer } from "@tanstack/react-virtual";
 import { cn } from "cn";
-import { ChevronRight, MoreHorizontal } from "lucide-react";
-import { useEffect, useRef, useState } from "react";
+import { ChevronRight, MoreHorizontal, Wrench } from "lucide-react";
+import { type KeyboardEvent, type MouseEvent, useEffect, useRef, useState } from "react";
 import type { Schema } from "@/api/types";
 import { KindIcon } from "@/components/kind-icon";
 import { ChatView } from "@/components/payload/chat-view";
@@ -9,6 +9,8 @@ import { Markdown } from "@/components/payload/markdown";
 import { PayloadView } from "@/components/payload/payload-view";
 import { ShowMore } from "@/components/payload/show-more";
 import { ScoreBadge } from "@/components/score-badge";
+import { TurnStrip } from "@/components/session/turn-strip";
+import { TurnToolbar } from "@/components/session/turn-toolbar";
 import type { SessionSteps } from "@/components/session/use-session-steps";
 import { useProject } from "@/components/shell/project-context";
 import { TimeText } from "@/components/time-text";
@@ -23,19 +25,40 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { formatCost, formatDuration, formatTokens } from "@/lib/format";
-import { type Bubble, bubbleOf, chipSteps, gapNs, previewLine, rawText } from "@/lib/session-turns";
+import { isTypingTarget, matchesBinding } from "@/lib/shortcuts";
+import {
+  type Bubble,
+  bubbleOf,
+  chipSteps,
+  filterCounts,
+  gapNs,
+  previewLine,
+  rawText,
+  type TurnDensity,
+  type TurnFilter,
+  turnMatches,
+  useTurnDensity,
+} from "@/lib/session-turns";
 
 const TURN_ESTIMATE = 96;
+const COMPACT_ESTIMATE = 28;
 const OVERSCAN = 6;
 /** Characters of a turn's text shown in its bubble. The details view keeps the full content. */
 const BUBBLE_LIMIT = 20_000;
 /** Steps shown as chips on a collapsed turn; the rest count as "+N more". */
 const MAX_STEP_CHIPS = 6;
 
+/** A turn in the conversation: its 1-based position in the session and the turn before it. */
+type ConversationEntry = {
+  turn: Schema<"SessionTurn">;
+  index: number;
+  previous: Schema<"SessionTurn"> | undefined;
+};
+
 /**
  * The session's turns beside the selected turn's trace. The session page drives it from the URL
  * (`trace`); the reviewer drives it from its own state. The turns are the session's `turns`, each
- * with its steps (D-C-28).
+ * with its steps (D-C-28). The search, the filters and the density live here too.
  */
 export function SessionConversation({
   turns,
@@ -53,7 +76,7 @@ export function SessionConversation({
   onSelectTrace: (traceId: string) => void;
   /** The trace id of the turn to scroll to, or null. */
   scrollTarget: string | null;
-  /** Called once the list has scrolled to `scrollTarget`. */
+  /** Called once the trace id in `scrollTarget` has been taken up. */
   onScrolled: () => void;
   /** Closes the trace. Omitted, the trace has no close button. */
   onCloseTrace?: () => void;
@@ -61,11 +84,92 @@ export function SessionConversation({
   const { ref } = useProject();
   const [span, setSpan] = useState<{ traceId?: string; spanId?: string }>({});
   const spanId = span.traceId === trace ? span.spanId : undefined;
+  const [query, setQuery] = useState("");
+  const [filters, setFilters] = useState<ReadonlySet<TurnFilter>>(new Set());
+  // The trace id the list scrolls to once that turn is rendered, or null.
+  const [pendingScroll, setPendingScroll] = useState<string | null>(null);
+  const density = useTurnDensity();
+  const stepsReady = steps.status === "ready";
+  // "Uses tools" needs the steps: until they are ready the filter does not apply.
+  const activeFilters: ReadonlySet<TurnFilter> = stepsReady
+    ? filters
+    : new Set([...filters].filter((filter) => filter !== "tools"));
+  const entries: ConversationEntry[] = turns.flatMap((turn, offset) =>
+    turnMatches(turn, steps.stepsOf(turn.trace.trace_id), query, activeFilters)
+      ? [{ turn, index: offset + 1, previous: offset > 0 ? turns[offset - 1] : undefined }]
+      : [],
+  );
+  const visibleIds = new Set(entries.map((entry) => entry.turn.trace.trace_id));
+  const counts = filterCounts(turns, steps.stepsOf);
+
+  useEffect(() => {
+    if (scrollTarget === null) {
+      return;
+    }
+    if (!visibleIds.has(scrollTarget)) {
+      setQuery("");
+      setFilters(new Set());
+    }
+    setPendingScroll(scrollTarget);
+    onScrolled();
+  }, [scrollTarget, visibleIds, onScrolled]);
 
   function selectStep(traceId: string, spanId: string) {
     setSpan({ traceId, spanId });
     if (traceId !== trace) {
       onSelectTrace(traceId);
+    }
+  }
+
+  /** Selects a turn from the strip or the keys, and scrolls the list to it. */
+  function pick(traceId: string) {
+    setPendingScroll(traceId);
+    onSelectTrace(traceId);
+  }
+
+  function toggleFilter(filter: TurnFilter) {
+    setFilters((current) => {
+      const next = new Set(current);
+      if (next.has(filter)) {
+        next.delete(filter);
+      } else {
+        next.add(filter);
+      }
+      return next;
+    });
+  }
+
+  /**
+   * j and k move the selection through the visible turns. Nothing selected (or the selected turn
+   * hidden) starts at the first visible turn; the ends do not wrap. Keys from the turn menu, a
+   * text field or another control inside the list are left alone.
+   */
+  function onKeyDown(event: KeyboardEvent<HTMLElement>) {
+    const target = event.target;
+    if (
+      !(target instanceof Element) ||
+      !event.currentTarget.contains(target) ||
+      target.closest("[role='menu']") !== null ||
+      isTypingTarget(target)
+    ) {
+      return;
+    }
+    let step = 0;
+    if (matchesBinding(event, "row-next")) {
+      step = 1;
+    } else if (matchesBinding(event, "row-prev")) {
+      step = -1;
+    }
+    if (step === 0) {
+      return;
+    }
+    event.preventDefault();
+    const selected = entries.findIndex((entry) => entry.turn.trace.trace_id === trace);
+    const nextIndex =
+      selected === -1 ? 0 : Math.min(Math.max(selected + step, 0), entries.length - 1);
+    const entry = entries[nextIndex];
+    if (entry) {
+      pick(entry.turn.trace.trace_id);
     }
   }
 
@@ -75,16 +179,46 @@ export function SessionConversation({
         <SplitPane
           name="session"
           start={
-            <TurnList
-              turns={turns}
-              selectedTraceId={trace}
-              steps={steps}
-              scrollTo={scrollTarget}
-              onScrolled={onScrolled}
-              onSelect={onSelectTrace}
-              onSelectStep={selectStep}
-              projectRef={ref}
-            />
+            <div className="flex min-h-0 flex-1 flex-col">
+              <TurnToolbar
+                query={query}
+                onQuery={setQuery}
+                filters={activeFilters}
+                onToggleFilter={toggleFilter}
+                counts={counts}
+                stepsReady={stepsReady}
+              />
+              <TurnStrip
+                turns={turns}
+                visible={visibleIds}
+                selectedTraceId={trace}
+                onPick={pick}
+              />
+              <section
+                aria-label="Conversation"
+                tabIndex={0}
+                onKeyDown={onKeyDown}
+                className="focus-ring flex min-h-0 flex-1 flex-col"
+              >
+                {entries.length === 0 && turns.length > 0 ? (
+                  <p className="px-4 py-3 text-body text-muted-foreground">No turns match.</p>
+                ) : (
+                  <TurnList
+                    entries={entries}
+                    selectedTraceId={trace}
+                    steps={steps}
+                    density={density}
+                    scrollTo={pendingScroll}
+                    onScrolled={() => {
+                      setPendingScroll(null);
+                    }}
+                    onSelect={onSelectTrace}
+                    onSelectStep={selectStep}
+                    projectRef={ref}
+                  />
+                )}
+              </section>
+            </div>
           }
           end={
             trace ? (
@@ -108,20 +242,23 @@ export function SessionConversation({
 }
 
 function TurnList({
-  turns,
+  entries,
   selectedTraceId,
   steps,
+  density,
   scrollTo,
   onScrolled,
   onSelect,
   onSelectStep,
   projectRef,
 }: {
-  turns: readonly Schema<"SessionTurn">[];
+  entries: readonly ConversationEntry[];
   selectedTraceId?: string;
   steps: SessionSteps;
-  /** Scrolls the list to this trace id's turn when it is set. */
+  density: TurnDensity;
+  /** Scrolls the list to this trace id's turn once it is rendered. */
   scrollTo: string | null;
+  /** Called once the list has scrolled to `scrollTo`. */
   onScrolled: () => void;
   onSelect: (traceId: string) => void;
   onSelectStep: (traceId: string, spanId: string) => void;
@@ -131,9 +268,9 @@ function TurnList({
   // The expanded turns, keyed by trace id so the state survives virtualization.
   const [expanded, setExpanded] = useState<ReadonlySet<string>>(new Set());
   const virtualizer = useVirtualizer({
-    count: turns.length,
+    count: entries.length,
     getScrollElement: () => scrollRef.current,
-    estimateSize: () => TURN_ESTIMATE,
+    estimateSize: () => (density === "compact" ? COMPACT_ESTIMATE : TURN_ESTIMATE),
     measureElement: (element) => {
       const height = element.getBoundingClientRect().height;
       return height > 0 ? height : TURN_ESTIMATE;
@@ -142,41 +279,55 @@ function TurnList({
   });
 
   useEffect(() => {
-    if (scrollTo !== null) {
-      const index = turns.findIndex((turn) => turn.trace.trace_id === scrollTo);
-      if (index >= 0) {
-        virtualizer.scrollToIndex(index, { align: "center" });
-      }
+    virtualizer.measure();
+  }, [density, virtualizer]);
+
+  useEffect(() => {
+    if (scrollTo === null) {
+      return;
+    }
+    const index = entries.findIndex((entry) => entry.turn.trace.trace_id === scrollTo);
+    // Not rendered yet (the filters are clearing): wait for the next render.
+    if (index >= 0) {
+      virtualizer.scrollToIndex(index, { align: "center" });
       onScrolled();
     }
-  }, [scrollTo, turns, virtualizer, onScrolled]);
+  }, [scrollTo, entries, virtualizer, onScrolled]);
 
   return (
-    <section aria-label="Conversation" className="flex min-h-0 flex-1 flex-col">
-      <div ref={scrollRef} data-scroll-container className="min-h-0 flex-1 overflow-auto">
-        <div
-          className="relative mx-auto w-full max-w-[760px]"
-          style={{ height: virtualizer.getTotalSize() }}
-        >
-          {virtualizer.getVirtualItems().map((item) => {
-            const turn = turns[item.index];
-            if (!turn) {
-              return null;
-            }
-            const traceId = turn.trace.trace_id;
-            const previous = item.index > 0 ? turns[item.index - 1] : undefined;
-            return (
-              <div
-                key={traceId}
-                data-index={item.index}
-                ref={virtualizer.measureElement}
-                className="absolute top-0 left-0 w-full"
-                style={{ transform: `translateY(${item.start}px)` }}
-              >
-                <Turn
-                  index={item.index + 1}
+    <div ref={scrollRef} data-scroll-container className="min-h-0 flex-1 overflow-auto">
+      <div
+        className="relative mx-auto w-full max-w-[760px]"
+        style={{ height: virtualizer.getTotalSize() }}
+      >
+        {virtualizer.getVirtualItems().map((item) => {
+          const entry = entries[item.index];
+          if (!entry) {
+            return null;
+          }
+          const { turn } = entry;
+          const traceId = turn.trace.trace_id;
+          return (
+            <div
+              key={traceId}
+              data-index={item.index}
+              ref={virtualizer.measureElement}
+              className="absolute top-0 left-0 w-full"
+              style={{ transform: `translateY(${item.start}px)` }}
+            >
+              {density === "compact" ? (
+                <CompactTurn
+                  index={entry.index}
                   turn={turn}
-                  previous={previous}
+                  selected={traceId === selectedTraceId}
+                  toolCount={toolStepCount(steps, traceId)}
+                  onSelect={() => onSelect(traceId)}
+                />
+              ) : (
+                <Turn
+                  index={entry.index}
+                  turn={turn}
+                  previous={entry.previous}
                   selected={traceId === selectedTraceId}
                   expanded={expanded.has(traceId)}
                   onToggle={() => {
@@ -195,12 +346,95 @@ function TurnList({
                   onSelectStep={onSelectStep}
                   projectRef={projectRef}
                 />
-              </div>
-            );
-          })}
-        </div>
+              )}
+            </div>
+          );
+        })}
       </div>
-    </section>
+    </div>
+  );
+}
+
+/** The number of tool steps of a turn; 0 while the steps are not ready. */
+function toolStepCount(steps: SessionSteps, traceId: string): number {
+  return steps.stepsOf(traceId)?.filter((step) => step.span_kind === "tool").length ?? 0;
+}
+
+/** A click selects the turn, except on a control inside it and on a click that ends a text selection. */
+function onTurnClick(event: MouseEvent<HTMLElement>, onSelect: () => void) {
+  const target = event.target as HTMLElement;
+  if (
+    target.closest(
+      "button, a, input, textarea, select, [role='button'], [role='menuitem'], [role='tab']",
+    )
+  ) {
+    return;
+  }
+  if ((window.getSelection()?.toString() ?? "").length > 0) {
+    return;
+  }
+  onSelect();
+}
+
+/** One line per turn in the compact density: index, name, the first line of each bubble, tools, duration. */
+function CompactTurn({
+  index,
+  turn,
+  selected,
+  toolCount,
+  onSelect,
+}: {
+  index: number;
+  turn: Schema<"SessionTurn">;
+  selected: boolean;
+  toolCount: number;
+  onSelect: () => void;
+}) {
+  const trace = turn.trace;
+  const failed = trace.status === "error";
+  const input = bubbleOf(turn.input, "user")?.text.split("\n")[0];
+  const output = bubbleOf(turn.output, "assistant")?.text.split("\n")[0];
+  return (
+    // The whole line selects the turn; the name button is the keyboard path.
+    // biome-ignore lint/a11y/noStaticElementInteractions: the name button is the keyboard equivalent.
+    // biome-ignore lint/a11y/useKeyWithClickEvents: the name button is the keyboard equivalent.
+    <div
+      className={cn(
+        "grid h-7 grid-cols-[2.5rem_9rem_minmax(0,1fr)_3.5rem_4rem] items-center gap-2 border-b px-4 text-body",
+        selected
+          ? "bg-selection shadow-[inset_2px_0_0_var(--primary)]"
+          : cn("hover:bg-row-hover", failed && "shadow-[inset_2px_0_0_var(--status-error)]"),
+      )}
+      onClick={(event) => {
+        onTurnClick(event, onSelect);
+      }}
+    >
+      <span className="num text-muted-foreground">#{index}</span>
+      <button
+        type="button"
+        className="focus-ring truncate rounded-sm text-left font-medium"
+        aria-current={selected ? "true" : undefined}
+        onClick={onSelect}
+      >
+        {trace.name}
+      </button>
+      <span className="min-w-0 truncate text-muted-foreground">
+        {input}
+        {input !== undefined && output !== undefined ? " → " : null}
+        {output}
+      </span>
+      <span className="num flex items-center gap-1 text-muted-foreground">
+        {toolCount > 0 ? (
+          <>
+            <Wrench aria-hidden="true" className="size-3" />
+            {toolCount}
+          </>
+        ) : null}
+      </span>
+      <span className="num text-right text-muted-foreground">
+        {formatDuration(trace.duration_ns)}
+      </span>
+    </div>
   );
 }
 
@@ -249,18 +483,7 @@ function Turn({
           : cn("hover:bg-row-hover", failed && "shadow-[inset_2px_0_0_var(--status-error)]"),
       )}
       onClick={(event) => {
-        const target = event.target as HTMLElement;
-        if (
-          target.closest(
-            "button, a, input, textarea, select, [role='button'], [role='menuitem'], [role='tab']",
-          )
-        ) {
-          return;
-        }
-        if ((window.getSelection()?.toString() ?? "").length > 0) {
-          return;
-        }
-        onSelect();
+        onTurnClick(event, onSelect);
       }}
     >
       <div className="flex items-center gap-2 text-body text-muted-foreground">

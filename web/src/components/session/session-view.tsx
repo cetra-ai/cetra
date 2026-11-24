@@ -34,6 +34,7 @@ import { formatCost, formatTokens } from "@/lib/format";
 import { useListReturn } from "@/lib/list-return";
 import { canAnnotate } from "@/lib/roles";
 import { parseSessionsSearch, type SessionPageSearch } from "@/lib/search/sessions";
+import { nextFailed } from "@/lib/session-turns";
 
 export function SessionView({
   sessionId,
@@ -105,8 +106,9 @@ function SessionLoaded({
   }
 
   const failedIndex = turns.findIndex((turn) => turn.trace.status === "error");
-  function showFirstError() {
-    const turn = turns[failedIndex];
+  // The errors chip: the next failed turn after the selected one, wrapping (D-C-28).
+  function showNextError() {
+    const turn = turns[nextFailed(turns, search.trace)];
     if (!turn) {
       return;
     }
@@ -118,7 +120,7 @@ function SessionLoaded({
     <div className="flex min-h-0 flex-1 flex-col">
       <SessionHeader
         session={session}
-        onShowErrors={failedIndex >= 0 ? showFirstError : undefined}
+        onShowErrors={failedIndex >= 0 ? showNextError : undefined}
       />
       {truncated ? (
         <div className="shrink-0 border-b bg-muted px-3 py-1 text-caption">
@@ -161,7 +163,7 @@ function SessionHeader({
   onShowErrors,
 }: {
   session: Schema<"SessionSummary">;
-  /** Selects the first failed turn. Absent when no turn failed. */
+  /** Selects the next failed turn. Absent when no turn failed. */
   onShowErrors?: () => void;
 }) {
   const { org, project, data } = useProject();
