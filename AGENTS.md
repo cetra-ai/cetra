@@ -94,7 +94,7 @@ If the code has to deviate from the spec, update the spec **in the same change**
 - Python samples of the site run in `sdks/python/tests/test_examples.py` and TypeScript samples in `sdks/typescript/src/examples.test.ts`; the SDK reference pages are checked against the exports by `just check-py` and `just check-ts`.
 - Tests cover the current behaviour only.
 - UI tests use the MSW mocks from `fixtures/api/`; a page test overrides an endpoint with `server.use` instead of mocking modules.
-- Captured OTLP fixtures are recorded with `just capture` (tools/capture) and never edited by hand; `just check-capture` before committing one.
+- Captured OTLP fixtures are recorded with `just capture` (tools/capture) and never edited by hand; `just check-capture` before committing one. A capture scenario whose packages cannot share `tools/capture/py`'s lock lives under `tools/capture/envs/<env>/scenarios/` (D-IN-26).
 - A fuzz crash is fixed with its input in `fuzz/regressions/<target>/` and a named unit test. `just test` replays every corpus and regression on stable. Regressions are never passed to libFuzzer, and a crashing input never goes into `fuzz/corpus/`.
 
 **Reference implementations.** The competitors' source code is checked out in `/home/sebastien/github/{lmnr,phoenix,langfuse,langwatch,helicone,opik,mlflow}`. Read it to compare designs and learn from their mistakes. Never copy code from it.
@@ -128,7 +128,7 @@ fixtures/server/golden/      golden server backups (meta.db, catalog.db, secret.
 fixtures/api/                example API responses (UI mocks), checked against the server types (spec 09)
 tools/                       dev tools (fixture capture, benchmarks); not shipped
 tools/soak/                  soak plots (uv)
-tools/capture/               fixture capture: mock provider, OTLP receiver, scenarios (B2)
+tools/capture/               fixture capture: mock provider, OTLP receiver, scenarios (B2); `harness/` (the Python harness package), `envs/<env>/` (scenario environments) and the tool projects `litellm-proxy/`, `langflow/`, `n8n/`, `promptfoo/` (D-IN-26)
 tools/e2e/                   run.sh for just e2e: a real cetra serve and both SDK suites (D-G-20)
 fuzz/                        cargo-fuzz targets (nightly only), committed corpus and regressions (track R M3)
 docs/                        decisions, specs, plans, research
@@ -205,7 +205,7 @@ Run everything through `just`:
 | `just capture <group>/<case>` | record an OTLP fixture from a scenario, e.g. `just capture openinference/openai-chat-tool` |
 | `just capture-all` | recapture every scenario |
 | `just check-capture` | lint and type-check the capture scenarios, then recapture every scenario and compare (timing excluded) |
-| `just capture-tools` | download the pinned gateway binaries and the LiteLLM Proxy environment into `target/capture-tools` (checksummed; Linux x86_64) |
+| `just capture-tools` | download the pinned gateway binaries and install the LiteLLM Proxy, Langflow, n8n and Promptfoo tools and the scenario environments into `target/capture-tools` (checksummed; Linux x86_64) |
 | `just fetch-corpus` | download the pinned benchmark corpus (OpenAssistant oasst2, Apache-2.0) into `target/bench-corpus` |
 | `just soak` | the storage soak (D-R-11), configured by `CETRA_SOAK_*` |
 | `just soak-plot <out>` | plots and a summary table of a soak run |
@@ -229,7 +229,7 @@ Required tools:
 - `uv`
 - `actionlint` and `zizmor` (only when editing `.github/`)
 - for fuzzing: the nightly toolchain and cargo-fuzz 0.13.2 (`just fuzz-tools`)
-- for captures, `just capture-tools` downloads Temporal CLI, Bifrost, aigw and Envoy into `target/capture-tools` (pinned, checksummed), and installs the LiteLLM Proxy environment (`tools/capture/litellm-proxy`, locked)
+- for captures, `just capture-tools` downloads Temporal CLI, Bifrost, aigw and Envoy into `target/capture-tools` (pinned, checksummed), installs the LiteLLM Proxy environment (`tools/capture/litellm-proxy`, locked), Langflow (`tools/capture/langflow`), the n8n and Promptfoo tools (`tools/capture/{n8n,promptfoo}`, pnpm-locked) and the Python environments under `tools/capture/envs/` (uv-locked)
 - for packaging (`just dist`, `just check-packaging`): `musl-tools` (Linux), `cargo-auditable` 0.7.7, `cargo-about` 0.9.3 (`--features cli`), Docker Engine 25+ with Compose 2.24+, helm 4.3.1, kubeconform 0.8.0; kind 0.33.0 and kubectl for `just helm-smoke`
 
 ## CI

@@ -41,10 +41,12 @@ pub struct Program {
 }
 
 impl Program {
-    /// `uv` for Python, or `node` for TypeScript.
-    pub fn for_language(repo_root: &Path, language: Language) -> Self {
+    /// `uv` for Python, or `node` for TypeScript. A Python scenario with an `env` runs in
+    /// `tools/capture/envs/<env>`; without one, in `tools/capture/py`. `env` is ignored for
+    /// TypeScript.
+    pub fn for_language(repo_root: &Path, language: Language, env: Option<&str>) -> Self {
         match language {
-            Language::Python => Self::python(repo_root),
+            Language::Python => Self::python(repo_root, env),
             Language::Typescript => Self::typescript(),
         }
     }
@@ -54,16 +56,17 @@ impl Program {
         Self { argv }
     }
 
-    fn python(repo_root: &Path) -> Self {
+    fn python(repo_root: &Path, env: Option<&str>) -> Self {
+        let project = match env {
+            Some(env) => repo_root.join("tools/capture/envs").join(env),
+            None => repo_root.join("tools/capture/py"),
+        };
         Self {
             argv: vec![
                 "uv".to_owned(),
                 "run".to_owned(),
                 "--project".to_owned(),
-                repo_root
-                    .join("tools/capture/py")
-                    .to_string_lossy()
-                    .into_owned(),
+                project.to_string_lossy().into_owned(),
                 "--frozen".to_owned(),
                 "python".to_owned(),
                 "main.py".to_owned(),
@@ -87,27 +90,69 @@ pub struct Outcome {
     pub stale_expected: bool,
 }
 
-/// Scans `tools/capture/{py,ts}/scenarios/*/*/scenario.json`.
+/// A scenario found by [`discover`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Discovered {
+    /// `group/case` of the scenario.
+    pub case: CasePath,
+    /// Language of its program.
+    pub language: Language,
+    /// The environment under `tools/capture/envs/`, or `None` for `tools/capture/py` and
+    /// `tools/capture/ts`.
+    pub env: Option<String>,
+    /// The scenario directory.
+    pub dir: PathBuf,
+}
+
+/// Scans `tools/capture/{py,ts}/scenarios/*/*/scenario.json` and
+/// `tools/capture/envs/*/scenarios/*/*/scenario.json`.
 ///
-/// A missing `scenarios` directory is an empty result. The same `group/case`
-/// in both languages fails. The vector is sorted by group, then case.
-pub fn discover(repo_root: &Path) -> Result<Vec<(CasePath, Language, PathBuf)>, CaptureError> {
+/// A missing `scenarios` directory is an empty result. An environment directory
+/// with `scenarios/` but no `pyproject.toml` fails. The same `group/case` in two
+/// roots fails. The vector is sorted by group, then case.
+pub fn discover(repo_root: &Path) -> Result<Vec<Discovered>, CaptureError> {
+    let capture = repo_root.join("tools/capture");
     let mut found = Vec::new();
-    scan(repo_root, Language::Python, &mut found)?;
-    scan(repo_root, Language::Typescript, &mut found)?;
+    scan(
+        &capture.join("py/scenarios"),
+        Language::Python,
+        None,
+        &mut found,
+    )?;
+    scan(
+        &capture.join("ts/scenarios"),
+        Language::Typescript,
+        None,
+        &mut found,
+    )?;
+    for env in environment_dirs(&capture.join("envs"))? {
+        let env_name = entry_name(&env)?;
+        let env_dir = env.path();
+        let scenarios = env_dir.join("scenarios");
+        if !scenarios.is_dir() {
+            continue;
+        }
+        if !env_dir.join("pyproject.toml").is_file() {
+            return Err(CaptureError::ScenarioInvalid {
+                case: env_dir.display().to_string(),
+                reason: "an environment with scenarios/ needs a pyproject.toml".to_owned(),
+            });
+        }
+        scan(&scenarios, Language::Python, Some(&env_name), &mut found)?;
+    }
     let mut seen = HashSet::new();
-    for (case, _, _) in &found {
-        if !seen.insert(case.to_string()) {
+    for scenario in &found {
+        if !seen.insert(scenario.case.to_string()) {
             return Err(CaptureError::DuplicateCase {
-                case: case.to_string(),
+                case: scenario.case.to_string(),
             });
         }
     }
     found.sort_by(|left, right| {
-        left.0
+        left.case
             .group
-            .cmp(&right.0.group)
-            .then(left.0.case.cmp(&right.0.case))
+            .cmp(&right.case.group)
+            .then(left.case.case.cmp(&right.case.case))
     });
     Ok(found)
 }
@@ -138,7 +183,7 @@ pub fn program_env(
     env.insert("PYTHONHASHSEED".to_owned(), "0".to_owned());
     env.insert(
         "CETRA_CAPTURE_MOCK_URL".to_owned(),
-        format!("http://127.0.0.1:{mock_port}"),
+        format!("http://{}:{mock_port}", scenario.mock_host),
     );
     env.insert("CETRA_CAPTURE_OTLP_ENDPOINT".to_owned(), receiver.clone());
     env.insert("CETRA_CAPTURE_META".to_owned(), meta_path.to_owned());
@@ -192,8 +237,8 @@ pub async fn run_case(
     let scenario = Scenario::load(scenario_dir)?;
     let mock = Mock::new(scenario.turns.clone());
     let receiver = Receiver::new();
-    let (mock_port, mock_server) = bind(mock.router()).await?;
-    let (receiver_port, receiver_server) = bind(receiver.router()).await?;
+    let (mock_port, mock_server) = bind(mock.router(), &scenario.mock_host).await?;
+    let (receiver_port, receiver_server) = bind(receiver.router(), "127.0.0.1").await?;
     let meta = MetaFile::create(&scenario.case)?;
     let meta_path = utf8_path(meta.path())?;
     let parent = std::env::vars().collect();
@@ -230,19 +275,17 @@ pub async fn run_case(
     Ok(outcome)
 }
 
+/// Adds the scenarios under `dir` (a `scenarios` directory) to `found`.
 fn scan(
-    repo_root: &Path,
+    dir: &Path,
     language: Language,
-    found: &mut Vec<(CasePath, Language, PathBuf)>,
+    env: Option<&str>,
+    found: &mut Vec<Discovered>,
 ) -> Result<(), CaptureError> {
-    let dir = repo_root
-        .join("tools/capture")
-        .join(language_dir(language))
-        .join("scenarios");
     if !dir.exists() {
         return Ok(());
     }
-    for group_entry in read_dir(&dir)? {
+    for group_entry in read_dir(dir)? {
         if !group_entry.path().is_dir() {
             continue;
         }
@@ -256,17 +299,26 @@ fn scan(
             }
             let case_name = entry_name(&case_entry)?;
             let case = format!("{group}/{case_name}").parse()?;
-            found.push((case, language, case_entry.path()));
+            found.push(Discovered {
+                case,
+                language,
+                env: env.map(str::to_owned),
+                dir: case_entry.path(),
+            });
         }
     }
     Ok(())
 }
 
-fn language_dir(language: Language) -> &'static str {
-    match language {
-        Language::Python => "py",
-        Language::Typescript => "ts",
+/// The entries of `tools/capture/envs`, or none when the directory does not exist.
+fn environment_dirs(envs: &Path) -> Result<Vec<DirEntry>, CaptureError> {
+    if !envs.is_dir() {
+        return Ok(Vec::new());
     }
+    Ok(read_dir(envs)?
+        .into_iter()
+        .filter(|entry| entry.path().is_dir())
+        .collect())
 }
 
 fn read_dir(path: &Path) -> Result<Vec<DirEntry>, CaptureError> {
@@ -292,14 +344,14 @@ fn entry_name(entry: &DirEntry) -> Result<String, CaptureError> {
         })
 }
 
-async fn bind(router: axum::Router) -> Result<(u16, Server), CaptureError> {
-    let listener =
-        TcpListener::bind("127.0.0.1:0")
-            .await
-            .map_err(|source| CaptureError::Process {
-                step: "bind a loopback port",
-                source,
-            })?;
+/// Binds `host` on a free port and serves `router` there.
+async fn bind(router: axum::Router, host: &str) -> Result<(u16, Server), CaptureError> {
+    let listener = TcpListener::bind((host, 0))
+        .await
+        .map_err(|source| CaptureError::Process {
+            step: "bind a loopback port",
+            source,
+        })?;
     let port = listener
         .local_addr()
         .map_err(|source| CaptureError::Process {
@@ -618,6 +670,7 @@ fn process(
         &mut request,
         &ScrubContext {
             provider: provider(scenario),
+            mock_host: scenario.mock_host.clone(),
             mock_port,
             receiver_port,
             home: home_dir()?,
@@ -1166,7 +1219,7 @@ mod tests {
         let found = discover(&tmp.0).unwrap();
         let labels: Vec<_> = found
             .iter()
-            .map(|(case, language, _)| (case.to_string(), *language))
+            .map(|found| (found.case.to_string(), found.language))
             .collect();
         assert_eq!(
             labels,
@@ -1179,8 +1232,84 @@ mod tests {
         let error = discover(&tmp.0).unwrap_err();
         assert_eq!(
             error.to_string(),
-            "case genai/alpha is in both the Python and TypeScript scenarios"
+            "case genai/alpha is defined in more than one scenario root"
         );
+    }
+
+    fn write_env_scenario(root: &Path, env: &str, group: &str, case: &str, project: bool) {
+        let env_dir = root.join("tools/capture/envs").join(env);
+        let dir = env_dir.join("scenarios").join(group).join(case);
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("scenario.json"), "{}\n").unwrap();
+        if project {
+            fs::write(env_dir.join("pyproject.toml"), "[project]\n").unwrap();
+        }
+    }
+
+    #[test]
+    fn discover_finds_environment_scenarios_with_their_environment() {
+        let tmp = Tmp::new("discover-env");
+        write_env_scenario(&tmp.0, "x", "genai", "zeta", true);
+        write_scenario(&tmp.0, Language::Python, "genai", "alpha");
+        write_env_scenario(&tmp.0, "y", "genai", "mid", true);
+        let found = discover(&tmp.0).unwrap();
+        let labels: Vec<_> = found
+            .iter()
+            .map(|found| (found.case.to_string(), found.language, found.env.as_deref()))
+            .collect();
+        assert_eq!(
+            labels,
+            vec![
+                ("genai/alpha".to_owned(), Language::Python, None),
+                ("genai/mid".to_owned(), Language::Python, Some("y")),
+                ("genai/zeta".to_owned(), Language::Python, Some("x")),
+            ]
+        );
+        assert_eq!(
+            found[1].dir,
+            tmp.0.join("tools/capture/envs/y/scenarios/genai/mid")
+        );
+    }
+
+    #[test]
+    fn discover_rejects_a_case_in_an_environment_and_the_python_root() {
+        let tmp = Tmp::new("discover-env-dup-py");
+        write_scenario(&tmp.0, Language::Python, "genai", "alpha");
+        write_env_scenario(&tmp.0, "x", "genai", "alpha", true);
+        let error = discover(&tmp.0).unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "case genai/alpha is defined in more than one scenario root"
+        );
+    }
+
+    #[test]
+    fn discover_rejects_a_case_in_two_environments() {
+        let tmp = Tmp::new("discover-env-dup-env");
+        write_env_scenario(&tmp.0, "x", "genai", "alpha", true);
+        write_env_scenario(&tmp.0, "y", "genai", "alpha", true);
+        let error = discover(&tmp.0).unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "case genai/alpha is defined in more than one scenario root"
+        );
+    }
+
+    #[test]
+    fn discover_rejects_an_environment_without_a_pyproject() {
+        let tmp = Tmp::new("discover-env-project");
+        write_env_scenario(&tmp.0, "x", "genai", "alpha", false);
+        let error = discover(&tmp.0).unwrap_err();
+        let text = error.to_string();
+        assert!(text.contains("pyproject.toml"), "{text}");
+        assert!(text.contains("envs/x"), "{text}");
+    }
+
+    #[test]
+    fn discover_ignores_an_environment_without_scenarios() {
+        let tmp = Tmp::new("discover-env-bare");
+        fs::create_dir_all(tmp.0.join("tools/capture/envs/bare")).unwrap();
+        assert!(discover(&tmp.0).unwrap().is_empty());
     }
 
     #[test]
@@ -1191,8 +1320,9 @@ mod tests {
         write_scenario(&tmp.0, Language::Typescript, "openinference", "chat-tool");
         let found = discover(&tmp.0).unwrap();
         assert_eq!(found.len(), 1);
-        assert_eq!(found[0].1, Language::Typescript);
-        assert_eq!(found[0].0.to_string(), "openinference/chat-tool");
+        assert_eq!(found[0].language, Language::Typescript);
+        assert_eq!(found[0].env, None);
+        assert_eq!(found[0].case.to_string(), "openinference/chat-tool");
     }
 
     #[test]
@@ -1206,7 +1336,7 @@ mod tests {
     #[test]
     fn program_commands_match_the_plan() {
         assert_eq!(
-            Program::python(Path::new("/repo")).argv,
+            Program::python(Path::new("/repo"), None).argv,
             [
                 "uv",
                 "run",
@@ -1219,8 +1349,36 @@ mod tests {
         );
         assert_eq!(Program::typescript().argv, ["node", "main.ts"]);
         assert_eq!(
-            Program::for_language(Path::new("/repo"), Language::Typescript).argv,
+            Program::for_language(Path::new("/repo"), Language::Typescript, None).argv,
             ["node", "main.ts"]
+        );
+        assert_eq!(
+            Program::for_language(Path::new("/repo"), Language::Python, None).argv,
+            [
+                "uv",
+                "run",
+                "--project",
+                "/repo/tools/capture/py",
+                "--frozen",
+                "python",
+                "main.py",
+            ]
+        );
+    }
+
+    #[test]
+    fn program_for_an_environment_runs_in_that_environment() {
+        assert_eq!(
+            Program::for_language(Path::new("/repo"), Language::Python, Some("mcp")).argv,
+            [
+                "uv",
+                "run",
+                "--project",
+                "/repo/tools/capture/envs/mcp",
+                "--frozen",
+                "python",
+                "main.py",
+            ]
         );
     }
 
@@ -1339,6 +1497,24 @@ mod tests {
         assert_eq!(
             env.get("CETRA_CAPTURE_MOCK_URL").map(String::as_str),
             Some("http://127.0.0.1:40123")
+        );
+        let mut second = scenario;
+        second.mock_host = "127.0.0.2".to_owned();
+        let env = program_env(
+            &parent,
+            &second,
+            Path::new("/repo"),
+            40123,
+            40124,
+            "/tmp/meta.json",
+        );
+        assert_eq!(
+            env.get("CETRA_CAPTURE_MOCK_URL").map(String::as_str),
+            Some("http://127.0.0.2:40123")
+        );
+        assert_eq!(
+            env.get("CETRA_CAPTURE_OTLP_ENDPOINT").map(String::as_str),
+            Some("http://127.0.0.1:40124/v1/traces")
         );
         assert_eq!(
             env.get("CETRA_CAPTURE_OTLP_ENDPOINT").map(String::as_str),

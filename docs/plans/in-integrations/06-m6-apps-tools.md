@@ -118,7 +118,7 @@ D-IN-26, M6's decisions:
    - **n8n and Promptfoo:** npm packages from `tools/capture/n8n/` and `tools/capture/promptfoo/`. Each holds a `package.json`, a `pnpm-workspace.yaml` (the shape of `tools/capture/ts`'s: `packages: []`, `minimumReleaseAge`, `allowBuilds`) and a `pnpm-lock.yaml`. They install with `pnpm install --frozen-lockfile --dir <project> --modules-dir <target dir>/node_modules`.
    - **Langflow:** a uv project `tools/capture/langflow/`, like `litellm-proxy`.
    - **Python environments** (`tools/capture/envs/*`) are synced by `uv sync --frozen --project` and skipped when a copy of their `uv.lock` in `target/capture-tools/envs/<name>.lock` matches.
-   - **Browser Use** needs Chromium (item 10).
+   - **Browser Use** needs Chromium: an explicit `playwright==1.65.2` pin in `tools/capture/envs/browser-use` installs it (item 10; version locked, not checksummed).
 3. **New fixture groups:** `n8n`, `livekit` and `pipecat`, which the design already lists, plus `promptflow` and `langflow`, which amend the design's fixed list (IN6.9 edits that bullet, `00-design.md` line 84). Browser Use, MCP, OpenLIT and Promptfoo go in `genai`; the OpenLLMetry vector case goes in `openllmetry`. `website/scripts/check-backing.mjs` accepts `[a-z0-9_]+` groups (`n8n` has a digit).
 4. **Pages with no capture:**
    - setup only: Stagehand, LobeChat, Weaviate (a section of the Vector databases page), Pinecone (the same page), Cleanlab, Harbor and Terminal-Bench;
@@ -128,7 +128,7 @@ D-IN-26, M6's decisions:
 7. **The `mcp` registry row is added** (OpenInference's `MCPInstrumentor`; the registry has no such row today). It joins an `mcp<2` server's spans to the client trace; the page says it records no spans of its own, and that `mcp>=2` traces natively.
 8. **n8n names are not rewritten.** The stored span name stays `node.execute` / `workflow.execute` (the spike's R-N8N-1 is dropped: no rule renames a span, and a rename would be a new mechanism). The page's Limits says the node name is in `n8n.node.name`.
 9. **Scoped content has no convention.** A fixed scope table (`pipecat*`, `livekit-agents`, `promptflow`, `langflow`) in `crates/otel/src/conventions/scoped.rs` fills input and output only where the convention readers left them empty.
-10. **Chromium** for Browser Use is installed with the Playwright version the Browser Use environment locks. It is pinned by that lock, not checksummed.
+10. **Chromium** for Browser Use comes from an explicit `playwright==1.65.2` pin in `tools/capture/envs/browser-use` (the newest upload before the cutoff; browser-use 1.0.6 does not lock playwright). `playwright install chromium` installs it. The version is locked by `uv.lock`, not checksummed. The scenario passes the installed binary as `executable_path`.
 11. **Not read, and unit-tested only:**
     - Promptfoo's `promptfoo.request.body` and `promptfoo.response.body` are not read (the grader span is `evaluator`, its child `chat` span keeps tokens, and has no content);
     - R-OL-1 and R-OL-3 are unit-tested only: no captured case has an OpenLIT Browser Use 0.x span (Browser Use 1.0 is captured);
@@ -148,7 +148,7 @@ Every version is the newest upload on or before the 7-day cutoff of the day the 
 | `livekit-agents`, `livekit-plugins-openai` | 1.8.12 | the same |
 | `pipecat-ai[openai]` | 1.16.0 | the same |
 | `browser-use` | 1.0.6 | `envs/browser-use` |
-| `playwright` | whatever `browser-use` locks | `envs/browser-use` (not pinned by us) |
+| `playwright` | 1.65.2, an explicit pin (newest upload before the cutoff, 2026-11-14; browser-use 1.0.6 does not lock it); locked by `uv.lock`, not checksummed | `envs/browser-use` (Chromium, item 10) |
 | `mcp` | 2.3.0 | `envs/mcp` |
 | `openlit` | 1.45.0, with `openai<3` | `envs/openlit` |
 | `chromadb`, `qdrant-client`, `pymilvus[milvus_lite]` | 1.5.9, 1.20.0, 3.0.3 | `envs/openlit` and `envs/vector` |

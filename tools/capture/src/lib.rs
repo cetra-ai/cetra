@@ -18,7 +18,7 @@ pub use determinism::deterministic;
 pub use error::CaptureError;
 pub use mock::{Mock, MockLog, Served};
 pub use receiver::{Received, Receiver};
-pub use run::{Outcome, Program, discover, program_env, run_case};
+pub use run::{Discovered, Outcome, Program, discover, program_env, run_case};
 pub use scenario::{
     Api, CasePath, Finish, Message, Provider, Scenario, TimestampAttribute, TimestampFormat,
     ToolCall, Turn, Usage,

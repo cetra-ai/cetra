@@ -97,8 +97,8 @@ pub enum CaptureError {
         source: std::io::Error,
     },
 
-    /// The same `group/case` is under both scenario trees.
-    #[error("case {case} is in both the Python and TypeScript scenarios")]
+    /// The same `group/case` is under more than one scenario root.
+    #[error("case {case} is defined in more than one scenario root")]
     DuplicateCase {
         /// `group/case`.
         case: String,

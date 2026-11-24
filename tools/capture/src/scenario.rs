@@ -2,11 +2,13 @@
 //!
 //! The JSON shape is `docs/plans/b2-capture/README.md` § The scenario format.
 //! Usage numbers use OTel semantics: `input` includes cache tokens and `output`
-//! includes reasoning tokens.
+//! includes reasoning tokens. `mock_host` is the loopback address the mock binds
+//! (default `127.0.0.1`).
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fmt;
 use std::fs;
+use std::net::Ipv4Addr;
 use std::path::Path;
 use std::str::FromStr;
 
@@ -31,6 +33,11 @@ pub const GROUPS: &[&str] = &[
     "gemini_cli",
     "voltagent",
     "edge",
+    "n8n",
+    "livekit",
+    "pipecat",
+    "promptflow",
+    "langflow",
 ];
 
 const SETTING_KEYS: &[&str] = &["max_attribute_bytes", "media_min_bytes", "media_max_bytes"];
@@ -127,6 +134,10 @@ pub struct Scenario {
     /// `project_id` and `ingest_time` overrides copied into `case.json`.
     #[serde(default)]
     pub context: Option<Map<String, Value>>,
+    /// Loopback IPv4 address the mock binds and puts in `CETRA_CAPTURE_MOCK_URL`.
+    /// Defaults to `127.0.0.1`. A program that routes by host can use `127.0.0.2`.
+    #[serde(default = "default_mock_host")]
+    pub mock_host: String,
     /// Package that produces the convention under test.
     pub instrumentation: String,
     /// Packages whose versions are recorded. Must contain [`Self::instrumentation`].
@@ -431,6 +442,7 @@ impl Scenario {
             reject_duplicates(values, field)?;
         }
         self.check_env()?;
+        check_mock_host(&self.mock_host)?;
         check_string_map(self.settings.as_ref(), SETTING_KEYS, "settings", true)?;
         check_string_map(self.context.as_ref(), CONTEXT_KEYS, "context", false)?;
         self.check_turns()?;
@@ -660,6 +672,22 @@ fn reject_duplicates(values: &[impl AsRef<str>], field: &str) -> Result<(), Stri
     Ok(())
 }
 
+/// The mock's bind address: an IPv4 loopback address, so the capture never listens on a
+/// routable interface.
+fn check_mock_host(host: &str) -> Result<(), String> {
+    let address: Ipv4Addr = host
+        .parse()
+        .map_err(|_| format!("mock_host \"{host}\" must be an IPv4 address"))?;
+    if !address.is_loopback() {
+        return Err(format!("mock_host \"{host}\" must be a loopback address"));
+    }
+    Ok(())
+}
+
+fn default_mock_host() -> String {
+    "127.0.0.1".to_owned()
+}
+
 fn check_string_map(
     map: Option<&Map<String, Value>>,
     allowed: &[&str],
@@ -707,6 +735,7 @@ mod tests {
 
     const FULL: &str = r#"{
       "description": "OpenAI chat completion with one tool call, traced by OpenInference.",
+      "mock_host": "127.0.0.2",
       "spec_refs": ["02 § Mapping tables / Input / output"],
       "notes": "Optional free text, copied into case.json.",
       "settings": { "media_min_bytes": 64 },
@@ -832,9 +861,49 @@ mod tests {
         assert!(encoded.contains("\"tool_calls\""));
         assert!(encoded.contains("\"rfc3339\""));
         assert!(!encoded.contains("\"case\""));
+        assert_eq!(scenario.mock_host, "127.0.0.2");
+        assert!(encoded.contains("\"mock_host\":\"127.0.0.2\""));
         let mut again: Scenario = serde_json::from_str(&encoded).expect("deserialize");
         again.case = scenario.case.clone();
         assert_eq!(again, scenario);
+    }
+
+    #[test]
+    fn mock_host_defaults_to_the_loopback_address() {
+        let scenario = load_value(chat()).expect("defaults");
+        assert_eq!(scenario.mock_host, "127.0.0.1");
+    }
+
+    #[test]
+    fn mock_host_accepts_any_ipv4_loopback_address() {
+        for host in ["127.0.0.1", "127.0.0.2", "127.255.255.254"] {
+            let mut value = chat();
+            value["mock_host"] = json!(host);
+            let scenario = load_value(value).expect("loopback is accepted");
+            assert_eq!(scenario.mock_host, host);
+        }
+    }
+
+    #[test]
+    fn mock_host_must_be_an_ipv4_loopback_address() {
+        for host in [
+            "10.0.0.1",
+            "192.168.1.5",
+            "0.0.0.0",
+            "localhost",
+            "::1",
+            "",
+            "127.0.0.256",
+        ] {
+            let mut value = chat();
+            value["mock_host"] = json!(host);
+            let reason = reason(value);
+            assert!(
+                reason.contains("mock_host")
+                    && (reason.contains("loopback") || reason.contains("IPv4")),
+                "{host}: {reason}"
+            );
+        }
     }
 
     #[test]

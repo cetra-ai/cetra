@@ -485,6 +485,47 @@ mod tests {
         assert!(log.errors.is_empty());
     }
 
+    /// A real HTTP/1.1 connection: `oneshot` cannot send a chunked request.
+    #[tokio::test]
+    async fn a_chunked_otlp_body_is_received() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let receiver = Receiver::new();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = tokio::spawn(axum::serve(listener, receiver.router()).into_future());
+        let body = sample().encode_to_vec();
+        let mut stream = tokio::net::TcpStream::connect(("127.0.0.1", port))
+            .await
+            .unwrap();
+        let head = "POST /v1/traces HTTP/1.1\r\nHost: 127.0.0.1\r\n\
+            Content-Type: application/x-protobuf\r\nTransfer-Encoding: chunked\r\n\
+            Connection: close\r\n\r\n";
+        let (first, rest) = body.split_at(body.len() / 2);
+        let mut request = head.as_bytes().to_vec();
+        for chunk in [first, rest] {
+            request.extend_from_slice(format!("{:x}\r\n", chunk.len()).as_bytes());
+            request.extend_from_slice(chunk);
+            request.extend_from_slice(b"\r\n");
+        }
+        request.extend_from_slice(b"0\r\n\r\n");
+        stream.write_all(&request).await.unwrap();
+        let mut response = Vec::new();
+        tokio::time::timeout(Duration::from_secs(5), stream.read_to_end(&mut response))
+            .await
+            .expect("the response arrives")
+            .unwrap();
+        server.abort();
+        assert!(
+            response.starts_with(b"HTTP/1.1 200"),
+            "{}",
+            String::from_utf8_lossy(&response)
+        );
+        let log = receiver.finish();
+        assert_eq!(log.exports, vec![sample()]);
+        assert!(log.errors.is_empty(), "{:?}", log.errors);
+    }
+
     #[tokio::test]
     async fn gzip_is_refused() {
         let receiver = Receiver::new();

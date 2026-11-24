@@ -1,0 +1,7 @@
+{
+  "private": true,
+  "packageManager": "pnpm@11.28.10",
+  "dependencies": {
+    "n8n": "2.48.4"
+  }
+}

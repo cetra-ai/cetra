@@ -1,0 +1,23 @@
+packages: []
+
+# Minutes. D74/D117: no release younger than 7 days.
+minimumReleaseAge: 10080
+
+# n8n's default database driver (n8n depends on sqlite3 directly); its native build is needed.
+# The other scripts stay off: the scenarios run the default workflow engine without them.
+allowBuilds:
+  "sqlite3@5.1.7": true
+  "@confluentinc/kafka-javascript@1.9.1": false # the Kafka trigger node only
+  "@parcel/watcher@2.6.0": false # the file watcher of the development tooling
+  "@scarf/scarf@1.4.0": false # install-time telemetry, which the capture never sends
+  "@sentry/node-cpu-profiler@2.4.4": false # optional Sentry profiler
+  "@sentry/node-native-stacktrace@0.5.2": false # optional Sentry native stack traces
+  "agent-browser@0.26.0": false # a browser binary for agent tools, not a workflow node the scenarios use
+  "cpu-features@0.0.10": false # optional native CPU detection of ssh2
+  "isolated-vm@7.0.2": false # the Code node's sandbox, which no scenario runs yet
+  "msgpackr-extract@3.0.7": false # optional speed-up of msgpackr, which falls back to JavaScript
+  "oracledb@6.10.0": false # the Oracle database driver, which no scenario uses
+  "protobufjs@7.6.6": false # its install script only warns about a version-scheme mismatch (as tools/capture/ts)
+  "ssh2@1.15.0": false # optional native crypto of the SSH node
+  "ssh2@1.17.0": false # optional native crypto of the SSH node
+  "vue-demi@0.14.10": false # its install script only prints a Vue version notice

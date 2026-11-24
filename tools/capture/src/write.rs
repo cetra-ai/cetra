@@ -185,6 +185,7 @@ mod tests {
         };
         Scenario {
             description: "A captured chat.".to_owned(),
+            mock_host: "127.0.0.1".to_owned(),
             spec_refs: vec!["02 § Normalization rules".to_owned()],
             notes,
             settings,

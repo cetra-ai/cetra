@@ -1,5 +1,7 @@
 # Fetch the pinned gateway binaries that capture scenarios run (IN5.1) into
-# target/capture-tools/, and install the LiteLLM Proxy environment (Amendment B).
+# target/capture-tools/, and install the LiteLLM Proxy environment (Amendment B),
+# the Langflow tool, the n8n and Promptfoo tools and the Python environments under
+# tools/capture/envs/ (IN6.1).
 # Linux x86_64 only; every download is checked by SHA-256.
 # The binary is moved to its final name last, so a partial run never leaves a file
 # that looks complete.
@@ -80,4 +82,64 @@ else
     UV_PROJECT_ENVIRONMENT="$litellm_env" uv sync --frozen --project "$repo_root/tools/capture/litellm-proxy"
     mkdir -p -- "$(dirname -- "$litellm_lock_copy")"
     cp -- "$repo_root/tools/capture/litellm-proxy/uv.lock" "$litellm_lock_copy"
+fi
+
+# Installs a pnpm tool project (tools/capture/<name>) into target/capture-tools/<name>/<version>/node_modules.
+# Skipped when the marker file exists and the committed lock matches its copy.
+# pnpm_tool <name> <version> <marker-under-node_modules>
+pnpm_tool() {
+    local name="$1" version="$2" marker="$3"
+    local project="$repo_root/tools/capture/$name"
+    local modules="$tools_dir/$name/$version/node_modules"
+    local lock_copy="$tools_dir/$name/pnpm-lock.yaml"
+    if [ -e "$modules/$marker" ] && cmp -s "$project/pnpm-lock.yaml" "$lock_copy"; then
+        echo "capture-tools: $name $version already present"
+        return 0
+    fi
+    echo "capture-tools: installing $name $version"
+    pnpm install --frozen-lockfile --dir "$project" --modules-dir "$modules"
+    mkdir -p -- "$tools_dir/$name"
+    cp -- "$project/pnpm-lock.yaml" "$lock_copy"
+}
+
+# Langflow, the same way as the LiteLLM Proxy above: a pinned uv tool project with no code.
+langflow_env="$tools_dir/langflow/1.13.2"
+langflow_lock_copy="$tools_dir/langflow/uv.lock"
+if [ -x "$langflow_env/bin/langflow" ] &&
+    cmp -s "$repo_root/tools/capture/langflow/uv.lock" "$langflow_lock_copy"; then
+    echo "capture-tools: langflow 1.13.2 already present"
+else
+    echo "capture-tools: installing langflow 1.13.2"
+    UV_PROJECT_ENVIRONMENT="$langflow_env" uv sync --frozen --project "$repo_root/tools/capture/langflow"
+    mkdir -p -- "$(dirname -- "$langflow_lock_copy")"
+    cp -- "$repo_root/tools/capture/langflow/uv.lock" "$langflow_lock_copy"
+fi
+
+pnpm_tool n8n 2.48.4 n8n/bin/n8n
+pnpm_tool promptfoo 0.125.1 promptfoo/package.json
+
+# The Python environments under tools/capture/envs/ (D-IN-26): each is synced in place
+# (its .venv), and skipped when its committed lock matches the copy stored in tools/capture-tools.
+mkdir -p -- "$tools_dir/envs"
+for env_dir in "$repo_root"/tools/capture/envs/*/; do
+    env_name="$(basename -- "$env_dir")"
+    env_lock_copy="$tools_dir/envs/$env_name.lock"
+    if [ -d "$env_dir/.venv" ] && cmp -s "$env_dir/uv.lock" "$env_lock_copy"; then
+        echo "capture-tools: envs/$env_name already present"
+        continue
+    fi
+    echo "capture-tools: syncing envs/$env_name"
+    uv sync --frozen --project "$env_dir"
+    cp -- "$env_dir/uv.lock" "$env_lock_copy"
+done
+
+# Chromium for Browser Use (IN6.1): the browser-use environment's pinned playwright installs it into
+# target/capture-tools/playwright (the binary is pinned by that lock, not checksummed). Skipped when a
+# chromium-* directory is already there.
+playwright_dir="$tools_dir/playwright"
+if compgen -G "$playwright_dir/chromium-*" >/dev/null; then
+    echo "capture-tools: chromium already present"
+else
+    echo "capture-tools: installing chromium for browser-use"
+    PLAYWRIGHT_BROWSERS_PATH="$playwright_dir" uv run --project "$repo_root/tools/capture/envs/browser-use" --frozen playwright install chromium
 fi

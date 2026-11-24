@@ -40,6 +40,11 @@ pub const GROUPS: &[&str] = &[
     "voltagent",
     "cetra",
     "edge",
+    "n8n",
+    "livekit",
+    "pipecat",
+    "promptflow",
+    "langflow",
 ];
 
 /// One fixture directory and its JSON files.

@@ -21,6 +21,8 @@ const MOCK_KEY: &str = "capture-mock-key";
 pub struct ScrubContext {
     /// Provider whose real host replaces the mock address.
     pub provider: Provider,
+    /// Loopback address of the mock provider (the scenario's `mock_host`).
+    pub mock_host: String,
     /// Loopback port of the mock provider.
     pub mock_port: u16,
     /// Loopback port of the OTLP receiver.
@@ -97,51 +99,64 @@ fn rewrite_endpoints(request: &mut ExportTraceServiceRequest, ctx: &ScrubContext
     for resource_spans in &mut request.resource_spans {
         for scope_spans in &mut resource_spans.scope_spans {
             for span in &mut scope_spans.spans {
-                rewrite_attribute_endpoints(&mut span.attributes, host, ctx.mock_port);
+                let endpoints = Endpoints {
+                    host,
+                    mock_host: &ctx.mock_host,
+                    mock_port: ctx.mock_port,
+                };
+                rewrite_attribute_endpoints(&mut span.attributes, &endpoints);
                 for event in &mut span.events {
-                    rewrite_attribute_endpoints(&mut event.attributes, host, ctx.mock_port);
+                    rewrite_attribute_endpoints(&mut event.attributes, &endpoints);
                 }
                 for link in &mut span.links {
-                    rewrite_attribute_endpoints(&mut link.attributes, host, ctx.mock_port);
+                    rewrite_attribute_endpoints(&mut link.attributes, &endpoints);
                 }
             }
         }
     }
 }
 
-fn rewrite_attribute_endpoints(attributes: &mut [KeyValue], host: &str, mock_port: u16) {
+/// What a mock address is rewritten to: the provider's real host and the mock's own
+/// loopback address and port.
+struct Endpoints<'a> {
+    host: &'a str,
+    mock_host: &'a str,
+    mock_port: u16,
+}
+
+fn rewrite_attribute_endpoints(attributes: &mut [KeyValue], endpoints: &Endpoints<'_>) {
     for attribute in attributes {
         let Some(value) = attribute.value.as_mut() else {
             continue;
         };
         match attribute.key.as_str() {
-            "server.address" => rewrite_address(value, host),
-            "server.port" => rewrite_port(value, mock_port),
+            "server.address" => rewrite_address(value, endpoints),
+            "server.port" => rewrite_port(value, endpoints.mock_port),
             _ => {}
         }
-        rewrite_nested_endpoints(value, host, mock_port);
+        rewrite_nested_endpoints(value, endpoints);
     }
 }
 
-fn rewrite_nested_endpoints(value: &mut AnyValue, host: &str, mock_port: u16) {
+fn rewrite_nested_endpoints(value: &mut AnyValue, endpoints: &Endpoints<'_>) {
     match &mut value.value {
         Some(Value::ArrayValue(array)) => {
             for item in &mut array.values {
-                rewrite_nested_endpoints(item, host, mock_port);
+                rewrite_nested_endpoints(item, endpoints);
             }
         }
         Some(Value::KvlistValue(list)) => {
-            rewrite_attribute_endpoints(&mut list.values, host, mock_port);
+            rewrite_attribute_endpoints(&mut list.values, endpoints);
         }
         _ => {}
     }
 }
 
-fn rewrite_address(value: &mut AnyValue, host: &str) {
+fn rewrite_address(value: &mut AnyValue, endpoints: &Endpoints<'_>) {
     if let Some(Value::StringValue(text)) = &mut value.value
-        && (text == "127.0.0.1" || text == "localhost")
+        && (text == "127.0.0.1" || text == "localhost" || text == endpoints.mock_host)
     {
-        *text = host.to_owned();
+        *text = endpoints.host.to_owned();
     }
 }
 
@@ -163,6 +178,10 @@ fn replacements(ctx: &ScrubContext) -> Vec<Replacement> {
         },
         Replacement {
             needle: format!("http://localhost:{}", ctx.mock_port),
+            replacement: format!("https://{host}"),
+        },
+        Replacement {
+            needle: format!("http://{}:{}", ctx.mock_host, ctx.mock_port),
             replacement: format!("https://{host}"),
         },
     ];
@@ -387,6 +406,8 @@ fn leaks(request: &ExportTraceServiceRequest, ctx: &ScrubContext) -> Vec<String>
 fn leak_needles(ctx: &ScrubContext) -> Vec<String> {
     let mut needles = vec![
         "127.0.0.1".to_owned(),
+        ctx.mock_host.clone(),
+        format!("{}:{}", ctx.mock_host, ctx.mock_port),
         "localhost".to_owned(),
         "[::1]".to_owned(),
         format!(":{}", ctx.mock_port),
@@ -511,6 +532,7 @@ mod tests {
     fn ctx() -> ScrubContext {
         ScrubContext {
             provider: Provider::OpenAi,
+            mock_host: "127.0.0.1".to_owned(),
             mock_port: 40123,
             receiver_port: 40124,
             home: PathBuf::from("/home/sebastien"),
@@ -726,6 +748,51 @@ mod tests {
             ),
             "capture-host-prod"
         );
+    }
+
+    #[test]
+    fn a_second_loopback_mock_address_is_rewritten_and_a_leftover_is_a_leak() {
+        let mut ctx = ctx();
+        ctx.mock_host = "127.0.0.2".to_owned();
+        let mut request = ExportTraceServiceRequest {
+            resource_spans: vec![ResourceSpans {
+                scope_spans: vec![ScopeSpans {
+                    spans: vec![Span {
+                        name: "chat".to_owned(),
+                        attributes: vec![
+                            string_attr("server.address", "127.0.0.2"),
+                            string_attr("url.full", "http://127.0.0.2:40123/v1/chat/completions"),
+                        ],
+                        ..Span::default()
+                    }],
+                    ..ScopeSpans::default()
+                }],
+                ..ResourceSpans::default()
+            }],
+        };
+        scrub(&mut request, &ctx).unwrap();
+        let span = &request.resource_spans[0].scope_spans[0].spans[0];
+        assert_eq!(text_of(&span.attributes[0]), "api.openai.com");
+        assert_eq!(
+            text_of(&span.attributes[1]),
+            "https://api.openai.com/v1/chat/completions"
+        );
+
+        let mut leftover = ExportTraceServiceRequest {
+            resource_spans: vec![ResourceSpans {
+                scope_spans: vec![ScopeSpans {
+                    spans: vec![Span {
+                        name: "chat".to_owned(),
+                        attributes: vec![string_attr("note", "see 127.0.0.2")],
+                        ..Span::default()
+                    }],
+                    ..ScopeSpans::default()
+                }],
+                ..ResourceSpans::default()
+            }],
+        };
+        let error = scrub(&mut leftover, &ctx).unwrap_err();
+        assert!(matches!(error, CaptureError::Leak { .. }), "{error}");
     }
 
     #[test]
