@@ -16,6 +16,7 @@ use arrow::array::{
     Array, ArrayRef, BooleanArray, RecordBatch, RecordBatchOptions, UInt32Array, make_comparator,
     new_empty_array,
 };
+use arrow::buffer::BooleanBuffer;
 use arrow::compute::{SortOptions, cast, concat, sort_to_indices, take};
 use arrow::datatypes::{DataType, Field, Schema, SchemaRef};
 
@@ -1004,6 +1005,8 @@ pub struct ScanBatches {
     ready: std::collections::VecDeque<RecordBatch>,
     /// Batches built at a time, each on its own thread.
     threads: usize,
+    /// A fused scan's state: its batches come from it instead.
+    fused: Option<Box<FusedScan>>,
 }
 
 impl ScanBatches {
@@ -1019,6 +1022,7 @@ impl ScanBatches {
             next: 0,
             ready: std::collections::VecDeque::new(),
             threads: 1,
+            fused: None,
         }
     }
 
@@ -1067,7 +1071,11 @@ impl ScanBatches {
     }
 
     fn batch_count(&self) -> usize {
-        self.selection.len().div_ceil(BATCH_ROWS)
+        match &self.fused {
+            // Unknown until the chunks are read; one while any is left.
+            Some(fused) => usize::from(fused.next < fused.units.len()),
+            None => self.selection.len().div_ceil(BATCH_ROWS),
+        }
     }
 
     /// The steps of batches left to build: each builds up to `threads` batches at once.
@@ -1186,10 +1194,182 @@ impl ScanBatches {
     }
 }
 
+/// A scan with a range filter on one integer column, walked chunk by chunk: each chunk's matching
+/// rows are found (from its packed values, or all of them when its zone proves it) and taken from
+/// the projected columns' chunks of the same rows. No list of row numbers is built, and the filter
+/// and the projection are one wave of reads ([`StrataFile::fused_scan`]).
+struct FusedScan {
+    output: SchemaRef,
+    /// The projected columns, in output order: directory ids.
+    columns: Vec<usize>,
+    filter: RangeFilterOwned,
+    infos: HashMap<usize, ColumnInfo>,
+    decoded: Decoded,
+    encoded: Encoded,
+    /// The filter column's chunks to walk: index, rows `from..to` within it, and whether its zone
+    /// proves every row matches.
+    units: Vec<(usize, u32, u32, bool)>,
+    next: usize,
+    /// One slot per directory id, for evaluating the filter on a decoded chunk.
+    slots: Vec<Option<ArrayRef>>,
+}
+
+/// [`RangeFilter`] with its bound owned.
+struct RangeFilterOwned {
+    bound: Bound,
+    column: usize,
+    lo: i128,
+    hi: i128,
+}
+
+impl FusedScan {
+    /// The rows of unit `(index, from, to, proven)` that match, as offsets from `from`: `None` for
+    /// all of them.
+    fn hits(
+        &mut self,
+        index: usize,
+        from: u32,
+        to: u32,
+        proven: bool,
+    ) -> Result<Option<BooleanBuffer>> {
+        if proven {
+            return Ok(None);
+        }
+        let f = &self.filter;
+        let info = info_of(&self.infos, f.column)?;
+        let entry = info.entries.get(index).ok_or_else(|| StrataError::Schema {
+            reason: "internal: missing chunk".to_string(),
+        })?;
+        let (offset, len) = ((from - entry.first_row) as usize, (to - from) as usize);
+        let out_of_chunk = || StrataError::Corrupt {
+            what: "chunk row",
+            offset: u64::from(from),
+        };
+        let packed = match self.encoded.get(&(f.column, index)) {
+            Some((entry, body)) => range_mask(entry, body, &info.field, f.lo, f.hi)?,
+            None => None,
+        };
+        let hits = match packed {
+            Some(bits) if bits.len() >= offset + len => bits.slice(offset, len),
+            Some(_) => return Err(out_of_chunk()),
+            None => {
+                let chunk = chunk_array(&self.decoded, &self.encoded, info, f.column, index)?;
+                if offset + len > chunk.len() {
+                    return Err(out_of_chunk());
+                }
+                if let Some(slot) = self.slots.get_mut(f.column) {
+                    *slot = Some(chunk.slice(offset, len));
+                }
+                let mask = evaluate(&f.bound, &self.slots, &[], len)?;
+                match mask.nulls() {
+                    Some(nulls) => mask.values() & nulls.inner(),
+                    None => mask.values().clone(),
+                }
+            }
+        };
+        Ok(Some(hits))
+    }
+
+    /// The next batch: whole units until the next one could pass `BATCH_ROWS` rows.
+    fn next_batch(&mut self) -> Result<Option<RecordBatch>> {
+        let mut pieces: Vec<Vec<ArrayRef>> = vec![Vec::new(); self.columns.len()];
+        let mut rows = 0usize;
+        while let Some(&(index, from, to, proven)) = self.units.get(self.next) {
+            let len = (to - from) as usize;
+            if rows > 0 && rows + len > BATCH_ROWS {
+                break;
+            }
+            self.next += 1;
+            let hits = self.hits(index, from, to, proven)?;
+            let count = hits.as_ref().map_or(len, BooleanBuffer::count_set_bits);
+            if count == 0 {
+                continue;
+            }
+            // The matching rows as offsets in the chunk, unless every row matches.
+            let first = info_of(&self.infos, self.filter.column)?
+                .entries
+                .get(index)
+                .map_or(0, |e| e.first_row);
+            let offset = from - first;
+            let local: Option<Vec<u32>> = match &hits {
+                Some(bits) if count < len => {
+                    Some(bits.set_indices().map(|i| offset + i as u32).collect())
+                }
+                _ => None,
+            };
+            for (k, &column) in self.columns.iter().enumerate() {
+                let info = info_of(&self.infos, column)?;
+                let piece = match &local {
+                    None => chunk_array(&self.decoded, &self.encoded, info, column, index)?
+                        .slice(offset as usize, len),
+                    Some(local) => {
+                        let picked = match self.encoded.get(&(column, index)) {
+                            Some((entry, body)) => pick_chunk(entry, body, &info.field, local)?,
+                            None => None,
+                        };
+                        match picked {
+                            Some(array) => array,
+                            None => {
+                                let chunk =
+                                    chunk_array(&self.decoded, &self.encoded, info, column, index)?;
+                                take(chunk.as_ref(), &UInt32Array::from(local.clone()), None)?
+                            }
+                        }
+                    }
+                };
+                if let Some(column_pieces) = pieces.get_mut(k) {
+                    column_pieces.push(piece);
+                }
+            }
+            rows += count;
+        }
+        if rows == 0 {
+            return Ok(None);
+        }
+        let mut arrays = Vec::with_capacity(self.columns.len());
+        for (k, column_pieces) in pieces.into_iter().enumerate() {
+            let array = match column_pieces.len() {
+                1 => column_pieces
+                    .into_iter()
+                    .next()
+                    .ok_or_else(|| StrataError::Schema {
+                        reason: "internal: no piece".to_string(),
+                    })?,
+                _ => {
+                    let refs: Vec<&dyn Array> = column_pieces.iter().map(|p| p.as_ref()).collect();
+                    concat(&refs)?
+                }
+            };
+            let field = self.output.field(k);
+            arrays.push(if array.data_type() == field.data_type() {
+                array
+            } else {
+                cast(&array, field.data_type())?
+            });
+        }
+        let options = RecordBatchOptions::new().with_row_count(Some(rows));
+        Ok(Some(RecordBatch::try_new_with_options(
+            Arc::clone(&self.output),
+            arrays,
+            &options,
+        )?))
+    }
+}
+
 impl Iterator for ScanBatches {
     type Item = Result<RecordBatch>;
 
     fn next(&mut self) -> Option<Self::Item> {
+        if let Some(fused) = &mut self.fused {
+            return match fused.next_batch() {
+                Ok(batch) => batch.map(Ok),
+                Err(e) => {
+                    // A failed scan ends with its error.
+                    fused.next = fused.units.len();
+                    Some(Err(e))
+                }
+            };
+        }
         if self.ready.is_empty() {
             let count = self.batch_count();
             if self.next >= count {
@@ -1373,6 +1553,39 @@ impl StrataFile {
             }
         }
 
+        // A range filter on one integer column, with plain numeric columns projected, is walked
+        // chunk by chunk ([`FusedScan`]).
+        if let Some(b) = &bound
+            && req.top.is_none()
+            && req.limit.is_none()
+            && sources.is_empty()
+            && let Some((column, lo, hi)) = int_interval(b)
+        {
+            let filter = RangeFilterOwned {
+                bound: b.clone(),
+                column,
+                lo,
+                hi,
+            };
+            if let Some(fused) = self
+                .fused_scan(
+                    filter,
+                    &req.projection,
+                    &infos,
+                    &candidates,
+                    req.kind,
+                    threads,
+                    &output,
+                )
+                .await?
+            {
+                return Ok(ScanBatches {
+                    fused: Some(Box::new(fused)),
+                    ..ScanBatches::empty(output)
+                });
+            }
+        }
+
         // 4–5. The selected rows. When every `Contains` term is a conjunct of the whole
         // predicate, the other conjuncts are evaluated first, and each search then reads only the
         // frames of the rows they keep: a time range searches the text of its rows only. Else
@@ -1545,6 +1758,124 @@ impl StrataFile {
         )?;
         batches.threads = threads;
         Ok(batches)
+    }
+
+    /// The [`FusedScan`] of `filter` over `candidates`, projecting `projection`, or `None` when the
+    /// scan does not fit one: a projected column that is not a plain numeric narrow column (a
+    /// dictionary, a payload, a map), or whose chunks do not cover the same rows as the filter
+    /// column's. Fetches, in one wave, the filter column's chunks whose zone does not prove the
+    /// filter and every projected column's chunks.
+    #[allow(clippy::too_many_arguments)]
+    async fn fused_scan(
+        &self,
+        filter: RangeFilterOwned,
+        projection: &[usize],
+        infos: &HashMap<usize, ColumnInfo>,
+        candidates: &[Range<u32>],
+        kind: ScanKind,
+        threads: usize,
+        output: &SchemaRef,
+    ) -> Result<Option<FusedScan>> {
+        let narrow = |column: usize| {
+            matches!(
+                self.directory().get(column).map(|record| record.layer),
+                Some(Layer::Narrow)
+            )
+        };
+        for &column in projection {
+            let plain = narrow(column)
+                && infos.get(&column).is_some_and(|info| {
+                    info.dict.is_none()
+                        && crate::narrow::numeric_of(info.field.data_type()).is_some()
+                });
+            if !plain {
+                return Ok(None);
+            }
+        }
+        let Some(conjuncts) = provable_conjuncts(&filter.bound) else {
+            return Ok(None);
+        };
+        let info = info_of(infos, filter.column)?;
+        let mut units = Vec::new();
+        for candidate in candidates {
+            for index in overlapping_chunks(&info.entries, std::slice::from_ref(candidate)) {
+                let Some(entry) = info.entries.get(index) else {
+                    continue;
+                };
+                // Every projected column must have the same chunk: the same rows.
+                let aligned = projection.iter().all(|column| {
+                    infos
+                        .get(column)
+                        .and_then(|c| c.entries.get(index))
+                        .is_some_and(|e| e.first_row == entry.first_row && e.n_rows == entry.n_rows)
+                });
+                if !aligned {
+                    return Ok(None);
+                }
+                let (from, to) = (
+                    candidate.start.max(entry.first_row),
+                    candidate
+                        .end
+                        .min(entry.first_row.saturating_add(entry.n_rows)),
+                );
+                if from < to {
+                    let proven = conjuncts
+                        .iter()
+                        .all(|(_, term)| chunk_must_match(term, entry, &info.field));
+                    units.push((index, from, to, proven));
+                }
+            }
+        }
+        let mut wanted: BTreeSet<(usize, usize)> = BTreeSet::new();
+        for &(index, _, _, proven) in &units {
+            if !proven {
+                wanted.insert((filter.column, index));
+            }
+            for &column in projection {
+                wanted.insert((column, index));
+            }
+        }
+        let mut decoded = Decoded::default();
+        let (segments, pending) = plan_chunks(infos, &wanted, &mut decoded)?;
+        let bodies = self.fetch_on(&segments, kind, threads).await?;
+        if bodies.len() != pending.len() {
+            return Err(StrataError::Corrupt {
+                what: "segment range",
+                offset: 0,
+            });
+        }
+        let mut encoded = Encoded::default();
+        for ((column, index, entry), body) in pending.into_iter().zip(bodies) {
+            encoded.insert((column, index), (entry, body));
+        }
+        let mut keep: HashMap<usize, ColumnInfo> = HashMap::new();
+        for column in projection
+            .iter()
+            .copied()
+            .chain(std::iter::once(filter.column))
+        {
+            if let Some(info) = infos.get(&column) {
+                keep.insert(
+                    column,
+                    ColumnInfo {
+                        field: info.field.clone(),
+                        dict: info.dict.clone(),
+                        entries: Arc::clone(&info.entries),
+                    },
+                );
+            }
+        }
+        Ok(Some(FusedScan {
+            output: Arc::clone(output),
+            columns: projection.to_vec(),
+            filter,
+            infos: keep,
+            decoded,
+            encoded,
+            units,
+            next: 0,
+            slots: vec![None; self.directory().len()],
+        }))
     }
 
     /// Whether some row of the file may satisfy `predicate`, from the zones, dictionaries and
@@ -2318,6 +2649,7 @@ impl StrataFile {
             next: 0,
             ready: std::collections::VecDeque::new(),
             threads: crate::parallel::cores(),
+            fused: None,
         })
     }
 }
@@ -2872,6 +3204,63 @@ mod tests {
             let alone = bytes(None).await;
             let proven = bytes(Some(Predicate::Cmp(id, CmpOp::GtEq, lit_int(0)))).await;
             assert_eq!(proven, alone);
+        });
+    }
+
+    #[test]
+    fn fused_range_scans_match_the_oracle_in_fewer_waves() {
+        runtime().block_on(async {
+            // 20,000 rows: `id` (0) increasing, `v` (1) = id % 97.
+            let file = open_ids(20_000).await;
+            let id_range = Predicate::And(vec![
+                Predicate::Cmp(0, CmpOp::GtEq, lit_int(3_001)),
+                Predicate::Cmp(0, CmpOp::Lt, lit_int(15_000)),
+            ]);
+            let v_sparse = Predicate::Cmp(1, CmpOp::Lt, lit_int(3));
+            let v_range = Predicate::And(vec![
+                Predicate::Cmp(1, CmpOp::Gt, lit_int(10)),
+                Predicate::Cmp(1, CmpOp::LtEq, lit_int(60)),
+            ]);
+            for p in [id_range.clone(), v_sparse.clone(), v_range] {
+                for projection in [vec![1], vec![0, 1], vec![1, 0], vec![]] {
+                    check(&file, p.clone(), &projection).await;
+                }
+            }
+            // No batch is larger than 8,192 rows.
+            let req = |predicate: Predicate| ScanRequest {
+                projection: vec![0, 1],
+                predicate: Some(predicate),
+                row_ranges: None,
+                limit: None,
+                kind: ScanKind::Scan,
+                views: false,
+                top: None,
+            };
+            let batches = file
+                .scan_batches(&req(id_range.clone()), 1)
+                .await
+                .unwrap()
+                .collect::<Result<Vec<_>>>()
+                .unwrap();
+            assert!(batches.iter().all(|b| b.num_rows() <= BATCH_ROWS));
+            assert_eq!(
+                batches.iter().map(RecordBatch::num_rows).sum::<usize>(),
+                11_999
+            );
+            // One wave for the filter and the projection; the general path (a `!=` filter, not
+            // a range) takes a wave for each.
+            let waves = |predicate: Predicate| {
+                let file = &file;
+                let request = req(predicate);
+                async move {
+                    let before = file.io_stats().waves;
+                    file.scan(&request).await.unwrap();
+                    file.io_stats().waves - before
+                }
+            };
+            let fused = waves(v_sparse).await;
+            let general = waves(Predicate::Cmp(1, CmpOp::NotEq, lit_int(3))).await;
+            assert!(fused < general, "fused {fused} waves, general {general}");
         });
     }
 
