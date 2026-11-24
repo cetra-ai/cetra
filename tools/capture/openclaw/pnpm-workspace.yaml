@@ -1,0 +1,13 @@
+packages: []
+
+# Minutes. D74/D117: no release younger than 7 days.
+minimumReleaseAge: 10080
+
+# openclaw's postinstall prunes bundled-plugin state of a global install; this project is a local tool.
+# esbuild's and protobufjs' scripts only verify a platform binary or warn; @google/genai's are no-ops or a prepare step.
+# The other scripts stay off: the capture runs the CLI and the plugin install, which need none of them.
+allowBuilds:
+  "@google/genai@2.30.0": false
+  "esbuild@0.28.2": false
+  "openclaw@2026.11.5": false
+  "protobufjs@7.6.6": false

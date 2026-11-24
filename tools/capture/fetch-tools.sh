@@ -117,6 +117,20 @@ fi
 
 pnpm_tool n8n 2.48.4 n8n/bin/n8n
 pnpm_tool promptfoo 0.125.1 promptfoo/package.json
+pnpm_tool openclaw 2026.11.5 openclaw/package.json
+
+# The OpenClaw diagnostics exporter (IN7.0), installed into a staged home so the capture never
+# writes to the operator's ~/.openclaw. Skipped when the staged home already lists the plugin.
+openclaw_dir="$tools_dir/openclaw/2026.11.5"
+if [ -d "$openclaw_dir/home/.openclaw" ] && grep -rq diagnostics-otel "$openclaw_dir/home/.openclaw"; then
+    echo "capture-tools: openclaw diagnostics-otel 2026.11.5 already present"
+else
+    echo "capture-tools: installing openclaw diagnostics-otel 2026.11.5"
+    HOME="$openclaw_dir/home" XDG_CONFIG_HOME="$openclaw_dir/home/.config" \
+        XDG_DATA_HOME="$openclaw_dir/home/.local/share" XDG_STATE_HOME="$openclaw_dir/home/.local/state" \
+        XDG_CACHE_HOME="$openclaw_dir/home/.cache" \
+        "$openclaw_dir/node_modules/.bin/openclaw" plugins install --pin --accept-capabilities npm:@openclaw/diagnostics-otel@2026.11.5
+fi
 
 # The Python environments under tools/capture/envs/ (D-IN-26): each is synced in place
 # (its .venv), and skipped when its committed lock matches the copy stored in tools/capture-tools.

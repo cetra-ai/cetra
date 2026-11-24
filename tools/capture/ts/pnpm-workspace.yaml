@@ -14,6 +14,8 @@ overrides:
 # protobufjs comes in through Mastra (@grpc/proto-loader); its install script only warns about a version-scheme mismatch.
 allowBuilds:
   "@anthropic-ai/claude-code@2.1.323": true
+  "@google/genai@2.21.0": false
   "@github/keytar@7.10.6": false
+  "@qwen-code/audio-capture@0.28.0": false
   "node-pty@1.0.0": false
   "protobufjs@7.6.6": false
