@@ -156,7 +156,7 @@ They run one after the other, in the order V1, L1, S1, V2. V2 is last so that th
    - **Add** `"makes the voice agent's availability check its slowest span"`, using `scenarioOf(5)`:
      - the trace's `name` is `voice-agent`;
      - its duration is 3,100 ms (`duration_ns` 3,100,000,000);
-     - among the non-root spans, the one with the largest `duration_ns` is the one named `check_availability`, at position 4;
+     - among the non-root spans, the one with the largest `duration_ns` is the one named `check_availability`, at index 4 of `spans` counting the root;
      - its span id is `"0000000500000005"`.
    - **Add** `"scores the voice agent's reply over its latency budget"`: trace 5's `scores` has one score named `under_budget`, whose value is `{ data_type: "boolean", value: false }`.
    - The existing generic tests ("makes traces 4 to 6 the hand-written scenario traces", the nesting and payload tests) cover the voice trace through `SHOWCASES` and must pass unchanged.
@@ -275,6 +275,7 @@ type Trace = Schema<"TraceSummary">;
 
 type StoryIssue = {
   id: string;
+  eventId: string;
   sourceId: string;
   sourceName: string;
   kind: Schema<"IssueSourceKind">;
@@ -291,6 +292,7 @@ type StoryIssue = {
 export const STORY_ISSUES: readonly StoryIssue[] = [
   {
     id: "01900000-0000-7000-8000-000000570101",
+    eventId: "01900000-0000-7000-8000-000000570111",
     sourceId: "01900000-0000-7000-8000-000000570301",
     sourceName: "Topics",
     kind: "topic",
@@ -302,6 +304,7 @@ export const STORY_ISSUES: readonly StoryIssue[] = [
   },
   {
     id: "01900000-0000-7000-8000-000000570102",
+    eventId: "01900000-0000-7000-8000-000000570112",
     sourceId: "01900000-0000-7000-8000-000000570302",
     sourceName: "Errors",
     kind: "error",
@@ -312,6 +315,7 @@ export const STORY_ISSUES: readonly StoryIssue[] = [
   },
   {
     id: "01900000-0000-7000-8000-000000570103",
+    eventId: "01900000-0000-7000-8000-000000570113",
     sourceId: "01900000-0000-7000-8000-000000570303",
     sourceName: "Latency budget",
     kind: "score",
@@ -322,6 +326,7 @@ export const STORY_ISSUES: readonly StoryIssue[] = [
   },
   {
     id: "01900000-0000-7000-8000-000000570104",
+    eventId: "01900000-0000-7000-8000-000000570114",
     sourceId: "01900000-0000-7000-8000-000000570304",
     sourceName: "Checks",
     kind: "score",
@@ -422,7 +427,7 @@ If `Schema<"AlertCondition">` refuses a field as written (for example `target`),
    | `created_at`, `updated_at` | `first_seen` and `last_seen` |
    | `count` | `matched.length` |
    | `users` | the distinct non-null `user_id`s of `matched` |
-3. **Issue events.** `storyIssueEvents(dataset, issue): Schema<"IssueEventPage">` returns `{ data: [{ id, kind: "created", at: first_seen }] }`. Add an `eventId` field to `StoryIssue` and set it in `STORY_ISSUES` to `01900000-0000-7000-8000-000000570111`, `…570112`, `…570113` and `…570114`, in order.
+3. **Issue events.** `storyIssueEvents(dataset, issue): Schema<"IssueEventPage">` returns `{ data: [{ id, kind: "created", at: first_seen }] }`. `id` is `issue.eventId`.
 4. **Alert rules.** `storyAlertRule(dataset, rule): Schema<"AlertRule">` builds:
 
    | Field | Value |
