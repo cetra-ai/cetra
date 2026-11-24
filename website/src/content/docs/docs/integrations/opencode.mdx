@@ -1,0 +1,100 @@
+---
+title: OpenCode
+description: "Connect OpenCode to cetra with cetra's OpenCode plugin: each turn becomes one trace of model and tool calls, with the session, tokens and the prompts."
+---
+
+import Backing from "../../../../components/Backing.astro";
+
+This page shows how to send OpenCode's traces to cetra with `cetra agents setup opencode`, and what you see in the UI.
+
+<Backing fixtures={["opencode/shell-tool", "opencode/shell-tool-v1"]} />
+
+OpenCode's own exporter is not used. Once `OTEL_EXPORTER_OTLP_ENDPOINT` is set, it sends hundreds of internal spans per turn that no setting turns off, and the v2 build also sends the prompt in a log record. cetra's setup writes a small plugin instead, and the plugin sends only the turns, the model calls and the tool calls. Both builds are supported: the npm 1.x build, `opencode-ai`, and the v2 build.
+
+## Connect OpenCode
+
+1. Create a project key with the `ingest` scope in the project's [API keys](/docs/platform/api-keys/) page. Copy the `sk-cetra-…` value.
+2. Install the `cetra` binary and run this in a terminal, with `<SK_CETRA_KEY>` set to your key and `<CETRA_URL>` set to your server:
+
+```bash
+export CETRA_INGEST_KEY=<SK_CETRA_KEY>
+cetra agents setup opencode --url <CETRA_URL>
+```
+
+3. Start OpenCode again. It loads the plugin at its next start, and its traces then go to cetra.
+
+## What setup writes
+
+`cetra agents setup opencode` writes two files in OpenCode's config folder: `$XDG_CONFIG_HOME/opencode` when `XDG_CONFIG_HOME` is set and not empty, else `~/.config/opencode`.
+
+- `<folder>/plugins/cetra-opencode.ts` is the plugin. Its first line says that cetra wrote it. Setup overwrites the file only when it is missing or starts with that line; when another file is there, setup stops and writes nothing, so move that file away and run setup again.
+- `<folder>/cetra-opencode.json`, with mode 0600, is the config the plugin reads:
+
+{/* untested: the config file `cetra agents setup opencode` writes into your home directory */}
+```json
+{
+  "managed_by": "cetra agents setup opencode",
+  "endpoint": "<CETRA_URL>",
+  "headers": {
+    "Authorization": "Bearer <SK_CETRA_KEY>"
+  },
+  "capture_content": true
+}
+```
+
+The plugin reads its endpoint, key and content switch from this file, never from the environment: the standard `OTEL_EXPORTER_*` names would wake OpenCode's own exporter. `capture_content` is `false` with `--no-content`.
+
+Setup writes no `agents.toml`, because OpenCode has no hook that would read it.
+
+To write the two files by hand, run `cetra agents setup opencode --print` and copy what it prints into the folder. Keep the plugin's first line and the config's `managed_by` value as they are: setup and `remove` recognize their files by them. With `--print` alone, nothing is written.
+
+To undo setup, run this. It deletes both files when cetra wrote them, and leaves any file that was not cetra's in place:
+
+```bash
+cetra agents remove opencode
+```
+
+## What you get
+
+Each turn is one trace. Its root is an `agent` span, `invoke_agent`, and each model call and tool call is a child of it. This holds for both builds.
+
+- each model call is an `llm` span named after the model, such as `chat gpt-4o-mini`, with the provider, the model and its input and output tokens;
+- each tool call is a `tool` span named after the tool: `shell` in the v2 build, `bash` in the 1.x build. OpenCode's own name for the span is kept in `cetra.span_name`;
+- the prompts, the answers, the tool arguments and the tool results are on the spans, when content is on. In the 1.x build a model call's span has no input messages, and its output messages carry no tool calls.
+
+Each trace has these fields:
+
+- the session, from OpenCode's session id in `gen_ai.conversation.id`;
+- `metadata.coding_agent` set to `opencode`.
+
+OpenCode sends no repository, branch or person, because it has no hook. cetra gets none of them for OpenCode traces.
+
+Use the [Coding agents dashboard template](/docs/tracing/custom-dashboards/) to see API-equivalent cost per session and tool usage.
+
+## Content
+
+Setup writes `"capture_content": true`, and the plugin sends the prompts, the answers, the tool arguments and the tool results. With `--no-content`, setup writes `false`, and none of that content is sent. Error messages are replaced too: a failed tool call reports `tool failed`, a failed model call `model call failed`, an interrupted turn `interrupted`, or the error's class name when it has one. With content on, the error's own text is kept.
+
+## API-equivalent cost
+
+cetra prices each model call from its token counts, using its price table. OpenCode does not report a cost. OpenCode reports cache tokens apart from input; cetra's input count includes them.
+
+API-equivalent cost is what the same tokens would cost at API prices. If you use a subscription plan, it is not what you pay.
+
+## Limits
+
+- Tested with OpenCode 2.3.0 and OpenCode 1.19.6 (the npm `opencode-ai` build), in `opencode run` mode. The interactive terminal interface was not captured.
+- The shell tool is named `shell` in the v2 build and `bash` in the 1.x build. Tool names come from the build you run.
+- In the 1.x build, a model call's span has no input messages, and its output messages carry no tool calls: 1.x has no hook that exposes them.
+- The small model call OpenCode makes to title a new session has no span.
+- A subagent session is its own trace, under its own session.
+- In the 1.x build, the plugin waits up to 5 seconds at the end of a turn while it sends the spans.
+- OpenCode 1.x prints nothing when a plugin fails to load. If no traces arrive, check that the config file exists and holds your server.
+- Do not set `OTEL_EXPORTER_OTLP_ENDPOINT` for OpenCode. It turns on OpenCode's own exporter, which sends hundreds of internal spans per turn and, in the v2 build, the prompt in a log record. The plugin needs no `OTEL_*` variable.
+- OpenCode sends no repository, branch or person, so cetra cannot group its traces by repository or branch.
+
+## Next
+
+- [Traces](/docs/tracing/traces/): read the trace as a tree and a timeline.
+- [Sessions](/docs/tracing/sessions/): the calls of one OpenCode session.
+- [Custom dashboards](/docs/tracing/custom-dashboards/): build your own cost views, or start from the Coding agents template.

@@ -1,0 +1,79 @@
+---
+title: Hermes Agent
+description: "Send Hermes Agent's traces to cetra with the hermes-otel plugin: each turn becomes one trace of model and tool calls, with the session, tokens and the prompts."
+---
+
+import Backing from "../../../../components/Backing.astro";
+
+This page shows how to send Hermes Agent's traces to cetra with `hermes-otel`, and what you see in the UI.
+
+<Backing fixtures={["hermes_agent/read-file"]} />
+
+The telemetry comes from `hermes-otel`, a community plugin. `cetra agents setup` has no Hermes target, because setup cannot install a Python package into Hermes's environment: you install the plugin yourself.
+
+## Connect Hermes Agent
+
+1. Create a project key with the `ingest` scope in the project's [API keys](/docs/platform/api-keys/) page. Copy the `sk-cetra-…` value.
+2. Install the plugin into Hermes's environment and enable it. Hermes 0.21 and later installs the plugin's Python dependencies itself:
+
+{/* untested: the commands come from the hermes-otel README and run against Hermes's own environment */}
+```bash
+hermes plugins install hermes_otel
+hermes plugins enable hermes_otel
+```
+
+3. Write `~/.hermes/hermes_otel.yaml` with cetra's endpoint and key. The endpoint is the full traces URL, `<CETRA_URL>/v1/traces`:
+
+{/* untested: a configuration file in your home directory */}
+```yaml
+project_name: hermes-agent
+backends:
+  - type: otlp
+    endpoint: <CETRA_URL>/v1/traces
+    headers:
+      Authorization: "Bearer <SK_CETRA_KEY>"
+    metrics: false
+content_capture: full
+capture_logs: false
+```
+
+4. Run Hermes as usual. Its traces then go to cetra.
+
+`content_capture` sets what is sent: `full` sends the prompts and the answers in full, with tool arguments and results clipped to previews; `preview` keeps only the previews; `off` sends no content. `capture_logs: false` and `metrics: false` keep Hermes's logs and metrics from being sent; when they are sent, cetra accepts and drops them.
+
+## What you get
+
+Each turn is one trace. Its root is an `agent` span, and each model call and tool call is under it.
+
+- each model call is an `llm` span, `api.<model>`, with the model and its input and output tokens. Hermes wraps it in an `llm.<model>` span, which cetra keeps as a `chain`: the wrapper carries no tokens of its own;
+- each tool call is a `tool` span named after the tool, such as `read_file`. Hermes's own name for the span is kept in `cetra.span_name`;
+- the prompts and the answers are on the spans, when content capture is on.
+
+Each trace has these fields:
+
+- the session, from Hermes's session id in `gen_ai.conversation.id`;
+- `metadata.coding_agent` set to `hermes-agent`.
+
+Hermes sends no repository, branch or person. cetra gets none of them for Hermes traces.
+
+Use the [Coding agents dashboard template](/docs/tracing/custom-dashboards/) to see API-equivalent cost per session and tool usage.
+
+## API-equivalent cost
+
+The captured run used Hermes's `custom` provider, its name for an OpenAI-compatible endpoint. The spans show provider `custom`, no row in cetra's price table matches it, and `hermes-otel` reports no cost for it either, so the model calls carry no API-equivalent cost.
+
+API-equivalent cost is what the same tokens would cost at API prices. If you use a subscription plan, it is not what you pay.
+
+## Limits
+
+- Tested with Hermes Agent 0.23.2 and `hermes-otel` 1.33.0, in one-shot `hermes chat` mode. The interactive interface was not captured.
+- `cetra agents setup` does not support Hermes. The plugin is yours to install, enable and update.
+- The telemetry plugin, `hermes-otel`, is a community project, not part of Hermes or cetra.
+- With Hermes's `custom` provider, the spans show provider `custom` and no cost.
+- Hermes also sends logs, and metrics unless `metrics: false` is set. cetra accepts and drops them.
+
+## Next
+
+- [Traces](/docs/tracing/traces/): read the trace as a tree and a timeline.
+- [Sessions](/docs/tracing/sessions/): the calls of one Hermes session.
+- [Custom dashboards](/docs/tracing/custom-dashboards/): build your own cost views, or start from the Coding agents template.
