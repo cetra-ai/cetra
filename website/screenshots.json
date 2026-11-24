@@ -121,13 +121,13 @@
     "clip": "aside[aria-label=\"Trace\"]"
   },
   {
-    "name": "marketing-trace-view-research",
+    "name": "marketing-trace-view-voice",
     "path": "/acme/support-bot/traces",
     "waitFor": "100 loaded",
     "theme": "dark",
     "viewport": { "width": 1920, "height": 530 },
     "actions": [
-      { "click": "div[role=\"grid\"][aria-label=\"Traces\"] >> text=research-agent" },
+      { "click": "div[role=\"grid\"][aria-label=\"Traces\"] >> text=voice-agent" },
       { "click": "aside[aria-label=\"Trace\"] button:has-text(\"Timeline\")" }
     ],
     "waitAfter": "Input / Output",

@@ -531,10 +531,10 @@ No other file.
    - show the root's Output card whole, bottom border included;
    - show no truncation badge.
 
-   The alerts shots (`alerts.png`, `marketing-alerts.png`) now list the four story rules before the fixture ones, two of them firing, and the story events; the docs shots' sidebar badges may show more firing alerts and issues. That is expected.
+   The alerts shots (`alerts.png`, `marketing-alerts.png`) list the four story rules with the fixture ones (the page groups them by state: three firing, the fixture's "High error rate" and two story rules), and the story events; the docs shots' sidebar badges may show more firing alerts and issues. That is expected.
 
    Look at the other changed PNGs by eye. They may change only in rows, counts and charts. Report any that changed another way. `git status` lists most of them, because the bytes change anyway.
-6. In `Chapters.astro`, set the Alert chapter's Frame `alt` to `"The alerts page with its alert rules, two of them firing, and the recent alert events."` (it said three rules, one firing; M15 rewrites the alts per story).
+6. In `Chapters.astro`, set the Alert chapter's Frame `alt` to `"The alerts page with its alert rules, three of them firing, and the recent alert events."` (it said three rules, one firing; M15 rewrites the alts per story).
 7. In `docs/plans/website/README.md`, set the M13 row's status cell to: done (V1, L1, S1, V2)
 8. Run `just check-web`, then `just check-docs`, one at a time, and check each exit code. `just check-web` runs every web test; that is deliberate, as this is the plan's last phase.
 
