@@ -8,6 +8,11 @@
 //! Pipecat (scope starting with `pipecat`): plain `input` and `output` (R-PC-1).
 //! LiveKit Agents (scope `livekit-agents`): the `lk.pii.*` content keys, keyed
 //! by attribute (R-LK-3).
+//! Prompt Flow (scope `promptflow`): `inputs` and `output` (R-PF-3).
+//! Langflow (scope `langflow`): `inputs` and `outputs` (R-LF-2).
+
+use cetra_core::enums::SpanKind;
+use serde_json::Value as Json;
 
 use crate::convert::openai_messages;
 use crate::payload::{Io, Payload, ReadContext, decode_json_text, non_message_payload};
@@ -23,6 +28,20 @@ pub(crate) fn read(ctx: &mut ReadContext<'_, '_>, filled: &Io) -> Io {
         }
         if filled.output.is_none() {
             io.output = take_value(ctx, "output");
+        }
+    } else if ctx.scope == "promptflow" {
+        if filled.input.is_none() {
+            io.input = promptflow_input(ctx);
+        }
+        if filled.output.is_none() {
+            io.output = promptflow_output(ctx);
+        }
+    } else if ctx.scope == "langflow" {
+        if filled.input.is_none() {
+            io.input = take_value(ctx, "inputs");
+        }
+        if filled.output.is_none() {
+            io.output = take_value(ctx, "outputs");
         }
     } else if ctx.scope == "livekit-agents" {
         if filled.input.is_none() {
@@ -63,6 +82,42 @@ fn pipecat_input(ctx: &mut ReadContext<'_, '_>) -> Option<Payload> {
         Some(json) if json.is_object() || json.is_array() => Some(Payload::Json(json)),
         _ => Some(non_message_payload(value, ctx.warnings)),
     }
+}
+
+/// R-PF-3: on an `llm` span, `inputs` is the OpenAI request object; its
+/// `messages` array is messages when it converts. Otherwise the plain value.
+fn promptflow_input(ctx: &mut ReadContext<'_, '_>) -> Option<Payload> {
+    let value = ctx.bag.get("inputs")?;
+    if as_str(value) == Some("") {
+        return None;
+    }
+    ctx.bag.take_payload("inputs");
+    if ctx.kind == SpanKind::Llm
+        && let Some(json) = decode_json_text(value, ctx.warnings)
+        && let Some(messages) = json.get("messages")
+        && let Ok(messages) = openai_messages(messages)
+    {
+        return Some(Payload::Messages(messages));
+    }
+    Some(non_message_payload(value, ctx.warnings))
+}
+
+/// R-PF-3: on an `llm` span, `output` is the OpenAI response object; its
+/// `choices[0].message` is one message when it converts. Otherwise the plain value.
+fn promptflow_output(ctx: &mut ReadContext<'_, '_>) -> Option<Payload> {
+    let value = ctx.bag.get("output")?;
+    if as_str(value) == Some("") {
+        return None;
+    }
+    ctx.bag.take_payload("output");
+    if ctx.kind == SpanKind::Llm
+        && let Some(json) = decode_json_text(value, ctx.warnings)
+        && let Some(message) = json.pointer("/choices/0/message")
+        && let Ok(messages) = openai_messages(&Json::Array(vec![message.clone()]))
+    {
+        return Some(Payload::Messages(messages));
+    }
+    Some(non_message_payload(value, ctx.warnings))
 }
 
 /// The first of `keys` that holds a non-empty value. Only that key is consumed.
@@ -287,5 +342,179 @@ mod tests {
         assert_eq!(io, Io::default());
         assert_eq!(bag.state("lk.pii.user_input"), Some(Use::Unread));
         assert_eq!(bag.state("lk.pii.response.text"), Some(Use::Unread));
+    }
+
+    fn read_as<'a>(scope: &str, kind: SpanKind, attrs: &'a [KeyValue]) -> (Io, AttrBag<'a>) {
+        let mut warnings = Warnings::default();
+        let mut bag = AttrBag::new(attrs, &mut warnings);
+        let io = read(
+            &mut ReadContext {
+                bag: &mut bag,
+                events: &[],
+                kind,
+                scope,
+                conventions: &[],
+                warnings: &mut warnings,
+            },
+            &Io::default(),
+        );
+        (io, bag)
+    }
+
+    #[test]
+    fn promptflow_llm_input_is_messages_when_it_converts() {
+        let inputs = json!({
+            "model": "gpt-4o-mini",
+            "messages": [{"role": "user", "content": "What is the weather in Paris?"}],
+        })
+        .to_string();
+        let attrs = [string_attr("inputs", &inputs)];
+        let (io, bag) = read_as("promptflow", SpanKind::Llm, &attrs);
+        assert!(matches!(io.input, Some(Payload::Messages(ref messages)) if messages.len() == 1));
+        assert_eq!(bag.state("inputs"), Some(Use::Payload));
+        assert!(io.errors.is_empty());
+    }
+
+    #[test]
+    fn promptflow_input_is_plain_json_elsewhere() {
+        // No `messages` array: the object.
+        let attrs = [string_attr("inputs", r#"{"model":"gpt-4o-mini"}"#)];
+        let (io, _) = read_as("promptflow", SpanKind::Llm, &attrs);
+        assert_eq!(
+            io.input,
+            Some(Payload::Json(json!({"model": "gpt-4o-mini"})))
+        );
+
+        // A `messages` array that is not OpenAI messages: the object, no error.
+        let attrs = [string_attr("inputs", r#"{"messages":[{"foo":1}]}"#)];
+        let (io, _) = read_as("promptflow", SpanKind::Llm, &attrs);
+        assert_eq!(
+            io.input,
+            Some(Payload::Json(json!({"messages": [{"foo": 1}]})))
+        );
+        assert!(io.errors.is_empty());
+
+        // A `Function` span: its inputs are the arguments, never messages.
+        let attrs = [string_attr(
+            "inputs",
+            r#"{"messages":[{"role":"user","content":"hi"}]}"#,
+        )];
+        let (io, _) = read_as("promptflow", SpanKind::Span, &attrs);
+        assert!(matches!(io.input, Some(Payload::Json(_))));
+    }
+
+    #[test]
+    fn promptflow_llm_output_is_the_first_choice_message() {
+        let output = json!({
+            "choices": [{"message": {"role": "assistant", "content": "It is 18C."}}],
+        })
+        .to_string();
+        let attrs = [string_attr("output", &output)];
+        let (io, bag) = read_as("promptflow", SpanKind::Llm, &attrs);
+        assert!(matches!(io.output, Some(Payload::Messages(ref messages)) if messages.len() == 1));
+        assert_eq!(bag.state("output"), Some(Use::Payload));
+
+        // No choices: the object.
+        let attrs = [string_attr("output", r#"{"id":"chatcmpl-1"}"#)];
+        let (io, _) = read_as("promptflow", SpanKind::Llm, &attrs);
+        assert_eq!(io.output, Some(Payload::Json(json!({"id": "chatcmpl-1"}))));
+
+        // A non-`llm` span keeps the object even with choices.
+        let attrs = [string_attr("output", &output)];
+        let (io, _) = read_as("promptflow", SpanKind::Span, &attrs);
+        assert!(matches!(io.output, Some(Payload::Json(_))));
+    }
+
+    #[test]
+    fn langflow_inputs_and_outputs_are_plain_values() {
+        let attrs = [
+            string_attr(
+                "inputs",
+                r#"{"input_value":"What is the weather in Paris?"}"#,
+            ),
+            string_attr("outputs", r#"{"message":"It is 18C."}"#),
+        ];
+        let (io, bag) = read_as("langflow", SpanKind::Chain, &attrs);
+        assert_eq!(
+            io.input,
+            Some(Payload::Json(
+                json!({"input_value": "What is the weather in Paris?"})
+            ))
+        );
+        assert_eq!(
+            io.output,
+            Some(Payload::Json(json!({"message": "It is 18C."})))
+        );
+        assert_eq!(bag.state("inputs"), Some(Use::Payload));
+        assert_eq!(bag.state("outputs"), Some(Use::Payload));
+
+        // Text is text, not messages.
+        let attrs = [string_attr("outputs", "plain text")];
+        let (io, _) = read_as("langflow", SpanKind::Chain, &attrs);
+        assert_eq!(io.output, Some(Payload::Text("plain text".to_owned())));
+    }
+
+    #[test]
+    fn promptflow_and_langflow_keys_on_other_scopes_stay_unread() {
+        let attrs = [
+            string_attr("inputs", r#"{"model":"m"}"#),
+            string_attr("output", "x"),
+            string_attr("outputs", "y"),
+        ];
+        for scope in ["other.scope", "promptflow.extra", "langflow.observability"] {
+            let (io, bag) = read_as(scope, SpanKind::Llm, &attrs);
+            assert_eq!(io, Io::default(), "{scope}");
+            assert_eq!(bag.state("inputs"), Some(Use::Unread), "{scope}");
+            assert_eq!(bag.state("output"), Some(Use::Unread), "{scope}");
+            assert_eq!(bag.state("outputs"), Some(Use::Unread), "{scope}");
+        }
+    }
+
+    #[test]
+    fn an_openinference_input_wins_and_inputs_stays_unread() {
+        // `input.value` is OpenInference's reader; the scoped `inputs` fills only an empty input.
+        let attrs = [
+            string_attr("input.value", "from openinference"),
+            string_attr("inputs", r#"{"model":"m","messages":[]}"#),
+        ];
+        let mut warnings = Warnings::default();
+        let mut bag = AttrBag::new(&attrs, &mut warnings);
+        let assembled = assemble(
+            &mut bag,
+            &[],
+            SpanKind::Llm,
+            "promptflow",
+            &[Convention::Openinference],
+            &mut warnings,
+            READERS,
+            REGISTRIES,
+        );
+        assert_eq!(
+            assembled.io.input,
+            Some(Payload::Text("from openinference".to_owned()))
+        );
+        assert_eq!(bag.state("inputs"), Some(Use::Unread));
+    }
+
+    #[test]
+    fn with_only_inputs_the_scoped_read_fills_the_input() {
+        let attrs = [string_attr("inputs", r#"{"model":"m"}"#)];
+        let mut warnings = Warnings::default();
+        let mut bag = AttrBag::new(&attrs, &mut warnings);
+        let assembled = assemble(
+            &mut bag,
+            &[],
+            SpanKind::Llm,
+            "promptflow",
+            &[Convention::Openinference],
+            &mut warnings,
+            READERS,
+            REGISTRIES,
+        );
+        assert_eq!(
+            assembled.io.input,
+            Some(Payload::Json(json!({"model": "m"})))
+        );
+        assert_eq!(bag.state("inputs"), Some(Use::Payload));
     }
 }

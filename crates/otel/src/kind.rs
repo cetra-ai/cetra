@@ -85,6 +85,9 @@ pub(crate) fn span_kind(
 /// repeats its `chat` child's model and content, so under the scope `bifrost`
 /// a model key makes such a span `chain`. The keys are peeked, not consumed,
 /// and its `chat` child is decided earlier by its operation name.
+///
+/// Prompt Flow (`span_type`, R-PF-1), Langflow (`trace_type`, `flow_id`, R-LF-1)
+/// and n8n (span name, R-N8N-2, R-N8N-3) decide on their own scope only.
 fn scope_gated(bag: &mut AttrBag<'_>, span_name: &str, scope_name: &str) -> Option<SpanKind> {
     // Pipecat's conversation and turn spans (D-IN-5) name no operation.
     if scope_name == "pipecat.turn" && matches!(span_name, "conversation" | "turn") {
@@ -103,6 +106,45 @@ fn scope_gated(bag: &mut AttrBag<'_>, span_name: &str, scope_name: &str) -> Opti
         && (present(bag, "gen_ai.request.model") || present(bag, "gen_ai.response.model"))
     {
         return Some(SpanKind::Chain);
+    }
+    // Prompt Flow (R-PF-1, D-IN-5): its own `span_type`. `Function` is a plain
+    // span: a `@trace` function is anything.
+    if scope_name == "promptflow" {
+        return decide(bag, "span_type", |text| {
+            Some(match text {
+                "LLM" => SpanKind::Llm,
+                "Embedding" => SpanKind::Embedding,
+                "Retrieval" => SpanKind::Retriever,
+                "Flow" | "LangChain" => SpanKind::Chain,
+                "Function" => SpanKind::Span,
+                _ => return None,
+            })
+        });
+    }
+    // Langflow (R-LF-1, D-IN-5). Its model call is a separate trace, so
+    // `llm` is `chain` here: reading it as `llm` would count the model twice.
+    if scope_name == "langflow" {
+        if let Some(kind) = decide(bag, "trace_type", |text| {
+            Some(match text {
+                "agent" => SpanKind::Agent,
+                "tool" => SpanKind::Tool,
+                "retriever" => SpanKind::Retriever,
+                "embedding" => SpanKind::Embedding,
+                _ => SpanKind::Chain,
+            })
+        }) {
+            return Some(kind);
+        }
+        return present(bag, "flow_id").then_some(SpanKind::Chain);
+    }
+    // n8n (R-N8N-2, R-N8N-3, D-IN-5): every node span is named `node.execute`,
+    // and a node with no GenAI operation is a plain span.
+    if scope_name == "n8n-workflow" {
+        return match span_name {
+            "workflow.execute" => Some(SpanKind::Chain),
+            "node.execute" if !present(bag, "gen_ai.operation.name") => Some(SpanKind::Span),
+            _ => None,
+        };
     }
     if !scope_name.starts_with("mirascope") {
         return None;
@@ -977,5 +1019,128 @@ mod tests {
             );
             assert_eq!(kind_named(name, "pipecat", &[]), SpanKind::Span, "{name}");
         }
+    }
+
+    #[test]
+    fn promptflow_span_type_decides_on_its_scope_only() {
+        for (text, kind) in [
+            ("LLM", SpanKind::Llm),
+            ("Embedding", SpanKind::Embedding),
+            ("Retrieval", SpanKind::Retriever),
+            ("Flow", SpanKind::Chain),
+            ("LangChain", SpanKind::Chain),
+            ("Function", SpanKind::Span),
+        ] {
+            let attrs = [string_attr("span_type", text)];
+            assert_eq!(kind_named("flow", "promptflow", &attrs), kind, "{text}");
+            assert_eq!(kind_named("flow", "other.scope", &attrs), SpanKind::Span);
+        }
+        // A `Function` span with a model in its inputs stays a plain span.
+        let attrs = [
+            string_attr("span_type", "Function"),
+            string_attr("inputs", r#"{"model":"gpt-4o-mini"}"#),
+        ];
+        assert_eq!(kind_named("weather", "promptflow", &attrs), SpanKind::Span);
+
+        // An unknown value decides nothing and stays unread.
+        let attrs = [
+            string_attr("span_type", "Other"),
+            string_attr("gen_ai.request.model", "gpt-4o-mini"),
+        ];
+        let mut bag = AttrBag::new(&attrs, &mut Warnings::default());
+        assert_eq!(
+            span_kind(&mut bag, "flow", "promptflow", &[]),
+            SpanKind::Llm
+        );
+        assert_eq!(bag.state("span_type"), Some(Use::Unread));
+
+        let attrs = [string_attr("span_type", "LLM")];
+        let mut bag = AttrBag::new(&attrs, &mut Warnings::default());
+        assert_eq!(span_kind(&mut bag, "llm", "promptflow", &[]), SpanKind::Llm);
+        assert_eq!(bag.state("span_type"), Some(Use::Consumed));
+    }
+
+    #[test]
+    fn langflow_trace_type_and_flow_id_decide_on_its_scope_only() {
+        let model = [string_attr("gen_ai.request.model", "gpt-4o-mini")];
+        for (text, kind) in [
+            ("agent", SpanKind::Agent),
+            ("tool", SpanKind::Tool),
+            ("retriever", SpanKind::Retriever),
+            ("embedding", SpanKind::Embedding),
+            ("llm", SpanKind::Chain),
+            ("prompt", SpanKind::Chain),
+            ("chain", SpanKind::Chain),
+        ] {
+            let mut attrs = vec![string_attr("trace_type", text)];
+            attrs.extend(model.iter().cloned());
+            assert_eq!(kind_named("Chat", "langflow", &attrs), kind, "{text}");
+            assert_eq!(kind_named("Chat", "other.scope", &attrs), SpanKind::Llm);
+        }
+
+        // The flow root has `flow_id` and no `trace_type`.
+        let root = [string_attr("flow_id", "7f3c")];
+        assert_eq!(kind_named("flow", "langflow", &root), SpanKind::Chain);
+        assert_eq!(kind_named("flow", "other.scope", &root), SpanKind::Span);
+
+        // Neither key: no decision, so the model fallback applies.
+        assert_eq!(kind_named("x", "langflow", &model), SpanKind::Llm);
+        assert_eq!(kind_named("x", "langflow", &[]), SpanKind::Span);
+    }
+
+    #[test]
+    fn n8n_rows_decide_on_its_scope_only() {
+        let model = [string_attr("gen_ai.request.model", "gpt-4o-mini")];
+        assert_eq!(
+            kind_named("workflow.execute", "n8n-workflow", &[]),
+            SpanKind::Chain
+        );
+        assert_eq!(
+            kind_named("workflow.execute", "other.scope", &[]),
+            SpanKind::Span
+        );
+
+        // A node without a GenAI operation is a plain span, even with a model.
+        assert_eq!(
+            kind_named("node.execute", "n8n-workflow", &[]),
+            SpanKind::Span
+        );
+        assert_eq!(
+            kind_named("node.execute", "n8n-workflow", &model),
+            SpanKind::Span
+        );
+        assert_eq!(
+            kind_named("node.execute", "other.scope", &model),
+            SpanKind::Llm
+        );
+
+        // With an operation, the GenAI rules decide.
+        let agent = [string_attr("gen_ai.operation.name", "invoke_agent")];
+        assert_eq!(
+            kind_named("node.execute", "n8n-workflow", &agent),
+            SpanKind::Agent
+        );
+        let chat = [string_attr("gen_ai.operation.name", "chat")];
+        assert_eq!(
+            kind_named("node.execute", "n8n-workflow", &chat),
+            SpanKind::Llm
+        );
+        // An operation the GenAI table does not know leaves the rule unused.
+        let other = [string_attr("gen_ai.operation.name", "run")];
+        assert_eq!(
+            kind_named("node.execute", "n8n-workflow", &other),
+            SpanKind::Span
+        );
+        assert_eq!(
+            kind_named(
+                "node.execute",
+                "n8n-workflow",
+                &[
+                    string_attr("gen_ai.operation.name", "run"),
+                    model[0].clone()
+                ]
+            ),
+            SpanKind::Llm
+        );
     }
 }

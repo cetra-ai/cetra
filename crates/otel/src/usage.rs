@@ -313,14 +313,14 @@ pub(crate) struct Usage {
 
 /// Resolve token columns. On any other kind the usage attributes stay unread.
 ///
-/// `_scope_name` is the span's instrumentation scope name (`""` when absent);
-/// no row reads it. `conventions` is the conventions detected on the span;
-/// VoltAgent's counts (V4) are gated on it.
+/// `scope_name` is the span's instrumentation scope name (`""` when absent);
+/// Prompt Flow's counts (R-PF-2) are gated on it. `conventions` is the
+/// conventions detected on the span; VoltAgent's counts (V4) are gated on it.
 pub(crate) fn usage(
     bag: &mut AttrBag<'_>,
     kind: SpanKind,
     provider: Option<&str>,
-    _scope_name: &str,
+    scope_name: &str,
     conventions: &[Convention],
     warnings: &mut Warnings,
 ) -> Usage {
@@ -419,26 +419,22 @@ pub(crate) fn usage(
         metadata.as_ref().and_then(|metadata| metadata.total),
     );
 
-    // V4: VoltAgent's own counts, after the generic extraction (D-IN-6). Each
-    // key is consumed only when it fills its column.
-    let voltagent = voltagent_usage(bag, kind, conventions, warnings);
+    // V4: VoltAgent's own counts, after the generic extraction (D-IN-6), and
+    // Prompt Flow's (R-PF-2). Each key is consumed only when it fills its column.
+    let scoped = scoped_usage(bag, kind, scope_name, conventions, warnings);
     let input = match input {
         Some(found) => Some(found),
-        None => {
-            take_count(bag, voltagent.input).map(|value| (value, Inclusive::Yes, Inclusive::Yes))
-        }
+        None => take_count(bag, scoped.input).map(|value| (value, Inclusive::Yes, Inclusive::Yes)),
     };
     let output = match output {
         Some(found) => Some(found),
-        None => {
-            take_count(bag, voltagent.output).map(|value| (value, Inclusive::Yes, Inclusive::Yes))
-        }
+        None => take_count(bag, scoped.output).map(|value| (value, Inclusive::Yes, Inclusive::Yes)),
     };
     if cache_read.is_none() {
-        cache_read = take_count(bag, voltagent.cache_read);
+        cache_read = take_count(bag, scoped.cache_read);
     }
     if reasoning.is_none() {
-        reasoning = take_count(bag, voltagent.reasoning);
+        reasoning = take_count(bag, scoped.reasoning);
     }
 
     let mut input_tokens = input.map(|(value, _, _)| value);
@@ -514,10 +510,10 @@ fn gemini_usage(bag: &AttrBag<'_>, warnings: &mut Warnings) -> Option<GeminiUsag
     })
 }
 
-/// VoltAgent's counts (V4), one per column they may fill. Read, not consumed:
+/// Scoped counts (V4, R-PF-2), one per column they may fill. Read, not consumed:
 /// [`take_count`] consumes the key that fills its column.
 #[derive(Debug, Default)]
-struct VoltagentUsage {
+struct ScopedUsage {
     input: Option<Counted>,
     output: Option<Counted>,
     cache_read: Option<Counted>,
@@ -532,23 +528,26 @@ struct Counted {
 }
 
 /// V4 (D-IN-6): `llm.usage.*` on `llm` spans of the `voltagent` convention.
+/// R-PF-2: the same keys on `llm` spans of scope `promptflow`, where Prompt
+/// Flow writes them (its `llm.usage.total_tokens` is already a TOTAL source).
 ///
 /// Not rows in the tables above: OpenInference and OpenLLMetry use the `llm.`
-/// namespace too, so only a `voltagent` span reads these keys (D-IN-23). The
-/// input includes the cache and the output the reasoning, like the GenAI row
-/// of the token table, so nothing is added back. `llm.usage.total_tokens` is
-/// already a total source. The root agent span's `usage.*` (the sum of every
-/// step) stay in `attributes`: rule 3.
-fn voltagent_usage(
+/// namespace too, so only a `voltagent` or `promptflow` span reads these keys
+/// (D-IN-23). The input includes the cache and the output the reasoning, like
+/// the GenAI row of the token table, so nothing is added back. The root agent
+/// span's `usage.*` (the sum of every step) stay in `attributes`: rule 3.
+fn scoped_usage(
     bag: &AttrBag<'_>,
     kind: SpanKind,
+    scope_name: &str,
     conventions: &[Convention],
     warnings: &mut Warnings,
-) -> VoltagentUsage {
-    if kind != SpanKind::Llm || !conventions.contains(&Convention::Voltagent) {
-        return VoltagentUsage::default();
+) -> ScopedUsage {
+    let scoped = conventions.contains(&Convention::Voltagent) || scope_name == "promptflow";
+    if kind != SpanKind::Llm || !scoped {
+        return ScopedUsage::default();
     }
-    VoltagentUsage {
+    ScopedUsage {
         input: one_count(bag, "llm.usage.prompt_tokens", warnings),
         output: one_count(bag, "llm.usage.completion_tokens", warnings),
         cache_read: one_count(bag, "llm.usage.cached_tokens", warnings),
@@ -1651,5 +1650,52 @@ mod tests {
             bag.state("langfuse.observation.completion_start_time"),
             Some(Use::Unread)
         );
+    }
+
+    #[test]
+    fn promptflow_llm_counts_fill_their_columns_and_are_consumed() {
+        // R-PF-2: the same keys as VoltAgent's, on an `llm` span of scope `promptflow`.
+        let attrs = [
+            int_attr("llm.usage.prompt_tokens", 131),
+            int_attr("llm.usage.completion_tokens", 12),
+        ];
+        let mut warnings = Warnings::default();
+        let mut bag = AttrBag::new(&attrs, &mut warnings);
+        let counts = usage(
+            &mut bag,
+            SpanKind::Llm,
+            None,
+            "promptflow",
+            &[],
+            &mut warnings,
+        );
+        assert_eq!(counts.input_tokens, Some(131));
+        assert_eq!(counts.output_tokens, Some(12));
+        assert_eq!(bag.state("llm.usage.prompt_tokens"), Some(Use::Consumed));
+        assert_eq!(
+            bag.state("llm.usage.completion_tokens"),
+            Some(Use::Consumed)
+        );
+    }
+
+    #[test]
+    fn promptflow_counts_need_an_llm_span_and_its_scope() {
+        let attrs = [
+            int_attr("llm.usage.prompt_tokens", 131),
+            int_attr("llm.usage.completion_tokens", 12),
+        ];
+        // Another scope, and a non-`llm` kind of the same scope, read nothing.
+        for (kind, scope) in [
+            (SpanKind::Llm, "other.scope"),
+            (SpanKind::Span, "promptflow"),
+            (SpanKind::Tool, "promptflow"),
+        ] {
+            let mut warnings = Warnings::default();
+            let mut bag = AttrBag::new(&attrs, &mut warnings);
+            let counts = usage(&mut bag, kind, None, scope, &[], &mut warnings);
+            assert_eq!(counts.input_tokens, None, "{kind:?} {scope}");
+            assert_eq!(counts.output_tokens, None, "{kind:?} {scope}");
+            assert_eq!(bag.state("llm.usage.prompt_tokens"), Some(Use::Unread));
+        }
     }
 }

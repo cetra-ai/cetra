@@ -264,6 +264,8 @@ pub(crate) fn fill(
     let request_model = mirascope_model(bag, scope_name, request_model);
     let response_model = mirascope_model(bag, scope_name, response_model);
     let request_model = voltagent_model(bag, conventions, request_model);
+    let (request_model, response_model) =
+        promptflow_models(bag, scope_name, request_model, response_model, warnings);
     let provider = provider(bag, resource, scope_name);
     let operation = string_field(bag, resource, OPERATION);
     let request_params = request_params(bag, warnings);
@@ -439,6 +441,48 @@ fn voltagent_model(
         }
     }
     model
+}
+
+/// R-PF-2 (D-IN-5): on scope `promptflow`, only on a span whose `span_type` is
+/// `LLM` or `Embedding`. An empty response model is filled from
+/// `llm.response.model`, an empty request model from the `model` field of the
+/// `inputs` JSON. A key is consumed when it fills its column. `inputs` is
+/// never consumed here: it is the span's input. `span_type` is peeked, since
+/// the kind row has already consumed it.
+fn promptflow_models(
+    bag: &mut AttrBag<'_>,
+    scope_name: &str,
+    request: Option<String>,
+    response: Option<String>,
+    warnings: &mut Warnings,
+) -> (Option<String>, Option<String>) {
+    let model_span = bag
+        .get("span_type")
+        .and_then(as_str)
+        .is_some_and(|text| matches!(text, "LLM" | "Embedding"));
+    if scope_name != "promptflow" || !model_span {
+        return (request, response);
+    }
+    let response = response.or_else(|| {
+        let text = bag
+            .get("llm.response.model")
+            .and_then(as_str)
+            .filter(|text| !text.is_empty())?
+            .to_owned();
+        bag.take("llm.response.model");
+        Some(text)
+    });
+    let request = request.or_else(|| {
+        let value = bag.get("inputs")?;
+        let json = crate::payload::decode_json_text(value, warnings)?;
+        let text = json
+            .get("model")?
+            .as_str()
+            .filter(|text| !text.is_empty())?
+            .to_owned();
+        Some(text)
+    });
+    (request, response)
 }
 
 /// R-PC-3 (D-IN-5): on a span of scope `pipecat.turn` whose session is still
@@ -1978,5 +2022,78 @@ mod tests {
         );
         assert_eq!(bag.state("gen_ai.request.top_k"), Some(Use::Consumed));
         assert_eq!(warnings.to_attribute(), None);
+    }
+
+    #[test]
+    fn promptflow_llm_models_fill_from_the_response_and_the_inputs() {
+        // R-PF-2: the response model from `llm.response.model`, the request
+        // model from `inputs.model`. `inputs` stays for the input column.
+        let attrs = [
+            string_attr("span_type", "LLM"),
+            string_attr("llm.response.model", "gpt-4o-mini-2024-07-18"),
+            string_attr("inputs", r#"{"model":"gpt-4o-mini","messages":[]}"#),
+        ];
+        let (fields, bag) = filled_in_scope("promptflow", &attrs);
+        assert_eq!(fields.request_model.as_deref(), Some("gpt-4o-mini"));
+        assert_eq!(
+            fields.response_model.as_deref(),
+            Some("gpt-4o-mini-2024-07-18")
+        );
+        assert_eq!(bag.state("llm.response.model"), Some(Use::Consumed));
+        assert_eq!(bag.state("inputs"), Some(Use::Unread));
+
+        // An embedding span is a model span too.
+        let attrs = [
+            string_attr("span_type", "Embedding"),
+            string_attr("inputs", r#"{"model":"text-embedding-3-small"}"#),
+        ];
+        let (fields, _) = filled_in_scope("promptflow", &attrs);
+        assert_eq!(
+            fields.request_model.as_deref(),
+            Some("text-embedding-3-small")
+        );
+    }
+
+    #[test]
+    fn promptflow_models_keep_the_genai_model_and_skip_other_span_types() {
+        // A model already filled by a higher source is kept.
+        let attrs = [
+            string_attr("span_type", "LLM"),
+            string_attr("gen_ai.request.model", "gpt-4o"),
+            string_attr("gen_ai.response.model", "gpt-4o-2024-08-06"),
+            string_attr("llm.response.model", "other"),
+            string_attr("inputs", r#"{"model":"other"}"#),
+        ];
+        let (fields, bag) = filled_in_scope("promptflow", &attrs);
+        assert_eq!(fields.request_model.as_deref(), Some("gpt-4o"));
+        assert_eq!(fields.response_model.as_deref(), Some("gpt-4o-2024-08-06"));
+        assert_eq!(bag.state("llm.response.model"), Some(Use::Unread));
+
+        // A `Function` span with a `model` in its inputs gets no model.
+        let attrs = [
+            string_attr("span_type", "Function"),
+            string_attr("inputs", r#"{"model":"gpt-4o-mini"}"#),
+        ];
+        let (fields, _) = filled_in_scope("promptflow", &attrs);
+        assert_eq!(fields.request_model, None);
+
+        // Inputs without `model` leave the request model empty.
+        let attrs = [
+            string_attr("span_type", "LLM"),
+            string_attr("inputs", r#"{"messages":[]}"#),
+        ];
+        let (fields, _) = filled_in_scope("promptflow", &attrs);
+        assert_eq!(fields.request_model, None);
+
+        // The same keys on another scope are unchanged.
+        let attrs = [
+            string_attr("span_type", "LLM"),
+            string_attr("llm.response.model", "m-1"),
+            string_attr("inputs", r#"{"model":"m-2"}"#),
+        ];
+        let (fields, bag) = filled_in_scope("other.scope", &attrs);
+        assert_eq!(fields.request_model, None);
+        assert_eq!(fields.response_model, None);
+        assert_eq!(bag.state("llm.response.model"), Some(Use::Unread));
     }
 }
