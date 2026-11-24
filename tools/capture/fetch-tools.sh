@@ -1,5 +1,6 @@
 # Fetch the pinned gateway binaries that capture scenarios run (IN5.1) into
-# target/capture-tools/. Linux x86_64 only; every download is checked by SHA-256.
+# target/capture-tools/, and install the LiteLLM Proxy environment (Amendment B).
+# Linux x86_64 only; every download is checked by SHA-256.
 # The binary is moved to its final name last, so a partial run never leaves a file
 # that looks complete.
 set -euo pipefail
@@ -62,3 +63,19 @@ fetch "$tools_dir/aigw/1.2.1/aigw" \
 fetch "$tools_dir/envoy/1.39.1/envoy" \
     "https://github.com/envoyproxy/envoy/releases/download/v1.39.1/envoy-1.39.1-linux-x86_64" \
     "002c6e1c69ed0fa0ea381887247cadadfaec9481375fa8d8d2b1731eeabf40b8"
+
+# The LiteLLM Proxy environment: its own uv project (litellm[proxy] cannot share
+# tools/capture/py; its mcp and rich pins conflict with the frameworks there),
+# installed as a pinned tool. Reinstalled only when the committed lock changes,
+# which a copy stored next to the environment detects.
+litellm_env="$tools_dir/litellm-proxy/1.109.1"
+litellm_lock_copy="$tools_dir/litellm-proxy/uv.lock"
+if [ -x "$litellm_env/bin/litellm" ] &&
+    cmp -s "$repo_root/tools/capture/litellm-proxy/uv.lock" "$litellm_lock_copy"; then
+    echo "capture-tools: litellm-proxy 1.109.1 already present"
+else
+    echo "capture-tools: installing litellm-proxy 1.109.1"
+    UV_PROJECT_ENVIRONMENT="$litellm_env" uv sync --frozen --project "$repo_root/tools/capture/litellm-proxy"
+    mkdir -p -- "$(dirname -- "$litellm_lock_copy")"
+    cp -- "$repo_root/tools/capture/litellm-proxy/uv.lock" "$litellm_lock_copy"
+fi

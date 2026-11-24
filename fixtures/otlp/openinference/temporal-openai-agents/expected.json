@@ -1,0 +1,651 @@
+{
+  "spans": [
+    {
+      "project_id": "01900000-0000-7000-8000-000000000001",
+      "trace_id": "232fcf5757f93460eac14ca389e0723a",
+      "span_id": "0b8ab4d3b59486ca",
+      "name": "StartWorkflow:WeatherWorkflow",
+      "span_kind": "span",
+      "start_time": "2025-12-31T23:59:50.000000000Z",
+      "end_time": "2025-12-31T23:59:50.138000000Z",
+      "status": "unset",
+      "service_name": "capture-app",
+      "attributes": {
+        "temporalWorkflowID": "wf-capture"
+      },
+      "resource_attributes": {
+        "telemetry.sdk.language": "python",
+        "telemetry.sdk.name": "opentelemetry",
+        "telemetry.sdk.version": "1.45.2"
+      },
+      "scope_name": "temporalio.contrib.opentelemetry._otel_interceptor",
+      "ingest_time": "2026-01-01T00:00:00.000000000Z",
+      "schema_version": 2
+    },
+    {
+      "project_id": "01900000-0000-7000-8000-000000000001",
+      "trace_id": "232fcf5757f93460eac14ca389e0723a",
+      "span_id": "0684a66b31d3837b",
+      "parent_span_id": "a2efd0cd28e6fd17",
+      "name": "temporal:startActivity",
+      "span_kind": "chain",
+      "start_time": "2025-12-31T23:59:50.142000000Z",
+      "end_time": "2025-12-31T23:59:50.396000000Z",
+      "status": "ok",
+      "service_name": "capture-app",
+      "attributes": {
+        "openinference.span.kind": "CHAIN"
+      },
+      "resource_attributes": {
+        "telemetry.sdk.language": "python",
+        "telemetry.sdk.name": "opentelemetry",
+        "telemetry.sdk.version": "1.45.2"
+      },
+      "scope_name": "openinference.instrumentation.openai_agents",
+      "scope_version": "2.7.0",
+      "conventions": [
+        "openinference"
+      ],
+      "ingest_time": "2026-01-01T00:00:00.000000000Z",
+      "schema_version": 2
+    },
+    {
+      "project_id": "01900000-0000-7000-8000-000000000001",
+      "trace_id": "232fcf5757f93460eac14ca389e0723a",
+      "span_id": "418d7cd128a95511",
+      "parent_span_id": "612ba3c8170e407e",
+      "name": "weather",
+      "span_kind": "agent",
+      "start_time": "2025-12-31T23:59:50.142000000Z",
+      "end_time": "2025-12-31T23:59:50.454000000Z",
+      "status": "ok",
+      "service_name": "capture-app",
+      "attributes": {
+        "agent.name": "weather",
+        "graph.node.id": "weather",
+        "openinference.span.kind": "AGENT"
+      },
+      "resource_attributes": {
+        "telemetry.sdk.language": "python",
+        "telemetry.sdk.name": "opentelemetry",
+        "telemetry.sdk.version": "1.45.2"
+      },
+      "scope_name": "openinference.instrumentation.openai_agents",
+      "scope_version": "2.7.0",
+      "conventions": [
+        "openinference"
+      ],
+      "ingest_time": "2026-01-01T00:00:00.000000000Z",
+      "schema_version": 2
+    },
+    {
+      "project_id": "01900000-0000-7000-8000-000000000001",
+      "trace_id": "232fcf5757f93460eac14ca389e0723a",
+      "span_id": "612ba3c8170e407e",
+      "parent_span_id": "04fa84986150c679",
+      "name": "Agent workflow",
+      "span_kind": "chain",
+      "start_time": "2025-12-31T23:59:50.142000000Z",
+      "end_time": "2025-12-31T23:59:50.454000000Z",
+      "status": "ok",
+      "service_name": "capture-app",
+      "attributes": {
+        "openinference.span.kind": "CHAIN"
+      },
+      "resource_attributes": {
+        "telemetry.sdk.language": "python",
+        "telemetry.sdk.name": "opentelemetry",
+        "telemetry.sdk.version": "1.45.2"
+      },
+      "scope_name": "openinference.instrumentation.openai_agents",
+      "scope_version": "2.7.0",
+      "conventions": [
+        "openinference"
+      ],
+      "ingest_time": "2026-01-01T00:00:00.000000000Z",
+      "schema_version": 2
+    },
+    {
+      "project_id": "01900000-0000-7000-8000-000000000001",
+      "trace_id": "232fcf5757f93460eac14ca389e0723a",
+      "span_id": "a2efd0cd28e6fd17",
+      "parent_span_id": "418d7cd128a95511",
+      "name": "turn",
+      "span_kind": "chain",
+      "start_time": "2025-12-31T23:59:50.142000000Z",
+      "end_time": "2025-12-31T23:59:50.407000000Z",
+      "status": "ok",
+      "service_name": "capture-app",
+      "attributes": {
+        "openinference.span.kind": "CHAIN"
+      },
+      "resource_attributes": {
+        "telemetry.sdk.language": "python",
+        "telemetry.sdk.name": "opentelemetry",
+        "telemetry.sdk.version": "1.45.2"
+      },
+      "scope_name": "openinference.instrumentation.openai_agents",
+      "scope_version": "2.7.0",
+      "conventions": [
+        "openinference"
+      ],
+      "ingest_time": "2026-01-01T00:00:00.000000000Z",
+      "schema_version": 2
+    },
+    {
+      "project_id": "01900000-0000-7000-8000-000000000001",
+      "trace_id": "232fcf5757f93460eac14ca389e0723a",
+      "span_id": "0d13b668276f772c",
+      "parent_span_id": "0b8ab4d3b59486ca",
+      "name": "RunWorkflow:WeatherWorkflow",
+      "span_kind": "span",
+      "start_time": "2025-12-31T23:59:50.148000000Z",
+      "end_time": "2025-12-31T23:59:50.458000000Z",
+      "status": "unset",
+      "service_name": "capture-app",
+      "attributes": {
+        "temporalRunID": "capture-volatile-1",
+        "temporalWorkflowID": "wf-capture"
+      },
+      "resource_attributes": {
+        "telemetry.sdk.language": "python",
+        "telemetry.sdk.name": "opentelemetry",
+        "telemetry.sdk.version": "1.45.2"
+      },
+      "scope_name": "temporalio.contrib.opentelemetry._otel_interceptor",
+      "ingest_time": "2026-01-01T00:00:00.000000000Z",
+      "schema_version": 2
+    },
+    {
+      "project_id": "01900000-0000-7000-8000-000000000001",
+      "trace_id": "232fcf5757f93460eac14ca389e0723a",
+      "span_id": "04fa84986150c679",
+      "parent_span_id": "0d13b668276f772c",
+      "name": "Agent workflow",
+      "span_kind": "agent",
+      "start_time": "2025-12-31T23:59:50.151000000Z",
+      "end_time": "2025-12-31T23:59:50.458000000Z",
+      "status": "ok",
+      "service_name": "capture-app",
+      "attributes": {
+        "openinference.span.kind": "AGENT"
+      },
+      "resource_attributes": {
+        "telemetry.sdk.language": "python",
+        "telemetry.sdk.name": "opentelemetry",
+        "telemetry.sdk.version": "1.45.2"
+      },
+      "scope_name": "openinference.instrumentation.openai_agents",
+      "scope_version": "2.7.0",
+      "conventions": [
+        "openinference"
+      ],
+      "ingest_time": "2026-01-01T00:00:00.000000000Z",
+      "schema_version": 2
+    },
+    {
+      "project_id": "01900000-0000-7000-8000-000000000001",
+      "trace_id": "232fcf5757f93460eac14ca389e0723a",
+      "span_id": "1783e5c8595d8a49",
+      "parent_span_id": "a2efd0cd28e6fd17",
+      "name": "StartActivity:invoke_model_activity",
+      "span_kind": "span",
+      "start_time": "2025-12-31T23:59:50.156000000Z",
+      "end_time": "2025-12-31T23:59:50.156000000Z",
+      "status": "unset",
+      "service_name": "capture-app",
+      "attributes": {
+        "temporalRunID": "capture-volatile-1",
+        "temporalWorkflowID": "wf-capture"
+      },
+      "resource_attributes": {
+        "telemetry.sdk.language": "python",
+        "telemetry.sdk.name": "opentelemetry",
+        "telemetry.sdk.version": "1.45.2"
+      },
+      "scope_name": "temporalio.contrib.opentelemetry._otel_interceptor",
+      "ingest_time": "2026-01-01T00:00:00.000000000Z",
+      "schema_version": 2
+    },
+    {
+      "project_id": "01900000-0000-7000-8000-000000000001",
+      "trace_id": "232fcf5757f93460eac14ca389e0723a",
+      "span_id": "45a0ecbf801331ec",
+      "parent_span_id": "dfd9fd184cf44e37",
+      "name": "response",
+      "span_kind": "llm",
+      "start_time": "2025-12-31T23:59:50.208000000Z",
+      "end_time": "2025-12-31T23:59:50.392000000Z",
+      "status": "ok",
+      "service_name": "capture-app",
+      "provider": "openai",
+      "request_model": "gpt-4o-mini-2024-07-18",
+      "input_tokens": 82,
+      "output_tokens": 17,
+      "cache_read_tokens": 0,
+      "cache_write_tokens": 0,
+      "reasoning_tokens": 0,
+      "total_tokens": 99,
+      "cost_input": 0.000082,
+      "cost_output": 0.000068,
+      "cost_total": 0.00015000000000000001,
+      "cost_source": "computed",
+      "request_params": "{\"created_at\":1767225600.0,\"id\":\"resp_capture_1\",\"model\":\"gpt-4o-mini-2024-07-18\",\"parallel_tool_calls\":true,\"tool_choice\":\"auto\"}",
+      "input": "[{\"role\":\"user\",\"parts\":[{\"type\":\"text\",\"content\":\"What is the weather in Paris?\"}]}]",
+      "input_format": "messages",
+      "output": "[{\"role\":\"assistant\",\"parts\":[{\"type\":\"tool_call\",\"id\":\"call_weather_1\",\"name\":\"get_weather\",\"arguments\":{\"city\":\"Paris\"}}]}]",
+      "output_format": "messages",
+      "input_preview": "What is the weather in Paris?",
+      "attributes": {
+        "input.mime_type": "application/json",
+        "llm.finish_reason": "stop",
+        "llm.invocation_parameters": "{\"id\": \"resp_capture_1\", \"created_at\": 1767225600.0, \"model\": \"gpt-4o-mini-2024-07-18\", \"parallel_tool_calls\": true, \"tool_choice\": \"auto\"}",
+        "llm.model_name": "gpt-4o-mini-2024-07-18",
+        "llm.system": "openai",
+        "llm.token_count.completion": "17",
+        "llm.token_count.completion_details.reasoning": "0",
+        "llm.token_count.prompt": "82",
+        "llm.token_count.prompt_details.cache_read": "0",
+        "llm.token_count.prompt_details.cache_write": "0",
+        "llm.token_count.total": "99",
+        "openinference.span.kind": "LLM",
+        "output.mime_type": "application/json"
+      },
+      "resource_attributes": {
+        "telemetry.sdk.language": "python",
+        "telemetry.sdk.name": "opentelemetry",
+        "telemetry.sdk.version": "1.45.2"
+      },
+      "scope_name": "openinference.instrumentation.openai_agents",
+      "scope_version": "2.7.0",
+      "conventions": [
+        "openinference"
+      ],
+      "ingest_time": "2026-01-01T00:00:00.000000000Z",
+      "schema_version": 2
+    },
+    {
+      "project_id": "01900000-0000-7000-8000-000000000001",
+      "trace_id": "232fcf5757f93460eac14ca389e0723a",
+      "span_id": "da62fbb83a976fc2",
+      "parent_span_id": "1783e5c8595d8a49",
+      "name": "RunActivity:invoke_model_activity",
+      "span_kind": "span",
+      "start_time": "2025-12-31T23:59:50.208000000Z",
+      "end_time": "2025-12-31T23:59:50.393000000Z",
+      "status": "unset",
+      "service_name": "capture-app",
+      "attributes": {
+        "temporalActivityID": "1",
+        "temporalRunID": "capture-volatile-1",
+        "temporalWorkflowID": "wf-capture"
+      },
+      "resource_attributes": {
+        "telemetry.sdk.language": "python",
+        "telemetry.sdk.name": "opentelemetry",
+        "telemetry.sdk.version": "1.45.2"
+      },
+      "scope_name": "temporalio.contrib.opentelemetry._otel_interceptor",
+      "ingest_time": "2026-01-01T00:00:00.000000000Z",
+      "schema_version": 2
+    },
+    {
+      "project_id": "01900000-0000-7000-8000-000000000001",
+      "trace_id": "232fcf5757f93460eac14ca389e0723a",
+      "span_id": "dfd9fd184cf44e37",
+      "parent_span_id": "0684a66b31d3837b",
+      "name": "temporal:executeActivity",
+      "span_kind": "chain",
+      "start_time": "2025-12-31T23:59:50.208000000Z",
+      "end_time": "2025-12-31T23:59:50.393000000Z",
+      "status": "ok",
+      "service_name": "capture-app",
+      "attributes": {
+        "openinference.span.kind": "CHAIN"
+      },
+      "resource_attributes": {
+        "telemetry.sdk.language": "python",
+        "telemetry.sdk.name": "opentelemetry",
+        "telemetry.sdk.version": "1.45.2"
+      },
+      "scope_name": "openinference.instrumentation.openai_agents",
+      "scope_version": "2.7.0",
+      "conventions": [
+        "openinference"
+      ],
+      "ingest_time": "2026-01-01T00:00:00.000000000Z",
+      "schema_version": 2
+    },
+    {
+      "project_id": "01900000-0000-7000-8000-000000000001",
+      "trace_id": "232fcf5757f93460eac14ca389e0723a",
+      "span_id": "b27875d2dcd60431",
+      "parent_span_id": "a2efd0cd28e6fd17",
+      "name": "get_weather",
+      "span_kind": "tool",
+      "start_time": "2025-12-31T23:59:50.396000000Z",
+      "end_time": "2025-12-31T23:59:50.407000000Z",
+      "status": "ok",
+      "service_name": "capture-app",
+      "input": "{\"city\":\"Paris\"}",
+      "input_format": "json",
+      "output": "{\"temperature_c\":18,\"conditions\":\"sunny\",\"city\":\"Paris\"}",
+      "output_format": "json",
+      "input_preview": "{\"city\":\"Paris\"}",
+      "output_preview": "{\"temperature_c\":18,\"conditions\":\"sunny\",\"city\":\"Paris\"}",
+      "attributes": {
+        "input.mime_type": "application/json",
+        "openinference.span.kind": "TOOL",
+        "output.mime_type": "application/json",
+        "tool.description": "Look up the weather for a city.",
+        "tool.name": "get_weather",
+        "tool.parameters": "{\"properties\": {\"city\": {\"title\": \"City\", \"type\": \"string\"}}, \"required\": [\"city\"], \"title\": \"get_weather_args\", \"type\": \"object\", \"additionalProperties\": false}"
+      },
+      "resource_attributes": {
+        "telemetry.sdk.language": "python",
+        "telemetry.sdk.name": "opentelemetry",
+        "telemetry.sdk.version": "1.45.2"
+      },
+      "scope_name": "openinference.instrumentation.openai_agents",
+      "scope_version": "2.7.0",
+      "conventions": [
+        "openinference"
+      ],
+      "ingest_time": "2026-01-01T00:00:00.000000000Z",
+      "schema_version": 2
+    },
+    {
+      "project_id": "01900000-0000-7000-8000-000000000001",
+      "trace_id": "232fcf5757f93460eac14ca389e0723a",
+      "span_id": "d08801402834972a",
+      "parent_span_id": "b27875d2dcd60431",
+      "name": "temporal:startActivity",
+      "span_kind": "chain",
+      "start_time": "2025-12-31T23:59:50.396000000Z",
+      "end_time": "2025-12-31T23:59:50.407000000Z",
+      "status": "ok",
+      "service_name": "capture-app",
+      "attributes": {
+        "openinference.span.kind": "CHAIN"
+      },
+      "resource_attributes": {
+        "telemetry.sdk.language": "python",
+        "telemetry.sdk.name": "opentelemetry",
+        "telemetry.sdk.version": "1.45.2"
+      },
+      "scope_name": "openinference.instrumentation.openai_agents",
+      "scope_version": "2.7.0",
+      "conventions": [
+        "openinference"
+      ],
+      "ingest_time": "2026-01-01T00:00:00.000000000Z",
+      "schema_version": 2
+    },
+    {
+      "project_id": "01900000-0000-7000-8000-000000000001",
+      "trace_id": "232fcf5757f93460eac14ca389e0723a",
+      "span_id": "10088a2424c3ef9f",
+      "parent_span_id": "b27875d2dcd60431",
+      "name": "StartActivity:get_weather",
+      "span_kind": "span",
+      "start_time": "2025-12-31T23:59:50.401000000Z",
+      "end_time": "2025-12-31T23:59:50.402000000Z",
+      "status": "unset",
+      "service_name": "capture-app",
+      "attributes": {
+        "temporalRunID": "capture-volatile-1",
+        "temporalWorkflowID": "wf-capture"
+      },
+      "resource_attributes": {
+        "telemetry.sdk.language": "python",
+        "telemetry.sdk.name": "opentelemetry",
+        "telemetry.sdk.version": "1.45.2"
+      },
+      "scope_name": "temporalio.contrib.opentelemetry._otel_interceptor",
+      "ingest_time": "2026-01-01T00:00:00.000000000Z",
+      "schema_version": 2
+    },
+    {
+      "project_id": "01900000-0000-7000-8000-000000000001",
+      "trace_id": "232fcf5757f93460eac14ca389e0723a",
+      "span_id": "71ad5295390ac6fd",
+      "parent_span_id": "10088a2424c3ef9f",
+      "name": "RunActivity:get_weather",
+      "span_kind": "span",
+      "start_time": "2025-12-31T23:59:50.405000000Z",
+      "end_time": "2025-12-31T23:59:50.405000000Z",
+      "status": "unset",
+      "service_name": "capture-app",
+      "attributes": {
+        "temporalActivityID": "2",
+        "temporalRunID": "capture-volatile-1",
+        "temporalWorkflowID": "wf-capture"
+      },
+      "resource_attributes": {
+        "telemetry.sdk.language": "python",
+        "telemetry.sdk.name": "opentelemetry",
+        "telemetry.sdk.version": "1.45.2"
+      },
+      "scope_name": "temporalio.contrib.opentelemetry._otel_interceptor",
+      "ingest_time": "2026-01-01T00:00:00.000000000Z",
+      "schema_version": 2
+    },
+    {
+      "project_id": "01900000-0000-7000-8000-000000000001",
+      "trace_id": "232fcf5757f93460eac14ca389e0723a",
+      "span_id": "a29e88f578377094",
+      "parent_span_id": "d08801402834972a",
+      "name": "temporal:executeActivity",
+      "span_kind": "chain",
+      "start_time": "2025-12-31T23:59:50.405000000Z",
+      "end_time": "2025-12-31T23:59:50.405000000Z",
+      "status": "ok",
+      "service_name": "capture-app",
+      "attributes": {
+        "openinference.span.kind": "CHAIN"
+      },
+      "resource_attributes": {
+        "telemetry.sdk.language": "python",
+        "telemetry.sdk.name": "opentelemetry",
+        "telemetry.sdk.version": "1.45.2"
+      },
+      "scope_name": "openinference.instrumentation.openai_agents",
+      "scope_version": "2.7.0",
+      "conventions": [
+        "openinference"
+      ],
+      "ingest_time": "2026-01-01T00:00:00.000000000Z",
+      "schema_version": 2
+    },
+    {
+      "project_id": "01900000-0000-7000-8000-000000000001",
+      "trace_id": "232fcf5757f93460eac14ca389e0723a",
+      "span_id": "aa724320de59ff2f",
+      "parent_span_id": "418d7cd128a95511",
+      "name": "turn",
+      "span_kind": "chain",
+      "start_time": "2025-12-31T23:59:50.407000000Z",
+      "end_time": "2025-12-31T23:59:50.454000000Z",
+      "status": "ok",
+      "service_name": "capture-app",
+      "attributes": {
+        "openinference.span.kind": "CHAIN"
+      },
+      "resource_attributes": {
+        "telemetry.sdk.language": "python",
+        "telemetry.sdk.name": "opentelemetry",
+        "telemetry.sdk.version": "1.45.2"
+      },
+      "scope_name": "openinference.instrumentation.openai_agents",
+      "scope_version": "2.7.0",
+      "conventions": [
+        "openinference"
+      ],
+      "ingest_time": "2026-01-01T00:00:00.000000000Z",
+      "schema_version": 2
+    },
+    {
+      "project_id": "01900000-0000-7000-8000-000000000001",
+      "trace_id": "232fcf5757f93460eac14ca389e0723a",
+      "span_id": "c1bdde1a5150a8f1",
+      "parent_span_id": "aa724320de59ff2f",
+      "name": "temporal:startActivity",
+      "span_kind": "chain",
+      "start_time": "2025-12-31T23:59:50.407000000Z",
+      "end_time": "2025-12-31T23:59:50.454000000Z",
+      "status": "ok",
+      "service_name": "capture-app",
+      "attributes": {
+        "openinference.span.kind": "CHAIN"
+      },
+      "resource_attributes": {
+        "telemetry.sdk.language": "python",
+        "telemetry.sdk.name": "opentelemetry",
+        "telemetry.sdk.version": "1.45.2"
+      },
+      "scope_name": "openinference.instrumentation.openai_agents",
+      "scope_version": "2.7.0",
+      "conventions": [
+        "openinference"
+      ],
+      "ingest_time": "2026-01-01T00:00:00.000000000Z",
+      "schema_version": 2
+    },
+    {
+      "project_id": "01900000-0000-7000-8000-000000000001",
+      "trace_id": "232fcf5757f93460eac14ca389e0723a",
+      "span_id": "d691ec8a08df5634",
+      "parent_span_id": "aa724320de59ff2f",
+      "name": "StartActivity:invoke_model_activity",
+      "span_kind": "span",
+      "start_time": "2025-12-31T23:59:50.411000000Z",
+      "end_time": "2025-12-31T23:59:50.411000000Z",
+      "status": "unset",
+      "service_name": "capture-app",
+      "attributes": {
+        "temporalRunID": "capture-volatile-1",
+        "temporalWorkflowID": "wf-capture"
+      },
+      "resource_attributes": {
+        "telemetry.sdk.language": "python",
+        "telemetry.sdk.name": "opentelemetry",
+        "telemetry.sdk.version": "1.45.2"
+      },
+      "scope_name": "temporalio.contrib.opentelemetry._otel_interceptor",
+      "ingest_time": "2026-01-01T00:00:00.000000000Z",
+      "schema_version": 2
+    },
+    {
+      "project_id": "01900000-0000-7000-8000-000000000001",
+      "trace_id": "232fcf5757f93460eac14ca389e0723a",
+      "span_id": "42ee81193b85ddd9",
+      "parent_span_id": "49d132264c75c6da",
+      "name": "response",
+      "span_kind": "llm",
+      "start_time": "2025-12-31T23:59:50.414000000Z",
+      "end_time": "2025-12-31T23:59:50.451000000Z",
+      "status": "ok",
+      "service_name": "capture-app",
+      "provider": "openai",
+      "request_model": "gpt-4o-mini-2024-07-18",
+      "input_tokens": 131,
+      "output_tokens": 12,
+      "cache_read_tokens": 64,
+      "cache_write_tokens": 0,
+      "reasoning_tokens": 0,
+      "total_tokens": 143,
+      "cost_input": 0.000099,
+      "cost_output": 0.000048,
+      "cost_total": 0.000147,
+      "cost_source": "computed",
+      "request_params": "{\"created_at\":1767225600.0,\"id\":\"resp_capture_2\",\"model\":\"gpt-4o-mini-2024-07-18\",\"parallel_tool_calls\":true,\"tool_choice\":\"auto\"}",
+      "input": "[{\"role\":\"user\",\"parts\":[{\"type\":\"text\",\"content\":\"What is the weather in Paris?\"}]},{\"role\":\"assistant\",\"parts\":[{\"type\":\"tool_call\",\"id\":\"call_weather_1\",\"name\":\"get_weather\",\"arguments\":{\"city\":\"Paris\"}}]},{\"role\":\"tool\",\"parts\":[{\"type\":\"tool_call_response\",\"id\":\"call_weather_1\",\"response\":{\"temperature_c\":18,\"conditions\":\"sunny\",\"city\":\"Paris\"}}]}]",
+      "input_format": "messages",
+      "output": "[{\"role\":\"assistant\",\"parts\":[{\"type\":\"text\",\"content\":\"It is 18 °C and sunny in Paris.\"}]}]",
+      "output_format": "messages",
+      "input_preview": "What is the weather in Paris?",
+      "output_preview": "It is 18 °C and sunny in Paris.",
+      "attributes": {
+        "input.mime_type": "application/json",
+        "llm.finish_reason": "stop",
+        "llm.invocation_parameters": "{\"id\": \"resp_capture_2\", \"created_at\": 1767225600.0, \"model\": \"gpt-4o-mini-2024-07-18\", \"parallel_tool_calls\": true, \"tool_choice\": \"auto\"}",
+        "llm.model_name": "gpt-4o-mini-2024-07-18",
+        "llm.system": "openai",
+        "llm.token_count.completion": "12",
+        "llm.token_count.completion_details.reasoning": "0",
+        "llm.token_count.prompt": "131",
+        "llm.token_count.prompt_details.cache_read": "64",
+        "llm.token_count.prompt_details.cache_write": "0",
+        "llm.token_count.total": "143",
+        "openinference.span.kind": "LLM",
+        "output.mime_type": "application/json"
+      },
+      "resource_attributes": {
+        "telemetry.sdk.language": "python",
+        "telemetry.sdk.name": "opentelemetry",
+        "telemetry.sdk.version": "1.45.2"
+      },
+      "scope_name": "openinference.instrumentation.openai_agents",
+      "scope_version": "2.7.0",
+      "conventions": [
+        "openinference"
+      ],
+      "ingest_time": "2026-01-01T00:00:00.000000000Z",
+      "schema_version": 2
+    },
+    {
+      "project_id": "01900000-0000-7000-8000-000000000001",
+      "trace_id": "232fcf5757f93460eac14ca389e0723a",
+      "span_id": "49d132264c75c6da",
+      "parent_span_id": "c1bdde1a5150a8f1",
+      "name": "temporal:executeActivity",
+      "span_kind": "chain",
+      "start_time": "2025-12-31T23:59:50.414000000Z",
+      "end_time": "2025-12-31T23:59:50.451000000Z",
+      "status": "ok",
+      "service_name": "capture-app",
+      "attributes": {
+        "openinference.span.kind": "CHAIN"
+      },
+      "resource_attributes": {
+        "telemetry.sdk.language": "python",
+        "telemetry.sdk.name": "opentelemetry",
+        "telemetry.sdk.version": "1.45.2"
+      },
+      "scope_name": "openinference.instrumentation.openai_agents",
+      "scope_version": "2.7.0",
+      "conventions": [
+        "openinference"
+      ],
+      "ingest_time": "2026-01-01T00:00:00.000000000Z",
+      "schema_version": 2
+    },
+    {
+      "project_id": "01900000-0000-7000-8000-000000000001",
+      "trace_id": "232fcf5757f93460eac14ca389e0723a",
+      "span_id": "9ae13e5ed8c750d4",
+      "parent_span_id": "d691ec8a08df5634",
+      "name": "RunActivity:invoke_model_activity",
+      "span_kind": "span",
+      "start_time": "2025-12-31T23:59:50.414000000Z",
+      "end_time": "2025-12-31T23:59:50.451000000Z",
+      "status": "unset",
+      "service_name": "capture-app",
+      "attributes": {
+        "temporalActivityID": "3",
+        "temporalRunID": "capture-volatile-1",
+        "temporalWorkflowID": "wf-capture"
+      },
+      "resource_attributes": {
+        "telemetry.sdk.language": "python",
+        "telemetry.sdk.name": "opentelemetry",
+        "telemetry.sdk.version": "1.45.2"
+      },
+      "scope_name": "temporalio.contrib.opentelemetry._otel_interceptor",
+      "ingest_time": "2026-01-01T00:00:00.000000000Z",
+      "schema_version": 2
+    }
+  ],
+  "media": [],
+  "rejected_spans": 0
+}

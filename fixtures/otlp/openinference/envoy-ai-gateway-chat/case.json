@@ -1,0 +1,23 @@
+{
+  "description": "Envoy AI Gateway (aigw with Envoy): one chat completion, traced by the external processor.",
+  "origin": "captured",
+  "source": {
+    "instrumentation": "aigw",
+    "instrumentation_version": "1.2.1",
+    "language": "python",
+    "libraries": {
+      "aigw": "1.2.1",
+      "envoy": "1.39.1",
+      "openai": "3.45.0"
+    },
+    "captured_at": "2026-11-24T00:39:05Z"
+  },
+  "spec_refs": [
+    "02 § Convention detection",
+    "02 § Mapping tables / Span kind",
+    "02 § Mapping tables / Input / output",
+    "02 § Mapping tables / Model, provider, usage",
+    "02 § Normalization rules"
+  ],
+  "notes": "The pinned aigw and Envoy binaries run as a subprocess: the Gateway API config from the template routes the listener to the mock, and Envoy 1.39.1 is symlinked where aigw's func-e lookup expects it, so nothing is downloaded. The environment carries the standard OTEL_EXPORTER_OTLP_* variables (HTTP protobuf, no compression) with metrics and logs off. aigw answers GET /v1/models itself. One chat request goes through as gpt-4o-mini and produces a single ChatCompletion span in OpenInference: llm.system is openai, llm.model_name is the response model, and the full request and response JSON sit in input.value and output.value. No cost is reported, so the price is computed. aigw binds several fixed ports besides the listener and admin port; the case runs alone, so only a foreign process on one of them breaks it. Nothing varies between runs."
+}

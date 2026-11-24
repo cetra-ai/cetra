@@ -228,7 +228,7 @@ Required tools:
 - `uv`
 - `actionlint` and `zizmor` (only when editing `.github/`)
 - for fuzzing: the nightly toolchain and cargo-fuzz 0.13.2 (`just fuzz-tools`)
-- for captures, `just capture-tools` downloads Temporal CLI, Bifrost, aigw and Envoy into `target/capture-tools` (pinned, checksummed)
+- for captures, `just capture-tools` downloads Temporal CLI, Bifrost, aigw and Envoy into `target/capture-tools` (pinned, checksummed), and installs the LiteLLM Proxy environment (`tools/capture/litellm-proxy`, locked)
 - for packaging (`just dist`, `just check-packaging`): `musl-tools` (Linux), `cargo-auditable` 0.7.7, `cargo-about` 0.9.3 (`--features cli`), Docker Engine 25+ with Compose 2.24+, helm 4.3.1, kubeconform 0.8.0; kind 0.33.0 and kubectl for `just helm-smoke`
 
 ## CI

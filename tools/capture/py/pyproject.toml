@@ -77,6 +77,10 @@ dependencies = [
   "autogen-ext[openai]==0.7.5",
   "openinference-instrumentation-autogen-agentchat==0.1.29",
   "mirascope[openai,ops]==2.8.2",
+  # Temporal with the OpenAI Agents plugin and the pinned dev-server binary (M5, track IN,
+  # docs/plans/in-integrations/spikes/m5-binaries.md).
+  "temporalio==1.36.1",
+  "temporalio-openai-agents[openinference]==2.0.0",
   # The SDK under test, from this repository (editable), so the harness uses its runtime.
   "cetra-sdk",
 ]
@@ -92,7 +96,9 @@ build-backend = "uv_build"
 exclude-newer = "7 days" # D74/D117: no release younger than 7 days
 # google-adk 2.14.0 was uploaded on 2026-11-07. The 7-day cutoff excludes it,
 # and 2.13.0 cannot share this project's OpenTelemetry 1.45 pin.
-exclude-newer-package = { google-adk = "2026-11-07T01:04:00Z" }
+# temporalio-openai-agents 2.0.0 was uploaded on 2026-11-17T21:07Z; it is the version for
+# openai-agents 0.24.x (1.1.0 needs 0.22.x) and reaches the 7-day cutoff on 2026-11-24T21:07Z.
+exclude-newer-package = { google-adk = "2026-11-07T01:04:00Z", temporalio-openai-agents = "2026-11-17T22:00:00Z" }
 # instructor 1.17.0 caps jiter<0.15 and guardrails-ai 0.11.0 caps openai<3. Both work with
 # the pins above (spike finding 5).
 # Mirascope 2.8.2's extras cap anthropic, google-genai and the Google GenAI instrumentor below

@@ -1,0 +1,63 @@
+{
+  "description": "Bifrost gateway chat completions, a tool call then its answer, traced by the gateway's otel plugin.",
+  "spec_refs": [
+    "02 § Convention detection",
+    "02 § Mapping tables / Span kind",
+    "02 § Mapping tables / Input / output",
+    "02 § Mapping tables / Model, provider, usage",
+    "02 § Normalization rules"
+  ],
+  "notes": "The pinned bifrost-http binary runs as a subprocess with the otel plugin (trace_type genai_extension, HTTP protobuf to the receiver). The config keeps the three air-gap keys: file:// pricing and model parameters from the committed vendor datasheet (so the reported cost is stable) and mcp_library_sync_interval 0, plus client.enforce_auth_on_inference false. The provider's base_url is the mock; the two GET /v1/models probes at start are answered by the mock without a turn. Two requests reach the upstream as gpt-4o-mini: one with a get_weather tool, then the same conversation with the assistant's tool call and the tool result. Each request is a /v1/chat/completions SERVER root and a chat CLIENT span; span_names keeps those two names and drops the 24 plugin.* spans per request. The root repeats its chat child's model and content and has no gen_ai.operation.name; its tool-call messages flatten the call (name and args, no function object). bifrost.request.id and bifrost.selected_key.id are UUIDs, and the three duration attributes are measured.",
+  "instrumentation": "bifrost",
+  "libraries": [
+    "bifrost",
+    "openai"
+  ],
+  "span_names": [
+    "/v1/chat/completions",
+    "chat gpt-4o-mini"
+  ],
+  "volatile_attributes": [
+    "bifrost.request.id",
+    "bifrost.selected_key.id"
+  ],
+  "timing_attributes": [
+    "bifrost.overhead.duration_ms",
+    "bifrost.upstream.duration_ms",
+    "bifrost.worker.handoff_ms"
+  ],
+  "turns": [
+    {
+      "api": "openai.chat",
+      "model": "gpt-4o-mini-2024-07-18",
+      "message": {
+        "tool_calls": [
+          {
+            "id": "call_weather_1",
+            "name": "get_weather",
+            "arguments": {
+              "city": "Paris"
+            }
+          }
+        ]
+      },
+      "finish": "tool_calls",
+      "usage": {
+        "input": 82,
+        "output": 17
+      }
+    },
+    {
+      "api": "openai.chat",
+      "model": "gpt-4o-mini-2024-07-18",
+      "message": {
+        "text": "It is 18 °C and sunny in Paris."
+      },
+      "finish": "stop",
+      "usage": {
+        "input": 131,
+        "output": 12
+      }
+    }
+  ]
+}

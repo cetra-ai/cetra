@@ -834,8 +834,8 @@ fn json_differences(
     let mut produced_input = produced_input.clone();
     mask_captured_at(&mut committed_case);
     mask_captured_at(&mut produced_case);
-    sort_resource_attributes(&mut committed_input);
-    sort_resource_attributes(&mut produced_input);
+    sort_attribute_arrays(&mut committed_input);
+    sort_attribute_arrays(&mut produced_input);
     let keys = attribute_keys(scenario);
     mask_tree(&mut committed_input, &keys);
     mask_tree(&mut produced_input, &keys);
@@ -869,26 +869,59 @@ fn mask_captured_at(value: &mut Value) {
     }
 }
 
-/// Sorts each `resourceSpans[*].resource.attributes` array by `key`, so that the
-/// order an exporter writes its resource attributes in is not a difference.
+/// Sorts every `attributes` array by `key` — each resource's, and every span's,
+/// event's and link's — so that the order an exporter writes its attributes in
+/// (Bifrost's Go SDK varies it per run) is not a difference.
 /// The sort is stable, so duplicate keys keep their order.
-fn sort_resource_attributes(value: &mut Value) {
+fn sort_attribute_arrays(value: &mut Value) {
     let Some(resource_spans) = value.get_mut("resourceSpans").and_then(Value::as_array_mut) else {
         return;
     };
     for resource_span in resource_spans {
-        let Some(attributes) = resource_span
+        if let Some(attributes) = resource_span
             .pointer_mut("/resource/attributes")
+            .and_then(Value::as_array_mut)
+        {
+            sort_by_key(attributes);
+        }
+        let Some(scope_spans) = resource_span
+            .pointer_mut("/scopeSpans")
             .and_then(Value::as_array_mut)
         else {
             continue;
         };
-        attributes.sort_by(|left, right| {
-            let left = left.get("key").and_then(Value::as_str);
-            let right = right.get("key").and_then(Value::as_str);
-            left.cmp(&right)
-        });
+        for scope_span in scope_spans {
+            let Some(spans) = scope_span.get_mut("spans").and_then(Value::as_array_mut) else {
+                continue;
+            };
+            for span in spans {
+                if let Some(attributes) = span.get_mut("attributes").and_then(Value::as_array_mut) {
+                    sort_by_key(attributes);
+                }
+                for field in ["events", "links"] {
+                    let Some(items) = span.get_mut(field).and_then(Value::as_array_mut) else {
+                        continue;
+                    };
+                    for item in items {
+                        if let Some(attributes) =
+                            item.get_mut("attributes").and_then(Value::as_array_mut)
+                        {
+                            sort_by_key(attributes);
+                        }
+                    }
+                }
+            }
+        }
     }
+}
+
+/// Sorts one `attributes` array by its entries' `key`.
+fn sort_by_key(attributes: &mut [Value]) {
+    attributes.sort_by(|left, right| {
+        let left = left.get("key").and_then(Value::as_str);
+        let right = right.get("key").and_then(Value::as_str);
+        left.cmp(&right)
+    });
 }
 
 fn mask_tree(value: &mut Value, keys: &HashSet<&str>) {
@@ -1419,7 +1452,7 @@ mod tests {
             paths,
             vec![
                 "case.json: description".to_owned(),
-                "input.json: resourceSpans[0].scopeSpans[0].spans[0].attributes[1].value.stringValue".to_owned(),
+                "input.json: resourceSpans[0].scopeSpans[0].spans[0].attributes[2].value.stringValue".to_owned(),
                 "input.json: resourceSpans[0].scopeSpans[0].spans[0].name".to_owned(),
             ]
         );
@@ -1457,6 +1490,32 @@ mod tests {
             paths,
             vec![
                 "input.json: resourceSpans[0].resource.attributes[1].value.stringValue".to_owned()
+            ]
+        );
+    }
+
+    #[test]
+    fn check_ignores_span_attribute_order() {
+        let scenario = scenario(json!({}), None);
+        let committed_input = input_export("chat", "100", "200", "150", "9", "gpt", "t0");
+        let mut produced_input = committed_input.clone();
+        // Bifrost writes its span attributes in a different order on every run.
+        produced_input["resourceSpans"][0]["scopeSpans"][0]["spans"][0]["attributes"]
+            .as_array_mut()
+            .expect("span attributes are an array")
+            .reverse();
+        let case = case_file("A chat turn.", "2026-01-01T00:00:00Z");
+        let paths = json_differences(&case, &case, &committed_input, &produced_input, &scenario);
+        assert!(paths.is_empty(), "{paths:?}");
+
+        // A changed value is still reported, at its sorted position.
+        produced_input["resourceSpans"][0]["scopeSpans"][0]["spans"][0]["attributes"][1]["value"]
+            ["stringValue"] = json!("gpt-other");
+        let paths = json_differences(&case, &case, &committed_input, &produced_input, &scenario);
+        assert_eq!(
+            paths,
+            vec![
+                "input.json: resourceSpans[0].scopeSpans[0].spans[0].attributes[2].value.stringValue".to_owned()
             ]
         );
     }

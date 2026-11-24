@@ -1,0 +1,62 @@
+{
+  "spans": [
+    {
+      "project_id": "01900000-0000-7000-8000-000000000001",
+      "trace_id": "0a7bb182f829b05844eb3d6a6b8a2bfb",
+      "span_id": "57d163ca2c96b069",
+      "name": "ChatCompletion",
+      "span_kind": "llm",
+      "start_time": "2025-12-31T23:59:50.000000000Z",
+      "end_time": "2025-12-31T23:59:50.078000000Z",
+      "status": "ok",
+      "service_name": "aigw",
+      "provider": "openai",
+      "request_model": "gpt-4o-mini-2024-07-18",
+      "input_tokens": 31,
+      "output_tokens": 12,
+      "cache_read_tokens": 0,
+      "reasoning_tokens": 0,
+      "total_tokens": 43,
+      "cost_input": 0.000031,
+      "cost_output": 0.000048,
+      "cost_total": 0.000079,
+      "cost_source": "computed",
+      "request_params": "{\"model\":\"gpt-4o-mini\",\"user\":\"user-1\"}",
+      "input": "[{\"role\":\"system\",\"parts\":[{\"type\":\"text\",\"content\":\"You are a weather bot.\"}]},{\"role\":\"user\",\"parts\":[{\"type\":\"text\",\"content\":\"What is the weather in Paris?\"}]}]",
+      "input_format": "messages",
+      "output": "[{\"role\":\"assistant\",\"parts\":[{\"type\":\"text\",\"content\":\"It is 18 °C and sunny in Paris.\"}]}]",
+      "output_format": "messages",
+      "input_preview": "What is the weather in Paris?",
+      "output_preview": "It is 18 °C and sunny in Paris.",
+      "attributes": {
+        "input.mime_type": "application/json",
+        "llm.invocation_parameters": "{\"model\":\"gpt-4o-mini\",\"user\":\"user-1\"}",
+        "llm.model_name": "gpt-4o-mini-2024-07-18",
+        "llm.system": "openai",
+        "llm.token_count.completion": "12",
+        "llm.token_count.completion_details.audio": "0",
+        "llm.token_count.completion_details.reasoning": "0",
+        "llm.token_count.prompt": "31",
+        "llm.token_count.prompt_details.audio": "0",
+        "llm.token_count.prompt_details.cache_creation": "0",
+        "llm.token_count.prompt_details.cache_read": "0",
+        "llm.token_count.total": "43",
+        "openinference.span.kind": "LLM",
+        "output.mime_type": "application/json"
+      },
+      "resource_attributes": {
+        "telemetry.sdk.language": "go",
+        "telemetry.sdk.name": "opentelemetry",
+        "telemetry.sdk.version": "1.46.0"
+      },
+      "scope_name": "envoyproxy/ai-gateway",
+      "conventions": [
+        "openinference"
+      ],
+      "ingest_time": "2026-01-01T00:00:00.000000000Z",
+      "schema_version": 2
+    }
+  ],
+  "media": [],
+  "rejected_spans": 0
+}
