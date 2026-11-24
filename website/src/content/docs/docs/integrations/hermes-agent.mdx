@@ -13,6 +13,8 @@ The telemetry comes from `hermes-otel`, a community plugin. `cetra agents setup`
 
 ## Connect Hermes Agent
 
+The setup commands and the `content_capture` values below come from the `hermes-otel` README, for version 1.33.0. The captured run did not run them as written: it installed the plugin with `uv pip install` from the plugin's git commit.
+
 1. Create a project key with the `ingest` scope in the project's [API keys](/docs/platform/api-keys/) page. Copy the `sk-cetra-…` value.
 2. Install the plugin into Hermes's environment and enable it. Hermes 0.21 and later installs the plugin's Python dependencies itself:
 

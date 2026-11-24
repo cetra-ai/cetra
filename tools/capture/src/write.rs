@@ -202,6 +202,7 @@ mod tests {
             span_names: Vec::new(),
             volatile_attributes: Vec::new(),
             volatile_name_prefixes: Vec::new(),
+            tolerated_probes: Vec::new(),
             unordered_spans: false,
             turns: vec![Turn {
                 api: Api::OpenaiChat,

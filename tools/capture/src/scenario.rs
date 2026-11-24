@@ -60,6 +60,13 @@ const ENV_PREFIXES: &[&str] = &[
 ];
 const ENV_FORBIDDEN: &[&str] = &["sk-", "pk-", "Bearer ", "@"];
 
+/// The probes a scenario may tolerate, each `"<METHOD> <path suffix>"`, matched by
+/// the request's method and path suffix (mock.rs `probe_matches`): OpenCode v2's
+/// Responses API check (`GET …/responses`), Hermes's custom-provider probe
+/// (`POST …/api/show`) and its model read (`GET …/models/<id>`). Without the field
+/// these requests are errors, as any unknown route is.
+pub const TOLERATED_PROBES: &[&str] = &["GET /responses", "POST /api/show", "GET /models/<id>"];
+
 /// `group/case` path of a captured fixture.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -145,6 +152,11 @@ pub struct Scenario {
     /// Defaults to `127.0.0.1`. A program that routes by host can use `127.0.0.2`.
     #[serde(default = "default_mock_host")]
     pub mock_host: String,
+    /// Probes the program makes beside its turns, each one of [`TOLERATED_PROBES`].
+    /// The mock answers them without a turn and records them in its log's `probes`,
+    /// never as errors; a probe the scenario does not list is an unknown-route error.
+    #[serde(default)]
+    pub tolerated_probes: Vec<String>,
     /// Package that produces the convention under test.
     pub instrumentation: String,
     /// Packages whose versions are recorded. Must contain [`Self::instrumentation`].
@@ -454,6 +466,19 @@ impl Scenario {
             "timestamp_attributes",
         )?;
         reject_duplicates(&self.timing_attributes, "timing_attributes")?;
+        for probe in &self.tolerated_probes {
+            if !TOLERATED_PROBES.contains(&probe.as_str()) {
+                return Err(format!(
+                    "tolerated_probes entry \"{probe}\" must be one of {}",
+                    TOLERATED_PROBES
+                        .iter()
+                        .map(|probe| format!("\"{probe}\""))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ));
+            }
+        }
+        reject_duplicates(&self.tolerated_probes, "tolerated_probes")?;
         for (field, values) in [
             ("span_names", &self.span_names),
             ("volatile_attributes", &self.volatile_attributes),
@@ -598,14 +623,24 @@ fn check_chat(index: usize, turn: &Turn) -> Result<(), String> {
 }
 
 /// An auxiliary turn is served to a request that declares no tools: it must be a chat
-/// turn with text and no tool calls, or the side call could not use it.
+/// turn with text and no tool calls, or the side call could not use it. Only the APIs
+/// whose requests the mock reads `tools` from (mock.rs `read_facts`: the chat routes)
+/// can route one; on any other API an auxiliary turn is a scenario error.
 fn check_auxiliary(index: usize, turn: &Turn) -> Result<(), String> {
     if !turn.auxiliary {
         return Ok(());
     }
-    if turn.api.is_embedding() {
+    if !matches!(
+        turn.api,
+        Api::OpenaiChat
+            | Api::OpenaiResponses
+            | Api::AnthropicMessages
+            | Api::CohereChat
+            | Api::OllamaChat
+    ) {
         return Err(format!(
-            "turns[{index}]: an auxiliary turn must be a chat turn with text and no tool calls"
+            "turns[{index}]: an auxiliary turn is not supported by {}, whose requests do not declare tools",
+            turn.api.name()
         ));
     }
     let Some(message) = &turn.message else {
@@ -788,6 +823,7 @@ mod tests {
       "notes": "Optional free text, copied into case.json.",
       "settings": { "media_min_bytes": 64 },
       "context": { "ingest_time": "2026-01-01T00:00:00.000000000Z" },
+      "tolerated_probes": ["GET /responses", "POST /api/show", "GET /models/<id>"],
       "instrumentation": "openinference-instrumentation-openai",
       "libraries": ["openai", "openinference-instrumentation-openai", "opentelemetry-sdk"],
       "env": { "OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT": "true" },
@@ -900,6 +936,10 @@ mod tests {
         assert_eq!(Provider::Ollama.host(), "ollama.com");
         assert_eq!(scenario.turns[0].finish, Some(Finish::ToolCalls));
         assert_eq!(
+            scenario.tolerated_probes,
+            ["GET /responses", "POST /api/show", "GET /models/<id>"]
+        );
+        assert_eq!(
             scenario.timestamp_attributes[0].format,
             TimestampFormat::Rfc3339
         );
@@ -1004,6 +1044,7 @@ mod tests {
         assert!(scenario.span_names.is_empty());
         assert!(scenario.volatile_attributes.is_empty());
         assert!(scenario.volatile_name_prefixes.is_empty());
+        assert!(scenario.tolerated_probes.is_empty());
     }
 
     #[test]
@@ -1549,10 +1590,6 @@ mod tests {
             "a text chat turn is a valid auxiliary turn"
         );
 
-        let mut value = embedding("openai.embeddings");
-        value["turns"][0]["auxiliary"] = json!(true);
-        assert_reason(value, expected);
-
         // Reasoning only (accepted by check_chat on anthropic.messages) is not text.
         let mut value = chat();
         value["turns"][0]["api"] = json!("anthropic.messages");
@@ -1560,5 +1597,83 @@ mod tests {
         value["turns"][0]["message"] = json!({ "text": null, "reasoning": "thinking" });
         value["turns"][0]["finish"] = json!("length");
         assert_reason(value, expected);
+    }
+
+    #[test]
+    fn an_auxiliary_turn_needs_an_api_whose_requests_declare_tools() {
+        // The mock reads `tools` only from the chat routes (read_facts); on any other
+        // API it could not route an auxiliary turn to the no-tools queue.
+        let mut value = embedding("openai.embeddings");
+        value["turns"][0]["auxiliary"] = json!(true);
+        assert_reason(
+            value,
+            "an auxiliary turn is not supported by openai.embeddings",
+        );
+
+        let mut value = embedding("gemini.embed_content");
+        value["turns"][0]["auxiliary"] = json!(true);
+        assert_reason(
+            value,
+            "an auxiliary turn is not supported by gemini.embed_content",
+        );
+
+        // Every chat route accepts one.
+        for api in [
+            "openai.chat",
+            "openai.responses",
+            "anthropic.messages",
+            "cohere.chat",
+            "ollama.chat",
+        ] {
+            let mut value = chat();
+            value["turns"][0]["api"] = json!(api);
+            value["turns"][0]["auxiliary"] = json!(true);
+            if api == "anthropic.messages" {
+                value["turns"][0]["finish"] = json!("stop");
+            }
+            assert!(
+                load_value(value).is_ok(),
+                "{api}: a text chat turn is a valid auxiliary turn"
+            );
+        }
+    }
+
+    #[test]
+    fn an_auxiliary_gemini_turn_is_rejected() {
+        let mut value = chat();
+        value["turns"][0]["api"] = json!("gemini.generate_content");
+        value["turns"][0]["auxiliary"] = json!(true);
+        assert_reason(
+            value,
+            "turns[0]: an auxiliary turn is not supported by gemini.generate_content, whose requests do not declare tools",
+        );
+    }
+
+    #[test]
+    fn an_unknown_probe_name_is_rejected() {
+        for probes in [json!(["GET /chat"]), json!(["get /responses"]), json!([""])] {
+            let mut value = chat();
+            value["tolerated_probes"] = probes.clone();
+            let reason = reason(value);
+            assert!(
+                reason.starts_with("tolerated_probes entry "),
+                "{probes}: {reason}"
+            );
+            assert!(reason.contains("must be one of"), "{probes}: {reason}");
+        }
+
+        let mut value = chat();
+        value["tolerated_probes"] = json!(["GET /responses", "POST /api/show", "GET /models/<id>"]);
+        assert!(
+            load_value(value).is_ok(),
+            "the three known probes are accepted"
+        );
+
+        let mut value = chat();
+        value["tolerated_probes"] = json!(["GET /responses", "GET /responses"]);
+        assert_reason(
+            value,
+            "tolerated_probes value \"GET /responses\" is duplicated",
+        );
     }
 }

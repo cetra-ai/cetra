@@ -316,12 +316,13 @@ pub async fn run_case(
     program: &Program,
 ) -> Result<Outcome, CaptureError> {
     let scenario = Scenario::load(scenario_dir)?;
-    // A Java or .NET program runs a toolchain `just capture-tools` fetches; a missing
-    // one is a setup problem, not a capture failure, and is reported as such.
+    // A Java or .NET program runs a toolchain and a build output `just capture-tools`
+    // fetches and builds; a missing one is a setup problem, not a capture failure,
+    // and is reported as such.
     if matches!(language, Language::Java | Language::Dotnet) {
-        check_tool_present(program)?;
+        check_tool_present(program, scenario_dir, language)?;
     }
-    let mock = Mock::new(scenario.turns.clone());
+    let mock = Mock::new(scenario.turns.clone(), scenario.tolerated_probes.clone());
     let receiver = Receiver::new();
     let (mock_port, mock_server) = bind(mock.router(), &scenario.mock_host).await?;
     let (receiver_port, receiver_server) = bind(receiver.router(), "127.0.0.1").await?;
@@ -365,17 +366,34 @@ pub async fn run_case(
     Ok(outcome)
 }
 
-/// Fails with [`CaptureError::ToolMissing`] when the program's tool binary is not on
-/// disk, which means `just capture-tools` has not fetched it.
-fn check_tool_present(program: &Program) -> Result<(), CaptureError> {
+/// Fails with [`CaptureError::ToolMissing`] when the program's tool binary, or the
+/// scenario's build output, is not on disk: `just capture-tools` has not fetched or
+/// built it. The build output is `target/capture.args` for Java and
+/// `bin/capture/Capture.dll` for .NET, relative to the scenario directory the
+/// program runs in ([`Program::java`] and [`Program::dotnet`]).
+fn check_tool_present(
+    program: &Program,
+    scenario_dir: &Path,
+    language: Language,
+) -> Result<(), CaptureError> {
     let Some(tool) = program.argv.first() else {
         return Err(CaptureError::ProgramCommand);
     };
-    let path = PathBuf::from(tool);
-    if path.is_file() {
+    let tool_path = PathBuf::from(tool);
+    if !tool_path.is_file() {
+        return Err(CaptureError::ToolMissing { path: tool_path });
+    }
+    let output = match language {
+        Language::Java => scenario_dir.join("target/capture.args"),
+        Language::Dotnet => scenario_dir.join("bin/capture/Capture.dll"),
+        // The function is called for Java and .NET only; Python and TypeScript
+        // programs have no build output.
+        Language::Python | Language::Typescript => return Ok(()),
+    };
+    if output.is_file() {
         Ok(())
     } else {
-        Err(CaptureError::ToolMissing { path })
+        Err(CaptureError::ToolMissing { path: output })
     }
 }
 
@@ -1665,6 +1683,63 @@ mod tests {
                 "bin/capture/Capture.dll",
             ]
         );
+    }
+
+    #[test]
+    fn check_tool_present_reports_the_missing_toolchain_and_build_output() {
+        let tmp = Tmp::new("tool-present");
+        let dir = tmp.0.join("scenario");
+        fs::create_dir_all(&dir).unwrap();
+        let tool = dir.join("dotnet");
+        let java = Program::argv(vec![
+            tool.to_string_lossy().into_owned(),
+            "@target/capture.args".to_owned(),
+        ]);
+        let dotnet = Program::argv(vec![
+            tool.to_string_lossy().into_owned(),
+            "bin/capture/Capture.dll".to_owned(),
+        ]);
+
+        // A missing toolchain comes first.
+        let error = check_tool_present(&java, &dir, Language::Java).unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            format!(
+                "{} is missing: run just capture-tools",
+                dir.join("dotnet").display()
+            )
+        );
+
+        // With the toolchain in place, the missing build output is the failure.
+        fs::write(&tool, b"").unwrap();
+        let error = check_tool_present(&java, &dir, Language::Java).unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            format!(
+                "{} is missing: run just capture-tools",
+                dir.join("target/capture.args").display()
+            )
+        );
+        let error = check_tool_present(&dotnet, &dir, Language::Dotnet).unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            format!(
+                "{} is missing: run just capture-tools",
+                dir.join("bin/capture/Capture.dll").display()
+            )
+        );
+
+        // Both present: no error, for either language.
+        fs::create_dir_all(dir.join("target")).unwrap();
+        fs::write(
+            dir.join("target/capture.args"),
+            b"-cp target/classes capture.Main\n",
+        )
+        .unwrap();
+        fs::create_dir_all(dir.join("bin/capture")).unwrap();
+        fs::write(dir.join("bin/capture/Capture.dll"), b"").unwrap();
+        check_tool_present(&java, &dir, Language::Java).unwrap();
+        check_tool_present(&dotnet, &dir, Language::Dotnet).unwrap();
     }
 
     /// Spawns `sh -c "sleep 60 & echo $!; wait"` in its own process group and returns the

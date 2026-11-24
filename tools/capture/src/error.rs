@@ -115,10 +115,11 @@ pub enum CaptureError {
     #[error("program command is empty")]
     ProgramCommand,
 
-    /// The JDK or .NET SDK a Java or .NET scenario runs on was never fetched.
+    /// The toolchain or build output a Java or .NET scenario runs on was never
+    /// fetched or built.
     #[error("{} is missing: run just capture-tools", path.display())]
     ToolMissing {
-        /// Path of the missing tool.
+        /// Path of the missing tool or build output.
         path: PathBuf,
     },
 

@@ -629,6 +629,12 @@ fn event_message(event: &Event, role: &str, warnings: &mut Warnings) -> Json {
         let Some(value) = attribute.value.as_ref() else {
             continue;
         };
+        // The body marker names where the event's whole message lives; `event_body`
+        // consumes it, and when it is not Semantic Kernel's JSON object the event is
+        // read as though it were absent, so it is never a message field either.
+        if attribute.key == EVENT_CONTENT {
+            continue;
+        }
         // A finish reason is text: a message's `finish_reason` must be a
         // string, so a JSON-looking value stays the text it was sent as.
         if attribute.key == "finish_reason" {
@@ -1465,7 +1471,8 @@ mod tests {
     fn event_content_that_is_not_an_object_is_ignored() {
         // D-IN-30 item 4: a `gen_ai.event.content` string that is not a JSON
         // object is not Semantic Kernel's, so the event is read from its own
-        // attributes exactly as before the rule, with no normalize error.
+        // attributes exactly as before the rule, with no normalize error and
+        // without the marker key copied into the message.
         let events = [event(
             "gen_ai.user.message",
             &[
@@ -1478,10 +1485,13 @@ mod tests {
         let Payload::Messages(messages) = io.input.expect("input") else {
             panic!("expected messages");
         };
+        let value: serde_json::Value =
+            serde_json::from_str(&messages_to_json(&messages)).expect("json");
         assert_eq!(
-            messages_to_json(&messages),
-            r#"[{"role":"user","parts":[{"text":"hi"}],"gen_ai.event.content":"plain text"}]"#
+            value,
+            serde_json::json!([{"role": "user", "parts": [{"text": "hi"}]}])
         );
+        assert!(value[0].get("gen_ai.event.content").is_none());
     }
 
     #[test]

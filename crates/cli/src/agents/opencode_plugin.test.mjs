@@ -371,6 +371,57 @@ test("a v1 model call outside any turn is not recorded", async () => {
   });
 });
 
+test("a missing sessionID starts no turn in either build", async () => {
+  await withPlugin({ captureContent: true }, async (posts) => {
+    // v1: chat.message without a sessionID neither throws nor starts a turn, and the
+    // idle event that follows flushes nothing.
+    const handlers = await cetraOpenCode.server({});
+    await handlers["chat.message"]({});
+    await handlers.event({ event: { type: "session.idle", properties: {} } });
+    assert.equal(posts.length, 0);
+
+    // v2: session.step.started without a sessionID neither throws nor starts a turn;
+    // nothing it opened is ever flushed, because no turn ever ends.
+    const { ctx, hooks, push } = fakeCtx();
+    const dispose = await cetraOpenCode.setup(ctx);
+    await hooks.get("context")({ messages: [] });
+    push({
+      type: "session.step.started",
+      data: { assistantMessageID: "m-no-session", model: { providerID: "openai", id: "gpt-4o-mini" } },
+      created: 1000,
+    });
+    await dispose();
+    assert.equal(posts.length, 0);
+  });
+});
+
+test("the buffer of ended spans is flushed at two thousand", async () => {
+  await withPlugin({ captureContent: true }, async (posts) => {
+    const { ctx, push } = fakeCtx();
+    await cetraOpenCode.setup(ctx);
+    // 2001 model calls without a turn end: the 2001st span finds a full buffer and
+    // flushes it, so exactly one POST leaves, with the first 2000 spans.
+    for (let i = 0; i < 2001; i++) {
+      push({
+        type: "session.step.started",
+        data: {
+          sessionID: "cap",
+          assistantMessageID: `m${i}`,
+          model: { providerID: "openai", id: "gpt-4o-mini" },
+        },
+        created: 1000 + i,
+      });
+      push({
+        type: "session.step.ended",
+        data: { assistantMessageID: `m${i}`, tokens: { input: 1, output: 1 }, finish: "stop" },
+        created: 1001 + i,
+      });
+    }
+    await waitFor(() => posts.length === 1);
+    assert.equal(spansOf(posts[0]).length, 2000);
+  });
+});
+
 test("configPath takes the config from XDG_CONFIG_HOME", () => {
   assert.equal(configPath({ XDG_CONFIG_HOME: "/x" }), "/x/opencode/cetra-opencode.json");
 });

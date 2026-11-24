@@ -1560,7 +1560,7 @@ mod settings_tests {
 
     /// Serves `turns` on loopback as an OpenAI-style provider. Returns the mock and the base URL.
     async fn provider(turns: Vec<Turn>) -> (Arc<Mock>, String) {
-        let mock = Mock::new(turns);
+        let mock = Mock::new(turns, Vec::new());
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
             .expect("bind");
@@ -2011,7 +2011,7 @@ mod turn_tests {
 
     /// Serves `turns` on loopback as an OpenAI-style provider. Returns the mock and the base URL.
     async fn provider(turns: Vec<Turn>) -> (Arc<Mock>, String) {
-        let mock = Mock::new(turns);
+        let mock = Mock::new(turns, Vec::new());
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
             .expect("bind");

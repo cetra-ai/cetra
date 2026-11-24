@@ -21,10 +21,13 @@ use crate::scenario::{Api, Provider, Turn};
 use crate::wire::{Ids, Rendered, openai};
 
 /// Scripted provider. Requests take turns from the front of the queue: an auxiliary
-/// turn (a request without tools) or a main one (a request with tools).
+/// turn (a request without tools) or a main one (a request with tools). Only the
+/// probes listed in `tolerated_probes` ([`crate::scenario::TOLERATED_PROBES`] spell
+/// them) are answered beside the turns.
 #[derive(Debug)]
 pub struct Mock {
     turns: Vec<Turn>,
+    tolerated_probes: Vec<String>,
     state: Mutex<StateInner>,
 }
 
@@ -38,6 +41,8 @@ struct StateInner {
     /// Take-turn attempts, including a request that finds both queues empty.
     requests: usize,
     served: Vec<Served>,
+    /// Tolerated probes that were answered, as `"<METHOD> <path>"`, in arrival order.
+    probes: Vec<String>,
     errors: Vec<String>,
 }
 
@@ -46,6 +51,8 @@ struct StateInner {
 pub struct MockLog {
     /// Turns that were rendered, in serve order.
     pub served: Vec<Served>,
+    /// Tolerated probes that were answered, as `"<METHOD> <path>"`, in arrival order.
+    pub probes: Vec<String>,
     /// Mismatches, exhausted requests, bad bodies, and turns left unserved.
     pub errors: Vec<String>,
 }
@@ -62,15 +69,18 @@ pub struct Served {
 }
 
 impl Mock {
-    /// Queues `turns` and starts at the first one of each queue.
-    pub fn new(turns: Vec<Turn>) -> std::sync::Arc<Self> {
+    /// Queues `turns` with the scenario's `tolerated_probes`, and starts at the first
+    /// turn of each queue.
+    pub fn new(turns: Vec<Turn>, tolerated_probes: Vec<String>) -> std::sync::Arc<Self> {
         std::sync::Arc::new(Self {
             turns,
+            tolerated_probes,
             state: Mutex::new(StateInner {
                 auxiliary_next: 0,
                 main_next: 0,
                 requests: 0,
                 served: Vec::new(),
+                probes: Vec::new(),
                 errors: Vec::new(),
             }),
         })
@@ -101,6 +111,7 @@ impl Mock {
         }
         MockLog {
             served: state.served.clone(),
+            probes: state.probes.clone(),
             errors: state.errors.clone(),
         }
     }
@@ -141,7 +152,8 @@ fn models_list() -> Response {
         .unwrap_or_else(|_| Response::new(Body::empty()))
 }
 
-/// Hermes's model probe (`GET …/models/<id>`). Not a turn and not an error.
+/// Hermes's model probe (`GET …/models/<id>`), answered only when the scenario
+/// tolerates it. Not a turn and not an error.
 fn model_get(id: &str) -> Response {
     let body =
         serde_json::json!({"id": id, "object": "model", "created": 0, "owned_by": "cetra-capture"});
@@ -160,6 +172,20 @@ fn model_id(path: &str) -> Option<&str> {
     (!id.is_empty() && !id.contains('/')).then_some(id)
 }
 
+/// Whether `probe`, one of [`crate::scenario::TOLERATED_PROBES`], matches this
+/// request's method and path suffix.
+fn probe_matches(probe: &str, method: &Method, path: &str) -> bool {
+    match probe {
+        // OpenCode v2 checks for the Responses API before its first turn.
+        "GET /responses" => *method == Method::GET && path.ends_with("/responses"),
+        // Hermes's custom provider asks the endpoint what it serves.
+        "POST /api/show" => *method == Method::POST && path.ends_with("/api/show"),
+        // Hermes reads the model it was told to use.
+        "GET /models/<id>" => *method == Method::GET && model_id(path).is_some(),
+        _ => false,
+    }
+}
+
 impl Mock {
     async fn respond(&self, request: axum::extract::Request) -> Response {
         let label = format!("{} {}", request.method(), request.uri().path());
@@ -170,20 +196,18 @@ impl Mock {
         if *request.method() == Method::GET && path.ends_with("/models") {
             return models_list();
         }
-        // Probes an agent makes beside its turns. They are answered, never logged.
-        if *request.method() == Method::GET
-            && let Some(id) = model_id(&path)
+        // A probe the scenario tolerates (scenario.rs `TOLERATED_PROBES`): answered
+        // without a turn, recorded in the log's `probes`, never an error. A probe the
+        // scenario does not list falls through to the unknown-route error below.
+        if self
+            .tolerated_probes
+            .iter()
+            .any(|probe| probe_matches(probe, request.method(), &path))
         {
-            return model_get(id);
-        }
-        let tolerated_probe = match *request.method() {
-            // OpenCode v2 checks for the Responses API before its first turn.
-            Method::GET if path.ends_with("/responses") => true,
-            // Hermes's custom provider asks the endpoint what it serves.
-            Method::POST if path.ends_with("/api/show") => true,
-            _ => false,
-        };
-        if tolerated_probe {
+            self.lock().probes.push(label.clone());
+            if let Some(id) = model_id(&path) {
+                return model_get(id);
+            }
             return error_response(
                 StatusCode::NOT_FOUND,
                 &format!("cetra-capture mock: no route {label}"),
@@ -851,7 +875,7 @@ mod tests {
             ),
         ];
         for (uri, body, turn, stream) in cases {
-            let mock = Mock::new(vec![turn.clone()]);
+            let mock = Mock::new(vec![turn.clone()], Vec::new());
             let response = send(&mock, "POST", uri, body).await;
             assert_eq!(response.status(), 200, "{uri}");
             let headers = response.headers().clone();
@@ -937,7 +961,7 @@ mod tests {
             ("/v2/chat", Api::CohereChat),
             ("/api/chat", Api::OllamaChat),
         ] {
-            let mock = Mock::new(vec![chat_turn(api, 0, 0), chat_turn(api, 0, 0)]);
+            let mock = Mock::new(vec![chat_turn(api, 0, 0), chat_turn(api, 0, 0)], Vec::new());
             let refused = send(&mock, "POST", uri, r#"{"stream":true}"#).await;
             assert_eq!(refused.status(), 500, "{uri}");
             let refused_body: Value = serde_json::from_slice(&bytes(refused).await).unwrap();
@@ -958,10 +982,13 @@ mod tests {
 
     #[tokio::test]
     async fn mismatch_consumes_the_turn_and_the_next_request_continues() {
-        let mock = Mock::new(vec![
-            chat_turn(Api::OpenaiChat, 0, 0),
-            chat_turn(Api::OpenaiChat, 0, 0),
-        ]);
+        let mock = Mock::new(
+            vec![
+                chat_turn(Api::OpenaiChat, 0, 0),
+                chat_turn(Api::OpenaiChat, 0, 0),
+            ],
+            Vec::new(),
+        );
         let wrong = send(&mock, "POST", "/v1/messages", "{}").await;
         assert_eq!(wrong.status(), 500);
         let wrong_body: Value = serde_json::from_slice(&bytes(wrong).await).unwrap();
@@ -989,10 +1016,13 @@ mod tests {
 
     #[tokio::test]
     async fn exhausted_requests_and_unserved_turns_are_logged() {
-        let mock = Mock::new(vec![
-            chat_turn(Api::OpenaiChat, 0, 0),
-            chat_turn(Api::OpenaiChat, 0, 0),
-        ]);
+        let mock = Mock::new(
+            vec![
+                chat_turn(Api::OpenaiChat, 0, 0),
+                chat_turn(Api::OpenaiChat, 0, 0),
+            ],
+            Vec::new(),
+        );
         let first = send(&mock, "POST", "/v1/chat/completions", "{}").await;
         assert_eq!(first.status(), 200);
         let second = send(&mock, "POST", "/v1/chat/completions", "{}").await;
@@ -1006,10 +1036,13 @@ mod tests {
 
     #[tokio::test]
     async fn finish_reports_turns_left_in_the_queue() {
-        let mock = Mock::new(vec![
-            chat_turn(Api::OpenaiChat, 0, 0),
-            chat_turn(Api::OpenaiResponses, 0, 0),
-        ]);
+        let mock = Mock::new(
+            vec![
+                chat_turn(Api::OpenaiChat, 0, 0),
+                chat_turn(Api::OpenaiResponses, 0, 0),
+            ],
+            Vec::new(),
+        );
         let response = send(&mock, "POST", "/v1/chat/completions", "{}").await;
         assert_eq!(response.status(), 200);
         let log = mock.finish();
@@ -1018,7 +1051,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_mock_without_turns_fails_any_request() {
-        let mock = Mock::new(Vec::new());
+        let mock = Mock::new(Vec::new(), Vec::new());
         let response = send(&mock, "POST", "/v1/chat/completions", "{}").await;
         assert_eq!(response.status(), 500);
         let log = mock.finish();
@@ -1028,7 +1061,7 @@ mod tests {
 
     #[tokio::test]
     async fn head_api_hello_is_ok_and_not_logged() {
-        let mock = Mock::new(Vec::new());
+        let mock = Mock::new(Vec::new(), Vec::new());
         let response = mock
             .router()
             .oneshot(request("HEAD", "/api/hello", ""))
@@ -1043,7 +1076,7 @@ mod tests {
 
     #[tokio::test]
     async fn get_models_is_answered_without_a_turn() {
-        let mock = Mock::new(vec![chat_turn(Api::OpenaiChat, 0, 0)]);
+        let mock = Mock::new(vec![chat_turn(Api::OpenaiChat, 0, 0)], Vec::new());
         let response = send(&mock, "GET", "/v1/models", "").await;
         assert_eq!(response.status(), 200);
         assert_eq!(response.headers()[header::CONTENT_TYPE], "application/json");
@@ -1053,6 +1086,7 @@ mod tests {
         assert_eq!(ok.status(), 200);
         let log = mock.finish();
         assert_eq!(log.served.len(), 1, "{:?}", log.served);
+        assert!(log.probes.is_empty(), "{:?}", log.probes);
         assert!(log.errors.is_empty(), "{:?}", log.errors);
     }
 
@@ -1066,7 +1100,10 @@ mod tests {
 
     #[tokio::test]
     async fn auxiliary_turns_go_to_requests_without_tools() {
-        let mock = Mock::new(vec![auxiliary_turn(), chat_turn(Api::OpenaiChat, 0, 0)]);
+        let mock = Mock::new(
+            vec![auxiliary_turn(), chat_turn(Api::OpenaiChat, 0, 0)],
+            Vec::new(),
+        );
         let with_tools = send(&mock, "POST", "/v1/chat/completions", TOOLS).await;
         assert_eq!(with_tools.status(), 200);
         assert_eq!(with_tools.headers()["x-request-id"], "req_capture_2");
@@ -1084,10 +1121,13 @@ mod tests {
 
     #[tokio::test]
     async fn without_auxiliary_turns_order_is_unchanged() {
-        let mock = Mock::new(vec![
-            chat_turn(Api::OpenaiChat, 0, 0),
-            chat_turn(Api::OpenaiChat, 0, 0),
-        ]);
+        let mock = Mock::new(
+            vec![
+                chat_turn(Api::OpenaiChat, 0, 0),
+                chat_turn(Api::OpenaiChat, 0, 0),
+            ],
+            Vec::new(),
+        );
         let with_tools = send(&mock, "POST", "/v1/chat/completions", TOOLS).await;
         assert_eq!(with_tools.status(), 200);
         let without_tools = send(&mock, "POST", "/v1/chat/completions", "{}").await;
@@ -1102,7 +1142,10 @@ mod tests {
 
     #[tokio::test]
     async fn unused_auxiliary_turn_follows_the_unused_turn_rule() {
-        let mock = Mock::new(vec![auxiliary_turn(), chat_turn(Api::OpenaiChat, 0, 0)]);
+        let mock = Mock::new(
+            vec![auxiliary_turn(), chat_turn(Api::OpenaiChat, 0, 0)],
+            Vec::new(),
+        );
         let with_tools = send(&mock, "POST", "/v1/chat/completions", TOOLS).await;
         assert_eq!(with_tools.status(), 200);
         let log = mock.finish();
@@ -1110,9 +1153,29 @@ mod tests {
         assert_eq!(log.errors, vec!["1 turns not served"]);
     }
 
+    /// One section per probe kind: without the scenario's tolerance the request is the
+    /// usual unknown-route error; with it, the request is answered and recorded in
+    /// the log's `probes`, never in `errors`.
     #[tokio::test]
-    async fn responses_get_probe_is_not_an_error() {
-        let mock = Mock::new(vec![chat_turn(Api::OpenaiChat, 0, 0)]);
+    async fn a_probe_is_an_error_unless_the_scenario_tolerates_it() {
+        // OpenCode v2's Responses API check: a 404 either way, but an error only
+        // when the scenario does not tolerate it.
+        let mock = Mock::new(vec![chat_turn(Api::OpenaiChat, 0, 0)], Vec::new());
+        let probe = send(&mock, "GET", "/v1/responses", "").await;
+        assert_eq!(probe.status(), 404);
+        let log = mock.finish();
+        assert!(log.served.is_empty());
+        assert_eq!(
+            log.errors,
+            vec![
+                "cetra-capture mock: no route GET /v1/responses",
+                "1 turns not served",
+            ]
+        );
+        let mock = Mock::new(
+            vec![chat_turn(Api::OpenaiChat, 0, 0)],
+            vec!["GET /responses".into()],
+        );
         let probe = send(&mock, "GET", "/v1/responses", "").await;
         assert_eq!(probe.status(), 404);
         let body: Value = serde_json::from_slice(&bytes(probe).await).unwrap();
@@ -1124,12 +1187,20 @@ mod tests {
         assert_eq!(ok.status(), 200);
         let log = mock.finish();
         assert_eq!(log.served.len(), 1);
+        assert_eq!(log.probes, vec!["GET /v1/responses"]);
         assert!(log.errors.is_empty(), "{:?}", log.errors);
-    }
 
-    #[tokio::test]
-    async fn api_show_probe_is_not_an_error() {
-        let mock = Mock::new(Vec::new());
+        // Hermes's custom-provider probe.
+        let mock = Mock::new(Vec::new(), Vec::new());
+        let probe = send(&mock, "POST", "/api/show", r#"{"model":"gpt-4o-mini"}"#).await;
+        assert_eq!(probe.status(), 404);
+        let log = mock.finish();
+        assert!(log.served.is_empty());
+        assert_eq!(
+            log.errors,
+            vec!["cetra-capture mock: no route POST /api/show"]
+        );
+        let mock = Mock::new(Vec::new(), vec!["POST /api/show".into()]);
         let probe = send(&mock, "POST", "/api/show", r#"{"model":"gpt-4o-mini"}"#).await;
         assert_eq!(probe.status(), 404);
         let body: Value = serde_json::from_slice(&bytes(probe).await).unwrap();
@@ -1139,12 +1210,20 @@ mod tests {
         );
         let log = mock.finish();
         assert!(log.served.is_empty());
+        assert_eq!(log.probes, vec!["POST /api/show"]);
         assert!(log.errors.is_empty(), "{:?}", log.errors);
-    }
 
-    #[tokio::test]
-    async fn model_get_returns_the_model() {
-        let mock = Mock::new(Vec::new());
+        // Hermes's model read: the model itself when tolerated, an error otherwise.
+        let mock = Mock::new(Vec::new(), Vec::new());
+        let refused = send(&mock, "GET", "/v1/models/gpt-4o-mini", "").await;
+        assert_eq!(refused.status(), 404);
+        let log = mock.finish();
+        assert!(log.served.is_empty());
+        assert_eq!(
+            log.errors,
+            vec!["cetra-capture mock: no route GET /v1/models/gpt-4o-mini"]
+        );
+        let mock = Mock::new(Vec::new(), vec!["GET /models/<id>".into()]);
         let response = send(&mock, "GET", "/v1/models/gpt-4o-mini", "").await;
         assert_eq!(response.status(), 200);
         assert_eq!(response.headers()[header::CONTENT_TYPE], "application/json");
@@ -1153,10 +1232,12 @@ mod tests {
             body,
             json!({"id": "gpt-4o-mini", "object": "model", "created": 0, "owned_by": "cetra-capture"})
         );
+        // A deeper path is not a model read, tolerated or not.
         let deeper = send(&mock, "GET", "/v1/models/a/b", "").await;
         assert_eq!(deeper.status(), 404);
         let log = mock.finish();
         assert!(log.served.is_empty());
+        assert_eq!(log.probes, vec!["GET /v1/models/gpt-4o-mini"]);
         assert_eq!(
             log.errors,
             vec!["cetra-capture mock: no route GET /v1/models/a/b"]
@@ -1165,7 +1246,7 @@ mod tests {
 
     #[tokio::test]
     async fn post_models_is_still_an_unknown_route() {
-        let mock = Mock::new(Vec::new());
+        let mock = Mock::new(Vec::new(), Vec::new());
         let response = send(&mock, "POST", "/v1/models", "{}").await;
         assert_eq!(response.status(), 404);
         let log = mock.finish();
@@ -1181,7 +1262,7 @@ mod tests {
         let mut turn = chat_turn(Api::OpenaiChat, 0, 0);
         turn.host = Some("openrouter.ai".to_owned());
         for host in ["openrouter.ai", "openrouter.ai:443"] {
-            let mock = Mock::new(vec![turn.clone()]);
+            let mock = Mock::new(vec![turn.clone()], Vec::new());
             let response = send_with_host(&mock, Some(host), "/v1/chat/completions", "{}").await;
             assert_eq!(response.status(), 200, "{host}");
             let log = mock.finish();
@@ -1189,7 +1270,7 @@ mod tests {
             assert!(log.errors.is_empty(), "{host}: {:?}", log.errors);
         }
 
-        let mock = Mock::new(vec![turn.clone(), turn.clone(), turn.clone()]);
+        let mock = Mock::new(vec![turn.clone(), turn.clone(), turn.clone()], Vec::new());
         let wrong =
             send_with_host(&mock, Some("127.0.0.1:1234"), "/v1/chat/completions", "{}").await;
         assert_eq!(wrong.status(), 500);
@@ -1224,7 +1305,7 @@ mod tests {
             ]
         );
 
-        let mock = Mock::new(vec![turn]);
+        let mock = Mock::new(vec![turn], Vec::new());
         let missing_header = send_with_host(&mock, None, "/v1/chat/completions", "{}").await;
         assert_eq!(missing_header.status(), 500);
         let log = mock.finish();
@@ -1236,7 +1317,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_get_to_a_chat_path_is_404() {
-        let mock = Mock::new(vec![chat_turn(Api::OpenaiChat, 0, 0)]);
+        let mock = Mock::new(vec![chat_turn(Api::OpenaiChat, 0, 0)], Vec::new());
         let get = send(&mock, "GET", "/v1/chat/completions", "").await;
         assert_eq!(get.status(), 404);
         let get_body: Value = serde_json::from_slice(&bytes(get).await).unwrap();
@@ -1257,7 +1338,7 @@ mod tests {
 
     #[tokio::test]
     async fn unknown_routes_are_404_and_logged() {
-        let mock = Mock::new(vec![chat_turn(Api::OpenaiChat, 0, 0)]);
+        let mock = Mock::new(vec![chat_turn(Api::OpenaiChat, 0, 0)], Vec::new());
         let get = send(&mock, "GET", "/v1/chat/completions", "").await;
         assert_eq!(get.status(), 404);
         let get_body: Value = serde_json::from_slice(&bytes(get).await).unwrap();
@@ -1296,7 +1377,10 @@ mod tests {
 
     #[tokio::test]
     async fn bad_json_and_gemini_stream_without_sse_do_not_consume_a_turn() {
-        let mock = Mock::new(vec![chat_turn(Api::GeminiGenerateContent, 0, 0)]);
+        let mock = Mock::new(
+            vec![chat_turn(Api::GeminiGenerateContent, 0, 0)],
+            Vec::new(),
+        );
         let bad = send(&mock, "POST", "/v1/chat/completions", "not-json").await;
         assert_eq!(bad.status(), 400);
         let bad_body: Value = serde_json::from_slice(&bytes(bad).await).unwrap();
@@ -1335,7 +1419,7 @@ mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn delays_sit_before_the_json_body_and_between_frames() {
-        let mock = Mock::new(vec![chat_turn(Api::OpenaiChat, 40, 15)]);
+        let mock = Mock::new(vec![chat_turn(Api::OpenaiChat, 40, 15)], Vec::new());
         let router = mock.router();
         let pending = tokio::spawn(async move {
             router
@@ -1350,7 +1434,7 @@ mod tests {
         assert_eq!(response.status(), 200);
         assert_eq!(response.headers()[header::CONTENT_TYPE], "application/json");
 
-        let mock = Mock::new(vec![chat_turn(Api::OpenaiChat, 40, 15)]);
+        let mock = Mock::new(vec![chat_turn(Api::OpenaiChat, 40, 15)], Vec::new());
         let response = send(&mock, "POST", "/v1/chat/completions", r#"{"stream":true}"#).await;
         assert_eq!(response.status(), 200);
         let expected = match openai::chat(

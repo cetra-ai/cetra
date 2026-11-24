@@ -16,6 +16,15 @@
 set -euo pipefail
 
 repo_root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd)"
+# The Java argument file (target/capture.args) is whitespace-split by the JVM, so a
+# classpath entry with a space in it cannot be carried: refuse such a checkout rather
+# than build output the runner cannot run.
+case "$repo_root" in
+    *[[:space:]]*)
+        echo "capture-tools: the repo path contains whitespace, which the Java argument file cannot carry: $repo_root" >&2
+        exit 1
+        ;;
+esac
 tools_dir="$repo_root/target/capture-tools"
 jdk="$tools_dir/jdk/21.0.13+9"
 maven="$tools_dir/maven/3.9.16"
@@ -35,16 +44,18 @@ trap cleanup EXIT
 
 java_modules=()
 if [ -f "$java_root/pom.xml" ]; then
-    # Every pom, source and properties file under tools/capture/java, never
-    # anything under target/, as one comparable hash list (paths relative to
-    # the repo root). The Maven repository's absolute path is part of the
-    # inputs: capture.args embeds it, so a moved checkout must rebuild.
+    # Every file under tools/capture/java, never anything under target/, as one
+    # comparable hash list (paths relative to the repo root). The JDK and Maven
+    # versions and the Maven repository's absolute path are part of the inputs:
+    # capture.args embeds the classpath from that repository, so a moved checkout
+    # or a toolchain bump must rebuild.
     java_inputs="$(
         cd -- "$repo_root"
         printf 'm2 %s\n' "$tools_dir/m2"
+        printf 'jdk %s\n' "$(basename -- "$jdk")"
+        printf 'maven %s\n' "$(basename -- "$maven")"
         find tools/capture/java -type d -name target -prune -o \
-            -type f \( -name pom.xml -o -name '*.java' -o -name '*.kt' -o -name '*.properties' \) \
-            -print0 | LC_ALL=C sort -z | xargs -0 -r sha256sum
+            -type f -print0 | LC_ALL=C sort -z | xargs -0 -r sha256sum
     )"
     for pom in "$java_root"/scenarios/*/*/pom.xml; do
         [ -f "$pom" ] || continue
@@ -56,7 +67,12 @@ if [ -f "$java_root/pom.xml" ]; then
     if [ -f "$java_hash" ] && [ "$java_inputs" = "$(cat -- "$java_hash")" ]; then
         java_up_to_date=true
         for module in "${java_modules[@]}"; do
-            if [ ! -f "$module/target/capture.args" ]; then
+            # A stale build can leave capture.args behind without the file it is
+            # written from (or the Quarkus jar it runs), so both are required.
+            if [ ! -f "$module/target/capture.args" ] || {
+                [ ! -f "$module/target/quarkus-app/quarkus-run.jar" ] &&
+                    [ ! -f "$module/target/classpath.txt" ]
+            }; then
                 java_up_to_date=false
                 break
             fi
@@ -93,13 +109,17 @@ for csproj in "$dotnet_root"/scenarios/*/*/Capture.csproj; do
     dotnet_total=$((dotnet_total + 1))
     project="$(dirname -- "$csproj")"
     marker="$project/bin/capture/.inputs.sha256"
+    # Every file of the project and of the Harness, never anything under bin/ or
+    # obj/ (so scenario.json counts too), plus the SDK version: a toolchain bump
+    # must rebuild.
     inputs="$(
         cd -- "$repo_root"
+        printf 'dotnet %s\n' "$(basename -- "$dotnet_sdk")"
         {
             find "${project#"$repo_root"/}" -type d \( -name bin -o -name obj \) -prune -o \
-                -type f \( -name '*.cs' -o -name '*.csproj' -o -name packages.lock.json \) -print0
+                -type f -print0
             find tools/capture/dotnet/Harness -type d \( -name bin -o -name obj \) -prune -o \
-                -type f \( -name '*.cs' -o -name '*.csproj' \) -print0
+                -type f -print0
         } | LC_ALL=C sort -z | xargs -0 -r sha256sum
     )"
     if [ -f "$marker" ] && [ "$inputs" = "$(cat -- "$marker")" ]; then

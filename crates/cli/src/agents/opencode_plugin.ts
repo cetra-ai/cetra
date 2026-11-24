@@ -150,7 +150,11 @@ type Span = {
   attrs: Attr[];
   error?: string;
 };
+// Spans that ended and wait for the next flush. A session that never ends a turn (a
+// long-running TUI) would grow it without bound, so it is capped: when it already
+// holds ENDED_CAP spans, the next ended span flushes it first, unawaited.
 const ended: Span[] = [];
+const ENDED_CAP = 2000;
 const newSpan = (name: string, parent: Span | undefined, start: number, attrs: Attr[]): Span => ({
   traceId: parent?.traceId ?? hex(16),
   spanId: hex(8),
@@ -160,6 +164,7 @@ const newSpan = (name: string, parent: Span | undefined, start: number, attrs: A
   attrs,
 });
 const end = (span: Span, at: number, error?: string): void => {
+  if (ended.length >= ENDED_CAP) void flush();
   span.end = at;
   span.error = error;
   ended.push(span);
@@ -205,11 +210,15 @@ const flush = async (): Promise<void> => {
 
 // Shared state, keyed by OpenCode ids. Both builds drive the same functions. A span that
 // started and never ended is closed with its turn and taken out of the maps, so unfinished
-// work never piles up across turns.
+// work never piles up across turns. `names` (v2's tool-input names, kept for a tool call
+// that may never come) and `textParts` (v1's streamed text, kept for a message that may
+// never complete) carry their session so a turn's end clears their entries too.
 const turns = new Map<string, Span>();
 const steps = new Map<string, { span: Span; text: string[]; calls: unknown[] }>();
 const tools = new Map<string, Span>();
 const requests = new Map<string, string>();
+const names = new Map<string, { session: unknown; name: string }>();
+const textParts = new Map<string, { messageID: unknown; session: unknown; text: string }>();
 
 // The text parts of a tool result content (or the string itself), joined by newlines.
 const textOf = (content: any): string =>
@@ -217,7 +226,10 @@ const textOf = (content: any): string =>
     .map((p: any) => (typeof p?.text === "string" ? p.text : JSON.stringify(p)))
     .join("\n");
 
-const turnStart = (sessionID: string, at: number): void => {
+// Starts a turn only for a non-empty string session id: an event or hook input without
+// one is not a turn, and keying a span by anything else would only leak state.
+const turnStart = (sessionID: unknown, at: number): void => {
+  if (typeof sessionID !== "string" || sessionID === "") return;
   if (turns.has(sessionID)) return;
   turns.set(
     sessionID,
@@ -227,8 +239,9 @@ const turnStart = (sessionID: string, at: number): void => {
     ]),
   );
 };
-// Ends a turn and flushes it. The flush is awaited only by v1's `session.idle`, which has no
-// disposer OpenCode would wait for; everywhere else the POST finishes in the background.
+// Ends a turn and flushes it. The flush is awaited only by v1's `session.idle` and
+// `session.deleted`, which have no disposer OpenCode would wait for; everywhere else
+// the POST finishes in the background.
 const turnEnd = async (sessionID: string, at: number, error?: string): Promise<void> => {
   const span = turns.get(sessionID);
   if (!span) return;
@@ -243,6 +256,12 @@ const turnEnd = async (sessionID: string, at: number, error?: string): Promise<v
       end(tool, at, error);
       tools.delete(id);
     }
+  }
+  for (const [id, name] of names) {
+    if (name.session === sessionID) names.delete(id);
+  }
+  for (const [id, part] of textParts) {
+    if (part.session === sessionID) textParts.delete(id);
   }
   turns.delete(sessionID);
   requests.delete(sessionID);
@@ -304,7 +323,6 @@ async function setup(ctx: any): Promise<() => Promise<void>> {
   try {
     config = loadConfig();
     if (config === null) return async () => {};
-    const names = new Map<string, string>();
     await ctx.session.hook("context", (event: any) => {
       try {
         const system = (Array.isArray(event?.system) ? event.system : []).map((part: any) => ({
@@ -380,10 +398,10 @@ async function setup(ctx: any): Promise<() => Promise<void>> {
               chatEnd(d.assistantMessageID, at, d.tokens, undefined, safeError(d.error, "model call failed"));
               break;
             case "session.tool.input.started":
-              names.set(d.id, d.name);
+              names.set(d.id, { session: d.sessionID, name: d.name });
               break;
             case "session.tool.called": {
-              const name = names.get(d.id) ?? "tool";
+              const name = names.get(d.id)?.name ?? "tool";
               steps.get(d.assistantMessageID)?.calls.push({
                 id: d.id,
                 type: "function",
@@ -421,7 +439,6 @@ async function server(_input: any): Promise<Record<string, unknown>> {
   try {
     config = loadConfig();
     if (config === null) return {};
-    const textParts = new Map<string, { messageID: string; text: string }>();
     // The message ids already recorded, with the session each belongs to so a turn's end can
     // clear its own entries.
     const done = new Map<string, string>();
@@ -473,7 +490,8 @@ async function server(_input: any): Promise<Record<string, unknown>> {
             }
             case "message.part.updated": {
               const part = p?.part;
-              if (part?.type === "text") textParts.set(part.id, { messageID: part.messageID, text: part.text });
+              if (part?.type === "text")
+                textParts.set(part.id, { messageID: part.messageID, session: part.sessionID, text: part.text });
               if (part?.type === "tool" && part.state?.status === "error") {
                 toolEnd(part.callID, Date.now(), undefined, safeError(part.state.error, "tool failed"));
               }
@@ -487,8 +505,10 @@ async function server(_input: any): Promise<Record<string, unknown>> {
               await turnEnd(p?.sessionID, Date.now());
               break;
             case "session.deleted":
+              // Awaited as `session.idle` above, for the same reason: the process may
+              // be on its way out.
               forget(p?.info?.id);
-              void turnEnd(p?.info?.id, Date.now(), "session deleted");
+              await turnEnd(p?.info?.id, Date.now(), "session deleted");
               break;
           }
         } catch {
