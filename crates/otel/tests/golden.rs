@@ -307,17 +307,21 @@ fn costs_match(path: &str, actual: &Value, expected: &Value) -> bool {
     }
 }
 
-/// Captured cases whose `llm` and `embedding` spans are expected to carry cost source
-/// `none`: their provider names the endpoint, not a vendor (Hermes's `custom`), so no
-/// snapshot row can match and the spans are unpriced on purpose (IN7.13, D-IN-29).
-const COST_NONE_CASES: &[(&str, &str)] = &[("hermes_agent", "read-file")];
+/// Captured cases whose `llm` and `embedding` spans may carry cost source `none`: their
+/// provider names the endpoint, not a vendor (Hermes's `custom`), or their model name
+/// carries a prefix no snapshot row has (EverOS's LiteLLM-style `openai/`), so no
+/// snapshot row can match and those spans are unpriced on purpose (IN7.13, D-IN-29;
+/// IN9.6, D-IN-31). A span of theirs the table does price must still be priced.
+const COST_NONE_CASES: &[(&str, &str)] =
+    &[("hermes_agent", "read-file"), ("genai", "everos-memory")];
 
 /// Every captured `llm` or `embedding` span with a model and token counts is priced by
 /// the embedded snapshot, the table the server uses. The golden suite prices with
 /// `prices.json`, which has one row per test model, so it cannot see a provider that
 /// no snapshot row carries (D-B1-11). Hand-written cases use invented models and are
-/// not checked here. The cases in [`COST_NONE_CASES`] are checked the other way: each
-/// of their `llm` spans must carry cost source `none`.
+/// not checked here. The cases in [`COST_NONE_CASES`] are checked the other way: a span
+/// the snapshot has no row for must carry cost source `none`, and one it prices must
+/// still carry a computed cost.
 #[test]
 fn captured_llm_spans_are_priced_by_the_builtin_snapshot() {
     let loaded = load_all_cases();
@@ -369,35 +373,49 @@ fn captured_llm_spans_are_priced_by_the_builtin_snapshot() {
             if !llm {
                 continue;
             }
-            if expects_none {
-                // Hermes's `custom` provider names the endpoint, not a vendor, so no
-                // snapshot row can match and its spans carry cost source `none` on
-                // purpose (IN7.13, D-IN-29).
-                checked += 1;
-                if span.cost_source != Some(CostSource::None) {
-                    failures.push(format!(
-                        "{label}: model {:?} provider {:?} should carry no cost",
-                        span.response_model.as_ref().or(span.request_model.as_ref()),
-                        span.provider
-                    ));
-                }
-                continue;
-            }
             let modelled = span.request_model.is_some() || span.response_model.is_some();
             let counted = span.input_tokens.is_some() || span.output_tokens.is_some();
             if !(modelled && counted) {
                 continue;
             }
-            checked += 1;
+            let model = span
+                .response_model
+                .as_deref()
+                .or(span.request_model.as_deref());
             let priced = span.cost_total.is_some()
                 && matches!(
                     span.cost_source,
                     Some(CostSource::Computed | CostSource::Reported)
                 );
+            if expects_none {
+                // Hermes's `custom` provider names the endpoint, not a vendor, and
+                // EverOS's model name carries a LiteLLM-style `openai/` prefix no row
+                // has, so the spans those describe carry cost source `none` on purpose
+                // (IN7.13, D-IN-29; IN9.6, D-IN-31); a span a row does price (EverOS's
+                // embedding model) must still be priced.
+                checked += 1;
+                let row = model.and_then(|model| {
+                    prices.price_for(model, span.provider.as_deref(), span.start_time)
+                });
+                if row.is_some() {
+                    if !priced {
+                        failures.push(format!(
+                            "{label}: model {model:?} provider {:?} has no price",
+                            span.provider
+                        ));
+                    }
+                } else if span.cost_source != Some(CostSource::None) {
+                    failures.push(format!(
+                        "{label}: model {model:?} provider {:?} should carry no cost",
+                        span.provider
+                    ));
+                }
+                continue;
+            }
+            checked += 1;
             if !priced {
                 failures.push(format!(
-                    "{label}: model {:?} provider {:?} has no price",
-                    span.response_model.as_ref().or(span.request_model.as_ref()),
+                    "{label}: model {model:?} provider {:?} has no price",
                     span.provider
                 ));
             }

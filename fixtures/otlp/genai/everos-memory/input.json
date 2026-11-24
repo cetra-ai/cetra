@@ -1,0 +1,848 @@
+{
+  "resourceSpans": [
+    {
+      "resource": {
+        "attributes": [
+          {
+            "key": "telemetry.sdk.language",
+            "value": {
+              "stringValue": "python"
+            }
+          },
+          {
+            "key": "telemetry.sdk.name",
+            "value": {
+              "stringValue": "opentelemetry"
+            }
+          },
+          {
+            "key": "telemetry.sdk.version",
+            "value": {
+              "stringValue": "1.45.2"
+            }
+          },
+          {
+            "key": "service.name",
+            "value": {
+              "stringValue": "everos"
+            }
+          },
+          {
+            "key": "service.version",
+            "value": {
+              "stringValue": "1.7.0"
+            }
+          }
+        ],
+        "droppedAttributesCount": 0,
+        "entityRefs": []
+      },
+      "scopeSpans": [
+        {
+          "scope": {
+            "name": "everos",
+            "version": "",
+            "attributes": [],
+            "droppedAttributesCount": 0
+          },
+          "spans": [
+            {
+              "traceId": "8a87136b4950709d45ebf817aab8db93",
+              "spanId": "875be8fecf47c887",
+              "traceState": "",
+              "parentSpanId": "",
+              "flags": 256,
+              "name": "everos.memory.add",
+              "kind": 1,
+              "startTimeUnixNano": "1767225590000000000",
+              "endTimeUnixNano": "1767225590048000000",
+              "attributes": [
+                {
+                  "key": "langfuse.observation.type",
+                  "value": {
+                    "stringValue": "span"
+                  }
+                },
+                {
+                  "key": "langfuse.session.id",
+                  "value": {
+                    "stringValue": "capture-s1"
+                  }
+                },
+                {
+                  "key": "langfuse.trace.tags",
+                  "value": {
+                    "arrayValue": {
+                      "values": [
+                        {
+                          "stringValue": "everos"
+                        },
+                        {
+                          "stringValue": "memory"
+                        }
+                      ]
+                    }
+                  }
+                },
+                {
+                  "key": "langfuse.trace.metadata.mode",
+                  "value": {
+                    "stringValue": "agent"
+                  }
+                },
+                {
+                  "key": "langfuse.trace.metadata.is_final",
+                  "value": {
+                    "boolValue": false
+                  }
+                },
+                {
+                  "key": "langfuse.trace.metadata.defer_extraction",
+                  "value": {
+                    "boolValue": false
+                  }
+                },
+                {
+                  "key": "langfuse.trace.metadata.request_id",
+                  "value": {
+                    "stringValue": "capture-volatile-1"
+                  }
+                }
+              ],
+              "droppedAttributesCount": 0,
+              "events": [],
+              "droppedEventsCount": 0,
+              "links": [],
+              "droppedLinksCount": 0,
+              "status": null
+            },
+            {
+              "traceId": "8a87136b4950709d45ebf817aab8db93",
+              "spanId": "6fc7ef32580aedc5",
+              "traceState": "",
+              "parentSpanId": "875be8fecf47c887",
+              "flags": 256,
+              "name": "everos.memcell.boundary",
+              "kind": 1,
+              "startTimeUnixNano": "1767225590004000000",
+              "endTimeUnixNano": "1767225590043000000",
+              "attributes": [
+                {
+                  "key": "langfuse.observation.type",
+                  "value": {
+                    "stringValue": "generation"
+                  }
+                },
+                {
+                  "key": "langfuse.trace.tags",
+                  "value": {
+                    "arrayValue": {
+                      "values": [
+                        {
+                          "stringValue": "everos"
+                        },
+                        {
+                          "stringValue": "memory"
+                        }
+                      ]
+                    }
+                  }
+                },
+                {
+                  "key": "gen_ai.request.model",
+                  "value": {
+                    "stringValue": "openai/gpt-4o-mini"
+                  }
+                },
+                {
+                  "key": "gen_ai.usage.input_tokens",
+                  "value": {
+                    "intValue": "262"
+                  }
+                },
+                {
+                  "key": "gen_ai.usage.output_tokens",
+                  "value": {
+                    "intValue": "24"
+                  }
+                }
+              ],
+              "droppedAttributesCount": 0,
+              "events": [],
+              "droppedEventsCount": 0,
+              "links": [],
+              "droppedLinksCount": 0,
+              "status": null
+            },
+            {
+              "traceId": "3be604552f48a0ef53c479fbee88f8b3",
+              "spanId": "0a2cec57b1880a57",
+              "traceState": "",
+              "parentSpanId": "",
+              "flags": 256,
+              "name": "everos.memory.flush",
+              "kind": 1,
+              "startTimeUnixNano": "1767225590052000000",
+              "endTimeUnixNano": "1767225590196000000",
+              "attributes": [
+                {
+                  "key": "langfuse.observation.type",
+                  "value": {
+                    "stringValue": "span"
+                  }
+                },
+                {
+                  "key": "langfuse.session.id",
+                  "value": {
+                    "stringValue": "capture-s1"
+                  }
+                },
+                {
+                  "key": "langfuse.trace.tags",
+                  "value": {
+                    "arrayValue": {
+                      "values": [
+                        {
+                          "stringValue": "everos"
+                        },
+                        {
+                          "stringValue": "memory"
+                        }
+                      ]
+                    }
+                  }
+                },
+                {
+                  "key": "langfuse.trace.metadata.mode",
+                  "value": {
+                    "stringValue": "agent"
+                  }
+                },
+                {
+                  "key": "langfuse.trace.metadata.is_final",
+                  "value": {
+                    "boolValue": true
+                  }
+                },
+                {
+                  "key": "langfuse.trace.metadata.defer_extraction",
+                  "value": {
+                    "boolValue": false
+                  }
+                },
+                {
+                  "key": "langfuse.trace.metadata.request_id",
+                  "value": {
+                    "stringValue": "capture-volatile-2"
+                  }
+                }
+              ],
+              "droppedAttributesCount": 0,
+              "events": [
+                {
+                  "timeUnixNano": "1767225590196000000",
+                  "name": "exception",
+                  "attributes": [
+                    {
+                      "key": "exception.type",
+                      "value": {
+                        "stringValue": "everos.component.llm.errors.LLMCallError"
+                      }
+                    },
+                    {
+                      "key": "exception.message",
+                      "value": {
+                        "stringValue": "no usable reply in 2 attempts (model='openai/gpt-4o-mini', response_format_mode='json_schema'): reply failed validation against _EpisodeReply"
+                      }
+                    },
+                    {
+                      "key": "exception.stacktrace",
+                      "value": {
+                        "stringValue": "Traceback (most recent call last):\n  File \"/capture/target/capture-tools/everos/1.7.0/lib/python3.13/site-packages/everos/component/llm/openai_provider.py\", line 338, in _validate\n    response_format.model_validate_json(text)\n    ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^^^^^^\n  File \"/capture/target/capture-tools/everos/1.7.0/lib/python3.13/site-packages/pydantic/main.py\", line 847, in model_validate_json\n    return cls.__pydantic_validator__.validate_json(\n           ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^\n        json_data, strict=strict, extra=extra, context=context, by_alias=by_alias, by_name=by_name\n        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n    )\n    ^\npydantic_core._pydantic_core.ValidationError: 4 validation errors for _EpisodeReply\ntitle\n  Field required [type=missing, input_value={'reasoning': 'one messag...eded', 'boundaries': []}, input_type=dict]\n    For further information visit https://errors.pydantic.dev/2.14/v/missing\ncontent\n  Field required [type=missing, input_value={'reasoning': 'one messag...eded', 'boundaries': []}, input_type=dict]\n    For further information visit https://errors.pydantic.dev/2.14/v/missing\nreasoning\n  Extra inputs are not permitted [type=extra_forbidden, input_value='one message, no cut needed', input_type=str]\n    For further information visit https://errors.pydantic.dev/2.14/v/extra_forbidden\nboundaries\n  Extra inputs are not permitted [type=extra_forbidden, input_value=[], input_type=list]\n    For further information visit https://errors.pydantic.dev/2.14/v/extra_forbidden\n\nThe above exception was the direct cause of the following exception:\n\nTraceback (most recent call last):\n  File \"/capture/target/capture-tools/everos/1.7.0/lib/python3.13/site-packages/opentelemetry/trace/__init__.py\", line 602, in use_span\n    yield span\n  File \"/capture/target/capture-tools/everos/1.7.0/lib/python3.13/site-packages/opentelemetry/sdk/trace/__init__.py\", line 1136, in start_as_current_span\n    yield span\n  File \"/capture/target/capture-tools/everos/1.7.0/lib/python3.13/site-packages/everos/core/observability/tracing/attributes.py\", line 136, in memory_span\n    yield span\n  File \"/capture/target/capture-tools/everos/1.7.0/lib/python3.13/site-packages/everos/service/memory/_memorize.py\", line 204, in run\n    return await asyncio.shield(extraction)\n           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/capture/target/capture-tools/everos/1.7.0/lib/python3.13/site-packages/everos/service/memory/_memorize.py\", line 64, in _tracked\n    return await work\n           ^^^^^^^^^^\n  File \"/capture/target/capture-tools/everos/1.7.0/lib/python3.13/site-packages/everos/service/memory/_memorize.py\", line 287, in _extract\n    raise first_error\n  File \"/capture/target/capture-tools/everos/1.7.0/lib/python3.13/site-packages/everos/memory/extract/pipeline/user_memory.py\", line 99, in run_cell\n    algo_ep = await self._extract(ingested, prepared)\n              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/capture/target/capture-tools/everos/1.7.0/lib/python3.13/site-packages/everos/memory/extract/pipeline/user_memory.py\", line 147, in _extract\n    algo_ep, summary = await asyncio.gather(\n                       ^^^^^^^^^^^^^^^^^^^^^\n    ...<2 lines>...\n    )\n    ^\n  File \"/capture/target/capture-tools/everos/1.7.0/lib/python3.13/site-packages/everos/memory/extract/pipeline/user_memory.py\", line 180, in _extract_episode\n    algo_ep = await retry_llm_output(\n              ^^^^^^^^^^^^^^^^^^^^^^^\n        attempt, operator=\"episode\", memcell_id=prepared.memcell_id\n        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n    )\n    ^\n  File \"/capture/target/capture-tools/everos/1.7.0/lib/python3.13/site-packages/everos/memory/extract/llm_retry.py\", line 49, in retry_llm_output\n    return await call()\n           ^^^^^^^^^^^^\n  File \"/capture/target/capture-tools/everos/1.7.0/lib/python3.13/site-packages/everos/memory/extract/pipeline/user_memory.py\", line 162, in attempt\n    return await extractor.aextract(\n           ^^^^^^^^^^^^^^^^^^^^^^^^^\n    ...<4 lines>...\n    )\n    ^\n  File \"/capture/target/capture-tools/everos/1.7.0/lib/python3.13/site-packages/everalgo/user_memory/episode/_extractor.py\", line 97, in aextract\n    reply = await _call_llm_for_episode(self._llm, messages)\n            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/capture/target/capture-tools/everos/1.7.0/lib/python3.13/site-packages/everalgo/user_memory/episode/_replies.py\", line 40, in _call_llm_for_episode\n    text = await llm.achat(messages=messages, response_format=_EpisodeReply)\n           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/capture/target/capture-tools/everos/1.7.0/lib/python3.13/site-packages/everos/component/llm/openai_provider.py\", line 182, in achat\n    return await self._request_valid_reply(request, response_format)\n           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/capture/target/capture-tools/everos/1.7.0/lib/python3.13/site-packages/everos/component/llm/openai_provider.py\", line 228, in _request_valid_reply\n    raise LLMCallError(\n    ...<3 lines>...\n    ) from (failure.__cause__ if failure else None)\neveros.component.llm.errors.LLMCallError: no usable reply in 2 attempts (model='openai/gpt-4o-mini', response_format_mode='json_schema'): reply failed validation against _EpisodeReply\n"
+                      }
+                    },
+                    {
+                      "key": "exception.escaped",
+                      "value": {
+                        "stringValue": "False"
+                      }
+                    }
+                  ],
+                  "droppedAttributesCount": 0
+                }
+              ],
+              "droppedEventsCount": 0,
+              "links": [],
+              "droppedLinksCount": 0,
+              "status": {
+                "message": "LLMCallError: no usable reply in 2 attempts (model='openai/gpt-4o-mini', response_format_mode='json_schema'): reply failed validation against _EpisodeReply",
+                "code": 2
+              }
+            },
+            {
+              "traceId": "3be604552f48a0ef53c479fbee88f8b3",
+              "spanId": "d1916785213fc097",
+              "traceState": "",
+              "parentSpanId": "0a2cec57b1880a57",
+              "flags": 256,
+              "name": "everos.memcell.boundary",
+              "kind": 1,
+              "startTimeUnixNano": "1767225590054000000",
+              "endTimeUnixNano": "1767225590087000000",
+              "attributes": [
+                {
+                  "key": "langfuse.observation.type",
+                  "value": {
+                    "stringValue": "generation"
+                  }
+                },
+                {
+                  "key": "langfuse.trace.tags",
+                  "value": {
+                    "arrayValue": {
+                      "values": [
+                        {
+                          "stringValue": "everos"
+                        },
+                        {
+                          "stringValue": "memory"
+                        }
+                      ]
+                    }
+                  }
+                },
+                {
+                  "key": "gen_ai.request.model",
+                  "value": {
+                    "stringValue": "openai/gpt-4o-mini"
+                  }
+                },
+                {
+                  "key": "gen_ai.usage.input_tokens",
+                  "value": {
+                    "intValue": "262"
+                  }
+                },
+                {
+                  "key": "gen_ai.usage.output_tokens",
+                  "value": {
+                    "intValue": "24"
+                  }
+                }
+              ],
+              "droppedAttributesCount": 0,
+              "events": [],
+              "droppedEventsCount": 0,
+              "links": [],
+              "droppedLinksCount": 0,
+              "status": null
+            },
+            {
+              "traceId": "3be604552f48a0ef53c479fbee88f8b3",
+              "spanId": "87c96c91119580a0",
+              "traceState": "",
+              "parentSpanId": "0a2cec57b1880a57",
+              "flags": 256,
+              "name": "everos.extract",
+              "kind": 1,
+              "startTimeUnixNano": "1767225590092000000",
+              "endTimeUnixNano": "1767225590162000000",
+              "attributes": [
+                {
+                  "key": "langfuse.observation.type",
+                  "value": {
+                    "stringValue": "generation"
+                  }
+                },
+                {
+                  "key": "langfuse.session.id",
+                  "value": {
+                    "stringValue": "capture-s1"
+                  }
+                },
+                {
+                  "key": "langfuse.trace.tags",
+                  "value": {
+                    "arrayValue": {
+                      "values": [
+                        {
+                          "stringValue": "everos"
+                        },
+                        {
+                          "stringValue": "memory"
+                        }
+                      ]
+                    }
+                  }
+                },
+                {
+                  "key": "langfuse.trace.metadata.app_id",
+                  "value": {
+                    "stringValue": "default"
+                  }
+                },
+                {
+                  "key": "langfuse.trace.metadata.project_id",
+                  "value": {
+                    "stringValue": "default"
+                  }
+                },
+                {
+                  "key": "langfuse.trace.metadata.memcell_id",
+                  "value": {
+                    "stringValue": "capture-volatile-3"
+                  }
+                },
+                {
+                  "key": "gen_ai.request.model",
+                  "value": {
+                    "stringValue": "openai/gpt-4o-mini"
+                  }
+                },
+                {
+                  "key": "gen_ai.usage.input_tokens",
+                  "value": {
+                    "intValue": "524"
+                  }
+                },
+                {
+                  "key": "gen_ai.usage.output_tokens",
+                  "value": {
+                    "intValue": "48"
+                  }
+                }
+              ],
+              "droppedAttributesCount": 0,
+              "events": [
+                {
+                  "timeUnixNano": "1767225590162000000",
+                  "name": "exception",
+                  "attributes": [
+                    {
+                      "key": "exception.type",
+                      "value": {
+                        "stringValue": "everos.component.llm.errors.LLMCallError"
+                      }
+                    },
+                    {
+                      "key": "exception.message",
+                      "value": {
+                        "stringValue": "no usable reply in 2 attempts (model='openai/gpt-4o-mini', response_format_mode='json_schema'): reply failed validation against _EpisodeReply"
+                      }
+                    },
+                    {
+                      "key": "exception.stacktrace",
+                      "value": {
+                        "stringValue": "Traceback (most recent call last):\n  File \"/capture/target/capture-tools/everos/1.7.0/lib/python3.13/site-packages/everos/component/llm/openai_provider.py\", line 338, in _validate\n    response_format.model_validate_json(text)\n    ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^^^^^^\n  File \"/capture/target/capture-tools/everos/1.7.0/lib/python3.13/site-packages/pydantic/main.py\", line 847, in model_validate_json\n    return cls.__pydantic_validator__.validate_json(\n           ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^\n        json_data, strict=strict, extra=extra, context=context, by_alias=by_alias, by_name=by_name\n        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n    )\n    ^\npydantic_core._pydantic_core.ValidationError: 4 validation errors for _EpisodeReply\ntitle\n  Field required [type=missing, input_value={'reasoning': 'one messag...eded', 'boundaries': []}, input_type=dict]\n    For further information visit https://errors.pydantic.dev/2.14/v/missing\ncontent\n  Field required [type=missing, input_value={'reasoning': 'one messag...eded', 'boundaries': []}, input_type=dict]\n    For further information visit https://errors.pydantic.dev/2.14/v/missing\nreasoning\n  Extra inputs are not permitted [type=extra_forbidden, input_value='one message, no cut needed', input_type=str]\n    For further information visit https://errors.pydantic.dev/2.14/v/extra_forbidden\nboundaries\n  Extra inputs are not permitted [type=extra_forbidden, input_value=[], input_type=list]\n    For further information visit https://errors.pydantic.dev/2.14/v/extra_forbidden\n\nThe above exception was the direct cause of the following exception:\n\nTraceback (most recent call last):\n  File \"/capture/target/capture-tools/everos/1.7.0/lib/python3.13/site-packages/opentelemetry/trace/__init__.py\", line 602, in use_span\n    yield span\n  File \"/capture/target/capture-tools/everos/1.7.0/lib/python3.13/site-packages/opentelemetry/sdk/trace/__init__.py\", line 1136, in start_as_current_span\n    yield span\n  File \"/capture/target/capture-tools/everos/1.7.0/lib/python3.13/site-packages/everos/core/observability/tracing/attributes.py\", line 136, in memory_span\n    yield span\n  File \"/capture/target/capture-tools/everos/1.7.0/lib/python3.13/site-packages/everos/memory/extract/pipeline/user_memory.py\", line 180, in _extract_episode\n    algo_ep = await retry_llm_output(\n              ^^^^^^^^^^^^^^^^^^^^^^^\n        attempt, operator=\"episode\", memcell_id=prepared.memcell_id\n        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n    )\n    ^\n  File \"/capture/target/capture-tools/everos/1.7.0/lib/python3.13/site-packages/everos/memory/extract/llm_retry.py\", line 49, in retry_llm_output\n    return await call()\n           ^^^^^^^^^^^^\n  File \"/capture/target/capture-tools/everos/1.7.0/lib/python3.13/site-packages/everos/memory/extract/pipeline/user_memory.py\", line 162, in attempt\n    return await extractor.aextract(\n           ^^^^^^^^^^^^^^^^^^^^^^^^^\n    ...<4 lines>...\n    )\n    ^\n  File \"/capture/target/capture-tools/everos/1.7.0/lib/python3.13/site-packages/everalgo/user_memory/episode/_extractor.py\", line 97, in aextract\n    reply = await _call_llm_for_episode(self._llm, messages)\n            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/capture/target/capture-tools/everos/1.7.0/lib/python3.13/site-packages/everalgo/user_memory/episode/_replies.py\", line 40, in _call_llm_for_episode\n    text = await llm.achat(messages=messages, response_format=_EpisodeReply)\n           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/capture/target/capture-tools/everos/1.7.0/lib/python3.13/site-packages/everos/component/llm/openai_provider.py\", line 182, in achat\n    return await self._request_valid_reply(request, response_format)\n           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/capture/target/capture-tools/everos/1.7.0/lib/python3.13/site-packages/everos/component/llm/openai_provider.py\", line 228, in _request_valid_reply\n    raise LLMCallError(\n    ...<3 lines>...\n    ) from (failure.__cause__ if failure else None)\neveros.component.llm.errors.LLMCallError: no usable reply in 2 attempts (model='openai/gpt-4o-mini', response_format_mode='json_schema'): reply failed validation against _EpisodeReply\n"
+                      }
+                    },
+                    {
+                      "key": "exception.escaped",
+                      "value": {
+                        "stringValue": "False"
+                      }
+                    }
+                  ],
+                  "droppedAttributesCount": 0
+                }
+              ],
+              "droppedEventsCount": 0,
+              "links": [],
+              "droppedLinksCount": 0,
+              "status": {
+                "message": "LLMCallError: no usable reply in 2 attempts (model='openai/gpt-4o-mini', response_format_mode='json_schema'): reply failed validation against _EpisodeReply",
+                "code": 2
+              }
+            },
+            {
+              "traceId": "3be604552f48a0ef53c479fbee88f8b3",
+              "spanId": "97d2a025f2c63d51",
+              "traceState": "",
+              "parentSpanId": "0a2cec57b1880a57",
+              "flags": 256,
+              "name": "everos.extract.summary",
+              "kind": 1,
+              "startTimeUnixNano": "1767225590093000000",
+              "endTimeUnixNano": "1767225590163000000",
+              "attributes": [
+                {
+                  "key": "langfuse.observation.type",
+                  "value": {
+                    "stringValue": "generation"
+                  }
+                },
+                {
+                  "key": "langfuse.session.id",
+                  "value": {
+                    "stringValue": "capture-s1"
+                  }
+                },
+                {
+                  "key": "langfuse.trace.tags",
+                  "value": {
+                    "arrayValue": {
+                      "values": [
+                        {
+                          "stringValue": "everos"
+                        },
+                        {
+                          "stringValue": "memory"
+                        }
+                      ]
+                    }
+                  }
+                },
+                {
+                  "key": "langfuse.trace.metadata.memcell_id",
+                  "value": {
+                    "stringValue": "capture-volatile-3"
+                  }
+                },
+                {
+                  "key": "gen_ai.request.model",
+                  "value": {
+                    "stringValue": "openai/gpt-4o-mini"
+                  }
+                },
+                {
+                  "key": "gen_ai.usage.input_tokens",
+                  "value": {
+                    "intValue": "524"
+                  }
+                },
+                {
+                  "key": "gen_ai.usage.output_tokens",
+                  "value": {
+                    "intValue": "48"
+                  }
+                }
+              ],
+              "droppedAttributesCount": 0,
+              "events": [],
+              "droppedEventsCount": 0,
+              "links": [],
+              "droppedLinksCount": 0,
+              "status": null
+            },
+            {
+              "traceId": "3be604552f48a0ef53c479fbee88f8b3",
+              "spanId": "f44472d20aa6e9f7",
+              "traceState": "",
+              "parentSpanId": "0a2cec57b1880a57",
+              "flags": 768,
+              "name": "everos.ome.extract_agent_case",
+              "kind": 1,
+              "startTimeUnixNano": "1767225590204000000",
+              "endTimeUnixNano": "1767225590206000000",
+              "attributes": [
+                {
+                  "key": "langfuse.observation.type",
+                  "value": {
+                    "stringValue": "agent"
+                  }
+                },
+                {
+                  "key": "langfuse.trace.tags",
+                  "value": {
+                    "arrayValue": {
+                      "values": [
+                        {
+                          "stringValue": "everos"
+                        },
+                        {
+                          "stringValue": "memory"
+                        }
+                      ]
+                    }
+                  }
+                },
+                {
+                  "key": "langfuse.trace.metadata.strategy",
+                  "value": {
+                    "stringValue": "extract_agent_case"
+                  }
+                },
+                {
+                  "key": "langfuse.trace.metadata.run_id",
+                  "value": {
+                    "stringValue": "capture-volatile-4"
+                  }
+                },
+                {
+                  "key": "langfuse.trace.metadata.attempt",
+                  "value": {
+                    "intValue": "0"
+                  }
+                },
+                {
+                  "key": "langfuse.trace.metadata.event_topic",
+                  "value": {
+                    "stringValue": "everos.memory.events:AgentPipelineStarted"
+                  }
+                }
+              ],
+              "droppedAttributesCount": 0,
+              "events": [],
+              "droppedEventsCount": 0,
+              "links": [],
+              "droppedLinksCount": 0,
+              "status": null
+            },
+            {
+              "traceId": "c99df2f52c1f626e4b3765ea17381d3b",
+              "spanId": "765cb7a537607f9d",
+              "traceState": "",
+              "parentSpanId": "",
+              "flags": 256,
+              "name": "everos.memory.search",
+              "kind": 1,
+              "startTimeUnixNano": "1767225592203000000",
+              "endTimeUnixNano": "1767225592664000000",
+              "attributes": [
+                {
+                  "key": "langfuse.observation.type",
+                  "value": {
+                    "stringValue": "retriever"
+                  }
+                },
+                {
+                  "key": "langfuse.user.id",
+                  "value": {
+                    "stringValue": "capture-user"
+                  }
+                },
+                {
+                  "key": "langfuse.trace.tags",
+                  "value": {
+                    "arrayValue": {
+                      "values": [
+                        {
+                          "stringValue": "everos"
+                        },
+                        {
+                          "stringValue": "memory"
+                        }
+                      ]
+                    }
+                  }
+                },
+                {
+                  "key": "langfuse.trace.metadata.request_id",
+                  "value": {
+                    "stringValue": "capture-volatile-5"
+                  }
+                },
+                {
+                  "key": "langfuse.trace.metadata.app_id",
+                  "value": {
+                    "stringValue": "default"
+                  }
+                },
+                {
+                  "key": "langfuse.trace.metadata.project_id",
+                  "value": {
+                    "stringValue": "default"
+                  }
+                },
+                {
+                  "key": "langfuse.trace.metadata.owner_type",
+                  "value": {
+                    "stringValue": "user"
+                  }
+                },
+                {
+                  "key": "langfuse.trace.metadata.method",
+                  "value": {
+                    "stringValue": "hybrid"
+                  }
+                },
+                {
+                  "key": "langfuse.observation.input",
+                  "value": {
+                    "stringValue": "{\"query\": \"what did the user say?\", \"top_k\": -1, \"method\": \"hybrid\"}"
+                  }
+                },
+                {
+                  "key": "langfuse.observation.output",
+                  "value": {
+                    "stringValue": "{\"episodes\": [], \"agent_cases\": [], \"agent_skills\": []}"
+                  }
+                },
+                {
+                  "key": "everos.search.top_score",
+                  "value": {
+                    "doubleValue": 0.0
+                  }
+                },
+                {
+                  "key": "everos.search.hit",
+                  "value": {
+                    "boolValue": false
+                  }
+                }
+              ],
+              "droppedAttributesCount": 0,
+              "events": [],
+              "droppedEventsCount": 0,
+              "links": [],
+              "droppedLinksCount": 0,
+              "status": null
+            },
+            {
+              "traceId": "c99df2f52c1f626e4b3765ea17381d3b",
+              "spanId": "262bda4ca99eccd6",
+              "traceState": "",
+              "parentSpanId": "765cb7a537607f9d",
+              "flags": 256,
+              "name": "everos.search.recall",
+              "kind": 1,
+              "startTimeUnixNano": "1767225592203000000",
+              "endTimeUnixNano": "1767225592664000000",
+              "attributes": [
+                {
+                  "key": "langfuse.observation.type",
+                  "value": {
+                    "stringValue": "retriever"
+                  }
+                },
+                {
+                  "key": "langfuse.trace.tags",
+                  "value": {
+                    "arrayValue": {
+                      "values": [
+                        {
+                          "stringValue": "everos"
+                        },
+                        {
+                          "stringValue": "memory"
+                        }
+                      ]
+                    }
+                  }
+                },
+                {
+                  "key": "langfuse.trace.metadata.phase",
+                  "value": {
+                    "stringValue": "sparse_dense"
+                  }
+                },
+                {
+                  "key": "langfuse.trace.metadata.method",
+                  "value": {
+                    "stringValue": "hybrid"
+                  }
+                }
+              ],
+              "droppedAttributesCount": 0,
+              "events": [],
+              "droppedEventsCount": 0,
+              "links": [],
+              "droppedLinksCount": 0,
+              "status": null
+            },
+            {
+              "traceId": "c99df2f52c1f626e4b3765ea17381d3b",
+              "spanId": "e2bb8fd14ecb0bd3",
+              "traceState": "",
+              "parentSpanId": "262bda4ca99eccd6",
+              "flags": 256,
+              "name": "everos.embedding",
+              "kind": 1,
+              "startTimeUnixNano": "1767225592203000000",
+              "endTimeUnixNano": "1767225592236000000",
+              "attributes": [
+                {
+                  "key": "langfuse.observation.type",
+                  "value": {
+                    "stringValue": "embedding"
+                  }
+                },
+                {
+                  "key": "langfuse.trace.tags",
+                  "value": {
+                    "arrayValue": {
+                      "values": [
+                        {
+                          "stringValue": "everos"
+                        },
+                        {
+                          "stringValue": "memory"
+                        }
+                      ]
+                    }
+                  }
+                },
+                {
+                  "key": "gen_ai.request.model",
+                  "value": {
+                    "stringValue": "text-embedding-3-small"
+                  }
+                },
+                {
+                  "key": "gen_ai.usage.input_tokens",
+                  "value": {
+                    "intValue": "5"
+                  }
+                }
+              ],
+              "droppedAttributesCount": 0,
+              "events": [],
+              "droppedEventsCount": 0,
+              "links": [],
+              "droppedLinksCount": 0,
+              "status": null
+            },
+            {
+              "traceId": "c99df2f52c1f626e4b3765ea17381d3b",
+              "spanId": "972c97a4522e2578",
+              "traceState": "",
+              "parentSpanId": "765cb7a537607f9d",
+              "flags": 256,
+              "name": "everos.search.rank",
+              "kind": 1,
+              "startTimeUnixNano": "1767225592664000000",
+              "endTimeUnixNano": "1767225592664000000",
+              "attributes": [
+                {
+                  "key": "langfuse.observation.type",
+                  "value": {
+                    "stringValue": "span"
+                  }
+                },
+                {
+                  "key": "langfuse.trace.tags",
+                  "value": {
+                    "arrayValue": {
+                      "values": [
+                        {
+                          "stringValue": "everos"
+                        },
+                        {
+                          "stringValue": "memory"
+                        }
+                      ]
+                    }
+                  }
+                },
+                {
+                  "key": "langfuse.trace.metadata.phase",
+                  "value": {
+                    "stringValue": "hierarchy"
+                  }
+                }
+              ],
+              "droppedAttributesCount": 0,
+              "events": [],
+              "droppedEventsCount": 0,
+              "links": [],
+              "droppedLinksCount": 0,
+              "status": null
+            }
+          ],
+          "schemaUrl": ""
+        }
+      ],
+      "schemaUrl": ""
+    }
+  ]
+}

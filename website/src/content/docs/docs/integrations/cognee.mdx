@@ -1,0 +1,50 @@
+---
+title: Cognee
+description: "Send Cognee pipeline spans to cetra by turning on its tracing and pointing the OTLP endpoint at port 4318. Setup only: the run stopped at cognify."
+---
+
+cetra reads the spans Cognee's tracing sends for its pipelines: memory storage, embedding, ingestion and graph extraction. This page points that export at cetra. It is setup only: the offline run for this page stopped at `cognify`, so no fixture backs it.
+
+## Install
+
+```bash
+pip install "cognee[tracing]"
+```
+
+The `tracing` extra installs the OTLP exporter. Without it Cognee logs that the exporter package is not installed and sends nothing.
+
+## Set up
+
+Cognee's tracing is off by default. Turn it on and point the OTLP endpoint at cetra's OTLP/HTTP port:
+
+```bash
+export COGNEE_TRACING_ENABLED=true
+export OTEL_EXPORTER_OTLP_ENDPOINT=http://<HOST>:4318
+export OTEL_EXPORTER_OTLP_HEADERS="Authorization=Bearer sk-cetra-…"
+export OTEL_SERVICE_NAME=cognee
+```
+
+Use port 4318, or another endpoint Cognee's exporter picker treats as HTTP (`/api/public/otel`, `/api/v2/otlp`, `dynatrace.com`, `:443/`). Any other endpoint makes Cognee try gRPC first, which fails silently against cetra's HTTP port. `OTEL_SERVICE_NAME` defaults to `cognee`. Then run your usual `cognee.add`, `cognify` and `search` calls.
+
+## What you get
+
+Observed in the run for this page, which covered `add` and the start of `cognify`:
+
+- an `llm` span named `cognee.observe.acreate_structured_output` for each structured-output model call, with the model name and the payload as its input; Cognee redacts secrets from the payload;
+- an `embedding` span named `cognee.observe.embed_text` for each embedding call, with the model and the vector width;
+- `span`s for the pipelines around them: `memory.store`, the `cognee.pipeline.task.*` steps of ingestion and graph extraction, and `cognee.db.graph.query` with the raw Cypher of each graph query.
+
+No token counts come out of Cognee, so no span carries a cost.
+
+## Limits
+
+- Not run to completion: `cognify`'s graph extraction asks the model for JSON it validates, and the run's endpoint did not answer it, so every extraction call retried and failed. `add` and `search` were not captured either.
+- Cognee writes no token counts, so cetra cannot compute a cost for its model calls.
+- Cognee also sends its own debug logs as an OTLP logs signal to the same endpoint. cetra does not store logs and drops them.
+- Input and output payloads are on by default, and the graph-query spans carry the raw Cypher. Set Cognee's tracing configuration off for a run whose payloads must not leave the process.
+- This page was written against cognee 1.6.8.
+
+## Next
+
+- [Send OpenTelemetry](/docs/get-started/opentelemetry/): the endpoint and the headers cetra expects.
+- [Traces](/docs/tracing/traces/): read the trace as a tree and a timeline.

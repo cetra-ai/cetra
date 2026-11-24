@@ -1,0 +1,509 @@
+{
+  "spans": [
+    {
+      "project_id": "01900000-0000-7000-8000-000000000001",
+      "trace_id": "3be604552f48a0ef53c479fbee88f8b3",
+      "span_id": "0a2cec57b1880a57",
+      "name": "everos.memory.flush",
+      "span_kind": "span",
+      "start_time": "2025-12-31T23:59:50.052000000Z",
+      "end_time": "2025-12-31T23:59:50.196000000Z",
+      "status": "error",
+      "status_message": "LLMCallError: no usable reply in 2 attempts (model='openai/gpt-4o-mini', response_format_mode='json_schema'): reply failed validation against _EpisodeReply",
+      "service_name": "everos",
+      "session_id": "capture-s1",
+      "release": "1.7.0",
+      "tags": [
+        "everos",
+        "memory"
+      ],
+      "metadata": {
+        "defer_extraction": "false",
+        "is_final": "true",
+        "mode": "agent",
+        "request_id": "capture-volatile-2"
+      },
+      "attributes": {
+        "langfuse.observation.type": "span",
+        "langfuse.session.id": "capture-s1",
+        "langfuse.trace.metadata.defer_extraction": "false",
+        "langfuse.trace.metadata.is_final": "true",
+        "langfuse.trace.metadata.mode": "agent",
+        "langfuse.trace.metadata.request_id": "capture-volatile-2",
+        "langfuse.trace.tags": "[\"everos\",\"memory\"]"
+      },
+      "resource_attributes": {
+        "service.version": "1.7.0",
+        "telemetry.sdk.language": "python",
+        "telemetry.sdk.name": "opentelemetry",
+        "telemetry.sdk.version": "1.45.2"
+      },
+      "scope_name": "everos",
+      "events": [
+        {
+          "time": "2025-12-31T23:59:50.196000000Z",
+          "name": "exception",
+          "attributes": "{\"exception.type\":\"everos.component.llm.errors.LLMCallError\",\"exception.message\":\"no usable reply in 2 attempts (model='openai/gpt-4o-mini', response_format_mode='json_schema'): reply failed validation against _EpisodeReply\",\"exception.stacktrace\":\"Traceback (most recent call last):\\n  File \\\"/capture/target/capture-tools/everos/1.7.0/lib/python3.13/site-packages/everos/component/llm/openai_provider.py\\\", line 338, in _validate\\n    response_format.model_validate_json(text)\\n    ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^^^^^^\\n  File \\\"/capture/target/capture-tools/everos/1.7.0/lib/python3.13/site-packages/pydantic/main.py\\\", line 847, in model_validate_json\\n    return cls.__pydantic_validator__.validate_json(\\n           ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^\\n        json_data, strict=strict, extra=extra, context=context, by_alias=by_alias, by_name=by_name\\n        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\\n    )\\n    ^\\npydantic_core._pydantic_core.ValidationError: 4 validation errors for _EpisodeReply\\ntitle\\n  Field required [type=missing, input_value={'reasoning': 'one messag...eded', 'boundaries': []}, input_type=dict]\\n    For further information visit https://errors.pydantic.dev/2.14/v/missing\\ncontent\\n  Field required [type=missing, input_value={'reasoning': 'one messag...eded', 'boundaries': []}, input_type=dict]\\n    For further information visit https://errors.pydantic.dev/2.14/v/missing\\nreasoning\\n  Extra inputs are not permitted [type=extra_forbidden, input_value='one message, no cut needed', input_type=str]\\n    For further information visit https://errors.pydantic.dev/2.14/v/extra_forbidden\\nboundaries\\n  Extra inputs are not permitted [type=extra_forbidden, input_value=[], input_type=list]\\n    For further information visit https://errors.pydantic.dev/2.14/v/extra_forbidden\\n\\nThe above exception was the direct cause of the following exception:\\n\\nTraceback (most recent call last):\\n  File \\\"/capture/target/capture-tools/everos/1.7.0/lib/python3.13/site-packages/opentelemetry/trace/__init__.py\\\", line 602, in use_span\\n    yield span\\n  File \\\"/capture/target/capture-tools/everos/1.7.0/lib/python3.13/site-packages/opentelemetry/sdk/trace/__init__.py\\\", line 1136, in start_as_current_span\\n    yield span\\n  File \\\"/capture/target/capture-tools/everos/1.7.0/lib/python3.13/site-packages/everos/core/observability/tracing/attributes.py\\\", line 136, in memory_span\\n    yield span\\n  File \\\"/capture/target/capture-tools/everos/1.7.0/lib/python3.13/site-packages/everos/service/memory/_memorize.py\\\", line 204, in run\\n    return await asyncio.shield(extraction)\\n           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\\n  File \\\"/capture/target/capture-tools/everos/1.7.0/lib/python3.13/site-packages/everos/service/memory/_memorize.py\\\", line 64, in _tracked\\n    return await work\\n           ^^^^^^^^^^\\n  File \\\"/capture/target/capture-tools/everos/1.7.0/lib/python3.13/site-packages/everos/service/memory/_memorize.py\\\", line 287, in _extract\\n    raise first_error\\n  File \\\"/capture/target/capture-tools/everos/1.7.0/lib/python3.13/site-packages/everos/memory/extract/pipeline/user_memory.py\\\", line 99, in run_cell\\n    algo_ep = await self._extract(ingested, prepared)\\n              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\\n  File \\\"/capture/target/capture-tools/everos/1.7.0/lib/python3.13/site-packages/everos/memory/extract/pipeline/user_memory.py\\\", line 147, in _extract\\n    algo_ep, summary = await asyncio.gather(\\n                       ^^^^^^^^^^^^^^^^^^^^^\\n    ...<2 lines>...\\n    )\\n    ^\\n  File \\\"/capture/target/capture-tools/everos/1.7.0/lib/python3.13/site-packages/everos/memory/extract/pipeline/user_memory.py\\\", line 180, in _extract_episode\\n    algo_ep = await retry_llm_output(\\n              ^^^^^^^^^^^^^^^^^^^^^^^\\n        attempt, operator=\\\"episode\\\", memcell_id=prepared.memcell_id\\n        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\\n    )\\n    ^\\n  File \\\"/capture/target/capture-tools/everos/1.7.0/lib/python3.13/site-packages/everos/memory/extract/llm_retry.py\\\", line 49, in retry_llm_output\\n    return await call()\\n           ^^^^^^^^^^^^\\n  File \\\"/capture/target/capture-tools/everos/1.7.0/lib/python3.13/site-packages/everos/memory/extract/pipeline/user_memory.py\\\", line 162, in attempt\\n    return await extractor.aextract(\\n           ^^^^^^^^^^^^^^^^^^^^^^^^^\\n    ...<4 lines>...\\n    )\\n    ^\\n  File \\\"/capture/target/capture-tools/everos/1.7.0/lib/python3.13/site-packages/everalgo/user_memory/episode/_extractor.py\\\", line 97, in aextract\\n    reply = await _call_llm_for_episode(self._llm, messages)\\n            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\\n  File \\\"/capture/target/capture-tools/everos/1.7.0/lib/python3.13/site-packages/everalgo/user_memory/episode/_replies.py\\\", line 40, in _call_llm_for_episode\\n    text = await llm.achat(messages=messages, response_format=_EpisodeReply)\\n           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\\n  File \\\"/capture/target/capture-tools/everos/1.7.0/lib/python3.13/site-packages/everos/component/llm/openai_provider.py\\\", line 182, in achat\\n    return await self._request_valid_reply(request, response_format)\\n           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\\n  File \\\"/capture/target/capture-tools/everos/1.7.0/lib/python3.13/site-packages/everos/component/llm/openai_provider.py\\\", line 228, in _request_valid_reply\\n    raise LLMCallError(\\n    ...<3 lines>...\\n    ) from (failure.__cause__ if failure else None)\\neveros.component.llm.errors.LLMCallError: no usable reply in 2 attempts (model='openai/gpt-4o-mini', response_format_mode='json_schema'): reply failed validation against _EpisodeReply\\n\",\"exception.escaped\":\"False\"}"
+        }
+      ],
+      "conventions": [
+        "langfuse"
+      ],
+      "ingest_time": "2026-01-01T00:00:00.000000000Z",
+      "schema_version": 2
+    },
+    {
+      "project_id": "01900000-0000-7000-8000-000000000001",
+      "trace_id": "3be604552f48a0ef53c479fbee88f8b3",
+      "span_id": "d1916785213fc097",
+      "parent_span_id": "0a2cec57b1880a57",
+      "name": "everos.memcell.boundary",
+      "span_kind": "llm",
+      "start_time": "2025-12-31T23:59:50.054000000Z",
+      "end_time": "2025-12-31T23:59:50.087000000Z",
+      "status": "unset",
+      "service_name": "everos",
+      "release": "1.7.0",
+      "tags": [
+        "everos",
+        "memory"
+      ],
+      "request_model": "openai/gpt-4o-mini",
+      "input_tokens": 262,
+      "output_tokens": 24,
+      "total_tokens": 286,
+      "cost_source": "none",
+      "attributes": {
+        "gen_ai.request.model": "openai/gpt-4o-mini",
+        "gen_ai.usage.input_tokens": "262",
+        "gen_ai.usage.output_tokens": "24",
+        "langfuse.observation.type": "generation",
+        "langfuse.trace.tags": "[\"everos\",\"memory\"]"
+      },
+      "resource_attributes": {
+        "service.version": "1.7.0",
+        "telemetry.sdk.language": "python",
+        "telemetry.sdk.name": "opentelemetry",
+        "telemetry.sdk.version": "1.45.2"
+      },
+      "scope_name": "everos",
+      "conventions": [
+        "genai",
+        "langfuse"
+      ],
+      "ingest_time": "2026-01-01T00:00:00.000000000Z",
+      "schema_version": 2
+    },
+    {
+      "project_id": "01900000-0000-7000-8000-000000000001",
+      "trace_id": "3be604552f48a0ef53c479fbee88f8b3",
+      "span_id": "87c96c91119580a0",
+      "parent_span_id": "0a2cec57b1880a57",
+      "name": "everos.extract",
+      "span_kind": "llm",
+      "start_time": "2025-12-31T23:59:50.092000000Z",
+      "end_time": "2025-12-31T23:59:50.162000000Z",
+      "status": "error",
+      "status_message": "LLMCallError: no usable reply in 2 attempts (model='openai/gpt-4o-mini', response_format_mode='json_schema'): reply failed validation against _EpisodeReply",
+      "service_name": "everos",
+      "session_id": "capture-s1",
+      "release": "1.7.0",
+      "tags": [
+        "everos",
+        "memory"
+      ],
+      "metadata": {
+        "app_id": "default",
+        "memcell_id": "capture-volatile-3",
+        "project_id": "default"
+      },
+      "request_model": "openai/gpt-4o-mini",
+      "input_tokens": 524,
+      "output_tokens": 48,
+      "total_tokens": 572,
+      "cost_source": "none",
+      "attributes": {
+        "gen_ai.request.model": "openai/gpt-4o-mini",
+        "gen_ai.usage.input_tokens": "524",
+        "gen_ai.usage.output_tokens": "48",
+        "langfuse.observation.type": "generation",
+        "langfuse.session.id": "capture-s1",
+        "langfuse.trace.metadata.app_id": "default",
+        "langfuse.trace.metadata.memcell_id": "capture-volatile-3",
+        "langfuse.trace.metadata.project_id": "default",
+        "langfuse.trace.tags": "[\"everos\",\"memory\"]"
+      },
+      "resource_attributes": {
+        "service.version": "1.7.0",
+        "telemetry.sdk.language": "python",
+        "telemetry.sdk.name": "opentelemetry",
+        "telemetry.sdk.version": "1.45.2"
+      },
+      "scope_name": "everos",
+      "events": [
+        {
+          "time": "2025-12-31T23:59:50.162000000Z",
+          "name": "exception",
+          "attributes": "{\"exception.type\":\"everos.component.llm.errors.LLMCallError\",\"exception.message\":\"no usable reply in 2 attempts (model='openai/gpt-4o-mini', response_format_mode='json_schema'): reply failed validation against _EpisodeReply\",\"exception.stacktrace\":\"Traceback (most recent call last):\\n  File \\\"/capture/target/capture-tools/everos/1.7.0/lib/python3.13/site-packages/everos/component/llm/openai_provider.py\\\", line 338, in _validate\\n    response_format.model_validate_json(text)\\n    ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^^^^^^\\n  File \\\"/capture/target/capture-tools/everos/1.7.0/lib/python3.13/site-packages/pydantic/main.py\\\", line 847, in model_validate_json\\n    return cls.__pydantic_validator__.validate_json(\\n           ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^\\n        json_data, strict=strict, extra=extra, context=context, by_alias=by_alias, by_name=by_name\\n        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\\n    )\\n    ^\\npydantic_core._pydantic_core.ValidationError: 4 validation errors for _EpisodeReply\\ntitle\\n  Field required [type=missing, input_value={'reasoning': 'one messag...eded', 'boundaries': []}, input_type=dict]\\n    For further information visit https://errors.pydantic.dev/2.14/v/missing\\ncontent\\n  Field required [type=missing, input_value={'reasoning': 'one messag...eded', 'boundaries': []}, input_type=dict]\\n    For further information visit https://errors.pydantic.dev/2.14/v/missing\\nreasoning\\n  Extra inputs are not permitted [type=extra_forbidden, input_value='one message, no cut needed', input_type=str]\\n    For further information visit https://errors.pydantic.dev/2.14/v/extra_forbidden\\nboundaries\\n  Extra inputs are not permitted [type=extra_forbidden, input_value=[], input_type=list]\\n    For further information visit https://errors.pydantic.dev/2.14/v/extra_forbidden\\n\\nThe above exception was the direct cause of the following exception:\\n\\nTraceback (most recent call last):\\n  File \\\"/capture/target/capture-tools/everos/1.7.0/lib/python3.13/site-packages/opentelemetry/trace/__init__.py\\\", line 602, in use_span\\n    yield span\\n  File \\\"/capture/target/capture-tools/everos/1.7.0/lib/python3.13/site-packages/opentelemetry/sdk/trace/__init__.py\\\", line 1136, in start_as_current_span\\n    yield span\\n  File \\\"/capture/target/capture-tools/everos/1.7.0/lib/python3.13/site-packages/everos/core/observability/tracing/attributes.py\\\", line 136, in memory_span\\n    yield span\\n  File \\\"/capture/target/capture-tools/everos/1.7.0/lib/python3.13/site-packages/everos/memory/extract/pipeline/user_memory.py\\\", line 180, in _extract_episode\\n    algo_ep = await retry_llm_output(\\n              ^^^^^^^^^^^^^^^^^^^^^^^\\n        attempt, operator=\\\"episode\\\", memcell_id=prepared.memcell_id\\n        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\\n    )\\n    ^\\n  File \\\"/capture/target/capture-tools/everos/1.7.0/lib/python3.13/site-packages/everos/memory/extract/llm_retry.py\\\", line 49, in retry_llm_output\\n    return await call()\\n           ^^^^^^^^^^^^\\n  File \\\"/capture/target/capture-tools/everos/1.7.0/lib/python3.13/site-packages/everos/memory/extract/pipeline/user_memory.py\\\", line 162, in attempt\\n    return await extractor.aextract(\\n           ^^^^^^^^^^^^^^^^^^^^^^^^^\\n    ...<4 lines>...\\n    )\\n    ^\\n  File \\\"/capture/target/capture-tools/everos/1.7.0/lib/python3.13/site-packages/everalgo/user_memory/episode/_extractor.py\\\", line 97, in aextract\\n    reply = await _call_llm_for_episode(self._llm, messages)\\n            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\\n  File \\\"/capture/target/capture-tools/everos/1.7.0/lib/python3.13/site-packages/everalgo/user_memory/episode/_replies.py\\\", line 40, in _call_llm_for_episode\\n    text = await llm.achat(messages=messages, response_format=_EpisodeReply)\\n           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\\n  File \\\"/capture/target/capture-tools/everos/1.7.0/lib/python3.13/site-packages/everos/component/llm/openai_provider.py\\\", line 182, in achat\\n    return await self._request_valid_reply(request, response_format)\\n           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\\n  File \\\"/capture/target/capture-tools/everos/1.7.0/lib/python3.13/site-packages/everos/component/llm/openai_provider.py\\\", line 228, in _request_valid_reply\\n    raise LLMCallError(\\n    ...<3 lines>...\\n    ) from (failure.__cause__ if failure else None)\\neveros.component.llm.errors.LLMCallError: no usable reply in 2 attempts (model='openai/gpt-4o-mini', response_format_mode='json_schema'): reply failed validation against _EpisodeReply\\n\",\"exception.escaped\":\"False\"}"
+        }
+      ],
+      "conventions": [
+        "genai",
+        "langfuse"
+      ],
+      "ingest_time": "2026-01-01T00:00:00.000000000Z",
+      "schema_version": 2
+    },
+    {
+      "project_id": "01900000-0000-7000-8000-000000000001",
+      "trace_id": "3be604552f48a0ef53c479fbee88f8b3",
+      "span_id": "97d2a025f2c63d51",
+      "parent_span_id": "0a2cec57b1880a57",
+      "name": "everos.extract.summary",
+      "span_kind": "llm",
+      "start_time": "2025-12-31T23:59:50.093000000Z",
+      "end_time": "2025-12-31T23:59:50.163000000Z",
+      "status": "unset",
+      "service_name": "everos",
+      "session_id": "capture-s1",
+      "release": "1.7.0",
+      "tags": [
+        "everos",
+        "memory"
+      ],
+      "metadata": {
+        "memcell_id": "capture-volatile-3"
+      },
+      "request_model": "openai/gpt-4o-mini",
+      "input_tokens": 524,
+      "output_tokens": 48,
+      "total_tokens": 572,
+      "cost_source": "none",
+      "attributes": {
+        "gen_ai.request.model": "openai/gpt-4o-mini",
+        "gen_ai.usage.input_tokens": "524",
+        "gen_ai.usage.output_tokens": "48",
+        "langfuse.observation.type": "generation",
+        "langfuse.session.id": "capture-s1",
+        "langfuse.trace.metadata.memcell_id": "capture-volatile-3",
+        "langfuse.trace.tags": "[\"everos\",\"memory\"]"
+      },
+      "resource_attributes": {
+        "service.version": "1.7.0",
+        "telemetry.sdk.language": "python",
+        "telemetry.sdk.name": "opentelemetry",
+        "telemetry.sdk.version": "1.45.2"
+      },
+      "scope_name": "everos",
+      "conventions": [
+        "genai",
+        "langfuse"
+      ],
+      "ingest_time": "2026-01-01T00:00:00.000000000Z",
+      "schema_version": 2
+    },
+    {
+      "project_id": "01900000-0000-7000-8000-000000000001",
+      "trace_id": "3be604552f48a0ef53c479fbee88f8b3",
+      "span_id": "f44472d20aa6e9f7",
+      "parent_span_id": "0a2cec57b1880a57",
+      "name": "everos.ome.extract_agent_case",
+      "span_kind": "agent",
+      "start_time": "2025-12-31T23:59:50.204000000Z",
+      "end_time": "2025-12-31T23:59:50.206000000Z",
+      "status": "unset",
+      "service_name": "everos",
+      "release": "1.7.0",
+      "tags": [
+        "everos",
+        "memory"
+      ],
+      "metadata": {
+        "attempt": "0",
+        "event_topic": "everos.memory.events:AgentPipelineStarted",
+        "run_id": "capture-volatile-4",
+        "strategy": "extract_agent_case"
+      },
+      "attributes": {
+        "langfuse.observation.type": "agent",
+        "langfuse.trace.metadata.attempt": "0",
+        "langfuse.trace.metadata.event_topic": "everos.memory.events:AgentPipelineStarted",
+        "langfuse.trace.metadata.run_id": "capture-volatile-4",
+        "langfuse.trace.metadata.strategy": "extract_agent_case",
+        "langfuse.trace.tags": "[\"everos\",\"memory\"]"
+      },
+      "resource_attributes": {
+        "service.version": "1.7.0",
+        "telemetry.sdk.language": "python",
+        "telemetry.sdk.name": "opentelemetry",
+        "telemetry.sdk.version": "1.45.2"
+      },
+      "scope_name": "everos",
+      "conventions": [
+        "langfuse"
+      ],
+      "ingest_time": "2026-01-01T00:00:00.000000000Z",
+      "schema_version": 2
+    },
+    {
+      "project_id": "01900000-0000-7000-8000-000000000001",
+      "trace_id": "8a87136b4950709d45ebf817aab8db93",
+      "span_id": "875be8fecf47c887",
+      "name": "everos.memory.add",
+      "span_kind": "span",
+      "start_time": "2025-12-31T23:59:50.000000000Z",
+      "end_time": "2025-12-31T23:59:50.048000000Z",
+      "status": "unset",
+      "service_name": "everos",
+      "session_id": "capture-s1",
+      "release": "1.7.0",
+      "tags": [
+        "everos",
+        "memory"
+      ],
+      "metadata": {
+        "defer_extraction": "false",
+        "is_final": "false",
+        "mode": "agent",
+        "request_id": "capture-volatile-1"
+      },
+      "attributes": {
+        "langfuse.observation.type": "span",
+        "langfuse.session.id": "capture-s1",
+        "langfuse.trace.metadata.defer_extraction": "false",
+        "langfuse.trace.metadata.is_final": "false",
+        "langfuse.trace.metadata.mode": "agent",
+        "langfuse.trace.metadata.request_id": "capture-volatile-1",
+        "langfuse.trace.tags": "[\"everos\",\"memory\"]"
+      },
+      "resource_attributes": {
+        "service.version": "1.7.0",
+        "telemetry.sdk.language": "python",
+        "telemetry.sdk.name": "opentelemetry",
+        "telemetry.sdk.version": "1.45.2"
+      },
+      "scope_name": "everos",
+      "conventions": [
+        "langfuse"
+      ],
+      "ingest_time": "2026-01-01T00:00:00.000000000Z",
+      "schema_version": 2
+    },
+    {
+      "project_id": "01900000-0000-7000-8000-000000000001",
+      "trace_id": "8a87136b4950709d45ebf817aab8db93",
+      "span_id": "6fc7ef32580aedc5",
+      "parent_span_id": "875be8fecf47c887",
+      "name": "everos.memcell.boundary",
+      "span_kind": "llm",
+      "start_time": "2025-12-31T23:59:50.004000000Z",
+      "end_time": "2025-12-31T23:59:50.043000000Z",
+      "status": "unset",
+      "service_name": "everos",
+      "release": "1.7.0",
+      "tags": [
+        "everos",
+        "memory"
+      ],
+      "request_model": "openai/gpt-4o-mini",
+      "input_tokens": 262,
+      "output_tokens": 24,
+      "total_tokens": 286,
+      "cost_source": "none",
+      "attributes": {
+        "gen_ai.request.model": "openai/gpt-4o-mini",
+        "gen_ai.usage.input_tokens": "262",
+        "gen_ai.usage.output_tokens": "24",
+        "langfuse.observation.type": "generation",
+        "langfuse.trace.tags": "[\"everos\",\"memory\"]"
+      },
+      "resource_attributes": {
+        "service.version": "1.7.0",
+        "telemetry.sdk.language": "python",
+        "telemetry.sdk.name": "opentelemetry",
+        "telemetry.sdk.version": "1.45.2"
+      },
+      "scope_name": "everos",
+      "conventions": [
+        "genai",
+        "langfuse"
+      ],
+      "ingest_time": "2026-01-01T00:00:00.000000000Z",
+      "schema_version": 2
+    },
+    {
+      "project_id": "01900000-0000-7000-8000-000000000001",
+      "trace_id": "c99df2f52c1f626e4b3765ea17381d3b",
+      "span_id": "262bda4ca99eccd6",
+      "parent_span_id": "765cb7a537607f9d",
+      "name": "everos.search.recall",
+      "span_kind": "retriever",
+      "start_time": "2025-12-31T23:59:52.203000000Z",
+      "end_time": "2025-12-31T23:59:52.664000000Z",
+      "status": "unset",
+      "service_name": "everos",
+      "release": "1.7.0",
+      "tags": [
+        "everos",
+        "memory"
+      ],
+      "metadata": {
+        "method": "hybrid",
+        "phase": "sparse_dense"
+      },
+      "attributes": {
+        "langfuse.observation.type": "retriever",
+        "langfuse.trace.metadata.method": "hybrid",
+        "langfuse.trace.metadata.phase": "sparse_dense",
+        "langfuse.trace.tags": "[\"everos\",\"memory\"]"
+      },
+      "resource_attributes": {
+        "service.version": "1.7.0",
+        "telemetry.sdk.language": "python",
+        "telemetry.sdk.name": "opentelemetry",
+        "telemetry.sdk.version": "1.45.2"
+      },
+      "scope_name": "everos",
+      "conventions": [
+        "langfuse"
+      ],
+      "ingest_time": "2026-01-01T00:00:00.000000000Z",
+      "schema_version": 2
+    },
+    {
+      "project_id": "01900000-0000-7000-8000-000000000001",
+      "trace_id": "c99df2f52c1f626e4b3765ea17381d3b",
+      "span_id": "765cb7a537607f9d",
+      "name": "everos.memory.search",
+      "span_kind": "retriever",
+      "start_time": "2025-12-31T23:59:52.203000000Z",
+      "end_time": "2025-12-31T23:59:52.664000000Z",
+      "status": "unset",
+      "service_name": "everos",
+      "user_id": "capture-user",
+      "release": "1.7.0",
+      "tags": [
+        "everos",
+        "memory"
+      ],
+      "metadata": {
+        "app_id": "default",
+        "method": "hybrid",
+        "owner_type": "user",
+        "project_id": "default",
+        "request_id": "capture-volatile-5"
+      },
+      "input": "{\"query\":\"what did the user say?\",\"top_k\":-1,\"method\":\"hybrid\"}",
+      "input_format": "json",
+      "output": "{\"episodes\":[],\"agent_cases\":[],\"agent_skills\":[]}",
+      "output_format": "json",
+      "input_preview": "{\"query\":\"what did the user say?\",\"top_k\":-1,\"method\":\"hybrid\"}",
+      "output_preview": "{\"episodes\":[],\"agent_cases\":[],\"agent_skills\":[]}",
+      "attributes": {
+        "everos.search.hit": "false",
+        "everos.search.top_score": "0.0",
+        "langfuse.observation.type": "retriever",
+        "langfuse.trace.metadata.app_id": "default",
+        "langfuse.trace.metadata.method": "hybrid",
+        "langfuse.trace.metadata.owner_type": "user",
+        "langfuse.trace.metadata.project_id": "default",
+        "langfuse.trace.metadata.request_id": "capture-volatile-5",
+        "langfuse.trace.tags": "[\"everos\",\"memory\"]",
+        "langfuse.user.id": "capture-user"
+      },
+      "resource_attributes": {
+        "service.version": "1.7.0",
+        "telemetry.sdk.language": "python",
+        "telemetry.sdk.name": "opentelemetry",
+        "telemetry.sdk.version": "1.45.2"
+      },
+      "scope_name": "everos",
+      "conventions": [
+        "langfuse"
+      ],
+      "ingest_time": "2026-01-01T00:00:00.000000000Z",
+      "schema_version": 2
+    },
+    {
+      "project_id": "01900000-0000-7000-8000-000000000001",
+      "trace_id": "c99df2f52c1f626e4b3765ea17381d3b",
+      "span_id": "e2bb8fd14ecb0bd3",
+      "parent_span_id": "262bda4ca99eccd6",
+      "name": "everos.embedding",
+      "span_kind": "embedding",
+      "start_time": "2025-12-31T23:59:52.203000000Z",
+      "end_time": "2025-12-31T23:59:52.236000000Z",
+      "status": "unset",
+      "service_name": "everos",
+      "release": "1.7.0",
+      "tags": [
+        "everos",
+        "memory"
+      ],
+      "provider": "openai",
+      "request_model": "text-embedding-3-small",
+      "input_tokens": 5,
+      "cost_input": 1.0000000000000001e-7,
+      "cost_total": 1.0000000000000001e-7,
+      "cost_source": "computed",
+      "attributes": {
+        "gen_ai.request.model": "text-embedding-3-small",
+        "gen_ai.usage.input_tokens": "5",
+        "langfuse.observation.type": "embedding",
+        "langfuse.trace.tags": "[\"everos\",\"memory\"]"
+      },
+      "resource_attributes": {
+        "service.version": "1.7.0",
+        "telemetry.sdk.language": "python",
+        "telemetry.sdk.name": "opentelemetry",
+        "telemetry.sdk.version": "1.45.2"
+      },
+      "scope_name": "everos",
+      "conventions": [
+        "genai",
+        "langfuse"
+      ],
+      "ingest_time": "2026-01-01T00:00:00.000000000Z",
+      "schema_version": 2
+    },
+    {
+      "project_id": "01900000-0000-7000-8000-000000000001",
+      "trace_id": "c99df2f52c1f626e4b3765ea17381d3b",
+      "span_id": "972c97a4522e2578",
+      "parent_span_id": "765cb7a537607f9d",
+      "name": "everos.search.rank",
+      "span_kind": "span",
+      "start_time": "2025-12-31T23:59:52.664000000Z",
+      "end_time": "2025-12-31T23:59:52.664000000Z",
+      "status": "unset",
+      "service_name": "everos",
+      "release": "1.7.0",
+      "tags": [
+        "everos",
+        "memory"
+      ],
+      "metadata": {
+        "phase": "hierarchy"
+      },
+      "attributes": {
+        "langfuse.observation.type": "span",
+        "langfuse.trace.metadata.phase": "hierarchy",
+        "langfuse.trace.tags": "[\"everos\",\"memory\"]"
+      },
+      "resource_attributes": {
+        "service.version": "1.7.0",
+        "telemetry.sdk.language": "python",
+        "telemetry.sdk.name": "opentelemetry",
+        "telemetry.sdk.version": "1.45.2"
+      },
+      "scope_name": "everos",
+      "conventions": [
+        "langfuse"
+      ],
+      "ingest_time": "2026-01-01T00:00:00.000000000Z",
+      "schema_version": 2
+    }
+  ],
+  "media": [],
+  "rejected_spans": 0
+}

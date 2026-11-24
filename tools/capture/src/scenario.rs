@@ -243,7 +243,7 @@ pub struct Turn {
     /// Token counts in OTel semantics. Missing fields are 0.
     #[serde(default)]
     pub usage: Usage,
-    /// Embedding width. Required for embedding turns, from 1 to 64, and absent otherwise.
+    /// Embedding width. Required for embedding turns, from 1 to 4096, and absent otherwise.
     #[serde(default)]
     pub dims: Option<u32>,
     /// Delay before the first streamed chunk, in milliseconds.
@@ -658,8 +658,8 @@ fn check_auxiliary(index: usize, turn: &Turn) -> Result<(), String> {
 
 fn check_embedding(index: usize, turn: &Turn) -> Result<(), String> {
     match turn.dims {
-        Some(dims) if (1..=64).contains(&dims) => {}
-        Some(_) => return Err(format!("turns[{index}].dims must be from 1 to 64")),
+        Some(dims) if (1..=4096).contains(&dims) => {}
+        Some(_) => return Err(format!("turns[{index}].dims must be from 1 to 4096")),
         None => return Err(format!("turns[{index}].dims is required")),
     }
     if turn.message.is_some() {
@@ -1136,11 +1136,11 @@ mod tests {
 
         let mut value = embedding("openai.embeddings");
         value["turns"][0]["dims"] = json!(0);
-        assert_reason(value, "turns[0].dims must be from 1 to 64");
+        assert_reason(value, "turns[0].dims must be from 1 to 4096");
 
         let mut value = embedding("openai.embeddings");
-        value["turns"][0]["dims"] = json!(65);
-        assert_reason(value, "turns[0].dims must be from 1 to 64");
+        value["turns"][0]["dims"] = json!(4097);
+        assert_reason(value, "turns[0].dims must be from 1 to 4096");
 
         let mut value = embedding("openai.embeddings");
         value["turns"][0]["message"] = json!({ "text": "hello" });

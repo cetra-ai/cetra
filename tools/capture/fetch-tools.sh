@@ -1,7 +1,8 @@
 # Fetch or install every pinned tool the capture scenarios run, into
 # target/capture-tools/: the gateway binaries (Temporal CLI, Bifrost, aigw, Envoy;
 # IN5.1), the opencode-v2 and goose CLIs, the Temurin JDK, Maven and the .NET SDK
-# (IN8.0), the LiteLLM Proxy environment (Amendment B), Langflow, Hermes Agent
+# (IN8.0), the LiteLLM Proxy environment (Amendment B), Langflow, the EverOS
+# environment with its tiktoken o200k_base file (IN9.6), Hermes Agent
 # with its hermes-otel plugin (IN7.9), the n8n, promptfoo, openclaw (with its
 # diagnostics-otel plugin), opencode and oh-my-pi pnpm tools, the Python
 # environments under tools/capture/envs/ (IN6.1) and Chromium for browser-use.
@@ -203,6 +204,28 @@ else
     mkdir -p -- "$(dirname -- "$litellm_lock_copy")"
     cp -- "$repo_root/tools/capture/litellm-proxy/uv.lock" "$litellm_lock_copy"
 fi
+
+# The EverOS environment (IN9.6): its own uv project like the LiteLLM Proxy above,
+# pinned with the `otel` extra (without it the server stays silent: it logs
+# observability_enabled_but_otel_not_installed and exports nothing).
+everos_env="$tools_dir/everos/1.7.0"
+everos_lock_copy="$tools_dir/everos/uv.lock"
+if [ -x "$everos_env/bin/everos" ] &&
+    cmp -s "$repo_root/tools/capture/everos/uv.lock" "$everos_lock_copy"; then
+    echo "capture-tools: everos 1.7.0 already present"
+else
+    echo "capture-tools: installing everos 1.7.0"
+    UV_PROJECT_ENVIRONMENT="$everos_env" uv sync --frozen --project "$repo_root/tools/capture/everos"
+    mkdir -p -- "$(dirname -- "$everos_lock_copy")"
+    cp -- "$repo_root/tools/capture/everos/uv.lock" "$everos_lock_copy"
+fi
+
+# The o200k_base tokenizer file EverOS needs at startup (IN9.6, user-approved
+# download 2026-11-24): tiktoken reads it from TIKTOKEN_CACHE_DIR under the cache
+# name of its URL, so it is stored under that name and checked by sha256.
+fetch "$tools_dir/tiktoken/fb374d419588a4632f3f557e76b4b70aebbca790" \
+    "https://openaipublic.blob.core.windows.net/encodings/o200k_base.tiktoken" \
+    "446a9538cb6c348e3516120d7c08b09f57c36495e2acfffe59a5bf8b0cfb1a2d"
 
 # Installs a pnpm tool project (tools/capture/<name>) into target/capture-tools/<name>/<version>/node_modules.
 # Skipped when the marker file exists and the committed lock matches its copy.
