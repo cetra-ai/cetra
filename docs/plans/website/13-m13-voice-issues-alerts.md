@@ -45,6 +45,8 @@ Out of scope:
 | D-W-24 | The hero shows four example traces behind tabs; the voice agent replaced the research agent |
 | D-W-25 | Every homepage picture follows one of the four stories, through mock objects tied to the story's hero trace |
 
+The voice story's trace list (design §12: sorted by duration) is not delivered here: generated voice-tagged traces run up to 20 s, so the 3.1 s hero isn't on top. M15 picks the list's URL.
+
 The user's answers (2026-11-24):
 - The stories, in order, are Support agent, Coding agent, Voice agent and Document extraction.
 - Captions name an outcome the reader wants.
@@ -69,7 +71,7 @@ No new dependency.
 | V1 The voice trace | `web/src/mocks/generated/dataset.ts`, `web/src/mocks/generated/dataset.test.ts` | — |
 | L1 Filters on the trace list | `web/src/mocks/generated/widget-query.ts`, `web/src/mocks/generated/handlers.ts`, `web/src/mocks/generated/handlers.test.ts` | — |
 | S1 Story issues and alert rules | `web/src/mocks/generated/stories.ts` (new), `web/src/mocks/generated/stories.test.ts` (new), `web/src/mocks/generated/handlers.ts` | V1, L1 |
-| V2 The voice hero shot | `website/screenshots.json`, `website/src/marketing/home/Hero.astro`, the PNGs under `website/src/assets/screenshots/`, `docs/plans/website/README.md` | V1, S1 |
+| V2 The voice hero shot | `website/screenshots.json`, `website/src/marketing/home/Hero.astro`, `website/src/marketing/home/Chapters.astro` (an alt), the PNGs under `website/src/assets/screenshots/`, `docs/plans/website/README.md` | V1, S1 |
 
 They run one after the other, in the order V1, L1, S1, V2. V2 is last so that the screenshots are captured once, from the final dataset.
 
@@ -195,7 +197,7 @@ They run one after the other, in the order V1, L1, S1, V2. V2 is last so that th
      }
    }
    ```
-   If `compile` or `parseChip` can throw anything other than `Unsupported` for a text that `readQuery` lets through, stop and report it with `QUESTION:`. Don't widen the `catch`.
+   `compile`, `parseChip` and `splitConjuncts` throw only `Unsupported` for any text `readQuery` lets through: text they can't model becomes a `raw` chip that `predicateOf` refuses. Don't widen the `catch`. List containment is written `tags @> ['x']` in the filter language (spec 05); `tags contains 'x'` is not a filter.
 2. In `handlers.ts`:
    1. Import `tracePredicate` from `@/mocks/generated/widget-query`, next to `widgetQueryHandler`.
    2. Give `filterTraces` a third parameter: `predicate?: (trace: Schema<"TraceSummary">) => boolean`.
@@ -214,8 +216,8 @@ They run one after the other, in the order V1, L1, S1, V2. V2 is last so that th
      - dataset `createDataset({ seed: 1, now: NOW, traces: 400 })`, `server.use(...largeHandlers(dataset))`;
      - `GET …/traces?filter=status = 'error'&limit=1000` returns exactly the visible traces whose `status` is `"error"` (compare sorted ids);
      - the `X-Mock-Filter-Ignored` header is null.
-   - **Add** `"applies a tags filter combined with a name filter"`: the filter `tags contains 'retry' and name = 'coding-agent'` returns exactly trace 4's id, without the ignored header.
-   - **Add** `"sorts a filtered list"`: the filter `tags contains 'voice'` with `sort=duration&order=desc` returns traces whose `duration_ns` doesn't increase, and every one has `voice` in its tags.
+   - **Add** `"applies a tags filter combined with a name filter"`: the filter `tags @> ['retry'] and name = 'coding-agent'` returns exactly trace 4's id, without the ignored header.
+   - **Add** `"sorts a filtered list"`: the filter `tags @> ['voice']` with `sort=duration&order=desc` returns traces whose `duration_ns` doesn't increase, and every one has `voice` in its tags.
 
 **Done when:**
 - `pnpm --dir web exec vitest run src/mocks 'src/routes/$org/$project/traces' --maxWorkers=8` passes;
@@ -237,7 +239,11 @@ If a test outside `handlers.test.ts` fails because it relied on filters being ig
 **Contracts.**
 - All ids end with a group starting `00000057`, which no fixture uses. Check with `rtk proxy grep -rn "00000057" fixtures web/src` before you start; it must print nothing.
 - Times are computed from `dataset.now` with `rfc3339` (from `dataset.ts`).
-- `ago(ms)` below means `rfc3339(dataset.now - ms)`.
+- Define a local helper `ago(dataset: Dataset, ms: number): string` returning `rfc3339(dataset.now - ms)`; the tables below write `ago(ms)` for it.
+- Compare times as epoch ms (`Date.parse`). "Newest first" breaks ties by `trace_id`, descending.
+- "UTC midnight" of a time `ms` is `Math.floor(ms / DAY_MS) * DAY_MS`.
+- Export every function this phase names (`storyOccurrences`, `storyIssue`, `storyIssueEvents`, `storyAlertRule`, `storyAlertEvent`, `storyHandlers`); the tests import them.
+- The generated occurrences are illustrative: generated traces carry generic names (`support-router`, `refund-agent`, …) and whole-trace durations, so issue 3 matches voice-tagged traces over 3 s although its title says 800 ms. That is accepted; don't try to make them agree.
 
 Put this at the top of `stories.ts` exactly (Biome may reformat):
 ```ts
@@ -345,7 +351,7 @@ export const STORY_RULES: readonly StoryRule[] = [
     eventId: "01900000-0000-7000-8000-000000570211",
     deliveryId: "01900000-0000-7000-8000-000000570221",
     name: "Answer correctness under 0.7 on support-bot",
-    condition: { metric: "score", window: "1h", comparator: "lt", threshold: 0.7, min_count: 10, score_name: "correctness", aggregation: "avg", filter: "tags contains 'email'" },
+    condition: { metric: "score", window: "1h", comparator: "lt", threshold: 0.7, min_count: 10, score_name: "correctness", aggregation: "avg", filter: "tags @> ['email']" },
     state: "ok",
     lastValue: 0.86,
     lastCount: 42,
@@ -356,7 +362,7 @@ export const STORY_RULES: readonly StoryRule[] = [
     eventId: "01900000-0000-7000-8000-000000570212",
     deliveryId: "01900000-0000-7000-8000-000000570222",
     name: "Error rate above 5% on code-agent",
-    condition: { metric: "error_rate", window: "15m", comparator: "gt", threshold: 0.05, min_count: 20, filter: "tags contains 'retry'" },
+    condition: { metric: "error_rate", window: "15m", comparator: "gt", threshold: 0.05, min_count: 20, filter: "tags @> ['retry']" },
     state: "firing",
     lastValue: 0.083,
     lastCount: 36,
@@ -367,7 +373,7 @@ export const STORY_RULES: readonly StoryRule[] = [
     eventId: "01900000-0000-7000-8000-000000570213",
     deliveryId: "01900000-0000-7000-8000-000000570223",
     name: "Slow replies on voice-agent",
-    condition: { metric: "latency_p95", target: "trace", window: "15m", comparator: "gt", threshold: 1_500, min_count: 20, filter: "tags contains 'voice'" },
+    condition: { metric: "latency_p95", target: "trace", window: "15m", comparator: "gt", threshold: 1_500, min_count: 20, filter: "tags @> ['voice']" },
     state: "firing",
     lastValue: 2_800,
     lastCount: 54,
@@ -378,7 +384,7 @@ export const STORY_RULES: readonly StoryRule[] = [
     eventId: "01900000-0000-7000-8000-000000570214",
     deliveryId: "01900000-0000-7000-8000-000000570224",
     name: "Schema check pass rate under 97%",
-    condition: { metric: "score", window: "1h", comparator: "lt", threshold: 0.97, min_count: 20, score_name: "schema_valid", aggregation: "pass_rate", filter: "tags contains 'billing'" },
+    condition: { metric: "score", window: "1h", comparator: "lt", threshold: 0.97, min_count: 20, score_name: "schema_valid", aggregation: "pass_rate", filter: "tags @> ['billing']" },
     state: "ok",
     lastValue: 0.985,
     lastCount: 210,
@@ -416,7 +422,7 @@ If `Schema<"AlertCondition">` refuses a field as written (for example `target`),
    | `created_at`, `updated_at` | `first_seen` and `last_seen` |
    | `count` | `matched.length` |
    | `users` | the distinct non-null `user_id`s of `matched` |
-3. **Issue events.** `storyIssueEvents(dataset, issue)` returns `{ data: [{ id, kind: "created", at: first_seen }] }`. `id` is the issue id with its last three characters `1xx` replaced by `11x`; for example `…570101` becomes `…570111`. Spell the four ids out as constants rather than computing them: `…570111`, `…570112`, `…570113`, `…570114`.
+3. **Issue events.** `storyIssueEvents(dataset, issue): Schema<"IssueEventPage">` returns `{ data: [{ id, kind: "created", at: first_seen }] }`. Add an `eventId` field to `StoryIssue` and set it in `STORY_ISSUES` to `01900000-0000-7000-8000-000000570111`, `…570112`, `…570113` and `…570114`, in order.
 4. **Alert rules.** `storyAlertRule(dataset, rule): Schema<"AlertRule">` builds:
 
    | Field | Value |
@@ -491,6 +497,7 @@ If an existing test fails because the large handlers now answer issues or alert 
 **Edit:**
 - `website/screenshots.json` (the `marketing-trace-view-research` entry);
 - `website/src/marketing/home/Hero.astro` (the third scenario);
+- `website/src/marketing/home/Chapters.astro` (the Alert chapter's alt only);
 - the PNGs under `website/src/assets/screenshots/`: delete `marketing-trace-view-research.png`, add `marketing-trace-view-voice.png`, and keep the rewritten others;
 - `docs/plans/website/README.md` (the M13 row only).
 
@@ -508,7 +515,7 @@ No other file.
      src: traceVoice,
      label: "Traces · Voice agent",
      alt: "The cetra trace view: a voice agent's trace for one caller turn, where a slow availability check makes the reply start 2.8 s after the caller stops talking, with its timeline, models and costs.",
-     caption: "The reply started 2.8 s after the caller stopped talking. One slow tool call is why.",
+     caption: "Find the one slow tool call behind a reply that started 2.8 s late.",
    },
    ```
 4. Run `CETRA_SCREENSHOTS_PORT=5299 just docs-screenshots` for every shot, in the foreground with a long timeout. The dataset changed, so the lists, sessions, users and dashboards move a little.
@@ -519,9 +526,12 @@ No other file.
    - show the root's Output card whole, bottom border included;
    - show no truncation badge.
 
+   The alerts shots (`alerts.png`, `marketing-alerts.png`) now list the four story rules before the fixture ones, two of them firing, and the story events; the docs shots' sidebar badges may show more firing alerts and issues. That is expected.
+
    Look at the other changed PNGs by eye. They may change only in rows, counts and charts. Report any that changed another way. `git status` lists most of them, because the bytes change anyway.
-6. Set the M13 row in `docs/plans/website/README.md` to `| M13 Voice story, trace list, issues, alerts | [\`13-m13-voice-issues-alerts.md\`](13-m13-voice-issues-alerts.md) | done (V1, L1, S1, V2) |`.
-7. Run `just check-web`, then `just check-docs`, one at a time, and check each exit code.
+6. In `Chapters.astro`, set the Alert chapter's Frame `alt` to `"The alerts page with its alert rules, two of them firing, and the recent alert events."` (it said three rules, one firing; M15 rewrites the alts per story).
+7. In `docs/plans/website/README.md`, set the M13 row's status cell to: done (V1, L1, S1, V2)
+8. Run `just check-web`, then `just check-docs`, one at a time, and check each exit code. `just check-web` runs every web test; that is deliberate, as this is the plan's last phase.
 
 **Done when:** both checks pass and step 5 holds.
 
