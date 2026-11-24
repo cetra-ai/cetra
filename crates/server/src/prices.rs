@@ -17,6 +17,8 @@ use uuid::Uuid;
 
 use crate::api::common::FieldError;
 use crate::api::model_prices::{ModelPrice, ModelPriceInput, ModelPriceScope, ModelPriceTier};
+use crate::audit::catalog::ModelPriceAction;
+use crate::audit::{self, Event, TargetKind};
 use crate::eval::budget::model_price;
 use crate::eval::rule_check::Subject;
 use crate::http::AppState;
@@ -561,12 +563,14 @@ pub(crate) async fn write(
     org: OrgId,
     project: Option<ProjectId>,
     change: PriceChange,
+    ctx: &audit::Ctx,
 ) -> Result<WriteOutcome, MetaError> {
     let prices = state.ingest.prices();
     let _guard = prices.lock_writes().await;
     let builtin = prices.builtin();
     let now = state.clock.now_ns();
     let closure_builtin = Arc::clone(&builtin);
+    let ctx = ctx.clone();
     let outcome = state
         .meta
         .write(move |conn| {
@@ -632,6 +636,11 @@ pub(crate) async fn write(
                 if !broken.is_empty() {
                     return Ok(WriteOutcome::BreaksRules(broken));
                 }
+                let (action, id) = match &change {
+                    PriceChange::Insert { id, .. } => (ModelPriceAction::Created, *id),
+                    PriceChange::Update { id, .. } => (ModelPriceAction::Updated, *id),
+                    PriceChange::Delete { id } => (ModelPriceAction::Deleted, *id),
+                };
                 let stored = match change {
                     PriceChange::Insert { id, row } => Some(Box::new(
                         model_prices::insert_tx(conn, id, org, project, &row, now).await?,
@@ -647,6 +656,13 @@ pub(crate) async fn write(
                         None
                     }
                 };
+                let mut event = Event::new(action)
+                    .org(org)
+                    .target(TargetKind::ModelPrice, id);
+                if let Some(project) = project {
+                    event = event.project(project);
+                }
+                audit::record(conn, &ctx, event, now).await?;
                 Ok(WriteOutcome::Done(stored))
             })
         })

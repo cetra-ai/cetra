@@ -6,7 +6,6 @@ use axum::extract::{Extension, State};
 use axum::http::{Method, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
-use cetra_core::ids::ProjectId;
 use uuid::Uuid;
 
 use crate::api::common::ProblemCode;
@@ -14,6 +13,8 @@ use crate::api::device::{
     DeviceApproveRequest, DeviceCodeRequest, DeviceCodeResponse, DeviceGrant, DeviceGrantProject,
     DevicePurpose, DeviceRequest, DeviceTokenRequest, InternalDeviceCode,
 };
+use crate::audit::catalog::AuthAction;
+use crate::audit::{self, Event};
 use crate::auth::device::{
     DeviceError, Grant, GrantProject, POLL_INTERVAL_S, Pending, Poll, Purpose,
 };
@@ -25,7 +26,6 @@ use crate::http::AppState;
 use crate::http::access::{Access, RouteDef, user_project};
 use crate::http::client_ip::ClientIp;
 use crate::http::error::{self, ApiError, field_error};
-use crate::meta::MetaError;
 use crate::meta::api_keys::{self, NewApiKey};
 use crate::meta::orgs::org_by_id;
 use crate::meta::personal_tokens::{self, NewToken};
@@ -194,6 +194,7 @@ async fn get_request(
 async fn approve(
     State(state): State<AppState>,
     Extension(principal): Extension<Principal>,
+    ctx: audit::Ctx,
     error::Path(user_code): error::Path<String>,
     error::Json(body): error::Json<DeviceApproveRequest>,
 ) -> Result<StatusCode, ApiError> {
@@ -204,8 +205,8 @@ async fn approve(
         .device
         .claim(&user_code, now)
         .map_err(|_| ApiError::NotFound)?;
-    let (grant, token_id, key) = match mint(&state, user, &pending, body, now).await {
-        Ok(minted) => minted,
+    let grant = match mint(&state, user, &pending, body, now, &ctx).await {
+        Ok(grant) => grant,
         Err(failure) => {
             state.device.release(&user_code, ticket);
             return Err(failure);
@@ -220,27 +221,20 @@ async fn approve(
             DeviceError::NotFound => ApiError::NotFound,
             other => internal(other),
         })?;
-    match key {
-        Some((key_id, project_id)) => {
-            tracing::info!(target: "audit", %token_id, %key_id, %project_id, user_id = %user.id, purpose = ?pending.purpose, "device code approved");
-        }
-        None => {
-            tracing::info!(target: "audit", %token_id, user_id = %user.id, purpose = ?pending.purpose, "device code approved");
-        }
-    }
     Ok(StatusCode::NO_CONTENT)
 }
 
 /// Mints what an approval grants: a `read, write` token for `login`; for `init`, a `read` token
-/// and an `ingest` key for the chosen project, in one transaction. Returns the grant, the token's
-/// id, and for `init` the key's id and project.
+/// and an `ingest` key for the chosen project, in one transaction. The approval is recorded in
+/// the same transaction, so a minted token always has its record.
 async fn mint(
     state: &AppState,
     user: &AuthUser,
     pending: &Pending,
     body: DeviceApproveRequest,
     now: i64,
-) -> Result<(Grant, Uuid, Option<(Uuid, ProjectId)>), ApiError> {
+    ctx: &audit::Ctx,
+) -> Result<Grant, ApiError> {
     let host = pending.host.as_deref();
     match pending.purpose {
         Purpose::Login => {
@@ -260,21 +254,31 @@ async fn mint(
                 scopes: vec![KeyScope::Read, KeyScope::Write],
                 expires_at: Some(now.saturating_add(NINETY_DAYS_NS)),
             };
-            let row = state
+            let ctx = ctx.clone();
+            state
                 .meta
                 .write(move |conn| {
-                    Box::pin(async move { personal_tokens::insert_token(conn, token, now).await })
+                    Box::pin(async move {
+                        let row = personal_tokens::insert_token(conn, token, now).await?;
+                        audit::record(
+                            conn,
+                            &ctx,
+                            Event::new(AuthAction::DeviceApproved {
+                                purpose: "login",
+                                token_id: row.id,
+                                key_id: None,
+                            }),
+                            now,
+                        )
+                        .await
+                    })
                 })
                 .await?;
-            Ok((
-                Grant {
-                    token: plaintext,
-                    project: None,
-                    ingest_key: None,
-                },
-                row.id,
-                None,
-            ))
+            Ok(Grant {
+                token: plaintext,
+                project: None,
+                ingest_key: None,
+            })
         }
         Purpose::Init => {
             let project_id = body
@@ -291,6 +295,7 @@ async fn mint(
             let org = org_by_id(state.meta.reader(), project.org_id)
                 .await?
                 .ok_or(ApiError::NotFound)?;
+            let org_id = org.id;
             let name = token_name("CLI init", host);
             let NewKey {
                 plaintext: token_plain,
@@ -320,13 +325,26 @@ async fn mint(
                 created_by: user.id,
                 expires_at: None,
             };
-            let (token_id, key_id) = state
+            let ctx = ctx.clone();
+            state
                 .meta
                 .write(move |conn| {
                     Box::pin(async move {
                         let token_row = personal_tokens::insert_token(conn, token, now).await?;
                         let key_row = api_keys::insert_api_key(conn, key, now).await?;
-                        Ok::<(Uuid, Uuid), MetaError>((token_row.id, key_row.id))
+                        audit::record(
+                            conn,
+                            &ctx,
+                            Event::new(AuthAction::DeviceApproved {
+                                purpose: "init",
+                                token_id: token_row.id,
+                                key_id: Some(key_row.id),
+                            })
+                            .org(org_id)
+                            .project(project_id),
+                            now,
+                        )
+                        .await
                     })
                 })
                 .await?;
@@ -336,15 +354,11 @@ async fn mint(
                 slug: project.slug,
                 name: project.name,
             };
-            Ok((
-                Grant {
-                    token: token_plain,
-                    project: Some(grant_project),
-                    ingest_key: Some(key_plain),
-                },
-                token_id,
-                Some((key_id, project_id)),
-            ))
+            Ok(Grant {
+                token: token_plain,
+                project: Some(grant_project),
+                ingest_key: Some(key_plain),
+            })
         }
     }
 }
@@ -353,6 +367,7 @@ async fn mint(
 async fn deny(
     State(state): State<AppState>,
     Extension(principal): Extension<Principal>,
+    ctx: audit::Ctx,
     error::Path(user_code): error::Path<String>,
 ) -> Result<StatusCode, ApiError> {
     let user = session_user(&principal)?;
@@ -362,7 +377,7 @@ async fn deny(
         .device
         .deny(&user_code, now)
         .map_err(|_| ApiError::NotFound)?;
-    tracing::info!(target: "audit", user_id = %user.id, "device code denied");
+    audit::record_alone(&state.meta, &ctx, Event::new(AuthAction::DeviceDenied), now).await?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -370,6 +385,7 @@ async fn deny(
 /// with a control-plane token of scope `device`. An identical retry answers 204 again.
 async fn register_code(
     State(state): State<AppState>,
+    ctx: audit::Ctx,
     error::Json(body): error::Json<InternalDeviceCode>,
 ) -> Result<StatusCode, ApiError> {
     let now = state.clock.now_ns();
@@ -395,7 +411,15 @@ async fn register_code(
             },
             other => internal(other),
         })?;
-    tracing::info!(target: "audit", purpose = ?purpose, "device code registered by the control plane");
+    audit::record_alone(
+        &state.meta,
+        &ctx,
+        Event::new(AuthAction::DeviceRegistered {
+            purpose: purpose_name(purpose),
+        }),
+        now,
+    )
+    .await?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -437,6 +461,14 @@ fn purpose_in(purpose: DevicePurpose) -> Purpose {
     match purpose {
         DevicePurpose::Login => Purpose::Login,
         DevicePurpose::Init => Purpose::Init,
+    }
+}
+
+/// The purpose's name in the audit catalog.
+fn purpose_name(purpose: Purpose) -> &'static str {
+    match purpose {
+        Purpose::Login => "login",
+        Purpose::Init => "init",
     }
 }
 
@@ -805,6 +837,71 @@ mod tests {
         assert_eq!(error_code(&polled), "access_denied");
 
         assert_eq!(deny(&app, &seeded.cookie, "BCDF-GHJK").await.status, 404);
+    }
+
+    #[tokio::test]
+    async fn approval_is_recorded_with_token_and_key_ids() {
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        let code = code_for(&app, "init", "dev-laptop").await;
+        let approved = approve(
+            &app,
+            &seeded.cookie,
+            &code.user_code,
+            json!({ "project_id": seeded.project.id }),
+        )
+        .await;
+        assert_eq!(approved.status, 204);
+        #[allow(clippy::type_complexity)]
+        let rows: Vec<(
+            String,
+            Option<String>,
+            Option<String>,
+            String,
+            Option<String>,
+        )> = sqlx::query_as(
+            "SELECT actor_kind, org_id, project_id, details, via FROM audit_events \
+                 WHERE action = 'auth.device_approved'",
+        )
+        .fetch_all(app.state.meta.reader())
+        .await
+        .unwrap();
+        assert_eq!(rows.len(), 1);
+        let (actor_kind, org_id, project_id, details, via) = &rows[0];
+        assert_eq!(actor_kind, "user");
+        assert_eq!(via.as_deref(), Some("session"));
+        assert!(org_id.is_some(), "an init approval names its org");
+        assert_eq!(
+            project_id.as_deref(),
+            Some(seeded.project.id.to_string().as_str())
+        );
+        let details: Value = serde_json::from_str(details).unwrap();
+        assert_eq!(details["purpose"], "init");
+        assert!(details["token_id"].is_string(), "{details}");
+        assert!(details["key_id"].is_string(), "{details}");
+    }
+
+    #[tokio::test]
+    async fn denial_is_recorded() {
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        let code = code_for(&app, "login", "dev-laptop").await;
+        let denied = deny(&app, &seeded.cookie, &code.user_code).await;
+        assert_eq!(denied.status, 204);
+        let rows: Vec<(String, Option<String>, String)> = sqlx::query_as(
+            "SELECT actor_kind, via, outcome FROM audit_events WHERE action = 'auth.device_denied'",
+        )
+        .fetch_all(app.state.meta.reader())
+        .await
+        .unwrap();
+        assert_eq!(
+            rows,
+            vec![(
+                "user".to_owned(),
+                Some("session".to_owned()),
+                "success".to_owned()
+            )]
+        );
     }
 
     #[tokio::test]

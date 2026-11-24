@@ -419,7 +419,6 @@ async fn run_task(task: RunTask) {
         "done"
     };
     tracing::info!(
-        target: "audit",
         project_id = %project.id,
         connection_id = %connection_id,
         user_id = %run_by,

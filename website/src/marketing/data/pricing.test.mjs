@@ -143,8 +143,15 @@ test("licence features match the docs", () => {
     .split("\n")
     .filter((line) => line.startsWith("| `"))
     .map((line) => /^\| `([^`]+)`/.exec(line)?.[1]);
-  assert.deepEqual([...keys].sort(), ["org_sso", "project_roles", "saml", "sso_enforcement"]);
-  assert.equal(SELF_HOSTED.licence.features.length, 4);
+  assert.deepEqual([...keys].sort(), [
+    "audit_log",
+    "org_sso",
+    "project_roles",
+    "saml",
+    "scim",
+    "sso_enforcement",
+  ]);
+  assert.equal(SELF_HOSTED.licence.features.length, 6);
 });
 
 test("licence support matches D197 and the docs", () => {

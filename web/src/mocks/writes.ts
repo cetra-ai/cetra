@@ -7,6 +7,7 @@ import promptSettingsDocument from "../../../fixtures/api/responses/prompt-setti
 import promptVersion1Document from "../../../fixtures/api/responses/prompts/support-reply/versions/1.json";
 import promptVersion2Document from "../../../fixtures/api/responses/prompts/support-reply/versions/2.json";
 import promptDocument from "../../../fixtures/api/responses/prompts/support-reply.json";
+import adminAuditStreamDocument from "../../../fixtures/api/static/admin-audit-stream.json";
 import adminLicenseDocument from "../../../fixtures/api/static/admin-license.json";
 import adminUserCreatedDocument from "../../../fixtures/api/static/admin-user-created.json";
 import adminUsersDocument from "../../../fixtures/api/static/admin-users.json";
@@ -44,12 +45,16 @@ import onlineRuleDocument from "../../../fixtures/api/static/online-rule.json";
 import onlineRulePreviewDocument from "../../../fixtures/api/static/online-rule-preview.json";
 import onlineRuleResumedDocument from "../../../fixtures/api/static/online-rule-resumed.json";
 import orgDocument from "../../../fixtures/api/static/org.json";
+import orgAuditStreamDocument from "../../../fixtures/api/static/org-audit-stream.json";
 import orgMembersDocument from "../../../fixtures/api/static/org-members.json";
 import orgModelPricesDocument from "../../../fixtures/api/static/org-model-prices.json";
+import orgScimDocument from "../../../fixtures/api/static/org-scim.json";
 import orgSsoDocument from "../../../fixtures/api/static/org-sso.json";
 import personalTokenCreatedDocument from "../../../fixtures/api/static/personal-token-created.json";
 import projectDocument from "../../../fixtures/api/static/project.json";
 import projectMembersDocument from "../../../fixtures/api/static/project-members.json";
+import scimGroupDocument from "../../../fixtures/api/static/scim-group.json";
+import scimTokenCreatedDocument from "../../../fixtures/api/static/scim-token-created.json";
 import scoreDefinitionDocument from "../../../fixtures/api/static/score-definition.json";
 import setupResponseDocument from "../../../fixtures/api/static/setup-response.json";
 import signupResponseDocument from "../../../fixtures/api/static/signup-response.json";
@@ -121,6 +126,43 @@ export const WRITE_OPERATIONS: readonly WriteOperation[] = [
     path: "/api/v1/orgs/{org}/sso/domains/{id}",
   },
   { operationId: "patch_org_sso", method: "patch", path: "/api/v1/orgs/{org}/sso" },
+  { operationId: "update_org_scim", method: "patch", path: "/api/v1/orgs/{org}/scim" },
+  {
+    operationId: "create_org_scim_token",
+    method: "post",
+    path: "/api/v1/orgs/{org}/scim/tokens",
+  },
+  {
+    operationId: "revoke_org_scim_token",
+    method: "delete",
+    path: "/api/v1/orgs/{org}/scim/tokens/{id}",
+  },
+  {
+    operationId: "put_org_scim_group_mapping",
+    method: "put",
+    path: "/api/v1/orgs/{org}/scim/groups/{id}/mapping",
+  },
+  {
+    operationId: "delete_org_scim_group_mapping",
+    method: "delete",
+    path: "/api/v1/orgs/{org}/scim/groups/{id}/mapping",
+  },
+  { operationId: "put_org_audit_stream", method: "put", path: "/api/v1/orgs/{org}/audit-stream" },
+  {
+    operationId: "delete_org_audit_stream",
+    method: "delete",
+    path: "/api/v1/orgs/{org}/audit-stream",
+  },
+  {
+    operationId: "rotate_org_audit_stream_secret",
+    method: "post",
+    path: "/api/v1/orgs/{org}/audit-stream/secret",
+  },
+  {
+    operationId: "test_org_audit_stream",
+    method: "post",
+    path: "/api/v1/orgs/{org}/audit-stream/test",
+  },
   {
     operationId: "post_llm_connection",
     method: "post",
@@ -252,6 +294,22 @@ export const WRITE_OPERATIONS: readonly WriteOperation[] = [
     path: "/api/v1/admin/settings/test-email",
   },
   { operationId: "put_admin_license", method: "put", path: "/api/v1/admin/license" },
+  { operationId: "put_admin_audit_stream", method: "put", path: "/api/v1/admin/audit-stream" },
+  {
+    operationId: "delete_admin_audit_stream",
+    method: "delete",
+    path: "/api/v1/admin/audit-stream",
+  },
+  {
+    operationId: "rotate_admin_audit_stream_secret",
+    method: "post",
+    path: "/api/v1/admin/audit-stream/secret",
+  },
+  {
+    operationId: "test_admin_audit_stream",
+    method: "post",
+    path: "/api/v1/admin/audit-stream/test",
+  },
   { operationId: "create_channel", method: "post", path: "/api/v1/projects/{project}/channels" },
   {
     operationId: "update_channel",
@@ -639,6 +697,20 @@ const RESPONSES: Record<string, Respond> = {
   post_org_sso_domain_verify: () => HttpResponse.json(orgSsoDocument),
   delete_org_sso_domain: () => noContent(),
   patch_org_sso: () => HttpResponse.json(orgSsoDocument),
+  update_org_scim: () => HttpResponse.json(orgScimDocument),
+  create_org_scim_token: () => HttpResponse.json(scimTokenCreatedDocument, { status: 201 }),
+  revoke_org_scim_token: () => noContent(),
+  put_org_scim_group_mapping: () => HttpResponse.json(scimGroupDocument),
+  delete_org_scim_group_mapping: () => noContent(),
+  put_org_audit_stream: ({ body }) =>
+    HttpResponse.json({
+      ...orgAuditStreamDocument,
+      enabled: typeof body.enabled === "boolean" ? body.enabled : orgAuditStreamDocument.enabled,
+    }),
+  delete_org_audit_stream: () => noContent(),
+  rotate_org_audit_stream_secret: () =>
+    HttpResponse.json({ secret: "mock-signing-secret-not-for-use" }),
+  test_org_audit_stream: () => HttpResponse.json({ reached: true, status: 200 }),
   post_org_invite: ({ body }) =>
     HttpResponse.json(
       {
@@ -839,6 +911,15 @@ const RESPONSES: Record<string, Respond> = {
   },
   post_admin_settings_test_email: () => problem(400, "bad_request", "email is not configured"),
   put_admin_license: () => HttpResponse.json(adminLicenseDocument),
+  put_admin_audit_stream: ({ body }) =>
+    HttpResponse.json({
+      ...adminAuditStreamDocument,
+      enabled: typeof body.enabled === "boolean" ? body.enabled : adminAuditStreamDocument.enabled,
+    }),
+  delete_admin_audit_stream: () => noContent(),
+  rotate_admin_audit_stream_secret: () =>
+    HttpResponse.json({ secret: "mock-signing-secret-not-for-use" }),
+  test_admin_audit_stream: () => HttpResponse.json({ reached: true, status: 200 }),
 
   create_channel: ({ body }) => {
     const sample =

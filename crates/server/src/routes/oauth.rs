@@ -12,6 +12,7 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use serde::Deserialize;
 
+use crate::audit;
 use crate::auth::oidc::flow::{self, LoginError, StartError};
 use crate::auth::oidc::state_cookie;
 use crate::auth::session::{SessionOrigin, start_session};
@@ -85,6 +86,7 @@ async fn authorize(
 async fn callback(
     State(state): State<AppState>,
     ClientIp(ip): ClientIp,
+    ctx: audit::Ctx,
     headers: HeaderMap,
     error::Path(provider): error::Path<String>,
     error::Query(query): error::Query<CallbackQuery>,
@@ -99,6 +101,7 @@ async fn callback(
             query.state.as_deref(),
             query.code.as_deref(),
             query.error.is_some(),
+            &ctx,
         )
         .await
     } else {
@@ -109,6 +112,7 @@ async fn callback(
             query.state.as_deref(),
             query.code.as_deref(),
             query.error.is_some(),
+            &ctx,
         )
         .await
     };
@@ -134,21 +138,6 @@ async fn callback(
                     return Ok(response);
                 }
             };
-            match logged_in.sso_org {
-                Some(org_id) => tracing::info!(
-                    target: "audit",
-                    user_id = %logged_in.user_id,
-                    org_id = %org_id,
-                    provider = %provider,
-                    "login"
-                ),
-                None => tracing::info!(
-                    target: "audit",
-                    user_id = %logged_in.user_id,
-                    provider = %provider,
-                    "login"
-                ),
-            }
             redirect(&logged_in.redirect, [clear, session])
         }
         Err(LoginError::Internal(error)) => {
@@ -1022,7 +1011,15 @@ mod tests {
         ))
         .await;
         assert_eq!(location(&response), "/traces");
-        assert!(logs.contains("identity linked"));
+        let linked: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM audit_events WHERE action = 'auth.identity_linked' \
+             AND actor_kind = 'user' AND details = ?",
+        )
+        .bind(r#"{"provider":"github"}"#)
+        .fetch_one(app.state.meta.reader())
+        .await
+        .unwrap();
+        assert_eq!(linked, 1);
         assert!(!logs.contains("grace@example.com"));
         let old = app
             .request(Method::GET, "/api/auth/me")
@@ -1327,7 +1324,14 @@ mod tests {
         ] {
             assert!(!logs.contains(needle), "log contains {needle}: {logs}");
         }
-        assert!(logs.contains("setup completed"), "{logs}");
+        let setups: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM audit_events WHERE action = 'auth.setup_completed' \
+             AND actor_kind = 'user' AND org_id IS NULL",
+        )
+        .fetch_one(app.state.meta.reader())
+        .await
+        .expect("setup rows");
+        assert_eq!(setups, 1);
         assert!(app.state.setup.token().unwrap().is_none());
         let admin: i64 = sqlx::query_scalar("SELECT is_instance_admin FROM users WHERE email = ?")
             .bind("ada@example.com")

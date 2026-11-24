@@ -1,0 +1,74 @@
+[
+  {
+    "method": "POST",
+    "path": "/scim/v2/Users",
+    "body": {
+      "schemas": ["urn:ietf:params:scim:schemas:core:2.0:User"],
+      "externalId": "entra-carol-1",
+      "userName": "carol.jones@acme.test",
+      "name": { "givenName": "Carol", "familyName": "Jones" },
+      "displayName": "Carol Jones",
+      "emails": [{ "type": "work", "value": "carol.jones@acme.test", "primary": true }],
+      "active": true
+    },
+    "expect": {
+      "status": 201,
+      "save": { "user": "/id" }
+    }
+  },
+  {
+    "method": "GET",
+    "path": "/scim/v2/Groups?filter=displayName eq \"Finance Admins\"",
+    "expect": {
+      "status": 200,
+      "json": { "/totalResults": 0 }
+    }
+  },
+  {
+    "method": "POST",
+    "path": "/scim/v2/Groups",
+    "body": {
+      "schemas": ["urn:ietf:params:scim:schemas:core:2.0:Group"],
+      "displayName": "Finance Admins",
+      "externalId": "entra-group-finance-admins"
+    },
+    "expect": {
+      "status": 201,
+      "save": { "group": "/id" },
+      "json": { "/displayName": "Finance Admins" }
+    }
+  },
+  {
+    "method": "GET",
+    "path": "/scim/v2/Groups?excludedAttributes=members",
+    "expect": {
+      "status": 200,
+      "json": { "/Resources/0/displayName": "Finance Admins" },
+      "absent": ["/Resources/0/members"]
+    }
+  },
+  {
+    "method": "PATCH",
+    "path": "/scim/v2/Groups/{group}",
+    "body": {
+      "schemas": ["urn:ietf:params:scim:api:messages:2.0:PatchOp"],
+      "Operations": [{ "op": "Add", "path": "members", "value": [{ "value": "{user}" }] }]
+    },
+    "expect": {
+      "status": 200,
+      "json": { "/members/0/value": "{user}" }
+    }
+  },
+  {
+    "method": "PATCH",
+    "path": "/scim/v2/Groups/{group}",
+    "body": {
+      "schemas": ["urn:ietf:params:scim:api:messages:2.0:PatchOp"],
+      "Operations": [{ "op": "Remove", "path": "members", "value": [{ "value": "{user}" }] }]
+    },
+    "expect": {
+      "status": 200,
+      "json": { "/members": [] }
+    }
+  }
+]

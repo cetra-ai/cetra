@@ -688,6 +688,114 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/admin/audit-events": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List the instance's audit records
+         * @description Newest first. Instance admins only, with a session. Needs a licence that lists `audit_log`, or a cloud cell (403 `plan_required` otherwise). Org records are never listed here.
+         */
+        get: operations["list_admin_audit_events"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/admin/audit-events/export": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Export the instance's audit records
+         * @description The instance's records as CSV or NDJSON, newest first, at most 1,000,000 of them. Recorded first as `audit.export_started`. Instance admins only, with a session; needs the licence or a cloud cell (403 `plan_required` otherwise).
+         */
+        get: operations["get_admin_audit_export"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/admin/audit-stream": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get the instance's audit stream
+         * @description Instance admins only, with a session, and a licence that lists `audit_log`, or a cloud cell. 404 when no destination is set. 409 when the stored settings cannot be read.
+         */
+        get: operations["get_admin_audit_stream"];
+        /**
+         * Create or update the instance's audit stream
+         * @description Instance admins only, with a session, and a licence that lists `audit_log`, or a cloud cell. Same rules as the organization's stream. The stream carries the instance log only.
+         */
+        put: operations["put_admin_audit_stream"];
+        post?: never;
+        /**
+         * Remove the instance's audit stream
+         * @description Instance admins only, with a session. Works without the licence.
+         */
+        delete: operations["delete_admin_audit_stream"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/admin/audit-stream/secret": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Rotate the instance's signing secret
+         * @description Instance admins only, with a session, and a licence that lists `audit_log`, or a cloud cell. The new secret is shown once. 409 when the stored settings cannot be read.
+         */
+        post: operations["rotate_admin_audit_stream_secret"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/admin/audit-stream/test": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Send a test line to the instance's audit stream
+         * @description Instance admins only, with a session, and a licence that lists `audit_log`, or a cloud cell. Reports only reachability, as the organization's test does.
+         */
+        post: operations["test_admin_audit_stream"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/admin/license": {
         parameters: {
             query?: never;
@@ -956,6 +1064,114 @@ export interface paths {
          * @description Organization admins and owners, with a session. Runs the tool-calling test on the connection and saves nothing (D-AS-24). A provider failure is `ok: false`, not an error status.
          */
         post: operations["post_org_assistant_test"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/orgs/{org}/audit-events": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List an organization's audit records
+         * @description Newest first. Admins and owners, with a session or a personal access token. Needs the `audit_log` feature: without it, 403 `plan_required`.
+         */
+        get: operations["list_org_audit_events"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/orgs/{org}/audit-events/export": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Export an organization's audit records
+         * @description The records of the filters as CSV or NDJSON, newest first, at most 1,000,000 of them. The export is recorded first as `audit.export_started`. Admins and owners; needs the `audit_log` feature (403 `plan_required` otherwise).
+         */
+        get: operations["get_org_audit_export"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/orgs/{org}/audit-stream": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get the organization's audit stream
+         * @description Owners only, with a session, and the `audit_log` feature (403 `plan_required` otherwise). 404 when no destination is set. 409 when the stored settings cannot be read.
+         */
+        get: operations["get_org_audit_stream"];
+        /**
+         * Create or update the organization's audit stream
+         * @description Owners only, with a session, and the `audit_log` feature. Creating returns 201 with the signing secret, shown once; updating returns 200 and keeps the secret. The URL must be https and carry no user information; the header is one name and value (400 `field_error`). Records are sent from the destination's creation on: history is not replayed.
+         */
+        put: operations["put_org_audit_stream"];
+        post?: never;
+        /**
+         * Remove the organization's audit stream
+         * @description Owners only, with a session. Works without the feature, so a lapsed org can still remove it. Records already sent are not affected.
+         */
+        delete: operations["delete_org_audit_stream"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/orgs/{org}/audit-stream/secret": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Rotate the organization's signing secret
+         * @description Owners only, with a session, and the `audit_log` feature. The new secret is shown once. 409 when the stored settings cannot be read.
+         */
+        post: operations["rotate_org_audit_stream_secret"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/orgs/{org}/audit-stream/test": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Send a test line to the organization's audit stream
+         * @description Owners only, with a session, and the `audit_log` feature. Sends one signed test line now and does not move the cursor. Reports only whether the endpoint answered, and with which status: a connection error reads as not reached.
+         */
+        post: operations["test_org_audit_stream"];
         delete?: never;
         options?: never;
         head?: never;
@@ -1242,6 +1458,114 @@ export interface paths {
         put?: never;
         post?: never;
         delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/orgs/{org}/scim": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Read the org's SCIM provisioning settings
+         * @description The enabled flag, the default role, the SCIM base URL, the verified SCIM domains and the live tokens, without their secrets. Owners only, session only (D-EA-15). Needs no feature, so the page stays readable after a lapse.
+         */
+        get: operations["get_org_scim"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        /**
+         * Turn the org's SCIM provisioning on or off, or change the default role
+         * @description Turning SCIM on or changing the default role needs the `scim` feature, and turning SCIM on needs a verified domain (409). Turning it off always works. The default role is `viewer` or `member`. While SCIM is on, managed members cannot be changed by hand (D-EA-18). Owners only, session only.
+         */
+        patch: operations["update_org_scim"];
+        trace?: never;
+    };
+    "/api/v1/orgs/{org}/scim/groups": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List the SCIM groups and their role mappings
+         * @description Every SCIM group of the org, by display name, with its member count and its role mapping (D-EA-14). Owners only, session only.
+         */
+        get: operations["list_org_scim_groups"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/orgs/{org}/scim/groups/{id}/mapping": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        /**
+         * Set a SCIM group's role mapping
+         * @description Replaces the group's org role and project roles (D-EA-14). A member gets the highest of their groups' roles, else the default role; owners are never changed. The org role is `admin`, `member` or `viewer`; `owner` is a 400. Raising a role needs the `scim` feature, and writing a project role needs `project_roles`; lowering works without them (D-EA-19). A mapping with neither an org role nor a project is a 400: delete it instead. While SCIM is on, the group's members are recomputed. Owners only, session only.
+         */
+        put: operations["put_org_scim_group_mapping"];
+        post?: never;
+        /**
+         * Remove a SCIM group's role mapping
+         * @description The group's members get the roles of their other groups, else the default role. Always works, so a lapsed org can take roles away. A group with no mapping also answers 204. Owners only, session only.
+         */
+        delete: operations["delete_org_scim_group_mapping"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/orgs/{org}/scim/tokens": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Create a SCIM bearer token
+         * @description Creates a `scim-cetra-…` token for the identity provider. The secret is in this response only. At most two tokens are live at once (409 otherwise). Needs the `scim` feature. Owners only, session only.
+         */
+        post: operations["create_org_scim_token"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/orgs/{org}/scim/tokens/{id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        /**
+         * Revoke a SCIM bearer token
+         * @description The token stops working at once. Works without the feature. Owners only, session only.
+         */
+        delete: operations["revoke_org_scim_token"];
         options?: never;
         head?: never;
         patch?: never;
@@ -4708,6 +5032,137 @@ export interface components {
          * @enum {string}
          */
         AssistantUnavailable: "forbidden" | "restore_mode" | "disabled" | "no_connection";
+        /** @description The actor of a record. */
+        AuditActor: {
+            /** @description The personal access token id, when a user acted through one. */
+            credential_id?: string;
+            /** @description The email, for a present user only. */
+            email?: string;
+            /** @description The user, key, token id. Omitted when there is none. */
+            id?: string;
+            /** @description `user`, `api_key`, `scim_token`, `control_plane`, `cli`, `system` or `anonymous`. */
+            kind: string;
+            /** @description The display name, when it resolves. */
+            name?: string;
+            status: components["schemas"]["AuditRefStatus"];
+            /** @description `session` or `pat` for a user. */
+            via?: string;
+        };
+        /** @description One audit record. */
+        AuditEvent: {
+            /** @description The action name, `group.name`. */
+            action: string;
+            actor: components["schemas"]["AuditActor"];
+            /**
+             * Format: date-time
+             * @description When the action happened.
+             */
+            at: string;
+            /** @description The action's details: ids, names of changed fields, roles, counts. Never payload. */
+            details: Record<string, never>;
+            /**
+             * Format: uuid
+             * @description Record id.
+             */
+            id: string;
+            /** @description The client IP, when recorded. */
+            ip?: string;
+            outcome: components["schemas"]["AuditOutcome"];
+            /** @description The project the action belongs to. */
+            project?: components["schemas"]["AuditRef"];
+            /** @description The object the action changed. */
+            target?: components["schemas"]["AuditRef"];
+            /** @description The client's user agent, when recorded. */
+            user_agent?: string;
+        };
+        /** @description One page of results. `next_cursor` is null when there is no next page. */
+        AuditEventPage: {
+            /** @description Items in this page. */
+            data: components["schemas"]["AuditEvent"][];
+            /** @description Opaque cursor for the next page, or null when this is the last page. */
+            next_cursor: string | null;
+        };
+        /**
+         * @description The export format (plan step 6).
+         * @enum {string}
+         */
+        AuditExportFormat: "csv" | "ndjson";
+        /**
+         * Format: int32
+         * @description Page size of the audit list: 1 to 500, default 100 (plan P-1).
+         * @default 100
+         */
+        AuditLimit: number;
+        /**
+         * @description Whether the action succeeded.
+         * @enum {string}
+         */
+        AuditOutcome: "success" | "failure";
+        /** @description An object a record names: its target, or the project of a record. */
+        AuditRef: {
+            /** @description The email, for a present user only. */
+            email?: string;
+            id: string;
+            /** @description The target kind, as the record stores it. */
+            kind: string;
+            /** @description The display name, when it resolves. */
+            name?: string;
+            status: components["schemas"]["AuditRefStatus"];
+        };
+        /**
+         * @description How a referenced user, key, project or provider resolves at read time (plan P-3).
+         * @enum {string}
+         */
+        AuditRefStatus: "present" | "former_member" | "deleted" | "unresolved";
+        /**
+         * @description The SIEM stream destination of an org or of the instance (track EA M4, D-EA-11). The URL,
+         *     the signing secret and the header value are never returned. An absent optional field is
+         *     omitted, never `null` (spec 09).
+         */
+        AuditStream: {
+            /** @description Whether records are sent. */
+            enabled: boolean;
+            /** @description The optional header's name. Its value is never returned. Omitted when there is none. */
+            header_name?: string;
+            status: components["schemas"]["AuditStreamStatus"];
+            /** @description The endpoint's host. */
+            url_host: string;
+        };
+        /** @description How the stream is doing. Records are sent oldest first, at least once. */
+        AuditStreamStatus: {
+            /**
+             * Format: date-time
+             * @description When the current run of failures began. Omitted when the last attempt worked.
+             */
+            failing_since?: string;
+            /**
+             * Format: int64
+             * @description Records not yet accepted by the endpoint.
+             */
+            lag: number;
+            /** @description The class of the last failure, when the last attempt failed. Never a URL or a value. */
+            last_error?: string;
+            /**
+             * Format: date-time
+             * @description The last delivery the endpoint accepted. Omitted until the first one.
+             */
+            last_success_at?: string;
+            /** @description Whether retention deleted records before they were sent. */
+            lost_records: boolean;
+        };
+        /**
+         * @description The answer to a test send. Only reachability: connection errors and timeouts both read as
+         *     not reached (plan P-7).
+         */
+        AuditStreamTest: {
+            /** @description Whether the endpoint answered. */
+            reached: boolean;
+            /**
+             * Format: int32
+             * @description The HTTP status it answered with. Omitted when it did not answer.
+             */
+            status?: number;
+        };
         /**
          * @description Login methods the UI should offer.
          *
@@ -5486,6 +5941,11 @@ export interface components {
             /** @description Opaque UI state: list-page URL params, or `{query, params, range}` / `{query, params, from, to}` for SQL (D-H-7). */
             state: Record<string, never>;
         };
+        /** @description `POST /api/v1/orgs/{org}/scim/tokens` body. */
+        CreateScimTokenRequest: {
+            /** @description Display name, 1 to 100 characters. */
+            name: string;
+        };
         /** @description `POST /api/v1/projects/{project}/score-definitions` body. */
         CreateScoreDefinitionRequest: {
             /** @description Labels of a categorical score: 1 to 100, unique. Only for categorical scores. */
@@ -5545,6 +6005,12 @@ export interface components {
             /** @description The bearer value. Shown only in this response. */
             secret: string;
         };
+        /** @description `201` of the create: the destination, and its signing secret, which is shown only here. */
+        CreatedAuditStream: {
+            /** @description The signing secret: verify `X-Cetra-Signature` with it. Shown once. */
+            secret: string;
+            stream: components["schemas"]["AuditStream"];
+        };
         /**
          * @description `POST /api/v1/orgs/{org}/invites` returns 201.
          *
@@ -5562,6 +6028,13 @@ export interface components {
             secret: string;
             /** @description The stored token, without the secret. */
             token: components["schemas"]["PersonalToken"];
+        };
+        /** @description The answer to a token create. The secret is shown only here. */
+        CreatedScimToken: {
+            /** @description The bearer value (`scim-cetra-…`). Shown only in this response. */
+            secret: string;
+            /** @description The stored token, without the secret. */
+            token: components["schemas"]["ScimToken"];
         };
         /** @description A dashboard with its definition. */
         Dashboard: {
@@ -6922,7 +7395,7 @@ export interface components {
          * @description A feature an org may be entitled to. Names are append-only (D-P-12).
          * @enum {string}
          */
-        Feature: "retention_management" | "project_roles" | "sso_enforcement" | "org_sso" | "saml";
+        Feature: "retention_management" | "project_roles" | "sso_enforcement" | "org_sso" | "saml" | "scim" | "audit_log";
         /** @description `POST /api/public/feedback` body (spec 06 § End-user feedback). */
         FeedbackRequest: {
             /** @description Free-text comment. */
@@ -8411,8 +8884,17 @@ export interface components {
          *     Spec README § Cross-cutting conventions and decision D61.
          */
         OrgId: string;
-        /** @description The org's limits (D-P-13). An omitted limit is unlimited. */
+        /**
+         * @description The org's limits (D-P-13). An omitted limit is unlimited, except `audit_retention_days`
+         *     (see its doc).
+         */
         OrgLimits: {
+            /**
+             * Format: int64
+             * @description Audit log retention in days. Omitted: the instance's `audit.retention_days`;
+             *     0: kept forever.
+             */
+            audit_retention_days?: number;
             /**
              * Format: int64
              * @description How many days of data the org may read.
@@ -8482,6 +8964,11 @@ export interface components {
             joined_at: string;
             /** @description Org role. */
             role: components["schemas"]["OrgRole"];
+            /**
+             * @description The org's identity provider manages this member: its role, overrides and removal
+             *     are locked (D-EA-18). False when SCIM is off or not entitled.
+             */
+            scim_managed: boolean;
             /** @description The member. */
             user: components["schemas"]["MemberUser"];
         };
@@ -8951,7 +9438,7 @@ export interface components {
          *     Spec 09 § Conventions. Later endpoints add codes.
          * @enum {string}
          */
-        ProblemCode: "bad_request" | "invalid_filter" | "query_failed" | "query_timeout" | "query_too_large" | "too_many_traces" | "too_many_items" | "busy" | "restore_mode" | "unauthorized" | "forbidden" | "sso_required" | "email_not_verified" | "plan_limit" | "plan_required" | "owner_not_allowed" | "not_found" | "method_not_allowed" | "payload_too_large" | "unsupported_media_type" | "range_not_satisfiable" | "conflict" | "authorization_pending" | "slow_down" | "access_denied" | "expired_token" | "quota_exceeded" | "rate_limited" | "internal";
+        ProblemCode: "bad_request" | "invalid_filter" | "query_failed" | "query_timeout" | "query_too_large" | "too_many_traces" | "too_many_items" | "busy" | "restore_mode" | "unauthorized" | "forbidden" | "sso_required" | "email_not_verified" | "plan_limit" | "plan_required" | "scim_managed" | "owner_not_allowed" | "not_found" | "method_not_allowed" | "payload_too_large" | "unsupported_media_type" | "range_not_satisfiable" | "conflict" | "authorization_pending" | "slow_down" | "access_denied" | "expired_token" | "quota_exceeded" | "rate_limited" | "internal";
         /**
          * @description A project the caller can see.
          *
@@ -9327,6 +9814,21 @@ export interface components {
             model?: string;
         };
         /**
+         * @description `PUT` body of the stream. The URL must be https and carry no user information; the optional
+         *     header is one name and one value, sealed and never returned. Without `header_value`, a
+         *     stored header keeps its value when the name is unchanged.
+         */
+        PutAuditStream: {
+            /** @description Whether records are sent. */
+            enabled: boolean;
+            /** @description The optional header's name, for example `Authorization`. */
+            header_name?: string;
+            /** @description The header's value, at most 1,024 bytes. Never returned. */
+            header_value?: string;
+            /** @description The endpoint, an https URL of at most 2,048 bytes. Never returned. */
+            url: string;
+        };
+        /**
          * @description `PUT /api/v1/orgs/{org}/sso/saml` (D-SA-18). Exactly one source: `metadata_url`,
          *     `metadata_xml`, or `idp_entity_id` + `sso_url` + `certificates`. With none of them, only the
          *     settings of the org's SAML provider are saved. `Debug` omits the metadata and the fields.
@@ -9368,6 +9870,16 @@ export interface components {
         PutOrgTokenRequest: {
             /** @description A signed `kind: org` token. Never logged. */
             token: string;
+        };
+        /**
+         * @description `PUT /api/v1/orgs/{org}/scim/groups/{id}/mapping` body. The new mapping replaces the old
+         *     one; a mapping with neither an org role nor a project is refused (use DELETE).
+         */
+        PutScimGroupMapping: {
+            /** @description The org role the group gives: `admin`, `member` or `viewer`. Omit it to give none. */
+            org_role?: components["schemas"]["OrgRole"];
+            /** @description One project role per project, at most 200. Omit the list to map no project. */
+            projects?: components["schemas"]["ScimProjectRole"][];
         };
         /** @description Item counts of a queue, by status. */
         QueueCounts: {
@@ -9541,6 +10053,10 @@ export interface components {
             value_num?: number;
             /** @description The label of a categorical score or the text of a text score. Omitted when none. */
             value_str?: string;
+        };
+        /** @description `POST …/secret`: the new signing secret, shown once. */
+        RotatedAuditStreamSecret: {
+            secret: string;
         };
         /** @description The finished jobs of one online rule in one hour. */
         RuleJobsHour: {
@@ -9731,6 +10247,96 @@ export interface components {
             functions: components["schemas"]["FunctionSchema"][];
             /** @description Logical views. */
             views: components["schemas"]["ViewSchema"][];
+        };
+        /**
+         * @description One SCIM group of the org, with its role mapping (D-EA-14). The display name is shown to
+         *     owners on their settings page only; it is never logged or recorded.
+         */
+        ScimGroup: {
+            /** @description The name the identity provider gave the group. */
+            display_name: string;
+            /** @description The identity provider's external id, when it sent one. Absent when it did not. */
+            external_id?: string;
+            /**
+             * Format: uuid
+             * @description Group id.
+             */
+            id: string;
+            /** @description The group's role mapping. Absent when the group maps nothing. */
+            mapping?: components["schemas"]["ScimGroupMapping"];
+            /**
+             * Format: int32
+             * @description How many SCIM users are in the group.
+             */
+            member_count: number;
+        };
+        /** @description `GET /api/v1/orgs/{org}/scim/groups`: every SCIM group of the org, ordered by display name. */
+        ScimGroupList: {
+            /** @description The groups. */
+            groups: components["schemas"]["ScimGroup"][];
+        };
+        /**
+         * @description A group's role mapping: an org role and one project role per project. Members get the
+         *     highest of their groups' roles (D-EA-14).
+         */
+        ScimGroupMapping: {
+            /** @description The org role the group gives: `admin`, `member` or `viewer`. `null` when it gives none. */
+            org_role?: components["schemas"]["OrgRole"];
+            /** @description One project role per project. Empty when the group maps no project. */
+            projects: components["schemas"]["ScimProjectRole"][];
+        };
+        /** @description A project role of a group mapping. */
+        ScimProjectRole: {
+            /**
+             * Format: uuid
+             * @description Project id.
+             */
+            project_id: string;
+            /** @description The project role: `admin`, `member`, `viewer` or `none` (hidden). */
+            role: components["schemas"]["ProjectRoleOverride"];
+        };
+        /** @description `GET` and `PATCH /api/v1/orgs/{org}/scim`. */
+        ScimSettings: {
+            /** @description The SCIM base URL to give the identity provider: `<public_url>/scim/v2`. */
+            base_url: string;
+            /** @description The org role a newly provisioned member gets: `viewer` or `member`. */
+            default_role: components["schemas"]["OrgRole"];
+            /** @description Whether SCIM provisioning is on. Readable without the `scim` feature. */
+            enabled: boolean;
+            /** @description The live tokens, newest first. */
+            tokens: components["schemas"]["ScimToken"][];
+            /**
+             * Format: int32
+             * @description The org's verified SCIM domains.
+             */
+            verified_domains: number;
+        };
+        /** @description A SCIM bearer token. Its secret is not a field. */
+        ScimToken: {
+            /**
+             * Format: date-time
+             * @description Creation time. JSON is RFC 3339.
+             */
+            created_at: string;
+            /**
+             * Format: uuid
+             * @description User who created the token. Omitted when that user is unknown.
+             */
+            created_by?: string;
+            /**
+             * Format: uuid
+             * @description Token id.
+             */
+            id: string;
+            /**
+             * Format: date-time
+             * @description Last successful authentication. Omitted until one has happened.
+             */
+            last_used_at?: string;
+            /** @description Display name. */
+            name: string;
+            /** @description Type prefix plus the first 6 random characters. */
+            prefix: string;
         };
         /**
          * @description One score row.
@@ -11424,6 +12030,13 @@ export interface components {
             shared?: boolean;
             /** @description Opaque UI state: list-page URL params, or `{query, params, range}` / `{query, params, from, to}` for SQL (D-H-7). */
             state?: Record<string, never>;
+        };
+        /** @description `PATCH /api/v1/orgs/{org}/scim` body. Absent fields keep their value. */
+        UpdateScimSettings: {
+            /** @description The role of newly provisioned members: `viewer` or `member`. */
+            default_role?: components["schemas"]["OrgRole"];
+            /** @description Turns SCIM on or off. */
+            enabled?: boolean;
         };
         /**
          * @description `PATCH /api/v1/projects/{project}/score-definitions/{id}` body. Absent means unchanged.
@@ -13569,6 +14182,482 @@ export interface operations {
             };
         };
     };
+    list_admin_audit_events: {
+        parameters: {
+            query?: {
+                /** @description Records at or after this time (RFC 3339 or epoch milliseconds). */
+                from?: components["schemas"]["TimeParam"];
+                /** @description Records before this time (RFC 3339 or epoch milliseconds). */
+                to?: components["schemas"]["TimeParam"];
+                /** @description Comma-separated action names or group prefixes, at most 20 entries. */
+                action?: string;
+                /** @description The actor's id: user, API key or token id. At most 64 characters. */
+                actor_id?: string;
+                /** @description The target's id. At most 64 characters. */
+                target_id?: string;
+                /** @description Records of this project. The instance log has none, so it matches nothing there. */
+                project_id?: string;
+                /** @description `success` or `failure`. */
+                outcome?: components["schemas"]["AuditOutcome"];
+                /** @description Maximum number of records (1–500, default 100). */
+                limit?: components["schemas"]["AuditLimit"];
+                /** @description Opaque cursor from a previous page. */
+                cursor?: string;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description One page of records, newest first. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AuditEventPage"];
+                };
+            };
+            /** @description The request is malformed or a filter is invalid. */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No credentials, or the credentials are invalid. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The credentials do not allow this operation, or the organization's plan does not include it (code plan_required). */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Too many requests. */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    get_admin_audit_export: {
+        parameters: {
+            query: {
+                /** @description Records at or after this time (RFC 3339 or epoch milliseconds). */
+                from?: components["schemas"]["TimeParam"];
+                /** @description Records before this time (RFC 3339 or epoch milliseconds). */
+                to?: components["schemas"]["TimeParam"];
+                /** @description Comma-separated action names or group prefixes, at most 20 entries. */
+                action?: string;
+                /** @description The actor's id. At most 64 characters. */
+                actor_id?: string;
+                /** @description The target's id. At most 64 characters. */
+                target_id?: string;
+                /** @description Records of this project. */
+                project_id?: string;
+                /** @description `success` or `failure`. */
+                outcome?: components["schemas"]["AuditOutcome"];
+                /** @description `csv` or `ndjson`. */
+                format: components["schemas"]["AuditExportFormat"];
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The records, one per line (NDJSON) or one per row (CSV), with `Content-Disposition: attachment`. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/x-ndjson": string;
+                    "text/csv": string;
+                };
+            };
+            /** @description The request is malformed or a filter is invalid. */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No credentials, or the credentials are invalid. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The credentials do not allow this operation, or the organization's plan does not include it (code plan_required). */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Too many requests. */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    get_admin_audit_stream: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The destination and its status. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AuditStream"];
+                };
+            };
+            /** @description No credentials, or the credentials are invalid. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The credentials do not allow this operation, or the organization's plan does not include it (code plan_required). */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The resource does not exist. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The request conflicts with the current state. */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Too many requests. */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    put_admin_audit_stream: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["PutAuditStream"];
+            };
+        };
+        responses: {
+            /** @description The updated destination. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AuditStream"];
+                };
+            };
+            /** @description The created destination and its signing secret. */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["CreatedAuditStream"];
+                };
+            };
+            /** @description The request is malformed or a filter is invalid. */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No credentials, or the credentials are invalid. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The credentials do not allow this operation, or the organization's plan does not include it (code plan_required). */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The request conflicts with the current state. */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Too many requests. */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    delete_admin_audit_stream: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Removed. The stream stops. */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description No credentials, or the credentials are invalid. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The credentials do not allow this operation, or the organization's plan does not include it (code plan_required). */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The resource does not exist. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Too many requests. */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    rotate_admin_audit_stream_secret: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The new signing secret. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["RotatedAuditStreamSecret"];
+                };
+            };
+            /** @description No credentials, or the credentials are invalid. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The credentials do not allow this operation, or the organization's plan does not include it (code plan_required). */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The resource does not exist. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The request conflicts with the current state. */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Too many requests. */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    test_admin_audit_stream: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Whether the endpoint answered, and its status. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AuditStreamTest"];
+                };
+            };
+            /** @description The request is malformed or a filter is invalid. */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No credentials, or the credentials are invalid. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The credentials do not allow this operation, or the organization's plan does not include it (code plan_required). */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The resource does not exist. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Too many requests. */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
     get_admin_license: {
         parameters: {
             query?: never;
@@ -14986,6 +16075,530 @@ export interface operations {
             };
             /** @description The server is busy or a dependency is unavailable. Retry later. */
             503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    list_org_audit_events: {
+        parameters: {
+            query?: {
+                /** @description Records at or after this time (RFC 3339 or epoch milliseconds). */
+                from?: components["schemas"]["TimeParam"];
+                /** @description Records before this time (RFC 3339 or epoch milliseconds). */
+                to?: components["schemas"]["TimeParam"];
+                /** @description Comma-separated action names or group prefixes, at most 20 entries. */
+                action?: string;
+                /** @description The actor's id: user, API key or token id. At most 64 characters. */
+                actor_id?: string;
+                /** @description The target's id. At most 64 characters. */
+                target_id?: string;
+                /** @description Records of this project. The instance log has none, so it matches nothing there. */
+                project_id?: string;
+                /** @description `success` or `failure`. */
+                outcome?: components["schemas"]["AuditOutcome"];
+                /** @description Maximum number of records (1–500, default 100). */
+                limit?: components["schemas"]["AuditLimit"];
+                /** @description Opaque cursor from a previous page. */
+                cursor?: string;
+            };
+            header?: never;
+            path: {
+                /** @description Org UUID or slug. */
+                org: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description One page of records, newest first. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AuditEventPage"];
+                };
+            };
+            /** @description The request is malformed or a filter is invalid. */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No credentials, or the credentials are invalid. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The credentials do not allow this operation, or the organization's plan does not include it (code plan_required). */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The resource does not exist. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Too many requests. */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    get_org_audit_export: {
+        parameters: {
+            query: {
+                /** @description Records at or after this time (RFC 3339 or epoch milliseconds). */
+                from?: components["schemas"]["TimeParam"];
+                /** @description Records before this time (RFC 3339 or epoch milliseconds). */
+                to?: components["schemas"]["TimeParam"];
+                /** @description Comma-separated action names or group prefixes, at most 20 entries. */
+                action?: string;
+                /** @description The actor's id. At most 64 characters. */
+                actor_id?: string;
+                /** @description The target's id. At most 64 characters. */
+                target_id?: string;
+                /** @description Records of this project. */
+                project_id?: string;
+                /** @description `success` or `failure`. */
+                outcome?: components["schemas"]["AuditOutcome"];
+                /** @description `csv` or `ndjson`. */
+                format: components["schemas"]["AuditExportFormat"];
+            };
+            header?: never;
+            path: {
+                /** @description Org UUID or slug. */
+                org: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The records, one per line (NDJSON) or one per row (CSV), with `Content-Disposition: attachment`. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/x-ndjson": string;
+                    "text/csv": string;
+                };
+            };
+            /** @description The request is malformed or a filter is invalid. */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No credentials, or the credentials are invalid. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The credentials do not allow this operation, or the organization's plan does not include it (code plan_required). */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The resource does not exist. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Too many requests. */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    get_org_audit_stream: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Org UUID or slug. */
+                org: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The destination and its status. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AuditStream"];
+                };
+            };
+            /** @description No credentials, or the credentials are invalid. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The credentials do not allow this operation, or the organization's plan does not include it (code plan_required). */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The resource does not exist. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The request conflicts with the current state. */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Too many requests. */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    put_org_audit_stream: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Org UUID or slug. */
+                org: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["PutAuditStream"];
+            };
+        };
+        responses: {
+            /** @description The updated destination. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AuditStream"];
+                };
+            };
+            /** @description The created destination and its signing secret. */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["CreatedAuditStream"];
+                };
+            };
+            /** @description The request is malformed or a filter is invalid. */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No credentials, or the credentials are invalid. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The credentials do not allow this operation, or the organization's plan does not include it (code plan_required). */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The resource does not exist. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The request conflicts with the current state. */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Too many requests. */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    delete_org_audit_stream: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Org UUID or slug. */
+                org: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Removed. The stream stops. */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description No credentials, or the credentials are invalid. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The credentials do not allow this operation, or the organization's plan does not include it (code plan_required). */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The resource does not exist. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Too many requests. */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    rotate_org_audit_stream_secret: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Org UUID or slug. */
+                org: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The new signing secret. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["RotatedAuditStreamSecret"];
+                };
+            };
+            /** @description No credentials, or the credentials are invalid. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The credentials do not allow this operation, or the organization's plan does not include it (code plan_required). */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The resource does not exist. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The request conflicts with the current state. */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Too many requests. */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    test_org_audit_stream: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Org UUID or slug. */
+                org: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Whether the endpoint answered, and its status. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AuditStreamTest"];
+                };
+            };
+            /** @description The request is malformed or a filter is invalid. */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No credentials, or the credentials are invalid. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The credentials do not allow this operation, or the organization's plan does not include it (code plan_required). */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The resource does not exist. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Too many requests. */
+            429: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -16607,6 +18220,478 @@ export interface operations {
                 content: {
                     "application/problem+json": components["schemas"]["Problem"];
                 };
+            };
+            /** @description No credentials, or the credentials are invalid. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The credentials do not allow this operation, or the organization's plan does not include it (code plan_required). */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The resource does not exist. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Too many requests. */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    get_org_scim: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Org UUID or slug. */
+                org: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The org's SCIM settings. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ScimSettings"];
+                };
+            };
+            /** @description No credentials, or the credentials are invalid. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The credentials do not allow this operation, or the organization's plan does not include it (code plan_required). */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The resource does not exist. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Too many requests. */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    update_org_scim: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Org UUID or slug. */
+                org: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["UpdateScimSettings"];
+            };
+        };
+        responses: {
+            /** @description The SCIM settings. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ScimSettings"];
+                };
+            };
+            /** @description The request is malformed or a filter is invalid. */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No credentials, or the credentials are invalid. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The credentials do not allow this operation, or the organization's plan does not include it (code plan_required). */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The resource does not exist. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The request conflicts with the current state. */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Too many requests. */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    list_org_scim_groups: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Org UUID or slug. */
+                org: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The org's SCIM groups. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ScimGroupList"];
+                };
+            };
+            /** @description No credentials, or the credentials are invalid. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The credentials do not allow this operation, or the organization's plan does not include it (code plan_required). */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The resource does not exist. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Too many requests. */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    put_org_scim_group_mapping: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Org UUID or slug. */
+                org: string;
+                /** @description Group id. */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["PutScimGroupMapping"];
+            };
+        };
+        responses: {
+            /** @description The group, with its new mapping. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ScimGroup"];
+                };
+            };
+            /** @description The request is malformed or a filter is invalid. */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No credentials, or the credentials are invalid. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The credentials do not allow this operation, or the organization's plan does not include it (code plan_required). */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The resource does not exist. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Too many requests. */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    delete_org_scim_group_mapping: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Org UUID or slug. */
+                org: string;
+                /** @description Group id. */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The mapping is removed. */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description No credentials, or the credentials are invalid. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The credentials do not allow this operation, or the organization's plan does not include it (code plan_required). */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The resource does not exist. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Too many requests. */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    create_org_scim_token: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Org UUID or slug. */
+                org: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["CreateScimTokenRequest"];
+            };
+        };
+        responses: {
+            /** @description The token, with its secret. */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["CreatedScimToken"];
+                };
+            };
+            /** @description The request is malformed or a filter is invalid. */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No credentials, or the credentials are invalid. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The credentials do not allow this operation, or the organization's plan does not include it (code plan_required). */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The resource does not exist. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The request conflicts with the current state. */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Too many requests. */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    revoke_org_scim_token: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Org UUID or slug. */
+                org: string;
+                /** @description Token id. */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The token is revoked. */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
             };
             /** @description No credentials, or the credentials are invalid. */
             401: {

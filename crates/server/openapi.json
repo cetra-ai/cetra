@@ -2400,6 +2400,689 @@
         ]
       }
     },
+    "/api/v1/admin/audit-events": {
+      "get": {
+        "tags": [
+          "audit"
+        ],
+        "summary": "List the instance's audit records",
+        "description": "Newest first. Instance admins only, with a session. Needs a licence that lists `audit_log`, or a cloud cell (403 `plan_required` otherwise). Org records are never listed here.",
+        "operationId": "list_admin_audit_events",
+        "parameters": [
+          {
+            "name": "from",
+            "in": "query",
+            "description": "Records at or after this time (RFC 3339 or epoch milliseconds).",
+            "required": false,
+            "schema": {
+              "$ref": "#/components/schemas/TimeParam"
+            }
+          },
+          {
+            "name": "to",
+            "in": "query",
+            "description": "Records before this time (RFC 3339 or epoch milliseconds).",
+            "required": false,
+            "schema": {
+              "$ref": "#/components/schemas/TimeParam"
+            }
+          },
+          {
+            "name": "action",
+            "in": "query",
+            "description": "Comma-separated action names or group prefixes, at most 20 entries.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "actor_id",
+            "in": "query",
+            "description": "The actor's id: user, API key or token id. At most 64 characters.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "target_id",
+            "in": "query",
+            "description": "The target's id. At most 64 characters.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "project_id",
+            "in": "query",
+            "description": "Records of this project. The instance log has none, so it matches nothing there.",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "outcome",
+            "in": "query",
+            "description": "`success` or `failure`.",
+            "required": false,
+            "schema": {
+              "$ref": "#/components/schemas/AuditOutcome"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "description": "Maximum number of records (1–500, default 100).",
+            "required": false,
+            "schema": {
+              "$ref": "#/components/schemas/AuditLimit",
+              "default": 100
+            }
+          },
+          {
+            "name": "cursor",
+            "in": "query",
+            "description": "Opaque cursor from a previous page.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "One page of records, newest first.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AuditEventPage"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The request is malformed or a filter is invalid.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No credentials, or the credentials are invalid.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The credentials do not allow this operation, or the organization's plan does not include it (code plan_required).",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Too many requests.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "session": []
+          }
+        ]
+      }
+    },
+    "/api/v1/admin/audit-events/export": {
+      "get": {
+        "tags": [
+          "audit"
+        ],
+        "summary": "Export the instance's audit records",
+        "description": "The instance's records as CSV or NDJSON, newest first, at most 1,000,000 of them. Recorded first as `audit.export_started`. Instance admins only, with a session; needs the licence or a cloud cell (403 `plan_required` otherwise).",
+        "operationId": "get_admin_audit_export",
+        "parameters": [
+          {
+            "name": "from",
+            "in": "query",
+            "description": "Records at or after this time (RFC 3339 or epoch milliseconds).",
+            "required": false,
+            "schema": {
+              "$ref": "#/components/schemas/TimeParam"
+            }
+          },
+          {
+            "name": "to",
+            "in": "query",
+            "description": "Records before this time (RFC 3339 or epoch milliseconds).",
+            "required": false,
+            "schema": {
+              "$ref": "#/components/schemas/TimeParam"
+            }
+          },
+          {
+            "name": "action",
+            "in": "query",
+            "description": "Comma-separated action names or group prefixes, at most 20 entries.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "actor_id",
+            "in": "query",
+            "description": "The actor's id. At most 64 characters.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "target_id",
+            "in": "query",
+            "description": "The target's id. At most 64 characters.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "project_id",
+            "in": "query",
+            "description": "Records of this project.",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "outcome",
+            "in": "query",
+            "description": "`success` or `failure`.",
+            "required": false,
+            "schema": {
+              "$ref": "#/components/schemas/AuditOutcome"
+            }
+          },
+          {
+            "name": "format",
+            "in": "query",
+            "description": "`csv` or `ndjson`.",
+            "required": true,
+            "schema": {
+              "$ref": "#/components/schemas/AuditExportFormat"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The records, one per line (NDJSON) or one per row (CSV), with `Content-Disposition: attachment`.",
+            "content": {
+              "application/x-ndjson": {
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "text/csv": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The request is malformed or a filter is invalid.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No credentials, or the credentials are invalid.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The credentials do not allow this operation, or the organization's plan does not include it (code plan_required).",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Too many requests.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "session": []
+          }
+        ]
+      }
+    },
+    "/api/v1/admin/audit-stream": {
+      "get": {
+        "tags": [
+          "audit"
+        ],
+        "summary": "Get the instance's audit stream",
+        "description": "Instance admins only, with a session, and a licence that lists `audit_log`, or a cloud cell. 404 when no destination is set. 409 when the stored settings cannot be read.",
+        "operationId": "get_admin_audit_stream",
+        "responses": {
+          "200": {
+            "description": "The destination and its status.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AuditStream"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No credentials, or the credentials are invalid.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The credentials do not allow this operation, or the organization's plan does not include it (code plan_required).",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "The resource does not exist.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The request conflicts with the current state.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Too many requests.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "session": []
+          }
+        ]
+      },
+      "put": {
+        "tags": [
+          "audit"
+        ],
+        "summary": "Create or update the instance's audit stream",
+        "description": "Instance admins only, with a session, and a licence that lists `audit_log`, or a cloud cell. Same rules as the organization's stream. The stream carries the instance log only.",
+        "operationId": "put_admin_audit_stream",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PutAuditStream"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "The updated destination.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AuditStream"
+                }
+              }
+            }
+          },
+          "201": {
+            "description": "The created destination and its signing secret.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CreatedAuditStream"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The request is malformed or a filter is invalid.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No credentials, or the credentials are invalid.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The credentials do not allow this operation, or the organization's plan does not include it (code plan_required).",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The request conflicts with the current state.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Too many requests.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "session": []
+          }
+        ]
+      },
+      "delete": {
+        "tags": [
+          "audit"
+        ],
+        "summary": "Remove the instance's audit stream",
+        "description": "Instance admins only, with a session. Works without the licence.",
+        "operationId": "delete_admin_audit_stream",
+        "responses": {
+          "204": {
+            "description": "Removed. The stream stops."
+          },
+          "401": {
+            "description": "No credentials, or the credentials are invalid.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The credentials do not allow this operation, or the organization's plan does not include it (code plan_required).",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "The resource does not exist.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Too many requests.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "session": []
+          }
+        ]
+      }
+    },
+    "/api/v1/admin/audit-stream/secret": {
+      "post": {
+        "tags": [
+          "audit"
+        ],
+        "summary": "Rotate the instance's signing secret",
+        "description": "Instance admins only, with a session, and a licence that lists `audit_log`, or a cloud cell. The new secret is shown once. 409 when the stored settings cannot be read.",
+        "operationId": "rotate_admin_audit_stream_secret",
+        "responses": {
+          "200": {
+            "description": "The new signing secret.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RotatedAuditStreamSecret"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No credentials, or the credentials are invalid.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The credentials do not allow this operation, or the organization's plan does not include it (code plan_required).",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "The resource does not exist.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The request conflicts with the current state.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Too many requests.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "session": []
+          }
+        ]
+      }
+    },
+    "/api/v1/admin/audit-stream/test": {
+      "post": {
+        "tags": [
+          "audit"
+        ],
+        "summary": "Send a test line to the instance's audit stream",
+        "description": "Instance admins only, with a session, and a licence that lists `audit_log`, or a cloud cell. Reports only reachability, as the organization's test does.",
+        "operationId": "test_admin_audit_stream",
+        "responses": {
+          "200": {
+            "description": "Whether the endpoint answered, and its status.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AuditStreamTest"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The request is malformed or a filter is invalid.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No credentials, or the credentials are invalid.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The credentials do not allow this operation, or the organization's plan does not include it (code plan_required).",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "The resource does not exist.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Too many requests.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "session": []
+          }
+        ]
+      }
+    },
     "/api/v1/admin/license": {
       "get": {
         "tags": [
@@ -4170,6 +4853,782 @@
           },
           "503": {
             "description": "The server is busy or a dependency is unavailable. Retry later.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "session": []
+          }
+        ]
+      }
+    },
+    "/api/v1/orgs/{org}/audit-events": {
+      "get": {
+        "tags": [
+          "audit"
+        ],
+        "summary": "List an organization's audit records",
+        "description": "Newest first. Admins and owners, with a session or a personal access token. Needs the `audit_log` feature: without it, 403 `plan_required`.",
+        "operationId": "list_org_audit_events",
+        "parameters": [
+          {
+            "name": "org",
+            "in": "path",
+            "description": "Org UUID or slug.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "from",
+            "in": "query",
+            "description": "Records at or after this time (RFC 3339 or epoch milliseconds).",
+            "required": false,
+            "schema": {
+              "$ref": "#/components/schemas/TimeParam"
+            }
+          },
+          {
+            "name": "to",
+            "in": "query",
+            "description": "Records before this time (RFC 3339 or epoch milliseconds).",
+            "required": false,
+            "schema": {
+              "$ref": "#/components/schemas/TimeParam"
+            }
+          },
+          {
+            "name": "action",
+            "in": "query",
+            "description": "Comma-separated action names or group prefixes, at most 20 entries.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "actor_id",
+            "in": "query",
+            "description": "The actor's id: user, API key or token id. At most 64 characters.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "target_id",
+            "in": "query",
+            "description": "The target's id. At most 64 characters.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "project_id",
+            "in": "query",
+            "description": "Records of this project. The instance log has none, so it matches nothing there.",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "outcome",
+            "in": "query",
+            "description": "`success` or `failure`.",
+            "required": false,
+            "schema": {
+              "$ref": "#/components/schemas/AuditOutcome"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "description": "Maximum number of records (1–500, default 100).",
+            "required": false,
+            "schema": {
+              "$ref": "#/components/schemas/AuditLimit",
+              "default": 100
+            }
+          },
+          {
+            "name": "cursor",
+            "in": "query",
+            "description": "Opaque cursor from a previous page.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "One page of records, newest first.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AuditEventPage"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The request is malformed or a filter is invalid.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No credentials, or the credentials are invalid.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The credentials do not allow this operation, or the organization's plan does not include it (code plan_required).",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "The resource does not exist.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Too many requests.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/orgs/{org}/audit-events/export": {
+      "get": {
+        "tags": [
+          "audit"
+        ],
+        "summary": "Export an organization's audit records",
+        "description": "The records of the filters as CSV or NDJSON, newest first, at most 1,000,000 of them. The export is recorded first as `audit.export_started`. Admins and owners; needs the `audit_log` feature (403 `plan_required` otherwise).",
+        "operationId": "get_org_audit_export",
+        "parameters": [
+          {
+            "name": "org",
+            "in": "path",
+            "description": "Org UUID or slug.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "from",
+            "in": "query",
+            "description": "Records at or after this time (RFC 3339 or epoch milliseconds).",
+            "required": false,
+            "schema": {
+              "$ref": "#/components/schemas/TimeParam"
+            }
+          },
+          {
+            "name": "to",
+            "in": "query",
+            "description": "Records before this time (RFC 3339 or epoch milliseconds).",
+            "required": false,
+            "schema": {
+              "$ref": "#/components/schemas/TimeParam"
+            }
+          },
+          {
+            "name": "action",
+            "in": "query",
+            "description": "Comma-separated action names or group prefixes, at most 20 entries.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "actor_id",
+            "in": "query",
+            "description": "The actor's id. At most 64 characters.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "target_id",
+            "in": "query",
+            "description": "The target's id. At most 64 characters.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "project_id",
+            "in": "query",
+            "description": "Records of this project.",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "outcome",
+            "in": "query",
+            "description": "`success` or `failure`.",
+            "required": false,
+            "schema": {
+              "$ref": "#/components/schemas/AuditOutcome"
+            }
+          },
+          {
+            "name": "format",
+            "in": "query",
+            "description": "`csv` or `ndjson`.",
+            "required": true,
+            "schema": {
+              "$ref": "#/components/schemas/AuditExportFormat"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The records, one per line (NDJSON) or one per row (CSV), with `Content-Disposition: attachment`.",
+            "content": {
+              "application/x-ndjson": {
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "text/csv": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The request is malformed or a filter is invalid.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No credentials, or the credentials are invalid.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The credentials do not allow this operation, or the organization's plan does not include it (code plan_required).",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "The resource does not exist.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Too many requests.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/orgs/{org}/audit-stream": {
+      "get": {
+        "tags": [
+          "audit"
+        ],
+        "summary": "Get the organization's audit stream",
+        "description": "Owners only, with a session, and the `audit_log` feature (403 `plan_required` otherwise). 404 when no destination is set. 409 when the stored settings cannot be read.",
+        "operationId": "get_org_audit_stream",
+        "parameters": [
+          {
+            "name": "org",
+            "in": "path",
+            "description": "Org UUID or slug.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The destination and its status.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AuditStream"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No credentials, or the credentials are invalid.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The credentials do not allow this operation, or the organization's plan does not include it (code plan_required).",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "The resource does not exist.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The request conflicts with the current state.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Too many requests.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "session": []
+          }
+        ]
+      },
+      "put": {
+        "tags": [
+          "audit"
+        ],
+        "summary": "Create or update the organization's audit stream",
+        "description": "Owners only, with a session, and the `audit_log` feature. Creating returns 201 with the signing secret, shown once; updating returns 200 and keeps the secret. The URL must be https and carry no user information; the header is one name and value (400 `field_error`). Records are sent from the destination's creation on: history is not replayed.",
+        "operationId": "put_org_audit_stream",
+        "parameters": [
+          {
+            "name": "org",
+            "in": "path",
+            "description": "Org UUID or slug.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PutAuditStream"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "The updated destination.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AuditStream"
+                }
+              }
+            }
+          },
+          "201": {
+            "description": "The created destination and its signing secret.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CreatedAuditStream"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The request is malformed or a filter is invalid.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No credentials, or the credentials are invalid.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The credentials do not allow this operation, or the organization's plan does not include it (code plan_required).",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "The resource does not exist.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The request conflicts with the current state.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Too many requests.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "session": []
+          }
+        ]
+      },
+      "delete": {
+        "tags": [
+          "audit"
+        ],
+        "summary": "Remove the organization's audit stream",
+        "description": "Owners only, with a session. Works without the feature, so a lapsed org can still remove it. Records already sent are not affected.",
+        "operationId": "delete_org_audit_stream",
+        "parameters": [
+          {
+            "name": "org",
+            "in": "path",
+            "description": "Org UUID or slug.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Removed. The stream stops."
+          },
+          "401": {
+            "description": "No credentials, or the credentials are invalid.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The credentials do not allow this operation, or the organization's plan does not include it (code plan_required).",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "The resource does not exist.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Too many requests.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "session": []
+          }
+        ]
+      }
+    },
+    "/api/v1/orgs/{org}/audit-stream/secret": {
+      "post": {
+        "tags": [
+          "audit"
+        ],
+        "summary": "Rotate the organization's signing secret",
+        "description": "Owners only, with a session, and the `audit_log` feature. The new secret is shown once. 409 when the stored settings cannot be read.",
+        "operationId": "rotate_org_audit_stream_secret",
+        "parameters": [
+          {
+            "name": "org",
+            "in": "path",
+            "description": "Org UUID or slug.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The new signing secret.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RotatedAuditStreamSecret"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No credentials, or the credentials are invalid.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The credentials do not allow this operation, or the organization's plan does not include it (code plan_required).",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "The resource does not exist.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The request conflicts with the current state.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Too many requests.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "session": []
+          }
+        ]
+      }
+    },
+    "/api/v1/orgs/{org}/audit-stream/test": {
+      "post": {
+        "tags": [
+          "audit"
+        ],
+        "summary": "Send a test line to the organization's audit stream",
+        "description": "Owners only, with a session, and the `audit_log` feature. Sends one signed test line now and does not move the cursor. Reports only whether the endpoint answered, and with which status: a connection error reads as not reached.",
+        "operationId": "test_org_audit_stream",
+        "parameters": [
+          {
+            "name": "org",
+            "in": "path",
+            "description": "Org UUID or slug.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Whether the endpoint answered, and its status.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AuditStreamTest"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The request is malformed or a filter is invalid.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No credentials, or the credentials are invalid.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The credentials do not allow this operation, or the organization's plan does not include it (code plan_required).",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "The resource does not exist.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Too many requests.",
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -6351,6 +7810,644 @@
             }
           }
         }
+      }
+    },
+    "/api/v1/orgs/{org}/scim": {
+      "get": {
+        "tags": [
+          "orgs"
+        ],
+        "summary": "Read the org's SCIM provisioning settings",
+        "description": "The enabled flag, the default role, the SCIM base URL, the verified SCIM domains and the live tokens, without their secrets. Owners only, session only (D-EA-15). Needs no feature, so the page stays readable after a lapse.",
+        "operationId": "get_org_scim",
+        "parameters": [
+          {
+            "name": "org",
+            "in": "path",
+            "description": "Org UUID or slug.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The org's SCIM settings.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ScimSettings"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No credentials, or the credentials are invalid.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The credentials do not allow this operation, or the organization's plan does not include it (code plan_required).",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "The resource does not exist.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Too many requests.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "session": []
+          }
+        ]
+      },
+      "patch": {
+        "tags": [
+          "orgs"
+        ],
+        "summary": "Turn the org's SCIM provisioning on or off, or change the default role",
+        "description": "Turning SCIM on or changing the default role needs the `scim` feature, and turning SCIM on needs a verified domain (409). Turning it off always works. The default role is `viewer` or `member`. While SCIM is on, managed members cannot be changed by hand (D-EA-18). Owners only, session only.",
+        "operationId": "update_org_scim",
+        "parameters": [
+          {
+            "name": "org",
+            "in": "path",
+            "description": "Org UUID or slug.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UpdateScimSettings"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "The SCIM settings.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ScimSettings"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The request is malformed or a filter is invalid.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No credentials, or the credentials are invalid.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The credentials do not allow this operation, or the organization's plan does not include it (code plan_required).",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "The resource does not exist.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The request conflicts with the current state.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Too many requests.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "session": []
+          }
+        ]
+      }
+    },
+    "/api/v1/orgs/{org}/scim/groups": {
+      "get": {
+        "tags": [
+          "orgs"
+        ],
+        "summary": "List the SCIM groups and their role mappings",
+        "description": "Every SCIM group of the org, by display name, with its member count and its role mapping (D-EA-14). Owners only, session only.",
+        "operationId": "list_org_scim_groups",
+        "parameters": [
+          {
+            "name": "org",
+            "in": "path",
+            "description": "Org UUID or slug.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The org's SCIM groups.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ScimGroupList"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No credentials, or the credentials are invalid.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The credentials do not allow this operation, or the organization's plan does not include it (code plan_required).",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "The resource does not exist.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Too many requests.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "session": []
+          }
+        ]
+      }
+    },
+    "/api/v1/orgs/{org}/scim/groups/{id}/mapping": {
+      "put": {
+        "tags": [
+          "orgs"
+        ],
+        "summary": "Set a SCIM group's role mapping",
+        "description": "Replaces the group's org role and project roles (D-EA-14). A member gets the highest of their groups' roles, else the default role; owners are never changed. The org role is `admin`, `member` or `viewer`; `owner` is a 400. Raising a role needs the `scim` feature, and writing a project role needs `project_roles`; lowering works without them (D-EA-19). A mapping with neither an org role nor a project is a 400: delete it instead. While SCIM is on, the group's members are recomputed. Owners only, session only.",
+        "operationId": "put_org_scim_group_mapping",
+        "parameters": [
+          {
+            "name": "org",
+            "in": "path",
+            "description": "Org UUID or slug.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Group id.",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PutScimGroupMapping"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "The group, with its new mapping.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ScimGroup"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The request is malformed or a filter is invalid.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No credentials, or the credentials are invalid.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The credentials do not allow this operation, or the organization's plan does not include it (code plan_required).",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "The resource does not exist.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Too many requests.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "session": []
+          }
+        ]
+      },
+      "delete": {
+        "tags": [
+          "orgs"
+        ],
+        "summary": "Remove a SCIM group's role mapping",
+        "description": "The group's members get the roles of their other groups, else the default role. Always works, so a lapsed org can take roles away. A group with no mapping also answers 204. Owners only, session only.",
+        "operationId": "delete_org_scim_group_mapping",
+        "parameters": [
+          {
+            "name": "org",
+            "in": "path",
+            "description": "Org UUID or slug.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Group id.",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "The mapping is removed."
+          },
+          "401": {
+            "description": "No credentials, or the credentials are invalid.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The credentials do not allow this operation, or the organization's plan does not include it (code plan_required).",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "The resource does not exist.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Too many requests.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "session": []
+          }
+        ]
+      }
+    },
+    "/api/v1/orgs/{org}/scim/tokens": {
+      "post": {
+        "tags": [
+          "orgs"
+        ],
+        "summary": "Create a SCIM bearer token",
+        "description": "Creates a `scim-cetra-…` token for the identity provider. The secret is in this response only. At most two tokens are live at once (409 otherwise). Needs the `scim` feature. Owners only, session only.",
+        "operationId": "create_org_scim_token",
+        "parameters": [
+          {
+            "name": "org",
+            "in": "path",
+            "description": "Org UUID or slug.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateScimTokenRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "The token, with its secret.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CreatedScimToken"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The request is malformed or a filter is invalid.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No credentials, or the credentials are invalid.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The credentials do not allow this operation, or the organization's plan does not include it (code plan_required).",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "The resource does not exist.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The request conflicts with the current state.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Too many requests.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "session": []
+          }
+        ]
+      }
+    },
+    "/api/v1/orgs/{org}/scim/tokens/{id}": {
+      "delete": {
+        "tags": [
+          "orgs"
+        ],
+        "summary": "Revoke a SCIM bearer token",
+        "description": "The token stops working at once. Works without the feature. Owners only, session only.",
+        "operationId": "revoke_org_scim_token",
+        "parameters": [
+          {
+            "name": "org",
+            "in": "path",
+            "description": "Org UUID or slug.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Token id.",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "The token is revoked."
+          },
+          "401": {
+            "description": "No credentials, or the credentials are invalid.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The credentials do not allow this operation, or the organization's plan does not include it (code plan_required).",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "The resource does not exist.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Too many requests.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "session": []
+          }
+        ]
       }
     },
     "/api/v1/orgs/{org}/sso": {
@@ -28199,6 +30296,263 @@
           "no_connection"
         ]
       },
+      "AuditActor": {
+        "type": "object",
+        "description": "The actor of a record.",
+        "required": [
+          "kind",
+          "status"
+        ],
+        "properties": {
+          "credential_id": {
+            "type": "string",
+            "description": "The personal access token id, when a user acted through one."
+          },
+          "email": {
+            "type": "string",
+            "description": "The email, for a present user only."
+          },
+          "id": {
+            "type": "string",
+            "description": "The user, key, token id. Omitted when there is none."
+          },
+          "kind": {
+            "type": "string",
+            "description": "`user`, `api_key`, `scim_token`, `control_plane`, `cli`, `system` or `anonymous`."
+          },
+          "name": {
+            "type": "string",
+            "description": "The display name, when it resolves."
+          },
+          "status": {
+            "$ref": "#/components/schemas/AuditRefStatus"
+          },
+          "via": {
+            "type": "string",
+            "description": "`session` or `pat` for a user."
+          }
+        }
+      },
+      "AuditEvent": {
+        "type": "object",
+        "description": "One audit record.",
+        "required": [
+          "id",
+          "at",
+          "action",
+          "outcome",
+          "actor",
+          "details"
+        ],
+        "properties": {
+          "action": {
+            "type": "string",
+            "description": "The action name, `group.name`."
+          },
+          "actor": {
+            "$ref": "#/components/schemas/AuditActor"
+          },
+          "at": {
+            "type": "string",
+            "format": "date-time",
+            "description": "When the action happened."
+          },
+          "details": {
+            "type": "object",
+            "description": "The action's details: ids, names of changed fields, roles, counts. Never payload."
+          },
+          "id": {
+            "type": "string",
+            "format": "uuid",
+            "description": "Record id."
+          },
+          "ip": {
+            "type": "string",
+            "description": "The client IP, when recorded."
+          },
+          "outcome": {
+            "$ref": "#/components/schemas/AuditOutcome"
+          },
+          "project": {
+            "$ref": "#/components/schemas/AuditRef",
+            "description": "The project the action belongs to."
+          },
+          "target": {
+            "$ref": "#/components/schemas/AuditRef",
+            "description": "The object the action changed."
+          },
+          "user_agent": {
+            "type": "string",
+            "description": "The client's user agent, when recorded."
+          }
+        }
+      },
+      "AuditEventPage": {
+        "type": "object",
+        "description": "One page of results. `next_cursor` is null when there is no next page.",
+        "required": [
+          "data",
+          "next_cursor"
+        ],
+        "properties": {
+          "data": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/AuditEvent"
+            },
+            "description": "Items in this page."
+          },
+          "next_cursor": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Opaque cursor for the next page, or null when this is the last page."
+          }
+        }
+      },
+      "AuditExportFormat": {
+        "type": "string",
+        "description": "The export format (plan step 6).",
+        "enum": [
+          "csv",
+          "ndjson"
+        ]
+      },
+      "AuditLimit": {
+        "type": "integer",
+        "format": "int32",
+        "description": "Page size of the audit list: 1 to 500, default 100 (plan P-1).",
+        "default": 100,
+        "maximum": 500,
+        "minimum": 1
+      },
+      "AuditOutcome": {
+        "type": "string",
+        "description": "Whether the action succeeded.",
+        "enum": [
+          "success",
+          "failure"
+        ]
+      },
+      "AuditRef": {
+        "type": "object",
+        "description": "An object a record names: its target, or the project of a record.",
+        "required": [
+          "kind",
+          "id",
+          "status"
+        ],
+        "properties": {
+          "email": {
+            "type": "string",
+            "description": "The email, for a present user only."
+          },
+          "id": {
+            "type": "string"
+          },
+          "kind": {
+            "type": "string",
+            "description": "The target kind, as the record stores it."
+          },
+          "name": {
+            "type": "string",
+            "description": "The display name, when it resolves."
+          },
+          "status": {
+            "$ref": "#/components/schemas/AuditRefStatus"
+          }
+        }
+      },
+      "AuditRefStatus": {
+        "type": "string",
+        "description": "How a referenced user, key, project or provider resolves at read time (plan P-3).",
+        "enum": [
+          "present",
+          "former_member",
+          "deleted",
+          "unresolved"
+        ]
+      },
+      "AuditStream": {
+        "type": "object",
+        "description": "The SIEM stream destination of an org or of the instance (track EA M4, D-EA-11). The URL,\nthe signing secret and the header value are never returned. An absent optional field is\nomitted, never `null` (spec 09).",
+        "required": [
+          "url_host",
+          "enabled",
+          "status"
+        ],
+        "properties": {
+          "enabled": {
+            "type": "boolean",
+            "description": "Whether records are sent."
+          },
+          "header_name": {
+            "type": "string",
+            "description": "The optional header's name. Its value is never returned. Omitted when there is none."
+          },
+          "status": {
+            "$ref": "#/components/schemas/AuditStreamStatus"
+          },
+          "url_host": {
+            "type": "string",
+            "description": "The endpoint's host."
+          }
+        }
+      },
+      "AuditStreamStatus": {
+        "type": "object",
+        "description": "How the stream is doing. Records are sent oldest first, at least once.",
+        "required": [
+          "lag",
+          "lost_records"
+        ],
+        "properties": {
+          "failing_since": {
+            "type": "string",
+            "format": "date-time",
+            "description": "When the current run of failures began. Omitted when the last attempt worked."
+          },
+          "lag": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Records not yet accepted by the endpoint.",
+            "minimum": 0
+          },
+          "last_error": {
+            "type": "string",
+            "description": "The class of the last failure, when the last attempt failed. Never a URL or a value."
+          },
+          "last_success_at": {
+            "type": "string",
+            "format": "date-time",
+            "description": "The last delivery the endpoint accepted. Omitted until the first one."
+          },
+          "lost_records": {
+            "type": "boolean",
+            "description": "Whether retention deleted records before they were sent."
+          }
+        }
+      },
+      "AuditStreamTest": {
+        "type": "object",
+        "description": "The answer to a test send. Only reachability: connection errors and timeouts both read as\nnot reached (plan P-7).",
+        "required": [
+          "reached"
+        ],
+        "properties": {
+          "reached": {
+            "type": "boolean",
+            "description": "Whether the endpoint answered."
+          },
+          "status": {
+            "type": "integer",
+            "format": "int32",
+            "description": "The HTTP status it answered with. Omitted when it did not answer.",
+            "minimum": 0
+          }
+        }
+      },
       "AuthConfig": {
         "type": "object",
         "description": "Login methods the UI should offer.\n\n`GET /api/auth/config`. Spec 08 § Sign-up policy and spec 09 § Auth.",
@@ -29694,6 +32048,20 @@
         },
         "additionalProperties": false
       },
+      "CreateScimTokenRequest": {
+        "type": "object",
+        "description": "`POST /api/v1/orgs/{org}/scim/tokens` body.",
+        "required": [
+          "name"
+        ],
+        "properties": {
+          "name": {
+            "type": "string",
+            "description": "Display name, 1 to 100 characters."
+          }
+        },
+        "additionalProperties": false
+      },
       "CreateScoreDefinitionRequest": {
         "type": "object",
         "description": "`POST /api/v1/projects/{project}/score-definitions` body.",
@@ -29802,6 +32170,23 @@
           }
         }
       },
+      "CreatedAuditStream": {
+        "type": "object",
+        "description": "`201` of the create: the destination, and its signing secret, which is shown only here.",
+        "required": [
+          "stream",
+          "secret"
+        ],
+        "properties": {
+          "secret": {
+            "type": "string",
+            "description": "The signing secret: verify `X-Cetra-Signature` with it. Shown once."
+          },
+          "stream": {
+            "$ref": "#/components/schemas/AuditStream"
+          }
+        }
+      },
       "CreatedInvite": {
         "type": "object",
         "description": "`POST /api/v1/orgs/{org}/invites` returns 201.\n\n`accept_url` is the only response that contains the token.",
@@ -29834,6 +32219,24 @@
           },
           "token": {
             "$ref": "#/components/schemas/PersonalToken",
+            "description": "The stored token, without the secret."
+          }
+        }
+      },
+      "CreatedScimToken": {
+        "type": "object",
+        "description": "The answer to a token create. The secret is shown only here.",
+        "required": [
+          "token",
+          "secret"
+        ],
+        "properties": {
+          "secret": {
+            "type": "string",
+            "description": "The bearer value (`scim-cetra-…`). Shown only in this response."
+          },
+          "token": {
+            "$ref": "#/components/schemas/ScimToken",
             "description": "The stored token, without the secret."
           }
         }
@@ -32341,7 +34744,9 @@
           "project_roles",
           "sso_enforcement",
           "org_sso",
-          "saml"
+          "saml",
+          "scim",
+          "audit_log"
         ]
       },
       "FeedbackRequest": {
@@ -35036,8 +37441,14 @@
       },
       "OrgLimits": {
         "type": "object",
-        "description": "The org's limits (D-P-13). An omitted limit is unlimited.",
+        "description": "The org's limits (D-P-13). An omitted limit is unlimited, except `audit_retention_days`\n(see its doc).",
         "properties": {
+          "audit_retention_days": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Audit log retention in days. Omitted: the instance's `audit.retention_days`;\n0: kept forever.",
+            "minimum": 0
+          },
           "data_access_days": {
             "type": "integer",
             "format": "int64",
@@ -35112,7 +37523,8 @@
         "required": [
           "user",
           "role",
-          "joined_at"
+          "joined_at",
+          "scim_managed"
         ],
         "properties": {
           "joined_at": {
@@ -35123,6 +37535,10 @@
           "role": {
             "$ref": "#/components/schemas/OrgRole",
             "description": "Org role."
+          },
+          "scim_managed": {
+            "type": "boolean",
+            "description": "The org's identity provider manages this member: its role, overrides and removal\nare locked (D-EA-18). False when SCIM is off or not entitled."
           },
           "user": {
             "$ref": "#/components/schemas/MemberUser",
@@ -36083,6 +38499,7 @@
           "email_not_verified",
           "plan_limit",
           "plan_required",
+          "scim_managed",
           "owner_not_allowed",
           "not_found",
           "method_not_allowed",
@@ -36771,6 +39188,33 @@
         },
         "additionalProperties": false
       },
+      "PutAuditStream": {
+        "type": "object",
+        "description": "`PUT` body of the stream. The URL must be https and carry no user information; the optional\nheader is one name and one value, sealed and never returned. Without `header_value`, a\nstored header keeps its value when the name is unchanged.",
+        "required": [
+          "url",
+          "enabled"
+        ],
+        "properties": {
+          "enabled": {
+            "type": "boolean",
+            "description": "Whether records are sent."
+          },
+          "header_name": {
+            "type": "string",
+            "description": "The optional header's name, for example `Authorization`."
+          },
+          "header_value": {
+            "type": "string",
+            "description": "The header's value, at most 1,024 bytes. Never returned."
+          },
+          "url": {
+            "type": "string",
+            "description": "The endpoint, an https URL of at most 2,048 bytes. Never returned."
+          }
+        },
+        "additionalProperties": false
+      },
       "PutOrgSamlProvider": {
         "type": "object",
         "description": "`PUT /api/v1/orgs/{org}/sso/saml` (D-SA-18). Exactly one source: `metadata_url`,\n`metadata_xml`, or `idp_entity_id` + `sso_url` + `certificates`. With none of them, only the\nsettings of the org's SAML provider are saved. `Debug` omits the metadata and the fields.",
@@ -36864,6 +39308,24 @@
           "token": {
             "type": "string",
             "description": "A signed `kind: org` token. Never logged."
+          }
+        },
+        "additionalProperties": false
+      },
+      "PutScimGroupMapping": {
+        "type": "object",
+        "description": "`PUT /api/v1/orgs/{org}/scim/groups/{id}/mapping` body. The new mapping replaces the old\none; a mapping with neither an org role nor a project is refused (use DELETE).",
+        "properties": {
+          "org_role": {
+            "$ref": "#/components/schemas/OrgRole",
+            "description": "The org role the group gives: `admin`, `member` or `viewer`. Omit it to give none."
+          },
+          "projects": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ScimProjectRole"
+            },
+            "description": "One project role per project, at most 200. Omit the list to map no project."
           }
         },
         "additionalProperties": false
@@ -37176,6 +39638,18 @@
           "value_str": {
             "type": "string",
             "description": "The label of a categorical score or the text of a text score. Omitted when none."
+          }
+        }
+      },
+      "RotatedAuditStreamSecret": {
+        "type": "object",
+        "description": "`POST …/secret`: the new signing secret, shown once.",
+        "required": [
+          "secret"
+        ],
+        "properties": {
+          "secret": {
+            "type": "string"
           }
         }
       },
@@ -37504,6 +39978,173 @@
               "$ref": "#/components/schemas/ViewSchema"
             },
             "description": "Logical views."
+          }
+        }
+      },
+      "ScimGroup": {
+        "type": "object",
+        "description": "One SCIM group of the org, with its role mapping (D-EA-14). The display name is shown to\nowners on their settings page only; it is never logged or recorded.",
+        "required": [
+          "id",
+          "display_name",
+          "member_count"
+        ],
+        "properties": {
+          "display_name": {
+            "type": "string",
+            "description": "The name the identity provider gave the group."
+          },
+          "external_id": {
+            "type": "string",
+            "description": "The identity provider's external id, when it sent one. Absent when it did not."
+          },
+          "id": {
+            "type": "string",
+            "format": "uuid",
+            "description": "Group id."
+          },
+          "mapping": {
+            "$ref": "#/components/schemas/ScimGroupMapping",
+            "description": "The group's role mapping. Absent when the group maps nothing."
+          },
+          "member_count": {
+            "type": "integer",
+            "format": "int32",
+            "description": "How many SCIM users are in the group.",
+            "minimum": 0
+          }
+        }
+      },
+      "ScimGroupList": {
+        "type": "object",
+        "description": "`GET /api/v1/orgs/{org}/scim/groups`: every SCIM group of the org, ordered by display name.",
+        "required": [
+          "groups"
+        ],
+        "properties": {
+          "groups": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ScimGroup"
+            },
+            "description": "The groups."
+          }
+        }
+      },
+      "ScimGroupMapping": {
+        "type": "object",
+        "description": "A group's role mapping: an org role and one project role per project. Members get the\nhighest of their groups' roles (D-EA-14).",
+        "required": [
+          "projects"
+        ],
+        "properties": {
+          "org_role": {
+            "$ref": "#/components/schemas/OrgRole",
+            "description": "The org role the group gives: `admin`, `member` or `viewer`. `null` when it gives none."
+          },
+          "projects": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ScimProjectRole"
+            },
+            "description": "One project role per project. Empty when the group maps no project."
+          }
+        }
+      },
+      "ScimProjectRole": {
+        "type": "object",
+        "description": "A project role of a group mapping.",
+        "required": [
+          "project_id",
+          "role"
+        ],
+        "properties": {
+          "project_id": {
+            "type": "string",
+            "format": "uuid",
+            "description": "Project id."
+          },
+          "role": {
+            "$ref": "#/components/schemas/ProjectRoleOverride",
+            "description": "The project role: `admin`, `member`, `viewer` or `none` (hidden)."
+          }
+        }
+      },
+      "ScimSettings": {
+        "type": "object",
+        "description": "`GET` and `PATCH /api/v1/orgs/{org}/scim`.",
+        "required": [
+          "enabled",
+          "default_role",
+          "base_url",
+          "verified_domains",
+          "tokens"
+        ],
+        "properties": {
+          "base_url": {
+            "type": "string",
+            "description": "The SCIM base URL to give the identity provider: `<public_url>/scim/v2`."
+          },
+          "default_role": {
+            "$ref": "#/components/schemas/OrgRole",
+            "description": "The org role a newly provisioned member gets: `viewer` or `member`."
+          },
+          "enabled": {
+            "type": "boolean",
+            "description": "Whether SCIM provisioning is on. Readable without the `scim` feature."
+          },
+          "tokens": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ScimToken"
+            },
+            "description": "The live tokens, newest first."
+          },
+          "verified_domains": {
+            "type": "integer",
+            "format": "int32",
+            "description": "The org's verified SCIM domains.",
+            "minimum": 0
+          }
+        }
+      },
+      "ScimToken": {
+        "type": "object",
+        "description": "A SCIM bearer token. Its secret is not a field.",
+        "required": [
+          "id",
+          "name",
+          "prefix",
+          "created_at"
+        ],
+        "properties": {
+          "created_at": {
+            "type": "string",
+            "format": "date-time",
+            "description": "Creation time. JSON is RFC 3339."
+          },
+          "created_by": {
+            "type": "string",
+            "format": "uuid",
+            "description": "User who created the token. Omitted when that user is unknown."
+          },
+          "id": {
+            "type": "string",
+            "format": "uuid",
+            "description": "Token id."
+          },
+          "last_used_at": {
+            "type": "string",
+            "format": "date-time",
+            "description": "Last successful authentication. Omitted until one has happened."
+          },
+          "name": {
+            "type": "string",
+            "description": "Display name."
+          },
+          "prefix": {
+            "type": "string",
+            "description": "Type prefix plus the first 6 random characters."
           }
         }
       },
@@ -40490,6 +43131,21 @@
         },
         "additionalProperties": false
       },
+      "UpdateScimSettings": {
+        "type": "object",
+        "description": "`PATCH /api/v1/orgs/{org}/scim` body. Absent fields keep their value.",
+        "properties": {
+          "default_role": {
+            "$ref": "#/components/schemas/OrgRole",
+            "description": "The role of newly provisioned members: `viewer` or `member`."
+          },
+          "enabled": {
+            "type": "boolean",
+            "description": "Turns SCIM on or off."
+          }
+        },
+        "additionalProperties": false
+      },
       "UpdateScoreDefinitionRequest": {
         "type": "object",
         "description": "`PATCH /api/v1/projects/{project}/score-definitions/{id}` body. Absent means unchanged.\n\n`min_value` and `max_value` cannot be cleared once set. Archive the definition instead.",
@@ -41181,6 +43837,10 @@
     {
       "name": "deletions",
       "description": "GDPR deletions and their status."
+    },
+    {
+      "name": "audit",
+      "description": "Audit records of an organization and of the instance."
     },
     {
       "name": "ingest",

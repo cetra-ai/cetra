@@ -25,6 +25,7 @@ function AdminLayout() {
         <nav aria-label="Instance admin" className="flex gap-1 border-b">
           <AdminTab to="/admin/users" label="Users" />
           <AdminTab to="/admin/settings" label="Settings" />
+          <AdminTab to="/admin/audit-log" label="Audit log" />
         </nav>
         <Outlet />
       </main>
@@ -32,7 +33,13 @@ function AdminLayout() {
   );
 }
 
-function AdminTab({ to, label }: { to: "/admin/users" | "/admin/settings"; label: string }) {
+function AdminTab({
+  to,
+  label,
+}: {
+  to: "/admin/users" | "/admin/settings" | "/admin/audit-log";
+  label: string;
+}) {
   return (
     <Link
       to={to}

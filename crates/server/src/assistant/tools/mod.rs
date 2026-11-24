@@ -308,27 +308,27 @@ pub(crate) async fn run(
     let user = &scope.user;
     let outcome = match name {
         mcp_tools::GET_SCHEMA => counted(
-            mcp_tools::get_schema(state, user, mcp_arguments(arguments, scope, false)).await,
+            mcp_tools::get_schema(state, user, None, mcp_arguments(arguments, scope, false)).await,
             |_| None,
         ),
         sql::QUERY_SQL => counted(
-            sql::query_sql(state, user, mcp_arguments(arguments, scope, true)).await,
+            sql::query_sql(state, user, None, mcp_arguments(arguments, scope, true)).await,
             |value| value["row_count"].as_u64(),
         ),
         sql::LIST_SAVED_VIEWS => counted(
-            sql::list_saved_views(state, user, mcp_arguments(arguments, scope, false)).await,
+            sql::list_saved_views(state, user, None, mcp_arguments(arguments, scope, false)).await,
             |value| list_len(value, "views"),
         ),
         traces::SEARCH_TRACES => counted(
-            traces::search_traces(state, user, mcp_arguments(arguments, scope, true)).await,
+            traces::search_traces(state, user, None, mcp_arguments(arguments, scope, true)).await,
             |value| list_len(value, "traces"),
         ),
         traces::GET_TRACE => counted(
-            traces::get_trace(state, user, mcp_arguments(arguments, scope, true)).await,
+            traces::get_trace(state, user, None, mcp_arguments(arguments, scope, true)).await,
             |value| list_len(value, "spans"),
         ),
         traces::GET_SPAN => counted(
-            traces::get_span(state, user, mcp_arguments(arguments, scope, true)).await,
+            traces::get_span(state, user, None, mcp_arguments(arguments, scope, true)).await,
             |_| None,
         ),
         reads::LIST_SESSIONS => reads::list_sessions(state, scope, arguments).await,

@@ -16,6 +16,8 @@ use super::{ProviderKind, normalize_domain, store};
 use crate::api::account::SignupPolicy;
 use crate::api::entitlements::Feature;
 use crate::api::org_sso::{JitRole, SsoDiscoverRequest, SsoDiscovery, SsoProtocol};
+use crate::audit::catalog::{AuthAction, JoinVia, MemberAction, SignupMethod};
+use crate::audit::{self, Event, TargetKind};
 use crate::auth::OrgRole;
 use crate::auth::oidc::ExchangeError;
 use crate::auth::oidc::flow::{self, LoggedIn, LoginError, display_name};
@@ -31,9 +33,7 @@ use crate::http::error::{self, ApiError};
 use crate::http::restore::refuse_outbound;
 use crate::meta::users::EmailVerifiedVia;
 use crate::meta::users::{NewUser, UserRow, normalize_email};
-use crate::meta::{
-    MetaError, identities, invites, members, orgs, personal_tokens, users, web_sessions,
-};
+use crate::meta::{MetaError, identities, invites, members, orgs, users};
 use crate::routes::oauth::redirect;
 
 /// The callback's provider segment and the state cookie's provider.
@@ -211,6 +211,7 @@ pub(crate) async fn finish(
     query_state: Option<&str>,
     code: Option<&str>,
     provider_error: bool,
+    ctx: &audit::Ctx,
 ) -> Result<LoggedIn, LoginError> {
     let now = state.clock.now_ns();
     let saved = state_cookie::open(
@@ -271,6 +272,7 @@ pub(crate) async fn finish(
             test_owner: saved.test_owner,
             redirect: saved.redirect,
         },
+        ctx,
     )
     .await
 }
@@ -312,7 +314,11 @@ impl fmt::Debug for SignIn {
 /// # Errors
 ///
 /// Returns a [`LoginError`] when the login is refused or the store fails.
-pub(crate) async fn sign_in_core(state: &AppState, input: SignIn) -> Result<LoggedIn, LoginError> {
+pub(crate) async fn sign_in_core(
+    state: &AppState,
+    input: SignIn,
+    ctx: &audit::Ctx,
+) -> Result<LoggedIn, LoginError> {
     let org = input.org;
     let now = state.clock.now_ns();
     let domains = state.org_sso.domains_of(org);
@@ -323,11 +329,16 @@ pub(crate) async fn sign_in_core(state: &AppState, input: SignIn) -> Result<Logg
     if !listed {
         return Err(LoginError::DomainNotAllowed);
     }
+    // D-EA-18: while SCIM locks the org, a login never creates or joins a member.
+    let scim_locks = crate::ee::scim::locks(state, org)
+        .await
+        .map_err(|error| LoginError::Internal(Box::new(error)))?;
     // A SAML org joins its users only with `saml` as well as `org_sso` (D-SA-4).
     let entitlements = of(state, org);
     let jit = (entitlements.allows(Feature::OrgSso)
         && (input.protocol == SsoProtocol::Oidc || entitlements.allows(Feature::Saml)))
-    .then(|| input.jit_role.org_role());
+    .then(|| input.jit_role.org_role())
+    .filter(|_| !scim_locks);
     let admit_input = Admit {
         org,
         provider_id: input.provider_id,
@@ -344,23 +355,22 @@ pub(crate) async fn sign_in_core(state: &AppState, input: SignIn) -> Result<Logg
         test_owner: input.test_owner,
         now,
     };
+    let ctx = ctx.clone();
     let admitted = state
         .meta
-        .write(move |conn| Box::pin(async move { admit(conn, &admit_input).await }))
+        .write(move |conn| Box::pin(async move { admit(conn, &admit_input, &ctx).await }))
         .await;
     let admitted = match admitted {
         Ok(admitted) => admitted,
         Err(MetaError::Conflict(_)) => Admitted::LinkRefused,
         Err(error) => return Err(flow::internal(error)),
     };
-    let (user_id, revoked, linked, joined, no_seat) = match admitted {
+    let (user_id, revoked, no_seat) = match admitted {
         Admitted::User {
             user_id,
             revoked,
-            linked,
-            joined,
             no_seat,
-        } => (user_id, revoked, linked, joined, no_seat),
+        } => (user_id, revoked, no_seat),
         Admitted::AccountDisabled => return Err(LoginError::AccountDisabled),
         Admitted::LinkRefused => return Err(LoginError::LinkRefused),
         Admitted::SignupClosed => return Err(LoginError::SignupClosed),
@@ -371,14 +381,8 @@ pub(crate) async fn sign_in_core(state: &AppState, input: SignIn) -> Result<Logg
     for hash in &revoked {
         state.pat_cache.evict(hash);
     }
-    if linked {
-        tracing::info!(target: "audit", user_id = %user_id, org_id = %org, "identity linked");
-    }
-    if let Some(role) = joined {
-        tracing::info!(target: "audit", user_id = %user_id, org_id = %org, role = org_role_str(role), "org sso joined");
-    }
     let redirect = if no_seat {
-        tracing::info!(target: "audit", user_id = %user_id, org_id = %org, "org sso join skipped: seat limit");
+        tracing::info!(user_id = %user_id, org_id = %org, "org sso join skipped: seat limit");
         let slug = orgs::org_by_id(state.meta.reader(), org)
             .await
             .map_err(flow::internal)?
@@ -425,9 +429,6 @@ enum Admitted {
         user_id: Uuid,
         /// Personal access token hashes the link revoked.
         revoked: Vec<String>,
-        linked: bool,
-        /// The role of a new membership.
-        joined: Option<OrgRole>,
         /// JIT was refused for lack of a seat, and the person keeps their other orgs (D-P-56).
         no_seat: bool,
     },
@@ -451,7 +452,11 @@ enum Target {
 }
 
 /// Decides the login. All reads come first; a refusal writes nothing (D-P-55, D-P-56).
-async fn admit(conn: &mut SqliteConnection, input: &Admit) -> Result<Admitted, MetaError> {
+async fn admit(
+    conn: &mut SqliteConnection,
+    input: &Admit,
+    ctx: &audit::Ctx,
+) -> Result<Admitted, MetaError> {
     let org = input.org;
     let now = input.now;
     // The provider the sign-in was validated against must still be the stored one: the same
@@ -509,8 +514,6 @@ async fn admit(conn: &mut SqliteConnection, input: &Admit) -> Result<Admitted, M
                         return Ok(Admitted::User {
                             user_id: user.id,
                             revoked: Vec::new(),
-                            linked: false,
-                            joined: None,
                             no_seat: false,
                         });
                     }
@@ -582,6 +585,7 @@ async fn admit(conn: &mut SqliteConnection, input: &Admit) -> Result<Admitted, M
     }
 
     // Writes. A conflict (a concurrent first login) rolls the whole write back.
+    let created = matches!(target, Target::New);
     let mut revoked = Vec::new();
     let mut linked = false;
     let user_id = match target {
@@ -596,14 +600,9 @@ async fn admit(conn: &mut SqliteConnection, input: &Admit) -> Result<Admitted, M
                 now,
             )
             .await?;
-            if !user.email_proven() {
-                // D148's defence against a pre-registered account: the unverified password and
-                // its sessions and tokens go when the provider links it.
-                web_sessions::delete_user_sessions(conn, user.id, None).await?;
-                revoked = personal_tokens::revoke_user_tokens(conn, user.id, now).await?;
-                users::set_password_hash(conn, user.id, None, now).await?;
-                users::set_email_verified(conn, user.id, now, EmailVerifiedVia::Idp).await?;
-            }
+            // D148's defence against a pre-registered account: an unproven account's password,
+            // sessions and tokens go when the provider links it. A proven one is untouched.
+            revoked = users::reset_unproven_tx(conn, &user, now).await?;
             linked = true;
             user.id
         }
@@ -645,11 +644,39 @@ async fn admit(conn: &mut SqliteConnection, input: &Admit) -> Result<Admitted, M
         joined = Some(role);
     }
     store::set_last_login(conn, org, now).await?;
+    // The records name the signed-in user as the actor, in the same transaction (D-EA-2).
+    let actor = ctx.with_actor(audit::Actor::User {
+        id: user_id,
+        via: audit::Via::Session,
+        credential_id: None,
+    });
+    if linked {
+        let event = Event::new(AuthAction::IdentityLinked {
+            provider: input.identity.clone(),
+        })
+        .org(org);
+        audit::record(conn, &actor, event, now).await?;
+    }
+    if created {
+        let event = Event::new(AuthAction::Signup {
+            method: SignupMethod::OrgProvider,
+        })
+        .org(org)
+        .target(TargetKind::User, user_id);
+        audit::record(conn, &actor, event, now).await?;
+    }
+    if let Some(role) = joined {
+        let event = Event::new(MemberAction::Added {
+            role: org_role_str(role),
+            via: JoinVia::SsoJit,
+        })
+        .org(org)
+        .target(TargetKind::User, user_id);
+        audit::record(conn, &actor, event, now).await?;
+    }
     Ok(Admitted::User {
         user_id,
         revoked,
-        linked,
-        joined,
         no_seat,
     })
 }
@@ -1152,6 +1179,46 @@ mod tests {
         .await;
         let seeded = app.seed().await;
         configure_org_sso(&app, seeded.org_id, &idp, "acme.test", true, false).await;
+        let response = sign_in(&app, &idp, None, "ada-sub", "ada@acme.test", None).await;
+        assert_eq!(location(&response), "/acme");
+        assert_eq!(
+            count(
+                &app,
+                "SELECT COUNT(*) FROM org_members m JOIN users u ON u.id = m.user_id \
+                 WHERE u.email = 'ada@acme.test'",
+            )
+            .await,
+            0
+        );
+    }
+
+    /// D-EA-18: while SCIM locks the org, an unknown user of its domain signs in without
+    /// joining, as a lapsed org does.
+    #[tokio::test]
+    async fn org_sso_jit_is_off_while_scim_is_on() {
+        let idp = MockIdp::start().await;
+        let app = TestApp::with_config(|config| {
+            config.security.allow_private_network_egress = true;
+            config.license_key = Some(crate::config::Secret::new(
+                crate::test_support::license_key(&["org_sso", "scim"]),
+            ));
+        })
+        .await;
+        let seeded = app.seed().await;
+        configure_org_sso(&app, seeded.org_id, &idp, "acme.test", true, false).await;
+        let org = seeded.org_id;
+        let now = app.state.clock.now_ns();
+        app.state
+            .meta
+            .write(move |conn| {
+                Box::pin(async move {
+                    crate::ee::scim::store::put_org_scim(conn, org, true, OrgRole::Viewer, now)
+                        .await?;
+                    Ok(())
+                })
+            })
+            .await
+            .unwrap();
         let response = sign_in(&app, &idp, None, "ada-sub", "ada@acme.test", None).await;
         assert_eq!(location(&response), "/acme");
         assert_eq!(

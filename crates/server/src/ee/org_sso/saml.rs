@@ -20,6 +20,7 @@ use super::login::{SignIn, sign_in_core};
 use super::saml_pending::{PENDING_TTL_NS, Pending};
 use super::{OrgProvider, ProviderKind, SamlProvider};
 use crate::api::org_sso::SsoProtocol;
+use crate::audit;
 use crate::auth::limits::network_key;
 use crate::auth::oidc::flow::{LoginError, display_name};
 use crate::auth::secret::{new_opaque_token, random_bytes};
@@ -272,6 +273,7 @@ fn fail(error: LoginError) -> Result<Response, ApiError> {
 async fn acs(
     State(state): State<AppState>,
     ClientIp(ip): ClientIp,
+    ctx: audit::Ctx,
     headers: HeaderMap,
     error::Path(path): error::Path<OrgIdPath>,
     body: Bytes,
@@ -302,7 +304,7 @@ async fn acs(
     let received = match cetra_saml::decode_response(&form.saml_response) {
         Ok(received) => received,
         Err(error) => {
-            tracing::info!(target: "audit", org_id = %org, reason = ?error, "saml response refused");
+            tracing::info!(org_id = %org, reason = ?error, "saml response refused");
             return refuse(&LoginError::SamlInvalid);
         }
     };
@@ -350,7 +352,7 @@ async fn acs(
             return fail(LoginError::SamlUnsupported);
         }
         Err(error) => {
-            tracing::info!(target: "audit", org_id = %org, reason = ?error, "saml response refused");
+            tracing::info!(org_id = %org, reason = ?error, "saml response refused");
             return fail(LoginError::SamlInvalid);
         }
     };
@@ -375,7 +377,7 @@ async fn acs(
         test_owner: pending.test_owner,
         redirect: pending.redirect,
     };
-    let logged_in = match sign_in_core(&state, input).await {
+    let logged_in = match sign_in_core(&state, input, &ctx).await {
         Ok(logged_in) => logged_in,
         Err(error) => return fail(error),
     };
@@ -402,7 +404,6 @@ async fn acs(
         }
     };
     tracing::info!(
-        target: "audit",
         user_id = %logged_in.user_id,
         org_id = %org,
         provider = "saml",
@@ -516,6 +517,114 @@ mod tests {
             )
             .await,
             1
+        );
+    }
+
+    #[tokio::test]
+    async fn a_saml_sign_in_writes_the_audit_records() {
+        let (app, seeded, _owner) = saml_app().await;
+        let org = seeded.org_id;
+        configure_org_saml(&app, org, &[TestKey::Idp], "acme.test", true, false).await;
+        let (request_id, binder, _) = begin_saml(&app, None).await;
+        let response = post_acs(
+            &app,
+            org,
+            &signed(&app, org, &request_id),
+            &[binder.as_str()],
+        )
+        .await;
+        assert_eq!(response.status, StatusCode::FOUND);
+        let user: String = sqlx::query_scalar("SELECT id FROM users WHERE email = 'ada@acme.test'")
+            .fetch_one(app.state.meta.reader())
+            .await
+            .unwrap();
+        // The org's log names the signup and the JIT join (D-EA-2), then the login.
+        let org_rows: Vec<(String, Option<String>, String)> = sqlx::query_as(
+            "SELECT action, target_id, details FROM audit_events WHERE org_id = ? ORDER BY seq",
+        )
+        .bind(org.to_string())
+        .fetch_all(app.state.meta.reader())
+        .await
+        .unwrap();
+        assert_eq!(
+            org_rows,
+            vec![
+                (
+                    "auth.signup".to_owned(),
+                    Some(user.clone()),
+                    r#"{"method":"org_provider"}"#.to_owned(),
+                ),
+                (
+                    "member.added".to_owned(),
+                    Some(user.clone()),
+                    format!(
+                        r#"{{"role":"{}","via":"sso_jit"}}"#,
+                        org_role_str(OrgRole::Viewer)
+                    ),
+                ),
+                (
+                    "auth.login".to_owned(),
+                    None,
+                    r#"{"method":"org_provider"}"#.to_owned(),
+                ),
+            ]
+        );
+        // The instance log gets the login without the org (D-EA-8), naming the new user.
+        let instance: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM audit_events WHERE action = 'auth.login' \
+                 AND org_id IS NULL AND actor_id = ?",
+        )
+        .bind(user)
+        .fetch_one(app.state.meta.reader())
+        .await
+        .unwrap();
+        assert_eq!(instance, 1);
+    }
+
+    #[tokio::test]
+    async fn saml_jit_is_off_while_scim_is_on() {
+        let (app, seeded, _owner) = org_sso_app_with(|config| {
+            config.public_url = serde_json::from_str("\"https://cetra.example\"").expect("url");
+            config.license_key = Some(crate::config::Secret::new(license_key(&[
+                "org_sso", "saml", "scim",
+            ])));
+        })
+        .await;
+        let org = seeded.org_id;
+        configure_org_saml(&app, org, &[TestKey::Idp], "acme.test", true, false).await;
+        let now = app.state.clock.now_ns();
+        app.state
+            .meta
+            .write(move |conn| {
+                Box::pin(async move {
+                    crate::ee::scim::store::put_org_scim(conn, org, true, OrgRole::Viewer, now)
+                        .await?;
+                    Ok(())
+                })
+            })
+            .await
+            .unwrap();
+        let (request_id, binder, _) = begin_saml(&app, None).await;
+        let response = post_acs(
+            &app,
+            org,
+            &signed(&app, org, &request_id),
+            &[binder.as_str()],
+        )
+        .await;
+        assert_eq!(location(&response), "/acme");
+        one_cookie(&response, SESSION_NAME);
+        // D-EA-18: the person is signed in, but the SCIM lock kept them from joining.
+        assert_eq!(
+            count(
+                &app,
+                format!(
+                    "SELECT COUNT(*) FROM org_members m JOIN users u ON u.id = m.user_id \
+                     WHERE u.email = 'ada@acme.test' AND m.org_id = '{org}'"
+                ),
+            )
+            .await,
+            0
         );
     }
 
@@ -1126,13 +1235,28 @@ mod tests {
             redirect: "/acme".to_owned(),
         };
         // The provider row was deleted and created again since the sign-in was validated.
-        let replaced = sign_in_core(&app.state, sign_in(Uuid::now_v7(), SsoProtocol::Saml)).await;
+        let replaced = sign_in_core(
+            &app.state,
+            sign_in(Uuid::now_v7(), SsoProtocol::Saml),
+            &audit::Ctx::system(),
+        )
+        .await;
         assert!(matches!(replaced, Err(LoginError::SsoUnavailable)));
         // The provider changed protocol since the sign-in was validated.
-        let switched = sign_in_core(&app.state, sign_in(stored.id, SsoProtocol::Oidc)).await;
+        let switched = sign_in_core(
+            &app.state,
+            sign_in(stored.id, SsoProtocol::Oidc),
+            &audit::Ctx::system(),
+        )
+        .await;
         assert!(matches!(switched, Err(LoginError::SsoUnavailable)));
         // The validated provider still matches, so the sign-in goes through.
-        let matching = sign_in_core(&app.state, sign_in(stored.id, SsoProtocol::Saml)).await;
+        let matching = sign_in_core(
+            &app.state,
+            sign_in(stored.id, SsoProtocol::Saml),
+            &audit::Ctx::system(),
+        )
+        .await;
         assert!(matching.is_ok());
     }
 

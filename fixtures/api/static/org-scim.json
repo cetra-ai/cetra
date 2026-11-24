@@ -1,0 +1,16 @@
+{
+  "enabled": true,
+  "default_role": "viewer",
+  "base_url": "http://localhost:8080/scim/v2",
+  "verified_domains": 1,
+  "tokens": [
+    {
+      "id": "01900000-0000-7000-8000-000000000801",
+      "name": "Okta",
+      "prefix": "scim-cetra-0a1b2c",
+      "created_at": "2026-01-01T00:00:00.000000000Z",
+      "created_by": "01900000-0000-7000-8000-000000000001",
+      "last_used_at": "2026-01-02T00:00:00.000000000Z"
+    }
+  ]
+}

@@ -132,6 +132,27 @@ pub(crate) fn org_token(
     features: &[&str],
     limits: &serde_json::Value,
 ) -> String {
+    org_token_with_domains(
+        org_id,
+        issued_at,
+        expires_at,
+        grace_ends_at,
+        features,
+        limits,
+        &[],
+    )
+}
+
+/// `org_token` with the `sso_domains` claim (D-EA-17) set to `sso_domains`.
+pub(crate) fn org_token_with_domains(
+    org_id: OrgId,
+    issued_at: &str,
+    expires_at: &str,
+    grace_ends_at: &str,
+    features: &[&str],
+    limits: &serde_json::Value,
+    sso_domains: &[&str],
+) -> String {
     sign_token(&serde_json::json!({
         "kind": "org",
         "id": Uuid::now_v7().to_string(),
@@ -143,6 +164,7 @@ pub(crate) fn org_token(
         "plan": {"id": "pro", "name": "Pro", "add_ons": ["teams"]},
         "features": features,
         "limits": limits,
+        "sso_domains": sso_domains,
     }))
 }
 
@@ -393,6 +415,8 @@ impl TestApp {
             pat_cache: crate::auth::principal::PatCache::new(),
             last_used: crate::auth::last_used::LastUsed::new(),
             token_last_used: crate::auth::last_used::LastUsed::tokens(),
+            scim_cache: crate::auth::principal::ScimCache::new(),
+            scim_last_used: crate::auth::last_used::LastUsed::scim_tokens(),
             setup: crate::bootstrap::SetupState::new(),
             password_hasher: tokio::sync::OnceCell::new(),
             mailer,
@@ -1284,6 +1308,7 @@ fn default_config(data_dir: &std::path::Path) -> ServerConfig {
         ingest: IngestConfig::default(),
         media: MediaConfig::default(),
         eval: EvalConfig::default(),
+        audit: crate::config::AuditConfig::default(),
         issues: crate::config::IssuesConfig::default(),
         security: SecurityConfig::default(),
         // Most tests act as a cloud cell (D-P-50); a test of the default turns it off.
@@ -2066,6 +2091,7 @@ pub(crate) fn config(data_dir: &std::path::Path) -> ServerConfig {
         ingest: IngestConfig::default(),
         media: MediaConfig::default(),
         eval: EvalConfig::default(),
+        audit: crate::config::AuditConfig::default(),
         issues: crate::config::IssuesConfig::default(),
         security: SecurityConfig::default(),
         entitlements: EntitlementsConfig::default(),

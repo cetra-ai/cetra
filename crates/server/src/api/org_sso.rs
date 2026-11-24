@@ -56,8 +56,7 @@ pub enum SsoProtocol {
 }
 
 impl SsoProtocol {
-    /// The stored text (`org_sso_providers.protocol`).
-    #[cfg(test)]
+    /// The stored text (`org_sso_providers.protocol`), and the audit details' name for it.
     pub(crate) fn as_str(self) -> &'static str {
         match self {
             Self::Oidc => "oidc",

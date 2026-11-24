@@ -1,6 +1,8 @@
 //! `org_members` and `project_members` (spec 04).
 #![cfg_attr(not(test), allow(dead_code))]
 
+use std::collections::HashMap;
+
 use cetra_core::ids::{OrgId, ProjectId};
 use sqlx::{SqliteConnection, SqlitePool};
 use uuid::Uuid;
@@ -308,7 +310,26 @@ pub(crate) async fn set_project_override(
     Ok(())
 }
 
-/// Deletes the project override.
+/// The override of `user` on `project`, read on the writer connection.
+///
+/// # Errors
+///
+/// Returns [`MetaError`] when the query fails or the stored role is unknown.
+pub(crate) async fn project_override_tx(
+    conn: &mut SqliteConnection,
+    project: ProjectId,
+    user: Uuid,
+) -> Result<Option<ProjectOverride>, MetaError> {
+    let role: Option<String> =
+        sqlx::query_scalar("SELECT role FROM project_members WHERE project_id = ? AND user_id = ?")
+            .bind(project.to_string())
+            .bind(user.to_string())
+            .fetch_optional(&mut *conn)
+            .await?;
+    role.map(|role| decode_override(&role)).transpose()
+}
+
+/// Deletes the project override. Returns `true` when a row was deleted.
 ///
 /// # Errors
 ///
@@ -317,13 +338,13 @@ pub(crate) async fn remove_project_override(
     conn: &mut SqliteConnection,
     project_id: ProjectId,
     user_id: Uuid,
-) -> Result<(), MetaError> {
-    sqlx::query("DELETE FROM project_members WHERE project_id = ? AND user_id = ?")
+) -> Result<bool, MetaError> {
+    let result = sqlx::query("DELETE FROM project_members WHERE project_id = ? AND user_id = ?")
         .bind(project_id.to_string())
         .bind(user_id.to_string())
         .execute(&mut *conn)
         .await?;
-    Ok(())
+    Ok(result.rows_affected() > 0)
 }
 
 /// Overrides on the project, ordered by user id.
@@ -352,6 +373,37 @@ pub(crate) async fn project_overrides(
         .collect()
 }
 
+/// The project overrides of `user` on the projects of `org`, read inside the caller's
+/// transaction (track EA M6: the recompute reads them before it changes them).
+///
+/// # Errors
+///
+/// Returns [`MetaError::Corrupt`] when a stored id or role does not decode, and
+/// [`MetaError::Db`] when the query fails.
+pub(crate) async fn project_overrides_of_user_tx(
+    conn: &mut SqliteConnection,
+    org: OrgId,
+    user: Uuid,
+) -> Result<Vec<(ProjectId, ProjectOverride)>, MetaError> {
+    let rows: Vec<(String, String)> = sqlx::query_as(
+        "SELECT pm.project_id, pm.role FROM project_members pm \
+         JOIN projects p ON p.id = pm.project_id WHERE p.org_id = ? AND pm.user_id = ?",
+    )
+    .bind(org.to_string())
+    .bind(user.to_string())
+    .fetch_all(&mut *conn)
+    .await?;
+    rows.into_iter()
+        .map(|(project, role)| {
+            let project = Uuid::parse_str(&project).map_err(|_| MetaError::Corrupt {
+                table: "project_members",
+                column: "project_id",
+            })?;
+            Ok((ProjectId::from_uuid(project), decode_override(&role)?))
+        })
+        .collect()
+}
+
 #[derive(Debug, sqlx::FromRow)]
 struct MemberRecord {
     id: String,
@@ -366,6 +418,65 @@ struct MemberRecord {
     updated_at: i64,
     role: String,
     joined_at: i64,
+}
+
+/// The org role of every member of `org`, by user id. A recompute of several users reads them
+/// once, not once per user (track EA M6, P-2).
+///
+/// # Errors
+///
+/// Returns [`MetaError`] when the query fails or a stored value does not decode.
+pub(crate) async fn org_roles_of_org_tx(
+    conn: &mut SqliteConnection,
+    org_id: OrgId,
+) -> Result<HashMap<Uuid, OrgRole>, MetaError> {
+    let rows: Vec<(String, String)> =
+        sqlx::query_as("SELECT user_id, role FROM org_members WHERE org_id = ?")
+            .bind(org_id.to_string())
+            .fetch_all(&mut *conn)
+            .await?;
+    rows.into_iter()
+        .map(|(user, role)| {
+            let user = Uuid::parse_str(&user).map_err(|_| MetaError::Corrupt {
+                table: "org_members",
+                column: "user_id",
+            })?;
+            Ok((user, decode_org_role(&role)?))
+        })
+        .collect()
+}
+
+/// The project overrides of every member of `org`, by user id: what
+/// [`project_overrides_of_user_tx`] gives for each user, read in one query (track EA M6, P-2).
+///
+/// # Errors
+///
+/// Returns [`MetaError`] when the query fails or a stored value does not decode.
+pub(crate) async fn project_overrides_of_org_tx(
+    conn: &mut SqliteConnection,
+    org: OrgId,
+) -> Result<HashMap<Uuid, Vec<(ProjectId, ProjectOverride)>>, MetaError> {
+    let rows: Vec<(String, String, String)> = sqlx::query_as(
+        "SELECT pm.user_id, pm.project_id, pm.role FROM project_members pm \
+         JOIN projects p ON p.id = pm.project_id WHERE p.org_id = ?",
+    )
+    .bind(org.to_string())
+    .fetch_all(&mut *conn)
+    .await?;
+    let mut by_user: HashMap<Uuid, Vec<(ProjectId, ProjectOverride)>> = HashMap::new();
+    for (user, project, role) in rows {
+        let corrupt = |column: &'static str| MetaError::Corrupt {
+            table: "project_members",
+            column,
+        };
+        let user = Uuid::parse_str(&user).map_err(|_| corrupt("user_id"))?;
+        let project = Uuid::parse_str(&project).map_err(|_| corrupt("project_id"))?;
+        by_user
+            .entry(user)
+            .or_default()
+            .push((ProjectId::from_uuid(project), decode_override(&role)?));
+    }
+    Ok(by_user)
 }
 
 fn member_row(record: MemberRecord) -> Result<MemberRow, MetaError> {

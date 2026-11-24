@@ -9,6 +9,11 @@ with an `### Upgrade notes` section (https://cetra.sh/docs/self-hosting/upgrade/
 
 ### Added
 
+- Audit records: sign-ins, membership, invitation, credential, SSO, licence and deletion actions, configuration changes of evaluators, rules, alerts, connections, prices, prompts, datasets, issue sources, dashboards and annotation queues, and data leaving the product (SQL runs, exports and MCP tool calls) are recorded in the metadata database with the actor, IP and user agent. Records are kept for `audit.retention_days` (default 365). Reading them comes with the enterprise audit log.
+- SCIM 2.0 user provisioning (Enterprise and the self-hosted licence): per-org tokens, Okta and Entra ID compatible Users endpoint, deprovisioning that revokes access, and members managed by the identity provider.
+- SCIM groups and role mappings to org and project roles, with Okta and Entra ID setup guides.
+- Audit log pages and API for organization admins and instance admins, with filters and CSV/NDJSON export (Enterprise and the self-hosted licence).
+- Audit log streaming to an HTTPS endpoint (Splunk, Datadog or any NDJSON receiver), signed, with retries.
 - The organization home shows a card per project with its last 24 hours (traces, error rate, LLM cost, an hourly chart with errors, the last ingest time), a cards/table switch, a search box, and this month's usage against the plan. `GET /api/v1/orgs/{org}/projects/activity` serves the cards.
 - Org owners can set up SAML 2.0 single sign-on for their org, with metadata import, automatic certificate rotation from a metadata URL, and the same domains and enforcement as OIDC (the `saml` licence feature).
 - LLM connections: **Test connection** checks the form's values before you save them, for a new connection too, and **Test embeddings** under Advanced checks an embedding model. The panel header shows when the saved values were last tested. `POST /api/v1/orgs/{org}/llm-connections/test` tests an unsaved connection, and `POST …/llm-connections/{id}/test` takes draft fields; a connection's `last_tested_at` and `last_test_ok` hold the last test of its saved values.

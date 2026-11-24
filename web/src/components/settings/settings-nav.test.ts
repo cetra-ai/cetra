@@ -1,4 +1,5 @@
 import { expect, it } from "vitest";
+import { visibleOrgNav } from "@/components/settings/settings-home";
 import {
   isProjectSettingsPath,
   orgSettingsNav,
@@ -43,4 +44,21 @@ it("keeps the role flags on the items that had them", () => {
   expect(sso?.ownerOnly).toBe(true);
   const keys = projectSettingsNav.find((item) => item.label === "API keys");
   expect(keys?.adminOnly).toBe(true);
+});
+
+it("hides the admin-only audit log from members and shows it to admins and owners", () => {
+  const labels = (role: "member" | "admin" | "owner") =>
+    visibleOrgNav(role).map((item) => item.label);
+  expect(labels("member")).not.toContain("Audit log");
+  expect(labels("admin")).toContain("Audit log");
+  expect(labels("owner")).toContain("Audit log");
+});
+
+it("lists provisioning after single sign-on as an owner-only item", () => {
+  const sso = orgSettingsNav.findIndex((item) => item.label === "Single sign-on");
+  expect(orgSettingsNav[sso + 1]).toMatchObject({
+    label: "Provisioning",
+    to: "/$org/settings/provisioning",
+    ownerOnly: true,
+  });
 });

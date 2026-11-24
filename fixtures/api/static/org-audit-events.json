@@ -1,0 +1,92 @@
+{
+  "data": [
+    {
+      "id": "01900000-0000-7000-8000-000000001d01",
+      "at": "2026-01-04T10:00:00.000000000Z",
+      "action": "member.role_changed",
+      "outcome": "success",
+      "actor": {
+        "kind": "user",
+        "id": "01900000-0000-7000-8000-000000000100",
+        "via": "session",
+        "name": "Ada Example",
+        "email": "ada@example.com",
+        "status": "present"
+      },
+      "target": {
+        "kind": "user",
+        "id": "01900000-0000-7000-8000-000000000101",
+        "name": "Bob Example",
+        "email": "bob@example.com",
+        "status": "present"
+      },
+      "details": {
+        "new_role": "admin",
+        "old_role": "member"
+      },
+      "ip": "203.0.113.7",
+      "user_agent": "Mozilla/5.0 (X11; Linux x86_64) Firefox/140.0"
+    },
+    {
+      "id": "01900000-0000-7000-8000-000000001d02",
+      "at": "2026-01-04T09:30:00.000000000Z",
+      "action": "member.removed",
+      "outcome": "success",
+      "actor": {
+        "kind": "user",
+        "id": "01900000-0000-7000-8000-000000000100",
+        "via": "pat",
+        "credential_id": "01900000-0000-7000-8000-000000000201",
+        "name": "Ada Example",
+        "email": "ada@example.com",
+        "status": "present"
+      },
+      "target": {
+        "kind": "user",
+        "id": "01900000-0000-7000-8000-000000000102",
+        "status": "former_member"
+      },
+      "details": {
+        "role": "member"
+      },
+      "ip": "203.0.113.7",
+      "user_agent": "cetra-cli/0.4"
+    },
+    {
+      "id": "01900000-0000-7000-8000-000000001d03",
+      "at": "2026-01-04T08:15:00.000000000Z",
+      "action": "api_key.created",
+      "outcome": "success",
+      "actor": {
+        "kind": "user",
+        "id": "01900000-0000-7000-8000-000000000100",
+        "via": "session",
+        "name": "Ada Example",
+        "email": "ada@example.com",
+        "status": "present"
+      },
+      "target": {
+        "kind": "api_key",
+        "id": "01900000-0000-7000-8000-000000000200",
+        "name": "Ingest key",
+        "status": "present"
+      },
+      "project": {
+        "kind": "project",
+        "id": "01900000-0000-7000-8000-000000000001",
+        "name": "Support bot",
+        "status": "present"
+      },
+      "details": {
+        "kind": "secret",
+        "scopes": [
+          "ingest",
+          "read"
+        ]
+      },
+      "ip": "203.0.113.7",
+      "user_agent": "Mozilla/5.0 (X11; Linux x86_64) Firefox/140.0"
+    }
+  ],
+  "next_cursor": "eyJzZXEiOjEyNDB9"
+}

@@ -193,7 +193,7 @@ Track V M6 (D-V-20 to D-V-26, D-V-33 to D-V-37). One route, answered as a stream
 - **Connection status.** A run uses the connection whatever its `status`, and never marks it failing (D-V-36).
 - **Tools.** Tools are never run. A tool-mode response format forces its own tool, so the user's tools are not callable in the same run. Media and unknown parts are refused (D-V-25).
 - **Notes.** Playground traces carry no end-user id, so a delete-by-user never matches them; they go with project and trace deletions. The overview's "Evaluation cost" widget counts `cetra-eval` only.
-- **Audit and restore.** The audit log records `playground run` with ids, the outcome and the latency, never the payload. Restore mode refuses runs (D-N-25).
+- **Logs and restore.** A run is a log line, not an audit record (D-EA-4). Restore mode refuses runs (D-N-25).
 
 ### Evaluation & alerts
 
@@ -262,7 +262,7 @@ Errors use the usual problem document (§ Conventions). Issue JSON uses RFC 3339
 - **Turn limits.** Per user, 20 turns a minute and 2 at once; per org, 8 at once; per conversation, one at a time (`409`) (D-AS-15). Per turn: 16 model calls, 32 tool calls and 10 minutes; `max_tokens` 4,096 per call. A model call waits at most 10 s for its connection's slot and rate token, else the turn ends with `error` `retryable` "the LLM connection is busy" (D-AS-8). Reaching a limit stores an assistant message that names it and ends with `done` `finish_reason: "limit"`; tool calls beyond the 32nd are not run (D-AS-23). The history sent to the model is at most 100,000 estimated tokens (D-AS-15, D-AS-22).
 - **Stored messages.** The user message is stored first. Each model call stores an assistant message (its text, then its tool calls); a tool message follows its results, each followed by the draft it produced (D-AS-21). Every message of the turn carries the turn's trace id. Tool results are stored in full and stubbed by an hourly sweep after 24 hours, so a result can stay whole for up to about 25 hours: the part keeps `size_bytes`, `rows` and `stubbed: true`, and the API omits `result` (D-AS-12).
 - **Trace.** Each turn is one trace in the reserved environment `cetra-assistant`, metadata only: an `agent` root, an `llm` span per model call and a `tool` span per tool call, with no message text, arguments or results. Its spans are not units (D-AS-11, D-V-23).
-- **Audit and restore.** The audit log records `assistant turn started` and `assistant turn` with the ids, the step and tool counts and the outcome, never the payload. Restore mode refuses turns and the setting test (D-AS-16).
+- **Logs and restore.** A turn is a log line, not an audit record (D-EA-4). Restore mode refuses turns and the setting test (D-AS-16).
 
 ### Pricing & GDPR
 
@@ -276,6 +276,59 @@ Errors use the usual problem document (§ Conventions). Issue JSON uses RFC 3339
 | `POST /deletions/preview` | `{filter?, search?, from, to, include_eval?, include_experiments?}` → `{matched_traces, capped}` |
 | `GET /deletions` · `GET /deletions/{id}` | newest first; status `resolving` → `pending` (hidden) → `applied`, or `failed` with `error` (D-M-3) |
 | `DELETE /api/v1/projects/{project}` · `DELETE /api/v1/orgs/{org}` | project/org erasure, see § Orgs and projects; session only (D-P-70) |
+
+### Provisioning and SCIM (track EA M5, `ee`)
+
+The Provisioning routes are cetra API, documented in OpenAPI. They need a session and `ManageProvisioning` (owner), and reject a PAT or an API key (D-EA-15).
+
+| Method & path |
+|---|
+| `GET /api/v1/orgs/{org}/scim` (readable without the `scim` feature) · `PATCH /api/v1/orgs/{org}/scim` (`{enabled?, default_role?}` with `default_role` `viewer` or `member`; enabling needs the `scim` feature and a verified domain, and on self-hosted `org_sso`; 403 `plan_required` or 409 when refused) |
+| `POST /api/v1/orgs/{org}/scim/tokens` (`{name}`; the secret `scim-cetra-…` is shown once; 409 when the org has two live tokens) · `DELETE /api/v1/orgs/{org}/scim/tokens/{id}` (revokes at once) |
+| `GET /api/v1/orgs/{org}/scim/groups` (`ScimGroupList`: every group with its member count and mapping, ordered by display name; the display name is shown to owners only) |
+| `PUT /api/v1/orgs/{org}/scim/groups/{id}/mapping` (`{org_role?, projects[]}`, `org_role` `admin`, `member` or `viewer`, `owner` is a 400; `projects` at most 200, no duplicate project; an empty mapping is a 400, use DELETE; returns the `ScimGroup`) · `DELETE /api/v1/orgs/{org}/scim/groups/{id}/mapping` (204, or 404 for an unknown group; always allowed, so a lapsed org can remove mappings) |
+
+The mapping routes need `ManageProvisioning` (owner, session only). A PUT that raises any role needs `scim`, and `project_roles` when a project row is new or higher; a PUT that only lowers roles works while lapsed (D-EA-19). When SCIM is enabled, a mapping change recomputes the group's members in the same write, and records `scim.group_mapping_changed` (spec 08 § SCIM).
+
+The SCIM surface is `<public_url>/scim/v2`, authenticated by a `scim-cetra-…` bearer token and outside OpenAPI, as RFC 7644 defines it (D-EA-12). It takes no CSRF token.
+
+| Method & path | Notes |
+|---|---|
+| `GET /scim/v2/ServiceProviderConfig`, `/ResourceTypes`, `/Schemas` | Static. `patch` and `filter` (max 200 results) are true; `bulk`, `sort`, `etag` and `changePassword` are false. |
+| `GET /scim/v2/Users` | `filter` (`userName eq`, `externalId eq`, `emails[type eq "work"].value eq`; other filters `400 invalidFilter`), `startIndex`, `count`. |
+| `POST /scim/v2/Users` | `201` with `Location` and `meta`. `409 uniqueness` for an existing `userName` or `externalId`. |
+| `GET`, `PUT`, `PATCH`, `DELETE /scim/v2/Users/{id}` | `{id}` is the `scim_users` row id. `PUT` and `PATCH` answer `200` with the resource, `DELETE` answers `204`. An unknown id is `404`. |
+| `GET /scim/v2/Groups` · `POST /scim/v2/Groups` | `GET` takes one `eq` filter on `displayName` or `externalId` (other filters `400 invalidFilter`), `startIndex`, `count` and `excludedAttributes=members`. `POST` answers `201` with `Location` and needs `scim`. `409 uniqueness` for a duplicate name or external id. |
+| `GET`, `PUT`, `PATCH`, `DELETE /scim/v2/Groups/{id}` | `{id}` is the `scim_groups` row id. `PUT` and `PATCH` answer `200` with the group and its members, `DELETE` answers `204`. Each route first loads the group in the caller's org (`404` otherwise). Members are SCIM user ids. |
+
+The Okta and Entra ID request shapes that the replay tests send (`fixtures/scim/`) are written from the vendors' public documentation, not from validator runs.
+
+Errors use `urn:ietf:params:scim:api:messages:2.0:Error` with `scimType` where SCIM defines one. A `/scim/v2` path that matches no route is a SCIM `404`, never the web app. Per token: 600 requests a minute, burst 600.
+
+Routes refused by a managed member's lock (D-EA-18) answer `409 scim_managed`: `PATCH /api/v1/orgs/{org}/members/{user}`, `DELETE /api/v1/orgs/{org}/members/{user}`, the org's invitation create and accept routes for verified-domain emails, and the project override routes for a managed member.
+
+### Audit log (track EA M3, `ee`)
+
+| Method & path | Notes |
+|---|---|
+| `GET /api/v1/orgs/{org}/audit-events` | Org owners and admins (`OrgPerm::ViewAudit`, session or PAT, no API key). Filters `from`, `to` (epoch milliseconds or RFC 3339; `from` inclusive, `to` exclusive), `action` (at most 20 comma-separated names; an entry ending in `.` is a group such as `member.`), `actor_id`, `target_id` (at most 64 characters), `project_id`, `outcome`. `limit` 1–500, default 100, and `cursor` (the `seq` of the last record, base64url of `{"seq": N}`). Newest first. `400 field_error` for a bad filter. Answers `{data, next_cursor}`; `actor` and `target` carry `status` (`present`, `former_member`, `deleted`, `unresolved`) |
+| `GET /api/v1/orgs/{org}/audit-events/export?format=csv\|ndjson` | The same filters, no `limit` or `cursor`. Records `audit.export_started` before the first byte. At most 1,000,000 records, streamed 1,000 at a time. CSV cells that start with `=`, `+`, `-`, `@`, a tab or a carriage return get a leading `'`. Answers `text/csv; charset=utf-8` or `application/x-ndjson`, `Content-Disposition: attachment`, `Cache-Control: no-store`. Without `audit_log`: `403 plan_required` |
+| `GET /api/v1/admin/audit-events` | Instance admins (`Access::InstanceAdmin`). The instance log only (records with no org). `project_id` is accepted and matches nothing. Gate: `audit_log` on the licence, or `entitlements.control_plane`; otherwise `403 plan_required`. Resolves users only; other kinds are `unresolved` |
+| `GET /api/v1/admin/audit-events/export?format=csv\|ndjson` | As the org export, for the instance log, under the same gate |
+
+### Audit stream (track EA M4, `ee`)
+
+Owners (`ManageAuditStream`, session only) manage the org's destination; instance admins (`Access::InstanceAdmin`) manage the instance's, with the instance log's gate. Every route needs `audit_log` on the licence (or `entitlements.control_plane`) except `DELETE`, which works when the feature has lapsed (D-EA-19). Refused in restore mode: the test route.
+
+| Method & path | Notes |
+|---|---|
+| `GET /api/v1/orgs/{org}/audit-stream` | The destination as `AuditStream`: `url_host`, `header_name`, `enabled` and `status` (`last_success_at`, `last_error`, `failing_since`, `lag` in records, `lost_records`, which edits and rotations keep and only a new destination clears). `404` when there is none. The URL, the header value and the secret are never returned |
+| `PUT /api/v1/orgs/{org}/audit-stream` | Body `{url, header_name?, header_value?, enabled}`, unknown fields refused. Create answers `201` with `CreatedAuditStream` (the `stream` and the `secret`, shown once); the cursor starts at the newest record. Update answers `200` with `AuditStream`, and keeps the stored header value when `header_value` is omitted and the name is unchanged. `400 field_error` when the URL is not `https` or is over 2,048 bytes, has user info, or the header name is invalid or reserved, or the value is over 1,024 bytes or has a line break. `409` when the stored settings cannot be read (remove and create again) |
+| `DELETE /api/v1/orgs/{org}/audit-stream` | `204`, or `404` when there is none |
+| `POST /api/v1/orgs/{org}/audit-stream/secret` | Rotates the signing secret. `200` with `RotatedAuditStreamSecret` (`secret`, shown once) |
+| `POST /api/v1/orgs/{org}/audit-stream/test` | Sends one signed test line now and does not move the cursor. `200` with `AuditStreamTest` `{reached, status}`. `status` is the HTTP status of any answer; a connection error or a timeout gives `reached: false` and no status, so the route reveals reachability only |
+
+The same five operations exist under `/api/v1/admin/audit-stream` for the instance destination.
 
 ## Response shapes (observability read API)
 
@@ -311,7 +364,7 @@ Streamable HTTP at `POST /mcp`, stateless, JSON responses, implemented with the 
 | `get_span` | `project, trace_id, span_id, around?, max_chars?` | full span |
 | `list_issues` | `project, state?` (`open` default, `resolved`, `ignored` or `all`), `source?` (a source id), `limit?` (1–100, default 20), `max_chars?` | `{issues, truncated, notes}`: the issues newest first by `last_seen`, each with `id`, `title`, `kind`, `state`, `regressed`, `source_id`, `first_seen`, `last_seen`, `count_7d`, `users_7d` and `url`. The counts are over the last 7 days, through the same tally as `GET /issues` (D-IC-24). Needs `ProjectPerm::View` |
 
-`project` is a project UUID or `org-slug/project-slug`. Each result is one text item of compact JSON. Every result is capped at `max_chars` characters (default 20,000, 1,000–100,000); string attribute, metadata and resource-attribute values are cut to 200 characters; a `notes` list names every cut. `query_sql` cuts string cells at 2,000 characters; `get_trace` with `include_payloads` shows the 200-character input/output previews, and `get_span` the full payloads cut to fit `max_chars`. A call whose client disconnects is cancelled and its query dropped (rmcp ignores `notifications/cancelled` in stateless mode, so a cancel without a disconnect runs to the tool's time limit). Argument and query errors are tool results with `isError: true` and `{error: {code, message, position?}}` using the problem codes above.
+`project` is a project UUID or `org-slug/project-slug`. Each tool call that names a project is recorded in the audit log before the tool reads (D-EA-22); `list_projects` names none and is not recorded. Each result is one text item of compact JSON. Every result is capped at `max_chars` characters (default 20,000, 1,000–100,000); string attribute, metadata and resource-attribute values are cut to 200 characters; a `notes` list names every cut. `query_sql` cuts string cells at 2,000 characters; `get_trace` with `include_payloads` shows the 200-character input/output previews, and `get_span` the full payloads cut to fit `max_chars`. A call whose client disconnects is cancelled and its query dropped (rmcp ignores `notifications/cancelled` in stateless mode, so a cancel without a disconnect runs to the tool's time limit). Argument and query errors are tool results with `isError: true` and `{error: {code, message, position?}}` using the problem codes above.
 
 ## CLI (`cetra` binary)
 

@@ -17,6 +17,8 @@ use crate::api::score_definitions::{
     CreateScoreDefinitionRequest, ScoreDefinition, ScoreDefinitionCategory,
     ScoreDefinitionListParams, ScoreDirection, UpdateScoreDefinitionRequest,
 };
+use crate::audit::catalog::ScoreDefinitionAction;
+use crate::audit::{self, Event, TargetKind};
 use crate::auth::principal::{self, Principal};
 use crate::auth::roles::ProjectPerm;
 use crate::http::AppState;
@@ -114,9 +116,10 @@ async fn create_score_definition(
     State(state): State<AppState>,
     Extension(principal): Extension<Principal>,
     Extension(access): Extension<ProjectAccess>,
+    ctx: audit::Ctx,
     error::Json(body): error::Json<CreateScoreDefinitionRequest>,
 ) -> Result<(StatusCode, error::Json<ScoreDefinition>), ApiError> {
-    let user = principal::session_user(&principal)?;
+    principal::session_user(&principal)?;
     let fields = DefinitionFields {
         name: body.name.trim().to_owned(),
         categories: body
@@ -136,25 +139,27 @@ async fn create_score_definition(
     }
     let id = Uuid::now_v7();
     let project = access.project.id;
-    let user_id = user.id;
+    let org = access.project.org_id;
     let data_type = body.data_type;
     let now = state.clock.now_ns();
     let row = state
         .meta
         .write(move |conn| {
-            Box::pin(
-                async move { insert_definition(conn, id, project, data_type, fields, now).await },
-            )
+            Box::pin(async move {
+                let row = insert_definition(conn, id, project, data_type, fields, now).await?;
+                let action = ScoreDefinitionAction::Created {
+                    data_type: data_type.as_str(),
+                };
+                let event = Event::new(action)
+                    .org(org)
+                    .project(project)
+                    .target(TargetKind::ScoreDefinition, id);
+                audit::record(conn, &ctx, event, now).await?;
+                Ok(row)
+            })
         })
         .await?;
     state.definitions.forget(project);
-    tracing::info!(
-        target: "audit",
-        score_definition_id = %id,
-        project_id = %project,
-        user_id = %user_id,
-        "score definition created"
-    );
     Ok((StatusCode::CREATED, error::Json(definition_json(&row))))
 }
 
@@ -163,11 +168,36 @@ async fn update_score_definition(
     Extension(principal): Extension<Principal>,
     Extension(access): Extension<ProjectAccess>,
     error::Path(IdPath { id }): error::Path<IdPath>,
+    ctx: audit::Ctx,
     error::Json(body): error::Json<UpdateScoreDefinitionRequest>,
 ) -> Result<error::Json<ScoreDefinition>, ApiError> {
-    let user = principal::session_user(&principal)?;
+    principal::session_user(&principal)?;
     let project = access.project.id;
+    let org = access.project.org_id;
     let now = state.clock.now_ns();
+    // The request fields that were sent, by name (plan P-2): never their values.
+    let mut changed_fields: Vec<&'static str> = Vec::new();
+    if body.name.is_some() {
+        changed_fields.push("name");
+    }
+    if body.categories.is_some() {
+        changed_fields.push("categories");
+    }
+    if body.min_value.is_some() {
+        changed_fields.push("min_value");
+    }
+    if body.max_value.is_some() {
+        changed_fields.push("max_value");
+    }
+    if body.description.is_some() {
+        changed_fields.push("description");
+    }
+    if body.direction.is_some() {
+        changed_fields.push("direction");
+    }
+    if body.archived.is_some() {
+        changed_fields.push("archived");
+    }
     // The stored data type decides what is valid, so the row is read first (D-I-26).
     let expected = get_definition(state.meta.reader(), project, id)
         .await?
@@ -184,18 +214,24 @@ async fn update_score_definition(
     let row = state
         .meta
         .write(move |conn| {
-            Box::pin(async move { write_update(conn, project, id, &expected, fields, now).await })
+            Box::pin(async move {
+                let out = write_update(conn, project, id, &expected, fields, now).await?;
+                if out.is_some() {
+                    let action = ScoreDefinitionAction::Updated {
+                        fields: changed_fields,
+                    };
+                    let event = Event::new(action)
+                        .org(org)
+                        .project(project)
+                        .target(TargetKind::ScoreDefinition, id);
+                    audit::record(conn, &ctx, event, now).await?;
+                }
+                Ok(out)
+            })
         })
         .await?
         .ok_or(ApiError::NotFound)?;
     state.definitions.forget(project);
-    tracing::info!(
-        target: "audit",
-        score_definition_id = %id,
-        project_id = %project,
-        user_id = %user.id,
-        "score definition updated"
-    );
     Ok(error::Json(definition_json(&row)))
 }
 
@@ -204,25 +240,36 @@ async fn archive_score_definition(
     Extension(principal): Extension<Principal>,
     Extension(access): Extension<ProjectAccess>,
     error::Path(IdPath { id }): error::Path<IdPath>,
+    ctx: audit::Ctx,
 ) -> Result<StatusCode, ApiError> {
-    let user = principal::session_user(&principal)?;
+    principal::session_user(&principal)?;
     let project = access.project.id;
+    let org = access.project.org_id;
     let now = state.clock.now_ns();
     let found = state
         .meta
-        .write(move |conn| Box::pin(async move { archive_tx(conn, project, id, now).await }))
+        .write(move |conn| {
+            Box::pin(async move {
+                // Archiving twice changes nothing, so only the first archive is recorded.
+                let was_archived = get_definition_tx(conn, project, id)
+                    .await?
+                    .is_some_and(|row| row.archived_at.is_some());
+                let found = archive_tx(conn, project, id, now).await?;
+                if found && !was_archived {
+                    let event = Event::new(ScoreDefinitionAction::Archived)
+                        .org(org)
+                        .project(project)
+                        .target(TargetKind::ScoreDefinition, id);
+                    audit::record(conn, &ctx, event, now).await?;
+                }
+                Ok(found)
+            })
+        })
         .await?;
     if !found {
         return Err(ApiError::NotFound);
     }
     state.definitions.forget(project);
-    tracing::info!(
-        target: "audit",
-        score_definition_id = %id,
-        project_id = %project,
-        user_id = %user.id,
-        "score definition archived"
-    );
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -1086,5 +1133,64 @@ mod tests {
             ),
             "{error}"
         );
+    }
+
+    /// `(action, details)` of every audit row of a score definition, oldest first.
+    async fn definition_audit_rows(app: &TestApp) -> Vec<(String, String)> {
+        sqlx::query_as(
+            "SELECT action, details FROM audit_events WHERE target_kind = 'score_definition' \
+             ORDER BY seq",
+        )
+        .fetch_all(app.state.meta.reader())
+        .await
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn score_definition_archive_is_recorded() {
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        let created = create_ok(&app, &seeded, numeric_body("retired")).await;
+        let id = created["id"].as_str().unwrap();
+        let response = patch(&app, &seeded, id, json!({"name": "renamed"})).await;
+        assert_eq!(
+            response.status,
+            200,
+            "{}",
+            String::from_utf8_lossy(&response.body)
+        );
+        let response = delete(&app, &seeded, id).await;
+        assert_eq!(response.status, 204);
+        let rows = definition_audit_rows(&app).await;
+        let actions: Vec<&str> = rows.iter().map(|row| row.0.as_str()).collect();
+        assert_eq!(
+            actions,
+            [
+                "score_definition.created",
+                "score_definition.updated",
+                "score_definition.archived",
+            ]
+        );
+        assert_eq!(rows[0].1, r#"{"data_type":"numeric"}"#);
+        assert_eq!(rows[1].1, r#"{"fields":["name"]}"#);
+        assert_eq!(rows[2].1, "{}");
+    }
+
+    #[tokio::test]
+    async fn archiving_twice_records_once() {
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        let created = create_ok(&app, &seeded, numeric_body("twice")).await;
+        let id = created["id"].as_str().unwrap();
+        assert_eq!(delete(&app, &seeded, id).await.status, 204);
+        // The second archive answers as before but changes nothing, so it records nothing.
+        assert_eq!(delete(&app, &seeded, id).await.status, 204);
+        let archived: Vec<String> = definition_audit_rows(&app)
+            .await
+            .into_iter()
+            .map(|row| row.0)
+            .filter(|action| action == "score_definition.archived")
+            .collect();
+        assert_eq!(archived.len(), 1);
     }
 }

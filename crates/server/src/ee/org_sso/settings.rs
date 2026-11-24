@@ -21,6 +21,8 @@ use crate::api::org_sso::{
     OrgSsoProvider, OrgSsoSaml, OrgSsoSamlSp, PatchOrgSso, PutOrgSamlProvider, PutOrgSsoProvider,
     SamlAttributeNames, SamlRefreshError, SsoProtocol,
 };
+use crate::audit::catalog::SsoAction;
+use crate::audit::{self, Event, TargetKind};
 use crate::auth::principal::{self, Principal};
 use crate::auth::roles::OrgPerm;
 use crate::config::{Secret, issuer_problem};
@@ -262,10 +264,11 @@ async fn put_org_sso_provider(
     State(state): State<AppState>,
     Extension(principal): Extension<Principal>,
     Extension(access): Extension<OrgAccess>,
+    ctx: audit::Ctx,
     error::Json(body): error::Json<PutOrgSsoProvider>,
 ) -> Result<error::Json<OrgSsoView>, ApiError> {
     let org = access.org.id;
-    let caller = principal::session_user(&principal)?.id;
+    principal::session_user(&principal)?;
     require(&state, org, Feature::OrgSso)?;
     refuse_outbound(&state, "identity provider check")?;
     let input = validate(body)?;
@@ -358,6 +361,13 @@ async fn put_org_sso_provider(
                 if renames_issuer {
                     store::delete_identities(conn, org).await?;
                 }
+                let event = Event::new(SsoAction::ProviderSaved {
+                    protocol: SsoProtocol::Oidc.as_str(),
+                    issuer_changed: renames_issuer,
+                })
+                .org(org)
+                .target(TargetKind::SsoProvider, id);
+                audit::record(conn, &ctx, event, now).await?;
                 Ok(Save::Saved)
             })
         })
@@ -376,7 +386,6 @@ async fn put_org_sso_provider(
         }
     }
     super::refresh(&state).await;
-    tracing::info!(target: "audit", org_id = %org, user_id = %caller, protocol = "oidc", "org sso provider saved");
     Ok(error::Json(view(&state, org).await?))
 }
 
@@ -386,21 +395,21 @@ async fn put_org_saml_provider(
     State(state): State<AppState>,
     Extension(principal): Extension<Principal>,
     Extension(access): Extension<OrgAccess>,
+    ctx: audit::Ctx,
     error::Json(body): error::Json<PutOrgSamlProvider>,
 ) -> Result<error::Json<OrgSsoView>, ApiError> {
     let org = access.org.id;
-    let caller = principal::session_user(&principal)?.id;
+    principal::session_user(&principal)?;
     require(&state, org, Feature::OrgSso)?;
     require(&state, org, Feature::Saml)?;
     require_https(&state)?;
     let input = validate_saml(body)?;
     let now = state.clock.now_ns();
     match input.source {
-        None => save_saml_settings(&state, org, input.settings, now).await?,
-        Some(source) => save_saml_provider(&state, org, input.settings, source, now).await?,
+        None => save_saml_settings(&state, org, input.settings, now, &ctx).await?,
+        Some(source) => save_saml_provider(&state, org, input.settings, source, now, &ctx).await?,
     }
     super::refresh(&state).await;
-    tracing::info!(target: "audit", org_id = %org, user_id = %caller, protocol = "saml", "org sso provider saved");
     Ok(error::Json(view(&state, org).await?))
 }
 
@@ -411,12 +420,14 @@ async fn save_saml_settings(
     org: OrgId,
     settings: SamlSettings,
     now: i64,
+    ctx: &audit::Ctx,
 ) -> Result<(), ApiError> {
+    let ctx = ctx.clone();
     let updated = state
         .meta
         .write(move |conn| {
             Box::pin(async move {
-                store::update_saml_settings(
+                let updated = store::update_saml_settings(
                     conn,
                     org,
                     &settings.display_name,
@@ -424,7 +435,17 @@ async fn save_saml_settings(
                     &settings.attributes,
                     now,
                 )
-                .await
+                .await?;
+                if updated && let Some(row) = store::provider_tx(conn, org).await? {
+                    let event = Event::new(SsoAction::ProviderSaved {
+                        protocol: SsoProtocol::Saml.as_str(),
+                        issuer_changed: false,
+                    })
+                    .org(org)
+                    .target(TargetKind::SsoProvider, row.id);
+                    audit::record(conn, &ctx, event, now).await?;
+                }
+                Ok(updated)
             })
         })
         .await?;
@@ -443,6 +464,7 @@ async fn save_saml_provider(
     settings: SamlSettings,
     source: SamlSource,
     now: i64,
+    ctx: &audit::Ctx,
 ) -> Result<(), ApiError> {
     let (metadata, metadata_url, refreshed_at) = saml_metadata(state, org, source, now).await?;
     let sso_allowed = url::Url::parse(metadata.sso_url())
@@ -469,6 +491,7 @@ async fn save_saml_provider(
         refreshed_at,
     };
     let id = Uuid::now_v7();
+    let ctx = ctx.clone();
     let outcome = state
         .meta
         .write(move |conn| {
@@ -498,10 +521,17 @@ async fn save_saml_provider(
                         entity_changed
                     }
                 };
-                store::put_saml_provider(conn, org, id, write, now).await?;
+                let saved = store::put_saml_provider(conn, org, id, write, now).await?;
                 if delete_identities {
                     store::delete_identities(conn, org).await?;
                 }
+                let event = Event::new(SsoAction::ProviderSaved {
+                    protocol: SsoProtocol::Saml.as_str(),
+                    issuer_changed: delete_identities,
+                })
+                .org(org)
+                .target(TargetKind::SsoProvider, saved);
+                audit::record(conn, &ctx, event, now).await?;
                 Ok(SamlSave::Saved)
             })
         })
@@ -680,9 +710,11 @@ async fn delete_org_sso_provider(
     State(state): State<AppState>,
     Extension(principal): Extension<Principal>,
     Extension(access): Extension<OrgAccess>,
+    ctx: audit::Ctx,
 ) -> Result<StatusCode, ApiError> {
     let org = access.org.id;
-    let caller = principal::session_user(&principal)?.id;
+    principal::session_user(&principal)?;
+    let now = state.clock.now_ns();
     let outcome = state
         .meta
         .write(move |conn| {
@@ -694,6 +726,12 @@ async fn delete_org_sso_provider(
                     return Ok(Remove::Enforced);
                 }
                 store::delete_provider(conn, org).await?;
+                let event = Event::new(SsoAction::ProviderRemoved {
+                    protocol: row.protocol.as_str(),
+                })
+                .org(org)
+                .target(TargetKind::SsoProvider, row.id);
+                audit::record(conn, &ctx, event, now).await?;
                 Ok(Remove::Removed)
             })
         })
@@ -705,7 +743,6 @@ async fn delete_org_sso_provider(
         }),
         Remove::Removed => {
             super::refresh(&state).await;
-            tracing::info!(target: "audit", org_id = %org, user_id = %caller, "org sso provider removed");
             Ok(StatusCode::NO_CONTENT)
         }
     }
@@ -718,6 +755,7 @@ async fn patch_org_sso(
     State(state): State<AppState>,
     Extension(principal): Extension<Principal>,
     Extension(access): Extension<OrgAccess>,
+    ctx: audit::Ctx,
     error::Json(body): error::Json<PatchOrgSso>,
 ) -> Result<error::Json<OrgSsoView>, ApiError> {
     let org = access.org.id;
@@ -770,6 +808,8 @@ async fn patch_org_sso(
     }
     let now = state.clock.now_ns();
     let snapshot = row;
+    let enabled_before = snapshot.enabled;
+    let enforced_before = was_enforced;
     let outcome = state
         .meta
         .write(move |conn| {
@@ -789,29 +829,40 @@ async fn patch_org_sso(
                 if !store::set_flags(conn, org, enabled, enforced, now).await? {
                     return Ok(Patch::Missing);
                 }
-                if enforced && !was_enforced {
-                    let (users, hashes) =
-                        store::revoke_for_domains(conn, org, &domains, now).await?;
-                    return Ok(Patch::Done(users, hashes));
+                let (users, hashes) = if enforced && !was_enforced {
+                    store::revoke_for_domains(conn, org, &domains, now).await?
+                } else {
+                    (0, Vec::new())
+                };
+                // A patch that sets the flags they already have changes nothing, so it records nothing.
+                if enabled != enabled_before || enforced != enforced_before {
+                    let event = Event::new(SsoAction::SettingsChanged {
+                        enabled_before,
+                        enabled,
+                        enforced_before,
+                        enforced,
+                        revoked_users: users,
+                    })
+                    .org(org);
+                    audit::record(conn, &ctx, event, now).await?;
                 }
-                Ok(Patch::Done(0, Vec::new()))
+                Ok(Patch::Done(hashes))
             })
         })
         .await?;
-    let (users, hashes) = match outcome {
+    let hashes = match outcome {
         Patch::Missing => return Err(ApiError::NotFound),
         Patch::Changed => {
             return Err(ApiError::Conflict {
                 detail: "The identity provider changed meanwhile; reload and try again.",
             });
         }
-        Patch::Done(users, hashes) => (users, hashes),
+        Patch::Done(hashes) => hashes,
     };
     for hash in &hashes {
         state.pat_cache.evict(hash);
     }
     super::refresh(&state).await;
-    tracing::info!(target: "audit", org_id = %org, user_id = %user.id, enabled, enforced, users, "org sso settings changed");
     Ok(error::Json(view(&state, org).await?))
 }
 
@@ -837,10 +888,11 @@ async fn post_org_sso_domain(
     State(state): State<AppState>,
     Extension(principal): Extension<Principal>,
     Extension(access): Extension<OrgAccess>,
+    ctx: audit::Ctx,
     error::Json(body): error::Json<AddOrgSsoDomain>,
 ) -> Result<(StatusCode, error::Json<OrgSsoView>), ApiError> {
     let org = access.org.id;
-    let caller = principal::session_user(&principal)?.id;
+    principal::session_user(&principal)?;
     require(&state, org, Feature::OrgSso)?;
     let domain =
         normalize_domain(&body.domain).ok_or_else(|| field_error("domain", "invalid domain"))?;
@@ -870,7 +922,13 @@ async fn post_org_sso_domain(
                     return Ok(Add::TooMany);
                 }
                 match store::insert_domain(conn, &row).await {
-                    Ok(()) => Ok(Add::Added),
+                    Ok(()) => {
+                        let event = Event::new(SsoAction::DomainAdded)
+                            .org(org)
+                            .target(TargetKind::SsoDomain, id);
+                        audit::record(conn, &ctx, event, now).await?;
+                        Ok(Add::Added)
+                    }
                     Err(MetaError::Conflict(_)) => Ok(Add::Listed),
                     Err(error) => Err(error),
                 }
@@ -885,10 +943,7 @@ async fn post_org_sso_domain(
         Add::Listed => Err(ApiError::Conflict {
             detail: "This domain is already listed.",
         }),
-        Add::Added => {
-            tracing::info!(target: "audit", org_id = %org, user_id = %caller, domain_id = %id, "org sso domain added");
-            Ok((StatusCode::CREATED, error::Json(view(&state, org).await?)))
-        }
+        Add::Added => Ok((StatusCode::CREATED, error::Json(view(&state, org).await?))),
     }
 }
 
@@ -896,10 +951,11 @@ async fn post_org_sso_domain_verify(
     State(state): State<AppState>,
     Extension(principal): Extension<Principal>,
     Extension(access): Extension<OrgAccess>,
+    ctx: audit::Ctx,
     error::Path(IdPath { id }): error::Path<IdPath>,
 ) -> Result<error::Json<OrgSsoView>, ApiError> {
     let org = access.org.id;
-    let caller = principal::session_user(&principal)?.id;
+    principal::session_user(&principal)?;
     require(&state, org, Feature::OrgSso)?;
     refuse_outbound(&state, "domain check")?;
     let row = store::domain(state.meta.reader(), org, id)
@@ -943,8 +999,8 @@ async fn post_org_sso_domain_verify(
                 match store::verified_row_tx(conn, &domain).await? {
                     Some(holder) if holder.org_id == org => {
                         store::mark_checked(conn, id, now).await?;
+                        record_verified(conn, &ctx, org, id, None, now).await?;
                         Ok(Check::Verified {
-                            taken_from: None,
                             revoked: Vec::new(),
                         })
                     }
@@ -958,17 +1014,16 @@ async fn post_org_sso_domain_verify(
                             store::mark_unverified(conn, holder.id).await?;
                             store::mark_verified(conn, id, now).await?;
                             let revoked = revoke_if_enforced(conn, org, &domain, now).await?;
-                            Ok(Check::Verified {
-                                taken_from: Some(holder.org_id),
-                                revoked,
-                            })
+                            record_verified(conn, &ctx, org, id, Some(holder.org_id), now).await?;
+                            Ok(Check::Verified { revoked })
                         }
                     }
                     None => match store::mark_verified(conn, id, now).await {
-                        Ok(()) => Ok(Check::Verified {
-                            taken_from: None,
-                            revoked: revoke_if_enforced(conn, org, &domain, now).await?,
-                        }),
+                        Ok(()) => {
+                            let revoked = revoke_if_enforced(conn, org, &domain, now).await?;
+                            record_verified(conn, &ctx, org, id, None, now).await?;
+                            Ok(Check::Verified { revoked })
+                        }
                         Err(MetaError::Conflict(_)) => {
                             store::mark_checked(conn, id, now).await?;
                             Ok(Check::Elsewhere)
@@ -986,18 +1041,11 @@ async fn post_org_sso_domain_verify(
         Check::Elsewhere => Err(ApiError::Conflict {
             detail: "This domain is verified by another organization.",
         }),
-        Check::Verified {
-            taken_from,
-            revoked,
-        } => {
+        Check::Verified { revoked } => {
             for hash in &revoked {
                 state.pat_cache.evict(hash);
             }
             super::refresh(&state).await;
-            tracing::info!(target: "audit", org_id = %org, user_id = %caller, domain_id = %id, "org sso domain verified");
-            if let Some(from) = taken_from {
-                tracing::info!(target: "audit", org_id = %org, from_org_id = %from, domain_id = %id, "org sso domain taken over");
-            }
             Ok(error::Json(view(&state, org).await?))
         }
     }
@@ -1007,20 +1055,59 @@ async fn delete_org_sso_domain(
     State(state): State<AppState>,
     Extension(principal): Extension<Principal>,
     Extension(access): Extension<OrgAccess>,
+    ctx: audit::Ctx,
     error::Path(IdPath { id }): error::Path<IdPath>,
 ) -> Result<StatusCode, ApiError> {
     let org = access.org.id;
-    let caller = principal::session_user(&principal)?.id;
+    principal::session_user(&principal)?;
+    let now = state.clock.now_ns();
     let removed = state
         .meta
-        .write(move |conn| Box::pin(async move { store::delete_domain(conn, org, id).await }))
+        .write(move |conn| {
+            Box::pin(async move {
+                let removed = store::delete_domain(conn, org, id).await?;
+                if removed {
+                    let event = Event::new(SsoAction::DomainRemoved)
+                        .org(org)
+                        .target(TargetKind::SsoDomain, id);
+                    audit::record(conn, &ctx, event, now).await?;
+                }
+                Ok(removed)
+            })
+        })
         .await?;
     if !removed {
         return Err(ApiError::NotFound);
     }
     super::refresh(&state).await;
-    tracing::info!(target: "audit", org_id = %org, user_id = %caller, domain_id = %id, "org sso domain removed");
     Ok(StatusCode::NO_CONTENT)
+}
+
+/// Records a verification in the domain's org. A takeover (`taken_from` is the holder) also
+/// writes `sso.domain_lost` in the holder's log.
+async fn record_verified(
+    conn: &mut SqliteConnection,
+    ctx: &audit::Ctx,
+    org: OrgId,
+    id: Uuid,
+    taken_from: Option<OrgId>,
+    now: i64,
+) -> Result<(), MetaError> {
+    let event = Event::new(SsoAction::DomainVerified {
+        taken_from: taken_from.map(OrgId::as_uuid),
+    })
+    .org(org)
+    .target(TargetKind::SsoDomain, id);
+    audit::record(conn, ctx, event, now).await?;
+    if let Some(holder) = taken_from {
+        let lost = Event::new(SsoAction::DomainLost {
+            to_org_id: org.as_uuid(),
+        })
+        .org(holder)
+        .target(TargetKind::SsoDomain, id);
+        audit::record(conn, ctx, lost, now).await?;
+    }
+    Ok(())
 }
 
 /// Whether one of the TXT strings is `expected`, ignoring surrounding whitespace and one
@@ -1052,9 +1139,8 @@ enum Check {
     Missing,
     /// Another org holds the domain and its record is still in the answer.
     Elsewhere,
-    /// The domain is this org's now. `taken_from` is the org it moved from.
+    /// The domain is this org's now; the audit record names the org it moved from.
     Verified {
-        taken_from: Option<OrgId>,
         /// The personal access token hashes the enforcement revoked (D-P-58).
         revoked: Vec<String>,
     },
@@ -1088,8 +1174,8 @@ enum Patch {
     Missing,
     /// The provider changed between the read and the write.
     Changed,
-    /// The flags are set; the revoked users and token hashes.
-    Done(u64, Vec<String>),
+    /// The flags are set; the revoked token hashes.
+    Done(Vec<String>),
 }
 
 /// What the delete found and did.
@@ -1831,6 +1917,68 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn domain_takeover_writes_both_orgs() {
+        let (app, seeded, owner) = org_sso_app().await;
+        seed_provider(&app, seeded.org_id, "https://idp.example").await;
+        add_domain(&app, "acme", &owner.cookie, "acme.test").await;
+        let acme = domain_of(&app, "acme", &owner.cookie, "acme.test").await;
+        app.dns_txt(&acme.txt_name, &[quoted(&acme.txt_value).as_str()]);
+        assert_eq!(
+            verify(&app, "acme", &owner.cookie, acme.id).await.status,
+            StatusCode::OK
+        );
+
+        let (beta_org, beta) = second_org(&app, "beta", "b@beta.test").await;
+        seed_provider(&app, beta_org, "https://idp.example").await;
+        assert_eq!(
+            add_domain(&app, "beta", &beta.cookie, "acme.test")
+                .await
+                .status,
+            StatusCode::CREATED
+        );
+        let beta_row = domain_of(&app, "beta", &beta.cookie, "acme.test").await;
+        // acme's record is gone: the domain moves to beta.
+        app.dns_txt(&acme.txt_name, &[quoted(&beta_row.txt_value).as_str()]);
+        assert_eq!(
+            verify(&app, "beta", &beta.cookie, beta_row.id).await.status,
+            StatusCode::OK
+        );
+
+        let lost: Vec<(String, String, String)> = sqlx::query_as(
+            "SELECT org_id, target_id, details FROM audit_events \
+             WHERE action = 'sso.domain_lost'",
+        )
+        .fetch_all(app.state.meta.reader())
+        .await
+        .unwrap();
+        assert_eq!(
+            lost,
+            vec![(
+                seeded.org_id.to_string(),
+                beta_row.id.to_string(),
+                format!(r#"{{"to_org_id":"{beta_org}"}}"#),
+            )],
+            "the losing org's log names the taker"
+        );
+        let taken: Vec<(String, String, String)> = sqlx::query_as(
+            "SELECT org_id, target_id, details FROM audit_events \
+             WHERE action = 'sso.domain_verified' AND org_id = ?",
+        )
+        .bind(beta_org.to_string())
+        .fetch_all(app.state.meta.reader())
+        .await
+        .unwrap();
+        assert_eq!(
+            taken,
+            vec![(
+                beta_org.to_string(),
+                beta_row.id.to_string(),
+                format!(r#"{{"taken_from":"{}"}}"#, seeded.org_id),
+            )],
+        );
+    }
+
+    #[tokio::test]
     async fn instance_config_owns_some_domains() {
         let (app, _seeded, owner) = org_sso_app_with(|config| {
             config.auth.enforce_sso_domains = vec!["corp.test".to_owned()];
@@ -2022,6 +2170,28 @@ mod tests {
             })
             .await
             .unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_patch_that_changes_no_flag_records_nothing() {
+        let idp = MockIdp::start().await;
+        let (app, seeded, owner) = org_sso_app().await;
+        configure_org_sso(&app, seeded.org_id, &idp, "acme.test", true, false).await;
+
+        let same = patch_settings(
+            &app,
+            &owner.cookie,
+            &json!({"enabled": true, "enforced": false}),
+        )
+        .await;
+        assert_eq!(same.status, StatusCode::OK);
+        let rows: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM audit_events WHERE action = 'sso.settings_changed'",
+        )
+        .fetch_one(app.state.meta.reader())
+        .await
+        .unwrap();
+        assert_eq!(rows, 0);
     }
 
     #[tokio::test]
@@ -2462,6 +2632,93 @@ mod tests {
         let saml = saml_of(&saved);
         assert_eq!(saml.metadata_url, Some(server.url()));
         assert!(saml.refreshed_at.is_some());
+    }
+
+    #[tokio::test]
+    async fn saml_saves_are_recorded_in_the_audit_log() {
+        let idp = MockIdp::start().await;
+        let (app, seeded, owner) = saml_app().await;
+        configure_org_sso(&app, seeded.org_id, &idp, "acme.test", true, false).await;
+        // A switch from OIDC deletes the org's identities, so its record says the identity
+        // changed; a save with no source changes the settings only.
+        let switched = put_saml(&app, &owner.cookie, &saml_xml("Acme SAML")).await;
+        assert_eq!(switched.status, StatusCode::OK);
+        let settings = put_saml(
+            &app,
+            &owner.cookie,
+            &json!({"display_name": "Renamed", "jit_role": "viewer"}),
+        )
+        .await;
+        assert_eq!(settings.status, StatusCode::OK);
+        let org = seeded.org_id;
+        let provider = store::provider(app.state.meta.reader(), org)
+            .await
+            .unwrap()
+            .expect("a provider")
+            .id;
+        let rows: Vec<(String, String, String)> = sqlx::query_as(
+            "SELECT org_id, target_id, details FROM audit_events \
+             WHERE action = 'sso.provider_saved' ORDER BY seq",
+        )
+        .fetch_all(app.state.meta.reader())
+        .await
+        .unwrap();
+        assert_eq!(
+            rows,
+            vec![
+                (
+                    org.to_string(),
+                    provider.to_string(),
+                    r#"{"protocol":"saml","issuer_changed":true}"#.to_owned(),
+                ),
+                (
+                    org.to_string(),
+                    provider.to_string(),
+                    r#"{"protocol":"saml","issuer_changed":false}"#.to_owned(),
+                ),
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn a_saml_provider_removal_is_recorded_with_its_protocol() {
+        let (app, seeded, owner) = saml_app().await;
+        configure_org_saml(
+            &app,
+            seeded.org_id,
+            &[TestKey::Idp],
+            "acme.test",
+            false,
+            false,
+        )
+        .await;
+        let org = seeded.org_id;
+        let provider = store::provider(app.state.meta.reader(), org)
+            .await
+            .unwrap()
+            .expect("a provider")
+            .id;
+        let removed = app
+            .request(Method::DELETE, PROVIDER_PATH)
+            .header("cookie", &owner.cookie)
+            .send()
+            .await;
+        assert_eq!(removed.status, StatusCode::NO_CONTENT);
+        let rows: Vec<(String, String, String)> = sqlx::query_as(
+            "SELECT org_id, target_id, details FROM audit_events \
+             WHERE action = 'sso.provider_removed'",
+        )
+        .fetch_all(app.state.meta.reader())
+        .await
+        .unwrap();
+        assert_eq!(
+            rows,
+            vec![(
+                org.to_string(),
+                provider.to_string(),
+                r#"{"protocol":"saml"}"#.to_owned(),
+            )]
+        );
     }
 
     #[tokio::test]

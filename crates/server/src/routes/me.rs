@@ -10,6 +10,8 @@ use axum::routing::{patch, post};
 
 use crate::api::account::{ChangePasswordRequest, UpdateMeRequest, User};
 use crate::api::common::{FieldError, ProblemCode};
+use crate::audit::catalog::AuthAction;
+use crate::audit::{self, Event, TargetKind};
 use crate::auth::password::check_policy;
 use crate::auth::principal::{self, Principal};
 use crate::http::AppState;
@@ -67,6 +69,7 @@ async fn update_me(
 async fn change_password(
     State(state): State<AppState>,
     ClientIp(ip): ClientIp,
+    ctx: audit::Ctx,
     Extension(principal): Extension<Principal>,
     error::Json(body): error::Json<ChangePasswordRequest>,
 ) -> Result<Response, ApiError> {
@@ -74,7 +77,10 @@ async fn change_password(
         Principal::Session {
             user, session_hash, ..
         } => (user, session_hash),
-        Principal::ApiKey { .. } | Principal::Pat { .. } | Principal::ControlPlane { .. } => {
+        Principal::ApiKey { .. }
+        | Principal::Pat { .. }
+        | Principal::ControlPlane { .. }
+        | Principal::Scim { .. } => {
             return Err(ApiError::Forbidden {
                 code: ProblemCode::Forbidden,
             });
@@ -139,7 +145,15 @@ async fn change_password(
             Box::pin(async move {
                 users::set_password_hash(conn, user_id, Some(&password_hash), now).await?;
                 delete_user_sessions(conn, user_id, Some(&keep)).await?;
-                revoke_user_tokens(conn, user_id, now).await
+                let hashes = revoke_user_tokens(conn, user_id, now).await?;
+                audit::record(
+                    conn,
+                    &ctx,
+                    Event::new(AuthAction::PasswordChanged).target(TargetKind::User, user_id),
+                    now,
+                )
+                .await?;
+                Ok(hashes)
             })
         })
         .await?;
@@ -147,7 +161,6 @@ async fn change_password(
         state.pat_cache.evict(&hash);
     }
     state.limits.lockout.clear(&email);
-    tracing::info!(target: "audit", %user_id, "password changed");
     Ok(StatusCode::NO_CONTENT.into_response())
 }
 
@@ -406,6 +419,44 @@ mod tests {
         assert_eq!(old.status, 401);
         let fresh = login(&app, "ada@example.com", NEW_PASSWORD).await;
         assert_eq!(fresh.status, 200);
+    }
+
+    #[tokio::test]
+    async fn password_change_is_recorded() {
+        let app = TestApp::new().await;
+        let user_id = insert_account(&app, "ada@example.com", Some(PASSWORD)).await;
+        let cookie = session_cookie(&login(&app, "ada@example.com", PASSWORD).await);
+        let changed = app
+            .request(Method::POST, "/api/v1/me/password")
+            .header(header::COOKIE.as_str(), &cookie)
+            .json(&serde_json::json!({
+                "current_password": PASSWORD,
+                "new_password": NEW_PASSWORD,
+            }))
+            .send()
+            .await;
+        assert_eq!(changed.status, 204);
+        #[allow(clippy::type_complexity)]
+        let rows: Vec<(
+            String,
+            String,
+            Option<String>,
+            Option<String>,
+            Option<String>,
+        )> = sqlx::query_as(
+            "SELECT actor_kind, outcome, via, target_kind, target_id \
+                 FROM audit_events WHERE action = 'auth.password_changed'",
+        )
+        .fetch_all(app.state.meta.reader())
+        .await
+        .unwrap();
+        assert_eq!(rows.len(), 1);
+        let (actor_kind, outcome, via, target_kind, target_id) = &rows[0];
+        assert_eq!(actor_kind, "user");
+        assert_eq!(outcome, "success");
+        assert_eq!(via.as_deref(), Some("session"));
+        assert_eq!(target_kind.as_deref(), Some("user"));
+        assert_eq!(target_id.as_deref(), Some(user_id.to_string().as_str()));
     }
 
     #[tokio::test]

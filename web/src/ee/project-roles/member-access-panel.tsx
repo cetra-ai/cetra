@@ -10,6 +10,7 @@ import { FormError } from "@/components/form/form-error";
 import { FormSuccess } from "@/components/form/form-success";
 import { SubmitButton } from "@/components/form/submit-button";
 import { LockedFeature } from "@/components/plan/locked-feature";
+import { useOrgMembers } from "@/components/settings/org-members";
 import { SettingsPanel } from "@/components/settings/settings-list";
 import { UnsavedChangesGuard } from "@/components/settings/unsaved-changes";
 import { Label } from "@/components/ui/label";
@@ -40,6 +41,12 @@ export function MemberAccessPanel({
   onClose: () => void;
 }) {
   const queryClient = useQueryClient();
+  // The project member row has no SCIM flag; the org's member list does (D-EA-18).
+  const managed =
+    useOrgMembers(org)
+      .data?.pages.flatMap((page) => page.data)
+      .find((item) => item.user.id === member.user.id)?.scim_managed === true;
+  const editable = canEdit && !managed;
   const stored: Access = member.override ?? "inherit";
   const [draft, setDraft] = useState<Access>(stored);
   const [actionError, setActionError] = useState<string | undefined>();
@@ -99,7 +106,7 @@ export function MemberAccessPanel({
       subtitle={member.user.name ? member.user.email : undefined}
       onClose={onClose}
       footer={
-        overridable && canEdit ? (
+        overridable && editable ? (
           <>
             {saved && !dirty ? <FormSuccess message="Saved" /> : null}
             {dirty ? (
@@ -136,12 +143,17 @@ export function MemberAccessPanel({
           <p className="text-caption text-muted-foreground">
             Overrides the org role in this project.
           </p>
+          {managed ? (
+            <p className="text-caption text-muted-foreground">
+              Managed by your identity provider. Project access can't be changed by hand.
+            </p>
+          ) : null}
           <ProjectAccessSelect
             id="member-access"
             email={member.user.email}
             stored={stored}
             value={draft}
-            canEdit={canEdit}
+            canEdit={editable}
             locked={locked}
             pending={pending}
             onChange={(value) => {

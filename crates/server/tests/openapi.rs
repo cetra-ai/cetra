@@ -90,6 +90,33 @@ const OPERATIONS: &[(&str, &str, &str)] = &[
     ),
     ("get", "/api/v1/orgs/{org}/usage", "get_org_usage"),
     ("get", "/api/v1/orgs/{org}/sso", "get_org_sso"),
+    ("get", "/api/v1/orgs/{org}/scim", "get_org_scim"),
+    ("patch", "/api/v1/orgs/{org}/scim", "update_org_scim"),
+    (
+        "post",
+        "/api/v1/orgs/{org}/scim/tokens",
+        "create_org_scim_token",
+    ),
+    (
+        "delete",
+        "/api/v1/orgs/{org}/scim/tokens/{id}",
+        "revoke_org_scim_token",
+    ),
+    (
+        "get",
+        "/api/v1/orgs/{org}/scim/groups",
+        "list_org_scim_groups",
+    ),
+    (
+        "put",
+        "/api/v1/orgs/{org}/scim/groups/{id}/mapping",
+        "put_org_scim_group_mapping",
+    ),
+    (
+        "delete",
+        "/api/v1/orgs/{org}/scim/groups/{id}/mapping",
+        "delete_org_scim_group_mapping",
+    ),
     ("patch", "/api/v1/orgs/{org}/sso", "patch_org_sso"),
     (
         "put",
@@ -616,6 +643,76 @@ const OPERATIONS: &[(&str, &str, &str)] = &[
     ("get", "/api/v1/orgs/{org}/deletions", "list_org_deletions"),
     (
         "get",
+        "/api/v1/orgs/{org}/audit-events",
+        "list_org_audit_events",
+    ),
+    (
+        "get",
+        "/api/v1/orgs/{org}/audit-events/export",
+        "get_org_audit_export",
+    ),
+    (
+        "get",
+        "/api/v1/admin/audit-events",
+        "list_admin_audit_events",
+    ),
+    (
+        "get",
+        "/api/v1/admin/audit-events/export",
+        "get_admin_audit_export",
+    ),
+    (
+        "get",
+        "/api/v1/orgs/{org}/audit-stream",
+        "get_org_audit_stream",
+    ),
+    (
+        "put",
+        "/api/v1/orgs/{org}/audit-stream",
+        "put_org_audit_stream",
+    ),
+    (
+        "delete",
+        "/api/v1/orgs/{org}/audit-stream",
+        "delete_org_audit_stream",
+    ),
+    (
+        "post",
+        "/api/v1/orgs/{org}/audit-stream/secret",
+        "rotate_org_audit_stream_secret",
+    ),
+    (
+        "post",
+        "/api/v1/orgs/{org}/audit-stream/test",
+        "test_org_audit_stream",
+    ),
+    (
+        "get",
+        "/api/v1/admin/audit-stream",
+        "get_admin_audit_stream",
+    ),
+    (
+        "put",
+        "/api/v1/admin/audit-stream",
+        "put_admin_audit_stream",
+    ),
+    (
+        "delete",
+        "/api/v1/admin/audit-stream",
+        "delete_admin_audit_stream",
+    ),
+    (
+        "post",
+        "/api/v1/admin/audit-stream/secret",
+        "rotate_admin_audit_stream_secret",
+    ),
+    (
+        "post",
+        "/api/v1/admin/audit-stream/test",
+        "test_admin_audit_stream",
+    ),
+    (
+        "get",
         "/api/v1/projects/{project}/evaluators",
         "list_evaluators",
     ),
@@ -1096,6 +1193,10 @@ const QUERY_OR_BODY: &[&str] = &[
     "list_deletions",
     "get_deletion",
     "list_org_deletions",
+    "list_org_audit_events",
+    "get_org_audit_export",
+    "list_admin_audit_events",
+    "get_admin_audit_export",
     "list_evaluators",
     "list_evaluator_versions",
     "list_score_definitions",
@@ -1171,6 +1272,7 @@ const TAGS: &[&str] = &[
     "media",
     "internal",
     "deletions",
+    "audit",
     "alerts",
     "issues",
     "assistant",
@@ -1296,6 +1398,18 @@ fn document_lint() {
                 | "post_personal_token"
                 | "delete_personal_token"
                 | "list_admin_users"
+                | "list_admin_audit_events"
+                | "get_admin_audit_export"
+                | "get_admin_audit_stream"
+                | "put_admin_audit_stream"
+                | "delete_admin_audit_stream"
+                | "rotate_admin_audit_stream_secret"
+                | "test_admin_audit_stream"
+                | "get_org_audit_stream"
+                | "put_org_audit_stream"
+                | "delete_org_audit_stream"
+                | "rotate_org_audit_stream_secret"
+                | "test_org_audit_stream"
                 | "post_admin_user"
                 | "patch_admin_user"
                 | "post_admin_user_reset_link"
@@ -1311,6 +1425,13 @@ fn document_lint() {
                 | "post_org_sso_domain"
                 | "post_org_sso_domain_verify"
                 | "delete_org_sso_domain"
+                | "get_org_scim"
+                | "update_org_scim"
+                | "create_org_scim_token"
+                | "revoke_org_scim_token"
+                | "list_org_scim_groups"
+                | "put_org_scim_group_mapping"
+                | "delete_org_scim_group_mapping"
                 | "delete_org"
                 | "delete_project"
                 | "patch_issue"
@@ -1417,13 +1538,19 @@ fn document_lint() {
             || *id == "put_assistant_feedback"
             || *id == "put_org_assistant"
             || *id == "post_org_assistant_test"
+            || *id == "list_org_audit_events"
+            || *id == "get_org_audit_export"
         {
             expected_errors.extend(["400", "401", "403", "404", "429"]);
         } else if *id == "get_invite_preview" {
             expected_errors.extend(["404", "429"]);
         } else if *id == "post_org_invite" || *id == "post_project" {
             expected_errors.extend(["400", "401", "403", "404", "409", "429"]);
-        } else if *id == "list_admin_users" || *id == "post_admin_settings_test_email" {
+        } else if *id == "list_admin_users"
+            || *id == "post_admin_settings_test_email"
+            || *id == "list_admin_audit_events"
+            || *id == "get_admin_audit_export"
+        {
             expected_errors.extend(["400", "401", "403", "429"]);
         } else if *id == "get_admin_settings" || *id == "get_admin_license" {
             expected_errors.extend(["401", "403", "429"]);
@@ -1473,8 +1600,12 @@ fn document_lint() {
             || *id == "put_org_saml_provider"
             || *id == "post_org_sso_domain"
             || *id == "patch_org_sso"
+            || *id == "update_org_scim"
+            || *id == "create_org_scim_token"
         {
             expected_errors.extend(["400", "401", "403", "404", "409", "429"]);
+        } else if *id == "put_org_scim_group_mapping" {
+            expected_errors.extend(["400", "401", "403", "404", "429"]);
         } else if *id == "post_org_sso_domain_verify" || *id == "delete_org_sso_provider" {
             expected_errors.extend(["401", "403", "404", "409", "429"]);
         } else if *id == "run_sql" || *id == "query_widget" || *id == "post_facets" {
@@ -1597,6 +1728,20 @@ fn document_lint() {
             expected_errors.extend(["400", "401", "403", "404", "413", "429"]);
         } else if *id == "post_experiment_results" {
             expected_errors.extend(["400", "401", "403", "404", "409", "413", "429"]);
+        } else if *id == "get_org_audit_stream" || *id == "get_admin_audit_stream" {
+            expected_errors.extend(["401", "403", "404", "409", "429"]);
+        } else if *id == "put_org_audit_stream" {
+            expected_errors.extend(["400", "401", "403", "404", "409", "429"]);
+        } else if *id == "put_admin_audit_stream" {
+            expected_errors.extend(["400", "401", "403", "409", "429"]);
+        } else if *id == "delete_org_audit_stream" || *id == "delete_admin_audit_stream" {
+            expected_errors.extend(["401", "403", "404", "429"]);
+        } else if *id == "rotate_org_audit_stream_secret"
+            || *id == "rotate_admin_audit_stream_secret"
+        {
+            expected_errors.extend(["401", "403", "404", "409", "429"]);
+        } else if *id == "test_org_audit_stream" || *id == "test_admin_audit_stream" {
+            expected_errors.extend(["400", "401", "403", "404", "429"]);
         } else if READ_OPERATIONS.contains(id)
             || *id == "preview_deletion"
             || *id == "post_online_rule_preview"
@@ -2007,6 +2152,7 @@ fn assert_nullability(schemas: &serde_json::Map<String, Value>) {
         "BackfillPage",
         "InternalUsagePage",
         "InternalDropPage",
+        "AuditEventPage",
     ];
     let mut expected: BTreeSet<String> = pages
         .iter()

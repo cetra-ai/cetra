@@ -128,6 +128,7 @@ fixtures/server/golden/      golden server backups (meta.db, catalog.db, secret.
                              from the first stable release on (SF6, D-R-38, spec 04 § Format versions)
 fixtures/api/                example API responses (UI mocks), checked against the server types (spec 09)
 fixtures/saml/               test IdP keys and certificates for cetra-saml (track SA)
+fixtures/scim/               SCIM requests in the shape Okta and Entra ID send, replayed in tests (track EA M6; written from the vendors' documentation, not validator runs)
 tools/                       dev tools (fixture capture, benchmarks); not shipped
 tools/soak/                  soak plots (uv)
 tools/capture/               fixture capture: mock provider, OTLP receiver, scenarios (B2)
@@ -249,7 +250,7 @@ Updated by hand: `rust-toolchain.toml`, `.node-version`, `packageManager`.
 
 ## Naming
 
-Crates are prefixed `cetra-`. The binary is `cetra`, env vars use the `CETRA_` prefix, and span attributes use the `cetra.*` namespace. API keys are `sk-cetra-…`, `pk-cetra-…` and `pat-cetra-…`.
+Crates are prefixed `cetra-`. The binary is `cetra`, env vars use the `CETRA_` prefix, and span attributes use the `cetra.*` namespace. API keys are `sk-cetra-…`, `pk-cetra-…`, `pat-cetra-…` and `scim-cetra-…`.
 
 The product was renamed from the working name `llmobs` to `cetra` mechanically (D46). Keep the name in as few places as practical, e.g. one constant for the attribute prefix.
 

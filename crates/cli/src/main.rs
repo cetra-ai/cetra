@@ -844,7 +844,12 @@ fn write_entitlements(out: &mut impl Write, report: &EntitlementsReport) -> io::
     let features = report.features.iter().map(wire_name).collect::<Vec<_>>();
     writeln!(out, "features: {}", features.join(", "))?;
     for (name, limit) in limit_rows(&report.limits) {
-        writeln!(out, "{name}: {}", limit_text(limit))?;
+        let text = if name == "audit_retention_days" {
+            audit_retention_text(limit)
+        } else {
+            limit_text(limit)
+        };
+        writeln!(out, "{name}: {text}")?;
     }
     writeln!(out, "units this month: {}", report.month_units)?;
     let window = report
@@ -854,7 +859,7 @@ fn write_entitlements(out: &mut impl Write, report: &EntitlementsReport) -> io::
 }
 
 /// The D-P-13 limits in order, then D-IC-13.
-fn limit_rows(limits: &OrgLimits) -> [(&'static str, Option<u64>); 11] {
+fn limit_rows(limits: &OrgLimits) -> [(&'static str, Option<u64>); 12] {
     [
         ("units_included", limits.units_included),
         ("units_cap", limits.units_cap),
@@ -867,11 +872,22 @@ fn limit_rows(limits: &OrgLimits) -> [(&'static str, Option<u64>); 11] {
         ("max_active_online_rules", limits.max_active_online_rules),
         ("max_annotation_queues", limits.max_annotation_queues),
         ("max_active_issue_sources", limits.max_active_issue_sources),
+        ("audit_retention_days", limits.audit_retention_days),
     ]
 }
 
 fn limit_text(limit: Option<u64>) -> String {
     limit.map_or_else(|| "unlimited".to_owned(), |value| value.to_string())
+}
+
+/// The audit retention limit (D-EA-7): omitted takes the instance's `audit.retention_days`,
+/// `0` keeps records forever.
+fn audit_retention_text(limit: Option<u64>) -> String {
+    match limit {
+        None => "instance default".to_owned(),
+        Some(0) => "kept forever".to_owned(),
+        Some(days) => format!("{days} days"),
+    }
 }
 
 /// The serde name of a unit enum value, e.g. `token` for `PlanSource::Token`.
@@ -1214,6 +1230,7 @@ mod tests {
             features: vec![Feature::RetentionManagement, Feature::ProjectRoles],
             limits: OrgLimits {
                 units_included: Some(200_000),
+                audit_retention_days: Some(0),
                 ..OrgLimits::default()
             },
             retention_window_days: None,
@@ -1237,8 +1254,19 @@ mod tests {
             text.contains("max_annotation_queues: unlimited\n"),
             "{text}"
         );
+        assert!(
+            text.contains("audit_retention_days: kept forever\n"),
+            "{text}"
+        );
         assert!(text.contains("retention window: unlimited\n"), "{text}");
         assert!(text.contains("units this month: 1240\n"), "{text}");
+    }
+
+    #[test]
+    fn audit_retention_prints_the_instance_default_or_days() {
+        assert_eq!(super::audit_retention_text(None), "instance default");
+        assert_eq!(super::audit_retention_text(Some(0)), "kept forever");
+        assert_eq!(super::audit_retention_text(Some(365)), "365 days");
     }
 
     #[test]

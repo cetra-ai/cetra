@@ -21,16 +21,22 @@ pub enum Feature {
     OrgSso,
     /// SAML 2.0 single sign-on for an org's provider (track SA, ee).
     Saml,
+    /// SCIM 2.0 provisioning (track EA M5): Enterprise or an enterprise licence.
+    Scim,
+    /// The audit log: reads and exports (track EA M3): Enterprise or an enterprise licence.
+    AuditLog,
 }
 
 impl Feature {
     /// Every feature, in declaration order.
-    pub const ALL: [Self; 5] = [
+    pub const ALL: [Self; 7] = [
         Self::RetentionManagement,
         Self::ProjectRoles,
         Self::SsoEnforcement,
         Self::OrgSso,
         Self::Saml,
+        Self::Scim,
+        Self::AuditLog,
     ];
 
     /// The wire name.
@@ -41,6 +47,8 @@ impl Feature {
             Self::SsoEnforcement => "sso_enforcement",
             Self::OrgSso => "org_sso",
             Self::Saml => "saml",
+            Self::Scim => "scim",
+            Self::AuditLog => "audit_log",
         }
     }
 
@@ -48,7 +56,12 @@ impl Feature {
     pub fn is_ee(self) -> bool {
         matches!(
             self,
-            Self::ProjectRoles | Self::SsoEnforcement | Self::OrgSso | Self::Saml
+            Self::ProjectRoles
+                | Self::SsoEnforcement
+                | Self::OrgSso
+                | Self::Saml
+                | Self::Scim
+                | Self::AuditLog
         )
     }
 
@@ -69,6 +82,12 @@ impl Feature {
                 "Single sign-on for an organization needs the Teams add-on or an enterprise licence."
             }
             Self::Saml => "SAML single sign-on needs a licence or plan that includes it.",
+            Self::Scim => {
+                "SCIM provisioning is part of the Enterprise plan and the self-hosted licence."
+            }
+            Self::AuditLog => {
+                "The audit log is part of the Enterprise plan and the self-hosted licence."
+            }
         }
     }
 }
@@ -126,7 +145,8 @@ pub struct OrgPlan {
     pub grace_ends_at: Option<i64>,
 }
 
-/// The org's limits (D-P-13). An omitted limit is unlimited.
+/// The org's limits (D-P-13). An omitted limit is unlimited, except `audit_retention_days`
+/// (see its doc).
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 pub struct OrgLimits {
     /// Units included in the plan.
@@ -162,6 +182,10 @@ pub struct OrgLimits {
     /// Annotation queues.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_annotation_queues: Option<u64>,
+    /// Audit log retention in days. Omitted: the instance's `audit.retention_days`;
+    /// 0: kept forever.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub audit_retention_days: Option<u64>,
 }
 
 impl From<Source> for PlanSource {
@@ -210,6 +234,7 @@ impl From<Limits> for OrgLimits {
             max_active_online_rules: limits.max_active_online_rules,
             max_active_issue_sources: limits.max_active_issue_sources,
             max_annotation_queues: limits.max_annotation_queues,
+            audit_retention_days: limits.audit_retention_days,
         }
     }
 }

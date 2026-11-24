@@ -10,12 +10,17 @@ use uuid::Uuid;
 
 use crate::api::account::OrgMembership;
 use crate::api::common::{Page, PageParams, Problem, ProblemCode};
+use crate::api::entitlements::Feature;
 use crate::api::invites::{CreateInviteRequest, CreatedInvite, Invite, InviteOrg, InvitePreview};
 use crate::api::members::MemberUser;
+use crate::audit::catalog::InviteAction;
+use crate::audit::{self, Event, TargetKind};
 use crate::auth::principal::{self, Principal};
 use crate::auth::roles::{self, OrgPerm, OrgRole};
 use crate::auth::secret::{hash_token, is_opaque_token, new_opaque_token};
 use crate::demo::is_demo_org;
+use crate::ee::scim::domains::{in_domains, scim_domains_tx};
+use crate::ee::scim::store as scim_store;
 use crate::email::Email;
 use crate::entitlements::{over_limit, plan_limit};
 use crate::http::AppState;
@@ -96,16 +101,19 @@ enum Created {
     Forbidden,
     /// The org's seat limit, which is what the caller hit.
     OverLimit(u64),
+    /// The email is on a verified SCIM domain while SCIM locks the org (D-EA-18).
+    ScimManaged,
 }
 
 enum Accepted {
     Done {
         membership: OrgMembership,
-        invite_id: Uuid,
     },
     Missing,
     WrongEmail,
     OverLimit(u64),
+    /// The invitation is for a verified SCIM domain while SCIM locks the org (D-EA-18).
+    ScimManaged,
 }
 
 async fn list_invites(
@@ -134,6 +142,7 @@ async fn create_invite(
     State(state): State<AppState>,
     Extension(principal): Extension<Principal>,
     Extension(access): Extension<OrgAccess>,
+    ctx: audit::Ctx,
     error::Json(body): error::Json<CreateInviteRequest>,
 ) -> Result<(StatusCode, error::Json<CreatedInvite>), ApiError> {
     let user = principal::session_user(&principal)?;
@@ -153,6 +162,8 @@ async fn create_invite(
     let invited_by = inviter.as_ref().map(member_user);
     let inviter_name = inviter.and_then(|user| user.name);
     let max_seats = state.entitlements.resolve(org_id, now).limits.max_seats;
+    let locks = crate::ee::scim::locks(&state, org_id).await?;
+    let domains_state = state.clone();
     let created = state
         .meta
         .write(move |conn| {
@@ -175,6 +186,12 @@ async fn create_invite(
                 if existing.is_some() {
                     return Err(MetaError::Conflict("already a member"));
                 }
+                if locks {
+                    let listed = scim_domains_tx(&domains_state, conn, org_id, now).await?;
+                    if in_domains(&listed, &email_for_db) {
+                        return Ok(Created::ScimManaged);
+                    }
+                }
                 if let Some(limit) = max_seats.filter(|_| role != OrgRole::Viewer) {
                     let seats = members::seat_members_tx(conn, org_id).await?
                         + invites::seat_invites_tx(conn, org_id, now, Some(&email_for_db)).await?;
@@ -193,6 +210,17 @@ async fn create_invite(
                     expires_at,
                 )
                 .await?;
+                audit::record(
+                    conn,
+                    &ctx,
+                    Event::new(InviteAction::Created {
+                        role: roles::org_role_str(role),
+                    })
+                    .org(org_id)
+                    .target(TargetKind::Invite, row.id),
+                    now,
+                )
+                .await?;
                 Ok(Created::Invite(row))
             })
         })
@@ -205,18 +233,12 @@ async fn create_invite(
             });
         }
         Created::OverLimit(limit) => return Err(plan_limit(limit, ("seat", "seats"))),
+        Created::ScimManaged => return Err(ApiError::ScimManaged),
     };
     let url = state
         .config
         .public_url
         .join(&format!("/invite/{}", minted.plaintext));
-    tracing::info!(
-        target: "audit",
-        org_id = %org_id,
-        actor_id = %actor,
-        invite_id = %row.id,
-        "invite created"
-    );
     if let Some(mailer) = &state.mailer {
         mailer.send_in_background(
             email,
@@ -240,12 +262,30 @@ async fn create_invite(
 async fn delete_invite(
     State(state): State<AppState>,
     Extension(access): Extension<OrgAccess>,
+    ctx: audit::Ctx,
     error::Path(IdPath { id }): error::Path<IdPath>,
 ) -> Result<StatusCode, ApiError> {
     let org_id = access.org.id;
+    let now = state.clock.now_ns();
     let removed = state
         .meta
-        .write(move |conn| Box::pin(async move { invites::delete_invite(conn, org_id, id).await }))
+        .write(move |conn| {
+            Box::pin(async move {
+                let removed = invites::delete_invite(conn, org_id, id).await?;
+                if removed {
+                    audit::record(
+                        conn,
+                        &ctx,
+                        Event::new(InviteAction::Revoked)
+                            .org(org_id)
+                            .target(TargetKind::Invite, id),
+                        now,
+                    )
+                    .await?;
+                }
+                Ok(removed)
+            })
+        })
         .await?;
     if !removed {
         return Err(ApiError::NotFound);
@@ -280,6 +320,7 @@ async fn preview_invite(
 async fn accept_invite(
     State(state): State<AppState>,
     Extension(principal): Extension<Principal>,
+    ctx: audit::Ctx,
     ClientIp(ip): ClientIp,
     error::Path(TokenPath { token }): error::Path<TokenPath>,
 ) -> Result<Response, ApiError> {
@@ -299,6 +340,7 @@ async fn accept_invite(
         .meta
         .write(move |conn| {
             Box::pin(async move {
+                let mut added = false;
                 let Some((invite, org)) = invites::unexpired_invite_tx(conn, &hash, now).await?
                 else {
                     return Ok(Accepted::Missing);
@@ -316,6 +358,15 @@ async fn accept_invite(
                 } else if invite.accepted_at.is_some() {
                     return Ok(Accepted::Missing);
                 } else {
+                    // D-EA-18: the test of `ee::scim::locks`, read inside this transaction.
+                    let scim_on = scim_store::org_scim_tx(conn, org.id).await?.enabled
+                        && crate::entitlements::of(&limits_state, org.id).allows(Feature::Scim);
+                    if scim_on {
+                        let listed = scim_domains_tx(&limits_state, conn, org.id, now).await?;
+                        if in_domains(&listed, &invite.email) {
+                            return Ok(Accepted::ScimManaged);
+                        }
+                    }
                     let max_seats = limits_state
                         .entitlements
                         .resolve(org.id, now)
@@ -328,7 +379,10 @@ async fn accept_invite(
                         }
                     }
                     match members::add_org_member(conn, org.id, caller_id, invite.role, now).await {
-                        Ok(()) => invite.role,
+                        Ok(()) => {
+                            added = true;
+                            invite.role
+                        }
                         Err(MetaError::Conflict("already a member")) => {
                             match members::org_role_tx(conn, org.id, caller_id).await? {
                                 Some(role) => role,
@@ -348,6 +402,21 @@ async fn accept_invite(
                     users::set_email_verified(conn, caller_id, now, EmailVerifiedVia::Invite)
                         .await?;
                 }
+                // Only a sign-up that added the membership is an acceptance; one that was
+                // already a member records nothing.
+                if added {
+                    audit::record(
+                        conn,
+                        &ctx,
+                        Event::new(InviteAction::Accepted {
+                            role: roles::org_role_str(role),
+                        })
+                        .org(org.id)
+                        .target(TargetKind::Invite, invite.id),
+                        now,
+                    )
+                    .await?;
+                }
                 let demo = is_demo_org(&limits_state.config, org.id);
                 Ok(Accepted::Done {
                     membership: OrgMembership {
@@ -357,31 +426,19 @@ async fn accept_invite(
                         role,
                         demo,
                     },
-                    invite_id: invite.id,
                 })
             })
         })
         .await?;
     match outcome {
-        Accepted::Done {
-            membership,
-            invite_id,
-        } => {
-            tracing::info!(
-                target: "audit",
-                org_id = %membership.id,
-                actor_id = %caller_id,
-                invite_id = %invite_id,
-                "invite accepted"
-            );
-            Ok(error::Json(membership).into_response())
-        }
+        Accepted::Done { membership } => Ok(error::Json(membership).into_response()),
         Accepted::Missing => Err(ApiError::NotFound),
         Accepted::WrongEmail => Ok(error::problem_response(&Problem::new(
             ProblemCode::Forbidden,
             Some("this invitation is for another email address".to_owned()),
         ))),
         Accepted::OverLimit(limit) => Err(plan_limit(limit, ("seat", "seats"))),
+        Accepted::ScimManaged => Err(ApiError::ScimManaged),
     }
 }
 
@@ -616,6 +673,103 @@ mod tests {
 
     fn body(response: &TestResponse) -> String {
         String::from_utf8_lossy(&response.body).into_owned()
+    }
+
+    /// `(target_id, details)` of every audit row with `action`, oldest first.
+    async fn audit_rows(app: &TestApp, action: &str) -> Vec<(Option<String>, serde_json::Value)> {
+        let rows: Vec<(Option<String>, String)> = sqlx::query_as(
+            "SELECT target_id, details FROM audit_events WHERE action = ? ORDER BY seq",
+        )
+        .bind(action)
+        .fetch_all(app.state.meta.reader())
+        .await
+        .unwrap();
+        rows.into_iter()
+            .map(|(target, details)| (target, serde_json::from_str(&details).unwrap()))
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn invite_create_accept_and_revoke_are_recorded() {
+        let app = TestApp::new().await;
+        let (_, ada) = signed_in(&app, "ada@example.com").await;
+        let org = create_org(&app, &ada).await;
+        let guest_id = insert_unverified(&app, "guest@example.com").await;
+        let guest = cookie_pair(
+            &start_session(
+                &app.state,
+                guest_id,
+                None,
+                None,
+                crate::auth::session::SessionOrigin::Password,
+            )
+            .await
+            .unwrap(),
+        );
+        let invite = post_invite(&app, &ada, &org.slug, "guest@example.com", "member").await;
+        let other = post_invite(&app, &ada, &org.slug, "other@example.com", "viewer").await;
+
+        let accepted = app
+            .request(
+                Method::POST,
+                &format!("/api/auth/invites/{}/accept", invite.token),
+            )
+            .header(header::COOKIE.as_str(), &guest)
+            .send()
+            .await;
+        assert_eq!(accepted.status, 200, "{}", body(&accepted));
+        let revoked = app
+            .request(
+                Method::DELETE,
+                &format!("/api/v1/orgs/{}/invites/{}", org.slug, other.invite.id),
+            )
+            .header(header::COOKIE.as_str(), &ada)
+            .send()
+            .await;
+        assert_eq!(revoked.status, 204);
+
+        assert_eq!(
+            audit_rows(&app, "invite.created").await,
+            vec![
+                (
+                    Some(invite.invite.id.to_string()),
+                    serde_json::json!({ "role": "member" })
+                ),
+                (
+                    Some(other.invite.id.to_string()),
+                    serde_json::json!({ "role": "viewer" })
+                ),
+            ]
+        );
+        assert_eq!(
+            audit_rows(&app, "invite.accepted").await,
+            vec![(
+                Some(invite.invite.id.to_string()),
+                serde_json::json!({ "role": "member" })
+            )]
+        );
+        assert_eq!(
+            audit_rows(&app, "invite.revoked").await,
+            vec![(Some(other.invite.id.to_string()), serde_json::json!({}))]
+        );
+    }
+
+    #[tokio::test]
+    async fn revoking_a_missing_invite_records_nothing() {
+        let app = TestApp::new().await;
+        let (_, ada) = signed_in(&app, "ada@example.com").await;
+        let org = create_org(&app, &ada).await;
+
+        let missing = app
+            .request(
+                Method::DELETE,
+                &format!("/api/v1/orgs/{}/invites/{}", org.slug, Uuid::now_v7()),
+            )
+            .header(header::COOKIE.as_str(), &ada)
+            .send()
+            .await;
+        assert_eq!(missing.status, 404);
+        assert!(audit_rows(&app, "invite.revoked").await.is_empty());
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -927,6 +1081,102 @@ mod tests {
         assert_eq!(accepted.status, 404, "{}", body(&accepted));
     }
 
+    /// Grants `org` these features through a signed org token, as the control plane does.
+    fn grant_features(app: &TestApp, org: OrgId, features: &[&str]) {
+        let token = crate::test_support::org_token(
+            org,
+            "2026-01-01T00:00:00Z",
+            "2099-01-01T00:00:00Z",
+            "2099-02-01T00:00:00Z",
+            features,
+            &serde_json::json!({}),
+        );
+        let defaults = app.state.entitlements.defaults().limits;
+        let (granted, grant) = crate::entitlements::tokens::grant_from_token(
+            &token,
+            app.state.config.public_url.origin(),
+            &defaults,
+        )
+        .expect("the test token verifies");
+        app.state.entitlements.put_grant(granted, grant);
+    }
+
+    #[tokio::test]
+    async fn accepting_an_old_invite_to_a_verified_domain_is_409_while_scim_is_on() {
+        let app = TestApp::new().await;
+        let (_, ada) = signed_in(&app, "ada@example.com").await;
+        let org = create_org(&app, &ada).await;
+        let org_id = org.id;
+        let now = app.state.clock.now_ns();
+        let guest_id = insert_unverified(&app, "guest@example.com").await;
+        let guest_cookie = cookie_pair(
+            &start_session(
+                &app.state,
+                guest_id,
+                None,
+                None,
+                crate::auth::session::SessionOrigin::Password,
+            )
+            .await
+            .unwrap(),
+        );
+        // The domain is verified, and the invite is made while SCIM is still off.
+        app.state
+            .meta
+            .write(move |conn| {
+                Box::pin(async move {
+                    crate::ee::org_sso::store::insert_domain(
+                        conn,
+                        &crate::ee::org_sso::store::DomainRow {
+                            id: Uuid::now_v7(),
+                            org_id,
+                            domain: "example.com".to_owned(),
+                            token: "golden-domain-token".to_owned(),
+                            verified_at: Some(now),
+                            last_checked_at: Some(now),
+                            created_at: now,
+                        },
+                    )
+                    .await
+                })
+            })
+            .await
+            .unwrap();
+        let invite = post_invite(&app, &ada, &org.slug, "guest@example.com", "member").await;
+
+        // Enable SCIM with the feature after the invite exists.
+        grant_features(&app, org_id, &["scim"]);
+        app.state
+            .meta
+            .write(move |conn| {
+                Box::pin(async move {
+                    crate::ee::scim::store::put_org_scim(conn, org_id, true, OrgRole::Viewer, now)
+                        .await
+                })
+            })
+            .await
+            .unwrap();
+
+        let accepted = app
+            .request(
+                Method::POST,
+                &format!("/api/auth/invites/{}/accept", invite.token),
+            )
+            .header(header::COOKIE.as_str(), &guest_cookie)
+            .send()
+            .await;
+        assert_eq!(accepted.status, 409, "{}", body(&accepted));
+        assert_eq!(accepted.problem().code, ProblemCode::ScimManaged);
+        let members: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM org_members WHERE org_id = ? AND user_id = ?")
+                .bind(org_id.to_string())
+                .bind(guest_id.to_string())
+                .fetch_one(app.state.meta.reader())
+                .await
+                .unwrap();
+        assert_eq!(members, 0, "a refused accept adds no membership");
+    }
+
     #[tokio::test]
     async fn accept_checks_the_email_and_is_idempotent() {
         let app = TestApp::new().await;
@@ -1011,6 +1261,8 @@ mod tests {
         assert_eq!(membership.id, org.id);
         assert_eq!(membership.slug, org.slug);
         assert_eq!(membership.role, OrgRole::Member);
+        // The first accept added the membership; the repeat was already a member.
+        assert_eq!(audit_rows(&app, "invite.accepted").await.len(), 1);
         let again: OrgMembership = app
             .request(
                 Method::POST,

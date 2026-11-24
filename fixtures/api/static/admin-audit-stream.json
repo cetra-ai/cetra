@@ -1,0 +1,11 @@
+{
+  "url_host": "siem.example.com",
+  "enabled": true,
+  "status": {
+    "last_success_at": "2026-11-23T09:30:00.000000000Z",
+    "last_error": "the endpoint answered 503",
+    "failing_since": "2026-11-23T11:50:00.000000000Z",
+    "lag": 12,
+    "lost_records": false
+  }
+}

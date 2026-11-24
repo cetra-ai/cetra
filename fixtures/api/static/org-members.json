@@ -7,7 +7,8 @@
         "name": "Ada Example"
       },
       "role": "owner",
-      "joined_at": "2026-01-01T09:00:00.000000000Z"
+      "joined_at": "2026-01-01T09:00:00.000000000Z",
+      "scim_managed": false
     },
     {
       "user": {
@@ -16,7 +17,8 @@
         "name": "Bob Example"
       },
       "role": "member",
-      "joined_at": "2026-01-02T09:00:00.000000000Z"
+      "joined_at": "2026-01-02T09:00:00.000000000Z",
+      "scim_managed": false
     }
   ],
   "next_cursor": null

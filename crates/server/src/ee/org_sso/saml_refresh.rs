@@ -7,6 +7,9 @@ use cetra_saml::parse_metadata;
 
 use super::MetadataFetchError;
 use super::store::{self, RefreshOutcome};
+use crate::api::org_sso::SsoProtocol;
+use crate::audit::catalog::SsoAction;
+use crate::audit::{self, Event, TargetKind};
 use crate::http::AppState;
 use crate::meta::MetaError;
 
@@ -65,6 +68,17 @@ pub(crate) async fn refresh_once(state: &AppState, now: i64) -> Result<Refresh, 
                         return Ok(None);
                     }
                     let changed = store::record_refresh(conn, provider_id, outcome, now).await?;
+                    if changed {
+                        // The rotation is the system updating the provider's certificates.
+                        let event = Event::new(SsoAction::ProviderSaved {
+                            protocol: SsoProtocol::Saml.as_str(),
+                            issuer_changed: false,
+                        })
+                        .org(org)
+                        .target(TargetKind::SsoProvider, provider_id);
+                        let ctx = audit::Ctx::system();
+                        audit::record(conn, &ctx, event, now).await?;
+                    }
                     Ok(Some(changed))
                 })
             })
@@ -85,7 +99,6 @@ pub(crate) async fn refresh_once(state: &AppState, now: i64) -> Result<Refresh, 
         if changed {
             run.rotated += 1;
             tracing::warn!(
-                target: "audit",
                 org_id = %org,
                 "org sso saml certificates changed"
             );
@@ -245,6 +258,51 @@ mod tests {
         .await;
         assert_eq!(location(&response), "/acme");
         one_cookie(&response, SESSION_NAME);
+    }
+
+    #[tokio::test]
+    async fn a_rotation_is_recorded_by_the_system_actor() {
+        let (app, seeded, owner) = saml_app().await;
+        let org = seeded.org_id;
+        let server = MetadataServer::start(metadata_xml(&[TestKey::Idp]).into_bytes()).await;
+        save_from_url(&app, &owner, &server.url()).await;
+        server.set(
+            StatusCode::OK,
+            metadata_xml(&[TestKey::Idp, TestKey::IdpNext]).into_bytes(),
+        );
+        app.state.clock.advance(DAY + Duration::from_secs(1));
+        let now = app.state.clock.now_ns();
+        let run = refresh_once(&app.state, now).await.expect("a refresh pass");
+        assert_eq!(run.rotated, 1);
+        let provider = store::provider(app.state.meta.reader(), org)
+            .await
+            .expect("query")
+            .expect("a provider");
+        // The owner's save, then the rotation by the refresh (actor `system`), with the same
+        // details: only the actor tells the certificate change from a save.
+        let rows: Vec<(String, String, String)> = sqlx::query_as(
+            "SELECT actor_kind, target_id, details FROM audit_events \
+             WHERE action = 'sso.provider_saved' ORDER BY seq",
+        )
+        .fetch_all(app.state.meta.reader())
+        .await
+        .unwrap();
+        let details = r#"{"protocol":"saml","issuer_changed":false}"#;
+        assert_eq!(
+            rows,
+            vec![
+                (
+                    "user".to_owned(),
+                    provider.id.to_string(),
+                    details.to_owned(),
+                ),
+                (
+                    "system".to_owned(),
+                    provider.id.to_string(),
+                    details.to_owned(),
+                ),
+            ]
+        );
     }
 
     #[tokio::test]

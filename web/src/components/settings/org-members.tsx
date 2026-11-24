@@ -268,10 +268,16 @@ export function MemberPanel({
   );
 }
 
+/** Why a member the identity provider manages cannot be changed by hand (D-EA-18). */
+const MANAGED_REASON = "Managed by your identity provider";
+
 function roleErrorMessage(error: unknown): string {
   const problem = problemOf(error);
   if (problem?.code === "plan_limit") {
     return problemMessage(error, "Your plan does not allow another seat.");
+  }
+  if (problem?.code === "scim_managed") {
+    return problemMessage(error, MANAGED_REASON);
   }
   if (problem?.status === 409) {
     return "An organization needs at least one owner. Make someone else an owner first.";
@@ -314,11 +320,13 @@ function RoleForm({
   const [role, setRole] = useState<OrgRole>(member.role);
   const roleItems = grantableRoles(actorRole);
   const items = roleItems.includes(member.role) ? roleItems : [member.role, ...roleItems];
-  const roleReason = !atLeast(actorRole, "admin")
-    ? "Only admins and owners can change roles"
-    : member.role === "owner" && actorRole !== "owner"
-      ? "Only an owner can change an owner's role"
-      : undefined;
+  const roleReason = member.scim_managed
+    ? MANAGED_REASON
+    : !atLeast(actorRole, "admin")
+      ? "Only admins and owners can change roles"
+      : member.role === "owner" && actorRole !== "owner"
+        ? "Only an owner can change an owner's role"
+        : undefined;
   const planLimited = problemOf(change.error)?.code === "plan_limit";
 
   return (
@@ -347,7 +355,9 @@ function RoleForm({
                 setRole(next);
               }
             }}
-            disabled={!canChangeRole(actorRole, member.role) || change.isPending}
+            disabled={
+              !canChangeRole(actorRole, member.role) || member.scim_managed || change.isPending
+            }
           >
             <SelectTrigger id="member-role" className="w-fit">
               <SelectValue />
@@ -367,6 +377,9 @@ function RoleForm({
 }
 
 function removeErrorMessage(error: unknown): string {
+  if (problemOf(error)?.code === "scim_managed") {
+    return problemMessage(error, MANAGED_REASON);
+  }
   return problemOf(error)?.status === 409
     ? "An organization needs at least one owner. Make someone else an owner first."
     : problemMessage(error, "Could not remove the member.");
@@ -393,11 +406,13 @@ function RemoveMember({
   const { email } = member.user;
   const name = member.user.name ?? email;
   const canRemove = canRemoveMember(actorRole, member.role, self);
-  const removeReason = canRemove
-    ? undefined
-    : !atLeast(actorRole, "admin")
-      ? "Only admins and owners can remove members"
-      : "Only an owner can remove an owner";
+  const removeReason = member.scim_managed
+    ? MANAGED_REASON
+    : canRemove
+      ? undefined
+      : !atLeast(actorRole, "admin")
+        ? "Only admins and owners can remove members"
+        : "Only an owner can remove an owner";
   const description = self
     ? "You will lose access to every project in this organization."
     : `${name} loses access to every project in this organization.`;
