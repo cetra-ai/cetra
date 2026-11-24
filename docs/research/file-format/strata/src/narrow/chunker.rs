@@ -195,7 +195,8 @@ fn ipc_ranges(array: &dyn Array, max_rows: usize, max_bytes: usize) -> Result<Ve
 
 /// The memory of a slice of `array`, as an `IPC` block counts it. A list or map counts its
 /// offsets and the child values its slice covers. A struct counts its columns, and its
-/// validity bits when it has nulls. Any other type uses arrow's slice measure.
+/// validity bits when it has nulls. A dictionary counts its keys and, per row, the average size
+/// of its values. Any other type uses arrow's slice measure.
 ///
 /// `get_slice_memory_size` counts a list slice's whole child array, so lists recurse into the
 /// covered child range instead.
@@ -232,6 +233,20 @@ fn slice_bytes(array: &dyn Array) -> Result<usize> {
                 total += slice_bytes(column.as_ref())?;
             }
             Ok(total)
+        }
+        // The whole dictionary is shared by every slice, but an `IPC` chunk keeps only the
+        // values its rows use (`encode_ipc`): a row counts its key and an average value.
+        DataType::Dictionary(_, _) => {
+            let dictionary = array
+                .as_any_dictionary_opt()
+                .ok_or_else(|| crate::narrow::unsupported(array.data_type()))?;
+            let keys = dictionary.keys().to_data().get_slice_memory_size()?;
+            let values = dictionary.values();
+            let per_value = match values.len() {
+                0 => 0,
+                n => slice_bytes(values.as_ref())? / n,
+            };
+            Ok(keys + rows * per_value)
         }
         _ => Ok(array.to_data().get_slice_memory_size()?),
     }
@@ -496,6 +511,37 @@ mod tests {
             let want = reference_ranges(array.as_ref(), has_dict, max_rows as usize, max_bytes);
             prop_assert_eq!(got, want);
         }
+    }
+
+    /// A dictionary slice counts its keys and an average value per row, not the whole
+    /// dictionary it shares: a list of dictionary codes over 100,000 values is split by its
+    /// rows, as `encode_ipc` stores them, into chunks of more than one block.
+    #[test]
+    fn dictionary_slices_count_the_values_of_their_rows() {
+        use arrow::array::{DictionaryArray, UInt32Array, UInt64Array};
+        use arrow::datatypes::UInt32Type;
+
+        let dictionary = DictionaryArray::<UInt32Type>::try_new(
+            UInt32Array::from_iter_values((0..10_000u32).map(|k| k * 7 % 100_000)),
+            Arc::new(UInt64Array::from_iter_values(0..100_000)),
+        )
+        .unwrap();
+        // 4 bytes of key and 8 of value a row, against 800,000 bytes of dictionary.
+        assert_eq!(slice_bytes(&dictionary.slice(0, 10)).unwrap(), 10 * 12);
+
+        let item = Arc::new(Field::new("item", dictionary.data_type().clone(), false));
+        let list = ListArray::try_new(
+            item,
+            OffsetBuffer::from_lengths(std::iter::repeat_n(5, 2_000)),
+            Arc::new(dictionary),
+            None,
+        )
+        .unwrap();
+        let ranges = chunk_ranges(&list, 1 << 20, 32 * 1024, false).unwrap();
+        // 64 bytes a row: 512 rows per 32 KiB, two blocks of 256.
+        let (last, full) = ranges.split_last().unwrap();
+        assert!(full.iter().all(|r| r.len() == 512), "{:?}", lens(&ranges));
+        assert_eq!(last.end, 2_000);
     }
 
     #[test]

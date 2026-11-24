@@ -8,6 +8,9 @@ publish = false
 
 [dependencies]
 arrow = { version = "59.2", default-features = false, features = ["ipc"] }
+# `garbage_collect_any_dictionary`, which `arrow` does not re-export: an IPC chunk keeps only
+# the dictionary values its rows use. Same release as `arrow`.
+arrow-select = { version = "59.2", default-features = false }
 object_store = "0.13"
 bytes = "1.12"
 futures = "0.3.34"

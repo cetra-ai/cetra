@@ -1142,6 +1142,72 @@ mod tests {
         }
     }
 
+    /// A stack-trace column, as the Parquet reader gives it: lists of frames whose fields are
+    /// dictionary-encoded over the whole file. Each `IPC` chunk keeps only the dictionary values
+    /// its rows use (Polar Signals took 32 KB a row with every chunk holding every value), and
+    /// the column reads back the same.
+    #[tokio::test]
+    async fn ipc_chunks_keep_only_the_dictionary_values_they_use() {
+        use arrow::array::{
+            DictionaryArray, ListArray, StringArray, StructArray, UInt32Array, UInt64Array,
+        };
+        use arrow::buffer::OffsetBuffer;
+        use arrow::datatypes::{Fields, UInt32Type};
+
+        let n = 4_096usize;
+        let distinct = 50_000usize;
+        // Two frames a row, every tenth row null; frame k refers to value (k * 7_919) % distinct.
+        let frames = 2 * n;
+        let key = |k: usize| u32::try_from(k * 7_919 % distinct).unwrap();
+        let address = DictionaryArray::<UInt32Type>::try_new(
+            UInt32Array::from_iter_values((0..frames).map(key)),
+            Arc::new(UInt64Array::from_iter_values(
+                (0..distinct as u64).map(|v| v * 0x9e37_79b9),
+            )),
+        )
+        .unwrap();
+        let function = DictionaryArray::<UInt32Type>::try_new(
+            UInt32Array::from_iter((0..frames).map(|k| (k % 13 != 0).then(|| key(k)))),
+            Arc::new(StringArray::from_iter_values(
+                (0..distinct).map(|v| format!("crate::module::function_{v}")),
+            )),
+        )
+        .unwrap();
+        let fields = Fields::from(vec![
+            Field::new("address", address.data_type().clone(), false),
+            Field::new("function", function.data_type().clone(), true),
+        ]);
+        let frame = StructArray::try_new(
+            fields.clone(),
+            vec![Arc::new(address), Arc::new(function)],
+            None,
+        )
+        .unwrap();
+        let item = Arc::new(Field::new("item", DataType::Struct(fields), true));
+        let nulls = arrow::buffer::NullBuffer::from_iter((0..n).map(|i| i % 10 != 0));
+        let locations = ListArray::try_new(
+            Arc::clone(&item),
+            OffsetBuffer::from_lengths(std::iter::repeat_n(2, n)),
+            Arc::new(frame),
+            Some(nulls),
+        )
+        .unwrap();
+        let schema = Arc::new(arrow::datatypes::Schema::new(vec![Field::new(
+            "locations",
+            DataType::List(item),
+            true,
+        )]));
+        let batch = RecordBatch::try_new(schema, vec![Arc::new(locations)]).unwrap();
+
+        let (file, _, summary) = written(&batch, Config::default()).await;
+        let column = &summary.columns[0];
+        assert!(column.encoding_counts[Encoding::Ipc as usize] > 1);
+        // Each dictionary alone takes over 1 MB; the chunks hold only their 8,192 frames.
+        assert!(column.bytes < 1 << 20, "{} bytes", column.bytes);
+        let decoded = crate::reader::read_column(&file, 0).await.unwrap();
+        assert_eq!(decoded.as_ref(), batch.column(0).as_ref());
+    }
+
     /// The 30% bar holds at its boundary, and an empty best is replaced only by an empty one.
     #[test]
     fn a_later_candidate_must_save_30_percent() {

@@ -3,8 +3,10 @@
 use std::sync::Arc;
 
 use arrow::array::{
-    Array, ArrayData, ArrayRef, AsArray, BooleanArray, FixedSizeBinaryArray, RecordBatch,
+    Array, ArrayData, ArrayRef, AsArray, BooleanArray, FixedSizeBinaryArray, FixedSizeListArray,
+    LargeListArray, ListArray, MapArray, OffsetSizeTrait, RecordBatch, StructArray,
 };
+use arrow::buffer::{OffsetBuffer, ScalarBuffer};
 use arrow::datatypes::{DataType, Field, Float64Type, Schema};
 use arrow::ipc::writer::StreamWriter;
 
@@ -902,7 +904,8 @@ fn encode_ipc(array: &ArrayRef) -> Result<EncodedChunk> {
         array.data_type().clone(),
         true,
     )]));
-    let batch = RecordBatch::try_new(Arc::clone(&schema), vec![Arc::clone(array)])?;
+    let array = without_unused_dictionary_values(array)?;
+    let batch = RecordBatch::try_new(Arc::clone(&schema), vec![array])?;
     let mut body = Vec::new();
     {
         let mut writer = StreamWriter::try_new(&mut body, &schema)?;
@@ -912,6 +915,122 @@ fn encode_ipc(array: &ArrayRef) -> Result<EncodedChunk> {
     let mut chunk = EncodedChunk::bare(Encoding::Ipc, 0);
     chunk.body = Some(body);
     Ok(chunk)
+}
+
+/// `array` with each dictionary in it holding only the values its rows use, recursing through
+/// lists, maps, structs and fixed-size lists; the same array when its type has no dictionary.
+/// A slice of a dictionary array shares its parent's whole dictionary, and IPC writes it all:
+/// Polar Signals' stack traces, dictionary-encoded by the Parquet reader, took 32 KB a row
+/// (8 MB chunks of 256 rows, 53 GB in all, against 668 MB of Parquet), and a scan decoded it.
+fn without_unused_dictionary_values(array: &ArrayRef) -> Result<ArrayRef> {
+    if !has_dictionary(array.data_type()) {
+        return Ok(Arc::clone(array));
+    }
+    Ok(match array.data_type() {
+        DataType::Dictionary(_, _) => {
+            let dictionary = array
+                .as_any_dictionary_opt()
+                .ok_or_else(|| unsupported(array.data_type()))?;
+            arrow_select::dictionary::garbage_collect_any_dictionary(dictionary)?
+        }
+        DataType::List(field) => {
+            let list = array.as_list::<i32>();
+            let (offsets, values) = covered_values(list.value_offsets(), list.values())?;
+            Arc::new(ListArray::try_new(
+                Arc::clone(field),
+                offsets,
+                without_unused_dictionary_values(&values)?,
+                list.nulls().cloned(),
+            )?)
+        }
+        DataType::LargeList(field) => {
+            let list = array.as_list::<i64>();
+            let (offsets, values) = covered_values(list.value_offsets(), list.values())?;
+            Arc::new(LargeListArray::try_new(
+                Arc::clone(field),
+                offsets,
+                without_unused_dictionary_values(&values)?,
+                list.nulls().cloned(),
+            )?)
+        }
+        DataType::Map(field, ordered) => {
+            let map = array.as_map();
+            let entries: ArrayRef = Arc::new(map.entries().clone());
+            let (offsets, entries) = covered_values(map.value_offsets(), &entries)?;
+            let entries = without_unused_dictionary_values(&entries)?;
+            let entries = entries
+                .as_struct_opt()
+                .ok_or_else(|| unsupported(array.data_type()))?
+                .clone();
+            Arc::new(MapArray::try_new(
+                Arc::clone(field),
+                offsets,
+                entries,
+                map.nulls().cloned(),
+                *ordered,
+            )?)
+        }
+        DataType::Struct(fields) => {
+            let strukt = array.as_struct();
+            let columns = strukt
+                .columns()
+                .iter()
+                .map(without_unused_dictionary_values)
+                .collect::<Result<Vec<_>>>()?;
+            Arc::new(StructArray::try_new(
+                fields.clone(),
+                columns,
+                strukt.nulls().cloned(),
+            )?)
+        }
+        DataType::FixedSizeList(field, size) => {
+            let list = array.as_fixed_size_list();
+            Arc::new(FixedSizeListArray::try_new(
+                Arc::clone(field),
+                *size,
+                without_unused_dictionary_values(list.values())?,
+                list.nulls().cloned(),
+            )?)
+        }
+        // A dictionary under another type (a union, a list view) is kept whole.
+        _ => Arc::clone(array),
+    })
+}
+
+/// The offsets of a list slice rebased to start at 0, and the child values they cover.
+fn covered_values<O: OffsetSizeTrait>(
+    offsets: &[O],
+    values: &ArrayRef,
+) -> Result<(OffsetBuffer<O>, ArrayRef)> {
+    let first = offsets.first().copied().unwrap_or(O::usize_as(0));
+    let last = offsets.last().copied().unwrap_or(O::usize_as(0));
+    let corrupt = || StrataError::Unsupported {
+        what: "list offsets out of order".to_string(),
+    };
+    let (start, end) = (first.as_usize(), last.as_usize());
+    if end < start || end > values.len() {
+        return Err(corrupt());
+    }
+    let rebased: Vec<O> = offsets.iter().map(|&o| o - first).collect();
+    let offsets = OffsetBuffer::new(ScalarBuffer::from(rebased));
+    Ok((offsets, values.slice(start, end - start)))
+}
+
+/// Whether `dt` is, or holds, a dictionary.
+fn has_dictionary(dt: &DataType) -> bool {
+    match dt {
+        DataType::Dictionary(_, _) => true,
+        DataType::List(field)
+        | DataType::LargeList(field)
+        | DataType::FixedSizeList(field, _)
+        | DataType::ListView(field)
+        | DataType::LargeListView(field)
+        | DataType::Map(field, _) => has_dictionary(field.data_type()),
+        DataType::Struct(fields) => fields.iter().any(|f| has_dictionary(f.data_type())),
+        DataType::Union(fields, _) => fields.iter().any(|(_, f)| has_dictionary(f.data_type())),
+        DataType::RunEndEncoded(_, values) => has_dictionary(values.data_type()),
+        _ => false,
+    }
 }
 
 /// A List(Utf8) chunk with a dictionary, as `ListDict`: a lengths block of the element counts
@@ -1415,6 +1534,73 @@ mod tests {
         assert_eq!(chunk.encoding, Encoding::Const);
         assert_eq!(chunk.const_len, 3);
         assert!(chunk.body.is_none());
+    }
+
+    /// Maps and fixed-size lists keep only the dictionary values of their slice too, and the
+    /// result equals the slice; a type without a dictionary is returned as is.
+    #[test]
+    fn unused_dictionary_values_are_dropped_under_maps_and_fixed_size_lists() {
+        use arrow::array::{
+            DictionaryArray, FixedSizeListArray, Int64Array, MapArray, StringArray, StructArray,
+            UInt16Array,
+        };
+        use arrow::datatypes::{Fields, UInt16Type};
+
+        let dictionary = |keys: Vec<u16>| {
+            let values = StringArray::from_iter_values((0..1_000).map(|v| format!("value {v}")));
+            DictionaryArray::<UInt16Type>::try_new(UInt16Array::from(keys), Arc::new(values))
+                .unwrap()
+        };
+        let values = dictionary((0..400u16).map(|k| k * 2).collect());
+        let entries = StructArray::try_new(
+            Fields::from(vec![
+                Field::new("keys", DataType::Int64, false),
+                Field::new("values", values.data_type().clone(), true),
+            ]),
+            vec![
+                Arc::new(Int64Array::from_iter_values(0..400)),
+                Arc::new(values),
+            ],
+            None,
+        )
+        .unwrap();
+        let map: ArrayRef = Arc::new(
+            MapArray::try_new(
+                Arc::new(Field::new("entries", entries.data_type().clone(), false)),
+                OffsetBuffer::from_lengths(std::iter::repeat_n(4, 100)),
+                entries,
+                None,
+                false,
+            )
+            .unwrap(),
+        );
+        let fixed: ArrayRef = Arc::new(
+            FixedSizeListArray::try_new(
+                Arc::new(Field::new(
+                    "item",
+                    DataType::Dictionary(Box::new(DataType::UInt16), Box::new(DataType::Utf8)),
+                    true,
+                )),
+                3,
+                Arc::new(dictionary((0..300u16).map(|k| 999 - k).collect())),
+                None,
+            )
+            .unwrap(),
+        );
+        // 5 rows of 4 map entries, or of 3 list values, use at most 20 of the 1,000 values.
+        let used = |dictionary: &ArrayRef| dictionary.as_any_dictionary().values().len();
+        let slice = map.slice(10, 5);
+        let compact = without_unused_dictionary_values(&slice).unwrap();
+        assert_eq!(compact.as_ref(), slice.as_ref());
+        assert_eq!(used(compact.as_map().entries().column(1)), 20);
+        let slice = fixed.slice(10, 5);
+        let compact = without_unused_dictionary_values(&slice).unwrap();
+        assert_eq!(compact.as_ref(), slice.as_ref());
+        assert_eq!(used(compact.as_fixed_size_list().values()), 15);
+
+        let plain: ArrayRef = Arc::new(Int64Array::from_iter_values(0..10));
+        let same = without_unused_dictionary_values(&plain.slice(2, 3)).unwrap();
+        assert_eq!(same.as_ref(), plain.slice(2, 3).as_ref());
     }
 
     #[test]
