@@ -516,3 +516,36 @@ The IN5.3 run found two problems.
 - `tools/capture/fetch-tools.sh`;
 - `tools/capture/src/run.rs`, for `json_differences` and its test only;
 - the `AGENTS.md` capture-tools line, which gains "and the LiteLLM Proxy environment".
+
+## Amendment C — IN5.2c: Bifrost's root-span text
+
+The IN5.3 capture showed what Bifrost's server root span (scope `bifrost`) carries:
+- `gen_ai.input.messages` and `gen_ai.output.messages` hold a bare string, not a message array: the last user text (`What is the weather in Paris?`), a tool result (`{"temperature_c": 18, ...}`), or the answer text. Its output can also be a real message array.
+- The GenAI reader therefore records `messages:genai:input` and `messages:genai:output` on `fixtures/otlp/genai/bifrost-chat`.
+
+The rule below is recorded in D-IN-25, item 11.
+
+**Goal:** on scope `bifrost`, a `gen_ai.input.messages` or `gen_ai.output.messages` value that is not a JSON array is the field's plain value. It is stored as a span's plain `input.value` string is stored (spec 02 rule 6: JSON text becomes a JSON value, other text stays text), and no normalize error is recorded. A JSON array goes through the message converter as today. Other scopes are unchanged: a non-array there is still a conversion failure.
+
+**Edit:**
+- `crates/otel/src/conventions/genai.rs`; the scope is reachable there since IN4.4;
+- `docs/spec/02-ingestion.md`, § Input/output, GenAI row: one sentence;
+- `fixtures/otlp/genai/bifrost-chat/expected.json`, re-blessed.
+
+**Steps.**
+1. Find how the GenAI reader turns `gen_ai.input.messages` / `gen_ai.output.messages` into IO, and how it records the failure.
+2. Find how another convention stores a plain string value under rule 6; for example, OpenInference's `input.value`. Reuse that function. Do not write a new parser.
+3. Gate the new branch on `scope_name == "bifrost"` and "the value does not parse as a JSON array".
+
+**Tests:**
+- in scope `bifrost`, a plain-text input is stored as text, with no error;
+- in scope `bifrost`, a JSON-object string becomes a JSON value, with no error;
+- in scope `bifrost`, a message array still converts;
+- the same plain text in another scope still records `messages:genai:input`.
+
+**Done when:**
+- `cargo nextest run -p cetra-otel` passes, as do clippy and fmt;
+- `just fixtures-bless` changes only `genai/bifrost-chat/expected.json`, and its two chain spans lose `cetra.normalize_error`. If any other `expected.json` changes, stop and report;
+- `just fixtures-fmt` and `just fixtures-check` pass.
+
+**Commit:** `Read Bifrost's root-span text`
