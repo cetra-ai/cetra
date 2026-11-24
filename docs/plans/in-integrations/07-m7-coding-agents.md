@@ -36,7 +36,7 @@ This plan makes Qwen Code, Pi and OpenClaw first-class coding agents, as track C
   - Pi gets cetra's extension file, and setup prints the environment lines.
   - OpenClaw gets its plugin installed and its config merged.
 - **Server.** `/v1/agent-context` accepts `qwen-code`.
-- **Captured cases:** `qwen_code/read-file`, `pi/read-file` and `openclaw/read-file`.
+- **Captured cases:** `qwen_code/shell-tool`, `pi/read-file` and `openclaw/read-file`.
 - **Pages:**
   - `qwen-code`, `pi` and `openclaw` (captured);
   - `augment-code`, `devin-sdk` and `omnigent` (setup only).
@@ -479,7 +479,7 @@ The implementer records the publish time with `npm view <pkg> time --json` and r
    - Use Gemini's `shell-tool` scenario as the shape.
    - The turns use `"api": "openai.chat"` (the mock's Chat Completions API, `tools/capture/src/scenario.rs` about line 247).
    - Arguments per tool, from the spikes:
-   - **`qwen_code/read-file`:**
+   - **`qwen_code/shell-tool`** (amended 2026-11-24: Qwen's `read_file` requires an absolute path, which a static turn cannot give, so the case calls Qwen's shell tool with `cat hello.txt`, as Gemini's `shell-tool` case does):
      - Run `qwen --auth-type openai -m gpt-4o-mini --approval-mode yolo "<prompt>"` with `OPENAI_BASE_URL=<mock>/v1`.
      - `.qwen/settings.json` holds the telemetry block of IN7.3, with `otlpEndpoint` = the receiver and `logPrompts: true`. Use no hooks.
      - `.qwen/.env` holds the header line.

@@ -37,7 +37,7 @@ This plan makes OpenCode, Goose and Oh My Pi first-class coding agents, as part 
   - OpenCode gets cetra's plugin file and its config file.
   - Goose gets printed environment lines; nothing is written.
   - Oh My Pi gets its `.env` lines.
-- **Captured cases:** `opencode/read-file` (v2), `opencode/read-file-v1`, `goose/read-file`, `oh_my_pi/read-file`, `hermes_agent/read-file`.
+- **Captured cases:** `opencode/shell-tool` (v2), `opencode/shell-tool-v1`, `goose/read-file`, `oh_my_pi/read-file`, `hermes_agent/read-file`.
 - **Pages:** `opencode`, `goose`, `oh-my-pi`, `hermes-agent`, all captured.
 - **Index and records:** the index's Coding agents rows, the agent lists, spec 02 and 09, D-IN-29, the CHANGELOG and the roadmap.
 
@@ -144,7 +144,7 @@ Neither Hermes package is on PyPI at these versions (PyPI's `hermes-agent` stops
 | IN7.10 Detection | `crates/otel/src/agents/mod.rs`, new `crates/otel/src/agents/{goose,hermes}.rs`, new `crates/otel/src/agents/generic_agent_tests.rs`, deleted `crates/otel/src/agents/pi.rs`, `crates/otel/tests/proptest.rs`, `docs/spec/02-ingestion.md` | part 1's IN7.1 |
 | IN7.11 OpenCode setup and plugin | `crates/cli/src/agents/{mod,setup}.rs`, new `crates/cli/src/agents/{opencode.rs,opencode_plugin.ts,opencode_plugin.test.mjs}`, `crates/cli/src/main.rs` (the `Agents` doc string), `website/src/content/docs/docs/reference/cli.md` (regenerated) | part 1's IN7.4 |
 | IN7.12 Goose and Oh My Pi setup | `crates/cli/src/agents/{mod,setup}.rs`, new `crates/cli/src/agents/{goose,oh_my_pi}.rs`, `crates/cli/src/main.rs` (doc string), `website/src/content/docs/docs/reference/cli.md` (regenerated) | IN7.11 (same files) |
-| IN7.13 Captures | `tools/capture/src/mock.rs` (auxiliary turns, probes), `tools/capture/ts/harness.ts` (`writeMeta`), new `tools/capture/ts/scenarios/{opencode/read-file,opencode/read-file-v1,goose/read-file,oh_my_pi/read-file,hermes_agent/read-file}/`, `tools/capture/src/scenario.rs` (`GROUPS`), `crates/otel/tests/support/mod.rs` (`GROUPS`), `fixtures/otlp/README.md`, new fixtures under `fixtures/otlp/{opencode,goose,oh_my_pi,hermes_agent}/` | IN7.9, IN7.10, IN7.11; part 1's IN7.5 |
+| IN7.13 Captures | `tools/capture/src/mock.rs` (auxiliary turns, probes), `tools/capture/ts/harness.ts` (`writeMeta`), new `tools/capture/ts/scenarios/{opencode/shell-tool,opencode/shell-tool-v1,goose/read-file,oh_my_pi/read-file,hermes_agent/read-file}/`, `tools/capture/src/scenario.rs` (`GROUPS`), `crates/otel/tests/support/mod.rs` (`GROUPS`), `fixtures/otlp/README.md`, new fixtures under `fixtures/otlp/{opencode,goose,oh_my_pi,hermes_agent}/` | IN7.9, IN7.10, IN7.11; part 1's IN7.5 |
 | IN7.14 Pages | new `website/src/content/docs/docs/integrations/{opencode,goose,oh-my-pi,hermes-agent}.mdx` | IN7.11–IN7.13 |
 | IN7.15 Index and records | as part 1's IN7.8 lists, plus `docs/plans/in-integrations/00-design.md` | IN7.14; part 1's IN7.8 (which records D-IN-28 in `mvp-decisions.md` first) |
 
@@ -429,8 +429,8 @@ PriceRow {
 
    | Case | `instrumentation` | `libraries` | How `main.ts` gets the versions |
    |---|---|---|---|
-   | `opencode/read-file` | `opencode` | `["opencode"]` | `versions: { opencode: "2.3.0" }` |
-   | `opencode/read-file-v1` | `opencode-ai` | `["opencode-ai"]` | alias `{ "opencode-ai": "../../../../target/capture-tools/opencode/1.19.6/node_modules/opencode-ai" }` |
+   | `opencode/shell-tool` | `opencode` | `["opencode"]` | `versions: { opencode: "2.3.0" }` |
+   | `opencode/shell-tool-v1` | `opencode-ai` | `["opencode-ai"]` | alias `{ "opencode-ai": "../../../../target/capture-tools/opencode/1.19.6/node_modules/opencode-ai" }` |
    | `goose/read-file` | `goose` | `["goose"]` | `versions: { goose: "1.59.2" }` |
    | `oh_my_pi/read-file` | `@oh-my-pi/pi-coding-agent` | `["@oh-my-pi/pi-coding-agent"]` | alias `{ "@oh-my-pi/pi-coding-agent": "../../../../target/capture-tools/oh-my-pi/18.22.0/node_modules/@oh-my-pi/pi-coding-agent" }` |
    | `hermes_agent/read-file` | `hermes-otel` | `["hermes-agent", "hermes-otel"]` | `versions: { "hermes-agent": "0.23.2", "hermes-otel": "1.33.0" }` |
@@ -442,25 +442,25 @@ PriceRow {
 
    | Case | `api` | `<tool>` | `<args>` |
    |---|---|---|---|
-   | `opencode/read-file` | `openai.responses` | `read` | `{ "path": "hello.txt" }` |
-   | `opencode/read-file-v1` | `openai.responses` | `read` | `{ "filePath": "hello.txt" }` |
+   | `opencode/shell-tool` | `openai.responses` | `bash` | `{ "command": "cat hello.txt", "description": "Print hello.txt" }` |
+   | `opencode/shell-tool-v1` | `openai.responses` | `bash` | `{ "command": "cat hello.txt", "description": "Print hello.txt" }` |
    | `goose/read-file` | `openai.chat` | `shell` | `{ "command": "cat hello.txt" }` |
    | `oh_my_pi/read-file` | `openai.chat` | `read` | `{ "path": "hello.txt" }` |
    | `hermes_agent/read-file` | `openai.chat` | `read_file` | `{ "path": "hello.txt" }` |
 
    Auxiliary turns come first in the list, each `"auxiliary": true`, model `gpt-4o-mini`, `message.text` `"Reading a file"`, no tool calls, `finish` `stop`, usage input 20, output 5: one for each OpenCode case and for Goose, three for Oh My Pi, none for Hermes. If a run fails because a call took the wrong turn (a "turn N: expected …" error, or no turn left), stop and ask.
 
-   The tool names and argument keys are the ones each agent offered in the spikes (Goose's `developer` builtin offers `shell`, `edit`, `tree`, `write`, `read_image`, `load_skill`; it has no read tool). The path is relative to the repo, which is each agent's working directory. If a tool span ends with an error status, stop and ask (an absolute path cannot be used: it differs per machine).
+   OpenCode uses its shell tool, not `read`: part 1's capture found that Qwen's `read_file` refuses a relative path, and OpenCode's `read` took absolute paths in the spike (`filePath` on 1.x), which a static turn cannot give. Before writing OpenCode's scenarios, read the `bash` tool's exact name and required parameters from the tool list each build sends (or its bundled source); if they differ from the table, use what the build says and report it. The other tool names and argument keys are the ones each agent offered in the spikes (Goose's `developer` builtin offers `shell`, `edit`, `tree`, `write`, `read_image`, `load_skill`; it has no read tool). The path is relative to the repo, which is each agent's working directory. If a tool span ends with an error status, stop and ask (an absolute path cannot be used: it differs per machine).
 6. **Endpoints.** `CETRA_CAPTURE_OTLP_ENDPOINT` ends in `/v1/traces` (`tools/capture/src/run.rs`). As `gemini_cli/shell-tool/main.ts` does, strip that suffix to get the base URL. OpenCode's config `endpoint`, Goose's and Oh My Pi's `OTEL_EXPORTER_OTLP_ENDPOINT` take the **base** URL (each appends `/v1/traces` itself); Hermes's backend `endpoint` takes the **full** URL. The receiver accepts and discards POSTs to `/v1/logs` and `/v1/metrics` (`receiver.rs`), so Hermes's logs and metrics need no switch. The mock key is `requiredEnv("OPENAI_API_KEY")` (`capture-mock-key`, `run.rs`); the OTLP header value is `Bearer ` plus the same key.
 7. **Scenarios.** Each is a `read-file` case in the shape of part 1's `pi/read-file`: `hello.txt` (content `hello from cetra\n`) in the repo through `repoFiles`. Every binary path is absolute under `process.env.CETRA_CAPTURE_TOOLS`. `<mock>` is the mock provider's base URL as the gemini scenario gets it; `<key>` the mock key of step 6; `<base>` and `<traces>` as step 5; `<home>` from `agentPaths()`.
-   - **`opencode/read-file`** (v2):
+   - **`opencode/shell-tool`** (v2):
      - bin `opencode-v2/2.3.0/opencode`; args `["run", "--standalone", "--auto", "<prompt>"]`;
      - environment: `OPENCODE_DISABLE_AUTOUPDATE=1`, `OPENCODE_DISABLE_MODELS_FETCH=1`, `OPENCODE_DISABLE_LSP_DOWNLOAD=1`, `OPENCODE_DISABLE_DEFAULT_PLUGINS=1`, `OPENAI_API_KEY=<key>`, `XDG_CONFIG_HOME=<home>/.config`. No `OTEL_*` variable;
      - `homeFiles`:
        - `.config/opencode/plugins/cetra-opencode.ts`: the content of `crates/cli/src/agents/opencode_plugin.ts`, read at run time from `path.join(<repo root>, "crates/cli/src/agents/opencode_plugin.ts")`, where the repo root is `path.resolve(<this main.ts's directory>, "../../../../../..")` (check it resolves to the directory holding `Cargo.toml`);
        - `.config/opencode/cetra-opencode.json`: detail 3 with `endpoint` `<base>`, header `Bearer <key>`, `capture_content` `true`;
      - `repoFiles`: `opencode.json` = `{"$schema":"https://opencode.ai/config.json","model":"openai/gpt-4o-mini","providers":{"openai":{"settings":{"baseURL":"<mock>/v1"}}}}`.
-   - **`opencode/read-file-v1`:** the same, except bin `opencode/1.19.6/node_modules/.bin/opencode`, args `["run", "--auto", "<prompt>"]`, and `opencode.json` = `{"$schema":"https://opencode.ai/config.json","provider":{"openai":{"options":{"baseURL":"<mock>/v1","apiKey":"<key>"}}},"model":"openai/gpt-4o-mini"}`.
+   - **`opencode/shell-tool-v1`:** the same, except bin `opencode/1.19.6/node_modules/.bin/opencode`, args `["run", "--auto", "<prompt>"]`, and `opencode.json` = `{"$schema":"https://opencode.ai/config.json","provider":{"openai":{"options":{"baseURL":"<mock>/v1","apiKey":"<key>"}}},"model":"openai/gpt-4o-mini"}`.
    - **`goose/read-file`:**
      - bin `goose/1.59.2/goose`; args `["run", "-t", "<prompt>", "--no-session", "--no-profile", "--with-builtin", "developer", "-q", "--output-format", "text"]`;
      - `homeFiles`: `.config/goose/config.yaml` with exactly these three lines: `GOOSE_PROVIDER: openai`, `GOOSE_MODEL: gpt-4o-mini`, `GOOSE_MODE: auto`;
@@ -523,7 +523,7 @@ PriceRow {
    - Set `volatile_attributes` and `timing_attributes` from what `--check` shows varying between two runs, each with a reason in `notes`.
 8. **Capture, check and bless,** as part 1's IN7.5 step 6.
    - **Expected:**
-     - **OpenCode v2:** exactly four spans on scope `cetra-opencode` (one plugin load, nothing doubled): agent, llm ×2, tool `read`, `coding_agent` `opencode`; the first `chat` has input messages. The auxiliary call has no span.
+     - **OpenCode v2:** exactly four spans on scope `cetra-opencode` (one plugin load, nothing doubled): agent, llm ×2, tool `bash`, `coding_agent` `opencode`; the first `chat` has input messages. The auxiliary call has no span.
      - **OpenCode v1:** the same four spans, kinds and tokens; the `chat` spans have no input messages (D-IN-29 item 4).
      - **Goose:** no span for the auxiliary call unless Goose makes one (record it); agent `reply`, chain `chat` ×2, llm `stream_response_from_provider` ×2 with 82/17 and 131/12, tool `shell`, `coding_agent` `goose`.
      - **Oh My Pi:** agent, llm ×2 under it with 82/17 and 131/12, tool `read`, plus three parentless llm `chat` spans for the auxiliary calls (20/5 each), `coding_agent` `oh-my-pi`. Record the three in the case's `notes` for IN7.14's Limits.
