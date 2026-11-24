@@ -1,6 +1,6 @@
 # Marketing site (cetra.sh)
 
-The design is `docs/website/00-design.md`. It has fifteen milestones, M1–M15, each with its own plan written just before it starts. M6 (benchmarks) waits for the benchmark and is not planned yet.
+The design is `docs/website/00-design.md`. It has sixteen milestones, M1–M16, each with its own plan written just before it starts. M6 (benchmarks) waits for the benchmark and is not planned yet.
 
 | Milestone | Plan | Status |
 |---|---|---|
@@ -19,6 +19,7 @@ The design is `docs/website/00-design.md`. It has fifteen milestones, M1–M15, 
 | M13 Voice story, trace list, issues, alerts | [`13-m13-voice-issues-alerts.md`](13-m13-voice-issues-alerts.md) | done (V1, L1, S1, V2) |
 | M14 Prompts, dashboards, queues, assistant | [`14-m14-prompts-dashboards-queues-assistant.md`](14-m14-prompts-dashboards-queues-assistant.md) | done (P0–P5) |
 | M15 Story screenshots and switcher | [`15-m15-story-shots-and-switcher.md`](15-m15-story-shots-and-switcher.md) | done (Q0–Q2) |
+| M16 A page per story | not planned yet | — |
 
 ## Branches
 
