@@ -204,6 +204,53 @@ def test_anthropic_end_to_end(memory: Memory, spans: Spans, http_recorder: Recor
     assert attrs(instrumented)["cetra.session.id"] == "s1"
 
 
+def test_anthropic_sdk_span_is_not_doubled(
+    memory: Memory, spans: Spans, http_recorder: Recorder
+) -> None:
+    exporter, start = memory
+    runtime = start(instrument=["anthropic"])
+    # The SDK's own span goes to the provider its client is given (what global mode gives it).
+    client = anthropic.Anthropic(
+        base_url=http_recorder.url,
+        api_key="test",
+        open_telemetry={"tracer_provider": runtime.provider},
+    )
+    client.messages.create(
+        model="claude-opus-4-6",
+        max_tokens=8,
+        messages=[{"role": "user", "content": "hello"}],
+    )
+
+    finished = spans(exporter)
+    assert [span.name for span in finished] == [ANTHROPIC_SPAN]
+    assert not any(
+        span.instrumentation_scope is not None
+        and span.instrumentation_scope.name.startswith("com.anthropic.sdk")
+        for span in finished
+    )
+
+
+def test_anthropic_sdk_span_reaches_cetra_without_instrumentor(
+    memory: Memory, spans: Spans, http_recorder: Recorder
+) -> None:
+    exporter, start = memory
+    runtime = start()
+    client = anthropic.Anthropic(
+        base_url=http_recorder.url,
+        api_key="test",
+        open_telemetry={"tracer_provider": runtime.provider},
+    )
+    client.messages.create(
+        model="claude-opus-4-6",
+        max_tokens=8,
+        messages=[{"role": "user", "content": "hello"}],
+    )
+
+    finished = spans(exporter)
+    assert [span.name for span in finished] == ["anthropic.messages.create"]
+    assert attrs(finished[0])["gen_ai.usage.input_tokens"] == 5
+
+
 def test_capture_content_false_hides_instrumentor_payloads(
     memory: Memory, spans: Spans, http_recorder: Recorder
 ) -> None:

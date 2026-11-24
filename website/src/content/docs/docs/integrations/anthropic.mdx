@@ -8,7 +8,7 @@ import { Tabs, TabItem } from "@astrojs/starlight/components";
 
 cetra traces Anthropic messages, including streamed answers, tool use, thinking blocks and prompt caching.
 
-<Backing fixtures={["openinference/anthropic-cache-tokens", "openinference/anthropic-stream-tool", "openinference/anthropic-thinking", "openllmetry/anthropic-cache-tokens", "openllmetry/anthropic-stream-tool", "openllmetry/chat-anthropic-cache", "genai/chat-cache-tokens"]} tests={["sdks/python/tests/test_instrument.py::test_anthropic_end_to_end", "sdks/typescript/src/instrument.test.ts::anthropic helper"]} />
+<Backing fixtures={["openinference/anthropic-cache-tokens", "openinference/anthropic-stream-tool", "openinference/anthropic-thinking", "openllmetry/anthropic-cache-tokens", "openllmetry/anthropic-stream-tool", "openllmetry/chat-anthropic-cache", "genai/chat-cache-tokens"]} tests={["sdks/python/tests/test_instrument.py::test_anthropic_end_to_end", "sdks/python/tests/test_instrument.py::test_anthropic_sdk_span_is_not_doubled", "sdks/typescript/src/instrument.test.ts::anthropic helper"]} />
 
 ## Install
 
@@ -98,7 +98,8 @@ Because the spans leave from Anthropic's servers, cetra's endpoint must be reach
 ## Limits
 
 - The fixtures were captured with the Anthropic Python SDK 2.4.0 and these instrumentations: OpenInference 3.3.0 and OpenLLMetry 0.62.4. Other versions are not covered.
-- Anthropic's own SDKs emit `anthropic.messages.create` spans for every call: TypeScript `@anthropic-ai/sdk` 1.9.0 and Python `anthropic` 2.9.0, the versions tested, both do. The Python and TypeScript setups on this page instrument the client with OpenInference's Anthropic instrumentor, so each call is recorded twice: once by the instrumentor and once by the SDK itself. Set `ANTHROPIC_OPEN_TELEMETRY=false`, which both SDKs read, to turn the SDK's own spans off.
+- Anthropic's own SDKs start a span of their own for each call, `anthropic.messages.create`, on the global tracer provider: Python `anthropic` 2.8.0 and TypeScript `@anthropic-ai/sdk` 1.8.0, the versions tested, both do. With the setups on this page each call is still recorded once: OpenInference's Anthropic instrumentor (Python 3.3.0 or later, TypeScript 1.0.1 or later) keeps the SDK's span out of the calls it traces. Without `use_global_provider=True` (TypeScript `useGlobalProvider: true`) the SDK's spans do not reach cetra at all.
+- OpenLLMetry's Anthropic instrumentation (0.62.4) does not keep the SDK's span out: its `anthropic.chat` span and the SDK's span both carry the call's tokens, which then count twice. With OpenLLMetry, set `ANTHROPIC_OPEN_TELEMETRY=false`, which both SDKs read, to turn the SDK's own spans off.
 - With OpenLLMetry's Anthropic instrumentation the prompt token count can exclude the cache. cetra adds the cache back, so the stored counts follow one rule.
 - The TypeScript helper is covered by an SDK test, not by captured spans.
 - The Claude Managed Agents route is setup only: no session was run against cetra, the span shapes come from Anthropic's documentation, and the beta means the span names and attributes can change.
