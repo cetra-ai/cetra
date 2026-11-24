@@ -43,6 +43,20 @@ it("sends queued events after the interval", async () => {
   ]);
 });
 
+it("drops a batch without a window and never throws from a late timer", async () => {
+  const send = vi.fn(async (_events: WireEvent[]) => {});
+  const stop = start({ send, flushMs: 5 });
+  track({ name: "command_palette.opened" });
+  vi.stubGlobal("window", undefined);
+  try {
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(() => stop()).not.toThrow();
+  } finally {
+    vi.unstubAllGlobals();
+  }
+  expect(send).not.toHaveBeenCalled();
+});
+
 it("adds the context's org and project", async () => {
   const send = vi.fn(async (_events: WireEvent[]) => {});
   const context: AnalyticsContext = { org: "acme", project: "support-bot" };

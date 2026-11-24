@@ -64,6 +64,9 @@ let active: Active | undefined;
  * lets the last batch leave while the page unloads.
  */
 export const postEvents: Sender = async (events) => {
+  if (typeof window === "undefined") {
+    return;
+  }
   await globalThis.fetch(new URL(ANALYTICS_PATH, window.location.origin).toString(), {
     method: "POST",
     credentials: "same-origin",
@@ -90,12 +93,19 @@ export function track(event: WebEvent): void {
   }
 }
 
-/** Sends up to `MAX_BATCH` queued events. A failed send is dropped (no retry). */
+/**
+ * Sends up to `MAX_BATCH` queued events. A failed send is dropped (no retry). Once the page
+ * is gone (no `window`, as after a test environment's teardown), the batch is dropped
+ * instead, so a late timer never throws and the queue still drains.
+ */
 export function flushAnalytics(): void {
   if (!active || active.queue.length === 0) {
     return;
   }
   const batch = active.queue.splice(0, MAX_BATCH);
+  if (typeof window === "undefined") {
+    return;
+  }
   void active.send(batch).catch(() => undefined);
 }
 
