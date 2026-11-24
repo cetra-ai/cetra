@@ -214,7 +214,12 @@ fn accept_span(
         &span.attributes,
     );
     // Before the validity checks, so an internal span is never counted as rejected.
-    if agents::discarded(agent, &span.name, &span.attributes) {
+    if agents::discarded(
+        agent,
+        scope_name.as_deref().unwrap_or(""),
+        &span.name,
+        &span.attributes,
+    ) {
         tally.discarded += 1;
         return None;
     }

@@ -7,6 +7,9 @@ mod claude_code;
 mod codex;
 mod copilot;
 mod gemini_cli;
+mod openclaw;
+mod pi;
+mod qwen_code;
 #[cfg(test)]
 mod test_support;
 
@@ -129,6 +132,9 @@ pub(crate) enum CodingAgent {
     Codex,
     GeminiCli,
     Copilot,
+    QwenCode,
+    Pi,
+    OpenClaw,
 }
 
 impl CodingAgent {
@@ -139,6 +145,9 @@ impl CodingAgent {
             Self::Codex => "codex",
             Self::GeminiCli => "gemini-cli",
             Self::Copilot => "copilot",
+            Self::QwenCode => "qwen-code",
+            Self::Pi => "pi",
+            Self::OpenClaw => "openclaw",
         }
     }
 }
@@ -174,6 +183,9 @@ pub(crate) fn detect_agent(
     span_name: &str,
     attributes: &[KeyValue],
 ) -> Option<CodingAgent> {
+    if service_name == Some("qwen-code") {
+        return Some(CodingAgent::QwenCode);
+    }
     if span_name.starts_with("claude_code.") {
         return Some(CodingAgent::ClaudeCode);
     }
@@ -194,6 +206,12 @@ pub(crate) fn detect_agent(
     if copilot {
         return Some(CodingAgent::Copilot);
     }
+    if scope_name == Some("cetra-pi") {
+        return Some(CodingAgent::Pi);
+    }
+    if scope_name == Some("openclaw") {
+        return Some(CodingAgent::OpenClaw);
+    }
     None
 }
 
@@ -206,13 +224,25 @@ fn attribute<'a>(attributes: &'a [KeyValue], key: &str) -> Option<&'a AnyValue> 
         .and_then(|attr| attr.value.as_ref())
 }
 
-/// D-CA-6: Codex's internal spans are dropped and counted, never stored or rejected.
+/// D-CA-6: an agent's internal spans are dropped and counted, never stored or rejected.
 pub(crate) fn discarded(
     agent: Option<CodingAgent>,
+    scope_name: &str,
     span_name: &str,
     attributes: &[KeyValue],
 ) -> bool {
-    agent == Some(CodingAgent::Codex) && !codex::kept(span_name, attributes)
+    match agent {
+        Some(CodingAgent::Codex) => !codex::kept(span_name, attributes),
+        Some(CodingAgent::QwenCode) => qwen_code::discarded(span_name, scope_name),
+        Some(CodingAgent::OpenClaw) => openclaw::discarded(span_name),
+        Some(
+            CodingAgent::ClaudeCode
+            | CodingAgent::GeminiCli
+            | CodingAgent::Copilot
+            | CodingAgent::Pi,
+        )
+        | None => false,
+    }
 }
 
 /// The values [`finish`] needs. Read before the bag is consumed.
@@ -226,7 +256,13 @@ pub(crate) fn finish_inputs(agent: Option<CodingAgent>, bag: &AttrBag<'_>) -> Fi
             tool_name: peek_text(bag, "tool_name"),
             turn_id: codex::turn_id(bag),
         },
-        Some(CodingAgent::GeminiCli | CodingAgent::Copilot) => Finish {
+        Some(
+            CodingAgent::GeminiCli
+            | CodingAgent::Copilot
+            | CodingAgent::QwenCode
+            | CodingAgent::Pi
+            | CodingAgent::OpenClaw,
+        ) => Finish {
             tool_name: peek_text(bag, "gen_ai.tool.name"),
             turn_id: None,
         },
@@ -240,7 +276,9 @@ pub(crate) fn kind(agent: Option<CodingAgent>, span_name: &str) -> Option<SpanKi
         CodingAgent::ClaudeCode => claude_code::kind(span_name),
         CodingAgent::Codex => codex::kind(span_name),
         CodingAgent::GeminiCli => gemini_cli::kind(span_name),
-        CodingAgent::Copilot => None,
+        CodingAgent::QwenCode => qwen_code::kind(span_name),
+        CodingAgent::OpenClaw => openclaw::kind(span_name),
+        CodingAgent::Copilot | CodingAgent::Pi => None,
     }
 }
 
@@ -263,6 +301,8 @@ pub(crate) fn context(
         CodingAgent::Codex => codex::context(attributes, bag, fields, agents),
         CodingAgent::GeminiCli => gemini_cli::context(fields, agents),
         CodingAgent::Copilot => copilot::context(bag, fields),
+        CodingAgent::QwenCode => qwen_code::context(fields, agents),
+        CodingAgent::Pi | CodingAgent::OpenClaw => {}
     }
 }
 
@@ -277,7 +317,11 @@ pub(crate) fn usage(
     match agent? {
         CodingAgent::ClaudeCode => claude_code::usage(span_name, kind, bag, warnings),
         CodingAgent::Codex => codex::usage(span_name, kind, bag, warnings),
-        CodingAgent::GeminiCli | CodingAgent::Copilot => None,
+        CodingAgent::GeminiCli
+        | CodingAgent::Copilot
+        | CodingAgent::QwenCode
+        | CodingAgent::Pi
+        | CodingAgent::OpenClaw => None,
     }
 }
 
@@ -289,7 +333,12 @@ pub(crate) fn ttft(
 ) -> Option<i64> {
     match agent? {
         CodingAgent::ClaudeCode => claude_code::ttft(bag, warnings),
-        CodingAgent::Codex | CodingAgent::GeminiCli | CodingAgent::Copilot => None,
+        CodingAgent::OpenClaw => openclaw::ttft(bag, warnings),
+        CodingAgent::Codex
+        | CodingAgent::GeminiCli
+        | CodingAgent::Copilot
+        | CodingAgent::QwenCode
+        | CodingAgent::Pi => None,
     }
 }
 
@@ -306,7 +355,12 @@ pub(crate) fn payload(
         Some(CodingAgent::ClaudeCode) => {
             claude_code::payload(span_name, bag, events, assembled, warnings);
         }
-        Some(CodingAgent::GeminiCli) => gemini_cli::payload(span_name, bag, assembled, warnings),
+        Some(
+            CodingAgent::GeminiCli
+            | CodingAgent::QwenCode
+            | CodingAgent::Pi
+            | CodingAgent::OpenClaw,
+        ) => gemini_cli::payload(span_name, bag, assembled, warnings),
         Some(CodingAgent::Codex | CodingAgent::Copilot) | None => {}
     }
 }
@@ -324,6 +378,9 @@ pub(crate) fn finish(
         Some(CodingAgent::Codex) => codex::finish(span_name, inputs, built),
         Some(CodingAgent::GeminiCli) => gemini_cli::finish(span_name, inputs, built),
         Some(CodingAgent::Copilot) => copilot::finish(kind, inputs, built),
+        Some(CodingAgent::QwenCode) => qwen_code::finish(span_name, inputs, built),
+        Some(CodingAgent::Pi) => pi::finish(span_name, inputs, built),
+        Some(CodingAgent::OpenClaw) => openclaw::finish(span_name, inputs, built),
         None => {}
     }
 }
@@ -482,6 +539,47 @@ mod tests {
             ),
             None
         );
+        assert_eq!(
+            detect_agent(Some("qwen-code"), None, "x", none),
+            Some(CodingAgent::QwenCode)
+        );
+        assert_eq!(detect_agent(Some("qwen-codex"), None, "x", none), None);
+        assert_eq!(
+            detect_agent(None, Some("cetra-pi"), "x", none),
+            Some(CodingAgent::Pi)
+        );
+        assert_eq!(detect_agent(None, Some("cetra-pi-x"), "x", none), None);
+        assert_eq!(
+            detect_agent(None, Some("openclaw"), "x", none),
+            Some(CodingAgent::OpenClaw)
+        );
+        assert_eq!(detect_agent(None, Some("openclaw.x"), "x", none), None);
+    }
+
+    #[test]
+    fn qwen_service_wins_over_the_gemini_attribute() {
+        use crate::agents::test_support::{request, run, span};
+
+        let by_attribute = [kv("gen_ai.agent.name", s("gemini-cli"))];
+        assert_eq!(
+            detect_agent(Some("qwen-code"), None, "llm_call", &by_attribute),
+            Some(CodingAgent::QwenCode)
+        );
+        let normalized = run(
+            &request(
+                "qwen-code",
+                "",
+                vec![span("llm_call", by_attribute.to_vec(), vec![])],
+            ),
+            &AgentContexts::default(),
+        );
+        assert_eq!(
+            normalized.spans[0]
+                .metadata
+                .get(key::CODING_AGENT)
+                .map(String::as_str),
+            Some("qwen-code")
+        );
     }
 
     #[test]
@@ -505,11 +603,25 @@ mod tests {
             CodingAgent::Codex,
             CodingAgent::GeminiCli,
             CodingAgent::Copilot,
+            CodingAgent::QwenCode,
+            CodingAgent::Pi,
+            CodingAgent::OpenClaw,
         ]
         .into_iter()
         .map(CodingAgent::wire_name)
         .collect();
-        assert_eq!(names, ["claude-code", "codex", "gemini-cli", "copilot"]);
+        assert_eq!(
+            names,
+            [
+                "claude-code",
+                "codex",
+                "gemini-cli",
+                "copilot",
+                "qwen-code",
+                "pi",
+                "openclaw"
+            ]
+        );
     }
 
     #[test]

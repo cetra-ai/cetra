@@ -91,6 +91,8 @@ const SCOPE_GATES: &[&str] = &[
     "mirascope.ops",
     "mirascope.llm",
     "@voltagent/core",
+    "cetra-pi",
+    "openclaw",
 ];
 
 /// Span attributes that select an operation or a span type a reader branches on.
@@ -149,7 +151,7 @@ const AGENT_SPAN_NAMES: &[&str] = &[
 ];
 
 /// Service names of the coding agents' resources (D-CA-3).
-const AGENT_SERVICE_NAMES: &[&str] = &["codex_exec", "gemini-cli", "claude-code"];
+const AGENT_SERVICE_NAMES: &[&str] = &["codex_exec", "gemini-cli", "claude-code", "qwen-code"];
 
 const GENAI_EVENTS: &[&str] = &[
     "gen_ai.system.message",
