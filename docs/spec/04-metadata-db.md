@@ -698,7 +698,7 @@ Every create, and every update that changes `version`, writes one `evaluator_ver
 -- Coding-agent session contexts (D-CA-9): the repository, branch and person a hook reported.
 CREATE TABLE agent_contexts (
   project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
-  agent TEXT NOT NULL,          -- claude-code | codex | gemini-cli | copilot
+  agent TEXT NOT NULL,          -- claude-code | codex | gemini-cli | copilot | qwen-code
   session_id TEXT NOT NULL,
   repository TEXT,              -- canonical form (D-CA-4)
   branch TEXT,

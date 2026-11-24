@@ -3955,7 +3955,7 @@ export interface components {
         };
         /** @description A coding agent's session context, sent by `cetra agents hook` (D-CA-9). */
         AgentContextBody: {
-            /** @description `claude-code`, `codex`, `gemini-cli` or `copilot`. */
+            /** @description `claude-code`, `codex`, `gemini-cli`, `copilot` or `qwen-code`. */
             agent: string;
             /** @description The branch, 1 to 256 characters. Absent keeps; `null` clears. */
             branch?: string | null;

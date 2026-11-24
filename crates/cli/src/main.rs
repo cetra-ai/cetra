@@ -88,7 +88,7 @@ enum Command {
         #[command(subcommand)]
         command: Box<projects::ProjectsCommand>,
     },
-    /// Connect coding agents (Claude Code, Codex, Gemini CLI, Copilot, Pi) to cetra.
+    /// Connect coding agents (Claude Code, Codex, Gemini CLI, Copilot, Pi, Qwen Code) to cetra.
     Agents {
         #[command(subcommand)]
         command: Box<agents::AgentsCommand>,

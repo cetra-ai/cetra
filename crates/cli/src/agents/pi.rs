@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::Context;
 
-use super::setup::{emit, read_optional_text, shell_quote};
+use super::setup::{emit_owned, read_optional_text, shell_quote};
 use super::{Paths, SetupArgs};
 
 const EXTENSION: &str = include_str!("pi_extension.ts");
@@ -55,7 +55,7 @@ fn setup_in(args: &SetupArgs, url: &str, dir: &Path, out: &mut dyn Write) -> any
             path.display()
         );
     }
-    emit(&path, EXTENSION.as_bytes(), args.print, out)?;
+    emit_owned(&path, EXTENSION.as_bytes(), args.print, out)?;
     writeln!(
         out,
         "pi reads its endpoint and key from the environment. Add these lines to your shell profile:"
@@ -233,6 +233,24 @@ mod tests {
         assert_eq!(fs::read(extension_path(dir.path())).unwrap(), written);
         assert!(first.contains("wrote "));
         assert!(!second.contains("wrote "));
+    }
+
+    #[test]
+    fn pi_setup_leaves_no_backup() {
+        let dir = tempdir().unwrap();
+        let path = extension_path(dir.path());
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        // An older file cetra wrote: the marker, then other text.
+        fs::write(&path, format!("{MARKER}\n// an older version\n")).unwrap();
+        let out = run_setup(&pi_args(), dir.path());
+        assert_eq!(fs::read_to_string(&path).unwrap(), EXTENSION);
+        assert!(out.contains("wrote "), "{out}");
+        let leftovers: Vec<_> = fs::read_dir(path.parent().unwrap())
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .filter(|name| name.ends_with(".cetra-backup"))
+            .collect();
+        assert!(leftovers.is_empty(), "{leftovers:?}");
     }
 
     #[test]

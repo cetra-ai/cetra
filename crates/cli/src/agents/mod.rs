@@ -1,4 +1,4 @@
-//! `cetra agents`: connects coding agents (Claude Code, Codex, Gemini CLI, Copilot, Pi) to cetra
+//! `cetra agents`: connects coding agents (Claude Code, Codex, Gemini CLI, Copilot, Pi, Qwen Code) to cetra
 //! (track CA, M4; Pi in track IN, M7). `setup` writes the agent's user settings and `remove` takes
 //! them back; `hook` posts a session's repository, branch and person. `agents.toml` holds the
 //! server, key and person the hook posts with.
@@ -6,6 +6,7 @@
 mod codex;
 pub(crate) mod hook;
 mod pi;
+mod qwen_code;
 mod setup;
 
 use std::fmt;
@@ -33,6 +34,9 @@ pub(crate) enum Agent {
     /// Pi: its extension file is written by setup; no hook (D-IN-28 item 9).
     #[value(name = "pi")]
     Pi,
+    /// Qwen Code: a Gemini CLI fork, set up like Gemini CLI (D-IN-28 item 7).
+    #[value(name = "qwen-code")]
+    QwenCode,
 }
 
 impl Agent {
@@ -43,6 +47,7 @@ impl Agent {
             Self::GeminiCli => "gemini-cli",
             Self::Copilot => "copilot",
             Self::Pi => "pi",
+            Self::QwenCode => "qwen-code",
         }
     }
 }

@@ -1,7 +1,8 @@
 //! `cetra agents setup` and `remove` (D-CA-10): writes each agent's user-level settings so its
-//! traces reach cetra, and removes what setup wrote. Claude Code and Gemini CLI are JSON files
-//! here, Codex is in `codex.rs`, Pi's extension is in `pi.rs`, and Copilot has no file: setup
-//! prints its settings instead.
+//! traces reach cetra, and removes what setup wrote. Claude Code, Gemini CLI and Qwen Code are
+//! JSON files here (Gemini CLI and Qwen Code share one pair of functions), Codex is in
+//! `codex.rs`, Pi's extension is in `pi.rs`, and Copilot has no file: setup prints its settings
+//! instead.
 
 use std::fs;
 use std::io::{self, Write};
@@ -14,6 +15,7 @@ use serde_json::{Map, Value, json};
 use super::codex;
 use super::hook::run_with_timeout;
 use super::pi;
+use super::qwen_code;
 use super::{Agent, AgentsFile, Paths, SetupArgs};
 use crate::credentials::{self, write_private_file};
 
@@ -62,6 +64,7 @@ pub(crate) fn setup(args: &SetupArgs, paths: &Paths, out: &mut dyn Write) -> any
         Agent::ClaudeCode => claude_code_setup(args, &url, paths, out)?,
         Agent::Codex => codex::setup(args, &url, paths, &codex::codex_home(paths), out)?,
         Agent::GeminiCli => gemini_cli_setup(args, &url, paths, out)?,
+        Agent::QwenCode => qwen_code::setup(args, &url, paths, out)?,
         Agent::Copilot => copilot(args, &url, out)?,
         Agent::Pi => pi::setup(args, &url, paths, out)?,
     }
@@ -88,6 +91,7 @@ pub(crate) fn remove(agent: Agent, paths: &Paths, out: &mut dyn Write) -> anyhow
         Agent::ClaudeCode => claude_code_remove(paths, out),
         Agent::Codex => codex::remove(paths, &codex::codex_home(paths), out),
         Agent::GeminiCli => gemini_cli_remove(paths, out),
+        Agent::QwenCode => qwen_code::remove(paths, out),
         Agent::Copilot => {
             writeln!(
                 out,
@@ -153,11 +157,12 @@ fn shell_single_quote(text: &str) -> String {
     format!("'{}'", text.replace('\'', "'\\''"))
 }
 
-/// The hook timeout each agent's settings take, in that agent's unit: seconds for Claude Code,
-/// milliseconds for Gemini CLI. Codex's unit is unverified, so its hooks get no timeout.
+/// The hook timeout each agent's settings take, in that agent's unit: seconds for Claude Code
+/// and Qwen Code (D-IN-28 item 7), milliseconds for Gemini CLI. Codex's unit is unverified, so
+/// its hooks get no timeout.
 fn hook_timeout(agent: Agent) -> Option<u64> {
     match agent {
-        Agent::ClaudeCode => Some(5),
+        Agent::ClaudeCode | Agent::QwenCode => Some(5),
         Agent::GeminiCli => Some(5000),
         Agent::Codex | Agent::Copilot | Agent::Pi => None,
     }
@@ -320,9 +325,9 @@ pub(super) fn settings_bytes(root: &Map<String, Value>) -> anyhow::Result<Vec<u8
 }
 
 /// Writes a settings file with mode 0600, following a symlink to its target (a dangling link
-/// too: the target is created). The first write of a file keeps a copy beside it,
-/// `<file>.cetra-backup`. True when the file changed.
-pub(super) fn write_settings(path: &Path, bytes: &[u8]) -> anyhow::Result<bool> {
+/// too: the target is created). With `backup`, the first write of a file keeps a copy beside
+/// it, `<file>.cetra-backup`. True when the file changed.
+fn write_settings(path: &Path, bytes: &[u8], backup: bool) -> anyhow::Result<bool> {
     let target = resolve_symlinks(path)?;
     match fs::read(&target) {
         Ok(current) if current == bytes => {
@@ -336,7 +341,9 @@ pub(super) fn write_settings(path: &Path, bytes: &[u8]) -> anyhow::Result<bool> 
         Err(error) if error.kind() == io::ErrorKind::NotFound => {}
         Err(_) => anyhow::bail!("reading {}", path.display()),
     }
-    backup_once(&target)?;
+    if backup {
+        backup_once(&target)?;
+    }
     write_private_file(&target, bytes)?;
     Ok(true)
 }
@@ -410,16 +417,37 @@ fn print_file(out: &mut dyn Write, path: &Path, bytes: &[u8]) -> anyhow::Result<
 }
 
 /// Writes a file for setup, or prints it under `--print`. Reports `wrote <path>` on a change.
+/// The first change keeps a `<file>.cetra-backup` of the file.
 pub(super) fn emit(
     path: &Path,
     bytes: &[u8],
     print: bool,
     out: &mut dyn Write,
 ) -> anyhow::Result<()> {
+    emit_with(path, bytes, print, true, out)
+}
+
+/// `emit` for a file cetra owns, whose marker its caller checked: no backup is kept.
+pub(super) fn emit_owned(
+    path: &Path,
+    bytes: &[u8],
+    print: bool,
+    out: &mut dyn Write,
+) -> anyhow::Result<()> {
+    emit_with(path, bytes, print, false, out)
+}
+
+fn emit_with(
+    path: &Path,
+    bytes: &[u8],
+    print: bool,
+    backup: bool,
+    out: &mut dyn Write,
+) -> anyhow::Result<()> {
     if print {
         return print_file(out, path, bytes);
     }
-    if write_settings(path, bytes)? {
+    if write_settings(path, bytes, backup)? {
         writeln!(out, "wrote {}", path.display())?;
     }
     Ok(())
@@ -427,7 +455,7 @@ pub(super) fn emit(
 
 /// Writes a file for remove. Reports `updated <path>` on a change and returns whether it changed.
 pub(super) fn updated(path: &Path, bytes: &[u8], out: &mut dyn Write) -> anyhow::Result<bool> {
-    let changed = write_settings(path, bytes)?;
+    let changed = write_settings(path, bytes, true)?;
     if changed {
         writeln!(out, "updated {}", path.display())?;
     }
@@ -535,8 +563,8 @@ fn gemini_dir(paths: &Paths) -> PathBuf {
     paths.home.join(".gemini")
 }
 
-/// The `.env` line that Gemini CLI reads its OTLP headers from.
-fn gemini_header_line(key: &str) -> String {
+/// The `.env` line that Gemini CLI and Qwen Code read their OTLP headers from.
+fn otlp_header_line(key: &str) -> String {
     format!("{HEADERS_PREFIX}Authorization=Bearer%20{key}")
 }
 
@@ -586,31 +614,46 @@ fn env_without_line(text: &str, line: &str) -> Option<String> {
     (lines.len() != before).then(|| join_lines(&lines))
 }
 
-fn gemini_cli_setup(
+/// What one agent with a `settings.json` (a `telemetry` object and hooks) and a `.env` in its
+/// directory takes from setup and remove. Gemini CLI and Qwen Code use `settings_env_setup`
+/// and `settings_env_remove` with their own values.
+pub(super) struct SettingsAgent {
+    pub(super) agent: Agent,
+    /// The directory holding `settings.json` and `.env`.
+    pub(super) dir: PathBuf,
+    /// The `telemetry` keys setup sets, with their values. Remove does not use them.
+    pub(super) telemetry: Vec<(&'static str, Value)>,
+    /// The `telemetry` keys remove takes back, when they point at the saved server.
+    pub(super) removable: &'static [&'static str],
+    /// The hook events that get cetra's hook.
+    pub(super) events: &'static [&'static str],
+    /// The line setup prints after writing, unless `--print`. Remove does not use it.
+    pub(super) note: &'static str,
+}
+
+/// Setup for an agent described by `spec`: its telemetry keys, its hooks and the `.env` headers
+/// line.
+pub(super) fn settings_env_setup(
+    spec: &SettingsAgent,
     args: &SetupArgs,
-    url: &str,
     paths: &Paths,
     out: &mut dyn Write,
 ) -> anyhow::Result<()> {
-    let dir = gemini_dir(paths);
-    let settings_path = dir.join("settings.json");
-    let env_path = dir.join(".env");
+    let settings_path = spec.dir.join("settings.json");
+    let env_path = spec.dir.join(".env");
     let mut root = read_json_object(&settings_path)?;
     let telemetry = object_entry(&mut root, "telemetry")?;
-    telemetry.insert("enabled".to_owned(), Value::Bool(true));
-    telemetry.insert("traces".to_owned(), Value::Bool(true));
-    telemetry.insert("target".to_owned(), json!("local"));
-    telemetry.insert("otlpEndpoint".to_owned(), json!(url));
-    telemetry.insert("otlpProtocol".to_owned(), json!("http"));
-    telemetry.insert("logPrompts".to_owned(), Value::Bool(!args.no_content));
+    for (name, value) in &spec.telemetry {
+        telemetry.insert((*name).to_owned(), value.clone());
+    }
     set_hooks(
         &mut root,
-        &GEMINI_EVENTS,
-        &hook_command(paths, Agent::GeminiCli),
-        Agent::GeminiCli,
+        spec.events,
+        &hook_command(paths, spec.agent),
+        spec.agent,
     )?;
     let env_text = read_optional_text(&env_path)?.unwrap_or_default();
-    let (env, replaced_other) = env_with_header(&env_text, &gemini_header_line(args.key.expose()));
+    let (env, replaced_other) = env_with_header(&env_text, &otlp_header_line(args.key.expose()));
     emit(&settings_path, &settings_bytes(&root)?, args.print, out)?;
     emit(&env_path, env.as_bytes(), args.print, out)?;
     if replaced_other && !args.print {
@@ -621,19 +664,21 @@ fn gemini_cli_setup(
         )?;
     }
     if !args.print {
-        writeln!(
-            out,
-            "Gemini CLI also sends logs and metrics; cetra accepts and drops them."
-        )?;
+        writeln!(out, "{}", spec.note)?;
     }
     Ok(())
 }
 
-fn gemini_cli_remove(paths: &Paths, out: &mut dyn Write) -> anyhow::Result<()> {
+/// Remove for an agent described by `spec`: its telemetry keys when they point at the saved
+/// server, its hooks, and the `.env` headers line.
+pub(super) fn settings_env_remove(
+    spec: &SettingsAgent,
+    paths: &Paths,
+    out: &mut dyn Write,
+) -> anyhow::Result<()> {
     let agents = AgentsFile::load(&paths.agents_file())?;
-    let dir = gemini_dir(paths);
-    let settings_path = dir.join("settings.json");
-    let env_path = dir.join(".env");
+    let settings_path = spec.dir.join("settings.json");
+    let env_path = spec.dir.join(".env");
     let mut root = read_json_object(&settings_path)?;
     let original = root.clone();
     match &agents {
@@ -641,8 +686,8 @@ fn gemini_cli_remove(paths: &Paths, out: &mut dyn Write) -> anyhow::Result<()> {
         Some(file) => {
             if points_at(root.get("telemetry"), "otlpEndpoint", &file.url) {
                 if let Some(telemetry) = root.get_mut("telemetry").and_then(Value::as_object_mut) {
-                    for name in GEMINI_TELEMETRY {
-                        telemetry.remove(name);
+                    for name in spec.removable {
+                        telemetry.remove(*name);
                     }
                     if telemetry.is_empty() {
                         root.remove("telemetry");
@@ -657,14 +702,14 @@ fn gemini_cli_remove(paths: &Paths, out: &mut dyn Write) -> anyhow::Result<()> {
             }
         }
     }
-    remove_hooks(&mut root, Agent::GeminiCli)?;
+    remove_hooks(&mut root, spec.agent)?;
     let mut changed = false;
     if root != original {
         changed |= updated(&settings_path, &settings_bytes(&root)?, out)?;
     }
     if let Some(file) = &agents
         && let Some(text) = read_optional_text(&env_path)?
-        && let Some(kept) = env_without_line(&text, &gemini_header_line(&file.key))
+        && let Some(kept) = env_without_line(&text, &otlp_header_line(&file.key))
     {
         changed |= updated(&env_path, kept.as_bytes(), out)?;
     }
@@ -672,6 +717,42 @@ fn gemini_cli_remove(paths: &Paths, out: &mut dyn Write) -> anyhow::Result<()> {
         writeln!(out, "nothing to remove")?;
     }
     Ok(())
+}
+
+fn gemini_cli_setup(
+    args: &SetupArgs,
+    url: &str,
+    paths: &Paths,
+    out: &mut dyn Write,
+) -> anyhow::Result<()> {
+    let spec = SettingsAgent {
+        agent: Agent::GeminiCli,
+        dir: gemini_dir(paths),
+        telemetry: vec![
+            ("enabled", Value::Bool(true)),
+            ("traces", Value::Bool(true)),
+            ("target", json!("local")),
+            ("otlpEndpoint", json!(url)),
+            ("otlpProtocol", json!("http")),
+            ("logPrompts", Value::Bool(!args.no_content)),
+        ],
+        removable: &GEMINI_TELEMETRY,
+        events: &GEMINI_EVENTS,
+        note: "Gemini CLI also sends logs and metrics; cetra accepts and drops them.",
+    };
+    settings_env_setup(&spec, args, paths, out)
+}
+
+fn gemini_cli_remove(paths: &Paths, out: &mut dyn Write) -> anyhow::Result<()> {
+    let spec = SettingsAgent {
+        agent: Agent::GeminiCli,
+        dir: gemini_dir(paths),
+        telemetry: Vec::new(),
+        removable: &GEMINI_TELEMETRY,
+        events: &GEMINI_EVENTS,
+        note: "",
+    };
+    settings_env_remove(&spec, paths, out)
 }
 
 /// Copilot has no settings file: setup prints the variables and the VS Code settings. Nothing
