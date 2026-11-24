@@ -37,7 +37,7 @@ with an `### Upgrade notes` section (https://cetra.sh/docs/self-hosting/upgrade/
 - A reported cost of exactly 0 on a span that counts tokens counts as no report and is priced from the price table; OpenLIT writes a cost of 0 when its price table has no row for the model.
 - `/v1/agent-context` accepts `qwen-code`.
 - Semantic Kernel .NET's GenAI events carry their message in `gen_ai.event.content`, which is read as the event's body; a GenAI message value that starts with `HIDDEN:` (Koog's masked content) is content not captured, not a malformed message; `koog` is a framework name, `open_ai` is an alias of `openai`, and on scope `io.quarkus.opentelemetry` `gen_ai.prompt` and `gen_ai.completion` fill input and output.
-- Spans of Vercel's Workflow SDK (scope `workflow`, names starting `workflow.`, `step.` or `queue.`), which eve runs on, are discarded and counted, as coding agents' internal spans are; on Agent Spec's `LlmGenerationSpan` model calls, a token attribute whose value is the string `"null"` is absent, with no warning.
+- Spans of Vercel's Workflow SDK (scope `workflow`, names starting `workflow.`, `step.` or `queue.`), which eve runs on, are discarded and counted, as coding agents' internal spans are, unless they carry model attributes (`gen_ai.*`, `llm.*` or `openinference.span.kind`); on Agent Spec's `LlmGenerationSpan` model calls, a token attribute whose value is the string `"null"` is absent, with no warning.
 
 ### Fixed
 
