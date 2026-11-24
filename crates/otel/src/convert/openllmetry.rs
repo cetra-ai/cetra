@@ -13,7 +13,9 @@ use crate::value::as_str;
 ///
 /// `None` when that prefix has no decimal index. `content` that starts with `[`
 /// and parses as a JSON array is stored as that array so N10 maps content parts.
-/// Anything else stays a string. Tool-call `arguments` stay a string for N10.
+/// Anything else stays a string. Tool-call `arguments` stay a string for N10,
+/// and a message's flattened `function_call.name`/`function_call.arguments`
+/// keys are rebuilt as one `function_call` object.
 pub(crate) fn flattened_messages(bag: &AttrBag<'_>, prefix: &str) -> Option<Vec<Json>> {
     let indexes: Vec<usize> = bag.indexed(prefix).into_keys().collect();
     if indexes.is_empty() {
@@ -47,7 +49,25 @@ fn message(bag: &AttrBag<'_>, prefix: &str, index: usize) -> Json {
     if let Some(calls) = tool_calls(bag, &format!("{base}tool_calls.")) {
         message.insert("tool_calls".to_owned(), Json::Array(calls));
     }
+    if let Some(call) = function_call(bag, &format!("{base}function_call.")) {
+        message.insert("function_call".to_owned(), Json::Object(call));
+    }
     Json::Object(message)
+}
+
+/// The legacy `function_call` object of one message, from its flattened `name`
+/// and `arguments` keys (LiteLLM writes it with no message role, D-IN-25).
+/// `None` when neither key is present.
+fn function_call(bag: &AttrBag<'_>, prefix: &str) -> Option<Map<String, Json>> {
+    let name = string_at(bag, &format!("{prefix}name"));
+    let arguments = string_at(bag, &format!("{prefix}arguments"));
+    if name.is_none() && arguments.is_none() {
+        return None;
+    }
+    let mut call = Map::new();
+    insert_string(&mut call, "name", name);
+    insert_string(&mut call, "arguments", arguments);
+    Some(call)
 }
 
 fn content_value(text: &str) -> Json {
