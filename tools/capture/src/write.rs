@@ -201,6 +201,7 @@ mod tests {
             turns: vec![Turn {
                 api: Api::OpenaiChat,
                 model: "gpt-test".to_owned(),
+                auxiliary: false,
                 host: None,
                 message: Some(Message {
                     text: Some("Hi".to_owned()),

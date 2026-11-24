@@ -20,7 +20,8 @@ use tokio::time::Sleep;
 use crate::scenario::{Api, Provider, Turn};
 use crate::wire::{Ids, Rendered, openai};
 
-/// Scripted provider. Requests take turns from the front of the queue.
+/// Scripted provider. Requests take turns from the front of the queue: an auxiliary
+/// turn (a request without tools) or a main one (a request with tools).
 #[derive(Debug)]
 pub struct Mock {
     turns: Vec<Turn>,
@@ -29,9 +30,12 @@ pub struct Mock {
 
 #[derive(Debug)]
 struct StateInner {
-    /// Next turn index. Advances for a served turn and for an API mismatch.
-    next: usize,
-    /// Take-turn attempts, including a request that finds the queue empty.
+    /// Index into [`Mock::turns`] of the next unserved auxiliary turn. Advances for a
+    /// served turn and for an API mismatch.
+    auxiliary_next: usize,
+    /// Index into [`Mock::turns`] of the next unserved main turn.
+    main_next: usize,
+    /// Take-turn attempts, including a request that finds both queues empty.
     requests: usize,
     served: Vec<Served>,
     errors: Vec<String>,
@@ -58,12 +62,13 @@ pub struct Served {
 }
 
 impl Mock {
-    /// Queues `turns` and starts at the first one.
+    /// Queues `turns` and starts at the first one of each queue.
     pub fn new(turns: Vec<Turn>) -> std::sync::Arc<Self> {
         std::sync::Arc::new(Self {
             turns,
             state: Mutex::new(StateInner {
-                next: 0,
+                auxiliary_next: 0,
+                main_next: 0,
                 requests: 0,
                 served: Vec::new(),
                 errors: Vec::new(),
@@ -82,7 +87,15 @@ impl Mock {
     /// Snapshot of the log. Turns still queued are reported as `"N turns not served"`.
     pub fn finish(&self) -> MockLog {
         let mut state = self.lock();
-        let remaining = self.turns.len().saturating_sub(state.next);
+        let remaining = self
+            .turns
+            .iter()
+            .enumerate()
+            .filter(|(index, turn)| {
+                turn.auxiliary && *index >= state.auxiliary_next
+                    || !turn.auxiliary && *index >= state.main_next
+            })
+            .count();
         if remaining > 0 {
             state.errors.push(format!("{remaining} turns not served"));
         }
@@ -128,6 +141,25 @@ fn models_list() -> Response {
         .unwrap_or_else(|_| Response::new(Body::empty()))
 }
 
+/// Hermes's model probe (`GET …/models/<id>`). Not a turn and not an error.
+fn model_get(id: &str) -> Response {
+    let body =
+        serde_json::json!({"id": id, "object": "model", "created": 0, "owned_by": "cetra-capture"});
+    let bytes = serde_json::to_vec(&body).unwrap_or_else(|_| Vec::new());
+    Response::builder()
+        .status(StatusCode::OK)
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(bytes))
+        .unwrap_or_else(|_| Response::new(Body::empty()))
+}
+
+/// The id in a `GET …/models/<id>` path, the path's last segment. `None` for a bare
+/// `…/models` ([`models_list`]) or a deeper path.
+fn model_id(path: &str) -> Option<&str> {
+    let (_, id) = path.rsplit_once("/models/")?;
+    (!id.is_empty() && !id.contains('/')).then_some(id)
+}
+
 impl Mock {
     async fn respond(&self, request: axum::extract::Request) -> Response {
         let label = format!("{} {}", request.method(), request.uri().path());
@@ -137,6 +169,25 @@ impl Mock {
         let posted = *request.method() == Method::POST;
         if *request.method() == Method::GET && path.ends_with("/models") {
             return models_list();
+        }
+        // Probes an agent makes beside its turns. They are answered, never logged.
+        if *request.method() == Method::GET
+            && let Some(id) = model_id(&path)
+        {
+            return model_get(id);
+        }
+        let tolerated_probe = match *request.method() {
+            // OpenCode v2 checks for the Responses API before its first turn.
+            Method::GET if path.ends_with("/responses") => true,
+            // Hermes's custom provider asks the endpoint what it serves.
+            Method::POST if path.ends_with("/api/show") => true,
+            _ => false,
+        };
+        if tolerated_probe {
+            return error_response(
+                StatusCode::NOT_FOUND,
+                &format!("cetra-capture mock: no route {label}"),
+            );
         }
         let Some(route) = classify(&path).filter(|_| posted) else {
             let message = format!("cetra-capture mock: no route {label}");
@@ -160,7 +211,7 @@ impl Mock {
             self.push_error(label.clone());
             return error_response(StatusCode::BAD_REQUEST, &label);
         };
-        let (index, turn) = match self.take(route) {
+        let (index, turn) = match self.take(route, facts.tools) {
             Take::Turn { index, turn } => (index, turn),
             Take::Reject { status, message } => return error_response(status, &message),
         };
@@ -199,20 +250,32 @@ impl Mock {
         }
     }
 
-    fn take(&self, route: Route) -> Take {
+    /// Takes the next turn for `route`. A request with `tools` takes a main turn; a
+    /// request without them takes the next auxiliary turn when one is left, else a main
+    /// one. A mismatched turn is consumed either way.
+    fn take(&self, route: Route, tools: bool) -> Take {
         let mut state = self.lock();
         state.requests += 1;
         let request_number = state.requests;
-        if state.next >= self.turns.len() {
+        let index = if tools {
+            self.next_turn(&state, false)
+        } else {
+            self.next_turn(&state, true)
+                .or_else(|| self.next_turn(&state, false))
+        };
+        let Some(index) = index else {
             let message = format!("request {request_number}: no scripted turn left");
             state.errors.push(message.clone());
             return Take::Reject {
                 status: StatusCode::INTERNAL_SERVER_ERROR,
                 message,
             };
+        };
+        if self.turns[index].auxiliary {
+            state.auxiliary_next = index + 1;
+        } else {
+            state.main_next = index + 1;
         }
-        let index = state.next;
-        state.next += 1;
         let turn = self.turns[index].clone();
         if turn.api != route.api() {
             let message = format!(
@@ -227,6 +290,16 @@ impl Mock {
             };
         }
         Take::Turn { index, turn }
+    }
+
+    /// The next unserved `auxiliary` turn's index, or `None` when that queue is empty.
+    fn next_turn(&self, state: &StateInner, auxiliary: bool) -> Option<usize> {
+        let start = if auxiliary {
+            state.auxiliary_next
+        } else {
+            state.main_next
+        };
+        (start..self.turns.len()).find(|index| self.turns[*index].auxiliary == auxiliary)
     }
 }
 
@@ -322,6 +395,8 @@ struct Facts {
     inputs: usize,
     base64: bool,
     batch: bool,
+    /// The request declares tools, which routes it to the main turn queue.
+    tools: bool,
 }
 
 fn read_facts(route: Route, body: &Map<String, Value>) -> Result<Facts, ()> {
@@ -343,12 +418,21 @@ fn read_facts(route: Route, body: &Map<String, Value>) -> Result<Facts, ()> {
         | Route::CohereChat
         | Route::OllamaChat => (0, false, false, stream_field),
     };
+    let tools = if matches!(
+        route,
+        Route::Chat | Route::Responses | Route::Messages | Route::CohereChat | Route::OllamaChat
+    ) {
+        matches!(body.get("tools"), Some(Value::Array(items)) if !items.is_empty())
+    } else {
+        false
+    };
     Ok(Facts {
         stream,
         include_usage,
         inputs,
         base64,
         batch,
+        tools,
     })
 }
 
@@ -567,6 +651,7 @@ mod tests {
         Turn {
             api,
             model: "mock-model".to_owned(),
+            auxiliary: false,
             host: None,
             message: Some(Message {
                 text: Some("Hi".to_owned()),
@@ -590,6 +675,7 @@ mod tests {
         Turn {
             api,
             model: "mock-embed".to_owned(),
+            auxiliary: false,
             host: None,
             message: None,
             finish: None,
@@ -968,6 +1054,113 @@ mod tests {
         let log = mock.finish();
         assert_eq!(log.served.len(), 1, "{:?}", log.served);
         assert!(log.errors.is_empty(), "{:?}", log.errors);
+    }
+
+    fn auxiliary_turn() -> Turn {
+        let mut turn = chat_turn(Api::OpenaiChat, 0, 0);
+        turn.auxiliary = true;
+        turn
+    }
+
+    const TOOLS: &str = r#"{"tools":[{"type":"function","function":{"name":"bash"}}]}"#;
+
+    #[tokio::test]
+    async fn auxiliary_turns_go_to_requests_without_tools() {
+        let mock = Mock::new(vec![auxiliary_turn(), chat_turn(Api::OpenaiChat, 0, 0)]);
+        let with_tools = send(&mock, "POST", "/v1/chat/completions", TOOLS).await;
+        assert_eq!(with_tools.status(), 200);
+        assert_eq!(with_tools.headers()["x-request-id"], "req_capture_2");
+        let without_tools = send(&mock, "POST", "/v1/chat/completions", "{}").await;
+        assert_eq!(without_tools.status(), 200);
+        assert_eq!(without_tools.headers()["x-request-id"], "req_capture_1");
+        let log = mock.finish();
+        // Scenario indexes: the auxiliary turn is listed first, served second.
+        assert_eq!(
+            log.served.iter().map(|s| s.turn).collect::<Vec<_>>(),
+            [1, 0]
+        );
+        assert!(log.errors.is_empty(), "{:?}", log.errors);
+    }
+
+    #[tokio::test]
+    async fn without_auxiliary_turns_order_is_unchanged() {
+        let mock = Mock::new(vec![
+            chat_turn(Api::OpenaiChat, 0, 0),
+            chat_turn(Api::OpenaiChat, 0, 0),
+        ]);
+        let with_tools = send(&mock, "POST", "/v1/chat/completions", TOOLS).await;
+        assert_eq!(with_tools.status(), 200);
+        let without_tools = send(&mock, "POST", "/v1/chat/completions", "{}").await;
+        assert_eq!(without_tools.status(), 200);
+        let log = mock.finish();
+        assert_eq!(
+            log.served.iter().map(|s| s.turn).collect::<Vec<_>>(),
+            [0, 1]
+        );
+        assert!(log.errors.is_empty(), "{:?}", log.errors);
+    }
+
+    #[tokio::test]
+    async fn unused_auxiliary_turn_follows_the_unused_turn_rule() {
+        let mock = Mock::new(vec![auxiliary_turn(), chat_turn(Api::OpenaiChat, 0, 0)]);
+        let with_tools = send(&mock, "POST", "/v1/chat/completions", TOOLS).await;
+        assert_eq!(with_tools.status(), 200);
+        let log = mock.finish();
+        assert_eq!(log.served.iter().map(|s| s.turn).collect::<Vec<_>>(), [1]);
+        assert_eq!(log.errors, vec!["1 turns not served"]);
+    }
+
+    #[tokio::test]
+    async fn responses_get_probe_is_not_an_error() {
+        let mock = Mock::new(vec![chat_turn(Api::OpenaiChat, 0, 0)]);
+        let probe = send(&mock, "GET", "/v1/responses", "").await;
+        assert_eq!(probe.status(), 404);
+        let body: Value = serde_json::from_slice(&bytes(probe).await).unwrap();
+        assert_eq!(
+            body["error"]["message"],
+            "cetra-capture mock: no route GET /v1/responses"
+        );
+        let ok = send(&mock, "POST", "/v1/chat/completions", "{}").await;
+        assert_eq!(ok.status(), 200);
+        let log = mock.finish();
+        assert_eq!(log.served.len(), 1);
+        assert!(log.errors.is_empty(), "{:?}", log.errors);
+    }
+
+    #[tokio::test]
+    async fn api_show_probe_is_not_an_error() {
+        let mock = Mock::new(Vec::new());
+        let probe = send(&mock, "POST", "/api/show", r#"{"model":"gpt-4o-mini"}"#).await;
+        assert_eq!(probe.status(), 404);
+        let body: Value = serde_json::from_slice(&bytes(probe).await).unwrap();
+        assert_eq!(
+            body["error"]["message"],
+            "cetra-capture mock: no route POST /api/show"
+        );
+        let log = mock.finish();
+        assert!(log.served.is_empty());
+        assert!(log.errors.is_empty(), "{:?}", log.errors);
+    }
+
+    #[tokio::test]
+    async fn model_get_returns_the_model() {
+        let mock = Mock::new(Vec::new());
+        let response = send(&mock, "GET", "/v1/models/gpt-4o-mini", "").await;
+        assert_eq!(response.status(), 200);
+        assert_eq!(response.headers()[header::CONTENT_TYPE], "application/json");
+        let body: Value = serde_json::from_slice(&bytes(response).await).unwrap();
+        assert_eq!(
+            body,
+            json!({"id": "gpt-4o-mini", "object": "model", "created": 0, "owned_by": "cetra-capture"})
+        );
+        let deeper = send(&mock, "GET", "/v1/models/a/b", "").await;
+        assert_eq!(deeper.status(), 404);
+        let log = mock.finish();
+        assert!(log.served.is_empty());
+        assert_eq!(
+            log.errors,
+            vec!["cetra-capture mock: no route GET /v1/models/a/b"]
+        );
     }
 
     #[tokio::test]

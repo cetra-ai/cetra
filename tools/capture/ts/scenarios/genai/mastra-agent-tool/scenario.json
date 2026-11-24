@@ -17,9 +17,7 @@
     "chat gpt-4o-mini",
     "execute_tool get_weather"
   ],
-  "timestamp_attributes": [
-    { "key": "mastra.completion_start_time", "format": "rfc3339" }
-  ],
+  "timestamp_attributes": [{ "key": "mastra.completion_start_time", "format": "rfc3339" }],
   "volatile_attributes": [
     "mastra.metadata.runId",
     "mastra.metadata.headers",

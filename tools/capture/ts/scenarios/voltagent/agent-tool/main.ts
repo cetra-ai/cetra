@@ -1,5 +1,5 @@
 import { createOpenAI } from "@ai-sdk/openai-v6";
-import { Agent, VoltAgent, createTool } from "@voltagent/core";
+import { Agent, createTool, VoltAgent } from "@voltagent/core";
 import { z } from "zod";
 
 import { finish, mockUrl, setup } from "../../../harness.ts";

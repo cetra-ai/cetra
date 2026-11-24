@@ -34,6 +34,10 @@ pub const GROUPS: &[&str] = &[
     "qwen_code",
     "pi",
     "openclaw",
+    "opencode",
+    "goose",
+    "oh_my_pi",
+    "hermes_agent",
     "voltagent",
     "edge",
     "n8n",
@@ -204,6 +208,10 @@ pub struct Turn {
     pub api: Api,
     /// Model id sent back on the response.
     pub model: String,
+    /// Served only to a request that declares no tools: an agent's side call (a title, a
+    /// session name) that runs beside the main flow. Default false.
+    #[serde(default)]
+    pub auxiliary: bool,
     /// The real host the program calls for this turn (D-IN-3); the mock checks the
     /// request's `Host` header against it. Absent: no check.
     #[serde(default)]
@@ -497,6 +505,7 @@ impl Scenario {
             } else {
                 check_chat(index, turn)?;
             }
+            check_auxiliary(index, turn)?;
             check_usage(index, turn)?;
         }
         Ok(())
@@ -576,6 +585,30 @@ fn check_chat(index: usize, turn: &Turn) -> Result<(), String> {
     if has_tools != matches!(finish, Finish::ToolCalls) {
         return Err(format!(
             "turns[{index}].finish must be tool_calls exactly when tool calls are present"
+        ));
+    }
+    Ok(())
+}
+
+/// An auxiliary turn is served to a request that declares no tools: it must be a chat
+/// turn with text and no tool calls, or the side call could not use it.
+fn check_auxiliary(index: usize, turn: &Turn) -> Result<(), String> {
+    if !turn.auxiliary {
+        return Ok(());
+    }
+    if turn.api.is_embedding() {
+        return Err(format!(
+            "turns[{index}]: an auxiliary turn must be a chat turn with text and no tool calls"
+        ));
+    }
+    let Some(message) = &turn.message else {
+        return Err(format!(
+            "turns[{index}]: an auxiliary turn must be a chat turn with text and no tool calls"
+        ));
+    };
+    if !present_text(message.text.as_deref()) || !message.tool_calls.is_empty() {
+        return Err(format!(
+            "turns[{index}]: an auxiliary turn must be a chat turn with text and no tool calls"
         ));
     }
     Ok(())
@@ -1379,6 +1412,10 @@ mod tests {
             "qwen_code",
             "pi",
             "openclaw",
+            "opencode",
+            "goose",
+            "oh_my_pi",
+            "hermes_agent",
         ] {
             let text = format!("{group}/x");
             let path: CasePath = text.parse().expect(&text);
@@ -1467,5 +1504,38 @@ mod tests {
         value["turns"] = json!([]);
         let scenario: Scenario = serde_json::from_value(value).expect("parse");
         scenario.check().expect("no turns is valid");
+    }
+
+    #[test]
+    fn auxiliary_turn_with_tool_calls_is_rejected() {
+        let expected = "an auxiliary turn must be a chat turn with text and no tool calls";
+
+        let mut value = chat();
+        value["turns"][0]["auxiliary"] = json!(true);
+        value["turns"][0]["message"] = json!({
+            "text": null,
+            "tool_calls": [{ "id": "call_a", "name": "shell", "arguments": { "command": "ls" } }]
+        });
+        value["turns"][0]["finish"] = json!("tool_calls");
+        assert_reason(value, expected);
+
+        let mut value = chat();
+        value["turns"][0]["auxiliary"] = json!(true);
+        assert!(
+            load_value(value).is_ok(),
+            "a text chat turn is a valid auxiliary turn"
+        );
+
+        let mut value = embedding("openai.embeddings");
+        value["turns"][0]["auxiliary"] = json!(true);
+        assert_reason(value, expected);
+
+        // Reasoning only (accepted by check_chat on anthropic.messages) is not text.
+        let mut value = chat();
+        value["turns"][0]["api"] = json!("anthropic.messages");
+        value["turns"][0]["auxiliary"] = json!(true);
+        value["turns"][0]["message"] = json!({ "text": null, "reasoning": "thinking" });
+        value["turns"][0]["finish"] = json!("length");
+        assert_reason(value, expected);
     }
 }

@@ -312,6 +312,10 @@ fn costs_match(path: &str, actual: &Value, expected: &Value) -> bool {
 /// `prices.json`, which has one row per test model, so it cannot see a provider that
 /// no snapshot row carries (D-B1-11). Hand-written cases use invented models and are
 /// not checked here.
+///
+/// `hermes_agent/read-file` is the one captured case this test skips: Hermes's `custom`
+/// provider names the endpoint, not a vendor, so no snapshot row can match it and its
+/// spans carry cost source `none` on purpose (IN7.13, D-IN-29).
 #[test]
 fn captured_llm_spans_are_priced_by_the_builtin_snapshot() {
     let loaded = load_all_cases();
@@ -327,6 +331,7 @@ fn captured_llm_spans_are_priced_by_the_builtin_snapshot() {
         .cases
         .iter()
         .filter(|case| case.meta.origin == Origin::Captured)
+        .filter(|case| !(case.group == "hermes_agent" && case.name == "read-file"))
     {
         let label = format!("{}/{}", case.group, case.name);
         let bytes = match fs::read(case.dir.join("input.json")) {
