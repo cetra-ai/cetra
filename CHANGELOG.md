@@ -14,6 +14,8 @@ with an `### Upgrade notes` section (https://cetra.sh/docs/self-hosting/upgrade/
 - Integration pages for Instructor, Agno, smolagents, Haystack, BeeAI Framework, Guardrails AI, Deep Agents, Temporal, LangGraph and the Claude Agent SDK, with captured spans for nine of them (seven new captures; LangGraph and the Claude Agent SDK use existing ones); `cetra-sdk` extras `instructor`, `agno`, `smolagents`, `haystack` and `beeai`.
 - Integration pages for Pydantic AI, Semantic Kernel, Strands Agents, Bedrock AgentCore, Microsoft Agent Framework, AG2, AutoGen, Mirascope, OpenHands, Mastra and VoltAgent, with captured spans for ten of them (OpenHands's case is hand-written), and the `voltagent` convention for VoltAgent's spans. AutoGen is `instrument=["autogen-agentchat"]`, with `openinference-instrumentation-autogen-agentchat` installed separately.
 - Integration pages for the gateways: LiteLLM Proxy, Bifrost, Envoy AI Gateway, Kong AI Gateway, Portkey, TrueFoundry, Vercel AI Gateway, Helicone and Cloudflare AI Gateway, with captured spans for LiteLLM Proxy, Bifrost, Envoy AI Gateway and Temporal, and `just capture-tools` to fetch the pinned binaries those captures start.
+- Integration pages for n8n, Langflow, Prompt Flow, LiveKit Agents, Pipecat, Browser Use, MCP, OpenLIT, the vector databases (Chroma, Qdrant, Milvus, Pinecone, Weaviate), Promptfoo, Stagehand, LobeChat, Gradio, Ragas, UQLM, Azure AI Evaluation, Cleanlab, and Harbor and Terminal-Bench, with captured spans for ten of them (eleven new captures); `instrument=["mcp"]` and the `cetra-sdk[mcp]` extra carry an MCP server's spans into the client's trace.
+- The capture harness is its own package (`tools/capture/harness/`), and capture scenarios whose packages cannot share the capture project's lock live under `tools/capture/envs/<env>/scenarios/`; `just capture-tools` installs every environment.
 
 ### Changed
 
@@ -25,6 +27,9 @@ with an `### Upgrade notes` section (https://cetra.sh/docs/self-hosting/upgrade/
 - LiteLLM Proxy's and Bifrost's own cost figures are read as the reported cost; Bifrost's server root span is a chain, not a second LLM call; `gen_ai.operation.name` values `embedding` and `aembedding` (LiteLLM's call types) give the embedding kind.
 - OpenLLMetry completions without a role are read as assistant messages; a `function_call` is a tool call.
 - Bifrost's server root span carries plain text instead of messages in its message fields; cetra stores it as text and records no normalize error.
+- Scope-gated rules read one instrumentation's keys on its own spans only: Prompt Flow (`span_type`, `inputs`, `output`, `llm.response.model`, `llm.usage.*`), Langflow (`trace_type`, `inputs`, `outputs`), n8n (span names), LiveKit Agents (`lk.pii.*` content and the provider host), Pipecat (scoped `input`/`output` and `conversation.id`), OpenLIT (`gen_ai.operation.type`), Promptfoo (`gen_ai.evaluation.name`) and the vector databases.
+- `tts` and `stt` operations (Pipecat's speech spans) are plain spans, and a host in LiveKit's `gen_ai.provider.name` names the endpoint: `api.openai.com` gives the provider `openai`.
+- A reported cost of exactly 0 on a span that counts tokens counts as no report and is priced from the price table; OpenLIT writes a cost of 0 when its price table has no row for the model.
 
 ### Fixed
 

@@ -158,6 +158,7 @@ Use this page to find how to connect your framework, provider or instrumentation
 
 | Integration | Python | TypeScript | How | Tested against |
 |---|---|---|---|---|
+| [Azure AI Evaluation](/docs/integrations/azure-ai-evaluation/) | ✓ | — | `cetra.score` with the evaluators' results | setup only |
 | [Browser Use](/docs/integrations/browser-use/) | ✓ | — | Pydantic AI's own OpenTelemetry spans | captured |
 | [Cleanlab](/docs/integrations/cleanlab/) | ✓ | — | `cetra.score` with Cleanlab's trustworthiness score | setup only |
 | [Gradio](/docs/integrations/gradio/) | ✓ | — | the instrumentation of the client library | setup only |
@@ -167,10 +168,14 @@ Use this page to find how to connect your framework, provider or instrumentation
 | [LobeChat](/docs/integrations/lobechat/) | — | — | LobeChat's telemetry variables | setup only |
 | [MCP](/docs/integrations/mcp/) | ✓ | — | the MCP SDK's own OpenTelemetry spans | captured |
 | [n8n](/docs/integrations/n8n/) | — | — | n8n's OpenTelemetry export | captured |
+| [OpenLIT](/docs/integrations/openlit/) | ✓ | — | OpenLIT's own OpenTelemetry instrumentation | captured |
 | [Pipecat](/docs/integrations/pipecat/) | ✓ | — | Pipecat's built-in tracing | captured |
 | [Prompt Flow](/docs/integrations/prompt-flow/) | ✓ | — | Prompt Flow's own OpenTelemetry setup | captured |
 | [Promptfoo](/docs/integrations/promptfoo/) | — | — | Promptfoo's own OpenTelemetry export | captured |
+| [Ragas](/docs/integrations/ragas/) | ✓ | — | `cetra.score` with Ragas metric results | setup only |
 | [Stagehand](/docs/integrations/stagehand/) | — | ✓ | the `telemetry` option of the Stagehand SDK | setup only |
+| [UQLM](/docs/integrations/uqlm/) | ✓ | — | `cetra.score` with UQLM's scorer results | setup only |
+| [Vector databases](/docs/integrations/vector-databases/) | ✓ | — | OpenLIT's or OpenLLMetry's vector instrumentors | captured |
 
 <CardGrid>
   <LinkCard title="Browser Use" description="Browser agent runs, model calls and tools." href="/docs/integrations/browser-use/" />
@@ -178,9 +183,11 @@ Use this page to find how to connect your framework, provider or instrumentation
   <LinkCard title="LiveKit Agents" description="Agent sessions, turns, model calls and tools." href="/docs/integrations/livekit-agents/" />
   <LinkCard title="MCP" description="Tool calls across MCP clients and servers." href="/docs/integrations/mcp/" />
   <LinkCard title="n8n" description="Workflow runs, nodes and the tokens of AI nodes." href="/docs/integrations/n8n/" />
+  <LinkCard title="OpenLIT" description="Model, embedding and vector database spans." href="/docs/integrations/openlit/" />
   <LinkCard title="Pipecat" description="Conversations, turns and each model call." href="/docs/integrations/pipecat/" />
   <LinkCard title="Prompt Flow" description="Traced functions and their OpenAI calls." href="/docs/integrations/prompt-flow/" />
   <LinkCard title="Promptfoo" description="Eval cases, provider calls and graders." href="/docs/integrations/promptfoo/" />
+  <LinkCard title="Vector databases" description="Chroma, Qdrant, Milvus, Pinecone and Weaviate calls." href="/docs/integrations/vector-databases/" />
 </CardGrid>
 
 ## Coding agents

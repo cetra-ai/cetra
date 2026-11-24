@@ -299,6 +299,10 @@ export default defineConfig({
                   label: "Apps and tools",
                   collapsed: true,
                   items: [
+                    {
+                      label: "Azure AI Evaluation",
+                      link: "/docs/integrations/azure-ai-evaluation/",
+                    },
                     { label: "Browser Use", link: "/docs/integrations/browser-use/" },
                     { label: "Cleanlab", link: "/docs/integrations/cleanlab/" },
                     { label: "Gradio", link: "/docs/integrations/gradio/" },
@@ -311,10 +315,14 @@ export default defineConfig({
                     { label: "LobeChat", link: "/docs/integrations/lobechat/" },
                     { label: "MCP", link: "/docs/integrations/mcp/" },
                     { label: "n8n", link: "/docs/integrations/n8n/" },
+                    { label: "OpenLIT", link: "/docs/integrations/openlit/" },
                     { label: "Pipecat", link: "/docs/integrations/pipecat/" },
                     { label: "Prompt Flow", link: "/docs/integrations/prompt-flow/" },
                     { label: "Promptfoo", link: "/docs/integrations/promptfoo/" },
+                    { label: "Ragas", link: "/docs/integrations/ragas/" },
                     { label: "Stagehand", link: "/docs/integrations/stagehand/" },
+                    { label: "UQLM", link: "/docs/integrations/uqlm/" },
+                    { label: "Vector databases", link: "/docs/integrations/vector-databases/" },
                   ],
                 },
                 {
