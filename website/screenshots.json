@@ -83,7 +83,7 @@
       { "click": "button[aria-label=\"Ask AI\"]" },
       {
         "click": "textarea[aria-label=\"Message the assistant\"]",
-        "type": "Which traces failed in the last day?"
+        "type": "Which trace errors spiked in the last 24 hours?"
       },
       { "click": "button[aria-label=\"Send\"]" }
     ],
