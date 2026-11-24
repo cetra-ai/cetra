@@ -13,6 +13,7 @@ with an `### Upgrade notes` section (https://cetra.sh/docs/self-hosting/upgrade/
 - Integration pages for 35 model providers and aisuite, with captured spans for Groq, Mistral AI, Cohere, Together AI, Ollama, Azure OpenAI and Vertex AI; `cetra-sdk` extras `groq`, `mistralai`, `cohere`, `ollama` and `together`.
 - Integration pages for Instructor, Agno, smolagents, Haystack, BeeAI Framework, Guardrails AI, Deep Agents, Temporal, LangGraph and the Claude Agent SDK, with captured spans for nine of them (seven new captures; LangGraph and the Claude Agent SDK use existing ones); `cetra-sdk` extras `instructor`, `agno`, `smolagents`, `haystack` and `beeai`.
 - Integration pages for Pydantic AI, Semantic Kernel, Strands Agents, Bedrock AgentCore, Microsoft Agent Framework, AG2, AutoGen, Mirascope, OpenHands, Mastra and VoltAgent, with captured spans for ten of them (OpenHands's case is hand-written), and the `voltagent` convention for VoltAgent's spans. AutoGen is `instrument=["autogen-agentchat"]`, with `openinference-instrumentation-autogen-agentchat` installed separately.
+- Integration pages for the gateways: LiteLLM Proxy, Bifrost, Envoy AI Gateway, Kong AI Gateway, Portkey, TrueFoundry, Vercel AI Gateway, Helicone and Cloudflare AI Gateway, with captured spans for LiteLLM Proxy, Bifrost, Envoy AI Gateway and Temporal, and `just capture-tools` to fetch the pinned binaries those captures start.
 
 ### Changed
 
@@ -21,6 +22,7 @@ with an `### Upgrade notes` section (https://cetra.sh/docs/self-hosting/upgrade/
 - Dark Reader and the browsers' automatic dark mode no longer darken the web UI, which has its own dark theme.
 - The Python and TypeScript SDKs send `User-Agent: cetra-sdk-python/<version>` and `cetra-sdk-js/<version>` on their requests; Python's trace exporter adds it after the OpenTelemetry exporter's own value.
 - Strands time to first token is read in milliseconds; framework names written as the provider (Strands, Microsoft Agent Framework, AutoGen, Spring AI) are skipped; Microsoft Agent Framework workflow steps and Mirascope trace spans are chain spans.
+- LiteLLM Proxy's and Bifrost's own cost figures are read as the reported cost; Bifrost's server root span is a chain, not a second LLM call; `gen_ai.operation.name` values `embedding` and `aembedding` (LiteLLM's call types) give the embedding kind.
 
 ### Fixed
 
