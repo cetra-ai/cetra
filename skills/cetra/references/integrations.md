@@ -89,16 +89,22 @@ Use this page to find how to connect your framework, provider or instrumentation
 | Integration | Python | TypeScript | How | Tested against |
 |---|---|---|---|---|
 | [AG2](https://cetra.sh/docs/integrations/ag2/) | ✓ | — | AG2's own telemetry middleware | captured |
+| [Agent Spec](https://cetra.sh/docs/integrations/agent-spec/) | ✓ | — | OpenInference's Agent Spec instrumentor | captured |
 | [Agno](https://cetra.sh/docs/integrations/agno/) | ✓ | — | `instrument=["agno"]` | captured |
 | [aisuite](https://cetra.sh/docs/integrations/aisuite/) | ✓ | — | the instrumentation of each provider SDK | setup only |
+| [Atomic Agents](https://cetra.sh/docs/integrations/atomic-agents/) | ✓ | — | its `AtomicAgentsInstrumentor` | captured |
 | [AutoGen](https://cetra.sh/docs/integrations/autogen/) | ✓ | — | `instrument=["autogen-agentchat"]` | captured |
 | [Bedrock AgentCore](https://cetra.sh/docs/integrations/bedrock-agentcore/) | ✓ | — | Strands' own OpenTelemetry spans | captured |
 | [BeeAI Framework](https://cetra.sh/docs/integrations/beeai/) | ✓ | — | `instrument=["beeai"]` | captured |
 | [Claude Agent SDK](https://cetra.sh/docs/integrations/claude-agent-sdk/) | ✓ | ✓ | Claude Code's OpenTelemetry spans | captured |
+| [Cloudflare Agents](https://cetra.sh/docs/integrations/cloudflare-agents/) | — | ✓ | Cloudflare's OTLP destination | setup only |
 | [CrewAI](https://cetra.sh/docs/integrations/crewai/) | ✓ | — | `instrument=["crewai"]` | SDK test |
 | [Deep Agents](https://cetra.sh/docs/integrations/deepagents/) | ✓ | — | `instrument=["langchain"]` | captured |
 | [DSPy](https://cetra.sh/docs/integrations/dspy/) | ✓ | — | `instrument=["dspy"]` | SDK test |
+| [eve](https://cetra.sh/docs/integrations/eve/) | — | ✓ | its `otelIntegration` | captured |
+| [Flue](https://cetra.sh/docs/integrations/flue/) | — | ✓ | `@flue/opentelemetry` | captured |
 | [Google ADK](https://cetra.sh/docs/integrations/google-adk/) | ✓ | — | ADK's own OpenTelemetry spans | captured |
+| [Graphite](https://cetra.sh/docs/integrations/graphite/) | ✓ | — | grafi's OTLP/gRPC export | setup only |
 | [Guardrails AI](https://cetra.sh/docs/integrations/guardrails/) | ✓ | — | `instrument=["openai"]` plus Guardrails' own spans | captured |
 | [Haystack](https://cetra.sh/docs/integrations/haystack/) | ✓ | — | `instrument=["haystack"]` | captured |
 | [Instructor](https://cetra.sh/docs/integrations/instructor/) | ✓ | — | `instrument=["instructor", "openai"]` | captured |
@@ -108,12 +114,14 @@ Use this page to find how to connect your framework, provider or instrumentation
 | [Mastra](https://cetra.sh/docs/integrations/mastra/) | — | ✓ | Mastra's OpenTelemetry exporter | captured |
 | [Microsoft Agent Framework](https://cetra.sh/docs/integrations/agent-framework/) | ✓ | — | Agent Framework's own OpenTelemetry spans | captured |
 | [Mirascope](https://cetra.sh/docs/integrations/mirascope/) | ✓ | — | Mirascope's `ops` traces | captured |
+| [NVIDIA NeMo Agent Toolkit](https://cetra.sh/docs/integrations/nemo-agent-toolkit/) | ✓ | — | its OTLP exporter | setup only |
 | [OpenAI Agents SDK](https://cetra.sh/docs/integrations/openai-agents/) | ✓ | — | `instrument=["openai-agents"]` | captured |
 | [OpenHands](https://cetra.sh/docs/integrations/openhands/) | ✓ | — | Laminar SDK's OTLP export | hand-written |
 | [Pydantic AI](https://cetra.sh/docs/integrations/pydantic-ai/) | ✓ | — | Pydantic AI's own OpenTelemetry spans | captured |
 | [Semantic Kernel](https://cetra.sh/docs/integrations/semantic-kernel/) | ✓ | — | Semantic Kernel's own OpenTelemetry spans | captured |
 | [smolagents](https://cetra.sh/docs/integrations/smolagents/) | ✓ | — | `instrument=["smolagents"]` | captured |
 | [Strands Agents](https://cetra.sh/docs/integrations/strands/) | ✓ | — | Strands' own OpenTelemetry spans | captured |
+| [TanStack AI](https://cetra.sh/docs/integrations/tanstack-ai/) | — | ✓ | OpenInference's TanStack AI middleware | captured |
 | [Temporal](https://cetra.sh/docs/integrations/temporal/) | ✓ | — | Temporal's OpenAI Agents plugin | captured |
 | [Vercel AI SDK](https://cetra.sh/docs/integrations/vercel-ai-sdk/) | — | ✓ | `aiTelemetry()` | captured |
 | [VoltAgent](https://cetra.sh/docs/integrations/voltagent/) | — | ✓ | VoltAgent's own OpenTelemetry spans | captured |
@@ -129,7 +137,9 @@ Use this page to find how to connect your framework, provider or instrumentation
 | [Arconia](https://cetra.sh/docs/integrations/arconia/) | — | — | Java, its OpenInference starter for Spring AI | setup only |
 
 - [AG2](https://cetra.sh/docs/integrations/ag2/): Agent runs and tool calls.
+- [Agent Spec](https://cetra.sh/docs/integrations/agent-spec/): Agent runs, model calls and tool calls, without token counts.
 - [Agno](https://cetra.sh/docs/integrations/agno/): Agent runs, model calls and tools.
+- [Atomic Agents](https://cetra.sh/docs/integrations/atomic-agents/): Agent runs, model calls and the tools you call yourself.
 - [AutoGen](https://cetra.sh/docs/integrations/autogen/): AgentChat agents, model calls and tools.
 - [Bedrock AgentCore](https://cetra.sh/docs/integrations/bedrock-agentcore/): AgentCore agents, through their Strands spans.
 - [BeeAI Framework](https://cetra.sh/docs/integrations/beeai/): Agents in Python.
@@ -137,6 +147,8 @@ Use this page to find how to connect your framework, provider or instrumentation
 - [CrewAI](https://cetra.sh/docs/integrations/crewai/): CrewAI from Python.
 - [Deep Agents](https://cetra.sh/docs/integrations/deepagents/): LangChain Deep Agents.
 - [DSPy](https://cetra.sh/docs/integrations/dspy/): DSPy from Python.
+- [eve](https://cetra.sh/docs/integrations/eve/): Agent turns, steps, model calls and tools.
+- [Flue](https://cetra.sh/docs/integrations/flue/): Agent runs, model calls and tools, with content on by default.
 - [Google ADK](https://cetra.sh/docs/integrations/google-adk/): Agent Development Kit runs.
 - [Guardrails AI](https://cetra.sh/docs/integrations/guardrails/): Guards, validators and the checked call.
 - [Haystack](https://cetra.sh/docs/integrations/haystack/): Pipelines and model calls.
@@ -153,6 +165,7 @@ Use this page to find how to connect your framework, provider or instrumentation
 - [Semantic Kernel](https://cetra.sh/docs/integrations/semantic-kernel/): Agents, plugin functions and model calls.
 - [smolagents](https://cetra.sh/docs/integrations/smolagents/): Agent steps, model calls and tools.
 - [Strands Agents](https://cetra.sh/docs/integrations/strands/): Event loop cycles, model calls and tools.
+- [TanStack AI](https://cetra.sh/docs/integrations/tanstack-ai/): Chat runs, model calls and tool calls.
 - [Temporal](https://cetra.sh/docs/integrations/temporal/): Agent workflows on Temporal, with their model calls.
 - [Vercel AI SDK](https://cetra.sh/docs/integrations/vercel-ai-sdk/): Versions 4 to 7.
 - [VoltAgent](https://cetra.sh/docs/integrations/voltagent/): Agent runs, model calls and tools, with the session.
@@ -169,6 +182,8 @@ Use this page to find how to connect your framework, provider or instrumentation
 | [Azure AI Evaluation](https://cetra.sh/docs/integrations/azure-ai-evaluation/) | ✓ | — | `cetra.score` with the evaluators' results | setup only |
 | [Browser Use](https://cetra.sh/docs/integrations/browser-use/) | ✓ | — | Pydantic AI's own OpenTelemetry spans | captured |
 | [Cleanlab](https://cetra.sh/docs/integrations/cleanlab/) | ✓ | — | `cetra.score` with Cleanlab's trustworthiness score | setup only |
+| [Cognee](https://cetra.sh/docs/integrations/cognee/) | ✓ | — | its built-in OTLP export | setup only |
+| [EverOS](https://cetra.sh/docs/integrations/everos/) | ✓ | — | its built-in OTLP export | captured |
 | [Gradio](https://cetra.sh/docs/integrations/gradio/) | ✓ | — | the instrumentation of the client library | setup only |
 | [Harbor and Terminal-Bench](https://cetra.sh/docs/integrations/harbor/) | ✓ | — | Harbor's OTLP protobuf export, sent as files | setup only |
 | [Langflow](https://cetra.sh/docs/integrations/langflow/) | ✓ | — | the Traceloop export that Langflow includes | captured |
@@ -178,6 +193,7 @@ Use this page to find how to connect your framework, provider or instrumentation
 | [n8n](https://cetra.sh/docs/integrations/n8n/) | — | — | n8n's OpenTelemetry export | captured |
 | [OpenLIT](https://cetra.sh/docs/integrations/openlit/) | ✓ | — | OpenLIT's own OpenTelemetry instrumentation | captured |
 | [Pipecat](https://cetra.sh/docs/integrations/pipecat/) | ✓ | — | Pipecat's built-in tracing | captured |
+| [Pixeltable](https://cetra.sh/docs/integrations/pixeltable/) | ✓ | — | `opentelemetry-instrumentation-pixeltable` | setup only |
 | [Prompt Flow](https://cetra.sh/docs/integrations/prompt-flow/) | ✓ | — | Prompt Flow's own OpenTelemetry setup | captured |
 | [Promptfoo](https://cetra.sh/docs/integrations/promptfoo/) | — | — | Promptfoo's own OpenTelemetry export | captured |
 | [Ragas](https://cetra.sh/docs/integrations/ragas/) | ✓ | — | `cetra.score` with Ragas metric results | setup only |
@@ -186,6 +202,7 @@ Use this page to find how to connect your framework, provider or instrumentation
 | [Vector databases](https://cetra.sh/docs/integrations/vector-databases/) | ✓ | — | OpenLIT's or OpenLLMetry's vector instrumentors | captured |
 
 - [Browser Use](https://cetra.sh/docs/integrations/browser-use/): Browser agent runs, model calls and tools.
+- [EverOS](https://cetra.sh/docs/integrations/everos/): Memory add, flush and search calls, with their model and embedding calls.
 - [Langflow](https://cetra.sh/docs/integrations/langflow/): Flow runs, components and model calls.
 - [LiveKit Agents](https://cetra.sh/docs/integrations/livekit-agents/): Agent sessions, turns, model calls and tools.
 - [MCP](https://cetra.sh/docs/integrations/mcp/): Tool calls across MCP clients and servers.

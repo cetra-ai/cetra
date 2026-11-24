@@ -94,16 +94,22 @@ Use this page to find how to connect your framework, provider or instrumentation
 | Integration | Python | TypeScript | How | Tested against |
 |---|---|---|---|---|
 | [AG2](/docs/integrations/ag2/) | ✓ | — | AG2's own telemetry middleware | captured |
+| [Agent Spec](/docs/integrations/agent-spec/) | ✓ | — | OpenInference's Agent Spec instrumentor | captured |
 | [Agno](/docs/integrations/agno/) | ✓ | — | `instrument=["agno"]` | captured |
 | [aisuite](/docs/integrations/aisuite/) | ✓ | — | the instrumentation of each provider SDK | setup only |
+| [Atomic Agents](/docs/integrations/atomic-agents/) | ✓ | — | its `AtomicAgentsInstrumentor` | captured |
 | [AutoGen](/docs/integrations/autogen/) | ✓ | — | `instrument=["autogen-agentchat"]` | captured |
 | [Bedrock AgentCore](/docs/integrations/bedrock-agentcore/) | ✓ | — | Strands' own OpenTelemetry spans | captured |
 | [BeeAI Framework](/docs/integrations/beeai/) | ✓ | — | `instrument=["beeai"]` | captured |
 | [Claude Agent SDK](/docs/integrations/claude-agent-sdk/) | ✓ | ✓ | Claude Code's OpenTelemetry spans | captured |
+| [Cloudflare Agents](/docs/integrations/cloudflare-agents/) | — | ✓ | Cloudflare's OTLP destination | setup only |
 | [CrewAI](/docs/integrations/crewai/) | ✓ | — | `instrument=["crewai"]` | SDK test |
 | [Deep Agents](/docs/integrations/deepagents/) | ✓ | — | `instrument=["langchain"]` | captured |
 | [DSPy](/docs/integrations/dspy/) | ✓ | — | `instrument=["dspy"]` | SDK test |
+| [eve](/docs/integrations/eve/) | — | ✓ | its `otelIntegration` | captured |
+| [Flue](/docs/integrations/flue/) | — | ✓ | `@flue/opentelemetry` | captured |
 | [Google ADK](/docs/integrations/google-adk/) | ✓ | — | ADK's own OpenTelemetry spans | captured |
+| [Graphite](/docs/integrations/graphite/) | ✓ | — | grafi's OTLP/gRPC export | setup only |
 | [Guardrails AI](/docs/integrations/guardrails/) | ✓ | — | `instrument=["openai"]` plus Guardrails' own spans | captured |
 | [Haystack](/docs/integrations/haystack/) | ✓ | — | `instrument=["haystack"]` | captured |
 | [Instructor](/docs/integrations/instructor/) | ✓ | — | `instrument=["instructor", "openai"]` | captured |
@@ -113,12 +119,14 @@ Use this page to find how to connect your framework, provider or instrumentation
 | [Mastra](/docs/integrations/mastra/) | — | ✓ | Mastra's OpenTelemetry exporter | captured |
 | [Microsoft Agent Framework](/docs/integrations/agent-framework/) | ✓ | — | Agent Framework's own OpenTelemetry spans | captured |
 | [Mirascope](/docs/integrations/mirascope/) | ✓ | — | Mirascope's `ops` traces | captured |
+| [NVIDIA NeMo Agent Toolkit](/docs/integrations/nemo-agent-toolkit/) | ✓ | — | its OTLP exporter | setup only |
 | [OpenAI Agents SDK](/docs/integrations/openai-agents/) | ✓ | — | `instrument=["openai-agents"]` | captured |
 | [OpenHands](/docs/integrations/openhands/) | ✓ | — | Laminar SDK's OTLP export | hand-written |
 | [Pydantic AI](/docs/integrations/pydantic-ai/) | ✓ | — | Pydantic AI's own OpenTelemetry spans | captured |
 | [Semantic Kernel](/docs/integrations/semantic-kernel/) | ✓ | — | Semantic Kernel's own OpenTelemetry spans | captured |
 | [smolagents](/docs/integrations/smolagents/) | ✓ | — | `instrument=["smolagents"]` | captured |
 | [Strands Agents](/docs/integrations/strands/) | ✓ | — | Strands' own OpenTelemetry spans | captured |
+| [TanStack AI](/docs/integrations/tanstack-ai/) | — | ✓ | OpenInference's TanStack AI middleware | captured |
 | [Temporal](/docs/integrations/temporal/) | ✓ | — | Temporal's OpenAI Agents plugin | captured |
 | [Vercel AI SDK](/docs/integrations/vercel-ai-sdk/) | — | ✓ | `aiTelemetry()` | captured |
 | [VoltAgent](/docs/integrations/voltagent/) | — | ✓ | VoltAgent's own OpenTelemetry spans | captured |
@@ -135,7 +143,9 @@ Use this page to find how to connect your framework, provider or instrumentation
 
 <CardGrid>
   <LinkCard title="AG2" description="Agent runs and tool calls." href="/docs/integrations/ag2/" />
+  <LinkCard title="Agent Spec" description="Agent runs, model calls and tool calls, without token counts." href="/docs/integrations/agent-spec/" />
   <LinkCard title="Agno" description="Agent runs, model calls and tools." href="/docs/integrations/agno/" />
+  <LinkCard title="Atomic Agents" description="Agent runs, model calls and the tools you call yourself." href="/docs/integrations/atomic-agents/" />
   <LinkCard title="AutoGen" description="AgentChat agents, model calls and tools." href="/docs/integrations/autogen/" />
   <LinkCard title="Bedrock AgentCore" description="AgentCore agents, through their Strands spans." href="/docs/integrations/bedrock-agentcore/" />
   <LinkCard title="BeeAI Framework" description="Agents in Python." href="/docs/integrations/beeai/" />
@@ -143,6 +153,8 @@ Use this page to find how to connect your framework, provider or instrumentation
   <LinkCard title="CrewAI" description="CrewAI from Python." href="/docs/integrations/crewai/" />
   <LinkCard title="Deep Agents" description="LangChain Deep Agents." href="/docs/integrations/deepagents/" />
   <LinkCard title="DSPy" description="DSPy from Python." href="/docs/integrations/dspy/" />
+  <LinkCard title="eve" description="Agent turns, steps, model calls and tools." href="/docs/integrations/eve/" />
+  <LinkCard title="Flue" description="Agent runs, model calls and tools, with content on by default." href="/docs/integrations/flue/" />
   <LinkCard title="Google ADK" description="Agent Development Kit runs." href="/docs/integrations/google-adk/" />
   <LinkCard title="Guardrails AI" description="Guards, validators and the checked call." href="/docs/integrations/guardrails/" />
   <LinkCard title="Haystack" description="Pipelines and model calls." href="/docs/integrations/haystack/" />
@@ -159,6 +171,7 @@ Use this page to find how to connect your framework, provider or instrumentation
   <LinkCard title="Semantic Kernel" description="Agents, plugin functions and model calls." href="/docs/integrations/semantic-kernel/" />
   <LinkCard title="smolagents" description="Agent steps, model calls and tools." href="/docs/integrations/smolagents/" />
   <LinkCard title="Strands Agents" description="Event loop cycles, model calls and tools." href="/docs/integrations/strands/" />
+  <LinkCard title="TanStack AI" description="Chat runs, model calls and tool calls." href="/docs/integrations/tanstack-ai/" />
   <LinkCard title="Temporal" description="Agent workflows on Temporal, with their model calls." href="/docs/integrations/temporal/" />
   <LinkCard title="Vercel AI SDK" description="Versions 4 to 7." href="/docs/integrations/vercel-ai-sdk/" />
   <LinkCard title="VoltAgent" description="Agent runs, model calls and tools, with the session." href="/docs/integrations/voltagent/" />
@@ -176,6 +189,8 @@ Use this page to find how to connect your framework, provider or instrumentation
 | [Azure AI Evaluation](/docs/integrations/azure-ai-evaluation/) | ✓ | — | `cetra.score` with the evaluators' results | setup only |
 | [Browser Use](/docs/integrations/browser-use/) | ✓ | — | Pydantic AI's own OpenTelemetry spans | captured |
 | [Cleanlab](/docs/integrations/cleanlab/) | ✓ | — | `cetra.score` with Cleanlab's trustworthiness score | setup only |
+| [Cognee](/docs/integrations/cognee/) | ✓ | — | its built-in OTLP export | setup only |
+| [EverOS](/docs/integrations/everos/) | ✓ | — | its built-in OTLP export | captured |
 | [Gradio](/docs/integrations/gradio/) | ✓ | — | the instrumentation of the client library | setup only |
 | [Harbor and Terminal-Bench](/docs/integrations/harbor/) | ✓ | — | Harbor's OTLP protobuf export, sent as files | setup only |
 | [Langflow](/docs/integrations/langflow/) | ✓ | — | the Traceloop export that Langflow includes | captured |
@@ -185,6 +200,7 @@ Use this page to find how to connect your framework, provider or instrumentation
 | [n8n](/docs/integrations/n8n/) | — | — | n8n's OpenTelemetry export | captured |
 | [OpenLIT](/docs/integrations/openlit/) | ✓ | — | OpenLIT's own OpenTelemetry instrumentation | captured |
 | [Pipecat](/docs/integrations/pipecat/) | ✓ | — | Pipecat's built-in tracing | captured |
+| [Pixeltable](/docs/integrations/pixeltable/) | ✓ | — | `opentelemetry-instrumentation-pixeltable` | setup only |
 | [Prompt Flow](/docs/integrations/prompt-flow/) | ✓ | — | Prompt Flow's own OpenTelemetry setup | captured |
 | [Promptfoo](/docs/integrations/promptfoo/) | — | — | Promptfoo's own OpenTelemetry export | captured |
 | [Ragas](/docs/integrations/ragas/) | ✓ | — | `cetra.score` with Ragas metric results | setup only |
@@ -194,6 +210,7 @@ Use this page to find how to connect your framework, provider or instrumentation
 
 <CardGrid>
   <LinkCard title="Browser Use" description="Browser agent runs, model calls and tools." href="/docs/integrations/browser-use/" />
+  <LinkCard title="EverOS" description="Memory add, flush and search calls, with their model and embedding calls." href="/docs/integrations/everos/" />
   <LinkCard title="Langflow" description="Flow runs, components and model calls." href="/docs/integrations/langflow/" />
   <LinkCard title="LiveKit Agents" description="Agent sessions, turns, model calls and tools." href="/docs/integrations/livekit-agents/" />
   <LinkCard title="MCP" description="Tool calls across MCP clients and servers." href="/docs/integrations/mcp/" />

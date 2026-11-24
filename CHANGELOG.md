@@ -20,6 +20,7 @@ with an `### Upgrade notes` section (https://cetra.sh/docs/self-hosting/upgrade/
 - Qwen Code, Pi and OpenClaw are coding agents: `cetra agents setup qwen-code`, `cetra agents setup pi` and `cetra agents setup openclaw` connect them to cetra, and `cetra agents remove` undoes each. Pi gets an extension that cetra writes, and OpenClaw's setup installs its diagnostics plugin. Integration pages cover these three and Augment Code, Devin SDK and Omnigent (setup only).
 - OpenCode, Goose and Oh My Pi are coding agents: `cetra agents setup opencode` (which writes cetra's OpenCode plugin and its config file), `cetra agents setup goose` (which prints Goose's environment lines) and `cetra agents setup oh-my-pi` (which writes Oh My Pi's `.env` lines) connect them to cetra, and `cetra agents remove` undoes each. Integration pages cover these three and Hermes Agent, which is detected and captured but has no setup.
 - Integration pages for Spring AI, LangChain4j, Quarkus LangChain4j, Koog and Microsoft.Extensions.AI, and .NET sections on the Semantic Kernel and Agent Framework pages, with captured spans for all of them: the capture tool runs Java and .NET scenarios, built by `just capture-tools` from the pinned JDK, Maven and .NET SDK. Setup-only pages cover Genkit Go, openai-go, ruby_llm, rig and Arconia.
+- Integration pages for eve, Agent Spec, Atomic Agents, TanStack AI, Flue and EverOS, with captured spans for all of them, a Claude Managed Agents section on the Anthropic page and a LangServe note on the LangChain page. Setup-only pages cover Cloudflare Agents, Graphite, the NVIDIA NeMo Agent Toolkit, Pixeltable and Cognee.
 
 ### Changed
 
@@ -36,6 +37,7 @@ with an `### Upgrade notes` section (https://cetra.sh/docs/self-hosting/upgrade/
 - A reported cost of exactly 0 on a span that counts tokens counts as no report and is priced from the price table; OpenLIT writes a cost of 0 when its price table has no row for the model.
 - `/v1/agent-context` accepts `qwen-code`.
 - Semantic Kernel .NET's GenAI events carry their message in `gen_ai.event.content`, which is read as the event's body; a GenAI message value that starts with `HIDDEN:` (Koog's masked content) is content not captured, not a malformed message; `koog` is a framework name, `open_ai` is an alias of `openai`, and on scope `io.quarkus.opentelemetry` `gen_ai.prompt` and `gen_ai.completion` fill input and output.
+- Spans of Vercel's Workflow SDK (scope `workflow`, names starting `workflow.`, `step.` or `queue.`), which eve runs on, are discarded and counted, as coding agents' internal spans are; on Agent Spec's `LlmGenerationSpan` model calls, a token attribute whose value is the string `"null"` is absent, with no warning.
 
 ### Fixed
 

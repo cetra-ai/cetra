@@ -63,6 +63,10 @@ await model.invoke("What is the weather in Paris?");
 - LangChain's run metadata, such as `langgraph_node` and `langgraph_step`, is kept as span metadata.
 - Cost is computed from the token counts of each model call.
 
+## LangServe
+
+LangServe serves LangChain runnables over HTTP and has no spans of its own. Instrument the app's LangChain code as this page shows, and add an OpenTelemetry FastAPI instrumentor for the HTTP layer if you want HTTP spans.
+
 ## Limits
 
 - The fixtures were captured in Python with `langchain` 1.4.8, `langchain-openai` 1.7.3 and `langgraph` 1.2.19, with OpenInference 0.1.81 and OpenLLMetry 0.62.4.

@@ -1,6 +1,6 @@
 # Track IN — Integrations: design
 
-Status: **draft, under review with the user** (2026-11-23). The user answered Q1–Q4 on 2026-11-23 (§ User answers). Revised the same day after two Sonnet cold reviews (round 1: 6 blockers, 11 majors; round 2: 0 blockers, 4 majors; all addressed below). **Approved by the user on 2026-11-23**; D-IN-18 added the same day after M1's spike, with the user's answer.
+Status: implemented on 2026-11-24 (M1–M9). The user answered Q1–Q4 on 2026-11-23 (§ User answers). Revised the same day after two Sonnet cold reviews (round 1: 6 blockers, 11 majors; round 2: 0 blockers, 4 majors; all addressed below). **Approved by the user on 2026-11-23**; D-IN-18 added the same day after M1's spike, with the user's answer.
 
 Decisions are `D-IN-<n>`, in `docs/mvp-decisions.md` § Track IN. They are distinct from track I's `D-I-<n>`.
 
@@ -409,7 +409,7 @@ Spikes: Portkey, TrueFoundry, Kong, Cloudflare AI Gateway, Bifrost, Envoy, Azure
 
 Spikes: done (`spikes/m8-*.md`). Plan: `08-m8-other-languages.md`. Status: done (Java and .NET capture runners, eight captured cases, the D-IN-30 item 4 normalizer rules, the five pages, the Semantic Kernel and Agent Framework .NET sections, and the five setup-only pages). Depends on: M7 for its records phase only (the index, sidebar, CHANGELOG and decision files); its runner, rule, capture and page phases may run beside M7 part 2 (the user, 2026-11-24).
 
-**M9 — Long-tail frameworks.** Delivers the dispositions of D-IN-31: captured cases and pages for eve, Agent Spec, Atomic Agents, TanStack AI and Flue (and Cognee and EverOS if spike E captures them), the two normalizer rules of D-IN-31 item 5, setup-only pages (and the Anthropic section, the LangChain note) for item 2, and § Not supported rows for item 4. Spikes: done (`spikes/m9-*.md`). Plan: `09-m9-long-tail.md`. Depends on: M8.
+**M9 — Long-tail frameworks.** Delivers the dispositions of D-IN-31: captured cases and pages for eve, Agent Spec, Atomic Agents, TanStack AI and Flue (and Cognee and EverOS if spike E captures them), the two normalizer rules of D-IN-31 item 5, setup-only pages (and the Anthropic section, the LangChain note) for item 2, and § Not supported rows for item 4. Spikes: done (`spikes/m9-*.md`). Plan: `09-m9-long-tail.md`. Status: done (six captured cases, the two D-IN-31 item 5 rules, the eve, Agent Spec, Atomic Agents, TanStack AI, Flue, EverOS and Cognee pages, the Claude Managed Agents section, the LangServe note, and the Cloudflare Agents, Graphite, NeMo Agent Toolkit and Pixeltable setup-only pages). Depends on: M8.
 
 ## User answers
 
