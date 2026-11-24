@@ -17,6 +17,7 @@ with an `### Upgrade notes` section (https://cetra.sh/docs/self-hosting/upgrade/
 - Integration pages for n8n, Langflow, Prompt Flow, LiveKit Agents, Pipecat, Browser Use, MCP, OpenLIT, the vector databases (Chroma, Qdrant, Milvus, Pinecone, Weaviate), Promptfoo, Stagehand, LobeChat, Gradio, Ragas, UQLM, Azure AI Evaluation, Cleanlab, and Harbor and Terminal-Bench, with captured spans for ten of them (eleven new captures); `instrument=["mcp"]` and the `cetra-sdk[mcp]` extra carry an MCP server's spans into the client's trace.
 - The capture harness is its own package (`tools/capture/harness/`), and capture scenarios whose packages cannot share the capture project's lock live under `tools/capture/envs/<env>/scenarios/`; `just capture-tools` installs every environment.
 - Vector database reads are `retriever` spans: OpenLIT's `vectordb` get, query and search, and the read spans of OpenLLMetry's Chroma, Qdrant, Milvus, Pinecone and Weaviate instrumentations. Writes stay `span`.
+- Qwen Code, Pi and OpenClaw are coding agents: `cetra agents setup qwen-code`, `cetra agents setup pi` and `cetra agents setup openclaw` connect them to cetra, and `cetra agents remove` undoes each. Pi gets an extension that cetra writes, and OpenClaw's setup installs its diagnostics plugin. Integration pages cover these three and Augment Code, Devin SDK and Omnigent (setup only).
 
 ### Changed
 
@@ -31,6 +32,7 @@ with an `### Upgrade notes` section (https://cetra.sh/docs/self-hosting/upgrade/
 - Scope-gated rules read one instrumentation's keys on its own spans only: Prompt Flow (`span_type`, `inputs`, `output`, `llm.response.model`, `llm.usage.*`), Langflow (`trace_type`, `inputs`, `outputs`), n8n (span names), LiveKit Agents (`lk.pii.*` content and the provider host), Pipecat (scoped `input`/`output` and `conversation.id`), OpenLIT (`gen_ai.operation.type`), Promptfoo (`gen_ai.evaluation.name`) and the vector databases.
 - `tts` and `stt` operations (Pipecat's speech spans) are plain spans, and a host in LiveKit's `gen_ai.provider.name` names the endpoint: `api.openai.com` gives the provider `openai`.
 - A reported cost of exactly 0 on a span that counts tokens counts as no report and is priced from the price table; OpenLIT writes a cost of 0 when its price table has no row for the model.
+- `/v1/agent-context` accepts `qwen-code`.
 
 ### Fixed
 

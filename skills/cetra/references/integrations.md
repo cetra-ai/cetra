@@ -188,6 +188,9 @@ Use this page to find how to connect your framework, provider or instrumentation
 | [Claude Code](https://cetra.sh/docs/integrations/claude-code/) | — | — | `cetra agents setup claude-code` | captured |
 | [Codex CLI](https://cetra.sh/docs/integrations/codex/) | — | — | `cetra agents setup codex` | captured |
 | [Gemini CLI](https://cetra.sh/docs/integrations/gemini-cli/) | — | — | `cetra agents setup gemini-cli` | captured |
+| [Qwen Code](https://cetra.sh/docs/integrations/qwen-code/) | — | — | `cetra agents setup qwen-code` | captured |
+| [Pi](https://cetra.sh/docs/integrations/pi/) | — | — | `cetra agents setup pi` | captured |
+| [OpenClaw](https://cetra.sh/docs/integrations/openclaw/) | — | — | `cetra agents setup openclaw` | captured |
 | [GitHub Copilot](https://cetra.sh/docs/integrations/copilot/) | — | — | `cetra agents setup copilot` | hand-written |
 | [Augment Code](https://cetra.sh/docs/integrations/augment-code/) | — | — | its `otel` extension's environment variables | setup only |
 | [Devin SDK](https://cetra.sh/docs/integrations/devin-sdk/) | — | — | the SDK's session tracing | setup only |
@@ -196,6 +199,9 @@ Use this page to find how to connect your framework, provider or instrumentation
 - [Claude Code](https://cetra.sh/docs/integrations/claude-code/): Prompts, model calls and tools, with the Claude Agent SDK.
 - [Codex CLI](https://cetra.sh/docs/integrations/codex/): Turns and tool calls from codex exec.
 - [Gemini CLI](https://cetra.sh/docs/integrations/gemini-cli/): Model calls and tool batches.
+- [Qwen Code](https://cetra.sh/docs/integrations/qwen-code/): Model calls and tool calls, with the session.
+- [Pi](https://cetra.sh/docs/integrations/pi/): Prompts, model calls and tools through cetra's pi extension.
+- [OpenClaw](https://cetra.sh/docs/integrations/openclaw/): Agent runs, model calls and tools through its diagnostics plugin.
 - [GitHub Copilot](https://cetra.sh/docs/integrations/copilot/): Copilot CLI and VS Code Copilot Chat.
 
 ## Instrumentation libraries
