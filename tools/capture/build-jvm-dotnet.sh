@@ -37,9 +37,11 @@ java_modules=()
 if [ -f "$java_root/pom.xml" ]; then
     # Every pom, source and properties file under tools/capture/java, never
     # anything under target/, as one comparable hash list (paths relative to
-    # the repo root, so the hash is stable across checkouts).
+    # the repo root). The Maven repository's absolute path is part of the
+    # inputs: capture.args embeds it, so a moved checkout must rebuild.
     java_inputs="$(
         cd -- "$repo_root"
+        printf 'm2 %s\n' "$tools_dir/m2"
         find tools/capture/java -type d -name target -prune -o \
             -type f \( -name pom.xml -o -name '*.java' -o -name '*.kt' -o -name '*.properties' \) \
             -print0 | LC_ALL=C sort -z | xargs -0 -r sha256sum
