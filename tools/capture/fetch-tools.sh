@@ -1,10 +1,14 @@
-# Fetch the pinned gateway binaries that capture scenarios run (IN5.1) into
-# target/capture-tools/, and install the LiteLLM Proxy environment (Amendment B),
-# the Langflow tool, the n8n and Promptfoo tools and the Python environments under
-# tools/capture/envs/ (IN6.1).
-# Linux x86_64 only; every download is checked by SHA-256.
-# The binary is moved to its final name last, so a partial run never leaves a file
-# that looks complete.
+# Fetch or install every pinned tool the capture scenarios run, into
+# target/capture-tools/: the gateway binaries (Temporal CLI, Bifrost, aigw, Envoy;
+# IN5.1), the opencode-v2 and goose CLIs, the Temurin JDK, Maven and the .NET SDK
+# (IN8.0), the LiteLLM Proxy environment (Amendment B), Langflow, Hermes Agent
+# with its hermes-otel plugin (IN7.9), the n8n, promptfoo, openclaw (with its
+# diagnostics-otel plugin), opencode and oh-my-pi pnpm tools, the Python
+# environments under tools/capture/envs/ (IN6.1) and Chromium for browser-use.
+# Linux x86_64 only; every download is checked against a pinned checksum
+# (SHA-256, or SHA-512 for Maven).
+# Each tool lands under its final name only once complete (whole trees carry a
+# .complete marker), so a partial run never leaves anything that looks complete.
 set -euo pipefail
 
 repo_root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd)"
@@ -54,6 +58,52 @@ fetch() {
     echo "capture-tools: $(basename -- "$final") in place"
 }
 
+# fetch_tree <final-dir> <url> <checksum-kind> <checksum> <strip-components>
+# fetch's job for a whole tool tree (the JDK, Maven, the .NET SDK) instead of one
+# binary: skipped when the .complete marker exists, downloaded to a temp file in
+# the parent directory, checked by sha256sum or sha512sum as <checksum-kind>
+# says, extracted into a temp directory with <strip-components> top folders
+# removed, then moved to <final-dir> with the marker touched last, so a partial
+# run never leaves a tree that looks complete. `just capture` runs this script
+# for every case, so two runs can meet here while a tree is still downloading:
+# the lock makes the later run wait and then skip on the marker, instead of
+# racing the move into place.
+fetch_tree() {
+    local final="$1" url="$2" kind="$3" checksum="$4" strip="$5"
+    local dir
+    dir="$(dirname -- "$final")"
+    mkdir -p -- "$dir"
+    exec 9>"$dir/.fetch.lock"
+    flock 9
+    if [ -e "$final/.complete" ]; then
+        echo "capture-tools: $final already present"
+        exec 9>&-
+        return 0
+    fi
+    local download extract_dir
+    download="$(mktemp --tmpdir="$dir")"
+    extract_dir="$(mktemp -d --tmpdir="$dir")"
+    temp_paths+=("$download" "$extract_dir")
+    echo "capture-tools: fetching $(basename -- "$final")"
+    curl -fsSL --retry 3 --connect-timeout 30 --output "$download" "$url"
+    case "$kind" in
+        sha256) echo "$checksum  $download" | sha256sum -c - ;;
+        sha512) echo "$checksum  $download" | sha512sum -c - ;;
+        *) echo "capture-tools: unknown checksum kind $kind" >&2
+           exit 1 ;;
+    esac
+    tar -xzf "$download" -C "$extract_dir" --strip-components="$strip"
+    # `mktemp -d` creates the extraction directory with mode 0700, so the mode is set in full.
+    chmod 755 -- "$extract_dir"
+    # A tree here without its marker is the leftover of a run that died between
+    # the move and the touch; extracting replaces it in full.
+    rm -rf -- "$final"
+    mv -f -- "$extract_dir" "$final"
+    touch "$final/.complete"
+    exec 9>&-
+    echo "capture-tools: $(basename -- "$final") in place"
+}
+
 fetch "$tools_dir/temporal/1.10.1/temporal" \
     "https://github.com/temporalio/cli/releases/download/v1.10.1/temporal_cli_1.10.1_linux_amd64.tar.gz" \
     "4c1500e2ce2d4de136e5fe8852d9b7f82eb62f19b6b383b3e0c040519a9d20b1" \
@@ -75,6 +125,45 @@ fetch "$tools_dir/goose/1.59.2/goose" \
     "https://github.com/aaif-goose/goose/releases/download/v1.59.2/goose-x86_64-unknown-linux-gnu.tar.gz" \
     "c63cf82953e968d84b7542eb38a621dfdb5050b967728ed363517be5cdc666ea" \
     "./goose"
+
+# The Java and .NET toolchains (IN8.0): whole trees. The JDK and Maven archives
+# have one top folder (stripped); the .NET SDK tarball has none, so strip 0.
+fetch_tree "$tools_dir/jdk/21.0.13+9" \
+    "https://github.com/adoptium/temurin21-binaries/releases/download/jdk-21.0.13%2B9/OpenJDK21U-jdk_x64_linux_hotspot_21.0.13_9.tar.gz" \
+    sha256 \
+    "d7f5d5cf865a2902b70ff549b97586a7d3f234e016f041ab447ea740c7d66d1c" \
+    1
+fetch_tree "$tools_dir/maven/3.9.16" \
+    "https://repo1.maven.org/maven2/org/apache/maven/apache-maven/3.9.16/apache-maven-3.9.16-bin.tar.gz" \
+    sha512 \
+    "831a8591fe20c8243b1dbe7d71e3244f31d1665b0804b2e825e38cbbe5ce0cafb8338851f90780735568773e0a6cd07bbec107cda0b896b008b861075358b6f6" \
+    1
+fetch_tree "$tools_dir/dotnet/10.0.404" \
+    "https://builds.dotnet.microsoft.com/dotnet/Sdk/10.0.404/dotnet-sdk-10.0.404-linux-x64.tar.gz" \
+    sha256 \
+    "c0610757a818fde4b960d27a0ac421f273068a05dc5ec7abafc01dbf84e9cb4d" \
+    0
+
+# The three toolchains report their versions on every run, and a mismatch fails
+# `just capture-tools` itself, so a wrong or broken tree never reaches a capture.
+java_version="$("$tools_dir/jdk/21.0.13+9/bin/java" -version 2>&1)"
+case "$java_version" in
+    *"21.0.13"*) echo "capture-tools: $(grep -m1 "openjdk version" <<<"$java_version")" ;;
+    *) echo "capture-tools: the JDK does not report 21.0.13" >&2; exit 1 ;;
+esac
+maven_version="$(JAVA_HOME="$tools_dir/jdk/21.0.13+9" "$tools_dir/maven/3.9.16/bin/mvn" -v)"
+case "$maven_version" in
+    *"Apache Maven 3.9.16"*) echo "capture-tools: $(grep -m1 "Apache Maven" <<<"$maven_version")" ;;
+    *) echo "capture-tools: Maven does not report 3.9.16" >&2; exit 1 ;;
+esac
+dotnet_cli_home="$(mktemp -d)"
+temp_paths+=("$dotnet_cli_home")
+dotnet_version="$(DOTNET_CLI_TELEMETRY_OPTOUT=1 DOTNET_NOLOGO=1 DOTNET_CLI_HOME="$dotnet_cli_home" \
+    "$tools_dir/dotnet/10.0.404/dotnet" --version)"
+case "$dotnet_version" in
+    *"10.0.404"*) echo "capture-tools: dotnet SDK ${dotnet_version%%$'\n'*}" ;;
+    *) echo "capture-tools: the .NET SDK does not report 10.0.404" >&2; exit 1 ;;
+esac
 
 # The LiteLLM Proxy environment: its own uv project (litellm[proxy] cannot share
 # tools/capture/py; its mcp and rich pins conflict with the frameworks there),
