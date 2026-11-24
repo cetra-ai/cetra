@@ -23,6 +23,7 @@ with an `### Upgrade notes` section (https://cetra.sh/docs/self-hosting/upgrade/
 
 - The install command is `curl -fsSL https://cetra.sh/install.sh | sh`: `cetra.sh/install.sh` redirects to the release's install script. The GitHub release URL keeps working.
 - Chart bars have slightly rounded tops; in a stack only the top segment is rounded.
+- Span kind icons use the Tabler icon set (a robot for agents, a wrench for tools, …), slightly larger.
 - The trace tree draws elbow lines between parents and children, its Duration, Tokens and Cost columns fit their values, and up to three slow spans (the largest self times above 20% of the trace) show their duration in amber. The timeline drops the metric columns to give the bars the full width: taller bars with the duration and cost inside them, round axis ticks with gridlines, and labels kept inside the panel.
 - Dark Reader and the browsers' automatic dark mode no longer darken the web UI, which has its own dark theme.
 - `PATCH /api/v1/orgs/{org}/llm-connections/{id}` no longer needs `api_key` with a new `base_url` or `adapter`: the saved key is kept.
