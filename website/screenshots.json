@@ -4,7 +4,7 @@
     "name": "trace-view",
     "path": "/acme/support-bot/traces",
     "waitFor": "100 loaded",
-    "actions": [{ "click": "text=How can I export my traces to a CSV file?" }],
+    "actions": [{ "click": "div[role=\"grid\"][aria-label=\"Traces\"] >> text=support-agent" }],
     "waitAfter": "Input / Output"
   },
   { "name": "sessions", "path": "/acme/support-bot/sessions?range=30d", "waitFor": "100 loaded" },
@@ -101,7 +101,7 @@
     "theme": "dark",
     "viewport": { "width": 1920, "height": 760 },
     "actions": [
-      { "click": "text=How can I export my traces to a CSV file?" },
+      { "click": "div[role=\"grid\"][aria-label=\"Traces\"] >> text=support-agent" },
       { "click": "aside[aria-label=\"Trace\"] button:has-text(\"Timeline\")" }
     ],
     "waitAfter": "Input / Output",
