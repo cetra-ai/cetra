@@ -155,14 +155,17 @@ pub(crate) const PAGE_ROUTES: &[&str] = &[
     "/$org/$project/users/$userId",
     "/$org/settings/",
     "/$org/settings/assistant",
+    "/$org/settings/audit-log",
     "/$org/settings/general",
     "/$org/settings/llm-connections",
     "/$org/settings/members",
     "/$org/settings/models",
     "/$org/settings/plan",
+    "/$org/settings/provisioning",
     "/$org/settings/sso",
     "/account",
     "/admin/",
+    "/admin/audit-log",
     "/admin/settings",
     "/admin/users",
     "/demo",
@@ -713,7 +716,7 @@ mod tests {
 
     #[test]
     fn page_routes_are_sorted_unique_templates() {
-        assert_eq!(PAGE_ROUTES.len(), 65);
+        assert_eq!(PAGE_ROUTES.len(), 68);
         for pair in PAGE_ROUTES.windows(2) {
             assert!(pair[0] < pair[1], "{} < {}", pair[0], pair[1]);
         }
