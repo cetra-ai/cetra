@@ -24,7 +24,7 @@ use crate::scrub::{ScrubContext, scrub};
 use crate::write::{Language, Source, write_case};
 
 const DEFAULT_INGEST_TIME: &str = "2026-01-01T00:00:00.000000000Z";
-const PROGRAM_TIMEOUT: Duration = Duration::from_secs(120);
+const PROGRAM_TIMEOUT: Duration = Duration::from_secs(180);
 const QUIET: Duration = Duration::from_millis(300);
 const IDLE_MAX: Duration = Duration::from_secs(5);
 const DIFF_LIMIT: usize = 20;
@@ -116,10 +116,12 @@ pub fn discover(repo_root: &Path) -> Result<Vec<(CasePath, Language, PathBuf)>, 
 ///
 /// `PATH`, `HOME`, and every `UV_*` and `XDG_*` variable are copied. The fixed
 /// capture and OTel variables replace anything copied. `scenario.env` is
-/// applied last. Nothing else from `parent` is present.
+/// applied last. Nothing else from `parent` is present. `CETRA_CAPTURE_TOOLS`
+/// names the pinned binaries' directory.
 pub fn program_env(
     parent: &HashMap<String, String>,
     scenario: &Scenario,
+    repo_root: &Path,
     mock_port: u16,
     receiver_port: u16,
     meta_path: &str,
@@ -145,6 +147,13 @@ pub fn program_env(
         scenario.libraries.join(","),
     );
     env.insert("CETRA_CAPTURE_CASE".to_owned(), scenario.case.to_string());
+    env.insert(
+        "CETRA_CAPTURE_TOOLS".to_owned(),
+        repo_root
+            .join("target/capture-tools")
+            .to_string_lossy()
+            .into_owned(),
+    );
     for key in [
         "OPENAI_API_KEY",
         "ANTHROPIC_API_KEY",
@@ -188,8 +197,18 @@ pub async fn run_case(
     let meta = MetaFile::create(&scenario.case)?;
     let meta_path = utf8_path(meta.path())?;
     let parent = std::env::vars().collect();
-    let env = program_env(&parent, &scenario, mock_port, receiver_port, meta_path);
+    let env = program_env(
+        &parent,
+        &scenario,
+        repo_root,
+        mock_port,
+        receiver_port,
+        meta_path,
+    );
     let mut child = spawn_program(program, scenario_dir, &env)?;
+    // Alive until `run_case` returns: it cleans up a group the scenario failed to stop.
+    #[cfg(unix)]
+    let _process_group = child.id().map(|pid| ProcessGroupGuard { pid });
     let lines = forward_output(&mut child, &scenario.case);
     let waited = wait_program(&mut child).await;
     lines.drain().await;
@@ -357,19 +376,46 @@ fn spawn_program(
     let Some((bin, args)) = program.argv.split_first() else {
         return Err(CaptureError::ProgramCommand);
     };
-    Command::new(bin)
+    let mut command = Command::new(bin);
+    command
         .args(args)
         .current_dir(dir)
         .kill_on_drop(true)
         .env_clear()
         .envs(env)
         .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .spawn()
-        .map_err(|source| CaptureError::Process {
-            step: "spawn the program",
-            source,
-        })
+        .stderr(std::process::Stdio::piped());
+    #[cfg(unix)]
+    command.process_group(0);
+    command.spawn().map_err(|source| CaptureError::Process {
+        step: "spawn the program",
+        source,
+    })
+}
+
+/// Sends SIGTERM to every process of the group whose leader is `pid`. Errors are ignored:
+/// the group may be gone already.
+#[cfg(unix)]
+fn kill_process_group(pid: u32) {
+    let _ = std::process::Command::new("kill")
+        .args(["-TERM", "--", &format!("-{pid}")])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status();
+}
+
+/// Kills the program's whole group when dropped, so a gateway the scenario started under
+/// `uv run` does not outlive the runner (`kill_on_drop` kills only the child).
+#[cfg(unix)]
+struct ProcessGroupGuard {
+    pid: u32,
+}
+
+#[cfg(unix)]
+impl Drop for ProcessGroupGuard {
+    fn drop(&mut self) {
+        kill_process_group(self.pid);
+    }
 }
 
 fn forward_output(child: &mut Child, case: &CasePath) -> Lines {
@@ -432,6 +478,10 @@ async fn wait_program(child: &mut Child) -> Result<(), CaptureError> {
             source,
         }),
         Err(_elapsed) => {
+            #[cfg(unix)]
+            if let Some(pid) = child.id() {
+                kill_process_group(pid);
+            }
             let _ = child.kill().await;
             let _ = child.wait().await;
             Err(CaptureError::ProgramTimeout)
@@ -1120,6 +1170,80 @@ mod tests {
         );
     }
 
+    /// Spawns `sh -c "sleep 60 & echo $!; wait"` in its own process group and returns the
+    /// child with the grandchild's pid (the first stdout line).
+    #[cfg(unix)]
+    async fn spawn_sleeping_group() -> (Child, u32) {
+        let mut child = Command::new("sh")
+            .args(["-c", "sleep 60 & echo $!; wait"])
+            .process_group(0)
+            .kill_on_drop(true)
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .unwrap();
+        let mut stdout = child.stdout.take().unwrap();
+        let mut line = String::new();
+        BufReader::new(&mut stdout)
+            .read_line(&mut line)
+            .await
+            .unwrap();
+        let grandchild: u32 = line.trim().parse().unwrap();
+        (child, grandchild)
+    }
+
+    /// True once `/proc/<pid>` is gone or its process is a zombie (`Z`): the process died.
+    /// `/proc/<pid>/stat` is `<pid> (<comm>) <state> …`; the state follows the last `)`.
+    #[cfg(target_os = "linux")]
+    async fn gone_within(pid: u32) -> bool {
+        for _ in 0..50 {
+            let Ok(stat) = std::fs::read_to_string(format!("/proc/{pid}/stat")) else {
+                return true;
+            };
+            if stat
+                .rsplit_once(')')
+                .and_then(|(_, rest)| rest.trim_start().chars().next())
+                == Some('Z')
+            {
+                return true;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        false
+    }
+
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn kill_process_group_stops_grandchildren() {
+        let (mut child, grandchild) = spawn_sleeping_group().await;
+        kill_process_group(child.id().unwrap());
+        let waited = tokio::time::timeout(Duration::from_secs(5), child.wait()).await;
+        assert!(waited.is_ok(), "the group leader did not exit within 5 s");
+        waited.unwrap().unwrap();
+        #[cfg(target_os = "linux")]
+        assert!(
+            gone_within(grandchild).await,
+            "grandchild {grandchild} survived the group kill"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn process_group_guard_kills_the_group_on_drop() {
+        let (mut child, grandchild) = spawn_sleeping_group().await;
+        drop(ProcessGroupGuard {
+            pid: child.id().unwrap(),
+        });
+        let waited = tokio::time::timeout(Duration::from_secs(5), child.wait()).await;
+        assert!(waited.is_ok(), "the group leader did not exit within 5 s");
+        waited.unwrap().unwrap();
+        #[cfg(target_os = "linux")]
+        assert!(
+            gone_within(grandchild).await,
+            "grandchild {grandchild} survived the guard's drop"
+        );
+    }
+
     #[test]
     fn program_env_drops_parent_secrets_and_applies_scenario_env() {
         let mut parent = HashMap::new();
@@ -1137,7 +1261,14 @@ mod tests {
         parent.insert("OTEL_TRACES_SAMPLER".to_owned(), "always_off".to_owned());
         parent.insert("UNRELATED".to_owned(), "nope".to_owned());
         let scenario = scenario(json!({"OTEL_SERVICE_NAME": "from-scenario"}), None);
-        let env = program_env(&parent, &scenario, 40123, 40124, "/tmp/meta.json");
+        let env = program_env(
+            &parent,
+            &scenario,
+            Path::new("/repo"),
+            40123,
+            40124,
+            "/tmp/meta.json",
+        );
         assert_eq!(env.get("PATH").map(String::as_str), Some("/usr/bin"));
         assert_eq!(
             env.get("HOME").map(String::as_str),
@@ -1176,6 +1307,10 @@ mod tests {
             env.get("CETRA_CAPTURE_CASE").map(String::as_str),
             Some("genai/alpha")
         );
+        assert_eq!(
+            env.get("CETRA_CAPTURE_TOOLS").map(String::as_str),
+            Some("/repo/target/capture-tools")
+        );
         for key in [
             "OPENAI_API_KEY",
             "ANTHROPIC_API_KEY",
@@ -1201,7 +1336,7 @@ mod tests {
             env.get("OTEL_SERVICE_NAME").map(String::as_str),
             Some("from-scenario")
         );
-        assert_eq!(env.len(), 21);
+        assert_eq!(env.len(), 22);
         assert!(!env.contains_key("AWS_SECRET_ACCESS_KEY"));
         assert!(!env.contains_key("UNRELATED"));
         let rendered = format!("{env:?}");

@@ -5,6 +5,13 @@ from __future__ import annotations
 import importlib.metadata
 import json
 import os
+import signal
+import socket
+import subprocess
+import time
+import urllib.error
+import urllib.request
+from collections.abc import Callable
 
 import httpx
 import httpx2
@@ -120,6 +127,21 @@ def receiver_base_url() -> str:
     return endpoint[: -len(suffix)]
 
 
+def importlib_versions(names: list[str]) -> dict[str, str]:
+    """Return the installed version of each non-empty name in ``names``."""
+    return {name: importlib.metadata.version(name) for name in names if name}
+
+
+def _write_meta(libraries: dict[str, str]) -> None:
+    """Write ``{"libraries": libraries}`` to the file ``CETRA_CAPTURE_META`` names.
+
+    A missing ``CETRA_CAPTURE_META`` raises ``KeyError`` naming that variable.
+    """
+    meta_path = os.environ["CETRA_CAPTURE_META"]
+    with open(meta_path, "w", encoding="utf-8") as meta_file:
+        json.dump({"libraries": libraries}, meta_file)
+
+
 def finish(provider: TracerProvider) -> None:
     """Flush and shut down ``provider``, then write the library versions the runner asked for.
 
@@ -128,11 +150,85 @@ def finish(provider: TracerProvider) -> None:
     """
     provider.force_flush()
     provider.shutdown()
-    names = os.environ["CETRA_CAPTURE_LIBRARIES"].split(",")
-    meta_path = os.environ["CETRA_CAPTURE_META"]
-    libraries = {name: importlib.metadata.version(name) for name in names if name}
-    with open(meta_path, "w", encoding="utf-8") as meta_file:
-        json.dump({"libraries": libraries}, meta_file)
+    _write_meta(importlib_versions(os.environ["CETRA_CAPTURE_LIBRARIES"].split(",")))
+
+
+def finish_tool(provider: TracerProvider | None, versions: dict[str, str]) -> None:
+    """Flush and shut down ``provider``, then write exactly ``versions``.
+
+    For a scenario that runs a pinned binary (a gateway) next to, or instead of, an
+    instrumented program. ``provider`` is ``None`` when the program has no spans of its
+    own. The runner requires every entry of the scenario's ``libraries`` to be a key of
+    ``versions``.
+
+    A missing ``CETRA_CAPTURE_META`` raises ``KeyError`` naming that variable.
+    """
+    if provider is not None:
+        provider.force_flush()
+        provider.shutdown()
+    _write_meta(versions)
+
+
+def free_port() -> int:
+    """Return a TCP port that was free on ``127.0.0.1`` a moment ago, for a gateway to bind."""
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        sock.bind(("127.0.0.1", 0))
+        port: int = sock.getsockname()[1]
+    return port
+
+
+def wait_http(
+    url: str, timeout: float, ok: Callable[[int], bool] = lambda status: status == 200
+) -> None:
+    """Poll ``GET url`` every 0.25 s and return once ``ok(status)`` is true.
+
+    An HTTP error status counts as a status (``HTTPError.code``); connection errors are
+    retried. Raises ``TimeoutError`` naming the URL once ``timeout`` seconds have passed.
+    """
+    deadline = time.monotonic() + timeout
+    while True:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise TimeoutError(f"{url} did not answer a ready status within {timeout} s")
+        status: int | None
+        try:
+            with urllib.request.urlopen(  # noqa: S310 - a loopback URL the scenario built
+                url, timeout=min(remaining, 5.0)
+            ) as response:
+                status = response.status
+        except urllib.error.HTTPError as error:
+            status = error.code
+        except OSError:
+            status = None
+        if status is not None and ok(status):
+            return
+        time.sleep(min(0.25, max(deadline - time.monotonic(), 0.0)))
+
+
+def stop_gateway(proc: subprocess.Popen[bytes], wait: float) -> None:
+    """Stop a gateway with SIGINT (it flushes its spans), killing it after ``wait`` seconds."""
+    proc.send_signal(signal.SIGINT)
+    try:
+        proc.wait(timeout=wait)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        proc.wait()
+
+
+def tool_binary(*parts: str) -> str:
+    """Return the path of a pinned capture binary under ``CETRA_CAPTURE_TOOLS``.
+
+    A missing binary raises ``FileNotFoundError`` naming the path, so a host without the
+    binaries fails with a message that says how to fetch them. Call it first.
+
+    A missing ``CETRA_CAPTURE_TOOLS`` raises ``KeyError`` naming that variable.
+    """
+    path = os.path.join(os.environ["CETRA_CAPTURE_TOOLS"], *parts)
+    if not os.path.isfile(path):
+        raise FileNotFoundError(
+            f"{path} does not exist: run `just capture-tools` (Linux x86_64 only)"
+        )
+    return path
 
 
 def prefer_identity_otlp_compression() -> None:
@@ -141,7 +237,6 @@ def prefer_identity_otlp_compression() -> None:
     Laminar constructs its trace and log exporters with gzip and does not read
     ``OTEL_EXPORTER_OTLP_COMPRESSION``. The receiver accepts only an identity body.
     """
-    from collections.abc import Callable
     from typing import cast
 
     from opentelemetry.exporter.otlp.proto.http import Compression

@@ -116,6 +116,18 @@ async fn hello() -> StatusCode {
     StatusCode::OK
 }
 
+/// A gateway's model listing at start (`GET …/models`; Bifrost calls `/v1/models`). Not a
+/// turn and not an error, like [`hello`]. Not a router route: the prefix varies.
+fn models_list() -> Response {
+    let body = serde_json::json!({"object": "list", "data": []});
+    let bytes = serde_json::to_vec(&body).unwrap_or_else(|_| Vec::new());
+    Response::builder()
+        .status(StatusCode::OK)
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(bytes))
+        .unwrap_or_else(|_| Response::new(Body::empty()))
+}
+
 impl Mock {
     async fn respond(&self, request: axum::extract::Request) -> Response {
         let label = format!("{} {}", request.method(), request.uri().path());
@@ -123,6 +135,9 @@ impl Mock {
         let query = request.uri().query().map(str::to_owned);
         let host = request_host(request.headers());
         let posted = *request.method() == Method::POST;
+        if *request.method() == Method::GET && path.ends_with("/models") {
+            return models_list();
+        }
         let Some(route) = classify(&path).filter(|_| posted) else {
             let message = format!("cetra-capture mock: no route {label}");
             self.push_error(message.clone());
@@ -938,6 +953,34 @@ mod tests {
         let log = mock.finish();
         assert!(log.served.is_empty(), "{:?}", log.served);
         assert!(log.errors.is_empty(), "{:?}", log.errors);
+    }
+
+    #[tokio::test]
+    async fn get_models_is_answered_without_a_turn() {
+        let mock = Mock::new(vec![chat_turn(Api::OpenaiChat, 0, 0)]);
+        let response = send(&mock, "GET", "/v1/models", "").await;
+        assert_eq!(response.status(), 200);
+        assert_eq!(response.headers()[header::CONTENT_TYPE], "application/json");
+        let body: Value = serde_json::from_slice(&bytes(response).await).unwrap();
+        assert_eq!(body, json!({"object": "list", "data": []}));
+        let ok = send(&mock, "POST", "/v1/chat/completions", "{}").await;
+        assert_eq!(ok.status(), 200);
+        let log = mock.finish();
+        assert_eq!(log.served.len(), 1, "{:?}", log.served);
+        assert!(log.errors.is_empty(), "{:?}", log.errors);
+    }
+
+    #[tokio::test]
+    async fn post_models_is_still_an_unknown_route() {
+        let mock = Mock::new(Vec::new());
+        let response = send(&mock, "POST", "/v1/models", "{}").await;
+        assert_eq!(response.status(), 404);
+        let log = mock.finish();
+        assert!(log.served.is_empty(), "{:?}", log.served);
+        assert_eq!(
+            log.errors,
+            vec!["cetra-capture mock: no route POST /v1/models"]
+        );
     }
 
     #[tokio::test]
