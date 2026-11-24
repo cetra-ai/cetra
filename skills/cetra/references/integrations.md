@@ -117,6 +117,11 @@ Use this page to find how to connect your framework, provider or instrumentation
 | [Temporal](https://cetra.sh/docs/integrations/temporal/) | ✓ | — | Temporal's OpenAI Agents plugin | captured |
 | [Vercel AI SDK](https://cetra.sh/docs/integrations/vercel-ai-sdk/) | — | ✓ | `aiTelemetry()` | captured |
 | [VoltAgent](https://cetra.sh/docs/integrations/voltagent/) | — | ✓ | VoltAgent's own OpenTelemetry spans | captured |
+| [Spring AI](https://cetra.sh/docs/integrations/spring-ai/) | — | — | Java, Spring Boot with Micrometer or OpenInference | captured |
+| [LangChain4j](https://cetra.sh/docs/integrations/langchain4j/) | — | — | Java, OpenInference's model listener | captured |
+| [Quarkus LangChain4j](https://cetra.sh/docs/integrations/quarkus-langchain4j/) | — | — | Java, the `quarkus-opentelemetry` extension | captured |
+| [Koog](https://cetra.sh/docs/integrations/koog/) | — | — | Java, its OpenTelemetry feature | captured |
+| [Microsoft.Extensions.AI](https://cetra.sh/docs/integrations/extensions-ai/) | — | — | .NET, `UseOpenTelemetry()` on the client | captured |
 | [Genkit Go](https://cetra.sh/docs/integrations/genkit-go/) | — | — | Go, its `otelgenai` plugin | setup only |
 | [openai-go](https://cetra.sh/docs/integrations/openai-go/) | — | — | Go, OpenInference Go's middleware | setup only |
 | [ruby_llm](https://cetra.sh/docs/integrations/ruby-llm/) | — | — | Ruby, its built-in `RubyLLM::OpenTelemetry` | setup only |
@@ -151,6 +156,11 @@ Use this page to find how to connect your framework, provider or instrumentation
 - [Temporal](https://cetra.sh/docs/integrations/temporal/): Agent workflows on Temporal, with their model calls.
 - [Vercel AI SDK](https://cetra.sh/docs/integrations/vercel-ai-sdk/): Versions 4 to 7.
 - [VoltAgent](https://cetra.sh/docs/integrations/voltagent/): Agent runs, model calls and tools, with the session.
+- [Spring AI](https://cetra.sh/docs/integrations/spring-ai/): Model calls and tools from Spring Boot, on one of two routes.
+- [LangChain4j](https://cetra.sh/docs/integrations/langchain4j/): Model calls with messages, tokens and cost.
+- [Quarkus LangChain4j](https://cetra.sh/docs/integrations/quarkus-langchain4j/): AI services, model calls and tools in one trace.
+- [Koog](https://cetra.sh/docs/integrations/koog/): Agent runs, graph nodes, model calls and tools.
+- [Microsoft.Extensions.AI](https://cetra.sh/docs/integrations/extensions-ai/): Chat calls with messages and tokens, and tool calls.
 
 ## Apps and tools
 

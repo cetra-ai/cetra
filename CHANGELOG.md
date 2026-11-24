@@ -19,6 +19,7 @@ with an `### Upgrade notes` section (https://cetra.sh/docs/self-hosting/upgrade/
 - Vector database reads are `retriever` spans: OpenLIT's `vectordb` get, query and search, and the read spans of OpenLLMetry's Chroma, Qdrant, Milvus, Pinecone and Weaviate instrumentations. Writes stay `span`.
 - Qwen Code, Pi and OpenClaw are coding agents: `cetra agents setup qwen-code`, `cetra agents setup pi` and `cetra agents setup openclaw` connect them to cetra, and `cetra agents remove` undoes each. Pi gets an extension that cetra writes, and OpenClaw's setup installs its diagnostics plugin. Integration pages cover these three and Augment Code, Devin SDK and Omnigent (setup only).
 - OpenCode, Goose and Oh My Pi are coding agents: `cetra agents setup opencode` (which writes cetra's OpenCode plugin and its config file), `cetra agents setup goose` (which prints Goose's environment lines) and `cetra agents setup oh-my-pi` (which writes Oh My Pi's `.env` lines) connect them to cetra, and `cetra agents remove` undoes each. Integration pages cover these three and Hermes Agent, which is detected and captured but has no setup.
+- Integration pages for Spring AI, LangChain4j, Quarkus LangChain4j, Koog and Microsoft.Extensions.AI, and .NET sections on the Semantic Kernel and Agent Framework pages, with captured spans for all of them: the capture tool runs Java and .NET scenarios, built by `just capture-tools` from the pinned JDK, Maven and .NET SDK. Setup-only pages cover Genkit Go, openai-go, ruby_llm, rig and Arconia.
 
 ### Changed
 
@@ -34,6 +35,7 @@ with an `### Upgrade notes` section (https://cetra.sh/docs/self-hosting/upgrade/
 - `tts` and `stt` operations (Pipecat's speech spans) are plain spans, and a host in LiveKit's `gen_ai.provider.name` names the endpoint: `api.openai.com` gives the provider `openai`.
 - A reported cost of exactly 0 on a span that counts tokens counts as no report and is priced from the price table; OpenLIT writes a cost of 0 when its price table has no row for the model.
 - `/v1/agent-context` accepts `qwen-code`.
+- Semantic Kernel .NET's GenAI events carry their message in `gen_ai.event.content`, which is read as the event's body; a GenAI message value that starts with `HIDDEN:` (Koog's masked content) is content not captured, not a malformed message; `koog` is a framework name, `open_ai` is an alias of `openai`, and on scope `io.quarkus.opentelemetry` `gen_ai.prompt` and `gen_ai.completion` fill input and output.
 
 ### Fixed
 

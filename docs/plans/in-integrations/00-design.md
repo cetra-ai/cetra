@@ -398,7 +398,7 @@ Spikes: Portkey, TrueFoundry, Kong, Cloudflare AI Gateway, Bifrost, Envoy, Azure
 - the normalizer rules those captures show (D-IN-30 item 4);
 - pages for each, setup-only pages for Genkit Go, openai-go, ruby_llm, rig and Arconia, and § Not supported rows for langchaingo, OpenLIT Go, Swiftide, AI SDK C++ and Embabel.
 
-Spikes: done (`spikes/m8-*.md`). Plan: `08-m8-other-languages.md`. Depends on: M7 for its records phase only (the index, sidebar, CHANGELOG and decision files); its runner, rule, capture and page phases may run beside M7 part 2 (the user, 2026-11-24).
+Spikes: done (`spikes/m8-*.md`). Plan: `08-m8-other-languages.md`. Status: done (Java and .NET capture runners, eight captured cases, the D-IN-30 item 4 normalizer rules, the five pages, the Semantic Kernel and Agent Framework .NET sections, and the five setup-only pages). Depends on: M7 for its records phase only (the index, sidebar, CHANGELOG and decision files); its runner, rule, capture and page phases may run beside M7 part 2 (the user, 2026-11-24).
 
 **M9 — Long-tail frameworks.** Delivers a page for each long-tail framework in the appendix whose spike shows an OTLP path: a captured case when it runs offline, setup only otherwise. The others move to § Not supported, and the user is told. Depends on: M8.
 
