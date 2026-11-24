@@ -788,7 +788,7 @@ mod tests {
             assert_eq!(bag.state("gen_ai.operation.name"), Some(Use::Unread));
             assert_eq!(bag.state("db.operation.name"), Some(Use::Unread));
         }
-        // Qdrant and Milvus write no `db.operation.name`: a plain span.
+        // A span with no `db.operation.name` is a plain span.
         let attrs = [string_attr("gen_ai.operation.name", "vectordb")];
         let mut bag = AttrBag::new(&attrs, &mut Warnings::default());
         assert_eq!(

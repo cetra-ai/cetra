@@ -95,7 +95,7 @@ Each database operation is one span, and each span is a trace of its own:
 Which reads count follows the instrumentation:
 
 - OpenLIT marks every vector span with the operation `vectordb`, and `db.operation.name` decides: `get`, `query` or `search` is a `retriever` (Chroma writes them in caps), and anything else is a `span`.
-- OpenLLMetry's instrumentors write no operation attribute, so the span name decides: `chroma.query`, `chroma.get`, `qdrant.query_points`, `qdrant.search`, `qdrant.scroll`, `milvus.search`, `milvus.query` and `milvus.get` are `retriever`s, and so are `pinecone.query`, `pinecone.fetch` and the Weaviate query names below. Every other name is a `span`.
+- cetra reads no operation attribute from OpenLLMetry's instrumentors, and the span name decides, because Qdrant and Pinecone write none: `chroma.query`, `chroma.get`, `qdrant.query_points`, `qdrant.search`, `qdrant.scroll`, `milvus.search`, `milvus.query` and `milvus.get` are `retriever`s, and so are `pinecone.query`, `pinecone.fetch` and the Weaviate query names below. Every other name is a `span`.
 
 The spans carry the counts and summaries the instrumentors write, such as the number of vectors written and the top k. No documents, no vectors and no results reach the input or output fields. OpenLLMetry writes each result as a span event, which cetra keeps on the span.
 

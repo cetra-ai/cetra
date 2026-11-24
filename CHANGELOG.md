@@ -16,6 +16,7 @@ with an `### Upgrade notes` section (https://cetra.sh/docs/self-hosting/upgrade/
 - Integration pages for the gateways: LiteLLM Proxy, Bifrost, Envoy AI Gateway, Kong AI Gateway, Portkey, TrueFoundry, Vercel AI Gateway, Helicone and Cloudflare AI Gateway, with captured spans for LiteLLM Proxy, Bifrost, Envoy AI Gateway and Temporal, and `just capture-tools` to fetch the pinned binaries those captures start.
 - Integration pages for n8n, Langflow, Prompt Flow, LiveKit Agents, Pipecat, Browser Use, MCP, OpenLIT, the vector databases (Chroma, Qdrant, Milvus, Pinecone, Weaviate), Promptfoo, Stagehand, LobeChat, Gradio, Ragas, UQLM, Azure AI Evaluation, Cleanlab, and Harbor and Terminal-Bench, with captured spans for ten of them (eleven new captures); `instrument=["mcp"]` and the `cetra-sdk[mcp]` extra carry an MCP server's spans into the client's trace.
 - The capture harness is its own package (`tools/capture/harness/`), and capture scenarios whose packages cannot share the capture project's lock live under `tools/capture/envs/<env>/scenarios/`; `just capture-tools` installs every environment.
+- Vector database reads are `retriever` spans: OpenLIT's `vectordb` get, query and search, and the read spans of OpenLLMetry's Chroma, Qdrant, Milvus, Pinecone and Weaviate instrumentations. Writes stay `span`.
 
 ### Changed
 

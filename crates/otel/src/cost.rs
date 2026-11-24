@@ -1589,6 +1589,24 @@ mod tests {
             assert_eq!(priced.total, Some(0.0));
         }
 
+        // Langfuse's `cost_details` total of 0 follows the same rule.
+        let (priced, states) = run(
+            &prices,
+            "gpt-4o-mini",
+            &usage_input(1_000_000),
+            &[KeyValue {
+                key: "langfuse.observation.cost_details".to_owned(),
+                value: Some(AnyValue {
+                    value: Some(Value::StringValue(r#"{"total": 0}"#.to_owned())),
+                }),
+                key_strindex: 0,
+            }],
+            &["langfuse.observation.cost_details"],
+        );
+        assert_eq!(priced.source, Some(CostSource::Computed));
+        assert_eq!(priced.total, Some(9.0));
+        assert_eq!(states, vec![Some(Use::Consumed)]);
+
         // A non-zero reported cost still wins outright.
         let (priced, _) = run(
             &prices,
