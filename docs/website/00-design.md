@@ -136,7 +136,7 @@ Copy here is **direction**, not final wording; M2 drafts it and reviews it with 
    - sub: one binary, nothing to babysit, your data stays on your server, or use our cloud;
    - buttons: **Try the demo** (main) and **Start free**;
    - under them, a copyable **install command** with OS tabs and a "what does this run?" link;
-   - a dark **screenshot of the trace view** (an agent trace's span tree, LLM messages, cost) beside the text on wide screens: a crop of the trace panel, shown at its own size (D-W-23).
+   - a dark **screenshot of the trace view** (an agent trace's span tree, LLM messages, cost) under the text, full width: a crop of the trace panel with the timeline on, shown at its own size (D-W-23).
 3. **Proof strip.** Until we have logos: open-source facts that are true at launch, such as the licence (MIT core), GitHub stars, OpenTelemetry-native, the number of integrations backed by fixtures. Engine numbers join only once measured (M6).
 4. **"Nothing else to run."** The stack contrast as a diagram: a typical self-hosted stack (Web, Worker, Postgres, Redis, ClickHouse, S3) against one cetra box. The "replaces X" framing comes from Bun. Each competitor is named only on its compare page, not here. Since 2026-11-23 (user) it is a 1:1 replacement: each service, labelled "What most alternatives make you run", points to the part of the one cetra box that replaces it (web UI and API, evaluations and alerts, embedded SQLite, built-in job queue, storage engine, local disk with S3 optional), and the caption links to `/compare/`.
 5. **Product chapters** (Linear's repeated layout, Braintrust's bands):
@@ -208,7 +208,7 @@ Answers of 2026-11-24:
 
 10. **The licence price and the homepage screenshots.**
    1. **The self-hosted licence shows no price** (D-W-22). It reads "Custom" with "Talk to us", like the Cloud Enterprise plan and the competitors' enterprise self-hosted tiers. It stays one licence with every enterprise feature, SAML included; the user chose this over a $5,400 Teams licence beside a custom-priced Enterprise one.
-   2. **The homepage screenshots show one panel each** (D-W-23, M10). The whole-app captures at 1440×900 read at about 9 px on the page, and no competitor shows the whole app: Laminar shows one cropped panel, Langfuse drawings, Helicone one simplified dashboard. Each `marketing-*` shot is a crop of the panel its section talks about, in a smaller window. The six chapters put their text beside the picture, alternating sides, and the hero does the same on wide screens.
+   2. **The homepage screenshots show one panel each** (D-W-23, M10). The whole-app captures at 1440×900 read at about 9 px on the page, and no competitor shows the whole app: Laminar shows one cropped panel, Langfuse drawings, Helicone one simplified dashboard. Each `marketing-*` shot is a crop of the panel its section talks about, in a smaller window. The six chapters put their text beside the picture, alternating sides. The hero keeps its picture under the text, full width, with the trace timeline on (the user, 2026-11-24, after seeing the preview).
 
 ## 10. Milestones
 
@@ -224,7 +224,7 @@ Built in order, each milestone merged to `main` when done (no feature flag). Unt
 | **M6 Benchmarks** *(after launch, §9.2)* | `/benchmarks/` from a results file: machines, versions, dates, named competitors, tradeoffs, reproduction script; engine numbers added to the homepage proof strip | The benchmark itself (D23) | — |
 | **M8 Main sync** | The site matches main as of 2026-11-22: rebased onto it, the integrations parser takes the coding-agent rows, the web demo link (§9.6), six chapters and the coding-agents section, new compare rows (annotation queues, issue detection, coding-agent tracing, in-app assistant) with sourced facts, pricing and self-hosting updated | M1–M5, M7; main's D191–D195 | Benchmarks (M6) |
 | **M9 Pricing feature table** | A feature table on both tabs of `/pricing/` (§9.9): limits first, then grouped features. Every row links to its docs page or cites a decision, and a test checks both. On phones, one Cloud plan column shows at a time. It replaces the "Every plan" list | M3, M8; PR #227 (the Cloud / Self-hosted switcher) | Docs for the Enterprise-only rows |
-| **M10 Focused screenshots** | Each homepage screenshot is a crop of one panel, captured in its own window size (`viewport`, `clip` in `screenshots.json`). The product chapters and the hero show text beside the picture on wide screens, and no picture is shown larger than its CSS size (§9.10.2) | M2, M8 | The docs' own screenshots |
+| **M10 Focused screenshots** | Each homepage screenshot is a crop of one panel, captured in its own window size (`viewport`, `clip` in `screenshots.json`). The product chapters show text beside the picture on wide screens, the hero keeps its picture under the text, and no picture is shown larger than its CSS size (§9.10.2) | M2, M8 | The docs' own screenshots |
 | **M7 Launch** | The holding page replaced by the homepage; `noindex` removed; sitemap, `robots.txt`, Open Graph images per page, canonical URLs, 404 page; Web Analytics on; final review pass on every page by the user | M2–M5 | Benchmarks (M6) |
 
 ## 11. Risks

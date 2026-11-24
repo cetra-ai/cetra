@@ -36,6 +36,10 @@ The user's answer (2026-11-24): do all three steps: crop the shots, recapture th
 
 No new dependency.
 
+## Follow-up (2026-11-24)
+
+After seeing the preview, the user asked for the hero picture back under the text, wider, with the trace timeline on: `marketing-trace-view` is captured at 1920×760 with the Timeline tab clicked (about 1,198 CSS px), and Hero.astro's 1200 px two-column block is gone.
+
 ## Phases
 
 | Phase | Edit | Depends on |
