@@ -68,22 +68,23 @@
   - Exa, Tavily, Parallel AI: no instrumentation;
   - Firecrawl: OpenLIT's target is the v1 SDK;
   - Coval: no results API.
-  - Morph Reflex and Testable Minds wait for the user's answer (question 3).
+  - Morph Reflex: its judge endpoint answers with a bare label, which cetra's judge parser does not read (Q3);
+  - Testable Minds: a Langfuse-API client configured on the vendor's side (Q3).
 - **No capture of** Stagehand (a Chrome extension calls the real OpenAI), LobeChat, Weaviate (both need a server), Pinecone (a fake REST host would be needed), Cleanlab (cloud key), Harbor (Docker), the old MCP SDK through OpenLLMetry, and LiveKit or Pipecat voice spans (STT/TTS/EOU need audio services).
 - **No JSON enum names.** Harbor's `harbor-atif2otel` JSON writes enum names, but OTLP/JSON requires integer enums, so cetra stays strict. The Harbor page uses the protobuf export (D-IN-26 item 6).
 - **No cetra-core change.** No new `Convention` variant (D-IN-26 item 9): scoped content is read by a module keyed on the scope name.
 - **Eval tools are setup only** unless Q4 is answered (b). Ragas, UQLM and Azure AI Evaluation show "trace the LLM calls, send results with `cetra.score`" (D-IN-26 item 5).
 
-## Questions for the user (asked 2026-11-24, unanswered)
+## User answers (2026-11-24)
 
-| # | Question | Blocks |
+| # | Question | Answer |
 |---|---|---|
-| Q1 | Vector-database `retriever` kind: (a) reads only (query, search, get, fetch), writes stay `span` — recommended; or (b) every operation | IN6.4b step 1, IN6.6 vector cases |
-| Q2 | OpenLIT writes `gen_ai.usage.cost = 0` when its price table has no row: (a) a reported cost of exactly 0 on a span with tokens counts as no report, every source — recommended; (b) the same, OpenLIT scopes only; (c) no rule, the page documents `pricing_json` | IN6.4b step 2, IN6.6 OpenLIT cases, IN6.8 `tracing/cost-and-tokens.mdx` |
-| Q3 | Morph Reflex, Testable Minds: URLs, or not supported | IN6.9 records only |
-| Q4 | Ragas, UQLM, Azure AI Evaluation: (a) setup-only pages — recommended (their samples would add heavy packages to the SDK's dev group); (b) SDK-test pages, as the spike and design say | IN6.8's three pages only (`ragas`, `uqlm`, `azure-ai-evaluation`) |
+| Q1 | Vector-database `retriever` kind | **(a)** reads only (query, search, get, fetch); writes stay `span` |
+| Q2 | OpenLIT's `gen_ai.usage.cost = 0` when its price table has no row | **(a)** a reported cost of exactly 0 on a span with tokens counts as no report, for every source |
+| Q3 | Morph Reflex, Testable Minds | **Both not supported.** Only Langfuse lists them. Testable Minds polls traces through Langfuse's public API and writes human scores back; the connector lives on Testable's side. Morph Reflex is used by Langfuse as an OpenAI-compatible judge (`https://api.morphllm.com/v1/reflex-oai`) that answers with a bare label; cetra's judge parser needs a JSON object with `label` (spec 06 D158), so it cannot read that reply. |
+| Q4 | Ragas, UQLM, Azure AI Evaluation | **(a)** setup-only pages, samples not run |
 
-Phases that do not depend on them run first. The answers are written here, then into D-IN-26. This plan covers Q4 (a). On (b), those three pages leave IN6.8, and a phase IN6.8b is written after the answer (Edit: `sdks/python/{pyproject.toml,uv.lock,tests/test_examples.py}` and the three pages).
+Every step below that offers (a)/(b)/(c) takes the answer above; the other options are void.
 
 ## Decisions this plan relies on
 
@@ -432,7 +433,7 @@ The implementer:
 
 ## IN6.4b — Vector and zero-cost rules
 
-**Blocked until Q1 and Q2 are answered.**
+Q1 (a) and Q2 (a) apply.
 
 **Steps.**
 1. **Vector spans** (Q1):
@@ -508,7 +509,7 @@ The spike scripts live in the scratchpad and may be gone. The dumps in the spike
 
 ## IN6.6 — Captures B: OpenLIT and the vector databases
 
-**Blocked until IN6.4b is committed.**
+Runs after IN6.4b is committed.
 
 **Steps.** Write the scenarios from `spikes/m6-tools-eval.md` § OpenLIT, § Vector databases and § Capture plan. Modules are named `genai_openlit_chat.py`, `genai_openlit_vector.py` and `openllmetry_vector_databases.py`.
 
