@@ -2,7 +2,9 @@
 //! traces reach cetra, and removes what setup wrote. Claude Code, Gemini CLI and Qwen Code are
 //! JSON files here (Gemini CLI and Qwen Code share one pair of functions), Codex is in
 //! `codex.rs`, Pi's extension is in `pi.rs`, OpenClaw's plugin install and config are in
-//! `openclaw.rs`, and Copilot has no file: setup prints its settings instead.
+//! `openclaw.rs`, OpenCode's plugin and config are in `opencode.rs`, Goose's printed lines are
+//! in `goose.rs`, Oh My Pi's `.env` lines are in `oh_my_pi.rs`, and Copilot has no file: setup
+//! prints its settings instead.
 
 use std::fs;
 use std::io::{self, Write};
@@ -13,7 +15,9 @@ use anyhow::Context;
 use serde_json::{Map, Value, json};
 
 use super::codex;
+use super::goose;
 use super::hook::run_with_timeout;
+use super::oh_my_pi;
 use super::openclaw;
 use super::opencode;
 use super::pi;
@@ -40,8 +44,6 @@ const GEMINI_TELEMETRY: [&str; 6] = [
 ];
 const KEY_PREFIX: &str = "sk-cetra-";
 const HEADERS_PREFIX: &str = "OTEL_EXPORTER_OTLP_HEADERS=";
-/// The form some people write the headers line in, as a shell `export`.
-const EXPORTED_HEADERS_PREFIX: &str = "export OTEL_EXPORTER_OTLP_HEADERS=";
 pub(super) const NOT_FOUND_NOTE: &str = "agents.toml not found; telemetry settings left unchanged";
 pub(super) const OTHER_SERVER_NOTE: &str =
     "the telemetry settings point to another server; left unchanged";
@@ -56,8 +58,10 @@ pub(crate) fn setup(args: &SetupArgs, paths: &Paths, out: &mut dyn Write) -> any
         anyhow::bail!("the key must be a project secret key (sk-cetra-…) with the ingest scope");
     }
     // agents.toml is saved last, and only when the agent's settings were written.
-    let agents_file = (!matches!(args.agent, Agent::Copilot | Agent::Pi | Agent::OpenCode)
-        && !args.print)
+    let agents_file = (!matches!(
+        args.agent,
+        Agent::Copilot | Agent::Pi | Agent::OpenCode | Agent::Goose
+    ) && !args.print)
         .then(|| AgentsFile {
             url: url.clone(),
             key: key.to_owned(),
@@ -79,6 +83,8 @@ pub(crate) fn setup(args: &SetupArgs, paths: &Paths, out: &mut dyn Write) -> any
             &openclaw::run_install,
         )?,
         Agent::OpenCode => opencode::setup(args, &url, paths, out)?,
+        Agent::Goose => goose::setup(args, &url, out)?,
+        Agent::OhMyPi => oh_my_pi::setup(args, &url, paths, out)?,
     }
     if let Some(file) = agents_file {
         // Saving replaces the server and key every agent's `remove` compares against; a warning
@@ -124,6 +130,8 @@ pub(crate) fn remove(agent: Agent, paths: &Paths, out: &mut dyn Write) -> anyhow
         Agent::Pi => pi::remove(paths, out),
         Agent::OpenClaw => openclaw::remove(paths, out),
         Agent::OpenCode => opencode::remove(paths, out),
+        Agent::Goose => goose::remove(out),
+        Agent::OhMyPi => oh_my_pi::remove(paths, out),
     }
 }
 
@@ -188,7 +196,13 @@ fn hook_timeout(agent: Agent) -> Option<u64> {
     match agent {
         Agent::ClaudeCode | Agent::QwenCode => Some(5),
         Agent::GeminiCli => Some(5000),
-        Agent::Codex | Agent::Copilot | Agent::Pi | Agent::OpenClaw | Agent::OpenCode => None,
+        Agent::Codex
+        | Agent::Copilot
+        | Agent::Pi
+        | Agent::OpenClaw
+        | Agent::OpenCode
+        | Agent::Goose
+        | Agent::OhMyPi => None,
     }
 }
 
@@ -351,7 +365,7 @@ pub(super) fn settings_bytes(root: &Map<String, Value>) -> anyhow::Result<Vec<u8
 /// Writes a settings file with mode 0600, following a symlink to its target (a dangling link
 /// too: the target is created). With `backup`, the first write of a file keeps a copy beside
 /// it, `<file>.cetra-backup`. True when the file changed.
-fn write_settings(path: &Path, bytes: &[u8], backup: bool) -> anyhow::Result<bool> {
+pub(super) fn write_settings(path: &Path, bytes: &[u8], backup: bool) -> anyhow::Result<bool> {
     let target = resolve_symlinks(path)?;
     match fs::read(&target) {
         Ok(current) if current == bytes => {
@@ -606,15 +620,19 @@ fn join_lines(lines: &[String]) -> String {
     lines.iter().map(|line| format!("{line}\n")).collect()
 }
 
-/// The `.env` text with its headers line set to `line`, and whether an existing headers line
-/// with another value was replaced. The first headers line (plain or `export`ed) is replaced
-/// and keeps its `\r`; otherwise `line` is appended. Other lines keep their bytes and order.
-fn env_with_header(text: &str, line: &str) -> (String, bool) {
+/// The `.env` text with its `name` line set to `line`, and whether an existing `name` line
+/// with another value was replaced. The first line starting with `<name>=` or
+/// `export <name>=` is replaced and keeps its `\r`; otherwise `line` is appended. Other
+/// lines keep their bytes and order.
+pub(super) fn env_with_var(text: &str, name: &str, line: &str) -> (String, bool) {
+    let plain = format!("{name}=");
+    let exported = format!("export {name}=");
     let mut lines = split_lines(text);
     let mut replaced_other = false;
-    match lines.iter().position(|kept| {
-        kept.starts_with(HEADERS_PREFIX) || kept.starts_with(EXPORTED_HEADERS_PREFIX)
-    }) {
+    match lines
+        .iter()
+        .position(|kept| kept.starts_with(&plain) || kept.starts_with(&exported))
+    {
         Some(index) => {
             let carriage = if lines[index].ends_with('\r') {
                 "\r"
@@ -631,7 +649,7 @@ fn env_with_header(text: &str, line: &str) -> (String, bool) {
 
 /// The `.env` text without the lines equal to `line` (a trailing `\r` ignored), or `None` when
 /// there is no such line.
-fn env_without_line(text: &str, line: &str) -> Option<String> {
+pub(super) fn env_without_line(text: &str, line: &str) -> Option<String> {
     let mut lines = split_lines(text);
     let before = lines.len();
     lines.retain(|kept| kept.trim_end_matches('\r') != line);
@@ -677,7 +695,11 @@ pub(super) fn settings_env_setup(
         spec.agent,
     )?;
     let env_text = read_optional_text(&env_path)?.unwrap_or_default();
-    let (env, replaced_other) = env_with_header(&env_text, &otlp_header_line(args.key.expose()));
+    let (env, replaced_other) = env_with_var(
+        &env_text,
+        "OTEL_EXPORTER_OTLP_HEADERS",
+        &otlp_header_line(args.key.expose()),
+    );
     emit(&settings_path, &settings_bytes(&root)?, args.print, out)?;
     emit(&env_path, env.as_bytes(), args.print, out)?;
     if replaced_other && !args.print {
@@ -1307,6 +1329,29 @@ mod tests {
             "{out}"
         );
         assert_eq!(fs::read_to_string(backup_of(&env_path)).unwrap(), original);
+    }
+
+    #[test]
+    fn env_with_var_replaces_an_exported_line_and_keeps_its_carriage_return() {
+        let (env, replaced) = env_with_var(
+            "FOO=1\r\nexport OTEL_EXPORTER_OTLP_HEADERS=old\r\n",
+            "OTEL_EXPORTER_OTLP_HEADERS",
+            "OTEL_EXPORTER_OTLP_HEADERS=new",
+        );
+        assert!(replaced);
+        assert_eq!(env, "FOO=1\r\nOTEL_EXPORTER_OTLP_HEADERS=new\r\n");
+        // The plain form is replaced too, and a line already holding `line` is not a replace.
+        let (env, replaced) = env_with_var(
+            "OTEL_EXPORTER_OTLP_HEADERS=new\n",
+            "OTEL_EXPORTER_OTLP_HEADERS",
+            "OTEL_EXPORTER_OTLP_HEADERS=new",
+        );
+        assert!(!replaced);
+        assert_eq!(env, "OTEL_EXPORTER_OTLP_HEADERS=new\n");
+        // With no existing line, `line` is appended.
+        let (env, replaced) = env_with_var("FOO=1\n", "OTEL_SERVICE_NAME", "OTEL_SERVICE_NAME=omp");
+        assert!(!replaced);
+        assert_eq!(env, "FOO=1\nOTEL_SERVICE_NAME=omp\n");
     }
 
     #[cfg(unix)]

@@ -24,7 +24,7 @@ Commands:
   query     Run a SQL query on a project
   traces    List and show traces
   projects  List the projects you can read
-  agents    Connect coding agents (Claude Code, Codex, Gemini CLI, Copilot, Pi, Qwen Code, OpenClaw, OpenCode) to cetra
+  agents    Connect coding agents (Claude Code, Codex, Gemini CLI, Copilot, Pi, Qwen Code, OpenClaw, OpenCode, Goose, Oh My Pi) to cetra
   help      Print this message or the help of the given subcommand(s)
 
 Options:
@@ -647,7 +647,7 @@ Options:
 ### `cetra agents`
 
 ```text
-Connect coding agents (Claude Code, Codex, Gemini CLI, Copilot, Pi, Qwen Code, OpenClaw, OpenCode) to cetra
+Connect coding agents (Claude Code, Codex, Gemini CLI, Copilot, Pi, Qwen Code, OpenClaw, OpenCode, Goose, Oh My Pi) to cetra
 
 Usage: cetra agents <COMMAND>
 
@@ -679,6 +679,8 @@ Arguments:
           - qwen-code:   Qwen Code: a Gemini CLI fork, set up like Gemini CLI (D-IN-28 item 7)
           - openclaw:    OpenClaw: setup installs its diagnostics plugin and merges its config (D-IN-28 items 5, 6)
           - opencode:    OpenCode: cetra's plugin and its config file are written by setup; no hook (D-IN-29)
+          - goose:       Goose: setup prints its environment lines; no hook (D-IN-29)
+          - oh-my-pi:    Oh My Pi: setup writes its .env lines; no hook (D-IN-29)
 
 Options:
       --url <URL>
@@ -720,6 +722,8 @@ Arguments:
           - qwen-code:   Qwen Code: a Gemini CLI fork, set up like Gemini CLI (D-IN-28 item 7)
           - openclaw:    OpenClaw: setup installs its diagnostics plugin and merges its config (D-IN-28 items 5, 6)
           - opencode:    OpenCode: cetra's plugin and its config file are written by setup; no hook (D-IN-29)
+          - goose:       Goose: setup prints its environment lines; no hook (D-IN-29)
+          - oh-my-pi:    Oh My Pi: setup writes its .env lines; no hook (D-IN-29)
 
 Options:
   -h, --help
