@@ -63,6 +63,7 @@ pub(crate) const SHOWN_KEYS: &[&str] = &[
     "media.min_bytes",
     "media.max_bytes",
     "eval.workers",
+    "audit.retention_days",
     "issues.workers",
     "security.allow_private_network_egress",
     "entitlements.upgrade_url",

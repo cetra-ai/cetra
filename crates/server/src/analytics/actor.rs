@@ -32,6 +32,8 @@ pub(crate) enum Via {
     ApiKey,
     /// The cloud control plane.
     ControlPlane,
+    /// A SCIM bearer token of an org (provisioning; no user, so counters only).
+    Scim,
 }
 
 /// Who an event is about. Carries ids and enums only: no email, name, slug or address can
@@ -60,6 +62,7 @@ impl Actor {
             Principal::Pat { user, .. } => (Some(user.id), Via::Pat),
             Principal::ApiKey { .. } => (None, Via::ApiKey),
             Principal::ControlPlane { .. } => (None, Via::ControlPlane),
+            Principal::Scim { .. } => (None, Via::Scim),
         };
         Self {
             user_id,

@@ -288,6 +288,14 @@ fn is_hook_invocation(args: &[std::ffi::OsString]) -> bool {
 async fn run_cli(
     args: impl IntoIterator<Item = impl Into<std::ffi::OsString> + Clone>,
 ) -> anyhow::Result<()> {
+    // Boxed: the dispatch future grew past the 16 KiB lint limit once the audit, SAML and
+    // telemetry work merged, and embedding it made every caller oversized with it.
+    Box::pin(run_cli_inner(args)).await
+}
+
+async fn run_cli_inner(
+    args: impl IntoIterator<Item = impl Into<std::ffi::OsString> + Clone>,
+) -> anyhow::Result<()> {
     let args: Vec<std::ffi::OsString> = args.into_iter().map(Into::into).collect();
     let hook = is_hook_invocation(&args);
     let cli = match Cli::try_parse_from(args) {
