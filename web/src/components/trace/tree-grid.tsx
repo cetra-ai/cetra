@@ -35,6 +35,7 @@ import {
   barGeometry,
   clampView,
   panBy,
+  slowLevel,
   type TimeWindow,
   ticks,
   traceWindow,
@@ -48,6 +49,8 @@ import {
   filterRows,
   hasChildren,
   subtreeEnds,
+  type TreeGuide,
+  treeGuides,
   visibleRows,
 } from "@/lib/tree";
 import { STORAGE_PREFIX } from "@/product";
@@ -55,12 +58,19 @@ import { STORAGE_PREFIX } from "@/product";
 /** A row must rest under the pointer this long before its span detail is prefetched. */
 const HOVER_PREFETCH_MS = 100;
 const OVERSCAN = 12;
-// Duration, Tokens, Cost and Timeline; the Name column is sized apart (auto or dragged).
-const METRIC_COLUMNS = "72px 64px 72px";
-const OTHER_COLUMNS = `${METRIC_COLUMNS} minmax(160px, 1fr)`;
-const OTHER_COLUMNS_MIN_PX = 72 + 64 + 72 + 160;
-// Tree mode has no time axis: the Name column takes the room the timeline would.
-const TREE_COLUMNS = `minmax(160px, 1fr) ${METRIC_COLUMNS}`;
+// Tree mode: Name, then Duration, Tokens and Cost.
+const TREE_COLUMNS = "minmax(160px, 1fr) 72px 64px 72px";
+// Timeline mode has no metric columns: the bars take the room beside the Name column,
+// which is sized apart (auto or dragged).
+const TIMELINE_MIN_PX = 160;
+// Timeline rows are 4px shorter than the density's, so the bars sit close together.
+const TIMELINE_ROW_INSET_PX = 4;
+// Tree guides: each depth indents 12px after a 4px margin, and a chevron box is 16px wide.
+const INDENT_PX = 12;
+const INDENT_BASE_PX = 4;
+const CHEVRON_PX = 16;
+// A tick label past this share of the axis sits left of its gridline, so it isn't cut.
+const TICK_FLIP_PCT = 85;
 const NAME_MIN_PX = 140;
 const NAME_MAX_PX = 640;
 const NAME_KEY_STEP_PX = 16;
@@ -184,7 +194,11 @@ export function TreeGrid({
   const ends = useMemo(() => subtreeEnds(spans), [spans]);
   const timeWindow = useMemo(() => traceWindow(trace, spans), [trace, spans]);
   const zoom = view ?? timeWindow;
-  const marks = useMemo(() => ticks(zoom, timelineWidth), [zoom, timelineWidth]);
+  const marks = useMemo(
+    () => ticks(zoom, timeWindow.startNs, timelineWidth),
+    [zoom, timeWindow.startNs, timelineWidth],
+  );
+  const traceNs = timeWindow.endNs - timeWindow.startNs;
   const selectedIndex = spans.findIndex((row) => row.span.span_id === selectedSpanId);
   const needleQuery = query.trim().toLowerCase();
 
@@ -226,16 +240,20 @@ export function TreeGrid({
     const visible = visibleRows(spans, ends, displayCollapsed);
     return errorSet ? visible.filter((index) => errorSet.has(index)) : visible;
   }, [spans, ends, displayCollapsed, errorSet]);
+  const guides = useMemo(
+    () => treeGuides(rows.map((index) => spans[index]?.depth ?? 0)),
+    [rows, spans],
+  );
 
   // The Name column fits the longest visible name until the user drags it.
   const [userNameWidth, setUserNameWidth] = useState<number | null>(readNameWidth);
   const autoWidth = useMemo(() => autoNameWidth(spans, rows), [spans, rows]);
   const nameWidth = userNameWidth ?? autoWidth;
-  const template = timeline ? `${nameWidth}px ${OTHER_COLUMNS}` : TREE_COLUMNS;
+  const template = timeline ? `${nameWidth}px minmax(${TIMELINE_MIN_PX}px, 1fr)` : TREE_COLUMNS;
 
   function clampName(width: number): number {
     const gridWidth = gridRef.current?.clientWidth;
-    const room = gridWidth ? gridWidth - OTHER_COLUMNS_MIN_PX : Number.POSITIVE_INFINITY;
+    const room = gridWidth ? gridWidth - TIMELINE_MIN_PX : Number.POSITIVE_INFINITY;
     return Math.round(Math.max(NAME_MIN_PX, Math.min(NAME_MAX_PX, room, width)));
   }
 
@@ -273,7 +291,7 @@ export function TreeGrid({
     writeNameWidth(next);
   }
 
-  const rowHeight = useRowHeight();
+  const rowHeight = useRowHeight() - (timeline ? TIMELINE_ROW_INSET_PX : 0);
   const virtualizer = useVirtualizer({
     count: rows.length,
     getScrollElement: () => scrollRef.current,
@@ -499,7 +517,7 @@ export function TreeGrid({
           role="grid"
           aria-label="Trace"
           aria-rowcount={rows.length + 1}
-          aria-colcount={timeline ? 5 : 4}
+          aria-colcount={timeline ? 2 : 4}
           tabIndex={0}
           className="relative flex min-h-0 flex-1 flex-col outline-none focus-visible:outline-2 focus-visible:outline-ring focus-visible:-outline-offset-2 focus-visible:outline-solid"
           onKeyDown={onKeyDown}
@@ -547,15 +565,19 @@ export function TreeGrid({
                 />
               ) : null}
             </div>
-            <div role="columnheader" className="px-2 text-right">
-              Duration
-            </div>
-            <div role="columnheader" className="px-2 text-right">
-              Tokens
-            </div>
-            <div role="columnheader" className="px-2 text-right">
-              Cost
-            </div>
+            {timeline ? null : (
+              <>
+                <div role="columnheader" className="px-2 text-right">
+                  Duration
+                </div>
+                <div role="columnheader" className="px-2 text-right">
+                  Tokens
+                </div>
+                <div role="columnheader" className="px-2 text-right">
+                  Cost
+                </div>
+              </>
+            )}
             {timeline ? (
               <div
                 role="columnheader"
@@ -576,18 +598,23 @@ export function TreeGrid({
                     }}
                   />
                 ) : null}
-                {marks.map((mark) => (
-                  <span
-                    key={mark.ns}
-                    aria-hidden="true"
-                    className="absolute top-1/2 -translate-y-1/2 text-caption normal-case"
-                    style={{
-                      left: `${((mark.ns - zoom.startNs) / (zoom.endNs - zoom.startNs)) * 100}%`,
-                    }}
-                  >
-                    {mark.label}
-                  </span>
-                ))}
+                {marks.map((mark) => {
+                  const pct = markPct(mark.ns, zoom);
+                  return (
+                    <span
+                      key={mark.ns}
+                      aria-hidden="true"
+                      data-tick
+                      className={cn(
+                        "absolute inset-y-0 flex items-center border-border text-caption whitespace-nowrap normal-case tabular-nums",
+                        pct > TICK_FLIP_PCT ? "-translate-x-full border-r pr-1" : "border-l pl-1",
+                      )}
+                      style={{ left: `${pct}%` }}
+                    >
+                      {mark.label}
+                    </span>
+                  );
+                })}
               </div>
             ) : null}
           </div>
@@ -604,6 +631,8 @@ export function TreeGrid({
                   return null;
                 }
                 const span = row.span;
+                const guide = guides[item.index];
+                const slow = slowLevel(span.duration_ns, traceNs, row.depth === 0);
                 const selected = span.span_id === selectedSpanId;
                 const expandable = hasChildren(ends, spanIndex);
                 const isCollapsed = displayCollapsed.has(span.span_id);
@@ -619,7 +648,9 @@ export function TreeGrid({
                     aria-selected={selected}
                     data-match={isMatch ? "true" : undefined}
                     className={cn(
-                      "absolute top-0 grid w-full items-center border-b",
+                      "absolute top-0 grid w-full items-center",
+                      // Timeline rows have gridlines instead of row borders.
+                      !timeline && "border-b",
                       selected
                         ? "bg-selection shadow-[inset_2px_0_0_var(--primary)]"
                         : "hover:bg-muted",
@@ -647,10 +678,11 @@ export function TreeGrid({
                       window.clearTimeout(hoverTimer.current);
                     }}
                   >
-                    <div role="gridcell" className="min-w-0">
+                    <div role="gridcell" className="relative h-full min-w-0">
+                      {guide ? <TreeGuideLines guide={guide} depth={row.depth} /> : null}
                       <div
-                        className="flex min-w-0 items-center gap-1 pr-2"
-                        style={{ paddingLeft: row.depth * 12 + 4 }}
+                        className="flex h-full min-w-0 items-center gap-1 pr-2"
+                        style={{ paddingLeft: row.depth * INDENT_PX + INDENT_BASE_PX }}
                       >
                         {expandable ? (
                           <button
@@ -683,17 +715,38 @@ export function TreeGrid({
                         ) : null}
                       </div>
                     </div>
-                    <div role="gridcell" className="num truncate px-2 text-caption">
-                      {formatDuration(span.duration_ns)}
-                    </div>
-                    <div role="gridcell" className="num truncate px-2 text-caption">
-                      {showTokens ? formatTokens(span.total_tokens) : ""}
-                    </div>
-                    <div role="gridcell" className="num truncate px-2 text-caption">
-                      {span.cost_total === undefined ? "" : formatCost(span.cost_total)}
-                    </div>
+                    {timeline ? null : (
+                      <>
+                        <div
+                          role="gridcell"
+                          data-slow={slow}
+                          className={cn(
+                            "num truncate px-2 text-caption",
+                            slow === "warn" && "font-medium text-status-warn",
+                            slow === "critical" && "font-medium text-status-error",
+                          )}
+                        >
+                          {formatDuration(span.duration_ns)}
+                        </div>
+                        <div role="gridcell" className="num truncate px-2 text-caption">
+                          {showTokens ? formatTokens(span.total_tokens) : ""}
+                        </div>
+                        <div role="gridcell" className="num truncate px-2 text-caption">
+                          {span.cost_total === undefined ? "" : formatCost(span.cost_total)}
+                        </div>
+                      </>
+                    )}
                     {timeline ? (
                       <div role="gridcell" className="relative h-full">
+                        {marks.map((mark) => (
+                          <span
+                            key={mark.ns}
+                            aria-hidden="true"
+                            data-gridline
+                            className="pointer-events-none absolute inset-y-0 w-px bg-border"
+                            style={{ left: `${markPct(mark.ns, zoom)}%` }}
+                          />
+                        ))}
                         {bar ? (
                           <SpanBar
                             span={span}
@@ -701,6 +754,7 @@ export function TreeGrid({
                             colorClass={BAR[span.span_kind]}
                             timelineWidth={timelineWidth}
                             traceStartNs={timeWindow.startNs}
+                            slow={slow}
                             onDoubleClick={() => {
                               setView(zoomToSpan(timeWindow, span));
                             }}
@@ -717,6 +771,65 @@ export function TreeGrid({
       </div>
     </TooltipProvider>
   );
+}
+
+function markPct(ns: number, zoom: TimeWindow): number {
+  return ((ns - zoom.startNs) / (zoom.endNs - zoom.startNs)) * 100;
+}
+
+/**
+ * The elbow lines in a row's indent: each level's line sits under its parent's chevron.
+ * ├ and a tick for a child with later siblings, a rounded └ for the last child, a full line
+ * for each ancestor level that continues, and a line down from an expanded parent's chevron.
+ */
+function TreeGuideLines({ guide, depth }: { guide: TreeGuide; depth: number }) {
+  const lineX = (level: number) => (level - 1) * INDENT_PX + INDENT_BASE_PX + CHEVRON_PX / 2;
+  const chevronX = depth * INDENT_PX + INDENT_BASE_PX;
+  const elbowX = lineX(depth);
+  // A leaf's tick runs through its empty chevron box to the icon; a parent's stops at its chevron.
+  const tickEnd = guide.down || depth === 0 ? chevronX + 3 : chevronX + CHEVRON_PX - 2;
+  return (
+    <span aria-hidden="true" data-guide={guideShape(guide)} className="pointer-events-none">
+      {guide.through.map((through, offset) =>
+        through ? (
+          <span
+            // biome-ignore lint/suspicious/noArrayIndexKey: the index is the tree level
+            key={offset}
+            className="absolute inset-y-0 w-px bg-border"
+            style={{ left: lineX(offset + 1) }}
+          />
+        ) : null,
+      )}
+      {guide.elbow === "mid" ? (
+        <>
+          <span className="absolute inset-y-0 w-px bg-border" style={{ left: elbowX }} />
+          <span
+            className="absolute top-1/2 h-px bg-border"
+            style={{ left: elbowX, width: tickEnd - elbowX }}
+          />
+        </>
+      ) : null}
+      {guide.elbow === "last" ? (
+        <span
+          className="absolute top-0 h-[calc(50%+1px)] rounded-bl-[4px] border-b border-l border-border"
+          style={{ left: elbowX, width: tickEnd - elbowX }}
+        />
+      ) : null}
+      {guide.down ? (
+        <span
+          className="absolute bottom-0 h-[calc(50%-7px)] w-px bg-border"
+          style={{ left: lineX(depth + 1) }}
+        />
+      ) : null}
+    </span>
+  );
+}
+
+/** A row's guides as text, e.g. "│ ├" or "  └┐", for tests and debugging. */
+function guideShape(guide: TreeGuide): string {
+  const levels = guide.through.map((through) => (through ? "│" : " ")).join(" ");
+  const elbow = guide.elbow === "mid" ? "├" : guide.elbow === "last" ? "└" : "";
+  return `${levels}${levels && elbow ? " " : ""}${elbow}${guide.down ? "┐" : ""}`;
 }
 
 function spanMatches(

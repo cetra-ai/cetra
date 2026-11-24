@@ -256,3 +256,43 @@ export function autoNameWidth(
   }
   return Math.min(NAME_AUTO_MAX_PX, Math.max(NAME_AUTO_MIN_PX, Math.round(widest)));
 }
+
+/** The connector lines drawn in one row's indent. */
+export type TreeGuide = {
+  /** The elbow to this row: "mid" (├, later siblings follow), "last" (└), none for a root. */
+  elbow: "mid" | "last" | null;
+  /**
+   * One entry per ancestor level from depth 1 to the parent: whether that ancestor has later
+   * siblings, so its vertical line runs through this row.
+   */
+  through: boolean[];
+  /** The row's own children follow it, so a line starts under its icon. */
+  down: boolean;
+};
+
+/**
+ * The connector lines of the rows shown, from their depths in pre-order.
+ * A line belongs to the rows actually shown, so a filtered or collapsed tree stops it at
+ * the last shown child.
+ */
+export function treeGuides(depths: readonly number[]): TreeGuide[] {
+  const guides: TreeGuide[] = new Array(depths.length);
+  // later[d]: a row of depth d follows, before any shallower row.
+  const later: boolean[] = [];
+  for (let index = depths.length - 1; index >= 0; index--) {
+    const depth = depths[index] ?? 0;
+    const next = depths[index + 1];
+    const through: boolean[] = [];
+    for (let level = 1; level < depth; level++) {
+      through.push(later[level] === true);
+    }
+    guides[index] = {
+      elbow: depth === 0 ? null : later[depth] ? "mid" : "last",
+      through,
+      down: next !== undefined && next > depth,
+    };
+    later[depth] = true;
+    later.length = depth + 1;
+  }
+  return guides;
+}
