@@ -13,7 +13,7 @@ import {
   itemsAt,
 } from "@/mocks/generated/datasets";
 import { experimentHandlers } from "@/mocks/generated/experiments";
-import { storyHandlers } from "@/mocks/generated/stories";
+import { STORY_SCORE_DEFINITIONS, storyHandlers } from "@/mocks/generated/stories";
 import { tracePredicate, widgetQueryHandler } from "@/mocks/generated/widget-query";
 import {
   type SpanStreamSource,
@@ -139,7 +139,10 @@ export function largeHandlers(dataset: Dataset): HttpHandler[] {
     http.get(`${PROJECT}/users`, ({ request }) => listUsers(dataset, request)),
     http.post(`${PROJECT}/facets`, ({ request }) => facets(dataset, request)),
     http.get(`${PROJECT}/score-definitions`, () =>
-      HttpResponse.json({ data: SCORE_DEFINITIONS, next_cursor: null }),
+      HttpResponse.json({
+        data: [...SCORE_DEFINITIONS, ...STORY_SCORE_DEFINITIONS],
+        next_cursor: null,
+      }),
     ),
     http.get(`${PROJECT}/dataset-trends`, ({ request }) => datasetTrends(dataset, request)),
     http.get(`${PROJECT}/datasets`, ({ request }) => listDatasets(dataset, request)),

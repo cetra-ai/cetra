@@ -3,12 +3,16 @@ import type { Schema } from "@/api/types";
 import { createDataset, type Dataset, rfc3339, visibleTraces } from "@/mocks/generated/dataset";
 import {
   STORY_ISSUES,
+  STORY_QUEUES,
   STORY_RULES,
+  STORY_SCORE_DEFINITIONS,
   storyAlertEvent,
   storyAlertRule,
   storyHandlers,
   storyIssue,
   storyOccurrences,
+  storyQueue,
+  storyQueueItem,
 } from "@/mocks/generated/stories";
 import { server } from "@/mocks/node";
 import alertEventsFixture from "../../../../fixtures/api/static/alert-events.json";
@@ -272,4 +276,107 @@ it("answers the story events routes, and lets the fixture rule's routes fall thr
   expect(alertEvents.data.slice(4).map((event) => event.id)).toEqual(
     projectAlertEventsFixture.data.map((event) => event.id),
   );
+});
+
+it("points every story queue's item at the story's hero trace", () => {
+  const dataset = createDataset({ seed: 1, now: NOW, traces: 2000 });
+  STORY_QUEUES.forEach((queue, position) => {
+    const item = storyQueueItem(dataset, queue);
+    const hero = dataset.traces[queue.heroIndex];
+    expect(item?.trace_id).toBe(hero?.trace_id);
+    expect(item?.queue_id).toBe(queue.id);
+    expect(item?.status).toBe("pending");
+    expect(queue.heroIndex).toBe(STORY_ISSUES[position]?.hero.index);
+  });
+});
+
+it("gives every story queue its own score fields", () => {
+  const names = new Map<string, string>([
+    ["01900000-0000-7000-8000-000000000611", "correctness"],
+    ["01900000-0000-7000-8000-000000000612", "relevance"],
+    ["01900000-0000-7000-8000-000000000615", "tone"],
+    ...STORY_SCORE_DEFINITIONS.map((definition): [string, string] => [
+      definition.id,
+      definition.name,
+    ]),
+  ]);
+  expect(STORY_QUEUES.map((queue) => queue.definitionIds.map((id) => names.get(id)))).toEqual([
+    ["correctness", "relevance"],
+    ["tests_pass", "verdict"],
+    ["resolved", "tone"],
+    ["schema_valid", "fields_correct"],
+  ]);
+  expect(STORY_SCORE_DEFINITIONS.map((definition) => definition.id)).toEqual([
+    "01900000-0000-7000-8000-000000570601",
+    "01900000-0000-7000-8000-000000570602",
+    "01900000-0000-7000-8000-000000570603",
+    "01900000-0000-7000-8000-000000570605",
+    "01900000-0000-7000-8000-000000570606",
+  ]);
+  expect(
+    STORY_SCORE_DEFINITIONS.filter((definition) => definition.data_type === "categorical").map(
+      (definition) => [definition.name, definition.categories.map((category) => category.label)],
+    ),
+  ).toEqual([
+    ["verdict", ["approve", "request changes", "reject"]],
+    ["fields_correct", ["all", "some", "none"]],
+  ]);
+});
+
+it("serves the story queues, their items and the lease, and lets other ids fall through", async () => {
+  const dataset = createDataset({ seed: 1, now: NOW, traces: 2000 });
+  server.use(...storyHandlers(dataset));
+  const queuePath = `${PROJECT}/annotation-queues`;
+  const itemPath = `${queuePath}/01900000-0000-7000-8000-000000570503/items/01900000-0000-7000-8000-000000570513`;
+
+  const list = (await (await fetch(queuePath)).json()) as {
+    data: { id: string }[];
+  };
+  expect(list.data.slice(0, 4).map((queue) => queue.id)).toEqual(
+    STORY_QUEUES.map((queue) => queue.id),
+  );
+  expect(list.data[4]?.id).toBe("01900000-0000-7000-8000-000000000a01");
+
+  const hero = dataset.traces[4]?.trace_id;
+  const byTrace = (await (await fetch(`${queuePath}?target_trace_id=${hero}`)).json()) as {
+    data: { id: string }[];
+  };
+  expect(byTrace.data.map((queue) => queue.id)).toEqual(["01900000-0000-7000-8000-000000570502"]);
+
+  const call = (await (
+    await fetch(`${queuePath}/01900000-0000-7000-8000-000000570503`)
+  ).json()) as Schema<"AnnotationQueue">;
+  expect(call.name).toBe("Call review");
+  expect(call.instructions).toBe(
+    "Listen for whether the caller got what they asked for, and how the reply sounded.",
+  );
+  expect(call.counts).toEqual({ pending: 20, completed: 7, skipped: 2 });
+
+  const voiceTrace = dataset.traces[5]?.trace_id;
+  const item = (await (await fetch(itemPath)).json()) as Schema<"AnnotationQueueItem">;
+  expect(item.trace_id).toBe(voiceTrace);
+  const leased = (await (
+    await fetch(`${itemPath}/lease`, { method: "POST" })
+  ).json()) as Schema<"AnnotationQueueItem">;
+  expect(leased).toEqual(item);
+
+  const completed = (await (
+    await fetch(`${queuePath}/01900000-0000-7000-8000-000000570503/items?status=completed`)
+  ).json()) as { data: unknown[] };
+  expect(completed.data).toEqual([]);
+
+  const fixture = (await (
+    await fetch(`${queuePath}/01900000-0000-7000-8000-000000000a01`)
+  ).json()) as Schema<"AnnotationQueue">;
+  expect(fixture.name).toBe("Relevance review");
+});
+
+it("counts a story queue's progress as completed plus skipped of its total", () => {
+  const dataset = createDataset({ seed: 1, now: NOW, traces: 2000 });
+  const progress = STORY_QUEUES.map((queue) => {
+    const { counts } = storyQueue(dataset, queue);
+    const total = counts.pending + counts.completed + counts.skipped;
+    return `${counts.completed + counts.skipped}/${total}`;
+  });
+  expect(progress).toEqual(["5/17", "9/15", "9/29", "21/52"]);
 });

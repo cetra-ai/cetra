@@ -2,6 +2,7 @@ import { type HttpHandler, HttpResponse, http } from "msw";
 import type { Schema } from "@/api/types";
 import { type Dataset, rfc3339, visibleTraces } from "@/mocks/generated/dataset";
 import alertRulesFixture from "../../../../fixtures/api/static/alert-rules.json";
+import queuesFixture from "../../../../fixtures/api/static/annotation-queues.json";
 import issuesFixture from "../../../../fixtures/api/static/issues.json";
 import projectAlertEventsFixture from "../../../../fixtures/api/static/project-alert-events.json";
 
@@ -179,6 +180,125 @@ export const STORY_RULES: readonly StoryRule[] = [
     lastValue: 0.985,
     lastCount: 210,
     changedAgoMs: 5 * HOUR_MS,
+  },
+];
+
+const MEMBER_ID = "01900000-0000-7000-8000-000000000100";
+/** The generated definitions the queues reuse (`SCORE_DEFINITIONS` in handlers.ts): correctness and relevance for Support answers, tone for Call review. */
+const CORRECTNESS_ID = "01900000-0000-7000-8000-000000000611";
+const RELEVANCE_ID = "01900000-0000-7000-8000-000000000612";
+const TONE_ID = "01900000-0000-7000-8000-000000000615";
+const DEFINED_AT = "2026-01-01T09:00:00.000000000Z";
+const LEASE_MS = 5 * MINUTE_MS;
+
+type StoryQueue = {
+  id: string;
+  itemId: string;
+  name: string;
+  description: string;
+  instructions: string;
+  /** The review fields, in order. */
+  definitionIds: readonly string[];
+  counts: Schema<"QueueCounts">;
+  /** Dataset index of the hero trace, the queue's one item. */
+  heroIndex: number;
+};
+
+export const STORY_SCORE_DEFINITIONS: Schema<"ScoreDefinition">[] = [
+  {
+    id: "01900000-0000-7000-8000-000000570601",
+    name: "tests_pass",
+    data_type: "boolean",
+    categories: [],
+    description: "Whether the tests pass after the patch.",
+    direction: "higher",
+    created_at: DEFINED_AT,
+    updated_at: DEFINED_AT,
+  },
+  {
+    id: "01900000-0000-7000-8000-000000570602",
+    name: "verdict",
+    data_type: "categorical",
+    categories: [{ label: "approve" }, { label: "request changes" }, { label: "reject" }],
+    description: "Your review of the patch.",
+    direction: "none",
+    created_at: DEFINED_AT,
+    updated_at: DEFINED_AT,
+  },
+  {
+    id: "01900000-0000-7000-8000-000000570603",
+    name: "resolved",
+    data_type: "boolean",
+    categories: [],
+    description: "Whether the caller's request was handled.",
+    direction: "higher",
+    created_at: DEFINED_AT,
+    updated_at: DEFINED_AT,
+  },
+  {
+    id: "01900000-0000-7000-8000-000000570605",
+    name: "schema_valid",
+    data_type: "boolean",
+    categories: [],
+    description: "Whether the extracted invoice passes the schema check.",
+    direction: "higher",
+    created_at: DEFINED_AT,
+    updated_at: DEFINED_AT,
+  },
+  {
+    id: "01900000-0000-7000-8000-000000570606",
+    name: "fields_correct",
+    data_type: "categorical",
+    categories: [{ label: "all" }, { label: "some" }, { label: "none" }],
+    description: "How many fields match the invoice.",
+    direction: "none",
+    created_at: DEFINED_AT,
+    updated_at: DEFINED_AT,
+  },
+];
+
+export const STORY_QUEUES: readonly StoryQueue[] = [
+  {
+    id: "01900000-0000-7000-8000-000000570501",
+    itemId: "01900000-0000-7000-8000-000000570511",
+    name: "Support answers",
+    description: "Support answers that people review after the judges.",
+    instructions:
+      "Score each answer against the customer's question. Skip the ones without a question.",
+    definitionIds: [CORRECTNESS_ID, RELEVANCE_ID],
+    counts: { pending: 12, completed: 4, skipped: 1 },
+    heroIndex: 3,
+  },
+  {
+    id: "01900000-0000-7000-8000-000000570502",
+    itemId: "01900000-0000-7000-8000-000000570512",
+    name: "Patch review",
+    description: "Patches from the coding agent, before they are merged.",
+    instructions: "Check that the patch fixes the issue and that the tests pass.",
+    definitionIds: ["01900000-0000-7000-8000-000000570601", "01900000-0000-7000-8000-000000570602"],
+    counts: { pending: 6, completed: 9, skipped: 0 },
+    heroIndex: 4,
+  },
+  {
+    id: "01900000-0000-7000-8000-000000570503",
+    itemId: "01900000-0000-7000-8000-000000570513",
+    name: "Call review",
+    description: "Calls that the voice agent handled.",
+    instructions:
+      "Listen for whether the caller got what they asked for, and how the reply sounded.",
+    definitionIds: ["01900000-0000-7000-8000-000000570603", TONE_ID],
+    counts: { pending: 20, completed: 7, skipped: 2 },
+    heroIndex: 5,
+  },
+  {
+    id: "01900000-0000-7000-8000-000000570504",
+    itemId: "01900000-0000-7000-8000-000000570514",
+    name: "Invoice fields",
+    description: "Invoices that the extraction pipeline read.",
+    instructions: "Compare the extracted fields with the invoice.",
+    definitionIds: ["01900000-0000-7000-8000-000000570605", "01900000-0000-7000-8000-000000570606"],
+    counts: { pending: 31, completed: 18, skipped: 3 },
+    heroIndex: 6,
   },
 ];
 
@@ -385,6 +505,45 @@ export function storyAlertEvent(dataset: Dataset, rule: StoryRule): Schema<"Aler
   };
 }
 
+export function storyQueue(dataset: Dataset, queue: StoryQueue): Schema<"AnnotationQueue"> {
+  return {
+    id: queue.id,
+    name: queue.name,
+    description: queue.description,
+    instructions: queue.instructions,
+    target: "trace",
+    definition_ids: [...queue.definitionIds],
+    version: 1,
+    created_by: MEMBER_ID,
+    created_at: ago(dataset, 7 * DAY_MS),
+    updated_at: ago(dataset, HOUR_MS),
+    counts: queue.counts,
+  };
+}
+
+/** The queue's one item: the hero trace, pending and leased to the mock user. Undefined when the dataset has no such trace. */
+export function storyQueueItem(
+  dataset: Dataset,
+  queue: StoryQueue,
+): Schema<"AnnotationQueueItem"> | undefined {
+  const hero: Trace | undefined = dataset.traces[queue.heroIndex];
+  if (hero === undefined) {
+    return undefined;
+  }
+  return {
+    id: queue.itemId,
+    queue_id: queue.id,
+    trace_id: hero.trace_id,
+    target_time: hero.start_time,
+    status: "pending",
+    leased_by_user_id: MEMBER_ID,
+    lease_expires_at: rfc3339(dataset.now + LEASE_MS),
+    added_by: "user",
+    added_by_id: MEMBER_ID,
+    created_at: ago(dataset, 6 * HOUR_MS),
+  };
+}
+
 /** A path parameter as text; msw types it as possibly repeated or missing. */
 function idParam(value: string | readonly string[] | undefined): string {
   return typeof value === "string" ? value : "";
@@ -398,6 +557,14 @@ function idParam(value: string | readonly string[] | undefined): string {
 export function storyHandlers(dataset: Dataset): HttpHandler[] {
   const issueById = (id: string) => STORY_ISSUES.find((issue) => issue.id === id);
   const ruleById = (id: string) => STORY_RULES.find((rule) => rule.id === id);
+  const queueById = (id: string) => STORY_QUEUES.find((queue) => queue.id === id);
+  const QUEUE = `${PROJECT}/annotation-queues`;
+  const heroItem = (queue: StoryQueue) => storyQueueItem(dataset, queue);
+  /** The item of a story queue, when `itemId` names that queue's item. */
+  const itemOf = (queueId: string, itemId: string) => {
+    const queue = queueById(queueId);
+    return queue !== undefined && queue.itemId === itemId ? heroItem(queue) : undefined;
+  };
   return [
     http.get(`${PROJECT}/issues`, () =>
       HttpResponse.json({
@@ -453,6 +620,54 @@ export function storyHandlers(dataset: Dataset): HttpHandler[] {
         data: [...events, ...projectAlertEventsFixture.data],
         next_cursor: null,
       });
+    }),
+    http.get(QUEUE, ({ request }) => {
+      const search = new URL(request.url).searchParams;
+      if (search.has("target_session_id")) {
+        return undefined;
+      }
+      const traceId = search.get("target_trace_id");
+      if (traceId !== null) {
+        const queues = STORY_QUEUES.filter(
+          (queue) => dataset.traces[queue.heroIndex]?.trace_id === traceId,
+        ).map((queue) => storyQueue(dataset, queue));
+        return queues.length === 0
+          ? undefined
+          : HttpResponse.json({ data: queues, next_cursor: null });
+      }
+      return HttpResponse.json({
+        data: [...STORY_QUEUES.map((queue) => storyQueue(dataset, queue)), ...queuesFixture.data],
+        next_cursor: null,
+      });
+    }),
+    http.get(`${QUEUE}/:id`, ({ params }) => {
+      const queue = queueById(idParam(params.id));
+      return queue ? HttpResponse.json(storyQueue(dataset, queue)) : undefined;
+    }),
+    http.get(`${QUEUE}/:id/items`, ({ params, request }) => {
+      const queue = queueById(idParam(params.id));
+      const item = queue ? heroItem(queue) : undefined;
+      if (item === undefined) {
+        return undefined;
+      }
+      const status = new URL(request.url).searchParams.get("status");
+      return HttpResponse.json({
+        data: status === null || status === "pending" ? [item] : [],
+        next_cursor: null,
+      });
+    }),
+    http.get(`${QUEUE}/:id/items/:item_id`, ({ params }) => {
+      const item = itemOf(idParam(params.id), idParam(params.item_id));
+      return item ? HttpResponse.json(item) : undefined;
+    }),
+    http.post(`${QUEUE}/:id/items/:item_id/lease`, ({ params }) => {
+      const item = itemOf(idParam(params.id), idParam(params.item_id));
+      return item ? HttpResponse.json(item) : undefined;
+    }),
+    http.post(`${QUEUE}/:id/next`, ({ params }) => {
+      const queue = queueById(idParam(params.id));
+      const item = queue ? heroItem(queue) : undefined;
+      return item ? HttpResponse.json(item) : undefined;
     }),
   ];
 }

@@ -276,7 +276,74 @@ it("defines the generated scores so lists can colour them", async () => {
     ["exact", "higher"],
     ["quality", "higher"],
     ["tone", "none"],
+    ["tests_pass", "higher"],
+    ["verdict", "none"],
+    ["resolved", "higher"],
+    ["schema_valid", "higher"],
+    ["fields_correct", "none"],
   ]);
+});
+
+it("serves the story queues' score definitions after the generated ones", async () => {
+  server.use(...largeHandlers(createDataset({ seed: 1, now: NOW, traces: 5 })));
+  const response = await fetch(`${PROJECT}/score-definitions`);
+  const body = (await response.json()) as { data: { id: string }[] };
+  const ids = body.data.map((item) => item.id);
+  const generated = [
+    "01900000-0000-7000-8000-000000000611",
+    "01900000-0000-7000-8000-000000000612",
+    "01900000-0000-7000-8000-000000000615",
+  ];
+  const story = [
+    "01900000-0000-7000-8000-000000570601",
+    "01900000-0000-7000-8000-000000570602",
+    "01900000-0000-7000-8000-000000570603",
+    "01900000-0000-7000-8000-000000570605",
+    "01900000-0000-7000-8000-000000570606",
+  ];
+  const at = (id: string) => ids.indexOf(id);
+  for (const id of generated) {
+    expect(at(id)).toBeGreaterThanOrEqual(0);
+  }
+  expect(at(generated[2] ?? "")).toBeLessThan(at(story[0] ?? ""));
+  expect(ids.slice(-5)).toEqual(story);
+});
+
+it("keeps the fixture queue's review as it was", async () => {
+  const dataset = createDataset({ seed: 1, now: NOW, traces: 5 });
+  server.use(...largeHandlers(dataset));
+  const review = async (id: string) =>
+    (
+      (await (await fetch(`${PROJECT}/annotation-queues/${id}`)).json()) as {
+        definition_ids: string[];
+      }
+    ).definition_ids;
+
+  const correctness = "01900000-0000-7000-8000-000000000611";
+  const relevance = "01900000-0000-7000-8000-000000000612";
+  expect(await review("01900000-0000-7000-8000-000000000a01")).toEqual([correctness, relevance]);
+  expect(await review("01900000-0000-7000-8000-000000570501")).toEqual([correctness, relevance]);
+  expect(await review("01900000-0000-7000-8000-000000570502")).toEqual([
+    "01900000-0000-7000-8000-000000570601",
+    "01900000-0000-7000-8000-000000570602",
+  ]);
+  expect(await review("01900000-0000-7000-8000-000000570503")).toEqual([
+    "01900000-0000-7000-8000-000000570603",
+    "01900000-0000-7000-8000-000000000615",
+  ]);
+
+  const storyItem = (await (
+    await fetch(
+      `${PROJECT}/annotation-queues/01900000-0000-7000-8000-000000570502/items/01900000-0000-7000-8000-000000570512`,
+    )
+  ).json()) as { trace_id: string };
+  expect(storyItem.trace_id).toBe(dataset.traces[4]?.trace_id);
+  const fixtureItem = (await (
+    await fetch(
+      `${PROJECT}/annotation-queues/01900000-0000-7000-8000-000000000a01/items/01900000-0000-7000-8000-000000000a11`,
+    )
+  ).json()) as { trace_id: string };
+  expect(fixtureItem.trace_id).toBe(dataset.traces[0]?.trace_id);
 });
 
 /** A trace the default lists show: no evaluation and no experiment trace. */
