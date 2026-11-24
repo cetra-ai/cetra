@@ -7,7 +7,7 @@
       "name": "weather-agent",
       "span_kind": "agent",
       "start_time": "2025-12-31T23:59:50.000000000Z",
-      "end_time": "2025-12-31T23:59:50.240000000Z",
+      "end_time": "2025-12-31T23:59:50.262000000Z",
       "status": "ok",
       "service_name": "capture-app",
       "input": "{\"input\":\"What is the weather in Paris?\"}",
@@ -58,23 +58,23 @@
       "scope_version": "0.1.85",
       "events": [
         {
-          "time": "2025-12-31T23:59:50.024000000Z",
+          "time": "2025-12-31T23:59:50.026000000Z",
           "name": "start (agent.requirement.start)"
         },
         {
-          "time": "2025-12-31T23:59:50.194000000Z",
+          "time": "2025-12-31T23:59:50.215000000Z",
           "name": "success (agent.requirement.success)"
         },
         {
-          "time": "2025-12-31T23:59:50.194000000Z",
+          "time": "2025-12-31T23:59:50.215000000Z",
           "name": "start (agent.requirement.start)"
         },
         {
-          "time": "2025-12-31T23:59:50.237000000Z",
+          "time": "2025-12-31T23:59:50.259000000Z",
           "name": "final_answer (agent.requirement.final_answer)"
         },
         {
-          "time": "2025-12-31T23:59:50.239000000Z",
+          "time": "2025-12-31T23:59:50.261000000Z",
           "name": "success (agent.requirement.success)"
         }
       ],
@@ -91,8 +91,8 @@
       "parent_span_id": "5a3f4fa075ee196f",
       "name": "OpenAIChatModel",
       "span_kind": "llm",
-      "start_time": "2025-12-31T23:59:50.025000000Z",
-      "end_time": "2025-12-31T23:59:50.193000000Z",
+      "start_time": "2025-12-31T23:59:50.027000000Z",
+      "end_time": "2025-12-31T23:59:50.214000000Z",
       "status": "ok",
       "service_name": "capture-app",
       "provider": "openai",
@@ -140,15 +140,15 @@
       "scope_version": "0.1.85",
       "events": [
         {
-          "time": "2025-12-31T23:59:50.029000000Z",
+          "time": "2025-12-31T23:59:50.032000000Z",
           "name": "start (backend.openai.chat.start)"
         },
         {
-          "time": "2025-12-31T23:59:50.190000000Z",
+          "time": "2025-12-31T23:59:50.211000000Z",
           "name": "success (backend.openai.chat.success)"
         },
         {
-          "time": "2025-12-31T23:59:50.192000000Z",
+          "time": "2025-12-31T23:59:50.213000000Z",
           "name": "finish (backend.openai.chat.finish)"
         }
       ],
@@ -165,8 +165,8 @@
       "parent_span_id": "5a3f4fa075ee196f",
       "name": "get_weather",
       "span_kind": "tool",
-      "start_time": "2025-12-31T23:59:50.193000000Z",
-      "end_time": "2025-12-31T23:59:50.194000000Z",
+      "start_time": "2025-12-31T23:59:50.214000000Z",
+      "end_time": "2025-12-31T23:59:50.215000000Z",
       "status": "ok",
       "service_name": "capture-app",
       "input": "{\"input\":{\"city\":\"Paris\"},\"options\":null}",
@@ -195,15 +195,15 @@
       "scope_version": "0.1.85",
       "events": [
         {
-          "time": "2025-12-31T23:59:50.193000000Z",
+          "time": "2025-12-31T23:59:50.214000000Z",
           "name": "start (tool.custom.get_weather.start)"
         },
         {
-          "time": "2025-12-31T23:59:50.193000000Z",
+          "time": "2025-12-31T23:59:50.215000000Z",
           "name": "success (tool.custom.get_weather.success)"
         },
         {
-          "time": "2025-12-31T23:59:50.194000000Z",
+          "time": "2025-12-31T23:59:50.215000000Z",
           "name": "finish (tool.custom.get_weather.finish)"
         }
       ],
@@ -220,8 +220,8 @@
       "parent_span_id": "5a3f4fa075ee196f",
       "name": "OpenAIChatModel",
       "span_kind": "llm",
-      "start_time": "2025-12-31T23:59:50.195000000Z",
-      "end_time": "2025-12-31T23:59:50.238000000Z",
+      "start_time": "2025-12-31T23:59:50.216000000Z",
+      "end_time": "2025-12-31T23:59:50.260000000Z",
       "status": "ok",
       "service_name": "capture-app",
       "provider": "openai",
@@ -269,15 +269,15 @@
       "scope_version": "0.1.85",
       "events": [
         {
-          "time": "2025-12-31T23:59:50.199000000Z",
+          "time": "2025-12-31T23:59:50.221000000Z",
           "name": "start (backend.openai.chat.start)"
         },
         {
-          "time": "2025-12-31T23:59:50.237000000Z",
+          "time": "2025-12-31T23:59:50.258000000Z",
           "name": "success (backend.openai.chat.success)"
         },
         {
-          "time": "2025-12-31T23:59:50.238000000Z",
+          "time": "2025-12-31T23:59:50.260000000Z",
           "name": "finish (backend.openai.chat.finish)"
         }
       ],
@@ -294,8 +294,8 @@
       "parent_span_id": "5a3f4fa075ee196f",
       "name": "final_answer",
       "span_kind": "agent",
-      "start_time": "2025-12-31T23:59:50.237000000Z",
-      "end_time": "2025-12-31T23:59:50.237000000Z",
+      "start_time": "2025-12-31T23:59:50.259000000Z",
+      "end_time": "2025-12-31T23:59:50.259000000Z",
       "status": "ok",
       "service_name": "capture-app",
       "input": "{\"delta\":\"Sunny in Paris\",\"output\":\"Sunny in Paris\",\"output_structured\":null,\"state\":{\"answer\":null,\"cost\":{\"completion_tokens_cost_usd\":0.000010199999999999999,\"prompt_tokens_usd\":0.000012299999999999999,\"total_cost_usd\":0.000022499999999999998},\"iteration\":2,\"memory\":{\"messages\":[{\"content\":[{\"text\":\"Your task: What is the weather in Paris?\",\"type\":\"text\"}],\"role\":\"user\"},{\"content\":[{\"args\":\"{\\\"city\\\": \\\"Paris\\\"}\",\"id\":\"call_00000001\",\"tool_name\":\"get_weather\",\"type\":\"tool-call\"}],\"role\":\"assistant\"},{\"content\":[{\"result\":\"sunny in Paris\",\"tool_call_id\":\"call_00000001\",\"tool_name\":\"get_weather\",\"type\":\"tool-result\"}],\"role\":\"tool\"}],\"name\":\"UnconstrainedMemory\"},\"result\":null,\"steps\":[{\"error\":null,\"id\":\"capture-volatile-1\",\"input\":{\"city\":\"Paris\"},\"iteration\":1,\"output\":\"sunny in Paris\",\"tool\":{\"description\":\"Look up the weather for a city.\",\"input_schema\":{\"properties\":{\"city\":{\"title\":\"City\",\"type\":\"string\"}},\"required\":[\"city\"],\"title\":\"get_weather\",\"type\":\"object\"},\"name\":\"get_weather\"}}],\"usage\":{\"cached_creation_tokens\":0,\"cached_prompt_tokens\":0,\"completion_tokens\":17,\"prompt_tokens\":82,\"total_tokens\":99}}}",
@@ -329,8 +329,8 @@
       "parent_span_id": "5a3f4fa075ee196f",
       "name": "final_answer",
       "span_kind": "tool",
-      "start_time": "2025-12-31T23:59:50.239000000Z",
-      "end_time": "2025-12-31T23:59:50.239000000Z",
+      "start_time": "2025-12-31T23:59:50.260000000Z",
+      "end_time": "2025-12-31T23:59:50.261000000Z",
       "status": "ok",
       "service_name": "capture-app",
       "input": "{\"input\":{\"response\":\"Sunny in Paris\"},\"options\":null}",
@@ -359,15 +359,15 @@
       "scope_version": "0.1.85",
       "events": [
         {
-          "time": "2025-12-31T23:59:50.239000000Z",
+          "time": "2025-12-31T23:59:50.261000000Z",
           "name": "start (tool.final_answer.start)"
         },
         {
-          "time": "2025-12-31T23:59:50.239000000Z",
+          "time": "2025-12-31T23:59:50.261000000Z",
           "name": "success (tool.final_answer.success)"
         },
         {
-          "time": "2025-12-31T23:59:50.239000000Z",
+          "time": "2025-12-31T23:59:50.261000000Z",
           "name": "finish (tool.final_answer.finish)"
         }
       ],

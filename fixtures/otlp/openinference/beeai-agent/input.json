@@ -49,7 +49,7 @@
               "name": "weather-agent",
               "kind": 1,
               "startTimeUnixNano": "1767225590000000000",
-              "endTimeUnixNano": "1767225590240000000",
+              "endTimeUnixNano": "1767225590262000000",
               "attributes": [
                 {
                   "key": "input.value",
@@ -253,31 +253,31 @@
               "droppedAttributesCount": 0,
               "events": [
                 {
-                  "timeUnixNano": "1767225590024000000",
+                  "timeUnixNano": "1767225590026000000",
                   "name": "start (agent.requirement.start)",
                   "attributes": [],
                   "droppedAttributesCount": 0
                 },
                 {
-                  "timeUnixNano": "1767225590194000000",
+                  "timeUnixNano": "1767225590215000000",
                   "name": "success (agent.requirement.success)",
                   "attributes": [],
                   "droppedAttributesCount": 0
                 },
                 {
-                  "timeUnixNano": "1767225590194000000",
+                  "timeUnixNano": "1767225590215000000",
                   "name": "start (agent.requirement.start)",
                   "attributes": [],
                   "droppedAttributesCount": 0
                 },
                 {
-                  "timeUnixNano": "1767225590237000000",
+                  "timeUnixNano": "1767225590259000000",
                   "name": "final_answer (agent.requirement.final_answer)",
                   "attributes": [],
                   "droppedAttributesCount": 0
                 },
                 {
-                  "timeUnixNano": "1767225590239000000",
+                  "timeUnixNano": "1767225590261000000",
                   "name": "success (agent.requirement.success)",
                   "attributes": [],
                   "droppedAttributesCount": 0
@@ -299,8 +299,8 @@
               "flags": 256,
               "name": "OpenAIChatModel",
               "kind": 1,
-              "startTimeUnixNano": "1767225590025000000",
-              "endTimeUnixNano": "1767225590193000000",
+              "startTimeUnixNano": "1767225590027000000",
+              "endTimeUnixNano": "1767225590214000000",
               "attributes": [
                 {
                   "key": "input.value",
@@ -504,19 +504,19 @@
               "droppedAttributesCount": 0,
               "events": [
                 {
-                  "timeUnixNano": "1767225590029000000",
+                  "timeUnixNano": "1767225590032000000",
                   "name": "start (backend.openai.chat.start)",
                   "attributes": [],
                   "droppedAttributesCount": 0
                 },
                 {
-                  "timeUnixNano": "1767225590190000000",
+                  "timeUnixNano": "1767225590211000000",
                   "name": "success (backend.openai.chat.success)",
                   "attributes": [],
                   "droppedAttributesCount": 0
                 },
                 {
-                  "timeUnixNano": "1767225590192000000",
+                  "timeUnixNano": "1767225590213000000",
                   "name": "finish (backend.openai.chat.finish)",
                   "attributes": [],
                   "droppedAttributesCount": 0
@@ -538,8 +538,8 @@
               "flags": 256,
               "name": "get_weather",
               "kind": 1,
-              "startTimeUnixNano": "1767225590193000000",
-              "endTimeUnixNano": "1767225590194000000",
+              "startTimeUnixNano": "1767225590214000000",
+              "endTimeUnixNano": "1767225590215000000",
               "attributes": [
                 {
                   "key": "input.value",
@@ -611,19 +611,19 @@
               "droppedAttributesCount": 0,
               "events": [
                 {
-                  "timeUnixNano": "1767225590193000000",
+                  "timeUnixNano": "1767225590214000000",
                   "name": "start (tool.custom.get_weather.start)",
                   "attributes": [],
                   "droppedAttributesCount": 0
                 },
                 {
-                  "timeUnixNano": "1767225590193000000",
+                  "timeUnixNano": "1767225590215000000",
                   "name": "success (tool.custom.get_weather.success)",
                   "attributes": [],
                   "droppedAttributesCount": 0
                 },
                 {
-                  "timeUnixNano": "1767225590194000000",
+                  "timeUnixNano": "1767225590215000000",
                   "name": "finish (tool.custom.get_weather.finish)",
                   "attributes": [],
                   "droppedAttributesCount": 0
@@ -645,8 +645,8 @@
               "flags": 256,
               "name": "OpenAIChatModel",
               "kind": 1,
-              "startTimeUnixNano": "1767225590195000000",
-              "endTimeUnixNano": "1767225590238000000",
+              "startTimeUnixNano": "1767225590216000000",
+              "endTimeUnixNano": "1767225590260000000",
               "attributes": [
                 {
                   "key": "input.value",
@@ -898,19 +898,19 @@
               "droppedAttributesCount": 0,
               "events": [
                 {
-                  "timeUnixNano": "1767225590199000000",
+                  "timeUnixNano": "1767225590221000000",
                   "name": "start (backend.openai.chat.start)",
                   "attributes": [],
                   "droppedAttributesCount": 0
                 },
                 {
-                  "timeUnixNano": "1767225590237000000",
+                  "timeUnixNano": "1767225590258000000",
                   "name": "success (backend.openai.chat.success)",
                   "attributes": [],
                   "droppedAttributesCount": 0
                 },
                 {
-                  "timeUnixNano": "1767225590238000000",
+                  "timeUnixNano": "1767225590260000000",
                   "name": "finish (backend.openai.chat.finish)",
                   "attributes": [],
                   "droppedAttributesCount": 0
@@ -932,8 +932,8 @@
               "flags": 256,
               "name": "final_answer",
               "kind": 1,
-              "startTimeUnixNano": "1767225590237000000",
-              "endTimeUnixNano": "1767225590237000000",
+              "startTimeUnixNano": "1767225590259000000",
+              "endTimeUnixNano": "1767225590259000000",
               "attributes": [
                 {
                   "key": "input.value",
@@ -996,8 +996,8 @@
               "flags": 256,
               "name": "final_answer",
               "kind": 1,
-              "startTimeUnixNano": "1767225590239000000",
-              "endTimeUnixNano": "1767225590239000000",
+              "startTimeUnixNano": "1767225590260000000",
+              "endTimeUnixNano": "1767225590261000000",
               "attributes": [
                 {
                   "key": "input.value",
@@ -1069,19 +1069,19 @@
               "droppedAttributesCount": 0,
               "events": [
                 {
-                  "timeUnixNano": "1767225590239000000",
+                  "timeUnixNano": "1767225590261000000",
                   "name": "start (tool.final_answer.start)",
                   "attributes": [],
                   "droppedAttributesCount": 0
                 },
                 {
-                  "timeUnixNano": "1767225590239000000",
+                  "timeUnixNano": "1767225590261000000",
                   "name": "success (tool.final_answer.success)",
                   "attributes": [],
                   "droppedAttributesCount": 0
                 },
                 {
-                  "timeUnixNano": "1767225590239000000",
+                  "timeUnixNano": "1767225590261000000",
                   "name": "finish (tool.final_answer.finish)",
                   "attributes": [],
                   "droppedAttributesCount": 0
