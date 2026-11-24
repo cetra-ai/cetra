@@ -33,12 +33,12 @@ services:
               upstream_url: https://api.openai.com/v1/chat/completions
       - name: opentelemetry
         config:
-          traces_endpoint: https://<CETRA_HOST>/v1/traces
+          traces_endpoint: http://localhost:8080/v1/traces
           headers:
             Authorization: Bearer <SK_CETRA_KEY>
 ```
 
-Replace `<CETRA_HOST>` with the host cetra runs on, and `<SK_CETRA_KEY>` with your `sk-cetra-…` API key. See [Send OpenTelemetry](/docs/get-started/opentelemetry/).
+Point `traces_endpoint` at the host cetra runs on, and replace `<SK_CETRA_KEY>` with your `sk-cetra-…` API key. See [Send OpenTelemetry](/docs/get-started/opentelemetry/).
 
 Start Kong with request tracing on and every request sampled:
 
