@@ -1,6 +1,17 @@
+// @ts-expect-error node builtin, available under Vitest
+import { createHash } from "node:crypto";
 import { expect, it } from "vitest";
 import type { Schema } from "@/api/types";
-import { createDataset, type Dataset, SHOWCASES, SUPPORT_TURNS } from "@/mocks/generated/dataset";
+import {
+  createDataset,
+  type Dataset,
+  type Profile,
+  SHOWCASES,
+  SUPPORT_PROFILE,
+  SUPPORT_SHOWCASE,
+  SUPPORT_TURNS,
+  type Turn,
+} from "@/mocks/generated/dataset";
 
 const NOW = Date.parse("2026-06-01T00:00:00.000Z");
 
@@ -671,4 +682,225 @@ it("leaves trace 0 and the showcases alone", () => {
   for (const showcase of SHOWCASES) {
     expect(dataset.traces[showcase.index]?.duration_ns).toBe(showcase.spans[0].to * 1_000_000);
   }
+});
+
+/** The sha256 of the traces and of the details of traces 0, 1, 2, 3, 7 and 16 of a dataset. */
+function digestOf(dataset: Dataset): string {
+  const hash = createHash("sha256");
+  hash.update(JSON.stringify(dataset.traces));
+  for (const index of [0, 1, 2, 3, 7, 16]) {
+    const trace = dataset.traces[index];
+    if (!trace) {
+      throw new Error(`the dataset has trace ${index}`);
+    }
+    const detail = dataset.traceDetail(trace.trace_id);
+    hash.update(JSON.stringify(detail));
+    for (const row of detail?.spans ?? []) {
+      hash.update(JSON.stringify(dataset.spanDetail(trace.trace_id, row.span.span_id)));
+    }
+  }
+  return hash.digest("hex");
+}
+
+/** The digest of the support output before M16 (P1): the default profile and the explicit one must both keep it. */
+const SUPPORT_DIGEST = "713b3032e536912b16edde65f86a421942cfe3ba4bdf32cc226667fb05edf471";
+
+it("keeps the support output byte-identical", () => {
+  const dataset = createDataset({ seed: 1, now: NOW, traces: 400 });
+  expect(digestOf(dataset)).toBe(SUPPORT_DIGEST);
+  const explicit = createDataset({
+    seed: 1,
+    now: NOW,
+    traces: 400,
+    profile: { ...SUPPORT_PROFILE, showcases: SHOWCASES },
+  });
+  expect(digestOf(explicit)).toBe(SUPPORT_DIGEST);
+});
+
+/** A profile whose traces are grouped into calls of 4 to 12, one caller per call, with no showcases. */
+const CALL_PROFILE: Profile = {
+  ...SUPPORT_PROFILE,
+  sessions: { kind: "calls", min: 4, max: 12, prefix: "call-" },
+  users: { kind: "per-call", pool: 60, prefix: "caller-", label: "Caller" },
+  showcases: [],
+};
+
+it("gives a profile without a big first trace an ordinary trace 0", () => {
+  const dataset = createDataset({
+    seed: 1,
+    now: NOW,
+    traces: 10,
+    profile: { ...SUPPORT_PROFILE, bigFirstTrace: false },
+  });
+  const trace = dataset.traces[0];
+  if (!trace) {
+    throw new Error("a ten-trace dataset has trace 0");
+  }
+  expect(trace.span_count).toBeLessThanOrEqual(60);
+  expect(NOW - Date.parse(trace.start_time)).toBeGreaterThanOrEqual(60_000);
+});
+
+it("groups consecutive generated traces into calls of 4 to 12, one caller per call", () => {
+  const dataset = createDataset({ seed: 1, now: NOW, traces: 300, profile: CALL_PROFILE });
+  const calls = new Map<string, number[]>();
+  dataset.traces.forEach((trace, index) => {
+    const session = trace.session_id;
+    if (session === undefined) {
+      throw new Error(`trace ${index} belongs to a call`);
+    }
+    calls.set(session, [...(calls.get(session) ?? []), index]);
+  });
+  const ordered = [...calls.values()];
+  expect(ordered.length).toBeGreaterThan(1);
+  expect(ordered[ordered.length - 1]?.at(-1)).toBe(299);
+
+  ordered.forEach((rows, call) => {
+    rows.forEach((index, position) => {
+      if (position > 0) {
+        expect(index).toBe((rows[position - 1] ?? -2) + 1);
+      }
+    });
+    const last = call === ordered.length - 1;
+    expect(rows.length).toBeGreaterThanOrEqual(last ? 1 : 4);
+    expect(rows.length).toBeLessThanOrEqual(12);
+
+    const user = `caller-${String(call % 60).padStart(3, "0")}`;
+    for (const index of rows) {
+      const trace = dataset.traces[index];
+      expect(trace?.user_id).toBe(user);
+      expect(JSON.parse(trace?.metadata["user.name"] ?? "null")).toBe(
+        `Caller ${String(call % 60).padStart(3, "0")}`,
+      );
+    }
+  });
+});
+
+it("skips the showcase indices when it groups calls", () => {
+  const dataset = createDataset({
+    seed: 1,
+    now: NOW,
+    traces: 10,
+    profile: { ...CALL_PROFILE, showcases: [SUPPORT_SHOWCASE] },
+  });
+  expect(dataset.traces[3]?.session_id).toBeUndefined();
+  expect(dataset.traces[2]?.session_id).toBeDefined();
+  // The first call takes at least four generated traces: 0, 1, 2 and then 4.
+  expect(dataset.traces[2]?.session_id).toBe(dataset.traces[4]?.session_id);
+});
+
+it("gives no session and no user to a profile without them", () => {
+  const dataset = createDataset({
+    seed: 1,
+    now: NOW,
+    traces: 100,
+    profile: {
+      ...SUPPORT_PROFILE,
+      sessions: { kind: "none" },
+      users: { kind: "none" },
+      showcases: [],
+    },
+  });
+  for (const trace of dataset.traces) {
+    expect(trace.session_id).toBeUndefined();
+    expect(trace.user_id).toBeUndefined();
+    expect(trace.metadata["user.name"]).toBeUndefined();
+  }
+});
+
+it("gives every generated trace the profile's base tags, sorted and unique", () => {
+  const dataset = createDataset({
+    seed: 1,
+    now: NOW,
+    traces: 300,
+    profile: { ...SUPPORT_PROFILE, tags: { base: ["billing"], pool: ["batch"] }, showcases: [] },
+  });
+  for (const trace of dataset.traces) {
+    expect(trace.tags).toContain("billing");
+    expect(trace.tags).toEqual([...new Set(trace.tags)].sort());
+  }
+});
+
+it("draws the duration with the profile's skew", () => {
+  const dataset = createDataset({
+    seed: 1,
+    now: NOW,
+    traces: 1000,
+    profile: {
+      ...SUPPORT_PROFILE,
+      duration: { min: 400, span: 3_600, skew: 3 },
+      shortTag: undefined,
+      showcases: [],
+    },
+  });
+  // Trace 0 is the 60 s big trace, so the draws are the traces after it.
+  const ms = dataset.traces.slice(1).map((trace) => trace.duration_ns / 1_000_000);
+  for (const value of ms) {
+    expect(value).toBeGreaterThanOrEqual(400);
+    expect(value).toBeLessThan(4_000);
+  }
+  expect(ms.filter((value) => value < 2_000).length / ms.length).toBeGreaterThan(0.7);
+});
+
+it("takes the service, span names and tool names from the profile", () => {
+  const dataset = createDataset({
+    seed: 1,
+    now: NOW,
+    traces: 10,
+    profile: {
+      ...SUPPORT_PROFILE,
+      service: "code-agent",
+      spanNames: { tool: ["run_tests"] },
+      showcases: [],
+    },
+  });
+  const trace = dataset.traces[1];
+  if (!trace) {
+    throw new Error("a ten-trace dataset has trace 1");
+  }
+  const spans = dataset.traceDetail(trace.trace_id)?.spans ?? [];
+  const tools = spans.filter((row) => row.span.span_kind === "tool");
+  expect(tools.length).toBeGreaterThan(0);
+  for (const row of tools) {
+    expect(row.span.name).toBe("run_tests");
+    const detail = dataset.spanDetail(trace.trace_id, row.span.span_id);
+    expect(detail?.input?.format === "json" ? detail.input.value : undefined).toMatchObject({
+      name: "run_tests",
+    });
+  }
+  for (const row of spans) {
+    expect(row.span.service_name).toBe("code-agent");
+  }
+});
+
+/** A topic without its code blocks. */
+function withoutSnippets(turn: Turn): Turn {
+  const { snippets: _snippets, ...rest } = turn;
+  return rest;
+}
+
+it("answers an llm span in plain text when its topics have no snippets", () => {
+  const [first, ...rest] = SUPPORT_TURNS.map(withoutSnippets);
+  if (!first) {
+    throw new Error("the support topics are not empty");
+  }
+  const dataset = createDataset({
+    seed: 1,
+    now: NOW,
+    traces: 40,
+    profile: { ...SUPPORT_PROFILE, turns: [first, ...rest], showcases: [] },
+  });
+  let llmChecked = 0;
+  for (const trace of dataset.traces.slice(1)) {
+    for (const row of dataset.traceDetail(trace.trace_id)?.spans ?? []) {
+      if (row.span.span_kind !== "llm") {
+        continue;
+      }
+      llmChecked += 1;
+      const detail = dataset.spanDetail(trace.trace_id, row.span.span_id);
+      const reply =
+        detail?.output?.format === "messages" ? detail.output.value[0]?.parts[0] : undefined;
+      expect(reply?.type === "text" ? reply.content : "").not.toContain("```");
+    }
+  }
+  expect(llmChecked).toBeGreaterThan(0);
 });
