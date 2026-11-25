@@ -219,6 +219,7 @@ enum LeafPos {
     Reasoning { message: usize, part: usize },
     Arguments { message: usize, part: usize },
     Response { message: usize, part: usize },
+    Transcript { message: usize, part: usize },
 }
 
 fn longest_leaf(messages: &[Message]) -> Option<LeafPos> {
@@ -245,6 +246,17 @@ fn longest_leaf(messages: &[Message]) -> Option<LeafPos> {
                     response: Json::String(text),
                     ..
                 } if leaf_open(text) => Some(LeafPos::Response {
+                    message: message_index,
+                    part: part_index,
+                }),
+                Part::Uri {
+                    transcript: Some(text),
+                    ..
+                }
+                | Part::Blob {
+                    transcript: Some(text),
+                    ..
+                } if leaf_open(text) => Some(LeafPos::Transcript {
                     message: message_index,
                     part: part_index,
                 }),
@@ -277,6 +289,17 @@ fn leaf_text(messages: &[Message], pos: LeafPos) -> &str {
         (LeafPos::Text { .. }, Part::Text { content, .. })
         | (LeafPos::Reasoning { .. }, Part::Reasoning { content, .. }) => content,
         (
+            LeafPos::Transcript { .. },
+            Part::Uri {
+                transcript: Some(text),
+                ..
+            }
+            | Part::Blob {
+                transcript: Some(text),
+                ..
+            },
+        ) => text,
+        (
             LeafPos::Arguments { .. },
             Part::ToolCall {
                 arguments: Some(Json::String(text)),
@@ -305,6 +328,17 @@ fn set_leaf(messages: &mut [Message], pos: LeafPos, value: String) {
         (LeafPos::Text { .. }, Part::Text { content, .. })
         | (LeafPos::Reasoning { .. }, Part::Reasoning { content, .. }) => *content = value,
         (
+            LeafPos::Transcript { .. },
+            Part::Uri {
+                transcript: Some(text),
+                ..
+            }
+            | Part::Blob {
+                transcript: Some(text),
+                ..
+            },
+        ) => *text = value,
+        (
             LeafPos::Arguments { .. },
             Part::ToolCall {
                 arguments: Some(Json::String(text)),
@@ -327,7 +361,8 @@ fn message_index(pos: LeafPos) -> usize {
         LeafPos::Text { message, .. }
         | LeafPos::Reasoning { message, .. }
         | LeafPos::Arguments { message, .. }
-        | LeafPos::Response { message, .. } => message,
+        | LeafPos::Response { message, .. }
+        | LeafPos::Transcript { message, .. } => message,
     }
 }
 
@@ -336,7 +371,8 @@ fn part_index(pos: LeafPos) -> usize {
         LeafPos::Text { part, .. }
         | LeafPos::Reasoning { part, .. }
         | LeafPos::Arguments { part, .. }
-        | LeafPos::Response { part, .. } => part,
+        | LeafPos::Response { part, .. }
+        | LeafPos::Transcript { part, .. } => part,
     }
 }
 
@@ -633,6 +669,32 @@ mod tests {
         assert!(json.len() <= 1_500, "{}", json.len());
         assert!(json.contains(TRUNCATED_STRING_SUFFIX_PREFIX), "{json}");
         assert!(json.contains("4000 bytes]"), "{json}");
+    }
+
+    #[test]
+    fn a_long_transcript_is_cut_like_text() {
+        let transcript = "word ".repeat(800);
+        let messages = vec![Message {
+            role: Role::User,
+            name: None,
+            parts: vec![Part::Uri {
+                modality: Some(cetra_core::message::Modality::Audio),
+                mime_type: None,
+                transcript: Some(transcript),
+                uri: "media://abc".to_owned(),
+                extra: Map::new(),
+            }],
+            finish_reason: None,
+            extra: Map::new(),
+        }];
+        let Fitted::Messages(kept) = fit_messages(messages, 1_500) else {
+            panic!("step 2 keeps messages");
+        };
+        let json = messages_to_json(&kept);
+        assert!(json.len() <= 1_500, "{}", json.len());
+        assert!(json.contains(TRUNCATED_STRING_SUFFIX_PREFIX), "{json}");
+        assert!(json.contains("4000 bytes]"), "{json}");
+        assert!(json.contains("media://abc"), "{json}");
     }
 
     #[test]
