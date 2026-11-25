@@ -14,6 +14,7 @@ import {
 } from "@/mocks/generated/datasets";
 import { experimentHandlers } from "@/mocks/generated/experiments";
 import { STORY_SCORE_DEFINITIONS, storyHandlers } from "@/mocks/generated/stories";
+import { storyChannelHandlers, storyEvaluateHandlers } from "@/mocks/generated/story-evaluate";
 import { tracePredicate, widgetQueryHandler } from "@/mocks/generated/widget-query";
 import {
   type SpanStreamSource,
@@ -154,6 +155,8 @@ export function largeHandlers(
   const withDatasets = options?.datasets !== false;
   return [
     ...storyHandlers(dataset, options?.project),
+    ...storyEvaluateHandlers(dataset, options?.project),
+    ...storyChannelHandlers(options?.project),
     ...queueItemHandlers(dataset, prefix),
     widgetQueryHandler(dataset, prefix),
     traceStreamHandler(liveTraceSource(dataset), prefix),

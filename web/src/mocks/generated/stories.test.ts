@@ -467,15 +467,38 @@ it("answers the story events routes, and lets the fixture rule's routes fall thr
   }
 });
 
-it("points every story queue's item at the queue's own trace", () => {
+it("points every story queue's item at the queue's own target", () => {
   for (const queue of STORY_QUEUES) {
     const dataset = stories[queue.story];
     const item = storyQueueItem(dataset, queue);
-    const trace = dataset.traces[queue.heroIndex];
-    expect(item?.trace_id).toBe(trace?.trace_id);
     expect(item?.queue_id).toBe(queue.id);
     expect(item?.status).toBe("pending");
+    if (queue.sessionId === undefined) {
+      expect(item?.trace_id).toBe(dataset.traces[queue.heroIndex ?? -1]?.trace_id);
+      expect(item?.session_id).toBeUndefined();
+    } else {
+      expect(item?.session_id).toBe(queue.sessionId);
+      expect(item?.trace_id).toBeUndefined();
+    }
   }
+});
+
+it("targets the support queue at its session, whose first turn is the item's time", () => {
+  const support = oneOf(STORY_QUEUES, "support");
+  expect(support.sessionId).toBe("sess-0142");
+  expect(support.heroIndex).toBeUndefined();
+  const first = visibleTraces(stories.support.traces, false, false)
+    .filter((trace) => trace.session_id === "sess-0142")
+    .map((trace) => Date.parse(trace.start_time))
+    .sort((left, right) => left - right)[0];
+  const item = storyQueueItem(stories.support, support);
+  expect(item?.session_id).toBe("sess-0142");
+  expect(Date.parse(item?.target_time ?? "")).toBe(first);
+  expect(storyQueue(stories.support, support).counts).toEqual({
+    pending: 21,
+    completed: 3,
+    skipped: 1,
+  });
 });
 
 it("gives every story queue its own score fields", () => {
@@ -489,7 +512,7 @@ it("gives every story queue its own score fields", () => {
     ]),
   ]);
   expect(STORY_QUEUES.map((queue) => queue.definitionIds.map((id) => names.get(id)))).toEqual([
-    ["correctness", "relevance"],
+    ["correctness", "tone", "policy"],
     ["tests_pass", "verdict"],
     ["resolved", "tone"],
     ["schema_valid", "fields_correct"],
@@ -500,6 +523,11 @@ it("gives every story queue its own score fields", () => {
     "01900000-0000-7000-8000-000000570603",
     "01900000-0000-7000-8000-000000570605",
     "01900000-0000-7000-8000-000000570606",
+    "01900000-0000-7000-8000-000000570607",
+    "01900000-0000-7000-8000-000000570608",
+    "01900000-0000-7000-8000-000000570609",
+    "01900000-0000-7000-8000-000000570610",
+    "01900000-0000-7000-8000-000000570611",
   ]);
   expect(
     STORY_SCORE_DEFINITIONS.filter((definition) => definition.data_type === "categorical").map(
@@ -568,7 +596,7 @@ it("counts a story queue's progress as completed plus skipped of its total", () 
     const total = counts.pending + counts.completed + counts.skipped;
     return `${counts.completed + counts.skipped}/${total}`;
   });
-  expect(progress).toEqual(["5/17", "9/15", "9/29", "21/52"]);
+  expect(progress).toEqual(["4/25", "9/15", "9/29", "21/52"]);
 });
 
 it("a project serves only its story's objects", async () => {

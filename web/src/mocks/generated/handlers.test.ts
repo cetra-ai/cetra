@@ -289,6 +289,11 @@ it("defines the generated scores so lists can colour them", async () => {
     ["resolved", "higher"],
     ["schema_valid", "higher"],
     ["fields_correct", "none"],
+    ["policy", "higher"],
+    ["total", "higher"],
+    ["vat_number", "higher"],
+    ["vendor", "higher"],
+    ["date", "higher"],
   ]);
 });
 
@@ -308,13 +313,18 @@ it("serves the story queues' score definitions after the generated ones", async 
     "01900000-0000-7000-8000-000000570603",
     "01900000-0000-7000-8000-000000570605",
     "01900000-0000-7000-8000-000000570606",
+    "01900000-0000-7000-8000-000000570607",
+    "01900000-0000-7000-8000-000000570608",
+    "01900000-0000-7000-8000-000000570609",
+    "01900000-0000-7000-8000-000000570610",
+    "01900000-0000-7000-8000-000000570611",
   ];
   const at = (id: string) => ids.indexOf(id);
   for (const id of generated) {
     expect(at(id)).toBeGreaterThanOrEqual(0);
   }
   expect(at(generated[2] ?? "")).toBeLessThan(at(story[0] ?? ""));
-  expect(ids.slice(-5)).toEqual(story);
+  expect(ids.slice(-story.length)).toEqual(story);
 });
 
 it("keeps the fixture queue's review as it was", async () => {
@@ -330,7 +340,11 @@ it("keeps the fixture queue's review as it was", async () => {
   const correctness = "01900000-0000-7000-8000-000000000611";
   const relevance = "01900000-0000-7000-8000-000000000612";
   expect(await review("01900000-0000-7000-8000-000000000a01")).toEqual([correctness, relevance]);
-  expect(await review("01900000-0000-7000-8000-000000570501")).toEqual([correctness, relevance]);
+  expect(await review("01900000-0000-7000-8000-000000570501")).toEqual([
+    correctness,
+    "01900000-0000-7000-8000-000000000615",
+    "01900000-0000-7000-8000-000000570607",
+  ]);
   expect(await review("01900000-0000-7000-8000-000000570502")).toEqual([
     "01900000-0000-7000-8000-000000570601",
     "01900000-0000-7000-8000-000000570602",

@@ -1,7 +1,7 @@
 import { type HttpHandler, HttpResponse, http } from "msw";
 import type { Schema } from "@/api/types";
 import { type Dataset, percentile, rfc3339, visibleTraces } from "@/mocks/generated/dataset";
-import { SSO_TURN } from "@/mocks/generated/story-support";
+import { SSO_TURN, SUPPORT_SESSION } from "@/mocks/generated/story-support";
 import alertRulesFixture from "../../../../fixtures/api/static/alert-rules.json";
 import queuesFixture from "../../../../fixtures/api/static/annotation-queues.json";
 import issuesFixture from "../../../../fixtures/api/static/issues.json";
@@ -35,7 +35,7 @@ const TEAM_SLACK: StoryChannel = {
   name: "Team Slack",
   kind: "slack",
 };
-const ON_CALL_PAGER: StoryChannel = {
+export const ON_CALL_PAGER: StoryChannel = {
   id: "01900000-0000-7000-8000-000000000503",
   name: "On-call pager",
   kind: "webhook",
@@ -174,7 +174,7 @@ type StoryRule = {
 };
 
 /** The visible traces that start in `[from, to)`. */
-function startedBetween(dataset: Dataset, from: number, to: number): Trace[] {
+export function startedBetween(dataset: Dataset, from: number, to: number): Trace[] {
   return visibleTraces(dataset.traces, false, false).filter((trace) => {
     const started = Date.parse(trace.start_time);
     return started >= from && started < to;
@@ -306,10 +306,10 @@ export const STORY_RULES: readonly StoryRule[] = [
 ];
 
 const MEMBER_ID = "01900000-0000-7000-8000-000000000100";
-/** The generated definitions the queues reuse (`SCORE_DEFINITIONS` in handlers.ts): correctness and relevance for Support answers, tone for Call review. */
+/** The generated definitions the queues reuse (`SCORE_DEFINITIONS` in handlers.ts): correctness and tone for Support answers and Call review. */
 const CORRECTNESS_ID = "01900000-0000-7000-8000-000000000611";
-const RELEVANCE_ID = "01900000-0000-7000-8000-000000000612";
 const TONE_ID = "01900000-0000-7000-8000-000000000615";
+const POLICY_ID = "01900000-0000-7000-8000-000000570607";
 const DEFINED_AT = "2026-01-01T09:00:00.000000000Z";
 const LEASE_MS = 5 * MINUTE_MS;
 
@@ -324,8 +324,10 @@ type StoryQueue = {
   /** The review fields, in order. */
   definitionIds: readonly string[];
   counts: Schema<"QueueCounts">;
-  /** Dataset index of the hero trace, the queue's one item. */
-  heroIndex: number;
+  /** Dataset index of the hero trace, the queue's one item (a trace queue). */
+  heroIndex?: number;
+  /** The session of the queue's one item (a session queue; the item has no trace). */
+  sessionId?: string;
 };
 
 export const STORY_SCORE_DEFINITIONS: Schema<"ScoreDefinition">[] = [
@@ -379,6 +381,56 @@ export const STORY_SCORE_DEFINITIONS: Schema<"ScoreDefinition">[] = [
     created_at: DEFINED_AT,
     updated_at: DEFINED_AT,
   },
+  {
+    id: POLICY_ID,
+    name: "policy",
+    data_type: "boolean",
+    categories: [],
+    description: "Whether the answer follows the support policy.",
+    direction: "higher",
+    created_at: DEFINED_AT,
+    updated_at: DEFINED_AT,
+  },
+  {
+    id: "01900000-0000-7000-8000-000000570608",
+    name: "total",
+    data_type: "boolean",
+    categories: [],
+    description: "Whether the extracted total matches the invoice.",
+    direction: "higher",
+    created_at: DEFINED_AT,
+    updated_at: DEFINED_AT,
+  },
+  {
+    id: "01900000-0000-7000-8000-000000570609",
+    name: "vat_number",
+    data_type: "boolean",
+    categories: [],
+    description: "Whether the extracted VAT number matches the invoice.",
+    direction: "higher",
+    created_at: DEFINED_AT,
+    updated_at: DEFINED_AT,
+  },
+  {
+    id: "01900000-0000-7000-8000-000000570610",
+    name: "vendor",
+    data_type: "boolean",
+    categories: [],
+    description: "Whether the extracted vendor matches the invoice.",
+    direction: "higher",
+    created_at: DEFINED_AT,
+    updated_at: DEFINED_AT,
+  },
+  {
+    id: "01900000-0000-7000-8000-000000570611",
+    name: "date",
+    data_type: "boolean",
+    categories: [],
+    description: "Whether the extracted date matches the invoice.",
+    direction: "higher",
+    created_at: DEFINED_AT,
+    updated_at: DEFINED_AT,
+  },
 ];
 
 export const STORY_QUEUES: readonly StoryQueue[] = [
@@ -386,13 +438,13 @@ export const STORY_QUEUES: readonly StoryQueue[] = [
     id: "01900000-0000-7000-8000-000000570501",
     story: "support",
     itemId: "01900000-0000-7000-8000-000000570511",
-    name: "Support answers",
+    name: "Answers with a thumbs-down",
     description: "Support answers that people review after the judges.",
     instructions:
-      "Score each answer against the customer's question. Skip the ones without a question.",
-    definitionIds: [CORRECTNESS_ID, RELEVANCE_ID],
-    counts: { pending: 12, completed: 4, skipped: 1 },
-    heroIndex: 3,
+      "Read the whole conversation. Grade the answer that got the thumbs-down: is it correct, is the tone right, does it follow the policy?",
+    definitionIds: [CORRECTNESS_ID, TONE_ID, POLICY_ID],
+    counts: { pending: 21, completed: 3, skipped: 1 },
+    sessionId: SUPPORT_SESSION,
   },
   {
     id: "01900000-0000-7000-8000-000000570502",
@@ -654,27 +706,45 @@ export function storyQueue(dataset: Dataset, queue: StoryQueue): Schema<"Annotat
   };
 }
 
-/** The queue's one item: the hero trace, pending and leased to the mock user. Undefined when the dataset has no such trace. */
+/**
+ * The queue's one item, pending and leased to the mock user: the session of a session queue, or the
+ * hero trace of a trace queue. Undefined when the dataset has no such session or trace.
+ */
 export function storyQueueItem(
   dataset: Dataset,
   queue: StoryQueue,
 ): Schema<"AnnotationQueueItem"> | undefined {
-  const hero: Trace | undefined = dataset.traces[queue.heroIndex];
-  if (hero === undefined) {
-    return undefined;
-  }
-  return {
+  const common = {
     id: queue.itemId,
     queue_id: queue.id,
-    trace_id: hero.trace_id,
-    target_time: hero.start_time,
-    status: "pending",
+    status: "pending" as const,
     leased_by_user_id: MEMBER_ID,
     lease_expires_at: rfc3339(dataset.now + LEASE_MS),
-    added_by: "user",
+    added_by: "user" as const,
     added_by_id: MEMBER_ID,
     created_at: ago(dataset, 6 * HOUR_MS),
   };
+  if (queue.sessionId !== undefined) {
+    // The session's earliest visible turn is its target time.
+    const first = oldestFirst(
+      visibleTraces(dataset.traces, false, false).filter(
+        (trace) => trace.session_id === queue.sessionId,
+      ),
+    )[0];
+    return first === undefined
+      ? undefined
+      : {
+          ...common,
+          session_id: queue.sessionId,
+          target_time: first.start_time,
+        };
+  }
+  const hero: Trace | undefined =
+    queue.heroIndex === undefined ? undefined : dataset.traces[queue.heroIndex];
+  if (hero === undefined) {
+    return undefined;
+  }
+  return { ...common, trace_id: hero.trace_id, target_time: hero.start_time };
 }
 
 /** A path parameter as text; msw types it as possibly repeated or missing. */
@@ -773,7 +843,11 @@ export function storyHandlers(dataset: Dataset, project?: string): HttpHandler[]
       const traceId = search.get("target_trace_id");
       if (traceId !== null) {
         const found = queues
-          .filter((queue) => dataset.traces[queue.heroIndex]?.trace_id === traceId)
+          .filter(
+            (queue) =>
+              queue.heroIndex !== undefined &&
+              dataset.traces[queue.heroIndex]?.trace_id === traceId,
+          )
           .map((queue) => storyQueue(dataset, queue));
         return found.length === 0
           ? undefined
