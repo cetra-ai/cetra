@@ -1,12 +1,14 @@
-//! Scenario files under `tools/capture/{py,ts}/scenarios/<group>/<case>/`.
+//! Scenario files under `tools/capture/{py,ts,java,dotnet}/scenarios/<group>/<case>/`.
 //!
 //! The JSON shape is `docs/plans/b2-capture/README.md` § The scenario format.
 //! Usage numbers use OTel semantics: `input` includes cache tokens and `output`
-//! includes reasoning tokens.
+//! includes reasoning tokens. `mock_host` is the loopback address the mock binds
+//! (default `127.0.0.1`).
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fmt;
 use std::fs;
+use std::net::Ipv4Addr;
 use std::path::Path;
 use std::str::FromStr;
 
@@ -29,7 +31,20 @@ pub const GROUPS: &[&str] = &[
     "claude_code",
     "codex",
     "gemini_cli",
+    "qwen_code",
+    "pi",
+    "openclaw",
+    "opencode",
+    "goose",
+    "oh_my_pi",
+    "hermes_agent",
+    "voltagent",
     "edge",
+    "n8n",
+    "livekit",
+    "pipecat",
+    "promptflow",
+    "langflow",
 ];
 
 const SETTING_KEYS: &[&str] = &["max_attribute_bytes", "media_min_bytes", "media_max_bytes"];
@@ -44,6 +59,13 @@ const ENV_PREFIXES: &[&str] = &[
     "ADK_",
 ];
 const ENV_FORBIDDEN: &[&str] = &["sk-", "pk-", "Bearer ", "@"];
+
+/// The probes a scenario may tolerate, each `"<METHOD> <path suffix>"`, matched by
+/// the request's method and path suffix (mock.rs `probe_matches`): OpenCode v2's
+/// Responses API check (`GET …/responses`), Hermes's custom-provider probe
+/// (`POST …/api/show`) and its model read (`GET …/models/<id>`). Without the field
+/// these requests are errors, as any unknown route is.
+pub const TOLERATED_PROBES: &[&str] = &["GET /responses", "POST /api/show", "GET /models/<id>"];
 
 /// `group/case` path of a captured fixture.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -126,6 +148,15 @@ pub struct Scenario {
     /// `project_id` and `ingest_time` overrides copied into `case.json`.
     #[serde(default)]
     pub context: Option<Map<String, Value>>,
+    /// Loopback IPv4 address the mock binds and puts in `CETRA_CAPTURE_MOCK_URL`.
+    /// Defaults to `127.0.0.1`. A program that routes by host can use `127.0.0.2`.
+    #[serde(default = "default_mock_host")]
+    pub mock_host: String,
+    /// Probes the program makes beside its turns, each one of [`TOLERATED_PROBES`].
+    /// The mock answers them without a turn and records them in its log's `probes`,
+    /// never as errors; a probe the scenario does not list is an unknown-route error.
+    #[serde(default)]
+    pub tolerated_probes: Vec<String>,
     /// Package that produces the convention under test.
     pub instrumentation: String,
     /// Packages whose versions are recorded. Must contain [`Self::instrumentation`].
@@ -146,6 +177,17 @@ pub struct Scenario {
     /// Their values are replaced by `capture-volatile-<n>` everywhere they appear.
     #[serde(default)]
     pub volatile_attributes: Vec<String>,
+    /// Span-name prefixes whose remainder is random per run (Koog's session ids,
+    /// Agent Framework's agent ids). A span whose name starts with a listed prefix
+    /// has the rest of its name replaced by `<volatile>` when the fixture is written
+    /// and checked.
+    #[serde(default)]
+    pub volatile_name_prefixes: Vec<String>,
+    /// The program ends its spans in any order, and each span's id can change between runs
+    /// (Langflow runs two components at once). `--check` then masks span ids and sorts
+    /// the spans before comparing. The fixture keeps its ids.
+    #[serde(default)]
+    pub unordered_spans: bool,
     /// Scripted provider turns, served in order. At least one, all for the same provider.
     pub turns: Vec<Turn>,
     /// Fixture path, taken from the scenario directory by [`Scenario::load`].
@@ -184,6 +226,14 @@ pub struct Turn {
     pub api: Api,
     /// Model id sent back on the response.
     pub model: String,
+    /// Served only to a request that declares no tools: an agent's side call (a title, a
+    /// session name) that runs beside the main flow. Default false.
+    #[serde(default)]
+    pub auxiliary: bool,
+    /// The real host the program calls for this turn (D-IN-3); the mock checks the
+    /// request's `Host` header against it. Absent: no check.
+    #[serde(default)]
+    pub host: Option<String>,
     /// Assistant message. Required for chat turns and absent for embeddings.
     #[serde(default)]
     pub message: Option<Message>,
@@ -193,7 +243,7 @@ pub struct Turn {
     /// Token counts in OTel semantics. Missing fields are 0.
     #[serde(default)]
     pub usage: Usage,
-    /// Embedding width. Required for embedding turns, from 1 to 64, and absent otherwise.
+    /// Embedding width. Required for embedding turns, from 1 to 4096, and absent otherwise.
     #[serde(default)]
     pub dims: Option<u32>,
     /// Delay before the first streamed chunk, in milliseconds.
@@ -240,6 +290,12 @@ pub enum Api {
     /// Gemini `embedContent` and `batchEmbedContents`.
     #[serde(rename = "gemini.embed_content")]
     GeminiEmbedContent,
+    /// Cohere Chat (v2).
+    #[serde(rename = "cohere.chat")]
+    CohereChat,
+    /// Ollama Chat.
+    #[serde(rename = "ollama.chat")]
+    OllamaChat,
 }
 
 impl Api {
@@ -249,6 +305,22 @@ impl Api {
             Self::OpenaiChat | Self::OpenaiResponses | Self::OpenaiEmbeddings => Provider::OpenAi,
             Self::AnthropicMessages => Provider::Anthropic,
             Self::GeminiGenerateContent | Self::GeminiEmbedContent => Provider::Gemini,
+            Self::CohereChat => Provider::Cohere,
+            Self::OllamaChat => Provider::Ollama,
+        }
+    }
+
+    /// The serde name, which is how a scenario's `api` field spells the endpoint.
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::OpenaiChat => "openai.chat",
+            Self::OpenaiResponses => "openai.responses",
+            Self::OpenaiEmbeddings => "openai.embeddings",
+            Self::AnthropicMessages => "anthropic.messages",
+            Self::GeminiGenerateContent => "gemini.generate_content",
+            Self::GeminiEmbedContent => "gemini.embed_content",
+            Self::CohereChat => "cohere.chat",
+            Self::OllamaChat => "ollama.chat",
         }
     }
 
@@ -266,6 +338,10 @@ pub enum Provider {
     Anthropic,
     /// `generativelanguage.googleapis.com`.
     Gemini,
+    /// `api.cohere.com`.
+    Cohere,
+    /// `ollama.com`.
+    Ollama,
 }
 
 impl Provider {
@@ -275,6 +351,8 @@ impl Provider {
             Self::OpenAi => "api.openai.com",
             Self::Anthropic => "api.anthropic.com",
             Self::Gemini => "generativelanguage.googleapis.com",
+            Self::Cohere => "api.cohere.com",
+            Self::Ollama => "ollama.com",
         }
     }
 }
@@ -378,9 +456,6 @@ impl Scenario {
         {
             return Err("libraries must contain instrumentation".to_owned());
         }
-        if self.turns.is_empty() {
-            return Err("turns must be non-empty".to_owned());
-        }
         reject_duplicates(&self.libraries, "libraries")?;
         reject_duplicates(
             &self
@@ -391,9 +466,23 @@ impl Scenario {
             "timestamp_attributes",
         )?;
         reject_duplicates(&self.timing_attributes, "timing_attributes")?;
+        for probe in &self.tolerated_probes {
+            if !TOLERATED_PROBES.contains(&probe.as_str()) {
+                return Err(format!(
+                    "tolerated_probes entry \"{probe}\" must be one of {}",
+                    TOLERATED_PROBES
+                        .iter()
+                        .map(|probe| format!("\"{probe}\""))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ));
+            }
+        }
+        reject_duplicates(&self.tolerated_probes, "tolerated_probes")?;
         for (field, values) in [
             ("span_names", &self.span_names),
             ("volatile_attributes", &self.volatile_attributes),
+            ("volatile_name_prefixes", &self.volatile_name_prefixes),
         ] {
             if values.iter().any(String::is_empty) {
                 return Err(format!("{field} entries must be non-empty"));
@@ -401,6 +490,7 @@ impl Scenario {
             reject_duplicates(values, field)?;
         }
         self.check_env()?;
+        check_mock_host(&self.mock_host)?;
         check_string_map(self.settings.as_ref(), SETTING_KEYS, "settings", true)?;
         check_string_map(self.context.as_ref(), CONTEXT_KEYS, "context", false)?;
         self.check_turns()?;
@@ -423,7 +513,11 @@ impl Scenario {
     }
 
     fn check_turns(&self) -> Result<(), String> {
-        let provider = self.turns[0].api.provider();
+        // A program that makes no provider request has no turns. The mock then fails any request.
+        let Some(first) = self.turns.first() else {
+            return Ok(());
+        };
+        let provider = first.api.provider();
         for (index, turn) in self.turns.iter().enumerate() {
             if turn.api.provider() != provider {
                 return Err(format!(
@@ -433,11 +527,17 @@ impl Scenario {
             if turn.chunks < 1 {
                 return Err(format!("turns[{index}].chunks must be at least 1"));
             }
+            if let Some(host) = &turn.host
+                && !is_dns_name(host)
+            {
+                return Err(format!("turns[{index}].host must be a lowercase DNS name"));
+            }
             if turn.api.is_embedding() {
                 check_embedding(index, turn)?;
             } else {
                 check_chat(index, turn)?;
             }
+            check_auxiliary(index, turn)?;
             check_usage(index, turn)?;
         }
         Ok(())
@@ -493,6 +593,26 @@ fn check_chat(index: usize, turn: &Turn) -> Result<(), String> {
             "turns[{index}].message needs text, reasoning, or a tool call"
         ));
     }
+    if matches!(turn.api, Api::CohereChat | Api::OllamaChat) {
+        if !message.tool_calls.is_empty() {
+            return Err(format!(
+                "turns[{index}].message.tool_calls are not supported by {}",
+                turn.api.name()
+            ));
+        }
+        if present_text(message.reasoning.as_deref()) {
+            return Err(format!(
+                "turns[{index}].message.reasoning is not supported by {}",
+                turn.api.name()
+            ));
+        }
+        if !matches!(finish, Finish::Stop | Finish::Length) {
+            return Err(format!(
+                "turns[{index}].finish must be stop or length for {}",
+                turn.api.name()
+            ));
+        }
+    }
     let has_tools = !message.tool_calls.is_empty();
     if has_tools != matches!(finish, Finish::ToolCalls) {
         return Err(format!(
@@ -502,10 +622,44 @@ fn check_chat(index: usize, turn: &Turn) -> Result<(), String> {
     Ok(())
 }
 
+/// An auxiliary turn is served to a request that declares no tools: it must be a chat
+/// turn with text and no tool calls, or the side call could not use it. Only the APIs
+/// whose requests the mock reads `tools` from (mock.rs `read_facts`: the chat routes)
+/// can route one; on any other API an auxiliary turn is a scenario error.
+fn check_auxiliary(index: usize, turn: &Turn) -> Result<(), String> {
+    if !turn.auxiliary {
+        return Ok(());
+    }
+    if !matches!(
+        turn.api,
+        Api::OpenaiChat
+            | Api::OpenaiResponses
+            | Api::AnthropicMessages
+            | Api::CohereChat
+            | Api::OllamaChat
+    ) {
+        return Err(format!(
+            "turns[{index}]: an auxiliary turn is not supported by {}, whose requests do not declare tools",
+            turn.api.name()
+        ));
+    }
+    let Some(message) = &turn.message else {
+        return Err(format!(
+            "turns[{index}]: an auxiliary turn must be a chat turn with text and no tool calls"
+        ));
+    };
+    if !present_text(message.text.as_deref()) || !message.tool_calls.is_empty() {
+        return Err(format!(
+            "turns[{index}]: an auxiliary turn must be a chat turn with text and no tool calls"
+        ));
+    }
+    Ok(())
+}
+
 fn check_embedding(index: usize, turn: &Turn) -> Result<(), String> {
     match turn.dims {
-        Some(dims) if (1..=64).contains(&dims) => {}
-        Some(_) => return Err(format!("turns[{index}].dims must be from 1 to 64")),
+        Some(dims) if (1..=4096).contains(&dims) => {}
+        Some(_) => return Err(format!("turns[{index}].dims must be from 1 to 4096")),
         None => return Err(format!("turns[{index}].dims is required")),
     }
     if turn.message.is_some() {
@@ -541,6 +695,20 @@ fn check_usage(index: usize, turn: &Turn) -> Result<(), String> {
         Provider::Anthropic if usage.reasoning != 0 => {
             return Err(format!("turns[{index}].usage.reasoning must be 0"));
         }
+        Provider::Cohere | Provider::Ollama => {
+            for (field, value) in [
+                ("cache_read", usage.cache_read),
+                ("cache_write", usage.cache_write),
+                ("reasoning", usage.reasoning),
+            ] {
+                if value != 0 {
+                    return Err(format!(
+                        "turns[{index}].usage.{field} is not reported by {}",
+                        turn.api.name()
+                    ));
+                }
+            }
+        }
         Provider::OpenAi | Provider::Anthropic | Provider::Gemini => {}
     }
     if turn.api.is_embedding()
@@ -558,6 +726,20 @@ fn check_usage(index: usize, turn: &Turn) -> Result<(), String> {
 }
 
 /// A present string counts when it is non-empty. `null` and `""` do not.
+/// A lowercase DNS name: 1 to 253 bytes of `a-z`, `0-9`, `-` and `.`, with at least one `.`,
+/// and neither end is `.` or `-`.
+fn is_dns_name(host: &str) -> bool {
+    let bytes = host.as_bytes();
+    !bytes.is_empty()
+        && bytes.len() <= 253
+        && bytes.contains(&b'.')
+        && bytes.iter().all(|byte| {
+            byte.is_ascii_lowercase() || byte.is_ascii_digit() || matches!(byte, b'-' | b'.')
+        })
+        && !matches!(bytes.first(), Some(b'.' | b'-'))
+        && !matches!(bytes.last(), Some(b'.' | b'-'))
+}
+
 fn present_text(text: Option<&str>) -> bool {
     text.is_some_and(|text| !text.is_empty())
 }
@@ -571,6 +753,22 @@ fn reject_duplicates(values: &[impl AsRef<str>], field: &str) -> Result<(), Stri
         }
     }
     Ok(())
+}
+
+/// The mock's bind address: an IPv4 loopback address, so the capture never listens on a
+/// routable interface.
+fn check_mock_host(host: &str) -> Result<(), String> {
+    let address: Ipv4Addr = host
+        .parse()
+        .map_err(|_| format!("mock_host \"{host}\" must be an IPv4 address"))?;
+    if !address.is_loopback() {
+        return Err(format!("mock_host \"{host}\" must be a loopback address"));
+    }
+    Ok(())
+}
+
+fn default_mock_host() -> String {
+    "127.0.0.1".to_owned()
 }
 
 fn check_string_map(
@@ -620,10 +818,12 @@ mod tests {
 
     const FULL: &str = r#"{
       "description": "OpenAI chat completion with one tool call, traced by OpenInference.",
+      "mock_host": "127.0.0.2",
       "spec_refs": ["02 § Mapping tables / Input / output"],
       "notes": "Optional free text, copied into case.json.",
       "settings": { "media_min_bytes": 64 },
       "context": { "ingest_time": "2026-01-01T00:00:00.000000000Z" },
+      "tolerated_probes": ["GET /responses", "POST /api/show", "GET /models/<id>"],
       "instrumentation": "openinference-instrumentation-openai",
       "libraries": ["openai", "openinference-instrumentation-openai", "opentelemetry-sdk"],
       "env": { "OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT": "true" },
@@ -732,7 +932,13 @@ mod tests {
         assert_eq!(scenario.turns[0].api.provider().host(), "api.openai.com");
         assert_eq!(Provider::Anthropic.host(), "api.anthropic.com");
         assert_eq!(Provider::Gemini.host(), "generativelanguage.googleapis.com");
+        assert_eq!(Provider::Cohere.host(), "api.cohere.com");
+        assert_eq!(Provider::Ollama.host(), "ollama.com");
         assert_eq!(scenario.turns[0].finish, Some(Finish::ToolCalls));
+        assert_eq!(
+            scenario.tolerated_probes,
+            ["GET /responses", "POST /api/show", "GET /models/<id>"]
+        );
         assert_eq!(
             scenario.timestamp_attributes[0].format,
             TimestampFormat::Rfc3339
@@ -743,15 +949,83 @@ mod tests {
         assert!(encoded.contains("\"tool_calls\""));
         assert!(encoded.contains("\"rfc3339\""));
         assert!(!encoded.contains("\"case\""));
+        assert_eq!(scenario.mock_host, "127.0.0.2");
+        assert!(encoded.contains("\"mock_host\":\"127.0.0.2\""));
         let mut again: Scenario = serde_json::from_str(&encoded).expect("deserialize");
         again.case = scenario.case.clone();
         assert_eq!(again, scenario);
     }
 
     #[test]
+    fn mock_host_defaults_to_the_loopback_address() {
+        let scenario = load_value(chat()).expect("defaults");
+        assert_eq!(scenario.mock_host, "127.0.0.1");
+    }
+
+    #[test]
+    fn mock_host_accepts_any_ipv4_loopback_address() {
+        for host in ["127.0.0.1", "127.0.0.2", "127.255.255.254"] {
+            let mut value = chat();
+            value["mock_host"] = json!(host);
+            let scenario = load_value(value).expect("loopback is accepted");
+            assert_eq!(scenario.mock_host, host);
+        }
+    }
+
+    #[test]
+    fn mock_host_must_be_an_ipv4_loopback_address() {
+        for host in [
+            "10.0.0.1",
+            "192.168.1.5",
+            "0.0.0.0",
+            "localhost",
+            "::1",
+            "",
+            "127.0.0.256",
+        ] {
+            let mut value = chat();
+            value["mock_host"] = json!(host);
+            let reason = reason(value);
+            assert!(
+                reason.contains("mock_host")
+                    && (reason.contains("loopback") || reason.contains("IPv4")),
+                "{host}: {reason}"
+            );
+        }
+    }
+
+    #[test]
+    fn turn_host_must_be_a_lowercase_dns_name() {
+        for host in ["openrouter.ai", "api.novita.ai", "a-b.c1.io"] {
+            let mut value = chat();
+            value["turns"][0]["host"] = json!(host);
+            assert!(load_value(value).is_ok(), "{host} should be accepted");
+        }
+        for host in [
+            "OpenRouter.ai",
+            "openrouter.ai:443",
+            "https://openrouter.ai",
+            "localhost",
+            ".openrouter.ai",
+            "openrouter.ai.",
+            "-openrouter.ai",
+            "",
+        ] {
+            let mut value = chat();
+            value["turns"][0]["host"] = json!(host);
+            assert_reason(value, "turns[0].host must be a lowercase DNS name");
+        }
+        let long = format!("{}.com", "a".repeat(250));
+        let mut value = chat();
+        value["turns"][0]["host"] = json!(long);
+        assert_reason(value, "turns[0].host must be a lowercase DNS name");
+    }
+
+    #[test]
     fn defaults_apply() {
         let scenario = load_value(embedding("openai.embeddings")).expect("defaults");
         let turn = &scenario.turns[0];
+        assert!(turn.host.is_none());
         assert_eq!(turn.ttft_ms, 30);
         assert_eq!(turn.chunk_delay_ms, 5);
         assert_eq!(turn.chunks, 3);
@@ -769,6 +1043,8 @@ mod tests {
         assert!(scenario.timing_attributes.is_empty());
         assert!(scenario.span_names.is_empty());
         assert!(scenario.volatile_attributes.is_empty());
+        assert!(scenario.volatile_name_prefixes.is_empty());
+        assert!(scenario.tolerated_probes.is_empty());
     }
 
     #[test]
@@ -860,11 +1136,11 @@ mod tests {
 
         let mut value = embedding("openai.embeddings");
         value["turns"][0]["dims"] = json!(0);
-        assert_reason(value, "turns[0].dims must be from 1 to 64");
+        assert_reason(value, "turns[0].dims must be from 1 to 4096");
 
         let mut value = embedding("openai.embeddings");
-        value["turns"][0]["dims"] = json!(65);
-        assert_reason(value, "turns[0].dims must be from 1 to 64");
+        value["turns"][0]["dims"] = json!(4097);
+        assert_reason(value, "turns[0].dims must be from 1 to 4096");
 
         let mut value = embedding("openai.embeddings");
         value["turns"][0]["message"] = json!({ "text": "hello" });
@@ -877,6 +1153,14 @@ mod tests {
         let mut value = embedding("openai.embeddings");
         value["turns"][0]["usage"]["output"] = json!(1);
         assert_reason(value, "turns[0].usage must contain only input");
+    }
+
+    #[test]
+    fn embedding_dims_4096_passes_validation() {
+        // The bound itself is valid (IN9.6): EverOS asks for 1024, Cognee's model 3072.
+        let mut value = embedding("openai.embeddings");
+        value["turns"][0]["dims"] = json!(4096);
+        load_value(value).expect("dims 4096 is inside the bound");
     }
 
     #[test]
@@ -920,6 +1204,80 @@ mod tests {
         let mut value = embedding("gemini.embed_content");
         value["turns"][0]["usage"]["input"] = json!(6);
         assert_reason(value, "turns[0].usage must be all zero");
+
+        let mut value = chat();
+        value["turns"][0]["api"] = json!("cohere.chat");
+        value["turns"][0]["usage"]["cache_read"] = json!(1);
+        assert_reason(
+            value,
+            "turns[0].usage.cache_read is not reported by cohere.chat",
+        );
+
+        for api in ["cohere.chat", "ollama.chat"] {
+            for field in ["cache_read", "cache_write", "reasoning"] {
+                let mut value = chat();
+                value["turns"][0]["api"] = json!(api);
+                value["turns"][0]["usage"][field] = json!(1);
+                assert_reason(
+                    value,
+                    &format!("turns[0].usage.{field} is not reported by {api}"),
+                );
+            }
+        }
+
+        let mut value = chat();
+        value["turns"][0]["api"] = json!("ollama.chat");
+        value["turns"][0]["message"]["tool_calls"] =
+            json!([{ "id": "call_1", "name": "get_weather", "arguments": {} }]);
+        value["turns"][0]["finish"] = json!("tool_calls");
+        assert_reason(
+            value,
+            "turns[0].message.tool_calls are not supported by ollama.chat",
+        );
+    }
+
+    #[test]
+    fn cohere_and_ollama_chat_have_no_reasoning_and_only_stop_or_length() {
+        let mut value = chat();
+        value["turns"][0]["api"] = json!("cohere.chat");
+        value["turns"][0]["message"]["reasoning"] = json!("thinking");
+        assert_reason(
+            value,
+            "turns[0].message.reasoning is not supported by cohere.chat",
+        );
+
+        let mut value = chat();
+        value["turns"][0]["api"] = json!("ollama.chat");
+        value["turns"][0]["finish"] = json!("tool_calls");
+        assert_reason(
+            value,
+            "turns[0].finish must be stop or length for ollama.chat",
+        );
+
+        let mut value = chat();
+        value["turns"][0]["api"] = json!("ollama.chat");
+        value["turns"][0]["finish"] = json!("length");
+        load_value(value).expect("ollama.chat may stop at the length limit");
+    }
+
+    #[test]
+    fn api_name_is_the_serde_name() {
+        let apis = [
+            Api::OpenaiChat,
+            Api::OpenaiResponses,
+            Api::OpenaiEmbeddings,
+            Api::AnthropicMessages,
+            Api::GeminiGenerateContent,
+            Api::GeminiEmbedContent,
+            Api::CohereChat,
+            Api::OllamaChat,
+        ];
+        for api in apis {
+            assert_eq!(
+                serde_json::to_value(api).expect("serialize"),
+                json!(api.name())
+            );
+        }
     }
 
     #[test]
@@ -1034,7 +1392,22 @@ mod tests {
         let mut value = chat();
         value["span_names"] = json!(["chat"]);
         value["volatile_attributes"] = json!(["session.id"]);
+        value["volatile_name_prefixes"] = json!(["invoke_agent "]);
         load_value(value).expect("valid span_names and volatile_attributes");
+    }
+
+    #[test]
+    fn an_empty_prefix_is_rejected() {
+        let mut value = chat();
+        value["volatile_name_prefixes"] = json!([""]);
+        assert_reason(value, "volatile_name_prefixes entries must be non-empty");
+
+        let mut value = chat();
+        value["volatile_name_prefixes"] = json!(["create_agent ", "create_agent "]);
+        assert_reason(
+            value,
+            "volatile_name_prefixes value \"create_agent \" is duplicated",
+        );
     }
 
     #[test]
@@ -1050,10 +1423,6 @@ mod tests {
         let mut value = chat();
         value["libraries"] = json!(["openai"]);
         assert_reason(value, "libraries must contain instrumentation");
-
-        let mut value = chat();
-        value["turns"] = json!([]);
-        assert_reason(value, "turns must be non-empty");
 
         let mut value = chat();
         value["turns"][0]["chunks"] = json!(0);
@@ -1108,7 +1477,18 @@ mod tests {
 
     #[test]
     fn case_path_accepts_the_coding_agent_groups() {
-        for group in ["claude_code", "codex", "gemini_cli"] {
+        for group in [
+            "claude_code",
+            "codex",
+            "gemini_cli",
+            "qwen_code",
+            "pi",
+            "openclaw",
+            "opencode",
+            "goose",
+            "oh_my_pi",
+            "hermes_agent",
+        ] {
             let text = format!("{group}/x");
             let path: CasePath = text.parse().expect(&text);
             assert_eq!(path.to_string(), text);
@@ -1186,11 +1566,122 @@ mod tests {
             serde_json::to_vec(&value).expect("json"),
         )
         .expect("write");
-        let error = Scenario::load(&dir).expect_err("invalid");
-        let CaptureError::ScenarioInvalid { case, reason } = error else {
-            panic!("expected ScenarioInvalid");
-        };
-        assert_eq!(case, "genai/empty-turns");
-        assert!(reason.contains("turns must be non-empty"), "{reason}");
+        let loaded = Scenario::load(&dir).expect("a scenario without turns is valid");
+        assert!(loaded.turns.is_empty());
+    }
+
+    #[test]
+    fn a_scenario_without_turns_is_valid() {
+        let mut value = chat();
+        value["turns"] = json!([]);
+        let scenario: Scenario = serde_json::from_value(value).expect("parse");
+        scenario.check().expect("no turns is valid");
+    }
+
+    #[test]
+    fn auxiliary_turn_with_tool_calls_is_rejected() {
+        let expected = "an auxiliary turn must be a chat turn with text and no tool calls";
+
+        let mut value = chat();
+        value["turns"][0]["auxiliary"] = json!(true);
+        value["turns"][0]["message"] = json!({
+            "text": null,
+            "tool_calls": [{ "id": "call_a", "name": "shell", "arguments": { "command": "ls" } }]
+        });
+        value["turns"][0]["finish"] = json!("tool_calls");
+        assert_reason(value, expected);
+
+        let mut value = chat();
+        value["turns"][0]["auxiliary"] = json!(true);
+        assert!(
+            load_value(value).is_ok(),
+            "a text chat turn is a valid auxiliary turn"
+        );
+
+        // Reasoning only (accepted by check_chat on anthropic.messages) is not text.
+        let mut value = chat();
+        value["turns"][0]["api"] = json!("anthropic.messages");
+        value["turns"][0]["auxiliary"] = json!(true);
+        value["turns"][0]["message"] = json!({ "text": null, "reasoning": "thinking" });
+        value["turns"][0]["finish"] = json!("length");
+        assert_reason(value, expected);
+    }
+
+    #[test]
+    fn an_auxiliary_turn_needs_an_api_whose_requests_declare_tools() {
+        // The mock reads `tools` only from the chat routes (read_facts); on any other
+        // API it could not route an auxiliary turn to the no-tools queue.
+        let mut value = embedding("openai.embeddings");
+        value["turns"][0]["auxiliary"] = json!(true);
+        assert_reason(
+            value,
+            "an auxiliary turn is not supported by openai.embeddings",
+        );
+
+        let mut value = embedding("gemini.embed_content");
+        value["turns"][0]["auxiliary"] = json!(true);
+        assert_reason(
+            value,
+            "an auxiliary turn is not supported by gemini.embed_content",
+        );
+
+        // Every chat route accepts one.
+        for api in [
+            "openai.chat",
+            "openai.responses",
+            "anthropic.messages",
+            "cohere.chat",
+            "ollama.chat",
+        ] {
+            let mut value = chat();
+            value["turns"][0]["api"] = json!(api);
+            value["turns"][0]["auxiliary"] = json!(true);
+            if api == "anthropic.messages" {
+                value["turns"][0]["finish"] = json!("stop");
+            }
+            assert!(
+                load_value(value).is_ok(),
+                "{api}: a text chat turn is a valid auxiliary turn"
+            );
+        }
+    }
+
+    #[test]
+    fn an_auxiliary_gemini_turn_is_rejected() {
+        let mut value = chat();
+        value["turns"][0]["api"] = json!("gemini.generate_content");
+        value["turns"][0]["auxiliary"] = json!(true);
+        assert_reason(
+            value,
+            "turns[0]: an auxiliary turn is not supported by gemini.generate_content, whose requests do not declare tools",
+        );
+    }
+
+    #[test]
+    fn an_unknown_probe_name_is_rejected() {
+        for probes in [json!(["GET /chat"]), json!(["get /responses"]), json!([""])] {
+            let mut value = chat();
+            value["tolerated_probes"] = probes.clone();
+            let reason = reason(value);
+            assert!(
+                reason.starts_with("tolerated_probes entry "),
+                "{probes}: {reason}"
+            );
+            assert!(reason.contains("must be one of"), "{probes}: {reason}");
+        }
+
+        let mut value = chat();
+        value["tolerated_probes"] = json!(["GET /responses", "POST /api/show", "GET /models/<id>"]);
+        assert!(
+            load_value(value).is_ok(),
+            "the three known probes are accepted"
+        );
+
+        let mut value = chat();
+        value["tolerated_probes"] = json!(["GET /responses", "GET /responses"]);
+        assert_reason(
+            value,
+            "tolerated_probes value \"GET /responses\" is duplicated",
+        );
     }
 }

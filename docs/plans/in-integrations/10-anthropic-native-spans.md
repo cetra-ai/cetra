@@ -1,0 +1,124 @@
+# IN follow-up — Anthropic SDK native spans
+
+Anthropic's own SDKs start a span of their own for every API call (`anthropic.messages.create`, on the global tracer provider). PR #242's Anthropic page warned that, with cetra's Anthropic helpers, each call is then recorded twice and its tokens counted twice. The check below shows that this is wrong for the versions cetra uses: OpenInference's Anthropic instrumentor hands the SDK a non-recording span while its own LLM span is current, so a traced call has one model span. Only TypeScript's `@arizeai/openinference-instrumentation-anthropic` 1.0.0 lacks this, and cetra's peer range still allows it. This plan raises that floor, adds tests that would catch a double count, records the decision, and rewrites the page's limit to say what is true: OpenLLMetry's Anthropic instrumentation does double count.
+
+**Prerequisites:** branch `claude/anthropic-double-count`, cut from `origin/claude/in-integrations` at 4cd5d89. Worktree: `.claude/worktrees/anthropic-double-count`.
+
+**Read first:**
+- `AGENTS.md` (rules, tests, commands).
+- `docs/spec/10-sdk.md` § Design rules, items 1 and 2.
+- `sdks/typescript/src/anthropic.ts`, `sdks/typescript/src/instrument.test.ts` § `anthropic helper`, `sdks/typescript/src/testing.test-helpers.ts` (`startMemory`, `finished`).
+- `sdks/python/tests/test_instrument.py` § `test_anthropic_end_to_end`, `sdks/python/tests/conftest.py` (`memory`, `spans`, `http_recorder`).
+- `website/src/content/docs/docs/integrations/anthropic.mdx` § Limits, and the `<Backing>` line at the top.
+- `docs/mvp-decisions.md`, the IN rows D-IN-23 to D-IN-31 (format of a row).
+
+## What it is, and what it is not
+
+When done:
+- `@cetra-ai/sdk` declares `@arizeai/openinference-instrumentation-anthropic` `^1.0.1` as its peer.
+- Both SDKs have tests showing that, with the Anthropic SDK's own spans on and reaching cetra's provider, a call traced by the helper exports exactly one model span; and a control test showing the SDK's own span does reach cetra when no instrumentor is active (so the first test would catch a regression).
+- D-IN-32 records the decision; spec 10 states the rule; the page states the real limit; the CHANGELOG has a line.
+
+Out of scope: a normalizer de-duplication rule (rejected, see D-IN-32); turning the helper off when native spans are on (rejected); any change to OpenLLMetry captures or `tools/capture`.
+
+## Findings (checked by the planning session, 2026-11-25)
+
+| Setup | Spans per call |
+|---|---|
+| Python `anthropic` 2.8.0 alone, global provider | 1: `anthropic.messages.create` (scope `com.anthropic.sdk.python`, `gen_ai.usage.*`) |
+| Python `anthropic` 2.8.0 + `openinference-instrumentation-anthropic` 3.3.5 | 1: `messages.create` (OpenInference). Every 3.3.x wheel (3.3.0–3.3.5) ships `_sdk_spans.py`, which wraps `anthropic._base_client.start_api_call_span` |
+| Python `anthropic` 2.8.0 + `opentelemetry-instrumentation-anthropic` 0.62.4 (OpenLLMetry) | **2**: `anthropic.messages.create` and `anthropic.chat`, siblings, both with input 82 / output 17 tokens |
+| TS `@anthropic-ai/sdk` 1.8.0 alone, cetra `useGlobalProvider: true` | 1: `anthropic.messages.create` (scope `com.anthropic.sdk.typescript`) |
+| TS `@anthropic-ai/sdk` 1.8.0 + `@arizeai/openinference-instrumentation-anthropic` 1.0.3 via `anthropic(Anthropic)`, `useGlobalProvider: true` | 1: `Anthropic Messages` (OpenInference) |
+| TS OpenInference 1.0.0 | no suppression code (`startsOwnSpans` absent); 1.0.1 (2026-11-05) onwards has it |
+
+In cetra's default mode (own provider, D-F-5) the SDK's spans go to the global provider and never reach cetra.
+
+## Decisions this plan relies on
+
+| ID | Summary |
+|---|---|
+| D-F-5 | Own provider by default; global mode opt-in |
+| D-F-7 | The helpers build OpenInference instrumentors |
+| D-IN-31 item 2 | The Anthropic page section; its "records each call twice" is corrected by D-IN-32 |
+| D-IN-32 (new, this plan) | The text below. User's answer (2026-11-25): "Raise floor + tests" |
+
+## Versions
+
+No new dependency. Only the peer range of an existing optional peer changes: `@arizeai/openinference-instrumentation-anthropic` `^1.0.0` → `^1.0.1` (1.0.1 published 2026-11-05; the dev pin stays 1.0.3). Python's floor `openinference-instrumentation-anthropic>=3.3.0` is unchanged (3.3.0 already suppresses).
+
+## Phases
+
+One phase. Files: see **Edit**.
+
+### IN10.1 — Floor, tests, decision, spec, page
+
+**Goal:** make the one-span-per-call behaviour a tested contract, and document it accurately.
+
+**Edit:**
+- `sdks/typescript/package.json`
+- `pnpm-lock.yaml` (only if `pnpm install` changes it)
+- `sdks/typescript/src/instrument.test.ts`
+- `sdks/python/tests/test_instrument.py`
+- `docs/mvp-decisions.md`
+- `docs/plans/in-integrations/00-design.md`
+- `docs/roadmap.md`
+- `docs/spec/10-sdk.md`
+- `website/src/content/docs/docs/integrations/anthropic.mdx`
+- `CHANGELOG.md`
+- `skills/cetra/references/anthropic.md` (regenerated by `just docs-gen`, never by hand)
+
+**Steps:**
+
+1. `sdks/typescript/package.json`, `peerDependencies`: set `"@arizeai/openinference-instrumentation-anthropic": "^1.0.1"`. Run `pnpm install` from the repo root; keep any `pnpm-lock.yaml` change, report it if it touches anything else than this specifier.
+
+2. `sdks/typescript/src/instrument.test.ts`, inside `describe("anthropic helper", …)`, add two tests after the existing one. Reuse `MESSAGE`, `jsonResponse`, `llmSpans`, `startMemory`, `finished` from the file; the client is built like the existing test's (`apiKey: "test"`, `baseURL: "http://127.0.0.1:9/v1"`, `fetch: () => Promise.resolve(jsonResponse(MESSAGE))`), and the call is the same `client.messages.create({ model: "claude-sonnet-4-5", max_tokens: 16, messages: [{ role: "user", content: "hello" }] })`.
+   - `it("records one model span when the Anthropic SDK's own spans reach cetra", …)`: `startMemory({ useGlobalProvider: true, instrument: [anthropic(Anthropic)] })`; one call; then assert `spans.map((span) => span.name)` equals `["Anthropic Messages"]`, `llmSpans(spans)` has length 1, and no span has `instrumentationScope.name` starting with `com.anthropic.sdk`.
+   - `it("receives the Anthropic SDK's own span without the helper", …)`: `startMemory({ useGlobalProvider: true, instrument: [] })`; one call; assert `spans.map((span) => span.name)` equals `["anthropic.messages.create"]` and that span's `attributes["gen_ai.usage.input_tokens"]` is `5`.
+   - The planning session ran exactly these two cases with these options and got those span lists; `resetForTests()` (already in the file's `beforeEach`/`afterEach`) resets the global provider between them. If a result differs, stop and report it.
+
+3. `sdks/python/tests/test_instrument.py`: add two tests after `test_anthropic_end_to_end`. The Python SDK's global mode cannot be re-set inside one test process (OpenTelemetry's `set_tracer_provider` is one-shot), so give the Anthropic client cetra's provider directly through its own option, which is where the SDK's span goes in global mode: `anthropic.Anthropic(base_url=http_recorder.url, api_key="test", open_telemetry={"tracer_provider": runtime.provider})`, where `runtime = start(...)` (the `memory` fixture's `start` returns the `Runtime`). The call is `client.messages.create(model="claude-opus-4-6", max_tokens=8, messages=[{"role": "user", "content": "hello"}])`.
+   - `test_anthropic_sdk_span_is_not_doubled`: `runtime = start(instrument=["anthropic"])`; one call; `finished = spans(exporter)`; assert `[span.name for span in finished] == [ANTHROPIC_SPAN]` and no span's `instrumentation_scope.name` starts with `com.anthropic.sdk`.
+   - `test_anthropic_sdk_span_reaches_cetra_without_instrumentor`: `runtime = start()`; one call; assert `[span.name for span in finished] == ["anthropic.messages.create"]` and `attrs(span)["gen_ai.usage.input_tokens"]` is the input token count `http_recorder` returns (read it from the fixture, do not guess; report the value).
+   - If `open_telemetry` is not accepted by the installed `anthropic` (2.8.0 in `sdks/python/uv.lock`), stop and report.
+
+4. `docs/mvp-decisions.md`: add this row right after D-IN-31, in the same table:
+
+   `| D-IN-32 | Anthropic SDK spans | **Anthropic's own SDK spans are not de-duplicated by cetra; the helpers rely on OpenInference keeping them out of a traced call** (the user, 2026-11-25). Anthropic's SDKs start an \`anthropic.messages.create\` span per API call on the global tracer provider (checked: Python \`anthropic\` 2.8.0, TypeScript \`@anthropic-ai/sdk\` 1.8.0). OpenInference's Anthropic instrumentor hands the SDK a non-recording span while its LLM span is current (Python \`openinference-instrumentation-anthropic\` 3.3.0 and later, TypeScript \`@arizeai/openinference-instrumentation-anthropic\` 1.0.1 and later), so a call traced by cetra's helpers has one model span and its tokens count once; in default mode the SDK's spans never reach cetra (D-F-5). The TypeScript peer floor is raised to \`^1.0.1\` (1.0.0 has no suppression); tests in both SDKs check one span per call with the SDK's spans on. This corrects D-IN-31 item 2, which said the two record each call twice. OpenLLMetry's Anthropic instrumentation (0.62.4) does not suppress: its \`anthropic.chat\` and the SDK's span both carry the tokens, so the page tells OpenLLMetry users to set \`ANTHROPIC_OPEN_TELEMETRY=false\`. | A normalizer rule dropping an SDK span nested under an OpenInference span (the spans are siblings with OpenLLMetry, not nested, and nothing needs it for OpenInference); the helper turning itself off when the SDK emits spans (the SDK's spans carry no content by default, so traces would lose prompts and completions) |`
+
+   (In the file the backslashes are not there: the code spans are plain backticks.)
+
+   In the same file, in D-IN-31's row, item 2, right after "records each call twice, spike F)", insert ` (corrected by D-IN-32)`. Change nothing else in D-IN-31. The spikes and `09-m9-long-tail.md` keep their wording: they are history.
+
+4b. `docs/plans/in-integrations/00-design.md`: its decision table mirrors `docs/mvp-decisions.md` (D-IN-17 to D-IN-31, around lines 350–364). Append the same D-IN-32 row after D-IN-31's row there, and make the same ` (corrected by D-IN-32)` insertion in its D-IN-31 row. If the two D-IN-31 rows differ in a way that makes the insertion point ambiguous, stop and report.
+
+4c. `docs/roadmap.md`, the IN track's row (around line 68, the one listing "D-IN-29, D-IN-30, D-IN-31"): append `, D-IN-32` after `D-IN-31`, and where the row lists the track's plans, add `10-anthropic-native-spans.md` after the M9 plan in the same style. Change nothing else in the row.
+
+5. `docs/spec/10-sdk.md`, § Design rules, item 2: append at the end of the item, before its closing decision reference if any (keep the item one paragraph):
+
+   ` Anthropic's SDKs start a span of their own per API call (\`anthropic.messages.create\`, on the global provider). OpenInference's Anthropic instrumentor replaces it with a non-recording span while its LLM span is current, so a call traced by the \`anthropic\` instrumentor or the \`cetra/anthropic\` helper has one model span; the minimum versions that do this are the floors: \`openinference-instrumentation-anthropic>=3.3.0\` (§ Instrumentors) and the TypeScript peer \`@arizeai/openinference-instrumentation-anthropic\` \`^1.0.1\` (D-IN-32).`
+
+6. `website/src/content/docs/docs/integrations/anthropic.mdx`:
+   - § Limits: replace the bullet that starts with "Anthropic's own SDKs emit `anthropic.messages.create` spans" by these two bullets:
+     - `- Anthropic's own SDKs start a span of their own for each call, \`anthropic.messages.create\`, on the global tracer provider: Python \`anthropic\` 2.8.0 and TypeScript \`@anthropic-ai/sdk\` 1.8.0, the versions tested, both do. With the setups on this page each call is still recorded once: OpenInference's Anthropic instrumentor (Python 3.3.0 or later, TypeScript 1.0.1 or later) keeps the SDK's span out of the calls it traces. Without \`use_global_provider=True\` (TypeScript \`useGlobalProvider: true\`) the SDK's spans do not reach cetra at all.`
+     - `- OpenLLMetry's Anthropic instrumentation (0.62.4) does not keep the SDK's span out: its \`anthropic.chat\` span and the SDK's span both carry the call's tokens, which then count twice. With OpenLLMetry, set \`ANTHROPIC_OPEN_TELEMETRY=false\`, which both SDKs read, to turn the SDK's own spans off.`
+     (No backslashes in the file.) The versions 2.8.0 and 1.8.0 are deliberate: they are the versions the SDKs' tests run (`sdks/python/uv.lock`, `sdks/typescript/package.json` devDependencies), replacing the old bullet's 2.9.0 and 1.9.0, which no cetra test runs. Do not change them back. The Limits bullet about the fixtures' Python SDK 2.4.0 stays as it is.
+   - The `<Backing … tests={[…]}>` line: add `"sdks/python/tests/test_instrument.py::test_anthropic_sdk_span_is_not_doubled"` after the existing Python test. The TypeScript entry `"sdks/typescript/src/instrument.test.ts::anthropic helper"` already covers the new tests (it names the `describe`).
+   - Change nothing else on the page.
+
+7. `CHANGELOG.md`, § `[Unreleased]`: add at the end of the existing `### Changed` list:
+   `- \`@cetra-ai/sdk\`'s Anthropic helper needs \`@arizeai/openinference-instrumentation-anthropic\` 1.0.1 or later, which keeps the Anthropic SDK's own span out of a traced call, so its tokens count once.` (no backslashes)
+
+8. Regenerate the skill references only (not the whole `just docs-gen`, which builds Rust): `cd website && CETRA_DOCS_WRITE=1 node scripts/skill-references.mjs`. Commit the regenerated `skills/cetra/references/anthropic.md`. Any other generated change: stop and report.
+
+**Tests:** the four tests of steps 2 and 3.
+
+**Done when** (before every command: `export PATH=$(ls -d ~/.local/share/nvm/v*/bin | tail -1):$PATH`; run only these, not `just check`, which the coordinating session runs once on `ubuntu-dev`):
+- `cd sdks/typescript && npx vitest run src/instrument.test.ts` passes.
+- `cd sdks/python && uv run pytest tests/test_instrument.py -q` passes.
+- `cd sdks/typescript && npx biome check src/instrument.test.ts` and `cd sdks/python && uv run ruff check tests/test_instrument.py && uv run ruff format --check tests/test_instrument.py` pass.
+- `node website/scripts/check-terms.mjs`, `node website/scripts/check-backing.mjs` and `cd website && node scripts/skill-references.mjs` (check mode, no env var) pass, if they run standalone (from `website/` if needed); otherwise report.
+- In the TS tests, the scope is `span.instrumentationScope.name` (`ReadableSpan` in `@opentelemetry/sdk-trace` 2.x); in Python, `span.instrumentation_scope.name`.
+- `git status` shows only the **Edit** files.
+
+**Commit:** `Keep the Anthropic SDK's own span out of a traced call (D-IN-32)`

@@ -43,6 +43,17 @@ bedrock = ["openinference-instrumentation-bedrock>=0.1.63"]
 openai-agents = ["openinference-instrumentation-openai-agents>=2.7.1"]
 crewai = ["openinference-instrumentation-crewai>=1.1.23"]
 dspy = ["openinference-instrumentation-dspy>=0.1.50"]
+groq = ["openinference-instrumentation-groq>=0.1.40"]
+mistralai = ["openinference-instrumentation-mistralai>=2.3.5"]
+cohere = ["openinference-instrumentation-cohere>=0.1.22"]
+ollama = ["openinference-instrumentation-ollama>=0.1.20"]
+together = ["openinference-instrumentation-together>=0.1.20"]
+instructor = ['openinference-instrumentation-instructor>=0.1.35; python_version < "3.14"']
+agno = ["openinference-instrumentation-agno>=1.2.0"]
+smolagents = ["openinference-instrumentation-smolagents>=0.1.50"]
+haystack = ["openinference-instrumentation-haystack>=0.1.53"]
+beeai = ['openinference-instrumentation-beeai>=0.1.36; python_version < "3.15"']
+mcp = ["openinference-instrumentation-mcp>=2.1.5"]
 all = [
   "openinference-instrumentation-openai>=0.1.69",
   "openinference-instrumentation-anthropic>=3.3.0",
@@ -54,6 +65,17 @@ all = [
   "openinference-instrumentation-openai-agents>=2.7.1",
   "openinference-instrumentation-crewai>=1.1.23",
   "openinference-instrumentation-dspy>=0.1.50",
+  "openinference-instrumentation-groq>=0.1.40",
+  "openinference-instrumentation-mistralai>=2.3.5",
+  "openinference-instrumentation-cohere>=0.1.22",
+  "openinference-instrumentation-ollama>=0.1.20",
+  "openinference-instrumentation-together>=0.1.20",
+  'openinference-instrumentation-instructor>=0.1.35; python_version < "3.14"',
+  "openinference-instrumentation-agno>=1.2.0",
+  "openinference-instrumentation-smolagents>=0.1.50",
+  "openinference-instrumentation-haystack>=0.1.53",
+  'openinference-instrumentation-beeai>=0.1.36; python_version < "3.15"',
+  "openinference-instrumentation-mcp>=2.1.5",
 ]
 
 [build-system]
@@ -62,6 +84,12 @@ build-backend = "uv_build"
 
 [tool.uv.build-backend]
 module-name = "cetra"
+
+[tool.uv]
+# openinference-instrumentation-mcp 2.1.6 was uploaded on 2026-11-19, after the 7-day cutoff
+# (2026-11-17). The newest upload before it is 2.1.5 (uploaded 2026-11-16).
+# Remove once openinference-instrumentation-mcp's floor is raised past a version older than 7 days.
+exclude-newer-package = { openinference-instrumentation-mcp = "2026-11-17T00:00:00Z" }
 
 [dependency-groups]
 dev = [

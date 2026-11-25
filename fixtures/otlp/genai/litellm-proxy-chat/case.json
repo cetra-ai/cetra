@@ -1,0 +1,22 @@
+{
+  "description": "LiteLLM Proxy chat completions through two model aliases and a tool call, traced by the proxy's otel callback.",
+  "origin": "captured",
+  "source": {
+    "instrumentation": "litellm",
+    "instrumentation_version": "1.109.1",
+    "language": "python",
+    "libraries": {
+      "litellm": "1.109.1",
+      "openai": "3.45.0"
+    },
+    "captured_at": "2026-11-24T00:38:16Z"
+  },
+  "spec_refs": [
+    "02 § Convention detection",
+    "02 § Mapping tables / Span kind",
+    "02 § Mapping tables / Input / output",
+    "02 § Mapping tables / Model, provider, usage",
+    "02 § Normalization rules"
+  ],
+  "notes": "The proxy runs as a subprocess with callbacks: [otel] and message logging left on. Its environment points the models at the mock (FAKE_BASE), loads the local model cost map and exports OTLP/HTTP protobuf to the receiver; OTEL_HEADERS carries a literal space because LiteLLM sends the value as is. Three requests reach two aliases: gpt-4o-mini (openai/gpt-4o-mini) twice and ds (deepseek/deepseek-chat) once, each with user user-1. gen_ai.response.model is the proxy's alias, while gen_ai.system and litellm.provider.model name the upstream. Cost is reported on gen_ai.cost.* keys. The third request sends one tool and its gen_ai.output.messages has empty parts: the call is only in gen_ai.completion.0.function_call.*. span_names keeps the litellm_request spans and drops the plumbing spans (fastapi, auth, router, self, raw_gen_ai_request) and the health-probe trace. litellm.call_id is a UUID, hidden_params holds a hash and the upstream address, metadata.requester_metadata holds the proxy's address and the request headers, and metadata.requester_ip_address is the client's loopback address, which the scrubber refuses: all four are volatile. gen_ai.response.id is listed too, since the proxy re-mints it on embeddings."
+}

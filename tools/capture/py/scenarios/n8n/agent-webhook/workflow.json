@@ -1,0 +1,82 @@
+[
+  {
+    "id": "wf1",
+    "name": "spike agent",
+    "active": true,
+    "nodes": [
+      {
+        "id": "n1",
+        "name": "Webhook",
+        "type": "n8n-nodes-base.webhook",
+        "typeVersion": 2,
+        "position": [0, 0],
+        "webhookId": "spike-hook",
+        "parameters": {
+          "path": "spike",
+          "httpMethod": "POST",
+          "responseMode": "lastNode"
+        }
+      },
+      {
+        "id": "n2",
+        "name": "AI Agent",
+        "type": "@n8n/n8n-nodes-langchain.agent",
+        "typeVersion": 2.2,
+        "position": [300, 0],
+        "parameters": {
+          "promptType": "define",
+          "text": "What is the weather in Paris?",
+          "options": {
+            "systemMessage": "You are a weather bot."
+          }
+        }
+      },
+      {
+        "id": "n3",
+        "name": "OpenAI Chat Model",
+        "type": "@n8n/n8n-nodes-langchain.lmChatOpenAi",
+        "typeVersion": 1.2,
+        "position": [300, 200],
+        "parameters": {
+          "model": {
+            "__rl": true,
+            "mode": "list",
+            "value": "gpt-4o-mini"
+          },
+          "options": {}
+        },
+        "credentials": {
+          "openAiApi": {
+            "id": "cred1",
+            "name": "fake openai"
+          }
+        }
+      }
+    ],
+    "connections": {
+      "OpenAI Chat Model": {
+        "ai_languageModel": [
+          [
+            {
+              "node": "AI Agent",
+              "type": "ai_languageModel",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Webhook": {
+        "main": [
+          [
+            {
+              "node": "AI Agent",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      }
+    },
+    "settings": {}
+  }
+]

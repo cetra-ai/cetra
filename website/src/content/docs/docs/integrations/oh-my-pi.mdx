@@ -1,0 +1,91 @@
+---
+title: Oh My Pi
+description: "Connect Oh My Pi to cetra with the .env lines setup writes: each run becomes one trace of model and tool calls, with the session, tokens and the prompts."
+---
+
+import Backing from "../../../../components/Backing.astro";
+
+This page shows how to send Oh My Pi's traces to cetra with `cetra agents setup oh-my-pi`, and what you see in the UI.
+
+<Backing fixtures={["oh_my_pi/read-file"]} />
+
+## Connect Oh My Pi
+
+1. Create a project key with the `ingest` scope in the project's [API keys](/docs/platform/api-keys/) page. Copy the `sk-cetra-…` value.
+2. Install the `cetra` binary and run this in a terminal, with `<SK_CETRA_KEY>` set to your key and `<CETRA_URL>` set to your server:
+
+```bash
+export CETRA_INGEST_KEY=<SK_CETRA_KEY>
+cetra agents setup oh-my-pi --url <CETRA_URL>
+```
+
+3. Run Oh My Pi as usual. Its traces then go to cetra. No shell profile change is needed: Oh My Pi reads its telemetry settings from its own `.env` file.
+
+## What setup writes
+
+`cetra agents setup oh-my-pi` writes the `OTEL_*` lines into `~/.omp/agent/.env`, a file only Oh My Pi reads. It keeps every other line in the file, and the first change keeps a copy at `~/.omp/agent/.env.cetra-backup`. The lines are:
+
+{/* untested: written by `cetra agents setup oh-my-pi` into a file in your home directory */}
+```bash
+OTEL_EXPORTER_OTLP_ENDPOINT=<CETRA_URL>
+OTEL_EXPORTER_OTLP_HEADERS=Authorization=Bearer <SK_CETRA_KEY>
+OTEL_SERVICE_NAME=omp
+OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT=true
+OTEL_LOGS_EXPORTER=none
+OTEL_METRICS_EXPORTER=none
+```
+
+The header value carries a plain space after `Bearer`: this is a dotenv value, not a shell line. `OTEL_SERVICE_NAME` names the service `omp` in the UI. The content line is left out with `--no-content`. The last two lines turn off Oh My Pi's logs and metrics, which cetra would otherwise accept and drop.
+
+Setup also saves `agents.toml`, with mode 0600, next to the credentials file of `cetra login` (`~/.config/cetra/` on Linux, `~/Library/Application Support/cetra/` on macOS). The `.env` lines have no marker, so `remove` reads this file to recognize its own lines.
+
+To see the merged `.env` without writing it, add `--print`. It prints the file and writes nothing.
+
+To undo setup, run this. It removes the lines setup wrote when they still point at the saved server, and deletes the `.env` when they were all it held. It keeps every other line:
+
+```bash
+cetra agents remove oh-my-pi
+```
+
+## What you get
+
+Each run is one trace. Its root is an `agent` span, `invoke_agent`, and each model call and tool call is a child of it.
+
+- each model call is an `llm` span named after the model, such as `chat gpt-4o-mini`, with the model and its input and output tokens;
+- each tool call is a `tool` span named after the tool, such as `read`. Oh My Pi's own name for the span is kept in `cetra.span_name`;
+- the prompts and the answers are on the spans, when content is on.
+
+The `agent` span carries Oh My Pi's own totals for the run, in `omp.gen_ai.agent.*` attributes: token counts and a cost estimate. cetra reads none of them, so the model calls are counted once.
+
+Each trace has these fields:
+
+- the session, from Oh My Pi's session id in `gen_ai.conversation.id`;
+- `metadata.coding_agent` set to `oh-my-pi`.
+
+Oh My Pi sends no repository, branch or person, because it has no hook. cetra gets none of them for Oh My Pi traces.
+
+Use the [Coding agents dashboard template](/docs/tracing/custom-dashboards/) to see API-equivalent cost per session and tool usage.
+
+## Content
+
+Oh My Pi sends the prompts and the answers when `OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT` is set, the fourth line setup writes. With `--no-content`, setup leaves the line out.
+
+## API-equivalent cost
+
+cetra prices each model call from its token counts, using its price table. Oh My Pi puts its own cost estimate on the run's span; cetra does not read it.
+
+API-equivalent cost is what the same tokens would cost at API prices. If you use a subscription plan, it is not what you pay.
+
+## Limits
+
+- Tested with Oh My Pi 18.22.0, in `omp -p` mode. The interactive terminal interface was not captured.
+- A project `.env` with `OTEL_*` lines also routes Oh My Pi's telemetry: Oh My Pi reads the one in the working directory too. Setup never writes a project `.env`.
+- When a tool call fails, Oh My Pi can make extra model calls beside the main flow, which arrive without a parent. The captured run has a successful tool call and shows none.
+- Oh My Pi exports over HTTP/protobuf only; it has no gRPC or JSON route.
+- Oh My Pi sends no repository, branch or person, so cetra cannot group its traces by repository or branch.
+
+## Next
+
+- [Traces](/docs/tracing/traces/): read the trace as a tree and a timeline.
+- [Sessions](/docs/tracing/sessions/): the calls of one Oh My Pi session.
+- [Custom dashboards](/docs/tracing/custom-dashboards/): build your own cost views, or start from the Coding agents template.

@@ -13,6 +13,7 @@ Instrumentation libraries describe an LLM call with attributes, and they do not 
 |---|---|---|
 | cetra | any attribute starting with `cetra.` | Kind, input, output, session, user, tags, metadata, environment, release, time to first token, cost |
 | [OpenTelemetry GenAI](/docs/integrations/opentelemetry-genai/) | `gen_ai.*` attributes, or events named `gen_ai.*` | Operation, models, provider, messages, system instructions, tool definitions, token counts, finish reasons, conversation ID |
+| [VoltAgent](/docs/integrations/voltagent/) | `voltagent.*` attributes, or an instrumentation scope starting with `@voltagent/` | Span kind, model, input and output, token counts, session |
 | [OpenInference](/docs/integrations/openinference/) | `openinference.span.kind`, or `llm.*`, `input.value`, `output.value`, `embedding.*`, `retrieval.*`, `tool.*` | Kind, models, input and output messages, tool definitions, token counts, cost, session, user |
 | [Vercel AI SDK](/docs/integrations/vercel-ai-sdk/) | `ai.*` attributes | Operation, models, prompt, response, tool calls, token counts, telemetry metadata |
 | [OpenLLMetry](/docs/integrations/openllmetry/) | `traceloop.*`, or `gen_ai.prompt.N.*` and `gen_ai.completion.N.*` | Kind, prompt and completion messages, entity input and output, association properties |
@@ -22,18 +23,32 @@ Instrumentation libraries describe an LLM call with attributes, and they do not 
 
 [Span attributes](/docs/reference/attributes/) lists every attribute and the field it feeds.
 
+Bifrost writes the GenAI convention under the instrumentation scope `bifrost`; cetra reads its server root span as a chain, and reads its tool calls and cost keys (`bifrost.cost.*`).
+
+Some frameworks write their own keys under their instrumentation scope. cetra reads those keys only on that scope, so the same key on another scope is left as it is:
+
+- [Prompt Flow](/docs/integrations/prompt-flow/) (scope `promptflow`): `span_type` sets the kind, and `inputs`, `output`, `llm.response.model` and `llm.usage.*` set the input, output, model and tokens.
+- [Langflow](/docs/integrations/langflow/) (scope `langflow`): `trace_type` sets the kind, and `inputs` and `outputs` set the input and output.
+- [n8n](/docs/integrations/n8n/) (scope `n8n-workflow`): the span name sets the kind, unless a GenAI operation sets it.
+- [LiveKit Agents](/docs/integrations/livekit-agents/) (scope `livekit-agents`): the `lk.pii.*` keys set the content, and a host in the provider names the endpoint.
+- [Pipecat](/docs/integrations/pipecat/) (scopes starting with `pipecat`): `input` and `output` set the content, and `conversation.id` sets the session on the turn spans.
+- [Promptfoo](/docs/integrations/promptfoo/) (scope `promptfoo.providers`): `gen_ai.evaluation.name` marks a grader span as an evaluator.
+- [OpenLIT](/docs/integrations/openlit/) (scopes starting with `openlit.instrumentation.`): `gen_ai.operation.type` sets the kind when the operation name is not a standard one, and on a vector span `db.operation.name` marks the reads as retrievers.
+- [Vector databases](/docs/integrations/vector-databases/): OpenLLMetry's Chroma, Qdrant, Milvus, Pinecone and Weaviate instrumentors (scopes `opentelemetry.instrumentation.chromadb`, `.qdrant`, `.milvus`, `.pinecone`, `.weaviate`) set the kind by span name, and the read names are retrievers.
+
 ## Precedence
 
 A span can carry several conventions. The Vercel AI SDK, for example, writes both `ai.*` and `gen_ai.*` attributes. For each field, cetra reads the conventions in this order and uses the first that has a value:
 
 1. cetra
 2. OpenTelemetry GenAI
-3. OpenInference
-4. Vercel AI SDK
-5. OpenLLMetry
-6. Langfuse
-7. Laminar
-8. Google ADK
+3. VoltAgent
+4. OpenInference
+5. Vercel AI SDK
+6. OpenLLMetry
+7. Langfuse
+8. Laminar
+9. Google ADK
 
 The winner takes the whole field. cetra never merges the message lists of two conventions into one.
 

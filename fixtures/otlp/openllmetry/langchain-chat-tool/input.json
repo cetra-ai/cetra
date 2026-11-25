@@ -90,7 +90,7 @@
                 {
                   "key": "traceloop.association.properties.lc_versions",
                   "value": {
-                    "stringValue": "{\"langchain-core\": \"1.7.4\", \"langchain\": \"1.4.8\", \"langchain-openai\": \"1.7.3\"}"
+                    "stringValue": "{\"langchain-core\": \"1.8.1\", \"langchain\": \"1.4.8\", \"langchain-openai\": \"1.7.3\"}"
                   }
                 },
                 {
@@ -200,7 +200,7 @@
               "name": "execute_tool get_weather",
               "kind": 1,
               "startTimeUnixNano": "1767225590043000000",
-              "endTimeUnixNano": "1767225590044000000",
+              "endTimeUnixNano": "1767225590043000000",
               "attributes": [
                 {
                   "key": "traceloop.workflow.name",
@@ -302,8 +302,8 @@
               "flags": 256,
               "name": "ChatOpenAI.chat",
               "kind": 3,
-              "startTimeUnixNano": "1767225590045000000",
-              "endTimeUnixNano": "1767225590079000000",
+              "startTimeUnixNano": "1767225590044000000",
+              "endTimeUnixNano": "1767225590077000000",
               "attributes": [
                 {
                   "key": "traceloop.workflow.name",
@@ -344,7 +344,7 @@
                 {
                   "key": "traceloop.association.properties.lc_versions",
                   "value": {
-                    "stringValue": "{\"langchain-core\": \"1.7.4\", \"langchain\": \"1.4.8\", \"langchain-openai\": \"1.7.3\"}"
+                    "stringValue": "{\"langchain-core\": \"1.8.1\", \"langchain\": \"1.4.8\", \"langchain-openai\": \"1.7.3\"}"
                   }
                 },
                 {

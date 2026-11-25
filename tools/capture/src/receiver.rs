@@ -212,6 +212,11 @@ fn earliest(quiet_at: Option<Instant>, deadline: Option<Instant>) -> Option<Inst
     }
 }
 
+/// The three OTLP/HTTP signal paths, which a HEAD probe may name.
+fn is_otlp_path(path: &str) -> bool {
+    path.ends_with("/v1/traces") || path.ends_with("/v1/logs") || path.ends_with("/v1/metrics")
+}
+
 fn accepted(method: &Method, path: &str) -> Option<Signal> {
     if method != Method::POST {
         return None;
@@ -281,6 +286,11 @@ async fn handle(
 ) -> Response {
     let method = request.method().clone();
     let path = request.uri().path().to_owned();
+    if method == Method::HEAD && is_otlp_path(&path) {
+        // A startup probe (n8n sends HEAD to the exporter's URL before it exports). It is
+        // answered, not recorded: nothing is exported and no error is logged.
+        return empty(StatusCode::OK);
+    }
     let Some(signal) = accepted(&method, &path) else {
         return receiver.fail(
             StatusCode::NOT_FOUND,
@@ -483,6 +493,60 @@ mod tests {
         let log = receiver.finish();
         assert_eq!(log.exports, vec![sample()]);
         assert!(log.errors.is_empty());
+    }
+
+    /// A real HTTP/1.1 connection: `oneshot` cannot send a chunked request.
+    #[tokio::test]
+    async fn a_chunked_otlp_body_is_received() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let receiver = Receiver::new();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = tokio::spawn(axum::serve(listener, receiver.router()).into_future());
+        let body = sample().encode_to_vec();
+        let mut stream = tokio::net::TcpStream::connect(("127.0.0.1", port))
+            .await
+            .unwrap();
+        let head = "POST /v1/traces HTTP/1.1\r\nHost: 127.0.0.1\r\n\
+            Content-Type: application/x-protobuf\r\nTransfer-Encoding: chunked\r\n\
+            Connection: close\r\n\r\n";
+        let (first, rest) = body.split_at(body.len() / 2);
+        let mut request = head.as_bytes().to_vec();
+        for chunk in [first, rest] {
+            request.extend_from_slice(format!("{:x}\r\n", chunk.len()).as_bytes());
+            request.extend_from_slice(chunk);
+            request.extend_from_slice(b"\r\n");
+        }
+        request.extend_from_slice(b"0\r\n\r\n");
+        stream.write_all(&request).await.unwrap();
+        let mut response = Vec::new();
+        tokio::time::timeout(Duration::from_secs(5), stream.read_to_end(&mut response))
+            .await
+            .expect("the response arrives")
+            .unwrap();
+        server.abort();
+        assert!(
+            response.starts_with(b"HTTP/1.1 200"),
+            "{}",
+            String::from_utf8_lossy(&response)
+        );
+        let log = receiver.finish();
+        assert_eq!(log.exports, vec![sample()]);
+        assert!(log.errors.is_empty(), "{:?}", log.errors);
+    }
+
+    #[tokio::test]
+    async fn a_head_probe_is_answered() {
+        let receiver = Receiver::new();
+        for path in ["/v1/traces", "/v1/metrics", "/v1/logs"] {
+            let response = send(&receiver, request("HEAD", path, None, None, Vec::new())).await;
+            assert_eq!(response.status(), 200, "{path}");
+            assert!(bytes(response).await.is_empty(), "{path}");
+        }
+        let log = receiver.finish();
+        assert!(log.exports.is_empty());
+        assert!(log.errors.is_empty(), "{:?}", log.errors);
     }
 
     #[tokio::test]

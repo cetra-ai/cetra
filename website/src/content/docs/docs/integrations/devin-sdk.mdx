@@ -1,0 +1,34 @@
+---
+title: Devin SDK
+description: "Send the traces of your Devin SDK app to cetra. The app owns the tracer and the exporter. Setup only: not run, because it needs a Devin agent."
+---
+
+The Devin SDK, `@cognition-ai/sdk`, can turn its sessions into OpenTelemetry spans. This page explains how that reaches cetra. It is setup only: it was not run, because the test sandbox had no Devin agent to drive.
+
+## Set up
+
+The SDK's tracing is in its `@cognition-ai/sdk/tracing` module. It needs no CLI flag, because it reads the session's updates directly.
+
+The app owns the OpenTelemetry setup, not the SDK:
+
+1. Create a tracer provider in your app, with an OTLP/HTTP exporter that points at your cetra server. Send the header `Authorization: Bearer <SK_CETRA_KEY>`, with `<SK_CETRA_KEY>` set to a key that has the `ingest` scope, from the project's [API keys](/docs/platform/api-keys/) page.
+2. Pass a tracer from that provider to `traceSessions`, from `@cognition-ai/sdk/tracing`, in the options of `createDevin`.
+
+The SDK README shows the tracer provider and `traceSessions`, but not the OTLP exporter. So this page gives no code for the exporter. Set it up with the OpenTelemetry documentation for your language.
+
+## Content
+
+The SDK records prompts by default, from every prompt path, including images and resources. The traces show each turn as an `agent` span, each model request as a `generation` span, and each tool call as a `tool` span.
+
+## Limits
+
+- Not run: the page follows the SDK README. No traces from a Devin agent were checked in cetra.
+- Cloud sessions send no usage updates, so their traces have turn and tool spans but no `generation` spans.
+- The SDK README's sample uses Langfuse's span processor. cetra needs no Langfuse component; the exporter in step 1 is enough.
+- The SDK has no switch to stop prompt recording. `tracing: false` on a session turns tracing off for that session altogether.
+- There is no `cetra agents setup` for this SDK. Nothing is written to a settings file, because the exporter lives in your app's code.
+
+## Next
+
+- [Traces](/docs/tracing/traces/): read a trace as a tree and a timeline.
+- [API keys](/docs/platform/api-keys/): create the `ingest` key the exporter sends.

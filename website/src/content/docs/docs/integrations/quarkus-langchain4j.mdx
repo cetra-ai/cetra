@@ -1,0 +1,92 @@
+---
+title: Quarkus LangChain4j
+description: "Trace Quarkus LangChain4j AI services with cetra through quarkus-opentelemetry: model calls, tools, and content behind four tracing switches."
+---
+
+import Backing from "../../../../components/Backing.astro";
+
+cetra traces Quarkus LangChain4j AI services through the `quarkus-opentelemetry` extension: the AI service call, each model call and each tool execution land in one trace.
+
+<Backing fixtures={["genai/quarkus-langchain4j-tool"]} />
+
+## Install
+
+```xml
+<dependency>
+    <groupId>io.quarkiverse.langchain4j</groupId>
+    <artifactId>quarkus-langchain4j-openai</artifactId>
+    <version>1.15.1</version>
+</dependency>
+<dependency>
+    <groupId>io.quarkus</groupId>
+    <artifactId>quarkus-opentelemetry</artifactId>
+</dependency>
+```
+
+The fixture was captured with the Quarkus platform 3.40.1.2, imported as `io.quarkus.platform:quarkus-bom` in `dependencyManagement`.
+
+## Set up
+
+Point the exporter at cetra and turn the content switches on in `application.properties`:
+
+```properties
+quarkus.langchain4j.openai.api-key=${OPENAI_API_KEY}
+quarkus.otel.exporter.otlp.endpoint=http://localhost:8080
+quarkus.otel.exporter.otlp.headers=Authorization=Bearer sk-cetra-…
+quarkus.otel.exporter.otlp.traces.protocol=http/protobuf
+quarkus.otel.service.name=my-app
+quarkus.langchain4j.tracing.include-prompt=true
+quarkus.langchain4j.tracing.include-completion=true
+quarkus.langchain4j.tracing.include-tool-arguments=true
+quarkus.langchain4j.tracing.include-tool-result=true
+```
+
+- `quarkus.otel.exporter.otlp.endpoint` is a base URL: Quarkus appends the signal's path itself.
+- The four `include-*` switches turn the content on. They are off by default: without them the model calls carry no prompt, completion, tool arguments or tool result.
+
+Declare the AI service and the tool:
+
+```java
+import dev.langchain4j.agent.tool.P;
+import dev.langchain4j.agent.tool.Tool;
+import io.quarkiverse.langchain4j.RegisterAiService;
+import jakarta.enterprise.context.ApplicationScoped;
+
+@RegisterAiService(tools = WeatherTools.class)
+public interface Assistant {
+    String chat(String message);
+}
+
+@ApplicationScoped
+public class WeatherTools {
+    @Tool("Get the current weather for a city")
+    public String get_weather(@P("city") String city) {
+        return "Sunny in " + city + ", 21 C";
+    }
+}
+```
+
+## What you get
+
+One AI service call with one tool round:
+
+- a plain span for the AI service call, named after the interface and the method, `langchain4j.aiservices.Assistant.chat`;
+- an `llm` span named `completion <model>` for each model call, with the provider `openai`, the model, the token counts and the cost computed from the built-in prices; the input is the prompt and the output is the completion, as plain text;
+- a `tool` span named `langchain4j.tools.<tool>`, with the arguments as its input and the result as its output;
+- a plain `POST /chat/completions` span from the HTTP client under each model call.
+
+## Limits
+
+- Content is off by default: the four `include-*` switches turn on the prompt, the completion, the tool arguments and the tool result.
+- The model call's input and output are plain text, not parsed messages.
+- The turn that answers with a tool call writes no completion, so its `llm` span has an input but no output. The prompt of the following call then shows `null` in place of the model's tool call; that is how Quarkus serializes the conversation.
+- The HTTP client spans stay plain spans; cetra reads no model data from them.
+- The capture sent no Authorization header; the header setting above is the library's documented option, not part of the captured run.
+- The fixture was captured with Quarkus 3.40.1.2 and Quarkus LangChain4j 1.15.1.
+- If a field is missing, look at the span's **Attributes** tab and compare it with [Span attributes](/docs/reference/attributes/).
+
+## Next
+
+- [Send OpenTelemetry](/docs/get-started/opentelemetry/): the endpoint and the headers cetra expects.
+- [Traces](/docs/tracing/traces/): read the trace as a tree and a timeline.
+- [Cost and tokens](/docs/tracing/cost-and-tokens/): how cost is computed from the token counts.

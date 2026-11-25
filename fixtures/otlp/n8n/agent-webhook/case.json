@@ -1,0 +1,20 @@
+{
+  "description": "n8n 2.48 runs a webhook workflow (Webhook, AI Agent, OpenAI Chat Model) and exports its node spans over OTLP/HTTP protobuf.",
+  "origin": "captured",
+  "source": {
+    "instrumentation": "n8n",
+    "instrumentation_version": "2.48.4",
+    "language": "python",
+    "libraries": {
+      "n8n": "2.48.4"
+    },
+    "captured_at": "2026-11-24T03:05:17Z"
+  },
+  "spec_refs": [
+    "02 § Convention detection",
+    "02 § Mapping tables / Span kind",
+    "02 § Mapping tables / Model, provider, usage",
+    "02 § Normalization rules"
+  ],
+  "notes": "n8n runs as `n8n start` (OpenTelemetry starts only with the server; `n8n execute` exports nothing). The scenario imports the credential (its url is the mock's /v1 base) and the workflow with the n8n CLI, activates the workflow, starts the server on a free port, and posts one request to the webhook. The credential file is a template: the program writes its @MOCK_URL@ into a temporary copy. The user folder is a temporary directory and every telemetry, diagnostics, template and AI switch is off. Spans: workflow.execute (chain), the Webhook node (span), the AI Agent node (agent, invoke_agent) and the OpenAI Chat Model node (llm, chat). Every span keeps the name node.execute (or workflow.execute); there is no content. The node's runtime does not record prompt or tool content here, and the Chat Model's usage is 131/12, the same as the spike. The server is stopped with SIGINT after a fixed export delay."
+}

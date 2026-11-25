@@ -1,0 +1,21 @@
+{
+  "description": "OpenAI client call through OpenRouter, one chat turn, traced by OpenInference through cetra's SDK.",
+  "origin": "captured",
+  "source": {
+    "instrumentation": "openinference-instrumentation-openai",
+    "instrumentation_version": "0.1.69",
+    "language": "python",
+    "libraries": {
+      "openai": "3.45.0",
+      "openinference-instrumentation-openai": "0.1.69",
+      "opentelemetry-sdk": "1.45.2"
+    },
+    "captured_at": "2026-11-23T13:48:57Z"
+  },
+  "spec_refs": [
+    "02 § Model, provider, usage",
+    "02 § Provider from the endpoint",
+    "02 § Cost computation"
+  ],
+  "notes": "The client keeps the real base URL https://openrouter.ai/api/v1, and the harness routes the request to the capture mock under that host (D-IN-3). cetra's SDK stamps the OpenAI client's host on the span as server.address openrouter.ai (D-IN-18), so the provider is openrouter from the endpoint rule (D-IN-2). The model openai/gpt-4o-mini is priced by OpenAI's gpt-4o-mini row through the gateway fallback (D-IN-13). Cost is computed, not reported. Token counts are input 14 and output 8."
+}

@@ -1,0 +1,61 @@
+---
+title: Bedrock AgentCore
+description: "Trace Amazon Bedrock AgentCore agents with cetra from Python. The agent code is Strands, so its spans are the Strands spans."
+---
+
+import { Tabs, TabItem } from "@astrojs/starlight/components";
+import Backing from "../../../../components/Backing.astro";
+
+cetra traces an Amazon Bedrock AgentCore agent through the Strands code it runs, so the spans are the Strands spans.
+
+<Backing fixtures={["genai/strands-agent-tool", "genai/strands-agent-tool-latest"]} />
+
+## Install
+
+<Tabs syncKey="lang">
+  <TabItem label="Python">
+
+```bash
+pip install cetra-sdk "strands-agents[openai]"
+```
+
+  </TabItem>
+</Tabs>
+
+## Set up
+
+Write the agent as a Strands agent, as on the [Strands Agents](/docs/integrations/strands/) page. Start cetra with `use_global_provider=True` before you create the agent, because Strands writes its spans to the global tracer provider. Set `CETRA_API_KEY` to your `sk-cetra-…` key.
+
+<Tabs syncKey="lang">
+  <TabItem label="Python">
+
+{/* untested: needs CETRA_API_KEY and an AWS account for the AgentCore runtime */}
+```python
+import cetra
+
+cetra.init(use_global_provider=True)
+
+# Create the Strands agent and run it as on the Strands Agents page.
+
+cetra.flush()
+```
+
+  </TabItem>
+</Tabs>
+
+## What you get
+
+An AgentCore agent that runs Strands code produces the spans listed on the [Strands Agents](/docs/integrations/strands/) page: the agent span, the event loop cycles, a `chat` `llm` span for each model call, and a `tool` span for each tool call.
+
+## Limits
+
+- cetra was tested with the Strands cases, not on AgentCore. The spans above come from Strands running locally.
+- The export from the AgentCore runtime to cetra is not tested, because the test needs an AWS account.
+- The fixtures were captured with `strands-agents` 1.65.0.
+- If a field is missing, look at the span's **Attributes** tab and compare it with [Span attributes](/docs/reference/attributes/).
+
+## Next
+
+- [Strands Agents](/docs/integrations/strands/): the spans, the session and the message formats.
+- [Traces](/docs/tracing/traces/): read the trace as a tree and a timeline.
+- [Cost and tokens](/docs/tracing/cost-and-tokens/): how cost is computed from the token counts.

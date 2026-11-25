@@ -1,0 +1,63 @@
+---
+title: EverOS
+description: "Send EverOS memory spans to cetra through its built-in OTLP export: one trace per add, flush and search call, with the pipeline's LLM and embedding calls."
+---
+
+import Backing from "../../../../components/Backing.astro";
+
+cetra reads the spans EverOS's memory server exports for each `add`, `flush` and `search` call, with the token counts of its LLM and embedding calls.
+
+<Backing fixtures={["genai/everos-memory"]} />
+
+## Install
+
+```bash
+pip install "everos[otel]"
+```
+
+The `otel` extra installs the OTLP exporter. Without it EverOS stays silent: it logs `observability_enabled_but_otel_not_installed` and exports nothing, even with tracing enabled. The fixture was captured with everos 1.7.0.
+
+## Set up
+
+EverOS exports when its observability section is on. Set the variables, then start the server and call the memory API as usual.
+
+```bash
+export EVEROS_OBSERVABILITY__ENABLED=true
+export EVEROS_OBSERVABILITY__ENDPOINT=http://<HOST>:8080/v1/traces
+export EVEROS_OBSERVABILITY__HEADERS='{"Authorization": "Bearer <SK_CETRA_KEY>"}'
+export EVEROS_OBSERVABILITY__CAPTURE_CONTENT=true
+
+everos server start
+```
+
+Replace `<SK_CETRA_KEY>` with your `sk-cetra-…` API key. See [Send OpenTelemetry](/docs/get-started/opentelemetry/). EverOS takes the full `/v1/traces` URL and appends nothing itself.
+
+- `EVEROS_OBSERVABILITY__CAPTURE_CONTENT` is false by default, and spans carry metadata only. Set it to `true` to also send the search query and the extracted memory as span input and output.
+- `EVEROS_OBSERVABILITY__SERVICE_NAME` names the service in cetra. It defaults to `everos`.
+- Point EverOS's own `EVEROS_LLM__*` and `EVEROS_EMBEDDING__*` variables at your model endpoint; that is EverOS's configuration, not cetra's.
+
+## What you get
+
+Each API call is one trace:
+
+- a `span` named `everos.memory.add` or `everos.memory.flush`, with the session id;
+- an `llm` span named `everos.memcell.boundary` for each boundary-detection model call, with the request model, the token counts and the cost computed from cetra's price table;
+- `llm` spans named `everos.extract` and `everos.extract.summary` for the episode and summary extraction calls, whose token counts sum every attempt the call took, with the cost computed from cetra's price table;
+- a `retriever` span named `everos.memory.search`, with the user id and, when content capture is on, the query as its input and the result counts as its output, with `everos.search.recall` and `everos.search.rank` under it for the recall and ranking phases;
+- an `embedding` span named `everos.embedding`, with the model, the input tokens and the cost computed from cetra's price table;
+- an `agent` span for each offline-memory strategy run, named `everos.ome.<strategy>`.
+
+A model call that fails keeps its span, with an error status and an exception event, so a failed extraction shows in the trace.
+
+## Limits
+
+- Without the `otel` extra nothing is exported. See [Install](#install).
+- Content is off by default: set `EVEROS_OBSERVABILITY__CAPTURE_CONTENT=true` for input and output previews.
+- The fixture's mock model answers one fixed reply that only the boundary call accepts, so the extraction spans in it show the error path. A real model answers the extraction calls and they succeed.
+- The fixture was captured with `everos[otel]` 1.7.0, one user message and a hybrid search.
+- If a field is missing, look at the span's **Attributes** tab and compare it with [Span attributes](/docs/reference/attributes/).
+
+## Next
+
+- [Traces](/docs/tracing/traces/): read the trace as a tree and a timeline.
+- [Cost and tokens](/docs/tracing/cost-and-tokens/): how cost is computed from the token counts.

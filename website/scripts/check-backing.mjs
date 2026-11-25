@@ -20,7 +20,7 @@ export function checkFile(path, text, exists) {
       findings.push(`${path}:${line}: Backing box without fixtures or tests`);
     }
     for (const fixture of fixtures) {
-      if (!/^[a-z_]+\/[a-z0-9-]+$/.test(fixture) || !exists(fixture)) {
+      if (!/^[a-z0-9_]+\/[a-z0-9-]+$/.test(fixture) || !exists(fixture)) {
         findings.push(`${path}:${line}: no fixture case fixtures/otlp/${fixture}`);
       }
     }

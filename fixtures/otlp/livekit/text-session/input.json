@@ -1,0 +1,1094 @@
+{
+  "resourceSpans": [
+    {
+      "resource": {
+        "attributes": [
+          {
+            "key": "telemetry.sdk.language",
+            "value": {
+              "stringValue": "python"
+            }
+          },
+          {
+            "key": "telemetry.sdk.name",
+            "value": {
+              "stringValue": "opentelemetry"
+            }
+          },
+          {
+            "key": "telemetry.sdk.version",
+            "value": {
+              "stringValue": "1.45.2"
+            }
+          },
+          {
+            "key": "service.name",
+            "value": {
+              "stringValue": "capture-app"
+            }
+          }
+        ],
+        "droppedAttributesCount": 0,
+        "entityRefs": []
+      },
+      "scopeSpans": [
+        {
+          "scope": {
+            "name": "livekit-agents",
+            "version": "",
+            "attributes": [],
+            "droppedAttributesCount": 0
+          },
+          "spans": [
+            {
+              "traceId": "ad3df930d558fb0f273729a9801a896a",
+              "spanId": "20e16a259f49f843",
+              "traceState": "",
+              "parentSpanId": "",
+              "flags": 256,
+              "name": "agent_session",
+              "kind": 1,
+              "startTimeUnixNano": "1767225590000000000",
+              "endTimeUnixNano": "1767225590402000000",
+              "attributes": [
+                {
+                  "key": "lk.agent_label",
+                  "value": {
+                    "stringValue": "weather_agent"
+                  }
+                },
+                {
+                  "key": "gen_ai.operation.name",
+                  "value": {
+                    "stringValue": "invoke_workflow"
+                  }
+                },
+                {
+                  "key": "gen_ai.workflow.name",
+                  "value": {
+                    "stringValue": "agent_session"
+                  }
+                }
+              ],
+              "droppedAttributesCount": 0,
+              "events": [
+                {
+                  "timeUnixNano": "1767225590229000000",
+                  "name": "agent_state_changed",
+                  "attributes": [
+                    {
+                      "key": "lk.old_state",
+                      "value": {
+                        "stringValue": "initializing"
+                      }
+                    },
+                    {
+                      "key": "lk.new_state",
+                      "value": {
+                        "stringValue": "listening"
+                      }
+                    }
+                  ],
+                  "droppedAttributesCount": 0
+                },
+                {
+                  "timeUnixNano": "1767225590245000000",
+                  "name": "agent_state_changed",
+                  "attributes": [
+                    {
+                      "key": "lk.old_state",
+                      "value": {
+                        "stringValue": "listening"
+                      }
+                    },
+                    {
+                      "key": "lk.new_state",
+                      "value": {
+                        "stringValue": "thinking"
+                      }
+                    }
+                  ],
+                  "droppedAttributesCount": 0
+                },
+                {
+                  "timeUnixNano": "1767225590365000000",
+                  "name": "agent_state_changed",
+                  "attributes": [
+                    {
+                      "key": "lk.old_state",
+                      "value": {
+                        "stringValue": "thinking"
+                      }
+                    },
+                    {
+                      "key": "lk.new_state",
+                      "value": {
+                        "stringValue": "speaking"
+                      }
+                    }
+                  ],
+                  "droppedAttributesCount": 0
+                },
+                {
+                  "timeUnixNano": "1767225590399000000",
+                  "name": "agent_state_changed",
+                  "attributes": [
+                    {
+                      "key": "lk.old_state",
+                      "value": {
+                        "stringValue": "speaking"
+                      }
+                    },
+                    {
+                      "key": "lk.new_state",
+                      "value": {
+                        "stringValue": "listening"
+                      }
+                    }
+                  ],
+                  "droppedAttributesCount": 0
+                }
+              ],
+              "droppedEventsCount": 0,
+              "links": [],
+              "droppedLinksCount": 0,
+              "status": null
+            },
+            {
+              "traceId": "ad3df930d558fb0f273729a9801a896a",
+              "spanId": "4aacc61f4b8709fb",
+              "traceState": "",
+              "parentSpanId": "20e16a259f49f843",
+              "flags": 256,
+              "name": "session_start",
+              "kind": 1,
+              "startTimeUnixNano": "1767225590000000000",
+              "endTimeUnixNano": "1767225590228000000",
+              "attributes": [],
+              "droppedAttributesCount": 0,
+              "events": [],
+              "droppedEventsCount": 0,
+              "links": [],
+              "droppedLinksCount": 0,
+              "status": null
+            },
+            {
+              "traceId": "ad3df930d558fb0f273729a9801a896a",
+              "spanId": "2df9f8c316bc1eb3",
+              "traceState": "",
+              "parentSpanId": "4aacc61f4b8709fb",
+              "flags": 256,
+              "name": "start_agent_activity",
+              "kind": 1,
+              "startTimeUnixNano": "1767225590005000000",
+              "endTimeUnixNano": "1767225590215000000",
+              "attributes": [
+                {
+                  "key": "lk.agent_label",
+                  "value": {
+                    "stringValue": "weather_agent"
+                  }
+                },
+                {
+                  "key": "gen_ai.operation.name",
+                  "value": {
+                    "stringValue": "create_agent"
+                  }
+                },
+                {
+                  "key": "gen_ai.agent.name",
+                  "value": {
+                    "stringValue": "weather_agent"
+                  }
+                },
+                {
+                  "key": "gen_ai.provider.name",
+                  "value": {
+                    "stringValue": "openai"
+                  }
+                },
+                {
+                  "key": "gen_ai.request.model",
+                  "value": {
+                    "stringValue": "gpt-4o-mini-2024-07-18"
+                  }
+                }
+              ],
+              "droppedAttributesCount": 0,
+              "events": [],
+              "droppedEventsCount": 0,
+              "links": [],
+              "droppedLinksCount": 0,
+              "status": null
+            },
+            {
+              "traceId": "ad3df930d558fb0f273729a9801a896a",
+              "spanId": "1de04432d79d06f3",
+              "traceState": "",
+              "parentSpanId": "2df9f8c316bc1eb3",
+              "flags": 256,
+              "name": "setup_toolsets",
+              "kind": 1,
+              "startTimeUnixNano": "1767225590006000000",
+              "endTimeUnixNano": "1767225590006000000",
+              "attributes": [],
+              "droppedAttributesCount": 0,
+              "events": [],
+              "droppedEventsCount": 0,
+              "links": [],
+              "droppedLinksCount": 0,
+              "status": null
+            },
+            {
+              "traceId": "ad3df930d558fb0f273729a9801a896a",
+              "spanId": "42cb3e853d06aa9b",
+              "traceState": "",
+              "parentSpanId": "2df9f8c316bc1eb3",
+              "flags": 256,
+              "name": "on_enter",
+              "kind": 1,
+              "startTimeUnixNano": "1767225590218000000",
+              "endTimeUnixNano": "1767225590218000000",
+              "attributes": [
+                {
+                  "key": "lk.agent_label",
+                  "value": {
+                    "stringValue": "weather_agent"
+                  }
+                }
+              ],
+              "droppedAttributesCount": 0,
+              "events": [],
+              "droppedEventsCount": 0,
+              "links": [],
+              "droppedLinksCount": 0,
+              "status": null
+            },
+            {
+              "traceId": "ad3df930d558fb0f273729a9801a896a",
+              "spanId": "cce33874fa8eb0d2",
+              "traceState": "",
+              "parentSpanId": "20e16a259f49f843",
+              "flags": 256,
+              "name": "agent_turn",
+              "kind": 1,
+              "startTimeUnixNano": "1767225590229000000",
+              "endTimeUnixNano": "1767225590399000000",
+              "attributes": [
+                {
+                  "key": "gen_ai.operation.name",
+                  "value": {
+                    "stringValue": "invoke_agent"
+                  }
+                },
+                {
+                  "key": "gen_ai.agent.name",
+                  "value": {
+                    "stringValue": "weather_agent"
+                  }
+                },
+                {
+                  "key": "lk.pii.user_input",
+                  "value": {
+                    "stringValue": "What's the weather in Paris?"
+                  }
+                },
+                {
+                  "key": "lk.generation_id",
+                  "value": {
+                    "stringValue": "capture-volatile-1"
+                  }
+                },
+                {
+                  "key": "lk.generation_count",
+                  "value": {
+                    "intValue": "2"
+                  }
+                },
+                {
+                  "key": "lk.speech_id",
+                  "value": {
+                    "stringValue": "capture-volatile-2"
+                  }
+                },
+                {
+                  "key": "lk.speech.queue_wait",
+                  "value": {
+                    "doubleValue": 0.0008295209845528007
+                  }
+                },
+                {
+                  "key": "lk.interrupted",
+                  "value": {
+                    "boolValue": false
+                  }
+                },
+                {
+                  "key": "lk.pii.response.text",
+                  "value": {
+                    "stringValue": "It is 18 °C and sunny in Paris."
+                  }
+                }
+              ],
+              "droppedAttributesCount": 0,
+              "events": [
+                {
+                  "timeUnixNano": "1767225590229000000",
+                  "name": "generation",
+                  "attributes": [
+                    {
+                      "key": "lk.generation_id",
+                      "value": {
+                        "stringValue": "capture-volatile-3"
+                      }
+                    }
+                  ],
+                  "droppedAttributesCount": 0
+                },
+                {
+                  "timeUnixNano": "1767225590324000000",
+                  "name": "generation",
+                  "attributes": [
+                    {
+                      "key": "lk.generation_id",
+                      "value": {
+                        "stringValue": "capture-volatile-1"
+                      }
+                    },
+                    {
+                      "key": "lk.parent_generation_id",
+                      "value": {
+                        "stringValue": "capture-volatile-3"
+                      }
+                    }
+                  ],
+                  "droppedAttributesCount": 0
+                }
+              ],
+              "droppedEventsCount": 0,
+              "links": [],
+              "droppedLinksCount": 0,
+              "status": null
+            },
+            {
+              "traceId": "ad3df930d558fb0f273729a9801a896a",
+              "spanId": "5711e7daa44a2fc9",
+              "traceState": "",
+              "parentSpanId": "cce33874fa8eb0d2",
+              "flags": 256,
+              "name": "llm_node",
+              "kind": 1,
+              "startTimeUnixNano": "1767225590230000000",
+              "endTimeUnixNano": "1767225590323000000",
+              "attributes": [
+                {
+                  "key": "lk.pii.chat_ctx",
+                  "value": {
+                    "stringValue": "capture-volatile-4"
+                  }
+                },
+                {
+                  "key": "lk.function_tools",
+                  "value": {
+                    "arrayValue": {
+                      "values": [
+                        {
+                          "stringValue": "get_weather"
+                        }
+                      ]
+                    }
+                  }
+                },
+                {
+                  "key": "lk.provider_tools",
+                  "value": {
+                    "arrayValue": {
+                      "values": []
+                    }
+                  }
+                },
+                {
+                  "key": "lk.tool_sets",
+                  "value": {
+                    "arrayValue": {
+                      "values": []
+                    }
+                  }
+                },
+                {
+                  "key": "gen_ai.request.model",
+                  "value": {
+                    "stringValue": "gpt-4o-mini-2024-07-18"
+                  }
+                },
+                {
+                  "key": "gen_ai.provider.name",
+                  "value": {
+                    "stringValue": "openai"
+                  }
+                },
+                {
+                  "key": "lk.pii.response.text",
+                  "value": {
+                    "stringValue": ""
+                  }
+                },
+                {
+                  "key": "lk.pii.response.function_calls",
+                  "value": {
+                    "stringValue": "capture-volatile-5"
+                  }
+                },
+                {
+                  "key": "lk.response.ttft",
+                  "value": {
+                    "doubleValue": 0.07821291801519692
+                  }
+                }
+              ],
+              "droppedAttributesCount": 0,
+              "events": [],
+              "droppedEventsCount": 0,
+              "links": [],
+              "droppedLinksCount": 0,
+              "status": null
+            },
+            {
+              "traceId": "ad3df930d558fb0f273729a9801a896a",
+              "spanId": "0130455205c07c0a",
+              "traceState": "",
+              "parentSpanId": "5711e7daa44a2fc9",
+              "flags": 256,
+              "name": "llm_request",
+              "kind": 1,
+              "startTimeUnixNano": "1767225590230000000",
+              "endTimeUnixNano": "1767225590322000000",
+              "attributes": [
+                {
+                  "key": "gen_ai.operation.name",
+                  "value": {
+                    "stringValue": "chat"
+                  }
+                },
+                {
+                  "key": "gen_ai.provider.name",
+                  "value": {
+                    "stringValue": "openai"
+                  }
+                },
+                {
+                  "key": "gen_ai.request.model",
+                  "value": {
+                    "stringValue": "gpt-4o-mini-2024-07-18"
+                  }
+                },
+                {
+                  "key": "gen_ai.request.stream",
+                  "value": {
+                    "boolValue": true
+                  }
+                },
+                {
+                  "key": "gen_ai.output.type",
+                  "value": {
+                    "stringValue": "text"
+                  }
+                },
+                {
+                  "key": "gen_ai.system_instructions",
+                  "value": {
+                    "stringValue": "[{\"type\": \"text\", \"content\": \"You are a weather assistant.\"}]"
+                  }
+                },
+                {
+                  "key": "gen_ai.input.messages",
+                  "value": {
+                    "stringValue": "[{\"role\": \"user\", \"parts\": [{\"type\": \"text\", \"content\": \"What's the weather in Paris?\"}]}]"
+                  }
+                },
+                {
+                  "key": "gen_ai.tool.definitions",
+                  "value": {
+                    "stringValue": "[{\"type\": \"function\", \"name\": \"get_weather\", \"description\": \"Look up the weather for a city.\"}]"
+                  }
+                },
+                {
+                  "key": "lk.llm_metrics",
+                  "value": {
+                    "stringValue": "{\"type\":\"llm_metrics\",\"label\":\"livekit.plugins.openai.llm.LLM\",\"request_id\":\"chatcmpl-capture-1\",\"timestamp\":1795488005.0364814,\"duration\":0.09146781999152154,\"ttft\":0.07789958803914487,\"cancelled\":false,\"completion_tokens\":17,\"prompt_tokens\":82,\"prompt_cached_tokens\":0,\"cache_creation_tokens\":0,\"reasoning_tokens\":0,\"total_tokens\":99,\"tokens_per_second\":185.8577147851101,\"speech_id\":null,\"metadata\":{\"model_name\":\"gpt-4o-mini-2024-07-18\",\"model_provider\":\"api.openai.com\"}}"
+                  }
+                },
+                {
+                  "key": "gen_ai.usage.input_tokens",
+                  "value": {
+                    "intValue": "82"
+                  }
+                },
+                {
+                  "key": "gen_ai.usage.output_tokens",
+                  "value": {
+                    "intValue": "17"
+                  }
+                },
+                {
+                  "key": "gen_ai.response.id",
+                  "value": {
+                    "stringValue": "chatcmpl-capture-1"
+                  }
+                },
+                {
+                  "key": "gen_ai.response.model",
+                  "value": {
+                    "stringValue": "gpt-4o-mini-2024-07-18"
+                  }
+                },
+                {
+                  "key": "gen_ai.response.finish_reasons",
+                  "value": {
+                    "arrayValue": {
+                      "values": [
+                        {
+                          "stringValue": "tool_call"
+                        }
+                      ]
+                    }
+                  }
+                },
+                {
+                  "key": "gen_ai.response.time_to_first_chunk",
+                  "value": {
+                    "doubleValue": 0.07789958803914487
+                  }
+                },
+                {
+                  "key": "gen_ai.output.messages",
+                  "value": {
+                    "stringValue": "[{\"role\": \"assistant\", \"parts\": [{\"type\": \"tool_call\", \"id\": \"call_weather_1\", \"name\": \"get_weather\", \"arguments\": {\"city\": \"Paris\"}}], \"finish_reason\": \"tool_call\"}]"
+                  }
+                },
+                {
+                  "key": "langfuse.observation.completion_start_time",
+                  "value": {
+                    "stringValue": "\"2025-12-31T23:59:50.308000+00:00\""
+                  }
+                }
+              ],
+              "droppedAttributesCount": 0,
+              "events": [],
+              "droppedEventsCount": 0,
+              "links": [],
+              "droppedLinksCount": 0,
+              "status": null
+            },
+            {
+              "traceId": "ad3df930d558fb0f273729a9801a896a",
+              "spanId": "54c00537ac2ffdf6",
+              "traceState": "",
+              "parentSpanId": "0130455205c07c0a",
+              "flags": 256,
+              "name": "llm_request_run",
+              "kind": 1,
+              "startTimeUnixNano": "1767225590230000000",
+              "endTimeUnixNano": "1767225590321000000",
+              "attributes": [
+                {
+                  "key": "gen_ai.provider.name",
+                  "value": {
+                    "stringValue": "openai"
+                  }
+                },
+                {
+                  "key": "gen_ai.request.model",
+                  "value": {
+                    "stringValue": "gpt-4o-mini-2024-07-18"
+                  }
+                },
+                {
+                  "key": "lk.retry_count",
+                  "value": {
+                    "intValue": "0"
+                  }
+                },
+                {
+                  "key": "lk.provider_request_ids",
+                  "value": {
+                    "arrayValue": {
+                      "values": [
+                        {
+                          "stringValue": "chatcmpl-capture-1"
+                        }
+                      ]
+                    }
+                  }
+                }
+              ],
+              "droppedAttributesCount": 0,
+              "events": [],
+              "droppedEventsCount": 0,
+              "links": [],
+              "droppedLinksCount": 0,
+              "status": null
+            },
+            {
+              "traceId": "ad3df930d558fb0f273729a9801a896a",
+              "spanId": "ed29b6736a88c216",
+              "traceState": "",
+              "parentSpanId": "cce33874fa8eb0d2",
+              "flags": 256,
+              "name": "function_tool",
+              "kind": 1,
+              "startTimeUnixNano": "1767225590308000000",
+              "endTimeUnixNano": "1767225590309000000",
+              "attributes": [
+                {
+                  "key": "lk.function_tool.id",
+                  "value": {
+                    "stringValue": "call_weather_1"
+                  }
+                },
+                {
+                  "key": "lk.function_tool.name",
+                  "value": {
+                    "stringValue": "get_weather"
+                  }
+                },
+                {
+                  "key": "lk.pii.function_tool.arguments",
+                  "value": {
+                    "stringValue": "{\"city\":\"Paris\"}"
+                  }
+                },
+                {
+                  "key": "gen_ai.operation.name",
+                  "value": {
+                    "stringValue": "execute_tool"
+                  }
+                },
+                {
+                  "key": "gen_ai.tool.name",
+                  "value": {
+                    "stringValue": "get_weather"
+                  }
+                },
+                {
+                  "key": "gen_ai.tool.type",
+                  "value": {
+                    "stringValue": "function"
+                  }
+                },
+                {
+                  "key": "gen_ai.tool.call.id",
+                  "value": {
+                    "stringValue": "call_weather_1"
+                  }
+                },
+                {
+                  "key": "gen_ai.agent.name",
+                  "value": {
+                    "stringValue": "weather_agent"
+                  }
+                },
+                {
+                  "key": "gen_ai.tool.description",
+                  "value": {
+                    "stringValue": "Look up the weather for a city."
+                  }
+                },
+                {
+                  "key": "gen_ai.tool.call.arguments",
+                  "value": {
+                    "stringValue": "{\"city\": \"Paris\"}"
+                  }
+                },
+                {
+                  "key": "lk.pii.function_tool.output",
+                  "value": {
+                    "stringValue": "{\"temperature_c\": 18, \"conditions\": \"sunny\", \"city\": \"Paris\"}"
+                  }
+                },
+                {
+                  "key": "lk.function_tool.is_error",
+                  "value": {
+                    "boolValue": false
+                  }
+                },
+                {
+                  "key": "gen_ai.tool.call.result",
+                  "value": {
+                    "stringValue": "{\"temperature_c\": 18, \"conditions\": \"sunny\", \"city\": \"Paris\"}"
+                  }
+                }
+              ],
+              "droppedAttributesCount": 0,
+              "events": [],
+              "droppedEventsCount": 0,
+              "links": [],
+              "droppedLinksCount": 0,
+              "status": null
+            },
+            {
+              "traceId": "ad3df930d558fb0f273729a9801a896a",
+              "spanId": "ffdec22c8590d73c",
+              "traceState": "",
+              "parentSpanId": "cce33874fa8eb0d2",
+              "flags": 256,
+              "name": "llm_node",
+              "kind": 1,
+              "startTimeUnixNano": "1767225590325000000",
+              "endTimeUnixNano": "1767225590397000000",
+              "attributes": [
+                {
+                  "key": "lk.pii.chat_ctx",
+                  "value": {
+                    "stringValue": "capture-volatile-6"
+                  }
+                },
+                {
+                  "key": "lk.function_tools",
+                  "value": {
+                    "arrayValue": {
+                      "values": [
+                        {
+                          "stringValue": "get_weather"
+                        }
+                      ]
+                    }
+                  }
+                },
+                {
+                  "key": "lk.provider_tools",
+                  "value": {
+                    "arrayValue": {
+                      "values": []
+                    }
+                  }
+                },
+                {
+                  "key": "lk.tool_sets",
+                  "value": {
+                    "arrayValue": {
+                      "values": []
+                    }
+                  }
+                },
+                {
+                  "key": "gen_ai.request.model",
+                  "value": {
+                    "stringValue": "gpt-4o-mini-2024-07-18"
+                  }
+                },
+                {
+                  "key": "gen_ai.provider.name",
+                  "value": {
+                    "stringValue": "openai"
+                  }
+                },
+                {
+                  "key": "lk.pii.response.text",
+                  "value": {
+                    "stringValue": "It is 18 °C and sunny in Paris."
+                  }
+                },
+                {
+                  "key": "lk.pii.response.function_calls",
+                  "value": {
+                    "stringValue": "capture-volatile-7"
+                  }
+                },
+                {
+                  "key": "lk.response.ttft",
+                  "value": {
+                    "doubleValue": 0.04038069595117122
+                  }
+                }
+              ],
+              "droppedAttributesCount": 0,
+              "events": [],
+              "droppedEventsCount": 0,
+              "links": [],
+              "droppedLinksCount": 0,
+              "status": null
+            },
+            {
+              "traceId": "ad3df930d558fb0f273729a9801a896a",
+              "spanId": "348807bdf105110a",
+              "traceState": "",
+              "parentSpanId": "ffdec22c8590d73c",
+              "flags": 256,
+              "name": "llm_request",
+              "kind": 1,
+              "startTimeUnixNano": "1767225590325000000",
+              "endTimeUnixNano": "1767225590397000000",
+              "attributes": [
+                {
+                  "key": "gen_ai.operation.name",
+                  "value": {
+                    "stringValue": "chat"
+                  }
+                },
+                {
+                  "key": "gen_ai.provider.name",
+                  "value": {
+                    "stringValue": "openai"
+                  }
+                },
+                {
+                  "key": "gen_ai.request.model",
+                  "value": {
+                    "stringValue": "gpt-4o-mini-2024-07-18"
+                  }
+                },
+                {
+                  "key": "gen_ai.request.stream",
+                  "value": {
+                    "boolValue": true
+                  }
+                },
+                {
+                  "key": "gen_ai.output.type",
+                  "value": {
+                    "stringValue": "text"
+                  }
+                },
+                {
+                  "key": "gen_ai.system_instructions",
+                  "value": {
+                    "stringValue": "[{\"type\": \"text\", \"content\": \"You are a weather assistant.\"}]"
+                  }
+                },
+                {
+                  "key": "gen_ai.input.messages",
+                  "value": {
+                    "stringValue": "[{\"role\": \"user\", \"parts\": [{\"type\": \"text\", \"content\": \"What's the weather in Paris?\"}]}, {\"role\": \"assistant\", \"parts\": [{\"type\": \"tool_call\", \"id\": \"call_weather_1\", \"name\": \"get_weather\", \"arguments\": {\"city\": \"Paris\"}}]}, {\"role\": \"tool\", \"parts\": [{\"type\": \"tool_call_response\", \"id\": \"call_weather_1\", \"name\": \"get_weather\", \"response\": {\"temperature_c\": 18, \"conditions\": \"sunny\", \"city\": \"Paris\"}}]}]"
+                  }
+                },
+                {
+                  "key": "gen_ai.tool.definitions",
+                  "value": {
+                    "stringValue": "[{\"type\": \"function\", \"name\": \"get_weather\", \"description\": \"Look up the weather for a city.\"}]"
+                  }
+                },
+                {
+                  "key": "lk.llm_metrics",
+                  "value": {
+                    "stringValue": "{\"type\":\"llm_metrics\",\"label\":\"livekit.plugins.openai.llm.LLM\",\"request_id\":\"chatcmpl-capture-2\",\"timestamp\":1795488005.1111157,\"duration\":0.07153114699758589,\"ttft\":0.04016873601358384,\"cancelled\":false,\"completion_tokens\":12,\"prompt_tokens\":131,\"prompt_cached_tokens\":0,\"cache_creation_tokens\":0,\"reasoning_tokens\":0,\"total_tokens\":143,\"tokens_per_second\":167.75908822495168,\"speech_id\":null,\"metadata\":{\"model_name\":\"gpt-4o-mini-2024-07-18\",\"model_provider\":\"api.openai.com\"}}"
+                  }
+                },
+                {
+                  "key": "gen_ai.usage.input_tokens",
+                  "value": {
+                    "intValue": "131"
+                  }
+                },
+                {
+                  "key": "gen_ai.usage.output_tokens",
+                  "value": {
+                    "intValue": "12"
+                  }
+                },
+                {
+                  "key": "gen_ai.response.id",
+                  "value": {
+                    "stringValue": "chatcmpl-capture-2"
+                  }
+                },
+                {
+                  "key": "gen_ai.response.model",
+                  "value": {
+                    "stringValue": "gpt-4o-mini-2024-07-18"
+                  }
+                },
+                {
+                  "key": "gen_ai.response.finish_reasons",
+                  "value": {
+                    "arrayValue": {
+                      "values": [
+                        {
+                          "stringValue": "stop"
+                        }
+                      ]
+                    }
+                  }
+                },
+                {
+                  "key": "gen_ai.response.time_to_first_chunk",
+                  "value": {
+                    "doubleValue": 0.04016873601358384
+                  }
+                },
+                {
+                  "key": "gen_ai.output.messages",
+                  "value": {
+                    "stringValue": "[{\"role\": \"assistant\", \"parts\": [{\"type\": \"text\", \"content\": \"It is 18 °C and sunny in Paris.\"}], \"finish_reason\": \"stop\"}]"
+                  }
+                },
+                {
+                  "key": "langfuse.observation.completion_start_time",
+                  "value": {
+                    "stringValue": "\"2025-12-31T23:59:50.365000+00:00\""
+                  }
+                }
+              ],
+              "droppedAttributesCount": 0,
+              "events": [],
+              "droppedEventsCount": 0,
+              "links": [],
+              "droppedLinksCount": 0,
+              "status": null
+            },
+            {
+              "traceId": "ad3df930d558fb0f273729a9801a896a",
+              "spanId": "29a1c693971ae878",
+              "traceState": "",
+              "parentSpanId": "348807bdf105110a",
+              "flags": 256,
+              "name": "llm_request_run",
+              "kind": 1,
+              "startTimeUnixNano": "1767225590325000000",
+              "endTimeUnixNano": "1767225590395000000",
+              "attributes": [
+                {
+                  "key": "gen_ai.provider.name",
+                  "value": {
+                    "stringValue": "openai"
+                  }
+                },
+                {
+                  "key": "gen_ai.request.model",
+                  "value": {
+                    "stringValue": "gpt-4o-mini-2024-07-18"
+                  }
+                },
+                {
+                  "key": "lk.retry_count",
+                  "value": {
+                    "intValue": "0"
+                  }
+                },
+                {
+                  "key": "lk.provider_request_ids",
+                  "value": {
+                    "arrayValue": {
+                      "values": [
+                        {
+                          "stringValue": "chatcmpl-capture-2"
+                        }
+                      ]
+                    }
+                  }
+                }
+              ],
+              "droppedAttributesCount": 0,
+              "events": [],
+              "droppedEventsCount": 0,
+              "links": [],
+              "droppedLinksCount": 0,
+              "status": null
+            },
+            {
+              "traceId": "ad3df930d558fb0f273729a9801a896a",
+              "spanId": "f1a87b8af513ea8f",
+              "traceState": "",
+              "parentSpanId": "cce33874fa8eb0d2",
+              "flags": 256,
+              "name": "agent_speaking",
+              "kind": 1,
+              "startTimeUnixNano": "1767225590365000000",
+              "endTimeUnixNano": "1767225590398000000",
+              "attributes": [],
+              "droppedAttributesCount": 0,
+              "events": [],
+              "droppedEventsCount": 0,
+              "links": [],
+              "droppedLinksCount": 0,
+              "status": null
+            },
+            {
+              "traceId": "ad3df930d558fb0f273729a9801a896a",
+              "spanId": "e9493f451cae462d",
+              "traceState": "",
+              "parentSpanId": "20e16a259f49f843",
+              "flags": 256,
+              "name": "session_close",
+              "kind": 1,
+              "startTimeUnixNano": "1767225590400000000",
+              "endTimeUnixNano": "1767225590401000000",
+              "attributes": [
+                {
+                  "key": "lk.close_reason",
+                  "value": {
+                    "stringValue": "user_initiated"
+                  }
+                },
+                {
+                  "key": "lk.close.drain",
+                  "value": {
+                    "boolValue": false
+                  }
+                }
+              ],
+              "droppedAttributesCount": 0,
+              "events": [],
+              "droppedEventsCount": 0,
+              "links": [],
+              "droppedLinksCount": 0,
+              "status": null
+            },
+            {
+              "traceId": "ad3df930d558fb0f273729a9801a896a",
+              "spanId": "ea57611ea7356966",
+              "traceState": "",
+              "parentSpanId": "e9493f451cae462d",
+              "flags": 256,
+              "name": "drain_agent_activity",
+              "kind": 1,
+              "startTimeUnixNano": "1767225590400000000",
+              "endTimeUnixNano": "1767225590400000000",
+              "attributes": [
+                {
+                  "key": "lk.agent_label",
+                  "value": {
+                    "stringValue": "weather_agent"
+                  }
+                }
+              ],
+              "droppedAttributesCount": 0,
+              "events": [],
+              "droppedEventsCount": 0,
+              "links": [],
+              "droppedLinksCount": 0,
+              "status": null
+            },
+            {
+              "traceId": "ad3df930d558fb0f273729a9801a896a",
+              "spanId": "99a896695d61af10",
+              "traceState": "",
+              "parentSpanId": "ea57611ea7356966",
+              "flags": 256,
+              "name": "on_exit",
+              "kind": 1,
+              "startTimeUnixNano": "1767225590400000000",
+              "endTimeUnixNano": "1767225590400000000",
+              "attributes": [
+                {
+                  "key": "lk.agent_label",
+                  "value": {
+                    "stringValue": "weather_agent"
+                  }
+                }
+              ],
+              "droppedAttributesCount": 0,
+              "events": [],
+              "droppedEventsCount": 0,
+              "links": [],
+              "droppedLinksCount": 0,
+              "status": null
+            }
+          ],
+          "schemaUrl": ""
+        }
+      ],
+      "schemaUrl": ""
+    }
+  ]
+}

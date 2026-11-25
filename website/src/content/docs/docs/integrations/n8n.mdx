@@ -1,0 +1,63 @@
+---
+title: n8n
+description: "Send n8n workflow and node spans to cetra from n8n's OpenTelemetry export, with the token counts of its AI nodes. Node content is not exported."
+---
+
+import Backing from "../../../../components/Backing.astro";
+
+cetra reads the spans n8n sends for each workflow execution and each node it runs, including the token counts of its AI nodes.
+
+<Backing fixtures={["n8n/agent-webhook"]} />
+
+## Install
+
+Install n8n with npm. The fixture was captured with n8n 2.48.4.
+
+```bash
+npm install -g n8n@2.48.4
+```
+
+## Set up
+
+n8n exports its spans when the server starts. Set the export variables, then start the server with `n8n start`.
+
+```bash
+export N8N_OTEL_ENABLED=true
+export N8N_OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:8080
+export N8N_OTEL_EXPORTER_OTLP_HEADERS="authorization=Bearer <SK_CETRA_KEY>"
+export N8N_OTEL_EXPORTER_OTLP_PROTOCOL=http/protobuf
+export N8N_OTEL_TRACES_PRODUCTION_ONLY=false
+export N8N_DIAGNOSTICS_ENABLED=false
+
+n8n start
+```
+
+Replace `<SK_CETRA_KEY>` with your `sk-cetra-…` API key. See [Send OpenTelemetry](/docs/get-started/opentelemetry/). n8n appends `/v1/traces` to the endpoint.
+
+- `n8n execute`, the command-line runner, exports nothing. Only the server exports spans.
+- `N8N_OTEL_TRACES_PRODUCTION_ONLY` defaults to `true`, which leaves out runs started by hand in the editor. Set it to `false` to export those too.
+- `N8N_DIAGNOSTICS_ENABLED=false` turns off n8n's own diagnostics. The fixture was captured with it off.
+
+## What you get
+
+One workflow execution is one trace:
+
+- a `chain` span for the whole execution, named `workflow.execute`, with the workflow's name and ID;
+- one `span` for each node, named `node.execute`;
+- an `agent` span for an AI Agent node, with the provider and the operation `invoke_agent`;
+- an `llm` span for a Chat Model node, with the provider, the request and response models, the token counts and the cost, which cetra computes from its price table.
+
+Every node span has the same name. To tell the nodes apart, look at the **Attributes** tab: each node carries its name in `n8n.node.name`, and its type in `n8n.node.type`.
+
+## Limits
+
+- n8n sends no content. No span has an input or an output, so the messages and the answers of an AI node are not in cetra.
+- The AI Agent node carries its model's token counts as attributes, but cetra does not count them on the `agent` span. The Chat Model node is the one that counts them and prices the call, so a sum over the trace counts each model call once.
+- The fixture covers a webhook workflow with an AI Agent, a Chat Model and a Webhook node. Tool nodes and n8n's agent tracing were not captured.
+- The fixture was captured with n8n 2.48.4 and the OpenAI Chat Model node, with the fake model answering in one turn.
+- If a field is missing, look at the span's **Attributes** tab and compare it with [Span attributes](/docs/reference/attributes/).
+
+## Next
+
+- [Traces](/docs/tracing/traces/): read the trace as a tree and a timeline.
+- [Cost and tokens](/docs/tracing/cost-and-tokens/): how cost is computed from the token counts.

@@ -49,7 +49,7 @@
               "name": "LangGraph",
               "kind": 1,
               "startTimeUnixNano": "1767225590000000000",
-              "endTimeUnixNano": "1767225590091000000",
+              "endTimeUnixNano": "1767225590086000000",
               "attributes": [
                 {
                   "key": "input.value",
@@ -119,7 +119,7 @@
               "name": "model",
               "kind": 1,
               "startTimeUnixNano": "1767225590001000000",
-              "endTimeUnixNano": "1767225590049000000",
+              "endTimeUnixNano": "1767225590045000000",
               "attributes": [
                 {
                   "key": "input.value",
@@ -188,8 +188,8 @@
               "flags": 256,
               "name": "ChatOpenAI",
               "kind": 1,
-              "startTimeUnixNano": "1767225590003000000",
-              "endTimeUnixNano": "1767225590047000000",
+              "startTimeUnixNano": "1767225590002000000",
+              "endTimeUnixNano": "1767225590043000000",
               "attributes": [
                 {
                   "key": "input.value",
@@ -344,7 +344,7 @@
                 {
                   "key": "metadata",
                   "value": {
-                    "stringValue": "{\"ls_integration\": \"langchain_chat_model\", \"langgraph_step\": 1, \"langgraph_node\": \"model\", \"langgraph_triggers\": [\"branch:to:model\"], \"langgraph_path\": [\"__pregel_pull\", \"model\"], \"langgraph_checkpoint_ns\": \"model:4a6c694f-d8cc-8777-ad19-4c3082bb1935\", \"checkpoint_ns\": \"model:4a6c694f-d8cc-8777-ad19-4c3082bb1935\", \"ls_provider\": \"openai\", \"ls_model_name\": \"gpt-4o-mini-2024-07-18\", \"ls_model_type\": \"chat\", \"ls_temperature\": null, \"lc_versions\": {\"langchain-core\": \"1.7.4\", \"langchain\": \"1.4.8\", \"langchain-openai\": \"1.7.3\"}}"
+                    "stringValue": "{\"ls_integration\": \"langchain_chat_model\", \"langgraph_step\": 1, \"langgraph_node\": \"model\", \"langgraph_triggers\": [\"branch:to:model\"], \"langgraph_path\": [\"__pregel_pull\", \"model\"], \"langgraph_checkpoint_ns\": \"model:4a6c694f-d8cc-8777-ad19-4c3082bb1935\", \"checkpoint_ns\": \"model:4a6c694f-d8cc-8777-ad19-4c3082bb1935\", \"ls_provider\": \"openai\", \"ls_model_name\": \"gpt-4o-mini-2024-07-18\", \"ls_model_type\": \"chat\", \"ls_temperature\": null, \"lc_versions\": {\"langchain-core\": \"1.8.1\", \"langchain\": \"1.4.8\", \"langchain-openai\": \"1.7.3\"}}"
                   }
                 },
                 {
@@ -372,8 +372,8 @@
               "flags": 256,
               "name": "tools",
               "kind": 1,
-              "startTimeUnixNano": "1767225590051000000",
-              "endTimeUnixNano": "1767225590053000000",
+              "startTimeUnixNano": "1767225590046000000",
+              "endTimeUnixNano": "1767225590048000000",
               "attributes": [
                 {
                   "key": "input.value",
@@ -430,8 +430,8 @@
               "flags": 256,
               "name": "get_weather",
               "kind": 1,
-              "startTimeUnixNano": "1767225590051000000",
-              "endTimeUnixNano": "1767225590052000000",
+              "startTimeUnixNano": "1767225590046000000",
+              "endTimeUnixNano": "1767225590047000000",
               "attributes": [
                 {
                   "key": "input.value",
@@ -494,8 +494,8 @@
               "flags": 256,
               "name": "model",
               "kind": 1,
-              "startTimeUnixNano": "1767225590054000000",
-              "endTimeUnixNano": "1767225590090000000",
+              "startTimeUnixNano": "1767225590049000000",
+              "endTimeUnixNano": "1767225590085000000",
               "attributes": [
                 {
                   "key": "input.value",
@@ -564,8 +564,8 @@
               "flags": 256,
               "name": "ChatOpenAI",
               "kind": 1,
-              "startTimeUnixNano": "1767225590055000000",
-              "endTimeUnixNano": "1767225590089000000",
+              "startTimeUnixNano": "1767225590050000000",
+              "endTimeUnixNano": "1767225590084000000",
               "attributes": [
                 {
                   "key": "input.value",
@@ -756,7 +756,7 @@
                 {
                   "key": "metadata",
                   "value": {
-                    "stringValue": "{\"ls_integration\": \"langchain_chat_model\", \"langgraph_step\": 3, \"langgraph_node\": \"model\", \"langgraph_triggers\": [\"branch:to:model\"], \"langgraph_path\": [\"__pregel_pull\", \"model\"], \"langgraph_checkpoint_ns\": \"model:6e765ee2-8763-3c74-e29e-0f8c3fd84482\", \"checkpoint_ns\": \"model:6e765ee2-8763-3c74-e29e-0f8c3fd84482\", \"ls_provider\": \"openai\", \"ls_model_name\": \"gpt-4o-mini-2024-07-18\", \"ls_model_type\": \"chat\", \"ls_temperature\": null, \"lc_versions\": {\"langchain-core\": \"1.7.4\", \"langchain\": \"1.4.8\", \"langchain-openai\": \"1.7.3\"}}"
+                    "stringValue": "{\"ls_integration\": \"langchain_chat_model\", \"langgraph_step\": 3, \"langgraph_node\": \"model\", \"langgraph_triggers\": [\"branch:to:model\"], \"langgraph_path\": [\"__pregel_pull\", \"model\"], \"langgraph_checkpoint_ns\": \"model:6e765ee2-8763-3c74-e29e-0f8c3fd84482\", \"checkpoint_ns\": \"model:6e765ee2-8763-3c74-e29e-0f8c3fd84482\", \"ls_provider\": \"openai\", \"ls_model_name\": \"gpt-4o-mini-2024-07-18\", \"ls_model_type\": \"chat\", \"ls_temperature\": null, \"lc_versions\": {\"langchain-core\": \"1.8.1\", \"langchain\": \"1.4.8\", \"langchain-openai\": \"1.7.3\"}}"
                   }
                 },
                 {

@@ -1,0 +1,9 @@
+model_list:
+  - model_name: gpt-4o-mini
+    litellm_params: {model: openai/gpt-4o-mini, api_base: "os.environ/FAKE_BASE", api_key: sk-fake}
+  - model_name: ds
+    litellm_params: {model: deepseek/deepseek-chat, api_base: "os.environ/FAKE_BASE", api_key: sk-fake}
+litellm_settings:
+  callbacks: ["otel"]
+  turn_off_message_logging: false
+general_settings: {master_key: "sk-spike-master-key-1234567890abcdef"}

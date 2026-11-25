@@ -1,0 +1,671 @@
+{
+  "spans": [
+    {
+      "project_id": "01900000-0000-7000-8000-000000000001",
+      "trace_id": "dfcc9495523cdababe9d08bfc45e9ce4",
+      "span_id": "52503bfdfdf4ddc3",
+      "name": "reply",
+      "span_kind": "agent",
+      "start_time": "2025-12-31T23:59:50.000000000Z",
+      "end_time": "2025-12-31T23:59:50.641000000Z",
+      "status": "unset",
+      "service_name": "goose",
+      "session_id": "capture-volatile-1",
+      "release": "1.59.2",
+      "metadata": {
+        "coding_agent": "goose"
+      },
+      "operation": "invoke_agent",
+      "input": "[{\"role\":\"user\",\"parts\":[{\"type\":\"text\",\"content\":\"Read hello.txt and tell me what it says.\"}]}]",
+      "input_format": "messages",
+      "output": "[{\"role\":\"assistant\",\"parts\":[{\"type\":\"text\",\"content\":\"hello.txt says: hello from cetra\"}],\"finish_reason\":\"stop\"}]",
+      "output_format": "messages",
+      "input_preview": "Read hello.txt and tell me what it says.",
+      "output_preview": "hello.txt says: hello from cetra",
+      "attributes": {
+        "busy_ns": "467098609",
+        "cetra.normalize_warning": "[\"duplicate_key\"]",
+        "code.file.path": "crates/goose/src/agents/services.rs",
+        "code.line.number": "813",
+        "code.module.name": "goose::agents::services",
+        "gen_ai.agent.name": "goose",
+        "gen_ai.operation.name": "invoke_agent",
+        "gen_ai.usage.input_tokens": "213",
+        "gen_ai.usage.output_tokens": "29",
+        "idle_ns": "173883677",
+        "session.id": "capture-volatile-1",
+        "target": "goose::agents::services",
+        "thread.id": "2",
+        "thread.name": "goose-cli-main",
+        "trace_input": "Read hello.txt and tell me what it says.",
+        "trace_output": "hello.txt says: hello from cetra",
+        "user_message": "Read hello.txt and tell me what it says."
+      },
+      "resource_attributes": {
+        "host.name": "capture-host",
+        "service.namespace": "goose",
+        "service.version": "1.59.2",
+        "telemetry.sdk.language": "rust",
+        "telemetry.sdk.name": "opentelemetry",
+        "telemetry.sdk.version": "0.32.1",
+        "user.name": "unknown"
+      },
+      "scope_name": "goose",
+      "events": [
+        {
+          "time": "2025-12-31T23:59:50.015000000Z",
+          "name": "Loading config from: \"/capture/target/capture-agents/goose__read-file/home/.config/goose/config.yaml\"",
+          "attributes": "{\"level\":\"DEBUG\",\"target\":\"goose::config::base\",\"code.file.path\":\"crates/goose/src/config/base.rs\",\"code.module.name\":\"goose::config::base\",\"code.line.number\":541}"
+        },
+        {
+          "time": "2025-12-31T23:59:50.015000000Z",
+          "name": "Loading config from: \"/capture/target/capture-agents/goose__read-file/home/.config/goose/config.yaml\"",
+          "attributes": "{\"level\":\"DEBUG\",\"target\":\"goose::config::base\",\"code.file.path\":\"crates/goose/src/config/base.rs\",\"code.module.name\":\"goose::config::base\",\"code.line.number\":541}"
+        },
+        {
+          "time": "2025-12-31T23:59:50.015000000Z",
+          "name": "Loading config from: \"/capture/target/capture-agents/goose__read-file/home/.config/goose/config.yaml\"",
+          "attributes": "{\"level\":\"DEBUG\",\"target\":\"goose::config::base\",\"code.file.path\":\"crates/goose/src/config/base.rs\",\"code.module.name\":\"goose::config::base\",\"code.line.number\":541}"
+        },
+        {
+          "time": "2025-12-31T23:59:50.015000000Z",
+          "name": "Loading config from: \"/capture/target/capture-agents/goose__read-file/home/.config/goose/config.yaml\"",
+          "attributes": "{\"level\":\"DEBUG\",\"target\":\"goose::config::base\",\"code.file.path\":\"crates/goose/src/config/base.rs\",\"code.module.name\":\"goose::config::base\",\"code.line.number\":541}"
+        },
+        {
+          "time": "2025-12-31T23:59:50.015000000Z",
+          "name": "Loading config from: \"/capture/target/capture-agents/goose__read-file/home/.config/goose/config.yaml\"",
+          "attributes": "{\"level\":\"DEBUG\",\"target\":\"goose::config::base\",\"code.file.path\":\"crates/goose/src/config/base.rs\",\"code.module.name\":\"goose::config::base\",\"code.line.number\":541}"
+        },
+        {
+          "time": "2025-12-31T23:59:50.015000000Z",
+          "name": "Loading config from: \"/capture/target/capture-agents/goose__read-file/home/.config/goose/config.yaml\"",
+          "attributes": "{\"level\":\"DEBUG\",\"target\":\"goose::config::base\",\"code.file.path\":\"crates/goose/src/config/base.rs\",\"code.module.name\":\"goose::config::base\",\"code.line.number\":541}"
+        },
+        {
+          "time": "2025-12-31T23:59:50.015000000Z",
+          "name": "Loading config from: \"/capture/target/capture-agents/goose__read-file/home/.config/goose/config.yaml\"",
+          "attributes": "{\"level\":\"DEBUG\",\"target\":\"goose::config::base\",\"code.file.path\":\"crates/goose/src/config/base.rs\",\"code.module.name\":\"goose::config::base\",\"code.line.number\":541}"
+        },
+        {
+          "time": "2025-12-31T23:59:50.015000000Z",
+          "name": "Loading config from: \"/capture/target/capture-agents/goose__read-file/home/.config/goose/config.yaml\"",
+          "attributes": "{\"level\":\"DEBUG\",\"target\":\"goose::config::base\",\"code.file.path\":\"crates/goose/src/config/base.rs\",\"code.module.name\":\"goose::config::base\",\"code.line.number\":541}"
+        },
+        {
+          "time": "2025-12-31T23:59:50.016000000Z",
+          "name": "Loading config from: \"/capture/target/capture-agents/goose__read-file/home/.config/goose/config.yaml\"",
+          "attributes": "{\"level\":\"DEBUG\",\"target\":\"goose::config::base\",\"code.file.path\":\"crates/goose/src/config/base.rs\",\"code.module.name\":\"goose::config::base\",\"code.line.number\":541}"
+        },
+        {
+          "time": "2025-12-31T23:59:50.022000000Z",
+          "name": "Loading config from: \"/capture/target/capture-agents/goose__read-file/home/.config/goose/config.yaml\"",
+          "attributes": "{\"level\":\"DEBUG\",\"target\":\"goose::config::base\",\"code.file.path\":\"crates/goose/src/config/base.rs\",\"code.module.name\":\"goose::config::base\",\"code.line.number\":541}"
+        },
+        {
+          "time": "2025-12-31T23:59:50.022000000Z",
+          "name": "Loading config from: \"/capture/target/capture-agents/goose__read-file/home/.config/goose/config.yaml\"",
+          "attributes": "{\"level\":\"DEBUG\",\"target\":\"goose::config::base\",\"code.file.path\":\"crates/goose/src/config/base.rs\",\"code.module.name\":\"goose::config::base\",\"code.line.number\":541}"
+        },
+        {
+          "time": "2025-12-31T23:59:50.022000000Z",
+          "name": "Loading config from: \"/capture/target/capture-agents/goose__read-file/home/.config/goose/config.yaml\"",
+          "attributes": "{\"level\":\"DEBUG\",\"target\":\"goose::config::base\",\"code.file.path\":\"crates/goose/src/config/base.rs\",\"code.module.name\":\"goose::config::base\",\"code.line.number\":541}"
+        },
+        {
+          "time": "2025-12-31T23:59:50.022000000Z",
+          "name": "Loading config from: \"/capture/target/capture-agents/goose__read-file/home/.config/goose/config.yaml\"",
+          "attributes": "{\"level\":\"DEBUG\",\"target\":\"goose::config::base\",\"code.file.path\":\"crates/goose/src/config/base.rs\",\"code.module.name\":\"goose::config::base\",\"code.line.number\":541}"
+        },
+        {
+          "time": "2025-12-31T23:59:50.022000000Z",
+          "name": "Loading config from: \"/capture/target/capture-agents/goose__read-file/home/.config/goose/config.yaml\"",
+          "attributes": "{\"level\":\"DEBUG\",\"target\":\"goose::config::base\",\"code.file.path\":\"crates/goose/src/config/base.rs\",\"code.module.name\":\"goose::config::base\",\"code.line.number\":541}"
+        },
+        {
+          "time": "2025-12-31T23:59:50.022000000Z",
+          "name": "Loading config from: \"/capture/target/capture-agents/goose__read-file/home/.config/goose/config.yaml\"",
+          "attributes": "{\"level\":\"DEBUG\",\"target\":\"goose::config::base\",\"code.file.path\":\"crates/goose/src/config/base.rs\",\"code.module.name\":\"goose::config::base\",\"code.line.number\":541}"
+        },
+        {
+          "time": "2025-12-31T23:59:50.022000000Z",
+          "name": "Loading config from: \"/capture/target/capture-agents/goose__read-file/home/.config/goose/config.yaml\"",
+          "attributes": "{\"level\":\"DEBUG\",\"target\":\"goose::config::base\",\"code.file.path\":\"crates/goose/src/config/base.rs\",\"code.module.name\":\"goose::config::base\",\"code.line.number\":541}"
+        },
+        {
+          "time": "2025-12-31T23:59:50.023000000Z",
+          "name": "Loading config from: \"/capture/target/capture-agents/goose__read-file/home/.config/goose/config.yaml\"",
+          "attributes": "{\"level\":\"DEBUG\",\"target\":\"goose::config::base\",\"code.file.path\":\"crates/goose/src/config/base.rs\",\"code.module.name\":\"goose::config::base\",\"code.line.number\":541}"
+        },
+        {
+          "time": "2025-12-31T23:59:50.023000000Z",
+          "name": "Loading config from: \"/capture/target/capture-agents/goose__read-file/home/.config/goose/config.yaml\"",
+          "attributes": "{\"level\":\"DEBUG\",\"target\":\"goose::config::base\",\"code.file.path\":\"crates/goose/src/config/base.rs\",\"code.module.name\":\"goose::config::base\",\"code.line.number\":541}"
+        },
+        {
+          "time": "2025-12-31T23:59:50.023000000Z",
+          "name": "Loading config from: \"/capture/target/capture-agents/goose__read-file/home/.config/goose/config.yaml\"",
+          "attributes": "{\"level\":\"DEBUG\",\"target\":\"goose::config::base\",\"code.file.path\":\"crates/goose/src/config/base.rs\",\"code.module.name\":\"goose::config::base\",\"code.line.number\":541}"
+        },
+        {
+          "time": "2025-12-31T23:59:50.023000000Z",
+          "name": "Loading config from: \"/capture/target/capture-agents/goose__read-file/home/.config/goose/config.yaml\"",
+          "attributes": "{\"level\":\"DEBUG\",\"target\":\"goose::config::base\",\"code.file.path\":\"crates/goose/src/config/base.rs\",\"code.module.name\":\"goose::config::base\",\"code.line.number\":541}"
+        },
+        {
+          "time": "2025-12-31T23:59:50.023000000Z",
+          "name": "Loading config from: \"/capture/target/capture-agents/goose__read-file/home/.config/goose/config.yaml\"",
+          "attributes": "{\"level\":\"DEBUG\",\"target\":\"goose::config::base\",\"code.file.path\":\"crates/goose/src/config/base.rs\",\"code.module.name\":\"goose::config::base\",\"code.line.number\":541}"
+        },
+        {
+          "time": "2025-12-31T23:59:50.023000000Z",
+          "name": "Loading config from: \"/capture/target/capture-agents/goose__read-file/home/.config/goose/config.yaml\"",
+          "attributes": "{\"level\":\"DEBUG\",\"target\":\"goose::config::base\",\"code.file.path\":\"crates/goose/src/config/base.rs\",\"code.module.name\":\"goose::config::base\",\"code.line.number\":541}"
+        },
+        {
+          "time": "2025-12-31T23:59:50.024000000Z",
+          "name": "Loading config from: \"/capture/target/capture-agents/goose__read-file/home/.config/goose/config.yaml\"",
+          "attributes": "{\"level\":\"DEBUG\",\"target\":\"goose::config::base\",\"code.file.path\":\"crates/goose/src/config/base.rs\",\"code.module.name\":\"goose::config::base\",\"code.line.number\":541}"
+        },
+        {
+          "time": "2025-12-31T23:59:50.389000000Z",
+          "name": "Loading config from: \"/capture/target/capture-agents/goose__read-file/home/.config/goose/config.yaml\"",
+          "attributes": "{\"level\":\"DEBUG\",\"target\":\"goose::config::base\",\"code.file.path\":\"crates/goose/src/config/base.rs\",\"code.module.name\":\"goose::config::base\",\"code.line.number\":541}"
+        },
+        {
+          "time": "2025-12-31T23:59:50.390000000Z",
+          "name": "Loading config from: \"/capture/target/capture-agents/goose__read-file/home/.config/goose/config.yaml\"",
+          "attributes": "{\"level\":\"DEBUG\",\"target\":\"goose::config::base\",\"code.file.path\":\"crates/goose/src/config/base.rs\",\"code.module.name\":\"goose::config::base\",\"code.line.number\":541}"
+        },
+        {
+          "time": "2025-12-31T23:59:50.502000000Z",
+          "name": "Loading config from: \"/capture/target/capture-agents/goose__read-file/home/.config/goose/config.yaml\"",
+          "attributes": "{\"level\":\"DEBUG\",\"target\":\"goose::config::base\",\"code.file.path\":\"crates/goose/src/config/base.rs\",\"code.module.name\":\"goose::config::base\",\"code.line.number\":541}"
+        },
+        {
+          "time": "2025-12-31T23:59:50.502000000Z",
+          "name": "Loading config from: \"/capture/target/capture-agents/goose__read-file/home/.config/goose/config.yaml\"",
+          "attributes": "{\"level\":\"DEBUG\",\"target\":\"goose::config::base\",\"code.file.path\":\"crates/goose/src/config/base.rs\",\"code.module.name\":\"goose::config::base\",\"code.line.number\":541}"
+        },
+        {
+          "time": "2025-12-31T23:59:50.502000000Z",
+          "name": "Running tool inspector",
+          "attributes": "{\"level\":\"DEBUG\",\"target\":\"goose::tool_inspection\",\"inspector_name\":\"egress\",\"tool_count\":\"1\",\"code.file.path\":\"crates/goose/src/tool_inspection.rs\",\"code.module.name\":\"goose::tool_inspection\",\"code.line.number\":89}"
+        },
+        {
+          "time": "2025-12-31T23:59:50.505000000Z",
+          "name": "Tool inspector completed",
+          "attributes": "{\"level\":\"DEBUG\",\"target\":\"goose::tool_inspection\",\"inspector_name\":\"egress\",\"result_count\":\"0\",\"code.file.path\":\"crates/goose/src/tool_inspection.rs\",\"code.module.name\":\"goose::tool_inspection\",\"code.line.number\":100}"
+        },
+        {
+          "time": "2025-12-31T23:59:50.505000000Z",
+          "name": "No adversary.md found, adversary inspector disabled",
+          "attributes": "{\"level\":\"DEBUG\",\"target\":\"goose::security::adversary_inspector\",\"code.file.path\":\"crates/goose/src/security/adversary_inspector.rs\",\"code.module.name\":\"goose::security::adversary_inspector\",\"code.line.number\":92}"
+        },
+        {
+          "time": "2025-12-31T23:59:50.505000000Z",
+          "name": "Running tool inspector",
+          "attributes": "{\"level\":\"DEBUG\",\"target\":\"goose::tool_inspection\",\"inspector_name\":\"permission\",\"tool_count\":\"1\",\"code.file.path\":\"crates/goose/src/tool_inspection.rs\",\"code.module.name\":\"goose::tool_inspection\",\"code.line.number\":89}"
+        },
+        {
+          "time": "2025-12-31T23:59:50.505000000Z",
+          "name": "Tool inspector completed",
+          "attributes": "{\"level\":\"DEBUG\",\"target\":\"goose::tool_inspection\",\"inspector_name\":\"permission\",\"result_count\":\"1\",\"code.file.path\":\"crates/goose/src/tool_inspection.rs\",\"code.module.name\":\"goose::tool_inspection\",\"code.line.number\":100}"
+        },
+        {
+          "time": "2025-12-31T23:59:50.505000000Z",
+          "name": "Running tool inspector",
+          "attributes": "{\"level\":\"DEBUG\",\"target\":\"goose::tool_inspection\",\"inspector_name\":\"repetition\",\"tool_count\":\"1\",\"code.file.path\":\"crates/goose/src/tool_inspection.rs\",\"code.module.name\":\"goose::tool_inspection\",\"code.line.number\":89}"
+        },
+        {
+          "time": "2025-12-31T23:59:50.505000000Z",
+          "name": "Tool inspector completed",
+          "attributes": "{\"level\":\"DEBUG\",\"target\":\"goose::tool_inspection\",\"inspector_name\":\"repetition\",\"result_count\":\"0\",\"code.file.path\":\"crates/goose/src/tool_inspection.rs\",\"code.module.name\":\"goose::tool_inspection\",\"code.line.number\":100}"
+        },
+        {
+          "time": "2025-12-31T23:59:50.514000000Z",
+          "name": "Loading config from: \"/capture/target/capture-agents/goose__read-file/home/.config/goose/config.yaml\"",
+          "attributes": "{\"level\":\"DEBUG\",\"target\":\"goose::config::base\",\"code.file.path\":\"crates/goose/src/config/base.rs\",\"code.module.name\":\"goose::config::base\",\"code.line.number\":541}"
+        },
+        {
+          "time": "2025-12-31T23:59:50.520000000Z",
+          "name": "Loading config from: \"/capture/target/capture-agents/goose__read-file/home/.config/goose/config.yaml\"",
+          "attributes": "{\"level\":\"DEBUG\",\"target\":\"goose::config::base\",\"code.file.path\":\"crates/goose/src/config/base.rs\",\"code.module.name\":\"goose::config::base\",\"code.line.number\":541}"
+        },
+        {
+          "time": "2025-12-31T23:59:50.546000000Z",
+          "name": "Loading config from: \"/capture/target/capture-agents/goose__read-file/home/.config/goose/config.yaml\"",
+          "attributes": "{\"level\":\"DEBUG\",\"target\":\"goose::config::base\",\"code.file.path\":\"crates/goose/src/config/base.rs\",\"code.module.name\":\"goose::config::base\",\"code.line.number\":541}"
+        },
+        {
+          "time": "2025-12-31T23:59:50.551000000Z",
+          "name": "Loading config from: \"/capture/target/capture-agents/goose__read-file/home/.config/goose/config.yaml\"",
+          "attributes": "{\"level\":\"DEBUG\",\"target\":\"goose::config::base\",\"code.file.path\":\"crates/goose/src/config/base.rs\",\"code.module.name\":\"goose::config::base\",\"code.line.number\":541}"
+        },
+        {
+          "time": "2025-12-31T23:59:50.551000000Z",
+          "name": "Loading config from: \"/capture/target/capture-agents/goose__read-file/home/.config/goose/config.yaml\"",
+          "attributes": "{\"level\":\"DEBUG\",\"target\":\"goose::config::base\",\"code.file.path\":\"crates/goose/src/config/base.rs\",\"code.module.name\":\"goose::config::base\",\"code.line.number\":541}"
+        },
+        {
+          "time": "2025-12-31T23:59:50.640000000Z",
+          "name": "Loading config from: \"/capture/target/capture-agents/goose__read-file/home/.config/goose/config.yaml\"",
+          "attributes": "{\"level\":\"DEBUG\",\"target\":\"goose::config::base\",\"code.file.path\":\"crates/goose/src/config/base.rs\",\"code.module.name\":\"goose::config::base\",\"code.line.number\":541}"
+        }
+      ],
+      "conventions": [
+        "genai"
+      ],
+      "ingest_time": "2026-01-01T00:00:00.000000000Z",
+      "schema_version": 2
+    },
+    {
+      "project_id": "01900000-0000-7000-8000-000000000001",
+      "trace_id": "dfcc9495523cdababe9d08bfc45e9ce4",
+      "span_id": "fcc351930c719d36",
+      "parent_span_id": "52503bfdfdf4ddc3",
+      "name": "chat",
+      "span_kind": "chain",
+      "start_time": "2025-12-31T23:59:50.390000000Z",
+      "end_time": "2025-12-31T23:59:50.475000000Z",
+      "status": "unset",
+      "service_name": "goose",
+      "release": "1.59.2",
+      "metadata": {
+        "coding_agent": "goose"
+      },
+      "provider": "openai",
+      "request_model": "gpt-4o-mini",
+      "response_model": "gpt-4o-mini",
+      "operation": "chat",
+      "request_params": "{\"id\":\"req_capture_2\",\"max_tokens\":16384}",
+      "attributes": {
+        "busy_ns": "4062886",
+        "code.file.path": "crates/goose-agent/src/inference.rs",
+        "code.line.number": "343",
+        "code.module.name": "goose_agent::inference",
+        "gen_ai.operation.name": "chat",
+        "gen_ai.provider.name": "openai",
+        "gen_ai.request.id": "req_capture_2",
+        "gen_ai.request.max_tokens": "16384",
+        "gen_ai.request.model": "gpt-4o-mini",
+        "gen_ai.response.finish_reasons": "[\"tool_calls\"]",
+        "gen_ai.response.id": "chatcmpl-capture-2",
+        "gen_ai.response.model": "gpt-4o-mini",
+        "gen_ai.usage.input_tokens": "82",
+        "gen_ai.usage.output_tokens": "17",
+        "idle_ns": "81157071",
+        "target": "goose::state_machine",
+        "thread.id": "2",
+        "thread.name": "goose-cli-main"
+      },
+      "resource_attributes": {
+        "host.name": "capture-host",
+        "service.namespace": "goose",
+        "service.version": "1.59.2",
+        "telemetry.sdk.language": "rust",
+        "telemetry.sdk.name": "opentelemetry",
+        "telemetry.sdk.version": "0.32.1",
+        "user.name": "unknown"
+      },
+      "scope_name": "goose",
+      "events": [
+        {
+          "time": "2025-12-31T23:59:50.390000000Z",
+          "name": "Loading config from: \"/capture/target/capture-agents/goose__read-file/home/.config/goose/config.yaml\"",
+          "attributes": "{\"level\":\"DEBUG\",\"target\":\"goose::config::base\",\"code.file.path\":\"crates/goose/src/config/base.rs\",\"code.module.name\":\"goose::config::base\",\"code.line.number\":541}"
+        }
+      ],
+      "conventions": [
+        "genai"
+      ],
+      "ingest_time": "2026-01-01T00:00:00.000000000Z",
+      "schema_version": 2
+    },
+    {
+      "project_id": "01900000-0000-7000-8000-000000000001",
+      "trace_id": "dfcc9495523cdababe9d08bfc45e9ce4",
+      "span_id": "76c15fc1b0f65889",
+      "parent_span_id": "fcc351930c719d36",
+      "name": "stream_response_from_provider",
+      "span_kind": "llm",
+      "start_time": "2025-12-31T23:59:50.391000000Z",
+      "end_time": "2025-12-31T23:59:50.400000000Z",
+      "status": "unset",
+      "service_name": "goose",
+      "session_id": "capture-volatile-1",
+      "release": "1.59.2",
+      "metadata": {
+        "coding_agent": "goose"
+      },
+      "provider": "openai",
+      "request_model": "gpt-4o-mini",
+      "response_model": "gpt-4o-mini",
+      "operation": "chat",
+      "input_tokens": 82,
+      "output_tokens": 17,
+      "cache_read_tokens": 0,
+      "total_tokens": 99,
+      "cost_input": 0.000082,
+      "cost_output": 0.000068,
+      "cost_total": 0.00015000000000000001,
+      "cost_source": "computed",
+      "request_params": "{\"id\":\"req_capture_2\",\"max_tokens\":16384,\"stream\":true}",
+      "input": "[{\"role\":\"user\",\"parts\":[{\"type\":\"text\",\"content\":\"Read hello.txt and tell me what it says.<turn-context>\\n<current-time>2026-11-24 15:17:00 +00:00</current-time>\\n<working-directory>/capture/target/capture-agents/goose__read-file/repo</working-directory>\\n</turn-context>\"}]}]",
+      "input_format": "messages",
+      "output": "[{\"role\":\"assistant\",\"parts\":[{\"type\":\"tool_call\",\"id\":\"call_capture_1\",\"name\":\"shell\",\"arguments\":{\"command\":\"cat hello.txt\"}}],\"finish_reason\":\"tool_call\"}]",
+      "output_format": "messages",
+      "input_preview": "Read hello.txt and tell me what it says.<turn-context>\n<current-time>2026-11-24 15:17:00 +00:00</current-time>\n<working-directory>/capture/target/capture-agents/goose__read-file/repo</working-directory>\n</turn-context>",
+      "attributes": {
+        "busy_ns": "1117544",
+        "code.file.path": "crates/goose/src/agents/reply_parts.rs",
+        "code.line.number": "226",
+        "code.module.name": "goose::agents::reply_parts",
+        "gen_ai.conversation.id": "capture-volatile-1",
+        "gen_ai.operation.name": "chat",
+        "gen_ai.provider.name": "openai",
+        "gen_ai.request.id": "req_capture_2",
+        "gen_ai.request.max_tokens": "16384",
+        "gen_ai.request.model": "gpt-4o-mini",
+        "gen_ai.request.stream": "true",
+        "gen_ai.response.finish_reasons": "[\"tool_calls\"]",
+        "gen_ai.response.id": "chatcmpl-capture-2",
+        "gen_ai.response.model": "gpt-4o-mini",
+        "gen_ai.usage.cache_read.input_tokens": "0",
+        "gen_ai.usage.input_tokens": "82",
+        "gen_ai.usage.output_tokens": "17",
+        "idle_ns": "7446949",
+        "session.id": "capture-volatile-1",
+        "target": "goose::agents::reply_parts",
+        "thread.id": "2",
+        "thread.name": "goose-cli-main"
+      },
+      "resource_attributes": {
+        "host.name": "capture-host",
+        "service.namespace": "goose",
+        "service.version": "1.59.2",
+        "telemetry.sdk.language": "rust",
+        "telemetry.sdk.name": "opentelemetry",
+        "telemetry.sdk.version": "0.32.1",
+        "user.name": "unknown"
+      },
+      "scope_name": "goose",
+      "events": [
+        {
+          "time": "2025-12-31T23:59:50.392000000Z",
+          "name": "Loading config from: \"/capture/target/capture-agents/goose__read-file/home/.config/goose/config.yaml\"",
+          "attributes": "{\"level\":\"DEBUG\",\"target\":\"goose::config::base\",\"code.file.path\":\"crates/goose/src/config/base.rs\",\"code.module.name\":\"goose::config::base\",\"code.line.number\":541}"
+        },
+        {
+          "time": "2025-12-31T23:59:50.392000000Z",
+          "name": "Loading config from: \"/capture/target/capture-agents/goose__read-file/home/.config/goose/config.yaml\"",
+          "attributes": "{\"level\":\"DEBUG\",\"target\":\"goose::config::base\",\"code.file.path\":\"crates/goose/src/config/base.rs\",\"code.module.name\":\"goose::config::base\",\"code.line.number\":541}"
+        },
+        {
+          "time": "2025-12-31T23:59:50.392000000Z",
+          "name": "Loading config from: \"/capture/target/capture-agents/goose__read-file/home/.config/goose/config.yaml\"",
+          "attributes": "{\"level\":\"DEBUG\",\"target\":\"goose::config::base\",\"code.file.path\":\"crates/goose/src/config/base.rs\",\"code.module.name\":\"goose::config::base\",\"code.line.number\":541}"
+        },
+        {
+          "time": "2025-12-31T23:59:50.392000000Z",
+          "name": "Loading config from: \"/capture/target/capture-agents/goose__read-file/home/.config/goose/config.yaml\"",
+          "attributes": "{\"level\":\"DEBUG\",\"target\":\"goose::config::base\",\"code.file.path\":\"crates/goose/src/config/base.rs\",\"code.module.name\":\"goose::config::base\",\"code.line.number\":541}"
+        },
+        {
+          "time": "2025-12-31T23:59:50.392000000Z",
+          "name": "WAITING_LLM_STREAM_START",
+          "attributes": "{\"level\":\"DEBUG\",\"target\":\"goose::agents::reply_parts\",\"code.file.path\":\"crates/goose/src/agents/reply_parts.rs\",\"code.module.name\":\"goose::agents::reply_parts\",\"code.line.number\":295}"
+        },
+        {
+          "time": "2025-12-31T23:59:50.400000000Z",
+          "name": "WAITING_LLM_STREAM_END",
+          "attributes": "{\"level\":\"DEBUG\",\"target\":\"goose::agents::reply_parts\",\"code.file.path\":\"crates/goose/src/agents/reply_parts.rs\",\"code.module.name\":\"goose::agents::reply_parts\",\"code.line.number\":306}"
+        }
+      ],
+      "conventions": [
+        "genai"
+      ],
+      "ingest_time": "2026-01-01T00:00:00.000000000Z",
+      "schema_version": 2
+    },
+    {
+      "project_id": "01900000-0000-7000-8000-000000000001",
+      "trace_id": "dfcc9495523cdababe9d08bfc45e9ce4",
+      "span_id": "0c6fa894efdc6503",
+      "parent_span_id": "52503bfdfdf4ddc3",
+      "name": "shell",
+      "span_kind": "tool",
+      "start_time": "2025-12-31T23:59:50.520000000Z",
+      "end_time": "2025-12-31T23:59:50.531000000Z",
+      "status": "unset",
+      "service_name": "goose",
+      "session_id": "capture-volatile-1",
+      "release": "1.59.2",
+      "metadata": {
+        "coding_agent": "goose"
+      },
+      "operation": "execute_tool",
+      "input": "{\"command\":\"cat hello.txt\"}",
+      "input_format": "json",
+      "output": "{\"resultType\":\"complete\",\"content\":[{\"type\":\"text\",\"text\":\"hello from cetra\",\"annotations\":{\"priority\":0.0}}],\"structuredContent\":{\"stdout\":\"hello from cetra\",\"stderr\":\"\",\"exit_code\":0},\"isError\":false}",
+      "output_format": "json",
+      "input_preview": "{\"command\":\"cat hello.txt\"}",
+      "output_preview": "{\"resultType\":\"complete\",\"content\":[{\"type\":\"text\",\"text\":\"hello from cetra\",\"annotations\":{\"priority\":0.0}}],\"structuredContent\":{\"stdout\":\"hello from cetra\",\"stderr\":\"\",\"exit_code\":0},\"isError\":false}",
+      "attributes": {
+        "busy_ns": "3609673",
+        "cetra.span_name": "execute_tool",
+        "code.file.path": "crates/goose/src/agents/state_machine/ops_toolcalling.rs",
+        "code.line.number": "149",
+        "code.module.name": "goose::agents::state_machine::ops_toolcalling",
+        "gen_ai.conversation.id": "capture-volatile-1",
+        "gen_ai.operation.name": "execute_tool",
+        "gen_ai.tool.call.id": "call_capture_1",
+        "gen_ai.tool.name": "shell",
+        "idle_ns": "6622586",
+        "session.id": "capture-volatile-1",
+        "target": "goose::state_machine",
+        "thread.id": "2",
+        "thread.name": "goose-cli-main"
+      },
+      "resource_attributes": {
+        "host.name": "capture-host",
+        "service.namespace": "goose",
+        "service.version": "1.59.2",
+        "telemetry.sdk.language": "rust",
+        "telemetry.sdk.name": "opentelemetry",
+        "telemetry.sdk.version": "0.32.1",
+        "user.name": "unknown"
+      },
+      "scope_name": "goose",
+      "events": [
+        {
+          "time": "2025-12-31T23:59:50.521000000Z",
+          "name": "Loading config from: \"/capture/target/capture-agents/goose__read-file/home/.config/goose/config.yaml\"",
+          "attributes": "{\"level\":\"DEBUG\",\"target\":\"goose::config::base\",\"code.file.path\":\"crates/goose/src/config/base.rs\",\"code.module.name\":\"goose::config::base\",\"code.line.number\":541}"
+        },
+        {
+          "time": "2025-12-31T23:59:50.530000000Z",
+          "name": "Loading config from: \"/capture/target/capture-agents/goose__read-file/home/.config/goose/config.yaml\"",
+          "attributes": "{\"level\":\"DEBUG\",\"target\":\"goose::config::base\",\"code.file.path\":\"crates/goose/src/config/base.rs\",\"code.module.name\":\"goose::config::base\",\"code.line.number\":541}"
+        }
+      ],
+      "conventions": [
+        "genai"
+      ],
+      "ingest_time": "2026-01-01T00:00:00.000000000Z",
+      "schema_version": 2
+    },
+    {
+      "project_id": "01900000-0000-7000-8000-000000000001",
+      "trace_id": "dfcc9495523cdababe9d08bfc45e9ce4",
+      "span_id": "b3e69f7e65106aa0",
+      "parent_span_id": "52503bfdfdf4ddc3",
+      "name": "chat",
+      "span_kind": "chain",
+      "start_time": "2025-12-31T23:59:50.551000000Z",
+      "end_time": "2025-12-31T23:59:50.627000000Z",
+      "status": "unset",
+      "service_name": "goose",
+      "release": "1.59.2",
+      "metadata": {
+        "coding_agent": "goose"
+      },
+      "provider": "openai",
+      "request_model": "gpt-4o-mini",
+      "response_model": "gpt-4o-mini",
+      "operation": "chat",
+      "request_params": "{\"id\":\"req_capture_3\",\"max_tokens\":16384}",
+      "attributes": {
+        "busy_ns": "5978634",
+        "code.file.path": "crates/goose-agent/src/inference.rs",
+        "code.line.number": "343",
+        "code.module.name": "goose_agent::inference",
+        "gen_ai.operation.name": "chat",
+        "gen_ai.provider.name": "openai",
+        "gen_ai.request.id": "req_capture_3",
+        "gen_ai.request.max_tokens": "16384",
+        "gen_ai.request.model": "gpt-4o-mini",
+        "gen_ai.response.finish_reasons": "[\"stop\"]",
+        "gen_ai.response.id": "chatcmpl-capture-3",
+        "gen_ai.response.model": "gpt-4o-mini",
+        "gen_ai.usage.input_tokens": "131",
+        "gen_ai.usage.output_tokens": "12",
+        "idle_ns": "69296734",
+        "target": "goose::state_machine",
+        "thread.id": "2",
+        "thread.name": "goose-cli-main"
+      },
+      "resource_attributes": {
+        "host.name": "capture-host",
+        "service.namespace": "goose",
+        "service.version": "1.59.2",
+        "telemetry.sdk.language": "rust",
+        "telemetry.sdk.name": "opentelemetry",
+        "telemetry.sdk.version": "0.32.1",
+        "user.name": "unknown"
+      },
+      "scope_name": "goose",
+      "events": [
+        {
+          "time": "2025-12-31T23:59:50.552000000Z",
+          "name": "Loading config from: \"/capture/target/capture-agents/goose__read-file/home/.config/goose/config.yaml\"",
+          "attributes": "{\"level\":\"DEBUG\",\"target\":\"goose::config::base\",\"code.file.path\":\"crates/goose/src/config/base.rs\",\"code.module.name\":\"goose::config::base\",\"code.line.number\":541}"
+        }
+      ],
+      "conventions": [
+        "genai"
+      ],
+      "ingest_time": "2026-01-01T00:00:00.000000000Z",
+      "schema_version": 2
+    },
+    {
+      "project_id": "01900000-0000-7000-8000-000000000001",
+      "trace_id": "dfcc9495523cdababe9d08bfc45e9ce4",
+      "span_id": "0fab7e29f7ebf319",
+      "parent_span_id": "b3e69f7e65106aa0",
+      "name": "stream_response_from_provider",
+      "span_kind": "llm",
+      "start_time": "2025-12-31T23:59:50.552000000Z",
+      "end_time": "2025-12-31T23:59:50.557000000Z",
+      "status": "unset",
+      "service_name": "goose",
+      "session_id": "capture-volatile-1",
+      "release": "1.59.2",
+      "metadata": {
+        "coding_agent": "goose"
+      },
+      "provider": "openai",
+      "request_model": "gpt-4o-mini",
+      "response_model": "gpt-4o-mini",
+      "operation": "chat",
+      "input_tokens": 131,
+      "output_tokens": 12,
+      "cache_read_tokens": 0,
+      "total_tokens": 143,
+      "cost_input": 0.000131,
+      "cost_output": 0.000048,
+      "cost_total": 0.00017900000000000001,
+      "cost_source": "computed",
+      "request_params": "{\"id\":\"req_capture_3\",\"max_tokens\":16384,\"stream\":true}",
+      "input": "[{\"role\":\"user\",\"parts\":[{\"type\":\"text\",\"content\":\"Read hello.txt and tell me what it says.<turn-context>\\n<current-time>2026-11-24 15:17:00 +00:00</current-time>\\n<working-directory>/capture/target/capture-agents/goose__read-file/repo</working-directory>\\n</turn-context>\"}]},{\"role\":\"assistant\",\"parts\":[{\"type\":\"tool_call\",\"id\":\"call_capture_1\",\"name\":\"shell\",\"arguments\":{\"command\":\"cat hello.txt\"}}]},{\"role\":\"tool\",\"parts\":[{\"type\":\"tool_call_response\",\"id\":\"call_capture_1\",\"response\":{\"resultType\":\"complete\",\"content\":[{\"type\":\"text\",\"text\":\"hello from cetra\",\"annotations\":{\"priority\":0.0}}],\"structuredContent\":{\"stdout\":\"hello from cetra\",\"stderr\":\"\",\"exit_code\":0},\"isError\":false}}]}]",
+      "input_format": "messages",
+      "output": "[{\"role\":\"assistant\",\"parts\":[{\"type\":\"text\",\"content\":\"hello.txt says: hello from cetra\"}],\"finish_reason\":\"stop\"}]",
+      "output_format": "messages",
+      "input_preview": "Read hello.txt and tell me what it says.<turn-context>\n<current-time>2026-11-24 15:17:00 +00:00</current-time>\n<working-directory>/capture/target/capture-agents/goose__read-file/repo</working-directory>\n</turn-context>",
+      "output_preview": "hello.txt says: hello from cetra",
+      "attributes": {
+        "busy_ns": "3677905",
+        "code.file.path": "crates/goose/src/agents/reply_parts.rs",
+        "code.line.number": "226",
+        "code.module.name": "goose::agents::reply_parts",
+        "gen_ai.conversation.id": "capture-volatile-1",
+        "gen_ai.operation.name": "chat",
+        "gen_ai.provider.name": "openai",
+        "gen_ai.request.id": "req_capture_3",
+        "gen_ai.request.max_tokens": "16384",
+        "gen_ai.request.model": "gpt-4o-mini",
+        "gen_ai.request.stream": "true",
+        "gen_ai.response.finish_reasons": "[\"stop\"]",
+        "gen_ai.response.id": "chatcmpl-capture-3",
+        "gen_ai.response.model": "gpt-4o-mini",
+        "gen_ai.usage.cache_read.input_tokens": "0",
+        "gen_ai.usage.input_tokens": "131",
+        "gen_ai.usage.output_tokens": "12",
+        "idle_ns": "1831887",
+        "session.id": "capture-volatile-1",
+        "target": "goose::agents::reply_parts",
+        "thread.id": "2",
+        "thread.name": "goose-cli-main"
+      },
+      "resource_attributes": {
+        "host.name": "capture-host",
+        "service.namespace": "goose",
+        "service.version": "1.59.2",
+        "telemetry.sdk.language": "rust",
+        "telemetry.sdk.name": "opentelemetry",
+        "telemetry.sdk.version": "0.32.1",
+        "user.name": "unknown"
+      },
+      "scope_name": "goose",
+      "events": [
+        {
+          "time": "2025-12-31T23:59:50.552000000Z",
+          "name": "Loading config from: \"/capture/target/capture-agents/goose__read-file/home/.config/goose/config.yaml\"",
+          "attributes": "{\"level\":\"DEBUG\",\"target\":\"goose::config::base\",\"code.file.path\":\"crates/goose/src/config/base.rs\",\"code.module.name\":\"goose::config::base\",\"code.line.number\":541}"
+        },
+        {
+          "time": "2025-12-31T23:59:50.552000000Z",
+          "name": "Loading config from: \"/capture/target/capture-agents/goose__read-file/home/.config/goose/config.yaml\"",
+          "attributes": "{\"level\":\"DEBUG\",\"target\":\"goose::config::base\",\"code.file.path\":\"crates/goose/src/config/base.rs\",\"code.module.name\":\"goose::config::base\",\"code.line.number\":541}"
+        },
+        {
+          "time": "2025-12-31T23:59:50.552000000Z",
+          "name": "Loading config from: \"/capture/target/capture-agents/goose__read-file/home/.config/goose/config.yaml\"",
+          "attributes": "{\"level\":\"DEBUG\",\"target\":\"goose::config::base\",\"code.file.path\":\"crates/goose/src/config/base.rs\",\"code.module.name\":\"goose::config::base\",\"code.line.number\":541}"
+        },
+        {
+          "time": "2025-12-31T23:59:50.552000000Z",
+          "name": "Loading config from: \"/capture/target/capture-agents/goose__read-file/home/.config/goose/config.yaml\"",
+          "attributes": "{\"level\":\"DEBUG\",\"target\":\"goose::config::base\",\"code.file.path\":\"crates/goose/src/config/base.rs\",\"code.module.name\":\"goose::config::base\",\"code.line.number\":541}"
+        },
+        {
+          "time": "2025-12-31T23:59:50.552000000Z",
+          "name": "WAITING_LLM_STREAM_START",
+          "attributes": "{\"level\":\"DEBUG\",\"target\":\"goose::agents::reply_parts\",\"code.file.path\":\"crates/goose/src/agents/reply_parts.rs\",\"code.module.name\":\"goose::agents::reply_parts\",\"code.line.number\":295}"
+        },
+        {
+          "time": "2025-12-31T23:59:50.557000000Z",
+          "name": "WAITING_LLM_STREAM_END",
+          "attributes": "{\"level\":\"DEBUG\",\"target\":\"goose::agents::reply_parts\",\"code.file.path\":\"crates/goose/src/agents/reply_parts.rs\",\"code.module.name\":\"goose::agents::reply_parts\",\"code.line.number\":306}"
+        }
+      ],
+      "conventions": [
+        "genai"
+      ],
+      "ingest_time": "2026-01-01T00:00:00.000000000Z",
+      "schema_version": 2
+    }
+  ],
+  "media": [],
+  "rejected_spans": 0
+}

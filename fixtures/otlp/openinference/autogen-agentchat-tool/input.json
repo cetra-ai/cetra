@@ -1,0 +1,592 @@
+{
+  "resourceSpans": [
+    {
+      "resource": {
+        "attributes": [
+          {
+            "key": "telemetry.sdk.language",
+            "value": {
+              "stringValue": "python"
+            }
+          },
+          {
+            "key": "telemetry.sdk.name",
+            "value": {
+              "stringValue": "opentelemetry"
+            }
+          },
+          {
+            "key": "telemetry.sdk.version",
+            "value": {
+              "stringValue": "1.45.2"
+            }
+          },
+          {
+            "key": "service.name",
+            "value": {
+              "stringValue": "capture-app"
+            }
+          }
+        ],
+        "droppedAttributesCount": 0,
+        "entityRefs": []
+      },
+      "scopeSpans": [
+        {
+          "scope": {
+            "name": "autogen-core",
+            "version": "",
+            "attributes": [],
+            "droppedAttributesCount": 0
+          },
+          "spans": [
+            {
+              "traceId": "c621da4877f4a89f1f05c3d252395325",
+              "spanId": "8c41a6632b1d9671",
+              "traceState": "",
+              "parentSpanId": "",
+              "flags": 256,
+              "name": "create_agent weather_agent",
+              "kind": 3,
+              "startTimeUnixNano": "1767225590000000000",
+              "endTimeUnixNano": "1767225590000000000",
+              "attributes": [
+                {
+                  "key": "gen_ai.operation.name",
+                  "value": {
+                    "stringValue": "create_agent"
+                  }
+                },
+                {
+                  "key": "gen_ai.system",
+                  "value": {
+                    "stringValue": "autogen"
+                  }
+                },
+                {
+                  "key": "gen_ai.agent.name",
+                  "value": {
+                    "stringValue": "weather_agent"
+                  }
+                },
+                {
+                  "key": "gen_ai.agent.description",
+                  "value": {
+                    "stringValue": "An agent that provides assistance with ability to use tools."
+                  }
+                }
+              ],
+              "droppedAttributesCount": 0,
+              "events": [],
+              "droppedEventsCount": 0,
+              "links": [],
+              "droppedLinksCount": 0,
+              "status": null
+            },
+            {
+              "traceId": "f3445b28721093fe615c94c1186d0511",
+              "spanId": "b4a0d17568c35de2",
+              "traceState": "",
+              "parentSpanId": "",
+              "flags": 256,
+              "name": "invoke_agent weather_agent",
+              "kind": 3,
+              "startTimeUnixNano": "1767225590002000000",
+              "endTimeUnixNano": "1767225590109000000",
+              "attributes": [
+                {
+                  "key": "gen_ai.operation.name",
+                  "value": {
+                    "stringValue": "invoke_agent"
+                  }
+                },
+                {
+                  "key": "gen_ai.system",
+                  "value": {
+                    "stringValue": "autogen"
+                  }
+                },
+                {
+                  "key": "gen_ai.agent.name",
+                  "value": {
+                    "stringValue": "weather_agent"
+                  }
+                },
+                {
+                  "key": "gen_ai.agent.description",
+                  "value": {
+                    "stringValue": "An agent that provides assistance with ability to use tools."
+                  }
+                }
+              ],
+              "droppedAttributesCount": 0,
+              "events": [],
+              "droppedEventsCount": 0,
+              "links": [],
+              "droppedLinksCount": 0,
+              "status": null
+            },
+            {
+              "traceId": "f3445b28721093fe615c94c1186d0511",
+              "spanId": "3d81a77e8102ef23",
+              "traceState": "",
+              "parentSpanId": "e5950a8d8684556a",
+              "flags": 256,
+              "name": "execute_tool get_weather",
+              "kind": 1,
+              "startTimeUnixNano": "1767225590072000000",
+              "endTimeUnixNano": "1767225590072000000",
+              "attributes": [
+                {
+                  "key": "gen_ai.operation.name",
+                  "value": {
+                    "stringValue": "execute_tool"
+                  }
+                },
+                {
+                  "key": "gen_ai.system",
+                  "value": {
+                    "stringValue": "autogen"
+                  }
+                },
+                {
+                  "key": "gen_ai.tool.name",
+                  "value": {
+                    "stringValue": "get_weather"
+                  }
+                },
+                {
+                  "key": "gen_ai.tool.description",
+                  "value": {
+                    "stringValue": "Get the weather."
+                  }
+                },
+                {
+                  "key": "gen_ai.tool.call.id",
+                  "value": {
+                    "stringValue": "call_weather_1"
+                  }
+                }
+              ],
+              "droppedAttributesCount": 0,
+              "events": [],
+              "droppedEventsCount": 0,
+              "links": [],
+              "droppedLinksCount": 0,
+              "status": null
+            }
+          ],
+          "schemaUrl": ""
+        },
+        {
+          "scope": {
+            "name": "openinference.instrumentation.autogen_agentchat",
+            "version": "0.1.29",
+            "attributes": [],
+            "droppedAttributesCount": 0
+          },
+          "spans": [
+            {
+              "traceId": "f3445b28721093fe615c94c1186d0511",
+              "spanId": "f87a276db2692340",
+              "traceState": "",
+              "parentSpanId": "b4a0d17568c35de2",
+              "flags": 256,
+              "name": "weather_agent.on_messages_stream",
+              "kind": 1,
+              "startTimeUnixNano": "1767225590002000000",
+              "endTimeUnixNano": "1767225590110000000",
+              "attributes": [
+                {
+                  "key": "input.value",
+                  "value": {
+                    "stringValue": "{\"messages\": [\"id='00000000-0000-0000-0000-000000000001' source='user' models_usage=None metadata={} created_at=datetime.datetime(2026, 1, 1, 0, 0, tzinfo=datetime.timezone.utc) content='What is the weather in Paris?' type='TextMessage'\"], \"cancellation_token\": \"<CancellationToken>\"}"
+                  }
+                },
+                {
+                  "key": "graph.node.id",
+                  "value": {
+                    "stringValue": "weather_agent"
+                  }
+                },
+                {
+                  "key": "graph.node.parent_id",
+                  "value": {
+                    "stringValue": "start"
+                  }
+                },
+                {
+                  "key": "openinference.span.kind",
+                  "value": {
+                    "stringValue": "AGENT"
+                  }
+                }
+              ],
+              "droppedAttributesCount": 0,
+              "events": [
+                {
+                  "timeUnixNano": "1767225590110000000",
+                  "name": "exception",
+                  "attributes": [
+                    {
+                      "key": "exception.type",
+                      "value": {
+                        "stringValue": "asyncio.exceptions.CancelledError"
+                      }
+                    },
+                    {
+                      "key": "exception.message",
+                      "value": {
+                        "stringValue": ""
+                      }
+                    },
+                    {
+                      "key": "exception.stacktrace",
+                      "value": {
+                        "stringValue": "Traceback (most recent call last):\n  File \"/capture/tools/capture/py/.venv/lib/python3.13/site-packages/openinference/instrumentation/autogen_agentchat/_wrappers.py\", line 217, in wrapped_generator\n    yield event\nasyncio.exceptions.CancelledError\n"
+                      }
+                    },
+                    {
+                      "key": "exception.escaped",
+                      "value": {
+                        "stringValue": "False"
+                      }
+                    }
+                  ],
+                  "droppedAttributesCount": 0
+                }
+              ],
+              "droppedEventsCount": 0,
+              "links": [],
+              "droppedLinksCount": 0,
+              "status": {
+                "message": "",
+                "code": 1
+              }
+            },
+            {
+              "traceId": "f3445b28721093fe615c94c1186d0511",
+              "spanId": "92da1c7038f51691",
+              "traceState": "",
+              "parentSpanId": "f87a276db2692340",
+              "flags": 256,
+              "name": "OpenAIChatCompletionClient.create",
+              "kind": 1,
+              "startTimeUnixNano": "1767225590003000000",
+              "endTimeUnixNano": "1767225590071000000",
+              "attributes": [
+                {
+                  "key": "llm.model_name",
+                  "value": {
+                    "stringValue": "gpt-4o-mini-2024-07-18"
+                  }
+                },
+                {
+                  "key": "llm.input_messages.0.message.role",
+                  "value": {
+                    "stringValue": "developer"
+                  }
+                },
+                {
+                  "key": "llm.input_messages.0.message.content",
+                  "value": {
+                    "stringValue": "You are a weather bot."
+                  }
+                },
+                {
+                  "key": "llm.input_messages.1.message.role",
+                  "value": {
+                    "stringValue": "user"
+                  }
+                },
+                {
+                  "key": "llm.input_messages.1.message.content",
+                  "value": {
+                    "stringValue": "What is the weather in Paris?"
+                  }
+                },
+                {
+                  "key": "output.value",
+                  "value": {
+                    "stringValue": "{\"finish_reason\": \"function_calls\", \"content\": [{\"id\": \"call_weather_1\", \"arguments\": \"{\\\"city\\\":\\\"Paris\\\"}\", \"name\": \"get_weather\"}], \"usage\": {\"prompt_tokens\": 82, \"completion_tokens\": 17}, \"cached\": false, \"logprobs\": null, \"thought\": null}"
+                  }
+                },
+                {
+                  "key": "output.mime_type",
+                  "value": {
+                    "stringValue": "application/json"
+                  }
+                },
+                {
+                  "key": "llm.output_messages.0.message.role",
+                  "value": {
+                    "stringValue": "assistant"
+                  }
+                },
+                {
+                  "key": "llm.output_messages.0.message.tool_calls.0.tool_call.id",
+                  "value": {
+                    "stringValue": "call_weather_1"
+                  }
+                },
+                {
+                  "key": "llm.output_messages.0.message.tool_calls.0.tool_call.function.name",
+                  "value": {
+                    "stringValue": "get_weather"
+                  }
+                },
+                {
+                  "key": "llm.output_messages.0.message.tool_calls.0.tool_call.function.arguments",
+                  "value": {
+                    "stringValue": "{\"city\":\"Paris\"}"
+                  }
+                },
+                {
+                  "key": "llm.token_count.prompt",
+                  "value": {
+                    "intValue": "82"
+                  }
+                },
+                {
+                  "key": "llm.token_count.completion",
+                  "value": {
+                    "intValue": "17"
+                  }
+                },
+                {
+                  "key": "llm.token_count.total",
+                  "value": {
+                    "intValue": "99"
+                  }
+                },
+                {
+                  "key": "openinference.span.kind",
+                  "value": {
+                    "stringValue": "LLM"
+                  }
+                }
+              ],
+              "droppedAttributesCount": 0,
+              "events": [],
+              "droppedEventsCount": 0,
+              "links": [],
+              "droppedLinksCount": 0,
+              "status": {
+                "message": "",
+                "code": 1
+              }
+            },
+            {
+              "traceId": "f3445b28721093fe615c94c1186d0511",
+              "spanId": "e5950a8d8684556a",
+              "traceState": "",
+              "parentSpanId": "f87a276db2692340",
+              "flags": 256,
+              "name": "weather_agent.get_weather",
+              "kind": 1,
+              "startTimeUnixNano": "1767225590072000000",
+              "endTimeUnixNano": "1767225590073000000",
+              "attributes": [
+                {
+                  "key": "tool.name",
+                  "value": {
+                    "stringValue": "get_weather"
+                  }
+                },
+                {
+                  "key": "tool.description",
+                  "value": {
+                    "stringValue": "Get the weather."
+                  }
+                },
+                {
+                  "key": "tool.parameters",
+                  "value": {
+                    "stringValue": "{\"city\":\"Paris\"}"
+                  }
+                },
+                {
+                  "key": "input.value",
+                  "value": {
+                    "stringValue": "{\"city\":\"Paris\"}"
+                  }
+                },
+                {
+                  "key": "input.mime_type",
+                  "value": {
+                    "stringValue": "application/json"
+                  }
+                },
+                {
+                  "key": "output.value",
+                  "value": {
+                    "stringValue": "sunny in Paris"
+                  }
+                },
+                {
+                  "key": "output.mime_type",
+                  "value": {
+                    "stringValue": "text/plain"
+                  }
+                },
+                {
+                  "key": "openinference.span.kind",
+                  "value": {
+                    "stringValue": "TOOL"
+                  }
+                }
+              ],
+              "droppedAttributesCount": 0,
+              "events": [],
+              "droppedEventsCount": 0,
+              "links": [],
+              "droppedLinksCount": 0,
+              "status": {
+                "message": "",
+                "code": 1
+              }
+            },
+            {
+              "traceId": "f3445b28721093fe615c94c1186d0511",
+              "spanId": "021546625c71b0d0",
+              "traceState": "",
+              "parentSpanId": "f87a276db2692340",
+              "flags": 256,
+              "name": "OpenAIChatCompletionClient.create",
+              "kind": 1,
+              "startTimeUnixNano": "1767225590074000000",
+              "endTimeUnixNano": "1767225590108000000",
+              "attributes": [
+                {
+                  "key": "llm.model_name",
+                  "value": {
+                    "stringValue": "gpt-4o-mini-2024-07-18"
+                  }
+                },
+                {
+                  "key": "llm.input_messages.0.message.role",
+                  "value": {
+                    "stringValue": "developer"
+                  }
+                },
+                {
+                  "key": "llm.input_messages.0.message.content",
+                  "value": {
+                    "stringValue": "You are a weather bot."
+                  }
+                },
+                {
+                  "key": "llm.input_messages.1.message.role",
+                  "value": {
+                    "stringValue": "user"
+                  }
+                },
+                {
+                  "key": "llm.input_messages.1.message.content",
+                  "value": {
+                    "stringValue": "What is the weather in Paris?"
+                  }
+                },
+                {
+                  "key": "llm.input_messages.2.message.role",
+                  "value": {
+                    "stringValue": "assistant"
+                  }
+                },
+                {
+                  "key": "llm.input_messages.2.message.tool_calls.0.tool_call.id",
+                  "value": {
+                    "stringValue": "call_weather_1"
+                  }
+                },
+                {
+                  "key": "llm.input_messages.2.message.tool_calls.0.tool_call.function.name",
+                  "value": {
+                    "stringValue": "get_weather"
+                  }
+                },
+                {
+                  "key": "llm.input_messages.2.message.tool_calls.0.tool_call.function.arguments",
+                  "value": {
+                    "stringValue": "{\"city\":\"Paris\"}"
+                  }
+                },
+                {
+                  "key": "llm.input_messages.3.message.role",
+                  "value": {
+                    "stringValue": "function"
+                  }
+                },
+                {
+                  "key": "llm.input_messages.3.function.0",
+                  "value": {
+                    "stringValue": "{\"name\": \"get_weather\", \"content\": \"sunny in Paris\", \"call_id\": \"call_weather_1\", \"is_error\": false}"
+                  }
+                },
+                {
+                  "key": "output.value",
+                  "value": {
+                    "stringValue": "{\"finish_reason\": \"stop\", \"content\": \"It is sunny in Paris.\", \"usage\": {\"prompt_tokens\": 131, \"completion_tokens\": 12}, \"cached\": false, \"logprobs\": null, \"thought\": null}"
+                  }
+                },
+                {
+                  "key": "output.mime_type",
+                  "value": {
+                    "stringValue": "application/json"
+                  }
+                },
+                {
+                  "key": "llm.token_count.prompt",
+                  "value": {
+                    "intValue": "131"
+                  }
+                },
+                {
+                  "key": "llm.token_count.completion",
+                  "value": {
+                    "intValue": "12"
+                  }
+                },
+                {
+                  "key": "llm.token_count.total",
+                  "value": {
+                    "intValue": "143"
+                  }
+                },
+                {
+                  "key": "llm.output_messages.0.message.role",
+                  "value": {
+                    "stringValue": "assistant"
+                  }
+                },
+                {
+                  "key": "llm.output_messages.0.message.content",
+                  "value": {
+                    "stringValue": "It is sunny in Paris."
+                  }
+                },
+                {
+                  "key": "openinference.span.kind",
+                  "value": {
+                    "stringValue": "LLM"
+                  }
+                }
+              ],
+              "droppedAttributesCount": 0,
+              "events": [],
+              "droppedEventsCount": 0,
+              "links": [],
+              "droppedLinksCount": 0,
+              "status": {
+                "message": "",
+                "code": 1
+              }
+            }
+          ],
+          "schemaUrl": ""
+        }
+      ],
+      "schemaUrl": ""
+    }
+  ]
+}

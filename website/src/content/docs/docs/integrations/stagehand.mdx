@@ -1,0 +1,51 @@
+---
+title: Stagehand
+description: "Send Stagehand browser spans to cetra with the telemetry option of its v4 SDK. Setup only: the spans seen have no model calls."
+---
+
+Stagehand sends its browser spans to cetra through the `telemetry` option of its v4 SDK. This page is setup only: it was run up to the first model call, and no model span was seen.
+
+## Install
+
+```bash
+npm install @browserbasehq/stagehand
+```
+
+## Set up
+
+Set `telemetry.traces` when you create the Stagehand client. Point `endpoint` at cetra's `/v1/traces` path, and send your `sk-cetra-…` key as a bearer header.
+
+{/* untested: run up to the first model call only; the import lines are not shown in the source this page was written from, and the example needs OPENAI_API_KEY and a running cetra */}
+```ts
+const browser = await localBrowser.launch({ headless: true });
+const stagehand = await Stagehand.create({
+  browser,
+  model: { modelName: "openai/gpt-4o-mini", apiKey: process.env.OPENAI_API_KEY },
+  telemetry: {
+    traces: {
+      endpoint: "http://localhost:8080/v1/traces",
+      headers: { authorization: "Bearer <SK_CETRA_KEY>" },
+    },
+  },
+});
+```
+
+Replace `<SK_CETRA_KEY>` with your `sk-cetra-…` API key. Stagehand sends OTLP/JSON, and cetra's `/v1/traces` accepts `application/json` as well as protobuf.
+
+## What you get
+
+- One `span` for each Stagehand call: `stagehand.init`, `page.goto`, `stagehand.observe` and `stagehand.close`, with the JSON-RPC method and request ID as attributes.
+- A failing call keeps its error status. The run this page is based on ended with a `stagehand.observe` span whose model call failed.
+- Browser log records as spans, such as the Chrome DevTools Protocol calls. In the run, these were 42 of the 68 spans.
+
+## Limits
+
+- Tested up to the first model call. The run used a key that failed on that call, so the successful `act`, `observe` and `extract` calls were not seen.
+- No model span was seen: no `llm` span and no `gen_ai.*` attributes. This page does not say how to get model-call spans from Stagehand.
+- The browser log spans are plain spans and are most of a trace. cetra does not filter them.
+- Stagehand's model calls are made by its Chrome extension, not by your application, so this page does not cover instrumenting the application to add them.
+
+## Next
+
+- [Traces](/docs/tracing/traces/): read the trace as a tree and a timeline.
+- [Send OpenTelemetry](/docs/get-started/opentelemetry/): the endpoint and the headers cetra expects.

@@ -1,0 +1,40 @@
+{
+  "description": "DeepAgents agent with one tool, traced by OpenInference's LangChain instrumentation.",
+  "spec_refs": [
+    "02 § Convention detection",
+    "02 § Mapping tables / Span kind",
+    "02 § Mapping tables / Model, provider, usage"
+  ],
+  "notes": "Only LangChainInstrumentor is enabled, the same row as LangChain and LangGraph; DeepAgents has no instrumentor of its own. create_deep_agent wraps ChatOpenAI, pointed at the mock, with one tool, and the built-in file and sub-agent tools are sent on the wire. The tree is the LangGraph one: LangGraph [chain] root, PatchToolCallsMiddleware.before_agent [agent], model [chain] over ChatOpenAI [llm], tools [chain] over get_weather [tool], then model [chain] over ChatOpenAI [llm], and _ParentNotifierMiddleware.after_agent [agent]. The two middleware spans are typed agent although they are plumbing; the page says so. Nothing in a column identifies DeepAgents; ls_integration=deepagents stays in the metadata attribute. Run, message, and checkpoint ids are pinned to a counter so a recapture stays stable, as in langgraph-agent.",
+  "instrumentation": "openinference-instrumentation-langchain",
+  "libraries": [
+    "deepagents",
+    "langchain-openai",
+    "openinference-instrumentation-langchain",
+    "opentelemetry-sdk"
+  ],
+  "turns": [
+    {
+      "api": "openai.chat",
+      "model": "gpt-4o-mini-2024-07-18",
+      "message": {
+        "tool_calls": [
+          {
+            "id": "call_weather_1",
+            "name": "get_weather",
+            "arguments": { "city": "Paris" }
+          }
+        ]
+      },
+      "finish": "tool_calls",
+      "usage": { "input": 82, "output": 17 }
+    },
+    {
+      "api": "openai.chat",
+      "model": "gpt-4o-mini-2024-07-18",
+      "message": { "text": "It is 18 °C and sunny in Paris." },
+      "finish": "stop",
+      "usage": { "input": 131, "output": 12 }
+    }
+  ]
+}

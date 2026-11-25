@@ -1,5 +1,5 @@
 import { execFileSync, spawn } from "node:child_process";
-import { mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { cpSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -12,13 +12,17 @@ const KILL_GRACE_MS = 5_000;
 const projectRoot = fileURLToPath(new URL(".", import.meta.url));
 
 export interface AgentRun {
-  /** Executable under node_modules/.bin, e.g. "claude". */
+  /** Executable under node_modules/.bin, e.g. "claude", or an absolute path to one. */
   bin: string;
   args: string[];
   /** The child's whole environment besides PATH, HOME, TERM, LANG and TZ. */
   env: Record<string, string>;
   /** Files to write before the run, relative to the isolated HOME. */
   homeFiles: Record<string, string>;
+  /** Directories copied recursively into the isolated HOME before the run: the name relative to HOME, the value an absolute source path. */
+  homeDirs?: Record<string, string>;
+  /** Files written into the repo before the run, relative to the repo. */
+  repoFiles?: Record<string, string>;
 }
 
 /** Paths of one run, for building config files before calling runAgent. */
@@ -55,10 +59,20 @@ export async function runAgent(run: AgentRun): Promise<void> {
   mkdirSync(home, { recursive: true });
   mkdirSync(repo, { recursive: true });
 
+  for (const [name, source] of Object.entries(run.homeDirs ?? {})) {
+    cpSync(source, path.join(home, name), { recursive: true });
+  }
+
   for (const [name, content] of Object.entries(run.homeFiles)) {
     const file = path.join(home, name);
     mkdirSync(path.dirname(file), { recursive: true });
     writeFileSync(file, content, { mode: name.endsWith(".sh") ? 0o755 : 0o600 });
+  }
+
+  for (const [name, content] of Object.entries(run.repoFiles ?? {})) {
+    const file = path.join(repo, name);
+    mkdirSync(path.dirname(file), { recursive: true });
+    writeFileSync(file, content);
   }
 
   const gitEnv = { PATH: pathVariable(), HOME: home, GIT_CONFIG_NOSYSTEM: "1" };
@@ -80,7 +94,9 @@ export async function runAgent(run: AgentRun): Promise<void> {
   // The agent's stdout goes to this process's stderr, so it never mixes with
   // anything the runner reads. The environment is explicit: the runner sets
   // OTEL_SERVICE_NAME, which would rename the agent if it were inherited.
-  const bin = path.join(projectRoot, "node_modules", ".bin", run.bin);
+  const bin = path.isAbsolute(run.bin)
+    ? run.bin
+    : path.join(projectRoot, "node_modules", ".bin", run.bin);
   const env = {
     PATH: pathVariable(),
     HOME: home,

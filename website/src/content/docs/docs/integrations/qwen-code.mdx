@@ -1,0 +1,94 @@
+---
+title: Qwen Code
+description: "Connect Qwen Code to cetra: each model call and tool call becomes a span, with the session, tokens and the prompts and answers."
+---
+
+import Backing from "../../../../components/Backing.astro";
+
+This page shows how to send Qwen Code's traces to cetra with `cetra agents setup`, and what you see in the UI.
+
+<Backing fixtures={["qwen_code/shell-tool"]} />
+
+The captured run asked Qwen Code to print a file. Qwen Code's file-read tool needs an absolute path, so the run used its shell tool instead.
+
+## Connect Qwen Code
+
+1. Create a project key with the `ingest` scope in the project's [API keys](/docs/platform/api-keys/) page. Copy the `sk-cetra-…` value.
+2. Install the `cetra` binary and run this in a terminal, with `<SK_CETRA_KEY>` set to your key and `<CETRA_URL>` set to your server:
+
+```bash
+export CETRA_INGEST_KEY=<SK_CETRA_KEY>
+cetra agents setup qwen-code --url <CETRA_URL>
+```
+
+3. Run Qwen Code as usual. Its traces then go to cetra.
+
+`cetra agents setup qwen-code` writes these files, and keeps every other key in them:
+
+- `~/.qwen/settings.json`: the `telemetry` keys that turn on traces and send them to your server, and two hooks (`SessionStart` and `UserPromptSubmit`). The hooks send the session's repository, branch and person to cetra. They never send spans.
+- `~/.qwen/.env`, with mode 0600: the `OTEL_EXPORTER_OTLP_HEADERS` line that holds your key. Qwen Code reads its headers from this file, not from `settings.json`.
+- `agents.toml`, with mode 0600, next to the credentials file of `cetra login` (`~/.config/cetra/` on Linux, `~/Library/Application Support/cetra/` on macOS): the server, the key and the person that the hooks use.
+
+The `telemetry` keys are these. To set them by hand, use the same values:
+
+| Key | Value |
+|---|---|
+| `enabled` | `true` |
+| `target` | `"local"` |
+| `otlpEndpoint` | your server URL |
+| `otlpProtocol` | `"http"` (HTTP with JSON) |
+| `logPrompts` | `true`, or `false` with `--no-content` |
+| `includeSensitiveSpanAttributes` | `true`, or `false` with `--no-content` |
+
+If `.env` already has an `OTEL_EXPORTER_OTLP_HEADERS` line, setup replaces it, and the original file is copied to `.env.cetra-backup`. Setup also copies `settings.json` to `settings.json.cetra-backup` before its first change.
+
+To see the files without writing them, add `--print`. It prints the merged files and writes nothing. To attribute sessions to a person other than your `git config --global user.email`, add `--user <EMAIL>`.
+
+To undo setup, run this. It removes only the keys and hooks that setup wrote:
+
+```bash
+cetra agents remove qwen-code
+```
+
+Run `cetra agents setup qwen-code` again after you move or upgrade the `cetra` binary. The hooks hold the binary's path.
+
+## What you get
+
+Qwen Code groups one prompt under one `agent` span, and each model call and tool call is a child of it.
+
+- the prompt is an `agent` span, `qwen-code.interaction`, with the prompt and the answer;
+- each model call is an `llm` span, with the model and its input and output tokens;
+- each tool call is a `tool` span named after the tool, such as `run_shell_command`. Qwen Code's own name for the span is kept in `cetra.span_name`;
+- Qwen Code's hook spans and the spans of its HTTP client are dropped.
+
+Each trace has these fields:
+
+- the session, from Qwen Code's session id;
+- the person and the repository and branch, from the hook. Qwen Code puts no person on its spans;
+- `metadata.coding_agent` set to `qwen-code`.
+
+Use the [Coding agents dashboard template](/docs/tracing/custom-dashboards/) to see API-equivalent cost per person, repository, branch and session, and tool usage.
+
+## Content
+
+Setup writes `logPrompts: true` and `includeSensitiveSpanAttributes: true`. Qwen Code then sends the prompts and the model's answers on its spans. The second key also attaches tool inputs and outputs to the spans. With `--no-content`, setup writes both keys as `false`.
+
+## API-equivalent cost
+
+cetra prices each model call from its token counts, using its price table. Qwen Code does not report a cost.
+
+API-equivalent cost is what the same tokens would cost at API prices. If you use a subscription plan, it is not what you pay.
+
+## Limits
+
+- Tested with Qwen Code 0.28.0.
+- Qwen Code also sends logs and metrics. Setup does not turn them off, and cetra accepts and drops them. Setup prints this when it finishes.
+- Setup registers its hooks on `SessionStart` and `UserPromptSubmit`. Qwen Code 0.28.0 did not fire `BeforeAgent`, the event that Gemini CLI uses, so setup does not register it.
+- Qwen Code has three background agents, which are on by default: automatic memory, automatic dreaming and automatic skill review. When they are on, each makes model calls after the answer, and those calls also appear in cetra. To turn them off, set `memory.enableManagedAutoMemory`, `memory.enableManagedAutoDream` and `memory.enableAutoSkill` to `false` in Qwen Code's settings. The captured run has them off.
+- `cetra agents setup` does not run on Windows. There, Qwen Code can still export spans if you set its telemetry settings yourself, but no hooks run.
+
+## Next
+
+- [Traces](/docs/tracing/traces/): read the trace as a tree and a timeline.
+- [Sessions](/docs/tracing/sessions/): the calls of one Qwen Code session.
+- [Custom dashboards](/docs/tracing/custom-dashboards/): build your own cost views, or start from the Coding agents template.

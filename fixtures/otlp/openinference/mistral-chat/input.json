@@ -1,0 +1,174 @@
+{
+  "resourceSpans": [
+    {
+      "resource": {
+        "attributes": [
+          {
+            "key": "telemetry.sdk.language",
+            "value": {
+              "stringValue": "python"
+            }
+          },
+          {
+            "key": "telemetry.sdk.name",
+            "value": {
+              "stringValue": "opentelemetry"
+            }
+          },
+          {
+            "key": "telemetry.sdk.version",
+            "value": {
+              "stringValue": "1.45.2"
+            }
+          },
+          {
+            "key": "service.name",
+            "value": {
+              "stringValue": "capture-app"
+            }
+          }
+        ],
+        "droppedAttributesCount": 0,
+        "entityRefs": []
+      },
+      "scopeSpans": [
+        {
+          "scope": {
+            "name": "openinference.instrumentation.mistralai",
+            "version": "2.3.5",
+            "attributes": [],
+            "droppedAttributesCount": 0
+          },
+          "spans": [
+            {
+              "traceId": "b4285997bd34192b6c97c5d43841c66c",
+              "spanId": "5684b5a2c0367a60",
+              "traceState": "",
+              "parentSpanId": "",
+              "flags": 256,
+              "name": "MistralClient.chat",
+              "kind": 1,
+              "startTimeUnixNano": "1767225590000000000",
+              "endTimeUnixNano": "1767225590040000000",
+              "attributes": [
+                {
+                  "key": "llm.invocation_parameters",
+                  "value": {
+                    "stringValue": "{\"model\": \"mistral-small-latest\", \"temperature\": \"\", \"top_p\": \"\", \"max_tokens\": \"\", \"stream\": false, \"stop\": \"\", \"random_seed\": \"\", \"metadata\": \"\", \"presence_penalty\": \"\", \"frequency_penalty\": \"\", \"min_tokens\": \"\", \"repetition_penalty\": \"\", \"top_k\": \"\", \"logprobs\": \"\", \"top_logprobs\": \"\", \"prompt_logprobs\": \"\", \"top_prompt_logprobs\": \"\", \"n\": \"\", \"reasoning_effort\": \"\", \"prompt_mode\": \"\", \"guardrails\": \"\", \"prompt_cache_key\": \"\", \"service_tier\": \"\", \"retries\": \"\"}"
+                  }
+                },
+                {
+                  "key": "llm.input_messages.0.message.role",
+                  "value": {
+                    "stringValue": "user"
+                  }
+                },
+                {
+                  "key": "llm.input_messages.0.message.content",
+                  "value": {
+                    "stringValue": "What is the capital of France?"
+                  }
+                },
+                {
+                  "key": "output.value",
+                  "value": {
+                    "stringValue": "{\"id\":\"chatcmpl-capture-1\",\"object\":\"chat.completion\",\"model\":\"mistral-small-latest\",\"usage\":{\"prompt_tokens\":14,\"completion_tokens\":8,\"total_tokens\":22,\"prompt_tokens_details\":{\"cached_tokens\":0,\"audio_tokens\":0},\"completion_tokens_details\":{\"reasoning_tokens\":0,\"audio_tokens\":0,\"accepted_prediction_tokens\":0,\"rejected_prediction_tokens\":0}},\"created\":1767225600,\"choices\":[{\"index\":0,\"finish_reason\":\"stop\",\"message\":{\"role\":\"assistant\",\"content\":\"The capital of France is Paris.\"},\"logprobs\":null}]}"
+                  }
+                },
+                {
+                  "key": "output.mime_type",
+                  "value": {
+                    "stringValue": "application/json"
+                  }
+                },
+                {
+                  "key": "input.value",
+                  "value": {
+                    "stringValue": "{\"model\": \"mistral-small-latest\", \"messages\": [{\"role\": \"user\", \"content\": \"What is the capital of France?\"}], \"temperature\": \"\", \"top_p\": \"\", \"max_tokens\": \"\", \"stream\": false, \"stop\": \"\", \"random_seed\": \"\", \"metadata\": \"\", \"tools\": \"\", \"presence_penalty\": \"\", \"frequency_penalty\": \"\", \"min_tokens\": \"\", \"repetition_penalty\": \"\", \"top_k\": \"\", \"logprobs\": \"\", \"top_logprobs\": \"\", \"prompt_logprobs\": \"\", \"top_prompt_logprobs\": \"\", \"n\": \"\", \"reasoning_effort\": \"\", \"prompt_mode\": \"\", \"guardrails\": \"\", \"prompt_cache_key\": \"\", \"service_tier\": \"\", \"retries\": \"\"}"
+                  }
+                },
+                {
+                  "key": "input.mime_type",
+                  "value": {
+                    "stringValue": "application/json"
+                  }
+                },
+                {
+                  "key": "llm.model_name",
+                  "value": {
+                    "stringValue": "mistral-small-latest"
+                  }
+                },
+                {
+                  "key": "llm.provider",
+                  "value": {
+                    "stringValue": "mistralai"
+                  }
+                },
+                {
+                  "key": "llm.system",
+                  "value": {
+                    "stringValue": "mistralai"
+                  }
+                },
+                {
+                  "key": "llm.token_count.total",
+                  "value": {
+                    "intValue": "22"
+                  }
+                },
+                {
+                  "key": "llm.token_count.prompt",
+                  "value": {
+                    "intValue": "14"
+                  }
+                },
+                {
+                  "key": "llm.token_count.completion",
+                  "value": {
+                    "intValue": "8"
+                  }
+                },
+                {
+                  "key": "llm.output_messages.0.message.role",
+                  "value": {
+                    "stringValue": "assistant"
+                  }
+                },
+                {
+                  "key": "llm.output_messages.0.message.content",
+                  "value": {
+                    "stringValue": "The capital of France is Paris."
+                  }
+                },
+                {
+                  "key": "llm.finish_reason",
+                  "value": {
+                    "stringValue": "stop"
+                  }
+                },
+                {
+                  "key": "openinference.span.kind",
+                  "value": {
+                    "stringValue": "LLM"
+                  }
+                }
+              ],
+              "droppedAttributesCount": 0,
+              "events": [],
+              "droppedEventsCount": 0,
+              "links": [],
+              "droppedLinksCount": 0,
+              "status": {
+                "message": "",
+                "code": 1
+              }
+            }
+          ],
+          "schemaUrl": ""
+        }
+      ],
+      "schemaUrl": ""
+    }
+  ]
+}

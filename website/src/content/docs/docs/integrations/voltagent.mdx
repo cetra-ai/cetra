@@ -1,0 +1,90 @@
+---
+title: VoltAgent
+description: "Trace VoltAgent agents with cetra from TypeScript: agent runs, model calls and tool calls, with the user and the session."
+---
+
+import { Tabs, TabItem } from "@astrojs/starlight/components";
+import Backing from "../../../../components/Backing.astro";
+
+cetra traces VoltAgent agent runs from TypeScript. VoltAgent's own observability writes the agent, model call and tool spans, and cetra reads them with the `voltagent` convention.
+
+<Backing fixtures={["voltagent/agent-tool"]} />
+
+## Install
+
+<Tabs syncKey="lang">
+  <TabItem label="TypeScript">
+
+```bash
+npm install @cetra-ai/sdk @voltagent/core@2 ai@6 @ai-sdk/openai@3 zod
+```
+
+  </TabItem>
+</Tabs>
+
+## Set up
+
+Start cetra with `useGlobalProvider: true`, so that VoltAgent's default observability uses cetra's tracer. Set `CETRA_API_KEY` to your `sk-cetra-…` key and `OPENAI_API_KEY` to your OpenAI key.
+
+<Tabs syncKey="lang">
+  <TabItem label="TypeScript">
+
+{/* untested: calls OpenAI through VoltAgent and needs CETRA_API_KEY and OPENAI_API_KEY */}
+```ts
+import { createOpenAI } from "@ai-sdk/openai";
+import { flush, init } from "@cetra-ai/sdk";
+import { Agent, VoltAgent, createTool } from "@voltagent/core";
+import { z } from "zod";
+
+init({ apiKey: process.env.CETRA_API_KEY, useGlobalProvider: true });
+
+const openai = createOpenAI({ apiKey: process.env.OPENAI_API_KEY });
+const weather = createTool({
+  name: "get_weather",
+  description: "Look up the weather for a city",
+  parameters: z.object({ city: z.string() }),
+  execute: async ({ city }) => ({ temperature_c: 18, city }),
+});
+const agent = new Agent({
+  name: "weather-agent",
+  instructions: "You are a weather assistant.",
+  model: openai.chat("gpt-4o-mini"),
+  tools: [weather],
+});
+new VoltAgent({ agents: { agent } });
+
+await agent.generateText("What's the weather in Paris?", {
+  maxSteps: 3,
+  userId: "user-1",
+  conversationId: "conv-1",
+});
+await flush();
+// VoltAgent keeps the process alive after the run, so the process exits explicitly.
+process.exit(0);
+```
+
+  </TabItem>
+</Tabs>
+
+`userId` becomes the user of the trace, and `conversationId` becomes its session.
+
+## What you get
+
+With one tool call inside a conversation, a run produces:
+
+- an `agent` span named `weather-agent`, with the prompt as its input and the answer as its output, the user and the session;
+- an `llm` span named `llm:generateText` for the model call, with the provider `openai`, the model `gpt-4o-mini`, the token counts, the cost computed from the built-in prices and the input messages;
+- a `tool` span named `tool.execution:get_weather`, with the arguments as its input and the result as its output.
+
+## Limits
+
+- The `llm` span records only the last step's token counts. When the run calls tools, the cost of the earlier steps is not counted, so the cost is an undercount.
+- The fixture was captured with `@voltagent/core` 2.11.1 and `ai` 6.0.322.
+- cetra recognizes a VoltAgent trace from its `voltagent.*` attributes or from its instrumentation scope, which starts with `@voltagent/`. If you rename VoltAgent's instrumentation scope, only the agent span is recognized as VoltAgent.
+- If a field is missing, look at the span's **Attributes** tab and compare it with [Span attributes](/docs/reference/attributes/).
+
+## Next
+
+- [Traces](/docs/tracing/traces/): read the trace as a tree and a timeline.
+- [Cost and tokens](/docs/tracing/cost-and-tokens/): how cost is computed from the token counts.
+- [Sessions](/docs/tracing/sessions/): group the traces of one conversation.

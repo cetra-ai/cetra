@@ -1,0 +1,15 @@
+[project]
+name = "cetra-capture-litellm-proxy"
+version = "0.0.0"
+requires-python = "==3.13.*"
+# litellm's `otel` callback imports opentelemetry.sdk and the OTLP/HTTP exporter but
+# does not declare them (the spike's project installed them alongside; same versions).
+dependencies = [
+  "litellm[proxy]==1.109.1",
+  "opentelemetry-sdk==1.45.2",
+  "opentelemetry-exporter-otlp-proto-http==1.45.2",
+]
+
+[tool.uv]
+package = false
+exclude-newer = "7 days" # D74/D117: no release younger than 7 days

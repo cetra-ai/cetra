@@ -1,0 +1,69 @@
+[project]
+name = "cetra-capture-env-promptflow"
+version = "0.0.0"
+requires-python = "==3.13.*"
+dependencies = [
+  # Prompt Flow (M6 captures A, spikes/m6-apps.md § 3): the tracing decorators and the devkit that
+  # sets up the OTLP exporter from the environment. Its own environment: the devkit pins pydash<8,
+  # which guardrails-ai (tools/capture/py) does not allow (D-IN-26 item 1).
+  "promptflow-tracing==1.18.5",
+  "promptflow-devkit==1.18.5",
+  "openai==3.45.0",
+  # promptflow-devkit imports this exporter on the OTLP path. 1.0.0b59 needs opentelemetry-sdk 1.45
+  # and cannot import under the 1.38 set below; 1.0.0b45 is the newest release whose requirement
+  # (~=1.35) takes 1.38 (D-IN-26 item 1).
+  "azure-monitor-opentelemetry-exporter==1.0.0b45",
+  # The capture harness, a package of its own (tools/capture/harness, module capture_py).
+  "cetra-capture-harness",
+]
+
+[dependency-groups]
+dev = ["ruff==0.17.3", "mypy==2.4.1"]
+
+[tool.uv]
+package = false
+exclude-newer = "7 days" # D74/D117: no release younger than 7 days
+# promptflow-tracing 1.18.5 needs opentelemetry-sdk<1.39 (D-IN-26). The harness keeps 1.45.2 in
+# every other environment; this one runs the newest 1.38 set (1.38.0, and semantic conventions
+# 0.59b0) before the cutoff, as the spike did (its exporter reported 1.38.0).
+override-dependencies = [
+  "opentelemetry-api==1.38.0",
+  "opentelemetry-sdk==1.38.0",
+  "opentelemetry-exporter-otlp-proto-http==1.38.0",
+  "opentelemetry-proto==1.38.0",
+  "opentelemetry-semantic-conventions==0.59b0",
+]
+
+[tool.uv.sources]
+cetra-capture-harness = { path = "../../harness", editable = true }
+
+[tool.ruff]
+target-version = "py313"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "W", "F", "I", "B", "UP", "SIM", "RUF", "PT", "ANN", "S", "BLE", "N"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["capture_py"]
+
+[tool.mypy]
+strict = true
+python_version = "3.13"
+files = ["scenarios"]
+# Every scenario entry point is main.py. mypy maps those paths to one module.
+exclude = ["main\\.py$"]
+
+# promptflow ships no py.typed marker: its decorators and tracing setup are Any.
+[[tool.mypy.overrides]]
+module = "promptflow"
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+module = "promptflow.*"
+ignore_missing_imports = true
+
+# @trace is Any-typed (promptflow ships no types): the scenario only has to run.
+[[tool.mypy.overrides]]
+module = "promptflow_openai_trace"
+disallow_untyped_decorators = false

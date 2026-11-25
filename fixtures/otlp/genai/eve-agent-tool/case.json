@@ -1,0 +1,22 @@
+{
+  "description": "eve dev-server agent run with one tool call, exported by eve's otelIntegration as GenAI spans.",
+  "origin": "captured",
+  "source": {
+    "instrumentation": "eve",
+    "instrumentation_version": "1.0.1",
+    "language": "typescript",
+    "libraries": {
+      "@vercel/otel": "2.3.0",
+      "eve": "1.0.1"
+    },
+    "captured_at": "2026-11-24T20:58:15Z"
+  },
+  "spec_refs": [
+    "02 § Convention detection",
+    "02 § Mapping tables / Span kind",
+    "02 § Mapping tables / Input / output",
+    "02 § Mapping tables / Model, provider, usage",
+    "02 § Coding agents"
+  ],
+  "notes": "eve 1.0.1 (with @vercel/otel 2.3.0) run by its dev server from the scenario folder, which is the eve project: the package.json name capture-eve sets the agent and service names. IN9.0 staged eve in the tool project tools/capture/eve (eve needs AI SDK 7, the capture project has 6), so main.ts links the staged node_modules into the scenario folder for the run and spawns the dev server with an explicit environment: no OTEL_* variable is passed, so the service name stays capture-eve, and HOME, XDG_CONFIG_HOME and TMPDIR point into the work directory that also holds hello.txt, so a run writes nothing outside the scenario folder. The provider is createOpenAICompatible with name \"openai\" (the AI SDK makes gen_ai.provider.name \"openai.chat\", which cetra maps to openai and prices) at the mock; otelIntegration exports to the receiver with no auth header. The mock answers the two streamed Chat Completions calls, whose tools include eve's built-in bash and friends beside read_file: first the read_file call, then the text. Expected: invoke_agent capture-eve (agent; its summed gen_ai.usage is not counted), agent.step twice (span), chat gpt-4o-mini twice (llm, tokens 82/17 and 131/12, provider openai, cost computed) and execute_tool read_file (tool, with arguments and result). The Workflow SDK spans (scope \"workflow\", names workflow.*, step.*, queue.*) are discarded by the normalizer (02 § Coding agents, D-IN-31 item 5), but they are not kept in the fixture: their symmetric spans (repeated step.execute, step.hydrate, workflow.stream.flush and workflow.stream.read.complete with different parents) are indistinguishable after masking, which makes the comparison order-dependent, so span_names keeps eve's own spans and IN9.1's unit tests cover the discard. Two agent.step spans link to a Workflow SDK span that is filtered out, which the check labels external-0 and external-1 (one numbered label per unknown link target). Volatile: eve mints wrun_ run ids and a delivery uuid on every boot. Timing: gen_ai.execute_tool.duration is measured, and the volatile keys are listed there too so the check ignores their capture-volatile-<n> placeholders, whose numbering follows span order. No telemetry leaves the process: the mock and the receiver are the only hosts."
+}

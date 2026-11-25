@@ -1,0 +1,24 @@
+{
+  "description": "AutoGen AgentChat agent run with one tool call, traced by the AutoGen OpenInference instrumentor only.",
+  "origin": "captured",
+  "source": {
+    "instrumentation": "openinference-instrumentation-autogen-agentchat",
+    "instrumentation_version": "0.1.29",
+    "language": "python",
+    "libraries": {
+      "autogen-agentchat": "0.7.5",
+      "autogen-ext": "0.7.5",
+      "openinference-instrumentation-autogen-agentchat": "0.1.29",
+      "opentelemetry-sdk": "1.45.2"
+    },
+    "captured_at": "2026-11-23T20:03:14Z"
+  },
+  "spec_refs": [
+    "02 § Convention detection",
+    "02 § Mapping tables / Span kind",
+    "02 § Mapping tables / Model, provider, usage",
+    "02 § Mapping tables / Input / output",
+    "02 § Normalization rules"
+  ],
+  "notes": "Only AutogenAgentChatInstrumentor is enabled, with AUTOGEN_DISABLE_RUNTIME_TRACING set before autogen is imported. The OpenAI instrumentor is not enabled: it would add a second llm span for each model call (D-IN-23 item 3). Each model call is one llm span, OpenAIChatCompletionClient.create. The model client is pointed at the mock."
+}

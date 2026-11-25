@@ -1,0 +1,22 @@
+{
+  "description": "OpenAI client call through OpenRouter, one chat turn, traced by OpenLLMetry.",
+  "origin": "captured",
+  "source": {
+    "instrumentation": "opentelemetry-instrumentation-openai",
+    "instrumentation_version": "0.62.4",
+    "language": "python",
+    "libraries": {
+      "openai": "3.45.0",
+      "opentelemetry-instrumentation-openai": "0.62.4",
+      "opentelemetry-sdk": "1.45.2",
+      "opentelemetry-semantic-conventions-ai": "0.5.1"
+    },
+    "captured_at": "2026-11-23T13:49:00Z"
+  },
+  "spec_refs": [
+    "02 § Model, provider, usage",
+    "02 § Provider from the endpoint",
+    "02 § Cost computation"
+  ],
+  "notes": "TRACELOOP_TRACE_CONTENT is true, which is also the default, so message content is recorded on the span. TRACELOOP_METRICS_ENABLED is false. The client keeps the real base URL https://openrouter.ai/api/v1, and the harness routes the request to the capture mock under that host (D-IN-3). OpenLLMetry writes gen_ai.provider.name openrouter itself, so the provider is openrouter without the endpoint rule. OpenLLMetry strips openai/ from both the request and the response model, so the span is priced by the publisher rows for the bare name gpt-4o-mini (D-IN-13). This case pins that gateway pricing, not the endpoint rule. Cost is computed, not reported. Token counts are input 14 and output 8."
+}

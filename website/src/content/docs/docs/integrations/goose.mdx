@@ -1,0 +1,83 @@
+---
+title: Goose
+description: "Connect Goose to cetra with environment lines: each reply becomes one trace of model and tool calls, with the session, tokens and the prompts."
+---
+
+import Backing from "../../../../components/Backing.astro";
+
+This page shows how to send Goose's traces to cetra with `cetra agents setup goose`, and what you see in the UI.
+
+<Backing fixtures={["goose/read-file"]} />
+
+## Connect Goose
+
+1. Create a project key with the `ingest` scope in the project's [API keys](/docs/platform/api-keys/) page. Copy the `sk-cetra-…` value.
+2. Install the `cetra` binary and run this in a terminal, with `<SK_CETRA_KEY>` set to your key and `<CETRA_URL>` set to your server:
+
+```bash
+export CETRA_INGEST_KEY=<SK_CETRA_KEY>
+cetra agents setup goose --url <CETRA_URL>
+```
+
+3. Setup writes nothing. It prints `export` lines, with your server and key in them. Add them to your shell profile. Setup does not edit the profile. The lines look like this:
+
+{/* untested: printed by `cetra agents setup goose` for your shell profile */}
+```bash
+export OTEL_EXPORTER_OTLP_ENDPOINT=<CETRA_URL>
+export OTEL_EXPORTER_OTLP_HEADERS=Authorization=Bearer%20<SK_CETRA_KEY>
+export OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT=true
+export OTEL_LOGS_EXPORTER=none
+export OTEL_METRICS_EXPORTER=none
+```
+
+4. Open a new shell so that the lines load, and run Goose as usual. Its traces then go to cetra.
+
+The header value is percent-encoded, so the space after `Bearer` is `%20`. The third line turns on the prompts and the answers; setup prints it only without `--no-content`. The last two lines turn off Goose's logs and metrics, which cetra would otherwise accept and drop.
+
+To undo setup, run this. It writes no file, and reminds you to delete the `OTEL_*` lines from your shell profile:
+
+```bash
+cetra agents remove goose
+```
+
+## What you get
+
+Each reply is one trace. Its root is an `agent` span, `reply`, carrying the prompt and the answer, and each model call and tool call is a child of it.
+
+- each model call is an `llm` span, `stream_response_from_provider`, with the model and its input and output tokens. Goose wraps it in a `chat` span, which cetra keeps as a `chain`: the wrapper repeats the `llm` span's tokens, so the call is counted once;
+- each tool call is a `tool` span named after the tool, such as `shell`. Goose's own name for the span is kept in `cetra.span_name`.
+
+The `reply` span carries the turn's total tokens. cetra does not read them either: they are the sum of the model calls' tokens.
+
+Each trace has these fields:
+
+- the session, from Goose's session id;
+- `metadata.coding_agent` set to `goose`.
+
+Goose sends no repository, branch or person, because it has no hook. cetra gets none of them for Goose traces.
+
+Use the [Coding agents dashboard template](/docs/tracing/custom-dashboards/) to see API-equivalent cost per session and tool usage.
+
+## Content
+
+Goose sends the prompts and the answers on its spans when `OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT` is set, the third line setup prints. With `--no-content`, setup leaves the line out.
+
+## API-equivalent cost
+
+cetra prices each model call from its token counts, using its price table. Goose does not report a cost.
+
+API-equivalent cost is what the same tokens would cost at API prices. If you use a subscription plan, it is not what you pay.
+
+## Limits
+
+- Tested with Goose 1.59.2, in `goose run` mode. The interactive interface was not captured.
+- The `OTEL_*` lines apply to every OpenTelemetry program started from that shell, not only Goose.
+- The model-call span is `stream_response_from_provider`; `chat` is its `chain` parent.
+- The small model call Goose makes to name the session has no span.
+- Goose sends no repository, branch or person, so cetra cannot group its traces by repository or branch.
+
+## Next
+
+- [Traces](/docs/tracing/traces/): read the trace as a tree and a timeline.
+- [Sessions](/docs/tracing/sessions/): the calls of one Goose session.
+- [Custom dashboards](/docs/tracing/custom-dashboards/): build your own cost views, or start from the Coding agents template.

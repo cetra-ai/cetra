@@ -1,0 +1,59 @@
+---
+title: Langflow
+description: "Send Langflow flow traces and model calls to cetra from the Traceloop export that Langflow includes. Component content is stored as JSON text."
+---
+
+import Backing from "../../../../components/Backing.astro";
+
+cetra reads the spans Langflow exports for each flow run, with one span per component, and the model call behind each language model component.
+
+<Backing fixtures={["langflow/basic-prompting"]} />
+
+## Install
+
+Install Langflow from PyPI. The fixture was captured with Langflow 1.13.2.
+
+```bash
+pip install langflow==1.13.2
+```
+
+## Set up
+
+Langflow exports its spans through the Traceloop SDK it includes. Set the Traceloop variables to cetra, then start Langflow.
+
+```bash
+export TRACELOOP_BASE_URL=http://localhost:8080
+export TRACELOOP_API_KEY=<SK_CETRA_KEY>
+export LANGFLOW_NATIVE_TRACING=false
+export LANGFLOW_DO_NOT_TRACK=true
+
+langflow run
+```
+
+Replace `<SK_CETRA_KEY>` with your `sk-cetra-…` API key. Traceloop sends it as the bearer token. The key must not be empty, or Traceloop does not start. Traceloop appends `/v1/traces` to `TRACELOOP_BASE_URL`.
+
+`LANGFLOW_NATIVE_TRACING=false` keeps Langflow's own tracing, which writes to its database, out of the run. The fixture was captured with it off, and with `LANGFLOW_DO_NOT_TRACK=true` set.
+
+## What you get
+
+A flow run is one trace, and the model call is another:
+
+- a `chain` span for the flow, named after the flow, with its output as JSON text;
+- a `chain` span for each component of the flow, such as the chat input, the prompt template, the language model and the chat output, with its input and output as JSON text.
+- In a separate trace, an `llm` span for the model call, named `ChatOpenAI.chat`, with the provider, the request and response models, the token counts and the cost, which cetra computes from its price table.
+
+The language model component is a `chain` span in the flow's trace. Its model call is the `llm` span in the other trace.
+
+## Limits
+
+- The model call is not part of the flow's trace. Langflow's Traceloop export starts a new trace for it. The flow's trace shows the components, and the model call is in a trace of its own with no link to the flow. Use the `ChatOpenAI.chat` span for the model's tokens and cost.
+- A component's input and output are the values Langflow passes between components, stored as JSON text. The language model component's input is its whole configuration.
+- Components run at the same time when the flow allows it, so their spans can end in either order.
+- The fixture covers the Basic Prompting starter flow with the OpenAI language model. Other providers and flows were not captured.
+- The fixture was captured with Langflow 1.13.2.
+- If a field is missing, look at the span's **Attributes** tab and compare it with [Span attributes](/docs/reference/attributes/).
+
+## Next
+
+- [Traces](/docs/tracing/traces/): read the trace as a tree and a timeline.
+- [Cost and tokens](/docs/tracing/cost-and-tokens/): how cost is computed from the token counts.

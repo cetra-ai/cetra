@@ -1,0 +1,20 @@
+{
+  "description": "MCP over stdio with the client and the server in separate processes: one get_weather tool call and one tools/list, traced by mcp 2.3's native OpenTelemetry spans.",
+  "origin": "captured",
+  "source": {
+    "instrumentation": "mcp",
+    "instrumentation_version": "2.3.0",
+    "language": "python",
+    "libraries": {
+      "mcp": "2.3.0",
+      "opentelemetry-sdk": "1.45.2"
+    },
+    "captured_at": "2026-11-24T02:43:15Z"
+  },
+  "spec_refs": [
+    "02 § Convention detection",
+    "02 § Mapping tables / Span kind",
+    "02 § Normalization rules"
+  ],
+  "notes": "mcp 2.3.0 in envs/mcp (its own environment: mcp 2 conflicts with semantic-kernel's mcp<2 in tools/capture/py, D-IN-26 item 1). No chat model is called, so the scenario has no turns and the mock is unused. The client runs in main; the server is genai_mcp_tool_server.py, started with sys.executable and given the OTEL and CETRA_CAPTURE variables and PATH explicitly (the stdio transport hands the server only the environment it is given). The server exports each span as it ends (SimpleSpanProcessor, the harness's setup), so the spans survive the client closing the server. The spans are the client's MCP send spans (CLIENT), the server's tools/call get_weather (the tool), and the other mcp.* method spans (span). No arguments or results are recorded by mcp itself."
+}

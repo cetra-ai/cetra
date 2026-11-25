@@ -1,0 +1,383 @@
+{
+  "resourceSpans": [
+    {
+      "resource": {
+        "attributes": [
+          {
+            "key": "telemetry.sdk.language",
+            "value": {
+              "stringValue": "python"
+            }
+          },
+          {
+            "key": "telemetry.sdk.name",
+            "value": {
+              "stringValue": "opentelemetry"
+            }
+          },
+          {
+            "key": "telemetry.sdk.version",
+            "value": {
+              "stringValue": "1.45.2"
+            }
+          },
+          {
+            "key": "service.name",
+            "value": {
+              "stringValue": "capture-app"
+            }
+          }
+        ],
+        "droppedAttributesCount": 0,
+        "entityRefs": []
+      },
+      "scopeSpans": [
+        {
+          "scope": {
+            "name": "agent_framework",
+            "version": "1.26.0",
+            "attributes": [],
+            "droppedAttributesCount": 0
+          },
+          "spans": [
+            {
+              "traceId": "6b9b64788c2516a2c052e5d9f355944f",
+              "spanId": "4c06768decd7ed96",
+              "traceState": "",
+              "parentSpanId": "",
+              "flags": 256,
+              "name": "workflow.build",
+              "kind": 1,
+              "startTimeUnixNano": "1767225590000000000",
+              "endTimeUnixNano": "1767225590001000000",
+              "attributes": [
+                {
+                  "key": "workflow_builder.name",
+                  "value": {
+                    "stringValue": "capture-volatile-1"
+                  }
+                },
+                {
+                  "key": "workflow.id",
+                  "value": {
+                    "stringValue": "capture-volatile-2"
+                  }
+                },
+                {
+                  "key": "workflow.definition",
+                  "value": {
+                    "stringValue": "capture-volatile-3"
+                  }
+                }
+              ],
+              "droppedAttributesCount": 0,
+              "events": [
+                {
+                  "timeUnixNano": "1767225590000000000",
+                  "name": "build.started",
+                  "attributes": [],
+                  "droppedAttributesCount": 0
+                },
+                {
+                  "timeUnixNano": "1767225590000000000",
+                  "name": "build.validation_completed",
+                  "attributes": [],
+                  "droppedAttributesCount": 0
+                },
+                {
+                  "timeUnixNano": "1767225590001000000",
+                  "name": "build.completed",
+                  "attributes": [],
+                  "droppedAttributesCount": 0
+                }
+              ],
+              "droppedEventsCount": 0,
+              "links": [],
+              "droppedLinksCount": 0,
+              "status": null
+            },
+            {
+              "traceId": "33012b80987e1ce25ce3be8eb9cdc703",
+              "spanId": "70f1592004799475",
+              "traceState": "",
+              "parentSpanId": "",
+              "flags": 256,
+              "name": "invoke_workflow",
+              "kind": 1,
+              "startTimeUnixNano": "1767225590003000000",
+              "endTimeUnixNano": "1767225590007000000",
+              "attributes": [
+                {
+                  "key": "workflow.id",
+                  "value": {
+                    "stringValue": "capture-volatile-2"
+                  }
+                },
+                {
+                  "key": "gen_ai.operation.name",
+                  "value": {
+                    "stringValue": "invoke_workflow"
+                  }
+                }
+              ],
+              "droppedAttributesCount": 0,
+              "events": [
+                {
+                  "timeUnixNano": "1767225590003000000",
+                  "name": "workflow.started",
+                  "attributes": [],
+                  "droppedAttributesCount": 0
+                },
+                {
+                  "timeUnixNano": "1767225590007000000",
+                  "name": "workflow.completed",
+                  "attributes": [],
+                  "droppedAttributesCount": 0
+                }
+              ],
+              "droppedEventsCount": 0,
+              "links": [],
+              "droppedLinksCount": 0,
+              "status": null
+            },
+            {
+              "traceId": "33012b80987e1ce25ce3be8eb9cdc703",
+              "spanId": "87f90be6ce40751e",
+              "traceState": "",
+              "parentSpanId": "70f1592004799475",
+              "flags": 256,
+              "name": "edge_group.process InternalEdgeGroup",
+              "kind": 1,
+              "startTimeUnixNano": "1767225590003000000",
+              "endTimeUnixNano": "1767225590003000000",
+              "attributes": [
+                {
+                  "key": "edge_group.type",
+                  "value": {
+                    "stringValue": "InternalEdgeGroup"
+                  }
+                },
+                {
+                  "key": "edge_group.id",
+                  "value": {
+                    "stringValue": "capture-volatile-4"
+                  }
+                },
+                {
+                  "key": "message.source_id",
+                  "value": {
+                    "stringValue": "internal:upper"
+                  }
+                },
+                {
+                  "key": "message.target_id",
+                  "value": {
+                    "stringValue": "upper"
+                  }
+                },
+                {
+                  "key": "edge_group.delivered",
+                  "value": {
+                    "boolValue": true
+                  }
+                },
+                {
+                  "key": "edge_group.delivery_status",
+                  "value": {
+                    "stringValue": "delivered"
+                  }
+                }
+              ],
+              "droppedAttributesCount": 0,
+              "events": [],
+              "droppedEventsCount": 0,
+              "links": [],
+              "droppedLinksCount": 0,
+              "status": null
+            },
+            {
+              "traceId": "33012b80987e1ce25ce3be8eb9cdc703",
+              "spanId": "0abddcd1541a62fe",
+              "traceState": "",
+              "parentSpanId": "70f1592004799475",
+              "flags": 256,
+              "name": "executor.process upper",
+              "kind": 1,
+              "startTimeUnixNano": "1767225590004000000",
+              "endTimeUnixNano": "1767225590005000000",
+              "attributes": [
+                {
+                  "key": "executor.id",
+                  "value": {
+                    "stringValue": "upper"
+                  }
+                },
+                {
+                  "key": "executor.type",
+                  "value": {
+                    "stringValue": "FunctionExecutor"
+                  }
+                },
+                {
+                  "key": "message.type",
+                  "value": {
+                    "stringValue": "MessageType.STANDARD"
+                  }
+                },
+                {
+                  "key": "message.payload_type",
+                  "value": {
+                    "stringValue": "WorkflowMessage"
+                  }
+                }
+              ],
+              "droppedAttributesCount": 0,
+              "events": [],
+              "droppedEventsCount": 0,
+              "links": [],
+              "droppedLinksCount": 0,
+              "status": null
+            },
+            {
+              "traceId": "33012b80987e1ce25ce3be8eb9cdc703",
+              "spanId": "8e01c154a1c8448a",
+              "traceState": "",
+              "parentSpanId": "0abddcd1541a62fe",
+              "flags": 256,
+              "name": "message.send",
+              "kind": 4,
+              "startTimeUnixNano": "1767225590004000000",
+              "endTimeUnixNano": "1767225590004000000",
+              "attributes": [
+                {
+                  "key": "message.type",
+                  "value": {
+                    "stringValue": "str"
+                  }
+                }
+              ],
+              "droppedAttributesCount": 0,
+              "events": [],
+              "droppedEventsCount": 0,
+              "links": [],
+              "droppedLinksCount": 0,
+              "status": null
+            },
+            {
+              "traceId": "33012b80987e1ce25ce3be8eb9cdc703",
+              "spanId": "340f87e7ac0328eb",
+              "traceState": "",
+              "parentSpanId": "70f1592004799475",
+              "flags": 256,
+              "name": "edge_group.process SingleEdgeGroup",
+              "kind": 1,
+              "startTimeUnixNano": "1767225590006000000",
+              "endTimeUnixNano": "1767225590006000000",
+              "attributes": [
+                {
+                  "key": "edge_group.type",
+                  "value": {
+                    "stringValue": "SingleEdgeGroup"
+                  }
+                },
+                {
+                  "key": "edge_group.id",
+                  "value": {
+                    "stringValue": "capture-volatile-5"
+                  }
+                },
+                {
+                  "key": "message.source_id",
+                  "value": {
+                    "stringValue": "upper"
+                  }
+                },
+                {
+                  "key": "edge_group.delivered",
+                  "value": {
+                    "boolValue": true
+                  }
+                },
+                {
+                  "key": "edge_group.delivery_status",
+                  "value": {
+                    "stringValue": "delivered"
+                  }
+                }
+              ],
+              "droppedAttributesCount": 0,
+              "events": [],
+              "droppedEventsCount": 0,
+              "links": [
+                {
+                  "traceId": "33012b80987e1ce25ce3be8eb9cdc703",
+                  "spanId": "8e01c154a1c8448a",
+                  "traceState": "",
+                  "attributes": [],
+                  "droppedAttributesCount": 0,
+                  "flags": 768
+                }
+              ],
+              "droppedLinksCount": 0,
+              "status": null
+            },
+            {
+              "traceId": "33012b80987e1ce25ce3be8eb9cdc703",
+              "spanId": "6f3dfd45229dcc60",
+              "traceState": "",
+              "parentSpanId": "70f1592004799475",
+              "flags": 256,
+              "name": "executor.process sink",
+              "kind": 1,
+              "startTimeUnixNano": "1767225590006000000",
+              "endTimeUnixNano": "1767225590006000000",
+              "attributes": [
+                {
+                  "key": "executor.id",
+                  "value": {
+                    "stringValue": "sink"
+                  }
+                },
+                {
+                  "key": "executor.type",
+                  "value": {
+                    "stringValue": "FunctionExecutor"
+                  }
+                },
+                {
+                  "key": "message.type",
+                  "value": {
+                    "stringValue": "MessageType.STANDARD"
+                  }
+                },
+                {
+                  "key": "message.payload_type",
+                  "value": {
+                    "stringValue": "WorkflowMessage"
+                  }
+                }
+              ],
+              "droppedAttributesCount": 0,
+              "events": [],
+              "droppedEventsCount": 0,
+              "links": [
+                {
+                  "traceId": "33012b80987e1ce25ce3be8eb9cdc703",
+                  "spanId": "8e01c154a1c8448a",
+                  "traceState": "",
+                  "attributes": [],
+                  "droppedAttributesCount": 0,
+                  "flags": 768
+                }
+              ],
+              "droppedLinksCount": 0,
+              "status": null
+            }
+          ],
+          "schemaUrl": ""
+        }
+      ],
+      "schemaUrl": ""
+    }
+  ]
+}

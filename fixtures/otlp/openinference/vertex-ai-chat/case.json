@@ -1,0 +1,21 @@
+{
+  "description": "Vertex AI generateContent through the google-genai SDK, one turn, traced by OpenInference through cetra's SDK.",
+  "origin": "captured",
+  "source": {
+    "instrumentation": "openinference-instrumentation-google-genai",
+    "instrumentation_version": "1.5.0",
+    "language": "python",
+    "libraries": {
+      "google-genai": "2.34.0",
+      "openinference-instrumentation-google-genai": "1.5.0",
+      "opentelemetry-sdk": "1.45.2"
+    },
+    "captured_at": "2026-11-23T15:01:30Z"
+  },
+  "spec_refs": [
+    "02 § Convention detection",
+    "02 § Model, provider, usage",
+    "02 § Cost computation"
+  ],
+  "notes": "The Vertex client targets https://us-central1-aiplatform.googleapis.com, and the harness routes the request to the capture mock under that host (D-IN-3). The instrumentor writes llm.provider google, the value it also writes for the Gemini Developer API, so cetra resolves the span to gcp.gen_ai and does not tell it from the Gemini API (D-IN-2, spec 02 § Provider from the endpoint). The model gemini-2.5-flash is priced by the existing gemini row through the gcp.gen_ai rule. Cost is computed, not reported. Token counts are input 14 and output 8."
+}

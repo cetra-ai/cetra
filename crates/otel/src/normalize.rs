@@ -214,7 +214,20 @@ fn accept_span(
         &span.attributes,
     );
     // Before the validity checks, so an internal span is never counted as rejected.
-    if agents::discarded(agent, &span.name, &span.attributes) {
+    if agents::discarded(
+        agent,
+        scope_name.as_deref().unwrap_or(""),
+        &span.name,
+        &span.attributes,
+    ) {
+        tally.discarded += 1;
+        return None;
+    }
+    if agents::scoped_discard(
+        scope_name.as_deref().unwrap_or(""),
+        &span.name,
+        &span.attributes,
+    ) {
         tally.discarded += 1;
         return None;
     }
@@ -252,35 +265,53 @@ fn accept_span(
     let mut truncated = resource.truncated.clone();
     let mut bag = AttrBag::new(&span.attributes, &mut warnings);
     crate::conventions::apply_status(&mut bag, &mut status, &mut status_message);
-    let conventions = detect(&bag, &span.events);
+    let scope = scope_name.as_deref().unwrap_or("");
+    let conventions = detect(&bag, &span.events, scope);
     let span_kind = match agents::kind(agent, &span.name) {
         Some(kind) => kind,
-        None => span_kind(&mut bag),
+        None => span_kind(&mut bag, &span.name, scope, &conventions),
     };
-    let mut fields = fill(&mut bag, &resource.view, &mut warnings);
+    let mut fields = fill(&mut bag, &resource.view, scope, &conventions, &mut warnings);
     agents::context(agent, &span.attributes, &mut bag, &mut fields, batch.agents);
+    fields.provider = crate::context::endpoint_provider(&bag, span_kind, fields.provider.take());
     let counted = match agents::usage(agent, &span.name, span_kind, &mut bag, &mut warnings) {
         Some(counted) => counted,
         None => usage(
             &mut bag,
             span_kind,
+            &span.name,
             fields.provider.as_deref(),
+            scope,
+            &conventions,
             &mut warnings,
         ),
     };
-    let ttft_ns = match ttft(&mut bag, &span.events, start_time, &mut warnings) {
+    let ttft_ns = match ttft(
+        &mut bag,
+        &span.events,
+        start_time,
+        scope,
+        &conventions,
+        &mut warnings,
+    ) {
         Some(nanos) => Some(nanos),
         None => agents::ttft(agent, &mut bag, &mut warnings),
     };
+    let model = fields
+        .response_model
+        .as_deref()
+        .or(fields.request_model.as_deref());
+    let request_model = retry_model(
+        fields.response_model.as_deref(),
+        fields.request_model.as_deref(),
+    );
     let priced = crate::cost::apply(
         &mut bag,
         &crate::cost::Charge {
             kind: span_kind,
             provider: fields.provider.as_deref(),
-            model: fields
-                .response_model
-                .as_deref()
-                .or(fields.request_model.as_deref()),
+            model,
+            request_model,
             start_time,
             usage: &counted,
         },
@@ -294,6 +325,8 @@ fn accept_span(
         &mut bag,
         &span.events,
         span_kind,
+        scope,
+        &conventions,
         &mut warnings,
         crate::conventions::READERS,
         crate::conventions::REGISTRIES,
@@ -514,6 +547,17 @@ fn encode_attribute_object(
     }
     // The object is finite JSON: non-finite doubles are already null.
     Some(serde_json::to_string(&Json::Object(object)).unwrap_or_else(|_| "{}".to_owned()))
+}
+
+/// The request model to retry pricing with (D-IN-20). It is returned only when
+/// the response model is the request model with its `vendor/` prefix stripped,
+/// as resellers such as Novita report it. Without a response model the request
+/// model is already the price model, so there is nothing to retry.
+fn retry_model<'a>(response: Option<&'a str>, request: Option<&'a str>) -> Option<&'a str> {
+    let response = response?;
+    let request = request?;
+    let (_, bare) = request.rsplit_once('/')?;
+    (bare == response).then_some(request)
 }
 
 #[cfg(test)]
@@ -837,5 +881,20 @@ mod tests {
             }),
             ..KeyValue::default()
         }
+    }
+
+    #[test]
+    fn the_request_model_is_retried_only_when_the_response_drops_its_vendor_prefix() {
+        assert_eq!(
+            retry_model(Some("deepseek-v3.2"), Some("deepseek/deepseek-v3.2")),
+            Some("deepseek/deepseek-v3.2")
+        );
+        assert_eq!(retry_model(Some("local-llama"), Some("gpt-4")), None);
+        assert_eq!(
+            retry_model(Some("gpt-4o"), Some("openai/gpt-4o-mini")),
+            None
+        );
+        assert_eq!(retry_model(None, Some("openai/x")), None);
+        assert_eq!(retry_model(Some("x"), Some("x")), None);
     }
 }

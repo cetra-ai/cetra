@@ -49,7 +49,7 @@
               "name": "invoke_agent LangGraph",
               "kind": 1,
               "startTimeUnixNano": "1767225590000000000",
-              "endTimeUnixNano": "1767225590091000000",
+              "endTimeUnixNano": "1767225590088000000",
               "attributes": [
                 {
                   "key": "gen_ai.provider.name",
@@ -116,7 +116,7 @@
               "name": "LangGraph.workflow",
               "kind": 1,
               "startTimeUnixNano": "1767225590002000000",
-              "endTimeUnixNano": "1767225590090000000",
+              "endTimeUnixNano": "1767225590088000000",
               "attributes": [
                 {
                   "key": "traceloop.workflow.name",
@@ -218,8 +218,8 @@
               "flags": 256,
               "name": "execute_task model",
               "kind": 1,
-              "startTimeUnixNano": "1767225590003000000",
-              "endTimeUnixNano": "1767225590047000000",
+              "startTimeUnixNano": "1767225590002000000",
+              "endTimeUnixNano": "1767225590046000000",
               "attributes": [
                 {
                   "key": "traceloop.workflow.name",
@@ -465,7 +465,7 @@
                 {
                   "key": "traceloop.association.properties.lc_versions",
                   "value": {
-                    "stringValue": "{\"langchain-core\": \"1.7.4\", \"langchain\": \"1.4.8\", \"langchain-openai\": \"1.7.3\"}"
+                    "stringValue": "{\"langchain-core\": \"1.8.1\", \"langchain\": \"1.4.8\", \"langchain-openai\": \"1.7.3\"}"
                   }
                 },
                 {
@@ -574,8 +574,8 @@
               "flags": 256,
               "name": "execute_task tools",
               "kind": 1,
-              "startTimeUnixNano": "1767225590049000000",
-              "endTimeUnixNano": "1767225590052000000",
+              "startTimeUnixNano": "1767225590047000000",
+              "endTimeUnixNano": "1767225590050000000",
               "attributes": [
                 {
                   "key": "traceloop.workflow.name",
@@ -731,8 +731,8 @@
               "flags": 256,
               "name": "execute_tool get_weather",
               "kind": 1,
-              "startTimeUnixNano": "1767225590049000000",
-              "endTimeUnixNano": "1767225590050000000",
+              "startTimeUnixNano": "1767225590048000000",
+              "endTimeUnixNano": "1767225590049000000",
               "attributes": [
                 {
                   "key": "traceloop.workflow.name",
@@ -894,8 +894,8 @@
               "flags": 256,
               "name": "execute_task model",
               "kind": 1,
-              "startTimeUnixNano": "1767225590053000000",
-              "endTimeUnixNano": "1767225590089000000",
+              "startTimeUnixNano": "1767225590051000000",
+              "endTimeUnixNano": "1767225590087000000",
               "attributes": [
                 {
                   "key": "traceloop.workflow.name",
@@ -1048,8 +1048,8 @@
               "flags": 256,
               "name": "ChatOpenAI.chat",
               "kind": 3,
-              "startTimeUnixNano": "1767225590054000000",
-              "endTimeUnixNano": "1767225590088000000",
+              "startTimeUnixNano": "1767225590052000000",
+              "endTimeUnixNano": "1767225590086000000",
               "attributes": [
                 {
                   "key": "traceloop.workflow.name",
@@ -1141,7 +1141,7 @@
                 {
                   "key": "traceloop.association.properties.lc_versions",
                   "value": {
-                    "stringValue": "{\"langchain-core\": \"1.7.4\", \"langchain\": \"1.4.8\", \"langchain-openai\": \"1.7.3\"}"
+                    "stringValue": "{\"langchain-core\": \"1.8.1\", \"langchain\": \"1.4.8\", \"langchain-openai\": \"1.7.3\"}"
                   }
                 },
                 {

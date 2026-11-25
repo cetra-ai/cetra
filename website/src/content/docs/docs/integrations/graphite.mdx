@@ -1,0 +1,44 @@
+---
+title: Graphite
+description: "Send Graphite (grafi) spans to cetra over OTLP/gRPC: OTEL_COLLECTOR_ENDPOINT and port 4317, with the key in OTEL_EXPORTER_OTLP_HEADERS. Setup only: not run."
+---
+
+Graphite is an event-driven agent framework, published as the `grafi` package on PyPI. Its tracing exports OpenTelemetry over OTLP/gRPC only; this page points that export at cetra. It is setup only: no grafi program was run against cetra for this page.
+
+## Install
+
+```bash
+pip install grafi
+```
+
+## Set up
+
+grafi's tracing setup (`setup_tracing`, in its OpenTelemetry guide) builds an OTLP/gRPC exporter from two variables:
+
+```bash
+export OTEL_COLLECTOR_ENDPOINT=<HOST>
+export OTEL_COLLECTOR_PORT=4317
+export OTEL_EXPORTER_OTLP_HEADERS="Authorization=Bearer sk-cetra-…"
+```
+
+`OTEL_COLLECTOR_ENDPOINT` is the host only, with no scheme; it defaults to `localhost`. `OTEL_COLLECTOR_PORT` defaults to `4317`, the port cetra accepts OTLP/gRPC on. Pass your cetra API key in `OTEL_EXPORTER_OTLP_HEADERS`.
+
+Model calls through the OpenAI client are instrumented by `openinference-instrumentation-openai`, a core dependency of grafi, so they come out as OpenInference spans.
+
+## What you get
+
+- OpenInference spans for OpenAI model calls, which cetra reads as `llm` spans; see [OpenInference](/docs/integrations/openinference/).
+- grafi's own spans for its agents and workflows are exported too; their shapes were not observed for this page.
+
+## Limits
+
+- Not run: grafi's export is OTLP/gRPC only, and no grafi program sent spans to cetra for this page.
+- grafi builds its exporter with `insecure=True`: the gRPC connection is plaintext, with no TLS.
+- Not checked: whether the exporter reads the header value above as written. Check the first trace in cetra's UI.
+- This page was written against grafi 0.0.36.
+
+## Next
+
+- [Send OpenTelemetry](/docs/get-started/opentelemetry/): the endpoint and the headers cetra expects.
+- [OpenInference](/docs/integrations/openinference/): the spans of the OpenAI instrumentation grafi uses, captured.
+- [Traces](/docs/tracing/traces/): read the trace as a tree and a timeline.

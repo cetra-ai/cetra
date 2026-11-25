@@ -1,0 +1,111 @@
+---
+title: Vercel AI Gateway
+description: "Trace Vercel AI Gateway calls with cetra through the OpenAI client or the AI SDK, with the model publisher's price."
+---
+
+import { Tabs, TabItem } from "@astrojs/starlight/components";
+
+Trace Vercel AI Gateway calls with cetra through the OpenAI client.
+
+## Install
+
+<Tabs syncKey="lang">
+  <TabItem label="Python">
+
+```bash
+pip install "cetra-sdk[openai]" openai
+```
+
+  </TabItem>
+  <TabItem label="TypeScript">
+
+```bash
+npm install @cetra-ai/sdk @arizeai/openinference-instrumentation-openai openai
+```
+
+  </TabItem>
+</Tabs>
+
+## Set up
+
+<Tabs syncKey="lang">
+  <TabItem label="Python">
+
+{/* untested: calls the Vercel AI Gateway and needs AI_GATEWAY_API_KEY */}
+```python
+import os
+
+import cetra
+from openai import OpenAI
+
+cetra.init(instrument=["openai"])
+
+client = OpenAI(base_url="https://ai-gateway.vercel.sh/v1", api_key=os.environ["AI_GATEWAY_API_KEY"])
+response = client.chat.completions.create(
+    model="openai/gpt-4o-mini",
+    messages=[{"role": "user", "content": "What is the capital of France?"}],
+)
+print(response.choices[0].message.content)
+
+cetra.flush()
+```
+
+  </TabItem>
+  <TabItem label="TypeScript">
+
+{/* untested: the imports of the example below */}
+```ts
+import { init } from "@cetra-ai/sdk";
+import { openai } from "@cetra-ai/sdk/openai";
+import OpenAI from "openai";
+```
+
+{/* example:integration-openai */}
+```ts
+init({ apiKey: process.env.CETRA_API_KEY, instrument: [openai(OpenAI)] });
+```
+
+{/* untested: calls the Vercel AI Gateway and needs AI_GATEWAY_API_KEY */}
+```ts
+const client = new OpenAI({
+  baseURL: "https://ai-gateway.vercel.sh/v1",
+  apiKey: process.env.AI_GATEWAY_API_KEY,
+});
+await client.chat.completions.create({
+  model: "openai/gpt-4o-mini",
+  messages: [{ role: "user", content: "What is the capital of France?" }],
+});
+```
+
+  </TabItem>
+</Tabs>
+
+The [Vercel AI SDK](/docs/integrations/vercel-ai-sdk/) reaches the same gateway with its own provider setup.
+
+## What you get
+
+- Each chat completion is an `llm` span with the provider `vercel_ai_gateway`.
+- Input and output token counts come from the response.
+- Cost is the model publisher's price, as described under Limits.
+- With `cetra.init(instrument=["openai"])`, the endpoint host is in `server.address`, and cetra names the provider from it.
+
+## Its own trace drain
+
+The gateway can drain its traces to an OTLP endpoint: in Vercel, **Team Settings**, **Drains**, add a drain with your OTLP URL and headers. Drains are a paid feature (Pro and Enterprise plans, billed per trace), send OTLP over HTTP only, and can be sampled by rule. The drain's root span carries the operation, the model, the provider, the token counts and the cost under `vercel.ai_gateway.cost.total`, and each provider attempt adds its own span. No prompt or completion content is sent.
+
+Setup only: cetra has not verified the drain, and no recorded one exists. The cost is a decimal string under a key cetra does not read, and the per-attempt spans carry no tokens, so each one shows as a duplicate-looking row.
+
+## Limits
+
+- Setup only: no spans of the Vercel AI Gateway are captured in the repository. The drain needs a paid Vercel plan.
+- The drain carries no content and its cost key is not read; the OpenAI-client route above shows the messages and computes the publisher's price.
+- Cost is the model publisher's price when the model names its publisher (`vendor/model`, or a bare name a publisher has a row for); Vercel's fees are not included. Models no publisher row matches have no built-in price.
+- Do not instrument both sides: an app with its own OpenTelemetry instrumentation behind a traced gateway counts each call twice, because the gateway joins the app's trace through `traceparent` and its span carries the same tokens and cost. Trace the gateway (it covers several apps and languages) or the app, not both. This is not verified for the Vercel AI Gateway.
+- With plain OpenInference or the official OpenAI instrumentation in Python, the provider shows as `openai`: they do not record the endpoint. Use `cetra.init(instrument=["openai"])` or OpenLLMetry.
+- If a field is missing, look at the span's **Attributes** tab and compare it with [Span attributes](/docs/reference/attributes/).
+
+## Next
+
+- [Traces](/docs/tracing/traces/): read the trace as a tree and a timeline.
+- [Cost and tokens](/docs/tracing/cost-and-tokens/): how cost is computed from the token counts.
+- [Custom model prices](/docs/tracing/cost-and-tokens/#custom-model-prices): price a model the built-in prices do not cover.

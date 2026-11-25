@@ -1,0 +1,30 @@
+{
+  "description": "OpenAI client call through Novita, one chat turn, traced by OpenLLMetry.",
+  "spec_refs": [
+    "02 § Model, provider, usage",
+    "02 § Provider from the endpoint",
+    "02 § Cost computation"
+  ],
+  "notes": "TRACELOOP_TRACE_CONTENT is true, which is also the default, so message content is recorded on the span. TRACELOOP_METRICS_ENABLED is false. The client keeps the real base URL https://api.novita.ai/openai, and the harness routes the request to the capture mock under that host (D-IN-3). OpenLLMetry writes gen_ai.openai.api_base with api.novita.ai's URL, so the provider is novita from the endpoint rule (D-IN-2). OpenLLMetry strips deepseek/ from the response model, and the price comes from the request model deepseek/deepseek-v3.2 (D-IN-20). Cost is computed, not reported. Token counts are input 14 and output 8.",
+  "instrumentation": "opentelemetry-instrumentation-openai",
+  "libraries": [
+    "openai",
+    "opentelemetry-instrumentation-openai",
+    "opentelemetry-sdk",
+    "opentelemetry-semantic-conventions-ai"
+  ],
+  "env": {
+    "TRACELOOP_TRACE_CONTENT": "true",
+    "TRACELOOP_METRICS_ENABLED": "false"
+  },
+  "turns": [
+    {
+      "api": "openai.chat",
+      "model": "deepseek/deepseek-v3.2",
+      "host": "api.novita.ai",
+      "message": { "text": "The capital of France is Paris." },
+      "finish": "stop",
+      "usage": { "input": 14, "output": 8 }
+    }
+  ]
+}

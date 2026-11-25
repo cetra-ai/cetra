@@ -1,0 +1,21 @@
+{
+  "description": "Together SDK chat completion, one turn, traced by OpenInference through cetra's SDK.",
+  "origin": "captured",
+  "source": {
+    "instrumentation": "openinference-instrumentation-together",
+    "instrumentation_version": "0.1.20",
+    "language": "python",
+    "libraries": {
+      "openinference-instrumentation-together": "0.1.20",
+      "opentelemetry-sdk": "1.45.2",
+      "together": "3.1.1"
+    },
+    "captured_at": "2026-11-23T15:01:26Z"
+  },
+  "spec_refs": [
+    "02 § Convention detection",
+    "02 § Model, provider, usage",
+    "02 § Cost computation"
+  ],
+  "notes": "The Together client sends chat to https://api-inference.together.ai (its default chat host), and the harness routes the request to the capture mock under that host (D-IN-3). The instrumentor writes llm.provider together, which resolves to together_ai through the alias list (D-IN-2). Cost is computed, not reported. Token counts are input 14 and output 8."
+}

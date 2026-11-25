@@ -1,0 +1,10 @@
+{
+  "private": true,
+  "packageManager": "pnpm@11.28.10",
+  "dependencies": {
+    "eve": "1.0.1",
+    "@ai-sdk/openai-compatible": "3.0.92",
+    "@vercel/otel": "2.3.0",
+    "zod": "4.6.7"
+  }
+}

@@ -1,0 +1,123 @@
+---
+title: MCP
+description: "Trace MCP tool calls and their server spans with the native OpenTelemetry tracing of the MCP Python SDK 2.x. The SDK records no arguments or results."
+---
+
+import Backing from "../../../../components/Backing.astro";
+
+cetra reads the spans that the MCP Python SDK writes for each request, with a server's tool call as a `tool` span that joins the client's trace.
+
+<Backing fixtures={["genai/mcp-tool"]} tests={["sdks/python/tests/test_instrument.py::test_other_registry_entries_import[mcp]"]} />
+
+## Install
+
+Install MCP 2.x, the OpenTelemetry SDK and its OTLP exporter. The fixture was captured with MCP 2.3.0.
+
+```bash
+pip install "mcp>=2" opentelemetry-sdk opentelemetry-exporter-otlp-proto-http
+```
+
+## Set up
+
+The MCP SDK creates spans through the global tracer provider. Each process that runs a client or a server sets its own provider, so each one exports its own spans. The client and the server in the fixture ran in separate processes.
+
+Set the exporter variables for each process:
+
+```bash
+export OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:8080
+export OTEL_EXPORTER_OTLP_HEADERS="Authorization=Bearer <SK_CETRA_KEY>"
+```
+
+Replace `<SK_CETRA_KEY>` with your `sk-cetra-…` API key. See [Send OpenTelemetry](/docs/get-started/opentelemetry/).
+
+{/* untested: the fixture's server and client are the same shape, with a fake weather tool; this sample needs mcp 2.x and a running cetra */}
+```python
+from mcp.server.mcpserver import MCPServer
+from opentelemetry import trace
+from opentelemetry.exporter.otlp.proto.http.trace_exporter import OTLPSpanExporter
+from opentelemetry.sdk.trace import TracerProvider
+from opentelemetry.sdk.trace.export import SimpleSpanProcessor
+
+provider = TracerProvider()
+provider.add_span_processor(SimpleSpanProcessor(OTLPSpanExporter()))
+trace.set_tracer_provider(provider)
+
+server = MCPServer("weather")
+
+
+@server.tool()
+def get_weather(city: str) -> str:
+    """Look up the weather for a city."""
+    return f'{{"temperature_c": 18, "conditions": "sunny", "city": "{city}"}}'
+
+
+if __name__ == "__main__":
+    server.run("stdio")
+```
+
+{/* untested: the client half of the fixture, started over stdio; this sample needs mcp 2.x, the server above and a running cetra */}
+```python
+import asyncio
+import os
+import sys
+
+from mcp import Client
+from mcp.client.stdio import StdioServerParameters
+from opentelemetry import trace
+from opentelemetry.exporter.otlp.proto.http.trace_exporter import OTLPSpanExporter
+from opentelemetry.sdk.trace import TracerProvider
+from opentelemetry.sdk.trace.export import SimpleSpanProcessor
+
+provider = TracerProvider()
+provider.add_span_processor(SimpleSpanProcessor(OTLPSpanExporter()))
+trace.set_tracer_provider(provider)
+
+params = StdioServerParameters(
+    command=sys.executable,
+    args=["server.py"],
+    # The stdio transport starts the server with only the environment given here.
+    env={k: v for k, v in os.environ.items() if k in ("PATH", "HOME") or k.startswith("OTEL_")},
+)
+
+
+async def main() -> None:
+    async with Client(params) as client:
+        await client.call_tool("get_weather", {"city": "Paris"})
+    provider.force_flush()
+
+
+asyncio.run(main())
+```
+
+The server exports each span as it ends, so its spans arrive even when the client closes it first. Use a span processor that exports at once, as the samples do.
+
+{/* untested: shows the registry row only; the fixture does not use it */}
+```python
+import cetra
+
+cetra.init(instrument=["mcp"])
+```
+
+The `mcp` instrument in `cetra-sdk` installs with `pip install "cetra-sdk[mcp]"`. It uses OpenInference's MCP instrumentation, `openinference-instrumentation-mcp` 2.1.5. It creates no spans. It carries the trace context to the server, so spans that the server process makes, with its own instrumentation or with spans you write, join the client's trace. On `mcp<2` the MCP SDK makes no spans itself. On `mcp>=2` the SDK passes the context itself, and the instrument is not needed. In a spike with `mcp>=2` the instrument logged a harmless `ValueError` and had no effect. No fixture backs the instrument: the fixture above was captured without it.
+
+## What you get
+
+One `call_tool` makes a trace with two spans that share it:
+
+- a `span` for the client's send, `MCP send tools/call get_weather`;
+- a `tool` span for the server's `tools/call get_weather`, a child of the client's span, with the tool's name and the operation `execute_tool`.
+
+The scenario also lists the tools, so the fixture has more spans. Each request is a trace of its own. The SDK sends more requests than the scenario makes: `server/discover` and a second `tools/list`. Each of them is a `span` on both sides.
+
+## Limits
+
+- The SDK records no arguments and no results. The spans have no input and no output, so the tool's content is not in cetra.
+- The `mcp` instrument creates no spans, and it is not needed on MCP 2.x. On MCP 1.x there are no MCP spans at all.
+- Each process exports its own spans, so a server process needs its own provider.
+- The fixture was captured with MCP 2.3.0 over stdio. Streamable HTTP and the other transports were not captured.
+- If a field is missing, look at the span's **Attributes** tab and compare it with [Span attributes](/docs/reference/attributes/).
+
+## Next
+
+- [Traces](/docs/tracing/traces/): read the trace as a tree and a timeline.
+- [Send OpenTelemetry](/docs/get-started/opentelemetry/): the endpoint and the headers cetra expects.

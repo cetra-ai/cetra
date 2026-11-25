@@ -79,7 +79,7 @@ API-equivalent cost is what the same tokens would cost at API prices. If you use
 
 ## Claude Agent SDK
 
-The Claude Agent SDK runs Claude Code with the same settings. When your application starts a turn inside its own OpenTelemetry span, the SDK passes that span's context to Claude Code. The Claude Code turn then nests under your application's span, in one trace.
+The Claude Agent SDK runs Claude Code with the same settings. When your application starts a turn inside its own OpenTelemetry span, the SDK passes that span's context to Claude Code. The Claude Code turn then nests under your application's span, in one trace. See also [Claude Agent SDK](/docs/integrations/claude-agent-sdk/).
 
 Set the same variables in the SDK's `env` option:
 

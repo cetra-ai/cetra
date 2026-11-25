@@ -4,7 +4,7 @@
 //! `traceloop.entity.input` and `traceloop.entity.output`. Those fallbacks are
 //! stored as JSON without unwrapping `args`, `kwargs`, or `output`.
 
-use cetra_core::message::Message;
+use cetra_core::message::{Message, Part};
 use serde_json::{Map, Value as Json};
 
 use super::present_json;
@@ -53,15 +53,67 @@ pub(crate) fn read(ctx: &mut ReadContext<'_, '_>) -> Io {
 }
 
 fn messages(ctx: &mut ReadContext<'_, '_>, prefix: &str) -> Option<(Payload, bool)> {
-    let raw = openllmetry_messages(ctx.bag, prefix)?;
+    let completion = prefix == COMPLETION;
+    let mut raw = openllmetry_messages(ctx.bag, prefix)?;
     consume_prefix(ctx, prefix);
+    // The value stored on a conversion failure is the client's, so the role
+    // default goes on the copy that is converted.
+    let client_value = if completion {
+        let client_value = Json::Array(raw.clone());
+        default_assistant_roles(&mut raw);
+        Some(client_value)
+    } else {
+        None
+    };
     let value = Json::Array(raw);
     match openai_messages(&value) {
         Ok(mut converted) => {
             lift_finish_reasons(&mut converted, &value);
+            if completion {
+                lift_function_calls(&mut converted);
+            }
             Some((Payload::Messages(converted), false))
         }
-        Err(_) => Some((Payload::Json(value), true)),
+        Err(_) => Some((Payload::Json(client_value.unwrap_or(value)), true)),
+    }
+}
+
+/// A completion message without a `role` is the model's: LiteLLM's tool turn
+/// writes `gen_ai.completion.0.function_call.*` and no role (D-IN-25). A
+/// prompt without a role still does not convert.
+fn default_assistant_roles(raw: &mut [Json]) {
+    for message in raw {
+        if let Json::Object(object) = message {
+            object
+                .entry("role")
+                .or_insert_with(|| Json::String("assistant".to_owned()));
+        }
+    }
+}
+
+/// A completion message's `function_call` object becomes one tool-call part,
+/// after any text part (LiteLLM, D-IN-25). The value is read before it is
+/// removed: a value that is not an object, and an object whose `name` is
+/// missing or not a string, stay in the message's `extra`. Nothing fails.
+fn lift_function_calls(messages: &mut [Message]) {
+    for message in messages {
+        let Some(Json::Object(call)) = message.extra.get("function_call") else {
+            continue;
+        };
+        let lifted = call
+            .get("name")
+            .and_then(Json::as_str)
+            .map(|name| (name.to_owned(), call.get("arguments").cloned()));
+        let Some((name, arguments)) = lifted else {
+            continue;
+        };
+        message.extra.shift_remove("function_call");
+        message.parts.push(Part::ToolCall {
+            id: None,
+            name,
+            arguments: arguments.map(parse_tool_arguments),
+            extra: Map::new(),
+        });
     }
 }
 
@@ -160,15 +212,16 @@ fn consume_prefix(ctx: &mut ReadContext<'_, '_>, prefix: &str) {
 
 #[cfg(test)]
 mod tests {
-    use super::read;
+    use super::{lift_function_calls, read};
     use crate::bag::{AttrBag, Use};
-    use crate::payload::{Payload, ReadContext};
+    use crate::conventions::{READERS, REGISTRIES};
+    use crate::payload::{Payload, ReadContext, assemble};
     use crate::warn::Warnings;
     use cetra_core::enums::SpanKind;
-    use cetra_core::message::messages_to_json;
+    use cetra_core::message::{Message, Role, messages_to_json};
     use opentelemetry_proto::tonic::common::v1::any_value::Value;
     use opentelemetry_proto::tonic::common::v1::{AnyValue, KeyValue};
-    use serde_json::json;
+    use serde_json::{Map, json};
 
     fn string_attr(key: &str, text: &str) -> KeyValue {
         KeyValue {
@@ -187,6 +240,8 @@ mod tests {
             bag: &mut bag,
             events: &[],
             kind: SpanKind::Llm,
+            scope: "",
+            conventions: &[],
             warnings: &mut warnings,
         });
         (io, bag)
@@ -266,5 +321,132 @@ mod tests {
         let (io, _) = read_span(&[string_attr("gen_ai.prompt.0.content", "hello")]);
         assert_eq!(io.input, Some(Payload::Json(json!([{"content": "hello"}]))));
         assert_eq!(io.errors, ["messages:openllmetry:input"]);
+    }
+
+    #[test]
+    fn a_completion_without_a_role_is_an_assistant_message() {
+        let (io, _) = read_span(&[string_attr("gen_ai.completion.0.content", "Paris.")]);
+        let Payload::Messages(messages) = io.output.expect("messages") else {
+            panic!("output is messages");
+        };
+        assert_eq!(
+            messages_to_json(&messages),
+            r#"[{"role":"assistant","parts":[{"type":"text","content":"Paris."}]}]"#
+        );
+        assert!(io.errors.is_empty());
+    }
+
+    #[test]
+    fn a_completion_function_call_is_a_tool_call_after_any_text_part() {
+        // LiteLLM's tool turn: the call is only in the flattened keys, with no
+        // role (D-IN-25).
+        let attrs = [
+            string_attr("gen_ai.completion.0.content", "Let me check."),
+            string_attr("gen_ai.completion.0.function_call.name", "get_weather"),
+            string_attr(
+                "gen_ai.completion.0.function_call.arguments",
+                r#"{"city":"Paris"}"#,
+            ),
+        ];
+        let (io, _) = read_span(&attrs);
+        let Payload::Messages(messages) = io.output.expect("messages") else {
+            panic!("output is messages");
+        };
+        assert_eq!(
+            messages_to_json(&messages),
+            r#"[{"role":"assistant","parts":[{"type":"text","content":"Let me check."},{"type":"tool_call","name":"get_weather","arguments":{"city":"Paris"}}]}]"#
+        );
+        assert!(io.errors.is_empty());
+
+        // Without the arguments key the call has none.
+        let (io, _) = read_span(&[string_attr(
+            "gen_ai.completion.0.function_call.name",
+            "get_weather",
+        )]);
+        let Payload::Messages(messages) = io.output.expect("messages") else {
+            panic!("output is messages");
+        };
+        assert_eq!(
+            messages_to_json(&messages),
+            r#"[{"role":"assistant","parts":[{"type":"tool_call","name":"get_weather"}]}]"#
+        );
+
+        // A call without a name is not lifted and stays in `extra`: the
+        // message converts and nothing fails.
+        let (io, _) = read_span(&[string_attr(
+            "gen_ai.completion.0.function_call.arguments",
+            r#"{"city":"Paris"}"#,
+        )]);
+        let Payload::Messages(messages) = io.output.expect("messages") else {
+            panic!("output is messages");
+        };
+        assert_eq!(
+            messages_to_json(&messages),
+            r#"[{"role":"assistant","parts":[],"function_call":{"arguments":"{\"city\":\"Paris\"}"}}]"#
+        );
+        assert!(io.errors.is_empty());
+    }
+
+    #[test]
+    fn a_function_call_value_that_is_not_an_object_stays_in_extra() {
+        let mut message = Message {
+            role: Role::Assistant,
+            name: None,
+            parts: Vec::new(),
+            finish_reason: None,
+            extra: Map::new(),
+        };
+        message
+            .extra
+            .insert("function_call".to_owned(), json!("not an object"));
+        let mut messages = vec![message.clone()];
+        lift_function_calls(&mut messages);
+        assert_eq!(messages, vec![message]);
+    }
+
+    #[test]
+    fn the_litellm_tool_turn_records_no_normalize_error() {
+        // Both conventions on one span (D-IN-25): GenAI's empty assistant
+        // output wins, and the OpenLLMetry reader converts the flattened
+        // completion keys too, so no error code reaches `cetra.normalize_error`.
+        let attrs = [
+            string_attr(
+                "gen_ai.output.messages",
+                r#"[{"role":"assistant","parts":[],"finish_reason":"tool_calls"}]"#,
+            ),
+            string_attr("gen_ai.completion.0.function_call.name", "get_weather"),
+            string_attr(
+                "gen_ai.completion.0.function_call.arguments",
+                r#"{"city":"Paris"}"#,
+            ),
+        ];
+        let mut warnings = Warnings::default();
+        let mut bag = AttrBag::new(&attrs, &mut warnings);
+        let assembled = assemble(
+            &mut bag,
+            &[],
+            SpanKind::Llm,
+            "",
+            &[],
+            &mut warnings,
+            READERS,
+            REGISTRIES,
+        );
+        let Payload::Messages(messages) = assembled.io.output.expect("output") else {
+            panic!("output is messages");
+        };
+        assert_eq!(
+            messages_to_json(&messages),
+            r#"[{"role":"assistant","parts":[{"type":"tool_call","name":"get_weather","arguments":{"city":"Paris"}}],"finish_reason":"tool_calls"}]"#
+        );
+        assert!(assembled.io.errors.is_empty());
+        assert_eq!(
+            bag.state("gen_ai.completion.0.function_call.name"),
+            Some(Use::Payload)
+        );
+        assert_eq!(
+            bag.state("gen_ai.completion.0.function_call.arguments"),
+            Some(Use::Payload)
+        );
     }
 }

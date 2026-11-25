@@ -1,0 +1,185 @@
+{
+  "spans": [
+    {
+      "project_id": "01900000-0000-7000-8000-000000000001",
+      "trace_id": "a6af7f727ca28ef46f36609d27969222",
+      "span_id": "dbe9fcd55b6c2bbb",
+      "name": "weather_agent.run",
+      "span_kind": "agent",
+      "start_time": "2025-12-31T23:59:50.000000000Z",
+      "end_time": "2025-12-31T23:59:50.108000000Z",
+      "status": "ok",
+      "service_name": "capture-app",
+      "session_id": "capture-volatile-3",
+      "input": "What is the weather in Paris?",
+      "input_format": "text",
+      "output": "It is sunny in Paris.",
+      "output_format": "text",
+      "input_preview": "What is the weather in Paris?",
+      "output_preview": "It is sunny in Paris.",
+      "attributes": {
+        "agent.name": "capture-volatile-2",
+        "agno.agent": "capture-volatile-2",
+        "agno.agent.id": "capture-volatile-2",
+        "agno.run.id": "capture-volatile-4",
+        "agno.tools": "[\"get_weather\"]",
+        "graph.node.id": "capture-volatile-1",
+        "graph.node.name": "capture-volatile-2",
+        "openinference.span.kind": "AGENT",
+        "output.mime_type": "application/json",
+        "session.id": "capture-volatile-3"
+      },
+      "resource_attributes": {
+        "telemetry.sdk.language": "python",
+        "telemetry.sdk.name": "opentelemetry",
+        "telemetry.sdk.version": "1.45.2"
+      },
+      "scope_name": "openinference.instrumentation.agno",
+      "scope_version": "1.2.0",
+      "conventions": [
+        "openinference"
+      ],
+      "ingest_time": "2026-01-01T00:00:00.000000000Z",
+      "schema_version": 2
+    },
+    {
+      "project_id": "01900000-0000-7000-8000-000000000001",
+      "trace_id": "a6af7f727ca28ef46f36609d27969222",
+      "span_id": "cee3436a8e43f292",
+      "parent_span_id": "dbe9fcd55b6c2bbb",
+      "name": "OpenAIChat.invoke",
+      "span_kind": "llm",
+      "start_time": "2025-12-31T23:59:50.005000000Z",
+      "end_time": "2025-12-31T23:59:50.064000000Z",
+      "status": "ok",
+      "service_name": "capture-app",
+      "provider": "openai",
+      "request_model": "gpt-4o-mini-2024-07-18",
+      "input_tokens": 82,
+      "output_tokens": 17,
+      "total_tokens": 99,
+      "cost_input": 0.000082,
+      "cost_output": 0.000068,
+      "cost_total": 0.00015000000000000001,
+      "cost_source": "computed",
+      "input": "[{\"role\":\"system\",\"parts\":[{\"type\":\"text\",\"content\":\"You are a weather assistant.\"}]},{\"role\":\"user\",\"parts\":[{\"type\":\"text\",\"content\":\"What is the weather in Paris?\"}]}]",
+      "input_format": "messages",
+      "output": "[{\"role\":\"assistant\",\"parts\":[{\"type\":\"tool_call\",\"id\":\"call_weather_1\",\"name\":\"get_weather\",\"arguments\":{\"city\":\"Paris\"}}]}]",
+      "output_format": "messages",
+      "input_preview": "What is the weather in Paris?",
+      "tool_definitions": "[{\"type\":\"function\",\"function\":{\"name\":\"get_weather\",\"description\":\"Look up the weather for a city.\",\"parameters\":{\"type\":\"object\",\"properties\":{\"city\":{\"type\":\"string\"}},\"required\":[\"city\"]}}}]",
+      "attributes": {
+        "input.mime_type": "application/json",
+        "llm.model_name": "gpt-4o-mini-2024-07-18",
+        "llm.provider": "OpenAI",
+        "llm.system": "openai",
+        "llm.token_count.completion": "17",
+        "llm.token_count.prompt": "82",
+        "openinference.span.kind": "LLM",
+        "output.mime_type": "application/json"
+      },
+      "resource_attributes": {
+        "telemetry.sdk.language": "python",
+        "telemetry.sdk.name": "opentelemetry",
+        "telemetry.sdk.version": "1.45.2"
+      },
+      "scope_name": "openinference.instrumentation.agno",
+      "scope_version": "1.2.0",
+      "conventions": [
+        "openinference"
+      ],
+      "ingest_time": "2026-01-01T00:00:00.000000000Z",
+      "schema_version": 2
+    },
+    {
+      "project_id": "01900000-0000-7000-8000-000000000001",
+      "trace_id": "a6af7f727ca28ef46f36609d27969222",
+      "span_id": "f1a6bd724a2f8120",
+      "parent_span_id": "dbe9fcd55b6c2bbb",
+      "name": "get_weather",
+      "span_kind": "tool",
+      "start_time": "2025-12-31T23:59:50.071000000Z",
+      "end_time": "2025-12-31T23:59:50.072000000Z",
+      "status": "ok",
+      "service_name": "capture-app",
+      "input": "{\"city\":\"Paris\"}",
+      "input_format": "json",
+      "output": "sunny in Paris",
+      "output_format": "text",
+      "input_preview": "{\"city\":\"Paris\"}",
+      "output_preview": "sunny in Paris",
+      "attributes": {
+        "input.mime_type": "application/json",
+        "openinference.span.kind": "TOOL",
+        "output.mime_type": "text/plain",
+        "tool.description": "Look up the weather for a city.",
+        "tool.name": "get_weather",
+        "tool.parameters": "{\"city\": \"Paris\"}"
+      },
+      "resource_attributes": {
+        "telemetry.sdk.language": "python",
+        "telemetry.sdk.name": "opentelemetry",
+        "telemetry.sdk.version": "1.45.2"
+      },
+      "scope_name": "openinference.instrumentation.agno",
+      "scope_version": "1.2.0",
+      "conventions": [
+        "openinference"
+      ],
+      "ingest_time": "2026-01-01T00:00:00.000000000Z",
+      "schema_version": 2
+    },
+    {
+      "project_id": "01900000-0000-7000-8000-000000000001",
+      "trace_id": "a6af7f727ca28ef46f36609d27969222",
+      "span_id": "fad067ca4d57c628",
+      "parent_span_id": "dbe9fcd55b6c2bbb",
+      "name": "OpenAIChat.invoke",
+      "span_kind": "llm",
+      "start_time": "2025-12-31T23:59:50.073000000Z",
+      "end_time": "2025-12-31T23:59:50.106000000Z",
+      "status": "ok",
+      "service_name": "capture-app",
+      "provider": "openai",
+      "request_model": "gpt-4o-mini-2024-07-18",
+      "input_tokens": 131,
+      "output_tokens": 12,
+      "total_tokens": 143,
+      "cost_input": 0.000131,
+      "cost_output": 0.000048,
+      "cost_total": 0.00017900000000000001,
+      "cost_source": "computed",
+      "input": "[{\"role\":\"system\",\"parts\":[{\"type\":\"text\",\"content\":\"You are a weather assistant.\"}]},{\"role\":\"user\",\"parts\":[{\"type\":\"text\",\"content\":\"What is the weather in Paris?\"}]},{\"role\":\"assistant\",\"parts\":[{\"type\":\"tool_call\",\"id\":\"call_weather_1\",\"name\":\"get_weather\",\"arguments\":{\"city\":\"Paris\"}}]},{\"role\":\"tool\",\"parts\":[{\"type\":\"tool_call_response\",\"id\":\"call_weather_1\",\"response\":\"sunny in Paris\"}]}]",
+      "input_format": "messages",
+      "output": "[{\"role\":\"assistant\",\"parts\":[{\"type\":\"text\",\"content\":\"It is sunny in Paris.\"}]}]",
+      "output_format": "messages",
+      "input_preview": "What is the weather in Paris?",
+      "output_preview": "It is sunny in Paris.",
+      "tool_definitions": "[{\"type\":\"function\",\"function\":{\"name\":\"get_weather\",\"description\":\"Look up the weather for a city.\",\"parameters\":{\"type\":\"object\",\"properties\":{\"city\":{\"type\":\"string\"}},\"required\":[\"city\"]}}}]",
+      "attributes": {
+        "input.mime_type": "application/json",
+        "llm.model_name": "gpt-4o-mini-2024-07-18",
+        "llm.provider": "OpenAI",
+        "llm.system": "openai",
+        "llm.token_count.completion": "12",
+        "llm.token_count.prompt": "131",
+        "openinference.span.kind": "LLM",
+        "output.mime_type": "application/json"
+      },
+      "resource_attributes": {
+        "telemetry.sdk.language": "python",
+        "telemetry.sdk.name": "opentelemetry",
+        "telemetry.sdk.version": "1.45.2"
+      },
+      "scope_name": "openinference.instrumentation.agno",
+      "scope_version": "1.2.0",
+      "conventions": [
+        "openinference"
+      ],
+      "ingest_time": "2026-01-01T00:00:00.000000000Z",
+      "schema_version": 2
+    }
+  ],
+  "media": [],
+  "rejected_spans": 0
+}

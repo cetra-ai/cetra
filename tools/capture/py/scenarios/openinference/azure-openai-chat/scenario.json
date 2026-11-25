@@ -1,0 +1,30 @@
+{
+  "description": "Azure OpenAI chat completion through the OpenAI SDK, one turn, traced by OpenInference through cetra's SDK.",
+  "spec_refs": [
+    "02 \u00a7 Convention detection",
+    "02 \u00a7 Model, provider, usage",
+    "02 \u00a7 Cost computation"
+  ],
+  "notes": "The Azure client targets https://capture.openai.azure.com, and the harness routes the request to the capture mock under that host (D-IN-3). The request names the deployment my-gpt4o-deployment, and the response names the base model gpt-4o-mini-2024-07-18, which OpenInference writes as llm.model_name. The instrumentor writes llm.provider azure, and cetra's runtime stamps server.address capture.openai.azure.com (D-IN-18), so the provider is azure.ai.openai (D-IN-2). Cost is computed, not reported. Token counts are input 14 and output 8.",
+  "instrumentation": "openinference-instrumentation-openai",
+  "libraries": [
+    "openai",
+    "openinference-instrumentation-openai",
+    "opentelemetry-sdk"
+  ],
+  "turns": [
+    {
+      "api": "openai.chat",
+      "model": "gpt-4o-mini-2024-07-18",
+      "host": "capture.openai.azure.com",
+      "message": {
+        "text": "The capital of France is Paris."
+      },
+      "finish": "stop",
+      "usage": {
+        "input": 14,
+        "output": 8
+      }
+    }
+  ]
+}

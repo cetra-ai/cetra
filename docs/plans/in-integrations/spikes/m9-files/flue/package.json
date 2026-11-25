@@ -1,0 +1,1 @@
+{"name":"m9-flue","private":true,"type":"module","dependencies":{"@earendil-works/pi-ai":"^1.4.0","@flue/opentelemetry":"^2.3.0","@flue/runtime":"^2.3.0","@opentelemetry/api":"^1.9.1","@opentelemetry/exporter-trace-otlp-proto":"^0.212.0","@opentelemetry/sdk-trace-base":"^2.12.1","@opentelemetry/sdk-trace-node":"^2.12.1","valibot":"^1.5.0"}}

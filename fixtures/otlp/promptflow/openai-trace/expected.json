@@ -1,0 +1,207 @@
+{
+  "spans": [
+    {
+      "project_id": "01900000-0000-7000-8000-000000000001",
+      "trace_id": "bd1a4f9af27b044946ef57e7ee07fe35",
+      "span_id": "0f014a5bd0d2447a",
+      "name": "flow",
+      "span_kind": "span",
+      "start_time": "2025-12-31T23:59:50.000000000Z",
+      "end_time": "2025-12-31T23:59:50.073000000Z",
+      "status": "ok",
+      "service_name": "promptflow",
+      "input": "{\"question\":\"What's the weather in Paris?\"}",
+      "input_format": "json",
+      "output": "\"It is 18 \\u00b0C and sunny in Paris.\"",
+      "output_format": "text",
+      "input_preview": "{\"question\":\"What's the weather in Paris?\"}",
+      "output_preview": "\"It is 18 \\u00b0C and sunny in Paris.\"",
+      "attributes": {
+        "__computed__.cumulative_token_count.completion": "29",
+        "__computed__.cumulative_token_count.prompt": "213",
+        "__computed__.cumulative_token_count.total": "242",
+        "framework": "promptflow",
+        "function": "flow",
+        "span_type": "Function"
+      },
+      "scope_name": "promptflow",
+      "events": [
+        {
+          "time": "2025-12-31T23:59:50.000000000Z",
+          "name": "promptflow.function.inputs",
+          "attributes": "{\"payload\":\"{\\n  \\\"question\\\": \\\"What's the weather in Paris?\\\"\\n}\"}"
+        },
+        {
+          "time": "2025-12-31T23:59:50.073000000Z",
+          "name": "promptflow.function.output",
+          "attributes": "{\"payload\":\"\\\"It is 18 \\\\u00b0C and sunny in Paris.\\\"\"}"
+        }
+      ],
+      "ingest_time": "2026-01-01T00:00:00.000000000Z",
+      "schema_version": 2
+    },
+    {
+      "project_id": "01900000-0000-7000-8000-000000000001",
+      "trace_id": "bd1a4f9af27b044946ef57e7ee07fe35",
+      "span_id": "bcf6961cc85b4b66",
+      "parent_span_id": "0f014a5bd0d2447a",
+      "name": "openai_chat",
+      "span_kind": "llm",
+      "start_time": "2025-12-31T23:59:50.000000000Z",
+      "end_time": "2025-12-31T23:59:50.039000000Z",
+      "status": "ok",
+      "service_name": "promptflow",
+      "provider": "openai",
+      "request_model": "gpt-4o-mini-2024-07-18",
+      "response_model": "gpt-4o-mini-2024-07-18",
+      "input_tokens": 82,
+      "output_tokens": 17,
+      "total_tokens": 99,
+      "cost_input": 0.000082,
+      "cost_output": 0.000068,
+      "cost_total": 0.00015000000000000001,
+      "cost_source": "computed",
+      "input": "[{\"role\":\"system\",\"parts\":[{\"type\":\"text\",\"content\":\"You are a weather assistant.\"}]},{\"role\":\"user\",\"parts\":[{\"type\":\"text\",\"content\":\"What's the weather in Paris?\"}]}]",
+      "input_format": "messages",
+      "output": "[{\"role\":\"assistant\",\"parts\":[{\"type\":\"tool_call\",\"id\":\"call_weather_1\",\"name\":\"get_weather\",\"arguments\":{\"city\":\"Paris\"}}],\"refusal\":null,\"annotations\":null,\"audio\":null,\"function_call\":null}]",
+      "output_format": "messages",
+      "input_preview": "What's the weather in Paris?",
+      "attributes": {
+        "__computed__.cumulative_token_count.total": "99",
+        "framework": "promptflow",
+        "function": "openai.resources.chat.completions.completions.Completions.create",
+        "llm.generated_message": "{\n  \"content\": null,\n  \"refusal\": null,\n  \"role\": \"assistant\",\n  \"annotations\": null,\n  \"audio\": null,\n  \"function_call\": null,\n  \"tool_calls\": [\n    {\n      \"id\": \"call_weather_1\",\n      \"function\": {\n        \"arguments\": \"{\\\"city\\\":\\\"Paris\\\"}\",\n        \"name\": \"get_weather\"\n      },\n      \"type\": \"function\"\n    }\n  ]\n}",
+        "llm.response.model": "gpt-4o-mini-2024-07-18",
+        "llm.usage.completion_tokens": "17",
+        "llm.usage.prompt_tokens": "82",
+        "llm.usage.total_tokens": "99",
+        "span_type": "LLM"
+      },
+      "scope_name": "promptflow",
+      "events": [
+        {
+          "time": "2025-12-31T23:59:50.001000000Z",
+          "name": "promptflow.function.inputs",
+          "attributes": "{\"payload\":\"{\\n  \\\"model\\\": \\\"gpt-4o-mini-2024-07-18\\\",\\n  \\\"messages\\\": [\\n    {\\n      \\\"role\\\": \\\"system\\\",\\n      \\\"content\\\": \\\"You are a weather assistant.\\\"\\n    },\\n    {\\n      \\\"role\\\": \\\"user\\\",\\n      \\\"content\\\": \\\"What's the weather in Paris?\\\"\\n    }\\n  ],\\n  \\\"tools\\\": [\\n    {\\n      \\\"type\\\": \\\"function\\\",\\n      \\\"function\\\": {\\n        \\\"name\\\": \\\"get_weather\\\",\\n        \\\"description\\\": \\\"Look up the weather for a city.\\\",\\n        \\\"parameters\\\": {\\n          \\\"type\\\": \\\"object\\\",\\n          \\\"properties\\\": {\\n            \\\"city\\\": {\\n              \\\"type\\\": \\\"string\\\"\\n            }\\n          },\\n          \\\"required\\\": [\\n            \\\"city\\\"\\n          ]\\n        }\\n      }\\n    }\\n  ]\\n}\"}"
+        },
+        {
+          "time": "2025-12-31T23:59:50.039000000Z",
+          "name": "promptflow.llm.generated_message",
+          "attributes": "{\"payload\":\"{\\n  \\\"content\\\": null,\\n  \\\"refusal\\\": null,\\n  \\\"role\\\": \\\"assistant\\\",\\n  \\\"annotations\\\": null,\\n  \\\"audio\\\": null,\\n  \\\"function_call\\\": null,\\n  \\\"tool_calls\\\": [\\n    {\\n      \\\"id\\\": \\\"call_weather_1\\\",\\n      \\\"function\\\": {\\n        \\\"arguments\\\": \\\"{\\\\\\\"city\\\\\\\":\\\\\\\"Paris\\\\\\\"}\\\",\\n        \\\"name\\\": \\\"get_weather\\\"\\n      },\\n      \\\"type\\\": \\\"function\\\"\\n    }\\n  ]\\n}\"}"
+        },
+        {
+          "time": "2025-12-31T23:59:50.039000000Z",
+          "name": "promptflow.function.output",
+          "attributes": "{\"payload\":\"{\\n  \\\"id\\\": \\\"chatcmpl-capture-1\\\",\\n  \\\"choices\\\": [\\n    {\\n      \\\"finish_reason\\\": \\\"tool_calls\\\",\\n      \\\"index\\\": 0,\\n      \\\"logprobs\\\": null,\\n      \\\"message\\\": {\\n        \\\"content\\\": null,\\n        \\\"refusal\\\": null,\\n        \\\"role\\\": \\\"assistant\\\",\\n        \\\"annotations\\\": null,\\n        \\\"audio\\\": null,\\n        \\\"function_call\\\": null,\\n        \\\"tool_calls\\\": [\\n          {\\n            \\\"id\\\": \\\"call_weather_1\\\",\\n            \\\"function\\\": {\\n              \\\"arguments\\\": \\\"{\\\\\\\"city\\\\\\\":\\\\\\\"Paris\\\\\\\"}\\\",\\n              \\\"name\\\": \\\"get_weather\\\"\\n            },\\n            \\\"type\\\": \\\"function\\\"\\n          }\\n        ]\\n      }\\n    }\\n  ],\\n  \\\"created\\\": 1767225600,\\n  \\\"model\\\": \\\"gpt-4o-mini-2024-07-18\\\",\\n  \\\"object\\\": \\\"chat.completion\\\",\\n  \\\"metadata\\\": null,\\n  \\\"moderation\\\": null,\\n  \\\"service_tier\\\": null,\\n  \\\"system_fingerprint\\\": \\\"fp_capture\\\",\\n  \\\"usage\\\": {\\n    \\\"completion_tokens\\\": 17,\\n    \\\"prompt_tokens\\\": 82,\\n    \\\"total_tokens\\\": 99,\\n    \\\"completion_tokens_details\\\": {\\n      \\\"accepted_prediction_tokens\\\": 0,\\n      \\\"audio_tokens\\\": 0,\\n      \\\"reasoning_tokens\\\": 0,\\n      \\\"rejected_prediction_tokens\\\": 0,\\n      \\\"text_tokens\\\": null\\n    },\\n    \\\"prompt_tokens_details\\\": {\\n      \\\"audio_tokens\\\": 0,\\n      \\\"cache_write_tokens\\\": null,\\n      \\\"cached_tokens\\\": 0,\\n      \\\"image_tokens\\\": null,\\n      \\\"text_tokens\\\": null\\n    }\\n  }\\n}\"}"
+        }
+      ],
+      "conventions": [
+        "openinference"
+      ],
+      "ingest_time": "2026-01-01T00:00:00.000000000Z",
+      "schema_version": 2
+    },
+    {
+      "project_id": "01900000-0000-7000-8000-000000000001",
+      "trace_id": "bd1a4f9af27b044946ef57e7ee07fe35",
+      "span_id": "e3930def5151372b",
+      "parent_span_id": "0f014a5bd0d2447a",
+      "name": "openai_chat",
+      "span_kind": "llm",
+      "start_time": "2025-12-31T23:59:50.039000000Z",
+      "end_time": "2025-12-31T23:59:50.073000000Z",
+      "status": "ok",
+      "service_name": "promptflow",
+      "provider": "openai",
+      "request_model": "gpt-4o-mini-2024-07-18",
+      "response_model": "gpt-4o-mini-2024-07-18",
+      "input_tokens": 131,
+      "output_tokens": 12,
+      "total_tokens": 143,
+      "cost_input": 0.000131,
+      "cost_output": 0.000048,
+      "cost_total": 0.00017900000000000001,
+      "cost_source": "computed",
+      "input": "[{\"role\":\"system\",\"parts\":[{\"type\":\"text\",\"content\":\"You are a weather assistant.\"}]},{\"role\":\"user\",\"parts\":[{\"type\":\"text\",\"content\":\"What's the weather in Paris?\"}]},{\"role\":\"assistant\",\"parts\":[{\"type\":\"tool_call\",\"id\":\"call_weather_1\",\"name\":\"get_weather\",\"arguments\":{\"city\":\"Paris\"}}]},{\"role\":\"tool\",\"parts\":[{\"type\":\"tool_call_response\",\"id\":\"call_weather_1\",\"response\":{\"temperature_c\":18,\"conditions\":\"sunny\",\"city\":\"Paris\"}}]}]",
+      "input_format": "messages",
+      "output": "[{\"role\":\"assistant\",\"parts\":[{\"type\":\"text\",\"content\":\"It is 18 °C and sunny in Paris.\"}],\"refusal\":null,\"annotations\":null,\"audio\":null,\"function_call\":null}]",
+      "output_format": "messages",
+      "input_preview": "What's the weather in Paris?",
+      "output_preview": "It is 18 °C and sunny in Paris.",
+      "attributes": {
+        "__computed__.cumulative_token_count.total": "143",
+        "framework": "promptflow",
+        "function": "openai.resources.chat.completions.completions.Completions.create",
+        "llm.generated_message": "{\n  \"content\": \"It is 18 \\u00b0C and sunny in Paris.\",\n  \"refusal\": null,\n  \"role\": \"assistant\",\n  \"annotations\": null,\n  \"audio\": null,\n  \"function_call\": null,\n  \"tool_calls\": null\n}",
+        "llm.response.model": "gpt-4o-mini-2024-07-18",
+        "llm.usage.completion_tokens": "12",
+        "llm.usage.prompt_tokens": "131",
+        "llm.usage.total_tokens": "143",
+        "span_type": "LLM"
+      },
+      "scope_name": "promptflow",
+      "events": [
+        {
+          "time": "2025-12-31T23:59:50.040000000Z",
+          "name": "promptflow.function.inputs",
+          "attributes": "{\"payload\":\"{\\n  \\\"model\\\": \\\"gpt-4o-mini-2024-07-18\\\",\\n  \\\"messages\\\": [\\n    {\\n      \\\"role\\\": \\\"system\\\",\\n      \\\"content\\\": \\\"You are a weather assistant.\\\"\\n    },\\n    {\\n      \\\"role\\\": \\\"user\\\",\\n      \\\"content\\\": \\\"What's the weather in Paris?\\\"\\n    },\\n    {\\n      \\\"role\\\": \\\"assistant\\\",\\n      \\\"tool_calls\\\": [\\n        {\\n          \\\"id\\\": \\\"call_weather_1\\\",\\n          \\\"function\\\": {\\n            \\\"arguments\\\": \\\"{\\\\\\\"city\\\\\\\":\\\\\\\"Paris\\\\\\\"}\\\",\\n            \\\"name\\\": \\\"get_weather\\\"\\n          },\\n          \\\"type\\\": \\\"function\\\"\\n        }\\n      ]\\n    },\\n    {\\n      \\\"role\\\": \\\"tool\\\",\\n      \\\"tool_call_id\\\": \\\"call_weather_1\\\",\\n      \\\"content\\\": \\\"{\\\\\\\"temperature_c\\\\\\\": 18, \\\\\\\"conditions\\\\\\\": \\\\\\\"sunny\\\\\\\", \\\\\\\"city\\\\\\\": \\\\\\\"Paris\\\\\\\"}\\\"\\n    }\\n  ],\\n  \\\"tools\\\": [\\n    {\\n      \\\"type\\\": \\\"function\\\",\\n      \\\"function\\\": {\\n        \\\"name\\\": \\\"get_weather\\\",\\n        \\\"description\\\": \\\"Look up the weather for a city.\\\",\\n        \\\"parameters\\\": {\\n          \\\"type\\\": \\\"object\\\",\\n          \\\"properties\\\": {\\n            \\\"city\\\": {\\n              \\\"type\\\": \\\"string\\\"\\n            }\\n          },\\n          \\\"required\\\": [\\n            \\\"city\\\"\\n          ]\\n        }\\n      }\\n    }\\n  ]\\n}\"}"
+        },
+        {
+          "time": "2025-12-31T23:59:50.073000000Z",
+          "name": "promptflow.llm.generated_message",
+          "attributes": "{\"payload\":\"{\\n  \\\"content\\\": \\\"It is 18 \\\\u00b0C and sunny in Paris.\\\",\\n  \\\"refusal\\\": null,\\n  \\\"role\\\": \\\"assistant\\\",\\n  \\\"annotations\\\": null,\\n  \\\"audio\\\": null,\\n  \\\"function_call\\\": null,\\n  \\\"tool_calls\\\": null\\n}\"}"
+        },
+        {
+          "time": "2025-12-31T23:59:50.073000000Z",
+          "name": "promptflow.function.output",
+          "attributes": "{\"payload\":\"{\\n  \\\"id\\\": \\\"chatcmpl-capture-2\\\",\\n  \\\"choices\\\": [\\n    {\\n      \\\"finish_reason\\\": \\\"stop\\\",\\n      \\\"index\\\": 0,\\n      \\\"logprobs\\\": null,\\n      \\\"message\\\": {\\n        \\\"content\\\": \\\"It is 18 \\\\u00b0C and sunny in Paris.\\\",\\n        \\\"refusal\\\": null,\\n        \\\"role\\\": \\\"assistant\\\",\\n        \\\"annotations\\\": null,\\n        \\\"audio\\\": null,\\n        \\\"function_call\\\": null,\\n        \\\"tool_calls\\\": null\\n      }\\n    }\\n  ],\\n  \\\"created\\\": 1767225600,\\n  \\\"model\\\": \\\"gpt-4o-mini-2024-07-18\\\",\\n  \\\"object\\\": \\\"chat.completion\\\",\\n  \\\"metadata\\\": null,\\n  \\\"moderation\\\": null,\\n  \\\"service_tier\\\": null,\\n  \\\"system_fingerprint\\\": \\\"fp_capture\\\",\\n  \\\"usage\\\": {\\n    \\\"completion_tokens\\\": 12,\\n    \\\"prompt_tokens\\\": 131,\\n    \\\"total_tokens\\\": 143,\\n    \\\"completion_tokens_details\\\": {\\n      \\\"accepted_prediction_tokens\\\": 0,\\n      \\\"audio_tokens\\\": 0,\\n      \\\"reasoning_tokens\\\": 0,\\n      \\\"rejected_prediction_tokens\\\": 0,\\n      \\\"text_tokens\\\": null\\n    },\\n    \\\"prompt_tokens_details\\\": {\\n      \\\"audio_tokens\\\": 0,\\n      \\\"cache_write_tokens\\\": null,\\n      \\\"cached_tokens\\\": 0,\\n      \\\"image_tokens\\\": null,\\n      \\\"text_tokens\\\": null\\n    }\\n  }\\n}\"}"
+        }
+      ],
+      "conventions": [
+        "openinference"
+      ],
+      "ingest_time": "2026-01-01T00:00:00.000000000Z",
+      "schema_version": 2
+    },
+    {
+      "project_id": "01900000-0000-7000-8000-000000000001",
+      "trace_id": "bd1a4f9af27b044946ef57e7ee07fe35",
+      "span_id": "f09253e04953e735",
+      "parent_span_id": "0f014a5bd0d2447a",
+      "name": "get_weather",
+      "span_kind": "span",
+      "start_time": "2025-12-31T23:59:50.039000000Z",
+      "end_time": "2025-12-31T23:59:50.039000000Z",
+      "status": "ok",
+      "service_name": "promptflow",
+      "input": "{\"city\":\"Paris\"}",
+      "input_format": "json",
+      "output": "{\"temperature_c\":18,\"conditions\":\"sunny\",\"city\":\"Paris\"}",
+      "output_format": "json",
+      "input_preview": "{\"city\":\"Paris\"}",
+      "output_preview": "{\"temperature_c\":18,\"conditions\":\"sunny\",\"city\":\"Paris\"}",
+      "attributes": {
+        "framework": "promptflow",
+        "function": "get_weather",
+        "span_type": "Function"
+      },
+      "scope_name": "promptflow",
+      "events": [
+        {
+          "time": "2025-12-31T23:59:50.039000000Z",
+          "name": "promptflow.function.inputs",
+          "attributes": "{\"payload\":\"{\\n  \\\"city\\\": \\\"Paris\\\"\\n}\"}"
+        },
+        {
+          "time": "2025-12-31T23:59:50.039000000Z",
+          "name": "promptflow.function.output",
+          "attributes": "{\"payload\":\"\\\"{\\\\\\\"temperature_c\\\\\\\": 18, \\\\\\\"conditions\\\\\\\": \\\\\\\"sunny\\\\\\\", \\\\\\\"city\\\\\\\": \\\\\\\"Paris\\\\\\\"}\\\"\"}"
+        }
+      ],
+      "ingest_time": "2026-01-01T00:00:00.000000000Z",
+      "schema_version": 2
+    }
+  ],
+  "media": [],
+  "rejected_spans": 0
+}

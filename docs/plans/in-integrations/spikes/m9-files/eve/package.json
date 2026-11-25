@@ -1,0 +1,1 @@
+{"name":"m9-eve","version":"0.0.0","private":true,"type":"module","dependencies":{"@ai-sdk/openai-compatible":"^3.0.92","@vercel/otel":"^2.3.0","eve":"^1.0.1","zod":"^4.6.7"}}

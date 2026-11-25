@@ -4412,7 +4412,7 @@ export interface components {
         };
         /** @description A coding agent's session context, sent by `cetra agents hook` (D-CA-9). */
         AgentContextBody: {
-            /** @description `claude-code`, `codex`, `gemini-cli` or `copilot`. */
+            /** @description `claude-code`, `codex`, `gemini-cli`, `copilot` or `qwen-code`. */
             agent: string;
             /** @description The branch, 1 to 256 characters. Absent keeps; `null` clears. */
             branch?: string | null;
@@ -5522,7 +5522,7 @@ export interface components {
          *     Spec 01 `conventions` and spec 02 § Convention detection.
          * @enum {string}
          */
-        Convention: "cetra" | "genai" | "openinference" | "openllmetry" | "vercel" | "langfuse" | "laminar" | "google_adk";
+        Convention: "cetra" | "genai" | "voltagent" | "openinference" | "openllmetry" | "vercel" | "langfuse" | "laminar" | "google_adk";
         /**
          * @description Where a span's cost came from.
          *

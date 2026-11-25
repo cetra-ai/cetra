@@ -1,0 +1,69 @@
+---
+title: rig
+description: "Trace rig model calls with cetra by bridging its tracing spans to OpenTelemetry. Setup only: not run."
+---
+
+rig writes GenAI attributes on `tracing` spans and exports nothing itself: your program bridges those spans to OpenTelemetry. This page is setup only: it was not run, and every fact comes from the crate's source.
+
+## Install
+
+```bash
+cargo add rig-core@0.46.0
+cargo add opentelemetry-otlp@0.33.1
+cargo add tracing-opentelemetry@0.34.0
+cargo add tracing-subscriber
+```
+
+## Set up
+
+Export over OTLP/HTTP with the standard variables:
+
+```bash
+export OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:8080
+export OTEL_EXPORTER_OTLP_HEADERS="Authorization=Bearer sk-cetra-…"
+export OTEL_SERVICE_NAME=my-app
+```
+
+Bridge rig's `tracing` spans to OpenTelemetry:
+
+```rust
+use opentelemetry::trace::TracerProvider as _;
+use opentelemetry_otlp::SpanExporter;
+use opentelemetry_sdk::trace::SdkTracerProvider;
+use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
+
+let exporter = SpanExporter::builder().with_http().build()?;
+let provider = SdkTracerProvider::builder()
+    .with_batch_exporter(exporter)
+    .build();
+let tracer = provider.tracer("my-app");
+tracing_subscriber::registry()
+    .with(tracing_opentelemetry::layer().with_tracer(tracer))
+    .init();
+```
+
+Call `provider.shutdown()` before your program ends, so the batch exporter flushes the last spans.
+
+Content is opt-in per request: call `.record_content_telemetry(true)` on the `CompletionRequest`. It is off by default, and there is no environment variable for it. When on, the span carries `gen_ai.system_instructions`, `gen_ai.input.messages`, `gen_ai.output.messages` and `gen_ai.tool.definitions`.
+
+## What you get
+
+- An `llm` span named `chat` for each completion (`generate_content` on Gemini), with the provider (the wire name, for example `openai`), the request and response models, the response id and the token counts; cetra computes the cost from the built-in prices.
+- With content on, the system instructions and the messages on the `llm` spans.
+- The other modalities get their own spans: `embeddings`, `rerank`, `transcription`, `image_generation`, `audio_generation`.
+
+## Limits
+
+- Not captured: written from the library's source and documentation.
+- rig sets no span kind: the bridge exports the spans as INTERNAL.
+- Content is off by default and per request only (`record_content_telemetry(true)`); the crate's documentation notes that it exposes sensitive content.
+- A token counter a provider reports as zero is recorded as zero; a counter a provider does not report is not recorded at all.
+- If the current span is already a conforming completion parent, rig records on it instead of opening a child span.
+- The bridge sample was not compiled; check the builder names against your versions of `opentelemetry-otlp` and `tracing-opentelemetry`.
+- This page was written against rig-core 0.46.0, opentelemetry-otlp 0.33.1 and tracing-opentelemetry 0.34.0.
+
+## Next
+
+- [Send OpenTelemetry](/docs/get-started/opentelemetry/): the endpoint and the headers cetra expects.
+- [Traces](/docs/tracing/traces/): read the trace as a tree and a timeline.
+- [Cost and tokens](/docs/tracing/cost-and-tokens/): how cost is computed from the token counts.
