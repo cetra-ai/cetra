@@ -200,6 +200,7 @@ These queries are `cetra_storage::reads` (D92).
 | Operation | Plan |
 |---|---|
 | Trace list | `traces` view, filter, sort `start_time DESC` (or by `cost_total`, `duration`, `total_tokens`), cursor `(sort_value, trace_id)`; fast path from 03 §6 |
+| Trace totals | the trace list's rows before sort, cursor and limit (window, default exclusions, search, filter), aggregated once: `count(*)`, the count of `status = 'error'` and the exact sum of `cost_total` (D-C-30) |
 | Trace detail | `spans WHERE trace_id = X`, light columns only for the tree; heavy columns fetched per span on demand (`GET …/spans/{span_id}`) |
 | Session detail | `traces WHERE session_id = X ORDER BY start_time`, then root input/output per trace for the chat view |
 | Span list | `spans` view with filter (e.g. all LLM calls for model X) |
