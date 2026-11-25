@@ -107,7 +107,7 @@ In `bench/`, with `LIBCLANG_PATH=/usr/lib/llvm-18/lib`:
 
 **Goal:** the queries on the `traces` files: the trace list in three sorts, and the sessions and users rollups.
 
-**Edit:** `bench/src/cw/mod.rs` (`pub mod shapes;`), `bench/src/cw/many.rs` (make `pub(crate)`: `rollup_ranges`, `column`, `add`, `day_text`, `answer_of`, `text_lines`, `int64_col`, `plain_request`, `llm_mask`, `BATCH_ROWS`, `LLM`, `DAY_NS`, `HOUR_NS`; no other change), `bench/src/cw/shapes.rs` (new), `bench/src/cw/harness.rs`.
+**Edit:** `bench/src/cw/mod.rs` (`pub mod shapes;`), `bench/src/cw/many.rs` (make `pub(crate)`: `rollup_ranges`, `column`, `add`, `day_text`, `answer_of`, `text_lines`, `int64_col`, `llm_mask`, `BATCH_ROWS`, `LLM`, `DAY_NS`, `HOUR_NS`; no other change), `bench/src/cw/shapes.rs` (new), `bench/src/cw/harness.rs`.
 
 ### Contracts
 
