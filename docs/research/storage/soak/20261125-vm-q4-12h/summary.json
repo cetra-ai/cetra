@@ -1,0 +1,449 @@
+{
+  "label": "vm-q4-fixed",
+  "passed": true,
+  "rules": [
+    {
+      "name": "rss_growth",
+      "verdict": "info",
+      "detail": "not enforced in this run: no growth"
+    },
+    {
+      "name": "fd_growth",
+      "verdict": "info",
+      "detail": "not enforced in this run: no growth"
+    },
+    {
+      "name": "thread_growth",
+      "verdict": "info",
+      "detail": "not enforced in this run: no growth"
+    },
+    {
+      "name": "wal_growth",
+      "verdict": "info",
+      "detail": "not enforced in this run: no growth"
+    },
+    {
+      "name": "memtable_growth",
+      "verdict": "info",
+      "detail": "not enforced in this run: no growth"
+    },
+    {
+      "name": "l0_growth",
+      "verdict": "info",
+      "detail": "not enforced in this run: no growth"
+    },
+    {
+      "name": "query_growth_list",
+      "verdict": "info",
+      "detail": "not enforced in this run: 95th percentiles per quarter grow: [477.268, 555.128, 880.867, 1221.440]"
+    },
+    {
+      "name": "query_growth_filter",
+      "verdict": "info",
+      "detail": "not enforced in this run: 95th percentiles per quarter grow: [518.143, 585.707, 933.849, 1196.480]"
+    },
+    {
+      "name": "query_growth_detail",
+      "verdict": "info",
+      "detail": "not enforced in this run: 95th percentiles per quarter grow: [107.325, 153.798, 258.042, 409.256]"
+    },
+    {
+      "name": "query_growth_sessions",
+      "verdict": "info",
+      "detail": "not enforced in this run: 95th percentiles per quarter grow: [459.701, 538.514, 840.666, 1008.212]"
+    },
+    {
+      "name": "query_growth_metrics",
+      "verdict": "info",
+      "detail": "not enforced in this run: 95th percentiles per quarter grow: [370.027, 747.818, 1333.964, 2136.501]"
+    },
+    {
+      "name": "query_growth_scores",
+      "verdict": "info",
+      "detail": "not enforced in this run: 95th percentiles per quarter grow: [166.930, 203.232, 342.707, 491.020]"
+    },
+    {
+      "name": "rss_max",
+      "verdict": "pass",
+      "detail": ""
+    },
+    {
+      "name": "ingest_rate",
+      "verdict": "pass",
+      "detail": ""
+    },
+    {
+      "name": "compaction_lag",
+      "verdict": "pass",
+      "detail": ""
+    },
+    {
+      "name": "day_close",
+      "verdict": "pass",
+      "detail": ""
+    },
+    {
+      "name": "retention",
+      "verdict": "pass",
+      "detail": ""
+    },
+    {
+      "name": "deletion_lag",
+      "verdict": "pass",
+      "detail": ""
+    },
+    {
+      "name": "orphans",
+      "verdict": "pass",
+      "detail": ""
+    },
+    {
+      "name": "wal_failed",
+      "verdict": "pass",
+      "detail": ""
+    },
+    {
+      "name": "sampling",
+      "verdict": "pass",
+      "detail": ""
+    },
+    {
+      "name": "appends",
+      "verdict": "pass",
+      "detail": ""
+    },
+    {
+      "name": "queries",
+      "verdict": "pass",
+      "detail": ""
+    },
+    {
+      "name": "deletions",
+      "verdict": "pass",
+      "detail": ""
+    },
+    {
+      "name": "retention_calls",
+      "verdict": "pass",
+      "detail": ""
+    },
+    {
+      "name": "log_errors",
+      "verdict": "pass",
+      "detail": ""
+    },
+    {
+      "name": "oracle",
+      "verdict": "pass",
+      "detail": ""
+    },
+    {
+      "name": "settled",
+      "verdict": "pass",
+      "detail": ""
+    }
+  ],
+  "stats": {
+    "elapsed_s": 43728.770340601,
+    "spans_per_s": 988.3339426965925,
+    "payload_bytes_per_span": 4632.48539994285,
+    "payload_total": 203260923844,
+    "scores_written": 858163,
+    "deletions": {
+      "registered": 84,
+      "applied": 84,
+      "pending_at_end": 0,
+      "lag_s": {
+        "p50": 539.709625081,
+        "p95": 1020.137488853,
+        "max": 1260.361642061
+      }
+    },
+    "retention_reports": [
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ]
+    ],
+    "shutdown_s": 1.728947077,
+    "reopen_s": 0.376991283,
+    "compaction_passes": 3,
+    "queries": {
+      "list": {
+        "n": 46200,
+        "p50_ms_median_of_samples": 243.216956,
+        "p95_ms_p95_of_samples": 964.552225,
+        "max_ms": 2747.632525
+      },
+      "filter": {
+        "n": 23056,
+        "p50_ms_median_of_samples": 264.72648399999997,
+        "p95_ms_p95_of_samples": 997.324769,
+        "max_ms": 3103.276405
+      },
+      "detail": {
+        "n": 38669,
+        "p50_ms_median_of_samples": 47.965208000000004,
+        "p95_ms_p95_of_samples": 314.333152,
+        "max_ms": 1616.319198
+      },
+      "sessions": {
+        "n": 15308,
+        "p50_ms_median_of_samples": 283.895042,
+        "p95_ms_p95_of_samples": 840.66615,
+        "max_ms": 2069.424015
+      },
+      "metrics": {
+        "n": 15449,
+        "p50_ms_median_of_samples": 428.190958,
+        "p95_ms_p95_of_samples": 1737.038735,
+        "max_ms": 3407.142405
+      },
+      "scores": {
+        "n": 15220,
+        "p50_ms_median_of_samples": 80.817049,
+        "p95_ms_p95_of_samples": 352.63915000000003,
+        "max_ms": 1055.110974
+      }
+    },
+    "appends": {
+      "n": 1271702,
+      "p50_ms_median_of_samples": 11.371406,
+      "p99_ms_p95_of_samples": 347.480299,
+      "max_ms": 1615.499134,
+      "tick_late_p99_ms_p95_of_samples": 493.086428,
+      "tick_late_max_ms": 1531.144256
+    },
+    "rss_bytes": {
+      "min": 1094189056.0,
+      "median": 2607788032.0,
+      "p95": 3477913600.0,
+      "max": 5243072512.0
+    },
+    "fds": {
+      "min": 20.0,
+      "median": 20.0,
+      "p95": 23.0,
+      "max": 26.0
+    },
+    "wal_bytes": {
+      "min": 53205381.0,
+      "median": 122814281.0,
+      "p95": 180625974.0,
+      "max": 191229503.0
+    },
+    "memtable_bytes": {
+      "min": 0.0,
+      "median": 145746206.0,
+      "p95": 270711336.0,
+      "max": 296000844.0
+    },
+    "l0_files": {
+      "min": 0.0,
+      "median": 16.0,
+      "p95": 32.0,
+      "max": 32.0
+    },
+    "l0_oldest_age_s": {
+      "min": 0.0,
+      "median": 180.248243777,
+      "p95": 366.623505077,
+      "max": 402.428943148
+    },
+    "objects_bytes": {
+      "min": 4528074351.0,
+      "median": 23386355079.0,
+      "p95": 40525639133.0,
+      "max": 43511666312.0
+    },
+    "warn_messages_top20": []
+  }
+}
