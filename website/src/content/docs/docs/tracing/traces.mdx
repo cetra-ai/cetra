@@ -113,13 +113,13 @@ In Tree and Timeline, the toolbar has a search box with **Previous match** and *
 
 <Image src={traceView} alt="A trace opened from the trace list: its span tree in the middle, and the root span's input and output on the right." />
 
-**Transcript** shows the model and tool spans in order as one conversation, and has no tree controls. Each model turn shows only the messages that are new since the previous call.
+**Transcript** shows the model and tool spans in order as one conversation, and has no tree controls. Each model turn shows only the messages that are new since the previous call. Each tool call is one line, `name(arguments) → result · duration`. A failed tool call shows its error in red on that line. Select a line to open its arguments and result. Select **Full width** to show the transcript without the panel beside it.
 
 When a trace has just ended, or the list is live, the view updates as spans arrive and shows a **Live** badge with a **Stop** button that stops following.
 
 The right side shows the selected span. The header gives its kind, name, model, provider, duration, time to first token, token counts with cache and reasoning, cost and status. The tabs are:
 
-- **Chat**: for spans with messages. System instructions are collapsed, messages appear as bubbles, tool calls and results as cards, and reasoning is collapsed. Images, audio and PDFs show in place. Tool definitions open in a drawer.
+- **Chat**: for spans with messages. System instructions are collapsed, messages appear as bubbles, and reasoning is collapsed. Each tool call is one line with its result, and the duration of its tool span when cetra can match it. Select a line to open its arguments and result. Images, audio and PDFs show in place. Tool definitions open in a drawer.
 - **Input / Output**: the raw payload as a JSON tree, as text or as raw text, with copy buttons. A badge tells you when a value was truncated.
 - **Attributes**: metadata, attributes, resource attributes, events and links. An exception event shows its stack trace.
 - **Scores**: the scores on the span and on the trace ([Scores](/docs/evaluation/scores/)).

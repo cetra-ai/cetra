@@ -169,7 +169,7 @@ it("renders the fixture image on the chat tab", async () => {
   expect(img).toHaveAttribute("loading", "lazy");
 });
 
-it("links a tool call to its response", async () => {
+it("folds a tool response into its call's line", async () => {
   server.use(
     http.get(SPAN_URL, ({ params }) => {
       if (params.span_id !== LLM_SPAN) return passthrough();
@@ -207,18 +207,33 @@ it("links a tool call to its response", async () => {
   );
   await renderApp(`/acme/support-bot/traces?trace=${TRACE_1}&span=${LLM_SPAN}`);
   const panel = await screen.findByRole("region", { name: "Span" });
-  const call = document.getElementById("tool-call-call_9");
-  const response = document.getElementById("tool-response-call_9");
-  if (!(call instanceof HTMLElement) || !(response instanceof HTMLElement)) {
-    throw new Error("missing tool link");
-  }
-  expect(panel.contains(call)).toBe(true);
-  expect(panel.contains(response)).toBe(true);
-  expect(within(call).getByRole("button", { name: "→ response" })).toBeInTheDocument();
-  expect(within(response).getByRole("button", { name: "lookup" })).toBeInTheDocument();
-  fireEvent.click(within(response).getByRole("button", { name: "lookup" }));
-  expect(document.getElementById("tool-call-call_9")).toBe(call);
+  const line = toolLine(panel, "lookup(");
+  expect(line.textContent).toBe('lookup(order_id: "9") → {status: "shipped"}');
+  fireEvent.click(line);
+  expect(within(panel).getByRole("region", { name: "Arguments" })).toBeInTheDocument();
+  expect(within(panel).getByRole("region", { name: "Result" })).toBeInTheDocument();
 });
+
+it("shows the matched tool span's duration in Chat", async () => {
+  await renderApp(`/acme/support-bot/traces?trace=${TRACE_1}&span=b100000000000014`);
+  const panel = await screen.findByRole("region", { name: "Span" });
+  const line = toolLine(panel, "get_order_status(");
+  expect(line.textContent).toBe(
+    'get_order_status(order_id: "1234") → {status: "shipped", eta: "2026-01-02"} · 350ms',
+  );
+});
+
+/** The tool line button whose text starts with `prefix`. */
+function toolLine(container: HTMLElement, prefix: string): HTMLElement {
+  const lines = within(container)
+    .getAllByRole("button")
+    .filter((button) => button.textContent?.startsWith(prefix));
+  const [line] = lines;
+  if (lines.length !== 1 || !line) {
+    throw new Error(`expected one line starting with ${prefix}, got ${lines.length}`);
+  }
+  return line;
+}
 
 it("keeps a stored input output tab on a messages span", async () => {
   localStorage.setItem(`${STORAGE_PREFIX}span-tab`, "io");

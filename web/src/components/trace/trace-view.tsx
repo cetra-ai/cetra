@@ -26,10 +26,13 @@ import type { TraceMode } from "@/lib/search/traces";
 import { useStream } from "@/lib/sse";
 import { insertSpan } from "@/lib/tree";
 import { useDelayedFlag } from "@/lib/use-delayed-flag";
+import { STORAGE_PREFIX } from "@/product";
 
 const RECENT_MS = 10 * 60 * 1000;
 const HIGHLIGHT_MS = 1_500;
 const EMPTY_HIGHLIGHTS: ReadonlySet<string> = new Set();
+/** The Transcript's Full width choice, a reading preference kept per browser. */
+const WIDE_KEY = `${STORAGE_PREFIX}transcript-wide`;
 const NEXT_MODE: Record<TraceMode, TraceMode> = {
   tree: "timeline",
   timeline: "transcript",
@@ -95,6 +98,7 @@ export function TraceView({
   });
   const [storedMode, setStoredMode] = useState<TraceMode>("tree");
   const [stoppedId, setStoppedId] = useState<string | null>(null);
+  const [wide, setWide] = useState(() => localStorage.getItem(WIDE_KEY) === "1");
   const [highlightState, setHighlightState] = useState<{
     traceId: string;
     ids: ReadonlySet<string>;
@@ -106,6 +110,11 @@ export function TraceView({
   function chooseMode(next: TraceMode) {
     if (onModeChange) onModeChange(next);
     else setStoredMode(next);
+  }
+  function chooseWide(on: boolean) {
+    setWide(on);
+    if (on) localStorage.setItem(WIDE_KEY, "1");
+    else localStorage.removeItem(WIDE_KEY);
   }
 
   useEffect(() => {
@@ -224,6 +233,19 @@ export function TraceView({
     .span_id;
   const selectedIsRoot = selectedRow !== undefined && selectedRow.span.parent_span_id === undefined;
   const showBar = active === "transcript" && onShowSummary !== undefined;
+  const transcript = (
+    <TranscriptView
+      key={loaded.trace.trace_id}
+      traceId={loaded.trace.trace_id}
+      spans={loaded.spans}
+      selectedSpanId={selected}
+      onSelectSpan={onSelectSpan}
+      mode={active}
+      onMode={chooseMode}
+      wide={wide}
+      onWide={chooseWide}
+    />
+  );
   const spanDetail = selected ? (
     <SpanDetail
       traceId={loaded.trace.trace_id}
@@ -231,6 +253,7 @@ export function TraceView({
       summary={selectedRow?.span}
       detached={detached}
       onAddFilter={onAddFilter}
+      spans={loaded.spans}
     />
   ) : null;
 
@@ -299,63 +322,59 @@ export function TraceView({
       ) : null}
       <div className="relative min-h-0 flex-1">
         <div className="absolute inset-0">
-          <SplitPane
-            name={active === "timeline" ? "trace-timeline" : "trace"}
-            mode={stacked ? "bottom" : "split"}
-            still={stacked}
-            start={
-              active === "transcript" ? (
-                <TranscriptView
-                  key={loaded.trace.trace_id}
-                  traceId={loaded.trace.trace_id}
-                  spans={loaded.spans}
-                  selectedSpanId={selected}
-                  onSelectSpan={onSelectSpan}
-                  mode={active}
-                  onMode={chooseMode}
-                />
-              ) : (
-                <TreeGrid
-                  key={loaded.trace.trace_id}
-                  spans={loaded.spans}
-                  trace={loaded.trace}
-                  selectedSpanId={selected}
-                  onSelectSpan={onSelectSpan}
-                  mode={active}
-                  onMode={chooseMode}
-                  timeline={active === "timeline"}
-                  highlightedSpanIds={highlighted}
-                />
-              )
-            }
-            end={
-              summaryShown ? (
-                <TraceSummary
-                  trace={loaded.trace}
-                  spans={loaded.spans}
-                  onSelectSpan={onSelectSpan}
-                />
-              ) : showBar ? (
-                <div className="flex min-h-0 flex-1 flex-col">
-                  <div className="flex items-center border-b px-4 py-1.5">
-                    <Button
-                      type="button"
-                      variant="ghost"
-                      size="xs"
-                      className="text-body"
-                      onClick={onShowSummary}
-                    >
-                      <ArrowLeft />
-                      Trace summary
-                    </Button>
+          {active === "transcript" && wide ? (
+            <div className="flex h-full min-h-0 flex-col">{transcript}</div>
+          ) : (
+            <SplitPane
+              name={active === "timeline" ? "trace-timeline" : "trace"}
+              mode={stacked ? "bottom" : "split"}
+              still={stacked}
+              start={
+                active === "transcript" ? (
+                  transcript
+                ) : (
+                  <TreeGrid
+                    key={loaded.trace.trace_id}
+                    spans={loaded.spans}
+                    trace={loaded.trace}
+                    selectedSpanId={selected}
+                    onSelectSpan={onSelectSpan}
+                    mode={active}
+                    onMode={chooseMode}
+                    timeline={active === "timeline"}
+                    highlightedSpanIds={highlighted}
+                  />
+                )
+              }
+              end={
+                summaryShown ? (
+                  <TraceSummary
+                    trace={loaded.trace}
+                    spans={loaded.spans}
+                    onSelectSpan={onSelectSpan}
+                  />
+                ) : showBar ? (
+                  <div className="flex min-h-0 flex-1 flex-col">
+                    <div className="flex items-center border-b px-4 py-1.5">
+                      <Button
+                        type="button"
+                        variant="ghost"
+                        size="xs"
+                        className="text-body"
+                        onClick={onShowSummary}
+                      >
+                        <ArrowLeft />
+                        Trace summary
+                      </Button>
+                    </div>
+                    {spanDetail}
                   </div>
-                  {spanDetail}
-                </div>
-              ) : (
-                spanDetail
-              )
-            }
-          />
+                ) : (
+                  spanDetail
+                )
+              }
+            />
+          )}
         </div>
       </div>
     </div>

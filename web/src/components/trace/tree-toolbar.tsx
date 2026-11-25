@@ -1,5 +1,5 @@
 import { ChevronDown, ChevronUp } from "lucide-react";
-import type { KeyboardEvent } from "react";
+import type { KeyboardEvent, ReactNode } from "react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import type { TraceMode } from "@/lib/search/traces";
@@ -22,16 +22,25 @@ type TreeControls = {
 export function TreeToolbar({
   mode,
   onMode,
+  end,
   ...tree
 }: {
   mode: TraceMode;
   onMode: (mode: TraceMode) => void;
+  /** Shown at the right end of the bar, such as the Transcript's Full width toggle. */
+  end?: ReactNode;
 } & Partial<TreeControls>) {
   const controls = treeControls(tree);
   return (
     <div className="flex h-8 shrink-0 items-center gap-1 border-b px-2">
       <ModeToggle mode={mode} onMode={onMode} />
       {controls ? <TreeControls controls={controls} /> : null}
+      {end ? (
+        <>
+          <span className="flex-1" />
+          {end}
+        </>
+      ) : null}
     </div>
   );
 }
