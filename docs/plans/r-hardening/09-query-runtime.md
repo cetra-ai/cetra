@@ -64,7 +64,7 @@ Sequential: P2 and P3 both edit `lib.rs`, and P4 documents what P1–P3 built.
 |---|---|
 | P1 | `crates/storage/src/query_runtime.rs` (new), `crates/storage/src/lib.rs`, `crates/storage/src/config.rs`, `crates/storage/Cargo.toml`, `Cargo.lock`, `crates/storage/src/model_tests/harness.rs`, `crates/storage/src/crash_tests.rs`, `crates/storage/src/model_tests/resources/memory.rs` |
 | P2 | `crates/storage/src/views/{mod,hex,sessions}.rs`, `crates/storage/src/lib.rs`, `crates/storage/src/media.rs`, `crates/storage/src/test_support.rs`, `crates/storage/src/reads/{deletions,experiments,scores,sessions,targets,traces,users,widgets,alerts,facets,prompts}.rs`, `crates/storage/src/sql/run.rs`, `crates/storage/src/fuzz_entry.rs`, `crates/storage/src/filter/mod.rs`, `crates/storage/src/query/traces.rs` |
-| P3 | `crates/storage/src/compaction/job.rs`, `crates/storage/src/compaction/rewrite.rs`, `crates/storage/src/lib.rs`, `crates/storage/src/hooks.rs` |
+| P3 | `crates/storage/src/compaction/job.rs`, `crates/storage/src/compaction/rewrite.rs`, `crates/storage/src/compaction/verify_pass.rs`, `crates/storage/src/lib.rs`, `crates/storage/src/hooks.rs` |
 | P4 | `docs/mvp-decisions.md`, `docs/spec/03-storage.md`, `docs/spec/05-query.md`, `docs/spec/12-operations.md`, `website/src/content/docs/docs/self-hosting/configuration-reference.md`, `CHANGELOG.md`, `docs/research/storage/hardening.md`, `docs/roadmap.md` |
 
 ## Conventions for every phase
