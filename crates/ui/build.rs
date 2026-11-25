@@ -14,6 +14,16 @@ use sha2::{Digest, Sha256};
 fn main() {
     let dist = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../web/dist");
     let out = PathBuf::from(std::env::var("OUT_DIR").expect("OUT_DIR is set by Cargo"));
+    // Cargo treats a missing `rerun-if-changed` path as changed on every build, which rebuilt
+    // this crate and `cetra-cli` on every cargo invocation without a web build (all Rust CI
+    // jobs). An empty `web/dist` (git ignores it) keeps the fingerprint stable, and a later
+    // `pnpm build` writing into it still re-runs this script. Its mtime goes back to the epoch,
+    // or Cargo would see it as newer than this run and re-run the script once more; if the
+    // platform refuses, that one extra run is the only cost.
+    if !dist.exists() {
+        fs::create_dir_all(&dist).expect("create web/dist");
+        let _ = fs::File::open(&dist).and_then(|d| d.set_modified(std::time::UNIX_EPOCH));
+    }
     println!("cargo:rerun-if-changed=build.rs");
     println!("cargo:rerun-if-changed={}", dist.display());
 
