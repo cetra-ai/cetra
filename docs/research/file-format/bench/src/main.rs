@@ -680,13 +680,9 @@ async fn has_files(loc: &Location, variant: &str) -> R<bool> {
 /// `FMT_OPEN_HINT` is set, as a catalog would (`FileSummary::tail_len`).
 static TAIL_HINTS: std::sync::Mutex<Option<std::collections::HashMap<ObjPath, u64>>> = std::sync::Mutex::new(None);
 
-/// The `.strata` files of a variant, sorted by path, opened concurrently. `FMT_OPEN_SUFFIX`
-/// sets the first read's length when there is no hint (default `Config::open_default_suffix`),
-/// `FMT_POINT_GAP` and `FMT_POINT_MAX_RANGE` how a lookup's reads merge.
-async fn open_strata(loc: &Location, variant: &str) -> R<Vec<Arc<StrataFile>>> {
-    let mut metas: Vec<ObjectMeta> = loc.store.list(Some(&loc.prefix.clone().join(variant))).try_collect().await?;
-    metas.retain(|m| m.location.to_string().ends_with(".strata"));
-    metas.sort_by(|a, b| a.location.cmp(&b.location));
+/// Strata's `Config` for the bench: the default, with the `FMT_OPEN_SUFFIX`, `FMT_POINT_GAP` and
+/// `FMT_POINT_MAX_RANGE` overrides.
+fn strata_config() -> Config {
     let mut cfg = Config::default();
     if let Some(n) = std::env::var("FMT_OPEN_SUFFIX").ok().and_then(|v| v.parse().ok()) {
         cfg.open_default_suffix = n;
@@ -699,6 +695,16 @@ async fn open_strata(loc: &Location, variant: &str) -> R<Vec<Arc<StrataFile>>> {
     if let Some(n) = std::env::var("FMT_POINT_MAX_RANGE").ok().and_then(|v| v.parse().ok()) {
         cfg.point_max_range = n;
     }
+    cfg
+}
+
+/// The `.strata` files of a variant, sorted by path, opened concurrently, with `strata_config`.
+/// `FMT_OPEN_HINT` gives each file its first open's tail length as the next open's hint.
+async fn open_strata(loc: &Location, variant: &str) -> R<Vec<Arc<StrataFile>>> {
+    let mut metas: Vec<ObjectMeta> = loc.store.list(Some(&loc.prefix.clone().join(variant))).try_collect().await?;
+    metas.retain(|m| m.location.to_string().ends_with(".strata"));
+    metas.sort_by(|a, b| a.location.cmp(&b.location));
+    let cfg = strata_config();
     let use_hints = std::env::var_os("FMT_OPEN_HINT").is_some();
     let hint = |p: &ObjPath| {
         let hints = TAIL_HINTS.lock().unwrap_or_else(|e| e.into_inner());

@@ -19,6 +19,7 @@ use parquet::file::metadata::{PageIndexPolicy, ParquetMetaDataReader};
 use serde_json::{Value, json};
 use xxhash_rust::xxh3::xxh3_64;
 
+use crate::cw::many;
 use crate::cw::read::{self, Files};
 use crate::cw::writes;
 use crate::profile::unhex;
@@ -420,6 +421,9 @@ pub async fn one_cmd(args: &[String]) -> R<()> {
 /// Runs `query` K times in this process, as `cw one` does, and returns its result.
 pub async fn one(dir: &str, format: &str, query: &str, runs: usize) -> R<ProcResult> {
     check_format(format)?;
+    if many::is_many(query) {
+        return many_format(dir, format, query, runs).await;
+    }
     if is_write_like(query) {
         if dir.starts_with("s3://") {
             return Err(format!("{query} is local only: give a local case directory").into());
@@ -520,6 +524,69 @@ async fn read_format(dir: &str, format: &str, query: &str, runs: usize) -> R<Pro
         waves,
         rows: warm.rows,
         answer: format!("{:016x}", warm.hash),
+        rss_start,
+        vmhwm: proc_status_bytes("VmHWM")?,
+        bytes_written: None,
+        tail_bytes: None,
+    })
+}
+
+/// An M3 query for `cw one` (plans/08-m3-many-files.md § M3.2). The format's files are listed and
+/// the case read outside the timed region. `rollup_30d` opens its `spans` files once and warms up
+/// on them; the cold queries open their files inside each run (CW-24). The store's counters are
+/// reset before each run, so `gets` and `bytes` are one cold run's (warm: the first measured run's).
+/// Every run's answer must equal the reference: the warm-up's, else the first run's.
+async fn many_format(dir: &str, format: &str, query: &str, runs: usize) -> R<ProcResult> {
+    if runs == 0 {
+        return Err("runs must be at least 1".into());
+    }
+    let rss_start = proc_status_bytes("VmRSS")?;
+    let loc = location(dir)?;
+    let listing = many::list(&loc, format).await?;
+    let case = many::read_project_case(&loc).await?;
+    let warm = if many::is_cold(query) { None } else { Some(many::open(&loc, format, &listing.spans).await?) };
+    let mut reference: Option<read::Answer> = None;
+    if let Some(w) = &warm {
+        let (answer, _) = many::run(query, format, &loc, &listing, Some(w), &case).await?;
+        reference = Some(answer);
+    }
+    let (mut runs_ms, mut cpu_ms) = (Vec::new(), Vec::new());
+    let (mut gets, mut bytes): (u64, u64) = (0, 0);
+    for k in 0..runs {
+        loc.store.reset();
+        let cpu0 = ProcessTime::now();
+        let t0 = Instant::now();
+        let (answer, per_id) = many::run(query, format, &loc, &listing, warm.as_ref(), &case).await?;
+        if per_id.is_empty() {
+            runs_ms.push(t0.elapsed().as_secs_f64() * 1e3);
+            cpu_ms.push(cpu0.elapsed().as_secs_f64() * 1e3);
+        } else {
+            for (wall, cpu) in per_id {
+                runs_ms.push(wall);
+                cpu_ms.push(cpu);
+            }
+        }
+        match reference {
+            Some(r) if r != answer => return Err(format!("answer changed between runs ({query} {format})").into()),
+            Some(_) => {}
+            None => reference = Some(answer),
+        }
+        // I/O counters are read after the first measured run only (see ProcResult).
+        if k == 0 {
+            (gets, bytes) = loc.store.stats();
+        }
+    }
+    let answer = reference.ok_or("no measured run")?;
+    Ok(ProcResult {
+        query: query.to_owned(),
+        format: format.to_owned(),
+        runs_ms,
+        cpu_ms,
+        gets,
+        bytes,
+        waves: None,
+        rows: answer.rows,
+        answer: format!("{:016x}", answer.hash),
         rss_start,
         vmhwm: proc_status_bytes("VmHWM")?,
         bytes_written: None,
