@@ -281,14 +281,17 @@ impl ObjectStore for BlockCache {
     }
     async fn get_ranges(&self, l: &Path, ranges: &[Range<u64>]) -> Result<Vec<Bytes>> {
         let size = self.meta(l).await?.size;
-        let mut out = Vec::with_capacity(ranges.len());
-        for r in ranges {
-            match resolve(Some(&GetRange::Bounded(r.clone())), size) {
-                Some(valid) => out.push(self.read(l, size, valid).await?),
-                None => out.extend(self.inner.get_ranges(l, std::slice::from_ref(r)).await?),
-            }
-        }
-        Ok(out)
+        // The ranges are read concurrently, as the inner store runs the ranges of one call in
+        // parallel; `try_join_all` returns them in input order.
+        let parts: Vec<Vec<Bytes>> =
+            futures::future::try_join_all(ranges.iter().map(|r| async move {
+                match resolve(Some(&GetRange::Bounded(r.clone())), size) {
+                    Some(valid) => self.read(l, size, valid).await.map(|b| vec![b]),
+                    None => self.inner.get_ranges(l, std::slice::from_ref(r)).await,
+                }
+            }))
+            .await?;
+        Ok(parts.into_iter().flatten().collect())
     }
     fn delete_stream(
         &self,
@@ -554,6 +557,32 @@ mod tests {
         for (bytes, r) in got.iter().zip(&ranges) {
             assert_eq!(&bytes[..], &data[r.start as usize..r.end as usize]);
         }
+    }
+
+    #[tokio::test]
+    async fn block_cache_get_ranges_keeps_order() {
+        let (inner, path, data) = stored(5 * MIB).await;
+        let cache = BlockCache::new(inner.clone(), 64 * MIB);
+        // Block 1 is held; blocks 0, 2, 3 and 4 are not. Ranges 0 and 2 share block 3.
+        get(&cache, &path, Some(GetRange::Bounded(MIB..MIB + 1))).await;
+        let ranges = [
+            3 * MIB + 100..3 * MIB + 200,
+            MIB + 10..MIB + 20,
+            4 * MIB - 50..4 * MIB + 50,
+            100..200,
+            2 * MIB + 7..2 * MIB + 9,
+        ];
+        let got = cache.get_ranges(&path, &ranges).await.unwrap();
+        let want: Vec<Bytes> = ranges
+            .iter()
+            .map(|r| Bytes::copy_from_slice(&data[r.start as usize..r.end as usize]))
+            .collect();
+        assert_eq!(got, want);
+        let inner_got = inner.get_ranges(&path, &ranges).await.unwrap();
+        assert_eq!(
+            got, inner_got,
+            "the same bytes as the inner store, in input order"
+        );
     }
 
     #[tokio::test]

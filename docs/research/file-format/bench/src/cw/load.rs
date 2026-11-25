@@ -143,10 +143,24 @@ async fn concurrent_once(
     }
     let mut answers = Vec::with_capacity(n);
     let mut times = Vec::with_capacity(n);
-    for handle in handles {
-        let (answer, ms) = handle.await??;
-        answers.push(answer);
-        times.push(ms);
+    for i in 0..handles.len() {
+        let result = match (&mut handles[i]).await {
+            Ok(result) => result,
+            Err(e) => Err(e.into()),
+        };
+        match result {
+            Ok((answer, ms)) => {
+                answers.push(answer);
+                times.push(ms);
+            }
+            Err(e) => {
+                // Tasks not yet awaited are aborted, so they do not run on after the error.
+                for handle in &handles[i + 1..] {
+                    handle.abort();
+                }
+                return Err(e);
+            }
+        }
     }
     let cpu_ms = cpu0.elapsed().as_secs_f64() * 1e3;
     Ok((combine(&answers), times, cpu_ms))
@@ -225,6 +239,8 @@ pub(crate) struct CacheMixRun {
     /// Pass 2's six query times, ms.
     pub times: Vec<f64>,
     /// The process CPU time of pass 2, ms (as `concurrent`, the average per query is this over six).
+    /// It includes `many::open` of both tables, which runs inside pass 2 but outside the six timed
+    /// queries, so it is not the queries' CPU alone.
     pub cpu_ms: f64,
 }
 
@@ -296,6 +312,8 @@ pub(crate) async fn cache_mix_run(
         prefix: loc.prefix.clone(),
     };
     let first = cache_pass(loc, &cached, &cache, listing, case, project, format).await?;
+    // Pass 2's CPU includes `many::open` of both tables (inside `cache_pass`, outside the timed
+    // queries), as `CacheMixRun::cpu_ms` says.
     let cpu0 = ProcessTime::now();
     let second = cache_pass(loc, &cached, &cache, listing, case, project, format).await?;
     let cpu_ms = cpu0.elapsed().as_secs_f64() * 1e3;
@@ -495,15 +513,51 @@ mod tests {
                 .await
                 .unwrap();
             assert!(run.pass1.0 >= 1, "{format}: pass 1 made no remote request");
+            assert!(run.hits > 0, "{format}: pass 2 hit the cache nowhere");
             assert!(
-                run.pass2.0 <= run.pass1.0,
-                "{format}: pass 2 made more requests than pass 1"
+                run.pass2.0 < run.pass1.0,
+                "{format}: pass 2 made no fewer requests than pass 1"
             );
             answers.push(run.answer);
         }
         assert_eq!(
             answers[0], answers[1],
             "cache_mix differs between the formats"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn cache_mix_small_budget_agrees() {
+        let p = TestProject::new("cache-small").await;
+        let loc = location(&p.dir.display().to_string()).unwrap();
+        let project = many::read_project_case(&loc).await.unwrap();
+        let case = ShapeCase {
+            clock: project.clock,
+            needles: read_case(&loc).await.unwrap().needles,
+        };
+        let mut answers = Vec::new();
+        for format in ["pq_cetra", "st"] {
+            let listing = many::list(&loc, format).await.unwrap();
+            let big = cache_mix_run(&loc, &listing, &case, &project, format, 64 << 20)
+                .await
+                .unwrap();
+            // A 1 MiB budget holds one block, so the passes evict through the real readers.
+            let small = cache_mix_run(&loc, &listing, &case, &project, format, 1 << 20)
+                .await
+                .unwrap();
+            assert_eq!(
+                small.answer, big.answer,
+                "{format}: a 1 MiB budget gives another answer than 64 MiB"
+            );
+            assert!(
+                small.misses > big.misses,
+                "{format}: the 1 MiB budget evicted nothing"
+            );
+            answers.push(small.answer);
+        }
+        assert_eq!(
+            answers[0], answers[1],
+            "cache_mix differs between the formats at 1 MiB"
         );
     }
 
