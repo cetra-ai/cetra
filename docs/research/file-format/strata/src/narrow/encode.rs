@@ -258,7 +258,15 @@ fn value_bytes_of<'a>(
 /// sign-extended.
 fn row_bits(values: &[u8], num: Numeric) -> impl Iterator<Item = u64> + '_ {
     values.chunks_exact(num.width.max(1)).map(move |row| {
-        let raw = le_u64(row).unwrap_or_default();
+        // Fixed-size reads compile to one load; `le_u64`'s copy of any length was a sixth of
+        // the time of writes.
+        let raw = match row.len() {
+            1 => row.first().copied().map_or(0, u64::from),
+            2 => <[u8; 2]>::try_from(row).map_or(0, |b| u64::from(u16::from_le_bytes(b))),
+            4 => <[u8; 4]>::try_from(row).map_or(0, |b| u64::from(u32::from_le_bytes(b))),
+            8 => <[u8; 8]>::try_from(row).map_or(0, u64::from_le_bytes),
+            _ => le_u64(row).unwrap_or_default(),
+        };
         if num.signed {
             super::sign_extend(raw, num.width)
         } else {
@@ -348,13 +356,16 @@ fn encode_delta(array: &dyn Array, num: Numeric) -> Result<Option<EncodedChunk>>
             None => 0,
         })
         .collect();
-    let (width, reference, patched) = best_delta_width(steps.get(32..).unwrap_or_default());
-    let lanes_bytes = n / 8 * usize::from(width);
-    let size = 1 + 8 + 1 + 32 + lanes_bytes + 4 + patched * PATCH_BYTES;
+    // The body takes `DELTA_FIXED` bytes plus what `best_delta_width` counts, and must be
+    // smaller than the values bit-packed.
     let bitpack_bytes = n / 8 * usize::from(width_for((max as u64).wrapping_sub(min as u64)));
-    if size >= bitpack_bytes {
+    let Some((width, reference, patched)) = best_delta_width(
+        steps.get(32..).unwrap_or_default(),
+        bitpack_bytes.saturating_sub(DELTA_FIXED),
+    ) else {
         return Ok(None);
-    }
+    };
+    let size = DELTA_FIXED + n / 8 * usize::from(width) + patched * PATCH_BYTES;
     let base = min as u64;
     let firsts: Vec<u64> = values
         .iter()
@@ -411,13 +422,29 @@ fn encode_delta(array: &dyn Array, num: Numeric) -> Result<Option<EncodedChunk>>
     Ok(Some(chunk))
 }
 
+/// The bytes `encode_delta` counts for a `ForDelta` body besides its packed steps and patches:
+/// the width, the reference, the first width, 32 for the first values and the patch count.
+const DELTA_FIXED: usize = 1 + 8 + 1 + 32 + 4;
+
 /// The width (0 to 32), reference step and patch count that store `steps` in the fewest bytes:
 /// for each width, the reference is the start of the window of `2^width` values that holds the
 /// most steps, and every step outside it is a patch. Steps are compared as signed numbers.
-fn best_delta_width(steps: &[u64]) -> (u8, u64, usize) {
+/// `None` when the fewest bytes are `limit` or more: the caller would not store it.
+fn best_delta_width(steps: &[u64], limit: usize) -> Option<(u8, u64, usize)> {
     let mut sorted: Vec<i64> = steps.iter().map(|&s| s as i64).collect();
     sorted.sort_unstable();
     let n = sorted.len();
+    // The distinct steps, and before each of them (and at the end) how many steps are smaller:
+    // delta steps repeat a lot, so the windows below run over far fewer values.
+    let mut distinct: Vec<i64> = Vec::new();
+    let mut before: Vec<usize> = Vec::new();
+    for (i, &step) in sorted.iter().enumerate() {
+        if distinct.last() != Some(&step) {
+            distinct.push(step);
+            before.push(i);
+        }
+    }
+    before.push(n);
     let mut best = (
         0u8,
         sorted.first().copied().unwrap_or(0) as u64,
@@ -425,18 +452,26 @@ fn best_delta_width(steps: &[u64]) -> (u8, u64, usize) {
         usize::MAX,
     );
     for width in 0u8..=32 {
-        let span = (1i128 << width) - 1;
-        // The window starting at each step: the most steps within `span` of it.
+        // The packed steps alone take this many bytes and grow with the width: once they reach
+        // the best size, no wider width is smaller. Writes spent a third of their time here.
+        if (n + 32) / 8 * usize::from(width) >= best.3.min(limit) {
+            break;
+        }
+        let span = (1u64 << width) - 1;
+        // The window starting at each distinct step: the most steps within `span` of it. A
+        // window starting at a repeat of a step covers fewer, so only first ones are tried.
+        // The steps are sorted, so `hi - lo` is the exact distance as a u64.
         let (mut end, mut covered, mut start) = (0usize, 0usize, 0i64);
-        for (i, &lo) in sorted.iter().enumerate() {
-            while sorted
+        for (j, &lo) in distinct.iter().enumerate() {
+            while distinct
                 .get(end)
-                .is_some_and(|&hi| i128::from(hi) - i128::from(lo) <= span)
+                .is_some_and(|&hi| (hi as u64).wrapping_sub(lo as u64) <= span)
             {
                 end += 1;
             }
-            if end - i > covered {
-                covered = end - i;
+            let within = before.get(end).zip(before.get(j)).map_or(0, |(e, b)| e - b);
+            if within > covered {
+                covered = within;
                 start = lo;
             }
         }
@@ -446,7 +481,7 @@ fn best_delta_width(steps: &[u64]) -> (u8, u64, usize) {
             best = (width, start as u64, patches, bytes);
         }
     }
-    (best.0, best.1, best.2)
+    (best.3 < limit).then_some((best.0, best.1, best.2))
 }
 
 fn encode_numeric(array: &dyn Array, num: Numeric, packer: &Packer) -> Result<EncodedChunk> {
@@ -1205,7 +1240,69 @@ mod tests {
     use super::*;
     use crate::narrow::BlockEntry;
     use arrow::array::{Float32Array, Float64Array, Int64Array, new_null_array};
+    use proptest::strategy::Strategy;
     use std::sync::Arc;
+
+    /// `best_delta_width` by its definition: every width, every window in 128-bit arithmetic.
+    fn best_delta_width_by_definition(steps: &[u64]) -> (u8, u64, usize, usize) {
+        let mut sorted: Vec<i64> = steps.iter().map(|&s| s as i64).collect();
+        sorted.sort_unstable();
+        let n = sorted.len();
+        let mut best = (
+            0u8,
+            sorted.first().copied().unwrap_or(0) as u64,
+            n,
+            usize::MAX,
+        );
+        for width in 0u8..=32 {
+            let span = (1i128 << width) - 1;
+            let (mut covered, mut start) = (0usize, 0i64);
+            for (i, &lo) in sorted.iter().enumerate() {
+                let within = sorted[i..]
+                    .iter()
+                    .take_while(|&&hi| i128::from(hi) - i128::from(lo) <= span)
+                    .count();
+                if within > covered {
+                    covered = within;
+                    start = lo;
+                }
+            }
+            let bytes = (n + 32) / 8 * usize::from(width) + (n - covered) * PATCH_BYTES;
+            if bytes < best.3 {
+                best = (width, start as u64, n - covered, bytes);
+            }
+        }
+        best
+    }
+
+    proptest::proptest! {
+        #![proptest_config(proptest::prelude::ProptestConfig::with_cases(500))]
+
+        /// The early stop and the u64 distances choose what trying every width chooses, on
+        /// steps that are small, far apart, or at the ends of the i64 range.
+        #[test]
+        fn best_delta_width_matches_its_definition(
+            steps in proptest::collection::vec(
+                proptest::prop_oneof![
+                    0u64..16,
+                    (0u64..1 << 20).prop_map(|s| s.wrapping_sub(1 << 19)),
+                    proptest::prelude::any::<u64>(),
+                    proptest::prelude::Just(i64::MIN as u64),
+                    proptest::prelude::Just(i64::MAX as u64),
+                ],
+                0..300,
+            ),
+            limit in 0usize..4_000,
+        ) {
+            // `limit` cuts the search short without changing what is under it.
+            let (width, reference, patched, bytes) = best_delta_width_by_definition(&steps);
+            let want = (width, reference, patched);
+            proptest::prop_assert_eq!(best_delta_width(&steps, usize::MAX), Some(want));
+            proptest::prop_assert_eq!(best_delta_width(&steps, bytes + 1), Some(want));
+            proptest::prop_assert_eq!(best_delta_width(&steps, bytes), None);
+            proptest::prop_assert_eq!(best_delta_width(&steps, limit), (bytes < limit).then_some(want));
+        }
+    }
 
     /// Decodes `chunk` as a column of `array`'s type and checks it against `array`.
     fn decodes_to(chunk: &EncodedChunk, array: &ArrayRef) {
