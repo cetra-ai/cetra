@@ -128,10 +128,55 @@ pub(super) fn apply_tombstones_and_filters(
             }
         };
         drop(mask);
+        reconcile_res(res.as_deref_mut(), before, batch.memory_bytes())?;
         if batch.is_empty() {
             break;
         }
     }
 
     Ok(batch)
+}
+
+#[cfg(test)]
+mod tests {
+    use cetra_column::{
+        Column, DataType, Field, FlatColumn, FlatData, GlobalPool, ScalarValue, Schema, Selection,
+    };
+    use cetra_query::BinaryOp;
+
+    use super::*;
+
+    #[test]
+    fn multiple_filters_do_not_inflate_reservation() {
+        let schema = Schema::try_new_arc(vec![Field::new("x", DataType::I64, false)]).unwrap();
+        let col = Column::Flat(FlatColumn::try_new(FlatData::I64(vec![1, 2, 3, 4]), None).unwrap());
+        let batch = Batch::try_new(Arc::clone(&schema), vec![col], 4, Selection::All).unwrap();
+        let col_expr = Expr::Column {
+            index: 0,
+            name: "x".to_owned(),
+            data_type: DataType::I64,
+        };
+        let filters: Vec<Expr> = (0..5)
+            .map(|_| Expr::Binary {
+                left: Box::new(col_expr.clone()),
+                op: BinaryOp::Gt,
+                right: Box::new(Expr::Literal(ScalarValue::I64(1))),
+                data_type: DataType::Bool,
+            })
+            .collect();
+
+        let pool = GlobalPool::standalone(1024 * 1024);
+        let mut res = pool.register("test_filters", false);
+        res.try_grow(64).unwrap();
+        let before = res.size();
+        reconcile_res(Some(&mut res), before, batch.memory_bytes()).unwrap();
+
+        let ctx = EvalContext {
+            now_ns: 0,
+            cancel: cetra_column::CancelToken::new(),
+        };
+        let out = apply_tombstones_and_filters(batch, None, &filters, &ctx, Some(&mut res), before)
+            .unwrap();
+        assert_eq!(res.size(), before + out.memory_bytes());
+    }
 }

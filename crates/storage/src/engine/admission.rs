@@ -48,6 +48,9 @@ impl AsyncAdmissionPool {
         cap: usize,
         wait: Duration,
     ) -> Result<Arc<ScopedPool>, QueryError> {
+        if initial > cap || initial > self.pool.limit() {
+            return Err(QueryError::Busy);
+        }
         let deadline = tokio::time::Instant::now() + wait;
         loop {
             // Register for wake-up BEFORE checking `try_admit` so a release between
@@ -109,5 +112,26 @@ mod tests {
         assert_eq!(pool.used(), 2 * MIB);
         drop(second);
         assert_eq!(pool.used(), 0);
+    }
+
+    #[tokio::test]
+    async fn admit_fast_fails_when_initial_exceeds_cap_or_limit() {
+        let pool = AsyncAdmissionPool::new(2 * MIB);
+        let start = tokio::time::Instant::now();
+        let err = pool
+            .admit(2 * MIB, MIB, Duration::from_secs(30))
+            .await
+            .unwrap_err();
+        assert!(matches!(err, QueryError::Busy));
+
+        let err2 = pool
+            .admit(3 * MIB, 4 * MIB, Duration::from_secs(30))
+            .await
+            .unwrap_err();
+        assert!(matches!(err2, QueryError::Busy));
+        assert!(
+            start.elapsed() < Duration::from_secs(1),
+            "impossible admission should fail immediately without waiting"
+        );
     }
 }

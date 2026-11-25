@@ -3,6 +3,7 @@
 //! corrupt-file `Suspects` reporting.
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::fmt;
 use std::ops::Range;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::Arc;
@@ -31,8 +32,7 @@ use parquet::data_type::{
 };
 use parquet::errors::ParquetError;
 use parquet::file::metadata::{
-    ColumnChunkMetaData, PageIndexPolicy, ParquetMetaData, ParquetMetaDataPushDecoder,
-    RowGroupMetaData,
+    PageIndexPolicy, ParquetMetaData, ParquetMetaDataPushDecoder, RowGroupMetaData,
 };
 use parquet::file::page_index::column_index::ColumnIndexMetaData;
 use parquet::file::page_index::offset_index::PageLocation;
@@ -59,7 +59,7 @@ const CANCEL_POLL_INTERVAL: Duration = Duration::from_millis(1);
 const BLOOM_COLUMNS: &[&str] = &["trace_id", "session_id", "user_id", "score_id"];
 
 /// Zero-Arrow low-level Parquet [`ScanSource`].
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub(crate) struct ParquetSource {
     store: Arc<dyn ObjectStore>,
     table: FileTable,
@@ -69,6 +69,17 @@ pub(crate) struct ParquetSource {
     metadata_cache: Arc<MetadataCache>,
     suspects: Suspects,
     runtime: tokio::runtime::Handle,
+}
+
+impl fmt::Debug for ParquetSource {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ParquetSource")
+            .field("table", &self.table.as_str())
+            .field("files", &self.files.len())
+            .field("deletions", &self.deletions.len())
+            .field("schema_len", &self.schema.len())
+            .finish_non_exhaustive()
+    }
 }
 
 impl ParquetSource {
@@ -290,14 +301,28 @@ fn table_time_column(table: FileTable) -> &'static str {
 }
 
 /// Precompiled projection, constraints, and bloom-filter hints shared by all partitions of a scan.
-#[derive(Debug)]
 struct ScanPlan {
     projection: Option<Vec<usize>>,
+    projected_schema: Arc<Schema>,
     output_cols: Vec<usize>,
     filter_cols: BTreeSet<usize>,
     filters: Vec<Expr>,
     constraints: BTreeMap<String, Vec<ColConstraint>>,
     bloom_lookups: Vec<BloomLookup>,
+}
+
+impl fmt::Debug for ScanPlan {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ScanPlan")
+            .field("projection_len", &self.projection.as_ref().map(Vec::len))
+            .field("projected_schema_len", &self.projected_schema.len())
+            .field("output_cols_len", &self.output_cols.len())
+            .field("filter_cols_len", &self.filter_cols.len())
+            .field("filters_len", &self.filters.len())
+            .field("constraints_len", &self.constraints.len())
+            .field("bloom_lookups_len", &self.bloom_lookups.len())
+            .finish()
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -318,7 +343,7 @@ struct BoundValue {
     inclusive: bool,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Clone, PartialEq)]
 enum ConstraintValue {
     Bool(bool),
     I64(i64),
@@ -326,14 +351,42 @@ enum ConstraintValue {
     Bytes(Vec<u8>),
 }
 
-#[derive(Debug, Clone)]
+impl fmt::Debug for ConstraintValue {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Bool(_) => f.write_str("Bool(<redacted>)"),
+            Self::I64(_) => f.write_str("I64(<redacted>)"),
+            Self::F64(_) => f.write_str("F64(<redacted>)"),
+            Self::Bytes(b) => write!(f, "Bytes({} bytes)", b.len()),
+        }
+    }
+}
+
+#[derive(Clone)]
 struct BloomLookup {
     column: String,
     keys: Vec<Vec<u8>>,
 }
 
+impl fmt::Debug for BloomLookup {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("BloomLookup")
+            .field("column", &self.column)
+            .field("keys_len", &self.keys.len())
+            .finish()
+    }
+}
+
 impl ScanPlan {
-    fn compile(table: FileTable, schema: &Schema, spec: &ScanSpec) -> Result<Self, QueryError> {
+    fn compile(
+        table: FileTable,
+        schema: &Arc<Schema>,
+        spec: &ScanSpec,
+    ) -> Result<Self, QueryError> {
+        let projected_schema = match &spec.projection {
+            Some(indices) => Arc::new(schema.project(indices)?),
+            None => Arc::clone(schema),
+        };
         let output_cols: Vec<usize> = match &spec.projection {
             Some(indices) => {
                 let mut set = BTreeSet::new();
@@ -428,6 +481,7 @@ impl ScanPlan {
 
         Ok(Self {
             projection: spec.projection.clone(),
+            projected_schema,
             output_cols,
             filter_cols,
             filters: spec.filters.clone(),
@@ -670,6 +724,7 @@ enum FetchError {
     Cancelled,
     Corrupt,
     Store,
+    Runtime,
 }
 
 fn fetch_ranges(
@@ -684,6 +739,9 @@ fn fetch_ranges(
     }
     if cancel.is_cancelled() {
         return Err(FetchError::Cancelled);
+    }
+    if tokio::runtime::Handle::try_current().is_ok() {
+        return Err(FetchError::Runtime);
     }
 
     let store = Arc::clone(store);
@@ -730,6 +788,9 @@ fn map_fetch_err(err: &FetchError, file_id: FileId, suspects: &Suspects) -> Quer
             QueryError::internal("corrupt parquet file")
         }
         FetchError::Store => QueryError::internal("storage read error"),
+        FetchError::Runtime => {
+            QueryError::internal("cannot block on parquet I/O inside tokio runtime")
+        }
     }
 }
 
@@ -763,11 +824,10 @@ fn load_metadata(
         runtime,
     )
     .map_err(|e| map_fetch_err(&e, file.id, suspects))?;
-    let tail_bytes = tail_bufs
-        .into_iter()
-        .next()
-        .ok_or_else(|| corrupt_err(file.id, suspects))?;
-    if tail_bytes.len() < 8 {
+    let [tail_bytes]: [Bytes; 1] = tail_bufs
+        .try_into()
+        .map_err(|_| corrupt_err(file.id, suspects))?;
+    if tail_bytes.len() as u64 != tail_len || tail_bytes.len() < 8 {
         return Err(corrupt_err(file.id, suspects));
     }
     let tail_8: [u8; 8] = tail_bytes[tail_bytes.len() - 8..]
@@ -805,6 +865,14 @@ fn load_metadata(
                 }
                 let bufs = fetch_ranges(store, &path, &ranges, cancel, runtime)
                     .map_err(|e| map_fetch_err(&e, file.id, suspects))?;
+                if bufs.len() != ranges.len()
+                    || bufs
+                        .iter()
+                        .zip(&ranges)
+                        .any(|(b, r)| b.len() as u64 != r.end - r.start)
+                {
+                    return Err(corrupt_err(file.id, suspects));
+                }
                 guard_sync(|| decoder.push_ranges(ranges, bufs))
                     .map_err(|_| corrupt_err(file.id, suspects))?;
             }
@@ -822,7 +890,7 @@ fn find_scalar_leaf(descr: &SchemaDescriptor, name: &str) -> Option<usize> {
     descr
         .columns()
         .iter()
-        .position(|col| col.path().parts() == [name])
+        .position(|col| col.path().parts() == [name] && col.max_rep_level() == 0)
 }
 
 fn unsigned_int32(col: &ColumnDescPtr) -> Option<u8> {
@@ -933,6 +1001,10 @@ fn value_in_bounds(
 }
 
 fn bounds_overlap_lo(q_lo: &BoundValue, data_hi: &ConstraintValue) -> bool {
+    if matches!(q_lo.value, ConstraintValue::F64(_)) {
+        // Parquet float statistics exclude NaN, whereas `cetra-query` orders `NaN > +inf`.
+        return true;
+    }
     let Some(ord) = cmp_constraint(data_hi, &q_lo.value) else {
         return true;
     };
@@ -1104,11 +1176,28 @@ fn column_index_page_matches(
     )
 }
 
+fn checked_rg_num_rows(rg: &RowGroupMetaData) -> Result<usize, ParquetError> {
+    let n = rg.num_rows();
+    if n < 0 || n > i64::from(u32::MAX) {
+        return Err(ParquetError::General(
+            "row group row count out of range".to_owned(),
+        ));
+    }
+    Ok(n as usize)
+}
+
 fn validate_page_locations(
     locs: &[PageLocation],
     num_rows: usize,
     file_size: u64,
 ) -> Result<(), ParquetError> {
+    if let Some(first) = locs.first()
+        && first.first_row_index != 0
+    {
+        return Err(ParquetError::General(
+            "first page location does not start at row 0".to_owned(),
+        ));
+    }
     let mut prev_row = -1_i64;
     for loc in locs {
         if loc.offset < 0 || loc.compressed_page_size <= 0 || loc.first_row_index < 0 {
@@ -1176,8 +1265,7 @@ fn prune_pages_for_row_group(
     file_size: u64,
 ) -> Result<Vec<Range<usize>>, ParquetError> {
     let rg = meta.row_group(rg_idx);
-    let num_rows = usize::try_from(rg.num_rows())
-        .map_err(|_| ParquetError::General("row group row count overflow".to_owned()))?;
+    let num_rows = checked_rg_num_rows(rg)?;
     if num_rows == 0 {
         return Ok(Vec::new());
     }
@@ -1249,6 +1337,9 @@ fn filter_row_groups(
     let mut stat_surviving = Vec::new();
     for rg_idx in 0..meta.num_row_groups() {
         let rg = meta.row_group(rg_idx);
+        if checked_rg_num_rows(rg).is_err() {
+            return Err(corrupt_err(file.id, suspects));
+        }
         if rg_matches_statistics(rg, plan) {
             stat_surviving.push(rg_idx);
         }
@@ -1287,14 +1378,27 @@ fn filter_row_groups(
         let ranges: Vec<Range<u64>> = bloom_requests.iter().map(|(_, _, r)| r.clone()).collect();
         let bufs = fetch_ranges(store, &path, &ranges, cancel, runtime)
             .map_err(|e| map_fetch_err(&e, file.id, suspects))?;
+        if bufs.len() != ranges.len()
+            || bufs
+                .iter()
+                .zip(&ranges)
+                .any(|(b, r)| b.len() as u64 != r.end - r.start)
+        {
+            return Err(corrupt_err(file.id, suspects));
+        }
         for ((rg_idx, lookup_idx, _), bytes) in bloom_requests.into_iter().zip(bufs) {
             if pruned_by_bloom.contains(&rg_idx) {
                 continue;
             }
             let sbbf = guard_sync(|| Sbbf::from_bytes(&bytes))
                 .map_err(|_| corrupt_err(file.id, suspects))?;
+            if sbbf.num_blocks() == 0 {
+                return Err(corrupt_err(file.id, suspects));
+            }
             let keys = &plan.bloom_lookups[lookup_idx].keys;
-            if !keys.iter().any(|k| sbbf.check(k.as_slice())) {
+            let matched = guard_sync(|| Ok(keys.iter().any(|k| sbbf.check(k.as_slice()))))
+                .map_err(|_| corrupt_err(file.id, suspects))?;
+            if !matched {
                 pruned_by_bloom.insert(rg_idx);
             }
         }
@@ -1411,56 +1515,6 @@ fn coalesce_ranges(mut ranges: Vec<Range<u64>>) -> Vec<Range<u64>> {
     merged
 }
 
-fn ranges_overlap(a: &Range<usize>, b: &[Range<usize>]) -> bool {
-    b.iter().any(|r| a.start < r.end && r.start < a.end)
-}
-
-fn collect_leaf_byte_ranges(
-    chunk: &ColumnChunkMetaData,
-    page_locations: Option<&[PageLocation]>,
-    num_rows: usize,
-    kept_row_ranges: &[Range<usize>],
-    file_size: u64,
-    out: &mut Vec<Range<u64>>,
-) -> Result<(), ParquetError> {
-    let (chunk_start, chunk_len) = chunk.byte_range();
-    let chunk_end = chunk_start
-        .checked_add(chunk_len)
-        .ok_or_else(|| ParquetError::General("chunk byte range overflow".to_owned()))?;
-    if chunk_end > file_size {
-        return Err(ParquetError::General(
-            "column chunk extends past file end".to_owned(),
-        ));
-    }
-    match page_locations {
-        Some(locs) if !locs.is_empty() => {
-            validate_page_locations(locs, num_rows, file_size)?;
-            let first_offset = locs[0].offset as u64;
-            if first_offset < chunk_start {
-                return Err(ParquetError::General(
-                    "first page offset before chunk start".to_owned(),
-                ));
-            }
-            // Dictionary page precedes first data page when `locs[0].offset > chunk_start`.
-            if first_offset > chunk_start {
-                out.push(chunk_start..first_offset);
-            }
-            let p_ranges = page_row_ranges(locs, num_rows);
-            for (loc, p_range) in locs.iter().zip(p_ranges) {
-                if ranges_overlap(&p_range, kept_row_ranges) {
-                    let start = loc.offset as u64;
-                    let end = start + loc.compressed_page_size as u64;
-                    out.push(start..end);
-                }
-            }
-        }
-        _ => {
-            out.push(chunk_start..chunk_end);
-        }
-    }
-    Ok(())
-}
-
 // ---------------------------------------------------------------------------
 // RLE / bit-packing & dictionary decoding (for DictColumn preservation)
 // ---------------------------------------------------------------------------
@@ -1521,12 +1575,20 @@ impl<'a> BitStream<'a> {
         Ok(u64::from_le_bytes(buf))
     }
 
+    fn remaining_bits(&self) -> usize {
+        self.data
+            .len()
+            .saturating_sub(self.byte_pos)
+            .saturating_mul(8)
+            .saturating_sub(usize::from(self.bit_pos))
+    }
+
     fn read_bits(&mut self, num_bits: u8) -> Option<u32> {
         if num_bits == 0 {
             return Some(0);
         }
         let needed = usize::from(num_bits);
-        let avail = (self.data.len().saturating_sub(self.byte_pos)) * 8 - usize::from(self.bit_pos);
+        let avail = self.remaining_bits();
         if avail < needed {
             return None;
         }
@@ -1536,7 +1598,7 @@ impl<'a> BitStream<'a> {
             let cur_byte = self.data[self.byte_pos];
             let rem_in_byte = 8 - usize::from(self.bit_pos);
             let take = (needed - read).min(rem_in_byte);
-            let mask = (1u8 << take) - 1;
+            let mask = ((1u16 << take) - 1) as u8;
             let bits = (cur_byte >> self.bit_pos) & mask;
             out |= u64::from(bits) << read;
             read += take;
@@ -1558,10 +1620,14 @@ fn decode_rle_hybrid(data: &[u8], bit_width: u8, count: usize) -> Result<Vec<u32
         return Err(ParquetError::General("RLE bit_width > 32".to_owned()));
     }
     if bit_width == 0 {
-        return Ok(vec![0; count]);
+        let mut out = Vec::new();
+        out.try_reserve_exact(count)
+            .map_err(|_| ParquetError::General("RLE allocation failed".to_owned()))?;
+        out.resize(count, 0);
+        return Ok(out);
     }
     let mut stream = BitStream::new(data);
-    let mut out = Vec::with_capacity(count);
+    let mut out = Vec::with_capacity(count.min(4096));
     let aligned_bytes = usize::from(bit_width).div_ceil(8);
 
     while out.len() < count {
@@ -1576,6 +1642,14 @@ fn decode_rle_hybrid(data: &[u8], bit_width: u8, count: usize) -> Result<Vec<u32
             let run_vals = usize::try_from(num_groups.saturating_mul(8))
                 .map_err(|_| ParquetError::General("RLE run length overflow".to_owned()))?;
             let to_read = run_vals.min(count - out.len());
+            if to_read
+                .checked_mul(usize::from(bit_width))
+                .is_none_or(|bits| bits > stream.remaining_bits())
+            {
+                return Err(ParquetError::General("truncated bit-packed run".to_owned()));
+            }
+            out.try_reserve(to_read)
+                .map_err(|_| ParquetError::General("RLE allocation failed".to_owned()))?;
             for _ in 0..to_read {
                 let v = stream
                     .read_bits(bit_width)
@@ -1595,6 +1669,8 @@ fn decode_rle_hybrid(data: &[u8], bit_width: u8, count: usize) -> Result<Vec<u32
             let val_u32 = u32::try_from(val)
                 .map_err(|_| ParquetError::General("RLE value exceeds u32".to_owned()))?;
             let take = repeat.min(count - out.len());
+            out.try_reserve(take)
+                .map_err(|_| ParquetError::General("RLE allocation failed".to_owned()))?;
             out.resize(out.len() + take, val_u32);
         }
     }
@@ -1622,21 +1698,39 @@ fn decode_levels(
     match encoding {
         Encoding::RLE => {
             let raw = decode_rle_hybrid(data, bit_width, num_values)?;
-            raw.into_iter()
-                .map(|v| {
-                    let lvl = i16::try_from(v)
-                        .map_err(|_| ParquetError::General("level value exceeds i16".to_owned()))?;
-                    if lvl > max_level {
-                        return Err(ParquetError::General("level exceeds max_level".to_owned()));
-                    }
-                    Ok(lvl)
-                })
-                .collect()
+            let mut out = Vec::new();
+            out.try_reserve_exact(raw.len())
+                .map_err(|_| ParquetError::General("level allocation failed".to_owned()))?;
+            for v in raw {
+                let lvl = i16::try_from(v)
+                    .map_err(|_| ParquetError::General("level value exceeds i16".to_owned()))?;
+                if lvl > max_level {
+                    return Err(ParquetError::General("level exceeds max_level".to_owned()));
+                }
+                out.push(lvl);
+            }
+            Ok(out)
         }
         #[allow(deprecated)]
         Encoding::BIT_PACKED => {
+            let needed_bits = num_values
+                .checked_mul(usize::from(bit_width))
+                .ok_or_else(|| {
+                    ParquetError::General("bit-packed level count overflow".to_owned())
+                })?;
+            let avail_bits = data
+                .len()
+                .checked_mul(8)
+                .ok_or_else(|| ParquetError::General("bit-packed data size overflow".to_owned()))?;
+            if needed_bits > avail_bits {
+                return Err(ParquetError::General(
+                    "truncated bit-packed levels".to_owned(),
+                ));
+            }
             let mut stream = BitStream::new(data);
-            let mut out = Vec::with_capacity(num_values);
+            let mut out = Vec::new();
+            out.try_reserve_exact(num_values)
+                .map_err(|_| ParquetError::General("level allocation failed".to_owned()))?;
             for _ in 0..num_values {
                 let v = stream.read_bits(bit_width).ok_or_else(|| {
                     ParquetError::General("truncated bit-packed levels".to_owned())
@@ -1684,7 +1778,10 @@ fn split_v1_level_slice(
         #[allow(deprecated)]
         Encoding::BIT_PACKED => {
             let bw = usize::from(bits_required(max_level));
-            let num_bytes = (num_values as usize * bw).div_ceil(8);
+            let bits = (num_values as usize)
+                .checked_mul(bw)
+                .ok_or_else(|| ParquetError::General("V1 bit-packed level overflow".to_owned()))?;
+            let num_bytes = bits.div_ceil(8);
             if num_bytes > buf.len() {
                 return Err(ParquetError::General(
                     "truncated V1 bit-packed level data".to_owned(),
@@ -1700,7 +1797,18 @@ fn split_v1_level_slice(
 
 fn decode_plain_utf8_dict(buf: &[u8], num_values: u32) -> Result<FlatColumn, ParquetError> {
     let count = num_values as usize;
-    let mut offsets = Vec::with_capacity(count + 1);
+    if count > buf.len() / 4 {
+        return Err(ParquetError::General(
+            "dictionary value count exceeds buffer capacity".to_owned(),
+        ));
+    }
+    let cap = count
+        .checked_add(1)
+        .ok_or_else(|| ParquetError::General("dictionary offset count overflow".to_owned()))?;
+    let mut offsets = Vec::new();
+    offsets
+        .try_reserve_exact(cap)
+        .map_err(|_| ParquetError::General("dictionary offsets allocation failed".to_owned()))?;
     offsets.push(0u32);
     let mut bytes = Vec::new();
     let mut pos = 0usize;
@@ -1831,13 +1939,19 @@ enum DictUtf8Mode {
 
 struct DictUtf8LeafDecoder {
     descr: ColumnDescPtr,
+    rg_num_rows: usize,
     mode: DictUtf8Mode,
 }
 
 impl DictUtf8LeafDecoder {
-    fn new(descr: ColumnDescPtr, page_reader: SerializedPageReader<SliceChunkReader>) -> Self {
+    fn new(
+        descr: ColumnDescPtr,
+        page_reader: SerializedPageReader<SliceChunkReader>,
+        rg_num_rows: usize,
+    ) -> Self {
         Self {
             descr,
+            rg_num_rows,
             mode: DictUtf8Mode::Dict {
                 page_reader,
                 dict_page: None,
@@ -2015,6 +2129,11 @@ impl DictUtf8LeafDecoder {
                         let max_rep = self.descr.max_rep_level();
                         let max_def = self.descr.max_def_level();
                         let n = num_values as usize;
+                        if max_rep == 0 && n > self.rg_num_rows {
+                            return Err(ParquetError::General(
+                                "page num_values exceeds row group row count".to_owned(),
+                            ));
+                        }
                         let mut offset = 0usize;
                         let rep_levels = if max_rep > 0 {
                             let (used, slice) = split_v1_level_slice(
@@ -2093,10 +2212,23 @@ impl DictUtf8LeafDecoder {
                         }
                         let max_rep = self.descr.max_rep_level();
                         let max_def = self.descr.max_def_level();
+                        if max_def == 0 && num_nulls != 0 {
+                            return Err(ParquetError::General(
+                                "non-zero nulls on required column".to_owned(),
+                            ));
+                        }
                         let n = num_values as usize;
+                        if max_rep == 0 && n > self.rg_num_rows {
+                            return Err(ParquetError::General(
+                                "page num_values exceeds row group row count".to_owned(),
+                            ));
+                        }
                         let rep_len = rep_levels_byte_len as usize;
                         let def_len = def_levels_byte_len as usize;
-                        if rep_len + def_len > buf.len() {
+                        if rep_len
+                            .checked_add(def_len)
+                            .is_none_or(|sum| sum > buf.len())
+                        {
                             return Err(ParquetError::General(
                                 "truncated V2 level lengths".to_owned(),
                             ));
@@ -2117,6 +2249,15 @@ impl DictUtf8LeafDecoder {
                             Vec::new()
                         };
                         let non_null = (num_values - num_nulls) as usize;
+                        if max_def > 0 {
+                            let actual_non_null =
+                                def_levels.iter().filter(|&&d| d == max_def).count();
+                            if non_null != actual_non_null {
+                                return Err(ParquetError::General(
+                                    "DataPageV2 non-null count mismatch".to_owned(),
+                                ));
+                            }
+                        }
                         let val_slice = &buf[rep_len + def_len..];
                         let codes = if non_null == 0 {
                             Vec::new()
@@ -2565,7 +2706,12 @@ fn compute_record_starts(
     num_values: usize,
 ) -> Result<Vec<usize>, ParquetError> {
     if rep_levels.is_empty() {
-        return Ok((0..num_values).collect());
+        let mut starts = Vec::new();
+        starts
+            .try_reserve_exact(num_values)
+            .map_err(|_| ParquetError::General("record starts allocation failed".to_owned()))?;
+        starts.extend(0..num_values);
+        return Ok(starts);
     }
     if rep_levels.len() != num_values {
         return Err(ParquetError::General(
@@ -2577,7 +2723,11 @@ fn compute_record_starts(
             "page does not start at a record boundary".to_owned(),
         ));
     }
+    let count = rep_levels.iter().filter(|&&r| r == 0).count();
     let mut starts = Vec::new();
+    starts
+        .try_reserve_exact(count)
+        .map_err(|_| ParquetError::General("record starts allocation failed".to_owned()))?;
     for (idx, &r) in rep_levels.iter().enumerate() {
         if r == 0 {
             starts.push(idx);
@@ -2686,18 +2836,6 @@ fn collect_leaf_ranges<T: parquet::data_type::DataType>(
         rep_levels,
         values,
     })
-}
-
-fn nulls_from_scalar_defs(def_levels: &[i16], max_def: i16) -> Option<Bitmap> {
-    if max_def == 0 {
-        return None;
-    }
-    let valid: Vec<bool> = def_levels.iter().map(|&d| d == max_def).collect();
-    if valid.iter().all(|&v| v) {
-        None
-    } else {
-        Some(Bitmap::from_bools(&valid))
-    }
 }
 
 fn scatter_fixed<V: Copy + Default>(
@@ -3203,6 +3341,9 @@ fn read_scalar_ranges(
         }
         (DataType::Binary, ScalarReader::ByteArray(r)) => {
             let leaf = collect_leaf_ranges(r, descr, ranges, current_row)?;
+            if max_def > 0 && leaf.def_levels.len() != leaf.row_count {
+                return Err(ParquetError::General("def level count mismatch".to_owned()));
+            }
             let mut offsets = Vec::with_capacity(leaf.row_count + 1);
             offsets.push(0u32);
             let mut bytes = Vec::new();
@@ -3848,12 +3989,12 @@ fn resolve_column_plan(
             let key_leaf = leaves
                 .iter()
                 .copied()
-                .find(|&i| descr.column(i).name() == "key")
+                .find(|&i| matches!(descr.column(i).name(), "key" | "keys"))
                 .unwrap_or(leaves[0]);
             let val_leaf = leaves
                 .iter()
                 .copied()
-                .find(|&i| descr.column(i).name() == "value")
+                .find(|&i| matches!(descr.column(i).name(), "value" | "values"))
                 .unwrap_or(leaves[1]);
             let (outer_non_null_def, elem_present_def) =
                 repeated_def_bounds(descr.root_schema(), descr.column(key_leaf).path().parts())?;
@@ -3952,8 +4093,7 @@ fn page_ranges_for_leaf(
         ));
     }
 
-    let num_rows = usize::try_from(rg.num_rows())
-        .map_err(|_| ParquetError::General("negative row group row count".to_owned()))?;
+    let num_rows = checked_rg_num_rows(rg)?;
 
     let full_locs = meta
         .offset_index()
@@ -3973,6 +4113,14 @@ fn page_ranges_for_leaf(
     let p_ranges = page_row_ranges(&locs, num_rows);
     let mut byte_ranges = Vec::new();
     let first_data_off = locs[0].offset as u64;
+    if first_data_off < chunk_start
+        || first_data_off > chunk_end
+        || first_data_off - chunk_start > i32::MAX as u64
+    {
+        return Err(ParquetError::General(
+            "invalid first data page offset in offset index".to_owned(),
+        ));
+    }
     if first_data_off > chunk_start {
         byte_ranges.push(chunk_start..first_data_off);
     }
@@ -3984,6 +4132,11 @@ fn page_ranges_for_leaf(
             let loc = &locs[p_idx];
             let s = loc.offset as u64;
             let e = s + loc.compressed_page_size as u64;
+            if s < chunk_start || e > chunk_end {
+                return Err(ParquetError::General(
+                    "page byte range outside column chunk".to_owned(),
+                ));
+            }
             byte_ranges.push(s..e);
         }
     }
@@ -3999,8 +4152,7 @@ fn open_page_reader(
 ) -> Result<SerializedPageReader<SliceChunkReader>, ParquetError> {
     let rg = meta.row_group(rg_idx);
     let col_chunk = rg.column(leaf_idx);
-    let total_rows = usize::try_from(rg.num_rows())
-        .map_err(|_| ParquetError::General("negative row group row count".to_owned()))?;
+    let total_rows = checked_rg_num_rows(rg)?;
     SerializedPageReader::new_with_properties(
         reader,
         col_chunk,
@@ -4070,6 +4222,7 @@ fn build_column_decoder(
     plan: &ResolvedColumnPlan,
     leaf_readers: &BTreeMap<usize, LeafReader>,
 ) -> Result<ColumnDecoder, ParquetError> {
+    let rg_num_rows = checked_rg_num_rows(meta.row_group(rg_idx))?;
     let descr = meta.file_metadata().schema_descr_ptr();
     let get_leaf = |leaf_idx: usize| -> Result<
         (ColumnDescPtr, SerializedPageReader<SliceChunkReader>),
@@ -4092,7 +4245,9 @@ fn build_column_decoder(
             let (col_descr, pr) = get_leaf(*leaf_idx)?;
             if *dict_utf8 {
                 Ok(ColumnDecoder::Utf8Dict(DictUtf8LeafDecoder::new(
-                    col_descr, pr,
+                    col_descr,
+                    pr,
+                    rg_num_rows,
                 )))
             } else {
                 let reader = open_scalar_reader(&col_descr, pr)?;
@@ -4110,7 +4265,7 @@ fn build_column_decoder(
         } => {
             let (col_descr, pr) = get_leaf(*leaf_idx)?;
             Ok(ColumnDecoder::ListUtf8Dict {
-                decoder: DictUtf8LeafDecoder::new(col_descr, pr),
+                decoder: DictUtf8LeafDecoder::new(col_descr, pr, rg_num_rows),
                 outer_non_null_def: *outer_non_null_def,
                 elem_present_def: *elem_present_def,
             })
@@ -4177,36 +4332,11 @@ fn build_column_decoder(
     }
 }
 
-fn chunk_row_ranges(ranges: Vec<Range<usize>>, batch_size: usize) -> VecDeque<Vec<Range<usize>>> {
-    let cap = batch_size.max(1);
-    let mut out = VecDeque::new();
-    let mut cur_chunk: Vec<Range<usize>> = Vec::new();
-    let mut cur_len = 0usize;
-
-    for r in ranges {
-        let mut pos = r.start;
-        while pos < r.end {
-            let space = cap - cur_len;
-            let take = space.min(r.end - pos);
-            cur_chunk.push(pos..pos + take);
-            cur_len += take;
-            pos += take;
-            if cur_len == cap {
-                out.push_back(std::mem::take(&mut cur_chunk));
-                cur_len = 0;
-            }
-        }
-    }
-    if !cur_chunk.is_empty() {
-        out.push_back(cur_chunk);
-    }
-    out
-}
-
 struct ActiveRowGroup {
     rg_idx: usize,
     kept_ranges: Vec<Range<usize>>,
-    chunks: VecDeque<Vec<Range<usize>>>,
+    range_idx: usize,
+    range_offset: usize,
     phase1_indices: Vec<usize>,
     phase1_plans: Vec<ResolvedColumnPlan>,
     phase1_decoders: Option<Vec<ColumnDecoder>>,
@@ -4215,6 +4345,34 @@ struct ActiveRowGroup {
     phase2_plans: Vec<ResolvedColumnPlan>,
     phase2_decoders: Option<Vec<ColumnDecoder>>,
     phase2_row: usize,
+}
+
+impl ActiveRowGroup {
+    fn next_chunk(&mut self, batch_size: usize) -> Option<Vec<Range<usize>>> {
+        let cap = batch_size.max(1);
+        let mut chunk = Vec::new();
+        let mut remaining = cap;
+        while self.range_idx < self.kept_ranges.len() && remaining > 0 {
+            let r = &self.kept_ranges[self.range_idx];
+            let pos = r.start + self.range_offset;
+            if pos >= r.end {
+                self.range_idx += 1;
+                self.range_offset = 0;
+                continue;
+            }
+            let avail = r.end - pos;
+            let take = remaining.min(avail);
+            chunk.push(pos..pos + take);
+            remaining -= take;
+            if take == avail {
+                self.range_idx += 1;
+                self.range_offset = 0;
+            } else {
+                self.range_offset += take;
+            }
+        }
+        if chunk.is_empty() { None } else { Some(chunk) }
+    }
 }
 
 struct ActiveFileState {
@@ -4292,20 +4450,21 @@ impl ParquetPartitionStream {
         }
         let phase1_indices: Vec<usize> = phase1_set.iter().copied().collect();
         let phase1_schema = Arc::new(self.schema.project(&phase1_indices)?);
-        let col_map: BTreeMap<usize, usize> = phase1_indices
-            .iter()
-            .enumerate()
-            .map(|(new_idx, &old_idx)| (old_idx, new_idx))
-            .collect();
+        let mut col_map = vec![None; self.schema.len()];
+        for (new_idx, &old_idx) in phase1_indices.iter().enumerate() {
+            if let Some(slot) = col_map.get_mut(old_idx) {
+                *slot = Some(new_idx);
+            }
+        }
         let phase1_filters = self
             .plan
             .filters
             .iter()
-            .map(|f| remap_expr_columns(f, &col_map))
+            .map(|f| f.remap_columns(&col_map))
             .collect::<Result<Vec<_>, _>>()?;
         let remapped_tombstone = tombstone_pred
             .as_ref()
-            .map(|tp| remap_expr_columns(tp, &col_map))
+            .map(|tp| tp.remap_columns(&col_map))
             .transpose()?;
 
         let phase2_indices: Vec<usize> = self
@@ -4337,11 +4496,7 @@ impl ParquetPartitionStream {
         let descr = af.meta.file_metadata().schema_descr_ptr();
 
         while let Some((rg_idx, kept_ranges)) = af.row_groups.pop_front() {
-            if kept_ranges.is_empty() {
-                continue;
-            }
-            let chunks = chunk_row_ranges(kept_ranges.clone(), self.batch_size);
-            if chunks.is_empty() {
+            if !kept_ranges.iter().any(|r| !r.is_empty()) {
                 continue;
             }
 
@@ -4362,7 +4517,8 @@ impl ParquetPartitionStream {
             let mut rg_state = ActiveRowGroup {
                 rg_idx,
                 kept_ranges,
-                chunks,
+                range_idx: 0,
+                range_offset: 0,
                 phase1_indices: af.phase1_indices.clone(),
                 phase1_plans,
                 phase1_decoders: None,
@@ -4439,8 +4595,17 @@ fn fetch_leaf_readers(
         Vec::new()
     } else {
         let path = ObjectPath::from(file.path.as_str());
-        fetch_ranges(store, &path, &coalesced, cancel, runtime)
-            .map_err(|e| map_fetch_err(&e, file.id, suspects))?
+        let bufs = fetch_ranges(store, &path, &coalesced, cancel, runtime)
+            .map_err(|e| map_fetch_err(&e, file.id, suspects))?;
+        if bufs.len() != coalesced.len()
+            || bufs
+                .iter()
+                .zip(&coalesced)
+                .any(|(b, r)| b.len() as u64 != r.end - r.start)
+        {
+            return Err(corrupt_err(file.id, suspects));
+        }
+        bufs
     };
     let chunk_reader = Arc::new(SliceChunkReader::from_fetched(
         file.size, coalesced, fetched,
@@ -4451,137 +4616,6 @@ fn fetch_leaf_readers(
         out.insert(leaf_idx, (locs, Arc::clone(&chunk_reader)));
     }
     Ok(out)
-}
-
-fn remap_expr_columns(expr: &Expr, col_map: &BTreeMap<usize, usize>) -> Result<Expr, QueryError> {
-    Ok(match expr {
-        Expr::Column {
-            index,
-            name,
-            data_type,
-        } => {
-            let new_idx = *col_map.get(index).ok_or_else(|| {
-                QueryError::internal("filter column missing from phase1 projection")
-            })?;
-            Expr::Column {
-                index: new_idx,
-                name: name.clone(),
-                data_type: data_type.clone(),
-            }
-        }
-        Expr::Literal(v) => Expr::Literal(v.clone()),
-        Expr::Unary {
-            op,
-            expr: inner,
-            data_type,
-        } => Expr::Unary {
-            op: *op,
-            expr: Box::new(remap_expr_columns(inner, col_map)?),
-            data_type: data_type.clone(),
-        },
-        Expr::Binary {
-            left,
-            op,
-            right,
-            data_type,
-        } => Expr::Binary {
-            left: Box::new(remap_expr_columns(left, col_map)?),
-            op: *op,
-            right: Box::new(remap_expr_columns(right, col_map)?),
-            data_type: data_type.clone(),
-        },
-        Expr::Cast { expr, target, mode } => Expr::Cast {
-            expr: Box::new(remap_expr_columns(expr, col_map)?),
-            target: target.clone(),
-            mode: *mode,
-        },
-        Expr::Between {
-            expr,
-            low,
-            high,
-            negated,
-        } => Expr::Between {
-            expr: Box::new(remap_expr_columns(expr, col_map)?),
-            low: Box::new(remap_expr_columns(low, col_map)?),
-            high: Box::new(remap_expr_columns(high, col_map)?),
-            negated: *negated,
-        },
-        Expr::InList {
-            expr,
-            list,
-            negated,
-            redacted,
-        } => Expr::InList {
-            expr: Box::new(remap_expr_columns(expr, col_map)?),
-            list: list
-                .iter()
-                .map(|e| remap_expr_columns(e, col_map))
-                .collect::<Result<Vec<_>, _>>()?,
-            negated: *negated,
-            redacted: *redacted,
-        },
-        Expr::Like {
-            expr,
-            pattern,
-            escape,
-            case_insensitive,
-            negated,
-        } => Expr::Like {
-            expr: Box::new(remap_expr_columns(expr, col_map)?),
-            pattern: Box::new(remap_expr_columns(pattern, col_map)?),
-            escape: *escape,
-            case_insensitive: *case_insensitive,
-            negated: *negated,
-        },
-        Expr::Case {
-            operand,
-            when_then,
-            else_expr,
-            data_type,
-        } => Expr::Case {
-            operand: operand
-                .as_ref()
-                .map(|e| Ok::<_, QueryError>(Box::new(remap_expr_columns(e, col_map)?)))
-                .transpose()?,
-            when_then: when_then
-                .iter()
-                .map(|(w, t)| {
-                    Ok((
-                        remap_expr_columns(w, col_map)?,
-                        remap_expr_columns(t, col_map)?,
-                    ))
-                })
-                .collect::<Result<Vec<_>, QueryError>>()?,
-            else_expr: else_expr
-                .as_ref()
-                .map(|e| Ok::<_, QueryError>(Box::new(remap_expr_columns(e, col_map)?)))
-                .transpose()?,
-            data_type: data_type.clone(),
-        },
-        Expr::MapIndex { map, key } => Expr::MapIndex {
-            map: Box::new(remap_expr_columns(map, col_map)?),
-            key: Box::new(remap_expr_columns(key, col_map)?),
-        },
-        Expr::MakeArray { elems, item_type } => Expr::MakeArray {
-            elems: elems
-                .iter()
-                .map(|e| remap_expr_columns(e, col_map))
-                .collect::<Result<Vec<_>, _>>()?,
-            item_type: item_type.clone(),
-        },
-        Expr::Call {
-            func,
-            args,
-            data_type,
-        } => Expr::Call {
-            func: *func,
-            args: args
-                .iter()
-                .map(|a| remap_expr_columns(a, col_map))
-                .collect::<Result<Vec<_>, _>>()?,
-            data_type: data_type.clone(),
-        },
-    })
 }
 
 fn guard_parquet<T, F>(file_id: FileId, suspects: &Suspects, f: F) -> Result<T, QueryError>
@@ -4639,11 +4673,12 @@ impl PartitionStream for ParquetPartitionStream {
                 }
             }
 
+            let batch_size = self.batch_size;
             let chunk_opt = self
                 .active_file
                 .as_mut()
                 .and_then(|f| f.current_rg.as_mut())
-                .and_then(|rg| rg.chunks.pop_front());
+                .and_then(|rg| rg.next_chunk(batch_size));
             let Some(chunk_ranges) = chunk_opt else {
                 if let Some(af) = self.active_file.as_mut() {
                     af.current_rg = None;
@@ -4683,7 +4718,7 @@ impl PartitionStream for ParquetPartitionStream {
                 )
             };
 
-            let (sel, p1_map) = if has_phase1 {
+            let (sel, mut p1_map) = if has_phase1 {
                 let (p1_indices, p1_cols) = {
                     let Some(af) = self.active_file.as_mut() else {
                         continue;
@@ -4715,17 +4750,12 @@ impl PartitionStream for ParquetPartitionStream {
                     (rg.phase1_indices.clone(), cols)
                 };
 
-                let mut p1_map = BTreeMap::new();
-                for (&col_idx, col) in p1_indices.iter().zip(p1_cols.iter()) {
-                    p1_map.insert(col_idx, col.clone());
-                }
-
                 let p1_batch = match Batch::try_new(phase1_schema, p1_cols, raw_len, Selection::All)
                 {
                     Ok(b) => b,
-                    Err(e) => {
+                    Err(_) => {
                         rollback_res(res.as_deref_mut(), before);
-                        return Err(e.into());
+                        return Err(corrupt_err(file_id, &self.suspects));
                     }
                 };
                 reconcile_res(res.as_deref_mut(), before, p1_batch.memory_bytes())?;
@@ -4741,7 +4771,12 @@ impl PartitionStream for ParquetPartitionStream {
                     reconcile_res(res.as_deref_mut(), before, 0)?;
                     continue;
                 }
-                (filtered.selection().clone(), p1_map)
+                let (_, filtered_cols, _, sel) = filtered.into_parts();
+                let mut p1_map = BTreeMap::new();
+                for (col_idx, col) in p1_indices.into_iter().zip(filtered_cols) {
+                    p1_map.insert(col_idx, col);
+                }
+                (sel, p1_map)
             } else {
                 (Selection::All, BTreeMap::new())
             };
@@ -4843,39 +4878,43 @@ impl PartitionStream for ParquetPartitionStream {
                 }
             }
 
-            let (proj_schema, assembled) = match &self.plan.projection {
+            let proj_schema = Arc::clone(&self.plan.projected_schema);
+            let assembled = match &self.plan.projection {
                 Some(indices) => {
-                    let ps = Arc::new(self.schema.project(indices)?);
                     let mut cols = Vec::with_capacity(indices.len());
+                    let mut first_pos: BTreeMap<usize, usize> = BTreeMap::new();
                     for &idx in indices {
-                        if let Some(c) = p1_map.get(&idx).or_else(|| p2_map.get(&idx)) {
-                            cols.push(c.clone());
+                        if let Some(c) = p1_map.remove(&idx).or_else(|| p2_map.remove(&idx)) {
+                            first_pos.insert(idx, cols.len());
+                            cols.push(c);
+                        } else if let Some(&pos) = first_pos.get(&idx) {
+                            cols.push(cols[pos].clone());
                         } else {
                             rollback_res(res.as_deref_mut(), before);
                             return Err(QueryError::internal("missing projected column slot"));
                         }
                     }
-                    (ps, cols)
+                    cols
                 }
                 None => {
                     let mut cols = Vec::with_capacity(self.schema.len());
                     for idx in 0..self.schema.len() {
-                        if let Some(c) = p1_map.get(&idx).or_else(|| p2_map.get(&idx)) {
-                            cols.push(c.clone());
+                        if let Some(c) = p1_map.remove(&idx).or_else(|| p2_map.remove(&idx)) {
+                            cols.push(c);
                         } else {
                             rollback_res(res.as_deref_mut(), before);
                             return Err(QueryError::internal("missing projected column slot"));
                         }
                     }
-                    (Arc::clone(&self.schema), cols)
+                    cols
                 }
             };
 
             let batch = match Batch::try_new(proj_schema, assembled, raw_len, sel) {
                 Ok(b) => b,
-                Err(e) => {
+                Err(_) => {
                     rollback_res(res.as_deref_mut(), before);
-                    return Err(e.into());
+                    return Err(corrupt_err(file_id, &self.suspects));
                 }
             };
             reconcile_res(res.as_deref_mut(), before, batch.memory_bytes())?;
@@ -4889,6 +4928,7 @@ mod tests {
     use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
+    use arrow::array::Array;
     use arrow::record_batch::RecordBatch;
     use async_trait::async_trait;
     use cetra_column::{Column, DataType, Field, GlobalPool, ScalarValue, Schema};
@@ -4909,6 +4949,8 @@ mod tests {
         CopyOptions, GetOptions, GetResult, ListResult, MultipartUpload, ObjectMeta, ObjectStore,
         ObjectStoreExt, PutMultipartOptions, PutOptions, PutPayload, PutResult,
     };
+    use parquet::arrow::ArrowWriter;
+    use parquet::file::properties::WriterProperties;
 
     use super::*;
     use crate::catalog::{FileId, FileMeta, FileTable};
@@ -4937,8 +4979,8 @@ mod tests {
         }
     }
 
-    impl std::fmt::Display for CountingStore {
-        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    impl fmt::Display for CountingStore {
+        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
             write!(f, "CountingStore")
         }
     }
@@ -5510,5 +5552,790 @@ mod tests {
             .expect_err("cancelled stalled I/O");
         assert!(matches!(err, QueryError::Cancelled));
         assert!(queue.take(100).is_empty());
+    }
+
+    fn write_custom_parquet(
+        rt: &tokio::runtime::Runtime,
+        store: &Arc<dyn ObjectStore>,
+        path: &str,
+        file_id: FileId,
+        table: FileTable,
+        day: NaiveDate,
+        batches: &[RecordBatch],
+        props: WriterProperties,
+    ) -> Arc<FileMeta> {
+        let mut buf = Vec::new();
+        let schema = batches[0].schema();
+        let mut writer = ArrowWriter::try_new(&mut buf, schema, Some(props)).expect("arrow writer");
+        let mut total_rows = 0u64;
+        for rb in batches {
+            total_rows += rb.num_rows() as u64;
+            writer.write(rb).expect("write batch");
+        }
+        let meta = writer.close().expect("close writer");
+        let size = buf.len() as u64;
+        let footer_size = if buf.len() >= 8 {
+            let tail: [u8; 8] = buf[buf.len() - 8..].try_into().expect("tail");
+            footer_size_from_tail(&tail, size).unwrap_or(8) as u64
+        } else {
+            8
+        };
+        let _ = meta;
+        rt.block_on(store.put(&ObjectPath::from(path), PutPayload::from(buf)))
+            .expect("put custom parquet");
+
+        let project: cetra_core::ids::ProjectId = "018f6b4e-7c1a-7c1a-8c1a-000000000001"
+            .parse()
+            .expect("project");
+        let t = day_start_ns(day).expect("day start");
+        Arc::new(FileMeta {
+            id: file_id,
+            table,
+            project,
+            day,
+            level: 0,
+            path: path.to_owned(),
+            size,
+            footer_size: footer_size.max(8),
+            rows: total_rows,
+            min_time: t,
+            max_time: t + 1_000,
+            min_ingest_time: t,
+            max_ingest_time: t + 1_000,
+            fully_merged: false,
+            deletions_applied_seq: 0,
+        })
+    }
+
+    #[test]
+    fn dict_bit_width_ge_8_and_plain_fallback_and_nested_nulls() {
+        use arrow::array::{ListBuilder, MapBuilder, StringBuilder};
+        use arrow::datatypes::{
+            DataType as ArrowDataType, Field as ArrowField, Schema as ArrowSchema,
+        };
+        use parquet::arrow::ArrowWriter;
+        use parquet::file::properties::{EnabledStatistics, WriterProperties};
+
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .build()
+            .expect("rt");
+        let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let cache = Arc::new(MetadataCache::new(1024 * 1024));
+        let suspects = Suspects::new(Arc::new(VerifyQueue::default()));
+        let day = NaiveDate::from_ymd_opt(2026, 3, 15).expect("day");
+        let exec = test_ctx(32 * 1024 * 1024);
+
+        // (a) DictColumn with bit_width >= 8 (>=260 distinct values).
+        let dict_schema = Arc::new(ArrowSchema::new(vec![ArrowField::new(
+            "tag",
+            ArrowDataType::Utf8,
+            true,
+        )]));
+        let mut sb = StringBuilder::new();
+        for i in 0..300 {
+            if i % 50 == 0 {
+                sb.append_null();
+            } else {
+                sb.append_value(format!("distinct_value_{i:04}"));
+            }
+        }
+        let dict_rb = RecordBatch::try_new(Arc::clone(&dict_schema), vec![Arc::new(sb.finish())])
+            .expect("rb");
+        let col_schema =
+            Arc::new(arrow_schema_to_column(&dict_schema).expect("convert dict schema"));
+        let props_dict = WriterProperties::builder()
+            .set_dictionary_enabled(true)
+            .build();
+        let dict_file = {
+            let mut buf = Vec::new();
+            let mut w = ArrowWriter::try_new(&mut buf, Arc::clone(&dict_schema), Some(props_dict))
+                .expect("writer");
+            w.write(&dict_rb).expect("write");
+            w.close().expect("close");
+            let size = buf.len() as u64;
+            rt.block_on(store.put(&ObjectPath::from("dict9.parquet"), PutPayload::from(buf)))
+                .expect("put");
+            Arc::new(FileMeta {
+                id: FileId::new_v7(),
+                table: FileTable::Spans,
+                project: "018f6b4e-7c1a-7c1a-8c1a-000000000001"
+                    .parse()
+                    .expect("project"),
+                day,
+                level: 0,
+                path: "dict9.parquet".to_owned(),
+                size,
+                footer_size: size.min(4096),
+                rows: 300,
+                min_time: 0,
+                max_time: 1000,
+                min_ingest_time: 0,
+                max_ingest_time: 1000,
+                fully_merged: false,
+                deletions_applied_seq: 0,
+            })
+        };
+        let dict_source = ParquetSource::new(
+            Arc::clone(&store),
+            FileTable::Spans,
+            col_schema,
+            vec![dict_file],
+            Arc::from([]),
+            Arc::clone(&cache),
+            suspects.clone(),
+            rt.handle().clone(),
+        );
+        let batches =
+            drain_on_workers(&dict_source, &ScanSpec::default(), &exec).expect("dict >= 260");
+        assert_eq!(batches.iter().map(Batch::num_rows).sum::<usize>(), 300);
+        assert!(matches!(batches[0].columns()[0], Column::Dict(_)));
+        assert_eq!(
+            batches[0].columns()[0].get_scalar(0).expect("row 0"),
+            ScalarValue::Null(DataType::Utf8)
+        );
+        assert_eq!(
+            batches[0].columns()[0].get_scalar(299).expect("row 299"),
+            ScalarValue::Utf8("distinct_value_0299".to_owned())
+        );
+
+        // (b) RLE_DICTIONARY -> PLAIN page fallback within a row group.
+        let mut fb_sb = StringBuilder::new();
+        for i in 0..80 {
+            if i < 20 {
+                fb_sb.append_value(if i % 2 == 0 { "aa" } else { "bb" });
+            } else {
+                fb_sb.append_value(format!("fallback_long_unique_string_entry_{i:04}"));
+            }
+        }
+        let fb_rb = RecordBatch::try_new(Arc::clone(&dict_schema), vec![Arc::new(fb_sb.finish())])
+            .expect("fb rb");
+        let fb_props = WriterProperties::builder()
+            .set_dictionary_enabled(true)
+            .set_dictionary_page_size_limit(64)
+            .set_data_page_row_count_limit(20)
+            .set_write_batch_size(10)
+            .build();
+        let fb_file = {
+            let mut buf = Vec::new();
+            let mut w = ArrowWriter::try_new(&mut buf, Arc::clone(&dict_schema), Some(fb_props))
+                .expect("writer");
+            w.write(&fb_rb).expect("write");
+            w.close().expect("close");
+            let size = buf.len() as u64;
+            rt.block_on(store.put(&ObjectPath::from("fallback.parquet"), PutPayload::from(buf)))
+                .expect("put");
+            Arc::new(FileMeta {
+                id: FileId::new_v7(),
+                table: FileTable::Spans,
+                project: "018f6b4e-7c1a-7c1a-8c1a-000000000001"
+                    .parse()
+                    .expect("project"),
+                day,
+                level: 0,
+                path: "fallback.parquet".to_owned(),
+                size,
+                footer_size: size.min(4096),
+                rows: 80,
+                min_time: 0,
+                max_time: 1000,
+                min_ingest_time: 0,
+                max_ingest_time: 1000,
+                fully_merged: false,
+                deletions_applied_seq: 0,
+            })
+        };
+        let fb_col_schema =
+            Arc::new(arrow_schema_to_column(&dict_schema).expect("convert fb schema"));
+        let fb_source = ParquetSource::new(
+            Arc::clone(&store),
+            FileTable::Spans,
+            fb_col_schema,
+            vec![fb_file],
+            Arc::from([]),
+            Arc::clone(&cache),
+            suspects.clone(),
+            rt.handle().clone(),
+        );
+        let fb_batches =
+            drain_on_workers(&fb_source, &ScanSpec::default(), &exec).expect("fallback scan");
+        assert_eq!(fb_batches.iter().map(Batch::num_rows).sum::<usize>(), 80);
+        assert_eq!(
+            fb_batches[0].columns()[0].get_scalar(0).expect("r0"),
+            ScalarValue::Utf8("aa".to_owned())
+        );
+        assert_eq!(
+            fb_batches[0].columns()[0].get_scalar(79).expect("r79"),
+            ScalarValue::Utf8("fallback_long_unique_string_entry_0079".to_owned())
+        );
+
+        // (c) Empty/null List, empty Map, null map values, all-null dictionary page.
+        let mut list_builder = ListBuilder::new(StringBuilder::new());
+        list_builder.values().append_value("x");
+        list_builder.append(true); // ["x"]
+        list_builder.append(true); // []
+        list_builder.append_null(); // null list
+        list_builder.values().append_value("y");
+        list_builder.append(true); // ["y"]
+        let list_arr = Arc::new(list_builder.finish());
+
+        let mut map_builder = MapBuilder::new(None, StringBuilder::new(), StringBuilder::new());
+        map_builder.keys().append_value("k1");
+        map_builder.values().append_value("v1");
+        map_builder.keys().append_value("k2");
+        map_builder.values().append_null();
+        map_builder.append(true).expect("map row 0");
+        map_builder.append(true).expect("map row 1"); // {}
+        map_builder.append(false).expect("map row 2"); // null map
+        map_builder.keys().append_value("k3");
+        map_builder.values().append_value("v3");
+        map_builder.append(true).expect("map row 3");
+        let map_arr = Arc::new(map_builder.finish());
+
+        let mut all_null_sb = StringBuilder::new();
+        for _ in 0..4 {
+            all_null_sb.append_null();
+        }
+        let all_null_arr = Arc::new(all_null_sb.finish());
+
+        let nested_schema = Arc::new(ArrowSchema::new(vec![
+            ArrowField::new("tags", list_arr.data_type().clone(), true),
+            ArrowField::new("attrs", map_arr.data_type().clone(), true),
+            ArrowField::new("all_null", ArrowDataType::Utf8, true),
+        ]));
+        let nested_rb = RecordBatch::try_new(
+            Arc::clone(&nested_schema),
+            vec![list_arr, map_arr, all_null_arr],
+        )
+        .expect("nested rb");
+        let nested_col_schema =
+            Arc::new(arrow_schema_to_column(&nested_schema).expect("nested col schema"));
+        let nested_props = WriterProperties::builder()
+            .set_dictionary_enabled(true)
+            .set_statistics_enabled(EnabledStatistics::Page)
+            .build();
+        let nested_file = write_custom_parquet(
+            &rt,
+            &store,
+            "nested_nulls.parquet",
+            FileId::new_v7(),
+            FileTable::Spans,
+            day,
+            &[nested_rb],
+            nested_props,
+        );
+        let nested_source = ParquetSource::new(
+            store,
+            FileTable::Spans,
+            nested_col_schema,
+            vec![nested_file],
+            Arc::from([]),
+            cache,
+            suspects,
+            rt.handle().clone(),
+        );
+        let nested_batches =
+            drain_on_workers(&nested_source, &ScanSpec::default(), &exec).expect("nested scan");
+        assert_eq!(nested_batches.iter().map(Batch::num_rows).sum::<usize>(), 4);
+        let nb = &nested_batches[0];
+        assert_eq!(
+            nb.columns()[0].get_scalar(1).expect("empty list"),
+            ScalarValue::List {
+                item_type: DataType::Utf8,
+                values: vec![],
+            }
+        );
+        assert_eq!(
+            nb.columns()[0].get_scalar(2).expect("null list"),
+            ScalarValue::Null(DataType::List(Box::new(DataType::Utf8)))
+        );
+        assert_eq!(
+            nb.columns()[1].get_scalar(1).expect("empty map"),
+            ScalarValue::MapUtf8(vec![])
+        );
+        assert_eq!(
+            nb.columns()[1].get_scalar(2).expect("null map"),
+            ScalarValue::Null(DataType::MapUtf8)
+        );
+        assert_eq!(
+            nb.columns()[1].get_scalar(0).expect("map with null value"),
+            ScalarValue::MapUtf8(vec![
+                ("k1".to_owned(), Some("v1".to_owned())),
+                ("k2".to_owned(), None),
+            ])
+        );
+        for r in 0..4 {
+            assert_eq!(
+                nb.columns()[2].get_scalar(r).expect("all null"),
+                ScalarValue::Null(DataType::Utf8)
+            );
+        }
+    }
+
+    #[test]
+    fn around_ns_and_file_day_bounds_pruning_rules() {
+        use cetra_query::exec::TimeRangeHint;
+
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("rt");
+        let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let cache = Arc::new(MetadataCache::new(1024));
+        let suspects = Suspects::new(Arc::new(VerifyQueue::default()));
+        let schema = Schema::try_new_arc(vec![Field::new(spans::NAME, DataType::Utf8, false)])
+            .expect("schema");
+        let project: cetra_core::ids::ProjectId = "018f6b4e-7c1a-7c1a-8c1a-000000000001"
+            .parse()
+            .expect("project");
+
+        let d0 = NaiveDate::from_ymd_opt(2026, 3, 10).expect("d0");
+        let d5 = NaiveDate::from_ymd_opt(2026, 3, 15).expect("d5");
+        let d9 = NaiveDate::from_ymd_opt(2026, 3, 19).expect("d9");
+        let make_file = |day: NaiveDate| {
+            let t = day_start_ns(day).expect("start");
+            Arc::new(FileMeta {
+                id: FileId::new_v7(),
+                table: FileTable::Spans,
+                project,
+                day,
+                level: 0,
+                path: format!("f_{day}.parquet"),
+                size: 100,
+                footer_size: 32,
+                rows: 10,
+                min_time: t,
+                max_time: t + 1_000,
+                min_ingest_time: t,
+                max_ingest_time: t + 1_000,
+                fully_merged: false,
+                deletions_applied_seq: 0,
+            })
+        };
+        let files = vec![make_file(d0), make_file(d5), make_file(d9)];
+        let d5_ns = day_start_ns(d5).expect("d5 ns");
+
+        // (e) `file_day_bounds`: ±1 day for Spans/Traces, exact for Scores.
+        assert_eq!(
+            file_day_bounds(FileTable::Spans, Some(d5_ns), Some(d5_ns)),
+            (d5.pred_opt().expect("pred"), d5.succ_opt().expect("succ"))
+        );
+        assert_eq!(
+            file_day_bounds(FileTable::Traces, Some(d5_ns), Some(d5_ns)),
+            (d5.pred_opt().expect("pred"), d5.succ_opt().expect("succ"))
+        );
+        assert_eq!(
+            file_day_bounds(FileTable::Scores, Some(d5_ns), Some(d5_ns)),
+            (d5, d5)
+        );
+
+        // (d) `around_ns` applies on Spans/Traces with `trace_id` + open time range.
+        for table in [FileTable::Spans, FileTable::Traces] {
+            let src = ParquetSource::new(
+                Arc::clone(&store),
+                table,
+                Arc::clone(&schema),
+                files.clone(),
+                Arc::from([]),
+                Arc::clone(&cache),
+                suspects.clone(),
+                rt.handle().clone(),
+            );
+            let spec_trace_open = ScanSpec {
+                time_range: TimeRangeHint {
+                    min_ns: None,
+                    max_ns: None,
+                    around_ns: Some(d5_ns),
+                },
+                id_lookups: vec![IdLookupHint::Fixed16 {
+                    column: traces::TRACE_ID.to_owned(),
+                    values: vec![[1u8; 16]],
+                }],
+                ..Default::default()
+            };
+            let kept = src.prune_files(&spec_trace_open);
+            assert_eq!(kept.len(), 1);
+            assert_eq!(kept[0].day, d5);
+
+            // Ignored when time_range is closed.
+            let spec_closed = ScanSpec {
+                time_range: TimeRangeHint {
+                    min_ns: Some(day_start_ns(d0).expect("d0")),
+                    max_ns: None,
+                    around_ns: Some(d5_ns),
+                },
+                id_lookups: vec![IdLookupHint::Fixed16 {
+                    column: traces::TRACE_ID.to_owned(),
+                    values: vec![[1u8; 16]],
+                }],
+                ..Default::default()
+            };
+            assert_eq!(src.prune_files(&spec_closed).len(), 3);
+
+            // Ignored on `user_id` and `session_id` lookups.
+            for col in [spans::USER_ID, spans::SESSION_ID] {
+                let spec_other_id = ScanSpec {
+                    time_range: TimeRangeHint {
+                        min_ns: None,
+                        max_ns: None,
+                        around_ns: Some(d5_ns),
+                    },
+                    id_lookups: vec![IdLookupHint::Utf8 {
+                        column: col.to_owned(),
+                        values: vec!["u1".to_owned()],
+                    }],
+                    ..Default::default()
+                };
+                assert_eq!(src.prune_files(&spec_other_id).len(), 3);
+            }
+        }
+
+        // Ignored on `Scores` even with `trace_id` + open time range.
+        let scores_src = ParquetSource::new(
+            store,
+            FileTable::Scores,
+            schema,
+            files,
+            Arc::from([]),
+            cache,
+            suspects,
+            rt.handle().clone(),
+        );
+        let spec_scores = ScanSpec {
+            time_range: TimeRangeHint {
+                min_ns: None,
+                max_ns: None,
+                around_ns: Some(d5_ns),
+            },
+            id_lookups: vec![IdLookupHint::Fixed16 {
+                column: scores::TRACE_ID.to_owned(),
+                values: vec![[1u8; 16]],
+            }],
+            ..Default::default()
+        };
+        assert_eq!(scores_src.prune_files(&spec_scores).len(), 3);
+    }
+
+    #[test]
+    fn zero_block_bloom_filter_quarantines_without_panicking() {
+        use parquet::file::metadata::{ParquetMetaDataReader, ParquetMetaDataWriter};
+
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .build()
+            .expect("rt");
+        let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let cache = Arc::new(MetadataCache::new(1024 * 1024));
+        let queue = Arc::new(VerifyQueue::default());
+        let suspects = Suspects::new(Arc::clone(&queue));
+        let day = NaiveDate::from_ymd_opt(2026, 3, 15).expect("day");
+        let base_ns = day_start_ns(day).expect("day start");
+
+        // Valid Parquet bloom filter header with `numBytes = 0` (0 blocks).
+        const ZERO_BLOCK_BLOOM: [u8; 15] = [
+            0x15, 0x00, 0x1c, 0x1c, 0x00, 0x00, 0x1c, 0x1c, 0x00, 0x00, 0x1c, 0x1c, 0x00, 0x00,
+            0x00,
+        ];
+        assert_eq!(
+            Sbbf::from_bytes(&ZERO_BLOCK_BLOOM)
+                .expect("zero-block header parses")
+                .num_blocks(),
+            0
+        );
+
+        let s1 = span_row(1, 0, base_ns + 1_000, base_ns + 2_000);
+        let trace_bytes = *s1.trace_id.as_bytes();
+        let rb = span_rows(&[s1]);
+        let schema = Arc::new(arrow_schema_to_column(&rb.schema()).expect("schema"));
+        let written = write_file(FileTable::Spans, 0, &[Arc::new(rb)]).expect("write_file");
+        let mut raw = written.bytes.to_vec();
+        let meta = ParquetMetaDataReader::new()
+            .parse_and_finish(&Bytes::from(raw.clone()))
+            .expect("parse meta");
+
+        let trace_leaf = find_scalar_leaf(meta.file_metadata().schema_descr(), spans::TRACE_ID)
+            .expect("trace_id leaf");
+        let bloom_off = meta
+            .row_group(0)
+            .column(trace_leaf)
+            .bloom_filter_offset()
+            .expect("bloom offset") as usize;
+        raw[bloom_off..bloom_off + ZERO_BLOCK_BLOOM.len()].copy_from_slice(&ZERO_BLOCK_BLOOM);
+
+        let mut rgs = meta.row_groups().to_vec();
+        let mut cols = rgs[0].columns().to_vec();
+        cols[trace_leaf] = cols[trace_leaf]
+            .clone()
+            .into_builder()
+            .set_bloom_filter_length(Some(ZERO_BLOCK_BLOOM.len() as i32))
+            .build()
+            .expect("col chunk");
+        rgs[0] = rgs[0]
+            .clone()
+            .into_builder()
+            .set_column_metadata(cols)
+            .build()
+            .expect("rg");
+        let patched_meta = ParquetMetaData::new(meta.file_metadata().clone(), rgs);
+        let mut patched_buf = raw;
+        ParquetMetaDataWriter::new(&mut patched_buf, &patched_meta)
+            .finish()
+            .expect("write patched meta");
+
+        let size = patched_buf.len() as u64;
+        let tail: [u8; 8] = patched_buf[patched_buf.len() - 8..]
+            .try_into()
+            .expect("tail");
+        let footer_size = footer_size_from_tail(&tail, size).expect("footer size") as u64;
+        let file_id = FileId::new_v7();
+        let path = "spans/zero_bloom.parquet";
+        rt.block_on(store.put(&ObjectPath::from(path), PutPayload::from(patched_buf)))
+            .expect("put");
+        let project: cetra_core::ids::ProjectId = "018f6b4e-7c1a-7c1a-8c1a-000000000001"
+            .parse()
+            .expect("project");
+        let fm = Arc::new(FileMeta {
+            id: file_id,
+            table: FileTable::Spans,
+            project,
+            day,
+            level: 0,
+            path: path.to_owned(),
+            size,
+            footer_size,
+            rows: 1,
+            min_time: written.min_time,
+            max_time: written.max_time,
+            min_ingest_time: written.min_ingest_time,
+            max_ingest_time: written.max_ingest_time,
+            fully_merged: false,
+            deletions_applied_seq: 0,
+        });
+
+        let source = ParquetSource::new(
+            store,
+            FileTable::Spans,
+            schema,
+            vec![fm],
+            Arc::from([]),
+            cache,
+            suspects,
+            rt.handle().clone(),
+        );
+        let mut spec = ScanSpec::default();
+        spec.id_lookups.push(IdLookupHint::Fixed16 {
+            column: spans::TRACE_ID.to_owned(),
+            values: vec![trace_bytes],
+        });
+        let exec = test_ctx(16 * 1024 * 1024);
+        let err = drain_on_workers(&source, &spec, &exec)
+            .expect_err("0-block bloom filter must fail safely");
+        assert!(matches!(err, QueryError::Internal(_)));
+        assert!(
+            queue.take(10).contains(&file_id),
+            "0-block bloom filter file must be quarantined"
+        );
+    }
+
+    #[test]
+    fn float_nan_not_falsely_pruned_and_privacy_safe_debug() {
+        use arrow::array::Float64Array;
+        use arrow::datatypes::{
+            DataType as ArrowDataType, Field as ArrowField, Schema as ArrowSchema,
+        };
+        use parquet::file::properties::{EnabledStatistics, WriterProperties};
+
+        use crate::deletion::PendingDeletion;
+
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .build()
+            .expect("rt");
+        let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let cache = Arc::new(MetadataCache::new(1024 * 1024));
+        let suspects = Suspects::new(Arc::new(VerifyQueue::default()));
+        let day = NaiveDate::from_ymd_opt(2026, 3, 15).expect("day");
+
+        // (g) Float NaN in row group [1.0, NaN] has Parquet stats min=1.0, max=1.0,
+        // but cetra-query orders NaN > +inf so `val > 5.0` must NOT prune it.
+        let arrow_schema = Arc::new(ArrowSchema::new(vec![ArrowField::new(
+            "val",
+            ArrowDataType::Float64,
+            false,
+        )]));
+        let rb_nan = RecordBatch::try_new(
+            Arc::clone(&arrow_schema),
+            vec![Arc::new(Float64Array::from(vec![1.0, f64::NAN]))],
+        )
+        .expect("rb_nan");
+        let rb_hi = RecordBatch::try_new(
+            Arc::clone(&arrow_schema),
+            vec![Arc::new(Float64Array::from(vec![10.0, 20.0]))],
+        )
+        .expect("rb_hi");
+        let props = WriterProperties::builder()
+            .set_max_row_group_row_count(Some(2))
+            .set_statistics_enabled(EnabledStatistics::Page)
+            .build();
+        let file = write_custom_parquet(
+            &rt,
+            &store,
+            "nan.parquet",
+            FileId::new_v7(),
+            FileTable::Spans,
+            day,
+            &[rb_nan, rb_hi],
+            props,
+        );
+        let col_schema = Arc::new(arrow_schema_to_column(&arrow_schema).expect("col schema"));
+        let source = ParquetSource::new(
+            store,
+            FileTable::Spans,
+            col_schema,
+            vec![file],
+            Arc::from([Arc::new(PendingDeletion {
+                id: uuid::Uuid::from_u128(1),
+                seq: 1,
+                project: "018f6b4e-7c1a-7c1a-8c1a-000000000001"
+                    .parse()
+                    .expect("project"),
+                cutoff: 100,
+                registered_at: 200,
+                trace_ids: std::collections::HashSet::new(),
+                users: ["secret-erased-user-99".to_owned()].into_iter().collect(),
+                sessions: ["secret-erased-sess-88".to_owned()].into_iter().collect(),
+            })]),
+            cache,
+            suspects,
+            rt.handle().clone(),
+        );
+
+        let exec = test_ctx(16 * 1024 * 1024);
+        let gt_spec = ScanSpec {
+            filters: vec![Expr::Binary {
+                left: Box::new(Expr::Column {
+                    index: 0,
+                    name: "val".to_owned(),
+                    data_type: DataType::F64,
+                }),
+                op: BinaryOp::Gt,
+                right: Box::new(Expr::Literal(ScalarValue::F64(5.0))),
+                data_type: DataType::Bool,
+            }],
+            ..Default::default()
+        };
+        let batches = drain_on_workers(&source, &gt_spec, &exec).expect("gt 5.0 scan");
+        let total: usize = batches.iter().map(Batch::num_rows).sum();
+        // NaN, 10.0, 20.0 must all survive `val > 5.0`.
+        assert_eq!(total, 3);
+
+        // `val < 0.0` CAN safely prune [1.0, NaN] against min = 1.0 (since NaN is not < 0.0).
+        let lt_spec = ScanSpec {
+            filters: vec![Expr::Binary {
+                left: Box::new(Expr::Column {
+                    index: 0,
+                    name: "val".to_owned(),
+                    data_type: DataType::F64,
+                }),
+                op: BinaryOp::Lt,
+                right: Box::new(Expr::Literal(ScalarValue::F64(0.0))),
+                data_type: DataType::Bool,
+            }],
+            ..Default::default()
+        };
+        let lt_batches = drain_on_workers(&source, &lt_spec, &exec).expect("lt 0.0 scan");
+        assert!(lt_batches.is_empty());
+
+        // (h) Privacy-safe Debug on ParquetSource, ScanPlan, ConstraintValue, BloomLookup.
+        let src_dbg = format!("{source:?}");
+        assert!(src_dbg.contains("ParquetSource"));
+        assert!(src_dbg.contains("files: 1"));
+        assert!(src_dbg.contains("deletions: 1"));
+        assert!(!src_dbg.contains("secret-erased-user-99"));
+        assert!(!src_dbg.contains("secret-erased-sess-88"));
+
+        let secret_spec = ScanSpec {
+            id_lookups: vec![IdLookupHint::Utf8 {
+                column: spans::USER_ID.to_owned(),
+                values: vec!["secret-user-lookup@example.com".to_owned()],
+            }],
+            filters: vec![Expr::Binary {
+                left: Box::new(Expr::Column {
+                    index: 0,
+                    name: "val".to_owned(),
+                    data_type: DataType::Utf8,
+                }),
+                op: BinaryOp::Eq,
+                right: Box::new(Expr::Literal(ScalarValue::Utf8(
+                    "secret-predicate-value".to_owned(),
+                ))),
+                data_type: DataType::Bool,
+            }],
+            ..Default::default()
+        };
+        let plan =
+            ScanPlan::compile(FileTable::Spans, &source.schema(), &secret_spec).expect("plan");
+        let plan_dbg = format!("{plan:?}");
+        assert!(plan_dbg.contains("ScanPlan"));
+        assert!(!plan_dbg.contains("secret-user-lookup"));
+        assert!(!plan_dbg.contains("secret-predicate-value"));
+        let cv_dbg = format!("{:?}", ConstraintValue::Bytes(b"secret-bytes".to_vec()));
+        assert!(!cv_dbg.contains("secret-bytes"));
+        assert!(cv_dbg.contains("12 bytes"));
+        let bl_dbg = format!(
+            "{:?}",
+            BloomLookup {
+                column: spans::USER_ID.to_owned(),
+                keys: vec![b"secret-bloom-key".to_vec()],
+            }
+        );
+        assert!(!bl_dbg.contains("secret-bloom-key"));
+        assert!(bl_dbg.contains("keys_len: 1"));
+    }
+
+    #[test]
+    fn corrupt_headers_and_runtime_guard_are_rejected_safely() {
+        // Unbounded allocation guards on decode_plain_utf8_dict, decode_rle_hybrid, decode_levels.
+        assert!(decode_plain_utf8_dict(&[0u8; 8], 3).is_err());
+        assert!(decode_rle_hybrid(&[0x03, 0x00], 8, 1_000_000).is_err());
+        #[allow(deprecated)]
+        let bit_packed_enc = Encoding::BIT_PACKED;
+        assert!(decode_levels(3, 1_000_000, bit_packed_enc, &[0u8; 4]).is_err());
+
+        // OffsetIndex validation: first_row_index != 0 is rejected.
+        let bad_locs = vec![PageLocation {
+            offset: 10,
+            compressed_page_size: 50,
+            first_row_index: 1,
+        }];
+        assert!(validate_page_locations(&bad_locs, 100, 1000).is_err());
+
+        // `fetch_ranges` inside a Tokio runtime returns non-quarantining Runtime error.
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("rt");
+        let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let queue = Arc::new(VerifyQueue::default());
+        let suspects = Suspects::new(Arc::clone(&queue));
+        let file_id = FileId::new_v7();
+        let handle = rt.handle().clone();
+        rt.block_on(async move {
+            let err = fetch_ranges(
+                &store,
+                &ObjectPath::from("missing.parquet"),
+                &[0..8],
+                &CancelToken::new(),
+                &handle,
+            )
+            .expect_err("must reject inside tokio runtime");
+            assert!(matches!(err, FetchError::Runtime));
+            let qerr = map_fetch_err(&err, file_id, &suspects);
+            assert!(matches!(qerr, QueryError::Internal(_)));
+        });
+        assert!(queue.take(10).is_empty());
     }
 }

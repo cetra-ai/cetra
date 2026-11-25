@@ -1,5 +1,6 @@
 //! Native `ScanSource` over an in-memory `MemSnapshot`.
 
+use std::fmt;
 use std::sync::Arc;
 
 use cetra_column::{Batch, CancelToken, Reservation, Schema};
@@ -20,7 +21,7 @@ use super::{
 };
 
 /// In-memory [`ScanSource`] reading `MemSnapshot` partitions for one project.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub(crate) struct MemtableSource {
     table: Table,
     project: ProjectId,
@@ -28,6 +29,16 @@ pub(crate) struct MemtableSource {
     snapshot: Arc<MemSnapshot>,
     deletions: Arc<[Arc<PendingDeletion>]>,
     schema: Arc<Schema>,
+}
+
+impl fmt::Debug for MemtableSource {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("MemtableSource")
+            .field("table", &self.table.name())
+            .field("deletions", &self.deletions.len())
+            .field("schema_len", &self.schema.len())
+            .finish_non_exhaustive()
+    }
 }
 
 impl MemtableSource {
@@ -137,10 +148,17 @@ impl ScanSource for MemtableSource {
     }
 
     fn explain_summary(&self, spec: &ScanSpec) -> String {
+        let project_batches: usize = self
+            .snapshot
+            .partitions
+            .iter()
+            .filter(|(key, _)| key.project == self.project)
+            .map(|(_, batches)| batches.len())
+            .sum();
         format!(
             "MemtableSource(table={}, batches={}, filters={})",
             self.table.name(),
-            self.snapshot.partitions.len(),
+            project_batches,
             spec.filters.len()
         )
     }
@@ -396,5 +414,54 @@ mod tests {
                 .is_none()
         );
         assert_eq!(res.size(), before);
+    }
+
+    #[test]
+    fn mem_source_debug_is_privacy_safe_and_explain_reports_project_batches() {
+        let p1 = project(1);
+        let p2 = project(2);
+        let mut mt = Memtable::new(Table::Spans);
+
+        let mut s1 = span_row(1, 0, DAY_NS + 100, 1_000);
+        s1.project_id = p1;
+        s1.user_id = Some("secret-alice@example.com".to_owned());
+        s1.session_id = Some("secret-session-123".to_owned());
+        let mut s2 = span_row(2, 0, DAY_NS + 200, 1_000);
+        s2.project_id = p1;
+        let mut s3 = span_row(3, 0, DAY_NS + 300, 1_000);
+        s3.project_id = p2;
+        s3.user_id = Some("secret-other-user".to_owned());
+
+        mt.insert(p1, span_rows(&[s1]), 1).unwrap();
+        mt.insert(p1, span_rows(&[s2]), 2).unwrap();
+        mt.insert(p2, span_rows(&[s3]), 3).unwrap();
+        let snapshot = mt.snapshot();
+
+        let deletion = Arc::new(PendingDeletion {
+            id: Uuid::from_u128(1),
+            seq: 1,
+            project: p1,
+            cutoff: 950,
+            registered_at: 1000,
+            trace_ids: HashSet::new(),
+            users: ["secret-erased-user".to_owned()].into_iter().collect(),
+            sessions: ["secret-erased-session".to_owned()].into_iter().collect(),
+        });
+
+        let source =
+            MemtableSource::new(Table::Spans, p1, None, snapshot, Arc::from([deletion])).unwrap();
+
+        let dbg = format!("{source:?}");
+        assert!(dbg.contains("MemtableSource"));
+        assert!(dbg.contains("spans"));
+        assert!(dbg.contains("deletions: 1"));
+        assert!(!dbg.contains("secret-alice"));
+        assert!(!dbg.contains("secret-session-123"));
+        assert!(!dbg.contains("secret-other-user"));
+        assert!(!dbg.contains("secret-erased-user"));
+        assert!(!dbg.contains("secret-erased-session"));
+
+        let summary = source.explain_summary(&ScanSpec::default());
+        assert_eq!(summary, "MemtableSource(table=spans, batches=2, filters=0)");
     }
 }
