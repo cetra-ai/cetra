@@ -64,6 +64,7 @@ with an `### Upgrade notes` section (https://cetra.sh/docs/self-hosting/upgrade/
 - A Laminar `LLM` span without a model or token counts (such as the OpenHands SDK's wrapper) is now a chain span, so its reported cost is not counted twice.
 - Selecting another member while the member panel is open no longer adds a second Role card.
 - A model named with a provider prefix, such as `openai/gpt-4o-mini` from LiteLLM-style clients and EverOS, is priced as the provider's model when no price row matches the full name.
+- An online backup cancelled by a server shutdown no longer leaves files in its directory: the shutdown waits until the backup has stopped and removed what it wrote.
 
 ## [0.1.0-rc.2] - 2026-11-22
 
