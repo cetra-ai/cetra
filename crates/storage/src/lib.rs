@@ -111,7 +111,8 @@ pub use reads::{
     SessionListRequest, SessionSort, SessionTarget, SessionTargetFilter, Shape, SortOrder,
     SpanListRequest, SpanRefreshRequest, SpanSort, SpanTarget, SpanTargetFilter,
     TRACE_REFRESH_STRICT_COLUMNS, TotalRow, TraceDetailData, TraceListRequest, TraceRefreshRequest,
-    TraceSort, TraceSpansData, TraceSpansRequest, TraceTarget, USER_COLUMNS, UserDeletionScope,
+    TraceSort, TraceSpansData, TraceSpansRequest, TraceTarget, TraceTotals, TraceTotalsRequest,
+    USER_COLUMNS, UserDeletionScope,
     UserDetailData, UserExtras, UserExtrasRequest, UserListRequest, UserSort, WidgetData,
     WidgetError, WidgetPoint, WidgetQuery, WidgetRequest, WidgetSeries, WidgetSource, alert_value,
     error_spans, eval_trace_ids, experiment_score_means, experiment_scores, experiment_traces,
@@ -119,8 +120,8 @@ pub use reads::{
     match_count, prompt_metrics, score_list, score_name_counts, scores_by_id, session_detail,
     session_extras, session_ids_of_traces, session_list, session_targets, span_detail, span_list,
     span_refresh, span_targets, trace_detail, trace_list, trace_list_plan, trace_refresh,
-    trace_spans, trace_targets, user_deletion_scope, user_detail, user_extras, user_list,
-    validate_expressions, validate_filter, validate_shape, widget_query,
+    trace_spans, trace_targets, trace_totals, user_deletion_scope, user_detail, user_extras,
+    user_list, validate_expressions, validate_filter, validate_shape, widget_query,
 };
 pub use snapshot::CopyReport;
 pub use snapshot::{CatalogSnapshot, LiveObject};
