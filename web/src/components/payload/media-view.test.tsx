@@ -1,5 +1,5 @@
 import { fireEvent, render, screen } from "@testing-library/react";
-import { expect, it } from "vitest";
+import { expect, it, vi } from "vitest";
 import { MediaView } from "@/components/payload/media-view";
 
 it("shows a dropped chip with the size in megabytes", () => {
@@ -102,4 +102,87 @@ it("renders a stored image through the API", () => {
     "src",
     "/api/v1/projects/acme%2Fbot/media/497790947d466676",
   );
+});
+
+it("renders a blob audio in the player with its transcript", () => {
+  render(
+    <MediaView
+      part={{
+        type: "blob",
+        content: "AAAA",
+        mime_type: "audio/wav",
+        modality: "audio",
+        transcript: "Hello there",
+      }}
+      projectRef="acme/bot"
+    />,
+  );
+  expect(screen.getByRole("button", { name: "Play" })).toBeInTheDocument();
+  expect(screen.getByText("Hello there")).toBeInTheDocument();
+  expect(document.querySelector("audio[controls]")).toBeNull();
+});
+
+it("keeps the transcript of a dropped audio", () => {
+  render(
+    <MediaView
+      part={{
+        type: "uri",
+        uri: "cetra:dropped",
+        reason: "too_large",
+        size: 32_000_000,
+        mime_type: "audio/wav",
+        modality: "audio",
+        transcript: "Dropped words",
+      }}
+      projectRef="acme/bot"
+    />,
+  );
+  expect(screen.getByText("Media dropped at ingest (too large, 32 MB)")).toBeInTheDocument();
+  expect(screen.getByText("Dropped words")).toBeInTheDocument();
+});
+
+it("an external audio loads the player without a waveform after Load", () => {
+  const constructed = vi.fn();
+  vi.stubGlobal(
+    "AudioContext",
+    class {
+      constructor() {
+        constructed();
+      }
+    },
+  );
+  render(
+    <MediaView
+      part={{
+        type: "uri",
+        uri: "https://example.com/a.wav",
+        modality: "audio",
+        mime_type: "audio/wav",
+      }}
+      projectRef="acme/bot"
+    />,
+  );
+  expect(screen.queryByRole("button", { name: "Play" })).not.toBeInTheDocument();
+  fireEvent.click(screen.getByRole("button", { name: "Load" }));
+  expect(screen.getByRole("button", { name: "Play" })).toBeInTheDocument();
+  expect(document.querySelector("audio")).toHaveAttribute("src", "https://example.com/a.wav");
+  expect(constructed).not.toHaveBeenCalled();
+  vi.unstubAllGlobals();
+});
+
+it("shows the transcript of an image under it", () => {
+  render(
+    <MediaView
+      part={{
+        type: "blob",
+        content: "AAAA",
+        mime_type: "image/png",
+        modality: "image",
+        transcript: "A caption",
+      }}
+      projectRef="acme/bot"
+    />,
+  );
+  expect(document.querySelector("img")).toHaveAttribute("src", "data:image/png;base64,AAAA");
+  expect(screen.getByText("A caption")).toBeInTheDocument();
 });
