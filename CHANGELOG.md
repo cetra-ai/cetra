@@ -58,6 +58,7 @@ with an `### Upgrade notes` section (https://cetra.sh/docs/self-hosting/upgrade/
 - `@cetra-ai/sdk`'s Anthropic helper needs `@arizeai/openinference-instrumentation-anthropic` 1.0.1 or later, which keeps the Anthropic SDK's own span out of a traced call, so its tokens count once.
 - The session page shows each turn's tool calls and, on demand, its model and tool calls in order with a preview of their input; turns can be searched, filtered (failed, scored, uses tools) and shown one per line; an overview strip, `j`/`k` and the errors chip move between turns.
 - The trace view plays audio in a themed player with a waveform and shows its transcript under it.
+- In a wide window, the evaluator's Configuration tab shows the **Test** panel beside the form instead of under it.
 
 ### Fixed
 

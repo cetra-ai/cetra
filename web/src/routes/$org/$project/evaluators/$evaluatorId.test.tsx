@@ -79,6 +79,17 @@ it("opens the configuration tab named in the URL", async () => {
   expect(await screen.findByLabelText("Prompt")).toBeInTheDocument();
 });
 
+it("puts the test panel after the form, in the layout grid", async () => {
+  await renderApp(CONFIG_URL);
+
+  const save = await screen.findByRole("button", { name: "Save" });
+  const heading = screen.getByRole("heading", { name: "Test" });
+
+  expect(save.compareDocumentPosition(heading) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  expect(heading.closest("section")).toHaveClass("@5xl:border-l");
+  expect(heading.closest("section")?.parentElement).toHaveClass("@5xl:grid-cols-2");
+});
+
 it("sends the whole config when the prompt changes", async () => {
   const patched = capturePatch((body) => ({ ...evaluatorFixture, ...body }));
   const { user } = await renderApp(CONFIG_URL);
