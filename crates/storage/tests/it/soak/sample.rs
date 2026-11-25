@@ -24,6 +24,10 @@ pub(crate) struct Sample {
     // process
     pub(crate) rss_bytes: u64,
     pub(crate) hwm_bytes: u64,
+    /// Anonymous memory in RSS (heap, stacks), `RssAnon`.
+    pub(crate) rss_anon_bytes: u64,
+    /// File-backed memory in RSS (the binary, mapped files), `RssFile`.
+    pub(crate) rss_file_bytes: u64,
     pub(crate) threads: u64,
     pub(crate) fds: u64,
     pub(crate) cpu_s: f64,
@@ -59,6 +63,8 @@ pub(crate) struct Sample {
     pub(crate) cache: Option<CacheSample>,
     // queries since the last sample
     pub(crate) queries: BTreeMap<String, QuerySample>,
+    // span appends since the last sample
+    pub(crate) appends: AppendSample,
 }
 
 #[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
@@ -84,6 +90,18 @@ pub(crate) struct QuerySample {
     pub(crate) p95_ms: f64,
     pub(crate) max_ms: f64,
     pub(crate) errors: u64,
+}
+
+/// The span appends of one sample: their latency (backpressure waits included) and how late
+/// the ingest ticks that made them fired.
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+pub(crate) struct AppendSample {
+    pub(crate) n: u64,
+    pub(crate) p50_ms: f64,
+    pub(crate) p99_ms: f64,
+    pub(crate) max_ms: f64,
+    pub(crate) tick_late_p99_ms: f64,
+    pub(crate) tick_late_max_ms: f64,
 }
 
 /// Nanoseconds since the Unix epoch.
@@ -123,8 +141,18 @@ fn is_tmp(path: &str) -> bool {
     name.starts_with('.') && name.contains(".tmp-")
 }
 
-/// (RSS bytes, high-water bytes, threads) from `/proc/self/status`.
-pub(crate) fn parse_status(text: &str) -> (u64, u64, u64) {
+/// The memory and thread fields of `/proc/self/status`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct ProcStatus {
+    pub(crate) rss_bytes: u64,
+    pub(crate) hwm_bytes: u64,
+    pub(crate) rss_anon_bytes: u64,
+    pub(crate) rss_file_bytes: u64,
+    pub(crate) threads: u64,
+}
+
+/// Reads [`ProcStatus`] from the text of `/proc/self/status`.
+pub(crate) fn parse_status(text: &str) -> ProcStatus {
     let field = |name: &str| -> u64 {
         text.lines()
             .find_map(|line| line.strip_prefix(name))
@@ -132,11 +160,13 @@ pub(crate) fn parse_status(text: &str) -> (u64, u64, u64) {
             .and_then(|value| value.parse().ok())
             .unwrap_or_else(|| panic!("/proc/self/status has no {name}"))
     };
-    (
-        field("VmRSS:") * 1024,
-        field("VmHWM:") * 1024,
-        field("Threads:"),
-    )
+    ProcStatus {
+        rss_bytes: field("VmRSS:") * 1024,
+        hwm_bytes: field("VmHWM:") * 1024,
+        rss_anon_bytes: field("RssAnon:") * 1024,
+        rss_file_bytes: field("RssFile:") * 1024,
+        threads: field("Threads:"),
+    }
 }
 
 /// User plus system CPU seconds from `/proc/self/stat` (USER_HZ is 100).
@@ -360,7 +390,12 @@ impl Sampler {
         sample.staged_objects = rows.staged.len() as u64;
 
         let status = std::fs::read_to_string("/proc/self/status").expect("/proc/self/status");
-        (sample.rss_bytes, sample.hwm_bytes, sample.threads) = parse_status(&status);
+        let status = parse_status(&status);
+        sample.rss_bytes = status.rss_bytes;
+        sample.hwm_bytes = status.hwm_bytes;
+        sample.rss_anon_bytes = status.rss_anon_bytes;
+        sample.rss_file_bytes = status.rss_file_bytes;
+        sample.threads = status.threads;
         sample.fds = std::fs::read_dir("/proc/self/fd").map_or(0, |entries| entries.count() as u64);
         let stat = std::fs::read_to_string("/proc/self/stat").expect("/proc/self/stat");
         sample.cpu_s = parse_cpu(&stat);
@@ -402,6 +437,7 @@ impl Sampler {
             .map(|(kind, count)| (kind.name(), count))
             .collect();
         sample.queries = shared.take_query_stats();
+        sample.appends = shared.take_append_stats();
         Ok(sample)
     }
 }

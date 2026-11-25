@@ -5330,6 +5330,8 @@ export interface components {
             mime_type?: string | null;
             /** @description Media kind, when known. Omitted when absent. An explicit `null` from the source is kept (D65). */
             modality?: components["schemas"]["Modality"] | null;
+            /** @description Spoken text of the media (an audio part's transcript), when known. Omitted when absent. An explicit `null` from the source is kept (D65). */
+            transcript?: string | null;
             /**
              * @description Part type.
              * @enum {string}
@@ -12071,6 +12073,8 @@ export interface components {
             mime_type?: string | null;
             /** @description Media kind, when known. Omitted when absent. An explicit `null` from the source is kept (D65). */
             modality?: components["schemas"]["Modality"] | null;
+            /** @description Spoken text of the media (an audio part's transcript), when known. Omitted when absent. An explicit `null` from the source is kept (D65). */
+            transcript?: string | null;
             /**
              * @description Part type.
              * @enum {string}

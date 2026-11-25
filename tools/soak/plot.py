@@ -111,6 +111,21 @@ def query_series(samples: list[Sample]) -> list[Series]:
     return out
 
 
+def append_series(samples: list[Sample]) -> list[Series]:
+    """Span append latency (p50, p99, max) and ingest tick lateness (p99), in milliseconds."""
+    xs = [float(sample["elapsed_s"]) / 3600.0 for sample in samples]
+    out: list[Series] = []
+    for label, key in (
+        ("append p50", "p50_ms"),
+        ("append p99", "p99_ms"),
+        ("append max", "max_ms"),
+        ("tick lateness p99", "tick_late_p99_ms"),
+    ):
+        ys = [float(sample.get("appends", {}).get(key, 0.0)) for sample in samples]
+        out.append((label, xs, ys))
+    return out
+
+
 def plot(
     path: Path,
     title: str,
@@ -194,6 +209,8 @@ def main(argv: list[str] | None = None) -> None:
         [
             ("RSS", xs, values(samples, "rss_bytes", GIB)),
             ("high-water mark", xs, values(samples, "hwm_bytes", GIB)),
+            ("anonymous", xs, values(samples, "rss_anon_bytes", GIB)),
+            ("file-backed", xs, values(samples, "rss_file_bytes", GIB)),
         ],
     )
     draw(
@@ -267,6 +284,13 @@ def main(argv: list[str] | None = None) -> None:
         "Read cache hit ratio per interval (S3 runs)",
         "ratio",
         [("hit ratio", hit_xs, hit_ys)],
+    )
+    draw(
+        "appends.png",
+        "Span appends",
+        "ms (log scale)",
+        append_series(samples),
+        log=True,
     )
     draw(
         "queries.png",

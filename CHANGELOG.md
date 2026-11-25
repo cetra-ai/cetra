@@ -18,6 +18,7 @@ with an `### Upgrade notes` section (https://cetra.sh/docs/self-hosting/upgrade/
 - Org owners can set up SAML 2.0 single sign-on for their org, with metadata import, automatic certificate rotation from a metadata URL, and the same domains and enforcement as OIDC (the `saml` licence feature).
 - LLM connections: **Test connection** checks the form's values before you save them, for a new connection too, and **Test embeddings** under Advanced checks an embedding model. The panel header shows when the saved values were last tested. `POST /api/v1/orgs/{org}/llm-connections/test` tests an unsaved connection, and `POST …/llm-connections/{id}/test` takes draft fields; a connection's `last_tested_at` and `last_test_ok` hold the last test of its saved values.
 - The connection form suggests common model ids for OpenAI, Anthropic and Gemini in the Default model field.
+- Media parts carry an optional `transcript`. OpenAI chat output audio keeps its transcript, a message with only audio previews its transcripts, and judges read `[audio: <transcript>]`.
 
 ### Changed
 
@@ -29,12 +30,14 @@ with an `### Upgrade notes` section (https://cetra.sh/docs/self-hosting/upgrade/
 - `PATCH /api/v1/orgs/{org}/llm-connections/{id}` no longer needs `api_key` with a new `base_url` or `adapter`: the saved key is kept.
 - The LLM connection form offers OpenAI, OpenAI-compatible, Anthropic and Gemini; a saved OpenAI connection with a base URL shows as OpenAI-compatible, and `GET /api/v1/projects/{project}/assistant` returns the connection's `base_url`. The form puts the base URL and structured output under Advanced unless the provider needs them, shows the saved key's last 4 characters, and its fields keep a readable width. The Test dialog is gone.
 - The Python and TypeScript SDKs send `User-Agent: cetra-sdk-python/<version>` and `cetra-sdk-js/<version>` on their requests; Python's trace exporter adds it after the OpenTelemetry exporter's own value.
+- The trace view plays audio in a themed player with a waveform and shows its transcript under it.
 
 ### Fixed
 
 - When an org has its own single sign-on, the login page's email step links to the password form ("Sign in with a password instead"), so instance admins and members of a domain whose sign-on is not enforced can still use their password. After an org's provider refuses to sign in an instance admin, the page shows the password form.
 - The top bar's search button no longer runs its label into the `Ctrl+K` shortcut on Linux and Windows.
 - Selecting another member while the member panel is open no longer adds a second Role card.
+- An online backup cancelled by a server shutdown no longer leaves files in its directory: the shutdown waits until the backup has stopped and removed what it wrote.
 
 ## [0.1.0-rc.2] - 2026-11-22
 
