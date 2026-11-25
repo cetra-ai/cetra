@@ -1361,9 +1361,9 @@ mod tests {
         MAX_MATCH_COUNT, MAX_REFRESH_IDS, MAX_REFRESH_SPANS_PER_TRACE, MatchCountRequest,
         SPAN_LIST_COLUMNS, SPAN_REFRESH_COLUMNS, SpanListRequest, SpanRefreshRequest, SpanSort,
         TRACE_REFRESH_STRICT_COLUMNS, TraceListRequest, TraceRefreshRequest, TraceSort,
-        TraceSpansRequest, TraceTotals, TraceTotalsRequest, error_spans, match_count,
-        span_detail, span_list, span_list_capped, span_refresh, trace_detail,
-        trace_detail_limited, trace_frame, trace_list, trace_refresh, trace_spans, trace_totals,
+        TraceSpansRequest, TraceTotals, TraceTotalsRequest, error_spans, match_count, span_detail,
+        span_list, span_list_capped, span_refresh, trace_detail, trace_detail_limited, trace_frame,
+        trace_list, trace_refresh, trace_spans, trace_totals,
     };
     use crate::query_error::{Position, RunError};
     use crate::reads::{ListScope, Page, SortOrder};

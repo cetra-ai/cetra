@@ -234,7 +234,13 @@ async fn generate() -> (BTreeMap<String, String>, Vec<Example>) {
     out.add("list_traces", &[], &[], "responses/traces.json", &traces);
 
     let totals: TraceTotals = fetch(&app, cookie, "/traces/totals").await;
-    out.add("get_trace_totals", &[], &[], "responses/trace-totals.json", &totals);
+    out.add(
+        "get_trace_totals",
+        &[],
+        &[],
+        "responses/trace-totals.json",
+        &totals,
+    );
 
     let traces_eval: Page<TraceSummary> = fetch(&app, cookie, "/traces?include_eval=true").await;
     out.add(

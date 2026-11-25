@@ -301,7 +301,11 @@ const OPERATIONS: &[(&str, &str, &str)] = &[
         "delete_project_member",
     ),
     ("get", "/api/v1/projects/{project}/traces", "list_traces"),
-    ("get", "/api/v1/projects/{project}/traces/totals", "get_trace_totals"),
+    (
+        "get",
+        "/api/v1/projects/{project}/traces/totals",
+        "get_trace_totals",
+    ),
     (
         "get",
         "/api/v1/projects/{project}/traces/stream",
