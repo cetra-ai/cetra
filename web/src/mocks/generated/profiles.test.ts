@@ -6,6 +6,7 @@ import { CODING_PROFILE, EXTRACTION_PROFILE, VOICE_PROFILE } from "./profiles";
 const NOW = Date.parse("2026-11-19T12:00:00Z");
 const SEED = 1;
 const TRACES = 2000;
+const DAY_MS = 86_400_000;
 
 type TraceSummary = Schema<"TraceSummary">;
 
@@ -160,6 +161,26 @@ it("voice turns are short and in calls", () => {
   expect(sessions.length).toBeGreaterThan(0);
   for (const session of sessions) {
     expect(voiceQuestions.has(session.first_input_preview ?? "")).toBe(true);
+  }
+});
+
+it("voice calls keep their first turn's age", () => {
+  const dataset = build(VOICE_PROFILE);
+  const recent = dataset.traces.filter((trace) => NOW - Date.parse(trace.start_time) < DAY_MS);
+  const share = recent.length / dataset.traces.length;
+  expect(share).toBeGreaterThanOrEqual(0.4);
+  expect(share).toBeLessThanOrEqual(0.7);
+
+  const calls = new Map<string, TraceSummary[]>();
+  for (const trace of generated(dataset, VOICE_PROFILE)) {
+    const session = trace.session_id ?? "";
+    calls.set(session, [...(calls.get(session) ?? []), trace]);
+  }
+  for (const [session, members] of calls) {
+    const starts = members.map((member) => Date.parse(member.start_time));
+    for (let turn = 1; turn < starts.length; turn += 1) {
+      expect(starts[turn], session).toBeGreaterThan(starts[turn - 1] ?? Number.NaN);
+    }
   }
 });
 

@@ -1566,7 +1566,7 @@ export const SUPPORT_PROFILE: Profile = {
 
 /**
  * Spreads each session's turns in time (SL-6): the session keeps its earliest trace's start, and each later
- * turn (in start-time order) starts 30 s to 8 min after the previous one. A session whose last turn would
+ * turn (in start-time order; in index order for `calls`) starts 30 s to 8 min after the previous one. A session whose last turn would
  * start after `now` moves earlier as a whole. Traces keep their own durations.
  */
 function spreadSessionTurns(
@@ -1584,10 +1584,14 @@ function spreadSessionTurns(
   const starts = traces.map((trace) => Date.parse(trace.start_time));
   const timed = [...traces];
   for (const indices of groups.values()) {
-    // Start-time order, ties by index: the same order `sessionSlots` numbers the turns in.
-    const ordered = [...indices].sort(
-      (left, right) => (starts[left] ?? 0) - (starts[right] ?? 0) || left - right,
-    );
+    // Start-time order, ties by index: the same order `sessionSlots` numbers the turns in. A call's
+    // turns are generated in order, so it runs in index order, anchored at its first trace's start.
+    const ordered =
+      profile.sessions.kind === "calls"
+        ? [...indices].sort((left, right) => left - right)
+        : [...indices].sort(
+            (left, right) => (starts[left] ?? 0) - (starts[right] ?? 0) || left - right,
+          );
     const [first, ...later] = ordered;
     if (first === undefined) {
       continue;
