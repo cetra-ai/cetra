@@ -1,9 +1,15 @@
 import { type HttpHandler, HttpResponse, http } from "msw";
 import type { Schema } from "@/api/types";
 import { type Dataset, rfc3339 } from "@/mocks/generated/dataset";
-import { compareBody, itemId, type Run, summaryOf } from "@/mocks/generated/experiments";
+import {
+  compareBody,
+  itemId,
+  type Run,
+  runMetadata,
+  summaryOf,
+} from "@/mocks/generated/experiments";
 import { mulberry32 } from "@/mocks/generated/random";
-import { ON_CALL_PAGER, startedBetween } from "@/mocks/generated/stories";
+import { idParam, ON_CALL_PAGER, scoreValues, startedBetween } from "@/mocks/generated/stories";
 import channelsFixture from "../../../../fixtures/api/static/channels.json";
 import evaluatorsFixture from "../../../../fixtures/api/static/evaluators.json";
 import onlineRuleStatsFixture from "../../../../fixtures/api/static/online-rule-stats.json";
@@ -97,21 +103,17 @@ const HOURS = 24;
 /** The coding runs of one hour: their `tests_pass` values. */
 type Hour = { start: number; values: boolean[] };
 
-/** The values of the boolean score `name` of each trace that carries it. */
-function booleanValues(traces: readonly Schema<"TraceSummary">[], name: string): boolean[] {
-  return traces.flatMap((trace) => {
-    const value = trace.scores.find((score) => score.name === name)?.value;
-    return value?.data_type === "boolean" ? [value.value] : [];
-  });
-}
-
-/** The hours before the dataset's now, oldest first: each hour's `tests_pass` values. */
+/**
+ * The hours before the dataset's now, oldest first: each hour's `tests_pass` values. The hours are
+ * UTC hours, as the story rules' hourly buckets are (`firstDippedHourAgo` in stories.ts).
+ */
 function hoursOf(dataset: Dataset): Hour[] {
+  const end = Math.floor(dataset.now / HOUR_MS) * HOUR_MS;
   return Array.from({ length: HOURS }, (_unused, index) => {
-    const start = dataset.now - (HOURS - index) * HOUR_MS;
+    const start = end - (HOURS - index) * HOUR_MS;
     return {
       start,
-      values: booleanValues(startedBetween(dataset, start, start + HOUR_MS), "tests_pass"),
+      values: scoreValues(startedBetween(dataset, start, start + HOUR_MS), "tests_pass", "boolean"),
     };
   });
 }
@@ -181,11 +183,6 @@ function readbackTestResult(): Schema<"EvaluatorTestResult"> {
   };
 }
 
-/** A path parameter as text; msw types it as possibly repeated or missing. */
-function idParam(value: string | readonly string[] | undefined): string {
-  return typeof value === "string" ? value : "";
-}
-
 /** The `rule_id` query parameter of a request, when it has one. */
 function ruleIdOf(request: Request): string | null {
   return new URL(request.url).searchParams.get("rule_id");
@@ -215,8 +212,12 @@ export function storyChannelHandlers(project?: string): HttpHandler[] {
 
 const INVOICE_DATASET_ID = "01900000-0000-7000-8000-000000570921";
 const INVOICE_ITEMS = 300;
-/** The dataset offset `itemId` takes for the invoices; the support runs use 0 and 1. */
-const INVOICE_ITEM_OFFSET = 2;
+/**
+ * The dataset offset `itemId` takes for the invoices. The support runs use 0 and 1. Offset 2's 300
+ * rows would run past its 0x100 slot into offset 3's (rows 256 to 299), so the invoices take 4 and
+ * offset 3 stays unused.
+ */
+const INVOICE_ITEM_OFFSET = 4;
 const INVOICE_THRESHOLD = 0.1;
 const INVOICE_LIMIT = 50;
 const INVOICE_MAX_LIMIT = 200;
@@ -306,12 +307,11 @@ const INVOICE_BY_ID = new Map<string, Run>(
         dataset_id: INVOICE_DATASET_ID,
         dataset_name: "Labeled invoices",
         dataset_version: 1,
-        // The schema types a metadata value as `never`; the mock stores the strings of a run.
-        metadata: {
+        metadata: runMetadata({
           prompt: "extract-invoice",
           version: spec.version,
           model: "gemini-2.5-flash",
-        } as unknown as Schema<"Experiment">["metadata"],
+        }),
         repetitions: 1,
         item_count: INVOICE_ITEMS,
         result_count: INVOICE_ITEMS,

@@ -15,7 +15,7 @@ type TraceSummary = Schema<"TraceSummary">;
 
 const HOUR_MS = 3_600_000;
 /** The cost step: the window starts `now − 14 h` (Y). */
-const STEP_HOURS = 14;
+export const STEP_HOURS = 14;
 /** Monday: the context-window window starts `now − 84 h` (M). */
 const MONDAY_HOURS = 84;
 const RETRY_SHARE = 0.18;

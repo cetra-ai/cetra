@@ -1,6 +1,7 @@
 import { type HttpHandler, HttpResponse, http } from "msw";
 import type { Schema } from "@/api/types";
 import { type Dataset, percentile, rfc3339, visibleTraces } from "@/mocks/generated/dataset";
+import { STEP_HOURS } from "@/mocks/generated/story-coding";
 import { SSO_TURN, SUPPORT_SESSION } from "@/mocks/generated/story-support";
 import alertRulesFixture from "../../../../fixtures/api/static/alert-rules.json";
 import queuesFixture from "../../../../fixtures/api/static/annotation-queues.json";
@@ -166,8 +167,11 @@ type StoryRule = {
   /** The channel the rule notifies. */
   channel: StoryChannel;
   state: "firing" | "ok";
-  /** The rule's value, its count and the time it last changed, before `now` of the dataset. */
-  lastValue: (dataset: Dataset, now: number) => number;
+  /**
+   * The rule's value, its count and the time it last changed, before `now` of the dataset. The value
+   * is undefined when the window has no sample to take it from.
+   */
+  lastValue: (dataset: Dataset, now: number) => number | undefined;
   lastCount: (dataset: Dataset, now: number) => number;
   /** When it last fired (firing), or resolved (ok), before now. */
   changedAgoMs: (dataset: Dataset, now: number) => number;
@@ -181,16 +185,25 @@ export function startedBetween(dataset: Dataset, from: number, to: number): Trac
   });
 }
 
-/** The numeric score `name` of each trace that carries it. */
-function numericScores(traces: readonly Trace[], name: string): number[] {
+/** The value of the score `name` of each trace that carries it, of the data type `dataType`. */
+export function scoreValues<T extends "numeric" | "boolean">(
+  traces: readonly Trace[],
+  name: string,
+  dataType: T,
+): (T extends "numeric" ? number : boolean)[] {
   return traces.flatMap((trace) => {
     const value = trace.scores.find((score) => score.name === name)?.value;
-    return value?.data_type === "numeric" ? [value.value] : [];
+    return value?.data_type === dataType
+      ? [value.value as T extends "numeric" ? number : boolean]
+      : [];
   });
 }
 
-function mean(values: readonly number[]): number {
-  return values.reduce((total, value) => total + value, 0) / values.length;
+/** The mean of the values, or undefined for an empty window (no sample to take a mean of). */
+function mean(values: readonly number[]): number | undefined {
+  return values.length === 0
+    ? undefined
+    : values.reduce((total, value) => total + value, 0) / values.length;
 }
 
 /** The cost of the traces (USD). */
@@ -206,16 +219,18 @@ function costOf(traces: readonly Trace[]): number {
 function firstDippedHourAgo(dataset: Dataset, now: number): number {
   const first = Math.floor((now - DAY_MS) / HOUR_MS) * HOUR_MS;
   for (let start = first; start < now; start += HOUR_MS) {
-    const scores = numericScores(startedBetween(dataset, start, start + HOUR_MS), "correctness");
-    if (scores.length > 0 && mean(scores) < CORRECTNESS_THRESHOLD) {
+    const average = mean(
+      scoreValues(startedBetween(dataset, start, start + HOUR_MS), "correctness", "numeric"),
+    );
+    if (average !== undefined && average < CORRECTNESS_THRESHOLD) {
       return now - start;
     }
   }
   return DAY_MS;
 }
 
-/** The cost step of the coding project (story-coding's `STEP_HOURS`). */
-const COST_STEP_MS = 14 * HOUR_MS;
+/** The cost step of the coding project: the window of its cost rule starts this long before the step. */
+const COST_STEP_MS = STEP_HOURS * HOUR_MS;
 
 const CORRECTNESS_CONDITION = {
   metric: "score",
@@ -238,7 +253,7 @@ export const STORY_RULES: readonly StoryRule[] = [
     channel: TEAM_SLACK,
     state: "firing",
     lastValue: (dataset, now) =>
-      mean(numericScores(startedBetween(dataset, now - HOUR_MS, now), "correctness")),
+      mean(scoreValues(startedBetween(dataset, now - HOUR_MS, now), "correctness", "numeric")),
     lastCount: (dataset, now) => startedBetween(dataset, now - HOUR_MS, now).length,
     changedAgoMs: (dataset, now) => firstDippedHourAgo(dataset, now),
   },
@@ -277,7 +292,7 @@ export const STORY_RULES: readonly StoryRule[] = [
           (trace) => trace.duration_ns / 1_000_000,
         ),
         95,
-      ) ?? Number.NaN,
+      ),
     lastCount: (dataset, now) => startedBetween(dataset, now - 15 * MINUTE_MS, now).length,
     changedAgoMs: () => 6 * HOUR_MS,
   },
@@ -643,6 +658,7 @@ export function storyIssueEvents(
 
 export function storyAlertRule(dataset: Dataset, rule: StoryRule): Schema<"AlertRule"> {
   const firing = rule.state === "firing";
+  const value = rule.lastValue(dataset, dataset.now);
   return {
     id: rule.id,
     name: rule.name,
@@ -652,7 +668,7 @@ export function storyAlertRule(dataset: Dataset, rule: StoryRule): Schema<"Alert
     channel_ids: [rule.channel.id],
     cooldown_s: 3600,
     notify_while_firing: false,
-    last_value: rule.lastValue(dataset, dataset.now),
+    ...(value === undefined ? {} : { last_value: value }),
     last_count: rule.lastCount(dataset, dataset.now),
     last_evaluated_at: ago(dataset, MINUTE_MS),
     ...(firing ? { last_fired_at: ago(dataset, rule.changedAgoMs(dataset, dataset.now)) } : {}),
@@ -663,11 +679,12 @@ export function storyAlertRule(dataset: Dataset, rule: StoryRule): Schema<"Alert
 
 export function storyAlertEvent(dataset: Dataset, rule: StoryRule): Schema<"AlertEvent"> {
   const windowTo = ago(dataset, rule.changedAgoMs(dataset, dataset.now));
+  const value = rule.lastValue(dataset, dataset.now);
   return {
     id: rule.eventId,
     rule_id: rule.id,
     kind: rule.state === "firing" ? "fired" : "resolved",
-    value: rule.lastValue(dataset, dataset.now),
+    ...(value === undefined ? {} : { value }),
     count: rule.lastCount(dataset, dataset.now),
     threshold: rule.condition.threshold,
     comparator: rule.condition.comparator,
@@ -696,7 +713,7 @@ export function storyQueue(dataset: Dataset, queue: StoryQueue): Schema<"Annotat
     name: queue.name,
     description: queue.description,
     instructions: queue.instructions,
-    target: "trace",
+    target: queue.sessionId === undefined ? "trace" : "session",
     definition_ids: [...queue.definitionIds],
     version: 1,
     created_by: MEMBER_ID,
@@ -747,8 +764,8 @@ export function storyQueueItem(
   return { ...common, trace_id: hero.trace_id, target_time: hero.start_time };
 }
 
-/** A path parameter as text; msw types it as possibly repeated or missing. */
-function idParam(value: string | readonly string[] | undefined): string {
+/** A path parameter as text; msw types it as possibly repeated or missing. Shared by the story handlers. */
+export function idParam(value: string | readonly string[] | undefined): string {
   return typeof value === "string" ? value : "";
 }
 

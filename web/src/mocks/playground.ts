@@ -1,4 +1,5 @@
 import { HttpResponse, http } from "msw";
+import { VOICE_AUDIO_TRACE_ID } from "@/mocks/generated/story-voice";
 
 /**
  * A canned playground answer for the dev server's browser worker (track V, M7). A run streams
@@ -33,7 +34,6 @@ const INVOICE_TRACE_ID = "a0000000000000000000000000000006";
  * P2's rule) and the first Nordic Freight run tagged `re-extracted` (index 40).
  */
 const PATCH_SPLIT_TRACE_ID = "a0000000000000000000000000000025";
-const VOICE_BOOKING_TRACE_ID = "a000000000000000000000000000006e";
 const INVOICE_COMMA_TRACE_ID = "a0000000000000000000000000000028";
 
 /** Any run that names no story: today's answer, and the file's existing `TRACE_ID`. */
@@ -120,7 +120,7 @@ const PATCH_SPLIT: Answer = {
 
 /** voice-reply v5: the reply reads the booking back in one sentence. */
 const VOICE_BOOKING: Answer = {
-  trace_id: VOICE_BOOKING_TRACE_ID,
+  trace_id: VOICE_AUDIO_TRACE_ID,
   text: "Done: Friday at 9:30, with Dr. Martin.",
   input: 310,
   output: 14,

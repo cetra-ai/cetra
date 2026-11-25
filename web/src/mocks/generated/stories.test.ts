@@ -338,6 +338,42 @@ it("computes each rule's value and count from its window at the clock", () => {
   expect(voiceAlert.last_count).toBe(voiceQuarter.length);
 });
 
+/** A rule's comparison of its value with its threshold, as the server reads the comparator. */
+const BREACHES = {
+  gt: (value: number, threshold: number) => value > threshold,
+  gte: (value: number, threshold: number) => value >= threshold,
+  lt: (value: number, threshold: number) => value < threshold,
+  lte: (value: number, threshold: number) => value <= threshold,
+} as const;
+
+it("has each firing rule's value breach its threshold, on at least its minimum sample count", () => {
+  for (const rule of STORY_RULES.filter((item) => item.state === "firing")) {
+    const dataset = stories[rule.story];
+    const value = rule.lastValue(dataset, dataset.now);
+    const { comparator, threshold } = rule.condition;
+    expect(value).toBeDefined();
+    expect(value !== undefined && BREACHES[comparator](value, threshold)).toBe(true);
+    expect(rule.lastCount(dataset, dataset.now)).toBeGreaterThanOrEqual(
+      rule.condition.min_count ?? 0,
+    );
+  }
+});
+
+it("leaves the value out of an empty window, with a count of 0", () => {
+  // The traces start before this clock, so the hour and the quarter hour after it hold none. The
+  // ok rule (extraction) has fixed values, so the firing rules are the ones whose windows count.
+  for (const rule of STORY_RULES.filter((item) => item.state === "firing")) {
+    const dataset = stories[rule.story];
+    const later = { ...dataset, now: dataset.now + DAY_MS * 365 };
+    expect(rule.lastCount(later, later.now)).toBe(0);
+    if (rule.story === "support" || rule.story === "voice") {
+      expect(rule.lastValue(later, later.now)).toBeUndefined();
+      expect(storyAlertRule(later, rule)).not.toHaveProperty("last_value");
+      expect(storyAlertEvent(later, rule)).not.toHaveProperty("value");
+    }
+  }
+});
+
 it("starts the support rule at the first hour of the last day under 0.7 correctness", () => {
   const support = stories.support;
   const first = Math.floor((NOW - DAY_MS) / HOUR_MS) * HOUR_MS;
@@ -473,6 +509,9 @@ it("points every story queue's item at the queue's own target", () => {
     const item = storyQueueItem(dataset, queue);
     expect(item?.queue_id).toBe(queue.id);
     expect(item?.status).toBe("pending");
+    // The queue's target is what its item is: a session queue's item names a session, not a trace.
+    const target = storyQueue(dataset, queue).target;
+    expect(target).toBe(queue.sessionId === undefined ? "trace" : "session");
     if (queue.sessionId === undefined) {
       expect(item?.trace_id).toBe(dataset.traces[queue.heroIndex ?? -1]?.trace_id);
       expect(item?.session_id).toBeUndefined();
@@ -492,6 +531,7 @@ it("targets the support queue at its session, whose first turn is the item's tim
     .map((trace) => Date.parse(trace.start_time))
     .sort((left, right) => left - right)[0];
   const item = storyQueueItem(stories.support, support);
+  expect(storyQueue(stories.support, support).target).toBe("session");
   expect(item?.session_id).toBe("sess-0142");
   expect(Date.parse(item?.target_time ?? "")).toBe(first);
   expect(storyQueue(stories.support, support).counts).toEqual({

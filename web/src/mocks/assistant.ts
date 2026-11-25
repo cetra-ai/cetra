@@ -297,7 +297,7 @@ type TurnSpec = {
   result: Fields;
   /** The number of rows the call returned. */
   rows: number;
-  draft: { kind: "dashboard" | "filter"; draft: Fields };
+  draft: { kind: "filter"; draft: Fields };
   answer: string;
 };
 

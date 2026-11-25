@@ -135,6 +135,14 @@ export function itemId(datasetOffset: number, index: number): string {
   return uuidOf(0xb0000 + datasetOffset * 0x100 + index);
 }
 
+/**
+ * A run's metadata as the mock stores it: the fields of the run's prompt and model (and version).
+ * The schema types a metadata value as `never`, so the cast is kept here, once.
+ */
+export function runMetadata(fields: Record<string, string | number>): Experiment["metadata"] {
+  return fields as unknown as Experiment["metadata"];
+}
+
 function buildRun(spec: RunSpec, ordinal: number): Run {
   const count = spec.running ? RUNNING_RESULTS : ITEM_COUNT;
   const rows = buildRows(spec, ordinal, count);
@@ -144,8 +152,7 @@ function buildRun(spec: RunSpec, ordinal: number): Run {
     name: spec.name,
     dataset_name: spec.dataset.name,
     dataset_version: spec.dataset.version,
-    // The schema types a metadata value as `never`; the mock stores the strings of a run.
-    metadata: { model: spec.model, prompt: spec.prompt } as unknown as Experiment["metadata"],
+    metadata: runMetadata({ model: spec.model, prompt: spec.prompt }),
     repetitions: 1,
     item_count: ITEM_COUNT,
     result_count: rows.length,

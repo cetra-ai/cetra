@@ -1,8 +1,12 @@
 import { beforeEach, expect, it } from "vitest";
-import { createDataset, type Dataset, isEligibleTrace } from "@/mocks/generated/dataset";
+import { createDataset, isEligibleTrace } from "@/mocks/generated/dataset";
 import { CODING_STORY_PROFILE } from "@/mocks/generated/story-coding";
 import { EXTRACTION_STORY_PROFILE } from "@/mocks/generated/story-extraction";
-import { VOICE_STORY_PROFILE } from "@/mocks/generated/story-voice";
+import {
+  VOICE_AUDIO_TRACE_ID,
+  VOICE_STORY_PROFILE,
+  voiceAudioTurn,
+} from "@/mocks/generated/story-voice";
 import { server } from "@/mocks/node";
 import { playgroundHandlers } from "@/mocks/playground";
 
@@ -10,7 +14,6 @@ const RUNS = `${location.origin}/api/v1/projects/acme%2Fsupport-bot/playground/r
 const NOW = Date.parse("2026-06-01T00:00:00.000Z");
 const GENERIC_TRACE_ID = "0190a1b2c3d4e5f60718293a4b5c6d7e";
 const GENERIC_TEXT = "Thanks for your message. A support agent will reply within one business day.";
-const HOUR_MS = 3_600_000;
 
 beforeEach(() => {
   server.use(...playgroundHandlers);
@@ -183,42 +186,6 @@ const PATCH_SPLIT_TEXT =
   "This touches 23 files, so I'll do it in three steps:\n\n1. Rename `Project.owner` in the models and migrations.\n2. Update the API handlers and their tests.\n3. Update the web client and run the full suite.";
 const BOOKING_TEXT = "Done: Friday at 9:30, with Dr. Martin.";
 
-/** The voice turn that reads the booking back (P2's rule): the lowest-index availability turn of the last 2 hours that no hang-up call touches. */
-function voiceBookingIndex(dataset: Dataset): number {
-  const eligible = (index: number): boolean => {
-    const trace = dataset.traces[index];
-    return trace !== undefined && isEligibleTrace(VOICE_STORY_PROFILE, trace, index);
-  };
-  const calls = new Map<string, number[]>();
-  dataset.traces.forEach((trace, index) => {
-    const session = trace.session_id;
-    if (session?.startsWith("call-") && eligible(index)) {
-      calls.set(session, [...(calls.get(session) ?? []), index]);
-    }
-  });
-  const touched = new Set<number>();
-  for (const turns of calls.values()) {
-    const last = turns[turns.length - 1];
-    const before = turns[turns.length - 2];
-    if (
-      last !== undefined &&
-      before !== undefined &&
-      dataset.traces[last]?.tags.includes("hangup")
-    ) {
-      touched.add(last);
-      touched.add(before);
-    }
-  }
-  return dataset.traces.findIndex(
-    (trace, index) =>
-      eligible(index) &&
-      !touched.has(index) &&
-      trace.tags.includes("calendar") &&
-      !trace.tags.includes("hangup") &&
-      Date.parse(trace.start_time) >= NOW - 2 * HOUR_MS,
-  );
-}
-
 it("answers the three new prompt versions with their text and numbers", async () => {
   const [patch, voice, invoice] = await Promise.all([
     run({ model: "claude-sonnet-4-5", source: { prompt: { name: "write-patch", version: 4 } } }),
@@ -271,20 +238,23 @@ it("keeps the older versions' answers, and answers extract-invoice v6 the same f
 
 it("opens the trace of each new version: the first context-window run, the booking turn, the first Nordic Freight re-extraction", async () => {
   const coding = createDataset({ seed: 1, now: NOW, traces: 2000, profile: CODING_STORY_PROFILE });
-  const codingIndex = coding.traces.findIndex((trace) => trace.tags.includes("context-window"));
+  const codingIndex = coding.traces.findIndex(
+    (trace, index) =>
+      isEligibleTrace(CODING_STORY_PROFILE, trace, index) && trace.tags.includes("context-window"),
+  );
   expect(codingIndex).toBe(37);
   const patch = await run({ source: { prompt: { name: "write-patch", version: 4 } } });
   expect(patch[0]?.data.trace_id).toBe(coding.traces[codingIndex]?.trace_id);
   expect(patch[0]?.data.trace_id).toBe("a0000000000000000000000000000025");
 
   const voice = createDataset({ seed: 1, now: NOW, traces: 2000, profile: VOICE_STORY_PROFILE });
-  const bookingIndex = voiceBookingIndex(voice);
+  const bookingIndex = voiceAudioTurn(voice);
   expect(bookingIndex).toBe(110);
   const bookingTrace = voice.traces[bookingIndex]?.trace_id;
   expect(voice.traceDetail(bookingTrace ?? "")?.spans.at(-1)?.span.name).toBe("check_availability");
   const booking = await run({ source: { prompt: { name: "voice-reply", version: 5 } } });
   expect(booking[0]?.data.trace_id).toBe(bookingTrace);
-  expect(booking[0]?.data.trace_id).toBe("a000000000000000000000000000006e");
+  expect(booking[0]?.data.trace_id).toBe(VOICE_AUDIO_TRACE_ID);
 
   const extraction = createDataset({
     seed: 1,

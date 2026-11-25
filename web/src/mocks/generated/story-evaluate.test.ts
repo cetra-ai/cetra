@@ -1,3 +1,4 @@
+import { type HttpHandler, HttpResponse, http } from "msw";
 import { beforeAll, expect, it } from "vitest";
 import type { Schema } from "@/api/types";
 import { createDataset, type Dataset, rfc3339, visibleTraces } from "@/mocks/generated/dataset";
@@ -56,13 +57,23 @@ function baseOf(story: StoryId): string {
 }
 
 /** Every story project's handlers, each under its own project. */
+function storyHandlersOfEveryStory(): HttpHandler[] {
+  return STORY_IDS.flatMap((story) => {
+    const ref = storyProject(story).ref;
+    return [...storyEvaluateHandlers(stories[story], ref), ...storyChannelHandlers(ref)];
+  });
+}
+
 function serveEveryStory(): void {
-  server.use(
-    ...STORY_IDS.flatMap((story) => {
-      const ref = storyProject(story).ref;
-      return [...storyEvaluateHandlers(stories[story], ref), ...storyChannelHandlers(ref)];
-    }),
-  );
+  server.use(...storyHandlersOfEveryStory());
+}
+
+/** A catch-all that answers 404: what the story handlers leave alone is then a 404, not a network error. */
+const NOT_FOUND = http.all("*", () => new HttpResponse(null, { status: 404 }));
+
+/** Every story project's handlers, then the catch-all: a fall-through shows as its exact 404. */
+function serveEveryStoryAndFallThrough(): void {
+  server.use(...storyHandlersOfEveryStory(), NOT_FOUND);
 }
 
 /** The ids of a list response's objects. */
@@ -89,7 +100,7 @@ it("lists each story's evaluators and rules under its own project only", async (
 });
 
 it("answers a story object only under its own project, and lets other ids fall through", async () => {
-  serveEveryStory();
+  serveEveryStoryAndFallThrough();
 
   const coding = (await (
     await fetch(`${baseOf("coding")}/evaluators/${TESTS_EVALUATOR}`)
@@ -99,9 +110,9 @@ it("answers a story object only under its own project, and lets other ids fall t
   expect(coding.output_score).toEqual({ name: "tests_pass", data_type: "boolean" });
 
   const judgeFromCoding = await fetch(`${baseOf("coding")}/evaluators/${READBACK_EVALUATOR}`);
-  expect(judgeFromCoding.status).not.toBe(200);
+  expect(judgeFromCoding.status).toBe(404);
   const ruleFromVoice = await fetch(`${baseOf("voice")}/online-rules/${TESTS_RULE}`);
-  expect(ruleFromVoice.status).not.toBe(200);
+  expect(ruleFromVoice.status).toBe(404);
 });
 
 it("serves the coding rule and its stats, with each hour's pass rate from the dataset", async () => {
@@ -266,13 +277,31 @@ it("pages the results of an invoice run over all 300 items", async () => {
 });
 
 it("serves the invoice experiments under the extraction project only", async () => {
-  serveEveryStory();
+  serveEveryStoryAndFallThrough();
 
   expect(await idsAt(`${baseOf("extraction")}/experiments`)).toEqual([INVOICE_V4, INVOICE_V3]);
   const support = await fetch(`${baseOf("support")}/experiments/${INVOICE_V3}`);
-  expect(support.status).not.toBe(200);
+  expect(support.status).toBe(404);
   const coding = await fetch(
     `${baseOf("coding")}/experiments/compare?ids=${INVOICE_V3},${INVOICE_V4}`,
   );
-  expect(coding.status).not.toBe(200);
+  expect(coding.status).toBe(404);
+});
+
+it("answers the story objects without a project: both evaluators and the invoice runs by id", async () => {
+  server.use(...storyEvaluateHandlers(stories.support), NOT_FOUND);
+  const unscoped = `${window.location.origin}/api/v1/projects/acme%2Fany`;
+
+  expect(await idsAt(`${unscoped}/evaluators`)).toEqual(
+    expect.arrayContaining([TESTS_EVALUATOR, READBACK_EVALUATOR]),
+  );
+  const run = await fetch(`${unscoped}/experiments/${INVOICE_V3}`);
+  expect(run.status).toBe(200);
+  expect(((await run.json()) as Schema<"Experiment">).id).toBe(INVOICE_V3);
+  const compare = await fetch(
+    `${unscoped}/experiments/compare?ids=${INVOICE_V3},${INVOICE_V4}&limit=1`,
+  );
+  expect(compare.status).toBe(200);
+  // The list is the generated one, not the invoice list: with no project it falls through.
+  expect((await fetch(`${unscoped}/experiments`)).status).toBe(404);
 });

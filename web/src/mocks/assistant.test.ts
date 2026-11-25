@@ -530,9 +530,13 @@ describe("assistant story conversations", () => {
       if (draft?.kind !== "filter") {
         throw new Error("draft did not parse as a filter");
       }
+      const rangeMs = RANGE_MS[draft.draft.range ?? "24h"];
+      if (rangeMs === undefined) {
+        throw new Error("unknown range");
+      }
       const query = new URLSearchParams({
         filter: draft.draft.filter ?? "",
-        from: String(NOW - RANGE_MS[draft.draft.range ?? "24h"]),
+        from: String(NOW - rangeMs),
         to: String(NOW),
         limit: "1000",
       });
