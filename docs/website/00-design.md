@@ -292,7 +292,7 @@ The content below is the direction; the plans fix the exact words. Captions are 
 | **Issues** | "Customers ask how to export traces to CSV" (topic); its first example is the hero trace | "run_tests failed: 1 failed, 47 passed" (error); its example is the hero trace's `run_tests` span | "Reply started more than 800 ms after the caller" (score); its example is the hero trace's `check_availability` span | "Invoice total doesn't match its line items"; its example is the hero trace's first schema check |
 | **Evaluate: annotation queue** | "Support answers": correctness and relevance, on the support trace | "Patch review": tests pass and a review verdict, on the coding trace | "Call review": resolved and tone, on the voice trace | "Invoice fields": schema valid and fields correct, on the extraction trace |
 | **Prompts: playground** | `support-reply` v2, answering the CSV question | `write-patch`, producing a diff | `voice-reply`, a short spoken answer | `extract-invoice`, on two models side by side |
-| **Alert** | Correctness average under 0.7 on `support-bot` | Error rate above 5% on `code-agent`, firing | p95 latency above 1.5 s on `voice-agent`, firing | Scanned PDFs over 10 an hour on `billing` traces |
+| **Alert** | Correctness average under 0.7 on `support-bot` | Error rate above 5% on `code-agent`, firing | p95 latency above 1.5 s on `voice-agent`, firing | Scanned PDFs over 10 an hour |
 
 The assistant chapter's picture is wider than today: the story's dashboard fills the page, and the assistant window sits over it, showing the question, the answer, the build request and the "Drafted a dashboard" card. The picture shows the dashboard as saved; the caption doesn't describe the apply step.
 
