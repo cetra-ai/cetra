@@ -5,8 +5,10 @@
 
 pub mod error;
 pub mod eval;
+pub mod filter;
 pub mod ir;
 pub mod text;
+pub mod tombstone;
 
 pub use error::{InvalidQuery, MESSAGE_CAP, Position, QueryError, cap_message};
 pub use eval::{eval_expr, eval_filter};
