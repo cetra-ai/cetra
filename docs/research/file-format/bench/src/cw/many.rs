@@ -17,8 +17,9 @@ use futures::{StreamExt, TryStreamExt};
 use object_store::path::Path as ObjPath;
 use object_store::{ObjectMeta, ObjectStore};
 use parquet::arrow::ProjectionMask;
-use parquet::arrow::arrow_reader::{ArrowPredicate, ArrowPredicateFn, RowFilter};
+use parquet::arrow::arrow_reader::{ArrowPredicate, ArrowPredicateFn, ArrowReaderMetadata, ArrowReaderOptions, RowFilter};
 use parquet::arrow::async_reader::{ParquetObjectReader, ParquetRecordBatchStreamBuilder};
+use parquet::file::metadata::PageIndexPolicy;
 use parquet::file::statistics::Statistics;
 use parquet::schema::types::SchemaDescriptor;
 use strata::{CmpOp, Lit, Predicate, ScanKind, ScanRequest, StrataFile};
@@ -64,6 +65,34 @@ pub(crate) struct FileRef {
 pub(crate) enum Opened {
     Parquet(Vec<PqFile>),
     Strata(Vec<Arc<StrataFile>>),
+}
+
+/// A Parquet file for the queries that read whole row groups: its footer without the page index,
+/// opened without a HEAD (the size is the listing's, see `light_pq`).
+struct LightPq {
+    store: Arc<dyn ObjectStore>,
+    path: ObjPath,
+    meta: ArrowReaderMetadata,
+}
+
+/// The files of one table for the queries of `open_light`.
+enum Light {
+    Parquet(Vec<LightPq>),
+    Strata(Vec<Arc<StrataFile>>),
+}
+
+impl Opened {
+    /// The same files as `Light`: a Parquet file keeps its footer, its page index is not read.
+    fn light(&self) -> Light {
+        match self {
+            Opened::Parquet(v) => Light::Parquet(
+                v.iter()
+                    .map(|f| LightPq { store: f.store.clone(), path: f.path.clone(), meta: f.meta.clone() })
+                    .collect(),
+            ),
+            Opened::Strata(v) => Light::Strata(v.clone()),
+        }
+    }
 }
 
 /// The text files of a project: `cw_traces.txt`, `cw_around.txt`, `cw_clock.txt`.
@@ -139,13 +168,44 @@ pub(crate) async fn open(loc: &Location, format: &str, files: &[FileRef]) -> R<O
             let v = try_join_all(files.iter().map(|f| pqfast::open(store.clone(), f.path.clone()))).await?;
             Ok(Opened::Parquet(v))
         }
-        "st" => {
-            let cfg = crate::strata_config();
-            let v = try_join_all(files.iter().map(|f| StrataFile::open(store.clone(), f.path.clone(), None, &cfg))).await?;
-            Ok(Opened::Strata(v.into_iter().map(Arc::new).collect()))
-        }
+        "st" => Ok(Opened::Strata(strata_files(loc, files).await?)),
         _ => Err(format!("unknown format {format}: want pq_cetra or st").into()),
     }
+}
+
+/// Opens Strata `files` with `StrataFile::open` and `crate::strata_config`, no tail hint.
+async fn strata_files(loc: &Location, files: &[FileRef]) -> R<Vec<Arc<StrataFile>>> {
+    let store: Arc<dyn ObjectStore> = loc.store.clone();
+    let cfg = crate::strata_config();
+    let v = try_join_all(files.iter().map(|f| StrataFile::open(store.clone(), f.path.clone(), None, &cfg))).await?;
+    Ok(v.into_iter().map(Arc::new).collect())
+}
+
+/// Opens `files` for the queries that read whole row groups or rows and no page index
+/// (`open:<table>`, `rollup_30d`, `rollup_30d_cold`, `anchor_rebuild`): Parquet with `light_pq`,
+/// Strata as `open`.
+async fn open_light(loc: &Location, format: &str, files: &[FileRef]) -> R<Light> {
+    let store: Arc<dyn ObjectStore> = loc.store.clone();
+    match format {
+        "pq_cetra" => {
+            let v = try_join_all(files.iter().map(|f| light_pq(store.clone(), f))).await?;
+            Ok(Light::Parquet(v))
+        }
+        "st" => Ok(Light::Strata(strata_files(loc, files).await?)),
+        _ => Err(format!("unknown format {format}: want pq_cetra or st").into()),
+    }
+}
+
+/// Reads a Parquet file's footer, without the page index and without a HEAD: the file size is the
+/// listing's `size`.
+async fn light_pq(store: Arc<dyn ObjectStore>, f: &FileRef) -> R<LightPq> {
+    let mut reader = ParquetObjectReader::new(store.clone(), f.path.clone()).with_file_size(f.size);
+    let meta = ArrowReaderMetadata::load_async(
+        &mut reader,
+        ArrowReaderOptions::new().with_page_index_policy(PageIndexPolicy::Skip),
+    )
+    .await?;
+    Ok(LightPq { store, path: f.path.clone(), meta })
 }
 
 /// The non-empty trimmed lines of a text file; a missing file is an error.
@@ -219,10 +279,9 @@ fn files_of<'a>(listing: &'a Listing, table: &str) -> R<&'a [FileRef]> {
 
 /// `open:<table>`: opens every file and keeps them open until it returns.
 async fn open_count(format: &str, loc: &Location, files: &[FileRef]) -> R<Answer> {
-    let opened = open(loc, format, files).await?;
-    let count = match &opened {
-        Opened::Parquet(v) => v.len(),
-        Opened::Strata(v) => v.len(),
+    let count = match open_light(loc, format, files).await? {
+        Light::Parquet(v) => v.len(),
+        Light::Strata(v) => v.len(),
     };
     let n = count as u64;
     Ok(answer_of(&n.to_le_bytes(), n))
@@ -371,7 +430,7 @@ type Groups = BTreeMap<String, Group>;
 
 /// One unit of the rollup: a Parquet row group, or a range of rows of a Strata file.
 enum RollUnit<'a> {
-    Parquet(&'a PqFile, usize),
+    Parquet(&'a LightPq, usize),
     Strata(&'a StrataFile, Range<u64>),
 }
 
@@ -474,24 +533,20 @@ async fn roll_unit(unit: RollUnit<'_>) -> R<Groups> {
 /// of every `spans` file, grouped by `request_model`. Units run `cores` at a time; their groups are
 /// merged with integer sums, so the order does not matter.
 async fn rollup(format: &str, loc: &Location, listing: &Listing, warm: Option<&Opened>) -> R<Answer> {
-    let owned: Opened;
-    let opened: &Opened = match warm {
-        Some(o) => o,
-        None => {
-            owned = open(loc, format, &listing.spans).await?;
-            &owned
-        }
+    let owned: Light = match warm {
+        Some(o) => o.light(),
+        None => open_light(loc, format, &listing.spans).await?,
     };
     let mut units = Vec::new();
-    match opened {
-        Opened::Parquet(v) => {
+    match &owned {
+        Light::Parquet(v) => {
             for f in v {
                 for rg in 0..f.meta.metadata().num_row_groups() {
                     units.push(RollUnit::Parquet(f, rg));
                 }
             }
         }
-        Opened::Strata(v) => {
+        Light::Strata(v) => {
             for f in v {
                 for rows in rollup_ranges(f.row_count()) {
                     units.push(RollUnit::Strata(f, rows));
@@ -555,7 +610,7 @@ fn anchor_rows(batch: &RecordBatch, threshold: i64, out: &mut Vec<[u8; 16]>) -> 
 
 /// The largest `last_ingest_time` of a Parquet file: the largest row-group maximum of the column.
 /// `None` when a row group has no maximum.
-fn parquet_max_i64(f: &PqFile, leaf: usize) -> Option<i64> {
+fn parquet_max_i64(f: &LightPq, leaf: usize) -> Option<i64> {
     let md = f.meta.metadata();
     let mut max: Option<i64> = None;
     for rg in 0..md.num_row_groups() {
@@ -568,60 +623,60 @@ fn parquet_max_i64(f: &PqFile, leaf: usize) -> Option<i64> {
     max
 }
 
-/// The anchor entries of a Parquet `traces` file. A file whose largest `last_ingest_time` is under
-/// the threshold is skipped before it is read.
-async fn parquet_anchor(f: &PqFile, threshold: i64) -> R<Vec<[u8; 16]>> {
+/// Whether a Parquet `traces` file may hold anchor entries: not when its largest `last_ingest_time`
+/// is under the threshold.
+fn parquet_may_anchor(f: &LightPq, threshold: i64) -> R<bool> {
     let leaf = leaf_of(f.meta.parquet_schema(), "last_ingest_time")?;
-    if let Some(max) = parquet_max_i64(f, leaf) {
-        if max < threshold {
-            return Ok(Vec::new());
-        }
-    }
-    let proj: Vec<usize> = ANCHOR_COLUMNS.iter().map(|n| f.meta.schema().index_of(n)).collect::<Result<_, _>>()?;
-    let batches: Vec<RecordBatch> = ParquetRecordBatchStreamBuilder::new_with_metadata(
-        ParquetObjectReader::new(f.store.clone(), f.path.clone()),
-        f.meta.clone(),
-    )
-    .with_projection(ProjectionMask::roots(f.meta.parquet_schema(), proj))
-    .build()?
-    .try_collect()
-    .await?;
-    let mut out = Vec::new();
-    for b in &batches {
-        anchor_rows(b, threshold, &mut out)?;
-    }
-    Ok(out)
+    Ok(!matches!(parquet_max_i64(f, leaf), Some(max) if max < threshold))
 }
 
-/// A scan request with no row restriction, no limit and no top-k.
-fn plain_request(projection: Vec<usize>, predicate: Option<Predicate>) -> ScanRequest {
-    ScanRequest {
-        projection,
-        predicate,
-        row_ranges: None,
-        limit: None,
-        kind: ScanKind::Scan,
-        views: false,
-        top: None,
-        row_filter: None,
-    }
+/// Whether a Strata `traces` file may hold anchor entries: not when its `last_ingest_time` range
+/// ends under the threshold. A file with no range (every row null) may.
+async fn strata_may_anchor(f: &StrataFile, threshold: i64) -> R<bool> {
+    let last = f.schema().index_of("last_ingest_time")?;
+    Ok(!matches!(f.int_range(last).await?, Some((_, max, _)) if max < threshold))
 }
 
-/// The anchor entries of a Strata `traces` file. A file whose `last_ingest_time` range ends under
-/// the threshold is skipped; a file with no range (every row null) is read.
-async fn strata_anchor(f: &StrataFile, threshold: i64) -> R<Vec<[u8; 16]>> {
-    let schema = f.schema();
-    let last = schema.index_of("last_ingest_time")?;
-    if let Some((_, max, _)) = f.int_range(last).await? {
-        if max < threshold {
-            return Ok(Vec::new());
-        }
-    }
-    let proj: Vec<usize> = ANCHOR_COLUMNS.iter().map(|n| schema.index_of(n)).collect::<Result<_, _>>()?;
-    let batches = f.scan(&plain_request(proj, None)).await?;
+/// One unit of `anchor_rebuild`: a Parquet row group, or a range of rows of a Strata file.
+enum AnchorUnit<'a> {
+    Parquet(&'a LightPq, usize),
+    Strata(&'a StrataFile, Range<u64>),
+}
+
+/// Reads one anchor unit and keeps its anchor entries.
+async fn anchor_unit(unit: AnchorUnit<'_>, threshold: i64) -> R<Vec<[u8; 16]>> {
     let mut out = Vec::new();
-    for b in &batches {
-        anchor_rows(b, threshold, &mut out)?;
+    match unit {
+        AnchorUnit::Parquet(f, rg) => {
+            let proj: Vec<usize> = ANCHOR_COLUMNS.iter().map(|n| f.meta.schema().index_of(n)).collect::<Result<_, _>>()?;
+            let mut stream = ParquetRecordBatchStreamBuilder::new_with_metadata(
+                ParquetObjectReader::new(f.store.clone(), f.path.clone()),
+                f.meta.clone(),
+            )
+            .with_row_groups(vec![rg])
+            .with_projection(ProjectionMask::roots(f.meta.parquet_schema(), proj))
+            .build()?;
+            while let Some(batch) = stream.try_next().await? {
+                anchor_rows(&batch, threshold, &mut out)?;
+            }
+        }
+        AnchorUnit::Strata(f, rows) => {
+            let schema = f.schema();
+            let projection: Vec<usize> = ANCHOR_COLUMNS.iter().map(|n| schema.index_of(n)).collect::<Result<_, _>>()?;
+            let req = ScanRequest {
+                projection,
+                predicate: None,
+                row_ranges: Some(vec![u32::try_from(rows.start)?..u32::try_from(rows.end)?]),
+                limit: None,
+                kind: ScanKind::Scan,
+                views: false,
+                top: None,
+                row_filter: None,
+            };
+            for batch in f.scan_batches(&req, 1).await? {
+                anchor_rows(&batch?, threshold, &mut out)?;
+            }
+        }
     }
     Ok(out)
 }
@@ -630,11 +685,34 @@ async fn strata_anchor(f: &StrataFile, threshold: i64) -> R<Vec<[u8; 16]>> {
 /// from, read from every `traces` file that may hold them. The answer's entries are sorted.
 async fn anchor(format: &str, loc: &Location, listing: &Listing, case: &ProjectCase) -> R<Answer> {
     let threshold = case.clock - ANCHOR_WINDOW_NS;
-    let opened = open(loc, format, &listing.traces).await?;
-    let parts: Vec<Vec<[u8; 16]>> = match &opened {
-        Opened::Parquet(v) => try_join_all(v.iter().map(|f| parquet_anchor(f, threshold))).await?,
-        Opened::Strata(v) => try_join_all(v.iter().map(|f| strata_anchor(f, threshold))).await?,
-    };
+    let opened = open_light(loc, format, &listing.traces).await?;
+    let mut units = Vec::new();
+    match &opened {
+        Light::Parquet(v) => {
+            for f in v {
+                if parquet_may_anchor(f, threshold)? {
+                    for rg in 0..f.meta.metadata().num_row_groups() {
+                        units.push(AnchorUnit::Parquet(f, rg));
+                    }
+                }
+            }
+        }
+        Light::Strata(v) => {
+            for f in v {
+                if strata_may_anchor(f, threshold).await? {
+                    for rows in rollup_ranges(f.row_count()) {
+                        units.push(AnchorUnit::Strata(f, rows));
+                    }
+                }
+            }
+        }
+    }
+    let cores = std::thread::available_parallelism().map_or(1, |n| n.get());
+    let parts: Vec<Vec<[u8; 16]>> = futures::stream::iter(units)
+        .map(|unit| anchor_unit(unit, threshold))
+        .buffer_unordered(cores)
+        .try_collect()
+        .await?;
     let mut ids: Vec<[u8; 16]> = parts.into_iter().flatten().collect();
     ids.sort_unstable();
     let mut bytes = Vec::with_capacity(ids.len() * 16);

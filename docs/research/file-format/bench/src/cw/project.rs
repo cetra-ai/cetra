@@ -147,6 +147,7 @@ pub async fn project_cmd(args: &[String]) -> R<()> {
     let storage = Storage::open(engine_config(&dir.join("engine"))).await?;
     let mut generator = Gen::new(Vec::new());
     let mut pending = Pending::default();
+    let small = matches!(opts.shape, Shape::Small { .. });
     let (sampler, queries): (Sampler, &[&str]) = match opts.shape {
         Shape::Days { days, traces_per_day, live_hours, payloads } => {
             let pool = read_pool(&payloads)?;
@@ -191,7 +192,11 @@ pub async fn project_cmd(args: &[String]) -> R<()> {
     storage.shutdown().await?;
     let t = Instant::now();
     let jobs = plan_layout(&dir)?;
+    if small {
+        check_small_levels(&jobs)?;
+    }
     let converted = convert_all(&jobs)?;
+    check_layout_rows(&jobs, &converted, generator.spans, generator.scores)?;
     println!("conversion {:.2?}", t.elapsed());
     print_build_stats(&jobs, &converted);
     Ok(())
@@ -443,7 +448,7 @@ async fn ingest_days(
     for d in 0..days {
         let base = day_start(d);
         for _ in 0..traces_per_day {
-            let at = base + generator.rng.below(86_400) as i64 * NS;
+            let at = base + generator.rng.below(86_400) as i64 * NS + generator.rng.below(1_000_000_000) as i64;
             let placed = generator.trace(at);
             sampler.see(d, placed.trace_id, placed.root_start);
             pending.push(placed);
@@ -468,7 +473,7 @@ async fn ingest_live(
     let live = traces_per_day * live_hours / 24;
     let window_start = day_start(days) - (live_hours as i64 - 1) * HOUR_NS;
     for _ in 0..live {
-        let at = window_start + generator.rng.below(live_hours * 3_600) as i64 * NS;
+        let at = window_start + generator.rng.below(live_hours * 3_600) as i64 * NS + generator.rng.below(1_000_000_000) as i64;
         pending.push(generator.trace(at));
         append_ready(storage, pending, false).await?;
     }
@@ -494,7 +499,8 @@ async fn ingest_small(
             if i > 86_399 {
                 return Err("too many spans for one day: lower --small or --flushes".into());
             }
-            let placed = generator.trace(PROJECT_START + i * NS);
+            let jitter = generator.rng.below(1_000_000_000) as i64;
+            let placed = generator.trace(PROJECT_START + i * NS + jitter);
             spans += placed.spans.len();
             sampler.see(0, placed.trace_id, placed.root_start);
             pending.push(placed);
@@ -682,6 +688,33 @@ fn convert_all(jobs: &[Job]) -> R<Vec<(u64, u64)>> {
         }
     }
     Ok(out)
+}
+
+/// The small form's files must all be level 0 (`0-` prefix): a background merge would change the
+/// layout the form is for.
+fn check_small_levels(jobs: &[Job]) -> R<()> {
+    for job in jobs {
+        let name = job.src.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+        if name.split('-').next().unwrap_or_default() != "0" {
+            return Err("small form: a background merge produced level-1 files; lower --flushes".into());
+        }
+    }
+    Ok(())
+}
+
+/// The converted files' rows, per table, must equal the rows the generator appended for `spans`
+/// and `scores`; otherwise an obsolete file was left in the layout.
+fn check_layout_rows(jobs: &[Job], converted: &[(u64, u64)], spans: u64, scores: u64) -> R<()> {
+    for (table, generated) in [("spans", spans), ("scores", scores)] {
+        let rows: u64 = jobs.iter().zip(converted).filter(|(job, _)| job.table == table).map(|(_, (r, _))| *r).sum();
+        if rows != generated {
+            return Err(format!(
+                "{table}: {rows} rows in the layout for {generated} generated: an obsolete file was left in the layout"
+            )
+            .into());
+        }
+    }
+    Ok(())
 }
 
 fn print_build_stats(jobs: &[Job], converted: &[(u64, u64)]) {
@@ -980,6 +1013,33 @@ mod tests {
         let dir = base.join("p");
         let err = project_cmd(&args(&dir, &["--small", "100000", "--flushes", "10"])).await.unwrap_err();
         assert!(err.to_string().contains("too many spans for one day"), "{err}");
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn layout_rows_match_the_generator() {
+        let base = scratch("layout-rows");
+        let dir = base.join("p");
+        // The check runs inside project_cmd: the build succeeds only if the rows match.
+        project_cmd(&args(&dir, &["--days", "2", "--traces-per-day", "300"])).await.unwrap();
+
+        // A deliberately wrong expected count must fail with the message of the check.
+        let job = |table: &str| Job { table: table.into(), src: PathBuf::new(), st: PathBuf::new(), sort: &[], size: 0 };
+        let jobs = vec![job("spans")];
+        let converted = vec![(10u64, 0u64)];
+        check_layout_rows(&jobs, &converted, 10, 0).unwrap();
+        let err = check_layout_rows(&jobs, &converted, 11, 0).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("spans: 10 rows in the layout for 11 generated: an obsolete file was left in the layout"),
+            "{err}"
+        );
+
+        // The small form refuses a level-1 file.
+        let level1 = vec![Job { src: PathBuf::from("1-x.parquet"), ..job("spans") }];
+        let err = check_small_levels(&level1).unwrap_err();
+        assert!(err.to_string().contains("small form: a background merge produced level-1 files"), "{err}");
+        check_small_levels(&[Job { src: PathBuf::from("0-x.parquet"), ..job("spans") }]).unwrap();
         let _ = fs::remove_dir_all(&base);
     }
 
