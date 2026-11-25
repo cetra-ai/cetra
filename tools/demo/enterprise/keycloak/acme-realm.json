@@ -1,0 +1,55 @@
+{
+  "realm": "acme",
+  "enabled": true,
+  "displayName": "acme (demo identity provider)",
+  "users": [
+    {
+      "username": "bob",
+      "email": "bob@acme.test",
+      "emailVerified": true,
+      "enabled": true,
+      "firstName": "Bob",
+      "lastName": "Acme",
+      "credentials": [
+        {
+          "type": "password",
+          "value": "bob-password",
+          "temporary": false
+        }
+      ]
+    },
+    {
+      "username": "carol",
+      "email": "carol@acme.test",
+      "emailVerified": true,
+      "enabled": true,
+      "firstName": "Carol",
+      "lastName": "Acme",
+      "credentials": [
+        {
+          "type": "password",
+          "value": "carol-password",
+          "temporary": false
+        }
+      ]
+    }
+  ],
+  "clients": [
+    {
+      "clientId": "cetra",
+      "name": "cetra",
+      "enabled": true,
+      "publicClient": false,
+      "clientAuthenticatorType": "client-secret",
+      "secret": "acme-demo-secret",
+      "standardFlowEnabled": true,
+      "directAccessGrantsEnabled": false,
+      "redirectUris": [
+        "http://localhost:8081/api/auth/callback/*"
+      ],
+      "webOrigins": [
+        "http://localhost:8081"
+      ]
+    }
+  ]
+}

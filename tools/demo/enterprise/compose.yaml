@@ -1,0 +1,40 @@
+# Keycloak, a DNS server for org domain verification, and cetra with an enterprise licence
+# (docs/testing-locally.md § Enterprise features). Every service uses the host network, so
+# the browser and cetra both reach Keycloak at http://localhost:8180, and cetra listens on
+# http://localhost:8081.
+services:
+  keycloak:
+    image: quay.io/keycloak/keycloak:26.8.1-2
+    network_mode: host
+    command: ["start-dev", "--http-port=8180", "--import-realm"]
+    environment:
+      KC_BOOTSTRAP_ADMIN_USERNAME: admin
+      KC_BOOTSTRAP_ADMIN_PASSWORD: admin
+    volumes:
+      - ./keycloak:/opt/keycloak/data/import:ro
+
+  dns:
+    image: alpine:3.22
+    network_mode: host
+    command:
+      - sh
+      - -c
+      - apk add --no-cache dnsmasq >/dev/null && exec dnsmasq --keep-in-foreground --conf-file=/etc/demo/dnsmasq.conf
+    volumes:
+      - ./dns:/etc/demo:ro
+
+  cetra:
+    # The binary is the host's, so the image's glibc must be at least the build host's.
+    image: ${CETRA_IMAGE:-ubuntu:26.04}
+    network_mode: host
+    depends_on: [keycloak, dns]
+    command: ["/opt/cetra/cetra", "serve"]
+    environment:
+      CETRA_CONFIG: /etc/cetra.toml
+      CETRA_LICENSE_KEY: ${CETRA_LICENSE_KEY:?set CETRA_LICENSE_KEY (just demo-license)}
+    volumes:
+      - ../../../target/release/cetra:/opt/cetra/cetra:ro
+      - ../../../target/demo-ee:/data
+      - ./cetra.toml:/etc/cetra.toml:ro
+      # Only cetra asks 127.0.0.1 (the dns service), so the host's resolver is untouched.
+      - ./dns/resolv.conf:/etc/resolv.conf:ro
