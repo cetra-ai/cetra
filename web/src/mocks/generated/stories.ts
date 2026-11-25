@@ -604,17 +604,17 @@ export function storyHandlers(dataset: Dataset, project?: string): HttpHandler[]
         next_cursor: null,
       }),
     ),
-    http.get(`${PROJECT}/issues/:id`, ({ params }) => {
+    http.get(`${prefix}/issues/:id`, ({ params }) => {
       const issue = issueById(idParam(params.id));
       const detail = issue ? storyIssue(dataset, issue) : undefined;
       return detail ? HttpResponse.json(detail) : undefined;
     }),
-    http.get(`${PROJECT}/issues/:id/occurrences`, ({ params }) => {
+    http.get(`${prefix}/issues/:id/occurrences`, ({ params }) => {
       const issue = issueById(idParam(params.id));
       const traces = issue ? matchedTraces(dataset, issue) : undefined;
       return issue && traces ? HttpResponse.json(occurrencesOf(issue, traces)) : undefined;
     }),
-    http.get(`${PROJECT}/issues/:id/events`, ({ params }) => {
+    http.get(`${prefix}/issues/:id/events`, ({ params }) => {
       const issue = issueById(idParam(params.id));
       const events = issue ? storyIssueEvents(dataset, issue) : undefined;
       return events ? HttpResponse.json(events) : undefined;
@@ -625,11 +625,11 @@ export function storyHandlers(dataset: Dataset, project?: string): HttpHandler[]
         next_cursor: null,
       }),
     ),
-    http.get(`${PROJECT}/alert-rules/:id`, ({ params }) => {
+    http.get(`${prefix}/alert-rules/:id`, ({ params }) => {
       const rule = ruleById(idParam(params.id));
       return rule ? HttpResponse.json(storyAlertRule(dataset, rule)) : undefined;
     }),
-    http.get(`${PROJECT}/alert-rules/:id/events`, ({ params }) => {
+    http.get(`${prefix}/alert-rules/:id/events`, ({ params }) => {
       const rule = ruleById(idParam(params.id));
       return rule
         ? HttpResponse.json({ data: [storyAlertEvent(dataset, rule)], next_cursor: null })

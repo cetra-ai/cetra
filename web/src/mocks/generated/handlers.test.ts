@@ -783,4 +783,11 @@ it("the widget query and the trace stream follow the prefix", async () => {
   expect(stream.status).toBe(200);
   expect(stream.headers.get("content-type")).toContain("text/event-stream");
   await stream.body?.cancel();
+
+  const other = await fetch(`${PLAYGROUND}/traces/stream`, {
+    headers: { Accept: "text/event-stream" },
+  });
+  const otherType = other.headers.get("content-type") ?? "";
+  expect(other.status === 200 && otherType.includes("text/event-stream")).toBe(false);
+  await other.body?.cancel();
 });

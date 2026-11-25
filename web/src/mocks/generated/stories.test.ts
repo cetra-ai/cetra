@@ -470,3 +470,25 @@ it("a project serves only its story's objects", async () => {
     STORY_QUEUES.map((queue) => queue.id),
   );
 });
+
+it("a story's detail routes are scoped to its project", async () => {
+  const dataset = createDataset({ seed: 1, now: NOW, traces: 20, profile: CODING_PROFILE });
+  const codingRule = "01900000-0000-7000-8000-000000570202";
+  server.use(...storyHandlers(dataset, "acme/code-agent"));
+
+  const voice = baseOf("voice");
+  const issueFromVoice = await fetch(`${voice}/issues/${CODING_ISSUE}`);
+  expect(issueFromVoice.status).not.toBe(200);
+  const ruleFromVoice = await fetch(`${voice}/alert-rules/${codingRule}`);
+  expect(ruleFromVoice.status).not.toBe(200);
+
+  const coding = baseOf("coding");
+  const issue = (await (await fetch(`${coding}/issues/${CODING_ISSUE}`)).json()) as Schema<"Issue">;
+  expect(issue.id).toBe(CODING_ISSUE);
+  expect(issue.title).toBe(storyIssue(dataset, oneOf(STORY_ISSUES, "coding"))?.title);
+  const rule = (await (
+    await fetch(`${coding}/alert-rules/${codingRule}`)
+  ).json()) as Schema<"AlertRule">;
+  expect(rule.id).toBe(codingRule);
+  expect(rule.name).toBe(storyAlertRule(dataset, oneOf(STORY_RULES, "coding")).name);
+});
