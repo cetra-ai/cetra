@@ -29,7 +29,6 @@ import { server } from "@/mocks/node";
 import { type StoryId, storyProject } from "@/mocks/projects";
 import alertEventsFixture from "../../../../fixtures/api/static/alert-events.json";
 import alertRulesFixture from "../../../../fixtures/api/static/alert-rules.json";
-import projectAlertEventsFixture from "../../../../fixtures/api/static/project-alert-events.json";
 
 /** The screenshot clock (`website/scripts/screenshots.mjs`). */
 const NOW = Date.parse("2026-11-19T12:00:00Z");
@@ -186,7 +185,7 @@ it("makes the first matching trace the first example of every story issue", () =
 
     const { examples } = storyOccurrences(dataset, issue);
     expect(examples[0]?.trace_id).toBe(hero?.trace_id);
-    expect(examples[0]?.reason).toBe(issue.hero.reason);
+    expect(examples[0]?.reason).toBe(issue.reasons[0]);
     const spanId = issue.hero.spanId?.(dataset, index);
     expect(examples[0]?.span_id).toBe(spanId);
     if (spanId !== undefined) {
@@ -269,13 +268,55 @@ it("gives every story issue at most five examples, the generated ones newest fir
     const newest = [...generated].sort(newestFirst).slice(0, GENERATED_EXAMPLES);
     expect(shown.map((example) => example.trace_id)).toEqual(newest.map((trace) => trace.trace_id));
 
-    for (const example of shown) {
-      if (issue.kind === "topic") {
-        expect(example.reason).toBe(byId.get(example.trace_id)?.input_preview);
-      } else {
-        expect(example.reason).toBeUndefined();
-      }
-    }
+    // Every example says why it is there, and the reasons follow the list by position.
+    examples.forEach((example, position) => {
+      expect(example.reason).toBe(issue.reasons[position % issue.reasons.length]);
+      expect(byId.has(example.trace_id)).toBe(true);
+    });
+  }
+});
+
+it("gives every example of a story issue its own reason, none repeated", () => {
+  for (const issue of STORY_ISSUES) {
+    const { examples } = storyOccurrences(stories[issue.story], issue);
+    const reasons = examples.map((example) => example.reason ?? "");
+    expect(reasons.every((reason) => reason.length > 0)).toBe(true);
+    expect(new Set(reasons).size).toBe(examples.length);
+    expect(examples.length).toBe(Math.min(1 + GENERATED_EXAMPLES, issue.reasons.length));
+  }
+});
+
+it("writes the support SSO examples as five different customer phrasings", () => {
+  const issue = oneOf(STORY_ISSUES, "support");
+  const { examples } = storyOccurrences(stories.support, issue);
+  expect(examples.map((example) => example.reason)).toEqual([
+    "Is SAML SSO included on Starter?",
+    "Can we log in with Okta on the Starter plan?",
+    "Do you support single sign-on below Team?",
+    "We need Google Workspace SSO, which plan?",
+    "Does Starter include SSO for 10 seats?",
+  ]);
+});
+
+it("writes the coding, voice and extraction examples with their own numbers", () => {
+  const reasonsOf = (story: StoryId) =>
+    storyOccurrences(stories[story], oneOf(STORY_ISSUES, story)).examples.map(
+      (example) => example.reason,
+    );
+  expect(reasonsOf("coding")).toEqual([
+    "Diff over 23 files: 212k tokens, over the 200k context",
+    "Diff over 31 files: 240k tokens, over the 200k context",
+    "Diff over 18 files: 205k tokens, over the 200k context",
+    "Diff over 27 files: 226k tokens, over the 200k context",
+    "Diff over 44 files: 263k tokens, over the 200k context",
+  ]);
+  for (const reason of reasonsOf("voice")) {
+    expect(reason).toMatch(
+      /^interruption 0\.\d: the agent spoke \d\.\d s before the caller finished$/,
+    );
+  }
+  for (const reason of reasonsOf("extraction")) {
+    expect(reason).toMatch(/^invoice-2026-06\d\d\.pdf: scanned image, no text layer$/);
   }
 });
 
@@ -305,6 +346,14 @@ it("sets last_fired_at on the four firing rules, and no story rule is ok", () =>
       expect(stored).not.toHaveProperty("last_fired_at");
     }
   }
+});
+
+it("has the voice rule firing for two days, longer than the chart's 24 hours", () => {
+  const dataset = stories.voice;
+  const rule = oneOf(STORY_RULES, "voice");
+  const alert = storyAlertRule(dataset, rule);
+  expect(alert.last_fired_at).toBe(rfc3339(NOW - 2 * DAY_MS));
+  expect(Date.parse(alert.last_fired_at ?? "")).toBeLessThan(NOW - DAY_MS);
 });
 
 it("computes each rule's value and count from its window at the clock", () => {
@@ -500,7 +549,7 @@ it("sends the voice rule to the on-call pager and the other rules to Team Slack"
   const voice = storyAlertEvent(stories.voice, oneOf(STORY_RULES, "voice"));
   expect(
     voice.deliveries.map((delivery) => [delivery.channel_name, delivery.channel_kind]),
-  ).toEqual([["On-call pager", "webhook"]]);
+  ).toEqual([["On-call", "webhook"]]);
   const support = storyAlertEvent(stories.support, oneOf(STORY_RULES, "support"));
   expect(
     support.deliveries.map((delivery) => [delivery.channel_name, delivery.channel_kind]),
@@ -597,9 +646,8 @@ it("answers the story events routes, and lets the fixture rule's routes fall thr
     expect(head.map((event) => event.id)).toEqual(storyEvents.map((event) => event.id));
     const times = head.map((event) => Date.parse(event.created_at));
     expect(times).toEqual([...times].sort((left, right) => right - left));
-    expect(alertEvents.data.slice(storyEvents.length).map((event) => event.id)).toEqual(
-      story === "support" ? projectAlertEventsFixture.data.map((event) => event.id) : [],
-    );
+    // No story project lists the fixture events: they follow the story events only when unscoped.
+    expect(alertEvents.data.slice(storyEvents.length)).toEqual([]);
   }
 });
 
@@ -730,6 +778,21 @@ it("serves the story queues, their items and the lease, and lets other ids fall 
   expect(fixture.name).toBe("Relevance review");
 });
 
+it("serves the support queue as a session queue, and its item as a session item the reviewer can open", async () => {
+  server.use(...allStoryHandlers());
+  const support = oneOf(STORY_QUEUES, "support");
+  const queuePath = `${baseOf("support")}/annotation-queues/${support.id}`;
+  const queue = (await (await fetch(queuePath)).json()) as Schema<"AnnotationQueue">;
+  expect(queue.target).toBe("session");
+  const item = (await (
+    await fetch(`${queuePath}/items/${support.itemId}`)
+  ).json()) as Schema<"AnnotationQueueItem">;
+  expect(item.id).toBe(support.itemId);
+  expect(item.session_id).toBe("sess-0142");
+  expect(item).not.toHaveProperty("trace_id");
+  expect(item.queue_id).toBe(support.id);
+});
+
 it("counts a story queue's progress as completed plus skipped of its total", () => {
   const progress = STORY_QUEUES.map((queue) => {
     const { counts } = storyQueue(stories[queue.story], queue);
@@ -787,16 +850,40 @@ it("a story project lists only its own alert rules and events", async () => {
 
   server.use(...storyHandlers(stories.support, "acme/support-bot"));
   const support = baseOf("support");
-  expect(await ruleIds(`${support}/alert-rules`)).toEqual([
-    SUPPORT_RULE,
-    ...alertRulesFixture.data.map((rule) => rule.id),
-  ]);
+  expect(await ruleIds(`${support}/alert-rules`)).toEqual([SUPPORT_RULE]);
   const supportEvents = (await (
     await fetch(`${support}/alert-events`)
   ).json()) as Schema<"AlertEventPage">;
   expect(supportEvents.data.map((event) => event.id)).toEqual([
     storyAlertEvent(stories.support, oneOf(STORY_RULES, "support")).id,
-    ...projectAlertEventsFixture.data.map((event) => event.id),
+  ]);
+});
+
+it("lists only the story rule under acme/support-bot, and keeps the fixture rules unscoped", async () => {
+  const ruleIds = async (path: string) =>
+    ((await (await fetch(path)).json()) as Schema<"AlertRulePage">).data.map((rule) => rule.id);
+  const eventIds = async (path: string) =>
+    ((await (await fetch(path)).json()) as Schema<"AlertEventPage">).data.map((event) => event.id);
+  const fixtureNames = new Set(alertRulesFixture.data.map((rule) => rule.name));
+  expect(fixtureNames).toEqual(new Set(["High error rate", "Low helpfulness", "Daily cost"]));
+
+  server.use(...storyHandlers(stories.support, "acme/support-bot"));
+  const names = (
+    (await (await fetch(`${baseOf("support")}/alert-rules`)).json()) as Schema<"AlertRulePage">
+  ).data.map((rule) => rule.name);
+  expect(names).toEqual([oneOf(STORY_RULES, "support").name]);
+  for (const name of fixtureNames) {
+    expect(names).not.toContain(name);
+  }
+  const events = await eventIds(`${baseOf("support")}/alert-events`);
+  expect(events).toEqual([storyAlertEvent(stories.support, oneOf(STORY_RULES, "support")).id]);
+
+  // Unscoped, the fixtures are listed after the story objects, as before.
+  server.use(...storyHandlers(stories.support));
+  const unscoped = await ruleIds(`${PROJECT}/alert-rules`);
+  expect(unscoped).toEqual([
+    ...STORY_RULES.map((rule) => rule.id),
+    ...alertRulesFixture.data.map((rule) => rule.id),
   ]);
 });
 

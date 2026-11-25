@@ -112,6 +112,29 @@ it("the batch tag selects the 200 batch runs, and the three failures have two er
   expect(batch.filter((trace) => trace.error_count === 2)).toHaveLength(3);
 });
 
+it("shows the schema failure as the output of the batch's three failed runs, and of no other run", () => {
+  const dataset = createDataset({
+    seed: 1,
+    now: NOW,
+    traces: 2_000,
+    profile: EXTRACTION_STORY_PROFILE,
+  });
+  const batch = visibleTraces(dataset.traces, false, false).filter((trace) =>
+    trace.tags.includes("batch-1119"),
+  );
+  const failed = batch.filter((trace) => trace.error_count === 2);
+  expect(failed).toHaveLength(3);
+  for (const trace of failed) {
+    expect(trace.output_preview).toBe(EXTRACTION_PROFILE.failedAnswer);
+  }
+  expect(EXTRACTION_PROFILE.failedAnswer).toBe(
+    "Schema check failed twice: total does not match the line items.",
+  );
+  for (const trace of batch.filter((item) => item.error_count === 0)) {
+    expect(trace.output_preview).not.toBe(EXTRACTION_PROFILE.failedAnswer);
+  }
+});
+
 it("puts the batch's three failures at its newest three runs, so the newest-first list shows them first", () => {
   const dataset = createDataset({
     seed: 1,

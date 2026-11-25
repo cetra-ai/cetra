@@ -36,9 +36,10 @@ const TEAM_SLACK: StoryChannel = {
   name: "Team Slack",
   kind: "slack",
 };
+/** The voice desk's webhook channel, named "On-call". */
 export const ON_CALL_PAGER: StoryChannel = {
   id: "01900000-0000-7000-8000-000000000503",
-  name: "On-call pager",
+  name: "On-call",
   kind: "webhook",
 };
 
@@ -77,21 +78,29 @@ type StoryIssue = {
   title: string;
   description: string;
   /**
-   * The story's first matching trace: its dataset index, the span the issue is about, and why.
-   * The span is undefined when the issue is about the whole trace.
+   * The story's first matching trace: its dataset index, and the span the issue is about. The span
+   * is undefined when the issue is about the whole trace.
    */
   hero: {
     index: (dataset: Dataset) => number;
     spanId?: (dataset: Dataset, index: number) => string | undefined;
-    reason: string;
   };
   /** The generated traces that are occurrences too. */
   matches: (trace: Trace) => boolean;
-  /** The reason shown for a generated example; absent shows the trace id. */
-  reasonOf?: (trace: Trace) => string | undefined;
+  /**
+   * The reasons the issue's examples show, one per example by position: the hero is the first
+   * example, then the generated traces, newest first. The list cycles, and an issue has at most
+   * five examples, so its five reasons are all different.
+   */
+  reasons: readonly string[];
 };
 
 const isSsoQuestion = (trace: Trace) => trace.input_preview === SSO_TURN.question;
+
+/** The reason of the example at `position`, from the issue's list, which cycles. */
+function reasonAt(reasons: readonly string[], position: number): string | undefined {
+  return reasons.length === 0 ? undefined : reasons[position % reasons.length];
+}
 
 /** The scanned-PDF issue, which the extraction rule counts (M19). */
 const SCANNED_ISSUE_ID = "01900000-0000-7000-8000-000000570104";
@@ -106,9 +115,15 @@ export const STORY_ISSUES: readonly StoryIssue[] = [
     kind: "topic",
     title: "Customers asking for SSO on the Starter plan",
     description: "Customers ask whether SSO comes with the Starter plan.",
-    hero: { index: firstMatch(isSsoQuestion), reason: "Do you have SSO on the Starter plan?" },
+    hero: { index: firstMatch(isSsoQuestion) },
     matches: isSsoQuestion,
-    reasonOf: (trace) => trace.input_preview,
+    reasons: [
+      "Is SAML SSO included on Starter?",
+      "Can we log in with Okta on the Starter plan?",
+      "Do you support single sign-on below Team?",
+      "We need Google Workspace SSO, which plan?",
+      "Does Starter include SSO for 10 seats?",
+    ],
   },
   {
     id: "01900000-0000-7000-8000-000000570102",
@@ -122,9 +137,15 @@ export const STORY_ISSUES: readonly StoryIssue[] = [
     hero: {
       index: firstMatch(hasTag("context-window")),
       spanId: errorSpan("write patch"),
-      reason: "The diff was too large for the model's context.",
     },
     matches: hasTag("context-window"),
+    reasons: [
+      "Diff over 23 files: 212k tokens, over the 200k context",
+      "Diff over 31 files: 240k tokens, over the 200k context",
+      "Diff over 18 files: 205k tokens, over the 200k context",
+      "Diff over 27 files: 226k tokens, over the 200k context",
+      "Diff over 44 files: 263k tokens, over the 200k context",
+    ],
   },
   {
     id: "01900000-0000-7000-8000-000000570103",
@@ -135,11 +156,15 @@ export const STORY_ISSUES: readonly StoryIssue[] = [
     kind: "score",
     title: "Agent talked over the caller",
     description: "The agent starts speaking before the caller has finished.",
-    hero: {
-      index: firstMatch(hasTag("interrupted")),
-      reason: "The interruption check scored 0.3.",
-    },
+    hero: { index: firstMatch(hasTag("interrupted")) },
     matches: hasTag("interrupted"),
+    reasons: [
+      "interruption 0.3: the agent spoke 0.4 s before the caller finished",
+      "interruption 0.2: the agent spoke 0.9 s before the caller finished",
+      "interruption 0.4: the agent spoke 0.2 s before the caller finished",
+      "interruption 0.1: the agent spoke 1.3 s before the caller finished",
+      "interruption 0.2: the agent spoke 0.6 s before the caller finished",
+    ],
   },
   {
     id: SCANNED_ISSUE_ID,
@@ -153,9 +178,15 @@ export const STORY_ISSUES: readonly StoryIssue[] = [
     hero: {
       index: firstMatch(hasTag("scanned")),
       spanId: errorSpan("ocr"),
-      reason: "The PDF is a scanned image with no text layer.",
     },
     matches: hasTag("scanned"),
+    reasons: [
+      "invoice-2026-0611.pdf: scanned image, no text layer",
+      "invoice-2026-0604.pdf: scanned image, no text layer",
+      "invoice-2026-0617.pdf: scanned image, no text layer",
+      "invoice-2026-0608.pdf: scanned image, no text layer",
+      "invoice-2026-0623.pdf: scanned image, no text layer",
+    ],
   },
 ];
 
@@ -353,7 +384,8 @@ export const STORY_RULES: readonly StoryRule[] = [
         95,
       ),
     lastCount: (dataset, now) => startedBetween(dataset, now - 15 * MINUTE_MS, now).length,
-    changedAgoMs: () => 6 * HOUR_MS,
+    // Firing for two days: longer than the chart's 24 hours.
+    changedAgoMs: () => 2 * DAY_MS,
   },
   {
     id: "01900000-0000-7000-8000-000000570204",
@@ -646,16 +678,17 @@ function occurrencesOf(
   const examples: Schema<"IssueExample">[] = [];
   if (hero) {
     const spanId = issue.hero.spanId?.(dataset, issue.hero.index(dataset));
+    const reason = reasonAt(issue.reasons, examples.length);
     examples.push({
       trace_id: hero.trace_id,
       created_at: hero.start_time,
-      reason: issue.hero.reason,
       issue_id: issue.id,
+      ...(reason === undefined ? {} : { reason }),
       ...(spanId === undefined ? {} : { span_id: spanId }),
     });
   }
   for (const trace of generated.slice(0, GENERATED_EXAMPLES)) {
-    const reason = issue.reasonOf?.(trace);
+    const reason = reasonAt(issue.reasons, examples.length);
     examples.push({
       trace_id: trace.trace_id,
       created_at: trace.start_time,
@@ -834,8 +867,9 @@ export function idParam(value: string | readonly string[] | undefined): string {
  * not served at all. A handler that returns undefined lets the request fall through to the
  * fixtures' handlers. With `project` (an API ref, `acme/<slug>`) the routes use its literal prefix
  * and serve only the objects of that project's story (none for a ref that is no story project);
- * without it, every object is served under `/api/v1/projects/:project`. The fixture objects of the
- * lists belong to the support project: they are listed only without `project` or under support.
+ * without it, every object is served under `/api/v1/projects/:project`. The fixture issues and queues
+ * of the lists belong to the support project: they are listed only without `project` or under
+ * support. The fixture alert rules and events are listed only without `project`.
  */
 export function storyHandlers(dataset: Dataset, project?: string): HttpHandler[] {
   const prefix =
@@ -843,6 +877,8 @@ export function storyHandlers(dataset: Dataset, project?: string): HttpHandler[]
   const scope = project === undefined ? undefined : projectOfRef(project)?.story;
   const served = (story: StoryId) => project === undefined || story === scope;
   const withFixtures = project === undefined || scope === "support";
+  // The fixtures' alert rules and events belong to no story project: only the unscoped mock lists them.
+  const withAlertFixtures = project === undefined;
   const issues = STORY_ISSUES.filter((issue) => served(issue.story));
   const rules = STORY_RULES.filter((rule) => served(rule.story));
   const queues = STORY_QUEUES.filter((queue) => served(queue.story));
@@ -888,7 +924,7 @@ export function storyHandlers(dataset: Dataset, project?: string): HttpHandler[]
       HttpResponse.json({
         data: [
           ...rules.map((rule) => storyAlertRule(dataset, rule)),
-          ...(withFixtures ? alertRulesFixture.data : []),
+          ...(withAlertFixtures ? alertRulesFixture.data : []),
         ],
         next_cursor: null,
       }),
@@ -926,7 +962,7 @@ export function storyHandlers(dataset: Dataset, project?: string): HttpHandler[]
         .map((rule) => storyAlertEvent(dataset, rule))
         .sort((left, right) => Date.parse(right.created_at) - Date.parse(left.created_at));
       return HttpResponse.json({
-        data: [...events, ...(withFixtures ? projectAlertEventsFixture.data : [])],
+        data: [...events, ...(withAlertFixtures ? projectAlertEventsFixture.data : [])],
         next_cursor: null,
       });
     }),

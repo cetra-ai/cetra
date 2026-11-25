@@ -27,7 +27,8 @@ function expectWithinRanges(value: CodingFacts): void {
   expect(value.costPerRunRatio).toBeLessThanOrEqual(3.4);
   expect(value.hourlyCostSinceStep).toHaveLength(14);
   for (const hour of value.hourlyCostSinceStep) {
-    expect(Math.abs(hour - 45)).toBeLessThanOrEqual(0.5);
+    expect(hour).toBeGreaterThanOrEqual(40.5);
+    expect(hour).toBeLessThanOrEqual(49.5);
   }
   expect(value.hourlyCostBefore).toHaveLength(10);
   for (const hour of value.hourlyCostBefore) {
@@ -43,18 +44,31 @@ it("pins the share of the runs that retry since the step at 18%", () => {
 });
 
 it("pins the share of the cost of the retried runs since the step at about 70%", () => {
-  expect(facts.retryCostShare).toBeCloseTo(0.6993, 3);
+  expect(facts.retryCostShare).toBeCloseTo(0.6974, 3);
 });
 
-it("pins the cost per run since the step at 2.73 times the cost per run before it", () => {
-  expect(facts.costPerRunRatio).toBeCloseTo(2.73, 2);
+it("pins the cost per run since the step at 2.71 times the cost per run before it", () => {
+  expect(facts.costPerRunRatio).toBeCloseTo(2.7125, 3);
 });
 
-it("makes every whole hour since the step cost 45 USD", () => {
+it("keeps every whole hour since the step between 40.5 and 49.5 USD", () => {
   expect(facts.hourlyCostSinceStep).toHaveLength(14);
   for (const hour of facts.hourlyCostSinceStep) {
-    expect(Math.abs(hour - 45)).toBeLessThanOrEqual(0.5);
+    expect(hour).toBeGreaterThanOrEqual(40.5);
+    expect(hour).toBeLessThanOrEqual(49.5);
   }
+});
+
+it("solves each whole hour since the step to 41 + ((hour index × 7) mod 9) USD", () => {
+  const targets = Array.from({ length: 14 }, (_unused, hour) => 41 + ((hour * 7) % 9));
+  expect(targets).toEqual([41, 48, 46, 44, 42, 49, 47, 45, 43, 41, 48, 46, 44, 42]);
+  expect(facts.hourlyCostSinceStep).toHaveLength(targets.length);
+  facts.hourlyCostSinceStep.forEach((hour, index) => {
+    expect(hour).toBeCloseTo(targets[index] ?? Number.NaN, 1);
+  });
+  // The hours vary: no two neighbours share a cost, so the chart does not read as a flat line.
+  const distinct = new Set(facts.hourlyCostSinceStep.map((hour) => Math.round(hour)));
+  expect(distinct.size).toBeGreaterThanOrEqual(9);
 });
 
 it("keeps every whole hour in the 24 hours before the step under 40 USD", () => {

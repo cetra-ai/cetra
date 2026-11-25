@@ -123,6 +123,7 @@ it("serves the coding rule and its stats, with each hour's pass rate from the da
     await fetch(`${baseOf("coding")}/online-rules/${TESTS_RULE}`)
   ).json()) as Schema<"OnlineRule">;
   expect(rule.evaluator_id).toBe(TESTS_EVALUATOR);
+  expect(rule.name).toBe("Tests pass after the patch");
   expect(rule.sample_rate).toBe(1);
   expect(rule.filter).toBeUndefined();
 
@@ -207,7 +208,7 @@ it("adds the on-call pager to the voice desk's channels and to no other story's"
   const pager = voice.data.find((channel) => channel.id === ON_CALL_PAGER);
   expect(pager).toEqual({
     id: ON_CALL_PAGER,
-    name: "On-call pager",
+    name: "On-call",
     kind: "webhook",
     target_hint: "hooks.example.com",
     available: true,

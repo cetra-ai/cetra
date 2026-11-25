@@ -20,8 +20,13 @@ export const STEP_HOURS = 14;
 const MONDAY_HOURS = 84;
 const RETRY_SHARE = 0.18;
 const CONTEXT_WINDOW_SHARE = 0.09;
-/** Every whole hour since the step costs this much (USD). */
-const HOUR_COST_USD = 45;
+/**
+ * The cost each whole hour since the step is solved to (USD), by the hour's index since the step:
+ * 41 + ((index × 7) mod 9), so the hours cost 41 to 49 and do not repeat a flat value.
+ */
+function hourTargetUsd(hour: number): number {
+  return 41 + ((hour * 7) % 9);
+}
 
 /** The eligible runs starting in `[from, to)`, with their index and start (ms). */
 type Run = { index: number; trace: TraceSummary; startMs: number };
@@ -74,7 +79,7 @@ function retrySpans(index: number): MarkedSpan[] {
 }
 
 /**
- * The coding project's marks (M17): API retries since Y, each hour costing 45 USD; context-window errors since M.
+ * The coding project's marks (M17): API retries since Y, each hour solved to its target cost (`hourTargetUsd`); context-window errors since M.
  * A run picked by both gets both marks merged.
  */
 function codingMarks(
@@ -89,7 +94,7 @@ function codingMarks(
     marks.set(index, previous ? mergeMarks(previous, change) : change);
   };
 
-  // Retries: an even spread over the runs since Y; the cost factor makes each whole hour cost 45 USD.
+  // Retries: an even spread over the runs since Y; the cost factor makes each whole hour cost its target.
   const stepRuns = runsIn(traces, context.eligible, step, Number.POSITIVE_INFINITY);
   const retried = new Set(evenSpread(stepRuns, RETRY_SHARE).map((run) => run.index));
   const hourOf = (run: Run): number => Math.floor((run.startMs - step) / HOUR_MS);
@@ -103,7 +108,7 @@ function codingMarks(
     const hour = hourOf(run);
     const factor = Math.max(
       1,
-      (HOUR_COST_USD - (unmarked.get(hour) ?? 0)) / (marked.get(hour) ?? 1),
+      (hourTargetUsd(hour) - (unmarked.get(hour) ?? 0)) / (marked.get(hour) ?? 1),
     );
     add(run.index, {
       tags: ["api-retry"],

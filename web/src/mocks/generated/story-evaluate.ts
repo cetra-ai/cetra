@@ -34,10 +34,10 @@ const TESTS_EVALUATOR_ID = "01900000-0000-7000-8000-000000570901";
 const TESTS_RULE_ID = "01900000-0000-7000-8000-000000570911";
 const READBACK_EVALUATOR_ID = "01900000-0000-7000-8000-000000570902";
 
-/** The on-call pager of the voice desk: the fixture "Pager webhook" with a name of its own and no delivery yet. */
+/** The on-call channel of the voice desk: a webhook named "On-call", with no delivery yet. */
 const ON_CALL_CHANNEL: Schema<"NotificationChannel"> = {
   id: ON_CALL_PAGER.id,
-  name: ON_CALL_PAGER.name,
+  name: "On-call",
   kind: "webhook",
   target_hint: "hooks.example.com",
   available: true,
@@ -123,7 +123,7 @@ function testsRule(dataset: Dataset): Schema<"OnlineRule"> {
   const done = hoursOf(dataset).reduce((total, hour) => total + hour.values.length, 0);
   return {
     id: TESTS_RULE_ID,
-    name: "Tests pass on every run",
+    name: "Tests pass after the patch",
     evaluator_id: TESTS_EVALUATOR_ID,
     target: "trace",
     variable_mapping: { input: "trace.input", output: "trace.output" },
