@@ -5,6 +5,7 @@ pub mod pool;
 pub mod sort_key;
 pub mod source;
 pub mod spill;
+pub mod streaming;
 
 pub use pipeline::{
     CollectSink, ControlFlow, DEFAULT_BATCH_SIZE, ExecContext, ExecMetrics, OperatorProfile,
