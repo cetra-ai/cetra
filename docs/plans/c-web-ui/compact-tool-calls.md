@@ -35,7 +35,7 @@ Not in scope: hiding the duplicate tool_call in an LLM turn when the next transc
 **D-C-32's matching rule** (implemented in phase 1, `matchToolSpans`): the candidates for an LLM span `L` are the trace's spans with `span_kind = "tool"` whose `parent_span_id` is defined and is in `{L.span_id} ∪ {L.parent_span_id, only if L.parent_span_id is defined}`. A tool span with no parent is never a candidate (so `undefined === undefined` never matches). Group the calls of `L` by tool name, separately for its input messages and its output messages, in message then part order.
 - Input calls with name `n` (calls made before `L`): the candidates named `n` with `end ≤ L.start`, sorted by start time (stable). With `k = min(#calls, #candidates)`, the last `k` candidates map to the last `k` calls, in order (right-aligned). The earlier calls get no match.
 - Output calls with name `n` (calls `L` asks for): the candidates named `n` with `start ≥ L.start`, sorted by start time (stable). With `k = min(#calls, #candidates)`, the first `k` candidates map to the first `k` calls, in order (left-aligned).
-- Times are compared with `instantNs` from `lib/format.ts`.
+- Times are compared exactly with `nsBetween(a, b)` from `lib/format.ts` (`b − a` in ns): `end ≤ L.start` is `nsBetween(end, L.start) >= 0`, `start ≥ L.start` is `nsBetween(L.start, start) >= 0`, and the ascending sort by start time is `candidates.sort((x, y) => nsBetween(y.start_time, x.start_time))` (`nsBetween(a, b)` is `b − a`, so this is `x.start − y.start`). Not `instantNs`: it rounds above 2^53.
 
 Rejected alternatives (for the decision text): matching on the call id (the tree has no attributes, and only some SDKs record `gen_ai.tool.call.id`); matching by name alone (repeated calls of one tool in an agent loop would all show the first span's duration).
 
@@ -92,15 +92,8 @@ export type ToolLinks = {
   spans: Map<Schema<"Part">, ToolSpanMatch>;
 };
 
-/** Empty links. Treat as read-only. */
-export const NO_TOOL_LINKS: ToolLinks = {
-  callNames: new Map(),
-  responses: new Map(),
-  shownCalls: new Set(),
-  spans: new Map(),
-};
-
-export const INLINE_MAX = 80;
+/** Not exported: only this module uses it. */
+const INLINE_MAX = 80;
 
 /** Arguments as `key: value, …` (no outer braces), shortened to INLINE_MAX. */
 export function inlineArgs(value: unknown): string;
@@ -151,12 +144,20 @@ function row(span: Partial<Schema<"SpanSummary">> & { span_id: string; name: str
   return {
     depth: 1,
     detached: false,
-    span: { duration_ns: 0, metadata: {}, span_kind: "tool", status: "ok", tags: [], ...span },
+    span: {
+      trace_id: "a1000000000000000000000000000001",
+      duration_ns: 0,
+      metadata: {},
+      span_kind: "tool",
+      status: "ok",
+      tags: [],
+      ...span,
+    },
   };
 }
 ```
-(if `tsc` reports another required `SpanSummary` field, add it to the defaults with a neutral value and report it). Timestamps use 9-digit fractions, such as `"2026-01-01T10:00:01.950000000Z"`. Use the support-bot values: LLM `b100000000000012` (`span_kind: "llm"`, parent `b100000000000011`, `10:00:00.100000000Z`–`10:00:01.900000000Z`), tool `b100000000000013` (parent `b100000000000011`, `10:00:01.950000000Z`–`10:00:02.300000000Z`, `duration_ns: 350_000_000`), LLM `b100000000000014` (parent `b100000000000011`, starts `10:00:02.350000000Z`).
-- `inlineArgs`: `{order_id: "1234"}` → `order_id: "1234"`; `{day: "Friday", time: "morning"}` → `day: "Friday", time: "morning"`; the string `'{"path":"a.py"}'` → `path: "a.py"`; `{a: {b: {c: 1}}}` → `a: {b: {…}}`; `{list: [1, 2]}` → `list: [1, 2]`; `undefined`, `null`, `{}`, `""` → `""`; the non-JSON string `"ls -la"` → `"ls -la"` (with the quotes); `{text: "x".repeat(200)}` → a string of 80 code points ending with `…`.
+(if another `SpanSummary` field turns out required, add it to the defaults with a neutral value and report it). Timestamps use 9-digit fractions, such as `"2026-01-01T10:00:01.950000000Z"`. Use the support-bot values: LLM `b100000000000012` (`span_kind: "llm"`, parent `b100000000000011`, `10:00:00.100000000Z`–`10:00:01.900000000Z`), tool `b100000000000013` (parent `b100000000000011`, `10:00:01.950000000Z`–`10:00:02.300000000Z`, `duration_ns: 350_000_000`), LLM `b100000000000014` (parent `b100000000000011`, starts `10:00:02.350000000Z`).
+- `inlineArgs`: `{order_id: "1234"}` → `order_id: "1234"`; `{day: "Friday", time: "morning"}` → `day: "Friday", time: "morning"`; the string `'{"path":"a.py"}'` → `path: "a.py"`; `{a: {b: {c: 1}}}` → `a: {b: {…}}`; `{list: [1, 2]}` → `list: [1, 2]`; `undefined`, `null`, `{}`, `""` → `""`; the non-JSON string `"ls -la"` → `"ls -la"` (with the quotes); `{text: "x".repeat(200)}` → a string of 80 code points (`Array.from(text).length === 80`) ending with `…`.
 - `inlineResult`: `{slots: ["9:30", "11:00"]}` → `{slots: ["9:30", "11:00"]}`; `"\n  def f():\n    pass"` → `def f():`; `"48 passed in 3.2s"` → `48 passed in 3.2s`; `true` → `true`; `undefined` → `""`; `"é".repeat(100)` → 80 code points ending with `…`; a string of 50 emoji (`"😀".repeat(50)`) is not shortened.
 - `toolLinks`: a call and its response in `messages` → `responses.get("call_1")` is the response, `shownCalls` has the id; a response whose call is only in `context` → not in `responses`, and `callNames.get(id)` is the context call's name; a call without an id is in neither; two responses with one id → the first; a call with an id but no string name → in `shownCalls`, not in `callNames`.
 - `foldedMessage`: a tool message with one folded response → true; a folded and an unfolded response → false; no parts → false.
@@ -184,7 +185,7 @@ function row(span: Partial<Schema<"SpanSummary">> & { span_id: string; name: str
 - create `web/src/components/payload/tool-call-line.tsx`, `web/src/components/payload/tool-call-line.test.tsx`;
 - edit `web/src/components/payload/part-view.tsx`, `message-view.tsx`, `chat-view.tsx`, `chat-view.test.tsx`, `payload-view.tsx`;
 - edit `web/src/components/trace/chat-tab.tsx`, `span-detail.tsx`, `span-detail.test.tsx`, `trace-view.tsx`, `transcript-view.tsx`, `transcript-view.test.tsx`, `tree-toolbar.tsx`;
-- edit `web/src/routes/$org/$project/sessions/$sessionId.test.tsx` (only the transcript test at its line ~71, step 15);
+- edit `web/src/routes/$org/$project/sessions/$sessionId.test.tsx` (only the transcript test at its line ~71, step 15) and `web/src/routes/$org/$project/traces/index.test.tsx` (only the test "shows the trace summary in transcript mode until a block is picked…" at its line ~384, step 15);
 - `web/src/components/trace/trace-view.test.tsx` only if an existing case breaks (report it).
 
 **Steps:**
@@ -213,15 +214,15 @@ Imports: `type ReactNode, useState` from `react`; `ChevronDown`, `ChevronRight`,
 2. Render: `const [open, setOpen] = useState(false)`; `const resultText = result !== undefined ? inlineResult(result.value) : ""`. A `div` (`flex min-w-0 flex-col gap-1`) holds a `button type="button"` with `aria-expanded={open}`, class `flex w-full min-w-0 items-center gap-1.5 text-left text-caption`, `data-status={error !== undefined ? "error" : undefined}`, and `onClick={() => { setOpen((current) => !current); onClick?.(); }}`. Inside the button, in order:
    - `open ? <ChevronDown … /> : <ChevronRight … />` with `className="size-3 shrink-0 text-muted-foreground" aria-hidden`;
    - `{icon}`;
-   - `<span className="min-w-0 truncate font-mono">` holding: `<span className="font-medium">{name}</span>`; when `args !== undefined`, `{`(${inlineArgs(args.value)})`}`; then, when `error !== undefined`: `{" → "}<span className="text-destructive"><CircleX className="inline size-3" aria-label="Failed" /> {error}</span>`; else when `resultText !== ""`: `{` → ${resultText}`}`;
+   - `<span className="min-w-0 truncate font-mono">` holding: `<span className="font-medium">{name}</span>`; when `args !== undefined`, `{`(${inlineArgs(args.value)})`}`; then, when `error !== undefined`: `{" → "}<span className="text-destructive"><CircleX className="inline size-3" role="img" aria-label="Failed" />{error}</span>` (no space between the icon and the error text, so the text reads `→ 1 failed…` with one space); else when `resultText !== ""`: `{` → ${resultText}`}`;
    - when `durationNs !== undefined`: `<span className="num shrink-0 text-muted-foreground">{`· ${formatDuration(durationNs)}`}</span>`, and, so the text reads `… · 350ms`, put `{" "}` right before this span (JSX drops a bare newline between elements).
-   The button's `textContent` is then exactly, for example, `get_order_status(order_id: "1234") → {status: "shipped"} · 350ms` (the space after the CircleX icon is part of the error span: `→ <icon> 1 failed`). If Biome flags `aria-label` on the svg (a11y), add `role="img"`; if it then flags `useSemanticElements`, report it instead of suppressing.
+   The button's `textContent` is then exactly, for example, `get_order_status(order_id: "1234") → {status: "shipped"} · 350ms` The `role="img"` on `CircleX` is required (an `svg` has no implicit `img` role for testing-library); if Biome flags it, report it instead of suppressing.
 3. When `open`, a body `div` (`flex flex-col gap-1 pl-4`), in order: `<IdText value={id} kind="call" />` when `id` is set; when `args !== undefined`, `<section aria-label="Arguments" className="flex flex-col gap-1"><p className="text-caption text-muted-foreground">Arguments</p><ValueBody value={args.value} /></section>`; when `result !== undefined`, the same with `Result`; when `error !== undefined`, `<p className="text-caption text-destructive">{error}</p>`.
 4. `ValueBody` is today's `ArgumentBody` from `tool-call-card.tsx`, moved unchanged with `jsonObject`. `scrollTo`, the anchor ids and the "→ response" button go away: nothing links lines to each other any more.
-5. `part-view.tsx`: delete the local `ToolLinks` type; `import { type ToolLinks } from "@/lib/tool-calls"` and re-export nothing. For `tool_call`: `id` and `name` as today; `const match = links.spans.get(part)`; render `<ToolCallLine name={name} id={id} args={{ value: part.arguments }} result={id !== undefined && links.responses.has(id) ? { value: links.responses.get(id) } : undefined} durationNs={match?.durationNs} error={match?.error} />`. For `tool_call_response`: `id` as today (a string, else `undefined`); when `id !== undefined && links.shownCalls.has(id)`, return `null`; else render `<ToolCallLine name={(id ? links.callNames.get(id) : undefined) ?? "response"} id={id} result={{ value: part.response }} />`.
+5. `part-view.tsx`: delete the local `ToolLinks` type; `import { type ToolLinks } from "@/lib/tool-calls"` and re-export nothing. For `tool_call`: `id` and `name` as today; `const match = links.spans.get(part)`; render (always with `args`, so a call without arguments reads `name()`) `<ToolCallLine name={name} id={id} args={{ value: part.arguments }} result={id !== undefined && links.responses.has(id) ? { value: links.responses.get(id) } : undefined} durationNs={match?.durationNs} error={match?.error} />`. For `tool_call_response`: `id` as today (a string, else `undefined`); when `id !== undefined && links.shownCalls.has(id)`, return `null`; else render `<ToolCallLine name={(id ? links.callNames.get(id) : undefined) ?? "response"} id={id} result={{ value: part.response }} />`.
 6. `message-view.tsx`: import `type ToolLinks` from `@/lib/tool-calls` instead of `part-view`. No other change.
 7. `chat-view.tsx`: delete `toolLinks` (moved to the lib; update its imports). `ChatView` gets a new optional prop `toolSpans?: Map<Schema<"Part">, ToolSpanMatch>` and computes `links = toolLinks(messages, [], toolSpans)`. `MessageList` filters out the messages for which `foldedMessage(message, links)` is true before mapping (keys are computed over the kept messages). `payload-view.tsx`'s `MessageList`: import `toolLinks` and `foldedMessage` from `@/lib/tool-calls` (instead of `toolLinks` from `chat-view`), and filter folded messages the same way. Check with `rg -n "toolLinks|ToolLinks|NO_LINKS" web/src` that no other user is left.
-8. `chat-tab.tsx`: new optional prop `spans?: readonly Schema<"TreeSpan">[]`. Compute
+8. `chat-tab.tsx`: `import { useMemo } from "react"`; new optional prop `spans?: readonly Schema<"TreeSpan">[]`. Compute
    ```ts
    const toolSpans = useMemo(() => {
      const row = spans?.find((candidate) => candidate.span.span_id === span.span_id);
@@ -231,7 +232,7 @@ Imports: `type ReactNode, useState` from `react`; `ChevronDown`, `ChevronRight`,
    ```
    and pass it to `ChatView`. The `input`/`output` passed to `ChatView` stay `messagesOf(span.input)` / `messagesOf(span.output)`: they return the payload's own array, so the `Part` objects are the same ones the map is keyed by. Never clone the messages or parts on this path.
 9. `span-detail.tsx`: new optional prop `spans?: readonly Schema<"TreeSpan">[]`, passed as `<ChatTab span={detail} spans={spans} />`. `trace-view.tsx`: pass `spans={loaded.spans}` to `SpanDetail` in the `spanDetail` constant.
-10. `transcript-view.tsx`, the tool turn: delete `ToolTurn` and the `ToolCallCard` import. In `TurnRow`, add `data-turn={span.span_id}` on the outer row `div`. For a tool span (`span.span_kind === "tool"`), the row's content is, instead of the header button and the body:
+10. `transcript-view.tsx`, the tool turn: delete `ToolTurn` and the `ToolCallCard` import. In `TurnRow`, add `data-turn={span.span_id}` on the outer row `div`. The row's children become `{span.span_kind === "tool" ? toolContent : (<>{the header button as today}{the detail ternary as today, minus its `span.span_kind === "tool"` branch}</>)}`: the Skeleton and `previous` logic stay for non-tool spans only, and a tool span never shows the Skeleton. `toolContent` is:
     ```tsx
     <ToolCallLine
       icon={<KindIcon kind={span.span_kind} />}
@@ -243,11 +244,11 @@ Imports: `type ReactNode, useState` from `react`; `ChevronDown`, `ChevronRight`,
       onClick={onSelect}
     />
     ```
-    then, when `detail.isError`, `<p className="text-caption">Could not load this span</p>`. Before the detail loads, the line is `name · duration` (no parentheses): accepted. LLM and other turns keep the header button and body as today. The row's outer `div` (selection style, hover prefetch, click-to-select that ignores buttons) is unchanged.
+    followed by `{detail.isError ? <p className="text-caption">Could not load this span</p> : null}`, both in a fragment. Before the detail loads, the line is `name · duration` (no parentheses): accepted. LLM and other turns keep the header button and body as today. The row's outer `div` (selection style, hover prefetch, click-to-select that ignores buttons) is unchanged.
 11. `transcript-view.tsx`, LLM turns: delete the local `NO_LINKS` constant. `LlmTurn` gets two new props, `llm: Schema<"SpanSummary">` and `spans: readonly Schema<"TreeSpan">[]`. In it: `const inputAll = payloadMessages(detail.input)`; `input = freshInput(seen, inputAll)` and `output` as today; `const links = toolLinks([...input, ...output], seen ?? [], matchToolSpans(llm, spans, inputAll, output))`; render the `input` and `output` messages that are not `foldedMessage(message, links)`, each `MessageView` with `links={links}`. `TurnRow` gets a `spans` prop and passes `llm={span}` and `spans`; `TranscriptView` passes its `spans` prop to each `TurnRow`. (`matchToolSpans` takes `inputAll`, the full input, so input calls that are not shown still match; only the shown ones render.)
-12. `tree-toolbar.tsx`: `import { type KeyboardEvent, type ReactNode } from "react"` (merge with the existing import); new optional prop `end?: ReactNode` on `TreeToolbar`, rendered last inside the toolbar `div` as `{end ? <><span className="flex-1" />{end}</> : null}`.
+12. `tree-toolbar.tsx`: change the import to `import type { KeyboardEvent, ReactNode } from "react";`; new optional prop `end?: ReactNode` on `TreeToolbar`, rendered last inside the toolbar `div` as `{end ? <><span className="flex-1" />{end}</> : null}`.
 13. `TranscriptView`: new props `wide: boolean; onWide: (on: boolean) => void`; it passes to `TreeToolbar` `end={<Button type="button" size="xs" variant={wide ? "secondary" : "ghost"} aria-pressed={wide} onClick={() => onWide(!wide)}><Maximize2 />Full width</Button>}` (`Maximize2` from `lucide-react`; accessible name `Full width`). The `section aria-label="Transcript"` stays.
-14. `trace-view.tsx`: `import { STORAGE_PREFIX } from "@/product"`; module constant ``const WIDE_KEY = `${STORAGE_PREFIX}transcript-wide`;``. In the component: `const [wide, setWide] = useState(() => localStorage.getItem(WIDE_KEY) === "1")`; `function chooseWide(on: boolean) { setWide(on); if (on) localStorage.setItem(WIDE_KEY, "1"); else localStorage.removeItem(WIDE_KEY); }`. Build the `TranscriptView` element once (`const transcript = <TranscriptView … wide={wide} onWide={chooseWide} />`, same props as today plus these two). Inside the `absolute inset-0` div, render `active === "transcript" && wide ? <div className="flex h-full min-h-0 flex-col">{transcript}</div> : <SplitPane … />`, with `start={active === "transcript" ? transcript : <TreeGrid … />}`. If the hooks must sit above an early return, place `useState` with the component's other hooks.
+14. `trace-view.tsx`: `import { STORAGE_PREFIX } from "@/product"`; module constant ``const WIDE_KEY = `${STORAGE_PREFIX}transcript-wide`;``. In the component: `const [wide, setWide] = useState(() => localStorage.getItem(WIDE_KEY) === "1")`; `function chooseWide(on: boolean) { setWide(on); if (on) localStorage.setItem(WIDE_KEY, "1"); else localStorage.removeItem(WIDE_KEY); }`. Build the `TranscriptView` element once (`const transcript = <TranscriptView … wide={wide} onWide={chooseWide} />`, same props as today plus these two). Inside the `absolute inset-0` div, render `active === "transcript" && wide ? <div className="flex h-full min-h-0 flex-col">{transcript}</div> : <SplitPane … />`, with `start={active === "transcript" ? transcript : <TreeGrid … />}`. Place the `useState` with the component's other hooks, above every early return (such as the pending and error returns near line 196).
 15. Existing tests that query `getByRole("button", { name: /get_order_status/ })` now find several buttons (the LLM call line, the tool turn line, the response line). Add this helper to each test file that needs it (no shared module):
     ```ts
     /** The tool line button whose text starts with `prefix`. */
@@ -258,10 +259,11 @@ Imports: `type ReactNode, useState` from `react`; `ChevronDown`, `ChevronRight`,
       return line;
     }
     ```
-    The Transcript's tool turn row is `transcript.querySelector('[data-turn="b100000000000013"]')`; its line is `toolLine(row, "get_order_status(")`. Update:
+    The Transcript's tool turn row is `transcript.querySelector('[data-turn="b100000000000013"]')`; its line is `toolLine(row, "get_order_status(")`. Before the detail loads, the tool line reads `get_order_status · 350ms` (no `(`), and `toolLine` throws, so every use is `const line = await waitFor(() => toolLine(row, "get_order_status("))`, and the row is awaited the same way (`await waitFor(() => { const row = transcript.querySelector(...); if (!(row instanceof HTMLElement)) throw new Error("no row"); return row; })`). Update:
     - `transcript-view.test.tsx` "shows the agent section and the LLM and tool turns": click the tool row's line (wait for the row with `findBy`/`waitFor`).
     - `transcript-view.test.tsx` "marks only the selected turn…": `toolBlock` is the `[data-turn="b100000000000013"]` row, `llmBlock` the `[data-turn="b100000000000012"]` row; the assertions on them stay.
     - `$sessionId.test.tsx` "returns from a picked transcript block to the trace summary": click the tool row's line found the same way.
+    - `traces/index.test.tsx` "shows the trace summary in transcript mode until a block is picked…" (line ~391): the same.
     Report any other test that breaks and how it was fixed.
 
 **Tests:**
@@ -271,7 +273,7 @@ Imports: `type ReactNode, useState` from `react`; `ChevronDown`, `ChevronRight`,
   - error (`error="1 failed, 47 passed"`): the button text contains `1 failed, 47 passed` and not `shipped`; `getByRole("img", { name: "Failed" })` exists; `data-status="error"`; open shows the error paragraph and the `Result` region.
   - `onClick` is called once per click.
   - no `args`, `name="response"`, result `{ ok: true }`: the text is `response → {ok: true}`; open shows no `Arguments` region.
-  - a `result` whose inline text is empty (`""`): the text is `name(…)` with no `→`.
+  - `name="run" args={{ value: { a: 1 } }} result={{ value: "" }}`: the text is exactly `run(a: 1)`.
 - `chat-view.test.tsx`, new cases (no `toolDefinitions` passed):
   - a call `lookup` `{q: "1"}` with id `call_1` in an assistant message and its response `{answer: 2}` in a `tool` message, all in `input` → exactly one button whose text starts with `lookup(`, its text is `lookup(q: "1") → {answer: 2}`, and `queryByText("Tool")` is null (the folded tool message is not rendered).
   - a response whose call is not in the messages → one button with text `response → {answer: 2}`, and the `Tool` message header is shown.
@@ -287,7 +289,7 @@ Imports: `type ReactNode, useState` from `react`; `ChevronDown`, `ChevronRight`,
   - "a failed tool turn shows its error on the line": `import traceFixture from "../../../../fixtures/api/responses/traces/a1000000000000000000000000000001.json"` (check the relative path the way `span-detail.test.tsx` imports its fixtures); `server.use(http.get("/api/v1/projects/:project/traces/:traceId", () => HttpResponse.json({ ...traceFixture, spans: traceFixture.spans.map((row) => row.span.span_id === "b100000000000013" ? { ...row, span: { ...row.span, status: "error", status_message: "1 failed, 47 passed" } } : row) })))` (check the exact route pattern and response shape in `fixtures/api` / the MSW handlers and adapt; leave the span-detail endpoints untouched); the tool row's line contains `1 failed, 47 passed` and has an image named `Failed`.
   - "Full width hides the side pane and is remembered": start on `/acme/support-bot/traces?trace=a1000000000000000000000000000001&mode=transcript` (no `span`, so the summary shows); `findByRole("region", { name: "Trace summary" })` exists; click the `Full width` button: its `aria-pressed` is `"true"`, `queryByRole("region", { name: "Trace summary" })` is null, the `Transcript` region is still there, and ``localStorage.getItem(`${STORAGE_PREFIX}transcript-wide`)`` is `"1"`; unmount and render the same URL again: the summary is still absent and the button pressed; click it again: the summary is back and the key is `null`. Add ``afterEach(() => localStorage.removeItem(`${STORAGE_PREFIX}transcript-wide`))`` with `STORAGE_PREFIX` imported from `@/product`.
 
-**Done when:** `pnpm --dir web exec vitest run src/lib/tool-calls.test.ts src/components/payload src/components/trace 'src/routes/$org/$project/sessions' --maxWorkers=8` passes; `pnpm --dir web exec tsc --noEmit -p .` passes; Biome is clean on the touched files; `rg -n "ToolCallCard|tool-call-card|NO_LINKS" web/src` finds nothing.
+**Done when:** `pnpm --dir web exec vitest run src/lib/tool-calls.test.ts src/components/payload src/components/trace 'src/routes/$org/$project/sessions' 'src/routes/$org/$project/traces' src/test --maxWorkers=8` passes; `pnpm --dir web exec tsc --noEmit -p .` passes; Biome is clean on the touched files; `rg -n "ToolCallCard|tool-call-card|NO_LINKS|NO_TOOL_LINKS" web/src` finds nothing.
 
 **Commit:** `Show tool calls as one line with the response folded in`
 
