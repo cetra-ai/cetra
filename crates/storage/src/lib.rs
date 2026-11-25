@@ -45,6 +45,8 @@ use crate::wal::{SegmentWriter, replay};
 
 pub(crate) mod anchor;
 pub(crate) mod catalog;
+#[allow(dead_code)] // used by M2–M6 before cut-over
+pub(crate) mod column_bridge;
 mod compaction;
 pub mod config;
 pub(crate) mod counters;

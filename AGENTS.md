@@ -141,7 +141,7 @@ docs/                        decisions, specs, plans, research
 **Crate dependency graph (enforced):**
 - `column` depends on no workspace crate.
 - `core` depends on no workspace crate.
-- `otel` and `storage` depend only on `core`. **They never depend on each other**, so they can be built in parallel; `server` connects them.
+- `otel` depends only on `core`; `storage` depends on `core` and `column`. **They never depend on each other**, so they can be built in parallel; `server` connects them.
 - `eval` depends on `core` and `otel`.
 - `token` depends on no workspace crate. `server` and `tools/license` use it, and so does the control plane (by git commit).
 - `saml` depends on no workspace crate. `server` uses it from track SA's M2, and so does the control plane (by git commit).

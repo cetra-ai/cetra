@@ -1271,6 +1271,7 @@ dependencies = [
  "async-trait",
  "bytes",
  "bytesize",
+ "cetra-column",
  "cetra-core",
  "chrono",
  "crc32c",
