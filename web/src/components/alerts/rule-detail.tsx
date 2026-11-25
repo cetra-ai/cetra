@@ -15,7 +15,6 @@ import type { Schema } from "@/api/types";
 import { EventKindBadge } from "@/components/alerts/event-kind-badge";
 import { cutTitle } from "@/components/alerts/issue-scope-fields";
 import { RulePreview } from "@/components/alerts/rule-preview";
-import { axisStyle } from "@/components/charts/plot-helpers";
 import { ConfirmDialog } from "@/components/confirm-dialog";
 import { DisabledReason } from "@/components/disabled-reason";
 import { FormError } from "@/components/form/form-error";
@@ -39,6 +38,7 @@ import {
 import { conditionSummary, formatAlertValue, formFromRule } from "@/lib/alerts";
 import { shortId } from "@/lib/format";
 import { canManageAlerts } from "@/lib/roles";
+import { type TimeZoneSetting, useTimeZone } from "@/lib/settings";
 
 const CANNOT_MANAGE = "Only project members and above can manage alerts";
 
@@ -59,6 +59,7 @@ export function RuleDetail({
   const canEdit = canManageAlerts(data.role);
   const channels = useQuery(channelsQuery(org, project));
   const upgradeUrl = useOrgEntitlements(org).upgradeUrl;
+  const zone = useTimeZone();
   const events = $api.useInfiniteQuery(
     "get",
     "/api/v1/projects/{project}/alert-rules/{id}/events",
@@ -290,15 +291,7 @@ export function RuleDetail({
                       )}
                     </TableCell>
                     <TableCell>
-                      <TimeText
-                        value={event.window_from}
-                        style={windowStyle(event.window_from, event.window_to)}
-                      />
-                      {" – "}
-                      <TimeText
-                        value={event.window_to}
-                        style={windowStyle(event.window_from, event.window_to)}
-                      />
+                      <EventWindow from={event.window_from} to={event.window_to} zone={zone} />
                     </TableCell>
                     <TableCell>
                       {event.deliveries.length === 0 ? (
@@ -432,9 +425,27 @@ function DeliveryBadge({ status }: { status: Schema<"DeliveryStatus"> }) {
   }
 }
 
-/** An event's window in the chart axis format: hours and minutes, with the date from a day on. */
-function windowStyle(from: string, to: string): TimeTextStyle {
-  return axisStyle([{ time: Date.parse(from) }, { time: Date.parse(to) }]) === "time"
-    ? "minute"
-    : "date-minute";
+/** An event's window to the minute: "10:00 – 10:05", with the dates when its ends fall on
+ *  different days in the shown zone ("11-18 23:55 – 11-19 00:05"). */
+function EventWindow({ from, to, zone }: { from: string; to: string; zone: TimeZoneSetting }) {
+  const style: TimeTextStyle =
+    calendarDay(from, zone) === calendarDay(to, zone) ? "minute" : "date-minute";
+  return (
+    <>
+      <TimeText value={from} style={style} />
+      {" – "}
+      <TimeText value={to} style={style} />
+    </>
+  );
+}
+
+/** The calendar day of an instant in the zone, or undefined for an unparsable value. */
+function calendarDay(value: string, zone: TimeZoneSetting): string | undefined {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) {
+    return undefined;
+  }
+  return zone === "utc"
+    ? `${date.getUTCFullYear()}-${date.getUTCMonth()}-${date.getUTCDate()}`
+    : `${date.getFullYear()}-${date.getMonth()}-${date.getDate()}`;
 }

@@ -3,7 +3,7 @@ import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/comp
 import { formatRelative, formatTimestamp } from "@/lib/format";
 import { type TimeZoneSetting, useTimeZone } from "@/lib/settings";
 
-/** `time` and `datetime` keep the milliseconds; `minute` (11:51) and `date-minute` (11-25 11:51)
+/** `time` and `datetime` keep the milliseconds; `minute` (11:51) and `date-minute` (11-19 11:51)
  *  are the chart axis formats, for times that are whole minutes or need no more precision. */
 export type TimeTextStyle = "time" | "datetime" | "minute" | "date-minute";
 
