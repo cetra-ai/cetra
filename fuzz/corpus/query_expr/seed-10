@@ -1,0 +1,1 @@
+tags @> [lower('BETA')] AND cost_total * 2 > 0.5 AND (isnan(latency_ms) OR isfinite(latency_ms)) AND greatest(duration_ns, 0) != coalesce(nullif(duration_ns, -1), 0)

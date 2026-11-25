@@ -1,0 +1,1 @@
+name ILIKE '%chat%' AND tags @> ['beta'] AND array_length(tags) >= 1 AND CAST(duration_ns AS DOUBLE) > 0 AND metadata['k1']::VARCHAR = 'v1'

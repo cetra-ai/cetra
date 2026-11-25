@@ -1,0 +1,1 @@
+date_bin(INTERVAL '5 minutes', start_time) + INTERVAL '1 hour 30 minutes' >= TIMESTAMP '2026-01-01T00:00:00Z' AND extract('year', date_col) >= 2025 AND abs(latency_ms) >= 0.0

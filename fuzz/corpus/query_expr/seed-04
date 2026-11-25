@@ -1,0 +1,1 @@
+CASE WHEN duration_ns != 0 THEN 100 / duration_ns ELSE 0 END + CAST(TRY_CAST(name AS BIGINT) IS NULL AS BIGINT)
