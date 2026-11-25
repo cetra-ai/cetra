@@ -13,6 +13,11 @@ pub mod memory;
 pub mod selection;
 pub mod types;
 
+/// Fuzz entry points (D-QE-7). Not part of the API.
+#[cfg(any(test, fuzzing))]
+#[doc(hidden)]
+pub mod fuzz_entry;
+
 pub use batch::Batch;
 pub use bitmap::Bitmap;
 pub use cancel::CancelToken;

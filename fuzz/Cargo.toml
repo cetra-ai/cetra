@@ -14,6 +14,7 @@ cargo-fuzz = true
 [dependencies]
 # Exact pin: `just fuzz-lock` resolves it on top of the root lock, and Dependabot bumps it here.
 libfuzzer-sys = "=0.4.13"
+cetra-column = { path = "../crates/column" }
 cetra-otel = { path = "../crates/otel" }
 cetra-saml = { path = "../crates/saml" }
 cetra-storage = { path = "../crates/storage" }
@@ -98,6 +99,13 @@ bench = false
 [[bin]]
 name = "saml_assertion"
 path = "fuzz_targets/saml_assertion.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "column_frame"
+path = "fuzz_targets/column_frame.rs"
 test = false
 doc = false
 bench = false
