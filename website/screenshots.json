@@ -524,8 +524,8 @@
     "waitAfter": "never read the booking back",
     "theme": "dark",
     "viewport": {
-      "width": 900,
-      "height": 1400
+      "width": 1400,
+      "height": 620
     },
     "clip": "main"
   },
@@ -639,7 +639,7 @@
     "theme": "dark",
     "viewport": {
       "width": 800,
-      "height": 600
+      "height": 555
     },
     "clip": "main"
   },
