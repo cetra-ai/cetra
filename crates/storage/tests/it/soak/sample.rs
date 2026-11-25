@@ -63,6 +63,8 @@ pub(crate) struct Sample {
     pub(crate) cache: Option<CacheSample>,
     // queries since the last sample
     pub(crate) queries: BTreeMap<String, QuerySample>,
+    // span appends since the last sample
+    pub(crate) appends: AppendSample,
 }
 
 #[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
@@ -88,6 +90,18 @@ pub(crate) struct QuerySample {
     pub(crate) p95_ms: f64,
     pub(crate) max_ms: f64,
     pub(crate) errors: u64,
+}
+
+/// The span appends of one sample: their latency (backpressure waits included) and how late
+/// the ingest ticks that made them fired.
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+pub(crate) struct AppendSample {
+    pub(crate) n: u64,
+    pub(crate) p50_ms: f64,
+    pub(crate) p99_ms: f64,
+    pub(crate) max_ms: f64,
+    pub(crate) tick_late_p99_ms: f64,
+    pub(crate) tick_late_max_ms: f64,
 }
 
 /// Nanoseconds since the Unix epoch.
@@ -423,6 +437,7 @@ impl Sampler {
             .map(|(kind, count)| (kind.name(), count))
             .collect();
         sample.queries = shared.take_query_stats();
+        sample.appends = shared.take_append_stats();
         Ok(sample)
     }
 }

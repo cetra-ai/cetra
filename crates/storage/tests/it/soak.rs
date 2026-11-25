@@ -216,6 +216,7 @@ async fn soak() {
         candidates,
         gate,
         queries,
+        appends,
         deletions,
         retention,
         registry,
@@ -242,6 +243,7 @@ async fn soak() {
         candidates,
         gate,
         queries,
+        appends,
         deletions,
         retention,
         registry,
@@ -617,6 +619,19 @@ fn summary_json(
             }),
         );
     }
+    let appends = {
+        let mut p50: Vec<f64> = post.iter().map(|s| s.appends.p50_ms).collect();
+        let mut p99: Vec<f64> = post.iter().map(|s| s.appends.p99_ms).collect();
+        let mut late: Vec<f64> = post.iter().map(|s| s.appends.tick_late_p99_ms).collect();
+        serde_json::json!({
+            "n": post.iter().map(|s| s.appends.n).sum::<u64>(),
+            "p50_ms_median_of_samples": summary_stats(&mut p50)["median"],
+            "p99_ms_p95_of_samples": summary_stats(&mut p99)["p95"],
+            "max_ms": post.iter().map(|s| s.appends.max_ms).fold(0.0, f64::max),
+            "tick_late_p99_ms_p95_of_samples": summary_stats(&mut late)["p95"],
+            "tick_late_max_ms": post.iter().map(|s| s.appends.tick_late_max_ms).fold(0.0, f64::max),
+        })
+    };
     let mut top: Vec<(&String, &u64)> = warn_messages.iter().collect();
     top.sort_by(|a, b| b.1.cmp(a.1));
     let warn_top: Vec<serde_json::Value> = top
@@ -654,6 +669,7 @@ fn summary_json(
             "reopen_s": reopen_s,
             "compaction_passes": compaction_passes,
             "queries": queries,
+            "appends": appends,
             "rss_bytes": over(|s| s.rss_bytes as f64),
             "fds": over(|s| s.fds as f64),
             "wal_bytes": over(|s| s.wal_bytes as f64),
@@ -691,6 +707,31 @@ fn percentile_of(values: &mut [f64], fraction: f64) -> f64 {
 }
 
 // ---------------------------------------------------------------- unit tests
+
+#[test]
+fn a_late_tick_keeps_its_share_of_the_rate() {
+    // Ten on-time ticks and one tick 250 ms late send the same spans as 1.35 s of the rate.
+    let on_time: f64 = (0..10)
+        .map(|_| driver::budget_for(100.0, Duration::from_millis(100)))
+        .sum();
+    let late = driver::budget_for(100.0, Duration::from_millis(350));
+    assert!((on_time + late - 135.0).abs() < 1e-9);
+}
+
+#[test]
+fn append_sample_takes_percentiles_and_maxima() {
+    let append: Vec<f64> = (1..=100).rev().map(f64::from).collect();
+    let late = vec![0.5, 120.0, 3.0];
+    let sample = driver::append_sample(append, late);
+    assert_eq!(sample.n, 100);
+    assert_eq!(sample.p50_ms, 51.0);
+    assert_eq!(sample.p99_ms, 99.0);
+    assert_eq!(sample.max_ms, 100.0);
+    assert_eq!(sample.tick_late_p99_ms, 120.0);
+    assert_eq!(sample.tick_late_max_ms, 120.0);
+    let empty = driver::append_sample(Vec::new(), Vec::new());
+    assert_eq!((empty.n, empty.p99_ms, empty.max_ms), (0, 0.0, 0.0));
+}
 
 #[test]
 fn parse_mix_reads_weights() {

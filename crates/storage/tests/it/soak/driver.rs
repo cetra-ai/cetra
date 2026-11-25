@@ -27,7 +27,7 @@ use uuid::Uuid;
 use super::config::{QueryKind, SoakConfig};
 use super::failures::{FailureKind, Failures};
 use super::registry::{Registry, near_midnight};
-use super::sample::{QuerySample, now_ns};
+use super::sample::{AppendSample, QuerySample, now_ns};
 use crate::common::payload::{self, GeneratedTrace, Payloads, span_payload_bytes};
 use crate::common::rng::{Rng, mix};
 
@@ -199,6 +199,13 @@ pub(crate) struct QueryStats {
     errors: BTreeMap<QueryKind, u64>,
 }
 
+/// How long the span appends took, and how late the ingest ticks fired, since the last sample.
+#[derive(Debug, Default)]
+pub(crate) struct AppendStats {
+    append_ms: Vec<f64>,
+    tick_late_ms: Vec<f64>,
+}
+
 #[derive(Debug, Default)]
 pub(crate) struct DeletionStats {
     /// Registered and not yet seen as applied: id and registration time.
@@ -219,6 +226,7 @@ pub(crate) struct Shared {
     /// Held by a deletion or retention call and by the oracle's check (R7.6).
     pub(crate) gate: tokio::sync::Mutex<()>,
     pub(crate) queries: Mutex<QueryStats>,
+    pub(crate) appends: Mutex<AppendStats>,
     pub(crate) deletions: Mutex<DeletionStats>,
     /// (files, bytes) removed by each retention call.
     pub(crate) retention: Mutex<Vec<(u64, u64)>>,
@@ -238,6 +246,7 @@ impl Shared {
             candidates: Candidates::new(projects),
             gate: tokio::sync::Mutex::new(()),
             queries: Mutex::new(QueryStats::default()),
+            appends: Mutex::new(AppendStats::default()),
             deletions: Mutex::new(DeletionStats::default()),
             retention: Mutex::new(Vec::new()),
             registry: Mutex::new(Registry::default()),
@@ -265,6 +274,35 @@ impl Shared {
             })
             .collect()
     }
+
+    /// The span appends' latency and the ingest ticks' lateness since the last call.
+    pub(crate) fn take_append_stats(&self) -> AppendSample {
+        let mut stats = self.appends.lock().unwrap_or_else(PoisonError::into_inner);
+        let append = std::mem::take(&mut stats.append_ms);
+        let late = std::mem::take(&mut stats.tick_late_ms);
+        drop(stats);
+        append_sample(append, late)
+    }
+}
+
+/// The sample of span append latencies and tick lateness, both in milliseconds.
+pub(crate) fn append_sample(mut append: Vec<f64>, mut late: Vec<f64>) -> AppendSample {
+    append.sort_by(f64::total_cmp);
+    late.sort_by(f64::total_cmp);
+    AppendSample {
+        n: append.len() as u64,
+        p50_ms: percentile(&append, 0.50),
+        p99_ms: percentile(&append, 0.99),
+        max_ms: append.last().copied().unwrap_or(0.0),
+        tick_late_p99_ms: percentile(&late, 0.99),
+        tick_late_max_ms: late.last().copied().unwrap_or(0.0),
+    }
+}
+
+/// The spans a project may send for `elapsed` at `rate` spans/s: the budget follows the clock,
+/// so a late tick sends more instead of losing its share.
+pub(crate) fn budget_for(rate: f64, elapsed: Duration) -> f64 {
+    rate * elapsed.as_secs_f64()
 }
 
 fn percentile(sorted: &[f64], fraction: f64) -> f64 {
@@ -336,7 +374,15 @@ async fn flush_spans(
             return;
         }
     };
-    match append_with_retry(shared, true, project_id(index), rows).await {
+    let started = Instant::now();
+    let appended = append_with_retry(shared, true, project_id(index), rows).await;
+    shared
+        .appends
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .append_ms
+        .push(started.elapsed().as_secs_f64() * 1e3);
+    match appended {
         Ok(()) => {
             shared
                 .counters
@@ -377,6 +423,11 @@ async fn flush_spans(
 
 /// Ingest for one project: traces at the project's share of the rate, with their
 /// late groups appended when due.
+///
+/// The budget grows with the time elapsed, not per tick: a tick that fires late (a slow
+/// append, a busy runtime) makes the next batch larger instead of losing its spans, so
+/// `ingest_rate` measures whether storage keeps up with the rate, and the tick's lateness
+/// is recorded apart (`AppendSample`).
 pub(crate) async fn ingest(
     shared: Arc<Shared>,
     index: usize,
@@ -392,15 +443,23 @@ pub(crate) async fn ingest(
     let mut next: Option<(u64, GeneratedTrace)> = None;
     let mut due: BinaryHeap<Reverse<(Instant, u64)>> = BinaryHeap::new();
     let mut late: HashMap<u64, LateGroup> = HashMap::new();
+    let mut last = Instant::now();
     while !*stop.borrow() {
-        interval.tick().await;
-        budget += rate * 0.1;
+        let scheduled = interval.tick().await;
+        let now = Instant::now();
+        shared
+            .appends
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .tick_late_ms
+            .push(now.duration_since(scheduled.into_std()).as_secs_f64() * 1e3);
+        budget += budget_for(rate, now.duration_since(last));
+        last = now;
         let mut batch: Vec<Span> = Vec::new();
         let mut first_spans = 0_u64;
         let mut late_spans = 0_u64;
         let mut complete: Vec<Candidate> = Vec::new();
 
-        let now = Instant::now();
         while let Some(Reverse((at, id))) = due.peek().copied() {
             if at > now {
                 break;
