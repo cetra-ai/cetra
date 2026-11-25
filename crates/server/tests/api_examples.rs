@@ -15,7 +15,7 @@ use cetra_server::api::account::{
     AuthConfig, Me, OrgMembership, OrgRole, Project, SetupResponse, SignupResponse,
 };
 use cetra_server::api::admin::{AdminLicense, AdminSettings, AdminUser, CreatedAdminUser};
-use cetra_server::api::alerts::{AlertEvent, AlertRule, NotificationChannel};
+use cetra_server::api::alerts::{AlertEvent, AlertRule, IssueAlertPreview, NotificationChannel};
 use cetra_server::api::annotation_queues::{
     AddQueueItems, AddedQueueItems, AnnotationQueue, AnnotationQueueItem, CreateAnnotationQueue,
     NextQueueItem, QueueMatchingAdded, QueueMatchingPreview, QueueMatchingRequest, SkipQueueItem,
@@ -487,6 +487,7 @@ fn static_files_match_their_types() {
     roundtrip::<IssuePage>("static/issues.json");
     roundtrip::<Issue>("static/issue.json");
     roundtrip::<IssueOccurrences>("static/issue-occurrences.json");
+    roundtrip::<IssueAlertPreview>("static/alert-issue-preview.json");
     roundtrip::<IssueEventPage>("static/issue-events.json");
     roundtrip::<IssueRefitPage>("static/issue-refits.json");
     roundtrip::<Page<EvalJob>>("static/eval-jobs.json");
@@ -851,6 +852,7 @@ fn generated_files_roundtrip() {
             "list_issues" => roundtrip::<IssuePage>(&example.file),
             "get_issue" => roundtrip::<Issue>(&example.file),
             "get_issue_occurrences" => roundtrip::<IssueOccurrences>(&example.file),
+            "get_alert_issue_preview" => roundtrip::<IssueAlertPreview>(&example.file),
             "get_issue_events" => roundtrip::<IssueEventPage>(&example.file),
             "list_issue_source_refits" => roundtrip::<IssueRefitPage>(&example.file),
             "get_online_rule_stats" => roundtrip::<OnlineRuleStatsResponse>(&example.file),
