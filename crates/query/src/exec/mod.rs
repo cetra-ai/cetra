@@ -1,5 +1,6 @@
 //! Synchronous push-pipeline query execution engine (`D-QE-5`).
 
+pub mod hash_join;
 pub mod pipeline;
 pub mod pool;
 pub mod sort_key;
