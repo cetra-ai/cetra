@@ -537,7 +537,7 @@ function Turn({
         onTurnClick(event, onSelect);
       }}
     >
-      <div className="flex items-center gap-2 text-body text-muted-foreground">
+      <div className="flex flex-wrap items-center gap-2 text-body text-muted-foreground">
         {turnSteps !== undefined && turnSteps.length > 0 ? (
           <Button
             type="button"
@@ -554,14 +554,20 @@ function Turn({
         )}
         <button
           type="button"
-          className="focus-ring flex min-w-0 flex-1 items-center gap-2 rounded-sm text-left"
+          // The meta line wraps when the column is narrow, so badges never run into the cost. Its
+          // floor fits the time (a long name truncates instead); below it, the cost wraps instead.
+          className="focus-ring flex min-w-36 flex-1 flex-wrap items-center gap-x-2 gap-y-1 rounded-sm text-left"
           aria-current={selected ? "true" : undefined}
           onClick={onSelect}
         >
           <span className="num shrink-0">#{index}</span>
           <span className="min-w-0 truncate font-medium text-foreground">{trace.name}</span>
-          <TimeText value={trace.start_time} style="time" />
-          {gap !== undefined ? <span className="num">+{formatDuration(gap)}</span> : null}
+          <span className="shrink-0 whitespace-nowrap">
+            <TimeText value={trace.start_time} style="time" />
+          </span>
+          {gap !== undefined ? (
+            <span className="num shrink-0 whitespace-nowrap">+{formatDuration(gap)}</span>
+          ) : null}
           {[...trace.scores]
             .sort((left, right) => left.name.localeCompare(right.name))
             .map((score) => (

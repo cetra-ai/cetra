@@ -177,6 +177,9 @@ export const RunColumn = memo(function RunColumn({
   const parameterError = Object.keys(errors).some((field) => PARAMETER_FIELDS.has(field));
   const ended = endText(run);
   const empty = run.status === "idle" && run.text === "" && run.toolCalls.length === 0;
+  const picked = versions?.find((option) => option.version === column.version);
+  const versionTitle =
+    column.version === undefined ? "Draft" : picked ? versionLabel(picked) : `v${column.version}`;
   return (
     <section
       aria-label={`Model ${number}`}
@@ -190,8 +193,16 @@ export const RunColumn = memo(function RunColumn({
               onPickVersion(id, value === "draft" ? undefined : Number(value));
             }}
           >
-            <SelectTrigger aria-label="Prompt version" className="w-44 min-w-0 shrink-0">
-              <SelectValue />
+            {/* Wide enough for "v12 · latest, production"; a longer label ends in an ellipsis,
+                and the title shows it whole. */}
+            <SelectTrigger
+              aria-label="Prompt version"
+              title={versionTitle}
+              className="w-56 min-w-0 shrink-0 *:data-[slot=select-value]:min-w-0"
+            >
+              <SelectValue>
+                <span className="truncate">{versionTitle}</span>
+              </SelectValue>
             </SelectTrigger>
             <SelectContent>
               <SelectItem value="draft">Draft</SelectItem>
