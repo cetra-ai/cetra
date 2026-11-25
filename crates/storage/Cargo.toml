@@ -44,6 +44,7 @@ uuid.workspace = true
 arbitrary.workspace = true
 
 [dev-dependencies]
+cetra-query.workspace = true
 arbitrary.workspace = true
 proptest.workspace = true
 flate2.workspace = true

@@ -12,7 +12,7 @@ use cetra_column::{
 use chrono::NaiveDate;
 
 use crate::error::QueryError;
-use crate::ir::{BinaryOp, CastMode, EvalContext, Expr, UnaryOp};
+use crate::ir::{BinaryOp, CastMode, EvalContext, Expr, ScalarFn, UnaryOp};
 
 const CANCEL_CHECK_MASK: usize = 1023;
 const NS_PER_DAY: i64 = 86_400_000_000_000;
@@ -264,7 +264,29 @@ fn eval_expr_masked(
         Expr::MakeArray { elems, item_type } => {
             eval_make_array(elems, item_type, batch, active, ctx, pool.as_deref_mut())
         }
-        Expr::Like { .. } | Expr::Call { .. } => Err(QueryError::failed("not yet wired")),
+        Expr::Like {
+            expr: inner,
+            pattern,
+            escape,
+            case_insensitive,
+            negated,
+        } => {
+            let val_col = eval_expr_masked(inner, batch, active, ctx, pool.as_deref_mut())?;
+            let pat_col = eval_expr_masked(pattern, batch, active, ctx, pool.as_deref_mut())?;
+            crate::fn_string::eval_like(
+                &val_col,
+                &pat_col,
+                *escape,
+                *case_insensitive,
+                *negated,
+                active,
+                ctx,
+                pool.as_deref_mut(),
+            )
+        }
+        Expr::Call { func, args, .. } => {
+            eval_call(*func, args, batch, active, ctx, pool.as_deref_mut())
+        }
     };
 
     match res {
@@ -599,6 +621,145 @@ pub(crate) fn map_ref_at(col: &Column, row: usize) -> Option<MapRef<'_>> {
 // Core expression implementations
 // ---------------------------------------------------------------------------
 
+fn eval_call(
+    func: ScalarFn,
+    args: &[Expr],
+    batch: &Batch,
+    active: Option<&Bitmap>,
+    ctx: &EvalContext,
+    mut pool: Option<&mut Reservation>,
+) -> Result<Column, QueryError> {
+    let mut arg_cols = Vec::with_capacity(args.len());
+    for arg in args {
+        arg_cols.push(eval_expr_masked(
+            arg,
+            batch,
+            active,
+            ctx,
+            pool.as_deref_mut(),
+        )?);
+    }
+    let len = batch.raw_len();
+    match func {
+        ScalarFn::Lower
+        | ScalarFn::Upper
+        | ScalarFn::Length
+        | ScalarFn::Substr
+        | ScalarFn::Trim
+        | ScalarFn::Ltrim
+        | ScalarFn::Rtrim
+        | ScalarFn::Left
+        | ScalarFn::Right
+        | ScalarFn::SplitPart
+        | ScalarFn::Concat
+        | ScalarFn::ConcatWs
+        | ScalarFn::StartsWith
+        | ScalarFn::EndsWith
+        | ScalarFn::Contains
+        | ScalarFn::Strpos
+        | ScalarFn::RegexpLike
+        | ScalarFn::RegexpExtract
+        | ScalarFn::Encode => {
+            crate::fn_string::eval_string_fn(func, &arg_cols, len, active, ctx, pool)
+        }
+        ScalarFn::Now
+        | ScalarFn::DateTrunc
+        | ScalarFn::DateBin
+        | ScalarFn::Extract
+        | ScalarFn::ToTimestamp => {
+            crate::fn_time::eval_time_fn(func, &arg_cols, len, active, ctx, pool)
+        }
+        ScalarFn::Abs
+        | ScalarFn::Round
+        | ScalarFn::Floor
+        | ScalarFn::Ceil
+        | ScalarFn::Sqrt
+        | ScalarFn::Ln
+        | ScalarFn::Log10
+        | ScalarFn::Power
+        | ScalarFn::Coalesce
+        | ScalarFn::Nullif
+        | ScalarFn::Greatest
+        | ScalarFn::Least
+        | ScalarFn::IsNan
+        | ScalarFn::IsFinite
+        | ScalarFn::ArrayHas
+        | ScalarFn::ArrayHasAll
+        | ScalarFn::ArrayLength
+        | ScalarFn::ArrayElement
+        | ScalarFn::ArrayToString
+        | ScalarFn::ArrayDistinct
+        | ScalarFn::MapKeys
+        | ScalarFn::MapValues
+        | ScalarFn::JsonGet
+        | ScalarFn::JsonGetText
+        | ScalarFn::JsonExtract
+        | ScalarFn::JsonExtractText => {
+            crate::fn_misc::eval_misc_fn(func, &arg_cols, len, active, ctx, pool)
+        }
+    }
+}
+
+#[expect(
+    clippy::too_many_arguments,
+    reason = "internal timestamp-interval helper preserves operands, target type, mask, ctx, pool"
+)]
+fn eval_timestamp_interval(
+    op: BinaryOp,
+    lcol: &Column,
+    rcol: &Column,
+    data_type: &DataType,
+    raw_len: usize,
+    active: Option<&Bitmap>,
+    ctx: &EvalContext,
+    pool: &mut Option<&mut Reservation>,
+) -> Result<Column, QueryError> {
+    let before = pool_size(pool);
+    let utc = match data_type {
+        DataType::TimestampNs { utc } => *utc,
+        _ => match (lcol.data_type(), rcol.data_type()) {
+            (DataType::TimestampNs { utc }, _) | (_, DataType::TimestampNs { utc }) => utc,
+            _ => true,
+        },
+    };
+    if matches!(lcol.data_type(), DataType::Null) || matches!(rcol.data_type(), DataType::Null) {
+        return Ok(Column::Const {
+            value: ScalarValue::Null(DataType::TimestampNs { utc }),
+            len: raw_len,
+        });
+    }
+    let (ts_col, iv_col, subtract) = match (lcol.data_type(), rcol.data_type(), op) {
+        (DataType::TimestampNs { .. }, DataType::Interval, BinaryOp::Add) => (lcol, rcol, false),
+        (DataType::TimestampNs { .. }, DataType::Interval, BinaryOp::Sub) => (lcol, rcol, true),
+        (DataType::Interval, DataType::TimestampNs { .. }, BinaryOp::Add) => (rcol, lcol, false),
+        _ => {
+            return Err(QueryError::failed(
+                "unsupported timestamp and interval arithmetic",
+            ));
+        }
+    };
+
+    try_reserve(pool, raw_len * 8 + bitmap_mem_bytes(raw_len))?;
+    let mut vals = vec![0i64; raw_len];
+    let mut nulls = Bitmap::new_zeroed(raw_len);
+    for (row, slot) in vals.iter_mut().enumerate() {
+        if (row & CANCEL_CHECK_MASK) == 0 {
+            check_cancel(ctx, pool, before)?;
+        }
+        if !is_active(active, row) {
+            continue;
+        }
+        if let (Some(ts), Some(iv)) = (read_timestamp(ts_col, row), read_interval(iv_col, row)) {
+            *slot = crate::fn_time::add_interval(ts, iv, subtract)?;
+            let _ = nulls.set(row, true);
+        }
+    }
+    Ok(Column::Flat(FlatColumn::try_new(
+        FlatData::TimestampNs { values: vals, utc },
+        Some(nulls),
+    )?))
+}
+
 fn bitmap_mem_bytes(len: usize) -> usize {
     len.div_ceil(64) * 8
 }
@@ -847,7 +1008,30 @@ fn eval_binary(
     mut pool: Option<&mut Reservation>,
 ) -> Result<Column, QueryError> {
     match op {
-        BinaryOp::Concat | BinaryOp::ArrayContains => Err(QueryError::failed("not yet wired")),
+        BinaryOp::Concat => {
+            let lcol = eval_expr_masked(left, batch, active, ctx, pool.as_deref_mut())?;
+            let rcol = eval_expr_masked(right, batch, active, ctx, pool.as_deref_mut())?;
+            if matches!(data_type, DataType::List(_))
+                || matches!(lcol.data_type(), DataType::List(_))
+                || matches!(rcol.data_type(), DataType::List(_))
+            {
+                crate::fn_misc::eval_list_concat(&lcol, &rcol, active, ctx, pool)
+            } else {
+                crate::fn_string::eval_string_concat(&lcol, &rcol, active, ctx, pool)
+            }
+        }
+        BinaryOp::ArrayContains => {
+            let lcol = eval_expr_masked(left, batch, active, ctx, pool.as_deref_mut())?;
+            let rcol = eval_expr_masked(right, batch, active, ctx, pool.as_deref_mut())?;
+            crate::fn_misc::eval_misc_fn(
+                ScalarFn::ArrayHasAll,
+                &[lcol, rcol],
+                batch.raw_len(),
+                active,
+                ctx,
+                pool,
+            )
+        }
         BinaryOp::And => eval_and(left, right, batch, active, ctx, pool),
         BinaryOp::Or => eval_or(left, right, batch, active, ctx, pool),
         BinaryOp::Eq
@@ -873,7 +1057,18 @@ fn eval_binary(
                 (DataType::TimestampNs { .. }, DataType::Interval)
                     | (DataType::Interval, DataType::TimestampNs { .. })
             ) {
-                return Err(QueryError::failed("not yet wired"));
+                let lcol = eval_expr_masked(left, batch, active, ctx, pool.as_deref_mut())?;
+                let rcol = eval_expr_masked(right, batch, active, ctx, pool.as_deref_mut())?;
+                return eval_timestamp_interval(
+                    op,
+                    &lcol,
+                    &rcol,
+                    data_type,
+                    batch.raw_len(),
+                    active,
+                    ctx,
+                    &mut pool,
+                );
             }
             let lcol = eval_expr_masked(left, batch, active, ctx, pool.as_deref_mut())?;
             let rcol = eval_expr_masked(right, batch, active, ctx, pool.as_deref_mut())?;
@@ -2593,17 +2788,6 @@ fn eval_cast(
     let raw_len = batch.raw_len();
     let src_dt = inner.data_type();
 
-    // Temporary QE2.1 arms wired in QE2.6.
-    if matches!(
-        (&src_dt, target),
-        (
-            DataType::Utf8,
-            DataType::TimestampNs { .. } | DataType::Date
-        ) | (DataType::TimestampNs { .. }, DataType::Utf8)
-    ) {
-        return Err(QueryError::failed("not yet wired"));
-    }
-
     let src = eval_expr_masked(inner, batch, active, ctx, pool.as_deref_mut())?;
 
     if src_dt == *target {
@@ -3131,6 +3315,92 @@ fn eval_cast(
                 Some(nulls),
             )?))
         }
+        (DataType::List(src_inner), DataType::List(tgt_inner))
+            if matches!(src_inner.as_ref(), DataType::Null) =>
+        {
+            let mut offsets = Vec::with_capacity(raw_len + 1);
+            offsets.push(0u32);
+            let mut total_items = 0usize;
+            let mut nulls = Bitmap::new_zeroed(raw_len);
+            for row in 0..raw_len {
+                if (row & CANCEL_CHECK_MASK) == 0 {
+                    check_cancel(ctx, &mut pool, before)?;
+                }
+                if is_active(active, row)
+                    && let Some(lref) = list_ref_at(&src, row)
+                {
+                    let n = match lref {
+                        ListRef::Flat { start, end, .. } => end - start,
+                        ListRef::Const(s) => s.len(),
+                    };
+                    total_items = total_items.checked_add(n).ok_or(ColumnError::Overflow {
+                        reason: "list cast element count overflow",
+                    })?;
+                    let _ = nulls.set(row, true);
+                }
+                let end_u32 = u32::try_from(total_items).map_err(|_| ColumnError::Overflow {
+                    reason: "list cast element count exceeds u32::MAX",
+                })?;
+                offsets.push(end_u32);
+            }
+            try_reserve(&mut pool, (raw_len + 1) * 4 + bitmap_mem_bytes(raw_len))?;
+            let values = Column::Const {
+                value: ScalarValue::Null((**tgt_inner).clone()),
+                len: total_items,
+            };
+            Ok(Column::Flat(FlatColumn::try_new(
+                FlatData::List {
+                    item_type: (**tgt_inner).clone(),
+                    offsets,
+                    values: Box::new(values),
+                },
+                Some(nulls),
+            )?))
+        }
+        (DataType::Utf8, DataType::TimestampNs { utc }) => {
+            let u = *utc;
+            cast_fixed(raw_len, active, ctx, &mut pool, before, |row| {
+                let Some(s) = read_str(&src, row) else {
+                    return Ok(None);
+                };
+                match crate::fn_time::parse_timestamp_ns(s, u) {
+                    Ok(ns) => Ok(Some(ns)),
+                    Err(e) => match mode {
+                        CastMode::Strict => Err(e),
+                        CastMode::Try => Ok(None),
+                    },
+                }
+            })
+            .map(|(vals, nulls)| {
+                FlatColumn::try_new(
+                    FlatData::TimestampNs {
+                        values: vals,
+                        utc: u,
+                    },
+                    Some(nulls),
+                )
+                .map(Column::Flat)
+            })?
+            .map_err(Into::into)
+        }
+        (DataType::Utf8, DataType::Date) => {
+            cast_fixed(raw_len, active, ctx, &mut pool, before, |row| {
+                let Some(s) = read_str(&src, row) else {
+                    return Ok(None);
+                };
+                match crate::fn_time::parse_date_days(s) {
+                    Ok(d) => Ok(Some(d)),
+                    Err(e) => match mode {
+                        CastMode::Strict => Err(e),
+                        CastMode::Try => Ok(None),
+                    },
+                }
+            })
+            .map(|(vals, nulls)| {
+                FlatColumn::try_new(FlatData::Date(vals), Some(nulls)).map(Column::Flat)
+            })?
+            .map_err(Into::into)
+        }
         (_, DataType::Utf8) => {
             cast_to_utf8(&src, &src_dt, mode, raw_len, active, ctx, &mut pool, before)
         }
@@ -3238,6 +3508,9 @@ fn cast_to_utf8(
                 }
             }
             DataType::FixedBytes8 | DataType::FixedBytes16 => read_bytes(src, row).map(hex::encode),
+            DataType::TimestampNs { utc } => {
+                read_timestamp(src, row).map(|ns| crate::fn_time::format_timestamp_ns(ns, *utc))
+            }
             DataType::Date => {
                 let Some(days) = read_date(src, row) else {
                     rendered.push(None);
@@ -4362,5 +4635,158 @@ mod tests {
             assert!(!text.contains("erased_alice_secret"));
             assert!(!text.contains("erased_bob_secret"));
         }
+    }
+
+    #[test]
+    fn wired_dispatch_and_reservation_postconditions() {
+        use crate::bind::bind_expr;
+        use crate::text::{SQL_LIMITS, TextKind, expect_end, parse_failure, parser, tokenize};
+        use cetra_column::Interval;
+
+        let schema = Schema::try_new_arc(vec![
+            Field::new("s", DataType::Utf8, true),
+            Field::new("ts", DataType::timestamp_utc(), true),
+            Field::new("tags", DataType::List(Box::new(DataType::Utf8)), true),
+        ])
+        .unwrap();
+
+        let batch = Batch::try_new_all(
+            Arc::clone(&schema),
+            vec![
+                Column::Flat(
+                    FlatColumn::try_new(
+                        FlatData::Utf8(
+                            Utf8Data::try_from_slices([
+                                "2026-01-01T10:00:00Z",
+                                "bad-timestamp",
+                                "{\"k\": [10, \"hi\"]}",
+                            ])
+                            .unwrap(),
+                        ),
+                        None,
+                    )
+                    .unwrap(),
+                ),
+                Column::Flat(
+                    FlatColumn::try_new(
+                        FlatData::TimestampNs {
+                            values: vec![1_767_261_600_000_000_000, i64::MAX, 0],
+                            utc: true,
+                        },
+                        None,
+                    )
+                    .unwrap(),
+                ),
+                Column::Flat(
+                    FlatColumn::try_new(
+                        FlatData::List {
+                            item_type: DataType::Utf8,
+                            offsets: vec![0, 1, 1, 2],
+                            values: Box::new(Column::Flat(
+                                FlatColumn::try_new(
+                                    FlatData::Utf8(
+                                        Utf8Data::try_from_slices(["alpha", "beta"]).unwrap(),
+                                    ),
+                                    None,
+                                )
+                                .unwrap(),
+                            )),
+                        },
+                        None,
+                    )
+                    .unwrap(),
+                ),
+            ],
+            3,
+        )
+        .unwrap();
+
+        // Mask out row 1 (which has "bad-timestamp" and i64::MAX ts) to prove active-row masking
+        let masked = batch
+            .with_selection(Selection::Mask(Bitmap::from_bools(&[true, false, true])))
+            .unwrap();
+
+        let parse_bind = |sql: &str| {
+            let toks = tokenize(sql, &SQL_LIMITS, TextKind::Sql).unwrap();
+            let mut p = parser(toks);
+            let ast = p
+                .parse_expr()
+                .map_err(|e| parse_failure(e, &p, sql))
+                .unwrap();
+            expect_end(&mut p, sql).unwrap();
+            bind_expr(&ast, &schema).unwrap()
+        };
+
+        let scope = GlobalPool::standalone(1024 * 1024);
+        let mut pool = scope.register("wired", false);
+        pool.try_grow(64).unwrap();
+        let before = pool.size();
+
+        // Utf8 -> TimestampNs cast + TimestampNs -> Utf8 cast + TimestampNs + Interval
+        let ts_cast = parse_bind("CAST(s AS TIMESTAMP)");
+        // Masked out rows 1 and 2? Row 2 is JSON, so mask only row 0 for strict ts cast!
+        let only_row0 = batch
+            .with_selection(Selection::Mask(Bitmap::from_bools(&[true, false, false])))
+            .unwrap();
+        let ts_col = eval_expr(&ts_cast, &only_row0, &ctx(), Some(&mut pool)).unwrap();
+        assert_eq!(pool.size(), before + ts_col.memory_bytes());
+        assert_eq!(read_timestamp(&ts_col, 0), Some(1_767_261_600_000_000_000));
+        assert!(ts_col.is_null(1));
+
+        let ts_to_str = parse_bind("CAST(ts AS VARCHAR)");
+        let str_col = eval_expr(&ts_to_str, &only_row0, &ctx(), Some(&mut pool)).unwrap();
+        assert_eq!(
+            pool.size(),
+            before + ts_col.memory_bytes() + str_col.memory_bytes()
+        );
+        assert_eq!(read_str(&str_col, 0), Some("2026-01-01T10:00:00Z"));
+
+        let date_cast = parse_bind("CAST('2026-01-02' AS DATE)");
+        let date_col = eval_expr(&date_cast, &only_row0, &ctx(), None).unwrap();
+        assert!(read_date(&date_col, 0).is_some());
+
+        // Timestamp + Interval & Interval + Timestamp & Timestamp - Interval (masked out i64::MAX row 1!)
+        let ts_add = parse_bind("ts + INTERVAL '1 hour'");
+        let ts_add_col = eval_expr(&ts_add, &masked, &ctx(), None).unwrap();
+        assert_eq!(
+            read_timestamp(&ts_add_col, 0),
+            Some(1_767_261_600_000_000_000 + 3_600_000_000_000)
+        );
+        assert!(ts_add_col.is_null(1));
+        assert_eq!(read_timestamp(&ts_add_col, 2), Some(3_600_000_000_000));
+
+        let iv_add = parse_bind("INTERVAL '2 hours' + ts");
+        let iv_add_col = eval_expr(&iv_add, &masked, &ctx(), None).unwrap();
+        assert_eq!(read_timestamp(&iv_add_col, 2), Some(7_200_000_000_000));
+
+        let ts_sub = parse_bind("ts - INTERVAL '1 hour'");
+        let ts_sub_col = eval_expr(&ts_sub, &masked, &ctx(), None).unwrap();
+        assert_eq!(read_timestamp(&ts_sub_col, 2), Some(-3_600_000_000_000));
+
+        // LIKE, string ||, list ||, @>, JSON -> / ->> / json_extract
+        let like_ex = parse_bind("s LIKE '2026%'");
+        let like_col = eval_expr(&like_ex, &masked, &ctx(), None).unwrap();
+        assert_eq!(read_bool(&like_col, 0), Some(true));
+
+        let str_cat = parse_bind("s || '_ok'");
+        let str_cat_col = eval_expr(&str_cat, &only_row0, &ctx(), None).unwrap();
+        assert_eq!(read_str(&str_cat_col, 0), Some("2026-01-01T10:00:00Z_ok"));
+
+        let list_cat = parse_bind("tags || ['gamma']");
+        let list_cat_col = eval_expr(&list_cat, &masked, &ctx(), None).unwrap();
+        assert!(list_ref_at(&list_cat_col, 0).is_some());
+
+        let contains = parse_bind("tags @> ['beta']");
+        let contains_col = eval_expr(&contains, &masked, &ctx(), None).unwrap();
+        assert_eq!(read_bool(&contains_col, 0), Some(false));
+        assert_eq!(read_bool(&contains_col, 2), Some(true));
+
+        let only_row2 = batch
+            .with_selection(Selection::Mask(Bitmap::from_bools(&[false, false, true])))
+            .unwrap();
+        let json_ex = parse_bind("s -> 'k' ->> 1");
+        let json_col = eval_expr(&json_ex, &only_row2, &ctx(), None).unwrap();
+        assert_eq!(read_str(&json_col, 2), Some("hi"));
+        let _ = Interval::default();
     }
 }

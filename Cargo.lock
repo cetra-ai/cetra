@@ -1288,6 +1288,7 @@ dependencies = [
  "bytesize",
  "cetra-column",
  "cetra-core",
+ "cetra-query",
  "chrono",
  "crc32c",
  "datafusion",
