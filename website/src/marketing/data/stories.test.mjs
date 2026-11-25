@@ -94,7 +94,10 @@ test("every shot is in screenshots.json and has a PNG", () => {
   assert.equal(names.length, 28);
   assert.equal(new Set(names).size, 28);
   assert.equal(shotName("hero", "voice"), "marketing-trace-view-voice");
-  assert.equal(shotName("trace", "support"), "marketing-trace-list");
+  assert.equal(shotName("trace", "support"), "marketing-trace-page");
+  assert.equal(shotName("trace", "voice"), "marketing-trace-page-voice");
+  assert.equal(shotName("evaluate", "support"), "marketing-evaluate");
+  assert.equal(shotName("evaluate", "coding"), "marketing-evaluate-coding");
 });
 
 test("alts are one sentence that describes the picture", () => {

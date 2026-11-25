@@ -61,9 +61,14 @@ export const PICTURES = [
   },
   {
     id: "trace",
-    section: "Trace list",
-    base: "marketing-trace-list",
-    label: "Traces",
+    section: "Trace",
+    base: "marketing-trace-page",
+    label: {
+      support: "Session · Support bot",
+      coding: "Trace · Code agent",
+      voice: "Trace · Voice desk",
+      extraction: "Traces · Invoice pipeline",
+    },
     stories: {
       support: {
         alt: "The trace list filtered to traces tagged email: agent traces with start time, name, duration and cost.",
@@ -133,9 +138,14 @@ export const PICTURES = [
   },
   {
     id: "evaluate",
-    section: "Annotation queue",
-    base: "marketing-queue-review",
-    label: "Annotation queue",
+    section: "Evaluate",
+    base: "marketing-evaluate",
+    label: {
+      support: "Annotation queue",
+      coding: "Online rule",
+      voice: "LLM judge",
+      extraction: "Experiments",
+    },
     stories: {
       support: {
         alt: "An annotation queue's review form for support answers: the progress, the instructions and the correctness and relevance score fields.",

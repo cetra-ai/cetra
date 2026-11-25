@@ -138,7 +138,7 @@
     "clip": "aside[aria-label=\"Trace\"]"
   },
   {
-    "name": "marketing-trace-list",
+    "name": "marketing-trace-page",
     "path": "/acme/support-bot/traces?filter=tags%20%40%3E%20%5B'email'%5D&cols=start,name,duration,cost",
     "waitFor": "support-agent",
     "theme": "dark",
@@ -170,7 +170,7 @@
     "clip": "main"
   },
   {
-    "name": "marketing-queue-review",
+    "name": "marketing-evaluate",
     "path": "/acme/support-bot/annotation-queues/01900000-0000-7000-8000-000000570501/review/01900000-0000-7000-8000-000000570511",
     "waitFor": "Complete and next",
     "theme": "dark",
@@ -206,7 +206,7 @@
     "clip": "main"
   },
   {
-    "name": "marketing-trace-list-coding",
+    "name": "marketing-trace-page-coding",
     "path": "/acme/code-agent/traces?filter=status%20%3D%20'error'&cols=start,name,duration,cost",
     "waitFor": "coding-agent",
     "theme": "dark",
@@ -238,7 +238,7 @@
     "clip": "main"
   },
   {
-    "name": "marketing-queue-review-coding",
+    "name": "marketing-evaluate-coding",
     "path": "/acme/code-agent/annotation-queues/01900000-0000-7000-8000-000000570502/review/01900000-0000-7000-8000-000000570512",
     "waitFor": "Complete and next",
     "theme": "dark",
@@ -277,7 +277,7 @@
     "clip": "main"
   },
   {
-    "name": "marketing-trace-list-voice",
+    "name": "marketing-trace-page-voice",
     "path": "/acme/voice-desk/traces?filter=tags%20%40%3E%20%5B'voice'%5D&sort=duration&order=desc&cols=start,name,duration,cost",
     "waitFor": "tags @> ['voice']",
     "theme": "dark",
@@ -309,7 +309,7 @@
     "clip": "main"
   },
   {
-    "name": "marketing-queue-review-voice",
+    "name": "marketing-evaluate-voice",
     "path": "/acme/voice-desk/annotation-queues/01900000-0000-7000-8000-000000570503/review/01900000-0000-7000-8000-000000570513",
     "waitFor": "Complete and next",
     "theme": "dark",
@@ -344,7 +344,7 @@
     "clip": "main"
   },
   {
-    "name": "marketing-trace-list-extraction",
+    "name": "marketing-trace-page-extraction",
     "path": "/acme/invoice-pipeline/traces?filter=tags%20%40%3E%20%5B'billing'%5D&cols=start,name,duration,cost",
     "waitFor": "extract-invoice",
     "theme": "dark",
@@ -376,7 +376,7 @@
     "clip": "main"
   },
   {
-    "name": "marketing-queue-review-extraction",
+    "name": "marketing-evaluate-extraction",
     "path": "/acme/invoice-pipeline/annotation-queues/01900000-0000-7000-8000-000000570504/review/01900000-0000-7000-8000-000000570514",
     "waitFor": "Complete and next",
     "theme": "dark",
