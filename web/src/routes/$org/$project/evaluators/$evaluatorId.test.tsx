@@ -86,8 +86,8 @@ it("puts the test panel after the form, in the layout grid", async () => {
   const heading = screen.getByRole("heading", { name: "Test" });
 
   expect(save.compareDocumentPosition(heading) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
-  expect(heading.closest("section")).toHaveClass("@5xl:border-l");
-  expect(heading.closest("section")?.parentElement).toHaveClass("@5xl:grid-cols-2");
+  expect(heading.closest("section")).toHaveClass("@6xl:border-l");
+  expect(heading.closest("section")?.parentElement).toHaveClass("@6xl:grid-cols-2");
 });
 
 it("sends the whole config when the prompt changes", async () => {

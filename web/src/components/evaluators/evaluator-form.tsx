@@ -603,7 +603,7 @@ export function EvaluatorForm({
 
   return (
     <div className="@container">
-      <div className="grid gap-6 @5xl:grid-cols-2 @5xl:gap-8">
+      <div className="grid gap-6 @6xl:grid-cols-2 @6xl:gap-8">
         <form noValidate className="flex min-w-0 flex-col gap-6" onSubmit={onSubmit}>
           <fieldset disabled={locked} className="flex min-w-0 flex-col gap-6">
             {!saved && values.kind === "llm_judge" ? (

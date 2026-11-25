@@ -264,7 +264,7 @@ export function TestPanel({
   return (
     <section
       aria-labelledby="test-panel-title"
-      className="flex min-w-0 flex-col gap-4 border-t pt-6 @5xl:border-t-0 @5xl:border-l @5xl:pt-0 @5xl:pl-8"
+      className="flex min-w-0 flex-col gap-4 border-t pt-6 @6xl:border-t-0 @6xl:border-l @6xl:pt-0 @6xl:pl-8"
     >
       <h2 id="test-panel-title" className="text-ui font-medium">
         Test
@@ -376,7 +376,7 @@ export function TestPanelLocked() {
   return (
     <section
       aria-labelledby="test-panel-title"
-      className="flex min-w-0 flex-col gap-2 border-t pt-6 @5xl:border-t-0 @5xl:border-l @5xl:pt-0 @5xl:pl-8"
+      className="flex min-w-0 flex-col gap-2 border-t pt-6 @6xl:border-t-0 @6xl:border-l @6xl:pt-0 @6xl:pl-8"
     >
       <h2 id="test-panel-title" className="text-ui font-medium">
         Test
