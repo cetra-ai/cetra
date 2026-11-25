@@ -25,6 +25,7 @@ import {
 import { server } from "@/mocks/node";
 import { type StoryId, storyProject } from "@/mocks/projects";
 import alertEventsFixture from "../../../../fixtures/api/static/alert-events.json";
+import alertRulesFixture from "../../../../fixtures/api/static/alert-rules.json";
 import projectAlertEventsFixture from "../../../../fixtures/api/static/project-alert-events.json";
 
 const NOW = Date.parse("2026-06-01T00:00:00.000Z");
@@ -269,7 +270,7 @@ it("serves the story issues and rules before the fixtures, and lets other ids fa
     const issues = (await (await fetch(`${baseOf(story)}/issues`)).json()) as Schema<"IssuePage">;
     expect(issues.data.map((issue) => issue.id)).toEqual([
       oneOf(STORY_ISSUES, story).id,
-      FIXTURE_ISSUE,
+      ...(story === "support" ? [FIXTURE_ISSUE] : []),
     ]);
     const rules = (await (
       await fetch(`${baseOf(story)}/alert-rules`)
@@ -334,7 +335,7 @@ it("answers the story events routes, and lets the fixture rule's routes fall thr
     const times = head.map((event) => Date.parse(event.created_at));
     expect(times).toEqual([...times].sort((left, right) => right - left));
     expect(alertEvents.data.slice(storyEvents.length).map((event) => event.id)).toEqual(
-      projectAlertEventsFixture.data.map((event) => event.id),
+      story === "support" ? projectAlertEventsFixture.data.map((event) => event.id) : [],
     );
   }
 });
@@ -391,8 +392,10 @@ it("serves the story queues, their items and the lease, and lets other ids fall 
     const list = (await (await fetch(`${baseOf(story)}/annotation-queues`)).json()) as {
       data: { id: string }[];
     };
-    expect(list.data.slice(0, 1).map((queue) => queue.id)).toEqual([oneOf(STORY_QUEUES, story).id]);
-    expect(list.data[1]?.id).toBe(FIXTURE_QUEUE);
+    expect(list.data.map((queue) => queue.id)).toEqual([
+      oneOf(STORY_QUEUES, story).id,
+      ...(story === "support" ? [FIXTURE_QUEUE] : []),
+    ]);
   }
 
   const codingHero = stories.coding.traces[4]?.trace_id;
@@ -469,6 +472,45 @@ it("a project serves only its story's objects", async () => {
   expect(await served(`${baseOf("voice")}/annotation-queues`)).toEqual(
     STORY_QUEUES.map((queue) => queue.id),
   );
+});
+
+it("a story project lists only its own alert rules and events", async () => {
+  const codingRule = "01900000-0000-7000-8000-000000570202";
+  const supportRule = "01900000-0000-7000-8000-000000570201";
+  const ruleIds = async (path: string) =>
+    ((await (await fetch(path)).json()) as Schema<"AlertRulePage">).data.map((rule) => rule.id);
+
+  server.use(...storyHandlers(stories.coding, "acme/code-agent"));
+  const coding = baseOf("coding");
+  expect(await ruleIds(`${coding}/alert-rules`)).toEqual([codingRule]);
+  const codingEvents = (await (
+    await fetch(`${coding}/alert-events`)
+  ).json()) as Schema<"AlertEventPage">;
+  const codingRuleObject = oneOf(STORY_RULES, "coding");
+  expect(codingRule).toBe(codingRuleObject.id);
+  expect(codingEvents.data.map((event) => event.id)).toEqual([
+    storyAlertEvent(stories.coding, codingRuleObject).id,
+  ]);
+
+  server.use(...storyHandlers(stories.support, "acme/support-bot"));
+  const support = baseOf("support");
+  expect(await ruleIds(`${support}/alert-rules`)).toEqual([
+    supportRule,
+    ...alertRulesFixture.data.map((rule) => rule.id),
+  ]);
+  const supportEvents = (await (
+    await fetch(`${support}/alert-events`)
+  ).json()) as Schema<"AlertEventPage">;
+  expect(supportEvents.data.map((event) => event.id)).toEqual([
+    storyAlertEvent(stories.support, oneOf(STORY_RULES, "support")).id,
+    ...projectAlertEventsFixture.data.map((event) => event.id),
+  ]);
+});
+
+it("a story project lists only its own issues", async () => {
+  server.use(...storyHandlers(stories.coding, "acme/code-agent"));
+  const issues = (await (await fetch(`${baseOf("coding")}/issues`)).json()) as Schema<"IssuePage">;
+  expect(issues.data.map((issue) => issue.id)).toEqual([CODING_ISSUE]);
 });
 
 it("a story's detail routes are scoped to its project", async () => {

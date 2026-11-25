@@ -571,13 +571,15 @@ function idParam(value: string | readonly string[] | undefined): string {
  * not served at all. A handler that returns undefined lets the request fall through to the
  * fixtures' handlers. With `project` (an API ref, `acme/<slug>`) the routes use its literal prefix
  * and serve only the objects of that project's story (none for a ref that is no story project);
- * without it, every object is served under `/api/v1/projects/:project`.
+ * without it, every object is served under `/api/v1/projects/:project`. The fixture objects of the
+ * lists belong to the support project: they are listed only without `project` or under support.
  */
 export function storyHandlers(dataset: Dataset, project?: string): HttpHandler[] {
   const prefix =
     project === undefined ? PROJECT : `/api/v1/projects/${encodeURIComponent(project)}`;
   const scope = project === undefined ? undefined : projectOfRef(project)?.story;
   const served = (story: StoryId) => project === undefined || story === scope;
+  const withFixtures = project === undefined || scope === "support";
   const issues = STORY_ISSUES.filter((issue) => served(issue.story));
   const rules = STORY_RULES.filter((rule) => served(rule.story));
   const queues = STORY_QUEUES.filter((queue) => served(queue.story));
@@ -599,7 +601,7 @@ export function storyHandlers(dataset: Dataset, project?: string): HttpHandler[]
             const detail = storyIssue(dataset, issue);
             return detail === undefined ? [] : [detail];
           }),
-          ...issuesFixture.data,
+          ...(withFixtures ? issuesFixture.data : []),
         ],
         next_cursor: null,
       }),
@@ -621,7 +623,10 @@ export function storyHandlers(dataset: Dataset, project?: string): HttpHandler[]
     }),
     http.get(`${prefix}/alert-rules`, () =>
       HttpResponse.json({
-        data: [...rules.map((rule) => storyAlertRule(dataset, rule)), ...alertRulesFixture.data],
+        data: [
+          ...rules.map((rule) => storyAlertRule(dataset, rule)),
+          ...(withFixtures ? alertRulesFixture.data : []),
+        ],
         next_cursor: null,
       }),
     ),
@@ -640,7 +645,7 @@ export function storyHandlers(dataset: Dataset, project?: string): HttpHandler[]
         .map((rule) => storyAlertEvent(dataset, rule))
         .sort((left, right) => Date.parse(right.created_at) - Date.parse(left.created_at));
       return HttpResponse.json({
-        data: [...events, ...projectAlertEventsFixture.data],
+        data: [...events, ...(withFixtures ? projectAlertEventsFixture.data : [])],
         next_cursor: null,
       });
     }),
@@ -659,7 +664,10 @@ export function storyHandlers(dataset: Dataset, project?: string): HttpHandler[]
           : HttpResponse.json({ data: found, next_cursor: null });
       }
       return HttpResponse.json({
-        data: [...queues.map((queue) => storyQueue(dataset, queue)), ...queuesFixture.data],
+        data: [
+          ...queues.map((queue) => storyQueue(dataset, queue)),
+          ...(withFixtures ? queuesFixture.data : []),
+        ],
         next_cursor: null,
       });
     }),
