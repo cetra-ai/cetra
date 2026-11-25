@@ -124,6 +124,7 @@ export function largeHandlers(dataset: Dataset): HttpHandler[] {
     traceStreamHandler(liveTraceSource(dataset)),
     spanStreamHandler(liveSpanSource(dataset)),
     http.get(`${PROJECT}/traces`, ({ request }) => listTraces(dataset, request)),
+    http.get(`${PROJECT}/traces/totals`, ({ request }) => traceTotals(dataset, request)),
     http.get(`${PROJECT}/traces/:trace_id/spans/:span_id`, ({ params }) =>
       oneSpan(dataset, params.trace_id, params.span_id),
     ),
@@ -529,6 +530,20 @@ function listTraces(dataset: Dataset, request: Request): Response {
   );
   const filtered = predicate !== undefined || userIdOfFilter(parsed.filter) !== undefined;
   return page(rows, parsed, filtered ? {} : ignoredFilter(parsed));
+}
+
+function traceTotals(dataset: Dataset, request: Request): Response {
+  const parsed = readQuery(new URL(request.url));
+  if (parsed instanceof Response) {
+    return parsed;
+  }
+  const predicate = parsed.filter ? tracePredicate(parsed.filter) : undefined;
+  const rows = filterTraces(dataset.traces, parsed, predicate);
+  return HttpResponse.json({
+    trace_count: rows.length,
+    error_trace_count: rows.filter((trace) => trace.status === "error").length,
+    cost_total: rows.reduce((sum, trace) => sum + (trace.cost_total ?? 0), 0),
+  });
 }
 
 function listSpans(dataset: Dataset, request: Request): Response {
