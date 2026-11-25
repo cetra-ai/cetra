@@ -156,6 +156,9 @@ pub struct Summary {
     pub tail_bytes: Option<u64>,
     /// The largest `vmhwm` of all rounds.
     pub vmhwm_max: u64,
+    /// The largest `vmhwm - rss_start` of all rounds: for the write-like queries, the memory the
+    /// runs added to what the process held when timing started.
+    pub rss_delta_max: u64,
 }
 
 impl Summary {
@@ -173,6 +176,7 @@ impl Summary {
             bytes_written: first.bytes_written,
             tail_bytes: first.tail_bytes,
             vmhwm_max: results.iter().map(|r| r.vmhwm).max().unwrap_or(0),
+            rss_delta_max: results.iter().map(|r| r.vmhwm.saturating_sub(r.rss_start)).max().unwrap_or(0),
         }
     }
 }
@@ -200,8 +204,9 @@ fn flush_writers(query: &str) -> R<usize> {
 }
 
 /// Whether Strata wins: every compared figure strictly lower than Parquet's.
-/// Figures: median and p95 latency and max VmHWM; for the write queries, also the median CPU
-/// time and the bytes written. Returns the names of the figures Strata loses on (empty = win).
+/// Figures: median and p95 latency and max VmHWM; for the write queries, the memory used
+/// (`rss_delta_max`) in place of VmHWM, and also the median CPU time and the bytes written.
+/// Returns the names of the figures Strata loses on (empty = win).
 fn losses(query: &str, st: &Summary, pq: &Summary) -> Vec<&'static str> {
     let mut lost = Vec::new();
     if percentile(&st.runs_ms, 0.50) >= percentile(&pq.runs_ms, 0.50) {
@@ -210,7 +215,12 @@ fn losses(query: &str, st: &Summary, pq: &Summary) -> Vec<&'static str> {
     if percentile(&st.runs_ms, 0.95) >= percentile(&pq.runs_ms, 0.95) {
         lost.push("p95");
     }
-    if st.vmhwm_max >= pq.vmhwm_max {
+    let (st_rss, pq_rss) = if is_write_like(query) {
+        (st.rss_delta_max, pq.rss_delta_max)
+    } else {
+        (st.vmhwm_max, pq.vmhwm_max)
+    };
+    if st_rss >= pq_rss {
         lost.push("rss");
     }
     if is_write_like(query) {
@@ -303,8 +313,10 @@ fn spawn_one(exe: &Path, dir: &str, format: &str, query: &str, runs: usize) -> R
 
 /// One summary line: the medians, p95, p99, CPU, I/O, peak RSS and rows of one format.
 fn print_line(query: &str, format: &str, s: &Summary) {
+    // A write-like query's memory is what its runs used (`rss_delta_max`), not the process peak.
+    let (rss_label, rss) = if is_write_like(query) { ("rss_used", s.rss_delta_max) } else { ("rss_max", s.vmhwm_max) };
     let mut line = format!(
-        "{query:<14}{format:<10}median {:>8.2}  p95 {:>8.2}  p99 {:>8.2}  cpu {:>8.1}  gets {:>6}  KiB {:>9.1}  waves {}  rss_max {:>7.1} MiB  rows {}",
+        "{query:<14}{format:<10}median {:>8.2}  p95 {:>8.2}  p99 {:>8.2}  cpu {:>8.1}  gets {:>6}  KiB {:>9.1}  waves {}  {rss_label} {:>7.1} MiB  rows {}",
         percentile(&s.runs_ms, 0.50),
         percentile(&s.runs_ms, 0.95),
         percentile(&s.runs_ms, 0.99),
@@ -312,7 +324,7 @@ fn print_line(query: &str, format: &str, s: &Summary) {
         s.gets,
         s.bytes as f64 / 1024.0,
         s.waves.map_or("-".to_owned(), |w| w.to_string()),
-        s.vmhwm_max as f64 / 1048576.0,
+        rss as f64 / 1048576.0,
         s.rows,
     );
     if is_write_like(query) {
@@ -532,6 +544,14 @@ pub(crate) fn proc_status_bytes(key: &str) -> R<u64> {
     Err(format!("no {key} in /proc/self/status").into())
 }
 
+/// Resets the kernel's peak-RSS mark to the current RSS (writing `5` to `/proc/self/clear_refs`),
+/// then returns `VmRSS`. The write-like queries call it right before their first timed run, so
+/// that `VmHWM` read after the runs is the peak during the runs (see `Summary::rss_delta_max`).
+pub(crate) fn start_peak_rss() -> R<u64> {
+    std::fs::write("/proc/self/clear_refs", "5")?;
+    proc_status_bytes("VmRSS")
+}
+
 /// Reads every `input/*.arrow` file of the case, in name order, as (name without extension,
 /// schema, batches).
 fn read_inputs(dir: &Path) -> R<Vec<(String, SchemaRef, Vec<RecordBatch>)>> {
@@ -597,11 +617,11 @@ pub fn write_format(dir: &Path, format: &str, runs: usize) -> R<ProcResult> {
     if runs == 0 {
         return Err("runs must be at least 1".into());
     }
-    let rss_start = proc_status_bytes("VmRSS")?;
     let inputs = read_inputs(dir)?;
     let rows: u64 = inputs.iter().map(|(_, _, b)| b.iter().map(|x| x.num_rows() as u64).sum::<u64>()).sum();
     let ext = if format == "pq_cetra" { "parquet" } else { "strata" };
     let out_dir = dir.join(format);
+    let rss_start = start_peak_rss()?;
     let (mut runs_ms, mut cpu_ms) = (Vec::new(), Vec::new());
     let mut bytes_written = 0u64;
     let mut last_summaries: Vec<strata::FileSummary> = Vec::new();
@@ -624,6 +644,7 @@ pub fn write_format(dir: &Path, format: &str, runs: usize) -> R<ProcResult> {
                 total += len;
                 summaries.push(summary);
             }
+            std::fs::File::open(&path)?.sync_all()?;
         }
         runs_ms.push(t0.elapsed().as_secs_f64() * 1e3);
         cpu_ms.push(cpu0.elapsed().as_secs_f64() * 1e3);
@@ -716,6 +737,7 @@ mod tests {
             bytes_written,
             tail_bytes: None,
             vmhwm_max: vmhwm,
+            rss_delta_max: vmhwm,
         }
     }
 
@@ -748,6 +770,42 @@ mod tests {
         assert_eq!(losses("write", &more_cpu, &pq), vec!["cpu"]);
         // CPU is not compared for the reads.
         assert!(losses("search:bug", &more_cpu, &pq).is_empty());
+    }
+
+    #[test]
+    fn write_memory_is_the_delta_over_the_start() {
+        let pq = summary(&[10.0, 20.0, 30.0], &[10.0, 20.0, 30.0], 100, Some(100));
+        // A high process peak that the runs did not add to: a win for a write query.
+        let mut st = summary(&[1.0, 15.0, 25.0], &[1.0, 2.0, 3.0], 500, Some(50));
+        st.rss_delta_max = 50;
+        assert!(losses("write", &st, &pq).is_empty());
+        // The same figures are the process peak for a read query, a loss.
+        assert_eq!(losses("search:bug", &st, &pq), vec!["rss"]);
+        // A write that adds more than Parquet is a loss, whatever the process peak.
+        st.rss_delta_max = 200;
+        assert_eq!(losses("write", &st, &pq), vec!["rss"]);
+    }
+
+    #[test]
+    fn summary_takes_the_largest_delta_over_rounds() {
+        let r = |rss_start: u64, vmhwm: u64| ProcResult {
+            query: "write".into(),
+            format: "st".into(),
+            runs_ms: vec![1.0],
+            cpu_ms: vec![1.0],
+            gets: 0,
+            bytes: 0,
+            waves: None,
+            rows: 1,
+            answer: "0000000000000000".into(),
+            rss_start,
+            vmhwm,
+            bytes_written: Some(1),
+            tail_bytes: None,
+        };
+        let s = Summary::from_results(&[r(100, 300), r(150, 200), r(400, 390)]);
+        assert_eq!(s.vmhwm_max, 390);
+        assert_eq!(s.rss_delta_max, 200);
     }
 
     #[test]

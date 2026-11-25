@@ -19,7 +19,7 @@ use parquet::arrow::ProjectionMask;
 use parquet::arrow::arrow_reader::{ParquetRecordBatchReader, ParquetRecordBatchReaderBuilder};
 use xxhash_rust::xxh3::{Xxh3, xxh3_64};
 
-use crate::cw::harness::{ProcResult, check_format, proc_status_bytes};
+use crate::cw::harness::{ProcResult, check_format, proc_status_bytes, start_peak_rss};
 use crate::{R, location, open_strata, write_parquet, write_strata};
 
 /// Rows per batch the merge reads and writes (plans/08-m2-writes-compaction.md § M2.2).
@@ -263,7 +263,6 @@ pub async fn compact_format(dir: &Path, format: &str, runs: usize) -> R<ProcResu
     if runs == 0 {
         return Err("runs must be at least 1".into());
     }
-    let rss_start = proc_status_bytes("VmRSS")?;
     let pq = format == "pq_cetra";
     let ext = ext_of(format);
     let inputs = case_files(&dir.join(format), ext)?;
@@ -273,6 +272,7 @@ pub async fn compact_format(dir: &Path, format: &str, runs: usize) -> R<ProcResu
     let dir_str = dir.to_str().ok_or("non-UTF-8 path")?;
     let out_dir = dir.join(format!("compact-{format}"));
     let out = out_dir.join(format!("000.{ext}"));
+    let rss_start = start_peak_rss()?;
     let (mut runs_ms, mut cpu_ms) = (Vec::with_capacity(runs), Vec::with_capacity(runs));
     let (mut rows, mut bytes_written) = (0u64, 0u64);
     for _ in 0..runs {
@@ -361,9 +361,9 @@ pub fn flush_format(dir: &Path, format: &str, writers: usize, runs: usize) -> R<
     if writers == 0 || runs == 0 {
         return Err("writers and runs must be at least 1".into());
     }
-    let rss_start = proc_status_bytes("VmRSS")?;
     let batch = read_flush_input(dir)?;
     let out_dir = dir.join(format!("flush-{format}"));
+    let rss_start = start_peak_rss()?;
     let (mut runs_ms, mut cpu_ms) = (Vec::with_capacity(runs), Vec::with_capacity(runs));
     let mut bytes_written = 0u64;
     for _ in 0..runs {

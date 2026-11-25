@@ -721,13 +721,19 @@ pub fn split_cmd(args: &[String]) -> crate::R<()> {
     let batches = read_batches(&input_paths(dir)?)?;
     let slices = split_batches(&batches, n)?;
 
-    // Only now is the old cut replaced: the new files are complete before the old ones go.
+    // A backup left by an interrupted split holds the old cut: it is never deleted here.
     for entry in fs::read_dir(dir)? {
         let path = entry?.path();
         if path.file_name().and_then(|s| s.to_str()).is_some_and(|s| s.starts_with("input.old-")) {
-            fs::remove_dir_all(&path)?;
+            return Err(format!(
+                "{}: an earlier split was interrupted; restore it to input/ by hand, then split again",
+                path.display()
+            )
+            .into());
         }
     }
+
+    // Only now is the old cut replaced: the new files are complete before the old ones go.
     let old = dir.join(format!("input.old-{}", std::process::id()));
     fs::rename(dir.join("input"), &old)?;
     fs::create_dir(dir.join("input"))?;
@@ -1203,5 +1209,23 @@ mod tests {
             .filter(|e| e.as_ref().unwrap().file_name().to_string_lossy().starts_with("input.old-"))
             .count();
         assert_eq!(leftovers, 0);
+    }
+
+    #[test]
+    fn split_refuses_after_an_interrupted_split() {
+        let dir = temp_dir("split-interrupted");
+        let d = dir.display().to_string();
+        let (spans, files) = gen_spans("text_unique", Some(100)).unwrap();
+        write_case(&dir, spans, &files).unwrap();
+        let backup = dir.join("input.old-123");
+        fs::create_dir(&backup).unwrap();
+        fs::write(backup.join("000.arrow"), b"old cut").unwrap();
+        let input_before: Vec<PathBuf> = input_paths(&dir).unwrap();
+
+        let err = split_cmd(&[d, "6".to_owned()]).unwrap_err().to_string();
+
+        assert!(err.contains("input.old-123") && err.contains("an earlier split was interrupted"), "{err}");
+        assert_eq!(fs::read(backup.join("000.arrow")).unwrap(), b"old cut");
+        assert_eq!(input_paths(&dir).unwrap(), input_before);
     }
 }
