@@ -1,0 +1,1 @@
+concat_ws(':', lower(name), substr(status, 1, 2), encode(trace_id, 'hex')) || ':' || coalesce(json_extract_text(name, '$.k'), map_keys(metadata)[1], '')

@@ -16,6 +16,7 @@ cargo-fuzz = true
 libfuzzer-sys = "=0.4.13"
 cetra-column = { path = "../crates/column" }
 cetra-otel = { path = "../crates/otel" }
+cetra-query = { path = "../crates/query" }
 cetra-saml = { path = "../crates/saml" }
 cetra-storage = { path = "../crates/storage" }
 
@@ -106,6 +107,13 @@ bench = false
 [[bin]]
 name = "column_frame"
 path = "fuzz_targets/column_frame.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "query_expr"
+path = "fuzz_targets/query_expr.rs"
 test = false
 doc = false
 bench = false

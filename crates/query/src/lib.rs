@@ -10,6 +10,9 @@ pub mod filter;
 pub mod fn_misc;
 pub mod fn_string;
 pub mod fn_time;
+#[cfg(any(test, fuzzing))]
+#[doc(hidden)]
+pub mod fuzz_entry;
 pub mod ir;
 pub mod text;
 pub mod tombstone;
