@@ -91,6 +91,22 @@ export const STORY_PROMPTS: StoryPrompt[] = [
         commit: "Name the file and ask for the diff only",
         at: "2026-10-29T09:05:00.000000000Z",
       },
+      {
+        template: [
+          {
+            role: "system",
+            content:
+              "You are a coding agent. Write a unified diff that fixes the issue, and nothing else. Split changes over 20 files into steps.",
+          },
+          { role: "user", content: "Issue: {{ issue }}\n\nFile {{ path }}:\n{{ code }}" },
+        ],
+        variables: ["issue", "path", "code"],
+        model: "claude-sonnet-4-5",
+        temperature: 0,
+        maxTokens: 1024,
+        commit: "Split large refactors into steps",
+        at: "2026-10-30T09:05:00.000000000Z",
+      },
     ],
   },
   {
@@ -156,6 +172,22 @@ export const STORY_PROMPTS: StoryPrompt[] = [
         maxTokens: 120,
         commit: "One or two sentences, so the reply starts sooner",
         at: "2026-10-30T10:10:00.000000000Z",
+      },
+      {
+        template: [
+          {
+            role: "system",
+            content:
+              "You are a receptionist on the phone. Answer in one or two short sentences. Read the booking back in one sentence: day, time and doctor.",
+          },
+          { role: "user", content: "{{ caller }}\n\nFree slots: {{ slots }}" },
+        ],
+        variables: ["caller", "slots"],
+        model: "gpt-4.1-mini",
+        temperature: 0.3,
+        maxTokens: 120,
+        commit: "Read the booking back",
+        at: "2026-10-31T10:10:00.000000000Z",
       },
     ],
   },
@@ -240,6 +272,22 @@ export const STORY_PROMPTS: StoryPrompt[] = [
         maxTokens: 600,
         commit: "Cap the output at 600 tokens",
         at: "2026-10-29T15:50:00.000000000Z",
+      },
+      {
+        template: [
+          {
+            role: "system",
+            content:
+              "Extract the invoice as JSON: vendor, invoice_number, date, currency, line_items, total. Amounts may use comma decimals (1.234,56 means 1234.56).",
+          },
+          { role: "user", content: "{{ ocr_text }}" },
+        ],
+        variables: ["ocr_text"],
+        model: "gemini-2.5-flash",
+        temperature: 0,
+        maxTokens: 600,
+        commit: "Accept comma decimals",
+        at: "2026-10-30T15:50:00.000000000Z",
       },
     ],
   },

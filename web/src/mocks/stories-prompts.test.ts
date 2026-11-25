@@ -70,9 +70,9 @@ it("filters the list by q, label and tag", async () => {
 
 it("gives each story prompt its shown version as the latest, labelled latest and production", async () => {
   const expectations: [string, number][] = [
-    ["write-patch", 3],
-    ["voice-reply", 4],
-    ["extract-invoice", 5],
+    ["write-patch", 4],
+    ["voice-reply", 5],
+    ["extract-invoice", 6],
   ];
   for (const [name, latest] of expectations) {
     const story = STORY_OF[name] ?? "support";
@@ -116,9 +116,9 @@ it("serves the shown version's template, variables and model", async () => {
 });
 
 it("resolves production and latest to the latest version, and leaves other labels to the manifest", async () => {
-  expect((await get("voice", "/prompts/voice-reply/resolve")).body).toMatchObject({ version: 4 });
+  expect((await get("voice", "/prompts/voice-reply/resolve")).body).toMatchObject({ version: 5 });
   expect((await get("voice", "/prompts/voice-reply/resolve?label=latest")).body).toMatchObject({
-    version: 4,
+    version: 5,
   });
   expect((await get("voice", "/prompts/voice-reply/resolve?label=staging")).status).toBe(404);
 });
@@ -128,10 +128,10 @@ it("records one label event per version, newest first", async () => {
     to_version: number;
     from_version?: number;
   }[];
-  expect(events).toHaveLength(5);
-  expect(events.map((event) => event.to_version)).toEqual([5, 4, 3, 2, 1]);
+  expect(events).toHaveLength(6);
+  expect(events.map((event) => event.to_version)).toEqual([6, 5, 4, 3, 2, 1]);
   expect(events[events.length - 1]).not.toHaveProperty("from_version");
-  expect(events[0]).toMatchObject({ from_version: 4 });
+  expect(events[0]).toMatchObject({ from_version: 5 });
 });
 
 it("answers prompt metrics for any window, newest version first", async () => {
@@ -140,13 +140,13 @@ it("answers prompt metrics for any window, newest version first", async () => {
   const metrics = await get("coding", `/prompts/write-patch/metrics?from=${from}&to=${to}`);
   expect(metrics.body).toMatchObject({ from, to });
   expect((metrics.body.versions as { version: number }[]).map((item) => item.version)).toEqual([
-    3, 2, 1,
+    4, 3, 2, 1,
   ]);
 });
 
 it("leaves an unknown prompt, a version out of range and the fixture prompts to other handlers", async () => {
   expect((await get("coding", "/prompts/nope")).status).toBe(404);
-  expect((await get("coding", "/prompts/write-patch/versions/4")).status).toBe(404);
+  expect((await get("coding", "/prompts/write-patch/versions/5")).status).toBe(404);
   expect((await get("coding", "/prompts/write-patch/versions/0")).status).toBe(404);
   expect(await get("support", "/prompts/support-reply")).toMatchObject({
     body: { name: "support-reply" },
@@ -178,4 +178,47 @@ it("gives every story prompt an id of its own, with versions dated before the st
 it("a story prompt is not served in another project", async () => {
   expect((await getIn("acme/code-agent", "/prompts/voice-reply")).status).toBe(404);
   expect((await getIn("acme/voice-desk", "/prompts/voice-reply")).status).toBe(200);
+});
+
+it("adds one version to each story prompt, its line last in the system message", async () => {
+  const added: [string, string, number, string, string][] = [
+    [
+      "write-patch",
+      "coding",
+      4,
+      "Split changes over 20 files into steps.",
+      "Split large refactors into steps",
+    ],
+    [
+      "voice-reply",
+      "voice",
+      5,
+      "Read the booking back in one sentence: day, time and doctor.",
+      "Read the booking back",
+    ],
+    [
+      "extract-invoice",
+      "extraction",
+      6,
+      "Amounts may use comma decimals (1.234,56 means 1234.56).",
+      "Accept comma decimals",
+    ],
+  ];
+  for (const [name, story, version, line, commit] of added) {
+    const detail = await get(story as StoryId, `/prompts/${name}/versions/${version}`);
+    const previous = await get(story as StoryId, `/prompts/${name}/versions/${version - 1}`);
+    const system = (detail.body.template as { role: string; content: string }[])[0]?.content ?? "";
+    const before =
+      (previous.body.template as { role: string; content: string }[])[0]?.content ?? "";
+    expect(system.endsWith(line)).toBe(true);
+    expect(system).toBe(`${before} ${line}`);
+    expect(detail.body).toMatchObject({
+      version,
+      commit_message: commit,
+      labels: ["latest", "production"],
+    });
+    expect(detail.body.config).toEqual(previous.body.config);
+    expect(detail.body.variables).toEqual(previous.body.variables);
+    expect(previous.body.labels).toEqual([]);
+  }
 });
