@@ -91,6 +91,12 @@ pub(crate) struct ReadContext<'a, 'b> {
     pub bag: &'a mut AttrBag<'b>,
     pub events: &'a [Event],
     pub kind: SpanKind,
+    /// Instrumentation scope name, `""` when absent. The GenAI reader gates
+    /// its Pydantic AI, Mirascope and Strands rules on it.
+    pub scope: &'a str,
+    /// Conventions detected on the span, in precedence order. The VoltAgent
+    /// reader gates every one of its rules on it.
+    pub conventions: &'a [Convention],
     pub warnings: &'a mut Warnings,
 }
 
@@ -201,10 +207,17 @@ pub(crate) fn error_attribute(errors: &[&str]) -> Option<String> {
 
 /// First value per field, in the readers' order. Then drop lower-precedence
 /// payload keys for each field that has a winner (rule 2).
+///
+/// `scope` (the span's instrumentation scope name, `""` when absent) and
+/// `conventions` (the conventions detected on it) reach the readers through
+/// [`ReadContext`].
+#[allow(clippy::too_many_arguments)] // the span's bag, events, kind, scope and conventions, the warnings, and the readers with their registries
 pub(crate) fn assemble(
     bag: &mut AttrBag<'_>,
     events: &[Event],
     kind: SpanKind,
+    scope: &str,
+    conventions: &[Convention],
     warnings: &mut Warnings,
     readers: &[ConventionPayload],
     registries: &[PayloadKeys],
@@ -217,6 +230,8 @@ pub(crate) fn assemble(
             bag,
             events,
             kind,
+            scope,
+            conventions,
             warnings,
         });
         keep(&mut io.input, &mut winners[0], got.input, reader.convention);
@@ -241,6 +256,23 @@ pub(crate) fn assemble(
         );
         dropped.extend(got.events);
         io.errors.extend(got.errors);
+    }
+    let scoped = crate::conventions::scoped::read(
+        &mut ReadContext {
+            bag,
+            events,
+            kind,
+            scope,
+            conventions,
+            warnings,
+        },
+        &io,
+    );
+    if io.input.is_none() {
+        io.input = scoped.input;
+    }
+    if io.output.is_none() {
+        io.output = scoped.output;
     }
     for (index, field) in FIELDS.iter().enumerate() {
         dropped.extend(drop_lower_payloads(
@@ -399,12 +431,13 @@ fn rank(convention: Convention) -> usize {
     match convention {
         Convention::Cetra => 0,
         Convention::Genai => 1,
-        Convention::Openinference => 2,
-        Convention::Vercel => 3,
-        Convention::Openllmetry => 4,
-        Convention::Langfuse => 5,
-        Convention::Laminar => 6,
-        Convention::GoogleAdk => 7,
+        Convention::Voltagent => 2,
+        Convention::Openinference => 3,
+        Convention::Vercel => 4,
+        Convention::Openllmetry => 5,
+        Convention::Langfuse => 6,
+        Convention::Laminar => 7,
+        Convention::GoogleAdk => 8,
     }
 }
 
@@ -875,6 +908,8 @@ mod tests {
             &mut bag,
             &events,
             SpanKind::Llm,
+            "",
+            &[],
             &mut warnings,
             &readers,
             &registries,
@@ -981,6 +1016,8 @@ mod tests {
             &mut bag,
             &[],
             SpanKind::Llm,
+            "",
+            &[],
             &mut warnings,
             &readers,
             &registries,

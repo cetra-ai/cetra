@@ -1,0 +1,76 @@
+---
+title: Pipecat
+description: "Send Pipecat conversation, turn and model call spans to cetra from Pipecat's built-in tracing, with the messages of each model call."
+---
+
+import Backing from "../../../../components/Backing.astro";
+
+cetra reads the conversation and turn spans that Pipecat's built-in tracing writes, and the spans of its LLM service, with the messages of each model call.
+
+<Backing fixtures={["pipecat/openai-pipeline"]} />
+
+## Install
+
+Install Pipecat with its OpenAI extra. The fixture was captured with Pipecat 1.16.0.
+
+```bash
+pip install "pipecat-ai[openai]==1.16.0"
+```
+
+## Set up
+
+Pipecat's `setup_tracing` reads the OTLP endpoint and protocol from the environment. Set the exporter variables, then start your application.
+
+```bash
+export OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:8080
+export OTEL_EXPORTER_OTLP_HEADERS="Authorization=Bearer <SK_CETRA_KEY>"
+```
+
+Replace `<SK_CETRA_KEY>` with your `sk-cetra-…` API key. See [Send OpenTelemetry](/docs/get-started/opentelemetry/).
+
+{/* untested: shows the tracing setup only; the fixture's pipeline has a registered function and runs with the OpenAI service pointed at a fake model, and this sample needs OPENAI_API_KEY and a running cetra */}
+```python
+import os
+
+from opentelemetry.exporter.otlp.proto.http.trace_exporter import OTLPSpanExporter
+from pipecat.pipeline.pipeline import Pipeline
+from pipecat.pipeline.task import PipelineTask
+from pipecat.processors.aggregators.llm_context import LLMContext
+from pipecat.processors.aggregators.llm_response_universal import LLMContextAggregatorPair
+from pipecat.services.openai.llm import OpenAILLMService
+from pipecat.utils.tracing.setup import setup_tracing
+
+setup_tracing("my-app", exporter=OTLPSpanExporter())
+
+llm = OpenAILLMService(
+    api_key=os.environ["OPENAI_API_KEY"],
+    settings=OpenAILLMService.Settings(model="gpt-4o-mini"),
+)
+context = LLMContext(messages=[{"role": "user", "content": "What is the weather in Paris?"}])
+pair = LLMContextAggregatorPair(context)
+pipeline = Pipeline([pair.user(), llm, pair.assistant()])
+
+# conversation_id groups the conversation and turn spans into one session.
+task = PipelineTask(pipeline, enable_tracing=True, conversation_id="conv-1")
+```
+
+Run the task the way your application does. `enable_tracing=True` is needed for the conversation and turn spans.
+
+## What you get
+
+- A `chain` span for the conversation and a `chain` span for each turn. Both carry the session from `conversation_id`.
+- An `llm` span for each model call, with the provider, the models, the token counts, the cost and the input messages. The answer is the output, when the model answers with text.
+
+## Limits
+
+- No tool span. The function call has no span of its own. The model call that asks for the function has no output, because its answer is only the call. The next model call's input carries the call and its result.
+- The model call spans carry no session. Only the conversation and turn spans do, so a session view does not group the model calls. Use the trace for each turn.
+- Speech-to-text and text-to-speech spans were not captured. The fixture has no audio service. cetra reads their operations as plain `span`s.
+- Only the OpenAI service was captured. cetra reads a model call's input as messages only when it is an OpenAI-shaped message list. Any other value is kept as text.
+- The fixture was captured with Pipecat 1.16.0. Pipecat 2.0 renames `PipelineTask`.
+- If a field is missing, look at the span's **Attributes** tab and compare it with [Span attributes](/docs/reference/attributes/).
+
+## Next
+
+- [Traces](/docs/tracing/traces/): read the trace as a tree and a timeline.
+- [Cost and tokens](/docs/tracing/cost-and-tokens/): how cost is computed from the token counts.

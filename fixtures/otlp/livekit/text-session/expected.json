@@ -1,0 +1,595 @@
+{
+  "spans": [
+    {
+      "project_id": "01900000-0000-7000-8000-000000000001",
+      "trace_id": "ad3df930d558fb0f273729a9801a896a",
+      "span_id": "20e16a259f49f843",
+      "name": "agent_session",
+      "span_kind": "chain",
+      "start_time": "2025-12-31T23:59:50.000000000Z",
+      "end_time": "2025-12-31T23:59:50.402000000Z",
+      "status": "unset",
+      "service_name": "capture-app",
+      "operation": "invoke_workflow",
+      "attributes": {
+        "gen_ai.operation.name": "invoke_workflow",
+        "gen_ai.workflow.name": "agent_session",
+        "lk.agent_label": "weather_agent"
+      },
+      "resource_attributes": {
+        "telemetry.sdk.language": "python",
+        "telemetry.sdk.name": "opentelemetry",
+        "telemetry.sdk.version": "1.45.2"
+      },
+      "scope_name": "livekit-agents",
+      "events": [
+        {
+          "time": "2025-12-31T23:59:50.229000000Z",
+          "name": "agent_state_changed",
+          "attributes": "{\"lk.old_state\":\"initializing\",\"lk.new_state\":\"listening\"}"
+        },
+        {
+          "time": "2025-12-31T23:59:50.245000000Z",
+          "name": "agent_state_changed",
+          "attributes": "{\"lk.old_state\":\"listening\",\"lk.new_state\":\"thinking\"}"
+        },
+        {
+          "time": "2025-12-31T23:59:50.365000000Z",
+          "name": "agent_state_changed",
+          "attributes": "{\"lk.old_state\":\"thinking\",\"lk.new_state\":\"speaking\"}"
+        },
+        {
+          "time": "2025-12-31T23:59:50.399000000Z",
+          "name": "agent_state_changed",
+          "attributes": "{\"lk.old_state\":\"speaking\",\"lk.new_state\":\"listening\"}"
+        }
+      ],
+      "conventions": [
+        "genai"
+      ],
+      "ingest_time": "2026-01-01T00:00:00.000000000Z",
+      "schema_version": 2
+    },
+    {
+      "project_id": "01900000-0000-7000-8000-000000000001",
+      "trace_id": "ad3df930d558fb0f273729a9801a896a",
+      "span_id": "4aacc61f4b8709fb",
+      "parent_span_id": "20e16a259f49f843",
+      "name": "session_start",
+      "span_kind": "span",
+      "start_time": "2025-12-31T23:59:50.000000000Z",
+      "end_time": "2025-12-31T23:59:50.228000000Z",
+      "status": "unset",
+      "service_name": "capture-app",
+      "resource_attributes": {
+        "telemetry.sdk.language": "python",
+        "telemetry.sdk.name": "opentelemetry",
+        "telemetry.sdk.version": "1.45.2"
+      },
+      "scope_name": "livekit-agents",
+      "ingest_time": "2026-01-01T00:00:00.000000000Z",
+      "schema_version": 2
+    },
+    {
+      "project_id": "01900000-0000-7000-8000-000000000001",
+      "trace_id": "ad3df930d558fb0f273729a9801a896a",
+      "span_id": "2df9f8c316bc1eb3",
+      "parent_span_id": "4aacc61f4b8709fb",
+      "name": "start_agent_activity",
+      "span_kind": "span",
+      "start_time": "2025-12-31T23:59:50.005000000Z",
+      "end_time": "2025-12-31T23:59:50.215000000Z",
+      "status": "unset",
+      "service_name": "capture-app",
+      "provider": "openai",
+      "request_model": "gpt-4o-mini-2024-07-18",
+      "operation": "create_agent",
+      "attributes": {
+        "gen_ai.agent.name": "weather_agent",
+        "gen_ai.operation.name": "create_agent",
+        "gen_ai.provider.name": "openai",
+        "gen_ai.request.model": "gpt-4o-mini-2024-07-18",
+        "lk.agent_label": "weather_agent"
+      },
+      "resource_attributes": {
+        "telemetry.sdk.language": "python",
+        "telemetry.sdk.name": "opentelemetry",
+        "telemetry.sdk.version": "1.45.2"
+      },
+      "scope_name": "livekit-agents",
+      "conventions": [
+        "genai"
+      ],
+      "ingest_time": "2026-01-01T00:00:00.000000000Z",
+      "schema_version": 2
+    },
+    {
+      "project_id": "01900000-0000-7000-8000-000000000001",
+      "trace_id": "ad3df930d558fb0f273729a9801a896a",
+      "span_id": "1de04432d79d06f3",
+      "parent_span_id": "2df9f8c316bc1eb3",
+      "name": "setup_toolsets",
+      "span_kind": "span",
+      "start_time": "2025-12-31T23:59:50.006000000Z",
+      "end_time": "2025-12-31T23:59:50.006000000Z",
+      "status": "unset",
+      "service_name": "capture-app",
+      "resource_attributes": {
+        "telemetry.sdk.language": "python",
+        "telemetry.sdk.name": "opentelemetry",
+        "telemetry.sdk.version": "1.45.2"
+      },
+      "scope_name": "livekit-agents",
+      "ingest_time": "2026-01-01T00:00:00.000000000Z",
+      "schema_version": 2
+    },
+    {
+      "project_id": "01900000-0000-7000-8000-000000000001",
+      "trace_id": "ad3df930d558fb0f273729a9801a896a",
+      "span_id": "42cb3e853d06aa9b",
+      "parent_span_id": "2df9f8c316bc1eb3",
+      "name": "on_enter",
+      "span_kind": "span",
+      "start_time": "2025-12-31T23:59:50.218000000Z",
+      "end_time": "2025-12-31T23:59:50.218000000Z",
+      "status": "unset",
+      "service_name": "capture-app",
+      "attributes": {
+        "lk.agent_label": "weather_agent"
+      },
+      "resource_attributes": {
+        "telemetry.sdk.language": "python",
+        "telemetry.sdk.name": "opentelemetry",
+        "telemetry.sdk.version": "1.45.2"
+      },
+      "scope_name": "livekit-agents",
+      "ingest_time": "2026-01-01T00:00:00.000000000Z",
+      "schema_version": 2
+    },
+    {
+      "project_id": "01900000-0000-7000-8000-000000000001",
+      "trace_id": "ad3df930d558fb0f273729a9801a896a",
+      "span_id": "cce33874fa8eb0d2",
+      "parent_span_id": "20e16a259f49f843",
+      "name": "agent_turn",
+      "span_kind": "agent",
+      "start_time": "2025-12-31T23:59:50.229000000Z",
+      "end_time": "2025-12-31T23:59:50.399000000Z",
+      "status": "unset",
+      "service_name": "capture-app",
+      "operation": "invoke_agent",
+      "input": "What's the weather in Paris?",
+      "input_format": "text",
+      "output": "It is 18 °C and sunny in Paris.",
+      "output_format": "text",
+      "input_preview": "What's the weather in Paris?",
+      "output_preview": "It is 18 °C and sunny in Paris.",
+      "attributes": {
+        "gen_ai.agent.name": "weather_agent",
+        "gen_ai.operation.name": "invoke_agent",
+        "lk.generation_count": "2",
+        "lk.generation_id": "capture-volatile-1",
+        "lk.interrupted": "false",
+        "lk.speech.queue_wait": "0.0008295209845528007",
+        "lk.speech_id": "capture-volatile-2"
+      },
+      "resource_attributes": {
+        "telemetry.sdk.language": "python",
+        "telemetry.sdk.name": "opentelemetry",
+        "telemetry.sdk.version": "1.45.2"
+      },
+      "scope_name": "livekit-agents",
+      "events": [
+        {
+          "time": "2025-12-31T23:59:50.229000000Z",
+          "name": "generation",
+          "attributes": "{\"lk.generation_id\":\"capture-volatile-3\"}"
+        },
+        {
+          "time": "2025-12-31T23:59:50.324000000Z",
+          "name": "generation",
+          "attributes": "{\"lk.generation_id\":\"capture-volatile-1\",\"lk.parent_generation_id\":\"capture-volatile-3\"}"
+        }
+      ],
+      "conventions": [
+        "genai"
+      ],
+      "ingest_time": "2026-01-01T00:00:00.000000000Z",
+      "schema_version": 2
+    },
+    {
+      "project_id": "01900000-0000-7000-8000-000000000001",
+      "trace_id": "ad3df930d558fb0f273729a9801a896a",
+      "span_id": "0130455205c07c0a",
+      "parent_span_id": "5711e7daa44a2fc9",
+      "name": "llm_request",
+      "span_kind": "llm",
+      "start_time": "2025-12-31T23:59:50.230000000Z",
+      "end_time": "2025-12-31T23:59:50.322000000Z",
+      "status": "unset",
+      "service_name": "capture-app",
+      "provider": "openai",
+      "request_model": "gpt-4o-mini-2024-07-18",
+      "response_model": "gpt-4o-mini-2024-07-18",
+      "operation": "chat",
+      "input_tokens": 82,
+      "output_tokens": 17,
+      "total_tokens": 99,
+      "cost_input": 0.000082,
+      "cost_output": 0.000068,
+      "cost_total": 0.00015000000000000001,
+      "cost_source": "computed",
+      "ttft_ns": 77899588,
+      "request_params": "{\"stream\":true}",
+      "input": "[{\"role\":\"user\",\"parts\":[{\"type\":\"text\",\"content\":\"What's the weather in Paris?\"}]}]",
+      "input_format": "messages",
+      "output": "[{\"role\":\"assistant\",\"parts\":[{\"type\":\"tool_call\",\"id\":\"call_weather_1\",\"name\":\"get_weather\",\"arguments\":{\"city\":\"Paris\"}}],\"finish_reason\":\"tool_call\"}]",
+      "output_format": "messages",
+      "input_preview": "What's the weather in Paris?",
+      "system_instructions": "[{\"type\":\"text\",\"content\":\"You are a weather assistant.\"}]",
+      "tool_definitions": "[{\"type\":\"function\",\"name\":\"get_weather\",\"description\":\"Look up the weather for a city.\"}]",
+      "attributes": {
+        "gen_ai.operation.name": "chat",
+        "gen_ai.output.type": "text",
+        "gen_ai.provider.name": "openai",
+        "gen_ai.request.model": "gpt-4o-mini-2024-07-18",
+        "gen_ai.request.stream": "true",
+        "gen_ai.response.finish_reasons": "[\"tool_call\"]",
+        "gen_ai.response.id": "chatcmpl-capture-1",
+        "gen_ai.response.model": "gpt-4o-mini-2024-07-18",
+        "gen_ai.response.time_to_first_chunk": "0.07789958803914487",
+        "gen_ai.usage.input_tokens": "82",
+        "gen_ai.usage.output_tokens": "17",
+        "langfuse.observation.completion_start_time": "\"2025-12-31T23:59:50.308000+00:00\"",
+        "lk.llm_metrics": "{\"type\":\"llm_metrics\",\"label\":\"livekit.plugins.openai.llm.LLM\",\"request_id\":\"chatcmpl-capture-1\",\"timestamp\":1795488005.0364814,\"duration\":0.09146781999152154,\"ttft\":0.07789958803914487,\"cancelled\":false,\"completion_tokens\":17,\"prompt_tokens\":82,\"prompt_cached_tokens\":0,\"cache_creation_tokens\":0,\"reasoning_tokens\":0,\"total_tokens\":99,\"tokens_per_second\":185.8577147851101,\"speech_id\":null,\"metadata\":{\"model_name\":\"gpt-4o-mini-2024-07-18\",\"model_provider\":\"api.openai.com\"}}"
+      },
+      "resource_attributes": {
+        "telemetry.sdk.language": "python",
+        "telemetry.sdk.name": "opentelemetry",
+        "telemetry.sdk.version": "1.45.2"
+      },
+      "scope_name": "livekit-agents",
+      "conventions": [
+        "genai",
+        "langfuse"
+      ],
+      "ingest_time": "2026-01-01T00:00:00.000000000Z",
+      "schema_version": 2
+    },
+    {
+      "project_id": "01900000-0000-7000-8000-000000000001",
+      "trace_id": "ad3df930d558fb0f273729a9801a896a",
+      "span_id": "54c00537ac2ffdf6",
+      "parent_span_id": "0130455205c07c0a",
+      "name": "llm_request_run",
+      "span_kind": "span",
+      "start_time": "2025-12-31T23:59:50.230000000Z",
+      "end_time": "2025-12-31T23:59:50.321000000Z",
+      "status": "unset",
+      "service_name": "capture-app",
+      "provider": "openai",
+      "request_model": "gpt-4o-mini-2024-07-18",
+      "attributes": {
+        "gen_ai.provider.name": "openai",
+        "gen_ai.request.model": "gpt-4o-mini-2024-07-18",
+        "lk.provider_request_ids": "[\"chatcmpl-capture-1\"]",
+        "lk.retry_count": "0"
+      },
+      "resource_attributes": {
+        "telemetry.sdk.language": "python",
+        "telemetry.sdk.name": "opentelemetry",
+        "telemetry.sdk.version": "1.45.2"
+      },
+      "scope_name": "livekit-agents",
+      "conventions": [
+        "genai"
+      ],
+      "ingest_time": "2026-01-01T00:00:00.000000000Z",
+      "schema_version": 2
+    },
+    {
+      "project_id": "01900000-0000-7000-8000-000000000001",
+      "trace_id": "ad3df930d558fb0f273729a9801a896a",
+      "span_id": "5711e7daa44a2fc9",
+      "parent_span_id": "cce33874fa8eb0d2",
+      "name": "llm_node",
+      "span_kind": "chain",
+      "start_time": "2025-12-31T23:59:50.230000000Z",
+      "end_time": "2025-12-31T23:59:50.323000000Z",
+      "status": "unset",
+      "service_name": "capture-app",
+      "provider": "openai",
+      "request_model": "gpt-4o-mini-2024-07-18",
+      "input": "capture-volatile-4",
+      "input_format": "text",
+      "input_preview": "capture-volatile-4",
+      "attributes": {
+        "gen_ai.provider.name": "openai",
+        "gen_ai.request.model": "gpt-4o-mini-2024-07-18",
+        "lk.function_tools": "[\"get_weather\"]",
+        "lk.pii.response.function_calls": "capture-volatile-5",
+        "lk.pii.response.text": "",
+        "lk.provider_tools": "[]",
+        "lk.response.ttft": "0.07821291801519692",
+        "lk.tool_sets": "[]"
+      },
+      "resource_attributes": {
+        "telemetry.sdk.language": "python",
+        "telemetry.sdk.name": "opentelemetry",
+        "telemetry.sdk.version": "1.45.2"
+      },
+      "scope_name": "livekit-agents",
+      "conventions": [
+        "genai"
+      ],
+      "ingest_time": "2026-01-01T00:00:00.000000000Z",
+      "schema_version": 2
+    },
+    {
+      "project_id": "01900000-0000-7000-8000-000000000001",
+      "trace_id": "ad3df930d558fb0f273729a9801a896a",
+      "span_id": "ed29b6736a88c216",
+      "parent_span_id": "cce33874fa8eb0d2",
+      "name": "function_tool",
+      "span_kind": "tool",
+      "start_time": "2025-12-31T23:59:50.308000000Z",
+      "end_time": "2025-12-31T23:59:50.309000000Z",
+      "status": "unset",
+      "service_name": "capture-app",
+      "operation": "execute_tool",
+      "input": "{\"city\":\"Paris\"}",
+      "input_format": "json",
+      "output": "{\"temperature_c\":18,\"conditions\":\"sunny\",\"city\":\"Paris\"}",
+      "output_format": "json",
+      "input_preview": "{\"city\":\"Paris\"}",
+      "output_preview": "{\"temperature_c\":18,\"conditions\":\"sunny\",\"city\":\"Paris\"}",
+      "attributes": {
+        "gen_ai.agent.name": "weather_agent",
+        "gen_ai.operation.name": "execute_tool",
+        "gen_ai.tool.call.id": "call_weather_1",
+        "gen_ai.tool.description": "Look up the weather for a city.",
+        "gen_ai.tool.name": "get_weather",
+        "gen_ai.tool.type": "function",
+        "lk.function_tool.id": "call_weather_1",
+        "lk.function_tool.is_error": "false",
+        "lk.function_tool.name": "get_weather",
+        "lk.pii.function_tool.arguments": "{\"city\":\"Paris\"}",
+        "lk.pii.function_tool.output": "{\"temperature_c\": 18, \"conditions\": \"sunny\", \"city\": \"Paris\"}"
+      },
+      "resource_attributes": {
+        "telemetry.sdk.language": "python",
+        "telemetry.sdk.name": "opentelemetry",
+        "telemetry.sdk.version": "1.45.2"
+      },
+      "scope_name": "livekit-agents",
+      "conventions": [
+        "genai"
+      ],
+      "ingest_time": "2026-01-01T00:00:00.000000000Z",
+      "schema_version": 2
+    },
+    {
+      "project_id": "01900000-0000-7000-8000-000000000001",
+      "trace_id": "ad3df930d558fb0f273729a9801a896a",
+      "span_id": "29a1c693971ae878",
+      "parent_span_id": "348807bdf105110a",
+      "name": "llm_request_run",
+      "span_kind": "span",
+      "start_time": "2025-12-31T23:59:50.325000000Z",
+      "end_time": "2025-12-31T23:59:50.395000000Z",
+      "status": "unset",
+      "service_name": "capture-app",
+      "provider": "openai",
+      "request_model": "gpt-4o-mini-2024-07-18",
+      "attributes": {
+        "gen_ai.provider.name": "openai",
+        "gen_ai.request.model": "gpt-4o-mini-2024-07-18",
+        "lk.provider_request_ids": "[\"chatcmpl-capture-2\"]",
+        "lk.retry_count": "0"
+      },
+      "resource_attributes": {
+        "telemetry.sdk.language": "python",
+        "telemetry.sdk.name": "opentelemetry",
+        "telemetry.sdk.version": "1.45.2"
+      },
+      "scope_name": "livekit-agents",
+      "conventions": [
+        "genai"
+      ],
+      "ingest_time": "2026-01-01T00:00:00.000000000Z",
+      "schema_version": 2
+    },
+    {
+      "project_id": "01900000-0000-7000-8000-000000000001",
+      "trace_id": "ad3df930d558fb0f273729a9801a896a",
+      "span_id": "348807bdf105110a",
+      "parent_span_id": "ffdec22c8590d73c",
+      "name": "llm_request",
+      "span_kind": "llm",
+      "start_time": "2025-12-31T23:59:50.325000000Z",
+      "end_time": "2025-12-31T23:59:50.397000000Z",
+      "status": "unset",
+      "service_name": "capture-app",
+      "provider": "openai",
+      "request_model": "gpt-4o-mini-2024-07-18",
+      "response_model": "gpt-4o-mini-2024-07-18",
+      "operation": "chat",
+      "input_tokens": 131,
+      "output_tokens": 12,
+      "total_tokens": 143,
+      "cost_input": 0.000131,
+      "cost_output": 0.000048,
+      "cost_total": 0.00017900000000000001,
+      "cost_source": "computed",
+      "ttft_ns": 40168736,
+      "request_params": "{\"stream\":true}",
+      "input": "[{\"role\":\"user\",\"parts\":[{\"type\":\"text\",\"content\":\"What's the weather in Paris?\"}]},{\"role\":\"assistant\",\"parts\":[{\"type\":\"tool_call\",\"id\":\"call_weather_1\",\"name\":\"get_weather\",\"arguments\":{\"city\":\"Paris\"}}]},{\"role\":\"tool\",\"parts\":[{\"type\":\"tool_call_response\",\"id\":\"call_weather_1\",\"response\":{\"temperature_c\":18,\"conditions\":\"sunny\",\"city\":\"Paris\"},\"name\":\"get_weather\"}]}]",
+      "input_format": "messages",
+      "output": "[{\"role\":\"assistant\",\"parts\":[{\"type\":\"text\",\"content\":\"It is 18 °C and sunny in Paris.\"}],\"finish_reason\":\"stop\"}]",
+      "output_format": "messages",
+      "input_preview": "What's the weather in Paris?",
+      "output_preview": "It is 18 °C and sunny in Paris.",
+      "system_instructions": "[{\"type\":\"text\",\"content\":\"You are a weather assistant.\"}]",
+      "tool_definitions": "[{\"type\":\"function\",\"name\":\"get_weather\",\"description\":\"Look up the weather for a city.\"}]",
+      "attributes": {
+        "gen_ai.operation.name": "chat",
+        "gen_ai.output.type": "text",
+        "gen_ai.provider.name": "openai",
+        "gen_ai.request.model": "gpt-4o-mini-2024-07-18",
+        "gen_ai.request.stream": "true",
+        "gen_ai.response.finish_reasons": "[\"stop\"]",
+        "gen_ai.response.id": "chatcmpl-capture-2",
+        "gen_ai.response.model": "gpt-4o-mini-2024-07-18",
+        "gen_ai.response.time_to_first_chunk": "0.04016873601358384",
+        "gen_ai.usage.input_tokens": "131",
+        "gen_ai.usage.output_tokens": "12",
+        "langfuse.observation.completion_start_time": "\"2025-12-31T23:59:50.365000+00:00\"",
+        "lk.llm_metrics": "{\"type\":\"llm_metrics\",\"label\":\"livekit.plugins.openai.llm.LLM\",\"request_id\":\"chatcmpl-capture-2\",\"timestamp\":1795488005.1111157,\"duration\":0.07153114699758589,\"ttft\":0.04016873601358384,\"cancelled\":false,\"completion_tokens\":12,\"prompt_tokens\":131,\"prompt_cached_tokens\":0,\"cache_creation_tokens\":0,\"reasoning_tokens\":0,\"total_tokens\":143,\"tokens_per_second\":167.75908822495168,\"speech_id\":null,\"metadata\":{\"model_name\":\"gpt-4o-mini-2024-07-18\",\"model_provider\":\"api.openai.com\"}}"
+      },
+      "resource_attributes": {
+        "telemetry.sdk.language": "python",
+        "telemetry.sdk.name": "opentelemetry",
+        "telemetry.sdk.version": "1.45.2"
+      },
+      "scope_name": "livekit-agents",
+      "conventions": [
+        "genai",
+        "langfuse"
+      ],
+      "ingest_time": "2026-01-01T00:00:00.000000000Z",
+      "schema_version": 2
+    },
+    {
+      "project_id": "01900000-0000-7000-8000-000000000001",
+      "trace_id": "ad3df930d558fb0f273729a9801a896a",
+      "span_id": "ffdec22c8590d73c",
+      "parent_span_id": "cce33874fa8eb0d2",
+      "name": "llm_node",
+      "span_kind": "chain",
+      "start_time": "2025-12-31T23:59:50.325000000Z",
+      "end_time": "2025-12-31T23:59:50.397000000Z",
+      "status": "unset",
+      "service_name": "capture-app",
+      "provider": "openai",
+      "request_model": "gpt-4o-mini-2024-07-18",
+      "input": "capture-volatile-6",
+      "input_format": "text",
+      "output": "It is 18 °C and sunny in Paris.",
+      "output_format": "text",
+      "input_preview": "capture-volatile-6",
+      "output_preview": "It is 18 °C and sunny in Paris.",
+      "attributes": {
+        "gen_ai.provider.name": "openai",
+        "gen_ai.request.model": "gpt-4o-mini-2024-07-18",
+        "lk.function_tools": "[\"get_weather\"]",
+        "lk.pii.response.function_calls": "capture-volatile-7",
+        "lk.provider_tools": "[]",
+        "lk.response.ttft": "0.04038069595117122",
+        "lk.tool_sets": "[]"
+      },
+      "resource_attributes": {
+        "telemetry.sdk.language": "python",
+        "telemetry.sdk.name": "opentelemetry",
+        "telemetry.sdk.version": "1.45.2"
+      },
+      "scope_name": "livekit-agents",
+      "conventions": [
+        "genai"
+      ],
+      "ingest_time": "2026-01-01T00:00:00.000000000Z",
+      "schema_version": 2
+    },
+    {
+      "project_id": "01900000-0000-7000-8000-000000000001",
+      "trace_id": "ad3df930d558fb0f273729a9801a896a",
+      "span_id": "f1a87b8af513ea8f",
+      "parent_span_id": "cce33874fa8eb0d2",
+      "name": "agent_speaking",
+      "span_kind": "span",
+      "start_time": "2025-12-31T23:59:50.365000000Z",
+      "end_time": "2025-12-31T23:59:50.398000000Z",
+      "status": "unset",
+      "service_name": "capture-app",
+      "resource_attributes": {
+        "telemetry.sdk.language": "python",
+        "telemetry.sdk.name": "opentelemetry",
+        "telemetry.sdk.version": "1.45.2"
+      },
+      "scope_name": "livekit-agents",
+      "ingest_time": "2026-01-01T00:00:00.000000000Z",
+      "schema_version": 2
+    },
+    {
+      "project_id": "01900000-0000-7000-8000-000000000001",
+      "trace_id": "ad3df930d558fb0f273729a9801a896a",
+      "span_id": "99a896695d61af10",
+      "parent_span_id": "ea57611ea7356966",
+      "name": "on_exit",
+      "span_kind": "span",
+      "start_time": "2025-12-31T23:59:50.400000000Z",
+      "end_time": "2025-12-31T23:59:50.400000000Z",
+      "status": "unset",
+      "service_name": "capture-app",
+      "attributes": {
+        "lk.agent_label": "weather_agent"
+      },
+      "resource_attributes": {
+        "telemetry.sdk.language": "python",
+        "telemetry.sdk.name": "opentelemetry",
+        "telemetry.sdk.version": "1.45.2"
+      },
+      "scope_name": "livekit-agents",
+      "ingest_time": "2026-01-01T00:00:00.000000000Z",
+      "schema_version": 2
+    },
+    {
+      "project_id": "01900000-0000-7000-8000-000000000001",
+      "trace_id": "ad3df930d558fb0f273729a9801a896a",
+      "span_id": "e9493f451cae462d",
+      "parent_span_id": "20e16a259f49f843",
+      "name": "session_close",
+      "span_kind": "span",
+      "start_time": "2025-12-31T23:59:50.400000000Z",
+      "end_time": "2025-12-31T23:59:50.401000000Z",
+      "status": "unset",
+      "service_name": "capture-app",
+      "attributes": {
+        "lk.close.drain": "false",
+        "lk.close_reason": "user_initiated"
+      },
+      "resource_attributes": {
+        "telemetry.sdk.language": "python",
+        "telemetry.sdk.name": "opentelemetry",
+        "telemetry.sdk.version": "1.45.2"
+      },
+      "scope_name": "livekit-agents",
+      "ingest_time": "2026-01-01T00:00:00.000000000Z",
+      "schema_version": 2
+    },
+    {
+      "project_id": "01900000-0000-7000-8000-000000000001",
+      "trace_id": "ad3df930d558fb0f273729a9801a896a",
+      "span_id": "ea57611ea7356966",
+      "parent_span_id": "e9493f451cae462d",
+      "name": "drain_agent_activity",
+      "span_kind": "span",
+      "start_time": "2025-12-31T23:59:50.400000000Z",
+      "end_time": "2025-12-31T23:59:50.400000000Z",
+      "status": "unset",
+      "service_name": "capture-app",
+      "attributes": {
+        "lk.agent_label": "weather_agent"
+      },
+      "resource_attributes": {
+        "telemetry.sdk.language": "python",
+        "telemetry.sdk.name": "opentelemetry",
+        "telemetry.sdk.version": "1.45.2"
+      },
+      "scope_name": "livekit-agents",
+      "ingest_time": "2026-01-01T00:00:00.000000000Z",
+      "schema_version": 2
+    }
+  ],
+  "media": [],
+  "rejected_spans": 0
+}

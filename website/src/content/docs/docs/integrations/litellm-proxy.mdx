@@ -1,0 +1,89 @@
+---
+title: LiteLLM Proxy
+description: "Send LiteLLM Proxy model calls to cetra from the proxy's OpenTelemetry callback, with the cost the proxy computes."
+---
+
+import Backing from "../../../../components/Backing.astro";
+
+cetra reads the spans LiteLLM Proxy sends for every model call it routes, with the cost the proxy computes.
+
+Running the LiteLLM Python library in your own code instead? See [LiteLLM](/docs/integrations/litellm/).
+
+<Backing fixtures={["genai/litellm-proxy-chat", "genai/litellm-proxy-embedding"]} />
+
+## Install
+
+Install the proxy with pip:
+
+```bash
+pip install "litellm[proxy]"
+```
+
+Your applications need no cetra SDK: they call the proxy with any OpenAI-compatible client, and the proxy is the exporter.
+
+## Set up
+
+The `otel` callback in `litellm_settings` turns the export on. Message logging stays on, so the spans carry the messages.
+
+```yaml
+model_list:
+  - model_name: gpt-4o-mini # the alias your clients send
+    litellm_params: {model: openai/gpt-4o-mini, api_key: os.environ/OPENAI_API_KEY}
+  - model_name: ds # an alias for a DeepSeek model
+    litellm_params: {model: deepseek/deepseek-chat, api_key: os.environ/DEEPSEEK_API_KEY}
+
+litellm_settings:
+  callbacks: ["otel"]
+  turn_off_message_logging: false
+
+general_settings:
+  master_key: "<LITELLM_MASTER_KEY>"
+```
+
+The proxy refuses to start without a master key, and your clients send it as their API key.
+
+Point the exporter at the host cetra runs on, then start the proxy:
+
+```bash
+export OTEL_EXPORTER=otlp_http
+export OTEL_ENDPOINT=http://localhost:8080
+export OTEL_HEADERS="Authorization=Bearer <SK_CETRA_KEY>"
+export OTEL_SERVICE_NAME=litellm-proxy
+export LITELLM_LOCAL_MODEL_COST_MAP=True
+
+litellm --config config.yaml --port 4000
+```
+
+Replace `<SK_CETRA_KEY>` with your `sk-cetra-…` API key. See [Send OpenTelemetry](/docs/get-started/opentelemetry/). The proxy appends `/v1/traces` to `OTEL_ENDPOINT` when the URL does not end in it.
+
+Keep the space in `OTEL_HEADERS` as it is. The proxy sends the value without decoding it, so LiteLLM's documented `%20` would arrive as `Bearer%20` followed by your key, and cetra would refuse it.
+
+`LITELLM_LOCAL_MODEL_COST_MAP=True` makes the proxy read the cost map from its package. Without it, the proxy downloads the map at start, which fails on a host without access to GitHub.
+
+## What you get
+
+One routed model call is one `llm` span named `litellm_request`:
+
+- The provider is the upstream's (`openai`, `deepseek`, …), read from `gen_ai.system`.
+- The token counts and the messages come from the call. A tool call in the answer is a tool-call part of the output.
+- The response model is the alias your client sent (`ds`), and the request model is the upstream's (`deepseek-chat`).
+- The cost is the one the proxy reports on every call, with its input and output parts. It includes the discount and the margin you set in the proxy, and it prices a model behind an alias, which no price table could match by name.
+
+An embedding call is an `embedding` span, with its token counts and the cost the proxy reports.
+
+## Limits
+
+- The fixtures were captured with LiteLLM Proxy 1.109.1 and the `openai` client 3.45.0.
+- `gen_ai.cost.input_cost` and `gen_ai.cost.output_cost` are the raw token costs, before the proxy's discount and margin, so the two parts need not add up to `gen_ai.cost.total_cost`. cetra keeps the total as the reported cost.
+- On an embedding call the proxy writes no provider: the provider column stays empty.
+- LiteLLM's other call types (rerank, image generation, transcription, responses, text completion) were not captured; their spans are read as `llm`.
+- `turn_off_message_logging: true` removes the messages, the tool definitions and the tool calls from the spans. A span keeps its token counts, its model and its cost.
+- The proxy exports about ten more spans per request (its HTTP handling, authentication and routing), as plain spans. Each HTTP request it serves is a trace of its own, so an HTTP health probe adds a trace every time it runs. cetra's SDK export filter does not apply to a gateway: use another probe type, or expect those traces.
+- Do not instrument both sides: an app with its own OpenTelemetry instrumentation behind a traced gateway counts each call twice, because the gateway joins the app's trace through `traceparent` and its span carries the same tokens and cost. Trace the gateway (it covers several apps and languages) or the app, not both.
+- If a field is missing, look at the span's **Attributes** tab and compare it with [Span attributes](/docs/reference/attributes/).
+
+## Next
+
+- [Traces](/docs/tracing/traces/): read the trace as a tree and a timeline.
+- [Cost and tokens](/docs/tracing/cost-and-tokens/): how cost is computed from the token counts.
+- [LiteLLM](/docs/integrations/litellm/): trace the library when you call it from your own code.

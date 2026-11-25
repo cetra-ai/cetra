@@ -1,0 +1,99 @@
+---
+title: Hugging Face Inference Providers
+description: "Trace Hugging Face Inference Providers calls with cetra through the OpenAI client."
+---
+
+import { Tabs, TabItem } from "@astrojs/starlight/components";
+
+Trace Hugging Face Inference Providers model calls with cetra through the OpenAI client.
+
+## Install
+
+<Tabs syncKey="lang">
+  <TabItem label="Python">
+
+```bash
+pip install "cetra-sdk[openai]" openai
+```
+
+  </TabItem>
+  <TabItem label="TypeScript">
+
+```bash
+npm install @cetra-ai/sdk @arizeai/openinference-instrumentation-openai openai
+```
+
+  </TabItem>
+</Tabs>
+
+## Set up
+
+<Tabs syncKey="lang">
+  <TabItem label="Python">
+
+{/* untested: calls Hugging Face Inference Providers and needs HF_TOKEN */}
+```python
+import os
+
+import cetra
+from openai import OpenAI
+
+cetra.init(instrument=["openai"])
+
+client = OpenAI(base_url="https://router.huggingface.co/v1", api_key=os.environ["HF_TOKEN"])
+response = client.chat.completions.create(
+    model="deepseek-ai/DeepSeek-R1:fastest",
+    messages=[{"role": "user", "content": "What is the capital of France?"}],
+)
+print(response.choices[0].message.content)
+
+cetra.flush()
+```
+
+  </TabItem>
+  <TabItem label="TypeScript">
+
+{/* untested: the imports of the example below */}
+```ts
+import { init } from "@cetra-ai/sdk";
+import { openai } from "@cetra-ai/sdk/openai";
+import OpenAI from "openai";
+```
+
+{/* example:integration-openai */}
+```ts
+init({ apiKey: process.env.CETRA_API_KEY, instrument: [openai(OpenAI)] });
+```
+
+{/* untested: calls Hugging Face Inference Providers and needs HF_TOKEN */}
+```ts
+const client = new OpenAI({ baseURL: "https://router.huggingface.co/v1", apiKey: process.env.HF_TOKEN });
+await client.chat.completions.create({
+  model: "deepseek-ai/DeepSeek-R1:fastest",
+  messages: [{ role: "user", content: "What is the capital of France?" }],
+});
+```
+
+  </TabItem>
+</Tabs>
+
+## What you get
+
+- Each chat completion is an `llm` span with the provider `huggingface`.
+- Input and output token counts come from the response.
+- No built-in price: add a custom model price in Settings → Model prices to get a cost.
+- With `cetra.init(instrument=["openai"])`, the endpoint host is in `server.address`, and cetra names the provider from it.
+
+## Limits
+
+- The router picks a provider for each call; the span names Hugging Face, not the provider that served it.
+- No spans of Hugging Face Inference Providers are captured in the repository. cetra maps the host `router.huggingface.co` to the provider `huggingface`.
+- The built-in prices have no Hugging Face Inference Providers rows, so cost is empty until you add a custom model price in Settings → Model prices.
+- With plain OpenInference or the official OpenAI instrumentation in Python, the provider shows as `openai`: they do not record the endpoint. Use `cetra.init(instrument=["openai"])` or OpenLLMetry.
+- If a field is missing, look at the span's **Attributes** tab and compare it with [Span attributes](/docs/reference/attributes/).
+
+## Next
+
+- [Traces](/docs/tracing/traces/): read the trace as a tree and a timeline.
+- [Cost and tokens](/docs/tracing/cost-and-tokens/): how cost is computed from the token counts.
+- [Custom model prices](/docs/tracing/cost-and-tokens/#custom-model-prices): price a model the built-in prices do not cover.

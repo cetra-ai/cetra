@@ -1,0 +1,101 @@
+---
+title: AG2
+description: "Trace AG2 agents with cetra from Python: agent runs, model calls and tool calls, through AG2's telemetry middleware."
+---
+
+import { Tabs, TabItem } from "@astrojs/starlight/components";
+import Backing from "../../../../components/Backing.astro";
+
+cetra traces AG2 agent runs through AG2's telemetry middleware: agent, model call and tool spans.
+
+<Backing fixtures={["genai/ag2-agent-tool"]} />
+
+## Install
+
+<Tabs syncKey="lang">
+  <TabItem label="Python">
+
+```bash
+pip install cetra-sdk "ag2[openai,tracing]"
+```
+
+  </TabItem>
+</Tabs>
+
+## Set up
+
+AG2's telemetry middleware takes a tracer provider. Pass it cetra's tracer provider. Set `CETRA_API_KEY` to your `sk-cetra-…` key and `OPENAI_API_KEY` to your OpenAI key.
+
+<Tabs syncKey="lang">
+  <TabItem label="Python">
+
+{/* untested: calls OpenAI through AG2 and needs CETRA_API_KEY and OPENAI_API_KEY */}
+```python
+import asyncio
+import os
+
+import cetra
+from ag2 import Agent, tool
+from ag2.config.openai import OpenAIConfig
+from ag2.middleware.builtin.telemetry import TelemetryMiddleware
+
+cetra.init()
+
+
+@tool
+def get_weather(city: str) -> str:
+    """Get the weather."""
+    return f"sunny in {city}"
+
+
+config = OpenAIConfig(model="gpt-4o-mini", api_key=os.environ["OPENAI_API_KEY"])
+middleware = [
+    TelemetryMiddleware(
+        tracer_provider=cetra.tracer_provider(),
+        agent_name="weather_agent",
+        provider_name="openai",
+        model_name="gpt-4o-mini",
+    )
+]
+agent = Agent(
+    "weather_agent",
+    prompt="You are a weather bot.",
+    config=config,
+    tools=[get_weather],
+    middleware=middleware,
+)
+
+
+async def run() -> None:
+    reply = await agent.ask("What is the weather in Paris?")
+    await reply.content()
+
+
+asyncio.run(run())
+
+cetra.flush()
+```
+
+  </TabItem>
+</Tabs>
+
+## What you get
+
+With one tool call, a run produces:
+
+- an `agent` span named `invoke_agent weather_agent`, with the provider and the model; the fixture has no input or output on this span;
+- an `llm` span for each model call, with the provider `openai`, the model, the token counts, the cost computed from the built-in prices, and the messages;
+- a `tool` span for each tool call, with the arguments as its input and the result as its output;
+- a plain span named `record_usage model_call` after each model call. It repeats that call's token counts.
+
+## Limits
+
+- The `record_usage` spans are plain spans, not `llm` spans, so the tokens are counted once, on the model call.
+- The fixture was captured with `ag2` 1.3.2 and the OpenTelemetry SDK 1.45.2.
+- If a field is missing, look at the span's **Attributes** tab and compare it with [Span attributes](/docs/reference/attributes/).
+
+## Next
+
+- [Traces](/docs/tracing/traces/): read the trace as a tree and a timeline.
+- [Cost and tokens](/docs/tracing/cost-and-tokens/): how cost is computed from the token counts.
+- [Online rules](/docs/evaluation/online-rules/): score these traces automatically.

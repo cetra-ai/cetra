@@ -1,0 +1,35 @@
+---
+title: LobeChat
+description: "Send LobeChat's OpenTelemetry spans to cetra with its telemetry environment variables. Setup only: not run, and its model spans are unverified."
+---
+
+LobeChat exports OpenTelemetry spans to cetra when you set its telemetry environment variables. This page is setup only, and it is unverified: it was not run against cetra.
+
+## Set up
+
+Telemetry is off by default. Set these variables for the LobeChat server, and replace `<SK_CETRA_KEY>` with your `sk-cetra-…` API key:
+
+```bash
+ENABLE_TELEMETRY=1
+OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:8080
+OTEL_EXPORTER_OTLP_HEADERS=Authorization=Bearer%20<SK_CETRA_KEY>
+OTEL_SERVICE_NAME=lobechat
+```
+
+`OTEL_EXPORTER_OTLP_ENDPOINT` is the base URL: LobeChat adds `/v1/traces` to it.
+
+## What you get
+
+Not verified. LobeChat v2.3.5 defines `gen_ai.*` attribute names for its model calls, but no run of LobeChat with these variables was recorded, so this page does not list the spans or attributes cetra receives.
+
+## Limits
+
+- Unverified: the variables come from LobeChat's source, and no LobeChat server was started for this page.
+- Not known: whether LobeChat records prompts and completions. An older LobeChat build's published example showed only HTTP server spans.
+- Not known: whether the header value above is read as written. Check the header in cetra's **Traces** view after the first request.
+- LobeChat runs as a Docker image or as a Node server. This page does not say which one to use.
+
+## Next
+
+- [Send OpenTelemetry](/docs/get-started/opentelemetry/): the endpoint and the headers cetra expects.
+- [Traces](/docs/tracing/traces/): read the trace as a tree and a timeline.

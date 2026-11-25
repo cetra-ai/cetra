@@ -1,0 +1,7 @@
+model_list:
+  - model_name: text-embedding-3-small
+    litellm_params: {model: openai/text-embedding-3-small, api_base: "os.environ/FAKE_BASE", api_key: sk-fake}
+litellm_settings:
+  callbacks: ["otel"]
+  turn_off_message_logging: false
+general_settings: {master_key: "sk-spike-master-key-1234567890abcdef"}

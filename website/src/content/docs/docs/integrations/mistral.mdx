@@ -1,0 +1,67 @@
+---
+title: Mistral AI
+description: "Trace Mistral AI model calls with cetra from Python, with the OpenInference Mistral instrumentation."
+---
+
+import { Tabs, TabItem } from "@astrojs/starlight/components";
+import Backing from "../../../../components/Backing.astro";
+
+Trace Mistral AI model calls with cetra from Python, with the OpenInference Mistral instrumentation.
+
+<Backing fixtures={["openinference/mistral-chat"]} />
+
+## Install
+
+<Tabs syncKey="lang">
+  <TabItem label="Python">
+
+```bash
+pip install "cetra-sdk[mistralai]" mistralai
+```
+
+  </TabItem>
+</Tabs>
+
+## Set up
+
+<Tabs syncKey="lang">
+  <TabItem label="Python">
+
+{/* untested: calls Mistral AI and needs MISTRAL_API_KEY */}
+```python
+import os
+
+import cetra
+from mistralai.client import Mistral
+
+cetra.init(instrument=["mistralai"])
+
+client = Mistral(api_key=os.environ["MISTRAL_API_KEY"])
+response = client.chat.complete(
+    model="mistral-small-latest",
+    messages=[{"role": "user", "content": "What is the capital of France?"}],
+)
+print(response.choices[0].message.content)
+
+cetra.flush()
+```
+
+  </TabItem>
+</Tabs>
+
+## What you get
+
+- Each chat completion is an `llm` span with the provider `mistral_ai`.
+- Input and output token counts come from the response.
+- Cost comes from the built-in prices.
+
+## Limits
+
+- The fixtures were captured with mistralai 3.7.0 and openinference-instrumentation-mistralai 2.3.5.
+- If a field is missing, look at the span's **Attributes** tab and compare it with [Span attributes](/docs/reference/attributes/).
+
+## Next
+
+- [Traces](/docs/tracing/traces/): read the trace as a tree and a timeline.
+- [Cost and tokens](/docs/tracing/cost-and-tokens/): how cost is computed from the token counts.
+- [Custom model prices](/docs/tracing/cost-and-tokens/#custom-model-prices): price a model the built-in prices do not cover.

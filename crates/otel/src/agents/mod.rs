@@ -8,6 +8,12 @@ mod codex;
 mod copilot;
 mod gemini_cli;
 #[cfg(test)]
+mod generic_agent_tests;
+mod goose;
+mod hermes;
+mod openclaw;
+mod qwen_code;
+#[cfg(test)]
 mod test_support;
 
 use std::collections::HashMap;
@@ -129,6 +135,13 @@ pub(crate) enum CodingAgent {
     Codex,
     GeminiCli,
     Copilot,
+    QwenCode,
+    Pi,
+    OpenClaw,
+    OpenCode,
+    Goose,
+    OhMyPi,
+    Hermes,
 }
 
 impl CodingAgent {
@@ -139,6 +152,13 @@ impl CodingAgent {
             Self::Codex => "codex",
             Self::GeminiCli => "gemini-cli",
             Self::Copilot => "copilot",
+            Self::QwenCode => "qwen-code",
+            Self::Pi => "pi",
+            Self::OpenClaw => "openclaw",
+            Self::OpenCode => "opencode",
+            Self::Goose => "goose",
+            Self::OhMyPi => "oh-my-pi",
+            Self::Hermes => "hermes-agent",
         }
     }
 }
@@ -158,6 +178,31 @@ pub(crate) fn is_redacted(text: &str) -> bool {
     matches!(text, "<REDACTED>" | "[REDACTED]")
 }
 
+/// The scope Vercel's Workflow SDK writes its spans under (D-IN-31 item 5).
+const WORKFLOW_SDK_SCOPE: &str = "workflow";
+/// The name prefixes of the Workflow SDK's spans (D-IN-31 item 5).
+const WORKFLOW_SDK_PREFIXES: &[&str] = &["workflow.", "step.", "queue."];
+
+/// D-IN-31 item 5: Vercel's Workflow SDK, which eve runs on, exports its internal
+/// spans under the scope `workflow`. It is not a coding agent, but its spans are
+/// discarded and counted like the coding agents' (D-CA-6): `true` when the scope is
+/// exactly `workflow` and the name starts with `workflow.`, `step.` or `queue.` —
+/// unless the span carries model or convention attributes (any `gen_ai.*` or `llm.*`
+/// key, or `openinference.span.kind`): a tracer named `workflow` in a user's own app
+/// may write model spans named `step.*`, and those must never be dropped. Any other
+/// scope or name: `false`.
+pub(crate) fn scoped_discard(scope_name: &str, span_name: &str, attributes: &[KeyValue]) -> bool {
+    scope_name == WORKFLOW_SDK_SCOPE
+        && WORKFLOW_SDK_PREFIXES
+            .iter()
+            .any(|prefix| span_name.starts_with(prefix))
+        && !attributes.iter().any(|attr| {
+            attr.key.starts_with("gen_ai.")
+                || attr.key.starts_with("llm.")
+                || attr.key == "openinference.span.kind"
+        })
+}
+
 /// Values the post-build step needs, read from the bag before it is consumed.
 #[derive(Debug, Default)]
 pub(crate) struct Finish {
@@ -174,6 +219,9 @@ pub(crate) fn detect_agent(
     span_name: &str,
     attributes: &[KeyValue],
 ) -> Option<CodingAgent> {
+    if service_name == Some("qwen-code") {
+        return Some(CodingAgent::QwenCode);
+    }
     if span_name.starts_with("claude_code.") {
         return Some(CodingAgent::ClaudeCode);
     }
@@ -194,6 +242,24 @@ pub(crate) fn detect_agent(
     if copilot {
         return Some(CodingAgent::Copilot);
     }
+    if scope_name == Some("cetra-pi") {
+        return Some(CodingAgent::Pi);
+    }
+    if scope_name == Some("openclaw") {
+        return Some(CodingAgent::OpenClaw);
+    }
+    if scope_name == Some("cetra-opencode") {
+        return Some(CodingAgent::OpenCode);
+    }
+    if scope_name == Some("goose") {
+        return Some(CodingAgent::Goose);
+    }
+    if scope_name == Some("@oh-my-pi/pi-agent-core") {
+        return Some(CodingAgent::OhMyPi);
+    }
+    if scope_name == Some("hermes-otel-plugin") {
+        return Some(CodingAgent::Hermes);
+    }
     None
 }
 
@@ -206,13 +272,29 @@ fn attribute<'a>(attributes: &'a [KeyValue], key: &str) -> Option<&'a AnyValue> 
         .and_then(|attr| attr.value.as_ref())
 }
 
-/// D-CA-6: Codex's internal spans are dropped and counted, never stored or rejected.
+/// D-CA-6: an agent's internal spans are dropped and counted, never stored or rejected.
 pub(crate) fn discarded(
     agent: Option<CodingAgent>,
+    scope_name: &str,
     span_name: &str,
     attributes: &[KeyValue],
 ) -> bool {
-    agent == Some(CodingAgent::Codex) && !codex::kept(span_name, attributes)
+    match agent {
+        Some(CodingAgent::Codex) => !codex::kept(span_name, attributes),
+        Some(CodingAgent::QwenCode) => qwen_code::discarded(span_name, scope_name),
+        Some(CodingAgent::OpenClaw) => openclaw::discarded(span_name),
+        Some(
+            CodingAgent::ClaudeCode
+            | CodingAgent::GeminiCli
+            | CodingAgent::Copilot
+            | CodingAgent::Pi
+            | CodingAgent::OpenCode
+            | CodingAgent::Goose
+            | CodingAgent::OhMyPi
+            | CodingAgent::Hermes,
+        )
+        | None => false,
+    }
 }
 
 /// The values [`finish`] needs. Read before the bag is consumed.
@@ -226,7 +308,17 @@ pub(crate) fn finish_inputs(agent: Option<CodingAgent>, bag: &AttrBag<'_>) -> Fi
             tool_name: peek_text(bag, "tool_name"),
             turn_id: codex::turn_id(bag),
         },
-        Some(CodingAgent::GeminiCli | CodingAgent::Copilot) => Finish {
+        Some(
+            CodingAgent::GeminiCli
+            | CodingAgent::Copilot
+            | CodingAgent::QwenCode
+            | CodingAgent::Pi
+            | CodingAgent::OpenClaw
+            | CodingAgent::OpenCode
+            | CodingAgent::Goose
+            | CodingAgent::OhMyPi
+            | CodingAgent::Hermes,
+        ) => Finish {
             tool_name: peek_text(bag, "gen_ai.tool.name"),
             turn_id: None,
         },
@@ -240,7 +332,13 @@ pub(crate) fn kind(agent: Option<CodingAgent>, span_name: &str) -> Option<SpanKi
         CodingAgent::ClaudeCode => claude_code::kind(span_name),
         CodingAgent::Codex => codex::kind(span_name),
         CodingAgent::GeminiCli => gemini_cli::kind(span_name),
-        CodingAgent::Copilot => None,
+        CodingAgent::QwenCode => qwen_code::kind(span_name),
+        CodingAgent::OpenClaw => openclaw::kind(span_name),
+        CodingAgent::Goose => goose::kind(span_name),
+        CodingAgent::Hermes => hermes::kind(span_name),
+        CodingAgent::Copilot | CodingAgent::Pi | CodingAgent::OpenCode | CodingAgent::OhMyPi => {
+            None
+        }
     }
 }
 
@@ -263,6 +361,13 @@ pub(crate) fn context(
         CodingAgent::Codex => codex::context(attributes, bag, fields, agents),
         CodingAgent::GeminiCli => gemini_cli::context(fields, agents),
         CodingAgent::Copilot => copilot::context(bag, fields),
+        CodingAgent::QwenCode => qwen_code::context(fields, agents),
+        CodingAgent::Pi
+        | CodingAgent::OpenClaw
+        | CodingAgent::OpenCode
+        | CodingAgent::Goose
+        | CodingAgent::OhMyPi
+        | CodingAgent::Hermes => {}
     }
 }
 
@@ -277,7 +382,15 @@ pub(crate) fn usage(
     match agent? {
         CodingAgent::ClaudeCode => claude_code::usage(span_name, kind, bag, warnings),
         CodingAgent::Codex => codex::usage(span_name, kind, bag, warnings),
-        CodingAgent::GeminiCli | CodingAgent::Copilot => None,
+        CodingAgent::GeminiCli
+        | CodingAgent::Copilot
+        | CodingAgent::QwenCode
+        | CodingAgent::Pi
+        | CodingAgent::OpenClaw
+        | CodingAgent::OpenCode
+        | CodingAgent::Goose
+        | CodingAgent::OhMyPi
+        | CodingAgent::Hermes => None,
     }
 }
 
@@ -289,7 +402,16 @@ pub(crate) fn ttft(
 ) -> Option<i64> {
     match agent? {
         CodingAgent::ClaudeCode => claude_code::ttft(bag, warnings),
-        CodingAgent::Codex | CodingAgent::GeminiCli | CodingAgent::Copilot => None,
+        CodingAgent::OpenClaw => openclaw::ttft(bag, warnings),
+        CodingAgent::Codex
+        | CodingAgent::GeminiCli
+        | CodingAgent::Copilot
+        | CodingAgent::QwenCode
+        | CodingAgent::Pi
+        | CodingAgent::OpenCode
+        | CodingAgent::Goose
+        | CodingAgent::OhMyPi
+        | CodingAgent::Hermes => None,
     }
 }
 
@@ -307,7 +429,19 @@ pub(crate) fn payload(
             claude_code::payload(span_name, bag, events, assembled, warnings);
         }
         Some(CodingAgent::GeminiCli) => gemini_cli::payload(span_name, bag, assembled, warnings),
-        Some(CodingAgent::Codex | CodingAgent::Copilot) | None => {}
+        // The generic GenAI reading reads their messages.
+        Some(
+            CodingAgent::QwenCode
+            | CodingAgent::Pi
+            | CodingAgent::OpenClaw
+            | CodingAgent::OpenCode
+            | CodingAgent::Goose
+            | CodingAgent::OhMyPi
+            | CodingAgent::Hermes
+            | CodingAgent::Codex
+            | CodingAgent::Copilot,
+        )
+        | None => {}
     }
 }
 
@@ -324,6 +458,13 @@ pub(crate) fn finish(
         Some(CodingAgent::Codex) => codex::finish(span_name, inputs, built),
         Some(CodingAgent::GeminiCli) => gemini_cli::finish(span_name, inputs, built),
         Some(CodingAgent::Copilot) => copilot::finish(kind, inputs, built),
+        Some(CodingAgent::QwenCode) => qwen_code::finish(span_name, inputs, built),
+        Some(CodingAgent::Pi | CodingAgent::OpenCode | CodingAgent::OhMyPi) => {
+            rename_prefixed_tool(span_name, EXECUTE_TOOL_PREFIX, inputs, built);
+        }
+        Some(CodingAgent::OpenClaw) => openclaw::finish(span_name, inputs, built),
+        Some(CodingAgent::Goose) => goose::finish(span_name, inputs, built),
+        Some(CodingAgent::Hermes) => hermes::finish(span_name, inputs, built),
         None => {}
     }
 }
@@ -338,6 +479,19 @@ pub(crate) fn rename_tool(built: &mut Span, name: &str) {
     built
         .attributes
         .insert(SPAN_NAME_ATTRIBUTE.to_owned(), original);
+}
+
+/// The prefix of the GenAI tool spans (`execute_tool <name>`) that Pi, OpenCode and Oh My Pi
+/// rename after their tool (D-CA-6).
+const EXECUTE_TOOL_PREFIX: &str = "execute_tool ";
+
+/// A span whose name starts with `prefix` takes the tool's name (D-CA-6).
+fn rename_prefixed_tool(span_name: &str, prefix: &str, inputs: &Finish, built: &mut Span) {
+    if span_name.starts_with(prefix)
+        && let Some(name) = inputs.tool_name.as_deref()
+    {
+        rename_tool(built, name);
+    }
 }
 
 /// A non-empty string, peeked: the bag keeps the key unread.
@@ -482,6 +636,73 @@ mod tests {
             ),
             None
         );
+        assert_eq!(
+            detect_agent(Some("qwen-code"), None, "x", none),
+            Some(CodingAgent::QwenCode)
+        );
+        assert_eq!(detect_agent(Some("qwen-codex"), None, "x", none), None);
+        assert_eq!(
+            detect_agent(None, Some("cetra-pi"), "x", none),
+            Some(CodingAgent::Pi)
+        );
+        assert_eq!(detect_agent(None, Some("cetra-pi-x"), "x", none), None);
+        assert_eq!(
+            detect_agent(None, Some("openclaw"), "x", none),
+            Some(CodingAgent::OpenClaw)
+        );
+        assert_eq!(detect_agent(None, Some("openclaw.x"), "x", none), None);
+        assert_eq!(
+            detect_agent(None, Some("cetra-opencode"), "x", none),
+            Some(CodingAgent::OpenCode)
+        );
+        assert_eq!(
+            detect_agent(None, Some("cetra-opencode-x"), "x", none),
+            None
+        );
+        assert_eq!(
+            detect_agent(None, Some("goose"), "x", none),
+            Some(CodingAgent::Goose)
+        );
+        assert_eq!(detect_agent(None, Some("goose.x"), "x", none), None);
+        assert_eq!(
+            detect_agent(None, Some("@oh-my-pi/pi-agent-core"), "x", none),
+            Some(CodingAgent::OhMyPi)
+        );
+        assert_eq!(
+            detect_agent(None, Some("@oh-my-pi/pi-agent"), "x", none),
+            None
+        );
+        assert_eq!(
+            detect_agent(None, Some("hermes-otel-plugin"), "x", none),
+            Some(CodingAgent::Hermes)
+        );
+        assert_eq!(detect_agent(None, Some("hermes-otel"), "x", none), None);
+    }
+
+    #[test]
+    fn qwen_service_wins_over_the_gemini_attribute() {
+        use crate::agents::test_support::{request, run, span};
+
+        let by_attribute = [kv("gen_ai.agent.name", s("gemini-cli"))];
+        assert_eq!(
+            detect_agent(Some("qwen-code"), None, "llm_call", &by_attribute),
+            Some(CodingAgent::QwenCode)
+        );
+        let normalized = run(
+            &request(
+                "qwen-code",
+                "",
+                vec![span("llm_call", by_attribute.to_vec(), vec![])],
+            ),
+            &AgentContexts::default(),
+        );
+        assert_eq!(
+            normalized.spans[0]
+                .metadata
+                .get(key::CODING_AGENT)
+                .map(String::as_str),
+            Some("qwen-code")
+        );
     }
 
     #[test]
@@ -505,11 +726,33 @@ mod tests {
             CodingAgent::Codex,
             CodingAgent::GeminiCli,
             CodingAgent::Copilot,
+            CodingAgent::QwenCode,
+            CodingAgent::Pi,
+            CodingAgent::OpenClaw,
+            CodingAgent::OpenCode,
+            CodingAgent::Goose,
+            CodingAgent::OhMyPi,
+            CodingAgent::Hermes,
         ]
         .into_iter()
         .map(CodingAgent::wire_name)
         .collect();
-        assert_eq!(names, ["claude-code", "codex", "gemini-cli", "copilot"]);
+        assert_eq!(
+            names,
+            [
+                "claude-code",
+                "codex",
+                "gemini-cli",
+                "copilot",
+                "qwen-code",
+                "pi",
+                "openclaw",
+                "opencode",
+                "goose",
+                "oh-my-pi",
+                "hermes-agent"
+            ]
+        );
     }
 
     #[test]
@@ -581,5 +824,108 @@ mod tests {
                 .map(String::as_str),
             Some("copilot")
         );
+    }
+
+    #[test]
+    fn workflow_sdk_spans_are_discarded() {
+        use crate::agents::test_support::{request, run, span};
+
+        let mut workflow_start = span("workflow.start", vec![], vec![]);
+        workflow_start.span_id = vec![0x31; 8];
+        let mut step_execute = span("step.execute", vec![], vec![]);
+        step_execute.span_id = vec![0x32; 8];
+        let mut queue_publish = span("queue.publish", vec![], vec![]);
+        queue_publish.span_id = vec![0x33; 8];
+        let normalized = run(
+            &request(
+                "capture-eve",
+                "workflow",
+                vec![workflow_start, step_execute, queue_publish],
+            ),
+            &AgentContexts::default(),
+        );
+        assert_eq!(normalized.discarded, 3);
+        assert!(normalized.spans.is_empty());
+        assert_eq!(normalized.rejections.total(), 0);
+    }
+
+    #[test]
+    fn workflow_scope_other_names_are_kept() {
+        use crate::agents::test_support::{request, run, span};
+
+        let normalized = run(
+            &request(
+                "capture-eve",
+                "workflow",
+                vec![span("chat gpt-4o-mini", vec![], vec![])],
+            ),
+            &AgentContexts::default(),
+        );
+        assert_eq!(normalized.discarded, 0);
+        assert_eq!(normalized.spans.len(), 1);
+        assert_eq!(normalized.spans[0].name, "chat gpt-4o-mini");
+    }
+
+    #[test]
+    fn workflow_names_on_another_scope_are_kept() {
+        use crate::agents::test_support::{request, run, span};
+
+        let normalized = run(
+            &request(
+                "capture-eve",
+                "eve.agent",
+                vec![span("workflow.start", vec![], vec![])],
+            ),
+            &AgentContexts::default(),
+        );
+        assert_eq!(normalized.discarded, 0);
+        assert_eq!(normalized.spans.len(), 1);
+        assert_eq!(normalized.spans[0].name, "workflow.start");
+    }
+
+    #[test]
+    fn a_workflow_scope_model_span_is_kept() {
+        use crate::agents::test_support::{request, run, span};
+
+        // The scope alone does not identify the Workflow SDK: a user's own tracer
+        // named `workflow` may write model spans named `step.*` (D-IN-31 item 5).
+        let normalized = run(
+            &request(
+                "my-app",
+                "workflow",
+                vec![span(
+                    "step.generate",
+                    vec![kv("gen_ai.request.model", s("gpt-4o-mini"))],
+                    vec![],
+                )],
+            ),
+            &AgentContexts::default(),
+        );
+        assert_eq!(normalized.discarded, 0);
+        assert_eq!(normalized.spans.len(), 1);
+        assert_eq!(normalized.spans[0].name, "step.generate");
+        assert_eq!(normalized.spans[0].span_kind, SpanKind::Llm);
+    }
+
+    #[test]
+    fn a_workflow_scope_openinference_span_is_kept() {
+        use crate::agents::test_support::{request, run, span};
+
+        let normalized = run(
+            &request(
+                "my-app",
+                "workflow",
+                vec![span(
+                    "step.run",
+                    vec![kv("openinference.span.kind", s("LLM"))],
+                    vec![],
+                )],
+            ),
+            &AgentContexts::default(),
+        );
+        assert_eq!(normalized.discarded, 0);
+        assert_eq!(normalized.spans.len(), 1);
+        assert_eq!(normalized.spans[0].name, "step.run");
+        assert_eq!(normalized.spans[0].span_kind, SpanKind::Llm);
     }
 }

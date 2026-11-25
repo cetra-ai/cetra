@@ -46,7 +46,10 @@ export async function finish(
 }
 
 /** Writes `CETRA_CAPTURE_META` with the versions of `CETRA_CAPTURE_LIBRARIES`. */
-export function writeMeta(aliases: Record<string, string> = {}): void {
+export function writeMeta(
+  aliases: Record<string, string> = {},
+  versions: Record<string, string> = {},
+): void {
   const listed = process.env.CETRA_CAPTURE_LIBRARIES;
   const metaPath = process.env.CETRA_CAPTURE_META;
   if (listed === undefined) {
@@ -58,6 +61,12 @@ export function writeMeta(aliases: Record<string, string> = {}): void {
   const libraries: Record<string, string> = {};
   for (const name of listed.split(",")) {
     if (name.length === 0) {
+      continue;
+    }
+    // A version given outright (a release binary or a Python environment, which have no
+    // package.json under node_modules) wins; its package.json is not read.
+    if (versions[name] !== undefined) {
+      libraries[name] = versions[name];
       continue;
     }
     const directory = aliases[name] ?? name;

@@ -1,0 +1,181 @@
+---
+title: Semantic Kernel
+description: "Trace Semantic Kernel agents with cetra from Python and .NET: agent runs, model calls and plugin functions, from Semantic Kernel's own spans."
+---
+
+import { Tabs, TabItem } from "@astrojs/starlight/components";
+import Backing from "../../../../components/Backing.astro";
+
+cetra traces Semantic Kernel agent runs as agent, model call and tool spans, from Semantic Kernel's own diagnostics.
+
+<Backing fixtures={["genai/semantic-kernel-agent-tool", "genai/semantic-kernel-dotnet-tool"]} />
+
+## Install
+
+<Tabs syncKey="lang">
+  <TabItem label="Python">
+
+```bash
+pip install cetra-sdk semantic-kernel openai
+```
+
+  </TabItem>
+  <TabItem label=".NET">
+
+```bash
+dotnet add package Microsoft.SemanticKernel --version 1.82.0
+dotnet add package OpenTelemetry --version 1.21.0
+dotnet add package OpenTelemetry.Exporter.OpenTelemetryProtocol --version 1.21.0
+```
+
+  </TabItem>
+</Tabs>
+
+## Set up
+
+Turn on Semantic Kernel's own diagnostics, then send its spans to cetra.
+
+<Tabs syncKey="lang">
+  <TabItem label="Python">
+
+Semantic Kernel writes its spans to the global OpenTelemetry tracer provider. Start cetra with `use_global_provider=True` so that it joins that provider. Set `CETRA_API_KEY` to your `sk-cetra-…` key and `OPENAI_API_KEY` to your OpenAI key.
+
+Semantic Kernel reads its switches when it is imported, so set them before the import.
+
+{/* untested: calls OpenAI through Semantic Kernel and needs CETRA_API_KEY and OPENAI_API_KEY */}
+```python
+import asyncio
+import os
+
+os.environ["SEMANTICKERNEL_EXPERIMENTAL_GENAI_ENABLE_OTEL_DIAGNOSTICS"] = "true"
+os.environ["SEMANTICKERNEL_EXPERIMENTAL_GENAI_ENABLE_OTEL_DIAGNOSTICS_SENSITIVE"] = "true"
+
+import cetra
+
+cetra.init(use_global_provider=True)
+
+from openai import AsyncOpenAI  # noqa: E402
+from semantic_kernel.agents import ChatCompletionAgent  # noqa: E402
+from semantic_kernel.connectors.ai.open_ai import OpenAIChatCompletion  # noqa: E402
+from semantic_kernel.functions import kernel_function  # noqa: E402
+
+
+class WeatherPlugin:
+    """Plugin that answers the weather question."""
+
+    @kernel_function(name="get_weather", description="Get the weather")
+    def get_weather(self, city: str) -> str:
+        return f"sunny in {city}"
+
+
+service = OpenAIChatCompletion(
+    ai_model_id="gpt-4o-mini",
+    async_client=AsyncOpenAI(api_key=os.environ["OPENAI_API_KEY"]),
+)
+
+
+async def run() -> None:
+    agent = ChatCompletionAgent(
+        service=service,
+        name="WeatherAgent",
+        instructions="You are a weather bot.",
+        plugins=[WeatherPlugin()],
+    )
+    await agent.get_response(messages="What is the weather in Paris?")
+
+
+asyncio.run(run())
+
+cetra.flush()
+```
+
+  </TabItem>
+  <TabItem label=".NET">
+
+Set both AppContext switches before the kernel is built: the first emits the model-call spans, the second puts the message content on them. Export over OTLP/HTTP with the standard variables, and set a service name so your traces are named:
+
+```bash
+export OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:8080
+export OTEL_EXPORTER_OTLP_HEADERS="Authorization=Bearer sk-cetra-…"
+export OTEL_SERVICE_NAME=my-app
+```
+
+Listen on Semantic Kernel's activity sources, then call the chat completion service as usual. Set `OPENAI_API_KEY` to your OpenAI key:
+
+```csharp
+using System.ComponentModel;
+using Microsoft.SemanticKernel;
+using Microsoft.SemanticKernel.ChatCompletion;
+using Microsoft.SemanticKernel.Connectors.OpenAI;
+using OpenTelemetry;
+using OpenTelemetry.Trace;
+
+AppContext.SetSwitch("Microsoft.SemanticKernel.Experimental.GenAI.EnableOTelDiagnostics", true);
+AppContext.SetSwitch("Microsoft.SemanticKernel.Experimental.GenAI.EnableOTelDiagnosticsSensitive", true);
+
+using var tracerProvider = Sdk.CreateTracerProviderBuilder()
+    .AddSource("Microsoft.SemanticKernel*")
+    .AddOtlpExporter()
+    .Build();
+
+var builder = Kernel.CreateBuilder();
+builder.AddOpenAIChatCompletion(modelId: "gpt-4o-mini",
+    apiKey: Environment.GetEnvironmentVariable("OPENAI_API_KEY")!);
+var kernel = builder.Build();
+kernel.ImportPluginFromType<WeatherPlugin>();
+var chat = kernel.GetRequiredService<IChatCompletionService>();
+
+var settings = new OpenAIPromptExecutionSettings { FunctionChoiceBehavior = FunctionChoiceBehavior.Auto() };
+var history = new ChatHistory();
+history.AddUserMessage("What is the weather in Lyon? Use the tool.");
+var answer = await chat.GetChatMessageContentAsync(history, settings, kernel);
+Console.WriteLine("answer: " + answer.Content);
+
+public sealed class WeatherPlugin
+{
+    [KernelFunction("get_weather"), Description("Get the current weather for a city")]
+    public string GetWeather([Description("City name")] string city) => $"Sunny in {city}, 21 C";
+}
+```
+
+Semantic Kernel offers every plugin function to the model as `<Plugin>-<Function>`, so the model sees `WeatherPlugin-get_weather`. The tool span and the echoed tool call name the function itself, `get_weather`.
+
+  </TabItem>
+</Tabs>
+
+## What you get
+
+- Python
+
+  With one plugin function, a run produces:
+
+  - an `agent` span named `invoke_agent WeatherAgent`, with the input and output messages and the tool definitions;
+  - an `llm` span for each model call, with the provider `openai`, the model, the token counts and the cost computed from the built-in prices;
+  - a `tool` span for each plugin function, with the arguments as its input and the result as its output.
+
+- .NET
+
+  With one plugin function, a chat call produces:
+
+  - an `llm` span named `chat gpt-4o-mini` for each model call, with the provider `openai`, the model, the input and output messages, the token counts and the cost computed from the built-in prices;
+  - a `tool` span for each plugin function, with the arguments as its input and the result as its output.
+
+## Limits
+
+- Python
+  - Semantic Kernel sends the message content of model calls as OTLP log records. cetra does not store log records, so the `llm` spans show no messages. The `agent` span still carries its input and output.
+  - The fixture was captured with `semantic-kernel` 1.47.0 and the OpenTelemetry SDK 1.45.2.
+- .NET
+  - Without the two AppContext switches, Semantic Kernel emits no model-call spans at all: only the tool spans arrive.
+  - The spans have no parent links: every span is its own trace, so a tool span is not linked to the model call that requested it.
+  - The per-message finish reason from Semantic Kernel's `gen_ai.choice` event is read and lowercased, so `ToolCalls` becomes `toolcalls` (not `tool_calls`). Only the span-level `gen_ai.response.finish_reason` and the URL-shaped `server.address` are not read.
+  - OpenTelemetry .NET 1.21.0 ignores `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT`. Set `OTEL_EXPORTER_OTLP_ENDPOINT`, the base URL without the `/v1/traces` path; the exporter appends the path itself.
+  - The capture sent no Authorization header; the header setting above is the library's documented option, not part of the captured run.
+  - The .NET fixture was captured with `Microsoft.SemanticKernel` 1.82.0 and OpenTelemetry .NET 1.21.0.
+- If a field is missing, look at the span's **Attributes** tab and compare it with [Span attributes](/docs/reference/attributes/).
+
+## Next
+
+- [Traces](/docs/tracing/traces/): read the trace as a tree and a timeline.
+- [Cost and tokens](/docs/tracing/cost-and-tokens/): how cost is computed from the token counts.
+- [Online rules](/docs/evaluation/online-rules/): score these traces automatically.

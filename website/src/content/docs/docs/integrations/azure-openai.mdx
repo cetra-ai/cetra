@@ -1,0 +1,109 @@
+---
+title: Azure OpenAI
+description: "Trace Azure OpenAI model calls with cetra through the OpenAI SDK's Azure client."
+---
+
+import { Tabs, TabItem } from "@astrojs/starlight/components";
+import Backing from "../../../../components/Backing.astro";
+
+Trace Azure OpenAI model calls with cetra through the OpenAI SDK's Azure client.
+
+<Backing fixtures={["openinference/azure-openai-chat"]} />
+
+## Install
+
+<Tabs syncKey="lang">
+  <TabItem label="Python">
+
+```bash
+pip install "cetra-sdk[openai]" openai
+```
+
+  </TabItem>
+  <TabItem label="TypeScript">
+
+```bash
+npm install @cetra-ai/sdk @arizeai/openinference-instrumentation-openai openai
+```
+
+  </TabItem>
+</Tabs>
+
+## Set up
+
+<Tabs syncKey="lang">
+  <TabItem label="Python">
+
+{/* untested: calls Azure OpenAI and needs AZURE_OPENAI_ENDPOINT */}
+```python
+import os
+
+import cetra
+from openai import AzureOpenAI
+
+cetra.init(instrument=["openai"])
+
+client = AzureOpenAI(
+    azure_endpoint=os.environ["AZURE_OPENAI_ENDPOINT"],
+    api_key=os.environ["AZURE_OPENAI_API_KEY"],
+    api_version="2024-10-21",
+)
+response = client.chat.completions.create(
+    model="<DEPLOYMENT_NAME>",
+    messages=[{"role": "user", "content": "What is the capital of France?"}],
+)
+print(response.choices[0].message.content)
+
+cetra.flush()
+```
+
+  </TabItem>
+  <TabItem label="TypeScript">
+
+{/* untested: the imports of the example below */}
+```ts
+import { init } from "@cetra-ai/sdk";
+import { openai } from "@cetra-ai/sdk/openai";
+import OpenAI, { AzureOpenAI } from "openai";
+```
+
+{/* example:integration-openai */}
+```ts
+init({ apiKey: process.env.CETRA_API_KEY, instrument: [openai(OpenAI)] });
+```
+
+{/* untested: calls Azure OpenAI and needs AZURE_OPENAI_ENDPOINT */}
+```ts
+const client = new AzureOpenAI({
+  endpoint: process.env.AZURE_OPENAI_ENDPOINT,
+  apiKey: process.env.AZURE_OPENAI_API_KEY,
+  apiVersion: "2024-10-21",
+});
+await client.chat.completions.create({
+  model: "<DEPLOYMENT_NAME>",
+  messages: [{ role: "user", content: "What is the capital of France?" }],
+});
+```
+
+  </TabItem>
+</Tabs>
+
+## What you get
+
+- Each chat completion is an `llm` span with the provider `azure.ai.openai`.
+- Input and output token counts come from the response.
+- Cost comes from the built-in prices.
+- The endpoint host is in `server.address`, and cetra names the provider from it.
+
+## Limits
+
+- The span shows the deployment's base model, which prices it.
+- Calling Azure OpenAI needs an Azure subscription. The fixtures were captured against cetra's mock.
+- The fixtures were captured with openai 3.45.0 and openinference-instrumentation-openai 0.1.69.
+- If a field is missing, look at the span's **Attributes** tab and compare it with [Span attributes](/docs/reference/attributes/).
+
+## Next
+
+- [Traces](/docs/tracing/traces/): read the trace as a tree and a timeline.
+- [Cost and tokens](/docs/tracing/cost-and-tokens/): how cost is computed from the token counts.
+- [Custom model prices](/docs/tracing/cost-and-tokens/#custom-model-prices): price a model the built-in prices do not cover.

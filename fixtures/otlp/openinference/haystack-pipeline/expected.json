@@ -1,0 +1,125 @@
+{
+  "spans": [
+    {
+      "project_id": "01900000-0000-7000-8000-000000000001",
+      "trace_id": "9f6fb8f16e97c9c2cf25ad146a5738e2",
+      "span_id": "1f44c9622ea691ce",
+      "name": "Pipeline.run",
+      "span_kind": "chain",
+      "start_time": "2025-12-31T23:59:50.000000000Z",
+      "end_time": "2025-12-31T23:59:50.182000000Z",
+      "status": "ok",
+      "service_name": "capture-app",
+      "input": "{\"data\":{\"prompt\":{\"country\":\"France\"}}}",
+      "input_format": "json",
+      "output": "{\"llm\":{\"replies\":[\"ChatMessage(_role=<ChatRole.ASSISTANT: 'assistant'>, _content=[TextContent(text='Paris is the capital of France.')], _name=None, _meta={'model': 'gpt-4o-mini-2024-07-18', 'index': 0, 'finish_reason': 'stop', 'usage': {'completion_tokens': 9, 'prompt_tokens': 25, 'total_tokens': 34, 'completion_tokens_details': {'accepted_prediction_tokens': 0, 'audio_tokens': 0, 'reasoning_tokens': 0, 'rejected_prediction_tokens': 0, 'text_tokens': None}, 'prompt_tokens_details': {'audio_tokens': 0, 'cache_write_tokens': None, 'cached_tokens': 0, 'image_tokens': None, 'text_tokens': None}}})\"]}}",
+      "output_format": "json",
+      "input_preview": "{\"data\":{\"prompt\":{\"country\":\"France\"}}}",
+      "output_preview": "{\"llm\":{\"replies\":[\"ChatMessage(_role=<ChatRole.ASSISTANT: 'assistant'>, _content=[TextContent(text='Paris is the capital of France.')], _name=None, _meta={'model': 'gpt-4o-mini-2024-07-18', 'index': 0, 'finish_reason': 'stop', 'usage': {'completion_tokens': 9, 'prompt_tokens': 25, 'total_tokens': 34, 'completion_tokens_details': {'accepted_prediction_tokens': 0, 'audio_tokens': 0, 'reasoning_tokens': 0, 'rejected_prediction_tokens': 0, 'text_tokens': None}, 'prompt_tokens_details': {'audio_tokens': 0, 'cac",
+      "attributes": {
+        "input.mime_type": "application/json",
+        "openinference.span.kind": "CHAIN",
+        "output.mime_type": "application/json"
+      },
+      "resource_attributes": {
+        "telemetry.sdk.language": "python",
+        "telemetry.sdk.name": "opentelemetry",
+        "telemetry.sdk.version": "1.45.2"
+      },
+      "scope_name": "openinference.instrumentation.haystack",
+      "scope_version": "0.1.53",
+      "conventions": [
+        "openinference"
+      ],
+      "ingest_time": "2026-01-01T00:00:00.000000000Z",
+      "schema_version": 2
+    },
+    {
+      "project_id": "01900000-0000-7000-8000-000000000001",
+      "trace_id": "9f6fb8f16e97c9c2cf25ad146a5738e2",
+      "span_id": "4a7dd17299c8bcc8",
+      "parent_span_id": "1f44c9622ea691ce",
+      "name": "ChatPromptBuilder.run",
+      "span_kind": "chain",
+      "start_time": "2025-12-31T23:59:50.026000000Z",
+      "end_time": "2025-12-31T23:59:50.026000000Z",
+      "status": "ok",
+      "service_name": "capture-app",
+      "input": "{\"template\":null,\"template_variables\":null,\"kwargs\":{\"country\":\"France\"}}",
+      "input_format": "json",
+      "output": "{\"prompt\":[\"ChatMessage(_role=<ChatRole.USER: 'user'>, _content=[TextContent(text='Capital of France?')], _name=None, _meta={})\"]}",
+      "output_format": "json",
+      "input_preview": "{\"template\":null,\"template_variables\":null,\"kwargs\":{\"country\":\"France\"}}",
+      "output_preview": "{\"prompt\":[\"ChatMessage(_role=<ChatRole.USER: 'user'>, _content=[TextContent(text='Capital of France?')], _name=None, _meta={})\"]}",
+      "attributes": {
+        "input.mime_type": "application/json",
+        "openinference.span.kind": "CHAIN",
+        "output.mime_type": "application/json"
+      },
+      "resource_attributes": {
+        "telemetry.sdk.language": "python",
+        "telemetry.sdk.name": "opentelemetry",
+        "telemetry.sdk.version": "1.45.2"
+      },
+      "scope_name": "openinference.instrumentation.haystack",
+      "scope_version": "0.1.53",
+      "conventions": [
+        "openinference"
+      ],
+      "ingest_time": "2026-01-01T00:00:00.000000000Z",
+      "schema_version": 2
+    },
+    {
+      "project_id": "01900000-0000-7000-8000-000000000001",
+      "trace_id": "9f6fb8f16e97c9c2cf25ad146a5738e2",
+      "span_id": "dd37f249f814eb58",
+      "parent_span_id": "1f44c9622ea691ce",
+      "name": "OpenAIChatGenerator.run",
+      "span_kind": "llm",
+      "start_time": "2025-12-31T23:59:50.028000000Z",
+      "end_time": "2025-12-31T23:59:50.181000000Z",
+      "status": "ok",
+      "service_name": "capture-app",
+      "provider": "openai",
+      "request_model": "gpt-4o-mini-2024-07-18",
+      "input_tokens": 25,
+      "output_tokens": 9,
+      "total_tokens": 34,
+      "cost_input": 0.000025,
+      "cost_output": 0.000036,
+      "cost_total": 0.000061000000000000005,
+      "cost_source": "computed",
+      "input": "[{\"role\":\"user\",\"parts\":[{\"type\":\"text\",\"content\":\"Capital of France?\"}]}]",
+      "input_format": "messages",
+      "output": "[{\"role\":\"assistant\",\"parts\":[{\"type\":\"text\",\"content\":\"Paris is the capital of France.\"}]}]",
+      "output_format": "messages",
+      "input_preview": "Capital of France?",
+      "output_preview": "Paris is the capital of France.",
+      "attributes": {
+        "input.mime_type": "application/json",
+        "llm.model_name": "gpt-4o-mini-2024-07-18",
+        "llm.provider": "openai",
+        "llm.system": "openai",
+        "llm.token_count.completion": "9",
+        "llm.token_count.prompt": "25",
+        "llm.token_count.total": "34",
+        "openinference.span.kind": "LLM",
+        "output.mime_type": "application/json"
+      },
+      "resource_attributes": {
+        "telemetry.sdk.language": "python",
+        "telemetry.sdk.name": "opentelemetry",
+        "telemetry.sdk.version": "1.45.2"
+      },
+      "scope_name": "openinference.instrumentation.haystack",
+      "scope_version": "0.1.53",
+      "conventions": [
+        "openinference"
+      ],
+      "ingest_time": "2026-01-01T00:00:00.000000000Z",
+      "schema_version": 2
+    }
+  ],
+  "media": [],
+  "rejected_spans": 0
+}

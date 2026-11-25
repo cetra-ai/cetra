@@ -1,0 +1,61 @@
+{
+  "spans": [
+    {
+      "project_id": "01900000-0000-7000-8000-000000000001",
+      "trace_id": "570c17c5729d5e8d7f7f3d46c698a46e",
+      "span_id": "289a10d81e56530a",
+      "name": "Completions",
+      "span_kind": "llm",
+      "start_time": "2025-12-31T23:59:50.000000000Z",
+      "end_time": "2025-12-31T23:59:50.042000000Z",
+      "status": "ok",
+      "service_name": "capture-app",
+      "provider": "groq",
+      "request_model": "openai/gpt-oss-20b",
+      "input_tokens": 14,
+      "output_tokens": 8,
+      "cache_read_tokens": 0,
+      "reasoning_tokens": 0,
+      "total_tokens": 22,
+      "cost_input": 1.0500000000000001e-6,
+      "cost_output": 2.4e-6,
+      "cost_total": 3.45e-6,
+      "cost_source": "computed",
+      "request_params": "{\"model\":\"openai/gpt-oss-20b\"}",
+      "input": "[{\"role\":\"user\",\"parts\":[{\"type\":\"text\",\"content\":\"What is the capital of France?\"}]}]",
+      "input_format": "messages",
+      "output": "[{\"role\":\"assistant\",\"parts\":[{\"type\":\"text\",\"content\":\"The capital of France is Paris.\"}]}]",
+      "output_format": "messages",
+      "input_preview": "What is the capital of France?",
+      "output_preview": "The capital of France is Paris.",
+      "attributes": {
+        "input.mime_type": "application/json",
+        "llm.finish_reason": "stop",
+        "llm.invocation_parameters": "{\"model\": \"openai/gpt-oss-20b\"}",
+        "llm.model_name": "openai/gpt-oss-20b",
+        "llm.provider": "groq",
+        "llm.token_count.completion": "8",
+        "llm.token_count.completion_details.reasoning": "0",
+        "llm.token_count.prompt": "14",
+        "llm.token_count.prompt_details.cache_read": "0",
+        "llm.token_count.total": "22",
+        "openinference.span.kind": "LLM",
+        "output.mime_type": "application/json"
+      },
+      "resource_attributes": {
+        "telemetry.sdk.language": "python",
+        "telemetry.sdk.name": "opentelemetry",
+        "telemetry.sdk.version": "1.45.2"
+      },
+      "scope_name": "openinference.instrumentation.groq",
+      "scope_version": "0.1.40",
+      "conventions": [
+        "openinference"
+      ],
+      "ingest_time": "2026-01-01T00:00:00.000000000Z",
+      "schema_version": 2
+    }
+  ],
+  "media": [],
+  "rejected_spans": 0
+}

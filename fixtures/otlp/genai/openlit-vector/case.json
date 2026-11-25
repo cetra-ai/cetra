@@ -1,0 +1,23 @@
+{
+  "description": "OpenLIT's chroma, qdrant and milvus instrumentors: add, query and delete on Chroma, Qdrant and Milvus Lite.",
+  "origin": "captured",
+  "source": {
+    "instrumentation": "openlit",
+    "instrumentation_version": "1.45.0",
+    "language": "python",
+    "libraries": {
+      "chromadb": "1.5.9",
+      "openlit": "1.45.0",
+      "opentelemetry-sdk": "1.45.2",
+      "pymilvus": "3.0.3",
+      "qdrant-client": "1.20.0"
+    },
+    "captured_at": "2026-11-24T08:59:10Z"
+  },
+  "spec_refs": [
+    "02 § Convention detection",
+    "02 § Mapping tables / Span kind",
+    "02 § Normalization rules"
+  ],
+  "notes": "openlit 1.45.0's vector database instrumentors in envs/openlit, on the tracer provider openlit.init builds (as genai/openlit-chat). No model is called, so the scenario has no turns and the mock is unused. Each database gets add, query and delete, in order: Chroma's in-memory client, Qdrant in :memory: local mode, Milvus Lite on a temp path (Milvus Lite writes a directory there) that is removed first so every run starts empty. OpenLIT reads the collection name from keyword arguments only: Chroma's comes from the collection itself, and Qdrant's and Milvus's are passed positionally, so their span names say unknown (as the spike saw). OpenLIT's Milvus DELETE wrapper raises AttributeError on the response and marks the span ERROR although the delete worked (spike): the fixture keeps the error status. Expected kinds per Q1 (a): the reads (db.operation.name GET, QUERY, SEARCH) are retriever, the writes stay span. openlit.agent.version_hash changes on every process start (spike finding 9): a placeholder. db.client.operation.duration is measured: timing."
+}

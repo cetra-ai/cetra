@@ -1,0 +1,91 @@
+---
+title: Pydantic AI
+description: "Trace Pydantic AI agents with cetra from Python: agent runs, model calls and tool calls, from Pydantic AI's own OpenTelemetry spans."
+---
+
+import { Tabs, TabItem } from "@astrojs/starlight/components";
+import Backing from "../../../../components/Backing.astro";
+
+cetra traces Pydantic AI agent runs as a tree of agent, model call and tool spans, with the messages.
+
+<Backing fixtures={["genai/pydantic-ai-agent-tool"]} />
+
+## Install
+
+<Tabs syncKey="lang">
+  <TabItem label="Python">
+
+```bash
+pip install cetra-sdk "pydantic-ai-slim[openai]"
+```
+
+  </TabItem>
+</Tabs>
+
+## Set up
+
+Pydantic AI writes its spans to the OpenTelemetry tracer that you give it. Start cetra first and pass it cetra's tracer provider. Set `CETRA_API_KEY` to your `sk-cetra-…` key and `OPENAI_API_KEY` to your OpenAI key.
+
+<Tabs syncKey="lang">
+  <TabItem label="Python">
+
+{/* untested: calls OpenAI through Pydantic AI and needs CETRA_API_KEY and OPENAI_API_KEY */}
+```python
+import os
+
+import cetra
+from pydantic_ai import Agent
+from pydantic_ai.agent import InstrumentationSettings
+from pydantic_ai.models.openai import OpenAIChatModel
+from pydantic_ai.providers.openai import OpenAIProvider
+
+cetra.init()
+Agent.instrument_all(
+    InstrumentationSettings(tracer_provider=cetra.tracer_provider(), include_content=True)
+)
+
+model = OpenAIChatModel(
+    "gpt-4o-mini",
+    provider=OpenAIProvider(api_key=os.environ["OPENAI_API_KEY"]),
+)
+agent = Agent(model, name="weather_agent", system_prompt="You are a weather bot.")
+
+
+@agent.tool_plain
+def get_weather(city: str) -> str:
+    """Get the weather."""
+    return f"sunny in {city}"
+
+
+agent.run_sync("What is the weather in Paris?")
+
+cetra.flush()
+```
+
+  </TabItem>
+</Tabs>
+
+The sample sets `include_content=True`, so the prompts, the completions and the tool results are sent to cetra.
+
+## What you get
+
+With one tool call, a run produces:
+
+- an `agent` span named `invoke_agent weather_agent`, with the whole message history as its input and the final answer as its output;
+- an `llm` span for each model call, with the provider `openai`, the request and response models, the token counts, the cost computed from the built-in prices, the messages and the tool definitions;
+- a `tool` span for each tool call, with the arguments as its input and the result as its output.
+
+Pydantic AI's conversation ID (`gen_ai.conversation.id`) becomes the cetra session.
+
+## Limits
+
+- The Pydantic AI Gateway exports its spans to Logfire only, so it is not a trace source for cetra; the calls your agents make through it are traced by this page's setup.
+- The fixture was captured with `pydantic-ai-slim` 2.68.0 and the OpenTelemetry SDK 1.45.2.
+- The fixture has the messages because `include_content` is on in the sample.
+- If a field is missing, look at the span's **Attributes** tab and compare it with [Span attributes](/docs/reference/attributes/).
+
+## Next
+
+- [Traces](/docs/tracing/traces/): read the trace as a tree and a timeline.
+- [Cost and tokens](/docs/tracing/cost-and-tokens/): how cost is computed from the token counts.
+- [Online rules](/docs/evaluation/online-rules/): score these traces automatically.

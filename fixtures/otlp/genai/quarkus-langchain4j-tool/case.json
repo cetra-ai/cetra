@@ -1,0 +1,18 @@
+{
+  "description": "Quarkus LangChain4j 1.15.1 on Quarkus 3.40.1.2: one AI service call with one tool round, traced by quarkus-opentelemetry with the four include-* content switches on.",
+  "origin": "captured",
+  "source": {
+    "instrumentation": "quarkus-langchain4j-core",
+    "instrumentation_version": "1.15.1",
+    "language": "java",
+    "libraries": {
+      "quarkus-core": "3.40.1.2",
+      "quarkus-langchain4j-core": "1.15.1",
+      "quarkus-langchain4j-openai": "1.15.1"
+    },
+    "captured_at": "2026-11-24T16:33:31Z"
+  },
+  "spec_refs": [
+    "02 § Mapping tables / Input / output"
+  ]
+}

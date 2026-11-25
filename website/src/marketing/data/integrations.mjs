@@ -5,8 +5,12 @@ export const MIGRATING_GROUP = "Migrating";
 
 /**
  * @typedef {object} Test
- * @property {"recorded" | "sdk" | "handwritten"} kind "recorded": spans captured from the real library; "sdk": an SDK test; "handwritten": spans written by hand
+ * @property {"recorded" | "sdk" | "handwritten" | "setup"} kind "recorded": spans captured from the real library; "sdk": an SDK test; "handwritten": spans written by hand; "setup": no spans or test in the repository
  * @property {"Python" | "TypeScript" | null} lang the language the test covers, or null for both
+ */
+
+/**
+ * @typedef {Test & { kind: "recorded" | "sdk" | "handwritten" }} Tested
  */
 
 /**
@@ -17,19 +21,20 @@ export const MIGRATING_GROUP = "Migrating";
  * @property {string} href      the docs route, e.g. "/docs/integrations/openai/"
  * @property {boolean} python   ✓ in the Python column
  * @property {boolean} typescript ✓ in the TypeScript column
- * @property {Test[]} tests    the "Tested against" cell, parsed
+ * @property {Tested[]} tests  the "Tested against" cell, parsed; a card never has a "setup" test
  */
 
 const ROW =
   /^\| \[([^\]]+)\]\((\/docs\/integrations\/[a-z0-9-]+\/)\) \| (✓|—) \| (✓|—) \| (.*?) \| (.*?) \|\s*$/;
 const CARD = /<LinkCard title="([^"]+)" description="([^"]+)" href="([^"]+)" \/>\s*$/;
-const TEST = /^(captured|SDK test|hand-written)(?: \((Python|TypeScript)\))?$/;
+const TEST = /^(captured|SDK test|hand-written|setup only)(?: \((Python|TypeScript)\))?$/;
 
 /** The "Tested against" wording in the docs table, mapped to `Test.kind`. */
 const KIND = {
   captured: "recorded",
   "SDK test": "sdk",
   "hand-written": "handwritten",
+  "setup only": "setup",
 };
 
 /**
@@ -87,8 +92,10 @@ export function parseIntegrations(mdx) {
   });
 
   const cardHrefs = new Set(cards.map((card) => card.href));
-  for (const href of rows.keys()) {
-    if (!cardHrefs.has(href)) {
+  for (const [href, row] of rows) {
+    // A setup-only row has no card and is left out of the list.
+    const setupOnly = row.tests.every((test) => test.kind === "setup");
+    if (!cardHrefs.has(href) && !setupOnly) {
       throw new Error(`integrations: no card for table row ${href}`);
     }
   }
@@ -98,7 +105,10 @@ export function parseIntegrations(mdx) {
     if (!row) {
       throw new Error(`integrations: no table row for card ${card.href}`);
     }
-    return { ...card, ...row };
+    if (row.tests.some((test) => test.kind === "setup")) {
+      throw new Error(`integrations: card for setup-only row ${card.href}`);
+    }
+    return { ...card, ...row, tests: /** @type {Tested[]} */ (row.tests) };
   });
 }
 

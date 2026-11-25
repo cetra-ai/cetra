@@ -1,0 +1,88 @@
+---
+title: LiveKit Agents
+description: "Send LiveKit Agents session, turn, model and tool spans to cetra, with the content LiveKit records. Voice spans are not covered."
+---
+
+import Backing from "../../../../components/Backing.astro";
+
+cetra reads the spans LiveKit Agents writes for an agent session: its turns, its model calls and its function tools, with the content LiveKit records for them.
+
+<Backing fixtures={["livekit/text-session"]} />
+
+## Install
+
+Install LiveKit Agents and its OpenAI plugin. The fixture was captured with both at 1.8.12.
+
+```bash
+pip install livekit-agents==1.8.12 livekit-plugins-openai==1.8.12
+```
+
+## Set up
+
+LiveKit Agents exports through the tracer provider you pass to `set_tracer_provider`. Set the exporter variables, then start your agent.
+
+```bash
+export OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:8080
+export OTEL_EXPORTER_OTLP_HEADERS="Authorization=Bearer <SK_CETRA_KEY>"
+```
+
+Replace `<SK_CETRA_KEY>` with your `sk-cetra-…` API key. See [Send OpenTelemetry](/docs/get-started/opentelemetry/). The exporter reads its endpoint and headers from these variables and appends `/v1/traces`.
+
+{/* untested: the fixture ran this shape in text mode with a function tool on a local stand-in for the OpenAI API; this sample needs OPENAI_API_KEY and a running cetra */}
+```python
+import asyncio
+
+from livekit.agents import Agent, AgentSession
+from livekit.agents.telemetry import set_tracer_provider
+from livekit.plugins import openai
+from opentelemetry.exporter.otlp.proto.http.trace_exporter import OTLPSpanExporter
+from opentelemetry.sdk.trace import TracerProvider
+from opentelemetry.sdk.trace.export import BatchSpanProcessor
+
+provider = TracerProvider()
+provider.add_span_processor(BatchSpanProcessor(OTLPSpanExporter()))
+set_tracer_provider(provider, allow_pii=True)
+
+
+class Assistant(Agent):
+    def __init__(self) -> None:
+        super().__init__(instructions="You are a weather assistant.")
+
+
+async def main() -> None:
+    session = AgentSession(llm=openai.LLM(model="gpt-4o-mini"))
+    await session.start(Assistant())
+    await session.run(user_input="What is the weather in Paris?")
+    await session.aclose()
+    provider.force_flush()
+
+
+asyncio.run(main())
+```
+
+Leave `allow_pii` at `True` to keep the content. With `allow_pii=False`, or `LIVEKIT_TELEMETRY_ALLOW_PII=false`, LiveKit removes the content before the export.
+
+## What you get
+
+One session is one trace:
+
+- an `agent` span for each turn, with the user's text as its input and the answer as its output;
+- an `llm` span for each model call, with the provider, the models, the token counts, the cost and the messages;
+- a `chain` span for each model call's `llm_node`, which holds the context it sent and the text it got back;
+- a `tool` span for each function tool, with its arguments and its result;
+- `span`s for the session's own steps, such as starting the agent and closing the session.
+
+The provider is `openai` when the model calls go to `api.openai.com`. cetra maps that host to `openai`, so the cost is priced.
+
+## Limits
+
+- Voice is not covered. The fixture ran in text mode, with no room and no audio. The spans of speech-to-text, text-to-speech and end-of-utterance detection were not captured.
+- Each model call writes three spans. Only the `llm` span carries the tokens and the cost, so count model calls on that span alone.
+- A model whose base URL host cetra does not map gets no provider. cetra does not read the host as a provider name.
+- The fixture was captured with `livekit-agents` 1.8.12 and `livekit-plugins-openai` 1.8.12.
+- If a field is missing, look at the span's **Attributes** tab and compare it with [Span attributes](/docs/reference/attributes/).
+
+## Next
+
+- [Traces](/docs/tracing/traces/): read the trace as a tree and a timeline.
+- [Cost and tokens](/docs/tracing/cost-and-tokens/): how cost is computed from the token counts.

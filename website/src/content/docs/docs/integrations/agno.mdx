@@ -1,0 +1,78 @@
+---
+title: Agno
+description: "Trace Agno agents with cetra from Python: agent runs, model calls and tool calls."
+---
+
+import { Tabs, TabItem } from "@astrojs/starlight/components";
+import Backing from "../../../../components/Backing.astro";
+
+Trace Agno agents with cetra from Python: agent runs, model calls and tool calls.
+
+<Backing fixtures={["openinference/agno-agent-tool"]} />
+
+## Install
+
+<Tabs syncKey="lang">
+  <TabItem label="Python">
+
+```bash
+pip install "cetra-sdk[agno]" agno openai
+```
+
+  </TabItem>
+</Tabs>
+
+## Set up
+
+<Tabs syncKey="lang">
+  <TabItem label="Python">
+
+{/* untested: calls OpenAI through Agno and needs OPENAI_API_KEY */}
+```python
+import os
+
+import cetra
+from agno.agent import Agent
+from agno.models.openai import OpenAIChat
+
+cetra.init(instrument=["agno"])
+
+
+def get_weather(city: str) -> str:
+    """Look up the weather for a city."""
+    return f"sunny in {city}"
+
+
+agent = Agent(
+    name="weather-agent",
+    model=OpenAIChat(id="gpt-4o-mini", api_key=os.environ["OPENAI_API_KEY"]),
+    tools=[get_weather],
+    instructions="You are a weather assistant.",
+)
+agent.run("What is the weather in Paris?")
+
+cetra.flush()
+```
+
+  </TabItem>
+</Tabs>
+
+## What you get
+
+- An agent run is an `agent` span named after the agent, with the run's input and output.
+- Each model call is an `llm` span with the messages, the tool definitions, the token counts and the cost, computed from the built-in prices.
+- Each tool call is a `tool` span with the tool's input and output.
+- The Agno session (`session.id`) becomes the trace's session.
+
+## Limits
+
+- Do not also enable `openai`: each model call would be recorded twice and counted twice.
+- Agno sends its own telemetry unless `AGNO_TELEMETRY` is `false`.
+- The fixture was captured with agno 3.2.0 and openinference-instrumentation-agno 1.2.0.
+- If a field is missing, look at the span's **Attributes** tab and compare it with [Span attributes](/docs/reference/attributes/).
+
+## Next
+
+- [Traces](/docs/tracing/traces/): read the trace as a tree and a timeline.
+- [Cost and tokens](/docs/tracing/cost-and-tokens/): how cost is computed from the token counts.
+- [Online rules](/docs/evaluation/online-rules/): score these traces automatically.

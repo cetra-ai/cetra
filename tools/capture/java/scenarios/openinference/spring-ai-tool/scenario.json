@@ -1,0 +1,46 @@
+{
+  "description": "Spring AI 2.0.2 on Spring Boot 4.1.2, OpenInference route: one ChatClient call with one tool round, traced by OpenInference's Spring AI handler as the only observation handler, inside an application span.",
+  "spec_refs": [
+    "02 § Mapping tables / Input / output"
+  ],
+  "instrumentation": "openinference-instrumentation-springAI",
+  "libraries": [
+    "openinference-instrumentation-springAI",
+    "spring-ai-openai",
+    "spring-boot"
+  ],
+  "turns": [
+    {
+      "api": "openai.chat",
+      "model": "gpt-4o-mini",
+      "message": {
+        "tool_calls": [
+          {
+            "id": "call_capture_1",
+            "name": "get_weather",
+            "arguments": {
+              "city": "Lyon"
+            }
+          }
+        ]
+      },
+      "finish": "tool_calls",
+      "usage": {
+        "input": 82,
+        "output": 17
+      }
+    },
+    {
+      "api": "openai.chat",
+      "model": "gpt-4o-mini",
+      "message": {
+        "text": "It is sunny in Lyon."
+      },
+      "finish": "stop",
+      "usage": {
+        "input": 131,
+        "output": 12
+      }
+    }
+  ]
+}

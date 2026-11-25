@@ -1,0 +1,41 @@
+[project]
+name = "cetra-capture-env-browser-use"
+version = "0.0.0"
+requires-python = "==3.13.*"
+dependencies = [
+  # Browser Use 1.0 (IN6.1 § Versions): its own environment, not tools/capture/py.
+  "browser-use==1.0.6",
+  # The pydantic-ai that browser-use 1.0.6 pins (pydantic-ai-slim[anthropic,google,openai]==2.66.0), listed so the pin is visible here.
+  "pydantic-ai-slim[anthropic,google,openai]==2.66.0",
+  # Chromium for Browser Use: `playwright install chromium` (IN6.1 step 8). Browser Use drives it over CDP.
+  "playwright==1.65.2",
+  # The capture harness, a package of its own (tools/capture/harness, module capture_py).
+  "cetra-capture-harness",
+]
+
+[dependency-groups]
+dev = ["ruff==0.17.3", "mypy==2.4.1"]
+
+[tool.uv]
+package = false
+exclude-newer = "7 days" # D74/D117: no release younger than 7 days
+
+[tool.uv.sources]
+cetra-capture-harness = { path = "../../harness", editable = true }
+
+[tool.ruff]
+target-version = "py313"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "W", "F", "I", "B", "UP", "SIM", "RUF", "PT", "ANN", "S", "BLE", "N"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["capture_py"]
+
+[tool.mypy]
+strict = true
+python_version = "3.13"
+files = ["scenarios"]
+# Every scenario entry point is main.py. mypy maps those paths to one module.
+exclude = ["main\\.py$"]

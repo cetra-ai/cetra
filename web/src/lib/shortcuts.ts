@@ -59,7 +59,7 @@ export const SHORTCUTS: readonly Shortcut[] = [
   {
     keys: "j / k, ↓ / ↑",
     description: "Next / previous row",
-    scope: "lists, tree",
+    scope: "lists, tree, session turns",
     bindings: [
       { id: "row-next", key: "j" },
       { id: "row-next", key: "ArrowDown" },

@@ -1,0 +1,73 @@
+---
+title: Azure AI Evaluation
+description: "Run Azure AI Evaluation evaluators and send each result to cetra as a score, with the judge's model calls traced. Setup only: not run."
+---
+
+Azure AI Evaluation scores answers with evaluators, from plain code such as F1 to LLM judges that call a model. This page traces the judge's model calls and sends each evaluator result to cetra as a score on the trace. It is setup only: the sample was not run.
+
+## Install
+
+```bash
+pip install "cetra-sdk[openai]" azure-ai-evaluation
+```
+
+## Set up
+
+The judge-based evaluators, such as `CoherenceEvaluator`, call the Azure OpenAI deployment named by the model configuration you pass them. cetra's OpenAI instrumentation traces those calls, as on the [Azure OpenAI](/docs/integrations/azure-openai/) page. `F1ScoreEvaluator` needs no model. Score inside a span, so the score has a trace to attach to:
+
+{/* untested: needs AZURE_OPENAI_ENDPOINT, AZURE_OPENAI_API_KEY and CETRA_API_KEY; the F1 result was checked in the spike, this wiring was not run */}
+```python
+import os
+
+import cetra
+from azure.ai.evaluation import CoherenceEvaluator, F1ScoreEvaluator
+
+cetra.init(instrument=["openai"])
+
+model_config = {
+    "azure_endpoint": os.environ["AZURE_OPENAI_ENDPOINT"],
+    "api_key": os.environ["AZURE_OPENAI_API_KEY"],
+    "azure_deployment": "<DEPLOYMENT_NAME>",
+}
+
+question = "What is the capital of France?"
+response = "Paris."
+
+with cetra.span("evaluation", input={"question": question, "response": response}):
+    coherence = CoherenceEvaluator(model_config)(query=question, response=response)
+    cetra.score(
+        trace_id=cetra.current_trace_id(),
+        name="coherence",
+        value=coherence["coherence"],
+        reason=coherence["coherence_reason"],
+    )
+
+    f1 = F1ScoreEvaluator()(response=response, ground_truth="Paris.")
+    cetra.score(
+        trace_id=cetra.current_trace_id(),
+        name="f1_score",
+        value=f1["f1_score"],
+        metadata={"threshold": f1["f1_score_threshold"], "result": f1["f1_score_result"]},
+    )
+
+cetra.flush()
+```
+
+Set `CETRA_API_KEY` to your `sk-cetra-…` key first, and replace `<DEPLOYMENT_NAME>` with your deployment's name.
+
+## What you get
+
+- The judge's model calls as `llm` spans under the `evaluation` span, with the model, the token counts and the cost, as on the [Azure OpenAI](/docs/integrations/azure-openai/) page.
+- One numeric score per evaluator on the trace of the `evaluation` span: `coherence`, an integer from 1 to 5 with the judge's reasoning as the score's reason, and `f1_score`, from 0 to 1, with the threshold and the pass or fail result as metadata.
+
+## Limits
+
+- Setup only: the sample on this page was not run. The spike ran `F1ScoreEvaluator` and saw the judge's model call as an `llm` span; the `cetra.score` wiring was not run.
+- The spike's judge run against a fake model failed to parse the reply, so the judge path here comes from the package's code, not from a completed run.
+- Azure AI Evaluation writes no spans to cetra. Its own result events go to Azure Monitor as log records, which cetra discards.
+- A judge can return `None` for an empty query or response. `cetra.score` rejects a `None` value with a warning and queues nothing.
+
+## Next
+
+- [Scores](/docs/evaluation/scores/): the score API and how scores are read.
+- [Azure OpenAI](/docs/integrations/azure-openai/): the instrumentation that traces the judge's calls.

@@ -1,0 +1,137 @@
+{
+  "spans": [
+    {
+      "project_id": "01900000-0000-7000-8000-000000000001",
+      "trace_id": "02f195e029816fad4980e6bd4d154409",
+      "span_id": "bc139eb3d0e9457c",
+      "name": "chat gpt-4o-mini",
+      "span_kind": "llm",
+      "start_time": "2025-12-31T23:59:50.000000000Z",
+      "end_time": "2025-12-31T23:59:50.149000000Z",
+      "status": "unset",
+      "service_name": "capture-app",
+      "provider": "openai",
+      "request_model": "gpt-4o-mini",
+      "operation": "chat",
+      "input_tokens": 82,
+      "output_tokens": 17,
+      "total_tokens": 99,
+      "cost_input": 0.000082,
+      "cost_output": 0.000068,
+      "cost_total": 0.00015000000000000001,
+      "cost_source": "computed",
+      "input": "[{\"role\":\"user\",\"parts\":[{\"type\":\"text\",\"content\":\"What is the weather in Lyon? Use the tool.\"}]}]",
+      "input_format": "messages",
+      "output": "[{\"role\":\"assistant\",\"parts\":[{\"type\":\"tool_call\",\"id\":\"call_capture_1\",\"name\":\"get_weather\",\"arguments\":{\"city\":\"Lyon\"}}],\"finish_reason\":\"toolcalls\"}]",
+      "output_format": "messages",
+      "input_preview": "What is the weather in Lyon? Use the tool.",
+      "attributes": {
+        "gen_ai.operation.name": "chat",
+        "gen_ai.request.model": "gpt-4o-mini",
+        "gen_ai.response.finish_reason": "[\"ToolCalls\"]",
+        "gen_ai.response.id": "chatcmpl-capture-1",
+        "gen_ai.system": "openai",
+        "gen_ai.usage.input_tokens": "82",
+        "gen_ai.usage.output_tokens": "17",
+        "server.address": "https://api.openai.com/v1",
+        "server.port": "443"
+      },
+      "resource_attributes": {
+        "telemetry.sdk.language": "dotnet",
+        "telemetry.sdk.name": "opentelemetry",
+        "telemetry.sdk.version": "1.21.0"
+      },
+      "scope_name": "Microsoft.SemanticKernel.Diagnostics",
+      "conventions": [
+        "genai"
+      ],
+      "ingest_time": "2026-01-01T00:00:00.000000000Z",
+      "schema_version": 2
+    },
+    {
+      "project_id": "01900000-0000-7000-8000-000000000001",
+      "trace_id": "3792687b6e94649ef27861d990c55bfe",
+      "span_id": "527ab55ced4eaa5b",
+      "name": "execute_tool get_weather",
+      "span_kind": "tool",
+      "start_time": "2025-12-31T23:59:50.168000000Z",
+      "end_time": "2025-12-31T23:59:50.172000000Z",
+      "status": "unset",
+      "service_name": "capture-app",
+      "operation": "execute_tool",
+      "input": "{\"city\":\"Lyon\"}",
+      "input_format": "json",
+      "output": "Sunny in Lyon, 21 C",
+      "output_format": "text",
+      "input_preview": "{\"city\":\"Lyon\"}",
+      "output_preview": "Sunny in Lyon, 21 C",
+      "attributes": {
+        "gen_ai.operation.name": "execute_tool",
+        "gen_ai.tool.description": "Get the current weather for a city",
+        "gen_ai.tool.name": "get_weather"
+      },
+      "resource_attributes": {
+        "telemetry.sdk.language": "dotnet",
+        "telemetry.sdk.name": "opentelemetry",
+        "telemetry.sdk.version": "1.21.0"
+      },
+      "scope_name": "Microsoft.SemanticKernel",
+      "conventions": [
+        "genai"
+      ],
+      "ingest_time": "2026-01-01T00:00:00.000000000Z",
+      "schema_version": 2
+    },
+    {
+      "project_id": "01900000-0000-7000-8000-000000000001",
+      "trace_id": "394a2b0174b0f849ec836cf98cdd754a",
+      "span_id": "2fd71ed2b84ab04b",
+      "name": "chat gpt-4o-mini",
+      "span_kind": "llm",
+      "start_time": "2025-12-31T23:59:50.175000000Z",
+      "end_time": "2025-12-31T23:59:50.210000000Z",
+      "status": "unset",
+      "service_name": "capture-app",
+      "provider": "openai",
+      "request_model": "gpt-4o-mini",
+      "operation": "chat",
+      "input_tokens": 131,
+      "output_tokens": 12,
+      "total_tokens": 143,
+      "cost_input": 0.000131,
+      "cost_output": 0.000048,
+      "cost_total": 0.00017900000000000001,
+      "cost_source": "computed",
+      "input": "[{\"role\":\"user\",\"parts\":[{\"type\":\"text\",\"content\":\"What is the weather in Lyon? Use the tool.\"}]},{\"role\":\"assistant\",\"parts\":[{\"type\":\"tool_call\",\"id\":\"call_capture_1\",\"name\":\"get_weather\",\"arguments\":{\"city\":\"Lyon\"}}]},{\"role\":\"tool\",\"parts\":[{\"type\":\"text\",\"content\":\"Sunny in Lyon, 21 C\"}]}]",
+      "input_format": "messages",
+      "output": "[{\"role\":\"assistant\",\"parts\":[{\"type\":\"text\",\"content\":\"It is sunny in Lyon.\"}],\"finish_reason\":\"stop\"}]",
+      "output_format": "messages",
+      "input_preview": "What is the weather in Lyon? Use the tool.",
+      "output_preview": "It is sunny in Lyon.",
+      "attributes": {
+        "gen_ai.operation.name": "chat",
+        "gen_ai.request.model": "gpt-4o-mini",
+        "gen_ai.response.finish_reason": "[\"Stop\"]",
+        "gen_ai.response.id": "chatcmpl-capture-2",
+        "gen_ai.system": "openai",
+        "gen_ai.usage.input_tokens": "131",
+        "gen_ai.usage.output_tokens": "12",
+        "server.address": "https://api.openai.com/v1",
+        "server.port": "443"
+      },
+      "resource_attributes": {
+        "telemetry.sdk.language": "dotnet",
+        "telemetry.sdk.name": "opentelemetry",
+        "telemetry.sdk.version": "1.21.0"
+      },
+      "scope_name": "Microsoft.SemanticKernel.Diagnostics",
+      "conventions": [
+        "genai"
+      ],
+      "ingest_time": "2026-01-01T00:00:00.000000000Z",
+      "schema_version": 2
+    }
+  ],
+  "media": [],
+  "rejected_spans": 0
+}

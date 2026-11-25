@@ -1,0 +1,30 @@
+{
+  "description": "Groq SDK chat completion, one turn, traced by OpenInference through cetra's SDK.",
+  "spec_refs": [
+    "02 \u00a7 Convention detection",
+    "02 \u00a7 Model, provider, usage",
+    "02 \u00a7 Cost computation"
+  ],
+  "notes": "The Groq client keeps its default base URL https://api.groq.com, and the harness routes the request to the capture mock under that host (D-IN-3). The instrumentor writes llm.provider groq, so the provider comes from that explicit value (D-IN-2). The model openai/gpt-oss-20b is priced by its groq row in the built-in snapshot's fixtures. Cost is computed, not reported. Token counts are input 14 and output 8.",
+  "instrumentation": "openinference-instrumentation-groq",
+  "libraries": [
+    "groq",
+    "openinference-instrumentation-groq",
+    "opentelemetry-sdk"
+  ],
+  "turns": [
+    {
+      "api": "openai.chat",
+      "model": "openai/gpt-oss-20b",
+      "host": "api.groq.com",
+      "message": {
+        "text": "The capital of France is Paris."
+      },
+      "finish": "stop",
+      "usage": {
+        "input": 14,
+        "output": 8
+      }
+    }
+  ]
+}

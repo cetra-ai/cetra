@@ -1,0 +1,81 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+  <modelVersion>4.0.0</modelVersion>
+  <parent>
+    <groupId>cetra.capture</groupId>
+    <artifactId>capture-reactor</artifactId>
+    <version>0.0.0</version>
+    <relativePath>../../../pom.xml</relativePath>
+  </parent>
+  <artifactId>openinference-spring-ai-tool</artifactId>
+  <packaging>jar</packaging>
+
+  <!-- The same Boot app as genai/spring-ai-boot-tool plus OpenInference's Spring AI
+       handler 0.1.10 (IN8.3, from spikes/m8-files/followup/boot-ai with -Dm8.oi=true
+       and spike 3's MicrometerTracingAutoConfiguration exclusion). -->
+  <properties>
+    <spring-boot.version>4.1.2</spring-boot.version>
+    <spring-ai.version>2.0.2</spring-ai.version>
+    <openinference-spring-ai.version>0.1.10</openinference-spring-ai.version>
+  </properties>
+  <dependencyManagement>
+    <dependencies>
+      <dependency>
+        <groupId>org.springframework.boot</groupId>
+        <artifactId>spring-boot-dependencies</artifactId>
+        <version>${spring-boot.version}</version>
+        <type>pom</type>
+        <scope>import</scope>
+      </dependency>
+      <dependency>
+        <groupId>org.springframework.ai</groupId>
+        <artifactId>spring-ai-bom</artifactId>
+        <version>${spring-ai.version}</version>
+        <type>pom</type>
+        <scope>import</scope>
+      </dependency>
+    </dependencies>
+  </dependencyManagement>
+  <dependencies>
+    <dependency>
+      <groupId>cetra.capture</groupId>
+      <artifactId>harness</artifactId>
+    </dependency>
+    <dependency>
+      <groupId>org.springframework.boot</groupId>
+      <artifactId>spring-boot-starter-opentelemetry</artifactId>
+    </dependency>
+    <dependency>
+      <groupId>org.springframework.boot</groupId>
+      <artifactId>spring-boot-starter-actuator</artifactId>
+    </dependency>
+    <dependency>
+      <groupId>org.springframework.ai</groupId>
+      <artifactId>spring-ai-starter-model-openai</artifactId>
+      <version>${spring-ai.version}</version>
+    </dependency>
+    <dependency>
+      <groupId>com.arize</groupId>
+      <artifactId>openinference-instrumentation-springAI</artifactId>
+      <version>${openinference-spring-ai.version}</version>
+    </dependency>
+  </dependencies>
+  <build>
+    <resources>
+      <resource>
+        <filtering>true</filtering>
+        <directory>src/main/resources</directory>
+        <includes>
+          <include>capture-versions.properties</include>
+        </includes>
+      </resource>
+      <resource>
+        <filtering>false</filtering>
+        <directory>src/main/resources</directory>
+        <excludes>
+          <exclude>capture-versions.properties</exclude>
+        </excludes>
+      </resource>
+    </resources>
+  </build>
+</project>

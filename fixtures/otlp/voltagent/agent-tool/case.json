@@ -1,0 +1,23 @@
+{
+  "description": "VoltAgent agent run with one tool call inside a conversation, traced by VoltAgent's default observability.",
+  "origin": "captured",
+  "source": {
+    "instrumentation": "@voltagent/core",
+    "instrumentation_version": "2.11.1",
+    "language": "typescript",
+    "libraries": {
+      "@opentelemetry/sdk-trace-node": "2.12.0",
+      "@voltagent/core": "2.11.1",
+      "ai": "6.0.322"
+    },
+    "captured_at": "2026-11-23T20:18:53Z"
+  },
+  "spec_refs": [
+    "02 § Convention detection",
+    "02 § Mapping tables / Span kind",
+    "02 § Mapping tables / Model, provider, usage",
+    "02 § Mapping tables / Input / output",
+    "02 § Mapping tables / Context fields"
+  ],
+  "notes": "The agent is weather-agent with one tool, get_weather, on openai.chat('gpt-4o-mini') at the mock. setup() registers the harness's global tracer provider, which VoltAgent's default observability uses. generateText runs with userId user-1 and conversationId conv-1, so the agent's memory writes add memory spans: span_names keeps the three spans of the run (the root agent span, llm:generateText and tool.execution:get_weather). The root span has no span.type and entity.type agent; the llm span carries llm.* keys and only the last step's usage (131 and 12); the tool span carries the plain input and output. operation.id, voltagent.operation_id and agent.messages.ui are random per run and listed as volatile. No telemetry leaves the process: the mock is the only host."
+}

@@ -194,6 +194,8 @@ mod tests {
         Turn {
             api: Api::GeminiGenerateContent,
             model: "gemini-2.5-flash".to_owned(),
+            auxiliary: false,
+            host: None,
             message,
             finish,
             usage,

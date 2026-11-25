@@ -6,7 +6,9 @@ Tools that are not part of the product. Benchmark scripts live here too.
 
 `cetra-capture` records the spans a real instrumentation library emits. A short Python or TypeScript program calls a local mock of the OpenAI, Anthropic and Gemini HTTP APIs and exports OTLP to a receiver in the same tool. The tool then writes `fixtures/otlp/<group>/<case>/case.json` and `input.json`.
 
-Scenarios live in `tools/capture/py/scenarios/<group>/<case>/` (uv) and `tools/capture/ts/scenarios/<group>/<case>/` (pnpm). Each directory holds `scenario.json` and the program.
+Scenarios live in `tools/capture/py/scenarios/<group>/<case>/` (uv) and `tools/capture/ts/scenarios/<group>/<case>/` (pnpm). A Python scenario whose packages cannot share `tools/capture/py`'s lock lives under `tools/capture/envs/<env>/scenarios/<group>/<case>/` and runs in that environment. Each directory holds `scenario.json` and the program.
+
+The Python harness that scenarios import is a uv package of its own, `tools/capture/harness` (`cetra-capture-harness`, imported as `capture_py`). `tools/capture/py` and any scenario environment under `tools/capture/envs/<env>/` depend on it by path, so the import path does not change.
 
 The recipes are in the tool; their design is in K9–K10 of [`docs/plans/b2-capture/`](../docs/plans/b2-capture/README.md):
 

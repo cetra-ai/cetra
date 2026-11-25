@@ -216,6 +216,8 @@ mod tests {
         Turn {
             api: Api::AnthropicMessages,
             model: "claude-sonnet-4-5".to_owned(),
+            auxiliary: false,
+            host: None,
             message: Some(message),
             finish: Some(finish),
             usage,

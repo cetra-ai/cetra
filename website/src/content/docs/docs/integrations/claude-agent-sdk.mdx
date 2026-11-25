@@ -1,0 +1,91 @@
+---
+title: Claude Agent SDK
+description: "Trace Claude Agent SDK runs with cetra from Python and TypeScript, through Claude Code's OpenTelemetry spans."
+---
+
+import { Tabs, TabItem } from "@astrojs/starlight/components";
+import Backing from "../../../../components/Backing.astro";
+
+Trace Claude Agent SDK runs with cetra from Python and TypeScript, through Claude Code's OpenTelemetry spans. The SDK runs Claude Code, and Claude Code exports the spans.
+
+<Backing fixtures={["claude_code/bash-tool"]} />
+
+## Install
+
+<Tabs syncKey="lang">
+  <TabItem label="Python">
+
+```bash
+pip install claude-agent-sdk
+```
+
+  </TabItem>
+  <TabItem label="TypeScript">
+
+```bash
+npm install @anthropic-ai/claude-agent-sdk
+```
+
+  </TabItem>
+</Tabs>
+
+## Set up
+
+Set the same environment variables as [Claude Code](/docs/integrations/claude-code/). When your application starts a turn inside its own OpenTelemetry span, the SDK passes that span's context to Claude Code, and the turn nests under your application's span in one trace.
+
+<Tabs syncKey="lang">
+  <TabItem label="Python">
+
+{/* untested: needs the Claude Agent SDK and a model */}
+```python
+from claude_agent_sdk import ClaudeAgentOptions
+
+options = ClaudeAgentOptions(
+    env={
+        "CLAUDE_CODE_ENABLE_TELEMETRY": "1",
+        "CLAUDE_CODE_ENHANCED_TELEMETRY_BETA": "1",
+        "OTEL_TRACES_EXPORTER": "otlp",
+        "OTEL_EXPORTER_OTLP_ENDPOINT": "<CETRA_URL>",
+        "OTEL_EXPORTER_OTLP_HEADERS": "Authorization=Bearer%20<SK_CETRA_KEY>",
+    },
+)
+```
+
+  </TabItem>
+  <TabItem label="TypeScript">
+
+The TypeScript SDK starts Claude Code the same way and reads the same variables.
+
+```bash
+export CLAUDE_CODE_ENABLE_TELEMETRY=1
+export CLAUDE_CODE_ENHANCED_TELEMETRY_BETA=1
+export OTEL_TRACES_EXPORTER=otlp
+export OTEL_EXPORTER_OTLP_ENDPOINT=<CETRA_URL>
+export OTEL_EXPORTER_OTLP_HEADERS="Authorization=Bearer%20<SK_CETRA_KEY>"
+```
+
+  </TabItem>
+</Tabs>
+
+Replace `<CETRA_URL>` with your server's URL and `<SK_CETRA_KEY>` with your `sk-cetra-…` key. These variables do not run the hooks of `cetra agents setup`, so a turn that starts this way has no branch from the hook.
+
+## What you get
+
+A turn started by the SDK is one trace, with the shape the [Claude Code](/docs/integrations/claude-code/) page describes:
+
+- the turn as an `agent` span, with the prompt as its input when content is on;
+- each model call as an `llm` span, with the model and its token counts;
+- each tool call as a `tool` span named after the tool.
+
+## Limits
+
+- The captured spans are Claude Code's, recorded from the Claude Code process that the SDK runs.
+- The application's own span (the parent of the Claude Code turn) is whatever your application's tracing produces.
+- Tested with Claude Code 2.1.323. Claude Code's span names and attributes are in beta, and they can change between versions.
+- If a field is missing, look at the span's **Attributes** tab and compare it with [Span attributes](/docs/reference/attributes/).
+
+## Next
+
+- [Traces](/docs/tracing/traces/): read the trace as a tree and a timeline.
+- [Cost and tokens](/docs/tracing/cost-and-tokens/): how cost is computed from the token counts.
+- [Online rules](/docs/evaluation/online-rules/): score these traces automatically.

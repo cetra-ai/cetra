@@ -1,0 +1,18 @@
+{
+  "description": "Spring AI 2.0.2 on Spring Boot 4.1.2, Micrometer route: one ChatClient call with one tool round, traced by Spring AI's chat-model observations exported over OTLP by Boot's OpenTelemetry starter.",
+  "origin": "captured",
+  "source": {
+    "instrumentation": "spring-ai-openai",
+    "instrumentation_version": "2.0.2",
+    "language": "java",
+    "libraries": {
+      "spring-ai-openai": "2.0.2",
+      "spring-boot": "4.1.2"
+    },
+    "captured_at": "2026-11-24T16:32:09Z"
+  },
+  "spec_refs": [
+    "02 § Mapping tables / Input / output"
+  ],
+  "notes": "Boot's HTTP client `POST` spans (one per model request) are dropped by span_names: their Micrometer keys `host` and `target.host` carry the mock's loopback address, which the scrub rewrites only under the `server.address` key, so the leak check refuses them. The kept names are exactly as Spring writes them, including `tool _calling ` with a leading and a trailing space."
+}

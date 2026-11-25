@@ -3,7 +3,7 @@ import { test } from "node:test";
 import { checkFile } from "./check-backing.mjs";
 
 const exists = (relative) =>
-  ["openinference/openai-chat-tool", "genai/tool-span"].includes(relative);
+  ["openinference/openai-chat-tool", "genai/tool-span", "n8n/agent-webhook"].includes(relative);
 
 test("an existing case has no finding", () => {
   const text = '<Backing fixtures={["openinference/openai-chat-tool"]} />';
@@ -29,4 +29,16 @@ test("a box with tests only is fine", () => {
 
 test("an empty box is a finding", () => {
   assert.equal(checkFile("p.mdx", "<Backing />", exists).length, 1);
+});
+
+test("a group with a digit names an existing case", () => {
+  const text = '<Backing fixtures={["n8n/agent-webhook"]} />';
+  assert.deepEqual(checkFile("p.mdx", text, exists), []);
+});
+
+test("a group with a digit names a missing case as a finding", () => {
+  const text = '<Backing fixtures={["n8n/agent-missing"]} />';
+  assert.deepEqual(checkFile("p.mdx", text, exists), [
+    "p.mdx:1: no fixture case fixtures/otlp/n8n/agent-missing",
+  ]);
 });

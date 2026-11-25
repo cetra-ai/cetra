@@ -1,0 +1,58 @@
+---
+title: NVIDIA NeMo Agent Toolkit
+description: "Send NVIDIA NeMo Agent Toolkit workflow spans to cetra with its Phoenix OTLP exporter. Setup only: the runs behind this page saw workflow spans only."
+---
+
+The NVIDIA NeMo Agent Toolkit (the `nvidia-nat` package on PyPI) runs agent workflows. Its tracing exporters send OpenTelemetry over OTLP/HTTP; this page points one at cetra. It is setup only: the runs behind this page sent workflow spans only, with no model spans and no token counts.
+
+## Install
+
+```bash
+pip install "nvidia-nat[langchain,phoenix]"
+```
+
+The `phoenix` extra installs the Phoenix tracing exporter used below. The `opentelemetry` extra installs the `otelcollector` exporter, the plain OTLP alternative described after the config.
+
+## Set up
+
+In the toolkit's workflow config, point the tracing exporter at cetra:
+
+```yaml
+general:
+  telemetry:
+    tracing:
+      phoenix:
+        endpoint: http://<HOST>:8080/v1/traces
+        api_key: <SK_CETRA_KEY>
+llms:
+  chat_llm:
+    _type: openai
+workflow:
+  _type: chat_completion
+```
+
+Replace `<HOST>` with your cetra server and `<SK_CETRA_KEY>` with your `sk-cetra-…` API key. The exporter uses the endpoint as given, with `/v1/traces` in it, and sends the key as an `Authorization: Bearer` header. The spans carry `openinference.span.kind`, and the project name as the `openinference.project.name` resource attribute. Run the workflow with `nat run --config_file config.yml --input "…"`.
+
+For a tool-using agent, set `workflow._type` to `react_agent` with `llm_name`, `tool_names` and `use_native_tool_calling`, and list the tools under `functions` (for example `_type: current_datetime`).
+
+The `otelcollector` exporter is the alternative: under `general.telemetry.tracing.otel`, set `_type: otelcollector`, an `endpoint` that includes `/v1/traces`, and a `project` name.
+
+## What you get
+
+In the runs behind this page, with nvidia-nat 1.9.0:
+
+- Two `<workflow>` spans per run, one for `WORKFLOW_START` and one for `FUNCTION_START`, with the same input and output; cetra reads both as `chain` spans.
+- With a `react_agent` workflow, one span per tool call, also read as a `chain` span.
+- The function name of each span sits in its `nat.function.name` attribute; the span names themselves are all `<workflow>`.
+
+## Limits
+
+- No model spans and no token counts: the model calls happened in both runs, but no LLM span was exported, so cetra shows no model call and computes no cost.
+- The two workflow spans of a run duplicate each other: same input, same output.
+- The tool span is read as `chain`, not `tool`, because the toolkit sets `openinference.span.kind=CHAIN` on it.
+- This page was written against nvidia-nat 1.9.0.
+
+## Next
+
+- [Send OpenTelemetry](/docs/get-started/opentelemetry/): the endpoint and the headers cetra expects.
+- [Traces](/docs/tracing/traces/): read the trace as a tree and a timeline.

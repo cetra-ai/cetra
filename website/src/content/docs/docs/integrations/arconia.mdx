@@ -1,0 +1,56 @@
+---
+title: Arconia
+description: "Trace Spring AI model calls with cetra through Arconia's OpenInference conventions starter. Setup only: not run, read from its jars."
+---
+
+Arconia's Spring Boot starters replace Spring AI's default Micrometer attributes with OpenInference ones on the same observations, and cetra reads OpenInference spans. This page is setup only: no Arconia program was run. The facts come from Arconia's documentation and from reading its jars.
+
+## Install
+
+In a Spring Boot application that already uses Spring AI, add the two starters:
+
+```xml
+<dependency>
+    <groupId>io.arconia</groupId>
+    <artifactId>arconia-opentelemetry-spring-boot-starter</artifactId>
+    <version>0.32.0</version>
+</dependency>
+<dependency>
+    <groupId>io.arconia</groupId>
+    <artifactId>arconia-openinference-ai-semantic-conventions</artifactId>
+    <version>0.32.0</version>
+</dependency>
+```
+
+## Set up
+
+Point the exporter at cetra:
+
+```properties
+arconia.otel.exporter.otlp.endpoint=http://localhost:8080
+arconia.otel.exporter.otlp.headers=Authorization=Bearer sk-cetra-…
+arconia.otel.exporter.otlp.protocol=http-protobuf
+```
+
+With `http-protobuf` the common endpoint is a base URL and each signal appends its own path, so the traces exporter adds `/v1/traces` itself. A per-signal `arconia.otel.traces.exporter.otlp.endpoint` overrides the common endpoint and is used as given.
+
+Content is captured by default, following the OpenInference specification. Hide it with the `arconia.observations.conventions.openinference.ai.hide-inputs` and `hide-outputs` properties, or with the `OPENINFERENCE_HIDE_INPUTS` and `OPENINFERENCE_HIDE_OUTPUTS` environment variables, which take precedence over the properties.
+
+## What you get
+
+- Chat model calls keep one observation, with OpenInference attributes instead of Spring AI's: `openinference.span.kind`, `llm.model_name`, `llm.provider`, `llm.token_count.prompt`, `llm.token_count.completion`, the input and output messages, and `input.value` and `output.value`. cetra reads them as `llm` spans with the provider, the model, the tokens and the cost computed from the built-in prices.
+- Embedding calls, tool executions (arguments and result), chat client calls (recorded as agents) and advisors (recorded as chains or guardrails) also carry OpenInference attributes.
+
+## Limits
+
+- Not run: no program with Arconia was run. The span count and names with Spring AI, the runtime compatibility with Spring Boot 4.1.2, and the starter's exporter next to Boot's own OpenTelemetry starter were not verified.
+- The OpenInference conventions replace Spring AI's attributes on the same spans rather than adding a second span. This is inferred from the convention class's bytecode, not from a run.
+- Do not combine Arconia's conventions with OpenInference's own Spring AI handler: Arconia rejects an application with more than one AI observation convention.
+- Arconia's handler reads Micrometer's tracing context, so excluding Boot's `MicrometerTracingAutoConfiguration` (the second route on the [Spring AI](/docs/integrations/spring-ai/) page) may affect it. That was not checked.
+- This page was written against Arconia 0.32.0.
+
+## Next
+
+- [Spring AI](/docs/integrations/spring-ai/): the captured Spring AI routes, without Arconia.
+- [Send OpenTelemetry](/docs/get-started/opentelemetry/): the endpoint and the headers cetra expects.
+- [Traces](/docs/tracing/traces/): read the trace as a tree and a timeline.

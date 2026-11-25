@@ -8,7 +8,7 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 use std::str::FromStr;
 
-use cetra_capture::{CaptureError, CasePath, Language, Program, discover, run_case};
+use cetra_capture::{CaptureError, CasePath, Discovered, Program, discover, run_case};
 use clap::{Parser, Subcommand};
 
 fn main() -> ExitCode {
@@ -69,8 +69,8 @@ enum Command {
 
 fn list() -> Result<(), CaptureError> {
     let root = repo_root()?;
-    for (case, _, _) in discover(&root)? {
-        tracing::info!("{case}");
+    for found in discover(&root)? {
+        tracing::info!("{}", found.case);
     }
     Ok(())
 }
@@ -83,9 +83,10 @@ async fn run(check: bool, all: bool, cases: &[String]) -> Result<(), CaptureErro
         tracing::info!("0 cases");
         return Ok(());
     }
-    for (case, language, dir) in selected {
-        let program = Program::for_language(&root, language);
-        let outcome = run_case(&root, &dir, language, check, &program).await?;
+    for found in selected {
+        let program = Program::for_language(&root, found.language, found.env.as_deref());
+        let outcome = run_case(&root, &found.dir, found.language, check, &program).await?;
+        let case = &found.case;
         if check {
             tracing::info!("checked {case}");
         } else {
@@ -99,17 +100,17 @@ async fn run(check: bool, all: bool, cases: &[String]) -> Result<(), CaptureErro
 }
 
 fn select(
-    discovered: &[(CasePath, Language, PathBuf)],
+    discovered: &[Discovered],
     all: bool,
     cases: &[String],
-) -> Result<Vec<(CasePath, Language, PathBuf)>, CaptureError> {
+) -> Result<Vec<Discovered>, CaptureError> {
     if all {
         return Ok(discovered.to_vec());
     }
     let mut selected = Vec::with_capacity(cases.len());
     for text in cases {
         let path = CasePath::from_str(text)?;
-        let Some(found) = discovered.iter().find(|(case, _, _)| case == &path) else {
+        let Some(found) = discovered.iter().find(|found| found.case == path) else {
             return Err(CaptureError::CaseNotFound { case: text.clone() });
         };
         selected.push(found.clone());

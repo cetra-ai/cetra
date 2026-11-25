@@ -1,0 +1,74 @@
+---
+title: Ragas
+description: "Run Ragas metrics and send each result to cetra as a score, with the judge's model calls traced. Setup only: not run."
+---
+
+Ragas evaluates your model's answers with metrics, and a metric's judge is a model call. This page traces those calls and sends each metric result to cetra as a score on the trace. It is setup only: the sample was not run.
+
+## Install
+
+```bash
+pip install "cetra-sdk[openai]" ragas
+```
+
+## Set up
+
+You give each metric an LLM built by `llm_factory` around an OpenAI client. Turn on cetra's OpenAI instrumentation, and the judge's calls become `llm` spans, as on the [OpenAI](/docs/integrations/openai/) page. Score inside a span, so the score has a trace to attach to:
+
+{/* untested: needs OPENAI_API_KEY and CETRA_API_KEY; the metric call was run in the spike against a mock, this wiring was not run */}
+```python
+import asyncio
+
+import cetra
+from openai import AsyncOpenAI
+from ragas.llms import llm_factory
+from ragas.metrics import DiscreteMetric
+
+cetra.init(instrument=["openai"])
+
+metric = DiscreteMetric(
+    name="correctness",
+    prompt="Is {response} right for {question}?",
+    allowed_values=["pass", "fail"],
+)
+
+
+async def main() -> None:
+    question = "What is the capital of France?"
+    response = "Paris."
+    async with cetra.span("ragas", input={"question": question, "response": response}):
+        result = await metric.ascore(
+            llm=llm_factory("gpt-4o-mini", client=AsyncOpenAI()),
+            question=question,
+            response=response,
+        )
+        cetra.score(
+            trace_id=cetra.current_trace_id(),
+            name=metric.name,
+            value=result.value,
+            reason=result.reason,
+        )
+
+
+asyncio.run(main())
+cetra.flush()
+```
+
+Set `CETRA_API_KEY` to your `sk-cetra-…` key first, and `RAGAS_DO_NOT_TRACK=true` to turn Ragas's own usage analytics off.
+
+## What you get
+
+- The judge's model call as an `llm` span under the `ragas` span, with the model, the token counts and the cost, as on the [OpenAI](/docs/integrations/openai/) page.
+- One categorical score named `correctness`, the metric's name, with the judge's value (`pass` or `fail`) as its label and the judge's reasoning as the score's reason, on the trace of the `ragas` span.
+
+## Limits
+
+- Setup only: the sample on this page was not run. The spike ran the metric call with a mocked model and read its `llm` span; the `cetra.score` wiring was not run.
+- Ragas writes no spans of its own. The trace holds your `ragas` span and the model spans of the OpenAI instrumentation.
+- A `DiscreteMetric` returns one of its `allowed_values`, so the score is categorical. A numeric Ragas metric gives a numeric score the same way.
+- `evaluate`, which runs metrics over a whole dataset, was not run. This page scores one call of one metric with `ascore`.
+
+## Next
+
+- [Scores](/docs/evaluation/scores/): the score API and how scores are read.
+- [OpenAI](/docs/integrations/openai/): the instrumentation that traces the judge's calls.

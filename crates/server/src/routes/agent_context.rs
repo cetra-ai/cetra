@@ -19,7 +19,7 @@ use crate::meta::agent_contexts::{AgentContextRow, delete_oldest, upsert_context
 use crate::routes::otlp::refuse_over_cap;
 
 /// The agents whose hook posts a context, by their wire names (D-CA-9).
-const AGENTS: [&str; 4] = ["claude-code", "codex", "gemini-cli", "copilot"];
+const AGENTS: [&str; 5] = ["claude-code", "codex", "gemini-cli", "copilot", "qwen-code"];
 /// Longest session id, branch and person, in characters (D-CA-9).
 const MAX_TEXT: usize = 256;
 
@@ -60,7 +60,7 @@ fn validate(body: AgentContextBody) -> Result<Post, ApiError> {
     if !AGENTS.contains(&body.agent.as_str()) {
         errors.push(field_error(
             "agent",
-            "must be claude-code, codex, gemini-cli or copilot",
+            "must be claude-code, codex, gemini-cli, copilot or qwen-code",
         ));
     }
     if !is_bounded(&body.session_id) {
@@ -485,6 +485,31 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn agent_context_accepts_qwen_code() {
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        let key = seeded.ingest_key.clone();
+        let accepted = post_context(
+            &app,
+            &key,
+            &json!({"agent": "qwen-code", "session_id": SESSION, "branch": "main"}),
+        )
+        .await;
+        assert_eq!(accepted.status, StatusCode::NO_CONTENT);
+
+        let refused =
+            post_context(&app, &key, &json!({"agent": "pi", "session_id": SESSION})).await;
+        assert_eq!(refused.status, StatusCode::BAD_REQUEST);
+        let errors = refused.problem().errors;
+        assert_eq!(errors.len(), 1, "{errors:?}");
+        assert_eq!(errors[0].field, "agent");
+        assert_eq!(
+            errors[0].message,
+            "must be claude-code, codex, gemini-cli, copilot or qwen-code"
+        );
     }
 
     #[tokio::test(flavor = "current_thread")]

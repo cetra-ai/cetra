@@ -9,6 +9,7 @@ import type { Schema } from "@/api/types";
 import { EmptyState } from "@/components/empty-state";
 import { FormError } from "@/components/form/form-error";
 import { SessionConversation } from "@/components/session/session-conversation";
+import { useSessionSteps } from "@/components/session/use-session-steps";
 import { useProject } from "@/components/shell/project-context";
 import { TraceView } from "@/components/trace/trace-view";
 import { Button } from "@/components/ui/button";
@@ -31,6 +32,7 @@ export type TargetDetail =
       traceId?: string;
       sessionId?: string;
       userId?: string;
+      session?: Schema<"SessionSummary">;
       turns?: readonly Schema<"SessionTurn">[];
     };
 
@@ -71,6 +73,7 @@ export function useTargetDetail(kind: Kind | undefined, item: Item | undefined):
       status: "ready",
       sessionId,
       userId: session.data.session.user_id,
+      session: session.data.session,
       turns: session.data.turns,
     };
   }
@@ -176,16 +179,16 @@ export function ReviewerTarget({
   }
 
   if (kind === "session") {
+    if (detail.session === undefined) {
+      return <p className="p-3 text-body">Could not load this session</p>;
+    }
     return (
-      <div className="flex min-h-0 flex-1 flex-col">
-        <SessionConversation
-          turns={detail.turns ?? []}
-          trace={traceId}
-          onSelectTrace={setTraceId}
-          scrollTarget={null}
-          onScrolled={NO_SCROLL}
-        />
-      </div>
+      <ReviewerSession
+        session={detail.session}
+        turns={detail.turns ?? []}
+        traceId={traceId}
+        onSelectTrace={setTraceId}
+      />
     );
   }
   return (
@@ -195,6 +198,41 @@ export function ReviewerTarget({
         traceId={detail.traceId ?? ""}
         spanId={spanId}
         onSelectSpan={setSpanId}
+      />
+    </div>
+  );
+}
+
+/** The reviewer's session conversation, with each turn's steps (D-C-28). */
+function ReviewerSession({
+  session,
+  turns,
+  traceId,
+  onSelectTrace,
+}: {
+  session: Schema<"SessionSummary">;
+  turns: readonly Schema<"SessionTurn">[];
+  traceId: string | undefined;
+  onSelectTrace: (traceId: string) => void;
+}) {
+  const { org, project } = useProject();
+  const steps = useSessionSteps({
+    org,
+    project,
+    session,
+    turns,
+    includeEval: false,
+    includeExperiments: false,
+  });
+  return (
+    <div className="flex min-h-0 flex-1 flex-col">
+      <SessionConversation
+        turns={turns}
+        steps={steps}
+        trace={traceId}
+        onSelectTrace={onSelectTrace}
+        scrollTarget={null}
+        onScrolled={NO_SCROLL}
       />
     </div>
   );

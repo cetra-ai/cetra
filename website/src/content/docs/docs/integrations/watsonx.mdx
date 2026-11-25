@@ -1,0 +1,57 @@
+---
+title: IBM watsonx.ai
+description: "Trace IBM watsonx.ai model calls with cetra from Python, with the OpenLLMetry watsonx instrumentation."
+---
+
+Trace IBM watsonx.ai model calls with cetra from Python.
+
+## Install
+
+```bash
+pip install ibm-watsonx-ai opentelemetry-instrumentation-watsonx opentelemetry-exporter-otlp-proto-http
+```
+
+## Set up
+
+{/* untested: needs an IBM Cloud account */}
+```python
+from opentelemetry import trace
+from opentelemetry.exporter.otlp.proto.http.trace_exporter import OTLPSpanExporter
+from opentelemetry.instrumentation.watsonx import WatsonxInstrumentor
+from opentelemetry.sdk.trace import TracerProvider
+from opentelemetry.sdk.trace.export import BatchSpanProcessor
+
+provider = TracerProvider()
+provider.add_span_processor(
+    BatchSpanProcessor(
+        OTLPSpanExporter(
+            endpoint="http://localhost:8080/v1/traces",
+            headers={"Authorization": "Bearer <SK_CETRA_KEY>"},
+        )
+    )
+)
+trace.set_tracer_provider(provider)
+WatsonxInstrumentor().instrument(tracer_provider=provider)
+
+# Call watsonx.ai with ibm_watsonx_ai as usual.
+provider.shutdown()
+```
+
+Replace `<SK_CETRA_KEY>` with your `sk-cetra-` API key. See [Send OpenTelemetry](/docs/get-started/opentelemetry/).
+
+## What you get
+
+- Model calls are recorded by the OpenLLMetry watsonx instrumentation.
+- No built-in price: add a custom model price in Settings → Model prices to get a cost.
+
+## Limits
+
+- Setup only: calling watsonx.ai needs an IBM Cloud account, and no spans of it are captured in the repository. The provider shown is whatever the OpenLLMetry instrumentation records; cetra's host table has no watsonx host.
+- The built-in prices have no IBM watsonx.ai rows, so cost is empty until you add a custom model price in Settings → Model prices.
+- If a field is missing, look at the span's **Attributes** tab and compare it with [Span attributes](/docs/reference/attributes/).
+
+## Next
+
+- [Traces](/docs/tracing/traces/): read the trace as a tree and a timeline.
+- [Cost and tokens](/docs/tracing/cost-and-tokens/): how cost is computed from the token counts.
+- [Custom model prices](/docs/tracing/cost-and-tokens/#custom-model-prices): price a model the built-in prices do not cover.

@@ -1,0 +1,52 @@
+{
+  "description": "AutoGen AgentChat agent run with one tool call, traced by the AutoGen OpenInference instrumentor only.",
+  "spec_refs": [
+    "02 § Convention detection",
+    "02 § Mapping tables / Span kind",
+    "02 § Mapping tables / Model, provider, usage",
+    "02 § Mapping tables / Input / output",
+    "02 § Normalization rules"
+  ],
+  "notes": "Only AutogenAgentChatInstrumentor is enabled, with AUTOGEN_DISABLE_RUNTIME_TRACING set before autogen is imported. The OpenAI instrumentor is not enabled: it would add a second llm span for each model call (D-IN-23 item 3). Each model call is one llm span, OpenAIChatCompletionClient.create. The model client is pointed at the mock.",
+  "instrumentation": "openinference-instrumentation-autogen-agentchat",
+  "libraries": [
+    "autogen-agentchat",
+    "autogen-ext",
+    "openinference-instrumentation-autogen-agentchat",
+    "opentelemetry-sdk"
+  ],
+  "turns": [
+    {
+      "api": "openai.chat",
+      "model": "gpt-4o-mini-2024-07-18",
+      "message": {
+        "tool_calls": [
+          {
+            "id": "call_weather_1",
+            "name": "get_weather",
+            "arguments": {
+              "city": "Paris"
+            }
+          }
+        ]
+      },
+      "finish": "tool_calls",
+      "usage": {
+        "input": 82,
+        "output": 17
+      }
+    },
+    {
+      "api": "openai.chat",
+      "model": "gpt-4o-mini-2024-07-18",
+      "message": {
+        "text": "It is sunny in Paris."
+      },
+      "finish": "stop",
+      "usage": {
+        "input": 131,
+        "output": 12
+      }
+    }
+  ]
+}

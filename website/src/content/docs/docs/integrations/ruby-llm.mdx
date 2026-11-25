@@ -1,0 +1,58 @@
+---
+title: ruby_llm
+description: "Trace ruby_llm chat, agent, embedding and tool calls with cetra through its built-in OpenTelemetry module. Setup only: not run."
+---
+
+ruby_llm ships a first-party OpenTelemetry module that writes GenAI attributes on model, agent and tool spans, and cetra reads them. This page is setup only: it was not run, and every fact comes from the gem's source and documentation.
+
+## Install
+
+```bash
+gem install ruby_llm opentelemetry-sdk opentelemetry-exporter-otlp
+```
+
+## Set up
+
+The application owns the OpenTelemetry SDK and the exporter; ruby_llm never configures them. The OTLP exporter sends protobuf over HTTP and appends `v1/traces` itself, so give it the base URL:
+
+```bash
+export OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:8080
+export OTEL_EXPORTER_OTLP_HEADERS="Authorization=Bearer sk-cetra-…"
+```
+
+Then enable the module:
+
+```ruby
+require "opentelemetry/sdk"
+require "opentelemetry/exporter/otlp"
+require "ruby_llm"
+
+OpenTelemetry::SDK.configure { |c| c.service_name = "my-app" }
+RubyLLM::OpenTelemetry.enable # or enable(content: true)
+```
+
+`RubyLLM::OpenTelemetry.disable` turns the module off again.
+
+Content is off by default. `enable(content: true)` writes the system instructions, the input and output messages and the tool arguments and results; there is no environment variable for it. Attachments are described, not sent, and URIs lose their query string.
+
+## What you get
+
+- An `llm` span named `chat <model>` for each model call, with the provider, the request and response models, the finish reason and the token counts; cetra computes the cost from the built-in prices.
+- An `agent` span named `invoke_agent <Agent>` for agent runs, with the agent name and the conversation id.
+- A `tool` span named `execute_tool <tool>` for tool calls, with the tool name and the call id, and with the arguments and the result when content is on.
+- `embeddings`, `generate_content`, `transcription`, `rerank` and the other operations get their own spans.
+- Failed calls set `error.type` to the exception's class and the span status to ERROR.
+
+## Limits
+
+- Not captured: written from the library's source and documentation.
+- Content is off by default and enabled in code only (`enable(content: true)`); no environment variable switches it.
+- Do not also enable thoughtbot's `opentelemetry-instrumentation-ruby_llm` gem: it writes its own `chat` spans, and both together record every model call twice.
+- The `ruby_llm-opentelemetry` gem is a placeholder release; it is not usable.
+- This page was written against ruby_llm 2.2.2, opentelemetry-sdk 1.13.1 and opentelemetry-exporter-otlp 0.37.0.
+
+## Next
+
+- [Send OpenTelemetry](/docs/get-started/opentelemetry/): the endpoint and the headers cetra expects.
+- [Traces](/docs/tracing/traces/): read the trace as a tree and a timeline.
+- [Cost and tokens](/docs/tracing/cost-and-tokens/): how cost is computed from the token counts.

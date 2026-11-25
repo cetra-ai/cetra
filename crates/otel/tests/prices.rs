@@ -3,15 +3,18 @@
 //! Conversion from LiteLLM's `model_prices_and_context_window.json`:
 //! - Keep entries whose `mode` is `chat`, `completion`, `responses` or `embedding`,
 //!   with at least one of `input_cost_per_token` / `output_cost_per_token`.
-//! - The model name is the LiteLLM key with a leading `<litellm_provider>/` removed.
-//!   A key that still contains `/` after that is skipped (proxy routes such as `openrouter/…`).
+//! - The model name is the LiteLLM key with a leading `<litellm_provider>/` removed; what is
+//!   left may contain `/` (`groq/openai/gpt-oss-120b` gives `openai/gpt-oss-120b`, the id the
+//!   client sends). A key without that prefix that contains `/` is skipped, and so is a nested
+//!   name of a cloud platform (Vertex AI, Bedrock, Azure, watsonx), whose prefix is a region or
+//!   a deployment (D-IN-14).
 //! - One row per `(model_name, provider)`. When two kept entries give the same pair, keep the
 //!   entry whose key has no `/`. Otherwise keep the first in key order.
 //! - `match_pattern` is `regex::escape(model_name)`.
 //! - `provider` is `row_provider(litellm_provider)`, the semconv name of the publisher or
 //!   cloud platform (see `row_provider`). A LiteLLM provider with no mapping keeps its own
 //!   name, so its rows never price another provider's spans. A missing `litellm_provider`
-//!   gives null.
+//!   gives null. `clf_ai_gateway` is `cloudflare_ai_gateway`.
 //! - Rows are sorted by `(model_name lowercased, provider_rank, provider, model_name)` (see
 //!   `provider_rank`). The lookup matches names case-insensitively, so case variants of one
 //!   model are adjacent. A span with no provider takes the first matching row, so the
@@ -39,6 +42,8 @@ const REQUIRED_MODELS: &[&str] = &[
     "claude-sonnet-4-5",
     "gemini-2.5-pro",
     "text-embedding-3-small",
+    "openai/gpt-oss-120b",
+    "deepseek/deepseek-v3.2",
 ];
 
 #[test]
@@ -187,6 +192,22 @@ fn conversion_follows_the_litellm_rules() {
             "mode": "chat",
             "litellm_provider": "openai",
             "input_cost_per_token": 9e-6
+        },
+        "novita/deepseek/deepseek-v3.2": {
+            "mode": "chat",
+            "litellm_provider": "novita",
+            "input_cost_per_token": 2.7e-7,
+            "output_cost_per_token": 4.1e-7
+        },
+        "stray/name": {
+            "mode": "chat",
+            "litellm_provider": "novita",
+            "input_cost_per_token": 1e-6
+        },
+        "bedrock/us-east-1/anthropic.claude-x": {
+            "mode": "chat",
+            "litellm_provider": "bedrock",
+            "input_cost_per_token": 1e-6
         }
     });
     let entries = raw.as_object().expect("object");
@@ -204,12 +225,14 @@ fn conversion_follows_the_litellm_rules() {
             ("bedrock-model", Some("aws.bedrock")),
             ("cohere-model", Some("cohere")),
             ("deep", Some("deepseek")),
+            ("deepseek/deepseek-v3.2", Some("novita")),
             ("embed-me", Some("openai")),
             ("gemini-x", Some("gcp.gemini")),
             ("gpt-4o", Some("openai")),
             ("gpt-4o", Some("azure.ai.openai")),
             ("mistral-model", Some("mistral_ai")),
             ("no-provider", None),
+            ("openai/gpt-4o", Some("openrouter")),
             ("other", Some("fireworks_ai")),
             ("reply", Some("gcp.gemini")),
             ("shared", Some("openai")),
@@ -257,6 +280,19 @@ fn conversion_follows_the_litellm_rules() {
     assert_eq!(
         find(&rows, "gemini-x", Some("gcp.gemini")).price_input,
         Some(million(5e-6))
+    );
+
+    assert_eq!(
+        find(&rows, "deepseek/deepseek-v3.2", Some("novita")).price_input,
+        Some(million(2.7e-7))
+    );
+    assert_eq!(
+        find(&rows, "deepseek/deepseek-v3.2", Some("novita")).price_output,
+        Some(million(4.1e-7))
+    );
+    assert_eq!(
+        find(&rows, "openai/gpt-4o", Some("openrouter")).price_input,
+        Some(million(9e-6))
     );
 
     let dotted = find(&rows, "a.b", Some("groq"));
@@ -313,6 +349,7 @@ fn provider_mapping_covers_the_litellm_names() {
         ("cohere_chat", "cohere"),
         ("perplexity", "perplexity"),
         ("watsonx", "ibm.watsonx.ai"),
+        ("clf_ai_gateway", "cloudflare_ai_gateway"),
         ("fireworks_ai", "fireworks_ai"),
         ("azure_anthropic", "azure_anthropic"),
     ];
@@ -459,7 +496,11 @@ fn convert_entry(key: &str, entry: &Map<String, Value>) -> Option<PriceRow> {
         return None;
     }
     let litellm_provider = entry.get("litellm_provider").and_then(Value::as_str);
-    let model_name = model_name(key, litellm_provider)?;
+    let model_name = model_name(
+        key,
+        litellm_provider,
+        litellm_provider.map(row_provider).as_deref(),
+    )?;
     let match_pattern = regex::escape(&model_name);
     let price_input = field_price(entry, "input_cost_per_token");
     let price_output = field_price(entry, "output_cost_per_token");
@@ -481,18 +522,17 @@ fn convert_entry(key: &str, entry: &Map<String, Value>) -> Option<PriceRow> {
     })
 }
 
-fn model_name(key: &str, provider: Option<&str>) -> Option<String> {
-    let stripped = match provider {
-        Some(provider) => {
-            let prefix = format!("{provider}/");
-            key.strip_prefix(&prefix).unwrap_or(key)
-        }
-        None => key,
-    };
-    if stripped.is_empty() || stripped.contains('/') {
+/// The LiteLLM key without its `<litellm_provider>/` prefix (D-IN-14). A name that still
+/// contains `/` is kept, except for a cloud platform, where the prefix is a region or a
+/// deployment (`us-east-1/…`), and for a key that had no provider prefix.
+fn model_name(key: &str, provider: Option<&str>, row: Option<&str>) -> Option<String> {
+    let stripped = provider.and_then(|provider| key.strip_prefix(&format!("{provider}/")));
+    let name = stripped.unwrap_or(key);
+    let cloud = provider_rank(row) == 1;
+    if name.is_empty() || (name.contains('/') && (stripped.is_none() || cloud)) {
         None
     } else {
-        Some(stripped.to_owned())
+        Some(name.to_owned())
     }
 }
 
@@ -514,6 +554,7 @@ fn row_provider(litellm_provider: &str) -> String {
         "cohere" | "cohere_chat" => "cohere",
         "perplexity" => "perplexity",
         "watsonx" => "ibm.watsonx.ai",
+        "clf_ai_gateway" => "cloudflare_ai_gateway",
         other if other.starts_with("vertex_ai") => "gcp.vertex_ai",
         other if other.starts_with("bedrock") => "aws.bedrock",
         other => other,

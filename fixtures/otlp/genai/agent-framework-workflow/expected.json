@@ -1,0 +1,230 @@
+{
+  "spans": [
+    {
+      "project_id": "01900000-0000-7000-8000-000000000001",
+      "trace_id": "33012b80987e1ce25ce3be8eb9cdc703",
+      "span_id": "70f1592004799475",
+      "name": "invoke_workflow",
+      "span_kind": "chain",
+      "start_time": "2025-12-31T23:59:50.003000000Z",
+      "end_time": "2025-12-31T23:59:50.007000000Z",
+      "status": "unset",
+      "service_name": "capture-app",
+      "operation": "invoke_workflow",
+      "attributes": {
+        "gen_ai.operation.name": "invoke_workflow",
+        "workflow.id": "capture-volatile-2"
+      },
+      "resource_attributes": {
+        "telemetry.sdk.language": "python",
+        "telemetry.sdk.name": "opentelemetry",
+        "telemetry.sdk.version": "1.45.2"
+      },
+      "scope_name": "agent_framework",
+      "scope_version": "1.26.0",
+      "events": [
+        {
+          "time": "2025-12-31T23:59:50.003000000Z",
+          "name": "workflow.started"
+        },
+        {
+          "time": "2025-12-31T23:59:50.007000000Z",
+          "name": "workflow.completed"
+        }
+      ],
+      "conventions": [
+        "genai"
+      ],
+      "ingest_time": "2026-01-01T00:00:00.000000000Z",
+      "schema_version": 2
+    },
+    {
+      "project_id": "01900000-0000-7000-8000-000000000001",
+      "trace_id": "33012b80987e1ce25ce3be8eb9cdc703",
+      "span_id": "87f90be6ce40751e",
+      "parent_span_id": "70f1592004799475",
+      "name": "edge_group.process InternalEdgeGroup",
+      "span_kind": "chain",
+      "start_time": "2025-12-31T23:59:50.003000000Z",
+      "end_time": "2025-12-31T23:59:50.003000000Z",
+      "status": "unset",
+      "service_name": "capture-app",
+      "attributes": {
+        "edge_group.delivered": "true",
+        "edge_group.delivery_status": "delivered",
+        "edge_group.id": "capture-volatile-4",
+        "edge_group.type": "InternalEdgeGroup",
+        "message.source_id": "internal:upper",
+        "message.target_id": "upper"
+      },
+      "resource_attributes": {
+        "telemetry.sdk.language": "python",
+        "telemetry.sdk.name": "opentelemetry",
+        "telemetry.sdk.version": "1.45.2"
+      },
+      "scope_name": "agent_framework",
+      "scope_version": "1.26.0",
+      "ingest_time": "2026-01-01T00:00:00.000000000Z",
+      "schema_version": 2
+    },
+    {
+      "project_id": "01900000-0000-7000-8000-000000000001",
+      "trace_id": "33012b80987e1ce25ce3be8eb9cdc703",
+      "span_id": "0abddcd1541a62fe",
+      "parent_span_id": "70f1592004799475",
+      "name": "executor.process upper",
+      "span_kind": "chain",
+      "start_time": "2025-12-31T23:59:50.004000000Z",
+      "end_time": "2025-12-31T23:59:50.005000000Z",
+      "status": "unset",
+      "service_name": "capture-app",
+      "attributes": {
+        "executor.id": "upper",
+        "executor.type": "FunctionExecutor",
+        "message.payload_type": "WorkflowMessage",
+        "message.type": "MessageType.STANDARD"
+      },
+      "resource_attributes": {
+        "telemetry.sdk.language": "python",
+        "telemetry.sdk.name": "opentelemetry",
+        "telemetry.sdk.version": "1.45.2"
+      },
+      "scope_name": "agent_framework",
+      "scope_version": "1.26.0",
+      "ingest_time": "2026-01-01T00:00:00.000000000Z",
+      "schema_version": 2
+    },
+    {
+      "project_id": "01900000-0000-7000-8000-000000000001",
+      "trace_id": "33012b80987e1ce25ce3be8eb9cdc703",
+      "span_id": "8e01c154a1c8448a",
+      "parent_span_id": "0abddcd1541a62fe",
+      "name": "message.send",
+      "span_kind": "span",
+      "start_time": "2025-12-31T23:59:50.004000000Z",
+      "end_time": "2025-12-31T23:59:50.004000000Z",
+      "status": "unset",
+      "service_name": "capture-app",
+      "attributes": {
+        "message.type": "str"
+      },
+      "resource_attributes": {
+        "telemetry.sdk.language": "python",
+        "telemetry.sdk.name": "opentelemetry",
+        "telemetry.sdk.version": "1.45.2"
+      },
+      "scope_name": "agent_framework",
+      "scope_version": "1.26.0",
+      "ingest_time": "2026-01-01T00:00:00.000000000Z",
+      "schema_version": 2
+    },
+    {
+      "project_id": "01900000-0000-7000-8000-000000000001",
+      "trace_id": "33012b80987e1ce25ce3be8eb9cdc703",
+      "span_id": "340f87e7ac0328eb",
+      "parent_span_id": "70f1592004799475",
+      "name": "edge_group.process SingleEdgeGroup",
+      "span_kind": "chain",
+      "start_time": "2025-12-31T23:59:50.006000000Z",
+      "end_time": "2025-12-31T23:59:50.006000000Z",
+      "status": "unset",
+      "service_name": "capture-app",
+      "attributes": {
+        "edge_group.delivered": "true",
+        "edge_group.delivery_status": "delivered",
+        "edge_group.id": "capture-volatile-5",
+        "edge_group.type": "SingleEdgeGroup",
+        "message.source_id": "upper"
+      },
+      "resource_attributes": {
+        "telemetry.sdk.language": "python",
+        "telemetry.sdk.name": "opentelemetry",
+        "telemetry.sdk.version": "1.45.2"
+      },
+      "scope_name": "agent_framework",
+      "scope_version": "1.26.0",
+      "links": [
+        {
+          "trace_id": "33012b80987e1ce25ce3be8eb9cdc703",
+          "span_id": "8e01c154a1c8448a"
+        }
+      ],
+      "ingest_time": "2026-01-01T00:00:00.000000000Z",
+      "schema_version": 2
+    },
+    {
+      "project_id": "01900000-0000-7000-8000-000000000001",
+      "trace_id": "33012b80987e1ce25ce3be8eb9cdc703",
+      "span_id": "6f3dfd45229dcc60",
+      "parent_span_id": "70f1592004799475",
+      "name": "executor.process sink",
+      "span_kind": "chain",
+      "start_time": "2025-12-31T23:59:50.006000000Z",
+      "end_time": "2025-12-31T23:59:50.006000000Z",
+      "status": "unset",
+      "service_name": "capture-app",
+      "attributes": {
+        "executor.id": "sink",
+        "executor.type": "FunctionExecutor",
+        "message.payload_type": "WorkflowMessage",
+        "message.type": "MessageType.STANDARD"
+      },
+      "resource_attributes": {
+        "telemetry.sdk.language": "python",
+        "telemetry.sdk.name": "opentelemetry",
+        "telemetry.sdk.version": "1.45.2"
+      },
+      "scope_name": "agent_framework",
+      "scope_version": "1.26.0",
+      "links": [
+        {
+          "trace_id": "33012b80987e1ce25ce3be8eb9cdc703",
+          "span_id": "8e01c154a1c8448a"
+        }
+      ],
+      "ingest_time": "2026-01-01T00:00:00.000000000Z",
+      "schema_version": 2
+    },
+    {
+      "project_id": "01900000-0000-7000-8000-000000000001",
+      "trace_id": "6b9b64788c2516a2c052e5d9f355944f",
+      "span_id": "4c06768decd7ed96",
+      "name": "workflow.build",
+      "span_kind": "chain",
+      "start_time": "2025-12-31T23:59:50.000000000Z",
+      "end_time": "2025-12-31T23:59:50.001000000Z",
+      "status": "unset",
+      "service_name": "capture-app",
+      "attributes": {
+        "workflow.definition": "capture-volatile-3",
+        "workflow.id": "capture-volatile-2",
+        "workflow_builder.name": "capture-volatile-1"
+      },
+      "resource_attributes": {
+        "telemetry.sdk.language": "python",
+        "telemetry.sdk.name": "opentelemetry",
+        "telemetry.sdk.version": "1.45.2"
+      },
+      "scope_name": "agent_framework",
+      "scope_version": "1.26.0",
+      "events": [
+        {
+          "time": "2025-12-31T23:59:50.000000000Z",
+          "name": "build.started"
+        },
+        {
+          "time": "2025-12-31T23:59:50.000000000Z",
+          "name": "build.validation_completed"
+        },
+        {
+          "time": "2025-12-31T23:59:50.001000000Z",
+          "name": "build.completed"
+        }
+      ],
+      "ingest_time": "2026-01-01T00:00:00.000000000Z",
+      "schema_version": 2
+    }
+  ],
+  "media": [],
+  "rejected_spans": 0
+}

@@ -1,0 +1,83 @@
+---
+title: Bifrost
+description: "Send Bifrost gateway model calls to cetra from the gateway's OpenTelemetry plugin, with the cost Bifrost reports."
+---
+
+import Backing from "../../../../components/Backing.astro";
+
+cetra reads the spans Bifrost sends for every model call it proxies, with the cost Bifrost computes from its pricing datasheet.
+
+<Backing fixtures={["genai/bifrost-chat"]} />
+
+## Install
+
+Run Bifrost from its binary or its Docker image. The `npx @maximhq/bifrost` launcher downloads the binary on first run.
+
+## Set up
+
+The `otel` plugin exports the spans. Give it the full traces URL and an `Authorization` header:
+
+```json
+{
+  "plugins": [
+    {
+      "enabled": true,
+      "name": "otel",
+      "config": {
+        "service_name": "bifrost",
+        "collector_url": "http://localhost:8080/v1/traces",
+        "trace_type": "genai_extension",
+        "protocol": "http",
+        "headers": { "Authorization": "Bearer <SK_CETRA_KEY>" }
+      }
+    }
+  ]
+}
+```
+
+Replace `<SK_CETRA_KEY>` with your `sk-cetra-…` API key. See [Send OpenTelemetry](/docs/get-started/opentelemetry/). A header value can also read an environment variable, as `"env.OTEL_API_KEY"`.
+
+One more block covers offline starts and client authentication:
+
+```json
+{
+  "framework": {
+    "pricing": {
+      "pricing_url": "file:///<APP_DIR>/pricing.json",
+      "model_parameters_url": "file:///<APP_DIR>/model-parameters.json",
+      "mcp_library_sync_interval": 0
+    }
+  },
+  "client": { "enforce_auth_on_inference": false }
+}
+```
+
+- Bifrost fetches its pricing datasheet from `getbifrost.ai` at start, and **it exits at start when it cannot fetch the datasheet and has none stored**. The two `file://` URLs point at local copies instead.
+- `mcp_library_sync_interval: 0` turns off the MCP catalog lookup, which would time out on an offline host and slow the start.
+- `client.enforce_auth_on_inference` is true by default: every request needs one of Bifrost's virtual keys. Set it to false to let your clients through with the provider key.
+
+Your applications call the gateway with any OpenAI-compatible client, at `http://<BIFROST_HOST>:<PORT>/v1`. Send the model as `<PROVIDER>/<MODEL>`, for example `openai/gpt-4o-mini`.
+
+## What you get
+
+Each model call is two spans:
+
+- a `chain` span for the server request (`/v1/chat/completions`). It repeats its child's model and content and carries no token counts and no cost, so nothing is counted twice. Its input is the last user message, or the tool result on a follow-up turn; its output is the answer, or the tool call the model made.
+- an `llm` span for the call itself (`chat <MODEL>`), with the provider, the request and response models, the token counts and the messages. Tool calls in the answer are tool-call parts: Bifrost flattens them into `name` and `args` fields, and cetra reads the flattened form.
+
+The provider is the key of the provider block in your config, here `openai`. The cost is the one Bifrost reports: `gen_ai.usage.cost` as the total, with `bifrost.cost.input` and `bifrost.cost.output` as the parts.
+
+## Limits
+
+- The fixture was captured with Bifrost 2.5.1 and the `openai` client 3.45.0.
+- Bifrost exports 24 `plugin.*` spans per request. They carry no attributes and stay plain spans.
+- Only the `openai` provider block was captured. Another provider id (`anthropic`, `azure`, `bedrock`, a custom name) was not observed.
+- `disable_content_logging: true` in the plugin's config removes the messages from both spans. The usage, cost and model keys stay.
+- Do not instrument both sides: an app with its own OpenTelemetry instrumentation behind a traced gateway counts each call twice, because the gateway joins the app's trace through `traceparent` and its span carries the same tokens and cost. Trace the gateway (it covers several apps and languages) or the app, not both.
+- If a field is missing, look at the span's **Attributes** tab and compare it with [Span attributes](/docs/reference/attributes/).
+
+## Next
+
+- [Traces](/docs/tracing/traces/): read the trace as a tree and a timeline.
+- [Cost and tokens](/docs/tracing/cost-and-tokens/): how cost is computed from the token counts.
+- [Custom model prices](/docs/tracing/cost-and-tokens/#custom-model-prices): price a model the built-in prices do not cover.

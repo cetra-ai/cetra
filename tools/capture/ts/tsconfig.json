@@ -14,5 +14,6 @@
     "skipLibCheck": true,
     "types": ["node"]
   },
-  "include": ["harness.ts", "agents.ts", "scenarios/**/*.ts"]
+  "include": ["harness.ts", "agents.ts", "scenarios/**/*.ts"],
+  "exclude": ["scenarios/genai/eve-agent-tool/.eve/**", "scenarios/genai/eve-agent-tool/agent/**"]
 }

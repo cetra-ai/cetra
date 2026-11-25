@@ -1,0 +1,58 @@
+{
+  "description": "Koog 1.3.0 AIAgent with one simple tool, traced by Koog's OpenTelemetry feature with a synchronous span processor and verbose content.",
+  "spec_refs": [
+    "02 § Mapping tables / Input / output"
+  ],
+  "instrumentation": "agents-features-opentelemetry-jvm",
+  "libraries": [
+    "agents-features-opentelemetry-jvm",
+    "koog-agents-jvm"
+  ],
+  "notes": "Koog puts random ids in span names (create_agent <session-uuid>, invoke_agent <uuid>), masked by volatile_name_prefixes, and in four attribute keys: gen_ai.agent.id is a session UUID, gen_ai.conversation.id a conversation UUID and koog.event.id a per-span event UUID, all masked by volatile_attributes; koog.node.output embeds the model response's wall-clock metaInfo.timestamp on the two LLM nodes. The key is a timing attribute: its values are ignored by --check and kept as captured, not rewritten, so the prompt and answer inside the chat spans' gen_ai.input.messages and gen_ai.output.messages stay valid JSON.",
+  "volatile_name_prefixes": [
+    "create_agent ",
+    "invoke_agent "
+  ],
+  "volatile_attributes": [
+    "gen_ai.agent.id",
+    "gen_ai.conversation.id",
+    "koog.event.id"
+  ],
+  "timing_attributes": [
+    "koog.node.output"
+  ],
+  "turns": [
+    {
+      "api": "openai.chat",
+      "model": "gpt-4o-mini",
+      "message": {
+        "tool_calls": [
+          {
+            "id": "call_capture_1",
+            "name": "get_weather",
+            "arguments": {
+              "city": "Lyon"
+            }
+          }
+        ]
+      },
+      "finish": "tool_calls",
+      "usage": {
+        "input": 82,
+        "output": 17
+      }
+    },
+    {
+      "api": "openai.chat",
+      "model": "gpt-4o-mini",
+      "message": {
+        "text": "It is sunny in Lyon."
+      },
+      "finish": "stop",
+      "usage": {
+        "input": 131,
+        "output": 12
+      }
+    }
+  ]
+}

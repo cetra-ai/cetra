@@ -1,0 +1,45 @@
+[project]
+name = "cetra-capture-harness"
+version = "0.0.0"
+requires-python = "==3.13.*"
+dependencies = [
+  # The HTTP layers and OTLP exporter that harness.py imports. Pinned to the versions
+  # tools/capture/py pinned before the harness became its own package (D-IN-3).
+  "httpx==0.28.1",
+  "httpx2==2.16.0",
+  "opentelemetry-sdk==1.45.2",
+  "opentelemetry-exporter-otlp-proto-http==1.45.2",
+  # The SDK under test, from this repository (editable), so the harness uses its runtime.
+  "cetra-sdk",
+]
+
+[dependency-groups]
+dev = ["ruff==0.17.3", "mypy==2.4.1"]
+
+[build-system]
+requires = ["uv_build>=0.13.6,<0.14"]
+build-backend = "uv_build"
+
+[tool.uv]
+exclude-newer = "7 days" # D74/D117: no release younger than 7 days
+
+[tool.uv.sources]
+cetra-sdk = { path = "../../../sdks/python", editable = true }
+
+[tool.uv.build-backend]
+module-name = "capture_py"
+
+[tool.ruff]
+target-version = "py313"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "W", "F", "I", "B", "UP", "SIM", "RUF", "PT", "ANN", "S", "BLE", "N"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["capture_py"]
+
+[tool.mypy]
+strict = true
+python_version = "3.13"
+files = ["src"]

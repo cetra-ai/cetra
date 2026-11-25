@@ -1,0 +1,123 @@
+---
+title: Vector databases
+description: "Trace Chroma, Qdrant, Milvus, Pinecone and Weaviate calls through OpenLIT or OpenLLMetry: reads are retriever spans, writes are plain spans."
+---
+
+import Backing from "../../../../components/Backing.astro";
+
+cetra reads the spans of your Chroma, Qdrant and Milvus calls through OpenLIT or OpenLLMetry, and the same instrumentors cover Pinecone and Weaviate. A read is a `retriever` span; a write is a plain `span`.
+
+<Backing fixtures={["genai/openlit-vector", "openllmetry/vector-databases"]} />
+
+## Install
+
+Install the client of your database and one of the two instrumentors. The fixtures were captured with `chromadb` 1.5.9, `qdrant-client` 1.20.0 and `pymilvus` 3.0.3.
+
+```bash
+pip install openlit chromadb qdrant-client "pymilvus[milvus_lite]"
+```
+
+```bash
+pip install opentelemetry-instrumentation-chromadb==0.63.1 opentelemetry-instrumentation-qdrant==0.63.1 opentelemetry-instrumentation-milvus==0.60.0 chromadb qdrant-client "pymilvus[milvus_lite]"
+```
+
+`opentelemetry-instrumentation-milvus` 0.63.1 does not install: it requires a package that is not on PyPI. 0.60.0 is the newest version that installs.
+
+## Set up through OpenLIT
+
+Call `openlit.init` once, then use the clients. See [OpenLIT](/docs/integrations/openlit/) for the other `init` arguments.
+
+{/* untested: the fixture runs this shape on in-memory databases; this sample needs CETRA_API_KEY and a running cetra */}
+```python
+import os
+
+import chromadb
+import openlit
+from qdrant_client import QdrantClient
+from qdrant_client.models import Distance, PointStruct, VectorParams
+
+openlit.init(
+    otlp_endpoint=os.environ["OTEL_EXPORTER_OTLP_ENDPOINT"],
+    otlp_headers=f"Authorization=Bearer {os.environ['CETRA_API_KEY']}",
+    disable_metrics=True,
+    disabled_instrumentors=["httpx", "requests", "urllib3", "aiohttp"],
+)
+
+chroma = chromadb.EphemeralClient()
+collection = chroma.get_or_create_collection("docs")
+collection.add(ids=["a"], documents=["sunny"], embeddings=[[0.1, 0.2]])
+collection.query(query_embeddings=[[0.15, 0.25]], n_results=1)
+
+qdrant = QdrantClient(":memory:")
+qdrant.create_collection("docs", vectors_config=VectorParams(size=2, distance=Distance.COSINE))
+qdrant.upsert("docs", points=[PointStruct(id=1, vector=[0.1, 0.2], payload={"text": "sunny"})])
+qdrant.query_points("docs", query=[0.15, 0.25], limit=1)
+```
+
+Set `CETRA_API_KEY` to your `sk-cetra-…` API key. See [Send OpenTelemetry](/docs/get-started/opentelemetry/).
+
+## Set up through OpenLLMetry
+
+Instrument each client, then use it. The instrumentors export through the tracer provider you pass them.
+
+{/* untested: the fixture runs this shape on in-memory databases; this sample needs CETRA_API_KEY and a running cetra */}
+```python
+import chromadb
+from opentelemetry import trace
+from opentelemetry.exporter.otlp.proto.http.trace_exporter import OTLPSpanExporter
+from opentelemetry.instrumentation.chromadb import ChromaInstrumentor
+from opentelemetry.instrumentation.qdrant import QdrantInstrumentor
+from opentelemetry.sdk.trace import TracerProvider
+from opentelemetry.sdk.trace.export import BatchSpanProcessor
+
+provider = TracerProvider()
+provider.add_span_processor(BatchSpanProcessor(OTLPSpanExporter()))
+trace.set_tracer_provider(provider)
+ChromaInstrumentor().instrument(tracer_provider=provider)
+QdrantInstrumentor().instrument(tracer_provider=provider)
+
+chroma = chromadb.EphemeralClient()
+collection = chroma.get_or_create_collection("docs")
+collection.add(ids=["a"], documents=["sunny"], embeddings=[[0.1, 0.2]])
+collection.query(query_embeddings=[[0.15, 0.25]], n_results=1)
+provider.force_flush()
+```
+
+Set `OTEL_EXPORTER_OTLP_ENDPOINT` and `OTEL_EXPORTER_OTLP_HEADERS` as on [Send OpenTelemetry](/docs/get-started/opentelemetry/).
+
+## What you get
+
+Each database operation is one span, and each span is a trace of its own:
+
+- a `retriever` span for each read: a query, search, get, fetch or scroll;
+- a plain `span` for each write: an insert, upsert, delete or collection creation.
+
+Which reads count follows the instrumentation:
+
+- OpenLIT marks every vector span with the operation `vectordb`, and `db.operation.name` decides: `get`, `query` or `search` is a `retriever` (Chroma writes them in caps), and anything else is a `span`.
+- cetra reads no operation attribute from OpenLLMetry's instrumentors, and the span name decides, because Qdrant and Pinecone write none: `chroma.query`, `chroma.get`, `qdrant.query_points`, `qdrant.search`, `qdrant.scroll`, `milvus.search`, `milvus.query` and `milvus.get` are `retriever`s, and so are `pinecone.query`, `pinecone.fetch` and the Weaviate query names below. Every other name is a `span`.
+
+The spans carry the counts and summaries the instrumentors write, such as the number of vectors written and the top k. No documents, no vectors and no results reach the input or output fields. OpenLLMetry writes each result as a span event, which cetra keeps on the span.
+
+## Pinecone and Weaviate
+
+These two sections are setup only: the repository holds no capture of them.
+
+- Pinecone: OpenLLMetry's instrumentor supports `pinecone` below 9 only. With Pinecone 10 it logs one line and instruments nothing, and OpenLIT's Pinecone target fails to import on Pinecone 10. On a supported version, `pinecone.query` and `pinecone.fetch` are `retriever`s and the writes are `span`s, as for the other databases.
+- Weaviate: OpenLLMetry's instrumentor writes one span per operation, named after the method, such as `db.weaviate.collections.data.insert`. The query names, starting `db.weaviate.collections.query.` or `db.weaviate.gql.query.`, are `retriever`s; the writes are `span`s.
+
+## Limits
+
+- Reads are retrievers and writes are plain spans. An operation your app uses as a read keeps the kind its name gives it.
+- OpenLIT's Milvus `DELETE` span is an error span although the delete worked: OpenLIT's wrapper fails reading the response. The span keeps the error status.
+- OpenLIT reads the collection name from keyword arguments only. Chroma shows the collection's name; Qdrant and Milvus calls that pass it positionally show `unknown` in the span name and in `db.collection.name`.
+- No span carries documents, vectors or results in the fields cetra fills.
+- The fixtures were captured with `openlit` 1.45.0 and OpenLLMetry's `opentelemetry-instrumentation-chromadb` and `-qdrant` 0.63.1 and `-milvus` 0.60.0, on in-memory databases (Chroma and Qdrant) and a Milvus Lite file.
+- Pinecone and Weaviate were not captured. Their rules above are checked by unit tests only.
+- If a field is missing, look at the span's **Attributes** tab and compare it with [Span attributes](/docs/reference/attributes/).
+
+## Next
+
+- [OpenLIT](/docs/integrations/openlit/): the instrumentation behind the OpenLIT route.
+- [OpenLLMetry](/docs/integrations/openllmetry/): the instrumentation behind the OpenLLMetry route.
+- [Traces](/docs/tracing/traces/): read the trace as a tree and a timeline.

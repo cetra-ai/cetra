@@ -1,0 +1,30 @@
+{
+  "client": {"enforce_auth_on_inference": false},
+  "framework": {
+    "pricing": {
+      "pricing_url": "file://@APP_DIR@/pricing.json",
+      "model_parameters_url": "file://@APP_DIR@/model-parameters.json",
+      "pricing_sync_interval": 86400,
+      "mcp_library_sync_interval": 0
+    }
+  },
+  "providers": {
+    "openai": {
+      "keys": [{"name": "k1", "value": "env.UPSTREAM_KEY", "models": ["*"], "weight": 1.0}],
+      "network_config": {"base_url": "@MOCK_URL@"}
+    }
+  },
+  "plugins": [
+    {
+      "enabled": true,
+      "name": "otel",
+      "config": {
+        "service_name": "bifrost",
+        "collector_url": "@OTLP_ENDPOINT@/v1/traces",
+        "trace_type": "genai_extension",
+        "protocol": "http",
+        "headers": {"Authorization": "env.CETRA_OTLP_AUTH"}
+      }
+    }
+  ]
+}

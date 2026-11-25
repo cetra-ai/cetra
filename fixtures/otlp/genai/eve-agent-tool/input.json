@@ -1,0 +1,1045 @@
+{
+  "resourceSpans": [
+    {
+      "resource": {
+        "attributes": [
+          {
+            "key": "service.name",
+            "value": {
+              "stringValue": "capture-eve"
+            }
+          },
+          {
+            "key": "cloud.provider",
+            "value": {
+              "stringValue": "vercel"
+            }
+          },
+          {
+            "key": "process.runtime.name",
+            "value": {
+              "stringValue": "nodejs"
+            }
+          },
+          {
+            "key": "vercel.runtime",
+            "value": {
+              "stringValue": "nodejs"
+            }
+          }
+        ],
+        "droppedAttributesCount": 0,
+        "entityRefs": []
+      },
+      "scopeSpans": [
+        {
+          "scope": {
+            "name": "eve.agent",
+            "version": "1.0.1",
+            "attributes": [],
+            "droppedAttributesCount": 0
+          },
+          "spans": [
+            {
+              "traceId": "3f18774f5d9926624c9050c77c84f603",
+              "spanId": "06e278dc494bd271",
+              "traceState": "",
+              "parentSpanId": "",
+              "flags": 0,
+              "name": "invoke_agent capture-eve",
+              "kind": 1,
+              "startTimeUnixNano": "1767225590000000000",
+              "endTimeUnixNano": "1767225590277000000",
+              "attributes": [
+                {
+                  "key": "agent.run.id",
+                  "value": {
+                    "stringValue": "capture-volatile-1"
+                  }
+                },
+                {
+                  "key": "agent.trace.schema.version",
+                  "value": {
+                    "intValue": "4"
+                  }
+                },
+                {
+                  "key": "gen_ai.conversation.id",
+                  "value": {
+                    "stringValue": "capture-volatile-1"
+                  }
+                },
+                {
+                  "key": "agent.framework.name",
+                  "value": {
+                    "stringValue": "eve"
+                  }
+                },
+                {
+                  "key": "agent.framework.version",
+                  "value": {
+                    "stringValue": "1.0.1"
+                  }
+                },
+                {
+                  "key": "operation.name",
+                  "value": {
+                    "stringValue": "invoke_agent"
+                  }
+                },
+                {
+                  "key": "resource.name",
+                  "value": {
+                    "stringValue": "invoke_agent capture-eve"
+                  }
+                },
+                {
+                  "key": "agent.channel.kind",
+                  "value": {
+                    "stringValue": "channel:eve"
+                  }
+                },
+                {
+                  "key": "agent.session.origin",
+                  "value": {
+                    "stringValue": "channel"
+                  }
+                },
+                {
+                  "key": "agent.name",
+                  "value": {
+                    "stringValue": "capture-eve"
+                  }
+                },
+                {
+                  "key": "gen_ai.agent.name",
+                  "value": {
+                    "stringValue": "capture-eve"
+                  }
+                },
+                {
+                  "key": "gen_ai.operation.name",
+                  "value": {
+                    "stringValue": "invoke_agent"
+                  }
+                },
+                {
+                  "key": "agent.turn.id",
+                  "value": {
+                    "stringValue": "turn_0"
+                  }
+                },
+                {
+                  "key": "agent.turn.sequence",
+                  "value": {
+                    "intValue": "0"
+                  }
+                },
+                {
+                  "key": "agent.run.type",
+                  "value": {
+                    "stringValue": "session"
+                  }
+                },
+                {
+                  "key": "agent.trace.content.input",
+                  "value": {
+                    "boolValue": true
+                  }
+                },
+                {
+                  "key": "agent.trace.content.output",
+                  "value": {
+                    "boolValue": true
+                  }
+                },
+                {
+                  "key": "agent.channel.audience",
+                  "value": {
+                    "stringValue": "unknown"
+                  }
+                },
+                {
+                  "key": "agent.session.title",
+                  "value": {
+                    "stringValue": "Read hello.txt with the read_file tool and say what it says."
+                  }
+                },
+                {
+                  "key": "agent.principal.current.type",
+                  "value": {
+                    "stringValue": "local-dev"
+                  }
+                },
+                {
+                  "key": "agent.principal.current.id",
+                  "value": {
+                    "stringValue": "local-dev"
+                  }
+                },
+                {
+                  "key": "agent.principal.initiator.type",
+                  "value": {
+                    "stringValue": "local-dev"
+                  }
+                },
+                {
+                  "key": "agent.principal.initiator.id",
+                  "value": {
+                    "stringValue": "local-dev"
+                  }
+                },
+                {
+                  "key": "agent.channel.name",
+                  "value": {
+                    "stringValue": "eve"
+                  }
+                },
+                {
+                  "key": "agent.channel.delivery.id",
+                  "value": {
+                    "stringValue": "capture-volatile-2"
+                  }
+                },
+                {
+                  "key": "agent.channel.delivery.input",
+                  "value": {
+                    "stringValue": "{\"message\":\"Read hello.txt with the read_file tool and say what it says.\"}"
+                  }
+                },
+                {
+                  "key": "gen_ai.input.messages",
+                  "value": {
+                    "stringValue": "[{\"kind\":\"user\",\"parts\":[{\"content\":\"Read hello.txt with the read_file tool and say what it says.\",\"type\":\"text\"}],\"role\":\"user\"}]"
+                  }
+                },
+                {
+                  "key": "gen_ai.output.messages",
+                  "value": {
+                    "stringValue": "[{\"finish_reason\":\"stop\",\"parts\":[{\"content\":\"hello.txt says: hello from cetra\",\"type\":\"text\"}],\"role\":\"assistant\"}]"
+                  }
+                },
+                {
+                  "key": "agent.turn.outcome",
+                  "value": {
+                    "stringValue": "completed"
+                  }
+                },
+                {
+                  "key": "gen_ai.usage.input_tokens",
+                  "value": {
+                    "intValue": "213"
+                  }
+                },
+                {
+                  "key": "gen_ai.usage.output_tokens",
+                  "value": {
+                    "intValue": "29"
+                  }
+                }
+              ],
+              "droppedAttributesCount": 0,
+              "events": [
+                {
+                  "timeUnixNano": "1767225590000000000",
+                  "name": "turn.started",
+                  "attributes": [],
+                  "droppedAttributesCount": 0
+                },
+                {
+                  "timeUnixNano": "1767225590277000000",
+                  "name": "turn.completed",
+                  "attributes": [],
+                  "droppedAttributesCount": 0
+                }
+              ],
+              "droppedEventsCount": 0,
+              "links": [],
+              "droppedLinksCount": 0,
+              "status": null
+            },
+            {
+              "traceId": "3f18774f5d9926624c9050c77c84f603",
+              "spanId": "264cea718d290422",
+              "traceState": "",
+              "parentSpanId": "06e278dc494bd271",
+              "flags": 0,
+              "name": "agent.step",
+              "kind": 1,
+              "startTimeUnixNano": "1767225590032000000",
+              "endTimeUnixNano": "1767225590137000000",
+              "attributes": [
+                {
+                  "key": "agent.run.id",
+                  "value": {
+                    "stringValue": "capture-volatile-1"
+                  }
+                },
+                {
+                  "key": "agent.trace.schema.version",
+                  "value": {
+                    "intValue": "4"
+                  }
+                },
+                {
+                  "key": "gen_ai.conversation.id",
+                  "value": {
+                    "stringValue": "capture-volatile-1"
+                  }
+                },
+                {
+                  "key": "agent.framework.name",
+                  "value": {
+                    "stringValue": "eve"
+                  }
+                },
+                {
+                  "key": "agent.framework.version",
+                  "value": {
+                    "stringValue": "1.0.1"
+                  }
+                },
+                {
+                  "key": "agent.turn.id",
+                  "value": {
+                    "stringValue": "turn_0"
+                  }
+                },
+                {
+                  "key": "agent.step.index",
+                  "value": {
+                    "intValue": "0"
+                  }
+                },
+                {
+                  "key": "agent.step.attempt",
+                  "value": {
+                    "intValue": "0"
+                  }
+                },
+                {
+                  "key": "operation.name",
+                  "value": {
+                    "stringValue": "workflow"
+                  }
+                },
+                {
+                  "key": "resource.name",
+                  "value": {
+                    "stringValue": "agent.step"
+                  }
+                },
+                {
+                  "key": "gen_ai.operation.name",
+                  "value": {
+                    "stringValue": "workflow"
+                  }
+                },
+                {
+                  "key": "agent.name",
+                  "value": {
+                    "stringValue": "capture-eve"
+                  }
+                },
+                {
+                  "key": "agent.channel.kind",
+                  "value": {
+                    "stringValue": "channel:eve"
+                  }
+                },
+                {
+                  "key": "agent.session.origin",
+                  "value": {
+                    "stringValue": "channel"
+                  }
+                },
+                {
+                  "key": "agent.model.id",
+                  "value": {
+                    "stringValue": "gpt-4o-mini"
+                  }
+                },
+                {
+                  "key": "agent.usage.input_tokens",
+                  "value": {
+                    "intValue": "82"
+                  }
+                },
+                {
+                  "key": "agent.usage.output_tokens",
+                  "value": {
+                    "intValue": "17"
+                  }
+                },
+                {
+                  "key": "agent.usage.cache_read_tokens",
+                  "value": {
+                    "intValue": "0"
+                  }
+                }
+              ],
+              "droppedAttributesCount": 0,
+              "events": [
+                {
+                  "timeUnixNano": "1767225590032000000",
+                  "name": "step.started",
+                  "attributes": [],
+                  "droppedAttributesCount": 0
+                },
+                {
+                  "timeUnixNano": "1767225590137000000",
+                  "name": "step.completed",
+                  "attributes": [],
+                  "droppedAttributesCount": 0
+                }
+              ],
+              "droppedEventsCount": 0,
+              "links": [
+                {
+                  "traceId": "311e425b7c94f5b2bbe110c697ddaac4",
+                  "spanId": "bb4d4b6f8fcc4548",
+                  "traceState": "",
+                  "attributes": [
+                    {
+                      "key": "eve.link.type",
+                      "value": {
+                        "stringValue": "workflow.delivery"
+                      }
+                    }
+                  ],
+                  "droppedAttributesCount": 0,
+                  "flags": 0
+                }
+              ],
+              "droppedLinksCount": 0,
+              "status": null
+            },
+            {
+              "traceId": "3f18774f5d9926624c9050c77c84f603",
+              "spanId": "377621a2006adb6b",
+              "traceState": "",
+              "parentSpanId": "264cea718d290422",
+              "flags": 0,
+              "name": "chat gpt-4o-mini",
+              "kind": 3,
+              "startTimeUnixNano": "1767225590033000000",
+              "endTimeUnixNano": "1767225590121000000",
+              "attributes": [
+                {
+                  "key": "agent.run.id",
+                  "value": {
+                    "stringValue": "capture-volatile-1"
+                  }
+                },
+                {
+                  "key": "agent.trace.schema.version",
+                  "value": {
+                    "intValue": "4"
+                  }
+                },
+                {
+                  "key": "gen_ai.conversation.id",
+                  "value": {
+                    "stringValue": "capture-volatile-1"
+                  }
+                },
+                {
+                  "key": "operation.name",
+                  "value": {
+                    "stringValue": "chat"
+                  }
+                },
+                {
+                  "key": "resource.name",
+                  "value": {
+                    "stringValue": "chat gpt-4o-mini"
+                  }
+                },
+                {
+                  "key": "gen_ai.agent.name",
+                  "value": {
+                    "stringValue": "capture-eve"
+                  }
+                },
+                {
+                  "key": "gen_ai.operation.name",
+                  "value": {
+                    "stringValue": "chat"
+                  }
+                },
+                {
+                  "key": "agent.turn.id",
+                  "value": {
+                    "stringValue": "turn_0"
+                  }
+                },
+                {
+                  "key": "gen_ai.provider.name",
+                  "value": {
+                    "stringValue": "openai.chat"
+                  }
+                },
+                {
+                  "key": "gen_ai.request.model",
+                  "value": {
+                    "stringValue": "gpt-4o-mini"
+                  }
+                },
+                {
+                  "key": "gen_ai.input.messages",
+                  "value": {
+                    "stringValue": "[{\"kind\":\"user\",\"parts\":[{\"content\":\"Read hello.txt with the read_file tool and say what it says.\",\"type\":\"text\"}],\"role\":\"user\"}]"
+                  }
+                },
+                {
+                  "key": "gen_ai.system_instructions",
+                  "value": {
+                    "stringValue": "[{\"content\":\"Instructions (instructions)\\nYou are a helpful assistant. Use the read_file tool when asked to read a file, then answer in one sentence.\\n\\nTasks\\n- A call that returns \\\"Started task <id>\\\" is a task: it keeps working while you continue. Every agent call is a task.\\n- Each result arrives once, in a <task_result> message. Until then you know nothing about it, so don't guess or report its result.\\n- Ending your reply doesn't end your turn. While tasks work, eve holds your turn and calls you again with each result.\\n- If you have nothing to tell the person until a result arrives, call eve__task_wait. Start every independent task first, then wait.\\n- If the person should hear from you now, for example to confirm work is underway when they don't need the result yet, reply. When results arrive, report them without repeating yourself.\\n- Don't redo work you delegated. Never use sleep or shell commands to wait for a task.\\n- To correct or continue an agent, or any task that accepts more input, call its tool again with its taskId. A new message never stops your tasks: answer it if it asks you something, decide whether it changes the work, then keep each task, correct an agent by taskId, or stop a task with eve__task_cancel.\",\"type\":\"text\"}]"
+                  }
+                },
+                {
+                  "key": "gen_ai.tool.definitions",
+                  "value": {
+                    "stringValue": "[{\"name\":\"bash\",\"description\":\"Execute a shell command in the shared workspace environment. The call waits 60 seconds for the command, or `timeout` seconds from 1 to 120. For builds, installs, and test suites whose full output you need, pass a larger `timeout` instead of shortening or splitting the command. The result is the command's stdout, then any stderr after a `[stderr]` line, or `(no output)`. A command that fails ends with `[exit code: N]` and is reported as an error. A command still running after the wait keeps running in the background, and a final note says how to check on or stop it.\",\"parameters\":{\"type\":\"object\",\"properties\":{\"command\":{\"type\":\"string\",\"description\":\"The shell command to execute.\"},\"timeout\":{\"type\":\"number\",\"description\":\"Seconds to wait for the command before it keeps running in the background. Defaults to 60; values above 120 wait 120, and values below 1 wait 1.\"}},\"required\":[\"command\"],\"additionalProperties\":false}},{\"name\":\"write_file\",\"description\":\"Writes a file to the local filesystem.\\n\\nUsage:\\n- This tool will overwrite the existing file if there is one at the provided path.\\n- If this is an existing file, you MUST use the read_file tool first to read the file's contents. This tool will fail if you did not read the file first.\\n- ALWAYS prefer editing existing files in the codebase. NEVER write new files unless explicitly required.\\n- NEVER proactively create documentation files (*.md) or README files. Only create documentation files if explicitly requested by the User.\\n- Only use emojis if the user explicitly requests it. Avoid writing emojis to files unless asked.\",\"parameters\":{\"type\":\"object\",\"properties\":{\"content\":{\"type\":\"string\",\"description\":\"Complete replacement file contents.\"},\"filePath\":{\"type\":\"string\",\"description\":\"The path to the file to write: absolute, relative to the workspace root, or beginning with $HOME/.\"}},\"required\":[\"content\",\"filePath\"],\"additionalProperties\":false}},{\"name\":\"edit_file\",\"description\":\"Edit a single file using exact text replacement. Every edits[].oldText must match a unique, non-overlapping region of the original file. If two changes affect the same block or nearby lines, merge them into one edit instead of emitting overlapping edits. Do not include large unchanged regions just to connect distant changes.\\n\\nGuidelines:\\n- Use edit_file for targeted changes. Batch changes to one file in a single call.\\n- Each edits[].oldText must exactly and uniquely match the original file. Keep matches short and non-overlapping; merge nearby changes without including large unchanged regions.\",\"parameters\":{\"type\":\"object\",\"properties\":{\"path\":{\"type\":\"string\",\"description\":\"Path to the file to edit (relative or absolute)\"},\"edits\":{\"type\":\"array\",\"items\":{\"type\":\"object\",\"properties\":{\"oldText\":{\"type\":\"string\",\"description\":\"Exact text for one targeted replacement. It must be unique in the original file and must not overlap with any other edits[].oldText in the same call.\"},\"newText\":{\"type\":\"string\",\"description\":\"Replacement text for this targeted edit.\"}},\"required\":[\"oldText\",\"newText\"],\"additionalProperties\":false},\"description\":\"One or more targeted replacements. Each edit is matched against the original file, not incrementally. Do not include overlapping or nested edits. If two changes touch the same block or nearby lines, merge them into one edit instead.\"}},\"required\":[\"path\",\"edits\"],\"additionalProperties\":false}},{\"name\":\"web_fetch\",\"description\":\"Fetch a webpage and return its content in the requested format. Use this to retrieve and analyze content from URLs.\\n\\nUsage notes:\\n- The URL must be a fully-formed valid URL starting with https://\\n- HTML responses are automatically converted to markdown or plain text based on the requested format\\n- Format options: \\\"markdown\\\" (default), \\\"text\\\", or \\\"html\\\"\\n- Default timeout is 30 seconds (max 120 seconds)\\n- Maximum response size is 5 MB; content is further capped at the shared tool-output budget (50 KB / 2000 lines)\\n- This tool is read-only and does not modify any files\",\"parameters\":{\"type\":\"object\",\"properties\":{\"format\":{\"type\":\"string\",\"enum\":[\"markdown\",\"text\",\"html\"],\"description\":\"The format to return the content in (text, markdown, or html). HTML responses are automatically converted to the requested format. Defaults to \\\"markdown\\\".\"},\"timeout\":{\"type\":\"number\",\"description\":\"Optional timeout in seconds, greater than 0. Defaults to 30, max 120.\"},\"url\":{\"type\":\"string\",\"description\":\"The fully-formed URL to fetch content from. Must start with https://.\"}},\"required\":[\"url\"],\"additionalProperties\":false}},{\"name\":\"web_search\"},{\"name\":\"agent\",\"description\":\"Delegate a focused subtask to a copy of yourself. Use it to isolate complex work or split a large task into independent pieces. Each call starts a task, so several agents can work at once: start every independent one before you wait. A new child has fresh history and state but reuses your tools and sandbox, so give parallel writers non-overlapping scopes. In message, state the goal, what to return, and whether it may change files. It does not see this conversation, so put everything it needs in message. To correct or continue an agent task, call this tool again with its taskId; without taskId, each call starts a new agent.\",\"parameters\":{\"type\":\"object\",\"properties\":{\"message\":{\"type\":\"string\",\"description\":\"The message to send to the agent, with everything it needs to do the work.\"},\"taskId\":{\"description\":\"The id of a task this tool started, copied from its \\\"Started task\\\" receipt or the [Tasks] note, to send it this input. Omit it to start a new task.\",\"type\":\"string\"}},\"required\":[\"message\"],\"additionalProperties\":false}},{\"name\":\"read_file\",\"description\":\"Read a text file and return its contents.\",\"parameters\":{\"type\":\"object\",\"properties\":{\"path\":{\"type\":\"string\",\"minLength\":1}},\"required\":[\"path\"],\"additionalProperties\":false}},{\"name\":\"self-modification__agent\",\"description\":\"Delegate here immediately when the user asks to change the self-modification subagent's model, reasoning, or configuration. Also delegate when the user asks to change this eve agent or its authored source. If the requested change references a tool or skill, include the exact identifier. Do not infer source paths; let the child resolve the appropriate file under /source. Delegate the requested change and existing constraints without adding unrequested features, implementation steps, or reporting requirements. Treat requests for persistent changes to future behavior or capabilities as source-modification requests, even when the requester does not mention files or source code. Infer persistence from the request and conversation rather than waiting for phrases such as “modify your source.” For example, asking the agent to stop always doing something, add a capability, or change future responses calls for inspecting and editing the authored source instead of providing a one-turn workaround. Treat questions phrased as whether you can install, add, enable, or connect to a named product or service as requests to extend this eve agent and delegate immediately. Do not assume they refer to device software, ask what kind of installation they mean, or deny them because you lack access to the user's device. The subagent determines whether the request maps to an integration, channel, connection, or other capability, then checks registry availability and any required setup. Delegate questions about which integrations, channels, connections, or capabilities are available to add: the subagent searches the eve registry and reports exact item addresses instead of guessing them. Delegate requests to investigate, diagnose, or optimize the agent's behavior from local traces to this subagent: it can inspect the invoking session's trace and make persistent source changes when warranted. Resolve short follow-ups such as “yes” or “do it” against the preceding conversation. If whether the requested change should persist is genuinely ambiguous, ask one concise clarifying question. If a tool or capability created or changed by this subagent later fails or behaves incorrectly, explain the observed problem and offer to delegate a repair. Do not start the repair until the user confirms. Treat that confirmation as a source-modification request and delegate it immediately, including the exact identifier, failing behavior, expected behavior, and existing constraints. Source edits do not affect the caller’s current turn. After this subagent reports changes, do not invoke edited tools or attempt runtime verification until a new user turn. It does not see this conversation, so put everything it needs in message. To correct or continue an agent task, call this tool again with its taskId; without taskId, each call starts a new agent.\",\"parameters\":{\"type\":\"object\",\"properties\":{\"message\":{\"type\":\"string\",\"description\":\"The message to send to the agent, with everything it needs to do the work.\"},\"taskId\":{\"description\":\"The id of a task this tool started, copied from its \\\"Started task\\\" receipt or the [Tasks] note, to send it this input. Omit it to start a new task.\",\"type\":\"string\"}},\"required\":[\"message\"],\"additionalProperties\":false}},{\"name\":\"eve__task_wait\",\"description\":\"Call eve__task_wait sparingly, only when you deliberately want to withhold a message from the user while waiting for a task result. Tasks keep running and their results reach you without calling eve__task_wait. If the user should hear from you now, reply instead. Wait silently until any of your tasks has a result, a new message arrives, or timeoutSeconds pass. It returns after the first result, which follows in a <task_result> message; wait again only if you still want to withhold a reply until another result arrives. Waiting never stops a task.\",\"parameters\":{\"type\":\"object\",\"properties\":{\"timeoutSeconds\":{\"type\":\"integer\",\"minimum\":1,\"description\":\"Optional. Seconds to wait before returning without a result. There is no upper limit, so set it above 1800 to wait longer than 30 minutes. Omit it to wait up to 30 minutes for a result or a new message, which is almost always right. Don't use short timeouts to check on tasks: results reach you without checking.\"}},\"additionalProperties\":false}},{\"name\":\"eve__task_cancel\",\"description\":\"Stop a task's current work. That work never reports back; if it already had a result, that result is still delivered. Cancelling an agent or one-shot task ends it; start a new task to delegate again. Other tasks that accept more input stay available: call their tool with the taskId to give them new work.\",\"parameters\":{\"type\":\"object\",\"properties\":{\"taskId\":{\"type\":\"string\",\"minLength\":1,\"description\":\"The id of the task to stop, copied from its \\\"Started task\\\" receipt or the [Tasks] note.\"}},\"required\":[\"taskId\"],\"additionalProperties\":false}}]"
+                  }
+                },
+                {
+                  "key": "gen_ai.usage.input_tokens",
+                  "value": {
+                    "intValue": "82"
+                  }
+                },
+                {
+                  "key": "gen_ai.usage.output_tokens",
+                  "value": {
+                    "intValue": "17"
+                  }
+                },
+                {
+                  "key": "gen_ai.usage.cache_read.input_tokens",
+                  "value": {
+                    "intValue": "0"
+                  }
+                },
+                {
+                  "key": "gen_ai.response.id",
+                  "value": {
+                    "stringValue": "chatcmpl-capture-1"
+                  }
+                },
+                {
+                  "key": "gen_ai.response.model",
+                  "value": {
+                    "stringValue": "gpt-4o-mini-2024-07-18"
+                  }
+                },
+                {
+                  "key": "gen_ai.response.finish_reasons",
+                  "value": {
+                    "arrayValue": {
+                      "values": [
+                        {
+                          "stringValue": "tool-calls"
+                        }
+                      ]
+                    }
+                  }
+                },
+                {
+                  "key": "ai.response.finish_reason",
+                  "value": {
+                    "stringValue": "tool-calls"
+                  }
+                },
+                {
+                  "key": "gen_ai.output.messages",
+                  "value": {
+                    "stringValue": "[{\"finish_reason\":\"tool_call\",\"parts\":[{\"arguments\":{\"path\":\"hello.txt\"},\"id\":\"call_read_file_1\",\"name\":\"read_file\",\"type\":\"tool_call\"}],\"role\":\"assistant\"}]"
+                  }
+                },
+                {
+                  "key": "ai.response.tool_calls",
+                  "value": {
+                    "stringValue": "[{\"callId\":\"call_read_file_1\",\"input\":{\"path\":\"hello.txt\"},\"toolName\":\"read_file\"}]"
+                  }
+                }
+              ],
+              "droppedAttributesCount": 0,
+              "events": [],
+              "droppedEventsCount": 0,
+              "links": [],
+              "droppedLinksCount": 0,
+              "status": null
+            },
+            {
+              "traceId": "3f18774f5d9926624c9050c77c84f603",
+              "spanId": "9e78a2bbde66eec6",
+              "traceState": "",
+              "parentSpanId": "264cea718d290422",
+              "flags": 0,
+              "name": "execute_tool read_file",
+              "kind": 1,
+              "startTimeUnixNano": "1767225590122000000",
+              "endTimeUnixNano": "1767225590133000000",
+              "attributes": [
+                {
+                  "key": "agent.run.id",
+                  "value": {
+                    "stringValue": "capture-volatile-1"
+                  }
+                },
+                {
+                  "key": "agent.trace.schema.version",
+                  "value": {
+                    "intValue": "4"
+                  }
+                },
+                {
+                  "key": "gen_ai.conversation.id",
+                  "value": {
+                    "stringValue": "capture-volatile-1"
+                  }
+                },
+                {
+                  "key": "agent.framework.name",
+                  "value": {
+                    "stringValue": "eve"
+                  }
+                },
+                {
+                  "key": "agent.framework.version",
+                  "value": {
+                    "stringValue": "1.0.1"
+                  }
+                },
+                {
+                  "key": "agent.turn.id",
+                  "value": {
+                    "stringValue": "turn_0"
+                  }
+                },
+                {
+                  "key": "agent.step.index",
+                  "value": {
+                    "intValue": "0"
+                  }
+                },
+                {
+                  "key": "agent.step.attempt",
+                  "value": {
+                    "intValue": "0"
+                  }
+                },
+                {
+                  "key": "operation.name",
+                  "value": {
+                    "stringValue": "execute_tool"
+                  }
+                },
+                {
+                  "key": "resource.name",
+                  "value": {
+                    "stringValue": "execute_tool read_file"
+                  }
+                },
+                {
+                  "key": "gen_ai.agent.name",
+                  "value": {
+                    "stringValue": "capture-eve"
+                  }
+                },
+                {
+                  "key": "gen_ai.operation.name",
+                  "value": {
+                    "stringValue": "execute_tool"
+                  }
+                },
+                {
+                  "key": "gen_ai.tool.call.id",
+                  "value": {
+                    "stringValue": "call_read_file_1"
+                  }
+                },
+                {
+                  "key": "gen_ai.tool.name",
+                  "value": {
+                    "stringValue": "read_file"
+                  }
+                },
+                {
+                  "key": "gen_ai.tool.type",
+                  "value": {
+                    "stringValue": "function"
+                  }
+                },
+                {
+                  "key": "agent.action.kind",
+                  "value": {
+                    "stringValue": "tool-call"
+                  }
+                },
+                {
+                  "key": "agent.action.name",
+                  "value": {
+                    "stringValue": "read_file"
+                  }
+                },
+                {
+                  "key": "gen_ai.tool.call.arguments",
+                  "value": {
+                    "stringValue": "{\"path\":\"hello.txt\"}"
+                  }
+                },
+                {
+                  "key": "agent.tool.is_framework",
+                  "value": {
+                    "boolValue": false
+                  }
+                },
+                {
+                  "key": "gen_ai.execute_tool.duration",
+                  "value": {
+                    "doubleValue": 0.003
+                  }
+                },
+                {
+                  "key": "agent.action.outcome",
+                  "value": {
+                    "stringValue": "completed"
+                  }
+                },
+                {
+                  "key": "gen_ai.tool.call.result",
+                  "value": {
+                    "stringValue": "{\"path\":\"hello.txt\",\"text\":\"hello from cetra\\n\"}"
+                  }
+                }
+              ],
+              "droppedAttributesCount": 0,
+              "events": [],
+              "droppedEventsCount": 0,
+              "links": [],
+              "droppedLinksCount": 0,
+              "status": null
+            },
+            {
+              "traceId": "3f18774f5d9926624c9050c77c84f603",
+              "spanId": "b22ce1e108f4d2cd",
+              "traceState": "",
+              "parentSpanId": "06e278dc494bd271",
+              "flags": 0,
+              "name": "agent.step",
+              "kind": 1,
+              "startTimeUnixNano": "1767225590193000000",
+              "endTimeUnixNano": "1767225590275000000",
+              "attributes": [
+                {
+                  "key": "agent.run.id",
+                  "value": {
+                    "stringValue": "capture-volatile-1"
+                  }
+                },
+                {
+                  "key": "agent.trace.schema.version",
+                  "value": {
+                    "intValue": "4"
+                  }
+                },
+                {
+                  "key": "gen_ai.conversation.id",
+                  "value": {
+                    "stringValue": "capture-volatile-1"
+                  }
+                },
+                {
+                  "key": "agent.framework.name",
+                  "value": {
+                    "stringValue": "eve"
+                  }
+                },
+                {
+                  "key": "agent.framework.version",
+                  "value": {
+                    "stringValue": "1.0.1"
+                  }
+                },
+                {
+                  "key": "agent.turn.id",
+                  "value": {
+                    "stringValue": "turn_0"
+                  }
+                },
+                {
+                  "key": "agent.step.index",
+                  "value": {
+                    "intValue": "1"
+                  }
+                },
+                {
+                  "key": "agent.step.attempt",
+                  "value": {
+                    "intValue": "0"
+                  }
+                },
+                {
+                  "key": "operation.name",
+                  "value": {
+                    "stringValue": "workflow"
+                  }
+                },
+                {
+                  "key": "resource.name",
+                  "value": {
+                    "stringValue": "agent.step"
+                  }
+                },
+                {
+                  "key": "gen_ai.operation.name",
+                  "value": {
+                    "stringValue": "workflow"
+                  }
+                },
+                {
+                  "key": "agent.name",
+                  "value": {
+                    "stringValue": "capture-eve"
+                  }
+                },
+                {
+                  "key": "agent.channel.kind",
+                  "value": {
+                    "stringValue": "channel:eve"
+                  }
+                },
+                {
+                  "key": "agent.session.origin",
+                  "value": {
+                    "stringValue": "channel"
+                  }
+                },
+                {
+                  "key": "agent.model.id",
+                  "value": {
+                    "stringValue": "gpt-4o-mini"
+                  }
+                },
+                {
+                  "key": "agent.usage.input_tokens",
+                  "value": {
+                    "intValue": "131"
+                  }
+                },
+                {
+                  "key": "agent.usage.output_tokens",
+                  "value": {
+                    "intValue": "12"
+                  }
+                },
+                {
+                  "key": "agent.usage.cache_read_tokens",
+                  "value": {
+                    "intValue": "0"
+                  }
+                }
+              ],
+              "droppedAttributesCount": 0,
+              "events": [
+                {
+                  "timeUnixNano": "1767225590193000000",
+                  "name": "step.started",
+                  "attributes": [],
+                  "droppedAttributesCount": 0
+                },
+                {
+                  "timeUnixNano": "1767225590274000000",
+                  "name": "step.completed",
+                  "attributes": [],
+                  "droppedAttributesCount": 0
+                }
+              ],
+              "droppedEventsCount": 0,
+              "links": [
+                {
+                  "traceId": "311e425b7c94f5b2bbe110c697ddaac4",
+                  "spanId": "e447e0861f524f06",
+                  "traceState": "",
+                  "attributes": [
+                    {
+                      "key": "eve.link.type",
+                      "value": {
+                        "stringValue": "workflow.delivery"
+                      }
+                    }
+                  ],
+                  "droppedAttributesCount": 0,
+                  "flags": 0
+                }
+              ],
+              "droppedLinksCount": 0,
+              "status": null
+            },
+            {
+              "traceId": "3f18774f5d9926624c9050c77c84f603",
+              "spanId": "9b9a73ab2f565e62",
+              "traceState": "",
+              "parentSpanId": "b22ce1e108f4d2cd",
+              "flags": 0,
+              "name": "chat gpt-4o-mini",
+              "kind": 3,
+              "startTimeUnixNano": "1767225590194000000",
+              "endTimeUnixNano": "1767225590272000000",
+              "attributes": [
+                {
+                  "key": "agent.run.id",
+                  "value": {
+                    "stringValue": "capture-volatile-1"
+                  }
+                },
+                {
+                  "key": "agent.trace.schema.version",
+                  "value": {
+                    "intValue": "4"
+                  }
+                },
+                {
+                  "key": "gen_ai.conversation.id",
+                  "value": {
+                    "stringValue": "capture-volatile-1"
+                  }
+                },
+                {
+                  "key": "operation.name",
+                  "value": {
+                    "stringValue": "chat"
+                  }
+                },
+                {
+                  "key": "resource.name",
+                  "value": {
+                    "stringValue": "chat gpt-4o-mini"
+                  }
+                },
+                {
+                  "key": "gen_ai.agent.name",
+                  "value": {
+                    "stringValue": "capture-eve"
+                  }
+                },
+                {
+                  "key": "gen_ai.operation.name",
+                  "value": {
+                    "stringValue": "chat"
+                  }
+                },
+                {
+                  "key": "agent.turn.id",
+                  "value": {
+                    "stringValue": "turn_0"
+                  }
+                },
+                {
+                  "key": "gen_ai.provider.name",
+                  "value": {
+                    "stringValue": "openai.chat"
+                  }
+                },
+                {
+                  "key": "gen_ai.request.model",
+                  "value": {
+                    "stringValue": "gpt-4o-mini"
+                  }
+                },
+                {
+                  "key": "gen_ai.input.messages",
+                  "value": {
+                    "stringValue": "[{\"kind\":\"user\",\"parts\":[{\"content\":\"Read hello.txt with the read_file tool and say what it says.\",\"type\":\"text\"}],\"role\":\"user\"},{\"parts\":[{\"arguments\":{\"path\":\"hello.txt\"},\"id\":\"call_read_file_1\",\"name\":\"read_file\",\"type\":\"tool_call\"}],\"role\":\"assistant\"},{\"parts\":[{\"id\":\"call_read_file_1\",\"response\":{\"path\":\"hello.txt\",\"text\":\"hello from cetra\\n\"},\"type\":\"tool_call_response\"}],\"role\":\"tool\"}]"
+                  }
+                },
+                {
+                  "key": "gen_ai.system_instructions",
+                  "value": {
+                    "stringValue": "[{\"content\":\"Instructions (instructions)\\nYou are a helpful assistant. Use the read_file tool when asked to read a file, then answer in one sentence.\\n\\nTasks\\n- A call that returns \\\"Started task <id>\\\" is a task: it keeps working while you continue. Every agent call is a task.\\n- Each result arrives once, in a <task_result> message. Until then you know nothing about it, so don't guess or report its result.\\n- Ending your reply doesn't end your turn. While tasks work, eve holds your turn and calls you again with each result.\\n- If you have nothing to tell the person until a result arrives, call eve__task_wait. Start every independent task first, then wait.\\n- If the person should hear from you now, for example to confirm work is underway when they don't need the result yet, reply. When results arrive, report them without repeating yourself.\\n- Don't redo work you delegated. Never use sleep or shell commands to wait for a task.\\n- To correct or continue an agent, or any task that accepts more input, call its tool again with its taskId. A new message never stops your tasks: answer it if it asks you something, decide whether it changes the work, then keep each task, correct an agent by taskId, or stop a task with eve__task_cancel.\",\"type\":\"text\"}]"
+                  }
+                },
+                {
+                  "key": "gen_ai.tool.definitions",
+                  "value": {
+                    "stringValue": "[{\"name\":\"bash\",\"description\":\"Execute a shell command in the shared workspace environment. The call waits 60 seconds for the command, or `timeout` seconds from 1 to 120. For builds, installs, and test suites whose full output you need, pass a larger `timeout` instead of shortening or splitting the command. The result is the command's stdout, then any stderr after a `[stderr]` line, or `(no output)`. A command that fails ends with `[exit code: N]` and is reported as an error. A command still running after the wait keeps running in the background, and a final note says how to check on or stop it.\",\"parameters\":{\"type\":\"object\",\"properties\":{\"command\":{\"type\":\"string\",\"description\":\"The shell command to execute.\"},\"timeout\":{\"type\":\"number\",\"description\":\"Seconds to wait for the command before it keeps running in the background. Defaults to 60; values above 120 wait 120, and values below 1 wait 1.\"}},\"required\":[\"command\"],\"additionalProperties\":false}},{\"name\":\"write_file\",\"description\":\"Writes a file to the local filesystem.\\n\\nUsage:\\n- This tool will overwrite the existing file if there is one at the provided path.\\n- If this is an existing file, you MUST use the read_file tool first to read the file's contents. This tool will fail if you did not read the file first.\\n- ALWAYS prefer editing existing files in the codebase. NEVER write new files unless explicitly required.\\n- NEVER proactively create documentation files (*.md) or README files. Only create documentation files if explicitly requested by the User.\\n- Only use emojis if the user explicitly requests it. Avoid writing emojis to files unless asked.\",\"parameters\":{\"type\":\"object\",\"properties\":{\"content\":{\"type\":\"string\",\"description\":\"Complete replacement file contents.\"},\"filePath\":{\"type\":\"string\",\"description\":\"The path to the file to write: absolute, relative to the workspace root, or beginning with $HOME/.\"}},\"required\":[\"content\",\"filePath\"],\"additionalProperties\":false}},{\"name\":\"edit_file\",\"description\":\"Edit a single file using exact text replacement. Every edits[].oldText must match a unique, non-overlapping region of the original file. If two changes affect the same block or nearby lines, merge them into one edit instead of emitting overlapping edits. Do not include large unchanged regions just to connect distant changes.\\n\\nGuidelines:\\n- Use edit_file for targeted changes. Batch changes to one file in a single call.\\n- Each edits[].oldText must exactly and uniquely match the original file. Keep matches short and non-overlapping; merge nearby changes without including large unchanged regions.\",\"parameters\":{\"type\":\"object\",\"properties\":{\"path\":{\"type\":\"string\",\"description\":\"Path to the file to edit (relative or absolute)\"},\"edits\":{\"type\":\"array\",\"items\":{\"type\":\"object\",\"properties\":{\"oldText\":{\"type\":\"string\",\"description\":\"Exact text for one targeted replacement. It must be unique in the original file and must not overlap with any other edits[].oldText in the same call.\"},\"newText\":{\"type\":\"string\",\"description\":\"Replacement text for this targeted edit.\"}},\"required\":[\"oldText\",\"newText\"],\"additionalProperties\":false},\"description\":\"One or more targeted replacements. Each edit is matched against the original file, not incrementally. Do not include overlapping or nested edits. If two changes touch the same block or nearby lines, merge them into one edit instead.\"}},\"required\":[\"path\",\"edits\"],\"additionalProperties\":false}},{\"name\":\"web_fetch\",\"description\":\"Fetch a webpage and return its content in the requested format. Use this to retrieve and analyze content from URLs.\\n\\nUsage notes:\\n- The URL must be a fully-formed valid URL starting with https://\\n- HTML responses are automatically converted to markdown or plain text based on the requested format\\n- Format options: \\\"markdown\\\" (default), \\\"text\\\", or \\\"html\\\"\\n- Default timeout is 30 seconds (max 120 seconds)\\n- Maximum response size is 5 MB; content is further capped at the shared tool-output budget (50 KB / 2000 lines)\\n- This tool is read-only and does not modify any files\",\"parameters\":{\"type\":\"object\",\"properties\":{\"format\":{\"type\":\"string\",\"enum\":[\"markdown\",\"text\",\"html\"],\"description\":\"The format to return the content in (text, markdown, or html). HTML responses are automatically converted to the requested format. Defaults to \\\"markdown\\\".\"},\"timeout\":{\"type\":\"number\",\"description\":\"Optional timeout in seconds, greater than 0. Defaults to 30, max 120.\"},\"url\":{\"type\":\"string\",\"description\":\"The fully-formed URL to fetch content from. Must start with https://.\"}},\"required\":[\"url\"],\"additionalProperties\":false}},{\"name\":\"web_search\"},{\"name\":\"agent\",\"description\":\"Delegate a focused subtask to a copy of yourself. Use it to isolate complex work or split a large task into independent pieces. Each call starts a task, so several agents can work at once: start every independent one before you wait. A new child has fresh history and state but reuses your tools and sandbox, so give parallel writers non-overlapping scopes. In message, state the goal, what to return, and whether it may change files. It does not see this conversation, so put everything it needs in message. To correct or continue an agent task, call this tool again with its taskId; without taskId, each call starts a new agent.\",\"parameters\":{\"type\":\"object\",\"properties\":{\"message\":{\"type\":\"string\",\"description\":\"The message to send to the agent, with everything it needs to do the work.\"},\"taskId\":{\"description\":\"The id of a task this tool started, copied from its \\\"Started task\\\" receipt or the [Tasks] note, to send it this input. Omit it to start a new task.\",\"type\":\"string\"}},\"required\":[\"message\"],\"additionalProperties\":false}},{\"name\":\"read_file\",\"description\":\"Read a text file and return its contents.\",\"parameters\":{\"type\":\"object\",\"properties\":{\"path\":{\"type\":\"string\",\"minLength\":1}},\"required\":[\"path\"],\"additionalProperties\":false}},{\"name\":\"self-modification__agent\",\"description\":\"Delegate here immediately when the user asks to change the self-modification subagent's model, reasoning, or configuration. Also delegate when the user asks to change this eve agent or its authored source. If the requested change references a tool or skill, include the exact identifier. Do not infer source paths; let the child resolve the appropriate file under /source. Delegate the requested change and existing constraints without adding unrequested features, implementation steps, or reporting requirements. Treat requests for persistent changes to future behavior or capabilities as source-modification requests, even when the requester does not mention files or source code. Infer persistence from the request and conversation rather than waiting for phrases such as “modify your source.” For example, asking the agent to stop always doing something, add a capability, or change future responses calls for inspecting and editing the authored source instead of providing a one-turn workaround. Treat questions phrased as whether you can install, add, enable, or connect to a named product or service as requests to extend this eve agent and delegate immediately. Do not assume they refer to device software, ask what kind of installation they mean, or deny them because you lack access to the user's device. The subagent determines whether the request maps to an integration, channel, connection, or other capability, then checks registry availability and any required setup. Delegate questions about which integrations, channels, connections, or capabilities are available to add: the subagent searches the eve registry and reports exact item addresses instead of guessing them. Delegate requests to investigate, diagnose, or optimize the agent's behavior from local traces to this subagent: it can inspect the invoking session's trace and make persistent source changes when warranted. Resolve short follow-ups such as “yes” or “do it” against the preceding conversation. If whether the requested change should persist is genuinely ambiguous, ask one concise clarifying question. If a tool or capability created or changed by this subagent later fails or behaves incorrectly, explain the observed problem and offer to delegate a repair. Do not start the repair until the user confirms. Treat that confirmation as a source-modification request and delegate it immediately, including the exact identifier, failing behavior, expected behavior, and existing constraints. Source edits do not affect the caller’s current turn. After this subagent reports changes, do not invoke edited tools or attempt runtime verification until a new user turn. It does not see this conversation, so put everything it needs in message. To correct or continue an agent task, call this tool again with its taskId; without taskId, each call starts a new agent.\",\"parameters\":{\"type\":\"object\",\"properties\":{\"message\":{\"type\":\"string\",\"description\":\"The message to send to the agent, with everything it needs to do the work.\"},\"taskId\":{\"description\":\"The id of a task this tool started, copied from its \\\"Started task\\\" receipt or the [Tasks] note, to send it this input. Omit it to start a new task.\",\"type\":\"string\"}},\"required\":[\"message\"],\"additionalProperties\":false}},{\"name\":\"eve__task_wait\",\"description\":\"Call eve__task_wait sparingly, only when you deliberately want to withhold a message from the user while waiting for a task result. Tasks keep running and their results reach you without calling eve__task_wait. If the user should hear from you now, reply instead. Wait silently until any of your tasks has a result, a new message arrives, or timeoutSeconds pass. It returns after the first result, which follows in a <task_result> message; wait again only if you still want to withhold a reply until another result arrives. Waiting never stops a task.\",\"parameters\":{\"type\":\"object\",\"properties\":{\"timeoutSeconds\":{\"type\":\"integer\",\"minimum\":1,\"description\":\"Optional. Seconds to wait before returning without a result. There is no upper limit, so set it above 1800 to wait longer than 30 minutes. Omit it to wait up to 30 minutes for a result or a new message, which is almost always right. Don't use short timeouts to check on tasks: results reach you without checking.\"}},\"additionalProperties\":false}},{\"name\":\"eve__task_cancel\",\"description\":\"Stop a task's current work. That work never reports back; if it already had a result, that result is still delivered. Cancelling an agent or one-shot task ends it; start a new task to delegate again. Other tasks that accept more input stay available: call their tool with the taskId to give them new work.\",\"parameters\":{\"type\":\"object\",\"properties\":{\"taskId\":{\"type\":\"string\",\"minLength\":1,\"description\":\"The id of the task to stop, copied from its \\\"Started task\\\" receipt or the [Tasks] note.\"}},\"required\":[\"taskId\"],\"additionalProperties\":false}}]"
+                  }
+                },
+                {
+                  "key": "gen_ai.usage.input_tokens",
+                  "value": {
+                    "intValue": "131"
+                  }
+                },
+                {
+                  "key": "gen_ai.usage.output_tokens",
+                  "value": {
+                    "intValue": "12"
+                  }
+                },
+                {
+                  "key": "gen_ai.usage.cache_read.input_tokens",
+                  "value": {
+                    "intValue": "0"
+                  }
+                },
+                {
+                  "key": "gen_ai.response.id",
+                  "value": {
+                    "stringValue": "chatcmpl-capture-2"
+                  }
+                },
+                {
+                  "key": "gen_ai.response.model",
+                  "value": {
+                    "stringValue": "gpt-4o-mini-2024-07-18"
+                  }
+                },
+                {
+                  "key": "gen_ai.response.finish_reasons",
+                  "value": {
+                    "arrayValue": {
+                      "values": [
+                        {
+                          "stringValue": "stop"
+                        }
+                      ]
+                    }
+                  }
+                },
+                {
+                  "key": "ai.response.finish_reason",
+                  "value": {
+                    "stringValue": "stop"
+                  }
+                },
+                {
+                  "key": "gen_ai.output.messages",
+                  "value": {
+                    "stringValue": "[{\"finish_reason\":\"stop\",\"parts\":[{\"content\":\"hello.txt says: hello from cetra\",\"type\":\"text\"}],\"role\":\"assistant\"}]"
+                  }
+                },
+                {
+                  "key": "ai.response.text",
+                  "value": {
+                    "stringValue": "hello.txt says: hello from cetra"
+                  }
+                }
+              ],
+              "droppedAttributesCount": 0,
+              "events": [],
+              "droppedEventsCount": 0,
+              "links": [],
+              "droppedLinksCount": 0,
+              "status": null
+            }
+          ],
+          "schemaUrl": ""
+        }
+      ],
+      "schemaUrl": ""
+    }
+  ]
+}

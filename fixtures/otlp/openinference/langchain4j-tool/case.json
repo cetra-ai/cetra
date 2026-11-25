@@ -1,0 +1,18 @@
+{
+  "description": "LangChain4j 1.23.0 AiServices with one tool, traced by OpenInference Java's model listener only: one llm span per model call, no agent or tool spans.",
+  "origin": "captured",
+  "source": {
+    "instrumentation": "openinference-instrumentation-langchain4j",
+    "instrumentation_version": "0.1.9",
+    "language": "java",
+    "libraries": {
+      "langchain4j": "1.23.0",
+      "langchain4j-open-ai": "1.23.0",
+      "openinference-instrumentation-langchain4j": "0.1.9"
+    },
+    "captured_at": "2026-11-24T16:33:07Z"
+  },
+  "spec_refs": [
+    "02 § Mapping tables / Input / output"
+  ]
+}

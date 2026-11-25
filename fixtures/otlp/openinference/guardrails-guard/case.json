@@ -1,0 +1,21 @@
+{
+  "description": "Guardrails guard with a local validator over one model call, traced by Guardrails' own spans and OpenInference's openai instrumentation.",
+  "origin": "captured",
+  "source": {
+    "instrumentation": "guardrails-ai",
+    "instrumentation_version": "0.11.0",
+    "language": "python",
+    "libraries": {
+      "guardrails-ai": "0.11.0",
+      "openinference-instrumentation-openai": "0.1.69",
+      "opentelemetry-sdk": "1.45.2"
+    },
+    "captured_at": "2026-11-23T16:54:38Z"
+  },
+  "spec_refs": [
+    "02 § Convention detection",
+    "02 § Mapping tables / Span kind",
+    "02 § Mapping tables / Model, provider, usage"
+  ],
+  "notes": "cetra_runtime is not used: the harness setup() provider is set as the global tracer provider, which Guardrails reads, and OpenInference's OpenAIInstrumentor is attached to it. Guardrails emits its own spans on the global provider; the OpenInference Guardrails instrumentor supports only guardrails-ai below 0.5.1 and is not installed here. main.py points HOME at a fresh temp directory holding .guardrailsrc with enable_metrics=false, read at import, so no usage metrics are sent; setting it on the settings object afterwards is too late. LITELLM_LOCAL_MODEL_COST_MAP is True before anything is imported, so litellm does not download its cost map. The API key comes from OPENAI_API_KEY and is never passed as a keyword, or it would be recorded in clear in llm.invocation_parameters. The validator is a local @register_validator class, as the page's sample. Guardrails writes five spans: guard, step, call, no-banned-word.validate and the openai instrumentor's ChatCompletion, as guard > step > call > ChatCompletion, with no-banned-word.validate under step. The step span is dropped by span_names: its input and output values embed the call id, which is the id() of the LLM callable (its memory address), the callable's repr with that address, and validator start and end times, none of which volatile_attributes or a pin can reach. call keeps step's id as its parent. The call span's llm.token_count stays unread (its kind is guardrail), so tokens count once, on the llm span. execution_id, instance_id, validation_session_id and validator.instance_id are random per run and are listed as volatile."
+}

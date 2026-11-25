@@ -1,0 +1,69 @@
+---
+title: Cohere
+description: "Trace Cohere chat calls with cetra from Python, with the OpenInference Cohere instrumentation."
+---
+
+import { Tabs, TabItem } from "@astrojs/starlight/components";
+import Backing from "../../../../components/Backing.astro";
+
+Trace Cohere chat calls with cetra from Python, with the OpenInference Cohere instrumentation.
+
+<Backing fixtures={["openinference/cohere-chat"]} />
+
+## Install
+
+<Tabs syncKey="lang">
+  <TabItem label="Python">
+
+```bash
+pip install "cetra-sdk[cohere]" cohere
+```
+
+  </TabItem>
+</Tabs>
+
+## Set up
+
+<Tabs syncKey="lang">
+  <TabItem label="Python">
+
+{/* untested: calls Cohere and needs COHERE_API_KEY */}
+```python
+import os
+
+import cetra
+import cohere
+
+cetra.init(instrument=["cohere"])
+
+client = cohere.ClientV2(api_key=os.environ["COHERE_API_KEY"])
+response = client.chat(
+    model="command-a-03-2025",
+    messages=[{"role": "user", "content": "What is the capital of France?"}],
+)
+print(response.message.content[0].text)
+
+cetra.flush()
+```
+
+  </TabItem>
+</Tabs>
+
+## What you get
+
+- Each chat call is an `llm` span with the provider `cohere`.
+- Input and output token counts come from the response.
+- Cost comes from the built-in prices.
+
+## Limits
+
+- Only non-streaming chat is captured.
+- Cohere's response carries no model name, so the span shows the model in the request.
+- The fixtures were captured with cohere 7.3.1 and openinference-instrumentation-cohere 0.1.22.
+- If a field is missing, look at the span's **Attributes** tab and compare it with [Span attributes](/docs/reference/attributes/).
+
+## Next
+
+- [Traces](/docs/tracing/traces/): read the trace as a tree and a timeline.
+- [Cost and tokens](/docs/tracing/cost-and-tokens/): how cost is computed from the token counts.
+- [Custom model prices](/docs/tracing/cost-and-tokens/#custom-model-prices): price a model the built-in prices do not cover.
