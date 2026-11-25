@@ -201,6 +201,17 @@ impl Suspects {
             );
         }
     }
+
+    /// Queues a single corrupt or missing file for background verification.
+    pub(crate) fn report_corrupt(&self, id: FileId) {
+        let queued = self.inner.queue.suspect([id], catalog::now_ns());
+        if queued > 0 {
+            tracing::warn!(
+                files = queued,
+                "a query failed to decode; its files are queued for verification"
+            );
+        }
+    }
 }
 
 /// What a whole-file read found.

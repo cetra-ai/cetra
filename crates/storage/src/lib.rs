@@ -53,6 +53,8 @@ pub(crate) mod counters;
 pub(crate) mod dedup;
 pub(crate) mod deletion;
 pub(crate) mod disk;
+#[allow(dead_code)] // wired in QE3.7 and M4
+pub(crate) mod engine;
 pub mod error;
 mod filter;
 pub(crate) mod flush;

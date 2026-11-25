@@ -9,7 +9,7 @@
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, PoisonError};
+use std::sync::{Arc, Mutex, OnceLock, PoisonError};
 
 use std::time::Duration;
 
@@ -39,6 +39,10 @@ pub(crate) struct Disk {
     spill: Arc<DiskManager>,
     /// Set once a failed spill-limit update has been logged.
     spill_cap_warned: AtomicBool,
+    /// Frozen total spill byte cap for `cetra_query::exec::SpillManager`, refreshed at `statvfs` time.
+    engine_spill_cap: AtomicU64,
+    /// Shared live spilled-bytes counter registered by `cetra_query::exec::SpillManager`.
+    engine_spilled: OnceLock<Arc<AtomicU64>>,
     /// Tests set this to stand in for `statvfs`.
     #[cfg(test)]
     fake_free: Mutex<Option<u64>>,
@@ -59,6 +63,8 @@ impl Disk {
             reserved: Mutex::new(0),
             spill,
             spill_cap_warned: AtomicBool::new(false),
+            engine_spill_cap: AtomicU64::new(0),
+            engine_spilled: OnceLock::new(),
             #[cfg(test)]
             fake_free: Mutex::new(None),
         };
@@ -94,6 +100,25 @@ impl Disk {
         {
             tracing::warn!(%error, "setting the query spill limit failed");
         }
+        let engine_used = self
+            .engine_spilled
+            .get()
+            .map_or(0, |counter| counter.load(Ordering::Acquire));
+        let engine_cap = engine_used.saturating_add(free.saturating_sub(self.min_free));
+        self.engine_spill_cap.store(engine_cap, Ordering::Release);
+    }
+
+    /// Registers the native query engine's live spilled-bytes counter and refreshes the spill cap.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) fn set_engine_spilled(&self, counter: Arc<AtomicU64>) {
+        let _ = self.engine_spilled.set(counter);
+        self.apply_spill_cap(self.free());
+    }
+
+    /// Frozen process-wide maximum total spilled bytes allowed for `cetra_query::exec::SpillManager`.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) fn engine_spill_cap(&self) -> u64 {
+        self.engine_spill_cap.load(Ordering::Acquire)
     }
 
     /// The last measured free bytes.
@@ -320,6 +345,17 @@ mod tests {
         assert_eq!(spill.max_temp_directory_size(), 0);
         disk.set_free_for_test(Some(100));
         assert_eq!(spill.max_temp_directory_size(), 0);
+        assert_eq!(disk.engine_spill_cap(), 0);
+
+        let engine_counter = Arc::new(AtomicU64::new(250));
+        disk.set_engine_spilled(Arc::clone(&engine_counter));
+        disk.set_free_for_test(Some(1_000));
+        assert_eq!(disk.engine_spill_cap(), 250 + 900);
+        engine_counter.store(500, Ordering::Release);
+        // Frozen until the next `statvfs` refresh.
+        assert_eq!(disk.engine_spill_cap(), 250 + 900);
+        disk.set_free_for_test(Some(1_000));
+        assert_eq!(disk.engine_spill_cap(), 500 + 900);
     }
 
     #[test]
