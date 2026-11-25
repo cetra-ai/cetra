@@ -22,7 +22,7 @@ The trace list gets a line under its table with the trace count, the error count
 
 When done:
 - `GET /traces/totals?filter=…&search=…&from=…&to=…&include_eval=…&include_experiments=…` answers `{"trace_count": 203, "error_trace_count": 3, "cost_total": 4.12}` for the same rows `GET /traces` pages through.
-- Under the traces table, a line reads `203 traces · 3 errors · $4.12`; with two rows checked, `2 of 203 selected · 1 error · $0.01`.
+- Under the traces table, a line reads `203 traces · 3 errors · $4.12`; with two rows checked, `2 of 203 selected · 1 error · $0.0027`.
 - OpenAPI, the generated web schema, and the mock fixtures (`fixtures/api/responses/trace-totals.json`) include the endpoint.
 - Spec 05, 09, 11, the decision, the CHANGELOG and the docs page describe it.
 
@@ -60,25 +60,28 @@ No new dependency.
 ## Phase graph
 
 ```
-P1 (storage + server) ──► [coordinator: just openapi, just api-examples, commit] ──► P2 (web) ──► P3 (docs, changelog)
+P1a (storage) ──► P1b (server) ──► [coordinator: compile, just openapi, just api-examples, commit] ──► P2 (web) ──► P3 (docs, changelog)
 ```
 
 P2 needs the regenerated `web/src/api/schema.gen.ts` and `fixtures/api/responses/trace-totals.json`. P3 touches only docs files; it runs after P2 so it can describe the final UI text, and could run in parallel with P2 (disjoint files) if the coordinator wants.
 
 | Phase | Files |
 |---|---|
-| P1 | `crates/storage/src/reads/traces.rs`, `crates/storage/src/reads/mod.rs`, `crates/storage/src/lib.rs`, `crates/server/src/api/traces.rs`, `crates/server/src/routes/traces.rs`, `crates/server/src/api/openapi.rs`, `crates/server/src/api_examples.rs` |
+| P1a | `crates/storage/src/reads/traces.rs`, `crates/storage/src/reads/mod.rs`, `crates/storage/src/lib.rs` |
+| P1b | `crates/server/src/api/traces.rs`, `crates/server/src/routes/traces.rs`, `crates/server/src/api/openapi.rs`, `crates/server/src/api_examples.rs`, `crates/server/tests/openapi.rs`, `crates/server/tests/api_examples.rs` |
 | coordinator | `crates/server/openapi.json`, `web/src/api/schema.gen.ts`, `fixtures/api/manifest.json`, `fixtures/api/responses/trace-totals.json` (generated) |
-| P2 | `web/src/api/queries.ts`, `web/src/components/trace/trace-totals.tsx` (new), `web/src/components/trace/trace-totals.test.tsx` (new), `web/src/routes/$org/$project/traces/index.tsx`, `web/src/routes/$org/$project/traces/index.test.tsx` |
+| P2 | `web/src/api/queries.ts`, `web/src/components/trace/trace-totals.tsx` (new), `web/src/components/trace/trace-totals.test.tsx` (new), `web/src/routes/$org/$project/traces/index.tsx`, `web/src/routes/$org/$project/traces/index.test.tsx`, `web/src/mocks/generated/handlers.ts`, `web/src/mocks/generated/handlers.test.ts` |
 | P3 | `website/src/content/docs/docs/tracing/traces.mdx`, `CHANGELOG.md` |
 
 ---
 
-## P1 — Storage read and API endpoint
+## P1a and P1b — Storage read and API endpoint
+
+P1a does the storage part: § Contracts "Storage", steps 1–6, the storage tests. Its **Edit:** `crates/storage/src/reads/traces.rs`, `crates/storage/src/reads/mod.rs`, `crates/storage/src/lib.rs`. **Commit:** `Add the trace_totals storage read`.
+
+P1b does the server part: § Contracts "Server", steps 7–11, the server tests. Its **Edit:** `crates/server/src/api/traces.rs`, `crates/server/src/routes/traces.rs`, `crates/server/src/api/openapi.rs`, `crates/server/src/api_examples.rs`, `crates/server/tests/openapi.rs`, `crates/server/tests/api_examples.rs`. **Commit:** `Add GET /traces/totals for the trace list totals`.
 
 **Goal:** `GET /api/v1/projects/{project}/traces/totals` answers the trace count, error trace count and exact cost sum of the trace list's rows.
-
-**Edit:** `crates/storage/src/reads/traces.rs`, `crates/storage/src/reads/mod.rs`, `crates/storage/src/lib.rs`, `crates/server/src/api/traces.rs`, `crates/server/src/routes/traces.rs`, `crates/server/src/api/openapi.rs`, `crates/server/src/api_examples.rs`.
 
 ### Contracts
 
@@ -233,7 +236,7 @@ Server:
       }
       ```
 9. `crates/server/src/api/openapi.rs`:
-   1. Add `TraceTotals, TraceTotalsParams` to the `crate::api::traces::{…}` import near the top.
+   1. Add `TraceTotals, TraceTotalsParams` to the `use super::traces::{…}` import near the top (it lists `SpanDetail, …, TraceStreamParams, TraceSummary`).
    2. Add `set.insert::<TraceTotals>();` next to `set.insert::<TraceDetail>();`.
    3. In `trace_paths`, build the `totals` operation as in § Contracts and add `.path(format!("{PROJECT}/traces/totals"), PathItem::new(HttpMethod::Get, totals))` right after the `/traces` path.
 10. `crates/server/src/api_examples.rs` `generate`: right after the `list_traces` example for `responses/traces.json`, add
@@ -242,6 +245,9 @@ Server:
     out.add("get_trace_totals", &[], &[], "responses/trace-totals.json", &totals);
     ```
     and add `TraceTotals` to the `crate::api::traces::{…}` import.
+11. Integration tests that enumerate the operations and examples:
+    1. `crates/server/tests/openapi.rs`: add `("get", "/api/v1/projects/{project}/traces/totals", "get_trace_totals")` to `OPERATIONS` (next to the `list_traces` entry); add `"get_trace_totals"` to `READ_OPERATIONS`; add `"get_trace_totals"` to `EXPECTED` in `assert_exclusions`.
+    2. `crates/server/tests/api_examples.rs`: in `generated_files_roundtrip`, add the arm `"get_trace_totals" => roundtrip::<TraceTotals>(&example.file),` next to the `list_traces` arm, and add `TraceTotals` to the `use cetra_server::api::traces::{…}` import.
 
 ### Tests
 
@@ -262,15 +268,15 @@ Server, in the `tests` module of `crates/server/src/routes/traces.rs`:
 - `totals_cover_the_whole_list`: `loaded()`; for queries `""`, `"?include_eval=true"`, `"?filter=status%20%3D%20'error'"`: `GET /traces/totals{query}` → 200; `GET /traces{query}` with `limit=1000` added (`?limit=1000` or `&limit=1000`) → its `data`; assert `trace_count` equals `data.len()`, `error_trace_count` equals the items whose `status` is `"error"`, and `cost_total` equals the sum of `cost_total` (absent or null as 0) within `1e-12`.
 - `totals_reject_bad_parameters`: `?filter=name%20%3D%20'x'%20)` → 400 with `code` `invalid_filter` and `errors[0].field == "filter"`; `?sort=cost_total` → 400 (unknown field); a `search` of 1,025 `a`s → 400 (as `search_is_at_most_1024_bytes` checks the list); `?from=2026-01-02T00:00:00Z&to=2026-01-01T00:00:00Z` → 400.
 
-**Done when:** the files are edited as above and committed. (The coordinator compiles, runs `cargo test -p cetra-storage --lib reads::traces::tests::totals` and `cargo test -p cetra-server --lib routes::traces::tests::totals`, then `just openapi` and `just api-examples`.)
+**Done when:** the phase's files are edited as above and committed. (The coordinator compiles, runs `cargo test -p cetra-storage --lib reads::traces::tests::totals` and `cargo test -p cetra-server --lib routes::traces::tests::totals`, then `just openapi` and `just api-examples`.)
 
-**Commit:** `Add GET /traces/totals for the trace list totals`
+**Commit:** see P1a and P1b above.
 
 ---
 
 ## Coordinator step — regenerate
 
-On ubuntu-dev after P1: `just openapi`, `just api-examples`; check that `fixtures/api/responses/trace-totals.json` holds `{"cost_total": …, "error_trace_count": 1, "trace_count": 5}` (the 5 default-list traces of the example dataset, one in error) and that `web/src/api/schema.gen.ts` has the path `/api/v1/projects/{project}/traces/totals` and the schema `TraceTotals`. Commit `Regenerate the OpenAPI document and API examples for trace totals`.
+After P1b (on ubuntu-dev, or locally when it is down): compile and run the P1 tests, then `just openapi`, `just api-examples`; check that `fixtures/api/responses/trace-totals.json` holds `{"trace_count": 5, "error_trace_count": 1, "cost_total": 0.00955}` (cost within rounding) (the 5 default-list traces of the example dataset, one in error) and that `web/src/api/schema.gen.ts` has the path `/api/v1/projects/{project}/traces/totals` and the schema `TraceTotals`. Commit `Regenerate the OpenAPI document and API examples for trace totals`.
 
 ---
 
@@ -278,7 +284,7 @@ On ubuntu-dev after P1: `just openapi`, `just api-examples`; check that `fixture
 
 **Goal:** the traces list shows the totals line of spec 11 under its table.
 
-**Edit:** `web/src/api/queries.ts`, `web/src/components/trace/trace-totals.tsx` (new), `web/src/components/trace/trace-totals.test.tsx` (new), `web/src/routes/$org/$project/traces/index.tsx`, `web/src/routes/$org/$project/traces/index.test.tsx`.
+**Edit:** `web/src/api/queries.ts`, `web/src/components/trace/trace-totals.tsx` (new), `web/src/components/trace/trace-totals.test.tsx` (new), `web/src/routes/$org/$project/traces/index.tsx`, `web/src/routes/$org/$project/traces/index.test.tsx`, `web/src/mocks/generated/handlers.ts`, `web/src/mocks/generated/handlers.test.ts`.
 
 ### Contracts
 
@@ -343,7 +349,7 @@ type Props = {
   listStatus: "pending" | "error" | "success";
 };
 
-export function TraceTotalsLine({ selected, list, listStatus }: Props): JSX.Element;
+export function TraceTotalsLine({ selected, list, listStatus }: Props) // no return type annotation (React 19 has no global JSX namespace)
 ```
 
 (`countLabel` in `web/src/components/data-table/new-rows.tsx` means something else; do not reuse or rename it.)
@@ -402,6 +408,23 @@ So the text content reads `203 traces · 3 errors · $4.12`, `2 of 203 selected 
       ) : null}
       ```
    No other change to `index.tsx`.
+4. `web/src/mocks/generated/handlers.ts` (the large generated dataset's handlers, used by some tests and the dev server): add a function after `listTraces`:
+   ```ts
+   function traceTotals(dataset: Dataset, request: Request): Response {
+     const parsed = readQuery(new URL(request.url));
+     if (parsed instanceof Response) {
+       return parsed;
+     }
+     const predicate = parsed.filter ? tracePredicate(parsed.filter) : undefined;
+     const rows = filterTraces(dataset.traces, parsed, predicate);
+     return HttpResponse.json({
+       trace_count: rows.length,
+       error_trace_count: rows.filter((trace) => trace.status === "error").length,
+       cost_total: rows.reduce((sum, trace) => sum + (trace.cost_total ?? 0), 0),
+     });
+   }
+   ```
+   and register `http.get(`${PROJECT}/traces/totals`, ({ request }) => traceTotals(dataset, request)),` right after the `${PROJECT}/traces` handler and before `${PROJECT}/traces/:trace_id/spans/:span_id`. If `readQuery` rejects a request without `limit` or `sort`, stop and report.
 
 ### Tests
 
@@ -410,15 +433,17 @@ So the text content reads `203 traces · 3 errors · $4.12`, `2 of 203 selected 
 - `uses the singular and groups thousands`: `{1, 1, 0}` → `1 trace · 1 error · $0`; `{1204, 0, 12.5}` → `1,204 traces · 0 errors · $12.50`, and the `0 errors` span has no `text-destructive` class.
 - `shows counting and unavailable`: `listStatus "pending"`, `list undefined` → `Counting…`; `listStatus "error"` → `Totals unavailable`.
 - `shows the selection against the list`: `selected {2, 1, 0.0027}`, `list {203, 3, 4.12}` → `2 of 203 selected · 1 error · $0.0027`; with `list undefined` and `listStatus "pending"` → `2 selected · 1 error · $0.0027`.
-- `selectionTotals sums the checked rows`: three `TraceSummary` rows built from `fixtures/api/responses/traces.json` (`data[0]`, `data[2]`, `data[3]`, i.e. traces …6 `unset` cost 0.0027, …3 `error` no cost, …2 `ok` cost 0.00246), `ids` = the first two ids plus an id not in `rows` → `{traceCount: 2, errorTraceCount: 1, costTotal: 0.0027}`.
+- `selectionTotals sums the checked rows`: `import tracesFixture from "../../../../fixtures/api/responses/traces.json";` and `const rows = tracesFixture.data as Schema<"TraceSummary">[];` (the cast is needed: JSON infers `status: string`). The fixture's order is …6 (`unset`, cost 0.0027), …4 (`ok`, 0.00133), …3 (`error`, no cost), …2 (`ok`, 0.00246), …1 (`ok`, 0.00306). `ids = new Set(["a1000000000000000000000000000006", "a1000000000000000000000000000003", "a10000000000000000000000000000ff"])` (the last is in no row) → `{traceCount: 2, errorTraceCount: 1, costTotal: 0.0027}`; an empty set → `{0, 0, 0}`.
 
 `web/src/routes/$org/$project/traces/index.test.tsx` (new tests at the end of the file; follow the file's `renderApp` and `server.use` pattern):
-- `shows the list totals under the table`: `server.use(http.get("*/api/v1/projects/:project/traces/totals", () => HttpResponse.json({ trace_count: 203, error_trace_count: 3, cost_total: 4.12 })))`; `const { urls, stop } = recordUrls();` `renderApp("/acme/support-bot/traces?filter=status%20%3D%20'error'&search=order")`; await the line's text `203 traces · 3 errors · $4.12`; then the recorded `/traces/totals` URL has `filter` `status = 'error'`, `search` `order`, and the same `from` and `to` as the recorded `/traces` list request; `stop()`.
-- `totals the checked rows`: same totals handler; `renderApp("/acme/support-bot/traces")`; in the grid, click `getAllByRole("checkbox", { name: "Select row" })[0]` and `[2]` (traces …6 and …3, the fixture's order) → line text `2 of 203 selected · 1 error · $0.0027`; unchecking both returns to `203 traces · 3 errors · $4.12`.
-- `says when the totals are unavailable`: totals handler returns `problemResponse` 500 (as other tests of the file use `problemResponse`) → `Totals unavailable`, and the table still renders.
+- `shows the list totals under the table`: `server.use(http.get("/api/v1/projects/:project/traces/totals", () => HttpResponse.json({ trace_count: 203, error_trace_count: 3, cost_total: 4.12 })))`; `const { urls, stop } = recordUrls();` `renderApp("/acme/support-bot/traces?filter=status%20%3D%20'error'&search=order")`; await the line's text `203 traces · 3 errors · $4.12`; then the recorded URL whose `pathname` ends with `/traces/totals` has `filter` `status = 'error'`, `search` `order`, and the same `from` and `to` as the recorded URL whose `pathname` ends with `/traces` (the list); match on the path suffix, since the project ref is encoded; `stop()`.
+- `totals the checked rows`: same totals handler; `const { user } = await renderApp("/acme/support-bot/traces")`; `await user.click(await rowBox(0))` and `await user.click(await rowBox(2))` (the file's existing `rowBox` helper; traces …6 and …3 in the fixture's order) → line text `2 of 203 selected · 1 error · $0.0027`; unchecking both returns to `203 traces · 3 errors · $4.12`.
+- `says when the totals are unavailable`: the totals handler (same path) returns `problemResponse` 500 (as other tests of the file use `problemResponse`) → `Totals unavailable`, and the table still renders.
 - `shows no totals for an empty list`: in the existing test `shows the plain empty state when the default filter matches nothing`, add at its end `expect(screen.queryByRole("status", { name: "Totals" })).not.toBeInTheDocument();`.
 
-If the mocks for `/traces/totals` are not found by default (the generated fixture is served for any query), the tests that do not override it still render; they must not fail on the new request.
+Tests that do not override `/traces/totals` get the generated fixture (served for any query) or, with `largeHandlers`, the new generated handler.
+
+`web/src/mocks/generated/handlers.test.ts`, new test `totals the traces the list matches`: `createDataset({ seed: 1, now: NOW, traces: 400 })`, `server.use(...largeHandlers(dataset))`; fetch `${PROJECT}/traces?limit=1000` and `${PROJECT}/traces/totals`; assert `trace_count` equals the list's length, `error_trace_count` its rows with `status === "error"`, and `cost_total` is within `1e-9` of the sum of `cost_total ?? 0`; then the same with `include_eval=true` on both.
 
 **Done when:** the files are edited as above and committed.
 
