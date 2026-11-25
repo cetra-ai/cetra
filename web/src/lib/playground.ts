@@ -26,6 +26,11 @@ export type Column = {
   temperature: string;
   /** `""` = unset. */
   maxTokens: string;
+  /**
+   * The version of the draft's source prompt this column runs instead of the draft (D-C-30).
+   * Absent: the column runs the draft. Ignored unless the draft's source is a prompt.
+   */
+  version?: number;
 };
 
 export type Draft = {
@@ -699,6 +704,98 @@ export function draftFromPromptVersion(
   };
 }
 
+/** The prompt name of a draft whose source is a prompt, else `undefined`. */
+export function sourcePrompt(draft: Pick<Draft, "source">): string | undefined {
+  return draft.source !== undefined && "prompt" in draft.source
+    ? draft.source.prompt.name
+    : undefined;
+}
+
+/**
+ * The draft a column pinned to `version` runs (D-C-30): the version's messages, tools, tool
+ * choice and response format, with the draft's variables, placeholders and render switch. Its
+ * source is that version.
+ */
+export function pinnedDraft(draft: Draft, version: Schema<"PromptVersion">): Draft {
+  const fromVersion = draftFromPromptVersion(version, []);
+  return {
+    ...draft,
+    entries: fromVersion.entries,
+    tools: fromVersion.tools,
+    toolChoice: fromVersion.toolChoice,
+    responseFormat: fromVersion.responseFormat,
+    source: { prompt: { name: version.name, version: version.version } },
+  };
+}
+
+/**
+ * The draft a column runs: the page's draft, or its pinned version's draft. `undefined` while
+ * the pinned version is not loaded (`versionOf` gives `undefined`).
+ */
+export function columnDraft(
+  draft: Draft,
+  column: Column,
+  versionOf: (version: number) => Schema<"PromptVersion"> | undefined,
+): Draft | undefined {
+  if (column.version === undefined || sourcePrompt(draft) === undefined) {
+    return draft;
+  }
+  const found = versionOf(column.version);
+  return found === undefined ? undefined : pinnedDraft(draft, found);
+}
+
+/**
+ * A column pinned to `version`, with the version's config: its connection when the config names
+ * one of `connectionIds` (else the column's own), its model (`""` when none) and its temperature
+ * and max tokens (`""` when unset).
+ */
+export function pinColumn(
+  column: Column,
+  version: Schema<"PromptVersion">,
+  connectionIds: readonly string[],
+): Column {
+  const config = version.config;
+  const params: Record<string, unknown> = isRecord(config.params) ? config.params : {};
+  const configured = typeof config.connection_id === "string" ? config.connection_id : undefined;
+  const connectionId =
+    configured !== undefined && connectionIds.includes(configured)
+      ? configured
+      : column.connectionId;
+  return {
+    ...column,
+    version: version.version,
+    connectionId,
+    model: typeof config.model === "string" ? config.model : "",
+    temperature: numberText(params.temperature),
+    maxTokens: numberText(params.max_tokens),
+  };
+}
+
+/**
+ * The variables and placeholders the settings panel lists: the draft's, then those of each
+ * pinned draft, each name once in order of first use (D-C-30).
+ */
+export function sharedInputs(
+  draft: Draft,
+  pinned: readonly Draft[],
+): { variables: string[]; placeholders: string[] } {
+  const variables: string[] = [];
+  const placeholders: string[] = [];
+  for (const item of [draft, ...pinned]) {
+    for (const name of draftVariables(item)) {
+      if (!variables.includes(name)) {
+        variables.push(name);
+      }
+    }
+    for (const name of placeholderNames(item.entries)) {
+      if (!placeholders.includes(name)) {
+        placeholders.push(name);
+      }
+    }
+  }
+  return { variables, placeholders };
+}
+
 /** A span as a draft (D-V-28): its system instructions, messages, tools and request parameters. */
 export function draftFromSpan(
   span: Schema<"SpanDetail">,
@@ -900,6 +997,8 @@ function draftOf(value: unknown): Draft | undefined {
     return undefined;
   }
   const source = sourceOf(value.source);
+  // A pinned version is kept only on a prompt-sourced draft (D-C-30); otherwise the pin is dropped.
+  const pinsAllowed = source !== undefined && "prompt" in source;
   return {
     entries,
     variables,
@@ -907,7 +1006,7 @@ function draftOf(value: unknown): Draft | undefined {
     tools,
     toolChoice,
     responseFormat,
-    columns,
+    columns: pinsAllowed ? columns : columns.map(({ version: _version, ...column }) => column),
     renderVariables: renderVariables ?? true,
     ...(source === undefined ? {} : { source }),
   };
@@ -934,8 +1033,13 @@ function isColumn(value: unknown): value is Column {
     (value.connectionId === undefined || typeof value.connectionId === "string") &&
     typeof value.model === "string" &&
     typeof value.temperature === "string" &&
-    typeof value.maxTokens === "string"
+    typeof value.maxTokens === "string" &&
+    (value.version === undefined || isVersionNumber(value.version))
   );
+}
+
+function isVersionNumber(value: unknown): value is number {
+  return typeof value === "number" && Number.isSafeInteger(value) && value >= 1;
 }
 
 /** The source of a stored draft; a malformed one is dropped, the rest of the draft is kept. */
