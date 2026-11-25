@@ -26,6 +26,7 @@ export function SpanDetail({
   summary,
   detached = false,
   onAddFilter,
+  spans,
 }: {
   traceId: string;
   spanId: string;
@@ -33,6 +34,8 @@ export function SpanDetail({
   summary?: Schema<"SpanSummary">;
   detached?: boolean;
   onAddFilter?: (conjunct: string) => void;
+  /** The trace's tree: a tool call's duration comes from its tool span. */
+  spans?: readonly Schema<"TreeSpan">[];
 }) {
   const { org, project } = useProject();
   // The previous span's body stays on screen while the next one loads, so switching does not flash.
@@ -118,7 +121,7 @@ export function SpanDetail({
           </TabsList>
           {messages ? (
             <TabsContent value="chat" className="min-h-0 overflow-auto px-4 pb-4 pt-3">
-              <ChatTab span={detail} />
+              <ChatTab span={detail} spans={spans} />
             </TabsContent>
           ) : null}
           <TabsContent value="io" className="min-h-0 overflow-auto px-4 pb-4 pt-3">

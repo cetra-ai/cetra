@@ -13,6 +13,18 @@ import projectFixture from "../../../../../../fixtures/api/static/project.json";
 const TRACE = "a1000000000000000000000000000001";
 const SECOND = "a1000000000000000000000000000002";
 
+/** The tool line button whose text starts with `prefix`. */
+function toolLine(container: HTMLElement, prefix: string): HTMLElement {
+  const lines = within(container)
+    .getAllByRole("button")
+    .filter((button) => button.textContent?.startsWith(prefix));
+  const [line] = lines;
+  if (lines.length !== 1 || !line) {
+    throw new Error(`expected one line starting with ${prefix}, got ${lines.length}`);
+  }
+  return line;
+}
+
 /** The caller's saved `resolved: Yes` on the session, so the sheet prefills it. */
 const OWN_RESOLVED: Schema<"Score"> = {
   project_id: PROJECT_ID,
@@ -68,7 +80,12 @@ it("returns from a picked transcript block to the trace summary", async () => {
   const transcript = await screen.findByRole("region", { name: "Transcript" });
   expect(await screen.findByRole("region", { name: "Trace summary" })).toBeInTheDocument();
 
-  await user.click(within(transcript).getByRole("button", { name: /get_order_status/ }));
+  const row = await waitFor(() => {
+    const found = transcript.querySelector('[data-turn="b100000000000013"]');
+    if (!(found instanceof HTMLElement)) throw new Error("no tool row");
+    return found;
+  });
+  await user.click(await waitFor(() => toolLine(row, "get_order_status(")));
   expect(await screen.findByRole("region", { name: "Span" })).toBeInTheDocument();
   expect(screen.queryByRole("region", { name: "Trace summary" })).not.toBeInTheDocument();
 

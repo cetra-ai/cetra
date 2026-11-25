@@ -2,9 +2,10 @@ import { cn } from "cn";
 import { Bot, MessageSquare, Settings2, User, Wrench } from "lucide-react";
 import type { ReactNode } from "react";
 import type { Schema } from "@/api/types";
-import { PartView, type ToolLinks } from "@/components/payload/part-view";
+import { PartView } from "@/components/payload/part-view";
 import { ShowMore } from "@/components/payload/show-more";
 import { Badge } from "@/components/ui/badge";
+import type { ToolLinks } from "@/lib/tool-calls";
 
 /** One chat message as a card: a role header, then its parts. Long messages are clipped. */
 export function MessageView({
