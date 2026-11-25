@@ -403,6 +403,103 @@ async fn pushdown_edge_cases() {
     }
 }
 
+/// Ranges on dates and on timestamps of every unit push down exactly, with no `FilterExec`, and
+/// keep the rows DataFusion keeps in memory.
+#[tokio::test]
+async fn date_and_timestamp_ranges_push_down() {
+    use arrow::array::{
+        Date32Array, Date64Array, TimestampMicrosecondArray, TimestampMillisecondArray,
+        TimestampSecondArray,
+    };
+    let n: i64 = 3_000;
+    let day_ms = 86_400_000i64;
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("id", DataType::Int64, false),
+        Field::new("s", DataType::Timestamp(TimeUnit::Second, None), true),
+        Field::new(
+            "ms",
+            DataType::Timestamp(TimeUnit::Millisecond, Some("UTC".into())),
+            true,
+        ),
+        Field::new("us", DataType::Timestamp(TimeUnit::Microsecond, None), true),
+        Field::new("d32", DataType::Date32, true),
+        Field::new("d64", DataType::Date64, true),
+    ]));
+    // A day a row from 2013-01-01 (15706 days after the epoch), a null every 17 rows.
+    let day = |i: i64| (i % 17 != 0).then_some(15_706 + i);
+    let batch = RecordBatch::try_new(
+        schema.clone(),
+        vec![
+            Arc::new(Int64Array::from_iter_values(0..n)),
+            Arc::new(TimestampSecondArray::from_iter(
+                (0..n).map(|i| day(i).map(|d| d * 86_400 + 5)),
+            )),
+            Arc::new(
+                TimestampMillisecondArray::from_iter((0..n).map(|i| day(i).map(|d| d * day_ms)))
+                    .with_timezone("UTC"),
+            ),
+            Arc::new(TimestampMicrosecondArray::from_iter(
+                (0..n).map(|i| day(i).map(|d| d * day_ms * 1_000 + 7)),
+            )),
+            Arc::new(Date32Array::from_iter(
+                (0..n).map(|i| day(i).map(|d| d as i32)),
+            )),
+            Arc::new(Date64Array::from_iter(
+                (0..n).map(|i| day(i).map(|d| d * day_ms)),
+            )),
+        ],
+    )
+    .unwrap();
+    let mut writer = StrataWriter::new(
+        schema.clone(),
+        &[],
+        Config {
+            chunk_max_rows: 256,
+            ..Config::default()
+        },
+    )
+    .unwrap();
+    writer.write(&batch).unwrap();
+    let (bytes, _) = writer.finish().unwrap();
+    let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+    let path = Path::from("dates.strata");
+    store.put(&path, PutPayload::from(bytes)).await.unwrap();
+    let table = StrataTable::open(store, vec![path], &Config::default())
+        .await
+        .unwrap();
+    let ctx = SessionContext::new();
+    ctx.register_table("t", Arc::new(table)).unwrap();
+    ctx.register_table(
+        "m",
+        Arc::new(MemTable::try_new(schema, vec![vec![batch]]).unwrap()),
+    )
+    .unwrap();
+
+    for filter in [
+        "s >= TIMESTAMP '2014-03-01 00:00:00' AND s < TIMESTAMP '2014-04-01 00:00:00'",
+        "ms > TIMESTAMP '2015-06-30T12:00:00Z'",
+        "us <= TIMESTAMP '2013-02-01 00:00:00.000007'",
+        "us >= TIMESTAMP '2013-07-14' AND us <= TIMESTAMP '2013-07-15'",
+        "d32 BETWEEN DATE '2013-07-01' AND DATE '2013-07-31'",
+        "d32 = DATE '2014-01-01'",
+        "d64 < DATE '2013-01-20'",
+    ] {
+        let strata = sorted_rows(&ctx, &format!("SELECT id FROM t WHERE {filter}")).await;
+        let memtable = sorted_rows(&ctx, &format!("SELECT id FROM m WHERE {filter}")).await;
+        assert!(
+            !memtable.is_empty() && memtable.len() < n as usize,
+            "`{filter}` keeps some rows"
+        );
+        assert_eq!(strata, memtable, "rows of `{filter}`");
+        let plan = plan_text(&ctx, &format!("SELECT id FROM t WHERE {filter}")).await;
+        assert!(plan.contains("predicate="), "`{filter}` is pushed:\n{plan}");
+        assert!(
+            !plan.contains("FilterExec"),
+            "`{filter}` keeps a FilterExec:\n{plan}"
+        );
+    }
+}
+
 /// Filters Strata does not translate run in the scan as row filters: functions of columns,
 /// fields of a struct column, floats. Their rows match DataFusion's over the same rows in memory,
 /// with a limit, a pushed sort and `count(*)` too. DataFusion's `FilterExec` stays above the

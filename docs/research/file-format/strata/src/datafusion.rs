@@ -555,9 +555,19 @@ fn lit_of(value: &ScalarValue, dt: &DataType) -> Option<Lit> {
         (DataType::UInt16, ScalarValue::UInt16(v)) => opt(*v, |v| Lit::UInt(u64::from(v))),
         (DataType::UInt32, ScalarValue::UInt32(v)) => opt(*v, |v| Lit::UInt(u64::from(v))),
         (DataType::UInt64, ScalarValue::UInt64(v)) => opt(*v, Lit::UInt),
-        (DataType::Timestamp(TimeUnit::Nanosecond, _), ScalarValue::TimestampNanosecond(v, _)) => {
-            opt(*v, Lit::Int)
-        }
+        // A timestamp's value is UTC whatever its zone, so the zones need not match.
+        (DataType::Timestamp(TimeUnit::Second, _), ScalarValue::TimestampSecond(v, _))
+        | (
+            DataType::Timestamp(TimeUnit::Millisecond, _),
+            ScalarValue::TimestampMillisecond(v, _),
+        )
+        | (
+            DataType::Timestamp(TimeUnit::Microsecond, _),
+            ScalarValue::TimestampMicrosecond(v, _),
+        )
+        | (DataType::Timestamp(TimeUnit::Nanosecond, _), ScalarValue::TimestampNanosecond(v, _))
+        | (DataType::Date64, ScalarValue::Date64(v)) => opt(*v, Lit::Int),
+        (DataType::Date32, ScalarValue::Date32(v)) => opt(*v, |v| Lit::Int(i64::from(v))),
         (DataType::Utf8, ScalarValue::Utf8View(v) | ScalarValue::Utf8(v)) => {
             opt(v.clone(), Lit::Utf8)
         }

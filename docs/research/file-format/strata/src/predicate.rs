@@ -5,15 +5,17 @@
 use std::collections::BTreeSet;
 use std::sync::Arc;
 
+use arrow::array::BooleanBufferBuilder;
 use arrow::array::{
     Array, ArrayRef, AsArray, BinaryArray, BooleanArray, DictionaryArray, FixedSizeBinaryArray,
     Float64Array, Int64Array, MapArray, Scalar, StringArray, UInt32Array, UInt64Array,
     new_null_array,
 };
-use arrow::buffer::BooleanBuffer;
+use arrow::buffer::{BooleanBuffer, NullBuffer};
 use arrow::compute::kernels::cmp::{eq, gt, gt_eq, lt, lt_eq, neq};
 use arrow::compute::{
-    CastOptions, and_kleene, cast, cast_with_options, is_not_null, is_null, not, or_kleene,
+    CastOptions, FilterBuilder, and_kleene, cast, cast_with_options, is_not_null, is_null, not,
+    or_kleene,
 };
 use arrow::datatypes::{DataType, Field, UInt32Type};
 
@@ -441,29 +443,8 @@ pub(crate) fn evaluate(
     rows: usize,
 ) -> Result<BooleanArray> {
     match b {
-        // The first term's mask starts the fold; no term is TRUE for `And` and FALSE for `Or`.
-        Bound::And(terms) => {
-            let Some((first, rest)) = terms.split_first() else {
-                return Ok(constant_mask(true, rows));
-            };
-            let mut acc = evaluate(first, columns, masks, rows)?;
-            for term in rest {
-                let mask = evaluate(term, columns, masks, rows)?;
-                acc = and_kleene(&acc, &mask)?;
-            }
-            Ok(acc)
-        }
-        Bound::Or(terms) => {
-            let Some((first, rest)) = terms.split_first() else {
-                return Ok(constant_mask(false, rows));
-            };
-            let mut acc = evaluate(first, columns, masks, rows)?;
-            for term in rest {
-                let mask = evaluate(term, columns, masks, rows)?;
-                acc = or_kleene(&acc, &mask)?;
-            }
-            Ok(acc)
-        }
+        Bound::And(terms) => fold(terms, columns, masks, rows, true),
+        Bound::Or(terms) => fold(terms, columns, masks, rows, false),
         Bound::Not(inner) => Ok(not(&evaluate(inner, columns, masks, rows)?)?),
         Bound::Mask(index) => masks
             .get(*index)
@@ -508,6 +489,155 @@ pub(crate) fn evaluate(
             Ok(is_not_null(array)?)
         }
         Bound::Const(value) => Ok(BooleanArray::from(vec![*value; rows])),
+    }
+}
+
+/// A later term of an `And` or an `Or` is evaluated on the rows it can still change only, packed,
+/// when they are fewer than one row in this many and it reads costly columns ([`costly`]).
+const PACK_BELOW: usize = 8;
+
+/// The `And` (`and`) or `Or` of `terms` over `rows` rows, as [`evaluate`]. The first term's
+/// mask starts the fold; no term is TRUE for `And` and FALSE for `Or`. Each later term matters
+/// only on the rows the fold has not settled: not FALSE for `And`, not TRUE for `Or`. With none
+/// left the fold stops, and with few left a term over strings or other costly columns is
+/// evaluated on those rows only ([`evaluate_packed`]).
+fn fold(
+    terms: &[Bound],
+    columns: &[Option<ArrayRef>],
+    masks: &[BooleanArray],
+    rows: usize,
+    and: bool,
+) -> Result<BooleanArray> {
+    let Some((first, rest)) = terms.split_first() else {
+        return Ok(constant_mask(and, rows));
+    };
+    let mut acc = evaluate(first, columns, masks, rows)?;
+    for term in rest {
+        let live = unsettled(&acc, and);
+        let count = live.count_set_bits();
+        if count == 0 {
+            break;
+        }
+        let mask = if count.saturating_mul(PACK_BELOW) <= rows && costly(term, columns) {
+            evaluate_packed(term, columns, masks, &live, count, !and)?
+        } else {
+            evaluate(term, columns, masks, rows)?
+        };
+        acc = if and {
+            and_kleene(&acc, &mask)?
+        } else {
+            or_kleene(&acc, &mask)?
+        };
+    }
+    Ok(acc)
+}
+
+/// Whether `b` reads a column whose rows are not primitive (strings, binaries, dictionaries, or
+/// nested values), or a mask: packing the rows a term reads costs about one comparison of a
+/// primitive column, so only a term over other columns gains from it.
+fn costly(b: &Bound, columns: &[Option<ArrayRef>]) -> bool {
+    match b {
+        Bound::And(terms) | Bound::Or(terms) => terms.iter().any(|term| costly(term, columns)),
+        Bound::Not(inner) => costly(inner, columns),
+        Bound::Cmp(column, _, _) | Bound::IsNull(column) | Bound::IsNotNull(column) => columns
+            .get(*column)
+            .and_then(Option::as_ref)
+            .is_some_and(|array| !array.data_type().is_primitive()),
+        Bound::Mask(_) => true,
+        Bound::Const(_) => false,
+    }
+}
+
+/// The rows of `acc` that a later term can still change: those not FALSE for an `And` (`and`),
+/// not TRUE for an `Or`. A NULL row is unsettled in both.
+fn unsettled(acc: &BooleanArray, and: bool) -> BooleanBuffer {
+    let decided = if and {
+        !acc.values()
+    } else {
+        acc.values().clone()
+    };
+    match acc.nulls() {
+        Some(nulls) => &!&decided | &!nulls.inner(),
+        None => !&decided,
+    }
+}
+
+/// `b` over the `count` rows set in `live`, evaluated on those rows only, and spread back over
+/// every row: the other rows hold `fill`, which the caller's fold settles either way. Only the
+/// columns and masks `b` references are packed.
+fn evaluate_packed(
+    b: &Bound,
+    columns: &[Option<ArrayRef>],
+    masks: &[BooleanArray],
+    live: &BooleanBuffer,
+    count: usize,
+    fill: bool,
+) -> Result<BooleanArray> {
+    let (mut used_columns, mut used_masks) = (BTreeSet::new(), BTreeSet::new());
+    references(b, &mut used_columns, &mut used_masks);
+    let filter = FilterBuilder::new(&BooleanArray::new(live.clone(), None))
+        .optimize()
+        .build();
+    let mut packed_columns: Vec<Option<ArrayRef>> = vec![None; columns.len()];
+    for &column in &used_columns {
+        let array = column_of(columns, column)?;
+        if let Some(slot) = packed_columns.get_mut(column) {
+            *slot = Some(filter.filter(array.as_ref())?);
+        }
+    }
+    let mut packed_masks: Vec<BooleanArray> = Vec::with_capacity(masks.len());
+    for (index, mask) in masks.iter().enumerate() {
+        packed_masks.push(if used_masks.contains(&index) {
+            filter.filter(mask)?.as_boolean().clone()
+        } else {
+            BooleanArray::new_null(0)
+        });
+    }
+    let mask = evaluate(b, &packed_columns, &packed_masks, count)?;
+    if mask.len() != count {
+        return Err(StrataError::Schema {
+            reason: format!(
+                "internal: a packed term of {} rows for {count} rows",
+                mask.len()
+            ),
+        });
+    }
+    let rows = live.len();
+    let mut values = BooleanBufferBuilder::new(rows);
+    values.append_n(rows, fill);
+    let mut valid = mask.nulls().map(|_| {
+        let mut valid = BooleanBufferBuilder::new(rows);
+        valid.append_n(rows, true);
+        valid
+    });
+    for (k, row) in live.set_indices().enumerate() {
+        values.set_bit(row, mask.value(k));
+        if let Some(valid) = valid.as_mut() {
+            valid.set_bit(row, mask.is_valid(k));
+        }
+    }
+    Ok(BooleanArray::new(
+        values.finish(),
+        valid.map(|mut valid| NullBuffer::new(valid.finish())),
+    ))
+}
+
+/// Adds to `columns` the directory ids and to `masks` the mask indexes that `b` reads.
+fn references(b: &Bound, columns: &mut BTreeSet<usize>, masks: &mut BTreeSet<usize>) {
+    match b {
+        Bound::And(terms) | Bound::Or(terms) => {
+            for term in terms {
+                references(term, columns, masks);
+            }
+        }
+        Bound::Not(inner) => references(inner, columns, masks),
+        Bound::Cmp(column, _, _) | Bound::IsNull(column) | Bound::IsNotNull(column) => {
+            columns.insert(*column);
+        }
+        Bound::Mask(index) => {
+            masks.insert(*index);
+        }
+        Bound::Const(_) => {}
     }
 }
 
@@ -1052,8 +1182,9 @@ fn shared_prefix_may_hold(op: CmpOp, min: &[u8; 16], max: &[u8; 16], v: &[u8]) -
 }
 
 /// Whether one conjunct may hold for a row of a chunk. A null chunk never does. A constant chunk
-/// is decided exactly by evaluating the conjunct on its one value. Otherwise the zone decides,
-/// term by term for an `Or`.
+/// is decided exactly by evaluating the conjunct on its one value, unless its zone is exact
+/// already (an integer, date or timestamp column), which is much cheaper: a sorted column's
+/// chunks are mostly constant. Otherwise the zone decides, term by term for an `Or`.
 fn conjunct_may_match(
     conjunct: &Bound,
     column: usize,
@@ -1061,7 +1192,21 @@ fn conjunct_may_match(
     field: &Field,
     dict: Option<&Dictionary>,
 ) -> Result<bool> {
-    if entry.encoding == Encoding::Const {
+    let exact_zone = entry.flags & flags::HAS_ZONE != 0
+        && matches!(
+            field.data_type(),
+            DataType::Int8
+                | DataType::Int16
+                | DataType::Int32
+                | DataType::Int64
+                | DataType::UInt8
+                | DataType::UInt16
+                | DataType::UInt32
+                | DataType::Date32
+                | DataType::Date64
+                | DataType::Timestamp(_, _)
+        );
+    if entry.encoding == Encoding::Const && !exact_zone {
         let row = crate::narrow::decode_chunk(
             &BlockEntry {
                 n_rows: 1,
@@ -1386,5 +1531,125 @@ mod tests {
         // An In with too many literals is rejected by the node count.
         let lits = vec![Lit::Null; MAX_PREDICATE_NODES];
         assert!(check_size(&Predicate::In(0, lits)).is_err());
+    }
+
+    /// The value of `b` at `row`, by SQL's three-valued logic, one row at a time: the
+    /// definition [`evaluate`] must match.
+    fn naive(
+        b: &Bound,
+        columns: &[Option<ArrayRef>],
+        masks: &[BooleanArray],
+        row: usize,
+    ) -> Option<bool> {
+        let int = |column: usize| {
+            let array = columns[column]
+                .as_ref()
+                .unwrap()
+                .as_primitive::<arrow::datatypes::Int64Type>();
+            array.is_valid(row).then(|| array.value(row))
+        };
+        match b {
+            // `And` is FALSE when a term is, else NULL when a term is; `Or` likewise with TRUE.
+            Bound::And(terms) | Bound::Or(terms) => {
+                let settles = !matches!(b, Bound::And(_));
+                let mut acc = Some(!settles);
+                for term in terms {
+                    match naive(term, columns, masks, row) {
+                        Some(v) if v == settles => return Some(settles),
+                        Some(_) => {}
+                        None => acc = None,
+                    }
+                }
+                acc
+            }
+            Bound::Not(inner) => naive(inner, columns, masks, row).map(|v| !v),
+            Bound::Cmp(column, op, lit) => {
+                let lit = lit.as_primitive::<arrow::datatypes::Int64Type>();
+                let (Some(v), true) = (int(*column), lit.is_valid(0)) else {
+                    return None;
+                };
+                let l = lit.value(0);
+                Some(match op {
+                    CmpOp::Eq => v == l,
+                    CmpOp::NotEq => v != l,
+                    CmpOp::Lt => v < l,
+                    CmpOp::LtEq => v <= l,
+                    CmpOp::Gt => v > l,
+                    CmpOp::GtEq => v >= l,
+                })
+            }
+            Bound::IsNull(column) => Some(int(*column).is_none()),
+            Bound::IsNotNull(column) => Some(int(*column).is_some()),
+            Bound::Const(value) => *value,
+            Bound::Mask(index) => {
+                let mask = &masks[*index];
+                mask.is_valid(row).then(|| mask.value(row))
+            }
+        }
+    }
+
+    /// Bound trees over three Int64 columns (ids 0 to 2) and two masks. Comparisons with
+    /// literals near the column values make terms that keep none, few or most rows, so folds
+    /// stop, pack and run in full.
+    fn bounds() -> impl proptest::strategy::Strategy<Value = Bound> {
+        use proptest::prelude::*;
+        let ops = prop_oneof![
+            Just(CmpOp::Eq),
+            Just(CmpOp::NotEq),
+            Just(CmpOp::Lt),
+            Just(CmpOp::LtEq),
+            Just(CmpOp::Gt),
+            Just(CmpOp::GtEq),
+        ];
+        let leaf = prop_oneof![
+            4 => (0usize..3, ops, proptest::option::weighted(0.95, -2i64..70)).prop_map(
+                |(column, op, lit)| {
+                    Bound::Cmp(column, op, Arc::new(Int64Array::from(vec![lit])) as ArrayRef)
+                }
+            ),
+            1 => (0usize..3).prop_map(Bound::IsNull),
+            1 => (0usize..3).prop_map(Bound::IsNotNull),
+            1 => proptest::option::of(any::<bool>()).prop_map(Bound::Const),
+            1 => (0usize..2).prop_map(Bound::Mask),
+        ];
+        leaf.prop_recursive(4, 24, 5, |inner| {
+            prop_oneof![
+                proptest::collection::vec(inner.clone(), 0..5).prop_map(Bound::And),
+                proptest::collection::vec(inner.clone(), 0..5).prop_map(Bound::Or),
+                inner.prop_map(|b| Bound::Not(Box::new(b))),
+            ]
+        })
+    }
+
+    proptest::proptest! {
+        #[test]
+        fn evaluate_matches_three_valued_logic_row_by_row(
+            b in bounds(),
+            values in proptest::collection::vec(
+                (proptest::option::weighted(0.9, 0i64..64),
+                 proptest::option::weighted(0.9, 0i64..64),
+                 proptest::option::weighted(0.9, 0i64..64),
+                 proptest::option::weighted(0.9, proptest::bool::weighted(0.1)),
+                 proptest::option::weighted(0.9, proptest::bool::weighted(0.9))),
+                0..300,
+            ),
+        ) {
+            let rows = values.len();
+            let columns: Vec<Option<ArrayRef>> = vec![
+                Some(Arc::new(values.iter().map(|v| v.0).collect::<Int64Array>())),
+                Some(Arc::new(values.iter().map(|v| v.1).collect::<Int64Array>())),
+                Some(Arc::new(values.iter().map(|v| v.2).collect::<Int64Array>())),
+            ];
+            let masks = vec![
+                values.iter().map(|v| v.3).collect::<BooleanArray>(),
+                values.iter().map(|v| v.4).collect::<BooleanArray>(),
+            ];
+            let got = evaluate(&b, &columns, &masks, rows).unwrap();
+            proptest::prop_assert_eq!(got.len(), rows);
+            for row in 0..rows {
+                let value = got.is_valid(row).then(|| got.value(row));
+                proptest::prop_assert_eq!(value, naive(&b, &columns, &masks, row), "row {} of {:?}", row, b);
+            }
+        }
     }
 }

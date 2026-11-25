@@ -228,6 +228,138 @@ fn proven_rows(
     Ok(proven)
 }
 
+/// The shortest run of rows proven by a column's zones that [`window_bounds`] drops the column
+/// from.
+const MIN_PROVEN_ROWS: u32 = 4_096;
+
+/// The filter windows of `candidates`, each at most `FILTER_WINDOW` rows of one candidate, with
+/// the index in the returned bounds of the bound each evaluates and the columns that bound
+/// reads. A column whose only uses in `b` are top-level conjuncts of its own that its chunks'
+/// zones can prove ([`chunk_must_match`]) is dropped, with those conjuncts, from the windows
+/// where the zones prove them for every row: a range on a sorted column then reads that column
+/// only at the edges of the range. The bound with nothing dropped, `b` itself, is the first.
+#[allow(clippy::type_complexity)]
+fn window_bounds(
+    b: &Bound,
+    columns: &[usize],
+    masks: &Masks,
+    infos: &HashMap<usize, ColumnInfo>,
+    candidates: &[Range<u32>],
+) -> Result<(Vec<(Range<u32>, usize)>, Vec<(Bound, Vec<usize>)>)> {
+    let mut bounds = vec![(b.clone(), columns.to_vec())];
+    // A dropped bound has no mask to evaluate, so only a predicate without masks drops.
+    let droppable = match b {
+        Bound::And(terms) if masks.sources.is_empty() => droppable_columns(terms),
+        _ => Vec::new(),
+    };
+    // Each droppable column with the runs of at least `MIN_PROVEN_ROWS` rows its zones prove,
+    // at most 64 columns (a bit each). Shorter runs would only make small windows.
+    let mut proven_by: Vec<(usize, Vec<Range<u32>>)> = Vec::new();
+    for (column, terms) in droppable.into_iter().take(64) {
+        let mut rows = proven_rows(&Bound::And(terms), infos, candidates)?;
+        rows.retain(|run| run.end - run.start >= MIN_PROVEN_ROWS);
+        if !rows.is_empty() {
+            proven_by.push((column, rows));
+        }
+    }
+    // The windows: the candidates cut where a proven run starts or ends, so that a window is
+    // proven or not as a whole for each column, then into pieces of at most `FILTER_WINDOW`.
+    let cuts: BTreeSet<u32> = proven_by
+        .iter()
+        .flat_map(|(_, rows)| rows.iter().flat_map(|run| [run.start, run.end]))
+        .collect();
+    let mut windows: Vec<Range<u32>> = Vec::new();
+    for candidate in candidates {
+        let inner = cuts.range(candidate.start.saturating_add(1)..candidate.end);
+        let mut start = candidate.start;
+        for &end in inner.chain(std::iter::once(&candidate.end)) {
+            while start < end {
+                let piece = end.min(start.saturating_add(FILTER_WINDOW));
+                windows.push(start..piece);
+                start = piece;
+            }
+        }
+    }
+    let mut at_key: HashMap<u64, usize> = HashMap::from([(0, 0)]);
+    let mut out = Vec::with_capacity(windows.len());
+    for window in windows {
+        let mut key = 0u64;
+        for (bit, (_, rows)) in proven_by.iter().enumerate() {
+            if covers(rows, &window) {
+                key |= 1 << bit;
+            }
+        }
+        let at = match at_key.get(&key) {
+            Some(&at) => at,
+            None => {
+                let dropped: Vec<usize> = proven_by
+                    .iter()
+                    .enumerate()
+                    .filter(|(bit, _)| key & (1 << bit) != 0)
+                    .map(|(_, (column, _))| *column)
+                    .collect();
+                let Bound::And(terms) = b else {
+                    return Err(StrataError::Schema {
+                        reason: "internal: a dropped conjunct outside an And".to_string(),
+                    });
+                };
+                let kept: Vec<Bound> = terms
+                    .iter()
+                    .filter(|term| {
+                        !bound_columns(term)
+                            .iter()
+                            .any(|column| dropped.contains(column))
+                    })
+                    .cloned()
+                    .collect();
+                let needed: Vec<usize> = columns
+                    .iter()
+                    .copied()
+                    .filter(|column| !dropped.contains(column))
+                    .collect();
+                bounds.push((Bound::And(kept), needed));
+                at_key.insert(key, bounds.len() - 1);
+                bounds.len() - 1
+            }
+        };
+        out.push((window, at));
+    }
+    Ok((out, bounds))
+}
+
+/// The columns of the top-level conjuncts `terms` that only provable terms of their own read
+/// (a comparison or `IS NOT NULL` of the column), each with those terms, in ascending column
+/// order.
+fn droppable_columns(terms: &[Bound]) -> Vec<(usize, Vec<Bound>)> {
+    let mut by_column: BTreeMap<usize, Option<Vec<Bound>>> = BTreeMap::new();
+    for term in terms {
+        let read = bound_columns(term);
+        let own = match term {
+            Bound::Cmp(column, _, _) | Bound::IsNotNull(column) => Some(*column),
+            _ => None,
+        };
+        for column in read {
+            let entry = by_column.entry(column).or_insert_with(|| Some(Vec::new()));
+            match (own, entry.as_mut()) {
+                (Some(own), Some(list)) if own == column => list.push(term.clone()),
+                _ => *entry = None,
+            }
+        }
+    }
+    by_column
+        .into_iter()
+        .filter_map(|(column, terms)| terms.map(|terms| (column, terms)))
+        .filter(|(_, terms)| !terms.is_empty())
+        .collect()
+}
+
+/// Whether one run of `rows` (sorted and disjoint) holds every row of `window`.
+fn covers(rows: &[Range<u32>], window: &Range<u32>) -> bool {
+    let at = rows.partition_point(|run| run.end <= window.start);
+    rows.get(at)
+        .is_some_and(|run| run.start <= window.start && run.end >= window.end)
+}
+
 /// The runs of `a` and `b` (each sorted and disjoint, and disjoint from each other) in one
 /// sorted list, touching runs merged.
 fn merge_runs(a: &[Range<u32>], b: &[Range<u32>]) -> Vec<Range<u32>> {
@@ -2462,11 +2594,19 @@ impl StrataFile {
                 .await?;
             return Ok(merge_runs(&proven, &runs));
         }
+        // The windows, each with the bound it evaluates: `b` without the conjuncts that the
+        // zones of their column's chunks prove over the whole window ([`window_bounds`]).
+        let (windows, bounds) = window_bounds(b, columns, masks, infos, candidates)?;
         let mut wanted: BTreeSet<(usize, usize)> = BTreeSet::new();
-        for &column in columns {
-            let info = info_of(infos, column)?;
-            for index in overlapping_chunks(&info.entries, candidates) {
-                wanted.insert((column, index));
+        for (range, at) in &windows {
+            let (_, needed) = bounds.get(*at).ok_or_else(|| StrataError::Schema {
+                reason: "internal: missing window bound".to_string(),
+            })?;
+            for &column in needed {
+                let info = info_of(infos, column)?;
+                for index in overlapping_chunks(&info.entries, std::slice::from_ref(range)) {
+                    wanted.insert((column, index));
+                }
             }
         }
         self.decode_wave(infos, &wanted, kind, decoded, plan.threads)
@@ -2477,65 +2617,61 @@ impl StrataFile {
         let mut runs: Vec<Range<u32>> = Vec::new();
         let mut matched = 0usize;
         let mut arrays: Vec<Option<ArrayRef>> = vec![None; n_dirs];
-        for candidate in candidates {
-            let mut window_start = candidate.start;
-            while window_start < candidate.end {
-                if limit.is_some_and(|n| matched >= n) {
-                    return Ok(runs);
-                }
-                // The rows of this window: at most `FILTER_WINDOW` rows of the candidate.
-                let window_end = candidate
-                    .end
-                    .min(window_start.saturating_add(FILTER_WINDOW));
-                let range = window_start..window_end;
-                let len = usize::try_from(window_end - window_start).map_err(|_| {
-                    StrataError::Corrupt {
-                        what: "row range",
-                        offset: u64::from(window_start),
-                    }
+        for (range, at) in windows {
+            if limit.is_some_and(|n| matched >= n) {
+                return Ok(runs);
+            }
+            let (bound, needed) = bounds.get(at).ok_or_else(|| StrataError::Schema {
+                reason: "internal: missing window bound".to_string(),
+            })?;
+            let len =
+                usize::try_from(range.end - range.start).map_err(|_| StrataError::Corrupt {
+                    what: "row range",
+                    offset: u64::from(range.start),
                 })?;
-                arrays.fill(None);
-                for &column in columns {
-                    let info = info_of(infos, column)?;
-                    let mut pieces: Vec<ArrayRef> = Vec::new();
-                    for index in overlapping_chunks(&info.entries, std::slice::from_ref(&range)) {
-                        let entry = info.entries.get(index).ok_or_else(|| StrataError::Schema {
-                            reason: "internal: missing chunk".to_string(),
-                        })?;
-                        let first = entry.first_row;
-                        let end = first.checked_add(entry.n_rows).ok_or_else(|| {
-                            StrataError::Corrupt {
+            arrays.fill(None);
+            for &column in needed {
+                let info = info_of(infos, column)?;
+                let mut pieces: Vec<ArrayRef> = Vec::new();
+                for index in overlapping_chunks(&info.entries, std::slice::from_ref(&range)) {
+                    let entry = info.entries.get(index).ok_or_else(|| StrataError::Schema {
+                        reason: "internal: missing chunk".to_string(),
+                    })?;
+                    let first = entry.first_row;
+                    let end =
+                        first
+                            .checked_add(entry.n_rows)
+                            .ok_or_else(|| StrataError::Corrupt {
                                 what: "block row order",
                                 offset: u64::from(first),
-                            }
+                            })?;
+                    let from = range.start.max(first);
+                    let to = range.end.min(end);
+                    let chunk = decoded_chunk(decoded, column, index)?;
+                    let offset =
+                        usize::try_from(from - first).map_err(|_| StrataError::Corrupt {
+                            what: "chunk row",
+                            offset: u64::from(first),
                         })?;
-                        let from = range.start.max(first);
-                        let to = range.end.min(end);
-                        let chunk = decoded_chunk(decoded, column, index)?;
-                        let offset =
-                            usize::try_from(from - first).map_err(|_| StrataError::Corrupt {
-                                what: "chunk row",
-                                offset: u64::from(first),
-                            })?;
-                        let length =
-                            usize::try_from(to - from).map_err(|_| StrataError::Corrupt {
-                                what: "row range",
-                                offset: u64::from(from),
-                            })?;
-                        pieces.push(chunk.slice(offset, length));
-                    }
-                    let refs: Vec<&dyn Array> = pieces.iter().map(|piece| piece.as_ref()).collect();
-                    let assembled = concat(&refs)?;
-                    if let Some(slot) = arrays.get_mut(column) {
-                        *slot = Some(assembled);
-                    }
+                    let length = usize::try_from(to - from).map_err(|_| StrataError::Corrupt {
+                        what: "row range",
+                        offset: u64::from(from),
+                    })?;
+                    pieces.push(chunk.slice(offset, length));
                 }
+                let refs: Vec<&dyn Array> = pieces.iter().map(|piece| piece.as_ref()).collect();
+                let assembled = concat(&refs)?;
+                if let Some(slot) = arrays.get_mut(column) {
+                    *slot = Some(assembled);
+                }
+            }
 
-                // The masks of this range: `Contains` masks are sliced, `MapKeyEq` masks are built
-                // from the residual's rows.
-                let mut range_masks: Vec<BooleanArray> = Vec::with_capacity(masks.sources.len());
-                for (index, source) in masks.sources.iter().enumerate() {
-                    let mask = match source {
+            // The masks of this range: `Contains` masks are sliced, `MapKeyEq` masks are built
+            // from the residual's rows.
+            let mut range_masks: Vec<BooleanArray> = Vec::with_capacity(masks.sources.len());
+            for (index, source) in masks.sources.iter().enumerate() {
+                let mask =
+                    match source {
                         MaskSource::Contains(..) => {
                             let full = masks.full.get(index).and_then(Option::as_ref).ok_or_else(
                                 || StrataError::Schema {
@@ -2558,34 +2694,32 @@ impl StrataFile {
                             map_key_mask(map.as_ref(), key, lit.as_ref())?
                         }
                     };
-                    range_masks.push(mask);
-                }
-                let mask = evaluate(b, &arrays, &range_masks, len)?;
-                // A null is not a match: the rows are the set bits of the values and validity.
-                let hits = match mask.nulls() {
-                    Some(nulls) => mask.values() & nulls.inner(),
-                    None => mask.values().clone(),
-                };
-                if hits.len() != len {
-                    return Err(StrataError::Schema {
-                        reason: "internal: a mask of the wrong length".to_string(),
-                    });
-                }
-                let count = hits.count_set_bits();
-                if count == len {
-                    push_run(&mut runs, range.start, range.end);
-                } else if count > 0 {
-                    for (start, end) in hits.set_slices() {
-                        push_run(
-                            &mut runs,
-                            row_at(range.start, start)?,
-                            row_at(range.start, end)?,
-                        );
-                    }
-                }
-                matched += count;
-                window_start = window_end;
+                range_masks.push(mask);
             }
+            let mask = evaluate(bound, &arrays, &range_masks, len)?;
+            // A null is not a match: the rows are the set bits of the values and validity.
+            let hits = match mask.nulls() {
+                Some(nulls) => mask.values() & nulls.inner(),
+                None => mask.values().clone(),
+            };
+            if hits.len() != len {
+                return Err(StrataError::Schema {
+                    reason: "internal: a mask of the wrong length".to_string(),
+                });
+            }
+            let count = hits.count_set_bits();
+            if count == len {
+                push_run(&mut runs, range.start, range.end);
+            } else if count > 0 {
+                for (start, end) in hits.set_slices() {
+                    push_run(
+                        &mut runs,
+                        row_at(range.start, start)?,
+                        row_at(range.start, end)?,
+                    );
+                }
+            }
+            matched += count;
         }
         Ok(merge_runs(&proven, &runs))
     }
@@ -4248,6 +4382,124 @@ mod tests {
             )
             .await;
             check(&payload, Predicate::IsNull(tokens), &[blob]).await;
+        });
+    }
+
+    /// A conjunct whose column's zones prove it over a whole filter window is not evaluated
+    /// there, and its column is not read: a range on a sorted column next to a filter on a
+    /// scattered one reads the sorted column only at the range's edges. The rows are the
+    /// oracle's for every shape, including those where the column is not droppable.
+    #[test]
+    fn zone_proven_conjuncts_are_dropped_from_filter_windows() {
+        runtime().block_on(async {
+            use arrow::array::Int64Array;
+            use arrow::datatypes::{Field, Schema};
+            let n = 200_000i64;
+            let schema = Arc::new(Schema::new(vec![
+                Field::new("t", DataType::Int64, false),
+                Field::new("k", DataType::Int64, true),
+                Field::new("v", DataType::Utf8, false),
+            ]));
+            // `t` grows by a varying step, so that its chunks are not tiny; `k` is scattered,
+            // with nulls.
+            let t = Int64Array::from_iter_values((0..n).map(|i| i * 1_000 + (i * 7_919) % 997));
+            let k =
+                Int64Array::from_iter((0..n).map(|i| (i % 23 != 0).then_some((i * 7_919) % 100)));
+            let v = StringArray::from_iter_values((0..n).map(|i| format!("v{i}")));
+            let batch = RecordBatch::try_new(
+                Arc::clone(&schema),
+                vec![Arc::new(t), Arc::new(k), Arc::new(v)],
+            )
+            .unwrap();
+            let config = Config {
+                chunk_max_rows: 1_024,
+                ..Config::default()
+            };
+            let mut w = StrataWriter::new(schema, &[], config).unwrap();
+            w.write(&batch).unwrap();
+            let (bytes, _) = w.finish().unwrap();
+            let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+            let path = Path::from("sorted.strata");
+            store.put(&path, PutPayload::from(bytes)).await.unwrap();
+            let file = StrataFile::open(store, path, None, &Config::default())
+                .await
+                .unwrap();
+
+            let (t, k, v) = (0, 1, 2);
+            let cmp = |c: usize, op: CmpOp, x: i64| Predicate::Cmp(c, op, lit_int(x));
+            let and = |terms: Vec<Predicate>| Predicate::And(terms);
+            let key = cmp(k, CmpOp::Eq, 3);
+            let window = |lo: i64, hi: i64| {
+                vec![
+                    cmp(t, CmpOp::GtEq, lo * 1_000),
+                    cmp(t, CmpOp::Lt, hi * 1_000),
+                ]
+            };
+            let mut shapes = vec![
+                and([vec![key.clone()], window(0, n)].concat()),
+                and([vec![key.clone()], window(30_123, 170_456)].concat()),
+                and([window(30_123, 170_456), vec![key.clone()]].concat()),
+                and(vec![
+                    key.clone(),
+                    Predicate::IsNotNull(t),
+                    cmp(t, CmpOp::Gt, 5),
+                ]),
+                // `t` under an OR or a NOT, or next to `k` in one term: not droppable.
+                and(vec![
+                    key.clone(),
+                    Predicate::Or(vec![cmp(t, CmpOp::Lt, 50_000_000), cmp(k, CmpOp::Eq, 4)]),
+                ]),
+                and(vec![
+                    key.clone(),
+                    Predicate::Not(Box::new(cmp(t, CmpOp::Lt, 9_000_000))),
+                ]),
+                // Both conjuncts droppable: `k`'s zones prove nothing, `t`'s prove everything.
+                and(vec![cmp(k, CmpOp::GtEq, 0), cmp(t, CmpOp::GtEq, 0)]),
+            ];
+            shapes.push(and(vec![shapes[1].clone(), cmp(k, CmpOp::NotEq, 4)]));
+            for p in shapes {
+                check(&file, p, &[t, k, v]).await;
+            }
+
+            let chunk_bytes = |predicate: Predicate| {
+                let file = &file;
+                async move {
+                    file.reset_io_stats();
+                    file.scan(&ScanRequest {
+                        projection: vec![v],
+                        predicate: Some(predicate),
+                        row_ranges: None,
+                        limit: None,
+                        kind: ScanKind::Scan,
+                        views: false,
+                        top: None,
+                        row_filter: None,
+                    })
+                    .await
+                    .unwrap();
+                    file.io_stats().by_kind[Kind::NarrowChunk as usize]
+                }
+            };
+            let alone = chunk_bytes(key.clone()).await;
+            let whole = chunk_bytes(and([vec![key.clone()], window(0, n)].concat())).await;
+            assert_eq!(
+                whole, alone,
+                "a range over all of `t` reads none of its chunks"
+            );
+            let half = chunk_bytes(and([vec![key.clone()], window(n / 2, n)].concat())).await;
+            let t_bytes = chunk_bytes(and(vec![
+                key.clone(),
+                Predicate::Not(Box::new(cmp(t, CmpOp::Lt, 0))),
+            ]))
+            .await
+                - alone;
+            assert!(t_bytes > 0);
+            // Half the rows' chunks of `k` and `v`, and only the edge chunks of `t`.
+            assert!(half < alone, "{half} of {alone}");
+            assert!(
+                half * 2 < alone + t_bytes / 2,
+                "{half} with {t_bytes} bytes of `t`"
+            );
         });
     }
 
