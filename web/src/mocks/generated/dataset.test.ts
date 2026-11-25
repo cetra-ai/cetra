@@ -5,7 +5,10 @@ import type { Schema } from "@/api/types";
 import {
   createDataset,
   type Dataset,
+  type Mark,
+  markScoreUuid,
   type Profile,
+  rfc3339,
   SHOWCASES,
   SUPPORT_PROFILE,
   SUPPORT_SHOWCASE,
@@ -952,4 +955,271 @@ it("answers an llm span in plain text when its topics have no snippets", () => {
     }
   }
   expect(llmChecked).toBeGreaterThan(0);
+});
+
+/** SUPPORT_PROFILE without its showcases: the base the mark tests compare against. */
+const PLAIN: Profile = { ...SUPPORT_PROFILE, showcases: [] };
+
+/** The error count and stack trace of a span, by its position in a trace's detail. */
+function errorSpansOf(dataset: Dataset, traceId: string) {
+  return (dataset.traceDetail(traceId)?.spans ?? []).filter((row) => row.span.status === "error");
+}
+
+it("a mark changes one trace and nothing else", () => {
+  const plain = createDataset({ seed: 1, now: NOW, traces: 20, profile: PLAIN });
+  const marked = createDataset({
+    seed: 1,
+    now: NOW,
+    traces: 20,
+    profile: {
+      ...PLAIN,
+      marks: () => new Map<number, Mark>([[11, { tags: ["x"], release: "v9", costFactor: 2 }]]),
+    },
+  });
+  const before = plain.traces[11];
+  const after = marked.traces[11];
+  if (!before || !after) {
+    throw new Error("a 20-trace dataset has trace 11");
+  }
+  expect(after.tags).toEqual([...new Set([...before.tags, "x"])].sort());
+  expect(after.release).toBe("v9");
+  const inputTokens = after.input_tokens ?? Number.NaN;
+  const outputTokens = after.output_tokens ?? Number.NaN;
+  expect(inputTokens).toBe((before.input_tokens ?? Number.NaN) * 2);
+  expect(outputTokens).toBe((before.output_tokens ?? Number.NaN) * 2);
+  expect(after.total_tokens).toBe(inputTokens + outputTokens);
+  expect(after.cost_total).toBe(Math.round(inputTokens * 3 + outputTokens * 15) / 1_000_000);
+  expect(marked.traces.filter((_trace, index) => index !== 11)).toEqual(
+    plain.traces.filter((_trace, index) => index !== 11),
+  );
+});
+
+it("a marked error replaces the drawn errors", () => {
+  const plain = createDataset({ seed: 1, now: NOW, traces: 300, profile: PLAIN });
+  const index = plain.traces.findIndex(
+    (trace, position) => position > 0 && trace.error_count === 3 && trace.span_count >= 6,
+  );
+  expect(index).toBeGreaterThan(0);
+  const dataset = createDataset({
+    seed: 1,
+    now: NOW,
+    traces: 300,
+    profile: {
+      ...PLAIN,
+      marks: () =>
+        new Map<number, Mark>([
+          [
+            index,
+            {
+              error: {
+                count: 2,
+                spanName: "ocr",
+                message: "OCR returned no text",
+                stacktrace: "OcrError: no text on any page (scanned image, 0 characters)",
+              },
+            },
+          ],
+        ]),
+    },
+  });
+  const trace = dataset.traces[index];
+  if (!trace) {
+    throw new Error(`the dataset has trace ${index}`);
+  }
+  expect(trace.error_count).toBe(2);
+  const errors = errorSpansOf(dataset, trace.trace_id);
+  expect(errors).toHaveLength(2);
+  for (const row of errors) {
+    expect(row.span.name).toBe("ocr");
+    expect(row.span.status_message).toBe("OCR returned no text");
+    const detail = dataset.spanDetail(trace.trace_id, row.span.span_id);
+    expect(detail?.events[0]?.attributes).toEqual({
+      "exception.stacktrace": "OcrError: no text on any page (scanned image, 0 characters)",
+    });
+  }
+});
+
+it("marks only reach eligible traces", () => {
+  const plain = createDataset({ seed: 1, now: NOW, traces: 300 });
+  // Trace 3 is the showcase, trace 0 the big first trace; the first cetra-eval trace after them is not eligible.
+  const evalIndex = plain.traces.findIndex(
+    (trace, index) => index > 3 && trace.environment === "cetra-eval",
+  );
+  expect(evalIndex).toBeGreaterThan(3);
+  const ignored: Mark = { tags: ["ignored"] };
+  const dataset = createDataset({
+    seed: 1,
+    now: NOW,
+    traces: 300,
+    profile: {
+      ...SUPPORT_PROFILE,
+      marks: () =>
+        new Map<number, Mark>([
+          [3, ignored],
+          [0, ignored],
+          [evalIndex, ignored],
+        ]),
+    },
+  });
+  for (const index of [0, 3, evalIndex]) {
+    expect(dataset.traces[index]?.tags).not.toContain("ignored");
+  }
+  expect(dataset.traces).toEqual(plain.traces);
+});
+
+it("marked score ids never collide", () => {
+  const mark: Mark = {
+    scores: [
+      { name: "correctness", source: "human", value: { data_type: "numeric", value: 0.11 } },
+      { name: "judge", source: "llm_judge", value: { data_type: "numeric", value: 0.5 } },
+    ],
+  };
+  const dataset = createDataset({
+    seed: 1,
+    now: NOW,
+    traces: 60,
+    profile: {
+      ...PLAIN,
+      marks: (traces) => new Map(traces.map((_trace, index): [number, Mark] => [index, mark])),
+    },
+  });
+  const ids = dataset.traces.flatMap((trace) => trace.scores.map((score) => score.score_id));
+  expect(new Set(ids).size).toBe(ids.length);
+  expect(ids.some((id) => id.startsWith("00000000-0000-7000-9000-"))).toBe(true);
+});
+
+it("marked spans are appended under the root", () => {
+  const mark: Mark = {
+    spans: [
+      {
+        name: "search",
+        kind: "tool",
+        fromMs: 100,
+        durationMs: 400,
+        output: { format: "json", value: { hits: 3 } },
+      },
+      {
+        name: "write",
+        kind: "tool",
+        fromMs: 600,
+        durationMs: 300,
+        error: { message: "disk full", stacktrace: "IOError: disk full" },
+      },
+    ],
+  };
+  const plain = createDataset({ seed: 1, now: NOW, traces: 40, profile: PLAIN });
+  const dataset = createDataset({
+    seed: 1,
+    now: NOW,
+    traces: 40,
+    profile: { ...PLAIN, marks: () => new Map<number, Mark>([[11, mark]]) },
+  });
+  const before = plain.traces[11];
+  const after = dataset.traces[11];
+  if (!before || !after) {
+    throw new Error("a 40-trace dataset has trace 11");
+  }
+  expect(after.span_count).toBe(before.span_count + 2);
+  expect(after.error_count).toBe(before.error_count + 1);
+  expect(after.duration_ns).toBeGreaterThanOrEqual(900_000_000);
+  const spans = dataset.traceDetail(after.trace_id)?.spans ?? [];
+  expect(spans).toHaveLength(after.span_count);
+  const [search, write] = spans.slice(-2);
+  if (!search || !write) {
+    throw new Error("the trace has two marked spans");
+  }
+  expect(search.depth).toBe(1);
+  expect(search.span.name).toBe("search");
+  expect(search.span.parent_span_id).toBe(after.root_span_id);
+  expect(Date.parse(search.span.start_time) - Date.parse(after.start_time)).toBe(100);
+  expect(search.span.duration_ns).toBe(400_000_000);
+  expect(search.span.status).toBe("ok");
+  expect(dataset.spanDetail(after.trace_id, search.span.span_id)?.output).toEqual({
+    format: "json",
+    value: { hits: 3 },
+  });
+  expect(write.depth).toBe(1);
+  expect(write.span.name).toBe("write");
+  expect(write.span.parent_span_id).toBe(after.root_span_id);
+  expect(Date.parse(write.span.start_time) - Date.parse(after.start_time)).toBe(600);
+  expect(write.span.duration_ns).toBe(300_000_000);
+  expect(write.span.status).toBe("error");
+  expect(write.span.status_message).toBe("disk full");
+  expect(dataset.spanDetail(after.trace_id, write.span.span_id)?.events[0]?.attributes).toEqual({
+    "exception.stacktrace": "IOError: disk full",
+  });
+});
+
+it("startMs and durationMs move the trace", () => {
+  const startMs = NOW - 3_600_000;
+  const dataset = createDataset({
+    seed: 1,
+    now: NOW,
+    traces: 40,
+    profile: {
+      ...PLAIN,
+      marks: () => new Map<number, Mark>([[11, { startMs, durationMs: 5_000 }]]),
+    },
+  });
+  const trace = dataset.traces[11];
+  expect(trace?.start_time).toBe(rfc3339(startMs));
+  expect(trace?.end_time).toBe(rfc3339(startMs + 5_000));
+  expect(trace?.duration_ns).toBe(5_000_000_000);
+});
+
+it("scores replace by name", () => {
+  const mark: Mark = {
+    scores: [
+      { name: "correctness", source: "human", value: { data_type: "numeric", value: 0.11 } },
+      { name: "judge", source: "llm_judge", value: { data_type: "numeric", value: 0.5 } },
+    ],
+  };
+  const dataset = createDataset({
+    seed: 1,
+    now: NOW,
+    traces: 40,
+    profile: { ...PLAIN, marks: () => new Map<number, Mark>([[2, mark]]) },
+  });
+  const trace = dataset.traces[2];
+  if (!trace) {
+    throw new Error("a 40-trace dataset has trace 2");
+  }
+  expect(trace.scores.map((score) => score.name)).toEqual(["correctness", "relevance", "judge"]);
+  const correctness = trace.scores[0];
+  expect(correctness?.source).toBe("human");
+  expect(correctness?.value).toEqual({ data_type: "numeric", value: 0.11 });
+  expect(trace.scores[2]?.score_id).toBe(markScoreUuid(2, 2));
+});
+
+it("a marked turn sets the previews", () => {
+  const [topic] = SUPPORT_TURNS;
+  if (!topic) {
+    throw new Error("the support topics are not empty");
+  }
+  const turn: Turn = { ...topic, question: "Can I pay by invoice?" };
+  const dataset = createDataset({
+    seed: 1,
+    now: NOW,
+    traces: 40,
+    profile: { ...PLAIN, marks: () => new Map<number, Mark>([[11, { turn }]]) },
+  });
+  const trace = dataset.traces[11];
+  if (!trace) {
+    throw new Error("a 40-trace dataset has trace 11");
+  }
+  expect(trace.input_preview).toBe("Can I pay by invoice?");
+  expect(rootQuestion(dataset, trace)).toBe("Can I pay by invoice?");
+});
+
+it("a showcase can belong to a session", () => {
+  const dataset = createDataset({
+    seed: 1,
+    now: NOW,
+    traces: 10,
+    profile: { ...SUPPORT_PROFILE, showcases: [{ ...SUPPORT_SHOWCASE, session: "sess-x" }] },
+  });
+  const trace = dataset.traces[3];
+  expect(trace?.session_id).toBe("sess-x");
+  const session = dataset.session("sess-x", true, true);
+  expect(session?.turns.map((turn) => turn.trace.trace_id)).toContain(trace?.trace_id);
 });

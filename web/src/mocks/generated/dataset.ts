@@ -1,6 +1,9 @@
 import type { Schema } from "@/api/types";
 import { mulberry32 } from "@/mocks/generated/random";
 
+/** Re-exported for the story modules (M17). */
+export { mulberry32 };
+
 const DAY_MS = 86_400_000;
 const NAMES = [
   "support-router",
@@ -94,6 +97,8 @@ export type Showcase = {
   ageMs: number;
   service: string;
   user?: string;
+  /** The showcase's session id (M17). */
+  session?: string;
   tags: string[];
   /** The generation models only; embedding and rerank models appear on their spans. */
   models: string[];
@@ -662,6 +667,50 @@ export type Users =
   | { kind: "per-call"; pool: number; prefix: string; label: string }
   | { kind: "none" };
 
+/** A span a mark adds under the root, after the generated spans (M17). */
+export type MarkedSpan = {
+  name: string;
+  kind: Schema<"SpanKind">;
+  /** Offset from the trace's start and length, ms. */
+  fromMs: number;
+  durationMs: number;
+  input?: Schema<"Payload">;
+  output?: Schema<"Payload">;
+  /** Absent: ok. */
+  error?: { message: string; stacktrace: string };
+};
+
+/** What a profile's `marks` changes on one generated trace (M17). Every field is optional. */
+export type Mark = {
+  /** Added to the trace's tags (the result stays sorted and unique). */
+  tags?: readonly string[];
+  release?: string;
+  /** Replace the trace's scores with the same name, and add the others. */
+  scores?: readonly { name: string; source: Schema<"ScoreSource">; value: Schema<"ScoreValue"> }[];
+  /** The trace's turn (its previews and its generated LLM payloads) instead of the drawn one. */
+  turn?: Turn;
+  /** The trace becomes an error trace: `count` error spans, named `spanName`, with this message. */
+  error?: { count: number; spanName: string; message: string; stacktrace: string };
+  /** Input and output tokens are multiplied by it (rounded down), so the cost is too. */
+  costFactor?: number;
+  /** A new start time, epoch ms; the end moves with it. */
+  startMs?: number;
+  /** A new duration; marked spans that end later extend it to their end. */
+  durationMs?: number;
+  spans?: readonly MarkedSpan[];
+};
+
+export type MarksContext = {
+  seed: number;
+  now: number;
+  /**
+   * True for the traces a mark may choose: not a showcase, not the big first trace, and visible with the
+   * trace list's defaults (environment not `cetra-eval`, no `cetra.experiment_id` metadata). A mark for
+   * another index is ignored.
+   */
+  eligible: (index: number) => boolean;
+};
+
 /** Every table and range of a generated dataset's traces, sessions and users (M16). */
 export type Profile = {
   /** `service_name` of every generated span. */
@@ -705,6 +754,11 @@ export type Profile = {
   /** Scores of a generated trace. */
   scores: (index: number, errored: boolean) => Schema<"ScoreBrief">[];
   showcases: readonly Showcase[];
+  /** Changes for chosen generated traces, by index; absent: none (M17). */
+  marks?: (
+    traces: readonly Schema<"TraceSummary">[],
+    context: MarksContext,
+  ) => ReadonlyMap<number, Mark>;
 };
 
 /** The session and user a `calls` profile gives a generated trace. */
@@ -761,13 +815,23 @@ export function createDataset(options: {
   }
   // A session's turns are spread out in time first: the session's turns depend on each other.
   const timed = spreadSessionTurns(bases, options.seed, options.now, profile);
+  // The marks change the timed traces before the sessions are numbered, since the numbering follows start times.
+  const marks = marksOf(timed, options.seed, options.now, profile);
+  const marked = timed.map((trace, index) => {
+    const mark = marks.get(index);
+    return mark ? markedSummary(trace, index, mark, profile) : trace;
+  });
   // A trace's turn depends on its session's other traces, so the previews are set once all are known.
-  const slots = sessionSlots(timed);
+  const slots = sessionSlots(marked);
   const turnAt = (index: number): TraceTurn => {
+    const markedTurn = marks.get(index)?.turn;
+    if (markedTurn) {
+      return { topic: markedTurn, exchange: markedTurn, main: true };
+    }
     const slot = slots.get(index);
     return turnOf(slot?.topic ?? index, slot?.turn ?? 1, profile);
   };
-  const traces = timed.map((trace, index) => {
+  const traces = marked.map((trace, index) => {
     const story = showcaseAt(index, profile)?.story;
     return story
       ? { ...trace, input_preview: story.inputPreview, output_preview: story.outputPreview }
@@ -789,7 +853,7 @@ export function createDataset(options: {
     if (cached) {
       return cached;
     }
-    const detail = buildDetail(options.seed, index, trace, profile);
+    const detail = buildDetail(options.seed, index, trace, profile, marks.get(index));
     details.set(traceId, detail);
     return detail;
   }
@@ -805,11 +869,14 @@ export function createDataset(options: {
         return undefined;
       }
       const index = indexById.get(traceId) ?? 0;
+      const mark = marks.get(index);
       return spanFromSummary(row.span, {
         traceIndex: index,
         errored: detail.trace.error_count > 0,
         turn: turnAt(index),
         profile,
+        mark,
+        generatedCount: detail.trace.span_count - markedSpanCount(mark),
       });
     },
     sessions(includeEval, includeExperiments) {
@@ -884,6 +951,112 @@ export function visibleTraces(
     }
     return true;
   });
+}
+
+/** The number of spans a mark adds under the root (M17). */
+function markedSpanCount(mark: Mark | undefined): number {
+  return mark?.spans?.length ?? 0;
+}
+
+/**
+ * The marks of a profile, for its eligible traces only (M17). The profile's `marks` sees every timed summary; a
+ * mark for an ineligible index is dropped.
+ */
+function marksOf(
+  traces: readonly Schema<"TraceSummary">[],
+  seed: number,
+  now: number,
+  profile: Profile,
+): ReadonlyMap<number, Mark> {
+  const result = new Map<number, Mark>();
+  if (!profile.marks) {
+    return result;
+  }
+  const eligible = (index: number): boolean => {
+    const trace = traces[index];
+    return (
+      trace !== undefined &&
+      showcaseAt(index, profile) === undefined &&
+      !(profile.bigFirstTrace && index === 0) &&
+      visibleTraces([trace], false, false).length === 1
+    );
+  };
+  for (const [index, mark] of profile.marks(traces, { seed, now, eligible })) {
+    if (eligible(index)) {
+      result.set(index, mark);
+    }
+  }
+  return result;
+}
+
+/** A generated trace's summary after its mark (M17). Its turn and its spans' payloads are applied elsewhere. */
+function markedSummary(
+  trace: Schema<"TraceSummary">,
+  index: number,
+  mark: Mark,
+  profile: Profile,
+): Schema<"TraceSummary"> {
+  const marked = mark.spans ?? [];
+  const startMs = mark.startMs ?? Date.parse(trace.start_time);
+  let durationMs = mark.durationMs ?? trace.duration_ns / 1_000_000;
+  for (const span of marked) {
+    durationMs = Math.max(durationMs, span.fromMs + span.durationMs);
+  }
+  // A mark's error count replaces the drawn one; the marked spans' errors are added to it.
+  const markedErrors = marked.filter((span) => span.error !== undefined).length;
+  const errorCount = (mark.error?.count ?? trace.error_count) + markedErrors;
+  // Generated summaries always carry their tokens; the `?? 0` only narrows the optional fields.
+  let inputTokens = trace.input_tokens ?? 0;
+  let outputTokens = trace.output_tokens ?? 0;
+  let costTotal = trace.cost_total;
+  if (mark.costFactor !== undefined) {
+    inputTokens = Math.floor(inputTokens * mark.costFactor);
+    outputTokens = Math.floor(outputTokens * mark.costFactor);
+    costTotal =
+      Math.round(inputTokens * profile.price.input + outputTokens * profile.price.output) /
+      1_000_000;
+  }
+  return {
+    ...trace,
+    start_time: rfc3339(startMs),
+    end_time: rfc3339(startMs + durationMs),
+    duration_ns: durationMs * 1_000_000,
+    status: errorCount > 0 ? "error" : "ok",
+    release: mark.release ?? trace.release,
+    tags: mark.tags ? [...new Set([...trace.tags, ...mark.tags])].sort() : trace.tags,
+    span_count: trace.span_count + marked.length,
+    error_count: errorCount,
+    llm_count: trace.llm_count + marked.filter((span) => span.kind === "llm").length,
+    input_tokens: inputTokens,
+    output_tokens: outputTokens,
+    total_tokens: inputTokens + outputTokens,
+    cost_total: costTotal,
+    scores: mark.scores ? markedScores(trace.scores, index, mark.scores) : trace.scores,
+  };
+}
+
+/** The scores after a mark: one with a marked name is replaced (keeping its id), the others are added (M17). */
+function markedScores(
+  scores: readonly Schema<"ScoreBrief">[],
+  index: number,
+  changes: NonNullable<Mark["scores"]>,
+): Schema<"ScoreBrief">[] {
+  const result = [...scores];
+  for (const change of changes) {
+    const at = result.findIndex((score) => score.name === change.name);
+    const current = result[at];
+    if (current) {
+      result[at] = { ...current, source: change.source, value: change.value };
+    } else {
+      result.push({
+        name: change.name,
+        score_id: markScoreUuid(index, result.length),
+        source: change.source,
+        value: change.value,
+      });
+    }
+  }
+  return result;
 }
 
 function traceSummary(
@@ -1005,6 +1178,7 @@ function showcaseSummary(
       value: score.value,
     })),
     ...(showcase.user ? { user_id: showcase.user } : {}),
+    ...(showcase.session ? { session_id: showcase.session } : {}),
   };
 }
 
@@ -1030,21 +1204,64 @@ function buildDetail(
   index: number,
   trace: Schema<"TraceSummary">,
   profile: Profile,
+  mark: Mark | undefined,
 ): Schema<"TraceDetail"> {
   const showcase = showcaseAt(index, profile);
   if (showcase) {
     return showcaseDetail(showcase, index, trace);
   }
   const rng = mulberry32(mix(seed, index + 17));
-  const spanCount = trace.span_count;
+  // The generated spans come first and keep their draws; a mark's spans follow them under the root (M17).
+  const markedSpans = mark?.spans ?? [];
+  const spanCount = trace.span_count - markedSpans.length;
+  const markedErrors = markedSpans.filter((span) => span.error !== undefined).length;
   const bigFirst = profile.bigFirstTrace && index === 0;
   const maxDepth = bigFirst ? 8 : profile.spans.maxDepth;
   const shape = spanShape(spanCount, maxDepth, bigFirst ? 2_000 : 0, rng);
   const startMs = Date.parse(trace.start_time);
   const endMs = Date.parse(trace.end_time);
-  const built = layoutSpans(shape, startMs, endMs, trace.error_count, rng, profile);
-  const spans = built.map((span, spanIndex) => treeSpan(span, spanIndex, index, trace, profile));
-  return { trace, spans, truncated: false };
+  const built = layoutSpans(shape, startMs, endMs, trace.error_count - markedErrors, rng, profile);
+  const spans = built.map((span, spanIndex) =>
+    treeSpan(span, spanIndex, index, trace, profile, mark),
+  );
+  const marked = markedSpans.map((span, i) =>
+    markedTreeSpan(span, spanCount + i, index, trace, profile),
+  );
+  return { trace, spans: [...spans, ...marked], truncated: false };
+}
+
+/** A mark's span under the root, at `position` after the generated spans (M17). */
+function markedTreeSpan(
+  span: MarkedSpan,
+  position: number,
+  traceIndex: number,
+  trace: Schema<"TraceSummary">,
+  profile: Profile,
+): Schema<"TreeSpan"> {
+  const startMs = Date.parse(trace.start_time) + span.fromMs;
+  const row = treeSpan(
+    {
+      depth: 1,
+      detached: false,
+      parent: 0,
+      startMs,
+      endMs: startMs + span.durationMs,
+      kind: span.kind,
+      status: span.error ? "error" : "ok",
+    },
+    position,
+    traceIndex,
+    trace,
+    profile,
+  );
+  return {
+    ...row,
+    span: {
+      ...row.span,
+      name: span.name,
+      ...(span.error ? { status_message: span.error.message } : {}),
+    },
+  };
 }
 
 /** A showcase trace's tree: its spans come in `showcase.spans` order, so every parent comes before its children (M11, M12). */
@@ -1207,22 +1424,33 @@ function treeSpan(
   traceIndex: number,
   trace: Schema<"TraceSummary">,
   profile: Profile,
+  mark?: Mark,
 ): Schema<"TreeSpan"> {
   const id = spanId(traceIndex, spanIndex);
   const names = profile.spanNames[span.kind];
+  // A generated error span takes the mark's error, when the mark has one (M17).
+  const markedError = span.status === "error" && spanIndex > 0 ? mark?.error : undefined;
   const summary: Schema<"SpanSummary"> = {
     span_id: id,
     trace_id: trace.trace_id,
     span_kind: span.kind,
     name:
-      spanIndex === 0 ? trace.name : names ? pick(names, spanIndex) : `${span.kind} ${spanIndex}`,
+      spanIndex === 0
+        ? trace.name
+        : markedError
+          ? markedError.spanName
+          : names
+            ? pick(names, spanIndex)
+            : `${span.kind} ${spanIndex}`,
     start_time: rfc3339(span.startMs),
     end_time: rfc3339(span.endMs),
     duration_ns: (span.endMs - span.startMs) * 1_000_000,
     status: span.status,
     metadata: { ...trace.metadata },
     tags: trace.tags,
-    ...(span.status === "error" ? { status_message: profile.error.message } : {}),
+    ...(span.status === "error"
+      ? { status_message: markedError?.message ?? profile.error.message }
+      : {}),
     ...(span.parent === undefined ? {} : { parent_span_id: spanId(traceIndex, span.parent) }),
     ...(trace.environment ? { environment: trace.environment } : {}),
     service_name: profile.service,
@@ -1269,6 +1497,9 @@ type SpanContext = {
   errored: boolean;
   turn: TraceTurn;
   profile: Profile;
+  /** The trace's mark (M17). Its spans from `generatedCount` on are the mark's, in order. */
+  mark?: Mark;
+  generatedCount: number;
 };
 
 const FENCE = "```";
@@ -1724,7 +1955,7 @@ function spanFromSummary(span: Schema<"SpanSummary">, context: SpanContext): Sch
               name: "exception",
               time: span.end_time,
               attributes: {
-                "exception.stacktrace": context.profile.error.stacktrace,
+                "exception.stacktrace": stackTraceOf(context, index),
               },
             },
           ]
@@ -1737,7 +1968,19 @@ function spanFromSummary(span: Schema<"SpanSummary">, context: SpanContext): Sch
     truncated,
     scope_name: "cetra",
   };
-  if (span.span_kind === "llm") {
+  const marked =
+    index >= context.generatedCount
+      ? context.mark?.spans?.[index - context.generatedCount]
+      : undefined;
+  if (marked) {
+    // A marked span's payloads are the mark's; an absent one stays absent.
+    if (marked.input) {
+      detail.input = marked.input;
+    }
+    if (marked.output) {
+      detail.output = marked.output;
+    }
+  } else if (span.span_kind === "llm") {
     const language = index % 2 === 0 ? "python" : "ts";
     detail.input = {
       format: "messages",
@@ -1848,6 +2091,18 @@ function spanFromSummary(span: Schema<"SpanSummary">, context: SpanContext): Sch
     }
   }
   return detail;
+}
+
+/**
+ * The stack trace of an error span at `position`: a marked span's own error, a generated error span's mark error,
+ * or the profile's stack trace (M17).
+ */
+function stackTraceOf(context: SpanContext, position: number): string {
+  if (position >= context.generatedCount) {
+    const marked = context.mark?.spans?.[position - context.generatedCount];
+    return marked?.error?.stacktrace ?? context.profile.error.stacktrace;
+  }
+  return context.mark?.error?.stacktrace ?? context.profile.error.stacktrace;
 }
 
 /** A story span's hand-written payloads; `error` replaces the generic exception event of an error span. */
@@ -2363,7 +2618,12 @@ export function scoreUuid(index: number, which: number): string {
   return `00000000-0000-7000-8000-${tail}`;
 }
 
-function spanId(traceIndex: number, spanIndex: number): string {
+/** Id of a score a mark adds: never equal to a `scoreUuid` (M17). */
+export function markScoreUuid(index: number, position: number): string {
+  return `00000000-0000-7000-9000-${(index * 8 + position).toString(16).padStart(12, "0")}`;
+}
+
+export function spanId(traceIndex: number, spanIndex: number): string {
   return `${traceIndex.toString(16).padStart(8, "0")}${(spanIndex + 1).toString(16).padStart(8, "0")}`;
 }
 
@@ -2411,6 +2671,6 @@ export function rfc3339(ms: number): string {
     .replace(/\.(\d{3})Z$/, (_match, fraction: string) => `.${fraction}000000Z`);
 }
 
-function mix(seed: number, index: number): number {
+export function mix(seed: number, index: number): number {
   return Math.imul(seed ^ index, 0x9e3779b1) >>> 0;
 }
