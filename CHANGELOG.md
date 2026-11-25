@@ -69,6 +69,7 @@ with an `### Upgrade notes` section (https://cetra.sh/docs/self-hosting/upgrade/
 - Selecting another member while the member panel is open no longer adds a second Role card.
 - A model named with a provider prefix, such as `openai/gpt-4o-mini` from LiteLLM-style clients and EverOS, is priced as the provider's model when no price row matches the full name.
 - An online backup cancelled by a server shutdown no longer leaves files in its directory: the shutdown waits until the backup has stopped and removed what it wrote.
+- A session turn's score badges wrap instead of overlapping each other or the turn's cost, also in an annotation queue's narrow review column. The trace header puts its actions on a second line when they don't fit beside the name. The playground's prompt version select shows a long label with an ellipsis and in full on hover.
 
 ## [0.1.0-rc.2] - 2026-11-22
 

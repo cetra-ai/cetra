@@ -106,7 +106,17 @@ it("shows a pinned version missing from the list", () => {
       { version: 1, labels: [] },
     ],
   });
-  expect(screen.getByRole("combobox", { name: "Prompt version" })).toHaveTextContent("v7");
+  const trigger = screen.getByRole("combobox", { name: "Prompt version" });
+  expect(trigger).toHaveTextContent("v7");
+  expect(trigger).toHaveAttribute("title", "v7");
+});
+
+it("titles an unpinned column's version select Draft", () => {
+  renderColumn();
+  expect(screen.getByRole("combobox", { name: "Prompt version" })).toHaveAttribute(
+    "title",
+    "Draft",
+  );
 });
 
 it("picking a version calls onPickVersion with its number, and Draft with undefined", async () => {
@@ -155,4 +165,20 @@ it("shows the pinned template", () => {
 it("shows no template for a draft column", () => {
   renderColumn({ template: TEMPLATE });
   expect(screen.queryByRole("list", { name: /Template of version/ })).not.toBeInTheDocument();
+});
+
+it("ends a long version label in an ellipsis and shows it whole in the title", () => {
+  renderColumn({
+    column: {
+      id: "c1",
+      connectionId: CONNECTION,
+      model: "",
+      temperature: "",
+      maxTokens: "",
+      version: 2,
+    },
+  });
+  const trigger = screen.getByRole("combobox", { name: "Prompt version" });
+  expect(trigger).toHaveAttribute("title", "v2 · latest, staging");
+  expect(within(trigger).getByText("v2 · latest, staging")).toHaveClass("truncate");
 });
