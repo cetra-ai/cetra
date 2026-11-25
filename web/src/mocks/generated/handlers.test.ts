@@ -2,7 +2,7 @@ import { expect, it } from "vitest";
 import type { Schema } from "@/api/types";
 import { createDataset, type Dataset, visibleTraces } from "@/mocks/generated/dataset";
 import { compareUsers, largeHandlers, userIdOfFilter } from "@/mocks/generated/handlers";
-import { CODING_PROFILE } from "@/mocks/generated/profiles";
+import { CODING_PROFILE, VOICE_PROFILE } from "@/mocks/generated/profiles";
 import { server } from "@/mocks/node";
 
 const NOW = Date.parse("2026-06-01T00:00:00.000Z");
@@ -688,4 +688,99 @@ it("answers a bad field, limit or q as that field's error, and a bad view or sea
     fields: [{ field: "user_id" }],
   });
   expect(sessionsSearch.status).toBe(400);
+});
+
+const API = `${location.origin}/api/v1/projects`;
+const CODING = `${API}/acme%2Fcode-agent`;
+const VOICE = `${API}/acme%2Fvoice-desk`;
+const SUPPORT = `${API}/acme%2Fsupport-bot`;
+const PLAYGROUND = `${API}/acme%2Fplayground`;
+
+it("a project-scoped mock answers its project only", async () => {
+  const dataset = createDataset({ seed: 1, now: NOW, traces: 20, profile: CODING_PROFILE });
+  const fixtures = await fetch(`${PLAYGROUND}/traces`);
+  const fixtureBody = await fixtures.text();
+  expect(fixtures.status).toBe(200);
+
+  server.use(...largeHandlers(dataset, { project: "acme/code-agent" }));
+  const page = (await (await fetch(`${CODING}/traces?limit=1000`)).json()) as Schema<"TracePage">;
+  const ids = new Set(dataset.traces.map((trace) => trace.trace_id));
+  expect(dataset.traces[4]?.name).toBe("coding-agent");
+  expect(page.data.some((trace) => trace.trace_id === dataset.traces[4]?.trace_id)).toBe(true);
+  expect(page.data.every((trace) => ids.has(trace.trace_id))).toBe(true);
+
+  const playground = await fetch(`${PLAYGROUND}/traces`);
+  expect(await playground.text()).toBe(fixtureBody);
+});
+
+it("two project mocks don't mix", async () => {
+  const support = createDataset({ seed: 1, now: NOW, traces: 300 });
+  const voice = createDataset({ seed: 1, now: NOW, traces: 300, profile: VOICE_PROFILE });
+  server.use(
+    ...largeHandlers(support, { project: "acme/support-bot" }),
+    ...largeHandlers(voice, { project: "acme/voice-desk" }),
+  );
+  const supportTrace = dataset5(support);
+  const voiceTrace = dataset5(voice);
+  expect(supportTrace.name).not.toBe(voiceTrace.name);
+
+  const fromSupport = (await (
+    await fetch(`${SUPPORT}/traces/${supportTrace.trace_id}`)
+  ).json()) as Schema<"TraceDetail">;
+  const fromVoice = (await (
+    await fetch(`${VOICE}/traces/${voiceTrace.trace_id}`)
+  ).json()) as Schema<"TraceDetail">;
+  expect(fromSupport.trace.name).toBe(supportTrace.name);
+  expect(fromVoice.trace.name).toBe(voiceTrace.name);
+  expect(voiceTrace.trace_id).toMatch(/05$/);
+});
+
+function dataset5(dataset: Dataset): Schema<"TraceSummary"> {
+  const trace = dataset.traces[5];
+  if (!trace) {
+    throw new Error("dataset is missing trace 5");
+  }
+  return trace;
+}
+
+it("datasets: false leaves the datasets to the fixtures", async () => {
+  const dataset = createDataset({ seed: 1, now: NOW, traces: 20, profile: CODING_PROFILE });
+  const url = `${CODING}/datasets`;
+  const fixtures = await (await fetch(url)).text();
+
+  server.use(...largeHandlers(dataset, { project: "acme/code-agent", datasets: false }));
+  expect(await (await fetch(url)).text()).toBe(fixtures);
+
+  server.resetHandlers();
+  server.use(...largeHandlers(dataset, { project: "acme/code-agent" }));
+  expect(await (await fetch(url)).text()).not.toBe(fixtures);
+});
+
+it("the widget query and the trace stream follow the prefix", async () => {
+  const voice = createDataset({ seed: 1, now: NOW, traces: 300, profile: VOICE_PROFILE });
+  server.use(...largeHandlers(voice, { project: "acme/voice-desk" }));
+
+  const response = await fetch(`${VOICE}/dashboards/query`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      from: new Date(NOW - 30 * DAY_MS).toISOString(),
+      to: new Date(NOW + DAY_MS).toISOString(),
+      shape: "total",
+      query: { source: "traces", measures: [{ agg: "count" }] },
+    }),
+  });
+  const body = (await response.json()) as { rows: { values: number[] }[] };
+  const counted = visibleTraces(voice.traces, false, false).filter((trace) => {
+    const time = Date.parse(trace.start_time);
+    return time >= NOW - 30 * DAY_MS && time < NOW + DAY_MS;
+  });
+  expect(body.rows[0]?.values[0]).toBe(counted.length);
+
+  const stream = await fetch(`${VOICE}/traces/stream`, {
+    headers: { Accept: "text/event-stream" },
+  });
+  expect(stream.status).toBe(200);
+  expect(stream.headers.get("content-type")).toContain("text/event-stream");
+  await stream.body?.cancel();
 });

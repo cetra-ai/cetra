@@ -36,11 +36,39 @@ async function main(): Promise<void> {
       import("./mocks/mock-mode"),
     ]);
     if (readMockMode() === "large") {
-      const [{ createDataset }, { largeHandlers }] = await Promise.all([
+      const [
+        { createDataset, SUPPORT_PROFILE },
+        { CODING_PROFILE, VOICE_PROFILE, EXTRACTION_PROFILE },
+        { largeHandlers },
+        { STORY_PROJECTS, projectHandlers },
+      ] = await Promise.all([
         import("./mocks/generated/dataset"),
+        import("./mocks/generated/profiles"),
         import("./mocks/generated/handlers"),
+        import("./mocks/projects"),
       ]);
-      worker.use(...largeHandlers(createDataset({ seed: 1, now: Date.now(), traces: 5000 })));
+      const profiles = {
+        support: SUPPORT_PROFILE,
+        coding: CODING_PROFILE,
+        voice: VOICE_PROFILE,
+        extraction: EXTRACTION_PROFILE,
+      };
+      const now = Date.now();
+      worker.use(...projectHandlers);
+      for (const project of STORY_PROJECTS) {
+        const dataset = createDataset({
+          seed: 1,
+          now,
+          traces: project.story === "support" ? 5_000 : 2_000,
+          profile: profiles[project.story],
+        });
+        worker.use(
+          ...largeHandlers(dataset, {
+            project: project.ref,
+            datasets: project.story === "support",
+          }),
+        );
+      }
     }
     await worker.start({
       quiet: import.meta.env.MODE === "demo",

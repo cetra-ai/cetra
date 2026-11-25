@@ -99,8 +99,8 @@ class Unsupported extends Error {
  * is no time to first token, and no cache tokens. So the TTFT widget is empty here, and the token
  * and LLM latency widgets show these approximations.
  */
-export function widgetQueryHandler(dataset: Dataset): HttpHandler {
-  return http.post(`${PROJECT}/dashboards/query`, async ({ request }) => {
+export function widgetQueryHandler(dataset: Dataset, prefix: string = PROJECT): HttpHandler {
+  return http.post(`${prefix}/dashboards/query`, async ({ request }) => {
     const body = (await request.json()) as Body;
     try {
       return HttpResponse.json(answer(dataset, body));

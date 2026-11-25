@@ -22,8 +22,8 @@ type StreamEvents = {
   ping: Record<string, never>;
 };
 
-export function traceStreamHandler(source: TraceStreamSource) {
-  return sse<StreamEvents>(`${PROJECT}/traces/stream`, ({ client, request }) => {
+export function traceStreamHandler(source: TraceStreamSource, prefix: string = PROJECT) {
+  return sse<StreamEvents>(`${prefix}/traces/stream`, ({ client, request }) => {
     // The Node interceptor delivers headers only after the first body byte.
     client.send({ data: "" });
     const stop = source(bind(client));
@@ -33,8 +33,8 @@ export function traceStreamHandler(source: TraceStreamSource) {
   });
 }
 
-export function spanStreamHandler(source: SpanStreamSource) {
-  return sse<StreamEvents>(`${PROJECT}/traces/:trace_id/stream`, ({ client, request, params }) => {
+export function spanStreamHandler(source: SpanStreamSource, prefix: string = PROJECT) {
+  return sse<StreamEvents>(`${prefix}/traces/:trace_id/stream`, ({ client, request, params }) => {
     client.send({ data: "" });
     const traceId = typeof params.trace_id === "string" ? params.trace_id : "";
     const stop = source(bind(client), traceId);

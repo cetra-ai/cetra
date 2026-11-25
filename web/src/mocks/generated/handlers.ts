@@ -99,10 +99,10 @@ const SCORE_DEFINITIONS: Schema<"ScoreDefinition">[] = [
  * hold, and the queue names fixture score definitions; the dev server points them at the dataset's
  * first trace and its first two definitions instead.
  */
-function queueItemHandlers(dataset: Dataset): HttpHandler[] {
+function queueItemHandlers(dataset: Dataset, prefix: string): HttpHandler[] {
   const item = () =>
     HttpResponse.json({ ...queueItemFixture, trace_id: dataset.traces[0]?.trace_id });
-  const items = `${PROJECT}/annotation-queues/:id`;
+  const items = `${prefix}/annotation-queues/:id`;
   return [
     http.get(items, () =>
       HttpResponse.json({
@@ -116,60 +116,79 @@ function queueItemHandlers(dataset: Dataset): HttpHandler[] {
   ];
 }
 
-export function largeHandlers(dataset: Dataset): HttpHandler[] {
+export function largeHandlers(
+  dataset: Dataset,
+  options?: {
+    /** A project ref (`acme/<slug>`): only that project's requests are answered. Unset: every project, as today. */
+    project?: string;
+    /** Generated datasets and experiments. Default true. */
+    datasets?: boolean;
+  },
+): HttpHandler[] {
+  const prefix =
+    options?.project === undefined
+      ? PROJECT
+      : `/api/v1/projects/${encodeURIComponent(options.project)}`;
+  const withDatasets = options?.datasets !== false;
   return [
-    ...storyHandlers(dataset),
-    ...queueItemHandlers(dataset),
-    widgetQueryHandler(dataset),
-    traceStreamHandler(liveTraceSource(dataset)),
-    spanStreamHandler(liveSpanSource(dataset)),
-    http.get(`${PROJECT}/traces`, ({ request }) => listTraces(dataset, request)),
-    http.get(`${PROJECT}/traces/:trace_id/spans/:span_id`, ({ params }) =>
+    ...storyHandlers(dataset, options?.project),
+    ...queueItemHandlers(dataset, prefix),
+    widgetQueryHandler(dataset, prefix),
+    traceStreamHandler(liveTraceSource(dataset), prefix),
+    spanStreamHandler(liveSpanSource(dataset), prefix),
+    http.get(`${prefix}/traces`, ({ request }) => listTraces(dataset, request)),
+    http.get(`${prefix}/traces/:trace_id/spans/:span_id`, ({ params }) =>
       oneSpan(dataset, params.trace_id, params.span_id),
     ),
-    http.get(`${PROJECT}/traces/:trace_id`, ({ params }) => oneTrace(dataset, params.trace_id)),
-    http.get(`${PROJECT}/spans`, ({ request }) => listSpans(dataset, request)),
-    http.get(`${PROJECT}/sessions/:session_id`, ({ request, params }) =>
+    http.get(`${prefix}/traces/:trace_id`, ({ params }) => oneTrace(dataset, params.trace_id)),
+    http.get(`${prefix}/spans`, ({ request }) => listSpans(dataset, request)),
+    http.get(`${prefix}/sessions/:session_id`, ({ request, params }) =>
       oneSession(dataset, request, params.session_id),
     ),
-    http.get(`${PROJECT}/sessions`, ({ request }) => listSessions(dataset, request)),
-    http.get(`${PROJECT}/users/:user_id`, ({ request, params }) =>
+    http.get(`${prefix}/sessions`, ({ request }) => listSessions(dataset, request)),
+    http.get(`${prefix}/users/:user_id`, ({ request, params }) =>
       oneUser(dataset, request, params.user_id),
     ),
-    http.get(`${PROJECT}/users`, ({ request }) => listUsers(dataset, request)),
-    http.post(`${PROJECT}/facets`, ({ request }) => facets(dataset, request)),
-    http.get(`${PROJECT}/score-definitions`, () =>
+    http.get(`${prefix}/users`, ({ request }) => listUsers(dataset, request)),
+    http.post(`${prefix}/facets`, ({ request }) => facets(dataset, request)),
+    http.get(`${prefix}/score-definitions`, () =>
       HttpResponse.json({
         data: [...SCORE_DEFINITIONS, ...STORY_SCORE_DEFINITIONS],
         next_cursor: null,
       }),
     ),
-    http.get(`${PROJECT}/dataset-trends`, ({ request }) => datasetTrends(dataset, request)),
-    http.get(`${PROJECT}/datasets`, ({ request }) => listDatasets(dataset, request)),
-    http.get(`${PROJECT}/datasets/:dataset/items/:item_id`, ({ params }) =>
-      oneDatasetItem(dataset, params.dataset, params.item_id),
-    ),
-    http.get(`${PROJECT}/datasets/:dataset/items`, ({ request, params }) =>
-      listDatasetItems(dataset, request, params.dataset),
-    ),
-    http.get(`${PROJECT}/datasets/:dataset/versions/:version/changes`, ({ request, params }) =>
-      listVersionChanges(dataset, request, params.dataset, params.version),
-    ),
-    http.get(`${PROJECT}/datasets/:dataset/versions`, ({ request, params }) =>
-      listDatasetVersions(dataset, request, params.dataset),
-    ),
-    http.get(`${PROJECT}/datasets/:dataset`, ({ params }) => oneDataset(dataset, params.dataset)),
-    http.get(`${PROJECT}/experiments`, ({ request }) => listExperiments(dataset, request)),
-    http.get(`${PROJECT}/experiments/:id/results`, ({ request, params }) =>
-      experimentResults(dataset, request, params.id),
-    ),
-    http.get(`${PROJECT}/experiments/:id`, ({ params }) => oneExperiment(dataset, params.id)),
-    // The experiments of the generated datasets answer above; every other experiment request falls
-    // through to the experiments mock (its runs are on the fixture dataset).
-    ...experimentHandlers(),
-    http.get(`${PROJECT}/experiments/summaries`, ({ request }) =>
-      experimentSummaries(dataset, request),
-    ),
+    ...(withDatasets
+      ? [
+          http.get(`${prefix}/dataset-trends`, ({ request }) => datasetTrends(dataset, request)),
+          http.get(`${prefix}/datasets`, ({ request }) => listDatasets(dataset, request)),
+          http.get(`${prefix}/datasets/:dataset/items/:item_id`, ({ params }) =>
+            oneDatasetItem(dataset, params.dataset, params.item_id),
+          ),
+          http.get(`${prefix}/datasets/:dataset/items`, ({ request, params }) =>
+            listDatasetItems(dataset, request, params.dataset),
+          ),
+          http.get(`${prefix}/datasets/:dataset/versions/:version/changes`, ({ request, params }) =>
+            listVersionChanges(dataset, request, params.dataset, params.version),
+          ),
+          http.get(`${prefix}/datasets/:dataset/versions`, ({ request, params }) =>
+            listDatasetVersions(dataset, request, params.dataset),
+          ),
+          http.get(`${prefix}/datasets/:dataset`, ({ params }) =>
+            oneDataset(dataset, params.dataset),
+          ),
+          http.get(`${prefix}/experiments`, ({ request }) => listExperiments(dataset, request)),
+          http.get(`${prefix}/experiments/:id/results`, ({ request, params }) =>
+            experimentResults(dataset, request, params.id),
+          ),
+          http.get(`${prefix}/experiments/:id`, ({ params }) => oneExperiment(dataset, params.id)),
+          // The experiments of the generated datasets answer above; every other experiment request falls
+          // through to the experiments mock (its runs are on the fixture dataset).
+          ...experimentHandlers(),
+          http.get(`${prefix}/experiments/summaries`, ({ request }) =>
+            experimentSummaries(dataset, request),
+          ),
+        ]
+      : []),
   ];
 }
 
