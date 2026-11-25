@@ -37,6 +37,7 @@ with an `### Upgrade notes` section (https://cetra.sh/docs/self-hosting/upgrade/
 
 ### Changed
 
+- Tool calls in the Chat tab and the trace Transcript are one line each, `name(arguments) → result · duration`, with the tool's response folded into its call and a failed call's error shown on the line; select a line to open the arguments and result. The Transcript has a **Full width** toggle that hides the panel beside it.
 - The install command is `curl -fsSL https://cetra.sh/install.sh | sh`: `cetra.sh/install.sh` redirects to the release's install script. The GitHub release URL keeps working.
 - Chart bars have slightly rounded tops; in a stack only the top segment is rounded.
 - Span kind icons use the Tabler icon set (a robot for agents, a wrench for tools, …), slightly larger.
