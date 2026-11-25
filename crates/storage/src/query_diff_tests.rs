@@ -8,7 +8,7 @@ use arrow::array::{
 };
 use arrow::compute::concat_batches;
 use arrow::datatypes::{DataType as ArrowDataType, Field as ArrowField, Schema as ArrowSchema};
-use cetra_column::{Batch, CancelToken, DataType, Field, Reservation, ScalarValue, Schema};
+use cetra_column::{Batch, CancelToken, ScalarValue};
 use cetra_core::schema::{scores_schema, spans_schema, traces_schema};
 use cetra_core::score::{Score, ScoreTarget};
 use cetra_query::{
@@ -244,10 +244,12 @@ async fn filter_dsl_matches_datafusion_row_for_row() {
 
     let (spans_rb, spans_cb) = collect_view_batch(&df_ctx, "spans").await;
     let (traces_rb, traces_cb) = collect_view_batch(&df_ctx, "traces").await;
+    let (sessions_rb, sessions_cb) = collect_view_batch(&df_ctx, "sessions").await;
     let (scores_rb, scores_cb) = collect_view_batch(&df_ctx, "scores").await;
 
     let span_ids = extract_id_column(&spans_rb, "span_id");
     let trace_ids = extract_id_column(&traces_rb, "trace_id");
+    let session_ids = extract_id_column(&sessions_rb, "session_id");
     let score_ids = extract_id_column(&scores_rb, "score_id");
     assert_eq!(
         span_ids.iter().collect::<HashSet<_>>().len(),
@@ -256,6 +258,10 @@ async fn filter_dsl_matches_datafusion_row_for_row() {
     assert_eq!(
         trace_ids.iter().collect::<HashSet<_>>().len(),
         trace_ids.len()
+    );
+    assert_eq!(
+        session_ids.iter().collect::<HashSet<_>>().len(),
+        session_ids.len()
     );
     assert_eq!(
         score_ids.iter().collect::<HashSet<_>>().len(),
@@ -349,6 +355,11 @@ async fn filter_dsl_matches_datafusion_row_for_row() {
             FilterView::Traces,
             "tags @> [] AND array_length(models) >= 0",
         ),
+        // Sessions view
+        (FilterView::Sessions, "trace_count >= 2"),
+        (FilterView::Sessions, "error_count > 0 AND duration_ms > 0"),
+        (FilterView::Sessions, "tags @> ['beta']"),
+        (FilterView::Sessions, "user_id IS NOT NULL"),
         // Scores view
         (
             FilterView::Scores,
@@ -369,8 +380,8 @@ async fn filter_dsl_matches_datafusion_row_for_row() {
         let (batch, ids, base_schema) = match view {
             FilterView::Spans => (&spans_cb, &span_ids, spans_cb.schema()),
             FilterView::Traces => (&traces_cb, &trace_ids, traces_cb.schema()),
+            FilterView::Sessions => (&sessions_cb, &session_ids, sessions_cb.schema()),
             FilterView::Scores => (&scores_cb, &score_ids, scores_cb.schema()),
-            FilterView::Sessions => unreachable!(),
         };
 
         let df_parsed = df_ctx
@@ -446,13 +457,20 @@ async fn filter_dsl_matches_datafusion_row_for_row() {
             "score_label('tone') = 'friendly'",
         ),
         (FilterView::Spans, &["tone"], "score('tone') > 0.5"),
+        (
+            FilterView::Sessions,
+            &["resolved"],
+            "score('resolved') >= 0.5",
+        ),
+        (FilterView::Sessions, &["resolved"], "has_score('resolved')"),
     ];
 
     for &(view, score_names, text) in score_cases {
         let (base_rb, base_schema, ids) = match view {
             FilterView::Traces => (&traces_rb, traces_cb.schema(), &trace_ids),
             FilterView::Spans => (&spans_rb, spans_cb.schema(), &span_ids),
-            _ => unreachable!(),
+            FilterView::Sessions => (&sessions_rb, sessions_cb.schema(), &session_ids),
+            FilterView::Scores => unreachable!(),
         };
         let (_joined_rb, joined_cb) =
             append_prejoined_score_columns(base_rb, view, &live, score_names);
@@ -501,9 +519,14 @@ async fn sql_scalar_expressions_match_datafusion_row_for_row() {
         "date_bin(INTERVAL '1 minute', start_time, TIMESTAMP '1970-01-01T00:00:00Z') <= start_time",
         "EXTRACT(YEAR FROM start_time) = 2026",
         "date_part('epoch', start_time) > 0",
+        "to_timestamp('2026-01-01T10:05:00Z') <= start_time",
+        "to_timestamp(1767261900) <= start_time",
+        "to_timestamp(duration_ms) > to_timestamp(0)",
         "round(duration_ms, 1) >= 0",
         "ceil(duration_ms) >= floor(duration_ms)",
         "sqrt(abs(duration_ms)) >= 0",
+        "ln(abs(duration_ms) + 1.0) >= 0",
+        "log10(abs(duration_ms) + 1.0) >= 0",
         "power(2, 3) = 8 AND pow(4, 0.5) = 2",
         "nullif(status, 'ok') IS NULL OR status != 'ok'",
         "greatest(duration_ns, 0, NULL) >= 0 AND least(duration_ns, 1000000000000, NULL) <= 1000000000000",
@@ -513,6 +536,9 @@ async fn sql_scalar_expressions_match_datafusion_row_for_row() {
         "array_element(tags, -1) IS NULL OR array_length(tags) > 0",
         "array_length(array_distinct(tags)) <= array_length(tags)",
         "array_to_string(tags, ',', 'null') IS NOT NULL",
+        "array_length(map_keys(attributes)) = array_length(map_values(attributes))",
+        "array_has(map_keys(attributes), 'cetra.eval.evaluator_id')",
+        "array_has(map_values(attributes), '01900000-0000-7000-8000-000000000201')",
         "(tags || ['extra']) @> ['extra']",
         "(status || '_x') = concat(status, '_x')",
         "CASE WHEN duration_ns > 0 THEN duration_ns * 2 ELSE 0 END >= 0",
@@ -577,18 +603,10 @@ async fn sql_scalar_expressions_match_datafusion_row_for_row() {
     }
 }
 
-#[test]
-fn invalid_filters_match_datafusion_errors() {
+#[tokio::test]
+async fn invalid_filters_match_datafusion_errors() {
     let df_ctx = query_ctx();
-    let span_arrow_schema = spans_schema();
-    // Use view schema via column_bridge on empty batch or by building from DataFusion's schema:
-    let _ = span_arrow_schema;
-    let rt = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .unwrap();
-    let (spans_rb, spans_cb) = rt.block_on(collect_view_batch(&df_ctx, "spans"));
-    let _ = spans_rb;
+    let (_spans_rb, spans_cb) = collect_view_batch(&df_ctx, "spans").await;
     let view_schema = spans_cb.schema();
 
     // Exact message + position parity cases (22 cases)
@@ -636,7 +654,7 @@ fn invalid_filters_match_datafusion_errors() {
     }
 
     // Scores view rejects score functions with exact message + position
-    let (_scores_rb, scores_cb) = rt.block_on(collect_view_batch(&df_ctx, "scores"));
+    let (_scores_rb, scores_cb) = collect_view_batch(&df_ctx, "scores").await;
     let df_score_err = df_ctx
         .parse_filter(DfFilterView::Scores, "score('x') > 1")
         .expect_err("scores view score()");
@@ -805,11 +823,6 @@ fn tombstone_predicate_matches_datafusion_across_all_tables() {
             .unwrap()
             .is_none()
     );
-    let _ = Reservation::size;
-    let _ = ScalarValue::Null(DataType::Null);
-    let _ = Field::new("x", DataType::Bool, true);
-    let _ = Schema::try_new(vec![]);
-    let _ = eval_expr;
 }
 
 #[allow(clippy::too_many_arguments)]

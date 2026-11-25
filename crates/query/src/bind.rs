@@ -1,5 +1,8 @@
 //! SQL AST binder and Filter DSL compiler (`sqlparser::ast::Expr` -> typed [`Expr`] IR).
 
+use std::borrow::Cow;
+use std::fmt;
+
 use cetra_column::{DataType, MAX_DECIMAL_PRECISION, MAX_NESTING_DEPTH, ScalarValue, Schema};
 use sqlparser::ast::{
     AccessExpr, BinaryOperator, CastKind, CeilFloorKind, DataType as SqlDataType, DateTimeField,
@@ -13,8 +16,11 @@ use crate::fn_time::{extract_return_type, parse_date_days, parse_interval, parse
 use crate::text::{DENIED_FUNCTIONS, position_of};
 use crate::{BinaryOp, CastMode, Expr, InvalidQuery, Position, ScalarFn, UnaryOp};
 
+/// Maximum AST nesting depth accepted by [`bind_expr`] (left-deep binary spines are flattened iteratively).
+const MAX_BIND_DEPTH: usize = 64;
+
 /// Compiled Filter DSL ready for evaluation over batches matching `planning_schema`.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct CompiledFilter {
     /// Target view.
     pub view: FilterView,
@@ -28,9 +34,21 @@ pub struct CompiledFilter {
     pub scores: Vec<String>,
 }
 
+impl fmt::Debug for CompiledFilter {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("CompiledFilter")
+            .field("view", &self.view)
+            .field("expr", &self.expr)
+            .field("planning_schema", &self.planning_schema)
+            .field("references_environment", &self.references_environment)
+            .field("scores_len", &self.scores.len())
+            .finish()
+    }
+}
+
 /// Binds a `sqlparser::ast::Expr` against `schema` into a typed [`Expr`] IR.
 pub fn bind_expr(ast: &SqlExpr, schema: &Schema) -> Result<Expr, InvalidQuery> {
-    bind_node(ast, schema)
+    bind_node(ast, schema, 0)
 }
 
 /// Parses, validates, and binds a Filter DSL string end-to-end against `view`'s base `schema`.
@@ -60,8 +78,14 @@ pub fn compile_filter(
     })
 }
 
-fn bind_node(ast: &SqlExpr, schema: &Schema) -> Result<Expr, InvalidQuery> {
+fn bind_node(ast: &SqlExpr, schema: &Schema, depth: usize) -> Result<Expr, InvalidQuery> {
     let pos = at(ast);
+    if depth > MAX_BIND_DEPTH {
+        return Err(InvalidQuery::new(
+            "the expression is nested too deeply",
+            pos,
+        ));
+    }
     match ast {
         SqlExpr::Identifier(ident) => bind_ident(ident, schema),
         SqlExpr::CompoundIdentifier(idents) => match idents.as_slice() {
@@ -74,11 +98,11 @@ fn bind_node(ast: &SqlExpr, schema: &Schema) -> Result<Expr, InvalidQuery> {
         SqlExpr::Value(vws) => bind_value(&vws.value, pos),
         SqlExpr::TypedString(ts) => bind_typed_string(ts, pos),
         SqlExpr::Interval(iv) => bind_interval(iv, pos),
-        SqlExpr::Nested(inner) => bind_node(inner, schema),
-        SqlExpr::UnaryOp { op, expr } => bind_unary(*op, expr, schema, pos),
-        SqlExpr::BinaryOp { left, op, right } => bind_binary(left, op, right, schema, pos),
+        SqlExpr::Nested(inner) => bind_node(inner, schema, depth + 1),
+        SqlExpr::UnaryOp { op, expr } => bind_unary(*op, expr, schema, pos, depth),
+        SqlExpr::BinaryOp { .. } => bind_binary_spine(ast, schema, depth),
         SqlExpr::IsNull(inner) | SqlExpr::IsUnknown(inner) => {
-            let e = bind_node(inner, schema)?;
+            let e = bind_node(inner, schema, depth + 1)?;
             Ok(Expr::Unary {
                 op: UnaryOp::IsNull,
                 expr: Box::new(e),
@@ -86,34 +110,34 @@ fn bind_node(ast: &SqlExpr, schema: &Schema) -> Result<Expr, InvalidQuery> {
             })
         }
         SqlExpr::IsNotNull(inner) | SqlExpr::IsNotUnknown(inner) => {
-            let e = bind_node(inner, schema)?;
+            let e = bind_node(inner, schema, depth + 1)?;
             Ok(Expr::Unary {
                 op: UnaryOp::IsNotNull,
                 expr: Box::new(e),
                 data_type: DataType::Bool,
             })
         }
-        SqlExpr::IsTrue(inner) => bind_is_bool(inner, UnaryOp::IsTrue, schema, pos),
-        SqlExpr::IsFalse(inner) => bind_is_bool(inner, UnaryOp::IsFalse, schema, pos),
-        SqlExpr::IsNotTrue(inner) => bind_is_bool(inner, UnaryOp::IsNotTrue, schema, pos),
-        SqlExpr::IsNotFalse(inner) => bind_is_bool(inner, UnaryOp::IsNotFalse, schema, pos),
+        SqlExpr::IsTrue(inner) => bind_is_bool(inner, UnaryOp::IsTrue, schema, pos, depth),
+        SqlExpr::IsFalse(inner) => bind_is_bool(inner, UnaryOp::IsFalse, schema, pos, depth),
+        SqlExpr::IsNotTrue(inner) => bind_is_bool(inner, UnaryOp::IsNotTrue, schema, pos, depth),
+        SqlExpr::IsNotFalse(inner) => bind_is_bool(inner, UnaryOp::IsNotFalse, schema, pos, depth),
         SqlExpr::IsDistinctFrom(left, right) => {
-            bind_distinct(left, right, BinaryOp::IsDistinctFrom, schema, pos)
+            bind_distinct(left, right, BinaryOp::IsDistinctFrom, schema, pos, depth)
         }
         SqlExpr::IsNotDistinctFrom(left, right) => {
-            bind_distinct(left, right, BinaryOp::IsNotDistinctFrom, schema, pos)
+            bind_distinct(left, right, BinaryOp::IsNotDistinctFrom, schema, pos, depth)
         }
         SqlExpr::Between {
             expr,
             negated,
             low,
             high,
-        } => bind_between(expr, low, high, *negated, schema, pos),
+        } => bind_between(expr, low, high, *negated, schema, pos, depth),
         SqlExpr::InList {
             expr,
             list,
             negated,
-        } => bind_in_list(expr, list, *negated, schema, pos),
+        } => bind_in_list(expr, list, *negated, schema, pos, depth),
         SqlExpr::Like {
             negated,
             any,
@@ -129,6 +153,7 @@ fn bind_node(ast: &SqlExpr, schema: &Schema) -> Result<Expr, InvalidQuery> {
             *any,
             schema,
             pos,
+            depth,
         ),
         SqlExpr::ILike {
             negated,
@@ -145,6 +170,7 @@ fn bind_node(ast: &SqlExpr, schema: &Schema) -> Result<Expr, InvalidQuery> {
             *any,
             schema,
             pos,
+            depth,
         ),
         SqlExpr::Cast {
             kind,
@@ -164,7 +190,7 @@ fn bind_node(ast: &SqlExpr, schema: &Schema) -> Result<Expr, InvalidQuery> {
                 CastKind::TryCast | CastKind::SafeCast => CastMode::Try,
             };
             let target = bind_sql_type(data_type, pos)?;
-            let inner = bind_node(expr, schema)?;
+            let inner = bind_node(expr, schema, depth + 1)?;
             let src_dt = inner.data_type();
             if !can_cast(&src_dt, &target) {
                 return Err(InvalidQuery::new(
@@ -193,12 +219,15 @@ fn bind_node(ast: &SqlExpr, schema: &Schema) -> Result<Expr, InvalidQuery> {
             else_result.as_deref(),
             schema,
             pos,
+            depth,
         ),
-        SqlExpr::Array(arr) => bind_array(&arr.elem, schema, pos),
+        SqlExpr::Array(arr) => bind_array(&arr.elem, schema, pos, depth),
         SqlExpr::CompoundFieldAccess { root, access_chain } => {
-            bind_compound_access(root, access_chain, schema, pos)
+            bind_compound_access(root, access_chain, schema, pos, depth)
         }
-        SqlExpr::JsonAccess { value, path } => bind_json_access(value, &path.path, schema, pos),
+        SqlExpr::JsonAccess { value, path } => {
+            bind_json_access(value, &path.path, schema, pos, depth)
+        }
         SqlExpr::Ceil { expr, field } => {
             if !matches!(
                 field,
@@ -209,7 +238,7 @@ fn bind_node(ast: &SqlExpr, schema: &Schema) -> Result<Expr, InvalidQuery> {
                     pos,
                 ));
             }
-            let arg = bind_node(expr, schema)?;
+            let arg = bind_node(expr, schema, depth + 1)?;
             bind_floor_ceil(ScalarFn::Ceil, arg, pos)
         }
         SqlExpr::Floor { expr, field } => {
@@ -222,7 +251,7 @@ fn bind_node(ast: &SqlExpr, schema: &Schema) -> Result<Expr, InvalidQuery> {
                     pos,
                 ));
             }
-            let arg = bind_node(expr, schema)?;
+            let arg = bind_node(expr, schema, depth + 1)?;
             bind_floor_ceil(ScalarFn::Floor, arg, pos)
         }
         SqlExpr::Substring {
@@ -231,18 +260,18 @@ fn bind_node(ast: &SqlExpr, schema: &Schema) -> Result<Expr, InvalidQuery> {
             substring_for,
             ..
         } => {
-            let s = coerce_to_utf8_from_utf8_or_null(bind_node(expr, schema)?, pos)?;
+            let s = coerce_to_utf8_from_utf8_or_null(bind_node(expr, schema, depth + 1)?, pos)?;
             let Some(from) = substring_from else {
                 return Err(InvalidQuery::new(
                     "substring requires a start position",
                     pos,
                 ));
             };
-            let start = coerce_to_i64_from_i64_or_null(bind_node(from, schema)?, pos)?;
+            let start = coerce_to_i64_from_i64_or_null(bind_node(from, schema, depth + 1)?, pos)?;
             let mut args = vec![s, start];
             if let Some(len_expr) = substring_for {
                 args.push(coerce_to_i64_from_i64_or_null(
-                    bind_node(len_expr, schema)?,
+                    bind_node(len_expr, schema, depth + 1)?,
                     pos,
                 )?);
             }
@@ -263,18 +292,18 @@ fn bind_node(ast: &SqlExpr, schema: &Schema) -> Result<Expr, InvalidQuery> {
                 Some(TrimWhereField::Leading) => ScalarFn::Ltrim,
                 Some(TrimWhereField::Trailing) => ScalarFn::Rtrim,
             };
-            let s = coerce_to_utf8_from_utf8_or_null(bind_node(expr, schema)?, pos)?;
+            let s = coerce_to_utf8_from_utf8_or_null(bind_node(expr, schema, depth + 1)?, pos)?;
             let mut args = vec![s];
             if let Some(what) = trim_what {
                 args.push(coerce_to_utf8_from_utf8_or_null(
-                    bind_node(what, schema)?,
+                    bind_node(what, schema, depth + 1)?,
                     pos,
                 )?);
             } else if let Some(chars) = trim_characters {
                 match chars.as_slice() {
                     [] => {}
                     [ch] => args.push(coerce_to_utf8_from_utf8_or_null(
-                        bind_node(ch, schema)?,
+                        bind_node(ch, schema, depth + 1)?,
                         pos,
                     )?),
                     _ => {
@@ -292,8 +321,8 @@ fn bind_node(ast: &SqlExpr, schema: &Schema) -> Result<Expr, InvalidQuery> {
             })
         }
         SqlExpr::Position { expr: sub, r#in: s } => {
-            let hay = coerce_to_utf8_from_utf8_or_null(bind_node(s, schema)?, pos)?;
-            let needle = coerce_to_utf8_from_utf8_or_null(bind_node(sub, schema)?, pos)?;
+            let hay = coerce_to_utf8_from_utf8_or_null(bind_node(s, schema, depth + 1)?, pos)?;
+            let needle = coerce_to_utf8_from_utf8_or_null(bind_node(sub, schema, depth + 1)?, pos)?;
             Ok(Expr::Call {
                 func: ScalarFn::Strpos,
                 args: vec![hay, needle],
@@ -301,18 +330,10 @@ fn bind_node(ast: &SqlExpr, schema: &Schema) -> Result<Expr, InvalidQuery> {
             })
         }
         SqlExpr::Extract { field, expr, .. } => {
-            let field_str = field.to_string();
-            let ret_dt = extract_return_type(&field_str)
-                .map_err(|e| InvalidQuery::new(e.to_string(), pos))?;
-            let src = bind_node(expr, schema)?;
-            validate_extract_source(&field_str, &src, pos)?;
-            Ok(Expr::Call {
-                func: ScalarFn::Extract,
-                args: vec![Expr::Literal(ScalarValue::Utf8(field_str)), src],
-                data_type: ret_dt,
-            })
+            let src = bind_node(expr, schema, depth + 1)?;
+            bind_extract(field.to_string(), src, pos)
         }
-        SqlExpr::Function(func) => bind_function(func, schema, pos),
+        SqlExpr::Function(func) => bind_function(func, schema, pos, depth),
         _ => Err(InvalidQuery::new("unsupported SQL expression", pos)),
     }
 }
@@ -397,7 +418,7 @@ fn bind_typed_string(ts: &TypedString, pos: Option<Position>) -> Result<Expr, In
         }
     };
     match &ts.data_type {
-        SqlDataType::Timestamp(None, tz) => {
+        SqlDataType::Timestamp(None | Some(9), tz) => {
             let utc = !matches!(tz, TimezoneInfo::None | TimezoneInfo::WithoutTimeZone);
             let ns =
                 parse_timestamp_ns(text, utc).map_err(|e| InvalidQuery::new(e.to_string(), pos))?;
@@ -431,9 +452,9 @@ fn bind_interval(iv: &Interval, pos: Option<Position>) -> Result<Expr, InvalidQu
             pos,
         ));
     }
-    let raw = match iv.value.as_ref() {
+    let raw: Cow<'_, str> = match iv.value.as_ref() {
         SqlExpr::Value(vws) => match &vws.value {
-            Value::SingleQuotedString(s) | Value::Number(s, _) => s.as_str(),
+            Value::SingleQuotedString(s) | Value::Number(s, _) => Cow::Borrowed(s.as_str()),
             _ => {
                 return Err(InvalidQuery::new(
                     "interval values must be string literals",
@@ -441,6 +462,33 @@ fn bind_interval(iv: &Interval, pos: Option<Position>) -> Result<Expr, InvalidQu
                 ));
             }
         },
+        SqlExpr::UnaryOp { op, expr }
+            if matches!(op, UnaryOperator::Minus | UnaryOperator::Plus) =>
+        {
+            match expr.as_ref() {
+                SqlExpr::Value(vws) => match &vws.value {
+                    Value::Number(s, _) => {
+                        if matches!(op, UnaryOperator::Minus) {
+                            Cow::Owned(format!("-{s}"))
+                        } else {
+                            Cow::Borrowed(s.as_str())
+                        }
+                    }
+                    _ => {
+                        return Err(InvalidQuery::new(
+                            "interval values must be string literals",
+                            pos,
+                        ));
+                    }
+                },
+                _ => {
+                    return Err(InvalidQuery::new(
+                        "interval values must be string literals",
+                        pos,
+                    ));
+                }
+            }
+        }
         _ => {
             return Err(InvalidQuery::new(
                 "interval values must be string literals",
@@ -450,7 +498,7 @@ fn bind_interval(iv: &Interval, pos: Option<Position>) -> Result<Expr, InvalidQu
     };
     let parsed = match &iv.leading_field {
         Some(field) => parse_interval(&format!("{raw} {field}")),
-        None => parse_interval(raw),
+        None => parse_interval(&raw),
     }
     .map_err(|e| InvalidQuery::new(e.to_string(), pos))?;
     Ok(Expr::Literal(ScalarValue::Interval(parsed)))
@@ -461,6 +509,7 @@ fn bind_unary(
     inner_ast: &SqlExpr,
     schema: &Schema,
     pos: Option<Position>,
+    depth: usize,
 ) -> Result<Expr, InvalidQuery> {
     if matches!(op, UnaryOperator::Minus)
         && let SqlExpr::Value(vws) = inner_ast
@@ -469,7 +518,7 @@ fn bind_unary(
     {
         return Ok(Expr::Literal(ScalarValue::I64(i64::MIN)));
     }
-    let inner = bind_node(inner_ast, schema)?;
+    let inner = bind_node(inner_ast, schema, depth + 1)?;
     let dt = inner.data_type();
     match op {
         UnaryOperator::Not => {
@@ -539,8 +588,9 @@ fn bind_is_bool(
     op: UnaryOp,
     schema: &Schema,
     pos: Option<Position>,
+    depth: usize,
 ) -> Result<Expr, InvalidQuery> {
-    let inner = bind_node(inner_ast, schema)?;
+    let inner = bind_node(inner_ast, schema, depth + 1)?;
     let dt = inner.data_type();
     if !matches!(dt, DataType::Bool | DataType::Null) {
         return Err(InvalidQuery::new(
@@ -561,9 +611,10 @@ fn bind_distinct(
     op: BinaryOp,
     schema: &Schema,
     pos: Option<Position>,
+    depth: usize,
 ) -> Result<Expr, InvalidQuery> {
-    let l = bind_node(left_ast, schema)?;
-    let r = bind_node(right_ast, schema)?;
+    let l = bind_node(left_ast, schema, depth + 1)?;
+    let r = bind_node(right_ast, schema, depth + 1)?;
     let common = coerce_comparison_pair(&l, &r, pos)?;
     let left = coerce_expr(l, &common, pos)?;
     let right = coerce_expr(r, &common, pos)?;
@@ -575,15 +626,27 @@ fn bind_distinct(
     })
 }
 
-fn bind_binary(
-    left_ast: &SqlExpr,
+fn bind_binary_spine(ast: &SqlExpr, schema: &Schema, depth: usize) -> Result<Expr, InvalidQuery> {
+    let mut spine: Vec<(&BinaryOperator, &SqlExpr, Option<Position>)> = Vec::new();
+    let mut cur = ast;
+    while let SqlExpr::BinaryOp { left, op, right } = cur {
+        spine.push((op, right.as_ref(), at(cur)));
+        cur = left.as_ref();
+    }
+    let mut acc = bind_node(cur, schema, depth + 1)?;
+    for (op, right_ast, pos) in spine.into_iter().rev() {
+        let r = bind_node(right_ast, schema, depth + 1)?;
+        acc = bind_binary_op(acc, op, r, pos)?;
+    }
+    Ok(acc)
+}
+
+fn bind_binary_op(
+    l: Expr,
     op: &BinaryOperator,
-    right_ast: &SqlExpr,
-    schema: &Schema,
+    r: Expr,
     pos: Option<Position>,
 ) -> Result<Expr, InvalidQuery> {
-    let l = bind_node(left_ast, schema)?;
-    let r = bind_node(right_ast, schema)?;
     match op {
         BinaryOperator::And | BinaryOperator::Or => {
             let bin_op = if matches!(op, BinaryOperator::And) {
@@ -721,7 +784,7 @@ fn bind_concat_op(l: Expr, r: Expr, pos: Option<Position>) -> Result<Expr, Inval
     let ldt = l.data_type();
     let rdt = r.data_type();
     if matches!(ldt, DataType::List(_)) || matches!(rdt, DataType::List(_)) {
-        let common = coerce_list_pair(&ldt, &rdt, pos)?;
+        let common = coerce_list_pair(&l, &r, pos)?;
         let left = coerce_expr(l, &common, pos)?;
         let right = coerce_expr(r, &common, pos)?;
         return Ok(Expr::Binary {
@@ -752,7 +815,7 @@ fn bind_at_arrow(l: Expr, r: Expr, pos: Option<Position>) -> Result<Expr, Invali
             pos,
         ));
     }
-    let common = coerce_list_pair(&ldt, &rdt, pos)?;
+    let common = coerce_list_pair(&l, &r, pos)?;
     let left = coerce_expr(l, &common, pos)?;
     let right = coerce_expr(r, &common, pos)?;
     Ok(Expr::Binary {
@@ -797,10 +860,11 @@ fn bind_between(
     negated: bool,
     schema: &Schema,
     pos: Option<Position>,
+    depth: usize,
 ) -> Result<Expr, InvalidQuery> {
-    let e = bind_node(expr_ast, schema)?;
-    let l = bind_node(low_ast, schema)?;
-    let h = bind_node(high_ast, schema)?;
+    let e = bind_node(expr_ast, schema, depth + 1)?;
+    let l = bind_node(low_ast, schema, depth + 1)?;
+    let h = bind_node(high_ast, schema, depth + 1)?;
     let common = coerce_comparison_many(&[&e, &l, &h], pos)?;
     let expr = Box::new(coerce_expr(e, &common, pos)?);
     let low = Box::new(coerce_expr(l, &common, pos)?);
@@ -819,8 +883,9 @@ fn bind_in_list(
     negated: bool,
     schema: &Schema,
     pos: Option<Position>,
+    depth: usize,
 ) -> Result<Expr, InvalidQuery> {
-    let e = bind_node(expr_ast, schema)?;
+    let e = bind_node(expr_ast, schema, depth + 1)?;
     if list_asts.is_empty() {
         return Ok(Expr::InList {
             expr: Box::new(e),
@@ -831,7 +896,7 @@ fn bind_in_list(
     }
     let mut items = Vec::with_capacity(list_asts.len());
     for item_ast in list_asts {
-        items.push(bind_node(item_ast, schema)?);
+        items.push(bind_node(item_ast, schema, depth + 1)?);
     }
     let mut all_refs: Vec<&Expr> = Vec::with_capacity(items.len() + 1);
     all_refs.push(&e);
@@ -865,6 +930,7 @@ fn bind_like(
     any: bool,
     schema: &Schema,
     pos: Option<Position>,
+    depth: usize,
 ) -> Result<Expr, InvalidQuery> {
     if any {
         return Err(InvalidQuery::new(
@@ -872,8 +938,8 @@ fn bind_like(
             pos,
         ));
     }
-    let expr = coerce_to_utf8_from_utf8_or_null(bind_node(expr_ast, schema)?, pos)?;
-    let pattern = coerce_to_utf8_from_utf8_or_null(bind_node(pat_ast, schema)?, pos)?;
+    let expr = coerce_to_utf8_from_utf8_or_null(bind_node(expr_ast, schema, depth + 1)?, pos)?;
+    let pattern = coerce_to_utf8_from_utf8_or_null(bind_node(pat_ast, schema, depth + 1)?, pos)?;
     let escape = match escape_val {
         None => Some('\\'),
         Some(Value::SingleQuotedString(s)) => {
@@ -908,19 +974,20 @@ fn bind_case(
     else_ast: Option<&SqlExpr>,
     schema: &Schema,
     pos: Option<Position>,
+    depth: usize,
 ) -> Result<Expr, InvalidQuery> {
     let op_bound = match operand_ast {
-        Some(op) => Some(bind_node(op, schema)?),
+        Some(op) => Some(bind_node(op, schema, depth + 1)?),
         None => None,
     };
     let mut whens = Vec::with_capacity(conditions.len());
     let mut thens = Vec::with_capacity(conditions.len());
     for cw in conditions {
-        whens.push(bind_node(&cw.condition, schema)?);
-        thens.push(bind_node(&cw.result, schema)?);
+        whens.push(bind_node(&cw.condition, schema, depth + 1)?);
+        thens.push(bind_node(&cw.result, schema, depth + 1)?);
     }
     let else_bound = match else_ast {
-        Some(el) => Some(bind_node(el, schema)?),
+        Some(el) => Some(bind_node(el, schema, depth + 1)?),
         None => None,
     };
 
@@ -976,10 +1043,11 @@ fn bind_array(
     elems_ast: &[SqlExpr],
     schema: &Schema,
     pos: Option<Position>,
+    depth: usize,
 ) -> Result<Expr, InvalidQuery> {
     let mut bound = Vec::with_capacity(elems_ast.len());
     for el in elems_ast {
-        bound.push(bind_node(el, schema)?);
+        bound.push(bind_node(el, schema, depth + 1)?);
     }
     let refs: Vec<&Expr> = bound.iter().collect();
     let item_type = if refs.is_empty() {
@@ -1026,12 +1094,19 @@ fn bind_compound_access(
     access_chain: &[AccessExpr],
     schema: &Schema,
     pos: Option<Position>,
+    depth: usize,
 ) -> Result<Expr, InvalidQuery> {
-    let mut cur = bind_node(root, schema)?;
-    for access in access_chain {
+    let (mut cur, subscripts) = if matches!(root, SqlExpr::Identifier(_))
+        && let Some(AccessExpr::Dot(SqlExpr::Identifier(col))) = access_chain.first()
+    {
+        (bind_ident(col, schema)?, &access_chain[1..])
+    } else {
+        (bind_node(root, schema, depth + 1)?, access_chain)
+    };
+    for access in subscripts {
         match access {
             AccessExpr::Subscript(Subscript::Index { index }) => {
-                let idx_expr = bind_node(index, schema)?;
+                let idx_expr = bind_node(index, schema, depth + 1)?;
                 match cur.data_type() {
                     DataType::MapUtf8 => {
                         let key = coerce_to_utf8_from_utf8_or_null(idx_expr, pos)?;
@@ -1072,13 +1147,14 @@ fn bind_json_access(
     path: &[JsonPathElem],
     schema: &Schema,
     pos: Option<Position>,
+    depth: usize,
 ) -> Result<Expr, InvalidQuery> {
-    let mut cur = coerce_to_utf8_from_utf8_or_null(bind_node(value, schema)?, pos)?;
+    let mut cur = coerce_to_utf8_from_utf8_or_null(bind_node(value, schema, depth + 1)?, pos)?;
     for elem in path {
         let key_expr = match elem {
             JsonPathElem::Dot { key, .. } => Expr::Literal(ScalarValue::Utf8(key.clone())),
             JsonPathElem::Bracket { key } | JsonPathElem::ColonBracket { key } => {
-                let bound_key = bind_node(key, schema)?;
+                let bound_key = bind_node(key, schema, depth + 1)?;
                 match bound_key.data_type() {
                     DataType::Utf8 | DataType::I64 => bound_key,
                     DataType::Null => coerce_expr(bound_key, &DataType::Utf8, pos)?,
@@ -1130,6 +1206,7 @@ fn bind_function(
     function: &Function,
     schema: &Schema,
     pos: Option<Position>,
+    depth: usize,
 ) -> Result<Expr, InvalidQuery> {
     validate_plain_function_call(function, pos)?;
     let raw_name = match function.name.0.as_slice() {
@@ -1159,7 +1236,7 @@ fn bind_function(
                 pos,
             ));
         };
-        args.push(bind_node(expr, schema)?);
+        args.push(bind_node(expr, schema, depth + 1)?);
     }
 
     let canonical = match raw_name.as_str() {
@@ -1492,24 +1569,7 @@ fn bind_scalar_fn(
                     pos,
                 ));
             };
-            let ret_dt = extract_return_type(&field_str)
-                .map_err(|e| InvalidQuery::new(e.to_string(), pos))?;
-            let src = match src.data_type() {
-                DataType::Utf8 | DataType::Date => {
-                    if matches!(src.data_type(), DataType::Utf8) {
-                        coerce_to_timestamp_arg(src, pos)?
-                    } else {
-                        src
-                    }
-                }
-                _ => src,
-            };
-            validate_extract_source(&field_str, &src, pos)?;
-            Ok(Expr::Call {
-                func: ScalarFn::Extract,
-                args: vec![Expr::Literal(ScalarValue::Utf8(field_str)), src],
-                data_type: ret_dt,
-            })
+            bind_extract(field_str, src, pos)
         }
         "to_timestamp" => {
             let [val] = take_one(args, name, pos)?;
@@ -1725,7 +1785,7 @@ fn bind_scalar_fn(
                     pos,
                 ));
             }
-            let common = coerce_list_pair(&arr.data_type(), &sub.data_type(), pos)?;
+            let common = coerce_list_pair(&arr, &sub, pos)?;
             let arr = coerce_expr(arr, &common, pos)?;
             let sub = coerce_expr(sub, &common, pos)?;
             Ok(Expr::Call {
@@ -1901,6 +1961,22 @@ fn take_three(
         .map_err(|v| InvalidQuery::new(format!("{name}() takes 3 arguments, got {}", v.len()), pos))
 }
 
+fn bind_extract(field_str: String, src: Expr, pos: Option<Position>) -> Result<Expr, InvalidQuery> {
+    let ret_dt =
+        extract_return_type(&field_str).map_err(|e| InvalidQuery::new(e.to_string(), pos))?;
+    let src = if matches!(src.data_type(), DataType::Utf8) {
+        coerce_to_timestamp_arg(src, pos)?
+    } else {
+        src
+    };
+    validate_extract_source(&field_str, &src, pos)?;
+    Ok(Expr::Call {
+        func: ScalarFn::Extract,
+        args: vec![Expr::Literal(ScalarValue::Utf8(field_str)), src],
+        data_type: ret_dt,
+    })
+}
+
 fn validate_extract_source(
     field_str: &str,
     src: &Expr,
@@ -1920,7 +1996,12 @@ fn validate_extract_source(
         ));
     }
     if matches!(dt, DataType::Interval) {
-        let lower = field_str.trim_ascii().to_ascii_lowercase();
+        let trimmed = field_str.trim_ascii();
+        let stripped = trimmed
+            .strip_prefix(|c| c == '\'' || c == '"')
+            .and_then(|s| s.strip_suffix(|c| c == '\'' || c == '"'))
+            .unwrap_or(trimmed);
+        let lower = stripped.to_ascii_lowercase();
         if matches!(
             lower.as_str(),
             "qtr"
@@ -2057,14 +2138,7 @@ fn coerce_comparison_pair(
     r: &Expr,
     pos: Option<Position>,
 ) -> Result<DataType, InvalidQuery> {
-    let dt = coerce_common_types(&l.data_type(), &r.data_type(), pos)?;
-    if !is_comparable_type(&dt) {
-        return Err(InvalidQuery::new(
-            format!("type `{}` cannot be compared", dt.display_name()),
-            pos,
-        ));
-    }
-    Ok(dt)
+    coerce_comparison_many(&[l, r], pos)
 }
 
 fn coerce_comparison_many(
@@ -2088,6 +2162,18 @@ fn coerce_common_many(exprs: &[&Expr], pos: Option<Position>) -> Result<DataType
     let mut cur = first.data_type();
     for ex in &exprs[1..] {
         cur = coerce_common_types(&cur, &ex.data_type(), pos)?;
+    }
+    for ex in exprs {
+        if !can_coerce_to(ex, &cur) {
+            return Err(InvalidQuery::new(
+                format!(
+                    "incompatible types `{}` and `{}`",
+                    ex.data_type().display_name(),
+                    cur.display_name()
+                ),
+                pos,
+            ));
+        }
     }
     Ok(cur)
 }
@@ -2204,27 +2290,73 @@ fn coerce_numeric_pair(
     }
 }
 
-fn coerce_list_pair(
-    a: &DataType,
-    b: &DataType,
-    pos: Option<Position>,
-) -> Result<DataType, InvalidQuery> {
-    match (a, b) {
-        (DataType::Null, DataType::Null) => Ok(DataType::List(Box::new(DataType::Null))),
-        (DataType::List(la), DataType::Null) => Ok(DataType::List(la.clone())),
-        (DataType::Null, DataType::List(lb)) => Ok(DataType::List(lb.clone())),
+fn coerce_list_pair(a: &Expr, b: &Expr, pos: Option<Position>) -> Result<DataType, InvalidQuery> {
+    let adt = a.data_type();
+    let bdt = b.data_type();
+    let out = match (&adt, &bdt) {
+        (DataType::Null, DataType::Null) => DataType::List(Box::new(DataType::Null)),
+        (DataType::List(la), DataType::Null) => DataType::List(la.clone()),
+        (DataType::Null, DataType::List(lb)) => DataType::List(lb.clone()),
         (DataType::List(la), DataType::List(lb)) => {
             let item = coerce_common_types(la, lb, pos)?;
-            Ok(DataType::List(Box::new(item)))
+            DataType::List(Box::new(item))
         }
-        _ => Err(InvalidQuery::new(
+        _ => {
+            return Err(InvalidQuery::new(
+                format!(
+                    "expected list types, got `{}` and `{}`",
+                    adt.display_name(),
+                    bdt.display_name()
+                ),
+                pos,
+            ));
+        }
+    };
+    if !can_coerce_to(a, &out) || !can_coerce_to(b, &out) {
+        return Err(InvalidQuery::new(
             format!(
-                "expected list types, got `{}` and `{}`",
-                a.display_name(),
-                b.display_name()
+                "incompatible types `{}` and `{}`",
+                adt.display_name(),
+                bdt.display_name()
             ),
             pos,
-        )),
+        ));
+    }
+    Ok(out)
+}
+
+fn can_coerce_to(expr: &Expr, target: &DataType) -> bool {
+    let src_dt = expr.data_type();
+    if src_dt == *target {
+        return true;
+    }
+    match (expr, target) {
+        (Expr::Literal(ScalarValue::Null(_)), _) => true,
+        (Expr::Literal(ScalarValue::I64(_)), DataType::F64) => true,
+        (Expr::Literal(ScalarValue::TimestampNs { .. }), DataType::TimestampNs { .. }) => true,
+        (Expr::Literal(ScalarValue::List { values, .. }), DataType::List(tgt_item)) => {
+            values.iter().all(|v| can_coerce_scalar_to(v, tgt_item))
+        }
+        (Expr::MakeArray { elems, .. }, DataType::List(tgt_item)) => {
+            elems.iter().all(|el| can_coerce_to(el, tgt_item))
+        }
+        _ => can_cast(&src_dt, target),
+    }
+}
+
+fn can_coerce_scalar_to(sv: &ScalarValue, target: &DataType) -> bool {
+    let src_dt = sv.data_type();
+    if src_dt == *target {
+        return true;
+    }
+    match (sv, target) {
+        (ScalarValue::Null(_), _) => true,
+        (ScalarValue::I64(_), DataType::F64) => true,
+        (ScalarValue::TimestampNs { .. }, DataType::TimestampNs { .. }) => true,
+        (ScalarValue::List { values, .. }, DataType::List(tgt_item)) => {
+            values.iter().all(|v| can_coerce_scalar_to(v, tgt_item))
+        }
+        _ => can_cast(&src_dt, target),
     }
 }
 
@@ -2233,69 +2365,85 @@ fn coerce_expr(expr: Expr, target: &DataType, pos: Option<Position>) -> Result<E
     if src_dt == *target {
         return Ok(expr);
     }
-    match (&expr, target) {
+    match (expr, target) {
         (Expr::Literal(ScalarValue::Null(_)), _) => {
-            return Ok(Expr::Literal(ScalarValue::Null(target.clone())));
+            Ok(Expr::Literal(ScalarValue::Null(target.clone())))
         }
         (Expr::Literal(ScalarValue::I64(n)), DataType::F64) => {
-            return Ok(Expr::Literal(ScalarValue::F64(*n as f64)));
+            Ok(Expr::Literal(ScalarValue::F64(n as f64)))
         }
         (Expr::Literal(ScalarValue::TimestampNs { value, .. }), DataType::TimestampNs { utc }) => {
-            return Ok(Expr::Literal(ScalarValue::TimestampNs {
-                value: *value,
-                utc: *utc,
-            }));
+            Ok(Expr::Literal(ScalarValue::TimestampNs { value, utc: *utc }))
         }
-        (
-            Expr::Literal(ScalarValue::List {
-                item_type: DataType::Null,
-                values,
-            }),
-            DataType::List(tgt_item),
-        ) => {
-            let new_vals = values
-                .iter()
-                .map(|_| ScalarValue::Null((**tgt_item).clone()))
-                .collect();
-            return Ok(Expr::Literal(ScalarValue::List {
-                item_type: (**tgt_item).clone(),
-                values: new_vals,
-            }));
+        (Expr::Literal(ScalarValue::List { values, .. }), DataType::List(tgt_item)) => {
+            let mut coerced = Vec::with_capacity(values.len());
+            let mut all_literals = true;
+            for v in values {
+                let c = coerce_expr(Expr::Literal(v), tgt_item, pos)?;
+                if !matches!(c, Expr::Literal(_)) {
+                    all_literals = false;
+                }
+                coerced.push(c);
+            }
+            if all_literals {
+                let new_vals: Vec<ScalarValue> = coerced
+                    .into_iter()
+                    .filter_map(|e| match e {
+                        Expr::Literal(sv) => Some(sv),
+                        _ => None,
+                    })
+                    .collect();
+                let list_val = ScalarValue::List {
+                    item_type: (**tgt_item).clone(),
+                    values: new_vals,
+                };
+                list_val
+                    .validate(MAX_NESTING_DEPTH)
+                    .map_err(|e| InvalidQuery::new(e.to_string(), pos))?;
+                Ok(Expr::Literal(list_val))
+            } else {
+                let list_dt = DataType::List(Box::new((**tgt_item).clone()));
+                list_dt
+                    .validate(MAX_NESTING_DEPTH)
+                    .map_err(|e| InvalidQuery::new(e.to_string(), pos))?;
+                Ok(Expr::MakeArray {
+                    elems: coerced,
+                    item_type: (**tgt_item).clone(),
+                })
+            }
         }
-        (
-            Expr::MakeArray {
-                elems,
-                item_type: DataType::Null,
-            },
-            DataType::List(tgt_item),
-        ) => {
+        (Expr::MakeArray { elems, .. }, DataType::List(tgt_item)) => {
             let new_elems = elems
-                .iter()
-                .cloned()
+                .into_iter()
                 .map(|el| coerce_expr(el, tgt_item, pos))
                 .collect::<Result<Vec<_>, _>>()?;
-            return Ok(Expr::MakeArray {
+            let list_dt = DataType::List(Box::new((**tgt_item).clone()));
+            list_dt
+                .validate(MAX_NESTING_DEPTH)
+                .map_err(|e| InvalidQuery::new(e.to_string(), pos))?;
+            Ok(Expr::MakeArray {
                 elems: new_elems,
                 item_type: (**tgt_item).clone(),
-            });
+            })
         }
-        _ => {}
+        (other, _) => {
+            if !can_cast(&src_dt, target) {
+                return Err(InvalidQuery::new(
+                    format!(
+                        "cannot coerce `{}` to `{}`",
+                        src_dt.display_name(),
+                        target.display_name()
+                    ),
+                    pos,
+                ));
+            }
+            Ok(Expr::Cast {
+                expr: Box::new(other),
+                target: target.clone(),
+                mode: CastMode::Strict,
+            })
+        }
     }
-    if !can_cast(&src_dt, target) {
-        return Err(InvalidQuery::new(
-            format!(
-                "cannot coerce `{}` to `{}`",
-                src_dt.display_name(),
-                target.display_name()
-            ),
-            pos,
-        ));
-    }
-    Ok(Expr::Cast {
-        expr: Box::new(expr),
-        target: target.clone(),
-        mode: CastMode::Strict,
-    })
 }
 
 fn can_cast(src: &DataType, target: &DataType) -> bool {
@@ -2364,6 +2512,7 @@ fn bind_sql_type(dt: &SqlDataType, pos: Option<Position>) -> Result<DataType, In
         | SqlDataType::Float64
         | SqlDataType::Float32
         | SqlDataType::Float4
+        | SqlDataType::Float8
         | SqlDataType::Real => Ok(DataType::F64),
         SqlDataType::Decimal(info) | SqlDataType::Numeric(info) | SqlDataType::Dec(info) => {
             let (p, s) = match info {
@@ -2666,5 +2815,257 @@ mod tests {
 
         // Multi-char ESCAPE rejected
         assert!(parse_and_bind("name LIKE 'a' ESCAPE '!!'", &schema).is_err());
+    }
+
+    #[test]
+    fn recursion_depth_bound_and_512_op_left_deep_spine() {
+        let schema = test_schema();
+
+        // (a) 200-deep nested SqlExpr::Nested returns Err(InvalidQuery) without stack overflow.
+        let mut nested = SqlExpr::Identifier(Ident::new("duration_ns"));
+        for _ in 0..200 {
+            nested = SqlExpr::Nested(Box::new(nested));
+        }
+        let err = bind_expr(&nested, &schema).expect_err("200-deep nested expression");
+        assert_eq!(err.message, "the expression is nested too deeply");
+
+        // (b) 512-op left-deep `a + 1 + 1 + ...` chain binds cleanly without stack overflow.
+        let mut sql = String::from("duration_ns");
+        for _ in 0..SQL_LIMITS.max_operators {
+            sql.push_str(" + 1");
+        }
+        let bound = parse_and_bind(&sql, &schema).expect("512-op left-deep chain");
+        assert_eq!(bound.data_type(), DataType::I64);
+    }
+
+    #[test]
+    fn compiled_filter_debug_redacts_score_names() {
+        let schema = test_schema();
+        let compiled = compile_filter(
+            FilterView::Spans,
+            &schema,
+            "score('secret_score_name') > 0.5",
+        )
+        .expect("compile filter");
+        let dbg = format!("{compiled:?}");
+        assert!(!dbg.contains("secret_score_name"), "{dbg}");
+        assert!(dbg.contains("scores_len: 1"), "{dbg}");
+    }
+
+    #[test]
+    fn list_coercion_literals_make_array_and_column_restrictions() {
+        use std::sync::Arc;
+
+        use cetra_column::{Batch, CancelToken, Column, FlatColumn, FlatData, Selection};
+
+        use crate::{EvalContext, eval_expr};
+
+        let schema = test_schema();
+
+        // All 6 list coercion expressions bind and evaluate cleanly.
+        let batch_schema = Schema::try_new(vec![Field::new(
+            "start_time",
+            DataType::timestamp_utc(),
+            false,
+        )])
+        .unwrap();
+        let start_ns = parse_timestamp_ns("2026-06-01T12:00:00Z", true).unwrap();
+        let start_col = Column::Flat(
+            FlatColumn::try_new(
+                FlatData::TimestampNs {
+                    utc: true,
+                    values: vec![start_ns],
+                },
+                None,
+            )
+            .unwrap(),
+        );
+        let batch = Batch::try_new(
+            Arc::new(batch_schema.clone()),
+            vec![start_col],
+            1,
+            Selection::All,
+        )
+        .unwrap();
+        let ctx = EvalContext {
+            now_ns: start_ns,
+            cancel: CancelToken::new(),
+        };
+
+        let exprs = [
+            ("[1, 2] @> [1.0]", DataType::Bool),
+            ("array_has([1, 2], 1.5)", DataType::Bool),
+            ("array_has([1, 2], 1.0)", DataType::Bool),
+            ("[1, 2] || [3.0]", DataType::List(Box::new(DataType::F64))),
+            (
+                "[[1], [2.5]]",
+                DataType::List(Box::new(DataType::List(Box::new(DataType::F64)))),
+            ),
+            (
+                "[[NULL]] || [['a']]",
+                DataType::List(Box::new(DataType::List(Box::new(DataType::Utf8)))),
+            ),
+            (
+                "[TIMESTAMP '2026-01-01T00:00:00Z'] || [start_time]",
+                DataType::List(Box::new(DataType::TimestampNs { utc: true })),
+            ),
+        ];
+
+        let mut results = Vec::new();
+        for (sql, expected_dt) in exprs {
+            let bound =
+                parse_and_bind(sql, &schema).unwrap_or_else(|e| panic!("failed `{sql}`: {e}"));
+            assert_eq!(bound.data_type(), expected_dt, "{sql}");
+
+            let eval_bound = parse_and_bind(sql, &batch_schema)
+                .unwrap_or_else(|e| panic!("failed eval bind `{sql}`: {e}"));
+            let out = eval_expr(&eval_bound, &batch, &ctx, None)
+                .unwrap_or_else(|e| panic!("failed eval `{sql}`: {e}"));
+            results.push(out.get_scalar(0).unwrap());
+        }
+
+        assert_eq!(results[0], ScalarValue::Bool(true));
+        assert_eq!(results[1], ScalarValue::Bool(false));
+        assert_eq!(results[2], ScalarValue::Bool(true));
+        assert_eq!(
+            results[3],
+            ScalarValue::List {
+                item_type: DataType::F64,
+                values: vec![
+                    ScalarValue::F64(1.0),
+                    ScalarValue::F64(2.0),
+                    ScalarValue::F64(3.0),
+                ],
+            }
+        );
+        assert_eq!(
+            results[4],
+            ScalarValue::List {
+                item_type: DataType::List(Box::new(DataType::F64)),
+                values: vec![
+                    ScalarValue::List {
+                        item_type: DataType::F64,
+                        values: vec![ScalarValue::F64(1.0)],
+                    },
+                    ScalarValue::List {
+                        item_type: DataType::F64,
+                        values: vec![ScalarValue::F64(2.5)],
+                    },
+                ],
+            }
+        );
+        assert_eq!(
+            results[5],
+            ScalarValue::List {
+                item_type: DataType::List(Box::new(DataType::Utf8)),
+                values: vec![
+                    ScalarValue::List {
+                        item_type: DataType::Utf8,
+                        values: vec![ScalarValue::Null(DataType::Utf8)],
+                    },
+                    ScalarValue::List {
+                        item_type: DataType::Utf8,
+                        values: vec![ScalarValue::Utf8("a".to_owned())],
+                    },
+                ],
+            }
+        );
+        let ts_2026 = parse_timestamp_ns("2026-01-01T00:00:00Z", true).unwrap();
+        assert_eq!(
+            results[6],
+            ScalarValue::List {
+                item_type: DataType::TimestampNs { utc: true },
+                values: vec![
+                    ScalarValue::TimestampNs {
+                        value: ts_2026,
+                        utc: true,
+                    },
+                    ScalarValue::TimestampNs {
+                        value: start_ns,
+                        utc: true,
+                    },
+                ],
+            }
+        );
+
+        // Non-literal List(A) vs List(B) columns (where A != B, neither Null) are rejected.
+        for bad_sql in [
+            "nums @> [1.0]",
+            "nums || [1.0]",
+            "array_has(nums, 1.5)",
+            "nums = [1.0]",
+            "nums || tags",
+        ] {
+            assert!(
+                parse_and_bind(bad_sql, &schema).is_err(),
+                "expected `{bad_sql}` to be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn qualified_subscripts_extract_interval_signs_typed_string_float8_and_quote_stripping() {
+        let mut fields = test_schema().fields().to_vec();
+        fields.push(Field::new("attributes", DataType::MapUtf8, true));
+        let schema = Schema::try_new(fields).unwrap();
+
+        // Major 4: qualified map/list subscripts
+        let attr_sub = parse_and_bind("s.attributes['k']", &schema).unwrap();
+        assert_eq!(attr_sub.data_type(), DataType::Utf8);
+        assert!(matches!(attr_sub, Expr::MapIndex { .. }));
+
+        let tag_sub = parse_and_bind("s.tags[1]", &schema).unwrap();
+        assert_eq!(tag_sub.data_type(), DataType::Utf8);
+        assert!(matches!(
+            tag_sub,
+            Expr::Call {
+                func: ScalarFn::ArrayElement,
+                ..
+            }
+        ));
+
+        // Major 5: EXTRACT and date_part both coerce Utf8 via coerce_to_timestamp_arg
+        let ext_str = parse_and_bind("EXTRACT(YEAR FROM '2026-01-01T00:00:00Z')", &schema).unwrap();
+        assert_eq!(ext_str.data_type(), DataType::I64);
+        let dp_str = parse_and_bind("date_part('year', '2026-01-01T00:00:00Z')", &schema).unwrap();
+        assert_eq!(dp_str.data_type(), DataType::I64);
+
+        // Major 6: signed numeric interval literals
+        let neg_day = parse_and_bind("INTERVAL -1 DAY", &schema).unwrap();
+        assert_eq!(
+            neg_day,
+            Expr::Literal(ScalarValue::Interval(cetra_column::Interval {
+                months: 0,
+                days: -1,
+                nanos: 0,
+            }))
+        );
+        let pos_hour = parse_and_bind("INTERVAL +1 HOUR", &schema).unwrap();
+        assert_eq!(
+            pos_hour,
+            Expr::Literal(ScalarValue::Interval(cetra_column::Interval {
+                months: 0,
+                days: 0,
+                nanos: 3_600_000_000_000,
+            }))
+        );
+
+        // Minor 1: TIMESTAMP(9) folds to Literal and FLOAT8 binds to F64
+        let ts9 = parse_and_bind("TIMESTAMP(9) '2026-01-01T00:00:00Z'", &schema).unwrap();
+        assert!(matches!(
+            ts9,
+            Expr::Literal(ScalarValue::TimestampNs { utc: false, .. })
+        ));
+        let float8 = parse_and_bind("CAST(duration_ns AS FLOAT8)", &schema).unwrap();
+        assert_eq!(float8.data_type(), DataType::F64);
+
+        // Minor 2: quoted extract field on interval rejected at bind time
+        let err = parse_and_bind("date_part('''quarter''', INTERVAL '1 day')", &schema)
+            .expect_err("quoted quarter on interval");
+        assert!(
+            err.message.contains("not supported on interval"),
+            "{}",
+            err.message
+        );
     }
 }
