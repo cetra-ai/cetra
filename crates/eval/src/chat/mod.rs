@@ -1061,6 +1061,7 @@ mod tests {
                     vec![Part::Uri {
                         modality: None,
                         mime_type: None,
+                        transcript: None,
                         uri: "media://a".to_owned(),
                         extra: extra(),
                     }],
@@ -1073,6 +1074,7 @@ mod tests {
                     vec![Part::Blob {
                         modality: None,
                         mime_type: None,
+                        transcript: None,
                         content: "AA==".to_owned(),
                         extra: extra(),
                     }],

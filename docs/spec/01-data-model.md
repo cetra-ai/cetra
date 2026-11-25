@@ -122,14 +122,17 @@ We adopt the OTel GenAI semantic-conventions JSON schema for `gen_ai.input.messa
      {"type": "tool_call", "id": "call_1", "name": "get_weather", "arguments": {…}},
      {"type": "tool_call_response", "id": "call_1", "response": …},
      {"type": "uri",  "modality": "image", "mime_type": "image/png", "uri": "https://…"},
-     {"type": "blob", "modality": "image", "mime_type": "image/png", "content": "<base64>"}
+     {"type": "blob", "modality": "image", "mime_type": "image/png", "content": "<base64>"},
+     {"type": "uri",  "modality": "audio", "mime_type": "audio/wav", "uri": "media://…", "transcript": "What's my balance?"}
    ],
    "finish_reason": "stop"            // output messages only
   }
 ]
 ```
 
-A `tool_call` without arguments omits `arguments` (as in the GenAI schema). An explicit JSON `null` on an optional field (`name`, `finish_reason`, `id`, `modality`, `mime_type`) is preserved as-is. A message without `parts` is read as an empty list and written back with `"parts": []`. This is the only case where the JSON does not round-trip exactly.
+A `tool_call` without arguments omits `arguments` (as in the GenAI schema). An explicit JSON `null` on an optional field (`name`, `finish_reason`, `id`, `modality`, `mime_type`, `transcript`) is preserved as-is. A message without `parts` is read as an empty list and written back with `"parts": []`. This is the only case where the JSON does not round-trip exactly.
+
+A `uri` or `blob` part may carry `transcript`, the spoken text of the media (for audio, what was said). Media extraction keeps it on the `uri` part it writes, including a dropped one.
 
 After media extraction, `blob` parts become `{"type": "uri", "modality": …, "mime_type": …, "uri": "media://<sha256>"}`. Unknown part types are preserved verbatim; the UI renders them as JSON.
 

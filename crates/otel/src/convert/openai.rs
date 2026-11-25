@@ -159,6 +159,7 @@ fn image_part(map: Map<String, Json>) -> Part {
         Part::Blob {
             modality: Some(Modality::Image),
             mime_type,
+            transcript: None,
             content,
             extra,
         }
@@ -166,6 +167,7 @@ fn image_part(map: Map<String, Json>) -> Part {
         Part::Uri {
             modality: Some(Modality::Image),
             mime_type: None,
+            transcript: None,
             uri: url,
             extra,
         }
@@ -198,6 +200,7 @@ fn audio_part(map: Map<String, Json>) -> Part {
     Part::Blob {
         modality: Some(Modality::Audio),
         mime_type,
+        transcript: None,
         content,
         extra,
     }

@@ -30829,6 +30829,13 @@
             ],
             "description": "Media kind, when known. Omitted when absent. An explicit `null` from the source is kept (D65)."
           },
+          "transcript": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Spoken text of the media (an audio part's transcript), when known. Omitted when absent. An explicit `null` from the source is kept (D65)."
+          },
           "type": {
             "type": "string",
             "description": "Part type.",
@@ -43211,6 +43218,13 @@
               }
             ],
             "description": "Media kind, when known. Omitted when absent. An explicit `null` from the source is kept (D65)."
+          },
+          "transcript": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Spoken text of the media (an audio part's transcript), when known. Omitted when absent. An explicit `null` from the source is kept (D65)."
           },
           "type": {
             "type": "string",
