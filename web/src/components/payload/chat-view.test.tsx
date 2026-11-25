@@ -1,5 +1,6 @@
 import { fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, expect, it, vi } from "vitest";
+import type { Schema } from "@/api/types";
 import { ChatView } from "@/components/payload/chat-view";
 
 afterEach(() => {
@@ -92,4 +93,74 @@ it("clips a long message until it is expanded", () => {
   );
   fireEvent.click(screen.getByRole("button", { name: "Show more" }));
   expect(screen.getByRole("button", { name: "Show less" })).toBeInTheDocument();
+});
+
+it("folds a tool response into its call's line", () => {
+  render(
+    <ChatView
+      input={[
+        {
+          role: "assistant",
+          parts: [{ type: "tool_call", id: "call_1", name: "lookup", arguments: { q: "1" } }],
+        },
+        {
+          role: "tool",
+          parts: [{ type: "tool_call_response", id: "call_1", response: { answer: 2 } }],
+        },
+      ]}
+      output={[]}
+    />,
+  );
+  expect(screen.getByRole("button", { name: 'lookup(q: "1") → {answer: 2}' })).toBeInTheDocument();
+  expect(screen.queryByText("Tool")).not.toBeInTheDocument();
+});
+
+it("shows a response whose call is not shown as its own line", () => {
+  render(
+    <ChatView
+      input={[
+        {
+          role: "tool",
+          parts: [{ type: "tool_call_response", id: "call_1", response: { answer: 2 } }],
+        },
+      ]}
+      output={[]}
+    />,
+  );
+  expect(screen.getByRole("button", { name: "response → {answer: 2}" })).toBeInTheDocument();
+  expect(screen.getByText("Tool")).toBeInTheDocument();
+});
+
+it("adds the matched tool span's duration to the call's line", () => {
+  const call: Schema<"Part"> = {
+    type: "tool_call",
+    id: "call_1",
+    name: "lookup",
+    arguments: { q: "1" },
+  };
+  render(
+    <ChatView
+      input={[{ role: "assistant", parts: [call] }]}
+      output={[]}
+      toolSpans={new Map([[call, { spanId: "b1", durationNs: 350_000_000 }]])}
+    />,
+  );
+  expect(screen.getByRole("button", { name: /^lookup\(/ })).toHaveTextContent(/· 350ms$/);
+});
+
+it("shows a failed tool span's error on the call's line", () => {
+  const call: Schema<"Part"> = {
+    type: "tool_call",
+    id: "call_1",
+    name: "lookup",
+    arguments: { q: "1" },
+  };
+  render(
+    <ChatView
+      input={[{ role: "assistant", parts: [call] }]}
+      output={[]}
+      toolSpans={new Map([[call, { spanId: "b1", durationNs: 1_000_000, error: "timeout" }]])}
+    />,
+  );
+  expect(screen.getByRole("button", { name: /^lookup\(/ })).toHaveTextContent("timeout");
 });

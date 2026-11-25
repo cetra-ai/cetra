@@ -381,6 +381,18 @@ it("opens a trace beside the list and follows span, escape, and j", async () => 
   expect(router.state.location.search.span).toBeUndefined();
 });
 
+/** The tool line button whose text starts with `prefix`. */
+function toolLine(container: HTMLElement, prefix: string): HTMLElement {
+  const lines = within(container)
+    .getAllByRole("button")
+    .filter((button) => button.textContent?.startsWith(prefix));
+  const [line] = lines;
+  if (lines.length !== 1 || !line) {
+    throw new Error(`expected one line starting with ${prefix}, got ${lines.length}`);
+  }
+  return line;
+}
+
 it("shows the trace summary in transcript mode until a block is picked, and goes back to it", async () => {
   const { router, user } = await renderApp(
     `/acme/support-bot/traces?trace=${TRACE_1}&mode=transcript`,
@@ -388,7 +400,12 @@ it("shows the trace summary in transcript mode until a block is picked, and goes
   expect(await screen.findByRole("region", { name: "Trace summary" })).toBeInTheDocument();
 
   const transcript = await screen.findByRole("region", { name: "Transcript" });
-  await user.click(within(transcript).getByRole("button", { name: /get_order_status/ }));
+  const row = await waitFor(() => {
+    const found = transcript.querySelector('[data-turn="b100000000000013"]');
+    if (!(found instanceof HTMLElement)) throw new Error("no tool row");
+    return found;
+  });
+  await user.click(await waitFor(() => toolLine(row, "get_order_status(")));
   await waitFor(() => {
     expect(router.state.location.search).toMatchObject({ span: TOOL_SPAN, mode: "transcript" });
   });

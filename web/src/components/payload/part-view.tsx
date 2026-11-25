@@ -3,12 +3,8 @@ import type { Schema } from "@/api/types";
 import { JsonView } from "@/components/payload/json-view";
 import { Markdown } from "@/components/payload/markdown";
 import { MediaView } from "@/components/payload/media-view";
-import { ToolCallCard } from "@/components/payload/tool-call-card";
-
-export type ToolLinks = {
-  callNames: Map<string, string>;
-  responseIds: Set<string>;
-};
+import { ToolCallLine } from "@/components/payload/tool-call-line";
+import type { ToolLinks } from "@/lib/tool-calls";
 
 export function PartView({
   part,
@@ -28,26 +24,31 @@ export function PartView({
   if (part.type === "tool_call") {
     const id = typeof part.id === "string" ? part.id : undefined;
     const name = typeof part.name === "string" ? part.name : "tool";
+    const match = links.spans.get(part);
     return (
-      <ToolCallCard
-        anchorId={id ? `tool-call-${id}` : undefined}
-        title={name}
+      <ToolCallLine
+        name={name}
         id={id}
-        body={part.arguments}
-        forwardTargetId={id && links.responseIds.has(id) ? `tool-response-${id}` : undefined}
+        args={{ value: part.arguments }}
+        result={
+          id !== undefined && links.responses.has(id)
+            ? { value: links.responses.get(id) }
+            : undefined
+        }
+        durationNs={match?.durationNs}
+        error={match?.error}
       />
     );
   }
   if (part.type === "tool_call_response") {
     const id = typeof part.id === "string" ? part.id : undefined;
-    const callName = id ? links.callNames.get(id) : undefined;
+    // A response whose call is shown is the call's result, on the call's line.
+    if (id !== undefined && links.shownCalls.has(id)) return null;
     return (
-      <ToolCallCard
-        anchorId={id ? `tool-response-${id}` : undefined}
-        title={callName ?? "Response"}
-        titleTargetId={id && callName ? `tool-call-${id}` : undefined}
+      <ToolCallLine
+        name={(id ? links.callNames.get(id) : undefined) ?? "response"}
         id={id}
-        body={part.response}
+        result={{ value: part.response }}
       />
     );
   }
