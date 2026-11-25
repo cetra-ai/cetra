@@ -79,8 +79,8 @@ export const PICTURES = [
         caption: "Read the code, patch it and rerun the tests, all in one transcript.",
       },
       voice: {
-        alt: "A voice agent's trace with the draft-reply span open: the caller asks to move an appointment to Friday morning, and the calendar check returns free slots at 9:30 and 11:00.",
-        caption: "The caller's request and the calendar check behind one voice reply.",
+        alt: "A voice agent's draft-reply span: the caller's recording with its transcript, the calendar check and its slots at 9:30 and 11:00, and the agent's spoken reply, with its transcript.",
+        caption: "Hear the caller and the agent, and read what was said, in one voice turn.",
       },
       extraction: {
         alt: "The trace list filtered to traces tagged billing: start time, name, duration and cost, with extract-invoice among the rows.",
@@ -156,7 +156,7 @@ export const PICTURES = [
         caption: "The rule's scores over 24 hours, so a drop shows at a glance.",
       },
       voice: {
-        alt: "The LLM judge Reads the booking back on its Configuration tab: its question about the booking, a boolean output with a reason, the score name readback, and a test form on one trace.",
+        alt: "The LLM judge Reads the booking back on its Configuration tab: its question about the booking, a test on one trace, and the result false, with the reason that the agent never read the booking back.",
         caption: "Write the judge's question once, then test it on a real call.",
       },
       extraction: {

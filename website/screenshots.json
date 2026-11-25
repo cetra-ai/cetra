@@ -435,7 +435,7 @@
     "theme": "dark",
     "viewport": {
       "width": 1400,
-      "height": 900
+      "height": 1100
     },
     "clip": "aside[aria-label=\"Trace\"]"
   },
@@ -498,7 +498,7 @@
     "theme": "dark",
     "viewport": {
       "width": 900,
-      "height": 1000
+      "height": 1400
     },
     "clip": "main"
   },

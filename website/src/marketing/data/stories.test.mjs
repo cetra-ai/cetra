@@ -21,7 +21,7 @@ const EXPECTED = {
   trace: {
     support: "Each turn of a session, with its score, so the bad answer stands out.",
     coding: "Read the code, patch it and rerun the tests, all in one transcript.",
-    voice: "The caller's request and the calendar check behind one voice reply.",
+    voice: "Hear the caller and the agent, and read what was said, in one voice turn.",
     extraction: "Every billing trace in one list, with its duration and cost.",
   },
   explore: {
