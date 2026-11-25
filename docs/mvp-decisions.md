@@ -1079,6 +1079,28 @@ Decisions of track EA (`docs/plans/ea-enterprise-admin/README.md`), numbered `D-
 | D-EA-27 | Account email is `userName` | **The account email is `userName`; incoming `emails` are ignored, never refused**, since Entra's UPN and mail often differ (M5 fix). Rejected: Refuse a mismatch: Entra ID would fail to provision users whose UPN and mail differ. |
 | D-EA-28 | Re-enable accounts SCIM disabled | **An account SCIM disabled is re-enabled when the IdP creates or reactivates the user**, even after the SCIM row was deleted (`scim_disabled_accounts`). An account an instance admin disabled stays refused (M5 fix). Rejected: Refuse every disabled account: the IdP could not reactivate a user that SCIM itself deprovisioned. |
 
+## Track QE — Custom query engine and columnar format
+
+Decisions of track QE (`docs/plans/query-engine/design.md`), numbered `D-QE-<n>`. "(user)" marks the user's choices of 2026-11-25.
+
+| # | Topic | Decision |
+|---|---|---|
+| D-QE-1 | Own query engine | **Replace DataFusion with our own pure-Rust query engine (`cetra-query`)**, keeping `sqlparser` (`GenericDialect`) for parsing (user). Priorities: owning the stack, latency + memory control, compile time. Rejected: keeping DataFusion (~30+ crates, planning floor, untracked operator memory, poor Strata fit); DuckDB/`chDB` (C++ FFI, weak multi-tenant sandboxing, incompatible with `TraceMerger`/S3 `read_cache`). |
+| D-QE-2 | `cetra-column` | **Replace Arrow with a lean, `tokio`-free `cetra-column` crate** (user) with `Flat`/`Const`/`Dict`/`Rle` encodings, `Selection` vectors, synchronous `MemoryPool`/`FairSpill`, and `CancelToken`, shared across `cetra-core`, `cetra-query`, `cetra-storage`, `cetra-server` and future Strata. Rejected: keeping Arrow `RecordBatch` (50+ dynamic types, downcasting, no native selection vectors). |
+| D-QE-3 | Format-agnostic scan | **Decouple the engine from on-disk formats via `ScanSource` / `ScanSpec`.** Ship on `ParquetSource` (with our own bounded Parquet metadata cache) now; swap in `StrataSource` once Strata passes its workload evaluation. |
+| D-QE-4 | Shape B SQL | **Curated analytical SQL ("Shape B")** for the SQL console and MCP (user): `SELECT`/`WITH`/equi-joins/`UNION [ALL]`/`INTERSECT`/`EXCEPT`/`UNNEST`/`GROUP BY`/`HAVING`/`FILTER (WHERE ...)`/basic `OVER` windows/~50 curated scalar functions/`approx_percentile_cont`/`encode`/JSON extraction/`EXPLAIN`/`{name:Type}` params; explicitly reject correlated subqueries, `WITH RECURSIVE`, `LATERAL`, `ROLLUP`/`CUBE`/`GROUPING SETS`, exotic window frames and the 20 denied OOM functions. |
+| D-QE-5 | Push pipelines | **DuckDB-style synchronous push pipelines on a bounded CPU worker pool** (8 MiB worker stacks), keeping Tokio strictly for disk/S3/network I/O. Rejected: async pull streams (DataFusion), port-graph DAGs, stage-by-stage `rayon::par_iter`. |
+| D-QE-6 | Spilling | **Spill to disk on buffering operators only** (`Sort`, `HashAgg`, `HashJoin`, `TraceMerger`) using `cetra-column` binary framing, enforcing `storage.min_free_bytes` via `Disk` and bounding open spill FDs. |
+| D-QE-7 | WAL binary framing | **Checksummed, DoS-bounded `cetra-column` binary batch framing (+ LZ4, CRC-32C)** for WAL records and spill files, replacing Arrow IPC while keeping `FORMAT_VERSION = 1` pre-release (spec 03 §12). |
+| D-QE-8 | `.parquet` export placement | **Keep `.parquet` export on `POST /sql`** (user) inside `cetra-storage` without pulling `parquet` or `arrow` into `cetra-column`, `cetra-query`, or `cetra-server`. |
+| D-QE-9 | Differential oracle | **Keep DataFusion and existing public Arrow/DataFusion signatures during M1–M6** as a differential test oracle (with `cetra-storage`'s temporary Arrow bridge and green `just check` at every milestone), then cut over atomically in M7. |
+| D-QE-10 | Crate split | **Dedicated `crates/column` (`cetra-column`) and `crates/query` (`cetra-query`) crates** (user) so Strata and `cetra-core` share `Batch`/`Column` cleanly. |
+| D-QE-11 | Typed `Events`/`Links` | **Model `spans.events` and `spans.links` as dedicated typed `Events` and `Links` columns** in `cetra-column` (user), formatting to JSON only at API/SQL boundaries. |
+| D-QE-12 | Non-Arrow Parquet writer | **Implement `.parquet` SQL exports using the `parquet` crate's low-level writer** (`default-features = false` + `zstd` only, no `arrow` feature, user), with root `Cargo.toml` declaring `parquet` as `default-features = false` at M7. |
+| D-QE-13 | Percentiles | **Bounded-memory sketches (DDSketch / t-digest) for dashboard widgets, facets and `approx_percentile_cont`, and exact `percentile_cont` in SQL gated by `MemoryPool`** (user). |
+| D-QE-14 | `INTERSECT` / `EXCEPT` | **Include `INTERSECT` and `EXCEPT` in Shape B SQL** (user), lowered to hash semi/anti-joins under the 32-table cap (D-A2-1). |
+| D-QE-15 | Unified `columns[].type` | **Emit unified cetra `columns[].type` display names** (`string`, `integer`, `float`, `decimal`, `boolean`, `timestamp`, `date`, `interval`, `binary`, `string_list`, `string_map`, `list`, `json`, `null`) in `POST /sql` responses, aligned with `GET /schema` and updating spec 05, OpenAPI, `web/src/lib/sql/types.ts` and fixtures together in M7 (user). |
+
 ## Open
 
 - `.cursor/` is untracked while D58 says `.cursor/rules` is kept (and the plans tell agents to read it): commit `.cursor/rules`, or drop that mention from D58?

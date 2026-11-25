@@ -1,4 +1,4 @@
-Status: design, for review with the user (2026-11-25). No plan is written yet.
+Status: approved (2026-11-25). M1 complete; M2 plan under cold review.
 
 # QE · Custom query engine and columnar format — design
 
