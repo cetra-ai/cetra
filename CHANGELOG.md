@@ -37,6 +37,7 @@ with an `### Upgrade notes` section (https://cetra.sh/docs/self-hosting/upgrade/
 - When an org has its own single sign-on, the login page's email step links to the password form ("Sign in with a password instead"), so instance admins and members of a domain whose sign-on is not enforced can still use their password. After an org's provider refuses to sign in an instance admin, the page shows the password form.
 - The top bar's search button no longer runs its label into the `Ctrl+K` shortcut on Linux and Windows.
 - Selecting another member while the member panel is open no longer adds a second Role card.
+- An online backup cancelled by a server shutdown no longer leaves files in its directory: the shutdown waits until the backup has stopped and removed what it wrote.
 
 ## [0.1.0-rc.2] - 2026-11-22
 
