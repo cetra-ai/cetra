@@ -410,6 +410,71 @@ it("serves the scanned PDFs' preview: 24 hourly points, the last with 14 and eve
   expect(bySource.points).toEqual(preview.points);
 });
 
+/** The scanned PDFs' preview at the other windows, at the screenshot clock (which is not a day boundary). */
+it.each([
+  { window: "15m", points: 96, from: "2026-11-18T12:00:00Z", sum: 46 },
+  { window: "6h", points: 12, from: "2026-11-16T12:00:00Z", sum: 46 },
+  { window: "24h", points: 15, from: "2026-11-05T00:00:00Z", sum: 54 },
+])(
+  "serves the scanned PDFs' preview at $window: $points points from $from, $sum in all",
+  async ({ window, points, from, sum }) => {
+    server.use(...allStoryHandlers());
+    const preview = (await (
+      await fetch(
+        `${baseOf("extraction")}/alert-rules/issue-preview?issue_id=${SCANNED_ISSUE}&window=${window}`,
+      )
+    ).json()) as Schema<"IssueAlertPreview">;
+    expect(preview.window).toBe(window);
+    expect(preview.from).toBe(rfc3339(Date.parse(from)));
+    expect(preview.to).toBe(rfc3339(NOW));
+    expect(preview.points).toHaveLength(points);
+    expect(preview.points[0]?.time).toBe(rfc3339(Date.parse(from)));
+    expect(preview.points.reduce((total, point) => total + point.count, 0)).toBe(sum);
+  },
+);
+
+it("counts the partial last bucket up to the clock only", async () => {
+  server.use(...allStoryHandlers());
+  // 24h buckets from 2026-11-19T00:00 to the clock (12:00): the last point holds the day so far.
+  const issue = STORY_ISSUES.find((item) => item.id === SCANNED_ISSUE);
+  if (issue === undefined) {
+    throw new Error("no scanned PDFs issue");
+  }
+  const dayStart = Date.parse("2026-11-19T00:00:00Z");
+  const expected = expectedTraces(stories.extraction, issue).all.filter((trace) => {
+    const started = Date.parse(trace.start_time);
+    return started >= dayStart && started < NOW;
+  }).length;
+  const preview = (await (
+    await fetch(
+      `${baseOf("extraction")}/alert-rules/issue-preview?issue_id=${SCANNED_ISSUE}&window=24h`,
+    )
+  ).json()) as Schema<"IssueAlertPreview">;
+  expect(preview.points[preview.points.length - 1]).toEqual({
+    time: rfc3339(dayStart),
+    count: expected,
+  });
+});
+
+it("answers the preview queries the story does not take from the manifest's fixture", async () => {
+  server.use(...allStoryHandlers());
+  const extraction = baseOf("extraction");
+  const queries = [
+    `issue_id=01900000-0000-7000-8000-00000000ffff&window=1h`,
+    `issue_id=${SCANNED_ISSUE}&source_id=${EXTRACTION_SOURCE}&window=1h`,
+    `window=1h`,
+    `issue_id=${SCANNED_ISSUE}&window=5m`,
+    `issue_id=${SCANNED_ISSUE}`,
+    `issue_id=${CODING_ISSUE}&window=1h`,
+  ];
+  for (const query of queries) {
+    const response = await fetch(`${extraction}/alert-rules/issue-preview?${query}`);
+    expect(response.status, query).toBe(200);
+    const body = (await response.json()) as Schema<"IssueAlertPreview">;
+    expect(body.from, query).toBe("2026-01-01T12:00:00.000000000Z");
+  }
+});
+
 it("fires the scanned PDFs rule at 14 in the last hour, since its 11th scanned PDF", () => {
   const alert = storyAlertRule(stories.extraction, oneOf(STORY_RULES, "extraction"));
   expect(alert.state).toBe("firing");

@@ -245,11 +245,9 @@ const CORRECTNESS_CONDITION = {
   aggregation: "avg",
 } as const;
 
-/** The start times (ms) of the visible traces that a story issue matches; its hero is one of them. */
+/** The start times (ms) of the issue's occurrences, as the issue page counts them (occurrenceTraces). */
 function startsOf(dataset: Dataset, issue: StoryIssue): number[] {
-  return visibleTraces(dataset.traces, false, false)
-    .filter((trace) => issue.matches(trace))
-    .map((trace) => Date.parse(trace.start_time));
+  return occurrenceTraces(dataset, issue).matched.map((trace) => Date.parse(trace.start_time));
 }
 
 /** The start times (ms) of the scanned-PDF issue's occurrences. */
@@ -264,7 +262,7 @@ function scannedLastHour(dataset: Dataset, now: number): number[] {
 }
 
 /** The windows the issue preview takes: the API's windows of 15 minutes and up. */
-type PreviewWindow = "15m" | "1h" | "6h" | "24h";
+type PreviewWindow = Exclude<Schema<"AlertWindow">, "1m" | "5m">;
 
 /** The span the preview covers before `to`, as the API's description gives it. */
 const PREVIEW_SPAN_MS: Record<PreviewWindow, number> = {
@@ -286,11 +284,11 @@ function previewWindowOf(value: string | null): PreviewWindow | undefined {
 function issuePreview(
   dataset: Dataset,
   issues: readonly StoryIssue[],
-  window: PreviewWindow,
+  bucket: PreviewWindow,
 ): Schema<"IssueAlertPreview"> {
-  const width = WINDOW_MS[window];
+  const width = WINDOW_MS[bucket];
   const to = dataset.now;
-  const from = Math.floor((to - PREVIEW_SPAN_MS[window]) / width) * width;
+  const from = Math.floor((to - PREVIEW_SPAN_MS[bucket]) / width) * width;
   const starts = issues.flatMap((issue) => startsOf(dataset, issue));
   const points: Schema<"IssueAlertPoint">[] = [];
   for (let start = from; start < to; start += width) {
@@ -300,7 +298,7 @@ function issuePreview(
       count: starts.filter((started) => started >= start && started < end).length,
     });
   }
-  return { from: rfc3339(from), to: rfc3339(to), window, points };
+  return { from: rfc3339(from), to: rfc3339(to), window: bucket, points };
 }
 
 export const STORY_RULES: readonly StoryRule[] = [
@@ -898,11 +896,11 @@ export function storyHandlers(dataset: Dataset, project?: string): HttpHandler[]
     // Before `alert-rules/:id`, which would take `issue-preview` for a rule id.
     http.get(`${prefix}/alert-rules/issue-preview`, ({ request }) => {
       const search = new URL(request.url).searchParams;
-      const window = previewWindowOf(search.get("window"));
+      const bucket = previewWindowOf(search.get("window"));
       const issueId = search.get("issue_id");
       const sourceId = search.get("source_id");
       // Exactly one of the two ids, a window the preview takes, and an issue or source of the project.
-      if (window === undefined || (issueId === null) === (sourceId === null)) {
+      if (bucket === undefined || (issueId === null) === (sourceId === null)) {
         return undefined;
       }
       const counted =
@@ -911,7 +909,7 @@ export function storyHandlers(dataset: Dataset, project?: string): HttpHandler[]
           : issues.filter((issue) => issue.id === issueId);
       return counted.length === 0
         ? undefined
-        : HttpResponse.json(issuePreview(dataset, counted, window));
+        : HttpResponse.json(issuePreview(dataset, counted, bucket));
     }),
     http.get(`${prefix}/alert-rules/:id`, ({ params }) => {
       const rule = ruleById(idParam(params.id));

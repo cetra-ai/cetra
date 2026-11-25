@@ -15,6 +15,11 @@ import { projectOfRef, type StoryId } from "./projects";
 
 const PROJECT = "/api/v1/projects/:project";
 
+/** Byte order of two labels, as the API sorts them (not the locale order). */
+function byLabel(left: string, right: string): number {
+  return left < right ? -1 : left > right ? 1 : 0;
+}
+
 /** A path parameter as text; msw types it as possibly repeated or missing. */
 function textParam(value: string | readonly string[] | undefined): string {
   return typeof value === "string" ? value : "";
@@ -397,7 +402,7 @@ function promptOf(story: StoryPrompt): Schema<"Prompt"> {
             updated_at: version.at,
           })),
         )
-        .sort((a, b) => a.label.localeCompare(b.label))
+        .sort((a, b) => byLabel(a.label, b.label))
     : [
         {
           label: "production",
@@ -425,13 +430,15 @@ function versionOf(story: StoryPrompt, version: number): Schema<"PromptVersion">
   if (v === undefined) {
     return undefined;
   }
+  // The latest version carries production unless its labels say otherwise, and always latest too.
+  const own = v.labels ?? (version === latest ? ["production"] : []);
   return {
     name: story.name,
     type: "chat",
     version,
     template: v.template,
     config: { model: v.model, params: { temperature: v.temperature, max_tokens: v.maxTokens } },
-    labels: v.labels ?? (version === latest ? ["latest", "production"] : []),
+    labels: version === latest ? [...own, "latest"].sort(byLabel) : own,
     variables: v.variables,
     placeholders: v.template.flatMap((entry) => ("type" in entry ? [entry.name] : [])),
     commit_message: v.commit,
@@ -506,10 +513,15 @@ export const storyPromptHandlers: HttpHandler[] = [
       return undefined;
     }
     const wanted = new URL(request.url).searchParams.get("label") ?? "production";
-    if (wanted !== "production" && wanted !== "latest") {
-      return undefined;
-    }
-    const detail = versionOf(story, story.versions.length);
+    // The version that carries the label; production and latest are the latest version otherwise.
+    const carrier = story.versions.findIndex((version) => version.labels?.includes(wanted));
+    const version =
+      carrier >= 0
+        ? carrier + 1
+        : wanted === "production" || wanted === "latest"
+          ? story.versions.length
+          : undefined;
+    const detail = version === undefined ? undefined : versionOf(story, version);
     return detail ? HttpResponse.json(detail) : undefined;
   }),
   http.get(`${PROJECT}/prompts/:prompt`, ({ params }) => {

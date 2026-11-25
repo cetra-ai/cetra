@@ -124,6 +124,19 @@ it("resolves production and latest to the latest version, and leaves other label
   expect((await get("voice", "/prompts/voice-reply/resolve?label=staging")).status).toBe(404);
 });
 
+it("resolves a label to the version that carries it, in the support project", async () => {
+  expect((await get("support", "/prompts/support-reply/resolve")).body).toMatchObject({
+    version: 3,
+    labels: ["latest", "production"],
+  });
+  expect((await get("support", "/prompts/support-reply/resolve?label=staging")).body).toMatchObject(
+    {
+      version: 2,
+      labels: ["staging"],
+    },
+  );
+});
+
 it("records one label event per version, newest first", async () => {
   const events = (await get("extraction", "/prompts/extract-invoice/label-events")).body.data as {
     to_version: number;
@@ -241,18 +254,32 @@ it("serves support-reply in the support project as three versions, v3 labelled p
   });
   expect(prompt.body).not.toHaveProperty("description");
 
+  const list = (await get("support", "/prompts")).body.data as {
+    id: string;
+    name: string;
+    latest_version: number;
+  }[];
+  expect(list.filter((item) => item.name === "support-reply")).toEqual([
+    expect.objectContaining({ id: "01900000-0000-7000-8000-000000001001", latest_version: 3 }),
+  ]);
+
   const versions = (await get("support", "/prompts/support-reply/versions")).body.data as Version[];
   expect(versions.map((version) => version.version)).toEqual([3, 2, 1]);
-  expect(versions.map((version) => version.labels)).toEqual([["production"], ["staging"], []]);
+  expect(versions.map((version) => version.labels)).toEqual([
+    ["latest", "production"],
+    ["staging"],
+    [],
+  ]);
 
   const v2 = await get("support", "/prompts/support-reply/versions/2");
   const v3 = await get("support", "/prompts/support-reply/versions/3");
+  expect(v2.body.labels).toEqual(["staging"]);
   expect(v3.body).toMatchObject({
     variables: ["product", "language", "question"],
     placeholders: ["history"],
     config: { model: "gpt-4o", params: { temperature: 0.3, max_tokens: 512 } },
     commit_message: "Say plainly what cetra doesn't do",
-    labels: ["production"],
+    labels: ["latest", "production"],
   });
   expect(v2.body.placeholders).toEqual(["history"]);
   const systemOf = (body: Record<string, unknown>) =>
