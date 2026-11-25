@@ -48,6 +48,7 @@ Object storage credentials are not settings: cetra reads the standard `AWS_ACCES
 | `storage.flush.upload_concurrency` | | integer | `8` | Parquet files one flush uploads at a time, 1 to 64. |
 | `storage.memtable.hard_limit` | | size | `"1GiB"` | Refuse writes while the in-memory buffer holds more than this. At least `"16MiB"`. |
 | `storage.query.target_partitions` | | integer | the number of CPU cores | Parallel partitions of one query. At least 1. |
+| `storage.query.threads` | | integer | the number of CPU cores | Threads that run queries and compaction, apart from ingest. From 1 to 1024. On Linux they run at a lower priority (nice + 10). |
 | `storage.query.metadata_cache_bytes` | | size | `"512MiB"` | Memory for cached Parquet footers and page indexes. `"0B"` is allowed. |
 | `storage.query.trace_lookback` | | duration | `"1h"` | How far back trace lists look, and the default window of `storage.anchor.window`. Up to `"24h"`. |
 | `storage.query.max_memory_total` | | size | half the machine's memory, at most `"8GiB"` | Memory shared by all queries. The machine's cgroup limit counts when it is lower. At least `storage.query.max_memory`. |

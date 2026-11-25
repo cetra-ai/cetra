@@ -62,6 +62,7 @@ GitHub and Google also accept the split form (`CETRA_AUTH__GITHUB__CLIENT_ID`, `
 | `storage.query.max_memory` | | `"2GiB"` |
 | `storage.query.metadata_cache_bytes` | | `"512MiB"` |
 | `storage.query.target_partitions` / `storage.query.trace_lookback` / `storage.query.admission_wait` | | the CPU count / `"1h"` / `"5s"` |
+| `storage.query.threads` | | the CPU count |
 | `storage.query.max_memory_total` / `storage.query.initial_memory` / `storage.query.read_cache_bytes` | | unset (half the machine's memory, at most `"8GiB"`) / `"64MiB"` / unset (10% of the file system, at most `"100GiB"`; `"0B"` turns it off) |
 | `storage.anchor.window` | | unset (`storage.query.trace_lookback`) |
 | `storage.deletion.max_delay` | | `"24h"` |

@@ -32,6 +32,7 @@ with an `### Upgrade notes` section (https://cetra.sh/docs/self-hosting/upgrade/
 - The Python and TypeScript SDKs send `User-Agent: cetra-sdk-python/<version>` and `cetra-sdk-js/<version>` on their requests; Python's trace exporter adds it after the OpenTelemetry exporter's own value.
 - The session page shows each turn's tool calls and, on demand, its model and tool calls in order with a preview of their input; turns can be searched, filtered (failed, scored, uses tools) and shown one per line; an overview strip, `j`/`k` and the errors chip move between turns.
 - The trace view plays audio in a themed player with a waveform and shows its transcript under it.
+- Queries and compaction run on threads of their own (`storage.query.threads`, default the CPU count), at a lower priority on Linux, so busy queries no longer slow down ingestion.
 
 ### Fixed
 
