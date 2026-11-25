@@ -3,6 +3,7 @@
 pub mod pipeline;
 pub mod pool;
 pub mod sort_key;
+pub mod sort_window;
 pub mod source;
 pub mod spill;
 pub mod streaming;
