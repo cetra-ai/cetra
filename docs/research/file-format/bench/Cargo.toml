@@ -30,13 +30,6 @@ cpu-time = "1.0.0"
 pprof = { version = "=0.15.0", default-features = false }
 strata = { path = "../strata" }
 
-# Temporary, while the cw phases of plans/08-m1-likely-failures.md are built in parallel;
-# M1.4 removes them.
-[features]
-cw_cases = []
-cw_harness = []
-cw_read = []
-
 [profile.release]
 debug = 1
 lto = "thin"

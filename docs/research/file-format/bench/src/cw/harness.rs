@@ -218,7 +218,7 @@ pub fn formats_for_round(r: usize) -> [&'static str; 2] {
 struct RunArgs {
     /// The case directory, or `s3://bucket/key`.
     dir: String,
-    /// Rounds per query (`--rounds`, default 3).
+    /// Rounds per query (`--rounds`, default 4: even, so each format runs first as often).
     rounds: usize,
     /// Measured runs per process (`--runs`, default 3).
     runs: usize,
@@ -231,7 +231,7 @@ struct RunArgs {
 /// Parses `cw run`'s arguments (after `run`).
 fn parse_run_args(args: &[String]) -> R<RunArgs> {
     let dir = args.first().ok_or(RUN_USAGE)?.clone();
-    let mut a = RunArgs { dir, rounds: 3, runs: 3, queries: None, out: None };
+    let mut a = RunArgs { dir, rounds: 4, runs: 3, queries: None, out: None };
     let mut i = 1;
     while i < args.len() {
         let flag = args[i].as_str();
@@ -609,6 +609,8 @@ pub fn write_format(dir: &Path, format: &str, runs: usize) -> R<ProcResult> {
         bytes_written = total;
         last_summaries = summaries;
     }
+    // Read before the size tables below, which read Parquet metadata in the Strata process only.
+    let vmhwm = proc_status_bytes("VmHWM")?;
     let tail_bytes = if format == "pq_cetra" {
         let mut tail = 0u64;
         for (stem, _, _) in &inputs {
@@ -631,7 +633,7 @@ pub fn write_format(dir: &Path, format: &str, runs: usize) -> R<ProcResult> {
         rows,
         answer: format!("{:016x}", xxh3_64(b"")),
         rss_start,
-        vmhwm: proc_status_bytes("VmHWM")?,
+        vmhwm,
         bytes_written: Some(bytes_written),
         tail_bytes: Some(tail_bytes),
     })

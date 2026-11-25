@@ -235,7 +235,7 @@ fn base64(bytes: &[u8]) -> String {
 
    **`gen_cmd(args)`**: parse `<case> <dir> [--traces N]`. Generate traces with `world.trace(&mut rng, &mut spans)`; for the `keys*` cases call `crate::strip_payloads` on each trace's spans as `generate` does. Apply the case's mutation, then `plant` for every case but the `keys*` ones. Pick ids with `rng`:
    - `cw_traces.txt`: 20 distinct trace ids of random spans;
-   - `cw_spans.txt`: for `giant`, up to 10 giant spans then random spans with an input up to 20; otherwise 20 random spans with an input.
+   - `cw_spans.txt`: for `giant`, up to 10 giant spans then random spans with an input up to 20; otherwise 20 random spans with an input. The `keys*` cases have no inputs (payloads are stripped), so theirs are 20 random spans; they don't run `span_heavy`.
    
    Then write the input files (step 6) and the text files. `cw_needles.txt` holds `NEEDLES`, plus `INTL_NEEDLES` for `intl`, for every case but the `keys*` ones; `giant`'s `cw_queries.txt` lists only `search:rare` and `search:absent` of them. Print the span count, LLM share, and each input file's rows. In `giant` (about 10,000 inputs at 2,000 traces) the rare needle lands in about 2 inputs.
 5. **`import_cmd(args)`**: `<src-dir> <dir> [name=needle ...]`. Read every `<src-dir>/pq_cetra/*.parquet` in path order with `parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder`, and write each file's batches, as they come, to one input file, in order (the files are already sorted). Ids: `cw_traces.txt` = the first 20 lines of `<src-dir>/trace_ids.txt`; `cw_spans.txt` = rows `i * rows / 20` of the first input file, moving forward to the next row with a non-null `input` (stop at 20 or at the file's end). Needles: the arguments when given; otherwise `absent=ABSENT`, `404=404`, `bug=bug`, `sql=SQL`, `the=" the "`, and `rare=<first line of <src-dir>/needles.txt, which is already hex>` when that file exists. Queries: `write`, `scan_payload`, `trace_light`, `span_heavy`, then every `search:*`.
@@ -277,7 +277,7 @@ fmtbench cw run <dir|s3://bucket/key> [--rounds R] [--runs K] [--queries a,b] [-
 fmtbench cw one <dir|s3://bucket/key> <format> <query> <K>      (spawned by `run`; not for people)
 ```
 
-Defaults: `R = 3`, `K = 3`, queries = `cw_queries.txt`, `--out` = `cw-<unix seconds>.jsonl` in `std::env::temp_dir()` (never in the repository); `run` prints the path. Formats are `pq_cetra` and `st`. `write` is skipped for an `s3://` location.
+Defaults: `R = 4` (even, so each format runs first as often), `K = 3`, queries = `cw_queries.txt`, `--out` = `cw-<unix seconds>.jsonl` in `std::env::temp_dir()` (never in the repository); `run` prints the path. Formats are `pq_cetra` and `st`. `write` is skipped for an `s3://` location.
 
 **One process's result:** `cw one` prints its result as one line of JSON built with `serde_json::json!`, the only stdout line that starts with `{`. Other lines (the size tables of `write`; what `location()` prints under `FMT_SIM_S3` or `FMT_HEDGE_MS`; the profile `main()` prints after `run()` under `FMT_PPROF`, which comes after the JSON) are not part of the result; `run` prints them through.
 
