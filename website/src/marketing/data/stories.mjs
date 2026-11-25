@@ -71,16 +71,16 @@ export const PICTURES = [
     },
     stories: {
       support: {
-        alt: "The trace list filtered to traces tagged email: agent traces with start time, name, duration and cost.",
-        caption: "Every support conversation, with its cost and latency.",
+        alt: "The session view of a support conversation: four turns with their scores and costs, the third asking whether the agent can schedule a weekly visit and scoring 0.3 on correctness, with a failed user-feedback mark.",
+        caption: "Each turn of a session, with its score, so the bad answer stands out.",
       },
       coding: {
-        alt: "The trace list filtered to traces with status error: failed runs, among them a coding-agent trace, with start time, name, duration and cost.",
-        caption: "Only the failed runs, so nothing broken hides in the traffic.",
+        alt: "A coding agent's transcript: the CSV fix request, the agent reading and searching the code, a run_tests error of 1 failed and 47 passed, and a final answer that reports 48 tests passing.",
+        caption: "Read the code, patch it and rerun the tests, all in one transcript.",
       },
       voice: {
-        alt: "The trace list filtered to voice traces and sorted by duration, longest first: start time, name, duration and cost.",
-        caption: "The slowest calls first, so you fix what callers feel.",
+        alt: "A voice agent's trace with the draft-reply span open: the caller asks to move an appointment to Friday morning, and the calendar check returns free slots at 9:30 and 11:00.",
+        caption: "The caller's request and the calendar check behind one voice reply.",
       },
       extraction: {
         alt: "The trace list filtered to traces tagged billing: start time, name, duration and cost, with extract-invoice among the rows.",
@@ -95,20 +95,20 @@ export const PICTURES = [
     label: "Assistant",
     stories: {
       support: {
-        alt: "The assistant's window open over a dashboard: the question about answers that scored low, its answer, and the drafted dashboard of answer quality.",
-        caption: "Ask which answers scored low, then get a quality dashboard built for you.",
+        alt: "The assistant's window over the traces page: the question about thumbs-down answers, its answer that 62% quote the old pricing page, and a filter card with Open in traces.",
+        caption: "Ask why answers got a thumbs-down, then open the traces behind them.",
       },
       coding: {
-        alt: "The assistant's window open over a dashboard: the question about failed traces, an answer that names coding-agent, and the drafted dashboard of failed runs, error rate, cost per run and p95 duration.",
-        caption: "Ask what failed, then get a dashboard for the coding agent built for you.",
+        alt: "The assistant's window over the traces page: the question about cost per run, its answer that 18% of runs call run_tests more than five times and make 70% of the cost, and a filter card with Open in traces.",
+        caption: "Ask why runs cost more, then open the retried runs.",
       },
       voice: {
-        alt: "The assistant's window open over a dashboard: the question about slow calls, its answer, and the drafted dashboard of voice latency.",
-        caption: "Ask which calls were slow, then get a latency dashboard built for you.",
+        alt: "The assistant's window over the traces page: the question about hang-ups, its answer that 71% follow a turn over 2.5 s on check_availability, and a filter card with Open in traces.",
+        caption: "Ask why callers hang up, then open the slow calendar checks.",
       },
       extraction: {
-        alt: "The assistant's window open over a dashboard: the question about invoices that needed a retry, its answer, and the drafted dashboard of invoices, schema-check failures and cost.",
-        caption: "Ask which invoices needed a retry, then get a dashboard built for you.",
+        alt: "The assistant's window over the traces page: the question about failing vendors, its answer that 38% of Nordic Freight's invoices were re-extracted, all on total, and a filter card with Open in traces.",
+        caption: "Ask which vendors fail, then open the re-extracted invoices.",
       },
     },
   },
@@ -119,20 +119,20 @@ export const PICTURES = [
     label: "Issues",
     stories: {
       support: {
-        alt: "An issue page for the question customers ask most, how to export traces to CSV: its state and actions, a daily chart of occurrences, and five example questions.",
-        caption: "What customers ask most, grouped for you, with real examples.",
+        alt: "An issue page titled Customers asking for SSO on the Starter plan: 244 occurrences in 14 days, a daily chart, and five examples asking whether SSO comes with the Starter plan.",
+        caption: "The same question, 244 times in 14 days, grouped into one issue.",
       },
       coding: {
-        alt: "An issue page for run_tests failing with 1 failed and 47 passed: its state and actions, a daily chart of occurrences, and example traces.",
-        caption: "The same test failure across runs becomes one issue to fix.",
+        alt: "An issue page titled ContextWindowExceeded: diff over 23 files: 70 occurrences in 14 days, 12 users on the busiest day, and an example saying the diff was too large for the model's context.",
+        caption: "Runs that stop when a diff no longer fits, grouped into one issue.",
       },
       voice: {
-        alt: "An issue page for replies that started more than 800 ms after the caller: its state and actions, a daily chart of occurrences, and check_availability, which took 1.22 s, as its first example.",
-        caption: "Slow replies grouped into one issue, with the trace that shows why.",
+        alt: "An issue page titled Agent talked over the caller: 11 occurrences in 14 days, 7 users on the busiest day, and an example whose interruption check scored 0.3.",
+        caption: "Replies that start before the caller has finished, grouped into one issue.",
       },
       extraction: {
-        alt: "An issue page for invoice totals that do not match their line items: its state and actions, a daily chart of occurrences, and an example with a total of 1,248.00 against line items of 1,284.00.",
-        caption: "Wrong totals grouped into one issue, before they reach your books.",
+        alt: "An issue page titled Scanned PDF: OCR returned no text: 54 occurrences in 14 days, and an example saying the PDF is a scanned image with no text layer.",
+        caption: "Scanned invoices that give OCR nothing to read, grouped into one issue.",
       },
     },
   },
@@ -148,20 +148,20 @@ export const PICTURES = [
     },
     stories: {
       support: {
-        alt: "An annotation queue's review form for support answers: the progress, the instructions and the correctness and relevance score fields.",
-        caption: "Reviewers score real answers in a queue.",
+        alt: "An annotation queue's review of an answer that got a thumbs-down: the progress reads 4 of 25 done, and the form has correctness, tone and policy fields with their instructions.",
+        caption: "Reviewers score each flagged answer in a queue, one by one.",
       },
       coding: {
-        alt: "An annotation queue's review form for patches: the progress, the instructions and the tests-pass and review-verdict fields.",
-        caption: "Review the agent's patches the way you review a pull request.",
+        alt: "The scores chart of an online rule over the last 24 hours, headed 66% with 411 scores, drawn as a line from 24 hours ago to now.",
+        caption: "The rule's scores over 24 hours, so a drop shows at a glance.",
       },
       voice: {
-        alt: "An annotation queue's review form for calls: the progress, the instructions and the resolved and tone fields.",
-        caption: "Check whether each caller got what they asked for.",
+        alt: "The LLM judge Reads the booking back on its Configuration tab: its question about the booking, a boolean output with a reason, the score name readback, and a test form on one trace.",
+        caption: "Write the judge's question once, then test it on a real call.",
       },
       extraction: {
-        alt: "An annotation queue's review form for invoices: the progress, the instructions and the schema-valid and fields-correct fields.",
-        caption: "Check the extracted fields against the invoice, one by one.",
+        alt: "The comparison of extract-invoice versions 3 and 4 on 300 invoices: total passes 99% against 97%, vat_number 96% against 91%, and cost $0.72 against $0.63.",
+        caption: "Version 4 lifts vat_number from 91% to 96% on 300 invoices.",
       },
     },
   },
@@ -176,16 +176,16 @@ export const PICTURES = [
         caption: "Try a prompt change on a real question before you ship it.",
       },
       coding: {
-        alt: "The playground with write-patch version 3: its messages, the variables filled in for a CSV bug, and the model's answer, a diff, with its tokens, cost and latency.",
-        caption: "Run the patch prompt on a real issue and see the diff.",
+        alt: "The playground with write-patch version 4: its two messages, the variables for a rename across 23 files, and the model's reply, three steps for the change.",
+        caption: "Run the patch prompt on a wide change, and see it split into steps.",
       },
       voice: {
-        alt: "The playground with voice-reply version 4: its messages, the caller's request to move an appointment, and the model's short spoken answer with its tokens, cost and latency.",
-        caption: "Tune the receptionist prompt for short spoken answers.",
+        alt: "The playground with voice-reply version 5: the receptionist prompt, the caller's request to move an appointment to Friday at 9:30 with Dr. Martin, and the reply Done: Friday at 9:30, with Dr. Martin.",
+        caption: "Tune the receptionist prompt so it reads the booking back.",
       },
       extraction: {
-        alt: "The playground with extract-invoice version 5 in two columns on the same invoice: a cheaper model reads the total as 1248 and claude-sonnet-4-5 as 1284, each with its tokens, cost and latency.",
-        caption: "Compare a cheap and a strong model on the same invoice, with the cost of each.",
+        alt: "The playground with extract-invoice version 6: the system prompt on comma decimals, the OCR text of a Nordic Freight invoice, and the JSON reply with total 1234.56 in EUR.",
+        caption: "A comma-decimal total, 1.234,56, comes back as 1234.56 in JSON.",
       },
     },
   },
@@ -196,16 +196,16 @@ export const PICTURES = [
     label: "Alerts",
     stories: {
       support: {
-        alt: "The alerts page with the rule for a correctness score under 0.7 on support-bot selected, with its condition and a preview chart.",
+        alt: "The alerts page with the rule Answer correctness under 0.7 selected: firing for 5 hours, last value 0.517, condition score under 0.700 over 1 hour, Team Slack, and a preview chart crossing its threshold.",
         caption: "Know when answer quality drops below your bar.",
       },
       coding: {
-        alt: "The alerts page with the rule for an error rate above 5% on code-agent selected and firing, with its channel, Team Slack, and a preview chart.",
-        caption: "Know when the coding agent's error rate climbs, in Slack.",
+        alt: "The alerts page with the rule Spend over $40 an hour selected: firing for 14 hours, last value $45.07, condition cost over $40.00 over 1 hour, Team Slack, and a preview chart above its threshold.",
+        caption: "Know when an hour of agent spend goes over your budget.",
       },
       voice: {
-        alt: "The alerts page with the rule for a p95 latency above 1.5 s on voice-agent selected and firing, with its condition and a preview chart.",
-        caption: "Know when callers start waiting, before they hang up.",
+        alt: "The alerts page with the rule Slow replies on the voice desk selected: firing for 6 hours, last value 3550 ms, condition p95 latency over 1500 ms over 15 minutes, On-call pager, and a preview chart.",
+        caption: "Know when one in twenty replies takes longer than 1.5 s.",
       },
       extraction: {
         alt: "The alerts page with the rule for a schema-check pass rate under 97% on billing traces selected, with its condition and a preview chart.",
