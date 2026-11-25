@@ -1,0 +1,619 @@
+//! Native `ScoresSource` performing `created_at`-only pushdown, GDPR tombstone
+//! filtering, and spillable per-`score_id` last-writer-wins deduplication
+//! (`(score_id ASC, updated_at DESC NULLS FIRST, ingest_time DESC NULLS FIRST)`).
+
+use std::collections::BTreeSet;
+use std::sync::Arc;
+
+use cetra_column::{
+    Batch, Bitmap, CancelToken, Column, ColumnError, DataType, FlatData, Reservation, ScalarValue,
+    Schema, Selection,
+};
+use cetra_core::ids::ProjectId;
+use cetra_core::schema::{scores, scores_schema};
+use cetra_query::exec::sort_window::ExternalSort;
+use cetra_query::exec::{
+    ExecContext, PartitionStream, ScanSource, ScanSpec, SortKey, TimeRangeHint, run_pipeline,
+};
+use cetra_query::{BinaryOp, EvalContext, Expr, QueryError, eval_filter};
+use chrono::NaiveDate;
+use object_store::ObjectStore;
+
+use crate::catalog::{FileMeta, FileTable};
+use crate::column_bridge::arrow_schema_to_column;
+use crate::deletion::PendingDeletion;
+use crate::verify::Suspects;
+use crate::wal::Table;
+
+use super::mem_source::MemtableSource;
+use super::metadata_cache::MetadataCache;
+use super::parquet_source::ParquetSource;
+use super::{
+    TimeBounds, cap_partitions, extract_time_bounds, read_str_at, reconcile_res, rollback_res,
+};
+
+/// Native [`ScanSource`] for the `scores` table with LWW deduplication per `score_id`.
+#[derive(Debug, Clone)]
+pub(crate) struct ScoresSource {
+    store: Arc<dyn ObjectStore>,
+    project: ProjectId,
+    schema: Arc<Schema>,
+    files: Vec<Arc<FileMeta>>,
+    scores_mem: Arc<crate::memtable::MemSnapshot>,
+    keep_from: Option<NaiveDate>,
+    deletions: Arc<[Arc<PendingDeletion>]>,
+    metadata_cache: Arc<MetadataCache>,
+    suspects: Suspects,
+    runtime: tokio::runtime::Handle,
+}
+
+impl ScoresSource {
+    /// Creates a [`ScoresSource`] over `files` and `scores_mem` for `project`.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn new(
+        store: Arc<dyn ObjectStore>,
+        project: ProjectId,
+        files: Vec<Arc<FileMeta>>,
+        scores_mem: Arc<crate::memtable::MemSnapshot>,
+        keep_from: Option<NaiveDate>,
+        deletions: Arc<[Arc<PendingDeletion>]>,
+        metadata_cache: Arc<MetadataCache>,
+        suspects: Suspects,
+        runtime: tokio::runtime::Handle,
+    ) -> Result<Self, QueryError> {
+        let schema = Arc::new(arrow_schema_to_column(&scores_schema())?);
+        Ok(Self {
+            store,
+            project,
+            schema,
+            files,
+            scores_mem,
+            keep_from,
+            deletions,
+            metadata_cache,
+            suspects,
+            runtime,
+        })
+    }
+}
+
+impl ScanSource for ScoresSource {
+    fn schema(&self) -> Arc<Schema> {
+        Arc::clone(&self.schema)
+    }
+
+    fn projected_schema(&self, spec: &ScanSpec) -> Result<Arc<Schema>, QueryError> {
+        match &spec.projection {
+            Some(indices) => Ok(Arc::new(self.schema.project(indices)?)),
+            None => Ok(Arc::clone(&self.schema)),
+        }
+    }
+
+    fn open_partitions(
+        &self,
+        spec: &ScanSpec,
+        ctx: &ExecContext,
+    ) -> Result<Vec<Box<dyn PartitionStream>>, QueryError> {
+        let _ = self.projected_schema(spec)?;
+        if ctx.eval.cancel.is_cancelled() {
+            return Err(QueryError::Cancelled);
+        }
+        if spec.limit == Some(0) {
+            return Ok(Vec::new());
+        }
+
+        let created_at_idx = schema_col_idx(&self.schema, scores::CREATED_AT)?;
+        let score_id_idx = schema_col_idx(&self.schema, scores::SCORE_ID)?;
+        let updated_at_idx = schema_col_idx(&self.schema, scores::UPDATED_AT)?;
+        let ingest_time_idx = schema_col_idx(&self.schema, scores::INGEST_TIME)?;
+        let deleted_idx = schema_col_idx(&self.schema, scores::DELETED)?;
+
+        // Mandatory pushdown safety invariant: ONLY predicates whose column references are
+        // non-empty and all equal `"created_at"` are pushed below LWW dedup (no `around_ns`!).
+        let pushed_created_at = created_at_only_conjuncts(&spec.filters, created_at_idx);
+        let hint_bounds = TimeBounds {
+            min: spec.time_range.min_ns,
+            max: spec.time_range.max_ns,
+        };
+        let filter_bounds = extract_time_bounds(&pushed_created_at, scores::CREATED_AT);
+        let effective_bounds = hint_bounds.intersect_with(&filter_bounds);
+        if effective_bounds.contradicts() {
+            return Ok(Vec::new());
+        }
+
+        // Underlying scan projection: requested ∪ filter_cols ∪ {score_id, updated_at, ingest_time, deleted}.
+        let mut scan_set = BTreeSet::new();
+        match &spec.projection {
+            Some(indices) => {
+                for &idx in indices {
+                    if idx >= self.schema.len() {
+                        return Err(ColumnError::InvalidBatch {
+                            reason: "projection index out of bounds",
+                        }
+                        .into());
+                    }
+                    scan_set.insert(idx);
+                }
+            }
+            None => {
+                for idx in 0..self.schema.len() {
+                    scan_set.insert(idx);
+                }
+            }
+        }
+        for filter in &spec.filters {
+            filter.referenced_columns(&mut scan_set);
+        }
+        scan_set.insert(score_id_idx);
+        scan_set.insert(updated_at_idx);
+        scan_set.insert(ingest_time_idx);
+        scan_set.insert(deleted_idx);
+
+        let scan_indices: Vec<usize> = scan_set.into_iter().collect();
+        let scan_schema = Arc::new(self.schema.project(&scan_indices)?);
+
+        let mut full_to_scan: Vec<Option<usize>> = vec![None; self.schema.len()];
+        for (scan_pos, &full_idx) in scan_indices.iter().enumerate() {
+            full_to_scan[full_idx] = Some(scan_pos);
+        }
+
+        let scan_score_id_idx = full_to_scan[score_id_idx]
+            .ok_or_else(|| QueryError::internal("score_id missing from scan schema"))?;
+        let scan_updated_at_idx = full_to_scan[updated_at_idx]
+            .ok_or_else(|| QueryError::internal("updated_at missing from scan schema"))?;
+        let scan_ingest_time_idx = full_to_scan[ingest_time_idx]
+            .ok_or_else(|| QueryError::internal("ingest_time missing from scan schema"))?;
+        let scan_deleted_idx = full_to_scan[deleted_idx]
+            .ok_or_else(|| QueryError::internal("deleted missing from scan schema"))?;
+
+        let post_filters: Vec<Expr> = spec
+            .filters
+            .iter()
+            .map(|f| f.remap_columns(&full_to_scan))
+            .collect::<Result<Vec<_>, _>>()?;
+
+        let scan_to_output: Option<Vec<usize>> = match &spec.projection {
+            Some(indices) => {
+                let mut out = Vec::with_capacity(indices.len());
+                for &full_idx in indices {
+                    let scan_pos = full_to_scan[full_idx]
+                        .ok_or_else(|| QueryError::internal("projected column missing"))?;
+                    out.push(scan_pos);
+                }
+                Some(out)
+            }
+            None => {
+                // `scan_indices` is already `0..self.schema.len()` in schema order.
+                None
+            }
+        };
+
+        // Push ONLY `created_at` bounds + `created_at`-only filters below LWW dedup.
+        let inner_spec = ScanSpec {
+            projection: Some(scan_indices),
+            map_keys: spec.map_keys.clone(),
+            time_range: TimeRangeHint {
+                min_ns: effective_bounds.min,
+                max_ns: effective_bounds.max,
+                around_ns: None,
+            },
+            id_lookups: Vec::new(),
+            filters: pushed_created_at,
+            substrings: Vec::new(),
+            sort_hints: Vec::new(),
+            limit: None,
+        };
+
+        let mut raw_streams: Vec<Box<dyn PartitionStream>> = Vec::new();
+        if !self.files.is_empty() {
+            let parquet_src = ParquetSource::new(
+                Arc::clone(&self.store),
+                FileTable::Scores,
+                Arc::clone(&self.schema),
+                self.files.clone(),
+                Arc::clone(&self.deletions),
+                Arc::clone(&self.metadata_cache),
+                self.suspects.clone(),
+                self.runtime.clone(),
+            );
+            raw_streams.extend(parquet_src.open_partitions(&inner_spec, ctx)?);
+        }
+
+        let mem_src = MemtableSource::new(
+            Table::Scores,
+            self.project,
+            self.keep_from,
+            Arc::clone(&self.scores_mem),
+            Arc::clone(&self.deletions),
+        )?;
+        raw_streams.extend(mem_src.open_partitions(&inner_spec, ctx)?);
+
+        if raw_streams.is_empty() {
+            return Ok(Vec::new());
+        }
+        let capped_streams = cap_partitions(raw_streams, ctx.target_partitions.max(1));
+
+        // Sort globally by (score_id ASC, updated_at DESC NULLS FIRST, ingest_time DESC NULLS FIRST).
+        let sort_keys = vec![
+            SortKey {
+                expr: Expr::Column {
+                    index: scan_score_id_idx,
+                    name: scores::SCORE_ID.to_owned(),
+                    data_type: DataType::Utf8,
+                },
+                descending: false,
+                nulls_first: false,
+            },
+            SortKey {
+                expr: Expr::Column {
+                    index: scan_updated_at_idx,
+                    name: scores::UPDATED_AT.to_owned(),
+                    data_type: DataType::timestamp_utc(),
+                },
+                descending: true,
+                nulls_first: true,
+            },
+            SortKey {
+                expr: Expr::Column {
+                    index: scan_ingest_time_idx,
+                    name: scores::INGEST_TIME.to_owned(),
+                    data_type: DataType::timestamp_utc(),
+                },
+                descending: true,
+                nulls_first: true,
+            },
+        ];
+
+        let sort_schema = Arc::clone(&scan_schema);
+        let sort_keys_for_sink = sort_keys.clone();
+        let ctx_for_sink = ctx.clone();
+        let sinks = run_pipeline(
+            ctx,
+            capped_streams,
+            |_| Ok(Vec::new()),
+            move |_| {
+                Ok(ExternalSort::new(
+                    Arc::clone(&sort_schema),
+                    sort_keys_for_sink.clone(),
+                    None,
+                    ctx_for_sink.clone(),
+                ))
+            },
+        )?;
+
+        let sorted_stream = ExternalSort::merge_sinks(sinks, scan_schema, sort_keys, None, ctx)?;
+        let dedup_stream = ScoresDedupStream {
+            input: sorted_stream,
+            scratch_res: ctx.pool.register("scores_dedup", false),
+            score_id_idx: scan_score_id_idx,
+            deleted_idx: scan_deleted_idx,
+            post_filters,
+            projection: scan_to_output,
+            remaining: spec.limit,
+            now_ns: ctx.eval.now_ns,
+            prev_score_id: None,
+            done: false,
+        };
+        Ok(vec![Box::new(dedup_stream)])
+    }
+
+    fn explain_summary(&self, spec: &ScanSpec) -> String {
+        format!(
+            "ScoresSource(files={}, filters={})",
+            self.files.len(),
+            spec.filters.len()
+        )
+    }
+}
+
+fn schema_col_idx(schema: &Schema, name: &str) -> Result<usize, QueryError> {
+    schema
+        .index_of(name)
+        .ok_or_else(|| QueryError::internal(format!("scores schema missing column {name}")))
+}
+
+fn created_at_only_conjuncts(filters: &[Expr], created_at_idx: usize) -> Vec<Expr> {
+    let mut out = Vec::new();
+    for filter in filters {
+        collect_created_at_conjuncts(filter, created_at_idx, &mut out);
+    }
+    out
+}
+
+fn collect_created_at_conjuncts(expr: &Expr, created_at_idx: usize, out: &mut Vec<Expr>) {
+    if let Expr::Binary {
+        left,
+        op: BinaryOp::And,
+        right,
+        ..
+    } = expr
+    {
+        collect_created_at_conjuncts(left, created_at_idx, out);
+        collect_created_at_conjuncts(right, created_at_idx, out);
+        return;
+    }
+    let mut cols = BTreeSet::new();
+    expr.referenced_columns(&mut cols);
+    if !cols.is_empty() && cols.iter().all(|&idx| idx == created_at_idx) {
+        out.push(expr.clone());
+    }
+}
+
+struct ScoresDedupStream {
+    input: Box<dyn PartitionStream>,
+    scratch_res: Reservation,
+    score_id_idx: usize,
+    deleted_idx: usize,
+    post_filters: Vec<Expr>,
+    projection: Option<Vec<usize>>,
+    remaining: Option<usize>,
+    now_ns: i64,
+    prev_score_id: Option<String>,
+    done: bool,
+}
+
+impl PartitionStream for ScoresDedupStream {
+    fn next_batch(
+        &mut self,
+        cancel: &CancelToken,
+        mut res: Option<&mut Reservation>,
+    ) -> Result<Option<Batch>, QueryError> {
+        let before = res.as_ref().map_or(0, |r| r.size());
+        let eval_ctx = EvalContext {
+            now_ns: self.now_ns,
+            cancel: cancel.clone(),
+        };
+
+        while !self.done {
+            if cancel.is_cancelled() {
+                self.scratch_res.free();
+                rollback_res(res, before);
+                return Err(QueryError::Cancelled);
+            }
+            if self.remaining == Some(0) {
+                self.done = true;
+                break;
+            }
+
+            let Some(batch) = self.input.next_batch(cancel, Some(&mut self.scratch_res))? else {
+                self.done = true;
+                break;
+            };
+            if batch.is_empty() {
+                self.scratch_res.free();
+                continue;
+            }
+
+            let keep_res = self.build_lww_mask(&batch, cancel);
+            let keep_mask = match keep_res {
+                Ok(m) => m,
+                Err(err) => {
+                    self.scratch_res.free();
+                    rollback_res(res, before);
+                    return Err(err);
+                }
+            };
+
+            let mut filtered = match batch.into_filter_mask(&keep_mask) {
+                Ok(b) => b,
+                Err(err) => {
+                    self.scratch_res.free();
+                    rollback_res(res, before);
+                    return Err(err.into());
+                }
+            };
+            drop(keep_mask);
+            if filtered.is_empty() {
+                self.scratch_res.free();
+                continue;
+            }
+
+            for filter in &self.post_filters {
+                let mask =
+                    match eval_filter(filter, &filtered, &eval_ctx, Some(&mut self.scratch_res)) {
+                        Ok(m) => m,
+                        Err(err) => {
+                            self.scratch_res.free();
+                            rollback_res(res, before);
+                            return Err(err);
+                        }
+                    };
+                filtered = match filtered.into_filter_mask(&mask) {
+                    Ok(b) => b,
+                    Err(err) => {
+                        self.scratch_res.free();
+                        rollback_res(res, before);
+                        return Err(err.into());
+                    }
+                };
+                drop(mask);
+                if filtered.is_empty() {
+                    break;
+                }
+            }
+            if filtered.is_empty() {
+                self.scratch_res.free();
+                continue;
+            }
+
+            if let Some(rem) = &mut self.remaining {
+                let take = filtered.num_rows().min(*rem);
+                *rem -= take;
+                if *rem == 0 {
+                    self.done = true;
+                }
+                if take < filtered.num_rows() {
+                    filtered = match truncate_batch_rows(filtered, take) {
+                        Ok(b) => b,
+                        Err(err) => {
+                            self.scratch_res.free();
+                            rollback_res(res, before);
+                            return Err(err);
+                        }
+                    };
+                }
+            }
+
+            if let Some(indices) = &self.projection {
+                filtered = match filtered.into_project(indices) {
+                    Ok(b) => b,
+                    Err(err) => {
+                        self.scratch_res.free();
+                        rollback_res(res, before);
+                        return Err(err.into());
+                    }
+                };
+            }
+
+            if filtered.num_rows().saturating_mul(4) < filtered.raw_len() {
+                self.scratch_res.free();
+                filtered = match filtered.compact(Some(&mut self.scratch_res)) {
+                    Ok(b) => b,
+                    Err(err) => {
+                        self.scratch_res.free();
+                        rollback_res(res, before);
+                        return Err(err.into());
+                    }
+                };
+            }
+
+            let out_bytes = filtered.memory_bytes();
+            self.scratch_res.free();
+            reconcile_res(res.as_deref_mut(), before, out_bytes)?;
+            return Ok(Some(filtered));
+        }
+
+        self.scratch_res.free();
+        rollback_res(res, before);
+        Ok(None)
+    }
+}
+
+impl ScoresDedupStream {
+    fn build_lww_mask(
+        &mut self,
+        batch: &Batch,
+        cancel: &CancelToken,
+    ) -> Result<Bitmap, QueryError> {
+        let raw_len = batch.raw_len();
+        let score_id_col = batch.column(self.score_id_idx).ok_or_else(|| {
+            QueryError::internal("score_id column missing from sorted scores batch")
+        })?;
+        let deleted_col = batch.column(self.deleted_idx).ok_or_else(|| {
+            QueryError::internal("deleted column missing from sorted scores batch")
+        })?;
+
+        let mut keep = Bitmap::new_zeroed(raw_len);
+        let mut check_row = |row: usize, prev: &mut Option<String>| -> Result<(), QueryError> {
+            let sid = read_str_at(score_id_col, row)
+                .ok_or_else(|| QueryError::internal("score_id must be a non-null Utf8 string"))?;
+            if prev.as_deref() == Some(sid) {
+                return Ok(());
+            }
+            *prev = Some(sid.to_owned());
+            if !read_bool_at(deleted_col, row).unwrap_or(false) {
+                let _ = keep.set(row, true);
+            }
+            Ok(())
+        };
+
+        match batch.selection() {
+            Selection::All => {
+                for row in 0..raw_len {
+                    if (row & 1023) == 0 && cancel.is_cancelled() {
+                        return Err(QueryError::Cancelled);
+                    }
+                    check_row(row, &mut self.prev_score_id)?;
+                }
+            }
+            Selection::Mask(mask) => {
+                for (i, row) in mask.iter_ones().enumerate() {
+                    if (i & 1023) == 0 && cancel.is_cancelled() {
+                        return Err(QueryError::Cancelled);
+                    }
+                    check_row(row, &mut self.prev_score_id)?;
+                }
+            }
+            Selection::Indices(indices) => {
+                for (i, &row) in indices.iter().enumerate() {
+                    if (i & 1023) == 0 && cancel.is_cancelled() {
+                        return Err(QueryError::Cancelled);
+                    }
+                    check_row(row as usize, &mut self.prev_score_id)?;
+                }
+            }
+        }
+
+        Ok(keep)
+    }
+}
+
+fn read_bool_at(col: &Column, row: usize) -> Option<bool> {
+    match col {
+        Column::Flat(f) => {
+            if f.is_null(row) {
+                return None;
+            }
+            match f.data() {
+                FlatData::Bool(bm) => Some(bm.get(row)),
+                _ => None,
+            }
+        }
+        Column::Const { value, len } => {
+            if row >= *len {
+                return None;
+            }
+            match value {
+                ScalarValue::Bool(b) => Some(*b),
+                _ => None,
+            }
+        }
+        Column::Dict(d) => {
+            if d.is_null(row) {
+                return None;
+            }
+            let code = *d.codes().get(row)? as usize;
+            if d.values().is_null(code) {
+                return None;
+            }
+            match d.values().data() {
+                FlatData::Bool(bm) => Some(bm.get(code)),
+                _ => None,
+            }
+        }
+        Column::Rle(r) => {
+            if row >= r.len() {
+                return None;
+            }
+            let phys = r.run_ends().partition_point(|&end| (end as usize) <= row);
+            if r.values().is_null(phys) {
+                return None;
+            }
+            match r.values().data() {
+                FlatData::Bool(bm) => Some(bm.get(phys)),
+                _ => None,
+            }
+        }
+    }
+}
+
+fn truncate_batch_rows(batch: Batch, take: usize) -> Result<Batch, QueryError> {
+    let active = batch.num_rows();
+    if take >= active {
+        return Ok(batch);
+    }
+    let new_sel = match batch.selection() {
+        Selection::All => {
+            let end = u32::try_from(take).map_err(|_| ColumnError::Overflow {
+                reason: "scores limit exceeds u32::MAX",
+            })?;
+            Selection::Indices((0..end).collect())
+        }
+        Selection::Mask(mask) => {
+            let indices: Vec<u32> = mask.iter_ones().take(take).map(|i| i as u32).collect();
+            Selection::Indices(indices)
+        }
+        Selection::Indices(idx) => Selection::Indices(idx[..take].to_vec()),
+    };
+    Ok(batch.into_with_selection(new_sel)?)
+}
