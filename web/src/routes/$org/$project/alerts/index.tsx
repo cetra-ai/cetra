@@ -395,7 +395,10 @@ function AlertsPage() {
                                     </TableCell>
                                     <TableCell>
                                       {rule.last_evaluated_at ? (
-                                        <TimeText value={rule.last_evaluated_at} style="datetime" />
+                                        <TimeText
+                                          value={rule.last_evaluated_at}
+                                          style="date-minute"
+                                        />
                                       ) : (
                                         "Never"
                                       )}
@@ -536,7 +539,7 @@ function RecentEvents({
                 return (
                   <TableRow key={event.id}>
                     <TableCell>
-                      <TimeText value={event.created_at} style="datetime" />
+                      <TimeText value={event.created_at} style="date-minute" />
                     </TableCell>
                     <TableCell>
                       <EventKindBadge kind={event.kind} />

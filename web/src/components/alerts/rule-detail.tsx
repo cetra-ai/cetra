@@ -15,13 +15,14 @@ import type { Schema } from "@/api/types";
 import { EventKindBadge } from "@/components/alerts/event-kind-badge";
 import { cutTitle } from "@/components/alerts/issue-scope-fields";
 import { RulePreview } from "@/components/alerts/rule-preview";
+import { axisStyle } from "@/components/charts/plot-helpers";
 import { ConfirmDialog } from "@/components/confirm-dialog";
 import { DisabledReason } from "@/components/disabled-reason";
 import { FormError } from "@/components/form/form-error";
 import { UpgradeButton } from "@/components/plan/upgrade-button";
 import { useOrgEntitlements } from "@/components/plan/use-org-entitlements";
 import { useProject } from "@/components/shell/project-context";
-import { TimeText } from "@/components/time-text";
+import { TimeText, type TimeTextStyle } from "@/components/time-text";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Label } from "@/components/ui/label";
@@ -200,14 +201,18 @@ export function RuleDetail({
         <dt className="text-muted-foreground">Last evaluated</dt>
         <dd>
           {rule.last_evaluated_at ? (
-            <TimeText value={rule.last_evaluated_at} style="datetime" />
+            <TimeText value={rule.last_evaluated_at} style="date-minute" />
           ) : (
             "Never"
           )}
         </dd>
         <dt className="text-muted-foreground">Last fired</dt>
         <dd>
-          {rule.last_fired_at ? <TimeText value={rule.last_fired_at} style="datetime" /> : "Never"}
+          {rule.last_fired_at ? (
+            <TimeText value={rule.last_fired_at} style="date-minute" />
+          ) : (
+            "Never"
+          )}
         </dd>
         <dt className="text-muted-foreground">Channels</dt>
         <dd>
@@ -260,7 +265,7 @@ export function RuleDetail({
                 {history.map((event) => (
                   <TableRow key={event.id}>
                     <TableCell>
-                      <TimeText value={event.created_at} style="datetime" />
+                      <TimeText value={event.created_at} style="date-minute" />
                     </TableCell>
                     <TableCell>
                       <EventKindBadge kind={event.kind} />
@@ -285,9 +290,15 @@ export function RuleDetail({
                       )}
                     </TableCell>
                     <TableCell>
-                      <TimeText value={event.window_from} style="time" />
+                      <TimeText
+                        value={event.window_from}
+                        style={windowStyle(event.window_from, event.window_to)}
+                      />
                       {" – "}
-                      <TimeText value={event.window_to} style="time" />
+                      <TimeText
+                        value={event.window_to}
+                        style={windowStyle(event.window_from, event.window_to)}
+                      />
                     </TableCell>
                     <TableCell>
                       {event.deliveries.length === 0 ? (
@@ -419,4 +430,11 @@ function DeliveryBadge({ status }: { status: Schema<"DeliveryStatus"> }) {
     case "pending":
       return <Badge variant="outline">Pending</Badge>;
   }
+}
+
+/** An event's window in the chart axis format: hours and minutes, with the date from a day on. */
+function windowStyle(from: string, to: string): TimeTextStyle {
+  return axisStyle([{ time: Date.parse(from) }, { time: Date.parse(to) }]) === "time"
+    ? "minute"
+    : "date-minute";
 }
