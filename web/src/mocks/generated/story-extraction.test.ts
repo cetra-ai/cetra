@@ -1,5 +1,6 @@
 import { expect, it } from "vitest";
-import { createDataset, visibleTraces } from "@/mocks/generated/dataset";
+import { createDataset, isEligibleTrace, visibleTraces } from "@/mocks/generated/dataset";
+import { EXTRACTION_PROFILE } from "@/mocks/generated/profiles";
 import {
   EXTRACTION_STORY_PROFILE,
   type ExtractionFacts,
@@ -8,6 +9,35 @@ import {
 
 const NOW = Date.parse("2026-11-19T12:00:00Z");
 const OTHER_NOW = Date.parse("2026-12-03T09:30:00Z");
+
+/** The file names of the four comma vendors, by `index % 20` (0 to 3). */
+const COMMA_FILES = [
+  "invoice-2026-0521.pdf (2 pages)",
+  "invoice-2026-0524.pdf (1 page)",
+  "invoice-2026-0527.pdf (3 pages)",
+  "invoice-2026-0530.pdf (1 page)",
+] as const;
+
+it("gives each eligible run the vendor its index selects: a comma vendor, or the M16 turn in turn order", () => {
+  const dataset = createDataset({
+    seed: 1,
+    now: NOW,
+    traces: 2_000,
+    profile: EXTRACTION_STORY_PROFILE,
+  });
+  let checked = 0;
+  dataset.traces.forEach((trace, index) => {
+    if (!isEligibleTrace(EXTRACTION_STORY_PROFILE, trace, index)) {
+      return;
+    }
+    const comma = COMMA_FILES[index % 20];
+    const turns = EXTRACTION_PROFILE.turns;
+    const expected = index % 20 < 4 ? comma : turns[index % turns.length]?.question;
+    expect(trace.input_preview).toBe(expected);
+    checked += 1;
+  });
+  expect(checked).toBeGreaterThan(1_000);
+});
 
 function factsAt(now: number): ExtractionFacts {
   const dataset = createDataset({

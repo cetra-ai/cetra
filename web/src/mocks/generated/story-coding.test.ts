@@ -73,8 +73,9 @@ it("has no context-window error before Monday", () => {
 });
 
 it("pins the tests_pass rate before the step and since it, the second lower", () => {
-  expect(facts.testsPassRateBefore).toBeCloseTo(0.8737, 3);
-  expect(facts.testsPassRateSince).toBeCloseTo(0.6345, 3);
+  // Context-window runs since Monday fail tests_pass too (M1), so the rate before the step is lower as well.
+  expect(facts.testsPassRateBefore).toBeCloseTo(0.7983, 3);
+  expect(facts.testsPassRateSince).toBeCloseTo(0.5787, 3);
   expect(facts.testsPassRateSince).toBeLessThan(facts.testsPassRateBefore);
 });
 
@@ -87,7 +88,7 @@ it("marks the api-retry runs' last run_tests spans with the packages/api command
   if (!trace) {
     throw new Error("expected an api-retry run");
   }
-  const index = Number.parseInt(trace.trace_id.slice(1), 16);
+  const index = dataset.traces.indexOf(trace);
   const marked = 6 + (index % 4);
   const firstMarked = trace.span_count - marked;
   const spans = (dataset.traceDetail(trace.trace_id)?.spans ?? [])
@@ -111,6 +112,22 @@ it("marks the api-retry runs' last run_tests spans with the packages/api command
       expect(span.status_message).toBe("timed out after 30 s");
     }
   });
+});
+
+it("fails tests_pass on the context-window runs that carry it, as their error does (M1)", () => {
+  const runs = dataset.traces.filter(
+    (trace) => trace.tags.includes("context-window") && trace.error_count > 0,
+  );
+  const withScore = runs.filter((trace) =>
+    trace.scores.some((score) => score.name === "tests_pass"),
+  );
+  expect(withScore.length).toBeGreaterThan(0);
+  for (const trace of withScore) {
+    expect(trace.scores.find((score) => score.name === "tests_pass")?.value).toEqual({
+      data_type: "boolean",
+      value: false,
+    });
+  }
 });
 
 it("keeps the facts' ranges on the dataset it returns", () => {

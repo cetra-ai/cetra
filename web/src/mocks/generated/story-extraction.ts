@@ -1,13 +1,14 @@
 import type { Schema } from "@/api/types";
 import {
   type Dataset,
-  EXTRACTION_SHOWCASE,
+  evenSpread,
+  isEligibleTrace,
   type Mark,
   type MarkedSpan,
   type MarksContext,
+  mergeMarks,
   type Profile,
   type Turn,
-  visibleTraces,
 } from "@/mocks/generated/dataset";
 import { EXTRACTION_PROFILE } from "@/mocks/generated/profiles";
 
@@ -87,14 +88,6 @@ const VENDOR_BY_FILE: ReadonlyMap<string, string> = new Map(
   ]),
 );
 
-/**
- * The picks of an even spread over `n` candidates in order: rank `r` (from 0) is picked when
- * `floor((r + 1) * p) > floor(r * p)`, so exactly `floor(n * p)` of them are picked.
- */
-function spread(p: number): (rank: number) => boolean {
-  return (rank) => Math.floor((rank + 1) * p) > Math.floor(rank * p);
-}
-
 /** The comma vendor of an eligible trace with `index % 20 < 4`; the M16 vendors take the other traces. */
 function commaVendorAt(index: number): (typeof COMMA_VENDORS)[number] | undefined {
   return index % 20 < 4 ? COMMA_VENDORS[index % 20] : undefined;
@@ -151,19 +144,9 @@ export function extractionMarks(
 ): ReadonlyMap<number, Mark> {
   const { now, eligible } = context;
   const marks = new Map<number, Mark>();
-  // Merges a change into the trace's mark: the later fields win, tags and spans concatenate.
   const add = (index: number, change: Mark): void => {
     const previous = marks.get(index);
-    const merged: Mark = { ...previous, ...change };
-    const tags = [...(previous?.tags ?? []), ...(change.tags ?? [])];
-    const spans = [...(previous?.spans ?? []), ...(change.spans ?? [])];
-    if (tags.length > 0) {
-      merged.tags = tags;
-    }
-    if (spans.length > 0) {
-      merged.spans = spans;
-    }
-    marks.set(index, merged);
+    marks.set(index, previous ? mergeMarks(previous, change) : change);
   };
 
   const eligibleIndices: number[] = [];
@@ -186,28 +169,23 @@ export function extractionMarks(
   const reExtracted = new Set<number>();
   for (const [question, indices] of byVendor) {
     const comma = COMMA_VENDORS.find((vendor) => vendor.turn.question === question);
-    const picks = spread(comma?.share ?? OTHER_VENDOR_SHARE);
-    indices.forEach((index, rank) => {
-      if (picks(rank)) {
-        reExtracted.add(index);
-        add(index, { tags: ["re-extracted"], spans: reExtractionSpans(comma?.amount) });
-      }
-    });
+    for (const index of evenSpread(indices, comma?.share ?? OTHER_VENDOR_SHARE)) {
+      reExtracted.add(index);
+      add(index, { tags: ["re-extracted"], spans: reExtractionSpans(comma?.amount) });
+    }
   }
 
   // 2. Scanned PDFs: an even spread over the eligible traces not re-extracted, and a burst in the last hour.
+  //    The burst takes the first 12 last-hour traces the spread did not pick.
   const scanCandidates = eligibleIndices.filter((index) => !reExtracted.has(index));
-  const scannedPicks = spread(0.03);
-  const scanned = new Set<number>();
-  scanCandidates.forEach((index, rank) => {
-    if (scannedPicks(rank)) {
-      scanned.add(index);
-    }
-  });
+  const scanned = new Set<number>(evenSpread(scanCandidates, 0.03));
   let burst = 0;
   for (const index of scanCandidates) {
     if (burst >= BURST_SIZE) {
       break;
+    }
+    if (scanned.has(index)) {
+      continue;
     }
     const start = Date.parse(traces[index]?.start_time ?? "");
     if (start >= now - HOUR_MS && start < now) {
@@ -273,10 +251,6 @@ export type ExtractionFacts = {
   batchCost: number;
 };
 
-function traceIndex(trace: Schema<"TraceSummary">): number {
-  return Number.parseInt(trace.trace_id.slice(1), 16);
-}
-
 function retryShare(rows: readonly Schema<"TraceSummary">[]): number {
   if (rows.length === 0) {
     return 0;
@@ -287,8 +261,9 @@ function retryShare(rows: readonly Schema<"TraceSummary">[]): number {
 /** The extraction facts of a dataset: eligible traces only (not the showcase, visible by default). */
 export function extractionFacts(dataset: Dataset): ExtractionFacts {
   const now = dataset.now;
-  const traces = visibleTraces(dataset.traces, false, false).filter(
-    (trace) => traceIndex(trace) !== EXTRACTION_SHOWCASE.index,
+  // The index is the dataset's order, so the facts never read it from a trace id.
+  const traces = dataset.traces.filter((trace, index) =>
+    isEligibleTrace(EXTRACTION_STORY_PROFILE, trace, index),
   );
   const vendorOf = (trace: Schema<"TraceSummary">): string | undefined =>
     VENDOR_BY_FILE.get(trace.input_preview ?? "");
@@ -332,7 +307,8 @@ export function extractionFacts(dataset: Dataset): ExtractionFacts {
       const start = Date.parse(trace.start_time);
       return start >= now - HOUR_MS && start < now;
     }).length,
-    scannedHourlyBefore: Math.max(0, ...hourly.values()),
+    // NaN when no hour before the last has a scanned PDF, so a test on the count cannot pass vacuously.
+    scannedHourlyBefore: hourly.size > 0 ? Math.max(...hourly.values()) : Number.NaN,
     batchSize: batch.length,
     batchFailedTwice: batch.filter((trace) => trace.error_count >= 2).length,
     batchCost: batch.reduce((sum, trace) => sum + (trace.cost_total ?? 0), 0),

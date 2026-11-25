@@ -5,8 +5,12 @@ import type { Schema } from "@/api/types";
 import {
   createDataset,
   type Dataset,
+  evenSpread,
+  isEligibleTrace,
   type Mark,
+  type MarkedSpan,
   markScoreUuid,
+  mergeMarks,
   type Profile,
   rfc3339,
   SHOWCASES,
@@ -1222,4 +1226,130 @@ it("a showcase can belong to a session", () => {
   expect(trace?.session_id).toBe("sess-x");
   const session = dataset.session("sess-x", true, true);
   expect(session?.turns.map((turn) => turn.trace.trace_id)).toContain(trace?.trace_id);
+});
+
+/** The first trace after the showcase (index 4) that has a `tests_pass` score and whose errors satisfy `ok`. */
+function firstCodingRun(dataset: Dataset, ok: (errorCount: number) => boolean): number {
+  return dataset.traces.findIndex(
+    (trace, index) =>
+      index > 4 &&
+      ok(trace.error_count) &&
+      trace.scores.some((score) => score.name === "tests_pass"),
+  );
+}
+
+it("a mark that makes a trace errored redraws its status-derived score (M1)", () => {
+  const baseline = createDataset({ seed: 1, now: NOW, traces: 40, profile: CODING_PROFILE });
+  const index = firstCodingRun(baseline, (count) => count === 0);
+  expect(index).toBeGreaterThan(-1);
+  const before = baseline.traces[index]?.scores.find((score) => score.name === "tests_pass");
+  expect(before?.value).toEqual({ data_type: "boolean", value: true });
+
+  const error = {
+    count: 1,
+    spanName: "write patch",
+    message: "ContextWindowExceeded: diff over 23 files",
+    stacktrace: "ContextWindowExceeded: the prompt is too long",
+  };
+  const dataset = createDataset({
+    seed: 1,
+    now: NOW,
+    traces: 40,
+    profile: { ...CODING_PROFILE, marks: () => new Map<number, Mark>([[index, { error }]]) },
+  });
+  const trace = dataset.traces[index];
+  expect(trace?.status).toBe("error");
+  expect(trace?.error_count).toBe(1);
+  const after = trace?.scores.find((score) => score.name === "tests_pass");
+  expect(after?.value).toEqual({ data_type: "boolean", value: false });
+  expect(after?.score_id).toBe(before?.score_id);
+});
+
+it("a mark that clears a trace's errors redraws its status-derived score back (M1)", () => {
+  const baseline = createDataset({ seed: 1, now: NOW, traces: 40, profile: CODING_PROFILE });
+  const index = firstCodingRun(baseline, (count) => count > 0);
+  expect(index).toBeGreaterThan(-1);
+  const error = { count: 0, spanName: "write patch", message: "", stacktrace: "" };
+  const dataset = createDataset({
+    seed: 1,
+    now: NOW,
+    traces: 40,
+    profile: { ...CODING_PROFILE, marks: () => new Map<number, Mark>([[index, { error }]]) },
+  });
+  const trace = dataset.traces[index];
+  expect(trace?.status).toBe("ok");
+  expect(trace?.error_count).toBe(0);
+  expect(trace?.scores.find((score) => score.name === "tests_pass")?.value).toEqual({
+    data_type: "boolean",
+    value: true,
+  });
+});
+
+it("mergeMarks: the later fields win, tags and spans concatenate, scores are replaced by name", () => {
+  const span: MarkedSpan = { name: "run_tests", kind: "tool", fromMs: 0, durationMs: 10 };
+  const merged = mergeMarks(
+    {
+      tags: ["x"],
+      release: "v1",
+      spans: [span],
+      scores: [
+        { name: "k", source: "check", value: { data_type: "boolean", value: true } },
+        { name: "j", source: "check", value: { data_type: "numeric", value: 0.5 } },
+      ],
+    },
+    {
+      tags: ["y"],
+      release: "v2",
+      scores: [{ name: "k", source: "check", value: { data_type: "boolean", value: false } }],
+    },
+  );
+  expect(merged).toEqual({
+    tags: ["x", "y"],
+    release: "v2",
+    spans: [span],
+    scores: [
+      { name: "j", source: "check", value: { data_type: "numeric", value: 0.5 } },
+      { name: "k", source: "check", value: { data_type: "boolean", value: false } },
+    ],
+  });
+});
+
+it("mergeMarks leaves out empty lists", () => {
+  expect(mergeMarks({}, { release: "v1" })).toEqual({ release: "v1" });
+  expect(mergeMarks({}, {})).toEqual({});
+});
+
+it("evenSpread picks round(p × n) of the items, evenly along the order", () => {
+  expect(evenSpread([0, 1, 2, 3, 4, 5, 6, 7, 8, 9], 0.3)).toEqual([3, 6, 9]);
+  expect(evenSpread(["a", "b", "c", "d"], 0)).toEqual([]);
+  expect(evenSpread(["a", "b", "c", "d"], 1)).toEqual(["a", "b", "c", "d"]);
+  expect(
+    evenSpread(
+      Array.from({ length: 1000 }, (_, i) => i),
+      0.18,
+    ),
+  ).toHaveLength(180);
+});
+
+it("isEligibleTrace excludes showcases, the big first trace and the traces the list hides", () => {
+  const profile: Profile = { ...SUPPORT_PROFILE, bigFirstTrace: true };
+  const dataset = createDataset({ seed: 1, now: NOW, traces: 10, profile });
+  const at = (index: number) => {
+    const trace = dataset.traces[index];
+    if (!trace) {
+      throw new Error(`a 10-trace dataset has trace ${index}`);
+    }
+    return trace;
+  };
+  expect(isEligibleTrace(profile, at(1), 1)).toBe(true);
+  expect(isEligibleTrace(profile, at(0), 0)).toBe(false);
+  expect(isEligibleTrace(profile, at(3), 3)).toBe(false);
+  expect(isEligibleTrace(profile, { ...at(1), environment: "cetra-eval" }, 1)).toBe(false);
+  expect(
+    isEligibleTrace(
+      profile,
+      { ...at(1), metadata: { ...at(1).metadata, "cetra.experiment_id": "exp-1" } },
+      1,
+    ),
+  ).toBe(false);
 });

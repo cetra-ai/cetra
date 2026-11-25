@@ -1,11 +1,13 @@
 import type { Schema } from "@/api/types";
 import {
   type Dataset,
+  evenSpread,
+  isEligibleTrace,
   type Mark,
   type MarkedSpan,
   type MarksContext,
+  mergeMarks,
   type Profile,
-  visibleTraces,
 } from "@/mocks/generated/dataset";
 import { CODING_PROFILE } from "@/mocks/generated/profiles";
 
@@ -23,14 +25,6 @@ const HOUR_COST_USD = 45;
 
 /** The eligible runs starting in `[from, to)`, with their index and start (ms). */
 type Run = { index: number; trace: TraceSummary; startMs: number };
-
-/**
- * The traces of an even spread over `items`: rank `r` (from 0) is picked when `floor((r + 1) p) > floor(r p)`, so
- * `floor(n p)` or `ceil(n p)` of the `n` items are picked, evenly along the order.
- */
-function spread<T>(items: readonly T[], p: number): T[] {
-  return items.filter((_, rank) => Math.floor((rank + 1) * p) > Math.floor(rank * p));
-}
 
 /** The eligible runs that start in `[from, to)`, in index order. */
 function runsIn(
@@ -92,21 +86,12 @@ function codingMarks(
   const marks = new Map<number, Mark>();
   const add = (index: number, change: Mark): void => {
     const previous = marks.get(index);
-    if (!previous) {
-      marks.set(index, change);
-      return;
-    }
-    marks.set(index, {
-      ...previous,
-      ...change,
-      tags: [...(previous.tags ?? []), ...(change.tags ?? [])],
-      spans: [...(previous.spans ?? []), ...(change.spans ?? [])],
-    });
+    marks.set(index, previous ? mergeMarks(previous, change) : change);
   };
 
   // Retries: an even spread over the runs since Y; the cost factor makes each whole hour cost 45 USD.
   const stepRuns = runsIn(traces, context.eligible, step, Number.POSITIVE_INFINITY);
-  const retried = new Set(spread(stepRuns, RETRY_SHARE).map((run) => run.index));
+  const retried = new Set(evenSpread(stepRuns, RETRY_SHARE).map((run) => run.index));
   const hourOf = (run: Run): number => Math.floor((run.startMs - step) / HOUR_MS);
   const unmarked = new Map<number, number>();
   const marked = new Map<number, number>();
@@ -132,7 +117,7 @@ function codingMarks(
 
   // Context window: an even spread over the runs since M.
   const mondayRuns = runsIn(traces, context.eligible, monday, Number.POSITIVE_INFINITY);
-  for (const run of spread(mondayRuns, CONTEXT_WINDOW_SHARE)) {
+  for (const run of evenSpread(mondayRuns, CONTEXT_WINDOW_SHARE)) {
     add(run.index, {
       tags: ["context-window"],
       error: {
@@ -172,11 +157,12 @@ export type CodingFacts = {
 
 /** The facts of a dataset built from `CODING_STORY_PROFILE`: the eligible runs only (M17). */
 export function codingFacts(dataset: Dataset): CodingFacts {
-  const showcases = new Set(CODING_PROFILE.showcases.map((showcase) => showcase.index));
-  const runs = visibleTraces(dataset.traces, false, false).flatMap((trace) => {
-    const index = Number.parseInt(trace.trace_id.slice(1), 16);
-    return showcases.has(index) ? [] : [{ index, trace, startMs: Date.parse(trace.start_time) }];
-  });
+  // The index is the dataset's order, so the facts never read it from a trace id.
+  const runs = dataset.traces.flatMap((trace, index): Run[] =>
+    isEligibleTrace(CODING_STORY_PROFILE, trace, index)
+      ? [{ index, trace, startMs: Date.parse(trace.start_time) }]
+      : [],
+  );
   const now = dataset.now;
   const step = now - STEP_HOURS * HOUR_MS;
   const before = now - 24 * HOUR_MS;

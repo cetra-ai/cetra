@@ -1,14 +1,15 @@
 import type { Schema } from "@/api/types";
 import {
   type Dataset,
+  isEligibleTrace,
   type Mark,
   type MarkedSpan,
   type MarksContext,
+  mergeMarks,
   type Profile,
   type Showcase,
   SUPPORT_PROFILE,
   type Turn,
-  visibleTraces,
 } from "./dataset";
 
 type TraceSummary = Schema<"TraceSummary">;
@@ -279,27 +280,10 @@ export const SESSION_SHOWCASES: readonly Showcase[] = [
   },
 ];
 
-/**
- * Adds a mark to a trace's mark. The later fields win; tags, spans and scores concatenate, so one trace can
- * carry the marks of several steps (P2 "Shared rules").
- */
+/** Adds a step's mark to a trace's mark, so one trace can carry the marks of several steps (M17 `mergeMarks`). */
 function addMark(marks: Map<number, Mark>, index: number, mark: Mark): void {
   const current = marks.get(index);
-  if (current === undefined) {
-    marks.set(index, mark);
-    return;
-  }
-  marks.set(index, {
-    ...current,
-    ...mark,
-    ...(current.tags || mark.tags ? { tags: [...(current.tags ?? []), ...(mark.tags ?? [])] } : {}),
-    ...(current.spans || mark.spans
-      ? { spans: [...(current.spans ?? []), ...(mark.spans ?? [])] }
-      : {}),
-    ...(current.scores || mark.scores
-      ? { scores: [...(current.scores ?? []), ...(mark.scores ?? [])] }
-      : {}),
-  });
+  marks.set(index, current ? mergeMarks(current, mark) : mark);
 }
 
 /** Rounds to two decimals, so the dip's values are exact (0.42 + 3 x 0.06 is not). */
@@ -445,12 +429,9 @@ export function supportFacts(dataset: Dataset): SupportFacts {
   const now = dataset.now;
   const since = now - SINCE_TUESDAY_MS;
   const dip = now - DIP_MS;
-  const showcases = new Set(SUPPORT_STORY_PROFILE.showcases.map((showcase) => showcase.index));
-  const eligible = dataset.traces.filter(
-    (trace, index) =>
-      !showcases.has(index) &&
-      !(SUPPORT_STORY_PROFILE.bigFirstTrace && index === 0) &&
-      visibleTraces([trace], false, false).length === 1,
+  // The index is the dataset's order, so the facts never read it from a trace id.
+  const eligible = dataset.traces.filter((trace, index) =>
+    isEligibleTrace(SUPPORT_STORY_PROFILE, trace, index),
   );
   const start = (trace: TraceSummary): number => Date.parse(trace.start_time);
   const feedback = eligible.filter((trace) => booleanScore(trace, "user_feedback") !== undefined);

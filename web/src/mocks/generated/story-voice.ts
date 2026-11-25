@@ -1,15 +1,17 @@
 import type { Schema } from "@/api/types";
 import {
   type Dataset,
+  evenSpread,
+  isEligibleTrace,
   type Mark,
   type MarkedSpan,
   type MarksContext,
+  mergeMarks,
   mix,
   type Profile,
   percentile,
   scoreUuid,
   spanId,
-  visibleTraces,
 } from "./dataset";
 import { VOICE_PROFILE } from "./profiles";
 
@@ -20,23 +22,18 @@ const HOUR_MS = 3_600_000;
 /** Salt of the availability ranks, so they differ from every other draw of the generator. */
 const AVAILABILITY_SALT = 0x51ed270b;
 
-/** The availability check's duration by quantile (ms), linear between the points (M17 P4). */
-const DURATION_QUANTILES: readonly (readonly [number, number])[] = [
-  [0, 400],
-  [0.5, 1_200],
-  [0.95, 3_000],
-  [1, 4_000],
-];
-
-/** Whether the rank `r` (from 0) of a list is picked: `round(p × n)` of `n`, give or take one. */
-function spread(p: number): (rank: number) => boolean {
-  return (rank) => Math.floor((rank + 1) * p) > Math.floor(rank * p);
-}
+/**
+ * The availability check's duration by quantile (ms), linear in each segment: (0, 400), (0.5, 1,200),
+ * (0.95, 3,000), (1, 4,000) (M17 P4).
+ */
+const QUANTILE_SEGMENTS = [
+  { u0: 0, v0: 400, u1: 0.5, v1: 1_200 },
+  { u0: 0.5, v0: 1_200, u1: 0.95, v1: 3_000 },
+  { u0: 0.95, v0: 3_000, u1: 1, v1: 4_000 },
+] as const;
 
 function quantile(u: number): number {
-  for (let at = 1; at < DURATION_QUANTILES.length; at += 1) {
-    const [u0, v0] = DURATION_QUANTILES[at - 1] ?? [0, 400];
-    const [u1, v1] = DURATION_QUANTILES[at] ?? [1, 4_000];
+  for (const { u0, v0, u1, v1 } of QUANTILE_SEGMENTS) {
     if (u <= u1) {
       return Math.round(v0 + ((u - u0) / (u1 - u0)) * (v1 - v0));
     }
@@ -93,23 +90,10 @@ function availabilitySpan(durationMs: number): MarkedSpan {
   };
 }
 
-/** Adds a change to a turn's mark: tags and spans concatenate, scores too, the later fields win. */
+/** Adds a change to a turn's mark (M17 `mergeMarks`). */
 function add(marks: Map<number, Mark>, index: number, change: Mark): void {
   const previous = marks.get(index);
-  if (!previous) {
-    marks.set(index, change);
-    return;
-  }
-  const merged: Mark = { ...previous, ...change };
-  const tags = [...(previous.tags ?? []), ...(change.tags ?? [])];
-  const spans = [...(previous.spans ?? []), ...(change.spans ?? [])];
-  const scores = [...(previous.scores ?? []), ...(change.scores ?? [])];
-  marks.set(index, {
-    ...merged,
-    ...(tags.length > 0 ? { tags } : {}),
-    ...(spans.length > 0 ? { spans } : {}),
-    ...(scores.length > 0 ? { scores } : {}),
-  });
+  marks.set(index, previous ? mergeMarks(previous, change) : change);
 }
 
 /** The three voice marks (M17 P4): hang-ups after slow turns, availability checks, interruptions. */
@@ -124,8 +108,8 @@ function voiceMarks(
   //    the last is slow (over 2.5 s) for 71% by the even spread, and an availability check in the slow ones.
   const touched = new Set<number>();
   const hangups = calls.filter((call) => call.turns.length >= 2 && call.k % 5 < 2);
-  const slowRank = spread(0.71);
-  hangups.forEach((call, rank) => {
+  const slowCalls = new Set(evenSpread(hangups, 0.71));
+  hangups.forEach((call) => {
     const last = call.turns[call.turns.length - 1];
     const before = call.turns[call.turns.length - 2];
     if (!last || !before) {
@@ -134,7 +118,7 @@ function voiceMarks(
     touched.add(last.index);
     touched.add(before.index);
     add(marks, last.index, { tags: ["hangup"] });
-    if (slowRank(rank)) {
+    if (slowCalls.has(call)) {
       const duration = 2_600 + (call.k % 12) * 100;
       add(marks, before.index, {
         tags: ["calendar"],
@@ -232,25 +216,21 @@ function availabilityMs(dataset: Dataset, turn: CallTurn): number | undefined {
 
 /** The numbers the voice pictures quote, computed from a dataset built with `VOICE_STORY_PROFILE`. */
 export function voiceFacts(dataset: Dataset): VoiceFacts {
-  const showcases = new Set(VOICE_STORY_PROFILE.showcases.map((showcase) => showcase.index));
+  // The index is the dataset's order, so the facts never read it from a trace id.
   const eligible = (index: number): boolean => {
     const trace = dataset.traces[index];
-    return (
-      trace !== undefined &&
-      !showcases.has(index) &&
-      visibleTraces([trace], false, false).length === 1
-    );
+    return trace !== undefined && isEligibleTrace(VOICE_STORY_PROFILE, trace, index);
   };
   const calls = callsOf(dataset.traces, eligible);
 
-  const hangups = calls.filter(
-    (call) =>
-      call.turns.length >= 2 && call.turns[call.turns.length - 1]?.trace.tags.includes("hangup"),
-  );
-  const beforeLast = (call: Call): CallTurn => call.turns[call.turns.length - 2] as CallTurn;
-  const slow = hangups.filter((call) => durationOf(beforeLast(call).trace) > 2_500);
-  const slowWithAvailability = slow.filter((call) => {
-    const turn = beforeLast(call);
+  // A hang-up call's turn before the last: the turn the slow-turn facts measure.
+  const hangups = calls.flatMap((call) => {
+    const last = call.turns[call.turns.length - 1];
+    const before = call.turns[call.turns.length - 2];
+    return last && before && last.trace.tags.includes("hangup") ? [before] : [];
+  });
+  const slow = hangups.filter((turn) => durationOf(turn.trace) > 2_500);
+  const slowWithAvailability = slow.filter((turn) => {
     const check = availabilityMs(dataset, turn);
     return turn.trace.tags.includes("calendar") && check !== undefined && check >= 2_000;
   });

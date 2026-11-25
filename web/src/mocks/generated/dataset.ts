@@ -959,6 +959,50 @@ function markedSpanCount(mark: Mark | undefined): number {
 }
 
 /**
+ * Whether a marks hook may choose trace `index` of a profile's dataset (M17): not a showcase, not the big first
+ * trace, and visible with the trace list's defaults. Facts and marks both use this rule.
+ */
+export function isEligibleTrace(
+  profile: Profile,
+  trace: Schema<"TraceSummary">,
+  index: number,
+): boolean {
+  return (
+    showcaseAt(index, profile) === undefined &&
+    !(profile.bigFirstTrace && index === 0) &&
+    visibleTraces([trace], false, false).length === 1
+  );
+}
+
+/**
+ * The traces an even spread picks from `items` in order: rank `r` (from 0) is picked when
+ * `floor((r + 1) p) > floor(r p)`, so `round(p × n)` of the `n` items, give or take one, evenly along the order (M17).
+ */
+export function evenSpread<T>(items: readonly T[], p: number): T[] {
+  return items.filter((_, rank) => Math.floor((rank + 1) * p) > Math.floor(rank * p));
+}
+
+/**
+ * Merges a change into a trace's mark (M17): the later fields win; tags, spans and scores concatenate, except that
+ * a score of `a` with the name of a score of `b` is replaced. Empty lists are left out.
+ */
+export function mergeMarks(a: Mark, b: Mark): Mark {
+  const tags = [...(a.tags ?? []), ...(b.tags ?? [])];
+  const spans = [...(a.spans ?? []), ...(b.spans ?? [])];
+  const scores = [
+    ...(a.scores ?? []).filter((score) => !b.scores?.some((other) => other.name === score.name)),
+    ...(b.scores ?? []),
+  ];
+  return {
+    ...a,
+    ...b,
+    ...(tags.length > 0 ? { tags } : {}),
+    ...(spans.length > 0 ? { spans } : {}),
+    ...(scores.length > 0 ? { scores } : {}),
+  };
+}
+
+/**
  * The marks of a profile, for its eligible traces only (M17). The profile's `marks` sees every timed summary; a
  * mark for an ineligible index is dropped.
  */
@@ -974,12 +1018,7 @@ function marksOf(
   }
   const eligible = (index: number): boolean => {
     const trace = traces[index];
-    return (
-      trace !== undefined &&
-      showcaseAt(index, profile) === undefined &&
-      !(profile.bigFirstTrace && index === 0) &&
-      visibleTraces([trace], false, false).length === 1
-    );
+    return trace !== undefined && isEligibleTrace(profile, trace, index);
   };
   for (const [index, mark] of profile.marks(traces, { seed, now, eligible })) {
     if (eligible(index)) {
@@ -1002,9 +1041,13 @@ function markedSummary(
   for (const span of marked) {
     durationMs = Math.max(durationMs, span.fromMs + span.durationMs);
   }
-  // A mark's error count replaces the drawn one; the marked spans' errors are added to it.
+  // A mark's error count replaces the drawn one; the marked spans' errors are added to it. The generated spans
+  // that can error are the non-root ones (`errorSpan`), so the mark's count is clamped to them.
   const markedErrors = marked.filter((span) => span.error !== undefined).length;
-  const errorCount = (mark.error?.count ?? trace.error_count) + markedErrors;
+  const generatedErrors = mark.error
+    ? Math.min(mark.error.count, Math.max(0, trace.span_count - 1))
+    : trace.error_count;
+  const errorCount = generatedErrors + markedErrors;
   // Generated summaries always carry their tokens; the `?? 0` only narrows the optional fields.
   let inputTokens = trace.input_tokens ?? 0;
   let outputTokens = trace.output_tokens ?? 0;
@@ -1016,12 +1059,17 @@ function markedSummary(
       Math.round(inputTokens * profile.price.input + outputTokens * profile.price.output) /
       1_000_000;
   }
+  // The status-derived scores (`profile.scores`) follow the errored flag, so they are drawn again when a mark
+  // changes it. The mark's own scores then replace theirs by name.
+  const errored = errorCount > 0;
+  const baseScores =
+    errored !== trace.error_count > 0 ? profile.scores(index, errored) : trace.scores;
   return {
     ...trace,
     start_time: rfc3339(startMs),
     end_time: rfc3339(startMs + durationMs),
     duration_ns: durationMs * 1_000_000,
-    status: errorCount > 0 ? "error" : "ok",
+    status: errored ? "error" : "ok",
     release: mark.release ?? trace.release,
     tags: mark.tags ? [...new Set([...trace.tags, ...mark.tags])].sort() : trace.tags,
     span_count: trace.span_count + marked.length,
@@ -1031,7 +1079,7 @@ function markedSummary(
     output_tokens: outputTokens,
     total_tokens: inputTokens + outputTokens,
     cost_total: costTotal,
-    scores: mark.scores ? markedScores(trace.scores, index, mark.scores) : trace.scores,
+    scores: mark.scores ? markedScores(baseScores, index, mark.scores) : baseScores,
   };
 }
 
