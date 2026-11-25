@@ -283,7 +283,6 @@ pub struct Storage {
     wal_dirs: [PathBuf; 2],
     runtime: Arc<RuntimeEnv>,
     /// The query runtime: every query's and compaction job's DataFusion work (D-R-39).
-    #[allow(dead_code)] // P2 and P3 use it
     query_runtime: QueryRuntime,
     /// Process-wide query memory (spec 03 §6). Each query's pool takes from it.
     memory: Arc<memory::SharedPool>,
@@ -619,6 +618,7 @@ impl Storage {
             objects: Arc::clone(&objects),
             published: Arc::clone(&published),
             runtime: Arc::clone(&runtime),
+            query_runtime: query_runtime.clone(),
             target_partitions,
             lookback,
             hooks: share_hooks(&hooks),
@@ -734,6 +734,7 @@ impl Storage {
             self.target_partitions,
             self.lookback,
             &self.verify,
+            &self.query_runtime,
         )
     }
 
@@ -1448,6 +1449,7 @@ pub(crate) fn project_query(
     target_partitions: NonZeroUsize,
     lookback: i64,
     verify: &Arc<VerifyQueue>,
+    executor: &QueryRuntime,
 ) -> Result<ProjectQuery, QueryError> {
     let partitions = target_partitions.get();
     let suspects = Suspects::new(Arc::clone(verify));
@@ -1493,6 +1495,7 @@ pub(crate) fn project_query(
             optimizer_rules: vec![Arc::new(query::TraceListRule)],
             suspects,
             visible_from: options.visible_from(),
+            executor: executor.clone(),
         });
     }
     let deletions = state.tombstones.for_project(project);
@@ -1560,6 +1563,7 @@ pub(crate) fn project_query(
         optimizer_rules: vec![Arc::new(query::TraceListRule)],
         suspects,
         visible_from: options.visible_from(),
+        executor: executor.clone(),
     })
 }
 

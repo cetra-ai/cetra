@@ -459,7 +459,7 @@ async fn load_trace_spans(
         .map_err(classify)?
         .limit(0, Some(max_required.saturating_add(1)))
         .map_err(classify)?;
-    let required = required.collect().await.map_err(|error| ctx.fail(error))?;
+    let required = ctx.collect(required).await.map_err(|error| ctx.fail(error))?;
     let earliest = ctx
         .session()
         .table(SPANS)
@@ -475,7 +475,7 @@ async fn load_trace_spans(
         .map_err(classify)?
         .limit(0, Some(max_spans.saturating_add(1)))
         .map_err(classify)?;
-    let earliest = earliest.collect().await.map_err(|error| ctx.fail(error))?;
+    let earliest = ctx.collect(earliest).await.map_err(|error| ctx.fail(error))?;
     let (earliest, truncated) = cap_rows(earliest, max_spans);
     Ok(TraceSpansData {
         required,
@@ -564,7 +564,7 @@ async fn refresh(
             .select(TRACE_REFRESH_STRICT_COLUMNS.iter().copied().map(col))
             .map_err(classify)?;
     }
-    frame.collect().await.map_err(|error| ctx.fail(error))
+    ctx.collect(frame).await.map_err(|error| ctx.fail(error))
 }
 
 /// Spans of `trace_ids` that pass the exclusions and the filter, the first `per_trace` of each
@@ -647,7 +647,7 @@ async fn refresh_spans(
         .map_err(classify)?
         .select(SPAN_REFRESH_COLUMNS.iter().copied().map(col))
         .map_err(classify)?;
-    frame.collect().await.map_err(|error| ctx.fail(error))
+    ctx.collect(frame).await.map_err(|error| ctx.fail(error))
 }
 
 /// Ranks the spans of each trace by `start_time`, then `span_id`, and keeps the first
@@ -733,7 +733,7 @@ async fn error_span_rows(
         .map_err(classify)?
         .select(ERROR_SPAN_COLUMNS.iter().copied().map(col))
         .map_err(classify)?;
-    frame.collect().await.map_err(|error| ctx.fail(error))
+    ctx.collect(frame).await.map_err(|error| ctx.fail(error))
 }
 
 /// Counts the rows of the traces or spans view that match a filter in a window, at most
@@ -892,7 +892,7 @@ async fn run_list(
         fetch = fetch.min(cap);
         loop {
             let frame = list_frame(ctx, &plan, fetch).await?;
-            let batches = frame.collect().await.map_err(|error| ctx.fail(error))?;
+            let batches = ctx.collect(frame).await.map_err(|error| ctx.fail(error))?;
             let read: usize = batches.iter().map(RecordBatch::num_rows).sum();
             let batches = match &plan.dedup {
                 Some(dedup) => drop_adjacent_copies(&batches, dedup.key)?,
@@ -1133,7 +1133,7 @@ async fn load_trace(
         .map_err(classify)?
         .filter(col(traces::TRACE_ID).eq(lit(trace_id)))
         .map_err(classify)?;
-    let trace = trace.collect().await.map_err(|error| ctx.fail(error))?;
+    let trace = ctx.collect(trace).await.map_err(|error| ctx.fail(error))?;
     let Some(trace) = single_row(&trace)? else {
         return Ok(None);
     };
@@ -1154,7 +1154,7 @@ async fn load_trace(
         .map_err(classify)?
         .limit(0, Some(cap + 1))
         .map_err(classify)?;
-    let (spans, truncated) = cap_rows(spans.collect().await.map_err(|error| ctx.fail(error))?, cap);
+    let (spans, truncated) = cap_rows(ctx.collect(spans).await.map_err(|error| ctx.fail(error))?, cap);
     Ok(Some(TraceDetailData {
         trace,
         spans,
@@ -1182,7 +1182,7 @@ async fn load_span(
         .map_err(classify)?
         .limit(0, Some(1))
         .map_err(classify)?;
-    let batches = frame.collect().await.map_err(|error| ctx.fail(error))?;
+    let batches = ctx.collect(frame).await.map_err(|error| ctx.fail(error))?;
     single_row(&batches)
 }
 
@@ -1854,6 +1854,7 @@ mod tests {
 
                 suspects: crate::verify::Suspects::detached(),
                 visible_from: None,
+                executor: crate::test_support::query_runtime(),
             },
             None,
         )

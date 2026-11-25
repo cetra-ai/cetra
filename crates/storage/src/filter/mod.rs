@@ -787,6 +787,7 @@ mod tests {
                 optimizer_rules: Vec::new(),
                 suspects: crate::verify::Suspects::detached(),
                 visible_from: None,
+                executor: crate::test_support::query_runtime(),
             },
             None,
         )
@@ -978,6 +979,7 @@ mod tests {
                 optimizer_rules: Vec::new(),
                 suspects: crate::verify::Suspects::detached(),
                 visible_from: None,
+                executor: crate::test_support::query_runtime(),
             },
             None,
         )

@@ -109,7 +109,7 @@ async fn matching(
         .map_err(classify)?
         .limit(0, Some(request.limit))
         .map_err(classify)?;
-    let batches = frame.collect().await.map_err(|error| ctx.fail(error))?;
+    let batches = ctx.collect(frame).await.map_err(|error| ctx.fail(error))?;
     let targets = collect_targets(&batches)?;
     Ok(targets
         .into_iter()
@@ -179,8 +179,8 @@ async fn user_scope(
         .map_err(classify)?
         .select(vec![col(spans::TRACE_ID), col(spans::SESSION_ID)])
         .map_err(classify)?;
-    let mut stream = frame
-        .execute_stream()
+    let query_frame = frame;
+    let mut stream = ctx.execute_stream(query_frame)
         .await
         .map_err(|error| ctx.fail(error))?;
     let mut trace_ids = BTreeSet::new();
@@ -252,8 +252,8 @@ async fn eval_scan(
         .map_err(classify)?
         .select(vec![col(spans::TRACE_ID), target.alias("target")])
         .map_err(classify)?;
-    let mut stream = frame
-        .execute_stream()
+    let query_frame = frame;
+    let mut stream = ctx.execute_stream(query_frame)
         .await
         .map_err(|error| ctx.fail(error))?;
     let mut found = BTreeSet::new();
@@ -317,8 +317,8 @@ async fn session_scan(
         .map_err(classify)?
         .select(vec![col(spans::TRACE_ID), col(spans::SESSION_ID)])
         .map_err(classify)?;
-    let mut stream = frame
-        .execute_stream()
+    let query_frame = frame;
+    let mut stream = ctx.execute_stream(query_frame)
         .await
         .map_err(|error| ctx.fail(error))?;
     let mut found = BTreeSet::new();

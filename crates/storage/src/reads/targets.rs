@@ -248,8 +248,8 @@ async fn span_filter_scan(
     .await?
     .select(vec![col(spans::TRACE_ID), col(spans::SPAN_ID)])
     .map_err(classify)?;
-    let mut stream = frame
-        .execute_stream()
+    let query_frame = frame;
+    let mut stream = ctx.execute_stream(query_frame)
         .await
         .map_err(|error| ctx.fail(error))?;
     let mut pairs = BTreeSet::new();
@@ -350,7 +350,7 @@ async fn trace_scan(ctx: &QueryContext, ids: &[TraceId]) -> Result<Vec<TraceTarg
         .map_err(classify)?
         .select(vec![col(traces::TRACE_ID), col(traces::START_TIME)])
         .map_err(classify)?;
-    let batches = frame.collect().await.map_err(|error| ctx.fail(error))?;
+    let batches = ctx.collect(frame).await.map_err(|error| ctx.fail(error))?;
     let mut found = BTreeMap::new();
     for batch in &batches {
         let trace_ids = utf8(batch.column(0))?;
@@ -401,7 +401,7 @@ async fn span_scan(
         .map_err(classify)?
         .select(vec![col(spans::TRACE_ID), col(spans::SPAN_ID)])
         .map_err(classify)?;
-    let batches = frame.collect().await.map_err(|error| ctx.fail(error))?;
+    let batches = ctx.collect(frame).await.map_err(|error| ctx.fail(error))?;
     let mut found = BTreeMap::new();
     for batch in &batches {
         let trace_column = utf8(batch.column(0))?;
@@ -443,7 +443,7 @@ async fn session_scan(ctx: &QueryContext, ids: &[&str]) -> Result<Vec<SessionTar
             col(traces::START_TIME),
         ])
         .map_err(classify)?;
-    let batches = frame.collect().await.map_err(|error| ctx.fail(error))?;
+    let batches = ctx.collect(frame).await.map_err(|error| ctx.fail(error))?;
     let mut found: BTreeMap<String, (i64, BTreeSet<TraceId>)> = BTreeMap::new();
     for batch in &batches {
         let sessions = utf8(batch.column(0))?;

@@ -187,7 +187,7 @@ async fn compute(
         AlertMeasure::LlmLatencyP95 => {
             let ids =
                 trace_id_plan(ctx, window, DAY_NS, true, filter, references_environment).await?;
-            let batches = ctx
+            let query_frame = ctx
                 .session()
                 .table("spans")
                 .await
@@ -206,8 +206,8 @@ async fn compute(
                         percentile(spans::DURATION_NS, 0.95).alias(VALUE),
                     ],
                 )
-                .map_err(classify)?
-                .collect()
+                .map_err(classify)?;
+            let batches = ctx.collect(query_frame)
                 .await
                 .map_err(|error| ctx.fail(error))?;
             let batch = single_row(&batches)?;
@@ -246,7 +246,7 @@ async fn score_count(
         });
     }
     let list: Vec<Expr> = names.iter().map(|name| lit(name.as_str())).collect();
-    let batches = ctx
+    let query_frame = ctx
         .session()
         .table("scores")
         .await
@@ -258,8 +258,8 @@ async fn score_count(
         )
         .map_err(classify)?
         .aggregate(vec![], vec![count(lit(1_i64)).alias(COUNT)])
-        .map_err(classify)?
-        .collect()
+        .map_err(classify)?;
+    let batches = ctx.collect(query_frame)
         .await
         .map_err(|error| ctx.fail(error))?;
     let batch = single_row(&batches)?;
@@ -298,10 +298,10 @@ async fn trace_batches(
     if let Some(filter) = filter {
         frame = filter.apply(frame, ctx).await.map_err(classify)?;
     }
-    frame
+    let query_frame = frame
         .aggregate(vec![], aggregates)
-        .map_err(classify)?
-        .collect()
+        .map_err(classify)?;
+    ctx.collect(query_frame)
         .await
         .map_err(|error| ctx.fail(error))
 }
@@ -385,7 +385,7 @@ async fn score_value(
     if pass_rate {
         predicate = predicate.and(col(scores::DATA_TYPE).eq(lit(ScoreDataType::Boolean.as_str())));
     }
-    let batches = ctx
+    let query_frame = ctx
         .session()
         .table("scores")
         .await
@@ -399,8 +399,8 @@ async fn score_value(
                 avg(col(scores::VALUE_NUM)).alias(VALUE),
             ],
         )
-        .map_err(classify)?
-        .collect()
+        .map_err(classify)?;
+    let batches = ctx.collect(query_frame)
         .await
         .map_err(|error| ctx.fail(error))?;
     let batch = single_row(&batches)?;
@@ -466,6 +466,7 @@ mod tests {
             optimizer_rules: Vec::new(),
             suspects: crate::verify::Suspects::detached(),
             visible_from: None,
+            executor: crate::test_support::query_runtime(),
         };
         QueryContext::new(query, None).expect("context")
     }

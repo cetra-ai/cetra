@@ -180,8 +180,8 @@ impl QueryContext {
         let schema = Schema::new(frame.schema().fields().clone());
         // The plan's limit stops the stream at `limit + 1` rows. The caller's
         // timeout drops this future, which drops the stream and cancels the query.
-        let mut stream = frame
-            .execute_stream()
+        let mut stream = self
+            .execute_stream(frame)
             .await
             .map_err(|error| self.fail(error))?;
         let (batches, truncated) = self
@@ -316,8 +316,8 @@ impl QueryContext {
                 ExportBody::Parquet(Box::new(encode::ParquetEncoder::new(&schema)?))
             }
         };
-        let inner = frame
-            .execute_stream()
+        let inner = self
+            .execute_stream(frame)
             .await
             .map_err(|error| self.fail(error))?;
         if tokio::time::Instant::now() >= deadline {

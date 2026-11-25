@@ -1058,7 +1058,7 @@ async fn collect(
     plan: &Plan,
     keys: Keys,
 ) -> Result<Vec<Row>, RunError> {
-    let batches = frame.collect().await.map_err(|error| ctx.fail(error))?;
+    let batches = ctx.collect(frame).await.map_err(|error| ctx.fail(error))?;
     read_rows(&batches, plan, keys)
 }
 
@@ -1775,6 +1775,7 @@ mod tests {
                 optimizer_rules: Vec::new(),
                 suspects: crate::verify::Suspects::detached(),
                 visible_from: None,
+                executor: crate::test_support::query_runtime(),
             },
             None,
         )

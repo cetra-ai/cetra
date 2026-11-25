@@ -35,6 +35,7 @@ use crate::filter::FilterView;
 use crate::hooks::Hooks;
 use crate::memtable::Memtable;
 use crate::objects::OBJECT_STORE_URL;
+use crate::query_runtime::QueryRuntime;
 use crate::read_cache::{BLOCK, CacheStore, ReadCache};
 use crate::read_state::ReadState;
 use crate::verify::{VerifyQueue, verify_file};
@@ -279,6 +280,16 @@ pub(crate) fn runtime() -> &'static tokio::runtime::Runtime {
     })
 }
 
+/// The query runtime the entries' queries run on (D-R-39).
+fn query_runtime() -> &'static QueryRuntime {
+    static RUNTIME: OnceLock<QueryRuntime> = OnceLock::new();
+    RUNTIME.get_or_init(|| {
+        // Harness setup, not input-dependent.
+        QueryRuntime::new(NonZeroUsize::new(2).expect("2 is not zero"))
+            .expect("build the fuzz query runtime")
+    })
+}
+
 /// One day in nanoseconds.
 const DAY_NS: i64 = 86_400 * 1_000_000_000;
 
@@ -370,6 +381,7 @@ pub(crate) fn parquet_query(
         two(),
         DAY_NS,
         &verify,
+        query_runtime(),
     )
     .expect("a query over one file plans");
     let ctx = QueryContext::new(query, None).expect("the query context builds");
@@ -577,6 +589,7 @@ fn run_filter(view: FilterView, text: &str) {
         two(),
         DAY_NS,
         &verify,
+        query_runtime(),
     )
     // Harness setup, not input-dependent.
     .expect("a query over empty tables plans");
@@ -593,7 +606,7 @@ fn run_filter(view: FilterView, text: &str) {
         let Ok(frame) = filter.apply(frame, &ctx).await else {
             return;
         };
-        let _ = frame.collect().await;
+        let _ = ctx.collect(frame).await;
     });
 }
 

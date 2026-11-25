@@ -233,7 +233,7 @@ async fn extras(
             ],
         )
         .map_err(classify)?;
-    let batches = frame.collect().await.map_err(|error| ctx.fail(error))?;
+    let batches = ctx.collect(frame).await.map_err(|error| ctx.fail(error))?;
     Ok(batches
         .into_iter()
         .filter(|batch| batch.num_rows() > 0)
@@ -291,8 +291,8 @@ pub(crate) async fn filtered_session_ids(
         .await?
         .select(vec![col(traces::SESSION_ID)])
         .map_err(classify)?;
-    let mut stream = frame
-        .execute_stream()
+    let query_frame = frame;
+    let mut stream = ctx.execute_stream(query_frame)
         .await
         .map_err(|error| ctx.fail(error))?;
     let mut found = BTreeSet::new();
@@ -339,7 +339,7 @@ async fn list(ctx: &QueryContext, request: &SessionListRequest<'_>) -> Result<Pa
         .map_err(classify)?
         .limit(0, Some(request.limit + 1))
         .map_err(classify)?;
-    let batches = frame.collect().await.map_err(|error| ctx.fail(error))?;
+    let batches = ctx.collect(frame).await.map_err(|error| ctx.fail(error))?;
     assemble(
         batches,
         request.limit,
@@ -368,14 +368,14 @@ async fn load(
     let plan = scoped.logical_plan().clone();
     let state = ctx.session().state();
     let session_plan = sessions_from_traces(plan.clone()).map_err(RunError::Internal)?;
-    let session = DataFrame::new(state.clone(), session_plan)
-        .collect()
+    let query_frame = DataFrame::new(state.clone(), session_plan);
+    let session = ctx.collect(query_frame)
         .await
         .map_err(|error| ctx.fail(error))?;
     let Some(session) = single_row(&session)? else {
         return Ok(None);
     };
-    let turns = DataFrame::new(state, plan)
+    let query_frame = DataFrame::new(state, plan)
         .sort(order_by(
             traces::START_TIME,
             &[traces::TRACE_ID],
@@ -383,8 +383,8 @@ async fn load(
         ))
         .map_err(classify)?
         .limit(0, Some(MAX_SESSION_TURNS + 1))
-        .map_err(classify)?
-        .collect()
+        .map_err(classify)?;
+    let turns = ctx.collect(query_frame)
         .await
         .map_err(|error| ctx.fail(error))?;
     let (turns, truncated) = cap_rows(turns, MAX_SESSION_TURNS);
@@ -443,7 +443,7 @@ async fn root_payloads(
             col(spans::OUTPUT_FORMAT),
         ])
         .map_err(classify)?;
-    joined.collect().await.map_err(|error| ctx.fail(error))
+    ctx.collect(joined).await.map_err(|error| ctx.fail(error))
 }
 
 fn row_count(batches: &[RecordBatch]) -> usize {
