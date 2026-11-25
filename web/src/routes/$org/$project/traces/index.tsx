@@ -52,7 +52,7 @@ import { SavedViewsMenu } from "@/components/saved-views/saved-views-menu";
 import { useProject } from "@/components/shell/project-context";
 import { Filmstrip } from "@/components/trace/filmstrip";
 import { SplitPane } from "@/components/trace/split-pane";
-import { selectionTotals, totalsOf, TraceTotalsLine } from "@/components/trace/trace-totals";
+import { selectionTotals, TraceTotalsLine, totalsOf } from "@/components/trace/trace-totals";
 import { TraceView } from "@/components/trace/trace-view";
 import { TracesHistogram } from "@/components/trace/traces-histogram";
 import {
