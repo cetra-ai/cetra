@@ -3,6 +3,7 @@
 
 pub mod cases;
 pub mod harness;
+pub mod project;
 pub mod read;
 pub mod writes;
 
@@ -13,6 +14,8 @@ pub async fn cmd(args: &[String]) -> crate::R<()> {
         Some("import") => cases::import_cmd(&args[1..]),
         Some("split") => cases::split_cmd(&args[1..]),
         Some("flush-input") => cases::flush_input_cmd(&args[1..]),
+        Some("project") => project::project_cmd(&args[1..]).await,
+        Some("layout") => project::layout_cmd(&args[1..]),
         Some("run") => harness::run_cmd(&args[1..]).await,
         Some("one") => harness::one_cmd(&args[1..]).await,
         _ => Err(crate::USAGE.into()),

@@ -768,7 +768,7 @@ pub fn split_cmd(args: &[String]) -> crate::R<()> {
 }
 
 /// The `.arrow` files of `<dir>/input/`, in name order.
-fn input_paths(dir: &Path) -> crate::R<Vec<PathBuf>> {
+pub(crate) fn input_paths(dir: &Path) -> crate::R<Vec<PathBuf>> {
     let mut paths: Vec<PathBuf> = fs::read_dir(dir.join("input"))?
         .map(|e| e.map(|e| e.path()))
         .collect::<Result<_, _>>()?;
