@@ -209,7 +209,7 @@ async fn list(ctx: &QueryContext, request: &UserListRequest<'_>) -> Result<Page,
         .map_err(classify)?
         .limit(0, Some(request.limit + 1))
         .map_err(classify)?;
-    let batches = frame.collect().await.map_err(|error| ctx.fail(error))?;
+    let batches = ctx.collect(frame).await.map_err(|error| ctx.fail(error))?;
     assemble(
         batches,
         request.limit,
@@ -368,7 +368,7 @@ async fn activity(
             vec![count(lit(1_i64)).alias(TRACE_COUNT)],
         )
         .map_err(classify)?;
-    let batches = frame.collect().await.map_err(|error| ctx.fail(error))?;
+    let batches = ctx.collect(frame).await.map_err(|error| ctx.fail(error))?;
     Ok(non_empty(batches))
 }
 
@@ -429,7 +429,7 @@ async fn scores_of(ctx: &QueryContext, base: &DataFrame) -> Result<Vec<RecordBat
             col(scores::DATA_TYPE).sort(true, false),
         ])
         .map_err(classify)?;
-    let batches = frame.collect().await.map_err(|error| ctx.fail(error))?;
+    let batches = ctx.collect(frame).await.map_err(|error| ctx.fail(error))?;
     Ok(non_empty(batches))
 }
 
@@ -452,7 +452,7 @@ async fn metadata_of(ctx: &QueryContext, base: &DataFrame) -> Result<Vec<RecordB
         .map_err(classify)?
         .select(vec![col(traces::USER_ID), col(traces::METADATA)])
         .map_err(classify)?;
-    let batches = frame.collect().await.map_err(|error| ctx.fail(error))?;
+    let batches = ctx.collect(frame).await.map_err(|error| ctx.fail(error))?;
     Ok(non_empty(batches))
 }
 
@@ -503,15 +503,16 @@ async fn load(
         .map_err(classify)?
         .logical_plan()
         .clone();
-    let user = aggregate_users(DataFrame::new(state.clone(), user_plan.clone()))?
-        .collect()
+    let query_frame = aggregate_users(DataFrame::new(state.clone(), user_plan.clone()))?;
+    let user = ctx
+        .collect(query_frame)
         .await
         .map_err(|error| ctx.fail(error))?;
     let Some(user) = single_row(&user)? else {
         return Ok(None);
     };
     let sessions = user_sessions_plan(&state, excluded_plan, user_plan)?;
-    let sessions = DataFrame::new(state, sessions)
+    let query_frame = DataFrame::new(state, sessions)
         .sort(order_by(
             traces::START_TIME,
             &[traces::SESSION_ID],
@@ -519,8 +520,9 @@ async fn load(
         ))
         .map_err(classify)?
         .limit(0, Some(MAX_USER_SESSIONS))
-        .map_err(classify)?
-        .collect()
+        .map_err(classify)?;
+    let sessions = ctx
+        .collect(query_frame)
         .await
         .map_err(|error| ctx.fail(error))?;
     let sessions: Vec<RecordBatch> = sessions

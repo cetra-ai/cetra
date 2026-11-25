@@ -172,7 +172,7 @@ async fn means_of(
             ],
             false,
         ));
-    let batches = ctx
+    let query_frame = ctx
         .session()
         .table("scores")
         .await
@@ -190,8 +190,9 @@ async fn means_of(
                 count(lit(1_i64)).alias("count"),
             ],
         )
-        .map_err(classify)?
-        .collect()
+        .map_err(classify)?;
+    let batches = ctx
+        .collect(query_frame)
         .await
         .map_err(|error| ctx.fail(error))?;
     let mut found = Vec::new();
@@ -259,8 +260,9 @@ async fn scores_of(
         .map_err(classify)?
         .limit(0, Some(MAX_EXPERIMENT_SCORES + 1))
         .map_err(classify)?;
-    let mut stream = frame
-        .execute_stream()
+    let query_frame = frame;
+    let mut stream = ctx
+        .execute_stream(query_frame)
         .await
         .map_err(|error| ctx.fail(error))?;
     let mut found = Vec::new();
@@ -335,8 +337,9 @@ async fn traces_of(
         .map_err(classify)?
         .limit(0, Some(MAX_EXPERIMENT_TRACES + 1))
         .map_err(classify)?;
-    let mut stream = frame
-        .execute_stream()
+    let query_frame = frame;
+    let mut stream = ctx
+        .execute_stream(query_frame)
         .await
         .map_err(|error| ctx.fail(error))?;
     let mut found = Vec::new();

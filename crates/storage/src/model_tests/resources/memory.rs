@@ -152,6 +152,7 @@ fn small_config(data_dir: &Path) -> StorageConfig {
             initial_memory: ByteSize::mib(16),
             metadata_cache_bytes: ByteSize::mib(64),
             target_partitions: 2,
+            threads: 2,
             ..QueryConfig::default()
         },
         anchor: Default::default(),

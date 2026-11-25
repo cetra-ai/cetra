@@ -40,7 +40,10 @@ pub(super) fn model_config(dir: &std::path::Path) -> StorageConfig {
             ..FlushConfig::default()
         },
         memtable: MemtableConfig::default(),
-        query: QueryConfig::default(),
+        query: QueryConfig {
+            threads: 2,
+            ..QueryConfig::default()
+        },
         anchor: Default::default(),
         gc: Default::default(),
         compaction: CompactionConfig {

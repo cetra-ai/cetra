@@ -1017,6 +1017,7 @@ fn no_rule(query: &ProjectQuery) -> QueryContext {
         optimizer_rules: Vec::<Arc<dyn PhysicalOptimizerRule + Send + Sync>>::new(),
         suspects: query.suspects.clone(),
         visible_from: None,
+        executor: query.executor.clone(),
     };
     QueryContext::new(source, None).unwrap()
 }

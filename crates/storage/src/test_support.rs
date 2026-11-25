@@ -30,6 +30,7 @@ use datafusion::physical_plan::ExecutionPlan;
 
 use crate::Storage;
 use crate::config::StorageConfig;
+use crate::query_runtime::QueryRuntime;
 use crate::reads::{
     Agg, Bucket, BucketWidth, Measure, Shape, WidgetData, WidgetQuery, WidgetRequest, WidgetSource,
     widget_query,
@@ -313,6 +314,17 @@ pub(crate) fn score_rows(scores: &[Score]) -> RecordBatch {
     scores_to_record_batch(scores).unwrap_or_else(|error| panic!("scores batch: {error}"))
 }
 
+/// One query runtime for every test that builds a `ProjectQuery` by hand.
+pub(crate) fn query_runtime() -> QueryRuntime {
+    static RUNTIME: std::sync::OnceLock<QueryRuntime> = std::sync::OnceLock::new();
+    RUNTIME
+        .get_or_init(|| {
+            QueryRuntime::new(NonZeroUsize::new(2).expect("2 is not zero"))
+                .expect("the test query runtime builds")
+        })
+        .clone()
+}
+
 pub(crate) fn example_query() -> ProjectQuery {
     let spans = dataset_spans();
     let scores = dataset_scores();
@@ -325,6 +337,7 @@ pub(crate) fn example_query() -> ProjectQuery {
         optimizer_rules: Vec::new(),
         suspects: crate::verify::Suspects::detached(),
         visible_from: None,
+        executor: query_runtime(),
     }
 }
 

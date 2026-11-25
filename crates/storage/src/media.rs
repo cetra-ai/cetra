@@ -21,6 +21,7 @@ use crate::catalog::Committer;
 use crate::error::{MediaError, QueryError};
 use crate::hooks::{HookPoint, Hooks};
 use crate::objects::Objects;
+use crate::query_runtime::QueryRuntime;
 use crate::read_state::Published;
 use crate::verify::VerifyQueue;
 use crate::{QueryOptions, project_query};
@@ -73,6 +74,8 @@ pub(crate) struct MediaGc {
     pub(crate) objects: Arc<Objects>,
     pub(crate) published: Arc<Published>,
     pub(crate) runtime: Arc<RuntimeEnv>,
+    /// Where the live-set scan runs (D-R-39).
+    pub(crate) query_runtime: QueryRuntime,
     pub(crate) target_partitions: NonZeroUsize,
     /// `query.trace_lookback` in ns, for [`project_query`].
     pub(crate) lookback: i64,
@@ -232,6 +235,7 @@ impl MediaGc {
             self.target_partitions,
             self.lookback,
             &self.verify,
+            &self.query_runtime,
         )
         .map_err(|error| match error {
             QueryError::DataFusion(error) => MediaError::Query(error),
@@ -245,17 +249,15 @@ impl MediaGc {
             SessionConfig::new().with_target_partitions(self.target_partitions.get()),
             Arc::clone(&self.runtime),
         );
-        let batches = context
+        let frame = context
             .read_table(Arc::clone(&query.spans))
             .map_err(MediaError::from)?
             .select_columns(&["media_refs"])
-            .map_err(MediaError::from)?
-            .collect()
-            .await
-            .map_err(|error| {
-                query.suspects.report(&error);
-                MediaError::from(error)
-            })?;
+            .map_err(MediaError::from)?;
+        let batches = self.query_runtime.collect(frame).await.map_err(|error| {
+            query.suspects.report(&error);
+            MediaError::from(error)
+        })?;
         let mut live = HashSet::new();
         for batch in &batches {
             insert_media_refs(batch, &mut live)?;

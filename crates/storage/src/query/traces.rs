@@ -2837,6 +2837,7 @@ mod tests {
 
             suspects: crate::verify::Suspects::detached(),
             visible_from: None,
+            executor: crate::test_support::query_runtime(),
         };
         (
             QueryContext::new(query, None).unwrap(),

@@ -547,7 +547,7 @@ async fn values(
         col(VALUE).is_null()
     };
     let missing_count = when(missing, lit(1_i64)).end().map_err(classify)?;
-    let totals = base
+    let query_frame = base
         .clone()
         .aggregate(
             vec![],
@@ -556,8 +556,9 @@ async fn values(
                 count(missing_count).alias(MISSING),
             ],
         )
-        .map_err(classify)?
-        .collect()
+        .map_err(classify)?;
+    let totals = ctx
+        .collect(query_frame)
         .await
         .map_err(|error| ctx.fail(error))?;
     let (total, missing) = match first_row(&totals) {
@@ -595,7 +596,7 @@ async fn values(
             )))
             .map_err(classify)?;
     }
-    let rows = groups
+    let query_frame = groups
         .aggregate(vec![col(VALUE)], vec![count(lit(1_i64)).alias(COUNT)])
         .map_err(classify)?
         .sort(vec![
@@ -604,8 +605,9 @@ async fn values(
         ])
         .map_err(classify)?
         .limit(0, Some(limit + 1))
-        .map_err(classify)?
-        .collect()
+        .map_err(classify)?;
+    let rows = ctx
+        .collect(query_frame)
         .await
         .map_err(|error| ctx.fail(error))?;
 
@@ -658,7 +660,7 @@ async fn histogram(
     frame: DataFrame,
     name: &str,
 ) -> Result<FacetData, RunError> {
-    let stats = frame
+    let query_frame = frame
         .clone()
         .select(vec![finite_number(name)?.alias(X)])
         .map_err(classify)?
@@ -674,8 +676,9 @@ async fn histogram(
                 percentile(X, 0.99).alias(P99),
             ],
         )
-        .map_err(classify)?
-        .collect()
+        .map_err(classify)?;
+    let stats = ctx
+        .collect(query_frame)
         .await
         .map_err(|error| ctx.fail(error))?;
     let Some(row) = first_row(&stats) else {
@@ -748,7 +751,7 @@ async fn buckets(
     let index = when(x.clone().gt_eq(lit(p99)), lit(HISTOGRAM_BUCKETS as i64))
         .otherwise(clamped)
         .map_err(classify)?;
-    let counted = frame
+    let query_frame = frame
         .select(vec![finite_number(name)?.alias(X)])
         .map_err(classify)?
         .filter(col(X).is_not_null())
@@ -756,8 +759,9 @@ async fn buckets(
         .select(vec![index.alias(BUCKET)])
         .map_err(classify)?
         .aggregate(vec![col(BUCKET)], vec![count(lit(1_i64)).alias(COUNT)])
-        .map_err(classify)?
-        .collect()
+        .map_err(classify)?;
+    let counted = ctx
+        .collect(query_frame)
         .await
         .map_err(|error| ctx.fail(error))?;
 
@@ -857,6 +861,7 @@ mod tests {
                 optimizer_rules: Vec::new(),
                 suspects: crate::verify::Suspects::detached(),
                 visible_from: None,
+                executor: crate::test_support::query_runtime(),
             },
             None,
         )

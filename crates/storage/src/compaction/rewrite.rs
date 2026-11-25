@@ -196,14 +196,17 @@ impl Compactor {
             };
             let compactor = Arc::clone(self);
             let tombstones = Arc::clone(&tombstones);
-            set.spawn(async move {
-                let _permit = permit;
-                let _guard = guard;
-                (
-                    file.id,
-                    check_and_rewrite(&compactor, &tombstones, &file, policy).await,
-                )
-            });
+            set.spawn_on(
+                async move {
+                    let _permit = permit;
+                    let _guard = guard;
+                    (
+                        file.id,
+                        check_and_rewrite(&compactor, &tombstones, &file, policy).await,
+                    )
+                },
+                self.executor.handle(),
+            );
         }
         let mut clean: Vec<(FileId, u64)> = Vec::new();
         while let Some(joined) = set.join_next().await {

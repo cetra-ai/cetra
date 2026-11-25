@@ -10,6 +10,7 @@ use crate::catalog::{CatalogEdit, FileId, FileMeta, FileTable};
 use crate::compaction::job::{ClaimGuard, Compactor};
 use crate::compaction::plan::{Job, JobKind, Policy};
 use crate::hooks::HookPoint;
+use crate::query_runtime::Stopped;
 use crate::read_cache::cached_name;
 use crate::read_state::publish_catalog;
 use crate::verify::{Verdict, verify_file};
@@ -263,15 +264,32 @@ impl Compactor {
                 whole_partition: false,
                 drop_deleted: false,
             };
-            if let Err(error) = self.run(job, policy).await {
-                report.failed += 1;
-                tracing::warn!(
-                    file_id = %id,
-                    error = error.label(),
-                    "rebuilding a corrupt traces file failed"
-                );
-                self.verify.requeue(id);
-                return;
+            let compactor = Arc::clone(self);
+            let outcome = self
+                .executor
+                .run(async move { compactor.run(job, policy).await })
+                .await;
+            match outcome {
+                Ok(Ok(_)) => {}
+                Ok(Err(error)) => {
+                    report.failed += 1;
+                    tracing::warn!(
+                        file_id = %id,
+                        error = error.label(),
+                        "rebuilding a corrupt traces file failed"
+                    );
+                    self.verify.requeue(id);
+                    return;
+                }
+                Err(Stopped) => {
+                    report.failed += 1;
+                    tracing::warn!(
+                        file_id = %id,
+                        "rebuilding a corrupt traces file failed: the query runtime stopped"
+                    );
+                    self.verify.requeue(id);
+                    return;
+                }
             }
         }
         report.repaired += 1;

@@ -178,7 +178,7 @@ async fn span_aggregates(
     request: &PromptMetricsRequest<'_>,
     ids: &LogicalPlan,
 ) -> Result<Vec<PromptVersionMetrics>, RunError> {
-    let batches = linked_spans(ctx, request, ids)
+    let query_frame = linked_spans(ctx, request, ids)
         .await?
         .aggregate(
             vec![col(spans::PROMPT_VERSION)],
@@ -194,8 +194,9 @@ async fn span_aggregates(
                 avg(col(spans::OUTPUT_TOKENS)).alias(OUTPUT_AVG),
             ],
         )
-        .map_err(classify)?
-        .collect()
+        .map_err(classify)?;
+    let batches = ctx
+        .collect(query_frame)
         .await
         .map_err(|error| ctx.fail(error))?;
     let mut found = Vec::new();
@@ -287,7 +288,7 @@ async fn score_means(
         .select(versioned_score_columns(TRACE_VERSION))
         .map_err(classify)?;
 
-    let batches = span_scores
+    let query_frame = span_scores
         .union(trace_scores)
         .map_err(classify)?
         .aggregate(
@@ -297,8 +298,9 @@ async fn score_means(
                 count(lit(1_i64)).alias(COUNT),
             ],
         )
-        .map_err(classify)?
-        .collect()
+        .map_err(classify)?;
+    let batches = ctx
+        .collect(query_frame)
         .await
         .map_err(|error| ctx.fail(error))?;
     let mut found = Vec::new();
@@ -390,6 +392,7 @@ mod tests {
             optimizer_rules: Vec::new(),
             suspects: crate::verify::Suspects::detached(),
             visible_from: None,
+            executor: crate::test_support::query_runtime(),
         };
         QueryContext::new(query, None).expect("context")
     }

@@ -16,15 +16,19 @@ use std::num::NonZeroUsize;
 use std::sync::{Arc, Mutex};
 
 use arrow::datatypes::{DataType, Schema};
+use arrow::record_batch::RecordBatch;
 use datafusion::common::{DFSchema, DFSchemaRef};
+use datafusion::dataframe::DataFrame;
 use datafusion::datasource::{TableProvider, ViewTable, provider_as_source};
 use datafusion::error::DataFusionError;
 use datafusion::execution::runtime_env::RuntimeEnv;
 use datafusion::logical_expr::{Expr, LogicalPlan, LogicalPlanBuilder, col, lit};
 use datafusion::physical_optimizer::PhysicalOptimizerRule;
+use datafusion::physical_plan::SendableRecordBatchStream;
 use datafusion::prelude::{SessionContext, cast, encode};
 
 use crate::query_error::{RunError, classify};
+use crate::query_runtime::QueryRuntime;
 use crate::verify::Suspects;
 
 // Q6 reads this limit when it tokenizes caller text.
@@ -61,6 +65,8 @@ pub struct ProjectQuery {
     /// above stay unfiltered: storage's own reads (compaction, media GC, retention) build
     /// their options with `None`.
     pub visible_from: Option<i64>,
+    /// Where this query's DataFusion work runs (D-R-39).
+    pub executor: QueryRuntime,
 }
 
 /// Inclusive `from`, exclusive `to`, nanoseconds since the Unix epoch, UTC (D101).
@@ -171,6 +177,8 @@ pub struct QueryContext {
     registered: Mutex<HashSet<ViewName>>,
     /// Files this query's scans read, reported when execution fails on a corrupt one.
     suspects: Suspects,
+    /// Where the execution of this query runs (D-R-39).
+    executor: QueryRuntime,
 }
 
 impl std::fmt::Debug for QueryContext {
@@ -193,6 +201,7 @@ impl QueryContext {
     /// Returns [`RunError::Internal`] when a view cannot be planned or registered.
     pub fn new(source: ProjectQuery, window: Option<TimeWindow>) -> Result<Self, RunError> {
         let suspects = source.suspects;
+        let executor = source.executor;
         let visible_from = source.visible_from;
         let state = session::session_state(
             source.runtime,
@@ -240,6 +249,7 @@ impl QueryContext {
                 ViewName::Scores,
             ])),
             suspects,
+            executor,
         })
     }
 
@@ -254,6 +264,23 @@ impl QueryContext {
     pub(crate) fn fail(&self, error: DataFusionError) -> RunError {
         self.suspects.report(&error);
         classify(error)
+    }
+
+    /// `frame.collect()`, run on the query runtime (D-R-39).
+    pub(crate) async fn collect(
+        &self,
+        frame: DataFrame,
+    ) -> Result<Vec<RecordBatch>, DataFusionError> {
+        self.executor.collect(frame).await
+    }
+
+    /// `frame.execute_stream()`, run on the query runtime (D-R-39). Dropping the stream
+    /// cancels the query.
+    pub(crate) async fn execute_stream(
+        &self,
+        frame: DataFrame,
+    ) -> Result<SendableRecordBatchStream, DataFusionError> {
+        self.executor.execute_stream(frame).await
     }
 
     /// Register a server-built table under its view name.
@@ -840,6 +867,7 @@ mod tests {
 
                 suspects: Suspects::detached(),
                 visible_from: None,
+                executor: crate::test_support::query_runtime(),
             },
             Some(window),
         )
@@ -979,5 +1007,69 @@ mod tests {
             i64_cell(&batches[0], 0, "n"),
             Some(dataset_spans().len() as i64)
         );
+    }
+
+    /// A scalar UDF that returns the name of the thread it runs on, one value per row.
+    fn thread_name_udf() -> datafusion::logical_expr::ScalarUDF {
+        use datafusion::logical_expr::{ColumnarValue, Volatility, create_udf};
+        create_udf(
+            "thread_name",
+            vec![DataType::Int64],
+            DataType::Utf8,
+            Volatility::Volatile,
+            Arc::new(
+                |args: &[ColumnarValue]| -> datafusion::error::Result<ColumnarValue> {
+                    let name = std::thread::current().name().unwrap_or("none").to_owned();
+                    let rows = match args.first() {
+                        Some(ColumnarValue::Array(array)) => array.len(),
+                        _ => 1,
+                    };
+                    let names = arrow::array::StringArray::from(vec![Some(name); rows]);
+                    Ok(ColumnarValue::Array(Arc::new(names)))
+                },
+            ),
+        )
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_query_executes_on_the_query_runtime() {
+        use futures::StreamExt;
+
+        let ctx = context();
+        ctx.session().register_udf(thread_name_udf());
+        let sql = format!("SELECT thread_name({DURATION_NS}) AS t FROM spans");
+
+        // Collected through the context: every row was computed on the query runtime.
+        let frame = ctx.session().sql(&sql).await.expect("the query plans");
+        let batches = ctx.collect(frame).await.expect("the query collects");
+        let mut collected = 0;
+        for batch in &batches {
+            let names = batch
+                .column_by_name("t")
+                .expect("column t")
+                .as_string::<i32>();
+            for name in names.iter() {
+                assert_eq!(name, Some("cetra-query"));
+                collected += 1;
+            }
+        }
+        assert_eq!(collected, dataset_spans().len());
+
+        // The same query streamed through the context.
+        let frame = ctx.session().sql(&sql).await.expect("the query plans");
+        let mut stream = ctx.execute_stream(frame).await.expect("the query streams");
+        let mut streamed = 0;
+        while let Some(batch) = stream.next().await {
+            let batch = batch.expect("a streamed batch");
+            let names = batch
+                .column_by_name("t")
+                .expect("column t")
+                .as_string::<i32>();
+            for name in names.iter() {
+                assert_eq!(name, Some("cetra-query"));
+                streamed += 1;
+            }
+        }
+        assert_eq!(streamed, collected);
     }
 }

@@ -66,6 +66,7 @@ pub(crate) mod partials;
 pub(crate) mod projects;
 pub mod query;
 mod query_error;
+mod query_runtime;
 mod query_text;
 pub(crate) mod read_cache;
 mod reads;
@@ -93,6 +94,7 @@ pub type CopyCancel = Arc<Mutex<bool>>;
 pub use crate::media::{MediaBlob, MediaRead, MediaReport};
 pub use crate::read_cache::ReadCacheStats;
 pub use query_error::{InvalidQuery, Position, RunError};
+pub use query_runtime::QueryRuntime;
 pub use reads::{
     ACTIVITY_BUCKETS, Agg, AlertMeasure, AlertValue, AlertValueRequest, Breakdown, Bucket,
     BucketWidth, DEFAULT_BREAKDOWN_LIMIT, ERROR_SPAN_COLUMNS, ERROR_TRACE_COUNT, ErrorSpansRequest,
@@ -280,6 +282,8 @@ pub struct Storage {
     /// `wal/spans` and `wal/scores` under the data directory, measured by [`Self::stats`].
     wal_dirs: [PathBuf; 2],
     runtime: Arc<RuntimeEnv>,
+    /// The query runtime: every query's and compaction job's DataFusion work (D-R-39).
+    query_runtime: QueryRuntime,
     /// Process-wide query memory (spec 03 §6). Each query's pool takes from it.
     memory: Arc<memory::SharedPool>,
     /// What [`Self::query`] admits each query with.
@@ -499,6 +503,12 @@ impl Storage {
             tombstones,
             projects,
         }));
+        let query_runtime =
+            QueryRuntime::new(NonZeroUsize::new(config.query.threads).unwrap_or(NonZeroUsize::MIN))
+                .map_err(|error| {
+                    tracing::error!(%error, "building the query runtime");
+                    OpenError::Runtime
+                })?;
         // Compaction gets a runtime of its own, so its memory pool is
         // independent of the query runtime's.
         let compactor = {
@@ -537,6 +547,7 @@ impl Storage {
                         .unwrap_or(i64::MAX),
                 },
                 share_hooks(&hooks),
+                query_runtime.clone(),
             ))
         };
         let spans = spawn_writer(
@@ -607,6 +618,7 @@ impl Storage {
             objects: Arc::clone(&objects),
             published: Arc::clone(&published),
             runtime: Arc::clone(&runtime),
+            query_runtime: query_runtime.clone(),
             target_partitions,
             lookback,
             hooks: share_hooks(&hooks),
@@ -654,6 +666,7 @@ impl Storage {
                 data_dir.join("wal").join(Table::Scores.name()),
             ],
             runtime,
+            query_runtime,
             memory,
             query_memory,
             replayed: [recovered.spans_records, recovered.scores_records],
@@ -721,6 +734,7 @@ impl Storage {
             self.target_partitions,
             self.lookback,
             &self.verify,
+            &self.query_runtime,
         )
     }
 
@@ -1427,6 +1441,7 @@ impl Drop for Storage {
 
 /// The body of [`Storage::query`]: providers for `project` over one published
 /// `state`. `Storage::query` and the media collection's live set both call it.
+#[allow(clippy::too_many_arguments)] // the published state, the request, and the query's shared resources
 pub(crate) fn project_query(
     state: &ReadState,
     project: ProjectId,
@@ -1435,6 +1450,7 @@ pub(crate) fn project_query(
     target_partitions: NonZeroUsize,
     lookback: i64,
     verify: &Arc<VerifyQueue>,
+    executor: &QueryRuntime,
 ) -> Result<ProjectQuery, QueryError> {
     let partitions = target_partitions.get();
     let suspects = Suspects::new(Arc::clone(verify));
@@ -1480,6 +1496,7 @@ pub(crate) fn project_query(
             optimizer_rules: vec![Arc::new(query::TraceListRule)],
             suspects,
             visible_from: options.visible_from(),
+            executor: executor.clone(),
         });
     }
     let deletions = state.tombstones.for_project(project);
@@ -1547,6 +1564,7 @@ pub(crate) fn project_query(
         optimizer_rules: vec![Arc::new(query::TraceListRule)],
         suspects,
         visible_from: options.visible_from(),
+        executor: executor.clone(),
     })
 }
 

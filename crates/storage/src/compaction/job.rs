@@ -23,6 +23,7 @@ use crate::error::{CommitError, CompactionError, ObjectError};
 use crate::hooks::{HookPoint, Hooks};
 use crate::objects::Objects;
 use crate::parquet::{FileWriter, footer_size_from_tail, time_column, write_file};
+use crate::query_runtime::QueryRuntime;
 use crate::read_state::{Published, publish_catalog};
 use crate::verify::{VerifyQueue, may_be_corrupt};
 
@@ -46,6 +47,8 @@ pub(crate) struct Compactor {
     /// before committing.
     pub(super) stopping: AtomicBool,
     pub(super) hooks: Hooks,
+    /// Where the jobs run (D-R-39).
+    pub(super) executor: QueryRuntime,
     /// Deletions already warned about as past `max_delay` (spec 03 §7): each
     /// is logged once, however many passes see it.
     pub(super) overdue_logged: Mutex<HashSet<Uuid>>,
@@ -154,6 +157,7 @@ impl Compactor {
         policy: Policy,
         limits: CompactorLimits,
         hooks: Hooks,
+        executor: QueryRuntime,
     ) -> Self {
         Self {
             committer,
@@ -168,6 +172,7 @@ impl Compactor {
             claims: Mutex::new(HashSet::new()),
             stopping: AtomicBool::new(false),
             hooks,
+            executor,
             overdue_logged: Mutex::new(HashSet::new()),
         }
     }
@@ -210,55 +215,58 @@ impl Compactor {
             };
             let compactor = Arc::clone(self);
             let policy = *self.policy.lock().unwrap_or_else(PoisonError::into_inner);
-            set.spawn(async move {
-                let _permit = permit;
-                let _guard = guard;
-                let table = job.table.as_str();
-                let project = job.project.to_string();
-                let day = job.day.to_string();
-                let kind = kind_label(job.kind);
-                let inputs = job.inputs.len();
-                let outcome = compactor.run(job, policy).await;
-                if let Err(error) = &outcome {
-                    // A conflict's text is its static reason. Every other error
-                    // is named by its label only: a DataFusion error raised by a
-                    // plan holding the covered-row predicate may quote its
-                    // literals (spec 03 §7).
-                    if matches!(error, CompactionError::Commit(CommitError::Conflict { .. })) {
-                        tracing::info!(
-                            table,
-                            project,
-                            day,
-                            kind,
-                            inputs,
-                            %error,
-                            "compaction job lost a conflict; a later pass redoes it"
-                        );
-                    } else if matches!(error, CompactionError::DiskFull) {
-                        tracing::info!(
-                            table,
-                            project,
-                            day,
-                            kind,
-                            inputs,
-                            error = error.label(),
-                            "compaction job deferred: not enough free disk"
-                        );
-                    } else {
-                        tracing::warn!(
-                            table,
-                            project,
-                            day,
-                            kind,
-                            inputs,
-                            error = error.label(),
-                            source = error.read_source(),
-                            "compaction job failed"
-                        );
+            set.spawn_on(
+                async move {
+                    let _permit = permit;
+                    let _guard = guard;
+                    let table = job.table.as_str();
+                    let project = job.project.to_string();
+                    let day = job.day.to_string();
+                    let kind = kind_label(job.kind);
+                    let inputs = job.inputs.len();
+                    let outcome = compactor.run(job, policy).await;
+                    if let Err(error) = &outcome {
+                        // A conflict's text is its static reason. Every other error
+                        // is named by its label only: a DataFusion error raised by a
+                        // plan holding the covered-row predicate may quote its
+                        // literals (spec 03 §7).
+                        if matches!(error, CompactionError::Commit(CommitError::Conflict { .. })) {
+                            tracing::info!(
+                                table,
+                                project,
+                                day,
+                                kind,
+                                inputs,
+                                %error,
+                                "compaction job lost a conflict; a later pass redoes it"
+                            );
+                        } else if matches!(error, CompactionError::DiskFull) {
+                            tracing::info!(
+                                table,
+                                project,
+                                day,
+                                kind,
+                                inputs,
+                                error = error.label(),
+                                "compaction job deferred: not enough free disk"
+                            );
+                        } else {
+                            tracing::warn!(
+                                table,
+                                project,
+                                day,
+                                kind,
+                                inputs,
+                                error = error.label(),
+                                source = error.read_source(),
+                                "compaction job failed"
+                            );
+                        }
                     }
-                }
-                outcome
-            });
+                    outcome
+                },
+                self.executor.handle(),
+            );
         }
 
         let mut report = CompactionReport::default();
@@ -998,6 +1006,38 @@ pub(crate) mod tests {
         drop(storage);
         let storage = Storage::open(config).await.unwrap();
         assert_eq!(storage.catalog_files(crate::wal::Table::Spans).len(), 1);
+        storage.shutdown().await.unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_compaction_job_runs_on_the_query_runtime() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = config_in(dir.path(), quiet_compaction(3), Duration::from_secs(3_600));
+        let mut storage = Storage::open(config.clone()).await.unwrap();
+        for index in 0..3_u8 {
+            let base = at(10, 0, 0) + i64::from(index) * 60 * 1_000_000_000;
+            let batch = span_rows(&[
+                span_row(0, 10 + index, base, base + 1_000_000_000),
+                span_row(1, 20 + index, base + 2_000_000_000, base + 3_000_000_000),
+            ]);
+            storage = flush_cycle(&config, storage, batch).await;
+        }
+        let report = storage.compact(at(11, 0, 0)).await.unwrap();
+        assert_eq!((report.jobs, report.failed), (1, 0), "{report:?}");
+
+        let names = storage
+            .hooks()
+            .thread_names(HookPoint::CompactionAfterWrite);
+        assert!(
+            !names.is_empty(),
+            "no compaction job passed CompactionAfterWrite"
+        );
+        assert!(
+            names
+                .iter()
+                .all(|name| name.as_deref() == Some("cetra-query")),
+            "a compaction job ran off the query runtime: {names:?}"
+        );
         storage.shutdown().await.unwrap();
     }
 

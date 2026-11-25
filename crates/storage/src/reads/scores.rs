@@ -109,7 +109,7 @@ async fn counts(
         keys.push((created.clone() - created.clone() % lit(DAY_NS)).alias(BUCKET));
         order.push(col(BUCKET).sort(true, false));
     }
-    let batches = ctx
+    let query_frame = ctx
         .session()
         .table(LIST)
         .await
@@ -126,8 +126,9 @@ async fn counts(
         )
         .map_err(classify)?
         .sort(order)
-        .map_err(classify)?
-        .collect()
+        .map_err(classify)?;
+    let batches = ctx
+        .collect(query_frame)
         .await
         .map_err(|error| ctx.fail(error))?;
     counts_of(&batches, request)
@@ -349,13 +350,14 @@ fn prepare_score_ids(ids: &[&str]) -> Result<Option<Vec<String>>, RunError> {
 
 async fn by_id(ctx: &QueryContext, keys: &[String]) -> Result<Vec<RecordBatch>, RunError> {
     let keys: Vec<Expr> = keys.iter().map(|key| lit(key.as_str())).collect();
-    ctx.session()
+    let query_frame = ctx
+        .session()
         .table(LIST)
         .await
         .map_err(classify)?
         .filter(col(scores::SCORE_ID).in_list(keys, false))
-        .map_err(classify)?
-        .collect()
+        .map_err(classify)?;
+    ctx.collect(query_frame)
         .await
         .map_err(|error| ctx.fail(error))
 }
@@ -413,7 +415,7 @@ async fn list(ctx: &QueryContext, request: &ScoreListRequest<'_>) -> Result<Page
         .map_err(classify)?
         .limit(0, Some(request.limit + 1))
         .map_err(classify)?;
-    let batches = frame.collect().await.map_err(|error| ctx.fail(error))?;
+    let batches = ctx.collect(frame).await.map_err(|error| ctx.fail(error))?;
     assemble(
         batches,
         request.limit,
@@ -491,7 +493,7 @@ async fn latest(
         ])
         .map_err(classify)?;
     let ranked = rank_latest(frame)?;
-    let batches = ranked
+    let query_frame = ranked
         .filter(col(RANK).eq(lit(ScalarValue::UInt64(Some(1)))))
         .map_err(classify)?
         .select(
@@ -506,8 +508,9 @@ async fn latest(
             col(TARGET_KEY).sort(true, false),
             col(scores::NAME).sort(true, false),
         ])
-        .map_err(classify)?
-        .collect()
+        .map_err(classify)?;
+    let batches = ctx
+        .collect(query_frame)
         .await
         .map_err(|error| ctx.fail(error))?;
     Ok(batches)
@@ -1054,6 +1057,7 @@ mod tests {
 
                 suspects: crate::verify::Suspects::detached(),
                 visible_from: None,
+                executor: crate::test_support::query_runtime(),
             },
             None,
         )

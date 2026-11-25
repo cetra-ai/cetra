@@ -138,6 +138,12 @@ impl StorageConfig {
                 "must be at least 1",
             ));
         }
+        if !(1..=1024).contains(&self.query.threads) {
+            return Err(ConfigError::invalid(
+                "storage.query.threads",
+                "must be from 1 to 1024",
+            ));
+        }
         if !valid_window(self.query.trace_lookback) {
             return Err(ConfigError::invalid(
                 "storage.query.trace_lookback",
@@ -406,6 +412,10 @@ pub struct QueryConfig {
     /// DataFusion `target_partitions`. Defaults to the process parallelism.
     #[serde(default = "default_target_partitions")]
     pub target_partitions: usize,
+    /// Worker threads of the query runtime, which runs every query's and every compaction
+    /// job's DataFusion work (D-R-39). Defaults to the process parallelism.
+    #[serde(default = "default_query_threads")]
+    pub threads: usize,
     /// Bytes of Parquet footer and page-index metadata DataFusion may cache.
     ///
     /// Zero is allowed. [`ByteSize`] cannot represent a negative size.
@@ -438,6 +448,7 @@ impl Default for QueryConfig {
     fn default() -> Self {
         Self {
             target_partitions: default_target_partitions(),
+            threads: default_query_threads(),
             metadata_cache_bytes: default_metadata_cache_bytes(),
             trace_lookback: default_trace_lookback(),
             max_memory_total: None,
@@ -452,6 +463,13 @@ impl Default for QueryConfig {
 fn default_target_partitions() -> usize {
     // `available_parallelism` fails only when the OS cannot report a count.
     // One partition is the minimum `validate` allows.
+    std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(1)
+}
+
+fn default_query_threads() -> usize {
+    // `available_parallelism` fails only when the OS cannot report a count.
     std::thread::available_parallelism()
         .map(|n| n.get())
         .unwrap_or(1)
@@ -844,6 +862,14 @@ mod tests {
                 "storage.query.target_partitions: must be at least 1",
             ),
             (
+                r#"{"data_dir":"/data","query":{"threads":0}}"#,
+                "storage.query.threads: must be from 1 to 1024",
+            ),
+            (
+                r#"{"data_dir":"/data","query":{"threads":1025}}"#,
+                "storage.query.threads: must be from 1 to 1024",
+            ),
+            (
                 r#"{"data_dir":"/data","flush":{"max_bytes":"1KiB"}}"#,
                 "storage.flush.max_bytes: must be at least 1MiB",
             ),
@@ -1034,6 +1060,17 @@ mod tests {
         upper.validate().unwrap();
         assert_eq!(upper.flush.max_age, Duration::from_secs(60 * 60));
         assert_eq!(upper.flush.upload_concurrency, 64);
+    }
+
+    #[test]
+    fn query_threads_bounds_pass_and_default_to_parallelism() {
+        let config = parse(r#"{"data_dir":"/data","query":{"threads":1024}}"#).unwrap();
+        config.validate().unwrap();
+        assert_eq!(config.query.threads, 1024);
+        let default = parse(r#"{"data_dir":"/data"}"#).unwrap();
+        let expected = std::thread::available_parallelism().map_or(1, |n| n.get());
+        assert_eq!(default.query.threads, expected);
+        assert_eq!(QueryConfig::default().threads, expected);
     }
 
     #[test]
