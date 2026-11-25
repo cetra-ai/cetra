@@ -511,6 +511,37 @@ it("previews the occurrences of the chosen issue", async () => {
   expect(requests.at(-1)?.searchParams.get("window")).toBe("1h");
 });
 
+it("previews the occurrences of the chosen source", async () => {
+  const requests: URL[] = [];
+  serveScopeLists();
+  server.use(
+    http.get(ISSUE_PREVIEW, ({ request }) => {
+      requests.push(new URL(request.url));
+      return HttpResponse.json(issuePreviewFixture);
+    }),
+  );
+
+  const { user } = await renderApp(PAGE);
+  await choose(user, "Metric", "Issue occurrences");
+  await choose(user, "Scope", "All issues of a source");
+  await choose(user, "Source", "Errors");
+
+  expect(await screen.findByRole("figure", { name: /Preview of the metric/ })).toBeInTheDocument();
+  expect(requests.at(-1)?.searchParams.get("source_id")).toBe(SOURCE_ID);
+  expect(requests.at(-1)?.searchParams.get("issue_id")).toBeNull();
+});
+
+it("says when the issue preview fails", async () => {
+  serveScopeLists();
+  server.use(http.get(ISSUE_PREVIEW, () => problemResponse(500, "internal")));
+
+  const { user } = await renderApp(PAGE);
+  await choose(user, "Metric", "Issue occurrences");
+  await choose(user, "Issue", ISSUE_LABEL);
+
+  expect(await screen.findByText("The preview could not be loaded.")).toBeInTheDocument();
+});
+
 it("says when the previewed issue no longer exists", async () => {
   serveScopeLists();
   server.use(http.get(ISSUE_PREVIEW, () => problemResponse(404, "not_found")));

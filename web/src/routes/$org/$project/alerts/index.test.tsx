@@ -357,6 +357,61 @@ it("draws an issue occurrence rule's trend once the row is visible", async () =>
   }
 });
 
+it("draws a dash for an issue occurrence rule whose preview fails", async () => {
+  server.use(
+    http.get(RULES, () =>
+      HttpResponse.json({
+        data: [
+          {
+            ...ruleFixture,
+            id: "01900000-0000-7000-8000-000000000520",
+            name: "Issue errors",
+            condition: {
+              metric: "issue_occurrences",
+              window: "1h",
+              comparator: "gt",
+              threshold: 3,
+              issue_id: ISSUE_ID,
+            },
+          },
+        ],
+        next_cursor: null,
+      }),
+    ),
+    http.get(ISSUE_PREVIEW, () => problemResponse(500, "internal")),
+  );
+  const callbacks: IntersectionObserverCallback[] = [];
+  const original = globalThis.IntersectionObserver;
+  globalThis.IntersectionObserver = class {
+    constructor(callback: IntersectionObserverCallback) {
+      callbacks.push(callback);
+    }
+    observe(): void {}
+    unobserve(): void {}
+    disconnect(): void {}
+    takeRecords(): IntersectionObserverEntry[] {
+      return [];
+    }
+  } as unknown as typeof IntersectionObserver;
+  try {
+    await renderApp(PAGE);
+    const table = await screen.findByRole("table", { name: "Alert rules" });
+
+    act(() => {
+      for (const callback of callbacks) {
+        callback([{ isIntersecting: true } as IntersectionObserverEntry], {} as never);
+      }
+    });
+
+    await waitFor(() =>
+      expect(within(table).getByRole("row", { name: /^Issue errors\b/ })).toHaveTextContent("—"),
+    );
+    expect(screen.queryByRole("img", { name: /^Trend of Issue errors/ })).toBeNull();
+  } finally {
+    globalThis.IntersectionObserver = original;
+  }
+});
+
 it("shows a dash in the trend when the widget query fails", async () => {
   server.use(http.post(WIDGET, () => problemResponse(500, "internal")));
 

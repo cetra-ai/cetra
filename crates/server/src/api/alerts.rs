@@ -624,7 +624,8 @@ pub struct IssueAlertPreviewParams {
 /// Occurrence counts of an `issue_occurrences` rule, per bucket as wide as its window (D-K-22).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 pub struct IssueAlertPreview {
-    /// Start of the range, inclusive. JSON is RFC 3339.
+    /// Start of the range, inclusive: the start of the window-wide bucket that holds `to` minus
+    /// the preview span (24 hours, 3 days or 14 days). JSON is RFC 3339.
     #[serde(with = "time_serde")]
     #[schema(value_type = String, format = DateTime)]
     pub from: i64,
@@ -634,7 +635,8 @@ pub struct IssueAlertPreview {
     pub to: i64,
     /// The window, which is the bucket width.
     pub window: AlertWindow,
-    /// One per bucket that overlaps `[from, to)`, oldest first, with no gap.
+    /// One per bucket from `from` to the last one that starts before `to`, oldest first, with no
+    /// gap; only the last one is partial.
     pub points: Vec<IssueAlertPoint>,
 }
 
@@ -645,6 +647,6 @@ pub struct IssueAlertPoint {
     #[serde(with = "time_serde")]
     #[schema(value_type = String, format = DateTime)]
     pub time: i64,
-    /// Live occurrences created in the bucket and in `[from, to)`; 0 when none.
+    /// Live occurrences created in the bucket (before `to` for the last one); 0 when none.
     pub count: u64,
 }

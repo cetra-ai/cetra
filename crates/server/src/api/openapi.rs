@@ -6141,7 +6141,7 @@ fn alert_rule_paths(paths: PathsBuilder) -> PathsBuilder {
         "Preview an issue occurrence rule",
     )
     .description(Some(
-        "Any project member can read. Counts the live occurrences an `issue_occurrences` rule with this scope and window would count, per bucket as wide as the window: over 24 hours for `15m` and `1h`, 3 days for `6h` and 14 days for `24h`, ending now. Exactly one of `issue_id` and `source_id`; windows under 15 minutes are 400. A missing issue or source is 404.",
+        "Any project member can read. Counts the live occurrences an `issue_occurrences` rule with this scope and window would count, per bucket as wide as the window: from the window boundary at or before 24 hours ago (`15m`, `1h`), 3 days ago (`6h`) or 14 days ago (`24h`), to now. Exactly one of `issue_id` and `source_id`; windows under 15 minutes are 400. A missing issue or source is 404.",
     ))
     .parameters(Some(with_query::<IssueAlertPreviewParams>(vec![
         project_param(),

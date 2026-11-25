@@ -1791,7 +1791,7 @@ export interface paths {
         };
         /**
          * Preview an issue occurrence rule
-         * @description Any project member can read. Counts the live occurrences an `issue_occurrences` rule with this scope and window would count, per bucket as wide as the window: over 24 hours for `15m` and `1h`, 3 days for `6h` and 14 days for `24h`, ending now. Exactly one of `issue_id` and `source_id`; windows under 15 minutes are 400. A missing issue or source is 404.
+         * @description Any project member can read. Counts the live occurrences an `issue_occurrences` rule with this scope and window would count, per bucket as wide as the window: from the window boundary at or before 24 hours ago (`15m`, `1h`), 3 days ago (`6h`) or 14 days ago (`24h`), to now. Exactly one of `issue_id` and `source_id`; windows under 15 minutes are 400. A missing issue or source is 404.
          */
         get: operations["get_alert_issue_preview"];
         put?: never;
@@ -7866,7 +7866,7 @@ export interface components {
         IssueAlertPoint: {
             /**
              * Format: int64
-             * @description Live occurrences created in the bucket and in `[from, to)`; 0 when none.
+             * @description Live occurrences created in the bucket (before `to` for the last one); 0 when none.
              */
             count: number;
             /**
@@ -7879,10 +7879,14 @@ export interface components {
         IssueAlertPreview: {
             /**
              * Format: date-time
-             * @description Start of the range, inclusive. JSON is RFC 3339.
+             * @description Start of the range, inclusive: the start of the window-wide bucket that holds `to` minus
+             *     the preview span (24 hours, 3 days or 14 days). JSON is RFC 3339.
              */
             from: string;
-            /** @description One per bucket that overlaps `[from, to)`, oldest first, with no gap. */
+            /**
+             * @description One per bucket from `from` to the last one that starts before `to`, oldest first, with no
+             *     gap; only the last one is partial.
+             */
             points: components["schemas"]["IssueAlertPoint"][];
             /**
              * Format: date-time

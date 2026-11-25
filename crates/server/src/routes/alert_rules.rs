@@ -25,7 +25,6 @@ use crate::audit::catalog::AlertRuleAction;
 use crate::audit::{self, Event, TargetKind};
 use crate::auth::principal::{self, Principal};
 use crate::auth::roles::ProjectPerm;
-use crate::eval::budget::DAY_NS;
 use crate::http::AppState;
 use crate::http::access::{Access, ProjectAccess, RouteDef};
 use crate::http::error::{self, ApiError};
@@ -130,18 +129,29 @@ struct RulePath {
     id: Uuid,
 }
 
+const DAY_NS: i64 = 86_400_000_000_000;
+
 /// The preview range of a window (D-K-13): 24 h up to `1h`, 3 days for `6h`, 14 days for `24h`.
 fn preview_span_ns(window: AlertWindow) -> i64 {
     match window {
+        // M1 | M5 are refused before this is called; listed so the match is exhaustive.
         AlertWindow::M1 | AlertWindow::M5 | AlertWindow::M15 | AlertWindow::H1 => DAY_NS,
         AlertWindow::H6 => 3 * DAY_NS,
         AlertWindow::H24 => 14 * DAY_NS,
     }
 }
 
+/// The scope of a preview: one issue, or a source's issues.
+enum PreviewScope {
+    Issue(Uuid),
+    Source(Uuid),
+}
+
 /// `GET …/alert-rules/issue-preview`: the live occurrences an `issue_occurrences` rule of the
 /// scope would count, per bucket as wide as the window, over the preview range ending now
-/// (D-K-22). Names are resolved as the evaluator resolves them (D-IC-20).
+/// (D-K-22). The range starts at the window boundary at or before the span's start, so every
+/// bucket but the last is a full window. Names are resolved as the evaluator resolves them
+/// (D-IC-20).
 async fn issue_preview(
     State(state): State<AppState>,
     Extension(access): Extension<ProjectAccess>,
@@ -149,35 +159,34 @@ async fn issue_preview(
 ) -> Result<error::Json<IssueAlertPreview>, ApiError> {
     let project = access.project.id;
     let org = access.project.org_id;
-    if params.issue_id.is_some() == params.source_id.is_some() {
-        return Err(field_error(
-            "issue_id",
-            "give exactly one of issue_id and source_id",
-        ));
-    }
-    if matches!(params.window, AlertWindow::M1 | AlertWindow::M5) {
-        return Err(field_error(
-            "window",
-            "issue occurrences need a window of 15m or more",
-        ));
-    }
-    let ids = match (params.issue_id, params.source_id) {
-        (Some(issue), _) => issue_scope_ids(state.meta.reader(), project, issue)
-            .await?
-            .ok_or(ApiError::NotFound)?,
-        (None, Some(source)) => source_scope_ids(state.meta.reader(), project, source)
-            .await?
-            .ok_or(ApiError::NotFound)?,
-        (None, None) => {
+    let scope = match (params.issue_id, params.source_id) {
+        (Some(issue), None) => PreviewScope::Issue(issue),
+        (None, Some(source)) => PreviewScope::Source(source),
+        _ => {
             return Err(field_error(
                 "issue_id",
                 "give exactly one of issue_id and source_id",
             ));
         }
     };
+    if matches!(params.window, AlertWindow::M1 | AlertWindow::M5) {
+        return Err(field_error(
+            "window",
+            "issue occurrences need a window of 15m or more",
+        ));
+    }
+    let ids = match scope {
+        PreviewScope::Issue(issue) => issue_scope_ids(state.meta.reader(), project, issue)
+            .await?
+            .ok_or(ApiError::NotFound)?,
+        PreviewScope::Source(source) => source_scope_ids(state.meta.reader(), project, source)
+            .await?
+            .ok_or(ApiError::NotFound)?,
+    };
     let to = state.clock.now_ns();
     let width = params.window.ns();
-    let from = to - preview_span_ns(params.window);
+    let start = to - preview_span_ns(params.window);
+    let from = start - start.rem_euclid(width);
     let window = TimeWindow::new(from, to)?;
 
     let mut by_bucket: BTreeMap<i64, u64> = BTreeMap::new();
@@ -192,7 +201,7 @@ async fn issue_preview(
 
     // Every bucket that overlaps `[from, to)`, oldest first; a bucket with no occurrence is 0.
     let mut points = Vec::new();
-    let mut time = from - from.rem_euclid(width);
+    let mut time = from;
     while time < to {
         points.push(IssueAlertPoint {
             time,
@@ -1884,11 +1893,13 @@ mod tests {
         format!("a1{n:030x}")
     }
 
-    /// Checks the shape every preview answers: buckets `width` wide from the one holding `from`
-    /// to the last one that starts before `to`, aligned to the epoch and with no gap.
+    /// Checks the shape every preview answers: `from` is the window boundary the buckets start
+    /// at, buckets `width` wide up to the last one that starts before `to`, aligned to the epoch
+    /// and with no gap.
     fn assert_buckets(preview: &IssueAlertPreview, width: i64) {
         let first = preview.points.first().expect("a point").time;
-        assert!(first <= preview.from && preview.from < first + width);
+        assert_eq!(first, preview.from);
+        assert_eq!(preview.from % width, 0);
         let last = preview.points.last().expect("a point").time;
         assert!(last < preview.to && preview.to <= last + width);
         assert!(preview.points.iter().all(|point| point.time % width == 0));
@@ -1932,7 +1943,8 @@ mod tests {
         }
         let preview = preview_ok(&app, &seeded, &format!("issue_id={issue}&window=1h")).await;
         assert_eq!(preview.window, AlertWindow::H1);
-        assert_eq!(preview.to - preview.from, 24 * HOUR_NS);
+        assert!(24 * HOUR_NS <= preview.to - preview.from);
+        assert!(preview.to - preview.from < 25 * HOUR_NS);
         assert_buckets(&preview, HOUR_NS);
         // The expected count of each bucket, from the occurrence times.
         let mut expected: BTreeMap<i64, u64> = BTreeMap::new();
@@ -1950,6 +1962,61 @@ mod tests {
         }
         let total: u64 = preview.points.iter().map(|point| point.count).sum();
         assert_eq!(total, 3);
+    }
+
+    #[tokio::test]
+    async fn issue_preview_counts_the_first_bucket_in_full() {
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        let (source, issue) = source_and_issue(&app, seeded.project.id).await;
+        let now = app.state.clock.now_ns();
+        let start = now - 24 * HOUR_NS;
+        let from = start - start.rem_euclid(HOUR_NS);
+        // In the first bucket, at its start: counted.
+        occurrence(&app, &seeded, source, issue, &trace(1), from, None, None).await;
+        // Just before the range, and in the bucket before it: not counted.
+        occurrence(
+            &app,
+            &seeded,
+            source,
+            issue,
+            &trace(2),
+            from - 1,
+            None,
+            None,
+        )
+        .await;
+        occurrence(
+            &app,
+            &seeded,
+            source,
+            issue,
+            &trace(3),
+            from - HOUR_NS,
+            None,
+            None,
+        )
+        .await;
+
+        let preview = preview_ok(&app, &seeded, &format!("issue_id={issue}&window=1h")).await;
+        assert_eq!(preview.points.first().expect("a point").time, from);
+        assert_eq!(preview.points[0].count, 1);
+        let total: u64 = preview.points.iter().map(|point| point.count).sum();
+        assert_eq!(total, 1);
+    }
+
+    #[tokio::test]
+    async fn issue_preview_of_another_project_is_not_found() {
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        let (other, _) = app.add_project(&seeded, "other", None).await;
+        let (source, issue) = source_and_issue(&app, other.id).await;
+
+        let by_issue = preview_query(&app, &seeded, &format!("issue_id={issue}&window=1h")).await;
+        assert_eq!(by_issue.status, 404);
+        let by_source =
+            preview_query(&app, &seeded, &format!("source_id={source}&window=1h")).await;
+        assert_eq!(by_source.status, 404);
     }
 
     #[tokio::test]
@@ -2136,16 +2203,19 @@ mod tests {
         let scope = format!("issue_id={issue}");
 
         let short = preview_ok(&app, &seeded, &format!("{scope}&window=15m")).await;
-        assert_eq!(short.to - short.from, DAY_NS);
+        assert!(DAY_NS <= short.to - short.from);
+        assert!(short.to - short.from < DAY_NS + 15 * MINUTE_NS);
         assert_buckets(&short, 15 * MINUTE_NS);
 
         let six = preview_ok(&app, &seeded, &format!("{scope}&window=6h")).await;
-        assert_eq!(six.to - six.from, 3 * DAY_NS);
+        assert!(3 * DAY_NS <= six.to - six.from);
+        assert!(six.to - six.from < 3 * DAY_NS + 6 * HOUR_NS);
         assert_buckets(&six, 6 * HOUR_NS);
 
         // Daily buckets start at UTC midnights.
         let day = preview_ok(&app, &seeded, &format!("{scope}&window=24h")).await;
-        assert_eq!(day.to - day.from, 14 * DAY_NS);
+        assert!(14 * DAY_NS <= day.to - day.from);
+        assert!(day.to - day.from < 14 * DAY_NS + DAY_NS);
         assert_buckets(&day, DAY_NS);
         assert!(day.points.iter().all(|point| point.time % DAY_NS == 0));
     }
