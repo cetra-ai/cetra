@@ -318,11 +318,11 @@ Answers of 2026-11-24 (the user): the story pictures looked alike, since every s
 
 - **Lever A, first (M16): one mock project per story, with generated traffic shaped like it.** The org `acme` gets three more projects beside "Support bot": "Code agent" (`code-agent`), "Voice desk" (`voice-desk`) and "Invoice pipeline" (`invoice-pipeline`). Each has its own generated traces, with names, models, durations, costs, tags, sessions, error rate and payload text typical of its kind:
   - coding runs are long, with many tool calls and failing tests;
-  - voice calls are short sessions of turns, with time to first token;
+  - voice calls are short sessions of turns (time to first token comes with M17 if a picture needs it);
   - extraction is a batch of cheap invoices with a schema check;
   - support keeps today's data.
 
-  Each story's hand-written objects (hero trace, issue, alert, prompt, dashboard, queue, assistant chat) move to its project. The story pictures then show the story's own project and data.
+  Each story's hand-written objects (hero trace, issue, alert, prompt, dashboard, queue, assistant chat) move to its project. The story pictures then show the story's own project and data. Mock details (planner, 2026-11-25): each hero keeps its index and trace id in its own project; a story object is served only under its story's project; in the code agent's project the coding objects no longer filter on the `retry` tag; voice traces form calls of 4 to 12 turns with one caller each; extraction traces have no session and no user.
 - **Lever B, then (M17): each picture is chosen for its story.** Answers of 2026-11-25 (the user, picture by picture): the Trace and Evaluate chapters show a different page per story; Explore, Issues, Prompts and Alerts keep one page, with each story's own data. Showing four different pages in every chapter would be too much for a viewer. Every picture is a page the chapter's text names. The pictures of a story tell one loop across the chapters: the trace, then what the assistant finds, the issue that groups it, how it is measured, the prompt that fixes it, and the alert that watches it.
 
 | Chapter | Support agent | Coding agent | Voice agent | Document extraction |
