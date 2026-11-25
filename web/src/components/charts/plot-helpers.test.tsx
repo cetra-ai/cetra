@@ -1,6 +1,13 @@
 import { describe, expect, it } from "vitest";
 import type { ChartRow } from "@/lib/metrics";
-import { roundsTop, tickBudget, topRoundedBarPath, xAxisTicks } from "./plot-helpers";
+import {
+  axisStyle,
+  formatTick,
+  roundsTop,
+  tickBudget,
+  topRoundedBarPath,
+  xAxisTicks,
+} from "./plot-helpers";
 
 const MINUTE_MS = 60_000;
 const START = Date.UTC(2026, 0, 1, 0, 0);
@@ -109,5 +116,19 @@ describe("roundsTop", () => {
     expect(roundsTop(row, "a", stack)).toBe(false);
     expect(roundsTop(row, "b", stack)).toBe(true);
     expect(roundsTop(row, "c", stack)).toBe(false);
+  });
+});
+
+describe("axisStyle and formatTick", () => {
+  it("labels a range under a day with hours and minutes, and a longer one with the date", () => {
+    const day = rowsEvery(60, 24);
+    expect(axisStyle(day)).toBe("time");
+    expect(axisStyle(rowsEvery(60, 25))).toBe("datetime");
+    expect(axisStyle([])).toBe("time");
+    const at = Date.UTC(2026, 10, 19, 11, 51, 23, 72);
+    expect(formatTick(at, "utc", "time")).toBe("11:51");
+    expect(formatTick(at, "utc", "datetime")).toBe("11-19 11:51");
+    expect(formatTick(String(at), "utc", "time")).toBe("11:51");
+    expect(formatTick("not a time", "utc", "time")).toBe("");
   });
 });

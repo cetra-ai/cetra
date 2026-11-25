@@ -33,6 +33,18 @@ const COMPARATOR_SYMBOLS: Record<Schema<"Comparator">, string> = {
   lte: "≤",
 };
 
+/**
+ * Where the preview draws its "Threshold" label: on the side of the line where the data sits
+ * while the rule is not firing, at the left end. A rule that fires above the threshold has its
+ * label above the line (Recharts' `insideBottomLeft` of a zero-height line), and below for one
+ * that fires under it.
+ */
+export function thresholdLabelPosition(
+  comparator: Schema<"Comparator">,
+): "insideBottomLeft" | "insideTopLeft" {
+  return comparator === "gt" || comparator === "gte" ? "insideBottomLeft" : "insideTopLeft";
+}
+
 /** ">", "≥", "<", "≤" for gt, gte, lt, lte. */
 export function comparatorSymbol(comparator: Schema<"Comparator">): string {
   return COMPARATOR_SYMBOLS[comparator];

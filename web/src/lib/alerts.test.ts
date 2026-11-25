@@ -19,6 +19,7 @@ import {
   previewRows,
   type RuleFormValues,
   thresholdInPercent,
+  thresholdLabelPosition,
   thresholdUnit,
 } from "./alerts";
 import { parseNewRuleSearch } from "./search/alerts";
@@ -637,4 +638,13 @@ it("parses the prefilled new rule search", () => {
   ).toEqual({ metric: "issue_occurrences", issue_id: "abc", source_id: "s" });
   expect(parseNewRuleSearch({ metric: "cost", issue_id: "", source_id: 3 })).toEqual({});
   expect(parseNewRuleSearch({})).toEqual({});
+});
+
+it("puts the threshold label on the side where the data sits while the rule is not firing", () => {
+  // A rule that fires above the threshold: the label goes above the line.
+  expect(thresholdLabelPosition("gt")).toBe("insideBottomLeft");
+  expect(thresholdLabelPosition("gte")).toBe("insideBottomLeft");
+  // A rule that fires under it: the label goes below the line.
+  expect(thresholdLabelPosition("lt")).toBe("insideTopLeft");
+  expect(thresholdLabelPosition("lte")).toBe("insideTopLeft");
 });

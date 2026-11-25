@@ -4,6 +4,7 @@ import { CartesianGrid, ComposedChart, Line, ReferenceLine, XAxis, YAxis } from 
 import { widgetQuery } from "@/api/dashboards";
 import { problemOf } from "@/api/problem";
 import { type IssueAlertScope, issueAlertPreviewQuery } from "@/api/queries-alerts";
+import { AXIS_TICK, axisStyle, formatTick } from "@/components/charts/plot-helpers";
 import { filterMessage } from "@/components/filter-bar/logic";
 import { FormError } from "@/components/form/form-error";
 import { ChartContainer } from "@/components/ui/chart";
@@ -19,9 +20,9 @@ import {
   previewQuery,
   previewRows,
   type RuleFormValues,
+  thresholdLabelPosition,
 } from "@/lib/alerts";
 import type { WidgetQuery } from "@/lib/dashboards/types";
-import { formatTimestamp } from "@/lib/format";
 import type { ChartRow } from "@/lib/metrics";
 import { useTimeZone } from "@/lib/settings";
 
@@ -181,6 +182,7 @@ function PreviewChart({ rows, values }: { rows: ChartRow[]; values: RuleFormValu
   const built = conditionFromForm(values);
   const threshold = built.ok ? built.condition.threshold : undefined;
   const condition = previewCondition(values);
+  const style = axisStyle(rows);
 
   return (
     <figure aria-label={`Preview of the metric over the last ${RANGE_LABEL[values.window]}`}>
@@ -194,12 +196,15 @@ function PreviewChart({ rows, values }: { rows: ChartRow[]; values: RuleFormValu
           <CartesianGrid stroke="var(--border)" strokeOpacity={0.7} vertical={false} />
           <XAxis
             dataKey="time"
-            tickFormatter={(ms) => formatTimestamp(new Date(ms).toISOString(), zone, "datetime")}
+            tick={AXIS_TICK}
+            padding={{ left: 8, right: 24 }}
+            tickFormatter={(value) => formatTick(value, zone, style)}
             minTickGap={28}
             axisLine={false}
             tickLine={false}
           />
           <YAxis
+            tick={AXIS_TICK}
             tickFormatter={(value) =>
               formatAlertValue(condition, typeof value === "number" ? value : undefined)
             }
@@ -222,7 +227,13 @@ function PreviewChart({ rows, values }: { rows: ChartRow[]; values: RuleFormValu
               stroke="var(--destructive)"
               strokeDasharray="4 4"
               ifOverflow="extendDomain"
-              label={{ value: "Threshold", position: "insideTopRight", fontSize: 11 }}
+              label={{
+                value: "Threshold",
+                position: thresholdLabelPosition(values.comparator),
+                offset: 6,
+                fontSize: 11,
+                fill: "var(--muted-foreground)",
+              }}
             />
           )}
         </ComposedChart>

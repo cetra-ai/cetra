@@ -37,6 +37,7 @@ with an `### Upgrade notes` section (https://cetra.sh/docs/self-hosting/upgrade/
 
 ### Changed
 
+- Alerts show times to the minute in the charts' formats (`11-19 11:51`), the rule preview's time axis drops the seconds and the date within a day, and its "Threshold" label sits at the left end of the line, on the side away from the data of a rule that is not firing. An issue whose occurrences have no user shows "—" for the busiest day's users instead of 0.
 - The install command is `curl -fsSL https://cetra.sh/install.sh | sh`: `cetra.sh/install.sh` redirects to the release's install script. The GitHub release URL keeps working.
 - Chart bars have slightly rounded tops; in a stack only the top segment is rounded.
 - Span kind icons use the Tabler icon set (a robot for agents, a wrench for tools, …), slightly larger.
