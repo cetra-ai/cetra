@@ -58,7 +58,7 @@ const CHUNK_DICT_SAMPLE_BYTES: usize = 1 << 20;
 /// at most this share (in percent) of what they take without it.
 const CHUNK_DICT_MAX_SHARE: usize = 95;
 
-/// The compressed form of a chunk body and its codec (zstd or LZ4), if any.
+/// The compressed form of a chunk body and its codec (zstd), if any.
 type Compressed = Option<(Codec, Vec<u8>)>;
 
 /// One encoded chunk of a narrow column: its rows, its chunk and the compressed form of its body
@@ -1479,9 +1479,9 @@ mod tests {
     }
 
     /// xxh3_64 of the file written from `wide_batch(20_000)` with `Config::default()`.
-    /// Recorded after narrow chunks gained LZ4 and delta patches were bit-packed. A change to
+    /// Recorded after narrow chunks dropped LZ4. A change to
     /// this value means the output changed.
-    const GOLDEN: u64 = 0x55b2_f341_10d3_3d18;
+    const GOLDEN: u64 = 0x6c01_c2fa_8705_5f0e;
 
     #[test]
     fn golden_output_hash() {
