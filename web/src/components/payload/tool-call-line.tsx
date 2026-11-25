@@ -1,5 +1,5 @@
 import { ChevronDown, ChevronRight, CircleX } from "lucide-react";
-import { type ReactNode, useState } from "react";
+import { type ReactNode, useId, useState } from "react";
 import { IdText } from "@/components/id-text";
 import { JsonView } from "@/components/payload/json-view";
 import { formatDuration } from "@/lib/format";
@@ -31,12 +31,14 @@ export function ToolCallLine({
   onClick?: () => void;
 }) {
   const [open, setOpen] = useState(false);
+  const bodyId = useId();
   const resultText = result !== undefined ? inlineResult(result.value) : "";
   return (
     <div className="flex min-w-0 flex-col gap-1">
       <button
         type="button"
         aria-expanded={open}
+        aria-controls={open ? bodyId : undefined}
         data-status={error !== undefined ? "error" : undefined}
         className="flex w-full min-w-0 items-center gap-1.5 text-left text-caption"
         onClick={() => {
@@ -64,26 +66,23 @@ export function ToolCallLine({
           ) : resultText !== "" ? (
             ` → ${resultText}`
           ) : null}
-          {durationNs !== undefined ? (
-            <>
-              {" "}
-              <span className="num shrink-0 text-muted-foreground">
-                {`· ${formatDuration(durationNs)}`}
-              </span>
-            </>
-          ) : null}
         </span>
+        {durationNs !== undefined ? (
+          // A sibling of the truncated text, so a long line never hides the duration. The leading
+          // space keeps the accessible name readable; the gap already spaces it visually.
+          <span className="num shrink-0 text-muted-foreground">{` · ${formatDuration(durationNs)}`}</span>
+        ) : null}
       </button>
       {open ? (
-        <div className="flex flex-col gap-1 pl-4">
+        <div id={bodyId} className="flex flex-col gap-1 pl-4">
           {id ? <IdText value={id} kind="call" /> : null}
-          {args !== undefined ? (
+          {args !== undefined && args.value !== undefined ? (
             <section aria-label="Arguments" className="flex flex-col gap-1">
               <p className="text-caption text-muted-foreground">Arguments</p>
               <ValueBody value={args.value} />
             </section>
           ) : null}
-          {result !== undefined ? (
+          {result !== undefined && result.value !== undefined ? (
             <section aria-label="Result" className="flex flex-col gap-1">
               <p className="text-caption text-muted-foreground">Result</p>
               <ValueBody value={result.value} />

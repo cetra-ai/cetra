@@ -43,7 +43,7 @@ export function PartView({
   if (part.type === "tool_call_response") {
     const id = typeof part.id === "string" ? part.id : undefined;
     // A response whose call is shown is the call's result, on the call's line.
-    if (id !== undefined && links.shownCalls.has(id)) return null;
+    if (id !== undefined && links.folded.has(id)) return null;
     return (
       <ToolCallLine
         name={(id ? links.callNames.get(id) : undefined) ?? "response"}

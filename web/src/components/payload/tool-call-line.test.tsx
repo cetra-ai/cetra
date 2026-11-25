@@ -16,6 +16,26 @@ it("shows the call on one line, with the result and the duration", () => {
   expect(line.textContent).toBe('get_order_status(order_id: "1234") → {status: "shipped"} · 350ms');
   expect(line).toHaveAttribute("aria-expanded", "false");
   expect(screen.queryByRole("region", { name: "Arguments" })).not.toBeInTheDocument();
+  // The duration is outside the truncated text, so a long line never hides it.
+  const duration = screen.getByText("· 350ms");
+  expect(duration.closest(".truncate")).toBeNull();
+});
+
+it("points the open line at its body", () => {
+  render(<ToolCallLine name="run" args={{ value: { a: 1 } }} />);
+  const line = screen.getByRole("button");
+  fireEvent.click(line);
+  const body = document.getElementById(line.getAttribute("aria-controls") ?? "");
+  expect(body).toContainElement(screen.getByRole("region", { name: "Arguments" }));
+});
+
+it("leaves out the sections of absent values", () => {
+  render(<ToolCallLine name="ping" args={{ value: undefined }} result={{ value: undefined }} />);
+  const line = screen.getByRole("button");
+  expect(line.textContent).toBe("ping()");
+  fireEvent.click(line);
+  expect(screen.queryByRole("region", { name: "Arguments" })).not.toBeInTheDocument();
+  expect(screen.queryByRole("region", { name: "Result" })).not.toBeInTheDocument();
 });
 
 it("opens on a click and closes on the next", () => {

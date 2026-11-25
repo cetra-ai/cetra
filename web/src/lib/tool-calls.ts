@@ -14,8 +14,11 @@ export type ToolLinks = {
   callNames: Map<string, string>;
   /** Call id → response, for each response in the shown messages whose call is also shown. */
   responses: Map<string, unknown>;
-  /** Ids of the calls in the shown messages. A response with one of these ids is folded into its call. */
-  shownCalls: Set<string>;
+  /**
+   * Ids that pair one shown call with one shown response: that response is folded into its call.
+   * An id used by two calls or two responses folds nothing, so no response is ever hidden.
+   */
+  folded: Set<string>;
   /** The matched tool span of a `tool_call` part, by part identity. */
   spans: Map<Schema<"Part">, ToolSpanMatch>;
 };
@@ -125,6 +128,23 @@ export function inlineResult(value: unknown): string {
   return shorten(text);
 }
 
+/**
+ * A tool span's arguments. Some instrumentations record the input as `{name, arguments}` (with an
+ * optional `id`); when `name` is the span's tool name, the arguments are `arguments`.
+ */
+export function toolArguments(value: unknown, name: string): unknown {
+  const subject = typeof value === "string" ? (parseObjectOrArray(value) ?? value) : value;
+  if (
+    isPlainObject(subject) &&
+    subject.name === name &&
+    "arguments" in subject &&
+    Object.keys(subject).every((key) => key === "name" || key === "arguments" || key === "id")
+  ) {
+    return subject.arguments;
+  }
+  return value;
+}
+
 function isToolCall(part: Schema<"Part">): part is Schema<"ToolCallPart"> {
   return part.type === "tool_call";
 }
@@ -156,12 +176,13 @@ export function toolLinks(
 ): ToolLinks {
   const callNames = new Map<string, string>();
   const responses = new Map<string, unknown>();
-  const shownCalls = new Set<string>();
+  const folded = new Set<string>();
 
+  const callCounts = new Map<string, number>();
   for (const call of toolCalls(messages)) {
     if (typeof call.id === "string" && call.id !== "") {
-      shownCalls.add(call.id);
-      if (typeof call.name === "string") {
+      callCounts.set(call.id, (callCounts.get(call.id) ?? 0) + 1);
+      if (typeof call.name === "string" && !callNames.has(call.id)) {
         callNames.set(call.id, call.name);
       }
     }
@@ -176,19 +197,23 @@ export function toolLinks(
       callNames.set(call.id, call.name);
     }
   }
+  const responseCounts = new Map<string, number>();
   for (const message of messages) {
     for (const part of message.parts) {
-      if (
-        isToolResponse(part) &&
-        typeof part.id === "string" &&
-        shownCalls.has(part.id) &&
-        !responses.has(part.id)
-      ) {
+      if (isToolResponse(part) && typeof part.id === "string" && callCounts.get(part.id) === 1) {
+        responseCounts.set(part.id, (responseCounts.get(part.id) ?? 0) + 1);
         responses.set(part.id, part.response);
       }
     }
   }
-  return { callNames, responses, shownCalls, spans };
+  for (const [id, count] of responseCounts) {
+    if (count === 1) {
+      folded.add(id);
+    } else {
+      responses.delete(id);
+    }
+  }
+  return { callNames, responses, folded, spans };
 }
 
 /** True when the message has parts and every part is a response folded into a shown call. */
@@ -196,8 +221,7 @@ export function foldedMessage(message: Schema<"Message">, links: ToolLinks): boo
   return (
     message.parts.length > 0 &&
     message.parts.every(
-      (part) =>
-        isToolResponse(part) && typeof part.id === "string" && links.shownCalls.has(part.id),
+      (part) => isToolResponse(part) && typeof part.id === "string" && links.folded.has(part.id),
     )
   );
 }

@@ -5,6 +5,7 @@ import {
   inlineArgs,
   inlineResult,
   matchToolSpans,
+  toolArguments,
   toolLinks,
 } from "@/lib/tool-calls";
 
@@ -164,7 +165,7 @@ describe("toolLinks", () => {
       message("tool", [response("call_1", { status: "shipped" })]),
     ]);
     expect(links.responses.get("call_1")).toEqual({ status: "shipped" });
-    expect(links.shownCalls.has("call_1")).toBe(true);
+    expect(links.folded.has("call_1")).toBe(true);
     expect(links.callNames.get("call_1")).toBe("get_order_status");
   });
 
@@ -179,21 +180,40 @@ describe("toolLinks", () => {
 
   it("keeps a call without an id in neither map", () => {
     const links = toolLinks([message("assistant", [{ type: "tool_call", name: "x" }])]);
-    expect(links.shownCalls.size).toBe(0);
+    expect(links.folded.size).toBe(0);
     expect(links.callNames.size).toBe(0);
   });
 
-  it("takes the first of two responses with one id", () => {
+  it("folds nothing for an id used by two responses, so neither is hidden", () => {
     const links = toolLinks([
       message("assistant", [SHOWN_CALL]),
       message("tool", [response("call_1", 1), response("call_1", 2)]),
     ]);
-    expect(links.responses.get("call_1")).toBe(1);
+    expect(links.responses.has("call_1")).toBe(false);
+    expect(links.folded.has("call_1")).toBe(false);
   });
 
-  it("shows a call without a string name in shownCalls only", () => {
-    const links = toolLinks([message("assistant", [{ type: "tool_call", id: "call_2" }])]);
-    expect(links.shownCalls.has("call_2")).toBe(true);
+  it("folds nothing for an id used by two calls", () => {
+    const links = toolLinks([
+      message("assistant", [call("call_1", "get_weather"), call("call_1", "get_weather")]),
+      message("tool", [response("call_1", "Paris"), response("call_1", "Rome")]),
+    ]);
+    expect(links.responses.has("call_1")).toBe(false);
+    expect(links.folded.has("call_1")).toBe(false);
+    expect(links.callNames.get("call_1")).toBe("get_weather");
+  });
+
+  it("does not fold a call that has no response", () => {
+    const links = toolLinks([message("assistant", [SHOWN_CALL])]);
+    expect(links.folded.size).toBe(0);
+  });
+
+  it("folds the response of a call without a string name", () => {
+    const links = toolLinks([
+      message("assistant", [{ type: "tool_call", id: "call_2" }]),
+      message("tool", [response("call_2", "ok")]),
+    ]);
+    expect(links.folded.has("call_2")).toBe(true);
     expect(links.callNames.has("call_2")).toBe(false);
   });
 });
@@ -397,5 +417,25 @@ describe("matchToolSpans", () => {
     });
     const matches = matchToolSpans(llm, [child], [], [message("assistant", [SHOWN_CALL])]);
     expect(matches.get(SHOWN_CALL)?.spanId).toBe(TOOL);
+  });
+});
+
+describe("toolArguments", () => {
+  it("unwraps {name, arguments} when the name is the tool's", () => {
+    expect(toolArguments({ name: "read_file", arguments: { path: "a.py" } }, "read_file")).toEqual({
+      path: "a.py",
+    });
+    expect(
+      toolArguments('{"id":"call_1","name":"read_file","arguments":{"path":"a.py"}}', "read_file"),
+    ).toEqual({ path: "a.py" });
+  });
+
+  it("keeps the value when the name differs or other keys are present", () => {
+    const other = { name: "search", arguments: { q: "x" } };
+    expect(toolArguments(other, "read_file")).toBe(other);
+    const extra = { name: "read_file", arguments: {}, path: "a.py" };
+    expect(toolArguments(extra, "read_file")).toBe(extra);
+    expect(toolArguments({ path: "a.py" }, "read_file")).toEqual({ path: "a.py" });
+    expect(toolArguments("ls", "shell")).toBe("ls");
   });
 });

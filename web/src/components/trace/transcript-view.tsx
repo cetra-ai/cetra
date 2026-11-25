@@ -14,7 +14,7 @@ import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
 import { formatCost, formatDuration, formatTokens } from "@/lib/format";
 import type { TraceMode } from "@/lib/search/traces";
-import { foldedMessage, matchToolSpans, toolLinks } from "@/lib/tool-calls";
+import { foldedMessage, matchToolSpans, toolArguments, toolLinks } from "@/lib/tool-calls";
 import {
   freshInput,
   messageText,
@@ -274,7 +274,7 @@ function TurnRow({
             name={span.name}
             durationNs={span.duration_ns}
             error={span.status === "error" ? span.status_message || "Failed" : undefined}
-            args={loaded ? { value: loaded.input?.value } : undefined}
+            args={loaded ? { value: toolArguments(loaded.input?.value, span.name) } : undefined}
             result={loaded?.output !== undefined ? { value: loaded.output.value } : undefined}
             onClick={onSelect}
           />
@@ -343,18 +343,22 @@ function LlmTurn({
   llm: Schema<"SpanSummary">;
   spans: readonly Schema<"TreeSpan">[];
 }) {
-  const seen = previous
-    ? [...payloadMessages(previous.input), ...payloadMessages(previous.output)]
-    : undefined;
-  // All the input matches tool spans, so a call shown on an earlier turn still gets its duration.
-  const inputAll = payloadMessages(detail.input);
-  const input = freshInput(seen, inputAll);
-  const output = payloadMessages(detail.output);
-  const links = toolLinks(
-    [...input, ...output],
-    seen ?? [],
-    matchToolSpans(llm, spans, inputAll, output),
-  );
+  // Matching scans the whole tree, so it runs once per loaded detail, not on every render.
+  const { input, output, links } = useMemo(() => {
+    const seen = previous
+      ? [...payloadMessages(previous.input), ...payloadMessages(previous.output)]
+      : undefined;
+    // All the input matches tool spans, so a call shown on an earlier turn still gets its duration.
+    const inputAll = payloadMessages(detail.input);
+    const input = freshInput(seen, inputAll);
+    const output = payloadMessages(detail.output);
+    const links = toolLinks(
+      [...input, ...output],
+      seen ?? [],
+      matchToolSpans(llm, spans, inputAll, output),
+    );
+    return { input, output, links };
+  }, [detail, previous, llm, spans]);
   return (
     <div className="flex flex-col gap-2">
       {input
