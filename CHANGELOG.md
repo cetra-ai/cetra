@@ -30,6 +30,7 @@ with an `### Upgrade notes` section (https://cetra.sh/docs/self-hosting/upgrade/
 - Org owners can set up SAML 2.0 single sign-on for their org, with metadata import, automatic certificate rotation from a metadata URL, and the same domains and enforcement as OIDC (the `saml` licence feature).
 - LLM connections: **Test connection** checks the form's values before you save them, for a new connection too, and **Test embeddings** under Advanced checks an embedding model. The panel header shows when the saved values were last tested. `POST /api/v1/orgs/{org}/llm-connections/test` tests an unsaved connection, and `POST …/llm-connections/{id}/test` takes draft fields; a connection's `last_tested_at` and `last_test_ok` hold the last test of its saved values.
 - The connection form suggests common model ids for OpenAI, Anthropic and Gemini in the Default model field.
+- Media parts carry an optional `transcript`. OpenAI chat output audio keeps its transcript, a message with only audio previews its transcripts, and judges read `[audio: <transcript>]`.
 
 ### Changed
 
@@ -52,6 +53,7 @@ with an `### Upgrade notes` section (https://cetra.sh/docs/self-hosting/upgrade/
 - Semantic Kernel .NET's GenAI events carry their message in `gen_ai.event.content`, which is read as the event's body; a GenAI message value that starts with `HIDDEN:` (Koog's masked content) is content not captured, not a malformed message; `koog` is a framework name, `open_ai` is an alias of `openai`, and on scope `io.quarkus.opentelemetry` `gen_ai.prompt` and `gen_ai.completion` fill input and output.
 - Spans of Vercel's Workflow SDK (scope `workflow`, names starting `workflow.`, `step.` or `queue.`), which eve runs on, are discarded and counted, as coding agents' internal spans are, unless they carry model attributes (`gen_ai.*`, `llm.*` or `openinference.span.kind`); on Agent Spec's `LlmGenerationSpan` model calls, a token attribute whose value is the string `"null"` is absent, with no warning.
 - `@cetra-ai/sdk`'s Anthropic helper needs `@arizeai/openinference-instrumentation-anthropic` 1.0.1 or later, which keeps the Anthropic SDK's own span out of a traced call, so its tokens count once.
+- The trace view plays audio in a themed player with a waveform and shows its transcript under it.
 
 ### Fixed
 

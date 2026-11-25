@@ -345,6 +345,8 @@ fn input_message(messages: &[Message]) -> Option<&Message> {
         .or_else(|| messages.last())
 }
 
+/// Spec 02 rule 9: the text parts. A message with none previews its media
+/// transcripts instead (non-empty ones, in part order).
 fn message_preview(message: &Message) -> Option<String> {
     let texts: Vec<&str> = message
         .parts
@@ -354,10 +356,22 @@ fn message_preview(message: &Message) -> Option<String> {
             _ => None,
         })
         .collect();
-    if texts.is_empty() {
+    if !texts.is_empty() {
+        return Some(cut_preview(&texts.join("\n")));
+    }
+    let transcripts: Vec<&str> = message
+        .parts
+        .iter()
+        .filter_map(|part| match part {
+            Part::Uri { transcript, .. } | Part::Blob { transcript, .. } => transcript.as_deref(),
+            _ => None,
+        })
+        .filter(|text| !text.is_empty())
+        .collect();
+    if transcripts.is_empty() {
         None
     } else {
-        Some(cut_preview(&texts.join("\n")))
+        Some(cut_preview(&transcripts.join("\n")))
     }
 }
 
@@ -618,7 +632,7 @@ mod tests {
     }
 
     #[test]
-    fn message_previews_use_text_parts_only() {
+    fn message_previews_use_text_parts_first() {
         let messages = vec![
             message("system", vec![text_part("sys")]),
             message("user", vec![text_part("first")]),
@@ -639,6 +653,44 @@ mod tests {
         let payload = Payload::Messages(messages);
         assert_eq!(preview_input(&payload).as_deref(), Some("last-a\nlast-b"));
         assert_eq!(preview_output(&payload).as_deref(), Some("tail"));
+    }
+
+    fn audio_part(transcript: Option<&str>) -> Part {
+        Part::Blob {
+            modality: Some(cetra_core::message::Modality::Audio),
+            mime_type: None,
+            transcript: transcript.map(str::to_owned),
+            content: "AAAA".to_owned(),
+            extra: Map::new(),
+        }
+    }
+
+    #[test]
+    fn a_voice_only_message_previews_its_transcripts() {
+        let payload = Payload::Messages(vec![message(
+            "assistant",
+            vec![
+                audio_part(Some("first")),
+                audio_part(None),
+                audio_part(Some("second")),
+            ],
+        )]);
+        assert_eq!(preview_output(&payload).as_deref(), Some("first\nsecond"));
+    }
+
+    #[test]
+    fn text_wins_over_transcripts() {
+        let payload = Payload::Messages(vec![message(
+            "assistant",
+            vec![audio_part(Some("spoken")), text_part("written")],
+        )]);
+        assert_eq!(preview_output(&payload).as_deref(), Some("written"));
+    }
+
+    #[test]
+    fn an_empty_transcript_gives_no_preview() {
+        let payload = Payload::Messages(vec![message("assistant", vec![audio_part(Some(""))])]);
+        assert_eq!(preview_output(&payload), None);
     }
 
     #[test]

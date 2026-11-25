@@ -86,6 +86,9 @@ fn message(value: &Json, index: usize) -> Result<Message, ConvertError> {
             }
         }
     }
+    if let Some(part) = output_audio(&mut extra) {
+        parts.push(part);
+    }
     if let Some(calls) = extra.shift_remove("tool_calls") {
         parts.extend(tool_calls(calls));
     }
@@ -170,6 +173,7 @@ fn image_part(map: Map<String, Json>) -> Part {
         Part::Blob {
             modality: Some(Modality::Image),
             mime_type,
+            transcript: None,
             content,
             extra,
         }
@@ -177,6 +181,7 @@ fn image_part(map: Map<String, Json>) -> Part {
         Part::Uri {
             modality: Some(Modality::Image),
             mime_type: None,
+            transcript: None,
             uri: url,
             extra,
         }
@@ -209,9 +214,38 @@ fn audio_part(map: Map<String, Json>) -> Part {
     Part::Blob {
         modality: Some(Modality::Audio),
         mime_type,
+        transcript: None,
         content,
         extra,
     }
+}
+
+/// Chat output audio: `message.audio` with a string `data` becomes an audio
+/// `blob` part with its `transcript`. The format is not in the response, so
+/// `mime_type` stays `None`. Spec 02 § Media extraction. Any other `audio`
+/// value stays in `extra`.
+fn output_audio(extra: &mut Map<String, Json>) -> Option<Part> {
+    let has_data = matches!(
+        extra.get("audio"),
+        Some(Json::Object(audio)) if matches!(audio.get("data"), Some(Json::String(_)))
+    );
+    if !has_data {
+        return None;
+    }
+    let Some(Json::Object(mut audio)) = extra.shift_remove("audio") else {
+        return None;
+    };
+    let Some(Json::String(content)) = audio.shift_remove("data") else {
+        return None;
+    };
+    let transcript = take_string(&mut audio, "transcript");
+    Some(Part::Blob {
+        modality: Some(Modality::Audio),
+        mime_type: None,
+        transcript,
+        content,
+        extra: audio,
+    })
 }
 
 fn audio_body(value: Option<&Json>) -> Option<(String, Option<String>, Map<String, Json>)> {
@@ -354,7 +388,7 @@ fn take_string(map: &mut Map<String, Json>, key: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::{ConvertError, openai_messages};
-    use cetra_core::message::messages_to_json;
+    use cetra_core::message::{Modality, Part, messages_to_json};
     use serde_json::json;
 
     fn converted(value: &serde_json::Value) -> String {
@@ -374,6 +408,79 @@ mod tests {
                 r#"{"role":"developer","parts":[{"type":"text","content":"rules"}]}]"#
             )
         );
+    }
+
+    #[test]
+    fn output_audio_becomes_an_audio_blob() {
+        let messages = openai_messages(&json!([{
+            "role": "assistant",
+            "content": null,
+            "audio": {
+                "id": "audio_1",
+                "data": "UklGRg==",
+                "transcript": "Your balance is 42 dollars.",
+                "expires_at": 1767225600
+            }
+        }]))
+        .expect("messages");
+        assert_eq!(messages.len(), 1);
+        let message = &messages[0];
+        assert!(!message.extra.contains_key("audio"), "{:?}", message.extra);
+        let [
+            Part::Blob {
+                modality,
+                mime_type,
+                transcript,
+                content,
+                extra,
+            },
+        ] = message.parts.as_slice()
+        else {
+            panic!("one audio blob: {:?}", message.parts);
+        };
+        assert_eq!(*modality, Some(Modality::Audio));
+        assert_eq!(*mime_type, None);
+        assert_eq!(transcript.as_deref(), Some("Your balance is 42 dollars."));
+        assert_eq!(content, "UklGRg==");
+        assert_eq!(extra.get("id"), Some(&json!("audio_1")));
+        assert_eq!(extra.get("expires_at"), Some(&json!(1767225600)));
+        assert!(!extra.contains_key("data"));
+        assert!(!extra.contains_key("transcript"));
+    }
+
+    #[test]
+    fn output_audio_without_data_stays_in_extra() {
+        let messages = openai_messages(&json!([{
+            "role": "assistant",
+            "content": "hi",
+            "audio": {"id": "audio_1"}
+        }]))
+        .expect("messages");
+        let message = &messages[0];
+        assert_eq!(message.parts.len(), 1);
+        assert_eq!(message.extra.get("audio"), Some(&json!({"id": "audio_1"})));
+    }
+
+    #[test]
+    fn a_non_string_audio_transcript_stays_in_the_part_extra() {
+        let messages = openai_messages(&json!([{
+            "role": "assistant",
+            "content": null,
+            "audio": {"data": "UklGRg==", "transcript": 7}
+        }]))
+        .expect("messages");
+        let message = &messages[0];
+        assert!(!message.extra.contains_key("audio"));
+        let [
+            Part::Blob {
+                transcript, extra, ..
+            },
+        ] = message.parts.as_slice()
+        else {
+            panic!("one audio blob: {:?}", message.parts);
+        };
+        assert_eq!(*transcript, None);
+        assert_eq!(extra.get("transcript"), Some(&json!(7)));
     }
 
     #[test]

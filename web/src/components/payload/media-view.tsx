@@ -1,5 +1,6 @@
 import { useState } from "react";
 import type { Schema } from "@/api/types";
+import { AudioPlayer, MediaWithTranscript } from "@/components/payload/audio-player";
 import { MediaChip } from "@/components/payload/media-chip";
 import {
   Dialog,
@@ -20,10 +21,31 @@ export function MediaView({
 }) {
   const mime = typeof part.mime_type === "string" ? part.mime_type : undefined;
   const modality = typeof part.modality === "string" ? part.modality : undefined;
+  const transcript = typeof part.transcript === "string" ? part.transcript : undefined;
+  return (
+    <MediaWithTranscript transcript={transcript}>
+      <MediaBody part={part} mime={mime} modality={modality} projectRef={projectRef} />
+    </MediaWithTranscript>
+  );
+}
+
+function MediaBody({
+  part,
+  mime,
+  modality,
+  projectRef,
+}: {
+  part: Schema<"UriPart"> | Schema<"BlobPart">;
+  mime: string | undefined;
+  modality: string | undefined;
+  projectRef?: string;
+}) {
   if (part.type === "blob") {
     const src = blobUrl(part);
     if (isImage(modality, mime)) return <ImageMedia src={src} />;
-    if (isAudio(modality, mime)) return <AudioControl src={src} />;
+    if (isAudio(modality, mime)) {
+      return <AudioPlayer key={src} src={src} mimeType={mime} waveform />;
+    }
     return <MediaChip uri={src} mimeType={mime} projectRef={projectRef} />;
   }
   const source = classifyMedia(projectRef, part.uri);
@@ -35,7 +57,9 @@ export function MediaView({
   }
   if (source.kind === "stored" || source.kind === "inline") {
     if (isImage(modality, mime)) return <ImageMedia src={source.url} />;
-    if (isAudio(modality, mime)) return <AudioControl src={source.url} />;
+    if (isAudio(modality, mime)) {
+      return <AudioPlayer key={source.url} src={source.url} mimeType={mime} waveform />;
+    }
   }
   return <MediaChip uri={part.uri} mimeType={mime} projectRef={projectRef} />;
 }
@@ -53,15 +77,10 @@ function ExternalMedia({ uri, mime, modality }: { uri: string; mime?: string; mo
     );
   }
   if (isImage(modality, mime)) return <ImageMedia src={uri} />;
-  if (isAudio(modality, mime)) return <AudioControl src={uri} />;
+  if (isAudio(modality, mime)) {
+    return <AudioPlayer key={uri} src={uri} mimeType={mime} waveform={false} />;
+  }
   return <MediaChip uri={uri} mimeType={mime} />;
-}
-
-function AudioControl({ src }: { src: string }) {
-  return (
-    // biome-ignore lint/a11y/useMediaCaption: ingested audio has no captions
-    <audio controls preload="none" src={src} />
-  );
 }
 
 function ImageMedia({ src }: { src: string }) {

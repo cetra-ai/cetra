@@ -20,8 +20,9 @@ pub(crate) fn is_messages(value: &Value) -> Option<Vec<Message>> {
 ///
 /// A JSON string is returned as itself, not as a quoted JSON string. A messages
 /// array yields the text parts of the last `assistant` message, joined with
-/// newlines, or an empty string when that message has no text part. Every other
-/// value is compact JSON.
+/// newlines. When that message has no text part it yields its media transcripts
+/// instead (non-empty, joined the same way), or an empty string when it has
+/// none. Every other value is compact JSON.
 pub(crate) fn extract_text(value: &Value) -> String {
     if let Value::String(text) = value {
         return text.clone();
@@ -37,7 +38,8 @@ pub(crate) fn extract_text(value: &Value) -> String {
 ///
 /// A string is copied. Null is empty. A messages array is one `role: …` line
 /// per message: text and reasoning are their content, media is `[image]`,
-/// `[audio]`, or `[file]`, a tool call is `tool_call name(arguments)`, and a
+/// `[audio]`, or `[file]` (`[audio: <transcript>]` and so on when the part has
+/// a non-empty transcript), a tool call is `tool_call name(arguments)`, and a
 /// tool result is `tool_result: ` plus the rendered response. Every other
 /// value, including an unknown message part, is compact JSON.
 pub(crate) fn render_value(value: &Value) -> String {
@@ -84,19 +86,33 @@ fn render_part(part: &Part) -> String {
         Part::ToolCallResponse { response, .. } => {
             format!("tool_result: {}", render_value(response))
         }
-        Part::Uri { modality, .. } | Part::Blob { modality, .. } => media_placeholder(modality),
+        Part::Uri {
+            modality,
+            transcript,
+            ..
+        }
+        | Part::Blob {
+            modality,
+            transcript,
+            ..
+        } => media_placeholder(modality, transcript.as_deref()),
         Part::Unknown(value) => compact_json(value),
     }
 }
 
 /// Image and audio keep their labels. Video and any other modality are `[file]`.
-fn media_placeholder(modality: &Option<Modality>) -> String {
-    match modality {
-        Some(Modality::Image) => "[image]",
-        Some(Modality::Audio) => "[audio]",
-        _ => "[file]",
+/// A non-empty transcript is appended after `: `: `[audio: <transcript>]`.
+/// A dropped part has no modality, so a dropped transcript renders as `[file: …]`.
+fn media_placeholder(modality: &Option<Modality>, transcript: Option<&str>) -> String {
+    let kind = match modality {
+        Some(Modality::Image) => "image",
+        Some(Modality::Audio) => "audio",
+        _ => "file",
+    };
+    match transcript {
+        Some(text) if !text.is_empty() => format!("[{kind}: {text}]"),
+        _ => format!("[{kind}]"),
     }
-    .to_owned()
 }
 
 fn compact_json(value: &Value) -> String {
@@ -112,7 +128,7 @@ fn last_assistant_text(messages: &[Message]) -> String {
     else {
         return String::new();
     };
-    message
+    let texts: Vec<&str> = message
         .parts
         .iter()
         .filter_map(|part| match part {
@@ -124,6 +140,18 @@ fn last_assistant_text(messages: &[Message]) -> String {
             | Part::Blob { .. }
             | Part::Unknown(_) => None,
         })
+        .collect();
+    if !texts.is_empty() {
+        return texts.join("\n");
+    }
+    message
+        .parts
+        .iter()
+        .filter_map(|part| match part {
+            Part::Uri { transcript, .. } | Part::Blob { transcript, .. } => transcript.as_deref(),
+            _ => None,
+        })
+        .filter(|text| !text.is_empty())
         .collect::<Vec<_>>()
         .join("\n")
 }
@@ -171,6 +199,54 @@ mod tests {
             {"role": "assistant", "parts": [{"type": "tool_call", "name": "lookup"}]}
         ]);
         assert_eq!(extract_text(&tool_only), "");
+    }
+
+    #[test]
+    fn media_renders_its_transcript() {
+        assert_eq!(
+            super::render_value(&json!([
+                {"role": "assistant", "parts": [
+                    {"type": "blob", "modality": "audio", "content": "AAAA", "transcript": "hello"}
+                ]}
+            ])),
+            "assistant: [audio: hello]"
+        );
+    }
+
+    #[test]
+    fn an_empty_transcript_renders_the_plain_placeholder() {
+        assert_eq!(
+            super::render_value(&json!([
+                {"role": "assistant", "parts": [
+                    {"type": "uri", "modality": "audio", "uri": "media://x", "transcript": ""}
+                ]}
+            ])),
+            "assistant: [audio]"
+        );
+    }
+
+    #[test]
+    fn a_voice_only_reply_extracts_its_transcript() {
+        let reply = json!([
+            {"role": "user", "parts": [{"type": "text", "content": "hi"}]},
+            {"role": "assistant", "parts": [
+                {"type": "blob", "modality": "audio", "content": "AAAA", "transcript": "first"},
+                {"type": "uri", "modality": "audio", "uri": "media://x"},
+                {"type": "uri", "modality": "audio", "uri": "media://y", "transcript": "second"}
+            ]}
+        ]);
+        assert_eq!(extract_text(&reply), "first\nsecond");
+    }
+
+    #[test]
+    fn text_wins_over_transcripts_in_extraction() {
+        let reply = json!([
+            {"role": "assistant", "parts": [
+                {"type": "blob", "modality": "audio", "content": "AAAA", "transcript": "spoken"},
+                {"type": "text", "content": "written"}
+            ]}
+        ]);
+        assert_eq!(extract_text(&reply), "written");
     }
 
     #[test]
