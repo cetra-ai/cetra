@@ -177,7 +177,7 @@ pub const CACHE_MIX: [&str; 6] = ["trace_list:start_time", "facets:7d", "dashboa
 - `block_cache_answers_like_the_store`: 200 ranges drawn by a fixed LCG (`x = x * 6364136223846793005 + 1442695040888963407`, wrapping, seed 1) over a 10 MiB + 1234-byte object, one in four of each kind `Bounded`, `Offset`, `Suffix` and none; the cache returns the same bytes, `range` and `meta.size` as the inner store.
 - `block_cache_range_kinds`: `Suffix(n)` with `n` larger than the object gives the whole object; `Bounded(a..b)` with `b` past the end is clamped; `Offset(size)` and `Bounded(5..5)` error as the inner store does; a read of the short last block returns its real length.
 - `block_cache_get_ranges`: `get_ranges` of three ranges, two in held blocks and one not, returns the inner store's bytes and makes one inner request.
-- `block_cache_head_then_read`: a `head` then a ranged read of the same path makes no second HEAD on the inner store.
+- `block_cache_head_then_read`: a `head` then a ranged read of the same path makes no second HEAD on the inner store. `Counting` does not count HEADs, so this test wraps `InMemory` in a test-only `ObjectStore` of `cache.rs`'s `#[cfg(test)]` module that delegates every method (as `counting.rs` does) and counts `get_opts` calls with `head` set.
 - `block_cache_longer_than_budget`: budget 1 MiB, a read of `[0, 3 MiB)` returns all 3 MiB correctly.
 - `block_cache_concurrent_misses`: two concurrent reads of the same missing block both fetch it (two inner requests).
 - In these tests the inner store is `Counting::new(Arc::new(InMemory::new()))`, whose counts the tests read.
