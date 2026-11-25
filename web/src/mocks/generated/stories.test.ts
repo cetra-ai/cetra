@@ -4,11 +4,10 @@ import {
   createDataset,
   type Dataset,
   type Profile,
+  percentile,
   rfc3339,
-  SUPPORT_PROFILE,
   visibleTraces,
 } from "@/mocks/generated/dataset";
-import { CODING_PROFILE, EXTRACTION_PROFILE, VOICE_PROFILE } from "@/mocks/generated/profiles";
 import {
   STORY_ISSUES,
   STORY_QUEUES,
@@ -22,16 +21,23 @@ import {
   storyQueue,
   storyQueueItem,
 } from "@/mocks/generated/stories";
+import { CODING_STORY_PROFILE } from "@/mocks/generated/story-coding";
+import { EXTRACTION_STORY_PROFILE } from "@/mocks/generated/story-extraction";
+import { SUPPORT_STORY_PROFILE, supportFacts } from "@/mocks/generated/story-support";
+import { VOICE_STORY_PROFILE } from "@/mocks/generated/story-voice";
 import { server } from "@/mocks/node";
 import { type StoryId, storyProject } from "@/mocks/projects";
 import alertEventsFixture from "../../../../fixtures/api/static/alert-events.json";
 import alertRulesFixture from "../../../../fixtures/api/static/alert-rules.json";
 import projectAlertEventsFixture from "../../../../fixtures/api/static/project-alert-events.json";
 
-const NOW = Date.parse("2026-06-01T00:00:00.000Z");
+/** The screenshot clock (`website/scripts/screenshots.mjs`). */
+const NOW = Date.parse("2026-11-19T12:00:00Z");
 const PROJECT = `${location.origin}/api/v1/projects/acme%2Fsupport-bot`;
 const MINUTE_MS = 60_000;
+const HOUR_MS = 60 * MINUTE_MS;
 const DAY_MS = 86_400_000;
+const WEEK_MS = 7 * DAY_MS;
 const WINDOW_MS: Record<string, number> = {
   "1m": MINUTE_MS,
   "5m": 5 * MINUTE_MS,
@@ -46,6 +52,9 @@ const OCCURRENCE_WINDOW_MS = 14 * DAY_MS;
 const GENERATED_EXAMPLES = 4;
 const CODING_ISSUE = "01900000-0000-7000-8000-000000570102";
 const VOICE_RULE = "01900000-0000-7000-8000-000000570203";
+const SUPPORT_RULE = "01900000-0000-7000-8000-000000570201";
+const TEAM_SLACK_ID = "01900000-0000-7000-8000-000000000500";
+const ON_CALL_PAGER_ID = "01900000-0000-7000-8000-000000000503";
 const FIXTURE_RULE = "01900000-0000-7000-8000-000000000510";
 const FIXTURE_ISSUE = "01900000-0000-7000-8000-000000001c01";
 const FIXTURE_QUEUE = "01900000-0000-7000-8000-000000000a01";
@@ -54,16 +63,24 @@ const STORY_OBJECT_IDS = new Set(
   [...STORY_ISSUES, ...STORY_RULES, ...STORY_QUEUES].map((object) => object.id),
 );
 
-const PROFILES: Record<StoryId, Profile> = {
-  support: SUPPORT_PROFILE,
-  coding: CODING_PROFILE,
-  voice: VOICE_PROFILE,
-  extraction: EXTRACTION_PROFILE,
+/** Each story's traces: the support project has 5,000, the others 2,000 (`main.tsx`). */
+const TRACES: Record<StoryId, number> = {
+  support: 5_000,
+  coding: 2_000,
+  voice: 2_000,
+  extraction: 2_000,
 };
 
-/** A story's dataset: its generation profile, so its hero trace sits at the story's index. */
-function datasetOf(story: StoryId, traces: number): Dataset {
-  return createDataset({ seed: 1, now: NOW, traces, profile: PROFILES[story] });
+const PROFILES: Record<StoryId, Profile> = {
+  support: SUPPORT_STORY_PROFILE,
+  coding: CODING_STORY_PROFILE,
+  voice: VOICE_STORY_PROFILE,
+  extraction: EXTRACTION_STORY_PROFILE,
+};
+
+/** A story's dataset at the screenshot clock, from its story profile. */
+function datasetOf(story: StoryId): Dataset {
+  return createDataset({ seed: 1, now: NOW, traces: TRACES[story], profile: PROFILES[story] });
 }
 
 /** The API base of a story's project: `/api/v1/projects/<encoded ref>`. */
@@ -85,15 +102,15 @@ function allStoryHandlers() {
   return STORY_IDS.flatMap((story) => storyHandlers(stories[story], storyProject(story).ref));
 }
 
-/** The four story datasets of 2,000 traces, built once for the tests. */
+/** The four story datasets at the screenshot clock, built once for the tests. */
 let stories: Record<StoryId, Dataset>;
 
 beforeAll(() => {
   stories = {
-    support: datasetOf("support", 2000),
-    coding: datasetOf("coding", 2000),
-    voice: datasetOf("voice", 2000),
-    extraction: datasetOf("extraction", 2000),
+    support: datasetOf("support"),
+    coding: datasetOf("coding"),
+    voice: datasetOf("voice"),
+    extraction: datasetOf("extraction"),
   };
 });
 
@@ -105,7 +122,7 @@ type Trace = Schema<"TraceSummary">;
  * traces that match, start inside the 14 days before now, and are not the hero.
  */
 function expectedTraces(dataset: Dataset, issue: StoryIssue) {
-  const hero: Trace | undefined = dataset.traces[issue.hero.index];
+  const hero: Trace | undefined = dataset.traces[issue.hero.index(dataset)];
   const generated = visibleTraces(dataset.traces, false, false).filter((trace) => {
     const started = Date.parse(trace.start_time);
     return (
@@ -116,6 +133,26 @@ function expectedTraces(dataset: Dataset, issue: StoryIssue) {
     );
   });
   return { hero, generated, all: hero ? [hero, ...generated] : generated };
+}
+
+/** The visible traces of a dataset that start in `[from, to)`, recomputed for the rule checks. */
+function startedIn(dataset: Dataset, from: number, to: number): Trace[] {
+  return visibleTraces(dataset.traces, false, false).filter((trace) => {
+    const started = Date.parse(trace.start_time);
+    return started >= from && started < to;
+  });
+}
+
+/** The numeric score `name` of each trace that carries it. */
+function numericScoresOf(traces: readonly Trace[], name: string): number[] {
+  return traces.flatMap((trace) => {
+    const value = trace.scores.find((score) => score.name === name)?.value;
+    return value?.data_type === "numeric" ? [value.value] : [];
+  });
+}
+
+function mean(values: readonly number[]): number {
+  return values.reduce((total, value) => total + value, 0) / values.length;
 }
 
 function dayOf(trace: Trace): number {
@@ -136,17 +173,28 @@ function newestFirst(left: Trace, right: Trace): number {
   );
 }
 
-it("makes the hero trace the first example of every story issue", () => {
+it("makes the first matching trace the first example of every story issue", () => {
   for (const issue of STORY_ISSUES) {
     const dataset = stories[issue.story];
-    const hero = dataset.traces[issue.hero.index];
+    const index = issue.hero.index(dataset);
+    const hero = dataset.traces[index];
+    const earlier = dataset.traces
+      .slice(0, index)
+      .filter((trace) => visibleTraces([trace], false, false).length === 1 && issue.matches(trace));
+    expect(hero !== undefined && issue.matches(hero)).toBe(true);
+    expect(earlier).toEqual([]);
+
     const { examples } = storyOccurrences(dataset, issue);
     expect(examples[0]?.trace_id).toBe(hero?.trace_id);
     expect(examples[0]?.reason).toBe(issue.hero.reason);
-    if (issue.hero.spanId !== undefined) {
-      expect(examples[0]?.span_id).toBe(issue.hero.spanId);
-      const spans = dataset.traceDetail(hero?.trace_id ?? "")?.spans ?? [];
-      expect(spans.some((row) => row.span.span_id === issue.hero.spanId)).toBe(true);
+    const spanId = issue.hero.spanId?.(dataset, index);
+    expect(examples[0]?.span_id).toBe(spanId);
+    if (spanId !== undefined) {
+      const span = dataset
+        .traceDetail(hero?.trace_id ?? "")
+        ?.spans.find((row) => row.span.span_id === spanId)?.span;
+      expect(span?.status).toBe("error");
+      expect(span?.name).toBe(issue.story === "coding" ? "write patch" : "ocr");
     }
   }
 });
@@ -179,6 +227,19 @@ it("counts an issue's occurrences from the dataset, in the issue and in its days
     expect(Date.parse(detail.first_seen)).toBe(Math.min(...starts));
     expect(Date.parse(detail.last_seen)).toBe(Math.max(...starts));
   }
+});
+
+it("counts the support issue's SSO traces in the last two weeks as the support facts do", () => {
+  const dataset = stories.support;
+  const { all } = expectedTraces(dataset, oneOf(STORY_ISSUES, "support"));
+  const countIn = (from: number, to: number) =>
+    all.filter((trace) => {
+      const started = Date.parse(trace.start_time);
+      return started >= from && started < to;
+    }).length;
+  const facts = supportFacts(dataset);
+  expect(countIn(NOW - WEEK_MS, NOW)).toBe(facts.ssoThisWeek);
+  expect(countIn(NOW - 2 * WEEK_MS, NOW - WEEK_MS)).toBe(facts.ssoPreviousWeek);
 });
 
 it("gives every story issue at most five examples, the generated ones newest first", () => {
@@ -220,7 +281,7 @@ it("gives every story issue at most five examples, the generated ones newest fir
 
 it("lists the story rules with their state and a fired event for the firing ones", () => {
   const rules = STORY_RULES.map((rule) => storyAlertRule(stories[rule.story], rule));
-  expect(rules.map((rule) => rule.state)).toEqual(["ok", "firing", "firing", "ok"]);
+  expect(rules.map((rule) => rule.state)).toEqual(["firing", "firing", "firing", "ok"]);
   for (const rule of STORY_RULES) {
     const event = storyAlertEvent(stories[rule.story], rule);
     expect(event.kind).toBe(rule.state === "firing" ? "fired" : "resolved");
@@ -230,18 +291,84 @@ it("lists the story rules with their state and a fired event for the firing ones
   }
 });
 
-it("sets last_fired_at on the two firing rules and omits it on the two ok ones", () => {
-  expect(STORY_RULES.filter((rule) => rule.state === "firing")).toHaveLength(2);
-  expect(STORY_RULES.filter((rule) => rule.state === "ok")).toHaveLength(2);
+it("sets last_fired_at on the three firing rules and omits it on the one ok rule", () => {
+  expect(STORY_RULES.filter((rule) => rule.state === "firing")).toHaveLength(3);
+  expect(STORY_RULES.filter((rule) => rule.state === "ok")).toHaveLength(1);
   for (const rule of STORY_RULES) {
     const dataset = stories[rule.story];
     const stored = storyAlertRule(dataset, rule);
     if (rule.state === "firing") {
-      expect(stored.last_fired_at).toBe(rfc3339(dataset.now - rule.changedAgoMs));
+      expect(stored.last_fired_at).toBe(
+        rfc3339(dataset.now - rule.changedAgoMs(dataset, dataset.now)),
+      );
     } else {
       expect(stored).not.toHaveProperty("last_fired_at");
     }
   }
+});
+
+it("computes each rule's value and count from its window at the clock", () => {
+  const support = stories.support;
+  const supportHour = startedIn(support, NOW - HOUR_MS, NOW);
+  const supportAlert = storyAlertRule(support, oneOf(STORY_RULES, "support"));
+  expect(supportAlert.last_value).toBeCloseTo(
+    mean(numericScoresOf(supportHour, "correctness")),
+    12,
+  );
+  expect(supportAlert.last_count).toBe(supportHour.length);
+
+  const coding = stories.coding;
+  const codingHour = startedIn(coding, NOW - HOUR_MS, NOW);
+  const codingAlert = storyAlertRule(coding, oneOf(STORY_RULES, "coding"));
+  expect(codingAlert.last_value).toBeCloseTo(
+    codingHour.reduce((total, trace) => total + (trace.cost_total ?? 0), 0),
+    9,
+  );
+  expect(codingAlert.last_count).toBe(codingHour.length);
+
+  const voice = stories.voice;
+  const voiceQuarter = startedIn(voice, NOW - 15 * MINUTE_MS, NOW);
+  const voiceAlert = storyAlertRule(voice, oneOf(STORY_RULES, "voice"));
+  expect(voiceAlert.last_value).toBe(
+    percentile(
+      voiceQuarter.map((trace) => trace.duration_ns / 1_000_000),
+      95,
+    ),
+  );
+  expect(voiceAlert.last_count).toBe(voiceQuarter.length);
+});
+
+it("starts the support rule at the first hour of the last day under 0.7 correctness", () => {
+  const support = stories.support;
+  const first = Math.floor((NOW - DAY_MS) / HOUR_MS) * HOUR_MS;
+  const hourlyMeans = Array.from({ length: 24 }, (_, hour) => {
+    const start = first + hour * HOUR_MS;
+    return mean(numericScoresOf(startedIn(support, start, start + HOUR_MS), "correctness"));
+  });
+  const dipped = hourlyMeans.findIndex((value) => value < 0.7);
+  expect(dipped).toBeGreaterThanOrEqual(0);
+  expect(hourlyMeans[23]).toBeLessThan(0.7);
+  const alert = storyAlertRule(support, oneOf(STORY_RULES, "support"));
+  expect(alert.last_fired_at).toBe(rfc3339(first + dipped * HOUR_MS));
+});
+
+it("sends the voice rule to the on-call pager and the other rules to Team Slack", () => {
+  for (const rule of STORY_RULES) {
+    const dataset = stories[rule.story];
+    const alert = storyAlertRule(dataset, rule);
+    const event = storyAlertEvent(dataset, rule);
+    const expected = rule.id === VOICE_RULE ? ON_CALL_PAGER_ID : TEAM_SLACK_ID;
+    expect(alert.channel_ids).toEqual([expected]);
+    expect(event.deliveries.map((delivery) => delivery.channel_id)).toEqual([expected]);
+  }
+  const voice = storyAlertEvent(stories.voice, oneOf(STORY_RULES, "voice"));
+  expect(
+    voice.deliveries.map((delivery) => [delivery.channel_name, delivery.channel_kind]),
+  ).toEqual([["On-call pager", "webhook"]]);
+  const support = storyAlertEvent(stories.support, oneOf(STORY_RULES, "support"));
+  expect(
+    support.deliveries.map((delivery) => [delivery.channel_name, delivery.channel_kind]),
+  ).toEqual([["Team Slack", "slack"]]);
 });
 
 it("leaves out a story issue that matches no trace", async () => {
@@ -285,7 +412,7 @@ it("serves the story issues and rules before the fixtures, and lets other ids fa
     await fetch(`${baseOf("voice")}/alert-rules/${VOICE_RULE}`)
   ).json()) as Schema<"AlertRule">;
   expect(voice.id).toBe(VOICE_RULE);
-  expect(voice.name).toBe("Slow replies on voice-agent");
+  expect(voice.name).toBe("Slow replies on the voice desk");
 
   const fixture = (await (
     await fetch(`${PROJECT}/issues/${FIXTURE_ISSUE}`)
@@ -340,16 +467,15 @@ it("answers the story events routes, and lets the fixture rule's routes fall thr
   }
 });
 
-it("points every story queue's item at the story's hero trace", () => {
-  STORY_QUEUES.forEach((queue, position) => {
+it("points every story queue's item at the queue's own trace", () => {
+  for (const queue of STORY_QUEUES) {
     const dataset = stories[queue.story];
     const item = storyQueueItem(dataset, queue);
-    const hero = dataset.traces[queue.heroIndex];
-    expect(item?.trace_id).toBe(hero?.trace_id);
+    const trace = dataset.traces[queue.heroIndex];
+    expect(item?.trace_id).toBe(trace?.trace_id);
     expect(item?.queue_id).toBe(queue.id);
     expect(item?.status).toBe("pending");
-    expect(queue.heroIndex).toBe(STORY_ISSUES[position]?.hero.index);
-  });
+  }
 });
 
 it("gives every story queue its own score fields", () => {
@@ -476,7 +602,6 @@ it("a project serves only its story's objects", async () => {
 
 it("a story project lists only its own alert rules and events", async () => {
   const codingRule = "01900000-0000-7000-8000-000000570202";
-  const supportRule = "01900000-0000-7000-8000-000000570201";
   const ruleIds = async (path: string) =>
     ((await (await fetch(path)).json()) as Schema<"AlertRulePage">).data.map((rule) => rule.id);
 
@@ -495,7 +620,7 @@ it("a story project lists only its own alert rules and events", async () => {
   server.use(...storyHandlers(stories.support, "acme/support-bot"));
   const support = baseOf("support");
   expect(await ruleIds(`${support}/alert-rules`)).toEqual([
-    supportRule,
+    SUPPORT_RULE,
     ...alertRulesFixture.data.map((rule) => rule.id),
   ]);
   const supportEvents = (await (
@@ -514,7 +639,7 @@ it("a story project lists only its own issues", async () => {
 });
 
 it("a story's detail routes are scoped to its project", async () => {
-  const dataset = createDataset({ seed: 1, now: NOW, traces: 20, profile: CODING_PROFILE });
+  const dataset = stories.coding;
   const codingRule = "01900000-0000-7000-8000-000000570202";
   server.use(...storyHandlers(dataset, "acme/code-agent"));
 

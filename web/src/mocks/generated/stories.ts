@@ -1,6 +1,7 @@
 import { type HttpHandler, HttpResponse, http } from "msw";
 import type { Schema } from "@/api/types";
-import { type Dataset, rfc3339, visibleTraces } from "@/mocks/generated/dataset";
+import { type Dataset, percentile, rfc3339, visibleTraces } from "@/mocks/generated/dataset";
+import { SSO_TURN } from "@/mocks/generated/story-support";
 import alertRulesFixture from "../../../../fixtures/api/static/alert-rules.json";
 import queuesFixture from "../../../../fixtures/api/static/annotation-queues.json";
 import issuesFixture from "../../../../fixtures/api/static/issues.json";
@@ -9,12 +10,11 @@ import { projectOfRef, type StoryId, storyProject } from "../projects";
 
 /**
  * The homepage stories' issues and alert rules (design §12, M13), next to the generated traces.
- * Each is tied to its story's hand-written trace (`SHOWCASES`), and has an id of its own, so the
+ * Each is tied to its story's first matching trace (M18), and has an id of its own, so the
  * fixtures keep theirs. Only the large mock serves them.
  */
 
 const PROJECT = "/api/v1/projects/:project";
-const TEAM_SLACK = "01900000-0000-7000-8000-000000000500";
 const MINUTE_MS = 60_000;
 const HOUR_MS = 60 * MINUTE_MS;
 const DAY_MS = 24 * HOUR_MS;
@@ -22,8 +22,48 @@ const DAY_MS = 24 * HOUR_MS;
 const OCCURRENCE_WINDOW_MS = 14 * DAY_MS;
 /** Example traces after the hero trace. */
 const GENERATED_EXAMPLES = 4;
+/** The support rule's threshold: the average correctness under it fires the rule. */
+const CORRECTNESS_THRESHOLD = 0.7;
 
 type Trace = Schema<"TraceSummary">;
+
+/** A notification channel of a rule, as the delivery names it. */
+type StoryChannel = { id: string; name: string; kind: Schema<"ChannelKind"> };
+
+const TEAM_SLACK: StoryChannel = {
+  id: "01900000-0000-7000-8000-000000000500",
+  name: "Team Slack",
+  kind: "slack",
+};
+const ON_CALL_PAGER: StoryChannel = {
+  id: "01900000-0000-7000-8000-000000000503",
+  name: "On-call pager",
+  kind: "webhook",
+};
+
+/** Whether a visible trace has the tag. */
+const hasTag = (tag: string) => (trace: Trace) => trace.tags.includes(tag);
+
+/** The index of the first visible trace of a dataset that matches, or -1 when none does. */
+function firstMatch(matches: (trace: Trace) => boolean): (dataset: Dataset) => number {
+  return (dataset) =>
+    dataset.traces.findIndex(
+      (trace) => matches(trace) && visibleTraces([trace], false, false).length === 1,
+    );
+}
+
+/** The span of the trace at `index` that is an error and has the name, when the trace has one. */
+function errorSpan(name: string): (dataset: Dataset, index: number) => string | undefined {
+  return (dataset, index) => {
+    const trace = dataset.traces[index];
+    if (trace === undefined) {
+      return undefined;
+    }
+    return dataset
+      .traceDetail(trace.trace_id)
+      ?.spans.find((row) => row.span.name === name && row.span.status === "error")?.span.span_id;
+  };
+}
 
 type StoryIssue = {
   id: string;
@@ -35,13 +75,22 @@ type StoryIssue = {
   kind: Schema<"IssueSourceKind">;
   title: string;
   description: string;
-  /** The story's hand-written trace: its dataset index, the span the issue is about, and why. */
-  hero: { index: number; spanId?: string; reason: string };
+  /**
+   * The story's first matching trace: its dataset index, the span the issue is about, and why.
+   * The span is undefined when the issue is about the whole trace.
+   */
+  hero: {
+    index: (dataset: Dataset) => number;
+    spanId?: (dataset: Dataset, index: number) => string | undefined;
+    reason: string;
+  };
   /** The generated traces that are occurrences too. */
   matches: (trace: Trace) => boolean;
   /** The reason shown for a generated example; absent shows the trace id. */
   reasonOf?: (trace: Trace) => string | undefined;
 };
+
+const isSsoQuestion = (trace: Trace) => trace.input_preview === SSO_TURN.question;
 
 export const STORY_ISSUES: readonly StoryIssue[] = [
   {
@@ -51,10 +100,10 @@ export const STORY_ISSUES: readonly StoryIssue[] = [
     sourceId: "01900000-0000-7000-8000-000000570301",
     sourceName: "Topics",
     kind: "topic",
-    title: "Customers ask how to export traces to CSV",
-    description: "Questions about exporting traces, from the Traces page or through the API.",
-    hero: { index: 3, reason: "How can I export my traces to a CSV file?" },
-    matches: (trace) => trace.input_preview === "How can I export my traces to a CSV file?",
+    title: "Customers asking for SSO on the Starter plan",
+    description: "Customers ask whether SSO comes with the Starter plan.",
+    hero: { index: firstMatch(isSsoQuestion), reason: "Do you have SSO on the Starter plan?" },
+    matches: isSsoQuestion,
     reasonOf: (trace) => trace.input_preview,
   },
   {
@@ -64,35 +113,45 @@ export const STORY_ISSUES: readonly StoryIssue[] = [
     sourceId: "01900000-0000-7000-8000-000000570302",
     sourceName: "Errors",
     kind: "error",
-    title: "run_tests failed: 1 failed, 47 passed",
-    description: "pytest reports failures after the agent's first patch.",
-    hero: { index: 4, spanId: "0000000400000009", reason: "1 failed, 47 passed" },
-    matches: (trace) => trace.status === "error",
+    title: "ContextWindowExceeded: diff over 23 files",
+    description: "Runs stop when the diff no longer fits the model's context.",
+    hero: {
+      index: firstMatch(hasTag("context-window")),
+      spanId: errorSpan("write patch"),
+      reason: "The diff was too large for the model's context.",
+    },
+    matches: hasTag("context-window"),
   },
   {
     id: "01900000-0000-7000-8000-000000570103",
     story: "voice",
     eventId: "01900000-0000-7000-8000-000000570113",
     sourceId: "01900000-0000-7000-8000-000000570303",
-    sourceName: "Latency budget",
+    sourceName: "Bad scores",
     kind: "score",
-    title: "Reply started more than 800 ms after the caller",
-    description: "The time from the end of the caller's turn to the first audio of the reply.",
-    hero: { index: 5, spanId: "0000000500000005", reason: "check_availability took 1.22 s" },
-    matches: (trace) => trace.tags.includes("voice") && trace.duration_ns > 3_000_000_000,
+    title: "Agent talked over the caller",
+    description: "The agent starts speaking before the caller has finished.",
+    hero: {
+      index: firstMatch(hasTag("interrupted")),
+      reason: "The interruption check scored 0.3.",
+    },
+    matches: hasTag("interrupted"),
   },
   {
     id: "01900000-0000-7000-8000-000000570104",
     story: "extraction",
     eventId: "01900000-0000-7000-8000-000000570114",
     sourceId: "01900000-0000-7000-8000-000000570304",
-    sourceName: "Checks",
-    kind: "score",
-    title: "Invoice total doesn't match its line items",
-    description:
-      "The schema check fails when the extracted total differs from the sum of the line items.",
-    hero: { index: 6, spanId: "0000000600000005", reason: "Total 1,248.00, line items 1,284.00" },
-    matches: (trace) => trace.status === "error" && trace.tags.includes("billing"),
+    sourceName: "Errors",
+    kind: "error",
+    title: "Scanned PDF: OCR returned no text",
+    description: "Scanned invoices give OCR nothing to read, so no fields are extracted.",
+    hero: {
+      index: firstMatch(hasTag("scanned")),
+      spanId: errorSpan("ocr"),
+      reason: "The PDF is a scanned image with no text layer.",
+    },
+    matches: hasTag("scanned"),
   },
 ];
 
@@ -104,12 +163,69 @@ type StoryRule = {
   deliveryId: string;
   name: string;
   condition: Schema<"AlertCondition">;
+  /** The channel the rule notifies. */
+  channel: StoryChannel;
   state: "firing" | "ok";
-  lastValue: number;
-  lastCount: number;
+  /** The rule's value, its count and the time it last changed, before `now` of the dataset. */
+  lastValue: (dataset: Dataset, now: number) => number;
+  lastCount: (dataset: Dataset, now: number) => number;
   /** When it last fired (firing), or resolved (ok), before now. */
-  changedAgoMs: number;
+  changedAgoMs: (dataset: Dataset, now: number) => number;
 };
+
+/** The visible traces that start in `[from, to)`. */
+function startedBetween(dataset: Dataset, from: number, to: number): Trace[] {
+  return visibleTraces(dataset.traces, false, false).filter((trace) => {
+    const started = Date.parse(trace.start_time);
+    return started >= from && started < to;
+  });
+}
+
+/** The numeric score `name` of each trace that carries it. */
+function numericScores(traces: readonly Trace[], name: string): number[] {
+  return traces.flatMap((trace) => {
+    const value = trace.scores.find((score) => score.name === name)?.value;
+    return value?.data_type === "numeric" ? [value.value] : [];
+  });
+}
+
+function mean(values: readonly number[]): number {
+  return values.reduce((total, value) => total + value, 0) / values.length;
+}
+
+/** The cost of the traces (USD). */
+function costOf(traces: readonly Trace[]): number {
+  return traces.reduce((total, trace) => total + (trace.cost_total ?? 0), 0);
+}
+
+/**
+ * How long before `now` the first UTC hour of the last 24 began whose mean correctness is under
+ * the threshold: the hourly buckets of the alert preview, oldest first. A dataset without such an
+ * hour (another story's, in the unscoped tests) reports the whole day, so the handler never throws.
+ */
+function firstDippedHourAgo(dataset: Dataset, now: number): number {
+  const first = Math.floor((now - DAY_MS) / HOUR_MS) * HOUR_MS;
+  for (let start = first; start < now; start += HOUR_MS) {
+    const scores = numericScores(startedBetween(dataset, start, start + HOUR_MS), "correctness");
+    if (scores.length > 0 && mean(scores) < CORRECTNESS_THRESHOLD) {
+      return now - start;
+    }
+  }
+  return DAY_MS;
+}
+
+/** The cost step of the coding project (story-coding's `STEP_HOURS`). */
+const COST_STEP_MS = 14 * HOUR_MS;
+
+const CORRECTNESS_CONDITION = {
+  metric: "score",
+  window: "1h",
+  comparator: "lt",
+  threshold: CORRECTNESS_THRESHOLD,
+  min_count: 10,
+  score_name: "correctness",
+  aggregation: "avg",
+} as const;
 
 export const STORY_RULES: readonly StoryRule[] = [
   {
@@ -117,46 +233,34 @@ export const STORY_RULES: readonly StoryRule[] = [
     story: "support",
     eventId: "01900000-0000-7000-8000-000000570211",
     deliveryId: "01900000-0000-7000-8000-000000570221",
-    name: "Answer correctness under 0.7 on support-bot",
-    condition: {
-      metric: "score",
-      window: "1h",
-      comparator: "lt",
-      threshold: 0.7,
-      min_count: 10,
-      score_name: "correctness",
-      aggregation: "avg",
-      filter: "tags @> ['email']",
-    },
-    state: "ok",
-    lastValue: 0.86,
-    lastCount: 42,
-    changedAgoMs: 3 * HOUR_MS,
+    name: "Answer correctness under 0.7",
+    condition: CORRECTNESS_CONDITION,
+    channel: TEAM_SLACK,
+    state: "firing",
+    lastValue: (dataset, now) =>
+      mean(numericScores(startedBetween(dataset, now - HOUR_MS, now), "correctness")),
+    lastCount: (dataset, now) => startedBetween(dataset, now - HOUR_MS, now).length,
+    changedAgoMs: (dataset, now) => firstDippedHourAgo(dataset, now),
   },
   {
     id: "01900000-0000-7000-8000-000000570202",
     story: "coding",
     eventId: "01900000-0000-7000-8000-000000570212",
     deliveryId: "01900000-0000-7000-8000-000000570222",
-    name: "Error rate above 5% on code-agent",
-    condition: {
-      metric: "error_rate",
-      window: "15m",
-      comparator: "gt",
-      threshold: 0.05,
-      min_count: 20,
-    },
+    name: "Spend over $40 an hour",
+    condition: { metric: "cost", window: "1h", comparator: "gt", threshold: 40 },
+    channel: TEAM_SLACK,
     state: "firing",
-    lastValue: 0.083,
-    lastCount: 36,
-    changedAgoMs: 6 * MINUTE_MS,
+    lastValue: (dataset, now) => costOf(startedBetween(dataset, now - HOUR_MS, now)),
+    lastCount: (dataset, now) => startedBetween(dataset, now - HOUR_MS, now).length,
+    changedAgoMs: () => COST_STEP_MS,
   },
   {
     id: "01900000-0000-7000-8000-000000570203",
     story: "voice",
     eventId: "01900000-0000-7000-8000-000000570213",
     deliveryId: "01900000-0000-7000-8000-000000570223",
-    name: "Slow replies on voice-agent",
+    name: "Slow replies on the voice desk",
     condition: {
       metric: "latency_p95",
       target: "trace",
@@ -164,12 +268,18 @@ export const STORY_RULES: readonly StoryRule[] = [
       comparator: "gt",
       threshold: 1_500,
       min_count: 20,
-      filter: "tags @> ['voice']",
     },
+    channel: ON_CALL_PAGER,
     state: "firing",
-    lastValue: 2_800,
-    lastCount: 54,
-    changedAgoMs: 4 * MINUTE_MS,
+    lastValue: (dataset, now) =>
+      percentile(
+        startedBetween(dataset, now - 15 * MINUTE_MS, now).map(
+          (trace) => trace.duration_ns / 1_000_000,
+        ),
+        95,
+      ) ?? Number.NaN,
+    lastCount: (dataset, now) => startedBetween(dataset, now - 15 * MINUTE_MS, now).length,
+    changedAgoMs: () => 6 * HOUR_MS,
   },
   {
     id: "01900000-0000-7000-8000-000000570204",
@@ -187,10 +297,11 @@ export const STORY_RULES: readonly StoryRule[] = [
       aggregation: "pass_rate",
       filter: "tags @> ['billing']",
     },
+    channel: TEAM_SLACK,
     state: "ok",
-    lastValue: 0.985,
-    lastCount: 210,
-    changedAgoMs: 5 * HOUR_MS,
+    lastValue: () => 0.985,
+    lastCount: () => 210,
+    changedAgoMs: () => 5 * HOUR_MS,
   },
 ];
 
@@ -355,7 +466,7 @@ type Occurrences = { hero: Trace | undefined; generated: Trace[]; matched: Trace
 
 /** The hero trace (if the dataset has it), then the generated occurrences, newest first. */
 function occurrenceTraces(dataset: Dataset, issue: StoryIssue): Occurrences {
-  const hero: Trace | undefined = dataset.traces[issue.hero.index];
+  const hero: Trace | undefined = dataset.traces[issue.hero.index(dataset)];
   const earliest = dataset.now - OCCURRENCE_WINDOW_MS;
   const generated = visibleTraces(dataset.traces, false, false)
     .filter((trace) => trace.trace_id !== hero?.trace_id && issue.matches(trace))
@@ -381,7 +492,11 @@ function oldestFirst(traces: readonly Trace[]): Trace[] {
 }
 
 /** The issue's occurrences, grouped by UTC day, with the first examples. */
-function occurrencesOf(issue: StoryIssue, traces: Occurrences): Schema<"IssueOccurrences"> {
+function occurrencesOf(
+  dataset: Dataset,
+  issue: StoryIssue,
+  traces: Occurrences,
+): Schema<"IssueOccurrences"> {
   const { hero, generated, matched } = traces;
   const byDay = new Map<number, Trace[]>();
   for (const trace of matched) {
@@ -403,12 +518,13 @@ function occurrencesOf(issue: StoryIssue, traces: Occurrences): Schema<"IssueOcc
 
   const examples: Schema<"IssueExample">[] = [];
   if (hero) {
+    const spanId = issue.hero.spanId?.(dataset, issue.hero.index(dataset));
     examples.push({
       trace_id: hero.trace_id,
       created_at: hero.start_time,
       reason: issue.hero.reason,
       issue_id: issue.id,
-      ...(issue.hero.spanId === undefined ? {} : { span_id: issue.hero.spanId }),
+      ...(spanId === undefined ? {} : { span_id: spanId }),
     });
   }
   for (const trace of generated.slice(0, GENERATED_EXAMPLES)) {
@@ -424,7 +540,7 @@ function occurrencesOf(issue: StoryIssue, traces: Occurrences): Schema<"IssueOcc
 }
 
 export function storyOccurrences(dataset: Dataset, issue: StoryIssue): Schema<"IssueOccurrences"> {
-  return occurrencesOf(issue, occurrenceTraces(dataset, issue));
+  return occurrencesOf(dataset, issue, occurrenceTraces(dataset, issue));
 }
 
 /** The issue, or undefined when no trace of the dataset matches it. */
@@ -481,26 +597,26 @@ export function storyAlertRule(dataset: Dataset, rule: StoryRule): Schema<"Alert
     condition: rule.condition,
     state: rule.state,
     enabled: true,
-    channel_ids: [TEAM_SLACK],
+    channel_ids: [rule.channel.id],
     cooldown_s: 3600,
     notify_while_firing: false,
-    last_value: rule.lastValue,
-    last_count: rule.lastCount,
+    last_value: rule.lastValue(dataset, dataset.now),
+    last_count: rule.lastCount(dataset, dataset.now),
     last_evaluated_at: ago(dataset, MINUTE_MS),
-    ...(firing ? { last_fired_at: ago(dataset, rule.changedAgoMs) } : {}),
+    ...(firing ? { last_fired_at: ago(dataset, rule.changedAgoMs(dataset, dataset.now)) } : {}),
     created_at: ago(dataset, 7 * DAY_MS),
     updated_at: ago(dataset, 7 * DAY_MS),
   };
 }
 
 export function storyAlertEvent(dataset: Dataset, rule: StoryRule): Schema<"AlertEvent"> {
-  const windowTo = ago(dataset, rule.changedAgoMs);
+  const windowTo = ago(dataset, rule.changedAgoMs(dataset, dataset.now));
   return {
     id: rule.eventId,
     rule_id: rule.id,
     kind: rule.state === "firing" ? "fired" : "resolved",
-    value: rule.lastValue,
-    count: rule.lastCount,
+    value: rule.lastValue(dataset, dataset.now),
+    count: rule.lastCount(dataset, dataset.now),
     threshold: rule.condition.threshold,
     comparator: rule.condition.comparator,
     metric: rule.condition.metric,
@@ -511,9 +627,9 @@ export function storyAlertEvent(dataset: Dataset, rule: StoryRule): Schema<"Aler
     deliveries: [
       {
         id: rule.deliveryId,
-        channel_id: TEAM_SLACK,
-        channel_name: "Team Slack",
-        channel_kind: "slack",
+        channel_id: rule.channel.id,
+        channel_name: rule.channel.name,
+        channel_kind: rule.channel.kind,
         status: "sent",
         attempts: 1,
         updated_at: windowTo,
@@ -614,7 +730,7 @@ export function storyHandlers(dataset: Dataset, project?: string): HttpHandler[]
     http.get(`${prefix}/issues/:id/occurrences`, ({ params }) => {
       const issue = issueById(idParam(params.id));
       const traces = issue ? matchedTraces(dataset, issue) : undefined;
-      return issue && traces ? HttpResponse.json(occurrencesOf(issue, traces)) : undefined;
+      return issue && traces ? HttpResponse.json(occurrencesOf(dataset, issue, traces)) : undefined;
     }),
     http.get(`${prefix}/issues/:id/events`, ({ params }) => {
       const issue = issueById(idParam(params.id));
