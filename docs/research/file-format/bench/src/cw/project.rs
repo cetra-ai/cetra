@@ -549,7 +549,7 @@ impl Sampler {
     }
 }
 
-/// `cw_traces.txt`, `cw_around.txt`, `cw_clock.txt` and `cw_queries.txt`.
+/// `cw_traces.txt`, `cw_around.txt`, `cw_clock.txt`, `cw_queries.txt` and `cw_needles.txt`.
 fn write_texts(dir: &Path, samples: &[([u8; 16], i64)], clock: i64, queries: &[&str]) -> R<()> {
     let hex = |b: &[u8]| -> String { b.iter().map(|x| format!("{x:02x}")).collect() };
     let traces: String = samples.iter().map(|(id, _)| hex(id) + "\n").collect();
@@ -563,6 +563,32 @@ fn write_texts(dir: &Path, samples: &[([u8; 16], i64)], clock: i64, queries: &[&
         q.push('\n');
     }
     fs::write(dir.join("cw_queries.txt"), q)?;
+    write_needles(dir)
+}
+
+/// Writes `cw_needles.txt` into `dir`: `cases::PROJECT_NEEDLES`, one `name<TAB>hex` line each
+/// (M1's format), replacing the file if present.
+fn write_needles(dir: &Path) -> R<()> {
+    let text: String = cases::PROJECT_NEEDLES
+        .iter()
+        .map(|(name, needle)| format!("{name}\t{}\n", crate::hex(needle.as_bytes())))
+        .collect();
+    fs::write(dir.join("cw_needles.txt"), text)?;
+    Ok(())
+}
+
+/// `cw needles <dir>`: writes `cw_needles.txt` into an existing project directory, for the
+/// projects built before M4.1.
+pub fn needles_cmd(args: &[String]) -> R<()> {
+    let [dir] = args else {
+        return Err(crate::USAGE.into());
+    };
+    let dir = Path::new(dir);
+    if !dir.is_dir() {
+        return Err(format!("{} is not a project directory", dir.display()).into());
+    }
+    write_needles(dir)?;
+    println!("wrote {}", dir.join("cw_needles.txt").display());
     Ok(())
 }
 
@@ -1040,6 +1066,25 @@ mod tests {
         let err = check_small_levels(&level1).unwrap_err();
         assert!(err.to_string().contains("small form: a background merge produced level-1 files"), "{err}");
         check_small_levels(&[Job { src: PathBuf::from("0-x.parquet"), ..job("spans") }]).unwrap();
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn projects_write_needles() {
+        let base = scratch("needles");
+        let dir = base.join("p");
+        project_cmd(&args(&dir, &["--days", "2", "--traces-per-day", "300"])).await.unwrap();
+        let want: String = cases::PROJECT_NEEDLES
+            .iter()
+            .map(|(name, needle)| format!("{name}\t{}\n", crate::hex(needle.as_bytes())))
+            .collect();
+        let text = fs::read_to_string(dir.join("cw_needles.txt")).unwrap();
+        assert_eq!(text, want);
+        assert_eq!(text.lines().count(), 5);
+
+        fs::remove_file(dir.join("cw_needles.txt")).unwrap();
+        needles_cmd(&[dir.display().to_string()]).unwrap();
+        assert_eq!(fs::read_to_string(dir.join("cw_needles.txt")).unwrap(), want);
         let _ = fs::remove_dir_all(&base);
     }
 

@@ -17,6 +17,7 @@ pub async fn cmd(args: &[String]) -> crate::R<()> {
         Some("flush-input") => cases::flush_input_cmd(&args[1..]),
         Some("project") => project::project_cmd(&args[1..]).await,
         Some("layout") => project::layout_cmd(&args[1..]),
+        Some("needles") => project::needles_cmd(&args[1..]),
         Some("run") => harness::run_cmd(&args[1..]).await,
         Some("one") => harness::one_cmd(&args[1..]).await,
         _ => Err(crate::USAGE.into()),

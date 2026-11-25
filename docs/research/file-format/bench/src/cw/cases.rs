@@ -62,6 +62,15 @@ pub const INTL_PHRASES: [&str; 10] = [
 pub const INTL_NEEDLES: [(&str, &str); 5] = [
     ("cafe", "café"), ("tokyo", "東京"), ("rocket", "🚀"), ("strasse", "straße"), ("oshibka", "ошибка"),
 ];
+/// The needles of a project (`cw_needles.txt`): planted ones of `NEEDLES`, which a project built
+/// with `--payloads` from a planted case carries, and natural ones.
+pub const PROJECT_NEEDLES: [(&str, &str); 5] = [
+    ("absent", ABSENT), ("bug", "bug"), ("404", "404"), ("common", "commonneedle"), ("role", "\"role\""),
+];
+/// Spans of the `mega` case's trace (M4.1 § Steps 1).
+pub const MEGA_SPANS: usize = 10_000;
+/// Every this-many-th clone of the `mega` trace is in `cw_spans.txt`; 20 clones in all.
+pub const MEGA_PICK_EVERY: usize = 500;
 
 /// A span's trace id and span id, as bytes.
 type Pair = ([u8; 16], [u8; 8]);
@@ -236,13 +245,15 @@ pub fn gen_spans(case: &str, traces: Option<usize>) -> crate::R<(Vec<Span>, Case
         "keys5k" => (100_000, Some(5_000)),
         "text_unique" | "b64" | "json_random" | "nonllm95" | "intl" => (10_000, None),
         "giant" => (2_000, None),
+        "mega" => (10_000, None),
         _ => {
             return Err(format!(
-                "unknown case {case:?}: expected keys100, keys1k, keys5k, text_unique, b64, json_random, nonllm95, giant or intl"
+                "unknown case {case:?}: expected keys100, keys1k, keys5k, text_unique, b64, json_random, nonllm95, giant, intl or mega"
             )
             .into());
         }
     };
+    let is_mega = case == "mega";
     let world = datagen::World::new(7);
     let mut rng = datagen::Rng::new(42);
     let mut spans = Vec::new();
@@ -253,6 +264,8 @@ pub fn gen_spans(case: &str, traces: Option<usize>) -> crate::R<(Vec<Span>, Case
             spans[start..].iter_mut().for_each(crate::strip_payloads);
         }
     }
+    // Before any picking, so the rng order is fixed (M4.1 § Steps 1).
+    let mega = if is_mega { Some(add_mega_clones(&mut spans, &mut rng)?) } else { None };
 
     let mut attr = None;
     let mut giant_pairs = Vec::new();
@@ -269,10 +282,12 @@ pub fn gen_spans(case: &str, traces: Option<usize>) -> crate::R<(Vec<Span>, Case
             "giant" => giant_pairs = giant(&mut spans, &mut rng),
             _ => {}
         }
-        plant(&mut spans);
+        if !is_mega {
+            plant(&mut spans);
+        }
     }
 
-    let mut needles: Vec<(String, String)> = if keys.is_some() {
+    let mut needles: Vec<(String, String)> = if keys.is_some() || is_mega {
         Vec::new()
     } else {
         NEEDLES.iter().map(|(n, v)| ((*n).to_owned(), (*v).to_owned())).collect()
@@ -280,13 +295,15 @@ pub fn gen_spans(case: &str, traces: Option<usize>) -> crate::R<(Vec<Span>, Case
     if case == "intl" {
         needles.extend(INTL_NEEDLES.iter().map(|(n, v)| ((*n).to_owned(), (*v).to_owned())));
     }
-    let files = CaseFiles {
-        queries: queries_for(case, &needles),
-        traces: pick_traces(&spans, &mut rng)?,
-        spans: pick_pairs(&spans, &giant_pairs, keys.is_some(), &mut rng)?,
-        needles,
-        attr,
+    let (traces, pairs) = match mega {
+        Some((trace, clones)) => {
+            let mut traces = vec![trace];
+            traces.extend(pick_traces_excluding(&spans, &mut rng, trace)?);
+            (traces, clones)
+        }
+        None => (pick_traces(&spans, &mut rng)?, pick_pairs(&spans, &giant_pairs, keys.is_some(), &mut rng)?),
     };
+    let files = CaseFiles { queries: queries_for(case, &needles), traces, spans: pairs, needles, attr };
     Ok((spans, files))
 }
 
@@ -309,6 +326,7 @@ fn queries_for(case: &str, needles: &[(String, String)]) -> Vec<String> {
             q
         }
         "giant" => strs(&["write", "span_heavy", "scan_payload", "search:rare", "search:absent"]),
+        "mega" => strs(&["write", "trace_light", "span_heavy"]),
         "import" => {
             let mut q = strs(&["write", "scan_payload", "trace_light", "span_heavy"]);
             q.extend(search);
@@ -325,18 +343,37 @@ fn queries_for(case: &str, needles: &[(String, String)]) -> Vec<String> {
 
 /// `cw_traces.txt`: 20 distinct trace ids, of randomly chosen spans.
 fn pick_traces(spans: &[Span], rng: &mut datagen::Rng) -> crate::R<Vec<[u8; 16]>> {
+    check_distinct_traces(spans)?;
+    Ok(draw_traces(spans, rng, Vec::new()))
+}
+
+/// The `IDS - 1` trace ids that `pick_traces` would pick after `exclude`, which is not among
+/// them: the `mega` case's `cw_traces.txt` is `exclude` first, then these.
+fn pick_traces_excluding(spans: &[Span], rng: &mut datagen::Rng, exclude: [u8; 16]) -> crate::R<Vec<[u8; 16]>> {
+    check_distinct_traces(spans)?;
+    let mut out = draw_traces(spans, rng, vec![exclude]);
+    out.remove(0);
+    Ok(out)
+}
+
+/// Errors unless `spans` hold at least `IDS` distinct traces.
+fn check_distinct_traces(spans: &[Span]) -> crate::R<()> {
     let distinct: HashSet<[u8; 16]> = spans.iter().map(|s| *s.trace_id.as_bytes()).collect();
     if distinct.len() < IDS {
         return Err(format!("cw_traces.txt: only {} traces, need {IDS}", distinct.len()).into());
     }
-    let mut out: Vec<[u8; 16]> = Vec::new();
+    Ok(())
+}
+
+/// Draws random traces of `spans` into `out` until it holds `IDS` distinct ids.
+fn draw_traces(spans: &[Span], rng: &mut datagen::Rng, mut out: Vec<[u8; 16]>) -> Vec<[u8; 16]> {
     while out.len() < IDS {
         let t = *spans[rng.below(spans.len())].trace_id.as_bytes();
         if !out.contains(&t) {
             out.push(t);
         }
     }
-    Ok(out)
+    out
 }
 
 /// `cw_spans.txt`: the first giant spans (up to 10), then random spans with an input, 20 in all.
@@ -358,6 +395,57 @@ fn pick_pairs(spans: &[Span], giant: &[Pair], keys: bool, rng: &mut datagen::Rng
         }
     }
     Ok(out)
+}
+
+/// The `mega` case's trace (M4.1 § Steps 1): the trace of the first LLM span with an input,
+/// extended in place to `MEGA_SPANS` spans by clones of that span, appended to `spans`. Clone `j`
+/// is parented to the root, starts `1 ms * (j + 1)` after the root and lasts 500 ns. Returns the
+/// trace id and the `cw_spans.txt` pairs: clones `j = 0, 500, …, 9500`.
+fn add_mega_clones(spans: &mut Vec<Span>, rng: &mut datagen::Rng) -> crate::R<([u8; 16], Vec<Pair>)> {
+    let template = spans
+        .iter()
+        .find(|s| s.span_kind == SpanKind::Llm && s.input.is_some())
+        .cloned()
+        .ok_or("mega: no LLM span with an input")?;
+    let trace = template.trace_id;
+    let own = spans.iter().filter(|s| s.trace_id == trace).count();
+    if own > MEGA_SPANS {
+        return Err(format!("mega: the trace has {own} spans, more than {MEGA_SPANS}").into());
+    }
+    let root = spans
+        .iter()
+        .find(|s| s.trace_id == trace && s.parent_span_id.is_none())
+        .ok_or("mega: the trace has no root span")?;
+    let (root_id, root_start) = (root.span_id, root.start_time);
+    let mut used: HashSet<[u8; 8]> = spans
+        .iter()
+        .filter(|s| s.trace_id == trace)
+        .map(|s| *s.span_id.as_bytes())
+        .collect();
+    let mut pairs = Vec::new();
+    for j in 0..MEGA_SPANS - own {
+        let span_id = loop {
+            if let Ok(id) = SpanId::from_bytes(rng.next().to_be_bytes()) {
+                if used.insert(*id.as_bytes()) {
+                    break id;
+                }
+            }
+        };
+        let start = root_start + 1_000 * (j as i64 + 1);
+        let mut s = template.clone();
+        s.span_id = span_id;
+        s.parent_span_id = Some(root_id);
+        s.start_time = start;
+        s.end_time = start + 500;
+        if j % MEGA_PICK_EVERY == 0 {
+            pairs.push((*trace.as_bytes(), *span_id.as_bytes()));
+        }
+        spans.push(s);
+    }
+    if pairs.len() != IDS {
+        return Err(format!("mega: {} clones, need {} for cw_spans.txt", MEGA_SPANS - own, IDS * MEGA_PICK_EVERY).into());
+    }
+    Ok((*trace.as_bytes(), pairs))
 }
 
 /// Writes a generated case into `dir`: the input files, then the text files.
@@ -1037,6 +1125,40 @@ mod tests {
             .find(|s| *s.trace_id.as_bytes() == trace && *s.span_id.as_bytes() == span)
             .unwrap();
         assert!(first.input.as_ref().unwrap().len() >= GIANT_BYTES - 3);
+    }
+
+    #[test]
+    fn mega_case_has_one_big_trace() {
+        let (spans, files) = gen_spans("mega", Some(50)).unwrap();
+        let mut per_trace: HashMap<[u8; 16], usize> = HashMap::new();
+        for s in &spans {
+            *per_trace.entry(*s.trace_id.as_bytes()).or_default() += 1;
+        }
+        let big: Vec<[u8; 16]> = per_trace.iter().filter(|(_, n)| **n == MEGA_SPANS).map(|(t, _)| *t).collect();
+        assert_eq!(big.len(), 1, "traces of {MEGA_SPANS} spans");
+        let mega = big[0];
+        let ids: HashSet<[u8; 8]> = spans
+            .iter()
+            .filter(|s| *s.trace_id.as_bytes() == mega)
+            .map(|s| *s.span_id.as_bytes())
+            .collect();
+        assert_eq!(ids.len(), MEGA_SPANS, "span ids of the mega trace are distinct");
+
+        assert_eq!(files.traces.len(), IDS);
+        assert_eq!(files.traces[0], mega);
+        assert!(files.traces[1..].iter().all(|t| *t != mega));
+        assert_eq!(files.traces.iter().collect::<HashSet<_>>().len(), IDS);
+
+        assert_eq!(files.spans.len(), IDS);
+        for (trace, span) in &files.spans {
+            assert_eq!(*trace, mega);
+            let s = spans
+                .iter()
+                .find(|s| *s.trace_id.as_bytes() == *trace && *s.span_id.as_bytes() == *span)
+                .unwrap();
+            assert!(s.input.is_some(), "a cw_spans.txt span has no input");
+        }
+        assert!(files.needles.is_empty());
     }
 
     #[test]
