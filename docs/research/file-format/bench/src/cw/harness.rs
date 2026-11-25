@@ -1,7 +1,7 @@
 //! `fmtbench cw run` and `cw one`: each query of a case runs in fresh processes, the two formats
 //! alternating round by round, and the results are summarised with a verdict per query
-//! (plans/08-m1-likely-failures.md § M1.2). M1.2 measures `write`; the readers come in M1.3 and
-//! are wired in M1.4.
+//! (plans/08-m1-likely-failures.md § M1.2 and § M1.4). Every query runs through `one`: `write`
+//! through `write_format`, the reads through `cw::read`.
 
 use std::fs::OpenOptions;
 use std::io::{BufWriter, Read, Seek, SeekFrom, Write};
@@ -18,7 +18,9 @@ use parquet::file::metadata::{PageIndexPolicy, ParquetMetaDataReader};
 use serde_json::{Value, json};
 use xxhash_rust::xxh3::xxh3_64;
 
-use crate::{location, narrow_table, payload_table, read_text, write_parquet, write_strata, R};
+use crate::cw::read::{self, Files};
+use crate::profile::unhex;
+use crate::{location, narrow_table, open_pq_fast, open_strata, parse_id, payload_table, read_text, write_parquet, write_strata, R};
 
 /// The two formats, Parquet first.
 const FORMATS: [&str; 2] = ["pq_cetra", "st"];
@@ -388,16 +390,108 @@ pub async fn one_cmd(args: &[String]) -> R<()> {
 }
 
 /// Runs `query` K times in this process, as `cw one` does, and returns its result.
-/// Only `write` is wired in M1.2; the reads come in M1.4.
 pub async fn one(dir: &str, format: &str, query: &str, runs: usize) -> R<ProcResult> {
     check_format(format)?;
-    if query != "write" {
-        return Err(format!("unknown query {query}").into());
+    if query == "write" {
+        if dir.starts_with("s3://") {
+            return Err("write is local only: give a local case directory".into());
+        }
+        return write_format(Path::new(dir), format, runs);
     }
-    if dir.starts_with("s3://") {
-        return Err("write is local only: give a local case directory".into());
+    read_format(dir, format, query, runs).await
+}
+
+/// The non-empty lines of a text file, trimmed; a missing file has none.
+fn lines_of(text: Option<String>) -> Vec<String> {
+    text.unwrap_or_default().lines().map(str::trim).filter(|l| !l.is_empty()).map(str::to_owned).collect()
+}
+
+/// The case's text files (plans/08-m1-likely-failures.md § M1.1), read through `loc`'s store:
+/// hex ids parsed with `parse_id` (a span's 8-byte id from its 16 hex digits), needles decoded
+/// from hex to UTF-8. A missing file gives an empty list or `None`.
+pub(crate) async fn read_case(loc: &crate::Location) -> R<read::Case> {
+    let traces = lines_of(read_text(loc, "cw_traces.txt").await?).iter().map(|l| parse_id(l)).collect::<R<Vec<_>>>()?;
+    let spans = lines_of(read_text(loc, "cw_spans.txt").await?)
+        .iter()
+        .map(|l| -> R<([u8; 16], [u8; 8])> {
+            let (trace, span) = l.split_once(' ').ok_or("cw_spans.txt: want '<trace> <span>'")?;
+            let span: [u8; 8] = unhex(span).try_into().map_err(|_| "cw_spans.txt: bad span id")?;
+            Ok((parse_id(trace)?, span))
+        })
+        .collect::<R<Vec<_>>>()?;
+    let needles = lines_of(read_text(loc, "cw_needles.txt").await?)
+        .iter()
+        .map(|l| -> R<(String, String)> {
+            let (name, hex) = l.split_once('\t').ok_or("cw_needles.txt: want '<name>\\t<hex>'")?;
+            Ok((name.to_owned(), String::from_utf8(unhex(hex))?))
+        })
+        .collect::<R<Vec<_>>>()?;
+    let attr = match lines_of(read_text(loc, "cw_attr.txt").await?).first() {
+        Some(l) => {
+            let (key, value) = l.split_once('\t').ok_or("cw_attr.txt: want '<key>\\t<value>'")?;
+            Some((key.to_owned(), value.to_owned()))
+        }
+        None => None,
+    };
+    Ok(read::Case { traces, spans, needles, attr })
+}
+
+/// A read query for `cw one`: the format's files are opened once, the case is read, the query
+/// runs once as a warm-up, then K measured runs, each of which must give the warm-up's answer.
+async fn read_format(dir: &str, format: &str, query: &str, runs: usize) -> R<ProcResult> {
+    if runs == 0 {
+        return Err("runs must be at least 1".into());
     }
-    write_format(Path::new(dir), format, runs)
+    let rss_start = proc_status_bytes("VmRSS")?;
+    let loc = location(dir)?;
+    let files = if format == "pq_cetra" {
+        Files::Parquet(open_pq_fast(&loc, "pq_cetra").await?)
+    } else {
+        Files::Strata(open_strata(&loc, "st").await?)
+    };
+    let case = read_case(&loc).await?;
+    let warm = read::run(query, &files, &case).await?;
+    loc.store.reset();
+    if let Files::Strata(fs) = &files {
+        for f in fs {
+            f.reset_io_stats();
+        }
+    }
+    let (mut runs_ms, mut cpu_ms) = (Vec::with_capacity(runs), Vec::with_capacity(runs));
+    let (mut gets, mut bytes): (u64, u64) = (0, 0);
+    let mut waves: Option<u64> = None;
+    for k in 0..runs {
+        let cpu0 = ProcessTime::now();
+        let t0 = Instant::now();
+        let answer = read::run(query, &files, &case).await?;
+        runs_ms.push(t0.elapsed().as_secs_f64() * 1e3);
+        cpu_ms.push(cpu0.elapsed().as_secs_f64() * 1e3);
+        if answer != warm {
+            return Err(format!("answer changed between runs ({query} {format})").into());
+        }
+        // I/O counters are read after the first measured run only (see ProcResult).
+        if k == 0 {
+            (gets, bytes) = loc.store.stats();
+            if let Files::Strata(fs) = &files {
+                waves = Some(fs.iter().map(|f| f.io_stats().waves).sum::<u64>());
+            }
+        }
+    }
+    Ok(ProcResult {
+        query: query.to_owned(),
+        format: format.to_owned(),
+        runs_ms,
+        cpu_ms,
+        gets,
+        bytes,
+        waves,
+        rows: warm.rows,
+        answer: format!("{:016x}", warm.hash),
+        rss_start,
+        vmhwm: proc_status_bytes("VmHWM")?,
+        bytes_written: None,
+        tail_bytes: None,
+    })
 }
 
 /// Fails unless `format` is `pq_cetra` or `st`.
@@ -694,5 +788,34 @@ mod tests {
             let tail = r.tail_bytes.unwrap();
             assert!(tail > 0 && tail < total, "{format} tail_bytes {tail} of {total}");
         }
+    }
+
+    #[tokio::test]
+    async fn cw_case_round_trips() {
+        use crate::cw::cases::{gen_spans, write_case};
+        // keys100: the traces, the spans and the attribute pair come back.
+        let dir = test_dir("cw_case_round_trips_keys");
+        let (spans, files) = gen_spans("keys100", Some(20)).unwrap();
+        write_case(&dir, spans, &files).unwrap();
+        let loc = location(dir.to_str().unwrap()).unwrap();
+        let case = read_case(&loc).await.unwrap();
+        assert_eq!(case.traces.len(), 20);
+        assert_eq!(case.traces, files.traces);
+        assert_eq!(case.spans.len(), 20);
+        assert_eq!(case.spans, files.spans);
+        assert!(case.attr.is_some());
+        assert_eq!(case.attr, files.attr);
+        assert!(case.needles.is_empty());
+        // text_unique: the needles come back as plain text.
+        let dir = test_dir("cw_case_round_trips_text");
+        let (spans, files) = gen_spans("text_unique", Some(30)).unwrap();
+        write_case(&dir, spans, &files).unwrap();
+        let loc = location(dir.to_str().unwrap()).unwrap();
+        let case = read_case(&loc).await.unwrap();
+        assert!(!files.needles.is_empty());
+        assert_eq!(case.needles, files.needles);
+        assert_eq!(case.traces, files.traces);
+        assert_eq!(case.spans, files.spans);
+        assert_eq!(case.attr, None);
     }
 }

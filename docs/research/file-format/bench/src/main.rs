@@ -142,7 +142,6 @@ async fn run() -> R<()> {
             }
             fineweb_cmd(&dir, spans, per_file, paths).await
         }
-        #[cfg(feature = "cw_cases")]
         Some("cw") => cw::cmd(&args[2..]).await,
         _ => Err(USAGE.into()),
     }
