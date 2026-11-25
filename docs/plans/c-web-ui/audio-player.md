@@ -35,7 +35,7 @@ Out of scope (not planned):
 
 | ID | Summary |
 |---|---|
-| D-C-29 (new, AP4 writes it) | `uri` and `blob` parts have an optional `transcript`. It is filled from cetra-format parts and OpenAI chat output audio. A text-less message previews its transcripts. Eval renders `[<media>: <transcript>]`. The Chat tab plays audio in a themed player with a waveform that is decoded when the player is visible, for files up to 8 MiB, and shows the transcript under it. |
+| D-C-29 (new, AP4 writes it) | `uri` and `blob` parts have an optional `transcript`. It is filled from cetra-format parts and OpenAI chat output audio. A text-less message previews its transcripts. Eval renders `[<media>: <transcript>]`. The Chat tab plays audio in a themed player with a waveform that is decoded when the player is visible, for files up to 4 MiB, and shows the transcript under it. |
 | D65 | Nullable optional fields are preserved as explicit nulls (the OpenAPI nullability list). |
 | D103 | Normalization returns blobs and the server stores them. |
 
@@ -48,7 +48,7 @@ The user's answers (2026-11-25):
 
 ## Versions
 
-No new dependency. The waveform uses the browser's Web Audio API (`AudioContext.decodeAudioData`).
+No new dependency. The waveform uses the browser's Web Audio API (`OfflineAudioContext.decodeAudioData`).
 
 ## Phases
 
@@ -212,7 +212,7 @@ AP2 and AP3 can run in parallel after AP1: AP2 edits only `crates/`, `fixtures/o
 /** Bars drawn by the player. */
 export const WAVEFORM_BARS = 64;
 /** Files larger than this are not decoded; the player shows a plain progress bar. */
-export const WAVEFORM_MAX_BYTES = 8 * 1024 * 1024;
+export const WAVEFORM_MAX_BYTES = 4 * 1024 * 1024;
 
 /**
  * Peak amplitude of each of `bars` equal slices of `samples`, scaled so the largest is 1.
@@ -228,12 +228,14 @@ export function clockOf(seconds: number): string;
 export function lengthOf(seconds: number): string;
 
 /**
- * Returns null at once, before any fetch, when `globalThis.AudioContext` is undefined.
+ * Returns null at once, before any fetch, when `globalThis.OfflineAudioContext` is undefined.
  * Otherwise fetches `src`, refuses bodies over WAVEFORM_MAX_BYTES (by Content-Length when
- * present, else by the bytes read), decodes with an AudioContext and returns peaksOf(first
- * channel). Returns null when the fetch fails (network, CSP), the body is too large or
- * decoding fails. Results (including null) are cached per src in a module-level Map, and
- * concurrent calls for one src share one promise. An abort is not cached.
+ * present, else by the bytes read), decodes with a one-channel, 8 kHz OfflineAudioContext and
+ * returns peaksOf(first channel). Returns null when the fetch fails (network, CSP) or the
+ * response is not ok, the body is too large or decoding fails. A fetch that throws or is not ok
+ * is not cached (its entry is removed, so a later call retries); the other results, including
+ * null, are cached per src in a module-level Map, and concurrent calls for one src share one
+ * promise. An abort is not cached.
  */
 export function loadPeaks(src: string, signal?: AbortSignal): Promise<number[] | null>;
 
@@ -255,7 +257,7 @@ export function MediaWithTranscript(props: { transcript?: string; children: Reac
 ```
 
 **Steps:**
-1. `waveform.ts` as the contracts above. `loadPeaks` aborts the read (via the signal or by cancelling the reader) once the byte cap is passed, and closes the `AudioContext` after decoding.
+1. `waveform.ts` as the contracts above. `loadPeaks` aborts the read (via the signal or by cancelling the reader) once the byte cap is passed, and decodes in an `OfflineAudioContext`, which has nothing to close.
 2. `AudioPlayer`:
    - A hidden `<audio preload="metadata" src={src}>` (keep the existing `biome-ignore lint/a11y/useMediaCaption` comment), driven by a ref. State: `playing`, `current` (s), `duration` (s or NaN), `failed`.
    - Events: `loadedmetadata` / `durationchange` set `duration`; `timeupdate` sets `current`; `play` / `pause` / `ended` set `playing` (`ended` also resets `current` to 0); `error` sets `failed`.
@@ -282,14 +284,14 @@ export function MediaWithTranscript(props: { transcript?: string; children: Reac
 - `waveform.test.ts` (`afterEach(resetPeaksCache)`; each `loadPeaks` test uses its own `src` URL under `/api/v1/test-audio/…` with an MSW handler from `server.use`):
   - `peaksOf` scales to the loudest slice; silence gives zeros; fewer samples than bars gives `bars` values; negative samples count by magnitude.
   - `clockOf`: 0 → `0:00`, 4.2 → `0:04`, 65 → `1:05`, 3725 → `1:02:05`, NaN → `0:00`. `lengthOf`: 4.2 → `4.2 s`, 65 → `1:05`.
-  - `loadPeaks returns null without AudioContext and fetches nothing` (a handler that records calls sees none).
-  - With `vi.stubGlobal("AudioContext", FakeAudioContext)` (a class whose `decodeAudioData` resolves `{ getChannelData: () => new Float32Array([0, 0.5, -1, 0.25]) }` and whose `close` resolves; `vi.unstubAllGlobals()` after each): `decodes the first channel into peaks`; `refuses a body whose Content-Length is over the cap` (handler sets `Content-Length` to `WAVEFORM_MAX_BYTES + 1`; result null, `decodeAudioData` not called; if MSW rejects a header that does not match the body, stub `fetch` with `vi.stubGlobal` for this test and return `new Response(new Uint8Array(4), { headers: { "Content-Length": String(WAVEFORM_MAX_BYTES + 1) } })`); `fetches one src once` (two calls, one request); `returns null when decoding fails`.
+  - `loadPeaks returns null without OfflineAudioContext and fetches nothing` (a handler that records calls sees none).
+  - With `vi.stubGlobal("OfflineAudioContext", FakeOfflineAudioContext)` (a class whose `decodeAudioData` resolves `{ getChannelData: () => new Float32Array([0, 0.5, -1, 0.25]) }` and whose no `close`; `vi.unstubAllGlobals()` after each): `decodes the first channel into peaks`; `refuses a body whose Content-Length is over the cap` (handler sets `Content-Length` to `WAVEFORM_MAX_BYTES + 1`; result null, `decodeAudioData` not called; if MSW rejects a header that does not match the body, stub `fetch` with `vi.stubGlobal` for this test and return `new Response(new Uint8Array(4), { headers: { "Content-Length": String(WAVEFORM_MAX_BYTES + 1) } })`); `fetches one src once` (two calls, one request); `returns null when decoding fails`.
 - `audio-player.test.tsx` (stub `HTMLMediaElement.prototype.play` to resolve and dispatch `play`, and `pause` to dispatch `pause`; set `duration` with `Object.defineProperty` and dispatch `loadedmetadata`):
   - `shows the type and length once the metadata loads` (`audio/wav · 4.2 s`, clock `0:00 / 0:04`).
   - `toggles play and pause` (button label Play → Pause → Play).
   - `seeks with the arrow keys` (ArrowRight sets `currentTime` to 5, clamped at the duration; Home to 0). If jsdom's `currentTime` cannot be set, define it with `Object.defineProperty(audio, "currentTime", { value: 0, writable: true })` like `duration`.
   - `shows a message when the audio cannot be played` (dispatch `error`).
-  - `does not fetch the file for the waveform without AudioContext` (the default jsdom environment; no request reaches MSW).
+  - `does not fetch the file for the waveform without OfflineAudioContext` (the default jsdom environment; no request reaches MSW).
 - `media-view.test.tsx`:
   - `renders a blob audio in the player with its transcript` (Play button present, transcript text visible, no `controls` audio element).
   - `keeps the transcript of a dropped audio` (dropped label and transcript).
@@ -319,7 +321,7 @@ export function MediaWithTranscript(props: { transcript?: string; children: Reac
 
 **Steps:**
 1. D-C-29, as a new row right after the row at the highest line number of the Track C table (the D-C rows are not in numeric order) (D-C-28 is on the unmerged `claude/session-page` branch; whichever merges second rebases and keeps both rows in order), in the table format of the Track C rows: the summary from this plan's decisions table, and "Alternatives rejected: pairing an audio part with the next text part (no data-model change, but ambiguous when a text instruction follows audio); a progress bar only (no waveform)."
-2. Spec 11 *Chat* bullet: replace "images/audio/PDF rendered from `media://` refs" with "images and PDFs rendered from `media://` refs; audio in a themed player (play/pause, a waveform decoded once visible for files up to 8 MiB, else a progress bar, elapsed and total time, MIME type and length), and a media part's `transcript` under the media in the same block (D-C-29)".
+2. Spec 11 *Chat* bullet: replace "images/audio/PDF rendered from `media://` refs" with "images and PDFs rendered from `media://` refs; audio in a themed player (play/pause, a waveform decoded once visible for files up to 4 MiB, else a progress bar, elapsed and total time, MIME type and length), and a media part's `transcript` under the media in the same block (D-C-29)".
 3. `media.mdx`: add a section `## Transcripts` after `## Send media`: a media part may carry `transcript`, the text of what was said; cetra keeps it when it stores or drops the media; for OpenAI chat completions with audio output, the transcript the API returns is kept; a message with only audio shows its transcripts as its preview; the trace view plays audio with a waveform and shows the transcript under the player; judges read `[audio: <transcript>]`. Include one `json` example of an audio part with a transcript (`check-samples.mjs` checks only Python and TypeScript fences, so a `json` fence needs no marker). Also update the "In the UI" paragraph (~line 97) to say audio plays in a player with a waveform and its transcript under it. Follow `website/STYLE.md`.
 4. `CHANGELOG.md` § `[Unreleased]`:
    - `### Added`: "Media parts carry an optional `transcript`. OpenAI chat output audio keeps its transcript, a message with only audio previews its transcripts, and judges read `[audio: <transcript>]`."

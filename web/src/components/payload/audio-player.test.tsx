@@ -66,6 +66,19 @@ it("seeks with the arrow keys and Home", () => {
   expect(audio.currentTime).toBe(0);
 });
 
+it("rewinds when the audio ends", () => {
+  render(<AudioPlayer src={src} mimeType="audio/wav" waveform={false} />);
+  const audio = audioElement();
+  Object.defineProperty(audio, "currentTime", { value: 0, writable: true, configurable: true });
+  setDuration(audio, 8);
+  fireEvent.click(screen.getByRole("button", { name: "Play" }));
+  audio.currentTime = 8;
+  fireEvent(audio, new Event("ended"));
+  expect(audio.currentTime).toBe(0);
+  expect(screen.getByText("0:00 / 0:08")).toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "Play" })).toBeInTheDocument();
+});
+
 it("shows a message when the audio cannot be played", () => {
   render(<AudioPlayer src={src} mimeType="audio/wav" waveform={false} />);
   fireEvent(audioElement(), new Event("error"));
@@ -73,7 +86,7 @@ it("shows a message when the audio cannot be played", () => {
   expect(screen.queryByRole("button", { name: "Play" })).not.toBeInTheDocument();
 });
 
-it("does not fetch the file for the waveform without AudioContext", async () => {
+it("does not fetch the file for the waveform without OfflineAudioContext", async () => {
   const requests = vi.fn();
   server.use(
     http.get(src, () => {

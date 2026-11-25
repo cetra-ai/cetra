@@ -196,8 +196,8 @@ These rules resolve ambiguities in the tables above. They were fixed while writi
 7. **`tool_definitions`**: a JSON array, with one element per tool (parsed JSON schema objects), in index order.
 8. **`request_params`**: a compact JSON object with keys sorted alphabetically. Null when there are no parameters. Sources, in precedence order: every `gen_ai.request.*` attribute except `gen_ai.request.model` (the key is the suffix), `llm.invocation_parameters` (a JSON object string, expanded), `ai.settings.*` except `ai.settings.context.*` (D-B1-5) (the suffix, with no case conversion: `ai.settings.maxRetries` → `maxRetries`; `intValue` → JSON number), and `langfuse.observation.model.parameters` (a JSON object string, expanded). A parameters value that is not a JSON object is ignored and the attribute stays. On a duplicate key the higher-precedence source wins. The source attributes are consumed attributes (rule 2).
 9. **Previews** (max 512 Unicode scalar values, cut with no ellipsis):
-   - `messages` input: text parts of the last `user` message, joined with `\n`. If there is no user message, use the last message's text parts.
-   - `messages` output: text parts of the last message, joined with `\n`. Null if it has none.
+   - `messages` input: text parts of the last `user` message, joined with `\n`. If there is no user message, use the last message's text parts. If that message has no text part, the non-empty `transcript`s of its `uri` and `blob` parts, joined with `\n`.
+   - `messages` output: text parts of the last message, joined with `\n`. If that message has no text part, the non-empty `transcript`s of its `uri` and `blob` parts, joined with `\n`. Null if it has none of these.
    - `json`: the compact JSON.
    - `text`: the text.
 10. **Payload format for non-message values:** a value that parses as a JSON object or array is `json`; any other string is `text`. So Vercel `ai.prompt` (JSON object string) is `json`, and `ai.response.text` on a non-`llm` span is `text`.

@@ -1,7 +1,7 @@
 /** Bars drawn by the player. */
 export const WAVEFORM_BARS = 64;
 /** Files larger than this are not decoded; the player shows a plain progress bar. */
-export const WAVEFORM_MAX_BYTES = 8 * 1024 * 1024;
+export const WAVEFORM_MAX_BYTES = 4 * 1024 * 1024;
 
 /**
  * Peak amplitude of each of `bars` equal slices of `samples`, scaled so the largest is 1.
@@ -49,12 +49,15 @@ export function lengthOf(seconds: number): string {
 const peaksCache = new Map<string, Promise<number[] | null>>();
 
 /**
- * Returns null at once, before any fetch, when `globalThis.AudioContext` is undefined.
+ * Returns null at once, before any fetch, when `globalThis.OfflineAudioContext` is undefined.
  * Otherwise fetches `src`, refuses bodies over WAVEFORM_MAX_BYTES (by Content-Length when
- * present, else by the bytes read), decodes with an AudioContext and returns peaksOf(first
- * channel). Returns null when the fetch fails (network, CSP), the body is too large or
- * decoding fails. Results (including null) are cached per src in a module-level Map, and
- * concurrent calls for one src share one promise. An abort is not cached.
+ * present, else by the bytes read), decodes with a one-channel, 8 kHz OfflineAudioContext
+ * (decodeAudioData resamples to that rate, which bounds the decoded size) and returns
+ * peaksOf(first channel). Returns null when the fetch fails (network, CSP) or the response is
+ * not ok, the body is too large or decoding fails. A decoded result, an over-the-cap body and
+ * a decode failure are cached per src in a module-level Map; a failed fetch (a thrown fetch or
+ * a response that is not ok) is removed from the Map once it settles, so a later call retries.
+ * Concurrent calls for one src share one promise. An abort is not cached.
  *
  * The decode itself is not tied to the signal: an aborted caller stops waiting and gets null,
  * while the shared decode still runs to its end (bounded by WAVEFORM_MAX_BYTES) and is cached.
@@ -62,7 +65,7 @@ const peaksCache = new Map<string, Promise<number[] | null>>();
  * React's StrictMode mounts the effect twice.
  */
 export function loadPeaks(src: string, signal?: AbortSignal): Promise<number[] | null> {
-  if (typeof globalThis.AudioContext === "undefined") return Promise.resolve(null);
+  if (typeof globalThis.OfflineAudioContext === "undefined") return Promise.resolve(null);
   if (signal?.aborted) return Promise.resolve(null);
   let shared = peaksCache.get(src);
   if (!shared) {
@@ -86,11 +89,23 @@ export function resetPeaksCache(): void {
   peaksCache.clear();
 }
 
+/**
+ * The peaks of `src`, or null. A fetch that throws or answers not ok is a transient failure:
+ * its cache entry is deleted once the shared promise settles, so a later call fetches again.
+ */
 async function decodePeaks(src: string): Promise<number[] | null> {
-  let context: AudioContext | undefined;
+  let response: Response;
   try {
-    const response = await fetch(src);
-    if (!response.ok) return null;
+    response = await fetch(src);
+  } catch {
+    peaksCache.delete(src);
+    return null;
+  }
+  if (!response.ok) {
+    peaksCache.delete(src);
+    return null;
+  }
+  try {
     const declared = response.headers.get("Content-Length");
     if (declared !== null && Number(declared) > WAVEFORM_MAX_BYTES) {
       await response.body?.cancel();
@@ -98,13 +113,11 @@ async function decodePeaks(src: string): Promise<number[] | null> {
     }
     const bytes = await readCapped(response);
     if (!bytes) return null;
-    context = new AudioContext();
+    const context = new OfflineAudioContext(1, 1, 8000);
     const decoded = await context.decodeAudioData(bytes);
     return peaksOf(decoded.getChannelData(0), WAVEFORM_BARS);
   } catch {
     return null;
-  } finally {
-    if (context) await context.close().catch(() => undefined);
   }
 }
 

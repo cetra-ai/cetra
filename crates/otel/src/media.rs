@@ -765,7 +765,7 @@ mod tests {
         let limits = limits(1, 64);
         let mut sink = MediaSink::new(&limits);
         let mut part = Part::Blob {
-            modality: Some(Modality::Audio),
+            modality: Some(Modality::Image),
             mime_type: Some("image/png".to_owned()),
             transcript: Some("What's my balance?".to_owned()),
             content: encode(&png()),

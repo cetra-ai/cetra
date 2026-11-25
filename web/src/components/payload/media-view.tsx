@@ -43,7 +43,9 @@ function MediaBody({
   if (part.type === "blob") {
     const src = blobUrl(part);
     if (isImage(modality, mime)) return <ImageMedia src={src} />;
-    if (isAudio(modality, mime)) return <AudioPlayer src={src} mimeType={mime} waveform />;
+    if (isAudio(modality, mime)) {
+      return <AudioPlayer key={src} src={src} mimeType={mime} waveform />;
+    }
     return <MediaChip uri={src} mimeType={mime} projectRef={projectRef} />;
   }
   const source = classifyMedia(projectRef, part.uri);
@@ -55,7 +57,9 @@ function MediaBody({
   }
   if (source.kind === "stored" || source.kind === "inline") {
     if (isImage(modality, mime)) return <ImageMedia src={source.url} />;
-    if (isAudio(modality, mime)) return <AudioPlayer src={source.url} mimeType={mime} waveform />;
+    if (isAudio(modality, mime)) {
+      return <AudioPlayer key={source.url} src={source.url} mimeType={mime} waveform />;
+    }
   }
   return <MediaChip uri={part.uri} mimeType={mime} projectRef={projectRef} />;
 }
@@ -73,7 +77,9 @@ function ExternalMedia({ uri, mime, modality }: { uri: string; mime?: string; mo
     );
   }
   if (isImage(modality, mime)) return <ImageMedia src={uri} />;
-  if (isAudio(modality, mime)) return <AudioPlayer src={uri} mimeType={mime} waveform={false} />;
+  if (isAudio(modality, mime)) {
+    return <AudioPlayer key={uri} src={uri} mimeType={mime} waveform={false} />;
+  }
   return <MediaChip uri={uri} mimeType={mime} />;
 }
 

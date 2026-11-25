@@ -133,8 +133,9 @@ export function AudioPlayer({
         onTimeUpdate={(event) => setCurrent(event.currentTarget.currentTime)}
         onPlay={() => setPlaying(true)}
         onPause={() => setPlaying(false)}
-        onEnded={() => {
+        onEnded={(event) => {
           setPlaying(false);
+          event.currentTarget.currentTime = 0;
           setCurrent(0);
         }}
         onError={() => setFailed(true)}

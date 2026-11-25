@@ -64,7 +64,7 @@ describe("clockOf and lengthOf", () => {
 describe("loadPeaks", () => {
   const audioUrl = (name: string) => `/api/v1/test-audio/${name}`;
 
-  it("returns null without AudioContext and fetches nothing", async () => {
+  it("returns null without OfflineAudioContext and fetches nothing", async () => {
     const requests = vi.fn();
     server.use(
       http.get(audioUrl("no-context.wav"), () => {
@@ -76,22 +76,19 @@ describe("loadPeaks", () => {
     expect(requests).not.toHaveBeenCalled();
   });
 
-  describe("with a fake AudioContext", () => {
+  describe("with a fake OfflineAudioContext", () => {
     const decodeAudioData = vi.fn();
 
-    class FakeAudioContext {
+    class FakeOfflineAudioContext {
       decodeAudioData(data: ArrayBuffer) {
         decodeAudioData(data);
         return Promise.resolve({ getChannelData: () => new Float32Array([0, 0.5, -1, 0.25]) });
-      }
-      close() {
-        return Promise.resolve();
       }
     }
 
     function stubContext() {
       decodeAudioData.mockClear();
-      vi.stubGlobal("AudioContext", FakeAudioContext);
+      vi.stubGlobal("OfflineAudioContext", FakeOfflineAudioContext);
     }
 
     it("decodes the first channel into peaks", async () => {
@@ -135,15 +132,25 @@ describe("loadPeaks", () => {
       expect(first).toEqual(second);
     });
 
+    it("retries a src whose fetch failed", async () => {
+      stubContext();
+      server.use(http.get(audioUrl("flaky.wav"), () => new HttpResponse(null, { status: 401 })));
+      await expect(loadPeaks(audioUrl("flaky.wav"))).resolves.toBeNull();
+      expect(decodeAudioData).not.toHaveBeenCalled();
+      server.use(
+        http.get(audioUrl("flaky.wav"), () => HttpResponse.arrayBuffer(new ArrayBuffer(4))),
+      );
+      const peaks = await loadPeaks(audioUrl("flaky.wav"));
+      expect(decodeAudioData).toHaveBeenCalledTimes(1);
+      expect(peaks).toHaveLength(WAVEFORM_BARS);
+    });
+
     it("returns null when decoding fails", async () => {
       vi.stubGlobal(
-        "AudioContext",
+        "OfflineAudioContext",
         class {
           decodeAudioData() {
             return Promise.reject(new Error("unsupported"));
-          }
-          close() {
-            return Promise.resolve();
           }
         },
       );
