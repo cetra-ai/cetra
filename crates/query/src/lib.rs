@@ -6,6 +6,7 @@
 pub mod error;
 pub mod eval;
 pub mod filter;
+pub mod fn_string;
 pub mod ir;
 pub mod text;
 pub mod tombstone;
