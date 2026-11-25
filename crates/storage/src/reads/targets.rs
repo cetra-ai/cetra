@@ -249,7 +249,8 @@ async fn span_filter_scan(
     .select(vec![col(spans::TRACE_ID), col(spans::SPAN_ID)])
     .map_err(classify)?;
     let query_frame = frame;
-    let mut stream = ctx.execute_stream(query_frame)
+    let mut stream = ctx
+        .execute_stream(query_frame)
         .await
         .map_err(|error| ctx.fail(error))?;
     let mut pairs = BTreeSet::new();

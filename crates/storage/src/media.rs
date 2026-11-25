@@ -254,14 +254,10 @@ impl MediaGc {
             .map_err(MediaError::from)?
             .select_columns(&["media_refs"])
             .map_err(MediaError::from)?;
-        let batches = self
-            .query_runtime
-            .collect(frame)
-            .await
-            .map_err(|error| {
-                query.suspects.report(&error);
-                MediaError::from(error)
-            })?;
+        let batches = self.query_runtime.collect(frame).await.map_err(|error| {
+            query.suspects.report(&error);
+            MediaError::from(error)
+        })?;
         let mut live = HashSet::new();
         for batch in &batches {
             insert_media_refs(batch, &mut live)?;

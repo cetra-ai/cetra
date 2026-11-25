@@ -180,7 +180,8 @@ async fn user_scope(
         .select(vec![col(spans::TRACE_ID), col(spans::SESSION_ID)])
         .map_err(classify)?;
     let query_frame = frame;
-    let mut stream = ctx.execute_stream(query_frame)
+    let mut stream = ctx
+        .execute_stream(query_frame)
         .await
         .map_err(|error| ctx.fail(error))?;
     let mut trace_ids = BTreeSet::new();
@@ -253,7 +254,8 @@ async fn eval_scan(
         .select(vec![col(spans::TRACE_ID), target.alias("target")])
         .map_err(classify)?;
     let query_frame = frame;
-    let mut stream = ctx.execute_stream(query_frame)
+    let mut stream = ctx
+        .execute_stream(query_frame)
         .await
         .map_err(|error| ctx.fail(error))?;
     let mut found = BTreeSet::new();
@@ -318,7 +320,8 @@ async fn session_scan(
         .select(vec![col(spans::TRACE_ID), col(spans::SESSION_ID)])
         .map_err(classify)?;
     let query_frame = frame;
-    let mut stream = ctx.execute_stream(query_frame)
+    let mut stream = ctx
+        .execute_stream(query_frame)
         .await
         .map_err(|error| ctx.fail(error))?;
     let mut found = BTreeSet::new();

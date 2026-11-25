@@ -292,7 +292,8 @@ pub(crate) async fn filtered_session_ids(
         .select(vec![col(traces::SESSION_ID)])
         .map_err(classify)?;
     let query_frame = frame;
-    let mut stream = ctx.execute_stream(query_frame)
+    let mut stream = ctx
+        .execute_stream(query_frame)
         .await
         .map_err(|error| ctx.fail(error))?;
     let mut found = BTreeSet::new();
@@ -369,7 +370,8 @@ async fn load(
     let state = ctx.session().state();
     let session_plan = sessions_from_traces(plan.clone()).map_err(RunError::Internal)?;
     let query_frame = DataFrame::new(state.clone(), session_plan);
-    let session = ctx.collect(query_frame)
+    let session = ctx
+        .collect(query_frame)
         .await
         .map_err(|error| ctx.fail(error))?;
     let Some(session) = single_row(&session)? else {
@@ -384,7 +386,8 @@ async fn load(
         .map_err(classify)?
         .limit(0, Some(MAX_SESSION_TURNS + 1))
         .map_err(classify)?;
-    let turns = ctx.collect(query_frame)
+    let turns = ctx
+        .collect(query_frame)
         .await
         .map_err(|error| ctx.fail(error))?;
     let (turns, truncated) = cap_rows(turns, MAX_SESSION_TURNS);

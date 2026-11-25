@@ -127,7 +127,8 @@ async fn counts(
         .map_err(classify)?
         .sort(order)
         .map_err(classify)?;
-    let batches = ctx.collect(query_frame)
+    let batches = ctx
+        .collect(query_frame)
         .await
         .map_err(|error| ctx.fail(error))?;
     counts_of(&batches, request)
@@ -349,7 +350,8 @@ fn prepare_score_ids(ids: &[&str]) -> Result<Option<Vec<String>>, RunError> {
 
 async fn by_id(ctx: &QueryContext, keys: &[String]) -> Result<Vec<RecordBatch>, RunError> {
     let keys: Vec<Expr> = keys.iter().map(|key| lit(key.as_str())).collect();
-    let query_frame = ctx.session()
+    let query_frame = ctx
+        .session()
         .table(LIST)
         .await
         .map_err(classify)?
@@ -507,7 +509,8 @@ async fn latest(
             col(scores::NAME).sort(true, false),
         ])
         .map_err(classify)?;
-    let batches = ctx.collect(query_frame)
+    let batches = ctx
+        .collect(query_frame)
         .await
         .map_err(|error| ctx.fail(error))?;
     Ok(batches)

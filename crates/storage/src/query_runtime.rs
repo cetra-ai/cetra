@@ -188,8 +188,7 @@ pub(crate) struct Stopped;
 pub(crate) fn lower_priority(base: i32) {
     let nice = (base + NICE_INCREMENT).min(19);
     // On Linux `PRIO_PROCESS` with a thread id changes that thread only.
-    if let Err(error) = rustix::process::setpriority_process(Some(rustix::thread::gettid()), nice)
-    {
+    if let Err(error) = rustix::process::setpriority_process(Some(rustix::thread::gettid()), nice) {
         tracing::debug!(%error, "lowering the query thread priority");
     }
 }
@@ -244,9 +243,7 @@ impl Stream for Bridged {
                     }
                     Poll::Ready(Err(_)) => {
                         this.task = None;
-                        Poll::Ready(Some(Err(DataFusionError::Execution(
-                            STOPPED.to_owned(),
-                        ))))
+                        Poll::Ready(Some(Err(DataFusionError::Execution(STOPPED.to_owned()))))
                     }
                 }
             }
@@ -293,7 +290,7 @@ mod tests {
             Duration::from_millis(50),
             runtime.run(async move {
                 let _guard = Notify(tx);
-                std::future::pending::<()>().await
+                std::future::pending::<()>().await;
             }),
         )
         .await;
@@ -370,12 +367,14 @@ mod tests {
         let ctx = SessionContext::new();
         let boom = create_udf(
             "boom",
-            vec![datafusion::arrow::datatypes::DataType::Int64],
-            datafusion::arrow::datatypes::DataType::Int64,
+            vec![arrow::datatypes::DataType::Int64],
+            arrow::datatypes::DataType::Int64,
             Volatility::Volatile,
-            Arc::new(|_: &[ColumnarValue]| -> datafusion::error::Result<ColumnarValue> {
-                panic!("udf boom")
-            }),
+            Arc::new(
+                |_: &[ColumnarValue]| -> datafusion::error::Result<ColumnarValue> {
+                    panic!("udf boom")
+                },
+            ),
         );
         ctx.register_udf(boom);
         let frame = ctx

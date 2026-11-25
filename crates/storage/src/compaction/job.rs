@@ -1033,7 +1033,9 @@ pub(crate) mod tests {
             "no compaction job passed CompactionAfterWrite"
         );
         assert!(
-            names.iter().all(|name| name.as_deref() == Some("cetra-query")),
+            names
+                .iter()
+                .all(|name| name.as_deref() == Some("cetra-query")),
             "a compaction job ran off the query runtime: {names:?}"
         );
         storage.shutdown().await.unwrap();

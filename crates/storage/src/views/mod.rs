@@ -18,8 +18,8 @@ use std::sync::{Arc, Mutex};
 use arrow::datatypes::{DataType, Schema};
 use arrow::record_batch::RecordBatch;
 use datafusion::common::{DFSchema, DFSchemaRef};
-use datafusion::datasource::{TableProvider, ViewTable, provider_as_source};
 use datafusion::dataframe::DataFrame;
+use datafusion::datasource::{TableProvider, ViewTable, provider_as_source};
 use datafusion::error::DataFusionError;
 use datafusion::execution::runtime_env::RuntimeEnv;
 use datafusion::logical_expr::{Expr, LogicalPlan, LogicalPlanBuilder, col, lit};
@@ -1017,18 +1017,17 @@ mod tests {
             vec![DataType::Int64],
             DataType::Utf8,
             Volatility::Volatile,
-            Arc::new(|args: &[ColumnarValue]| -> datafusion::error::Result<ColumnarValue> {
-                let name = std::thread::current()
-                    .name()
-                    .unwrap_or("none")
-                    .to_owned();
-                let rows = match args.first() {
-                    Some(ColumnarValue::Array(array)) => array.len(),
-                    _ => 1,
-                };
-                let names = arrow::array::StringArray::from(vec![Some(name); rows]);
-                Ok(ColumnarValue::Array(Arc::new(names)))
-            }),
+            Arc::new(
+                |args: &[ColumnarValue]| -> datafusion::error::Result<ColumnarValue> {
+                    let name = std::thread::current().name().unwrap_or("none").to_owned();
+                    let rows = match args.first() {
+                        Some(ColumnarValue::Array(array)) => array.len(),
+                        _ => 1,
+                    };
+                    let names = arrow::array::StringArray::from(vec![Some(name); rows]);
+                    Ok(ColumnarValue::Array(Arc::new(names)))
+                },
+            ),
         )
     }
 
@@ -1045,7 +1044,10 @@ mod tests {
         let batches = ctx.collect(frame).await.expect("the query collects");
         let mut collected = 0;
         for batch in &batches {
-            let names = batch.column_by_name("t").expect("column t").as_string::<i32>();
+            let names = batch
+                .column_by_name("t")
+                .expect("column t")
+                .as_string::<i32>();
             for name in names.iter() {
                 assert_eq!(name, Some("cetra-query"));
                 collected += 1;
@@ -1055,14 +1057,14 @@ mod tests {
 
         // The same query streamed through the context.
         let frame = ctx.session().sql(&sql).await.expect("the query plans");
-        let mut stream = ctx
-            .execute_stream(frame)
-            .await
-            .expect("the query streams");
+        let mut stream = ctx.execute_stream(frame).await.expect("the query streams");
         let mut streamed = 0;
         while let Some(batch) = stream.next().await {
             let batch = batch.expect("a streamed batch");
-            let names = batch.column_by_name("t").expect("column t").as_string::<i32>();
+            let names = batch
+                .column_by_name("t")
+                .expect("column t")
+                .as_string::<i32>();
             for name in names.iter() {
                 assert_eq!(name, Some("cetra-query"));
                 streamed += 1;

@@ -504,7 +504,8 @@ async fn load(
         .logical_plan()
         .clone();
     let query_frame = aggregate_users(DataFrame::new(state.clone(), user_plan.clone()))?;
-    let user = ctx.collect(query_frame)
+    let user = ctx
+        .collect(query_frame)
         .await
         .map_err(|error| ctx.fail(error))?;
     let Some(user) = single_row(&user)? else {
@@ -520,7 +521,8 @@ async fn load(
         .map_err(classify)?
         .limit(0, Some(MAX_USER_SESSIONS))
         .map_err(classify)?;
-    let sessions = ctx.collect(query_frame)
+    let sessions = ctx
+        .collect(query_frame)
         .await
         .map_err(|error| ctx.fail(error))?;
     let sessions: Vec<RecordBatch> = sessions

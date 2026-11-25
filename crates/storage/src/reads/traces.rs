@@ -459,7 +459,10 @@ async fn load_trace_spans(
         .map_err(classify)?
         .limit(0, Some(max_required.saturating_add(1)))
         .map_err(classify)?;
-    let required = ctx.collect(required).await.map_err(|error| ctx.fail(error))?;
+    let required = ctx
+        .collect(required)
+        .await
+        .map_err(|error| ctx.fail(error))?;
     let earliest = ctx
         .session()
         .table(SPANS)
@@ -475,7 +478,10 @@ async fn load_trace_spans(
         .map_err(classify)?
         .limit(0, Some(max_spans.saturating_add(1)))
         .map_err(classify)?;
-    let earliest = ctx.collect(earliest).await.map_err(|error| ctx.fail(error))?;
+    let earliest = ctx
+        .collect(earliest)
+        .await
+        .map_err(|error| ctx.fail(error))?;
     let (earliest, truncated) = cap_rows(earliest, max_spans);
     Ok(TraceSpansData {
         required,
@@ -1154,7 +1160,10 @@ async fn load_trace(
         .map_err(classify)?
         .limit(0, Some(cap + 1))
         .map_err(classify)?;
-    let (spans, truncated) = cap_rows(ctx.collect(spans).await.map_err(|error| ctx.fail(error))?, cap);
+    let (spans, truncated) = cap_rows(
+        ctx.collect(spans).await.map_err(|error| ctx.fail(error))?,
+        cap,
+    );
     Ok(Some(TraceDetailData {
         trace,
         spans,

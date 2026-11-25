@@ -557,7 +557,8 @@ async fn values(
             ],
         )
         .map_err(classify)?;
-    let totals = ctx.collect(query_frame)
+    let totals = ctx
+        .collect(query_frame)
         .await
         .map_err(|error| ctx.fail(error))?;
     let (total, missing) = match first_row(&totals) {
@@ -605,7 +606,8 @@ async fn values(
         .map_err(classify)?
         .limit(0, Some(limit + 1))
         .map_err(classify)?;
-    let rows = ctx.collect(query_frame)
+    let rows = ctx
+        .collect(query_frame)
         .await
         .map_err(|error| ctx.fail(error))?;
 
@@ -675,7 +677,8 @@ async fn histogram(
             ],
         )
         .map_err(classify)?;
-    let stats = ctx.collect(query_frame)
+    let stats = ctx
+        .collect(query_frame)
         .await
         .map_err(|error| ctx.fail(error))?;
     let Some(row) = first_row(&stats) else {
@@ -757,7 +760,8 @@ async fn buckets(
         .map_err(classify)?
         .aggregate(vec![col(BUCKET)], vec![count(lit(1_i64)).alias(COUNT)])
         .map_err(classify)?;
-    let counted = ctx.collect(query_frame)
+    let counted = ctx
+        .collect(query_frame)
         .await
         .map_err(|error| ctx.fail(error))?;
 

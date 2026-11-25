@@ -195,7 +195,8 @@ async fn span_aggregates(
             ],
         )
         .map_err(classify)?;
-    let batches = ctx.collect(query_frame)
+    let batches = ctx
+        .collect(query_frame)
         .await
         .map_err(|error| ctx.fail(error))?;
     let mut found = Vec::new();
@@ -298,7 +299,8 @@ async fn score_means(
             ],
         )
         .map_err(classify)?;
-    let batches = ctx.collect(query_frame)
+    let batches = ctx
+        .collect(query_frame)
         .await
         .map_err(|error| ctx.fail(error))?;
     let mut found = Vec::new();

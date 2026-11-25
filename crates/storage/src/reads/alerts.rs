@@ -207,7 +207,8 @@ async fn compute(
                     ],
                 )
                 .map_err(classify)?;
-            let batches = ctx.collect(query_frame)
+            let batches = ctx
+                .collect(query_frame)
                 .await
                 .map_err(|error| ctx.fail(error))?;
             let batch = single_row(&batches)?;
@@ -259,7 +260,8 @@ async fn score_count(
         .map_err(classify)?
         .aggregate(vec![], vec![count(lit(1_i64)).alias(COUNT)])
         .map_err(classify)?;
-    let batches = ctx.collect(query_frame)
+    let batches = ctx
+        .collect(query_frame)
         .await
         .map_err(|error| ctx.fail(error))?;
     let batch = single_row(&batches)?;
@@ -298,9 +300,7 @@ async fn trace_batches(
     if let Some(filter) = filter {
         frame = filter.apply(frame, ctx).await.map_err(classify)?;
     }
-    let query_frame = frame
-        .aggregate(vec![], aggregates)
-        .map_err(classify)?;
+    let query_frame = frame.aggregate(vec![], aggregates).map_err(classify)?;
     ctx.collect(query_frame)
         .await
         .map_err(|error| ctx.fail(error))
@@ -400,7 +400,8 @@ async fn score_value(
             ],
         )
         .map_err(classify)?;
-    let batches = ctx.collect(query_frame)
+    let batches = ctx
+        .collect(query_frame)
         .await
         .map_err(|error| ctx.fail(error))?;
     let batch = single_row(&batches)?;

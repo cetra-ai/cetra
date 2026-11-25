@@ -94,6 +94,7 @@ pub type CopyCancel = Arc<Mutex<bool>>;
 pub use crate::media::{MediaBlob, MediaRead, MediaReport};
 pub use crate::read_cache::ReadCacheStats;
 pub use query_error::{InvalidQuery, Position, RunError};
+pub use query_runtime::QueryRuntime;
 pub use reads::{
     ACTIVITY_BUCKETS, Agg, AlertMeasure, AlertValue, AlertValueRequest, Breakdown, Bucket,
     BucketWidth, DEFAULT_BREAKDOWN_LIMIT, ERROR_SPAN_COLUMNS, ERROR_TRACE_COUNT, ErrorSpansRequest,
@@ -129,7 +130,6 @@ pub use sql::{
     EXPORT_MAX_CHUNK_BYTES, EXPORT_MAX_ROWS, ExportFormat, SQL_MAX_RESULT_BYTES, SQL_MAX_ROWS,
     SqlColumn, SqlJson, SqlRequest,
 };
-pub use query_runtime::QueryRuntime;
 pub use views::{
     ColumnInfo, ColumnKind, FunctionInfo, ProjectQuery, QueryContext, SqliteView, TimeWindow,
     ViewColumns, ViewName, function_catalog, view_catalog,
@@ -503,13 +503,12 @@ impl Storage {
             tombstones,
             projects,
         }));
-        let query_runtime = QueryRuntime::new(
-            NonZeroUsize::new(config.query.threads).unwrap_or(NonZeroUsize::MIN),
-        )
-        .map_err(|error| {
-            tracing::error!(%error, "building the query runtime");
-            OpenError::Runtime
-        })?;
+        let query_runtime =
+            QueryRuntime::new(NonZeroUsize::new(config.query.threads).unwrap_or(NonZeroUsize::MIN))
+                .map_err(|error| {
+                    tracing::error!(%error, "building the query runtime");
+                    OpenError::Runtime
+                })?;
         // Compaction gets a runtime of its own, so its memory pool is
         // independent of the query runtime's.
         let compactor = {
@@ -1442,6 +1441,7 @@ impl Drop for Storage {
 
 /// The body of [`Storage::query`]: providers for `project` over one published
 /// `state`. `Storage::query` and the media collection's live set both call it.
+#[allow(clippy::too_many_arguments)] // the published state, the request, and the query's shared resources
 pub(crate) fn project_query(
     state: &ReadState,
     project: ProjectId,
