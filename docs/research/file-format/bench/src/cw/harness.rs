@@ -1,7 +1,8 @@
 //! `fmtbench cw run` and `cw one`: each query of a case runs in fresh processes, the two formats
 //! alternating round by round, and the results are summarised with a verdict per query
 //! (plans/08-m1-likely-failures.md § M1.2 and § M1.4). Every query runs through `one`: `write`
-//! through `write_format`, the reads through `cw::read`.
+//! through `write_format`, `compact` and `flush:<n>` through `cw::writes`, the reads through
+//! `cw::read`.
 
 use std::fs::OpenOptions;
 use std::io::{BufWriter, Read, Seek, SeekFrom, Write};
@@ -19,6 +20,7 @@ use serde_json::{Value, json};
 use xxhash_rust::xxh3::xxh3_64;
 
 use crate::cw::read::{self, Files};
+use crate::cw::writes;
 use crate::profile::unhex;
 use crate::{location, narrow_table, open_pq_fast, open_strata, parse_id, payload_table, read_text, write_parquet, write_strata, R};
 
@@ -184,9 +186,22 @@ fn percentile(v: &[f64], p: f64) -> f64 {
     s[rank - 1]
 }
 
+/// Queries that write files: `write`, `compact` and `flush:<n>`. They run locally only, take no
+/// warm-up, and are judged on CPU time and bytes written too (CW-16, CW-12).
+pub(crate) fn is_write_like(query: &str) -> bool {
+    matches!(query, "write" | "compact") || query.starts_with("flush:")
+}
+
+/// The writer count of `flush:<n>`: n from 1 to 64.
+fn flush_writers(query: &str) -> R<usize> {
+    let n = query.strip_prefix("flush:").ok_or("not a flush query")?;
+    let n: usize = n.parse().map_err(|e| format!("{query}: {e}"))?;
+    if (1..=64).contains(&n) { Ok(n) } else { Err(format!("{query}: n must be from 1 to 64").into()) }
+}
+
 /// Whether Strata wins: every compared figure strictly lower than Parquet's.
-/// Figures: median and p95 latency and max VmHWM; for `write`, also the median CPU time
-/// and the bytes written. Returns the names of the figures Strata loses on (empty = win).
+/// Figures: median and p95 latency and max VmHWM; for the write queries, also the median CPU
+/// time and the bytes written. Returns the names of the figures Strata loses on (empty = win).
 fn losses(query: &str, st: &Summary, pq: &Summary) -> Vec<&'static str> {
     let mut lost = Vec::new();
     if percentile(&st.runs_ms, 0.50) >= percentile(&pq.runs_ms, 0.50) {
@@ -198,7 +213,7 @@ fn losses(query: &str, st: &Summary, pq: &Summary) -> Vec<&'static str> {
     if st.vmhwm_max >= pq.vmhwm_max {
         lost.push("rss");
     }
-    if query == "write" {
+    if is_write_like(query) {
         if percentile(&st.cpu_ms, 0.50) >= percentile(&pq.cpu_ms, 0.50) {
             lost.push("cpu");
         }
@@ -300,7 +315,7 @@ fn print_line(query: &str, format: &str, s: &Summary) {
         s.vmhwm_max as f64 / 1048576.0,
         s.rows,
     );
-    if query == "write" {
+    if is_write_like(query) {
         line.push_str(&format!("  size {:.1} MiB", s.bytes_written.unwrap_or(0) as f64 / 1048576.0));
     }
     println!("{line}");
@@ -332,8 +347,8 @@ pub async fn run_cmd(args: &[String]) -> R<()> {
     let exe = std::env::current_exe()?;
     let mut mismatch = false;
     for query in &queries {
-        if is_s3 && query == "write" {
-            println!("{query}: skipped, write is local only");
+        if is_s3 && is_write_like(query) {
+            println!("{query}: skipped, write queries are local only");
             continue;
         }
         // Results per format: [pq_cetra, st].
@@ -349,7 +364,8 @@ pub async fn run_cmd(args: &[String]) -> R<()> {
         }
         let pq_first = &results[0][0];
         let st_first = &results[1][0];
-        if query != "write" {
+        // The answers of the write queries are constant (`write`, `flush:<n>`) or not compared.
+        if query != "write" && !query.starts_with("flush:") {
             let same = results.iter().flatten().all(|r| r.answer == pq_first.answer && r.rows == pq_first.rows);
             if !same {
                 mismatch = true;
@@ -365,7 +381,7 @@ pub async fn run_cmd(args: &[String]) -> R<()> {
         print_line(query, "st", &st);
         let lost = losses(query, &st, &pq);
         if lost.is_empty() {
-            let compared = if query == "write" { "median, p95, rss, cpu, size" } else { "median, p95, rss" };
+            let compared = if is_write_like(query) { "median, p95, rss, cpu, size" } else { "median, p95, rss" };
             println!("{query:<14}verdict   WIN ({compared})");
         } else {
             println!("{query:<14}verdict   LOSS ({})", lost.join(", "));
@@ -392,11 +408,16 @@ pub async fn one_cmd(args: &[String]) -> R<()> {
 /// Runs `query` K times in this process, as `cw one` does, and returns its result.
 pub async fn one(dir: &str, format: &str, query: &str, runs: usize) -> R<ProcResult> {
     check_format(format)?;
-    if query == "write" {
+    if is_write_like(query) {
         if dir.starts_with("s3://") {
-            return Err("write is local only: give a local case directory".into());
+            return Err(format!("{query} is local only: give a local case directory").into());
         }
-        return write_format(Path::new(dir), format, runs);
+        let dir = Path::new(dir);
+        return match query {
+            "write" => write_format(dir, format, runs),
+            "compact" => writes::compact_format(dir, format, runs).await,
+            _ => writes::flush_format(dir, format, flush_writers(query)?, runs),
+        };
     }
     read_format(dir, format, query, runs).await
 }
@@ -495,12 +516,12 @@ async fn read_format(dir: &str, format: &str, query: &str, runs: usize) -> R<Pro
 }
 
 /// Fails unless `format` is `pq_cetra` or `st`.
-fn check_format(format: &str) -> R<()> {
+pub(crate) fn check_format(format: &str) -> R<()> {
     if FORMATS.contains(&format) { Ok(()) } else { Err(format!("unknown format {format}: want pq_cetra or st").into()) }
 }
 
 /// Reads `VmRSS` or `VmHWM` of this process from `/proc/self/status`, in bytes.
-fn proc_status_bytes(key: &str) -> R<u64> {
+pub(crate) fn proc_status_bytes(key: &str) -> R<u64> {
     let status = std::fs::read_to_string("/proc/self/status")?;
     for line in status.lines() {
         if let Some(rest) = line.strip_prefix(key).and_then(|r| r.strip_prefix(':')) {
@@ -726,6 +747,23 @@ mod tests {
         let more_cpu = summary(&[1.0, 15.0, 25.0], &[30.0, 30.0, 30.0], 50, Some(50));
         assert_eq!(losses("write", &more_cpu, &pq), vec!["cpu"]);
         // CPU is not compared for the reads.
+        assert!(losses("search:bug", &more_cpu, &pq).is_empty());
+    }
+
+    #[test]
+    fn write_like_queries() {
+        assert!(is_write_like("write"));
+        assert!(is_write_like("compact"));
+        assert!(is_write_like("flush:8"));
+        assert!(!is_write_like("scan_payload"));
+        assert!(!is_write_like("search:bug"));
+        assert_eq!(flush_writers("flush:8").unwrap(), 8);
+        assert!(flush_writers("flush:0").is_err());
+        assert!(flush_writers("flush:65").is_err());
+        // Strata's extra CPU is a loss for a write query, compact included.
+        let pq = summary(&[10.0, 20.0, 30.0], &[10.0, 20.0, 30.0], 100, Some(100));
+        let more_cpu = summary(&[1.0, 15.0, 25.0], &[30.0, 30.0, 30.0], 50, Some(50));
+        assert_eq!(losses("compact", &more_cpu, &pq), vec!["cpu"]);
         assert!(losses("search:bug", &more_cpu, &pq).is_empty());
     }
 

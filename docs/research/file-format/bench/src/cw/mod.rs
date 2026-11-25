@@ -4,6 +4,7 @@
 pub mod cases;
 pub mod harness;
 pub mod read;
+pub mod writes;
 
 /// `fmtbench cw …`: the cetra workload benchmark (plans/08-m1-likely-failures.md).
 pub async fn cmd(args: &[String]) -> crate::R<()> {
