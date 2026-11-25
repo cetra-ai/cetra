@@ -90,13 +90,28 @@ Instrumentations that put images in the message attributes work without changes.
   </TabItem>
 </Tabs>
 
+## Transcripts
+
+A media part can carry a `transcript`: the text of what was said. For audio, this is the spoken words. Put the transcript on the media part itself, not in a text part next to it:
+
+```json
+{"type": "blob", "modality": "audio", "mime_type": "audio/wav", "transcript": "What is my balance?", "content": "<BASE64_DATA>"}
+```
+
+cetra keeps the transcript when it stores the media, and when it drops the media for its size. Other details:
+
+- For OpenAI chat completions with audio output, cetra keeps the transcript that the API returns with the audio.
+- A message that has no text, only audio, shows its transcripts as its preview.
+- Judges read audio with a transcript as `[audio: <transcript>]`. Without a transcript, a judge reads `[audio]`.
+- The **Chat** tab plays audio in a player with a waveform, and shows the transcript under the player. The waveform is drawn for files up to 8 MiB. Larger files show a progress bar. If the browser cannot play a file, the player says so, and the transcript still shows.
+
 ## Where media is stored
 
 cetra writes each blob once, named by its SHA-256 hash, in the media area of your data directory, or in your S3 bucket if you use one. The same image sent twice is stored once. In the span, the blob is replaced by a `media://<hash>` reference. The UI and API serve it only to signed-in members and keys of the project.
 
 ## In the UI
 
-The **Chat** tab of a span shows images, audio and PDFs from their references. In the raw **Input / Output** tab you see the `media://` reference. Select a media item to open it.
+The **Chat** tab of a span shows images and PDFs from their references. Audio plays in a player with a waveform, and its transcript shows under the player. In the raw **Input / Output** tab you see the `media://` reference. Select a media item to open it.
 
 ## Size limits
 
