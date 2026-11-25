@@ -21,6 +21,7 @@ use xxhash_rust::xxh3::xxh3_64;
 
 use crate::cw::many;
 use crate::cw::read::{self, Files};
+use crate::cw::shapes::{self, ShapeCase};
 use crate::cw::writes;
 use crate::profile::unhex;
 use crate::{location, narrow_table, open_pq_fast, open_strata, parse_id, payload_table, read_text, write_parquet, write_strata, R};
@@ -424,6 +425,9 @@ pub async fn one(dir: &str, format: &str, query: &str, runs: usize) -> R<ProcRes
     if many::is_many(query) {
         return many_format(dir, format, query, runs).await;
     }
+    if shapes::is_shape(query) {
+        return shape_format(dir, format, query, runs).await;
+    }
     if is_write_like(query) {
         if dir.starts_with("s3://") {
             return Err(format!("{query} is local only: give a local case directory").into());
@@ -587,6 +591,57 @@ async fn many_format(dir: &str, format: &str, query: &str, runs: usize) -> R<Pro
         waves: None,
         rows: answer.rows,
         answer: format!("{:016x}", answer.hash),
+        rss_start,
+        vmhwm: proc_status_bytes("VmHWM")?,
+        bytes_written: None,
+        tail_bytes: None,
+    })
+}
+
+/// An M4 trace or rollup query for `cw one` (plans/08-m4-query-shapes.md § M4.2). The format's
+/// files of the query's table are listed and opened, and the case read, outside the timed region.
+/// One warm-up run gives the reference answer; then the store's counters are reset and K measured
+/// runs follow, each of which must give that answer. `gets` and `bytes` are the first measured run's.
+async fn shape_format(dir: &str, format: &str, query: &str, runs: usize) -> R<ProcResult> {
+    if runs == 0 {
+        return Err("runs must be at least 1".into());
+    }
+    let rss_start = proc_status_bytes("VmRSS")?;
+    let loc = location(dir)?;
+    let listing = many::list(&loc, format).await?;
+    let clock = many::read_project_case(&loc).await?.clock;
+    let needles = read_case(&loc).await?.needles;
+    let case = ShapeCase { clock, needles };
+    let files = if shapes::table_of(query) == "traces" { &listing.traces } else { &listing.spans };
+    let opened = many::open(&loc, format, files).await?;
+    let reference = shapes::run(query, files, &opened, &case).await?;
+    loc.store.reset();
+    let (mut runs_ms, mut cpu_ms) = (Vec::with_capacity(runs), Vec::with_capacity(runs));
+    let (mut gets, mut bytes): (u64, u64) = (0, 0);
+    for k in 0..runs {
+        let cpu0 = ProcessTime::now();
+        let t0 = Instant::now();
+        let answer = shapes::run(query, files, &opened, &case).await?;
+        runs_ms.push(t0.elapsed().as_secs_f64() * 1e3);
+        cpu_ms.push(cpu0.elapsed().as_secs_f64() * 1e3);
+        if answer != reference {
+            return Err(format!("answer changed between runs ({query} {format})").into());
+        }
+        // I/O counters are read after the first measured run only (see ProcResult).
+        if k == 0 {
+            (gets, bytes) = loc.store.stats();
+        }
+    }
+    Ok(ProcResult {
+        query: query.to_owned(),
+        format: format.to_owned(),
+        runs_ms,
+        cpu_ms,
+        gets,
+        bytes,
+        waves: None,
+        rows: reference.rows,
+        answer: format!("{:016x}", reference.hash),
         rss_start,
         vmhwm: proc_status_bytes("VmHWM")?,
         bytes_written: None,

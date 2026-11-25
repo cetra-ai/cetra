@@ -6,6 +6,7 @@ pub mod harness;
 pub mod many;
 pub mod project;
 pub mod read;
+pub mod shapes;
 pub mod writes;
 
 /// `fmtbench cw …`: the cetra workload benchmark (plans/08-m1-likely-failures.md).

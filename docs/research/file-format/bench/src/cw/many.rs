@@ -30,17 +30,17 @@ use crate::pqfast::{self, PqFile};
 use crate::{Location, R, parse_id, read_text};
 
 /// Nanoseconds per UTC day and per hour.
-const DAY_NS: i64 = 86_400_000_000_000;
-const HOUR_NS: i64 = 3_600_000_000_000;
+pub(crate) const DAY_NS: i64 = 86_400_000_000_000;
+pub(crate) const HOUR_NS: i64 = 3_600_000_000_000;
 /// Rows per Strata rollup range (one unit of work), and per Parquet batch.
 const ROLLUP_RANGE_ROWS: u64 = 100_000;
-const BATCH_ROWS: usize = 8_192;
+pub(crate) const BATCH_ROWS: usize = 8_192;
 /// `anchor_rebuild` keeps the `traces` rows last ingested within this window before the clock,
 /// and whose start or end is within `MIDNIGHT_NS` of a UTC midnight (spec 03 § Trace anchor).
 const ANCHOR_WINDOW_NS: i64 = 2 * HOUR_NS;
 const MIDNIGHT_NS: i64 = HOUR_NS;
 /// The `span_kind` the rollup keeps, and the columns it reads.
-const LLM: &str = "llm";
+pub(crate) const LLM: &str = "llm";
 const ROLLUP_COLUMNS: [&str; 3] = ["request_model", "cost_total", "total_tokens"];
 /// The `traces` columns `anchor_rebuild` reads.
 const ANCHOR_COLUMNS: [&str; 4] = ["trace_id", "start_time", "end_time", "last_ingest_time"];
@@ -209,7 +209,7 @@ async fn light_pq(store: Arc<dyn ObjectStore>, f: &FileRef) -> R<LightPq> {
 }
 
 /// The non-empty trimmed lines of a text file; a missing file is an error.
-fn text_lines(text: Option<String>, name: &str) -> R<Vec<String>> {
+pub(crate) fn text_lines(text: Option<String>, name: &str) -> R<Vec<String>> {
     let text = text.ok_or_else(|| format!("no {name} in the case"))?;
     Ok(text.lines().map(str::trim).filter(|l| !l.is_empty()).map(str::to_owned).collect())
 }
@@ -263,7 +263,7 @@ pub(crate) async fn run(
 }
 
 /// The answer of `bytes`, which encodes `rows` rows.
-fn answer_of(bytes: &[u8], rows: u64) -> Answer {
+pub(crate) fn answer_of(bytes: &[u8], rows: u64) -> Answer {
     Answer { rows, hash: xxh3_64(bytes) }
 }
 
@@ -319,7 +319,7 @@ fn days_near(ns: i64) -> Vec<String> {
 }
 
 /// `YYYY-MM-DD` of the UTC day `z` days after 1970-01-01 (civil calendar, proleptic Gregorian).
-fn day_text(z: i64) -> String {
+pub(crate) fn day_text(z: i64) -> String {
     let z = z + 719_468;
     let era = z.div_euclid(146_097);
     let doe = z - era * 146_097;
@@ -412,7 +412,7 @@ fn all_columns(n: usize) -> Vec<usize> {
 }
 
 /// The column `name` of `batch`, downcast to `T`.
-fn column<'a, T: Array + 'static>(batch: &'a RecordBatch, name: &str) -> R<&'a T> {
+pub(crate) fn column<'a, T: Array + 'static>(batch: &'a RecordBatch, name: &str) -> R<&'a T> {
     let c = batch.column_by_name(name).ok_or_else(|| format!("no {name} column"))?;
     c.as_any().downcast_ref::<T>().ok_or_else(|| format!("{name} has another type").into())
 }
@@ -435,7 +435,7 @@ enum RollUnit<'a> {
 }
 
 /// Ranges of `ROLLUP_RANGE_ROWS` rows covering `rows` rows.
-fn rollup_ranges(rows: u64) -> Vec<Range<u64>> {
+pub(crate) fn rollup_ranges(rows: u64) -> Vec<Range<u64>> {
     let mut v = Vec::new();
     let mut s = 0;
     while s < rows {
@@ -446,12 +446,12 @@ fn rollup_ranges(rows: u64) -> Vec<Range<u64>> {
 }
 
 /// `a + b` for the integer sums, which an overflow fails.
-fn add(a: i64, b: i64) -> R<i64> {
+pub(crate) fn add(a: i64, b: i64) -> R<i64> {
     Ok(a.checked_add(b).ok_or("rollup sum overflows")?)
 }
 
 /// The rows with `span_kind = 'llm'` of a batch whose column 0 is `span_kind`.
-fn llm_mask(batch: &RecordBatch) -> Result<arrow::array::BooleanArray, ArrowError> {
+pub(crate) fn llm_mask(batch: &RecordBatch) -> Result<arrow::array::BooleanArray, ArrowError> {
     let kinds = batch
         .column(0)
         .as_any()
@@ -583,7 +583,7 @@ fn near_midnight(t: i64) -> bool {
 }
 
 /// The column `name` of `batch` as `i64` values (a timestamp column is cast).
-fn int64_col(batch: &RecordBatch, name: &str) -> R<Int64Array> {
+pub(crate) fn int64_col(batch: &RecordBatch, name: &str) -> R<Int64Array> {
     let c = batch.column_by_name(name).ok_or_else(|| format!("no {name} column"))?;
     let casted = cast(c.as_ref(), &DataType::Int64)?;
     casted.as_any().downcast_ref::<Int64Array>().cloned().ok_or_else(|| format!("{name} is not an integer column").into())
