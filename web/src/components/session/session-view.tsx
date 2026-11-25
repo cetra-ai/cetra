@@ -14,6 +14,7 @@ import { CopyButton } from "@/components/copy-button";
 import { DisabledReason } from "@/components/disabled-reason";
 import { ScoreBadge } from "@/components/score-badge";
 import { badgeValue, SessionConversation } from "@/components/session/session-conversation";
+import { useSessionSteps } from "@/components/session/use-session-steps";
 import { useProject } from "@/components/shell/project-context";
 import { TimeText } from "@/components/time-text";
 import { MetricChip } from "@/components/trace/metric-chip";
@@ -33,6 +34,7 @@ import { formatCost, formatTokens } from "@/lib/format";
 import { useListReturn } from "@/lib/list-return";
 import { canAnnotate } from "@/lib/roles";
 import { parseSessionsSearch, type SessionPageSearch } from "@/lib/search/sessions";
+import { nextFailed } from "@/lib/session-turns";
 
 export function SessionView({
   sessionId,
@@ -42,15 +44,12 @@ export function SessionView({
   search: SessionPageSearch;
 }) {
   const { org, project } = useProject();
-  const navigate = useNavigate();
   const detail = useQuery(
     sessionQuery(org, project, sessionId, {
       includeEval: search.eval === 1,
       includeExperiments: search.exp === 1,
     }),
   );
-  // The index of the turn to scroll to, or null. The conversation clears it once it has scrolled.
-  const [scrollTarget, setScrollTarget] = useState<number | null>(null);
 
   if (detail.isPending) {
     return (
@@ -68,7 +67,33 @@ export function SessionView({
     );
   }
 
-  const { session, turns, truncated } = detail.data;
+  return <SessionLoaded data={detail.data} search={search} sessionId={sessionId} />;
+}
+
+/** The session page once its detail is loaded: the header and the turns with their steps. */
+function SessionLoaded({
+  data,
+  search,
+  sessionId,
+}: {
+  data: Schema<"SessionDetail">;
+  search: SessionPageSearch;
+  sessionId: string;
+}) {
+  const { org, project } = useProject();
+  const navigate = useNavigate();
+  const steps = useSessionSteps({
+    org,
+    project,
+    session: data.session,
+    turns: data.turns,
+    includeEval: search.eval === 1,
+    includeExperiments: search.exp === 1,
+  });
+  // The trace id of the turn to scroll to, or null. The conversation clears it once it has scrolled.
+  const [scrollTarget, setScrollTarget] = useState<string | null>(null);
+
+  const { session, turns, truncated } = data;
   function selectTurn(next: string) {
     void navigate({
       to: "/$org/$project/sessions/$sessionId",
@@ -81,12 +106,13 @@ export function SessionView({
   }
 
   const failedIndex = turns.findIndex((turn) => turn.trace.status === "error");
-  function showFirstError() {
-    const turn = turns[failedIndex];
+  // The errors chip: the next failed turn after the selected one, wrapping (D-C-28).
+  function showNextError() {
+    const turn = turns[nextFailed(turns, search.trace)];
     if (!turn) {
       return;
     }
-    setScrollTarget(failedIndex);
+    setScrollTarget(turn.trace.trace_id);
     selectTurn(turn.trace.trace_id);
   }
 
@@ -94,15 +120,21 @@ export function SessionView({
     <div className="flex min-h-0 flex-1 flex-col">
       <SessionHeader
         session={session}
-        onShowErrors={failedIndex >= 0 ? showFirstError : undefined}
+        onShowErrors={failedIndex >= 0 ? showNextError : undefined}
       />
       {truncated ? (
         <div className="shrink-0 border-b bg-muted px-3 py-1 text-caption">
           Showing the first 1 000 turns
         </div>
       ) : null}
+      {steps.truncated ? (
+        <div className="shrink-0 border-b bg-muted px-3 py-1 text-caption">
+          Some steps are not shown: this session has more than 5 000 steps per 100 turns.
+        </div>
+      ) : null}
       <SessionConversation
         turns={turns}
+        steps={steps}
         trace={search.trace}
         onSelectTrace={selectTurn}
         scrollTarget={scrollTarget}
@@ -131,7 +163,7 @@ function SessionHeader({
   onShowErrors,
 }: {
   session: Schema<"SessionSummary">;
-  /** Selects the first failed turn. Absent when no turn failed. */
+  /** Selects the next failed turn. Absent when no turn failed. */
   onShowErrors?: () => void;
 }) {
   const { org, project, data } = useProject();

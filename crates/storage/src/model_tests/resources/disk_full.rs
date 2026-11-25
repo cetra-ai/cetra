@@ -595,11 +595,24 @@ fn a_flush_on_a_full_disk_retries_and_leaves_no_temp_files() {
             "failed flush attempts left {} temp file(s) under objects/: {leftovers:?}",
             leftovers.len()
         );
-        // Failed flush attempts give their space back (R5.5).
+        // Failed flush attempts give their space back (R5.5), except the files an
+        // attempt wrote before another of its files failed: spec 03 §2, "The staged
+        // names of a failed attempt stay for GC". On ext4 each attempt keeps the
+        // filler's traces file this way (M5-9).
+        let staged = h
+            .block_on(h.storage().staged_paths())
+            .expect("list the staged objects");
+        let objects = h.dir().join("objects");
+        let staged_bytes: u64 = staged
+            .iter()
+            .filter_map(|path| std::fs::metadata(objects.join(path)).ok())
+            .map(|meta| std::os::unix::fs::MetadataExt::blocks(&meta) * 512)
+            .sum();
         let free = free_bytes(root);
         assert!(
-            free >= 192 * 1024,
-            "failed flush attempts gave their space back: {free} bytes free"
+            free + staged_bytes >= 192 * 1024,
+            "failed flush attempts gave their space back: {free} bytes free, \
+             {staged_bytes} bytes in staged files"
         );
         assert!(
             !h.storage().health().spans_wal_failed,

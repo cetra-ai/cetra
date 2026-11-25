@@ -53,6 +53,7 @@ with an `### Upgrade notes` section (https://cetra.sh/docs/self-hosting/upgrade/
 - Semantic Kernel .NET's GenAI events carry their message in `gen_ai.event.content`, which is read as the event's body; a GenAI message value that starts with `HIDDEN:` (Koog's masked content) is content not captured, not a malformed message; `koog` is a framework name, `open_ai` is an alias of `openai`, and on scope `io.quarkus.opentelemetry` `gen_ai.prompt` and `gen_ai.completion` fill input and output.
 - Spans of Vercel's Workflow SDK (scope `workflow`, names starting `workflow.`, `step.` or `queue.`), which eve runs on, are discarded and counted, as coding agents' internal spans are, unless they carry model attributes (`gen_ai.*`, `llm.*` or `openinference.span.kind`); on Agent Spec's `LlmGenerationSpan` model calls, a token attribute whose value is the string `"null"` is absent, with no warning.
 - `@cetra-ai/sdk`'s Anthropic helper needs `@arizeai/openinference-instrumentation-anthropic` 1.0.1 or later, which keeps the Anthropic SDK's own span out of a traced call, so its tokens count once.
+- The session page shows each turn's tool calls and, on demand, its model and tool calls in order with a preview of their input; turns can be searched, filtered (failed, scored, uses tools) and shown one per line; an overview strip, `j`/`k` and the errors chip move between turns.
 - The trace view plays audio in a themed player with a waveform and shows its transcript under it.
 
 ### Fixed
