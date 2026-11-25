@@ -13,6 +13,7 @@ workspace = true
 [dependencies]
 cetra-column.workspace = true
 cetra-core.workspace = true
+cetra-query.workspace = true
 arrow = { workspace = true, features = ["ipc_compression", "json"] }
 async-trait.workspace = true
 bytes.workspace = true
@@ -44,7 +45,6 @@ uuid.workspace = true
 arbitrary.workspace = true
 
 [dev-dependencies]
-cetra-query.workspace = true
 arbitrary.workspace = true
 proptest.workspace = true
 flate2.workspace = true
