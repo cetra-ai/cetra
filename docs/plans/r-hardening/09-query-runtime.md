@@ -29,8 +29,8 @@ Implementer: the `glm-5-3` agent (Haiku when GLM has no credit). Four phases, ru
 - Object-store I/O stays on whichever runtime polls it (the query runtime for queries). Routing S3 I/O back to the main runtime, as InfluxDB's `DedicatedExecutor` does, is left until a measurement asks for it.
 - No hard CPU pinning, no `SCHED_IDLE`. No change to `target_partitions`, batch sizes or the memory pools.
 - No server or CLI change: the server keeps its one runtime; storage owns the second.
-- Parquet decoding outside DataFusion stays on the caller's runtime: the anchor rebuild (`anchor.rs`), the verify pass (`verify.rs`, `compaction/verify_pass.rs`) and `compaction/slice.rs` `time_values`. The verification soak may still show tail latency from them; they move only if it does.
-- A dropped query is aborted, but the abort lands at the task's next poll, so its memory reservation and spill files are released a moment later than when the caller polled it itself. Accepted.
+- Parquet decoding outside DataFusion stays on the caller's runtime: the anchor rebuild (`anchor.rs`), the verify pass's checks (`verify.rs`, `compaction/verify_pass.rs` apart from its traces-file rebuild, which P3 moves) and `compaction/slice.rs` `time_values`. The verification soak may still show tail latency from them; they move only if it does.
+- A dropped query is aborted, but the abort lands at the task's next poll, so its memory reservation and spill files are released a moment later than when the caller polled it itself. Accepted. Likewise, compaction jobs hold the runtime through the `Compactor`, so after a `Storage` is dropped an aborted job can live until its next poll (and its `spawn_blocking` work to its end). Accepted; the P3 report says whether a test that reopens a data directory right away flaked.
 - The 12 h soak that verifies the fix is run by the coordinating session after this plan, on the VM.
 
 ## Decisions this plan relies on
@@ -81,7 +81,7 @@ Sequential: P2 and P3 both edit `lib.rs`, and P4 documents what P1–P3 built.
 
 **Goal:** a `QueryRuntime` that owns a niced multi-thread Tokio runtime and runs futures and DataFusion streams on it, built by `Storage::open` from `storage.query.threads`; nothing uses it yet.
 
-**Edit:** `crates/storage/src/query_runtime.rs` (new), `crates/storage/src/lib.rs` (the `mod` line, the `Storage` field, its construction in `Storage::open`, the `pub use`), `crates/storage/src/config.rs`, `crates/storage/Cargo.toml`, `Cargo.lock`, and the four test configs of step 4 (`model_tests/harness.rs`, `crash_tests.rs`, `model_tests/resources/memory.rs`).
+**Edit:** `crates/storage/src/query_runtime.rs` (new), `crates/storage/src/lib.rs` (the `mod` line, the `Storage` field, its construction in `Storage::open`, the `pub use`), `crates/storage/src/config.rs`, `crates/storage/Cargo.toml`, `Cargo.lock`, and the three test configs of step 4 (`model_tests/harness.rs`, `crash_tests.rs`, `model_tests/resources/memory.rs`).
 
 **Steps:**
 
@@ -223,14 +223,14 @@ Sequential: P2 and P3 both edit `lib.rs`, and P4 documents what P1–P3 built.
    3. `run`: `let task = self.inner.handle.spawn(future);` Keep `task.abort_handle()` in a guard whose `Drop` calls `abort()`, so dropping the `run` future aborts the task. Await the `JoinHandle`: `Ok(value)` returns `Ok(value)`; a `JoinError` with `is_panic()` calls `std::panic::resume_unwind(error.into_panic())`; any other `JoinError` (cancelled: the runtime shut down, or aborted) returns `Err(Stopped)`. Spawning on a handle whose runtime has shut down gives a cancelled `JoinError`, so that case is also `Err(Stopped)`.
    4. `collect`: `self.run(async move { frame.collect().await }).await`, mapping `Err(Stopped)` to `DataFusionError::Execution(STOPPED.to_owned())`.
    5. `execute_stream`: create `let (schema_tx, schema_rx) = oneshot::channel::<Result<SchemaRef, DataFusionError>>();` and `let (batch_tx, batch_rx) = mpsc::channel::<Result<RecordBatch, DataFusionError>>(STREAM_BUFFER);`. Spawn on `self.inner.handle` a task that: (a) calls `frame.execute_stream().await`; on `Err(error)` sends `Err(error)` on `schema_tx` and returns; (b) on `Ok(stream)` sends `Ok(stream.schema())` on `schema_tx` (if the receiver is gone, return); (c) loops `while let Some(item) = stream.next().await`, sending each item on `batch_tx`; when a send fails (the reader dropped the stream) it returns, which drops the DataFusion stream and cancels the plan. The whole of `execute_stream()` runs in that task, because some operators (for example `CoalescePartitionsExec`) spawn their partition tasks inside `execute`, on the runtime that calls it.
-      Then `await` `schema_rx`: `Ok(Ok(schema))` goes on; `Ok(Err(error))` returns `Err(error)`; a `RecvError` (the task ended without sending: the runtime stopped, or it panicked) returns `DataFusionError::Execution(STOPPED.to_owned())`. Abort the task if this function's future is dropped before the schema arrives (same guard as in `run`).
+      Then `await` `schema_rx`: `Ok(Ok(schema))` goes on; `Ok(Err(error))` returns `Err(error)`; a `RecvError` (the task ended without sending) awaits the task's `JoinHandle`: a panic → `std::panic::resume_unwind(error.into_panic())`; otherwise `DataFusionError::Execution(STOPPED.to_owned())`. The abort guard stays alive across that await. Abort the task if this function's future is dropped before the schema arrives (same guard as in `run`).
       Return `Box::pin(RecordBatchStreamAdapter::new(schema, Bridged { receiver: batch_rx, task: Some(join_handle), _abort: guard }))`. `Bridged` is a private struct (all its fields are `Unpin`, so `impl Stream` uses `self.get_mut()`) implementing `Stream<Item = Result<RecordBatch, DataFusionError>>`:
       - poll `receiver.poll_recv(cx)`; `Ready(Some(item))` → `Ready(Some(item))`;
       - `Ready(None)` (the task dropped its sender) → if `task` is `Some`, poll it (`Pin::new(task).poll(cx)`): `Pending` → `Pending`; `Ready(Ok(()))` → set `task = None`, `Ready(None)`; `Ready(Err(error))` with `error.is_panic()` → `std::panic::resume_unwind(error.into_panic())`, so a panic in the query reaches the reader as it did before; any other `Err` (cancelled) → set `task = None`, `Ready(Some(Err(DataFusionError::Execution(STOPPED.to_owned()))))`. If `task` is already `None`, `Ready(None)`.
       Without this, a panic mid-stream would end the stream early and a reader such as `sql/run.rs` `take_rows` would return a short result as if it were complete. The guard aborts the task when `Bridged` is dropped.
    6. The abort guard is one private type used by both: `struct AbortOnDrop(AbortHandle); impl Drop for AbortOnDrop { fn drop(&mut self) { self.0.abort(); } }`. Aborting a finished task is a no-op.
 
-4. Test configs that open many storages get 2 query threads, so a model or crash suite does not start one thread per core for every storage it opens: add `threads: 2,` to the `QueryConfig` (or set `config.query.threads = 2;`, matching how the function already overrides other keys) in `model_tests/harness.rs` `model_config`, `crash_tests.rs` `quiet_config` and `compaction_config`, and `model_tests/resources/memory.rs` `small_config` (the small-machine profile, which P4 documents). Leave every other test config at the default.
+4. Test configs that open many storages get 2 query threads, so a model or crash suite does not start one thread per core for every storage it opens: in `model_tests/harness.rs` `model_config` (line ~43) and `crash_tests.rs` `quiet_config` (line ~109), `query: QueryConfig::default()` becomes `query: QueryConfig { threads: 2, ..QueryConfig::default() }`; in `model_tests/resources/memory.rs` `small_config` (the small-machine profile, which P4 documents; its `QueryConfig { … ..QueryConfig::default() }` literal at line ~149), add `threads: 2,`. `crash_tests.rs` `compaction_config` calls `quiet_config` and needs nothing. Leave every other test config at the default.
 5. `lib.rs`: add `mod query_runtime;` next to `mod query_text;`, and `pub use query_runtime::QueryRuntime;` with the other `pub use` lines (the type is public because P2 puts it in the public `ProjectQuery`). Add the field to `Storage`, after `runtime: Arc<RuntimeEnv>,`:
    ```rust
    /// The query runtime: every query's and compaction job's DataFusion work (D-R-39).
@@ -242,10 +242,10 @@ Sequential: P2 and P3 both edit `lib.rs`, and P4 documents what P1–P3 built.
 - `run_returns_the_output_from_a_query_thread`: `QueryRuntime::new(NonZeroUsize::new(2).unwrap())`; `run(async { std::thread::current().name().map(str::to_owned) })` returns `Ok(Some("cetra-query"))`.
 - `dropping_run_aborts_the_task`: the future holds a guard (a struct whose `Drop` sends on a `std::sync::mpsc` channel) and then awaits `std::future::pending::<()>()`. Start `run` with `tokio::time::timeout(Duration::from_millis(50), …)`, which drops it; the guard's message arrives within 2 s (`recv_timeout`).
 - `a_panic_reaches_the_caller`: `#[should_panic(expected = "boom")]`; `run(async { panic!("boom") })`.
-- `run_after_the_runtime_is_gone_is_stopped`: build a runtime, keep `handle().clone()`, drop the `QueryRuntime`; a new `QueryRuntime { inner: Arc::new(Owned { runtime: None, handle }) }` (test-only construction) gives `run(async {}) == Err(Stopped)`.
+- `run_after_the_runtime_is_gone_is_stopped`: build a plain `tokio::runtime::Builder::new_multi_thread().worker_threads(1).build()`, keep `runtime.handle().clone()`, then drop the runtime inside `tokio::task::spawn_blocking(move || drop(runtime)).await` (a plain drop shuts it down synchronously, which is not allowed on an async thread); a `QueryRuntime { inner: Arc::new(Owned { runtime: None, handle }) }` (test-only construction) gives `run(async {}).await == Err(Stopped)`.
 - `collect_and_execute_stream_return_the_rows`: a `SessionContext::new()`; `ctx.sql("SELECT * FROM (VALUES (1), (2), (3)) AS t(x)")` → frame; `collect` gives 3 rows; a second identical frame through `execute_stream` gives the same 3 rows when read to the end, and `stream.schema()` has the field `x`.
 - `execute_stream_reports_an_execution_error`: a frame of `SELECT CAST('a' AS INT)`; `execute_stream` either returns `Err` or a stream whose first item is `Err` (DataFusion may fail at either point); assert one of the two, never `Ok` rows.
-- `a_panic_mid_stream_reaches_the_reader`: `#[should_panic(expected = "udf boom")]`. A `SessionContext::new()` with a scalar UDF `boom(x)` (`datafusion::logical_expr::create_udf`, `Int64` → `Int64`, `Volatility::Volatile`) whose body panics with `"udf boom"`; `execute_stream` of `SELECT boom(value) FROM generate_series(1, 10)` and read the stream to the end.
+- `a_panic_mid_stream_reaches_the_reader`: `#[should_panic(expected = "udf boom")]`. A `SessionContext::new()` with a scalar UDF `boom(x)` (`datafusion::logical_expr::create_udf`, `Int64` → `Int64`, `Volatility::Volatile`) whose body panics with `"udf boom"`; `execute_stream` of `SELECT boom(value) FROM generate_series(1, 10)` and read the stream to the end. If it does not panic (DataFusion turned the panic into an error item instead), stop and report what the stream returned.
 - `dropping_the_stream_stops_the_producer`: a frame over `generate_series(1, 100000000)` (`SELECT * FROM generate_series(1, 100000000)`); `execute_stream`, read one batch, drop the stream; then `tokio::time::timeout(Duration::from_secs(5), …)` around a loop that waits until `handle().metrics().num_alive_tasks() == 0` (poll every 10 ms) succeeds.
 - `query_threads_run_at_a_lower_priority` (Linux only, `#[cfg(target_os = "linux")]`): `let base = rustix::process::getpriority_process(None).unwrap();` `run(async { rustix::process::getpriority_process(Some(rustix::thread::gettid())).unwrap() })` returns `(base + 10).min(19)`.
 - `config.rs` tests (next to `"storage.query.target_partitions: must be at least 1"`): `{"data_dir":"/data","query":{"threads":0}}` and `{"data_dir":"/data","query":{"threads":1025}}` both fail with `storage.query.threads: must be from 1 to 1024`; `{"threads":1024}` passes; the default equals `std::thread::available_parallelism()` (or 1).
@@ -260,7 +260,7 @@ Sequential: P2 and P3 both edit `lib.rs`, and P4 documents what P1–P3 built.
 
 **Goal:** every read and SQL execution goes through `QueryContext::collect` / `QueryContext::execute_stream`, which run on the query runtime carried by `ProjectQuery`.
 
-**Edit:** `crates/storage/src/views/mod.rs`, `crates/storage/src/lib.rs`, `crates/storage/src/media.rs`, `crates/storage/src/test_support.rs`, `crates/storage/src/fuzz_entry.rs`, `crates/storage/src/sql/run.rs`, the `reads/` files of step 4, and every file with a `ProjectQuery { … }` literal (step 5's list).
+**Edit:** `crates/storage/src/views/mod.rs`, `crates/storage/src/lib.rs`, `crates/storage/src/media.rs`, `crates/storage/src/test_support.rs`, `crates/storage/src/fuzz_entry.rs`, `crates/storage/src/sql/run.rs`, the `reads/` files of step 4 (`alerts`, `deletions`, `experiments`, `facets`, `prompts`, `scores`, `sessions`, `targets`, `traces`, `users`, `widgets`), and every file with a `ProjectQuery { … }` literal (step 5's list).
 
 **Steps:**
 
@@ -304,19 +304,38 @@ Sequential: P2 and P3 both edit `lib.rs`, and P4 documents what P1–P3 built.
      and pass `query_runtime()` at both calls.
    - Any other caller `rtk proxy grep -rn "project_query(" crates/storage/src` shows: stop and report it.
    Remove the `#[allow(dead_code)]` P1 put on the `Storage` field.
-4. Replace each execution site below. `X.collect().await` becomes `ctx.collect(X).await` and `X.execute_stream().await` becomes `ctx.execute_stream(X).await`, keeping the `.map_err(…)` and `?` exactly as they are; in `sql/run.rs` the receiver is `self` (a `QueryContext` method), so it is `self.collect(…)` / `self.execute_stream(…)`. The list, from `main` at the time of writing (non-test code only):
+4. **Rule:** every `DataFrame` `.collect()` and `.execute_stream()` outside `#[cfg(test)]` goes through the context. `X.collect().await` becomes `ctx.collect(X).await` and `X.execute_stream().await` becomes `ctx.execute_stream(X).await`, where `X` is the whole `DataFrame` expression before `.collect()`; this includes chains written over several lines, for example
+   ```rust
+   let rows = frame
+       .aggregate(…)
+       .map_err(classify)?
+       .collect()
+       .await
+       .map_err(|error| ctx.fail(error))?;
+   ```
+   becomes
+   ```rust
+   let rows = ctx
+       .collect(frame.aggregate(…).map_err(classify)?)
+       .await
+       .map_err(|error| ctx.fail(error))?;
+   ```
+   Keep every `.map_err(…)` and `?` as it is. In `sql/run.rs` the receiver is `self` (a `QueryContext` method): `self.collect(…)` / `self.execute_stream(…)`. Where the function names its context differently than `ctx`, use that name. `futures` streams' `.collect()` (on a `Stream`, not a `DataFrame`) stay. The sites, from the branch at the time of writing (non-test code only; single-line and multi-line):
+   - `reads/alerts.rs`: 210, 262, 304, 403 (multi-line);
    - `reads/deletions.rs`: 112 (`frame.collect`), 183, 256, 321 (`execute_stream`);
-   - `reads/experiments.rs`: 263, 339 (`execute_stream`);
-   - `reads/scores.rs`: 416;
-   - `reads/sessions.rs`: 236, 295 (`execute_stream`), 342, 446 (`joined.collect`);
+   - `reads/experiments.rs`: 194 (multi-line), 263, 339 (`execute_stream`);
+   - `reads/facets.rs`: 560, 608, 678, 760 (multi-line; 414 is a `futures` stream and stays);
+   - `reads/prompts.rs`: 198, 301 (multi-line);
+   - `reads/scores.rs`: 130, 358, 510 (multi-line), 416;
+   - `reads/sessions.rs`: 236, 295 (`execute_stream`), 342, 372, 387 (multi-line, `DataFrame::new(state…, plan)…`), 446 (`joined.collect`);
    - `reads/targets.rs`: 252 (`execute_stream`), 353, 404, 446;
    - `reads/traces.rs`: 462 (`required`), 478 (`earliest`), 567, 650, 736, 895, 1136 (`trace`), 1157 (`spans`), 1185;
-   - `reads/users.rs`: 212, 371, 432, 455;
+   - `reads/users.rs`: 212, 371, 432, 455, 507, 523 (the last two multi-line);
    - `reads/widgets.rs`: 1061;
    - `sql/run.rs`: 184, 320 (`execute_stream`);
    - `fuzz_entry.rs`: 596 (`frame.collect`, result ignored: `let _ = ctx.collect(frame).await;`);
    - `media.rs` ~244: step 3.
-   After the edits, `rtk proxy grep -rn "\.collect()\.await\|\.execute_stream()" crates/storage/src/reads crates/storage/src/sql/run.rs crates/storage/src/fuzz_entry.rs` must show only lines inside `#[cfg(test)]` modules or on `futures` streams (for example `sql/run.rs` `stream.collect().await` on a `Stream`, which stays). If you find a `DataFrame` method that executes and is not in the list (`count`, `show`, `cache`, `write_*`, `collect_partitioned`) outside tests, stop and report it.
+   After the edits, `rg -U -n '\.collect\(\)\s*\.await' crates/storage/src` and `rg -n 'execute_stream\(\)' crates/storage/src` must show only lines inside `#[cfg(test)]` modules, on `futures` streams (for example `sql/run.rs` `stream.collect().await`, `reads/facets.rs` 414), or inside `query_runtime.rs` itself. List any other hit in the report and stop. If you find a `DataFrame` method that executes and is not in the list (`count`, `show`, `cache`, `write_*`, `collect_partitioned`) outside tests, stop and report it.
 5. `test_support.rs` (add `use crate::query_runtime::QueryRuntime;` and `std::num::NonZeroUsize` if missing): add
    ```rust
    /// One query runtime for every test that builds a `ProjectQuery` by hand.
@@ -343,12 +362,13 @@ Sequential: P2 and P3 both edit `lib.rs`, and P4 documents what P1–P3 built.
 
 **Goal:** `Compactor::pass` spawns each job on the query runtime.
 
-**Edit:** `crates/storage/src/compaction/job.rs`, `crates/storage/src/compaction/rewrite.rs`, `crates/storage/src/lib.rs`, `crates/storage/src/hooks.rs`.
+**Edit:** `crates/storage/src/compaction/job.rs`, `crates/storage/src/compaction/rewrite.rs`, `crates/storage/src/compaction/verify_pass.rs`, `crates/storage/src/lib.rs`, `crates/storage/src/hooks.rs`.
 
 **Steps:**
 1. `job.rs`, `Compactor`: add the field `executor: QueryRuntime` (`use crate::query_runtime::QueryRuntime;`) with the doc `/// Where the jobs run (D-R-39).` `Compactor::new` takes it as a new last parameter `executor: QueryRuntime` and stores it.
 2. `Compactor::pass`: `set.spawn(async move { … })` becomes `set.spawn_on(async move { … }, self.executor.handle())`, the body unchanged. The rest of `pass` (the semaphore, joining the set) stays as it is. A job aborted because the runtime shut down comes back as a cancelled `JoinError`; keep whatever the loop that joins the set already does with a `JoinError` (read it and say in the report what it does).
 3. `compaction/rewrite.rs`, the deletion-rewrite pass (`impl Compactor`, the `JoinSet` of `check_and_rewrite` tasks, line ~199): `set.spawn(async move { … })` becomes `set.spawn_on(async move { … }, self.executor.handle())`, body unchanged. Report what its join loop does with a `JoinError`.
+3b. `compaction/verify_pass.rs`, the rebuild of a corrupt traces file (line ~266, `if let Err(error) = self.run(job, policy).await {`): it runs a `JobKind::Rewrite` job, a DataFusion merge, outside `pass`. Run it on the query runtime: `let compactor = Arc::clone(self); let outcome = self.executor.run(async move { compactor.run(job, policy).await }).await;` then `match outcome { Ok(Ok(_)) => {}, Ok(Err(error)) => { /* the existing failure branch, unchanged, with `error` */ }, Err(Stopped) => { /* the same branch: report.failed += 1, a warn without an error field ("rebuilding a corrupt traces file failed: the query runtime stopped"), requeue, return */ } }`. If `self` there is not an `Arc<Compactor>` receiver (`self: &Arc<Self>`), stop and report.
 4. `lib.rs`, `Storage::open`: pass `query_runtime.clone()` as the new last argument of `compaction::job::Compactor::new`. If any test builds a `Compactor` directly, pass `crate::test_support::query_runtime()` there.
 5. `hooks.rs`, test `Hooks` (`mod fault`): add to `State` a field `thread_names: Mutex<Vec<(HookPoint, Option<String>)>>` (initialised empty in `Default`), push `(point, std::thread::current().name().map(str::to_owned))` at the start of `pause`, next to the `passed` push, and add
    ```rust
