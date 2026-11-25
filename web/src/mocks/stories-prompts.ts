@@ -4,6 +4,7 @@ import labelEventsFixture from "../../../fixtures/api/responses/prompts/support-
 import promptsFixture from "../../../fixtures/api/responses/prompts.json";
 import { metricsOf } from "./fallbacks";
 import { projectOfRef, type StoryId } from "./projects";
+import { connectionIdOf } from "./story-connections";
 
 /**
  * The prompts of the homepage stories (design §12, M14), answered in the browser only. The fixture
@@ -432,12 +433,18 @@ function versionOf(story: StoryPrompt, version: number): Schema<"PromptVersion">
   }
   // The latest version carries production unless its labels say otherwise, and always latest too.
   const own = v.labels ?? (version === latest ? ["production"] : []);
+  // The model's connection: the playground column runs on it (a claude-* model on Anthropic, a gemini-* one on Google).
+  const connectionId = connectionIdOf(v.model);
   return {
     name: story.name,
     type: "chat",
     version,
     template: v.template,
-    config: { model: v.model, params: { temperature: v.temperature, max_tokens: v.maxTokens } },
+    config: {
+      model: v.model,
+      ...(connectionId === undefined ? {} : { connection_id: connectionId }),
+      params: { temperature: v.temperature, max_tokens: v.maxTokens },
+    },
     labels: version === latest ? [...own, "latest"].sort(byLabel) : own,
     variables: v.variables,
     placeholders: v.template.flatMap((entry) => ("type" in entry ? [entry.name] : [])),

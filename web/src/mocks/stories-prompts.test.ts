@@ -3,6 +3,11 @@ import { fallbackHandlers } from "@/mocks/fallbacks";
 import { server } from "@/mocks/node";
 import { type StoryId, storyProject } from "@/mocks/projects";
 import { storyPromptHandlers } from "@/mocks/stories-prompts";
+import {
+  connectionIdOf,
+  STORY_CONNECTION_IDS,
+  storyConnectionHandlers,
+} from "@/mocks/story-connections";
 
 /** The story whose project serves each story prompt (P-4). */
 const STORY_OF: Record<string, StoryId> = {
@@ -33,7 +38,7 @@ type Version = {
   version: number;
   labels: string[];
   variables?: string[];
-  config?: { model: string; params: { max_tokens: number } };
+  config?: { model: string; connection_id?: string; params: { max_tokens: number } };
   template?: unknown;
   commit_message?: string;
 };
@@ -319,4 +324,36 @@ it("keeps the fixture support-reply, versions 1 and 2, in the other projects", a
   expect(list.filter((prompt) => prompt.name === "support-reply")).toEqual([
     expect.objectContaining({ latest_version: 2 }),
   ]);
+});
+
+it("names on each version the connection of its model: Anthropic for claude, Google for gemini, OpenAI for gpt", async () => {
+  server.use(...storyConnectionHandlers);
+  const listed = (await (
+    await fetch(new URL("/api/v1/orgs/acme/llm-connections", window.location.origin))
+  ).json()) as { data: { id: string }[] };
+  const listedIds = listed.data.map((connection) => connection.id);
+
+  // Every version names the connection its model belongs to, and that connection is listed.
+  for (const [name, story] of Object.entries(STORY_OF)) {
+    const versions = (await get(story, `/prompts/${name}/versions`)).body.data as Version[];
+    expect(versions.length).toBeGreaterThan(0);
+    for (const version of versions) {
+      const connection = connectionIdOf(version.config?.model ?? "");
+      expect(connection).toBeDefined();
+      expect(version.config?.connection_id).toBe(connection);
+      expect(listedIds).toContain(connection);
+    }
+  }
+
+  // The shown version of each story, by its provider.
+  const shown: [string, StoryId, number, string][] = [
+    ["write-patch", "coding", 4, STORY_CONNECTION_IDS.anthropic],
+    ["voice-reply", "voice", 5, STORY_CONNECTION_IDS.openai],
+    ["extract-invoice", "extraction", 6, STORY_CONNECTION_IDS.google],
+    ["support-reply", "support", 3, STORY_CONNECTION_IDS.openai],
+  ];
+  for (const [name, story, version, connection] of shown) {
+    const detail = await get(story, `/prompts/${name}/versions/${version}`);
+    expect(detail.body.config).toMatchObject({ connection_id: connection });
+  }
 });
