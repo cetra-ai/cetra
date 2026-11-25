@@ -208,7 +208,7 @@ export function largeHandlers(
           http.get(`${prefix}/experiments/:id`, ({ params }) => oneExperiment(dataset, params.id)),
           // The experiments of the generated datasets answer above; every other experiment request falls
           // through to the experiments mock (its runs are on the fixture dataset).
-          ...experimentHandlers(),
+          ...experimentHandlers(options?.project),
           http.get(`${prefix}/experiments/summaries`, ({ request }) =>
             experimentSummaries(dataset, request),
           ),

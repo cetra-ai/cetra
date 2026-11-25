@@ -33,6 +33,9 @@ const TESTS_EVALUATOR = "01900000-0000-7000-8000-000000570901";
 const TESTS_RULE = "01900000-0000-7000-8000-000000570911";
 const READBACK_EVALUATOR = "01900000-0000-7000-8000-000000570902";
 const ON_CALL_PAGER = "01900000-0000-7000-8000-000000000503";
+const INVOICE_V3 = "01900000-0000-7000-8000-000000570931";
+const INVOICE_V4 = "01900000-0000-7000-8000-000000570932";
+const INVOICE_ITEMS = 300;
 const READBACK_REASON =
   "The agent offered 9:30 on Friday but never read the booking back before ending the call.";
 
@@ -205,4 +208,71 @@ it("adds the on-call pager to the voice desk's channels and to no other story's"
   expect(pager).not.toHaveProperty("last_delivery");
 
   expect(await idsAt(`${baseOf("coding")}/channels`)).not.toContain(ON_CALL_PAGER);
+});
+
+/** One score of an experiment's summary, by name. */
+function scoreOf(summary: Schema<"ExperimentSummary"> | undefined, name: string) {
+  return summary?.scores.find((score) => score.name === name);
+}
+
+it("compares the two invoice prompts: each field's pass rate, the cost and the item count", async () => {
+  serveEveryStory();
+
+  const body = (await (
+    await fetch(
+      `${baseOf("extraction")}/experiments/compare?ids=${INVOICE_V3},${INVOICE_V4}&limit=1`,
+    )
+  ).json()) as Schema<"ExperimentComparison">;
+  const [v3, v4] = body.experiments;
+  expect(v3?.experiment.id).toBe(INVOICE_V3);
+  expect(v4?.experiment.id).toBe(INVOICE_V4);
+
+  // Pass rates: 291 and 297 of 300 for total, 273 and 288 for the VAT number, all for the rest.
+  const percent = (summary: Schema<"ExperimentSummary"> | undefined, name: string) =>
+    Math.round((scoreOf(summary, name)?.pass_rate ?? 0) * 100);
+  expect(percent(v3, "total")).toBe(97);
+  expect(percent(v4, "total")).toBe(99);
+  expect(percent(v3, "vat_number")).toBe(91);
+  expect(percent(v4, "vat_number")).toBe(96);
+  for (const summary of [v3, v4]) {
+    expect(percent(summary, "vendor")).toBe(100);
+    expect(percent(summary, "date")).toBe(100);
+    expect(scoreOf(summary, "total")?.count).toBe(INVOICE_ITEMS);
+  }
+  expect(v3?.cost_total).toBeCloseTo(0.63, 6);
+  expect(v4?.cost_total).toBeCloseTo(0.72, 6);
+  expect(v3?.result_count).toBe(INVOICE_ITEMS);
+
+  expect(body.deltas[0]?.scores.total?.delta).toBeCloseTo(6 / INVOICE_ITEMS, 9);
+  expect(body.rows).toHaveLength(1);
+  expect(body.next_cursor).not.toBeNull();
+});
+
+it("pages the results of an invoice run over all 300 items", async () => {
+  serveEveryStory();
+
+  const seen: string[] = [];
+  let cursor: string | null = null;
+  do {
+    const query = cursor === null ? "" : `&cursor=${encodeURIComponent(cursor)}`;
+    const page = (await (
+      await fetch(`${baseOf("extraction")}/experiments/${INVOICE_V3}/results?limit=120${query}`)
+    ).json()) as { rows: Schema<"ResultRow">[]; next_cursor: string | null };
+    seen.push(...page.rows.map((row) => row.dataset_item_id));
+    cursor = page.next_cursor;
+  } while (cursor !== null);
+  expect(seen).toHaveLength(INVOICE_ITEMS);
+  expect(new Set(seen).size).toBe(INVOICE_ITEMS);
+});
+
+it("serves the invoice experiments under the extraction project only", async () => {
+  serveEveryStory();
+
+  expect(await idsAt(`${baseOf("extraction")}/experiments`)).toEqual([INVOICE_V4, INVOICE_V3]);
+  const support = await fetch(`${baseOf("support")}/experiments/${INVOICE_V3}`);
+  expect(support.status).not.toBe(200);
+  const coding = await fetch(
+    `${baseOf("coding")}/experiments/compare?ids=${INVOICE_V3},${INVOICE_V4}`,
+  );
+  expect(coding.status).not.toBe(200);
 });

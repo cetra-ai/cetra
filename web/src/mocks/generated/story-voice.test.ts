@@ -173,8 +173,8 @@ describe("the voice audio turn", () => {
     const output = draft?.output?.format === "messages" ? draft.output.value : [];
     const caller = input[0]?.parts[0];
     const agent = output[0]?.parts[0];
-    const callerUri = caller && "uri" in caller ? caller.uri : "";
-    const agentUri = agent && "uri" in agent ? agent.uri : "";
+    const callerUri = caller && "uri" in caller && typeof caller.uri === "string" ? caller.uri : "";
+    const agentUri = agent && "uri" in agent && typeof agent.uri === "string" ? agent.uri : "";
 
     const callerWav = wavOf(callerUri);
     expect(callerWav).toMatchObject({

@@ -1,6 +1,8 @@
 import { type HttpHandler, HttpResponse, http } from "msw";
 import type { Schema } from "@/api/types";
 import { type Dataset, rfc3339 } from "@/mocks/generated/dataset";
+import { compareBody, itemId, type Run, summaryOf } from "@/mocks/generated/experiments";
+import { mulberry32 } from "@/mocks/generated/random";
 import { ON_CALL_PAGER, startedBetween } from "@/mocks/generated/stories";
 import channelsFixture from "../../../../fixtures/api/static/channels.json";
 import evaluatorsFixture from "../../../../fixtures/api/static/evaluators.json";
@@ -11,7 +13,8 @@ import { projectOfRef, type StoryId } from "../projects";
 /**
  * The evaluation objects of the story projects (M18 P5): the on-call channel of the voice desk, the
  * coding agent's check and its online rule, and the voice desk's LLM judge with its test result.
- * Only the story projects answer them (`storyEvaluateHandlers`, `storyChannelHandlers`).
+ * Only the story projects answer them (`storyEvaluateHandlers`, `storyChannelHandlers`). The
+ * extraction project's two experiments on the labeled invoices (M18 P6) are answered there too.
  */
 
 const PROJECT = "/api/v1/projects/:project";
@@ -208,6 +211,204 @@ export function storyChannelHandlers(project?: string): HttpHandler[] {
   ];
 }
 
+// The invoice experiment (M18 P6): two prompt versions run over the same 300 labeled invoices.
+
+const INVOICE_DATASET_ID = "01900000-0000-7000-8000-000000570921";
+const INVOICE_ITEMS = 300;
+/** The dataset offset `itemId` takes for the invoices; the support runs use 0 and 1. */
+const INVOICE_ITEM_OFFSET = 2;
+const INVOICE_THRESHOLD = 0.1;
+const INVOICE_LIMIT = 50;
+const INVOICE_MAX_LIMIT = 200;
+
+/**
+ * The invoices a run passes. Each field's passes are the first rows of an order: `total` and
+ * `vat_number` use two different orders (salts 1 and 2), so the rows that fail differ per field.
+ */
+type InvoiceRun = {
+  id: string;
+  version: number;
+  createdAt: string;
+  total: number;
+  vatNumber: number;
+  cost: number;
+  latencyMs: number;
+};
+
+const INVOICE_RUNS: readonly InvoiceRun[] = [
+  {
+    id: "01900000-0000-7000-8000-000000570931",
+    version: 3,
+    createdAt: "2026-11-18T10:00:00.000Z",
+    total: 291,
+    vatNumber: 273,
+    cost: 0.0021,
+    latencyMs: 2_100,
+  },
+  {
+    id: "01900000-0000-7000-8000-000000570932",
+    version: 4,
+    createdAt: "2026-11-18T11:00:00.000Z",
+    total: 297,
+    vatNumber: 288,
+    cost: 0.0024,
+    latencyMs: 2_300,
+  },
+];
+
+/** The rank of each row (0 first) in the order of `salt`: the rows sorted by a hash of salt and row. */
+function rankOf(salt: number): number[] {
+  const keys = Array.from({ length: INVOICE_ITEMS }, (_unused, row) =>
+    mulberry32(salt * 1_000_003 + row)(),
+  );
+  const order = keys
+    .map((_key, row) => row)
+    .sort((left, right) => (keys[left] ?? 0) - (keys[right] ?? 0));
+  const rank = new Array<number>(INVOICE_ITEMS).fill(0);
+  order.forEach((row, position) => {
+    rank[row] = position;
+  });
+  return rank;
+}
+
+const TOTAL_RANK = rankOf(1);
+const VAT_RANK = rankOf(2);
+
+/** A boolean score of one row. */
+function passed(pass: boolean): Schema<"ResultScore"> {
+  return { data_type: "boolean", value_num: pass ? 1 : 0 };
+}
+
+/** The rows of one invoice run: the same 300 items in both runs, with the run's passes. */
+function invoiceRowsOf(run: InvoiceRun): Schema<"ResultRow">[] {
+  return Array.from({ length: INVOICE_ITEMS }, (_unused, row) => ({
+    dataset_item_id: itemId(INVOICE_ITEM_OFFSET, row),
+    repetition: 0,
+    input: { invoice: `invoice-${String(row + 1).padStart(4, "0")}.pdf` },
+    latency_ns: run.latencyMs * 1_000_000,
+    cost_total: run.cost,
+    scores: {
+      total: passed((TOTAL_RANK[row] ?? 0) < run.total),
+      vat_number: passed((VAT_RANK[row] ?? 0) < run.vatNumber),
+      vendor: passed(true),
+      date: passed(true),
+    },
+  }));
+}
+
+const INVOICE_BY_ID = new Map<string, Run>(
+  INVOICE_RUNS.map((spec): [string, Run] => [
+    spec.id,
+    {
+      experiment: {
+        id: spec.id,
+        name: `extract-invoice v${spec.version}`,
+        dataset_id: INVOICE_DATASET_ID,
+        dataset_name: "Labeled invoices",
+        dataset_version: 1,
+        // The schema types a metadata value as `never`; the mock stores the strings of a run.
+        metadata: {
+          prompt: "extract-invoice",
+          version: spec.version,
+          model: "gemini-2.5-flash",
+        } as unknown as Schema<"Experiment">["metadata"],
+        repetitions: 1,
+        item_count: INVOICE_ITEMS,
+        result_count: INVOICE_ITEMS,
+        status: "completed",
+        created_at: spec.createdAt,
+        finished_at: new Date(Date.parse(spec.createdAt) + 5 * 60_000).toISOString(),
+      },
+      rows: invoiceRowsOf(spec),
+      datasetKey: INVOICE_DATASET_ID,
+    },
+  ]),
+);
+
+/** The two runs, newest first, as the list returns them. */
+const INVOICE_LIST: Run[] = [...INVOICE_BY_ID.values()].sort((left, right) =>
+  right.experiment.created_at.localeCompare(left.experiment.created_at),
+);
+
+/** A positive integer query parameter, or the default; the limit's maximum applies. */
+function limitOf(url: URL): number {
+  const parsed = Number(url.searchParams.get("limit"));
+  return Number.isInteger(parsed) && parsed > 0
+    ? Math.min(parsed, INVOICE_MAX_LIMIT)
+    : INVOICE_LIMIT;
+}
+
+/** The compare of two to four invoice runs, as the server's compare route answers it. */
+function invoiceCompare(url: URL): Response | undefined {
+  const runs = (url.searchParams.get("ids") ?? "").split(",").map((id) => INVOICE_BY_ID.get(id));
+  if (runs.length < 2 || runs.length > 4 || runs.some((run) => run === undefined)) {
+    return undefined;
+  }
+  const thresholdText = url.searchParams.get("threshold");
+  const threshold = thresholdText === null ? INVOICE_THRESHOLD : Number(thresholdText);
+  const onlyText = url.searchParams.get("only");
+  const only =
+    onlyText === "regressed" || onlyText === "improved" || onlyText === "changed"
+      ? onlyText
+      : undefined;
+  return HttpResponse.json(
+    compareBody(
+      runs.filter((run): run is Run => run !== undefined),
+      threshold,
+      only,
+      limitOf(url),
+      url.searchParams.get("cursor") ?? undefined,
+    ),
+  );
+}
+
+/** The results of an invoice run, one page of items after the cursor (the item id of the last one). */
+function invoiceResults(url: URL, id: string): Response | undefined {
+  const run = INVOICE_BY_ID.get(id);
+  if (!run) {
+    return undefined;
+  }
+  const cursor = url.searchParams.get("cursor");
+  const limit = limitOf(url);
+  const rows = run.rows.filter((row) => cursor === null || row.dataset_item_id > cursor);
+  const shown = rows.slice(0, limit);
+  const last = shown[shown.length - 1];
+  return HttpResponse.json({
+    summary: summaryOf(run),
+    rows: shown,
+    next_cursor: rows.length > limit && last ? last.dataset_item_id : null,
+  });
+}
+
+/**
+ * The invoice experiments' routes, under `prefix`. The list is answered only with `scoped` (a
+ * project ref), so an unscoped request keeps the generated experiments' list; the by-id routes
+ * answer their own ids in either case and fall through for any other.
+ */
+function invoiceExperimentHandlers(prefix: string, scoped: boolean): HttpHandler[] {
+  const EXPERIMENTS = `${prefix}/experiments`;
+  return [
+    ...(scoped
+      ? [
+          http.get(EXPERIMENTS, () =>
+            HttpResponse.json({
+              data: INVOICE_LIST.map((run) => run.experiment),
+              next_cursor: null,
+            }),
+          ),
+        ]
+      : []),
+    http.get(`${EXPERIMENTS}/compare`, ({ request }) => invoiceCompare(new URL(request.url))),
+    http.get(`${EXPERIMENTS}/:id/results`, ({ request, params }) =>
+      invoiceResults(new URL(request.url), idParam(params.id)),
+    ),
+    http.get(`${EXPERIMENTS}/:id`, ({ params }) => {
+      const run = INVOICE_BY_ID.get(idParam(params.id));
+      return run ? HttpResponse.json(run.experiment) : undefined;
+    }),
+  ];
+}
+
 /**
  * The evaluators, online rules and judge test of the story projects. With `project` (an API ref,
  * `acme/<slug>`) the routes use its literal prefix and serve only that project's story objects
@@ -223,6 +424,7 @@ export function storyEvaluateHandlers(dataset: Dataset, project?: string): HttpH
   const withFixtures = project === undefined || scope === "support";
   const coding = served("coding");
   const voice = served("voice");
+  const extraction = served("extraction");
   const evaluators = [...(coding ? [TESTS_EVALUATOR] : []), ...(voice ? [READBACK_EVALUATOR] : [])];
   const EVALUATORS = `${prefix}/evaluators`;
   const RULES = `${prefix}/online-rules`;
@@ -279,5 +481,6 @@ export function storyEvaluateHandlers(dataset: Dataset, project?: string): HttpH
         ? HttpResponse.json({ data: [], next_cursor: null })
         : undefined,
     ),
+    ...(extraction ? invoiceExperimentHandlers(prefix, project !== undefined) : []),
   ];
 }
