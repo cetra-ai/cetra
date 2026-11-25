@@ -13,15 +13,17 @@ export function totalsOf(data: Schema<"TraceTotals">): Totals {
   };
 }
 
-/** Totals of the loaded rows whose id is in `ids`: errors are rows with status `error`, a missing cost adds 0. */
+/**
+ * Totals of the checked rows: the count is every checked id; errors and cost come from the loaded
+ * rows among them (status `error`; a missing cost adds 0).
+ */
 export function selectionTotals(
   rows: readonly Schema<"TraceSummary">[],
   ids: ReadonlySet<string>,
 ): Totals {
-  const totals: Totals = { traceCount: 0, errorTraceCount: 0, costTotal: 0 };
+  const totals: Totals = { traceCount: ids.size, errorTraceCount: 0, costTotal: 0 };
   for (const row of rows) {
     if (ids.has(row.trace_id)) {
-      totals.traceCount += 1;
       if (row.status === "error") {
         totals.errorTraceCount += 1;
       }
@@ -69,8 +71,7 @@ function Parts({ first, totals }: { first: string; totals: Totals }) {
 
 export function TraceTotalsLine({ selected, list, listStatus }: Props) {
   return (
-    <div
-      role="status"
+    <section
       aria-label="Totals"
       className="flex h-7 shrink-0 items-center border-t border-border px-3 text-caption text-muted-foreground"
     >
@@ -90,6 +91,6 @@ export function TraceTotalsLine({ selected, list, listStatus }: Props) {
       ) : (
         "Counting…"
       )}
-    </div>
+    </section>
   );
 }

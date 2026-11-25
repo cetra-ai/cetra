@@ -477,3 +477,11 @@ Follow `website/STYLE.md` (no new banned terms; the words above are plain).
 1. Sync the branch to ubuntu-dev and run `just check` there (with Node on the PATH), plus `just docs-gen` if `check-docs` asks for it.
 2. Sonnet code review of the branch against `origin/main`; fixes by an implementer with an exact brief.
 3. Open the PR; update `docs/roadmap.md` only if a Track C row lists UI follow-ups this closes (none expected).
+
+## Changes after the code review and checks
+
+- The line is a `<section aria-label="Totals">` (a named region), not `role="status"`: the layout tests assert no status region on the page, a live region would announce every checkbox change, and Biome's `useSemanticElements` refuses `role="group"` on a `div`.
+- `selectionTotals` counts every checked id (`ids.size`), so the line agrees with "Add N to dataset"; errors and cost still come from the loaded rows among them.
+- While the table shows the previous filter's placeholder rows, the line reads `Counting…`.
+- `trace-view.test.tsx` overrides `/traces/:trace_id` while rendering the list, which also matched `/traces/totals`; the test now answers the totals first.
+- Spec 11 and the docs say the totals are fetched once per window and refresh with Refresh or a change of range, filter, search or flags.

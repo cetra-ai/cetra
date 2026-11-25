@@ -18,7 +18,7 @@ function renderLine(props: {
       listStatus={props.listStatus ?? "success"}
     />,
   );
-  return screen.getByRole("status", { name: "Totals" });
+  return screen.getByRole("region", { name: "Totals" });
 }
 
 it("shows the list totals", () => {
@@ -63,14 +63,15 @@ it("shows the selection alone while the list totals are pending", () => {
   expect(totals.textContent).toBe("2 selected · 1 error · $0.0027");
 });
 
-it("selectionTotals sums the checked rows", () => {
+it("selectionTotals counts every checked id and sums the loaded ones", () => {
+  // The last id is in no loaded row: it counts, but adds no error and no cost.
   const ids = new Set([
     "a1000000000000000000000000000006",
     "a1000000000000000000000000000003",
     "a10000000000000000000000000000ff",
   ]);
   expect(selectionTotals(rows, ids)).toEqual({
-    traceCount: 2,
+    traceCount: 3,
     errorTraceCount: 1,
     costTotal: 0.0027,
   });

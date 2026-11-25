@@ -880,7 +880,11 @@ function TracesPage() {
                         {rows.length > 0 ? (
                           <TraceTotalsLine
                             selected={selectedTotals}
-                            list={totals.data ? totalsOf(totals.data) : undefined}
+                            list={
+                              totals.data && !list.isPlaceholderData
+                                ? totalsOf(totals.data)
+                                : undefined
+                            }
                             listStatus={totals.status}
                           />
                         ) : null}

@@ -652,7 +652,7 @@ it("shows the plain empty state when the default filter matches nothing", async 
   expect(screen.getByRole("button", { name: "Clear filters" })).toBeInTheDocument();
   expect(screen.queryByRole("tab", { name: "OTel env vars" })).not.toBeInTheDocument();
   expect(screen.getByText("0 loaded")).toBeInTheDocument();
-  expect(screen.queryByRole("status", { name: "Totals" })).not.toBeInTheDocument();
+  expect(screen.queryByRole("region", { name: "Totals" })).not.toBeInTheDocument();
 });
 
 it("the saved views menu sits in the breadcrumb", async () => {
@@ -2020,7 +2020,7 @@ it("shows the list totals under the table", async () => {
   try {
     await renderApp("/acme/support-bot/traces?filter=status%20%3D%20'error'&search=order");
     await waitFor(() => {
-      expect(screen.getByRole("status", { name: "Totals" }).textContent).toBe(
+      expect(screen.getByRole("region", { name: "Totals" }).textContent).toBe(
         "203 traces · 3 errors · $4.12",
       );
     });
@@ -2043,21 +2043,21 @@ it("totals the checked rows", async () => {
   );
   const { user } = await renderApp("/acme/support-bot/traces");
   await waitFor(() => {
-    expect(screen.getByRole("status", { name: "Totals" }).textContent).toBe(
+    expect(screen.getByRole("region", { name: "Totals" }).textContent).toBe(
       "203 traces · 3 errors · $4.12",
     );
   });
   await user.click(await rowBox(0));
   await user.click(await rowBox(2));
   await waitFor(() => {
-    expect(screen.getByRole("status", { name: "Totals" }).textContent).toBe(
+    expect(screen.getByRole("region", { name: "Totals" }).textContent).toBe(
       "2 of 203 selected · 1 error · $0.0027",
     );
   });
   await user.click(await rowBox(0));
   await user.click(await rowBox(2));
   await waitFor(() => {
-    expect(screen.getByRole("status", { name: "Totals" }).textContent).toBe(
+    expect(screen.getByRole("region", { name: "Totals" }).textContent).toBe(
       "203 traces · 3 errors · $4.12",
     );
   });
@@ -2071,7 +2071,7 @@ it("says when the totals are unavailable", async () => {
   );
   await renderApp("/acme/support-bot/traces");
   await waitFor(() => {
-    expect(screen.getByRole("status", { name: "Totals" }).textContent).toBe("Totals unavailable");
+    expect(screen.getByRole("region", { name: "Totals" }).textContent).toBe("Totals unavailable");
   });
   expect(screen.getByRole("grid", { name: "Traces" })).toBeInTheDocument();
 });
