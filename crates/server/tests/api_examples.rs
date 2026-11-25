@@ -78,7 +78,7 @@ use cetra_server::api::score_definitions::{CreateScoreDefinitionRequest, ScoreDe
 use cetra_server::api::scores::{FeedbackRequest, ScoreBatch};
 use cetra_server::api::sessions::{SessionDetail, SessionSummary};
 use cetra_server::api::sql::{SqlQueryRequest, SqlQueryResult};
-use cetra_server::api::traces::{SpanDetail, SpanSummary, TraceDetail, TraceSummary};
+use cetra_server::api::traces::{SpanDetail, SpanSummary, TraceDetail, TraceSummary, TraceTotals};
 use cetra_server::api::usage::OrgUsage;
 use cetra_server::api::users::{EndUserDetail, EndUserSummary};
 use serde::de::DeserializeOwned;
@@ -741,6 +741,7 @@ fn generated_files_roundtrip() {
         }
         match example.operation_id.as_str() {
             "list_traces" => roundtrip::<Page<TraceSummary>>(&example.file),
+            "get_trace_totals" => roundtrip::<TraceTotals>(&example.file),
             "get_trace" => roundtrip::<TraceDetail>(&example.file),
             "list_spans" => roundtrip::<Page<SpanSummary>>(&example.file),
             "get_span" => roundtrip::<SpanDetail>(&example.file),

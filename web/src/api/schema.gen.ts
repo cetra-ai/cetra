@@ -4114,6 +4114,26 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/projects/{project}/traces/totals": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get trace list totals
+         * @description Evaluation, playground and assistant traces (`environment = cetra-eval`, `environment = cetra-playground` or `environment = cetra-assistant`) and experiment traces are excluded unless `include_eval` or `include_experiments` is set. Counts and sums every trace the list matches, not one page.
+         */
+        get: operations["get_trace_totals"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/projects/{project}/traces/{trace_id}": {
         parameters: {
             query?: never;
@@ -11666,6 +11686,28 @@ export interface components {
             trace_id: components["schemas"]["TraceId"];
             /** @description End-user id. */
             user_id?: string;
+        };
+        /**
+         * @description Totals of the traces a trace list matches (D-C-31).
+         *
+         *     Spec 09 § Observability data.
+         */
+        TraceTotals: {
+            /**
+             * Format: double
+             * @description Sum of their `cost_total`, USD. 0 when none has a cost.
+             */
+            cost_total: number;
+            /**
+             * Format: int64
+             * @description Of those, traces with status `error`.
+             */
+            error_trace_count: number;
+            /**
+             * Format: int64
+             * @description Traces the list would page through.
+             */
+            trace_count: number;
         };
         /**
          * @description One span in a flat pre-order trace tree.
@@ -33008,6 +33050,105 @@ export interface operations {
                 };
                 content: {
                     "text/event-stream": string;
+                };
+            };
+            /** @description The request is malformed or a filter is invalid. */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No credentials, or the credentials are invalid. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The credentials do not allow this operation, or the organization's plan does not include it (code plan_required). */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The resource does not exist. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The query took longer than its time limit, needed more memory or temporary disk space than allowed, a filter deletion matched more than 100,000 traces, or the owner cannot be that user (code owner_not_allowed). */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Too many requests. */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The server is busy or a dependency is unavailable. Retry later. */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    get_trace_totals: {
+        parameters: {
+            query?: {
+                /** @description Filter DSL expression over the `traces` view (spec 05). */
+                filter?: string;
+                /** @description Full-text search (spec 05 § Full-text search). At most 1,024 bytes (D-G-39). */
+                search?: string;
+                /** @description Inclusive range start. RFC 3339 or epoch milliseconds. */
+                from?: components["schemas"]["TimeParam"];
+                /** @description Exclusive range end. RFC 3339 or epoch milliseconds. */
+                to?: components["schemas"]["TimeParam"];
+                /** @description Include traces from the reserved environments (`cetra-eval`, `cetra-playground`, `cetra-assistant`). Default false. Spec 05 § Default exclusions. */
+                include_eval?: boolean;
+                /** @description Include experiment traces. Default false. Spec 05 § Default exclusions. */
+                include_experiments?: boolean;
+            };
+            header?: never;
+            path: {
+                /** @description Project UUID, URL-encoded org-slug/project-slug, or `current`. */
+                project: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Totals of the matching traces. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TraceTotals"];
                 };
             };
             /** @description The request is malformed or a filter is invalid. */

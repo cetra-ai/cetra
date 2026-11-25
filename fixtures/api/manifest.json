@@ -834,6 +834,14 @@
     "file": "responses/traces/a1000000000000000000000000000006.json"
   },
   {
+    "operation_id": "get_trace_totals",
+    "path_params": {},
+    "query": {},
+    "status": 200,
+    "content_type": "application/json",
+    "file": "responses/trace-totals.json"
+  },
+  {
     "operation_id": "get_user",
     "path_params": {
       "user_id": "user-42"

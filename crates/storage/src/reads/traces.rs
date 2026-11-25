@@ -13,15 +13,18 @@ use cetra_core::enums::SpanStatus;
 use cetra_core::schema::{spans, traces};
 use datafusion::common::ScalarValue;
 use datafusion::error::DataFusionError;
+use datafusion::functions_aggregate::expr_fn::count;
 use datafusion::functions_window::expr_fn::row_number;
+use datafusion::logical_expr::expr_fn::when;
 use datafusion::logical_expr::{Expr, ExprFunctionExt, col, lit};
 use datafusion::prelude::DataFrame;
 
+use super::columns::{f64_at, i64_at, require};
 use super::cursor::{after, assemble, decode, order_by};
 use super::{ListScope, Page, SortOrder, present};
 use crate::filter::{Filter, FilterView, exclusions, search, strict_exclusions, time_window};
 use crate::query_error::{RunError, classify};
-use crate::views::{QueryContext, TimeWindow, ViewName};
+use crate::views::{QueryContext, TimeWindow, ViewName, exact_cost_sum};
 
 const LIST: &str = "traces";
 const SPANS: &str = "spans";
@@ -35,6 +38,9 @@ const SPAN_KEY: &[&str] = &[spans::START_TIME, spans::SPAN_ID, spans::TRACE_ID];
 /// filter matching many copies, can't make the refetch read more than this.
 const MAX_FETCH: usize = 64 * super::MAX_PAGE;
 const SPAN_RANK: &str = "rn";
+const TOTAL_TRACES: &str = "trace_count";
+const TOTAL_ERRORS: &str = "error_trace_count";
+const TOTAL_COST: &str = "cost_total";
 
 /// Most spans `trace_detail` returns for one trace.
 pub const MAX_TRACE_SPANS: usize = 20_000;
@@ -132,6 +138,31 @@ pub struct MatchCountRequest<'a> {
     pub strict_exclusions: bool,
     /// Time allowed for planning and running.
     pub timeout: Duration,
+}
+
+/// The trace list's rows to total (D-C-31): the list's filter, search, window and exclusions,
+/// without sort, cursor or limit.
+#[derive(Debug, Clone, Copy)]
+pub struct TraceTotalsRequest<'a> {
+    /// Filter text. Empty or whitespace means no filter.
+    pub filter: Option<&'a str>,
+    /// Search text. Empty or whitespace means no search.
+    pub search: Option<&'a str>,
+    /// Window and default exclusions.
+    pub scope: ListScope,
+    /// Time allowed for planning and running.
+    pub timeout: Duration,
+}
+
+/// Totals of the trace list's rows (D-C-31).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct TraceTotals {
+    /// Traces the list would page through.
+    pub trace_count: i64,
+    /// Of those, the traces whose `status` is `error`.
+    pub error_trace_count: i64,
+    /// Exact sum of their `cost_total` (D-A2-4); a null cost adds nothing; 0 for no trace.
+    pub cost_total: f64,
 }
 
 /// Span list columns: [`cetra_core::schema::SPANS_LIGHT_COLUMNS`] without
@@ -808,6 +839,75 @@ async fn count_matches(
         .map_err(|error| ctx.fail(error))
 }
 
+/// Totals of the rows [`trace_list`] would page through for the same filter, search and scope.
+///
+/// # Errors
+///
+/// [`RunError::Invalid`] for filter text; [`RunError::InvalidRequest`] for a search without a
+/// window; [`RunError::Timeout`] past `timeout`; DataFusion failures through [`classify`] and
+/// `ctx.fail` (a non-finite or out-of-range cost fails the sum, as in the widget query).
+pub async fn trace_totals(
+    ctx: &QueryContext,
+    request: TraceTotalsRequest<'_>,
+) -> Result<TraceTotals, RunError> {
+    let filter = match present(request.filter) {
+        Some(text) => Some(ctx.parse_filter(FilterView::Traces, text)?),
+        None => None,
+    };
+    match tokio::time::timeout(request.timeout, totals_of(ctx, &request, filter)).await {
+        Err(_) => Err(RunError::Timeout),
+        Ok(result) => result,
+    }
+}
+
+async fn totals_of(
+    ctx: &QueryContext,
+    request: &TraceTotalsRequest<'_>,
+    filter: Option<Filter>,
+) -> Result<TraceTotals, RunError> {
+    let frame = scope_frame(
+        ctx,
+        FilterView::Traces,
+        LIST,
+        filter,
+        request.search,
+        request.scope,
+        false,
+    )
+    .await?;
+    // `count` of a `CASE` without `ELSE` counts only the error rows, so it is never null.
+    let frame = frame
+        .aggregate(
+            vec![],
+            vec![
+                count(lit(1_i64)).alias(TOTAL_TRACES),
+                count(
+                    when(
+                        col(traces::STATUS).eq(lit(SpanStatus::Error.as_str())),
+                        lit(1_i64),
+                    )
+                    .end()
+                    .map_err(classify)?,
+                )
+                .alias(TOTAL_ERRORS),
+                exact_cost_sum(col(traces::COST_TOTAL)).alias(TOTAL_COST),
+            ],
+        )
+        .map_err(classify)?;
+    let batches = frame.collect().await.map_err(|error| ctx.fail(error))?;
+    let batch = single_row(&batches)?.ok_or_else(|| {
+        RunError::Internal(DataFusionError::Internal(
+            "trace totals returned no row".to_owned(),
+        ))
+    })?;
+    Ok(TraceTotals {
+        trace_count: i64_at(require(&batch, TOTAL_TRACES)?, 0)?,
+        error_trace_count: i64_at(require(&batch, TOTAL_ERRORS)?, 0)?,
+        // The sum is null when no row has a cost.
+        cost_total: f64_at(require(&batch, TOTAL_COST)?, 0)?.unwrap_or(0.0),
+    })
+}
+
 /// Copies of one row. Rows that agree on `key` and sort next to each other are copies; the
 /// sort puts the copy with the greatest `newest` first, and that copy is the one kept.
 struct Dedup {
@@ -1261,9 +1361,9 @@ mod tests {
         MAX_MATCH_COUNT, MAX_REFRESH_IDS, MAX_REFRESH_SPANS_PER_TRACE, MatchCountRequest,
         SPAN_LIST_COLUMNS, SPAN_REFRESH_COLUMNS, SpanListRequest, SpanRefreshRequest, SpanSort,
         TRACE_REFRESH_STRICT_COLUMNS, TraceListRequest, TraceRefreshRequest, TraceSort,
-        TraceSpansRequest, error_spans, match_count, span_detail, span_list, span_list_capped,
-        span_refresh, trace_detail, trace_detail_limited, trace_frame, trace_list, trace_refresh,
-        trace_spans,
+        TraceSpansRequest, TraceTotals, TraceTotalsRequest, error_spans, match_count, span_detail,
+        span_list, span_list_capped, span_refresh, trace_detail, trace_detail_limited, trace_frame,
+        trace_list, trace_refresh, trace_spans, trace_totals,
     };
     use crate::query_error::{Position, RunError};
     use crate::reads::{ListScope, Page, SortOrder};
@@ -3147,5 +3247,133 @@ mod tests {
             .await
             .expect("no ids");
         assert!(batches.is_empty());
+    }
+
+    fn totals_request<'a>(
+        scope: ListScope,
+        filter: Option<&'a str>,
+        search: Option<&'a str>,
+    ) -> TraceTotalsRequest<'a> {
+        TraceTotalsRequest {
+            filter,
+            search,
+            scope,
+            timeout: TIMEOUT,
+        }
+    }
+
+    #[tokio::test]
+    async fn totals_match_the_listed_rows() {
+        let ctx = context();
+        let cases: [(ListScope, Option<&str>, Option<&str>); 5] = [
+            (scope(None, false), None, None),
+            (scope(None, true), None, None),
+            (scope(None, false), Some("status = 'error'"), None),
+            (scope(None, false), Some("cost_total > 0.002"), None),
+            (scope(Some(day()), false), None, Some("order")),
+        ];
+        for (index, (case_scope, filter, search)) in cases.into_iter().enumerate() {
+            let mut request = listed(case_scope, TraceSort::StartTime, SortOrder::Desc, 1000);
+            request.filter = filter;
+            request.search = search;
+            let page = trace_list(&ctx, request).await.expect("list");
+            let listed_rows = rows(&page);
+            let totals = trace_totals(&ctx, totals_request(case_scope, filter, search))
+                .await
+                .expect("totals");
+            assert_eq!(
+                totals.trace_count,
+                i64::try_from(listed_rows.len()).expect("count"),
+                "case {index}"
+            );
+            let errors = listed_rows
+                .iter()
+                .filter(|row| row["status"] == "error")
+                .count();
+            assert_eq!(
+                totals.error_trace_count,
+                i64::try_from(errors).expect("count"),
+                "case {index}"
+            );
+            let cost: f64 = listed_rows
+                .iter()
+                .map(|row| row["cost_total"].as_f64().unwrap_or(0.0))
+                .sum();
+            assert!(
+                (totals.cost_total - cost).abs() < 1e-12,
+                "case {index}: {} vs {cost}",
+                totals.cost_total
+            );
+            if index == 0 {
+                // Not vacuous: the unfiltered list has traces and errors.
+                assert!(totals.trace_count > 0);
+                assert!(totals.error_trace_count > 0);
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn totals_of_no_rows_are_zero() {
+        let ctx = context();
+        let totals = trace_totals(
+            &ctx,
+            totals_request(scope(None, false), Some("name = 'no such trace'"), None),
+        )
+        .await
+        .expect("totals");
+        assert_eq!(
+            totals,
+            TraceTotals {
+                trace_count: 0,
+                error_trace_count: 0,
+                cost_total: 0.0,
+            }
+        );
+    }
+
+    #[tokio::test]
+    async fn totals_sum_costs_exactly() {
+        let mut spans: Vec<Span> = (1..=10_u16)
+            .flat_map(|trace| copies_of(trace, 1, i64::from(trace) * 1_000, 1))
+            .collect();
+        for span in &mut spans {
+            span.cost_total = Some(0.1);
+        }
+        // One span per trace, in trace order: the third span is trace 3's, and it fails.
+        spans[2].status = SpanStatus::Error;
+        let ctx = context_for(&spans);
+        let totals = trace_totals(&ctx, totals_request(scope(None, false), None, None))
+            .await
+            .expect("totals");
+        assert_eq!(
+            totals,
+            TraceTotals {
+                trace_count: 10,
+                error_trace_count: 1,
+                cost_total: 1.0,
+            }
+        );
+    }
+
+    #[tokio::test]
+    async fn totals_reject_a_bad_filter_and_a_search_without_window() {
+        let ctx = context();
+        let bad = trace_totals(
+            &ctx,
+            totals_request(scope(None, false), Some("error_count >"), None),
+        )
+        .await;
+        assert!(matches!(bad, Err(RunError::Invalid(_))), "{bad:?}");
+        let no_window = trace_totals(
+            &ctx,
+            totals_request(scope(None, false), None, Some("order")),
+        )
+        .await;
+        match no_window {
+            Err(RunError::InvalidRequest(message)) => {
+                assert_eq!(message, "search needs a time range");
+            }
+            other => panic!("{other:?}"),
+        }
     }
 }

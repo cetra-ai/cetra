@@ -27896,6 +27896,163 @@
         }
       }
     },
+    "/api/v1/projects/{project}/traces/totals": {
+      "get": {
+        "tags": [
+          "traces"
+        ],
+        "summary": "Get trace list totals",
+        "description": "Evaluation, playground and assistant traces (`environment = cetra-eval`, `environment = cetra-playground` or `environment = cetra-assistant`) and experiment traces are excluded unless `include_eval` or `include_experiments` is set. Counts and sums every trace the list matches, not one page.",
+        "operationId": "get_trace_totals",
+        "parameters": [
+          {
+            "name": "project",
+            "in": "path",
+            "description": "Project UUID, URL-encoded org-slug/project-slug, or `current`.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "filter",
+            "in": "query",
+            "description": "Filter DSL expression over the `traces` view (spec 05).",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "search",
+            "in": "query",
+            "description": "Full-text search (spec 05 § Full-text search). At most 1,024 bytes (D-G-39).",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "from",
+            "in": "query",
+            "description": "Inclusive range start. RFC 3339 or epoch milliseconds.",
+            "required": false,
+            "schema": {
+              "$ref": "#/components/schemas/TimeParam"
+            }
+          },
+          {
+            "name": "to",
+            "in": "query",
+            "description": "Exclusive range end. RFC 3339 or epoch milliseconds.",
+            "required": false,
+            "schema": {
+              "$ref": "#/components/schemas/TimeParam"
+            }
+          },
+          {
+            "name": "include_eval",
+            "in": "query",
+            "description": "Include traces from the reserved environments (`cetra-eval`, `cetra-playground`, `cetra-assistant`). Default false. Spec 05 § Default exclusions.",
+            "required": false,
+            "schema": {
+              "type": "boolean"
+            }
+          },
+          {
+            "name": "include_experiments",
+            "in": "query",
+            "description": "Include experiment traces. Default false. Spec 05 § Default exclusions.",
+            "required": false,
+            "schema": {
+              "type": "boolean"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Totals of the matching traces.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TraceTotals"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The request is malformed or a filter is invalid.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No credentials, or the credentials are invalid.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The credentials do not allow this operation, or the organization's plan does not include it (code plan_required).",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "The resource does not exist.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "The query took longer than its time limit, needed more memory or temporary disk space than allowed, a filter deletion matched more than 100,000 traces, or the owner cannot be that user (code owner_not_allowed).",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Too many requests.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The server is busy or a dependency is unavailable. Retry later.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/projects/{project}/traces/{trace_id}": {
       "get": {
         "tags": [
@@ -42535,6 +42692,32 @@
           "user_id": {
             "type": "string",
             "description": "End-user id."
+          }
+        }
+      },
+      "TraceTotals": {
+        "type": "object",
+        "description": "Totals of the traces a trace list matches (D-C-31).\n\nSpec 09 § Observability data.",
+        "required": [
+          "trace_count",
+          "error_trace_count",
+          "cost_total"
+        ],
+        "properties": {
+          "cost_total": {
+            "type": "number",
+            "format": "double",
+            "description": "Sum of their `cost_total`, USD. 0 when none has a cost."
+          },
+          "error_trace_count": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Of those, traces with status `error`."
+          },
+          "trace_count": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Traces the list would page through."
           }
         }
       },

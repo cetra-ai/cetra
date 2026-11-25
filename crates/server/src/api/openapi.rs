@@ -172,7 +172,7 @@ use super::sessions::{SessionDetail, SessionListParams, SessionSort, SessionSumm
 use super::sql::{SqlColumnInfo, SqlQueryRequest, SqlQueryResult};
 use super::traces::{
     SpanDetail, SpanListParams, SpanSort, SpanSummary, TraceDetail, TraceDetailParams,
-    TraceListParams, TraceSort, TraceStreamParams, TraceSummary,
+    TraceListParams, TraceSort, TraceStreamParams, TraceSummary, TraceTotals, TraceTotalsParams,
 };
 use super::usage::{OrgUsage, UsageDay, UsageParams};
 use super::users::{
@@ -367,6 +367,7 @@ pub(crate) fn collect_schemas() -> SchemaSet {
     set.insert::<TraceSummary>();
     set.insert::<SpanSummary>();
     set.insert::<TraceDetail>();
+    set.insert::<TraceTotals>();
     set.insert::<SpanDetail>();
     set.insert::<SessionSummary>();
     set.insert::<SessionDetail>();
@@ -3178,6 +3179,17 @@ fn trace_paths(paths: PathsBuilder) -> PathsBuilder {
             READ_ERRORS,
         ))
         .build();
+    let totals = operation("get_trace_totals", "traces", "Get trace list totals")
+        .description(Some(format!(
+            "{EXCLUSIONS} Counts and sums every trace the list matches, not one page."
+        )))
+        .parameters(Some(with_query::<TraceTotalsParams>(vec![project_param()])))
+        .responses(responses(
+            "200",
+            json_of::<TraceTotals>("Totals of the matching traces."),
+            READ_ERRORS,
+        ))
+        .build();
     let stream = operation("stream_traces", "traces", "Stream traces")
         .description(Some(format!(
             "{EXCLUSIONS} Server-sent events: `trace` data is a TraceSummary; `resync` and `ping` data are `{{}}`. `ping` is sent every 15 seconds."
@@ -3242,6 +3254,10 @@ fn trace_paths(paths: PathsBuilder) -> PathsBuilder {
         .path(
             format!("{PROJECT}/traces"),
             PathItem::new(HttpMethod::Get, list),
+        )
+        .path(
+            format!("{PROJECT}/traces/totals"),
+            PathItem::new(HttpMethod::Get, totals),
         )
         .path(
             format!("{PROJECT}/traces/stream"),
