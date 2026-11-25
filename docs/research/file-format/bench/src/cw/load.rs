@@ -9,13 +9,15 @@ use std::time::Instant;
 use cpu_time::ProcessTime;
 use tokio::sync::Barrier;
 
+use crate::counting::Counting;
+use crate::cw::cache::BlockCache;
 use crate::cw::harness::{ProcResult, check_format, proc_status_bytes, read_case};
-use crate::cw::many::{self, Listing, Opened};
+use crate::cw::many::{self, Listing, Opened, ProjectCase};
 use crate::cw::read::Answer;
 use crate::cw::shapes::{self, ShapeCase};
 #[cfg(test)]
 use crate::cw::{cases, project::project_cmd};
-use crate::{R, location};
+use crate::{Location, R, location};
 #[cfg(test)]
 use std::fs;
 #[cfg(test)]
@@ -27,6 +29,15 @@ pub const MIX: [&str; 4] = [
     "facets:7d",
     "dashboard:30d",
     "search_1d:bug",
+];
+/// The queries `cache_mix:<MiB>` runs twice, in this order.
+pub const CACHE_MIX: [&str; 6] = [
+    "trace_list:start_time",
+    "facets:7d",
+    "dashboard:30d",
+    "search_1d:bug",
+    "lookup_around",
+    "rollup_30d_cold",
 ];
 /// cetra's process-wide query memory (CW-10, spec 03 § 6).
 pub const TOTAL_MEMORY: u64 = 8 << 30;
@@ -53,8 +64,8 @@ pub(crate) async fn load_format(
         return concurrent_format(dir, format, query, n, runs).await;
     }
     if let Some(text) = query.strip_prefix("cache_mix:") {
-        number_of(query, text, 1..=1_048_576)?;
-        return Err(format!("{query}: the read cache is built in M5.2").into());
+        let mib = number_of(query, text, 1..=1_048_576)?;
+        return cache_mix_format(dir, format, query, mib, runs).await;
     }
     Err(format!("{query} is not a load query").into())
 }
@@ -200,6 +211,170 @@ async fn concurrent_format(
     })
 }
 
+/// The result of one `cache_mix` run.
+pub(crate) struct CacheMixRun {
+    /// Pass 2's answer.
+    pub answer: Answer,
+    /// Remote (gets, bytes) of `loc.store` during each pass. Pass 1 is read by the tests only.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub pass1: (u64, u64),
+    pub pass2: (u64, u64),
+    /// Cache (hits, misses) in blocks during pass 2.
+    pub hits: u64,
+    pub misses: u64,
+    /// Pass 2's six query times, ms.
+    pub times: Vec<f64>,
+    /// The process CPU time of pass 2, ms (as `concurrent`, the average per query is this over six).
+    pub cpu_ms: f64,
+}
+
+/// One pass of `cache_mix`: the six answers, the six wall times in ms, the remote counts of
+/// `loc.store` and the cache's (hits, misses).
+struct Pass {
+    answers: Vec<Answer>,
+    times: Vec<f64>,
+    remote: (u64, u64),
+    cache: (u64, u64),
+}
+
+/// One pass of `cache_mix` over the cached location: the files of both tables are opened through it
+/// inside the pass, and each query of `CACHE_MIX` runs in order.
+async fn cache_pass(
+    loc: &Location,
+    cached: &Location,
+    cache: &BlockCache,
+    listing: &Listing,
+    case: &ShapeCase,
+    project: &ProjectCase,
+    format: &str,
+) -> R<Pass> {
+    loc.store.reset();
+    cache.reset_stats();
+    let spans = many::open(cached, format, &listing.spans).await?;
+    let traces = many::open(cached, format, &listing.traces).await?;
+    let mut answers = Vec::with_capacity(CACHE_MIX.len());
+    let mut times = Vec::with_capacity(CACHE_MIX.len());
+    for query in CACHE_MIX {
+        let t0 = Instant::now();
+        let answer = if many::is_many(query) {
+            many::run(query, format, cached, listing, None, project)
+                .await?
+                .0
+        } else {
+            let (files, opened) = if shapes::table_of(query) == "traces" {
+                (&listing.traces[..], &traces)
+            } else {
+                (&listing.spans[..], &spans)
+            };
+            shapes::run(query, files, opened, case).await?
+        };
+        times.push(t0.elapsed().as_secs_f64() * 1e3);
+        answers.push(answer);
+    }
+    Ok(Pass {
+        answers,
+        times,
+        remote: loc.store.stats(),
+        cache: cache.stats(),
+    })
+}
+
+/// One `cache_mix` run (plans/08-m5-memory-concurrency.md § M5.2): a new `BlockCache` of `budget`
+/// bytes over `loc.store`, then two passes through it. Pass 2's answers must equal pass 1's.
+pub(crate) async fn cache_mix_run(
+    loc: &Location,
+    listing: &Listing,
+    case: &ShapeCase,
+    project: &ProjectCase,
+    format: &str,
+    budget: u64,
+) -> R<CacheMixRun> {
+    let cache = Arc::new(BlockCache::new(loc.store.clone(), budget));
+    let cached = Location {
+        store: Arc::new(Counting::new(cache.clone())),
+        url: loc.url.clone(),
+        prefix: loc.prefix.clone(),
+    };
+    let first = cache_pass(loc, &cached, &cache, listing, case, project, format).await?;
+    let cpu0 = ProcessTime::now();
+    let second = cache_pass(loc, &cached, &cache, listing, case, project, format).await?;
+    let cpu_ms = cpu0.elapsed().as_secs_f64() * 1e3;
+    if let Some(i) = (0..CACHE_MIX.len()).find(|&i| first.answers[i] != second.answers[i]) {
+        return Err(format!("{} answer changed between passes ({format})", CACHE_MIX[i]).into());
+    }
+    Ok(CacheMixRun {
+        answer: combine(&second.answers),
+        pass1: first.remote,
+        pass2: second.remote,
+        hits: second.cache.0,
+        misses: second.cache.1,
+        times: second.times,
+        cpu_ms,
+    })
+}
+
+/// `cache_mix:<MiB>`: the format's files are listed, the case read, all outside the timed region.
+/// Each run is one `cache_mix_run` with a cache of `mib` MiB; the first run's answer is the
+/// reference. `gets` and `bytes` are the first run's pass 2. Each run prints its pass 2's cache
+/// hits and misses to stderr.
+async fn cache_mix_format(
+    dir: &str,
+    format: &str,
+    query: &str,
+    mib: u64,
+    runs: usize,
+) -> R<ProcResult> {
+    let rss_start = proc_status_bytes("VmRSS")?;
+    let loc = location(dir)?;
+    let listing = many::list(&loc, format).await?;
+    let project = many::read_project_case(&loc).await?;
+    let case = ShapeCase {
+        clock: project.clock,
+        needles: read_case(&loc).await?.needles,
+    };
+    let mut runs_ms = Vec::with_capacity(runs * CACHE_MIX.len());
+    let mut cpu_ms = Vec::with_capacity(runs * CACHE_MIX.len());
+    let mut reference: Option<Answer> = None;
+    let mut remote = (0u64, 0u64);
+    for k in 0..runs {
+        let run = cache_mix_run(&loc, &listing, &case, &project, format, mib << 20).await?;
+        eprintln!("cache hits {} misses {}", run.hits, run.misses);
+        if let Some(first) = reference {
+            if first != run.answer {
+                return Err(format!("answer changed between runs ({query} {format})").into());
+            }
+        } else {
+            reference = Some(run.answer);
+        }
+        if k == 0 {
+            remote = run.pass2;
+        }
+        // As `concurrent`: one CPU entry per query, the pass's CPU divided by its queries.
+        cpu_ms.extend(std::iter::repeat_n(
+            run.cpu_ms / CACHE_MIX.len() as f64,
+            CACHE_MIX.len(),
+        ));
+        runs_ms.extend(run.times);
+    }
+    let reference = reference.ok_or("runs must be at least 1")?;
+    let vmhwm = proc_status_bytes("VmHWM")?;
+    Ok(ProcResult {
+        query: query.to_owned(),
+        format: format.to_owned(),
+        runs_ms,
+        cpu_ms,
+        gets: remote.0,
+        bytes: remote.1,
+        waves: None,
+        rows: reference.rows,
+        answer: format!("{:016x}", reference.hash),
+        rss_start,
+        vmhwm,
+        bytes_written: None,
+        tail_bytes: None,
+    })
+}
+
 /// A project written by `cw project` for the tests: 9 days of 400 traces a day with payloads, in
 /// `cw-test-load-{test}-{pid}` under the temp directory, removed on drop. `dir` is the project.
 #[cfg(test)]
@@ -302,6 +477,34 @@ mod tests {
         assert!(is_load("concurrent:0"));
         assert!(is_load("cache_mix:x"));
         assert!(!is_load("trace_list:cost_total"));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn cache_mix_agrees_across_formats() {
+        let p = TestProject::new("cache").await;
+        let loc = location(&p.dir.display().to_string()).unwrap();
+        let project = many::read_project_case(&loc).await.unwrap();
+        let case = ShapeCase {
+            clock: project.clock,
+            needles: read_case(&loc).await.unwrap().needles,
+        };
+        let mut answers = Vec::new();
+        for format in ["pq_cetra", "st"] {
+            let listing = many::list(&loc, format).await.unwrap();
+            let run = cache_mix_run(&loc, &listing, &case, &project, format, 64 << 20)
+                .await
+                .unwrap();
+            assert!(run.pass1.0 >= 1, "{format}: pass 1 made no remote request");
+            assert!(
+                run.pass2.0 <= run.pass1.0,
+                "{format}: pass 2 made more requests than pass 1"
+            );
+            answers.push(run.answer);
+        }
+        assert_eq!(
+            answers[0], answers[1],
+            "cache_mix differs between the formats"
+        );
     }
 
     #[tokio::test]

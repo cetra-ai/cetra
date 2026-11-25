@@ -1,6 +1,7 @@
 //! `fmtbench cw`: Strata against cetra's Parquet files on cetra's workload, without DataFusion
 //! (`plans/08-cetra-workload-design.md`, `plans/08-m1-likely-failures.md`).
 
+pub mod cache;
 pub mod cases;
 pub mod harness;
 pub mod load;

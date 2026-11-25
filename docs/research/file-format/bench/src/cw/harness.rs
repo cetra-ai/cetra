@@ -234,6 +234,15 @@ fn losses(query: &str, st: &Summary, pq: &Summary) -> Vec<&'static str> {
             lost.push("size");
         }
     }
+    if query.starts_with("cache_mix:") {
+        // A tie at zero is not a loss: both formats served pass 2 from the cache alone.
+        if st.gets >= pq.gets && !(st.gets == 0 && pq.gets == 0) {
+            lost.push("gets");
+        }
+        if st.bytes >= pq.bytes && !(st.bytes == 0 && pq.bytes == 0) {
+            lost.push("bytes");
+        }
+    }
     lost
 }
 
@@ -396,7 +405,13 @@ pub async fn run_cmd(args: &[String]) -> R<()> {
         print_line(query, "st", &st);
         let lost = losses(query, &st, &pq);
         if lost.is_empty() {
-            let compared = if is_write_like(query) { "median, p95, rss, cpu, size" } else { "median, p95, rss" };
+            let compared = if is_write_like(query) {
+                "median, p95, rss, cpu, size"
+            } else if query.starts_with("cache_mix:") {
+                "median, p95, rss, gets, bytes"
+            } else {
+                "median, p95, rss"
+            };
             println!("{query:<14}verdict   WIN ({compared})");
         } else {
             println!("{query:<14}verdict   LOSS ({})", lost.join(", "));
@@ -896,6 +911,26 @@ mod tests {
         assert_eq!(losses("write", &more_cpu, &pq), vec!["cpu"]);
         // CPU is not compared for the reads.
         assert!(losses("search:bug", &more_cpu, &pq).is_empty());
+        // A cache_mix query compares the remote gets and bytes; 0 against 0 is not a loss.
+        let mut pq_mix = summary(&[10.0, 20.0, 30.0], &[10.0, 20.0, 30.0], 100, Some(100));
+        pq_mix.gets = 10;
+        pq_mix.bytes = 100;
+        let mut st_mix = summary(&[1.0, 15.0, 25.0], &[1.0, 2.0, 3.0], 50, Some(50));
+        st_mix.gets = 4;
+        st_mix.bytes = 50;
+        assert!(losses("cache_mix:64", &st_mix, &pq_mix).is_empty());
+        st_mix.gets = 12;
+        assert_eq!(losses("cache_mix:64", &st_mix, &pq_mix), vec!["gets"]);
+        st_mix.gets = 4;
+        st_mix.bytes = 100;
+        assert_eq!(losses("cache_mix:64", &st_mix, &pq_mix), vec!["bytes"]);
+        let mut pq_zero = summary(&[10.0, 20.0, 30.0], &[10.0, 20.0, 30.0], 100, Some(100));
+        pq_zero.gets = 0;
+        pq_zero.bytes = 0;
+        let mut st_zero = summary(&[1.0, 15.0, 25.0], &[1.0, 2.0, 3.0], 50, Some(50));
+        st_zero.gets = 0;
+        st_zero.bytes = 0;
+        assert!(losses("cache_mix:64", &st_zero, &pq_zero).is_empty());
     }
 
     #[test]
