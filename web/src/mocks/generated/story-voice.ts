@@ -96,8 +96,29 @@ const CALLER_QUESTION = "Hi, can I move my appointment to Friday morning?";
 const AGENT_ANSWER = "Friday at 9:30 is free. Should I book it?";
 
 /**
- * A 16-bit mono PCM WAV of `seconds` at 8 kHz: three summed sines under a slow amplitude envelope, so the waveform
- * has a shape. Returned as a `data:` URI (P2): the header is written with a DataView.
+ * The loudness of speech at `t` seconds: four syllables a second, each a bump whose height and timing come from
+ * `seed`, with a short pause after every fifth, so two voices of different seeds draw different waveforms.
+ */
+function syllables(t: number, seed: number): number {
+  const rate = 4;
+  const index = Math.floor(t * rate);
+  // A small deterministic hash of (index, seed) in [0, 1).
+  const hash = (k: number) => {
+    const x = Math.sin((k + 1) * 12.9898 + seed * 78.233) * 43_758.5453;
+    return x - Math.floor(x);
+  };
+  if (index % 5 === 4) {
+    return 0.05;
+  }
+  const centre = (index + 0.5 + (hash(index) - 0.5) * 0.3) / rate;
+  const height = 0.35 + 0.65 * hash(index + 101);
+  const width = 0.05 + 0.04 * hash(index + 202);
+  return 0.05 + height * Math.exp(-(((t - centre) / width) ** 2));
+}
+
+/**
+ * A 16-bit mono PCM WAV of `seconds` at 8 kHz: three summed sines under a speech-like envelope (`syllables`), so the
+ * waveform has a shape. Returned as a `data:` URI (P2): the header is written with a DataView.
  */
 function toneWav(seconds: number, seed: number): string {
   const samples = Math.round(seconds * SAMPLE_RATE);
@@ -124,7 +145,7 @@ function toneWav(seconds: number, seed: number): string {
   view.setUint32(40, dataBytes, true);
   for (let n = 0; n < samples; n += 1) {
     const t = n / SAMPLE_RATE;
-    const envelope = 0.55 + 0.45 * Math.sin(2 * Math.PI * 0.7 * t + seed);
+    const envelope = syllables(t, seed);
     const tone =
       0.5 * Math.sin(2 * Math.PI * 220 * t) +
       0.3 * Math.sin(2 * Math.PI * 330 * t + seed) +
@@ -138,9 +159,9 @@ function toneWav(seconds: number, seed: number): string {
   return `data:audio/wav;base64,${btoa(binary)}`;
 }
 
-/** The caller's and the agent's turn audio (P2): 2.4 s and 2.0 s. */
-const CALLER_WAV = toneWav(2.4, 1);
-const AGENT_WAV = toneWav(2.0, 2);
+/** The caller's and the agent's turn audio (P2): 3.4 s and 2.6 s, so the players show 0:03 and 0:02. */
+const CALLER_WAV = toneWav(3.4, 1);
+const AGENT_WAV = toneWav(2.6, 2);
 
 /** The draft reply span of the chosen turn (P2): the caller's audio, the availability call, the agent's audio. */
 function draftReplySpan(checkMs: number): MarkedSpan {

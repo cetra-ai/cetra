@@ -343,7 +343,7 @@
     "theme": "dark",
     "viewport": {
       "width": 1100,
-      "height": 1100
+      "height": 1330
     },
     "clip": "section[aria-label=\"Transcript\"]",
     "storage": {
@@ -373,9 +373,13 @@
     "theme": "dark",
     "viewport": {
       "width": 1600,
-      "height": 900
+      "height": 680
     },
-    "clip": "[role=\"tabpanel\"]"
+    "clip": "[role=\"tabpanel\"]",
+    "storage": {
+      "cetra.split.traces": "{\"traces-list\":15,\"traces-detail\":85}",
+      "cetra.split.trace": "{\"trace-tree\":20,\"trace-detail\":80}"
+    }
   },
   {
     "name": "marketing-evaluate-voice",

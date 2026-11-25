@@ -168,7 +168,7 @@ describe("the voice audio turn", () => {
     });
   });
 
-  it("has a caller WAV of 2.4 s and an agent WAV of 2.0 s, 8 kHz 16-bit mono", () => {
+  it("has a caller WAV of 3.4 s and an agent WAV of 2.6 s, 8 kHz 16-bit mono", () => {
     const input = draft?.input?.format === "messages" ? draft.input.value : [];
     const output = draft?.output?.format === "messages" ? draft.output.value : [];
     const caller = input[0]?.parts[0];
@@ -185,9 +185,9 @@ describe("the voice audio turn", () => {
       channels: 1,
       sampleRate: 8_000,
       bits: 16,
-      dataBytes: 38_400,
-      riffSize: 38_436,
-      fileBytes: 38_444,
+      dataBytes: 54_400,
+      riffSize: 54_436,
+      fileBytes: 54_444,
     });
 
     const agentWav = wavOf(agentUri);
@@ -198,9 +198,9 @@ describe("the voice audio turn", () => {
       channels: 1,
       sampleRate: 8_000,
       bits: 16,
-      dataBytes: 32_000,
-      riffSize: 32_036,
-      fileBytes: 32_044,
+      dataBytes: 41_600,
+      riffSize: 41_636,
+      fileBytes: 41_644,
     });
   });
 });

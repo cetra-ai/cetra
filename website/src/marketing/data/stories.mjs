@@ -77,11 +77,11 @@ export const PICTURES = [
         caption: "Each turn of a session, with its score, so the bad answer stands out.",
       },
       coding: {
-        alt: "A coding agent's transcript: the CSV fix request, the agent reading and searching the code, a run_tests error of 1 failed and 47 passed, and a final answer that reports 48 tests passing.",
+        alt: "A coding agent's transcript: the CSV fix request and plan, one line per tool call, a first patch whose run_tests line reads 1 failed, 47 passed, then a second patch and a run of 48 passed.",
         caption: "Read the code, patch it and rerun the tests, all in one transcript.",
       },
       voice: {
-        alt: "A voice agent's draft-reply span: the caller's recording with its transcript, the calendar check and its slots at 9:30 and 11:00, and the agent's spoken reply, with its transcript.",
+        alt: "A voice agent's turn in the Chat view: the caller's 3.4 s recording with its transcript, one line for the calendar check with its slots 9:30 and 11:00 and its 2.91 s, and the agent's spoken reply with its transcript.",
         caption: "Hear the caller and the agent, and read what was said, in one voice turn.",
       },
       extraction: {
