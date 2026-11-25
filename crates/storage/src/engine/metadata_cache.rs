@@ -146,7 +146,7 @@ impl MetadataCache {
 mod tests {
     use std::sync::Arc;
 
-    use parquet::file::metadata::{FileMetaData, ParquetMetaData, ParquetMetaDataReader};
+    use parquet::file::metadata::{FileMetaData, ParquetMetaData};
     use parquet::schema::types::Type;
     use uuid::Uuid;
 
@@ -161,8 +161,6 @@ mod tests {
         let descr = Arc::new(parquet::schema::types::SchemaDescriptor::new(schema));
         let file_meta = FileMetaData::new(1, num_rows, None, None, descr, None);
         let meta = ParquetMetaData::new(file_meta, Vec::new());
-        // Sanity check that ParquetMetaDataReader module remains unused warning-free only if needed
-        let _ = std::marker::PhantomData::<ParquetMetaDataReader>;
         Arc::new(meta)
     }
 
