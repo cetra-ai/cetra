@@ -1,5 +1,6 @@
 import { $api } from "@/api/client";
 import { projectRef } from "@/api/project-ref";
+import type { Schema } from "@/api/types";
 
 export function channelsInit(org: string, project: string) {
   return { params: { path: { project: projectRef(org, project) } } };
@@ -31,4 +32,18 @@ export function alertEventsInit(org: string, project: string, id: string) {
 
 export function projectAlertEventsInit(org: string, project: string) {
   return { params: { path: { project: projectRef(org, project) }, query: { limit: 20 } } };
+}
+
+/** The issue or source an issue occurrence rule counts (exactly one). */
+export type IssueAlertScope = { issue_id: string } | { source_id: string };
+
+export function issueAlertPreviewQuery(
+  org: string,
+  project: string,
+  scope: IssueAlertScope,
+  window: Schema<"AlertWindow">,
+) {
+  return $api.queryOptions("get", "/api/v1/projects/{project}/alert-rules/issue-preview", {
+    params: { path: { project: projectRef(org, project) }, query: { ...scope, window } },
+  });
 }
