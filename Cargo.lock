@@ -1076,6 +1076,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "cetra-column"
+version = "0.1.0-rc.2"
+dependencies = [
+ "crc32c",
+ "lz4_flex",
+ "proptest",
+ "thiserror 2.0.21",
+]
+
+[[package]]
 name = "cetra-core"
 version = "0.1.0-rc.2"
 dependencies = [

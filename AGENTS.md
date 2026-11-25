@@ -103,6 +103,7 @@ If the code has to deviate from the spec, update the spec **in the same change**
 
 ```
 crates/
+  column/     cetra-column   pure-Rust columnar in-memory batches, encodings, memory pool, and binary framing (track QE)
   core/      cetra-core     shared contracts: IDs, enums, names, messages, Span/Score,
                              Arrow schemas + batch conversion, OpenAPI schemas,
                              no config (D59)                                          (spec 01)
@@ -138,6 +139,7 @@ docs/                        decisions, specs, plans, research
 ```
 
 **Crate dependency graph (enforced):**
+- `column` depends on no workspace crate.
 - `core` depends on no workspace crate.
 - `otel` and `storage` depend only on `core`. **They never depend on each other**, so they can be built in parallel; `server` connects them.
 - `eval` depends on `core` and `otel`.

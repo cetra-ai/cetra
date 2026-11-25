@@ -35,6 +35,7 @@ inefficient_to_string = "warn"
 
 [workspace.dependencies]
 # workspace crates
+cetra-column = { path = "crates/column" }
 cetra-core = { path = "crates/core" }
 cetra-eval = { path = "crates/eval" }
 cetra-otel = { path = "crates/otel" }
