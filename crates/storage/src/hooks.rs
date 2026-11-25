@@ -185,6 +185,7 @@ mod fault {
         hits: [AtomicU64; HookPoint::COUNT],
         groups: Mutex<Vec<(usize, u64)>>,
         passed: Mutex<Vec<HookPoint>>,
+        thread_names: Mutex<Vec<(HookPoint, Option<String>)>>,
         abort_at: Mutex<HashSet<HookPoint>>,
     }
 
@@ -209,6 +210,7 @@ mod fault {
                     hits: [const { AtomicU64::new(0) }; HookPoint::COUNT],
                     groups: Mutex::new(Vec::new()),
                     passed: Mutex::new(Vec::new()),
+                    thread_names: Mutex::new(Vec::new()),
                     abort_at: Mutex::new(HashSet::new()),
                 }),
             }
@@ -224,6 +226,8 @@ mod fault {
             let index = point.index();
             self.inner.hits[index].fetch_add(1, Ordering::SeqCst);
             lock(&self.inner.passed).push(point);
+            lock(&self.inner.thread_names)
+                .push((point, std::thread::current().name().map(str::to_owned)));
             let aborting = lock(&self.inner.abort_at).contains(&point);
             if aborting {
                 // The crash child is a separate process. Aborting it is the point.
@@ -350,6 +354,15 @@ mod fault {
         /// M2.9 asserts the durability order from this.
         pub(crate) fn points(&self) -> Vec<HookPoint> {
             lock(&self.inner.passed).clone()
+        }
+
+        /// The name of the thread each passage of `point` ran on, in order.
+        pub(crate) fn thread_names(&self, point: HookPoint) -> Vec<Option<String>> {
+            lock(&self.inner.thread_names)
+                .iter()
+                .filter(|(passed, _)| *passed == point)
+                .map(|(_, name)| name.clone())
+                .collect()
         }
     }
 }

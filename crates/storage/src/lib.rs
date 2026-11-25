@@ -548,6 +548,7 @@ impl Storage {
                         .unwrap_or(i64::MAX),
                 },
                 share_hooks(&hooks),
+                query_runtime.clone(),
             ))
         };
         let spans = spawn_writer(
