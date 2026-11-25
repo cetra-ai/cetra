@@ -29,6 +29,9 @@ memchr = "2"
 cpu-time = "1.0.0"
 pprof = { version = "=0.15.0", default-features = false }
 strata = { path = "../strata" }
+cetra-storage = { path = "/home/sebastien/travaux/llm-observer/crates/storage" }
+uuid = { version = "1.29", features = ["v7"] }
+bytesize = "2.7.0"
 
 [profile.release]
 debug = 1
