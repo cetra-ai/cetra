@@ -9,8 +9,8 @@ use chrono::{
 
 use crate::error::QueryError;
 use crate::eval::{
-    check_cancel, is_active, pool_size, read_date, read_f64, read_i64, read_interval, read_str,
-    read_timestamp, reconcile_output, rollback_to, try_reserve,
+    check_cancel, checked_fixed_bytes, is_active, pool_size, read_date, read_f64, read_i64,
+    read_interval, read_str, read_timestamp, reconcile_output, rollback_to, try_reserve,
 };
 use crate::ir::{EvalContext, ScalarFn};
 
@@ -28,10 +28,6 @@ const DAYS_PER_ERA: i64 = 146_097;
 
 const INTERVAL_PRECISION: u32 = 15;
 const INTERVAL_SCALE: i128 = 1_000_000_000_000_000;
-
-fn bitmap_mem_bytes(len: usize) -> usize {
-    len.div_ceil(64) * 8
-}
 
 // ---------------------------------------------------------------------------
 // Interval parsing & calendar arithmetic
@@ -788,7 +784,7 @@ fn eval_now(
             len,
         }),
         Some(_) => {
-            try_reserve(pool, len * 8 + bitmap_mem_bytes(len))?;
+            try_reserve(pool, checked_fixed_bytes(len, 8, true)?)?;
             let mut values = vec![0i64; len];
             let mut nulls = Bitmap::new_zeroed(len);
             for (row, slot) in values.iter_mut().enumerate() {
@@ -834,35 +830,30 @@ fn eval_date_trunc(
         ));
     }
 
-    if active.is_some_and(Bitmap::all_zeros) {
+    if len == 0
+        || active.is_some_and(Bitmap::all_zeros)
+        || matches!(ts_col.data_type(), DataType::Null)
+    {
         return Ok(Column::Const {
             value: ScalarValue::Null(DataType::TimestampNs { utc }),
             len,
         });
     }
 
-    let const_unit = match unit_col {
+    let const_unit_str = match unit_col {
         Column::Const {
             value: ScalarValue::Utf8(s),
             ..
-        } => Some(TruncUnit::parse(s)?),
+        } => Some(Some(s.as_str())),
         Column::Const {
             value: ScalarValue::Null(_),
             ..
-        } => {
-            return Err(QueryError::failed("date_trunc unit cannot be null"));
-        }
+        } => Some(None),
         _ => None,
     };
+    let mut cached_const_unit: Option<TruncUnit> = None;
 
-    if matches!(ts_col.data_type(), DataType::Null) {
-        return Ok(Column::Const {
-            value: ScalarValue::Null(DataType::TimestampNs { utc }),
-            len,
-        });
-    }
-
-    try_reserve(pool, len * 8 + bitmap_mem_bytes(len))?;
+    try_reserve(pool, checked_fixed_bytes(len, 8, true)?)?;
     let mut values = vec![0i64; len];
     let mut nulls = Bitmap::new_zeroed(len);
 
@@ -873,8 +864,19 @@ fn eval_date_trunc(
         if !is_active(active, row) {
             continue;
         }
-        let unit = match const_unit {
-            Some(u) => u,
+        let Some(ns) = read_timestamp(ts_col, row) else {
+            continue;
+        };
+        let unit = match const_unit_str {
+            Some(Some(s)) => match cached_const_unit {
+                Some(u) => u,
+                None => {
+                    let parsed = TruncUnit::parse(s)?;
+                    cached_const_unit = Some(parsed);
+                    parsed
+                }
+            },
+            Some(None) => return Err(QueryError::failed("date_trunc unit cannot be null")),
             None => {
                 let Some(s) = read_str(unit_col, row) else {
                     continue;
@@ -882,10 +884,8 @@ fn eval_date_trunc(
                 TruncUnit::parse(s)?
             }
         };
-        if let Some(ns) = read_timestamp(ts_col, row) {
-            *slot = truncate_timestamp_ns(ns, unit)?;
-            let _ = nulls.set(row, true);
-        }
+        *slot = truncate_timestamp_ns(ns, unit)?;
+        let _ = nulls.set(row, true);
     }
 
     Ok(Column::Flat(FlatColumn::try_new(
@@ -947,22 +947,9 @@ fn eval_date_bin(
         return Err(QueryError::failed("date_bin origin must be a timestamp"));
     }
 
-    if active.is_some_and(Bitmap::all_zeros) {
-        return Ok(Column::Const {
-            value: ScalarValue::Null(DataType::TimestampNs { utc }),
-            len,
-        });
-    }
-
-    if let Column::Const {
-        value: ScalarValue::Interval(iv),
-        ..
-    } = stride_col
-    {
-        validate_bin_stride(*iv)?;
-    }
-
-    if matches!(stride_col.data_type(), DataType::Null)
+    if len == 0
+        || active.is_some_and(Bitmap::all_zeros)
+        || matches!(stride_col.data_type(), DataType::Null)
         || matches!(src_col.data_type(), DataType::Null)
         || origin_col.is_some_and(|o| matches!(o.data_type(), DataType::Null))
     {
@@ -972,7 +959,16 @@ fn eval_date_bin(
         });
     }
 
-    try_reserve(pool, len * 8 + bitmap_mem_bytes(len))?;
+    let const_stride_iv = match stride_col {
+        Column::Const {
+            value: ScalarValue::Interval(iv),
+            ..
+        } => Some(*iv),
+        _ => None,
+    };
+    let mut cached_const_stride: Option<i64> = None;
+
+    try_reserve(pool, checked_fixed_bytes(len, 8, true)?)?;
     let mut values = vec![0i64; len];
     let mut nulls = Bitmap::new_zeroed(len);
 
@@ -983,10 +979,6 @@ fn eval_date_bin(
         if !is_active(active, row) {
             continue;
         }
-        let Some(stride_iv) = read_interval(stride_col, row) else {
-            continue;
-        };
-        let stride_ns = validate_bin_stride(stride_iv)?;
         let Some(src_ns) = read_timestamp(src_col, row) else {
             continue;
         };
@@ -998,6 +990,22 @@ fn eval_date_bin(
                 o
             }
             None => 0,
+        };
+        let stride_ns = match const_stride_iv {
+            Some(iv) => match cached_const_stride {
+                Some(s) => s,
+                None => {
+                    let s = validate_bin_stride(iv)?;
+                    cached_const_stride = Some(s);
+                    s
+                }
+            },
+            None => {
+                let Some(stride_iv) = read_interval(stride_col, row) else {
+                    continue;
+                };
+                validate_bin_stride(stride_iv)?
+            }
         };
         *slot = bin_timestamp_ns(src_ns, stride_ns, origin_ns)?;
         let _ = nulls.set(row, true);
@@ -1142,7 +1150,7 @@ fn eval_extract(
         return Err(QueryError::failed("unsupported extract field for interval"));
     }
 
-    try_reserve(pool, len * 8 + bitmap_mem_bytes(len))?;
+    try_reserve(pool, checked_fixed_bytes(len, 8, true)?)?;
 
     if field == ExtractField::Epoch {
         let mut values = vec![0.0f64; len];
@@ -1236,7 +1244,7 @@ fn eval_to_timestamp(
         return Err(QueryError::failed("unsupported type for to_timestamp"));
     }
 
-    try_reserve(pool, len * 8 + bitmap_mem_bytes(len))?;
+    try_reserve(pool, checked_fixed_bytes(len, 8, true)?)?;
     let mut values = vec![0i64; len];
     let mut nulls = Bitmap::new_zeroed(len);
 
@@ -1993,5 +2001,94 @@ mod tests {
         .unwrap_err();
         assert!(matches!(cancel_err, QueryError::Cancelled));
         assert_eq!(res.size(), before + ok_col.memory_bytes());
+    }
+
+    #[test]
+    fn date_trunc_and_date_bin_empty_and_all_null_do_not_fault() {
+        let bad_unit = Column::try_new_const(ScalarValue::Utf8("century".into()), 0).unwrap();
+        let empty_ts = Column::Flat(
+            FlatColumn::try_new(
+                FlatData::TimestampNs {
+                    values: vec![],
+                    utc: true,
+                },
+                None,
+            )
+            .unwrap(),
+        );
+        let empty_trunc = eval_time_fn(
+            ScalarFn::DateTrunc,
+            &[bad_unit, empty_ts.clone()],
+            0,
+            None,
+            &ctx_at(0),
+            None,
+        )
+        .unwrap();
+        assert_eq!(empty_trunc.len(), 0);
+
+        let all_null_ts = Column::Flat(
+            FlatColumn::try_new(
+                FlatData::TimestampNs {
+                    values: vec![0, 0],
+                    utc: true,
+                },
+                Some(Bitmap::from_bools(&[false, false])),
+            )
+            .unwrap(),
+        );
+        let bad_unit2 = Column::try_new_const(ScalarValue::Utf8("century".into()), 2).unwrap();
+        let null_trunc = eval_time_fn(
+            ScalarFn::DateTrunc,
+            &[bad_unit2, all_null_ts.clone()],
+            2,
+            None,
+            &ctx_at(0),
+            None,
+        )
+        .unwrap();
+        assert!(null_trunc.is_null(0));
+        assert!(null_trunc.is_null(1));
+
+        let null_unit = Column::try_new_const(ScalarValue::Null(DataType::Utf8), 2).unwrap();
+        let null_unit_trunc = eval_time_fn(
+            ScalarFn::DateTrunc,
+            &[null_unit, all_null_ts.clone()],
+            2,
+            None,
+            &ctx_at(0),
+            None,
+        )
+        .unwrap();
+        assert!(null_unit_trunc.is_null(0));
+
+        // date_bin with invalid Const stride on len == 0 or all-NULL src_col must not fault.
+        let bad_stride0 =
+            Column::try_new_const(ScalarValue::Interval(Interval::default()), 0).unwrap();
+        let empty_bin = eval_time_fn(
+            ScalarFn::DateBin,
+            &[bad_stride0, empty_ts],
+            0,
+            None,
+            &ctx_at(0),
+            None,
+        )
+        .unwrap();
+        assert_eq!(empty_bin.len(), 0);
+
+        let month_stride =
+            Column::try_new_const(ScalarValue::Interval(parse_interval("1 month").unwrap()), 2)
+                .unwrap();
+        let null_bin = eval_time_fn(
+            ScalarFn::DateBin,
+            &[month_stride, all_null_ts],
+            2,
+            None,
+            &ctx_at(0),
+            None,
+        )
+        .unwrap();
+        assert!(null_bin.is_null(0));
+        assert!(null_bin.is_null(1));
     }
 }

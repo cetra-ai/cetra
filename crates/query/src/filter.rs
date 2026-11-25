@@ -33,7 +33,7 @@ pub enum FilterView {
 }
 
 /// Validated & parsed Filter DSL ready for binding/planning.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct ParsedFilter {
     /// Target view.
     pub view: FilterView,
@@ -43,6 +43,16 @@ pub struct ParsedFilter {
     pub references_environment: bool,
     /// Distinct score names in first-appearance order (`<= MAX_SCORE_NAMES`).
     pub scores: Vec<String>,
+}
+
+impl std::fmt::Debug for ParsedFilter {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ParsedFilter")
+            .field("view", &self.view)
+            .field("references_environment", &self.references_environment)
+            .field("scores_len", &self.scores.len())
+            .finish()
+    }
 }
 
 /// Parses and validates a Filter DSL string against `view`'s base `schema`.
@@ -934,5 +944,20 @@ mod tests {
 
         // like_pattern escaping
         assert_eq!(like_pattern("100% ok_now\\"), "%100\\% ok\\_now\\\\%");
+
+        // Privacy-safe Debug on ParsedFilter omits AST literals and score names.
+        let secret_parsed = parse_filter_ast(
+            FilterView::Spans,
+            &schema,
+            "environment = 'secret_env_literal' AND score('secret_score_name') > 0",
+        )
+        .unwrap();
+        let dbg = format!("{secret_parsed:?}");
+        assert!(dbg.contains("ParsedFilter"));
+        assert!(dbg.contains("Spans"));
+        assert!(dbg.contains("references_environment: true"));
+        assert!(dbg.contains("scores_len: 1"));
+        assert!(!dbg.contains("secret_env_literal"));
+        assert!(!dbg.contains("secret_score_name"));
     }
 }

@@ -6,23 +6,23 @@ use std::collections::HashSet;
 
 use cetra_column::{
     Batch, BinaryData, Bitmap, Column, ColumnError, DataType, EventItem, EventsData, FlatColumn,
-    FlatData, Interval, LinkItem, LinksData, MapData, Reservation, ScalarValue, Selection,
-    Utf8Data,
+    FlatData, Interval, LinkItem, LinksData, MAX_NESTING_DEPTH, MapData, Reservation, ScalarValue,
+    Selection, Utf8Data,
 };
-use chrono::NaiveDate;
 
 use crate::error::QueryError;
 use crate::ir::{BinaryOp, CastMode, EvalContext, Expr, ScalarFn, UnaryOp};
 
 const CANCEL_CHECK_MASK: usize = 1023;
 const NS_PER_DAY: i64 = 86_400_000_000_000;
-const UNIX_EPOCH_CE_DAYS: i32 = 719_163;
 
 /// Evaluates `expr` over `batch`, always returning a `Column` of length `batch.raw_len()`.
 ///
-/// Inactive rows under `batch.selection()` are masked out (never fault) and filled with
-/// canonical nulls. On `Ok(col)`, `pool` is reconciled to `before + col.memory_bytes()`;
-/// on `Err(_)`, `pool` is rolled back to `before`.
+/// Active rows under `batch.selection()` are exact, and inactive rows never fault. Callers
+/// must respect `batch.selection()`: zero-copy fast paths (such as `Expr::Column`,
+/// `Expr::Literal`, and UTC timestamp retagging) may leave existing or constant values in
+/// inactive slots rather than canonical nulls. On `Ok(col)`, `pool` is reconciled to
+/// `before + col.memory_bytes()`; on `Err(_)`, `pool` is rolled back to `before`.
 pub fn eval_expr(
     expr: &Expr,
     batch: &Batch,
@@ -167,9 +167,11 @@ fn eval_expr_masked(
                 }
                 .into());
             }
+            try_reserve(&mut pool, col.memory_bytes())?;
             Ok(col.clone())
         }
         Expr::Literal(val) => {
+            try_reserve(&mut pool, val.heap_bytes())?;
             let col = Column::try_new_const(val.clone(), raw_len)?;
             Ok(col)
         }
@@ -307,6 +309,41 @@ fn eval_expr_masked(
 
 pub(crate) fn pool_size(pool: &Option<&mut Reservation>) -> usize {
     pool.as_deref().map_or(0, Reservation::size)
+}
+
+pub(crate) fn checked_fixed_bytes(
+    len: usize,
+    elem_size: usize,
+    with_nulls: bool,
+) -> Result<usize, QueryError> {
+    let data = len.checked_mul(elem_size).ok_or(QueryError::TooLarge)?;
+    if with_nulls {
+        data.checked_add(bitmap_mem_bytes(len))
+            .ok_or(QueryError::TooLarge)
+    } else {
+        Ok(data)
+    }
+}
+
+pub(crate) fn checked_varlen_bytes(
+    len: usize,
+    total_bytes: usize,
+    with_nulls: bool,
+) -> Result<usize, QueryError> {
+    let offsets = len
+        .checked_add(1)
+        .and_then(|n| n.checked_mul(4))
+        .ok_or(QueryError::TooLarge)?;
+    let total = offsets
+        .checked_add(total_bytes)
+        .ok_or(QueryError::TooLarge)?;
+    if with_nulls {
+        total
+            .checked_add(bitmap_mem_bytes(len))
+            .ok_or(QueryError::TooLarge)
+    } else {
+        Ok(total)
+    }
 }
 
 pub(crate) fn try_reserve(
@@ -617,6 +654,252 @@ pub(crate) fn map_ref_at(col: &Column, row: usize) -> Option<MapRef<'_>> {
     }
 }
 
+/// Zero-copy borrowed view of an events list at one row.
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum EventsRef<'a> {
+    Flat {
+        data: &'a EventsData,
+        start: usize,
+        end: usize,
+    },
+    Const(&'a [EventItem]),
+}
+
+/// Zero-copy borrowed view of a links list at one row.
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum LinksRef<'a> {
+    Flat {
+        data: &'a LinksData,
+        start: usize,
+        end: usize,
+    },
+    Const(&'a [LinkItem]),
+}
+
+pub(crate) fn events_ref_at(col: &Column, row: usize) -> Option<EventsRef<'_>> {
+    if let Column::Const { value, len } = col {
+        return (row < *len).then_some(value).and_then(|v| match v {
+            ScalarValue::Events(evs) => Some(EventsRef::Const(evs.as_slice())),
+            _ => None,
+        });
+    }
+    let (fc, flat_row) = resolve_flat(col, row)?;
+    match fc.data() {
+        FlatData::Events(data) => {
+            let start = data.offsets()[flat_row] as usize;
+            let end = data.offsets()[flat_row + 1] as usize;
+            Some(EventsRef::Flat { data, start, end })
+        }
+        _ => None,
+    }
+}
+
+pub(crate) fn links_ref_at(col: &Column, row: usize) -> Option<LinksRef<'_>> {
+    if let Column::Const { value, len } = col {
+        return (row < *len).then_some(value).and_then(|v| match v {
+            ScalarValue::Links(lks) => Some(LinksRef::Const(lks.as_slice())),
+            _ => None,
+        });
+    }
+    let (fc, flat_row) = resolve_flat(col, row)?;
+    match fc.data() {
+        FlatData::Links(data) => {
+            let start = data.offsets()[flat_row] as usize;
+            let end = data.offsets()[flat_row + 1] as usize;
+            Some(LinksRef::Flat { data, start, end })
+        }
+        _ => None,
+    }
+}
+
+#[derive(Clone, Copy)]
+pub(crate) enum ElemRef<'a> {
+    Null,
+    Col(&'a Column, usize),
+    Scalar(&'a ScalarValue),
+}
+
+impl<'a> ElemRef<'a> {
+    pub(crate) fn is_null(self) -> bool {
+        match self {
+            Self::Null => true,
+            Self::Col(c, r) => c.is_null(r),
+            Self::Scalar(sv) => sv.is_null(),
+        }
+    }
+
+    pub(crate) fn read_bool(self) -> Option<bool> {
+        match self {
+            Self::Null => None,
+            Self::Col(c, r) => read_bool(c, r),
+            Self::Scalar(ScalarValue::Bool(b)) => Some(*b),
+            Self::Scalar(_) => None,
+        }
+    }
+
+    pub(crate) fn read_i64(self) -> Option<i64> {
+        match self {
+            Self::Null => None,
+            Self::Col(c, r) => read_i64(c, r),
+            Self::Scalar(ScalarValue::I64(v)) => Some(*v),
+            Self::Scalar(_) => None,
+        }
+    }
+
+    pub(crate) fn read_f64(self) -> Option<f64> {
+        match self {
+            Self::Null => None,
+            Self::Col(c, r) => read_f64(c, r),
+            Self::Scalar(ScalarValue::F64(v)) => Some(*v),
+            Self::Scalar(_) => None,
+        }
+    }
+
+    pub(crate) fn read_decimal(self) -> Option<(i128, i8)> {
+        match self {
+            Self::Null => None,
+            Self::Col(c, r) => {
+                let v = read_decimal(c, r)?;
+                let DataType::Decimal128 { scale, .. } = c.data_type() else {
+                    return None;
+                };
+                Some((v, scale))
+            }
+            Self::Scalar(ScalarValue::Decimal128 { value, scale, .. }) => Some((*value, *scale)),
+            Self::Scalar(_) => None,
+        }
+    }
+
+    pub(crate) fn read_timestamp(self) -> Option<i64> {
+        match self {
+            Self::Null => None,
+            Self::Col(c, r) => read_timestamp(c, r),
+            Self::Scalar(ScalarValue::TimestampNs { value, .. }) => Some(*value),
+            Self::Scalar(_) => None,
+        }
+    }
+
+    pub(crate) fn read_date(self) -> Option<i32> {
+        match self {
+            Self::Null => None,
+            Self::Col(c, r) => read_date(c, r),
+            Self::Scalar(ScalarValue::Date(d)) => Some(*d),
+            Self::Scalar(_) => None,
+        }
+    }
+
+    pub(crate) fn read_interval(self) -> Option<Interval> {
+        match self {
+            Self::Null => None,
+            Self::Col(c, r) => read_interval(c, r),
+            Self::Scalar(ScalarValue::Interval(iv)) => Some(*iv),
+            Self::Scalar(_) => None,
+        }
+    }
+
+    pub(crate) fn read_str(self) -> Option<&'a str> {
+        match self {
+            Self::Null => None,
+            Self::Col(c, r) => read_str(c, r),
+            Self::Scalar(ScalarValue::Utf8(s)) => Some(s.as_str()),
+            Self::Scalar(_) => None,
+        }
+    }
+
+    pub(crate) fn read_bytes(self) -> Option<&'a [u8]> {
+        match self {
+            Self::Null => None,
+            Self::Col(c, r) => read_bytes(c, r),
+            Self::Scalar(ScalarValue::Binary(b)) => Some(b.as_slice()),
+            Self::Scalar(ScalarValue::FixedBytes8(b)) => Some(b.as_slice()),
+            Self::Scalar(ScalarValue::FixedBytes16(b)) => Some(b.as_slice()),
+            Self::Scalar(_) => None,
+        }
+    }
+
+    pub(crate) fn as_list_ref(self) -> Option<ListRef<'a>> {
+        match self {
+            Self::Null => None,
+            Self::Col(c, r) => list_ref_at(c, r),
+            Self::Scalar(ScalarValue::List { values, .. }) => {
+                Some(ListRef::Const(values.as_slice()))
+            }
+            Self::Scalar(_) => None,
+        }
+    }
+
+    pub(crate) fn as_map_ref(self) -> Option<MapRef<'a>> {
+        match self {
+            Self::Null => None,
+            Self::Col(c, r) => map_ref_at(c, r),
+            Self::Scalar(ScalarValue::MapUtf8(entries)) => Some(MapRef::Const(entries.as_slice())),
+            Self::Scalar(_) => None,
+        }
+    }
+
+    pub(crate) fn as_events_ref(self) -> Option<EventsRef<'a>> {
+        match self {
+            Self::Null => None,
+            Self::Col(c, r) => events_ref_at(c, r),
+            Self::Scalar(ScalarValue::Events(evs)) => Some(EventsRef::Const(evs.as_slice())),
+            Self::Scalar(_) => None,
+        }
+    }
+
+    pub(crate) fn as_links_ref(self) -> Option<LinksRef<'a>> {
+        match self {
+            Self::Null => None,
+            Self::Col(c, r) => links_ref_at(c, r),
+            Self::Scalar(ScalarValue::Links(lks)) => Some(LinksRef::Const(lks.as_slice())),
+            Self::Scalar(_) => None,
+        }
+    }
+
+    pub(crate) fn to_scalar(self) -> ScalarValue {
+        match self {
+            Self::Null => ScalarValue::Null(DataType::Null),
+            Self::Col(c, r) => read_scalar(c, r),
+            Self::Scalar(sv) => sv.clone(),
+        }
+    }
+
+    pub(crate) fn data_type(self) -> DataType {
+        match self {
+            Self::Null => DataType::Null,
+            Self::Col(c, _) => c.data_type(),
+            Self::Scalar(sv) => sv.data_type(),
+        }
+    }
+}
+
+pub(crate) fn list_ref_len(lref: ListRef<'_>) -> usize {
+    match lref {
+        ListRef::Flat { start, end, .. } => end - start,
+        ListRef::Const(s) => s.len(),
+    }
+}
+
+pub(crate) fn list_ref_elem(lref: ListRef<'_>, idx: usize) -> ElemRef<'_> {
+    match lref {
+        ListRef::Flat { values, start, .. } => {
+            let pos = start + idx;
+            if values.is_null(pos) {
+                ElemRef::Null
+            } else {
+                ElemRef::Col(values, pos)
+            }
+        }
+        ListRef::Const(slice) => {
+            let sv = &slice[idx];
+            if sv.is_null() {
+                ElemRef::Null
+            } else {
+                ElemRef::Scalar(sv)
+            }
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Core expression implementations
 // ---------------------------------------------------------------------------
@@ -739,7 +1022,7 @@ fn eval_timestamp_interval(
         }
     };
 
-    try_reserve(pool, raw_len * 8 + bitmap_mem_bytes(raw_len))?;
+    try_reserve(pool, checked_fixed_bytes(raw_len, 8, true)?)?;
     let mut vals = vec![0i64; raw_len];
     let mut nulls = Bitmap::new_zeroed(raw_len);
     for (row, slot) in vals.iter_mut().enumerate() {
@@ -760,8 +1043,17 @@ fn eval_timestamp_interval(
     )?))
 }
 
-fn bitmap_mem_bytes(len: usize) -> usize {
+pub(crate) fn bitmap_mem_bytes(len: usize) -> usize {
     len.div_ceil(64) * 8
+}
+
+fn checked_bool_bytes(len: usize, with_nulls: bool) -> Result<usize, QueryError> {
+    let bm = bitmap_mem_bytes(len);
+    if with_nulls {
+        bm.checked_mul(2).ok_or(QueryError::TooLarge)
+    } else {
+        Ok(bm)
+    }
 }
 
 fn build_bool_column(
@@ -789,6 +1081,9 @@ fn eval_unary(
 
     match op {
         UnaryOp::Not => {
+            if !matches!(child.data_type(), DataType::Bool | DataType::Null) {
+                return Err(QueryError::failed("NOT requires boolean operand"));
+            }
             if matches!(child.data_type(), DataType::Null) {
                 return Ok(Column::Const {
                     value: ScalarValue::Null(data_type.clone()),
@@ -808,8 +1103,7 @@ fn eval_unary(
                     len: *len,
                 });
             }
-            let bm_bytes = bitmap_mem_bytes(raw_len);
-            try_reserve(&mut pool, bm_bytes * 2)?;
+            try_reserve(&mut pool, checked_bool_bytes(raw_len, true)?)?;
             let mut vals = Bitmap::new_zeroed(raw_len);
             let mut nulls = Bitmap::new_zeroed(raw_len);
             for row in 0..raw_len {
@@ -833,9 +1127,17 @@ fn eval_unary(
         | UnaryOp::IsFalse
         | UnaryOp::IsNotTrue
         | UnaryOp::IsNotFalse => {
-            let bm_bytes = bitmap_mem_bytes(raw_len);
+            if matches!(
+                op,
+                UnaryOp::IsTrue | UnaryOp::IsFalse | UnaryOp::IsNotTrue | UnaryOp::IsNotFalse
+            ) && !matches!(child.data_type(), DataType::Bool | DataType::Null)
+            {
+                return Err(QueryError::failed(
+                    "boolean truthiness test requires boolean operand",
+                ));
+            }
             let need_nulls = active.is_some();
-            try_reserve(&mut pool, bm_bytes * if need_nulls { 2 } else { 1 })?;
+            try_reserve(&mut pool, checked_bool_bytes(raw_len, need_nulls)?)?;
             let mut vals = Bitmap::new_zeroed(raw_len);
             let mut nulls = need_nulls.then(|| Bitmap::new_zeroed(raw_len));
             for row in 0..raw_len {
@@ -876,13 +1178,14 @@ fn eval_neg(
     pool: &mut Option<&mut Reservation>,
     before: usize,
 ) -> Result<Column, QueryError> {
+    data_type.validate(MAX_NESTING_DEPTH)?;
     match child.data_type() {
         DataType::Null => Ok(Column::Const {
             value: ScalarValue::Null(data_type.clone()),
             len: raw_len,
         }),
         DataType::I64 => {
-            try_reserve(pool, raw_len * 8 + bitmap_mem_bytes(raw_len))?;
+            try_reserve(pool, checked_fixed_bytes(raw_len, 8, true)?)?;
             let mut vals = vec![0i64; raw_len];
             let mut nulls = Bitmap::new_zeroed(raw_len);
             for (row, slot) in vals.iter_mut().enumerate() {
@@ -904,7 +1207,7 @@ fn eval_neg(
             )?))
         }
         DataType::F64 => {
-            try_reserve(pool, raw_len * 8 + bitmap_mem_bytes(raw_len))?;
+            try_reserve(pool, checked_fixed_bytes(raw_len, 8, true)?)?;
             let mut vals = vec![0.0f64; raw_len];
             let mut nulls = Bitmap::new_zeroed(raw_len);
             for (row, slot) in vals.iter_mut().enumerate() {
@@ -924,7 +1227,7 @@ fn eval_neg(
             )?))
         }
         DataType::Decimal128 { precision, scale } => {
-            try_reserve(pool, raw_len * 16 + bitmap_mem_bytes(raw_len))?;
+            try_reserve(pool, checked_fixed_bytes(raw_len, 16, true)?)?;
             let mut vals = vec![0i128; raw_len];
             let mut nulls = Bitmap::new_zeroed(raw_len);
             for (row, slot) in vals.iter_mut().enumerate() {
@@ -953,7 +1256,7 @@ fn eval_neg(
         DataType::Interval => {
             try_reserve(
                 pool,
-                raw_len * size_of::<Interval>() + bitmap_mem_bytes(raw_len),
+                checked_fixed_bytes(raw_len, size_of::<Interval>(), true)?,
             )?;
             let mut vals = vec![Interval::default(); raw_len];
             let mut nulls = Bitmap::new_zeroed(raw_len);
@@ -1097,9 +1400,11 @@ fn eval_and(
     let before = pool_size(&pool);
     let raw_len = batch.raw_len();
     let lcol = eval_expr_masked(left, batch, active, ctx, pool.as_deref_mut())?;
+    if !matches!(lcol.data_type(), DataType::Bool | DataType::Null) {
+        return Err(QueryError::failed("AND requires boolean operands"));
+    }
 
-    let bm_bytes = bitmap_mem_bytes(raw_len);
-    try_reserve(&mut pool, bm_bytes)?;
+    try_reserve(&mut pool, checked_bool_bytes(raw_len, false)?)?;
     let mut right_mask = Bitmap::new_zeroed(raw_len);
     for row in 0..raw_len {
         if (row & CANCEL_CHECK_MASK) == 0 {
@@ -1111,14 +1416,17 @@ fn eval_and(
     }
 
     if right_mask.all_zeros() {
-        try_reserve(&mut pool, bm_bytes * 2)?;
+        try_reserve(&mut pool, checked_bool_bytes(raw_len, true)?)?;
         let vals = Bitmap::new_zeroed(raw_len);
         let nulls = active.cloned().unwrap_or_else(|| Bitmap::new_ones(raw_len));
         return build_bool_column(raw_len, vals, Some(nulls));
     }
 
     let rcol = eval_expr_masked(right, batch, Some(&right_mask), ctx, pool.as_deref_mut())?;
-    try_reserve(&mut pool, bm_bytes * 2)?;
+    if !matches!(rcol.data_type(), DataType::Bool | DataType::Null) {
+        return Err(QueryError::failed("AND requires boolean operands"));
+    }
+    try_reserve(&mut pool, checked_bool_bytes(raw_len, true)?)?;
     let mut vals = Bitmap::new_zeroed(raw_len);
     let mut nulls = Bitmap::new_zeroed(raw_len);
     for row in 0..raw_len {
@@ -1159,9 +1467,11 @@ fn eval_or(
     let before = pool_size(&pool);
     let raw_len = batch.raw_len();
     let lcol = eval_expr_masked(left, batch, active, ctx, pool.as_deref_mut())?;
+    if !matches!(lcol.data_type(), DataType::Bool | DataType::Null) {
+        return Err(QueryError::failed("OR requires boolean operands"));
+    }
 
-    let bm_bytes = bitmap_mem_bytes(raw_len);
-    try_reserve(&mut pool, bm_bytes)?;
+    try_reserve(&mut pool, checked_bool_bytes(raw_len, false)?)?;
     let mut right_mask = Bitmap::new_zeroed(raw_len);
     for row in 0..raw_len {
         if (row & CANCEL_CHECK_MASK) == 0 {
@@ -1173,14 +1483,17 @@ fn eval_or(
     }
 
     if right_mask.all_zeros() {
-        try_reserve(&mut pool, bm_bytes * 2)?;
+        try_reserve(&mut pool, checked_bool_bytes(raw_len, true)?)?;
         let vals = active.cloned().unwrap_or_else(|| Bitmap::new_ones(raw_len));
         let nulls = active.cloned().unwrap_or_else(|| Bitmap::new_ones(raw_len));
         return build_bool_column(raw_len, vals, Some(nulls));
     }
 
     let rcol = eval_expr_masked(right, batch, Some(&right_mask), ctx, pool.as_deref_mut())?;
-    try_reserve(&mut pool, bm_bytes * 2)?;
+    if !matches!(rcol.data_type(), DataType::Bool | DataType::Null) {
+        return Err(QueryError::failed("OR requires boolean operands"));
+    }
+    try_reserve(&mut pool, checked_bool_bytes(raw_len, true)?)?;
     let mut vals = Bitmap::new_zeroed(raw_len);
     let mut nulls = Bitmap::new_zeroed(raw_len);
     for row in 0..raw_len {
@@ -1226,8 +1539,7 @@ fn eval_cmp(
             len: raw_len,
         });
     }
-    let bm_bytes = bitmap_mem_bytes(raw_len);
-    try_reserve(pool, bm_bytes * 2)?;
+    try_reserve(pool, checked_bool_bytes(raw_len, true)?)?;
     let mut vals = Bitmap::new_zeroed(raw_len);
     let mut nulls = Bitmap::new_zeroed(raw_len);
 
@@ -1257,9 +1569,8 @@ fn eval_distinct(
     pool: &mut Option<&mut Reservation>,
 ) -> Result<Column, QueryError> {
     let before = pool_size(pool);
-    let bm_bytes = bitmap_mem_bytes(raw_len);
     let need_nulls = active.is_some();
-    try_reserve(pool, bm_bytes * if need_nulls { 2 } else { 1 })?;
+    try_reserve(pool, checked_bool_bytes(raw_len, need_nulls)?)?;
     let mut vals = Bitmap::new_zeroed(raw_len);
     let mut nulls = need_nulls.then(|| Bitmap::new_zeroed(raw_len));
 
@@ -1343,28 +1654,35 @@ fn compare_row(lcol: &Column, rcol: &Column, row: usize) -> Result<Ordering, Que
     }
 }
 
-fn compare_decimals(a: i128, s1: i8, b: i128, s2: i8) -> Result<Ordering, QueryError> {
+fn compare_scaled_decimal(a: i128, b: i128, diff: u32) -> Ordering {
+    if diff > 38 {
+        return if a == 0 {
+            0i128.cmp(&b)
+        } else if a < 0 {
+            Ordering::Less
+        } else {
+            Ordering::Greater
+        };
+    }
+    if let Some(factor) = 10i128.checked_pow(diff)
+        && let Some(sa) = a.checked_mul(factor)
+    {
+        return sa.cmp(&b);
+    }
+    let (hi_a, lo_a) = u256_mul(a.unsigned_abs(), 10u128.pow(diff));
+    cmp_signed_u256_i128(a < 0, hi_a, lo_a, b)
+}
+
+pub(crate) fn compare_decimals(a: i128, s1: i8, b: i128, s2: i8) -> Result<Ordering, QueryError> {
     if s1 == s2 {
         return Ok(a.cmp(&b));
     }
     if s1 < s2 {
-        let diff = (s2 as i32 - s1 as i32) as u32;
-        if let Some(factor) = 10i128.checked_pow(diff)
-            && let Some(sa) = a.checked_mul(factor)
-        {
-            return Ok(sa.cmp(&b));
-        }
-        let (hi_a, lo_a) = u256_mul(a.unsigned_abs(), 10u128.pow(diff));
-        Ok(cmp_signed_u256_i128(a < 0, hi_a, lo_a, b))
+        let diff = (i32::from(s2) - i32::from(s1)) as u32;
+        Ok(compare_scaled_decimal(a, b, diff))
     } else {
-        let diff = (s1 as i32 - s2 as i32) as u32;
-        if let Some(factor) = 10i128.checked_pow(diff)
-            && let Some(sb) = b.checked_mul(factor)
-        {
-            return Ok(a.cmp(&sb));
-        }
-        let (hi_b, lo_b) = u256_mul(b.unsigned_abs(), 10u128.pow(diff));
-        Ok(cmp_signed_u256_i128(b < 0, hi_b, lo_b, a).reverse())
+        let diff = (i32::from(s1) - i32::from(s2)) as u32;
+        Ok(compare_scaled_decimal(b, a, diff).reverse())
     }
 }
 
@@ -1473,6 +1791,7 @@ fn eval_arith(
     pool: &mut Option<&mut Reservation>,
 ) -> Result<Column, QueryError> {
     let before = pool_size(pool);
+    data_type.validate(MAX_NESTING_DEPTH)?;
     if matches!(lcol.data_type(), DataType::Null) || matches!(rcol.data_type(), DataType::Null) {
         return Ok(Column::Const {
             value: ScalarValue::Null(data_type.clone()),
@@ -1482,7 +1801,7 @@ fn eval_arith(
 
     match data_type {
         DataType::I64 => {
-            try_reserve(pool, raw_len * 8 + bitmap_mem_bytes(raw_len))?;
+            try_reserve(pool, checked_fixed_bytes(raw_len, 8, true)?)?;
             let mut vals = vec![0i64; raw_len];
             let mut nulls = Bitmap::new_zeroed(raw_len);
             for (row, slot) in vals.iter_mut().enumerate() {
@@ -1528,7 +1847,7 @@ fn eval_arith(
             )?))
         }
         DataType::F64 => {
-            try_reserve(pool, raw_len * 8 + bitmap_mem_bytes(raw_len))?;
+            try_reserve(pool, checked_fixed_bytes(raw_len, 8, true)?)?;
             let mut vals = vec![0.0f64; raw_len];
             let mut nulls = Bitmap::new_zeroed(raw_len);
             for (row, slot) in vals.iter_mut().enumerate() {
@@ -1566,7 +1885,7 @@ fn eval_arith(
             )?))
         }
         DataType::Decimal128 { precision, scale } => {
-            try_reserve(pool, raw_len * 16 + bitmap_mem_bytes(raw_len))?;
+            try_reserve(pool, checked_fixed_bytes(raw_len, 16, true)?)?;
             let mut vals = vec![0i128; raw_len];
             let mut nulls = Bitmap::new_zeroed(raw_len);
             for (row, slot) in vals.iter_mut().enumerate() {
@@ -1685,7 +2004,7 @@ fn decimal_mul(a: i128, b: i128, scale: i8) -> Result<i128, QueryError> {
             return Err(QueryError::failed("decimal overflow"));
         }
         let factor = 10u128
-            .checked_pow((-scale) as u32)
+            .checked_pow(u32::from(scale.unsigned_abs()))
             .ok_or_else(|| QueryError::failed("decimal scale overflow"))?;
         lo.checked_mul(factor)
             .ok_or_else(|| QueryError::failed("decimal overflow"))?
@@ -1709,7 +2028,7 @@ fn decimal_div(a: i128, b: i128, scale: i8) -> Result<i128, QueryError> {
         q
     } else {
         let factor = 10u128
-            .checked_pow((-scale) as u32)
+            .checked_pow(u32::from(scale.unsigned_abs()))
             .ok_or_else(|| QueryError::failed("decimal scale overflow"))?;
         let (hi, lo) = u256_mul(b_abs, factor);
         if hi != 0 { 0 } else { a.unsigned_abs() / lo }
@@ -1737,8 +2056,7 @@ fn eval_between(
     let lo = eval_expr_masked(low, batch, active, ctx, pool.as_deref_mut())?;
     let hi = eval_expr_masked(high, batch, active, ctx, pool.as_deref_mut())?;
 
-    let bm_bytes = bitmap_mem_bytes(raw_len);
-    try_reserve(&mut pool, bm_bytes * 2)?;
+    try_reserve(&mut pool, checked_bool_bytes(raw_len, true)?)?;
     let mut vals = Bitmap::new_zeroed(raw_len);
     let mut nulls = Bitmap::new_zeroed(raw_len);
 
@@ -1934,11 +2252,13 @@ fn eval_in_list(
                 len: raw_len,
             });
         }
-        let bm_bytes = bitmap_mem_bytes(raw_len);
-        try_reserve(&mut pool, bm_bytes * 2)?;
+        try_reserve(&mut pool, checked_bool_bytes(raw_len, true)?)?;
         let mut vals = Bitmap::new_zeroed(raw_len);
         let mut nulls = Bitmap::new_zeroed(raw_len);
         for row in 0..raw_len {
+            if (row & CANCEL_CHECK_MASK) == 0 {
+                check_cancel(ctx, &mut pool, before)?;
+            }
             if is_active(active, row) {
                 let _ = nulls.set(row, true);
                 if negated {
@@ -1959,8 +2279,7 @@ fn eval_in_list(
     }
 
     if let Some((set, has_null)) = LiteralSet::from_literals(&lhs_dt, list) {
-        let bm_bytes = bitmap_mem_bytes(raw_len);
-        try_reserve(&mut pool, bm_bytes * 2)?;
+        try_reserve(&mut pool, checked_bool_bytes(raw_len, true)?)?;
         let mut vals = Bitmap::new_zeroed(raw_len);
         let mut nulls = Bitmap::new_zeroed(raw_len);
         for row in 0..raw_len {
@@ -2001,8 +2320,7 @@ fn eval_in_list(
         )?);
     }
 
-    let bm_bytes = bitmap_mem_bytes(raw_len);
-    try_reserve(&mut pool, bm_bytes * 2)?;
+    try_reserve(&mut pool, checked_bool_bytes(raw_len, true)?)?;
     let mut vals = Bitmap::new_zeroed(raw_len);
     let mut nulls = Bitmap::new_zeroed(raw_len);
 
@@ -2065,8 +2383,17 @@ fn eval_case(
         )?),
         None => None,
     };
+    let op_bytes = pool_size(&pool).saturating_sub(before);
 
-    try_reserve(&mut pool, bitmap_mem_bytes(raw_len) * 2)?;
+    let bm_bytes = checked_bool_bytes(raw_len, true)?;
+    let row_source_bytes =
+        checked_fixed_bytes(raw_len, size_of::<Option<(usize, usize)>>(), false)?;
+    try_reserve(
+        &mut pool,
+        bm_bytes
+            .checked_add(row_source_bytes)
+            .ok_or(QueryError::TooLarge)?,
+    )?;
     let mut remaining = active.cloned().unwrap_or_else(|| Bitmap::new_ones(raw_len));
     let mut branch_cols: Vec<Column> = Vec::with_capacity(when_then.len() + 1);
     let mut row_source: Vec<Option<(usize, usize)>> = vec![None; raw_len];
@@ -2076,11 +2403,12 @@ fn eval_case(
             break;
         }
         check_cancel(ctx, &mut pool, before)?;
+        let before_when = pool_size(&pool);
         let when_col =
             eval_expr_masked(when_ex, batch, Some(&remaining), ctx, pool.as_deref_mut())?;
         let mut matched = Bitmap::new_zeroed(raw_len);
-        for row in remaining.iter_ones() {
-            if (row & CANCEL_CHECK_MASK) == 0 {
+        for (iter_idx, row) in remaining.iter_ones().enumerate() {
+            if (iter_idx & CANCEL_CHECK_MASK) == 0 {
                 check_cancel(ctx, &mut pool, before)?;
             }
             let is_match = match &op_col {
@@ -2096,13 +2424,17 @@ fn eval_case(
             }
         }
         drop(when_col);
+        rollback_to(&mut pool, before_when);
 
         if !matched.all_zeros() {
             let then_col =
                 eval_expr_masked(then_ex, batch, Some(&matched), ctx, pool.as_deref_mut())?;
             let col_idx = branch_cols.len();
             branch_cols.push(then_col);
-            for row in matched.iter_ones() {
+            for (iter_idx, row) in matched.iter_ones().enumerate() {
+                if (iter_idx & CANCEL_CHECK_MASK) == 0 {
+                    check_cancel(ctx, &mut pool, before)?;
+                }
                 row_source[row] = Some((col_idx, row));
                 let _ = remaining.set(row, false);
             }
@@ -2115,19 +2447,32 @@ fn eval_case(
         let else_col = eval_expr_masked(el_ex, batch, Some(&remaining), ctx, pool.as_deref_mut())?;
         let col_idx = branch_cols.len();
         branch_cols.push(else_col);
-        for row in remaining.iter_ones() {
+        for (iter_idx, row) in remaining.iter_ones().enumerate() {
+            if (iter_idx & CANCEL_CHECK_MASK) == 0 {
+                check_cancel(ctx, &mut pool, before)?;
+            }
             row_source[row] = Some((col_idx, row));
         }
     }
 
     drop(op_col);
     drop(remaining);
+    let temp_bytes = op_bytes.saturating_add(bm_bytes);
+    if let Some(res) = pool.as_deref_mut() {
+        res.shrink(temp_bytes.min(res.size().saturating_sub(before)));
+    }
 
-    let sources: Vec<Option<(&Column, usize)>> = row_source
-        .iter()
-        .map(|entry| entry.map(|(ci, r)| (&branch_cols[ci], r)))
-        .collect();
-    build_flat_from_sources(data_type, &sources, &mut pool, ctx, before)
+    build_flat_from_fn(
+        data_type,
+        raw_len,
+        |row| match row_source[row] {
+            Some((ci, r)) if !branch_cols[ci].is_null(r) => ElemRef::Col(&branch_cols[ci], r),
+            _ => ElemRef::Null,
+        },
+        &mut pool,
+        ctx,
+        before,
+    )
 }
 
 fn eval_map_index(
@@ -2162,7 +2507,7 @@ fn eval_map_index(
     let _ = u32::try_from(total_bytes).map_err(|_| ColumnError::Overflow {
         reason: "map index utf8 byte length exceeds u32::MAX",
     })?;
-    let est = (raw_len + 1) * 4 + total_bytes + bitmap_mem_bytes(raw_len);
+    let est = checked_varlen_bytes(raw_len, total_bytes, true)?;
     try_reserve(&mut pool, est)?;
 
     let mut offsets = Vec::with_capacity(raw_len + 1);
@@ -2243,8 +2588,16 @@ fn eval_make_array(
         reason: "array element count exceeds u32::MAX",
     })?;
 
-    let mut child_sources: Vec<Option<(&Column, usize)>> = Vec::with_capacity(total_elems);
-    try_reserve(&mut pool, (raw_len + 1) * 4 + bitmap_mem_bytes(raw_len))?;
+    let header_bytes = checked_varlen_bytes(raw_len, 0, active.is_some())?;
+    let scratch_bytes = checked_fixed_bytes(total_elems, size_of::<ElemRef<'_>>(), false)?;
+    try_reserve(
+        &mut pool,
+        header_bytes
+            .checked_add(scratch_bytes)
+            .ok_or(QueryError::TooLarge)?,
+    )?;
+
+    let mut child_sources: Vec<ElemRef<'_>> = Vec::with_capacity(total_elems);
     let mut offsets = Vec::with_capacity(raw_len + 1);
     offsets.push(0u32);
     let mut nulls = active.map(|_| Bitmap::new_zeroed(raw_len));
@@ -2259,16 +2612,16 @@ fn eval_make_array(
             }
             for ec in &elem_cols {
                 if ec.is_null(row) {
-                    child_sources.push(None);
+                    child_sources.push(ElemRef::Null);
                 } else {
-                    child_sources.push(Some((ec, row)));
+                    child_sources.push(ElemRef::Col(ec, row));
                 }
             }
         }
         offsets.push(child_sources.len() as u32);
     }
 
-    let values = build_flat_from_sources(item_type, &child_sources, &mut pool, ctx, before)?;
+    let values = build_flat_from_elem_refs(item_type, &child_sources, &mut pool, ctx, before)?;
     Ok(Column::Flat(FlatColumn::try_new(
         FlatData::List {
             item_type: item_type.clone(),
@@ -2279,32 +2632,58 @@ fn eval_make_array(
     )?))
 }
 
-fn build_flat_from_sources(
+pub(crate) fn build_flat_from_sources(
     data_type: &DataType,
     sources: &[Option<(&Column, usize)>],
     pool: &mut Option<&mut Reservation>,
     ctx: &EvalContext,
     before: usize,
 ) -> Result<Column, QueryError> {
-    let len = sources.len();
-    let nulls_bytes = bitmap_mem_bytes(len);
+    build_flat_from_fn(
+        data_type,
+        sources.len(),
+        |i| match sources[i] {
+            Some((col, row)) if !col.is_null(row) => ElemRef::Col(col, row),
+            _ => ElemRef::Null,
+        },
+        pool,
+        ctx,
+        before,
+    )
+}
 
+pub(crate) fn build_flat_from_elem_refs(
+    data_type: &DataType,
+    sources: &[ElemRef<'_>],
+    pool: &mut Option<&mut Reservation>,
+    ctx: &EvalContext,
+    before: usize,
+) -> Result<Column, QueryError> {
+    build_flat_from_fn(data_type, sources.len(), |i| sources[i], pool, ctx, before)
+}
+
+fn build_flat_from_fn<'a>(
+    data_type: &DataType,
+    len: usize,
+    at: impl Fn(usize) -> ElemRef<'a>,
+    pool: &mut Option<&mut Reservation>,
+    ctx: &EvalContext,
+    before: usize,
+) -> Result<Column, QueryError> {
     match data_type {
         DataType::Null => Ok(Column::Flat(FlatColumn::try_new(
             FlatData::Null(len),
             None,
         )?)),
         DataType::Bool => {
-            try_reserve(pool, nulls_bytes * 2)?;
+            try_reserve(pool, checked_bool_bytes(len, true)?)?;
             let mut vals = Bitmap::new_zeroed(len);
             let mut nulls = Bitmap::new_zeroed(len);
-            for (i, src) in sources.iter().enumerate() {
+            for i in 0..len {
                 if (i & CANCEL_CHECK_MASK) == 0 {
                     check_cancel(ctx, pool, before)?;
                 }
-                if let Some((col, row)) = src
-                    && let Some(b) = read_bool(col, *row)
-                {
+                if let Some(b) = at(i).read_bool() {
                     let _ = nulls.set(i, true);
                     if b {
                         let _ = vals.set(i, true);
@@ -2314,16 +2693,14 @@ fn build_flat_from_sources(
             build_bool_column(len, vals, Some(nulls))
         }
         DataType::I64 => {
-            try_reserve(pool, len * 8 + nulls_bytes)?;
+            try_reserve(pool, checked_fixed_bytes(len, 8, true)?)?;
             let mut vals = vec![0i64; len];
             let mut nulls = Bitmap::new_zeroed(len);
-            for (i, (src, slot)) in sources.iter().zip(vals.iter_mut()).enumerate() {
+            for (i, slot) in vals.iter_mut().enumerate() {
                 if (i & CANCEL_CHECK_MASK) == 0 {
                     check_cancel(ctx, pool, before)?;
                 }
-                if let Some((col, row)) = src
-                    && let Some(v) = read_i64(col, *row)
-                {
+                if let Some(v) = at(i).read_i64() {
                     *slot = v;
                     let _ = nulls.set(i, true);
                 }
@@ -2334,16 +2711,14 @@ fn build_flat_from_sources(
             )?))
         }
         DataType::F64 => {
-            try_reserve(pool, len * 8 + nulls_bytes)?;
+            try_reserve(pool, checked_fixed_bytes(len, 8, true)?)?;
             let mut vals = vec![0.0f64; len];
             let mut nulls = Bitmap::new_zeroed(len);
-            for (i, (src, slot)) in sources.iter().zip(vals.iter_mut()).enumerate() {
+            for (i, slot) in vals.iter_mut().enumerate() {
                 if (i & CANCEL_CHECK_MASK) == 0 {
                     check_cancel(ctx, pool, before)?;
                 }
-                if let Some((col, row)) = src
-                    && let Some(v) = read_f64(col, *row)
-                {
+                if let Some(v) = at(i).read_f64() {
                     *slot = v;
                     let _ = nulls.set(i, true);
                 }
@@ -2354,16 +2729,14 @@ fn build_flat_from_sources(
             )?))
         }
         DataType::Decimal128 { precision, scale } => {
-            try_reserve(pool, len * 16 + nulls_bytes)?;
+            try_reserve(pool, checked_fixed_bytes(len, 16, true)?)?;
             let mut vals = vec![0i128; len];
             let mut nulls = Bitmap::new_zeroed(len);
-            for (i, (src, slot)) in sources.iter().zip(vals.iter_mut()).enumerate() {
+            for (i, slot) in vals.iter_mut().enumerate() {
                 if (i & CANCEL_CHECK_MASK) == 0 {
                     check_cancel(ctx, pool, before)?;
                 }
-                if let Some((col, row)) = src
-                    && let Some(v) = read_decimal(col, *row)
-                {
+                if let Some((v, _)) = at(i).read_decimal() {
                     *slot = v;
                     let _ = nulls.set(i, true);
                 }
@@ -2378,16 +2751,14 @@ fn build_flat_from_sources(
             )?))
         }
         DataType::TimestampNs { utc } => {
-            try_reserve(pool, len * 8 + nulls_bytes)?;
+            try_reserve(pool, checked_fixed_bytes(len, 8, true)?)?;
             let mut vals = vec![0i64; len];
             let mut nulls = Bitmap::new_zeroed(len);
-            for (i, (src, slot)) in sources.iter().zip(vals.iter_mut()).enumerate() {
+            for (i, slot) in vals.iter_mut().enumerate() {
                 if (i & CANCEL_CHECK_MASK) == 0 {
                     check_cancel(ctx, pool, before)?;
                 }
-                if let Some((col, row)) = src
-                    && let Some(v) = read_timestamp(col, *row)
-                {
+                if let Some(v) = at(i).read_timestamp() {
                     *slot = v;
                     let _ = nulls.set(i, true);
                 }
@@ -2401,16 +2772,14 @@ fn build_flat_from_sources(
             )?))
         }
         DataType::Date => {
-            try_reserve(pool, len * 4 + nulls_bytes)?;
+            try_reserve(pool, checked_fixed_bytes(len, 4, true)?)?;
             let mut vals = vec![0i32; len];
             let mut nulls = Bitmap::new_zeroed(len);
-            for (i, (src, slot)) in sources.iter().zip(vals.iter_mut()).enumerate() {
+            for (i, slot) in vals.iter_mut().enumerate() {
                 if (i & CANCEL_CHECK_MASK) == 0 {
                     check_cancel(ctx, pool, before)?;
                 }
-                if let Some((col, row)) = src
-                    && let Some(v) = read_date(col, *row)
-                {
+                if let Some(v) = at(i).read_date() {
                     *slot = v;
                     let _ = nulls.set(i, true);
                 }
@@ -2421,16 +2790,14 @@ fn build_flat_from_sources(
             )?))
         }
         DataType::Interval => {
-            try_reserve(pool, len * size_of::<Interval>() + nulls_bytes)?;
+            try_reserve(pool, checked_fixed_bytes(len, size_of::<Interval>(), true)?)?;
             let mut vals = vec![Interval::default(); len];
             let mut nulls = Bitmap::new_zeroed(len);
-            for (i, (src, slot)) in sources.iter().zip(vals.iter_mut()).enumerate() {
+            for (i, slot) in vals.iter_mut().enumerate() {
                 if (i & CANCEL_CHECK_MASK) == 0 {
                     check_cancel(ctx, pool, before)?;
                 }
-                if let Some((col, row)) = src
-                    && let Some(v) = read_interval(col, *row)
-                {
+                if let Some(v) = at(i).read_interval() {
                     *slot = v;
                     let _ = nulls.set(i, true);
                 }
@@ -2442,10 +2809,11 @@ fn build_flat_from_sources(
         }
         DataType::Utf8 => {
             let mut total_bytes = 0usize;
-            for src in sources {
-                if let Some((col, row)) = src
-                    && let Some(s) = read_str(col, *row)
-                {
+            for i in 0..len {
+                if (i & CANCEL_CHECK_MASK) == 0 {
+                    check_cancel(ctx, pool, before)?;
+                }
+                if let Some(s) = at(i).read_str() {
                     total_bytes =
                         total_bytes
                             .checked_add(s.len())
@@ -2457,18 +2825,16 @@ fn build_flat_from_sources(
             let _ = u32::try_from(total_bytes).map_err(|_| ColumnError::Overflow {
                 reason: "utf8 byte length exceeds u32::MAX",
             })?;
-            try_reserve(pool, (len + 1) * 4 + total_bytes + nulls_bytes)?;
+            try_reserve(pool, checked_varlen_bytes(len, total_bytes, true)?)?;
             let mut offsets = Vec::with_capacity(len + 1);
             offsets.push(0u32);
             let mut bytes = Vec::with_capacity(total_bytes);
             let mut nulls = Bitmap::new_zeroed(len);
-            for (i, src) in sources.iter().enumerate() {
+            for i in 0..len {
                 if (i & CANCEL_CHECK_MASK) == 0 {
                     check_cancel(ctx, pool, before)?;
                 }
-                if let Some((col, row)) = src
-                    && let Some(s) = read_str(col, *row)
-                {
+                if let Some(s) = at(i).read_str() {
                     bytes.extend_from_slice(s.as_bytes());
                     let _ = nulls.set(i, true);
                 }
@@ -2482,10 +2848,11 @@ fn build_flat_from_sources(
         }
         DataType::Binary => {
             let mut total_bytes = 0usize;
-            for src in sources {
-                if let Some((col, row)) = src
-                    && let Some(b) = read_bytes(col, *row)
-                {
+            for i in 0..len {
+                if (i & CANCEL_CHECK_MASK) == 0 {
+                    check_cancel(ctx, pool, before)?;
+                }
+                if let Some(b) = at(i).read_bytes() {
                     total_bytes =
                         total_bytes
                             .checked_add(b.len())
@@ -2497,18 +2864,16 @@ fn build_flat_from_sources(
             let _ = u32::try_from(total_bytes).map_err(|_| ColumnError::Overflow {
                 reason: "binary byte length exceeds u32::MAX",
             })?;
-            try_reserve(pool, (len + 1) * 4 + total_bytes + nulls_bytes)?;
+            try_reserve(pool, checked_varlen_bytes(len, total_bytes, true)?)?;
             let mut offsets = Vec::with_capacity(len + 1);
             offsets.push(0u32);
             let mut bytes = Vec::with_capacity(total_bytes);
             let mut nulls = Bitmap::new_zeroed(len);
-            for (i, src) in sources.iter().enumerate() {
+            for i in 0..len {
                 if (i & CANCEL_CHECK_MASK) == 0 {
                     check_cancel(ctx, pool, before)?;
                 }
-                if let Some((col, row)) = src
-                    && let Some(b) = read_bytes(col, *row)
-                {
+                if let Some(b) = at(i).read_bytes() {
                     bytes.extend_from_slice(b);
                     let _ = nulls.set(i, true);
                 }
@@ -2521,16 +2886,14 @@ fn build_flat_from_sources(
             )?))
         }
         DataType::FixedBytes8 => {
-            try_reserve(pool, len * 8 + nulls_bytes)?;
+            try_reserve(pool, checked_fixed_bytes(len, 8, true)?)?;
             let mut vals = vec![[0u8; 8]; len];
             let mut nulls = Bitmap::new_zeroed(len);
-            for (i, (src, slot)) in sources.iter().zip(vals.iter_mut()).enumerate() {
+            for (i, slot) in vals.iter_mut().enumerate() {
                 if (i & CANCEL_CHECK_MASK) == 0 {
                     check_cancel(ctx, pool, before)?;
                 }
-                if let Some((col, row)) = src
-                    && let Some(b) = read_bytes(col, *row)
-                {
+                if let Some(b) = at(i).read_bytes() {
                     let arr: [u8; 8] = b.try_into().map_err(|_| ColumnError::InvalidBatch {
                         reason: "expected 8-byte binary value",
                     })?;
@@ -2544,16 +2907,14 @@ fn build_flat_from_sources(
             )?))
         }
         DataType::FixedBytes16 => {
-            try_reserve(pool, len * 16 + nulls_bytes)?;
+            try_reserve(pool, checked_fixed_bytes(len, 16, true)?)?;
             let mut vals = vec![[0u8; 16]; len];
             let mut nulls = Bitmap::new_zeroed(len);
-            for (i, (src, slot)) in sources.iter().zip(vals.iter_mut()).enumerate() {
+            for (i, slot) in vals.iter_mut().enumerate() {
                 if (i & CANCEL_CHECK_MASK) == 0 {
                     check_cancel(ctx, pool, before)?;
                 }
-                if let Some((col, row)) = src
-                    && let Some(b) = read_bytes(col, *row)
-                {
+                if let Some(b) = at(i).read_bytes() {
                     let arr: [u8; 16] = b.try_into().map_err(|_| ColumnError::InvalidBatch {
                         reason: "expected 16-byte binary value",
                     })?;
@@ -2566,60 +2927,71 @@ fn build_flat_from_sources(
                 Some(nulls),
             )?))
         }
-        DataType::List(inner_dt) => build_list_from_sources(inner_dt, sources, pool, ctx, before),
-        DataType::MapUtf8 => build_map_from_sources(sources, pool, ctx, before),
-        DataType::Events => build_events_from_sources(sources, pool, ctx, before),
-        DataType::Links => build_links_from_sources(sources, pool, ctx, before),
+        DataType::List(inner_dt) => build_list_from_refs(inner_dt, len, at, pool, ctx, before),
+        DataType::MapUtf8 => build_map_from_refs(len, at, pool, ctx, before),
+        DataType::Events => build_events_from_refs(len, at, pool, ctx, before),
+        DataType::Links => build_links_from_refs(len, at, pool, ctx, before),
     }
 }
 
-fn build_list_from_sources(
+fn build_list_from_refs<'a>(
     inner_dt: &DataType,
-    sources: &[Option<(&Column, usize)>],
+    len: usize,
+    at: impl Fn(usize) -> ElemRef<'a>,
     pool: &mut Option<&mut Reservation>,
     ctx: &EvalContext,
     before: usize,
 ) -> Result<Column, QueryError> {
-    let len = sources.len();
-    let mut offsets = Vec::with_capacity(len + 1);
-    offsets.push(0u32);
-    let mut child_scalars = Vec::new();
-    let mut nulls = Bitmap::new_zeroed(len);
-
-    for (i, src) in sources.iter().enumerate() {
+    let mut total_elems = 0usize;
+    for i in 0..len {
         if (i & CANCEL_CHECK_MASK) == 0 {
             check_cancel(ctx, pool, before)?;
         }
-        if let Some((col, row)) = src {
-            let sv = read_scalar(col, *row);
-            if let ScalarValue::List { values, .. } = sv {
-                let _ = nulls.set(i, true);
-                child_scalars.extend(values);
+        if let Some(lref) = at(i).as_list_ref() {
+            total_elems =
+                total_elems
+                    .checked_add(list_ref_len(lref))
+                    .ok_or(ColumnError::Overflow {
+                        reason: "list length exceeds usize",
+                    })?;
+        }
+    }
+    let _ = u32::try_from(total_elems).map_err(|_| ColumnError::Overflow {
+        reason: "list length exceeds u32::MAX",
+    })?;
+
+    let header_bytes = checked_varlen_bytes(len, 0, true)?;
+    let scratch_bytes = checked_fixed_bytes(total_elems, size_of::<ElemRef<'_>>(), false)?;
+    try_reserve(
+        pool,
+        header_bytes
+            .checked_add(scratch_bytes)
+            .ok_or(QueryError::TooLarge)?,
+    )?;
+
+    let mut offsets = Vec::with_capacity(len + 1);
+    offsets.push(0u32);
+    let mut nulls = Bitmap::new_zeroed(len);
+    let mut child_refs: Vec<ElemRef<'_>> = Vec::with_capacity(total_elems);
+
+    for i in 0..len {
+        if (i & CANCEL_CHECK_MASK) == 0 {
+            check_cancel(ctx, pool, before)?;
+        }
+        if let Some(lref) = at(i).as_list_ref() {
+            let _ = nulls.set(i, true);
+            let n = list_ref_len(lref);
+            for j in 0..n {
+                if (j & CANCEL_CHECK_MASK) == 0 {
+                    check_cancel(ctx, pool, before)?;
+                }
+                child_refs.push(list_ref_elem(lref, j));
             }
         }
-        let end = u32::try_from(child_scalars.len()).map_err(|_| ColumnError::Overflow {
-            reason: "list length exceeds u32::MAX",
-        })?;
-        offsets.push(end);
+        offsets.push(child_refs.len() as u32);
     }
 
-    let est: usize = (len + 1) * 4
-        + bitmap_mem_bytes(len)
-        + child_scalars
-            .iter()
-            .map(ScalarValue::heap_bytes)
-            .sum::<usize>();
-    try_reserve(pool, est)?;
-
-    let child_cols: Vec<Column> = child_scalars
-        .into_iter()
-        .map(|s| Column::try_new_const(s, 1))
-        .collect::<Result<_, _>>()?;
-    let child_sources: Vec<Option<(&Column, usize)>> = child_cols
-        .iter()
-        .map(|c| (!c.is_null(0)).then_some((c, 0)))
-        .collect();
-    let values = build_flat_from_sources(inner_dt, &child_sources, pool, ctx, before)?;
+    let values = build_flat_from_elem_refs(inner_dt, &child_refs, pool, ctx, before)?;
     Ok(Column::Flat(FlatColumn::try_new(
         FlatData::List {
             item_type: inner_dt.clone(),
@@ -2630,48 +3002,144 @@ fn build_list_from_sources(
     )?))
 }
 
-fn build_map_from_sources(
-    sources: &[Option<(&Column, usize)>],
+fn build_map_from_refs<'a>(
+    len: usize,
+    at: impl Fn(usize) -> ElemRef<'a>,
     pool: &mut Option<&mut Reservation>,
     ctx: &EvalContext,
     before: usize,
 ) -> Result<Column, QueryError> {
-    let len = sources.len();
-    let mut offsets = Vec::with_capacity(len + 1);
-    offsets.push(0u32);
-    let mut keys: Vec<String> = Vec::new();
-    let mut vals: Vec<String> = Vec::new();
-    let mut val_valid: Vec<bool> = Vec::new();
-    let mut nulls = Bitmap::new_zeroed(len);
-
-    for (i, src) in sources.iter().enumerate() {
+    let mut total_entries = 0usize;
+    let mut key_bytes_len = 0usize;
+    let mut val_bytes_len = 0usize;
+    for i in 0..len {
         if (i & CANCEL_CHECK_MASK) == 0 {
             check_cancel(ctx, pool, before)?;
         }
-        if let Some((col, row)) = src
-            && let ScalarValue::MapUtf8(entries) = read_scalar(col, *row)
-        {
-            let _ = nulls.set(i, true);
-            for (k, mv) in entries {
-                keys.push(k);
-                val_valid.push(mv.is_some());
-                vals.push(mv.unwrap_or_default());
+        if let Some(mref) = at(i).as_map_ref() {
+            match mref {
+                MapRef::Const(entries) => {
+                    total_entries =
+                        total_entries
+                            .checked_add(entries.len())
+                            .ok_or(ColumnError::Overflow {
+                                reason: "map entry count overflow",
+                            })?;
+                    for (k, v) in entries {
+                        key_bytes_len =
+                            key_bytes_len
+                                .checked_add(k.len())
+                                .ok_or(ColumnError::Overflow {
+                                    reason: "map key byte length overflow",
+                                })?;
+                        if let Some(vs) = v {
+                            val_bytes_len = val_bytes_len.checked_add(vs.len()).ok_or(
+                                ColumnError::Overflow {
+                                    reason: "map value byte length overflow",
+                                },
+                            )?;
+                        }
+                    }
+                }
+                MapRef::Flat { data, start, end } => {
+                    total_entries =
+                        total_entries
+                            .checked_add(end - start)
+                            .ok_or(ColumnError::Overflow {
+                                reason: "map entry count overflow",
+                            })?;
+                    for idx in start..end {
+                        if let Some(k) = data.keys().get(idx) {
+                            key_bytes_len = key_bytes_len.checked_add(k.len()).ok_or(
+                                ColumnError::Overflow {
+                                    reason: "map key byte length overflow",
+                                },
+                            )?;
+                        }
+                        if !data.value_nulls().is_some_and(|bm| !bm.get(idx))
+                            && let Some(v) = data.values().get(idx)
+                        {
+                            val_bytes_len = val_bytes_len.checked_add(v.len()).ok_or(
+                                ColumnError::Overflow {
+                                    reason: "map value byte length overflow",
+                                },
+                            )?;
+                        }
+                    }
+                }
             }
         }
-        let end = u32::try_from(keys.len()).map_err(|_| ColumnError::Overflow {
-            reason: "map entry count exceeds u32::MAX",
-        })?;
-        offsets.push(end);
     }
-    let key_bytes: usize = keys.iter().map(String::len).sum();
-    let val_bytes: usize = vals.iter().map(String::len).sum();
-    try_reserve(
-        pool,
-        (len + 1) * 4 + (keys.len() + 1) * 8 + key_bytes + val_bytes + bitmap_mem_bytes(len),
-    )?;
-    let keys_data = Utf8Data::try_from_slices(keys.iter().map(String::as_str))?;
-    let vals_data = Utf8Data::try_from_slices(vals.iter().map(String::as_str))?;
-    let val_nulls = Bitmap::from_bools(&val_valid);
+    let _ = u32::try_from(total_entries).map_err(|_| ColumnError::Overflow {
+        reason: "map entry count exceeds u32::MAX",
+    })?;
+    let _ = u32::try_from(key_bytes_len).map_err(|_| ColumnError::Overflow {
+        reason: "map key byte length exceeds u32::MAX",
+    })?;
+    let _ = u32::try_from(val_bytes_len).map_err(|_| ColumnError::Overflow {
+        reason: "map value byte length exceeds u32::MAX",
+    })?;
+
+    let est = checked_varlen_bytes(len, 0, true)?
+        .checked_add(checked_varlen_bytes(total_entries, key_bytes_len, false)?)
+        .and_then(|s| s.checked_add(checked_varlen_bytes(total_entries, val_bytes_len, true).ok()?))
+        .ok_or(QueryError::TooLarge)?;
+    try_reserve(pool, est)?;
+
+    let mut offsets = Vec::with_capacity(len + 1);
+    offsets.push(0u32);
+    let mut nulls = Bitmap::new_zeroed(len);
+    let mut key_offsets = Vec::with_capacity(total_entries + 1);
+    key_offsets.push(0u32);
+    let mut key_bytes = Vec::with_capacity(key_bytes_len);
+    let mut val_offsets = Vec::with_capacity(total_entries + 1);
+    val_offsets.push(0u32);
+    let mut val_bytes = Vec::with_capacity(val_bytes_len);
+    let mut val_nulls = Bitmap::new_zeroed(total_entries);
+    let mut entry_pos = 0usize;
+
+    for i in 0..len {
+        if (i & CANCEL_CHECK_MASK) == 0 {
+            check_cancel(ctx, pool, before)?;
+        }
+        if let Some(mref) = at(i).as_map_ref() {
+            let _ = nulls.set(i, true);
+            match mref {
+                MapRef::Const(entries) => {
+                    for (k, v) in entries {
+                        key_bytes.extend_from_slice(k.as_bytes());
+                        key_offsets.push(key_bytes.len() as u32);
+                        if let Some(vs) = v {
+                            val_bytes.extend_from_slice(vs.as_bytes());
+                            let _ = val_nulls.set(entry_pos, true);
+                        }
+                        val_offsets.push(val_bytes.len() as u32);
+                        entry_pos += 1;
+                    }
+                }
+                MapRef::Flat { data, start, end } => {
+                    for idx in start..end {
+                        if let Some(k) = data.keys().get(idx) {
+                            key_bytes.extend_from_slice(k.as_bytes());
+                        }
+                        key_offsets.push(key_bytes.len() as u32);
+                        if !data.value_nulls().is_some_and(|bm| !bm.get(idx))
+                            && let Some(vs) = data.values().get(idx)
+                        {
+                            val_bytes.extend_from_slice(vs.as_bytes());
+                            let _ = val_nulls.set(entry_pos, true);
+                        }
+                        val_offsets.push(val_bytes.len() as u32);
+                        entry_pos += 1;
+                    }
+                }
+            }
+        }
+        offsets.push(entry_pos as u32);
+    }
+
+    let keys_data = Utf8Data::try_new(key_offsets, key_bytes)?;
+    let vals_data = Utf8Data::try_new(val_offsets, val_bytes)?;
     let map = MapData::try_new(offsets, keys_data, vals_data, Some(val_nulls))?;
     Ok(Column::Flat(FlatColumn::try_new(
         FlatData::MapUtf8(Box::new(map)),
@@ -2679,45 +3147,149 @@ fn build_map_from_sources(
     )?))
 }
 
-fn build_events_from_sources(
-    sources: &[Option<(&Column, usize)>],
+fn build_events_from_refs<'a>(
+    len: usize,
+    at: impl Fn(usize) -> ElemRef<'a>,
     pool: &mut Option<&mut Reservation>,
     ctx: &EvalContext,
     before: usize,
 ) -> Result<Column, QueryError> {
-    let len = sources.len();
-    let mut offsets = Vec::with_capacity(len + 1);
-    offsets.push(0u32);
-    let mut items: Vec<EventItem> = Vec::new();
-    let mut nulls = Bitmap::new_zeroed(len);
-    for (i, src) in sources.iter().enumerate() {
+    let mut total_events = 0usize;
+    let mut name_bytes_len = 0usize;
+    let mut attr_bytes_len = 0usize;
+    for i in 0..len {
         if (i & CANCEL_CHECK_MASK) == 0 {
             check_cancel(ctx, pool, before)?;
         }
-        if let Some((col, row)) = src
-            && let ScalarValue::Events(evs) = read_scalar(col, *row)
-        {
-            let _ = nulls.set(i, true);
-            items.extend(evs);
+        if let Some(eref) = at(i).as_events_ref() {
+            match eref {
+                EventsRef::Const(evs) => {
+                    total_events =
+                        total_events
+                            .checked_add(evs.len())
+                            .ok_or(ColumnError::Overflow {
+                                reason: "events count overflow",
+                            })?;
+                    for ev in evs {
+                        name_bytes_len = name_bytes_len.checked_add(ev.name.len()).ok_or(
+                            ColumnError::Overflow {
+                                reason: "events name byte length overflow",
+                            },
+                        )?;
+                        if let Some(a) = &ev.attributes {
+                            attr_bytes_len = attr_bytes_len.checked_add(a.len()).ok_or(
+                                ColumnError::Overflow {
+                                    reason: "events attributes byte length overflow",
+                                },
+                            )?;
+                        }
+                    }
+                }
+                EventsRef::Flat { data, start, end } => {
+                    total_events =
+                        total_events
+                            .checked_add(end - start)
+                            .ok_or(ColumnError::Overflow {
+                                reason: "events count overflow",
+                            })?;
+                    for idx in start..end {
+                        if let Some(n) = data.names().get(idx) {
+                            name_bytes_len = name_bytes_len.checked_add(n.len()).ok_or(
+                                ColumnError::Overflow {
+                                    reason: "events name byte length overflow",
+                                },
+                            )?;
+                        }
+                        if !data.attribute_nulls().is_some_and(|bm| !bm.get(idx))
+                            && let Some(a) = data.attributes().get(idx)
+                        {
+                            attr_bytes_len = attr_bytes_len.checked_add(a.len()).ok_or(
+                                ColumnError::Overflow {
+                                    reason: "events attributes byte length overflow",
+                                },
+                            )?;
+                        }
+                    }
+                }
+            }
         }
-        let end = u32::try_from(items.len()).map_err(|_| ColumnError::Overflow {
-            reason: "events count exceeds u32::MAX",
-        })?;
-        offsets.push(end);
     }
-    let est: usize = (len + 1) * 4
-        + items.len() * 16
-        + items
-            .iter()
-            .map(|e| e.name.len() + e.attributes.as_ref().map_or(0, String::len))
-            .sum::<usize>();
+    let _ = u32::try_from(total_events).map_err(|_| ColumnError::Overflow {
+        reason: "events count exceeds u32::MAX",
+    })?;
+    let _ = u32::try_from(name_bytes_len).map_err(|_| ColumnError::Overflow {
+        reason: "events name byte length exceeds u32::MAX",
+    })?;
+    let _ = u32::try_from(attr_bytes_len).map_err(|_| ColumnError::Overflow {
+        reason: "events attributes byte length exceeds u32::MAX",
+    })?;
+
+    let est = checked_varlen_bytes(len, 0, true)?
+        .checked_add(checked_fixed_bytes(total_events, 8, false)?)
+        .and_then(|s| {
+            s.checked_add(checked_varlen_bytes(total_events, name_bytes_len, false).ok()?)
+        })
+        .and_then(|s| s.checked_add(checked_varlen_bytes(total_events, attr_bytes_len, true).ok()?))
+        .ok_or(QueryError::TooLarge)?;
     try_reserve(pool, est)?;
-    let times: Vec<i64> = items.iter().map(|e| e.time).collect();
-    let names = Utf8Data::try_from_slices(items.iter().map(|e| e.name.as_str()))?;
-    let attrs =
-        Utf8Data::try_from_slices(items.iter().map(|e| e.attributes.as_deref().unwrap_or("")))?;
-    let attr_valid: Vec<bool> = items.iter().map(|e| e.attributes.is_some()).collect();
-    let attr_nulls = Bitmap::from_bools(&attr_valid);
+
+    let mut offsets = Vec::with_capacity(len + 1);
+    offsets.push(0u32);
+    let mut nulls = Bitmap::new_zeroed(len);
+    let mut times = Vec::with_capacity(total_events);
+    let mut name_offsets = Vec::with_capacity(total_events + 1);
+    name_offsets.push(0u32);
+    let mut name_bytes = Vec::with_capacity(name_bytes_len);
+    let mut attr_offsets = Vec::with_capacity(total_events + 1);
+    attr_offsets.push(0u32);
+    let mut attr_bytes = Vec::with_capacity(attr_bytes_len);
+    let mut attr_nulls = Bitmap::new_zeroed(total_events);
+    let mut ev_pos = 0usize;
+
+    for i in 0..len {
+        if (i & CANCEL_CHECK_MASK) == 0 {
+            check_cancel(ctx, pool, before)?;
+        }
+        if let Some(eref) = at(i).as_events_ref() {
+            let _ = nulls.set(i, true);
+            match eref {
+                EventsRef::Const(evs) => {
+                    for ev in evs {
+                        times.push(ev.time);
+                        name_bytes.extend_from_slice(ev.name.as_bytes());
+                        name_offsets.push(name_bytes.len() as u32);
+                        if let Some(a) = &ev.attributes {
+                            attr_bytes.extend_from_slice(a.as_bytes());
+                            let _ = attr_nulls.set(ev_pos, true);
+                        }
+                        attr_offsets.push(attr_bytes.len() as u32);
+                        ev_pos += 1;
+                    }
+                }
+                EventsRef::Flat { data, start, end } => {
+                    for idx in start..end {
+                        times.push(data.times()[idx]);
+                        if let Some(n) = data.names().get(idx) {
+                            name_bytes.extend_from_slice(n.as_bytes());
+                        }
+                        name_offsets.push(name_bytes.len() as u32);
+                        if !data.attribute_nulls().is_some_and(|bm| !bm.get(idx))
+                            && let Some(a) = data.attributes().get(idx)
+                        {
+                            attr_bytes.extend_from_slice(a.as_bytes());
+                            let _ = attr_nulls.set(ev_pos, true);
+                        }
+                        attr_offsets.push(attr_bytes.len() as u32);
+                        ev_pos += 1;
+                    }
+                }
+            }
+        }
+        offsets.push(ev_pos as u32);
+    }
+
+    let names = Utf8Data::try_new(name_offsets, name_bytes)?;
+    let attrs = Utf8Data::try_new(attr_offsets, attr_bytes)?;
     let ev_data = EventsData::try_new(offsets, times, names, attrs, Some(attr_nulls))?;
     Ok(Column::Flat(FlatColumn::try_new(
         FlatData::Events(Box::new(ev_data)),
@@ -2725,45 +3297,123 @@ fn build_events_from_sources(
     )?))
 }
 
-fn build_links_from_sources(
-    sources: &[Option<(&Column, usize)>],
+fn build_links_from_refs<'a>(
+    len: usize,
+    at: impl Fn(usize) -> ElemRef<'a>,
     pool: &mut Option<&mut Reservation>,
     ctx: &EvalContext,
     before: usize,
 ) -> Result<Column, QueryError> {
-    let len = sources.len();
-    let mut offsets = Vec::with_capacity(len + 1);
-    offsets.push(0u32);
-    let mut items: Vec<LinkItem> = Vec::new();
-    let mut nulls = Bitmap::new_zeroed(len);
-    for (i, src) in sources.iter().enumerate() {
+    let mut total_links = 0usize;
+    let mut attr_bytes_len = 0usize;
+    for i in 0..len {
         if (i & CANCEL_CHECK_MASK) == 0 {
             check_cancel(ctx, pool, before)?;
         }
-        if let Some((col, row)) = src
-            && let ScalarValue::Links(lks) = read_scalar(col, *row)
-        {
-            let _ = nulls.set(i, true);
-            items.extend(lks);
+        if let Some(lref) = at(i).as_links_ref() {
+            match lref {
+                LinksRef::Const(lks) => {
+                    total_links =
+                        total_links
+                            .checked_add(lks.len())
+                            .ok_or(ColumnError::Overflow {
+                                reason: "links count overflow",
+                            })?;
+                    for lk in lks {
+                        if let Some(a) = &lk.attributes {
+                            attr_bytes_len = attr_bytes_len.checked_add(a.len()).ok_or(
+                                ColumnError::Overflow {
+                                    reason: "links attributes byte length overflow",
+                                },
+                            )?;
+                        }
+                    }
+                }
+                LinksRef::Flat { data, start, end } => {
+                    total_links =
+                        total_links
+                            .checked_add(end - start)
+                            .ok_or(ColumnError::Overflow {
+                                reason: "links count overflow",
+                            })?;
+                    for idx in start..end {
+                        if !data.attribute_nulls().is_some_and(|bm| !bm.get(idx))
+                            && let Some(a) = data.attributes().get(idx)
+                        {
+                            attr_bytes_len = attr_bytes_len.checked_add(a.len()).ok_or(
+                                ColumnError::Overflow {
+                                    reason: "links attributes byte length overflow",
+                                },
+                            )?;
+                        }
+                    }
+                }
+            }
         }
-        let end = u32::try_from(items.len()).map_err(|_| ColumnError::Overflow {
-            reason: "links count exceeds u32::MAX",
-        })?;
-        offsets.push(end);
     }
-    let est: usize = (len + 1) * 4
-        + items.len() * 32
-        + items
-            .iter()
-            .map(|l| l.attributes.as_ref().map_or(0, String::len))
-            .sum::<usize>();
+    let _ = u32::try_from(total_links).map_err(|_| ColumnError::Overflow {
+        reason: "links count exceeds u32::MAX",
+    })?;
+    let _ = u32::try_from(attr_bytes_len).map_err(|_| ColumnError::Overflow {
+        reason: "links attributes byte length exceeds u32::MAX",
+    })?;
+
+    let est = checked_varlen_bytes(len, 0, true)?
+        .checked_add(checked_fixed_bytes(total_links, 24, false)?)
+        .and_then(|s| s.checked_add(checked_varlen_bytes(total_links, attr_bytes_len, true).ok()?))
+        .ok_or(QueryError::TooLarge)?;
     try_reserve(pool, est)?;
-    let trace_ids: Vec<[u8; 16]> = items.iter().map(|l| l.trace_id).collect();
-    let span_ids: Vec<[u8; 8]> = items.iter().map(|l| l.span_id).collect();
-    let attrs =
-        Utf8Data::try_from_slices(items.iter().map(|l| l.attributes.as_deref().unwrap_or("")))?;
-    let attr_valid: Vec<bool> = items.iter().map(|l| l.attributes.is_some()).collect();
-    let attr_nulls = Bitmap::from_bools(&attr_valid);
+
+    let mut offsets = Vec::with_capacity(len + 1);
+    offsets.push(0u32);
+    let mut nulls = Bitmap::new_zeroed(len);
+    let mut trace_ids = Vec::with_capacity(total_links);
+    let mut span_ids = Vec::with_capacity(total_links);
+    let mut attr_offsets = Vec::with_capacity(total_links + 1);
+    attr_offsets.push(0u32);
+    let mut attr_bytes = Vec::with_capacity(attr_bytes_len);
+    let mut attr_nulls = Bitmap::new_zeroed(total_links);
+    let mut lk_pos = 0usize;
+
+    for i in 0..len {
+        if (i & CANCEL_CHECK_MASK) == 0 {
+            check_cancel(ctx, pool, before)?;
+        }
+        if let Some(lref) = at(i).as_links_ref() {
+            let _ = nulls.set(i, true);
+            match lref {
+                LinksRef::Const(lks) => {
+                    for lk in lks {
+                        trace_ids.push(lk.trace_id);
+                        span_ids.push(lk.span_id);
+                        if let Some(a) = &lk.attributes {
+                            attr_bytes.extend_from_slice(a.as_bytes());
+                            let _ = attr_nulls.set(lk_pos, true);
+                        }
+                        attr_offsets.push(attr_bytes.len() as u32);
+                        lk_pos += 1;
+                    }
+                }
+                LinksRef::Flat { data, start, end } => {
+                    for idx in start..end {
+                        trace_ids.push(data.trace_ids()[idx]);
+                        span_ids.push(data.span_ids()[idx]);
+                        if !data.attribute_nulls().is_some_and(|bm| !bm.get(idx))
+                            && let Some(a) = data.attributes().get(idx)
+                        {
+                            attr_bytes.extend_from_slice(a.as_bytes());
+                            let _ = attr_nulls.set(lk_pos, true);
+                        }
+                        attr_offsets.push(attr_bytes.len() as u32);
+                        lk_pos += 1;
+                    }
+                }
+            }
+        }
+        offsets.push(lk_pos as u32);
+    }
+
+    let attrs = Utf8Data::try_new(attr_offsets, attr_bytes)?;
     let lk_data = LinksData::try_new(offsets, trace_ids, span_ids, attrs, Some(attr_nulls))?;
     Ok(Column::Flat(FlatColumn::try_new(
         FlatData::Links(Box::new(lk_data)),
@@ -2785,6 +3435,7 @@ fn eval_cast(
     mut pool: Option<&mut Reservation>,
 ) -> Result<Column, QueryError> {
     let before = pool_size(&pool);
+    target.validate(MAX_NESTING_DEPTH)?;
     let raw_len = batch.raw_len();
     let src_dt = inner.data_type();
 
@@ -2795,7 +3446,7 @@ fn eval_cast(
     }
 
     if let (DataType::TimestampNs { .. }, DataType::TimestampNs { utc }) = (&src_dt, target) {
-        return retag_timestamp_utc(src, *utc);
+        return retag_timestamp_utc(src, *utc, &mut pool);
     }
 
     if matches!(src_dt, DataType::Null) || matches!(target, DataType::Null) {
@@ -2834,7 +3485,7 @@ fn eval_cast(
             .map_err(Into::into)
         }
         (DataType::I64, DataType::Bool) => {
-            try_reserve(&mut pool, bitmap_mem_bytes(raw_len) * 2)?;
+            try_reserve(&mut pool, checked_bool_bytes(raw_len, true)?)?;
             let mut vals = Bitmap::new_zeroed(raw_len);
             let mut nulls = Bitmap::new_zeroed(raw_len);
             for row in 0..raw_len {
@@ -2979,7 +3630,7 @@ fn eval_cast(
             .map_err(Into::into)
         }
         (DataType::Utf8, DataType::Bool) => {
-            try_reserve(&mut pool, bitmap_mem_bytes(raw_len) * 2)?;
+            try_reserve(&mut pool, checked_bool_bytes(raw_len, true)?)?;
             let mut vals = Bitmap::new_zeroed(raw_len);
             let mut nulls = Bitmap::new_zeroed(raw_len);
             for row in 0..raw_len {
@@ -3132,16 +3783,19 @@ fn eval_cast(
         (DataType::Utf8, DataType::Binary) => {
             let mut total_bytes = 0usize;
             for row in 0..raw_len {
+                if (row & CANCEL_CHECK_MASK) == 0 {
+                    check_cancel(ctx, &mut pool, before)?;
+                }
                 if is_active(active, row)
                     && let Some(s) = read_str(&src, row)
                 {
-                    total_bytes += s.len();
+                    total_bytes = total_bytes
+                        .checked_add(s.len())
+                        .ok_or(QueryError::TooLarge)?;
                 }
             }
-            try_reserve(
-                &mut pool,
-                (raw_len + 1) * 4 + total_bytes + bitmap_mem_bytes(raw_len),
-            )?;
+            let _ = u32::try_from(total_bytes).map_err(|_| QueryError::TooLarge)?;
+            try_reserve(&mut pool, checked_varlen_bytes(raw_len, total_bytes, true)?)?;
             let mut offsets = Vec::with_capacity(raw_len + 1);
             offsets.push(0u32);
             let mut bytes = Vec::with_capacity(total_bytes);
@@ -3156,7 +3810,8 @@ fn eval_cast(
                     bytes.extend_from_slice(s.as_bytes());
                     let _ = nulls.set(row, true);
                 }
-                offsets.push(bytes.len() as u32);
+                let end = u32::try_from(bytes.len()).map_err(|_| QueryError::TooLarge)?;
+                offsets.push(end);
             }
             let bin = BinaryData::try_new(offsets, bytes)?;
             Ok(Column::Flat(FlatColumn::try_new(
@@ -3165,7 +3820,7 @@ fn eval_cast(
             )?))
         }
         (DataType::Utf8, DataType::FixedBytes8) => {
-            try_reserve(&mut pool, raw_len * 8 + bitmap_mem_bytes(raw_len))?;
+            try_reserve(&mut pool, checked_fixed_bytes(raw_len, 8, true)?)?;
             let mut vals = vec![[0u8; 8]; raw_len];
             let mut nulls = Bitmap::new_zeroed(raw_len);
             for (row, slot) in vals.iter_mut().enumerate() {
@@ -3194,7 +3849,7 @@ fn eval_cast(
             )?))
         }
         (DataType::Utf8, DataType::FixedBytes16) => {
-            try_reserve(&mut pool, raw_len * 16 + bitmap_mem_bytes(raw_len))?;
+            try_reserve(&mut pool, checked_fixed_bytes(raw_len, 16, true)?)?;
             let mut vals = vec![[0u8; 16]; raw_len];
             let mut nulls = Bitmap::new_zeroed(raw_len);
             for (row, slot) in vals.iter_mut().enumerate() {
@@ -3225,16 +3880,19 @@ fn eval_cast(
         (DataType::FixedBytes8 | DataType::FixedBytes16, DataType::Binary) => {
             let mut total_bytes = 0usize;
             for row in 0..raw_len {
+                if (row & CANCEL_CHECK_MASK) == 0 {
+                    check_cancel(ctx, &mut pool, before)?;
+                }
                 if is_active(active, row)
                     && let Some(b) = read_bytes(&src, row)
                 {
-                    total_bytes += b.len();
+                    total_bytes = total_bytes
+                        .checked_add(b.len())
+                        .ok_or(QueryError::TooLarge)?;
                 }
             }
-            try_reserve(
-                &mut pool,
-                (raw_len + 1) * 4 + total_bytes + bitmap_mem_bytes(raw_len),
-            )?;
+            let _ = u32::try_from(total_bytes).map_err(|_| QueryError::TooLarge)?;
+            try_reserve(&mut pool, checked_varlen_bytes(raw_len, total_bytes, true)?)?;
             let mut offsets = Vec::with_capacity(raw_len + 1);
             offsets.push(0u32);
             let mut bytes = Vec::with_capacity(total_bytes);
@@ -3249,7 +3907,8 @@ fn eval_cast(
                     bytes.extend_from_slice(b);
                     let _ = nulls.set(row, true);
                 }
-                offsets.push(bytes.len() as u32);
+                let end = u32::try_from(bytes.len()).map_err(|_| QueryError::TooLarge)?;
+                offsets.push(end);
             }
             let bin = BinaryData::try_new(offsets, bytes)?;
             Ok(Column::Flat(FlatColumn::try_new(
@@ -3258,7 +3917,7 @@ fn eval_cast(
             )?))
         }
         (DataType::Binary, DataType::FixedBytes8) => {
-            try_reserve(&mut pool, raw_len * 8 + bitmap_mem_bytes(raw_len))?;
+            try_reserve(&mut pool, checked_fixed_bytes(raw_len, 8, true)?)?;
             let mut vals = vec![[0u8; 8]; raw_len];
             let mut nulls = Bitmap::new_zeroed(raw_len);
             for (row, slot) in vals.iter_mut().enumerate() {
@@ -3287,7 +3946,7 @@ fn eval_cast(
             )?))
         }
         (DataType::Binary, DataType::FixedBytes16) => {
-            try_reserve(&mut pool, raw_len * 16 + bitmap_mem_bytes(raw_len))?;
+            try_reserve(&mut pool, checked_fixed_bytes(raw_len, 16, true)?)?;
             let mut vals = vec![[0u8; 16]; raw_len];
             let mut nulls = Bitmap::new_zeroed(raw_len);
             for (row, slot) in vals.iter_mut().enumerate() {
@@ -3318,6 +3977,7 @@ fn eval_cast(
         (DataType::List(src_inner), DataType::List(tgt_inner))
             if matches!(src_inner.as_ref(), DataType::Null) =>
         {
+            try_reserve(&mut pool, checked_varlen_bytes(raw_len, 0, true)?)?;
             let mut offsets = Vec::with_capacity(raw_len + 1);
             offsets.push(0u32);
             let mut total_items = 0usize;
@@ -3343,7 +4003,6 @@ fn eval_cast(
                 })?;
                 offsets.push(end_u32);
             }
-            try_reserve(&mut pool, (raw_len + 1) * 4 + bitmap_mem_bytes(raw_len))?;
             let values = Column::Const {
                 value: ScalarValue::Null((**tgt_inner).clone()),
                 len: total_items,
@@ -3408,7 +4067,16 @@ fn eval_cast(
     }
 }
 
-fn retag_timestamp_utc(src: Column, utc: bool) -> Result<Column, QueryError> {
+fn retag_timestamp_utc(
+    src: Column,
+    utc: bool,
+    pool: &mut Option<&mut Reservation>,
+) -> Result<Column, QueryError> {
+    try_reserve(pool, src.memory_bytes())?;
+    retag_timestamp_utc_inner(src, utc)
+}
+
+fn retag_timestamp_utc_inner(src: Column, utc: bool) -> Result<Column, QueryError> {
     match src {
         Column::Flat(fc) => {
             let nulls = fc.nulls().cloned();
@@ -3437,7 +4105,7 @@ fn retag_timestamp_utc(src: Column, utc: bool) -> Result<Column, QueryError> {
         }
         Column::Dict(d) => {
             let Column::Flat(new_vals) =
-                retag_timestamp_utc(Column::Flat(d.values().clone()), utc)?
+                retag_timestamp_utc_inner(Column::Flat(d.values().clone()), utc)?
             else {
                 return Err(QueryError::failed("expected flat dict values"));
             };
@@ -3449,7 +4117,7 @@ fn retag_timestamp_utc(src: Column, utc: bool) -> Result<Column, QueryError> {
         }
         Column::Rle(r) => {
             let Column::Flat(new_vals) =
-                retag_timestamp_utc(Column::Flat(r.values().clone()), utc)?
+                retag_timestamp_utc_inner(Column::Flat(r.values().clone()), utc)?
             else {
                 return Err(QueryError::failed("expected flat rle values"));
             };
@@ -3475,91 +4143,85 @@ fn cast_to_utf8(
     pool: &mut Option<&mut Reservation>,
     before: usize,
 ) -> Result<Column, QueryError> {
-    let mut rendered: Vec<Option<String>> = Vec::with_capacity(raw_len);
-    let mut total_bytes = 0usize;
+    use std::fmt::Write;
+
+    try_reserve(pool, checked_varlen_bytes(raw_len, 0, true)?)?;
+    let mut offsets = Vec::with_capacity(raw_len + 1);
+    offsets.push(0u32);
+    let mut bytes = Vec::new();
+    let mut nulls = Bitmap::new_zeroed(raw_len);
+    let mut scratch = String::new();
+
     for row in 0..raw_len {
         if (row & CANCEL_CHECK_MASK) == 0 {
             check_cancel(ctx, pool, before)?;
         }
-        if !is_active(active, row) || src.is_null(row) {
-            rendered.push(None);
-            continue;
-        }
-        let s = match src_dt {
-            DataType::Bool => read_bool(src, row).map(|b| b.to_string()),
-            DataType::I64 => read_i64(src, row).map(|v| v.to_string()),
-            DataType::F64 => read_f64(src, row).map(|v| v.to_string()),
-            DataType::Decimal128 { scale, .. } => {
-                read_decimal(src, row).map(|v| format_decimal(v, *scale))
-            }
-            DataType::Binary => {
-                let Some(b) = read_bytes(src, row) else {
-                    rendered.push(None);
-                    continue;
-                };
-                match std::str::from_utf8(b) {
-                    Ok(s) => Some(s.to_owned()),
-                    Err(_) => match mode {
-                        CastMode::Strict => {
-                            return Err(QueryError::failed("invalid utf-8 in binary cast"));
-                        }
-                        CastMode::Try => None,
+        if is_active(active, row) && !src.is_null(row) {
+            let row_slice: Option<&[u8]> = match src_dt {
+                DataType::Bool => read_bool(src, row).map(|b| {
+                    scratch.clear();
+                    let _ = write!(scratch, "{b}");
+                    scratch.as_bytes()
+                }),
+                DataType::I64 => read_i64(src, row).map(|v| {
+                    scratch.clear();
+                    let _ = write!(scratch, "{v}");
+                    scratch.as_bytes()
+                }),
+                DataType::F64 => read_f64(src, row).map(|v| {
+                    scratch.clear();
+                    let _ = write!(scratch, "{v}");
+                    scratch.as_bytes()
+                }),
+                DataType::Decimal128 { scale, .. } => read_decimal(src, row).map(|v| {
+                    scratch = format_decimal(v, *scale);
+                    scratch.as_bytes()
+                }),
+                DataType::Binary => match read_bytes(src, row) {
+                    Some(b) => match std::str::from_utf8(b) {
+                        Ok(s) => Some(s.as_bytes()),
+                        Err(_) => match mode {
+                            CastMode::Strict => {
+                                return Err(QueryError::failed("invalid utf-8 in binary cast"));
+                            }
+                            CastMode::Try => None,
+                        },
                     },
-                }
-            }
-            DataType::FixedBytes8 | DataType::FixedBytes16 => read_bytes(src, row).map(hex::encode),
-            DataType::TimestampNs { utc } => {
-                read_timestamp(src, row).map(|ns| crate::fn_time::format_timestamp_ns(ns, *utc))
-            }
-            DataType::Date => {
-                let Some(days) = read_date(src, row) else {
-                    rendered.push(None);
-                    continue;
-                };
-                match days
-                    .checked_add(UNIX_EPOCH_CE_DAYS)
-                    .and_then(NaiveDate::from_num_days_from_ce_opt)
-                {
-                    Some(d) => Some(d.format("%Y-%m-%d").to_string()),
-                    None => match mode {
-                        CastMode::Strict => {
-                            return Err(QueryError::failed("date out of range for string cast"));
-                        }
-                        CastMode::Try => None,
-                    },
-                }
-            }
-            _ => return Err(QueryError::failed("unsupported cast to utf8")),
-        };
-        if let Some(ref st) = s {
-            total_bytes = total_bytes
-                .checked_add(st.len())
-                .ok_or(ColumnError::Overflow {
-                    reason: "utf8 cast byte length overflow",
+                    None => None,
+                },
+                DataType::FixedBytes8 | DataType::FixedBytes16 => read_bytes(src, row).map(|b| {
+                    scratch = hex::encode(b);
+                    scratch.as_bytes()
+                }),
+                DataType::TimestampNs { utc } => read_timestamp(src, row).map(|ns| {
+                    scratch = crate::fn_time::format_timestamp_ns(ns, *utc);
+                    scratch.as_bytes()
+                }),
+                DataType::Date => read_date(src, row).map(|days| {
+                    scratch = crate::fn_time::format_date_days(days);
+                    scratch.as_bytes()
+                }),
+                _ => return Err(QueryError::failed("unsupported cast to utf8")),
+            };
+            if let Some(slice) = row_slice {
+                let next_len =
+                    bytes
+                        .len()
+                        .checked_add(slice.len())
+                        .ok_or(ColumnError::Overflow {
+                            reason: "utf8 cast byte length overflow",
+                        })?;
+                let _ = u32::try_from(next_len).map_err(|_| ColumnError::Overflow {
+                    reason: "utf8 cast byte length exceeds u32::MAX",
                 })?;
-        }
-        rendered.push(s);
-    }
-
-    let _ = u32::try_from(total_bytes).map_err(|_| ColumnError::Overflow {
-        reason: "utf8 cast byte length exceeds u32::MAX",
-    })?;
-    try_reserve(
-        pool,
-        (raw_len + 1) * 4 + total_bytes + bitmap_mem_bytes(raw_len),
-    )?;
-    let mut offsets = Vec::with_capacity(raw_len + 1);
-    offsets.push(0u32);
-    let mut bytes = Vec::with_capacity(total_bytes);
-    let mut nulls = Bitmap::new_zeroed(raw_len);
-
-    for (row, opt) in rendered.iter().enumerate() {
-        if let Some(s) = opt {
-            bytes.extend_from_slice(s.as_bytes());
-            let _ = nulls.set(row, true);
+                try_reserve(pool, slice.len())?;
+                bytes.extend_from_slice(slice);
+                let _ = nulls.set(row, true);
+            }
         }
         offsets.push(bytes.len() as u32);
     }
+
     let utf8 = Utf8Data::try_new(offsets, bytes)?;
     Ok(Column::Flat(FlatColumn::try_new(
         FlatData::Utf8(utf8),
@@ -3575,7 +4237,7 @@ fn cast_fixed<T: Default + Copy>(
     before: usize,
     mut f: impl FnMut(usize) -> Result<Option<T>, QueryError>,
 ) -> Result<(Vec<T>, Bitmap), QueryError> {
-    try_reserve(pool, raw_len * size_of::<T>() + bitmap_mem_bytes(raw_len))?;
+    try_reserve(pool, checked_fixed_bytes(raw_len, size_of::<T>(), true)?)?;
     let mut vals = vec![T::default(); raw_len];
     let mut nulls = Bitmap::new_zeroed(raw_len);
     for (row, slot) in vals.iter_mut().enumerate() {
@@ -3648,7 +4310,7 @@ fn i64_to_decimal(v: i64, precision: u8, scale: i8) -> Result<i128, QueryError> 
             .ok_or_else(|| QueryError::failed("decimal overflow"))?
     } else {
         let denom = 10i128
-            .checked_pow((-scale) as u32)
+            .checked_pow(u32::from(scale.unsigned_abs()))
             .ok_or_else(|| QueryError::failed("decimal scale overflow"))?;
         i128::from(v) / denom
     };
@@ -3676,7 +4338,7 @@ fn decimal_to_i64(v: i128, scale: i8) -> Option<i64> {
         let denom = 10i128.checked_pow(scale as u32)?;
         v / denom
     } else {
-        let factor = 10i128.checked_pow((-scale) as u32)?;
+        let factor = 10i128.checked_pow(u32::from(scale.unsigned_abs()))?;
         v.checked_mul(factor)?
     };
     i64::try_from(unscaled).ok()
@@ -3731,28 +4393,64 @@ fn parse_decimal_str(text: &str, precision: u8, scale: i8) -> Result<i128, Query
     {
         return Err(QueryError::failed("invalid decimal string"));
     }
-    let mut digits = String::with_capacity(int_part.len() + frac_part.len());
-    digits.push_str(int_part);
-    digits.push_str(frac_part);
-    let raw_mag = digits
-        .parse::<u128>()
-        .map_err(|_| QueryError::failed("decimal string overflow"))?;
-    let frac_len = i32::try_from(frac_part.len())
-        .map_err(|_| QueryError::failed("decimal string overflow"))?;
-    let diff = i32::from(scale) - frac_len;
-    let mag = if diff >= 0 {
-        let factor = 10u128
-            .checked_pow(diff as u32)
-            .ok_or_else(|| QueryError::failed("decimal overflow"))?;
-        raw_mag
-            .checked_mul(factor)
-            .ok_or_else(|| QueryError::failed("decimal overflow"))?
+
+    let int_trimmed = int_part.trim_start_matches('0');
+    let frac_trimmed = frac_part.trim_end_matches('0');
+    if int_trimmed.is_empty() && frac_trimmed.is_empty() {
+        return check_decimal_bounds(0, precision);
+    }
+
+    let mag = if scale >= 0 {
+        let keep_frac = usize::from(scale.unsigned_abs());
+        if frac_trimmed.len() <= keep_frac {
+            let mut digits = String::with_capacity(int_trimmed.len() + frac_trimmed.len());
+            digits.push_str(int_trimmed);
+            digits.push_str(frac_trimmed);
+            let raw_mag = digits
+                .parse::<u128>()
+                .map_err(|_| QueryError::failed("decimal string overflow"))?;
+            let diff = u32::try_from(keep_frac - frac_trimmed.len())
+                .map_err(|_| QueryError::failed("decimal scale overflow"))?;
+            let factor = 10u128
+                .checked_pow(diff)
+                .ok_or_else(|| QueryError::failed("decimal overflow"))?;
+            raw_mag
+                .checked_mul(factor)
+                .ok_or_else(|| QueryError::failed("decimal overflow"))?
+        } else {
+            let kept_frac = &frac_trimmed[..keep_frac];
+            let round_up = frac_trimmed.as_bytes()[keep_frac] >= b'5';
+            let raw_mag = if int_trimmed.is_empty() && kept_frac.is_empty() {
+                0u128
+            } else {
+                let mut digits = String::with_capacity(int_trimmed.len() + kept_frac.len());
+                digits.push_str(int_trimmed);
+                digits.push_str(kept_frac);
+                digits
+                    .parse::<u128>()
+                    .map_err(|_| QueryError::failed("decimal string overflow"))?
+            };
+            if round_up {
+                raw_mag
+                    .checked_add(1)
+                    .ok_or_else(|| QueryError::failed("decimal overflow"))?
+            } else {
+                raw_mag
+            }
+        }
     } else {
         let denom = 10u128
-            .checked_pow((-diff) as u32)
+            .checked_pow(u32::from(scale.unsigned_abs()))
             .ok_or_else(|| QueryError::failed("decimal scale overflow"))?;
-        let mut q = raw_mag / denom;
-        let r = raw_mag % denom;
+        let int_mag = if int_trimmed.is_empty() {
+            0u128
+        } else {
+            int_trimmed
+                .parse::<u128>()
+                .map_err(|_| QueryError::failed("decimal string overflow"))?
+        };
+        let mut q = int_mag / denom;
+        let r = int_mag % denom;
         if r >= denom.div_ceil(2) {
             q = q
                 .checked_add(1)
@@ -3760,11 +4458,12 @@ fn parse_decimal_str(text: &str, precision: u8, scale: i8) -> Result<i128, Query
         }
         q
     };
+
     let signed = signed_from_u128(neg, mag)?;
     check_decimal_bounds(signed, precision)
 }
 
-fn format_decimal(value: i128, scale: i8) -> String {
+pub(crate) fn format_decimal(value: i128, scale: i8) -> String {
     if scale == 0 {
         return value.to_string();
     }
@@ -3773,7 +4472,7 @@ fn format_decimal(value: i128, scale: i8) -> String {
             return "0".to_owned();
         }
         let mut s = value.to_string();
-        for _ in 0..(-scale) {
+        for _ in 0..usize::from(scale.unsigned_abs()) {
             s.push('0');
         }
         return s;
@@ -4788,5 +5487,437 @@ mod tests {
         let json_col = eval_expr(&json_ex, &only_row2, &ctx(), None).unwrap();
         assert_eq!(read_str(&json_col, 2), Some("hi"));
         let _ = Interval::default();
+    }
+
+    #[test]
+    fn decimal_extreme_scales_and_parse_validation() {
+        // Blocker 1: |s1 - s2| > 38 without 10u128.pow overflow panic.
+        assert_eq!(compare_decimals(0, -10, 0, 38).unwrap(), Ordering::Equal);
+        assert_eq!(compare_decimals(0, -10, 1, 38).unwrap(), Ordering::Less);
+        assert_eq!(compare_decimals(0, -10, -1, 38).unwrap(), Ordering::Greater);
+        assert_eq!(
+            compare_decimals(1, -10, 999, 38).unwrap(),
+            Ordering::Greater
+        );
+        assert_eq!(compare_decimals(-1, -10, -999, 38).unwrap(), Ordering::Less);
+        assert_eq!(compare_decimals(0, 38, 0, -10).unwrap(), Ordering::Equal);
+        assert_eq!(compare_decimals(5, 38, 0, -10).unwrap(), Ordering::Greater);
+        assert_eq!(compare_decimals(999, 38, 1, -10).unwrap(), Ordering::Less);
+        assert_eq!(
+            compare_decimals(-999, 38, -1, -10).unwrap(),
+            Ordering::Greater
+        );
+
+        // Blocker 2: scale == i8::MIN must never panic on `-scale`.
+        assert_eq!(format_decimal(0, i8::MIN), "0");
+        assert!(format_decimal(5, i8::MIN).starts_with('5'));
+        assert_eq!(format_decimal(5, i8::MIN).len(), 1 + 128);
+        assert!(i64_to_decimal(5, 10, i8::MIN).is_err());
+        assert_eq!(decimal_to_i64(5, i8::MIN), None);
+        assert!(decimal_mul(1, 2, i8::MIN).is_err());
+        assert!(decimal_div(1, 2, i8::MIN).is_err());
+        assert!(parse_decimal_str("1", 10, i8::MIN).is_err());
+
+        // Minor 5: parse_decimal_str trims trailing fractional zeros and handles >38 frac digits.
+        assert_eq!(
+            parse_decimal_str("1.5000000000000000000000000000000000000000", 10, 2).unwrap(),
+            150
+        );
+        assert_eq!(
+            parse_decimal_str("1.236000000000000000000000000000000000000001", 10, 2).unwrap(),
+            124
+        );
+        assert_eq!(
+            parse_decimal_str("0.0000000000000000000000000000000000000005", 38, 38).unwrap(),
+            0
+        );
+
+        // Blocker 2: DataType::validate in eval_cast / eval_arith / eval_neg.
+        let schema = Schema::try_new_arc(vec![Field::new("x", DataType::I64, false)]).unwrap();
+        let batch = Batch::try_new_all(
+            schema,
+            vec![Column::Flat(
+                FlatColumn::try_new(FlatData::I64(vec![1]), None).unwrap(),
+            )],
+            1,
+        )
+        .unwrap();
+        let bad_cast = Expr::Cast {
+            expr: Box::new(Expr::Column {
+                index: 0,
+                name: "x".into(),
+                data_type: DataType::I64,
+            }),
+            target: DataType::Decimal128 {
+                precision: 5,
+                scale: i8::MIN,
+            },
+            mode: CastMode::Strict,
+        };
+        assert!(matches!(
+            eval_expr(&bad_cast, &batch, &ctx(), None).unwrap_err(),
+            QueryError::Column(ColumnError::InvalidBatch { .. })
+        ));
+
+        let bad_arith = Expr::Binary {
+            left: Box::new(Expr::Literal(ScalarValue::Null(DataType::Null))),
+            op: BinaryOp::Add,
+            right: Box::new(Expr::Literal(ScalarValue::Null(DataType::Null))),
+            data_type: DataType::Decimal128 {
+                precision: 0,
+                scale: 0,
+            },
+        };
+        assert!(matches!(
+            eval_expr(&bad_arith, &batch, &ctx(), None).unwrap_err(),
+            QueryError::Column(ColumnError::InvalidBatch { .. })
+        ));
+    }
+
+    #[test]
+    fn reservation_guards_nested_builders_case_and_casts() {
+        // Major 2: checked_fixed_bytes / checked_varlen_bytes overflow -> TooLarge
+        assert!(matches!(
+            checked_fixed_bytes(usize::MAX, 8, true),
+            Err(QueryError::TooLarge)
+        ));
+        assert!(matches!(
+            checked_varlen_bytes(usize::MAX, 0, true),
+            Err(QueryError::TooLarge)
+        ));
+
+        // Blocker 3a: Expr::Column and retag_timestamp_utc reserve before cloning.
+        let n = 128usize;
+        let schema = Schema::try_new_arc(vec![
+            Field::new("x", DataType::I64, false),
+            Field::new("ts", DataType::timestamp_utc(), false),
+            Field::new("s", DataType::Utf8, true),
+            Field::new("fb", DataType::FixedBytes8, true),
+        ])
+        .unwrap();
+        let x_col = Column::Flat(FlatColumn::try_new(FlatData::I64(vec![42; n]), None).unwrap());
+        let ts_col = Column::Flat(
+            FlatColumn::try_new(
+                FlatData::TimestampNs {
+                    values: vec![1_700_000_000_000_000_000; n],
+                    utc: true,
+                },
+                None,
+            )
+            .unwrap(),
+        );
+        let s_col = Column::Flat(
+            FlatColumn::try_new(
+                FlatData::Utf8(Utf8Data::try_from_slices(vec!["hello_world_payload"; n]).unwrap()),
+                None,
+            )
+            .unwrap(),
+        );
+        let fb_col = Column::Flat(
+            FlatColumn::try_new(FlatData::FixedBytes8(vec![[1u8; 8]; n]), None).unwrap(),
+        );
+        let col_bytes = x_col.memory_bytes();
+        let ts_bytes = ts_col.memory_bytes();
+        let batch =
+            Batch::try_new_all(Arc::clone(&schema), vec![x_col, ts_col, s_col, fb_col], n).unwrap();
+
+        let tiny_pool = GlobalPool::standalone(col_bytes / 2);
+        let mut tiny_res = tiny_pool.register("col_clone_oom", false);
+        let col_expr = Expr::Column {
+            index: 0,
+            name: "x".into(),
+            data_type: DataType::I64,
+        };
+        assert!(matches!(
+            eval_expr(&col_expr, &batch, &ctx(), Some(&mut tiny_res)).unwrap_err(),
+            QueryError::TooLarge
+        ));
+        assert_eq!(tiny_res.size(), 0);
+
+        // retag_timestamp_utc needs peak 2 * ts_bytes while cloning values.
+        let retag_pool = GlobalPool::standalone(ts_bytes + ts_bytes / 2);
+        let mut retag_res = retag_pool.register("retag_oom", false);
+        let retag_expr = Expr::Cast {
+            expr: Box::new(Expr::Column {
+                index: 1,
+                name: "ts".into(),
+                data_type: DataType::timestamp_utc(),
+            }),
+            target: DataType::TimestampNs { utc: false },
+            mode: CastMode::Strict,
+        };
+        assert!(matches!(
+            eval_expr(&retag_expr, &batch, &ctx(), Some(&mut retag_res)).unwrap_err(),
+            QueryError::TooLarge
+        ));
+        assert_eq!(retag_res.size(), 0);
+
+        // Blocker 3d & Blocker 4: cast_to_utf8, Utf8 -> Binary, FixedBytes8 -> Binary OOM rollback.
+        let cast_pool = GlobalPool::standalone(256);
+        let mut cast_res = cast_pool.register("cast_oom", false);
+        cast_res.try_grow(16).unwrap();
+        for cast_expr in [
+            Expr::Cast {
+                expr: Box::new(Expr::Column {
+                    index: 2,
+                    name: "s".into(),
+                    data_type: DataType::Utf8,
+                }),
+                target: DataType::Binary,
+                mode: CastMode::Strict,
+            },
+            Expr::Cast {
+                expr: Box::new(Expr::Column {
+                    index: 3,
+                    name: "fb".into(),
+                    data_type: DataType::FixedBytes8,
+                }),
+                target: DataType::Binary,
+                mode: CastMode::Strict,
+            },
+            Expr::Cast {
+                expr: Box::new(Expr::Column {
+                    index: 0,
+                    name: "x".into(),
+                    data_type: DataType::I64,
+                }),
+                target: DataType::Utf8,
+                mode: CastMode::Strict,
+            },
+        ] {
+            assert!(matches!(
+                eval_expr(&cast_expr, &batch, &ctx(), Some(&mut cast_res)).unwrap_err(),
+                QueryError::TooLarge
+            ));
+            assert_eq!(cast_res.size(), 16);
+        }
+
+        // Major 6: CancelToken aborts empty InList, Utf8->Binary, FixedBytes8->Binary, cast_to_utf8.
+        let cancelled = EvalContext {
+            now_ns: 0,
+            cancel: CancelToken::new(),
+        };
+        cancelled.cancel.cancel();
+        let masked = batch
+            .with_selection(Selection::Mask(Bitmap::new_ones(n)))
+            .unwrap();
+        for cancel_expr in [
+            Expr::InList {
+                expr: Box::new(Expr::Column {
+                    index: 0,
+                    name: "x".into(),
+                    data_type: DataType::I64,
+                }),
+                list: vec![],
+                negated: false,
+                redacted: false,
+            },
+            Expr::Cast {
+                expr: Box::new(Expr::Column {
+                    index: 2,
+                    name: "s".into(),
+                    data_type: DataType::Utf8,
+                }),
+                target: DataType::Binary,
+                mode: CastMode::Strict,
+            },
+            Expr::Cast {
+                expr: Box::new(Expr::Column {
+                    index: 3,
+                    name: "fb".into(),
+                    data_type: DataType::FixedBytes8,
+                }),
+                target: DataType::Binary,
+                mode: CastMode::Strict,
+            },
+            Expr::Cast {
+                expr: Box::new(Expr::Column {
+                    index: 0,
+                    name: "x".into(),
+                    data_type: DataType::I64,
+                }),
+                target: DataType::Utf8,
+                mode: CastMode::Strict,
+            },
+        ] {
+            assert!(matches!(
+                eval_expr(&cancel_expr, &masked, &cancelled, None).unwrap_err(),
+                QueryError::Cancelled
+            ));
+        }
+
+        // Major 1: eval_case must shrink when_col & op_col reservations across many branches.
+        let mut when_then = Vec::new();
+        for b in 0..12i64 {
+            when_then.push((
+                Expr::Literal(ScalarValue::I64(b)),
+                Expr::Literal(ScalarValue::I64(b * 10)),
+            ));
+        }
+        let many_case = Expr::Case {
+            operand: Some(Box::new(Expr::Column {
+                index: 0,
+                name: "x".into(),
+                data_type: DataType::I64,
+            })),
+            when_then,
+            else_expr: Some(Box::new(Expr::Literal(ScalarValue::I64(-1)))),
+            data_type: DataType::I64,
+        };
+        // Batch has x = 42, so all 12 WHEN branches run and miss, then ELSE runs.
+        // Without rollback per branch, 12 when_cols + op_col + row_source would leak.
+        let case_pool = GlobalPool::standalone(6 * 1024);
+        let mut case_res = case_pool.register("case_tight", false);
+        let case_out = eval_expr(&many_case, &batch, &ctx(), Some(&mut case_res)).unwrap();
+        assert_eq!(case_res.size(), case_out.memory_bytes());
+        assert_eq!(read_i64(&case_out, 0), Some(-1));
+
+        // Blocker 3b: eval_make_array reserves child_sources before allocating.
+        let make_arr = Expr::MakeArray {
+            elems: vec![
+                Expr::Column {
+                    index: 0,
+                    name: "x".into(),
+                    data_type: DataType::I64,
+                };
+                16
+            ],
+            item_type: DataType::I64,
+        };
+        let arr_oom_pool = GlobalPool::standalone(col_bytes + 512);
+        let mut arr_oom_res = arr_oom_pool.register("arr_oom", false);
+        assert!(matches!(
+            eval_expr(&make_arr, &batch, &ctx(), Some(&mut arr_oom_res)).unwrap_err(),
+            QueryError::TooLarge
+        ));
+        assert_eq!(arr_oom_res.size(), 0);
+
+        // Blocker 3c: CASE over List, MapUtf8, Events, Links with zero-copy pass-1 reservation.
+        let complex_schema = Schema::try_new_arc(vec![
+            Field::new("flag", DataType::Bool, false),
+            Field::new("l", DataType::List(Box::new(DataType::Utf8)), true),
+            Field::new("m", DataType::MapUtf8, true),
+            Field::new("e", DataType::Events, true),
+            Field::new("k", DataType::Links, true),
+        ])
+        .unwrap();
+        let flag_col = Column::Flat(
+            FlatColumn::try_new(FlatData::Bool(Bitmap::from_bools(&[true, false])), None).unwrap(),
+        );
+        let list_col = Column::try_new_const(
+            ScalarValue::List {
+                item_type: DataType::Utf8,
+                values: vec![ScalarValue::Utf8("a".into())],
+            },
+            2,
+        )
+        .unwrap();
+        let map_col = Column::try_new_const(
+            ScalarValue::MapUtf8(vec![("k".into(), Some("v".into()))]),
+            2,
+        )
+        .unwrap();
+        let ev_col = Column::try_new_const(
+            ScalarValue::Events(vec![EventItem {
+                time: 123,
+                name: "ev".into(),
+                attributes: Some("{}".into()),
+            }]),
+            2,
+        )
+        .unwrap();
+        let lk_col = Column::try_new_const(
+            ScalarValue::Links(vec![LinkItem {
+                trace_id: [1; 16],
+                span_id: [2; 8],
+                attributes: None,
+            }]),
+            2,
+        )
+        .unwrap();
+        let complex_batch = Batch::try_new_all(
+            complex_schema,
+            vec![flag_col, list_col, map_col, ev_col, lk_col],
+            2,
+        )
+        .unwrap();
+        let c_pool = GlobalPool::standalone(64 * 1024);
+        let mut c_res = c_pool.register("complex_case", false);
+        for (idx, dt) in [
+            (1, DataType::List(Box::new(DataType::Utf8))),
+            (2, DataType::MapUtf8),
+            (3, DataType::Events),
+            (4, DataType::Links),
+        ] {
+            let ex = Expr::Case {
+                operand: None,
+                when_then: vec![(
+                    Expr::Column {
+                        index: 0,
+                        name: "flag".into(),
+                        data_type: DataType::Bool,
+                    },
+                    Expr::Column {
+                        index: idx,
+                        name: "c".into(),
+                        data_type: dt.clone(),
+                    },
+                )],
+                else_expr: None,
+                data_type: dt,
+            };
+            let before_c = c_res.size();
+            let out = eval_expr(&ex, &complex_batch, &ctx(), Some(&mut c_res)).unwrap();
+            assert_eq!(c_res.size(), before_c + out.memory_bytes());
+            assert!(!out.is_null(0));
+            assert!(out.is_null(1));
+        }
+
+        // Minor 7: boolean ops reject non-bool non-null columns.
+        for bad_bool in [
+            Expr::Unary {
+                op: UnaryOp::Not,
+                expr: Box::new(Expr::Column {
+                    index: 0,
+                    name: "x".into(),
+                    data_type: DataType::I64,
+                }),
+                data_type: DataType::Bool,
+            },
+            Expr::Unary {
+                op: UnaryOp::IsTrue,
+                expr: Box::new(Expr::Column {
+                    index: 0,
+                    name: "x".into(),
+                    data_type: DataType::I64,
+                }),
+                data_type: DataType::Bool,
+            },
+            Expr::Binary {
+                left: Box::new(Expr::Column {
+                    index: 0,
+                    name: "x".into(),
+                    data_type: DataType::I64,
+                }),
+                op: BinaryOp::And,
+                right: Box::new(Expr::Literal(ScalarValue::Bool(true))),
+                data_type: DataType::Bool,
+            },
+            Expr::Binary {
+                left: Box::new(Expr::Literal(ScalarValue::Bool(false))),
+                op: BinaryOp::Or,
+                right: Box::new(Expr::Column {
+                    index: 0,
+                    name: "x".into(),
+                    data_type: DataType::I64,
+                }),
+                data_type: DataType::Bool,
+            },
+        ] {
+            assert!(matches!(
+                eval_expr(&bad_bool, &batch, &ctx(), None).unwrap_err(),
+                QueryError::Failed(_)
+            ));
+        }
     }
 }

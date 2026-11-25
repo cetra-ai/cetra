@@ -7,7 +7,7 @@ use std::fmt;
 
 use cetra_column::{Batch, DataType, Reservation, ScalarValue, Schema};
 
-use crate::eval::{eval_filter, pool_size, reconcile_output, rollback_to};
+use crate::eval::{eval_filter, pool_size, reconcile_output, rollback_to, try_reserve};
 use crate::{BinaryOp, EvalContext, Expr, QueryError, UnaryOp};
 
 const COL_TRACE_ID: &str = "trace_id";
@@ -162,8 +162,16 @@ pub fn filter_uncovered(
             return Err(err);
         }
     };
+    let covered_bytes = covered.memory_bytes();
+    if let Err(err) = try_reserve(&mut pool, covered_bytes) {
+        rollback_to(&mut pool, before);
+        return Err(err);
+    }
     let keep = covered.not();
     drop(covered);
+    if let Some(res) = pool.as_deref_mut() {
+        res.shrink(covered_bytes);
+    }
     let out = match batch.filter_mask(&keep) {
         Ok(b) => b,
         Err(err) => {
@@ -615,5 +623,23 @@ mod tests {
             Err(QueryError::TooLarge)
         ));
         assert_eq!(tiny_res.size(), 30);
+
+        // Reservation must cover the temporary inverted `keep = covered.not()` mask
+        // even when `eval_filter` itself fits in the pool.
+        let large_rows = 8192usize;
+        let bool_schema =
+            Schema::try_new_arc(vec![Field::new("flag", DataType::Bool, false)]).unwrap();
+        let const_flag = Column::try_new_const(ScalarValue::Bool(true), large_rows).unwrap();
+        let large_batch = Batch::try_new_all(bool_schema, vec![const_flag], large_rows).unwrap();
+        let const_pred = Expr::Literal(ScalarValue::Bool(true));
+        // Bitmap for 8192 rows is 1024 bytes; eval_filter peaks at 1024 bytes,
+        // and covered.not() needs another 1024 bytes (total 2048).
+        let inv_pool = GlobalPool::standalone(1536);
+        let mut inv_res = inv_pool.register("tombstone_inv_oom", true);
+        assert!(matches!(
+            filter_uncovered(&large_batch, &const_pred, &ctx(), Some(&mut inv_res)),
+            Err(QueryError::TooLarge)
+        ));
+        assert_eq!(inv_res.size(), 0);
     }
 }

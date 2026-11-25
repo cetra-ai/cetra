@@ -7,8 +7,8 @@ use regex::{Regex, RegexBuilder};
 
 use crate::error::QueryError;
 use crate::eval::{
-    active_count, check_cancel, is_active, pool_size, read_bytes, read_i64, read_str,
-    reconcile_output, rollback_to, try_reserve,
+    active_count, check_cancel, checked_varlen_bytes, is_active, pool_size, read_bytes, read_i64,
+    read_str, reconcile_output, rollback_to, try_reserve,
 };
 use crate::ir::{EvalContext, ScalarFn};
 
@@ -220,7 +220,7 @@ impl LikeMatcher {
             Self::Contains { mid, ci_regex } => match ci_regex {
                 None => s.contains(mid.as_str()),
                 Some(re) => {
-                    if s.is_ascii() && mid.is_ascii() {
+                    if s.is_ascii() && mid.is_ascii() && mid.len() <= 32 {
                         if mid.is_empty() {
                             true
                         } else {
@@ -1027,11 +1027,7 @@ fn split_part_slice<'a>(s: &'a str, delim: &str, n: i64) -> Result<&'a str, Quer
         let Ok(k) = usize::try_from(n.unsigned_abs()) else {
             return Ok("");
         };
-        let total_parts = s.split(delim).count();
-        if k > total_parts {
-            return Ok("");
-        }
-        Ok(s.split(delim).nth(total_parts - k).unwrap_or(""))
+        Ok(s.rsplit(delim).nth(k - 1).unwrap_or(""))
     }
 }
 
@@ -1565,24 +1561,49 @@ fn eval_regexp_extract(
         return Ok(null_const(DataType::Utf8, len));
     }
 
+    try_reserve(pool, checked_varlen_bytes(len, 0, true)?)?;
+    let mut offsets = Vec::with_capacity(len + 1);
+    offsets.push(0u32);
+    let mut bytes = Vec::new();
+    let mut nulls = Bitmap::new_zeroed(len);
     let mut cache = RegexpCache::new(pat_col, flags_col);
-    eval_utf8_slice_fn(len, active, ctx, pool, before, |row| {
-        let Some(s) = read_str(s_col, row) else {
-            return Ok(None);
-        };
-        let Some(pat) = read_str(pat_col, row) else {
-            return Ok(None);
-        };
-        let flags = match flags_col {
-            Some(fc) => match read_str(fc, row) {
-                Some(f) => f,
-                None => return Ok(None),
-            },
-            None => "",
-        };
-        let re = cache.get_or_compile(pat, flags)?;
-        Ok(regexp_extract_match(re, s))
-    })
+
+    for row in 0..len {
+        if (row & CANCEL_CHECK_MASK) == 0 {
+            check_cancel(ctx, pool, before)?;
+        }
+        if is_active(active, row)
+            && let Some(s) = read_str(s_col, row)
+            && let Some(pat) = read_str(pat_col, row)
+            && let Some(flags) = match flags_col {
+                Some(fc) => read_str(fc, row),
+                None => Some(""),
+            }
+        {
+            let re = cache.get_or_compile(pat, flags)?;
+            if let Some(m) = regexp_extract_match(re, s) {
+                let next_len = bytes
+                    .len()
+                    .checked_add(m.len())
+                    .ok_or(ColumnError::Overflow {
+                        reason: "utf8 byte length overflow",
+                    })?;
+                let _ = u32::try_from(next_len).map_err(|_| ColumnError::Overflow {
+                    reason: "utf8 byte length exceeds u32::MAX",
+                })?;
+                try_reserve(pool, m.len())?;
+                bytes.extend_from_slice(m.as_bytes());
+                let _ = nulls.set(row, true);
+            }
+        }
+        offsets.push(bytes.len() as u32);
+    }
+
+    let utf8 = Utf8Data::try_new(offsets, bytes)?;
+    Ok(Column::Flat(FlatColumn::try_new(
+        FlatData::Utf8(utf8),
+        Some(nulls),
+    )?))
 }
 
 // ---------------------------------------------------------------------------
@@ -1595,6 +1616,7 @@ fn read_encode_bytes(col: &Column, row: usize) -> Result<Option<&[u8]>, QueryErr
             Ok(read_bytes(col, row))
         }
         DataType::Utf8 => Ok(read_str(col, row).map(str::as_bytes)),
+        DataType::Null => Ok(None),
         _ => Err(QueryError::failed("encode requires binary or string input")),
     }
 }
@@ -1622,7 +1644,7 @@ fn eval_encode(
     }
     expect_utf8_or_null(enc_col)?;
 
-    if matches!(val_col.data_type(), DataType::Null)
+    if len == 0
         || matches!(enc_col.data_type(), DataType::Null)
         || active.is_some_and(Bitmap::all_zeros)
     {
@@ -1637,9 +1659,6 @@ fn eval_encode(
         if !is_active(active, row) {
             continue;
         }
-        let Some(src) = read_encode_bytes(val_col, row)? else {
-            continue;
-        };
         let Some(enc) = read_str(enc_col, row) else {
             continue;
         };
@@ -1648,6 +1667,9 @@ fn eval_encode(
                 "unsupported encoding; only 'hex' is supported",
             ));
         }
+        let Some(src) = read_encode_bytes(val_col, row)? else {
+            continue;
+        };
         let hex_len = src.len().checked_mul(2).ok_or(ColumnError::Overflow {
             reason: "hex encoded byte length overflow",
         })?;
@@ -1656,6 +1678,9 @@ fn eval_encode(
             .ok_or(ColumnError::Overflow {
                 reason: "utf8 byte length overflow",
             })?;
+    }
+    if matches!(val_col.data_type(), DataType::Null) {
+        return Ok(null_const(DataType::Utf8, len));
     }
     let _ = u32::try_from(total_bytes).map_err(|_| ColumnError::Overflow {
         reason: "utf8 byte length exceeds u32::MAX",
@@ -2124,7 +2149,7 @@ mod tests {
                 Some("c".into()),
                 Some("".into()),
                 Some("abc".into()),
-                Some("a".into()),
+                Some("".into()),
             ]
         );
         assert_eq!(
@@ -2623,5 +2648,79 @@ mod tests {
                 Some("hi:end".into()),
             ]
         );
+    }
+
+    #[test]
+    fn ilike_long_needle_encode_null_validation_and_regexp_extract_oom() {
+        // Blocker 5: long ASCII ILIKE '%mid%' (>32 chars) delegates to linear-time ci_regex.
+        let long_needle = format!("%{}Z%", "a".repeat(64));
+        let hay = utf8_col(&[
+            Some(&format!("{}z", "A".repeat(200))),
+            Some(&"A".repeat(200)),
+        ]);
+        let pat = const_str(&long_needle, 2);
+        let res = eval_like(&hay, &pat, None, true, false, None, &ctx(), None).unwrap();
+        assert_eq!(bool_vec(&res), vec![Some(true), Some(false)]);
+
+        // Major 4: split_part("aaa", "aa", -2) == "a" alongside -1 == ""
+        let sp = eval_string_fn(
+            ScalarFn::SplitPart,
+            &[const_str("aaa", 1), const_str("aa", 1), const_i64(-2, 1)],
+            1,
+            None,
+            &ctx(),
+            None,
+        )
+        .unwrap();
+        assert_eq!(str_vec(&sp), vec![Some("a".into())]);
+
+        // Minor 4: encode validates encoding upfront on active rows even when input is NULL.
+        let null_col = Column::Const {
+            value: ScalarValue::Null(DataType::Null),
+            len: 2,
+        };
+        let bad_enc = utf8_col(&[Some("base64"), Some("hex")]);
+        assert!(matches!(
+            eval_string_fn(
+                ScalarFn::Encode,
+                &[null_col.clone(), bad_enc.clone()],
+                2,
+                None,
+                &ctx(),
+                None,
+            )
+            .unwrap_err(),
+            QueryError::Failed(_)
+        ));
+        // Inactive row with invalid encoding must not fault.
+        let mask = Bitmap::from_bools(&[false, true]);
+        let masked_enc = eval_string_fn(
+            ScalarFn::Encode,
+            &[null_col, bad_enc],
+            2,
+            Some(&mask),
+            &ctx(),
+            None,
+        )
+        .unwrap();
+        assert!(masked_enc.is_null(0));
+        assert!(masked_enc.is_null(1));
+
+        // Minor 3: eval_regexp_extract single-pass streaming OOM rollback.
+        let pool = GlobalPool::standalone(48);
+        let mut res = pool.register("re_oom", false);
+        let s_col = const_str("prefix-payload_1234567890_abcdef", 4);
+        let re_pat = const_str("(payload_[0-9a-z_]+)", 4);
+        let oom = eval_string_fn(
+            ScalarFn::RegexpExtract,
+            &[s_col, re_pat],
+            4,
+            None,
+            &ctx(),
+            Some(&mut res),
+        )
+        .unwrap_err();
+        assert!(matches!(oom, QueryError::TooLarge));
+        assert_eq!(res.size(), 0);
     }
 }
