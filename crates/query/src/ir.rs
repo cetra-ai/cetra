@@ -1,8 +1,11 @@
 //! Typed expression IR and runtime evaluation context.
 
+use std::collections::BTreeSet;
 use std::fmt;
 
 use cetra_column::{CancelToken, DataType, ScalarValue};
+
+use crate::error::QueryError;
 
 /// Binary operators in [`Expr`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -511,6 +514,213 @@ impl Expr {
             }
         }
     }
+
+    /// Collects every column index referenced anywhere in this expression into `out`.
+    pub fn referenced_columns(&self, out: &mut BTreeSet<usize>) {
+        match self {
+            Self::Column { index, .. } => {
+                out.insert(*index);
+            }
+            Self::Literal(_) => {}
+            Self::Unary { expr, .. } | Self::Cast { expr, .. } => {
+                expr.referenced_columns(out);
+            }
+            Self::Binary { left, right, .. } => {
+                left.referenced_columns(out);
+                right.referenced_columns(out);
+            }
+            Self::Between {
+                expr, low, high, ..
+            } => {
+                expr.referenced_columns(out);
+                low.referenced_columns(out);
+                high.referenced_columns(out);
+            }
+            Self::InList { expr, list, .. } => {
+                expr.referenced_columns(out);
+                for item in list {
+                    item.referenced_columns(out);
+                }
+            }
+            Self::Like { expr, pattern, .. } => {
+                expr.referenced_columns(out);
+                pattern.referenced_columns(out);
+            }
+            Self::Case {
+                operand,
+                when_then,
+                else_expr,
+                ..
+            } => {
+                if let Some(op) = operand {
+                    op.referenced_columns(out);
+                }
+                for (w, t) in when_then {
+                    w.referenced_columns(out);
+                    t.referenced_columns(out);
+                }
+                if let Some(el) = else_expr {
+                    el.referenced_columns(out);
+                }
+            }
+            Self::MapIndex { map, key } => {
+                map.referenced_columns(out);
+                key.referenced_columns(out);
+            }
+            Self::MakeArray { elems, .. } => {
+                for elem in elems {
+                    elem.referenced_columns(out);
+                }
+            }
+            Self::Call { args, .. } => {
+                for arg in args {
+                    arg.referenced_columns(out);
+                }
+            }
+        }
+    }
+
+    /// Rewrites every [`Expr::Column`] index according to `map`, preserving `name` and `data_type`.
+    /// Returns [`QueryError::Internal`] if a referenced column index is out of bounds or mapped to `None`.
+    pub fn remap_columns(&self, map: &[Option<usize>]) -> Result<Self, QueryError> {
+        match self {
+            Self::Column {
+                index,
+                name,
+                data_type,
+            } => {
+                let new_index = map.get(*index).copied().flatten().ok_or_else(|| {
+                    QueryError::internal(format!("column index {index} is not in remap table"))
+                })?;
+                Ok(Self::Column {
+                    index: new_index,
+                    name: name.clone(),
+                    data_type: data_type.clone(),
+                })
+            }
+            Self::Literal(v) => Ok(Self::Literal(v.clone())),
+            Self::Unary {
+                op,
+                expr,
+                data_type,
+            } => Ok(Self::Unary {
+                op: *op,
+                expr: Box::new(expr.remap_columns(map)?),
+                data_type: data_type.clone(),
+            }),
+            Self::Binary {
+                left,
+                op,
+                right,
+                data_type,
+            } => Ok(Self::Binary {
+                left: Box::new(left.remap_columns(map)?),
+                op: *op,
+                right: Box::new(right.remap_columns(map)?),
+                data_type: data_type.clone(),
+            }),
+            Self::Cast { expr, target, mode } => Ok(Self::Cast {
+                expr: Box::new(expr.remap_columns(map)?),
+                target: target.clone(),
+                mode: *mode,
+            }),
+            Self::Between {
+                expr,
+                low,
+                high,
+                negated,
+            } => Ok(Self::Between {
+                expr: Box::new(expr.remap_columns(map)?),
+                low: Box::new(low.remap_columns(map)?),
+                high: Box::new(high.remap_columns(map)?),
+                negated: *negated,
+            }),
+            Self::InList {
+                expr,
+                list,
+                negated,
+                redacted,
+            } => {
+                let mut mapped_list = Vec::with_capacity(list.len());
+                for item in list {
+                    mapped_list.push(item.remap_columns(map)?);
+                }
+                Ok(Self::InList {
+                    expr: Box::new(expr.remap_columns(map)?),
+                    list: mapped_list,
+                    negated: *negated,
+                    redacted: *redacted,
+                })
+            }
+            Self::Like {
+                expr,
+                pattern,
+                escape,
+                case_insensitive,
+                negated,
+            } => Ok(Self::Like {
+                expr: Box::new(expr.remap_columns(map)?),
+                pattern: Box::new(pattern.remap_columns(map)?),
+                escape: *escape,
+                case_insensitive: *case_insensitive,
+                negated: *negated,
+            }),
+            Self::Case {
+                operand,
+                when_then,
+                else_expr,
+                data_type,
+            } => {
+                let mapped_op = match operand {
+                    Some(op) => Some(Box::new(op.remap_columns(map)?)),
+                    None => None,
+                };
+                let mut mapped_wt = Vec::with_capacity(when_then.len());
+                for (w, t) in when_then {
+                    mapped_wt.push((w.remap_columns(map)?, t.remap_columns(map)?));
+                }
+                let mapped_else = match else_expr {
+                    Some(el) => Some(Box::new(el.remap_columns(map)?)),
+                    None => None,
+                };
+                Ok(Self::Case {
+                    operand: mapped_op,
+                    when_then: mapped_wt,
+                    else_expr: mapped_else,
+                    data_type: data_type.clone(),
+                })
+            }
+            Self::MapIndex { map: m, key } => Ok(Self::MapIndex {
+                map: Box::new(m.remap_columns(map)?),
+                key: Box::new(key.remap_columns(map)?),
+            }),
+            Self::MakeArray { elems, item_type } => {
+                let mut mapped_elems = Vec::with_capacity(elems.len());
+                for elem in elems {
+                    mapped_elems.push(elem.remap_columns(map)?);
+                }
+                Ok(Self::MakeArray {
+                    elems: mapped_elems,
+                    item_type: item_type.clone(),
+                })
+            }
+            Self::Call {
+                func,
+                args,
+                data_type,
+            } => {
+                let mut mapped_args = Vec::with_capacity(args.len());
+                for arg in args {
+                    mapped_args.push(arg.remap_columns(map)?);
+                }
+                Ok(Self::Call {
+                    func: *func,
+                    args: mapped_args,
+                    data_type: data_type.clone(),
+                })
+            }
+        }
+    }
 }
 
 fn fmt_scalar_safe(value: &ScalarValue) -> String {
@@ -675,4 +885,105 @@ pub struct EvalContext {
     pub now_ns: i64,
     /// Cooperative cancellation flag.
     pub cancel: CancelToken,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn col(index: usize, name: &str, data_type: DataType) -> Expr {
+        Expr::Column {
+            index,
+            name: name.to_owned(),
+            data_type,
+        }
+    }
+
+    #[test]
+    fn referenced_and_remap_cover_all_expr_variants() {
+        let expr = Expr::Case {
+            operand: Some(Box::new(col(1, "c1", DataType::I64))),
+            when_then: vec![(
+                Expr::Between {
+                    expr: Box::new(col(2, "c2", DataType::I64)),
+                    low: Box::new(Expr::Literal(ScalarValue::I64(0))),
+                    high: Box::new(Expr::Unary {
+                        op: UnaryOp::Neg,
+                        expr: Box::new(col(3, "c3", DataType::I64)),
+                        data_type: DataType::I64,
+                    }),
+                    negated: false,
+                },
+                Expr::MakeArray {
+                    elems: vec![
+                        Expr::Cast {
+                            expr: Box::new(Expr::MapIndex {
+                                map: Box::new(col(4, "c4", DataType::MapUtf8)),
+                                key: Box::new(Expr::Literal(ScalarValue::Utf8("k".to_owned()))),
+                            }),
+                            target: DataType::Utf8,
+                            mode: CastMode::Try,
+                        },
+                        Expr::Call {
+                            func: ScalarFn::Coalesce,
+                            args: vec![col(5, "c5", DataType::Utf8)],
+                            data_type: DataType::Utf8,
+                        },
+                    ],
+                    item_type: DataType::Utf8,
+                },
+            )],
+            else_expr: Some(Box::new(Expr::Binary {
+                left: Box::new(Expr::InList {
+                    expr: Box::new(col(6, "c6", DataType::Utf8)),
+                    list: vec![col(7, "c7", DataType::Utf8)],
+                    negated: false,
+                    redacted: true,
+                }),
+                op: BinaryOp::And,
+                right: Box::new(Expr::Like {
+                    expr: Box::new(col(8, "c8", DataType::Utf8)),
+                    pattern: Box::new(Expr::Literal(ScalarValue::Utf8("%x%".to_owned()))),
+                    escape: Some('\\'),
+                    case_insensitive: true,
+                    negated: false,
+                }),
+                data_type: DataType::Bool,
+            })),
+            data_type: DataType::List(Box::new(DataType::Utf8)),
+        };
+
+        let mut refs = BTreeSet::new();
+        expr.referenced_columns(&mut refs);
+        assert_eq!(
+            refs.into_iter().collect::<Vec<_>>(),
+            vec![1, 2, 3, 4, 5, 6, 7, 8]
+        );
+
+        let map = vec![
+            None,
+            Some(10),
+            Some(20),
+            Some(30),
+            Some(40),
+            Some(50),
+            Some(60),
+            Some(70),
+            Some(80),
+        ];
+        let remapped = expr.remap_columns(&map).unwrap();
+        let mut new_refs = BTreeSet::new();
+        remapped.referenced_columns(&mut new_refs);
+        assert_eq!(
+            new_refs.into_iter().collect::<Vec<_>>(),
+            vec![10, 20, 30, 40, 50, 60, 70, 80]
+        );
+
+        // Missing mapping returns Internal error
+        let bad_map = vec![None; 9];
+        assert!(matches!(
+            expr.remap_columns(&bad_map),
+            Err(QueryError::Internal(_))
+        ));
+    }
 }

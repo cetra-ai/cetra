@@ -194,6 +194,55 @@ impl Batch {
         })
     }
 
+    /// Consumes `self` and replaces `selection` without copying column buffers.
+    pub fn into_with_selection(mut self, selection: Selection) -> Result<Self, ColumnError> {
+        selection.validate(self.raw_len)?;
+        validate_non_null_fields(&self.schema, &self.columns, &selection)?;
+        self.selection = selection;
+        Ok(self)
+    }
+
+    /// Consumes `self` and intersects the current selection with `mask` (length `raw_len`)
+    /// without copying column buffers.
+    pub fn into_filter_mask(self, mask: &Bitmap) -> Result<Self, ColumnError> {
+        let next = self.selection.intersect_mask(self.raw_len, mask)?;
+        self.into_with_selection(next)
+    }
+
+    /// Consumes `self` and projects a subset of columns by index, keeping `selection` intact.
+    /// Moves unique columns without cloning and clones only when an index appears more than once.
+    pub fn into_project(mut self, indices: &[usize]) -> Result<Self, ColumnError> {
+        let new_schema = Arc::new(self.schema.project(indices)?);
+        let old_columns = std::mem::take(&mut self.columns);
+        let mut slots: Vec<Option<Column>> = old_columns.into_iter().map(Some).collect();
+        let mut first_out_pos: Vec<Option<usize>> = vec![None; slots.len()];
+        let mut new_columns = Vec::with_capacity(indices.len());
+
+        for &idx in indices {
+            if let Some(col) = slots.get_mut(idx).and_then(Option::take) {
+                if let Some(pos_slot) = first_out_pos.get_mut(idx) {
+                    *pos_slot = Some(new_columns.len());
+                }
+                new_columns.push(col);
+            } else if let Some(out_col) = first_out_pos
+                .get(idx)
+                .and_then(|pos| *pos)
+                .and_then(|pos| new_columns.get(pos))
+                .cloned()
+            {
+                new_columns.push(out_col);
+            } else {
+                return Err(ColumnError::InvalidBatch {
+                    reason: "projection index out of bounds",
+                });
+            }
+        }
+
+        self.schema = new_schema;
+        self.columns = new_columns;
+        Ok(self)
+    }
+
     /// Slices physical rows `offset..offset + len`, slicing `selection` accordingly.
     pub fn slice(&self, offset: usize, len: usize) -> Result<Self, ColumnError> {
         let new_sel = self.selection.slice(self.raw_len, offset, len)?;
@@ -896,5 +945,103 @@ mod tests {
         .unwrap_err();
         assert!(matches!(err_flat, ColumnError::MemoryLimit { .. }));
         assert_eq!(minus_one_res.size(), 0);
+    }
+
+    #[test]
+    fn into_selection_and_into_project_move_without_cloning_unique_columns() {
+        let schema = Schema::try_new_arc(vec![
+            Field::new("a", DataType::I64, false),
+            Field::new("b", DataType::I64, true),
+            Field::new("c", DataType::I64, false),
+        ])
+        .unwrap();
+
+        let c0 = Column::Flat(FlatColumn::try_new(FlatData::I64(vec![10, 20, 30]), None).unwrap());
+        let c1 = Column::Flat(
+            FlatColumn::try_new(
+                FlatData::I64(vec![1, 2, 3]),
+                Some(Bitmap::from_bools(&[true, false, true])),
+            )
+            .unwrap(),
+        );
+        let c2 = Column::Flat(FlatColumn::try_new(FlatData::I64(vec![7, 8, 9]), None).unwrap());
+
+        let ptr0 = match &c0 {
+            Column::Flat(fc) => match fc.data() {
+                FlatData::I64(v) => v.as_ptr(),
+                _ => unreachable!(),
+            },
+            _ => unreachable!(),
+        };
+        let ptr2 = match &c2 {
+            Column::Flat(fc) => match fc.data() {
+                FlatData::I64(v) => v.as_ptr(),
+                _ => unreachable!(),
+            },
+            _ => unreachable!(),
+        };
+
+        let batch = Batch::try_new_all(Arc::clone(&schema), vec![c0, c1, c2], 3).unwrap();
+
+        // Non-null check rejects null row in column b if we project/validate?
+        // First test into_filter_mask + into_with_selection move c0 without reallocating
+        let mask = Bitmap::from_bools(&[true, false, true]);
+        let filtered = batch.into_filter_mask(&mask).unwrap();
+        assert_eq!(filtered.num_rows(), 2);
+        assert_eq!(filtered.raw_len(), 3);
+
+        // into_project with duplicate index [2, 0, 2]: c2[0] and c0[1] are moved, c2[2] is cloned
+        let projected = filtered.into_project(&[2, 0, 2]).unwrap();
+        assert_eq!(projected.schema().len(), 3);
+        assert_eq!(projected.num_rows(), 2);
+        assert_eq!(projected.raw_len(), 3);
+
+        let moved_ptr2 = match &projected.columns()[0] {
+            Column::Flat(fc) => match fc.data() {
+                FlatData::I64(v) => v.as_ptr(),
+                _ => unreachable!(),
+            },
+            _ => unreachable!(),
+        };
+        let moved_ptr0 = match &projected.columns()[1] {
+            Column::Flat(fc) => match fc.data() {
+                FlatData::I64(v) => v.as_ptr(),
+                _ => unreachable!(),
+            },
+            _ => unreachable!(),
+        };
+        let cloned_ptr2 = match &projected.columns()[2] {
+            Column::Flat(fc) => match fc.data() {
+                FlatData::I64(v) => v.as_ptr(),
+                _ => unreachable!(),
+            },
+            _ => unreachable!(),
+        };
+        assert_eq!(moved_ptr2, ptr2);
+        assert_eq!(moved_ptr0, ptr0);
+        assert_ne!(cloned_ptr2, ptr2);
+
+        // Empty projection yields 0 columns while preserving raw_len and selection
+        let empty_proj = projected.clone().into_project(&[]).unwrap();
+        assert_eq!(empty_proj.schema().len(), 0);
+        assert_eq!(empty_proj.columns().len(), 0);
+        assert_eq!(empty_proj.raw_len(), 3);
+        assert_eq!(empty_proj.num_rows(), 2);
+
+        // Out-of-bounds projection fails cleanly
+        assert!(matches!(
+            projected.clone().into_project(&[99]),
+            Err(ColumnError::InvalidBatch { .. })
+        ));
+
+        // into_with_selection validates selection bounds and non-null constraints
+        let with_sel = projected
+            .into_with_selection(Selection::Indices(vec![0]))
+            .unwrap();
+        assert_eq!(with_sel.num_rows(), 1);
+        assert!(matches!(
+            with_sel.into_with_selection(Selection::Indices(vec![5])),
+            Err(ColumnError::InvalidBatch { .. })
+        ));
     }
 }
