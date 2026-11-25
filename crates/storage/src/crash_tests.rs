@@ -106,7 +106,10 @@ fn quiet_config(dir: &Path) -> StorageConfig {
             upload_concurrency: 2,
         },
         memtable: MemtableConfig::default(),
-        query: QueryConfig::default(),
+        query: QueryConfig {
+            threads: 2,
+            ..QueryConfig::default()
+        },
         anchor: Default::default(),
         gc: Default::default(),
         compaction: Default::default(),

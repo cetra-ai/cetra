@@ -66,6 +66,7 @@ pub(crate) mod partials;
 pub(crate) mod projects;
 pub mod query;
 mod query_error;
+mod query_runtime;
 mod query_text;
 pub(crate) mod read_cache;
 mod reads;
@@ -128,6 +129,7 @@ pub use sql::{
     EXPORT_MAX_CHUNK_BYTES, EXPORT_MAX_ROWS, ExportFormat, SQL_MAX_RESULT_BYTES, SQL_MAX_ROWS,
     SqlColumn, SqlJson, SqlRequest,
 };
+pub use query_runtime::QueryRuntime;
 pub use views::{
     ColumnInfo, ColumnKind, FunctionInfo, ProjectQuery, QueryContext, SqliteView, TimeWindow,
     ViewColumns, ViewName, function_catalog, view_catalog,
@@ -280,6 +282,9 @@ pub struct Storage {
     /// `wal/spans` and `wal/scores` under the data directory, measured by [`Self::stats`].
     wal_dirs: [PathBuf; 2],
     runtime: Arc<RuntimeEnv>,
+    /// The query runtime: every query's and compaction job's DataFusion work (D-R-39).
+    #[allow(dead_code)] // P2 and P3 use it
+    query_runtime: QueryRuntime,
     /// Process-wide query memory (spec 03 §6). Each query's pool takes from it.
     memory: Arc<memory::SharedPool>,
     /// What [`Self::query`] admits each query with.
@@ -499,6 +504,13 @@ impl Storage {
             tombstones,
             projects,
         }));
+        let query_runtime = QueryRuntime::new(
+            NonZeroUsize::new(config.query.threads).unwrap_or(NonZeroUsize::MIN),
+        )
+        .map_err(|error| {
+            tracing::error!(%error, "building the query runtime");
+            OpenError::Runtime
+        })?;
         // Compaction gets a runtime of its own, so its memory pool is
         // independent of the query runtime's.
         let compactor = {
@@ -654,6 +666,7 @@ impl Storage {
                 data_dir.join("wal").join(Table::Scores.name()),
             ],
             runtime,
+            query_runtime,
             memory,
             query_memory,
             replayed: [recovered.spans_records, recovered.scores_records],
