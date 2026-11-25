@@ -32,6 +32,7 @@ with an `### Upgrade notes` section (https://cetra.sh/docs/self-hosting/upgrade/
 - The connection form suggests common model ids for OpenAI, Anthropic and Gemini in the Default model field.
 - Media parts carry an optional `transcript`. OpenAI chat output audio keeps its transcript, a message with only audio previews its transcripts, and judges read `[audio: <transcript>]`.
 - The alert editor, the rule panel and the rule list chart an issue occurrence rule's occurrences per window with its threshold, through `GET /api/v1/projects/{project}/alert-rules/issue-preview`.
+- The playground compares versions of a prompt side by side: each column of a draft opened from a prompt can run one of its versions, with the version's template, answer, tokens, cost and latency; `?compare=` opens two versions.
 
 ### Changed
 
