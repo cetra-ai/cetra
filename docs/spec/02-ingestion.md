@@ -311,6 +311,7 @@ Applied to `input`, `output`, `system_instructions` after message conversion and
    - canonical `blob` parts;
    - data URIs `data:<mime>;base64,<…>` anywhere in string values;
    - provider shapes that survived as raw JSON: OpenAI `image_url.url` data URI, `input_audio.data`, Anthropic `source: {type: base64, media_type, data}`, Gemini `inline_data` / `inlineData {mime_type, data}`;
+   - OpenAI chat output `message.audio` with a string `data`, which the OpenAI converter turns into an audio `blob` part carrying its `transcript` (the format is not in the response, so the type is sniffed);
    - Vercel `image` and `file` parts (raw base64 in `image` or `data`). The Vercel converter turns them into `blob` parts.
 2. Skip if decoded size < `media.min_bytes` (default 4 KiB) — tiny blobs stay inline.
 3. Decode base64 and compute SHA-256. The MIME type is resolved in this order:
@@ -331,7 +332,7 @@ After media extraction, these strings are checked against `ingest.max_attribute_
 
 - **Messages.** The candidate list is measured by its serialized length.
   1. Keep every system message, the first user message, and the longest suffix that still fits. Where a contiguous run of messages was removed, insert one placeholder `{"role":"system","parts":[{"type":"text","content":"[cetra: K messages truncated]"}]}`. `K` is the number removed in that run.
-  2. If the kept list still exceeds the limit, cut the longest string leaf with the string rule: text or reasoning `content`, or tool `arguments` / `response` when that value is a JSON string. Cut it to the length that makes the list fit, or to 1 KiB when a shorter cut would be required. Repeat, longest first, until the list fits or no leaf is longer than 1 KiB.
+  2. If the kept list still exceeds the limit, cut the longest string leaf with the string rule: text or reasoning `content`, a media part's `transcript`, or tool `arguments` / `response` when that value is a JSON string. Cut it to the length that makes the list fit, or to 1 KiB when a shorter cut would be required. Repeat, longest first, until the list fits or no leaf is longer than 1 KiB.
   3. If it still does not fit, store the serialized messages cut with the string rule and set the format to `text`. `attributes` gains `cetra.normalize_error` code `truncate:<field>`, where `<field>` is `input` or `output`.
 - **JSON payloads.** `input` or `output` whose format is `json` is cut as one string. The format becomes `text`, because the cut text is no longer valid JSON.
 - **Other strings.** Cut at the largest UTF-8 character boundary ≤ the limit, then append `…[cetra: truncated, original N bytes]`. The stored value is slightly longer than the limit. A value whose length equals the limit is kept.

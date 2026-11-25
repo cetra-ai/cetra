@@ -82,7 +82,7 @@ Type notation in this document: "Utf8 (dict)" means a `Utf8` column in memory th
 | `input_format` | Utf8 (dict), nullable | | `messages` \| `json` \| `text`. |
 | `output` | Utf8, nullable | | |
 | `output_format` | Utf8 (dict), nullable | | |
-| `input_preview` | Utf8, nullable | P | First 512 chars of plain-text rendering. |
+| `input_preview` | Utf8, nullable | P | First 512 chars of plain-text rendering. A message with no text part previews its media transcripts. |
 | `output_preview` | Utf8, nullable | P | Same. |
 | `system_instructions` | Utf8 (JSON), nullable | | |
 | `tool_definitions` | Utf8 (JSON), nullable | | |
