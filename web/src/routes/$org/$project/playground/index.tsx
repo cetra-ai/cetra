@@ -166,6 +166,21 @@ function useStable<T>(value: T): T {
   return kept.current.value;
 }
 
+/** The list from the last render whose items had the same versions and the same data objects (react-query keeps a version's data object while it does not change), so memoized children skip a render. */
+function useSameVersions<T>(list: { version: number; data: T }[]): { version: number; data: T }[] {
+  const kept = useRef(list);
+  const previous = kept.current;
+  if (
+    previous.length !== list.length ||
+    previous.some(
+      (item, index) => item.version !== list[index]?.version || item.data !== list[index]?.data,
+    )
+  ) {
+    kept.current = list;
+  }
+  return kept.current;
+}
+
 /** The runs with their field errors cleared: the errors were about the draft as it was. */
 function withoutFieldErrors(runs: Record<string, RunState>): Record<string, RunState> {
   const hasErrors = Object.values(runs).some((run) => Object.keys(run.errors).length > 0);
@@ -680,10 +695,23 @@ function PlaygroundWorkspace({
   const versionOf = (version: number) => pinnedQueries[pinnedNumbers.indexOf(version)]?.data;
   const versionFailed = (version: number) =>
     pinnedQueries[pinnedNumbers.indexOf(version)]?.isError === true;
-  // The pinned versions loaded so far. useStable keeps their identity until one loads or changes, so
-  // the memo below is rebuilt only then.
-  const loadedVersions = useStable(
+  // The pinned versions loaded so far. useSameVersions keeps their identity until one loads or
+  // changes, so the memos below are rebuilt only then.
+  const loadedVersions = useSameVersions(
     pinnedNumbers.map((version, index) => ({ version, data: pinnedQueries[index]?.data })),
+  );
+  // The pinned versions' messages, built once per loaded version: a new array on each draft edit
+  // would re-render every pinned column (RunColumn is memoized).
+  const templates = useMemo(
+    () =>
+      new Map(
+        loadedVersions.flatMap((item) =>
+          item.data === undefined
+            ? []
+            : [[item.version, draftFromPromptVersion(item.data, []).entries] as const],
+        ),
+      ),
+    [loadedVersions],
   );
 
   // The draft's checks are recomputed only when the draft, the connections or a pinned version
@@ -906,12 +934,30 @@ function PlaygroundWorkspace({
         updateColumn(id, { version: undefined });
         return;
       }
-      updateColumn(id, { version });
       const name = sourcePrompt(draftRef.current);
       if (name === undefined) {
+        updateColumn(id, { version });
         return;
       }
-      void queryClient.fetchQuery(promptVersionQuery(org, project, name, version)).then(
+      const query = promptVersionQuery(org, project, name, version);
+      const cached = queryClient.getQueryData<Schema<"PromptVersion">>(query.queryKey);
+      if (cached !== undefined) {
+        editDraft((previous) => ({
+          ...previous,
+          columns: previous.columns.map((column) =>
+            column.id === id
+              ? pinColumn(
+                  column,
+                  cached,
+                  connections.map((item) => item.id),
+                )
+              : column,
+          ),
+        }));
+        return;
+      }
+      updateColumn(id, { version });
+      void queryClient.fetchQuery({ ...query, staleTime: Number.POSITIVE_INFINITY }).then(
         (found) => {
           editDraft((previous) => ({
             ...previous,
@@ -1199,7 +1245,7 @@ function PlaygroundWorkspace({
                   versions={versionOptions}
                   template={
                     pinnedIds.has(column.id) && column.version !== undefined
-                      ? columnDrafts[index]?.entries
+                      ? templates.get(column.version)
                       : undefined
                   }
                   onPickVersion={pickVersion}

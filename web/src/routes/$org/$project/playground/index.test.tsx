@@ -813,3 +813,80 @@ it("?compare= with a missing version opens the version alone", async () => {
   expect(await screen.findByRole("region", { name: "Model 1" })).toBeInTheDocument();
   expect(screen.queryByRole("region", { name: "Model 2" })).not.toBeInTheDocument();
 });
+
+it("picking a version while its column runs stops the run and clears it", async () => {
+  let signal: AbortSignal | undefined;
+  server.use(
+    http.post(RUNS, ({ request }) => {
+      signal = request.signal;
+      return openStream();
+    }),
+  );
+  saveDraft(PROJECT_KEY, promptDraft([column("c1"), column("c2")]));
+  const { user } = await renderApp(PAGE);
+  const region = within(await screen.findByRole("region", { name: "Model 2" }));
+  await user.click(region.getByRole("button", { name: "Run" }));
+  await waitFor(() => expect(signal).toBeDefined());
+
+  await pickVersionIn(user, "Model 2", "v1 · production");
+
+  await waitFor(() => expect(signal?.aborted).toBe(true));
+  expect(await region.findByText("Run to see the answer")).toBeInTheDocument();
+});
+
+it("Run all runs the columns that can run", async () => {
+  const bodies: RunBody[] = [];
+  server.use(
+    http.post(RUNS, async ({ request }) => {
+      bodies.push((await request.json()) as RunBody);
+      return answer(["done", DONE]);
+    }),
+    http.get(VERSION, ({ params }) =>
+      String(params.version) === "1"
+        ? HttpResponse.json({ title: "Broken", status: 500 }, { status: 500 })
+        : undefined,
+    ),
+  );
+  saveDraft(PROJECT_KEY, promptDraft([column("c1"), column("c2", 1)]));
+  const { user } = await renderApp(PAGE);
+  await screen.findByText("Could not load version 1.");
+  const runAll = screen.getByRole("button", { name: "Run all" });
+  expect(runAll).toBeEnabled();
+
+  await user.click(runAll);
+
+  const first = within(screen.getByRole("region", { name: "Model 1" }));
+  expect(await first.findByText("$0.0021")).toBeInTheDocument();
+  expect(bodies).toHaveLength(1);
+  expect(bodies[0]?.source?.prompt?.version).toBe(2);
+});
+
+it("picking a loaded version applies its config without fetching it again", async () => {
+  let fetches = 0;
+  server.use(
+    http.get(VERSION, ({ params }) => {
+      if (String(params.version) !== "1") {
+        return undefined;
+      }
+      fetches += 1;
+      return HttpResponse.json({
+        ...versionOneFixture,
+        config: { model: "gpt-4o-mini", params: { temperature: 0.9, max_tokens: 256 } },
+      });
+    }),
+  );
+  const { user } = await renderApp(`${PAGE}?prompt=support-reply&version=2`);
+  await screen.findByText("From prompt support-reply v2");
+  await user.click(screen.getByRole("button", { name: "Add model" }));
+  const modelOf = () =>
+    within(screen.getByRole("region", { name: "Model 2" })).getByRole("textbox", {
+      name: "Model",
+    });
+  await pickVersionIn(user, "Model 2", "v1 · production");
+  await waitFor(() => expect(modelOf()).toHaveValue("gpt-4o-mini"));
+  await pickVersionIn(user, "Model 2", "Draft");
+  await pickVersionIn(user, "Model 2", "v1 · production");
+
+  expect(modelOf()).toHaveValue("gpt-4o-mini");
+  expect(fetches).toBe(1);
+});
