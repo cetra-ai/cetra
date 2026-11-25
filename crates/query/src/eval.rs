@@ -134,7 +134,8 @@ fn selection_active_bitmap<'a>(
     }
 }
 
-fn eval_expr_masked(
+/// Evaluates `expr` over `batch` restricted to rows where `active` is `true` (or all rows if `None`).
+pub(crate) fn eval_expr_masked(
     expr: &Expr,
     batch: &Batch,
     active: Option<&Bitmap>,
