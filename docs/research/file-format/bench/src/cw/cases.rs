@@ -6,8 +6,12 @@ use std::fs::{self, File};
 use std::io::BufWriter;
 use std::path::{Path, PathBuf};
 
-use arrow::array::{Array, FixedSizeBinaryArray, RecordBatch, TimestampNanosecondArray, UInt32Array};
-use arrow::compute::{SortColumn, concat_batches, interleave_record_batch, lexsort_to_indices, take_record_batch};
+use arrow::array::{
+    Array, FixedSizeBinaryArray, RecordBatch, TimestampNanosecondArray, UInt32Array,
+};
+use arrow::compute::{
+    SortColumn, concat_batches, interleave_record_batch, lexsort_to_indices, take_record_batch,
+};
 use arrow::datatypes::SchemaRef;
 use arrow::error::ArrowError;
 use arrow::ipc::reader::FileReader;
@@ -54,18 +58,33 @@ pub const NEEDLES: [(&str, &str); 6] = [
 ];
 /// Phrases of the `intl` text: accents, CJK, emoji, Cyrillic, and case pairs.
 pub const INTL_PHRASES: [&str; 10] = [
-    "Le café est très chaud", "CAFÉ CRÈME à emporter", "東京の天気は晴れです", "数据库连接错误",
-    "🚀 déploiement terminé ✅", "Die Straße ist gesperrt", "STRASSE GESPERRT",
-    "Ошибка подключения к базе данных", "naïve résumé façade", "😀😃 emoji 🎉",
+    "Le café est très chaud",
+    "CAFÉ CRÈME à emporter",
+    "東京の天気は晴れです",
+    "数据库连接错误",
+    "🚀 déploiement terminé ✅",
+    "Die Straße ist gesperrt",
+    "STRASSE GESPERRT",
+    "Ошибка подключения к базе данных",
+    "naïve résumé façade",
+    "😀😃 emoji 🎉",
 ];
 /// Extra needles of `intl`, appended to `NEEDLES`.
 pub const INTL_NEEDLES: [(&str, &str); 5] = [
-    ("cafe", "café"), ("tokyo", "東京"), ("rocket", "🚀"), ("strasse", "straße"), ("oshibka", "ошибка"),
+    ("cafe", "café"),
+    ("tokyo", "東京"),
+    ("rocket", "🚀"),
+    ("strasse", "straße"),
+    ("oshibka", "ошибка"),
 ];
 /// The needles of a project (`cw_needles.txt`): planted ones of `NEEDLES`, which a project built
 /// with `--payloads` from a planted case carries, and natural ones.
 pub const PROJECT_NEEDLES: [(&str, &str); 5] = [
-    ("absent", ABSENT), ("bug", "bug"), ("404", "404"), ("common", "commonneedle"), ("role", "\"role\""),
+    ("absent", ABSENT),
+    ("bug", "bug"),
+    ("404", "404"),
+    ("common", "commonneedle"),
+    ("role", "\"role\""),
 ];
 /// Spans of the `mega` case's trace (M4.1 § Steps 1).
 pub const MEGA_SPANS: usize = 10_000;
@@ -97,8 +116,15 @@ pub fn gen_cmd(args: &[String]) -> crate::R<()> {
         _ => return Err(crate::USAGE.into()),
     };
     let (spans, files) = gen_spans(case, traces)?;
-    let llm = spans.iter().filter(|s| s.span_kind == SpanKind::Llm).count();
-    println!("{} spans, {:.2}% LLM", spans.len(), 100.0 * llm as f64 / spans.len().max(1) as f64);
+    let llm = spans
+        .iter()
+        .filter(|s| s.span_kind == SpanKind::Llm)
+        .count();
+    println!(
+        "{} spans, {:.2}% LLM",
+        spans.len(),
+        100.0 * llm as f64 / spans.len().max(1) as f64
+    );
     write_case(Path::new(dir), spans, &files)
 }
 
@@ -126,7 +152,12 @@ pub fn import_cmd(args: &[String]) -> crate::R<()> {
         .map(crate::parse_id)
         .collect::<crate::R<Vec<_>>>()?;
     if traces.len() < IDS {
-        return Err(format!("{}: {} trace ids, need {IDS}", trace_ids.display(), traces.len()).into());
+        return Err(format!(
+            "{}: {} trace ids, need {IDS}",
+            trace_ids.display(),
+            traces.len()
+        )
+        .into());
     }
 
     // Spans for cw_spans.txt come from the first input file: row i * rows / IDS, moving forward
@@ -166,7 +197,13 @@ pub fn import_cmd(args: &[String]) -> crate::R<()> {
     }
 
     let queries = queries_for("import", &needles);
-    let files = CaseFiles { queries, traces, spans: picks, needles, attr: None };
+    let files = CaseFiles {
+        queries,
+        traces,
+        spans: picks,
+        needles,
+        attr: None,
+    };
     write_texts(dir, &files)?;
     println!("imported {} files from {}", parquet.len(), src.display());
     Ok(())
@@ -185,15 +222,24 @@ fn import_needles(src: &Path, args: &[String]) -> crate::R<Vec<(String, String)>
         }
         return Ok(out);
     }
-    let mut out: Vec<(String, String)> = [("absent", ABSENT), ("404", "404"), ("bug", "bug"), ("sql", "SQL"), ("the", " the ")]
-        .iter()
-        .map(|(n, v)| ((*n).to_owned(), (*v).to_owned()))
-        .collect();
+    let mut out: Vec<(String, String)> = [
+        ("absent", ABSENT),
+        ("404", "404"),
+        ("bug", "bug"),
+        ("sql", "SQL"),
+        ("the", " the "),
+    ]
+    .iter()
+    .map(|(n, v)| ((*n).to_owned(), (*v).to_owned()))
+    .collect();
     let path = src.join("needles.txt");
     if path.exists() {
         let text = fs::read_to_string(&path)?;
         if let Some(first) = text.lines().next() {
-            out.push(("rare".to_owned(), String::from_utf8(crate::profile::unhex(first.trim()))?));
+            out.push((
+                "rare".to_owned(),
+                String::from_utf8(crate::profile::unhex(first.trim()))?,
+            ));
         }
     }
     Ok(out)
@@ -210,7 +256,9 @@ fn pick_spans(
 ) -> crate::R<()> {
     let trace = fixed_binary(batch, "trace_id")?;
     let span = fixed_binary(batch, "span_id")?;
-    let input = batch.column_by_name("input").ok_or("input file has no input column")?;
+    let input = batch
+        .column_by_name("input")
+        .ok_or("input file has no input column")?;
     for r in 0..batch.num_rows() {
         if picks.len() >= IDS {
             break;
@@ -230,7 +278,9 @@ fn pick_spans(
 
 /// The fixed-size binary column `name` of `batch`.
 fn fixed_binary<'a>(batch: &'a RecordBatch, name: &str) -> crate::R<&'a FixedSizeBinaryArray> {
-    let column = batch.column_by_name(name).ok_or_else(|| format!("input file has no {name} column"))?;
+    let column = batch
+        .column_by_name(name)
+        .ok_or_else(|| format!("input file has no {name} column"))?;
     column
         .as_any()
         .downcast_ref::<FixedSizeBinaryArray>()
@@ -265,7 +315,11 @@ pub fn gen_spans(case: &str, traces: Option<usize>) -> crate::R<(Vec<Span>, Case
         }
     }
     // Before any picking, so the rng order is fixed (M4.1 § Steps 1).
-    let mega = if is_mega { Some(add_mega_clones(&mut spans, &mut rng)?) } else { None };
+    let mega = if is_mega {
+        Some(add_mega_clones(&mut spans, &mut rng)?)
+    } else {
+        None
+    };
 
     let mut attr = None;
     let mut giant_pairs = Vec::new();
@@ -290,10 +344,17 @@ pub fn gen_spans(case: &str, traces: Option<usize>) -> crate::R<(Vec<Span>, Case
     let mut needles: Vec<(String, String)> = if keys.is_some() || is_mega {
         Vec::new()
     } else {
-        NEEDLES.iter().map(|(n, v)| ((*n).to_owned(), (*v).to_owned())).collect()
+        NEEDLES
+            .iter()
+            .map(|(n, v)| ((*n).to_owned(), (*v).to_owned()))
+            .collect()
     };
     if case == "intl" {
-        needles.extend(INTL_NEEDLES.iter().map(|(n, v)| ((*n).to_owned(), (*v).to_owned())));
+        needles.extend(
+            INTL_NEEDLES
+                .iter()
+                .map(|(n, v)| ((*n).to_owned(), (*v).to_owned())),
+        );
     }
     let (traces, pairs) = match mega {
         Some((trace, clones)) => {
@@ -301,9 +362,18 @@ pub fn gen_spans(case: &str, traces: Option<usize>) -> crate::R<(Vec<Span>, Case
             traces.extend(pick_traces_excluding(&spans, &mut rng, trace)?);
             (traces, clones)
         }
-        None => (pick_traces(&spans, &mut rng)?, pick_pairs(&spans, &giant_pairs, keys.is_some(), &mut rng)?),
+        None => (
+            pick_traces(&spans, &mut rng)?,
+            pick_pairs(&spans, &giant_pairs, keys.is_some(), &mut rng)?,
+        ),
     };
-    let files = CaseFiles { queries: queries_for(case, &needles), traces, spans: pairs, needles, attr };
+    let files = CaseFiles {
+        queries: queries_for(case, &needles),
+        traces,
+        spans: pairs,
+        needles,
+        attr,
+    };
     Ok((spans, files))
 }
 
@@ -313,7 +383,9 @@ fn queries_for(case: &str, needles: &[(String, String)]) -> Vec<String> {
     let search: Vec<String> = needles.iter().map(|(n, _)| format!("search:{n}")).collect();
     let strs = |v: &[&str]| v.iter().map(|s| (*s).to_owned()).collect::<Vec<String>>();
     match case {
-        "keys100" | "keys1k" | "keys5k" => strs(&["write", "attr_filter", "attr_keys", "trace_light"]),
+        "keys100" | "keys1k" | "keys5k" => {
+            strs(&["write", "attr_filter", "attr_keys", "trace_light"])
+        }
         "text_unique" | "b64" | "json_random" => {
             let mut q = strs(&["write", "scan_payload"]);
             q.extend(search);
@@ -325,7 +397,13 @@ fn queries_for(case: &str, needles: &[(String, String)]) -> Vec<String> {
             q.extend(search);
             q
         }
-        "giant" => strs(&["write", "span_heavy", "scan_payload", "search:rare", "search:absent"]),
+        "giant" => strs(&[
+            "write",
+            "span_heavy",
+            "scan_payload",
+            "search:rare",
+            "search:absent",
+        ]),
         "mega" => strs(&["write", "trace_light", "span_heavy"]),
         "import" => {
             let mut q = strs(&["write", "scan_payload", "trace_light", "span_heavy"]);
@@ -349,7 +427,11 @@ fn pick_traces(spans: &[Span], rng: &mut datagen::Rng) -> crate::R<Vec<[u8; 16]>
 
 /// The `IDS - 1` trace ids that `pick_traces` would pick after `exclude`, which is not among
 /// them: the `mega` case's `cw_traces.txt` is `exclude` first, then these.
-fn pick_traces_excluding(spans: &[Span], rng: &mut datagen::Rng, exclude: [u8; 16]) -> crate::R<Vec<[u8; 16]>> {
+fn pick_traces_excluding(
+    spans: &[Span],
+    rng: &mut datagen::Rng,
+    exclude: [u8; 16],
+) -> crate::R<Vec<[u8; 16]>> {
     check_distinct_traces(spans)?;
     let mut out = draw_traces(spans, rng, vec![exclude]);
     out.remove(0);
@@ -378,14 +460,23 @@ fn draw_traces(spans: &[Span], rng: &mut datagen::Rng, mut out: Vec<[u8; 16]>) -
 
 /// `cw_spans.txt`: the first giant spans (up to 10), then random spans with an input, 20 in all.
 /// The `keys*` cases have no payloads, so their pool is every span.
-fn pick_pairs(spans: &[Span], giant: &[Pair], keys: bool, rng: &mut datagen::Rng) -> crate::R<Vec<Pair>> {
+fn pick_pairs(
+    spans: &[Span],
+    giant: &[Pair],
+    keys: bool,
+    rng: &mut datagen::Rng,
+) -> crate::R<Vec<Pair>> {
     let pool: Vec<Pair> = spans
         .iter()
         .filter(|s| keys || s.input.is_some())
         .map(|s| (*s.trace_id.as_bytes(), *s.span_id.as_bytes()))
         .collect();
     if pool.len() < IDS {
-        return Err(format!("cw_spans.txt: only {} spans to pick from, need {IDS}", pool.len()).into());
+        return Err(format!(
+            "cw_spans.txt: only {} spans to pick from, need {IDS}",
+            pool.len()
+        )
+        .into());
     }
     let mut out: Vec<Pair> = giant.iter().take(10).copied().collect();
     while out.len() < IDS {
@@ -399,9 +490,12 @@ fn pick_pairs(spans: &[Span], giant: &[Pair], keys: bool, rng: &mut datagen::Rng
 
 /// The `mega` case's trace (M4.1 § Steps 1): the trace of the first LLM span with an input,
 /// extended in place to `MEGA_SPANS` spans by clones of that span, appended to `spans`. Clone `j`
-/// is parented to the root, starts `1 ms * (j + 1)` after the root and lasts 500 ns. Returns the
-/// trace id and the `cw_spans.txt` pairs: clones `j = 0, 500, …, 9500`.
-fn add_mega_clones(spans: &mut Vec<Span>, rng: &mut datagen::Rng) -> crate::R<([u8; 16], Vec<Pair>)> {
+/// is parented to the root, starts `1 µs * (j + 1)` (1,000 ns) after the root and lasts 500 ns.
+/// Returns the trace id and the `cw_spans.txt` pairs: clones `j = 0, 500, …, 9500`.
+fn add_mega_clones(
+    spans: &mut Vec<Span>,
+    rng: &mut datagen::Rng,
+) -> crate::R<([u8; 16], Vec<Pair>)> {
     let template = spans
         .iter()
         .find(|s| s.span_kind == SpanKind::Llm && s.input.is_some())
@@ -409,8 +503,15 @@ fn add_mega_clones(spans: &mut Vec<Span>, rng: &mut datagen::Rng) -> crate::R<([
         .ok_or("mega: no LLM span with an input")?;
     let trace = template.trace_id;
     let own = spans.iter().filter(|s| s.trace_id == trace).count();
-    if own > MEGA_SPANS {
-        return Err(format!("mega: the trace has {own} spans, more than {MEGA_SPANS}").into());
+    // The clones are `j = 0 … MEGA_SPANS - own - 1`; the last picked one must exist.
+    let last_picked = (IDS - 1) * MEGA_PICK_EVERY;
+    if own + last_picked >= MEGA_SPANS {
+        return Err(format!(
+            "mega: the template trace has {own} spans, leaving {} clones below {MEGA_SPANS}, \
+             but clone {last_picked} (the last picked one) must exist",
+            MEGA_SPANS.saturating_sub(own)
+        )
+        .into());
     }
     let root = spans
         .iter()
@@ -443,7 +544,11 @@ fn add_mega_clones(spans: &mut Vec<Span>, rng: &mut datagen::Rng) -> crate::R<([
         spans.push(s);
     }
     if pairs.len() != IDS {
-        return Err(format!("mega: {} clones, need {} for cw_spans.txt", MEGA_SPANS - own, IDS * MEGA_PICK_EVERY).into());
+        return Err(format!(
+            "mega: {} clone pairs for cw_spans.txt, need {IDS}",
+            pairs.len()
+        )
+        .into());
     }
     Ok((*trace.as_bytes(), pairs))
 }
@@ -473,8 +578,14 @@ fn write_inputs(dir: &Path, mut spans: Vec<Span>) -> crate::R<()> {
         let b = concat_batches(&batches[0].schema(), &batches)?;
         let idx = lexsort_to_indices(
             &[
-                SortColumn { values: b.column_by_name("trace_id").unwrap().clone(), options: None },
-                SortColumn { values: b.column_by_name("start_time").unwrap().clone(), options: None },
+                SortColumn {
+                    values: b.column_by_name("trace_id").unwrap().clone(),
+                    options: None,
+                },
+                SortColumn {
+                    values: b.column_by_name("start_time").unwrap().clone(),
+                    options: None,
+                },
             ],
             None,
         )?;
@@ -490,7 +601,10 @@ fn write_inputs(dir: &Path, mut spans: Vec<Span>) -> crate::R<()> {
 
 /// Creates one Arrow IPC input file, ready for batches of `schema`.
 fn create_input(path: &Path, schema: &SchemaRef) -> crate::R<FileWriter<BufWriter<File>>> {
-    Ok(FileWriter::try_new(BufWriter::new(File::create(path)?), schema)?)
+    Ok(FileWriter::try_new(
+        BufWriter::new(File::create(path)?),
+        schema,
+    )?)
 }
 
 /// Writes the text files of a case: queries, traces, spans, needles (when there are any) and
@@ -498,15 +612,24 @@ fn create_input(path: &Path, schema: &SchemaRef) -> crate::R<FileWriter<BufWrite
 fn write_texts(dir: &Path, files: &CaseFiles) -> crate::R<()> {
     fs::create_dir_all(dir)?;
     write_lines(dir.join("cw_queries.txt"), files.queries.iter().cloned())?;
-    write_lines(dir.join("cw_traces.txt"), files.traces.iter().map(|t| crate::hex(t)))?;
+    write_lines(
+        dir.join("cw_traces.txt"),
+        files.traces.iter().map(|t| crate::hex(t)),
+    )?;
     write_lines(
         dir.join("cw_spans.txt"),
-        files.spans.iter().map(|(t, s)| format!("{} {}", crate::hex(t), crate::hex(s))),
+        files
+            .spans
+            .iter()
+            .map(|(t, s)| format!("{} {}", crate::hex(t), crate::hex(s))),
     )?;
     if !files.needles.is_empty() {
         write_lines(
             dir.join("cw_needles.txt"),
-            files.needles.iter().map(|(n, v)| format!("{n}\t{}", crate::hex(v.as_bytes()))),
+            files
+                .needles
+                .iter()
+                .map(|(n, v)| format!("{n}\t{}", crate::hex(v.as_bytes()))),
         )?;
     }
     if let Some((key, value)) = &files.attr {
@@ -546,11 +669,21 @@ fn base64(bytes: &[u8]) -> String {
     const A: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
     let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
     for c in bytes.chunks(3) {
-        let n = (u32::from(c[0]) << 16) | (u32::from(*c.get(1).unwrap_or(&0)) << 8) | u32::from(*c.get(2).unwrap_or(&0));
+        let n = (u32::from(c[0]) << 16)
+            | (u32::from(*c.get(1).unwrap_or(&0)) << 8)
+            | u32::from(*c.get(2).unwrap_or(&0));
         out.push(A[(n >> 18) as usize & 63] as char);
         out.push(A[(n >> 12) as usize & 63] as char);
-        out.push(if c.len() > 1 { A[(n >> 6) as usize & 63] as char } else { '=' });
-        out.push(if c.len() > 2 { A[n as usize & 63] as char } else { '=' });
+        out.push(if c.len() > 1 {
+            A[(n >> 6) as usize & 63] as char
+        } else {
+            '='
+        });
+        out.push(if c.len() > 2 {
+            A[n as usize & 63] as char
+        } else {
+            '='
+        });
     }
     out
 }
@@ -566,7 +699,11 @@ fn unique_text(rng: &mut datagen::Rng, len: usize) -> String {
         }
         for i in 0..rng.range(3, 10) {
             let c = b'a' + rng.below(26) as u8;
-            s.push(if i == 0 && (words + 1) % 12 == 0 { c.to_ascii_uppercase() as char } else { c as char });
+            s.push(if i == 0 && (words + 1) % 12 == 0 {
+                c.to_ascii_uppercase() as char
+            } else {
+                c as char
+            });
         }
         words += 1;
     }
@@ -587,7 +724,11 @@ fn b64_text(rng: &mut datagen::Rng, len: usize) -> String {
 fn json_text(rng: &mut datagen::Rng, len: usize) -> String {
     let mut s = format!("{{\"id\":\"{}\",\"items\":[", hex_string(rng, 32));
     while s.len() < len {
-        let item = format!("{{\"k\":\"{}\",\"v\":{}}},", hex_string(rng, 16), rng.next() % 1_000_000);
+        let item = format!(
+            "{{\"k\":\"{}\",\"v\":{}}},",
+            hex_string(rng, 16),
+            rng.next() % 1_000_000
+        );
         s.push_str(&item);
     }
     if s.ends_with(',') {
@@ -628,15 +769,29 @@ fn put_payload(
 }
 
 /// Replaces every non-null input and output by `f(rng, its byte length)`.
-fn replace_payloads(spans: &mut [Span], rng: &mut datagen::Rng, f: fn(&mut datagen::Rng, usize) -> String) {
+fn replace_payloads(
+    spans: &mut [Span],
+    rng: &mut datagen::Rng,
+    f: fn(&mut datagen::Rng, usize) -> String,
+) {
     for s in spans.iter_mut() {
         if let Some(len) = s.input.as_ref().map(String::len) {
             let value = f(rng, len);
-            put_payload(value, &mut s.input, &mut s.input_format, &mut s.input_preview);
+            put_payload(
+                value,
+                &mut s.input,
+                &mut s.input_format,
+                &mut s.input_preview,
+            );
         }
         if let Some(len) = s.output.as_ref().map(String::len) {
             let value = f(rng, len);
-            put_payload(value, &mut s.output, &mut s.output_format, &mut s.output_preview);
+            put_payload(
+                value,
+                &mut s.output,
+                &mut s.output_format,
+                &mut s.output_preview,
+            );
         }
     }
 }
@@ -646,7 +801,11 @@ fn replace_payloads(spans: &mut [Span], rng: &mut datagen::Rng, f: fn(&mut datag
 fn assign_keys(spans: &mut [Span], pool: usize, rng: &mut datagen::Rng) {
     let mut keys = Vec::with_capacity(pool);
     for i in 0..pool {
-        keys.push(if i % 2 == 0 { format!("tool.arg.{i}") } else { hex_string(rng, 32) });
+        keys.push(if i % 2 == 0 {
+            format!("tool.arg.{i}")
+        } else {
+            hex_string(rng, 32)
+        });
     }
     for s in spans.iter_mut() {
         let mut chosen = BTreeSet::new();
@@ -687,7 +846,11 @@ fn telemetry_span(llm: &Span, j: usize, rng: &mut datagen::Rng) -> Span {
     };
     let db = j % 2 == 0;
     let start = llm.start_time + 1_000 * (j as i64 + 1);
-    let (key, value) = if db { ("db.system", "\"postgresql\"") } else { ("http.method", "\"GET\"") };
+    let (key, value) = if db {
+        ("db.system", "\"postgresql\"")
+    } else {
+        ("http.method", "\"GET\"")
+    };
     let mut s = llm.clone();
     s.span_kind = SpanKind::Span;
     s.name = if db { "db.query" } else { "http.get" }.to_owned();
@@ -744,7 +907,12 @@ fn giant(spans: &mut [Span], rng: &mut datagen::Rng) -> Vec<Pair> {
             continue;
         };
         let value = giant_text(rng, old, k / GIANT_EVERY);
-        put_payload(value, &mut s.input, &mut s.input_format, &mut s.input_preview);
+        put_payload(
+            value,
+            &mut s.input,
+            &mut s.input_format,
+            &mut s.input_preview,
+        );
         pairs.push((*s.trace_id.as_bytes(), *s.span_id.as_bytes()));
     }
     pairs
@@ -812,7 +980,11 @@ pub fn split_cmd(args: &[String]) -> crate::R<()> {
     // A backup left by an interrupted split holds the old cut: it is never deleted here.
     for entry in fs::read_dir(dir)? {
         let path = entry?.path();
-        if path.file_name().and_then(|s| s.to_str()).is_some_and(|s| s.starts_with("input.old-")) {
+        if path
+            .file_name()
+            .and_then(|s| s.to_str())
+            .is_some_and(|s| s.starts_with("input.old-"))
+        {
             return Err(format!(
                 "{}: an earlier split was interrupted; restore it to input/ by hand, then split again",
                 path.display()
@@ -833,7 +1005,14 @@ pub fn split_cmd(args: &[String]) -> crate::R<()> {
     fs::remove_dir_all(&old)?;
 
     // The outputs of the old cut no longer match the input.
-    for name in ["pq_cetra", "st", "compact-pq_cetra", "compact-st", "flush-pq_cetra", "flush-st"] {
+    for name in [
+        "pq_cetra",
+        "st",
+        "compact-pq_cetra",
+        "compact-st",
+        "flush-pq_cetra",
+        "flush-st",
+    ] {
         let path = dir.join(name);
         if path.exists() {
             fs::remove_dir_all(&path)?;
@@ -850,7 +1029,10 @@ pub fn split_cmd(args: &[String]) -> crate::R<()> {
         let starts = start_times(slice)?.values();
         let lo = starts.iter().copied().min().unwrap_or_default();
         let hi = starts.iter().copied().max().unwrap_or_default();
-        println!("input/{i:03}.arrow: {} rows, start_time {lo}..{hi}", slice.num_rows());
+        println!(
+            "input/{i:03}.arrow: {} rows, start_time {lo}..{hi}",
+            slice.num_rows()
+        );
     }
     Ok(())
 }
@@ -896,7 +1078,10 @@ fn start_times(batch: &RecordBatch) -> crate::R<&TimestampNanosecondArray> {
 fn sorted_by_trace(batch: &RecordBatch) -> crate::R<RecordBatch> {
     let column = |name: &str| -> crate::R<_> {
         Ok(SortColumn {
-            values: batch.column_by_name(name).ok_or_else(|| format!("input file has no {name} column"))?.clone(),
+            values: batch
+                .column_by_name(name)
+                .ok_or_else(|| format!("input file has no {name} column"))?
+                .clone(),
             options: None,
         })
     };
@@ -974,7 +1159,11 @@ pub fn flush_input_cmd(args: &[String]) -> crate::R<()> {
     let mut out = create_input(&dir.join("flush.arrow"), &schema)?;
     out.write(&flush)?;
     out.finish()?;
-    println!("flush.arrow: {} rows, {} bytes in memory", flush.num_rows(), flush.get_array_memory_size());
+    println!(
+        "flush.arrow: {} rows, {} bytes in memory",
+        flush.num_rows(),
+        flush.get_array_memory_size()
+    );
     Ok(())
 }
 
@@ -1012,7 +1201,9 @@ mod tests {
 
     /// Whether `s` is non-empty lowercase hex.
     fn is_hex(s: &str) -> bool {
-        !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+        !s.is_empty()
+            && s.bytes()
+                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
     }
 
     #[test]
@@ -1072,21 +1263,35 @@ mod tests {
             s.input = Some("plain words".to_owned());
         }
         plant(&mut spans);
-        let count = |needle: &str| spans.iter().filter(|s| s.input.as_deref().unwrap().contains(needle)).count();
+        let count = |needle: &str| {
+            spans
+                .iter()
+                .filter(|s| s.input.as_deref().unwrap().contains(needle))
+                .count()
+        };
         assert_eq!(count("zqxjrareneedle"), 2);
         assert_eq!(count("commonneedle"), 2_000);
         for needle in ["bug", "Bug", "BUG"] {
             let c = count(needle);
-            assert!((60..=75).contains(&c), "{needle} planted {c} times, want about 67");
+            assert!(
+                (60..=75).contains(&c),
+                "{needle} planted {c} times, want about 67"
+            );
         }
     }
 
     #[test]
     fn telemetry_makes_95_percent_non_llm() {
         let (spans, _) = gen_spans("nonllm95", Some(200)).unwrap();
-        let llm = spans.iter().filter(|s| s.span_kind == SpanKind::Llm).count();
+        let llm = spans
+            .iter()
+            .filter(|s| s.span_kind == SpanKind::Llm)
+            .count();
         assert!((llm as f64) / (spans.len() as f64) < 0.06);
-        let telemetry: Vec<&Span> = spans.iter().filter(|s| s.name == "db.query" || s.name == "http.get").collect();
+        let telemetry: Vec<&Span> = spans
+            .iter()
+            .filter(|s| s.name == "db.query" || s.name == "http.get")
+            .collect();
         assert!(!telemetry.is_empty());
         for s in telemetry {
             assert!(s.parent_span_id.is_some());
@@ -1117,7 +1322,11 @@ mod tests {
     #[test]
     fn giant_case_has_giant_inputs() {
         let (spans, files) = gen_spans("giant", Some(200)).unwrap();
-        let max = spans.iter().filter_map(|s| s.input.as_ref().map(String::len)).max().unwrap_or(0);
+        let max = spans
+            .iter()
+            .filter_map(|s| s.input.as_ref().map(String::len))
+            .max()
+            .unwrap_or(0);
         assert!(max >= GIANT_BYTES - 3);
         let (trace, span) = files.spans[0];
         let first = spans
@@ -1134,7 +1343,11 @@ mod tests {
         for s in &spans {
             *per_trace.entry(*s.trace_id.as_bytes()).or_default() += 1;
         }
-        let big: Vec<[u8; 16]> = per_trace.iter().filter(|(_, n)| **n == MEGA_SPANS).map(|(t, _)| *t).collect();
+        let big: Vec<[u8; 16]> = per_trace
+            .iter()
+            .filter(|(_, n)| **n == MEGA_SPANS)
+            .map(|(t, _)| *t)
+            .collect();
         assert_eq!(big.len(), 1, "traces of {MEGA_SPANS} spans");
         let mega = big[0];
         let ids: HashSet<[u8; 8]> = spans
@@ -1142,7 +1355,11 @@ mod tests {
             .filter(|s| *s.trace_id.as_bytes() == mega)
             .map(|s| *s.span_id.as_bytes())
             .collect();
-        assert_eq!(ids.len(), MEGA_SPANS, "span ids of the mega trace are distinct");
+        assert_eq!(
+            ids.len(),
+            MEGA_SPANS,
+            "span ids of the mega trace are distinct"
+        );
 
         assert_eq!(files.traces.len(), IDS);
         assert_eq!(files.traces[0], mega);
@@ -1180,7 +1397,10 @@ mod tests {
                     .downcast_ref::<TimestampNanosecondArray>()
                     .unwrap();
                 for r in 0..batch.num_rows() {
-                    let key = (<[u8; 16]>::try_from(traces.value(r)).unwrap(), starts.value(r));
+                    let key = (
+                        <[u8; 16]>::try_from(traces.value(r)).unwrap(),
+                        starts.value(r),
+                    );
                     assert!(prev.is_none_or(|p| p <= key), "input {i} is not sorted");
                     prev = Some(key);
                 }
@@ -1214,7 +1434,10 @@ mod tests {
         let dir = temp_dir("keys");
         let (spans, files) = gen_spans("keys100", Some(20)).unwrap();
         write_case(&dir, spans, &files).unwrap();
-        assert_eq!(fs::read_to_string(dir.join("cw_attr.txt")).unwrap(), "tool.arg.2\t\"v3\"\n");
+        assert_eq!(
+            fs::read_to_string(dir.join("cw_attr.txt")).unwrap(),
+            "tool.arg.2\t\"v3\"\n"
+        );
         assert!(!dir.join("cw_needles.txt").exists());
     }
 
@@ -1225,7 +1448,10 @@ mod tests {
             let traces = fixed_binary(b, "trace_id").unwrap();
             let spans = fixed_binary(b, "span_id").unwrap();
             for r in 0..b.num_rows() {
-                out.push((<[u8; 16]>::try_from(traces.value(r)).unwrap(), <[u8; 8]>::try_from(spans.value(r)).unwrap()));
+                out.push((
+                    <[u8; 16]>::try_from(traces.value(r)).unwrap(),
+                    <[u8; 8]>::try_from(spans.value(r)).unwrap(),
+                ));
             }
         }
         out.sort();
@@ -1237,16 +1463,26 @@ mod tests {
         let traces = fixed_binary(batch, "trace_id").unwrap();
         let starts = start_times(batch).unwrap();
         (0..batch.num_rows())
-            .map(|r| (<[u8; 16]>::try_from(traces.value(r)).unwrap(), starts.value(r)))
+            .map(|r| {
+                (
+                    <[u8; 16]>::try_from(traces.value(r)).unwrap(),
+                    starts.value(r),
+                )
+            })
             .collect()
     }
 
     /// The text files of a case directory, as strings.
     fn text_files(dir: &Path) -> Vec<String> {
-        ["cw_queries.txt", "cw_traces.txt", "cw_spans.txt", "cw_needles.txt"]
-            .iter()
-            .map(|f| fs::read_to_string(dir.join(f)).unwrap())
-            .collect()
+        [
+            "cw_queries.txt",
+            "cw_traces.txt",
+            "cw_spans.txt",
+            "cw_needles.txt",
+        ]
+        .iter()
+        .map(|f| fs::read_to_string(dir.join(f)).unwrap())
+        .collect()
     }
 
     #[test]
@@ -1268,11 +1504,17 @@ mod tests {
             let mut prev_max: Option<i64> = None;
             for slice in &slices {
                 let keys = sort_keys(slice);
-                assert!(keys.windows(2).all(|w| w[0] <= w[1]), "slice is not sorted (n = {n})");
+                assert!(
+                    keys.windows(2).all(|w| w[0] <= w[1]),
+                    "slice is not sorted (n = {n})"
+                );
                 let starts: Vec<i64> = keys.iter().map(|k| k.1).collect();
                 let lo = *starts.iter().min().unwrap();
                 let hi = *starts.iter().max().unwrap();
-                assert!(prev_max.is_none_or(|p| p <= lo), "slices overlap in time (n = {n})");
+                assert!(
+                    prev_max.is_none_or(|p| p <= lo),
+                    "slices overlap in time (n = {n})"
+                );
                 prev_max = Some(hi);
             }
         }
@@ -1306,7 +1548,10 @@ mod tests {
         assert_eq!(batches.len(), 1);
         assert_eq!(batches[0].num_rows(), total);
         let keys = sort_keys(&batches[0]);
-        assert!(keys.windows(2).all(|w| w[0] <= w[1]), "flush.arrow is not sorted");
+        assert!(
+            keys.windows(2).all(|w| w[0] <= w[1]),
+            "flush.arrow is not sorted"
+        );
     }
 
     #[test]
@@ -1328,7 +1573,13 @@ mod tests {
         assert_eq!(text_files(&dir), before);
         let leftovers = fs::read_dir(&dir)
             .unwrap()
-            .filter(|e| e.as_ref().unwrap().file_name().to_string_lossy().starts_with("input.old-"))
+            .filter(|e| {
+                e.as_ref()
+                    .unwrap()
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with("input.old-")
+            })
             .count();
         assert_eq!(leftovers, 0);
     }
@@ -1346,7 +1597,10 @@ mod tests {
 
         let err = split_cmd(&[d, "6".to_owned()]).unwrap_err().to_string();
 
-        assert!(err.contains("input.old-123") && err.contains("an earlier split was interrupted"), "{err}");
+        assert!(
+            err.contains("input.old-123") && err.contains("an earlier split was interrupted"),
+            "{err}"
+        );
         assert_eq!(fs::read(backup.join("000.arrow")).unwrap(), b"old cut");
         assert_eq!(input_paths(&dir).unwrap(), input_before);
     }

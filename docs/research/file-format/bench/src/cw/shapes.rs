@@ -5,13 +5,13 @@
 //! and parallelism, and the answers are encoded the same way.
 
 use std::collections::btree_map::Entry;
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::ops::Range;
 use std::sync::Arc;
 
 use arrow::array::{
     Array, BooleanArray, FixedSizeBinaryArray, Float64Array, ListArray, MapArray, RecordBatch,
-    StringArray, StructArray,
+    StringArray,
 };
 use arrow::error::ArrowError;
 use futures::{StreamExt, TryStreamExt};
@@ -349,8 +349,13 @@ pub(crate) async fn scan_fold<T: Fold>(
         }
     }
     let cores = std::thread::available_parallelism().map_or(1, |n| n.get());
-    futures::stream::iter(units)
+    // The futures are built into a Vec first: a `.map` closure in the stream's type makes the
+    // future of `scan_fold` not provably `Send` (a higher-ranked lifetime), and M5 spawns it.
+    let scans: Vec<_> = units
+        .into_iter()
         .map(|unit| scan_unit(unit, columns, window, ids.clone(), fold.clone()))
+        .collect();
+    futures::stream::iter(scans)
         .buffer_unordered(cores)
         .try_fold(T::default(), |mut acc, part| {
             acc.merge(part);
@@ -503,6 +508,9 @@ fn partial_fold(extra: Option<&'static str>) -> FoldFn<Traces> {
             .map(|name| many::column::<StringArray>(batch, name))
             .transpose()?;
         for row in 0..batch.num_rows() {
+            if !start.is_valid(row) || !end.is_valid(row) {
+                return Err(format!("traces: null start_time or end_time at row {row}").into());
+            }
             let id: [u8; 16] = ids.value(row).try_into()?;
             let micro = if cost.is_valid(row) {
                 (cost.value(row) * COST_SCALE).round() as i64
@@ -671,22 +679,11 @@ fn text_at(col: &StringArray, row: usize) -> &str {
     }
 }
 
-/// The non-null keys of the entries of one `Map<Utf8, Utf8>` row, one per entry.
-fn map_keys(entries: &StructArray) -> R<Vec<String>> {
-    let keys = entries
-        .column(0)
-        .as_any()
-        .downcast_ref::<StringArray>()
-        .ok_or("map keys are not Utf8")?;
-    Ok((0..keys.len())
-        .filter(|&i| keys.is_valid(i))
-        .map(|i| keys.value(i).to_owned())
-        .collect())
-}
-
-/// The value of `key` in the entries of one `Map<Utf8, Utf8>` row; `None` when the key is absent or
-/// its value is null. The first entry with the key counts.
-fn map_text(entries: &StructArray, key: &str) -> R<Option<String>> {
+/// The entries of one row of a `Map<Utf8, Utf8>` column, borrowed from the batch: the key array, the
+/// value array and the entry indices of the row. Offsets index the whole entries array, as
+/// `MapArray::value` slices it.
+fn map_row(map: &MapArray, row: usize) -> R<(&StringArray, &StringArray, Range<usize>)> {
+    let entries = map.entries();
     let keys = entries
         .column(0)
         .as_any()
@@ -697,13 +694,62 @@ fn map_text(entries: &StructArray, key: &str) -> R<Option<String>> {
         .as_any()
         .downcast_ref::<StringArray>()
         .ok_or("map values are not Utf8")?;
-    let found = (0..keys.len()).find(|&i| keys.is_valid(i) && keys.value(i) == key);
-    Ok(found.and_then(|i| values.is_valid(i).then(|| values.value(i).to_owned())))
+    let offsets = map.value_offsets();
+    Ok((
+        keys,
+        values,
+        offsets[row] as usize..offsets[row + 1] as usize,
+    ))
 }
 
-/// Adds one to the count of `(facet, value)`.
-fn bump(counts: &mut BTreeMap<(&'static str, String), u64>, facet: &'static str, value: String) {
-    *counts.entry((facet, value)).or_insert(0) += 1;
+/// The value of `key` in one `Map<Utf8, Utf8>` row, borrowed from the batch; `None` when the key is
+/// absent or its value is null. The first entry with the key counts.
+fn map_text<'a>(map: &'a MapArray, row: usize, key: &str) -> R<Option<&'a str>> {
+    let (keys, values, range) = map_row(map, row)?;
+    let found = range
+        .clone()
+        .find(|&i| keys.is_valid(i) && keys.value(i) == key);
+    Ok(found.and_then(|i| values.is_valid(i).then(|| values.value(i))))
+}
+
+/// The entries of one `List<Utf8>` row's values, borrowed from the batch: the value array and the
+/// indices of the row's items.
+fn list_row(list: &ListArray, row: usize) -> R<(&StringArray, Range<usize>)> {
+    let items = list
+        .values()
+        .as_any()
+        .downcast_ref::<StringArray>()
+        .ok_or("tags are not Utf8")?;
+    let offsets = list.value_offsets();
+    Ok((items, offsets[row] as usize..offsets[row + 1] as usize))
+}
+
+/// Adds the per-batch counts of one facet to the accumulator: one owned `String` per distinct value.
+fn flush_facet(
+    into: &mut BTreeMap<(&'static str, String), u64>,
+    counts: HashMap<(&'static str, &str), u64>,
+) {
+    for ((facet, value), n) in counts {
+        *into.entry((facet, value.to_owned())).or_insert(0) += n;
+    }
+}
+
+/// Adds the per-batch counts of one (bucket, value) map to the accumulator: one owned `String` per
+/// distinct value.
+fn flush_bucketed(into: &mut BTreeMap<(i64, String), u64>, counts: HashMap<(i64, &str), u64>) {
+    for ((bucket, value), n) in counts {
+        *into.entry((bucket, value.to_owned())).or_insert(0) += n;
+    }
+}
+
+/// Adds the per-batch counts of numeric facet values, keyed by their decimal text.
+fn flush_numeric(
+    into: &mut BTreeMap<(&'static str, String), u64>,
+    counts: HashMap<(&'static str, i64), u64>,
+) {
+    for ((facet, value), n) in counts {
+        *into.entry((facet, value.to_string())).or_insert(0) += n;
+    }
 }
 
 /// The log2 bucket of a duration: `floor(log2 v)` for `v > 0`, −1 for null or `v ≤ 0`.
@@ -742,31 +788,30 @@ impl Fold for Facets {
 /// The fold of `facets:7d`: every batch's rows, counted per facet (see `facet_lines`).
 fn facets_fold() -> FoldFn<Facets> {
     Arc::new(|batch: &RecordBatch, out: &mut Facets| -> R<()> {
+        // The batch's counts, keyed by values borrowed from its arrays; merged once at the end.
+        let mut text: HashMap<(&'static str, &str), u64> = HashMap::new();
+        let mut numeric: HashMap<(&'static str, i64), u64> = HashMap::new();
         for facet in FACET_STRINGS {
             let col = many::column::<StringArray>(batch, facet)?;
             for row in 0..batch.num_rows() {
-                bump(&mut out.0, facet, text_at(col, row).to_owned());
+                *text.entry((facet, text_at(col, row))).or_insert(0) += 1;
             }
         }
         for facet in DISTINCT_FACETS {
             let col = many::column::<StringArray>(batch, facet)?;
             for row in 0..batch.num_rows() {
                 if col.is_valid(row) {
-                    bump(&mut out.0, facet, col.value(row).to_owned());
+                    *text.entry((facet, col.value(row))).or_insert(0) += 1;
                 }
             }
         }
         let tags = many::column::<ListArray>(batch, "tags")?;
         for row in 0..batch.num_rows() {
             if tags.is_valid(row) {
-                let items = tags.value(row);
-                let items = items
-                    .as_any()
-                    .downcast_ref::<StringArray>()
-                    .ok_or("tags are not Utf8")?;
-                for i in 0..items.len() {
+                let (items, range) = list_row(tags, row)?;
+                for i in range {
                     if items.is_valid(i) {
-                        bump(&mut out.0, "tag", items.value(i).to_owned());
+                        *text.entry(("tag", items.value(i))).or_insert(0) += 1;
                     }
                 }
             }
@@ -775,24 +820,30 @@ fn facets_fold() -> FoldFn<Facets> {
         let costs = many::column::<Float64Array>(batch, "cost_total")?;
         for row in 0..batch.num_rows() {
             let d = durations.is_valid(row).then(|| durations.value(row));
-            bump(&mut out.0, "duration_log2", duration_log2(d).to_string());
+            *numeric
+                .entry(("duration_log2", duration_log2(d)))
+                .or_insert(0) += 1;
             let c = costs.is_valid(row).then(|| costs.value(row));
-            bump(&mut out.0, "cost_decade", cost_decade(c).to_string());
+            *numeric.entry(("cost_decade", cost_decade(c))).or_insert(0) += 1;
         }
         let attrs = many::column::<MapArray>(batch, "attributes")?;
         let meta = many::column::<MapArray>(batch, "metadata")?;
         for row in 0..batch.num_rows() {
             if attrs.is_valid(row) {
-                for key in map_keys(&attrs.value(row))? {
-                    bump(&mut out.0, "attr_key", key);
+                let (keys, _, range) = map_row(attrs, row)?;
+                for i in range.filter(|&i| keys.is_valid(i)) {
+                    *text.entry(("attr_key", keys.value(i))).or_insert(0) += 1;
                 }
             }
             if meta.is_valid(row) {
-                for key in map_keys(&meta.value(row))? {
-                    bump(&mut out.0, "meta_key", key);
+                let (keys, _, range) = map_row(meta, row)?;
+                for i in range.filter(|&i| keys.is_valid(i)) {
+                    *text.entry(("meta_key", keys.value(i))).or_insert(0) += 1;
                 }
             }
         }
+        flush_facet(&mut out.0, text);
+        flush_numeric(&mut out.0, numeric);
         Ok(())
     })
 }
@@ -893,11 +944,14 @@ fn dashboard_fold(width: i64) -> FoldFn<Dash> {
         let durations = many::int64_col(batch, "duration_ns")?;
         let tags = many::column::<ListArray>(batch, "tags")?;
         let metadata = many::column::<MapArray>(batch, "metadata")?;
+        // The batch's groups, keyed by values borrowed from its arrays; merged once at the end.
+        let mut models_here: HashMap<(i64, &str), Model> = HashMap::new();
+        let mut tags_here: HashMap<(i64, &str), u64> = HashMap::new();
+        let mut plans_here: HashMap<(i64, &str), u64> = HashMap::new();
         for row in 0..batch.num_rows() {
             let bucket = start.value(row).div_euclid(width) * width;
-            let m = out
-                .models
-                .entry((bucket, text_at(models, row).to_owned()))
+            let m = models_here
+                .entry((bucket, text_at(models, row)))
                 .or_default();
             m.count += 1;
             if status.is_valid(row) && status.value(row) == "error" {
@@ -910,26 +964,29 @@ fn dashboard_fold(width: i64) -> FoldFn<Dash> {
                 m.durations.push(durations.value(row));
             }
             if tags.is_valid(row) {
-                let items = tags.value(row);
-                let items = items
-                    .as_any()
-                    .downcast_ref::<StringArray>()
-                    .ok_or("tags are not Utf8")?;
-                for i in 0..items.len() {
+                let (items, range) = list_row(tags, row)?;
+                for i in range {
                     if items.is_valid(i) {
-                        *out.tags
-                            .entry((bucket, items.value(i).to_owned()))
-                            .or_insert(0) += 1;
+                        *tags_here.entry((bucket, items.value(i))).or_insert(0) += 1;
                     }
                 }
             }
             let plan = if metadata.is_valid(row) {
-                map_text(&metadata.value(row), "plan")?.unwrap_or_default()
+                map_text(metadata, row, "plan")?.unwrap_or_default()
             } else {
-                String::new()
+                ""
             };
-            *out.plans.entry((bucket, plan)).or_insert(0) += 1;
+            *plans_here.entry((bucket, plan)).or_insert(0) += 1;
         }
+        for ((bucket, model), m) in models_here {
+            let into = out.models.entry((bucket, model.to_owned())).or_default();
+            into.count += m.count;
+            into.errors += m.errors;
+            into.cost = into.cost.saturating_add(m.cost);
+            into.durations.extend(m.durations);
+        }
+        flush_bucketed(&mut out.tags, tags_here);
+        flush_bucketed(&mut out.plans, plans_here);
         Ok(())
     })
 }
@@ -1151,39 +1208,108 @@ mod tests {
         }
     }
 
-    /// Every `traces` row of the project's Parquet files, read in full: (trace_id, start, end,
-    /// cost micro-units).
-    fn trace_rows(dir: &Path) -> Vec<([u8; 16], i64, i64, i64)> {
+    /// Every batch of the project's Parquet files of `table`, read in full.
+    fn batches(dir: &Path, table: &str) -> Vec<RecordBatch> {
         let mut files = Vec::new();
-        walk(&dir.join("pq_cetra/traces"), &mut files);
-        let mut out: Vec<([u8; 16], i64, i64, i64)> = Vec::new();
+        walk(&dir.join("pq_cetra").join(table), &mut files);
+        let mut out = Vec::new();
         for file in files {
             let reader = ParquetRecordBatchReaderBuilder::try_new(fs::File::open(file).unwrap())
                 .unwrap()
                 .build()
                 .unwrap();
             for batch in reader {
-                let b = batch.unwrap();
-                let ids = many::column::<FixedSizeBinaryArray>(&b, "trace_id").unwrap();
-                let start = many::int64_col(&b, "start_time").unwrap();
-                let end = many::int64_col(&b, "end_time").unwrap();
-                let cost = many::column::<Float64Array>(&b, "cost_total").unwrap();
-                for row in 0..b.num_rows() {
-                    let micro = if cost.is_valid(row) {
-                        (cost.value(row) * COST_SCALE).round() as i64
-                    } else {
-                        0
-                    };
-                    out.push((
+                out.push(batch.unwrap());
+            }
+        }
+        out
+    }
+
+    /// Every `traces` row of the project's Parquet files, read in full: ((trace_id, start, end,
+    /// cost micro-units), the `extra` column's text when one is given and non-null).
+    fn trace_rows_by(
+        dir: &Path,
+        extra: Option<&str>,
+    ) -> Vec<(([u8; 16], i64, i64, i64), Option<String>)> {
+        let mut out = Vec::new();
+        for b in batches(dir, "traces") {
+            let ids = many::column::<FixedSizeBinaryArray>(&b, "trace_id").unwrap();
+            let start = many::int64_col(&b, "start_time").unwrap();
+            let end = many::int64_col(&b, "end_time").unwrap();
+            let cost = many::column::<Float64Array>(&b, "cost_total").unwrap();
+            let text = extra.map(|c| many::column::<StringArray>(&b, c).unwrap());
+            for row in 0..b.num_rows() {
+                let micro = if cost.is_valid(row) {
+                    (cost.value(row) * COST_SCALE).round() as i64
+                } else {
+                    0
+                };
+                let name = text.and_then(|t| t.is_valid(row).then(|| t.value(row).to_owned()));
+                out.push((
+                    (
                         ids.value(row).try_into().unwrap(),
                         start.value(row),
                         end.value(row),
                         micro,
-                    ));
-                }
+                    ),
+                    name,
+                ));
             }
         }
         out
+    }
+
+    /// Every `traces` row of the project's Parquet files, read in full: (trace_id, start, end,
+    /// cost micro-units).
+    fn trace_rows(dir: &Path) -> Vec<([u8; 16], i64, i64, i64)> {
+        trace_rows_by(dir, None)
+            .into_iter()
+            .map(|(r, _)| r)
+            .collect()
+    }
+
+    /// The `sessions` or `users` answer (`column` = `session_id` or `user_id`) computed from every
+    /// `traces` row read in full, with the merge and the grouping written out here: the partials
+    /// merged per trace (min start, max end, cost sum, the minimum non-null name), then the traces
+    /// whose merged start lies in the window, grouped by name.
+    fn reference_rollup(dir: &Path, column: &str, days: i64, clock: i64) -> Answer {
+        let (from, to) = window_of(clock, days);
+        let mut merged: BTreeMap<[u8; 16], (i64, i64, i64, Option<String>)> = BTreeMap::new();
+        for ((id, start, end, cost), name) in trace_rows_by(dir, Some(column)) {
+            let e = merged.entry(id).or_insert((start, end, 0, None));
+            e.0 = e.0.min(start);
+            e.1 = e.1.max(end);
+            e.2 += cost;
+            if let Some(name) = name {
+                e.3 = Some(match e.3.take() {
+                    Some(old) => old.min(name),
+                    None => name,
+                });
+            }
+        }
+        // Per name: (traces, min start, max end, cost micro-units).
+        let mut groups: BTreeMap<String, (u64, i64, i64, i64)> = BTreeMap::new();
+        for (start, end, cost, name) in merged.into_values() {
+            if start < from || start >= to {
+                continue;
+            }
+            let Some(name) = name else { continue };
+            let g = groups.entry(name).or_insert((0, i64::MAX, i64::MIN, 0));
+            g.0 += 1;
+            g.1 = g.1.min(start);
+            g.2 = g.2.max(end);
+            g.3 += cost;
+        }
+        let mut bytes = Vec::new();
+        for (name, (count, start, end, cost)) in &groups {
+            bytes.extend_from_slice(name.as_bytes());
+            bytes.push(0);
+            bytes.extend_from_slice(&count.to_le_bytes());
+            bytes.extend_from_slice(&start.to_le_bytes());
+            bytes.extend_from_slice(&end.to_le_bytes());
+            bytes.extend_from_slice(&cost.to_le_bytes());
+        }
+        many::answer_of(&bytes, groups.len() as u64)
     }
 
     /// The trace list computed from every `traces` row read in full, with the sort written out
@@ -1238,10 +1364,18 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn sessions_and_users_agree() {
         let f = Fixture::new("rollups").await;
-        for query in ["sessions:7d", "users:30d"] {
+        for (query, column, days) in [
+            ("sessions:7d", "session_id", 7),
+            ("users:30d", "user_id", 30),
+        ] {
             let (pq, st) = f.both(query).await;
             assert_eq!(pq, st, "{query} differs between the formats");
             assert!(pq.rows >= 1, "{query} has no names");
+            assert_eq!(
+                pq,
+                reference_rollup(&f.dir(), column, days, f.clock),
+                "{query} differs from the reference"
+            );
         }
     }
 
@@ -1290,6 +1424,112 @@ mod tests {
         assert_eq!(bucket_width(0, 200 * many::DAY_NS), many::DAY_NS);
     }
 
+    /// The `duration_log2` bucket by repeated halving, independently of `duration_log2`: −1 for null
+    /// or `v ≤ 0`, else the number of halvings that bring `v` to 0, minus one.
+    fn floor_log2_by_halving(v: Option<i64>) -> i64 {
+        match v {
+            Some(v) if v > 0 => {
+                let (mut x, mut bucket) = (v, -1);
+                while x > 0 {
+                    x >>= 1;
+                    bucket += 1;
+                }
+                bucket
+            }
+            _ => -1,
+        }
+    }
+
+    /// The `status` and `duration_log2` lines of `facets:7d` (sorted), computed from every `spans` row
+    /// read in full: the rows whose `start_time` lies in the 7-day window, counted by plain loops.
+    fn reference_facet_lines(dir: &Path, clock: i64) -> Vec<String> {
+        let (from, to) = window_of(clock, 7);
+        let mut status: BTreeMap<String, u64> = BTreeMap::new();
+        let mut log2: BTreeMap<i64, u64> = BTreeMap::new();
+        for b in batches(dir, "spans") {
+            let start = many::int64_col(&b, "start_time").unwrap();
+            let st = many::column::<StringArray>(&b, "status").unwrap();
+            let dur = many::int64_col(&b, "duration_ns").unwrap();
+            for row in 0..b.num_rows() {
+                if !(start.is_valid(row) && start.value(row) >= from && start.value(row) < to) {
+                    continue;
+                }
+                let s = if st.is_valid(row) {
+                    st.value(row).to_owned()
+                } else {
+                    String::new()
+                };
+                *status.entry(s).or_insert(0) += 1;
+                let d = dur.is_valid(row).then(|| dur.value(row));
+                *log2.entry(floor_log2_by_halving(d)).or_insert(0) += 1;
+            }
+        }
+        let mut lines: Vec<String> = status
+            .iter()
+            .map(|(v, n)| format!("status\t{v}\t{n}"))
+            .collect();
+        lines.extend(log2.iter().map(|(v, n)| format!("duration_log2\t{v}\t{n}")));
+        lines.sort_unstable();
+        lines
+    }
+
+    /// The `m` line of `dashboard:<days>d` for the (bucket, model) with the most LLM rows of the
+    /// window, hand-computed from every `spans` row read in full: count, errors, cost micro-units and
+    /// the nearest-rank p95 of the non-null durations.
+    fn reference_busiest_model(dir: &Path, days: i64, clock: i64) -> String {
+        let (from, to) = window_of(clock, days);
+        let width = bucket_width(from, to);
+        // Per (bucket, model): (rows, errors, cost micro-units, non-null durations).
+        let mut groups: BTreeMap<(i64, String), (u64, u64, i64, Vec<i64>)> = BTreeMap::new();
+        for b in batches(dir, "spans") {
+            let start = many::int64_col(&b, "start_time").unwrap();
+            let kind = many::column::<StringArray>(&b, "span_kind").unwrap();
+            let model = many::column::<StringArray>(&b, "request_model").unwrap();
+            let status = many::column::<StringArray>(&b, "status").unwrap();
+            let cost = many::column::<Float64Array>(&b, "cost_total").unwrap();
+            let dur = many::int64_col(&b, "duration_ns").unwrap();
+            for row in 0..b.num_rows() {
+                if !(start.is_valid(row) && start.value(row) >= from && start.value(row) < to) {
+                    continue;
+                }
+                if !(kind.is_valid(row) && kind.value(row) == many::LLM) {
+                    continue;
+                }
+                let bucket = start.value(row).div_euclid(width) * width;
+                let name = if model.is_valid(row) {
+                    model.value(row).to_owned()
+                } else {
+                    String::new()
+                };
+                let g = groups
+                    .entry((bucket, name))
+                    .or_insert((0, 0, 0, Vec::new()));
+                g.0 += 1;
+                if status.is_valid(row) && status.value(row) == "error" {
+                    g.1 += 1;
+                }
+                if cost.is_valid(row) {
+                    g.2 += (cost.value(row) * COST_SCALE).round() as i64;
+                }
+                if dur.is_valid(row) {
+                    g.3.push(dur.value(row));
+                }
+            }
+        }
+        let ((bucket, model), (count, errors, cost, mut durations)) = groups
+            .into_iter()
+            .max_by_key(|(_, g)| g.0)
+            .expect("the window holds LLM spans");
+        durations.sort_unstable();
+        let n = durations.len();
+        let p95 = if n == 0 {
+            "-".to_owned()
+        } else {
+            durations[(95 * n).div_ceil(100) - 1].to_string()
+        };
+        format!("m\t{bucket}\t{model}\t{count}\t{errors}\t{cost}\t{p95}")
+    }
+
     #[tokio::test(flavor = "multi_thread")]
     async fn facets_agree() {
         let f = Fixture::new("facets").await;
@@ -1318,6 +1558,17 @@ mod tests {
             by_kind, spans,
             "the span_kind counts differ from the window's span count"
         );
+        let expected = reference_facet_lines(&f.dir(), f.clock);
+        assert!(!expected.is_empty(), "the window holds no status lines");
+        let got: Vec<String> = lines
+            .iter()
+            .filter(|l| l.starts_with("status\t") || l.starts_with("duration_log2\t"))
+            .cloned()
+            .collect();
+        assert_eq!(
+            got, expected,
+            "the status and duration_log2 lines differ from the reference"
+        );
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -1331,6 +1582,13 @@ mod tests {
                 .await
                 .unwrap();
             assert_eq!(lines.len() as u64, pq.rows);
+            if days == 7 {
+                let expected = reference_busiest_model(&f.dir(), days, f.clock);
+                assert!(
+                    lines.contains(&expected),
+                    "{query}: the busiest model's line {expected} is not in the answer"
+                );
+            }
             let (from, to) = window_of(f.clock, days);
             let width = bucket_width(from, to);
             let models: Vec<&String> = lines.iter().filter(|l| l.starts_with("m\t")).collect();
