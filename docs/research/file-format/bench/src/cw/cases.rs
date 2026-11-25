@@ -6,9 +6,11 @@ use std::fs::{self, File};
 use std::io::BufWriter;
 use std::path::{Path, PathBuf};
 
-use arrow::array::{Array, FixedSizeBinaryArray, RecordBatch};
-use arrow::compute::{SortColumn, concat_batches, lexsort_to_indices, take_record_batch};
+use arrow::array::{Array, FixedSizeBinaryArray, RecordBatch, TimestampNanosecondArray, UInt32Array};
+use arrow::compute::{SortColumn, concat_batches, interleave_record_batch, lexsort_to_indices, take_record_batch};
 use arrow::datatypes::SchemaRef;
+use arrow::error::ArrowError;
+use arrow::ipc::reader::FileReader;
 use arrow::ipc::writer::FileWriter;
 use cetra_core::batch::spans_to_record_batch;
 use cetra_core::enums::{PayloadFormat, SpanKind, SpanStatus};
@@ -699,12 +701,202 @@ fn plant(spans: &mut [Span]) {
     }
 }
 
+/// Bytes of Arrow memory one flush writes (spec 03 § 2, `flush.max_bytes`).
+pub const FLUSH_BYTES: usize = 256 << 20;
+
+/// The most files `cw split` cuts a case into.
+const MAX_SPLIT: usize = 1_000;
+
+/// `fmtbench cw split <dir> <n>`: rewrites `<dir>/input/` as `n` files, each one time slice of
+/// the case, as `n` L0 files (M2.1 § Steps 1 to 4). Removes the outputs of the old cut.
+pub fn split_cmd(args: &[String]) -> crate::R<()> {
+    let [dir, n] = args else {
+        return Err(crate::USAGE.into());
+    };
+    let dir = Path::new(dir);
+    let n: usize = n.parse()?;
+    if !(1..=MAX_SPLIT).contains(&n) {
+        return Err(format!("split into {n} files: expected 1 to {MAX_SPLIT}").into());
+    }
+    let batches = read_batches(&input_paths(dir)?)?;
+    let slices = split_batches(&batches, n)?;
+
+    // Only now is the old cut replaced: the new files are complete before the old ones go.
+    for entry in fs::read_dir(dir)? {
+        let path = entry?.path();
+        if path.file_name().and_then(|s| s.to_str()).is_some_and(|s| s.starts_with("input.old-")) {
+            fs::remove_dir_all(&path)?;
+        }
+    }
+    let old = dir.join(format!("input.old-{}", std::process::id()));
+    fs::rename(dir.join("input"), &old)?;
+    fs::create_dir(dir.join("input"))?;
+    for (i, slice) in slices.iter().enumerate() {
+        let mut out = create_input(&dir.join(format!("input/{i:03}.arrow")), &slice.schema())?;
+        out.write(slice)?;
+        out.finish()?;
+    }
+    fs::remove_dir_all(&old)?;
+
+    // The outputs of the old cut no longer match the input.
+    for name in ["pq_cetra", "st", "compact-pq_cetra", "compact-st", "flush-pq_cetra", "flush-st"] {
+        let path = dir.join(name);
+        if path.exists() {
+            fs::remove_dir_all(&path)?;
+        }
+    }
+    let flush = dir.join("flush.arrow");
+    if flush.exists() {
+        fs::remove_file(&flush)?;
+    }
+
+    let total: usize = slices.iter().map(RecordBatch::num_rows).sum();
+    println!("{total} rows in {} files", slices.len());
+    for (i, slice) in slices.iter().enumerate() {
+        let starts = start_times(slice)?.values();
+        let lo = starts.iter().copied().min().unwrap_or_default();
+        let hi = starts.iter().copied().max().unwrap_or_default();
+        println!("input/{i:03}.arrow: {} rows, start_time {lo}..{hi}", slice.num_rows());
+    }
+    Ok(())
+}
+
+/// The `.arrow` files of `<dir>/input/`, in name order.
+fn input_paths(dir: &Path) -> crate::R<Vec<PathBuf>> {
+    let mut paths: Vec<PathBuf> = fs::read_dir(dir.join("input"))?
+        .map(|e| e.map(|e| e.path()))
+        .collect::<Result<_, _>>()?;
+    paths.retain(|p| p.extension().is_some_and(|e| e == "arrow"));
+    paths.sort();
+    if paths.is_empty() {
+        return Err(format!("no input/*.arrow files in {}", dir.display()).into());
+    }
+    Ok(paths)
+}
+
+/// The batches of `paths`, in order.
+fn read_batches(paths: &[PathBuf]) -> crate::R<Vec<RecordBatch>> {
+    let mut batches = Vec::new();
+    for path in paths {
+        for batch in FileReader::try_new(File::open(path)?, None)? {
+            batches.push(batch?);
+        }
+    }
+    if batches.iter().all(|b| b.num_rows() == 0) {
+        return Err("no input rows".into());
+    }
+    Ok(batches)
+}
+
+/// The `start_time` column of `batch`.
+fn start_times(batch: &RecordBatch) -> crate::R<&TimestampNanosecondArray> {
+    batch
+        .column_by_name("start_time")
+        .ok_or("input file has no start_time column")?
+        .as_any()
+        .downcast_ref::<TimestampNanosecondArray>()
+        .ok_or_else(|| "start_time is not a nanosecond timestamp".into())
+}
+
+/// `batch`'s rows sorted by `(trace_id, start_time)`, as `write_inputs` sorts a case.
+fn sorted_by_trace(batch: &RecordBatch) -> crate::R<RecordBatch> {
+    let column = |name: &str| -> crate::R<_> {
+        Ok(SortColumn {
+            values: batch.column_by_name(name).ok_or_else(|| format!("input file has no {name} column"))?.clone(),
+            options: None,
+        })
+    };
+    let idx = lexsort_to_indices(&[column("trace_id")?, column("start_time")?], None)?;
+    Ok(take_record_batch(batch, &idx)?)
+}
+
+/// The rows of `batches` (one schema) cut into `n` slices of consecutive `start_time`, each
+/// sorted by `(trace_id, start_time)`: slice i holds the rows of global ranks
+/// [len*i/n, len*(i+1)/n) by `start_time` (ties by input order), and empty slices are dropped.
+pub fn split_batches(batches: &[RecordBatch], n: usize) -> crate::R<Vec<RecordBatch>> {
+    // (start_time, batch index, row index) of every row, in time order.
+    let mut rows: Vec<(i64, usize, usize)> = Vec::new();
+    for (b, batch) in batches.iter().enumerate() {
+        let starts = start_times(batch)?;
+        for r in 0..batch.num_rows() {
+            rows.push((starts.value(r), b, r));
+        }
+    }
+    if rows.is_empty() {
+        return Err("no input rows".into());
+    }
+    rows.sort_unstable();
+    let total = rows.len();
+    let refs: Vec<&RecordBatch> = batches.iter().collect();
+    let mut out = Vec::new();
+    for i in 0..n {
+        let (lo, hi) = (total * i / n, total * (i + 1) / n);
+        if lo == hi {
+            continue;
+        }
+        let indices: Vec<(usize, usize)> = rows[lo..hi].iter().map(|&(_, b, r)| (b, r)).collect();
+        let slice = interleave_record_batch(&refs, &indices).map_err(|e| match e {
+            ArrowError::OffsetOverflowError(_) => {
+                format!("slice {i} of {n} is too large for one batch: split into more files")
+            }
+            e => e.to_string(),
+        })?;
+        out.push(sorted_by_trace(&slice)?);
+    }
+    Ok(out)
+}
+
+/// `fmtbench cw flush-input <dir>`: writes `<dir>/flush.arrow`, one batch of about `FLUSH_BYTES`
+/// holding the first rows of the input files in order, sorted by `(trace_id, start_time)`
+/// (M2.1 § Step 5).
+pub fn flush_input_cmd(args: &[String]) -> crate::R<()> {
+    let [dir] = args else {
+        return Err(crate::USAGE.into());
+    };
+    let dir = Path::new(dir);
+    let batches = read_batches(&input_paths(dir)?)?;
+    let total_rows: usize = batches.iter().map(RecordBatch::num_rows).sum();
+    // A batch read from IPC reports the whole file body for each of its columns, so the sizes are
+    // measured on compacted copies, one batch at a time.
+    let mut total_bytes = 0usize;
+    for batch in &batches {
+        let idx = UInt32Array::from_iter_values(0..u32::try_from(batch.num_rows())?);
+        total_bytes += take_record_batch(batch, &idx)?.get_array_memory_size();
+    }
+    let rows = flush_rows(total_rows, total_bytes, FLUSH_BYTES);
+
+    let mut parts = Vec::new();
+    let mut left = rows;
+    for batch in &batches {
+        if left == 0 {
+            break;
+        }
+        let take = left.min(batch.num_rows());
+        parts.push(batch.slice(0, take));
+        left -= take;
+    }
+    let schema = batches[0].schema();
+    let flush = sorted_by_trace(&concat_batches(&schema, &parts)?)?;
+    let mut out = create_input(&dir.join("flush.arrow"), &schema)?;
+    out.write(&flush)?;
+    out.finish()?;
+    println!("flush.arrow: {} rows, {} bytes in memory", flush.num_rows(), flush.get_array_memory_size());
+    Ok(())
+}
+
+/// The rows of a flush: `total_rows` scaled by `limit / total_bytes`, rounded up and capped at
+/// `total_rows`; all of them when `total_bytes` is 0.
+fn flush_rows(total_rows: usize, total_bytes: usize, limit: usize) -> usize {
+    if total_bytes == 0 {
+        return total_rows;
+    }
+    let rows = (total_rows as u128 * limit as u128).div_ceil(total_bytes as u128);
+    rows.min(total_rows as u128) as usize
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::{HashMap, HashSet};
-
-    use arrow::array::TimestampNanosecondArray;
-    use arrow::ipc::reader::FileReader;
 
     use super::*;
 
@@ -896,5 +1088,120 @@ mod tests {
         write_case(&dir, spans, &files).unwrap();
         assert_eq!(fs::read_to_string(dir.join("cw_attr.txt")).unwrap(), "tool.arg.2\t\"v3\"\n");
         assert!(!dir.join("cw_needles.txt").exists());
+    }
+
+    /// Every `(trace_id, span_id)` of `batches`, sorted.
+    fn id_pairs(batches: &[RecordBatch]) -> Vec<([u8; 16], [u8; 8])> {
+        let mut out = Vec::new();
+        for b in batches {
+            let traces = fixed_binary(b, "trace_id").unwrap();
+            let spans = fixed_binary(b, "span_id").unwrap();
+            for r in 0..b.num_rows() {
+                out.push((<[u8; 16]>::try_from(traces.value(r)).unwrap(), <[u8; 8]>::try_from(spans.value(r)).unwrap()));
+            }
+        }
+        out.sort();
+        out
+    }
+
+    /// The `(trace_id, start_time)` keys of `batch`, in row order.
+    fn sort_keys(batch: &RecordBatch) -> Vec<([u8; 16], i64)> {
+        let traces = fixed_binary(batch, "trace_id").unwrap();
+        let starts = start_times(batch).unwrap();
+        (0..batch.num_rows())
+            .map(|r| (<[u8; 16]>::try_from(traces.value(r)).unwrap(), starts.value(r)))
+            .collect()
+    }
+
+    /// The text files of a case directory, as strings.
+    fn text_files(dir: &Path) -> Vec<String> {
+        ["cw_queries.txt", "cw_traces.txt", "cw_spans.txt", "cw_needles.txt"]
+            .iter()
+            .map(|f| fs::read_to_string(dir.join(f)).unwrap())
+            .collect()
+    }
+
+    #[test]
+    fn split_keeps_every_row_in_time_slices() {
+        let dir = temp_dir("split-slices");
+        let (spans, files) = gen_spans("text_unique", Some(200)).unwrap();
+        write_case(&dir, spans, &files).unwrap();
+        let mut batches = Vec::new();
+        for i in 0..FILES {
+            batches.extend(read_input(&dir.join(format!("input/{i:03}.arrow"))));
+        }
+        let total: usize = batches.iter().map(RecordBatch::num_rows).sum();
+        let want = id_pairs(&batches);
+        for n in [1, 3, 10] {
+            let slices = split_batches(&batches, n).unwrap();
+            let rows: usize = slices.iter().map(RecordBatch::num_rows).sum();
+            assert_eq!(rows, total, "n = {n}");
+            assert_eq!(id_pairs(&slices), want, "n = {n}");
+            let mut prev_max: Option<i64> = None;
+            for slice in &slices {
+                let keys = sort_keys(slice);
+                assert!(keys.windows(2).all(|w| w[0] <= w[1]), "slice is not sorted (n = {n})");
+                let starts: Vec<i64> = keys.iter().map(|k| k.1).collect();
+                let lo = *starts.iter().min().unwrap();
+                let hi = *starts.iter().max().unwrap();
+                assert!(prev_max.is_none_or(|p| p <= lo), "slices overlap in time (n = {n})");
+                prev_max = Some(hi);
+            }
+        }
+    }
+
+    #[test]
+    fn split_drops_empty_slices() {
+        let (spans, _) = gen_spans("text_unique", Some(30)).unwrap();
+        let batch = spans_to_record_batch(&spans).unwrap().slice(0, 3);
+        let slices = split_batches(&[batch], 10).unwrap();
+        assert_eq!(slices.len(), 3);
+        assert!(slices.iter().all(|s| s.num_rows() == 1));
+    }
+
+    #[test]
+    fn flush_rows_scales_to_the_limit() {
+        assert_eq!(flush_rows(1_000, 4_000, 1_000), 250);
+        assert_eq!(flush_rows(1_000, 4_001, 1_000), 250);
+        assert_eq!(flush_rows(10, 100, 1_000), 10);
+        assert_eq!(flush_rows(10, 0, 1_000), 10);
+    }
+
+    #[test]
+    fn flush_input_takes_the_first_rows() {
+        let dir = temp_dir("flush-input");
+        let (spans, files) = gen_spans("text_unique", Some(200)).unwrap();
+        let total = spans.len();
+        write_case(&dir, spans, &files).unwrap();
+        flush_input_cmd(&[dir.display().to_string()]).unwrap();
+        let batches = read_input(&dir.join("flush.arrow"));
+        assert_eq!(batches.len(), 1);
+        assert_eq!(batches[0].num_rows(), total);
+        let keys = sort_keys(&batches[0]);
+        assert!(keys.windows(2).all(|w| w[0] <= w[1]), "flush.arrow is not sorted");
+    }
+
+    #[test]
+    fn split_cmd_rewrites_the_input() {
+        let dir = temp_dir("split-cmd");
+        let d = dir.display().to_string();
+        let (spans, files) = gen_spans("text_unique", Some(100)).unwrap();
+        write_case(&dir, spans, &files).unwrap();
+        flush_input_cmd(std::slice::from_ref(&d)).unwrap();
+        fs::create_dir_all(dir.join("pq_cetra")).unwrap();
+        fs::write(dir.join("pq_cetra/000.parquet"), b"old").unwrap();
+        let before = text_files(&dir);
+
+        split_cmd(&[d.clone(), "6".to_owned()]).unwrap();
+
+        assert_eq!(fs::read_dir(dir.join("input")).unwrap().count(), 6);
+        assert!(!dir.join("pq_cetra").exists());
+        assert!(!dir.join("flush.arrow").exists());
+        assert_eq!(text_files(&dir), before);
+        let leftovers = fs::read_dir(&dir)
+            .unwrap()
+            .filter(|e| e.as_ref().unwrap().file_name().to_string_lossy().starts_with("input.old-"))
+            .count();
+        assert_eq!(leftovers, 0);
     }
 }

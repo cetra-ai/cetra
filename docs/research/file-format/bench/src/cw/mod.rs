@@ -10,6 +10,8 @@ pub async fn cmd(args: &[String]) -> crate::R<()> {
     match args.first().map(String::as_str) {
         Some("gen") => cases::gen_cmd(&args[1..]),
         Some("import") => cases::import_cmd(&args[1..]),
+        Some("split") => cases::split_cmd(&args[1..]),
+        Some("flush-input") => cases::flush_input_cmd(&args[1..]),
         Some("run") => harness::run_cmd(&args[1..]).await,
         Some("one") => harness::one_cmd(&args[1..]).await,
         _ => Err(crate::USAGE.into()),
