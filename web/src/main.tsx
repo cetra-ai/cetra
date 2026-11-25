@@ -37,21 +37,27 @@ async function main(): Promise<void> {
     ]);
     if (readMockMode() === "large") {
       const [
-        { createDataset, SUPPORT_PROFILE },
-        { CODING_PROFILE, VOICE_PROFILE, EXTRACTION_PROFILE },
+        { createDataset },
+        { SUPPORT_STORY_PROFILE },
+        { CODING_STORY_PROFILE },
+        { VOICE_STORY_PROFILE },
+        { EXTRACTION_STORY_PROFILE },
         { largeHandlers },
         { STORY_PROJECTS, projectHandlers },
       ] = await Promise.all([
         import("./mocks/generated/dataset"),
-        import("./mocks/generated/profiles"),
+        import("./mocks/generated/story-support"),
+        import("./mocks/generated/story-coding"),
+        import("./mocks/generated/story-voice"),
+        import("./mocks/generated/story-extraction"),
         import("./mocks/generated/handlers"),
         import("./mocks/projects"),
       ]);
       const profiles = {
-        support: SUPPORT_PROFILE,
-        coding: CODING_PROFILE,
-        voice: VOICE_PROFILE,
-        extraction: EXTRACTION_PROFILE,
+        support: SUPPORT_STORY_PROFILE,
+        coding: CODING_STORY_PROFILE,
+        voice: VOICE_STORY_PROFILE,
+        extraction: EXTRACTION_STORY_PROFILE,
       };
       const now = Date.now();
       worker.use(...projectHandlers);

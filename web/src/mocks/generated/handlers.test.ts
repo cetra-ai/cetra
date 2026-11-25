@@ -282,6 +282,8 @@ it("defines the generated scores so lists can colour them", async () => {
     ["exact", "higher"],
     ["quality", "higher"],
     ["tone", "none"],
+    ["user_feedback", "higher"],
+    ["interruption", "higher"],
     ["tests_pass", "higher"],
     ["verdict", "none"],
     ["resolved", "higher"],

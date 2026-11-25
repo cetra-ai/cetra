@@ -92,6 +92,28 @@ const SCORE_DEFINITIONS: Schema<"ScoreDefinition">[] = [
     created_at: DEFINED_AT,
     updated_at: DEFINED_AT,
   },
+  {
+    id: "01900000-0000-7000-8000-000000000616",
+    name: "user_feedback",
+    data_type: "boolean",
+    categories: [],
+    description: "Whether the end user marked the answer as helpful.",
+    direction: "higher",
+    created_at: DEFINED_AT,
+    updated_at: DEFINED_AT,
+  },
+  {
+    id: "01900000-0000-7000-8000-000000000617",
+    name: "interruption",
+    data_type: "numeric",
+    categories: [],
+    min_value: 0,
+    max_value: 1,
+    description: "How much the caller talked over the agent, from 0 to 1.",
+    direction: "higher",
+    created_at: DEFINED_AT,
+    updated_at: DEFINED_AT,
+  },
 ];
 
 /**
