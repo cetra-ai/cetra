@@ -38,7 +38,7 @@ const EXPECTED = {
   },
   evaluate: {
     support: "Reviewers score each flagged answer in a queue, one by one.",
-    coding: "The rule's scores over 24 hours, so a drop shows at a glance.",
+    coding: "A code check scores every run, and the rule charts its pass rate by the hour.",
     voice: "Write the judge's question once, then test it on a real call.",
     extraction: "Version 4 lifts vat_number from 91% to 96% on 300 invoices.",
   },

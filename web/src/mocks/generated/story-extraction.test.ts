@@ -33,10 +33,32 @@ it("gives each eligible run the vendor its index selects: a comma vendor, or the
     const comma = COMMA_FILES[index % 20];
     const turns = EXTRACTION_PROFILE.turns;
     const expected = index % 20 < 4 ? comma : turns[index % turns.length]?.question;
-    expect(trace.input_preview).toBe(expected);
+    if (trace.tags.includes("batch-1119")) {
+      // A batch run is an M16 vendor's invoice with its own number: same vendor, same page count.
+      expect(index % 20).toBeGreaterThanOrEqual(4);
+      expect(trace.input_preview?.replace(/invoice-2026-1[12]\d\d/, "")).toBe(
+        expected?.replace(/invoice-2026-\d{4}/, ""),
+      );
+    } else {
+      expect(trace.input_preview).toBe(expected);
+    }
     checked += 1;
   });
   expect(checked).toBeGreaterThan(1_000);
+});
+
+it("gives every run of the batch its own invoice file", () => {
+  const dataset = createDataset({
+    seed: 1,
+    now: NOW,
+    traces: 2_000,
+    profile: EXTRACTION_STORY_PROFILE,
+  });
+  const files = dataset.traces
+    .filter((trace) => trace.tags.includes("batch-1119"))
+    .map((trace) => trace.input_preview?.split(" ")[0]);
+  expect(files).toHaveLength(200);
+  expect(new Set(files).size).toBe(200);
 });
 
 function factsAt(now: number): ExtractionFacts {
@@ -94,8 +116,8 @@ it.each(SAMPLES)("three batch runs fail twice at %s", (_, now) => {
   expect(factsAt(now).batchFailedTwice).toBe(3);
 });
 
-it.each(SAMPLES)("the batch costs 0.4776 USD at %s", (_, now) => {
-  expect(factsAt(now).batchCost).toBeCloseTo(0.4776, 3);
+it.each(SAMPLES)("the batch costs 0.4816 USD at %s", (_, now) => {
+  expect(factsAt(now).batchCost).toBeCloseTo(0.4816, 3);
 });
 
 it("the batch tag selects the 200 batch runs, and the three failures have two errors", () => {

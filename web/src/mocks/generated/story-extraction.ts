@@ -109,6 +109,22 @@ function vendorTurnAt(index: number): Turn {
   return turns[index % turns.length] ?? turns[0];
 }
 
+/** The first invoice number of the batch: rank r reads invoice `BATCH_FIRST_INVOICE + r`. */
+const BATCH_FIRST_INVOICE = 1100;
+
+/**
+ * The turn of the batch's invoice at `rank`: the vendor's turn with the invoice's own file and number, so the
+ * batch list shows 200 different invoices (M19 retake). The page count stays the vendor's.
+ */
+function batchTurn(vendor: Turn, rank: number): Turn {
+  const number = String(BATCH_FIRST_INVOICE + rank);
+  return {
+    ...vendor,
+    question: vendor.question.replace(/invoice-2026-\d{4}/, `invoice-2026-${number}`),
+    summary: vendor.summary.replace(/INV-2026-\d{4}/, `INV-2026-${number}`),
+  };
+}
+
 function reExtractionSpans(amount: string | undefined): MarkedSpan[] {
   const reason =
     amount === undefined
@@ -200,7 +216,9 @@ export function extractionMarks(
     add(index, { tags: ["scanned"], error: SCANNED_ERROR });
   }
 
-  // 3. The batch: the first 200 eligible error-free traces that no earlier mark chose and that started before
+  // 3. The batch: the first 200 eligible error-free traces of the M16 vendors (each batch run reads its own
+  // invoice file, so a comma vendor's run there would leave its vendor's file count) that no earlier mark chose
+  // and that started before
   // a day ago, one every 18 s over an hour from three hours ago; ranks 197, 198 and 199 fail twice.
   const batch: number[] = [];
   for (const index of eligibleIndices) {
@@ -210,6 +228,7 @@ export function extractionMarks(
     const trace = traces[index];
     if (
       !trace ||
+      commaVendorAt(index) !== undefined ||
       reExtracted.has(index) ||
       scanned.has(index) ||
       trace.error_count !== 0 ||
@@ -221,9 +240,11 @@ export function extractionMarks(
   }
   const batchStart = now - 3 * HOUR_MS;
   batch.forEach((index, rank) => {
+    const turn = batchTurn(vendorTurnAt(index), rank);
     if (BATCH_FAILURE_RANKS.has(rank)) {
       add(index, {
         name: BATCH_NAME,
+        turn,
         startMs: batchStart + rank * BATCH_STEP_MS,
         tags: [BATCH_TAG, "re-extracted"],
         error: BATCH_ERROR,
@@ -231,6 +252,7 @@ export function extractionMarks(
     } else {
       add(index, {
         name: BATCH_NAME,
+        turn,
         startMs: batchStart + rank * BATCH_STEP_MS,
         tags: [BATCH_TAG],
       });

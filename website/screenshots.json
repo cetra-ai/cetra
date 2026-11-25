@@ -209,14 +209,14 @@
     "waitFor": "Can I schedule it every week?",
     "theme": "dark",
     "viewport": {
-      "width": 900,
-      "height": 900
+      "width": 1450,
+      "height": 790
     },
     "clip": "section[aria-label=\"Conversation\"]"
   },
   {
     "name": "marketing-assistant",
-    "path": "/acme/support-bot/traces",
+    "path": "/acme/support-bot/traces?range=7d",
     "waitFor": "loaded",
     "actions": [
       {
@@ -231,19 +231,14 @@
     ],
     "waitAfter": "Open in traces",
     "storage": {
-      "cetra.assistant.window": "{\"x\":16,\"y\":16,\"width\":560,\"height\":968}"
+      "cetra.assistant.window": "{\"x\":16,\"y\":16,\"width\":640,\"height\":880}"
     },
     "theme": "dark",
     "viewport": {
       "width": 1024,
-      "height": 1000
+      "height": 912
     },
-    "clipRect": {
-      "x": 0,
-      "y": 0,
-      "width": 900,
-      "height": 1000
-    }
+    "clip": "section[aria-label=\"Assistant\"]"
   },
   {
     "name": "marketing-issue",
@@ -252,7 +247,7 @@
     "theme": "dark",
     "viewport": {
       "width": 800,
-      "height": 600
+      "height": 555
     },
     "clip": "main"
   },
@@ -260,17 +255,32 @@
     "name": "marketing-evaluate",
     "path": "/acme/support-bot/annotation-queues/01900000-0000-7000-8000-000000570501/review/01900000-0000-7000-8000-000000570511",
     "waitFor": "4 of 25 done",
-    "actions": [
-      {
-        "click": "section[aria-label=\"Conversation\"] [data-index=\"2\"]"
-      }
-    ],
     "theme": "dark",
     "viewport": {
-      "width": 1400,
-      "height": 900
+      "width": 1440,
+      "height": 760
     },
-    "clip": "main"
+    "clip": "main",
+    "actions": [
+      {
+        "click": "fieldset:has(legend:text-is(\"correctness\")) input",
+        "type": "0.3"
+      },
+      {
+        "click": "input[aria-label=\"correctness reason\"]",
+        "type": "Says exports run any time; doesn't answer the weekly schedule"
+      },
+      {
+        "click": "fieldset:has(legend:text-is(\"tone\")) label:has-text(\"friendly\")"
+      },
+      {
+        "click": "fieldset:has(legend:text-is(\"policy\")) label:has-text(\"No\")"
+      }
+    ],
+    "storage": {
+      "cetra.split.session": "{\"session-turns\":85,\"session-trace\":15}",
+      "cetra.split.annotation-review": "{\"annotation-review-target\":62,\"annotation-review-form\":38}"
+    }
   },
   {
     "name": "marketing-playground",
@@ -297,7 +307,7 @@
     "theme": "dark",
     "viewport": {
       "width": 1400,
-      "height": 800
+      "height": 640
     },
     "clip": "main"
   },
@@ -313,10 +323,18 @@
     "waitAfter": "History",
     "theme": "dark",
     "viewport": {
-      "width": 900,
-      "height": 900
+      "width": 1240,
+      "height": 860
     },
-    "clip": "main"
+    "storage": {
+      "cetra.split.alerts.bottom": "{\"alerts-list\":28,\"alerts-detail\":72}"
+    },
+    "clipRect": {
+      "x": 209,
+      "y": 40,
+      "width": 1031,
+      "height": 745
+    }
   },
   {
     "name": "marketing-trace-page-coding",
@@ -346,19 +364,14 @@
     ],
     "waitAfter": "Open in traces",
     "storage": {
-      "cetra.assistant.window": "{\"x\":16,\"y\":16,\"width\":560,\"height\":968}"
+      "cetra.assistant.window": "{\"x\":16,\"y\":16,\"width\":640,\"height\":880}"
     },
     "theme": "dark",
     "viewport": {
       "width": 1024,
-      "height": 1000
+      "height": 912
     },
-    "clipRect": {
-      "x": 0,
-      "y": 0,
-      "width": 900,
-      "height": 1000
-    }
+    "clip": "section[aria-label=\"Assistant\"]"
   },
   {
     "name": "marketing-issue-coding",
@@ -367,26 +380,37 @@
     "theme": "dark",
     "viewport": {
       "width": 800,
-      "height": 600
+      "height": 555
     },
     "clip": "main"
   },
   {
     "name": "marketing-evaluate-coding",
     "path": "/acme/code-agent/online-rules?rule=01900000-0000-7000-8000-000000570911",
-    "waitFor": "Tests pass on every run",
+    "waitFor": "Tests pass after the patch",
     "theme": "dark",
     "viewport": {
-      "width": 900,
-      "height": 700
+      "width": 1280,
+      "height": 670
     },
-    "clip": "section[aria-label=\"Scores, last 24 hours\"]"
+    "clipRect": {
+      "x": 538,
+      "y": 40,
+      "width": 742,
+      "height": 630
+    }
   },
   {
     "name": "marketing-playground-coding",
     "path": "/acme/code-agent/playground?prompt=write-patch&version=4",
     "waitFor": "Run all",
     "actions": [
+      {
+        "click": "button[aria-label=\"Prompt version\"]"
+      },
+      {
+        "click": "[role=\"option\"]:has-text(\"v4\")"
+      },
       {
         "click": "input[aria-label=\"issue\"]",
         "type": "Rename Project.owner to Project.admin across the codebase (issue #409)."
@@ -400,14 +424,14 @@
         "type": "class Project:\n    owner: User"
       },
       {
-        "click": "button:has-text('Run all')"
+        "click": "button:has-text(\"Run all\")"
       }
     ],
-    "waitAfter": "three steps",
+    "waitAfter": "Run finished",
     "theme": "dark",
     "viewport": {
       "width": 960,
-      "height": 640
+      "height": 620
     },
     "clip": "main"
   },
@@ -423,10 +447,18 @@
     "waitAfter": "History",
     "theme": "dark",
     "viewport": {
-      "width": 900,
-      "height": 900
+      "width": 1240,
+      "height": 860
     },
-    "clip": "main"
+    "storage": {
+      "cetra.split.alerts.bottom": "{\"alerts-list\":28,\"alerts-detail\":72}"
+    },
+    "clipRect": {
+      "x": 209,
+      "y": 40,
+      "width": 1031,
+      "height": 720
+    }
   },
   {
     "name": "marketing-trace-page-voice",
@@ -441,7 +473,7 @@
   },
   {
     "name": "marketing-assistant-voice",
-    "path": "/acme/voice-desk/traces",
+    "path": "/acme/voice-desk/traces?range=30d",
     "waitFor": "loaded",
     "actions": [
       {
@@ -456,19 +488,14 @@
     ],
     "waitAfter": "Open in traces",
     "storage": {
-      "cetra.assistant.window": "{\"x\":16,\"y\":16,\"width\":560,\"height\":968}"
+      "cetra.assistant.window": "{\"x\":16,\"y\":16,\"width\":640,\"height\":880}"
     },
     "theme": "dark",
     "viewport": {
       "width": 1024,
-      "height": 1000
+      "height": 912
     },
-    "clipRect": {
-      "x": 0,
-      "y": 0,
-      "width": 900,
-      "height": 1000
-    }
+    "clip": "section[aria-label=\"Assistant\"]"
   },
   {
     "name": "marketing-issue-voice",
@@ -477,7 +504,7 @@
     "theme": "dark",
     "viewport": {
       "width": 800,
-      "height": 600
+      "height": 555
     },
     "clip": "main"
   },
@@ -508,22 +535,28 @@
     "waitFor": "Run all",
     "actions": [
       {
+        "click": "button[aria-label=\"Prompt version\"]"
+      },
+      {
+        "click": "[role=\"option\"]:has-text(\"v5\")"
+      },
+      {
         "click": "input[aria-label=\"caller\"]",
         "type": "Hi, can I move my appointment with Dr. Martin to Friday at 9:30?"
       },
       {
         "click": "input[aria-label=\"slots\"]",
-        "type": "14:00, 16:30"
+        "type": "9:30, 11:00"
       },
       {
-        "click": "button:has-text('Run all')"
+        "click": "button:has-text(\"Run all\")"
       }
     ],
-    "waitAfter": "Done: Friday at 9:30",
+    "waitAfter": "Run finished",
     "theme": "dark",
     "viewport": {
       "width": 960,
-      "height": 640
+      "height": 560
     },
     "clip": "main"
   },
@@ -539,30 +572,43 @@
     "waitAfter": "History",
     "theme": "dark",
     "viewport": {
-      "width": 900,
-      "height": 900
+      "width": 1240,
+      "height": 860
     },
-    "clip": "main"
+    "storage": {
+      "cetra.split.alerts.bottom": "{\"alerts-list\":28,\"alerts-detail\":72}"
+    },
+    "clipRect": {
+      "x": 209,
+      "y": 40,
+      "width": 1031,
+      "height": 745
+    }
   },
   {
     "name": "marketing-trace-page-extraction",
-    "path": "/acme/invoice-pipeline/traces?filter=tags%20%40%3E%20%5B'batch-1119'%5D&cols=start,name,duration,cost",
+    "path": "/acme/invoice-pipeline/traces?filter=tags%20%40%3E%20%5B%27batch-1119%27%5D&cols=status,input,output",
     "waitFor": "200 traces · 3 errors",
     "theme": "dark",
     "viewport": {
-      "width": 900,
-      "height": 700
+      "width": 1100,
+      "height": 560
     },
     "actions": [
       {
         "click": "button[aria-pressed]:has-text(\"Filters\")"
       }
     ],
-    "clip": "main"
+    "clipRect": {
+      "x": 208,
+      "y": 168,
+      "width": 892,
+      "height": 392
+    }
   },
   {
     "name": "marketing-assistant-extraction",
-    "path": "/acme/invoice-pipeline/traces",
+    "path": "/acme/invoice-pipeline/traces?range=30d",
     "waitFor": "loaded",
     "actions": [
       {
@@ -577,19 +623,14 @@
     ],
     "waitAfter": "Open in traces",
     "storage": {
-      "cetra.assistant.window": "{\"x\":16,\"y\":16,\"width\":560,\"height\":968}"
+      "cetra.assistant.window": "{\"x\":16,\"y\":16,\"width\":640,\"height\":880}"
     },
     "theme": "dark",
     "viewport": {
       "width": 1024,
-      "height": 1000
+      "height": 912
     },
-    "clipRect": {
-      "x": 0,
-      "y": 0,
-      "width": 900,
-      "height": 1000
-    }
+    "clip": "section[aria-label=\"Assistant\"]"
   },
   {
     "name": "marketing-issue-extraction",
@@ -611,7 +652,12 @@
       "width": 900,
       "height": 700
     },
-    "clip": "main"
+    "clipRect": {
+      "x": 40,
+      "y": 40,
+      "width": 860,
+      "height": 432
+    }
   },
   {
     "name": "marketing-playground-extraction",
@@ -619,18 +665,24 @@
     "waitFor": "Run all",
     "actions": [
       {
-        "click": "input[aria-label=\"ocr_text\"]",
-        "type": "NORDIC FREIGHT AB · Invoice INV-2026-0521 · TOTAL 1.234,56 EUR"
+        "click": "button[aria-label=\"Prompt version\"]"
       },
       {
-        "click": "button:has-text('Run all')"
+        "click": "[role=\"option\"]:has-text(\"v6\")"
+      },
+      {
+        "click": "input[aria-label=\"ocr_text\"]",
+        "type": "NORDIC FREIGHT AB · TOTAL 1.234,56 EUR"
+      },
+      {
+        "click": "button:has-text(\"Run all\")"
       }
     ],
-    "waitAfter": "1234.56",
+    "waitAfter": "Run finished",
     "theme": "dark",
     "viewport": {
       "width": 960,
-      "height": 640
+      "height": 560
     },
     "clip": "main"
   },
@@ -646,9 +698,17 @@
     "waitAfter": "History",
     "theme": "dark",
     "viewport": {
-      "width": 900,
-      "height": 900
+      "width": 1240,
+      "height": 860
     },
-    "clip": "main"
+    "storage": {
+      "cetra.split.alerts.bottom": "{\"alerts-list\":28,\"alerts-detail\":72}"
+    },
+    "clipRect": {
+      "x": 209,
+      "y": 40,
+      "width": 1031,
+      "height": 745
+    }
   }
 ]

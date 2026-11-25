@@ -105,8 +105,8 @@ type StoryIssue = {
   /** The generated traces that are occurrences too. */
   matches: (trace: Trace) => boolean;
   /**
-   * The reasons the issue's examples show, one per example by position: the hero is the first
-   * example, then the generated traces, newest first. The list cycles, and an issue has at most
+   * The reasons the issue's examples show, one per example by position: the hero and the generated
+   * traces, newest first. The list cycles, and an issue has at most
    * five examples, so its five reasons are all different. `"input_preview"`: each example's reason
    * is its own trace's question, so the examples show the questions the traces were asked.
    */
@@ -386,7 +386,7 @@ export const STORY_RULES: readonly StoryRule[] = [
     condition: {
       metric: "latency_p95",
       target: "trace",
-      window: "15m",
+      window: "1h",
       comparator: "gt",
       threshold: 1_500,
       min_count: 20,
@@ -395,12 +395,10 @@ export const STORY_RULES: readonly StoryRule[] = [
     state: "firing",
     lastValue: (dataset, now) =>
       percentile(
-        startedBetween(dataset, now - 15 * MINUTE_MS, now).map(
-          (trace) => trace.duration_ns / 1_000_000,
-        ),
+        startedBetween(dataset, now - HOUR_MS, now).map((trace) => trace.duration_ns / 1_000_000),
         95,
       ),
-    lastCount: (dataset, now) => startedBetween(dataset, now - 15 * MINUTE_MS, now).length,
+    lastCount: (dataset, now) => startedBetween(dataset, now - HOUR_MS, now).length,
     // Firing for two days: longer than the chart's 24 hours.
     changedAgoMs: () => 2 * DAY_MS,
   },
@@ -692,27 +690,23 @@ function occurrencesOf(
       users: distinctUsers(traces),
     }));
 
-  const examples: Schema<"IssueExample">[] = [];
-  if (hero) {
-    const spanId = issue.hero.spanId?.(dataset, issue.hero.index(dataset));
-    const reason = reasonOf(issue, hero, examples.length);
-    examples.push({
-      trace_id: hero.trace_id,
-      created_at: hero.start_time,
-      issue_id: issue.id,
-      ...(reason === undefined ? {} : { reason }),
-      ...(spanId === undefined ? {} : { span_id: spanId }),
-    });
-  }
-  for (const trace of generated.slice(0, GENERATED_EXAMPLES)) {
-    const reason = reasonOf(issue, trace, examples.length);
-    examples.push({
+  // The hero and the newest generated occurrences, newest first like the page lists them; the hero keeps
+  // its span, and the reasons go by position in that order.
+  const shown = [...(hero ? [hero] : []), ...generated.slice(0, GENERATED_EXAMPLES)].sort(
+    newestFirst,
+  );
+  const heroSpanId = hero ? issue.hero.spanId?.(dataset, issue.hero.index(dataset)) : undefined;
+  const examples: Schema<"IssueExample">[] = shown.map((trace, position) => {
+    const reason = reasonOf(issue, trace, position);
+    const spanId = trace.trace_id === hero?.trace_id ? heroSpanId : undefined;
+    return {
       trace_id: trace.trace_id,
       created_at: trace.start_time,
       issue_id: issue.id,
       ...(reason === undefined ? {} : { reason }),
-    });
-  }
+      ...(spanId === undefined ? {} : { span_id: spanId }),
+    };
+  });
   return { days, examples };
 }
 

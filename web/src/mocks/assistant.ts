@@ -464,8 +464,6 @@ function traceIdAt(index: number): string {
   return `a${index.toString(16).padStart(31, "0")}`;
 }
 
-const STORY_CONTEXT = { page: "traces", range: "24h" };
-
 /** The SQL call of a story turn, as the assistant's query_sql tool receives it. */
 function queryCall(query: string): TurnSpec["call"] {
   return { name: "query_sql", arguments: { query, params: {} } };
@@ -505,6 +503,8 @@ export type Story = {
   /** When the stored chat started; each story is five minutes older than the one before. */
   base: string;
   heroTraceId: string;
+  /** The range the stored chat's question carried: the page's range, the same as its filter card's. */
+  range: string;
   turns: [TurnSpec];
 };
 
@@ -514,6 +514,7 @@ export const STORIES: Story[] = [
     conversationId: "01900000-0000-7000-8000-000000570801",
     base: "2026-11-19T11:50:00Z",
     heroTraceId: traceIdAt(3),
+    range: "7d",
     turns: [
       {
         question: "Why did our thumbs-down rate double since Tuesday?",
@@ -539,6 +540,7 @@ export const STORIES: Story[] = [
     conversationId: "01900000-0000-7000-8000-000000570802",
     base: "2026-11-19T11:45:00Z",
     heroTraceId: traceIdAt(4),
+    range: "24h",
     turns: [
       {
         question: "Why did cost per run triple yesterday?",
@@ -564,6 +566,7 @@ export const STORIES: Story[] = [
     conversationId: "01900000-0000-7000-8000-000000570803",
     base: "2026-11-19T11:40:00Z",
     heroTraceId: traceIdAt(5),
+    range: "30d",
     turns: [
       {
         question: "Why do callers hang up?",
@@ -589,6 +592,7 @@ export const STORIES: Story[] = [
     conversationId: "01900000-0000-7000-8000-000000570804",
     base: "2026-11-19T11:35:00Z",
     heroTraceId: traceIdAt(6),
+    range: "30d",
     turns: [
       {
         question: "Which vendors' invoices fail the most, and why?",
@@ -638,7 +642,7 @@ type Summary = {
 function storyDetail(story: Story) {
   const [turn] = story.turns;
   const messages = placed(
-    storyScript(turn, story.heroTraceId).messages(STORY_CONTEXT),
+    storyScript(turn, story.heroTraceId).messages({ page: "traces", range: story.range }),
     1,
     story.base,
   );

@@ -71,7 +71,7 @@ export const PICTURES = [
     },
     stories: {
       support: {
-        alt: "The session view of a support conversation: four turns with their scores and costs, the third asking whether the agent can schedule a weekly visit and scoring 0.3 on correctness, with a failed user-feedback mark.",
+        alt: "The conversation of a support session: four turns with their scores and costs, the third asking whether it can schedule the export every week and scoring 0.3 on correctness, with a failed user-feedback mark.",
         caption: "Each turn of a session, with its score, so the bad answer stands out.",
       },
       coding: {
@@ -83,7 +83,7 @@ export const PICTURES = [
         caption: "Hear the caller and the agent, and read what was said, in one voice turn.",
       },
       extraction: {
-        alt: "The trace list filtered to the batch tagged batch-1119: 200 invoice traces, with the three failed ones at the top marked by a red edge, and the totals line reading 200 traces, 3 errors and $0.48.",
+        alt: "The trace list of the batch tagged batch-1119: process-invoice traces, each with its own invoice file, three failed ones at the top with the output Schema check failed twice, and a totals line of 200 traces, 3 errors and $0.48.",
         caption: "A 200-invoice batch, with its three failed invoices at the top.",
       },
     },
@@ -95,19 +95,19 @@ export const PICTURES = [
     label: "Assistant",
     stories: {
       support: {
-        alt: "The assistant's window over the traces page: the question about thumbs-down answers, its answer that 62% quote the old pricing page, and a filter card with Open in traces.",
+        alt: "The assistant's window: the question about thumbs-down answers, a SQL step, a filter card with Open in traces, the answer that 62% quote the old pricing page, and a dashboard card with Open in dashboard editor.",
         caption: "Ask why answers got a thumbs-down, then open the traces behind them.",
       },
       coding: {
-        alt: "The assistant's window over the traces page: the question about cost per run, its answer that 18% of runs call run_tests more than five times and make 70% of the cost, and a filter card with Open in traces.",
+        alt: "The assistant's window: the question about cost per run, a SQL step, a filter card with Open in traces, the answer that 18% of runs call run_tests more than five times and make 70% of the cost, and a dashboard card.",
         caption: "Ask why runs cost more, then open the retried runs.",
       },
       voice: {
-        alt: "The assistant's window over the traces page: the question about hang-ups, its answer that 71% follow a turn over 2.5 s on check_availability, and a filter card with Open in traces.",
+        alt: "The assistant's window: the question about hang-ups, a SQL step, a filter card with Open in traces, the answer that 71% follow a turn over 2.5 s on check_availability, and a dashboard card.",
         caption: "Ask why callers hang up, then open the slow calendar checks.",
       },
       extraction: {
-        alt: "The assistant's window over the traces page: the question about failing vendors, its answer that 38% of Nordic Freight's invoices were re-extracted, all on total, and a filter card with Open in traces.",
+        alt: "The assistant's window: the question about failing vendors, a SQL step, a filter card with Open in traces, the answer that 38% of Nordic Freight's invoices were re-extracted, all on total, and a dashboard card.",
         caption: "Ask which vendors fail, then open the re-extracted invoices.",
       },
     },
@@ -119,19 +119,19 @@ export const PICTURES = [
     label: "Issues",
     stories: {
       support: {
-        alt: "An issue page titled Customers asking for SSO on the Starter plan: 244 occurrences in 14 days, a daily chart, and five examples asking whether SSO comes with the Starter plan.",
+        alt: "An issue page titled Customers asking for SSO on the Starter plan: 244 occurrences in 14 days, a daily chart, and five differently worded examples asking about SSO on the Starter plan.",
         caption: "The same question, 244 times in 14 days, grouped into one issue.",
       },
       coding: {
-        alt: "An issue page titled ContextWindowExceeded: diff over 23 files: 70 occurrences in 14 days, 12 users on the busiest day, and an example saying the diff was too large for the model's context.",
+        alt: "An issue page titled ContextWindowExceeded: diff over 23 files: 70 occurrences in 14 days, 12 users on the busiest day, and five examples, each a diff over the 200k context.",
         caption: "Runs that stop when a diff no longer fits, grouped into one issue.",
       },
       voice: {
-        alt: "An issue page titled Agent talked over the caller: 11 occurrences in 14 days, 7 users on the busiest day, and an example whose interruption check scored 0.3.",
+        alt: "An issue page titled Agent talked over the caller: 11 occurrences in 14 days, 7 users on the busiest day, and five examples, each with its interruption score and how early the agent spoke.",
         caption: "Replies that start before the caller has finished, grouped into one issue.",
       },
       extraction: {
-        alt: "An issue page titled Scanned PDF: OCR returned no text: 54 occurrences in 14 days, and an example saying the PDF is a scanned image with no text layer.",
+        alt: "An issue page titled Scanned PDF: OCR returned no text: 54 occurrences in 14 days, and examples saying the PDF is a scanned image with no text layer.",
         caption: "Scanned invoices that give OCR nothing to read, grouped into one issue.",
       },
     },
@@ -148,12 +148,12 @@ export const PICTURES = [
     },
     stories: {
       support: {
-        alt: "An annotation queue's review of an answer that got a thumbs-down: the progress reads 4 of 25 done, and the form has correctness, tone and policy fields with their instructions.",
+        alt: "An annotation queue's review of a support conversation: its four turns on the left, the progress 4 of 25 done, and the form filled in with correctness 0.3 and its reason, tone friendly and policy No.",
         caption: "Reviewers score each flagged answer in a queue, one by one.",
       },
       coding: {
-        alt: "The scores chart of an online rule over the last 24 hours, headed 66% with 411 scores, drawn as a line from 24 hours ago to now.",
-        caption: "The rule's scores over 24 hours, so a drop shows at a glance.",
+        alt: "The online rule Tests pass after the patch: its evaluator, target and 100% sample rate, 411 runs scored in the last 24 hours, and its scores at 66% over the same hours.",
+        caption: "A code check scores every run, and the rule charts its pass rate by the hour.",
       },
       voice: {
         alt: "The LLM judge Reads the booking back on its Configuration tab: its question about the booking, a test on one trace, and the result false, with the reason that the agent never read the booking back.",
@@ -176,15 +176,15 @@ export const PICTURES = [
         caption: "Run two prompt versions on the same question, and see which one answers right.",
       },
       coding: {
-        alt: "The playground with write-patch version 4: its two messages, the variables for a rename across 23 files, and the model's reply, three steps for the change.",
+        alt: "The playground with write-patch version 4 on Claude Sonnet: its two messages, the variables for a rename across the codebase, and the reply that the change touches 23 files and goes in three steps.",
         caption: "Run the patch prompt on a wide change, and see it split into steps.",
       },
       voice: {
-        alt: "The playground with voice-reply version 5: the receptionist prompt, the caller's request to move an appointment to Friday at 9:30 with Dr. Martin, and the reply Done: Friday at 9:30, with Dr. Martin.",
+        alt: "The playground with voice-reply version 5: the receptionist prompt, the caller's request to move an appointment to Friday at 9:30, the free slots 9:30 and 11:00, and the reply Done: Friday at 9:30, with Dr. Martin.",
         caption: "Tune the receptionist prompt so it reads the booking back.",
       },
       extraction: {
-        alt: "The playground with extract-invoice version 6: the system prompt on comma decimals, the OCR text of a Nordic Freight invoice, and the JSON reply with total 1234.56 in EUR.",
+        alt: "The playground with extract-invoice version 6: the system prompt on comma decimals, the OCR text of a Nordic Freight invoice with TOTAL 1.234,56 EUR, and the JSON reply with total 1234.56.",
         caption: "A comma-decimal total, 1.234,56, comes back as 1234.56 in JSON.",
       },
     },
@@ -200,11 +200,11 @@ export const PICTURES = [
         caption: "Know when answer quality drops below your bar.",
       },
       coding: {
-        alt: "The alerts page with the rule Spend over $40 an hour selected: firing for 14 hours, last value $45.07, condition cost over $40.00 over 1 hour, Team Slack, and a preview chart above its threshold.",
+        alt: "The alerts page with the rule Spend over $40 an hour selected: firing for 14 hours, last value $42.07, condition cost over $40.00 over 1 hour, Team Slack, and a preview chart above its threshold.",
         caption: "Know when an hour of agent spend goes over your budget.",
       },
       voice: {
-        alt: "The alerts page with the rule Slow replies on the voice desk selected: firing for 6 hours, last value 3550 ms, condition p95 latency over 1500 ms over 15 minutes, On-call pager, and a preview chart.",
+        alt: "The alerts page with the rule Slow replies on the voice desk selected: firing for 2 days, last value 3666 ms, condition p95 latency over 1500 ms over 1 hour, the On-call webhook, and a preview chart above its threshold all day.",
         caption: "Know when one in twenty replies takes longer than 1.5 s.",
       },
       extraction: {

@@ -184,7 +184,7 @@ function newestFirst(left: Trace, right: Trace): number {
   );
 }
 
-it("makes the first matching trace the first example of every story issue, the newest one for the support issue", () => {
+it("makes the first matching trace an example of every story issue, the newest one for the support issue", () => {
   for (const issue of STORY_ISSUES) {
     const dataset = stories[issue.story];
     const index = issue.hero.index(dataset);
@@ -202,10 +202,15 @@ it("makes the first matching trace the first example of every story issue, the n
     expect(earlier).toEqual([]);
 
     const { examples } = storyOccurrences(dataset, issue);
-    expect(examples[0]?.trace_id).toBe(hero?.trace_id);
-    expect(examples[0]?.reason).toBe(reasonFor(issue, hero, 0));
+    const position = examples.findIndex((example) => example.trace_id === hero?.trace_id);
+    expect(position).toBeGreaterThanOrEqual(0);
+    expect(examples[position]?.reason).toBe(reasonFor(issue, hero, position));
     const spanId = issue.hero.spanId?.(dataset, index);
-    expect(examples[0]?.span_id).toBe(spanId);
+    expect(examples[position]?.span_id).toBe(spanId);
+    // Only the hero's example carries a span.
+    expect(examples.filter((example) => example.span_id !== undefined).length).toBe(
+      spanId === undefined ? 0 : 1,
+    );
     if (spanId !== undefined) {
       const span = dataset
         .traceDetail(hero?.trace_id ?? "")
@@ -259,7 +264,7 @@ it("counts the support issue's SSO traces in the last two weeks as the support f
   expect(countIn(NOW - 2 * WEEK_MS, NOW - WEEK_MS)).toBe(facts.ssoPreviousWeek);
 });
 
-it("gives every story issue at most five examples, the generated ones newest first", () => {
+it("gives every story issue at most five examples, the hero and the newest generated ones, newest first", () => {
   for (const issue of STORY_ISSUES) {
     const dataset = stories[issue.story];
     const byId = new Map(dataset.traces.map((trace) => [trace.trace_id, trace]));
@@ -270,10 +275,11 @@ it("gives every story issue at most five examples, the generated ones newest fir
       expect(examples.length).toBeGreaterThan(1);
     }
 
-    const shown = examples.slice(1);
+    const heroId = dataset.traces[issue.hero.index(dataset)]?.trace_id;
+    const shown = examples.filter((example) => example.trace_id !== heroId);
     expect(shown.length).toBe(Math.min(GENERATED_EXAMPLES, generated.length));
 
-    const order: [number, string][] = shown.map((example) => [
+    const order: [number, string][] = examples.map((example) => [
       Date.parse(example.created_at),
       example.trace_id,
     ]);
@@ -397,15 +403,15 @@ it("computes each rule's value and count from its window at the clock", () => {
   expect(codingAlert.last_count).toBe(codingHour.length);
 
   const voice = stories.voice;
-  const voiceQuarter = startedIn(voice, NOW - 15 * MINUTE_MS, NOW);
+  const voiceHour = startedIn(voice, NOW - HOUR_MS, NOW);
   const voiceAlert = storyAlertRule(voice, oneOf(STORY_RULES, "voice"));
   expect(voiceAlert.last_value).toBe(
     percentile(
-      voiceQuarter.map((trace) => trace.duration_ns / 1_000_000),
+      voiceHour.map((trace) => trace.duration_ns / 1_000_000),
       95,
     ),
   );
-  expect(voiceAlert.last_count).toBe(voiceQuarter.length);
+  expect(voiceAlert.last_count).toBe(voiceHour.length);
 });
 
 /** A rule's comparison of its value with its threshold, as the server reads the comparator. */
