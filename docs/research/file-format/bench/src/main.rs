@@ -7,6 +7,7 @@
 //! fmtbench upload <dir> <s3://bucket/key> [variant...]
 
 mod counting;
+mod cw;
 mod payload;
 mod pqfast;
 mod hedge;
