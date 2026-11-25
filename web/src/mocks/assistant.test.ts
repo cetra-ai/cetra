@@ -11,38 +11,94 @@ import {
   parseTurnEvent,
   type TurnEvent,
 } from "@/lib/assistant/types";
-import { assistantHandlers, resetAssistantMock, STORIES, scriptFor } from "@/mocks/assistant";
+import {
+  assistantHandlers,
+  resetAssistantMock,
+  STORIES,
+  type Story,
+  scriptFor,
+} from "@/mocks/assistant";
 import {
   createDataset,
   type Dataset,
+  isEligibleTrace,
   type Profile,
-  SUPPORT_PROFILE,
 } from "@/mocks/generated/dataset";
-import { CODING_PROFILE, EXTRACTION_PROFILE, VOICE_PROFILE } from "@/mocks/generated/profiles";
+import { largeHandlers } from "@/mocks/generated/handlers";
+import { CODING_STORY_PROFILE, codingFacts } from "@/mocks/generated/story-coding";
+import { EXTRACTION_STORY_PROFILE, extractionFacts } from "@/mocks/generated/story-extraction";
+import { SUPPORT_STORY_PROFILE, supportFacts } from "@/mocks/generated/story-support";
+import { VOICE_STORY_PROFILE, voiceFacts } from "@/mocks/generated/story-voice";
 import { server } from "@/mocks/node";
 import { type StoryId, storyProject } from "@/mocks/projects";
-import { STORY_DASHBOARD_IDS, storyDashboards } from "@/mocks/story-dashboards";
 
 const OTHER_ID = "01900000-0000-7000-8000-000000001a01";
 const NEW_ID = "01900000-0000-7000-8000-000000001a02";
 const DEFAULT_TRACE_ID = "0af7651916cd43dd8448eb211c80319c";
 const DEFAULT_TITLE = "Which trace errors spiked?";
 
-const PROFILES: Record<StoryId, Profile> = {
-  support: SUPPORT_PROFILE,
-  coding: CODING_PROFILE,
-  voice: VOICE_PROFILE,
-  extraction: EXTRACTION_PROFILE,
+/** The screenshot clock of the story datasets. */
+const NOW = Date.parse("2026-11-19T12:00:00Z");
+const HOUR_MS = 3_600_000;
+const DAY_MS = 86_400_000;
+const RANGE_MS: Record<string, number> = {
+  "15m": 15 * 60_000,
+  "1h": HOUR_MS,
+  "6h": 6 * HOUR_MS,
+  "24h": DAY_MS,
+  "7d": 7 * DAY_MS,
+  "30d": 30 * DAY_MS,
 };
 
-/** A story's dataset of `traces` traces, built with the story's profile. */
-function datasetOf(story: StoryId, traces: number): Dataset {
-  return createDataset({
+/** Each story's profile and trace count, as `main.tsx` builds the large mock (M17). */
+const STORY_PROFILES: Record<StoryId, Profile> = {
+  support: SUPPORT_STORY_PROFILE,
+  coding: CODING_STORY_PROFILE,
+  voice: VOICE_STORY_PROFILE,
+  extraction: EXTRACTION_STORY_PROFILE,
+};
+const STORY_TRACES: Record<StoryId, number> = {
+  support: 5_000,
+  coding: 2_000,
+  voice: 2_000,
+  extraction: 2_000,
+};
+
+const datasets = new Map<StoryId, Dataset>();
+
+/** A story's dataset at the screenshot clock, built with the story's profile. */
+function storyDataset(story: StoryId): Dataset {
+  const cached = datasets.get(story);
+  if (cached !== undefined) {
+    return cached;
+  }
+  const dataset = createDataset({
     seed: 1,
-    now: Date.parse("2026-11-19T12:00:00Z"),
-    traces,
-    profile: PROFILES[story],
+    now: NOW,
+    traces: STORY_TRACES[story],
+    profile: STORY_PROFILES[story],
   });
+  datasets.set(story, dataset);
+  return dataset;
+}
+
+/** The traces a story's facts count: not a showcase, not the big first trace, and visible. */
+function eligibleOf(story: StoryId, dataset: Dataset) {
+  return dataset.traces.filter((trace, index) =>
+    isEligibleTrace(STORY_PROFILES[story], trace, index),
+  );
+}
+
+function round2(value: number): number {
+  return Math.round(value * 100) / 100;
+}
+
+function storyNamed(story: StoryId): Story {
+  const found = STORIES.find((item) => item.story === story);
+  if (found === undefined) {
+    throw new Error(`no story ${story}`);
+  }
+  return found;
 }
 
 /** The assistant's API base in the story's project: `/api/v1/projects/<encoded ref>/assistant`. */
@@ -103,6 +159,15 @@ async function detail(story: StoryId, id: string): Promise<StoredDetail> {
   return (await response.json()) as StoredDetail;
 }
 
+/** The SQL rows a stored story chat holds: the result of its one query call (message 3). */
+async function storedRows(story: StoryId): Promise<Record<string, unknown>[]> {
+  const stored = await detail(story, storyNamed(story).conversationId);
+  const part = stored.messages[2]?.parts[0] as
+    | { result?: { rows?: Record<string, unknown>[] } }
+    | undefined;
+  return part?.result?.rows ?? [];
+}
+
 /** The events of one kind, typed. */
 function eventsNamed<N extends TurnEvent["event"]>(events: TurnEvent[], name: N) {
   return events.filter((event): event is Extract<TurnEvent, { event: N }> => event.event === name);
@@ -160,21 +225,17 @@ function firstStory() {
 describe("assistant story conversations", () => {
   it("picks each story's script from the question, trimmed and in any case", async () => {
     for (const story of STORIES) {
-      for (const [index, turn] of story.turns.entries()) {
-        await createChat(story.story);
-        const exact = await ask(story.story, NEW_ID, turn.question);
-        await createChat(story.story);
-        const loose = await ask(story.story, NEW_ID, `  ${turn.question.toUpperCase()}  `);
+      const [turn] = story.turns;
+      await createChat(story.story);
+      const exact = await ask(story.story, NEW_ID, turn.question);
+      await createChat(story.story);
+      const loose = await ask(story.story, NEW_ID, `  ${turn.question.toUpperCase()}  `);
 
-        expect(loose).toEqual(exact);
-        expect(eventsNamed(exact, "start")[0]?.data.trace_id).toBe(story.heroTraceId);
-        const call = eventsNamed(exact, "tool_call")[0];
-        expect(call?.data.name).toBe(index === 0 ? "search_traces" : "draft_dashboard");
-        if (index === 1) {
-          expect(eventsNamed(exact, "draft")[0]?.data.kind).toBe("dashboard");
-        }
-        expect(exact.at(-1)).toMatchObject({ event: "done", data: { finish_reason: "stop" } });
-      }
+      expect(loose).toEqual(exact);
+      expect(eventsNamed(exact, "start")[0]?.data.trace_id).toBe(story.heroTraceId);
+      expect(eventsNamed(exact, "tool_call")[0]?.data.name).toBe("query_sql");
+      expect(eventsNamed(exact, "draft")[0]?.data.kind).toBe("filter");
+      expect(exact.at(-1)).toMatchObject({ event: "done", data: { finish_reason: "stop" } });
     }
   });
 
@@ -213,83 +274,54 @@ describe("assistant story conversations", () => {
     expect(scriptFor("").title).toBe(DEFAULT_TITLE);
   });
 
-  it.each(STORIES)("stores both turns of $story as they were streamed", async (story) => {
-    await createChat(story.story);
-    const [turn1, turn2] = story.turns;
-    const first = await ask(story.story, NEW_ID, turn1.question, { page: "traces", range: "24h" });
-    const second = await ask(story.story, NEW_ID, turn2.question, { page: "dashboard" });
+  it("stores the one turn of each story as it was streamed", async () => {
+    for (const story of STORIES) {
+      const [turn] = story.turns;
+      await createChat(story.story);
+      const events = await ask(story.story, NEW_ID, turn.question, {
+        page: "traces",
+        range: "24h",
+      });
 
-    expect(eventsNamed(first, "start")[0]?.data.turn_id).toBe(1);
-    expect(eventsNamed(second, "start")[0]?.data.turn_id).toBe(2);
+      expect(eventsNamed(events, "start")[0]?.data.turn_id).toBe(1);
 
-    const stored = await detail(story.story, NEW_ID);
-    expect(stored.title).toBe(turn1.question);
-    expect(stored.message_count).toBe(8);
-    expect(stored.messages.map((message) => message.seq)).toEqual([1, 2, 3, 4, 5, 6, 7, 8]);
-    expect(stored.messages.map((message) => message.role)).toEqual([
-      "user",
-      "assistant",
-      "tool",
-      "assistant",
-      "user",
-      "assistant",
-      "tool",
-      "assistant",
-    ]);
-    expect(stored.messages[0]?.parts).toEqual([{ type: "text", content: turn1.question }]);
-    expect(stored.messages[0]?.context).toEqual({ page: "traces", range: "24h" });
-    expect(stored.messages[4]?.parts).toEqual([{ type: "text", content: turn2.question }]);
-    expect(stored.messages[4]?.context).toEqual({ page: "dashboard" });
+      const stored = await detail(story.story, NEW_ID);
+      expect(stored.title).toBe(turn.question);
+      expect(stored.message_count).toBe(4);
+      expect(stored.messages.map((message) => message.seq)).toEqual([1, 2, 3, 4]);
+      expect(stored.messages.map((message) => message.role)).toEqual([
+        "user",
+        "assistant",
+        "tool",
+        "assistant",
+      ]);
+      expect(stored.messages[0]?.parts).toEqual([{ type: "text", content: turn.question }]);
+      expect(stored.messages[0]?.context).toEqual({ page: "traces", range: "24h" });
 
-    const bubbles = bubblesOf(stored.messages);
-    expect(bubbles.map((bubble) => bubble.role)).toEqual([
-      "user",
-      "assistant",
-      "user",
-      "assistant",
-    ]);
-    expect(bubbles[0]).toMatchObject({ role: "user", text: turn1.question });
-    expect(bubbles[2]).toMatchObject({ role: "user", text: turn2.question });
-    expect(comparable(assistantAt(bubbles, 1))).toEqual(comparable(streamedBubble(first)));
-    expect(comparable(assistantAt(bubbles, 3))).toEqual(comparable(streamedBubble(second)));
-    expect(assistantAt(bubbles, 1).traceId).toBe(story.heroTraceId);
-    expect(assistantAt(bubbles, 3).status).toBe("complete");
+      const bubbles = bubblesOf(stored.messages);
+      expect(bubbles.map((bubble) => bubble.role)).toEqual(["user", "assistant"]);
+      expect(bubbles[0]).toMatchObject({ role: "user", text: turn.question });
+      expect(comparable(assistantAt(bubbles, 1))).toEqual(comparable(streamedBubble(events)));
+      expect(assistantAt(bubbles, 1).traceId).toBe(story.heroTraceId);
+      expect(assistantAt(bubbles, 1).status).toBe("complete");
 
-    const draftEvent = eventsNamed(second, "draft")[0];
-    const storedDraft = assistantAt(bubbles, 3).blocks.find((block) => block.type === "draft");
-    expect(draftEvent).toBeDefined();
-    expect(storedDraft).toMatchObject({ type: "draft", draft: draftEvent?.data.draft });
+      const draftEvent = eventsNamed(events, "draft")[0];
+      const storedDraft = assistantAt(bubbles, 1).blocks.find((block) => block.type === "draft");
+      expect(draftEvent).toBeDefined();
+      expect(storedDraft).toMatchObject({ type: "draft", draft: draftEvent?.data.draft });
+    }
   });
 
-  it("names only traces that exist", async () => {
-    const expectedRows: Record<string, number> = {
-      support: 6,
-      coding: 1,
-      voice: 12,
-      extraction: 3,
-    };
-
+  it("names only traces that exist, and the rows the query returned", async () => {
     for (const story of STORIES) {
-      const ids = new Set(datasetOf(story.story, 50).traces.map((trace) => trace.trace_id));
+      const ids = new Set(storyDataset(story.story).traces.map((trace) => trace.trace_id));
       expect(ids.has(story.heroTraceId)).toBe(true);
 
       const stored = await detail(story.story, story.conversationId);
-      const search = stored.messages[2]?.parts[0] as Record<string, unknown> | undefined;
-      const rows = (search?.result as { rows: { trace_id: string }[] } | undefined)?.rows ?? [];
-      expect(rows.length).toBe(expectedRows[story.story]);
-      for (const row of rows) {
-        expect(ids.has(row.trace_id)).toBe(true);
-      }
-      expect(search).toMatchObject({ rows: expectedRows[story.story] });
-      expect(rows.some((row) => row.trace_id === story.heroTraceId)).toBe(
-        story.story !== "support",
-      );
-
-      const events = await ask(story.story, NEW_ID, story.turns[0].question);
-      expect(eventsNamed(events, "tool_result")[0]?.data.summary.rows).toBe(
-        expectedRows[story.story],
-      );
-      await createChat(story.story);
+      const search = stored.messages[2]?.parts[0] as { rows?: number } | undefined;
+      const [turn] = story.turns;
+      expect(search).toMatchObject({ rows: turn.rows });
+      expect((await storedRows(story.story)).length).toBe(turn.rows);
 
       for (const message of stored.messages) {
         for (const part of message.parts) {
@@ -300,14 +332,6 @@ describe("assistant story conversations", () => {
             expect(ids.has(match[0])).toBe(true);
           }
         }
-      }
-
-      const abbreviated = story.turns[0].answer.match(/a0000000…(\d{4})/);
-      if (story.story === "support") {
-        expect(abbreviated).toBeNull();
-      } else {
-        expect(abbreviated?.[1]).toBe(story.heroTraceId.slice(-4));
-        expect(story.heroTraceId.startsWith("a0000000")).toBe(true);
       }
     }
   });
@@ -320,7 +344,7 @@ describe("assistant story conversations", () => {
 
     const support = await listIn("support");
     expect(support.data.map((item) => item.id)).toEqual([firstStory().conversationId, OTHER_ID]);
-    expect(support.data.map((item) => item.message_count)).toEqual([8, 4]);
+    expect(support.data.map((item) => item.message_count)).toEqual([4, 4]);
     for (const item of support.data) {
       expect(item).not.toHaveProperty("messages");
     }
@@ -328,7 +352,7 @@ describe("assistant story conversations", () => {
       const listed = await listIn(story.story);
       expect(listed.data.map((item) => item.id)).toEqual([story.conversationId]);
       expect(listed.data[0]?.title).toBe(story.turns[0].question);
-      expect(listed.data[0]?.message_count).toBe(8);
+      expect(listed.data[0]?.message_count).toBe(4);
     }
 
     await createChat("support");
@@ -347,22 +371,17 @@ describe("assistant story conversations", () => {
   it("opens a stored story chat directly", async () => {
     for (const story of STORIES) {
       const stored = await detail(story.story, story.conversationId);
-      expect(stored.message_count).toBe(8);
-      expect(stored.messages).toHaveLength(8);
+      expect(stored.message_count).toBe(4);
+      expect(stored.messages).toHaveLength(4);
 
       const bubbles = bubblesOf(stored.messages);
-      expect(bubbles.map((bubble) => bubble.role)).toEqual([
-        "user",
-        "assistant",
-        "user",
-        "assistant",
-      ]);
+      expect(bubbles.map((bubble) => bubble.role)).toEqual(["user", "assistant"]);
       expect(bubbles[0]).toMatchObject({ role: "user", text: story.turns[0].question });
 
-      const last = assistantAt(bubbles, 3);
+      const last = assistantAt(bubbles, 1);
       expect(last.traceId).toBe(story.heroTraceId);
       expect(last.blocks).toContainEqual(
-        expect.objectContaining({ type: "draft", kind: "dashboard" }),
+        expect.objectContaining({ type: "draft", kind: "filter" }),
       );
     }
 
@@ -387,74 +406,148 @@ describe("assistant story conversations", () => {
     expect(await statusIn("voice-desk")).toBe(200);
   });
 
-  it("drafts dashboards the assistant card accepts", async () => {
-    const expected: Record<
-      string,
-      { id: string; name: string; description: string; widgets: string[]; ids: string[] }
-    > = {
-      support: {
-        id: STORY_DASHBOARD_IDS.answerQuality,
-        name: "Answer quality",
-        description: "Support answers: quality, volume and cost.",
-        widgets: ["Correctness by day", "Answers per day", "Cost per answer", "Answers by model"],
-        ids: ["correctness-by-day", "answers-per-day", "cost-per-answer", "answers-by-model"],
-      },
-      coding: {
-        id: STORY_DASHBOARD_IDS.codeAgentHealth,
-        name: "Code agent health",
-        description: "Failed runs, cost and duration of the coding agent.",
-        widgets: ["Failed runs per day", "Error rate", "Cost per run", "p95 duration"],
-        ids: ["failed-runs-per-day", "error-rate", "cost-per-run", "p95-duration"],
-      },
-      voice: {
-        id: STORY_DASHBOARD_IDS.voiceLatency,
-        name: "Voice latency",
-        description: "How long callers wait for a reply.",
-        widgets: ["p95 reply time", "Reply time by day", "Calls over 3 s", "Calls per day"],
-        ids: ["p95-reply-time", "reply-time-by-day", "calls-over-3-s", "calls-per-day"],
-      },
-      extraction: {
-        id: STORY_DASHBOARD_IDS.invoiceExtraction,
-        name: "Invoice extraction",
-        description: "Invoices read, schema-check failures and cost.",
-        widgets: [
-          "Invoices per day",
-          "Schema check failures",
-          "Cost per invoice",
-          "Invoices by model",
-        ],
-        ids: ["invoices-per-day", "schema-check-failures", "cost-per-invoice", "invoices-by-model"],
-      },
-    };
-
+  it("drafts a filter the Filter card accepts", () => {
     for (const story of STORIES) {
-      const draft = story.turns[1].draft?.draft;
-      expect(draft).toBeDefined();
-      const parsed = parseDraft("dashboard", draft);
+      const [turn] = story.turns;
+      expect(turn.draft.kind).toBe("filter");
+      const parsed = parseDraft("filter", turn.draft.draft);
       expect(parsed).not.toBeNull();
-      if (parsed?.kind !== "dashboard") {
-        throw new Error("draft did not parse as a dashboard");
+      expect(parsed?.kind).toBe("filter");
+      expect(parsed?.kind === "filter" && parsed.draft.view).toBe("traces");
+    }
+  });
+
+  it("each answer quotes the rounded facts of its story", () => {
+    const answer = (story: StoryId) => storyNamed(story).turns[0].answer;
+
+    const support = supportFacts(storyDataset("support"));
+    expect(answer("support")).toContain(`**${Math.round(support.quotingShare * 100)}%**`);
+    expect(answer("support")).toContain(`**${support.quotingOldPricing}**`);
+
+    const coding = codingFacts(storyDataset("coding"));
+    expect(answer("coding")).toContain(`**${Math.round(coding.retryShare * 100)}%**`);
+    expect(answer("coding")).toContain(`**${Math.round(coding.retryCostShare * 100)}%**`);
+
+    const voice = voiceFacts(storyDataset("voice"));
+    expect(answer("voice")).toContain(`**${Math.round(voice.hangupsAfterSlowTurn * 100)}%**`);
+    expect(answer("voice")).toContain(`**${(voice.availabilityMedianMs / 1000).toFixed(1)} s**`);
+    expect(answer("voice")).toContain(`**${(voice.availabilityP95Ms / 1000).toFixed(1)} s**`);
+
+    const extraction = extractionFacts(storyDataset("extraction"));
+    expect(answer("extraction")).toContain(
+      `**${Math.round(extraction.nordicFreightRetryShare * 100)}%**`,
+    );
+  });
+
+  it("each query's rows are the facts' counts over the eligible traces", async () => {
+    // Support: one release in the last 46 hours, with its feedback, downvotes and old-pricing traces.
+    const supportSet = eligibleOf("support", storyDataset("support"));
+    const sinceTuesday = NOW - 46 * HOUR_MS;
+    const feedback = supportSet.filter(
+      (trace) =>
+        Date.parse(trace.start_time) >= sinceTuesday &&
+        trace.scores.find((score) => score.name === "user_feedback")?.value.data_type === "boolean",
+    );
+    const downvotes = feedback.filter(
+      (trace) =>
+        trace.scores.find((score) => score.name === "user_feedback")?.value.data_type ===
+          "boolean" &&
+        trace.scores.find((score) => score.name === "user_feedback")?.value.value === false,
+    );
+    const support = supportFacts(storyDataset("support"));
+    expect(await storedRows("support")).toEqual([
+      {
+        release: "v2.14",
+        feedback: feedback.length,
+        downvotes: support.downvotesSinceTuesday,
+        old_pricing: support.quotingOldPricing,
+      },
+    ]);
+    expect(downvotes.length).toBe(support.downvotesSinceTuesday);
+
+    // Coding: runs in the last 14 hours, split by retry, with their cost.
+    const codingRuns = eligibleOf("coding", storyDataset("coding")).filter(
+      (trace) => Date.parse(trace.start_time) >= NOW - 14 * HOUR_MS,
+    );
+    const costOf = (runs: typeof codingRuns) =>
+      round2(runs.reduce((sum, trace) => sum + (trace.cost_total ?? 0), 0));
+    const notRetried = codingRuns.filter((trace) => !trace.tags.includes("api-retry"));
+    const retried = codingRuns.filter((trace) => trace.tags.includes("api-retry"));
+    const coding = codingFacts(storyDataset("coding"));
+    const codingRows = await storedRows("coding");
+    expect(codingRows).toEqual([
+      { retried: false, runs: notRetried.length, cost: costOf(notRetried) },
+      { retried: true, runs: retried.length, cost: costOf(retried) },
+    ]);
+    expect(Math.round((retried.length / codingRuns.length) * 100)).toBe(
+      Math.round(coding.retryShare * 100),
+    );
+
+    // Voice: the calendar turns whose last span is a marked check_availability span.
+    const voiceSet = storyDataset("voice");
+    const checks = eligibleOf("voice", voiceSet).filter(
+      (trace) =>
+        trace.tags.includes("calendar") &&
+        voiceSet.traceDetail(trace.trace_id)?.spans.at(-1)?.span.name === "check_availability",
+    ).length;
+    const voice = voiceFacts(voiceSet);
+    expect(await storedRows("voice")).toEqual([
+      {
+        checks,
+        p50_ms: Math.round(voice.availabilityMedianMs),
+        p95_ms: Math.round(voice.availabilityP95Ms),
+      },
+    ]);
+
+    // Extraction: the four comma vendors' files, with their eligible invoices and re-extraction shares.
+    const extractionSet = storyDataset("extraction");
+    const extraction = extractionFacts(extractionSet);
+    const shares: Record<string, number> = {
+      "invoice-2026-0521.pdf (2 pages)": extraction.nordicFreightRetryShare,
+      "invoice-2026-0524.pdf (1 page)": extraction.commaVendors["Baltic Paper"],
+      "invoice-2026-0527.pdf (3 pages)": extraction.commaVendors["Rhine Tools"],
+      "invoice-2026-0530.pdf (1 page)": extraction.commaVendors["Lyon Bureau"],
+    };
+    const extractionRows = await storedRows("extraction");
+    expect(extractionRows.map((row) => row.invoice_file)).toEqual(Object.keys(shares));
+    const eligible = eligibleOf("extraction", extractionSet);
+    for (const row of extractionRows) {
+      const file = String(row.invoice_file);
+      const of = eligible.filter((trace) => trace.input_preview === file);
+      expect(row.invoices).toBe(of.length);
+      expect(row.re_extracted).toBe(round2(shares[file] ?? Number.NaN));
+      expect(row.re_extracted).toBe(
+        round2(of.filter((trace) => trace.tags.includes("re-extracted")).length / of.length),
+      );
+    }
+  });
+
+  it("each draft's filter lists the traces its answer counts", async () => {
+    for (const story of STORIES) {
+      const project = storyProject(story.story).ref;
+      server.use(...largeHandlers(storyDataset(story.story), { project, datasets: false }));
+      const draft = parseDraft("filter", story.turns[0].draft.draft);
+      if (draft?.kind !== "filter") {
+        throw new Error("draft did not parse as a filter");
       }
-      const want = expected[story.story];
-      expect(want).toBeDefined();
-      if (want === undefined) {
-        continue;
-      }
-      const dashboard = storyDashboards().find((item) => item.id === want.id);
-      expect(dashboard).toBeDefined();
-      expect(draft).toEqual({
-        name: dashboard?.name,
-        description: dashboard?.description,
-        definition: dashboard?.definition,
+      const query = new URLSearchParams({
+        filter: draft.draft.filter ?? "",
+        from: String(NOW - RANGE_MS[draft.draft.range ?? "24h"]),
+        to: String(NOW),
+        limit: "1000",
       });
-      expect(parsed.draft.name).toBe(want.name);
-      expect(parsed.draft.description).toBe(want.description);
-      const widgets = parsed.draft.definition.widgets;
-      expect(widgets.map((widget) => widget.title)).toEqual(want.widgets);
-      expect(widgets.map((widget) => widget.id)).toEqual(want.ids);
-      expect(new Set(widgets.map((widget) => widget.id)).size).toBe(widgets.length);
-      for (const widget of widgets) {
-        expect(widget.layout.x + widget.layout.w).toBeLessThanOrEqual(60);
+      const listed = (await (
+        await fetch(
+          `${window.location.origin}/api/v1/projects/${encodeURIComponent(project)}/traces?${query}`,
+        )
+      ).json()) as { data: unknown[] };
+
+      if (story.story === "support") {
+        expect(listed.data.length).toBe(supportFacts(storyDataset("support")).quotingOldPricing);
+      }
+      if (story.story === "coding") {
+        const rows = await storedRows("coding");
+        expect(listed.data.length).toBe(rows[1]?.runs);
       }
     }
   });
@@ -476,6 +569,6 @@ describe("assistant story conversations", () => {
 
     expect(events.length).toBeGreaterThan(0);
     expect((await detail("support", NEW_ID)).messages).toEqual([]);
-    expect((await detail(story.story, story.conversationId)).message_count).toBe(8);
+    expect((await detail(story.story, story.conversationId)).message_count).toBe(4);
   });
 });
