@@ -1,7 +1,8 @@
 //! Fuzz entry point for `cetra-column` binary framing (D-QE-7). Must never panic.
 #![allow(clippy::expect_used, clippy::unwrap_used)] // harness setup, not input-dependent
 
-/// Decodes arbitrary bytes as a single frame and as a multi-frame stream.
+/// Decodes arbitrary bytes as a single frame, a multi-frame stream, and CRC-repaired / wrapped
+/// frames past the CRC gate to exercise inner LZ4, `BodyReader`, and `Reservation` invariants.
 pub fn column_frame(data: &[u8]) {
     let _ = crate::frame::decode_batch(data, None, None);
     let mut offset = 0;
@@ -9,10 +10,68 @@ pub fn column_frame(data: &[u8]) {
         crate::frame::decode_next(data, offset)
     {
         let _ = crate::frame::decode_batch(&data[frame], None, None);
-        if next <= offset {
-            break;
-        }
+        assert!(next > offset, "framing must advance");
         offset = next;
+    }
+
+    if data.len() >= crate::frame::FRAME_HEADER_LEN {
+        let mut repaired = data.to_vec();
+        let hdr_payload_len =
+            u32::from_le_bytes([repaired[12], repaired[13], repaired[14], repaired[15]]) as usize;
+        let matches_len =
+            crate::frame::FRAME_HEADER_LEN.checked_add(hdr_payload_len) == Some(repaired.len());
+        let len_ok = if matches_len {
+            true
+        } else if let Ok(actual_len) =
+            u32::try_from(repaired.len() - crate::frame::FRAME_HEADER_LEN)
+        {
+            repaired[0..4].copy_from_slice(&crate::frame::FRAME_MAGIC);
+            repaired[4] = crate::frame::FRAME_VERSION;
+            repaired[12..16].copy_from_slice(&actual_len.to_le_bytes());
+            true
+        } else {
+            false
+        };
+        if len_ok {
+            let payload = &repaired[crate::frame::FRAME_HEADER_LEN..];
+            let crc = crc32c::crc32c_append(crc32c::crc32c(&repaired[0..16]), payload);
+            repaired[16..20].copy_from_slice(&crc.to_le_bytes());
+
+            let scope = crate::GlobalPool::standalone(2 * 1024 * 1024);
+            let mut res = scope.register("fuzz_repaired", true);
+            match crate::frame::decode_batch_with_limit(
+                &repaired,
+                None,
+                Some(&mut res),
+                1024 * 1024,
+            ) {
+                Ok(batch) => assert_eq!(res.size(), batch.memory_bytes()),
+                Err(_) => assert_eq!(res.size(), 0),
+            }
+        }
+    }
+
+    if let Ok(len_u32) = u32::try_from(data.len()) {
+        let mut wrapped = Vec::with_capacity(crate::frame::FRAME_HEADER_LEN + data.len());
+        let mut hdr = [0u8; crate::frame::FRAME_HEADER_LEN];
+        hdr[0..4].copy_from_slice(&crate::frame::FRAME_MAGIC);
+        hdr[4] = crate::frame::FRAME_VERSION;
+        hdr[5] = 0;
+        hdr[6..8].copy_from_slice(&0u16.to_le_bytes());
+        let len_bytes = len_u32.to_le_bytes();
+        hdr[8..12].copy_from_slice(&len_bytes);
+        hdr[12..16].copy_from_slice(&len_bytes);
+        let crc = crc32c::crc32c_append(crc32c::crc32c(&hdr[0..16]), data);
+        hdr[16..20].copy_from_slice(&crc.to_le_bytes());
+        wrapped.extend_from_slice(&hdr);
+        wrapped.extend_from_slice(data);
+
+        let scope = crate::GlobalPool::standalone(2 * 1024 * 1024);
+        let mut res2 = scope.register("fuzz_wrapped", true);
+        match crate::frame::decode_batch_with_limit(&wrapped, None, Some(&mut res2), 1024 * 1024) {
+            Ok(batch) => assert_eq!(res2.size(), batch.memory_bytes()),
+            Err(_) => assert_eq!(res2.size(), 0),
+        }
     }
 }
 
