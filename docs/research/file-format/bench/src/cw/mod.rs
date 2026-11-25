@@ -3,6 +3,7 @@
 
 pub mod cases;
 pub mod harness;
+pub mod load;
 pub mod many;
 pub mod project;
 pub mod read;

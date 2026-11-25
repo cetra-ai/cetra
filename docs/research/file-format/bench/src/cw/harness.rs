@@ -19,6 +19,7 @@ use parquet::file::metadata::{PageIndexPolicy, ParquetMetaDataReader};
 use serde_json::{Value, json};
 use xxhash_rust::xxh3::xxh3_64;
 
+use crate::cw::load;
 use crate::cw::many;
 use crate::cw::read::{self, Files};
 use crate::cw::shapes::{self, ShapeCase};
@@ -427,6 +428,9 @@ pub async fn one(dir: &str, format: &str, query: &str, runs: usize) -> R<ProcRes
     }
     if shapes::is_shape(query) {
         return shape_format(dir, format, query, runs).await;
+    }
+    if load::is_load(query) {
+        return load::load_format(dir, format, query, runs).await;
     }
     if is_write_like(query) {
         if dir.starts_with("s3://") {
