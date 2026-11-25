@@ -242,8 +242,8 @@
   },
   {
     "name": "marketing-issue",
-    "path": "/acme/support-bot/issues/01900000-0000-7000-8000-000000570101",
-    "waitFor": "Customers asking for SSO on the Starter plan",
+    "path": "/acme/support-bot/issues/01900000-0000-7000-8000-000000570105",
+    "waitFor": "Answer contradicts its sources",
     "theme": "dark",
     "viewport": {
       "width": 800,
@@ -342,10 +342,13 @@
     "waitFor": "coding-agent",
     "theme": "dark",
     "viewport": {
-      "width": 1400,
-      "height": 900
+      "width": 1100,
+      "height": 1100
     },
-    "clip": "aside[aria-label=\"Trace\"]"
+    "clip": "section[aria-label=\"Transcript\"]",
+    "storage": {
+      "cetra.transcript-wide": "1"
+    }
   },
   {
     "name": "marketing-assistant-coding",
@@ -374,17 +377,6 @@
     "clip": "section[aria-label=\"Assistant\"]"
   },
   {
-    "name": "marketing-issue-coding",
-    "path": "/acme/code-agent/issues/01900000-0000-7000-8000-000000570102",
-    "waitFor": "ContextWindowExceeded: diff over 23 files",
-    "theme": "dark",
-    "viewport": {
-      "width": 800,
-      "height": 555
-    },
-    "clip": "main"
-  },
-  {
     "name": "marketing-evaluate-coding",
     "path": "/acme/code-agent/online-rules?rule=01900000-0000-7000-8000-000000570911",
     "waitFor": "Tests pass after the patch",
@@ -399,41 +391,6 @@
       "width": 742,
       "height": 630
     }
-  },
-  {
-    "name": "marketing-playground-coding",
-    "path": "/acme/code-agent/playground?prompt=write-patch&version=4",
-    "waitFor": "Run all",
-    "actions": [
-      {
-        "click": "button[aria-label=\"Prompt version\"]"
-      },
-      {
-        "click": "[role=\"option\"]:has-text(\"v4\")"
-      },
-      {
-        "click": "input[aria-label=\"issue\"]",
-        "type": "Rename Project.owner to Project.admin across the codebase (issue #409)."
-      },
-      {
-        "click": "input[aria-label=\"path\"]",
-        "type": "src/"
-      },
-      {
-        "click": "input[aria-label=\"code\"]",
-        "type": "class Project:\n    owner: User"
-      },
-      {
-        "click": "button:has-text(\"Run all\")"
-      }
-    ],
-    "waitAfter": "Run finished",
-    "theme": "dark",
-    "viewport": {
-      "width": 960,
-      "height": 620
-    },
-    "clip": "main"
   },
   {
     "name": "marketing-alerts-coding",
@@ -466,10 +423,10 @@
     "waitFor": "Friday at 9:30 is free",
     "theme": "dark",
     "viewport": {
-      "width": 1400,
-      "height": 1100
+      "width": 1600,
+      "height": 900
     },
-    "clip": "aside[aria-label=\"Trace\"]"
+    "clip": "[role=\"tabpanel\"]"
   },
   {
     "name": "marketing-assistant-voice",
@@ -498,17 +455,6 @@
     "clip": "section[aria-label=\"Assistant\"]"
   },
   {
-    "name": "marketing-issue-voice",
-    "path": "/acme/voice-desk/issues/01900000-0000-7000-8000-000000570103",
-    "waitFor": "Agent talked over the caller",
-    "theme": "dark",
-    "viewport": {
-      "width": 800,
-      "height": 555
-    },
-    "clip": "main"
-  },
-  {
     "name": "marketing-evaluate-voice",
     "path": "/acme/voice-desk/evaluators/01900000-0000-7000-8000-000000570902?tab=config",
     "waitFor": "Reads the booking back",
@@ -526,37 +472,6 @@
     "viewport": {
       "width": 1400,
       "height": 620
-    },
-    "clip": "main"
-  },
-  {
-    "name": "marketing-playground-voice",
-    "path": "/acme/voice-desk/playground?prompt=voice-reply&version=5",
-    "waitFor": "Run all",
-    "actions": [
-      {
-        "click": "button[aria-label=\"Prompt version\"]"
-      },
-      {
-        "click": "[role=\"option\"]:has-text(\"v5\")"
-      },
-      {
-        "click": "input[aria-label=\"caller\"]",
-        "type": "Hi, can I move my appointment with Dr. Martin to Friday at 9:30?"
-      },
-      {
-        "click": "input[aria-label=\"slots\"]",
-        "type": "9:30, 11:00"
-      },
-      {
-        "click": "button:has-text(\"Run all\")"
-      }
-    ],
-    "waitAfter": "Run finished",
-    "theme": "dark",
-    "viewport": {
-      "width": 960,
-      "height": 560
     },
     "clip": "main"
   },
@@ -633,17 +548,6 @@
     "clip": "section[aria-label=\"Assistant\"]"
   },
   {
-    "name": "marketing-issue-extraction",
-    "path": "/acme/invoice-pipeline/issues/01900000-0000-7000-8000-000000570104",
-    "waitFor": "Scanned PDF: OCR returned no text",
-    "theme": "dark",
-    "viewport": {
-      "width": 800,
-      "height": 555
-    },
-    "clip": "main"
-  },
-  {
     "name": "marketing-evaluate-extraction",
     "path": "/acme/invoice-pipeline/experiments/compare?ids=01900000-0000-7000-8000-000000570931,01900000-0000-7000-8000-000000570932",
     "waitFor": "vat_number",
@@ -658,33 +562,6 @@
       "width": 860,
       "height": 432
     }
-  },
-  {
-    "name": "marketing-playground-extraction",
-    "path": "/acme/invoice-pipeline/playground?prompt=extract-invoice&version=6",
-    "waitFor": "Run all",
-    "actions": [
-      {
-        "click": "button[aria-label=\"Prompt version\"]"
-      },
-      {
-        "click": "[role=\"option\"]:has-text(\"v6\")"
-      },
-      {
-        "click": "input[aria-label=\"ocr_text\"]",
-        "type": "NORDIC FREIGHT AB · TOTAL 1.234,56 EUR"
-      },
-      {
-        "click": "button:has-text(\"Run all\")"
-      }
-    ],
-    "waitAfter": "Run finished",
-    "theme": "dark",
-    "viewport": {
-      "width": 960,
-      "height": 560
-    },
-    "clip": "main"
   },
   {
     "name": "marketing-alerts-extraction",

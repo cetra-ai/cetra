@@ -343,6 +343,12 @@ Rules for these pictures:
 
 Answers of 2026-11-25 on what the UI can't show yet (the user): the playground compares prompt versions side by side, an `issue_occurrences` alert rule gets a chart, and the trace list gets a total of the selected or filtered rows; the "App UI changes on main" session builds the three, and the pictures that need them wait for them on main. The coding Evaluate picture shows the online rule page of the `tests_pass` check with its hourly pass-rate line (no daily chart). Planner's choices, not objected to: the issue pictures show the kind through the source's name ("Topics", "Errors", "Bad scores") and counts, not percentages; the voice judge picture is the evaluator's Configuration tab with a test result on one call; the coding cost rule's step happens within the chart's last 24 hours; the assistant's actions are the Filter card's "Open in traces" and the Dashboard card's "Open in dashboard editor"; the hero pictures stay as they are.
 
+Answers of 2026-11-25, evening (the user, after the M19 retake; D-W-27): the Explore, Issues, Prompts and Alert pictures looked too much alike across the stories. These chapters now show **one picture shared by every story**, without the story picker; Trace and Evaluate keep a picture per story. The table above stays as the record of the per-story pictures; for the shared chapters it is replaced by:
+- **Issues:** a new bad-score issue in the support project, "Answer contradicts its sources", generic across the agent kinds: five examples from a refund policy, a price, a booking, an invoice total and a test log, and occurrences on every day of the 14-day chart.
+- **Prompts:** the support picture (support-reply v2 and v3 side by side).
+- **Explore:** one new, more generic question, answered from SQL and ending on the dashboard card only (no filter card). The question is the user's pick among the proposed options.
+- **Alert:** new rules with generic data; the rule is the user's pick among the proposed options.
+
 ### Milestones
 
 - **M16 A mock project per story.** The three new projects in the mocks, a generation profile per project, the large mock serving each project its own dataset, the story objects moved to their projects, and the existing story screenshots retaken in their projects. Depends on M15. The support project's generated traces keep today's draws; tests that read a coding, voice or extraction hero from the support dataset move to its story's profile.

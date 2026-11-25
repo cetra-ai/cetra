@@ -30,21 +30,28 @@ function shotOf(name: string): ImageMetadata {
 
 const panels = panelsOf(picture);
 const section = pictureById(picture).section;
+// A shared picture is one shot for every story: no story picker, so the page's pickers skip it.
+const shared = pictureById(picture).shared !== undefined;
+const [only] = panels;
 ---
 
-<div
-  class:list={["story", `story--${align}`]}
-  data-story-picker
->
-  <Tabs id={`story-${picture}`} label={`Story: ${section}`} labels={STORIES.map((story) => story.label)}>
-    {panels.map((panel, i) => (
-      <div data-tab-panel data-story={panel.story} hidden={i !== 0}>
-        <Frame src={shotOf(panel.shot)} alt={panel.alt} label={panel.label} fade={fade} eager={eager && i === 0} />
-        <p class="caption">{panel.caption}</p>
-      </div>
-    ))}
-  </Tabs>
-</div>
+{shared && only ? (
+  <div class:list={["story", `story--${align}`]}>
+    <Frame src={shotOf(only.shot)} alt={only.alt} label={only.label} fade={fade} eager={eager} />
+    <p class="caption">{only.caption}</p>
+  </div>
+) : (
+  <div class:list={["story", `story--${align}`]} data-story-picker>
+    <Tabs id={`story-${picture}`} label={`Story: ${section}`} labels={STORIES.map((story) => story.label)}>
+      {panels.map((panel, i) => (
+        <div data-tab-panel data-story={panel.story} hidden={i !== 0}>
+          <Frame src={shotOf(panel.shot)} alt={panel.alt} label={panel.label} fade={fade} eager={eager && i === 0} />
+          <p class="caption">{panel.caption}</p>
+        </div>
+      ))}
+    </Tabs>
+  </div>
+)}
 
 <style>
   .story :global(.tablist) {

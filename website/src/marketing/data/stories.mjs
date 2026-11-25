@@ -24,7 +24,9 @@ export const STORIES = /** @type {const} */ ([
  * @property {string} section the page's name, for the picker's accessible name
  * @property {string} base    the shot's base name in screenshots.json
  * @property {string | Record<string, string>} label the Frame's title-bar text; one per story when a record
- * @property {Record<string, PictureContent>} stories keyed by story id
+ * @property {Record<string, PictureContent>} [stories] keyed by story id; absent for a shared picture
+ * @property {PictureContent} [shared] one picture for every story, shown without the story picker: the
+ * shot is `base` itself (the chapter's pages look the same in every story, M19 retake)
  */
 
 /** @type {Picture[]} */
@@ -117,23 +119,9 @@ export const PICTURES = [
     section: "Issues",
     base: "marketing-issue",
     label: "Issues",
-    stories: {
-      support: {
-        alt: "An issue page titled Customers asking for SSO on the Starter plan: 244 occurrences in 14 days, a daily chart, and five differently worded examples asking about SSO on the Starter plan.",
-        caption: "The same question, 244 times in 14 days, grouped into one issue.",
-      },
-      coding: {
-        alt: "An issue page titled ContextWindowExceeded: diff over 23 files: 70 occurrences in 14 days, 12 users on the busiest day, and five examples, each a diff over the 200k context.",
-        caption: "Runs that stop when a diff no longer fits, grouped into one issue.",
-      },
-      voice: {
-        alt: "An issue page titled Agent talked over the caller: 11 occurrences in 14 days, 7 users on the busiest day, and five examples, each with its interruption score and how early the agent spoke.",
-        caption: "Replies that start before the caller has finished, grouped into one issue.",
-      },
-      extraction: {
-        alt: "An issue page titled Scanned PDF: OCR returned no text: 54 occurrences in 14 days, and examples saying the PDF is a scanned image with no text layer.",
-        caption: "Scanned invoices that give OCR nothing to read, grouped into one issue.",
-      },
+    shared: {
+      alt: "An issue page titled Answer contradicts its sources: 100 occurrences in 14 days, a bar for every day, and five examples, from a refund policy and a price to a booking, an invoice total and a test log.",
+      caption: "Answers that contradict their sources, grouped into one issue with their examples.",
     },
   },
   {
@@ -170,23 +158,9 @@ export const PICTURES = [
     section: "Playground",
     base: "marketing-playground",
     label: "Playground",
-    stories: {
-      support: {
-        alt: "The playground with support-reply versions 2 and 3 side by side on a question about a weekly schedule: version 2 says you can export any time, and version 3 says cetra can't schedule exports yet and offers the export by hand.",
-        caption: "Run two prompt versions on the same question, and see which one answers right.",
-      },
-      coding: {
-        alt: "The playground with write-patch version 4 on Claude Sonnet: its two messages, the variables for a rename across the codebase, and the reply that the change touches 23 files and goes in three steps.",
-        caption: "Run the patch prompt on a wide change, and see it split into steps.",
-      },
-      voice: {
-        alt: "The playground with voice-reply version 5: the receptionist prompt, the caller's request to move an appointment to Friday at 9:30, the free slots 9:30 and 11:00, and the reply Done: Friday at 9:30, with Dr. Martin.",
-        caption: "Tune the receptionist prompt so it reads the booking back.",
-      },
-      extraction: {
-        alt: "The playground with extract-invoice version 6: the system prompt on comma decimals, the OCR text of a Nordic Freight invoice with TOTAL 1.234,56 EUR, and the JSON reply with total 1234.56.",
-        caption: "A comma-decimal total, 1.234,56, comes back as 1234.56 in JSON.",
-      },
+    shared: {
+      alt: "The playground with support-reply versions 2 and 3 side by side on a question about a weekly schedule: version 2 says you can export any time, and version 3 says cetra can't schedule exports yet and offers the export by hand.",
+      caption: "Run two prompt versions on the same question, and see which one answers right.",
     },
   },
   {
@@ -220,6 +194,8 @@ export function shotName(pictureId, storyId) {
   const picture = pictureById(pictureId);
   const story = STORIES.find((s) => s.id === storyId);
   if (!story) throw new Error(`stories: unknown story "${storyId}"`);
+  // A shared picture is the same shot in every story.
+  if (picture.shared) return picture.base;
   // The first story keeps the bare name; the others add their id.
   const suffix = story.id === STORIES[0].id ? "" : `-${story.id}`;
   return `${picture.base}${suffix}`;
@@ -233,11 +209,17 @@ export function pictureById(pictureId) {
 }
 
 /**
- * The four panels of one picture, in STORIES order.
+ * The panels of one picture: one per story, in STORIES order, or the one panel of a shared picture
+ * (its `story` is "all").
  * @returns {{ story: string, shot: string, label: string, alt: string, caption: string }[]}
  */
 export function panelsOf(pictureId) {
   const picture = pictureById(pictureId);
+  if (picture.shared) {
+    if (typeof picture.label !== "string")
+      throw new Error(`stories: shared picture "${pictureId}" needs one label`);
+    return [{ story: "all", shot: picture.base, label: picture.label, ...picture.shared }];
+  }
   return STORIES.map(({ id }) => {
     const content = picture.stories[id];
     if (!content) throw new Error(`stories: picture "${pictureId}" has no story "${id}"`);

@@ -47,19 +47,19 @@ export const ON_CALL_PAGER: StoryChannel = {
 const hasTag = (tag: string) => (trace: Trace) => trace.tags.includes(tag);
 
 /** The index of the first visible trace of a dataset that matches, or -1 when none does. */
-function firstMatch(matches: (trace: Trace) => boolean): (dataset: Dataset) => number {
+function firstMatch(matches: StoryIssue["matches"]): (dataset: Dataset) => number {
   return (dataset) =>
     dataset.traces.findIndex(
-      (trace) => matches(trace) && visibleTraces([trace], false, false).length === 1,
+      (trace) => matches(trace, dataset.now) && visibleTraces([trace], false, false).length === 1,
     );
 }
 
 /** The index of the newest visible trace of a dataset that matches, or -1 when none does (ties as `newestFirst`). */
-function newestMatch(matches: (trace: Trace) => boolean): (dataset: Dataset) => number {
+function newestMatch(matches: StoryIssue["matches"]): (dataset: Dataset) => number {
   return (dataset) => {
     let best: number | undefined;
     dataset.traces.forEach((trace, index) => {
-      if (!matches(trace) || visibleTraces([trace], false, false).length !== 1) {
+      if (!matches(trace, dataset.now) || visibleTraces([trace], false, false).length !== 1) {
         return;
       }
       const current = best === undefined ? undefined : dataset.traces[best];
@@ -102,8 +102,8 @@ type StoryIssue = {
     index: (dataset: Dataset) => number;
     spanId?: (dataset: Dataset, index: number) => string | undefined;
   };
-  /** The generated traces that are occurrences too. */
-  matches: (trace: Trace) => boolean;
+  /** The generated traces that are occurrences too; `now` is the dataset's clock. */
+  matches: (trace: Trace, now: number) => boolean;
   /**
    * The reasons the issue's examples show, one per example by position: the hero and the generated
    * traces, newest first. The list cycles, and an issue has at most
@@ -115,6 +115,16 @@ type StoryIssue = {
 
 const isSsoQuestion = (trace: Trace) =>
   SSO_QUESTIONS.some((question) => trace.input_preview === question);
+
+/**
+ * The support traces of the contradiction issue, so every day of its chart has a bar of about the same
+ * height: the support dataset has about 700 traces a day over the last two days and about 35 a day before,
+ * so the issue takes one in 70 of the last two days' traces and one in 5 of the older ones, by trace id.
+ */
+const contradictsSources = (trace: Trace, now: number) => {
+  const pick = Number.parseInt(trace.trace_id.slice(-4), 16);
+  return now - Date.parse(trace.start_time) < 2 * DAY_MS ? pick % 70 === 5 : pick % 5 === 2;
+};
 
 /** The reason of the example of `trace` at `position`: the issue's list entry, or the trace's question. */
 function reasonOf(issue: StoryIssue, trace: Trace, position: number): string | undefined {
@@ -203,6 +213,28 @@ export const STORY_ISSUES: readonly StoryIssue[] = [
       "invoice-2026-0617.pdf: scanned image, no text layer",
       "invoice-2026-0608.pdf: scanned image, no text layer",
       "invoice-2026-0623.pdf: scanned image, no text layer",
+    ],
+  },
+  {
+    // The homepage's one Issues picture, for every story (M19 retake): answers that contradict their
+    // sources, with one example from each kind of agent.
+    id: "01900000-0000-7000-8000-000000570105",
+    story: "support",
+    eventId: "01900000-0000-7000-8000-000000570115",
+    sourceId: "01900000-0000-7000-8000-000000570305",
+    sourceName: "Bad scores",
+    kind: "score",
+    title: "Answer contradicts its sources",
+    description:
+      "The answer states a fact that the retrieved documents or tool results contradict.",
+    hero: { index: newestMatch(contradictsSources) },
+    matches: contradictsSources,
+    reasons: [
+      "Says refunds are open for 60 days; the policy says 30",
+      "Quotes $49 a month; the pricing page says $59",
+      "Books Dr. Lee; the calendar has Dr. Martin on Friday",
+      "Reads the total as 1,284.00; the invoice says 1,248.00",
+      "Says all tests pass; the log shows 2 failures",
     ],
   },
 ];
@@ -643,7 +675,7 @@ function occurrenceTraces(dataset: Dataset, issue: StoryIssue): Occurrences {
   const hero: Trace | undefined = dataset.traces[issue.hero.index(dataset)];
   const earliest = dataset.now - OCCURRENCE_WINDOW_MS;
   const generated = visibleTraces(dataset.traces, false, false)
-    .filter((trace) => trace.trace_id !== hero?.trace_id && issue.matches(trace))
+    .filter((trace) => trace.trace_id !== hero?.trace_id && issue.matches(trace, dataset.now))
     .filter((trace) => {
       const started = Date.parse(trace.start_time);
       return started >= earliest && started <= dataset.now;

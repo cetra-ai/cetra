@@ -9,7 +9,8 @@ const shots = JSON.parse(
 const shotNames = new Set(shots.map((shot) => shot.name));
 const pngDir = new URL("../../assets/screenshots/", import.meta.url);
 
-/** The 28 captions, as the fixed content of plan M15 states them (copy edits touch this table too). */
+/** The 22 captions, as the fixed content of plan M15 states them (copy edits touch this table too): one
+ * per story, or one string for a shared picture (M19 retake). */
 const EXPECTED = {
   hero: {
     support: "See what each step of a support answer cost and how long it took.",
@@ -30,24 +31,14 @@ const EXPECTED = {
     voice: "Ask why callers hang up, then open the slow calendar checks.",
     extraction: "Ask which vendors fail, then open the re-extracted invoices.",
   },
-  issues: {
-    support: "The same question, 244 times in 14 days, grouped into one issue.",
-    coding: "Runs that stop when a diff no longer fits, grouped into one issue.",
-    voice: "Replies that start before the caller has finished, grouped into one issue.",
-    extraction: "Scanned invoices that give OCR nothing to read, grouped into one issue.",
-  },
+  issues: "Answers that contradict their sources, grouped into one issue with their examples.",
   evaluate: {
     support: "Reviewers score each flagged answer in a queue, one by one.",
     coding: "A code check scores every run, and the rule charts its pass rate by the hour.",
     voice: "Write the judge's question once, then test it on a real call.",
     extraction: "Version 4 lifts vat_number from 91% to 96% on 300 invoices.",
   },
-  prompts: {
-    support: "Run two prompt versions on the same question, and see which one answers right.",
-    coding: "Run the patch prompt on a wide change, and see it split into steps.",
-    voice: "Tune the receptionist prompt so it reads the booking back.",
-    extraction: "A comma-decimal total, 1.234,56, comes back as 1234.56 in JSON.",
-  },
+  prompts: "Run two prompt versions on the same question, and see which one answers right.",
   alert: {
     support: "Know when answer quality drops below your bar.",
     coding: "Know when an hour of agent spend goes over your budget.",
@@ -55,6 +46,10 @@ const EXPECTED = {
     extraction: "Know when scanned invoices come in faster than 10 an hour.",
   },
 };
+
+/** The pictures shared by every story (M19 retake): the same shot, no story picker. */
+const SHARED = ["issues", "prompts"];
+const PANELS = 4 * (7 - SHARED.length) + SHARED.length;
 
 test("the four stories are in the fixed order", () => {
   assert.deepEqual(
@@ -68,16 +63,25 @@ test("the four stories are in the fixed order", () => {
   assert.equal(STORIES[0].id, "support");
 });
 
-test("there are seven pictures of four stories each", () => {
+test("there are seven pictures, of four stories each or shared by all", () => {
   assert.deepEqual(
     PICTURES.map((picture) => picture.id),
     ["hero", "trace", "explore", "issues", "evaluate", "prompts", "alert"],
+  );
+  assert.deepEqual(
+    PICTURES.filter((picture) => picture.shared).map((picture) => picture.id),
+    SHARED,
   );
   for (const picture of PICTURES) {
     const panels = panelsOf(picture.id);
     assert.deepEqual(
       panels.map((panel) => panel.story),
-      STORIES.map((story) => story.id),
+      picture.shared ? ["all"] : STORIES.map((story) => story.id),
+    );
+    assert.equal(
+      picture.shared === undefined,
+      picture.stories !== undefined,
+      `${picture.id}: shared or stories`,
     );
   }
 });
@@ -91,13 +95,14 @@ test("every shot is in screenshots.json and has a PNG", () => {
       names.push(panel.shot);
     }
   }
-  assert.equal(names.length, 28);
-  assert.equal(new Set(names).size, 28);
+  assert.equal(names.length, PANELS);
+  assert.equal(new Set(names).size, PANELS);
   assert.equal(shotName("hero", "voice"), "marketing-trace-view-voice");
   assert.equal(shotName("trace", "support"), "marketing-trace-page");
   assert.equal(shotName("trace", "voice"), "marketing-trace-page-voice");
   assert.equal(shotName("evaluate", "support"), "marketing-evaluate");
   assert.equal(shotName("evaluate", "coding"), "marketing-evaluate-coding");
+  assert.equal(shotName("issues", "voice"), "marketing-issue");
 });
 
 test("alts are one sentence that describes the picture", () => {
@@ -111,7 +116,7 @@ test("alts are one sentence that describes the picture", () => {
       alts.push(panel.alt);
     }
   }
-  assert.equal(new Set(alts).size, 28, "two alts are the same");
+  assert.equal(new Set(alts).size, PANELS, "two alts are the same");
 });
 
 test("captions are one line", () => {
@@ -125,11 +130,15 @@ test("captions are one line", () => {
       captions.push(panel.caption);
     }
   }
-  assert.equal(new Set(captions).size, 28, "two captions are the same");
+  assert.equal(new Set(captions).size, PANELS, "two captions are the same");
 
   for (const picture of PICTURES) {
     const expected = EXPECTED[picture.id];
     assert.ok(expected, `EXPECTED has no picture "${picture.id}"`);
+    if (picture.shared) {
+      assert.equal(picture.shared.caption, expected, `caption of ${picture.id}`);
+      continue;
+    }
     for (const { id } of STORIES) {
       assert.equal(
         pictureById(picture.id).stories[id].caption,

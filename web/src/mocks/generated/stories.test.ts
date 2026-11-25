@@ -138,7 +138,7 @@ function expectedTraces(dataset: Dataset, issue: StoryIssue) {
     const started = Date.parse(trace.start_time);
     return (
       trace.trace_id !== hero?.trace_id &&
-      issue.matches(trace) &&
+      issue.matches(trace, dataset.now) &&
       started >= dataset.now - OCCURRENCE_WINDOW_MS &&
       started <= dataset.now
     );
@@ -193,12 +193,12 @@ it("makes the first matching trace an example of every story issue, the newest o
     const earlier = dataset.traces.filter(
       (trace, position) =>
         visibleTraces([trace], false, false).length === 1 &&
-        issue.matches(trace) &&
+        issue.matches(trace, dataset.now) &&
         (issue.story === "support"
           ? hero !== undefined && newestFirst(trace, hero) < 0
           : position < index),
     );
-    expect(hero !== undefined && issue.matches(hero)).toBe(true);
+    expect(hero !== undefined && issue.matches(hero, dataset.now)).toBe(true);
     expect(earlier).toEqual([]);
 
     const { examples } = storyOccurrences(dataset, issue);
@@ -608,7 +608,7 @@ it("serves the story issues and rules before the fixtures, and lets other ids fa
   for (const story of STORY_IDS) {
     const issues = (await (await fetch(`${baseOf(story)}/issues`)).json()) as Schema<"IssuePage">;
     expect(issues.data.map((issue) => issue.id)).toEqual([
-      oneOf(STORY_ISSUES, story).id,
+      ...STORY_ISSUES.filter((issue) => issue.story === story).map((issue) => issue.id),
       ...(story === "support" ? [FIXTURE_ISSUE] : []),
     ]);
     const rules = (await (
