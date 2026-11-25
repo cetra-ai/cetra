@@ -81,7 +81,7 @@ fn is_events_struct(fields: &Fields) -> bool {
         && fields[0].name() == event_field::TIME
         && matches!(
             fields[0].data_type(),
-            ArrowDataType::Timestamp(TimeUnit::Nanosecond, _)
+            ArrowDataType::Timestamp(TimeUnit::Nanosecond, Some(_))
         )
         && fields[1].name() == event_field::NAME
         && is_utf8_like(fields[1].data_type())
@@ -1249,6 +1249,9 @@ pub(crate) fn column_to_record_batch(
 
     let mut arrays = Vec::with_capacity(compacted.columns().len());
     for (col, field) in compacted.columns().iter().zip(out_schema.fields()) {
+        if !field.is_nullable() && col.has_nulls() {
+            return Err(invalid("null values in non-nullable target field"));
+        }
         arrays.push(column_to_arrow_array(col, field.data_type())?);
     }
 
@@ -1274,6 +1277,9 @@ fn column_to_arrow_array(col: &Column, target: &ArrowDataType) -> Result<ArrayRe
             _ => Err(invalid("unsupported target dictionary key type")),
         },
         ArrowDataType::RunEndEncoded(run_ends_field, value_field) => {
+            if run_ends_field.is_nullable() {
+                return Err(invalid("target run_ends field cannot be nullable"));
+            }
             match run_ends_field.data_type() {
                 ArrowDataType::Int16 => {
                     column_to_run_array::<Int16Type>(col, target, value_field.data_type())
@@ -1322,13 +1328,7 @@ fn column_to_dict_array<K: DictKeyInt>(
     match col {
         Column::Dict(dict) => {
             let values_arr = flat_to_arrow_array(dict.values(), value_type)?;
-            let null_buf = if dict.has_nulls() {
-                Some(NullBuffer::new(BooleanBuffer::from_iter(
-                    (0..dict.len()).map(|i| !dict.is_null(i)),
-                )))
-            } else {
-                None
-            };
+            let null_buf = bitmap_to_null_buffer(dict.nulls());
             build_dict_array::<K>(dict.codes(), null_buf, values_arr)
         }
         Column::Const { value, len } => {
@@ -1358,17 +1358,21 @@ fn column_to_dict_array<K: DictKeyInt>(
             let null_buf = bitmap_to_null_buffer(flat.nulls());
             build_dict_array::<K>(&codes, null_buf, values_arr)
         }
-        Column::Rle(_) => {
-            let flat = col.materialize(None)?;
-            let values_arr = flat_to_arrow_array(&flat, value_type)?;
-            let mut codes = Vec::with_capacity(flat.len());
-            for i in 0..flat.len() {
-                let code = u32::try_from(i)
-                    .map_err(|_| overflow("dictionary 1-to-1 code exceeds u32::MAX"))?;
-                codes.push(code);
+        Column::Rle(rle) => {
+            let values_arr = flat_to_arrow_array(rle.values(), value_type)?;
+            let mut codes = Vec::with_capacity(rle.len());
+            let mut prev = 0usize;
+            for (run_idx, &end) in rle.run_ends().iter().enumerate() {
+                let code = u32::try_from(run_idx)
+                    .map_err(|_| overflow("dictionary code exceeds u32::MAX"))?;
+                let end_usize = end as usize;
+                let run_len = end_usize
+                    .checked_sub(prev)
+                    .ok_or_else(|| invalid("non-monotonic rle run_ends"))?;
+                codes.extend(std::iter::repeat_n(code, run_len));
+                prev = end_usize;
             }
-            let null_buf = bitmap_to_null_buffer(flat.nulls());
-            build_dict_array::<K>(&codes, null_buf, values_arr)
+            build_dict_array::<K>(&codes, None, values_arr)
         }
     }
 }
@@ -1379,6 +1383,14 @@ fn build_run_array<R: RunEndInt>(
     values: &ArrayRef,
     logical_len: usize,
 ) -> Result<ArrayRef, ColumnError> {
+    if let ArrowDataType::RunEndEncoded(run_ends_field, values_field) = target {
+        if run_ends_field.is_nullable() {
+            return Err(invalid("target run_ends field cannot be nullable"));
+        }
+        if !values_field.is_nullable() && values.logical_null_count() > 0 {
+            return Err(invalid("null values in non-nullable run-end values field"));
+        }
+    }
     let run_ends_arr = PrimitiveArray::<R>::new(ScalarBuffer::from(run_ends), None);
     let checked = RunArray::<R>::try_new(&run_ends_arr, values).map_err(arrow_err)?;
     if checked.data_type() == target {
@@ -1471,19 +1483,13 @@ fn utf8_data_to_arrow(
 ) -> Result<ArrayRef, ColumnError> {
     match target {
         ArrowDataType::Utf8 => {
-            let mut offsets = Vec::with_capacity(u.offsets().len());
-            for &o in u.offsets() {
-                offsets
-                    .push(i32::try_from(o).map_err(|_| overflow("utf8 offset exceeds i32::MAX"))?);
-            }
-            let offset_buf = OffsetBuffer::new(ScalarBuffer::from(offsets));
+            let offset_buf = offsets_to_i32(u.offsets())?;
             let arr = StringArray::try_new(offset_buf, Buffer::from_slice_ref(u.bytes()), null_buf)
                 .map_err(arrow_err)?;
             Ok(Arc::new(arr))
         }
         ArrowDataType::LargeUtf8 => {
-            let offsets: Vec<i64> = u.offsets().iter().map(|&o| i64::from(o)).collect();
-            let offset_buf = OffsetBuffer::new(ScalarBuffer::from(offsets));
+            let offset_buf = offsets_to_i64(u.offsets());
             let arr =
                 LargeStringArray::try_new(offset_buf, Buffer::from_slice_ref(u.bytes()), null_buf)
                     .map_err(arrow_err)?;
@@ -1893,7 +1899,7 @@ mod tests {
         assert_eq!(rt, rb);
 
         // Arrow 59 forbids constructing a MapArray with a null key in safe Rust (`#![forbid(unsafe_code)]`);
-        // verify non-Utf8 map key schema is rejected with InvalidBatch, alongside null Events name rejection.
+        // verify non-Utf8 map key schema is rejected with InvalidBatch.
         let mut int_key_map_b = MapBuilder::new(None, Int32Builder::new(), StringBuilder::new());
         int_key_map_b.keys().append_value(1);
         int_key_map_b.values().append_value("v1");
@@ -2586,5 +2592,274 @@ mod tests {
         let misc_rt = column_to_record_batch(&filtered, Some(&misc_schema)).unwrap();
         assert_eq!(misc_rt.num_rows(), 1);
         assert_eq!(misc_rt, misc_rb.slice(1, 1));
+    }
+
+    #[test]
+    fn dict_value_level_nulls_preserve_key_indices_on_round_trip() {
+        let keys = Int8Array::from(vec![0, 1]);
+        let values = Arc::new(StringArray::from(vec![Some("a"), None])) as ArrayRef;
+        let dict =
+            Arc::new(DictionaryArray::<Int8Type>::try_new(keys, values).unwrap()) as ArrayRef;
+        let schema = Arc::new(ArrowSchema::new(vec![ArrowField::new(
+            "d",
+            dict.data_type().clone(),
+            true,
+        )]));
+        let rb = RecordBatch::try_new(Arc::clone(&schema), vec![dict]).unwrap();
+
+        let col_batch = record_batch_to_column(&rb).unwrap();
+        let rt = column_to_record_batch(&col_batch, Some(&schema)).unwrap();
+        assert_eq!(rt, rb);
+    }
+
+    #[test]
+    fn non_nullable_dict_and_run_end_encoded_validations_reject_with_invalid_batch() {
+        // 1. Non-nullable Dictionary target rejects Column::Dict with value-level null
+        let dict_col = Column::Dict(
+            DictColumn::try_new(
+                FlatColumn::try_new(
+                    FlatData::Utf8(Utf8Data::try_from_slices(["a", ""]).unwrap()),
+                    Some(Bitmap::from_bools(&[true, false])),
+                )
+                .unwrap(),
+                vec![0, 1],
+                None,
+            )
+            .unwrap(),
+        );
+        let dict_batch = Batch::try_new_all(
+            Schema::try_new_arc(vec![Field::new("d", DataType::Utf8, true)]).unwrap(),
+            vec![dict_col],
+            2,
+        )
+        .unwrap();
+        let non_null_dict_schema = ArrowSchema::new(vec![ArrowField::new(
+            "d",
+            ArrowDataType::Dictionary(Box::new(ArrowDataType::Int8), Box::new(ArrowDataType::Utf8)),
+            false,
+        )]);
+        assert!(matches!(
+            column_to_record_batch(&dict_batch, Some(&non_null_dict_schema)),
+            Err(ColumnError::InvalidBatch { .. })
+        ));
+
+        // 2. Non-nullable outer RunEndEncoded target rejects Column::Rle with null run
+        let rle_col = Column::Rle(
+            RleColumn::try_new(
+                FlatColumn::try_new(
+                    FlatData::I64(vec![10, 0]),
+                    Some(Bitmap::from_bools(&[true, false])),
+                )
+                .unwrap(),
+                vec![2, 4],
+            )
+            .unwrap(),
+        );
+        let rle_batch = Batch::try_new_all(
+            Schema::try_new_arc(vec![Field::new("r", DataType::I64, true)]).unwrap(),
+            vec![rle_col],
+            4,
+        )
+        .unwrap();
+        let non_null_outer_rle_schema = ArrowSchema::new(vec![ArrowField::new(
+            "r",
+            ArrowDataType::RunEndEncoded(
+                Arc::new(ArrowField::new("run_ends", ArrowDataType::Int32, false)),
+                Arc::new(ArrowField::new("values", ArrowDataType::Int64, true)),
+            ),
+            false,
+        )]);
+        assert!(matches!(
+            column_to_record_batch(&rle_batch, Some(&non_null_outer_rle_schema)),
+            Err(ColumnError::InvalidBatch { .. })
+        ));
+
+        // 3. Nullable RunEndEncoded target with nullable run_ends_field rejected
+        let nullable_run_ends_schema = ArrowSchema::new(vec![ArrowField::new(
+            "r",
+            ArrowDataType::RunEndEncoded(
+                Arc::new(ArrowField::new("run_ends", ArrowDataType::Int32, true)),
+                Arc::new(ArrowField::new("values", ArrowDataType::Int64, true)),
+            ),
+            true,
+        )]);
+        assert!(matches!(
+            column_to_record_batch(&rle_batch, Some(&nullable_run_ends_schema)),
+            Err(ColumnError::InvalidBatch { .. })
+        ));
+
+        // 4. Nullable RunEndEncoded target with non-nullable values_field and null values rejected
+        let non_null_values_rle_schema = ArrowSchema::new(vec![ArrowField::new(
+            "r",
+            ArrowDataType::RunEndEncoded(
+                Arc::new(ArrowField::new("run_ends", ArrowDataType::Int32, false)),
+                Arc::new(ArrowField::new("values", ArrowDataType::Int64, false)),
+            ),
+            true,
+        )]);
+        assert!(matches!(
+            column_to_record_batch(&rle_batch, Some(&non_null_values_rle_schema)),
+            Err(ColumnError::InvalidBatch { .. })
+        ));
+    }
+
+    #[test]
+    fn rle_to_narrow_dict_target_reuses_run_values_without_key_overflow() {
+        let rle_col = Column::Rle(
+            RleColumn::try_new(
+                FlatColumn::try_new(
+                    FlatData::Utf8(Utf8Data::try_from_slices(["a", "b"]).unwrap()),
+                    None,
+                )
+                .unwrap(),
+                vec![100, 200],
+            )
+            .unwrap(),
+        );
+        let batch = Batch::try_new_all(
+            Schema::try_new_arc(vec![Field::new("r", DataType::Utf8, false)]).unwrap(),
+            vec![rle_col],
+            200,
+        )
+        .unwrap();
+        let target_schema = ArrowSchema::new(vec![ArrowField::new(
+            "r",
+            ArrowDataType::Dictionary(Box::new(ArrowDataType::Int8), Box::new(ArrowDataType::Utf8)),
+            false,
+        )]);
+        let rb = column_to_record_batch(&batch, Some(&target_schema)).unwrap();
+        assert_eq!(rb.num_rows(), 200);
+        let back = record_batch_to_column(&rb).unwrap();
+        assert!(batch.semantic_eq(&back));
+    }
+
+    #[test]
+    fn null_events_name_links_trace_id_and_naive_events_timestamp_rejected() {
+        // Null Events.name on non-null parent row rejected with InvalidBatch
+        let ev_fields = Fields::from(vec![
+            ArrowField::new(
+                event_field::TIME,
+                ArrowDataType::Timestamp(TimeUnit::Nanosecond, Some("UTC".into())),
+                false,
+            ),
+            ArrowField::new(event_field::NAME, ArrowDataType::Utf8, true),
+            ArrowField::new(event_field::ATTRIBUTES, ArrowDataType::Utf8, true),
+        ]);
+        let ev_struct = StructArray::try_new(
+            ev_fields.clone(),
+            vec![
+                Arc::new(TimestampNanosecondArray::from(vec![100]).with_timezone("UTC")),
+                Arc::new(StringArray::from(vec![Option::<&str>::None])),
+                Arc::new(StringArray::from(vec![Option::<&str>::None])),
+            ],
+            None,
+        )
+        .unwrap();
+        let ev_list = ListArray::try_new(
+            Arc::new(ArrowField::new(
+                "item",
+                ArrowDataType::Struct(ev_fields),
+                false,
+            )),
+            OffsetBuffer::new(ScalarBuffer::from(vec![0i32, 1])),
+            Arc::new(ev_struct),
+            None,
+        )
+        .unwrap();
+        let ev_rb = RecordBatch::try_new(
+            Arc::new(ArrowSchema::new(vec![ArrowField::new(
+                "ev",
+                ev_list.data_type().clone(),
+                true,
+            )])),
+            vec![Arc::new(ev_list)],
+        )
+        .unwrap();
+        assert!(matches!(
+            record_batch_to_column(&ev_rb),
+            Err(ColumnError::InvalidBatch { .. })
+        ));
+
+        // Null Links.trace_id on non-null parent row rejected with InvalidBatch
+        let lk_fields = Fields::from(vec![
+            ArrowField::new(
+                link_field::TRACE_ID,
+                ArrowDataType::FixedSizeBinary(16),
+                true,
+            ),
+            ArrowField::new(
+                link_field::SPAN_ID,
+                ArrowDataType::FixedSizeBinary(8),
+                false,
+            ),
+            ArrowField::new(link_field::ATTRIBUTES, ArrowDataType::Utf8, true),
+        ]);
+        let lk_struct = StructArray::try_new(
+            lk_fields.clone(),
+            vec![
+                Arc::new(
+                    FixedSizeBinaryArray::try_from_sparse_iter_with_size(
+                        std::iter::once(Option::<&[u8]>::None),
+                        16,
+                    )
+                    .unwrap(),
+                ),
+                Arc::new(
+                    FixedSizeBinaryArray::try_from_iter(std::iter::once([0x11u8; 8].as_slice()))
+                        .unwrap(),
+                ),
+                Arc::new(StringArray::from(vec![Option::<&str>::None])),
+            ],
+            None,
+        )
+        .unwrap();
+        let lk_list = ListArray::try_new(
+            Arc::new(ArrowField::new(
+                "item",
+                ArrowDataType::Struct(lk_fields),
+                false,
+            )),
+            OffsetBuffer::new(ScalarBuffer::from(vec![0i32, 1])),
+            Arc::new(lk_struct),
+            None,
+        )
+        .unwrap();
+        let lk_rb = RecordBatch::try_new(
+            Arc::new(ArrowSchema::new(vec![ArrowField::new(
+                "lk",
+                lk_list.data_type().clone(),
+                true,
+            )])),
+            vec![Arc::new(lk_list)],
+        )
+        .unwrap();
+        assert!(matches!(
+            record_batch_to_column(&lk_rb),
+            Err(ColumnError::InvalidBatch { .. })
+        ));
+
+        // Events struct with naive timestamp (no timezone) is not silently treated as UTC Events
+        let naive_ev_fields = Fields::from(vec![
+            ArrowField::new(
+                event_field::TIME,
+                ArrowDataType::Timestamp(TimeUnit::Nanosecond, None),
+                false,
+            ),
+            ArrowField::new(event_field::NAME, ArrowDataType::Utf8, false),
+            ArrowField::new(event_field::ATTRIBUTES, ArrowDataType::Utf8, true),
+        ]);
+        let naive_ev_schema = ArrowSchema::new(vec![ArrowField::new(
+            "ev",
+            ArrowDataType::List(Arc::new(ArrowField::new(
+                "item",
+                ArrowDataType::Struct(naive_ev_fields),
+                false,
+            ))),
+            true,
+        )]);
+        assert!(matches!(
+            arrow_schema_to_column(&naive_ev_schema),
+            Err(ColumnError::InvalidBatch { .. })
+        ));
     }
 }
