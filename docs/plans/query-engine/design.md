@@ -1,4 +1,4 @@
-Status: approved (2026-11-25). M1 complete; M2 plan under cold review.
+Status: approved (2026-11-25). M1–M2 complete; M3 in progress.
 
 # QE · Custom query engine and columnar format — design
 
