@@ -9,7 +9,7 @@ use std::sync::{Arc, Mutex, MutexGuard};
 
 use async_trait::async_trait;
 use bytes::Bytes;
-use futures::stream::BoxStream;
+use futures::stream::{BoxStream, StreamExt, TryStreamExt};
 use object_store::path::Path;
 use object_store::{
     CopyOptions, GetOptions, GetRange, GetResult, GetResultPayload, ListResult, MultipartUpload,
@@ -281,15 +281,21 @@ impl ObjectStore for BlockCache {
     }
     async fn get_ranges(&self, l: &Path, ranges: &[Range<u64>]) -> Result<Vec<Bytes>> {
         let size = self.meta(l).await?.size;
-        // The ranges are read concurrently, as the inner store runs the ranges of one call in
-        // parallel; `try_join_all` returns them in input order.
-        let parts: Vec<Vec<Bytes>> =
-            futures::future::try_join_all(ranges.iter().map(|r| async move {
+        // The ranges are read 10 at a time, as object_store's own `get_ranges` runs the ranges of
+        // one call (`buffered` keeps input order). The futures are built into a Vec first: a
+        // `.map` closure in the stream's type is not general enough for a spawned caller.
+        let reads: Vec<_> = ranges
+            .iter()
+            .map(|r| async move {
                 match resolve(Some(&GetRange::Bounded(r.clone())), size) {
                     Some(valid) => self.read(l, size, valid).await.map(|b| vec![b]),
                     None => self.inner.get_ranges(l, std::slice::from_ref(r)).await,
                 }
-            }))
+            })
+            .collect();
+        let parts: Vec<Vec<Bytes>> = futures::stream::iter(reads)
+            .buffered(10)
+            .try_collect()
             .await?;
         Ok(parts.into_iter().flatten().collect())
     }
