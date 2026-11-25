@@ -19,7 +19,7 @@ The design is `docs/website/00-design.md`. It has seventeen milestones, M1–M17
 | M13 Voice story, trace list, issues, alerts | [`13-m13-voice-issues-alerts.md`](13-m13-voice-issues-alerts.md) | done (V1, L1, S1, V2) |
 | M14 Prompts, dashboards, queues, assistant | [`14-m14-prompts-dashboards-queues-assistant.md`](14-m14-prompts-dashboards-queues-assistant.md) | done (P0–P5) |
 | M15 Story screenshots and switcher | [`15-m15-story-shots-and-switcher.md`](15-m15-story-shots-and-switcher.md) | done (Q0–Q2) |
-| M16 A mock project per story | not planned yet | — |
+| M16 A mock project per story | planned | [16-m16-story-projects.md](16-m16-story-projects.md) |
 | M17 A picture per story | not planned yet | — |
 
 ## Branches
