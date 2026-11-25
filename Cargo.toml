@@ -39,6 +39,7 @@ cetra-column = { path = "crates/column" }
 cetra-core = { path = "crates/core" }
 cetra-eval = { path = "crates/eval" }
 cetra-otel = { path = "crates/otel" }
+cetra-query = { path = "crates/query" }
 cetra-storage = { path = "crates/storage" }
 cetra-token = { path = "crates/token" }
 cetra-saml = { path = "crates/saml" }
@@ -105,6 +106,8 @@ serde = { version = "1.0", features = ["derive"] }
 serde_json = { version = "1.0", features = ["preserve_order"] }
 # RFC 9535 JSONPath on mapping expressions (D162).
 serde_json_path = "0.7.2"
+# Filter DSL and Shape B SQL parser (D-QE-1). Matches datafusion 55.2's resolved version.
+sqlparser = { version = "0.62.0", features = ["visitor", "recursive-protection"] }
 # Dataset CSV import and export (track J, D-J-6). `csv` is already in the lock as a dependency of arrow-csv.
 csv = "1.4.0"
 # Judge prompt templates (D163) and email templates (spec 08; `.html` names auto-escape).

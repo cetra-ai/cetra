@@ -110,6 +110,8 @@ crates/
   otel/      cetra-otel     OTLP decode, normalization, media, truncation, cost      (spec 02)
   eval/      cetra-eval     evaluator execution: checks, mapping, templates, judges,
                              webhooks, judge traces                                   (spec 06)
+  query/     cetra-query    pure-Rust vectorized expressions, Filter DSL, Shape B SQL
+                             planner, and push-pipeline executor                      (track QE)
   storage/   cetra-storage  WAL, memtable, Parquet, catalog (catalog.db), compaction,
                              deletion, DataFusion providers, filter DSL, SQL sandbox  (specs 03, 05)
   token/     cetra-token    signed licence, org and control-plane tokens (Elastic-2.0, D-P-26)
@@ -141,6 +143,7 @@ docs/                        decisions, specs, plans, research
 **Crate dependency graph (enforced):**
 - `column` depends on no workspace crate.
 - `core` depends on no workspace crate.
+- `query` depends only on `column`.
 - `otel` depends only on `core`; `storage` depends on `core` and `column`. **They never depend on each other**, so they can be built in parallel; `server` connects them.
 - `eval` depends on `core` and `otel`.
 - `token` depends on no workspace crate. `server` and `tools/license` use it, and so does the control plane (by git commit).

@@ -1179,6 +1179,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "cetra-query"
+version = "0.1.0-rc.2"
+dependencies = [
+ "cetra-column",
+ "chrono",
+ "hex",
+ "proptest",
+ "regex",
+ "serde_json",
+ "serde_json_path",
+ "sqlparser",
+ "thiserror 2.0.21",
+]
+
+[[package]]
 name = "cetra-saml"
 version = "0.1.0-rc.2"
 dependencies = [
