@@ -35,9 +35,16 @@ use ::datafusion::logical_expr::expr::{Between, BinaryExpr, InList, Like, Scalar
 use ::datafusion::logical_expr::expr_rewriter::unnormalize_col;
 use ::datafusion::logical_expr::utils::conjunction;
 use ::datafusion::logical_expr::{Expr, Operator, TableProviderFilterPushDown, TableType};
-use ::datafusion::physical_expr::expressions::Column as PhysicalColumn;
+use ::datafusion::physical_expr::expressions::{
+    BinaryExpr as PhysicalBinaryExpr, Column as PhysicalColumn,
+};
+use ::datafusion::physical_expr::utils::{collect_columns, reassign_expr_columns};
+use ::datafusion::physical_expr::{DynamicFilterTracking, PhysicalExpr};
 use ::datafusion::physical_expr::{EquivalenceProperties, PhysicalSortExpr};
 use ::datafusion::physical_plan::execution_plan::{Boundedness, EmissionType, SchedulingType};
+use ::datafusion::physical_plan::filter_pushdown::{
+    ChildPushdownResult, FilterPushdownPhase, FilterPushdownPropagation, PushedDown,
+};
 use ::datafusion::physical_plan::metrics::{ExecutionPlanMetricsSet, MetricBuilder, MetricsSet};
 use ::datafusion::physical_plan::stream::RecordBatchStreamAdapter;
 use ::datafusion::physical_plan::{
@@ -54,6 +61,7 @@ use crate::io::{IoStats, ScanKind};
 use crate::predicate::{self, CmpOp, Lit, Predicate, layout_of};
 use crate::scan::{RowFilter, ScanRequest, TopRows};
 use ::datafusion::common::runtime::SpawnedTask;
+use ::datafusion::config::ConfigOptions;
 
 /// A DataFusion table over Strata files that share one schema.
 #[derive(Debug)]
@@ -328,6 +336,68 @@ fn translate(expr: &Expr, table: &StrataTable) -> Pushed {
         Pushed::Inexact(p) if fits(&p) => Pushed::Inexact(p),
         _ => Pushed::No,
     }
+}
+
+/// The row filter of DataFusion's physical filters `filters`, over the scan output (`schema`,
+/// the table columns `projection`): their conjunction, evaluated on a batch of the table
+/// columns they read. `None` when one reads no column, reads a column the output does not
+/// have, or holds a dynamic filter.
+fn physical_row_filter(
+    filters: &[Arc<dyn PhysicalExpr>],
+    projection: &[usize],
+    schema: &SchemaRef,
+) -> Option<RowFilter> {
+    // The output position of each table column the filters read.
+    let mut read: std::collections::BTreeMap<usize, usize> = std::collections::BTreeMap::new();
+    for filter in filters {
+        if DynamicFilterTracking::classify(filter).contains_dynamic_filter() {
+            return None;
+        }
+        let columns = collect_columns(filter);
+        if columns.is_empty() {
+            return None;
+        }
+        for column in columns {
+            let field = schema.fields().get(column.index())?;
+            if field.name() != column.name() {
+                return None;
+            }
+            read.insert(*projection.get(column.index())?, column.index());
+        }
+    }
+    let fields: Vec<Field> = read
+        .values()
+        .filter_map(|&position| schema.fields().get(position))
+        .map(|field| field.as_ref().clone())
+        .collect();
+    let filter_schema: SchemaRef = Arc::new(Schema::new(fields));
+    let mut conjunction: Option<Arc<dyn PhysicalExpr>> = None;
+    for filter in filters {
+        let filter = reassign_expr_columns(Arc::clone(filter), &filter_schema).ok()?;
+        conjunction = Some(match conjunction {
+            Some(all) => Arc::new(PhysicalBinaryExpr::new(all, Operator::And, filter)),
+            None => filter,
+        });
+    }
+    let physical = conjunction?;
+    let external = |e: DataFusionError| StrataError::from(arrow::error::ArrowError::from(e));
+    let mask = move |batch: &RecordBatch| -> Result<BooleanArray> {
+        let batch = to_table_batch(batch, &filter_schema)?;
+        let value = physical
+            .evaluate(&batch)
+            .and_then(|value| value.into_array(batch.num_rows()))
+            .map_err(external)?;
+        value
+            .as_boolean_opt()
+            .cloned()
+            .ok_or_else(|| StrataError::Schema {
+                reason: format!("a row filter of type {}", value.data_type()),
+            })
+    };
+    Some(RowFilter {
+        columns: read.into_keys().collect(),
+        mask: Arc::new(mask),
+    })
 }
 
 /// Whether the scan can run `expr` as a row filter when Strata cannot translate it: it reads
@@ -1050,7 +1120,7 @@ fn int_scalar(data_type: &DataType, v: i64) -> Option<ScalarValue> {
 pub(crate) type PlainScan<'a> = (&'a [Arc<StrataFile>], &'a [usize], Option<&'a Predicate>);
 
 /// Reads Strata files for one table scan.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct StrataExec {
     files: Vec<Arc<StrataFile>>,
     /// One entry per partition: the file index and the rows it reads (`None`: all of them).
@@ -1061,14 +1131,17 @@ pub struct StrataExec {
     limit: Option<usize>,
     /// The filters Strata does not translate, run by the scan ([`row_filter`]).
     row_filter: Option<RowFilter>,
+    /// The row filter is DataFusion's whole `FilterExec` above, which the plan then drops
+    /// ([`physical_row_filter`]).
+    absorbed: bool,
     /// The order each partition outputs its rows in, when DataFusion pushed a sort down
     /// (`try_pushdown_sort`). Every key is a projected column.
     order: Option<Vec<PhysicalSortExpr>>,
     /// The rows each partition keeps of `order`, from the sort's limit (`with_fetch`).
     fetch: Option<usize>,
     /// The scan is one partition that reads the files in stages, best first ([`staged_top`]):
-    /// set with a sort, a limit and a substring search, when the first key is a signed integer
-    /// or a timestamp.
+    /// set with a sort, a limit and a filter (a predicate or a row filter), when the first key
+    /// is a signed integer or a timestamp.
     staged: bool,
     schema: SchemaRef,
     /// Statistics of the output columns: the minimum and maximum of integer and timestamp
@@ -1175,7 +1248,7 @@ fn sort_rows(
 const STAGE_GROWTH: usize = 4;
 
 /// The first `fetch` rows of `files` by `keys`, for a scan whose first sort key is the signed
-/// integer or timestamp column `top.column`, filtered by `predicate`. Also returns the I/O of
+/// integer or timestamp column `top.column`, filtered by `predicate` and `row_filter`. Also returns the I/O of
 /// every file read.
 ///
 /// The files are ranked by the best value their zones allow for the first key (the largest
@@ -1188,7 +1261,8 @@ const STAGE_GROWTH: usize = 4;
 async fn staged_top(
     files: &[Arc<StrataFile>],
     projection: &[usize],
-    predicate: &Predicate,
+    predicate: Option<&Predicate>,
+    row_filter: Option<&RowFilter>,
     top: TopRows,
     keys: &[(usize, SortOptions)],
     fetch: usize,
@@ -1245,25 +1319,29 @@ async fn staged_top(
                         } else {
                             cmp
                         };
-                        Predicate::And(vec![predicate.clone(), bound])
+                        match predicate {
+                            Some(p) => Some(Predicate::And(vec![p.clone(), bound])),
+                            None => Some(bound),
+                        }
                     }
-                    None => predicate.clone(),
+                    None => predicate.cloned(),
                 };
                 let file = Arc::clone(file);
                 let projection = projection.to_vec();
+                let row_filter = row_filter.cloned();
                 SpawnedTask::spawn(async move {
                     let before = file.io_stats();
                     let scanned = file
                         .scan_batches(
                             &ScanRequest {
                                 projection,
-                                predicate: Some(predicate),
+                                predicate,
                                 row_ranges: None,
                                 limit: None,
                                 kind: ScanKind::Scan,
                                 views: true,
                                 top: Some(top),
-                                row_filter: None,
+                                row_filter,
                             },
                             threads,
                         )
@@ -1345,6 +1423,7 @@ impl StrataExec {
             lookup,
             limit,
             row_filter: None,
+            absorbed: false,
             order: None,
             fetch: None,
             staged: false,
@@ -1371,10 +1450,8 @@ impl StrataExec {
                         | DataType::Timestamp(_, _)
                 )
             });
-        let staged = fetch.is_some()
-            && first_int
-            && self.row_filter.is_none()
-            && self.predicate.as_ref().is_some_and(has_contains);
+        let staged =
+            fetch.is_some() && first_int && (self.row_filter.is_some() || self.predicate.is_some());
         let partitions = if staged { 1 } else { self.parts.len().max(1) };
         let props = plan_properties(
             &self.files,
@@ -1391,6 +1468,7 @@ impl StrataExec {
             lookup: self.lookup.clone(),
             limit: self.limit,
             row_filter: self.row_filter.clone(),
+            absorbed: self.absorbed,
             order: Some(order),
             fetch,
             staged,
@@ -1489,8 +1567,9 @@ impl ExecutionPlan for StrataExec {
         let mut rows = usize::try_from(rows).unwrap_or(usize::MAX);
         // How a limit splits across partitions is not modelled: it only caps the estimate.
         let cap = self.limit.or(self.fetch);
-        // A row filter is not counted: DataFusion's `FilterExec` above estimates its rows.
-        let selected = self.predicate.is_some() || self.lookup.is_some();
+        // A row filter is counted only when the plan has no `FilterExec` above to estimate its
+        // rows.
+        let selected = self.predicate.is_some() || self.lookup.is_some() || self.absorbed;
         let filtered = selected || cap.is_some();
         if selected && rows > 0 {
             let kept = rows as f64 * f64::from(self.selectivity.min(100)) / 100.0;
@@ -1573,6 +1652,55 @@ impl ExecutionPlan for StrataExec {
         self.fetch
     }
 
+    /// Before the plan is optimized, takes the filters of a `FilterExec` above as its row
+    /// filter when it runs one already, all or none ([`physical_row_filter`]), and reports them
+    /// supported, so DataFusion drops the `FilterExec`. Every other filter, in every other
+    /// phase, is reported unsupported, with no updated node.
+    fn handle_child_pushdown_result(
+        &self,
+        phase: FilterPushdownPhase,
+        child_pushdown_result: ChildPushdownResult,
+        _config: &ConfigOptions,
+    ) -> DfResult<FilterPushdownPropagation<Arc<dyn ExecutionPlan>>> {
+        let filters: Vec<Arc<dyn PhysicalExpr>> = child_pushdown_result
+            .parent_filters
+            .into_iter()
+            .map(|f| f.filter)
+            .collect();
+        let unsupported = vec![PushedDown::No; filters.len()];
+        if matches!(phase, FilterPushdownPhase::Pre) {
+            // A scan that runs a row filter takes the whole `FilterExec` over: its rows reach
+            // the operators above as the scan finds them, where the `FilterExec` held them
+            // until it had a full batch, and a sort above can be pushed into the scan.
+            let takes = self.row_filter.is_some()
+                && self.lookup.is_none()
+                && self.limit.is_none()
+                && self.order.is_none()
+                && !self.staged
+                && !filters.is_empty();
+            if takes
+                && let Some(row_filter) =
+                    physical_row_filter(&filters, &self.projection, &self.schema)
+            {
+                let mut exec = self.clone();
+                exec.row_filter = Some(row_filter);
+                exec.absorbed = true;
+                exec.metrics = ExecutionPlanMetricsSet::new();
+                let supported = vec![PushedDown::Yes; filters.len()];
+                return Ok(
+                    FilterPushdownPropagation::with_parent_pushdown_result(supported)
+                        .with_updated_node(Arc::new(exec)),
+                );
+            }
+            return Ok(FilterPushdownPropagation::with_parent_pushdown_result(
+                unsupported,
+            ));
+        }
+        Ok(FilterPushdownPropagation::with_parent_pushdown_result(
+            unsupported,
+        ))
+    }
+
     fn apply_expressions(
         &self,
         _f: &mut dyn FnMut(
@@ -1648,13 +1776,21 @@ impl ExecutionPlan for StrataExec {
         };
         let schema = Arc::clone(&self.schema);
         if self.staged
-            && let (Some(keys), Some(top), Some(fetch), Some(predicate)) =
-                (keys.clone(), top, fetch, predicate.clone())
+            && let (Some(keys), Some(top), Some(fetch)) = (keys.clone(), top, fetch)
         {
             let files = self.files.clone();
+            let (predicate, row_filter) = (predicate.clone(), row_filter.clone());
             let fut = async move {
-                let (best, io) =
-                    staged_top(&files, &projection, &predicate, top, &keys, fetch).await?;
+                let (best, io) = staged_top(
+                    &files,
+                    &projection,
+                    predicate.as_ref(),
+                    row_filter.as_ref(),
+                    top,
+                    &keys,
+                    fetch,
+                )
+                .await?;
                 bytes.add(usize::try_from(io.bytes).unwrap_or(usize::MAX));
                 requests.add(usize::try_from(io.requests).unwrap_or(usize::MAX));
                 waves.add(usize::try_from(io.waves).unwrap_or(usize::MAX));

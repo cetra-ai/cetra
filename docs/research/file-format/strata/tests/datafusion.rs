@@ -598,12 +598,12 @@ async fn row_filters_match_datafusion() {
     let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
     let path = Path::from("rows.strata");
     store.put(&path, PutPayload::from(bytes)).await.unwrap();
-    let table = StrataTable::open(store, vec![path], &Config::default())
+    let table = StrataTable::open(Arc::clone(&store), vec![path], &Config::default())
         .await
         .unwrap();
     let ctx = SessionContext::new();
     ctx.register_table("t", Arc::new(table)).unwrap();
-    let memory = MemTable::try_new(schema, vec![vec![batch]]).unwrap();
+    let memory = MemTable::try_new(schema.clone(), vec![vec![batch.clone()]]).unwrap();
     ctx.register_table("m", Arc::new(memory)).unwrap();
 
     let filters = [
@@ -652,14 +652,66 @@ async fn row_filters_match_datafusion() {
     assert!(limited.iter().all(|row| all.contains(row)));
 
     // The row filter runs when the projection holds a column much wider than the filter's
-    // (`body`), and is left to `FilterExec` otherwise.
+    // (`body`), and takes the `FilterExec` over; it is left to `FilterExec` otherwise.
     let plan = plan_text(
         &ctx,
         "SELECT id, body FROM t WHERE lower(s) = 'name_3' AND id > 10",
     )
     .await;
     assert!(plan.contains("row_filter="), "{plan}");
-    assert!(plan.contains("FilterExec"), "{plan}");
+    assert!(!plan.contains("FilterExec"), "{plan}");
+    // With no `FilterExec` left, a sort goes into the scan, which runs the row filter.
+    let sql = "SELECT id, body FROM {} WHERE lower(s) = 'name_3' ORDER BY id DESC LIMIT 6";
+    let plan = plan_text(&ctx, &sql.replace("{}", "t")).await;
+    assert!(
+        plan.contains("order=[") && plan.contains("row_filter="),
+        "{plan}"
+    );
+    let strata = sorted_rows(&ctx, &sql.replace("{}", "t")).await;
+    let memtable = sorted_rows(&ctx, &sql.replace("{}", "m")).await;
+    assert_eq!(strata.len(), 6);
+    assert_eq!(strata, memtable, "`{sql}`");
+    // Over two files, the sort and its limit go into the scan, which reads the files in stages
+    // with the row filter. (A projection above the scan would keep the limit out of it.)
+    let half = batch.num_rows() / 2;
+    let mut paths = Vec::new();
+    for (name, part) in [
+        ("a.strata", batch.slice(0, half)),
+        ("b.strata", batch.slice(half, batch.num_rows() - half)),
+    ] {
+        let mut writer = StrataWriter::new(
+            schema.clone(),
+            &[],
+            Config {
+                chunk_max_rows: 256,
+                ..Config::default()
+            },
+        )
+        .unwrap();
+        writer.write(&part).unwrap();
+        let (bytes, _) = writer.finish().unwrap();
+        let path = Path::from(name);
+        store.put(&path, PutPayload::from(bytes)).await.unwrap();
+        paths.push(path);
+    }
+    let two = StrataTable::open(Arc::clone(&store), paths, &Config::default())
+        .await
+        .unwrap();
+    ctx.register_table("t2", Arc::new(two)).unwrap();
+    for sql in [
+        "SELECT * FROM {} WHERE lower(s) = 'name_3' ORDER BY id DESC LIMIT 6",
+        "SELECT * FROM {} WHERE lower(s) LIKE '%3%' ORDER BY id LIMIT 9",
+    ] {
+        let plan = plan_text(&ctx, &sql.replace("{}", "t2")).await;
+        assert!(
+            plan.contains("staged") && plan.contains("row_filter="),
+            "{plan}"
+        );
+        let strata = sorted_rows(&ctx, &sql.replace("{}", "t2")).await;
+        let memtable = sorted_rows(&ctx, &sql.replace("{}", "m")).await;
+        assert!(!strata.is_empty());
+        assert_eq!(strata, memtable, "`{sql}`");
+    }
     let plan = plan_text(
         &ctx,
         "SELECT id, s FROM t WHERE lower(s) = 'name_3' AND id > 10",
