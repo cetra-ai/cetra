@@ -1,4 +1,5 @@
 import type { Dashboard, Widget, WidgetQuery } from "@/lib/dashboards/types";
+import type { StoryId } from "./projects";
 
 /**
  * The homepage stories' dashboards (design §12, M14), one per story. Each widget carries its
@@ -18,6 +19,14 @@ export const STORY_DASHBOARD_IDS = {
   voiceLatency: "01900000-0000-7000-8000-000000570403",
   invoiceExtraction: "01900000-0000-7000-8000-000000570404",
 } as const;
+
+/** The story of each story dashboard, by dashboard id: the dashboard is served in that story's project only. */
+export const STORY_DASHBOARD_STORIES: Readonly<Record<string, StoryId>> = {
+  [STORY_DASHBOARD_IDS.answerQuality]: "support",
+  [STORY_DASHBOARD_IDS.codeAgentHealth]: "coding",
+  [STORY_DASHBOARD_IDS.voiceLatency]: "voice",
+  [STORY_DASHBOARD_IDS.invoiceExtraction]: "extraction",
+};
 
 /** The 2x2 grid of a story dashboard: widgets 0 and 1 on the first row, 2 and 3 on the second. */
 const SLOTS = [
@@ -52,7 +61,6 @@ function dashboard(id: string, name: string, description: string, widgets: Widge
 }
 
 const EMAIL = "tags @> ['email']";
-const RETRY = "tags @> ['retry']";
 const VOICE = "tags @> ['voice']";
 const BILLING = "tags @> ['billing']";
 
@@ -94,22 +102,18 @@ export function storyDashboards(): Dashboard[] {
       [
         chart(0, "failed-runs-per-day", "Failed runs per day", "bar", {
           source: "traces",
-          filter: RETRY,
           measures: [{ agg: "count", where: "status = 'error'", label: "Failed runs" }],
         }),
         chart(1, "error-rate", "Error rate", "number", {
           source: "traces",
-          filter: RETRY,
           measures: [{ agg: "rate", where: "error_count > 0", label: "Error rate" }],
         }),
         chart(2, "cost-per-run", "Cost per run", "line", {
           source: "traces",
-          filter: RETRY,
           measures: [{ agg: "avg", field: "cost_total", label: "Cost per run" }],
         }),
         chart(3, "p95-duration", "p95 duration", "number", {
           source: "traces",
-          filter: RETRY,
           measures: [{ agg: "p95", field: "duration_ns", label: "p95 duration" }],
         }),
       ],

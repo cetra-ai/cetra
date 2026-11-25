@@ -1,16 +1,30 @@
 import { beforeEach, expect, it } from "vitest";
 import { server } from "@/mocks/node";
+import { type StoryId, storyProject } from "@/mocks/projects";
 import { storyPromptHandlers } from "@/mocks/stories-prompts";
 
-const PROJECT = "/api/v1/projects/acme%2Fsupport-bot";
+/** The story whose project serves each story prompt (P-4). */
+const STORY_OF: Record<string, StoryId> = {
+  "write-patch": "coding",
+  "voice-reply": "voice",
+  "extract-invoice": "extraction",
+  "support-reply": "support",
+};
 
 beforeEach(() => {
   server.use(...storyPromptHandlers);
 });
 
-async function get(path: string) {
-  const response = await fetch(new URL(`${PROJECT}${path}`, window.location.origin));
+/** A GET of `path` under the project with API ref `ref` (`acme/<slug>`). */
+async function getIn(ref: string, path: string) {
+  const url = new URL(`/api/v1/projects/${encodeURIComponent(ref)}${path}`, window.location.origin);
+  const response = await fetch(url);
   return { status: response.status, body: (await response.json()) as Record<string, unknown> };
+}
+
+/** A GET of `path` under the project that serves the story's prompt. */
+async function get(story: StoryId, path: string) {
+  return getIn(storyProject(story).ref, path);
 }
 
 type Named = { name: string };
@@ -23,32 +37,35 @@ type Version = {
   commit_message?: string;
 };
 
-it("lists the fixture prompts, then the three story prompts", async () => {
-  const list = await get("/prompts");
-  expect((list.body.data as Named[]).map((prompt) => prompt.name)).toEqual([
+it("lists the fixture prompts, then the story prompt of each project", async () => {
+  const namesIn = async (ref: string) =>
+    ((await getIn(ref, "/prompts")).body.data as Named[]).map((prompt) => prompt.name);
+
+  expect(await namesIn("acme/code-agent")).toEqual(["summarize", "support-reply", "write-patch"]);
+  expect(await namesIn("acme/voice-desk")).toEqual(["summarize", "support-reply", "voice-reply"]);
+  expect(await namesIn("acme/invoice-pipeline")).toEqual([
     "summarize",
     "support-reply",
-    "write-patch",
-    "voice-reply",
     "extract-invoice",
   ]);
+  expect(await namesIn("acme/support-bot")).toEqual(["summarize", "support-reply"]);
+
+  const list = await getIn("acme/code-agent", "/prompts");
   expect(list.body.next_cursor).toBeNull();
 });
 
 it("filters the list by q, label and tag", async () => {
-  const names = async (query: string) =>
-    ((await get(`/prompts${query}`)).body.data as Named[]).map((prompt) => prompt.name);
+  const names = async (ref: string, query: string) =>
+    ((await getIn(ref, `/prompts${query}`)).body.data as Named[]).map((prompt) => prompt.name);
 
-  expect(await names("?q=INVOICE")).toEqual(["extract-invoice"]);
-  expect(await names("?tag=voice")).toEqual(["voice-reply"]);
-  expect(await names("?label=production")).toEqual([
+  expect(await names("acme/invoice-pipeline", "?q=INVOICE")).toEqual(["extract-invoice"]);
+  expect(await names("acme/voice-desk", "?tag=voice")).toEqual(["voice-reply"]);
+  expect(await names("acme/voice-desk", "?label=production")).toEqual([
     "summarize",
     "support-reply",
-    "write-patch",
     "voice-reply",
-    "extract-invoice",
   ]);
-  expect(await names("?q=zzz")).toEqual([]);
+  expect(await names("acme/voice-desk", "?q=zzz")).toEqual([]);
 });
 
 it("gives each story prompt its shown version as the latest, labelled latest and production", async () => {
@@ -58,10 +75,11 @@ it("gives each story prompt its shown version as the latest, labelled latest and
     ["extract-invoice", 5],
   ];
   for (const [name, latest] of expectations) {
-    const prompt = await get(`/prompts/${name}`);
+    const story = STORY_OF[name] ?? "support";
+    const prompt = await get(story, `/prompts/${name}`);
     expect(prompt.body).toMatchObject({ name, type: "chat", latest_version: latest });
 
-    const versions = (await get(`/prompts/${name}/versions`)).body.data as Version[];
+    const versions = (await get(story, `/prompts/${name}/versions`)).body.data as Version[];
     expect(versions.map((version) => version.version)).toEqual(
       Array.from({ length: latest }, (_, index) => latest - index),
     );
@@ -73,7 +91,7 @@ it("gives each story prompt its shown version as the latest, labelled latest and
 });
 
 it("serves the shown version's template, variables and model", async () => {
-  const patch = await get("/prompts/write-patch/versions/3");
+  const patch = await get("coding", "/prompts/write-patch/versions/3");
   expect(patch.body).toMatchObject({
     variables: ["issue", "path", "code"],
     config: { model: "claude-sonnet-4-5" },
@@ -84,13 +102,13 @@ it("serves the shown version's template, variables and model", async () => {
     ],
   });
 
-  const voice = await get("/prompts/voice-reply/versions/4");
+  const voice = await get("voice", "/prompts/voice-reply/versions/4");
   expect(voice.body).toMatchObject({
     variables: ["caller", "slots"],
     config: { model: "gpt-4.1-mini" },
   });
 
-  const invoice = await get("/prompts/extract-invoice/versions/5");
+  const invoice = await get("extraction", "/prompts/extract-invoice/versions/5");
   expect(invoice.body).toMatchObject({
     variables: ["ocr_text"],
     config: { model: "gemini-2.5-flash", params: { max_tokens: 600 } },
@@ -98,15 +116,15 @@ it("serves the shown version's template, variables and model", async () => {
 });
 
 it("resolves production and latest to the latest version, and leaves other labels to the manifest", async () => {
-  expect((await get("/prompts/voice-reply/resolve")).body).toMatchObject({ version: 4 });
-  expect((await get("/prompts/voice-reply/resolve?label=latest")).body).toMatchObject({
+  expect((await get("voice", "/prompts/voice-reply/resolve")).body).toMatchObject({ version: 4 });
+  expect((await get("voice", "/prompts/voice-reply/resolve?label=latest")).body).toMatchObject({
     version: 4,
   });
-  expect((await get("/prompts/voice-reply/resolve?label=staging")).status).toBe(404);
+  expect((await get("voice", "/prompts/voice-reply/resolve?label=staging")).status).toBe(404);
 });
 
 it("records one label event per version, newest first", async () => {
-  const events = (await get("/prompts/extract-invoice/label-events")).body.data as {
+  const events = (await get("extraction", "/prompts/extract-invoice/label-events")).body.data as {
     to_version: number;
     from_version?: number;
   }[];
@@ -119,7 +137,7 @@ it("records one label event per version, newest first", async () => {
 it("answers prompt metrics for any window, newest version first", async () => {
   const from = "2026-11-13T00:00:00.000Z";
   const to = "2026-11-20T00:00:00.000Z";
-  const metrics = await get(`/prompts/write-patch/metrics?from=${from}&to=${to}`);
+  const metrics = await get("coding", `/prompts/write-patch/metrics?from=${from}&to=${to}`);
   expect(metrics.body).toMatchObject({ from, to });
   expect((metrics.body.versions as { version: number }[]).map((item) => item.version)).toEqual([
     3, 2, 1,
@@ -127,10 +145,10 @@ it("answers prompt metrics for any window, newest version first", async () => {
 });
 
 it("leaves an unknown prompt, a version out of range and the fixture prompts to other handlers", async () => {
-  expect((await get("/prompts/nope")).status).toBe(404);
-  expect((await get("/prompts/write-patch/versions/4")).status).toBe(404);
-  expect((await get("/prompts/write-patch/versions/0")).status).toBe(404);
-  expect(await get("/prompts/support-reply")).toMatchObject({
+  expect((await get("coding", "/prompts/nope")).status).toBe(404);
+  expect((await get("coding", "/prompts/write-patch/versions/4")).status).toBe(404);
+  expect((await get("coding", "/prompts/write-patch/versions/0")).status).toBe(404);
+  expect(await get("support", "/prompts/support-reply")).toMatchObject({
     body: { name: "support-reply" },
   });
 });
@@ -138,7 +156,7 @@ it("leaves an unknown prompt, a version out of range and the fixture prompts to 
 it("gives every story prompt an id of its own, with versions dated before the story clock", async () => {
   const ids = await Promise.all(
     ["write-patch", "voice-reply", "extract-invoice"].map(
-      async (name) => (await get(`/prompts/${name}`)).body.id,
+      async (name) => (await get(STORY_OF[name] ?? "support", `/prompts/${name}`)).body.id,
     ),
   );
   expect(ids).toEqual([
@@ -147,7 +165,7 @@ it("gives every story prompt an id of its own, with versions dated before the st
     "01900000-0000-7000-8000-000000570704",
   ]);
 
-  const versions = (await get("/prompts/extract-invoice/versions")).body.data as {
+  const versions = (await get("extraction", "/prompts/extract-invoice/versions")).body.data as {
     created_at: string;
   }[];
   const dates = versions.map((version) => version.created_at).reverse();
@@ -155,4 +173,9 @@ it("gives every story prompt an id of its own, with versions dated before the st
     expect(date < "2026-11-19T12:00:00Z").toBe(true);
   }
   expect([...dates].sort()).toEqual(dates);
+});
+
+it("a story prompt is not served in another project", async () => {
+  expect((await getIn("acme/code-agent", "/prompts/voice-reply")).status).toBe(404);
+  expect((await getIn("acme/voice-desk", "/prompts/voice-reply")).status).toBe(200);
 });

@@ -5,6 +5,7 @@ import alertRulesFixture from "../../../../fixtures/api/static/alert-rules.json"
 import queuesFixture from "../../../../fixtures/api/static/annotation-queues.json";
 import issuesFixture from "../../../../fixtures/api/static/issues.json";
 import projectAlertEventsFixture from "../../../../fixtures/api/static/project-alert-events.json";
+import { projectOfRef, type StoryId, storyProject } from "../projects";
 
 /**
  * The homepage stories' issues and alert rules (design §12, M13), next to the generated traces.
@@ -13,7 +14,6 @@ import projectAlertEventsFixture from "../../../../fixtures/api/static/project-a
  */
 
 const PROJECT = "/api/v1/projects/:project";
-const PROJECT_ID = "01900000-0000-7000-8000-000000000001";
 const TEAM_SLACK = "01900000-0000-7000-8000-000000000500";
 const MINUTE_MS = 60_000;
 const HOUR_MS = 60 * MINUTE_MS;
@@ -27,6 +27,8 @@ type Trace = Schema<"TraceSummary">;
 
 type StoryIssue = {
   id: string;
+  /** The story whose project serves the issue. */
+  story: StoryId;
   eventId: string;
   sourceId: string;
   sourceName: string;
@@ -44,6 +46,7 @@ type StoryIssue = {
 export const STORY_ISSUES: readonly StoryIssue[] = [
   {
     id: "01900000-0000-7000-8000-000000570101",
+    story: "support",
     eventId: "01900000-0000-7000-8000-000000570111",
     sourceId: "01900000-0000-7000-8000-000000570301",
     sourceName: "Topics",
@@ -56,6 +59,7 @@ export const STORY_ISSUES: readonly StoryIssue[] = [
   },
   {
     id: "01900000-0000-7000-8000-000000570102",
+    story: "coding",
     eventId: "01900000-0000-7000-8000-000000570112",
     sourceId: "01900000-0000-7000-8000-000000570302",
     sourceName: "Errors",
@@ -63,10 +67,11 @@ export const STORY_ISSUES: readonly StoryIssue[] = [
     title: "run_tests failed: 1 failed, 47 passed",
     description: "pytest reports failures after the agent's first patch.",
     hero: { index: 4, spanId: "0000000400000009", reason: "1 failed, 47 passed" },
-    matches: (trace) => trace.status === "error" && trace.tags.includes("retry"),
+    matches: (trace) => trace.status === "error",
   },
   {
     id: "01900000-0000-7000-8000-000000570103",
+    story: "voice",
     eventId: "01900000-0000-7000-8000-000000570113",
     sourceId: "01900000-0000-7000-8000-000000570303",
     sourceName: "Latency budget",
@@ -78,6 +83,7 @@ export const STORY_ISSUES: readonly StoryIssue[] = [
   },
   {
     id: "01900000-0000-7000-8000-000000570104",
+    story: "extraction",
     eventId: "01900000-0000-7000-8000-000000570114",
     sourceId: "01900000-0000-7000-8000-000000570304",
     sourceName: "Checks",
@@ -92,6 +98,8 @@ export const STORY_ISSUES: readonly StoryIssue[] = [
 
 type StoryRule = {
   id: string;
+  /** The story whose project serves the rule. */
+  story: StoryId;
   eventId: string;
   deliveryId: string;
   name: string;
@@ -106,6 +114,7 @@ type StoryRule = {
 export const STORY_RULES: readonly StoryRule[] = [
   {
     id: "01900000-0000-7000-8000-000000570201",
+    story: "support",
     eventId: "01900000-0000-7000-8000-000000570211",
     deliveryId: "01900000-0000-7000-8000-000000570221",
     name: "Answer correctness under 0.7 on support-bot",
@@ -126,6 +135,7 @@ export const STORY_RULES: readonly StoryRule[] = [
   },
   {
     id: "01900000-0000-7000-8000-000000570202",
+    story: "coding",
     eventId: "01900000-0000-7000-8000-000000570212",
     deliveryId: "01900000-0000-7000-8000-000000570222",
     name: "Error rate above 5% on code-agent",
@@ -135,7 +145,6 @@ export const STORY_RULES: readonly StoryRule[] = [
       comparator: "gt",
       threshold: 0.05,
       min_count: 20,
-      filter: "tags @> ['retry']",
     },
     state: "firing",
     lastValue: 0.083,
@@ -144,6 +153,7 @@ export const STORY_RULES: readonly StoryRule[] = [
   },
   {
     id: "01900000-0000-7000-8000-000000570203",
+    story: "voice",
     eventId: "01900000-0000-7000-8000-000000570213",
     deliveryId: "01900000-0000-7000-8000-000000570223",
     name: "Slow replies on voice-agent",
@@ -163,6 +173,7 @@ export const STORY_RULES: readonly StoryRule[] = [
   },
   {
     id: "01900000-0000-7000-8000-000000570204",
+    story: "extraction",
     eventId: "01900000-0000-7000-8000-000000570214",
     deliveryId: "01900000-0000-7000-8000-000000570224",
     name: "Schema check pass rate under 97%",
@@ -193,6 +204,8 @@ const LEASE_MS = 5 * MINUTE_MS;
 
 type StoryQueue = {
   id: string;
+  /** The story whose project serves the queue. */
+  story: StoryId;
   itemId: string;
   name: string;
   description: string;
@@ -260,6 +273,7 @@ export const STORY_SCORE_DEFINITIONS: Schema<"ScoreDefinition">[] = [
 export const STORY_QUEUES: readonly StoryQueue[] = [
   {
     id: "01900000-0000-7000-8000-000000570501",
+    story: "support",
     itemId: "01900000-0000-7000-8000-000000570511",
     name: "Support answers",
     description: "Support answers that people review after the judges.",
@@ -271,6 +285,7 @@ export const STORY_QUEUES: readonly StoryQueue[] = [
   },
   {
     id: "01900000-0000-7000-8000-000000570502",
+    story: "coding",
     itemId: "01900000-0000-7000-8000-000000570512",
     name: "Patch review",
     description: "Patches from the coding agent, before they are merged.",
@@ -281,6 +296,7 @@ export const STORY_QUEUES: readonly StoryQueue[] = [
   },
   {
     id: "01900000-0000-7000-8000-000000570503",
+    story: "voice",
     itemId: "01900000-0000-7000-8000-000000570513",
     name: "Call review",
     description: "Calls that the voice agent handled.",
@@ -292,6 +308,7 @@ export const STORY_QUEUES: readonly StoryQueue[] = [
   },
   {
     id: "01900000-0000-7000-8000-000000570504",
+    story: "extraction",
     itemId: "01900000-0000-7000-8000-000000570514",
     name: "Invoice fields",
     description: "Invoices that the extraction pipeline read.",
@@ -425,7 +442,7 @@ export function storyIssue(dataset: Dataset, issue: StoryIssue): Schema<"Issue">
   }
   return {
     id: issue.id,
-    project_id: PROJECT_ID,
+    project_id: storyProject(issue.story).id,
     source_id: issue.sourceId,
     source_name: issue.sourceName,
     kind: issue.kind,
@@ -550,15 +567,24 @@ function idParam(value: string | readonly string[] | undefined): string {
 }
 
 /**
- * The story issues and rules, before the fixtures. A story issue that matches no trace is not
- * served at all. A handler that returns undefined lets the request fall through to the
- * fixtures' handlers.
+ * The story issues, rules and queues, before the fixtures. A story issue that matches no trace is
+ * not served at all. A handler that returns undefined lets the request fall through to the
+ * fixtures' handlers. With `project` (an API ref, `acme/<slug>`) the routes use its literal prefix
+ * and serve only the objects of that project's story (none for a ref that is no story project);
+ * without it, every object is served under `/api/v1/projects/:project`.
  */
-export function storyHandlers(dataset: Dataset): HttpHandler[] {
-  const issueById = (id: string) => STORY_ISSUES.find((issue) => issue.id === id);
-  const ruleById = (id: string) => STORY_RULES.find((rule) => rule.id === id);
-  const queueById = (id: string) => STORY_QUEUES.find((queue) => queue.id === id);
-  const QUEUE = `${PROJECT}/annotation-queues`;
+export function storyHandlers(dataset: Dataset, project?: string): HttpHandler[] {
+  const prefix =
+    project === undefined ? PROJECT : `/api/v1/projects/${encodeURIComponent(project)}`;
+  const scope = project === undefined ? undefined : projectOfRef(project)?.story;
+  const served = (story: StoryId) => project === undefined || story === scope;
+  const issues = STORY_ISSUES.filter((issue) => served(issue.story));
+  const rules = STORY_RULES.filter((rule) => served(rule.story));
+  const queues = STORY_QUEUES.filter((queue) => served(queue.story));
+  const issueById = (id: string) => issues.find((issue) => issue.id === id);
+  const ruleById = (id: string) => rules.find((rule) => rule.id === id);
+  const queueById = (id: string) => queues.find((queue) => queue.id === id);
+  const QUEUE = `${prefix}/annotation-queues`;
   const heroItem = (queue: StoryQueue) => storyQueueItem(dataset, queue);
   /** The item of a story queue, when `itemId` names that queue's item. */
   const itemOf = (queueId: string, itemId: string) => {
@@ -566,10 +592,10 @@ export function storyHandlers(dataset: Dataset): HttpHandler[] {
     return queue !== undefined && queue.itemId === itemId ? heroItem(queue) : undefined;
   };
   return [
-    http.get(`${PROJECT}/issues`, () =>
+    http.get(`${prefix}/issues`, () =>
       HttpResponse.json({
         data: [
-          ...STORY_ISSUES.flatMap((issue) => {
+          ...issues.flatMap((issue) => {
             const detail = storyIssue(dataset, issue);
             return detail === undefined ? [] : [detail];
           }),
@@ -593,12 +619,9 @@ export function storyHandlers(dataset: Dataset): HttpHandler[] {
       const events = issue ? storyIssueEvents(dataset, issue) : undefined;
       return events ? HttpResponse.json(events) : undefined;
     }),
-    http.get(`${PROJECT}/alert-rules`, () =>
+    http.get(`${prefix}/alert-rules`, () =>
       HttpResponse.json({
-        data: [
-          ...STORY_RULES.map((rule) => storyAlertRule(dataset, rule)),
-          ...alertRulesFixture.data,
-        ],
+        data: [...rules.map((rule) => storyAlertRule(dataset, rule)), ...alertRulesFixture.data],
         next_cursor: null,
       }),
     ),
@@ -612,10 +635,10 @@ export function storyHandlers(dataset: Dataset): HttpHandler[] {
         ? HttpResponse.json({ data: [storyAlertEvent(dataset, rule)], next_cursor: null })
         : undefined;
     }),
-    http.get(`${PROJECT}/alert-events`, () => {
-      const events = STORY_RULES.map((rule) => storyAlertEvent(dataset, rule)).sort(
-        (left, right) => Date.parse(right.created_at) - Date.parse(left.created_at),
-      );
+    http.get(`${prefix}/alert-events`, () => {
+      const events = rules
+        .map((rule) => storyAlertEvent(dataset, rule))
+        .sort((left, right) => Date.parse(right.created_at) - Date.parse(left.created_at));
       return HttpResponse.json({
         data: [...events, ...projectAlertEventsFixture.data],
         next_cursor: null,
@@ -628,15 +651,15 @@ export function storyHandlers(dataset: Dataset): HttpHandler[] {
       }
       const traceId = search.get("target_trace_id");
       if (traceId !== null) {
-        const queues = STORY_QUEUES.filter(
-          (queue) => dataset.traces[queue.heroIndex]?.trace_id === traceId,
-        ).map((queue) => storyQueue(dataset, queue));
-        return queues.length === 0
+        const found = queues
+          .filter((queue) => dataset.traces[queue.heroIndex]?.trace_id === traceId)
+          .map((queue) => storyQueue(dataset, queue));
+        return found.length === 0
           ? undefined
-          : HttpResponse.json({ data: queues, next_cursor: null });
+          : HttpResponse.json({ data: found, next_cursor: null });
       }
       return HttpResponse.json({
-        data: [...STORY_QUEUES.map((queue) => storyQueue(dataset, queue)), ...queuesFixture.data],
+        data: [...queues.map((queue) => storyQueue(dataset, queue)), ...queuesFixture.data],
         next_cursor: null,
       });
     }),

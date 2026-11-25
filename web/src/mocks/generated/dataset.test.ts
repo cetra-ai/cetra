@@ -12,8 +12,34 @@ import {
   SUPPORT_TURNS,
   type Turn,
 } from "@/mocks/generated/dataset";
+import { CODING_PROFILE, EXTRACTION_PROFILE, VOICE_PROFILE } from "@/mocks/generated/profiles";
+import type { StoryId } from "@/mocks/projects";
 
 const NOW = Date.parse("2026-06-01T00:00:00.000Z");
+
+/** The story whose hand-written trace has each showcase index (P-2). */
+const STORY_OF_INDEX: Readonly<Record<number, StoryId>> = {
+  3: "support",
+  4: "coding",
+  5: "voice",
+  6: "extraction",
+};
+
+const PROFILES: Record<StoryId, Profile> = {
+  support: SUPPORT_PROFILE,
+  coding: CODING_PROFILE,
+  voice: VOICE_PROFILE,
+  extraction: EXTRACTION_PROFILE,
+};
+
+/** The generation profile of showcase `index`'s story: its own dataset holds that showcase. */
+function profileOf(index: number): Profile {
+  const story = STORY_OF_INDEX[index];
+  if (story === undefined) {
+    throw new Error(`no story has showcase index ${index}`);
+  }
+  return PROFILES[story];
+}
 
 /** The topic whose main question is `question`, if any. */
 function topicOf(question: string | undefined): (typeof SUPPORT_TURNS)[number] | undefined {
@@ -337,7 +363,7 @@ function showcaseOf(): {
   trace: Schema<"TraceSummary">;
   spans: readonly Schema<"TreeSpan">[];
 } {
-  const dataset = createDataset({ seed: 1, now: NOW, traces: 10 });
+  const dataset = createDataset({ seed: 1, now: NOW, traces: 10, profile: profileOf(3) });
   const trace = dataset.traces[3];
   if (!trace) {
     throw new Error("a ten-trace dataset has trace 3");
@@ -447,7 +473,7 @@ function scenarioOf(index: number): {
   trace: Schema<"TraceSummary">;
   spans: readonly Schema<"TreeSpan">[];
 } {
-  const dataset = createDataset({ seed: 1, now: NOW, traces: 10 });
+  const dataset = createDataset({ seed: 1, now: NOW, traces: 10, profile: profileOf(index) });
   const trace = dataset.traces[index];
   if (!trace) {
     throw new Error(`a ten-trace dataset has trace ${index}`);
@@ -460,8 +486,8 @@ function scenarioOf(index: number): {
 }
 
 it("makes traces 4 to 6 the hand-written scenario traces", () => {
-  const dataset = createDataset({ seed: 1, now: NOW, traces: 10 });
   for (const index of [4, 5, 6]) {
+    const dataset = createDataset({ seed: 1, now: NOW, traces: 10, profile: profileOf(index) });
     const showcase = SHOWCASES.find((s) => s.index === index);
     const story = showcase?.story;
     const trace = dataset.traces[index];
@@ -680,7 +706,32 @@ it("leaves trace 0 and the showcases alone", () => {
   const dataset = createDataset({ seed: 1, now: NOW, traces: 60 });
   expect(dataset.traces[0]?.duration_ns).toBe(60_000 * 1_000_000);
   for (const showcase of SHOWCASES) {
-    expect(dataset.traces[showcase.index]?.duration_ns).toBe(showcase.spans[0].to * 1_000_000);
+    const own = createDataset({
+      seed: 1,
+      now: NOW,
+      traces: 60,
+      profile: profileOf(showcase.index),
+    });
+    expect(own.traces[showcase.index]?.duration_ns).toBe(showcase.spans[0].to * 1_000_000);
+  }
+});
+
+it("the support dataset holds the support hero only", () => {
+  const dataset = createDataset({ seed: 1, now: NOW, traces: 10 });
+  const hero = dataset.traces[3];
+  expect(hero?.span_count).toBe(SUPPORT_SHOWCASE.spans.length);
+  expect(hero?.user_id).toBe("user-012");
+  for (const index of [4, 5, 6]) {
+    const trace = dataset.traces[index];
+    expect(SUPPORT_PROFILE.names).toContain(trace?.name);
+    const preview = trace?.input_preview;
+    expect(
+      SUPPORT_TURNS.some(
+        (topic) =>
+          topic.question === preview ||
+          topic.followUps.some((followUp) => followUp.question === preview),
+      ),
+    ).toBe(true);
   }
 });
 
@@ -702,12 +753,10 @@ function digestOf(dataset: Dataset): string {
   return hash.digest("hex");
 }
 
-/** The digest of the support output before M16 (P1): the default profile and the explicit one must both keep it. */
+/** The digest of the support output before M16 (P1): the profile with every showcase keeps it (the default now holds the support hero only). */
 const SUPPORT_DIGEST = "713b3032e536912b16edde65f86a421942cfe3ba4bdf32cc226667fb05edf471";
 
 it("keeps the support output byte-identical", () => {
-  const dataset = createDataset({ seed: 1, now: NOW, traces: 400 });
-  expect(digestOf(dataset)).toBe(SUPPORT_DIGEST);
   const explicit = createDataset({
     seed: 1,
     now: NOW,

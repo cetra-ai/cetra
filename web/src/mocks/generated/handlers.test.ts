@@ -2,6 +2,7 @@ import { expect, it } from "vitest";
 import type { Schema } from "@/api/types";
 import { createDataset, type Dataset, visibleTraces } from "@/mocks/generated/dataset";
 import { compareUsers, largeHandlers, userIdOfFilter } from "@/mocks/generated/handlers";
+import { CODING_PROFILE } from "@/mocks/generated/profiles";
 import { server } from "@/mocks/node";
 
 const NOW = Date.parse("2026-06-01T00:00:00.000Z");
@@ -310,7 +311,7 @@ it("serves the story queues' score definitions after the generated ones", async 
 });
 
 it("keeps the fixture queue's review as it was", async () => {
-  const dataset = createDataset({ seed: 1, now: NOW, traces: 5 });
+  const dataset = createDataset({ seed: 1, now: NOW, traces: 5, profile: CODING_PROFILE });
   server.use(...largeHandlers(dataset));
   const review = async (id: string) =>
     (
@@ -425,7 +426,7 @@ it("applies a status filter to the trace list", async () => {
 });
 
 it("applies a tags filter combined with a name filter", async () => {
-  const dataset = createDataset({ seed: 1, now: NOW, traces: 400 });
+  const dataset = createDataset({ seed: 1, now: NOW, traces: 400, profile: CODING_PROFILE });
   server.use(...largeHandlers(dataset));
 
   const url = new URL(`${PROJECT}/traces`);
@@ -434,7 +435,11 @@ it("applies a tags filter combined with a name filter", async () => {
   const response = await fetch(url);
   const body = (await response.json()) as Schema<"TracePage">;
   expect(response.headers.get("X-Mock-Filter-Ignored")).toBeNull();
-  expect(body.data.map((trace) => trace.trace_id)).toEqual([dataset.traces[4]?.trace_id]);
+  const expected = visibleTraces(dataset.traces, false, false)
+    .filter((trace) => trace.name === "coding-agent" && trace.tags.includes("retry"))
+    .map((trace) => trace.trace_id);
+  expect(expected).toContain(dataset.traces[4]?.trace_id);
+  expect(body.data.map((trace) => trace.trace_id).sort()).toEqual([...expected].sort());
 });
 
 it("sorts a filtered list", async () => {

@@ -2,6 +2,7 @@ import { type HttpHandler, HttpResponse, http } from "msw";
 import type { Schema } from "@/api/types";
 import promptsFixture from "../../../fixtures/api/responses/prompts.json";
 import { metricsOf } from "./fallbacks";
+import { projectOfRef, type StoryId } from "./projects";
 
 /**
  * The prompts of the homepage stories (design §12, M14), answered in the browser only. The fixture
@@ -10,6 +11,11 @@ import { metricsOf } from "./fallbacks";
  */
 
 const PROJECT = "/api/v1/projects/:project";
+
+/** A path parameter as text; msw types it as possibly repeated or missing. */
+function textParam(value: string | readonly string[] | undefined): string {
+  return typeof value === "string" ? value : "";
+}
 
 type Template = { role: "system" | "user"; content: string }[];
 
@@ -26,6 +32,8 @@ type StoryVersion = {
 
 type StoryPrompt = {
   id: string;
+  /** The story whose project serves the prompt. */
+  story: StoryId;
   name: string;
   description: string;
   tags: string[];
@@ -35,6 +43,7 @@ type StoryPrompt = {
 export const STORY_PROMPTS: StoryPrompt[] = [
   {
     id: "01900000-0000-7000-8000-000000570702",
+    story: "coding",
     name: "write-patch",
     description: "Turn an issue and a file into a unified diff",
     tags: ["coding"],
@@ -86,6 +95,7 @@ export const STORY_PROMPTS: StoryPrompt[] = [
   },
   {
     id: "01900000-0000-7000-8000-000000570703",
+    story: "voice",
     name: "voice-reply",
     description: "What the receptionist says back on the phone",
     tags: ["voice"],
@@ -151,6 +161,7 @@ export const STORY_PROMPTS: StoryPrompt[] = [
   },
   {
     id: "01900000-0000-7000-8000-000000570704",
+    story: "extraction",
     name: "extract-invoice",
     description: "Read an invoice's fields from its text",
     tags: ["billing"],
@@ -234,12 +245,13 @@ export const STORY_PROMPTS: StoryPrompt[] = [
   },
 ];
 
-/** The story prompt called `name`, if any. */
-function storyPrompt(name: unknown): StoryPrompt | undefined {
+/** The story prompt called `name` in the project `project` (an API ref), if any: a story prompt is served only in its story's project. */
+function storyPrompt(name: unknown, project: string): StoryPrompt | undefined {
   if (typeof name !== "string") {
     return undefined;
   }
-  return STORY_PROMPTS.find((prompt) => prompt.name === name);
+  const prompt = STORY_PROMPTS.find((candidate) => candidate.name === name);
+  return prompt !== undefined && projectOfRef(project)?.story === prompt.story ? prompt : undefined;
 }
 
 /** The prompt's detail: its latest version is the last one, labelled `production`. */
@@ -308,7 +320,7 @@ function labelEventsOf(story: StoryPrompt) {
 export const storyPromptHandlers: HttpHandler[] = [
   // Each story route below returns nothing for a prompt that is not a story, so the fixtures answer it.
   http.get(`${PROJECT}/prompts/:prompt/metrics`, ({ request, params }) => {
-    const story = storyPrompt(params.prompt);
+    const story = storyPrompt(params.prompt, textParam(params.project));
     if (story === undefined) {
       return undefined;
     }
@@ -319,7 +331,7 @@ export const storyPromptHandlers: HttpHandler[] = [
     return HttpResponse.json(metricsOf(versions, from, to));
   }),
   http.get(`${PROJECT}/prompts/:prompt/versions/:version`, ({ params }) => {
-    const story = storyPrompt(params.prompt);
+    const story = storyPrompt(params.prompt, textParam(params.project));
     if (story === undefined) {
       return undefined;
     }
@@ -331,21 +343,21 @@ export const storyPromptHandlers: HttpHandler[] = [
     return detail ? HttpResponse.json(detail) : undefined;
   }),
   http.get(`${PROJECT}/prompts/:prompt/versions`, ({ params }) => {
-    const story = storyPrompt(params.prompt);
+    const story = storyPrompt(params.prompt, textParam(params.project));
     if (story === undefined) {
       return undefined;
     }
     return HttpResponse.json({ data: versionsOf(story), next_cursor: null });
   }),
   http.get(`${PROJECT}/prompts/:prompt/label-events`, ({ params }) => {
-    const story = storyPrompt(params.prompt);
+    const story = storyPrompt(params.prompt, textParam(params.project));
     if (story === undefined) {
       return undefined;
     }
     return HttpResponse.json({ data: labelEventsOf(story), next_cursor: null });
   }),
   http.get(`${PROJECT}/prompts/:prompt/resolve`, ({ request, params }) => {
-    const story = storyPrompt(params.prompt);
+    const story = storyPrompt(params.prompt, textParam(params.project));
     if (story === undefined) {
       return undefined;
     }
@@ -357,18 +369,20 @@ export const storyPromptHandlers: HttpHandler[] = [
     return detail ? HttpResponse.json(detail) : undefined;
   }),
   http.get(`${PROJECT}/prompts/:prompt`, ({ params }) => {
-    const story = storyPrompt(params.prompt);
+    const story = storyPrompt(params.prompt, textParam(params.project));
     return story === undefined ? undefined : HttpResponse.json(promptOf(story));
   }),
-  // The fixture prompts first, then the story prompts; the filters apply to both.
-  http.get(`${PROJECT}/prompts`, ({ request }) => {
+  // The fixture prompts first, then the story prompts of this project; the filters apply to both.
+  http.get(`${PROJECT}/prompts`, ({ request, params }) => {
     // The fixture is checked against the Prompt schema by the contract tests.
     const fixtures = promptsFixture.data as Schema<"Prompt">[];
     const url = new URL(request.url);
     const q = url.searchParams.get("q")?.toLowerCase();
     const label = url.searchParams.get("label");
     const tag = url.searchParams.get("tag");
-    const data = [...fixtures, ...STORY_PROMPTS.map(promptOf)].filter(
+    const project = textParam(params.project);
+    const stories = STORY_PROMPTS.filter((prompt) => projectOfRef(project)?.story === prompt.story);
+    const data = [...fixtures, ...stories.map(promptOf)].filter(
       (prompt) =>
         (!q || prompt.name.toLowerCase().includes(q)) &&
         (!label || prompt.labels.some((item) => item.label === label)) &&

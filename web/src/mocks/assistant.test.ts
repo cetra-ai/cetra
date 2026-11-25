@@ -12,15 +12,44 @@ import {
   type TurnEvent,
 } from "@/lib/assistant/types";
 import { assistantHandlers, resetAssistantMock, STORIES, scriptFor } from "@/mocks/assistant";
-import { createDataset } from "@/mocks/generated/dataset";
+import {
+  createDataset,
+  type Dataset,
+  type Profile,
+  SUPPORT_PROFILE,
+} from "@/mocks/generated/dataset";
+import { CODING_PROFILE, EXTRACTION_PROFILE, VOICE_PROFILE } from "@/mocks/generated/profiles";
 import { server } from "@/mocks/node";
+import { type StoryId, storyProject } from "@/mocks/projects";
 import { STORY_DASHBOARD_IDS, storyDashboards } from "@/mocks/story-dashboards";
 
-const BASE = `${window.location.origin}/api/v1/projects/acme%2Fsupport-bot/assistant`;
-const NEW_ID = "01900000-0000-7000-8000-000000001a02";
 const OTHER_ID = "01900000-0000-7000-8000-000000001a01";
+const NEW_ID = "01900000-0000-7000-8000-000000001a02";
 const DEFAULT_TRACE_ID = "0af7651916cd43dd8448eb211c80319c";
 const DEFAULT_TITLE = "Which trace errors spiked?";
+
+const PROFILES: Record<StoryId, Profile> = {
+  support: SUPPORT_PROFILE,
+  coding: CODING_PROFILE,
+  voice: VOICE_PROFILE,
+  extraction: EXTRACTION_PROFILE,
+};
+
+/** A story's dataset of `traces` traces, built with the story's profile. */
+function datasetOf(story: StoryId, traces: number): Dataset {
+  return createDataset({
+    seed: 1,
+    now: Date.parse("2026-11-19T12:00:00Z"),
+    traces,
+    profile: PROFILES[story],
+  });
+}
+
+/** The assistant's API base in the story's project: `/api/v1/projects/<encoded ref>/assistant`. */
+function baseOf(story: StoryId): string {
+  const ref = encodeURIComponent(storyProject(story).ref);
+  return `${window.location.origin}/api/v1/projects/${ref}/assistant`;
+}
 
 type StoredDetail = {
   id: string;
@@ -34,18 +63,19 @@ beforeEach(() => {
   server.use(...assistantHandlers(0));
 });
 
-async function createChat(): Promise<void> {
-  const response = await fetch(`${BASE}/conversations`, { method: "POST" });
+async function createChat(story: StoryId): Promise<void> {
+  const response = await fetch(`${baseOf(story)}/conversations`, { method: "POST" });
   expect(response.status).toBe(201);
 }
 
-/** Runs one turn and returns the events the stream sent, in order. */
+/** Runs one turn in the story's project and returns the events the stream sent, in order. */
 async function ask(
+  story: StoryId,
   id: string,
   message: string,
   context?: Record<string, unknown>,
 ): Promise<TurnEvent[]> {
-  const response = await fetch(`${BASE}/conversations/${id}/turns`, {
+  const response = await fetch(`${baseOf(story)}/conversations/${id}/turns`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ message, context }),
@@ -68,8 +98,8 @@ async function ask(
   return events;
 }
 
-async function detail(id: string): Promise<StoredDetail> {
-  const response = await fetch(`${BASE}/conversations/${id}`);
+async function detail(story: StoryId, id: string): Promise<StoredDetail> {
+  const response = await fetch(`${baseOf(story)}/conversations/${id}`);
   return (await response.json()) as StoredDetail;
 }
 
@@ -131,10 +161,10 @@ describe("assistant story conversations", () => {
   it("picks each story's script from the question, trimmed and in any case", async () => {
     for (const story of STORIES) {
       for (const [index, turn] of story.turns.entries()) {
-        await createChat();
-        const exact = await ask(NEW_ID, turn.question);
-        await createChat();
-        const loose = await ask(NEW_ID, `  ${turn.question.toUpperCase()}  `);
+        await createChat(story.story);
+        const exact = await ask(story.story, NEW_ID, turn.question);
+        await createChat(story.story);
+        const loose = await ask(story.story, NEW_ID, `  ${turn.question.toUpperCase()}  `);
 
         expect(loose).toEqual(exact);
         expect(eventsNamed(exact, "start")[0]?.data.trace_id).toBe(story.heroTraceId);
@@ -149,8 +179,8 @@ describe("assistant story conversations", () => {
   });
 
   it("keeps today's script for any other question", async () => {
-    await createChat();
-    const events = await ask(NEW_ID, "hello");
+    await createChat("support");
+    const events = await ask("support", NEW_ID, "hello");
 
     expect(events[0]).toEqual({
       event: "start",
@@ -166,7 +196,7 @@ describe("assistant story conversations", () => {
       true,
     );
 
-    const stored = await detail(NEW_ID);
+    const stored = await detail("support", NEW_ID);
     expect(stored.title).toBe(DEFAULT_TITLE);
     expect(stored.message_count).toBe(6);
     expect(stored.messages.map((message) => message.seq)).toEqual([1, 2, 3, 4, 5, 6]);
@@ -183,16 +213,16 @@ describe("assistant story conversations", () => {
     expect(scriptFor("").title).toBe(DEFAULT_TITLE);
   });
 
-  it.each(STORIES)("stores both turns of $name as they were streamed", async (story) => {
-    await createChat();
+  it.each(STORIES)("stores both turns of $story as they were streamed", async (story) => {
+    await createChat(story.story);
     const [turn1, turn2] = story.turns;
-    const first = await ask(NEW_ID, turn1.question, { page: "traces", range: "24h" });
-    const second = await ask(NEW_ID, turn2.question, { page: "dashboard" });
+    const first = await ask(story.story, NEW_ID, turn1.question, { page: "traces", range: "24h" });
+    const second = await ask(story.story, NEW_ID, turn2.question, { page: "dashboard" });
 
     expect(eventsNamed(first, "start")[0]?.data.turn_id).toBe(1);
     expect(eventsNamed(second, "start")[0]?.data.turn_id).toBe(2);
 
-    const stored = await detail(NEW_ID);
+    const stored = await detail(story.story, NEW_ID);
     expect(stored.title).toBe(turn1.question);
     expect(stored.message_count).toBe(8);
     expect(stored.messages.map((message) => message.seq)).toEqual([1, 2, 3, 4, 5, 6, 7, 8]);
@@ -232,11 +262,6 @@ describe("assistant story conversations", () => {
   });
 
   it("names only traces that exist", async () => {
-    const ids = new Set(
-      createDataset({ seed: 1, now: Date.parse("2026-11-19T12:00:00Z"), traces: 50 }).traces.map(
-        (trace) => trace.trace_id,
-      ),
-    );
     const expectedRows: Record<string, number> = {
       support: 6,
       coding: 1,
@@ -245,23 +270,26 @@ describe("assistant story conversations", () => {
     };
 
     for (const story of STORIES) {
+      const ids = new Set(datasetOf(story.story, 50).traces.map((trace) => trace.trace_id));
       expect(ids.has(story.heroTraceId)).toBe(true);
 
-      const stored = await detail(story.conversationId);
+      const stored = await detail(story.story, story.conversationId);
       const search = stored.messages[2]?.parts[0] as Record<string, unknown> | undefined;
       const rows = (search?.result as { rows: { trace_id: string }[] } | undefined)?.rows ?? [];
-      expect(rows.length).toBe(expectedRows[story.name]);
+      expect(rows.length).toBe(expectedRows[story.story]);
       for (const row of rows) {
         expect(ids.has(row.trace_id)).toBe(true);
       }
-      expect(search).toMatchObject({ rows: expectedRows[story.name] });
-      expect(rows.some((row) => row.trace_id === story.heroTraceId)).toBe(story.name !== "support");
-
-      const events = await ask(NEW_ID, story.turns[0].question);
-      expect(eventsNamed(events, "tool_result")[0]?.data.summary.rows).toBe(
-        expectedRows[story.name],
+      expect(search).toMatchObject({ rows: expectedRows[story.story] });
+      expect(rows.some((row) => row.trace_id === story.heroTraceId)).toBe(
+        story.story !== "support",
       );
-      await createChat();
+
+      const events = await ask(story.story, NEW_ID, story.turns[0].question);
+      expect(eventsNamed(events, "tool_result")[0]?.data.summary.rows).toBe(
+        expectedRows[story.story],
+      );
+      await createChat(story.story);
 
       for (const message of stored.messages) {
         for (const part of message.parts) {
@@ -275,7 +303,7 @@ describe("assistant story conversations", () => {
       }
 
       const abbreviated = story.turns[0].answer.match(/a0000000…(\d{4})/);
-      if (story.name === "support") {
+      if (story.story === "support") {
         expect(abbreviated).toBeNull();
       } else {
         expect(abbreviated?.[1]).toBe(story.heroTraceId.slice(-4));
@@ -284,31 +312,31 @@ describe("assistant story conversations", () => {
     }
   });
 
-  it("lists the four story chats after a new one and before the fixture chat", async () => {
-    const storyIds = STORIES.map((story) => story.conversationId);
+  it("lists each story chat in its project, after a new one and before the fixture chat", async () => {
+    const listIn = async (story: StoryId) =>
+      (await (await fetch(`${baseOf(story)}/conversations`)).json()) as {
+        data: Record<string, unknown>[];
+      };
 
-    const before = (await (await fetch(`${BASE}/conversations`)).json()) as {
-      data: Record<string, unknown>[];
-    };
-    expect(before.data.map((item) => item.id)).toEqual([...storyIds, OTHER_ID]);
-    expect(before.data.slice(0, 4).map((item) => item.title)).toEqual(
-      STORIES.map((story) => story.turns[0].question),
-    );
-    expect(before.data.slice(0, 4).map((item) => item.message_count)).toEqual([8, 8, 8, 8]);
-    for (const item of before.data) {
+    const support = await listIn("support");
+    expect(support.data.map((item) => item.id)).toEqual([firstStory().conversationId, OTHER_ID]);
+    expect(support.data.map((item) => item.message_count)).toEqual([8, 4]);
+    for (const item of support.data) {
       expect(item).not.toHaveProperty("messages");
     }
+    for (const story of STORIES.slice(1)) {
+      const listed = await listIn(story.story);
+      expect(listed.data.map((item) => item.id)).toEqual([story.conversationId]);
+      expect(listed.data[0]?.title).toBe(story.turns[0].question);
+      expect(listed.data[0]?.message_count).toBe(8);
+    }
 
-    await createChat();
-    const empty = (await (await fetch(`${BASE}/conversations`)).json()) as {
-      data: Record<string, unknown>[];
-    };
+    await createChat("support");
+    const empty = await listIn("support");
     expect(empty.data[0]).toMatchObject({ id: NEW_ID, title: "", message_count: 0 });
 
-    await ask(NEW_ID, firstStory().turns[0].question);
-    const after = (await (await fetch(`${BASE}/conversations`)).json()) as {
-      data: Record<string, unknown>[];
-    };
+    await ask("support", NEW_ID, firstStory().turns[0].question);
+    const after = await listIn("support");
     expect(after.data[0]).toMatchObject({
       id: NEW_ID,
       title: firstStory().turns[0].question,
@@ -318,7 +346,7 @@ describe("assistant story conversations", () => {
 
   it("opens a stored story chat directly", async () => {
     for (const story of STORIES) {
-      const stored = await detail(story.conversationId);
+      const stored = await detail(story.story, story.conversationId);
       expect(stored.message_count).toBe(8);
       expect(stored.messages).toHaveLength(8);
 
@@ -338,8 +366,25 @@ describe("assistant story conversations", () => {
       );
     }
 
-    const missing = await fetch(`${BASE}/conversations/01900000-0000-7000-8000-00000000ffff`);
+    const missing = await fetch(
+      `${baseOf("support")}/conversations/01900000-0000-7000-8000-00000000ffff`,
+    );
     expect(missing.status).toBe(404);
+  });
+
+  it("a story chat is not served in another project", async () => {
+    const voice = STORIES.find((story) => story.story === "voice");
+    if (voice === undefined) {
+      throw new Error("no voice story");
+    }
+    const statusIn = async (slug: string) =>
+      (
+        await fetch(
+          `${window.location.origin}/api/v1/projects/acme%2F${slug}/assistant/conversations/${voice.conversationId}`,
+        )
+      ).status;
+    expect(await statusIn("code-agent")).toBe(404);
+    expect(await statusIn("voice-desk")).toBe(200);
   });
 
   it("drafts dashboards the assistant card accepts", async () => {
@@ -390,7 +435,7 @@ describe("assistant story conversations", () => {
       if (parsed?.kind !== "dashboard") {
         throw new Error("draft did not parse as a dashboard");
       }
-      const want = expected[story.name];
+      const want = expected[story.story];
       expect(want).toBeDefined();
       if (want === undefined) {
         continue;
@@ -415,22 +460,22 @@ describe("assistant story conversations", () => {
   });
 
   it("a new chat starts empty", async () => {
-    await createChat();
-    await ask(NEW_ID, firstStory().turns[0].question);
-    await createChat();
+    await createChat("support");
+    await ask("support", NEW_ID, firstStory().turns[0].question);
+    await createChat("support");
 
-    const stored = await detail(NEW_ID);
+    const stored = await detail("support", NEW_ID);
     expect(stored.messages).toEqual([]);
     expect(stored.message_count).toBe(0);
   });
 
   it("does not store a turn sent to another chat", async () => {
     const story = firstStory();
-    await createChat();
-    const events = await ask(story.conversationId, "hello");
+    await createChat("support");
+    const events = await ask(story.story, story.conversationId, "hello");
 
     expect(events.length).toBeGreaterThan(0);
-    expect((await detail(NEW_ID)).messages).toEqual([]);
-    expect((await detail(story.conversationId)).message_count).toBe(8);
+    expect((await detail("support", NEW_ID)).messages).toEqual([]);
+    expect((await detail(story.story, story.conversationId)).message_count).toBe(8);
   });
 });

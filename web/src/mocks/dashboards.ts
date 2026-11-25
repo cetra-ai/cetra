@@ -6,6 +6,8 @@ import dashboardDocument from "../../../fixtures/api/static/dashboard.json";
 import staleDocument from "../../../fixtures/api/static/dashboard-stale.json";
 import dashboardsDocument from "../../../fixtures/api/static/dashboards.json";
 import meDocument from "../../../fixtures/api/static/me.json";
+import { projectOfRef } from "./projects";
+import { STORY_DASHBOARD_STORIES } from "./story-dashboards";
 
 const LIST = "/api/v1/projects/:project/dashboards";
 const ONE = "/api/v1/projects/:project/dashboards/:id";
@@ -44,11 +46,11 @@ export function dashboardHandlers(
 }
 
 const handlers: HttpHandler[] = [
-  http.get(LIST, ({ request }) => {
+  http.get(LIST, ({ request, params }) => {
     const url = new URL(request.url);
     const limit = Number(url.searchParams.get("limit") ?? DEFAULT_PAGE);
     const offset = Number(url.searchParams.get("cursor") ?? 0);
-    const sorted = [...dashboards].sort(byName);
+    const sorted = [...dashboards].filter((item) => visibleIn(item, params.project)).sort(byName);
     const page = sorted.slice(offset, offset + limit).map(summaryOf);
     const next = offset + limit < sorted.length ? String(offset + limit) : null;
     return HttpResponse.json({ data: page, next_cursor: next });
@@ -136,11 +138,15 @@ const handlers: HttpHandler[] = [
     return new HttpResponse(null, { status: 204 });
   }),
   http.get(ONE, ({ params }) => {
-    const dashboard = dashboards.find((item) => item.id === params.id);
+    const dashboard = dashboards.find(
+      (item) => item.id === params.id && visibleIn(item, params.project),
+    );
     return dashboard ? HttpResponse.json(dashboard) : notFound();
   }),
   http.patch(ONE, async ({ params, request }) => {
-    const dashboard = dashboards.find((item) => item.id === params.id);
+    const dashboard = dashboards.find(
+      (item) => item.id === params.id && visibleIn(item, params.project),
+    );
     const body = await readJson(request);
     if (!body || typeof body.version !== "number") {
       return problem(400, "bad_request", "Bad Request");
@@ -190,7 +196,9 @@ const handlers: HttpHandler[] = [
     return HttpResponse.json(dashboard);
   }),
   http.delete(ONE, ({ params }) => {
-    const index = dashboards.findIndex((item) => item.id === params.id);
+    const index = dashboards.findIndex(
+      (item) => item.id === params.id && visibleIn(item, params.project),
+    );
     if (index < 0) {
       return notFound();
     }
@@ -198,6 +206,18 @@ const handlers: HttpHandler[] = [
     return new HttpResponse(null, { status: 204 });
   }),
 ];
+
+/**
+ * Whether a project's dashboards list and routes show `dashboard`: a story dashboard only in its
+ * story's project (P-4), every other dashboard in every project. `project` is the decoded ref.
+ */
+function visibleIn(dashboard: Dashboard, project: unknown): boolean {
+  const story = STORY_DASHBOARD_STORIES[dashboard.id];
+  return (
+    story === undefined ||
+    projectOfRef(typeof project === "string" ? project : undefined)?.story === story
+  );
+}
 
 function byName(left: Dashboard, right: Dashboard): number {
   if (left.name !== right.name) {

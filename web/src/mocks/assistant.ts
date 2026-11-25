@@ -1,6 +1,7 @@
 import { type HttpHandler, HttpResponse, http } from "msw";
 import assistantConversations from "../../../fixtures/api/responses/assistant-conversations.json";
 import { turnStream } from "../test/turn-stream";
+import { projectOfRef, type StoryId } from "./projects";
 import { STORY_DASHBOARD_IDS, storyDashboards } from "./story-dashboards";
 
 const PROJECT = "/api/v1/projects/:project/assistant";
@@ -433,7 +434,7 @@ function dashboardDraft(id: string): Fields {
 
 /** One story: its hero trace, its stored chat, and its two turns (an answer, then a dashboard draft). */
 export type Story = {
-  name: "support" | "coding" | "voice" | "extraction";
+  story: StoryId;
   conversationId: string;
   /** When the stored chat started; each story is five minutes older than the one before. */
   base: string;
@@ -472,7 +473,7 @@ function dashboardTurn(question: string, draft: Fields): TurnSpec {
 
 export const STORIES: Story[] = [
   {
-    name: "support",
+    story: "support",
     conversationId: "01900000-0000-7000-8000-000000570801",
     base: "2026-11-19T11:50:00Z",
     heroTraceId: traceIdAt(3),
@@ -492,7 +493,7 @@ export const STORIES: Story[] = [
     ],
   },
   {
-    name: "coding",
+    story: "coding",
     conversationId: "01900000-0000-7000-8000-000000570802",
     base: "2026-11-19T11:45:00Z",
     heroTraceId: traceIdAt(4),
@@ -500,7 +501,7 @@ export const STORIES: Story[] = [
       searchTurn(
         "Which traces failed in the last day?",
         ["I'll search the failed traces ", "from the last day. "],
-        "status = 'error' and tags @> ['retry']",
+        "status = 'error'",
         "2026-11-18T12:00:00Z",
         searchResult([4]),
         "One: coding-agent (a0000000…0004). Its first run_tests call failed with 1 failed, 47 passed, and the second run passed.",
@@ -512,7 +513,7 @@ export const STORIES: Story[] = [
     ],
   },
   {
-    name: "voice",
+    story: "voice",
     conversationId: "01900000-0000-7000-8000-000000570803",
     base: "2026-11-19T11:40:00Z",
     heroTraceId: traceIdAt(5),
@@ -532,7 +533,7 @@ export const STORIES: Story[] = [
     ],
   },
   {
-    name: "extraction",
+    story: "extraction",
     conversationId: "01900000-0000-7000-8000-000000570804",
     base: "2026-11-19T11:35:00Z",
     heroTraceId: traceIdAt(6),
@@ -611,12 +612,28 @@ function newConversationDetail() {
   };
 }
 
-/** The new chat first, then the four story chats, then the fixture list. */
-function conversationList() {
-  const stories = STORIES.map((story) => summaryOf(storyDetail(story)));
-  const fixtures = assistantConversations.data;
+/**
+ * The conversations of `project` (a decoded API ref): the new chat, then the project's story chat,
+ * then the fixture list in the support project only.
+ */
+function conversationList(project: unknown) {
+  const ref = typeof project === "string" ? project : undefined;
+  const stories = STORIES.filter((story) => projectOfRef(ref)?.story === story.story).map((story) =>
+    summaryOf(storyDetail(story)),
+  );
+  const fixtures = projectOfRef(ref)?.story === "support" ? assistantConversations.data : [];
   const listed = created ? [summaryOf(newConversationDetail())] : [];
   return { data: [...listed, ...stories, ...fixtures], next_cursor: null };
+}
+
+/**
+ * Whether conversation `id` is served in `project` (a decoded API ref): a story chat only in its
+ * story's project (P-4); every other id, the new chat and the fixtures included, in every project.
+ */
+function servedIn(id: unknown, project: unknown): boolean {
+  const story = STORIES.find((item) => item.conversationId === id);
+  const ref = typeof project === "string" ? project : undefined;
+  return story === undefined || projectOfRef(ref)?.story === story.story;
 }
 
 /**
@@ -631,24 +648,37 @@ export function assistantHandlers(eventDelayMs: number = EVENT_DELAY_MS): HttpHa
       ran = [];
       return HttpResponse.json(newConversation, { status: 201 });
     }),
-    http.get(`${PROJECT}/conversations`, () => HttpResponse.json(conversationList())),
+    http.get(`${PROJECT}/conversations`, ({ params }) =>
+      HttpResponse.json(conversationList(params.project)),
+    ),
     http.get(`${PROJECT}/conversations/:id`, ({ params }) => {
       if (params.id === NEW_CONVERSATION_ID) {
         return HttpResponse.json(newConversationDetail());
+      }
+      if (!servedIn(params.id, params.project)) {
+        return undefined;
       }
       const story = STORIES.find((item) => item.conversationId === params.id);
       return story === undefined ? undefined : HttpResponse.json(storyDetail(story));
     }),
     http.patch(`${PROJECT}/conversations/:id`, async ({ params, request }) => {
+      if (!servedIn(params.id, params.project)) {
+        return undefined;
+      }
       const body = (await request.json()) as { title: string };
       return HttpResponse.json({ ...newConversation, id: params.id, title: body.title });
     }),
-    http.delete(`${PROJECT}/conversations/:id`, () => new HttpResponse(null, { status: 204 })),
+    http.delete(`${PROJECT}/conversations/:id`, ({ params }) =>
+      servedIn(params.id, params.project) ? new HttpResponse(null, { status: 204 }) : undefined,
+    ),
     http.put(
       `${PROJECT}/conversations/:id/messages/:seq/feedback`,
       () => new HttpResponse(null, { status: 204 }),
     ),
     http.post(`${PROJECT}/conversations/:id/turns`, async ({ params, request }) => {
+      if (!servedIn(params.id, params.project)) {
+        return undefined;
+      }
       const turn = await readTurnRequest(request);
       const script = scriptFor(turn.message);
       const isNew = params.id === NEW_CONVERSATION_ID;

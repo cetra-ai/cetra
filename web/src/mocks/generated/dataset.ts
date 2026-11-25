@@ -1561,7 +1561,7 @@ export const SUPPORT_PROFILE: Profile = {
   systemPrompt: "You are a concise support agent. Answer in Markdown.",
   failedAnswer: FAILED_ANSWER,
   scores: (index) => (index % 2 === 0 ? scoresFor(index) : []),
-  showcases: SHOWCASES,
+  showcases: [SUPPORT_SHOWCASE],
 };
 
 /**
