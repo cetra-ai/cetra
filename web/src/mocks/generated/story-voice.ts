@@ -12,6 +12,7 @@ import {
   percentile,
   scoreUuid,
   spanId,
+  type Turn,
 } from "./dataset";
 import { VOICE_PROFILE } from "./profiles";
 
@@ -90,6 +91,134 @@ function availabilitySpan(durationMs: number): MarkedSpan {
   };
 }
 
+const SAMPLE_RATE = 8_000;
+const CALLER_QUESTION = "Hi, can I move my appointment to Friday morning?";
+const AGENT_ANSWER = "Friday at 9:30 is free. Should I book it?";
+
+/**
+ * A 16-bit mono PCM WAV of `seconds` at 8 kHz: three summed sines under a slow amplitude envelope, so the waveform
+ * has a shape. Returned as a `data:` URI (P2): the header is written with a DataView.
+ */
+function toneWav(seconds: number, seed: number): string {
+  const samples = Math.round(seconds * SAMPLE_RATE);
+  const dataBytes = samples * 2;
+  const buffer = new ArrayBuffer(44 + dataBytes);
+  const view = new DataView(buffer);
+  const writeText = (offset: number, text: string): void => {
+    for (let i = 0; i < text.length; i += 1) {
+      view.setUint8(offset + i, text.charCodeAt(i));
+    }
+  };
+  writeText(0, "RIFF");
+  view.setUint32(4, 36 + dataBytes, true);
+  writeText(8, "WAVE");
+  writeText(12, "fmt ");
+  view.setUint32(16, 16, true);
+  view.setUint16(20, 1, true);
+  view.setUint16(22, 1, true);
+  view.setUint32(24, SAMPLE_RATE, true);
+  view.setUint32(28, SAMPLE_RATE * 2, true);
+  view.setUint16(32, 2, true);
+  view.setUint16(34, 16, true);
+  writeText(36, "data");
+  view.setUint32(40, dataBytes, true);
+  for (let n = 0; n < samples; n += 1) {
+    const t = n / SAMPLE_RATE;
+    const envelope = 0.55 + 0.45 * Math.sin(2 * Math.PI * 0.7 * t + seed);
+    const tone =
+      0.5 * Math.sin(2 * Math.PI * 220 * t) +
+      0.3 * Math.sin(2 * Math.PI * 330 * t + seed) +
+      0.2 * Math.sin(2 * Math.PI * 440 * t);
+    view.setInt16(44 + n * 2, Math.round(envelope * tone * 0.6 * 32_767), true);
+  }
+  let binary = "";
+  for (const byte of new Uint8Array(buffer)) {
+    binary += String.fromCharCode(byte);
+  }
+  return `data:audio/wav;base64,${btoa(binary)}`;
+}
+
+/** The caller's and the agent's turn audio (P2): 2.4 s and 2.0 s. */
+const CALLER_WAV = toneWav(2.4, 1);
+const AGENT_WAV = toneWav(2.0, 2);
+
+/** The draft reply span of the chosen turn (P2): the caller's audio, the availability call, the agent's audio. */
+function draftReplySpan(checkMs: number): MarkedSpan {
+  return {
+    name: "draft reply",
+    kind: "llm",
+    fromMs: 250 + checkMs,
+    durationMs: 300,
+    input: {
+      format: "messages",
+      value: [
+        {
+          role: "user",
+          parts: [
+            {
+              type: "uri",
+              uri: CALLER_WAV,
+              modality: "audio",
+              mime_type: "audio/wav",
+              transcript: CALLER_QUESTION,
+            },
+          ],
+        },
+        {
+          role: "assistant",
+          parts: [
+            {
+              type: "tool_call",
+              id: "call_1",
+              name: "check_availability",
+              arguments: { day: "Friday", time: "morning" },
+            },
+          ],
+        },
+        {
+          role: "tool",
+          parts: [
+            {
+              type: "tool_call_response",
+              id: "call_1",
+              response: { slots: ["9:30", "11:00"] },
+            },
+          ],
+        },
+      ],
+    },
+    output: {
+      format: "messages",
+      value: [
+        {
+          role: "assistant",
+          parts: [
+            {
+              type: "uri",
+              uri: AGENT_WAV,
+              modality: "audio",
+              mime_type: "audio/wav",
+              transcript: AGENT_ANSWER,
+            },
+          ],
+        },
+      ],
+    },
+  };
+}
+
+/** The reschedule turn of the chosen voice turn (P2): its previews match the audio. */
+const RESCHEDULE_TURN: Turn = {
+  question: CALLER_QUESTION,
+  heading: "Reschedule",
+  summary: AGENT_ANSWER,
+  steps: [],
+  followUps: [
+    { question: "Yes, please.", summary: "Booked: Friday at 9:30.", steps: [] },
+    { question: "Thanks.", summary: "You're welcome. Goodbye!", steps: [] },
+  ],
+};
+
 /** Adds a change to a turn's mark (M17 `mergeMarks`). */
 function add(marks: Map<number, Mark>, index: number, change: Mark): void {
   const previous = marks.get(index);
@@ -140,12 +269,22 @@ function voiceMarks(
   });
   const keyOf = (index: number): number => mix(context.seed ^ AVAILABILITY_SALT, index);
   pool.sort((left, right) => keyOf(left) - keyOf(right) || left - right);
+  // The voice audio turn (P2): the lowest-index pool turn that started in the last 2 hours.
+  const recent = pool.filter((index) => {
+    const start = Date.parse(traces[index]?.start_time ?? "");
+    return start >= context.now - 2 * HOUR_MS && start <= context.now;
+  });
+  const audioIndex = recent.length > 0 ? Math.min(...recent) : undefined;
   pool.forEach((index, rank) => {
     const duration = quantile((rank + 0.5) / pool.length);
+    const audio = index === audioIndex;
     add(marks, index, {
       tags: ["calendar"],
-      spans: [availabilitySpan(duration)],
+      spans: audio
+        ? [draftReplySpan(duration), availabilitySpan(duration)]
+        : [availabilitySpan(duration)],
       durationMs: duration + 600,
+      ...(audio ? { turn: RESCHEDULE_TURN } : {}),
     });
   });
 
@@ -275,4 +414,50 @@ export function voiceFacts(dataset: Dataset): VoiceFacts {
     hourlyP95Ms,
     p95AllDay: hourlyP95Ms.every((value) => value > 1_500),
   };
+}
+
+/** The voice audio turn at the screenshot clock (P2): its trace and its `draft reply` span. Pinned by the test. */
+export const VOICE_AUDIO_TRACE_ID = "a000000000000000000000000000006e";
+export const VOICE_AUDIO_SPAN_ID = "0000006e00000008";
+
+/**
+ * The index of the voice audio turn in a dataset built with `VOICE_STORY_PROFILE` (P2): the lowest-index eligible
+ * `calendar` turn that is neither a hang-up nor the turn before one, started in the last 2 hours, whose second-to-last
+ * span is the `draft reply` span. P8's picture and the playground's voice answer use its trace.
+ */
+export function voiceAudioTurn(dataset: Dataset): number {
+  const eligible = (index: number): boolean => {
+    const trace = dataset.traces[index];
+    return trace !== undefined && isEligibleTrace(VOICE_STORY_PROFILE, trace, index);
+  };
+  const beforeHangup = new Set<number>();
+  for (const call of callsOf(dataset.traces, eligible)) {
+    const last = call.turns[call.turns.length - 1];
+    const before = call.turns[call.turns.length - 2];
+    if (last && before && last.trace.tags.includes("hangup")) {
+      beforeHangup.add(before.index);
+    }
+  }
+  for (const [index, trace] of dataset.traces.entries()) {
+    if (
+      !eligible(index) ||
+      !trace.tags.includes("calendar") ||
+      trace.tags.includes("hangup") ||
+      beforeHangup.has(index)
+    ) {
+      continue;
+    }
+    const age = dataset.now - Date.parse(trace.start_time);
+    if (age < 0 || age > 2 * HOUR_MS) {
+      continue;
+    }
+    const detail = dataset.traceDetail(trace.trace_id);
+    const draft = detail?.spans.find(
+      (row) => row.span.span_id === spanId(index, trace.span_count - 2),
+    )?.span;
+    if (draft?.name === "draft reply") {
+      return index;
+    }
+  }
+  throw new Error("the dataset has no voice audio turn in the last 2 hours");
 }
