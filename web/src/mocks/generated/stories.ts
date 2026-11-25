@@ -93,6 +93,9 @@ type StoryIssue = {
 
 const isSsoQuestion = (trace: Trace) => trace.input_preview === SSO_TURN.question;
 
+/** The scanned-PDF issue, which the extraction rule counts (M19). */
+const SCANNED_ISSUE_ID = "01900000-0000-7000-8000-000000570104";
+
 export const STORY_ISSUES: readonly StoryIssue[] = [
   {
     id: "01900000-0000-7000-8000-000000570101",
@@ -139,7 +142,7 @@ export const STORY_ISSUES: readonly StoryIssue[] = [
     matches: hasTag("interrupted"),
   },
   {
-    id: "01900000-0000-7000-8000-000000570104",
+    id: SCANNED_ISSUE_ID,
     story: "extraction",
     eventId: "01900000-0000-7000-8000-000000570114",
     sourceId: "01900000-0000-7000-8000-000000570304",
@@ -242,6 +245,64 @@ const CORRECTNESS_CONDITION = {
   aggregation: "avg",
 } as const;
 
+/** The start times (ms) of the visible traces that a story issue matches; its hero is one of them. */
+function startsOf(dataset: Dataset, issue: StoryIssue): number[] {
+  return visibleTraces(dataset.traces, false, false)
+    .filter((trace) => issue.matches(trace))
+    .map((trace) => Date.parse(trace.start_time));
+}
+
+/** The start times (ms) of the scanned-PDF issue's occurrences. */
+function scannedStarts(dataset: Dataset): number[] {
+  const issue = STORY_ISSUES.find((item) => item.id === SCANNED_ISSUE_ID);
+  return issue === undefined ? [] : startsOf(dataset, issue);
+}
+
+/** The scanned PDFs that start in the hour before `now`: the extraction rule's value and count. */
+function scannedLastHour(dataset: Dataset, now: number): number[] {
+  return scannedStarts(dataset).filter((started) => started >= now - HOUR_MS && started < now);
+}
+
+/** The windows the issue preview takes: the API's windows of 15 minutes and up. */
+type PreviewWindow = "15m" | "1h" | "6h" | "24h";
+
+/** The span the preview covers before `to`, as the API's description gives it. */
+const PREVIEW_SPAN_MS: Record<PreviewWindow, number> = {
+  "15m": DAY_MS,
+  "1h": DAY_MS,
+  "6h": 3 * DAY_MS,
+  "24h": 14 * DAY_MS,
+};
+
+function previewWindowOf(value: string | null): PreviewWindow | undefined {
+  return value === "15m" || value === "1h" || value === "6h" || value === "24h" ? value : undefined;
+}
+
+/**
+ * The issue preview of the issues: one point per window-wide bucket from the bucket holding `to`
+ * minus the span, up to `to` (the dataset's now). A point counts the visible traces of the issues
+ * that start in its bucket (the last point only up to `to`), oldest first.
+ */
+function issuePreview(
+  dataset: Dataset,
+  issues: readonly StoryIssue[],
+  window: PreviewWindow,
+): Schema<"IssueAlertPreview"> {
+  const width = WINDOW_MS[window];
+  const to = dataset.now;
+  const from = Math.floor((to - PREVIEW_SPAN_MS[window]) / width) * width;
+  const starts = issues.flatMap((issue) => startsOf(dataset, issue));
+  const points: Schema<"IssueAlertPoint">[] = [];
+  for (let start = from; start < to; start += width) {
+    const end = Math.min(start + width, to);
+    points.push({
+      time: rfc3339(start),
+      count: starts.filter((started) => started >= start && started < end).length,
+    });
+  }
+  return { from: rfc3339(from), to: rfc3339(to), window, points };
+}
+
 export const STORY_RULES: readonly StoryRule[] = [
   {
     id: "01900000-0000-7000-8000-000000570201",
@@ -301,22 +362,23 @@ export const STORY_RULES: readonly StoryRule[] = [
     story: "extraction",
     eventId: "01900000-0000-7000-8000-000000570214",
     deliveryId: "01900000-0000-7000-8000-000000570224",
-    name: "Schema check pass rate under 97%",
+    name: "Scanned PDFs over 10 an hour",
     condition: {
-      metric: "score",
+      metric: "issue_occurrences",
+      issue_id: SCANNED_ISSUE_ID,
       window: "1h",
-      comparator: "lt",
-      threshold: 0.97,
-      min_count: 20,
-      score_name: "schema_valid",
-      aggregation: "pass_rate",
-      filter: "tags @> ['billing']",
+      comparator: "gt",
+      threshold: 10,
     },
     channel: TEAM_SLACK,
-    state: "ok",
-    lastValue: () => 0.985,
-    lastCount: () => 210,
-    changedAgoMs: () => 5 * HOUR_MS,
+    state: "firing",
+    lastValue: (dataset, now) => scannedLastHour(dataset, now).length,
+    lastCount: (dataset, now) => scannedLastHour(dataset, now).length,
+    changedAgoMs: (dataset, now) => {
+      // The hour went over 10 at its 11th scanned PDF, in start order.
+      const eleventh = scannedLastHour(dataset, now).sort((left, right) => left - right)[10];
+      return eleventh === undefined ? DAY_MS : now - eleventh;
+    },
   },
 ];
 
@@ -833,6 +895,24 @@ export function storyHandlers(dataset: Dataset, project?: string): HttpHandler[]
         next_cursor: null,
       }),
     ),
+    // Before `alert-rules/:id`, which would take `issue-preview` for a rule id.
+    http.get(`${prefix}/alert-rules/issue-preview`, ({ request }) => {
+      const search = new URL(request.url).searchParams;
+      const window = previewWindowOf(search.get("window"));
+      const issueId = search.get("issue_id");
+      const sourceId = search.get("source_id");
+      // Exactly one of the two ids, a window the preview takes, and an issue or source of the project.
+      if (window === undefined || (issueId === null) === (sourceId === null)) {
+        return undefined;
+      }
+      const counted =
+        issueId === null
+          ? issues.filter((issue) => issue.sourceId === sourceId)
+          : issues.filter((issue) => issue.id === issueId);
+      return counted.length === 0
+        ? undefined
+        : HttpResponse.json(issuePreview(dataset, counted, window));
+    }),
     http.get(`${prefix}/alert-rules/:id`, ({ params }) => {
       const rule = ruleById(idParam(params.id));
       return rule ? HttpResponse.json(storyAlertRule(dataset, rule)) : undefined;

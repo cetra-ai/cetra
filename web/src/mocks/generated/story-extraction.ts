@@ -20,7 +20,8 @@ const BATCH_TAG = "batch-1119";
 const BATCH_SIZE = 200;
 /** Batch ranks start at 0: rank r starts at `B + r * BATCH_STEP_MS`. */
 const BATCH_STEP_MS = 18_000;
-const BATCH_FAILURE_RANKS: ReadonlySet<number> = new Set([41, 97, 158]);
+/** The batch's newest three ranks fail twice, so the newest-first list shows them first (M19). */
+const BATCH_FAILURE_RANKS: ReadonlySet<number> = new Set([197, 198, 199]);
 const BURST_SIZE = 12;
 
 /** The four comma-decimal vendors (M17). Each is a turn that only marked traces carry. */
@@ -198,7 +199,7 @@ export function extractionMarks(
   }
 
   // 3. The batch: the first 200 eligible error-free traces that no earlier mark chose and that started before
-  // a day ago, one every 18 s over an hour from three hours ago; ranks 41, 97 and 158 fail twice.
+  // a day ago, one every 18 s over an hour from three hours ago; ranks 197, 198 and 199 fail twice.
   const batch: number[] = [];
   for (const index of eligibleIndices) {
     if (batch.length >= BATCH_SIZE) {

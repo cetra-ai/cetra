@@ -281,7 +281,7 @@ it("gives every story issue at most five examples, the generated ones newest fir
 
 it("lists the story rules with their state and a fired event for the firing ones", () => {
   const rules = STORY_RULES.map((rule) => storyAlertRule(stories[rule.story], rule));
-  expect(rules.map((rule) => rule.state)).toEqual(["firing", "firing", "firing", "ok"]);
+  expect(rules.map((rule) => rule.state)).toEqual(["firing", "firing", "firing", "firing"]);
   for (const rule of STORY_RULES) {
     const event = storyAlertEvent(stories[rule.story], rule);
     expect(event.kind).toBe(rule.state === "firing" ? "fired" : "resolved");
@@ -291,9 +291,9 @@ it("lists the story rules with their state and a fired event for the firing ones
   }
 });
 
-it("sets last_fired_at on the three firing rules and omits it on the one ok rule", () => {
-  expect(STORY_RULES.filter((rule) => rule.state === "firing")).toHaveLength(3);
-  expect(STORY_RULES.filter((rule) => rule.state === "ok")).toHaveLength(1);
+it("sets last_fired_at on the four firing rules, and no story rule is ok", () => {
+  expect(STORY_RULES.filter((rule) => rule.state === "firing")).toHaveLength(4);
+  expect(STORY_RULES.filter((rule) => rule.state === "ok")).toHaveLength(0);
   for (const rule of STORY_RULES) {
     const dataset = stories[rule.story];
     const stored = storyAlertRule(dataset, rule);
@@ -360,8 +360,8 @@ it("has each firing rule's value breach its threshold, on at least its minimum s
 });
 
 it("leaves the value out of an empty window, with a count of 0", () => {
-  // The traces start before this clock, so the hour and the quarter hour after it hold none. The
-  // ok rule (extraction) has fixed values, so the firing rules are the ones whose windows count.
+  // The traces start before this clock, so the hour and the quarter hour after it hold none. Every
+  // story rule fires now, so each one's window is the one that counts.
   for (const rule of STORY_RULES.filter((item) => item.state === "firing")) {
     const dataset = stories[rule.story];
     const later = { ...dataset, now: dataset.now + DAY_MS * 365 };
@@ -386,6 +386,41 @@ it("starts the support rule at the first hour of the last day under 0.7 correctn
   expect(hourlyMeans[23]).toBeLessThan(0.7);
   const alert = storyAlertRule(support, oneOf(STORY_RULES, "support"));
   expect(alert.last_fired_at).toBe(rfc3339(first + dipped * HOUR_MS));
+});
+
+const SCANNED_ISSUE = "01900000-0000-7000-8000-000000570104";
+const EXTRACTION_SOURCE = "01900000-0000-7000-8000-000000570304";
+
+it("serves the scanned PDFs' preview: 24 hourly points, the last with 14 and every earlier one at most 6", async () => {
+  server.use(...allStoryHandlers());
+  const extraction = baseOf("extraction");
+  const preview = (await (
+    await fetch(`${extraction}/alert-rules/issue-preview?issue_id=${SCANNED_ISSUE}&window=1h`)
+  ).json()) as Schema<"IssueAlertPreview">;
+  expect(preview.from).toBe(rfc3339(NOW - DAY_MS));
+  expect(preview.to).toBe(rfc3339(NOW));
+  expect(preview.points).toHaveLength(24);
+  const counts = preview.points.map((point) => point.count);
+  expect(counts[23]).toBe(14);
+  expect(Math.max(...counts.slice(0, 23))).toBeLessThanOrEqual(6);
+
+  const bySource = (await (
+    await fetch(`${extraction}/alert-rules/issue-preview?source_id=${EXTRACTION_SOURCE}&window=1h`)
+  ).json()) as Schema<"IssueAlertPreview">;
+  expect(bySource.points).toEqual(preview.points);
+});
+
+it("fires the scanned PDFs rule at 14 in the last hour, since its 11th scanned PDF", () => {
+  const alert = storyAlertRule(stories.extraction, oneOf(STORY_RULES, "extraction"));
+  expect(alert.state).toBe("firing");
+  expect(alert.last_value).toBe(14);
+  expect(alert.last_count).toBe(14);
+  const starts = startedIn(stories.extraction, NOW - HOUR_MS, NOW)
+    .filter((trace) => trace.tags.includes("scanned"))
+    .map((trace) => Date.parse(trace.start_time))
+    .sort((left, right) => left - right);
+  expect(starts).toHaveLength(14);
+  expect(Date.parse(alert.last_fired_at ?? "")).toBe(starts[10]);
 });
 
 it("sends the voice rule to the on-call pager and the other rules to Team Slack", () => {

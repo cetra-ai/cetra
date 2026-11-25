@@ -111,3 +111,19 @@ it("the batch tag selects the 200 batch runs, and the three failures have two er
   expect(batch).toHaveLength(200);
   expect(batch.filter((trace) => trace.error_count === 2)).toHaveLength(3);
 });
+
+it("puts the batch's three failures at its newest three runs, so the newest-first list shows them first", () => {
+  const dataset = createDataset({
+    seed: 1,
+    now: NOW,
+    traces: 2_000,
+    profile: EXTRACTION_STORY_PROFILE,
+  });
+  const batch = visibleTraces(dataset.traces, false, false).filter((trace) =>
+    trace.tags.includes("batch-1119"),
+  );
+  const newest = [...batch]
+    .sort((left, right) => Date.parse(right.start_time) - Date.parse(left.start_time))
+    .slice(0, 3);
+  expect(newest.map((trace) => trace.error_count)).toEqual([2, 2, 2]);
+});
