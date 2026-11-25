@@ -142,11 +142,13 @@ async fn run() -> R<()> {
             }
             fineweb_cmd(&dir, spans, per_file, paths).await
         }
+        #[cfg(feature = "cw_cases")]
+        Some("cw") => cw::cmd(&args[2..]).await,
         _ => Err(USAGE.into()),
     }
 }
 
-const USAGE: &str = "usage: fmtbench gen <dir> <traces> <files> [--swe <max_trajectories> <shard>... | --convo <max_conversations> <file>...] | query <dir|s3://bucket/key> [runs] [only] | profile <dir|s3://bucket/key> [runs] | probe <s3://bucket/key> [reps] | upload <dir> <s3://bucket/key> [variant...] | download <s3://bucket/key> <dir> | merge <dir> (local only) | restrata <dir> [out] (local only) | series <data> <out> [runs] [datasets...] (local only) | fineweb <dir> <spans> <spans_per_file> <fineweb.parquet>... (local only; FMT_QUERYSET=braintrust for its queries)\n  s3 needs AWS_ENDPOINT, AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, AWS_DEFAULT_REGION (R2: auto), and AWS_ALLOW_HTTP=true for a plain-HTTP endpoint";
+const USAGE: &str = "usage: fmtbench gen <dir> <traces> <files> [--swe <max_trajectories> <shard>... | --convo <max_conversations> <file>...] | query <dir|s3://bucket/key> [runs] [only] | profile <dir|s3://bucket/key> [runs] | probe <s3://bucket/key> [reps] | upload <dir> <s3://bucket/key> [variant...] | download <s3://bucket/key> <dir> | merge <dir> (local only) | restrata <dir> [out] (local only) | series <data> <out> [runs] [datasets...] (local only) | fineweb <dir> <spans> <spans_per_file> <fineweb.parquet>... (local only; FMT_QUERYSET=braintrust for its queries) | cw gen <case> <dir> [--traces N] | cw import <src-dir> <dir> [name=needle...] | cw run <dir|s3://bucket/key> [--rounds R] [--runs K] [--queries a,b]\n  s3 needs AWS_ENDPOINT, AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, AWS_DEFAULT_REGION (R2: auto), and AWS_ALLOW_HTTP=true for a plain-HTTP endpoint";
 
 // ------------------------------------------------------------------ generate
 
