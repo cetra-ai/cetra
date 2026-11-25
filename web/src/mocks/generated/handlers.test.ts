@@ -895,3 +895,22 @@ it("the widget query and the trace stream follow the prefix", async () => {
   expect(other.status === 200 && otherType.includes("text/event-stream")).toBe(false);
   await other.body?.cancel();
 });
+
+it("totals the traces the list matches", async () => {
+  const dataset = createDataset({ seed: 1, now: NOW, traces: 400 });
+  server.use(...largeHandlers(dataset));
+  for (const query of ["", "include_eval=true"]) {
+    const list = (await (
+      await fetch(`${PROJECT}/traces?limit=1000${query ? `&${query}` : ""}`)
+    ).json()) as { data: Schema<"TraceSummary">[] };
+    const totals = (await (
+      await fetch(`${PROJECT}/traces/totals${query ? `?${query}` : ""}`)
+    ).json()) as Schema<"TraceTotals">;
+    const cost = list.data.reduce((sum, trace) => sum + (trace.cost_total ?? 0), 0);
+    expect(totals.trace_count, query).toBe(list.data.length);
+    expect(totals.error_trace_count, query).toBe(
+      list.data.filter((trace) => trace.status === "error").length,
+    );
+    expect(Math.abs(totals.cost_total - cost), query).toBeLessThan(1e-9);
+  }
+});

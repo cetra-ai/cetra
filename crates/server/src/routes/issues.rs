@@ -1651,7 +1651,7 @@ async fn get_issue_occurrences(
     let names = names_of(id, &merged);
     let ctx = open_query(&state, org, project, None).await?;
 
-    let counts = name_counts(&ctx, &names, window, true).await?;
+    let counts = name_counts(&ctx, &names, window, Some(DAY_NS)).await?;
     let mut by_day: BTreeMap<i64, Tally> = BTreeMap::new();
     let mut by_name: HashMap<String, Tally> = HashMap::new();
     for row in counts {

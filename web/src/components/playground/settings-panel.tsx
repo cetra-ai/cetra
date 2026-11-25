@@ -1,6 +1,5 @@
 import { ChevronRight } from "lucide-react";
 import { memo, type ReactNode, useState } from "react";
-import { placeholderNamesOf } from "@/components/playground/message-editor";
 import { Badge } from "@/components/ui/badge";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -14,7 +13,7 @@ import {
 import { Switch } from "@/components/ui/switch";
 import { Textarea } from "@/components/ui/textarea";
 import { parseJsonField } from "@/lib/datasets";
-import { type Draft, draftVariables, storedText } from "@/lib/playground";
+import { type Draft, storedText } from "@/lib/playground";
 
 /** The choices of `tool_choice` besides a tool name. */
 const TOOL_CHOICES = ["auto", "none", "required"] as const;
@@ -26,6 +25,10 @@ type SettingsPanelProps = {
   onChange: (patch: Partial<Draft>) => void;
   /** Field errors of the settings, by field name (`tools`, `placeholders.<name>`, ...). */
   errors: Record<string, string>;
+  /** The variables to list: the draft's and the pinned versions', D-C-30. */
+  variables: readonly string[];
+  /** The placeholders to list: the draft's and the pinned versions', D-C-30. */
+  placeholders: readonly string[];
 };
 
 /** The tool names of a JSON list of tools; `[]` when the text is not one. */
@@ -50,9 +53,9 @@ export const SettingsPanel = memo(function SettingsPanel({
   draft,
   onChange,
   errors,
+  variables,
+  placeholders,
 }: SettingsPanelProps) {
-  const variables = draftVariables(draft);
-  const placeholders = placeholderNamesOf(draft.entries);
   const toolNames = toolNamesOf(draft.tools).filter(
     (name) => !(TOOL_CHOICES as readonly string[]).includes(name),
   );

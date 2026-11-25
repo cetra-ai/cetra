@@ -9,6 +9,8 @@ import {
   DEFAULT_RULE_FORM,
   formatAlertValue,
   formFromRule,
+  issuePreviewRows,
+  issuePreviewScope,
   metricDefaults,
   metricLabel,
   previewCondition,
@@ -571,10 +573,62 @@ it("counts the scope of an issue rule when switching metric and back is not a ch
   expect(conditionChanged(original, back)).toBe(false);
 });
 
-it("has no preview for issue occurrences", () => {
+it("has no widget query for issue occurrences", () => {
   expect(previewQuery({ metric: "issue_occurrences", target: "trace", scoreName: "" })).toBe(
     undefined,
   );
+});
+
+it("scopes the issue occurrence preview to the chosen issue or source", () => {
+  expect(issuePreviewScope(formWith({ metric: "error_rate" }))).toBeUndefined();
+  expect(
+    issuePreviewScope(formWith({ metric: "issue_occurrences", window: "5m", issueId: "i" })),
+  ).toEqual({
+    kind: "missing",
+    message: "Issue occurrences need a window of 15 minutes or more.",
+  });
+  expect(
+    issuePreviewScope(formWith({ metric: "issue_occurrences", window: "1h", issueId: "  " })),
+  ).toEqual({ kind: "missing", message: "Choose an issue to see the preview." });
+  expect(
+    issuePreviewScope(
+      formWith({ metric: "issue_occurrences", window: "1h", issueScope: "source", sourceId: "" }),
+    ),
+  ).toEqual({ kind: "missing", message: "Choose an issue source to see the preview." });
+  expect(
+    issuePreviewScope(formWith({ metric: "issue_occurrences", window: "1h", issueId: " i-1 " })),
+  ).toEqual({ kind: "ready", scope: { issue_id: "i-1" }, window: "1h" });
+  expect(
+    issuePreviewScope(
+      formWith({
+        metric: "issue_occurrences",
+        window: "15m",
+        issueScope: "source",
+        sourceId: " s-1 ",
+      }),
+    ),
+  ).toEqual({ kind: "ready", scope: { source_id: "s-1" }, window: "15m" });
+});
+
+it("turns an issue occurrence answer into rows, zeros included and unparsable times dropped", () => {
+  expect(issuePreviewRows(undefined)).toEqual([]);
+  expect(
+    issuePreviewRows({
+      from: "2026-01-01T00:00:00Z",
+      to: "2026-01-01T03:00:00Z",
+      window: "1h",
+      points: [
+        { time: "2026-01-01T00:00:00Z", count: 2 },
+        { time: "2026-01-01T01:00:00Z", count: 0 },
+        { time: "2026-01-01T02:00:00Z", count: 5 },
+        { time: "not a time", count: 9 },
+      ],
+    }),
+  ).toEqual([
+    { time: Date.parse("2026-01-01T00:00:00Z"), all: 2 },
+    { time: Date.parse("2026-01-01T01:00:00Z"), all: 0 },
+    { time: Date.parse("2026-01-01T02:00:00Z"), all: 5 },
+  ]);
 });
 
 it("parses the prefilled new rule search", () => {

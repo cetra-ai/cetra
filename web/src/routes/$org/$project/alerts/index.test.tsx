@@ -6,6 +6,7 @@ import { FIRING_RULE_ID } from "@/test/fixtures";
 import { problemResponse } from "@/test/problem";
 import { renderApp } from "@/test/render";
 import eventsFixture from "../../../../../../fixtures/api/static/alert-events.json";
+import issuePreviewFixture from "../../../../../../fixtures/api/static/alert-issue-preview.json";
 import ruleFixture from "../../../../../../fixtures/api/static/alert-rule.json";
 import rulesFixture from "../../../../../../fixtures/api/static/alert-rules.json";
 import entitlementsFixture from "../../../../../../fixtures/api/static/org-entitlements.json";
@@ -18,6 +19,8 @@ const EVENTS = "/api/v1/projects/:project/alert-events";
 const RULE = "/api/v1/projects/:project/alert-rules/:id";
 const RULE_EVENTS = "/api/v1/projects/:project/alert-rules/:id/events";
 const WIDGET = "/api/v1/projects/:project/dashboards/query";
+const ISSUE_PREVIEW = "/api/v1/projects/:project/alert-rules/issue-preview";
+const ISSUE_ID = "01900000-0000-7000-8000-000000001c01";
 const CANNOT_MANAGE = "Only project members and above can manage alerts";
 
 afterEach(() => {
@@ -289,6 +292,121 @@ it("draws the trend with the threshold once the row is visible", async () => {
       }),
     ).toBeInTheDocument();
     expect(requests).toBeGreaterThan(0);
+  } finally {
+    globalThis.IntersectionObserver = original;
+  }
+});
+
+it("draws an issue occurrence rule's trend once the row is visible", async () => {
+  let requests = 0;
+  server.use(
+    http.get(RULES, () =>
+      HttpResponse.json({
+        data: [
+          {
+            ...ruleFixture,
+            id: "01900000-0000-7000-8000-000000000520",
+            name: "Issue errors",
+            condition: {
+              metric: "issue_occurrences",
+              window: "1h",
+              comparator: "gt",
+              threshold: 3,
+              issue_id: ISSUE_ID,
+            },
+          },
+        ],
+        next_cursor: null,
+      }),
+    ),
+    http.get(ISSUE_PREVIEW, () => {
+      requests += 1;
+      return HttpResponse.json(issuePreviewFixture);
+    }),
+  );
+  const callbacks: IntersectionObserverCallback[] = [];
+  const original = globalThis.IntersectionObserver;
+  globalThis.IntersectionObserver = class {
+    constructor(callback: IntersectionObserverCallback) {
+      callbacks.push(callback);
+    }
+    observe(): void {}
+    unobserve(): void {}
+    disconnect(): void {}
+    takeRecords(): IntersectionObserverEntry[] {
+      return [];
+    }
+  } as unknown as typeof IntersectionObserver;
+  try {
+    await renderApp(PAGE);
+    await screen.findByRole("table", { name: "Alert rules" });
+    expect(requests).toBe(0);
+
+    act(() => {
+      for (const callback of callbacks) {
+        callback([{ isIntersecting: true } as IntersectionObserverEntry], {} as never);
+      }
+    });
+
+    expect(
+      await screen.findByRole("img", { name: "Trend of Issue errors over the last 1h" }),
+    ).toBeInTheDocument();
+    expect(requests).toBeGreaterThan(0);
+  } finally {
+    globalThis.IntersectionObserver = original;
+  }
+});
+
+it("draws a dash for an issue occurrence rule whose preview fails", async () => {
+  server.use(
+    http.get(RULES, () =>
+      HttpResponse.json({
+        data: [
+          {
+            ...ruleFixture,
+            id: "01900000-0000-7000-8000-000000000520",
+            name: "Issue errors",
+            condition: {
+              metric: "issue_occurrences",
+              window: "1h",
+              comparator: "gt",
+              threshold: 3,
+              issue_id: ISSUE_ID,
+            },
+          },
+        ],
+        next_cursor: null,
+      }),
+    ),
+    http.get(ISSUE_PREVIEW, () => problemResponse(500, "internal")),
+  );
+  const callbacks: IntersectionObserverCallback[] = [];
+  const original = globalThis.IntersectionObserver;
+  globalThis.IntersectionObserver = class {
+    constructor(callback: IntersectionObserverCallback) {
+      callbacks.push(callback);
+    }
+    observe(): void {}
+    unobserve(): void {}
+    disconnect(): void {}
+    takeRecords(): IntersectionObserverEntry[] {
+      return [];
+    }
+  } as unknown as typeof IntersectionObserver;
+  try {
+    await renderApp(PAGE);
+    const table = await screen.findByRole("table", { name: "Alert rules" });
+
+    act(() => {
+      for (const callback of callbacks) {
+        callback([{ isIntersecting: true } as IntersectionObserverEntry], {} as never);
+      }
+    });
+
+    await waitFor(() =>
+      expect(within(table).getByRole("row", { name: /^Issue errors\b/ })).toHaveTextContent("—"),
+    );
+    expect(screen.queryByRole("img", { name: /^Trend of Issue errors/ })).toBeNull();
   } finally {
     globalThis.IntersectionObserver = original;
   }

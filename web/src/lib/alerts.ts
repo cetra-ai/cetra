@@ -2,7 +2,7 @@ import type { Schema } from "@/api/types";
 import { seriesPlot } from "@/lib/dashboards/plot";
 import type { WidgetQuery } from "@/lib/dashboards/types";
 import { serializeChip } from "@/lib/dsl/dsl";
-import type { ChartRow } from "@/lib/metrics";
+import { type ChartRow, epochMs } from "@/lib/metrics";
 
 const KIND_LABELS: Record<Schema<"ChannelKind">, string> = {
   slack: "Slack",
@@ -425,8 +425,8 @@ export function previewRows(
 
 /** The widget query that draws a rule's preview and trend (the trace error rate, cost, p95 latency
  *  or score average), with the divisor that turns its value into the condition's unit. Latency of
- *  llm spans and issue occurrences have no preview: `undefined`. Score measures draw the average of
- *  the named score. */
+ *  llm spans have no preview, and issue occurrences are drawn from `issuePreviewRows` instead:
+ *  both are `undefined` here. Score measures draw the average of the named score. */
 export function previewQuery(
   condition: Pick<RuleFormValues, "metric" | "target" | "scoreName">,
 ): { query: WidgetQuery; divisor: number } | undefined {
@@ -465,4 +465,44 @@ export function previewQuery(
     case "issue_occurrences":
       return undefined;
   }
+}
+
+/** The scope and window of an issue occurrence preview, or why there is none: the form has no
+ *  issue or source yet, or a window under 15 minutes. `undefined` for the other metrics. */
+export function issuePreviewScope(
+  form: Pick<RuleFormValues, "metric" | "issueScope" | "issueId" | "sourceId" | "window">,
+):
+  | { kind: "ready"; scope: { issue_id: string } | { source_id: string }; window: Window }
+  | { kind: "missing"; message: string }
+  | undefined {
+  if (form.metric !== "issue_occurrences") {
+    return undefined;
+  }
+  if (form.window === "1m" || form.window === "5m") {
+    return {
+      kind: "missing",
+      message: "Issue occurrences need a window of 15 minutes or more.",
+    };
+  }
+  if (form.issueScope === "issue") {
+    const issueId = form.issueId.trim();
+    return issueId === ""
+      ? { kind: "missing", message: "Choose an issue to see the preview." }
+      : { kind: "ready", scope: { issue_id: issueId }, window: form.window };
+  }
+  const sourceId = form.sourceId.trim();
+  return sourceId === ""
+    ? { kind: "missing", message: "Choose an issue source to see the preview." }
+    : { kind: "ready", scope: { source_id: sourceId }, window: form.window };
+}
+
+/** The chart rows of an issue occurrence preview: one per point, `all` the count. */
+export function issuePreviewRows(answer: Schema<"IssueAlertPreview"> | undefined): ChartRow[] {
+  if (answer === undefined) {
+    return [];
+  }
+  return answer.points.flatMap((point) => {
+    const time = epochMs(point.time);
+    return time === undefined ? [] : [{ time, all: point.count }];
+  });
 }

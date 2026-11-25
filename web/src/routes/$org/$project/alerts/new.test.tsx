@@ -6,6 +6,7 @@ import { server } from "@/mocks/node";
 import { FIRING_RULE_ID, SLACK_CHANNEL_ID } from "@/test/fixtures";
 import { problemResponse } from "@/test/problem";
 import { renderApp } from "@/test/render";
+import issuePreviewFixture from "../../../../../../fixtures/api/static/alert-issue-preview.json";
 import ruleFixture from "../../../../../../fixtures/api/static/alert-rule.json";
 import channelsFixture from "../../../../../../fixtures/api/static/channels.json";
 import issueFixture from "../../../../../../fixtures/api/static/issue.json";
@@ -24,6 +25,7 @@ const SOURCES = "/api/v1/projects/:project/issue-sources";
 const ISSUE_ID = "01900000-0000-7000-8000-000000001c01";
 const OTHER_ISSUE_ID = "01900000-0000-7000-8000-000000001c02";
 const SOURCE_ID = "01900000-0000-7000-8000-000000001c00";
+const ISSUE_PREVIEW = "/api/v1/projects/:project/alert-rules/issue-preview";
 const ISSUE_LABEL = "ValueError: could not parse the reply (Errors)";
 
 /** Chooses an option of a select by its label, through the trigger and the listbox. */
@@ -481,12 +483,74 @@ it("offers no window under 15 minutes for issue occurrences", async () => {
   expect(screen.queryByRole("option", { name: "1 minute" })).toBeNull();
 });
 
-it("says there is no preview for issue occurrences", async () => {
+it("asks for an issue before previewing issue occurrences", async () => {
   serveScopeLists();
   const { user } = await renderApp(PAGE);
   await choose(user, "Metric", "Issue occurrences");
 
-  expect(await screen.findByText("No preview for issue occurrences.")).toBeInTheDocument();
+  expect(await screen.findByText("Choose an issue to see the preview.")).toBeInTheDocument();
+});
+
+it("previews the occurrences of the chosen issue", async () => {
+  const requests: URL[] = [];
+  serveScopeLists();
+  server.use(
+    http.get(ISSUE_PREVIEW, ({ request }) => {
+      requests.push(new URL(request.url));
+      return HttpResponse.json(issuePreviewFixture);
+    }),
+  );
+
+  const { user } = await renderApp(PAGE);
+  await choose(user, "Metric", "Issue occurrences");
+  await choose(user, "Issue", ISSUE_LABEL);
+
+  expect(await screen.findByRole("figure", { name: /Preview of the metric/ })).toBeInTheDocument();
+  expect(requests.at(-1)?.searchParams.get("issue_id")).toBe(ISSUE_ID);
+  expect(requests.at(-1)?.searchParams.get("source_id")).toBeNull();
+  expect(requests.at(-1)?.searchParams.get("window")).toBe("1h");
+});
+
+it("previews the occurrences of the chosen source", async () => {
+  const requests: URL[] = [];
+  serveScopeLists();
+  server.use(
+    http.get(ISSUE_PREVIEW, ({ request }) => {
+      requests.push(new URL(request.url));
+      return HttpResponse.json(issuePreviewFixture);
+    }),
+  );
+
+  const { user } = await renderApp(PAGE);
+  await choose(user, "Metric", "Issue occurrences");
+  await choose(user, "Scope", "All issues of a source");
+  await choose(user, "Source", "Errors");
+
+  expect(await screen.findByRole("figure", { name: /Preview of the metric/ })).toBeInTheDocument();
+  expect(requests.at(-1)?.searchParams.get("source_id")).toBe(SOURCE_ID);
+  expect(requests.at(-1)?.searchParams.get("issue_id")).toBeNull();
+});
+
+it("says when the issue preview fails", async () => {
+  serveScopeLists();
+  server.use(http.get(ISSUE_PREVIEW, () => problemResponse(500, "internal")));
+
+  const { user } = await renderApp(PAGE);
+  await choose(user, "Metric", "Issue occurrences");
+  await choose(user, "Issue", ISSUE_LABEL);
+
+  expect(await screen.findByText("The preview could not be loaded.")).toBeInTheDocument();
+});
+
+it("says when the previewed issue no longer exists", async () => {
+  serveScopeLists();
+  server.use(http.get(ISSUE_PREVIEW, () => problemResponse(404, "not_found")));
+
+  const { user } = await renderApp(PAGE);
+  await choose(user, "Metric", "Issue occurrences");
+  await choose(user, "Issue", ISSUE_LABEL);
+
+  expect(await screen.findByText("The issue or source no longer exists.")).toBeInTheDocument();
 });
 
 it("hides the filter and the minimum samples for issue occurrences", async () => {

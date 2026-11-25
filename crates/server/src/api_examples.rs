@@ -22,7 +22,7 @@ use crate::api::prompts::{Prompt, PromptLabelEvent, PromptMetrics, PromptSetting
 use crate::api::schema::SchemaResponse;
 use crate::api::sessions::{SessionDetail, SessionSummary};
 use crate::api::sql::SqlQueryResult;
-use crate::api::traces::{SpanDetail, SpanSummary, TraceDetail, TraceSummary};
+use crate::api::traces::{SpanDetail, SpanSummary, TraceDetail, TraceSummary, TraceTotals};
 use crate::api::users::{EndUserDetail, EndUserSummary};
 use crate::test_support::{EXAMPLE_CONVERSATION, EXAMPLE_PROJECT, EXAMPLE_PROMPT, TestApp};
 
@@ -232,6 +232,15 @@ async fn generate() -> (BTreeMap<String, String>, Vec<Example>) {
 
     let traces: Page<TraceSummary> = fetch(&app, cookie, "/traces").await;
     out.add("list_traces", &[], &[], "responses/traces.json", &traces);
+
+    let totals: TraceTotals = fetch(&app, cookie, "/traces/totals").await;
+    out.add(
+        "get_trace_totals",
+        &[],
+        &[],
+        "responses/trace-totals.json",
+        &totals,
+    );
 
     let traces_eval: Page<TraceSummary> = fetch(&app, cookie, "/traces?include_eval=true").await;
     out.add(
@@ -977,6 +986,13 @@ async fn generate() -> (BTreeMap<String, String>, Vec<Example>) {
             BTreeMap::new(),
             BTreeMap::new(),
             "static/project-alert-events.json",
+            "application/json",
+        ),
+        example(
+            "get_alert_issue_preview",
+            BTreeMap::new(),
+            BTreeMap::new(),
+            "static/alert-issue-preview.json",
             "application/json",
         ),
         example_status("post_api_key", "static/api-key-created.json", 201),

@@ -66,8 +66,9 @@ pub use traces::{
     MAX_REFRESH_IDS, MAX_REFRESH_SPANS_PER_TRACE, MAX_TRACE_SPANS, MatchCountRequest,
     SPAN_LIST_COLUMNS, SPAN_REFRESH_COLUMNS, SpanListRequest, SpanRefreshRequest, SpanSort,
     TRACE_REFRESH_STRICT_COLUMNS, TraceDetailData, TraceListRequest, TraceRefreshRequest,
-    TraceSort, TraceSpansData, TraceSpansRequest, error_spans, match_count, span_detail, span_list,
-    span_refresh, trace_detail, trace_list, trace_list_plan, trace_refresh, trace_spans,
+    TraceSort, TraceSpansData, TraceSpansRequest, TraceTotals, TraceTotalsRequest, error_spans,
+    match_count, span_detail, span_list, span_refresh, trace_detail, trace_list, trace_list_plan,
+    trace_refresh, trace_spans, trace_totals,
 };
 pub use users::{
     ACTIVITY_BUCKETS, ERROR_TRACE_COUNT, MAX_USER_METADATA_KEYS, MAX_USER_SESSIONS, USER_COLUMNS,

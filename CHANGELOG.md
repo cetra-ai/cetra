@@ -31,6 +31,9 @@ with an `### Upgrade notes` section (https://cetra.sh/docs/self-hosting/upgrade/
 - LLM connections: **Test connection** checks the form's values before you save them, for a new connection too, and **Test embeddings** under Advanced checks an embedding model. The panel header shows when the saved values were last tested. `POST /api/v1/orgs/{org}/llm-connections/test` tests an unsaved connection, and `POST …/llm-connections/{id}/test` takes draft fields; a connection's `last_tested_at` and `last_test_ok` hold the last test of its saved values.
 - The connection form suggests common model ids for OpenAI, Anthropic and Gemini in the Default model field.
 - Media parts carry an optional `transcript`. OpenAI chat output audio keeps its transcript, a message with only audio previews its transcripts, and judges read `[audio: <transcript>]`.
+- The alert editor, the rule panel and the rule list chart an issue occurrence rule's occurrences per window with its threshold, through `GET /api/v1/projects/{project}/alert-rules/issue-preview`.
+- The playground compares versions of a prompt side by side: each column of a draft opened from a prompt can run one of its versions, with the version's template, answer, tokens, cost and latency; `?compare=` opens two versions.
+- The trace list shows the trace count, error count and cost of the checked rows, or of every trace the list matches, under its table; `GET /api/v1/projects/{project}/traces/totals` answers the same totals for a filter, search and time range.
 
 ### Changed
 

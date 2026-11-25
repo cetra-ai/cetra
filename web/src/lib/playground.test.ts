@@ -1,11 +1,12 @@
 import { HttpResponse, http } from "msw";
-import { afterEach, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { fieldErrors } from "@/api/problem";
 import { setUnauthorizedHandler } from "@/api/session";
 import type { Schema } from "@/api/types";
 import {
   blockedMessages,
   type Column,
+  columnDraft,
   type Draft,
   draftFromPromptVersion,
   draftFromSpan,
@@ -13,12 +14,15 @@ import {
   droppedToolDefinitions,
   emptyDraft,
   loadDraft,
+  pinColumn,
+  pinnedDraft,
   type RunEvent,
   type RunRequest,
   readSse,
   renamePlaceholder,
   runPlayground,
   saveDraft,
+  sharedInputs,
   toChatTemplate,
   toRunRequest,
 } from "@/lib/playground";
@@ -649,4 +653,164 @@ it("ignores unknown fields of a stored draft and refuses one that does not fit",
   localStorage.setItem(key, "not json");
   expect(loadDraft("acme/stored")).toBeUndefined();
   localStorage.removeItem(key);
+});
+
+describe("version compare", () => {
+  const VERSION = versionTwo as unknown as Schema<"PromptVersion">;
+  const OTHER = "01900000-0000-7000-8000-000000000012";
+  const SUPPORT_REPLY_V1: Draft["source"] = { prompt: { name: "support-reply", version: 1 } };
+
+  it("pinnedDraft takes the version's messages and settings and keeps the draft's inputs", () => {
+    const draft: Draft = {
+      ...draftWith([{ role: "user", parts: [{ type: "text", content: "{{ question }}" }] }]),
+      variables: { question: "q" },
+      placeholders: { history: "[]" },
+      renderVariables: false,
+      tools: '[{"name":"lookup","parameters":{}}]',
+      source: SUPPORT_REPLY_V1,
+    };
+    const pinned = pinnedDraft(draft, VERSION);
+    expect(pinned.entries).toHaveLength(3);
+    expect(pinned.entries[1]).toEqual({ type: "placeholder", name: "history" });
+    expect(pinned.tools).toBe("");
+    expect(pinned.variables).toEqual({ question: "q" });
+    expect(pinned.placeholders).toEqual({ history: "[]" });
+    expect(pinned.renderVariables).toBe(false);
+    expect(pinned.source).toEqual({ prompt: { name: "support-reply", version: 2 } });
+  });
+
+  it("columnDraft returns the draft for an unpinned column", () => {
+    const draft: Draft = { ...emptyDraft(CONNECTION), source: SUPPORT_REPLY_V1 };
+    expect(columnDraft(draft, column(), () => undefined)).toBe(draft);
+  });
+
+  it("columnDraft returns the draft when the source is not a prompt", () => {
+    const draft: Draft = {
+      ...emptyDraft(CONNECTION),
+      source: { span: { trace_id: TRACE, span_id: SPAN } },
+    };
+    expect(columnDraft(draft, column({ version: 2 }), () => VERSION)).toBe(draft);
+  });
+
+  it("columnDraft is undefined while the version is not loaded", () => {
+    const draft: Draft = { ...emptyDraft(CONNECTION), source: SUPPORT_REPLY_V1 };
+    expect(columnDraft(draft, column({ version: 2 }), () => undefined)).toBeUndefined();
+  });
+
+  it("columnDraft builds the pinned draft", () => {
+    const draft: Draft = { ...emptyDraft(CONNECTION), source: SUPPORT_REPLY_V1 };
+    const found = columnDraft(draft, column({ version: 2 }), (version) =>
+      version === 2 ? VERSION : undefined,
+    );
+    expect(found).toEqual(pinnedDraft(draft, VERSION));
+    const request = requestOf(pinnedDraft(draft, VERSION), column({ version: 2 }));
+    expect(request.messages).toHaveLength(3);
+    expect(request.source).toEqual({ prompt: { name: "support-reply", version: 2 } });
+  });
+
+  it("pinColumn applies the version's config", () => {
+    expect(
+      pinColumn(column({ connectionId: CONNECTION, model: "other" }), VERSION, [CONNECTION]),
+    ).toEqual({
+      id: "01900000-0000-7000-8000-000000000021",
+      connectionId: CONNECTION,
+      model: "gpt-4o",
+      temperature: "0.3",
+      maxTokens: "512",
+      version: 2,
+    });
+  });
+
+  it("pinColumn keeps the column's connection when the config names none or an unknown one", () => {
+    const own = column({ connectionId: CONNECTION });
+    expect(pinColumn(own, VERSION, [CONNECTION, OTHER]).connectionId).toBe(CONNECTION);
+    const unknown = {
+      ...VERSION,
+      config: { ...VERSION.config, connection_id: "01900000-0000-7000-8000-00000000dead" },
+    };
+    expect(pinColumn(own, unknown, [CONNECTION, OTHER]).connectionId).toBe(CONNECTION);
+  });
+
+  it("pinColumn takes the config's connection when it is known", () => {
+    const owned = { ...VERSION, config: { ...VERSION.config, connection_id: OTHER } };
+    expect(
+      pinColumn(column({ connectionId: CONNECTION }), owned, [CONNECTION, OTHER]).connectionId,
+    ).toBe(OTHER);
+  });
+
+  it("pinColumn clears the model and parameters the version does not set", () => {
+    const bare = { ...VERSION, config: {} };
+    expect(
+      pinColumn(column({ model: "gpt-4o-mini", temperature: "0.9", maxTokens: "100" }), bare, [
+        CONNECTION,
+      ]),
+    ).toEqual({ ...column(), version: 2, model: "", temperature: "", maxTokens: "" });
+  });
+
+  it("sharedInputs lists the draft's names then the pinned ones, once each", () => {
+    const draft = draftWith([
+      { role: "system", parts: [{ type: "text", content: "{{ a }} {{ question }}" }] },
+    ]);
+    const pinned = draftWith([
+      {
+        role: "system",
+        parts: [{ type: "text", content: "{{ product }} {{ language }} {{ question }}" }],
+      },
+      { type: "placeholder", name: "history" },
+    ]);
+    expect(sharedInputs(draft, [pinned])).toEqual({
+      variables: ["a", "question", "product", "language"],
+      placeholders: ["history"],
+    });
+  });
+
+  it("sharedInputs lists no variables of a draft that does not render them", () => {
+    const draft: Draft = {
+      ...draftWith([{ role: "user", parts: [{ type: "text", content: "{{ a }}" }] }]),
+      renderVariables: false,
+    };
+    expect(sharedInputs(draft, [])).toEqual({ variables: [], placeholders: [] });
+  });
+
+  it("loadDraft keeps a pinned column of a prompt-sourced draft", () => {
+    const draft: Draft = {
+      ...emptyDraft(CONNECTION),
+      columns: [column({ version: 2 })],
+      source: { prompt: { name: "support-reply", version: 2 } },
+    };
+    saveDraft("acme/pinned", draft);
+    const loaded = loadDraft("acme/pinned");
+    expect(loaded).toEqual(draft);
+    expect(loaded?.columns[0]?.version).toBe(2);
+    localStorage.removeItem(`${STORAGE_PREFIX}playground.acme/pinned`);
+  });
+
+  it("loadDraft drops the pin when the source is not a prompt", () => {
+    const draft: Draft = {
+      ...emptyDraft(CONNECTION),
+      columns: [column({ version: 2 })],
+      source: { span: { trace_id: TRACE, span_id: SPAN } },
+    };
+    saveDraft("acme/pin-span", draft);
+    const loaded = loadDraft("acme/pin-span");
+    expect(loaded?.columns).toEqual([column()]);
+    expect(loaded?.columns[0]).not.toHaveProperty("version");
+    localStorage.removeItem(`${STORAGE_PREFIX}playground.acme/pin-span`);
+  });
+
+  it("loadDraft rejects a column with a malformed version", () => {
+    const key = `${STORAGE_PREFIX}playground.acme/bad-version`;
+    for (const version of [0, 1.5, "2"]) {
+      localStorage.setItem(
+        key,
+        JSON.stringify({
+          ...emptyDraft(CONNECTION),
+          columns: [{ ...column(), version }],
+          source: { prompt: { name: "support-reply", version: 2 } },
+        }),
+      );
+      expect(loadDraft("acme/bad-version")).toBeUndefined();
+    }
+    localStorage.removeItem(key);
+  });
 });

@@ -4,7 +4,7 @@ import { Trash2, Waypoints } from "lucide-react";
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { problemOf } from "@/api/problem";
 import { projectRef } from "@/api/project-ref";
-import { spanDetailQuery, traceDetailQuery } from "@/api/queries";
+import { spanDetailQuery, traceDetailQuery, traceTotalsQuery } from "@/api/queries";
 import type { Schema } from "@/api/types";
 import { AddMatchingDialog } from "@/components/annotation-queues/add-matching-dialog";
 import {
@@ -52,6 +52,7 @@ import { SavedViewsMenu } from "@/components/saved-views/saved-views-menu";
 import { useProject } from "@/components/shell/project-context";
 import { Filmstrip } from "@/components/trace/filmstrip";
 import { SplitPane } from "@/components/trace/split-pane";
+import { selectionTotals, TraceTotalsLine, totalsOf } from "@/components/trace/trace-totals";
 import { TraceView } from "@/components/trace/trace-view";
 import { TracesHistogram } from "@/components/trace/traces-histogram";
 import {
@@ -239,6 +240,10 @@ function TracesPage() {
     void list.fetchNextPage();
   }, [list.fetchNextPage]);
   const rows = useMemo(() => list.data?.pages.flatMap((page) => page.data) ?? [], [list.data]);
+  const selectedTotals = useMemo(
+    () => (checkedIds.size > 0 ? selectionTotals(rows, checkedIds) : undefined),
+    [rows, checkedIds],
+  );
   const specs = useMemo(() => traceColumnSpecs(scoreNames(rows)), [rows]);
   const lockedIds = useMemo(() => lockedColumnIds(specs), [specs]);
   const defaults = useMemo(() => visibleColumnIds(specs, undefined), [specs]);
@@ -394,6 +399,18 @@ function TracesPage() {
     (projectProbe.isPending || (projectProbe.isFetching && probeRows === 0));
   const onboarding =
     listEmpty && !probing && onboardingShown(needsOnboarding, probeRows, projectProbe.isError);
+  const totals = useQuery({
+    ...traceTotalsQuery(org, project, {
+      from: resolved.from,
+      to: resolved.to,
+      filter: search.filter,
+      search: search.search,
+      includeEval: search.eval === 1,
+      includeExperiments: search.exp === 1,
+    }),
+    ...LIST_CACHE,
+    enabled: !hold && !filterError && !probing && !onboarding && rows.length > 0,
+  });
   const reason = traceLiveReason(search);
   const liveOn = search.live === 1 && reason === undefined && !hold;
   const live = useLiveTraces({
@@ -860,6 +877,17 @@ function TracesPage() {
                             )
                           }
                         />
+                        {rows.length > 0 ? (
+                          <TraceTotalsLine
+                            selected={selectedTotals}
+                            list={
+                              totals.data && !list.isPlaceholderData
+                                ? totalsOf(totals.data)
+                                : undefined
+                            }
+                            listStatus={totals.status}
+                          />
+                        ) : null}
                       </>
                     ) : null}
                   </div>

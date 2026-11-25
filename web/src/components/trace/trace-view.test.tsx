@@ -360,6 +360,10 @@ describe("trace switch and span prefetch", () => {
       release = resolve;
     });
     server.use(
+      // Listed first: `:trace_id` below would also match the list's totals request.
+      http.get("/api/v1/projects/:project/traces/totals", () =>
+        HttpResponse.json({ trace_count: 5, error_trace_count: 1, cost_total: 0.00955 }),
+      ),
       http.get("/api/v1/projects/:project/traces/:trace_id", ({ params }) => {
         if (params.trace_id === TRACE_3) {
           return gate.then(() => HttpResponse.json(thirdTrace));
