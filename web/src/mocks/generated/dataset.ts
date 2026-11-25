@@ -685,6 +685,8 @@ export type Mark = {
   /** Added to the trace's tags (the result stays sorted and unique). */
   tags?: readonly string[];
   release?: string;
+  /** The trace's name, and its root span's: the trace summary and the root of its detail show it. */
+  name?: string;
   /** Replace the trace's scores with the same name, and add the others. */
   scores?: readonly { name: string; source: Schema<"ScoreSource">; value: Schema<"ScoreValue"> }[];
   /** The trace's turn (its previews and its generated LLM payloads) instead of the drawn one. */
@@ -1070,6 +1072,7 @@ function markedSummary(
     end_time: rfc3339(startMs + durationMs),
     duration_ns: durationMs * 1_000_000,
     status: errored ? "error" : "ok",
+    name: mark.name ?? trace.name,
     release: mark.release ?? trace.release,
     tags: mark.tags ? [...new Set([...trace.tags, ...mark.tags])].sort() : trace.tags,
     span_count: trace.span_count + marked.length,

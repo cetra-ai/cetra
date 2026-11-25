@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { createDataset, type Dataset, visibleTraces } from "./dataset";
 import {
   OLD_PRICING_TAG,
-  SSO_TURN,
+  SSO_QUESTIONS,
   SUPPORT_STORY_PROFILE,
   type SupportFacts,
   supportFacts,
@@ -98,8 +98,37 @@ describe("support story filters", () => {
     expect(found).toHaveLength(41);
   });
 
-  it("gives the SSO traces the SSO question as their preview", () => {
-    const sso = dataset.traces.filter((trace) => trace.input_preview === SSO_TURN.question);
+  it("gives the SSO traces one of the five SSO questions as their preview", () => {
+    const sso = dataset.traces.filter((trace) =>
+      SSO_QUESTIONS.some((question) => trace.input_preview === question),
+    );
     expect(sso).toHaveLength(facts.ssoThisWeek + facts.ssoPreviousWeek);
+    expect(sso).toHaveLength(244);
+  });
+
+  it("asks the five SSO questions in turn, so each one is asked about as often as the others", () => {
+    expect(SSO_QUESTIONS).toEqual([
+      "Do you have SSO on the Starter plan?",
+      "Is SAML SSO included on Starter?",
+      "Can we log in with Okta on the Starter plan?",
+      "Do you support single sign-on below Team?",
+      "We need Google Workspace SSO, which plan?",
+    ]);
+    const counts = SSO_QUESTIONS.map(
+      (question) => dataset.traces.filter((trace) => trace.input_preview === question).length,
+    );
+    expect(counts.reduce((sum, count) => sum + count, 0)).toBe(244);
+    for (const count of counts) {
+      expect(count).toBeGreaterThanOrEqual(48);
+      expect(count).toBeLessThanOrEqual(49);
+    }
+  });
+
+  it("keeps the SSO questions and their counts at another clock", () => {
+    const other = build(OTHER_NOW);
+    const sso = other.traces.filter((trace) =>
+      SSO_QUESTIONS.some((question) => trace.input_preview === question),
+    );
+    expect(sso).toHaveLength(244);
   });
 });

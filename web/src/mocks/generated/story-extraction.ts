@@ -18,6 +18,8 @@ const HOUR_MS = 3_600_000;
 const DAY_MS = 86_400_000;
 const BATCH_TAG = "batch-1119";
 const BATCH_SIZE = 200;
+/** The name of the batch's runs: the batch is a run of the invoice pipeline (M17). */
+const BATCH_NAME = "process-invoice";
 /** Batch ranks start at 0: rank r starts at `B + r * BATCH_STEP_MS`. */
 const BATCH_STEP_MS = 18_000;
 /** The batch's newest three ranks fail twice, so the newest-first list shows them first (M19). */
@@ -221,12 +223,17 @@ export function extractionMarks(
   batch.forEach((index, rank) => {
     if (BATCH_FAILURE_RANKS.has(rank)) {
       add(index, {
+        name: BATCH_NAME,
         startMs: batchStart + rank * BATCH_STEP_MS,
         tags: [BATCH_TAG, "re-extracted"],
         error: BATCH_ERROR,
       });
     } else {
-      add(index, { startMs: batchStart + rank * BATCH_STEP_MS, tags: [BATCH_TAG] });
+      add(index, {
+        name: BATCH_NAME,
+        startMs: batchStart + rank * BATCH_STEP_MS,
+        tags: [BATCH_TAG],
+      });
     }
   });
 

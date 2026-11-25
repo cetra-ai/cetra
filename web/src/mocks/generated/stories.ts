@@ -2,7 +2,7 @@ import { type HttpHandler, HttpResponse, http } from "msw";
 import type { Schema } from "@/api/types";
 import { type Dataset, percentile, rfc3339, visibleTraces } from "@/mocks/generated/dataset";
 import { STEP_HOURS } from "@/mocks/generated/story-coding";
-import { SSO_TURN, SUPPORT_SESSION } from "@/mocks/generated/story-support";
+import { SSO_QUESTIONS, SUPPORT_SESSION } from "@/mocks/generated/story-support";
 import alertRulesFixture from "../../../../fixtures/api/static/alert-rules.json";
 import queuesFixture from "../../../../fixtures/api/static/annotation-queues.json";
 import issuesFixture from "../../../../fixtures/api/static/issues.json";
@@ -54,6 +54,23 @@ function firstMatch(matches: (trace: Trace) => boolean): (dataset: Dataset) => n
     );
 }
 
+/** The index of the newest visible trace of a dataset that matches, or -1 when none does (ties as `newestFirst`). */
+function newestMatch(matches: (trace: Trace) => boolean): (dataset: Dataset) => number {
+  return (dataset) => {
+    let best: number | undefined;
+    dataset.traces.forEach((trace, index) => {
+      if (!matches(trace) || visibleTraces([trace], false, false).length !== 1) {
+        return;
+      }
+      const current = best === undefined ? undefined : dataset.traces[best];
+      if (current === undefined || newestFirst(trace, current) < 0) {
+        best = index;
+      }
+    });
+    return best ?? -1;
+  };
+}
+
 /** The span of the trace at `index` that is an error and has the name, when the trace has one. */
 function errorSpan(name: string): (dataset: Dataset, index: number) => string | undefined {
   return (dataset, index) => {
@@ -90,15 +107,21 @@ type StoryIssue = {
   /**
    * The reasons the issue's examples show, one per example by position: the hero is the first
    * example, then the generated traces, newest first. The list cycles, and an issue has at most
-   * five examples, so its five reasons are all different.
+   * five examples, so its five reasons are all different. `"input_preview"`: each example's reason
+   * is its own trace's question, so the examples show the questions the traces were asked.
    */
-  reasons: readonly string[];
+  reasons: readonly string[] | "input_preview";
 };
 
-const isSsoQuestion = (trace: Trace) => trace.input_preview === SSO_TURN.question;
+const isSsoQuestion = (trace: Trace) =>
+  SSO_QUESTIONS.some((question) => trace.input_preview === question);
 
-/** The reason of the example at `position`, from the issue's list, which cycles. */
-function reasonAt(reasons: readonly string[], position: number): string | undefined {
+/** The reason of the example of `trace` at `position`: the issue's list entry, or the trace's question. */
+function reasonOf(issue: StoryIssue, trace: Trace, position: number): string | undefined {
+  if (issue.reasons === "input_preview") {
+    return trace.input_preview;
+  }
+  const { reasons } = issue;
   return reasons.length === 0 ? undefined : reasons[position % reasons.length];
 }
 
@@ -115,15 +138,9 @@ export const STORY_ISSUES: readonly StoryIssue[] = [
     kind: "topic",
     title: "Customers asking for SSO on the Starter plan",
     description: "Customers ask whether SSO comes with the Starter plan.",
-    hero: { index: firstMatch(isSsoQuestion) },
+    hero: { index: newestMatch(isSsoQuestion) },
     matches: isSsoQuestion,
-    reasons: [
-      "Is SAML SSO included on Starter?",
-      "Can we log in with Okta on the Starter plan?",
-      "Do you support single sign-on below Team?",
-      "We need Google Workspace SSO, which plan?",
-      "Does Starter include SSO for 10 seats?",
-    ],
+    reasons: "input_preview",
   },
   {
     id: "01900000-0000-7000-8000-000000570102",
@@ -678,7 +695,7 @@ function occurrencesOf(
   const examples: Schema<"IssueExample">[] = [];
   if (hero) {
     const spanId = issue.hero.spanId?.(dataset, issue.hero.index(dataset));
-    const reason = reasonAt(issue.reasons, examples.length);
+    const reason = reasonOf(issue, hero, examples.length);
     examples.push({
       trace_id: hero.trace_id,
       created_at: hero.start_time,
@@ -688,7 +705,7 @@ function occurrencesOf(
     });
   }
   for (const trace of generated.slice(0, GENERATED_EXAMPLES)) {
-    const reason = reasonAt(issue.reasons, examples.length);
+    const reason = reasonOf(issue, trace, examples.length);
     examples.push({
       trace_id: trace.trace_id,
       created_at: trace.start_time,

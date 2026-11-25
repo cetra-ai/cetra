@@ -150,3 +150,22 @@ it("puts the batch's three failures at its newest three runs, so the newest-firs
     .slice(0, 3);
   expect(newest.map((trace) => trace.error_count)).toEqual([2, 2, 2]);
 });
+
+it("names all 200 batch runs process-invoice, in the summary and at the root of their detail", () => {
+  const dataset = createDataset({
+    seed: 1,
+    now: NOW,
+    traces: 2_000,
+    profile: EXTRACTION_STORY_PROFILE,
+  });
+  const batch = visibleTraces(dataset.traces, false, false).filter((trace) =>
+    trace.tags.includes("batch-1119"),
+  );
+  expect(batch).toHaveLength(200);
+  for (const trace of batch) {
+    expect(trace.name).toBe("process-invoice");
+    const root = dataset.traceDetail(trace.trace_id)?.spans[0]?.span;
+    expect(root?.name).toBe("process-invoice");
+  }
+  expect(dataset.traces.filter((trace) => trace.name === "process-invoice")).toHaveLength(200);
+});

@@ -1353,3 +1353,31 @@ it("isEligibleTrace excludes showcases, the big first trace and the traces the l
     ),
   ).toBe(false);
 });
+
+it("a mark's name renames the trace and the root span of its detail, and nothing else", () => {
+  const plain = createDataset({ seed: 1, now: NOW, traces: 20, profile: PLAIN });
+  const marked = createDataset({
+    seed: 1,
+    now: NOW,
+    traces: 20,
+    profile: {
+      ...PLAIN,
+      marks: () => new Map<number, Mark>([[11, { name: "process-invoice" }]]),
+    },
+  });
+  const before = plain.traces[11];
+  const after = marked.traces[11];
+  if (!before || !after) {
+    throw new Error("a 20-trace dataset has trace 11");
+  }
+  expect(after.name).toBe("process-invoice");
+  expect({ ...after, name: before.name }).toEqual(before);
+  const root = marked.traceDetail(after.trace_id)?.spans[0];
+  expect(root?.span.name).toBe("process-invoice");
+  expect(marked.spanDetail(after.trace_id, root?.span.span_id ?? "")?.name).toBe("process-invoice");
+  const other = marked.traces.filter((_trace, index) => index !== 11);
+  expect(other).toEqual(plain.traces.filter((_trace, index) => index !== 11));
+  expect(marked.traceDetail(marked.traces[4]?.trace_id ?? "")?.spans[0]?.span.name).toBe(
+    plain.traceDetail(plain.traces[4]?.trace_id ?? "")?.spans[0]?.span.name,
+  );
+});

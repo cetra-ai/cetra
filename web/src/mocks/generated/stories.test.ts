@@ -23,7 +23,11 @@ import {
 } from "@/mocks/generated/stories";
 import { CODING_STORY_PROFILE } from "@/mocks/generated/story-coding";
 import { EXTRACTION_STORY_PROFILE } from "@/mocks/generated/story-extraction";
-import { SUPPORT_STORY_PROFILE, supportFacts } from "@/mocks/generated/story-support";
+import {
+  SSO_QUESTIONS,
+  SUPPORT_STORY_PROFILE,
+  supportFacts,
+} from "@/mocks/generated/story-support";
 import { VOICE_STORY_PROFILE } from "@/mocks/generated/story-voice";
 import { server } from "@/mocks/node";
 import { type StoryId, storyProject } from "@/mocks/projects";
@@ -49,6 +53,14 @@ const WINDOW_MS: Record<string, number> = {
 const OCCURRENCE_WINDOW_MS = 14 * DAY_MS;
 /** Example traces after the hero trace. */
 const GENERATED_EXAMPLES = 4;
+type Issue = (typeof STORY_ISSUES)[number];
+/** The reason an example of `trace` at `position` shows: the issue's list entry, or the trace's own question. */
+function reasonFor(issue: Issue, trace: Schema<"TraceSummary"> | undefined, position: number) {
+  if (issue.reasons === "input_preview") {
+    return trace?.input_preview;
+  }
+  return issue.reasons[position % issue.reasons.length];
+}
 const CODING_ISSUE = "01900000-0000-7000-8000-000000570102";
 const VOICE_RULE = "01900000-0000-7000-8000-000000570203";
 const SUPPORT_RULE = "01900000-0000-7000-8000-000000570201";
@@ -172,20 +184,26 @@ function newestFirst(left: Trace, right: Trace): number {
   );
 }
 
-it("makes the first matching trace the first example of every story issue", () => {
+it("makes the first matching trace the first example of every story issue, the newest one for the support issue", () => {
   for (const issue of STORY_ISSUES) {
     const dataset = stories[issue.story];
     const index = issue.hero.index(dataset);
     const hero = dataset.traces[index];
-    const earlier = dataset.traces
-      .slice(0, index)
-      .filter((trace) => visibleTraces([trace], false, false).length === 1 && issue.matches(trace));
+    // The support issue's hero is its newest matching trace; the others' is the first one by index.
+    const earlier = dataset.traces.filter(
+      (trace, position) =>
+        visibleTraces([trace], false, false).length === 1 &&
+        issue.matches(trace) &&
+        (issue.story === "support"
+          ? hero !== undefined && newestFirst(trace, hero) < 0
+          : position < index),
+    );
     expect(hero !== undefined && issue.matches(hero)).toBe(true);
     expect(earlier).toEqual([]);
 
     const { examples } = storyOccurrences(dataset, issue);
     expect(examples[0]?.trace_id).toBe(hero?.trace_id);
-    expect(examples[0]?.reason).toBe(issue.reasons[0]);
+    expect(examples[0]?.reason).toBe(reasonFor(issue, hero, 0));
     const spanId = issue.hero.spanId?.(dataset, index);
     expect(examples[0]?.span_id).toBe(spanId);
     if (spanId !== undefined) {
@@ -270,7 +288,7 @@ it("gives every story issue at most five examples, the generated ones newest fir
 
     // Every example says why it is there, and the reasons follow the list by position.
     examples.forEach((example, position) => {
-      expect(example.reason).toBe(issue.reasons[position % issue.reasons.length]);
+      expect(example.reason).toBe(reasonFor(issue, byId.get(example.trace_id), position));
       expect(byId.has(example.trace_id)).toBe(true);
     });
   }
@@ -282,20 +300,23 @@ it("gives every example of a story issue its own reason, none repeated", () => {
     const reasons = examples.map((example) => example.reason ?? "");
     expect(reasons.every((reason) => reason.length > 0)).toBe(true);
     expect(new Set(reasons).size).toBe(examples.length);
-    expect(examples.length).toBe(Math.min(1 + GENERATED_EXAMPLES, issue.reasons.length));
+    const distinct =
+      issue.reasons === "input_preview" ? SSO_QUESTIONS.length : issue.reasons.length;
+    expect(examples.length).toBe(Math.min(1 + GENERATED_EXAMPLES, distinct));
   }
 });
 
-it("writes the support SSO examples as five different customer phrasings", () => {
+it("shows the support SSO examples' own questions, each one different", () => {
   const issue = oneOf(STORY_ISSUES, "support");
-  const { examples } = storyOccurrences(stories.support, issue);
-  expect(examples.map((example) => example.reason)).toEqual([
-    "Is SAML SSO included on Starter?",
-    "Can we log in with Okta on the Starter plan?",
-    "Do you support single sign-on below Team?",
-    "We need Google Workspace SSO, which plan?",
-    "Does Starter include SSO for 10 seats?",
-  ]);
+  const dataset = stories.support;
+  const byId = new Map(dataset.traces.map((trace) => [trace.trace_id, trace]));
+  const { examples } = storyOccurrences(dataset, issue);
+  const reasons = examples.map((example) => example.reason);
+  expect(reasons).toEqual(examples.map((example) => byId.get(example.trace_id)?.input_preview));
+  for (const reason of reasons) {
+    expect(SSO_QUESTIONS).toContain(reason);
+  }
+  expect(new Set(reasons).size).toBe(examples.length);
 });
 
 it("writes the coding, voice and extraction examples with their own numbers", () => {

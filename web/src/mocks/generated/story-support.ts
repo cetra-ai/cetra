@@ -37,9 +37,17 @@ export const OLD_PRICING_TAG = "old-pricing";
 /** The session of the hand-written conversation (P2 mark 5). */
 export const SUPPORT_SESSION = "sess-0142";
 
-/** The question the SSO traces answer (P2 mark 3). */
-export const SSO_TURN: Turn = {
-  question: "Do you have SSO on the Starter plan?",
+/** The questions the SSO traces ask (P2 mark 3), in the order the marks cycle through them. */
+export const SSO_QUESTIONS: readonly string[] = [
+  "Do you have SSO on the Starter plan?",
+  "Is SAML SSO included on Starter?",
+  "Can we log in with Okta on the Starter plan?",
+  "Do you support single sign-on below Team?",
+  "We need Google Workspace SSO, which plan?",
+];
+
+/** The turn every SSO question shares: the answer, and its follow-ups. */
+const SSO_BASE: Omit<Turn, "question"> = {
   heading: "SSO on the Starter plan",
   summary: "SSO comes with the Team plan. Starter has email and password, and Google sign-in.",
   steps: ["Upgrade to Team to turn on SAML or OIDC SSO", "Google sign-in works on every plan"],
@@ -61,6 +69,12 @@ export const SSO_TURN: Turn = {
     },
   ],
 };
+
+/** The SSO turns, one per question in `SSO_QUESTIONS` order: the same answer and follow-ups for each. */
+export const SSO_TURNS: readonly Turn[] = SSO_QUESTIONS.map((question) => ({
+  ...SSO_BASE,
+  question,
+}));
 
 /** The retriever span a downvote that quotes the old pricing has (P2 mark 2). */
 const RETRIEVE_OLD_PRICING: MarkedSpan = {
@@ -339,7 +353,8 @@ function supportMarks(
     addMark(marks, index, { tags: [OLD_PRICING_TAG], spans: [RETRIEVE_OLD_PRICING] });
   }
 
-  // 3. The SSO topic: the plain traces (no session, not a downvote) of the last two weeks.
+  // 3. The SSO topic: the plain traces (no session, not a downvote) of the last two weeks. Their questions cycle
+  //    through `SSO_TURNS` by rank, newest first, so the newest five traces ask five different questions.
   const plain = (index: number): boolean => !hasSession(index) && !downvotes.has(index);
   const thisWeek = indices
     .filter((index) => plain(index) && start(index) >= now - WEEK_MS && start(index) < now)
@@ -349,9 +364,15 @@ function supportMarks(
       (index) => plain(index) && start(index) >= now - 2 * WEEK_MS && start(index) < now - WEEK_MS,
     )
     .slice(0, SSO_PREVIOUS_WEEK);
-  for (const index of [...thisWeek, ...previousWeek]) {
-    addMark(marks, index, { turn: SSO_TURN });
-  }
+  const ssoByNewest = [...thisWeek, ...previousWeek].sort(
+    (left, right) => start(right) - start(left) || left - right,
+  );
+  ssoByNewest.forEach((index, rank) => {
+    const turn = SSO_TURNS[rank % SSO_TURNS.length] ?? SSO_TURNS[0];
+    if (turn) {
+      addMark(marks, index, { turn });
+    }
+  });
 
   // 4. The correctness dip: every correctness score moves down from `now - 5 h`.
   for (const index of indices) {
@@ -449,7 +470,9 @@ export function supportFacts(dataset: Dataset): SupportFacts {
   const sso = (from: number, to: number): number =>
     eligible.filter(
       (trace) =>
-        trace.input_preview === SSO_TURN.question && start(trace) >= from && start(trace) < to,
+        SSO_QUESTIONS.some((question) => trace.input_preview === question) &&
+        start(trace) >= from &&
+        start(trace) < to,
     ).length;
   const correctness = (from: number, to: number): number[] =>
     eligible.flatMap((trace) => {
