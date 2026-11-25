@@ -38,6 +38,7 @@ with an `### Upgrade notes` section (https://cetra.sh/docs/self-hosting/upgrade/
 ### Changed
 
 - Tool calls in the Chat tab and the trace Transcript are one line each, `name(arguments) → result · duration`, with the tool's response folded into its call and a failed call's error shown on the line; select a line to open the arguments and result. The Transcript has a **Full width** toggle that hides the panel beside it.
+- Alerts show times to the minute in the charts' formats (`11-19 11:51`), the rule preview's time axis drops the seconds and the date within a day, and its "Threshold" label sits at the left end of the line, on the side away from the data of a rule that is not firing. An issue whose occurrences have no user shows "—" for the busiest day's users instead of 0.
 - The install command is `curl -fsSL https://cetra.sh/install.sh | sh`: `cetra.sh/install.sh` redirects to the release's install script. The GitHub release URL keeps working.
 - Chart bars have slightly rounded tops; in a stack only the top segment is rounded.
 - Span kind icons use the Tabler icon set (a robot for agents, a wrench for tools, …), slightly larger.
@@ -59,6 +60,7 @@ with an `### Upgrade notes` section (https://cetra.sh/docs/self-hosting/upgrade/
 - `@cetra-ai/sdk`'s Anthropic helper needs `@arizeai/openinference-instrumentation-anthropic` 1.0.1 or later, which keeps the Anthropic SDK's own span out of a traced call, so its tokens count once.
 - The session page shows each turn's tool calls and, on demand, its model and tool calls in order with a preview of their input; turns can be searched, filtered (failed, scored, uses tools) and shown one per line; an overview strip, `j`/`k` and the errors chip move between turns.
 - The trace view plays audio in a themed player with a waveform and shows its transcript under it.
+- In a wide window, the evaluator's Configuration tab shows the **Test** panel beside the form instead of under it.
 
 ### Fixed
 

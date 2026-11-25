@@ -12,9 +12,11 @@ import { expect, it, vi } from "vitest";
 import { projectRef } from "@/api/project-ref";
 import { ProjectProvider } from "@/components/shell/project-context";
 import { ThemeProvider } from "@/components/theme-provider";
+import { TIME_ZONE_STORAGE_KEY } from "@/lib/settings";
 import { server } from "@/mocks/node";
 import { FIRING_RULE_ID } from "@/test/fixtures";
 import { problemResponse } from "@/test/problem";
+import eventsFixture from "../../../../fixtures/api/static/alert-events.json";
 import issuePreviewFixture from "../../../../fixtures/api/static/alert-issue-preview.json";
 import ruleFixture from "../../../../fixtures/api/static/alert-rule.json";
 import issueFixture from "../../../../fixtures/api/static/issue.json";
@@ -143,6 +145,72 @@ it("shows the metric against its threshold above the history", async () => {
       name: "Preview of the metric over the last 24 hours",
     }),
   ).toBeInTheDocument();
+});
+
+it("shows the rule's times to the minute, as the charts do", async () => {
+  localStorage.setItem(TIME_ZONE_STORAGE_KEY, "utc");
+  server.use(
+    http.post(WIDGET, () =>
+      HttpResponse.json({
+        shape: "series",
+        bucket_ns: 300_000_000_000,
+        series: [
+          {
+            measure: 0,
+            other: false,
+            points: [
+              { time: "2026-01-01T00:00:00Z", value: 0.02, rows: 1 },
+              { time: "2026-01-01T00:05:00Z", value: 0.08, rows: 1 },
+            ],
+          },
+        ],
+      }),
+    ),
+  );
+
+  await renderPanel();
+
+  const panel = await screen.findByRole("region", { name: "Alert rule" });
+  // Last evaluated and Last fired.
+  expect(await within(panel).findByText("01-01 10:06")).toBeInTheDocument();
+  const table = await within(panel).findByRole("table", { name: "Alert events" });
+  // The fired event's time (as Last fired) and its five-minute window, without the date.
+  expect(within(panel).getAllByText("01-01 10:05")).toHaveLength(2);
+  const firstRow = within(table).getAllByRole("row")[1] as HTMLElement;
+  expect(firstRow).toHaveTextContent("10:00 – 10:05");
+  expect(panel).not.toHaveTextContent(/\d{2}:\d{2}:\d{2}\.\d{3}/);
+
+  // The preview's X-axis uses the same formats (axisStyle and formatTick, tested in
+  // plot-helpers): Recharts draws no tick text in jsdom.
+  const figure = await within(panel).findByRole("figure", {
+    name: "Preview of the metric over the last 24 hours",
+  });
+  expect(figure).toHaveTextContent("Threshold");
+});
+
+it("dates an event window whose ends fall on different days", async () => {
+  localStorage.setItem(TIME_ZONE_STORAGE_KEY, "utc");
+  server.use(
+    http.get("/api/v1/projects/:project/alert-rules/:id/events", () =>
+      HttpResponse.json({
+        ...eventsFixture,
+        data: [
+          {
+            ...eventsFixture.data[0],
+            created_at: "2026-01-02T00:05:00.000000000Z",
+            window_from: "2026-01-01T23:55:00.000000000Z",
+            window_to: "2026-01-02T00:05:00.000000000Z",
+          },
+        ],
+      }),
+    ),
+  );
+
+  await renderPanel();
+
+  const table = await screen.findByRole("table", { name: "Alert events" });
+  const row = within(table).getAllByRole("row")[1] as HTMLElement;
+  expect(row).toHaveTextContent("01-01 23:55 – 01-02 00:05");
 });
 
 it("closes through the close button", async () => {
