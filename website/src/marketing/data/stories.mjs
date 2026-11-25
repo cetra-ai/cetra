@@ -83,8 +83,8 @@ export const PICTURES = [
         caption: "Hear the caller and the agent, and read what was said, in one voice turn.",
       },
       extraction: {
-        alt: "The trace list filtered to traces tagged billing: start time, name, duration and cost, with extract-invoice among the rows.",
-        caption: "Every billing trace in one list, with its duration and cost.",
+        alt: "The trace list filtered to the batch tagged batch-1119: 200 invoice traces, with the three failed ones at the top marked by a red edge, and the totals line reading 200 traces, 3 errors and $0.48.",
+        caption: "A 200-invoice batch, with its three failed invoices at the top.",
       },
     },
   },
@@ -172,8 +172,8 @@ export const PICTURES = [
     label: "Playground",
     stories: {
       support: {
-        alt: "The playground with support-reply version 2: its messages, the variables filled in for a question about exporting traces to CSV, and the model's answer with its tokens, cost and latency.",
-        caption: "Try a prompt change on a real question before you ship it.",
+        alt: "The playground with support-reply versions 2 and 3 side by side on a question about a weekly schedule: version 2 says you can export any time, and version 3 says cetra can't schedule exports yet and offers the export by hand.",
+        caption: "Run two prompt versions on the same question, and see which one answers right.",
       },
       coding: {
         alt: "The playground with write-patch version 4: its two messages, the variables for a rename across 23 files, and the model's reply, three steps for the change.",
@@ -208,8 +208,8 @@ export const PICTURES = [
         caption: "Know when one in twenty replies takes longer than 1.5 s.",
       },
       extraction: {
-        alt: "The alerts page with the rule for a schema-check pass rate under 97% on billing traces selected, with its condition and a preview chart.",
-        caption: "Know when the schema check pass rate slips.",
+        alt: "The alerts page with the rule Scanned PDFs over 10 an hour selected: firing for 8 minutes, last value 14, condition issue occurrences over 10 in 1 hour, Team Slack, and a 24-hour preview chart that rises above its threshold in the last hour.",
+        caption: "Know when scanned invoices come in faster than 10 an hour.",
       },
     },
   },

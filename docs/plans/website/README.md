@@ -22,7 +22,7 @@ The design is `docs/website/00-design.md`. It has nineteen milestones, M1–M19,
 | M16 A mock project per story | done (P1–P6) | [16-m16-story-projects.md](16-m16-story-projects.md) |
 | M17 Story data | planned | [17-m17-story-data.md](17-m17-story-data.md) |
 | M18 Pictures that need no UI change | done | [18-m18-story-pictures.md](18-m18-story-pictures.md) |
-| M19 Pictures that wait for the UI | planned | [19-m19-ui-pictures.md](19-m19-ui-pictures.md) |
+| M19 Pictures that wait for the UI | done | [19-m19-ui-pictures.md](19-m19-ui-pictures.md) |
 
 ## Branches
 

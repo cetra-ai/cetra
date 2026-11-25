@@ -82,7 +82,7 @@
   {
     "name": "prompt",
     "path": "/acme/support-bot/prompts/support-reply",
-    "waitFor": "Friendlier tone",
+    "waitFor": "Say plainly what cetra doesn't do",
     "now": "2026-01-01T11:00:00Z"
   },
   {
@@ -274,7 +274,7 @@
   },
   {
     "name": "marketing-playground",
-    "path": "/acme/support-bot/playground?prompt=support-reply&version=2",
+    "path": "/acme/support-bot/playground?prompt=support-reply&version=2&compare=3",
     "waitFor": "Run all",
     "actions": [
       {
@@ -287,17 +287,17 @@
       },
       {
         "click": "input[aria-label=\"question\"]",
-        "type": "How can I export my traces to a CSV file?"
+        "type": "Can I schedule it every week?"
       },
       {
         "click": "button:has-text('Run all')"
       }
     ],
-    "waitAfter": "Use the API for ranges",
+    "waitAfter": "can't schedule exports yet",
     "theme": "dark",
     "viewport": {
-      "width": 960,
-      "height": 640
+      "width": 1400,
+      "height": 800
     },
     "clip": "main"
   },
@@ -546,12 +546,12 @@
   },
   {
     "name": "marketing-trace-page-extraction",
-    "path": "/acme/invoice-pipeline/traces?filter=tags%20%40%3E%20%5B'billing'%5D&cols=start,name,duration,cost",
-    "waitFor": "extract-invoice",
+    "path": "/acme/invoice-pipeline/traces?filter=tags%20%40%3E%20%5B'batch-1119'%5D&cols=start,name,duration,cost",
+    "waitFor": "200 traces · 3 errors",
     "theme": "dark",
     "viewport": {
       "width": 900,
-      "height": 640
+      "height": 700
     },
     "actions": [
       {
@@ -637,7 +637,7 @@
   {
     "name": "marketing-alerts-extraction",
     "path": "/acme/invoice-pipeline/alerts?rule=01900000-0000-7000-8000-000000570204",
-    "waitFor": "Schema check pass rate under 97%",
+    "waitFor": "Scanned PDFs over 10 an hour",
     "actions": [
       {
         "click": "button[aria-label=\"Bottom\"]"

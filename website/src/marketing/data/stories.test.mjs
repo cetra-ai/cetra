@@ -22,7 +22,7 @@ const EXPECTED = {
     support: "Each turn of a session, with its score, so the bad answer stands out.",
     coding: "Read the code, patch it and rerun the tests, all in one transcript.",
     voice: "Hear the caller and the agent, and read what was said, in one voice turn.",
-    extraction: "Every billing trace in one list, with its duration and cost.",
+    extraction: "A 200-invoice batch, with its three failed invoices at the top.",
   },
   explore: {
     support: "Ask why answers got a thumbs-down, then open the traces behind them.",
@@ -43,7 +43,7 @@ const EXPECTED = {
     extraction: "Version 4 lifts vat_number from 91% to 96% on 300 invoices.",
   },
   prompts: {
-    support: "Try a prompt change on a real question before you ship it.",
+    support: "Run two prompt versions on the same question, and see which one answers right.",
     coding: "Run the patch prompt on a wide change, and see it split into steps.",
     voice: "Tune the receptionist prompt so it reads the booking back.",
     extraction: "A comma-decimal total, 1.234,56, comes back as 1234.56 in JSON.",
@@ -52,7 +52,7 @@ const EXPECTED = {
     support: "Know when answer quality drops below your bar.",
     coding: "Know when an hour of agent spend goes over your budget.",
     voice: "Know when one in twenty replies takes longer than 1.5 s.",
-    extraction: "Know when the schema check pass rate slips.",
+    extraction: "Know when scanned invoices come in faster than 10 an hour.",
   },
 };
 
