@@ -108,11 +108,15 @@ pub fn import_cmd(args: &[String]) -> crate::R<()> {
         return Err(format!("no pq_cetra/*.parquet files in {}", src.display()).into());
     }
     fs::create_dir_all(dir.join("input"))?;
-    let traces = fs::read_to_string(src.join("trace_ids.txt"))?
+    let trace_ids = src.join("trace_ids.txt");
+    let traces = fs::read_to_string(&trace_ids)?
         .lines()
         .take(IDS)
         .map(crate::parse_id)
         .collect::<crate::R<Vec<_>>>()?;
+    if traces.len() < IDS {
+        return Err(format!("{}: {} trace ids, need {IDS}", trace_ids.display(), traces.len()).into());
+    }
 
     // Spans for cw_spans.txt come from the first input file: row i * rows / IDS, moving forward
     // to the next row with a non-null input, and never the same row twice.
@@ -140,6 +144,14 @@ pub fn import_cmd(args: &[String]) -> crate::R<()> {
         }
         out.finish()?;
         println!("{}: {base} rows", out_path.display());
+    }
+    if picks.len() < IDS {
+        return Err(format!(
+            "{}: {} spans with an input, need {IDS} for cw_spans.txt",
+            parquet[0].display(),
+            picks.len()
+        )
+        .into());
     }
 
     let queries = queries_for("import", &needles);
@@ -313,7 +325,7 @@ fn queries_for(case: &str, needles: &[(String, String)]) -> Vec<String> {
 fn pick_traces(spans: &[Span], rng: &mut datagen::Rng) -> crate::R<Vec<[u8; 16]>> {
     let distinct: HashSet<[u8; 16]> = spans.iter().map(|s| *s.trace_id.as_bytes()).collect();
     if distinct.len() < IDS {
-        return Err(format!("only {} traces, need {IDS}", distinct.len()).into());
+        return Err(format!("cw_traces.txt: only {} traces, need {IDS}", distinct.len()).into());
     }
     let mut out: Vec<[u8; 16]> = Vec::new();
     while out.len() < IDS {
@@ -334,7 +346,7 @@ fn pick_pairs(spans: &[Span], giant: &[Pair], keys: bool, rng: &mut datagen::Rng
         .map(|s| (*s.trace_id.as_bytes(), *s.span_id.as_bytes()))
         .collect();
     if pool.len() < IDS {
-        return Err(format!("only {} spans to pick from, need {IDS}", pool.len()).into());
+        return Err(format!("cw_spans.txt: only {} spans to pick from, need {IDS}", pool.len()).into());
     }
     let mut out: Vec<Pair> = giant.iter().take(10).copied().collect();
     while out.len() < IDS {

@@ -3,6 +3,7 @@
 //! same canonical encoding of the answer, so that both formats can be compared row for row.
 
 use std::collections::{BTreeMap, HashSet};
+use std::ops::Range;
 use std::sync::Arc;
 
 use arrow::array::{
@@ -10,8 +11,8 @@ use arrow::array::{
     StructArray,
 };
 use arrow::compute::kernels::comparison::ilike;
-use arrow::compute::{filter_record_batch, or, prep_null_mask_filter};
-use arrow::datatypes::SchemaRef;
+use arrow::compute::{filter, or, prep_null_mask_filter};
+use arrow::datatypes::{Schema, SchemaRef};
 use arrow::error::ArrowError;
 use futures::TryStreamExt;
 use futures::future::try_join_all;
@@ -156,9 +157,10 @@ struct Unit {
     selection: RowSelection,
 }
 
-/// Runs `read` over every file, in parallel, and folds each piece with `fold`. A Strata file is
-/// one piece, a scan with the file's share of the cores; a Parquet file is one piece per unit of
-/// `parquet_units`. Returns the pieces' results in file order, then unit order.
+/// Runs `read` over every file, in parallel, and folds each piece with `fold`. A Parquet file is
+/// one piece per unit of `parquet_units`; a Strata file is one piece per range of `strata_ranges`.
+/// Both formats run `workers` pieces per file, one thread each. Returns the pieces' results in
+/// file order, then unit order.
 async fn scan<T: Default + Send + 'static>(files: &Files, read: Read, fold: Fold<T>) -> R<Vec<T>> {
     let read = Arc::new(read);
     let mut tasks = Vec::new();
@@ -189,8 +191,10 @@ async fn scan<T: Default + Send + 'static>(files: &Files, read: Read, fold: Fold
         Files::Strata(v) => {
             let workers = workers_for(v.len());
             for f in v {
-                let (f, read) = (f.clone(), read.clone());
-                tasks.push(tokio::spawn(async move { strata_part(&f, &read, workers, fold).await }));
+                for rows in strata_ranges(f.row_count(), workers) {
+                    let (f, read) = (f.clone(), read.clone());
+                    tasks.push(tokio::spawn(async move { strata_part(&f, &read, rows, fold).await }));
+                }
             }
         }
     }
@@ -236,29 +240,64 @@ async fn parquet_part<T: Default>(unit: Unit, read: &Read, fold: Fold<T>) -> R<T
     Ok(acc)
 }
 
-/// Reads one Strata file and folds its batches. A predicate is evaluated by the scan; else the
-/// mask is applied to each batch.
+/// Reads one row range of a Strata file, on one thread, and folds its batches. A predicate is
+/// evaluated by the scan; else the mask is applied to each batch, and only the projected columns
+/// are filtered.
 async fn strata_part<T: Default>(
     file: &StrataFile,
     read: &Read,
-    threads: usize,
+    rows: Range<u64>,
     fold: Fold<T>,
 ) -> R<T> {
-    let request = read.strata_request();
+    let mut request = read.strata_request();
+    request.row_ranges = Some(vec![u32::try_from(rows.start)?..u32::try_from(rows.end)?]);
     let post = if read.predicate.is_none() { read.keep.as_ref() } else { None };
+    let schema = file.schema();
     let mut acc = T::default();
-    for batch in file.scan_batches(&request, threads).await? {
+    for batch in file.scan_batches(&request, 1).await? {
         let batch = batch?;
         let batch = match post {
             Some(keep) => {
                 let mask = (*keep.mask)(&batch)?;
-                filter_record_batch(&batch, &mask)?
+                filter_projection(&batch, &schema, &read.projection, &mask)?
             }
             None => batch,
         };
         fold(&batch, &mut acc)?;
     }
     Ok(acc)
+}
+
+/// The projected columns of `batch` (schema indexes `projection`), with the rows `mask` keeps.
+/// Only those columns are filtered: the mask's own columns, which a Strata scan reads for the
+/// mask, are left out.
+fn filter_projection(
+    batch: &RecordBatch,
+    schema: &Schema,
+    projection: &[usize],
+    mask: &BooleanArray,
+) -> R<RecordBatch> {
+    let out_schema = Arc::new(schema.project(projection)?);
+    let mut columns = Vec::with_capacity(projection.len());
+    for field in out_schema.fields() {
+        let column = batch
+            .column_by_name(field.name())
+            .ok_or_else(|| format!("no {} column", field.name()))?;
+        let array: &dyn Array = column.as_ref();
+        columns.push(filter(array, mask)?);
+    }
+    Ok(RecordBatch::try_new(out_schema, columns)?)
+}
+
+/// Strata's row ranges for a file of `rows` rows: `workers` contiguous ranges of about equal size,
+/// split at the same points as `parquet_units` splits one row group of `rows` rows. Empty ranges
+/// are left out.
+fn strata_ranges(rows: u64, workers: usize) -> Vec<Range<u64>> {
+    let workers = workers.max(1) as u64;
+    (0..workers)
+        .map(|i| rows * i / workers..rows * (i + 1) / workers)
+        .filter(|r| !r.is_empty())
+        .collect()
 }
 
 /// Parquet's units for one file: `workers` contiguous row ranges of about equal size, each as
@@ -417,10 +456,11 @@ fn collect_pairs(batch: &RecordBatch, out: &mut Vec<Pair>) -> R<()> {
     Ok(())
 }
 
-/// The answer of a set of pairs: the pairs sorted by (trace_id, span_id), each as its 16 and 8
-/// bytes, hashed.
+/// The answer of a set of pairs: the distinct pairs sorted by (trace_id, span_id), each as its 16
+/// and 8 bytes, hashed. A pair counts once however many times it was found, on both formats.
 fn pair_answer(mut pairs: Vec<Pair>) -> Answer {
     pairs.sort_unstable();
+    pairs.dedup();
     let mut bytes = Vec::with_capacity(pairs.len() * 24);
     for (trace, span) in &pairs {
         bytes.extend_from_slice(trace);
@@ -441,21 +481,25 @@ pub async fn search(files: &Files, needle: &str) -> R<(Answer, Vec<SearchPath>)>
             Ok((pair_answer(parts.concat()), Vec::new()))
         }
         Files::Strata(v) => {
-            let threads = workers_for(v.len());
-            let mut tasks = Vec::with_capacity(v.len());
+            let workers = workers_for(v.len());
+            let mut tasks = Vec::new();
+            let mut paths = Vec::with_capacity(v.len());
             for f in v {
-                let (f, needle, pat, schema) =
-                    (f.clone(), needle.to_owned(), pat.clone(), schema.clone());
-                tasks.push(tokio::spawn(async move {
-                    strata_search(&f, &needle, &pat, &schema, threads).await
-                }));
+                let (reads, path) = strata_search_reads(f, needle, &pat, &schema)?;
+                paths.push(path);
+                for read in reads {
+                    let read = Arc::new(read);
+                    for rows in strata_ranges(f.row_count(), workers) {
+                        let (f, read) = (f.clone(), read.clone());
+                        tasks.push(tokio::spawn(async move {
+                            strata_part(&f, &read, rows, collect_pairs).await
+                        }));
+                    }
+                }
             }
             let mut pairs = Vec::new();
-            let mut paths = Vec::with_capacity(tasks.len());
             for t in tasks {
-                let (found, path) = t.await??;
-                pairs.extend(found);
-                paths.push(path);
+                pairs.extend(t.await??);
             }
             Ok((pair_answer(pairs), paths))
         }
@@ -471,18 +515,17 @@ fn scan_read(schema: &SchemaRef, columns: Vec<usize>, pat: &str) -> R<Read> {
     })
 }
 
-/// One Strata file's search. It takes the index path when the needle has no cased character,
-/// is at most `MAX_CONTAINS` bytes long, and the file has `input`, `output` or
-/// `system_instructions` as a payload column; else it scans. The index path matches the payload
-/// columns with `Contains` (one `Predicate::Or`) and scans the other `SEARCH` columns. Its matches
-/// are deduplicated; the scan path's are not (it has no duplicates to remove).
-async fn strata_search(
+/// The reads of one Strata file's search, and the path it takes. The index path is taken when the
+/// needle has no cased character, is at most `MAX_CONTAINS` bytes long, and the file has `input`,
+/// `output` or `system_instructions` as a payload column; else the scan path is taken. The index
+/// path matches the payload columns with `Contains` (one `Predicate::Or`) and scans the other
+/// `SEARCH` columns; the scan path scans every `SEARCH` column.
+fn strata_search_reads(
     file: &StrataFile,
     needle: &str,
     pat: &str,
     schema: &SchemaRef,
-    threads: usize,
-) -> R<(Vec<Pair>, SearchPath)> {
+) -> R<(Vec<Read>, SearchPath)> {
     let payload_ids: HashSet<usize> = file
         .directory()
         .iter()
@@ -497,8 +540,7 @@ async fn strata_search(
             matches!(schema.field(c).name().as_str(), "input" | "output" | "system_instructions")
         });
     if !index_ok {
-        let read = scan_read(schema, search, pat)?;
-        return Ok((strata_part(file, &read, threads, collect_pairs).await?, SearchPath::Scan));
+        return Ok((vec![scan_read(schema, search, pat)?], SearchPath::Scan));
     }
     let terms: Vec<Predicate> = payload
         .iter()
@@ -509,15 +551,12 @@ async fn strata_search(
         keep: None,
         predicate: Some(Predicate::Or(terms)),
     };
-    let mut pairs: Vec<Pair> = strata_part(file, &index_read, threads, collect_pairs).await?;
+    let mut reads = vec![index_read];
     let others: Vec<usize> = search.iter().copied().filter(|c| !payload.contains(c)).collect();
     if !others.is_empty() {
-        let scan = scan_read(schema, others, pat)?;
-        pairs.extend(strata_part(file, &scan, threads, collect_pairs).await?);
+        reads.push(scan_read(schema, others, pat)?);
     }
-    pairs.sort_unstable();
-    pairs.dedup();
-    Ok((pairs, SearchPath::Index))
+    Ok((reads, SearchPath::Index))
 }
 
 /// The mask of `attr_filter`: a row matches when its `attributes` map holds `key` exactly once,
@@ -580,7 +619,12 @@ fn count_keys(batch: &RecordBatch, counts: &mut BTreeMap<String, u64>) -> R<()> 
         seen.sort_unstable();
         seen.dedup();
         for key in seen {
-            *counts.entry(key.to_owned()).or_insert(0) += 1;
+            match counts.get_mut(key) {
+                Some(n) => *n += 1,
+                None => {
+                    counts.insert(key.to_owned(), 1);
+                }
+            }
         }
     }
     Ok(())
@@ -1192,6 +1236,30 @@ mod tests {
                     assert_eq!(pos, group_rows.len());
                 }
                 assert_eq!(seen, (0..total).collect::<Vec<usize>>(), "rows {rows:?}, workers {workers}");
+            }
+        }
+    }
+
+    #[test]
+    fn strata_and_parquet_split_into_the_same_units() {
+        for rows in [0u64, 1, 7, 100_000] {
+            for workers in [1usize, 3, 8] {
+                let ranges = strata_ranges(rows, workers);
+                let mut seen: Vec<u64> = Vec::new();
+                for r in &ranges {
+                    assert!(!r.is_empty(), "rows {rows}, workers {workers}: empty range {r:?}");
+                    seen.extend(r.clone());
+                }
+                assert_eq!(seen, (0..rows).collect::<Vec<u64>>(), "rows {rows}, workers {workers}");
+                // The same unit sizes as Parquet's units of one row group of `rows` rows.
+                let parquet: Vec<usize> = parquet_units(&[rows as usize], workers)
+                    .iter()
+                    .map(|(_, selection)| {
+                        selection.iter().filter(|s| !s.skip).map(|s| s.row_count).sum()
+                    })
+                    .collect();
+                let strata: Vec<usize> = ranges.iter().map(|r| (r.end - r.start) as usize).collect();
+                assert_eq!(strata, parquet, "rows {rows}, workers {workers}");
             }
         }
     }
