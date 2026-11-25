@@ -12,18 +12,35 @@ interface Props {
   fade?: boolean;
   /** Load eagerly (only the hero). */
   eager?: boolean;
+  /**
+   * A fixed height, in CSS px, for the picture: a taller one scrolls inside it, a shorter one sits at its top.
+   * Every picture of a story chapter gets the same, so switching stories never moves the page.
+   */
+  height?: number;
+  /** Where a scrolling picture starts, in CSS px of the shot from its top; scaled with the picture. */
+  start?: number;
 }
-const { src, alt, label, fade = true, eager = false } = Astro.props;
+const { src, alt, label, fade = true, eager = false, height, start } = Astro.props;
 // The screenshots are captured at 2x, so the picture's CSS width is half its file width.
 const cssWidth = Math.round(src.width / 2);
 ---
 
-<figure class:list={["frame", fade && "frame--fade"]} style={`--shot-width: ${cssWidth}px`}>
+<figure
+  class:list={["frame", fade && "frame--fade", height !== undefined && "frame--fixed"]}
+  style={`--shot-width: ${cssWidth}px${height === undefined ? "" : `; --frame-height: ${height}px`}`}
+>
   <div class="bar" aria-hidden="true">
     <span class="dot"></span><span class="dot"></span><span class="dot"></span>
     {label && <span class="label">{label}</span>}
   </div>
-  <div class="scroll" tabindex="0" role="group" aria-label="Screenshot">
+  <div
+    class="scroll"
+    tabindex="0"
+    role="group"
+    aria-label="Screenshot"
+    data-start={start}
+    data-shot-width={start === undefined ? undefined : cssWidth}
+  >
     <Image
       src={src}
       alt={alt}
@@ -83,6 +100,16 @@ const cssWidth = Math.round(src.width / 2);
     background: linear-gradient(to bottom, transparent, var(--band-bg));
     pointer-events: none;
   }
+  .frame--fixed {
+    width: min(var(--shot-width), 100%);
+  }
+  .frame--fixed .scroll {
+    height: var(--frame-height);
+    overflow-y: auto;
+    scrollbar-width: thin;
+    scrollbar-color: var(--line-strong) transparent;
+    overscroll-behavior: contain;
+  }
   @media (max-width: 720px) {
     /* Design §4: on phones a screen is a scrollable crop, not a shrunken picture. */
     .scroll {
@@ -94,3 +121,20 @@ const cssWidth = Math.round(src.width / 2);
     }
   }
 </style>
+
+<script>
+  // A scrolling picture with a start opens there (the coding transcript opens at its first patch). A hidden story
+  // panel has no size, so this waits until the picture is laid out, then scrolls once, scaled to its shown width.
+  for (const box of document.querySelectorAll<HTMLElement>(".scroll[data-start]")) {
+    const start = Number(box.dataset.start);
+    const shotWidth = Number(box.dataset.shotWidth);
+    const image = box.querySelector("img");
+    if (!image || !Number.isFinite(start) || !Number.isFinite(shotWidth)) continue;
+    const observer = new ResizeObserver(() => {
+      if (image.clientWidth === 0 || image.clientHeight === 0) return;
+      box.scrollTop = start * (image.clientWidth / shotWidth);
+      observer.disconnect();
+    });
+    observer.observe(image);
+  }
+</script>

@@ -16,6 +16,7 @@ export const STORIES = /** @type {const} */ ([
  * @typedef {object} PictureContent
  * @property {string} alt     what the picture shows, one sentence, for screen readers
  * @property {string} caption one line under the picture
+ * @property {number} [start] where a picture taller than its frame starts, in CSS px of the shot from its top
  */
 
 /**
@@ -25,6 +26,8 @@ export const STORIES = /** @type {const} */ ([
  * @property {string} base    the shot's base name in screenshots.json
  * @property {string | Record<string, string>} label the Frame's title-bar text; one per story when a record
  * @property {Record<string, PictureContent>} [stories] keyed by story id; absent for a shared picture
+ * @property {number} [frameHeight] the height, in CSS px, of the frame every story's picture sits in: a taller
+ * picture scrolls inside it and a shorter one sits at its top, so switching stories never moves the page
  * @property {PictureContent} [shared] one picture for every story, shown without the story picker: the
  * shot is `base` itself (the chapter's pages look the same in every story, M19 retake)
  */
@@ -63,6 +66,7 @@ export const PICTURES = [
   },
   {
     id: "trace",
+    frameHeight: 630,
     section: "Trace",
     base: "marketing-trace-page",
     label: {
@@ -79,6 +83,7 @@ export const PICTURES = [
       coding: {
         alt: "A coding agent's transcript: the CSV fix request and plan, one line per tool call, a first patch whose run_tests line reads 1 failed, 47 passed, then a second patch and a run of 48 passed.",
         caption: "Read the code, patch it and rerun the tests, all in one transcript.",
+        start: 540,
       },
       voice: {
         alt: "A voice agent's turn in the Chat view: the caller's 3.4 s recording with its transcript, one line for the calendar check with its slots 9:30 and 11:00 and its 2.91 s, and the agent's spoken reply with its transcript.",
@@ -112,6 +117,7 @@ export const PICTURES = [
   },
   {
     id: "evaluate",
+    frameHeight: 630,
     section: "Evaluate",
     base: "marketing-evaluate",
     label: {
@@ -183,7 +189,7 @@ export function pictureById(pictureId) {
 /**
  * The panels of one picture: one per story, in STORIES order, or the one panel of a shared picture
  * (its `story` is "all").
- * @returns {{ story: string, shot: string, label: string, alt: string, caption: string }[]}
+ * @returns {{ story: string, shot: string, label: string, alt: string, caption: string, start?: number }[]}
  */
 export function panelsOf(pictureId) {
   const picture = pictureById(pictureId);

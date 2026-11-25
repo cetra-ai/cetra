@@ -33,6 +33,7 @@ const section = pictureById(picture).section;
 // A shared picture is one shot for every story: no story picker, so the page's pickers skip it.
 const shared = pictureById(picture).shared !== undefined;
 const [only] = panels;
+const frameHeight = pictureById(picture).frameHeight;
 ---
 
 {shared && only ? (
@@ -45,7 +46,15 @@ const [only] = panels;
     <Tabs id={`story-${picture}`} label={`Story: ${section}`} labels={STORIES.map((story) => story.label)}>
       {panels.map((panel, i) => (
         <div data-tab-panel data-story={panel.story} hidden={i !== 0}>
-          <Frame src={shotOf(panel.shot)} alt={panel.alt} label={panel.label} fade={fade} eager={eager && i === 0} />
+          <Frame
+            src={shotOf(panel.shot)}
+            alt={panel.alt}
+            label={panel.label}
+            fade={fade && frameHeight === undefined}
+            eager={eager && i === 0}
+            height={frameHeight}
+            start={panel.start}
+          />
           <p class="caption">{panel.caption}</p>
         </div>
       ))}
