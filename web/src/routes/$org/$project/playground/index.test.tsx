@@ -2,9 +2,10 @@ import { fireEvent, screen, waitFor, within } from "@testing-library/react";
 import type { UserEvent } from "@testing-library/user-event";
 import { HttpResponse, http } from "msw";
 import { beforeEach, expect, it, vi } from "vitest";
-import { emptyDraft, saveDraft } from "@/lib/playground";
+import { type Column, type Draft, emptyDraft, saveDraft } from "@/lib/playground";
 import { server } from "@/mocks/node";
 import { renderApp } from "@/test/render";
+import versionOneFixture from "../../../../../../fixtures/api/responses/prompts/support-reply/versions/1.json";
 import versionTwoFixture from "../../../../../../fixtures/api/responses/prompts/support-reply/versions/2.json";
 import llmSpanFixture from "../../../../../../fixtures/api/responses/spans/a1000000000000000000000000000001/b100000000000012.json";
 import traceFixture from "../../../../../../fixtures/api/responses/traces/a1000000000000000000000000000001.json";
@@ -36,8 +37,10 @@ type RunBody = {
   model: string;
   messages: unknown[];
   variables: Record<string, string>;
+  placeholders: Record<string, unknown>;
   connection_id: string;
   render_variables: boolean;
+  source?: { prompt?: { name: string; version: number } };
 };
 
 /** A complete answer: each event is `[name, data]`, and the stream ends. */
@@ -513,4 +516,300 @@ it("empty settings sections start folded and open on click", async () => {
   await user.click(tools);
   expect(screen.getByRole("textbox", { name: "Tools" })).toBeInTheDocument();
   expect(screen.getByRole("combobox", { name: "Tool choice" })).toBeInTheDocument();
+});
+
+/** A draft from `emptyDraft` whose source is `support-reply` v2, with these columns and messages. */
+function promptDraft(columns: Column[], entries?: Draft["entries"]): Draft {
+  const base = emptyDraft(CONNECTION_ID);
+  return {
+    ...base,
+    entries: entries ?? base.entries,
+    source: { prompt: { name: "support-reply", version: 2 } },
+    columns,
+  };
+}
+
+/** A column with no model or settings, pinned to `version` when it is given. */
+function column(id: string, version?: number): Column {
+  return {
+    id,
+    connectionId: CONNECTION_ID,
+    model: "",
+    temperature: "",
+    maxTokens: "",
+    ...(version === undefined ? {} : { version }),
+  };
+}
+
+/**
+ * Picks a version in a column's Prompt version select from the keyboard: the split pane cancels
+ * pointer events in jsdom, so a click never picks an option. The option's first word is typed to
+ * highlight it (`v1` for `v1 · production`, `Draft` for `Draft`).
+ */
+async function pickVersionIn(user: UserEvent, region: string, option: string) {
+  const select = within(screen.getByRole("region", { name: region })).getByRole("combobox", {
+    name: "Prompt version",
+  });
+  select.focus();
+  await user.keyboard("{Enter}");
+  await screen.findByRole("option", { name: option });
+  await user.keyboard(option.split(" ")[0] ?? "");
+  await user.keyboard("{Enter}");
+  await waitFor(() =>
+    expect(screen.queryByRole("option", { name: option })).not.toBeInTheDocument(),
+  );
+}
+
+it("a prompt draft shows the version select with Draft and the versions", async () => {
+  const { user } = await renderApp(`${PAGE}?prompt=support-reply&version=2`);
+  const select = await screen.findByRole("combobox", { name: "Prompt version" });
+  expect(select).toHaveTextContent("Draft");
+
+  await user.click(select);
+  expect(await screen.findByRole("option", { name: "v2 · latest, staging" })).toBeInTheDocument();
+  expect(screen.getByRole("option", { name: "v1 · production" })).toBeInTheDocument();
+});
+
+it("a span draft shows no version select", async () => {
+  server.use(http.get(SPAN_URL, () => HttpResponse.json(llmSpanFixture)));
+  await renderApp(`${PAGE}?trace=${FIXTURE_TRACE}&span=${LLM_SPAN}`);
+
+  expect(await screen.findByText("From a span")).toBeInTheDocument();
+  expect(screen.queryByRole("combobox", { name: "Prompt version" })).not.toBeInTheDocument();
+});
+
+it("a pinned column shows the version's template and runs its messages", async () => {
+  const bodies: RunBody[] = [];
+  server.use(
+    http.post(RUNS, async ({ request }) => {
+      bodies.push((await request.json()) as RunBody);
+      return answer(["done", DONE]);
+    }),
+  );
+  const { user } = await renderApp(`${PAGE}?prompt=support-reply&version=2`);
+  await typeIn(user, await screen.findByRole("textbox", { name: "product" }), "Cetra");
+  await typeIn(user, screen.getByRole("textbox", { name: "question" }), "Where is it?");
+  await user.click(screen.getByRole("button", { name: "Add model" }));
+  await pickVersionIn(user, "Model 2", "v1 · production");
+
+  expect(await screen.findByRole("list", { name: "Template of version 1" })).toBeInTheDocument();
+  await user.click(screen.getByRole("button", { name: "Run all" }));
+  await waitFor(() => expect(bodies).toHaveLength(2));
+
+  const pinned = bodies.find((body) => body.source?.prompt?.version === 1);
+  const draftRun = bodies.find((body) => body.source?.prompt?.version === 2);
+  // The body carries the version's entries as they are: the server expands the placeholder.
+  expect(pinned?.messages).toEqual([
+    {
+      role: "system",
+      parts: [{ type: "text", content: "You are a support agent for {{ product }}." }],
+    },
+    { type: "placeholder", name: "history" },
+    { role: "user", parts: [{ type: "text", content: "{{ question }}" }] },
+  ]);
+  expect(pinned?.placeholders).toEqual({ history: [] });
+  expect(pinned?.variables).toMatchObject({ product: "Cetra", question: "Where is it?" });
+  expect(pinned?.source).toEqual({ prompt: { name: "support-reply", version: 1 } });
+  expect(draftRun?.variables).toMatchObject({ product: "Cetra", question: "Where is it?" });
+});
+
+it("picking a version applies its config to the column", async () => {
+  server.use(
+    http.get(VERSION, ({ params }) =>
+      String(params.version) === "1"
+        ? HttpResponse.json({
+            ...versionOneFixture,
+            config: { model: "gpt-4o-mini", params: { temperature: 0.9, max_tokens: 256 } },
+          })
+        : undefined,
+    ),
+  );
+  const { user } = await renderApp(`${PAGE}?prompt=support-reply&version=2`);
+  await screen.findByText("From prompt support-reply v2");
+  await user.click(screen.getByRole("button", { name: "Add model" }));
+  await pickVersionIn(user, "Model 2", "v1 · production");
+
+  const model = within(screen.getByRole("region", { name: "Model 2" })).getByRole("textbox", {
+    name: "Model",
+  });
+  await waitFor(() => expect(model).toHaveValue("gpt-4o-mini"));
+  expect(screen.getByRole("button", { name: "Parameters of model 2" })).toHaveTextContent(
+    "temp 0.9 · max 256",
+  );
+});
+
+it("both columns show their tokens, cost and latency", async () => {
+  server.use(
+    http.post(RUNS, async ({ request }) => {
+      const body = (await request.json()) as RunBody;
+      return answer(
+        body.source?.prompt?.version === 1
+          ? [
+              "done",
+              {
+                ...DONE,
+                usage: { ...DONE.usage, input: 345 },
+                cost_usd: 0.0042,
+                latency_ms: 900,
+              },
+            ]
+          : ["done", DONE],
+      );
+    }),
+  );
+  const { user } = await renderApp(`${PAGE}?prompt=support-reply&version=2`);
+  await screen.findByText("From prompt support-reply v2");
+  await user.click(screen.getByRole("button", { name: "Add model" }));
+  await pickVersionIn(user, "Model 2", "v1 · production");
+  await user.click(screen.getByRole("button", { name: "Run all" }));
+
+  const first = within(await screen.findByRole("region", { name: "Model 1" }));
+  const second = within(screen.getByRole("region", { name: "Model 2" }));
+  expect(await first.findByText("$0.0021")).toBeInTheDocument();
+  expect(await second.findByText("$0.0042")).toBeInTheDocument();
+  expect(first.getByText("420ms")).toBeInTheDocument();
+  expect(second.getByText("900ms")).toBeInTheDocument();
+  expect(first.getByText("12")).toBeInTheDocument();
+  expect(second.getByText("345")).toBeInTheDocument();
+});
+
+it("the settings list the pinned version's variables", async () => {
+  const entries = emptyDraft(CONNECTION_ID).entries;
+  entries[1] = { role: "user", parts: [{ type: "text", content: "{{ question }}" }] };
+  saveDraft(PROJECT_KEY, promptDraft([column("c1", 1)], entries));
+  await renderApp(PAGE);
+
+  // Version 1 uses `product`, which the draft's own text does not.
+  expect(await screen.findByRole("textbox", { name: "product" })).toBeInTheDocument();
+  expect(screen.getByRole("textbox", { name: "question" })).toBeInTheDocument();
+});
+
+it("a pinned column's message error stays in the column", async () => {
+  server.use(
+    http.post(RUNS, () =>
+      HttpResponse.json(
+        {
+          type: "about:blank",
+          title: "Invalid run",
+          status: 400,
+          code: "invalid_run",
+          detail: "The run is not valid.",
+          errors: [{ field: "messages[0].parts[0]", message: "Unsupported part type" }],
+        },
+        { status: 400 },
+      ),
+    ),
+  );
+  saveDraft(PROJECT_KEY, promptDraft([column("c1", 1)]));
+  const { user } = await renderApp(PAGE);
+  const region = within(await screen.findByRole("region", { name: "Model 1" }));
+  // The pinned version loads first: its Run is disabled until then.
+  await region.findByRole("list", { name: "Template of version 1" });
+  await user.click(region.getByRole("button", { name: "Run" }));
+
+  expect(
+    await within(screen.getByRole("region", { name: "Model 1" })).findByText(
+      "Unsupported part type",
+    ),
+  ).toBeInTheDocument();
+  expect(
+    within(screen.getByRole("list", { name: "Messages" })).queryByText("Unsupported part type"),
+  ).not.toBeInTheDocument();
+});
+
+it("a pinned column runs while the draft has a blocked message", async () => {
+  const entries = emptyDraft(CONNECTION_ID).entries;
+  entries[1] = { role: "user", parts: [{ type: "uri", uri: "https://example.com/picture.png" }] };
+  saveDraft(PROJECT_KEY, promptDraft([column("c1"), column("c2", 1)], entries));
+  await renderApp(PAGE);
+
+  const draftRun = within(await screen.findByRole("region", { name: "Model 1" })).getByRole(
+    "button",
+    { name: "Run" },
+  );
+  const pinned = within(screen.getByRole("region", { name: "Model 2" }));
+  await pinned.findByRole("list", { name: "Template of version 1" });
+  const pinnedRun = pinned.getByRole("button", { name: "Run" });
+  expect(draftRun).toBeDisabled();
+  expect(pinnedRun).toBeEnabled();
+});
+
+it("a pinned version that fails to load disables its Run with the reason", async () => {
+  server.use(
+    http.get(VERSION, ({ params }) =>
+      String(params.version) === "1"
+        ? HttpResponse.json({ title: "Broken", status: 500 }, { status: 500 })
+        : undefined,
+    ),
+  );
+  saveDraft(PROJECT_KEY, promptDraft([column("c1"), column("c2", 1)]));
+  await renderApp(PAGE);
+
+  expect(await screen.findByText("Could not load version 1.")).toBeInTheDocument();
+  expect(
+    within(screen.getByRole("region", { name: "Model 2" })).getByRole("button", { name: "Run" }),
+  ).toBeDisabled();
+});
+
+it("the pin survives a reload", async () => {
+  const first = await renderApp(`${PAGE}?prompt=support-reply&version=2`);
+  await screen.findByText("From prompt support-reply v2");
+  await first.user.click(screen.getByRole("button", { name: "Add model" }));
+  await pickVersionIn(first.user, "Model 2", "v1 · production");
+  await screen.findByRole("list", { name: "Template of version 1" });
+  first.unmount();
+
+  await renderApp(PAGE);
+  const select = within(await screen.findByRole("region", { name: "Model 2" })).getByRole(
+    "combobox",
+    { name: "Prompt version" },
+  );
+  // The select shows the bare `v1` until the version list loads.
+  await waitFor(() => expect(select).toHaveTextContent("v1 · production"));
+});
+
+it("changing a column's version clears its answer", async () => {
+  server.use(
+    http.post(RUNS, () =>
+      answer(["start", { trace_id: TRACE_ID }], ["text", { delta: "Hi there" }], ["done", DONE]),
+    ),
+  );
+  saveDraft(PROJECT_KEY, promptDraft([column("c1", 1)]));
+  const { user } = await renderApp(PAGE);
+  const region = within(await screen.findByRole("region", { name: "Model 1" }));
+  await region.findByRole("list", { name: "Template of version 1" });
+  await user.click(region.getByRole("button", { name: "Run" }));
+  expect(await region.findByText("Hi there")).toBeInTheDocument();
+
+  await pickVersionIn(user, "Model 1", "v2 · latest, staging");
+  await waitFor(() => expect(region.queryByText("Hi there")).not.toBeInTheDocument());
+  expect(region.getByText("Run to see the answer")).toBeInTheDocument();
+});
+
+it("a pinned draft asks before a new source replaces it", async () => {
+  saveDraft(PROJECT_KEY, promptDraft([column("c1", 1)]));
+  await renderApp(`${PAGE}?prompt=support-reply&version=1`);
+
+  expect(await screen.findByText("Replace the current draft?")).toBeInTheDocument();
+});
+
+it("?compare= opens two pinned columns", async () => {
+  const { router } = await renderApp(`${PAGE}?prompt=support-reply&version=2&compare=1`);
+
+  // The loaded draft replaces the columns, so each select is queried again until it shows.
+  const selectIn = (region: string) =>
+    within(screen.getByRole("region", { name: region })).getByRole("combobox", {
+      name: "Prompt version",
+    });
+  await waitFor(() => expect(selectIn("Model 1")).toHaveTextContent("v2 · latest, staging"));
+  await waitFor(() => expect(selectIn("Model 2")).toHaveTextContent("v1 · production"));
+  expect((router.state.location.search as Record<string, unknown>).compare).toBeUndefined();
+});
+
+it("?compare= with a missing version opens the version alone", async () => {
+  await renderApp(`${PAGE}?prompt=support-reply&version=2&compare=9`);
+
+  expect(await screen.findByText("From prompt support-reply v2")).toBeInTheDocument();
+  expect(await screen.findByRole("region", { name: "Model 1" })).toBeInTheDocument();
+  expect(screen.queryByRole("region", { name: "Model 2" })).not.toBeInTheDocument();
 });

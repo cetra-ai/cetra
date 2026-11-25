@@ -1,11 +1,11 @@
-import { type QueryClient, useQueryClient } from "@tanstack/react-query";
+import { type QueryClient, useQueries, useQueryClient } from "@tanstack/react-query";
 import { createFileRoute } from "@tanstack/react-router";
 import { History, Play, Plus, Square } from "lucide-react";
 import { type KeyboardEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { $api } from "@/api/client";
 import { fieldErrors, problemMessage, problemOf } from "@/api/problem";
 import { spanDetailQuery, traceDetailQuery } from "@/api/queries";
-import { promptQuery, promptVersionQuery } from "@/api/queries-prompts";
+import { promptQuery, promptVersionQuery, promptVersionsInit } from "@/api/queries-prompts";
 import { connectionsInit } from "@/api/queries-settings";
 import type { Schema } from "@/api/types";
 import { ConfirmDialog } from "@/components/confirm-dialog";
@@ -19,6 +19,7 @@ import {
   IDLE_RUN,
   RunColumn,
   type RunState,
+  type VersionOption,
 } from "@/components/playground/run-column";
 import { SaveDialog } from "@/components/playground/save-dialog";
 import { SettingsPanel } from "@/components/playground/settings-panel";
@@ -29,6 +30,7 @@ import { Skeleton } from "@/components/ui/skeleton";
 import {
   blockedMessages,
   type Column,
+  columnDraft,
   type Draft,
   draftFromPromptVersion,
   draftFromSpan,
@@ -36,9 +38,12 @@ import {
   emptyDraft,
   loadDraft,
   type Message,
+  pinColumn,
   renamePlaceholder,
   runPlayground,
   saveDraft,
+  sharedInputs,
+  sourcePrompt,
   toRunRequest,
 } from "@/lib/playground";
 import { VIEWER_REASON as PROMPT_EDIT_REASON } from "@/lib/prompts";
@@ -48,10 +53,11 @@ import { uuidv7 } from "@/lib/uuid";
 
 type Connection = Schema<"LlmConnection">;
 
-/** The search params of the page. `prompt`/`version`, `trace`/`span` are loaded in a later step. */
+/** The search params of the page: `prompt` with `version` and `compare`, `trace`/`span`, `run`. */
 type PlaygroundSearch = {
   prompt?: string;
   version?: number;
+  compare?: number;
   trace?: string;
   span?: string;
   run?: string;
@@ -64,6 +70,10 @@ const FRAME_FALLBACK_MS = 50;
 const START_FAILED = "Could not start the run.";
 const CONNECTION_LOST = "The connection was lost.";
 const NO_ERRORS: Record<string, string> = {};
+/** The checks of one column's run: its request, or why it cannot be sent. */
+type Check = ReturnType<typeof toRunRequest>;
+/** The check of a pinned column whose version is not loaded yet. */
+const NOT_LOADED: Check = { ok: false, errors: {} };
 const SEARCH_TEXT_MAX = 200;
 const VIEWER_REASON = "Only members can run the playground";
 const NO_CONNECTION_REASON =
@@ -72,6 +82,8 @@ const NO_CONNECTION_REASON =
 const FORM_FIELDS: ReadonlySet<string> = new Set(["messages", "request"]);
 const SETTINGS_FIELD =
   /^(variables|placeholders|tools|tool_choice|toolChoice|responseFormat|response_format)(\.|$)/;
+/** The settings a pinned column shares with the draft: its variables and placeholders (D-C-30). */
+const SHARED_FIELD = /^(variables|placeholders)(\.|$)/;
 
 export const Route = createFileRoute("/$org/$project/playground/")({
   validateSearch: (search) => parsePlaygroundSearch(search),
@@ -79,9 +91,12 @@ export const Route = createFileRoute("/$org/$project/playground/")({
 });
 
 function parsePlaygroundSearch(search: Record<string, unknown>): PlaygroundSearch {
+  const prompt = searchText(search.prompt);
   return {
-    prompt: searchText(search.prompt),
+    prompt,
     version: searchVersion(search.version),
+    // A lone `compare` (no prompt to compare versions of) is dropped, so it never sticks in the URL.
+    compare: prompt === undefined ? undefined : searchVersion(search.compare),
     trace: typeof search.trace === "string" ? hexId(search.trace, 32) : undefined,
     span: typeof search.span === "string" ? hexId(search.span, 16) : undefined,
     run: typeof search.run === "string" ? hexId(search.run, 32) : undefined,
@@ -239,7 +254,11 @@ function isBlankDraft(draft: Draft): boolean {
     draft.responseFormat === "" &&
     draft.columns.length === 1 &&
     draft.columns.every(
-      (column) => column.model === "" && column.temperature === "" && column.maxTokens === "",
+      (column) =>
+        column.model === "" &&
+        column.temperature === "" &&
+        column.maxTokens === "" &&
+        column.version === undefined,
     )
   );
 }
@@ -266,23 +285,17 @@ async function loadRun(
   return { draft: draftFromRun(span, connections), cut: span.truncated.length > 0 };
 }
 
-/**
- * A prompt version as a draft. A version that does not exist gives the latest one instead, and a
- * prompt that does not exist is an error.
- */
-async function loadPrompt(
+/** The asked version of a prompt, or its latest when the asked version does not exist (a 404). */
+async function versionOrLatest(
   queryClient: QueryClient,
   org: string,
   project: string,
   name: string,
   version: number | undefined,
-  connections: readonly Connection[],
-): Promise<Loaded> {
-  const connectionIds = connections.map((item) => item.id);
+): Promise<Schema<"PromptVersion">> {
   if (version !== undefined) {
     try {
-      const found = await queryClient.fetchQuery(promptVersionQuery(org, project, name, version));
-      return { draft: draftFromPromptVersion(found, connectionIds), cut: false };
+      return await queryClient.fetchQuery(promptVersionQuery(org, project, name, version));
     } catch (error) {
       if (problemOf(error)?.status !== 404) {
         throw error;
@@ -290,10 +303,49 @@ async function loadPrompt(
     }
   }
   const prompt = await queryClient.fetchQuery(promptQuery(org, project, name));
-  const latest = await queryClient.fetchQuery(
-    promptVersionQuery(org, project, name, prompt.latest_version),
-  );
-  return { draft: draftFromPromptVersion(latest, connectionIds), cut: false };
+  return queryClient.fetchQuery(promptVersionQuery(org, project, name, prompt.latest_version));
+}
+
+/**
+ * A prompt version as a draft. A version that does not exist gives the latest one instead, and a
+ * prompt that does not exist is an error. With `compare`, a second column is pinned to that version
+ * (D-C-30); a `compare` version that does not exist adds no column.
+ */
+async function loadPrompt(
+  queryClient: QueryClient,
+  org: string,
+  project: string,
+  name: string,
+  version: number | undefined,
+  compare: number | undefined,
+  connections: readonly Connection[],
+): Promise<Loaded> {
+  const connectionIds = connections.map((item) => item.id);
+  const found = await versionOrLatest(queryClient, org, project, name, version);
+  const draft = draftFromPromptVersion(found, connectionIds);
+  const [first] = draft.columns;
+  if (compare === undefined || compare === found.version || first === undefined) {
+    return { draft, cut: false };
+  }
+  let other: Schema<"PromptVersion">;
+  try {
+    other = await queryClient.fetchQuery(promptVersionQuery(org, project, name, compare));
+  } catch (error) {
+    if (problemOf(error)?.status === 404) {
+      return { draft, cut: false };
+    }
+    throw error;
+  }
+  return {
+    draft: {
+      ...draft,
+      columns: [
+        pinColumn(first, found, connectionIds),
+        pinColumn({ ...first, id: uuidv7() }, other, connectionIds),
+      ],
+    },
+    cut: false,
+  };
 }
 
 /** A LLM span as a draft, with the first org connection (D-V-28). */
@@ -313,17 +365,18 @@ async function loadSpan(
 }
 
 /**
- * The source the URL names, as one key: `prompt:<name>@<version>` or `span:<trace>:<span>`. A prompt
- * wins over a span. `undefined` when the URL names no source.
+ * The source the URL names, as one key: `prompt:<name>@<version>~<compare>` or `span:<trace>:<span>`.
+ * A prompt wins over a span. `undefined` when the URL names no source.
  */
 function urlSourceKey(
   prompt: string | undefined,
   version: number | undefined,
   trace: string | undefined,
   span: string | undefined,
+  compare: number | undefined,
 ): string | undefined {
   if (prompt !== undefined) {
-    return `prompt:${prompt}@${version ?? ""}`;
+    return `prompt:${prompt}@${version ?? ""}~${compare ?? ""}`;
   }
   if (trace !== undefined && span !== undefined) {
     return `span:${trace}:${span}`;
@@ -350,6 +403,14 @@ function messageIndexOf(field: string): number | undefined {
 
 function blockedText(item: { index: number; kinds: string[] }): string {
   return `Message ${item.index} has ${item.kinds.join(", ")} parts, which the playground cannot send. Remove them to run.`;
+}
+
+/** The errors whose field `keep` accepts. */
+function onlyFields(
+  errors: Record<string, string>,
+  keep: (field: string) => boolean,
+): Record<string, string> {
+  return Object.fromEntries(Object.entries(errors).filter(([field]) => keep(field)));
 }
 
 /** The first error of each field across the sources, for the fields `keep` accepts. */
@@ -475,8 +536,14 @@ function PlaygroundWorkspace({
 
   // `?prompt=` (with `version`) or `?trace=&span=` opens that source once, like `?run=` (D-V-28).
   // The source keys are then removed from the URL; the draft keeps its source.
-  const { prompt: promptName, version: promptVersion, trace: traceId, span: spanId } = search;
-  const sourceKey = urlSourceKey(promptName, promptVersion, traceId, spanId);
+  const {
+    prompt: searchPrompt,
+    version: promptVersion,
+    compare: compareVersion,
+    trace: traceId,
+    span: spanId,
+  } = search;
+  const sourceKey = urlSourceKey(searchPrompt, promptVersion, traceId, spanId, compareVersion);
   useEffect(() => {
     if (sourceKey === undefined) {
       loadedSource.current = undefined;
@@ -487,9 +554,17 @@ function PlaygroundWorkspace({
     }
     let load: Promise<Loaded>;
     let status: string;
-    if (promptName !== undefined) {
+    if (searchPrompt !== undefined) {
       status = "Opening the prompt…";
-      load = loadPrompt(queryClient, org, project, promptName, promptVersion, connections);
+      load = loadPrompt(
+        queryClient,
+        org,
+        project,
+        searchPrompt,
+        promptVersion,
+        compareVersion,
+        connections,
+      );
     } else if (traceId !== undefined && spanId !== undefined) {
       status = "Opening the span…";
       load = loadSpan(queryClient, org, project, traceId, spanId, connections[0]?.id);
@@ -511,6 +586,7 @@ function PlaygroundWorkspace({
               ...previous,
               prompt: undefined,
               version: undefined,
+              compare: undefined,
               trace: undefined,
               span: undefined,
             }),
@@ -520,8 +596,9 @@ function PlaygroundWorkspace({
       });
   }, [
     sourceKey,
-    promptName,
+    searchPrompt,
     promptVersion,
+    compareVersion,
     traceId,
     spanId,
     queryClient,
@@ -568,16 +645,105 @@ function PlaygroundWorkspace({
     };
   }, []);
 
-  // The draft's checks are recomputed only when the draft or the connections change, not on every
-  // streamed chunk.
-  const blocked = useMemo(() => blockedMessages(draft), [draft]);
-  const checks = useMemo(
-    () => draft.columns.map((column) => toRunRequest(draft, column, connections)),
-    [draft, connections],
+  // The versions of the draft's prompt: the select's choices. A failed or loading list offers none.
+  const promptName = sourcePrompt(draft);
+  const versions = $api.useQuery(
+    "get",
+    "/api/v1/projects/{project}/prompts/{prompt}/versions",
+    promptVersionsInit(org, project, promptName ?? ""),
+    { enabled: promptName !== undefined },
   );
+  const versionOptions = useStable<VersionOption[] | undefined>(
+    promptName === undefined
+      ? undefined
+      : (versions.data?.data ?? []).map((item) => ({ version: item.version, labels: item.labels })),
+  );
+  // The versions the columns are pinned to, each loaded once: a version never changes.
+  const pinnedNumbers =
+    promptName === undefined
+      ? []
+      : [
+          ...new Set(
+            draft.columns.flatMap((column) =>
+              column.version === undefined ? [] : [column.version],
+            ),
+          ),
+        ];
+  const pinnedQueries = useQueries({
+    queries: pinnedNumbers.map((version) => ({
+      ...promptVersionQuery(org, project, promptName ?? "", version),
+      // A version that is gone fails at once, instead of retrying.
+      staleTime: Number.POSITIVE_INFINITY,
+      retry: false,
+    })),
+  });
+  const versionOf = (version: number) => pinnedQueries[pinnedNumbers.indexOf(version)]?.data;
+  const versionFailed = (version: number) =>
+    pinnedQueries[pinnedNumbers.indexOf(version)]?.isError === true;
+  // The pinned versions loaded so far. useStable keeps their identity until one loads or changes, so
+  // the memo below is rebuilt only then.
+  const loadedVersions = useStable(
+    pinnedNumbers.map((version, index) => ({ version, data: pinnedQueries[index]?.data })),
+  );
+
+  // The draft's checks are recomputed only when the draft, the connections or a pinned version
+  // change, not on every streamed chunk: a new template array each render would defeat RunColumn's
+  // memo. A column's draft is the page's, or its pinned version's (D-C-30).
+  const blocked = useMemo(() => blockedMessages(draft), [draft]);
+  const { columnDrafts, checks } = useMemo(() => {
+    const drafts = draft.columns.map((column) =>
+      columnDraft(
+        draft,
+        column,
+        (version) => loadedVersions.find((item) => item.version === version)?.data,
+      ),
+    );
+    return {
+      columnDrafts: drafts,
+      checks: draft.columns.map((column, index) => {
+        const target = drafts[index];
+        return target === undefined ? NOT_LOADED : toRunRequest(target, column, connections);
+      }),
+    };
+  }, [draft, connections, loadedVersions]);
+  const pinnedIds = new Set(
+    draft.columns
+      .filter((column) => promptName !== undefined && column.version !== undefined)
+      .map((column) => column.id),
+  );
+  // The variables and placeholders the settings list: the draft's and the pinned versions' (D-C-30).
+  const pinnedDrafts = draft.columns.flatMap((column, index) => {
+    const target = columnDrafts[index];
+    return pinnedIds.has(column.id) && target !== undefined ? [target] : [];
+  });
+  const inputs = useStable(sharedInputs(draft, pinnedDrafts));
   const running = Object.values(runs).some((run) => run.status === "running");
   const runReason = runBlockReason(canRun, blocked, connections.length);
   const shortcut = shortcutLabel("⌘↵", navigator.userAgent);
+
+  // Why one column's Run is disabled. A pinned column ignores the draft's blocked messages: its
+  // messages are the version's, and it waits for the version to load (D-C-30).
+  function columnRunReason(column: Column): string | undefined {
+    if (!pinnedIds.has(column.id) || column.version === undefined) {
+      return runReason;
+    }
+    if (!canRun) {
+      return VIEWER_REASON;
+    }
+    if (connections.length === 0) {
+      return NO_CONNECTION_REASON;
+    }
+    if (versionFailed(column.version)) {
+      return `Could not load version ${column.version}.`;
+    }
+    if (versionOf(column.version) === undefined) {
+      return `Loading version ${column.version}…`;
+    }
+    return undefined;
+  }
+  // Run all is disabled only when every column is; it then says the first column's reason.
+  const reasons = draft.columns.map((column) => columnRunReason(column));
+  const runAllReason = reasons.every((reason) => reason !== undefined) ? reasons[0] : undefined;
 
   // The server indexes messages after its placeholders are expanded, so `messages[n]` is entry n
   // only when no placeholder comes at or before it. Other message errors go to the form.
@@ -589,13 +755,20 @@ function PlaygroundWorkspace({
   };
 
   // Problems: the refused parts and server errors under their messages; the settings' under them;
-  // the whole request above the columns; the rest under each column.
-  const runErrorList = Object.values(runs).map((run) => run.errors);
+  // the whole request above the columns; the rest under each column. A pinned column's messages are
+  // its version's, so its errors stay in the column, except the variables and placeholders it
+  // shares with the draft (they go to the settings).
+  const unpinnedRunErrors = Object.entries(runs)
+    .filter(([id]) => !pinnedIds.has(id))
+    .map(([, run]) => run.errors);
+  const pinnedRunErrors = Object.entries(runs)
+    .filter(([id]) => pinnedIds.has(id))
+    .map(([, run]) => onlyFields(run.errors, (field) => SHARED_FIELD.test(field)));
   const editorProblems: Record<number, string> = {};
   for (const item of blocked) {
     editorProblems[item.index - 1] = blockedText(item);
   }
-  for (const errors of runErrorList) {
+  for (const errors of unpinnedRunErrors) {
     for (const [field, message] of Object.entries(errors)) {
       const index = messageIndexOf(field);
       if (index !== undefined && locatesMessage(index) && editorProblems[index] === undefined) {
@@ -604,12 +777,23 @@ function PlaygroundWorkspace({
     }
   }
   const checkErrors = checks.map((check) => (check.ok ? NO_ERRORS : check.errors));
+  const unpinnedCheckErrors = draft.columns.flatMap((column, index) =>
+    pinnedIds.has(column.id) ? [] : [checkErrors[index] ?? NO_ERRORS],
+  );
+  const pinnedCheckErrors = draft.columns.flatMap((column, index) =>
+    pinnedIds.has(column.id)
+      ? [onlyFields(checkErrors[index] ?? NO_ERRORS, (field) => SHARED_FIELD.test(field))]
+      : [],
+  );
   const editorErrors = useStable(editorProblems);
   const settingsErrors = useStable(
-    mergeFirst([...checkErrors, ...runErrorList], (field) => SETTINGS_FIELD.test(field)),
+    mergeFirst(
+      [...unpinnedCheckErrors, ...unpinnedRunErrors, ...pinnedCheckErrors, ...pinnedRunErrors],
+      (field) => SETTINGS_FIELD.test(field),
+    ),
   );
   const formError = Object.values(
-    mergeFirst(runErrorList, (field) => FORM_FIELDS.has(field) || isUnlocated(field)),
+    mergeFirst(unpinnedRunErrors, (field) => FORM_FIELDS.has(field) || isUnlocated(field)),
   )[0];
   const columnErrors = useStable(
     Object.fromEntries(
@@ -618,9 +802,11 @@ function PlaygroundWorkspace({
         mergeFirst(
           [checkErrors[index] ?? NO_ERRORS, runs[column.id]?.errors ?? NO_ERRORS],
           (field) =>
-            !SETTINGS_FIELD.test(field) &&
-            !FORM_FIELDS.has(field) &&
-            messageIndexOf(field) === undefined,
+            pinnedIds.has(column.id)
+              ? !SHARED_FIELD.test(field)
+              : !SETTINGS_FIELD.test(field) &&
+                !FORM_FIELDS.has(field) &&
+                messageIndexOf(field) === undefined,
         ),
       ]),
     ),
@@ -705,6 +891,49 @@ function PlaygroundWorkspace({
     [editDraft],
   );
 
+  // Picks a column's version, or Draft. The column's answer belongs to the other version, so it
+  // goes. A pinned version's config is applied when the version has loaded (D-C-30); a version that
+  // fails to load shows its reason in the column instead.
+  const pickVersion = useCallback(
+    (id: string, version: number | undefined) => {
+      controllers.current.get(id)?.abort();
+      controllers.current.delete(id);
+      pendingText.current.delete(id);
+      setRuns((previous) =>
+        Object.fromEntries(Object.entries(previous).filter(([key]) => key !== id)),
+      );
+      if (version === undefined) {
+        updateColumn(id, { version: undefined });
+        return;
+      }
+      updateColumn(id, { version });
+      const name = sourcePrompt(draftRef.current);
+      if (name === undefined) {
+        return;
+      }
+      void queryClient.fetchQuery(promptVersionQuery(org, project, name, version)).then(
+        (found) => {
+          editDraft((previous) => ({
+            ...previous,
+            columns: previous.columns.map((column) =>
+              column.id === id && column.version === version
+                ? pinColumn(
+                    column,
+                    found,
+                    connections.map((item) => item.id),
+                  )
+                : column,
+            ),
+          }));
+        },
+        () => {
+          // The column's Run says the version could not load (see columnRunReason).
+        },
+      );
+    },
+    [connections, editDraft, org, project, queryClient, updateColumn],
+  );
+
   const stopColumn = useCallback((id: string) => {
     controllers.current.get(id)?.abort();
   }, []);
@@ -746,7 +975,20 @@ function PlaygroundWorkspace({
     (columnId: string) => {
       const current = draftRef.current;
       const column = current.columns.find((item) => item.id === columnId);
-      const checked = column === undefined ? undefined : toRunRequest(current, column, connections);
+      // A pinned column runs its version's draft; the version is in the query cache, since the
+      // column was pinned to a loaded version.
+      const target =
+        column === undefined
+          ? undefined
+          : columnDraft(current, column, (version) =>
+              queryClient.getQueryData<Schema<"PromptVersion">>(
+                promptVersionQuery(org, project, sourcePrompt(current) ?? "", version).queryKey,
+              ),
+            );
+      const checked =
+        column === undefined || target === undefined
+          ? undefined
+          : toRunRequest(target, column, connections);
       if (checked === undefined || !checked.ok) {
         // The problems are already shown under the controls.
         return;
@@ -808,12 +1050,14 @@ function PlaygroundWorkspace({
         },
       );
     },
-    [connections, projectKey, queryClient, setRun, queueText, flushText],
+    [connections, org, project, projectKey, queryClient, setRun, queueText, flushText],
   );
 
   function runAll() {
     for (const column of draft.columns) {
-      startRun(column.id);
+      if (columnRunReason(column) === undefined) {
+        startRun(column.id);
+      }
     }
   }
 
@@ -823,7 +1067,7 @@ function PlaygroundWorkspace({
       return;
     }
     event.preventDefault();
-    if (!running && runReason === undefined) {
+    if (!running && runAllReason === undefined) {
       runAll();
     }
   }
@@ -880,11 +1124,11 @@ function PlaygroundWorkspace({
                 Stop all
               </Button>
             ) : (
-              <DisabledReason reason={runReason}>
+              <DisabledReason reason={runAllReason}>
                 <Button
                   type="button"
                   size="sm"
-                  disabled={runReason !== undefined}
+                  disabled={runAllReason !== undefined}
                   title={`Run every model (${shortcut})`}
                   onClick={runAll}
                 >
@@ -931,7 +1175,13 @@ function PlaygroundWorkspace({
                 errors={editorErrors}
                 onChange={setEntries}
               />
-              <SettingsPanel draft={draft} errors={settingsErrors} onChange={updateDraft} />
+              <SettingsPanel
+                draft={draft}
+                errors={settingsErrors}
+                onChange={updateDraft}
+                variables={inputs.variables}
+                placeholders={inputs.placeholders}
+              />
             </div>
           </ResizablePanel>
           <ResizableHandle withHandle />
@@ -945,7 +1195,14 @@ function PlaygroundWorkspace({
                   run={runs[column.id] ?? IDLE_RUN}
                   connections={connections}
                   errors={columnErrors[column.id] ?? NO_ERRORS}
-                  runReason={runReason}
+                  runReason={columnRunReason(column)}
+                  versions={versionOptions}
+                  template={
+                    pinnedIds.has(column.id) && column.version !== undefined
+                      ? columnDrafts[index]?.entries
+                      : undefined
+                  }
+                  onPickVersion={pickVersion}
                   shortcut={shortcut}
                   canRemove={draft.columns.length > 1}
                   onChange={updateColumn}
