@@ -158,6 +158,8 @@ mod model_tests;
 #[cfg(test)]
 mod quarantine_tests;
 #[cfg(test)]
+mod query_diff_tests;
+#[cfg(test)]
 mod retention;
 #[cfg(test)]
 mod s3_fault_tests;
