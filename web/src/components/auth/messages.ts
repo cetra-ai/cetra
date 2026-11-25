@@ -23,6 +23,10 @@ const OAUTH_MESSAGES: Record<OAuthErrorCode, string> = {
   sso_unavailable: "Single sign-on is not set up for this email domain.",
   sso_required:
     "Your organization requires signing in through its identity provider. Enter your email to continue.",
+  saml_invalid:
+    "The identity provider's sign-in response could not be accepted. Start again from the login page.",
+  saml_unsupported:
+    "The identity provider sent an encrypted assertion, which is not supported. Ask an owner of your organization to turn off assertion encryption in the identity provider.",
 };
 
 export function oauthErrorMessage(code: OAuthErrorCode): string {

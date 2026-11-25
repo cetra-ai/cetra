@@ -7,10 +7,12 @@ interface Props {
   id?: string;
   /** The slot holds its own frame (a Frame): drop the visual's border, background and fade. */
   bare?: boolean;
+  /** Put the picture on the left at 960 px and wider. */
+  flip?: boolean;
 }
-const { eyebrow, title, lede, features, id, bare = false } = Astro.props;
+const { eyebrow, title, lede, features, id, bare = false, flip = false } = Astro.props;
 ---
-<div class="chapter">
+<div class:list={["chapter", flip && "chapter--flip"]}>
   <div class="text">
     <div class="head">
       {eyebrow && <p class="eyebrow">{eyebrow}</p>}
@@ -43,10 +45,22 @@ const { eyebrow, title, lede, features, id, bare = false } = Astro.props;
     gap: var(--space-5);
   }
   @media (min-width: 960px) {
-    .text {
-      grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+    .chapter {
+      grid-template-columns: minmax(0, 4fr) minmax(0, 8fr);
       gap: var(--space-8);
-      align-items: start;
+      align-items: center;
+    }
+    .chapter--flip {
+      grid-template-columns: minmax(0, 8fr) minmax(0, 4fr);
+    }
+    .chapter--flip .text {
+      order: 2;
+    }
+    .visual :global(.frame) {
+      margin-inline: 0 auto;
+    }
+    .chapter--flip .visual :global(.frame) {
+      margin-inline: auto 0;
     }
   }
   h2 {
@@ -58,15 +72,10 @@ const { eyebrow, title, lede, features, id, bare = false } = Astro.props;
   }
   .features {
     margin: var(--space-5) 0 0;
-    grid-template-columns: repeat(2, minmax(0, 1fr));
+    grid-template-columns: minmax(0, 1fr);
     gap: var(--space-2) var(--space-5);
     font-size: var(--text-sm);
     color: var(--fg-muted);
-  }
-  @media (max-width: 720px) {
-    .features {
-      grid-template-columns: minmax(0, 1fr);
-    }
   }
   .visual {
     border: 1px solid var(--line);

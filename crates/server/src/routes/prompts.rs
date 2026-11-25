@@ -19,6 +19,8 @@ use crate::api::prompts::{
     PromptListParams, PromptMetrics, PromptMetricsParams, PromptScoreMean, PromptSettings,
     PromptVersion, PromptVersionMetrics, ResolveParams, SetLabelRequest, UpdatePromptRequest,
 };
+use crate::audit::catalog::PromptAction;
+use crate::audit::{self, Event, TargetKind};
 use crate::auth::principal::Principal;
 use crate::auth::roles::{ProjectPerm, Role};
 use crate::http::AppState;
@@ -497,6 +499,7 @@ async fn create_prompt(
     State(state): State<AppState>,
     Extension(principal): Extension<Principal>,
     Extension(access): Extension<ProjectAccess>,
+    ctx: audit::Ctx,
     error::Json(body): error::Json<CreatePromptRequest>,
 ) -> Result<(StatusCode, error::Json<PromptVersion>), ApiError> {
     let prompt_type = prompt_type_of(body.kind);
@@ -539,6 +542,7 @@ async fn create_prompt(
         return Err(bad_request(errors));
     };
     let project = access.project.id;
+    let org = access.project.org_id;
     let now = state.clock.now_ns();
     let may = may_touch_protected(&principal, &access);
     let new = NewPrompt {
@@ -548,22 +552,36 @@ async fn create_prompt(
         description,
         tags,
     };
+    // The labels the request set, each moved to the version it creates (plan M2, D-EA-21).
+    let label_names = version.labels.clone();
     let outcome = state
         .meta
         .write(move |conn| {
-            Box::pin(async move { create_tx(conn, project, new, version, may, now).await })
+            Box::pin(async move {
+                let written = create_tx(conn, project, new, version, may, now).await?;
+                if let Written::Done((prompt, created)) = &written {
+                    let event = Event::new(PromptAction::Created)
+                        .org(org)
+                        .project(project)
+                        .target(TargetKind::Prompt, prompt.id);
+                    audit::record(conn, &ctx, event, now).await?;
+                    let version = u32::try_from(created.version).unwrap_or(u32::MAX);
+                    for label in &label_names {
+                        let event = Event::new(PromptAction::LabelSet {
+                            label: label.clone(),
+                            version,
+                        })
+                        .org(org)
+                        .project(project)
+                        .target(TargetKind::Prompt, prompt.id);
+                        audit::record(conn, &ctx, event, now).await?;
+                    }
+                }
+                Ok(written)
+            })
         })
         .await?;
     let (prompt, version) = settle(outcome)?;
-    let actor = created_by(&principal);
-    tracing::info!(
-        target: "audit",
-        prompt_id = %prompt.id,
-        project_id = %project,
-        version = version.version,
-        actor = %actor.as_deref().unwrap_or("-"),
-        "prompt created"
-    );
     Ok((
         StatusCode::CREATED,
         error::Json(version_json(&prompt, &version)?),
@@ -584,11 +602,18 @@ async fn get_prompt(
 /// versions never change.
 async fn update_prompt(
     State(state): State<AppState>,
-    Extension(principal): Extension<Principal>,
     Extension(access): Extension<ProjectAccess>,
+    ctx: audit::Ctx,
     error::Path(PromptPath { prompt }): error::Path<PromptPath>,
     error::Json(body): error::Json<UpdatePromptRequest>,
 ) -> Result<error::Json<Prompt>, ApiError> {
+    let changed_fields: Vec<&'static str> = [
+        ("description", body.description.is_some()),
+        ("tags", body.tags.is_some()),
+    ]
+    .into_iter()
+    .filter_map(|(name, given)| given.then_some(name))
+    .collect();
     let mut errors = Vec::new();
     let description = match body.description {
         None => None,
@@ -619,25 +644,29 @@ async fn update_prompt(
         return Err(bad_request(errors));
     }
     let project = access.project.id;
+    let org = access.project.org_id;
     let now = state.clock.now_ns();
     let name = prompt;
     let row = state
         .meta
         .write(move |conn| {
             Box::pin(async move {
-                store::update_prompt(conn, project, &name, description, tags, now).await
+                let updated =
+                    store::update_prompt(conn, project, &name, description, tags, now).await?;
+                if let Some(row) = &updated {
+                    let event = Event::new(PromptAction::Updated {
+                        fields: changed_fields,
+                    })
+                    .org(org)
+                    .project(project)
+                    .target(TargetKind::Prompt, row.id);
+                    audit::record(conn, &ctx, event, now).await?;
+                }
+                Ok(updated)
             })
         })
         .await?
         .ok_or(ApiError::NotFound)?;
-    let actor = created_by(&principal);
-    tracing::info!(
-        target: "audit",
-        prompt_id = %row.id,
-        project_id = %project,
-        actor = %actor.as_deref().unwrap_or("-"),
-        "prompt updated"
-    );
     Ok(error::Json(prompt_json(&row)))
 }
 
@@ -670,24 +699,31 @@ async fn delete_prompt(
     State(state): State<AppState>,
     Extension(principal): Extension<Principal>,
     Extension(access): Extension<ProjectAccess>,
+    ctx: audit::Ctx,
     error::Path(PromptPath { prompt }): error::Path<PromptPath>,
 ) -> Result<StatusCode, ApiError> {
     let project = access.project.id;
+    let org = access.project.org_id;
+    let now = state.clock.now_ns();
     let may = may_touch_protected(&principal, &access);
     let name = prompt;
     let outcome = state
         .meta
-        .write(move |conn| Box::pin(async move { delete_tx(conn, project, &name, may).await }))
+        .write(move |conn| {
+            Box::pin(async move {
+                let written = delete_tx(conn, project, &name, may).await?;
+                if let Written::Done(id) = &written {
+                    let event = Event::new(PromptAction::Deleted)
+                        .org(org)
+                        .project(project)
+                        .target(TargetKind::Prompt, *id);
+                    audit::record(conn, &ctx, event, now).await?;
+                }
+                Ok(written)
+            })
+        })
         .await?;
-    let id = settle(outcome)?;
-    let actor = created_by(&principal);
-    tracing::info!(
-        target: "audit",
-        prompt_id = %id,
-        project_id = %project,
-        actor = %actor.as_deref().unwrap_or("-"),
-        "prompt deleted"
-    );
+    settle(outcome)?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -826,6 +862,7 @@ async fn create_version(
     State(state): State<AppState>,
     Extension(principal): Extension<Principal>,
     Extension(access): Extension<ProjectAccess>,
+    ctx: audit::Ctx,
     error::Path(PromptPath { prompt }): error::Path<PromptPath>,
     error::Json(body): error::Json<CreateVersionRequest>,
 ) -> Result<(StatusCode, error::Json<PromptVersion>), ApiError> {
@@ -841,26 +878,41 @@ async fn create_version(
     )
     .map_err(bad_request)?;
     let project = access.project.id;
+    let org = access.project.org_id;
     let now = state.clock.now_ns();
     let may = may_touch_protected(&principal, &access);
+    // The labels the request set, each moved to the version it creates (plan M2, D-EA-21).
+    let label_names = version.labels.clone();
     let outcome = state
         .meta
         .write(move |conn| {
             Box::pin(async move {
-                add_version_tx(conn, project, &prompt, validated_for, version, may, now).await
+                let written =
+                    add_version_tx(conn, project, &prompt, validated_for, version, may, now)
+                        .await?;
+                if let Written::Done((row, added)) = &written {
+                    let version = u32::try_from(added.version).unwrap_or(u32::MAX);
+                    let event = Event::new(PromptAction::VersionCreated { version })
+                        .org(org)
+                        .project(project)
+                        .target(TargetKind::Prompt, row.id);
+                    audit::record(conn, &ctx, event, now).await?;
+                    for label in &label_names {
+                        let event = Event::new(PromptAction::LabelSet {
+                            label: label.clone(),
+                            version,
+                        })
+                        .org(org)
+                        .project(project)
+                        .target(TargetKind::Prompt, row.id);
+                        audit::record(conn, &ctx, event, now).await?;
+                    }
+                }
+                Ok(written)
             })
         })
         .await?;
     let (prompt, version) = settle(outcome)?;
-    let actor = created_by(&principal);
-    tracing::info!(
-        target: "audit",
-        prompt_id = %prompt.id,
-        project_id = %project,
-        version = version.version,
-        actor = %actor.as_deref().unwrap_or("-"),
-        "prompt version created"
-    );
     Ok((
         StatusCode::CREATED,
         error::Json(version_json(&prompt, &version)?),
@@ -919,6 +971,7 @@ async fn set_label(
     State(state): State<AppState>,
     Extension(principal): Extension<Principal>,
     Extension(access): Extension<ProjectAccess>,
+    ctx: audit::Ctx,
     error::Path(PromptLabelPath { prompt, label }): error::Path<PromptLabelPath>,
     error::Json(body): error::Json<SetLabelRequest>,
 ) -> Result<error::Json<Prompt>, ApiError> {
@@ -931,6 +984,7 @@ async fn set_label(
         )]));
     }
     let project = access.project.id;
+    let org = access.project.org_id;
     let now = state.clock.now_ns();
     let may = may_touch_protected(&principal, &access);
     let actor = created_by(&principal);
@@ -939,7 +993,7 @@ async fn set_label(
         .meta
         .write(move |conn| {
             Box::pin(async move {
-                set_label_tx(
+                let written = set_label_tx(
                     conn,
                     project,
                     &name,
@@ -948,20 +1002,22 @@ async fn set_label(
                     may,
                     now,
                 )
-                .await
+                .await?;
+                if let Written::Done(row) = &written {
+                    let event = Event::new(PromptAction::LabelSet {
+                        label,
+                        version: u32::try_from(version).unwrap_or(u32::MAX),
+                    })
+                    .org(org)
+                    .project(project)
+                    .target(TargetKind::Prompt, row.id);
+                    audit::record(conn, &ctx, event, now).await?;
+                }
+                Ok(written)
             })
         })
         .await?;
     let prompt = settle(outcome)?;
-    let actor = created_by(&principal);
-    tracing::info!(
-        target: "audit",
-        prompt_id = %prompt.id,
-        project_id = %project,
-        version,
-        actor = %actor.as_deref().unwrap_or("-"),
-        "prompt label set"
-    );
     Ok(error::Json(prompt_json(&prompt)))
 }
 
@@ -993,10 +1049,12 @@ async fn remove_label(
     State(state): State<AppState>,
     Extension(principal): Extension<Principal>,
     Extension(access): Extension<ProjectAccess>,
+    ctx: audit::Ctx,
     error::Path(PromptLabelPath { prompt, label }): error::Path<PromptLabelPath>,
 ) -> Result<StatusCode, ApiError> {
     check_label("label", &label).map_err(|error| bad_request(vec![error]))?;
     let project = access.project.id;
+    let org = access.project.org_id;
     let now = state.clock.now_ns();
     let may = may_touch_protected(&principal, &access);
     let actor = created_by(&principal);
@@ -1005,19 +1063,21 @@ async fn remove_label(
         .meta
         .write(move |conn| {
             Box::pin(async move {
-                remove_label_tx(conn, project, &name, &label, actor.as_deref(), may, now).await
+                let written =
+                    remove_label_tx(conn, project, &name, &label, actor.as_deref(), may, now)
+                        .await?;
+                if let Written::Done(id) = &written {
+                    let event = Event::new(PromptAction::LabelRemoved { label })
+                        .org(org)
+                        .project(project)
+                        .target(TargetKind::Prompt, *id);
+                    audit::record(conn, &ctx, event, now).await?;
+                }
+                Ok(written)
             })
         })
         .await?;
-    let id = settle(outcome)?;
-    let actor = created_by(&principal);
-    tracing::info!(
-        target: "audit",
-        prompt_id = %id,
-        project_id = %project,
-        actor = %actor.as_deref().unwrap_or("-"),
-        "prompt label removed"
-    );
+    settle(outcome)?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -1069,11 +1129,13 @@ async fn put_settings(
     State(state): State<AppState>,
     Extension(principal): Extension<Principal>,
     Extension(access): Extension<ProjectAccess>,
+    ctx: audit::Ctx,
     error::Json(body): error::Json<PromptSettings>,
 ) -> Result<error::Json<PromptSettings>, ApiError> {
     let labels = check_labels("protected_labels", &body.protected_labels, MAX_PROTECTED)
         .map_err(bad_request)?;
     let project = access.project.id;
+    let org = access.project.org_id;
     let now = state.clock.now_ns();
     let actor = created_by(&principal);
     let stored = state
@@ -1081,18 +1143,17 @@ async fn put_settings(
         .write(move |conn| {
             Box::pin(async move {
                 store::set_protected_labels(conn, project, &labels, actor.as_deref(), now).await?;
-                store::protected_labels_tx(conn, project).await
+                let stored = store::protected_labels_tx(conn, project).await?;
+                let event = Event::new(PromptAction::ProtectedLabelsChanged {
+                    count: u32::try_from(stored.len()).unwrap_or(u32::MAX),
+                })
+                .org(org)
+                .project(project);
+                audit::record(conn, &ctx, event, now).await?;
+                Ok(stored)
             })
         })
         .await?;
-    let actor = created_by(&principal);
-    tracing::info!(
-        target: "audit",
-        project_id = %project,
-        labels = stored.len(),
-        actor = %actor.as_deref().unwrap_or("-"),
-        "prompt settings updated"
-    );
     Ok(error::Json(PromptSettings {
         protected_labels: stored,
     }))
@@ -2027,8 +2088,15 @@ mod tests {
         })
         .await;
         assert_eq!(response.status, StatusCode::CREATED);
-        assert!(logs.contains("prompt created"), "{logs}");
-        assert!(logs.contains("actor=key:"), "{logs}");
+        let rows: Vec<(String, String, String)> = sqlx::query_as(
+            "SELECT action, actor_kind, details FROM audit_events WHERE action = 'prompt.created'",
+        )
+        .fetch_all(app.state.meta.reader())
+        .await
+        .unwrap();
+        assert_eq!(rows.len(), 1);
+        let (_, actor_kind, details) = &rows[0];
+        assert_eq!(actor_kind, "api_key");
         for canary in [
             "canary-name-x",
             "canary-template-y",
@@ -2036,7 +2104,133 @@ mod tests {
             "canary-commit-w",
         ] {
             assert!(!logs.contains(canary), "{canary} in the logs");
+            assert!(!details.contains(canary), "{canary} in the audit row");
         }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn prompt_label_set_is_recorded_with_the_label() {
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        let auth = ("cookie", seeded.cookie.as_str());
+        let list = base(&seeded);
+        let created = call(&app, Method::POST, &list, auth, Some(text_body("rl", &[]))).await;
+        assert_eq!(created.status, StatusCode::CREATED);
+        let set = call(
+            &app,
+            Method::PUT,
+            &format!("{list}/rl/labels/staging"),
+            auth,
+            Some(json!({"version": 1})),
+        )
+        .await;
+        assert_eq!(set.status, StatusCode::OK);
+
+        let rows: Vec<(String, String)> = sqlx::query_as(
+            "SELECT target_id, details FROM audit_events WHERE action = 'prompt.label_set'",
+        )
+        .fetch_all(app.state.meta.reader())
+        .await
+        .unwrap();
+        assert_eq!(rows.len(), 1);
+        let details: Value = serde_json::from_str(&rows[0].1).unwrap();
+        assert_eq!(details, json!({"label": "staging", "version": 1}));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn create_with_labels_records_label_sets() {
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        let auth = ("cookie", seeded.cookie.as_str());
+        let list = base(&seeded);
+        let created = call(
+            &app,
+            Method::POST,
+            &list,
+            auth,
+            Some(text_body("cwl", &["staging", "canary"])),
+        )
+        .await;
+        assert_eq!(created.status, StatusCode::CREATED);
+        let added = call(
+            &app,
+            Method::POST,
+            &format!("{list}/cwl/versions"),
+            auth,
+            Some(json!({"template": "Hi {{ name }}", "labels": ["staging"]})),
+        )
+        .await;
+        assert_eq!(added.status, StatusCode::CREATED);
+
+        let rows: Vec<(String, String)> = sqlx::query_as(
+            "SELECT target_id, details FROM audit_events WHERE action = 'prompt.label_set' \
+             ORDER BY seq",
+        )
+        .fetch_all(app.state.meta.reader())
+        .await
+        .unwrap();
+        let details: Vec<Value> = rows
+            .iter()
+            .map(|(_, details)| serde_json::from_str(details).unwrap())
+            .collect();
+        assert_eq!(
+            details,
+            vec![
+                json!({"label": "staging", "version": 1}),
+                json!({"label": "canary", "version": 1}),
+                json!({"label": "staging", "version": 2}),
+            ]
+        );
+        assert_eq!(rows[0].0, rows[1].0);
+        assert_eq!(rows[0].0, rows[2].0);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn protected_prompt_write_records_nothing() {
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        let member = app
+            .add_member(&seeded, "member@example.com", OrgRole::Member)
+            .await;
+        let member_auth = ("cookie", member.cookie.as_str());
+        let admin_auth = ("cookie", seeded.cookie.as_str());
+        let list = base(&seeded);
+        let created = call(
+            &app,
+            Method::POST,
+            &list,
+            admin_auth,
+            Some(text_body("pr", &["production"])),
+        )
+        .await;
+        assert_eq!(created.status, StatusCode::CREATED);
+        // Creating the prompt with labels records label sets too, so count only the refused move.
+        let label_sets_before: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM audit_events WHERE action = 'prompt.label_set'",
+        )
+        .fetch_one(app.state.meta.reader())
+        .await
+        .unwrap();
+
+        let refused = call(
+            &app,
+            Method::PUT,
+            &format!("{list}/pr/labels/production"),
+            member_auth,
+            Some(json!({"version": 1})),
+        )
+        .await;
+        assert_eq!(refused.status, StatusCode::FORBIDDEN);
+        let label_sets_after: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM audit_events WHERE action = 'prompt.label_set'",
+        )
+        .fetch_one(app.state.meta.reader())
+        .await
+        .unwrap();
+        assert_eq!(
+            label_sets_after, label_sets_before,
+            "a refused label move records nothing"
+        );
     }
 
     /// The label `label` points at in a prompt's answer, if set.

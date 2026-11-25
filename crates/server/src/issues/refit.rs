@@ -825,7 +825,6 @@ async fn budget_stop(state: &AppState, source: &SourceRow, stop: BudgetStop, now
             match paused {
                 Ok(()) => {
                     tracing::info!(
-                        target: "audit",
                         source_id = %source_id,
                         reason = "budget",
                         "issue source paused"

@@ -862,7 +862,6 @@ impl Turn<'_> {
             let _ = self.emit(event).await;
         }
         tracing::info!(
-            target: "audit",
             project_id = %self.setup.project.id,
             conversation_id = %self.setup.conversation,
             user_id = %self.setup.user.id,

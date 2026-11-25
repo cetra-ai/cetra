@@ -11,6 +11,8 @@ use crate::api::common::{FieldError, Page, PageParams};
 use crate::api::keys::{
     CreatePersonalTokenRequest, CreatedPersonalToken, PersonalToken, PersonalTokenScope,
 };
+use crate::audit::catalog::PatAction;
+use crate::audit::{self, Event, TargetKind};
 use crate::auth::principal::{self, Principal};
 use crate::auth::roles::KeyScope;
 use crate::auth::secret::{self, KeyKind};
@@ -85,6 +87,7 @@ async fn list_tokens(
 async fn create_token(
     State(state): State<AppState>,
     Extension(principal): Extension<Principal>,
+    ctx: audit::Ctx,
     error::Json(body): error::Json<CreatePersonalTokenRequest>,
 ) -> Result<(StatusCode, error::Json<CreatedPersonalToken>), ApiError> {
     let user = principal::session_user(&principal)?;
@@ -97,11 +100,15 @@ async fn create_token(
     let user_id = user.id;
     let hash = minted.hash.clone();
     let prefix = minted.prefix.clone();
+    let action = PatAction::Created {
+        scopes: scope_names(&scopes),
+        expires_at,
+    };
     let row = state
         .meta
         .write(move |conn| {
             Box::pin(async move {
-                personal_tokens::insert_token(
+                let row = personal_tokens::insert_token(
                     conn,
                     NewToken {
                         user_id,
@@ -113,12 +120,13 @@ async fn create_token(
                     },
                     now,
                 )
-                .await
+                .await?;
+                let event = Event::new(action).target(TargetKind::Pat, row.id);
+                audit::record(conn, &ctx, event, now).await?;
+                Ok(row)
             })
         })
         .await?;
-    let token_id = row.id;
-    tracing::info!(target: "audit", %token_id, %user_id, "personal token created");
     Ok((
         StatusCode::CREATED,
         error::Json(CreatedPersonalToken {
@@ -131,42 +139,63 @@ async fn create_token(
 async fn revoke_token(
     State(state): State<AppState>,
     Extension(principal): Extension<Principal>,
+    ctx: audit::Ctx,
     error::Path(path): error::Path<TokenPath>,
 ) -> Result<StatusCode, ApiError> {
     let user = principal::session_user(&principal)?;
-    revoke_owned(&state, user.id, path.id).await
+    revoke_owned(&state, user.id, path.id, &ctx).await
 }
 
 async fn revoke_current(
     State(state): State<AppState>,
     Extension(principal): Extension<Principal>,
+    ctx: audit::Ctx,
 ) -> Result<StatusCode, ApiError> {
     let Principal::Pat { user, token_id, .. } = principal else {
         return Err(ApiError::NotFound);
     };
-    revoke_owned(&state, user.id, token_id).await
+    revoke_owned(&state, user.id, token_id, &ctx).await
 }
 
 async fn revoke_owned(
     state: &AppState,
     user_id: Uuid,
     token_id: Uuid,
+    ctx: &audit::Ctx,
 ) -> Result<StatusCode, ApiError> {
     let now = state.clock.now_ns();
+    let ctx = ctx.clone();
     let hash = state
         .meta
         .write(move |conn| {
-            Box::pin(
-                async move { personal_tokens::revoke_token(conn, user_id, token_id, now).await },
-            )
+            Box::pin(async move {
+                let hash = personal_tokens::revoke_token(conn, user_id, token_id, now).await?;
+                if hash.is_some() {
+                    let event = Event::new(PatAction::Revoked).target(TargetKind::Pat, token_id);
+                    audit::record(conn, &ctx, event, now).await?;
+                }
+                Ok(hash)
+            })
         })
         .await?;
     let Some(hash) = hash else {
         return Err(ApiError::NotFound);
     };
     state.pat_cache.evict(&hash);
-    tracing::info!(target: "audit", %token_id, %user_id, "personal token revoked");
     Ok(StatusCode::NO_CONTENT)
+}
+
+/// The scope names the audit record carries (as `meta::personal_tokens` stores them).
+fn scope_names(scopes: &[KeyScope]) -> Vec<&'static str> {
+    scopes
+        .iter()
+        .map(|scope| match scope {
+            KeyScope::Ingest => "ingest",
+            KeyScope::Read => "read",
+            KeyScope::Write => "write",
+            KeyScope::Feedback => "feedback",
+        })
+        .collect()
 }
 
 fn checked_name(name: &str) -> Result<String, ApiError> {
@@ -784,5 +813,63 @@ mod tests {
         assert_eq!(past.status, 400);
         let text = String::from_utf8_lossy(&past.body);
         assert!(!text.contains("\"1\""));
+    }
+
+    #[tokio::test]
+    async fn pat_create_and_revoke_are_recorded() {
+        let app = TestApp::new().await;
+        let account = account(&app).await;
+        let created = create(
+            &app,
+            &account,
+            json!({"name": "logout", "scopes": ["read", "write"]}),
+        )
+        .await;
+        let id = created["token"]["id"].as_str().unwrap().to_owned();
+        let auth = bearer(created["secret"].as_str().unwrap());
+        let revoked = app
+            .request(Method::DELETE, "/api/v1/me/tokens/current")
+            .header(header::AUTHORIZATION.as_str(), &auth)
+            .send()
+            .await;
+        assert_eq!(revoked.status, 204);
+
+        #[allow(clippy::type_complexity)]
+        let rows: Vec<(
+            String,
+            String,
+            Option<String>,
+            Option<String>,
+            String,
+            String,
+        )> = sqlx::query_as(
+            "SELECT action, actor_kind, via, credential_id, target_id, details \
+                 FROM audit_events WHERE target_kind = 'pat' ORDER BY seq",
+        )
+        .fetch_all(app.state.meta.reader())
+        .await
+        .unwrap();
+        assert_eq!(rows.len(), 2);
+        let user = account.user_id.to_string();
+        let (created_row, revoked_row) = (&rows[0], &rows[1]);
+        assert_eq!(created_row.0, "pat.created");
+        assert_eq!(created_row.1, "user");
+        assert_eq!(created_row.2.as_deref(), Some("session"));
+        assert_eq!(created_row.4, id);
+        assert_eq!(
+            created_row.5,
+            r#"{"scopes":["read","write"],"expires_at":null}"#
+        );
+        assert_eq!(revoked_row.0, "pat.revoked");
+        assert_eq!(revoked_row.2.as_deref(), Some("pat"));
+        assert_eq!(revoked_row.3.as_deref(), Some(id.as_str()));
+        assert_eq!(revoked_row.4, id);
+        assert_eq!(revoked_row.5, "{}");
+        let actor: Option<String> =
+            sqlx::query_scalar("SELECT actor_id FROM audit_events WHERE action = 'pat.revoked'")
+                .fetch_one(app.state.meta.reader())
+                .await
+                .unwrap();
+        assert_eq!(actor.as_deref(), Some(user.as_str()));
     }
 }

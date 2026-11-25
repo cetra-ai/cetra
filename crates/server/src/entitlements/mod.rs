@@ -87,6 +87,9 @@ pub(crate) struct Limits {
     pub(crate) max_active_online_rules: Option<u64>,
     pub(crate) max_active_issue_sources: Option<u64>,
     pub(crate) max_annotation_queues: Option<u64>,
+    /// Audit log retention in days (D-EA-7). `None`: the instance's `audit.retention_days`;
+    /// `Some(0)`: kept forever; otherwise at least 30 days (plan P-4).
+    pub(crate) audit_retention_days: Option<u64>,
 }
 
 /// The instance defaults, resolved from config once (`[entitlements.defaults]`).
@@ -125,6 +128,8 @@ impl Defaults {
                 max_active_online_rules: config.max_active_online_rules,
                 max_active_issue_sources: config.max_active_issue_sources,
                 max_annotation_queues: config.max_annotation_queues,
+                // No `[entitlements.defaults]` key: the instance's `audit.retention_days` applies.
+                audit_retention_days: None,
             },
         }
     }
@@ -207,6 +212,8 @@ pub(crate) struct EntitlementsState {
     defaults: Defaults,
     /// The newest accepted token per org, valid or in grace at the time it was read.
     orgs: RwLock<HashMap<OrgId, Arc<OrgGrant>>>,
+    /// `entitlements.control_plane`: the org tokens' SSO domains count for SCIM only with it on.
+    control_plane: bool,
 }
 
 impl EntitlementsState {
@@ -237,6 +244,7 @@ impl EntitlementsState {
                 license_writes: tokio::sync::Mutex::new(()),
                 defaults,
                 orgs: RwLock::new(orgs),
+                control_plane,
             });
         }
         for stored in stored_tokens {
@@ -265,6 +273,7 @@ impl EntitlementsState {
             license_writes: tokio::sync::Mutex::new(()),
             defaults,
             orgs: RwLock::new(orgs),
+            control_plane,
         })
     }
 
@@ -298,6 +307,19 @@ impl EntitlementsState {
             .unwrap_or_else(PoisonError::into_inner)
             .get(&org)
             .cloned()
+    }
+
+    /// The org's SSO domains from its org token, which SCIM treats as verified (D-EA-17): the
+    /// grant's list while `now < grace_ends_at`; empty otherwise and on a cell without
+    /// `entitlements.control_plane`.
+    pub(crate) fn sso_domains(&self, org: OrgId, now: i64) -> Vec<String> {
+        if !self.control_plane {
+            return Vec::new();
+        }
+        match self.grant(org) {
+            Some(grant) if now < grant.grace_ends_at => grant.sso_domains.clone(),
+            _ => Vec::new(),
+        }
     }
 
     /// Replaces the org's grant if `grant.issued_at` is newer than the held one.
@@ -483,7 +505,8 @@ mod tests {
     use crate::meta::entitlements::{StoredToken, put_token, record_window_end};
     use crate::meta::orgs::insert_org;
     use crate::test_support::{
-        TestApp, capture_logs, license_key, license_key_until, org_token, sign_token,
+        TestApp, capture_logs, license_key, license_key_until, org_token, org_token_with_domains,
+        sign_token,
     };
     use cetra_token::TokenError;
     use serde_json::json;
@@ -514,6 +537,7 @@ mod tests {
             },
             features: FeatureSet::EMPTY,
             limits: Limits::default(),
+            sso_domains: Vec::new(),
         }
     }
 
@@ -571,6 +595,12 @@ mod tests {
         );
         assert_eq!(Feature::from_name("org_sso"), Some(Feature::OrgSso));
         assert!(Feature::OrgSso.is_ee());
+        assert_eq!(Feature::from_name("saml"), Some(Feature::Saml));
+        assert!(Feature::Saml.is_ee());
+        assert_eq!(Feature::from_name("scim"), Some(Feature::Scim));
+        assert!(Feature::Scim.is_ee());
+        assert_eq!(Feature::from_name("audit_log"), Some(Feature::AuditLog));
+        assert!(Feature::AuditLog.is_ee());
         assert_eq!(Feature::from_name("audit_logs"), None);
         assert!(Feature::ALL.len() <= 32);
     }
@@ -595,6 +625,77 @@ mod tests {
         );
         assert!(
             !Entitlements::new(FeatureSet::EMPTY, Limits::default()).allows(Feature::ProjectRoles)
+        );
+    }
+
+    #[tokio::test]
+    async fn sso_domains_empty_after_grace() {
+        let app = TestApp::with_config(|config| config.entitlements.control_plane = true).await;
+        let org = OrgId::new_v7();
+        let token = org_token_with_domains(
+            org,
+            "2025-12-01T00:00:00Z",
+            "2026-01-01T00:00:00Z",
+            "2026-02-01T00:00:00Z",
+            &[],
+            &json!({}),
+            &["acme.test"],
+        );
+        let (granted, grant) =
+            grant_from_token(&token, PublicUrl::default().origin(), &Limits::default()).unwrap();
+        app.state.entitlements.put_grant(granted, grant);
+        let domains = vec!["acme.test".to_owned()];
+
+        // Before expiry, and in grace, the token's domains count.
+        assert_eq!(
+            app.state
+                .entitlements
+                .sso_domains(org, at("2025-12-15T00:00:00Z")),
+            domains
+        );
+        assert_eq!(
+            app.state
+                .entitlements
+                .sso_domains(org, at("2026-01-15T00:00:00Z")),
+            domains
+        );
+        // From grace_ends_at on, none.
+        assert!(
+            app.state
+                .entitlements
+                .sso_domains(org, at("2026-02-01T00:00:00Z"))
+                .is_empty()
+        );
+        // An org without a token has none.
+        assert!(
+            app.state
+                .entitlements
+                .sso_domains(OrgId::new_v7(), at("2025-12-15T00:00:00Z"))
+                .is_empty()
+        );
+    }
+
+    #[tokio::test]
+    async fn sso_domains_are_empty_on_a_cell_without_control_plane() {
+        let app = TestApp::with_config(|config| config.entitlements.control_plane = false).await;
+        let org = OrgId::new_v7();
+        let token = org_token_with_domains(
+            org,
+            "2025-12-01T00:00:00Z",
+            "2099-01-01T00:00:00Z",
+            "2099-02-01T00:00:00Z",
+            &[],
+            &json!({}),
+            &["acme.test"],
+        );
+        let (granted, grant) =
+            grant_from_token(&token, PublicUrl::default().origin(), &Limits::default()).unwrap();
+        app.state.entitlements.put_grant(granted, grant);
+        assert!(
+            app.state
+                .entitlements
+                .sso_domains(org, at("2025-12-15T00:00:00Z"))
+                .is_empty()
         );
     }
 

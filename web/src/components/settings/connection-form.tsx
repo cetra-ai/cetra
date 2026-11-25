@@ -1,12 +1,14 @@
 import { useQueryClient } from "@tanstack/react-query";
 import { X } from "lucide-react";
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { $api } from "@/api/client";
-import { fieldErrors, problemMessage } from "@/api/problem";
+import { fieldErrors, problemMessage, problemOf } from "@/api/problem";
 import { connectionsKey } from "@/api/queries-settings";
 import type { Schema } from "@/api/types";
 import { DisabledReason } from "@/components/disabled-reason";
+import { FormError } from "@/components/form/form-error";
 import { TextField } from "@/components/form/text-field";
+import { ConnectionTestResult } from "@/components/settings/connection-test";
 import { SettingsFormCard } from "@/components/settings/settings-card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -18,14 +20,18 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
-import { LLM_ADAPTER_LABELS } from "@/lib/llm-adapters";
+import {
+  adapterOf,
+  DEFAULT_BASE_URLS,
+  PROVIDER_CHOICES,
+  type ProviderChoice,
+  providerChoice,
+} from "@/lib/llm-adapters";
+import { MODEL_SUGGESTIONS } from "@/lib/llm-models";
 
 type Connection = Schema<"LlmConnection">;
 type StructuredMode = Schema<"StructuredOutputMode">;
-
-const PROVIDERS = (Object.entries(LLM_ADAPTER_LABELS) as [Schema<"LlmAdapter">, string][]).map(
-  ([value, label]) => ({ value, label }),
-);
+type TestKind = "chat" | "embedding";
 
 const STRUCTURED_OUTPUT_MODES: { value: StructuredMode; label: string }[] = [
   { value: "native", label: "Native (default)" },
@@ -75,8 +81,8 @@ function newHeaderRow(name: string): HeaderRow {
   return { id: headerRowId, name, value: "" };
 }
 
-function adapterValue(value: string): Schema<"LlmAdapter"> {
-  return value === "anthropic" || value === "gemini" ? value : "openai";
+function providerValue(value: string): ProviderChoice {
+  return PROVIDER_CHOICES.find((option) => option.value === value)?.value ?? "openai";
 }
 
 function structuredValue(value: string): StructuredMode | "" {
@@ -132,25 +138,34 @@ function useConnectionMutations(org: string) {
 
 /**
  * The create or edit form of a connection, shown in the list's row panel. Save is enabled only
- * while the values differ and are valid. A create form calls `onCreated` once saved.
+ * while the values differ and are valid. A create form calls `onCreated` once saved. Test checks
+ * the form's current values, saved or not, and shows the result under the form (D-I-53).
  */
 export function ConnectionForm({
   org,
   connection,
   onCreated,
-  onTest,
 }: {
   org: string;
   /** Undefined for a new connection. */
   connection: Connection | undefined;
   onCreated: () => void;
-  /** Shows a Test button, which is disabled while the values are unsaved. */
-  onTest?: () => void;
 }) {
   const { create, patch } = useConnectionMutations(org);
+  const queryClient = useQueryClient();
+  // gcTime 0: a test request holds the key, so it leaves the cache once settled.
+  const testSaved = $api.useMutation("post", "/api/v1/orgs/{org}/llm-connections/{id}/test", {
+    gcTime: 0,
+  });
+  const testUnsaved = $api.useMutation("post", "/api/v1/orgs/{org}/llm-connections/test", {
+    gcTime: 0,
+  });
   const pending = connection === undefined ? create.isPending : patch.isPending;
   const [name, setName] = useState(connection?.name ?? "");
-  const [adapter, setAdapter] = useState<Schema<"LlmAdapter">>(connection?.adapter ?? "openai");
+  const [provider, setProvider] = useState<ProviderChoice>(
+    connection ? providerChoice(connection) : "openai",
+  );
+  const adapter = adapterOf(provider);
   const [apiKey, setApiKey] = useState("");
   const [baseUrl, setBaseUrl] = useState(connection?.base_url ?? "");
   const [defaultModel, setDefaultModel] = useState(connection?.default_model ?? "");
@@ -173,6 +188,14 @@ export function ConnectionForm({
   const [serverErrors, setServerErrors] = useState<Partial<Record<FieldKey, string>>>({});
   const [serverError, setServerError] = useState<string | undefined>();
   const [saved, setSaved] = useState(false);
+  const [testResult, setTestResult] = useState<Schema<"LlmConnectionTestResult"> | undefined>();
+  const [testError, setTestError] = useState<string | undefined>();
+  const [embeddingModel, setEmbeddingModel] = useState("");
+  // Focus goes here when a test ends: the form's controls are disabled while it runs.
+  const testRegion = useRef<HTMLDivElement>(null);
+  const testing = testSaved.isPending || testUnsaved.isPending;
+  // While a test runs the form cannot change, so its result always describes the values shown.
+  const busy = pending || testing;
 
   const trimmedName = name.trim();
   // Header values are hidden on an edit, so the rows only count once the user changes them.
@@ -183,6 +206,9 @@ export function ConnectionForm({
   }
   if (connection === undefined && apiKey.trim().length === 0) {
     clientErrors.api_key = "Enter the API key.";
+  }
+  if (provider === "openai_compatible" && baseUrl.trim().length === 0) {
+    clientErrors.base_url = "Enter the server's base URL.";
   }
   if (maxConcurrency.trim() !== "" && !isWholeNumberIn(maxConcurrency.trim(), 1, 64)) {
     clientErrors.max_concurrency = "Enter a whole number from 1 to 64.";
@@ -195,6 +221,7 @@ export function ConnectionForm({
     clientErrors.headers = headerError;
   }
   const invalid = Object.keys(clientErrors).length > 0;
+  const suggestions = MODEL_SUGGESTIONS[provider];
 
   /** A client error shows once its field was touched; a server error shows until the next save. */
   function fieldError(field: FieldKey): string | undefined {
@@ -207,6 +234,9 @@ export function ConnectionForm({
   function touch(field: string) {
     setTouched((current) => (current[field] === true ? current : { ...current, [field]: true }));
     setSaved(false);
+    // A result describes the values it tested.
+    setTestResult(undefined);
+    setTestError(undefined);
   }
 
   function headerValues(): Record<string, string> {
@@ -219,6 +249,19 @@ export function ConnectionForm({
       map[rowName] = row.value;
     }
     return map;
+  }
+
+  function chooseProvider(next: ProviderChoice) {
+    setProvider(next);
+    // The URL error was for the previous provider's URL.
+    setServerErrors(({ base_url: _, ...rest }) => rest);
+    // Another provider's URL is wrong for this one; the saved choice gets its saved URL back.
+    setBaseUrl(
+      connection !== undefined && next === providerChoice(connection)
+        ? (connection.base_url ?? "")
+        : "",
+    );
+    touch("provider");
   }
 
   function createBody(): Schema<"CreateLlmConnectionRequest"> {
@@ -290,6 +333,7 @@ export function ConnectionForm({
   const dirty =
     body === undefined
       ? trimmedName.length > 0 ||
+        provider !== "openai" ||
         apiKey.length > 0 ||
         baseUrl.trim().length > 0 ||
         defaultModel.trim().length > 0 ||
@@ -337,17 +381,135 @@ export function ConnectionForm({
     patch.mutate(
       { params: { path: { org, id: connection.id } }, body: sent },
       {
-        onSuccess: () => {
+        onSuccess: (updated) => {
+          // The saved provider decides the select, as the header shows it (a base URL makes it compatible).
+          setProvider(providerChoice(updated));
           // The saved key and header values are gone from the form; the names stay.
           setApiKey("");
           setHeadersDirty(false);
           setTouched({});
+          // The saved values changed, so the last result no longer describes them.
+          setTestResult(undefined);
+          setTestError(undefined);
           if (sent.extra_headers !== undefined) {
             setRows(Object.keys(sent.extra_headers).map((headerName) => newHeaderRow(headerName)));
           }
           setSaved(true);
         },
         onError: handleError,
+      },
+    );
+  }
+
+  /** A saved connection's test: the fields that differ from it, and the model only when it changed. */
+  function savedTestBody(current: Connection, kind: TestKind): Schema<"TestLlmConnectionRequest"> {
+    const edits = editBody(current);
+    const body: Schema<"TestLlmConnectionRequest"> = {};
+    if (edits.adapter !== undefined) {
+      body.adapter = edits.adapter;
+    }
+    if (edits.api_key !== undefined) {
+      body.api_key = edits.api_key;
+    }
+    if (edits.base_url !== undefined) {
+      body.base_url = edits.base_url;
+    }
+    if (edits.structured_output !== undefined) {
+      body.structured_output = edits.structured_output;
+    }
+    if (edits.extra_headers !== undefined) {
+      body.extra_headers = edits.extra_headers;
+    }
+    if (kind === "embedding") {
+      body.embedding_model = embeddingModel.trim();
+    } else if (defaultModel.trim() !== (current.default_model ?? "").trim()) {
+      // An unchanged default model is left out, so the server counts the test as one of the
+      // default model (D-I-53).
+      body.model = defaultModel.trim();
+    }
+    return body;
+  }
+
+  /** An unsaved connection's test: every value set in the form. */
+  function unsavedTestBody(kind: TestKind): Schema<"TestUnsavedLlmConnectionRequest"> {
+    const body: Schema<"TestUnsavedLlmConnectionRequest"> = { adapter, api_key: apiKey };
+    if (baseUrl.trim()) {
+      body.base_url = baseUrl.trim();
+    }
+    if (structured !== "") {
+      body.structured_output = structured;
+    }
+    if (headersDirty) {
+      body.extra_headers = headerValues();
+    }
+    if (kind === "embedding") {
+      body.embedding_model = embeddingModel.trim();
+    } else {
+      body.model = defaultModel.trim();
+    }
+    return body;
+  }
+
+  // Only what a test sends can stop it: the name and the limits are not sent.
+  const testProblem = clientErrors.api_key ?? clientErrors.base_url ?? clientErrors.headers;
+  const chatTestReason =
+    testProblem ?? (defaultModel.trim() === "" ? "Enter a default model to test." : undefined);
+  const embeddingTestReason =
+    adapter === "anthropic"
+      ? "Anthropic has no embeddings API"
+      : (testProblem ??
+        (embeddingModel.trim() === "" ? "Enter an embedding model to test." : undefined));
+
+  /** A test's errors: a field the form renders goes under it, the rest under the form's result. */
+  function handleTestError(caught: unknown) {
+    if (problemOf(caught)?.status === 429) {
+      setTestError("Too many tests. Wait a minute.");
+      return;
+    }
+    const placed: Partial<Record<FieldKey, string>> = {};
+    const unplaced: string[] = [];
+    for (const [field, message] of Object.entries(fieldErrors(caught))) {
+      if (field.startsWith("extra_headers")) {
+        placed.headers ??= message;
+      } else if (isPlacedField(field)) {
+        placed[field] = message;
+      } else {
+        // `model`, `embedding_model`: the test's own fields, shown under the form.
+        unplaced.push(message);
+      }
+    }
+    setServerErrors(placed);
+    if (unplaced.length > 0) {
+      setTestError(unplaced.join(" "));
+    } else if (Object.keys(placed).length === 0) {
+      setTestError(problemMessage(caught, "Could not run the test."));
+    }
+  }
+
+  function runTest(kind: TestKind) {
+    setTestResult(undefined);
+    setTestError(undefined);
+    setServerErrors({});
+    setServerError(undefined);
+    const options = {
+      onSuccess: (result: Schema<"LlmConnectionTestResult">) => {
+        setTestResult(result);
+      },
+      onError: handleTestError,
+    };
+    if (connection === undefined) {
+      testUnsaved.mutate({ params: { path: { org } }, body: unsavedTestBody(kind) }, options);
+      return;
+    }
+    testSaved.mutate(
+      { params: { path: { org, id: connection.id } }, body: savedTestBody(connection, kind) },
+      {
+        ...options,
+        onSuccess: (result) => {
+          setTestResult(result);
+          // The status and the last test may have changed.
+          void queryClient.invalidateQueries({ queryKey: connectionsKey(org) });
+        },
       },
     );
   }
@@ -371,10 +533,25 @@ export function ConnectionForm({
   }
 
   const advancedError =
+    (provider !== "openai_compatible" && fieldError("base_url") !== undefined) ||
     fieldError("max_concurrency") !== undefined ||
     fieldError("requests_per_minute") !== undefined ||
     fieldError("headers") !== undefined;
   const headersError = fieldError("headers");
+
+  // An error opens Advanced, where its field is; the user may close it again.
+  useEffect(() => {
+    if (advancedError) {
+      setAdvancedOpen(true);
+    }
+  }, [advancedError]);
+
+  // Focus moves to the test's outcome when a test ends. A cleared result does not move it.
+  useEffect(() => {
+    if (testResult !== undefined || testError !== undefined) {
+      testRegion.current?.focus();
+    }
+  }, [testResult, testError]);
 
   return (
     <SettingsFormCard
@@ -386,232 +563,290 @@ export function ConnectionForm({
       saved={saved}
       error={serverError}
       saveLabel={connection === undefined ? "Add connection" : "Save"}
+      disabledReason={testing ? "Wait for the test to finish." : undefined}
       onSubmit={submit}
       footerExtra={
-        onTest === undefined ? undefined : (
-          <DisabledReason reason={dirty ? "Save your changes before testing." : undefined}>
-            <Button type="button" variant="outline" disabled={dirty} onClick={onTest}>
-              Test connection
-            </Button>
-          </DisabledReason>
-        )
+        <DisabledReason reason={chatTestReason}>
+          <Button
+            type="button"
+            variant="outline"
+            disabled={chatTestReason !== undefined || testing || pending}
+            onClick={() => runTest("chat")}
+          >
+            {testing ? "Testing…" : "Test connection"}
+          </Button>
+        </DisabledReason>
       }
     >
-      <TextField
-        id="connection-name"
-        label="Name"
-        value={name}
-        maxLength={100}
-        error={fieldError("name")}
-        disabled={pending}
-        onChange={(next) => {
-          setName(next);
-          touch("name");
-        }}
-      />
-      <div className="flex flex-col gap-2">
-        <Label htmlFor="connection-provider">Provider</Label>
-        <Select
-          value={adapter}
-          onValueChange={(value) => {
-            setAdapter(adapterValue(value));
-            touch("adapter");
-          }}
-          disabled={pending}
-        >
-          <SelectTrigger
-            id="connection-provider"
-            aria-describedby="connection-provider-description"
-            className="w-fit"
+      <div className="flex max-w-xl flex-col gap-4">
+        <div className="flex flex-col gap-2">
+          <Label htmlFor="connection-provider">Provider</Label>
+          <Select
+            value={provider}
+            onValueChange={(value) => {
+              chooseProvider(providerValue(value));
+            }}
+            disabled={busy}
           >
-            <SelectValue />
-          </SelectTrigger>
-          <SelectContent>
-            {PROVIDERS.map((option) => (
-              <SelectItem key={option.value} value={option.value}>
-                {option.label}
-              </SelectItem>
-            ))}
-          </SelectContent>
-        </Select>
-        <p id="connection-provider-description" className="text-caption text-muted-foreground">
-          OpenAI-compatible covers any server with an OpenAI-style API: Azure, vLLM, Ollama,
-          OpenRouter, LiteLLM.
-        </p>
-      </div>
-      <TextField
-        id="connection-api-key"
-        label="API key"
-        type="password"
-        autoComplete="new-password"
-        value={apiKey}
-        error={fieldError("api_key")}
-        disabled={pending}
-        description={
-          connection === undefined
-            ? "Stored encrypted, never shown again."
-            : "Stored encrypted. Leave empty to keep the current key."
-        }
-        onChange={(next) => {
-          setApiKey(next);
-          touch("api_key");
-        }}
-      />
-      <TextField
-        id="connection-base-url"
-        label="Base URL"
-        value={baseUrl}
-        error={fieldError("base_url")}
-        disabled={pending}
-        onChange={(next) => {
-          setBaseUrl(next);
-          touch("base_url");
-        }}
-        description="For OpenAI-compatible servers such as Azure, vLLM, Ollama, OpenRouter or LiteLLM. Local addresses need the server setting security.allow_private_network_egress."
-      />
-      <TextField
-        id="connection-model"
-        label="Default model"
-        value={defaultModel}
-        error={fieldError("default_model")}
-        disabled={pending}
-        onChange={(next) => {
-          setDefaultModel(next);
-          touch("default_model");
-        }}
-      />
-      <div className="flex flex-col gap-2">
-        <Label htmlFor="connection-structured-output">Structured output</Label>
-        <Select
-          value={structured}
-          onValueChange={(value) => {
-            setStructured(structuredValue(value));
-            touch("structured_output");
+            <SelectTrigger id="connection-provider" className="w-fit">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              {PROVIDER_CHOICES.map((option) => (
+                <SelectItem key={option.value} value={option.value}>
+                  {option.label}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+        </div>
+        <TextField
+          id="connection-name"
+          label="Name"
+          value={name}
+          maxLength={100}
+          error={fieldError("name")}
+          disabled={busy}
+          onChange={(next) => {
+            setName(next);
+            touch("name");
           }}
-          disabled={pending}
-        >
-          <SelectTrigger
-            id="connection-structured-output"
-            aria-describedby="connection-structured-output-description"
-            className="w-fit"
-          >
-            <SelectValue placeholder="Native (default)" />
-          </SelectTrigger>
-          <SelectContent>
-            {STRUCTURED_OUTPUT_MODES.map((option) => (
-              <SelectItem key={option.value} value={option.value}>
-                {option.label}
-              </SelectItem>
+        />
+        <TextField
+          id="connection-api-key"
+          label="API key"
+          type="password"
+          autoComplete="new-password"
+          value={apiKey}
+          placeholder={
+            connection === undefined
+              ? undefined
+              : connection.api_key_hint
+                ? `••••${connection.api_key_hint}`
+                : "••••••••"
+          }
+          error={fieldError("api_key")}
+          disabled={busy}
+          description={
+            connection === undefined
+              ? "Stored encrypted, never shown again."
+              : "Stored encrypted. Type a new key to replace it."
+          }
+          onChange={(next) => {
+            setApiKey(next);
+            touch("api_key");
+          }}
+        />
+        {provider === "openai_compatible" ? (
+          <TextField
+            id="connection-base-url"
+            label="Base URL"
+            placeholder="https://my-gateway.example.com/v1"
+            value={baseUrl}
+            error={fieldError("base_url")}
+            disabled={busy}
+            onChange={(next) => {
+              setBaseUrl(next);
+              touch("base_url");
+            }}
+            description="Any server with an OpenAI-style API: Azure OpenAI, vLLM, Ollama, OpenRouter, LiteLLM."
+          />
+        ) : null}
+        <TextField
+          id="connection-model"
+          label="Default model"
+          value={defaultModel}
+          list={suggestions.length > 0 ? "connection-model-suggestions" : undefined}
+          error={fieldError("default_model")}
+          disabled={busy}
+          onChange={(next) => {
+            setDefaultModel(next);
+            touch("default_model");
+          }}
+        />
+        {suggestions.length > 0 ? (
+          <datalist id="connection-model-suggestions">
+            {suggestions.map((name) => (
+              <option key={name} value={name} />
             ))}
-          </SelectContent>
-        </Select>
-        <p
-          id="connection-structured-output-description"
-          className="text-caption text-muted-foreground"
+          </datalist>
+        ) : null}
+        <details
+          open={advancedOpen}
+          onToggle={(event) => {
+            setAdvancedOpen(event.currentTarget.open);
+          }}
         >
-          Use Tool call or Prompt only if the provider rejects native structured output.
-        </p>
-      </div>
-      <details
-        open={advancedOpen || advancedError}
-        onToggle={(event) => {
-          setAdvancedOpen(event.currentTarget.open);
-        }}
-      >
-        <summary className="cursor-pointer text-body font-medium">Advanced</summary>
-        <div className="mt-4 flex flex-col gap-4">
-          <div className="flex flex-col gap-4 sm:flex-row">
-            <TextField
-              id="connection-max-concurrency"
-              type="number"
-              label="Max concurrency"
-              value={maxConcurrency}
-              placeholder="4"
-              unit="concurrent"
-              inputMode="numeric"
-              min={1}
-              max={64}
-              error={fieldError("max_concurrency")}
-              disabled={pending}
-              onChange={(next) => {
-                setMaxConcurrency(next);
-                touch("max_concurrency");
-              }}
-            />
-            <TextField
-              id="connection-requests-per-minute"
-              type="number"
-              label="Requests per minute"
-              value={requestsPerMinute}
-              placeholder="300"
-              unit="per minute"
-              inputMode="numeric"
-              min={1}
-              max={10000}
-              error={fieldError("requests_per_minute")}
-              disabled={pending}
-              onChange={(next) => {
-                setRequestsPerMinute(next);
-                touch("requests_per_minute");
-              }}
-            />
-          </div>
-          <fieldset className="flex flex-col gap-2">
-            <legend className="text-body leading-none font-medium">Extra headers</legend>
-            <div className="flex items-center justify-end gap-2">
-              {connection !== undefined ? (
-                <p className="mr-auto text-caption text-muted-foreground">
-                  Values are hidden. Set every header again to change them.
+          <summary className="cursor-pointer text-body font-medium">Advanced</summary>
+          <div className="mt-4 flex flex-col gap-4">
+            {provider !== "openai_compatible" ? (
+              <TextField
+                id="connection-base-url"
+                label="Base URL"
+                placeholder={DEFAULT_BASE_URLS[adapter]}
+                value={baseUrl}
+                error={fieldError("base_url")}
+                disabled={busy}
+                onChange={(next) => {
+                  setBaseUrl(next);
+                  touch("base_url");
+                }}
+                description="Only for a proxy. Leave empty to use the provider's API."
+              />
+            ) : null}
+            <div className="flex flex-col gap-2">
+              <Label htmlFor="connection-structured-output">Structured output</Label>
+              <Select
+                value={structured}
+                onValueChange={(value) => {
+                  setStructured(structuredValue(value));
+                  touch("structured_output");
+                }}
+                disabled={busy}
+              >
+                <SelectTrigger
+                  id="connection-structured-output"
+                  aria-describedby="connection-structured-output-description"
+                  className="w-fit"
+                >
+                  <SelectValue placeholder="Native (default)" />
+                </SelectTrigger>
+                <SelectContent>
+                  {STRUCTURED_OUTPUT_MODES.map((option) => (
+                    <SelectItem key={option.value} value={option.value}>
+                      {option.label}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+              <p
+                id="connection-structured-output-description"
+                className="text-caption text-muted-foreground"
+              >
+                Use Tool call or Prompt only if the provider rejects native structured output.
+              </p>
+            </div>
+            <div className="flex flex-col gap-4 sm:flex-row">
+              <TextField
+                id="connection-max-concurrency"
+                type="number"
+                label="Max concurrency"
+                value={maxConcurrency}
+                placeholder="4"
+                unit="concurrent"
+                inputMode="numeric"
+                min={1}
+                max={64}
+                error={fieldError("max_concurrency")}
+                disabled={busy}
+                onChange={(next) => {
+                  setMaxConcurrency(next);
+                  touch("max_concurrency");
+                }}
+              />
+              <TextField
+                id="connection-requests-per-minute"
+                type="number"
+                label="Requests per minute"
+                value={requestsPerMinute}
+                placeholder="300"
+                unit="per minute"
+                inputMode="numeric"
+                min={1}
+                max={10000}
+                error={fieldError("requests_per_minute")}
+                disabled={busy}
+                onChange={(next) => {
+                  setRequestsPerMinute(next);
+                  touch("requests_per_minute");
+                }}
+              />
+            </div>
+            <fieldset className="flex flex-col gap-2">
+              <legend className="text-body leading-none font-medium">Extra headers</legend>
+              <div className="flex items-center justify-end gap-2">
+                {connection !== undefined ? (
+                  <p className="mr-auto text-caption text-muted-foreground">
+                    Values are hidden. Set every header again to change them.
+                  </p>
+                ) : null}
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  disabled={busy}
+                  onClick={addHeaderRow}
+                >
+                  Add header
+                </Button>
+              </div>
+              {rows.map((row, index) => (
+                <div key={row.id} className="flex items-center gap-2">
+                  <Input
+                    aria-label={`Header name ${index + 1}`}
+                    aria-invalid={headersError ? true : undefined}
+                    value={row.name}
+                    disabled={busy}
+                    onChange={(event) => updateHeaderRow(row.id, { name: event.target.value })}
+                  />
+                  <Input
+                    aria-label={`Header value ${index + 1}`}
+                    aria-invalid={headersError ? true : undefined}
+                    type="password"
+                    autoComplete="off"
+                    value={row.value}
+                    disabled={busy}
+                    onChange={(event) => updateHeaderRow(row.id, { value: event.target.value })}
+                  />
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    size="icon-xs"
+                    aria-label={`Remove header ${index + 1}`}
+                    disabled={busy}
+                    onClick={() => removeHeaderRow(row.id)}
+                  >
+                    <X />
+                  </Button>
+                </div>
+              ))}
+              {headersError ? (
+                <p role="alert" className="text-caption text-destructive">
+                  {headersError}
                 </p>
               ) : null}
+            </fieldset>
+            <TextField
+              id="connection-embedding-model"
+              label="Embedding model"
+              value={embeddingModel}
+              disabled={busy || adapter === "anthropic"}
+              description="Optional. Checks a model that issue sources embed with."
+              onChange={(next) => {
+                setEmbeddingModel(next);
+                touch("embedding_model");
+              }}
+            />
+            <DisabledReason reason={embeddingTestReason}>
               <Button
                 type="button"
                 variant="outline"
                 size="sm"
-                disabled={pending}
-                onClick={addHeaderRow}
+                disabled={embeddingTestReason !== undefined || testing || pending}
+                onClick={() => runTest("embedding")}
               >
-                Add header
+                Test embeddings
               </Button>
-            </div>
-            {rows.map((row, index) => (
-              <div key={row.id} className="flex items-center gap-2">
-                <Input
-                  aria-label={`Header name ${index + 1}`}
-                  aria-invalid={headersError ? true : undefined}
-                  value={row.name}
-                  disabled={pending}
-                  onChange={(event) => updateHeaderRow(row.id, { name: event.target.value })}
-                />
-                <Input
-                  aria-label={`Header value ${index + 1}`}
-                  aria-invalid={headersError ? true : undefined}
-                  type="password"
-                  autoComplete="off"
-                  value={row.value}
-                  disabled={pending}
-                  onChange={(event) => updateHeaderRow(row.id, { value: event.target.value })}
-                />
-                <Button
-                  type="button"
-                  variant="ghost"
-                  size="icon-xs"
-                  aria-label={`Remove header ${index + 1}`}
-                  disabled={pending}
-                  onClick={() => removeHeaderRow(row.id)}
-                >
-                  <X />
-                </Button>
-              </div>
-            ))}
-            {headersError ? (
-              <p role="alert" className="text-caption text-destructive">
-                {headersError}
-              </p>
-            ) : null}
-          </fieldset>
+            </DisabledReason>
+          </div>
+        </details>
+      </div>
+      <div ref={testRegion} tabIndex={-1} className="max-w-xl focus:outline-none">
+        <div aria-live="polite">
+          {testResult ? <ConnectionTestResult result={testResult} /> : null}
         </div>
-      </details>
+        <FormError message={testError} />
+      </div>
     </SettingsFormCard>
   );
 }

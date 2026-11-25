@@ -8,7 +8,9 @@ use serde::de::DeserializeOwned;
 use serde_json::{Map, Value, json};
 
 use super::output::{self, DEFAULT_MAX_CHARS};
+use super::record_tool;
 use crate::api::convert;
+use crate::audit;
 use crate::auth::principal::AuthUser;
 use crate::auth::roles::{self, ProjectPerm, Role};
 use crate::demo::orgs_for;
@@ -329,10 +331,12 @@ fn role_name(role: Role) -> &'static str {
 pub(crate) async fn get_schema(
     state: &AppState,
     user: &AuthUser,
+    audit: Option<&audit::Ctx>,
     raw: JsonObject,
 ) -> Result<Value, ApiError> {
     let ProjectArguments { project } = arguments(raw)?;
-    user_project(state, user, &project, ProjectPerm::View).await?;
+    let access = user_project(state, user, &project, ProjectPerm::View).await?;
+    record_tool(state, audit, GET_SCHEMA, &access, None).await?;
     serde_json::to_value(convert::schema_response())
         .map_err(|error| ApiError::Internal(Box::new(error)))
 }

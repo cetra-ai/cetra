@@ -9,9 +9,11 @@ use serde::Deserialize;
 use serde_json::{Map, Value, json};
 
 use super::output::{self, DEFAULT_MAX_CHARS};
+use super::record_tool;
 use super::tools::arguments;
 use crate::api::common::TimeParam;
 use crate::api::saved_views::SavedViewKind;
+use crate::audit;
 use crate::auth::principal::AuthUser;
 use crate::auth::roles::ProjectPerm;
 use crate::http::AppState;
@@ -85,6 +87,7 @@ struct QuerySqlArguments {
 pub(crate) async fn query_sql(
     state: &AppState,
     user: &AuthUser,
+    audit: Option<&audit::Ctx>,
     raw: JsonObject,
 ) -> Result<Value, ApiError> {
     let args: QuerySqlArguments = arguments(raw)?;
@@ -98,6 +101,14 @@ pub(crate) async fn query_sql(
         })?;
     let max_chars = output::max_chars(args.max_chars)?;
     let access = user_project(state, user, &args.project, ProjectPerm::Query).await?;
+    record_tool(
+        state,
+        audit,
+        QUERY_SQL,
+        &access,
+        Some(audit::sha256_hex(&args.query)),
+    )
+    .await?;
     let ctx = open_query_windowed(
         state,
         access.project.org_id,
@@ -232,10 +243,12 @@ struct ListSavedViewsArguments {
 pub(crate) async fn list_saved_views(
     state: &AppState,
     user: &AuthUser,
+    audit: Option<&audit::Ctx>,
     raw: JsonObject,
 ) -> Result<Value, ApiError> {
     let args: ListSavedViewsArguments = arguments(raw)?;
     let access = user_project(state, user, &args.project, ProjectPerm::View).await?;
+    record_tool(state, audit, LIST_SAVED_VIEWS, &access, None).await?;
     views_body(state, access.project.id, user, args.kind, MAX_VIEWS).await
 }
 

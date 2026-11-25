@@ -70,7 +70,9 @@ impl Drop for HookReceiver {
 
 async fn answer(State(shared): State<Arc<Shared>>, request: Request) -> Response {
     let (parts, body) = request.into_parts();
-    let body = to_bytes(body, 1 << 20)
+    // Records up to 4 MiB: an audit stream batch is capped at 1 MiB, but a single record may
+    // exceed the cap and is still sent.
+    let body = to_bytes(body, 4 << 20)
         .await
         .map(|bytes| bytes.to_vec())
         .unwrap_or_default();

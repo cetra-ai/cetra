@@ -1,0 +1,77 @@
+[
+  {
+    "method": "GET",
+    "path": "/scim/v2/Users?filter=userName eq \"jane.doe@acme.test\"",
+    "expect": {
+      "status": 200,
+      "json": { "/totalResults": 0 }
+    }
+  },
+  {
+    "method": "POST",
+    "path": "/scim/v2/Users",
+    "body": {
+      "schemas": ["urn:ietf:params:scim:schemas:core:2.0:User"],
+      "externalId": "00u-jane-doe-1",
+      "userName": "jane.doe@acme.test",
+      "name": { "givenName": "Jane", "familyName": "Doe" },
+      "displayName": "Jane Doe",
+      "emails": [{ "primary": true, "type": "work", "value": "jane.doe@acme.test" }],
+      "active": true
+    },
+    "expect": {
+      "status": 201,
+      "save": { "user": "/id" },
+      "json": { "/userName": "jane.doe@acme.test", "/active": true }
+    }
+  },
+  {
+    "method": "GET",
+    "path": "/scim/v2/Users/{user}",
+    "expect": {
+      "status": 200,
+      "json": { "/id": "{user}", "/userName": "jane.doe@acme.test" }
+    }
+  },
+  {
+    "method": "PUT",
+    "path": "/scim/v2/Users/{user}",
+    "body": {
+      "schemas": ["urn:ietf:params:scim:schemas:core:2.0:User"],
+      "externalId": "00u-jane-doe-1",
+      "userName": "jane.doe@acme.test",
+      "name": { "givenName": "Jane", "familyName": "Doe" },
+      "displayName": "Jane D. Doe",
+      "emails": [{ "primary": true, "type": "work", "value": "jane.doe@acme.test" }],
+      "active": true
+    },
+    "expect": {
+      "status": 200,
+      "json": { "/displayName": "Jane D. Doe", "/active": true }
+    }
+  },
+  {
+    "method": "PATCH",
+    "path": "/scim/v2/Users/{user}",
+    "body": {
+      "schemas": ["urn:ietf:params:scim:api:messages:2.0:PatchOp"],
+      "Operations": [{ "op": "replace", "value": { "active": false } }]
+    },
+    "expect": {
+      "status": 200,
+      "json": { "/active": false }
+    }
+  },
+  {
+    "method": "PATCH",
+    "path": "/scim/v2/Users/{user}",
+    "body": {
+      "schemas": ["urn:ietf:params:scim:api:messages:2.0:PatchOp"],
+      "Operations": [{ "op": "replace", "value": { "active": true } }]
+    },
+    "expect": {
+      "status": 200,
+      "json": { "/active": true }
+    }
+  }
+]

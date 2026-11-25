@@ -21,12 +21,25 @@ with an `### Upgrade notes` section (https://cetra.sh/docs/self-hosting/upgrade/
 - OpenCode, Goose and Oh My Pi are coding agents: `cetra agents setup opencode` (which writes cetra's OpenCode plugin and its config file), `cetra agents setup goose` (which prints Goose's environment lines) and `cetra agents setup oh-my-pi` (which writes Oh My Pi's `.env` lines) connect them to cetra, and `cetra agents remove` undoes each. Integration pages cover these three and Hermes Agent, which is detected and captured but has no setup.
 - Integration pages for Spring AI, LangChain4j, Quarkus LangChain4j, Koog and Microsoft.Extensions.AI, and .NET sections on the Semantic Kernel and Agent Framework pages, with captured spans for all of them: the capture tool runs Java and .NET scenarios, built by `just capture-tools` from the pinned JDK, Maven and .NET SDK. Setup-only pages cover Genkit Go, openai-go, ruby_llm, rig and Arconia.
 - Integration pages for eve, Agent Spec, Atomic Agents, TanStack AI, Flue and EverOS, with captured spans for all of them, a Claude Managed Agents section on the Anthropic page and a LangServe note on the LangChain page. Setup-only pages cover Cloudflare Agents, Graphite, the NVIDIA NeMo Agent Toolkit, Pixeltable and Cognee.
+- Audit records: sign-ins, membership, invitation, credential, SSO, licence and deletion actions, configuration changes of evaluators, rules, alerts, connections, prices, prompts, datasets, issue sources, dashboards and annotation queues, and data leaving the product (SQL runs, exports and MCP tool calls) are recorded in the metadata database with the actor, IP and user agent. Records are kept for `audit.retention_days` (default 365). Reading them comes with the enterprise audit log.
+- SCIM 2.0 user provisioning (Enterprise and the self-hosted licence): per-org tokens, Okta and Entra ID compatible Users endpoint, deprovisioning that revokes access, and members managed by the identity provider.
+- SCIM groups and role mappings to org and project roles, with Okta and Entra ID setup guides.
+- Audit log pages and API for organization admins and instance admins, with filters and CSV/NDJSON export (Enterprise and the self-hosted licence).
+- Audit log streaming to an HTTPS endpoint (Splunk, Datadog or any NDJSON receiver), signed, with retries.
+- The organization home shows a card per project with its last 24 hours (traces, error rate, LLM cost, an hourly chart with errors, the last ingest time), a cards/table switch, a search box, and this month's usage against the plan. `GET /api/v1/orgs/{org}/projects/activity` serves the cards.
+- Org owners can set up SAML 2.0 single sign-on for their org, with metadata import, automatic certificate rotation from a metadata URL, and the same domains and enforcement as OIDC (the `saml` licence feature).
+- LLM connections: **Test connection** checks the form's values before you save them, for a new connection too, and **Test embeddings** under Advanced checks an embedding model. The panel header shows when the saved values were last tested. `POST /api/v1/orgs/{org}/llm-connections/test` tests an unsaved connection, and `POST …/llm-connections/{id}/test` takes draft fields; a connection's `last_tested_at` and `last_test_ok` hold the last test of its saved values.
+- The connection form suggests common model ids for OpenAI, Anthropic and Gemini in the Default model field.
 
 ### Changed
 
 - The install command is `curl -fsSL https://cetra.sh/install.sh | sh`: `cetra.sh/install.sh` redirects to the release's install script. The GitHub release URL keeps working.
 - Chart bars have slightly rounded tops; in a stack only the top segment is rounded.
+- Span kind icons use the Tabler icon set (a robot for agents, a wrench for tools, …), slightly larger.
+- The trace tree draws elbow lines between parents and children, its Duration, Tokens and Cost columns fit their values, and up to three slow spans (the largest self times above 20% of the trace) show their duration in amber. The timeline drops the metric columns to give the bars the full width: taller bars with the duration and cost inside them, round axis ticks with gridlines, and labels kept inside the panel.
 - Dark Reader and the browsers' automatic dark mode no longer darken the web UI, which has its own dark theme.
+- `PATCH /api/v1/orgs/{org}/llm-connections/{id}` no longer needs `api_key` with a new `base_url` or `adapter`: the saved key is kept.
+- The LLM connection form offers OpenAI, OpenAI-compatible, Anthropic and Gemini; a saved OpenAI connection with a base URL shows as OpenAI-compatible, and `GET /api/v1/projects/{project}/assistant` returns the connection's `base_url`. The form puts the base URL and structured output under Advanced unless the provider needs them, shows the saved key's last 4 characters, and its fields keep a readable width. The Test dialog is gone.
 - The Python and TypeScript SDKs send `User-Agent: cetra-sdk-python/<version>` and `cetra-sdk-js/<version>` on their requests; Python's trace exporter adds it after the OpenTelemetry exporter's own value.
 - Strands time to first token is read in milliseconds; framework names written as the provider (Strands, Microsoft Agent Framework, AutoGen, Spring AI) are skipped; Microsoft Agent Framework workflow steps and Mirascope trace spans are chain spans.
 - LiteLLM Proxy's and Bifrost's own cost figures are read as the reported cost; Bifrost's server root span is a chain, not a second LLM call; `gen_ai.operation.name` values `embedding` and `aembedding` (LiteLLM's call types) give the embedding kind.
@@ -42,10 +55,12 @@ with an `### Upgrade notes` section (https://cetra.sh/docs/self-hosting/upgrade/
 
 ### Fixed
 
+- When an org has its own single sign-on, the login page's email step links to the password form ("Sign in with a password instead"), so instance admins and members of a domain whose sign-on is not enforced can still use their password. After an org's provider refuses to sign in an instance admin, the page shows the password form.
 - The top bar's search button no longer runs its label into the `Ctrl+K` shortcut on Linux and Windows.
 - OpenRouter, Vercel AI Gateway, Helicone, Portkey and Cloudflare AI Gateway spans are priced by the model publisher's price, and the built-in prices include Groq, Novita, Nebius, DeepInfra, Baseten, Hyperbolic and Together models that were missing.
 - OpenInference outputs labelled as JSON that hold plain text, as Agno's do, no longer record a `cetra.normalize_error` attribute.
 - A Laminar `LLM` span without a model or token counts (such as the OpenHands SDK's wrapper) is now a chain span, so its reported cost is not counted twice.
+- Selecting another member while the member panel is open no longer adds a second Role card.
 
 ## [0.1.0-rc.2] - 2026-11-22
 

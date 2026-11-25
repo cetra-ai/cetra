@@ -316,6 +316,22 @@ function compile(text: string, columns: ReadonlySet<string>, path: string): Pred
   return (row) => predicates.every((predicate) => predicate(row));
 }
 
+/**
+ * A predicate over traces for `filter`, or undefined when the mock cannot evaluate it. The trace
+ * list uses it (M13), with the same columns as a traces widget.
+ */
+export function tracePredicate(filter: string): ((trace: Trace) => boolean) | undefined {
+  try {
+    const predicate = compile(filter, COLUMNS.traces, "filter");
+    return (trace) => predicate(traceRow(trace));
+  } catch (error) {
+    if (error instanceof Unsupported) {
+      return undefined;
+    }
+    throw error;
+  }
+}
+
 function predicateOf(chip: Chip, columns: ReadonlySet<string>, path: string): Predicate {
   switch (chip.kind) {
     case "compare": {

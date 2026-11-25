@@ -1,0 +1,31 @@
+---
+title: Okta SCIM setup
+description: Connect Okta to cetra over SCIM 2.0 to provision members, push groups and map the groups to roles.
+---
+
+This page sets up an Okta app that provisions the members of an org in cetra and pushes the groups that set their roles. Read [SCIM provisioning](/docs/platform/scim/) first for the base URL, the token and how groups map to roles.
+
+## Before you start
+
+- SCIM is on for the org, with a token. In **Org settings**, then **Provisioning**, copy the base URL `<PUBLIC_URL>/scim/v2` and create a token. cetra shows the token once.
+- The org has a verified domain that matches the emails of the people you provision.
+
+## Steps
+
+1. In Okta, create an app integration that provisions users over SCIM 2.0. Okta's documentation describes the app types for SCIM 2.0.
+2. Set the SCIM connector base URL to `<PUBLIC_URL>/scim/v2`.
+3. Set the unique identifier field for users to `userName`.
+4. Choose HTTP header authentication, and enter the token as a bearer token.
+5. Test the connector configuration. The test sends a request to cetra, and it should succeed.
+6. Under **To App**, enable provisioning of new users (create users), profile updates (update user attributes) and deactivation (deactivate users).
+7. Assign the people to the app. Okta creates them in cetra, with the role their groups give, or the org's default role.
+8. Under **Push Groups**, push the groups you want to use for roles. Okta sends each group with its members.
+9. In cetra, open **Org settings**, then **Provisioning**, and map each pushed group under **Role mappings**. A group with no mapping gives its members no role of their own.
+
+Okta sends the groups and their members to cetra. cetra does not record group names in its logs or its audit records.
+
+## Checked against Okta's documentation
+
+The SCIM requests that cetra's tests replay for Okta follow Okta's public SCIM documentation. They were not checked with a run of Okta's own validator. If Okta sends a request that cetra refuses, check the response, which names the SCIM error, and report it.
+
+Okta's labels and menus can change between versions. Use the names in your Okta version's documentation where they differ from these steps.

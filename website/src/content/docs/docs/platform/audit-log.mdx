@@ -1,0 +1,186 @@
+---
+title: Audit log
+description: Read, filter and export the records of who did what in an org and on the instance, and how long cetra keeps them.
+---
+
+The audit log lets org owners and admins, and instance admins, read and export a record of who did what, and when. Reading and exporting need the `audit_log` feature, which Enterprise and the self-hosted licence include. Recording does not. Every org and the instance record their actions on every plan, so the history starts at the first action, not at an upgrade.
+
+## What is recorded
+
+Each record has an action name, such as `member.role_changed`, a time, an outcome (`success` or `failure`), an actor, a target, a project when the action is about one, the client IP address and the user agent. Its details hold ids, the names of changed fields, roles and counts. They never hold prompts, completions, secret values, SQL text or email addresses.
+
+| Group | What it covers |
+|---|---|
+| Sign-in | Sign-in with a password, an instance provider, an org provider or a device approval. Failed sign-ins of a known account. Sign-out, password changes and resets, sign-up. |
+| Orgs and projects | Creating, renaming, deleting and transferring an org. Creating, renaming and deleting a project. |
+| Members | Invitations created, revoked and accepted. Members added, removed and given a new role. Project role overrides. |
+| Credentials | API keys and personal access tokens created and revoked. Device codes approved. |
+| Single sign-on | Provider settings, enforcement, and domains added, verified, moved or removed. |
+| SCIM | Provisioning tokens, users and groups provisioned, group mappings, and role raises refused at the seat limit. |
+| Exports and data leaving cetra | Exports, SQL console runs (recorded as a SHA-256 hash of the query, never the text), and MCP tool calls that name a project. |
+| Deletions | A user's data deletion, and project and org deletions, when requested and when applied. |
+| Project objects | Evaluators, online rules, alert rules and channels, LLM connections, model prices, prompts, datasets, issue sources, dashboards and annotation queues: created, changed and deleted. |
+| Instance | Setup, licence installs and refusals, admin accounts, and orgs created or dropped by a control plane. |
+| Audit streams | A stream destination set, changed or removed, and its signing secret rotated. See [Streaming](#streaming). |
+
+These are not recorded: reads, such as viewing a trace or a page, and edits to the data itself, such as scores, annotations and dataset items. A request that fails before cetra knows which account it is for, such as a sign-in with an unknown email, is written to the server log only.
+
+## Privacy
+
+- The log stores ids. cetra looks up names and emails when you read or export the log, so they show the current values.
+- In an org's log, a name and an email show only for people who are still members of that org. Anyone else shows as a former member, with their id. A person who leaves an org does not stay visible in its log with their email.
+- When an account is deleted, its records keep the id and show as `Deleted user`. The records it made lose their IP address and user agent in the same change.
+- IP addresses and user agents are personal data. cetra keeps them for the retention period, then deletes them with the record.
+- A stream sends the IP address and user agent of each record to its receiver. The receiver keeps them under its own rules, not cetra's retention.
+- The instance log resolves only the names of accounts. Projects, keys and providers in it show as ids, because an instance admin does not read org data.
+
+## Retention
+
+cetra keeps each record for a set number of days, then an hourly task deletes it.
+
+- The instance default is `audit.retention_days`, 365 days when unset. `0` keeps records forever. Any other value must be 30 or more. See the [configuration reference](/docs/self-hosting/configuration-reference/).
+- The instance default applies to the instance log and to every org that has no retention limit of its own.
+- On cetra Cloud, an org's `audit_retention_days` limit replaces the instance default for that org. `0` keeps its records forever. A value below 30 counts as 30.
+- When an org's plan no longer sets the limit, the org returns to the instance default. Records older than that default are deleted at the next purge.
+- Dropping an org deletes its records when the drop is applied.
+
+## Read the log
+
+1. Open **Org settings**, then **Audit log**. Instance admins open **Admin**, then **Audit log**.
+2. The newest records show first. Each page holds 100 records. Select **Load more** to read older ones.
+3. Filter the list:
+   - **Range**: the last 24 hours, 7 days (the default), 30 days, 90 days or all records.
+   - **Action**: one or more action names, separated by commas, such as `api_key.created`. An entry that ends with a dot selects a group, such as `member.`. An action filter holds at most 20 entries.
+   - **Actor** and **target**: an id.
+   - **Outcome**: `success` or `failure`.
+   The filters are part of the page's address, so a filtered view can be shared with another admin of the org.
+4. Select a record to see all of its fields, including the details.
+
+The list answers `400` for an action entry that is not a name or a group, such as `Member.Role`.
+
+### Status labels
+
+The actor and target columns show a status when a name is not available:
+
+| Label | Meaning |
+|---|---|
+| Former member | In an org's log, the account is not a member of the org now. Only the id shows. |
+| Deleted user | The account was erased. |
+| Deleted key, Deleted project, Deleted provider | The object no longer exists. |
+| The kind, such as `project` | The instance log does not resolve this kind of object. |
+
+## Export
+
+Org owners and admins export the org's log. Instance admins export the instance log.
+
+1. Set the filters you want. An export takes the same filters as the list, with no page limit.
+2. Select **Export**, then **CSV** or **NDJSON**.
+
+An export holds at most 1,000,000 records, newest first. If more records match, narrow the time range and export again.
+
+Before cetra streams the file, it records an `audit.export_started` record with the format and the names of the filters you set, never their values. If that record cannot be written, the export does not start.
+
+- **CSV** has one header row and one row per record. Its columns run from `at` to `details`, and `details` is compact JSON. A cell that starts with `=`, `+`, `-`, `@`, a tab or a carriage return gets a leading `'`, so a spreadsheet does not run it as a formula. Names and user agents are set by users, so cetra escapes every cell.
+- **NDJSON** has one JSON record per line, with the same fields as the API.
+
+An export contains names and emails of the people it covers. Store it as you would any personal data.
+
+## Streaming
+
+Org owners can send their org's records to an HTTPS endpoint, such as a SIEM. Instance admins can do the same for the instance log. Streaming needs the `audit_log` feature, as reading does. Each org has one destination, and the instance has one.
+
+### Set up a destination
+
+1. Open **Org settings**, then **Audit log**. The stream card sits above the table, and only owners of the org see it. Instance admins open **Admin**, then **Audit log**.
+2. Enter the **URL**. It must start with `https://`, be at most 2,048 bytes long, and have no user name or password in it. A receiver on a private network address is refused unless the instance sets `security.allow_private_network_egress`. See the [configuration reference](/docs/self-hosting/configuration-reference/).
+3. Optionally, enter a **header name** and a **header value** for the receiver's authentication, such as `Authorization` with `Splunk <HEC-TOKEN>`. The value is at most 1,024 bytes and cannot contain line breaks. cetra stores it sealed and never shows it again. cetra refuses header names that it sets itself.
+4. Save. cetra shows the **signing secret** once. Copy it into the receiver now. If you lose it, rotate the secret. The old secret then stops matching the signatures.
+5. Select **Send test** to send one test line. The result shows only whether the endpoint answered and, if it did, the HTTP status. A connection error and a timeout both show as not reached.
+
+### Receivers
+
+| Receiver | URL | Header |
+|---|---|---|
+| Splunk HTTP Event Collector | `https://<HOST>:8088/services/collector/raw` | `Authorization: Splunk <HEC-TOKEN>` |
+| Datadog Logs | `https://http-intake.logs.<SITE>/api/v2/logs` | `DD-API-KEY: <DATADOG-API-KEY>` |
+| Any receiver that reads NDJSON | Your endpoint | What it needs, or none |
+
+Replace `<SITE>` with your Datadog site, such as `datadoghq.com`. Check the receiver's documentation for its limits on request size and its input format.
+
+### Line format
+
+Each batch is one `POST` with the content type `application/x-ndjson`. The body has one JSON object per line, one record per line, oldest first:
+
+{/* untested: a sketch of one line, with placeholders */}
+
+```json
+{"id":"…","seq":42,"at":"2026-11-23T12:00:00.000Z","org_id":"…","project_id":"…","action":"member.role_changed","outcome":"success","actor":{"kind":"user","id":"…","via":"session","credential_id":null},"target":{"kind":"user","id":"…"},"details":{…},"ip":"203.0.113.9","user_agent":"…"}
+```
+
+- `id` identifies the record. It does not change.
+- `seq` orders the records. It is one sequence for the whole server, not one per org, so the `seq` values of an org have gaps. The gaps are expected.
+- `at` is the time in UTC, with milliseconds.
+- `actor` and `target` hold kinds and ids. `target` is `null` when the record has no target. An absent value is `null`.
+- The stream holds ids only. Names and emails are not sent.
+
+### Verify the signature
+
+Each batch carries `X-Cetra-Signature: t=<seconds>,v1=<hex>`. `<seconds>` is the Unix time when cetra signed the batch. `<hex>` is the HMAC-SHA256, hex-encoded, of `<seconds>.<body>`, computed with the signing secret. `<body>` is the request body exactly as it arrived, before any parsing. The format is the same as for alert webhooks.
+
+To verify a batch, build the same string from `t` and the raw body, compute the HMAC with your copy of the secret, and compare the result with `v1` in constant time. Reject the batch when they differ. If the receiver can, also reject a `t` that is far from its own clock, to limit replays.
+
+### Delivery
+
+- **At least once.** A record can arrive more than once, for example when the receiver stored a batch but cetra did not get the reply. Deduplicate on `id`.
+- **Batches.** cetra sends up to 500 records, or about 1 MiB, in one request, whichever comes first. A record larger than 1 MiB is still sent, alone.
+- **Schedule.** Every 10 seconds, cetra sends the new records of each destination. A destination moves on only after the receiver answers with a `2xx` status.
+- **Retries.** A failed batch is sent again. The wait between attempts grows, and it stays at most one hour.
+- **Email.** When a destination has failed for 24 hours, cetra emails the owners of the org, or the instance admins for the instance destination. It sends one email for each outage. A successful delivery ends the outage.
+- **Status.** The stream card shows the last successful delivery, how many records are waiting, the last error, and when the failures started.
+- **Existing records.** A new destination sends only the records written after it is saved. Use an export for the records before that.
+- **Records lost to retention.** A record that retention deletes before it is sent is never sent. The card then shows that records were deleted before delivery. The notice stays through edits and secret rotations; removing the destination and creating it again clears it.
+- **Lapses.** If the plan or the licence no longer includes `audit_log`, streaming stops. The destination is kept, and it resumes when the feature returns.
+- **Restore mode.** While the server runs in restore mode, cetra sends nothing to any destination. A restore drill does not replay records into a SIEM.
+
+### Pause or remove
+
+Turn off **Enabled** to pause the stream. The destination keeps its place, so the records written meanwhile are sent when you turn it on again, as long as retention has not deleted them. Select **Remove**, then type `remove`, to delete the destination and its secret.
+
+Each change is recorded as `audit.stream_set`, `audit.stream_removed` or `audit.stream_secret_rotated`. The details hold the host, whether a header is set and the enabled flag, never the header value or the secret.
+
+## Use the API
+
+The log is also available as JSON. A session or a personal access token can read it. An API key cannot.
+
+| Route | Who can read it |
+|---|---|
+| `GET /api/v1/orgs/{org}/audit-events` | Owners and admins of the org. |
+| `GET /api/v1/orgs/{org}/audit-events/export?format=csv` or `ndjson` | Owners and admins of the org. |
+| `GET /api/v1/admin/audit-events` | Instance admins. |
+| `GET /api/v1/admin/audit-events/export?format=csv` or `ndjson` | Instance admins. |
+
+The list takes the filters of the page, plus `limit` (1 to 500, default 100) and `cursor`. The response holds `data` and `next_cursor`. Pass `next_cursor` as `cursor` to read the next page. Each record's `actor` and `target` carry the `status` shown above.
+
+```bash
+curl -H "Authorization: Bearer pat-cetra-…" \
+  "https://<HOST>/api/v1/orgs/<ORG>/audit-events?action=member.&limit=100"
+```
+
+## The instance log
+
+The instance log holds the records that belong to no org: sign-ins, instance settings, the licence, admin accounts, and org creation and deletion by a control plane. Instance admins read it at **Admin**, then **Audit log**, or through `/api/v1/admin/audit-events`.
+
+Instance admins do not read org logs through this page or its API. An owner or admin of the org reads the org's log.
+
+## Plans
+
+| Where | Reading and exporting |
+|---|---|
+| cetra Cloud, Enterprise | Included. |
+| Self-hosted, with a licence that lists `audit_log` | Included. |
+| Self-hosted, without that feature | Locked. The routes answer `403` with `plan_required`, and the page shows the lock. |
+| Instance log on a cetra Cloud cell | Included without a licence. |
+
+Recording never stops. If the licence expires, or the org's plan no longer includes the feature, reading, exporting and streaming stop, and recording goes on. When the feature returns, reading resumes with every record that the retention still keeps.
+
+cetra does not edit or delete records in the API, except for the retention purge, an org drop, and clearing IP addresses and user agents when an account is deleted. Someone with access to the server's data directory can still change `meta.db`. Keep exports if you need a copy outside the server.

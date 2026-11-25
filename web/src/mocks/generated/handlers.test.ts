@@ -276,7 +276,74 @@ it("defines the generated scores so lists can colour them", async () => {
     ["exact", "higher"],
     ["quality", "higher"],
     ["tone", "none"],
+    ["tests_pass", "higher"],
+    ["verdict", "none"],
+    ["resolved", "higher"],
+    ["schema_valid", "higher"],
+    ["fields_correct", "none"],
   ]);
+});
+
+it("serves the story queues' score definitions after the generated ones", async () => {
+  server.use(...largeHandlers(createDataset({ seed: 1, now: NOW, traces: 5 })));
+  const response = await fetch(`${PROJECT}/score-definitions`);
+  const body = (await response.json()) as { data: { id: string }[] };
+  const ids = body.data.map((item) => item.id);
+  const generated = [
+    "01900000-0000-7000-8000-000000000611",
+    "01900000-0000-7000-8000-000000000612",
+    "01900000-0000-7000-8000-000000000615",
+  ];
+  const story = [
+    "01900000-0000-7000-8000-000000570601",
+    "01900000-0000-7000-8000-000000570602",
+    "01900000-0000-7000-8000-000000570603",
+    "01900000-0000-7000-8000-000000570605",
+    "01900000-0000-7000-8000-000000570606",
+  ];
+  const at = (id: string) => ids.indexOf(id);
+  for (const id of generated) {
+    expect(at(id)).toBeGreaterThanOrEqual(0);
+  }
+  expect(at(generated[2] ?? "")).toBeLessThan(at(story[0] ?? ""));
+  expect(ids.slice(-5)).toEqual(story);
+});
+
+it("keeps the fixture queue's review as it was", async () => {
+  const dataset = createDataset({ seed: 1, now: NOW, traces: 5 });
+  server.use(...largeHandlers(dataset));
+  const review = async (id: string) =>
+    (
+      (await (await fetch(`${PROJECT}/annotation-queues/${id}`)).json()) as {
+        definition_ids: string[];
+      }
+    ).definition_ids;
+
+  const correctness = "01900000-0000-7000-8000-000000000611";
+  const relevance = "01900000-0000-7000-8000-000000000612";
+  expect(await review("01900000-0000-7000-8000-000000000a01")).toEqual([correctness, relevance]);
+  expect(await review("01900000-0000-7000-8000-000000570501")).toEqual([correctness, relevance]);
+  expect(await review("01900000-0000-7000-8000-000000570502")).toEqual([
+    "01900000-0000-7000-8000-000000570601",
+    "01900000-0000-7000-8000-000000570602",
+  ]);
+  expect(await review("01900000-0000-7000-8000-000000570503")).toEqual([
+    "01900000-0000-7000-8000-000000570603",
+    "01900000-0000-7000-8000-000000000615",
+  ]);
+
+  const storyItem = (await (
+    await fetch(
+      `${PROJECT}/annotation-queues/01900000-0000-7000-8000-000000570502/items/01900000-0000-7000-8000-000000570512`,
+    )
+  ).json()) as { trace_id: string };
+  expect(storyItem.trace_id).toBe(dataset.traces[4]?.trace_id);
+  const fixtureItem = (await (
+    await fetch(
+      `${PROJECT}/annotation-queues/01900000-0000-7000-8000-000000000a01/items/01900000-0000-7000-8000-000000000a11`,
+    )
+  ).json()) as { trace_id: string };
+  expect(fixtureItem.trace_id).toBe(dataset.traces[0]?.trace_id);
 });
 
 /** A trace the default lists show: no evaluation and no experiment trace. */
@@ -325,9 +392,68 @@ it("lists only one user's traces for a user_id filter, and flags other filters a
   expect(body.data.map((trace) => trace.trace_id).sort()).toEqual(expected);
 
   const other = new URL(`${PROJECT}/traces`);
-  other.searchParams.set("filter", "user_id = 'a' and name = 'b'");
+  other.searchParams.set("filter", "metadata['plan'] = 'pro'");
   const flagged = await fetch(other);
   expect(flagged.headers.get("X-Mock-Filter-Ignored")).toBe("1");
+});
+
+it("still ignores a filter on the spans list other than user_id", async () => {
+  const dataset = createDataset({ seed: 1, now: NOW, traces: 400 });
+  server.use(...largeHandlers(dataset));
+  const url = new URL(`${PROJECT}/spans`);
+  url.searchParams.set("filter", "status = 'error'");
+  const response = await fetch(url);
+  expect(response.status).toBe(200);
+  expect(response.headers.get("X-Mock-Filter-Ignored")).toBe("1");
+});
+
+it("applies a status filter to the trace list", async () => {
+  const dataset = createDataset({ seed: 1, now: NOW, traces: 400 });
+  server.use(...largeHandlers(dataset));
+  const expected = dataset.traces
+    .filter((trace) => isVisible(trace) && trace.status === "error")
+    .map((trace) => trace.trace_id)
+    .sort();
+
+  const url = new URL(`${PROJECT}/traces`);
+  url.searchParams.set("filter", "status = 'error'");
+  url.searchParams.set("limit", "1000");
+  const response = await fetch(url);
+  const body = (await response.json()) as Schema<"TracePage">;
+  expect(response.headers.get("X-Mock-Filter-Ignored")).toBeNull();
+  expect(body.data.map((trace) => trace.trace_id).sort()).toEqual(expected);
+});
+
+it("applies a tags filter combined with a name filter", async () => {
+  const dataset = createDataset({ seed: 1, now: NOW, traces: 400 });
+  server.use(...largeHandlers(dataset));
+
+  const url = new URL(`${PROJECT}/traces`);
+  url.searchParams.set("filter", "tags @> ['retry'] and name = 'coding-agent'");
+  url.searchParams.set("limit", "1000");
+  const response = await fetch(url);
+  const body = (await response.json()) as Schema<"TracePage">;
+  expect(response.headers.get("X-Mock-Filter-Ignored")).toBeNull();
+  expect(body.data.map((trace) => trace.trace_id)).toEqual([dataset.traces[4]?.trace_id]);
+});
+
+it("sorts a filtered list", async () => {
+  const dataset = createDataset({ seed: 1, now: NOW, traces: 400 });
+  server.use(...largeHandlers(dataset));
+
+  const url = new URL(`${PROJECT}/traces`);
+  url.searchParams.set("filter", "tags @> ['voice']");
+  url.searchParams.set("sort", "duration");
+  url.searchParams.set("order", "desc");
+  url.searchParams.set("limit", "1000");
+  const response = await fetch(url);
+  const body = (await response.json()) as Schema<"TracePage">;
+  const durations = body.data.map((trace) => trace.duration_ns);
+  expect(durations.length).toBeGreaterThan(0);
+  expect(durations).toEqual([...durations].sort((left, right) => right - left));
+  for (const trace of body.data) {
+    expect(trace.tags).toContain("voice");
+  }
 });
 
 it("lists only the spans of one user's traces for a user_id filter, without the ignored flag", async () => {

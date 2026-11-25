@@ -33,13 +33,24 @@ export const Route = createFileRoute("/$org/settings/plan")({
   component: OrgPlanPage,
 });
 
-const FEATURES: Feature[] = ["retention_management", "project_roles", "sso_enforcement", "org_sso"];
+const FEATURES: Feature[] = [
+  "retention_management",
+  "project_roles",
+  "sso_enforcement",
+  "org_sso",
+  "saml",
+  "scim",
+  "audit_log",
+];
 
 const FEATURE_NAMES: Record<Feature, string> = {
   retention_management: "Retention management",
   project_roles: "Project roles",
   sso_enforcement: "SSO enforcement",
   org_sso: "Single sign-on",
+  saml: "SAML single sign-on",
+  scim: "SCIM provisioning",
+  audit_log: "Audit log",
 };
 
 const USAGE_CHART: ChartConfig = {
@@ -51,6 +62,14 @@ const USAGE_STACK = ["spans", "scores"] as const;
 
 function formatLimit(value: number | undefined): string {
   return value === undefined ? "unlimited" : numbers.format(value);
+}
+
+/** The org's audit retention: unset is the instance's default, 0 is kept forever. */
+function auditRetention(days: number | undefined): string {
+  if (days === undefined) {
+    return "Instance default";
+  }
+  return days === 0 ? "Kept forever" : `${numbers.format(days)} days`;
 }
 
 function capitalise(word: string): string {
@@ -113,6 +132,7 @@ function PlanDetails({
     ["Active online evaluation rules", formatLimit(limits.max_active_online_rules)],
     ["Active issue sources", formatLimit(limits.max_active_issue_sources)],
     ["Annotation queues", formatLimit(limits.max_annotation_queues)],
+    ["Audit retention", auditRetention(limits.audit_retention_days)],
   ];
 
   return (

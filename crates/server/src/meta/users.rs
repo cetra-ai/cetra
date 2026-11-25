@@ -3,11 +3,14 @@
 
 use std::collections::HashMap;
 
+use cetra_core::ids::OrgId;
 use sqlx::{SqliteConnection, SqlitePool};
 use unicode_normalization::UnicodeNormalization;
 use uuid::Uuid;
 
-use super::{MetaError, unique_or};
+use super::{MetaError, invites, members, personal_tokens, unique_or, web_sessions};
+use crate::auth::OrgRole;
+use crate::entitlements::over_limit;
 
 /// Why an email was rejected. The message does not contain the input.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
@@ -343,6 +346,107 @@ pub(crate) async fn set_email_verified(
         .execute(&mut *conn)
         .await?;
     Ok(())
+}
+
+/// Deletes the user's web sessions and revokes their PATs. Returns the revoked PAT hashes,
+/// which the caller evicts from `pat_cache` after commit (D-EA-16, D-P-39).
+///
+/// # Errors
+///
+/// Returns [`MetaError::Db`] when an update fails.
+pub(crate) async fn revoke_access_tx(
+    conn: &mut SqliteConnection,
+    user: Uuid,
+    now: i64,
+) -> Result<Vec<String>, MetaError> {
+    web_sessions::delete_user_sessions(conn, user, None).await?;
+    personal_tokens::revoke_user_tokens(conn, user, now).await
+}
+
+/// D-P-66: an account whose email is not proven loses its sessions, PATs and password
+/// before an IdP links it, and its email becomes proven via `idp` (D148). A proven account
+/// is untouched. Returns the revoked PAT hashes, empty for a proven account.
+///
+/// # Errors
+///
+/// Returns [`MetaError::Db`] when an update fails.
+pub(crate) async fn reset_unproven_tx(
+    conn: &mut SqliteConnection,
+    user: &UserRow,
+    now: i64,
+) -> Result<Vec<String>, MetaError> {
+    if user.email_proven() {
+        return Ok(Vec::new());
+    }
+    let revoked = revoke_access_tx(conn, user.id, now).await?;
+    set_password_hash(conn, user.id, None, now).await?;
+    set_email_verified(conn, user.id, now, EmailVerifiedVia::Idp).await?;
+    Ok(revoked)
+}
+
+/// Changes a user's email (SCIM userName change, D-EA-13). `email` must already be
+/// [`normalize_email`]'s output. Identities keep the email they were linked with.
+///
+/// # Errors
+///
+/// A taken address is [`MetaError::Conflict`] `"uniqueness"`. Returns [`MetaError::Db`]
+/// when the update fails otherwise.
+pub(crate) async fn set_email_tx(
+    conn: &mut SqliteConnection,
+    user: Uuid,
+    email: &str,
+    now: i64,
+) -> Result<(), MetaError> {
+    debug_assert!(
+        normalize_email(email).ok().as_deref() == Some(email),
+        "email is not normalized"
+    );
+    sqlx::query("UPDATE users SET email = ?, updated_at = ? WHERE id = ?")
+        .bind(email)
+        .bind(now)
+        .bind(user.to_string())
+        .execute(&mut *conn)
+        .await
+        .map_err(|error| unique_or(error, "uniqueness"))?;
+    Ok(())
+}
+
+/// Adds `user` to `org` with `role` unless already a member (then the role stays, P-5), within
+/// `max_seats` for a non-viewer role, and removes the org's pending invitation for the user's
+/// email. `Ok(None)`: already a member. `Ok(Some(role))`: added.
+///
+/// # Errors
+///
+/// Returns [`MetaError::Conflict`] `"seat limit"` when no seat is left, and [`MetaError`] when a
+/// query fails or the user does not exist.
+pub(crate) async fn ensure_member_tx(
+    conn: &mut SqliteConnection,
+    org: OrgId,
+    user: Uuid,
+    role: OrgRole,
+    max_seats: Option<u64>,
+    now: i64,
+) -> Result<Option<OrgRole>, MetaError> {
+    if members::org_role_tx(conn, org, user).await?.is_some() {
+        return Ok(None);
+    }
+    let email: String = sqlx::query_scalar("SELECT email FROM users WHERE id = ?")
+        .bind(user.to_string())
+        .fetch_one(&mut *conn)
+        .await?;
+    if role != OrgRole::Viewer {
+        // The invitation of this email is removed below, so it does not count against the limit.
+        let seats = members::seat_members_tx(conn, org).await?
+            + invites::seat_invites_tx(conn, org, now, Some(email.as_str())).await?;
+        if over_limit(max_seats, seats, 1) {
+            return Err(MetaError::Conflict("seat limit"));
+        }
+    }
+    members::add_org_member(conn, org, user, role, now).await?;
+    if let Some(invite) = invites::pending_invite_for_tx(conn, org, &email, now).await? {
+        invites::delete_invite(conn, org, invite.id).await?;
+    }
+    Ok(Some(role))
 }
 
 /// Replaces the display name. `None` clears it.
@@ -815,23 +919,9 @@ mod tests {
                     let org =
                         crate::meta::orgs::insert_org(conn, OrgId::new_v7(), "Acme", "acme", 1)
                             .await?;
-                    crate::meta::members::add_org_member(
-                        conn,
-                        org.id,
-                        owner_id,
-                        crate::auth::OrgRole::Owner,
-                        1,
-                    )
-                    .await?;
+                    members::add_org_member(conn, org.id, owner_id, OrgRole::Owner, 1).await?;
                     assert!(is_last_active_owner(conn, owner_id).await?);
-                    crate::meta::members::add_org_member(
-                        conn,
-                        org.id,
-                        other_id,
-                        crate::auth::OrgRole::Owner,
-                        1,
-                    )
-                    .await?;
+                    members::add_org_member(conn, org.id, other_id, OrgRole::Owner, 1).await?;
                     assert!(!is_last_active_owner(conn, owner_id).await?);
                     set_disabled(conn, other_id, Some(2), 2).await?;
                     assert!(is_last_active_owner(conn, owner_id).await?);
@@ -843,6 +933,192 @@ mod tests {
         })
         .await
         .unwrap();
+    }
+
+    /// One web session and one live PAT (`token_hash`) of `user`.
+    async fn session_and_token(db: &crate::meta::MetaDb, user: Uuid, token_hash: &str) {
+        let token_hash = token_hash.to_owned();
+        db.write(move |conn| {
+            Box::pin(async move {
+                web_sessions::insert_session(
+                    conn,
+                    web_sessions::NewSession {
+                        hash: format!("session-{token_hash}"),
+                        user_id: user,
+                        user_agent: None,
+                        ip: None,
+                        sso_org_id: None,
+                        via_provider: false,
+                    },
+                    1,
+                    10_000,
+                )
+                .await?;
+                personal_tokens::insert_token(
+                    conn,
+                    personal_tokens::NewToken {
+                        user_id: user,
+                        name: "ci".to_owned(),
+                        prefix: "pat-cetra-abcdef".to_owned(),
+                        hash: token_hash,
+                        scopes: vec![crate::auth::roles::KeyScope::Read],
+                        expires_at: None,
+                    },
+                    1,
+                )
+                .await?;
+                Ok(())
+            })
+        })
+        .await
+        .unwrap();
+    }
+
+    /// The user's web sessions, and their PATs that are not revoked.
+    async fn live_sessions_and_tokens(db: &crate::meta::MetaDb, user: Uuid) -> (i64, i64) {
+        let sessions: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM web_sessions WHERE user_id = ?")
+                .bind(user.to_string())
+                .fetch_one(db.reader())
+                .await
+                .unwrap();
+        let tokens: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM personal_tokens WHERE user_id = ? AND revoked_at IS NULL",
+        )
+        .bind(user.to_string())
+        .fetch_one(db.reader())
+        .await
+        .unwrap();
+        (sessions, tokens)
+    }
+
+    #[tokio::test]
+    async fn set_email_changes_and_refuses_a_taken_address() {
+        let (_dir, db) = test_db().await;
+        let ada = insert(&db, "ada@example.com", false).await;
+        let bob = insert(&db, "bob@example.com", false).await;
+        let ada_id = ada.id;
+        db.write(move |conn| {
+            Box::pin(async move { set_email_tx(conn, ada_id, "ada.lovelace@example.com", 2).await })
+        })
+        .await
+        .unwrap();
+        let moved = user_by_id(db.reader(), ada.id).await.unwrap().unwrap();
+        assert_eq!(moved.email, "ada.lovelace@example.com");
+        assert_eq!(moved.updated_at, 2);
+        assert!(
+            user_by_email(db.reader(), "ada@example.com")
+                .await
+                .unwrap()
+                .is_none()
+        );
+
+        let bob_id = bob.id;
+        let error = db
+            .write(move |conn| {
+                Box::pin(
+                    async move { set_email_tx(conn, bob_id, "ada.lovelace@example.com", 3).await },
+                )
+            })
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(error, MetaError::Conflict("uniqueness")),
+            "{error}"
+        );
+        let unchanged = user_by_id(db.reader(), bob.id).await.unwrap().unwrap();
+        assert_eq!(unchanged.email, "bob@example.com");
+    }
+
+    #[tokio::test]
+    async fn revoke_access_removes_sessions_and_tokens() {
+        let (_dir, db) = test_db().await;
+        let ada = insert(&db, "ada@example.com", false).await;
+        session_and_token(&db, ada.id, "token-hash-1").await;
+        assert_eq!(live_sessions_and_tokens(&db, ada.id).await, (1, 1));
+
+        let ada_id = ada.id;
+        let revoked = db
+            .write(move |conn| Box::pin(async move { revoke_access_tx(conn, ada_id, 2).await }))
+            .await
+            .unwrap();
+        assert_eq!(revoked, vec!["token-hash-1".to_owned()]);
+        assert_eq!(live_sessions_and_tokens(&db, ada.id).await, (0, 0));
+    }
+
+    #[tokio::test]
+    async fn reset_unproven_clears_password_sessions_and_tokens() {
+        let (_dir, db) = test_db().await;
+        let ada = db
+            .write(move |conn| {
+                Box::pin(async move {
+                    insert_user(
+                        conn,
+                        NewUser {
+                            email: "ada@example.com".to_owned(),
+                            name: None,
+                            password_hash: Some("hash".to_owned()),
+                            email_verified_at: None,
+                            email_verified_via: None,
+                            is_instance_admin: false,
+                        },
+                        1,
+                    )
+                    .await
+                })
+            })
+            .await
+            .unwrap();
+        session_and_token(&db, ada.id, "token-hash-1").await;
+        let id = ada.id;
+
+        let revoked = db
+            .write(move |conn| Box::pin(async move { reset_unproven_tx(conn, &ada, 2).await }))
+            .await
+            .unwrap();
+        assert_eq!(revoked, vec!["token-hash-1".to_owned()]);
+        assert_eq!(live_sessions_and_tokens(&db, id).await, (0, 0));
+        let after = user_by_id(db.reader(), id).await.unwrap().unwrap();
+        assert_eq!(after.password_hash, None);
+        assert_eq!(after.email_verified_at, Some(2));
+        assert_eq!(after.email_verified_via, Some(EmailVerifiedVia::Idp));
+    }
+
+    #[tokio::test]
+    async fn reset_unproven_leaves_a_proven_account() {
+        let (_dir, db) = test_db().await;
+        let ada = db
+            .write(move |conn| {
+                Box::pin(async move {
+                    insert_user(
+                        conn,
+                        NewUser {
+                            email: "ada@example.com".to_owned(),
+                            name: None,
+                            password_hash: Some("hash".to_owned()),
+                            email_verified_at: Some(1),
+                            email_verified_via: Some(EmailVerifiedVia::MailToken),
+                            is_instance_admin: false,
+                        },
+                        1,
+                    )
+                    .await
+                })
+            })
+            .await
+            .unwrap();
+        session_and_token(&db, ada.id, "token-hash-1").await;
+        let id = ada.id;
+
+        let revoked = db
+            .write(move |conn| Box::pin(async move { reset_unproven_tx(conn, &ada, 2).await }))
+            .await
+            .unwrap();
+        assert!(revoked.is_empty());
+        assert_eq!(live_sessions_and_tokens(&db, id).await, (1, 1));
+        let after = user_by_id(db.reader(), id).await.unwrap().unwrap();
+        assert_eq!(after.password_hash.as_deref(), Some("hash"));
+        assert_eq!(after.email_verified_via, Some(EmailVerifiedVia::MailToken));
     }
 
     #[tokio::test]

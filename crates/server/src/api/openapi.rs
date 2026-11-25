@@ -53,12 +53,17 @@ use super::assistant::{
     AssistantRole, AssistantSettings, AssistantStatus, AssistantTestRequest, AssistantTurnRequest,
     AssistantUnavailable, PutAssistantSettings, UpdateAssistantConversationRequest,
 };
+use super::audit::{
+    AuditActor, AuditEvent, AuditExportFormat, AuditExportParams, AuditLimit, AuditListParams,
+    AuditOutcome, AuditRef, AuditRefStatus, AuditStream, AuditStreamStatus, AuditStreamTest,
+    CreatedAuditStream, PutAuditStream, RotatedAuditStreamSecret,
+};
 use super::backfills::{Backfill, BackfillEstimate, BackfillStatus, CreateBackfillRequest};
 use super::common::{ExclusionParams, Limit, Page, PageParams, Problem, SortOrder, TimeParam};
 use super::connections::{
     ConnectionStatus, CreateLlmConnectionRequest, LlmAdapter, LlmConnection,
     LlmConnectionTestError, LlmConnectionTestResult, StructuredOutputMode, TestErrorClass,
-    TestLlmConnectionRequest, UpdateLlmConnectionRequest,
+    TestLlmConnectionRequest, TestUnsavedLlmConnectionRequest, UpdateLlmConnectionRequest,
 };
 use super::dashboards::{
     AggBody, BreakdownBody, Chart, ChartType, CreateDashboard, Dashboard, DashboardListParams,
@@ -133,12 +138,16 @@ use super::online_rules::{
     RuleTarget, UpdateOnlineRuleRequest,
 };
 use super::org_sso::{
-    AddOrgSsoDomain, DomainStatus, JitRole, OrgSso, OrgSsoDomain, OrgSsoProvider, PatchOrgSso,
-    PutOrgSsoProvider, SsoDiscoverRequest, SsoDiscovery,
+    AddOrgSsoDomain, DomainStatus, JitRole, OrgSso, OrgSsoCertificate, OrgSsoDomain,
+    OrgSsoProvider, OrgSsoSaml, OrgSsoSamlSp, PatchOrgSso, PutOrgSamlProvider, PutOrgSsoProvider,
+    SamlAttributeNames, SamlRefreshError, SsoDiscoverRequest, SsoDiscovery, SsoProtocol,
 };
 use super::playground::{
     PlaygroundParams, PlaygroundResponseFormat, PlaygroundRunRequest, PlaygroundSource,
     PlaygroundTool,
+};
+use super::project_activity::{
+    ActivityBucket, ProjectActivity, ProjectActivityParams, ProjectsActivity,
 };
 use super::prompts::{
     CreatePromptRequest, CreateVersionRequest, Prompt, PromptKind, PromptLabel, PromptLabelEvent,
@@ -147,6 +156,10 @@ use super::prompts::{
 };
 use super::saved_views::{CreateSavedView, SavedView, SavedViewListParams, UpdateSavedView};
 use super::schema::SchemaResponse;
+use super::scim::{
+    CreateScimTokenRequest, CreatedScimToken, PutScimGroupMapping, ScimGroup, ScimGroupList,
+    ScimGroupMapping, ScimProjectRole, ScimSettings, ScimToken, UpdateScimSettings,
+};
 use super::score_definitions::{
     CreateScoreDefinitionRequest, ScoreDefinition, ScoreDefinitionCategory,
     ScoreDefinitionListParams, ScoreDirection, UpdateScoreDefinitionRequest,
@@ -202,6 +215,20 @@ pub(crate) fn collect_schemas() -> SchemaSet {
     set.insert::<DeletionPreviewRequest>();
     set.insert::<DeletionPreview>();
     set.insert_page::<Deletion>("DeletionPage");
+    set.insert::<AuditOutcome>();
+    set.insert::<AuditRefStatus>();
+    set.insert::<AuditExportFormat>();
+    set.insert::<AuditActor>();
+    set.insert::<AuditRef>();
+    set.insert::<AuditEvent>();
+    set.insert::<AuditLimit>();
+    set.insert_page::<AuditEvent>("AuditEventPage");
+    set.insert::<AuditStreamStatus>();
+    set.insert::<AuditStream>();
+    set.insert::<PutAuditStream>();
+    set.insert::<CreatedAuditStream>();
+    set.insert::<RotatedAuditStreamSecret>();
+    set.insert::<AuditStreamTest>();
     set.insert::<SortOrder>();
     set.insert::<TraceSort>();
     set.insert::<SpanSort>();
@@ -250,14 +277,35 @@ pub(crate) fn collect_schemas() -> SchemaSet {
     set.insert::<UsageNotice>();
     set.insert::<OrgUsage>();
     set.insert::<UsageDay>();
+    set.insert::<ProjectsActivity>();
+    set.insert::<ProjectActivity>();
+    set.insert::<ActivityBucket>();
     set.insert::<JitRole>();
     set.insert::<OrgSsoProvider>();
     set.insert::<DomainStatus>();
     set.insert::<OrgSsoDomain>();
     set.insert::<OrgSso>();
+    set.insert::<SsoProtocol>();
+    set.insert::<OrgSsoSaml>();
+    set.insert::<OrgSsoCertificate>();
+    set.insert::<SamlAttributeNames>();
+    set.insert::<SamlRefreshError>();
+    set.insert::<OrgSsoSamlSp>();
     set.insert::<PutOrgSsoProvider>();
+    set.insert::<PutOrgSamlProvider>();
+    set.insert::<SamlAcsForm>();
     set.insert::<AddOrgSsoDomain>();
     set.insert::<PatchOrgSso>();
+    set.insert::<ScimSettings>();
+    set.insert::<ScimToken>();
+    set.insert::<UpdateScimSettings>();
+    set.insert::<CreateScimTokenRequest>();
+    set.insert::<CreatedScimToken>();
+    set.insert::<ScimGroup>();
+    set.insert::<ScimGroupMapping>();
+    set.insert::<ScimProjectRole>();
+    set.insert::<ScimGroupList>();
+    set.insert::<PutScimGroupMapping>();
     set.insert::<SsoDiscoverRequest>();
     set.insert::<SsoDiscovery>();
     set.insert::<DevicePurpose>();
@@ -312,6 +360,7 @@ pub(crate) fn collect_schemas() -> SchemaSet {
     set.insert::<CreateLlmConnectionRequest>();
     set.insert::<UpdateLlmConnectionRequest>();
     set.insert::<TestLlmConnectionRequest>();
+    set.insert::<TestUnsavedLlmConnectionRequest>();
     set.insert::<LlmConnectionTestError>();
     set.insert::<LlmConnectionTestResult>();
     set.insert_page::<LlmConnection>("LlmConnectionPage");
@@ -697,6 +746,10 @@ pub fn openapi() -> OpenApi {
             tag("media", "Extracted media blobs."),
             tag("deletions", "GDPR deletions and their status."),
             tag(
+                "audit",
+                "Audit records of an organization and of the instance.",
+            ),
+            tag(
                 "ingest",
                 "Calls made by coding agents and SDKs on the ingest key.",
             ),
@@ -1017,6 +1070,7 @@ fn paths() -> Paths {
     let paths = admin_paths(paths);
     let paths = invite_paths(paths);
     let paths = org_sso_paths(paths);
+    let paths = scim_paths(paths);
     let paths = project_paths(paths);
     let paths = member_paths(paths);
     let paths = connection_paths(paths);
@@ -1043,11 +1097,298 @@ fn paths() -> Paths {
     let paths = annotation_queue_paths(paths);
     let paths = sql_paths(paths);
     let paths = deletion_paths(paths);
+    let paths = audit_paths(paths);
+    let paths = audit_stream_paths(paths);
     let paths = channel_paths(paths);
     let paths = alert_rule_paths(paths);
     let paths = assistant_paths(paths);
     let paths = assistant_settings_paths(paths);
     media_paths(paths).build()
+}
+
+fn audit_paths(paths: PathsBuilder) -> PathsBuilder {
+    let session = Some(vec![SecurityRequirement::new("session", [] as [&str; 0])]);
+    let list_org = operation(
+        "list_org_audit_events",
+        "audit",
+        "List an organization's audit records",
+    )
+    .description(Some(
+        "Newest first. Admins and owners, with a session or a personal access token. Needs the `audit_log` feature: without it, 403 `plan_required`.",
+    ))
+    .parameters(Some(with_query::<AuditListParams>(vec![path_string(
+        "org",
+        "Org UUID or slug.",
+    )])))
+    .responses(responses(
+        "200",
+        json_named("AuditEventPage", "One page of records, newest first."),
+        QUERY_ERRORS,
+    ))
+    .build();
+    let export_org = operation(
+        "get_org_audit_export",
+        "audit",
+        "Export an organization's audit records",
+    )
+    .description(Some(
+        "The records of the filters as CSV or NDJSON, newest first, at most 1,000,000 of them. The export is recorded first as `audit.export_started`. Admins and owners; needs the `audit_log` feature (403 `plan_required` otherwise).",
+    ))
+    .parameters(Some(with_query::<AuditExportParams>(vec![path_string(
+        "org",
+        "Org UUID or slug.",
+    )])))
+    .responses(responses("200", audit_export_result(), QUERY_ERRORS))
+    .build();
+    let list_admin = operation(
+        "list_admin_audit_events",
+        "audit",
+        "List the instance's audit records",
+    )
+    .description(Some(
+        "Newest first. Instance admins only, with a session. Needs a licence that lists `audit_log`, or a cloud cell (403 `plan_required` otherwise). Org records are never listed here.",
+    ))
+    .securities(session.clone())
+    .parameters(Some(with_query::<AuditListParams>(Vec::new())))
+    .responses(responses(
+        "200",
+        json_named("AuditEventPage", "One page of records, newest first."),
+        &[400, 401, 403, 429],
+    ))
+    .build();
+    let export_admin = operation(
+        "get_admin_audit_export",
+        "audit",
+        "Export the instance's audit records",
+    )
+    .description(Some(
+        "The instance's records as CSV or NDJSON, newest first, at most 1,000,000 of them. Recorded first as `audit.export_started`. Instance admins only, with a session; needs the licence or a cloud cell (403 `plan_required` otherwise).",
+    ))
+    .securities(session)
+    .parameters(Some(with_query::<AuditExportParams>(Vec::new())))
+    .responses(responses(
+        "200",
+        audit_export_result(),
+        &[400, 401, 403, 429],
+    ))
+    .build();
+    paths
+        .path(
+            "/api/v1/orgs/{org}/audit-events",
+            PathItem::new(HttpMethod::Get, list_org),
+        )
+        .path(
+            "/api/v1/orgs/{org}/audit-events/export",
+            PathItem::new(HttpMethod::Get, export_org),
+        )
+        .path(
+            "/api/v1/admin/audit-events",
+            PathItem::new(HttpMethod::Get, list_admin),
+        )
+        .path(
+            "/api/v1/admin/audit-events/export",
+            PathItem::new(HttpMethod::Get, export_admin),
+        )
+}
+
+/// One operation of the audit stream, session only. `org_scoped` adds the path's `org`.
+fn stream_operation(
+    id: &str,
+    summary: &str,
+    description: &str,
+    org_scoped: bool,
+) -> OperationBuilder {
+    operation(id, "audit", summary)
+        .description(Some(description))
+        .securities(Some(vec![SecurityRequirement::new(
+            "session",
+            [] as [&str; 0],
+        )]))
+        .parameters(if org_scoped {
+            Some(vec![path_string("org", "Org UUID or slug.")])
+        } else {
+            None
+        })
+}
+
+fn audit_stream_paths(paths: PathsBuilder) -> PathsBuilder {
+    let get_org = stream_operation(
+        "get_org_audit_stream",
+        "Get the organization's audit stream",
+        "Owners only, with a session, and the `audit_log` feature (403 `plan_required` otherwise). 404 when no destination is set. 409 when the stored settings cannot be read.",
+        true,
+    )
+    .responses(responses(
+        "200",
+        json_of::<AuditStream>("The destination and its status."),
+        &[401, 403, 404, 409, 429],
+    ))
+    .build();
+    let put_org = stream_operation(
+        "put_org_audit_stream",
+        "Create or update the organization's audit stream",
+        "Owners only, with a session, and the `audit_log` feature. Creating returns 201 with the signing secret, shown once; updating returns 200 and keeps the secret. The URL must be https and carry no user information; the header is one name and value (400 `field_error`). Records are sent from the destination's creation on: history is not replayed.",
+        true,
+    )
+    .request_body(Some(json_body("PutAuditStream")))
+    .responses(responses_with(
+        [
+            ("200", json_of::<AuditStream>("The updated destination.")),
+            (
+                "201",
+                json_of::<CreatedAuditStream>("The created destination and its signing secret."),
+            ),
+        ],
+        &[400, 401, 403, 404, 409, 429],
+    ))
+    .build();
+    let delete_org = stream_operation(
+        "delete_org_audit_stream",
+        "Remove the organization's audit stream",
+        "Owners only, with a session. Works without the feature, so a lapsed org can still remove it. Records already sent are not affected.",
+        true,
+    )
+    .responses(responses(
+        "204",
+        ResponseBuilder::new()
+            .description("Removed. The stream stops.")
+            .build(),
+        &[401, 403, 404, 429],
+    ))
+    .build();
+    let rotate_org = stream_operation(
+        "rotate_org_audit_stream_secret",
+        "Rotate the organization's signing secret",
+        "Owners only, with a session, and the `audit_log` feature. The new secret is shown once. 409 when the stored settings cannot be read.",
+        true,
+    )
+    .responses(responses(
+        "200",
+        json_of::<RotatedAuditStreamSecret>("The new signing secret."),
+        &[401, 403, 404, 409, 429],
+    ))
+    .build();
+    let test_org = stream_operation(
+        "test_org_audit_stream",
+        "Send a test line to the organization's audit stream",
+        "Owners only, with a session, and the `audit_log` feature. Sends one signed test line now and does not move the cursor. Reports only whether the endpoint answered, and with which status: a connection error reads as not reached.",
+        true,
+    )
+    .responses(responses(
+        "200",
+        json_of::<AuditStreamTest>("Whether the endpoint answered, and its status."),
+        &[400, 401, 403, 404, 429],
+    ))
+    .build();
+    let get_admin = stream_operation(
+        "get_admin_audit_stream",
+        "Get the instance's audit stream",
+        "Instance admins only, with a session, and a licence that lists `audit_log`, or a cloud cell. 404 when no destination is set. 409 when the stored settings cannot be read.",
+        false,
+    )
+    .responses(responses(
+        "200",
+        json_of::<AuditStream>("The destination and its status."),
+        &[401, 403, 404, 409, 429],
+    ))
+    .build();
+    let put_admin = stream_operation(
+        "put_admin_audit_stream",
+        "Create or update the instance's audit stream",
+        "Instance admins only, with a session, and a licence that lists `audit_log`, or a cloud cell. Same rules as the organization's stream. The stream carries the instance log only.",
+        false,
+    )
+    .request_body(Some(json_body("PutAuditStream")))
+    .responses(responses_with(
+        [
+            ("200", json_of::<AuditStream>("The updated destination.")),
+            (
+                "201",
+                json_of::<CreatedAuditStream>("The created destination and its signing secret."),
+            ),
+        ],
+        &[400, 401, 403, 409, 429],
+    ))
+    .build();
+    let delete_admin = stream_operation(
+        "delete_admin_audit_stream",
+        "Remove the instance's audit stream",
+        "Instance admins only, with a session. Works without the licence.",
+        false,
+    )
+    .responses(responses(
+        "204",
+        ResponseBuilder::new()
+            .description("Removed. The stream stops.")
+            .build(),
+        &[401, 403, 404, 429],
+    ))
+    .build();
+    let rotate_admin = stream_operation(
+        "rotate_admin_audit_stream_secret",
+        "Rotate the instance's signing secret",
+        "Instance admins only, with a session, and a licence that lists `audit_log`, or a cloud cell. The new secret is shown once. 409 when the stored settings cannot be read.",
+        false,
+    )
+    .responses(responses(
+        "200",
+        json_of::<RotatedAuditStreamSecret>("The new signing secret."),
+        &[401, 403, 404, 409, 429],
+    ))
+    .build();
+    let test_admin = stream_operation(
+        "test_admin_audit_stream",
+        "Send a test line to the instance's audit stream",
+        "Instance admins only, with a session, and a licence that lists `audit_log`, or a cloud cell. Reports only reachability, as the organization's test does.",
+        false,
+    )
+    .responses(responses(
+        "200",
+        json_of::<AuditStreamTest>("Whether the endpoint answered, and its status."),
+        &[400, 401, 403, 404, 429],
+    ))
+    .build();
+    paths
+        .path(
+            "/api/v1/orgs/{org}/audit-stream",
+            PathItem::new(HttpMethod::Get, get_org),
+        )
+        .path(
+            "/api/v1/orgs/{org}/audit-stream",
+            PathItem::new(HttpMethod::Put, put_org),
+        )
+        .path(
+            "/api/v1/orgs/{org}/audit-stream",
+            PathItem::new(HttpMethod::Delete, delete_org),
+        )
+        .path(
+            "/api/v1/orgs/{org}/audit-stream/secret",
+            PathItem::new(HttpMethod::Post, rotate_org),
+        )
+        .path(
+            "/api/v1/orgs/{org}/audit-stream/test",
+            PathItem::new(HttpMethod::Post, test_org),
+        )
+        .path(
+            "/api/v1/admin/audit-stream",
+            PathItem::new(HttpMethod::Get, get_admin),
+        )
+        .path(
+            "/api/v1/admin/audit-stream",
+            PathItem::new(HttpMethod::Put, put_admin),
+        )
+        .path(
+            "/api/v1/admin/audit-stream",
+            PathItem::new(HttpMethod::Delete, delete_admin),
+        )
+        .path(
+            "/api/v1/admin/audit-stream/secret",
+            PathItem::new(HttpMethod::Post, rotate_admin),
+        )
+        .path(
+            "/api/v1/admin/audit-stream/test",
+            PathItem::new(HttpMethod::Post, test_admin),
+        )
 }
 
 fn admin_paths(paths: PathsBuilder) -> PathsBuilder {
@@ -1204,7 +1545,7 @@ fn auth_paths(paths: PathsBuilder) -> PathsBuilder {
         "Clears the login cookie. Success sets the session cookie and redirects to the saved \
          relative path. Failure redirects to `/login?error=<code>`. Codes: `invalid_state`, \
          `provider_error`, `provider_unavailable`, `email_not_verified`, `domain_not_allowed`, \
-         `signup_closed`, `account_disabled`, `link_refused`, `setup_required`, `seat_limit`, `sso_unavailable`, `sso_required`. The provider is `github`, `google`, `oidc:<name>`, or `sso` (an org's provider, started through `/api/auth/sso/authorize`).",
+         `signup_closed`, `account_disabled`, `link_refused`, `setup_required`, `seat_limit`, `sso_unavailable`, `sso_required`, `saml_invalid`, `saml_unsupported`. The provider is `github`, `google`, `oidc:<name>`, or `sso` (an org's provider, started through `/api/auth/sso/authorize`).",
     ))
     .securities(Some(Vec::new()))
     .parameters(Some(vec![
@@ -1428,6 +1769,55 @@ fn auth_paths(paths: PathsBuilder) -> PathsBuilder {
         &[400, 429],
     ))
     .build();
+    let saml_metadata = operation(
+        "get_saml_metadata",
+        "auth",
+        "Read an org's SAML service provider metadata",
+    )
+    .description(Some(
+        "The SP metadata document of the org's SAML provider (D-SA-12): the entity ID and the assertion consumer service URL to register at the identity provider. Public, with no session. 404 when the org has no SAML provider.",
+    ))
+    .securities(Some(Vec::new()))
+    .parameters(Some(vec![path_string("org_id", "Org UUID.")]))
+    .responses(responses(
+        "200",
+        ResponseBuilder::new()
+            .description("The SP metadata document.")
+            .content(
+                "application/samlmetadata+xml",
+                Content::new(Some(string_schema())),
+            )
+            .build(),
+        &[404],
+    ))
+    .build();
+    let saml_start = operation("get_saml_start", "auth", "Start an org's SAML login")
+        .description(Some(
+            "Starts a login through the org's SAML provider (D-SA-5, D-SA-10). The same URL is the identity provider's tile link. A missing or disabled provider redirects to `/login?error=sso_unavailable` with no cookie. Shares the per-IP bucket of 300 a minute with `/api/auth/sso/authorize`; over it is 429.",
+        ))
+        .securities(Some(Vec::new()))
+        .parameters(Some(vec![path_string("org_id", "Org UUID.")]))
+        .responses(responses(
+            "302",
+            redirect_to("To the org's identity provider, or to `/login?error=sso_unavailable`."),
+            &[429, 503],
+        ))
+        .build();
+    let saml_acs = operation("post_saml_acs", "auth", "Finish an org's SAML login")
+        .description(Some(
+            "The assertion consumer service (D-SA-10, D-SA-12). The identity provider posts the `SAMLResponse` form here, with the `RelayState` it received. The response is validated as D-SA-9 describes, and each login is single use. A failure redirects to `/login?error=saml_invalid`; a response the server does not accept, such as one with an encrypted assertion, redirects to `/login?error=saml_unsupported`. The route is exempt from the `Origin` check (D141): the pending login and its binder cookie are the check. The form is at most 256 KiB.",
+        ))
+        .securities(Some(Vec::new()))
+        .parameters(Some(vec![path_string("org_id", "Org UUID.")]))
+        .request_body(Some(form_body("SamlAcsForm")))
+        .responses(responses(
+            "302",
+            redirect_to(
+                "To the saved page, the start URL for an unsolicited response, or /login?error=<code>.",
+            ),
+            &[404, 413, 429],
+        ))
+        .build();
     let device_code = operation("post_device_code", "auth", "Start a device sign-in")
         .description(Some(
             "Issues a device code for `cetra login` or `cetra-cli init` (RFC 8628, D-AO-3). The CLI shows `user_code`, opens `verification_uri_complete` and polls `POST /api/auth/device/token` every `interval` seconds. The codes expire after `expires_in` seconds. No cookie and no `Origin` are needed. Ten codes a minute per client network (an IPv6 address counts by its /64); over that is 429.",
@@ -1541,6 +1931,18 @@ fn auth_paths(paths: PathsBuilder) -> PathsBuilder {
             PathItem::new(HttpMethod::Post, sso_discover),
         )
         .path(
+            "/api/auth/saml/{org_id}",
+            PathItem::new(HttpMethod::Get, saml_metadata),
+        )
+        .path(
+            "/api/auth/saml/{org_id}/start",
+            PathItem::new(HttpMethod::Get, saml_start),
+        )
+        .path(
+            "/api/auth/saml/{org_id}/acs",
+            PathItem::new(HttpMethod::Post, saml_acs),
+        )
+        .path(
             "/api/auth/sso/authorize",
             PathItem::new(HttpMethod::Get, sso_authorize),
         )
@@ -1589,6 +1991,19 @@ fn auth_paths(paths: PathsBuilder) -> PathsBuilder {
         )
 }
 
+/// The form the identity provider posts to the SAML ACS (D-SA-10). Documentation only: the
+/// handler reads the form itself. The names are fixed by SAML, so they keep their case.
+#[derive(utoipa::ToSchema)]
+#[allow(dead_code)]
+struct SamlAcsForm {
+    #[serde(rename = "SAMLResponse")]
+    #[schema(rename = "SAMLResponse")]
+    saml_response: String,
+    #[serde(rename = "RelayState")]
+    #[schema(rename = "RelayState")]
+    relay_state: Option<String>,
+}
+
 fn org_sso_paths(paths: PathsBuilder) -> PathsBuilder {
     let session_only = vec![SecurityRequirement::new("session", [] as [&str; 0])];
     let org_param = path_string("org", "Org UUID or slug.");
@@ -1619,6 +2034,23 @@ fn org_sso_paths(paths: PathsBuilder) -> PathsBuilder {
     .securities(Some(session_only.clone()))
     .parameters(Some(vec![org_param.clone()]))
     .request_body(Some(json_body("PutOrgSsoProvider")))
+    .responses(responses(
+        "200",
+        json_of::<OrgSso>("The saved SSO settings."),
+        &[400, 401, 403, 404, 409, 429],
+    ))
+    .build();
+    let put_saml = operation(
+        "put_org_saml_provider",
+        "orgs",
+        "Save the org's SAML identity provider",
+    )
+    .description(Some(
+        "Creates or updates the org's one SAML provider (D-SA-17, D-SA-18). Give exactly one source: `metadata_url` (an `https` URL, fetched now and refreshed daily), `metadata_xml` (pasted), or `idp_entity_id`, `sso_url` and `certificates` together. With none of them, only the SAML settings are saved. Changing the IdP entity ID needs `confirm_entity_id_change: true` and deletes the org's identities. The server's public URL must be `https` (D-SA-19). Needs the org SSO and SAML features (D-P-61). Owners only, session only (D-P-51).",
+    ))
+    .securities(Some(session_only.clone()))
+    .parameters(Some(vec![org_param.clone()]))
+    .request_body(Some(json_body("PutOrgSamlProvider")))
     .responses(responses(
         "200",
         json_of::<OrgSso>("The saved SSO settings."),
@@ -1728,6 +2160,10 @@ fn org_sso_paths(paths: PathsBuilder) -> PathsBuilder {
         .path("/api/v1/orgs/{org}/sso", settings)
         .path("/api/v1/orgs/{org}/sso/provider", provider)
         .path(
+            "/api/v1/orgs/{org}/sso/saml",
+            PathItem::new(HttpMethod::Put, put_saml),
+        )
+        .path(
             "/api/v1/orgs/{org}/sso/domains",
             PathItem::new(HttpMethod::Post, add_domain),
         )
@@ -1739,6 +2175,157 @@ fn org_sso_paths(paths: PathsBuilder) -> PathsBuilder {
             "/api/v1/orgs/{org}/sso/domains/{id}",
             PathItem::new(HttpMethod::Delete, remove_domain),
         )
+}
+
+fn scim_paths(paths: PathsBuilder) -> PathsBuilder {
+    let session_only = vec![SecurityRequirement::new("session", [] as [&str; 0])];
+    let get = operation(
+        "get_org_scim",
+        "orgs",
+        "Read the org's SCIM provisioning settings",
+    )
+    .description(Some(
+        "The enabled flag, the default role, the SCIM base URL, the verified SCIM domains and the live tokens, without their secrets. Owners only, session only (D-EA-15). Needs no feature, so the page stays readable after a lapse.",
+    ))
+    .securities(Some(session_only.clone()))
+    .parameters(Some(vec![path_string("org", "Org UUID or slug.")]))
+    .responses(responses(
+        "200",
+        json_of::<ScimSettings>("The org's SCIM settings."),
+        AUTH_ERRORS,
+    ))
+    .build();
+    let patch = operation(
+        "update_org_scim",
+        "orgs",
+        "Turn the org's SCIM provisioning on or off, or change the default role",
+    )
+    .description(Some(
+        "Turning SCIM on or changing the default role needs the `scim` feature, and turning SCIM on needs a verified domain (409). Turning it off always works. The default role is `viewer` or `member`. While SCIM is on, managed members cannot be changed by hand (D-EA-18). Owners only, session only.",
+    ))
+    .securities(Some(session_only.clone()))
+    .parameters(Some(vec![path_string("org", "Org UUID or slug.")]))
+    .request_body(Some(json_body("UpdateScimSettings")))
+    .responses(responses(
+        "200",
+        json_of::<ScimSettings>("The SCIM settings."),
+        &[400, 401, 403, 404, 409, 429],
+    ))
+    .build();
+    let create_token = operation(
+        "create_org_scim_token",
+        "orgs",
+        "Create a SCIM bearer token",
+    )
+    .description(Some(
+        "Creates a `scim-cetra-…` token for the identity provider. The secret is in this response only. At most two tokens are live at once (409 otherwise). Needs the `scim` feature. Owners only, session only.",
+    ))
+    .securities(Some(session_only.clone()))
+    .parameters(Some(vec![path_string("org", "Org UUID or slug.")]))
+    .request_body(Some(json_body("CreateScimTokenRequest")))
+    .responses(responses(
+        "201",
+        json_of::<CreatedScimToken>("The token, with its secret."),
+        &[400, 401, 403, 404, 409, 429],
+    ))
+    .build();
+    let revoke_token = operation(
+        "revoke_org_scim_token",
+        "orgs",
+        "Revoke a SCIM bearer token",
+    )
+    .description(Some(
+        "The token stops working at once. Works without the feature. Owners only, session only.",
+    ))
+    .securities(Some(session_only.clone()))
+    .parameters(Some(vec![
+        path_string("org", "Org UUID or slug."),
+        path_uuid("id", "Token id."),
+    ]))
+    .responses(responses(
+        "204",
+        ResponseBuilder::new()
+            .description("The token is revoked.")
+            .build(),
+        AUTH_ERRORS,
+    ))
+    .build();
+    let list_groups = operation(
+        "list_org_scim_groups",
+        "orgs",
+        "List the SCIM groups and their role mappings",
+    )
+    .description(Some(
+        "Every SCIM group of the org, by display name, with its member count and its role mapping (D-EA-14). Owners only, session only.",
+    ))
+    .securities(Some(session_only.clone()))
+    .parameters(Some(vec![path_string("org", "Org UUID or slug.")]))
+    .responses(responses(
+        "200",
+        json_of::<ScimGroupList>("The org's SCIM groups."),
+        AUTH_ERRORS,
+    ))
+    .build();
+    let put_group_mapping = operation(
+        "put_org_scim_group_mapping",
+        "orgs",
+        "Set a SCIM group's role mapping",
+    )
+    .description(Some(
+        "Replaces the group's org role and project roles (D-EA-14). A member gets the highest of their groups' roles, else the default role; owners are never changed. The org role is `admin`, `member` or `viewer`; `owner` is a 400. Raising a role needs the `scim` feature, and writing a project role needs `project_roles`; lowering works without them (D-EA-19). A mapping with neither an org role nor a project is a 400: delete it instead. While SCIM is on, the group's members are recomputed. Owners only, session only.",
+    ))
+    .securities(Some(session_only.clone()))
+    .parameters(Some(vec![
+        path_string("org", "Org UUID or slug."),
+        path_uuid("id", "Group id."),
+    ]))
+    .request_body(Some(json_body("PutScimGroupMapping")))
+    .responses(responses(
+        "200",
+        json_of::<ScimGroup>("The group, with its new mapping."),
+        &[400, 401, 403, 404, 429],
+    ))
+    .build();
+    let delete_group_mapping = operation(
+        "delete_org_scim_group_mapping",
+        "orgs",
+        "Remove a SCIM group's role mapping",
+    )
+    .description(Some(
+        "The group's members get the roles of their other groups, else the default role. Always works, so a lapsed org can take roles away. A group with no mapping also answers 204. Owners only, session only.",
+    ))
+    .securities(Some(session_only))
+    .parameters(Some(vec![
+        path_string("org", "Org UUID or slug."),
+        path_uuid("id", "Group id."),
+    ]))
+    .responses(responses(
+        "204",
+        ResponseBuilder::new()
+            .description("The mapping is removed.")
+            .build(),
+        AUTH_ERRORS,
+    ))
+    .build();
+    let mut settings = PathItem::new(HttpMethod::Get, get);
+    settings.patch = Some(patch);
+    let mut group_mapping = PathItem::new(HttpMethod::Put, put_group_mapping);
+    group_mapping.delete = Some(delete_group_mapping);
+    paths
+        .path("/api/v1/orgs/{org}/scim", settings)
+        .path(
+            "/api/v1/orgs/{org}/scim/tokens",
+            PathItem::new(HttpMethod::Post, create_token),
+        )
+        .path(
+            "/api/v1/orgs/{org}/scim/tokens/{id}",
+            PathItem::new(HttpMethod::Delete, revoke_token),
+        )
+        .path(
+            "/api/v1/orgs/{org}/scim/groups",
+            PathItem::new(HttpMethod::Get, list_groups),
+        )
+        .path("/api/v1/orgs/{org}/scim/groups/{id}/mapping", group_mapping)
 }
 
 fn invite_paths(paths: PathsBuilder) -> PathsBuilder {
@@ -1832,6 +2419,24 @@ fn project_paths(paths: PathsBuilder) -> PathsBuilder {
             QUERY_ERRORS,
         ))
         .build();
+    let activity = operation(
+        "get_projects_activity",
+        "projects",
+        "Read the projects' last 24 hours",
+    )
+    .description(Some(
+        "The org home's activity of the requested projects (D-C-27): traces, error traces and the sum of `cost_total` (USD) with the default exclusions, 24 hourly buckets from `from` (the epoch-aligned hours whose last one holds the request time; `to` is one nanosecond after it), and `last_ingest_at` when the server has received spans for the project since it started. `ids` is 1 to 50 distinct project ids, comma-separated; the answer follows their order. Unknown ids, ids of another org and projects hidden from the caller are left out. A project whose query fails or runs out of time is listed in `unavailable`. Any org member, through a session or a personal access token.",
+    ))
+    .parameters(Some(with_query::<ProjectActivityParams>(vec![path_string(
+        "org",
+        "Org UUID or slug.",
+    )])))
+    .responses(responses(
+        "200",
+        json_of::<ProjectsActivity>("The activity of the requested projects."),
+        QUERY_ERRORS,
+    ))
+    .build();
     let post_project = operation("post_project", "projects", "Create a project")
         .parameters(Some(vec![path_string("org", "Org UUID or slug.")]))
         .request_body(Some(json_body("CreateProjectRequest")))
@@ -2192,6 +2797,10 @@ fn project_paths(paths: PathsBuilder) -> PathsBuilder {
             PathItem::new(HttpMethod::Post, post_internal_device_code),
         )
         .path("/api/v1/orgs/{org}/projects", projects)
+        .path(
+            "/api/v1/orgs/{org}/projects/activity",
+            PathItem::new(HttpMethod::Get, activity),
+        )
         .path("/api/v1/projects/{project}", project)
 }
 
@@ -2377,12 +2986,30 @@ fn connection_paths(paths: PathsBuilder) -> PathsBuilder {
         &[400, 401, 403, 404, 409, 429],
     ))
     .build();
+    let test_unsaved = operation(
+        "post_unsaved_llm_connection_test",
+        "llm_connections",
+        "Test an unsaved LLM connection",
+    )
+    .description(Some("Organization admins and owners. Nothing is stored."))
+    .parameters(Some(vec![org.clone()]))
+    .request_body(Some(json_body("TestUnsavedLlmConnectionRequest")))
+    .responses(responses(
+        "200",
+        json_of::<LlmConnectionTestResult>(
+            "The outcome. A provider failure is ok: false, not an error status.",
+        ),
+        &[400, 401, 403, 404, 429],
+    ))
+    .build();
     let test = operation(
         "post_llm_connection_test",
         "llm_connections",
         "Test an LLM connection",
     )
-    .description(Some("Organization admins and owners."))
+    .description(Some(
+        "Organization admins and owners. Draft fields test values that are not saved; such a test stores nothing.",
+    ))
     .parameters(Some(vec![org, id]))
     .request_body(Some(json_body("TestLlmConnectionRequest")))
     .responses(responses(
@@ -2404,6 +3031,10 @@ fn connection_paths(paths: PathsBuilder) -> PathsBuilder {
         .path(
             "/api/v1/orgs/{org}/llm-connections/{id}/test",
             PathItem::new(HttpMethod::Post, test),
+        )
+        .path(
+            "/api/v1/orgs/{org}/llm-connections/test",
+            PathItem::new(HttpMethod::Post, test_unsaved),
         )
 }
 
@@ -4093,6 +4724,15 @@ fn dataset_paths(paths: PathsBuilder) -> PathsBuilder {
 fn export_result() -> Response {
     ResponseBuilder::new()
         .description("The version's items, one per line (JSONL) or one per row (CSV), with `Content-Disposition: attachment`.")
+        .content("application/x-ndjson", Content::new(Some(string_schema())))
+        .content("text/csv", Content::new(Some(string_schema())))
+        .build()
+}
+
+/// The body of an audit export: NDJSON lines or CSV rows, as an attachment.
+fn audit_export_result() -> Response {
+    ResponseBuilder::new()
+        .description("The records, one per line (NDJSON) or one per row (CSV), with `Content-Disposition: attachment`.")
         .content("application/x-ndjson", Content::new(Some(string_schema())))
         .content("text/csv", Content::new(Some(string_schema())))
         .build()
@@ -5972,6 +6612,17 @@ fn json_body(name: &str) -> utoipa::openapi::request_body::RequestBody {
         .required(Some(Required::True))
         .content(
             "application/json",
+            Content::new(Some(Ref::from_schema_name(name))),
+        )
+        .build()
+}
+
+/// `json_body` for an `application/x-www-form-urlencoded` body (the SAML ACS form).
+fn form_body(name: &str) -> utoipa::openapi::request_body::RequestBody {
+    RequestBodyBuilder::new()
+        .required(Some(Required::True))
+        .content(
+            "application/x-www-form-urlencoded",
             Content::new(Some(Ref::from_schema_name(name))),
         )
         .build()

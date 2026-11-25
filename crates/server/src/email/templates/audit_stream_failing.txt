@@ -1,0 +1,3 @@
+The audit stream to {{ url_host }} for {{ scope_name }} has failed for {{ since_hours }} hours. Records are kept and sent once the endpoint accepts them again, but records older than the audit retention period can be purged before they arrive.
+
+Check the destination: {{ url }}

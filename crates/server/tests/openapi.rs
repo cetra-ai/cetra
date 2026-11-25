@@ -18,6 +18,9 @@ const OPERATIONS: &[(&str, &str, &str)] = &[
     ("get", "/api/auth/callback/{provider}", "get_oauth_callback"),
     ("get", "/api/auth/sso/authorize", "get_sso_authorize"),
     ("post", "/api/auth/sso/discover", "post_sso_discover"),
+    ("get", "/api/auth/saml/{org_id}", "get_saml_metadata"),
+    ("get", "/api/auth/saml/{org_id}/start", "get_saml_start"),
+    ("post", "/api/auth/saml/{org_id}/acs", "post_saml_acs"),
     ("get", "/api/auth/config", "get_auth_config"),
     ("post", "/api/auth/setup", "post_setup"),
     ("post", "/api/auth/login", "post_login"),
@@ -87,11 +90,43 @@ const OPERATIONS: &[(&str, &str, &str)] = &[
     ),
     ("get", "/api/v1/orgs/{org}/usage", "get_org_usage"),
     ("get", "/api/v1/orgs/{org}/sso", "get_org_sso"),
+    ("get", "/api/v1/orgs/{org}/scim", "get_org_scim"),
+    ("patch", "/api/v1/orgs/{org}/scim", "update_org_scim"),
+    (
+        "post",
+        "/api/v1/orgs/{org}/scim/tokens",
+        "create_org_scim_token",
+    ),
+    (
+        "delete",
+        "/api/v1/orgs/{org}/scim/tokens/{id}",
+        "revoke_org_scim_token",
+    ),
+    (
+        "get",
+        "/api/v1/orgs/{org}/scim/groups",
+        "list_org_scim_groups",
+    ),
+    (
+        "put",
+        "/api/v1/orgs/{org}/scim/groups/{id}/mapping",
+        "put_org_scim_group_mapping",
+    ),
+    (
+        "delete",
+        "/api/v1/orgs/{org}/scim/groups/{id}/mapping",
+        "delete_org_scim_group_mapping",
+    ),
     ("patch", "/api/v1/orgs/{org}/sso", "patch_org_sso"),
     (
         "put",
         "/api/v1/orgs/{org}/sso/provider",
         "put_org_sso_provider",
+    ),
+    (
+        "put",
+        "/api/v1/orgs/{org}/sso/saml",
+        "put_org_saml_provider",
     ),
     (
         "delete",
@@ -209,6 +244,11 @@ const OPERATIONS: &[(&str, &str, &str)] = &[
         "/api/v1/orgs/{org}/llm-connections/{id}/test",
         "post_llm_connection_test",
     ),
+    (
+        "post",
+        "/api/v1/orgs/{org}/llm-connections/test",
+        "post_unsaved_llm_connection_test",
+    ),
     ("get", "/api/v1/orgs/{org}/models", "list_org_model_prices"),
     ("post", "/api/v1/orgs/{org}/models", "post_org_model_price"),
     (
@@ -223,6 +263,11 @@ const OPERATIONS: &[(&str, &str, &str)] = &[
     ),
     ("get", "/api/v1/orgs/{org}/projects", "list_projects"),
     ("post", "/api/v1/orgs/{org}/projects", "post_project"),
+    (
+        "get",
+        "/api/v1/orgs/{org}/projects/activity",
+        "get_projects_activity",
+    ),
     ("get", "/api/v1/projects/{project}", "get_project"),
     ("patch", "/api/v1/projects/{project}", "patch_project"),
     (
@@ -596,6 +641,76 @@ const OPERATIONS: &[(&str, &str, &str)] = &[
     ("delete", "/api/v1/projects/{project}", "delete_project"),
     ("delete", "/api/v1/orgs/{org}", "delete_org"),
     ("get", "/api/v1/orgs/{org}/deletions", "list_org_deletions"),
+    (
+        "get",
+        "/api/v1/orgs/{org}/audit-events",
+        "list_org_audit_events",
+    ),
+    (
+        "get",
+        "/api/v1/orgs/{org}/audit-events/export",
+        "get_org_audit_export",
+    ),
+    (
+        "get",
+        "/api/v1/admin/audit-events",
+        "list_admin_audit_events",
+    ),
+    (
+        "get",
+        "/api/v1/admin/audit-events/export",
+        "get_admin_audit_export",
+    ),
+    (
+        "get",
+        "/api/v1/orgs/{org}/audit-stream",
+        "get_org_audit_stream",
+    ),
+    (
+        "put",
+        "/api/v1/orgs/{org}/audit-stream",
+        "put_org_audit_stream",
+    ),
+    (
+        "delete",
+        "/api/v1/orgs/{org}/audit-stream",
+        "delete_org_audit_stream",
+    ),
+    (
+        "post",
+        "/api/v1/orgs/{org}/audit-stream/secret",
+        "rotate_org_audit_stream_secret",
+    ),
+    (
+        "post",
+        "/api/v1/orgs/{org}/audit-stream/test",
+        "test_org_audit_stream",
+    ),
+    (
+        "get",
+        "/api/v1/admin/audit-stream",
+        "get_admin_audit_stream",
+    ),
+    (
+        "put",
+        "/api/v1/admin/audit-stream",
+        "put_admin_audit_stream",
+    ),
+    (
+        "delete",
+        "/api/v1/admin/audit-stream",
+        "delete_admin_audit_stream",
+    ),
+    (
+        "post",
+        "/api/v1/admin/audit-stream/secret",
+        "rotate_admin_audit_stream_secret",
+    ),
+    (
+        "post",
+        "/api/v1/admin/audit-stream/test",
+        "test_admin_audit_stream",
+    ),
     (
         "get",
         "/api/v1/projects/{project}/evaluators",
@@ -1058,6 +1173,7 @@ const QUERY_OR_BODY: &[&str] = &[
     "list_llm_connections",
     "list_project_members",
     "list_projects",
+    "get_projects_activity",
     "list_api_keys",
     "list_personal_tokens",
     "list_traces",
@@ -1077,6 +1193,10 @@ const QUERY_OR_BODY: &[&str] = &[
     "list_deletions",
     "get_deletion",
     "list_org_deletions",
+    "list_org_audit_events",
+    "get_org_audit_export",
+    "list_admin_audit_events",
+    "get_admin_audit_export",
     "list_evaluators",
     "list_evaluator_versions",
     "list_score_definitions",
@@ -1152,6 +1272,7 @@ const TAGS: &[&str] = &[
     "media",
     "internal",
     "deletions",
+    "audit",
     "alerts",
     "issues",
     "assistant",
@@ -1241,6 +1362,9 @@ fn document_lint() {
                 | "get_oauth_authorize"
                 | "get_sso_authorize"
                 | "post_sso_discover"
+                | "get_saml_metadata"
+                | "get_saml_start"
+                | "post_saml_acs"
                 | "post_device_code"
                 | "post_device_token"
                 | "get_oauth_callback"
@@ -1274,6 +1398,18 @@ fn document_lint() {
                 | "post_personal_token"
                 | "delete_personal_token"
                 | "list_admin_users"
+                | "list_admin_audit_events"
+                | "get_admin_audit_export"
+                | "get_admin_audit_stream"
+                | "put_admin_audit_stream"
+                | "delete_admin_audit_stream"
+                | "rotate_admin_audit_stream_secret"
+                | "test_admin_audit_stream"
+                | "get_org_audit_stream"
+                | "put_org_audit_stream"
+                | "delete_org_audit_stream"
+                | "rotate_org_audit_stream_secret"
+                | "test_org_audit_stream"
                 | "post_admin_user"
                 | "patch_admin_user"
                 | "post_admin_user_reset_link"
@@ -1283,11 +1419,19 @@ fn document_lint() {
                 | "post_admin_settings_test_email"
                 | "get_org_sso"
                 | "put_org_sso_provider"
+                | "put_org_saml_provider"
                 | "delete_org_sso_provider"
                 | "patch_org_sso"
                 | "post_org_sso_domain"
                 | "post_org_sso_domain_verify"
                 | "delete_org_sso_domain"
+                | "get_org_scim"
+                | "update_org_scim"
+                | "create_org_scim_token"
+                | "revoke_org_scim_token"
+                | "list_org_scim_groups"
+                | "put_org_scim_group_mapping"
+                | "delete_org_scim_group_mapping"
                 | "delete_org"
                 | "delete_project"
                 | "patch_issue"
@@ -1328,6 +1472,12 @@ fn document_lint() {
             expected_errors.extend(["404"]);
         } else if *id == "get_sso_authorize" {
             expected_errors.extend(["429"]);
+        } else if *id == "get_saml_metadata" {
+            expected_errors.extend(["404"]);
+        } else if *id == "get_saml_start" {
+            expected_errors.extend(["429"]);
+        } else if *id == "post_saml_acs" {
+            expected_errors.extend(["404", "413", "429"]);
         } else if *id == "post_sso_discover" || *id == "post_device_code" {
             // `post_device_code` also documents a 503; the lint compares 4xx only.
             expected_errors.extend(["400", "429"]);
@@ -1388,13 +1538,19 @@ fn document_lint() {
             || *id == "put_assistant_feedback"
             || *id == "put_org_assistant"
             || *id == "post_org_assistant_test"
+            || *id == "list_org_audit_events"
+            || *id == "get_org_audit_export"
         {
             expected_errors.extend(["400", "401", "403", "404", "429"]);
         } else if *id == "get_invite_preview" {
             expected_errors.extend(["404", "429"]);
         } else if *id == "post_org_invite" || *id == "post_project" {
             expected_errors.extend(["400", "401", "403", "404", "409", "429"]);
-        } else if *id == "list_admin_users" || *id == "post_admin_settings_test_email" {
+        } else if *id == "list_admin_users"
+            || *id == "post_admin_settings_test_email"
+            || *id == "list_admin_audit_events"
+            || *id == "get_admin_audit_export"
+        {
             expected_errors.extend(["400", "401", "403", "429"]);
         } else if *id == "get_admin_settings" || *id == "get_admin_license" {
             expected_errors.extend(["401", "403", "429"]);
@@ -1431,17 +1587,25 @@ fn document_lint() {
             || *id == "delete_llm_connection"
         {
             expected_errors.extend(["400", "401", "403", "404", "409", "429"]);
-        } else if *id == "get_llm_connection" || *id == "post_llm_connection_test" {
+        } else if *id == "get_llm_connection"
+            || *id == "post_llm_connection_test"
+            || *id == "post_unsaved_llm_connection_test"
+        {
             expected_errors.extend(["400", "401", "403", "404", "429"]);
         } else if *id == "create_channel"
             || *id == "update_channel"
             || *id == "create_alert_rule"
             || *id == "update_alert_rule"
             || *id == "put_org_sso_provider"
+            || *id == "put_org_saml_provider"
             || *id == "post_org_sso_domain"
             || *id == "patch_org_sso"
+            || *id == "update_org_scim"
+            || *id == "create_org_scim_token"
         {
             expected_errors.extend(["400", "401", "403", "404", "409", "429"]);
+        } else if *id == "put_org_scim_group_mapping" {
+            expected_errors.extend(["400", "401", "403", "404", "429"]);
         } else if *id == "post_org_sso_domain_verify" || *id == "delete_org_sso_provider" {
             expected_errors.extend(["401", "403", "404", "409", "429"]);
         } else if *id == "run_sql" || *id == "query_widget" || *id == "post_facets" {
@@ -1564,6 +1728,20 @@ fn document_lint() {
             expected_errors.extend(["400", "401", "403", "404", "413", "429"]);
         } else if *id == "post_experiment_results" {
             expected_errors.extend(["400", "401", "403", "404", "409", "413", "429"]);
+        } else if *id == "get_org_audit_stream" || *id == "get_admin_audit_stream" {
+            expected_errors.extend(["401", "403", "404", "409", "429"]);
+        } else if *id == "put_org_audit_stream" {
+            expected_errors.extend(["400", "401", "403", "404", "409", "429"]);
+        } else if *id == "put_admin_audit_stream" {
+            expected_errors.extend(["400", "401", "403", "409", "429"]);
+        } else if *id == "delete_org_audit_stream" || *id == "delete_admin_audit_stream" {
+            expected_errors.extend(["401", "403", "404", "429"]);
+        } else if *id == "rotate_org_audit_stream_secret"
+            || *id == "rotate_admin_audit_stream_secret"
+        {
+            expected_errors.extend(["401", "403", "404", "409", "429"]);
+        } else if *id == "test_org_audit_stream" || *id == "test_admin_audit_stream" {
+            expected_errors.extend(["400", "401", "403", "404", "429"]);
         } else if READ_OPERATIONS.contains(id)
             || *id == "preview_deletion"
             || *id == "post_online_rule_preview"
@@ -1631,7 +1809,10 @@ fn document_lint() {
 
     for (name, schema) in schemas {
         assert!(is_pascal(name), "component {name}");
-        check_property_names(schema, name);
+        // The SAML form names are fixed by SAML (`SAMLResponse`, `RelayState`), not JSON fields.
+        if name != "SamlAcsForm" {
+            check_property_names(schema, name);
+        }
     }
 
     let pages = [
@@ -1971,6 +2152,7 @@ fn assert_nullability(schemas: &serde_json::Map<String, Value>) {
         "BackfillPage",
         "InternalUsagePage",
         "InternalDropPage",
+        "AuditEventPage",
     ];
     let mut expected: BTreeSet<String> = pages
         .iter()

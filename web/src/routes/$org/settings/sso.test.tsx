@@ -40,6 +40,7 @@ it("shows the provider, the callback URL, the domains and the switches to an own
   const { router } = await openPage();
 
   await screen.findByRole("heading", { name: "Identity provider", level: 2 });
+  expect(screen.getByRole("radio", { name: "OpenID Connect" })).toBeChecked();
   expect(router.state.location.pathname).toBe("/acme/settings/sso");
   expect(orgNav().getByRole("link", { name: "Single sign-on" })).toHaveAttribute(
     "aria-current",

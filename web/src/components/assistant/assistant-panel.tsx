@@ -29,7 +29,7 @@ import {
 } from "@/lib/assistant/transcript";
 import { parseTurnEvent, type TurnEvent } from "@/lib/assistant/types";
 import { postEventStream, StreamRequestError } from "@/lib/event-stream";
-import { LLM_ADAPTER_LABELS } from "@/lib/llm-adapters";
+import { providerLabel } from "@/lib/llm-adapters";
 import { shortcutLabel } from "@/lib/shortcuts";
 import { activeTabOf, readTabs } from "@/lib/sql/tabs";
 
@@ -270,7 +270,9 @@ export function AssistantPanel({ layout }: { layout: PanelLayout }) {
       ? {
           name: status.data.connection_name ?? "an LLM connection",
           detail: [
-            status.data.adapter ? adapterLabel(status.data.adapter) : undefined,
+            status.data.adapter
+              ? adapterLabel(status.data.adapter, status.data.base_url)
+              : undefined,
             status.data.model,
           ]
             .filter((part): part is string => part !== undefined && part !== "")
@@ -400,10 +402,10 @@ export function AssistantPanel({ layout }: { layout: PanelLayout }) {
   );
 }
 
-/** The adapter's display name; the status route returns the adapter as a plain string. */
-function adapterLabel(adapter: string): string {
-  return adapter in LLM_ADAPTER_LABELS
-    ? LLM_ADAPTER_LABELS[adapter as keyof typeof LLM_ADAPTER_LABELS]
+/** The provider's display name; the status route returns the adapter as a plain string. */
+function adapterLabel(adapter: string, baseUrl: string | undefined): string {
+  return adapter === "openai" || adapter === "anthropic" || adapter === "gemini"
+    ? providerLabel({ adapter, base_url: baseUrl })
     : adapter;
 }
 

@@ -168,3 +168,50 @@ it("has no upgrade link without an upgrade URL", async () => {
   expect(await screen.findByRole("heading", { name: "Pro + Teams" })).toBeInTheDocument();
   expect(screen.queryByRole("link", { name: "Upgrade" })).toBeNull();
 });
+
+it("shows the audit retention: the instance default, kept forever, or the days", async () => {
+  const retention = (limits: object) =>
+    server.use(
+      http.get("/api/v1/orgs/:org/entitlements", () =>
+        HttpResponse.json({ ...entitlementsFixture, limits }),
+      ),
+    );
+
+  retention({ ...entitlementsFixture.limits });
+  const first = await renderApp("/acme/settings/plan");
+  expect(await screen.findByRole("heading", { name: "Pro + Teams" })).toBeInTheDocument();
+  expect(
+    within(screen.getByRole("region", { name: "Limits" })).getByRole("row", {
+      name: /Audit retention/,
+    }),
+  ).toHaveTextContent("Instance default");
+  first.unmount();
+
+  retention({ ...entitlementsFixture.limits, audit_retention_days: 0 });
+  const forever = await renderApp("/acme/settings/plan");
+  expect(await screen.findByRole("heading", { name: "Pro + Teams" })).toBeInTheDocument();
+  expect(
+    within(screen.getByRole("region", { name: "Limits" })).getByRole("row", {
+      name: /Audit retention/,
+    }),
+  ).toHaveTextContent("Kept forever");
+  forever.unmount();
+
+  retention({ ...entitlementsFixture.limits, audit_retention_days: 400 });
+  await renderApp("/acme/settings/plan");
+  expect(await screen.findByRole("heading", { name: "Pro + Teams" })).toBeInTheDocument();
+  expect(
+    within(screen.getByRole("region", { name: "Limits" })).getByRole("row", {
+      name: /Audit retention/,
+    }),
+  ).toHaveTextContent("400 days");
+});
+
+it("lists the audit log as a feature the plan does not include", async () => {
+  await renderApp("/acme/settings/plan");
+
+  expect(await screen.findByRole("heading", { name: "Pro + Teams" })).toBeInTheDocument();
+  const audit = screen.getByText("Audit log", { selector: "li > span" }).closest("li");
+  expect(audit).toHaveTextContent("Available with Enterprise or an enterprise licence");
+  expect(audit).not.toHaveTextContent("Included");
+});

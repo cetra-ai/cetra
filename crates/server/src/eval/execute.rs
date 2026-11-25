@@ -23,6 +23,8 @@ use uuid::Uuid;
 use crate::api::evaluators::EvaluatorKind;
 use crate::api::online_rules::BudgetPeriod;
 use crate::api::scores::ScoreCreate;
+use crate::audit::catalog::OnlineRuleAction;
+use crate::audit::{self, Event, TargetKind};
 use crate::deletion;
 use crate::entitlements::{Visibility, units};
 use crate::eval::budget::{self, Reservation, Reserve};
@@ -1189,9 +1191,6 @@ async fn finish_job(
         matched = settled.matched,
         "eval job finished"
     );
-    for (rule_id, reason) in &settled.paused {
-        audit_pause(rule_id, row.project_id, reason);
-    }
     if let Some(rule) = settled.skip_rule {
         // A budget pause skips the rule's backlog in chunks of 1 000 per write (I-3).
         eval_jobs::skip_queued_of_rule(&state.meta, rule, "budget", now).await?;
@@ -1200,18 +1199,19 @@ async fn finish_job(
         return Ok(());
     };
     if settled.matched && counts && state.eval.breakers.record(rule, failed) {
-        let tripped = state
+        state
             .meta
             .write(move |conn| {
                 Box::pin(async move {
-                    online_rules::pause_rule(conn, rule, PAUSE_ERRORS, Some(BREAKER_DETAIL), now)
-                        .await
+                    if online_rules::pause_rule(conn, rule, PAUSE_ERRORS, Some(BREAKER_DETAIL), now)
+                        .await?
+                    {
+                        record_pause(conn, rule, PAUSE_ERRORS, now).await?;
+                    }
+                    Ok(())
                 })
             })
             .await?;
-        if tripped {
-            audit_pause(&rule, row.project_id, PAUSE_ERRORS);
-        }
     }
     Ok(())
 }
@@ -1228,11 +1228,10 @@ struct Settle {
     pause: Pause,
 }
 
-/// What the write did: whether the job's row matched, the rules it paused, and a rule whose queued
+/// What the write did: whether the job's row matched, and a rule whose queued
 /// jobs are still to be skipped with `budget` (in chunks, after this write).
 struct Settled {
     matched: bool,
-    paused: Vec<(Uuid, &'static str)>,
     skip_rule: Option<Uuid>,
 }
 
@@ -1287,7 +1286,6 @@ async fn write_outcome(conn: &mut SqliteConnection, settle: Settle) -> Result<Se
     if !eval_jobs::finish(conn, job, claims, finish, now).await? {
         return Ok(Settled {
             matched: false,
-            paused: Vec::new(),
             skip_rule: None,
         });
     }
@@ -1363,9 +1361,11 @@ async fn write_outcome(conn: &mut SqliteConnection, settle: Settle) -> Result<Se
             }
         }
     }
+    for (rule_id, reason) in paused {
+        record_pause(conn, rule_id, reason, now).await?;
+    }
     Ok(Settled {
         matched: true,
-        paused,
         skip_rule,
     })
 }
@@ -1381,14 +1381,23 @@ pub(crate) async fn connection_unchanged(
     Ok(row.is_some_and(|row| Some(row.updated_at) == claimed_at))
 }
 
-fn audit_pause(rule_id: &Uuid, project_id: ProjectId, reason: &str) {
-    tracing::info!(
-        target: "audit",
-        rule_id = %rule_id,
-        project_id = %project_id,
-        reason,
-        "online rule paused"
-    );
+/// Records a pause the worker made, as the system (D-EA-21). Runs in the settlement's own
+/// transaction, so the record and the pause commit together. A rule that no longer exists has no
+/// scope and records nothing.
+async fn record_pause(
+    conn: &mut SqliteConnection,
+    rule: Uuid,
+    reason: &'static str,
+    now: i64,
+) -> Result<(), MetaError> {
+    if let Some((org, project)) = audit::scope_of_rule(conn, rule).await? {
+        let event = Event::new(OnlineRuleAction::Paused { reason })
+            .org(org)
+            .project(project)
+            .target(TargetKind::OnlineRule, rule);
+        audit::record(conn, &audit::Ctx::system(), event, now).await?;
+    }
+    Ok(())
 }
 
 /// The retry of a job that did not finish: a later attempt, or `failed` once the attempts run out.
@@ -2675,6 +2684,43 @@ mod job_tests {
         let rule = rule_row(&app, &seeded.project, rule_id).await;
         assert_eq!(rule.paused_reason.as_deref(), Some("budget"));
         assert!(mock.requests().is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_budget_pause_is_recorded_by_system() {
+        let mock = MockLlm::start(vec![]).await;
+        let (app, seeded) = test_app().await;
+        let conn = connection(&app, &seeded.cookie, &mock).await;
+        let evaluator = judge(&app, &seeded, conn, PRICED).await;
+        let rule_id = rule(&app, &seeded, evaluator, Some((0.000_001, "day")), MAPPING).await;
+        store_trace(&app, &seeded.project, trace(14), "production").await;
+        let now = app.state.clock.now_ns();
+        let (job, new) = new_job(
+            seeded.project.id,
+            KIND_RULE,
+            Some(rule_id),
+            evaluator,
+            None,
+            trace(14),
+            now,
+        );
+        enqueue(&app, new).await;
+
+        let row = run_once(&app, &seeded.project, job, Some(conn)).await;
+        assert_eq!(row.error.as_deref(), Some("budget"));
+        #[allow(clippy::type_complexity)]
+        let rows: Vec<(String, String, String, Option<String>, Option<String>)> = sqlx::query_as(
+            "SELECT action, actor_kind, details, project_id, target_id FROM audit_events \
+                 WHERE action = 'online_rule.paused'",
+        )
+        .fetch_all(app.state.meta.reader())
+        .await
+        .unwrap();
+        assert_eq!(rows.len(), 1, "one pause, one record");
+        assert_eq!(rows[0].1, "system");
+        assert_eq!(rows[0].2, r#"{"reason":"budget"}"#);
+        assert_eq!(rows[0].3, Some(seeded.project.id.to_string()));
+        assert_eq!(rows[0].4, Some(rule_id.to_string()));
     }
 
     #[tokio::test]

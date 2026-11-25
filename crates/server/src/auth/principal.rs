@@ -19,6 +19,7 @@ use crate::auth::cache::KeyCache;
 use crate::auth::roles::{KeyScope, KeyScopes};
 use crate::auth::secret::{self, KeyKind};
 use crate::auth::session::resolve_cookie_header;
+use crate::ee::scim::store as scim_store;
 use crate::http::AppState;
 use crate::http::error::ApiError;
 use crate::meta::api_keys::{self, LoadedApiKey};
@@ -88,6 +89,13 @@ pub(crate) enum Principal {
         method: String,
         path: String,
     },
+    /// A SCIM bearer token of an org (D-EA-15). Only `Access::Scim` routes accept it.
+    Scim {
+        /// The token's org.
+        org_id: cetra_core::ids::OrgId,
+        /// `scim_tokens.id`, for audit logs.
+        token_id: Uuid,
+    },
 }
 
 /// A cached successful key lookup. `expires_at` is checked on every use.
@@ -116,6 +124,16 @@ pub(crate) struct CachedPat {
     pub(crate) scopes: KeyScopes,
     /// When the token stops working. Absent means it does not expire.
     pub(crate) expires_at: Option<i64>,
+}
+
+/// A cached successful SCIM token lookup. The org is active when the entry is made, and a
+/// revoke evicts the entry.
+#[derive(Clone, Copy)]
+pub(crate) struct CachedScim {
+    /// `scim_tokens.id`.
+    pub(crate) id: Uuid,
+    /// The token's org.
+    pub(crate) org_id: cetra_core::ids::OrgId,
 }
 
 impl fmt::Debug for Principal {
@@ -159,6 +177,11 @@ impl fmt::Debug for Principal {
                 .field("method", method)
                 .field("path", path)
                 .finish(),
+            Self::Scim { org_id, token_id } => formatter
+                .debug_struct("Scim")
+                .field("org_id", org_id)
+                .field("token_id", token_id)
+                .finish(),
         }
     }
 }
@@ -171,9 +194,11 @@ impl fmt::Debug for Principal {
 pub(crate) fn session_user(principal: &Principal) -> Result<&AuthUser, ApiError> {
     match principal {
         Principal::Session { user, .. } | Principal::Pat { user, .. } => Ok(user),
-        Principal::ApiKey { .. } | Principal::ControlPlane { .. } => Err(ApiError::Forbidden {
-            code: ProblemCode::Forbidden,
-        }),
+        Principal::ApiKey { .. } | Principal::ControlPlane { .. } | Principal::Scim { .. } => {
+            Err(ApiError::Forbidden {
+                code: ProblemCode::Forbidden,
+            })
+        }
     }
 }
 
@@ -253,6 +278,9 @@ pub(crate) async fn bearer_principal(
     if kind == KeyKind::Personal {
         return personal_principal(state, &hash, now).await;
     }
+    if kind == KeyKind::Scim {
+        return scim_principal(state, &hash, now).await;
+    }
     if let Some(cached) = state.key_cache.get(&hash, now) {
         if expired(cached.expires_at, now) {
             state.key_cache.evict(&hash);
@@ -302,6 +330,33 @@ fn control_plane_principal(state: &AppState, token: &str, now: i64) -> Result<Pr
         scope: claims.scope,
         method: claims.method,
         path: claims.path,
+    })
+}
+
+/// The caller of a SCIM token (D-EA-15). A revoked token, or one whose org is not active, is
+/// refused. A cache hit is not checked against the org again: a revoke evicts the entry.
+async fn scim_principal(state: &AppState, hash: &str, now: i64) -> Result<Principal, ApiError> {
+    let cached = if let Some(cached) = state.scim_cache.get(hash, now) {
+        cached
+    } else {
+        let Some((row, org_active)) = scim_store::token_by_hash(state.meta.reader(), hash).await?
+        else {
+            return Err(ApiError::Unauthorized);
+        };
+        if row.revoked_at.is_some() || !org_active {
+            return Err(ApiError::Unauthorized);
+        }
+        let cached = CachedScim {
+            id: row.id,
+            org_id: row.org_id,
+        };
+        state.scim_cache.put(hash.to_owned(), cached, now);
+        cached
+    };
+    state.scim_last_used.record(cached.id, now);
+    Ok(Principal::Scim {
+        org_id: cached.org_id,
+        token_id: cached.id,
     })
 }
 
@@ -411,6 +466,9 @@ pub(crate) type ApiKeyCache = KeyCache<CachedKey>;
 /// The personal-token cache used by [`authenticate`].
 pub(crate) type PatCache = KeyCache<CachedPat>;
 
+/// The SCIM-token cache used by [`bearer_principal`].
+pub(crate) type ScimCache = KeyCache<CachedScim>;
+
 #[cfg(test)]
 mod tests {
     use uuid::Uuid;
@@ -497,6 +555,121 @@ mod tests {
             panic!("expected a control-plane principal");
         };
         assert_eq!(scope, "orgs");
+    }
+
+    /// A new org and a SCIM token of it, minted as the token route does. Returns the org,
+    /// the token id and the bearer value.
+    async fn scim_token(app: &TestApp) -> (OrgId, Uuid, String) {
+        let now = app.state.clock.now_ns();
+        let minted = crate::auth::secret::new_key(KeyKind::Scim).unwrap();
+        let plaintext = minted.plaintext.clone();
+        let (org, token_id) = app
+            .state
+            .meta
+            .write(move |conn| {
+                Box::pin(async move {
+                    let org =
+                        crate::meta::orgs::insert_org(conn, OrgId::new_v7(), "Acme", "acme", now)
+                            .await?;
+                    let owner = crate::meta::users::insert_user(
+                        conn,
+                        crate::meta::users::NewUser {
+                            email: "owner@example.com".to_owned(),
+                            name: None,
+                            password_hash: None,
+                            email_verified_at: None,
+                            email_verified_via: None,
+                            is_instance_admin: false,
+                        },
+                        now,
+                    )
+                    .await?;
+                    let row = crate::ee::scim::store::insert_token(
+                        conn,
+                        org.id,
+                        "test",
+                        &minted.prefix,
+                        &minted.hash,
+                        owner.id,
+                        now,
+                    )
+                    .await?;
+                    Ok((org.id, row.id))
+                })
+            })
+            .await
+            .unwrap();
+        (org, token_id, plaintext)
+    }
+
+    #[tokio::test]
+    async fn a_scim_token_resolves_to_its_org() {
+        let app = TestApp::new().await;
+        let (org, token_id, token) = scim_token(&app).await;
+        let Ok(principal) = bearer_principal(&app.state, &bearer_headers(&token)).await else {
+            panic!("a live SCIM token resolves");
+        };
+        let Principal::Scim {
+            org_id,
+            token_id: resolved,
+        } = principal
+        else {
+            panic!("expected a SCIM principal");
+        };
+        assert_eq!(org_id, org);
+        assert_eq!(resolved, token_id);
+    }
+
+    #[tokio::test]
+    async fn a_revoked_scim_token_is_refused_after_eviction() {
+        let app = TestApp::new().await;
+        let (org, token_id, token) = scim_token(&app).await;
+        let headers = bearer_headers(&token);
+        assert!(bearer_principal(&app.state, &headers).await.is_ok());
+        let now = app.state.clock.now_ns();
+        app.state
+            .meta
+            .write(move |conn| {
+                Box::pin(async move {
+                    crate::ee::scim::store::revoke_token(conn, org, token_id, now).await?;
+                    Ok(())
+                })
+            })
+            .await
+            .unwrap();
+        // The cache holds the hit for 60 s; a revoke evicts it.
+        app.state
+            .scim_cache
+            .evict(&crate::auth::secret::hash_token(&token));
+        let refused = bearer_principal(&app.state, &headers).await;
+        assert!(
+            matches!(refused, Err(crate::http::error::ApiError::Unauthorized)),
+            "a revoked SCIM token is refused"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_scim_token_of_a_dropped_org_is_refused() {
+        let app = TestApp::new().await;
+        let (org, _, token) = scim_token(&app).await;
+        app.state
+            .meta
+            .write(move |conn| {
+                Box::pin(async move {
+                    sqlx::query("UPDATE orgs SET state = 'deleting' WHERE id = ?")
+                        .bind(org.to_string())
+                        .execute(&mut *conn)
+                        .await?;
+                    Ok(())
+                })
+            })
+            .await
+            .unwrap();
+        let refused = bearer_principal(&app.state, &bearer_headers(&token)).await;
+        assert!(
+            matches!(refused, Err(crate::http::error::ApiError::Unauthorized)),
+            "a SCIM token of an org that is not active is refused"
+        );
     }
 
     #[tokio::test]
