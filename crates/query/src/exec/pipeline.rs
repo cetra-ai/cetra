@@ -222,7 +222,9 @@ where
                                 te.elapsed().as_nanos().min(u64::MAX as u128) as u64,
                             );
                             let f = f?;
-                            downstream_flow = f;
+                            if f == ControlFlow::Stop {
+                                downstream_flow = ControlFlow::Stop;
+                            }
                             Ok(f)
                         })?;
                         let total_ns = t0.elapsed().as_nanos().min(u64::MAX as u128) as u64;
@@ -274,7 +276,9 @@ fn push_through_slice<S: PushSink>(
         let f = push_through_slice(rest, rest_prof, out_batch, sink);
         emit_ns = emit_ns.saturating_add(te.elapsed().as_nanos().min(u64::MAX as u128) as u64);
         let f = f?;
-        downstream_flow = f;
+        if f == ControlFlow::Stop {
+            downstream_flow = ControlFlow::Stop;
+        }
         Ok(f)
     })?;
     let total_ns = t0.elapsed().as_nanos().min(u64::MAX as u128) as u64;

@@ -205,9 +205,15 @@ impl WorkerPool {
         }
 
         if let Some(err) = guard.first_err.take() {
+            let discard = std::mem::take(&mut guard.results);
+            drop(guard);
+            drop(discard);
             return Err(err);
         }
         if cancel.is_cancelled() || guard.aborted {
+            let discard = std::mem::take(&mut guard.results);
+            drop(guard);
+            drop(discard);
             return Err(QueryError::Cancelled);
         }
 
@@ -222,20 +228,24 @@ impl WorkerPool {
     }
 
     fn drain_query(&self, query_id: u64) -> usize {
-        let mut inner = self.shared.lock();
-        inner.order.retain(|&id| id != query_id);
-        inner.queues.remove(&query_id).map_or(0, |q| q.len())
+        let removed = {
+            let mut inner = self.shared.lock();
+            inner.order.retain(|&id| id != query_id);
+            inner.queues.remove(&query_id)
+        };
+        removed.map_or(0, |q| q.len())
     }
 }
 
 impl Drop for WorkerPool {
     fn drop(&mut self) {
-        {
+        let drained = {
             let mut inner = self.shared.lock();
             inner.shutdown = true;
             inner.order.clear();
-            inner.queues.clear();
-        }
+            std::mem::take(&mut inner.queues)
+        };
+        drop(drained);
         self.shared.cv.notify_all();
         for handle in self.threads.drain(..) {
             let _ = handle.join();
@@ -250,6 +260,20 @@ struct ScopeInner<T> {
     drained: usize,
     drained_pool: bool,
     aborted: bool,
+}
+
+impl<T> ScopeInner<T> {
+    fn record_err(&mut self, err: QueryError) {
+        let replace = match &self.first_err {
+            None => true,
+            Some(QueryError::Cancelled) => !matches!(err, QueryError::Cancelled),
+            Some(_) => false,
+        };
+        if replace {
+            self.first_err = Some(err);
+        }
+        self.aborted = true;
+    }
 }
 
 struct ScopeShared<T> {
@@ -301,17 +325,16 @@ impl<T> ScopeShared<T> {
 
 struct TaskCompletionGuard<'a, T> {
     scope: &'a Arc<ScopeShared<T>>,
+    in_flight_guard: Option<InFlightGuard>,
     completed: bool,
 }
 
 impl<T> Drop for TaskCompletionGuard<'_, T> {
     fn drop(&mut self) {
+        drop(self.in_flight_guard.take());
         if !self.completed {
             let mut guard = self.scope.lock();
-            if guard.first_err.is_none() {
-                guard.first_err = Some(QueryError::internal("query worker panicked"));
-            }
-            guard.aborted = true;
+            guard.record_err(QueryError::internal("query worker panicked"));
             guard.finished += 1;
             drop(guard);
             self.scope.cv.notify_all();
@@ -331,6 +354,7 @@ fn run_scoped_task<F, T>(
 {
     let mut completion = TaskCompletionGuard {
         scope,
+        in_flight_guard: Some(in_flight_guard),
         completed: false,
     };
 
@@ -359,7 +383,7 @@ fn run_scoped_task<F, T>(
 
     // Release `in_flight_guard` BEFORE signaling `finished` so `in_flight_count() == 0`
     // is strictly visible when `run_scoped` wakes up and returns.
-    drop(in_flight_guard);
+    drop(completion.in_flight_guard.take());
 
     let mut guard = scope.lock();
     match outcome {
@@ -370,10 +394,7 @@ fn run_scoped_task<F, T>(
             }
         }
         Outcome::Err(err) => {
-            if guard.first_err.is_none() {
-                guard.first_err = Some(err);
-            }
-            guard.aborted = true;
+            guard.record_err(err);
         }
     }
     guard.finished += 1;
@@ -579,5 +600,65 @@ mod tests {
             elapsed < Duration::from_millis(50),
             "cancel+drain took {elapsed:?}"
         );
+    }
+
+    #[test]
+    fn run_scoped_drops_completed_reservations_before_returning_err() {
+        use cetra_column::{GlobalPool, Reservation};
+
+        let global_pool = GlobalPool::standalone(1024);
+        let workers = WorkerPool::new(1).unwrap();
+        let cancel = CancelToken::new();
+
+        // With 1 worker, task 0 completes and stores Ok(Reservation) in guard.results
+        // before task 1 runs and returns Err(TooLarge).
+        let gp0 = Arc::clone(&global_pool);
+        type ResTask = Box<dyn FnOnce(usize) -> Result<Reservation, QueryError> + Send>;
+        let tasks: Vec<ResTask> = vec![
+            Box::new(move |_| {
+                let mut res = gp0.register("sibling_ok", false);
+                res.try_grow(256)?;
+                Ok(res)
+            }),
+            Box::new(|_| Err(QueryError::TooLarge)),
+        ];
+
+        let err = workers.run_scoped(&cancel, tasks).unwrap_err();
+        assert!(matches!(err, QueryError::TooLarge));
+        assert_eq!(global_pool.reserved(), 0);
+    }
+
+    #[test]
+    fn run_scoped_prioritizes_non_cancelled_error_over_cancelled() {
+        let workers = Arc::new(WorkerPool::new(2).unwrap());
+        let cancel = CancelToken::new();
+        let barrier = Arc::new(Barrier::new(2));
+
+        let b0 = Arc::clone(&barrier);
+        let c0 = cancel.clone();
+        let b1 = Arc::clone(&barrier);
+        let w1 = Arc::clone(&workers);
+        type UnitTask = Box<dyn FnOnce(usize) -> Result<(), QueryError> + Send>;
+        let tasks: Vec<UnitTask> = vec![
+            Box::new(move |_| {
+                b0.wait();
+                c0.cancel();
+                Err(QueryError::Cancelled)
+            }),
+            Box::new(move |_| {
+                b1.wait();
+                // Wait until sibling 0 finishes and drops its InFlightGuard so
+                // Cancelled has a chance to be recorded first in guard.first_err.
+                while w1.in_flight_count() > 1 {
+                    thread::yield_now();
+                }
+                thread::sleep(Duration::from_millis(2));
+                Err(QueryError::TooLarge)
+            }),
+        ];
+
+        let err = workers.run_scoped(&cancel, tasks).unwrap_err();
+        assert!(matches!(err, QueryError::TooLarge));
+        assert_eq!(workers.in_flight_count(), 0);
     }
 }

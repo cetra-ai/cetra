@@ -127,6 +127,12 @@ impl Batch {
         &self.schema
     }
 
+    /// Consumes this batch and returns its raw `(schema, columns, raw_len, selection)` parts
+    /// without cloning column buffers.
+    pub fn into_parts(self) -> (Arc<Schema>, Vec<Column>, usize, Selection) {
+        (self.schema, self.columns, self.raw_len, self.selection)
+    }
+
     /// All columns in schema order.
     pub fn columns(&self) -> &[Column] {
         &self.columns

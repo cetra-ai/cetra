@@ -191,11 +191,18 @@ impl Drop for SpillWriter {
 
 /// Handle to a completed temporary spill file; deletes the file and subtracts its bytes from
 /// `SpillManager::spilled_bytes()` on `Drop`.
-#[derive(Debug)]
 pub struct SpillFile {
     path: PathBuf,
     byte_len: u64,
     spilled_bytes: Arc<AtomicU64>,
+}
+
+impl fmt::Debug for SpillFile {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("SpillFile")
+            .field("byte_len", &self.byte_len)
+            .finish()
+    }
 }
 
 impl SpillFile {
@@ -226,11 +233,19 @@ impl Drop for SpillFile {
 }
 
 /// Sequential frame reader yielding `Option<Batch>` from a [`SpillFile`].
-#[derive(Debug)]
 pub struct SpillReader {
     reader: BufReader<File>,
     schema: Arc<Schema>,
     frame_buf: Vec<u8>,
+}
+
+impl fmt::Debug for SpillReader {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("SpillReader")
+            .field("schema", &self.schema)
+            .field("frame_buf_len", &self.frame_buf.len())
+            .finish()
+    }
 }
 
 impl SpillReader {
@@ -430,5 +445,55 @@ mod tests {
         assert_eq!(capped.spilled_bytes(), 0);
         drop(w_cap);
         assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 0);
+    }
+
+    #[test]
+    fn spill_file_and_reader_debug_redact_paths_and_payload_bytes() {
+        let dir = tempfile::tempdir().unwrap();
+        let spill = SpillManager::with_fixed_cap(dir.path().to_path_buf(), 1024 * 1024);
+        let schema =
+            Schema::try_new_arc(vec![Field::new("prompt", DataType::Utf8, false)]).unwrap();
+        let secret = "super-secret-prompt-payload-xyz987";
+        let batch = Batch::try_new_all(
+            Arc::clone(&schema),
+            vec![Column::Flat(
+                FlatColumn::try_new(
+                    FlatData::Utf8(Utf8Data::try_from_slices([secret]).unwrap()),
+                    None,
+                )
+                .unwrap(),
+            )],
+            1,
+        )
+        .unwrap();
+
+        let sf = {
+            let mut w = spill.create_file().unwrap();
+            w.write_batch(&batch).unwrap();
+            w.finish().unwrap()
+        };
+        let sf_dbg = format!("{sf:?}");
+        assert!(sf_dbg.contains("byte_len"), "{sf_dbg}");
+        assert!(!sf_dbg.contains(secret), "leaked payload in {sf_dbg}");
+        let dir_str = dir.path().to_string_lossy();
+        assert!(
+            !sf_dbg.contains(dir_str.as_ref()),
+            "leaked path in {sf_dbg}"
+        );
+
+        let mut reader = sf.open_reader(Arc::clone(&schema)).unwrap();
+        let got = reader.next_batch(None).unwrap().unwrap();
+        assert_eq!(got.num_rows(), 1);
+        let reader_dbg = format!("{reader:?}");
+        assert!(reader_dbg.contains("frame_buf_len"), "{reader_dbg}");
+        assert!(
+            !reader_dbg.contains(secret),
+            "leaked payload in {reader_dbg}"
+        );
+        // Ensure raw frame_buf byte vector is not printed (e.g. uncompressed/LZ4 literals)
+        assert!(
+            !reader_dbg.contains("frame_buf:"),
+            "leaked raw frame_buf in {reader_dbg}"
+        );
     }
 }

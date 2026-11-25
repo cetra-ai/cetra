@@ -460,6 +460,20 @@ impl ExternalSort {
         limit: Option<usize>,
         ctx: &ExecContext,
     ) -> Result<Box<dyn PartitionStream>, QueryError> {
+        for sink in &sinks {
+            if sink.schema.as_ref() != schema.as_ref() {
+                return Err(ColumnError::InvalidBatch {
+                    reason: "ExternalSort sink schema does not match merge_sinks schema",
+                }
+                .into());
+            }
+            if sink.keys != keys {
+                return Err(QueryError::Invalid(InvalidQuery::new(
+                    "ExternalSort sink keys do not match merge_sinks keys",
+                    None,
+                )));
+            }
+        }
         if limit == Some(0) || sinks.is_empty() {
             return Ok(Box::new(EmptyStream));
         }
@@ -613,7 +627,7 @@ struct InMemorySortedStream {
 }
 
 impl InMemorySortedStream {
-    fn spill_remaining(&mut self) -> Result<(), QueryError> {
+    fn spill_remaining(&mut self, cancel: &CancelToken) -> Result<(), QueryError> {
         let mut writer = self.ctx.spill.create_file()?;
         let total_mem: usize = self.buffered.iter().map(|b| b.batch.memory_bytes()).sum();
         let total_rows: usize = self.buffered.iter().map(|b| b.batch.num_rows()).sum();
@@ -622,13 +636,17 @@ impl InMemorySortedStream {
             .max(1)
             .min(self.ctx.batch_size.max(1));
         let batch_refs: Vec<&Batch> = self.buffered.iter().map(|b| &b.batch).collect();
+        let eval_ctx = EvalContext {
+            now_ns: self.ctx.eval.now_ns,
+            cancel: cancel.clone(),
+        };
 
         for chunk in self.refs[self.cursor..].chunks(rows_per_chunk) {
-            if self.ctx.eval.cancel.is_cancelled() {
+            if cancel.is_cancelled() {
                 return Err(QueryError::Cancelled);
             }
             let out_batch =
-                build_batch_from_refs(&self.schema, &batch_refs, chunk, None, &self.ctx.eval)?;
+                build_batch_from_refs(&self.schema, &batch_refs, chunk, None, &eval_ctx)?;
             write_batch_framed(&mut writer, &out_batch, self.frame_bytes)?;
         }
 
@@ -727,7 +745,7 @@ impl PartitionStream for InMemorySortedStream {
             }
             Err(QueryError::TooLarge) if !self.buffered.is_empty() => {
                 rollback_to(&mut res, before);
-                self.spill_remaining()?;
+                self.spill_remaining(cancel)?;
                 let Some(reader) = &mut self.fallback_reader else {
                     return Ok(None);
                 };
@@ -754,7 +772,7 @@ enum CursorSource {
 struct RunCursor {
     source: CursorSource,
     keys: Vec<SortKey>,
-    eval_ctx: EvalContext,
+    now_ns: i64,
     current_batch: Option<Batch>,
     extra_keys: Vec<Option<Column>>,
     row: usize,
@@ -765,13 +783,13 @@ impl RunCursor {
     fn from_reader(
         reader: SpillReader,
         keys: Vec<SortKey>,
-        eval_ctx: EvalContext,
+        now_ns: i64,
         pool: &Arc<ScopedPool>,
     ) -> Self {
         Self {
             source: CursorSource::Spill(reader),
             keys,
-            eval_ctx,
+            now_ns,
             current_batch: None,
             extra_keys: Vec::new(),
             row: 0,
@@ -782,13 +800,13 @@ impl RunCursor {
     fn from_stream(
         stream: Box<dyn PartitionStream>,
         keys: Vec<SortKey>,
-        eval_ctx: EvalContext,
+        now_ns: i64,
         pool: &Arc<ScopedPool>,
     ) -> Self {
         Self {
             source: CursorSource::Stream(stream),
             keys,
-            eval_ctx,
+            now_ns,
             current_batch: None,
             extra_keys: Vec::new(),
             row: 0,
@@ -819,7 +837,6 @@ impl RunCursor {
                 continue;
             }
             if !batch.selection().is_all(batch.raw_len()) {
-                let before = self.res.size();
                 let compacted = batch.compact(Some(&mut self.res))?;
                 drop(batch);
                 let mem = compacted.memory_bytes();
@@ -829,10 +846,13 @@ impl RunCursor {
                 } else if mem > cur {
                     self.res.try_grow(mem - cur)?;
                 }
-                let _ = before;
                 batch = compacted;
             }
-            let extra = eval_extra_sort_keys(&self.keys, &batch, &self.eval_ctx, &mut self.res)?;
+            let eval_ctx = EvalContext {
+                now_ns: self.now_ns,
+                cancel: cancel.clone(),
+            };
+            let extra = eval_extra_sort_keys(&self.keys, &batch, &eval_ctx, &mut self.res)?;
             self.current_batch = Some(batch);
             self.extra_keys = extra;
             self.row = 0;
@@ -976,7 +996,7 @@ fn merge_spill_passes(
             cursors.push(RunCursor::from_reader(
                 reader,
                 keys.to_vec(),
-                ctx.eval.clone(),
+                ctx.eval.now_ns,
                 &ctx.pool,
             ));
         }
@@ -1093,7 +1113,7 @@ impl MergeStream {
             cursors.push(RunCursor::from_reader(
                 reader,
                 keys.to_vec(),
-                ctx.eval.clone(),
+                ctx.eval.now_ns,
                 &ctx.pool,
             ));
         }
@@ -1128,7 +1148,7 @@ impl MergeStream {
             cursors.push(RunCursor::from_stream(
                 stream,
                 keys.to_vec(),
-                ctx.eval.clone(),
+                ctx.eval.now_ns,
                 &ctx.pool,
             ));
         }
@@ -1436,6 +1456,19 @@ fn validate_window_spec(spec: &WindowSpec) -> Result<Field, QueryError> {
                 None,
             )));
         }
+        if matches!(
+            (start, end),
+            (FrameBound::CurrentRow, FrameBound::Preceding(_))
+                | (
+                    FrameBound::Following(_),
+                    FrameBound::CurrentRow | FrameBound::Preceding(_)
+                )
+        ) {
+            return Err(QueryError::Invalid(InvalidQuery::new(
+                "window frame start cannot follow window frame end",
+                None,
+            )));
+        }
     }
 
     let (dt, nullable) = match &spec.func {
@@ -1529,6 +1562,12 @@ pub fn eval_window_group(
     let mut fields = input_schema.fields().to_vec();
     let mut out_types = Vec::with_capacity(specs.len());
     for spec in &specs {
+        if spec.partition_by != partition_by || spec.order_by != order_by {
+            return Err(QueryError::Invalid(InvalidQuery::new(
+                "window spec partition_by/order_by must match window group",
+                None,
+            )));
+        }
         let field = validate_window_spec(spec)?;
         out_types.push(field.data_type.clone());
         fields.push(field);
@@ -1637,6 +1676,7 @@ impl WindowStream {
             if cancel.is_cancelled() {
                 break Err(QueryError::Cancelled);
             }
+            let before = self.res.size();
             let next = match sorted.next_batch(cancel, Some(&mut self.res)) {
                 Ok(n) => n,
                 Err(err) => break Err(err),
@@ -1645,8 +1685,9 @@ impl WindowStream {
                 break Ok(None);
             };
             if batch.is_empty() {
-                if let Err(err) = self.reconcile_window_res() {
-                    break Err(err);
+                let cur = self.res.size();
+                if cur > before {
+                    self.res.shrink(cur - before);
                 }
                 continue;
             }
@@ -1912,6 +1953,7 @@ impl PartitionStream for WindowStream {
             let part_opt = match self.read_next_partition(cancel) {
                 Ok(p) => p,
                 Err(err) => {
+                    let _ = self.reconcile_window_res();
                     rollback_to(&mut res, before);
                     return Err(err);
                 }
@@ -3660,5 +3702,111 @@ mod tests {
         assert_eq!(wcnt, vec![3, 3, 3, 2, 2]);
         assert_eq!(MAX_MERGE_WAY, 32);
         assert_eq!(ctx.pool.reserved(), 0);
+    }
+
+    #[test]
+    fn contract_validation_for_window_frames_group_and_merge_sinks() {
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = test_ctx(dir.path(), 1024 * 1024, 1024 * 1024);
+        let schema = Schema::try_new_arc(vec![
+            Field::new("grp", DataType::Utf8, false),
+            Field::new("ord", DataType::I64, false),
+        ])
+        .unwrap();
+        let other_schema = Schema::try_new_arc(vec![
+            Field::new("grp", DataType::Utf8, false),
+            Field::new("other", DataType::I64, false),
+        ])
+        .unwrap();
+
+        let p_by = vec![col_expr(0, "grp", DataType::Utf8)];
+        let o_by = vec![SortKey {
+            expr: col_expr(1, "ord", DataType::I64),
+            descending: false,
+            nulls_first: false,
+        }];
+
+        // 1. Invalid frame bounds in validate_window_spec
+        for bad_frame in [
+            (FrameBound::CurrentRow, FrameBound::Preceding(1)),
+            (FrameBound::Following(1), FrameBound::CurrentRow),
+            (FrameBound::Following(2), FrameBound::Preceding(1)),
+        ] {
+            let err = eval_window_group(
+                Box::new(EmptyStream),
+                Arc::clone(&schema),
+                p_by.clone(),
+                o_by.clone(),
+                vec![WindowSpec {
+                    partition_by: p_by.clone(),
+                    order_by: o_by.clone(),
+                    frame: Some(bad_frame),
+                    func: WindowFunc::Count(None),
+                    output_name: "c".to_owned(),
+                }],
+                &ctx,
+            )
+            .err()
+            .expect("invalid frame bound must fail");
+            assert!(matches!(err, QueryError::Invalid(_)), "got {err:?}");
+        }
+
+        // 2. Mismatched partition_by / order_by in eval_window_group
+        let err_p = eval_window_group(
+            Box::new(EmptyStream),
+            Arc::clone(&schema),
+            p_by.clone(),
+            o_by.clone(),
+            vec![WindowSpec {
+                partition_by: vec![],
+                order_by: o_by.clone(),
+                frame: None,
+                func: WindowFunc::RowNumber,
+                output_name: "rn".to_owned(),
+            }],
+            &ctx,
+        )
+        .err()
+        .expect("mismatched partition_by must fail");
+        assert!(matches!(err_p, QueryError::Invalid(_)), "got {err_p:?}");
+
+        let err_o = eval_window_group(
+            Box::new(EmptyStream),
+            Arc::clone(&schema),
+            p_by.clone(),
+            o_by.clone(),
+            vec![WindowSpec {
+                partition_by: p_by,
+                order_by: vec![],
+                frame: None,
+                func: WindowFunc::RowNumber,
+                output_name: "rn".to_owned(),
+            }],
+            &ctx,
+        )
+        .err()
+        .expect("mismatched order_by must fail");
+        assert!(matches!(err_o, QueryError::Invalid(_)), "got {err_o:?}");
+
+        // 3. Mismatched schema / keys in ExternalSort::merge_sinks
+        let sink_bad_schema =
+            ExternalSort::new(Arc::clone(&other_schema), o_by.clone(), None, ctx.clone());
+        let err_s = ExternalSort::merge_sinks(
+            vec![sink_bad_schema],
+            Arc::clone(&schema),
+            o_by.clone(),
+            None,
+            &ctx,
+        )
+        .err()
+        .expect("mismatched sink schema must fail");
+        assert!(matches!(err_s, QueryError::Column(_)), "got {err_s:?}");
+
+        let sink_bad_keys = ExternalSort::new(Arc::clone(&schema), vec![], None, ctx.clone());
+        let err_k =
+            ExternalSort::merge_sinks(vec![sink_bad_keys], Arc::clone(&schema), o_by, None, &ctx)
+                .err()
+                .expect("mismatched sink keys must fail");
+        assert!(matches!(err_k, QueryError::Invalid(_)), "got {err_k:?}");
     }
 }

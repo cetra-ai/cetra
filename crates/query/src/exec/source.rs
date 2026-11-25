@@ -355,20 +355,24 @@ mod tests {
         Column, DataType, Field, FlatColumn, FlatData, GlobalPool, ScalarValue, Utf8Data,
     };
 
-    fn test_ctx(cap: usize) -> ExecContext {
+    fn test_ctx(cap: usize) -> (ExecContext, tempfile::TempDir) {
         let dir = tempfile::tempdir().unwrap();
-        ExecContext {
+        let ctx = ExecContext {
             pool: GlobalPool::standalone(cap),
             eval: EvalContext {
                 now_ns: 0,
                 cancel: CancelToken::new(),
             },
-            spill: Arc::new(SpillManager::with_fixed_cap(dir.keep(), 1024 * 1024)),
+            spill: Arc::new(SpillManager::with_fixed_cap(
+                dir.path().to_path_buf(),
+                1024 * 1024,
+            )),
             workers: Arc::new(WorkerPool::new(2).unwrap()),
             batch_size: 8192,
             target_partitions: 2,
             metrics: ExecMetrics::default(),
-        }
+        };
+        (ctx, dir)
     }
 
     #[test]
@@ -444,7 +448,7 @@ mod tests {
         };
         assert_eq!(source.projected_schema(&spec).unwrap().len(), 0);
 
-        let ctx = test_ctx(1024 * 1024);
+        let (ctx, _dir) = test_ctx(1024 * 1024);
         let mut streams = source.open_partitions(&spec, &ctx).unwrap();
         assert_eq!(streams.len(), 1);
         let mut res = ctx.pool.register("scan", false);
@@ -470,7 +474,7 @@ mod tests {
         assert_eq!(res.size(), before);
 
         // Reservation error restores `res` to `before`
-        let tight_ctx = test_ctx(1024 * 1024);
+        let (tight_ctx, _tight_dir) = test_ctx(1024 * 1024);
         let spec_all = ScanSpec {
             projection: None,
             filters: vec![filter_gt2],
