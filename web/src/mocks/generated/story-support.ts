@@ -119,8 +119,8 @@ const EXPORT_ANSWER =
   "Open Traces, filter the rows you want, then use Export → CSV. Exports run in the background and you get a link by email.";
 const LIMIT_QUESTION = "What's the limit for one export?";
 const LIMIT_ANSWER = "100,000 traces per export. Above that, use the API with a cursor.";
-const SCHEDULE_QUESTION = "Can I schedule it every week?";
-const SCHEDULE_ANSWER = "You can export any time from the Traces page with Export → CSV.";
+export const SCHEDULE_QUESTION = "Can I schedule it every week?";
+export const SCHEDULE_ANSWER = "You can export any time from the Traces page with Export → CSV.";
 const THANKS_QUESTION = "Okay, thanks.";
 const THANKS_ANSWER = "You're welcome.";
 

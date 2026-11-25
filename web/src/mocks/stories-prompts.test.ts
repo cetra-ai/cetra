@@ -1,4 +1,5 @@
 import { beforeEach, expect, it } from "vitest";
+import { fallbackHandlers } from "@/mocks/fallbacks";
 import { server } from "@/mocks/node";
 import { type StoryId, storyProject } from "@/mocks/projects";
 import { storyPromptHandlers } from "@/mocks/stories-prompts";
@@ -221,4 +222,74 @@ it("adds one version to each story prompt, its line last in the system message",
     expect(detail.body.variables).toEqual(previous.body.variables);
     expect(previous.body.labels).toEqual([]);
   }
+});
+
+it("serves support-reply in the support project as three versions, v3 labelled production and v2 staging", async () => {
+  const prompt = await get("support", "/prompts/support-reply");
+  expect(prompt.body).toMatchObject({
+    id: "01900000-0000-7000-8000-000000001001",
+    name: "support-reply",
+    type: "chat",
+    tags: [],
+    latest_version: 3,
+    created_at: "2026-01-01T00:00:01.000000000Z",
+    updated_at: "2026-01-01T10:30:00Z",
+    labels: [
+      { label: "production", version: 3, updated_at: "2026-01-01T10:30:00Z" },
+      { label: "staging", version: 2, updated_at: "2026-01-01T00:00:02.000000000Z" },
+    ],
+  });
+  expect(prompt.body).not.toHaveProperty("description");
+
+  const versions = (await get("support", "/prompts/support-reply/versions")).body.data as Version[];
+  expect(versions.map((version) => version.version)).toEqual([3, 2, 1]);
+  expect(versions.map((version) => version.labels)).toEqual([["production"], ["staging"], []]);
+
+  const v2 = await get("support", "/prompts/support-reply/versions/2");
+  const v3 = await get("support", "/prompts/support-reply/versions/3");
+  expect(v3.body).toMatchObject({
+    variables: ["product", "language", "question"],
+    placeholders: ["history"],
+    config: { model: "gpt-4o", params: { temperature: 0.3, max_tokens: 512 } },
+    commit_message: "Say plainly what cetra doesn't do",
+    labels: ["production"],
+  });
+  expect(v2.body.placeholders).toEqual(["history"]);
+  const systemOf = (body: Record<string, unknown>) =>
+    (body.template as { role?: string; content?: string }[])[0]?.content;
+  expect(systemOf(v3.body)).toBe(
+    `${systemOf(v2.body)} If the customer asks for something cetra doesn't do, say so plainly, then offer the closest thing it does.`,
+  );
+});
+
+it("records support-reply's label events newest first, and answers its metrics for all three versions", async () => {
+  const events = (await get("support", "/prompts/support-reply/label-events")).body.data as {
+    label: string;
+    to_version: number;
+    from_version?: number;
+  }[];
+  expect(events.map((event) => event.to_version)).toEqual([3, 2, 1]);
+  expect(events[0]).toMatchObject({ label: "production", from_version: 1, to_version: 3 });
+  expect(events[events.length - 1]).not.toHaveProperty("from_version");
+
+  const from = "2026-01-01T00:00:00.000Z";
+  const to = "2026-01-02T00:00:00.000Z";
+  const metrics = await get("support", `/prompts/support-reply/metrics?from=${from}&to=${to}`);
+  expect((metrics.body.versions as { version: number }[]).map((item) => item.version)).toEqual([
+    3, 2, 1,
+  ]);
+});
+
+it("keeps the fixture support-reply, versions 1 and 2, in the other projects", async () => {
+  server.use(...fallbackHandlers);
+  const versions = (await getIn("acme/code-agent", "/prompts/support-reply/versions")).body
+    .data as Version[];
+  expect(versions.map((version) => version.version)).toEqual([2, 1]);
+  const list = (await getIn("acme/code-agent", "/prompts")).body.data as {
+    name: string;
+    latest_version: number;
+  }[];
+  expect(list.filter((prompt) => prompt.name === "support-reply")).toEqual([
+    expect.objectContaining({ latest_version: 2 }),
+  ]);
 });

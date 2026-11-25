@@ -1,5 +1,6 @@
 import { type HttpHandler, HttpResponse, http } from "msw";
 import type { Schema } from "@/api/types";
+import labelEventsFixture from "../../../fixtures/api/responses/prompts/support-reply/label-events.json";
 import promptsFixture from "../../../fixtures/api/responses/prompts.json";
 import { metricsOf } from "./fallbacks";
 import { projectOfRef, type StoryId } from "./projects";
@@ -7,7 +8,9 @@ import { projectOfRef, type StoryId } from "./projects";
 /**
  * The prompts of the homepage stories (design §12, M14), answered in the browser only. The fixture
  * prompts keep their own answers: these handlers return nothing for any other name, so the fallbacks
- * and the contract fixtures answer them. Never installed in tests; a test calls `server.use`.
+ * and the contract fixtures answer them. A story prompt replaces a fixture prompt of the same name in
+ * its story's project only (`support-reply` in the support project). Never installed in tests; a test
+ * calls `server.use`.
  */
 
 const PROJECT = "/api/v1/projects/:project";
@@ -17,7 +20,11 @@ function textParam(value: string | readonly string[] | undefined): string {
   return typeof value === "string" ? value : "";
 }
 
-type Template = { role: "system" | "user"; content: string }[];
+/** A template entry: a role message, or a placeholder (the API's and the fixtures' spelling). */
+type Template = (
+  | { role: "system" | "user"; content: string }
+  | { type: "placeholder"; name: string }
+)[];
 
 /** One version of a story prompt, oldest first in `STORY_PROMPTS`. */
 type StoryVersion = {
@@ -28,6 +35,8 @@ type StoryVersion = {
   maxTokens: number;
   commit: string;
   at: string;
+  /** The labels on this version. When absent, the latest version carries `production`. */
+  labels?: string[];
 };
 
 type StoryPrompt = {
@@ -35,9 +44,12 @@ type StoryPrompt = {
   /** The story whose project serves the prompt. */
   story: StoryId;
   name: string;
-  description: string;
+  /** Left out for a prompt whose fixture row has none. */
+  description?: string;
   tags: string[];
   versions: StoryVersion[];
+  /** The label history, newest first. When absent, one event per version is generated. */
+  labelEvents?: Schema<"PromptLabelEvent">[];
 };
 
 export const STORY_PROMPTS: StoryPrompt[] = [
@@ -291,6 +303,72 @@ export const STORY_PROMPTS: StoryPrompt[] = [
       },
     ],
   },
+  {
+    id: "01900000-0000-7000-8000-000000001001",
+    story: "support",
+    name: "support-reply",
+    tags: [],
+    versions: [
+      {
+        template: [
+          { role: "system", content: "You are a support agent for {{ product }}." },
+          { type: "placeholder", name: "history" },
+          { role: "user", content: "{{ question }}" },
+        ],
+        variables: ["product", "question"],
+        model: "gpt-4o",
+        temperature: 0.3,
+        maxTokens: 512,
+        commit: "First version",
+        at: "2026-01-01T00:00:01.000000000Z",
+      },
+      {
+        template: [
+          {
+            role: "system",
+            content:
+              "You are a friendly support agent for {{ product }}. Answer in {{ language }}.",
+          },
+          { type: "placeholder", name: "history" },
+          { role: "user", content: "{{ question }}" },
+        ],
+        variables: ["product", "language", "question"],
+        model: "gpt-4o",
+        temperature: 0.3,
+        maxTokens: 512,
+        commit: "Friendlier tone",
+        at: "2026-01-01T00:00:02.000000000Z",
+        labels: ["staging"],
+      },
+      {
+        template: [
+          {
+            role: "system",
+            content:
+              "You are a friendly support agent for {{ product }}. Answer in {{ language }}. If the customer asks for something cetra doesn't do, say so plainly, then offer the closest thing it does.",
+          },
+          { type: "placeholder", name: "history" },
+          { role: "user", content: "{{ question }}" },
+        ],
+        variables: ["product", "language", "question"],
+        model: "gpt-4o",
+        temperature: 0.3,
+        maxTokens: 512,
+        commit: "Say plainly what cetra doesn't do",
+        at: "2026-01-01T10:30:00Z",
+        labels: ["production"],
+      },
+    ],
+    labelEvents: [
+      {
+        label: "production",
+        from_version: 1,
+        to_version: 3,
+        at: "2026-01-01T10:30:00Z",
+      },
+      ...labelEventsFixture.data,
+    ],
+  },
 ];
 
 /** The story prompt called `name` in the project `project` (an API ref), if any: a story prompt is served only in its story's project. */
@@ -302,24 +380,39 @@ function storyPrompt(name: unknown, project: string): StoryPrompt | undefined {
   return prompt !== undefined && projectOfRef(project)?.story === prompt.story ? prompt : undefined;
 }
 
-/** The prompt's detail: its latest version is the last one, labelled `production`. */
+/**
+ * The prompt's detail. Its labels are the versions' own `labels` when any version has some, sorted by
+ * label as the API sorts them; otherwise its latest version is the last one, labelled `production`.
+ */
 function promptOf(story: StoryPrompt): Schema<"Prompt"> {
   const last = story.versions[story.versions.length - 1];
   const first = story.versions[0];
+  const declared = story.versions.some((version) => version.labels !== undefined);
+  const labels = declared
+    ? story.versions
+        .flatMap((version, index) =>
+          (version.labels ?? []).map((label) => ({
+            label,
+            version: index + 1,
+            updated_at: version.at,
+          })),
+        )
+        .sort((a, b) => a.label.localeCompare(b.label))
+    : [
+        {
+          label: "production",
+          version: story.versions.length,
+          updated_at: last?.at ?? "",
+        },
+      ];
   return {
     id: story.id,
     name: story.name,
     type: "chat",
-    description: story.description,
+    ...(story.description === undefined ? {} : { description: story.description }),
     tags: story.tags,
     latest_version: story.versions.length,
-    labels: [
-      {
-        label: "production",
-        version: story.versions.length,
-        updated_at: last?.at ?? "",
-      },
-    ],
+    labels,
     created_at: first?.at ?? "",
     updated_at: last?.at ?? "",
   };
@@ -338,9 +431,9 @@ function versionOf(story: StoryPrompt, version: number): Schema<"PromptVersion">
     version,
     template: v.template,
     config: { model: v.model, params: { temperature: v.temperature, max_tokens: v.maxTokens } },
-    labels: version === latest ? ["latest", "production"] : [],
+    labels: v.labels ?? (version === latest ? ["latest", "production"] : []),
     variables: v.variables,
-    placeholders: [],
+    placeholders: v.template.flatMap((entry) => ("type" in entry ? [entry.name] : [])),
     commit_message: v.commit,
     created_at: v.at,
   };
@@ -355,6 +448,9 @@ function versionsOf(story: StoryPrompt): Schema<"PromptVersion">[] {
 
 /** One event per version, newest first; a version after the first records the one it moved from. */
 function labelEventsOf(story: StoryPrompt) {
+  if (story.labelEvents !== undefined) {
+    return story.labelEvents;
+  }
   return story.versions
     .map((v, index) => {
       const to = index + 1;
@@ -430,7 +526,12 @@ export const storyPromptHandlers: HttpHandler[] = [
     const tag = url.searchParams.get("tag");
     const project = textParam(params.project);
     const stories = STORY_PROMPTS.filter((prompt) => projectOfRef(project)?.story === prompt.story);
-    const data = [...fixtures, ...stories.map(promptOf)].filter(
+    // A served story prompt replaces the fixture row of its name, so the name appears once.
+    const served = new Set(stories.map((prompt) => prompt.name));
+    const data = [
+      ...fixtures.filter((prompt) => !served.has(prompt.name)),
+      ...stories.map(promptOf),
+    ].filter(
       (prompt) =>
         (!q || prompt.name.toLowerCase().includes(q)) &&
         (!label || prompt.labels.some((item) => item.label === label)) &&

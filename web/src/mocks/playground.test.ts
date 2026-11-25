@@ -3,6 +3,11 @@ import { createDataset, isEligibleTrace } from "@/mocks/generated/dataset";
 import { CODING_STORY_PROFILE } from "@/mocks/generated/story-coding";
 import { EXTRACTION_STORY_PROFILE } from "@/mocks/generated/story-extraction";
 import {
+  SCHEDULE_ANSWER,
+  SCHEDULE_QUESTION,
+  SUPPORT_STORY_PROFILE,
+} from "@/mocks/generated/story-support";
+import {
   VOICE_AUDIO_TRACE_ID,
   VOICE_STORY_PROFILE,
   voiceAudioTurn,
@@ -273,4 +278,56 @@ it("opens the trace of each new version: the first context-window run, the booki
   const invoice = await run({ source: { prompt: { name: "extract-invoice", version: 6 } } });
   expect(invoice[0]?.data.trace_id).toBe(extraction.traces[nordicIndex]?.trace_id);
   expect(invoice[0]?.data.trace_id).toBe("a0000000000000000000000000000028");
+});
+
+it("answers support-reply v3 with the export answer, and v2 with the schedule answer only for the schedule question", async () => {
+  const schedule = { prompt: { name: "support-reply", version: 2 } };
+  const [v3, v2Schedule, v2Other] = await Promise.all([
+    run({ model: "gpt-4o", source: { prompt: { name: "support-reply", version: 3 } } }),
+    run({ model: "gpt-4o", variables: { question: SCHEDULE_QUESTION }, source: schedule }),
+    run({ model: "gpt-4o", variables: { question: "Okay, thanks." }, source: schedule }),
+  ]);
+
+  expect(streamed(v3)).toBe(
+    "cetra can't schedule exports yet. You can export by hand any time from the Traces page with Export → CSV, or call the export API from your own weekly job.",
+  );
+  expect(doneOf(v3)).toMatchObject({
+    usage: { input: 1060, output: 52 },
+    cost_usd: 0.0042,
+    latency_ms: 1300,
+    ttft_ms: 300,
+  });
+
+  expect(streamed(v2Schedule)).toBe(SCHEDULE_ANSWER);
+  expect(doneOf(v2Schedule)).toMatchObject({
+    usage: { input: 1040, output: 24 },
+    cost_usd: 0.0035,
+    latency_ms: 1100,
+    ttft_ms: 280,
+  });
+
+  expect(streamed(v2Other)).toBe(SUPPORT_TEXT);
+  expect(doneOf(v2Other)).toMatchObject({
+    usage: { input: 88, output: 44 },
+    cost_usd: 0.00066,
+  });
+});
+
+it("opens the support schedule turn, the third turn of sess-0142, from both support answers", async () => {
+  const dataset = createDataset({
+    seed: 1,
+    now: NOW,
+    traces: 2000,
+    profile: SUPPORT_STORY_PROFILE,
+  });
+  expect(dataset.traces[9]?.trace_id).toBe("a0000000000000000000000000000009");
+  expect(dataset.traces[9]?.input_preview).toBe(SCHEDULE_QUESTION);
+
+  const v3 = await run({ source: { prompt: { name: "support-reply", version: 3 } } });
+  expect(v3[0]?.data.trace_id).toBe("a0000000000000000000000000000009");
+  const v2 = await run({
+    variables: { question: SCHEDULE_QUESTION },
+    source: { prompt: { name: "support-reply", version: 2 } },
+  });
+  expect(v2[0]?.data.trace_id).toBe("a0000000000000000000000000000009");
 });
