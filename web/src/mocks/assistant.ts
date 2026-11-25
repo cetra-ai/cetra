@@ -2,6 +2,7 @@ import { type HttpHandler, HttpResponse, http } from "msw";
 import assistantConversations from "../../../fixtures/api/responses/assistant-conversations.json";
 import { turnStream } from "../test/turn-stream";
 import { projectOfRef, type StoryId } from "./projects";
+import { STORY_DASHBOARD_IDS, storyDashboards } from "./story-dashboards";
 
 const PROJECT = "/api/v1/projects/:project/assistant";
 const NEW_CONVERSATION_ID = "01900000-0000-7000-8000-000000001a02";
@@ -286,6 +287,9 @@ const DEFAULT_SCRIPT: Script = {
 /** The call id of a story turn's one tool call. */
 const CALL_ID = "call_1";
 const NEW_BASE = "2026-11-19T12:00:00Z";
+/** The call id of a story turn's dashboard draft, made after the answer. */
+const DASHBOARD_CALL_ID = "call_2";
+const DASHBOARD_CLOSING = "Here is the draft. Open it in the editor to review and save it.";
 
 /** What one story turn says and does: its question, one SQL call, the rows it returns and the filter it ends on. */
 type TurnSpec = {
@@ -297,8 +301,11 @@ type TurnSpec = {
   result: Fields;
   /** The number of rows the call returned. */
   rows: number;
+  /** The filter card the turn drafts before its answer. */
   draft: { kind: "filter"; draft: Fields };
   answer: string;
+  /** The story's dashboard draft, which the turn drafts after its answer with a second call. */
+  dashboard: Fields;
 };
 
 const USAGE = { input: 1400, output: 160 };
@@ -306,6 +313,10 @@ const COST_USD = 0.0024;
 
 function turnSummaryOf(spec: TurnSpec) {
   return { size_bytes: JSON.stringify(spec.result).length, rows: spec.rows };
+}
+
+function dashboardSummaryOf(spec: TurnSpec) {
+  return { size_bytes: JSON.stringify(spec.dashboard).length };
 }
 
 function storyEvents(spec: TurnSpec, traceId: string, turnId: number): StreamEvent[] {
@@ -324,8 +335,21 @@ function storyEvents(spec: TurnSpec, traceId: string, turnId: number): StreamEve
     },
     { event: "text", data: { delta: spec.answer } },
     {
+      event: "tool_call",
+      data: { id: DASHBOARD_CALL_ID, name: "draft_dashboard", arguments: spec.dashboard },
+    },
+    {
+      event: "tool_result",
+      data: { id: DASHBOARD_CALL_ID, ok: true, summary: dashboardSummaryOf(spec) },
+    },
+    {
+      event: "draft",
+      data: { id: `draft_${DASHBOARD_CALL_ID}`, kind: "dashboard", draft: spec.dashboard },
+    },
+    { event: "text", data: { delta: DASHBOARD_CLOSING } },
+    {
       event: "done",
-      data: { finish_reason: "stop", usage: USAGE, cost_usd: COST_USD, steps: 1 },
+      data: { finish_reason: "stop", usage: USAGE, cost_usd: COST_USD, steps: 2 },
     },
   ];
 }
@@ -382,7 +406,48 @@ function storyMessages(
       ],
       ...reply,
     },
-    { seq: 4, role: "assistant", parts: [{ type: "text", content: spec.answer }], ...reply },
+    {
+      seq: 4,
+      role: "assistant",
+      parts: [
+        { type: "text", content: spec.answer },
+        {
+          type: "tool_call",
+          id: DASHBOARD_CALL_ID,
+          name: "draft_dashboard",
+          arguments: spec.dashboard,
+        },
+      ],
+      ...reply,
+    },
+    {
+      seq: 5,
+      role: "tool",
+      parts: [
+        {
+          type: "tool_result",
+          id: DASHBOARD_CALL_ID,
+          name: "draft_dashboard",
+          ok: true,
+          result: { status: "drafted" },
+          ...dashboardSummaryOf(spec),
+          stubbed: false,
+        },
+        {
+          type: "draft",
+          id: `draft_${DASHBOARD_CALL_ID}`,
+          kind: "dashboard",
+          draft: spec.dashboard,
+        },
+      ],
+      ...reply,
+    },
+    {
+      seq: 6,
+      role: "assistant",
+      parts: [{ type: "text", content: DASHBOARD_CLOSING }],
+      ...reply,
+    },
   ];
 }
 
@@ -411,14 +476,27 @@ function filterDraft(filter: string, range: string): Fields {
   return { view: "traces", filter, range, include_eval: false, include_experiments: false };
 }
 
+/** The dashboard draft a story turn ends on: the story dashboard `id`, as the draft card reads it. */
+function dashboardDraft(id: string): Fields {
+  const dashboard = storyDashboards().find((item) => item.id === id);
+  if (dashboard === undefined) {
+    throw new Error(`no story dashboard ${id}`);
+  }
+  return {
+    name: dashboard.name,
+    description: dashboard.description,
+    definition: dashboard.definition,
+  };
+}
+
 const SUPPORT_SQL =
   "SELECT release, count(*) AS feedback, count(*) FILTER (WHERE score('user_feedback') = 0) AS downvotes, count(*) FILTER (WHERE array_has(tags, 'old-pricing')) AS old_pricing FROM traces WHERE has_score('user_feedback') AND start_time >= now() - INTERVAL '46 hours' GROUP BY release";
 const CODING_SQL =
   "SELECT array_has(tags, 'api-retry') AS retried, count(*) AS runs, sum(cost_total) AS cost FROM traces WHERE start_time >= now() - INTERVAL '14 hours' GROUP BY 1";
 const VOICE_SQL =
-  "SELECT count(*) AS checks, approx_percentile_cont(s.duration_ms, 0.5) AS p50_ms, approx_percentile_cont(s.duration_ms, 0.95) AS p95_ms FROM spans s JOIN traces t ON s.trace_id = t.trace_id WHERE s.name = 'check_availability' AND array_has(t.tags, 'calendar') AND t.start_time >= now() - INTERVAL '14 days'";
+  "SELECT count(*) AS checks, approx_percentile_cont(s.duration_ms, 0.5) AS p50_ms, approx_percentile_cont(s.duration_ms, 0.95) AS p95_ms FROM spans s JOIN traces t ON s.trace_id = t.trace_id WHERE s.name = 'check_availability' AND array_has(t.tags, 'calendar') AND t.start_time >= now() - INTERVAL '30 days'";
 const EXTRACTION_SQL =
-  "SELECT input_preview AS invoice_file, count(*) AS invoices, round(avg(CASE WHEN array_has(tags, 're-extracted') THEN 1.0 ELSE 0.0 END), 2) AS re_extracted FROM traces WHERE start_time >= now() - INTERVAL '30 days' GROUP BY 1 ORDER BY 3 DESC LIMIT 4";
+  "SELECT CASE input_preview WHEN 'invoice-2026-0521.pdf (2 pages)' THEN 'Nordic Freight' WHEN 'invoice-2026-0524.pdf (1 page)' THEN 'Baltic Paper' WHEN 'invoice-2026-0527.pdf (3 pages)' THEN 'Rhine Tools' WHEN 'invoice-2026-0530.pdf (1 page)' THEN 'Lyon Bureau' ELSE 'Other vendors' END AS vendor, count(*) AS invoices, round(avg(CASE WHEN array_has(tags, 're-extracted') THEN 1.0 ELSE 0.0 END), 2) AS re_extracted FROM traces WHERE start_time >= now() - INTERVAL '30 days' GROUP BY 1 ORDER BY 3 DESC LIMIT 4";
 
 /** One story: its hero trace, its stored chat, and its one turn (a question answered from SQL). */
 export type Story = {
@@ -439,7 +517,7 @@ export const STORIES: Story[] = [
     turns: [
       {
         question: "Why did our thumbs-down rate double since Tuesday?",
-        intro: ["I'll count the downvoted answers ", "since Tuesday, by release. "],
+        intro: ["I'll count the downvoted answers ", "since Tuesday 14:00, by release. "],
         call: queryCall(SUPPORT_SQL),
         result: {
           columns: ["release", "feedback", "downvotes", "old_pricing"],
@@ -450,6 +528,7 @@ export const STORIES: Story[] = [
           kind: "filter",
           draft: filterDraft("release = 'v2.14' and tags @> ['old-pricing']", "7d"),
         },
+        dashboard: dashboardDraft(STORY_DASHBOARD_IDS.answerQuality),
         answer:
           "**62%** of the downvoted answers since Tuesday 14:00 quote the old pricing page: retrieval returns `pricing-2025.md`, back in the index since deploy v2.14. That's **41** traces.",
       },
@@ -463,17 +542,18 @@ export const STORIES: Story[] = [
     turns: [
       {
         question: "Why did cost per run triple yesterday?",
-        intro: ["I'll compare the runs of the last 14 hours ", "by retries. "],
+        intro: ["I'll compare the runs since the cost rose last night ", "with the day before."],
         call: queryCall(CODING_SQL),
         result: {
           columns: ["retried", "runs", "cost"],
           rows: [
             { retried: false, runs: 359, cost: 189.42 },
-            { retried: true, runs: 78, cost: 440.58 },
+            { retried: true, runs: 78, cost: 436.58 },
           ],
         },
         rows: 2,
         draft: { kind: "filter", draft: filterDraft("tags @> ['api-retry']", "24h") },
+        dashboard: dashboardDraft(STORY_DASHBOARD_IDS.codeAgentHealth),
         answer:
           "**18%** of runs call `run_tests` more than five times and make **70%** of the cost: they all touch `packages/api`, whose test suite times out at 30 s, so the agent retries.",
       },
@@ -487,7 +567,7 @@ export const STORIES: Story[] = [
     turns: [
       {
         question: "Why do callers hang up?",
-        intro: ["I'll compare the hang-ups ", "with the calendar checks of the last 14 days. "],
+        intro: ["I'll look at the turn before each hang-up ", "over the last 30 days."],
         call: queryCall(VOICE_SQL),
         result: {
           columns: ["checks", "p50_ms", "p95_ms"],
@@ -496,8 +576,9 @@ export const STORIES: Story[] = [
         rows: 1,
         draft: {
           kind: "filter",
-          draft: filterDraft("tags @> ['calendar'] and duration_ns > 2500000000", "24h"),
+          draft: filterDraft("tags @> ['calendar']", "30d"),
         },
+        dashboard: dashboardDraft(STORY_DASHBOARD_IDS.voiceLatency),
         answer:
           "**71%** of hang-ups follow a turn over 2.5 s, almost all of them `check_availability` on the calendar API (median **1.5 s**, p95 **3.5 s**).",
       },
@@ -511,19 +592,20 @@ export const STORIES: Story[] = [
     turns: [
       {
         question: "Which vendors' invoices fail the most, and why?",
-        intro: ["I'll group the invoices by file ", "and count the re-extractions. "],
+        intro: ["I'll group the invoices ", "by vendor."],
         call: queryCall(EXTRACTION_SQL),
         result: {
-          columns: ["invoice_file", "invoices", "re_extracted"],
+          columns: ["vendor", "invoices", "re_extracted"],
           rows: [
-            { invoice_file: "invoice-2026-0521.pdf (2 pages)", invoices: 95, re_extracted: 0.38 },
-            { invoice_file: "invoice-2026-0524.pdf (1 page)", invoices: 90, re_extracted: 0.3 },
-            { invoice_file: "invoice-2026-0527.pdf (3 pages)", invoices: 89, re_extracted: 0.29 },
-            { invoice_file: "invoice-2026-0530.pdf (1 page)", invoices: 96, re_extracted: 0.29 },
+            { vendor: "Nordic Freight", invoices: 95, re_extracted: 0.38 },
+            { vendor: "Baltic Paper", invoices: 90, re_extracted: 0.3 },
+            { vendor: "Rhine Tools", invoices: 89, re_extracted: 0.29 },
+            { vendor: "Lyon Bureau", invoices: 96, re_extracted: 0.29 },
           ],
         },
         rows: 4,
-        draft: { kind: "filter", draft: filterDraft("tags @> ['re-extracted']", "7d") },
+        draft: { kind: "filter", draft: filterDraft("tags @> ['re-extracted']", "30d") },
+        dashboard: dashboardDraft(STORY_DASHBOARD_IDS.invoiceExtraction),
         answer:
           'Nordic Freight: **38%** re-extracted, all on `total`. It writes amounts as "1.234,56" and the schema expects a dot; Baltic Paper, Rhine Tools and Lyon Bureau use the same format.',
       },

@@ -31,6 +31,7 @@ import { SUPPORT_STORY_PROFILE, supportFacts } from "@/mocks/generated/story-sup
 import { VOICE_STORY_PROFILE, voiceFacts } from "@/mocks/generated/story-voice";
 import { server } from "@/mocks/node";
 import { type StoryId, storyProject } from "@/mocks/projects";
+import { STORY_DASHBOARD_IDS, storyDashboards } from "@/mocks/story-dashboards";
 
 const OTHER_ID = "01900000-0000-7000-8000-000000001a01";
 const NEW_ID = "01900000-0000-7000-8000-000000001a02";
@@ -287,10 +288,12 @@ describe("assistant story conversations", () => {
 
       const stored = await detail(story.story, NEW_ID);
       expect(stored.title).toBe(turn.question);
-      expect(stored.message_count).toBe(4);
-      expect(stored.messages.map((message) => message.seq)).toEqual([1, 2, 3, 4]);
+      expect(stored.message_count).toBe(6);
+      expect(stored.messages.map((message) => message.seq)).toEqual([1, 2, 3, 4, 5, 6]);
       expect(stored.messages.map((message) => message.role)).toEqual([
         "user",
+        "assistant",
+        "tool",
         "assistant",
         "tool",
         "assistant",
@@ -344,7 +347,7 @@ describe("assistant story conversations", () => {
 
     const support = await listIn("support");
     expect(support.data.map((item) => item.id)).toEqual([firstStory().conversationId, OTHER_ID]);
-    expect(support.data.map((item) => item.message_count)).toEqual([4, 4]);
+    expect(support.data.map((item) => item.message_count)).toEqual([6, 4]);
     for (const item of support.data) {
       expect(item).not.toHaveProperty("messages");
     }
@@ -352,7 +355,7 @@ describe("assistant story conversations", () => {
       const listed = await listIn(story.story);
       expect(listed.data.map((item) => item.id)).toEqual([story.conversationId]);
       expect(listed.data[0]?.title).toBe(story.turns[0].question);
-      expect(listed.data[0]?.message_count).toBe(4);
+      expect(listed.data[0]?.message_count).toBe(6);
     }
 
     await createChat("support");
@@ -364,15 +367,15 @@ describe("assistant story conversations", () => {
     expect(after.data[0]).toMatchObject({
       id: NEW_ID,
       title: firstStory().turns[0].question,
-      message_count: 4,
+      message_count: 6,
     });
   });
 
   it("opens a stored story chat directly", async () => {
     for (const story of STORIES) {
       const stored = await detail(story.story, story.conversationId);
-      expect(stored.message_count).toBe(4);
-      expect(stored.messages).toHaveLength(4);
+      expect(stored.message_count).toBe(6);
+      expect(stored.messages).toHaveLength(6);
 
       const bubbles = bubblesOf(stored.messages);
       expect(bubbles.map((bubble) => bubble.role)).toEqual(["user", "assistant"]);
@@ -415,6 +418,41 @@ describe("assistant story conversations", () => {
       expect(parsed?.kind).toBe("filter");
       expect(parsed?.kind === "filter" && parsed.draft.view).toBe("traces");
     }
+  });
+
+  it("each story stores its filter, then its story dashboard after the answer, and both parse", async () => {
+    const dashboardIds: Record<StoryId, string> = {
+      support: STORY_DASHBOARD_IDS.answerQuality,
+      coding: STORY_DASHBOARD_IDS.codeAgentHealth,
+      voice: STORY_DASHBOARD_IDS.voiceLatency,
+      extraction: STORY_DASHBOARD_IDS.invoiceExtraction,
+    };
+    for (const story of STORIES) {
+      const stored = await detail(story.story, story.conversationId);
+      const drafts = stored.messages.flatMap((message) =>
+        message.parts.flatMap((part) => (part.type === "draft" ? [part] : [])),
+      );
+      expect(drafts.map((part) => part.kind)).toEqual(["filter", "dashboard"]);
+
+      const [filter, dashboard] = drafts;
+      const parsedFilter = parseDraft("filter", filter?.draft);
+      expect(parsedFilter?.kind).toBe("filter");
+      expect(parsedFilter?.kind === "filter" && parsedFilter.draft.view).toBe("traces");
+
+      const expected = storyDashboards().find((item) => item.id === dashboardIds[story.story]);
+      const parsedDashboard = parseDraft("dashboard", dashboard?.draft);
+      expect(parsedDashboard?.kind).toBe("dashboard");
+      expect(parsedDashboard?.kind === "dashboard" && parsedDashboard.draft.name).toBe(
+        expected?.name,
+      );
+      expect(parsedDashboard?.kind === "dashboard" && parsedDashboard.draft.definition).toEqual(
+        expected?.definition,
+      );
+    }
+  });
+
+  it("the voice filter is the calendar tag alone", () => {
+    expect(storyNamed("voice").turns[0].draft.draft.filter).toBe("tags @> ['calendar']");
   });
 
   it("each answer quotes the rounded facts of its story", () => {
@@ -498,28 +536,65 @@ describe("assistant story conversations", () => {
         p95_ms: Math.round(voice.availabilityP95Ms),
       },
     ]);
+  });
 
-    // Extraction: the four comma vendors' files, with their eligible invoices and re-extraction shares.
+  it("the extraction rows are the four vendors in order, with the facts' shares", async () => {
+    // Extraction: the four comma vendors, grouped by their file name, with their eligible invoices and re-extraction shares.
     const extractionSet = storyDataset("extraction");
     const extraction = extractionFacts(extractionSet);
-    const shares: Record<string, number> = {
-      "invoice-2026-0521.pdf (2 pages)": extraction.nordicFreightRetryShare,
-      "invoice-2026-0524.pdf (1 page)": extraction.commaVendors["Baltic Paper"],
-      "invoice-2026-0527.pdf (3 pages)": extraction.commaVendors["Rhine Tools"],
-      "invoice-2026-0530.pdf (1 page)": extraction.commaVendors["Lyon Bureau"],
-    };
+    const vendors: [string, string, number][] = [
+      ["Nordic Freight", "invoice-2026-0521.pdf (2 pages)", extraction.nordicFreightRetryShare],
+      ["Baltic Paper", "invoice-2026-0524.pdf (1 page)", extraction.commaVendors["Baltic Paper"]],
+      ["Rhine Tools", "invoice-2026-0527.pdf (3 pages)", extraction.commaVendors["Rhine Tools"]],
+      ["Lyon Bureau", "invoice-2026-0530.pdf (1 page)", extraction.commaVendors["Lyon Bureau"]],
+    ];
     const extractionRows = await storedRows("extraction");
-    expect(extractionRows.map((row) => row.invoice_file)).toEqual(Object.keys(shares));
+    expect(extractionRows.map((row) => row.vendor)).toEqual(vendors.map(([vendor]) => vendor));
     const eligible = eligibleOf("extraction", extractionSet);
-    for (const row of extractionRows) {
-      const file = String(row.invoice_file);
+    vendors.forEach(([vendor, file, share], index) => {
       const of = eligible.filter((trace) => trace.input_preview === file);
-      expect(row.invoices).toBe(of.length);
-      expect(row.re_extracted).toBe(round2(shares[file] ?? Number.NaN));
-      expect(row.re_extracted).toBe(
+      expect(extractionRows[index]).toEqual({
+        vendor,
+        invoices: of.length,
+        re_extracted: round2(share),
+      });
+      expect(round2(share)).toBe(
         round2(of.filter((trace) => trace.tags.includes("re-extracted")).length / of.length),
       );
+    });
+  });
+
+  it("each story's SQL window, intro and filter range agree with the question", () => {
+    const expected: Record<StoryId, { window: string; range: string; intro: string }> = {
+      support: {
+        window: "INTERVAL '46 hours'",
+        range: "7d",
+        intro: "I'll count the downvoted answers since Tuesday 14:00, by release. ",
+      },
+      coding: {
+        window: "INTERVAL '14 hours'",
+        range: "24h",
+        intro: "I'll compare the runs since the cost rose last night with the day before.",
+      },
+      voice: {
+        window: "INTERVAL '30 days'",
+        range: "30d",
+        intro: "I'll look at the turn before each hang-up over the last 30 days.",
+      },
+      extraction: {
+        window: "INTERVAL '30 days'",
+        range: "30d",
+        intro: "I'll group the invoices by vendor.",
+      },
+    };
+    for (const story of STORIES) {
+      const want = expected[story.story];
+      const [turn] = story.turns;
+      expect(String(turn.call.arguments.query)).toContain(want.window);
+      expect(turn.draft.draft.range).toBe(want.range);
+      expect(turn.intro.join("")).toBe(want.intro);
     }
+    expect(storyNamed("voice").turns[0].draft.draft.filter).toBe("tags @> ['calendar']");
   });
 
   it("each draft's filter lists the traces its answer counts", async () => {
@@ -550,8 +625,11 @@ describe("assistant story conversations", () => {
         expect(listed.data.length).toBe(supportFacts(storyDataset("support")).quotingOldPricing);
       }
       if (story.story === "coding") {
-        const rows = await storedRows("coding");
-        expect(listed.data.length).toBe(rows[1]?.runs);
+        const retriedIn24h = eligibleOf("coding", storyDataset("coding")).filter(
+          (trace) =>
+            trace.tags.includes("api-retry") && Date.parse(trace.start_time) >= NOW - DAY_MS,
+        ).length;
+        expect(listed.data.length).toBe(retriedIn24h);
       }
     }
   });
@@ -573,6 +651,6 @@ describe("assistant story conversations", () => {
 
     expect(events.length).toBeGreaterThan(0);
     expect((await detail("support", NEW_ID)).messages).toEqual([]);
-    expect((await detail(story.story, story.conversationId)).message_count).toBe(4);
+    expect((await detail(story.story, story.conversationId)).message_count).toBe(6);
   });
 });
