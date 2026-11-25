@@ -1,7 +1,9 @@
 import { screen, waitFor, within } from "@testing-library/react";
+import type { UserEvent } from "@testing-library/user-event";
 import { HttpResponse, http } from "msw";
 import { expect, it } from "vitest";
 import type { Schema } from "@/api/types";
+import { setTurnDensity, TURN_DENSITY_STORAGE_KEY } from "@/lib/session-turns";
 import { server } from "@/mocks/node";
 import { ADA_ID, PROJECT_ID } from "@/test/fixtures";
 import { renderApp } from "@/test/render";
@@ -163,6 +165,29 @@ function traceSummary(
   };
 }
 
+function stepSummary(
+  traceId: string,
+  spanId: string,
+  name: string,
+  kind: Schema<"SpanKind">,
+  overrides: Partial<Schema<"SpanSummary">> = {},
+): Schema<"SpanSummary"> {
+  return {
+    trace_id: traceId,
+    span_id: spanId,
+    parent_span_id: "b1000000000000ff",
+    name,
+    span_kind: kind,
+    start_time: NOW,
+    end_time: NOW,
+    duration_ns: 350_000_000,
+    status: "ok",
+    tags: [],
+    metadata: {},
+    ...overrides,
+  };
+}
+
 const ERROR_SESSION: Schema<"SessionSummary"> = {
   session_id: "sess-errors",
   start_time: NOW,
@@ -229,6 +254,11 @@ function scoreBadge(text: string) {
     element?.textContent === text && element.children.length > 0;
 }
 
+/** The error session's steps: one tool call on the first turn, so its chip shows. */
+const ERROR_SESSION_STEPS: Schema<"SpanSummary">[] = [
+  stepSummary(OK_TRACE, "b1000000000000f1", "get_order_status", "tool"),
+];
+
 function serveErrorSession() {
   server.use(
     http.get("/api/v1/projects/:project/sessions/:sessionId", () =>
@@ -237,6 +267,9 @@ function serveErrorSession() {
         turns: ERROR_SESSION_TURNS,
         truncated: false,
       }),
+    ),
+    http.get("/api/v1/projects/:project/spans", () =>
+      HttpResponse.json({ data: ERROR_SESSION_STEPS, next_cursor: null }),
     ),
   );
 }
@@ -266,7 +299,7 @@ it("shows a turn as chat bubbles, and the payload switch only in details", async
   expect(within(conversation).getByText("Where is my order?")).toBeInTheDocument();
   const items = within(conversation).getAllByRole("listitem");
   expect(items.map((item) => item.textContent)).toEqual(["check the tracking page", "wait a day"]);
-  expect(within(conversation).getByText("1 tool calls")).toBeInTheDocument();
+  expect(await within(conversation).findByText("get_order_status")).toBeInTheDocument();
   expect(within(conversation).getByText('{"error":"payment timeout"}')).toBeInTheDocument();
   expect(within(conversation).queryByText("Pretty")).not.toBeInTheDocument();
 
@@ -286,6 +319,164 @@ it("shows a turn as chat bubbles, and the payload switch only in details", async
   await user.click(await screen.findByRole("menuitem", { name: "Hide details" }));
   expect(within(conversation).queryByText("Pretty")).not.toBeInTheDocument();
   expect(within(conversation).getByText('{"error":"payment timeout"}')).toBeInTheDocument();
+});
+
+it("shows a turn's tool calls as chips", async () => {
+  await renderApp("/acme/support-bot/sessions/sess-001");
+  const conversation = await screen.findByRole("region", { name: "Conversation" });
+  expect(await within(conversation).findByText("get_order_status")).toBeInTheDocument();
+  expect(within(conversation).queryByText("chat claude-sonnet-4-5")).not.toBeInTheDocument();
+});
+
+it("expands a turn's steps in start order and opens a step in the trace pane", async () => {
+  const { router, user } = await renderApp("/acme/support-bot/sessions/sess-001");
+  const conversation = await screen.findByRole("region", { name: "Conversation" });
+  const chevrons = await within(conversation).findAllByRole("button", { name: "Show steps" });
+  const first = chevrons[0];
+  if (!first) {
+    throw new Error("missing first turn's Show steps");
+  }
+  await user.click(first);
+  const steps = await within(conversation).findByRole("list", { name: "Steps" });
+  // KindIcon's aria-label starts each accessible name, so the order is checked on the text.
+  const rows = within(steps).getAllByRole("button");
+  expect(rows.map((row) => row.textContent ?? "")).toEqual([
+    expect.stringContaining("chat"),
+    expect.stringContaining("get_order_status"),
+    expect.stringContaining("chat"),
+  ]);
+
+  await user.click(within(steps).getByRole("button", { name: /get_order_status/ }));
+  expect(router.state.location.search).toMatchObject({ trace: TRACE });
+  const grid = await screen.findByRole("grid", { name: "Trace" });
+  expect(within(grid).getByRole("row", { name: /get_order_status/ })).toHaveAttribute(
+    "aria-selected",
+    "true",
+  );
+});
+
+it("shows a one-line input preview under each expanded step", async () => {
+  server.use(
+    http.get("/api/v1/projects/:project/spans", () =>
+      HttpResponse.json({
+        data: [
+          stepSummary(TRACE, "b1000000000000f1", "chat claude-sonnet-4-5", "llm", {
+            start_time: "2026-01-01T10:00:00.100000000Z",
+          }),
+          stepSummary(TRACE, "b1000000000000f2", "get_order_status", "tool", {
+            start_time: "2026-01-01T10:00:01.950000000Z",
+            input_preview: '{\n  "order": 1234\n}',
+          }),
+        ],
+        next_cursor: null,
+      }),
+    ),
+  );
+  const { user } = await renderApp("/acme/support-bot/sessions/sess-001");
+  const conversation = await screen.findByRole("region", { name: "Conversation" });
+  const chevrons = await within(conversation).findAllByRole("button", { name: "Show steps" });
+  const first = chevrons[0];
+  if (!first) {
+    throw new Error("missing first turn's Show steps");
+  }
+  await user.click(first);
+  const steps = await within(conversation).findByRole("list", { name: "Steps" });
+  const rows = within(steps).getAllByRole("button");
+  const llm = rows[0];
+  if (!llm) {
+    throw new Error("missing llm step");
+  }
+  const tool = rows[1];
+  if (!tool) {
+    throw new Error("missing tool step");
+  }
+  expect(within(steps).getByText('{ "order": 1234 }')).toHaveAttribute(
+    "title",
+    '{ "order": 1234 }',
+  );
+  // The step without an input preview keeps its single line.
+  expect(llm.children).toHaveLength(1);
+  expect(tool.children).toHaveLength(2);
+});
+
+it("shows the gap since the previous turn", async () => {
+  await renderApp("/acme/support-bot/sessions/sess-001");
+  const conversation = await screen.findByRole("region", { name: "Conversation" });
+  const turns = within(conversation).getAllByRole("button", { name: /support-agent/ });
+  const first = turns[0];
+  if (!first) {
+    throw new Error("missing first turn");
+  }
+  const second = turns[1];
+  if (!second) {
+    throw new Error("missing second turn");
+  }
+  expect(within(second).getByText("+5m 00s")).toBeInTheDocument();
+  expect(within(first).queryByText(/^\+/)).not.toBeInTheDocument();
+});
+
+it("marks a failed step in red with its error", async () => {
+  server.use(
+    http.get("/api/v1/projects/:project/spans", () =>
+      HttpResponse.json({
+        data: [
+          stepSummary(TRACE, "b1000000000000f1", "get_order_status", "tool", {
+            status: "error",
+            status_message: "payment gateway timeout",
+          }),
+        ],
+        next_cursor: null,
+      }),
+    ),
+  );
+  await renderApp("/acme/support-bot/sessions/sess-001");
+  const conversation = await screen.findByRole("region", { name: "Conversation" });
+  const message = await within(conversation).findByText("payment gateway timeout");
+  const chip = message.parentElement;
+  expect(chip).toHaveClass("border-status-error/40", "text-status-error");
+});
+
+it("says when the steps could not load", async () => {
+  server.use(
+    http.get("/api/v1/projects/:project/spans", () =>
+      HttpResponse.json({ message: "boom" }, { status: 500 }),
+    ),
+  );
+  let answered = false;
+  const onResponse = ({ request }: { request: Request }) => {
+    if (new URL(request.url).pathname.endsWith("/spans")) {
+      answered = true;
+    }
+  };
+  server.events.on("response:mocked", onResponse);
+  try {
+    await renderApp("/acme/support-bot/sessions/sess-001");
+    const conversation = await screen.findByRole("region", { name: "Conversation" });
+    await waitFor(() => {
+      expect(answered).toBe(true);
+    });
+    expect(
+      within(conversation).queryByRole("button", { name: "Show steps" }),
+    ).not.toBeInTheDocument();
+    expect(within(conversation).queryByText("get_order_status")).not.toBeInTheDocument();
+  } finally {
+    server.events.removeListener("response:mocked", onResponse);
+  }
+});
+
+it("says when some steps are not shown", async () => {
+  server.use(
+    http.get("/api/v1/projects/:project/spans", () =>
+      HttpResponse.json({ data: [], next_cursor: "cursor" }),
+    ),
+  );
+  await renderApp("/acme/support-bot/sessions/sess-001");
+  await screen.findByRole("region", { name: "Conversation" });
+  expect(
+    await screen.findByText(
+      "Some steps are not shown: this session has more than 5 000 steps per 100 turns.",
+    ),
+  ).toBeInTheDocument();
 });
 
 it("marks a failed turn and caps a long bubble", async () => {
@@ -333,3 +524,200 @@ it("names the session in the breadcrumb", async () => {
   }
   expect(await within(crumbs).findByText("sess-001")).toBeInTheDocument();
 });
+
+/** Serves a session with the given turns and the error session's one tool call (D-C-28). */
+function serveTurns(session: Schema<"SessionSummary">, turns: Schema<"SessionTurn">[]) {
+  server.use(
+    http.get("/api/v1/projects/:project/sessions/:sessionId", () =>
+      HttpResponse.json({ session, turns, truncated: false }),
+    ),
+    http.get("/api/v1/projects/:project/spans", () =>
+      HttpResponse.json({ data: ERROR_SESSION_STEPS, next_cursor: null }),
+    ),
+  );
+}
+
+it("filters turns by search text", async () => {
+  const { user } = await renderApp("/acme/support-bot/sessions/sess-001");
+  const conversation = await screen.findByRole("region", { name: "Conversation" });
+  await searchTurns(user, "address");
+  const turns = within(conversation).getAllByRole("button", { name: /support-agent/ });
+  expect(turns).toHaveLength(1);
+  expect(turns[0]).toHaveTextContent("#2");
+  expect(within(conversation).queryByText("My order 1234 hasn't arrived.")).not.toBeInTheDocument();
+});
+
+it("filters turns by the Failed chip and shows the counts", async () => {
+  serveErrorSession();
+  const { user } = await renderApp("/acme/support-bot/sessions/sess-errors");
+  const conversation = await screen.findByRole("region", { name: "Conversation" });
+  expect(screen.getByRole("button", { name: "Failed 1" })).toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "Scored 0" })).toBeInTheDocument();
+  expect(await screen.findByRole("button", { name: "Uses tools 1" })).toBeInTheDocument();
+
+  await user.click(screen.getByRole("button", { name: "Failed 1" }));
+  expect(within(conversation).getByRole("button", { name: /refund-flow/ })).toBeInTheDocument();
+  expect(
+    within(conversation).queryByRole("button", { name: /lookup-order/ }),
+  ).not.toBeInTheDocument();
+});
+
+it("hides the Uses tools chip until the steps load, then filters on it", async () => {
+  let release: () => void = () => undefined;
+  const gate = new Promise<void>((resolve) => {
+    release = () => resolve();
+  });
+  server.use(
+    http.get("/api/v1/projects/:project/spans", async () => {
+      await gate;
+      return HttpResponse.json({
+        data: [stepSummary(TRACE, "b1000000000000f1", "get_order_status", "tool")],
+        next_cursor: null,
+      });
+    }),
+  );
+  const { user } = await renderApp("/acme/support-bot/sessions/sess-001");
+  const conversation = await screen.findByRole("region", { name: "Conversation" });
+  expect(screen.queryByRole("button", { name: /^Uses tools/ })).not.toBeInTheDocument();
+
+  release();
+  await user.click(await screen.findByRole("button", { name: "Uses tools 1" }));
+  const turns = within(conversation).getAllByRole("button", { name: /support-agent/ });
+  expect(turns).toHaveLength(1);
+  expect(turns[0]).toHaveTextContent("#1");
+});
+
+it("says when no turn matches", async () => {
+  const { user } = await renderApp("/acme/support-bot/sessions/sess-001");
+  await screen.findByRole("region", { name: "Conversation" });
+  await searchTurns(user, "zzz-no-match");
+  expect(await screen.findByText("No turns match.")).toBeInTheDocument();
+});
+
+it("keeps the gap to the real previous turn while filtered", async () => {
+  // The failed turn starts one minute after the first one, which the Failed filter hides.
+  const spacedTurns: Schema<"SessionTurn">[] = ERROR_SESSION_TURNS.map((turn, offset) => ({
+    ...turn,
+    trace: { ...turn.trace, start_time: `2026-01-01T10:0${offset}:00.000000000Z` },
+  }));
+  serveTurns(ERROR_SESSION, spacedTurns);
+  const { user } = await renderApp("/acme/support-bot/sessions/sess-errors");
+  const conversation = await screen.findByRole("region", { name: "Conversation" });
+  expect(within(conversation).getByRole("button", { name: /refund-flow/ })).toHaveTextContent(
+    "+1m 00s",
+  );
+
+  await user.click(screen.getByRole("button", { name: "Failed 1" }));
+  expect(within(conversation).getByRole("button", { name: /refund-flow/ })).toHaveTextContent(
+    "+1m 00s",
+  );
+});
+
+it("remembers the compact density and shows one line per turn", async () => {
+  const { user } = await renderApp("/acme/support-bot/sessions/sess-001");
+  const conversation = await screen.findByRole("region", { name: "Conversation" });
+  try {
+    await user.click(screen.getByRole("radio", { name: "Compact" }));
+    expect(within(conversation).getAllByText(/→/)).toHaveLength(2);
+    expect(localStorage.getItem(TURN_DENSITY_STORAGE_KEY)).toBe("compact");
+  } finally {
+    setTurnDensity("chat");
+    localStorage.clear();
+  }
+});
+
+it("selects a turn from the strip", async () => {
+  const { router, user } = await renderApp("/acme/support-bot/sessions/sess-001");
+  await screen.findByRole("region", { name: "Conversation" });
+  const strip = screen.getByRole("group", { name: "Turns overview" });
+  await user.click(within(strip).getByRole("button", { name: /^#2 / }));
+  expect(router.state.location.search).toMatchObject({ trace: SECOND });
+});
+
+it("moves between turns with j and k", async () => {
+  const { router, user } = await renderApp("/acme/support-bot/sessions/sess-001");
+  const conversation = await screen.findByRole("region", { name: "Conversation" });
+  conversation.focus();
+  await user.keyboard("j");
+  await user.keyboard("j");
+  expect(router.state.location.search).toMatchObject({ trace: SECOND });
+  await user.keyboard("k");
+  expect(router.state.location.search).toMatchObject({ trace: TRACE });
+});
+
+it("the menu's arrow keys do not move the selection", async () => {
+  const { router, user } = await renderApp("/acme/support-bot/sessions/sess-001");
+  const conversation = await screen.findByRole("region", { name: "Conversation" });
+  const turns = within(conversation).getAllByRole("button", { name: /support-agent/ });
+  const first = turns[0];
+  if (!first) {
+    throw new Error("missing first turn");
+  }
+  await user.click(first);
+  expect(router.state.location.search).toMatchObject({ trace: TRACE });
+
+  const actions = within(conversation).getAllByRole("button", { name: "Turn actions" });
+  const firstActions = actions[0];
+  if (!firstActions) {
+    throw new Error("missing first turn actions");
+  }
+  await user.click(firstActions);
+  await user.keyboard("{ArrowDown}");
+  expect(router.state.location.search).toMatchObject({ trace: TRACE });
+});
+
+it("the errors chip walks through the failed turns", async () => {
+  // The first turn fails too, so the chip has two failed turns to walk through.
+  const turns: Schema<"SessionTurn">[] = ERROR_SESSION_TURNS.map((turn, offset) =>
+    offset === 0 ? { ...turn, trace: { ...turn.trace, status: "error" as const } } : turn,
+  );
+  serveTurns({ ...ERROR_SESSION, error_count: 2 }, turns);
+  const { router, user } = await renderApp("/acme/support-bot/sessions/sess-errors");
+  await screen.findByRole("region", { name: "Conversation" });
+
+  await user.click(screen.getByRole("button", { name: "2 errors" }));
+  expect(router.state.location.search).toMatchObject({ trace: OK_TRACE });
+  await user.click(screen.getByRole("button", { name: "2 errors" }));
+  expect(router.state.location.search).toMatchObject({ trace: FAILED_TRACE });
+  await user.click(screen.getByRole("button", { name: "2 errors" }));
+  expect(router.state.location.search).toMatchObject({ trace: OK_TRACE });
+});
+
+it("a hidden failed turn clears the search when the errors chip selects it", async () => {
+  serveErrorSession();
+  const { user } = await renderApp("/acme/support-bot/sessions/sess-errors");
+  const conversation = await screen.findByRole("region", { name: "Conversation" });
+  await searchTurns(user, "Where is");
+  expect(
+    within(conversation).queryByRole("button", { name: /refund-flow/ }),
+  ).not.toBeInTheDocument();
+
+  await user.click(screen.getByRole("button", { name: "1 errors" }));
+  expect(screen.getByRole("textbox", { name: "Search turns" })).toHaveValue("");
+  expect(within(conversation).getByRole("button", { name: /refund-flow/ })).toHaveAttribute(
+    "aria-current",
+    "true",
+  );
+});
+
+it("a strip cell of a hidden turn brings it back", async () => {
+  const { router, user } = await renderApp("/acme/support-bot/sessions/sess-001");
+  const conversation = await screen.findByRole("region", { name: "Conversation" });
+  await searchTurns(user, "address");
+  expect(within(conversation).getAllByRole("button", { name: /support-agent/ })).toHaveLength(1);
+
+  const strip = screen.getByRole("group", { name: "Turns overview" });
+  await user.click(within(strip).getByRole("button", { name: /^#1 / }));
+  expect(screen.getByRole("textbox", { name: "Search turns" })).toHaveValue("");
+  expect(within(conversation).getAllByRole("button", { name: /support-agent/ })).toHaveLength(2);
+  expect(router.state.location.search).toMatchObject({ trace: TRACE });
+});
+
+/**
+ * Types into the turn search box. It is focused directly: in jsdom the split pane's resize handle
+ * takes the focus of a click inside the pane (it has no layout to hit-test), so `user.type` misses.
+ */
+async function searchTurns(user: UserEvent, text: string) {
+  screen.getByRole("textbox", { name: "Search turns" }).focus();
+  await user.keyboard(text);
+}
