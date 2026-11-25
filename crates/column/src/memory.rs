@@ -95,7 +95,7 @@ impl GlobalPool {
     }
 
     /// Atomically takes `initial` bytes and returns a [`ScopedPool`] capped at `cap`.
-    /// Returns `None` if `used + initial > limit`.
+    /// Returns `None` if `initial > cap` or `used + initial > limit`.
     pub fn try_admit(self: &Arc<Self>, initial: usize, cap: usize) -> Option<Arc<ScopedPool>> {
         if initial > cap {
             return None;
@@ -312,7 +312,7 @@ impl Reservation {
 
             let keep = state.used.max(self.pool.initial);
             let freed = state.held.saturating_sub(keep);
-            state.held = keep;
+            state.held -= freed;
             freed
         };
 
@@ -356,7 +356,7 @@ impl Drop for Reservation {
 
             let keep = state.used.max(self.pool.initial);
             let freed = state.held.saturating_sub(keep);
-            state.held = keep;
+            state.held -= freed;
             freed
         };
 

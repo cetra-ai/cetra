@@ -3,24 +3,10 @@
 use std::fmt;
 use std::sync::Arc;
 
-use crate::column::{reconcile_reservation, rollback_reservation};
+use crate::column::{FlatPiece, reconcile_reservation, rollback_reservation};
 use crate::{
     Bitmap, Column, ColumnError, FlatColumn, MAX_NESTING_DEPTH, Reservation, Schema, Selection,
 };
-
-enum FlatPiece<'a> {
-    Borrowed(&'a FlatColumn),
-    Owned(FlatColumn),
-}
-
-impl FlatPiece<'_> {
-    fn as_flat(&self) -> &FlatColumn {
-        match self {
-            Self::Borrowed(f) => f,
-            Self::Owned(f) => f,
-        }
-    }
-}
 
 /// Columnar batch of rows with an attached [`Selection`] filter.
 #[derive(Clone, PartialEq)]
@@ -225,14 +211,22 @@ impl Batch {
     pub fn compact(&self, mut pool: Option<&mut Reservation>) -> Result<Self, ColumnError> {
         let before = pool.as_ref().map_or(0, |p| p.size());
         if self.selection.is_all(self.raw_len) {
-            let out = Self {
+            let mut target_bytes = 0usize;
+            for col in &self.columns {
+                target_bytes =
+                    target_bytes
+                        .checked_add(col.memory_bytes())
+                        .ok_or(ColumnError::Overflow {
+                            reason: "batch compact byte total overflow",
+                        })?;
+            }
+            reconcile_reservation(pool, before, target_bytes)?;
+            return Ok(Self {
                 schema: Arc::clone(&self.schema),
                 columns: self.columns.clone(),
                 raw_len: self.raw_len,
                 selection: Selection::All,
-            };
-            reconcile_reservation(pool, before, out.memory_bytes())?;
-            return Ok(out);
+            });
         }
 
         let indices = match self.selection.to_indices(self.raw_len) {
@@ -350,7 +344,12 @@ impl Batch {
             }
 
             let flat_refs: Vec<&FlatColumn> = pieces.iter().map(FlatPiece::as_flat).collect();
-            let merged = match FlatColumn::concat(&field.data_type, &flat_refs, total_rows) {
+            let merged = match FlatColumn::concat_with_pool(
+                &field.data_type,
+                &flat_refs,
+                total_rows,
+                pool.as_deref_mut(),
+            ) {
                 Ok(fc) => fc,
                 Err(err) => {
                     rollback_reservation(pool, before);
@@ -359,7 +358,15 @@ impl Batch {
             };
             drop(pieces);
 
-            running_bytes = running_bytes.saturating_add(merged.memory_bytes());
+            running_bytes = match running_bytes.checked_add(merged.memory_bytes()) {
+                Some(b) => b,
+                None => {
+                    rollback_reservation(pool, before);
+                    return Err(ColumnError::Overflow {
+                        reason: "concat byte total overflow",
+                    });
+                }
+            };
             reconcile_reservation(pool.as_deref_mut(), before, running_bytes)?;
             new_cols.push(Column::Flat(merged));
         }
@@ -794,5 +801,100 @@ mod tests {
             prop_assert_eq!(res.size(), compacted.memory_bytes() + doubled.memory_bytes());
             prop_assert_eq!(doubled.num_rows(), batch.num_rows() * 2);
         }
+    }
+
+    #[test]
+    fn concat_and_compact_respect_tight_memory_pool_limits() {
+        let schema = Schema::try_new_arc(vec![
+            Field::new("id", DataType::I64, false),
+            Field::new("tags", DataType::List(Box::new(DataType::Utf8)), true),
+        ])
+        .unwrap();
+
+        let id1 = Column::try_new_const(ScalarValue::I64(42), 4).unwrap();
+        let tags1 = Column::Flat(
+            FlatColumn::try_new(
+                FlatData::List {
+                    item_type: DataType::Utf8,
+                    offsets: vec![0, 2, 4, 6, 8],
+                    values: Box::new(
+                        Column::try_new_const(ScalarValue::Utf8("tag".into()), 8).unwrap(),
+                    ),
+                },
+                None,
+            )
+            .unwrap(),
+        );
+        let b1 = Batch::try_new_all(Arc::clone(&schema), vec![id1, tags1], 4).unwrap();
+
+        let id2 = Column::Flat(FlatColumn::try_new(FlatData::I64(vec![10, 20]), None).unwrap());
+        let tags2 = Column::Flat(
+            FlatColumn::try_new(
+                FlatData::List {
+                    item_type: DataType::Utf8,
+                    offsets: vec![0, 1, 2],
+                    values: Box::new(Column::Flat(
+                        FlatColumn::try_new(
+                            FlatData::Utf8(Utf8Data::try_from_slices(["aa", "bb"]).unwrap()),
+                            None,
+                        )
+                        .unwrap(),
+                    )),
+                },
+                None,
+            )
+            .unwrap(),
+        );
+        let b2 = Batch::try_new_all(Arc::clone(&schema), vec![id2, tags2], 2).unwrap();
+
+        // Compact is_all fast path rejects before cloning when pool is too small
+        let tiny_scope = GlobalPool::standalone(b2.memory_bytes() - 1);
+        let mut tiny_res = tiny_scope.register("compact_tiny", true);
+        let err_compact = b2.compact(Some(&mut tiny_res)).unwrap_err();
+        assert!(matches!(err_compact, ColumnError::MemoryLimit { .. }));
+        assert_eq!(tiny_res.size(), 0);
+
+        // Compute exact merged size using an ample pool first
+        let big_scope = GlobalPool::standalone(1024 * 1024);
+        let mut big_res = big_scope.register("big", true);
+        let merged_ok =
+            Batch::concat(Arc::clone(&schema), &[&b1, &b2], Some(&mut big_res)).unwrap();
+        let merged_bytes = merged_ok.memory_bytes();
+        assert_eq!(big_res.size(), merged_bytes);
+
+        // A pool smaller than merged_bytes (or smaller than peak live pieces + merged) fails cleanly and rolls back
+        let tight_scope = GlobalPool::standalone(merged_bytes + 40);
+        let mut tight_res = tight_scope.register("tight", true);
+        tight_res.try_grow(40).unwrap();
+        let err_concat =
+            Batch::concat(Arc::clone(&schema), &[&b1, &b2], Some(&mut tight_res)).unwrap_err();
+        assert!(matches!(err_concat, ColumnError::MemoryLimit { .. }));
+        assert_eq!(tight_res.size(), 40);
+
+        // Also test borrowed flat-only concat rejecting before allocating merged when cap = merged_bytes - 1
+        let b1_flat = b1.with_selection(Selection::All).unwrap();
+        let b1_mat = Batch::try_new_all(
+            Arc::clone(&schema),
+            b1_flat
+                .columns()
+                .iter()
+                .map(|c| Column::Flat(c.materialize(None).unwrap()))
+                .collect(),
+            b1_flat.raw_len(),
+        )
+        .unwrap();
+        let flat_merged_bytes = Batch::concat(Arc::clone(&schema), &[&b1_mat, &b2], None)
+            .unwrap()
+            .memory_bytes();
+        let exact_minus_one = GlobalPool::standalone(flat_merged_bytes - 1);
+        let mut minus_one_res = exact_minus_one.register("minus1", true);
+        let err_flat = Batch::concat(
+            Arc::clone(&schema),
+            &[&b1_mat, &b2],
+            Some(&mut minus_one_res),
+        )
+        .unwrap_err();
+        assert!(matches!(err_flat, ColumnError::MemoryLimit { .. }));
+        assert_eq!(minus_one_res.size(), 0);
     }
 }

@@ -103,7 +103,7 @@ If the code has to deviate from the spec, update the spec **in the same change**
 
 ```
 crates/
-  column/     cetra-column   pure-Rust columnar in-memory batches, encodings, memory pool, and binary framing (track QE)
+  column/    cetra-column   pure-Rust columnar in-memory batches, encodings, memory pool, and binary framing (track QE)
   core/      cetra-core     shared contracts: IDs, enums, names, messages, Span/Score,
                              Arrow schemas + batch conversion, OpenAPI schemas,
                              no config (D59)                                          (spec 01)

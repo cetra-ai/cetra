@@ -8,6 +8,64 @@ use crate::{
     ScalarValue,
 };
 
+pub(crate) enum FlatPiece<'a> {
+    Borrowed(&'a FlatColumn),
+    Owned(FlatColumn),
+}
+
+impl FlatPiece<'_> {
+    pub(crate) fn as_flat(&self) -> &FlatColumn {
+        match self {
+            Self::Borrowed(f) => f,
+            Self::Owned(f) => f,
+        }
+    }
+}
+
+fn checked_mul_bytes(a: usize, b: usize, reason: &'static str) -> Result<usize, ColumnError> {
+    a.checked_mul(b).ok_or(ColumnError::Overflow { reason })
+}
+
+fn checked_add_bytes(a: usize, b: usize, reason: &'static str) -> Result<usize, ColumnError> {
+    a.checked_add(b).ok_or(ColumnError::Overflow { reason })
+}
+
+fn fixed_take_bytes(
+    row_count: usize,
+    elem_bytes: usize,
+    nulls_bytes: usize,
+) -> Result<usize, ColumnError> {
+    let data_bytes = checked_mul_bytes(row_count, elem_bytes, "take byte size overflow")?;
+    checked_add_bytes(data_bytes, nulls_bytes, "take byte size overflow")
+}
+
+fn varlen_take_bytes(
+    offsets: &[u32],
+    nulls: Option<&Bitmap>,
+    indices: &[u32],
+    valid_mask: Option<&Bitmap>,
+    nulls_bytes: usize,
+    overflow_reason: &'static str,
+    u32_reason: &'static str,
+) -> Result<usize, ColumnError> {
+    let mut total_bytes: usize = 0;
+    for (out_pos, &idx) in indices.iter().enumerate() {
+        let row = idx as usize;
+        if valid_mask.is_none_or(|m| m.get(out_pos)) && nulls.is_none_or(|bm| bm.get(row)) {
+            let item_len = (offsets[row + 1] - offsets[row]) as usize;
+            total_bytes = checked_add_bytes(total_bytes, item_len, overflow_reason)?;
+        }
+    }
+    let _ = checked_u32(total_bytes, u32_reason)?;
+    let offsets_bytes = checked_mul_bytes(
+        checked_add_bytes(indices.len(), 1, overflow_reason)?,
+        4,
+        overflow_reason,
+    )?;
+    let data_bytes = checked_add_bytes(offsets_bytes, total_bytes, overflow_reason)?;
+    checked_add_bytes(data_bytes, nulls_bytes, overflow_reason)
+}
+
 /// Reconciles `pool` so its size becomes `before + target_bytes`, rolling back to `before` on error.
 pub(crate) fn reconcile_reservation(
     pool: Option<&mut Reservation>,
@@ -1586,6 +1644,19 @@ impl FlatColumn {
         }
     }
 
+    pub(crate) fn validate_with_depth(&self, max_depth: usize) -> Result<(), ColumnError> {
+        self.data_type().validate(max_depth)?;
+        if let FlatData::List { values, .. } = self.data() {
+            if max_depth == 0 {
+                return Err(ColumnError::InvalidBatch {
+                    reason: "exceeded maximum nesting depth",
+                });
+            }
+            values.validate_with_depth(max_depth - 1)?;
+        }
+        Ok(())
+    }
+
     /// Underlying flat values buffer.
     pub fn data(&self) -> &FlatData {
         &self.data
@@ -1813,10 +1884,10 @@ impl FlatColumn {
             });
         }
 
-        let mut out_valid = Bitmap::new_ones(indices.len());
+        let mut any_null = false;
         for (out_pos, &idx) in indices.iter().enumerate() {
             if valid_mask.is_some_and(|m| !m.get(out_pos)) {
-                let _ = out_valid.set(out_pos, false);
+                any_null = true;
             } else {
                 let row = idx as usize;
                 if row >= self.len() {
@@ -1825,95 +1896,172 @@ impl FlatColumn {
                     });
                 }
                 if self.is_null(row) {
-                    let _ = out_valid.set(out_pos, false);
+                    any_null = true;
                 }
             }
         }
 
-        let out_nulls = if matches!(self.data, FlatData::Null(_)) || out_valid.all_ones() {
-            None
+        let has_out_nulls = any_null && !matches!(self.data, FlatData::Null(_));
+        let nulls_bytes = if has_out_nulls {
+            indices.len().div_ceil(64) * 8
         } else {
+            0
+        };
+
+        let build_out_nulls = || -> Option<Bitmap> {
+            if !has_out_nulls {
+                return None;
+            }
+            let mut out_valid = Bitmap::new_ones(indices.len());
+            for (out_pos, &idx) in indices.iter().enumerate() {
+                if valid_mask.is_some_and(|m| !m.get(out_pos)) || self.is_null(idx as usize) {
+                    let _ = out_valid.set(out_pos, false);
+                }
+            }
             Some(out_valid)
         };
 
-        let nulls_bytes = out_nulls.as_ref().map_or(0, Bitmap::memory_bytes);
-
-        let data = match &self.data {
-            FlatData::Null(_) => FlatData::Null(indices.len()),
+        let (data, out_nulls) = match &self.data {
+            FlatData::Null(_) => (FlatData::Null(indices.len()), None),
             FlatData::Bool(src) => {
-                let out_bytes = indices.len().div_ceil(64) * 8 + nulls_bytes;
+                let out_bytes = checked_add_bytes(
+                    indices.len().div_ceil(64) * 8,
+                    nulls_bytes,
+                    "bool take byte size overflow",
+                )?;
                 reconcile_reservation(pool.as_deref_mut(), before, out_bytes)?;
+                let out_nulls = build_out_nulls();
                 let mut bm = Bitmap::new_zeroed(indices.len());
                 for (out_pos, &idx) in indices.iter().enumerate() {
                     if out_nulls.as_ref().is_none_or(|m| m.get(out_pos)) && src.get(idx as usize) {
                         let _ = bm.set(out_pos, true);
                     }
                 }
-                FlatData::Bool(bm)
+                (FlatData::Bool(bm), out_nulls)
             }
             FlatData::I64(src) => {
-                let out_bytes = indices.len() * 8 + nulls_bytes;
+                let out_bytes = fixed_take_bytes(indices.len(), 8, nulls_bytes)?;
                 reconcile_reservation(pool.as_deref_mut(), before, out_bytes)?;
-                FlatData::I64(gather_fixed(src, indices, out_nulls.as_ref(), 0))
+                let out_nulls = build_out_nulls();
+                (
+                    FlatData::I64(gather_fixed(src, indices, out_nulls.as_ref(), 0)),
+                    out_nulls,
+                )
             }
             FlatData::F64(src) => {
-                let out_bytes = indices.len() * 8 + nulls_bytes;
+                let out_bytes = fixed_take_bytes(indices.len(), 8, nulls_bytes)?;
                 reconcile_reservation(pool.as_deref_mut(), before, out_bytes)?;
-                FlatData::F64(gather_fixed(src, indices, out_nulls.as_ref(), 0.0))
+                let out_nulls = build_out_nulls();
+                (
+                    FlatData::F64(gather_fixed(src, indices, out_nulls.as_ref(), 0.0)),
+                    out_nulls,
+                )
             }
             FlatData::Decimal128 {
                 values,
                 precision,
                 scale,
             } => {
-                let out_bytes = indices.len() * 16 + nulls_bytes;
+                let out_bytes = fixed_take_bytes(indices.len(), 16, nulls_bytes)?;
                 reconcile_reservation(pool.as_deref_mut(), before, out_bytes)?;
-                FlatData::Decimal128 {
-                    values: gather_fixed(values, indices, out_nulls.as_ref(), 0),
-                    precision: *precision,
-                    scale: *scale,
-                }
+                let out_nulls = build_out_nulls();
+                (
+                    FlatData::Decimal128 {
+                        values: gather_fixed(values, indices, out_nulls.as_ref(), 0),
+                        precision: *precision,
+                        scale: *scale,
+                    },
+                    out_nulls,
+                )
             }
             FlatData::TimestampNs { values, utc } => {
-                let out_bytes = indices.len() * 8 + nulls_bytes;
+                let out_bytes = fixed_take_bytes(indices.len(), 8, nulls_bytes)?;
                 reconcile_reservation(pool.as_deref_mut(), before, out_bytes)?;
-                FlatData::TimestampNs {
-                    values: gather_fixed(values, indices, out_nulls.as_ref(), 0),
-                    utc: *utc,
-                }
+                let out_nulls = build_out_nulls();
+                (
+                    FlatData::TimestampNs {
+                        values: gather_fixed(values, indices, out_nulls.as_ref(), 0),
+                        utc: *utc,
+                    },
+                    out_nulls,
+                )
             }
             FlatData::Date(src) => {
-                let out_bytes = indices.len() * 4 + nulls_bytes;
+                let out_bytes = fixed_take_bytes(indices.len(), 4, nulls_bytes)?;
                 reconcile_reservation(pool.as_deref_mut(), before, out_bytes)?;
-                FlatData::Date(gather_fixed(src, indices, out_nulls.as_ref(), 0))
+                let out_nulls = build_out_nulls();
+                (
+                    FlatData::Date(gather_fixed(src, indices, out_nulls.as_ref(), 0)),
+                    out_nulls,
+                )
             }
             FlatData::Interval(src) => {
-                let out_bytes = indices.len() * size_of::<Interval>() + nulls_bytes;
+                let out_bytes =
+                    fixed_take_bytes(indices.len(), size_of::<Interval>(), nulls_bytes)?;
                 reconcile_reservation(pool.as_deref_mut(), before, out_bytes)?;
-                FlatData::Interval(gather_fixed(
-                    src,
-                    indices,
-                    out_nulls.as_ref(),
-                    Interval::default(),
-                ))
+                let out_nulls = build_out_nulls();
+                (
+                    FlatData::Interval(gather_fixed(
+                        src,
+                        indices,
+                        out_nulls.as_ref(),
+                        Interval::default(),
+                    )),
+                    out_nulls,
+                )
             }
             FlatData::FixedBytes8(src) => {
-                let out_bytes = indices.len() * 8 + nulls_bytes;
+                let out_bytes = fixed_take_bytes(indices.len(), 8, nulls_bytes)?;
                 reconcile_reservation(pool.as_deref_mut(), before, out_bytes)?;
-                FlatData::FixedBytes8(gather_fixed(src, indices, out_nulls.as_ref(), [0u8; 8]))
+                let out_nulls = build_out_nulls();
+                (
+                    FlatData::FixedBytes8(gather_fixed(src, indices, out_nulls.as_ref(), [0u8; 8])),
+                    out_nulls,
+                )
             }
             FlatData::FixedBytes16(src) => {
-                let out_bytes = indices.len() * 16 + nulls_bytes;
+                let out_bytes = fixed_take_bytes(indices.len(), 16, nulls_bytes)?;
                 reconcile_reservation(pool.as_deref_mut(), before, out_bytes)?;
-                FlatData::FixedBytes16(gather_fixed(src, indices, out_nulls.as_ref(), [0u8; 16]))
+                let out_nulls = build_out_nulls();
+                (
+                    FlatData::FixedBytes16(gather_fixed(
+                        src,
+                        indices,
+                        out_nulls.as_ref(),
+                        [0u8; 16],
+                    )),
+                    out_nulls,
+                )
             }
             FlatData::Utf8(u) => {
+                let out_bytes = varlen_take_bytes(
+                    &u.offsets,
+                    self.nulls.as_ref(),
+                    indices,
+                    valid_mask,
+                    nulls_bytes,
+                    "utf8 take byte length overflow",
+                    "utf8 take byte length exceeds u32::MAX",
+                )?;
+                reconcile_reservation(pool.as_deref_mut(), before, out_bytes)?;
+                let out_nulls = build_out_nulls();
                 let gathered = u.take(indices, out_nulls.as_ref())?;
-                FlatData::Utf8(gathered)
+                (FlatData::Utf8(gathered), out_nulls)
             }
             FlatData::Binary(b) => {
+                let out_bytes = varlen_take_bytes(
+                    &b.offsets,
+                    self.nulls.as_ref(),
+                    indices,
+                    valid_mask,
+                    nulls_bytes,
+                    "binary take byte length overflow",
+                    "binary take byte length exceeds u32::MAX",
+                )?;
+                reconcile_reservation(pool.as_deref_mut(), before, out_bytes)?;
+                let out_nulls = build_out_nulls();
                 let gathered = b.take(indices, out_nulls.as_ref())?;
-                FlatData::Binary(gathered)
+                (FlatData::Binary(gathered), out_nulls)
             }
             FlatData::List {
                 item_type,
@@ -1922,18 +2070,32 @@ impl FlatColumn {
             } => {
                 let mut total_child = 0usize;
                 for (out_pos, &idx) in indices.iter().enumerate() {
-                    if out_nulls.as_ref().is_none_or(|m| m.get(out_pos)) {
+                    if valid_mask.is_none_or(|m| m.get(out_pos)) && !self.is_null(idx as usize) {
                         let row = idx as usize;
                         let count = (offsets[row + 1] - offsets[row]) as usize;
-                        total_child =
-                            total_child
-                                .checked_add(count)
-                                .ok_or(ColumnError::Overflow {
-                                    reason: "list take child count overflow",
-                                })?;
+                        total_child = checked_add_bytes(
+                            total_child,
+                            count,
+                            "list take child count overflow",
+                        )?;
                     }
                 }
                 let _ = checked_u32(total_child, "list take child count exceeds u32::MAX")?;
+                let offsets_bytes = checked_mul_bytes(
+                    checked_add_bytes(indices.len(), 1, "list take offsets overflow")?,
+                    4,
+                    "list take offsets overflow",
+                )?;
+                let child_indices_bytes =
+                    checked_mul_bytes(total_child, 4, "list take child indices overflow")?;
+                let pre_bytes = checked_add_bytes(
+                    checked_add_bytes(offsets_bytes, nulls_bytes, "list take bytes overflow")?,
+                    child_indices_bytes,
+                    "list take bytes overflow",
+                )?;
+                reconcile_reservation(pool.as_deref_mut(), before, pre_bytes)?;
+
+                let out_nulls = build_out_nulls();
                 let mut out_offsets = Vec::with_capacity(indices.len() + 1);
                 out_offsets.push(0);
                 let mut child_indices = Vec::with_capacity(total_child);
@@ -1951,17 +2113,279 @@ impl FlatColumn {
                     }
                 }
                 let out_values = values.take(&child_indices, pool)?;
-                FlatData::List {
-                    item_type: item_type.clone(),
-                    offsets: out_offsets,
-                    values: Box::new(Column::Flat(out_values)),
-                }
+                (
+                    FlatData::List {
+                        item_type: item_type.clone(),
+                        offsets: out_offsets,
+                        values: Box::new(Column::Flat(out_values)),
+                    },
+                    out_nulls,
+                )
             }
             FlatData::MapUtf8(m) => {
-                FlatData::MapUtf8(Box::new(m.take(indices, out_nulls.as_ref())?))
+                let mut total_entries = 0usize;
+                let mut keys_bytes = 0usize;
+                let mut values_bytes = 0usize;
+                for (out_pos, &idx) in indices.iter().enumerate() {
+                    if valid_mask.is_none_or(|bm| bm.get(out_pos)) && !self.is_null(idx as usize) {
+                        let row = idx as usize;
+                        let start = m.offsets[row] as usize;
+                        let end = m.offsets[row + 1] as usize;
+                        total_entries = checked_add_bytes(
+                            total_entries,
+                            end - start,
+                            "map take entry count overflow",
+                        )?;
+                        keys_bytes = checked_add_bytes(
+                            keys_bytes,
+                            (m.keys.offsets[end] - m.keys.offsets[start]) as usize,
+                            "utf8 take byte length overflow",
+                        )?;
+                        if let Some(vn) = &m.value_nulls {
+                            for src in start..end {
+                                if vn.get(src) {
+                                    values_bytes = checked_add_bytes(
+                                        values_bytes,
+                                        (m.values.offsets[src + 1] - m.values.offsets[src])
+                                            as usize,
+                                        "utf8 take byte length overflow",
+                                    )?;
+                                }
+                            }
+                        } else {
+                            values_bytes = checked_add_bytes(
+                                values_bytes,
+                                (m.values.offsets[end] - m.values.offsets[start]) as usize,
+                                "utf8 take byte length overflow",
+                            )?;
+                        }
+                    }
+                }
+                let _ = checked_u32(total_entries, "map take entry count exceeds u32::MAX")?;
+                let _ = checked_u32(keys_bytes, "utf8 take byte length exceeds u32::MAX")?;
+                let _ = checked_u32(values_bytes, "utf8 take byte length exceeds u32::MAX")?;
+
+                let row_offsets_bytes = checked_mul_bytes(
+                    checked_add_bytes(indices.len(), 1, "map take offsets overflow")?,
+                    4,
+                    "map take offsets overflow",
+                )?;
+                let entry_offsets_bytes = checked_mul_bytes(
+                    checked_add_bytes(total_entries, 1, "map take entry offsets overflow")?,
+                    4,
+                    "map take entry offsets overflow",
+                )?;
+                let val_nulls_bytes = if m.value_nulls.is_some() {
+                    total_entries.div_ceil(64) * 8
+                } else {
+                    0
+                };
+                let scratch_bytes =
+                    checked_mul_bytes(total_entries, 4, "map take entry indices overflow")?;
+                let mut reserve_bytes =
+                    checked_add_bytes(row_offsets_bytes, nulls_bytes, "map take bytes overflow")?;
+                reserve_bytes = checked_add_bytes(
+                    reserve_bytes,
+                    entry_offsets_bytes,
+                    "map take bytes overflow",
+                )?;
+                reserve_bytes =
+                    checked_add_bytes(reserve_bytes, keys_bytes, "map take bytes overflow")?;
+                reserve_bytes = checked_add_bytes(
+                    reserve_bytes,
+                    entry_offsets_bytes,
+                    "map take bytes overflow",
+                )?;
+                reserve_bytes =
+                    checked_add_bytes(reserve_bytes, values_bytes, "map take bytes overflow")?;
+                reserve_bytes =
+                    checked_add_bytes(reserve_bytes, val_nulls_bytes, "map take bytes overflow")?;
+                reserve_bytes =
+                    checked_add_bytes(reserve_bytes, scratch_bytes, "map take bytes overflow")?;
+                reconcile_reservation(pool.as_deref_mut(), before, reserve_bytes)?;
+
+                let out_nulls = build_out_nulls();
+                let gathered = m.take(indices, out_nulls.as_ref())?;
+                (FlatData::MapUtf8(Box::new(gathered)), out_nulls)
             }
-            FlatData::Events(e) => FlatData::Events(Box::new(e.take(indices, out_nulls.as_ref())?)),
-            FlatData::Links(l) => FlatData::Links(Box::new(l.take(indices, out_nulls.as_ref())?)),
+            FlatData::Events(e) => {
+                let mut total_events = 0usize;
+                let mut names_bytes = 0usize;
+                let mut attrs_bytes = 0usize;
+                for (out_pos, &idx) in indices.iter().enumerate() {
+                    if valid_mask.is_none_or(|bm| bm.get(out_pos)) && !self.is_null(idx as usize) {
+                        let row = idx as usize;
+                        let start = e.offsets[row] as usize;
+                        let end = e.offsets[row + 1] as usize;
+                        total_events = checked_add_bytes(
+                            total_events,
+                            end - start,
+                            "events take count overflow",
+                        )?;
+                        names_bytes = checked_add_bytes(
+                            names_bytes,
+                            (e.names.offsets[end] - e.names.offsets[start]) as usize,
+                            "utf8 take byte length overflow",
+                        )?;
+                        if let Some(an) = &e.attribute_nulls {
+                            for src in start..end {
+                                if an.get(src) {
+                                    attrs_bytes = checked_add_bytes(
+                                        attrs_bytes,
+                                        (e.attributes.offsets[src + 1] - e.attributes.offsets[src])
+                                            as usize,
+                                        "utf8 take byte length overflow",
+                                    )?;
+                                }
+                            }
+                        } else {
+                            attrs_bytes = checked_add_bytes(
+                                attrs_bytes,
+                                (e.attributes.offsets[end] - e.attributes.offsets[start]) as usize,
+                                "utf8 take byte length overflow",
+                            )?;
+                        }
+                    }
+                }
+                let _ = checked_u32(total_events, "events take count exceeds u32::MAX")?;
+                let _ = checked_u32(names_bytes, "utf8 take byte length exceeds u32::MAX")?;
+                let _ = checked_u32(attrs_bytes, "utf8 take byte length exceeds u32::MAX")?;
+
+                let row_offsets_bytes = checked_mul_bytes(
+                    checked_add_bytes(indices.len(), 1, "events take offsets overflow")?,
+                    4,
+                    "events take offsets overflow",
+                )?;
+                let times_bytes = checked_mul_bytes(total_events, 8, "events take times overflow")?;
+                let item_offsets_bytes = checked_mul_bytes(
+                    checked_add_bytes(total_events, 1, "events take item offsets overflow")?,
+                    4,
+                    "events take item offsets overflow",
+                )?;
+                let attr_nulls_bytes = if e.attribute_nulls.is_some() {
+                    total_events.div_ceil(64) * 8
+                } else {
+                    0
+                };
+                let scratch_bytes =
+                    checked_mul_bytes(total_events, 4, "events take item indices overflow")?;
+                let mut reserve_bytes = checked_add_bytes(
+                    row_offsets_bytes,
+                    nulls_bytes,
+                    "events take bytes overflow",
+                )?;
+                reserve_bytes =
+                    checked_add_bytes(reserve_bytes, times_bytes, "events take bytes overflow")?;
+                reserve_bytes = checked_add_bytes(
+                    reserve_bytes,
+                    item_offsets_bytes,
+                    "events take bytes overflow",
+                )?;
+                reserve_bytes =
+                    checked_add_bytes(reserve_bytes, names_bytes, "events take bytes overflow")?;
+                reserve_bytes = checked_add_bytes(
+                    reserve_bytes,
+                    item_offsets_bytes,
+                    "events take bytes overflow",
+                )?;
+                reserve_bytes =
+                    checked_add_bytes(reserve_bytes, attrs_bytes, "events take bytes overflow")?;
+                reserve_bytes = checked_add_bytes(
+                    reserve_bytes,
+                    attr_nulls_bytes,
+                    "events take bytes overflow",
+                )?;
+                reserve_bytes =
+                    checked_add_bytes(reserve_bytes, scratch_bytes, "events take bytes overflow")?;
+                reconcile_reservation(pool.as_deref_mut(), before, reserve_bytes)?;
+
+                let out_nulls = build_out_nulls();
+                let gathered = e.take(indices, out_nulls.as_ref())?;
+                (FlatData::Events(Box::new(gathered)), out_nulls)
+            }
+            FlatData::Links(l) => {
+                let mut total_links = 0usize;
+                let mut attrs_bytes = 0usize;
+                for (out_pos, &idx) in indices.iter().enumerate() {
+                    if valid_mask.is_none_or(|bm| bm.get(out_pos)) && !self.is_null(idx as usize) {
+                        let row = idx as usize;
+                        let start = l.offsets[row] as usize;
+                        let end = l.offsets[row + 1] as usize;
+                        total_links = checked_add_bytes(
+                            total_links,
+                            end - start,
+                            "links take count overflow",
+                        )?;
+                        if let Some(an) = &l.attribute_nulls {
+                            for src in start..end {
+                                if an.get(src) {
+                                    attrs_bytes = checked_add_bytes(
+                                        attrs_bytes,
+                                        (l.attributes.offsets[src + 1] - l.attributes.offsets[src])
+                                            as usize,
+                                        "utf8 take byte length overflow",
+                                    )?;
+                                }
+                            }
+                        } else {
+                            attrs_bytes = checked_add_bytes(
+                                attrs_bytes,
+                                (l.attributes.offsets[end] - l.attributes.offsets[start]) as usize,
+                                "utf8 take byte length overflow",
+                            )?;
+                        }
+                    }
+                }
+                let _ = checked_u32(total_links, "links take count exceeds u32::MAX")?;
+                let _ = checked_u32(attrs_bytes, "utf8 take byte length exceeds u32::MAX")?;
+
+                let row_offsets_bytes = checked_mul_bytes(
+                    checked_add_bytes(indices.len(), 1, "links take offsets overflow")?,
+                    4,
+                    "links take offsets overflow",
+                )?;
+                let trace_ids_bytes =
+                    checked_mul_bytes(total_links, 16, "links take trace_ids overflow")?;
+                let span_ids_bytes =
+                    checked_mul_bytes(total_links, 8, "links take span_ids overflow")?;
+                let item_offsets_bytes = checked_mul_bytes(
+                    checked_add_bytes(total_links, 1, "links take item offsets overflow")?,
+                    4,
+                    "links take item offsets overflow",
+                )?;
+                let attr_nulls_bytes = if l.attribute_nulls.is_some() {
+                    total_links.div_ceil(64) * 8
+                } else {
+                    0
+                };
+                let scratch_bytes =
+                    checked_mul_bytes(total_links, 4, "links take item indices overflow")?;
+                let mut reserve_bytes =
+                    checked_add_bytes(row_offsets_bytes, nulls_bytes, "links take bytes overflow")?;
+                reserve_bytes =
+                    checked_add_bytes(reserve_bytes, trace_ids_bytes, "links take bytes overflow")?;
+                reserve_bytes =
+                    checked_add_bytes(reserve_bytes, span_ids_bytes, "links take bytes overflow")?;
+                reserve_bytes = checked_add_bytes(
+                    reserve_bytes,
+                    item_offsets_bytes,
+                    "links take bytes overflow",
+                )?;
+                reserve_bytes =
+                    checked_add_bytes(reserve_bytes, attrs_bytes, "links take bytes overflow")?;
+                reserve_bytes = checked_add_bytes(
+                    reserve_bytes,
+                    attr_nulls_bytes,
+                    "links take bytes overflow",
+                )?;
+                reserve_bytes =
+                    checked_add_bytes(reserve_bytes, scratch_bytes, "links take bytes overflow")?;
+                reconcile_reservation(pool, before, reserve_bytes)?;
+
+                let out_nulls = build_out_nulls();
+                let gathered = l.take(indices, out_nulls.as_ref())?;
+                (FlatData::Links(Box::new(gathered)), out_nulls)
+            }
         };
 
         Ok(Self {
@@ -2051,24 +2475,97 @@ impl FlatColumn {
         self.data.memory_bytes() + self.nulls.as_ref().map_or(0, Bitmap::memory_bytes)
     }
 
+    #[cfg(test)]
     pub(crate) fn concat(
         data_type: &DataType,
         parts: &[&Self],
         total_rows: usize,
     ) -> Result<Self, ColumnError> {
+        Self::concat_with_pool(data_type, parts, total_rows, None)
+    }
+
+    pub(crate) fn concat_with_pool(
+        data_type: &DataType,
+        parts: &[&Self],
+        total_rows: usize,
+        mut pool: Option<&mut Reservation>,
+    ) -> Result<Self, ColumnError> {
+        let before = pool.as_ref().map_or(0, |p| p.size());
+        match Self::concat_inner(data_type, parts, total_rows, pool.as_deref_mut(), before) {
+            Ok(out) => {
+                reconcile_reservation(pool, before, out.memory_bytes())?;
+                Ok(out)
+            }
+            Err(err) => {
+                rollback_reservation(pool, before);
+                Err(err)
+            }
+        }
+    }
+
+    fn concat_inner(
+        data_type: &DataType,
+        parts: &[&Self],
+        total_rows: usize,
+        mut pool: Option<&mut Reservation>,
+        before: usize,
+    ) -> Result<Self, ColumnError> {
+        let sum_rows: usize = parts.iter().try_fold(0usize, |acc, p| {
+            checked_add_bytes(acc, p.len(), "concat row count overflow")
+        })?;
+        if sum_rows != total_rows {
+            return Err(ColumnError::InvalidBatch {
+                reason: "concat total_rows mismatch",
+            });
+        }
+
         if matches!(data_type, DataType::Null) {
+            for p in parts {
+                if !matches!(p.data(), FlatData::Null(_)) {
+                    return Err(ColumnError::InvalidBatch {
+                        reason: "concat column data type mismatch",
+                    });
+                }
+            }
             return Ok(Self {
                 data: FlatData::Null(total_rows),
                 nulls: None,
             });
         }
-        let null_parts: Vec<(usize, Option<&Bitmap>)> =
-            parts.iter().map(|p| (p.len(), p.nulls())).collect();
-        let nulls = concat_bitmaps(&null_parts, total_rows);
+
+        let has_nulls = parts
+            .iter()
+            .any(|p| p.nulls().is_some_and(|bm| !bm.all_ones()));
+        let nulls_bytes = if has_nulls {
+            total_rows.div_ceil(64) * 8
+        } else {
+            0
+        };
+        let build_nulls = || -> Option<Bitmap> {
+            if !has_nulls {
+                return None;
+            }
+            let null_parts: Vec<(usize, Option<&Bitmap>)> =
+                parts.iter().map(|p| (p.len(), p.nulls())).collect();
+            concat_bitmaps(&null_parts, total_rows)
+        };
 
         let data = match data_type {
             DataType::Null => FlatData::Null(total_rows),
             DataType::Bool => {
+                for p in parts {
+                    if !matches!(p.data(), FlatData::Bool(_)) {
+                        return Err(ColumnError::InvalidBatch {
+                            reason: "concat column data type mismatch",
+                        });
+                    }
+                }
+                let out_bytes = checked_add_bytes(
+                    total_rows.div_ceil(64) * 8,
+                    nulls_bytes,
+                    "bool concat byte size overflow",
+                )?;
+                reconcile_reservation(pool.as_deref_mut(), before, out_bytes)?;
                 let mut bm = Bitmap::new_zeroed(total_rows);
                 let mut pos = 0usize;
                 for p in parts {
@@ -2084,6 +2581,15 @@ impl FlatColumn {
                 FlatData::Bool(bm)
             }
             DataType::I64 => {
+                for p in parts {
+                    if !matches!(p.data(), FlatData::I64(_)) {
+                        return Err(ColumnError::InvalidBatch {
+                            reason: "concat column data type mismatch",
+                        });
+                    }
+                }
+                let out_bytes = fixed_take_bytes(total_rows, 8, nulls_bytes)?;
+                reconcile_reservation(pool.as_deref_mut(), before, out_bytes)?;
                 let mut out = Vec::with_capacity(total_rows);
                 for p in parts {
                     if let FlatData::I64(v) = p.data() {
@@ -2093,6 +2599,15 @@ impl FlatColumn {
                 FlatData::I64(out)
             }
             DataType::F64 => {
+                for p in parts {
+                    if !matches!(p.data(), FlatData::F64(_)) {
+                        return Err(ColumnError::InvalidBatch {
+                            reason: "concat column data type mismatch",
+                        });
+                    }
+                }
+                let out_bytes = fixed_take_bytes(total_rows, 8, nulls_bytes)?;
+                reconcile_reservation(pool.as_deref_mut(), before, out_bytes)?;
                 let mut out = Vec::with_capacity(total_rows);
                 for p in parts {
                     if let FlatData::F64(v) = p.data() {
@@ -2102,6 +2617,22 @@ impl FlatColumn {
                 FlatData::F64(out)
             }
             DataType::Decimal128 { precision, scale } => {
+                for p in parts {
+                    match p.data() {
+                        FlatData::Decimal128 {
+                            precision: pp,
+                            scale: ps,
+                            ..
+                        } if pp == precision && ps == scale => {}
+                        _ => {
+                            return Err(ColumnError::InvalidBatch {
+                                reason: "concat column data type mismatch",
+                            });
+                        }
+                    }
+                }
+                let out_bytes = fixed_take_bytes(total_rows, 16, nulls_bytes)?;
+                reconcile_reservation(pool.as_deref_mut(), before, out_bytes)?;
                 let mut out = Vec::with_capacity(total_rows);
                 for p in parts {
                     if let FlatData::Decimal128 { values, .. } = p.data() {
@@ -2115,6 +2646,18 @@ impl FlatColumn {
                 }
             }
             DataType::TimestampNs { utc } => {
+                for p in parts {
+                    match p.data() {
+                        FlatData::TimestampNs { utc: pu, .. } if pu == utc => {}
+                        _ => {
+                            return Err(ColumnError::InvalidBatch {
+                                reason: "concat column data type mismatch",
+                            });
+                        }
+                    }
+                }
+                let out_bytes = fixed_take_bytes(total_rows, 8, nulls_bytes)?;
+                reconcile_reservation(pool.as_deref_mut(), before, out_bytes)?;
                 let mut out = Vec::with_capacity(total_rows);
                 for p in parts {
                     if let FlatData::TimestampNs { values, .. } = p.data() {
@@ -2127,6 +2670,15 @@ impl FlatColumn {
                 }
             }
             DataType::Date => {
+                for p in parts {
+                    if !matches!(p.data(), FlatData::Date(_)) {
+                        return Err(ColumnError::InvalidBatch {
+                            reason: "concat column data type mismatch",
+                        });
+                    }
+                }
+                let out_bytes = fixed_take_bytes(total_rows, 4, nulls_bytes)?;
+                reconcile_reservation(pool.as_deref_mut(), before, out_bytes)?;
                 let mut out = Vec::with_capacity(total_rows);
                 for p in parts {
                     if let FlatData::Date(v) = p.data() {
@@ -2136,6 +2688,15 @@ impl FlatColumn {
                 FlatData::Date(out)
             }
             DataType::Interval => {
+                for p in parts {
+                    if !matches!(p.data(), FlatData::Interval(_)) {
+                        return Err(ColumnError::InvalidBatch {
+                            reason: "concat column data type mismatch",
+                        });
+                    }
+                }
+                let out_bytes = fixed_take_bytes(total_rows, size_of::<Interval>(), nulls_bytes)?;
+                reconcile_reservation(pool.as_deref_mut(), before, out_bytes)?;
                 let mut out = Vec::with_capacity(total_rows);
                 for p in parts {
                     if let FlatData::Interval(v) = p.data() {
@@ -2145,26 +2706,75 @@ impl FlatColumn {
                 FlatData::Interval(out)
             }
             DataType::Utf8 => {
-                let u_parts: Vec<&Utf8Data> = parts
-                    .iter()
-                    .filter_map(|p| match p.data() {
-                        FlatData::Utf8(u) => Some(u),
-                        _ => None,
-                    })
-                    .collect();
+                let mut u_parts = Vec::with_capacity(parts.len());
+                let mut total_bytes = 0usize;
+                for p in parts {
+                    let FlatData::Utf8(u) = p.data() else {
+                        return Err(ColumnError::InvalidBatch {
+                            reason: "concat column data type mismatch",
+                        });
+                    };
+                    total_bytes = checked_add_bytes(
+                        total_bytes,
+                        u.bytes.len(),
+                        "utf8 concat byte length overflow",
+                    )?;
+                    u_parts.push(u);
+                }
+                let _ = checked_u32(total_bytes, "utf8 concat byte length exceeds u32::MAX")?;
+                let offsets_bytes = checked_mul_bytes(
+                    checked_add_bytes(total_rows, 1, "utf8 concat offsets overflow")?,
+                    4,
+                    "utf8 concat offsets overflow",
+                )?;
+                let out_bytes = checked_add_bytes(
+                    checked_add_bytes(offsets_bytes, total_bytes, "utf8 concat bytes overflow")?,
+                    nulls_bytes,
+                    "utf8 concat bytes overflow",
+                )?;
+                reconcile_reservation(pool.as_deref_mut(), before, out_bytes)?;
                 FlatData::Utf8(Utf8Data::concat(&u_parts)?)
             }
             DataType::Binary => {
-                let b_parts: Vec<&BinaryData> = parts
-                    .iter()
-                    .filter_map(|p| match p.data() {
-                        FlatData::Binary(b) => Some(b),
-                        _ => None,
-                    })
-                    .collect();
+                let mut b_parts = Vec::with_capacity(parts.len());
+                let mut total_bytes = 0usize;
+                for p in parts {
+                    let FlatData::Binary(b) = p.data() else {
+                        return Err(ColumnError::InvalidBatch {
+                            reason: "concat column data type mismatch",
+                        });
+                    };
+                    total_bytes = checked_add_bytes(
+                        total_bytes,
+                        b.bytes.len(),
+                        "binary concat byte length overflow",
+                    )?;
+                    b_parts.push(b);
+                }
+                let _ = checked_u32(total_bytes, "binary concat byte length exceeds u32::MAX")?;
+                let offsets_bytes = checked_mul_bytes(
+                    checked_add_bytes(total_rows, 1, "binary concat offsets overflow")?,
+                    4,
+                    "binary concat offsets overflow",
+                )?;
+                let out_bytes = checked_add_bytes(
+                    checked_add_bytes(offsets_bytes, total_bytes, "binary concat bytes overflow")?,
+                    nulls_bytes,
+                    "binary concat bytes overflow",
+                )?;
+                reconcile_reservation(pool.as_deref_mut(), before, out_bytes)?;
                 FlatData::Binary(BinaryData::concat(&b_parts)?)
             }
             DataType::FixedBytes8 => {
+                for p in parts {
+                    if !matches!(p.data(), FlatData::FixedBytes8(_)) {
+                        return Err(ColumnError::InvalidBatch {
+                            reason: "concat column data type mismatch",
+                        });
+                    }
+                }
+                let out_bytes = fixed_take_bytes(total_rows, 8, nulls_bytes)?;
+                reconcile_reservation(pool.as_deref_mut(), before, out_bytes)?;
                 let mut out = Vec::with_capacity(total_rows);
                 for p in parts {
                     if let FlatData::FixedBytes8(v) = p.data() {
@@ -2174,6 +2784,15 @@ impl FlatColumn {
                 FlatData::FixedBytes8(out)
             }
             DataType::FixedBytes16 => {
+                for p in parts {
+                    if !matches!(p.data(), FlatData::FixedBytes16(_)) {
+                        return Err(ColumnError::InvalidBatch {
+                            reason: "concat column data type mismatch",
+                        });
+                    }
+                }
+                let out_bytes = fixed_take_bytes(total_rows, 16, nulls_bytes)?;
+                reconcile_reservation(pool.as_deref_mut(), before, out_bytes)?;
                 let mut out = Vec::with_capacity(total_rows);
                 for p in parts {
                     if let FlatData::FixedBytes16(v) = p.data() {
@@ -2182,26 +2801,40 @@ impl FlatColumn {
                 }
                 FlatData::FixedBytes16(out)
             }
-            DataType::List { .. } => {
-                let DataType::List(inner) = data_type else {
-                    return Err(ColumnError::InvalidBatch {
-                        reason: "list data type mismatch",
-                    });
-                };
+            DataType::List(inner) => {
                 let mut total_child = 0usize;
                 let mut child_cols = Vec::with_capacity(parts.len());
                 for p in parts {
-                    if let FlatData::List { values, .. } = p.data() {
-                        total_child =
-                            total_child
-                                .checked_add(values.len())
-                                .ok_or(ColumnError::Overflow {
-                                    reason: "list concat child length overflow",
-                                })?;
-                        child_cols.push(values.as_ref());
+                    let FlatData::List {
+                        item_type, values, ..
+                    } = p.data()
+                    else {
+                        return Err(ColumnError::InvalidBatch {
+                            reason: "concat column data type mismatch",
+                        });
+                    };
+                    if item_type != inner.as_ref() {
+                        return Err(ColumnError::InvalidBatch {
+                            reason: "concat column data type mismatch",
+                        });
                     }
+                    total_child = checked_add_bytes(
+                        total_child,
+                        values.len(),
+                        "list concat child length overflow",
+                    )?;
+                    child_cols.push(values.as_ref());
                 }
                 let _ = checked_u32(total_child, "list concat child length exceeds u32::MAX")?;
+                let offsets_bytes = checked_mul_bytes(
+                    checked_add_bytes(total_rows, 1, "list concat offsets overflow")?,
+                    4,
+                    "list concat offsets overflow",
+                )?;
+                let pre_bytes =
+                    checked_add_bytes(offsets_bytes, nulls_bytes, "list concat bytes overflow")?;
+                reconcile_reservation(pool.as_deref_mut(), before, pre_bytes)?;
+
                 let mut offsets = Vec::with_capacity(total_rows + 1);
                 offsets.push(0);
                 let mut running = 0u32;
@@ -2218,12 +2851,17 @@ impl FlatColumn {
                         running += values.len() as u32;
                     }
                 }
-                let mut flat_children = Vec::with_capacity(child_cols.len());
+
+                let mut flat_children: Vec<FlatPiece<'_>> = Vec::with_capacity(child_cols.len());
                 for col in &child_cols {
-                    flat_children.push(col.materialize(None)?);
+                    let piece = match col {
+                        Column::Flat(fc) => FlatPiece::Borrowed(fc),
+                        other => FlatPiece::Owned(other.materialize(pool.as_deref_mut())?),
+                    };
+                    flat_children.push(piece);
                 }
-                let child_refs: Vec<&Self> = flat_children.iter().collect();
-                let merged_child = Self::concat(inner, &child_refs, total_child)?;
+                let child_refs: Vec<&Self> = flat_children.iter().map(FlatPiece::as_flat).collect();
+                let merged_child = Self::concat_with_pool(inner, &child_refs, total_child, pool)?;
                 FlatData::List {
                     item_type: (**inner).clone(),
                     offsets,
@@ -2231,37 +2869,218 @@ impl FlatColumn {
                 }
             }
             DataType::MapUtf8 => {
-                let m_parts: Vec<&MapData> = parts
-                    .iter()
-                    .filter_map(|p| match p.data() {
-                        FlatData::MapUtf8(m) => Some(m.as_ref()),
-                        _ => None,
-                    })
-                    .collect();
+                let mut m_parts = Vec::with_capacity(parts.len());
+                let mut total_entries = 0usize;
+                let mut keys_bytes = 0usize;
+                let mut values_bytes = 0usize;
+                let mut has_val_nulls = false;
+                for p in parts {
+                    let FlatData::MapUtf8(m) = p.data() else {
+                        return Err(ColumnError::InvalidBatch {
+                            reason: "concat column data type mismatch",
+                        });
+                    };
+                    total_entries = checked_add_bytes(
+                        total_entries,
+                        m.entry_count(),
+                        "map concat entry count overflow",
+                    )?;
+                    keys_bytes = checked_add_bytes(
+                        keys_bytes,
+                        m.keys.bytes.len(),
+                        "utf8 concat byte length overflow",
+                    )?;
+                    values_bytes = checked_add_bytes(
+                        values_bytes,
+                        m.values.bytes.len(),
+                        "utf8 concat byte length overflow",
+                    )?;
+                    if m.value_nulls.as_ref().is_some_and(|bm| !bm.all_ones()) {
+                        has_val_nulls = true;
+                    }
+                    m_parts.push(m.as_ref());
+                }
+                let _ = checked_u32(total_entries, "map concat entry count exceeds u32::MAX")?;
+                let _ = checked_u32(keys_bytes, "utf8 concat byte length exceeds u32::MAX")?;
+                let _ = checked_u32(values_bytes, "utf8 concat byte length exceeds u32::MAX")?;
+                let row_offsets_bytes = checked_mul_bytes(
+                    checked_add_bytes(total_rows, 1, "map concat offsets overflow")?,
+                    4,
+                    "map concat offsets overflow",
+                )?;
+                let entry_offsets_bytes = checked_mul_bytes(
+                    checked_add_bytes(total_entries, 1, "map concat entry offsets overflow")?,
+                    4,
+                    "map concat entry offsets overflow",
+                )?;
+                let val_nulls_bytes = if has_val_nulls {
+                    total_entries.div_ceil(64) * 8
+                } else {
+                    0
+                };
+                let mut out_bytes =
+                    checked_add_bytes(row_offsets_bytes, nulls_bytes, "map concat bytes overflow")?;
+                out_bytes =
+                    checked_add_bytes(out_bytes, entry_offsets_bytes, "map concat bytes overflow")?;
+                out_bytes = checked_add_bytes(out_bytes, keys_bytes, "map concat bytes overflow")?;
+                out_bytes =
+                    checked_add_bytes(out_bytes, entry_offsets_bytes, "map concat bytes overflow")?;
+                out_bytes =
+                    checked_add_bytes(out_bytes, values_bytes, "map concat bytes overflow")?;
+                out_bytes =
+                    checked_add_bytes(out_bytes, val_nulls_bytes, "map concat bytes overflow")?;
+                reconcile_reservation(pool.as_deref_mut(), before, out_bytes)?;
                 FlatData::MapUtf8(Box::new(MapData::concat(&m_parts)?))
             }
             DataType::Events => {
-                let e_parts: Vec<&EventsData> = parts
-                    .iter()
-                    .filter_map(|p| match p.data() {
-                        FlatData::Events(e) => Some(e.as_ref()),
-                        _ => None,
-                    })
-                    .collect();
+                let mut e_parts = Vec::with_capacity(parts.len());
+                let mut total_events = 0usize;
+                let mut names_bytes = 0usize;
+                let mut attrs_bytes = 0usize;
+                let mut has_attr_nulls = false;
+                for p in parts {
+                    let FlatData::Events(e) = p.data() else {
+                        return Err(ColumnError::InvalidBatch {
+                            reason: "concat column data type mismatch",
+                        });
+                    };
+                    total_events = checked_add_bytes(
+                        total_events,
+                        e.event_count(),
+                        "events concat count overflow",
+                    )?;
+                    names_bytes = checked_add_bytes(
+                        names_bytes,
+                        e.names.bytes.len(),
+                        "utf8 concat byte length overflow",
+                    )?;
+                    attrs_bytes = checked_add_bytes(
+                        attrs_bytes,
+                        e.attributes.bytes.len(),
+                        "utf8 concat byte length overflow",
+                    )?;
+                    if e.attribute_nulls.as_ref().is_some_and(|bm| !bm.all_ones()) {
+                        has_attr_nulls = true;
+                    }
+                    e_parts.push(e.as_ref());
+                }
+                let _ = checked_u32(total_events, "events concat count exceeds u32::MAX")?;
+                let _ = checked_u32(names_bytes, "utf8 concat byte length exceeds u32::MAX")?;
+                let _ = checked_u32(attrs_bytes, "utf8 concat byte length exceeds u32::MAX")?;
+                let row_offsets_bytes = checked_mul_bytes(
+                    checked_add_bytes(total_rows, 1, "events concat offsets overflow")?,
+                    4,
+                    "events concat offsets overflow",
+                )?;
+                let times_bytes =
+                    checked_mul_bytes(total_events, 8, "events concat times overflow")?;
+                let item_offsets_bytes = checked_mul_bytes(
+                    checked_add_bytes(total_events, 1, "events concat item offsets overflow")?,
+                    4,
+                    "events concat item offsets overflow",
+                )?;
+                let attr_nulls_bytes = if has_attr_nulls {
+                    total_events.div_ceil(64) * 8
+                } else {
+                    0
+                };
+                let mut out_bytes = checked_add_bytes(
+                    row_offsets_bytes,
+                    nulls_bytes,
+                    "events concat bytes overflow",
+                )?;
+                out_bytes =
+                    checked_add_bytes(out_bytes, times_bytes, "events concat bytes overflow")?;
+                out_bytes = checked_add_bytes(
+                    out_bytes,
+                    item_offsets_bytes,
+                    "events concat bytes overflow",
+                )?;
+                out_bytes =
+                    checked_add_bytes(out_bytes, names_bytes, "events concat bytes overflow")?;
+                out_bytes = checked_add_bytes(
+                    out_bytes,
+                    item_offsets_bytes,
+                    "events concat bytes overflow",
+                )?;
+                out_bytes =
+                    checked_add_bytes(out_bytes, attrs_bytes, "events concat bytes overflow")?;
+                out_bytes =
+                    checked_add_bytes(out_bytes, attr_nulls_bytes, "events concat bytes overflow")?;
+                reconcile_reservation(pool.as_deref_mut(), before, out_bytes)?;
                 FlatData::Events(Box::new(EventsData::concat(&e_parts)?))
             }
             DataType::Links => {
-                let l_parts: Vec<&LinksData> = parts
-                    .iter()
-                    .filter_map(|p| match p.data() {
-                        FlatData::Links(l) => Some(l.as_ref()),
-                        _ => None,
-                    })
-                    .collect();
+                let mut l_parts = Vec::with_capacity(parts.len());
+                let mut total_links = 0usize;
+                let mut attrs_bytes = 0usize;
+                let mut has_attr_nulls = false;
+                for p in parts {
+                    let FlatData::Links(l) = p.data() else {
+                        return Err(ColumnError::InvalidBatch {
+                            reason: "concat column data type mismatch",
+                        });
+                    };
+                    total_links = checked_add_bytes(
+                        total_links,
+                        l.link_count(),
+                        "links concat count overflow",
+                    )?;
+                    attrs_bytes = checked_add_bytes(
+                        attrs_bytes,
+                        l.attributes.bytes.len(),
+                        "utf8 concat byte length overflow",
+                    )?;
+                    if l.attribute_nulls.as_ref().is_some_and(|bm| !bm.all_ones()) {
+                        has_attr_nulls = true;
+                    }
+                    l_parts.push(l.as_ref());
+                }
+                let _ = checked_u32(total_links, "links concat count exceeds u32::MAX")?;
+                let _ = checked_u32(attrs_bytes, "utf8 concat byte length exceeds u32::MAX")?;
+                let row_offsets_bytes = checked_mul_bytes(
+                    checked_add_bytes(total_rows, 1, "links concat offsets overflow")?,
+                    4,
+                    "links concat offsets overflow",
+                )?;
+                let trace_ids_bytes =
+                    checked_mul_bytes(total_links, 16, "links concat trace_ids overflow")?;
+                let span_ids_bytes =
+                    checked_mul_bytes(total_links, 8, "links concat span_ids overflow")?;
+                let item_offsets_bytes = checked_mul_bytes(
+                    checked_add_bytes(total_links, 1, "links concat item offsets overflow")?,
+                    4,
+                    "links concat item offsets overflow",
+                )?;
+                let attr_nulls_bytes = if has_attr_nulls {
+                    total_links.div_ceil(64) * 8
+                } else {
+                    0
+                };
+                let mut out_bytes = checked_add_bytes(
+                    row_offsets_bytes,
+                    nulls_bytes,
+                    "links concat bytes overflow",
+                )?;
+                out_bytes =
+                    checked_add_bytes(out_bytes, trace_ids_bytes, "links concat bytes overflow")?;
+                out_bytes =
+                    checked_add_bytes(out_bytes, span_ids_bytes, "links concat bytes overflow")?;
+                out_bytes = checked_add_bytes(
+                    out_bytes,
+                    item_offsets_bytes,
+                    "links concat bytes overflow",
+                )?;
+                out_bytes =
+                    checked_add_bytes(out_bytes, attrs_bytes, "links concat bytes overflow")?;
+                out_bytes =
+                    checked_add_bytes(out_bytes, attr_nulls_bytes, "links concat bytes overflow")?;
+                reconcile_reservation(pool, before, out_bytes)?;
                 FlatData::Links(Box::new(LinksData::concat(&l_parts)?))
             }
         };
 
+        let nulls = build_nulls();
         Ok(Self { data, nulls })
     }
 }
@@ -2587,21 +3406,10 @@ impl Column {
 
     pub(crate) fn validate_with_depth(&self, max_depth: usize) -> Result<(), ColumnError> {
         match self {
-            Self::Flat(f) => {
-                f.data_type().validate(max_depth)?;
-                if let FlatData::List { values, .. } = f.data() {
-                    if max_depth == 0 {
-                        return Err(ColumnError::InvalidBatch {
-                            reason: "exceeded maximum nesting depth",
-                        });
-                    }
-                    values.validate_with_depth(max_depth - 1)?;
-                }
-                Ok(())
-            }
+            Self::Flat(f) => f.validate_with_depth(max_depth),
             Self::Const { value, .. } => value.validate(max_depth),
-            Self::Dict(d) => Self::Flat((*d.values).clone()).validate_with_depth(max_depth),
-            Self::Rle(r) => Self::Flat((*r.values).clone()).validate_with_depth(max_depth),
+            Self::Dict(d) => d.values.validate_with_depth(max_depth),
+            Self::Rle(r) => r.values.validate_with_depth(max_depth),
         }
     }
 
@@ -2676,15 +3484,23 @@ impl Column {
         let before = pool.as_ref().map_or(0, |p| p.size());
         match self {
             Self::Flat(f) => {
-                let out = f.clone();
-                reconcile_reservation(pool.as_deref_mut(), before, out.memory_bytes())?;
-                Ok(out)
+                reconcile_reservation(pool.as_deref_mut(), before, f.memory_bytes())?;
+                Ok(f.clone())
             }
             Self::Const { value, len } => {
                 if let Err(err) = value.validate(MAX_NESTING_DEPTH) {
                     rollback_reservation(pool, before);
                     return Err(err);
                 }
+                let scratch_bytes =
+                    match checked_mul_bytes(*len, 4, "const materialize scratch overflow") {
+                        Ok(b) => b,
+                        Err(err) => {
+                            rollback_reservation(pool, before);
+                            return Err(err);
+                        }
+                    };
+                reconcile_reservation(pool.as_deref_mut(), before, scratch_bytes)?;
                 let one = match flat_from_scalar_one(value) {
                     Ok(c) => c,
                     Err(err) => {
@@ -2693,10 +3509,28 @@ impl Column {
                     }
                 };
                 let indices = vec![0u32; *len];
-                one.take(&indices, pool)
+                let out = match one.take(&indices, pool.as_deref_mut()) {
+                    Ok(c) => c,
+                    Err(err) => {
+                        rollback_reservation(pool, before);
+                        return Err(err);
+                    }
+                };
+                drop(indices);
+                reconcile_reservation(pool, before, out.memory_bytes())?;
+                Ok(out)
             }
             Self::Dict(d) => {
                 if let Some(code_nulls) = d.nulls() {
+                    let scratch_bytes =
+                        match checked_mul_bytes(d.len(), 4, "dict materialize scratch overflow") {
+                            Ok(b) => b,
+                            Err(err) => {
+                                rollback_reservation(pool, before);
+                                return Err(err);
+                            }
+                        };
+                    reconcile_reservation(pool.as_deref_mut(), before, scratch_bytes)?;
                     let mut indices = Vec::with_capacity(d.len());
                     for (i, &code) in d.codes().iter().enumerate() {
                         if code_nulls.get(i) {
@@ -2705,12 +3539,34 @@ impl Column {
                             indices.push(0);
                         }
                     }
-                    d.values().take_with_mask(&indices, Some(code_nulls), pool)
+                    let out = match d.values().take_with_mask(
+                        &indices,
+                        Some(code_nulls),
+                        pool.as_deref_mut(),
+                    ) {
+                        Ok(c) => c,
+                        Err(err) => {
+                            rollback_reservation(pool, before);
+                            return Err(err);
+                        }
+                    };
+                    drop(indices);
+                    reconcile_reservation(pool, before, out.memory_bytes())?;
+                    Ok(out)
                 } else {
                     d.values().take(d.codes(), pool)
                 }
             }
             Self::Rle(r) => {
+                let scratch_bytes =
+                    match checked_mul_bytes(r.len(), 4, "rle materialize scratch overflow") {
+                        Ok(b) => b,
+                        Err(err) => {
+                            rollback_reservation(pool, before);
+                            return Err(err);
+                        }
+                    };
+                reconcile_reservation(pool.as_deref_mut(), before, scratch_bytes)?;
                 let mut indices = Vec::with_capacity(r.len());
                 let mut prev = 0u32;
                 for (run_idx, &end) in r.run_ends().iter().enumerate() {
@@ -2718,7 +3574,16 @@ impl Column {
                     indices.resize(indices.len() + count, run_idx as u32);
                     prev = end;
                 }
-                r.values().take(&indices, pool)
+                let out = match r.values().take(&indices, pool.as_deref_mut()) {
+                    Ok(c) => c,
+                    Err(err) => {
+                        rollback_reservation(pool, before);
+                        return Err(err);
+                    }
+                };
+                drop(indices);
+                reconcile_reservation(pool, before, out.memory_bytes())?;
+                Ok(out)
             }
         }
     }
@@ -2728,7 +3593,7 @@ impl Column {
     pub fn take(
         &self,
         indices: &[u32],
-        pool: Option<&mut Reservation>,
+        mut pool: Option<&mut Reservation>,
     ) -> Result<FlatColumn, ColumnError> {
         let before = pool.as_ref().map_or(0, |p| p.size());
         match self {
@@ -2746,6 +3611,15 @@ impl Column {
                         });
                     }
                 }
+                let scratch_bytes =
+                    match checked_mul_bytes(indices.len(), 4, "const take scratch overflow") {
+                        Ok(b) => b,
+                        Err(err) => {
+                            rollback_reservation(pool, before);
+                            return Err(err);
+                        }
+                    };
+                reconcile_reservation(pool.as_deref_mut(), before, scratch_bytes)?;
                 let one = match flat_from_scalar_one(value) {
                     Ok(c) => c,
                     Err(err) => {
@@ -2754,20 +3628,54 @@ impl Column {
                     }
                 };
                 let zero_indices = vec![0u32; indices.len()];
-                one.take(&zero_indices, pool)
+                let out = match one.take(&zero_indices, pool.as_deref_mut()) {
+                    Ok(c) => c,
+                    Err(err) => {
+                        rollback_reservation(pool, before);
+                        return Err(err);
+                    }
+                };
+                drop(zero_indices);
+                reconcile_reservation(pool, before, out.memory_bytes())?;
+                Ok(out)
             }
             Self::Dict(d) => {
+                for &idx in indices {
+                    if (idx as usize) >= d.len() {
+                        rollback_reservation(pool, before);
+                        return Err(ColumnError::InvalidBatch {
+                            reason: "take index out of bounds",
+                        });
+                    }
+                }
+                let idx_bytes =
+                    match checked_mul_bytes(indices.len(), 4, "dict take scratch overflow") {
+                        Ok(b) => b,
+                        Err(err) => {
+                            rollback_reservation(pool, before);
+                            return Err(err);
+                        }
+                    };
+                let mask_bytes = if d.nulls().is_some() {
+                    indices.len().div_ceil(64) * 8
+                } else {
+                    0
+                };
+                let scratch_bytes =
+                    match checked_add_bytes(idx_bytes, mask_bytes, "dict take scratch overflow") {
+                        Ok(b) => b,
+                        Err(err) => {
+                            rollback_reservation(pool, before);
+                            return Err(err);
+                        }
+                    };
+                reconcile_reservation(pool.as_deref_mut(), before, scratch_bytes)?;
+
                 let mut dict_indices = Vec::with_capacity(indices.len());
-                if let Some(code_nulls) = d.nulls() {
+                let out = if let Some(code_nulls) = d.nulls() {
                     let mut mask = Bitmap::new_ones(indices.len());
                     for (out_pos, &idx) in indices.iter().enumerate() {
                         let row = idx as usize;
-                        if row >= d.len() {
-                            rollback_reservation(pool, before);
-                            return Err(ColumnError::InvalidBatch {
-                                reason: "take index out of bounds",
-                            });
-                        }
                         if code_nulls.get(row) {
                             dict_indices.push(d.codes()[row]);
                         } else {
@@ -2775,35 +3683,63 @@ impl Column {
                             dict_indices.push(0);
                         }
                     }
-                    d.values().take_with_mask(&dict_indices, Some(&mask), pool)
+                    let res =
+                        d.values()
+                            .take_with_mask(&dict_indices, Some(&mask), pool.as_deref_mut());
+                    drop(mask);
+                    res
                 } else {
                     for &idx in indices {
-                        let row = idx as usize;
-                        if row >= d.len() {
-                            rollback_reservation(pool, before);
-                            return Err(ColumnError::InvalidBatch {
-                                reason: "take index out of bounds",
-                            });
-                        }
-                        dict_indices.push(d.codes()[row]);
+                        dict_indices.push(d.codes()[idx as usize]);
                     }
-                    d.values().take(&dict_indices, pool)
-                }
+                    d.values().take(&dict_indices, pool.as_deref_mut())
+                };
+                drop(dict_indices);
+                let out = match out {
+                    Ok(c) => c,
+                    Err(err) => {
+                        rollback_reservation(pool, before);
+                        return Err(err);
+                    }
+                };
+                reconcile_reservation(pool, before, out.memory_bytes())?;
+                Ok(out)
             }
             Self::Rle(r) => {
-                let mut run_indices = Vec::with_capacity(indices.len());
                 for &idx in indices {
-                    let row = idx as usize;
-                    if row >= r.len() {
+                    if (idx as usize) >= r.len() {
                         rollback_reservation(pool, before);
                         return Err(ColumnError::InvalidBatch {
                             reason: "take index out of bounds",
                         });
                     }
+                }
+                let scratch_bytes =
+                    match checked_mul_bytes(indices.len(), 4, "rle take scratch overflow") {
+                        Ok(b) => b,
+                        Err(err) => {
+                            rollback_reservation(pool, before);
+                            return Err(err);
+                        }
+                    };
+                reconcile_reservation(pool.as_deref_mut(), before, scratch_bytes)?;
+
+                let mut run_indices = Vec::with_capacity(indices.len());
+                for &idx in indices {
+                    let row = idx as usize;
                     let run_idx = r.run_ends().partition_point(|&end| (end as usize) <= row);
                     run_indices.push(run_idx as u32);
                 }
-                r.values().take(&run_indices, pool)
+                let out = match r.values().take(&run_indices, pool.as_deref_mut()) {
+                    Ok(c) => c,
+                    Err(err) => {
+                        rollback_reservation(pool, before);
+                        return Err(err);
+                    }
+                };
+                drop(run_indices);
+                reconcile_reservation(pool, before, out.memory_bytes())?;
+                Ok(out)
             }
         }
     }
@@ -3547,22 +4483,6 @@ mod tests {
             Field::new("b", DataType::Utf8, true),
         ])
         .unwrap();
-        let batch = Batch::try_new(
-            Arc::clone(&schema),
-            vec![
-                Column::Flat(FlatColumn::try_new(FlatData::I64(vec![1, 2, 3]), None).unwrap()),
-                u_col
-                    .slice(0, 2)
-                    .unwrap()
-                    .materialize(None)
-                    .map(Column::Flat)
-                    .unwrap(),
-            ],
-            2,
-            Selection::Mask(Bitmap::from_bools(&[true, false])),
-        );
-        // Use a valid 3-row batch for compact
-        drop(batch);
         let batch3 = Batch::try_new(
             Arc::clone(&schema),
             vec![
@@ -3616,5 +4536,127 @@ mod tests {
         .unwrap_err();
         assert!(matches!(err4, ColumnError::MemoryLimit { .. }));
         assert_eq!(tc_res.size(), 40);
+    }
+
+    #[test]
+    fn const_and_rle_huge_len_reject_before_scratch_allocation() {
+        let tiny_scope = GlobalPool::standalone(1024);
+        let mut tiny_res = tiny_scope.register("tiny", true);
+
+        let huge_const = Column::Const {
+            value: ScalarValue::I64(1),
+            len: 10_000_000,
+        };
+        let err = huge_const.materialize(Some(&mut tiny_res)).unwrap_err();
+        assert!(matches!(err, ColumnError::MemoryLimit { .. }));
+        assert_eq!(tiny_res.size(), 0);
+
+        let huge_rle = Column::Rle(
+            RleColumn::try_new(
+                FlatColumn::try_new(FlatData::I64(vec![1]), None).unwrap(),
+                vec![10_000_000],
+            )
+            .unwrap(),
+        );
+        let err_rle = huge_rle.materialize(Some(&mut tiny_res)).unwrap_err();
+        assert!(matches!(err_rle, ColumnError::MemoryLimit { .. }));
+        assert_eq!(tiny_res.size(), 0);
+
+        // Const::take also rejects before allocating scratch indices when pool cannot hold scratch + output
+        let tiny_take_scope = GlobalPool::standalone(16);
+        let mut tiny_take_res = tiny_take_scope.register("tiny_take", true);
+        let idx = [0u32, 1, 2, 3, 4];
+        let err_take = huge_const.take(&idx, Some(&mut tiny_take_res)).unwrap_err();
+        assert!(matches!(err_take, ColumnError::MemoryLimit { .. }));
+        assert_eq!(tiny_take_res.size(), 0);
+    }
+
+    #[test]
+    fn variable_width_take_and_concat_respect_tight_reservation_and_reject_mismatched_parts() {
+        let map_col = Column::Flat(
+            FlatColumn::try_new(
+                FlatData::MapUtf8(Box::new(
+                    MapData::try_new(
+                        vec![0, 2],
+                        Utf8Data::try_from_slices(["key1", "key2"]).unwrap(),
+                        Utf8Data::try_from_slices(["val1", ""]).unwrap(),
+                        Some(Bitmap::from_bools(&[true, false])),
+                    )
+                    .unwrap(),
+                )),
+                None,
+            )
+            .unwrap(),
+        );
+        let ev_col = Column::Flat(
+            FlatColumn::try_new(
+                FlatData::Events(Box::new(
+                    EventsData::try_new(
+                        vec![0, 1],
+                        vec![100],
+                        Utf8Data::try_from_slices(["evt"]).unwrap(),
+                        Utf8Data::try_from_slices(["{\"a\":1}"]).unwrap(),
+                        None,
+                    )
+                    .unwrap(),
+                )),
+                None,
+            )
+            .unwrap(),
+        );
+        let lk_col = Column::Flat(
+            FlatColumn::try_new(
+                FlatData::Links(Box::new(
+                    LinksData::try_new(
+                        vec![0, 1],
+                        vec![[1u8; 16]],
+                        vec![[2u8; 8]],
+                        Utf8Data::try_from_slices(["attr"]).unwrap(),
+                        None,
+                    )
+                    .unwrap(),
+                )),
+                None,
+            )
+            .unwrap(),
+        );
+        let list_col = Column::Flat(
+            FlatColumn::try_new(
+                FlatData::List {
+                    item_type: DataType::Utf8,
+                    offsets: vec![0, 2],
+                    values: Box::new(Column::Flat(
+                        FlatColumn::try_new(
+                            FlatData::Utf8(Utf8Data::try_from_slices(["hello", "world"]).unwrap()),
+                            None,
+                        )
+                        .unwrap(),
+                    )),
+                },
+                None,
+            )
+            .unwrap(),
+        );
+
+        let ample_scope = GlobalPool::standalone(4096);
+        let mut ample_res = ample_scope.register("ample", true);
+        for col in [&map_col, &ev_col, &lk_col, &list_col] {
+            let taken = col.take(&[0, 0], Some(&mut ample_res)).unwrap();
+            assert_eq!(ample_res.size(), taken.memory_bytes());
+            ample_res.free();
+
+            let tiny_scope = GlobalPool::standalone(taken.memory_bytes() - 1);
+            let mut tiny_res = tiny_scope.register("tiny", true);
+            let err = col.take(&[0, 0], Some(&mut tiny_res)).unwrap_err();
+            assert!(matches!(err, ColumnError::MemoryLimit { .. }));
+            assert_eq!(tiny_res.size(), 0);
+        }
+
+        // Mismatched FlatData variants in FlatColumn::concat return InvalidBatch
+        let i64_flat = FlatColumn::try_new(FlatData::I64(vec![1]), None).unwrap();
+        let f64_flat = FlatColumn::try_new(FlatData::F64(vec![1.0]), None).unwrap();
+        let err_mismatch =
+            FlatColumn::concat(&DataType::I64, &[&i64_flat, &f64_flat], 2).unwrap_err();
+        assert!(matches!(err_mismatch, ColumnError::InvalidBatch { .. }));
     }
 }
