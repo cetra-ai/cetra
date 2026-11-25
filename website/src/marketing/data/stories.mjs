@@ -35,9 +35,9 @@ export const PICTURES = [
     base: "marketing-trace-view",
     label: {
       support: "Traces · Support bot",
-      coding: "Traces · Coding agent",
-      voice: "Traces · Voice agent",
-      extraction: "Traces · Document pipeline",
+      coding: "Traces · Code agent",
+      voice: "Traces · Voice desk",
+      extraction: "Traces · Invoice pipeline",
     },
     stories: {
       support: {
