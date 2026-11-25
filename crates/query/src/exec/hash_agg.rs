@@ -24,7 +24,7 @@ use crate::ir::{EvalContext, Expr};
 use super::pipeline::{ControlFlow, ExecContext, PushSink, run_pipeline};
 use super::sort_key::SortKey;
 use super::source::{ScanSource, ScanSpec};
-use super::spill::{SpillFile, SpillManager, SpillWriter};
+use super::spill::{SpillFile, SpillWriter};
 
 const NUM_SPILL_PARTITIONS: usize = 32;
 const MAX_REPARTITION_DEPTH: usize = 4;
@@ -798,8 +798,8 @@ fn hash_atoms(atoms: &[KeyAtom], salt: u64) -> u64 {
                 KeyAtom::Interval(iv) => iv.hash(&mut h),
                 KeyAtom::Utf8(s) => s.hash(&mut h),
                 KeyAtom::Binary(b) => b.hash(&mut h),
-                KeyAtom::FixedBytes8(b) => b.hash(&mut h),
-                KeyAtom::FixedBytes16(b) => b.hash(&mut h),
+                KeyAtom::FixedBytes8(b) => b.as_slice().hash(&mut h),
+                KeyAtom::FixedBytes16(b) => b.as_slice().hash(&mut h),
                 KeyAtom::Scalar(sv) => hash_scalar_value(sv, &mut h),
             }
         }
@@ -2227,7 +2227,7 @@ fn exact_percentile_sorted(sorted: &[f64], quantile: f64) -> Result<f64, QueryEr
     let lo = pos.floor() as usize;
     let hi = pos.ceil() as usize;
     let frac = pos - lo as f64;
-    if lo == hi || frac == 0.0 {
+    if lo == hi || frac == 0.0 || sorted[lo] == sorted[hi] {
         Ok(sorted[lo])
     } else {
         Ok(sorted[lo] + frac * (sorted[hi] - sorted[lo]))
@@ -2374,6 +2374,9 @@ impl GroupTable {
     fn insert_group(&mut self, hash: u64, key: Vec<KeyAtom>) -> usize {
         if self.slots.is_empty() {
             self.slots = vec![EMPTY_SLOT; 16];
+            self.spillable_bytes = self
+                .spillable_bytes
+                .saturating_add(self.slots.capacity() * size_of::<u32>());
         } else if (self.keys.len() + 1) * 10 >= self.slots.len() * 7 {
             self.rehash(self.slots.len() * 2);
         }
@@ -2382,10 +2385,24 @@ impl GroupTable {
         let key_heap: usize = key.capacity() * size_of::<KeyAtom>()
             + key.iter().map(KeyAtom::heap_bytes).sum::<usize>();
         let states: Vec<AccState> = self.acc_kinds.iter().map(AccKind::make_state).collect();
+        let states_heap: usize = states.capacity() * size_of::<AccState>()
+            + states
+                .iter()
+                .map(AccState::spillable_heap_bytes)
+                .sum::<usize>();
+        let states_unsp: usize = states.iter().map(AccState::unspillable_heap_bytes).sum();
+
+        let old_outer = self.hashes.capacity() * size_of::<u64>()
+            + self.keys.capacity() * size_of::<Vec<KeyAtom>>()
+            + self.states.capacity() * size_of::<Vec<AccState>>();
 
         self.hashes.push(hash);
         self.keys.push(key);
         self.states.push(states);
+
+        let new_outer = self.hashes.capacity() * size_of::<u64>()
+            + self.keys.capacity() * size_of::<Vec<KeyAtom>>()
+            + self.states.capacity() * size_of::<Vec<AccState>>();
 
         let mask = self.slots.len() - 1;
         let mut idx = (hash as usize) & mask;
@@ -2394,14 +2411,17 @@ impl GroupTable {
         }
         self.slots[idx] = gi as u32;
 
-        self.spillable_bytes = self.recompute_spillable_bytes_plus(key_heap);
+        self.spillable_bytes = self
+            .spillable_bytes
+            .saturating_sub(old_outer)
+            .saturating_add(new_outer)
+            .saturating_add(key_heap)
+            .saturating_add(states_heap);
+        self.unspillable_bytes = self.unspillable_bytes.saturating_add(states_unsp);
         gi
     }
 
-    fn recompute_spillable_bytes_plus(&self, _hint: usize) -> usize {
-        self.compute_spillable_bytes()
-    }
-
+    #[cfg(test)]
     fn compute_spillable_bytes(&self) -> usize {
         let mut total = self.slots.capacity() * size_of::<u32>()
             + self.hashes.capacity() * size_of::<u64>()
@@ -2423,7 +2443,13 @@ impl GroupTable {
     }
 
     fn rehash(&mut self, new_cap: usize) {
+        let old_slots_bytes = self.slots.capacity() * size_of::<u32>();
         self.slots = vec![EMPTY_SLOT; new_cap];
+        let new_slots_bytes = self.slots.capacity() * size_of::<u32>();
+        self.spillable_bytes = self
+            .spillable_bytes
+            .saturating_sub(old_slots_bytes)
+            .saturating_add(new_slots_bytes);
         let mask = new_cap - 1;
         for (gi, &h) in self.hashes.iter().enumerate() {
             let mut idx = (h as usize) & mask;
@@ -2432,17 +2458,6 @@ impl GroupTable {
             }
             self.slots[idx] = gi as u32;
         }
-    }
-
-    fn refresh_bytes(&mut self) {
-        self.spillable_bytes = self.compute_spillable_bytes();
-        let mut unsp = 0usize;
-        for row_states in &self.states {
-            for st in row_states {
-                unsp += st.unspillable_heap_bytes();
-            }
-        }
-        self.unspillable_bytes = unsp;
     }
 
     fn clear_and_free(&mut self, res: &mut Reservation, unspillable_res: &mut Reservation) {
@@ -2869,10 +2884,14 @@ impl HashAgg {
             if keys.is_empty() {
                 return Ok(Vec::new());
             }
+            let layout = AggLayout {
+                group_types: &self.group_types,
+                acc_kinds: &self.acc_kinds,
+                partial_schema: &self.partial_schema,
+                output_schema: &self.output_schema,
+            };
             return emit_chunked_output_batches(
-                &self.output_schema,
-                &self.group_types,
-                &self.acc_kinds,
+                &layout,
                 &keys,
                 &states,
                 self.ctx.batch_size.max(1),
@@ -2914,19 +2933,32 @@ impl HashAgg {
         let mut local_table = GroupTable::new(self.acc_kinds.clone());
         let mut local_res = self.ctx.pool.register("hash_agg_merge", true);
         let mut local_unsp = self.ctx.pool.register("hash_agg_merge_unsp", false);
+        let frame_cap = target_spill_frame_bytes(&self.ctx);
+        let mut max_batch_bytes = frame_cap;
+        let layout = AggLayout {
+            group_types: &self.group_types,
+            acc_kinds: &self.acc_kinds,
+            partial_schema: &self.partial_schema,
+            output_schema: &self.output_schema,
+        };
 
         while let Some(batch) = reader.next_batch(Some(&mut reader_res))? {
             if self.ctx.eval.cancel.is_cancelled() {
                 return Err(QueryError::Cancelled);
             }
+            max_batch_bytes = max_batch_bytes.max(batch.memory_bytes());
+            let headroom = max_batch_bytes.saturating_sub(reader_res.size());
+            let mut group_state = GroupTableState {
+                table: &mut local_table,
+                res: &mut local_res,
+                unspillable_res: &mut local_unsp,
+            };
             let fold_res = fold_partial_batch_into_table(
                 &batch,
-                self.group_types.len(),
-                &self.acc_kinds,
-                &mut local_table,
-                &mut local_res,
-                &mut local_unsp,
+                &layout,
+                &mut group_state,
                 depth as u64,
+                headroom,
                 &self.ctx.eval,
             );
             match fold_res {
@@ -2943,20 +2975,20 @@ impl HashAgg {
                     let salt = next_depth as u64;
                     let mut sub_writers: Vec<Option<SpillWriter>> =
                         (0..NUM_SPILL_PARTITIONS).map(|_| None).collect();
-                    let frame_cap = target_spill_frame_bytes(&self.ctx);
 
                     if local_table.num_groups() > 0 {
+                        let mut group_state = GroupTableState {
+                            table: &mut local_table,
+                            res: &mut local_res,
+                            unspillable_res: &mut local_unsp,
+                        };
                         drain_group_table_to_writers(
-                            &mut local_table,
-                            &self.partial_schema,
-                            &self.group_types,
-                            &self.acc_kinds,
+                            &layout,
+                            &mut group_state,
                             salt,
                             frame_cap,
                             &self.ctx,
                             &mut sub_writers,
-                            &mut local_res,
-                            &mut local_unsp,
                         )?;
                     }
                     // Route only the unfolded tail of `batch` (starting at `failed_row`),
@@ -2966,9 +2998,9 @@ impl HashAgg {
                         failed_row,
                         self.group_types.len(),
                         salt,
-                        &self.ctx.spill,
+                        frame_cap,
+                        &self.ctx,
                         &mut sub_writers,
-                        &self.ctx.eval,
                     )?;
                     drop(batch);
                     reader_res.free();
@@ -2979,9 +3011,9 @@ impl HashAgg {
                             0,
                             self.group_types.len(),
                             salt,
-                            &self.ctx.spill,
+                            frame_cap,
+                            &self.ctx,
                             &mut sub_writers,
-                            &self.ctx.eval,
                         )?;
                         drop(rem_batch);
                         reader_res.free();
@@ -3018,9 +3050,7 @@ impl HashAgg {
         local_table.clear_and_free(&mut local_res, &mut local_unsp);
         if !keys.is_empty() {
             let batches = emit_chunked_output_batches(
-                &self.output_schema,
-                &self.group_types,
-                &self.acc_kinds,
+                &layout,
                 &keys,
                 &states,
                 self.ctx.batch_size.max(1),
@@ -3041,17 +3071,24 @@ impl HashAgg {
     fn drain_table_to_writers(&mut self, salt: u64) -> Result<(), QueryError> {
         self.ensure_partition_writers();
         let frame_cap = target_spill_frame_bytes(&self.ctx);
+        let layout = AggLayout {
+            group_types: &self.group_types,
+            acc_kinds: &self.acc_kinds,
+            partial_schema: &self.partial_schema,
+            output_schema: &self.output_schema,
+        };
+        let mut group_state = GroupTableState {
+            table: &mut self.table,
+            res: &mut self.res,
+            unspillable_res: &mut self.unspillable_res,
+        };
         drain_group_table_to_writers(
-            &mut self.table,
-            &self.partial_schema,
-            &self.group_types,
-            &self.acc_kinds,
+            &layout,
+            &mut group_state,
             salt,
             frame_cap,
             &self.ctx,
             &mut self.partition_writers,
-            &mut self.res,
-            &mut self.unspillable_res,
         )?;
         self.spilled = true;
         Ok(())
@@ -3089,13 +3126,22 @@ impl HashAgg {
 
         let mut start_row = 0usize;
         if !self.spilled {
+            let layout = AggLayout {
+                group_types: &self.group_types,
+                acc_kinds: &self.acc_kinds,
+                partial_schema: &self.partial_schema,
+                output_schema: &self.output_schema,
+            };
+            let mut group_state = GroupTableState {
+                table: &mut self.table,
+                res: &mut self.res,
+                unspillable_res: &mut self.unspillable_res,
+            };
             match fold_partial_batch_into_table(
                 batch,
-                self.group_types.len(),
-                &self.acc_kinds,
-                &mut self.table,
-                &mut self.res,
-                &mut self.unspillable_res,
+                &layout,
+                &mut group_state,
+                0,
                 0,
                 &self.ctx.eval,
             )? {
@@ -3109,18 +3155,20 @@ impl HashAgg {
 
         // Already spilled: route remaining unfolded rows directly into the 32 partial spill writers.
         self.ensure_partition_writers();
+        let frame_cap = target_spill_frame_bytes(&self.ctx);
         route_partial_batch_to_writers(
             batch,
             start_row,
             self.group_types.len(),
             0,
-            &self.ctx.spill,
+            frame_cap,
+            &self.ctx,
             &mut self.partition_writers,
-            &self.ctx.eval,
         )
     }
 
-    fn drain_in_memory_into_partial_batches(&mut self) -> Result<Vec<Batch>, QueryError> {
+    fn drain_in_memory_into(mut self, combined: &mut HashAgg) -> Result<(), QueryError> {
+        let mut scratch = self.ctx.pool.register("hash_agg_combine_drain", false);
         if let Some(states) = self.global_states.take() {
             let batch = build_partial_batch(
                 Arc::clone(&self.partial_schema),
@@ -3129,40 +3177,105 @@ impl HashAgg {
                 &[],
                 &[states],
                 &self.ctx.eval,
-                &mut self.res,
+                &mut scratch,
             )?;
             self.res.free();
             self.unspillable_res.free();
-            return Ok(vec![batch]);
+            combined.consume_partial_batch(&batch)?;
+            drop(batch);
+            scratch.free();
+            return Ok(());
         }
 
-        let keys = std::mem::take(&mut self.table.keys);
-        let states = std::mem::take(&mut self.table.states);
-        self.table
-            .clear_and_free(&mut self.res, &mut self.unspillable_res);
+        self.table.slots = Vec::new();
+        self.table.hashes = Vec::new();
+        let mut keys: Vec<Option<Vec<KeyAtom>>> = std::mem::take(&mut self.table.keys)
+            .into_iter()
+            .map(Some)
+            .collect();
+        let mut states: Vec<Option<Vec<AccState>>> = std::mem::take(&mut self.table.states)
+            .into_iter()
+            .map(Some)
+            .collect();
+        self.table.spillable_bytes = 0;
+        self.table.unspillable_bytes = 0;
+        shrink_res_to_remaining(&keys, &states, &mut self.res, &mut self.unspillable_res);
+
         if keys.is_empty() {
-            return Ok(Vec::new());
+            self.res.free();
+            self.unspillable_res.free();
+            return Ok(());
         }
-        let chunk_size = self.ctx.batch_size.max(1);
-        let mut out = Vec::new();
-        let mut scratch = self.ctx.pool.register("hash_agg_partial_drain", true);
-        let mut start = 0usize;
-        while start < keys.len() {
-            let end = (start + chunk_size).min(keys.len());
-            let b = build_partial_batch(
+
+        let frame_cap = target_spill_frame_bytes(&self.ctx);
+        let max_rows = self.ctx.batch_size.max(1);
+        let mut pos = 0usize;
+        while pos < keys.len() {
+            let mut chunk_end = pos;
+            let mut est_bytes = 0usize;
+            while chunk_end < keys.len() && chunk_end - pos < max_rows {
+                if let (Some(k), Some(s)) = (&keys[chunk_end], &states[chunk_end]) {
+                    let row_est = estimate_partial_group_bytes(k, s);
+                    if chunk_end > pos && est_bytes.saturating_add(row_est) > frame_cap {
+                        break;
+                    }
+                    est_bytes = est_bytes.saturating_add(row_est);
+                }
+                chunk_end += 1;
+            }
+            let mut chunk_keys = Vec::with_capacity(chunk_end - pos);
+            let mut chunk_states = Vec::with_capacity(chunk_end - pos);
+            for gi in pos..chunk_end {
+                if let (Some(k), Some(s)) = (keys[gi].take(), states[gi].take()) {
+                    chunk_keys.push(k);
+                    chunk_states.push(s);
+                }
+            }
+            let (chunk_sp, chunk_unsp) = chunk_owned_bytes(&chunk_keys, &chunk_states);
+            let batch = match build_partial_batch(
                 Arc::clone(&self.partial_schema),
                 &self.group_types,
                 &self.acc_kinds,
-                &keys[start..end],
-                &states[start..end],
+                &chunk_keys,
+                &chunk_states,
                 &self.ctx.eval,
                 &mut scratch,
-            )?;
-            out.push(b);
-            start = end;
+            ) {
+                Ok(b) => b,
+                Err(QueryError::TooLarge)
+                    if !combined.spilled && combined.table.num_groups() > 0 =>
+                {
+                    scratch.free();
+                    combined.drain_table_to_writers(0)?;
+                    build_partial_batch(
+                        Arc::clone(&self.partial_schema),
+                        &self.group_types,
+                        &self.acc_kinds,
+                        &chunk_keys,
+                        &chunk_states,
+                        &self.ctx.eval,
+                        &mut scratch,
+                    )?
+                }
+                Err(err) => {
+                    scratch.free();
+                    return Err(err);
+                }
+            };
+            drop(chunk_keys);
+            drop(chunk_states);
+            self.res.shrink(chunk_sp);
+            self.unspillable_res.shrink(chunk_unsp);
+            combined.consume_partial_batch(&batch)?;
+            drop(batch);
+            scratch.free();
+            pos = chunk_end;
         }
-        scratch.free();
-        Ok(out)
+        drop(keys);
+        drop(states);
+        self.res.free();
+        self.unspillable_res.free();
+        Ok(())
     }
 
     fn finish_into_spill_files(mut self) -> Result<Vec<SpillFile>, QueryError> {
@@ -3252,8 +3365,8 @@ impl PushSink for HashAgg {
         let filter_masks = &evaled.filter_masks;
 
         if let Some(states) = self.global_states.as_mut() {
-            for &row in &active_rows {
-                if (row & CANCEL_CHECK_MASK) == 0 && self.ctx.eval.cancel.is_cancelled() {
+            for (idx, &row) in active_rows.iter().enumerate() {
+                if (idx & CANCEL_CHECK_MASK) == 0 && self.ctx.eval.cancel.is_cancelled() {
                     eval_res.free();
                     return Err(QueryError::Cancelled);
                 }
@@ -3306,24 +3419,37 @@ impl PushSink for HashAgg {
         }
 
         // Grouped aggregation: fold rows into `self.table`, spilling on MemoryLimit when `buffered_rows > 0`.
-        for &row in &active_rows {
-            if (row & CANCEL_CHECK_MASK) == 0 && self.ctx.eval.cancel.is_cancelled() {
+        let layout = AggLayout {
+            group_types: &self.group_types,
+            acc_kinds: &self.acc_kinds,
+            partial_schema: &self.partial_schema,
+            output_schema: &self.output_schema,
+        };
+        let inputs = GroupedBatchInputs {
+            group_cols: &group_cols,
+            agg_inputs: &agg_inputs,
+            filter_masks,
+        };
+        for (idx, &row) in active_rows.iter().enumerate() {
+            if (idx & CANCEL_CHECK_MASK) == 0 && self.ctx.eval.cancel.is_cancelled() {
                 eval_res.free();
                 return Err(QueryError::Cancelled);
             }
+            let mut group_state = GroupTableState {
+                table: &mut self.table,
+                res: &mut self.res,
+                unspillable_res: &mut self.unspillable_res,
+            };
+            let mut spill_sink = SpillPartitionSink {
+                spilled: &mut self.spilled,
+                writers: &mut self.partition_writers,
+            };
             let res = fold_grouped_row_with_spill(
                 row,
-                &group_cols,
-                &agg_inputs,
-                filter_masks,
-                &self.acc_kinds,
-                &mut self.table,
-                &mut self.res,
-                &mut self.unspillable_res,
-                &mut self.spilled,
-                &mut self.partition_writers,
-                &self.partial_schema,
-                &self.group_types,
+                &inputs,
+                &layout,
+                &mut group_state,
+                &mut spill_sink,
                 &self.ctx,
             );
             if let Err(err) = res {
@@ -3332,16 +3458,27 @@ impl PushSink for HashAgg {
             }
         }
 
+        drop(group_cols);
+        drop(agg_inputs);
+        drop(evaled);
+        drop(batch);
+        eval_res.free();
+
         // Keep reservation synced cleanly, and if already spilled, drain `table` to release 100% of HashMap RAM.
         if self.spilled && self.table.num_groups() > 0 {
             self.drain_table_to_writers(0)?;
         } else {
-            self.table.refresh_bytes();
-            let _ = self.res.resize(self.table.spillable_bytes);
-            let _ = self.unspillable_res.resize(self.table.unspillable_bytes);
+            match self.res.resize(self.table.spillable_bytes) {
+                Ok(()) => {}
+                Err(ColumnError::MemoryLimit { .. }) if self.table.num_groups() > 0 => {
+                    self.drain_table_to_writers(0)?;
+                    return Ok(ControlFlow::Continue);
+                }
+                Err(err) => return Err(err.into()),
+            }
+            self.unspillable_res.resize(self.table.unspillable_bytes)?;
         }
 
-        eval_res.free();
         Ok(ControlFlow::Continue)
     }
 
@@ -3369,43 +3506,48 @@ pub fn execute_hash_agg(
         return agg.into_batches();
     }
 
-    if partitions.len() == 1 {
-        let mut sinks = run_pipeline(ctx, partitions, |_| Ok(Vec::new()), {
-            let spec_c = agg_spec.clone();
-            let schema_c = Arc::clone(&input_schema);
-            let ctx_c = ctx.clone();
-            move |_| HashAgg::new(spec_c.clone(), Arc::clone(&schema_c), ctx_c.clone())
-        })?;
-        let Some(sink) = sinks.pop() else {
-            let agg = HashAgg::new(agg_spec, input_schema, ctx.clone())?;
-            return agg.into_batches();
-        };
-        return sink.into_batches();
-    }
-
-    let sinks = run_pipeline(ctx, partitions, |_| Ok(Vec::new()), {
+    let mut sinks = run_pipeline(ctx, partitions, |_| Ok(Vec::new()), {
         let spec_c = agg_spec.clone();
         let schema_c = Arc::clone(&input_schema);
         let ctx_c = ctx.clone();
         move |_| HashAgg::new(spec_c.clone(), Arc::clone(&schema_c), ctx_c.clone())
     })?;
 
-    let mut combined = HashAgg::new(agg_spec, input_schema, ctx.clone())?;
+    let Some(mut combined) = sinks.pop() else {
+        let agg = HashAgg::new(agg_spec, input_schema, ctx.clone())?;
+        return agg.into_batches();
+    };
+    if sinks.is_empty() {
+        return combined.into_batches();
+    }
+
     let partial_schema = combined.partial_schema();
-    for mut sink in sinks {
+    while let Some(sink) = sinks.pop() {
         if !sink.spilled {
-            let partial_batches = sink.drain_in_memory_into_partial_batches()?;
-            drop(sink);
-            for b in partial_batches {
-                combined.consume_partial_batch(&b)?;
-            }
+            sink.drain_in_memory_into(&mut combined)?;
         } else {
             let spill_files = sink.finish_into_spill_files()?;
             let mut reader_res = ctx.pool.register("hash_agg_combine_read", false);
+            let mut max_frame_bytes = target_spill_frame_bytes(ctx);
             for file in spill_files {
                 let mut reader = file.open_reader(Arc::clone(&partial_schema))?;
-                while let Some(b) = reader.next_batch(Some(&mut reader_res))? {
+                loop {
+                    if combined.table.num_groups() > 0 {
+                        if let Err(ColumnError::MemoryLimit { .. }) =
+                            reader_res.try_grow(max_frame_bytes)
+                        {
+                            reader_res.free();
+                            combined.drain_table_to_writers(0)?;
+                        } else {
+                            reader_res.shrink(max_frame_bytes);
+                        }
+                    }
+                    let Some(b) = reader.next_batch(Some(&mut reader_res))? else {
+                        break;
+                    };
+                    max_frame_bytes = max_frame_bytes.max(b.memory_bytes());
                     combined.consume_partial_batch(&b)?;
+                    drop(b);
                     reader_res.free();
                 }
             }
@@ -3439,6 +3581,7 @@ fn resolve_eval_col<'a>(batch: &'a Batch, col: &'a EvalCol) -> &'a Column {
 fn eval_one_input(
     expr: &Expr,
     batch: &Batch,
+    active_mask: Option<&Bitmap>,
     eval_ctx: &EvalContext,
     eval_res: &mut Reservation,
 ) -> Result<EvalCol, QueryError> {
@@ -3447,7 +3590,10 @@ fn eval_one_input(
     {
         return Ok(EvalCol::Borrowed(*index));
     }
-    let col = eval_expr(expr, batch, eval_ctx, Some(eval_res))?;
+    let col = match active_mask {
+        Some(m) => eval::eval_expr_masked(expr, batch, Some(m), eval_ctx, Some(eval_res))?,
+        None => eval_expr(expr, batch, eval_ctx, Some(eval_res))?,
+    };
     Ok(EvalCol::Owned(col))
 }
 
@@ -3459,7 +3605,7 @@ fn evaluate_batch_inputs(
 ) -> Result<EvaluatedBatchInputs, QueryError> {
     let mut group_cols = Vec::with_capacity(spec.group_by.len());
     for (_, expr) in &spec.group_by {
-        group_cols.push(eval_one_input(expr, batch, eval_ctx, eval_res)?);
+        group_cols.push(eval_one_input(expr, batch, None, eval_ctx, eval_res)?);
     }
 
     let mut filter_masks = Vec::with_capacity(spec.aggs.len());
@@ -3470,15 +3616,7 @@ fn evaluate_batch_inputs(
             Some(f) => Some(eval_filter(f, batch, eval_ctx, Some(eval_res))?),
             None => None,
         };
-        let masked_batch;
-        let target_batch = if let Some(m) = &mask
-            && !m.all_ones()
-        {
-            masked_batch = batch.clone().into_filter_mask(m)?;
-            &masked_batch
-        } else {
-            batch
-        };
+        let active_mask = mask.as_ref().filter(|m| !m.all_ones());
 
         let mut cols = Vec::new();
         match &agg.func {
@@ -3496,32 +3634,24 @@ fn evaluate_batch_inputs(
             | AggFunc::PercentileCont { expr: e, .. }
             | AggFunc::ArrayAgg { expr: e, .. }
             | AggFunc::TagUnion(e) => {
-                if !target_batch.is_empty() || matches!(e, Expr::Column { .. }) {
-                    cols.push(eval_one_input(e, target_batch, eval_ctx, eval_res)?);
-                } else {
-                    cols.push(EvalCol::Owned(Column::Const {
-                        value: ScalarValue::Null(e.data_type()),
-                        len: batch.raw_len(),
-                    }));
-                }
+                cols.push(eval_one_input(e, batch, active_mask, eval_ctx, eval_res)?);
             }
             AggFunc::FirstNonNullByOrder { value, order_by } => {
-                if !target_batch.is_empty() || matches!(value, Expr::Column { .. }) {
-                    cols.push(eval_one_input(value, target_batch, eval_ctx, eval_res)?);
-                    for k in order_by {
-                        cols.push(eval_one_input(&k.expr, target_batch, eval_ctx, eval_res)?);
-                    }
-                } else {
-                    cols.push(EvalCol::Owned(Column::Const {
-                        value: ScalarValue::Null(value.data_type()),
-                        len: batch.raw_len(),
-                    }));
-                    for k in order_by {
-                        cols.push(EvalCol::Owned(Column::Const {
-                            value: ScalarValue::Null(k.expr.data_type()),
-                            len: batch.raw_len(),
-                        }));
-                    }
+                cols.push(eval_one_input(
+                    value,
+                    batch,
+                    active_mask,
+                    eval_ctx,
+                    eval_res,
+                )?);
+                for k in order_by {
+                    cols.push(eval_one_input(
+                        &k.expr,
+                        batch,
+                        active_mask,
+                        eval_ctx,
+                        eval_res,
+                    )?);
                 }
             }
         }
@@ -3545,92 +3675,100 @@ fn collect_active_rows(batch: &Batch) -> Vec<usize> {
     }
 }
 
-#[expect(
-    clippy::too_many_arguments,
-    reason = "atomic per-row grouped fold with spill fallback"
-)]
+struct AggLayout<'a> {
+    group_types: &'a [DataType],
+    acc_kinds: &'a [AccKind],
+    partial_schema: &'a Arc<Schema>,
+    output_schema: &'a Arc<Schema>,
+}
+
+struct GroupTableState<'a> {
+    table: &'a mut GroupTable,
+    res: &'a mut Reservation,
+    unspillable_res: &'a mut Reservation,
+}
+
+struct GroupedBatchInputs<'a> {
+    group_cols: &'a [&'a Column],
+    agg_inputs: &'a [Vec<&'a Column>],
+    filter_masks: &'a [Option<Bitmap>],
+}
+
+struct SpillPartitionSink<'a> {
+    spilled: &'a mut bool,
+    writers: &'a mut Vec<Option<SpillWriter>>,
+}
+
 fn fold_grouped_row_with_spill(
     row: usize,
-    group_cols: &[&Column],
-    agg_inputs: &[Vec<&Column>],
-    filter_masks: &[Option<Bitmap>],
-    acc_kinds: &[AccKind],
-    table: &mut GroupTable,
-    res: &mut Reservation,
-    unspillable_res: &mut Reservation,
-    spilled: &mut bool,
-    partition_writers: &mut Vec<Option<SpillWriter>>,
-    partial_schema: &Arc<Schema>,
-    group_types: &[DataType],
+    inputs: &GroupedBatchInputs<'_>,
+    layout: &AggLayout<'_>,
+    state: &mut GroupTableState<'_>,
+    spill_sink: &mut SpillPartitionSink<'_>,
     ctx: &ExecContext,
 ) -> Result<(), QueryError> {
-    let hash = hash_cols_row(group_cols, row, 0);
+    let hash = hash_cols_row(inputs.group_cols, row, 0);
     for attempt in 0..2 {
-        let existing_gi = table.lookup_by_cols(hash, group_cols, row);
+        let existing_gi = state.table.lookup_by_cols(hash, inputs.group_cols, row);
         let mut need_sp = 0usize;
         let mut need_unsp = 0usize;
         if existing_gi.is_none() {
-            let key_heap: usize = group_cols
+            let key_heap: usize = inputs
+                .group_cols
                 .iter()
                 .map(|c| col_row_heap_estimate(c, row))
                 .sum::<usize>()
-                + group_cols.len() * size_of::<KeyAtom>();
-            need_sp = need_sp.saturating_add(table.new_group_overhead(key_heap));
+                + inputs.group_cols.len() * size_of::<KeyAtom>();
+            need_sp = need_sp.saturating_add(state.table.new_group_overhead(key_heap));
         }
-        for (agg_idx, kind) in acc_kinds.iter().enumerate() {
-            if let Some(mask) = &filter_masks[agg_idx]
+        for (agg_idx, kind) in layout.acc_kinds.iter().enumerate() {
+            if let Some(mask) = &inputs.filter_masks[agg_idx]
                 && !mask.get(row)
             {
                 continue;
             }
             let (ds, du) = match existing_gi {
-                Some(gi) => {
-                    table.states[gi][agg_idx].estimate_fold_growth(kind, &agg_inputs[agg_idx], row)
+                Some(gi) => state.table.states[gi][agg_idx].estimate_fold_growth(
+                    kind,
+                    &inputs.agg_inputs[agg_idx],
+                    row,
+                ),
+                None => {
+                    kind.make_state()
+                        .estimate_fold_growth(kind, &inputs.agg_inputs[agg_idx], row)
                 }
-                None => kind
-                    .make_state()
-                    .estimate_fold_growth(kind, &agg_inputs[agg_idx], row),
             };
             need_sp = need_sp.saturating_add(ds);
             need_unsp = need_unsp.saturating_add(du);
         }
 
-        let sp_needed_total = table.spillable_bytes.saturating_add(need_sp);
-        let unsp_needed_total = table.unspillable_bytes.saturating_add(need_unsp);
+        let sp_needed_total = state.table.spillable_bytes.saturating_add(need_sp);
+        let unsp_needed_total = state.table.unspillable_bytes.saturating_add(need_unsp);
 
-        let sp_ok = if sp_needed_total > res.size() {
-            res.try_grow(sp_needed_total - res.size())
+        let sp_ok = if sp_needed_total > state.res.size() {
+            state.res.try_grow(sp_needed_total - state.res.size())
         } else {
             Ok(())
         };
-        let unsp_ok = if sp_ok.is_ok() && unsp_needed_total > unspillable_res.size() {
-            unspillable_res.try_grow(unsp_needed_total - unspillable_res.size())
+        let unsp_ok = if sp_ok.is_ok() && unsp_needed_total > state.unspillable_res.size() {
+            state
+                .unspillable_res
+                .try_grow(unsp_needed_total - state.unspillable_res.size())
         } else {
             Ok(())
         };
 
         let combined_res = sp_ok.and(unsp_ok);
         if let Err(ColumnError::MemoryLimit { .. }) = combined_res {
-            let _ = res.resize(table.spillable_bytes);
-            let _ = unspillable_res.resize(table.unspillable_bytes);
-            if attempt == 0 && table.num_groups() > 0 {
-                if partition_writers.is_empty() {
-                    *partition_writers = (0..NUM_SPILL_PARTITIONS).map(|_| None).collect();
+            let _ = state.res.resize(state.table.spillable_bytes);
+            let _ = state.unspillable_res.resize(state.table.unspillable_bytes);
+            if attempt == 0 && state.table.num_groups() > 0 {
+                if spill_sink.writers.is_empty() {
+                    *spill_sink.writers = (0..NUM_SPILL_PARTITIONS).map(|_| None).collect();
                 }
                 let frame_cap = target_spill_frame_bytes(ctx);
-                drain_group_table_to_writers(
-                    table,
-                    partial_schema,
-                    group_types,
-                    acc_kinds,
-                    0,
-                    frame_cap,
-                    ctx,
-                    partition_writers,
-                    res,
-                    unspillable_res,
-                )?;
-                *spilled = true;
+                drain_group_table_to_writers(layout, state, 0, frame_cap, ctx, spill_sink.writers)?;
+                *spill_sink.spilled = true;
                 continue;
             }
             return Err(QueryError::TooLarge);
@@ -3641,28 +3779,34 @@ fn fold_grouped_row_with_spill(
         let gi = match existing_gi {
             Some(gi) => gi,
             None => {
-                let key: Vec<KeyAtom> = group_cols.iter().map(|c| read_key_atom(c, row)).collect();
-                table.insert_group(hash, key)
+                let key: Vec<KeyAtom> = inputs
+                    .group_cols
+                    .iter()
+                    .map(|c| read_key_atom(c, row))
+                    .collect();
+                state.table.insert_group(hash, key)
             }
         };
 
         let mut delta_sp_before = 0usize;
         let mut delta_unsp_before = 0usize;
-        for (agg_idx, kind) in acc_kinds.iter().enumerate() {
-            if let Some(mask) = &filter_masks[agg_idx]
+        for (agg_idx, kind) in layout.acc_kinds.iter().enumerate() {
+            if let Some(mask) = &inputs.filter_masks[agg_idx]
                 && !mask.get(row)
             {
                 continue;
             }
-            let st = &mut table.states[gi][agg_idx];
+            let st = &mut state.table.states[gi][agg_idx];
             delta_sp_before += st.spillable_heap_bytes();
             delta_unsp_before += st.unspillable_heap_bytes();
-            st.fold_row(kind, &agg_inputs[agg_idx], row)?;
-            table.spillable_bytes = table
+            st.fold_row(kind, &inputs.agg_inputs[agg_idx], row)?;
+            state.table.spillable_bytes = state
+                .table
                 .spillable_bytes
                 .saturating_sub(delta_sp_before)
                 .saturating_add(st.spillable_heap_bytes());
-            table.unspillable_bytes = table
+            state.table.unspillable_bytes = state
+                .table
                 .unspillable_bytes
                 .saturating_sub(delta_unsp_before)
                 .saturating_add(st.unspillable_heap_bytes());
@@ -3674,20 +3818,15 @@ fn fold_grouped_row_with_spill(
     Err(QueryError::TooLarge)
 }
 
-#[expect(
-    clippy::too_many_arguments,
-    reason = "merges a partial-state batch into a GroupTable"
-)]
 fn fold_partial_batch_into_table(
     batch: &Batch,
-    num_group_cols: usize,
-    acc_kinds: &[AccKind],
-    table: &mut GroupTable,
-    res: &mut Reservation,
-    unspillable_res: &mut Reservation,
+    layout: &AggLayout<'_>,
+    state: &mut GroupTableState<'_>,
     salt: u64,
+    headroom: usize,
     eval_ctx: &EvalContext,
 ) -> Result<Option<usize>, QueryError> {
+    let num_group_cols = layout.group_types.len();
     let cols: Vec<&Column> = batch.columns().iter().collect();
     let group_cols = &cols[..num_group_cols];
     let num_rows = batch.num_rows();
@@ -3697,7 +3836,7 @@ fn fold_partial_batch_into_table(
             return Err(QueryError::Cancelled);
         }
         let hash = hash_cols_row(group_cols, row, salt);
-        let existing_gi = table.lookup_by_cols(hash, group_cols, row);
+        let existing_gi = state.table.lookup_by_cols(hash, group_cols, row);
 
         let mut need_sp = 0usize;
         let mut need_unsp = 0usize;
@@ -3707,15 +3846,15 @@ fn fold_partial_batch_into_table(
                 .map(|c| col_row_heap_estimate(c, row))
                 .sum::<usize>()
                 + group_cols.len() * size_of::<KeyAtom>();
-            need_sp = need_sp.saturating_add(table.new_group_overhead(key_heap));
+            need_sp = need_sp.saturating_add(state.table.new_group_overhead(key_heap));
         }
 
         let mut offset = num_group_cols;
-        for (agg_idx, kind) in acc_kinds.iter().enumerate() {
+        for (agg_idx, kind) in layout.acc_kinds.iter().enumerate() {
             let width = kind.partial_col_count();
             let slice = &cols[offset..offset + width];
             let (ds, du) = match existing_gi {
-                Some(gi) => table.states[gi][agg_idx].estimate_merge_growth(slice, row),
+                Some(gi) => state.table.states[gi][agg_idx].estimate_merge_growth(slice, row),
                 None => kind.make_state().estimate_merge_growth(slice, row),
             };
             need_sp = need_sp.saturating_add(ds);
@@ -3723,23 +3862,41 @@ fn fold_partial_batch_into_table(
             offset += width;
         }
 
-        let sp_needed = table.spillable_bytes.saturating_add(need_sp);
-        let unsp_needed = table.unspillable_bytes.saturating_add(need_unsp);
-        let sp_ok = if sp_needed > res.size() {
-            res.try_grow(sp_needed - res.size())
+        let sp_needed = state.table.spillable_bytes.saturating_add(need_sp);
+        let unsp_needed = state.table.unspillable_bytes.saturating_add(need_unsp);
+        let eff_headroom = if state.table.num_groups() > 0 {
+            headroom
+        } else {
+            0
+        };
+        let before_sp = state.res.size();
+        let sp_with_headroom = sp_needed.saturating_add(eff_headroom);
+        let sp_ok = if sp_with_headroom > before_sp {
+            match state.res.try_grow(sp_with_headroom - before_sp) {
+                Ok(()) => {
+                    let keep = sp_needed.max(before_sp);
+                    if state.res.size() > keep {
+                        state.res.shrink(state.res.size() - keep);
+                    }
+                    Ok(())
+                }
+                Err(err) => Err(err),
+            }
         } else {
             Ok(())
         };
-        let unsp_ok = if sp_ok.is_ok() && unsp_needed > unspillable_res.size() {
-            unspillable_res.try_grow(unsp_needed - unspillable_res.size())
+        let unsp_ok = if sp_ok.is_ok() && unsp_needed > state.unspillable_res.size() {
+            state
+                .unspillable_res
+                .try_grow(unsp_needed - state.unspillable_res.size())
         } else {
             Ok(())
         };
         let combined = sp_ok.and(unsp_ok);
         if let Err(ColumnError::MemoryLimit { .. }) = combined {
-            let _ = res.resize(table.spillable_bytes);
-            let _ = unspillable_res.resize(table.unspillable_bytes);
-            if table.num_groups() > 0 {
+            let _ = state.res.resize(state.table.spillable_bytes);
+            let _ = state.unspillable_res.resize(state.table.unspillable_bytes);
+            if state.table.num_groups() > 0 {
                 return Ok(Some(row));
             }
             return Err(QueryError::TooLarge);
@@ -3751,22 +3908,24 @@ fn fold_partial_batch_into_table(
             Some(gi) => gi,
             None => {
                 let key: Vec<KeyAtom> = group_cols.iter().map(|c| read_key_atom(c, row)).collect();
-                table.insert_group(hash, key)
+                state.table.insert_group(hash, key)
             }
         };
 
         let mut offset = num_group_cols;
-        for (agg_idx, kind) in acc_kinds.iter().enumerate() {
+        for (agg_idx, kind) in layout.acc_kinds.iter().enumerate() {
             let width = kind.partial_col_count();
-            let st = &mut table.states[gi][agg_idx];
+            let st = &mut state.table.states[gi][agg_idx];
             let sp_before = st.spillable_heap_bytes();
             let unsp_before = st.unspillable_heap_bytes();
             st.merge_row(kind, &cols[offset..offset + width], row)?;
-            table.spillable_bytes = table
+            state.table.spillable_bytes = state
+                .table
                 .spillable_bytes
                 .saturating_sub(sp_before)
                 .saturating_add(st.spillable_heap_bytes());
-            table.unspillable_bytes = table
+            state.table.unspillable_bytes = state
+                .table
                 .unspillable_bytes
                 .saturating_sub(unsp_before)
                 .saturating_add(st.unspillable_heap_bytes());
@@ -3774,9 +3933,23 @@ fn fold_partial_batch_into_table(
         }
     }
 
-    table.refresh_bytes();
-    res.resize(table.spillable_bytes)?;
-    unspillable_res.resize(table.unspillable_bytes)?;
+    match state.res.resize(state.table.spillable_bytes) {
+        Ok(()) => {}
+        Err(ColumnError::MemoryLimit { .. }) if state.table.num_groups() > 0 => {
+            return Ok(Some(num_rows));
+        }
+        Err(err) => return Err(err.into()),
+    }
+    if headroom > 0 && state.table.num_groups() > 0 {
+        match state.res.try_grow(headroom) {
+            Ok(()) => state.res.shrink(headroom),
+            Err(ColumnError::MemoryLimit { .. }) => return Ok(Some(num_rows)),
+            Err(err) => return Err(err.into()),
+        }
+    }
+    state
+        .unspillable_res
+        .resize(state.table.unspillable_bytes)?;
     Ok(None)
 }
 
@@ -3788,31 +3961,151 @@ fn target_spill_frame_bytes(ctx: &ExecContext) -> usize {
     (ctx.pool.spill_share() / 4).max(MIN_SPILL_FRAME_BYTES)
 }
 
-#[expect(
-    clippy::too_many_arguments,
-    reason = "drains GroupTable across 32 hash-partitioned spill writers"
-)]
+fn chunk_owned_bytes(keys: &[Vec<KeyAtom>], states: &[Vec<AccState>]) -> (usize, usize) {
+    let mut sp = 0usize;
+    let mut unsp = 0usize;
+    for k in keys {
+        sp = sp
+            .saturating_add(k.capacity() * size_of::<KeyAtom>())
+            .saturating_add(k.iter().map(KeyAtom::heap_bytes).sum::<usize>());
+    }
+    for s in states {
+        sp = sp
+            .saturating_add(s.capacity() * size_of::<AccState>())
+            .saturating_add(s.iter().map(AccState::spillable_heap_bytes).sum::<usize>());
+        unsp = unsp.saturating_add(
+            s.iter()
+                .map(AccState::unspillable_heap_bytes)
+                .sum::<usize>(),
+        );
+    }
+    (sp, unsp)
+}
+
+fn shrink_res_to_remaining(
+    keys: &[Option<Vec<KeyAtom>>],
+    states: &[Option<Vec<AccState>>],
+    res: &mut Reservation,
+    unspillable_res: &mut Reservation,
+) {
+    let mut rem_sp = keys.len().saturating_mul(size_of::<Option<Vec<KeyAtom>>>())
+        + states
+            .len()
+            .saturating_mul(size_of::<Option<Vec<AccState>>>());
+    let mut rem_unsp = 0usize;
+    for k in keys.iter().flatten() {
+        rem_sp = rem_sp
+            .saturating_add(k.capacity() * size_of::<KeyAtom>())
+            .saturating_add(k.iter().map(KeyAtom::heap_bytes).sum::<usize>());
+    }
+    for s in states.iter().flatten() {
+        rem_sp = rem_sp
+            .saturating_add(s.capacity() * size_of::<AccState>())
+            .saturating_add(s.iter().map(AccState::spillable_heap_bytes).sum::<usize>());
+        rem_unsp = rem_unsp.saturating_add(
+            s.iter()
+                .map(AccState::unspillable_heap_bytes)
+                .sum::<usize>(),
+        );
+    }
+    if res.size() > rem_sp {
+        res.shrink(res.size() - rem_sp);
+    }
+    if unspillable_res.size() > rem_unsp {
+        unspillable_res.shrink(unspillable_res.size() - rem_unsp);
+    }
+}
+
+struct PartialChunkCtx<'a> {
+    writer: &'a mut SpillWriter,
+    frame_cap_bytes: usize,
+    eval_ctx: &'a EvalContext,
+    scratch: &'a mut Reservation,
+}
+
+fn write_partial_chunk(
+    layout: &AggLayout<'_>,
+    chunk_ctx: &mut PartialChunkCtx<'_>,
+    mut chunk_keys: Vec<Vec<KeyAtom>>,
+    mut chunk_states: Vec<Vec<AccState>>,
+    state: &mut GroupTableState<'_>,
+) -> Result<(), QueryError> {
+    let n = chunk_keys.len();
+    if n == 0 {
+        return Ok(());
+    }
+    let batch = match build_partial_batch(
+        Arc::clone(layout.partial_schema),
+        layout.group_types,
+        layout.acc_kinds,
+        &chunk_keys,
+        &chunk_states,
+        chunk_ctx.eval_ctx,
+        chunk_ctx.scratch,
+    ) {
+        Ok(b) => b,
+        Err(QueryError::TooLarge) if n > 1 => {
+            chunk_ctx.scratch.free();
+            let half = n / 2;
+            let right_keys = chunk_keys.split_off(half);
+            let right_states = chunk_states.split_off(half);
+            write_partial_chunk(layout, chunk_ctx, chunk_keys, chunk_states, state)?;
+            return write_partial_chunk(layout, chunk_ctx, right_keys, right_states, state);
+        }
+        Err(err) => {
+            chunk_ctx.scratch.free();
+            return Err(err);
+        }
+    };
+    if batch.memory_bytes() > chunk_ctx.frame_cap_bytes && n > 1 {
+        drop(batch);
+        chunk_ctx.scratch.free();
+        let half = n / 2;
+        let right_keys = chunk_keys.split_off(half);
+        let right_states = chunk_states.split_off(half);
+        write_partial_chunk(layout, chunk_ctx, chunk_keys, chunk_states, state)?;
+        return write_partial_chunk(layout, chunk_ctx, right_keys, right_states, state);
+    }
+    let (chunk_sp, chunk_unsp) = chunk_owned_bytes(&chunk_keys, &chunk_states);
+    drop(chunk_keys);
+    drop(chunk_states);
+    state.res.shrink(chunk_sp);
+    state.unspillable_res.shrink(chunk_unsp);
+    chunk_ctx.writer.write_batch(&batch)?;
+    drop(batch);
+    chunk_ctx.scratch.free();
+    Ok(())
+}
+
 fn drain_group_table_to_writers(
-    table: &mut GroupTable,
-    partial_schema: &Arc<Schema>,
-    group_types: &[DataType],
-    acc_kinds: &[AccKind],
+    layout: &AggLayout<'_>,
+    state: &mut GroupTableState<'_>,
     salt: u64,
     frame_cap_bytes: usize,
     ctx: &ExecContext,
     writers: &mut [Option<SpillWriter>],
-    res: &mut Reservation,
-    unspillable_res: &mut Reservation,
 ) -> Result<(), QueryError> {
-    let keys = std::mem::take(&mut table.keys);
-    let states = std::mem::take(&mut table.states);
-    table.clear_and_free(res, unspillable_res);
+    state.table.slots = Vec::new();
+    state.table.hashes = Vec::new();
+    let mut keys: Vec<Option<Vec<KeyAtom>>> = std::mem::take(&mut state.table.keys)
+        .into_iter()
+        .map(Some)
+        .collect();
+    let mut states: Vec<Option<Vec<AccState>>> = std::mem::take(&mut state.table.states)
+        .into_iter()
+        .map(Some)
+        .collect();
+    state.table.spillable_bytes = 0;
+    state.table.unspillable_bytes = 0;
+    shrink_res_to_remaining(&keys, &states, state.res, state.unspillable_res);
 
     let mut buckets: Vec<Vec<usize>> = (0..NUM_SPILL_PARTITIONS).map(|_| Vec::new()).collect();
     for (gi, key) in keys.iter().enumerate() {
-        let h = hash_atoms(key, salt);
-        let p = (h as usize) & (NUM_SPILL_PARTITIONS - 1);
-        buckets[p].push(gi);
+        if let Some(k) = key {
+            let h = hash_atoms(k, salt);
+            let p = (h as usize) & (NUM_SPILL_PARTITIONS - 1);
+            buckets[p].push(gi);
+        }
     }
 
     let mut scratch = ctx.pool.register("hash_agg_spill_build", false);
@@ -3835,32 +4128,102 @@ fn drain_group_table_to_writers(
             let mut est_bytes = 0usize;
             while chunk_end < indices.len() && chunk_end - pos < ctx.batch_size.max(1) {
                 let gi = indices[chunk_end];
-                let row_est = estimate_partial_group_bytes(&keys[gi], &states[gi]);
-                if chunk_end > pos && est_bytes.saturating_add(row_est) > frame_cap_bytes {
-                    break;
+                if let (Some(k), Some(s)) = (&keys[gi], &states[gi]) {
+                    let row_est = estimate_partial_group_bytes(k, s);
+                    if chunk_end > pos && est_bytes.saturating_add(row_est) > frame_cap_bytes {
+                        break;
+                    }
+                    est_bytes = est_bytes.saturating_add(row_est);
                 }
-                est_bytes = est_bytes.saturating_add(row_est);
                 chunk_end += 1;
             }
             let chunk_indices = &indices[pos..chunk_end];
-            let chunk_keys: Vec<Vec<KeyAtom>> =
-                chunk_indices.iter().map(|&gi| keys[gi].clone()).collect();
-            let chunk_states: Vec<Vec<AccState>> =
-                chunk_indices.iter().map(|&gi| states[gi].clone()).collect();
-            let batch = build_partial_batch(
-                Arc::clone(partial_schema),
-                group_types,
-                acc_kinds,
-                &chunk_keys,
-                &chunk_states,
-                &ctx.eval,
-                &mut scratch,
-            )?;
-            writer.write_batch(&batch)?;
-            drop(batch);
-            scratch.free();
+            let mut chunk_keys = Vec::with_capacity(chunk_indices.len());
+            let mut chunk_states = Vec::with_capacity(chunk_indices.len());
+            for &gi in chunk_indices {
+                if let (Some(k), Some(s)) = (keys[gi].take(), states[gi].take()) {
+                    chunk_keys.push(k);
+                    chunk_states.push(s);
+                }
+            }
+            let mut chunk_ctx = PartialChunkCtx {
+                writer,
+                frame_cap_bytes,
+                eval_ctx: &ctx.eval,
+                scratch: &mut scratch,
+            };
+            write_partial_chunk(layout, &mut chunk_ctx, chunk_keys, chunk_states, state)?;
             pos = chunk_end;
         }
+    }
+    drop(keys);
+    drop(states);
+    state.res.free();
+    state.unspillable_res.free();
+    Ok(())
+}
+
+fn take_partial_batch_rows(
+    batch: &Batch,
+    indices: &[u32],
+    res: &mut Reservation,
+) -> Result<Batch, QueryError> {
+    let mut cols = Vec::with_capacity(batch.columns().len());
+    for col in batch.columns() {
+        cols.push(Column::Flat(col.take(indices, Some(res))?));
+    }
+    Ok(Batch::try_new_all(
+        Arc::clone(batch.schema()),
+        cols,
+        indices.len(),
+    )?)
+}
+
+fn write_chunked_partial_rows(
+    writer: &mut SpillWriter,
+    batch: &Batch,
+    indices: &[u32],
+    frame_cap_bytes: usize,
+    res: &mut Reservation,
+) -> Result<(), QueryError> {
+    if indices.is_empty() {
+        return Ok(());
+    }
+    let rows_per_row_est = (batch.memory_bytes() / batch.raw_len().max(1)).max(1);
+    let max_rows = (frame_cap_bytes / rows_per_row_est)
+        .max(1)
+        .min(indices.len());
+    let mut start = 0usize;
+    while start < indices.len() {
+        let end = (start + max_rows).min(indices.len());
+        let sub_idx = &indices[start..end];
+        let sub = match take_partial_batch_rows(batch, sub_idx, res) {
+            Ok(s) => s,
+            Err(QueryError::TooLarge) if sub_idx.len() > 1 => {
+                res.free();
+                let half = sub_idx.len() / 2;
+                write_chunked_partial_rows(writer, batch, &sub_idx[..half], frame_cap_bytes, res)?;
+                write_chunked_partial_rows(writer, batch, &sub_idx[half..], frame_cap_bytes, res)?;
+                start = end;
+                continue;
+            }
+            Err(err) => {
+                res.free();
+                return Err(err);
+            }
+        };
+        if sub.memory_bytes() > frame_cap_bytes && sub_idx.len() > 1 {
+            drop(sub);
+            res.free();
+            let half = sub_idx.len() / 2;
+            write_chunked_partial_rows(writer, batch, &sub_idx[..half], frame_cap_bytes, res)?;
+            write_chunked_partial_rows(writer, batch, &sub_idx[half..], frame_cap_bytes, res)?;
+        } else {
+            writer.write_batch(&sub)?;
+            drop(sub);
+            res.free();
+        }
+        start = end;
     }
     Ok(())
 }
@@ -3870,9 +4233,9 @@ fn route_partial_batch_to_writers(
     start_row: usize,
     num_group_cols: usize,
     salt: u64,
-    spill: &SpillManager,
+    frame_cap_bytes: usize,
+    ctx: &ExecContext,
     writers: &mut [Option<SpillWriter>],
-    eval_ctx: &EvalContext,
 ) -> Result<(), QueryError> {
     let cols: Vec<&Column> = batch.columns().iter().collect();
     let group_cols = &cols[..num_group_cols];
@@ -3882,7 +4245,7 @@ fn route_partial_batch_to_writers(
     }
     let mut part_rows: Vec<Vec<u32>> = (0..NUM_SPILL_PARTITIONS).map(|_| Vec::new()).collect();
     for row in start_row..num_rows {
-        if (row & CANCEL_CHECK_MASK) == 0 && eval_ctx.cancel.is_cancelled() {
+        if (row & CANCEL_CHECK_MASK) == 0 && ctx.eval.cancel.is_cancelled() {
             return Err(QueryError::Cancelled);
         }
         let h = hash_cols_row(group_cols, row, salt);
@@ -3890,21 +4253,19 @@ fn route_partial_batch_to_writers(
         part_rows[p].push(row as u32);
     }
 
+    let mut scratch = ctx.pool.register("hash_agg_route_take", false);
     for (p, rows) in part_rows.into_iter().enumerate() {
         if rows.is_empty() {
             continue;
         }
-        let sub = batch
-            .clone()
-            .into_with_selection(Selection::Indices(rows))?;
         let writer = match &mut writers[p] {
             Some(w) => w,
             slot @ None => {
-                let w = spill.create_file()?;
+                let w = ctx.spill.create_file()?;
                 slot.insert(w)
             }
         };
-        writer.write_batch(&sub)?;
+        write_chunked_partial_rows(writer, batch, &rows, frame_cap_bytes, &mut scratch)?;
     }
     Ok(())
 }
@@ -3956,14 +4317,8 @@ fn build_partial_batch(
     Ok(Batch::try_new_all(partial_schema, columns, num_rows)?)
 }
 
-#[expect(
-    clippy::too_many_arguments,
-    reason = "emits finalized batches chunked by batch_size"
-)]
 fn emit_chunked_output_batches(
-    output_schema: &Arc<Schema>,
-    group_types: &[DataType],
-    acc_kinds: &[AccKind],
+    layout: &AggLayout<'_>,
     keys: &[Vec<KeyAtom>],
     states: &[Vec<AccState>],
     batch_size: usize,
@@ -3975,9 +4330,9 @@ fn emit_chunked_output_batches(
     while start < states.len() {
         let end = (start + batch_size).min(states.len());
         let b = build_output_batch(
-            Arc::clone(output_schema),
-            group_types,
-            acc_kinds,
+            Arc::clone(layout.output_schema),
+            layout.group_types,
+            layout.acc_kinds,
             &keys[start..end],
             &states[start..end],
             eval_ctx,
@@ -4816,5 +5171,503 @@ mod tests {
         drop(pct_agg);
         assert_eq!(tiny_ctx.pool.reserved(), 0);
         assert_eq!(tiny_ctx.spill.spilled_bytes(), 0);
+    }
+
+    #[test]
+    fn hash_cols_row_matches_hash_atoms_every_datatype() {
+        use cetra_column::{DictColumn, EventItem, LinkItem, RleColumn};
+        let (ctx, _dir) = test_ctx(4 * 1024 * 1024);
+        let mut res = ctx.pool.register("hash_parity", false);
+
+        let cols: Vec<Column> = vec![
+            Column::try_new_const(ScalarValue::Null(DataType::Null), 2).unwrap(),
+            build_column_from_scalars(
+                &DataType::Bool,
+                &[
+                    ScalarValue::Bool(true),
+                    ScalarValue::Bool(false),
+                    ScalarValue::Null(DataType::Bool),
+                ],
+                &ctx.eval,
+                &mut res,
+            )
+            .unwrap(),
+            build_column_from_scalars(
+                &DataType::I64,
+                &[
+                    ScalarValue::I64(-42),
+                    ScalarValue::I64(99),
+                    ScalarValue::Null(DataType::I64),
+                ],
+                &ctx.eval,
+                &mut res,
+            )
+            .unwrap(),
+            build_column_from_scalars(
+                &DataType::F64,
+                &[
+                    ScalarValue::F64(0.0),
+                    ScalarValue::F64(-0.0),
+                    ScalarValue::F64(f64::NAN),
+                    ScalarValue::F64(f64::INFINITY),
+                    ScalarValue::Null(DataType::F64),
+                ],
+                &ctx.eval,
+                &mut res,
+            )
+            .unwrap(),
+            build_column_from_scalars(
+                &DataType::Decimal128 {
+                    precision: 12,
+                    scale: 3,
+                },
+                &[
+                    ScalarValue::Decimal128 {
+                        value: 123_456,
+                        precision: 12,
+                        scale: 3,
+                    },
+                    ScalarValue::Null(DataType::Decimal128 {
+                        precision: 12,
+                        scale: 3,
+                    }),
+                ],
+                &ctx.eval,
+                &mut res,
+            )
+            .unwrap(),
+            build_column_from_scalars(
+                &DataType::TimestampNs { utc: true },
+                &[
+                    ScalarValue::TimestampNs {
+                        value: 1_700_000_000_000_000_000,
+                        utc: true,
+                    },
+                    ScalarValue::Null(DataType::TimestampNs { utc: true }),
+                ],
+                &ctx.eval,
+                &mut res,
+            )
+            .unwrap(),
+            build_column_from_scalars(
+                &DataType::Date,
+                &[ScalarValue::Date(19_700), ScalarValue::Null(DataType::Date)],
+                &ctx.eval,
+                &mut res,
+            )
+            .unwrap(),
+            build_column_from_scalars(
+                &DataType::Interval,
+                &[
+                    ScalarValue::Interval(Interval {
+                        months: 2,
+                        days: 3,
+                        nanos: 4_000,
+                    }),
+                    ScalarValue::Null(DataType::Interval),
+                ],
+                &ctx.eval,
+                &mut res,
+            )
+            .unwrap(),
+            build_column_from_scalars(
+                &DataType::Utf8,
+                &[
+                    ScalarValue::Utf8("hello".into()),
+                    ScalarValue::Null(DataType::Utf8),
+                ],
+                &ctx.eval,
+                &mut res,
+            )
+            .unwrap(),
+            build_column_from_scalars(
+                &DataType::Binary,
+                &[
+                    ScalarValue::Binary(vec![1, 2, 3, 4]),
+                    ScalarValue::Null(DataType::Binary),
+                ],
+                &ctx.eval,
+                &mut res,
+            )
+            .unwrap(),
+            build_column_from_scalars(
+                &DataType::FixedBytes8,
+                &[
+                    ScalarValue::FixedBytes8([1, 2, 3, 4, 5, 6, 7, 8]),
+                    ScalarValue::Null(DataType::FixedBytes8),
+                ],
+                &ctx.eval,
+                &mut res,
+            )
+            .unwrap(),
+            build_column_from_scalars(
+                &DataType::FixedBytes16,
+                &[
+                    ScalarValue::FixedBytes16([9; 16]),
+                    ScalarValue::Null(DataType::FixedBytes16),
+                ],
+                &ctx.eval,
+                &mut res,
+            )
+            .unwrap(),
+            build_column_from_scalars(
+                &DataType::List(Box::new(DataType::I64)),
+                &[
+                    ScalarValue::List {
+                        item_type: DataType::I64,
+                        values: vec![ScalarValue::I64(1), ScalarValue::I64(2)],
+                    },
+                    ScalarValue::Null(DataType::List(Box::new(DataType::I64))),
+                ],
+                &ctx.eval,
+                &mut res,
+            )
+            .unwrap(),
+            build_column_from_scalars(
+                &DataType::MapUtf8,
+                &[
+                    ScalarValue::MapUtf8(vec![("k".into(), Some("v".into()))]),
+                    ScalarValue::Null(DataType::MapUtf8),
+                ],
+                &ctx.eval,
+                &mut res,
+            )
+            .unwrap(),
+            build_column_from_scalars(
+                &DataType::Events,
+                &[
+                    ScalarValue::Events(vec![EventItem {
+                        time: 10,
+                        name: "ev".into(),
+                        attributes: Some("{}".into()),
+                    }]),
+                    ScalarValue::Null(DataType::Events),
+                ],
+                &ctx.eval,
+                &mut res,
+            )
+            .unwrap(),
+            build_column_from_scalars(
+                &DataType::Links,
+                &[
+                    ScalarValue::Links(vec![LinkItem {
+                        trace_id: [1; 16],
+                        span_id: [2; 8],
+                        attributes: None,
+                    }]),
+                    ScalarValue::Null(DataType::Links),
+                ],
+                &ctx.eval,
+                &mut res,
+            )
+            .unwrap(),
+            Column::Dict(
+                DictColumn::try_new(
+                    FlatColumn::try_new(FlatData::FixedBytes8(vec![[1; 8], [2; 8]]), None).unwrap(),
+                    vec![0, 1, 0],
+                    Some(Bitmap::from_bools(&[true, false, true])),
+                )
+                .unwrap(),
+            ),
+            Column::Rle(
+                RleColumn::try_new(
+                    FlatColumn::try_new(FlatData::FixedBytes16(vec![[3; 16], [4; 16]]), None)
+                        .unwrap(),
+                    vec![2, 4],
+                )
+                .unwrap(),
+            ),
+        ];
+
+        for col in &cols {
+            for r in 0..col.len() {
+                for salt in [0u64, 1, 2, 42] {
+                    let h_col = hash_cols_row(&[col], r, salt);
+                    let atom = read_key_atom(col, r);
+                    let h_atom = hash_atoms(&[atom], salt);
+                    assert_eq!(
+                        h_col,
+                        h_atom,
+                        "hash mismatch for {:?} row {r} salt {salt}",
+                        col.data_type()
+                    );
+                }
+            }
+        }
+        res.free();
+    }
+
+    #[test]
+    fn group_by_fixed_bytes16_trace_id_spill_exact() {
+        let schema = Schema::try_new_arc(vec![
+            Field::new("trace_id", DataType::FixedBytes16, false),
+            Field::new("val", DataType::I64, false),
+        ])
+        .unwrap();
+
+        let mut batches = Vec::new();
+        for b in 0..8 {
+            let mut tids = Vec::with_capacity(200);
+            let mut vals = Vec::with_capacity(200);
+            for i in 0..200 {
+                let g = (b * 50 + i) % 400;
+                let mut tid = [0u8; 16];
+                tid[..8].copy_from_slice(&(g as u64).to_le_bytes());
+                tid[8..].copy_from_slice(&((g as u64) ^ 0xA5A5_5A5A).to_le_bytes());
+                tids.push(tid);
+                vals.push((g % 13 + 1) as i64);
+            }
+            batches.push(
+                Batch::try_new_all(
+                    Arc::clone(&schema),
+                    vec![
+                        Column::Flat(
+                            FlatColumn::try_new(FlatData::FixedBytes16(tids), None).unwrap(),
+                        ),
+                        Column::Flat(FlatColumn::try_new(FlatData::I64(vals), None).unwrap()),
+                    ],
+                    200,
+                )
+                .unwrap(),
+            );
+        }
+
+        let source = BatchSource::new(Arc::clone(&schema), batches).unwrap();
+        let agg_spec = HashAggSpec {
+            group_by: vec![(
+                "trace_id".to_owned(),
+                col_ref(0, "trace_id", DataType::FixedBytes16),
+            )],
+            aggs: vec![
+                AggExpr {
+                    func: AggFunc::CountStar,
+                    filter: None,
+                    output_name: "cnt".to_owned(),
+                },
+                AggExpr {
+                    func: AggFunc::Sum(col_ref(1, "val", DataType::I64)),
+                    filter: None,
+                    output_name: "sum".to_owned(),
+                },
+            ],
+        };
+
+        let to_map = |bs: &[Batch]| -> std::collections::BTreeMap<[u8; 16], (i64, i64)> {
+            let mut m = std::collections::BTreeMap::new();
+            for b in bs {
+                for r in 0..b.num_rows() {
+                    let ScalarValue::FixedBytes16(tid) =
+                        b.column(0).unwrap().get_scalar(r).unwrap()
+                    else {
+                        panic!("expected FixedBytes16");
+                    };
+                    let ScalarValue::I64(cnt) = b.column(1).unwrap().get_scalar(r).unwrap() else {
+                        panic!("expected i64 cnt");
+                    };
+                    let ScalarValue::I64(sum) = b.column(2).unwrap().get_scalar(r).unwrap() else {
+                        panic!("expected i64 sum");
+                    };
+                    assert!(
+                        m.insert(tid, (cnt, sum)).is_none(),
+                        "duplicate group after spill combine!"
+                    );
+                }
+            }
+            m
+        };
+
+        let (big_ctx, _big_dir) = test_ctx(8 * 1024 * 1024);
+        let expected = to_map(
+            &execute_hash_agg(&source, &ScanSpec::default(), agg_spec.clone(), &big_ctx).unwrap(),
+        );
+        assert_eq!(expected.len(), 400);
+
+        let (tight_ctx, _tight_dir) = test_ctx(64 * 1024);
+        let actual =
+            to_map(&execute_hash_agg(&source, &ScanSpec::default(), agg_spec, &tight_ctx).unwrap());
+        assert_eq!(actual, expected);
+        assert_eq!(tight_ctx.pool.reserved(), 0);
+        assert_eq!(tight_ctx.spill.spilled_bytes(), 0);
+    }
+
+    #[test]
+    fn group_table_incremental_bytes_match_full_scan() {
+        let kinds = vec![
+            AccKind::CountDistinct(DataType::Utf8),
+            AccKind::Percentile {
+                input_type: DataType::I64,
+                quantile: 0.5,
+            },
+        ];
+        let mut table = GroupTable::new(kinds.clone());
+        assert_eq!(table.spillable_bytes, table.compute_spillable_bytes());
+
+        let str_col = Column::Flat(
+            FlatColumn::try_new(
+                FlatData::Utf8(Utf8Data::try_from_slices(["alpha", "beta-longer"]).unwrap()),
+                None,
+            )
+            .unwrap(),
+        );
+        let num_col = Column::Flat(FlatColumn::try_new(FlatData::I64(vec![10, 20]), None).unwrap());
+
+        for g in 0..500usize {
+            let key = vec![KeyAtom::Utf8(format!("group-{g:04}"))];
+            let h = hash_atoms(&key, 0);
+            let gi = table.insert_group(h, key);
+            assert_eq!(table.spillable_bytes, table.compute_spillable_bytes());
+
+            for r in 0..2 {
+                let st0 = &mut table.states[gi][0];
+                let sp_before = st0.spillable_heap_bytes();
+                st0.fold_row(&kinds[0], &[&str_col], r).unwrap();
+                table.spillable_bytes = table
+                    .spillable_bytes
+                    .saturating_sub(sp_before)
+                    .saturating_add(st0.spillable_heap_bytes());
+
+                let st1 = &mut table.states[gi][1];
+                let unsp_before = st1.unspillable_heap_bytes();
+                st1.fold_row(&kinds[1], &[&num_col], r).unwrap();
+                table.unspillable_bytes = table
+                    .unspillable_bytes
+                    .saturating_sub(unsp_before)
+                    .saturating_add(st1.unspillable_heap_bytes());
+
+                assert_eq!(table.spillable_bytes, table.compute_spillable_bytes());
+            }
+        }
+    }
+
+    #[test]
+    fn filter_where_computed_expr_no_fault_and_dict_rle_const_encodings() {
+        use cetra_column::{DictColumn, RleColumn};
+
+        // FILTER (WHERE denom != 0) with SUM(100 / denom) must not fault on denom == 0 rows
+        // and must work cleanly with zero batch.clone() under a tight pool.
+        let schema = Schema::try_new_arc(vec![
+            Field::new("grp", DataType::Utf8, false),
+            Field::new("denom", DataType::I64, false),
+            Field::new("tag", DataType::Utf8, false),
+            Field::new("const_v", DataType::I64, false),
+        ])
+        .unwrap();
+
+        let grp_dict = Column::Dict(
+            DictColumn::try_new(
+                FlatColumn::try_new(
+                    FlatData::Utf8(Utf8Data::try_from_slices(["g0", "g1"]).unwrap()),
+                    None,
+                )
+                .unwrap(),
+                vec![0, 1, 0, 1, 0, 1],
+                None,
+            )
+            .unwrap(),
+        );
+        let denom_rle = Column::Rle(
+            RleColumn::try_new(
+                FlatColumn::try_new(FlatData::I64(vec![0, 2, 5]), None).unwrap(),
+                vec![2, 4, 6],
+            )
+            .unwrap(),
+        );
+        let tag_flat = Column::Flat(
+            FlatColumn::try_new(
+                FlatData::Utf8(Utf8Data::try_from_slices(["a", "b", "c", "d", "e", "f"]).unwrap()),
+                None,
+            )
+            .unwrap(),
+        );
+        let const_v = Column::try_new_const(ScalarValue::I64(7), 6).unwrap();
+
+        let batch = Batch::try_new_all(
+            Arc::clone(&schema),
+            vec![grp_dict, denom_rle, tag_flat, const_v],
+            6,
+        )
+        .unwrap();
+        let src = BatchSource::new(Arc::clone(&schema), vec![batch]).unwrap();
+
+        let denom_nz = Expr::Binary {
+            left: Box::new(col_ref(1, "denom", DataType::I64)),
+            op: BinaryOp::NotEq,
+            right: Box::new(Expr::Literal(ScalarValue::I64(0))),
+            data_type: DataType::Bool,
+        };
+        let div_expr = Expr::Binary {
+            left: Box::new(Expr::Literal(ScalarValue::I64(100))),
+            op: BinaryOp::Div,
+            right: Box::new(col_ref(1, "denom", DataType::I64)),
+            data_type: DataType::I64,
+        };
+        let agg_spec = HashAggSpec {
+            group_by: vec![
+                ("grp".to_owned(), col_ref(0, "grp", DataType::Utf8)),
+                ("const_v".to_owned(), col_ref(3, "const_v", DataType::I64)),
+            ],
+            aggs: vec![
+                AggExpr {
+                    func: AggFunc::Sum(div_expr),
+                    filter: Some(denom_nz.clone()),
+                    output_name: "sum_div".to_owned(),
+                },
+                AggExpr {
+                    func: AggFunc::Count(col_ref(2, "tag", DataType::Utf8)),
+                    filter: Some(denom_nz),
+                    output_name: "cnt_tag".to_owned(),
+                },
+                AggExpr {
+                    func: AggFunc::Sum(col_ref(3, "const_v", DataType::I64)),
+                    filter: None,
+                    output_name: "sum_const".to_owned(),
+                },
+            ],
+        };
+
+        let (ctx, _dir) = test_ctx(128 * 1024);
+        let out = execute_hash_agg(&src, &ScanSpec::default(), agg_spec, &ctx).unwrap();
+        assert_eq!(ctx.pool.reserved(), 0);
+
+        let mut map = std::collections::BTreeMap::new();
+        for b in &out {
+            for r in 0..b.num_rows() {
+                let ScalarValue::Utf8(g) = b.column(0).unwrap().get_scalar(r).unwrap() else {
+                    panic!("expected utf8");
+                };
+                let ScalarValue::I64(cv) = b.column(1).unwrap().get_scalar(r).unwrap() else {
+                    panic!("expected i64");
+                };
+                let ScalarValue::I64(sd) = b.column(2).unwrap().get_scalar(r).unwrap() else {
+                    panic!("expected i64");
+                };
+                let ScalarValue::I64(ct) = b.column(3).unwrap().get_scalar(r).unwrap() else {
+                    panic!("expected i64");
+                };
+                let ScalarValue::I64(sc) = b.column(4).unwrap().get_scalar(r).unwrap() else {
+                    panic!("expected i64");
+                };
+                map.insert((g, cv), (sd, ct, sc));
+            }
+        }
+        // Rows:
+        // 0: g0, denom=0 (filtered out), const=7
+        // 1: g1, denom=0 (filtered out), const=7
+        // 2: g0, denom=2 -> 50, const=7
+        // 3: g1, denom=2 -> 50, const=7
+        // 4: g0, denom=5 -> 20, const=7
+        // 5: g1, denom=5 -> 20, const=7
+        assert_eq!(map.get(&("g0".to_owned(), 7)), Some(&(70, 2, 21)));
+        assert_eq!(map.get(&("g1".to_owned(), 7)), Some(&(70, 2, 21)));
+
+        // Equal +/-inf in exact_percentile_sorted does not produce NaN.
+        assert_eq!(
+            exact_percentile_sorted(&[f64::INFINITY, f64::INFINITY], 0.5).unwrap(),
+            f64::INFINITY
+        );
+        assert_eq!(
+            exact_percentile_sorted(&[f64::NEG_INFINITY, f64::NEG_INFINITY], 0.25).unwrap(),
+            f64::NEG_INFINITY
+        );
     }
 }
