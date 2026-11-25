@@ -44,6 +44,8 @@ arbitrary.workspace = true
 
 [dev-dependencies]
 arbitrary.workspace = true
+# The binary's allocator (D56) in the integration tests, so the soak measures its memory.
+mimalloc.workspace = true
 proptest.workspace = true
 flate2.workspace = true
 tracing-subscriber.workspace = true
