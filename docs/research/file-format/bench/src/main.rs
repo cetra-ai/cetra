@@ -1583,14 +1583,14 @@ fn restrata_cmd(dir: &Path, out: &str) -> R<()> {
 /// The narrow columns of the Strata files: bytes, key-filter bytes, chunks and chunks per
 /// encoding, summed over the files, largest first.
 fn narrow_table(summaries: &[strata::FileSummary]) {
-    const ENCODINGS: [&str; 13] = ["const", "null", "for", "plain", "fsb", "fsb_rle", "dict", "varbin", "list_dict", "bool", "ipc", "map", "float_dict"];
-    let mut columns: Vec<(String, u64, u64, u32, [u32; 13])> = Vec::new();
+    const ENCODINGS: [&str; 14] = ["const", "null", "for", "plain", "fsb", "fsb_rle", "dict", "varbin", "list_dict", "bool", "ipc", "map", "float_dict", "for_delta"];
+    let mut columns: Vec<(String, u64, u64, u32, [u32; 14])> = Vec::new();
     for s in summaries {
         for c in s.columns.iter().filter(|c| c.payload.is_none()) {
             let i = match columns.iter().position(|e| e.0 == c.name) {
                 Some(i) => i,
                 None => {
-                    columns.push((c.name.clone(), 0, 0, 0, [0; 13]));
+                    columns.push((c.name.clone(), 0, 0, 0, [0; 14]));
                     columns.len() - 1
                 }
             };
