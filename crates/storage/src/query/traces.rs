@@ -2489,14 +2489,21 @@ mod tests {
             .sum::<usize>()
     }
 
-    /// M6.8 (D-A1-13): a pool too small for the merge's sorts spills them, and
-    /// the merge still returns every trace, as the default-memory query does.
+    /// M6.8 (D-A1-13): a pool too small for the merge's sort spills it, and the
+    /// merge still returns every trace, as the default-memory query does.
+    ///
+    /// One partition, so the sort needs about 7.7 MiB for its 120,000 traces: more
+    /// than the 5.75 MiB the 6 MiB pool leaves it beside its 256 KiB of merge bytes,
+    /// so it spills whatever its fair share is at the time. The pool still holds the
+    /// trace merge's chunk, which can't spill. With two partitions and 25,000 traces
+    /// each, a sort's 1.6 MiB was just above its fair share, and below it until the
+    /// other sort reserved its merge bytes, so the query sometimes did not spill.
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn a_small_pool_spills_the_merge_and_returns_every_trace() {
         let dir = tempfile::tempdir().unwrap();
         let storage = crate::Storage::open(config_in(dir.path())).await.unwrap();
         storage
-            .append_spans(project(), spans_batch(&numbered_spans(50_000)))
+            .append_spans(project(), spans_batch(&numbered_spans(120_000)))
             .await
             .unwrap();
         storage.shutdown().await.unwrap();
@@ -2516,23 +2523,24 @@ mod tests {
             storage.shutdown().await.unwrap();
             counts
         };
-        assert_eq!(expected.len(), 50_000);
+        assert_eq!(expected.len(), 120_000);
 
         let mut config = config_in(dir.path());
-        config.query.max_memory = ByteSize::mib(8);
+        config.query.target_partitions = 1;
+        config.query.max_memory = ByteSize::mib(6);
         config.query.initial_memory = ByteSize::mib(1);
-        config.query.max_memory_total = Some(ByteSize::mib(8));
+        config.query.max_memory_total = Some(ByteSize::mib(6));
         let storage = crate::Storage::open(config).await.unwrap();
         let query = storage
             .query(project(), QueryOptions::new(None, None))
             .await
             .unwrap();
-        // Each sort reserves 1 MiB to merge its spill files, not the default 10 MiB.
+        // Each sort reserves 256 KiB to merge its spill files, not the default 10 MiB.
         let ctx = SessionContext::new_with_config_rt(
             SessionConfig::new()
-                .with_target_partitions(2)
+                .with_target_partitions(1)
                 .with_batch_size(1024)
-                .with_sort_spill_reservation_bytes(1024 * 1024),
+                .with_sort_spill_reservation_bytes(256 * 1024),
             Arc::clone(&query.runtime),
         );
         ctx.register_table("traces", Arc::clone(&query.traces))
