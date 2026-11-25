@@ -61,7 +61,7 @@ No new dependency. M1 uses what `bench/Cargo.toml` already has, at the versions 
 
 `bench`, `testdata` and `strata` point `cetra-core` at `/home/sebastien/travaux/llm-observer/crates/core`, whose `Span` has fields this worktree's `testdata` doesn't set. The orchestrator points them at this worktree's `crates/core` before the phases start, and puts the paths and the lock files back after M1.4. **Phases never edit or commit `Cargo.toml` or `Cargo.lock` files** (M1.4 edits only `bench/Cargo.toml`'s `[features]`); if a build needs a change there, stop and report it.
 
-Commands run in `docs/research/file-format/bench/`.
+Commands run in `docs/research/file-format/bench/`, with `LIBCLANG_PATH=/usr/lib/llvm-18/lib` set: Vortex's `custom-labels` dependency runs bindgen, which doesn't find libclang on this machine otherwise.
 
 ## Phase graph
 
@@ -73,7 +73,7 @@ Commands run in `docs/research/file-format/bench/`.
 | M1.4 wiring | `bench/Cargo.toml` (`[features]` only), `bench/src/main.rs`, `bench/src/cw/mod.rs`, `bench/src/cw/harness.rs` | M1.1, M1.2, M1.3 |
 | M1.5 runs and report | `strata-readiness.md`, `plans/08-cetra-workload-design.md` (orchestrator) | M1.4 |
 
-**M1.1, M1.2 and M1.3 run in parallel**, in the session's one worktree (a hook keeps this session's agents from writing to other worktrees), on the branch `claude/file-format-research`:
+**M1.1, M1.2 and M1.3 run in parallel**, in the session's one worktree, on the branch `claude/file-format-research`, so that they share one `target/` and the dependencies (DataFusion, Vortex, arrow) build once instead of three times:
 - The orchestrator's base commit adds `mod cw;` to `main.rs`, a `cw/mod.rs` that declares each module behind a temporary feature of the `bench` crate (`#[cfg(feature = "cw_cases")] pub mod cases;`, `cw_harness`, `cw_read`), and the three features in `bench/Cargo.toml`. Each phase builds and tests with its own feature only (`--features cw_cases` and so on), so another phase's unfinished file is never compiled. A feature of the root crate doesn't change its dependencies, so they build once.
 - Each phase owns one new file, and its tests build what they need without the other two (M1.2 and M1.3 write their test files with `spans_to_record_batch`, `crate::write_parquet` and `crate::write_strata`, not with M1.1's cases).
 - Only M1.1 edits `main.rs` (the `Some("cw")` arm and `USAGE`) and `cw/mod.rs` (`cmd`, which it puts under `#[cfg(feature = "cw_cases")]` too).
