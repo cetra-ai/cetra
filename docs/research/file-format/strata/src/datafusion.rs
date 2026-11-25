@@ -12,7 +12,7 @@
 use std::ops::Range;
 use std::sync::Arc;
 
-use arrow::array::{RecordBatch, RecordBatchOptions};
+use arrow::array::{AsArray, BooleanArray, RecordBatch, RecordBatchOptions};
 use arrow::compute::{SortColumn, concat_batches, lexsort_to_indices, take_record_batch};
 use arrow::compute::{SortOptions, cast};
 use arrow::datatypes::{DataType, Field, Schema, SchemaRef, TimeUnit};
@@ -24,13 +24,16 @@ use object_store::path::Path;
 
 use ::datafusion::catalog::Session;
 use ::datafusion::common::stats::Precision;
+use ::datafusion::common::tree_node::TreeNode;
 use ::datafusion::common::tree_node::TreeNodeRecursion;
 use ::datafusion::common::utils::project_schema;
-use ::datafusion::common::{ColumnStatistics, DataFusionError, ScalarValue, Statistics};
+use ::datafusion::common::{ColumnStatistics, DFSchema, DataFusionError, ScalarValue, Statistics};
 use ::datafusion::datasource::TableProvider;
 use ::datafusion::error::Result as DfResult;
 use ::datafusion::execution::TaskContext;
 use ::datafusion::logical_expr::expr::{Between, BinaryExpr, InList, Like, ScalarFunction};
+use ::datafusion::logical_expr::expr_rewriter::unnormalize_col;
+use ::datafusion::logical_expr::utils::conjunction;
 use ::datafusion::logical_expr::{Expr, Operator, TableProviderFilterPushDown, TableType};
 use ::datafusion::physical_expr::expressions::Column as PhysicalColumn;
 use ::datafusion::physical_expr::{EquivalenceProperties, PhysicalSortExpr};
@@ -49,7 +52,7 @@ use crate::file::StrataFile;
 use crate::hot::Layer;
 use crate::io::{IoStats, ScanKind};
 use crate::predicate::{self, CmpOp, Lit, Predicate, layout_of};
-use crate::scan::{ScanRequest, TopRows};
+use crate::scan::{RowFilter, ScanRequest, TopRows};
 use ::datafusion::common::runtime::SpawnedTask;
 
 /// A DataFusion table over Strata files that share one schema.
@@ -325,6 +328,135 @@ fn translate(expr: &Expr, table: &StrataTable) -> Pushed {
         Pushed::Inexact(p) if fits(&p) => Pushed::Inexact(p),
         _ => Pushed::No,
     }
+}
+
+/// Whether the scan can run `expr` as a row filter when Strata cannot translate it: it reads
+/// columns of the table, by name, and has no volatile function, subquery, aggregate, window
+/// function or placeholder, which a scan cannot evaluate row by row on its own.
+fn row_filterable(expr: &Expr, table: &StrataTable) -> bool {
+    let columns = expr.column_refs();
+    let unsupported = expr
+        .exists(|e| {
+            Ok(matches!(
+                e,
+                Expr::ScalarSubquery(_)
+                    | Expr::Exists(_)
+                    | Expr::InSubquery(_)
+                    | Expr::SetComparison(_)
+                    | Expr::AggregateFunction(_)
+                    | Expr::WindowFunction(_)
+                    | Expr::OuterReferenceColumn(..)
+                    | Expr::Placeholder(_)
+            ))
+        })
+        .unwrap_or(true);
+    !columns.is_empty()
+        && columns
+            .iter()
+            .all(|column| table.schema.index_of(&column.name).is_ok())
+        && !expr.is_volatile()
+        && !unsupported
+}
+
+/// The row filter of `filters` (each [`row_filterable`]), their conjunction: DataFusion's
+/// physical expression over the table columns they read, evaluated by the scan on the rows its
+/// predicate selects. A NULL result drops the row, as `WHERE` does. `None` without a filter.
+fn row_filter(
+    state: &dyn Session,
+    table: &StrataTable,
+    filters: &[Expr],
+) -> DfResult<Option<RowFilter>> {
+    let Some(expr) = conjunction(filters.iter().cloned().map(unnormalize_col)) else {
+        return Ok(None);
+    };
+    let mut columns = expr
+        .column_refs()
+        .iter()
+        .map(|column| table.schema.index_of(&column.name))
+        .collect::<std::result::Result<Vec<usize>, _>>()?;
+    columns.sort_unstable();
+    columns.dedup();
+    let schema: SchemaRef = Arc::new(table.schema.project(&columns)?);
+    let physical = state.create_physical_expr(expr, &DFSchema::try_from(Arc::clone(&schema))?)?;
+    let external = |e: DataFusionError| StrataError::from(arrow::error::ArrowError::from(e));
+    let mask = move |batch: &RecordBatch| -> Result<BooleanArray> {
+        let batch = to_table_batch(batch, &schema)?;
+        let value = physical
+            .evaluate(&batch)
+            .and_then(|value| value.into_array(batch.num_rows()))
+            .map_err(external)?;
+        value
+            .as_boolean_opt()
+            .cloned()
+            .ok_or_else(|| StrataError::Schema {
+                reason: format!("a row filter of type {}", value.data_type()),
+            })
+    };
+    Ok(Some(RowFilter {
+        columns,
+        mask: Arc::new(mask),
+    }))
+}
+
+/// How many times the stored bytes of the filter columns the other projected columns must
+/// hold for a row filter to pay (see [`row_filter_pays`]).
+const ROW_FILTER_GAIN: u64 = 4;
+
+/// The stored bytes a row the other projected columns must hold for a row filter to pay (see
+/// [`row_filter_pays`]).
+const ROW_FILTER_MIN_ROW_BYTES: u64 = 16;
+
+/// Whether a row filter on `filter_columns` pays for a scan projecting `projection`. It reads
+/// the filter columns once more and costs a little for each row it tests, and saves the other
+/// projected columns' rows it drops. So it pays when those columns are wide: at least
+/// [`ROW_FILTER_MIN_ROW_BYTES`] stored bytes a row, and [`ROW_FILTER_GAIN`] times the filter
+/// columns' bytes, as a payload column next to a filter on a label is. Narrow columns decode
+/// faster than the filter tests their rows (TPC-H q19 was 1.4 times slower with one). Without
+/// a row filter the filter runs in DataFusion's `FilterExec` above the scan, which the
+/// pushdown keeps (Inexact).
+async fn row_filter_pays(
+    files: &[Arc<StrataFile>],
+    projection: &[usize],
+    filter_columns: &[usize],
+) -> DfResult<bool> {
+    let (mut filter, mut other) = (0u64, 0u64);
+    for &column in filter_columns {
+        filter = filter.saturating_add(stored_bytes(files, column).await.map_err(df)?);
+    }
+    for &column in projection.iter().filter(|c| !filter_columns.contains(c)) {
+        other = other.saturating_add(stored_bytes(files, column).await.map_err(df)?);
+    }
+    let rows: u64 = files.iter().map(|file| file.row_count()).sum();
+    Ok(
+        other >= rows.saturating_mul(ROW_FILTER_MIN_ROW_BYTES).max(1)
+            && other >= filter.saturating_mul(ROW_FILTER_GAIN),
+    )
+}
+
+/// The stored bytes of schema column `column` in `files`: its chunks, dictionary and payload
+/// segments, and those of its map children and residual.
+async fn stored_bytes(files: &[Arc<StrataFile>], column: usize) -> Result<u64> {
+    let mut total = 0u64;
+    for file in files {
+        for (id, record) in file.directory().iter().enumerate() {
+            let own = usize::try_from(record.column_id).is_ok_and(|c| c == column);
+            let child = usize::try_from(record.parent).is_ok_and(|p| p == column);
+            if !own && !child {
+                continue;
+            }
+            let chunks: u64 = file
+                .block_entries(id)
+                .await?
+                .iter()
+                .map(|e| u64::from(e.segment_len))
+                .sum();
+            total = total
+                .saturating_add(chunks)
+                .saturating_add(u64::from(record.dict_len))
+                .saturating_add(u64::from(record.payload_len));
+        }
+    }
+    Ok(total)
 }
 
 fn translate_inner(expr: &Expr, table: &StrataTable) -> Pushed {
@@ -679,6 +811,12 @@ impl TableProvider for StrataTable {
                 let (p, answer) = match translate(filter, self) {
                     Pushed::Exact(p) => (p, TableProviderFilterPushDown::Exact),
                     Pushed::Inexact(p) => (p, TableProviderFilterPushDown::Inexact),
+                    // The scan runs it on the rows its predicate selects ([`row_filter`]), and
+                    // DataFusion's `FilterExec` above checks the rows it keeps again: the filter
+                    // stays in the plan, so the plan's row estimates are those of a filter.
+                    Pushed::No if row_filterable(filter, self) => {
+                        return TableProviderFilterPushDown::Inexact;
+                    }
                     Pushed::No => return TableProviderFilterPushDown::Unsupported,
                 };
                 if !fits_with(&kept, &p) {
@@ -700,11 +838,16 @@ impl TableProvider for StrataTable {
         // Translate the filters. DataFusion passes only the filters that `supports_filters_pushdown`
         // accepted, so a filter that does not translate here is an error, not a filter to skip.
         let mut kept: Vec<Predicate> = Vec::new();
+        let mut residual: Vec<Expr> = Vec::new();
         let mut key = None;
         for filter in filters {
             let (p, exact) = match translate(filter, self) {
                 Pushed::Exact(p) => (p, true),
                 Pushed::Inexact(p) => (p, false),
+                Pushed::No if row_filterable(filter, self) => {
+                    residual.push(filter.clone());
+                    continue;
+                }
                 Pushed::No => {
                     return Err(DataFusionError::Plan(format!(
                         "StrataTable cannot evaluate a pushed filter: {filter}"
@@ -755,9 +898,20 @@ impl TableProvider for StrataTable {
             }
         }
 
-        // Lookup mode: the key filter is the only kept filter and there is no limit.
+        let indexes: Vec<usize> = projection
+            .cloned()
+            .unwrap_or_else(|| (0..self.schema.fields().len()).collect());
+        let row_filter = match row_filter(state, self, &residual)? {
+            Some(filter) if row_filter_pays(&files, &indexes, &filter.columns).await? => {
+                Some(filter)
+            }
+            _ => None,
+        };
+        // Lookup mode: the key filter is the only filter and there is no limit.
         let lookup = match key {
-            Some((_, bytes)) if kept.len() == 1 && limit.is_none() => Some(bytes),
+            Some((_, bytes)) if kept.len() == 1 && limit.is_none() && row_filter.is_none() => {
+                Some(bytes)
+            }
             _ => None,
         };
         let predicate = match (lookup.is_some(), kept.len()) {
@@ -766,9 +920,6 @@ impl TableProvider for StrataTable {
             _ => Some(Predicate::And(kept)),
         };
 
-        let indexes: Vec<usize> = projection
-            .cloned()
-            .unwrap_or_else(|| (0..self.schema.fields().len()).collect());
         let schema = project_schema(&self.schema, projection)?;
         let target = state.config().target_partitions();
         let mut column_stats = Vec::with_capacity(indexes.len());
@@ -777,6 +928,7 @@ impl TableProvider for StrataTable {
         }
         let mut exec = StrataExec::new(files, indexes, predicate, lookup, limit, schema, target);
         exec.column_stats = column_stats;
+        exec.row_filter = row_filter;
         exec.selectivity = state.config_options().optimizer.default_filter_selectivity;
         Ok(Arc::new(exec))
     }
@@ -897,6 +1049,8 @@ pub struct StrataExec {
     predicate: Option<Predicate>,
     lookup: Option<Vec<u8>>,
     limit: Option<usize>,
+    /// The filters Strata does not translate, run by the scan ([`row_filter`]).
+    row_filter: Option<RowFilter>,
     /// The order each partition outputs its rows in, when DataFusion pushed a sort down
     /// (`try_pushdown_sort`). Every key is a projected column.
     order: Option<Vec<PhysicalSortExpr>>,
@@ -1099,6 +1253,7 @@ async fn staged_top(
                                 kind: ScanKind::Scan,
                                 views: true,
                                 top: Some(top),
+                                row_filter: None,
                             },
                             threads,
                         )
@@ -1179,6 +1334,7 @@ impl StrataExec {
             predicate,
             lookup,
             limit,
+            row_filter: None,
             order: None,
             fetch: None,
             staged: false,
@@ -1205,8 +1361,10 @@ impl StrataExec {
                         | DataType::Timestamp(_, _)
                 )
             });
-        let staged =
-            fetch.is_some() && first_int && self.predicate.as_ref().is_some_and(has_contains);
+        let staged = fetch.is_some()
+            && first_int
+            && self.row_filter.is_none()
+            && self.predicate.as_ref().is_some_and(has_contains);
         let partitions = if staged { 1 } else { self.parts.len().max(1) };
         let props = plan_properties(
             &self.files,
@@ -1222,6 +1380,7 @@ impl StrataExec {
             predicate: self.predicate.clone(),
             lookup: self.lookup.clone(),
             limit: self.limit,
+            row_filter: self.row_filter.clone(),
             order: Some(order),
             fetch,
             staged,
@@ -1233,10 +1392,15 @@ impl StrataExec {
         }
     }
 
-    /// The files, projection and predicate of a plain scan: no lookup, limit or pushed sort.
-    /// `None` otherwise. An aggregate over a plain scan may run in Strata (`aggregate.rs`).
+    /// The files, projection and predicate of a plain scan: no lookup, limit, row filter or
+    /// pushed sort. `None` otherwise. An aggregate over a plain scan may run in Strata
+    /// (`aggregate.rs`).
     pub(crate) fn plain_scan(&self) -> Option<PlainScan<'_>> {
-        (self.lookup.is_none() && self.limit.is_none() && self.order.is_none()).then_some((
+        (self.lookup.is_none()
+            && self.limit.is_none()
+            && self.row_filter.is_none()
+            && self.order.is_none())
+        .then_some((
             self.files.as_slice(),
             self.projection.as_slice(),
             self.predicate.as_ref(),
@@ -1266,6 +1430,9 @@ impl DisplayAs for StrataExec {
             self.partitions(),
             self.lookup.is_some()
         )?;
+        if let Some(filter) = &self.row_filter {
+            write!(f, ", row_filter={:?}", filter.columns)?;
+        }
         if let Some(order) = &self.order {
             let keys: Vec<String> = order.iter().map(ToString::to_string).collect();
             write!(f, ", order=[{}], fetch={:?}", keys.join(", "), self.fetch)?;
@@ -1312,6 +1479,7 @@ impl ExecutionPlan for StrataExec {
         let mut rows = usize::try_from(rows).unwrap_or(usize::MAX);
         // How a limit splits across partitions is not modelled: it only caps the estimate.
         let cap = self.limit.or(self.fetch);
+        // A row filter is not counted: DataFusion's `FilterExec` above estimates its rows.
         let selected = self.predicate.is_some() || self.lookup.is_some();
         let filtered = selected || cap.is_some();
         if selected && rows > 0 {
@@ -1447,6 +1615,7 @@ impl ExecutionPlan for StrataExec {
         };
         let projection = self.projection.clone();
         let predicate = self.predicate.clone();
+        let row_filter = self.row_filter.clone();
         let lookup = self.lookup.clone();
         let limit = self.limit;
         let keys = match &self.order {
@@ -1538,6 +1707,7 @@ impl ExecutionPlan for StrataExec {
                             kind: ScanKind::Scan,
                             views: true,
                             top: None,
+                            row_filter: row_filter.clone(),
                         };
                         let (bytes, requests, waves) =
                             (bytes.clone(), requests.clone(), waves.clone());
@@ -1583,6 +1753,7 @@ impl ExecutionPlan for StrataExec {
                                 kind: ScanKind::Scan,
                                 views: true,
                                 top,
+                                row_filter,
                             },
                             threads,
                         )

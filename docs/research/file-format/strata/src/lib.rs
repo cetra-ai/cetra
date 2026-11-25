@@ -76,5 +76,5 @@ pub use merge::{merge, rewrite};
 pub use payload::PayloadStats;
 pub use predicate::{CmpOp, Lit, Predicate};
 pub use reader::read_column;
-pub use scan::ScanRequest;
+pub use scan::{RowFilter, ScanRequest};
 pub use writer::{ColumnSummary, FileSummary, StrataWriter};

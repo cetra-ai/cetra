@@ -127,6 +127,7 @@ pub async fn trace_list(
                 kind: ScanKind::Scan,
                 views: false,
                 top: None,
+                row_filter: None,
             })
             .await?;
         for batch in batches {

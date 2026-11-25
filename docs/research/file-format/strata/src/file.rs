@@ -2054,6 +2054,7 @@ pub(crate) mod tests {
                     kind: ScanKind::Scan,
                     views: false,
                     top: None,
+                    row_filter: None,
                 };
                 file.scan(&req).await.unwrap();
                 chunk_bytes(&file)
@@ -2077,6 +2078,7 @@ pub(crate) mod tests {
                     kind: ScanKind::Scan,
                     views: false,
                     top: None,
+                    row_filter: None,
                 };
                 let batches = file.scan(&req).await.unwrap();
                 let got: usize = batches.iter().map(RecordBatch::num_rows).sum();

@@ -67,6 +67,32 @@ pub struct ScanRequest {
     /// Keep only the selected rows that rank in the first `k` by one narrow column, and the
     /// rows tied with the k-th. Cannot be combined with `limit`.
     pub top: Option<TopRows>,
+    /// Keep only the selected rows it keeps. It runs before `limit` and `top`.
+    pub row_filter: Option<RowFilter>,
+}
+
+/// A filter Strata cannot evaluate itself, such as a SQL expression: the scan reads `columns`
+/// for the rows its predicate selects, asks `mask` which of them to keep, and reads the
+/// projection for those rows only. On Polar Signals, a filter on one label kept 999 of 500,000
+/// rows, and the scan decoded their stack traces only instead of all of them.
+#[derive(Clone)]
+pub struct RowFilter {
+    /// Schema indexes of the columns `mask` reads, distinct and in this order. Not empty.
+    pub columns: Vec<usize>,
+    /// Which rows of a batch of `columns` to keep: TRUE keeps a row, FALSE and NULL drop it. The
+    /// mask has the batch's length.
+    pub mask: RowMask,
+}
+
+/// The mask function of a [`RowFilter`].
+pub type RowMask = Arc<dyn Fn(&RecordBatch) -> Result<BooleanArray> + Send + Sync>;
+
+impl std::fmt::Debug for RowFilter {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RowFilter")
+            .field("columns", &self.columns)
+            .finish_non_exhaustive()
+    }
 }
 
 /// The rows a scan keeps when a sort and a limit sit above it: those that rank in the first `k`
@@ -1429,6 +1455,15 @@ impl StrataFile {
             None => (None, Vec::new()),
         };
         self.check_row_ranges(req.row_ranges.as_deref())?;
+        if let Some(filter) = &req.row_filter {
+            let mut seen = BTreeSet::new();
+            if filter.columns.is_empty() || !filter.columns.iter().all(|&c| seen.insert(c)) {
+                return Err(StrataError::Unsupported {
+                    what: "a row filter without columns or with a repeated column".to_string(),
+                });
+            }
+            self.check_projection(&filter.columns)?;
+        }
         if let Some(top) = &req.top {
             if req.limit.is_some() {
                 return Err(StrataError::Unsupported {
@@ -1558,6 +1593,7 @@ impl StrataFile {
         if let Some(b) = &bound
             && req.top.is_none()
             && req.limit.is_none()
+            && req.row_filter.is_none()
             && sources.is_empty()
             && let Some((column, lo, hi)) = int_interval(b)
         {
@@ -1592,11 +1628,13 @@ impl StrataFile {
         // the masks of the `Contains` terms are computed over the whole file before the filter
         // wave, which evaluates the predicate with them.
         let late = bound.as_ref().and_then(|b| late_contains(b, &sources));
+        // The limit bounds the rows the predicate selects, unless a row filter drops some.
+        let limit = req.limit.filter(|_| req.row_filter.is_none());
         let mut decoded = Decoded::default();
         // Chunks fetched but not decoded, by the filter or the projection.
         let mut encoded = Encoded::default();
         let selection: Rows = match (&bound, late) {
-            (None, _) => Rows::whole(&candidates, req.limit),
+            (None, _) => Rows::whole(&candidates, limit),
             (Some(_), Some((rest, late))) => {
                 // `rest` reads no `Contains` mask; theirs are null placeholders.
                 let full = sources
@@ -1673,7 +1711,7 @@ impl StrataFile {
                     &infos,
                     &candidates,
                     req.kind,
-                    req.limit,
+                    limit,
                     (&mut decoded, &mut encoded),
                 )
                 .await
@@ -1681,7 +1719,15 @@ impl StrataFile {
             }
         };
 
-        // 6. Limit, or the top rows. Top rows and payload columns take a list of rows.
+        // 6. The row filter, the limit, or the top rows. Top rows and payload columns take a
+        // list of rows.
+        let selection = match &req.row_filter {
+            Some(filter) if selection.len() > 0 => {
+                self.row_filtered(filter, selection, req.kind, req.views, threads)
+                    .await?
+            }
+            _ => selection,
+        };
         let mut selection = match req.limit {
             Some(limit) => selection.truncate(limit),
             None => selection,
@@ -1758,6 +1804,89 @@ impl StrataFile {
         )?;
         batches.threads = threads;
         Ok(batches)
+    }
+
+    /// The rows of `selection` that `filter` keeps. Its columns are read for the selected rows
+    /// by scans of at most [`FILTER_WINDOW`] rows each, so the filter holds one window's values
+    /// at a time.
+    async fn row_filtered(
+        &self,
+        filter: &RowFilter,
+        selection: Rows,
+        kind: ScanKind,
+        views: bool,
+        threads: usize,
+    ) -> Result<Rows> {
+        let runs = match selection {
+            Rows::Ranges { ranges, .. } => ranges,
+            Rows::List(rows) => {
+                let mut runs = Vec::new();
+                for row in rows {
+                    push_run(&mut runs, row, row.saturating_add(1));
+                }
+                runs
+            }
+        };
+        // The runs in windows of at most `FILTER_WINDOW` rows, a run split where one ends.
+        let mut windows: Vec<Vec<Range<u32>>> = vec![Vec::new()];
+        let mut held = 0u32;
+        for run in runs {
+            let mut start = run.start;
+            while start < run.end {
+                if held == FILTER_WINDOW {
+                    windows.push(Vec::new());
+                    held = 0;
+                }
+                let end = run.end.min(start.saturating_add(FILTER_WINDOW - held));
+                if let Some(last) = windows.last_mut() {
+                    last.push(start..end);
+                }
+                held += end - start;
+                start = end;
+            }
+        }
+        let mut kept: Vec<Range<u32>> = Vec::new();
+        for pieces in windows.into_iter().filter(|w| !w.is_empty()) {
+            let request = ScanRequest {
+                projection: filter.columns.clone(),
+                predicate: None,
+                row_ranges: Some(pieces.clone()),
+                limit: None,
+                kind,
+                views,
+                top: None,
+                row_filter: None,
+            };
+            let batches = Box::pin(self.scan_batches(&request, threads)).await?;
+            let mut rows = pieces.iter().flat_map(|piece| piece.clone());
+            for batch in batches {
+                let batch = batch?;
+                let mask = (filter.mask)(&batch)?;
+                if mask.len() != batch.num_rows() {
+                    return Err(StrataError::Schema {
+                        reason: format!(
+                            "a row filter returned {} values for {} rows",
+                            mask.len(),
+                            batch.num_rows()
+                        ),
+                    });
+                }
+                for keep in mask.iter() {
+                    let row = rows.next().ok_or_else(|| StrataError::Schema {
+                        reason: "internal: a row filter scan of the wrong row count".to_string(),
+                    })?;
+                    if keep == Some(true) {
+                        push_run(&mut kept, row, row.saturating_add(1));
+                    }
+                }
+            }
+            if rows.next().is_some() {
+                return Err(StrataError::Schema {
+                    reason: "internal: a row filter scan of the wrong row count".to_string(),
+                });
+            }
+        }
+        Ok(Rows::from_runs(kept))
     }
 
     /// The [`FusedScan`] of `filter` over `candidates`, projecting `projection`, or `None` when the
@@ -3029,6 +3158,7 @@ mod tests {
                         kind: ScanKind::Scan,
                         views,
                         top: None,
+                        row_filter: None,
                     };
                     let mut batches = file.scan_batches(&req, threads).await.unwrap();
                     // Four batches, built `threads` at a time.
@@ -3091,6 +3221,7 @@ mod tests {
                     kind: ScanKind::Scan,
                     views,
                     top: None,
+                    row_filter: None,
                 };
                 let plain = file.scan(&req(false)).await.unwrap();
                 let viewed = file.scan(&req(true)).await.unwrap();
@@ -3146,6 +3277,7 @@ mod tests {
                         kind: ScanKind::Scan,
                         views: false,
                         top: None,
+                        row_filter: None,
                     };
                     let rows: usize = file
                         .scan(&req)
@@ -3218,6 +3350,7 @@ mod tests {
                         kind: ScanKind::Scan,
                         views: false,
                         top: None,
+                        row_filter: None,
                     };
                     let rows: usize = file
                         .scan(&req)
@@ -3263,6 +3396,7 @@ mod tests {
                 kind: ScanKind::Scan,
                 views: false,
                 top: None,
+                row_filter: None,
             };
             let batches = file
                 .scan_batches(&req(id_range.clone()), 1)
@@ -3306,6 +3440,7 @@ mod tests {
                     kind: ScanKind::Scan,
                     views: false,
                     top: None,
+                    row_filter: None,
                 };
             // Every row: dense, decoded batch by batch.
             let want = oracle(&file, None, None, &projection).await.unwrap();
@@ -3345,6 +3480,7 @@ mod tests {
             kind: ScanKind::Scan,
             views: false,
             top: None,
+            row_filter: None,
         };
         let batches = file.scan(&req).await.unwrap();
         let want = oracle(file, Some(&p), None, projection).await.unwrap();
@@ -3499,6 +3635,7 @@ mod tests {
                 kind: ScanKind::Scan,
                 views: false,
                 top: None,
+                row_filter: None,
             };
             let batches = file.scan(&req).await.unwrap();
             let stats = file.io_stats();
@@ -3530,6 +3667,7 @@ mod tests {
                     kind: ScanKind::Scan,
                     views: false,
                     top: None,
+                    row_filter: None,
                 };
                 let batches = file.scan(&req).await.unwrap();
                 let stats = file.io_stats();
@@ -3564,6 +3702,7 @@ mod tests {
                     kind: ScanKind::Scan,
                     views: false,
                     top: None,
+                    row_filter: None,
                 };
                 let batches = file.scan(&req).await.unwrap();
                 assert!(batches.is_empty());
@@ -3586,6 +3725,7 @@ mod tests {
                 kind: ScanKind::Scan,
                 views: false,
                 top: None,
+                row_filter: None,
             };
             let batches = file.scan(&req).await.unwrap();
             let want = oracle(&file, None, Some(ranges.as_slice()), &projection)
@@ -3604,6 +3744,7 @@ mod tests {
                 kind: ScanKind::Scan,
                 views: false,
                 top: None,
+                row_filter: None,
             };
             let batches = file.scan(&req).await.unwrap();
             let restricted = [100..9_000, 15_000..15_050];
@@ -3612,6 +3753,111 @@ mod tests {
                 .unwrap();
             assert!(want.num_rows() > 0);
             assert_batches_equal(&joined(&want.schema(), &batches), &want);
+        });
+    }
+
+    /// Rows of `batch` whose `input_tokens` (column 0) is 3 modulo 7; NULL where it is null.
+    fn tokens_mask(batch: &RecordBatch) -> Result<BooleanArray> {
+        let tokens = cast(batch.column(0), &DataType::Int64)?;
+        Ok(tokens
+            .as_any()
+            .downcast_ref::<arrow::array::Int64Array>()
+            .unwrap()
+            .iter()
+            .map(|v| v.map(|v| v % 7 == 3))
+            .collect())
+    }
+
+    #[test]
+    fn row_filters_keep_the_rows_their_mask_keeps() {
+        runtime().block_on(async {
+            // 150,000 rows: the filter reads them in three windows.
+            let file = open_wide(150_000, &Config::default()).await;
+            let projection = [col("input_tokens"), col("trace_id"), col("model")];
+            let seen = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let counted = Arc::clone(&seen);
+            let filter = RowFilter {
+                columns: vec![col("input_tokens")],
+                mask: Arc::new(move |batch: &RecordBatch| {
+                    counted.fetch_add(batch.num_rows(), std::sync::atomic::Ordering::Relaxed);
+                    tokens_mask(batch)
+                }),
+            };
+            let expect = |want: RecordBatch| {
+                let mask = tokens_mask(&want.project(&[0]).unwrap()).unwrap();
+                filter_record_batch(&want, &mask).unwrap()
+            };
+            let req = ScanRequest {
+                projection: projection.to_vec(),
+                predicate: None,
+                row_ranges: None,
+                limit: None,
+                kind: ScanKind::Scan,
+                views: false,
+                top: None,
+                row_filter: Some(filter.clone()),
+            };
+            let batches = file.scan(&req).await.unwrap();
+            let want = expect(oracle(&file, None, None, &projection).await.unwrap());
+            assert!(want.num_rows() > 1_000 && want.num_rows() < 150_000);
+            assert_batches_equal(&joined(&want.schema(), &batches), &want);
+            assert_eq!(seen.load(std::sync::atomic::Ordering::Relaxed), 150_000);
+
+            // With a predicate and row ranges, the filter sees only the rows they select.
+            seen.store(0, std::sync::atomic::Ordering::Relaxed);
+            let p = Predicate::Cmp(col("input_tokens"), CmpOp::Gt, lit_int(2_500));
+            let ranges = [100..90_000, 100_000..100_050];
+            let req = ScanRequest {
+                predicate: Some(p.clone()),
+                row_ranges: Some(ranges.to_vec()),
+                ..req.clone()
+            };
+            let batches = file.scan(&req).await.unwrap();
+            let selected = oracle(&file, Some(&p), Some(ranges.as_slice()), &projection)
+                .await
+                .unwrap();
+            let want = expect(selected.clone());
+            assert!(want.num_rows() > 0);
+            assert_batches_equal(&joined(&want.schema(), &batches), &want);
+            assert_eq!(
+                seen.load(std::sync::atomic::Ordering::Relaxed),
+                selected.num_rows()
+            );
+
+            // A limit keeps the first rows the filter keeps, not the first rows it sees.
+            let req = ScanRequest {
+                limit: Some(5),
+                ..req.clone()
+            };
+            let batches = file.scan(&req).await.unwrap();
+            assert_batches_equal(&joined(&want.schema(), &batches), &want.slice(0, 5));
+
+            // A mask of the wrong length and a repeated column are errors.
+            let short = RowFilter {
+                columns: vec![col("input_tokens")],
+                mask: Arc::new(|_: &RecordBatch| Ok(BooleanArray::from(vec![true]))),
+            };
+            let req = ScanRequest {
+                limit: None,
+                row_filter: Some(short),
+                ..req.clone()
+            };
+            assert!(matches!(
+                file.scan(&req).await,
+                Err(StrataError::Schema { .. })
+            ));
+            let repeated = RowFilter {
+                columns: vec![col("input_tokens"), col("input_tokens")],
+                ..filter
+            };
+            let req = ScanRequest {
+                row_filter: Some(repeated),
+                ..req
+            };
+            assert!(matches!(
+                file.scan(&req).await,
+                Err(StrataError::Unsupported { .. })
+            ));
         });
     }
 
@@ -3629,6 +3875,7 @@ mod tests {
                 kind: ScanKind::Scan,
                 views: false,
                 top: None,
+                row_filter: None,
             };
             let batches = file.scan(&req).await.unwrap();
             let want = oracle(&file, Some(&p), None, &projection)
@@ -3661,6 +3908,7 @@ mod tests {
                 kind: ScanKind::Scan,
                 views: false,
                 top: None,
+                row_filter: None,
             };
             let batches = file.scan(&req).await.unwrap();
             assert!(batches.iter().all(|b| b.num_columns() == 0));
@@ -3686,6 +3934,7 @@ mod tests {
                     kind: ScanKind::Scan,
                     views: false,
                     top: None,
+                    row_filter: None,
                 };
                 let file = &file;
                 async move { file.scan(&req).await }
@@ -3818,6 +4067,7 @@ mod tests {
                     kind: ScanKind::Scan,
                     views: false,
                     top: None,
+                    row_filter: None,
                 };
                 let got = file.scan(&req).await;
                 let want = oracle(&file, Some(&p), None, &req.projection).await;
@@ -3881,6 +4131,7 @@ mod tests {
             kind: ScanKind::Scan,
             views: false,
             top: None,
+            row_filter: None,
         };
         let batches = file.scan(&req).await.unwrap();
         let schema = Arc::new(file.schema().project(projection).unwrap());
@@ -3935,6 +4186,7 @@ mod tests {
                 kind: ScanKind::Scan,
                 views: false,
                 top: None,
+                row_filter: None,
             };
             lazy_file.scan(&req).await.unwrap();
             assert_eq!(lazy_file.io_stats().waves, 3);
@@ -3973,6 +4225,7 @@ mod tests {
                 kind: ScanKind::Scan,
                 views: false,
                 top: None,
+                row_filter: None,
             };
             let batches = file.scan(&req).await.unwrap();
             let want = oracle(
@@ -4042,6 +4295,7 @@ mod tests {
                 kind: ScanKind::Scan,
                 views: false,
                 top: None,
+                row_filter: None,
             };
             let whole = frame_bytes(req(needle.clone())).await;
             let part = frame_bytes(req(and(vec![narrow.clone(), needle.clone()]))).await;
@@ -4072,6 +4326,7 @@ mod tests {
                     kind: ScanKind::Scan,
                     views: false,
                     top: None,
+                    row_filter: None,
                 })
                 .await;
             assert!(matches!(result, Err(StrataError::Unsupported { .. })));
@@ -4084,6 +4339,7 @@ mod tests {
                     kind: ScanKind::Scan,
                     views: false,
                     top: None,
+                    row_filter: None,
                 })
                 .await;
             assert!(matches!(long, Err(StrataError::Unsupported { .. })));
@@ -4122,6 +4378,7 @@ mod tests {
                 kind: ScanKind::Scan,
                 views: false,
                 top: None,
+                row_filter: None,
             };
             file.scan(&req).await.unwrap();
             // Metadata, up to four `Contains` waves, the filter and the projection.
@@ -4284,6 +4541,7 @@ mod tests {
                 kind: ScanKind::Scan,
                 views: false,
                 top: None,
+                row_filter: None,
             };
             assert!(file.scan(&req).await.unwrap().is_empty());
             assert_eq!(file.io_stats().waves, 1);
@@ -4349,6 +4607,7 @@ mod tests {
                 kind: ScanKind::Scan,
                 views: false,
                 top,
+                row_filter: None,
             };
             let schema = scan_schema(file.schema().project(&projection).unwrap(), false);
             file.reset_io_stats();
@@ -4403,6 +4662,7 @@ mod tests {
                 kind: ScanKind::Scan,
                 views: false,
                 top: Some(top),
+                row_filter: None,
             };
             let with_limit = file.scan(&req(top(col("start_time")), Some(3))).await;
             assert!(matches!(with_limit, Err(StrataError::Unsupported { .. })));

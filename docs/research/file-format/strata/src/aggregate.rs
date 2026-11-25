@@ -336,6 +336,7 @@ async fn file_groups(
                 kind: ScanKind::Scan,
                 views: false,
                 top: None,
+                row_filter: None,
             },
             threads,
         )

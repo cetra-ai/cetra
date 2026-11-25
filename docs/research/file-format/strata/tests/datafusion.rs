@@ -402,3 +402,172 @@ async fn pushdown_edge_cases() {
         assert_eq!(strata, memtable, "rows of `{predicate}`");
     }
 }
+
+/// Filters Strata does not translate run in the scan as row filters: functions of columns,
+/// fields of a struct column, floats. Their rows match DataFusion's over the same rows in memory,
+/// with a limit, a pushed sort and `count(*)` too. DataFusion's `FilterExec` stays above the
+/// scan, so the plan's row estimates are those of the filter.
+#[tokio::test(flavor = "multi_thread")]
+async fn row_filters_match_datafusion() {
+    use arrow::array::{
+        ArrayRef, DictionaryArray, ListArray, StringArray, StructArray, UInt32Array,
+    };
+    use arrow::datatypes::{Fields, Int64Type, UInt32Type};
+    let n: usize = 5_000;
+    let label_fields = Fields::from(vec![
+        Field::new(
+            "comm",
+            DataType::Dictionary(Box::new(DataType::UInt32), Box::new(DataType::Utf8)),
+            true,
+        ),
+        Field::new("cpu", DataType::Utf8, true),
+    ]);
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("id", DataType::Int64, false),
+        Field::new("s", DataType::Utf8, true),
+        Field::new("labels", DataType::Struct(label_fields.clone()), false),
+        Field::new(
+            "stack",
+            DataType::List(Arc::new(Field::new("item", DataType::Int64, true))),
+            true,
+        ),
+        Field::new("f", DataType::Float64, true),
+        Field::new("body", DataType::Utf8, false),
+    ]));
+    let ids = Int64Array::from_iter_values(0..n as i64);
+    let s =
+        StringArray::from_iter((0..n).map(|i| (i % 11 != 0).then(|| format!("Name_{}", i % 37))));
+    let comm_values = StringArray::from_iter_values((0..50).map(|c| format!("comm_{c}")));
+    let comm = DictionaryArray::<UInt32Type>::try_new(
+        UInt32Array::from_iter((0..n).map(|i| (i % 97 != 0).then_some(((i * 7) % 50) as u32))),
+        Arc::new(comm_values),
+    )
+    .unwrap();
+    let cpu =
+        StringArray::from_iter((0..n).map(|i| (i % 5 != 0).then(|| format!("CPU_{}", i % 16))));
+    let labels = StructArray::try_new(
+        label_fields,
+        vec![Arc::new(comm) as ArrayRef, Arc::new(cpu)],
+        None,
+    )
+    .unwrap();
+    let stack = ListArray::from_iter_primitive::<Int64Type, _, _>((0..n).map(|i| {
+        (i % 13 != 0).then(|| {
+            (0..(i % 6) as i64)
+                .map(|v| Some(v * i as i64))
+                .collect::<Vec<_>>()
+        })
+    }));
+    let f =
+        Float64Array::from_iter((0..n).map(|i| (i % 9 != 0).then_some((i % 100) as f64 / 100.0)));
+    // A wide column, 200 pseudo-random hex digits a row, so that a row filter pays for
+    // queries that project it.
+    let mut state = 0x9e37_79b9_7f4a_7c15u64;
+    let body = StringArray::from_iter_values((0..n).map(|_| {
+        (0..25)
+            .map(|_| {
+                state = state
+                    .wrapping_mul(6_364_136_223_846_793_005)
+                    .wrapping_add(1_442_695_040_888_963_407);
+                format!("{:08x}", state >> 32)
+            })
+            .collect::<String>()
+    }));
+    let batch = RecordBatch::try_new(
+        schema.clone(),
+        vec![
+            Arc::new(ids),
+            Arc::new(s),
+            Arc::new(labels),
+            Arc::new(stack),
+            Arc::new(f),
+            Arc::new(body),
+        ],
+    )
+    .unwrap();
+
+    // Small chunks, so that the filter and the projection see many of them.
+    let mut writer = StrataWriter::new(
+        schema.clone(),
+        &[],
+        Config {
+            chunk_max_rows: 256,
+            ..Config::default()
+        },
+    )
+    .unwrap();
+    writer.write(&batch).unwrap();
+    let (bytes, _) = writer.finish().unwrap();
+    let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+    let path = Path::from("rows.strata");
+    store.put(&path, PutPayload::from(bytes)).await.unwrap();
+    let table = StrataTable::open(store, vec![path], &Config::default())
+        .await
+        .unwrap();
+    let ctx = SessionContext::new();
+    ctx.register_table("t", Arc::new(table)).unwrap();
+    let memory = MemTable::try_new(schema, vec![vec![batch]]).unwrap();
+    ctx.register_table("m", Arc::new(memory)).unwrap();
+
+    let filters = [
+        "lower(s) = 'name_3'",
+        "labels.comm = 'comm_5'",
+        "labels.comm ILIKE 'COMM\\_1%' ESCAPE '\\'",
+        "length(s) > 6 AND id > 1000",
+        "starts_with(lower(labels.cpu), 'cpu_1') OR s IS NULL",
+        "coalesce(labels.cpu, 'none') = 'none'",
+        "id % 13 = 4 AND f > 0.5",
+        "array_length(stack) > 3",
+        "NOT (lower(s) = 'name_3')",
+    ];
+    for filter in filters {
+        let strata = sorted_rows(&ctx, &format!("SELECT * FROM t WHERE {filter}")).await;
+        let memtable = sorted_rows(&ctx, &format!("SELECT * FROM m WHERE {filter}")).await;
+        println!(
+            "row_filters [{filter}]: strata {} rows, memtable {} rows",
+            strata.len(),
+            memtable.len()
+        );
+        assert!(
+            !memtable.is_empty() && memtable.len() < n,
+            "`{filter}` keeps some rows"
+        );
+        assert_eq!(strata, memtable, "rows of `{filter}`");
+    }
+    for sql in [
+        "SELECT id, labels FROM {} WHERE lower(s) = 'name_3' ORDER BY id LIMIT 5",
+        "SELECT id FROM {} WHERE labels.comm = 'comm_5' ORDER BY f DESC, id LIMIT 7",
+        "SELECT count(*) FROM {} WHERE lower(s) = 'name_3'",
+        "SELECT count(*), sum(id) FROM {} WHERE labels.comm = 'comm_5' AND id > 100",
+    ] {
+        let strata = sorted_rows(&ctx, &sql.replace("{}", "t")).await;
+        let memtable = sorted_rows(&ctx, &sql.replace("{}", "m")).await;
+        assert_eq!(strata, memtable, "`{sql}`");
+    }
+    // A LIMIT without an order keeps any rows the filter keeps.
+    let limited = sorted_rows(
+        &ctx,
+        "SELECT id, s FROM t WHERE lower(s) = 'name_3' LIMIT 4",
+    )
+    .await;
+    let all = sorted_rows(&ctx, "SELECT id, s FROM m WHERE lower(s) = 'name_3'").await;
+    assert_eq!(limited.len(), 4);
+    assert!(limited.iter().all(|row| all.contains(row)));
+
+    // The row filter runs when the projection holds a column much wider than the filter's
+    // (`body`), and is left to `FilterExec` otherwise.
+    let plan = plan_text(
+        &ctx,
+        "SELECT id, body FROM t WHERE lower(s) = 'name_3' AND id > 10",
+    )
+    .await;
+    assert!(plan.contains("row_filter="), "{plan}");
+    assert!(plan.contains("FilterExec"), "{plan}");
+    let plan = plan_text(
+        &ctx,
+        "SELECT id, s FROM t WHERE lower(s) = 'name_3' AND id > 10",
+    )
+    .await;
+    assert!(!plan.contains("row_filter="), "{plan}");
+    assert!(plan.contains("FilterExec"), "{plan}");
+}

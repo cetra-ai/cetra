@@ -398,6 +398,7 @@ fn fuzz_lookup() {
                 kind: ScanKind::Scan,
                 views: false,
                 top: None,
+                row_filter: None,
             };
             let f = if rng.below(2) == 0 {
                 &file

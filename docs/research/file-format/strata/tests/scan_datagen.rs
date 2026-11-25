@@ -223,6 +223,7 @@ async fn scan_datagen_scan() {
             kind: ScanKind::Scan,
             views: false,
             top: None,
+            row_filter: None,
         })
         .await
         .unwrap();
@@ -267,6 +268,7 @@ async fn scan_datagen_scan() {
                 kind: ScanKind::Scan,
                 views: false,
                 top: None,
+                row_filter: None,
             })
             .await
             .unwrap();
@@ -296,6 +298,7 @@ async fn scan_datagen_scan() {
             kind: ScanKind::Scan,
             views: false,
             top: None,
+            row_filter: None,
         })
         .await
         .unwrap();

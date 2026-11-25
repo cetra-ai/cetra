@@ -125,6 +125,7 @@ fn file_decodes(data: &[u8]) -> bool {
                 kind: ScanKind::Scan,
                 views,
                 top: None,
+                row_filter: None,
             };
             if let Ok(batches) = file.scan(&req).await {
                 check_batches("scan", &batches);
@@ -146,6 +147,7 @@ fn file_decodes(data: &[u8]) -> bool {
                 kind: ScanKind::Point,
                 views: true,
                 top: None,
+                row_filter: None,
             };
             if let Ok(batches) = file.scan(&req).await {
                 check_batches("contains scan", &batches);

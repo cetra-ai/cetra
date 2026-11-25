@@ -490,6 +490,7 @@ fn fuzz_scan() {
                 },
                 views: false,
                 top: None,
+                row_filter: None,
             };
             let got = rt().block_on(file.scan(&req));
             match (&got, &want_mask) {
