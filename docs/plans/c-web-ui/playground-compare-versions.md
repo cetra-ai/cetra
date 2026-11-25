@@ -78,8 +78,7 @@ the typecheck to pass. P3 touches only docs files.
 Conventions for every phase: TypeScript strict, Biome style as the surrounding code; comments are
 full sentences; no `as` casts except where the existing code already does the same thing; tests use
 the existing helpers. Check commands are run from the repo root with Node on `PATH`
-(`export PATH="$HOME/.nvm/versions/node/$(cat .node-version | tr -d v)/bin:$PATH"` if `node` is
-missing). While iterating run only the touched test files:
+(`export PATH=$HOME/.local/share/nvm/v26.13.0/bin:$PATH` first). While iterating run only the touched test files:
 `cd web && pnpm exec vitest run <paths> --maxWorkers=8`. Don't run `just check` (the coordinator
 runs it once at the end). Typecheck with `cd web && pnpm typecheck` once, right before the commit
 (not while iterating). If running a command through `rtk` leaves `web/.vitest/output.json`,
