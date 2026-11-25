@@ -77,7 +77,7 @@ Commands run in `docs/research/file-format/bench/`.
 - The orchestrator's base commit adds `mod cw;` to `main.rs`, a `cw/mod.rs` that declares each module behind a temporary feature of the `bench` crate (`#[cfg(feature = "cw_cases")] pub mod cases;`, `cw_harness`, `cw_read`), and the three features in `bench/Cargo.toml`. Each phase builds and tests with its own feature only (`--features cw_cases` and so on), so another phase's unfinished file is never compiled. A feature of the root crate doesn't change its dependencies, so they build once.
 - Each phase owns one new file, and its tests build what they need without the other two (M1.2 and M1.3 write their test files with `spans_to_record_batch`, `crate::write_parquet` and `crate::write_strata`, not with M1.1's cases).
 - Only M1.1 edits `main.rs` (the `Some("cw")` arm and `USAGE`) and `cw/mod.rs` (`cmd`, which it puts under `#[cfg(feature = "cw_cases")]` too).
-- Each phase commits only its own files, naming them: `git commit -m "<subject>" -- <files>`. Nothing else in the working tree is theirs to stage (it holds other uncommitted work).
+- Each phase commits only its own files: `git add <its new files>`, then `git commit -m "<subject>" -- <its files>`. Nothing else in the working tree is theirs to stage (it holds other uncommitted work).
 - M1.4 runs after the three: it removes the features (plain `pub mod` lines, nothing left in `Cargo.toml`), wires `cw run`, `cw one` and the readers together, and runs the end-to-end checks.
 
 While several agents run, each builds and tests only `bench` and only its own tests (`cargo test --release --features cw_<module> cw::<module>::`). Cargo's lock on the shared `target/` makes the builds take turns.
