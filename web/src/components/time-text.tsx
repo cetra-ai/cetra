@@ -1,8 +1,13 @@
+import { formatTick } from "@/components/charts/plot-helpers";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
 import { formatRelative, formatTimestamp } from "@/lib/format";
-import { useTimeZone } from "@/lib/settings";
+import { type TimeZoneSetting, useTimeZone } from "@/lib/settings";
 
-export function TimeText({ value, style }: { value: string; style: "time" | "datetime" }) {
+/** `time` and `datetime` keep the milliseconds; `minute` (11:51) and `date-minute` (11-19 11:51)
+ *  are the chart axis formats, for times that are whole minutes or need no more precision. */
+export type TimeTextStyle = "time" | "datetime" | "minute" | "date-minute";
+
+export function TimeText({ value, style }: { value: string; style: TimeTextStyle }) {
   const zone = useTimeZone();
   const other = zone === "utc" ? "local" : "utc";
   return (
@@ -10,7 +15,7 @@ export function TimeText({ value, style }: { value: string; style: "time" | "dat
       <Tooltip>
         <TooltipTrigger asChild>
           <time dateTime={value} data-zone={zone} className="tabular-nums">
-            {formatTimestamp(value, zone, style)}
+            {formatTimeText(value, zone, style)}
           </time>
         </TooltipTrigger>
         <TooltipContent className="flex-col items-start">
@@ -21,4 +26,15 @@ export function TimeText({ value, style }: { value: string; style: "time" | "dat
       </Tooltip>
     </TooltipProvider>
   );
+}
+
+function formatTimeText(value: string, zone: TimeZoneSetting, style: TimeTextStyle): string {
+  if (style === "time" || style === "datetime") {
+    return formatTimestamp(value, zone, style);
+  }
+  const ms = Date.parse(value);
+  if (Number.isNaN(ms)) {
+    return value;
+  }
+  return formatTick(ms, zone, style === "minute" ? "time" : "datetime");
 }
