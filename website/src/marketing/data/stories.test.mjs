@@ -9,7 +9,7 @@ const shots = JSON.parse(
 const shotNames = new Set(shots.map((shot) => shot.name));
 const pngDir = new URL("../../assets/screenshots/", import.meta.url);
 
-/** The 22 captions, as the fixed content of plan M15 states them (copy edits touch this table too): one
+/** The 12 captions, as the fixed content of plan M15 states them (copy edits touch this table too): one
  * per story, or one string for a shared picture (M19 retake). */
 const EXPECTED = {
   hero: {
@@ -25,12 +25,7 @@ const EXPECTED = {
     voice: "Hear the caller and the agent, and read what was said, in one voice turn.",
     extraction: "A 200-invoice batch, with its three failed invoices at the top.",
   },
-  explore: {
-    support: "Ask why answers got a thumbs-down, then open the traces behind them.",
-    coding: "Ask why runs cost more, then open the retried runs.",
-    voice: "Ask why callers hang up, then open the slow calendar checks.",
-    extraction: "Ask which vendors fail, then open the re-extracted invoices.",
-  },
+  explore: "Ask which prompt got worse, and get the numbers, the cause and a dashboard.",
   issues: "Answers that contradict their sources, grouped into one issue with their examples.",
   evaluate: {
     support: "Reviewers score each flagged answer in a queue, one by one.",
@@ -39,16 +34,11 @@ const EXPECTED = {
     extraction: "Version 4 lifts vat_number from 91% to 96% on 300 invoices.",
   },
   prompts: "Run two prompt versions on the same question, and see which one answers right.",
-  alert: {
-    support: "Know when answer quality drops below your bar.",
-    coding: "Know when an hour of agent spend goes over your budget.",
-    voice: "Know when one in twenty replies takes longer than 1.5 s.",
-    extraction: "Know when scanned invoices come in faster than 10 an hour.",
-  },
+  alert: "Know when the error rate, a score, the cost or an issue crosses your line.",
 };
 
 /** The pictures shared by every story (M19 retake): the same shot, no story picker. */
-const SHARED = ["issues", "prompts"];
+const SHARED = ["explore", "issues", "prompts", "alert"];
 const PANELS = 4 * (7 - SHARED.length) + SHARED.length;
 
 test("the four stories are in the fixed order", () => {

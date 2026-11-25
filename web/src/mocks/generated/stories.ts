@@ -2,7 +2,7 @@ import { type HttpHandler, HttpResponse, http } from "msw";
 import type { Schema } from "@/api/types";
 import { type Dataset, percentile, rfc3339, visibleTraces } from "@/mocks/generated/dataset";
 import { STEP_HOURS } from "@/mocks/generated/story-coding";
-import { SSO_QUESTIONS, SUPPORT_SESSION } from "@/mocks/generated/story-support";
+import { ERROR_BURST_MS, SSO_QUESTIONS, SUPPORT_SESSION } from "@/mocks/generated/story-support";
 import alertRulesFixture from "../../../../fixtures/api/static/alert-rules.json";
 import queuesFixture from "../../../../fixtures/api/static/annotation-queues.json";
 import issuesFixture from "../../../../fixtures/api/static/issues.json";
@@ -35,6 +35,17 @@ const TEAM_SLACK: StoryChannel = {
   id: "01900000-0000-7000-8000-000000000500",
   name: "Team Slack",
   kind: "slack",
+};
+/** The fixture webhook and email channels, which the support project serves. */
+const PAGER_WEBHOOK: StoryChannel = {
+  id: "01900000-0000-7000-8000-000000000501",
+  name: "Pager webhook",
+  kind: "webhook",
+};
+const ON_CALL_EMAIL: StoryChannel = {
+  id: "01900000-0000-7000-8000-000000000502",
+  name: "On-call email",
+  kind: "email",
 };
 /** The voice desk's webhook channel, named "On-call". */
 export const ON_CALL_PAGER: StoryChannel = {
@@ -250,6 +261,8 @@ type StoryRule = {
   /** The channel the rule notifies. */
   channel: StoryChannel;
   state: "firing" | "ok";
+  /** False for a disabled rule; enabled when absent. */
+  enabled?: boolean;
   /**
    * The rule's value, its count and the time it last changed, before `now` of the dataset. The value
    * is undefined when the window has no sample to take it from.
@@ -336,6 +349,14 @@ function scannedStarts(dataset: Dataset): number[] {
   return issue === undefined ? [] : startsOf(dataset, issue);
 }
 
+/** The contradictions that start in the hour before `now`: the generic issue rule's value and count. */
+function contradictionsLastHour(dataset: Dataset, now: number): number[] {
+  const issue = STORY_ISSUES.find((item) => item.id === CONTRADICTION_ISSUE_ID);
+  return (issue === undefined ? [] : startsOf(dataset, issue)).filter(
+    (started) => started >= now - HOUR_MS && started < now,
+  );
+}
+
 /** The scanned PDFs that start in the hour before `now`: the extraction rule's value and count. */
 function scannedLastHour(dataset: Dataset, now: number): number[] {
   return scannedStarts(dataset).filter((started) => started >= now - HOUR_MS && started < now);
@@ -381,6 +402,24 @@ function issuePreview(
   return { from: rfc3339(from), to: rfc3339(to), window: bucket, points };
 }
 
+/** The share of the visible traces that start in `[from, to)` with an error, or undefined without one. */
+function errorRate(dataset: Dataset, from: number, to: number): number | undefined {
+  const traces = startedBetween(dataset, from, to);
+  return traces.length === 0
+    ? undefined
+    : traces.filter((trace) => trace.error_count > 0).length / traces.length;
+}
+
+/** The mean of a boolean score, true as 1, over the visible traces that start in `[from, to)`. */
+function booleanMean(dataset: Dataset, name: string, from: number, to: number) {
+  return mean(
+    scoreValues(startedBetween(dataset, from, to), name, "boolean").map((value) => (value ? 1 : 0)),
+  );
+}
+
+/** The contradiction issue of the shared Issues picture, which a generic rule counts. */
+const CONTRADICTION_ISSUE_ID = "01900000-0000-7000-8000-000000570105";
+
 export const STORY_RULES: readonly StoryRule[] = [
   {
     id: "01900000-0000-7000-8000-000000570201",
@@ -395,6 +434,120 @@ export const STORY_RULES: readonly StoryRule[] = [
       mean(scoreValues(startedBetween(dataset, now - HOUR_MS, now), "correctness", "numeric")),
     lastCount: (dataset, now) => startedBetween(dataset, now - HOUR_MS, now).length,
     changedAgoMs: (dataset, now) => firstDippedHourAgo(dataset, now),
+  },
+  // The generic rules of the shared Alerts picture (M19 retake), in the support project.
+  {
+    id: "01900000-0000-7000-8000-000000570205",
+    story: "support",
+    eventId: "01900000-0000-7000-8000-000000570215",
+    deliveryId: "01900000-0000-7000-8000-000000570225",
+    name: "Error rate above 15%",
+    condition: {
+      metric: "error_rate",
+      window: "1h",
+      comparator: "gt",
+      threshold: 0.15,
+      min_count: 20,
+    },
+    channel: PAGER_WEBHOOK,
+    state: "firing",
+    lastValue: (dataset, now) => errorRate(dataset, now - HOUR_MS, now),
+    lastCount: (dataset, now) => startedBetween(dataset, now - HOUR_MS, now).length,
+    changedAgoMs: () => ERROR_BURST_MS,
+  },
+  {
+    id: "01900000-0000-7000-8000-000000570206",
+    story: "support",
+    eventId: "01900000-0000-7000-8000-000000570216",
+    deliveryId: "01900000-0000-7000-8000-000000570226",
+    name: "Slow replies",
+    condition: {
+      metric: "latency_p95",
+      target: "trace",
+      window: "15m",
+      comparator: "gt",
+      threshold: 20_000,
+      min_count: 10,
+    },
+    channel: PAGER_WEBHOOK,
+    state: "ok",
+    lastValue: (dataset, now) =>
+      percentile(
+        startedBetween(dataset, now - 15 * MINUTE_MS, now).map(
+          (trace) => trace.duration_ns / 1_000_000,
+        ),
+        95,
+      ),
+    lastCount: (dataset, now) => startedBetween(dataset, now - 15 * MINUTE_MS, now).length,
+    changedAgoMs: () => 3 * DAY_MS,
+  },
+  {
+    id: "01900000-0000-7000-8000-000000570207",
+    story: "support",
+    eventId: "01900000-0000-7000-8000-000000570217",
+    deliveryId: "01900000-0000-7000-8000-000000570227",
+    name: "Thumbs-up rate under 80%",
+    condition: {
+      metric: "score",
+      window: "1h",
+      comparator: "lt",
+      threshold: 0.8,
+      min_count: 10,
+      score_name: "user_feedback",
+      aggregation: "avg",
+    },
+    channel: TEAM_SLACK,
+    state: "ok",
+    lastValue: (dataset, now) => booleanMean(dataset, "user_feedback", now - HOUR_MS, now),
+    lastCount: (dataset, now) =>
+      scoreValues(startedBetween(dataset, now - HOUR_MS, now), "user_feedback", "boolean").length,
+    changedAgoMs: () => 2 * DAY_MS,
+  },
+  {
+    id: "01900000-0000-7000-8000-000000570208",
+    story: "support",
+    eventId: "01900000-0000-7000-8000-000000570218",
+    deliveryId: "01900000-0000-7000-8000-000000570228",
+    name: "Daily spend over $20",
+    condition: { metric: "cost", window: "24h", comparator: "gt", threshold: 20 },
+    channel: ON_CALL_EMAIL,
+    state: "ok",
+    lastValue: (dataset, now) => costOf(startedBetween(dataset, now - DAY_MS, now)),
+    lastCount: (dataset, now) => startedBetween(dataset, now - DAY_MS, now).length,
+    changedAgoMs: () => 5 * DAY_MS,
+  },
+  {
+    id: "01900000-0000-7000-8000-000000570209",
+    story: "support",
+    eventId: "01900000-0000-7000-8000-000000570219",
+    deliveryId: "01900000-0000-7000-8000-000000570229",
+    name: "Contradictions over 20 an hour",
+    condition: {
+      metric: "issue_occurrences",
+      issue_id: CONTRADICTION_ISSUE_ID,
+      window: "1h",
+      comparator: "gt",
+      threshold: 20,
+    },
+    channel: TEAM_SLACK,
+    state: "ok",
+    lastValue: (dataset, now) => contradictionsLastHour(dataset, now).length,
+    lastCount: (dataset, now) => contradictionsLastHour(dataset, now).length,
+    changedAgoMs: () => 4 * DAY_MS,
+  },
+  {
+    id: "01900000-0000-7000-8000-00000057020a",
+    story: "support",
+    eventId: "01900000-0000-7000-8000-00000057021a",
+    deliveryId: "01900000-0000-7000-8000-00000057022a",
+    name: "Hourly spend over $1",
+    condition: { metric: "cost", window: "1h", comparator: "gt", threshold: 1 },
+    channel: ON_CALL_EMAIL,
+    state: "ok",
+    enabled: false,
+    lastValue: (dataset, now) => costOf(startedBetween(dataset, now - HOUR_MS, now)),
+    lastCount: (dataset, now) => startedBetween(dataset, now - HOUR_MS, now).length,
+    changedAgoMs: () => 6 * DAY_MS,
   },
   {
     id: "01900000-0000-7000-8000-000000570202",
@@ -800,7 +953,7 @@ export function storyAlertRule(dataset: Dataset, rule: StoryRule): Schema<"Alert
     name: rule.name,
     condition: rule.condition,
     state: rule.state,
-    enabled: true,
+    enabled: rule.enabled ?? true,
     channel_ids: [rule.channel.id],
     cooldown_s: 3600,
     notify_while_firing: false,
@@ -1001,7 +1154,9 @@ export function storyHandlers(dataset: Dataset, project?: string): HttpHandler[]
         : undefined;
     }),
     http.get(`${prefix}/alert-events`, () => {
+      // Only the firing rules' events: the generic ok rules of the shared Alerts picture keep the list short.
       const events = rules
+        .filter((rule) => rule.state === "firing")
         .map((rule) => storyAlertEvent(dataset, rule))
         .sort((left, right) => Date.parse(right.created_at) - Date.parse(left.created_at));
       return HttpResponse.json({

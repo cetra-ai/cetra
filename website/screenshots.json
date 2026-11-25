@@ -226,12 +226,12 @@
         "click": "button[aria-label^=\"Chats:\"]"
       },
       {
-        "click": "[role=\"menuitem\"]:has-text(\"Why did our thumbs-down rate double since Tuesday?\")"
+        "click": "[role=\"menuitem\"]:has-text(\"Which of our prompts got worse this week?\")"
       }
     ],
-    "waitAfter": "Open in traces",
+    "waitAfter": "Open in dashboard editor",
     "storage": {
-      "cetra.assistant.window": "{\"x\":16,\"y\":16,\"width\":640,\"height\":880}"
+      "cetra.assistant.window": "{\"x\":16,\"y\":16,\"width\":640,\"height\":860}"
     },
     "theme": "dark",
     "viewport": {
@@ -313,8 +313,8 @@
   },
   {
     "name": "marketing-alerts",
-    "path": "/acme/support-bot/alerts?rule=01900000-0000-7000-8000-000000570201",
-    "waitFor": "Answer correctness under 0.7",
+    "path": "/acme/support-bot/alerts?rule=01900000-0000-7000-8000-000000570205",
+    "waitFor": "Error rate above 15%",
     "actions": [
       {
         "click": "button[aria-label=\"Bottom\"]"
@@ -324,16 +324,16 @@
     "theme": "dark",
     "viewport": {
       "width": 1240,
-      "height": 860
+      "height": 1040
     },
     "storage": {
-      "cetra.split.alerts.bottom": "{\"alerts-list\":28,\"alerts-detail\":72}"
+      "cetra.split.alerts.bottom": "{\"alerts-list\":49,\"alerts-detail\":51}"
     },
     "clipRect": {
       "x": 209,
       "y": 40,
       "width": 1031,
-      "height": 745
+      "height": 1000
     }
   },
   {
@@ -349,32 +349,6 @@
     "storage": {
       "cetra.transcript-wide": "1"
     }
-  },
-  {
-    "name": "marketing-assistant-coding",
-    "path": "/acme/code-agent/traces",
-    "waitFor": "loaded",
-    "actions": [
-      {
-        "click": "button[aria-label=\"Ask AI\"]"
-      },
-      {
-        "click": "button[aria-label^=\"Chats:\"]"
-      },
-      {
-        "click": "[role=\"menuitem\"]:has-text(\"Why did cost per run triple yesterday?\")"
-      }
-    ],
-    "waitAfter": "Open in traces",
-    "storage": {
-      "cetra.assistant.window": "{\"x\":16,\"y\":16,\"width\":640,\"height\":880}"
-    },
-    "theme": "dark",
-    "viewport": {
-      "width": 1024,
-      "height": 912
-    },
-    "clip": "section[aria-label=\"Assistant\"]"
   },
   {
     "name": "marketing-evaluate-coding",
@@ -393,31 +367,6 @@
     }
   },
   {
-    "name": "marketing-alerts-coding",
-    "path": "/acme/code-agent/alerts?rule=01900000-0000-7000-8000-000000570202",
-    "waitFor": "Spend over $40 an hour",
-    "actions": [
-      {
-        "click": "button[aria-label=\"Bottom\"]"
-      }
-    ],
-    "waitAfter": "History",
-    "theme": "dark",
-    "viewport": {
-      "width": 1240,
-      "height": 860
-    },
-    "storage": {
-      "cetra.split.alerts.bottom": "{\"alerts-list\":28,\"alerts-detail\":72}"
-    },
-    "clipRect": {
-      "x": 209,
-      "y": 40,
-      "width": 1031,
-      "height": 720
-    }
-  },
-  {
     "name": "marketing-trace-page-voice",
     "path": "/acme/voice-desk/traces?trace=a000000000000000000000000000006e&span=0000006e00000008",
     "waitFor": "Friday at 9:30 is free",
@@ -427,32 +376,6 @@
       "height": 900
     },
     "clip": "[role=\"tabpanel\"]"
-  },
-  {
-    "name": "marketing-assistant-voice",
-    "path": "/acme/voice-desk/traces?range=30d",
-    "waitFor": "loaded",
-    "actions": [
-      {
-        "click": "button[aria-label=\"Ask AI\"]"
-      },
-      {
-        "click": "button[aria-label^=\"Chats:\"]"
-      },
-      {
-        "click": "[role=\"menuitem\"]:has-text(\"Why do callers hang up?\")"
-      }
-    ],
-    "waitAfter": "Open in traces",
-    "storage": {
-      "cetra.assistant.window": "{\"x\":16,\"y\":16,\"width\":640,\"height\":880}"
-    },
-    "theme": "dark",
-    "viewport": {
-      "width": 1024,
-      "height": 912
-    },
-    "clip": "section[aria-label=\"Assistant\"]"
   },
   {
     "name": "marketing-evaluate-voice",
@@ -476,31 +399,6 @@
     "clip": "main"
   },
   {
-    "name": "marketing-alerts-voice",
-    "path": "/acme/voice-desk/alerts?rule=01900000-0000-7000-8000-000000570203",
-    "waitFor": "Slow replies on the voice desk",
-    "actions": [
-      {
-        "click": "button[aria-label=\"Bottom\"]"
-      }
-    ],
-    "waitAfter": "History",
-    "theme": "dark",
-    "viewport": {
-      "width": 1240,
-      "height": 860
-    },
-    "storage": {
-      "cetra.split.alerts.bottom": "{\"alerts-list\":28,\"alerts-detail\":72}"
-    },
-    "clipRect": {
-      "x": 209,
-      "y": 40,
-      "width": 1031,
-      "height": 745
-    }
-  },
-  {
     "name": "marketing-trace-page-extraction",
     "path": "/acme/invoice-pipeline/traces?filter=tags%20%40%3E%20%5B%27batch-1119%27%5D&cols=status,input,output",
     "waitFor": "200 traces · 3 errors",
@@ -522,32 +420,6 @@
     }
   },
   {
-    "name": "marketing-assistant-extraction",
-    "path": "/acme/invoice-pipeline/traces?range=30d",
-    "waitFor": "loaded",
-    "actions": [
-      {
-        "click": "button[aria-label=\"Ask AI\"]"
-      },
-      {
-        "click": "button[aria-label^=\"Chats:\"]"
-      },
-      {
-        "click": "[role=\"menuitem\"]:has-text(\"Which vendors' invoices fail the most, and why?\")"
-      }
-    ],
-    "waitAfter": "Open in traces",
-    "storage": {
-      "cetra.assistant.window": "{\"x\":16,\"y\":16,\"width\":640,\"height\":880}"
-    },
-    "theme": "dark",
-    "viewport": {
-      "width": 1024,
-      "height": 912
-    },
-    "clip": "section[aria-label=\"Assistant\"]"
-  },
-  {
     "name": "marketing-evaluate-extraction",
     "path": "/acme/invoice-pipeline/experiments/compare?ids=01900000-0000-7000-8000-000000570931,01900000-0000-7000-8000-000000570932",
     "waitFor": "vat_number",
@@ -561,31 +433,6 @@
       "y": 40,
       "width": 860,
       "height": 432
-    }
-  },
-  {
-    "name": "marketing-alerts-extraction",
-    "path": "/acme/invoice-pipeline/alerts?rule=01900000-0000-7000-8000-000000570204",
-    "waitFor": "Scanned PDFs over 10 an hour",
-    "actions": [
-      {
-        "click": "button[aria-label=\"Bottom\"]"
-      }
-    ],
-    "waitAfter": "History",
-    "theme": "dark",
-    "viewport": {
-      "width": 1240,
-      "height": 860
-    },
-    "storage": {
-      "cetra.split.alerts.bottom": "{\"alerts-list\":28,\"alerts-detail\":72}"
-    },
-    "clipRect": {
-      "x": 209,
-      "y": 40,
-      "width": 1031,
-      "height": 745
     }
   }
 ]

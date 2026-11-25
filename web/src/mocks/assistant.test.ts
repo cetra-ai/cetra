@@ -90,6 +90,11 @@ function eligibleOf(story: StoryId, dataset: Dataset) {
   );
 }
 
+/** The drafts a story's turn makes, in order: the shared Explore chat (support) drafts a dashboard only. */
+function draftKinds(story: Story): string[] {
+  return story.story === "support" ? ["dashboard"] : ["filter", "dashboard"];
+}
+
 function round2(value: number): number {
   return Math.round(value * 100) / 100;
 }
@@ -235,7 +240,9 @@ describe("assistant story conversations", () => {
       expect(loose).toEqual(exact);
       expect(eventsNamed(exact, "start")[0]?.data.trace_id).toBe(story.heroTraceId);
       expect(eventsNamed(exact, "tool_call")[0]?.data.name).toBe("query_sql");
-      expect(eventsNamed(exact, "draft")[0]?.data.kind).toBe("filter");
+      expect(eventsNamed(exact, "draft").map((event) => event.data.kind)).toEqual(
+        draftKinds(story),
+      );
       expect(exact.at(-1)).toMatchObject({ event: "done", data: { finish_reason: "stop" } });
     }
   });
@@ -384,7 +391,7 @@ describe("assistant story conversations", () => {
       const last = assistantAt(bubbles, 1);
       expect(last.traceId).toBe(story.heroTraceId);
       expect(last.blocks).toContainEqual(
-        expect.objectContaining({ type: "draft", kind: "filter" }),
+        expect.objectContaining({ type: "draft", kind: draftKinds(story)[0] }),
       );
     }
 
@@ -409,18 +416,19 @@ describe("assistant story conversations", () => {
     expect(await statusIn("voice-desk")).toBe(200);
   });
 
-  it("drafts a filter the Filter card accepts", () => {
-    for (const story of STORIES) {
+  it("drafts a filter the Filter card accepts, except the shared Explore chat", () => {
+    expect(storyNamed("support").turns[0].draft).toBeUndefined();
+    for (const story of STORIES.filter((item) => item.story !== "support")) {
       const [turn] = story.turns;
-      expect(turn.draft.kind).toBe("filter");
-      const parsed = parseDraft("filter", turn.draft.draft);
+      expect(turn.draft?.kind).toBe("filter");
+      const parsed = parseDraft("filter", turn.draft?.draft);
       expect(parsed).not.toBeNull();
       expect(parsed?.kind).toBe("filter");
       expect(parsed?.kind === "filter" && parsed.draft.view).toBe("traces");
     }
   });
 
-  it("each story stores its filter, then its story dashboard after the answer, and both parse", async () => {
+  it("each story stores its filter (support has none), then its story dashboard after the answer, and both parse", async () => {
     const dashboardIds: Record<StoryId, string> = {
       support: STORY_DASHBOARD_IDS.answerQuality,
       coding: STORY_DASHBOARD_IDS.codeAgentHealth,
@@ -432,12 +440,14 @@ describe("assistant story conversations", () => {
       const drafts = stored.messages.flatMap((message) =>
         message.parts.flatMap((part) => (part.type === "draft" ? [part] : [])),
       );
-      expect(drafts.map((part) => part.kind)).toEqual(["filter", "dashboard"]);
+      expect(drafts.map((part) => part.kind)).toEqual(draftKinds(story));
 
-      const [filter, dashboard] = drafts;
-      const parsedFilter = parseDraft("filter", filter?.draft);
-      expect(parsedFilter?.kind).toBe("filter");
-      expect(parsedFilter?.kind === "filter" && parsedFilter.draft.view).toBe("traces");
+      const dashboard = drafts.at(-1);
+      if (drafts.length === 2) {
+        const parsedFilter = parseDraft("filter", drafts[0]?.draft);
+        expect(parsedFilter?.kind).toBe("filter");
+        expect(parsedFilter?.kind === "filter" && parsedFilter.draft.view).toBe("traces");
+      }
 
       const expected = storyDashboards().find((item) => item.id === dashboardIds[story.story]);
       const parsedDashboard = parseDraft("dashboard", dashboard?.draft);
@@ -452,15 +462,27 @@ describe("assistant story conversations", () => {
   });
 
   it("the voice filter is the calendar tag alone", () => {
-    expect(storyNamed("voice").turns[0].draft.draft.filter).toBe("tags @> ['calendar']");
+    expect(storyNamed("voice").turns[0].draft?.draft.filter).toBe("tags @> ['calendar']");
   });
 
   it("each answer quotes the rounded facts of its story", () => {
     const answer = (story: StoryId) => storyNamed(story).turns[0].answer;
 
     const support = supportFacts(storyDataset("support"));
+    const { weekBeforeTuesday: before, sinceTuesday: since } = support;
     expect(answer("support")).toContain(`**${Math.round(support.quotingShare * 100)}%**`);
-    expect(answer("support")).toContain(`**${support.quotingOldPricing}**`);
+    expect(answer("support")).toContain(
+      `**${support.quotingOldPricing}** of ${support.downvotesSinceTuesday}`,
+    );
+    expect(answer("support")).toContain(
+      `correctness ${before.correctness.toFixed(2)} → **${since.correctness.toFixed(2)}** over **${since.answers.toLocaleString("en-US")}** answers`,
+    );
+    expect(answer("support")).toContain(
+      `thumbs-down ${Math.round(before.downvoteRate * 100)}% → **${Math.round(since.downvoteRate * 100)}%**`,
+    );
+    expect(answer("support")).toContain(
+      `$${before.costPerAnswer.toFixed(4)} → $${since.costPerAnswer.toFixed(4)}`,
+    );
 
     const coding = codingFacts(storyDataset("coding"));
     expect(answer("coding")).toContain(`**${Math.round(coding.retryShare * 100)}%**`);
@@ -478,30 +500,19 @@ describe("assistant story conversations", () => {
   });
 
   it("each query's rows are the facts' counts over the eligible traces", async () => {
-    // Support: one release in the last 46 hours, with its feedback, downvotes and old-pricing traces.
-    const supportSet = eligibleOf("support", storyDataset("support"));
-    const sinceTuesday = NOW - 46 * HOUR_MS;
-    const feedback = supportSet.filter(
-      (trace) =>
-        Date.parse(trace.start_time) >= sinceTuesday &&
-        trace.scores.find((score) => score.name === "user_feedback")?.value.data_type === "boolean",
-    );
-    const downvotes = feedback.filter(
-      (trace) =>
-        trace.scores.find((score) => score.name === "user_feedback")?.value.data_type ===
-          "boolean" &&
-        trace.scores.find((score) => score.name === "user_feedback")?.value.value === false,
-    );
+    // Support: the release since Tuesday 14:00 and the week before it, with the facts' numbers.
     const support = supportFacts(storyDataset("support"));
+    const rowOf = (release: string, window: typeof support.sinceTuesday) => ({
+      release,
+      answers: window.answers,
+      correctness: Math.round(window.correctness * 100) / 100,
+      thumbs_down: Math.round(window.downvoteRate * 100) / 100,
+      cost_per_answer: Math.round(window.costPerAnswer * 10_000) / 10_000,
+    });
     expect(await storedRows("support")).toEqual([
-      {
-        release: "v2.14",
-        feedback: feedback.length,
-        downvotes: support.downvotesSinceTuesday,
-        old_pricing: support.quotingOldPricing,
-      },
+      rowOf("v2.14", support.sinceTuesday),
+      rowOf("before v2.14", support.weekBeforeTuesday),
     ]);
-    expect(downvotes.length).toBe(support.downvotesSinceTuesday);
 
     // Coding: runs in the last 14 hours, split by retry, with their cost.
     const codingRuns = eligibleOf("coding", storyDataset("coding")).filter(
@@ -567,9 +578,9 @@ describe("assistant story conversations", () => {
   it("each story's SQL window, intro and filter range agree with the question", () => {
     const expected: Record<StoryId, { window: string; range: string; intro: string }> = {
       support: {
-        window: "INTERVAL '46 hours'",
+        window: "INTERVAL '214 hours'",
         range: "7d",
-        intro: "I'll count the downvoted answers since Tuesday 14:00, by release. ",
+        intro: "I'll compare quality, feedback and cost before and since Tuesday's deploy. ",
       },
       coding: {
         window: "INTERVAL '14 hours'",
@@ -591,17 +602,18 @@ describe("assistant story conversations", () => {
       const want = expected[story.story];
       const [turn] = story.turns;
       expect(String(turn.call.arguments.query)).toContain(want.window);
-      expect(turn.draft.draft.range).toBe(want.range);
+      // The shared Explore chat has no filter card; its page range is the stored context's.
+      expect(turn.draft?.draft.range ?? story.range).toBe(want.range);
       expect(turn.intro.join("")).toBe(want.intro);
     }
-    expect(storyNamed("voice").turns[0].draft.draft.filter).toBe("tags @> ['calendar']");
+    expect(storyNamed("voice").turns[0].draft?.draft.filter).toBe("tags @> ['calendar']");
   });
 
   it("each draft's filter lists the traces its answer counts", async () => {
-    for (const story of STORIES) {
+    for (const story of STORIES.filter((item) => item.turns[0].draft !== undefined)) {
       const project = storyProject(story.story).ref;
       server.use(...largeHandlers(storyDataset(story.story), { project, datasets: false }));
-      const draft = parseDraft("filter", story.turns[0].draft.draft);
+      const draft = parseDraft("filter", story.turns[0].draft?.draft);
       if (draft?.kind !== "filter") {
         throw new Error("draft did not parse as a filter");
       }
@@ -621,9 +633,6 @@ describe("assistant story conversations", () => {
         )
       ).json()) as { data: unknown[] };
 
-      if (story.story === "support") {
-        expect(listed.data.length).toBe(supportFacts(storyDataset("support")).quotingOldPricing);
-      }
       if (story.story === "coding") {
         const retriedIn24h = eligibleOf("coding", storyDataset("coding")).filter(
           (trace) =>

@@ -30,6 +30,18 @@ const DOWNVOTES_QUOTING_OLD_PRICING = 41;
 const SSO_THIS_WEEK = 214;
 const SSO_PREVIOUS_WEEK = 30;
 
+/** The provider's rate-limit burst: it starts this long before now (the shared Alerts picture, M19 retake). */
+export const ERROR_BURST_MS = 12 * 60_000;
+/** How many error-free traces of the burst fail. */
+const ERROR_BURST_TRACES = 8;
+const RATE_LIMIT_ERROR = {
+  count: 1,
+  spanName: "generate answer",
+  message: "RateLimitError: 429 Too Many Requests from the model provider",
+  stacktrace:
+    "RateLimitError: 429 Too Many Requests from the model provider\n    at generate (agent/answer.ts:58:11)",
+};
+
 /** The release the support team shipped on Tuesday (P2 mark 1). */
 const RELEASE = "v2.14";
 /** The tag of the traces whose answer quotes the 2025 pricing (P2 mark 2). */
@@ -391,6 +403,19 @@ function supportMarks(
     });
   }
 
+  // 5. The rate-limit burst: the first error-free traces of the last 12 minutes fail.
+  const burst = indices
+    .filter(
+      (index) =>
+        start(index) >= now - ERROR_BURST_MS &&
+        start(index) < now &&
+        traces[index]?.error_count === 0,
+    )
+    .slice(0, ERROR_BURST_TRACES);
+  for (const index of burst) {
+    addMark(marks, index, { error: RATE_LIMIT_ERROR });
+  }
+
   return marks;
 }
 
@@ -420,12 +445,25 @@ export type SupportFacts = {
   correctnessBeforeDip: number;
   /** Mean correctness of the traces from the dip on. */
   correctnessAfterDip: number;
+  /**
+   * The Explore picture's comparison (M19 retake): the eligible traces of the week before Tuesday 14:00 and
+   * those since, with their mean correctness, the downvotes over the feedback traces and the mean cost.
+   */
+  weekBeforeTuesday: ReleaseWindow;
+  sinceTuesday: ReleaseWindow;
   /** The turns of `sess-0142` in time order. */
   sessionTurns: readonly {
     input: string;
     correctness: number | undefined;
     userFeedback: boolean | undefined;
   }[];
+};
+
+export type ReleaseWindow = {
+  answers: number;
+  correctness: number;
+  downvoteRate: number;
+  costPerAnswer: number;
 };
 
 function numericScore(trace: TraceSummary, name: string): number | undefined {
@@ -480,6 +518,18 @@ export function supportFacts(dataset: Dataset): SupportFacts {
       return value !== undefined && start(trace) >= from && start(trace) < to ? [value] : [];
     });
   const session = dataset.session(SUPPORT_SESSION, false, false);
+  const windowOf = (from: number, to: number): ReleaseWindow => {
+    const traces = eligible.filter((trace) => start(trace) >= from && start(trace) < to);
+    const rated = traces.filter((trace) => booleanScore(trace, "user_feedback") !== undefined);
+    return {
+      answers: traces.length,
+      correctness: mean(correctness(from, to)),
+      downvoteRate:
+        rated.filter((trace) => booleanScore(trace, "user_feedback") === false).length /
+        rated.length,
+      costPerAnswer: mean(traces.map((trace) => trace.cost_total ?? 0)),
+    };
+  };
 
   return {
     downvotesSinceTuesday,
@@ -491,6 +541,8 @@ export function supportFacts(dataset: Dataset): SupportFacts {
     ssoPreviousWeek: sso(twoWeeksStart, weekStart),
     correctnessBeforeDip: mean(correctness(0, dip)),
     correctnessAfterDip: mean(correctness(dip, Number.POSITIVE_INFINITY)),
+    weekBeforeTuesday: windowOf(since - WEEK_MS, since),
+    sinceTuesday: windowOf(since, Number.POSITIVE_INFINITY),
     sessionTurns: (session?.turns ?? []).map(({ trace }) => ({
       input: trace.input_preview ?? "",
       correctness: numericScore(trace, "correctness"),

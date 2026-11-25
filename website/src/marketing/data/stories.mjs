@@ -95,23 +95,9 @@ export const PICTURES = [
     section: "Assistant",
     base: "marketing-assistant",
     label: "Assistant",
-    stories: {
-      support: {
-        alt: "The assistant's window: the question about thumbs-down answers, a SQL step, a filter card with Open in traces, the answer that 62% quote the old pricing page, and a dashboard card with Open in dashboard editor.",
-        caption: "Ask why answers got a thumbs-down, then open the traces behind them.",
-      },
-      coding: {
-        alt: "The assistant's window: the question about cost per run, a SQL step, a filter card with Open in traces, the answer that 18% of runs call run_tests more than five times and make 70% of the cost, and a dashboard card.",
-        caption: "Ask why runs cost more, then open the retried runs.",
-      },
-      voice: {
-        alt: "The assistant's window: the question about hang-ups, a SQL step, a filter card with Open in traces, the answer that 71% follow a turn over 2.5 s on check_availability, and a dashboard card.",
-        caption: "Ask why callers hang up, then open the slow calendar checks.",
-      },
-      extraction: {
-        alt: "The assistant's window: the question about failing vendors, a SQL step, a filter card with Open in traces, the answer that 38% of Nordic Freight's invoices were re-extracted, all on total, and a dashboard card.",
-        caption: "Ask which vendors fail, then open the re-extracted invoices.",
-      },
+    shared: {
+      alt: "The assistant's window: the question which prompts got worse this week, a SQL step, the answer that kb-answer v13 dropped correctness from 0.85 to 0.78 with 62% of its downvotes quoting the old pricing page, and a dashboard card.",
+      caption: "Ask which prompt got worse, and get the numbers, the cause and a dashboard.",
     },
   },
   {
@@ -168,23 +154,9 @@ export const PICTURES = [
     section: "Alerts",
     base: "marketing-alerts",
     label: "Alerts",
-    stories: {
-      support: {
-        alt: "The alerts page with the rule Answer correctness under 0.7 selected: firing for 5 hours, last value 0.517, condition score under 0.700 over 1 hour, Team Slack, and a preview chart crossing its threshold.",
-        caption: "Know when answer quality drops below your bar.",
-      },
-      coding: {
-        alt: "The alerts page with the rule Spend over $40 an hour selected: firing for 14 hours, last value $42.07, condition cost over $40.00 over 1 hour, Team Slack, and a preview chart above its threshold.",
-        caption: "Know when an hour of agent spend goes over your budget.",
-      },
-      voice: {
-        alt: "The alerts page with the rule Slow replies on the voice desk selected: firing for 2 days, last value 3666 ms, condition p95 latency over 1500 ms over 1 hour, the On-call webhook, and a preview chart above its threshold all day.",
-        caption: "Know when one in twenty replies takes longer than 1.5 s.",
-      },
-      extraction: {
-        alt: "The alerts page with the rule Scanned PDFs over 10 an hour selected: firing for 8 minutes, last value 14, condition issue occurrences over 10 in 1 hour, Team Slack, and a 24-hour preview chart that rises above its threshold in the last hour.",
-        caption: "Know when scanned invoices come in faster than 10 an hour.",
-      },
+    shared: {
+      alt: "The alerts page with seven rules, two firing, and the rule Error rate above 15% selected: firing for 12 minutes, last value 25.0%, the Pager webhook, and a 24-hour preview that jumps over its threshold in the last hour.",
+      caption: "Know when the error rate, a score, the cost or an issue crosses your line.",
     },
   },
 ];

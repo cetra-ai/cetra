@@ -66,6 +66,8 @@ const VOICE_RULE = "01900000-0000-7000-8000-000000570203";
 const SUPPORT_RULE = "01900000-0000-7000-8000-000000570201";
 const TEAM_SLACK_ID = "01900000-0000-7000-8000-000000000500";
 const ON_CALL_PAGER_ID = "01900000-0000-7000-8000-000000000503";
+const PAGER_WEBHOOK_ID = "01900000-0000-7000-8000-000000000501";
+const ON_CALL_EMAIL_ID = "01900000-0000-7000-8000-000000000502";
 const FIXTURE_RULE = "01900000-0000-7000-8000-000000000510";
 const FIXTURE_ISSUE = "01900000-0000-7000-8000-000000001c01";
 const FIXTURE_QUEUE = "01900000-0000-7000-8000-000000000a01";
@@ -349,7 +351,22 @@ it("writes the coding, voice and extraction examples with their own numbers", ()
 
 it("lists the story rules with their state and a fired event for the firing ones", () => {
   const rules = STORY_RULES.map((rule) => storyAlertRule(stories[rule.story], rule));
-  expect(rules.map((rule) => rule.state)).toEqual(["firing", "firing", "firing", "firing"]);
+  // The support project's first rule, its six generic rules (the shared Alerts picture), then one rule per story.
+  expect(rules.map((rule) => rule.state)).toEqual([
+    "firing",
+    "firing",
+    "ok",
+    "ok",
+    "ok",
+    "ok",
+    "ok",
+    "firing",
+    "firing",
+    "firing",
+  ]);
+  expect(rules.filter((rule) => !rule.enabled).map((rule) => rule.name)).toEqual([
+    "Hourly spend over $1",
+  ]);
   for (const rule of STORY_RULES) {
     const event = storyAlertEvent(stories[rule.story], rule);
     expect(event.kind).toBe(rule.state === "firing" ? "fired" : "resolved");
@@ -359,9 +376,9 @@ it("lists the story rules with their state and a fired event for the firing ones
   }
 });
 
-it("sets last_fired_at on the four firing rules, and no story rule is ok", () => {
-  expect(STORY_RULES.filter((rule) => rule.state === "firing")).toHaveLength(4);
-  expect(STORY_RULES.filter((rule) => rule.state === "ok")).toHaveLength(0);
+it("sets last_fired_at on the five firing rules only", () => {
+  expect(STORY_RULES.filter((rule) => rule.state === "firing")).toHaveLength(5);
+  expect(STORY_RULES.filter((rule) => rule.state === "ok")).toHaveLength(5);
   for (const rule of STORY_RULES) {
     const dataset = stories[rule.story];
     const stored = storyAlertRule(dataset, rule);
@@ -564,12 +581,19 @@ it("fires the scanned PDFs rule at 14 in the last hour, since its 11th scanned P
   expect(Date.parse(alert.last_fired_at ?? "")).toBe(starts[10]);
 });
 
-it("sends the voice rule to the on-call pager and the other rules to Team Slack", () => {
+it("sends each rule to its channel: the voice rule to the on-call pager, the generic ones to the fixture channels", () => {
+  const byName: Record<string, string> = {
+    "Error rate above 15%": PAGER_WEBHOOK_ID,
+    "Slow replies": PAGER_WEBHOOK_ID,
+    "Daily spend over $20": ON_CALL_EMAIL_ID,
+    "Hourly spend over $1": ON_CALL_EMAIL_ID,
+  };
   for (const rule of STORY_RULES) {
     const dataset = stories[rule.story];
     const alert = storyAlertRule(dataset, rule);
     const event = storyAlertEvent(dataset, rule);
-    const expected = rule.id === VOICE_RULE ? ON_CALL_PAGER_ID : TEAM_SLACK_ID;
+    const expected =
+      rule.id === VOICE_RULE ? ON_CALL_PAGER_ID : (byName[rule.name] ?? TEAM_SLACK_ID);
     expect(alert.channel_ids).toEqual([expected]);
     expect(event.deliveries.map((delivery) => delivery.channel_id)).toEqual([expected]);
   }
@@ -666,7 +690,9 @@ it("answers the story events routes, and lets the fixture rule's routes fall thr
     const alertEvents = (await (
       await fetch(`${baseOf(story)}/alert-events`)
     ).json()) as Schema<"AlertEventPage">;
-    const storyEvents = STORY_RULES.filter((rule) => rule.story === story)
+    const storyEvents = STORY_RULES.filter(
+      (rule) => rule.story === story && rule.state === "firing",
+    )
       .map((rule) => storyAlertEvent(stories[story], rule))
       .sort((left, right) => Date.parse(right.created_at) - Date.parse(left.created_at));
     const head = alertEvents.data.slice(0, storyEvents.length);
@@ -877,16 +903,20 @@ it("a story project lists only its own alert rules and events", async () => {
 
   server.use(...storyHandlers(stories.support, "acme/support-bot"));
   const support = baseOf("support");
-  expect(await ruleIds(`${support}/alert-rules`)).toEqual([SUPPORT_RULE]);
+  const supportRules = STORY_RULES.filter((rule) => rule.story === "support");
+  expect(await ruleIds(`${support}/alert-rules`)).toEqual(supportRules.map((rule) => rule.id));
+  expect(supportRules[0]?.id).toBe(SUPPORT_RULE);
   const supportEvents = (await (
     await fetch(`${support}/alert-events`)
   ).json()) as Schema<"AlertEventPage">;
-  expect(supportEvents.data.map((event) => event.id)).toEqual([
-    storyAlertEvent(stories.support, oneOf(STORY_RULES, "support")).id,
+  // The firing rules' events only, newest first: the error burst, then the correctness dip.
+  expect(supportEvents.data.map((event) => event.rule_id)).toEqual([
+    "01900000-0000-7000-8000-000000570205",
+    SUPPORT_RULE,
   ]);
 });
 
-it("lists only the story rule under acme/support-bot, and keeps the fixture rules unscoped", async () => {
+it("lists only the story rules under acme/support-bot, and keeps the fixture rules unscoped", async () => {
   const ruleIds = async (path: string) =>
     ((await (await fetch(path)).json()) as Schema<"AlertRulePage">).data.map((rule) => rule.id);
   const eventIds = async (path: string) =>
@@ -898,12 +928,19 @@ it("lists only the story rule under acme/support-bot, and keeps the fixture rule
   const names = (
     (await (await fetch(`${baseOf("support")}/alert-rules`)).json()) as Schema<"AlertRulePage">
   ).data.map((rule) => rule.name);
-  expect(names).toEqual([oneOf(STORY_RULES, "support").name]);
+  expect(names).toEqual(
+    STORY_RULES.filter((rule) => rule.story === "support").map((rule) => rule.name),
+  );
   for (const name of fixtureNames) {
     expect(names).not.toContain(name);
   }
   const events = await eventIds(`${baseOf("support")}/alert-events`);
-  expect(events).toEqual([storyAlertEvent(stories.support, oneOf(STORY_RULES, "support")).id]);
+  expect(events).toEqual(
+    STORY_RULES.filter((rule) => rule.story === "support" && rule.state === "firing")
+      .map((rule) => storyAlertEvent(stories.support, rule))
+      .sort((left, right) => Date.parse(right.created_at) - Date.parse(left.created_at))
+      .map((event) => event.id),
+  );
 
   // Unscoped, the fixtures are listed after the story objects, as before.
   server.use(...storyHandlers(stories.support));

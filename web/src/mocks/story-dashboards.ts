@@ -60,7 +60,6 @@ function dashboard(id: string, name: string, description: string, widgets: Widge
   };
 }
 
-const EMAIL = "tags @> ['email']";
 const VOICE = "tags @> ['voice']";
 const BILLING = "tags @> ['billing']";
 
@@ -69,29 +68,28 @@ export function storyDashboards(): Dashboard[] {
   return [
     dashboard(
       STORY_DASHBOARD_IDS.answerQuality,
-      "Answer quality",
-      "Support answers: quality, volume and cost.",
+      "Prompt quality by version",
+      "Correctness, answers, cost and latency of each release of the support prompts.",
       [
         chart(0, "correctness-by-day", "Correctness by day", "line", {
           source: "scores",
           filter: "name = 'correctness'",
           measures: [{ agg: "avg", field: "value_num", label: "Correctness" }],
         }),
-        chart(1, "answers-per-day", "Answers per day", "bar", {
+        chart(1, "answers-by-release", "Answers by release", "bar_h", {
           source: "traces",
-          filter: EMAIL,
           measures: [{ agg: "count", label: "Answers" }],
+          breakdown: { field: "release", limit: 5 },
         }),
-        chart(2, "cost-per-answer", "Cost per answer", "number", {
+        chart(2, "cost-per-answer-by-release", "Cost per answer by release", "bar_h", {
           source: "traces",
-          filter: EMAIL,
           measures: [{ agg: "avg", field: "cost_total", label: "Cost per answer" }],
+          breakdown: { field: "release", limit: 5 },
         }),
-        chart(3, "answers-by-model", "Answers by model", "bar_h", {
+        chart(3, "p95-latency-by-release", "p95 latency by release", "bar_h", {
           source: "traces",
-          filter: EMAIL,
-          measures: [{ agg: "count", label: "Answers" }],
-          breakdown: { field: "models", limit: 5 },
+          measures: [{ agg: "p95", field: "duration_ns", label: "p95 latency" }],
+          breakdown: { field: "release", limit: 5 },
         }),
       ],
     ),

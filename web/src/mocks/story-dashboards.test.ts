@@ -119,13 +119,18 @@ it("the story dashboards have the planned ids, names and widget titles", () => {
   ]);
   expect(new Set(dashboards.map((dashboard) => dashboard.id)).size).toBe(4);
   expect(dashboards.map((dashboard) => dashboard.name)).toEqual([
-    "Answer quality",
+    "Prompt quality by version",
     "Code agent health",
     "Voice latency",
     "Invoice extraction",
   ]);
   expect(dashboards.map((dashboard) => dashboard.definition.widgets.map((w) => w.title))).toEqual([
-    ["Correctness by day", "Answers per day", "Cost per answer", "Answers by model"],
+    [
+      "Correctness by day",
+      "Answers by release",
+      "Cost per answer by release",
+      "p95 latency by release",
+    ],
     ["Failed runs per day", "Error rate", "Cost per run", "p95 duration"],
     ["p95 reply time", "Reply time by day", "Calls over 3 s", "Calls per day"],
     ["Invoices per day", "Schema check failures", "Cost per invoice", "Invoices by model"],
@@ -160,7 +165,7 @@ it("storyDashboards returns fresh objects", () => {
   firstWidgets.pop();
   first[0] = { ...first[0], name: "changed" } as Dashboard;
   const second = storyDashboards();
-  expect(second[0]?.name).toBe("Answer quality");
+  expect(second[0]?.name).toBe("Prompt quality by version");
   expect(second[0]?.definition.widgets).toHaveLength(4);
 });
 
@@ -271,7 +276,7 @@ it("the rate widgets match the dataset", async () => {
 
 it("the hero traces are counted", () => {
   // Each story's second widget carries its tag filter (the scores widget is the first one), except
-  // the coding one: its widgets count every trace of the project.
+  // the coding and support ones: their widgets count every trace of the project.
   const heroes: [StoryId, number, string][] = [
     ["support", 3, STORY_DASHBOARD_IDS.answerQuality],
     ["coding", 4, STORY_DASHBOARD_IDS.codeAgentHealth],
@@ -289,9 +294,11 @@ it("the hero traces are counted", () => {
       throw new Error(`no trace ${index}`);
     }
     const filter = queryOf(second).filter;
-    if (story === "coding") {
+    if (story === "coding" || story === "support") {
       expect(filter).toBeUndefined();
-      expect(trace.error_count).toBeGreaterThan(0);
+      if (story === "coding") {
+        expect(trace.error_count).toBeGreaterThan(0);
+      }
       continue;
     }
     const predicate = filter === undefined ? undefined : tracePredicate(filter);

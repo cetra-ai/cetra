@@ -301,8 +301,8 @@ type TurnSpec = {
   result: Fields;
   /** The number of rows the call returned. */
   rows: number;
-  /** The filter card the turn drafts before its answer. */
-  draft: { kind: "filter"; draft: Fields };
+  /** The filter card the turn drafts before its answer; the shared Explore picture's turn has none (M19 retake). */
+  draft?: { kind: "filter"; draft: Fields };
   answer: string;
   /** The story's dashboard draft, which the turn drafts after its answer with a second call. */
   dashboard: Fields;
@@ -329,10 +329,14 @@ function storyEvents(spec: TurnSpec, traceId: string, turnId: number): StreamEve
       data: { id: CALL_ID, name: spec.call.name, arguments: spec.call.arguments },
     },
     { event: "tool_result", data: { id: CALL_ID, ok: true, summary: turnSummaryOf(spec) } },
-    {
-      event: "draft",
-      data: { id: `draft_${CALL_ID}`, kind: spec.draft.kind, draft: spec.draft.draft },
-    },
+    ...(spec.draft === undefined
+      ? []
+      : [
+          {
+            event: "draft",
+            data: { id: `draft_${CALL_ID}`, kind: spec.draft.kind, draft: spec.draft.draft },
+          } satisfies StreamEvent,
+        ]),
     { event: "text", data: { delta: spec.answer } },
     {
       event: "tool_call",
@@ -354,7 +358,7 @@ function storyEvents(spec: TurnSpec, traceId: string, turnId: number): StreamEve
   ];
 }
 
-/** The four stored messages of a story turn: question, call, result with its draft, answer. */
+/** The stored messages of a story turn: question, call, result with its draft (if any), answer, dashboard. */
 function storyMessages(
   spec: TurnSpec,
   traceId: string,
@@ -397,12 +401,16 @@ function storyMessages(
           ...turnSummaryOf(spec),
           stubbed: false,
         },
-        {
-          type: "draft",
-          id: `draft_${CALL_ID}`,
-          kind: spec.draft.kind,
-          draft: spec.draft.draft,
-        },
+        ...(spec.draft === undefined
+          ? []
+          : [
+              {
+                type: "draft",
+                id: `draft_${CALL_ID}`,
+                kind: spec.draft.kind,
+                draft: spec.draft.draft,
+              },
+            ]),
       ],
       ...reply,
     },
@@ -488,7 +496,7 @@ function dashboardDraft(id: string): Fields {
 }
 
 const SUPPORT_SQL =
-  "SELECT release, count(*) AS feedback, count(*) FILTER (WHERE score('user_feedback') = 0) AS downvotes, count(*) FILTER (WHERE array_has(tags, 'old-pricing')) AS old_pricing FROM traces WHERE has_score('user_feedback') AND start_time >= now() - INTERVAL '46 hours' GROUP BY release";
+  "SELECT CASE WHEN release = 'v2.14' THEN 'v2.14' ELSE 'before v2.14' END AS release, count(*) AS answers, round(avg(score('correctness')), 2) AS correctness, round(count(*) FILTER (WHERE score('user_feedback') = 0) / count(*) FILTER (WHERE has_score('user_feedback')), 2) AS thumbs_down, round(avg(cost_total), 4) AS cost_per_answer FROM traces WHERE start_time >= now() - INTERVAL '214 hours' GROUP BY 1 ORDER BY 1 DESC";
 const CODING_SQL =
   "SELECT array_has(tags, 'api-retry') AS retried, count(*) AS runs, sum(cost_total) AS cost FROM traces WHERE start_time >= now() - INTERVAL '14 hours' GROUP BY 1";
 const VOICE_SQL =
@@ -517,21 +525,41 @@ export const STORIES: Story[] = [
     range: "7d",
     turns: [
       {
-        question: "Why did our thumbs-down rate double since Tuesday?",
-        intro: ["I'll count the downvoted answers ", "since Tuesday 14:00, by release. "],
+        question: "Which of our prompts got worse this week?",
+        intro: ["I'll compare quality, feedback and cost ", "before and since Tuesday's deploy. "],
         call: queryCall(SUPPORT_SQL),
         result: {
-          columns: ["release", "feedback", "downvotes", "old_pricing"],
-          rows: [{ release: "v2.14", feedback: 438, downvotes: 66, old_pricing: 41 }],
+          columns: ["release", "answers", "correctness", "thumbs_down", "cost_per_answer"],
+          rows: [
+            {
+              release: "v2.14",
+              answers: 1317,
+              correctness: 0.78,
+              thumbs_down: 0.15,
+              cost_per_answer: 0.0065,
+            },
+            {
+              release: "before v2.14",
+              answers: 231,
+              correctness: 0.85,
+              thumbs_down: 0.08,
+              cost_per_answer: 0.0064,
+            },
+          ],
         },
-        rows: 1,
-        draft: {
-          kind: "filter",
-          draft: filterDraft("release = 'v2.14' and tags @> ['old-pricing']", "7d"),
-        },
+        rows: 2,
         dashboard: dashboardDraft(STORY_DASHBOARD_IDS.answerQuality),
-        answer:
-          "**62%** of the downvoted answers since Tuesday 14:00 quote the old pricing page: retrieval returns `pricing-2025.md`, back in the index since deploy v2.14. That's **41** traces.",
+        answer: [
+          "**kb-answer v13** is the prompt that got worse this week. It shipped with release v2.14 on Tuesday at 14:00:",
+          "",
+          "- correctness 0.85 → **0.78** over **1,317** answers",
+          "- thumbs-down 8% → **15%**",
+          "- cost per answer flat, $0.0064 → $0.0065",
+          "",
+          '**62%** of its downvoted answers (**41** of 66) quote `pricing-2025.md`: v13 dropped the line "Use only the current pricing page", so the old page now wins retrieval ties.',
+          "",
+          "Compare v12 and v13 in the playground before you move the `production` label back.",
+        ].join("\n"),
       },
     ],
   },
