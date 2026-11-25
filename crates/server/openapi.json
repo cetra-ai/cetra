@@ -42697,7 +42697,7 @@
       },
       "TraceTotals": {
         "type": "object",
-        "description": "Totals of the traces a trace list matches (D-C-30).\n\nSpec 09 § Observability data.",
+        "description": "Totals of the traces a trace list matches (D-C-31).\n\nSpec 09 § Observability data.",
         "required": [
           "trace_count",
           "error_trace_count",

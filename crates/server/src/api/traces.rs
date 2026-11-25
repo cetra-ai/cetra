@@ -804,7 +804,7 @@ pub struct TraceTotalsParams {
     pub include_experiments: bool,
 }
 
-/// Totals of the traces a trace list matches (D-C-30).
+/// Totals of the traces a trace list matches (D-C-31).
 ///
 /// Spec 09 § Observability data.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ToSchema)]

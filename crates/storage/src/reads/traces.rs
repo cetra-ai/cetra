@@ -140,7 +140,7 @@ pub struct MatchCountRequest<'a> {
     pub timeout: Duration,
 }
 
-/// The trace list's rows to total (D-C-30): the list's filter, search, window and exclusions,
+/// The trace list's rows to total (D-C-31): the list's filter, search, window and exclusions,
 /// without sort, cursor or limit.
 #[derive(Debug, Clone, Copy)]
 pub struct TraceTotalsRequest<'a> {
@@ -154,7 +154,7 @@ pub struct TraceTotalsRequest<'a> {
     pub timeout: Duration,
 }
 
-/// Totals of the trace list's rows (D-C-30).
+/// Totals of the trace list's rows (D-C-31).
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct TraceTotals {
     /// Traces the list would page through.

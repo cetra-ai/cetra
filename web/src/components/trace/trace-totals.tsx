@@ -1,7 +1,7 @@
 import type { Schema } from "@/api/types";
 import { formatCost } from "@/lib/format";
 
-/** Trace count, error count and cost of a set of traces (D-C-30). */
+/** Trace count, error count and cost of a set of traces (D-C-31). */
 export type Totals = { traceCount: number; errorTraceCount: number; costTotal: number };
 
 /** The API's totals as `Totals`. */

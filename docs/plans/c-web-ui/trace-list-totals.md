@@ -1,11 +1,11 @@
-# Trace list totals (D-C-30)
+# Trace list totals (D-C-31)
 
 The trace list gets a line under its table with the trace count, the error count and the total cost: of the checked rows when some are checked, otherwise of every trace the list matches (range, filter, search, flags), not only the loaded pages. The whole-list figures come from a new endpoint, `GET /api/v1/projects/{project}/traces/totals`, backed by a new storage read, `trace_totals`, that aggregates the list's rows in one scan. The checked rows' figures are summed in the browser. Implementers: the `glm-5-3` agent (Haiku when GLM has no credit).
 
 **Prerequisites:** none. Branch `claude/trace-list-totals`, cut from `origin/main` at `ac0dfcb`. The spec and decision edits are already on the branch (commit "Plan trace list totals").
 
 **Read first:**
-- `docs/mvp-decisions.md` § Track C, row D-C-30.
+- `docs/mvp-decisions.md` § Track C, row D-C-31.
 - `docs/spec/09-api.md` § Observability data, rows `GET /traces` and `GET /traces/totals`.
 - `docs/spec/05-query.md` § Trace and span APIs (row "Trace totals") and § Dashboard queries, paragraph "Counts are integers; … costs are summed as `Decimal128(38, 18)`".
 - `docs/spec/11-ui.md` § Traces (list), bullet "Totals line under the table".
@@ -36,7 +36,7 @@ Out of scope:
 
 | ID | Summary |
 |---|---|
-| D-C-30 | Totals line; `GET /traces/totals` `{trace_count, error_trace_count, cost_total}`; selection summed in the browser |
+| D-C-31 | Totals line; `GET /traces/totals` `{trace_count, error_trace_count, cost_total}`; selection summed in the browser |
 | D-A2-4 | Costs are summed as `Decimal128(38, 18)` and returned as `f64` (`exact_cost_sum`) |
 | D-C-16 | The histogram counts errors as `status = 'error'`; the totals use the same test |
 | D-G-39 | `search` is at most 1,024 bytes (`check_search`) |
@@ -88,7 +88,7 @@ P1b does the server part: § Contracts "Server", steps 7–11, the server tests.
 Storage, in `crates/storage/src/reads/traces.rs` (after `MatchCountRequest`):
 
 ```rust
-/// The trace list's rows to total (D-C-30): the list's filter, search, window and exclusions,
+/// The trace list's rows to total (D-C-31): the list's filter, search, window and exclusions,
 /// without sort, cursor or limit.
 #[derive(Debug, Clone, Copy)]
 pub struct TraceTotalsRequest<'a> {
@@ -102,7 +102,7 @@ pub struct TraceTotalsRequest<'a> {
     pub timeout: Duration,
 }
 
-/// Totals of the trace list's rows (D-C-30).
+/// Totals of the trace list's rows (D-C-31).
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct TraceTotals {
     /// Traces the list would page through.
@@ -165,7 +165,7 @@ pub struct TraceTotalsParams {
     pub include_experiments: bool,
 }
 
-/// Totals of the traces a trace list matches (D-C-30).
+/// Totals of the traces a trace list matches (D-C-31).
 ///
 /// Spec 09 § Observability data.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ToSchema)]
@@ -325,7 +325,7 @@ export function traceTotalsQuery(
 import type { Schema } from "@/api/types";
 import { formatCost } from "@/lib/format";
 
-/** Trace count, error count and cost of a set of traces (D-C-30). */
+/** Trace count, error count and cost of a set of traces (D-C-31). */
 export type Totals = { traceCount: number; errorTraceCount: number; costTotal: number };
 
 /** The API's totals as `Totals`. */

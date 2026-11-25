@@ -11688,7 +11688,7 @@ export interface components {
             user_id?: string;
         };
         /**
-         * @description Totals of the traces a trace list matches (D-C-30).
+         * @description Totals of the traces a trace list matches (D-C-31).
          *
          *     Spec 09 § Observability data.
          */
