@@ -92,6 +92,8 @@ The list hides evaluation traces and experiment traces until you tick them in th
 - "N loaded" counts the rows loaded so far.
 - **Filters**, the preset chips and the filter bar are in the row below ([Filters and search](/docs/tracing/filters-and-search/)).
 
+The line under the table totals the list: the number of traces, how many failed and their cost, over every trace that matches the time range, filter and search, not only the rows loaded so far. Tick rows to total those instead; the line then reads, for example, "3 of 203 selected · 1 error · $0.42". Traces that arrive in live mode are counted after **Refresh**.
+
 Tick the box of one or more rows to see **Add N to dataset**, which adds those traces to a dataset ([Datasets](/docs/evaluation/datasets/)). **Delete matching…** deletes every trace that matches the current filter, search and time range. It shows how many that is before you confirm, and needs the admin role ([Deletion and retention](/docs/platform/deletion-and-retention/)).
 
 Select a row to open the trace in a panel with the list still in place. Use `j` and `k`, or the arrow keys, to move between rows, and `Esc` to close the panel. The layout switcher in the trace header moves the panel: **Drawer** (the default) opens it beside the list, **Bottom** below the list, and **Page** replaces the list with the trace. **Maximize trace** makes the panel fill the page, and **Restore trace** undoes it. **Open full page** opens the trace on its own page.
