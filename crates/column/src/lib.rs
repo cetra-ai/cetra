@@ -8,6 +8,7 @@ pub mod bitmap;
 pub mod cancel;
 pub mod column;
 pub mod error;
+pub mod frame;
 pub mod memory;
 pub mod selection;
 pub mod types;
