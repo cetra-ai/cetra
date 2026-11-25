@@ -6,6 +6,7 @@
 pub mod bind;
 pub mod error;
 pub mod eval;
+pub mod exec;
 pub mod filter;
 pub mod fn_misc;
 pub mod fn_string;

@@ -1190,6 +1190,7 @@ dependencies = [
  "serde_json",
  "serde_json_path",
  "sqlparser",
+ "tempfile",
  "thiserror 2.0.21",
 ]
 

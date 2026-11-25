@@ -50,6 +50,12 @@ pub enum QueryError {
     /// Query was cancelled via `CancelToken` (maps to timeout/abort in server).
     #[error("query cancelled")]
     Cancelled,
+    /// Admission wait timed out or capacity saturated (`503 busy`).
+    #[error("server busy")]
+    Busy,
+    /// Unexpected internal, I/O, or worker panic error (`500`).
+    #[error("internal query error: {0}")]
+    Internal(String),
     /// Column invariant or internal error (never `ColumnError::MemoryLimit`, which converts to `TooLarge`).
     #[error("column error: {0}")]
     Column(ColumnError),
@@ -68,6 +74,11 @@ impl QueryError {
     /// Builds `QueryError::Failed`, capping `message` at [`MESSAGE_CAP`].
     pub fn failed(message: impl AsRef<str>) -> Self {
         Self::Failed(cap_message(message.as_ref()))
+    }
+
+    /// Builds `QueryError::Internal`, capping `message` at [`MESSAGE_CAP`].
+    pub fn internal(message: impl AsRef<str>) -> Self {
+        Self::Internal(cap_message(message.as_ref()))
     }
 }
 
