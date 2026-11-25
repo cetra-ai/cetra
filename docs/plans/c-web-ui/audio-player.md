@@ -59,7 +59,7 @@ AP1 (core field, serde, OpenAPI, constructors, media carry-over)
 AP4 (docs, decision, changelog)   after AP2 and AP3
 ```
 
-AP2 and AP3 can run in parallel after AP1: AP2 edits only `crates/`, `fixtures/otlp/` and `docs/spec/02-ingestion.md`; AP3 edits only `web/src/components/payload/`.
+AP2 and AP3 can run in parallel after AP1: AP2 edits only `crates/`, `fixtures/otlp/` and `docs/spec/01`, `02` and `06`; AP3 edits only `web/src/components/payload/`.
 
 ---
 
@@ -117,11 +117,12 @@ AP2 and AP3 can run in parallel after AP1: AP2 edits only `crates/`, `fixtures/o
   - `an_extracted_blob_keeps_its_transcript`: a blob ≥ `min_bytes` with a transcript becomes a `media://` uri part with the same transcript.
   - `a_dropped_blob_keeps_its_transcript`: a blob over `max_bytes` becomes `cetra:dropped` with `reason`, `size` and the transcript.
   - `an_extracted_data_uri_keeps_its_transcript`: a `uri` part whose uri is an entire data URI, with a transcript.
+  - `a_canonical_blob_inside_raw_json_keeps_its_transcript`: the raw-JSON path (`json_part` / `replaced_object`, ~line 262) already copies unknown keys, so it needs no code change; this test pins it (a `json` payload holding a canonical blob object with a transcript).
 - The OpenAPI snapshot (`crates/core/tests/snapshots/part_schema.snap`, asserted at `message.rs` ~line 1073) is updated with `INSTA_UPDATE=always cargo test -p cetra-core`; read the diff: only the two `transcript` properties are new. `crates/server/tests/openapi.rs` passes with the new field.
 
 **Done when** (from the worktree root):
 - `cargo test -p cetra-core -p cetra-otel -p cetra-eval` passes (after the snapshot update above).
-- `cargo test -p cetra-server --test openapi` passes.
+- `cargo test -p cetra-server --test openapi --test api_examples` passes (check the test target names in `crates/server/Cargo.toml` / `crates/server/tests/`; run the targets that match `Part::Uri`).
 - `just openapi` needs the JS deps for the TypeScript generation: run `just js-install` first if `node_modules/` is missing.
 - `cargo clippy -p cetra-core -p cetra-otel -p cetra-eval -p cetra-server --all-targets -- -D warnings` is clean, and `cargo fmt --check` is clean.
 - `git diff --stat` shows `web/src/api/schema.gen.ts` with `transcript` on `UriPart` and `BlobPart`.
@@ -160,12 +161,14 @@ AP2 and AP3 can run in parallel after AP1: AP2 edits only `crates/`, `fixtures/o
    - `mime_type` stays `None`: the response does not say the format. Media extraction sniffs WAV, MP3, OGG and FLAC (spec 02 § Media extraction step 3). Raw PCM stays `application/octet-stream`.
 4. **Eval** (`eval/src/text.rs`):
    - `last_assistant_text`: when the last assistant message has no text part, return its media transcripts (non-empty, part order) joined with `"\n"`, the same rule as the preview. A message with text keeps returning only its text.
+   - A dropped part has no modality (spec 02: `cetra:dropped` parts are written without one), so a dropped audio renders `[file: <transcript>]`. That is intended; do not change the dropped shape.
+   - Update the module doc (~lines 39–40, which list `[image]`, `[audio]`, `[file]`) with the transcript form.
    - `render_part` for `Part::Uri` / `Part::Blob` passes the transcript to `media_placeholder(modality, transcript)`, which returns `[audio]` etc. as today when the transcript is `None` or empty, and `[audio: <transcript>]` (same label, `": "`, the transcript verbatim) otherwise. Update the doc comment.
 5. **Fixture** `fixtures/otlp/edge/openai-output-audio/`, hand-written (`origin: "hand_written"`), following `fixtures/otlp/README.md`:
    - One GenAI span whose `gen_ai.output.messages` attribute is a JSON string of OpenAI response choices (the Laminar shape that `conventions/genai.rs` `genai_messages` sends to `openai_messages`, D-B1-3): `[{"message":{"role":"assistant","content":null,"audio":{"id":"audio_1","data":"<base64>","transcript":"Your balance is 42 dollars.","expires_at":1767225600}},"finish_reason":"stop"}]`. Copy the span's other attributes (operation name, span kind) from an existing `fixtures/otlp/genai/` case that sets `gen_ai.output.messages`, with no usage attributes and no input messages, so the case needs no `prices.json` row and has one scenario.
    - `case.json` `settings`: `{"media_min_bytes": 64}`, so a small blob is extracted.
    - The `data` is a WAV of about 250 bytes: a 44-byte RIFF/WAVE header for 8 kHz, mono, 8-bit PCM, then 200 samples of silence (value 128). Generate the base64 with a one-off script in the scratchpad, not a file in the repo.
-   - `spec_refs`: `["02 § Media extraction", "01 § Canonical message format"]`.
+   - `spec_refs`: `["02 § Media extraction", "02 § Normalization rules", "01 § Canonical message format"]`.
    - Write `expected.json` with `CETRA_BLESS=1 cargo test -p cetra-otel --test golden`, then `just fixtures-fmt`, then read it and check: the output is one assistant message with `finish_reason` `stop` and one `uri` part, `modality: "audio"`, `mime_type: "audio/wav"` (sniffed), a `media://` uri, `transcript` set, and `id` / `expires_at` kept on the part; `output_preview` is the transcript; `media_refs` has one hash.
 6. **Specs:**
    - Spec 01, `input_preview` row: append "A message with no text part previews its media transcripts."
@@ -280,11 +283,11 @@ export function MediaWithTranscript(props: { transcript?: string; children: Reac
   - `peaksOf` scales to the loudest slice; silence gives zeros; fewer samples than bars gives `bars` values; negative samples count by magnitude.
   - `clockOf`: 0 → `0:00`, 4.2 → `0:04`, 65 → `1:05`, 3725 → `1:02:05`, NaN → `0:00`. `lengthOf`: 4.2 → `4.2 s`, 65 → `1:05`.
   - `loadPeaks returns null without AudioContext and fetches nothing` (a handler that records calls sees none).
-  - With `vi.stubGlobal("AudioContext", FakeAudioContext)` (a class whose `decodeAudioData` resolves `{ getChannelData: () => new Float32Array([0, 0.5, -1, 0.25]) }` and whose `close` resolves; `vi.unstubAllGlobals()` after each): `decodes the first channel into peaks`; `refuses a body whose Content-Length is over the cap` (handler sets `Content-Length` to `WAVEFORM_MAX_BYTES + 1`; result null, `decodeAudioData` not called); `fetches one src once` (two calls, one request); `returns null when decoding fails`.
+  - With `vi.stubGlobal("AudioContext", FakeAudioContext)` (a class whose `decodeAudioData` resolves `{ getChannelData: () => new Float32Array([0, 0.5, -1, 0.25]) }` and whose `close` resolves; `vi.unstubAllGlobals()` after each): `decodes the first channel into peaks`; `refuses a body whose Content-Length is over the cap` (handler sets `Content-Length` to `WAVEFORM_MAX_BYTES + 1`; result null, `decodeAudioData` not called; if MSW rejects a header that does not match the body, stub `fetch` with `vi.stubGlobal` for this test and return `new Response(new Uint8Array(4), { headers: { "Content-Length": String(WAVEFORM_MAX_BYTES + 1) } })`); `fetches one src once` (two calls, one request); `returns null when decoding fails`.
 - `audio-player.test.tsx` (stub `HTMLMediaElement.prototype.play` to resolve and dispatch `play`, and `pause` to dispatch `pause`; set `duration` with `Object.defineProperty` and dispatch `loadedmetadata`):
   - `shows the type and length once the metadata loads` (`audio/wav · 4.2 s`, clock `0:00 / 0:04`).
   - `toggles play and pause` (button label Play → Pause → Play).
-  - `seeks with the arrow keys` (ArrowRight sets `currentTime` to 5, clamped at the duration; Home to 0).
+  - `seeks with the arrow keys` (ArrowRight sets `currentTime` to 5, clamped at the duration; Home to 0). If jsdom's `currentTime` cannot be set, define it with `Object.defineProperty(audio, "currentTime", { value: 0, writable: true })` like `duration`.
   - `shows a message when the audio cannot be played` (dispatch `error`).
   - `does not fetch the file for the waveform without AudioContext` (the default jsdom environment; no request reaches MSW).
 - `media-view.test.tsx`:
@@ -315,7 +318,7 @@ export function MediaWithTranscript(props: { transcript?: string; children: Reac
 `docs/roadmap.md` is not edited: no track changes status. `skills/references.json` does not list the media page, so no skill reference is regenerated.
 
 **Steps:**
-1. D-C-29 (D-C-28 is on the unmerged `claude/session-page` branch; whichever merges second rebases and keeps both rows in order), in the table format of the Track C rows: the summary from this plan's decisions table, and "Alternatives rejected: pairing an audio part with the next text part (no data-model change, but ambiguous when a text instruction follows audio); a progress bar only (no waveform)."
+1. D-C-29, as a new row right after the row at the highest line number of the Track C table (the D-C rows are not in numeric order) (D-C-28 is on the unmerged `claude/session-page` branch; whichever merges second rebases and keeps both rows in order), in the table format of the Track C rows: the summary from this plan's decisions table, and "Alternatives rejected: pairing an audio part with the next text part (no data-model change, but ambiguous when a text instruction follows audio); a progress bar only (no waveform)."
 2. Spec 11 *Chat* bullet: replace "images/audio/PDF rendered from `media://` refs" with "images and PDFs rendered from `media://` refs; audio in a themed player (play/pause, a waveform decoded once visible for files up to 8 MiB, else a progress bar, elapsed and total time, MIME type and length), and a media part's `transcript` under the media in the same block (D-C-29)".
 3. `media.mdx`: add a section `## Transcripts` after `## Send media`: a media part may carry `transcript`, the text of what was said; cetra keeps it when it stores or drops the media; for OpenAI chat completions with audio output, the transcript the API returns is kept; a message with only audio shows its transcripts as its preview; the trace view plays audio with a waveform and shows the transcript under the player; judges read `[audio: <transcript>]`. Include one `json` example of an audio part with a transcript (`check-samples.mjs` checks only Python and TypeScript fences, so a `json` fence needs no marker). Also update the "In the UI" paragraph (~line 97) to say audio plays in a player with a waveform and its transcript under it. Follow `website/STYLE.md`.
 4. `CHANGELOG.md` § `[Unreleased]`:
