@@ -1782,6 +1782,26 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/projects/{project}/alert-rules/issue-preview": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Preview an issue occurrence rule
+         * @description Any project member can read. Counts the live occurrences an `issue_occurrences` rule with this scope and window would count, per bucket as wide as the window: from the window boundary at or before 24 hours ago (`15m`, `1h`), 3 days ago (`6h`) or 14 days ago (`24h`), to now. Exactly one of `issue_id` and `source_id`; windows under 15 minutes are 400. A missing issue or source is 404.
+         */
+        get: operations["get_alert_issue_preview"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/projects/{project}/alert-rules/{id}": {
         parameters: {
             query?: never;
@@ -7861,6 +7881,40 @@ export interface components {
              *     approximation when merged issues share users.
              */
             users: number;
+        };
+        /** @description One bucket of an [`IssueAlertPreview`]. */
+        IssueAlertPoint: {
+            /**
+             * Format: int64
+             * @description Live occurrences created in the bucket (before `to` for the last one); 0 when none.
+             */
+            count: number;
+            /**
+             * Format: date-time
+             * @description Start of the bucket: a multiple of the window since the Unix epoch. JSON is RFC 3339.
+             */
+            time: string;
+        };
+        /** @description Occurrence counts of an `issue_occurrences` rule, per bucket as wide as its window (D-K-22). */
+        IssueAlertPreview: {
+            /**
+             * Format: date-time
+             * @description Start of the range, inclusive: the start of the window-wide bucket that holds `to` minus
+             *     the preview span (24 hours, 3 days or 14 days). JSON is RFC 3339.
+             */
+            from: string;
+            /**
+             * @description One per bucket from `from` to the last one that starts before `to`, oldest first, with no
+             *     gap; only the last one is partial.
+             */
+            points: components["schemas"]["IssueAlertPoint"][];
+            /**
+             * Format: date-time
+             * @description End of the range, exclusive (the request time).
+             */
+            to: string;
+            /** @description The window, which is the bucket width. */
+            window: components["schemas"]["AlertWindow"];
         };
         /** @description Candidates of an LLM source created in the last 24 hours, by status (D-IC-12). */
         IssueCandidateCounts: {
@@ -19843,6 +19897,105 @@ export interface operations {
             };
             /** @description The request conflicts with the current state. */
             409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Too many requests. */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The server is busy or a dependency is unavailable. Retry later. */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    get_alert_issue_preview: {
+        parameters: {
+            query: {
+                /**
+                 * @description The issue counted, with its merge target and the issues merged into that target.
+                 *     Exactly one of `issue_id` and `source_id`.
+                 */
+                issue_id?: string;
+                /**
+                 * @description The source whose issues are counted, except the ignored and merged ones (with the issues
+                 *     merged into each). Exactly one of `issue_id` and `source_id`.
+                 */
+                source_id?: string;
+                /** @description The rule's window: `15m`, `1h`, `6h` or `24h`. It is the bucket width. */
+                window: components["schemas"]["AlertWindow"];
+            };
+            header?: never;
+            path: {
+                /** @description Project UUID, URL-encoded org-slug/project-slug, or `current`. */
+                project: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The counts per bucket. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["IssueAlertPreview"];
+                };
+            };
+            /** @description The request is malformed or a filter is invalid. */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No credentials, or the credentials are invalid. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The credentials do not allow this operation, or the organization's plan does not include it (code plan_required). */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The resource does not exist. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The query took longer than its time limit, needed more memory or temporary disk space than allowed, a filter deletion matched more than 100,000 traces, or the owner cannot be that user (code owner_not_allowed). */
+            422: {
                 headers: {
                     [name: string]: unknown;
                 };

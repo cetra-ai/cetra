@@ -37,8 +37,9 @@ use super::agent_context::AgentContextBody;
 use super::alerts::{
     AlertCondition, AlertDelivery, AlertEvent, AlertEventKind, AlertMetric, AlertRule, AlertState,
     AlertWindow, ChannelDelivery, ChannelKind, ChannelTestResult, Comparator,
-    CreateAlertRuleRequest, CreateChannelRequest, DeliveryStatus, LatencyTarget,
-    NotificationChannel, ScoreAggregation, UpdateAlertRuleRequest, UpdateChannelRequest,
+    CreateAlertRuleRequest, CreateChannelRequest, DeliveryStatus, IssueAlertPoint,
+    IssueAlertPreview, IssueAlertPreviewParams, LatencyTarget, NotificationChannel,
+    ScoreAggregation, UpdateAlertRuleRequest, UpdateChannelRequest,
 };
 use super::annotation_queues::{
     AddQueueItems, AddedQueueItems, AnnotationQueue, AnnotationQueueItem,
@@ -592,6 +593,8 @@ pub(crate) fn collect_schemas() -> SchemaSet {
     set.insert::<AlertEventKind>();
     set.insert::<AlertDelivery>();
     set.insert::<AlertEvent>();
+    set.insert::<IssueAlertPoint>();
+    set.insert::<IssueAlertPreview>();
     set.insert_page::<AlertRule>("AlertRulePage");
     set.insert_page::<AlertEvent>("AlertEventPage");
     set.insert::<BudgetPeriod>();
@@ -6148,6 +6151,23 @@ fn alert_rule_paths(paths: PathsBuilder) -> PathsBuilder {
             QUERY_ERRORS,
         ))
         .build();
+    let issue_preview = operation(
+        "get_alert_issue_preview",
+        "alerts",
+        "Preview an issue occurrence rule",
+    )
+    .description(Some(
+        "Any project member can read. Counts the live occurrences an `issue_occurrences` rule with this scope and window would count, per bucket as wide as the window: from the window boundary at or before 24 hours ago (`15m`, `1h`), 3 days ago (`6h`) or 14 days ago (`24h`), to now. Exactly one of `issue_id` and `source_id`; windows under 15 minutes are 400. A missing issue or source is 404.",
+    ))
+    .parameters(Some(with_query::<IssueAlertPreviewParams>(vec![
+        project_param(),
+    ])))
+    .responses(responses(
+        "200",
+        json_of::<IssueAlertPreview>("The counts per bucket."),
+        READ_ERRORS,
+    ))
+    .build();
     let project_events = operation(
         "list_project_alert_events",
         "alerts",
@@ -6190,6 +6210,10 @@ fn alert_rule_paths(paths: PathsBuilder) -> PathsBuilder {
         .path(
             format!("{PROJECT}/alert-rules/{{id}}/events"),
             PathItem::new(HttpMethod::Get, events),
+        )
+        .path(
+            format!("{PROJECT}/alert-rules/issue-preview"),
+            PathItem::new(HttpMethod::Get, issue_preview),
         )
         .path(
             format!("{PROJECT}/alert-events"),

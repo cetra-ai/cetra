@@ -15,6 +15,7 @@ import { ThemeProvider } from "@/components/theme-provider";
 import { server } from "@/mocks/node";
 import { FIRING_RULE_ID } from "@/test/fixtures";
 import { problemResponse } from "@/test/problem";
+import issuePreviewFixture from "../../../../fixtures/api/static/alert-issue-preview.json";
 import ruleFixture from "../../../../fixtures/api/static/alert-rule.json";
 import issueFixture from "../../../../fixtures/api/static/issue.json";
 import issueSourceFixture from "../../../../fixtures/api/static/issue-source.json";
@@ -24,6 +25,8 @@ import { RulePanel } from "./rule-panel";
 const ORG = "acme";
 const PROJECT = "support-bot";
 const RULE = "/api/v1/projects/:project/alert-rules/:id";
+// Served before RULE: its `:id` also matches `issue-preview`.
+const ISSUE_PREVIEW = "/api/v1/projects/:project/alert-rules/issue-preview";
 const WIDGET = "/api/v1/projects/:project/dashboards/query";
 const ISSUE = "/api/v1/projects/:project/issues/:id";
 const SOURCE = "/api/v1/projects/:project/issue-sources/:id";
@@ -205,6 +208,7 @@ it("shows a history error in place of the events table", async () => {
 
 it("shows the title of the issue an issue rule counts", async () => {
   server.use(
+    http.get(ISSUE_PREVIEW, () => HttpResponse.json(issuePreviewFixture)),
     http.get(RULE, () => HttpResponse.json(scopedRule({ issue_id: ISSUE_ID }))),
     http.get(ISSUE, () => HttpResponse.json(issueFixture)),
   );
@@ -218,6 +222,7 @@ it("shows the title of the issue an issue rule counts", async () => {
 
 it("shows the short id of the issue while it cannot be loaded", async () => {
   server.use(
+    http.get(ISSUE_PREVIEW, () => HttpResponse.json(issuePreviewFixture)),
     http.get(RULE, () => HttpResponse.json(scopedRule({ issue_id: ISSUE_ID }))),
     http.get(ISSUE, () => problemResponse(500, "internal")),
   );
@@ -233,6 +238,7 @@ it("shows the short id of the issue while it cannot be loaded", async () => {
 
 it("links a source rule to its source", async () => {
   server.use(
+    http.get(ISSUE_PREVIEW, () => HttpResponse.json(issuePreviewFixture)),
     http.get(RULE, () => HttpResponse.json(scopedRule({ source_id: SOURCE_ID }))),
     http.get(SOURCE, () => HttpResponse.json(issueSourceFixture)),
   );

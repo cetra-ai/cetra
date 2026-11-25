@@ -551,6 +551,11 @@ const OPERATIONS: &[(&str, &str, &str)] = &[
         "get_alert_rule",
     ),
     (
+        "get",
+        "/api/v1/projects/{project}/alert-rules/issue-preview",
+        "get_alert_issue_preview",
+    ),
+    (
         "patch",
         "/api/v1/projects/{project}/alert-rules/{id}",
         "update_alert_rule",
@@ -1249,6 +1254,7 @@ const READ_OPERATIONS: &[&str] = &[
     "list_issues",
     "get_issue",
     "get_issue_occurrences",
+    "get_alert_issue_preview",
     "get_prompt_metrics",
 ];
 
