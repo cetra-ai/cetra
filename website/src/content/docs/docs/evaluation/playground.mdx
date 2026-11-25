@@ -43,6 +43,18 @@ Select **Add answer to conversation** on a column to append its answer to the me
 
 A run is refused before it starts if a message has media or an unknown part, because the playground cannot send those. The message is named, and you remove the part to run.
 
+## Compare prompt versions
+
+A draft opened from a prompt has a **Version** select in each column's header. **Draft** runs the messages you edit. A version runs that version's messages, tools, tool choice and response format, with the same variables and placeholders as the draft. Picking a version also sets the column's connection, model and parameters from the version's config. You can still change them.
+
+A column with a version shows the version's template above its answer, in a block you can fold. Each of its runs records the version as its source.
+
+The settings panel's tools, tool choice and response format apply to **Draft** columns only, because a version brings its own. **Add answer to conversation** adds the answer to the messages you edit, as in any column. Changing a column's version clears its answer.
+
+**Save as new version** still saves the draft's messages and settings, with the first column's config, whether or not that column has a version.
+
+To compare two versions, open the prompt's playground with **Open in playground**, select **Add model**, and pick the other version in the new column. You can also open `/<org>/<project>/playground?prompt=<name>&version=<a>&compare=<b>`. It opens version `a` in the first column and version `b` in the second.
+
 ## Tools and response formats
 
 A tool is a JSON list of tool definitions, each with a name, an optional description and its parameters. The playground sends the tools and the tool choice to the model. It does not run the tools: when the model calls one, the call appears in the answer, and you add the result as a `tool` message yourself.
