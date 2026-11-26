@@ -1,11 +1,14 @@
 //! Shape B SQL frontend: validation, parameters, view/function catalogs, and logical IR.
 
+pub mod binder;
 pub mod catalog;
 pub mod explain;
 pub mod logical;
 pub mod optimize;
 pub mod params;
 pub mod validate;
+
+pub use binder::{BoundParams, bind_statement};
 
 pub use catalog::{
     FunctionInfo, FunctionKind, SqlCatalog, SqlTableDef, SqlViewKind, TimeWindow, function_catalog,

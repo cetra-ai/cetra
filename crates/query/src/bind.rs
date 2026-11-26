@@ -83,10 +83,6 @@ pub fn bind_expr(ast: &SqlExpr, schema: &Schema) -> Result<Expr, InvalidQuery> {
 }
 
 /// Binds a `sqlparser::ast::Expr` using a custom [`ExprResolver`] into a typed [`Expr`] IR.
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "used by sql/binder.rs in QE5.2")
-)]
 pub(crate) fn bind_expr_with(
     ast: &SqlExpr,
     resolver: &dyn ExprResolver,
