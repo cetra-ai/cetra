@@ -144,18 +144,19 @@ pub fn search_pack_rows(
     needle: &[u8],
     case_insensitive: bool,
 ) -> Result<Bitmap, StatamError> {
-    search_pack_rows_impl(pack, row_refs, None, pack_idx, needle, case_insensitive)
+    search_pack_rows_impl(pack, row_refs, None, pack_idx, needle, case_insensitive, 1)
 }
 
 /// Exact row-level substring search restricted to rows active in `active_mask`,
-/// avoiding per-row `PayloadRefRow` cloning in callers.
-pub(crate) fn search_pack_rows_masked(
+/// using up to `read_threads` workers for `.stpk` frame decompression and substring scanning.
+pub(crate) fn search_pack_rows_masked_with_threads(
     pack: &ChunkPackReader,
     row_refs: &[PayloadRefRow],
     active_mask: &Bitmap,
     pack_idx: u16,
     needle: &[u8],
     case_insensitive: bool,
+    read_threads: usize,
 ) -> Result<Bitmap, StatamError> {
     search_pack_rows_impl(
         pack,
@@ -164,6 +165,7 @@ pub(crate) fn search_pack_rows_masked(
         pack_idx,
         needle,
         case_insensitive,
+        read_threads,
     )
 }
 
@@ -194,6 +196,7 @@ fn search_pack_rows_impl(
     pack_idx: u16,
     needle: &[u8],
     case_insensitive: bool,
+    read_threads: usize,
 ) -> Result<Bitmap, StatamError> {
     let mut results = Bitmap::new_zeroed(row_refs.len());
     if active_mask.is_some_and(Bitmap::all_zeros) {
@@ -280,6 +283,7 @@ fn search_pack_rows_impl(
             pack_idx,
             needle,
             case_insensitive,
+            read_threads,
             &mut matcher,
             &chunk_rows,
             &needed_chunks,
@@ -290,6 +294,7 @@ fn search_pack_rows_impl(
             pack,
             row_refs,
             pack_idx,
+            read_threads,
             &mut matcher,
             &chunk_rows,
             &needed_chunks,
@@ -307,6 +312,7 @@ fn search_short_needle_rows(
     pack_idx: u16,
     needle: &[u8],
     case_insensitive: bool,
+    read_threads: usize,
     matcher: &mut NeedleMatcher,
     chunk_rows: &[usize],
     needed_chunks: &BTreeSet<u32>,
@@ -333,11 +339,21 @@ fn search_short_needle_rows(
 
     let mut matched_chunks = HashSet::new();
     if !surviving_chunks.is_empty() {
-        pack.scan_chunks_in_frames(&surviving_chunks, |cid, bytes| {
-            if matcher.matches(bytes) {
-                matched_chunks.insert(cid);
-            }
-        })?;
+        if read_threads.clamp(1, crate::parallel::MAX_WRITE_THREADS) > 1 {
+            let matched = pack.scan_chunks_in_frames_parallel(
+                &surviving_chunks,
+                read_threads,
+                || Ok(NeedleMatcher::new(needle, case_insensitive)),
+                |m, cid, bytes| m.matches(bytes).then_some(cid),
+            )?;
+            matched_chunks.extend(matched);
+        } else {
+            pack.scan_chunks_in_frames(&surviving_chunks, |cid, bytes| {
+                if matcher.matches(bytes) {
+                    matched_chunks.insert(cid);
+                }
+            })?;
+        }
     }
 
     if skip_boundary {
@@ -439,17 +455,31 @@ fn search_short_needle_rows(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn search_long_needle_rows(
     pack: &ChunkPackReader,
     row_refs: &[PayloadRefRow],
     pack_idx: u16,
+    read_threads: usize,
     matcher: &mut NeedleMatcher,
     chunk_rows: &[usize],
     needed_chunks: &BTreeSet<u32>,
     results: &mut Bitmap,
 ) -> Result<(), StatamError> {
     let all_needed: Vec<u32> = needed_chunks.iter().copied().collect();
-    let fetched = pack.read_chunks(&all_needed)?;
+    let fetched: HashMap<u32, Vec<u8>> =
+        if read_threads.clamp(1, crate::parallel::MAX_WRITE_THREADS) > 1 {
+            pack.scan_chunks_in_frames_parallel(
+                &all_needed,
+                read_threads,
+                || Ok(()),
+                |(), cid, bytes| Some((cid, bytes.to_vec())),
+            )?
+            .into_iter()
+            .collect()
+        } else {
+            pack.read_chunks(&all_needed)?
+        };
 
     let mut seq_cache: HashMap<&[(u16, u32)], bool> = HashMap::new();
     let mut scratch_buf = Vec::new();
@@ -996,12 +1026,22 @@ mod tests {
             .collect();
 
         // Build one representative split pair for every (len in 5..=64, split in 1..len).
-        // Group splits into a few tests across chunk pairs by storing each (len, split) pair
-        // in its own chunk pair (using unique length-prefix padding in `'a'..'d'` so chunks are >= 256 B).
+        // Under Miri, sample representative lengths so the exhaustive loop finishes in seconds.
+        #[cfg(miri)]
+        let lens: &[usize] = &[5, 6, 7, 8, 16, 32, 64];
+        #[cfg(not(miri))]
+        let lens_vec: Vec<usize> = (5..=64).collect();
+        #[cfg(not(miri))]
+        let lens: &[usize] = &lens_vec;
+
         let mut cases = Vec::new();
-        for len in 5..=64usize {
+        for &len in lens {
             let needle = &full_needle[..len];
-            for split in 1..len {
+            #[cfg(miri)]
+            let splits: Vec<usize> = vec![1, len / 2, len - 1];
+            #[cfg(not(miri))]
+            let splits: Vec<usize> = (1..len).collect();
+            for split in splits {
                 let mut left = vec![b'a'; 260];
                 // Encode unique marker in `'a'..'d'` so chunks don't dedup into identical IDs.
                 let tag = ((len * 64 + split) as u32).to_le_bytes();
@@ -1101,5 +1141,63 @@ mod tests {
         // Only the TS02 trigram section was read (never EdgeTable or data frames)!
         let counters_after = s3.counters();
         assert!(counters_after.bytes_requested <= fresh_pack.postscript().trigram_len as u64);
+    }
+
+    #[test]
+    fn parallel_pack_frame_search_matches_single_threaded() {
+        let opts = PackWriteOptions {
+            codec: test_codec(),
+            zstd_level: 3,
+            target_frame_raw_bytes: 512,
+            enable_trigram_skip: true,
+            compress_toc_lz4: true,
+            write_threads: 1,
+        };
+        let mut builder = ChunkPackBuilder::new([0x77u8; 16], opts);
+        let mut rows = Vec::new();
+        for i in 0..40u32 {
+            let chunk = if i % 7 == 0 {
+                format!("chunk-{i}-TARGET_NEEDLE_ABC-{}", "X".repeat(300))
+            } else {
+                format!("chunk-{i}-ordinary-payload-{}", "Y".repeat(300))
+            };
+            let cid = builder.intern_chunk(chunk.as_bytes()).unwrap();
+            rows.push(PayloadRefRow::Chunks(vec![(0, cid)]));
+        }
+        let mut pack_bytes = Vec::new();
+        builder.finish(&mut pack_bytes).unwrap();
+        let pack = ChunkPackReader::open(Arc::new(SimulatedS3Reader::from_bytes(
+            pack_bytes,
+            SimulatedS3Config::default(),
+        )))
+        .unwrap();
+        assert!(pack.toc().frames.len() >= 4);
+
+        let all_mask = Bitmap::new_ones(rows.len());
+        let seq = search_pack_rows_masked_with_threads(
+            &pack,
+            &rows,
+            &all_mask,
+            0,
+            b"target_needle_abc",
+            true,
+            1,
+        )
+        .unwrap();
+        let par = search_pack_rows_masked_with_threads(
+            &pack,
+            &rows,
+            &all_mask,
+            0,
+            b"target_needle_abc",
+            true,
+            4,
+        )
+        .unwrap();
+        assert_eq!(seq, par);
+        assert_eq!(
+            par.iter_ones().collect::<Vec<_>>(),
+            vec![0, 7, 14, 21, 28, 35]
+        );
     }
 }

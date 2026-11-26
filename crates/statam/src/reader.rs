@@ -34,9 +34,13 @@ use crate::format::{
     decompress_checked, read_framed_block, read_framed_pack_frame,
 };
 use crate::io::RangeReader;
+use crate::parallel::{MAX_WRITE_THREADS, parallel_map_in_order};
 use crate::payload::pack::ChunkPackReader;
-use crate::payload::search::{pack_short_circuits_all, search_pack_rows_masked};
-use crate::payload::{PayloadRefRow, decode_payload_refs, scan_payload_refs_inline_substring};
+use crate::payload::search::{pack_short_circuits_all, search_pack_rows_masked_with_threads};
+use crate::payload::{
+    PayloadRefRow, decode_payload_refs, decode_payload_refs_selected,
+    scan_payload_refs_inline_substring,
+};
 use crate::simd::bloom::{BloomIndex, statam_bloom_hash};
 use crate::simd::filter::{FilterOp, filter_f64, filter_i64, filter_i64_between, filter_u32};
 use crate::simd::trigram::{TrigramBloom, ascii_lowercase_into, extract_trigram_hashes};
@@ -278,6 +282,9 @@ pub struct ScanRequest {
     pub limit: Option<usize>,
     /// I/O coalescing mode (`Auto`, `Point`, or `Scan`).
     pub coalesce_mode: CoalesceMode,
+    /// Number of worker threads for parallel `.stpk` frame scanning and Phase-2 column decoding
+    /// (`0` or `1` = sequential, clamped to `1..=32`).
+    pub read_threads: usize,
 }
 
 /// Parsed Hot Tail metadata for a `.statam` file (opened in 1 GET).
@@ -1314,6 +1321,7 @@ impl StatamReader {
                         &resolved_preds,
                         &resolved_subs,
                         &dict_sub_bitmaps,
+                        req.read_threads,
                     )?;
                     for batch in mb_batches {
                         if batch.is_empty() {
@@ -1354,6 +1362,7 @@ impl StatamReader {
                     &resolved_subs,
                     &dict_sub_bitmaps,
                     req.limit.map(|lim| lim.saturating_sub(emitted_rows)),
+                    req.read_threads,
                 )?,
                 CoalesceMode::Scan | CoalesceMode::Auto => self.scan_rg_late_mat(
                     rg_idx,
@@ -1368,6 +1377,7 @@ impl StatamReader {
                     &resolved_preds,
                     &resolved_subs,
                     &dict_sub_bitmaps,
+                    req.read_threads,
                 )?,
             };
 
@@ -1392,6 +1402,272 @@ impl StatamReader {
                     }
                 }
                 emitted_rows += batch.num_rows();
+                out_batches.push(batch);
+            }
+        }
+
+        Ok(out_batches)
+    }
+
+    /// Materializes the requested global `row_indices` (0-based across the file) with optional
+    /// column projection, using coalesced range reads and sparse decoding per touched mini-block.
+    ///
+    /// Out-of-bounds indices (`>= row_count`) are ignored; valid indices are deduplicated and
+    /// returned in ascending file order as one [`Batch`] per touched mini-block.
+    pub fn take_rows(
+        &self,
+        row_indices: &[u64],
+        projection: Option<&[usize]>,
+        read_threads: usize,
+    ) -> Result<Vec<Batch>, StatamError> {
+        let schema = &self.meta.schema_meta.schema;
+        let num_logical = schema.len();
+
+        let proj_indices: Vec<usize> = match projection {
+            Some(v) => {
+                for &idx in v {
+                    if idx >= num_logical {
+                        return Err(StatamError::SchemaMismatch {
+                            reason: "projection column index out of bounds",
+                        });
+                    }
+                }
+                v.to_vec()
+            }
+            None => (0..num_logical).collect(),
+        };
+        let proj_schema = Arc::new(schema.project(&proj_indices)?);
+
+        let total_rows = self.meta.postscript.row_count;
+        if row_indices.is_empty()
+            || total_rows == 0
+            || self.meta.col_dir.is_empty()
+            || self.meta.rg_dir.is_empty()
+        {
+            return Ok(Vec::new());
+        }
+
+        let mut sorted_rows: Vec<u64> = row_indices
+            .iter()
+            .copied()
+            .filter(|&r| r < total_rows)
+            .collect();
+        if sorted_rows.is_empty() {
+            return Ok(Vec::new());
+        }
+        sorted_rows.sort_unstable();
+        sorted_rows.dedup();
+
+        // Map each sorted global row index -> (rg_idx, mb_idx, local_row) via binary search.
+        let mut touched_rgs: Vec<(usize, Vec<(usize, Bitmap)>)> = Vec::new();
+        for row_idx in sorted_rows {
+            let rg_idx = self
+                .meta
+                .rg_dir
+                .partition_point(|rg| u64::from(rg.first_row) <= row_idx)
+                .saturating_sub(1);
+            let mb_blks = self.meta.rg_blocks(0, rg_idx);
+            let mb_idx = mb_blks
+                .partition_point(|b| u64::from(b.first_row) <= row_idx)
+                .saturating_sub(1);
+            let mb_blk = mb_blks.get(mb_idx).ok_or(StatamError::Corrupt {
+                reason: "mini-block index out of bounds during take_rows",
+            })?;
+            let local_row = row_idx
+                .checked_sub(u64::from(mb_blk.first_row))
+                .and_then(|v| usize::try_from(v).ok())
+                .ok_or(StatamError::Corrupt {
+                    reason: "row index precedes mini-block first_row",
+                })?;
+            if local_row >= mb_blk.row_count as usize {
+                return Err(StatamError::Corrupt {
+                    reason: "row index exceeds mini-block row_count",
+                });
+            }
+
+            let mb_list = if touched_rgs.last().is_some_and(|(r, _)| *r == rg_idx) {
+                &mut touched_rgs
+                    .last_mut()
+                    .ok_or(StatamError::Corrupt {
+                        reason: "missing touched row group entry",
+                    })?
+                    .1
+            } else {
+                touched_rgs.push((rg_idx, Vec::new()));
+                &mut touched_rgs
+                    .last_mut()
+                    .ok_or(StatamError::Corrupt {
+                        reason: "missing touched row group entry",
+                    })?
+                    .1
+            };
+            let mask = if mb_list.last().is_some_and(|(m, _)| *m == mb_idx) {
+                &mut mb_list
+                    .last_mut()
+                    .ok_or(StatamError::Corrupt {
+                        reason: "missing touched mini-block entry",
+                    })?
+                    .1
+            } else {
+                mb_list.push((mb_idx, Bitmap::new_zeroed(mb_blk.row_count as usize)));
+                &mut mb_list
+                    .last_mut()
+                    .ok_or(StatamError::Corrupt {
+                        reason: "missing touched mini-block entry",
+                    })?
+                    .1
+            };
+            let _ = mask.set(local_row, true);
+        }
+
+        struct TouchedRgPlan {
+            rg_idx: usize,
+            mb_masks: Vec<(usize, Bitmap)>,
+            surviving_mbs: Vec<usize>,
+            plan: RgIoPlan,
+        }
+
+        let empty_map_keys: HashMap<usize, Vec<String>> = HashMap::new();
+        let mut dict_cols_set: BTreeSet<usize> = BTreeSet::new();
+        let mut touched_with_plans: Vec<TouchedRgPlan> = Vec::with_capacity(touched_rgs.len());
+        for (rg_idx, mb_masks) in touched_rgs {
+            let surviving_mbs: Vec<usize> = mb_masks.iter().map(|(mb, _)| *mb).collect();
+            let plan = self.build_rg_io_plan(
+                rg_idx,
+                &surviving_mbs,
+                &proj_indices,
+                &empty_map_keys,
+                None,
+                &[],
+                &[],
+                &[],
+            );
+            for &pidx in plan.all_phys_cols() {
+                if (self.meta.col_dir[pidx].col_flags & COL_FLAG_HAS_FILE_DICT) != 0 {
+                    let blks = self.meta.rg_blocks(pidx, rg_idx);
+                    if surviving_mbs
+                        .iter()
+                        .any(|&mb| blks[mb].encoding == Encoding::Dict)
+                    {
+                        dict_cols_set.insert(pidx);
+                    }
+                }
+            }
+            touched_with_plans.push(TouchedRgPlan {
+                rg_idx,
+                mb_masks,
+                surviving_mbs,
+                plan,
+            });
+        }
+        if !dict_cols_set.is_empty() {
+            let dict_cols: Vec<usize> = dict_cols_set.into_iter().collect();
+            self.ensure_dicts_loaded(&dict_cols)?;
+        }
+
+        let mut out_batches = Vec::new();
+        for TouchedRgPlan {
+            rg_idx,
+            mb_masks,
+            surviving_mbs,
+            plan,
+        } in touched_with_plans
+        {
+            let rg = &self.meta.rg_dir[rg_idx];
+
+            let mut ranges = Vec::new();
+            let mut need_l0_payload = false;
+            for &mb_idx in &surviving_mbs {
+                for &pidx in plan.all_phys_cols() {
+                    let blk = &self.meta.rg_blocks(pidx, rg_idx)[mb_idx];
+                    if blk.stored_len > 0 {
+                        let total = (BLOCK_FRAME_HEADER_LEN as u64)
+                            .checked_add(u64::from(blk.stored_len))
+                            .ok_or(StatamError::BoundsExceeded {
+                                reason: "take_rows block length overflow",
+                            })?;
+                        let end =
+                            blk.offset
+                                .checked_add(total)
+                                .ok_or(StatamError::BoundsExceeded {
+                                    reason: "take_rows block end overflow",
+                                })?;
+                        ranges.push((blk.offset, end));
+                    }
+                    if self.meta.col_dir[pidx].locality_group == LocalityGroup::ExternalPayload
+                        && rg.l0_payload_len > 0
+                    {
+                        need_l0_payload = true;
+                    }
+                }
+            }
+
+            let l0_end = rg
+                .l0_payload_offset
+                .checked_add(u64::from(rg.l0_payload_len))
+                .ok_or(StatamError::BoundsExceeded {
+                    reason: "take_rows L0 payload end overflow",
+                })?;
+            if need_l0_payload {
+                ranges.push((rg.l0_payload_offset, l0_end));
+            }
+
+            let block_cache = fetch_coalesced_blocks(self.reader.as_ref(), &ranges)?;
+            let l0_parsed = if need_l0_payload {
+                block_cache
+                    .get(&(rg.l0_payload_offset, l0_end))
+                    .map(|b| ParsedL0Payload::parse(b))
+                    .transpose()?
+            } else {
+                None
+            };
+
+            let read_block = |blk: &BlockEntry| -> Result<Vec<u8>, StatamError> {
+                if blk.stored_len == 0 {
+                    return Ok(Vec::new());
+                }
+                let end = blk
+                    .offset
+                    .checked_add(BLOCK_FRAME_HEADER_LEN as u64 + u64::from(blk.stored_len))
+                    .ok_or(StatamError::BoundsExceeded {
+                        reason: "take_rows block key overflow",
+                    })?;
+                let key = (blk.offset, end);
+                let frame = block_cache.get(&key).ok_or(StatamError::Corrupt {
+                    reason: "missing take_rows fetched block",
+                })?;
+                let (_, _, body) = read_framed_block(frame, MAX_BLOCK_RAW_BYTES)?;
+                Ok(body)
+            };
+
+            let mut active_mbs: Vec<(usize, Bitmap, HashMap<usize, DecodedPhase1>)> = mb_masks
+                .into_iter()
+                .map(|(mb_idx, mask)| (mb_idx, mask, HashMap::new()))
+                .collect();
+
+            let rg_resolved_chunks = self.resolve_rg_payload_chunks(
+                rg_idx,
+                &mut active_mbs,
+                &proj_indices,
+                l0_parsed.as_ref(),
+                &read_block,
+                read_threads,
+            )?;
+
+            for (mb_idx, mask, decoded_p1) in active_mbs {
+                let batch = self.materialize_phase2_mb(
+                    rg_idx,
+                    mb_idx,
+                    &mask,
+                    decoded_p1,
+                    &plan,
+                    &proj_indices,
+                    &proj_schema,
+                    &empty_map_keys,
+                    &rg_resolved_chunks,
+                    &read_block,
+                    read_threads,
+                )?;
                 out_batches.push(batch);
             }
         }
@@ -1866,6 +2142,7 @@ impl StatamReader {
         subs: &[(usize, &SubstringQuery)],
         dict_sub_bitmaps: &[Option<Bitmap>],
         limit_remaining: Option<usize>,
+        read_threads: usize,
     ) -> Result<Vec<Batch>, StatamError> {
         let plan = self.build_rg_io_plan(
             rg_idx,
@@ -2037,6 +2314,7 @@ impl StatamReader {
                 dict_sub_bitmaps,
                 l0_parsed.as_ref(),
                 &block_lookup,
+                read_threads,
             )?;
             let hits = mask.count_ones();
             if hits > 0 {
@@ -2059,6 +2337,7 @@ impl StatamReader {
             proj_indices,
             l0_parsed.as_ref(),
             &block_lookup,
+            read_threads,
         )?;
 
         let mut batches = Vec::with_capacity(active_mbs.len());
@@ -2074,6 +2353,7 @@ impl StatamReader {
                 map_keys_by_col,
                 &rg_resolved_chunks,
                 &block_lookup,
+                read_threads,
             )?;
             batches.push(batch);
         }
@@ -2095,6 +2375,7 @@ impl StatamReader {
         preds: &[(usize, &Predicate)],
         subs: &[(usize, &SubstringQuery)],
         dict_sub_bitmaps: &[Option<Bitmap>],
+        read_threads: usize,
     ) -> Result<Vec<Batch>, StatamError> {
         let plan = self.build_rg_io_plan(
             rg_idx,
@@ -2191,6 +2472,7 @@ impl StatamReader {
                 dict_sub_bitmaps,
                 l0_from_p1.as_ref(),
                 &p1_lookup,
+                read_threads,
             )?;
             if mask.count_ones() > 0 {
                 active_mbs.push((mb_idx, mask, decoded_p1));
@@ -2294,13 +2576,14 @@ impl StatamReader {
             };
 
         // Coalesce all .stpk / L0 chunk reads across ALL active mini-blocks and ALL projected
-        // ExternalPayload columns in this RG into ONE `read_chunks` call per pack!
+        // ExternalPayload columns in this RG into ONE scan call per pack!
         let rg_resolved_chunks = self.resolve_rg_payload_chunks(
             rg_idx,
             &mut active_mbs,
             proj_indices,
             l0_ref,
             &p2_lookup,
+            read_threads,
         )?;
 
         let mut batches = Vec::with_capacity(active_mbs.len());
@@ -2316,6 +2599,7 @@ impl StatamReader {
                 map_keys_by_col,
                 &rg_resolved_chunks,
                 &p2_lookup,
+                read_threads,
             )?;
             batches.push(batch);
         }
@@ -2329,7 +2613,8 @@ impl StatamReader {
         active_mbs: &mut [(usize, Bitmap, HashMap<usize, DecodedPhase1>)],
         proj_indices: &[usize],
         l0_local: Option<&ParsedL0Payload<'_>>,
-        read_block: &dyn Fn(&BlockEntry) -> Result<Vec<u8>, StatamError>,
+        read_block: &(dyn Fn(&BlockEntry) -> Result<Vec<u8>, StatamError> + Sync),
+        read_threads: usize,
     ) -> Result<HashMap<(u16, u32), Vec<u8>>, StatamError> {
         let mut proj_payload_cols: Vec<usize> = proj_indices
             .iter()
@@ -2347,29 +2632,63 @@ impl StatamReader {
         let mut by_pack: HashMap<u16, BTreeSet<u32>> = HashMap::new();
         for (mb_idx, mask, decoded_p1) in active_mbs.iter_mut() {
             let mb_row_count = self.meta.rg_blocks(0, rg_idx)[*mb_idx].row_count as usize;
+            let is_sparse = !mask.all_ones() && mask.count_ones().saturating_mul(8) < mb_row_count;
             for &cidx in &proj_payload_cols {
                 if let std::collections::hash_map::Entry::Vacant(e) = decoded_p1.entry(cidx) {
                     let blk = &self.meta.rg_blocks(cidx, rg_idx)[*mb_idx];
-                    let refs = if blk.encoding == Encoding::ConstNull {
-                        vec![PayloadRefRow::Null; mb_row_count]
+                    if blk.encoding == Encoding::ConstNull {
+                        if is_sparse {
+                            let selected =
+                                mask.iter_ones().map(|r| (r, PayloadRefRow::Null)).collect();
+                            e.insert(DecodedPhase1::SelectedPayloadRefs(selected));
+                        } else {
+                            e.insert(DecodedPhase1::PayloadRefs(vec![
+                                PayloadRefRow::Null;
+                                mb_row_count
+                            ]));
+                        }
                     } else {
                         let raw = read_block(blk)?;
-                        decode_payload_refs(&raw, mb_row_count, MAX_BATCH_DECODED_BYTES)?
-                    };
-                    e.insert(DecodedPhase1::PayloadRefs(refs));
+                        if is_sparse {
+                            let selected = decode_payload_refs_selected(
+                                &raw,
+                                mb_row_count,
+                                mask,
+                                MAX_BATCH_DECODED_BYTES,
+                            )?;
+                            e.insert(DecodedPhase1::SelectedPayloadRefs(selected));
+                        } else {
+                            let refs =
+                                decode_payload_refs(&raw, mb_row_count, MAX_BATCH_DECODED_BYTES)?;
+                            e.insert(DecodedPhase1::PayloadRefs(refs));
+                        }
+                    }
                 }
-                if let Some(DecodedPhase1::PayloadRefs(refs)) = decoded_p1.get(&cidx) {
-                    for r in mask.iter_ones() {
-                        if let PayloadRefRow::Chunks(chunks) = &refs[r] {
-                            for &(pidx, cid) in chunks {
-                                by_pack.entry(pidx).or_default().insert(cid);
+                match decoded_p1.get(&cidx) {
+                    Some(DecodedPhase1::PayloadRefs(refs)) => {
+                        for r in mask.iter_ones() {
+                            if let PayloadRefRow::Chunks(chunks) = &refs[r] {
+                                for &(pidx, cid) in chunks {
+                                    by_pack.entry(pidx).or_default().insert(cid);
+                                }
                             }
                         }
                     }
+                    Some(DecodedPhase1::SelectedPayloadRefs(selected)) => {
+                        for (_, row) in selected {
+                            if let PayloadRefRow::Chunks(chunks) = row {
+                                for &(pidx, cid) in chunks {
+                                    by_pack.entry(pidx).or_default().insert(cid);
+                                }
+                            }
+                        }
+                    }
+                    _ => {}
                 }
             }
         }
 
+        let threads = read_threads.clamp(1, MAX_WRITE_THREADS);
         let mut resolved_chunks: HashMap<(u16, u32), Vec<u8>> = HashMap::new();
         for (pidx, cids_set) in by_pack {
             let cids: Vec<u32> = cids_set.into_iter().collect();
@@ -2388,9 +2707,20 @@ impl StatamReader {
                     },
                 )?;
                 let pack = self.resolve_pack(pack_id)?;
-                let map = pack.read_chunks(&cids)?;
-                for (cid, bytes) in map {
-                    resolved_chunks.insert((pidx, cid), bytes);
+                if threads > 1 {
+                    let pairs = pack.scan_chunks_in_frames_parallel(
+                        &cids,
+                        threads,
+                        || Ok(()),
+                        |(), cid, bytes| Some((cid, bytes.to_vec())),
+                    )?;
+                    for (cid, bytes) in pairs {
+                        resolved_chunks.insert((pidx, cid), bytes);
+                    }
+                } else {
+                    pack.scan_chunks_in_frames(&cids, |cid, bytes| {
+                        resolved_chunks.insert((pidx, cid), bytes.to_vec());
+                    })?;
                 }
             }
         }
@@ -2537,7 +2867,8 @@ impl StatamReader {
         subs: &[(usize, &SubstringQuery)],
         dict_sub_bitmaps: &[Option<Bitmap>],
         l0_local: Option<&ParsedL0Payload<'_>>,
-        read_block: &dyn Fn(&BlockEntry) -> Result<Vec<u8>, StatamError>,
+        read_block: &(dyn Fn(&BlockEntry) -> Result<Vec<u8>, StatamError> + Sync),
+        read_threads: usize,
     ) -> Result<(Bitmap, HashMap<usize, DecodedPhase1>), StatamError> {
         let fields = self.meta.schema_meta.schema.fields();
         let mb_row_count = self.meta.rg_blocks(0, rg_idx)[mb_idx].row_count as usize;
@@ -2786,10 +3117,11 @@ impl StatamReader {
                         &sq.needle,
                         sq.case_insensitive,
                         l0_local,
+                        read_threads,
                     )?,
-                    DecodedPhase1::ShreddedSub(_) => {
+                    DecodedPhase1::SelectedPayloadRefs(_) | DecodedPhase1::ShreddedSub(_) => {
                         return Err(StatamError::Corrupt {
-                            reason: "unexpected ShreddedSub for substring query",
+                            reason: "unexpected Phase 1 variant for substring query",
                         });
                     }
                 };
@@ -2809,7 +3141,7 @@ impl StatamReader {
         rg_idx: usize,
         mb_idx: usize,
         mb_row_count: usize,
-        read_block: &dyn Fn(&BlockEntry) -> Result<Vec<u8>, StatamError>,
+        read_block: &(dyn Fn(&BlockEntry) -> Result<Vec<u8>, StatamError> + Sync),
         decoded_p1: &mut HashMap<usize, DecodedPhase1>,
     ) -> Result<(), StatamError> {
         if decoded_p1.contains_key(&pidx) {
@@ -2870,6 +3202,7 @@ impl StatamReader {
         needle: &[u8],
         case_insensitive: bool,
         l0_local: Option<&ParsedL0Payload<'_>>,
+        read_threads: usize,
     ) -> Result<Bitmap, StatamError> {
         let mut results = Bitmap::new_zeroed(refs.len());
         if active_mask.all_zeros() {
@@ -2953,13 +3286,14 @@ impl StatamReader {
             if !any_pack_row {
                 continue;
             }
-            let bm = search_pack_rows_masked(
+            let bm = search_pack_rows_masked_with_threads(
                 &pack,
                 refs,
                 &pack_mask,
                 pack_idx,
                 needle,
                 case_insensitive,
+                read_threads,
             )?;
             for bit in bm.iter_ones() {
                 let _ = results.set(bit, true);
@@ -3028,10 +3362,12 @@ impl StatamReader {
         proj_schema: &Arc<Schema>,
         map_keys_by_col: &HashMap<usize, Vec<String>>,
         resolved_chunks: &HashMap<(u16, u32), Vec<u8>>,
-        read_block: &dyn Fn(&BlockEntry) -> Result<Vec<u8>, StatamError>,
+        read_block: &(dyn Fn(&BlockEntry) -> Result<Vec<u8>, StatamError> + Sync),
+        read_threads: usize,
     ) -> Result<Batch, StatamError> {
         let fields = self.meta.schema_meta.schema.fields();
         let mb_row_count = self.meta.rg_blocks(0, rg_idx)[mb_idx].row_count as usize;
+        let threads = read_threads.clamp(1, MAX_WRITE_THREADS);
 
         if proj_indices.is_empty() {
             let sel = if mask.all_ones() {
@@ -3049,6 +3385,7 @@ impl StatamReader {
 
         // Decode any needed shredded subcols for projected MapUtf8 columns (moving from decoded_p1).
         let mut decoded_subs: HashMap<usize, ShreddedSubCol> = HashMap::new();
+        let mut uncached_subs: Vec<usize> = Vec::new();
         for &cidx in proj_indices {
             if fields[cidx].data_type == DataType::MapUtf8
                 && let Some(sm) = self
@@ -3067,162 +3404,218 @@ impl StatamReader {
                         continue;
                     }
                     let sub_pidx = ke.sub_col_idx as usize;
-                    if decoded_subs.contains_key(&sub_pidx) {
+                    if decoded_subs.contains_key(&sub_pidx) || uncached_subs.contains(&sub_pidx) {
                         continue;
                     }
                     if let Some(DecodedPhase1::ShreddedSub(sub)) = decoded_p1.remove(&sub_pidx) {
                         decoded_subs.insert(sub_pidx, sub);
                     } else {
-                        let blk = &self.meta.rg_blocks(sub_pidx, rg_idx)[mb_idx];
-                        let raw = read_block(blk)?;
-                        let sub = decode_shredded_subcol_selected(&raw, mb_row_count, mask)?;
-                        decoded_subs.insert(sub_pidx, sub);
+                        uncached_subs.push(sub_pidx);
                     }
                 }
             }
         }
+        if !uncached_subs.is_empty() {
+            if threads > 1 && uncached_subs.len() >= 4 {
+                let decoded_pairs = parallel_map_in_order(uncached_subs, threads, |sub_pidx| {
+                    let blk = &self.meta.rg_blocks(sub_pidx, rg_idx)[mb_idx];
+                    let raw = read_block(blk)?;
+                    let sub = decode_shredded_subcol_selected(&raw, mb_row_count, mask)?;
+                    Ok((sub_pidx, sub))
+                })?;
+                for (sub_pidx, sub) in decoded_pairs {
+                    decoded_subs.insert(sub_pidx, sub);
+                }
+            } else {
+                for sub_pidx in uncached_subs {
+                    let blk = &self.meta.rg_blocks(sub_pidx, rg_idx)[mb_idx];
+                    let raw = read_block(blk)?;
+                    let sub = decode_shredded_subcol_selected(&raw, mb_row_count, mask)?;
+                    decoded_subs.insert(sub_pidx, sub);
+                }
+            }
+        }
 
-        let mut out_cols = Vec::with_capacity(proj_indices.len());
-        for &cidx in proj_indices {
-            let dt = &fields[cidx].data_type;
-            let cd = &self.meta.col_dir[cidx];
+        let is_sparse_payload =
+            !mask.all_ones() && mask.count_ones().saturating_mul(8) < mb_row_count;
 
-            if cd.locality_group == LocalityGroup::ExternalPayload {
-                let ref_rows_owned;
-                let ref_rows: &[PayloadRefRow] =
-                    if let Some(DecodedPhase1::PayloadRefs(r)) = decoded_p1.remove(&cidx) {
-                        ref_rows_owned = r;
-                        &ref_rows_owned
-                    } else {
+        let decode_payload_col =
+            |cidx: usize, cached: Option<DecodedPhase1>| -> Result<Column, StatamError> {
+                match cached {
+                    Some(DecodedPhase1::SelectedPayloadRefs(selected)) => {
+                        reconstruct_payload_column_selected(
+                            mb_row_count,
+                            &selected,
+                            mask,
+                            resolved_chunks,
+                        )
+                    }
+                    Some(DecodedPhase1::PayloadRefs(refs)) => {
+                        reconstruct_payload_column_from_map(&refs, mask, resolved_chunks)
+                    }
+                    _ => {
                         let blk = &self.meta.rg_blocks(cidx, rg_idx)[mb_idx];
                         if blk.encoding == Encoding::ConstNull {
-                            ref_rows_owned = vec![PayloadRefRow::Null; mb_row_count];
+                            return Ok(Column::try_new_const(
+                                ScalarValue::Null(DataType::Utf8),
+                                mb_row_count,
+                            )?);
+                        }
+                        let raw = read_block(blk)?;
+                        if is_sparse_payload {
+                            let selected = decode_payload_refs_selected(
+                                &raw,
+                                mb_row_count,
+                                mask,
+                                MAX_BATCH_DECODED_BYTES,
+                            )?;
+                            reconstruct_payload_column_selected(
+                                mb_row_count,
+                                &selected,
+                                mask,
+                                resolved_chunks,
+                            )
                         } else {
-                            let raw = read_block(blk)?;
-                            ref_rows_owned =
+                            let refs =
                                 decode_payload_refs(&raw, mb_row_count, MAX_BATCH_DECODED_BYTES)?;
-                        }
-                        &ref_rows_owned
-                    };
-                let col = reconstruct_payload_column_from_map(ref_rows, mask, resolved_chunks)?;
-                out_cols.push(col);
-                continue;
-            }
-
-            if *dt == DataType::MapUtf8
-                && let Some(sm) = self
-                    .meta
-                    .schema_meta
-                    .shredded_maps
-                    .iter()
-                    .find(|s| s.logical_col_idx as usize == cidx)
-            {
-                let skip_residual = plan.phase2_map_fast_path.contains(&(mb_idx, cidx));
-                let residual_flat: Option<FlatColumn> = if skip_residual {
-                    None
-                } else if let Some(DecodedPhase1::Col(c)) = decoded_p1.remove(&cidx) {
-                    Some(c.materialize(None)?)
-                } else {
-                    let blk = &self.meta.rg_blocks(cidx, rg_idx)[mb_idx];
-                    let raw = if blk.stored_len > 0 {
-                        read_block(blk)?
-                    } else {
-                        Vec::new()
-                    };
-                    Some(decode_shredded_residual_block_selected(&raw, blk, mask)?)
-                };
-
-                let flat_map = if let Some(req_keys) = map_keys_by_col.get(&cidx) {
-                    if req_keys.len() == 1
-                        && let Some(ke) = sm.keys.iter().find(|k| k.key == req_keys[0])
-                    {
-                        let sub = &decoded_subs[&(ke.sub_col_idx as usize)];
-                        decode_single_map_key(
-                            mb_row_count,
-                            residual_flat.as_ref().and_then(FlatColumn::nulls),
-                            &ke.key,
-                            sub,
-                            if skip_residual { 0 } else { ke.residual_count },
-                            residual_flat.as_ref(),
-                        )?
-                    } else {
-                        let mut subpairs: Vec<(&str, &ShreddedSubCol)> = Vec::new();
-                        for ke in &sm.keys {
-                            if req_keys.iter().any(|rk| rk == &ke.key)
-                                && let Some(sub) = decoded_subs.get(&(ke.sub_col_idx as usize))
-                            {
-                                subpairs.push((ke.key.as_str(), sub));
-                            }
-                        }
-                        let pruned_residual = if skip_residual {
-                            None
-                        } else {
-                            residual_flat
-                                .as_ref()
-                                .map(|res| filter_residual_to_keys(res, req_keys))
-                                .transpose()?
-                        };
-                        unshred_map_selected(
-                            mb_row_count,
-                            pruned_residual.as_ref().and_then(FlatColumn::nulls),
-                            pruned_residual.as_ref(),
-                            &subpairs,
-                            mask,
-                        )?
-                    }
-                } else {
-                    let mut subpairs: Vec<(&str, &ShreddedSubCol)> =
-                        Vec::with_capacity(sm.keys.len());
-                    for ke in &sm.keys {
-                        if let Some(sub) = decoded_subs.get(&(ke.sub_col_idx as usize)) {
-                            subpairs.push((ke.key.as_str(), sub));
+                            reconstruct_payload_column_from_map(&refs, mask, resolved_chunks)
                         }
                     }
-                    unshred_map_selected(
-                        mb_row_count,
-                        residual_flat.as_ref().and_then(FlatColumn::nulls),
-                        residual_flat.as_ref(),
-                        &subpairs,
-                        mask,
-                    )?
-                };
-                out_cols.push(Column::Flat(flat_map));
-                continue;
-            }
-
-            if let Some(DecodedPhase1::Col(col)) = decoded_p1.remove(&cidx) {
-                if *dt == DataType::MapUtf8
-                    && let Some(req_keys) = map_keys_by_col.get(&cidx)
-                {
-                    let flat = col.materialize(None)?;
-                    out_cols.push(Column::Flat(filter_residual_to_keys(&flat, req_keys)?));
-                } else {
-                    out_cols.push(col);
                 }
-                continue;
+            };
+
+        let out_cols = if threads <= 1 {
+            let mut out_cols = Vec::with_capacity(proj_indices.len());
+            for &cidx in proj_indices {
+                let dt = &fields[cidx].data_type;
+                let cd = &self.meta.col_dir[cidx];
+                if cd.locality_group == LocalityGroup::ExternalPayload {
+                    let cached = decoded_p1.remove(&cidx);
+                    out_cols.push(decode_payload_col(cidx, cached)?);
+                    continue;
+                }
+                if let Some(cached) = decoded_p1.remove(&cidx) {
+                    out_cols.push(self.materialize_cached_p1_col(
+                        mb_row_count,
+                        cidx,
+                        dt,
+                        mask,
+                        cached,
+                        plan,
+                        mb_idx,
+                        map_keys_by_col,
+                        &decoded_subs,
+                    )?);
+                    continue;
+                }
+                let blk = &self.meta.rg_blocks(cidx, rg_idx)[mb_idx];
+                let dict = if blk.encoding == Encoding::Dict {
+                    self.get_cached_dict(cidx)
+                } else {
+                    None
+                };
+                out_cols.push(self.decode_uncached_p2_non_payload_col(
+                    rg_idx,
+                    mb_idx,
+                    mb_row_count,
+                    cidx,
+                    mask,
+                    plan,
+                    map_keys_by_col,
+                    &decoded_subs,
+                    dict.as_deref(),
+                    read_block,
+                )?);
+            }
+            out_cols
+        } else {
+            // Pre-populate cached FileDicts on main thread so parallel workers never touch `caches` Mutex.
+            let mut pre_dicts: HashMap<usize, Arc<FileDict>> = HashMap::new();
+            for &cidx in proj_indices {
+                let cd = &self.meta.col_dir[cidx];
+                if cd.locality_group != LocalityGroup::ExternalPayload
+                    && !pre_dicts.contains_key(&cidx)
+                {
+                    let blk = &self.meta.rg_blocks(cidx, rg_idx)[mb_idx];
+                    if blk.encoding == Encoding::Dict
+                        && let Some(dict) = self.get_cached_dict(cidx)
+                    {
+                        pre_dicts.insert(cidx, dict);
+                    }
+                }
             }
 
-            let blk = &self.meta.rg_blocks(cidx, rg_idx)[mb_idx];
-            let raw = if blk.stored_len > 0 {
-                read_block(blk)?
-            } else {
-                Vec::new()
-            };
-            let dict = if blk.encoding == Encoding::Dict {
-                self.get_cached_dict(cidx)
-            } else {
-                None
-            };
-            let col = decode_mini_block_selected(&raw, blk, dt, dict.as_deref(), mask)?;
-            if *dt == DataType::MapUtf8
-                && let Some(req_keys) = map_keys_by_col.get(&cidx)
-            {
-                let flat = col.materialize(None)?;
-                out_cols.push(Column::Flat(filter_residual_to_keys(&flat, req_keys)?));
-            } else {
-                out_cols.push(col);
+            let mut slots: Vec<Option<Column>> = vec![None; proj_indices.len()];
+            let mut parallel_tasks: Vec<(usize, usize, Option<Arc<FileDict>>)> = Vec::new();
+            for (pos, &cidx) in proj_indices.iter().enumerate() {
+                let dt = &fields[cidx].data_type;
+                let cd = &self.meta.col_dir[cidx];
+                if cd.locality_group == LocalityGroup::ExternalPayload {
+                    let cached = decoded_p1.remove(&cidx);
+                    slots[pos] = Some(decode_payload_col(cidx, cached)?);
+                } else if let Some(cached) = decoded_p1.remove(&cidx) {
+                    slots[pos] = Some(self.materialize_cached_p1_col(
+                        mb_row_count,
+                        cidx,
+                        dt,
+                        mask,
+                        cached,
+                        plan,
+                        mb_idx,
+                        map_keys_by_col,
+                        &decoded_subs,
+                    )?);
+                } else {
+                    parallel_tasks.push((pos, cidx, pre_dicts.get(&cidx).map(Arc::clone)));
+                }
             }
-        }
+
+            if parallel_tasks.len() >= 4 {
+                let decoded_cols =
+                    parallel_map_in_order(parallel_tasks, threads, |(pos, cidx, dict)| {
+                        let col = self.decode_uncached_p2_non_payload_col(
+                            rg_idx,
+                            mb_idx,
+                            mb_row_count,
+                            cidx,
+                            mask,
+                            plan,
+                            map_keys_by_col,
+                            &decoded_subs,
+                            dict.as_deref(),
+                            read_block,
+                        )?;
+                        Ok((pos, col))
+                    })?;
+                for (pos, col) in decoded_cols {
+                    slots[pos] = Some(col);
+                }
+            } else {
+                for (pos, cidx, dict) in parallel_tasks {
+                    slots[pos] = Some(self.decode_uncached_p2_non_payload_col(
+                        rg_idx,
+                        mb_idx,
+                        mb_row_count,
+                        cidx,
+                        mask,
+                        plan,
+                        map_keys_by_col,
+                        &decoded_subs,
+                        dict.as_deref(),
+                        read_block,
+                    )?);
+                }
+            }
+
+            slots
+                .into_iter()
+                .map(|s| {
+                    s.ok_or(StatamError::Corrupt {
+                        reason: "missing materialized column",
+                    })
+                })
+                .collect::<Result<Vec<_>, _>>()?
+        };
 
         let sel = if mask.all_ones() {
             Selection::All
@@ -3235,6 +3628,188 @@ impl StatamReader {
             mb_row_count,
             sel,
         )?)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn materialize_cached_p1_col(
+        &self,
+        mb_row_count: usize,
+        cidx: usize,
+        dt: &DataType,
+        mask: &Bitmap,
+        cached: DecodedPhase1,
+        plan: &RgIoPlan,
+        mb_idx: usize,
+        map_keys_by_col: &HashMap<usize, Vec<String>>,
+        decoded_subs: &HashMap<usize, ShreddedSubCol>,
+    ) -> Result<Column, StatamError> {
+        let DecodedPhase1::Col(col) = cached else {
+            return Err(StatamError::Corrupt {
+                reason: "unexpected Phase 1 cache variant for Phase 2 column",
+            });
+        };
+        if *dt == DataType::MapUtf8
+            && let Some(sm) = self
+                .meta
+                .schema_meta
+                .shredded_maps
+                .iter()
+                .find(|s| s.logical_col_idx as usize == cidx)
+        {
+            let skip_residual = plan.phase2_map_fast_path.contains(&(mb_idx, cidx));
+            let residual_flat = if skip_residual {
+                None
+            } else {
+                Some(col.materialize(None)?)
+            };
+            return self.build_shredded_map_col(
+                mb_row_count,
+                cidx,
+                sm,
+                skip_residual,
+                residual_flat.as_ref(),
+                mask,
+                map_keys_by_col,
+                decoded_subs,
+            );
+        }
+        if *dt == DataType::MapUtf8
+            && let Some(req_keys) = map_keys_by_col.get(&cidx)
+        {
+            let flat = col.materialize(None)?;
+            return Ok(Column::Flat(filter_residual_to_keys(&flat, req_keys)?));
+        }
+        Ok(col)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn decode_uncached_p2_non_payload_col(
+        &self,
+        rg_idx: usize,
+        mb_idx: usize,
+        mb_row_count: usize,
+        cidx: usize,
+        mask: &Bitmap,
+        plan: &RgIoPlan,
+        map_keys_by_col: &HashMap<usize, Vec<String>>,
+        decoded_subs: &HashMap<usize, ShreddedSubCol>,
+        dict: Option<&FileDict>,
+        read_block: &(dyn Fn(&BlockEntry) -> Result<Vec<u8>, StatamError> + Sync),
+    ) -> Result<Column, StatamError> {
+        let dt = &self.meta.schema_meta.schema.fields()[cidx].data_type;
+        if *dt == DataType::MapUtf8
+            && let Some(sm) = self
+                .meta
+                .schema_meta
+                .shredded_maps
+                .iter()
+                .find(|s| s.logical_col_idx as usize == cidx)
+        {
+            let skip_residual = plan.phase2_map_fast_path.contains(&(mb_idx, cidx));
+            let residual_flat = if skip_residual {
+                None
+            } else {
+                let blk = &self.meta.rg_blocks(cidx, rg_idx)[mb_idx];
+                let raw = if blk.stored_len > 0 {
+                    read_block(blk)?
+                } else {
+                    Vec::new()
+                };
+                Some(decode_shredded_residual_block_selected(&raw, blk, mask)?)
+            };
+            return self.build_shredded_map_col(
+                mb_row_count,
+                cidx,
+                sm,
+                skip_residual,
+                residual_flat.as_ref(),
+                mask,
+                map_keys_by_col,
+                decoded_subs,
+            );
+        }
+
+        let blk = &self.meta.rg_blocks(cidx, rg_idx)[mb_idx];
+        let raw = if blk.stored_len > 0 {
+            read_block(blk)?
+        } else {
+            Vec::new()
+        };
+        let col = decode_mini_block_selected(&raw, blk, dt, dict, mask)?;
+        if *dt == DataType::MapUtf8
+            && let Some(req_keys) = map_keys_by_col.get(&cidx)
+        {
+            let flat = col.materialize(None)?;
+            return Ok(Column::Flat(filter_residual_to_keys(&flat, req_keys)?));
+        }
+        Ok(col)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn build_shredded_map_col(
+        &self,
+        mb_row_count: usize,
+        cidx: usize,
+        sm: &crate::format::ShreddedMapDir,
+        skip_residual: bool,
+        residual_flat: Option<&FlatColumn>,
+        mask: &Bitmap,
+        map_keys_by_col: &HashMap<usize, Vec<String>>,
+        decoded_subs: &HashMap<usize, ShreddedSubCol>,
+    ) -> Result<Column, StatamError> {
+        let flat_map = if let Some(req_keys) = map_keys_by_col.get(&cidx) {
+            if req_keys.len() == 1
+                && let Some(ke) = sm.keys.iter().find(|k| k.key == req_keys[0])
+            {
+                let sub = &decoded_subs[&(ke.sub_col_idx as usize)];
+                decode_single_map_key(
+                    mb_row_count,
+                    residual_flat.and_then(FlatColumn::nulls),
+                    &ke.key,
+                    sub,
+                    if skip_residual { 0 } else { ke.residual_count },
+                    residual_flat,
+                )?
+            } else {
+                let mut subpairs: Vec<(&str, &ShreddedSubCol)> = Vec::new();
+                for ke in &sm.keys {
+                    if req_keys.iter().any(|rk| rk == &ke.key)
+                        && let Some(sub) = decoded_subs.get(&(ke.sub_col_idx as usize))
+                    {
+                        subpairs.push((ke.key.as_str(), sub));
+                    }
+                }
+                let pruned_residual = if skip_residual {
+                    None
+                } else {
+                    residual_flat
+                        .map(|res| filter_residual_to_keys(res, req_keys))
+                        .transpose()?
+                };
+                unshred_map_selected(
+                    mb_row_count,
+                    pruned_residual.as_ref().and_then(FlatColumn::nulls),
+                    pruned_residual.as_ref(),
+                    &subpairs,
+                    mask,
+                )?
+            }
+        } else {
+            let mut subpairs: Vec<(&str, &ShreddedSubCol)> = Vec::with_capacity(sm.keys.len());
+            for ke in &sm.keys {
+                if let Some(sub) = decoded_subs.get(&(ke.sub_col_idx as usize)) {
+                    subpairs.push((ke.key.as_str(), sub));
+                }
+            }
+            unshred_map_selected(
+                mb_row_count,
+                residual_flat.and_then(FlatColumn::nulls),
+                residual_flat,
+                &subpairs,
+                mask,
+            )?
+        };
+        Ok(Column::Flat(flat_map))
     }
 
     // --- Internal helpers exposed to gdpr.rs ---
@@ -3448,6 +4023,83 @@ impl StatamReader {
     }
 }
 
+fn append_payload_row_to_utf8(
+    row: &PayloadRefRow,
+    row_idx: usize,
+    nulls: &mut Bitmap,
+    offsets: &mut Vec<u32>,
+    data_bytes: &mut Vec<u8>,
+    total_decoded: &mut usize,
+    resolved_chunks: &HashMap<(u16, u32), Vec<u8>>,
+) -> Result<(), StatamError> {
+    match row {
+        PayloadRefRow::Null => {
+            offsets.push(data_bytes.len() as u32);
+        }
+        PayloadRefRow::Inline(bytes) => {
+            let _ = nulls.set(row_idx, true);
+            *total_decoded =
+                total_decoded
+                    .checked_add(bytes.len())
+                    .ok_or(StatamError::BoundsExceeded {
+                        reason: "decoded payload column overflows usize",
+                    })?;
+            if *total_decoded > MAX_BATCH_DECODED_BYTES {
+                return Err(StatamError::BoundsExceeded {
+                    reason: "decoded payload column exceeds MAX_BATCH_DECODED_BYTES",
+                });
+            }
+            let next_off = u32::try_from(data_bytes.len() + bytes.len()).map_err(|_| {
+                StatamError::BoundsExceeded {
+                    reason: "utf8 payload column exceeds u32::MAX",
+                }
+            })?;
+            data_bytes.extend_from_slice(bytes);
+            offsets.push(next_off);
+        }
+        PayloadRefRow::Chunks(chunks) => {
+            let _ = nulls.set(row_idx, true);
+            let mut row_len = 0usize;
+            let start_pos = data_bytes.len();
+            for &(pidx, cid) in chunks {
+                let chunk = resolved_chunks
+                    .get(&(pidx, cid))
+                    .ok_or(StatamError::Corrupt {
+                        reason: "missing resolved payload chunk",
+                    })?;
+                row_len = row_len
+                    .checked_add(chunk.len())
+                    .ok_or(StatamError::BoundsExceeded {
+                        reason: "row payload byte size overflow",
+                    })?;
+                if row_len > MAX_ROW_PAYLOAD_BYTES {
+                    return Err(StatamError::BoundsExceeded {
+                        reason: "reconstructed row payload exceeds MAX_ROW_PAYLOAD_BYTES",
+                    });
+                }
+                *total_decoded =
+                    total_decoded
+                        .checked_add(chunk.len())
+                        .ok_or(StatamError::BoundsExceeded {
+                            reason: "decoded payload column overflows usize",
+                        })?;
+                if *total_decoded > MAX_BATCH_DECODED_BYTES {
+                    return Err(StatamError::BoundsExceeded {
+                        reason: "decoded payload column exceeds MAX_BATCH_DECODED_BYTES",
+                    });
+                }
+                data_bytes.extend_from_slice(chunk);
+            }
+            let next_off =
+                u32::try_from(start_pos + row_len).map_err(|_| StatamError::BoundsExceeded {
+                    reason: "utf8 payload column exceeds u32::MAX",
+                })?;
+            offsets.push(next_off);
+        }
+    }
+    Ok(())
+}
+
 fn reconstruct_payload_column_from_map(
     refs: &[PayloadRefRow],
     active_mask: &Bitmap,
@@ -3467,79 +4119,75 @@ fn reconstruct_payload_column_from_map(
     let mut offsets = Vec::with_capacity(row_count + 1);
     offsets.push(0u32);
     let mut data_bytes = Vec::new();
-    let mut nulls = Bitmap::new_ones(row_count);
+    let mut nulls = Bitmap::new_zeroed(row_count);
     let mut total_decoded = 0usize;
 
     for (r, row) in refs.iter().enumerate() {
         if !active_mask.get(r) {
             offsets.push(data_bytes.len() as u32);
-            let _ = nulls.set(r, false);
             continue;
         }
-        match row {
-            PayloadRefRow::Null => {
-                let _ = nulls.set(r, false);
+        append_payload_row_to_utf8(
+            row,
+            r,
+            &mut nulls,
+            &mut offsets,
+            &mut data_bytes,
+            &mut total_decoded,
+            resolved_chunks,
+        )?;
+    }
+
+    let utf8 = Utf8Data::try_new(offsets, data_bytes)?;
+    let nulls_opt = if nulls.all_ones() { None } else { Some(nulls) };
+    Ok(Column::Flat(FlatColumn::try_new(
+        FlatData::Utf8(utf8),
+        nulls_opt,
+    )?))
+}
+
+fn reconstruct_payload_column_selected(
+    row_count: usize,
+    selected: &[(usize, PayloadRefRow)],
+    active_mask: &Bitmap,
+    resolved_chunks: &HashMap<(u16, u32), Vec<u8>>,
+) -> Result<Column, StatamError> {
+    let all_active_null = selected
+        .iter()
+        .all(|(r, row)| !active_mask.get(*r) || matches!(row, PayloadRefRow::Null));
+    if all_active_null {
+        return Ok(Column::try_new_const(
+            ScalarValue::Null(DataType::Utf8),
+            row_count,
+        )?);
+    }
+
+    let mut offsets = Vec::with_capacity(row_count + 1);
+    offsets.push(0u32);
+    let mut data_bytes = Vec::new();
+    let mut nulls = Bitmap::new_zeroed(row_count);
+    let mut total_decoded = 0usize;
+    let mut sel_idx = 0usize;
+
+    for r in 0..row_count {
+        if sel_idx < selected.len() && selected[sel_idx].0 == r {
+            let row = &selected[sel_idx].1;
+            sel_idx += 1;
+            if !active_mask.get(r) {
                 offsets.push(data_bytes.len() as u32);
+                continue;
             }
-            PayloadRefRow::Inline(bytes) => {
-                total_decoded =
-                    total_decoded
-                        .checked_add(bytes.len())
-                        .ok_or(StatamError::BoundsExceeded {
-                            reason: "decoded payload column overflows usize",
-                        })?;
-                if total_decoded > MAX_BATCH_DECODED_BYTES {
-                    return Err(StatamError::BoundsExceeded {
-                        reason: "decoded payload column exceeds MAX_BATCH_DECODED_BYTES",
-                    });
-                }
-                let next_off = u32::try_from(data_bytes.len() + bytes.len()).map_err(|_| {
-                    StatamError::BoundsExceeded {
-                        reason: "utf8 payload column exceeds u32::MAX",
-                    }
-                })?;
-                data_bytes.extend_from_slice(bytes);
-                offsets.push(next_off);
-            }
-            PayloadRefRow::Chunks(chunks) => {
-                let mut row_len = 0usize;
-                let start_pos = data_bytes.len();
-                for &(pidx, cid) in chunks {
-                    let chunk = resolved_chunks
-                        .get(&(pidx, cid))
-                        .ok_or(StatamError::Corrupt {
-                            reason: "missing resolved payload chunk",
-                        })?;
-                    row_len =
-                        row_len
-                            .checked_add(chunk.len())
-                            .ok_or(StatamError::BoundsExceeded {
-                                reason: "row payload byte size overflow",
-                            })?;
-                    if row_len > MAX_ROW_PAYLOAD_BYTES {
-                        return Err(StatamError::BoundsExceeded {
-                            reason: "reconstructed row payload exceeds MAX_ROW_PAYLOAD_BYTES",
-                        });
-                    }
-                    total_decoded = total_decoded.checked_add(chunk.len()).ok_or(
-                        StatamError::BoundsExceeded {
-                            reason: "decoded payload column overflows usize",
-                        },
-                    )?;
-                    if total_decoded > MAX_BATCH_DECODED_BYTES {
-                        return Err(StatamError::BoundsExceeded {
-                            reason: "decoded payload column exceeds MAX_BATCH_DECODED_BYTES",
-                        });
-                    }
-                    data_bytes.extend_from_slice(chunk);
-                }
-                let next_off = u32::try_from(start_pos + row_len).map_err(|_| {
-                    StatamError::BoundsExceeded {
-                        reason: "utf8 payload column exceeds u32::MAX",
-                    }
-                })?;
-                offsets.push(next_off);
-            }
+            append_payload_row_to_utf8(
+                row,
+                r,
+                &mut nulls,
+                &mut offsets,
+                &mut data_bytes,
+                &mut total_decoded,
+                resolved_chunks,
+            )?;
+        } else {
+            offsets.push(data_bytes.len() as u32);
         }
     }
 
@@ -3570,6 +4218,7 @@ enum DecodedPhase1 {
     Col(Column),
     ShreddedSub(ShreddedSubCol),
     PayloadRefs(Vec<PayloadRefRow>),
+    SelectedPayloadRefs(Vec<(usize, PayloadRefRow)>),
 }
 
 struct ParsedL0Payload<'a> {
@@ -6956,5 +7605,314 @@ mod tests {
             })
             .unwrap_err();
         assert!(matches!(err, StatamError::Corrupt { .. }));
+    }
+
+    #[test]
+    fn parallel_read_threads_matches_single_threaded_on_substring_and_wide_point_lookup() {
+        let spans_schema = make_spans_schema();
+        let b0 = make_spans_batch(&spans_schema, 0, 160);
+        let b1 = make_spans_batch(&spans_schema, 160, 160);
+        let full_batch = Batch::concat(Arc::clone(&spans_schema), &[&b0, &b1], None).unwrap();
+
+        // Pick a trace_id from the middle of the dataset for a wide point lookup.
+        let target_tid = match full_batch.column(0).unwrap() {
+            Column::Flat(fc) => match fc.data() {
+                FlatData::FixedBytes16(v) => v[155],
+                _ => panic!("expected FixedBytes16 trace_id"),
+            },
+            _ => panic!("expected flat trace_id"),
+        };
+
+        for profile in [WriteProfile::L0Fast, WriteProfile::L1Compact] {
+            let mut opts = WriteOptions::for_table(TableKind::Spans, profile);
+            opts.sort_cols = vec![2, 0];
+            opts.row_group_size = 160;
+            opts.mini_block_size = 80;
+
+            let mut resolver = InMemoryPackResolver::new();
+            let mut file_bytes = Vec::new();
+            if profile == WriteProfile::L1Compact {
+                let pack_id = [0x44u8; 16];
+                opts.pack_id = Some(pack_id);
+                let mut pack_opts = test_pack_opts();
+                pack_opts.target_frame_raw_bytes = 512;
+                let mut pb = ChunkPackBuilder::new(pack_id, pack_opts);
+                let mut writer =
+                    StatamWriter::new(Arc::clone(&spans_schema), opts, Some(&mut pb)).unwrap();
+                writer.write_batch(&b0).unwrap();
+                writer.write_batch(&b1).unwrap();
+                writer.finish(&mut file_bytes).unwrap();
+                let mut pack_bytes = Vec::new();
+                pb.finish(&mut pack_bytes).unwrap();
+                resolver.insert_bytes(pack_id, pack_bytes).unwrap();
+            } else {
+                let mut writer = StatamWriter::new(Arc::clone(&spans_schema), opts, None).unwrap();
+                writer.write_batch(&b0).unwrap();
+                writer.write_batch(&b1).unwrap();
+                writer.finish(&mut file_bytes).unwrap();
+            }
+
+            let reader = StatamReader::open(
+                Arc::new(SliceReader::new(file_bytes)),
+                Some(Arc::new(resolver)),
+            )
+            .unwrap();
+
+            // 1. Wide point lookup (exercises sparse PayloadRefs + parallel Phase-2 column decode)
+            let point_seq = reader
+                .scan(&ScanRequest {
+                    projection: None,
+                    id_lookups: vec![IdLookup::eq("trace_id", target_tid)],
+                    coalesce_mode: CoalesceMode::Point,
+                    read_threads: 1,
+                    ..ScanRequest::default()
+                })
+                .unwrap();
+            let point_par = reader
+                .scan(&ScanRequest {
+                    projection: None,
+                    id_lookups: vec![IdLookup::eq("trace_id", target_tid)],
+                    coalesce_mode: CoalesceMode::Point,
+                    read_threads: 4,
+                    ..ScanRequest::default()
+                })
+                .unwrap();
+            let cat_seq = concat_scanned_batches(&spans_schema, &point_seq);
+            let cat_par = concat_scanned_batches(&spans_schema, &point_par);
+            assert!(cat_seq.num_rows() >= 1);
+            assert_eq!(cat_seq.num_rows(), cat_par.num_rows());
+            for c in 0..spans_schema.len() {
+                assert!(
+                    cat_seq
+                        .column(c)
+                        .unwrap()
+                        .semantic_eq(cat_par.column(c).unwrap()),
+                    "point lookup mismatch at col {c} for {profile:?}"
+                );
+            }
+
+            // 2. Substring scan across .stpk / L0 payloads with read_threads=1 vs 4
+            let sub_seq = reader
+                .scan(&ScanRequest {
+                    projection: None,
+                    substrings: vec![SubstringQuery::ilike("input", b"\"role\":\"USER\"")],
+                    read_threads: 1,
+                    ..ScanRequest::default()
+                })
+                .unwrap();
+            let sub_par = reader
+                .scan(&ScanRequest {
+                    projection: None,
+                    substrings: vec![SubstringQuery::ilike("input", b"\"role\":\"USER\"")],
+                    read_threads: 4,
+                    ..ScanRequest::default()
+                })
+                .unwrap();
+            let sub_cat_seq = concat_scanned_batches(&spans_schema, &sub_seq);
+            let sub_cat_par = concat_scanned_batches(&spans_schema, &sub_par);
+            assert_eq!(sub_cat_seq.num_rows(), 240);
+            assert_eq!(sub_cat_seq.num_rows(), sub_cat_par.num_rows());
+            for c in 0..spans_schema.len() {
+                assert!(
+                    sub_cat_seq
+                        .column(c)
+                        .unwrap()
+                        .semantic_eq(sub_cat_par.column(c).unwrap()),
+                    "substring mismatch at col {c} for {profile:?}"
+                );
+            }
+
+            // 3. Duplicate projected Encoding::Dict column (also cached in Phase 1) with
+            //    enough uncached columns to trigger parallel Phase-2 decode (`parallel_tasks >= 4`).
+            let dup_proj = [4usize, 4, 0, 1, 2, 3, 5];
+            let dup_schema = Arc::new(spans_schema.project(&dup_proj).unwrap());
+            let dup_pred = Predicate::new(
+                "status_code",
+                ZonePred::Eq(ZoneValue::Bytes(b"OK".to_vec())),
+            );
+            let dup_seq = reader
+                .scan(&ScanRequest {
+                    projection: Some(dup_proj.to_vec()),
+                    predicates: vec![dup_pred.clone()],
+                    read_threads: 1,
+                    ..ScanRequest::default()
+                })
+                .unwrap();
+            let dup_par = reader
+                .scan(&ScanRequest {
+                    projection: Some(dup_proj.to_vec()),
+                    predicates: vec![dup_pred],
+                    read_threads: 4,
+                    ..ScanRequest::default()
+                })
+                .unwrap();
+            let dup_cat_seq = concat_scanned_batches(&dup_schema, &dup_seq);
+            let dup_cat_par = concat_scanned_batches(&dup_schema, &dup_par);
+            assert!(dup_cat_seq.num_rows() > 0);
+            assert_eq!(dup_cat_seq.num_rows(), dup_cat_par.num_rows());
+            for c in 0..dup_proj.len() {
+                assert!(
+                    dup_cat_seq
+                        .column(c)
+                        .unwrap()
+                        .semantic_eq(dup_cat_par.column(c).unwrap()),
+                    "duplicate dict col mismatch at pos {c} for {profile:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn take_rows_scattered_matches_full_scan() {
+        let spans_schema = make_spans_schema();
+        // 1,200 rows across 4 RGs and 8+ mini-blocks so 100 and 1,000 scattered indices
+        // span every RG and mini-block boundary!
+        let b0 = make_spans_batch(&spans_schema, 0, 600);
+        let b1 = make_spans_batch(&spans_schema, 600, 600);
+
+        for profile in [WriteProfile::L0Fast, WriteProfile::L1Compact] {
+            let mut opts = WriteOptions::for_table(TableKind::Spans, profile);
+            opts.sort_cols = vec![2, 0];
+            opts.row_group_size = 300;
+            opts.mini_block_size = 100;
+
+            let mut resolver = InMemoryPackResolver::new();
+            let mut file_bytes = Vec::new();
+            if profile == WriteProfile::L1Compact {
+                let pack_id = [0x55u8; 16];
+                opts.pack_id = Some(pack_id);
+                let mut pb = ChunkPackBuilder::new(pack_id, test_pack_opts());
+                let mut writer =
+                    StatamWriter::new(Arc::clone(&spans_schema), opts, Some(&mut pb)).unwrap();
+                writer.write_batch(&b0).unwrap();
+                writer.write_batch(&b1).unwrap();
+                writer.finish(&mut file_bytes).unwrap();
+                let mut pack_bytes = Vec::new();
+                pb.finish(&mut pack_bytes).unwrap();
+                resolver.insert_bytes(pack_id, pack_bytes).unwrap();
+            } else {
+                let mut writer = StatamWriter::new(Arc::clone(&spans_schema), opts, None).unwrap();
+                writer.write_batch(&b0).unwrap();
+                writer.write_batch(&b1).unwrap();
+                writer.finish(&mut file_bytes).unwrap();
+            }
+
+            let reader = StatamReader::open(
+                Arc::new(SliceReader::new(file_bytes)),
+                Some(Arc::new(resolver)),
+            )
+            .unwrap();
+
+            let full = concat_scanned_batches(
+                &spans_schema,
+                &reader.scan(&ScanRequest::default()).unwrap(),
+            );
+            assert_eq!(full.num_rows(), 1200);
+
+            // Empty & out-of-bounds only
+            assert!(reader.take_rows(&[], None, 1).unwrap().is_empty());
+            assert!(reader.take_rows(&[1200, 9999], None, 1).unwrap().is_empty());
+
+            // 100 scattered (unsorted + duplicates + out-of-bounds) indices
+            let mut indices_100: Vec<u64> = (0..100u64).map(|i| (i * 73) % 1200).collect();
+            indices_100.push(1199);
+            indices_100.push(73); // duplicate
+            indices_100.push(5000); // out of bounds
+
+            let mut expected_100 = indices_100
+                .iter()
+                .copied()
+                .filter(|&r| r < 1200)
+                .collect::<Vec<_>>();
+            expected_100.sort_unstable();
+            expected_100.dedup();
+            let expected_mask_100 = {
+                let mut bm = Bitmap::new_zeroed(1200);
+                for &r in &expected_100 {
+                    let _ = bm.set(r as usize, true);
+                }
+                bm
+            };
+            let masked_100 = Batch::try_new(
+                Arc::clone(&spans_schema),
+                full.columns().to_vec(),
+                1200,
+                Selection::Mask(expected_mask_100),
+            )
+            .unwrap();
+            let expected_batch_100 =
+                Batch::concat(Arc::clone(&spans_schema), &[&masked_100], None).unwrap();
+
+            for threads in [1usize, 4] {
+                let taken = reader.take_rows(&indices_100, None, threads).unwrap();
+                let got = concat_scanned_batches(&spans_schema, &taken);
+                assert_eq!(got.num_rows(), expected_100.len());
+                for c in 0..spans_schema.len() {
+                    assert!(
+                        got.column(c)
+                            .unwrap()
+                            .semantic_eq(expected_batch_100.column(c).unwrap()),
+                        "take_rows(100, threads={threads}) mismatch at col {c} for {profile:?}"
+                    );
+                }
+            }
+
+            // 1,000 scattered indices + projected subset + 0-col projection
+            let indices_1000: Vec<u64> = (0..1000u64).map(|i| (i * 197 + 11) % 1200).collect();
+            let mut unique_1000 = indices_1000.clone();
+            unique_1000.sort_unstable();
+            unique_1000.dedup();
+            let expected_mask_1000 = {
+                let mut bm = Bitmap::new_zeroed(1200);
+                for &r in &unique_1000 {
+                    let _ = bm.set(r as usize, true);
+                }
+                bm
+            };
+            let masked_1000 = Batch::try_new(
+                Arc::clone(&spans_schema),
+                full.columns().to_vec(),
+                1200,
+                Selection::Mask(expected_mask_1000),
+            )
+            .unwrap();
+            let expected_batch_1000 =
+                Batch::concat(Arc::clone(&spans_schema), &[&masked_1000], None).unwrap();
+
+            let taken_1000 = reader.take_rows(&indices_1000, None, 4).unwrap();
+            let got_1000 = concat_scanned_batches(&spans_schema, &taken_1000);
+            assert_eq!(got_1000.num_rows(), unique_1000.len());
+            for c in 0..spans_schema.len() {
+                assert!(
+                    got_1000
+                        .column(c)
+                        .unwrap()
+                        .semantic_eq(expected_batch_1000.column(c).unwrap()),
+                    "take_rows(1000, threads=4) mismatch at col {c} for {profile:?}"
+                );
+            }
+
+            // Narrow projection + 0-col projection
+            let narrow_proj = [1usize, 3, 10, 13];
+            let narrow_schema = Arc::new(spans_schema.project(&narrow_proj).unwrap());
+            let taken_narrow = reader
+                .take_rows(&indices_100, Some(&narrow_proj), 4)
+                .unwrap();
+            let got_narrow = concat_scanned_batches(&narrow_schema, &taken_narrow);
+            assert_eq!(got_narrow.num_rows(), expected_100.len());
+            for (pos, &orig_c) in narrow_proj.iter().enumerate() {
+                assert!(
+                    got_narrow
+                        .column(pos)
+                        .unwrap()
+                        .semantic_eq(expected_batch_100.column(orig_c).unwrap()),
+                    "take_rows narrow mismatch at col {orig_c}"
+                );
+            }
+
+            let taken_zero = reader.take_rows(&indices_100, Some(&[]), 1).unwrap();
+            let zero_rows: usize = taken_zero.iter().map(Batch::num_rows).sum();
+            assert_eq!(zero_rows, expected_100.len());
+        }
     }
 }

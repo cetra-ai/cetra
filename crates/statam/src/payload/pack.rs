@@ -1432,6 +1432,12 @@ pub(crate) struct TrigramSectionData {
     pub(crate) frame_blooms: Vec<Option<TrigramBloom>>,
 }
 
+type PreparedFrameGroups = (
+    Vec<(u32, Vec<u32>)>,
+    Vec<Range<u64>>,
+    Option<Arc<PackDecoderDict>>,
+);
+
 /// Range-based reader for an immutable `.stpk` chunk pack.
 pub struct ChunkPackReader {
     reader: Arc<dyn RangeReader>,
@@ -1814,6 +1820,76 @@ impl ChunkPackReader {
         Ok(out)
     }
 
+    fn prepare_frame_chunk_groups(
+        &self,
+        chunk_ids: &[u32],
+    ) -> Result<PreparedFrameGroups, StatamError> {
+        let mut by_frame: BTreeMap<u32, Vec<u32>> = BTreeMap::new();
+        for &cid in chunk_ids {
+            let loc = self
+                .toc
+                .chunks
+                .get(cid as usize)
+                .ok_or(StatamError::Corrupt {
+                    reason: "chunk_id out of bounds",
+                })?;
+            by_frame.entry(loc.frame_id).or_default().push(cid);
+        }
+
+        let mut frame_groups = Vec::with_capacity(by_frame.len());
+        let mut ranges = Vec::with_capacity(by_frame.len());
+        let mut needs_dict = false;
+        for (fid, mut cids) in by_frame {
+            cids.sort_unstable();
+            cids.dedup();
+            let entry = &self.toc.frames[fid as usize];
+            if (entry.flags & PACK_FRAME_FLAG_USES_DICT) != 0 {
+                needs_dict = true;
+            }
+            ranges.push(frame_byte_range(entry)?);
+            frame_groups.push((fid, cids));
+        }
+
+        let dict = if needs_dict {
+            self.load_decoder_dict()?
+        } else {
+            None
+        };
+
+        Ok((frame_groups, ranges, dict))
+    }
+
+    fn decompress_and_visit_frame<F>(
+        &self,
+        fid: u32,
+        raw: &[u8],
+        cids: &[u32],
+        dict: Option<&PackDecoderDict>,
+        mut visit: F,
+    ) -> Result<(), StatamError>
+    where
+        F: FnMut(u32, &[u8]),
+    {
+        let entry = &self.toc.frames[fid as usize];
+        verify_raw_frame_matches_entry(raw, entry)?;
+        let (_, _, decoded) = read_framed_pack_frame_with_dict(raw, MAX_FRAME_RAW_BYTES, dict)?;
+        if decoded.len() != entry.raw_len as usize {
+            return Err(StatamError::Corrupt {
+                reason: "decompressed frame length mismatch",
+            });
+        }
+        for &cid in cids {
+            let loc = &self.toc.chunks[cid as usize];
+            let start = loc.offset_in_frame as usize;
+            let end = start + loc.raw_len as usize;
+            let slice = decoded.get(start..end).ok_or(StatamError::Corrupt {
+                reason: "chunk slice out of decoded frame bounds",
+            })?;
+            visit(cid, slice);
+        }
+        Ok(())
+    }
+
     /// Scans all requested unique `chunk_ids` in a single `read_ranges` wave, passing each
     /// chunk slice directly from the decompressed frame buffer with zero per-chunk clones.
     pub fn scan_chunks_in_frames<F>(
@@ -1828,69 +1904,95 @@ impl ChunkPackReader {
             return Ok(());
         }
 
-        let mut by_frame: BTreeMap<u32, Vec<u32>> = BTreeMap::new();
-        for &cid in chunk_ids {
-            let loc = self
-                .toc
-                .chunks
-                .get(cid as usize)
-                .ok_or(StatamError::Corrupt {
-                    reason: "chunk_id out of bounds",
-                })?;
-            by_frame.entry(loc.frame_id).or_default().push(cid);
-        }
-
-        let mut frame_ids = Vec::with_capacity(by_frame.len());
-        let mut ranges = Vec::with_capacity(by_frame.len());
-        let mut needs_dict = false;
-        for (&fid, cids) in &mut by_frame {
-            cids.sort_unstable();
-            cids.dedup();
-            let entry = &self.toc.frames[fid as usize];
-            if (entry.flags & PACK_FRAME_FLAG_USES_DICT) != 0 {
-                needs_dict = true;
-            }
-            frame_ids.push(fid);
-            ranges.push(frame_byte_range(entry)?);
-        }
-
-        let dict = if needs_dict {
-            self.load_decoder_dict()?
-        } else {
-            None
-        };
-
+        let (frame_groups, ranges, dict) = self.prepare_frame_chunk_groups(chunk_ids)?;
         let frame_bytes_list = self.reader.read_ranges(&ranges)?;
-        if frame_bytes_list.len() != frame_ids.len() {
+        if frame_bytes_list.len() != frame_groups.len() {
             return Err(StatamError::Corrupt {
                 reason: "read_ranges returned wrong frame count",
             });
         }
 
-        for (&fid, raw) in frame_ids.iter().zip(frame_bytes_list.iter()) {
-            let entry = &self.toc.frames[fid as usize];
-            verify_raw_frame_matches_entry(raw, entry)?;
-            let (_, _, decoded) =
-                read_framed_pack_frame_with_dict(raw, MAX_FRAME_RAW_BYTES, dict.as_deref())?;
-            if decoded.len() != entry.raw_len as usize {
-                return Err(StatamError::Corrupt {
-                    reason: "decompressed frame length mismatch",
-                });
-            }
-            if let Some(cids) = by_frame.get(&fid) {
-                for &cid in cids {
-                    let loc = &self.toc.chunks[cid as usize];
-                    let start = loc.offset_in_frame as usize;
-                    let end = start + loc.raw_len as usize;
-                    let slice = decoded.get(start..end).ok_or(StatamError::Corrupt {
-                        reason: "chunk slice out of decoded frame bounds",
-                    })?;
-                    visit(cid, slice);
-                }
-            }
+        for ((fid, cids), raw) in frame_groups.iter().zip(frame_bytes_list.iter()) {
+            self.decompress_and_visit_frame(*fid, raw, cids, dict.as_deref(), &mut visit)?;
         }
 
         Ok(())
+    }
+
+    /// Parallel variant of [`Self::scan_chunks_in_frames`], fetching all needed frames in one
+    /// coalesced `read_ranges` wave and decompressing/visiting frames across up to `read_threads`
+    /// workers (falling back to sequential execution when `read_threads <= 1` or `<= 1` frame).
+    pub fn scan_chunks_in_frames_parallel<S, T, Init, F>(
+        &self,
+        chunk_ids: &[u32],
+        read_threads: usize,
+        init: Init,
+        f: F,
+    ) -> Result<Vec<T>, StatamError>
+    where
+        T: Send,
+        Init: Fn() -> Result<S, StatamError> + Sync,
+        F: Fn(&mut S, u32, &[u8]) -> Option<T> + Sync,
+    {
+        if chunk_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let (frame_groups, ranges, dict) = self.prepare_frame_chunk_groups(chunk_ids)?;
+        let frame_bytes_list = self.reader.read_ranges(&ranges)?;
+        if frame_bytes_list.len() != frame_groups.len() {
+            return Err(StatamError::Corrupt {
+                reason: "read_ranges returned wrong frame count",
+            });
+        }
+
+        let threads = read_threads.clamp(1, MAX_WRITE_THREADS);
+        if threads <= 1 || frame_groups.len() <= 1 {
+            let mut state = init()?;
+            let mut out = Vec::new();
+            for ((fid, cids), raw) in frame_groups.iter().zip(frame_bytes_list.iter()) {
+                self.decompress_and_visit_frame(*fid, raw, cids, dict.as_deref(), |cid, slice| {
+                    if let Some(item) = f(&mut state, cid, slice) {
+                        out.push(item);
+                    }
+                })?;
+            }
+            return Ok(out);
+        }
+
+        let frame_tasks: Vec<(u32, Bytes, Vec<u32>)> = frame_groups
+            .into_iter()
+            .zip(frame_bytes_list)
+            .map(|((fid, cids), raw)| (fid, raw, cids))
+            .collect();
+
+        let per_frame = parallel_map_in_order_with_init(
+            frame_tasks,
+            threads,
+            init,
+            |state, (fid, raw, cids)| {
+                let mut frame_out = Vec::new();
+                self.decompress_and_visit_frame(
+                    fid,
+                    &raw,
+                    &cids,
+                    dict.as_deref(),
+                    |cid, slice| {
+                        if let Some(item) = f(state, cid, slice) {
+                            frame_out.push(item);
+                        }
+                    },
+                )?;
+                Ok(frame_out)
+            },
+        )?;
+
+        let total: usize = per_frame.iter().map(Vec::len).sum();
+        let mut out = Vec::with_capacity(total);
+        for mut items in per_frame {
+            out.append(&mut items);
+        }
+        Ok(out)
     }
 
     /// Reads and validates the per-frame trigram bloom filters (`None` where omitted), cached per reader.
@@ -3119,22 +3221,41 @@ mod tests {
         let pack_id = [0xE1u8; 16];
 
         // 1. Mixed normal frames (with trigram blooms + dedup + 1 MiB guard) + bypass frames.
+        #[cfg(miri)]
+        let (
+            mixed_target,
+            mixed_chunks,
+            mixed_chunk_len,
+            mixed_bypass,
+            mixed_bypass_len,
+            min_frames,
+        ) = (2 * 1024, 12usize, 512usize, 3usize, 512usize, 4usize);
+        #[cfg(not(miri))]
+        let (
+            mixed_target,
+            mixed_chunks,
+            mixed_chunk_len,
+            mixed_bypass,
+            mixed_bypass_len,
+            min_frames,
+        ) = (16 * 1024, 80usize, 4 * 1024, 12usize, 8 * 1024, 10usize);
+
         let build_mixed = |threads: usize| -> (Vec<u8>, PackWriteStats) {
             let opts = PackWriteOptions {
                 codec: test_codec(),
                 zstd_level: 3,
-                target_frame_raw_bytes: 16 * 1024,
+                target_frame_raw_bytes: mixed_target,
                 enable_trigram_skip: true,
                 compress_toc_lz4: true,
                 write_threads: threads,
             };
             let mut pb = ChunkPackBuilder::new(pack_id, opts);
             let mut state: u64 = 0x1234_5678_9abc_def0;
-            for i in 0..80usize {
-                let mut chunk = Vec::with_capacity(4 * 1024);
+            for i in 0..mixed_chunks {
+                let mut chunk = Vec::with_capacity(mixed_chunk_len);
                 let prefix = format!("{{\"msg\":\"item-{i:04}-payload\",\"body\":\"");
                 chunk.extend_from_slice(prefix.as_bytes());
-                while chunk.len() < 4 * 1024 {
+                while chunk.len() < mixed_chunk_len {
                     state ^= state << 13;
                     state ^= state >> 7;
                     state ^= state << 17;
@@ -3146,8 +3267,8 @@ mod tests {
                     assert_eq!(dup_id, id);
                 }
             }
-            for b in 0..12usize {
-                let mut bypass = vec![0u8; 8 * 1024];
+            for b in 0..mixed_bypass {
+                let mut bypass = vec![0u8; mixed_bypass_len];
                 for byte in &mut bypass {
                     state ^= state << 13;
                     state ^= state >> 7;
@@ -3176,7 +3297,7 @@ mod tests {
             "mixed normal+bypass pack must be bit-exact between 1T and 4T"
         );
         let reader = ChunkPackReader::open(Arc::new(SliceReader::new(bytes_4t))).unwrap();
-        assert!(reader.toc().frames.len() >= 10);
+        assert!(reader.toc().frames.len() >= min_frames);
 
         // 1b. Interleaving append_raw_frame while pending_frames is non-empty.
         let hashes_src = reader.read_hash_table().unwrap();
@@ -3237,51 +3358,54 @@ mod tests {
             "interleaved append_raw_frame with pending_frames must be bit-exact 1T vs 4T"
         );
 
-        // 2. new_with_dict under 2 MiB (flush_pre_dict_without_dict).
-        let build_dict_pack = |threads: usize, count: usize| -> (Vec<u8>, PackWriteStats) {
-            let opts = PackWriteOptions {
-                codec: test_codec(),
-                zstd_level: 3,
-                target_frame_raw_bytes: 128 * 1024,
-                enable_trigram_skip: true,
-                compress_toc_lz4: true,
-                write_threads: threads,
-            };
-            let mut pb = ChunkPackBuilder::new_with_dict(pack_id, opts);
-            for i in 0..count {
-                let payload = format!(
-                    "{{\"idx\":{i:06},\"role\":\"assistant\",\"model\":\"claude-test\",\
+        #[cfg(not(miri))]
+        {
+            // 2. new_with_dict under 2 MiB (flush_pre_dict_without_dict).
+            let build_dict_pack = |threads: usize, count: usize| -> (Vec<u8>, PackWriteStats) {
+                let opts = PackWriteOptions {
+                    codec: test_codec(),
+                    zstd_level: 3,
+                    target_frame_raw_bytes: 128 * 1024,
+                    enable_trigram_skip: true,
+                    compress_toc_lz4: true,
+                    write_threads: threads,
+                };
+                let mut pb = ChunkPackBuilder::new_with_dict(pack_id, opts);
+                for i in 0..count {
+                    let payload = format!(
+                        "{{\"idx\":{i:06},\"role\":\"assistant\",\"model\":\"claude-test\",\
                      \"content\":\"Repeated structured JSON payload prefix for dict training \
                      and multi-frame compression verification iteration={i:06} suffix_padding_0123456789\"}}"
-                );
-                let repeated = payload.repeat(12);
-                pb.intern_chunk(repeated.as_bytes()).unwrap();
-            }
-            let mut out = Vec::new();
-            let stats = pb.finish(&mut out).unwrap();
-            (out, stats)
-        };
+                    );
+                    let repeated = payload.repeat(12);
+                    pb.intern_chunk(repeated.as_bytes()).unwrap();
+                }
+                let mut out = Vec::new();
+                let stats = pb.finish(&mut out).unwrap();
+                (out, stats)
+            };
 
-        let (small_1t, small_s1) = build_dict_pack(1, 200);
-        let (small_4t, small_s4) = build_dict_pack(4, 200);
-        assert_eq!(small_s1, small_s4);
-        assert_eq!(
-            small_1t, small_4t,
-            "pre-dict <2MiB pack must be bit-exact between 1T and 4T"
-        );
+            let (small_1t, small_s1) = build_dict_pack(1, 200);
+            let (small_4t, small_s4) = build_dict_pack(4, 200);
+            assert_eq!(small_s1, small_s4);
+            assert_eq!(
+                small_1t, small_4t,
+                "pre-dict <2MiB pack must be bit-exact between 1T and 4T"
+            );
 
-        // 3. new_with_dict over 2 MiB (triggers dict training + multi-worker PackDictCompressor).
-        let (dict_1t, dict_s1) = build_dict_pack(1, 2_200);
-        let (dict_4t, dict_s4) = build_dict_pack(4, 2_200);
-        assert_eq!(dict_s1, dict_s4);
-        assert_eq!(
-            dict_1t, dict_4t,
-            "dict-trained >2MiB pack must be bit-exact between 1T and 4T"
-        );
-        let dict_reader = ChunkPackReader::open(Arc::new(SliceReader::new(dict_4t))).unwrap();
-        assert!(dict_reader.toc().frames.len() >= 16);
-        let all_ids: Vec<u32> = (0..dict_reader.toc().chunks.len() as u32).collect();
-        let got = dict_reader.read_chunks(&all_ids).unwrap();
-        assert_eq!(got.len(), all_ids.len());
+            // 3. new_with_dict over 2 MiB (triggers dict training + multi-worker PackDictCompressor).
+            let (dict_1t, dict_s1) = build_dict_pack(1, 2_200);
+            let (dict_4t, dict_s4) = build_dict_pack(4, 2_200);
+            assert_eq!(dict_s1, dict_s4);
+            assert_eq!(
+                dict_1t, dict_4t,
+                "dict-trained >2MiB pack must be bit-exact between 1T and 4T"
+            );
+            let dict_reader = ChunkPackReader::open(Arc::new(SliceReader::new(dict_4t))).unwrap();
+            assert!(dict_reader.toc().frames.len() >= 16);
+            let all_ids: Vec<u32> = (0..dict_reader.toc().chunks.len() as u32).collect();
+            let got = dict_reader.read_chunks(&all_ids).unwrap();
+            assert_eq!(got.len(), all_ids.len());
+        }
     }
 }
