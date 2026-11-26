@@ -19,7 +19,7 @@ use crate::reads::ListScope;
 use crate::reads_qe::context::{
     EngineContext, OperatorStream, duration_ms_from_ns_expr, populate_id_lookups,
     rewrite_view_expr_for_raw, run_err_to_query, sessions_view_schema, spans_raw_schema,
-    traces_raw_schema, traces_view_projection, traces_view_schema,
+    traces_raw_schema, traces_view_projection_with_raw_trace_id,
 };
 use crate::reads_qe::scores_join::{apply_compiled_filter, compile_optional_filter};
 use crate::views::TimeWindow;
@@ -347,33 +347,51 @@ pub(crate) fn strict_exclusions_spans(
 /// Returns `Ok(None)` when `dashboard_filter` is absent/blank AND `scope.include_eval &&
 /// scope.include_experiments` are both true (after still checking `from - lookback_ns` for
 /// `i64` underflow -> `RunError::InvalidRequest("from is out of range")`).
+/// Parameters for [`trace_id_semi_join`] and [`apply_trace_id_semi_join`].
+pub(crate) struct TraceSemiJoinParams<'a> {
+    pub(crate) lookback_ns: i64,
+    pub(crate) ends_after_from: bool,
+    pub(crate) scope: ListScope,
+    pub(crate) references_environment: bool,
+    pub(crate) dashboard_filter: Option<&'a str>,
+}
+
+/// Builds a reusable `trace_id` semi-join stream (`FixedBytes16`) from `traces` over
+/// `[from - lookback_ns, to)` (optionally requiring `end_time >= from`).
+/// Returns `Ok(None)` when `dashboard_filter` is absent/blank and both `include_eval` and
+/// `include_experiments` are `true` (skipping the lookback subtraction just like the oracle).
 pub(crate) fn trace_id_semi_join(
     ctx: &EngineContext,
     exec_ctx: &ExecContext,
-    lookback_ns: i64,
-    ends_after_from: bool,
-    scope: ListScope,
-    dashboard_filter: Option<&str>,
+    params: &TraceSemiJoinParams<'_>,
 ) -> Result<Option<StreamSet>, RunError> {
+    let TraceSemiJoinParams {
+        lookback_ns,
+        ends_after_from,
+        scope,
+        references_environment,
+        dashboard_filter,
+    } = *params;
     let Some(window) = scope.window else {
         return Err(RunError::InvalidRequest(
             "time window is required".to_owned(),
         ));
     };
+    let filter_text = crate::reads::present(dashboard_filter);
+    if filter_text.is_none() && scope.include_eval && scope.include_experiments {
+        return Ok(None);
+    }
     let start = window
         .from()
         .checked_sub(lookback_ns)
         .ok_or_else(|| RunError::InvalidRequest("from is out of range".to_owned()))?;
     let wide = TimeWindow::new(start, window.to())?;
 
-    let compiled = compile_optional_filter(FilterView::Traces, dashboard_filter)?;
-    if compiled.is_none() && scope.include_eval && scope.include_experiments {
-        return Ok(None);
-    }
-
-    let references_environment = compiled
-        .as_ref()
-        .is_some_and(|filter| filter.references_environment);
+    let compiled = compile_optional_filter(FilterView::Traces, filter_text)?;
+    let references_environment = references_environment
+        || compiled
+            .as_ref()
+            .is_some_and(|filter| filter.references_environment);
     let wide_scope = ListScope {
         window: Some(wide),
         include_eval: scope.include_eval,
@@ -438,15 +456,22 @@ pub(crate) fn trace_id_semi_join(
             }))
         }
         Some(filter) => {
+            const RAW_TID: &str = "__raw_trace_id";
             let raw_streams = ctx
                 .traces
                 .open_partitions(&spec, exec_ctx)
                 .map_err(crate::reads_qe::context::query_err_to_run)?;
-            let view_schema = traces_view_schema()?;
+            let (_, view_plus_raw_schema) =
+                traces_view_projection_with_raw_trace_id(&traces_raw, RAW_TID, exec_ctx.clone())
+                    .map_err(crate::reads_qe::context::query_err_to_run)?;
             let view_streams: Vec<Box<dyn PartitionStream>> = raw_streams
                 .into_iter()
                 .map(|s| {
-                    let proj = traces_view_projection(&traces_raw, exec_ctx.clone())?;
+                    let (proj, _) = traces_view_projection_with_raw_trace_id(
+                        &traces_raw,
+                        RAW_TID,
+                        exec_ctx.clone(),
+                    )?;
                     Ok(
                         Box::new(OperatorStream::new(s, vec![Box::new(proj)], exec_ctx))
                             as Box<dyn PartitionStream>,
@@ -456,21 +481,22 @@ pub(crate) fn trace_id_semi_join(
                 .map_err(crate::reads_qe::context::query_err_to_run)?;
 
             let filtered =
-                apply_compiled_filter(ctx, exec_ctx, view_streams, &view_schema, &filter)
+                apply_compiled_filter(ctx, exec_ctx, view_streams, &view_plus_raw_schema, &filter)
                     .map_err(crate::reads_qe::context::query_err_to_run)?;
 
-            let view_trace_idx = view_schema.index_of(traces::TRACE_ID).ok_or_else(|| {
-                crate::reads_qe::columns::internal("trace_id missing from traces view schema")
+            let raw_tid_idx = view_plus_raw_schema.index_of(RAW_TID).ok_or_else(|| {
+                crate::reads_qe::columns::internal("__raw_trace_id missing from semi-join schema")
             })?;
-            let id_schema = Arc::new(
-                view_schema
-                    .project(&[view_trace_idx])
-                    .map_err(|e| crate::reads_qe::context::query_err_to_run(e.into()))?,
-            );
+            let id_schema = Schema::try_new_arc(vec![Field::new(
+                traces::TRACE_ID,
+                DataType::FixedBytes16,
+                false,
+            )])
+            .map_err(|e| crate::reads_qe::context::query_err_to_run(e.into()))?;
             let id_col = Expr::Column {
-                index: view_trace_idx,
-                name: traces::TRACE_ID.to_owned(),
-                data_type: DataType::Utf8,
+                index: raw_tid_idx,
+                name: RAW_TID.to_owned(),
+                data_type: DataType::FixedBytes16,
             };
             let id_streams: Vec<Box<dyn PartitionStream>> = filtered
                 .into_iter()
@@ -496,25 +522,15 @@ pub(crate) fn trace_id_semi_join(
     }
 }
 
-/// Applies [`trace_id_semi_join`] to `left` using `JoinType::LeftSemi` on `trace_id`.
+/// Applies [`trace_id_semi_join`] to `left` using `JoinType::LeftSemi` on `trace_id`,
+/// always preserving `left.schema` (harmonizing `right` to `left`'s `trace_id` type).
 pub(crate) fn apply_trace_id_semi_join(
     ctx: &EngineContext,
     exec_ctx: &ExecContext,
     left: StreamSet,
-    lookback_ns: i64,
-    ends_after_from: bool,
-    scope: ListScope,
-    dashboard_filter: Option<&str>,
+    params: &TraceSemiJoinParams<'_>,
 ) -> Result<Vec<Box<dyn PartitionStream>>, RunError> {
-    let Some(right) = trace_id_semi_join(
-        ctx,
-        exec_ctx,
-        lookback_ns,
-        ends_after_from,
-        scope,
-        dashboard_filter,
-    )?
-    else {
+    let Some(right) = trace_id_semi_join(ctx, exec_ctx, params)? else {
         return Ok(left.streams);
     };
     if left.streams.is_empty() {
@@ -525,54 +541,25 @@ pub(crate) fn apply_trace_id_semi_join(
     let right_trace_col = col_expr(&right.schema, traces::TRACE_ID)
         .map_err(crate::reads_qe::context::query_err_to_run)?;
 
-    let (left_streams, left_schema, left_key, right_streams, right_schema, right_key) =
+    let (right_streams, right_schema, right_key) =
         if left_trace_col.data_type() == right_trace_col.data_type() {
-            (
-                left.streams,
-                left.schema,
-                left_trace_col,
-                right.streams,
-                right.schema,
-                right_trace_col,
-            )
-        } else if right_trace_col.data_type() == DataType::FixedBytes16
-            && left_trace_col.data_type() == DataType::Utf8
-        {
-            let rhs = harmonize_trace_id_side(right.streams, &DataType::Utf8, exec_ctx)
+            (right.streams, right.schema, right_trace_col)
+        } else {
+            let rhs = harmonize_trace_id_side(right.streams, &left_trace_col.data_type(), exec_ctx)
                 .map_err(crate::reads_qe::context::query_err_to_run)?;
             let rk = col_expr(&rhs.schema, traces::TRACE_ID)
                 .map_err(crate::reads_qe::context::query_err_to_run)?;
-            (
-                left.streams,
-                left.schema,
-                left_trace_col,
-                rhs.streams,
-                rhs.schema,
-                rk,
-            )
-        } else {
-            let lhs = harmonize_all_trace_id_to_utf8(left.streams, &left.schema, exec_ctx)
-                .map_err(crate::reads_qe::context::query_err_to_run)?;
-            let lk = col_expr(&lhs.schema, traces::TRACE_ID)
-                .map_err(crate::reads_qe::context::query_err_to_run)?;
-            (
-                lhs.streams,
-                lhs.schema,
-                lk,
-                right.streams,
-                right.schema,
-                right_trace_col,
-            )
+            (rhs.streams, rhs.schema, rk)
         };
 
     let joined = execute_hash_join(
-        left_streams,
-        left_schema,
+        left.streams,
+        left.schema,
         right_streams,
         right_schema,
         HashJoinSpec {
             join_type: JoinType::LeftSemi,
-            left_keys: vec![left_key],
+            left_keys: vec![left_trace_col],
             right_keys: vec![right_key],
             null_equals_null: false,
             residual_filter: None,
@@ -694,9 +681,32 @@ pub(crate) fn search_predicate(
     })
 }
 
+/// Projection indices for the 9 raw `traces` columns required by [`sessions_from_traces`].
+pub(crate) fn sessions_from_traces_projection(raw_schema: &Schema) -> Result<Vec<usize>, RunError> {
+    let needed = [
+        traces::SESSION_ID,
+        traces::START_TIME,
+        traces::END_TIME,
+        traces::TRACE_ID,
+        traces::ERROR_COUNT,
+        traces::TOTAL_TOKENS,
+        traces::COST_TOTAL,
+        traces::USER_ID,
+        traces::TAGS,
+    ];
+    let mut indices = Vec::with_capacity(needed.len());
+    for name in needed {
+        let idx = raw_schema.index_of(name).ok_or_else(|| {
+            crate::reads_qe::columns::internal(format!("missing {name} in traces schema"))
+        })?;
+        indices.push(idx);
+    }
+    Ok(indices)
+}
+
 /// Reusable push-pipeline builder aggregating scoped `traces` partitions into the 11-column
 /// `sessions` stream (`SumCostDecimal` cast to `F64`, `FirstNonNullByOrder` for `user_id`,
-/// `TagUnion` for `tags`, `duration_ns = greatest(end_time - start_time, 0)`, `duration_ms`).
+/// `TagUnion` for `tags`, `duration_ns = end_time - start_time`, `duration_ms`).
 pub(crate) fn sessions_from_traces(
     traces_streams: Vec<Box<dyn PartitionStream>>,
     traces_schema: &Arc<Schema>,
@@ -855,7 +865,7 @@ pub(crate) fn sessions_from_traces(
         data_type: DataType::List(Box::new(DataType::Utf8)),
     };
 
-    let raw_diff = Expr::Binary {
+    let duration_ns = Expr::Binary {
         left: Box::new(Expr::Cast {
             expr: Box::new(agg_end.clone()),
             target: DataType::I64,
@@ -867,11 +877,6 @@ pub(crate) fn sessions_from_traces(
             target: DataType::I64,
             mode: CastMode::Strict,
         }),
-        data_type: DataType::I64,
-    };
-    let duration_ns = Expr::Call {
-        func: ScalarFn::Greatest,
-        args: vec![raw_diff, Expr::Literal(ScalarValue::I64(0))],
         data_type: DataType::I64,
     };
     let duration_ms = duration_ms_from_ns_expr(duration_ns.clone());
@@ -948,53 +953,6 @@ fn harmonize_trace_id_side(
                 Arc::clone(&out_schema),
                 exec_ctx.clone(),
             )?;
-            Ok(
-                Box::new(OperatorStream::new(s, vec![Box::new(proj)], exec_ctx))
-                    as Box<dyn PartitionStream>,
-            )
-        })
-        .collect::<Result<Vec<_>, QueryError>>()?;
-    Ok(StreamSet {
-        streams: out,
-        schema: out_schema,
-    })
-}
-
-fn harmonize_all_trace_id_to_utf8(
-    streams: Vec<Box<dyn PartitionStream>>,
-    schema: &Schema,
-    exec_ctx: &ExecContext,
-) -> Result<StreamSet, QueryError> {
-    let mut fields = Vec::with_capacity(schema.len());
-    let mut exprs = Vec::with_capacity(schema.len());
-    for (idx, field) in schema.fields().iter().enumerate() {
-        let col = Expr::Column {
-            index: idx,
-            name: field.name.clone(),
-            data_type: field.data_type.clone(),
-        };
-        if field.name == traces::TRACE_ID && field.data_type == DataType::FixedBytes16 {
-            fields.push(Field::new(
-                field.name.clone(),
-                DataType::Utf8,
-                field.nullable,
-            ));
-            exprs.push(Expr::Call {
-                func: ScalarFn::Encode,
-                args: vec![col, Expr::Literal(ScalarValue::Utf8("hex".to_owned()))],
-                data_type: DataType::Utf8,
-            });
-        } else {
-            fields.push(field.clone());
-            exprs.push(col);
-        }
-    }
-    let out_schema = Schema::try_new_arc(fields)?;
-    let out = streams
-        .into_iter()
-        .map(|s| {
-            let proj =
-                ProjectOp::with_schema(exprs.clone(), Arc::clone(&out_schema), exec_ctx.clone())?;
             Ok(
                 Box::new(OperatorStream::new(s, vec![Box::new(proj)], exec_ctx))
                     as Box<dyn PartitionStream>,
@@ -1104,14 +1062,17 @@ mod tests {
                 trace_id_semi_join(
                     &ctx_c,
                     exec_ctx,
-                    86_400_000_000_000,
-                    true,
-                    ListScope {
-                        window: Some(TimeWindow::new(i64::MIN, 0).expect("window")),
-                        include_eval: false,
-                        include_experiments: false,
+                    &TraceSemiJoinParams {
+                        lookback_ns: 86_400_000_000_000,
+                        ends_after_from: true,
+                        scope: ListScope {
+                            window: Some(TimeWindow::new(i64::MIN, 0).expect("window")),
+                            include_eval: false,
+                            include_experiments: false,
+                        },
+                        references_environment: false,
+                        dashboard_filter: None,
                     },
-                    None,
                 )
                 .map_err(run_err_to_query)?;
                 Ok(())
@@ -1136,6 +1097,161 @@ mod tests {
             RunError::InvalidRequest(msg) => assert_eq!(msg, "search needs a time range"),
             other => panic!("unexpected {other:?}"),
         }
+
+        // When semi-join is skipped (include_eval && include_experiments && blank filter),
+        // `checked_sub` is skipped too so `i64::MIN` returns `Ok(None)`.
+        let ctx_c = ctx.clone();
+        let skipped = ctx
+            .run_with_ctx(Duration::from_secs(5), move |exec_ctx| {
+                let res = trace_id_semi_join(
+                    &ctx_c,
+                    exec_ctx,
+                    &TraceSemiJoinParams {
+                        lookback_ns: 86_400_000_000_000,
+                        ends_after_from: true,
+                        scope: ListScope {
+                            window: Some(TimeWindow::new(i64::MIN, 0).expect("window")),
+                            include_eval: true,
+                            include_experiments: true,
+                        },
+                        references_environment: false,
+                        dashboard_filter: Some("   "),
+                    },
+                )
+                .map_err(run_err_to_query)?;
+                Ok(res.is_none())
+            })
+            .await
+            .expect("skipped semi-join succeeds")
+            .0;
+        assert!(skipped);
+
+        let _ = storage.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn apply_trace_id_semi_join_with_score_filter_preserves_left_schema_and_clock_skew() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let storage = crate::Storage::open(test_config(dir.path()))
+            .await
+            .expect("open");
+        let project: ProjectId = "018f6b4e-7c1a-7c1a-8c1a-000000000001".parse().expect("pid");
+
+        let t0 = 1_700_000_000_000_000_000_i64;
+        // Clock-skew trace: end_time < start_time (negative duration_ns)
+        let mut s_skew = span_row(1, 0, t0 + 10_000, t0 + 10_000);
+        s_skew.end_time = t0 + 2_000;
+        s_skew.session_id = Some("sess-skew".to_owned());
+
+        let sc =
+            crate::test_support::score_row(1, 1, t0 + 10_000, t0 + 10_000, t0 + 10_000, false, "q");
+        storage
+            .append_spans(project, span_rows(&[s_skew]))
+            .await
+            .expect("append spans");
+        storage
+            .append_scores(project, crate::test_support::score_rows(&[sc]))
+            .await
+            .expect("append scores");
+
+        let ctx = EngineContext::from_storage(&storage, project, &QueryOptions::new(None, None))
+            .expect("ctx");
+
+        // `apply_trace_id_semi_join` with `score(...)` filter must keep `left`'s `FixedBytes16` schema.
+        let ctx_c = ctx.clone();
+        let (batches, _) = ctx
+            .run_with_ctx(Duration::from_secs(5), move |exec_ctx| {
+                let raw = spans_raw_schema().map_err(run_err_to_query)?;
+                let tid_idx = raw.index_of(spans::TRACE_ID).expect("tid");
+                let spec = ScanSpec {
+                    projection: Some(vec![tid_idx]),
+                    ..ScanSpec::default()
+                };
+                let left_schema = ctx_c.spans.projected_schema(&spec)?;
+                let left_streams = ctx_c.spans.open_partitions(&spec, exec_ctx)?;
+                let joined = apply_trace_id_semi_join(
+                    &ctx_c,
+                    exec_ctx,
+                    StreamSet {
+                        streams: left_streams,
+                        schema: Arc::clone(&left_schema),
+                    },
+                    &TraceSemiJoinParams {
+                        lookback_ns: 86_400_000_000_000,
+                        ends_after_from: true,
+                        scope: ListScope {
+                            window: Some(TimeWindow::new(t0, t0 + 100_000).expect("win")),
+                            include_eval: false,
+                            include_experiments: false,
+                        },
+                        references_environment: false,
+                        dashboard_filter: Some("score('q') > 0"),
+                    },
+                )
+                .map_err(run_err_to_query)?;
+                let pool = Arc::clone(&exec_ctx.pool);
+                let sinks = run_pipeline(
+                    exec_ctx,
+                    joined,
+                    |_| Ok(Vec::new()),
+                    move |_| Ok(CollectSink::new(&pool)),
+                )?;
+                let out: Vec<cetra_column::Batch> = sinks
+                    .into_iter()
+                    .flat_map(CollectSink::into_batches)
+                    .collect();
+                for b in &out {
+                    assert_eq!(
+                        b.schema().fields()[0].data_type,
+                        DataType::FixedBytes16,
+                        "left FixedBytes16 schema must be preserved"
+                    );
+                }
+                Ok(out)
+            })
+            .await
+            .expect("semi-join");
+        assert_eq!(
+            batches
+                .iter()
+                .map(cetra_column::Batch::num_rows)
+                .sum::<usize>(),
+            1
+        );
+
+        // `sessions_from_traces` preserves negative duration_ns for clock skew.
+        let ctx_c = ctx.clone();
+        let (sess_batches, _) = ctx
+            .run_with_ctx(Duration::from_secs(5), move |exec_ctx| {
+                let raw = traces_raw_schema().map_err(run_err_to_query)?;
+                let spec = ScanSpec {
+                    projection: Some(
+                        sessions_from_traces_projection(&raw).map_err(run_err_to_query)?,
+                    ),
+                    ..ScanSpec::default()
+                };
+                let proj = ctx_c.traces.projected_schema(&spec)?;
+                let streams = ctx_c.traces.open_partitions(&spec, exec_ctx)?;
+                let sess = sessions_from_traces(streams, &proj, exec_ctx)?;
+                let pool = Arc::clone(&exec_ctx.pool);
+                let sinks = run_pipeline(
+                    exec_ctx,
+                    sess.streams,
+                    |_| Ok(Vec::new()),
+                    move |_| Ok(CollectSink::new(&pool)),
+                )?;
+                Ok(sinks
+                    .into_iter()
+                    .flat_map(CollectSink::into_batches)
+                    .collect::<Vec<_>>())
+            })
+            .await
+            .expect("sessions");
+        let b = sess_batches.iter().find(|b| b.num_rows() > 0).expect("row");
+        assert_eq!(
+            i64_at(b, require_col(b, DURATION_NS).expect("dur"), 0).expect("dur"),
+            -8_000
+        );
 
         let _ = storage.shutdown().await;
     }

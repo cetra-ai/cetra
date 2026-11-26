@@ -8,7 +8,6 @@ use std::sync::Arc;
 use cetra_column::{Batch, DataType, Field, ScalarValue, Schema};
 use cetra_core::enums::{ScoreSource, ScoreTargetKind};
 use cetra_core::schema::{scores, spans, traces};
-use cetra_query::exec::hash_join::{HashJoinSpec, JoinType, execute_hash_join};
 use cetra_query::exec::streaming::{FilterOp, ProjectOp, UnnestOp};
 use cetra_query::exec::{
     AggExpr, AggFunc, ExecContext, HashAgg, HashAggSpec, PartitionStream, PushOperator, ScanSource,
@@ -33,7 +32,7 @@ use crate::reads_qe::context::{
     run_err_to_query, scores_raw_schema, spans_raw_schema, spans_view_projection,
     spans_view_schema, traces_raw_schema, traces_view_projection, traces_view_schema,
 };
-use crate::reads_qe::scope::{apply_trace_id_semi_join, scoped_traces_spec};
+use crate::reads_qe::scope::{TraceSemiJoinParams, apply_trace_id_semi_join, scoped_traces_spec};
 use crate::reads_qe::scores_join::{
     apply_compiled_filter, compile_filter, compile_optional_filter,
 };
@@ -303,7 +302,7 @@ fn compile_expression(
 }
 
 /// Native query engine implementation of `widget_query`.
-pub(crate) async fn widget_query(
+pub async fn widget_query(
     ctx: &EngineContext,
     request: WidgetRequest<'_>,
 ) -> Result<WidgetData, WidgetError> {
@@ -665,13 +664,8 @@ fn prepare_widget_streams(
                     spec.filters.push(rewritten);
                     populate_id_lookups(&mut spec);
                 }
-                let need_semi_join = !(dashboard_text.is_none()
-                    && (include_eval || filters.references_environment)
-                    && include_experiments)
-                    || (dashboard_text.is_none()
-                        && include_experiments
-                        && !include_eval
-                        && filters.references_environment);
+                let need_semi_join =
+                    !(dashboard_text.is_none() && include_eval && include_experiments);
                 let needed = collect_needed_raw_cols(
                     &raw_schema,
                     plan,
@@ -768,13 +762,7 @@ fn prepare_widget_streams(
                 spec.filters.push(rewritten);
                 populate_id_lookups(&mut spec);
             }
-            let need_semi_join = !(dashboard_text.is_none()
-                && (include_eval || filters.references_environment)
-                && include_experiments)
-                || (dashboard_text.is_none()
-                    && include_experiments
-                    && !include_eval
-                    && filters.references_environment);
+            let need_semi_join = !(dashboard_text.is_none() && include_eval && include_experiments);
             let needed = collect_needed_raw_cols(
                 &raw_schema,
                 plan,
@@ -908,121 +896,21 @@ fn apply_widget_trace_semi_join(
         streams: left_streams,
         schema: Arc::clone(left_schema),
     };
-
-    // Match `reads::widgets::trace_ids`: when `dashboard_filter` is absent and `include_experiments`
-    // is true, `include_eval` alone governs whether the semi-join is skipped, whereas `references_environment`
-    // still relaxes the eval exclusion on the 1-day lookback semi-join.
-    if dashboard_text.is_none() && include_experiments && !include_eval && references_environment {
-        let start = window
-            .from()
-            .checked_sub(BucketWidth::D1.ns())
-            .ok_or_else(out_of_range)?;
-        let lookback = TimeWindow::new(start, window.to())?;
-        let mut spec = scoped_traces_spec(
-            ctx,
-            ListScope {
-                window: Some(lookback),
-                include_eval: false,
-                include_experiments: true,
-            },
-            true,
-        )?;
-        spec.time_range.around_ns = None;
-        let traces_raw = traces_raw_schema()?;
-        let end_col = col_expr(&traces_raw, traces::END_TIME)?;
-        spec.filters
-            .push(cmp_ts(&end_col, BinaryOp::GtEq, window.from()));
-        let trace_id_idx = col_index(&traces_raw, traces::TRACE_ID)?;
-        spec.projection = Some(vec![trace_id_idx]);
-        if left.streams.is_empty() {
-            return Ok(Vec::new());
-        }
-        let right_streams = ctx
-            .traces
-            .open_partitions(&spec, exec_ctx)
-            .map_err(query_err_to_run)?;
-        let right_schema = ctx
-            .traces
-            .projected_schema(&spec)
-            .map_err(query_err_to_run)?;
-        let left_key = col_expr(left_schema, traces::TRACE_ID)?;
-        let right_key = col_expr(&right_schema, traces::TRACE_ID)?;
-        // Harmonize if `left` uses view schema (`Utf8` hex) and `right` is `FixedBytes16`.
-        if left_key.data_type() == right_key.data_type() {
-            let joined = execute_hash_join(
-                left.streams,
-                left.schema,
-                right_streams,
-                right_schema,
-                HashJoinSpec {
-                    join_type: JoinType::LeftSemi,
-                    left_keys: vec![left_key],
-                    right_keys: vec![right_key],
-                    null_equals_null: false,
-                    residual_filter: None,
-                },
-                exec_ctx,
-            )
-            .map_err(query_err_to_run)?;
-            return Ok(vec![joined]);
-        }
-        let hex_schema =
-            Schema::try_new_arc(vec![Field::new(traces::TRACE_ID, DataType::Utf8, false)])
-                .map_err(|e| query_err_to_run(e.into()))?;
-        let hex_expr = Expr::Call {
-            func: cetra_query::ScalarFn::Encode,
-            args: vec![
-                right_key,
-                Expr::Literal(ScalarValue::Utf8("hex".to_owned())),
-            ],
-            data_type: DataType::Utf8,
-        };
-        let encoded_right: Vec<Box<dyn PartitionStream>> = right_streams
-            .into_iter()
-            .map(|s| {
-                let proj = ProjectOp::with_schema(
-                    vec![hex_expr.clone()],
-                    Arc::clone(&hex_schema),
-                    exec_ctx.clone(),
-                )?;
-                Ok(
-                    Box::new(OperatorStream::new(s, vec![Box::new(proj)], exec_ctx))
-                        as Box<dyn PartitionStream>,
-                )
-            })
-            .collect::<Result<Vec<_>, QueryError>>()
-            .map_err(query_err_to_run)?;
-        let hex_key = col_expr(&hex_schema, traces::TRACE_ID)?;
-        let joined = execute_hash_join(
-            left.streams,
-            left.schema,
-            encoded_right,
-            hex_schema,
-            HashJoinSpec {
-                join_type: JoinType::LeftSemi,
-                left_keys: vec![left_key],
-                right_keys: vec![hex_key],
-                null_equals_null: false,
-                residual_filter: None,
-            },
-            exec_ctx,
-        )
-        .map_err(query_err_to_run)?;
-        return Ok(vec![joined]);
-    }
-
     apply_trace_id_semi_join(
         ctx,
         exec_ctx,
         left,
-        BucketWidth::D1.ns(),
-        true,
-        ListScope {
-            window: Some(window),
-            include_eval: include_eval || references_environment,
-            include_experiments,
+        &TraceSemiJoinParams {
+            lookback_ns: BucketWidth::D1.ns(),
+            ends_after_from: true,
+            scope: ListScope {
+                window: Some(window),
+                include_eval,
+                include_experiments,
+            },
+            references_environment,
+            dashboard_filter: dashboard_text,
         },
-        dashboard_text,
     )
 }
 
@@ -1511,6 +1399,8 @@ fn cmp_top_group(a: &AggRow, b: &AggRow) -> Ordering {
 }
 
 fn cmp_f64_desc(a: f64, b: f64) -> Ordering {
+    let norm = |v: f64| if v == 0.0 { 0.0 } else { v };
+    let (a, b) = (norm(a), norm(b));
     match (a.is_nan(), b.is_nan()) {
         (true, true) => Ordering::Equal,
         (true, false) => Ordering::Greater,
@@ -1656,8 +1546,8 @@ fn run_series(
             lines.extend(lines_of(plan, None, false, &refs));
         }
         Some(group) => {
-            // Pass 1: top groups
-            let p1 = prepare_widget_streams(ctx, exec_ctx, window, Some(bucket_ns), cfg)?;
+            // Pass 1: top groups (no time bucket needed for breakdown ranking).
+            let p1 = prepare_widget_streams(ctx, exec_ctx, window, None, cfg)?;
             let top = run_top_groups(p1, plan, group.limit, exec_ctx)?;
             let top_names: Vec<String> = top.iter().filter_map(|r| r.group.clone()).collect();
             if !top_names.is_empty() {
@@ -1819,13 +1709,20 @@ fn run_total(
     let top_names: Vec<String> = groups.iter().filter_map(|r| r.group.clone()).collect();
     if top_names.is_empty() {
         if let Some(pw) = prev_win {
-            // Still validate / check semi-join bounds for previous window if compare is true.
-            let _ = prepare_widget_streams(ctx, exec_ctx, pw, None, cfg)?;
+            // Check semi-join lookback bounds for previous window when a semi-join applies.
+            let need_semi_join = matches!(plan.source, WidgetSource::Spans | WidgetSource::Scores)
+                && !(cfg.dashboard_text.is_none() && cfg.include_eval && cfg.include_experiments);
+            if need_semi_join {
+                let _ = pw
+                    .from()
+                    .checked_sub(BucketWidth::D1.ns())
+                    .ok_or_else(out_of_range)?;
+            }
         }
         return Ok(WidgetData::Total { rows: Vec::new() });
     }
 
-    let other_cur = if group.other {
+    let other_cur = if group.other && groups.len() == group.limit {
         let p2 = prepare_widget_streams(ctx, exec_ctx, window, None, cfg)?;
         let g_col = col_expr(&p2.schema, GROUP_INPUT)?;
         let not_in = Expr::InList {
@@ -2486,7 +2383,30 @@ mod tests {
             .expect("df stats");
         assert_widget_parity(&qe_st, &df_st, 0.01);
 
-        // 9. `from` underflow on `previous_window` and 1-day lookback -> InvalidRequest("from is out of range").
+        // 9. `WidgetSource::Scores` + `CountDistinct(trace_id)` with `score(...)` `dashboard_filter`
+        // (regression test for preserving `FixedBytes16` `trace_id` on `left` in semi-join).
+        let q_scores_cd = WidgetQuery {
+            source: WidgetSource::Scores,
+            filter: None,
+            measures: vec![measure(Agg::CountDistinct, Some("trace_id"), None)],
+            breakdown: None,
+        };
+        let req_scores_cd = WidgetRequest {
+            query: &q_scores_cd,
+            shape: Shape::Total,
+            dashboard_filter: Some("score('q') > 0.5"),
+            compare: false,
+            ..req_total_cmp
+        };
+        let qe_cd = widget_query(&qe_ctx, req_scores_cd)
+            .await
+            .expect("qe scores cd");
+        let df_cd = oracle::widget_query(&df_ctx, req_scores_cd)
+            .await
+            .expect("df scores cd");
+        assert_widget_parity(&qe_cd, &df_cd, 1e-9);
+
+        // 10. `from` underflow on `previous_window` and 1-day lookback -> InvalidRequest("from is out of range").
         let underflow_win = TimeWindow::new(i64::MIN + 10, i64::MIN + 100).expect("min win");
         let req_underflow = WidgetRequest {
             window: underflow_win,

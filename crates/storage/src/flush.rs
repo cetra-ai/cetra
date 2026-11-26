@@ -486,7 +486,7 @@ fn prepare(
                 let min_ingest = min_ingest_time(&partition.batch, table)?;
                 let batch = uncovered_rows(
                     file_table,
-                    &partition.batch,
+                    partition.batch,
                     tombstones,
                     partition.key.project,
                     min_ingest,
@@ -514,7 +514,7 @@ fn prepare(
                     })?;
                 let min_ingest = min_ingest_time(&combined, table)?;
                 let combined =
-                    uncovered_rows(file_table, &combined, tombstones, key.project, min_ingest)?;
+                    uncovered_rows(file_table, combined, tombstones, key.project, min_ingest)?;
                 if combined.num_rows() == 0 {
                     continue;
                 }
@@ -616,14 +616,14 @@ fn read_ts(col: &Column, row: usize) -> Option<i64> {
 /// deletion can cover are returned as they are.
 fn uncovered_rows(
     table: FileTable,
-    batch: &Batch,
+    batch: Batch,
     tombstones: &Tombstones,
     project: ProjectId,
     min_ingest: i64,
 ) -> Result<Batch, FlushError> {
     let deletions = applicable(&tombstones.for_project(project), None, min_ingest);
     if deletions.is_empty() {
-        return Ok(batch.clone());
+        return Ok(batch);
     }
     let tombstone_table = match table {
         FileTable::Spans => cetra_query::TombstoneTable::Spans,
@@ -637,9 +637,9 @@ fn uncovered_rows(
                 reason: "building the deletion filter",
             })?
     else {
-        return Ok(batch.clone());
+        return Ok(batch);
     };
-    drop_covered_batch(batch, &predicate).map_err(|_| FlushError::Deletion {
+    drop_covered_batch(&batch, &predicate).map_err(|_| FlushError::Deletion {
         reason: "applying the deletion filter",
     })
 }

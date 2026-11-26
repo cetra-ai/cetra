@@ -23,10 +23,10 @@ use tokio::task::JoinSet;
 
 use crate::catalog::{CatalogEdit, FileId, FileMeta, FileTable, now_ns};
 use crate::compaction::job::{ClaimGuard, Compactor};
-use crate::compaction::merge::{MergeContext, read_error};
+use crate::compaction::merge::MergeContext;
 use crate::compaction::plan::{Job, JobKind, Policy};
 use crate::deletion::{PendingDeletion, Tombstones, applicable, to_tombstone_specs};
-use crate::error::{CommitError, CompactionError, query_err_to_df};
+use crate::error::{CommitError, CompactionError};
 use crate::memtable::MemSnapshot;
 use crate::parquet::ingest_column;
 use crate::read_state::{ReadState, publish_catalog, publish_tombstones};
@@ -553,13 +553,13 @@ async fn holds_covered(
     let scoped_pool = ctx
         .pool
         .try_admit(0, ctx.pool.limit())
-        .ok_or_else(|| read_error(query_err_to_df(QueryError::TooLarge)))?;
+        .ok_or_else(|| CompactionError::from_query(QueryError::TooLarge))?;
     let workers = ctx
         .qe_runtime
         .workers()
-        .map_err(query_err_to_df)
-        .map_err(read_error)?;
+        .map_err(CompactionError::from_query)?;
     let cancel = CancelToken::new();
+    let _cancel_guard = super::CancelOnDrop(cancel.clone());
     let exec_ctx = ExecContext {
         pool: Arc::clone(&scoped_pool),
         eval: EvalContext {
@@ -587,8 +587,7 @@ async fn holds_covered(
     );
     let mut streams = source
         .open_partitions(&spec, &exec_ctx)
-        .map_err(query_err_to_df)
-        .map_err(read_error)?;
+        .map_err(CompactionError::from_query)?;
     let Some(mut stream) = streams.pop() else {
         return Ok(false);
     };
@@ -617,8 +616,7 @@ async fn holds_covered(
                     }
                 }],
             )
-            .map_err(query_err_to_df)
-            .map_err(read_error)?;
+            .map_err(CompactionError::from_query)?;
         out.pop().ok_or(CompactionError::Task)
     })
     .await

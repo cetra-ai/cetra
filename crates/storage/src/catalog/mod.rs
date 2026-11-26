@@ -3,7 +3,6 @@
 //! `Storage::open` loads this from `catalog.db` and publishes it with the
 //! replayed memtables. A flush replaces it in the same publish that drops
 //! `frozen`.
-#![allow(dead_code)]
 
 mod committer;
 mod db;
@@ -107,8 +106,10 @@ pub(crate) enum FileState {
     /// Readable. These rows are the in-memory catalog.
     Active,
     /// Replaced. GC deletes it after `gc.grace`.
+    #[cfg_attr(not(test), allow(dead_code))]
     Obsolete,
     /// Unreadable. Only accepted as an expected state.
+    #[cfg_attr(not(test), allow(dead_code))]
     Quarantined,
 }
 

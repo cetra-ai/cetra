@@ -1,7 +1,6 @@
 //! Write-ahead log for one table.
 //!
 //! Spec 03 §1. Records, segment files, replay, and the writer task live here.
-#![allow(dead_code)]
 
 mod record;
 mod replay;
@@ -18,10 +17,6 @@ pub(crate) use record::{Decoded, decode_next, encode, push_framed, read_batch};
 
 use std::io;
 use std::path::{Path, PathBuf};
-
-use arrow::datatypes::SchemaRef;
-
-use cetra_core::schema::{scores_schema, spans_schema};
 
 use crate::fs;
 
@@ -40,14 +35,6 @@ impl Table {
         match self {
             Self::Spans => "spans",
             Self::Scores => "scores",
-        }
-    }
-
-    /// Stored Arrow schema.
-    pub(crate) fn schema(self) -> SchemaRef {
-        match self {
-            Self::Spans => spans_schema(),
-            Self::Scores => scores_schema(),
         }
     }
 

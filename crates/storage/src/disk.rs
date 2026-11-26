@@ -109,14 +109,12 @@ impl Disk {
     }
 
     /// Registers the native query engine's live spilled-bytes counter and refreshes the spill cap.
-    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn set_engine_spilled(&self, counter: Arc<AtomicU64>) {
         let _ = self.engine_spilled.set(counter);
         self.apply_spill_cap(self.free());
     }
 
     /// Frozen process-wide maximum total spilled bytes allowed for `cetra_query::exec::SpillManager`.
-    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn engine_spill_cap(&self) -> u64 {
         self.engine_spill_cap.load(Ordering::Acquire)
     }

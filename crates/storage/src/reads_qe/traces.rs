@@ -56,13 +56,13 @@ const MAX_FETCH: usize = 64 * MAX_PAGE;
 const SPAN_RANK: &str = "__rn";
 
 /// One trace row and its spans (`cetra_column::Batch` representation).
-pub(crate) struct QeTraceDetailData {
+pub struct QeTraceDetailData {
     /// The `traces` view row, all 29 columns.
-    pub(crate) trace: Batch,
+    pub trace: Batch,
     /// [`SPAN_LIST_COLUMNS`], ordered `start_time ASC, span_id ASC`.
-    pub(crate) spans: Vec<Batch>,
+    pub spans: Vec<Batch>,
     /// True when more than [`MAX_TRACE_SPANS`] spans were stored.
-    pub(crate) truncated: bool,
+    pub truncated: bool,
 }
 
 impl fmt::Debug for QeTraceDetailData {
@@ -192,13 +192,13 @@ fn prepare_trace_list(
     let list_mode = if !ctx.force_range_mode && !has_scores && !has_search {
         match (request.sort, request.order) {
             (TraceSort::StartTime, SortOrder::Desc) => Some(TraceListMode::Widening {
-                fetch: request.limit + 1,
+                fetch: request.limit.saturating_add(1),
             }),
             (TraceSort::CostTotal | TraceSort::Duration | TraceSort::TotalTokens, _) => {
                 let sort_keys = traces_raw_sort_keys(&traces_raw, request.sort, request.order)?;
                 Some(TraceListMode::TwoPhase {
                     sort_keys,
-                    limit: request.limit + 1,
+                    limit: request.limit.saturating_add(1),
                     offset: 0,
                 })
             }
@@ -224,7 +224,7 @@ fn prepare_trace_list(
 
 /// Summary of the physical trace list plan (`mode=list` or `mode=range`).
 #[doc(hidden)]
-pub(crate) async fn trace_list_plan(
+pub async fn trace_list_plan(
     ctx: &EngineContext,
     request: TraceListRequest<'_>,
 ) -> Result<String, RunError> {
@@ -237,7 +237,7 @@ pub(crate) async fn trace_list_plan(
 }
 
 /// One page of traces, in `traces`-view column order (`29` columns).
-pub(crate) async fn trace_list(
+pub async fn trace_list(
     ctx: &EngineContext,
     request: TraceListRequest<'_>,
 ) -> Result<QePage, RunError> {
@@ -1009,7 +1009,7 @@ fn capped_span_page(
 
 /// One trace and its spans (`SPAN_LIST_COLUMNS`, ordered `start_time ASC, span_id ASC`,
 /// capped at [`MAX_TRACE_SPANS`]). Default exclusions do NOT apply. Uses ONLY caller `ctx.around`.
-pub(crate) async fn trace_detail(
+pub async fn trace_detail(
     ctx: &EngineContext,
     trace_id: &str,
     timeout: Duration,
@@ -2198,7 +2198,8 @@ fn traces_raw_after_expr(cursor: &Cursor, raw_schema: &Schema) -> Result<Expr, R
         return Err(RunError::InvalidRequest("invalid cursor".to_owned()));
     }
     let trace_col = col_expr_q(raw_schema, traces::TRACE_ID).map_err(query_err_to_run)?;
-    let trace_bytes = decode_hex_16(&cursor.tie[0], 32, "trace_id")?;
+    let trace_bytes = decode_hex_16(&cursor.tie[0], 32, "trace_id")
+        .map_err(|_| RunError::InvalidRequest("invalid cursor".to_owned()))?;
     let cmp_op = match cursor.order {
         SortOrder::Asc => BinaryOp::Gt,
         SortOrder::Desc => BinaryOp::Lt,
