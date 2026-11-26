@@ -9,9 +9,11 @@ pub(crate) mod deletions;
 pub(crate) mod experiments;
 pub(crate) mod prompts;
 pub(crate) mod scope;
+pub(crate) mod scores;
 pub(crate) mod scores_join;
 pub(crate) mod sessions;
 pub(crate) mod targets;
+pub(crate) mod traces;
 pub(crate) mod users;
 
 #[allow(unused_imports)] // used in QE4.2-M7
