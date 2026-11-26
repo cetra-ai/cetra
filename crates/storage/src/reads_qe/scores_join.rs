@@ -100,16 +100,16 @@ pub(crate) fn apply_compiled_filter(
     let mut current_schema = Arc::clone(left_schema);
 
     for (index, score_name) in compiled.scores.iter().enumerate() {
-        let latest = latest_score_stream(
+        let latest = latest_score_stream(&LatestScoreParams {
             ctx,
             exec_ctx,
-            &scores_raw,
-            &current_schema,
+            scores_raw: &scores_raw,
+            left_schema: &current_schema,
             target_kind,
             key_cols,
             index,
             score_name,
-        )?;
+        })?;
 
         let left_keys = key_cols
             .iter()
@@ -178,17 +178,28 @@ struct LatestScoreStream {
     key_names: Vec<String>,
 }
 
-#[allow(clippy::too_many_arguments)]
-fn latest_score_stream(
-    ctx: &crate::reads_qe::context::EngineContext,
-    exec_ctx: &ExecContext,
-    scores_raw: &Arc<Schema>,
-    left_schema: &Schema,
-    target_kind: &str,
-    key_cols: &[&str],
+struct LatestScoreParams<'a> {
+    ctx: &'a crate::reads_qe::context::EngineContext,
+    exec_ctx: &'a ExecContext,
+    scores_raw: &'a Arc<Schema>,
+    left_schema: &'a Schema,
+    target_kind: &'a str,
+    key_cols: &'a [&'a str],
     index: usize,
-    score_name: &str,
-) -> Result<LatestScoreStream, QueryError> {
+    score_name: &'a str,
+}
+
+fn latest_score_stream(params: &LatestScoreParams<'_>) -> Result<LatestScoreStream, QueryError> {
+    let LatestScoreParams {
+        ctx,
+        exec_ctx,
+        scores_raw,
+        left_schema,
+        target_kind,
+        key_cols,
+        index,
+        score_name,
+    } = *params;
     let mut scan_indices = Vec::with_capacity(key_cols.len() + 4);
     for &k in key_cols {
         scan_indices.push(

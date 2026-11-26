@@ -2,6 +2,7 @@
 
 use std::cmp::Ordering;
 use std::collections::{BTreeSet, BinaryHeap, HashSet};
+use std::fmt;
 use std::sync::Arc;
 
 use cetra_column::{
@@ -32,7 +33,7 @@ use crate::reads_qe::context::{
 };
 use crate::reads_qe::scope::{
     SearchPredicate, StreamSet, scoped_spans_spec, scoped_traces_spec, search_predicate,
-    sessions_from_traces,
+    sessions_from_traces, sessions_from_traces_projection,
 };
 use crate::reads_qe::scores_join::{apply_compiled_filter, compile_optional_filter};
 
@@ -134,7 +135,7 @@ fn filter_view(view: FacetView) -> FilterView {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 enum ParsedField {
     Values(&'static str),
     Bool(&'static str),
@@ -142,6 +143,23 @@ enum ParsedField {
     Keys(&'static str),
     MapValue(&'static str, String),
     Number(&'static str),
+}
+
+impl fmt::Debug for ParsedField {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Values(col) => f.debug_tuple("Values").field(col).finish(),
+            Self::Bool(col) => f.debug_tuple("Bool").field(col).finish(),
+            Self::List(col) => f.debug_tuple("List").field(col).finish(),
+            Self::Keys(col) => f.debug_tuple("Keys").field(col).finish(),
+            Self::MapValue(col, key) => f
+                .debug_struct("MapValue")
+                .field("col", col)
+                .field("key_len", &key.len())
+                .finish_non_exhaustive(),
+            Self::Number(col) => f.debug_tuple("Number").field(col).finish(),
+        }
+    }
 }
 
 fn parse_field(view: FacetView, text: &str) -> Result<ParsedField, RunError> {
@@ -188,11 +206,22 @@ fn unescape_key(escaped: &str) -> Option<String> {
     (1..=MAX_FACET_KEY).contains(&length).then_some(key)
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 struct CheckedField {
     field: ParsedField,
     query: Option<String>,
     limit: usize,
+}
+
+impl fmt::Debug for CheckedField {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("CheckedField")
+            .field("field", &self.field)
+            .field("has_query", &self.query.is_some())
+            .field("query_len", &self.query.as_ref().map(String::len))
+            .field("limit", &self.limit)
+            .finish()
+    }
 }
 
 fn check_field(view: FacetView, field: &FacetField<'_>) -> Result<CheckedField, RunError> {
@@ -319,6 +348,12 @@ pub(crate) async fn facets(
 
     // Pass 2: at most 1 narrow scan projecting only histogram numeric columns where p99 > min.
     let pass2_timeout = deadline.saturating_duration_since(tokio::time::Instant::now());
+    if pass2_timeout.is_zero() {
+        for h in pending_histograms {
+            slots[h.slot_idx] = Err(RunError::Timeout);
+        }
+        return Ok(slots);
+    }
     let pass2_out = {
         let ctx_c = ctx.clone();
         let view = request.view;
@@ -420,6 +455,13 @@ fn run_pass1(
         }
         return Ok((done, Vec::new()));
     }
+
+    // Keep headroom on `ScopedPool` so one runaway spillable `HashAgg` cannot starve siblings'
+    // unspillable reservations (`scratch`, `ParquetSource`, or `finalize_value_field` output).
+    let has_value_fields = valid_fields
+        .iter()
+        .any(|(_, f)| !matches!(f.field, ParsedField::Number(_)));
+    let _headroom = has_value_fields.then(|| exec_ctx.pool.register("facet_headroom", true));
 
     let sinks = exec_run_pipeline(exec_ctx, streams, |_| Ok(Vec::new()), {
         let fields_c = valid_fields.to_vec();
@@ -730,7 +772,7 @@ fn run_pass2(
 
     let mut out = Vec::with_capacity(pending.len());
     for (i, h) in pending.iter().enumerate() {
-        let width = (h.p99 - h.min) / HISTOGRAM_BUCKETS as f64;
+        let width = (h.p99 / HISTOGRAM_BUCKETS as f64) - (h.min / HISTOGRAM_BUCKETS as f64);
         let length = if h.max >= h.p99 {
             HISTOGRAM_BUCKETS + 1
         } else {
@@ -796,14 +838,19 @@ fn open_facets_streams(
     fields: &[&ParsedField],
 ) -> Result<StreamSet, RunError> {
     if view == FacetView::Sessions {
-        let spec = scoped_traces_spec(ctx, scope, false)?;
+        let mut spec = scoped_traces_spec(ctx, scope, false)?;
         let traces_raw = traces_raw_schema()?;
+        spec.projection = Some(sessions_from_traces_projection(&traces_raw)?);
+        let proj_schema = ctx
+            .traces
+            .projected_schema(&spec)
+            .map_err(query_err_to_run)?;
         let raw_streams = ctx
             .traces
             .open_partitions(&spec, exec_ctx)
             .map_err(query_err_to_run)?;
         let sess =
-            sessions_from_traces(raw_streams, &traces_raw, exec_ctx).map_err(query_err_to_run)?;
+            sessions_from_traces(raw_streams, &proj_schema, exec_ctx).map_err(query_err_to_run)?;
         let streams = match filter {
             Some(f) => apply_compiled_filter(ctx, exec_ctx, sess.streams, &sess.schema, &f)
                 .map_err(query_err_to_run)?,
@@ -1005,6 +1052,9 @@ fn open_facets_streams(
         }
     }
 
+    spec.map_keys
+        .retain(|(col, _)| !keys_cols.contains(col.as_str()));
+
     if matches!(search_pred, SearchPredicate::Traces { .. }) {
         needed.insert(col_index(&raw_schema, traces::TRACE_ID)?);
     }
@@ -1154,6 +1204,7 @@ struct ValueWorkerState {
     failed_too_large: bool,
     utf8_schema: Arc<Schema>,
     scratch: Reservation,
+    buf_bytes: usize,
     chunk_buf: Vec<String>,
     row_dedup: HashSet<String>,
 }
@@ -1239,6 +1290,7 @@ impl FacetFanoutSink {
                         failed_too_large: false,
                         utf8_schema: Arc::clone(utf8_schema),
                         scratch,
+                        buf_bytes: 0,
                         chunk_buf: Vec::new(),
                         row_dedup: HashSet::new(),
                     })));
@@ -1287,8 +1339,9 @@ impl PushSink for FacetFanoutSink {
                     st.total = st.total.saturating_add(num_rows as u64);
                     if let Err(err) = push_value_field_batch(st, &batch, batch_limit) {
                         st.scratch.free();
-                        st.chunk_buf.clear();
-                        st.row_dedup.clear();
+                        st.buf_bytes = 0;
+                        st.chunk_buf = Vec::new();
+                        st.row_dedup = HashSet::new();
                         match err {
                             QueryError::TooLarge => {
                                 // Drop ONLY this field's HashAgg state so sibling fields proceed.
@@ -1307,6 +1360,10 @@ impl PushSink for FacetFanoutSink {
     fn finish(&mut self) -> Result<(), QueryError> {
         for state in &mut self.states {
             if let FieldWorkerState::Values(st) = state {
+                st.scratch.free();
+                st.buf_bytes = 0;
+                st.chunk_buf = Vec::new();
+                st.row_dedup = HashSet::new();
                 if st.failed_too_large {
                     continue;
                 }
@@ -1328,6 +1385,58 @@ impl PushSink for FacetFanoutSink {
     }
 }
 
+struct ChunkFlusher<'a> {
+    utf8_schema: &'a Arc<Schema>,
+    scratch: &'a mut Reservation,
+    buf_bytes: &'a mut usize,
+    chunk_buf: &'a mut Vec<String>,
+    agg: &'a mut Option<HashAgg>,
+    batch_limit: usize,
+}
+
+impl ChunkFlusher<'_> {
+    fn push(&mut self, value: String) -> Result<(), QueryError> {
+        let delta = size_of::<String>().saturating_add(value.len());
+        self.scratch.try_grow(delta)?;
+        *self.buf_bytes = self.buf_bytes.saturating_add(delta);
+        self.chunk_buf.push(value);
+        if self.chunk_buf.len() >= self.batch_limit {
+            self.flush()?;
+        }
+        Ok(())
+    }
+
+    fn flush(&mut self) -> Result<(), QueryError> {
+        if self.chunk_buf.is_empty() {
+            return Ok(());
+        }
+        let len = self.chunk_buf.len();
+        let utf8 = Utf8Data::try_from_slices(self.chunk_buf.iter().map(String::as_str))?;
+        self.chunk_buf.clear();
+        let release = *self.buf_bytes;
+        *self.buf_bytes = 0;
+        self.scratch
+            .shrink(self.scratch.size().saturating_sub(release));
+        let flat = FlatColumn::try_new(FlatData::Utf8(utf8), None)?;
+        let mini = Batch::try_new(
+            Arc::clone(self.utf8_schema),
+            vec![Column::Flat(flat)],
+            len,
+            Selection::All,
+        )?;
+        let bytes = mini.memory_bytes();
+        self.scratch.try_grow(bytes)?;
+        let res = match self.agg.as_mut() {
+            Some(a) => a.consume(mini),
+            None => Err(QueryError::internal("missing facet HashAgg")),
+        };
+        self.scratch
+            .shrink(self.scratch.size().saturating_sub(bytes));
+        res?;
+        Ok(())
+    }
+}
+
 fn push_value_field_batch(
     st: &mut ValueWorkerState,
     batch: &Batch,
@@ -1340,11 +1449,16 @@ fn push_value_field_batch(
         agg,
         utf8_schema,
         scratch,
+        buf_bytes,
         chunk_buf,
         row_dedup,
         ..
     } = st;
     chunk_buf.clear();
+    if *buf_bytes > 0 {
+        scratch.shrink(scratch.size().saturating_sub(*buf_bytes));
+        *buf_bytes = 0;
+    }
     let query_ref = query.as_ref().map(|(q, ql)| (q.as_str(), ql.as_str()));
 
     match source {
@@ -1352,6 +1466,14 @@ fn push_value_field_batch(
             let col = batch
                 .column(*col_idx)
                 .ok_or_else(|| QueryError::internal("missing values column"))?;
+            let mut flusher = ChunkFlusher {
+                utf8_schema,
+                scratch,
+                buf_bytes,
+                chunk_buf,
+                agg,
+                batch_limit,
+            };
             for phys_row in active_rows(batch) {
                 let val_opt = raw_string_at(col, phys_row)
                     .map_err(|e| QueryError::internal(e.to_string()))?;
@@ -1359,19 +1481,25 @@ fn push_value_field_batch(
                     None => *missing = missing.saturating_add(1),
                     Some(v) => {
                         if matches_query(&v, query_ref) {
-                            chunk_buf.push(v);
+                            flusher.push(v)?;
                         }
                     }
                 }
-                if chunk_buf.len() >= batch_limit {
-                    flush_value_chunk(chunk_buf, utf8_schema, scratch, agg)?;
-                }
             }
+            flusher.flush()?;
         }
         ValueSource::Bool(col_idx) => {
             let col = batch
                 .column(*col_idx)
                 .ok_or_else(|| QueryError::internal("missing bool column"))?;
+            let mut flusher = ChunkFlusher {
+                utf8_schema,
+                scratch,
+                buf_bytes,
+                chunk_buf,
+                agg,
+                batch_limit,
+            };
             for phys_row in active_rows(batch) {
                 let val_opt =
                     raw_bool_at(col, phys_row).map_err(|e| QueryError::internal(e.to_string()))?;
@@ -1380,14 +1508,12 @@ fn push_value_field_batch(
                     Some(b) => {
                         let s = if b { "true" } else { "false" };
                         if matches_query(s, query_ref) {
-                            chunk_buf.push(s.to_owned());
+                            flusher.push(s.to_owned())?;
                         }
                     }
                 }
-                if chunk_buf.len() >= batch_limit {
-                    flush_value_chunk(chunk_buf, utf8_schema, scratch, agg)?;
-                }
             }
+            flusher.flush()?;
         }
         ValueSource::List(col_idx) => {
             let col = batch
@@ -1395,98 +1521,101 @@ fn push_value_field_batch(
                 .ok_or_else(|| QueryError::internal("missing list column"))?;
             for phys_row in active_rows(batch) {
                 row_dedup.clear();
-                let is_empty_or_null = read_list_utf8_row(col, phys_row, row_dedup)?;
+                let mut dedup_bytes = 0usize;
+                let is_empty_or_null =
+                    read_list_utf8_row(col, phys_row, row_dedup, scratch, &mut dedup_bytes)?;
                 if is_empty_or_null {
                     *missing = missing.saturating_add(1);
                 } else {
+                    let mut flusher = ChunkFlusher {
+                        utf8_schema,
+                        scratch,
+                        buf_bytes,
+                        chunk_buf,
+                        agg,
+                        batch_limit,
+                    };
                     for elem in row_dedup.drain() {
                         if matches_query(&elem, query_ref) {
-                            chunk_buf.push(elem);
+                            flusher.push(elem)?;
                         }
                     }
                 }
-                if chunk_buf.len() >= batch_limit {
-                    flush_value_chunk(chunk_buf, utf8_schema, scratch, agg)?;
+                if dedup_bytes > 0 {
+                    scratch.shrink(scratch.size().saturating_sub(dedup_bytes));
+                }
+                if row_dedup.capacity() > batch_limit.saturating_mul(2) {
+                    *row_dedup = HashSet::new();
                 }
             }
+            let mut flusher = ChunkFlusher {
+                utf8_schema,
+                scratch,
+                buf_bytes,
+                chunk_buf,
+                agg,
+                batch_limit,
+            };
+            flusher.flush()?;
         }
         ValueSource::Keys(col_idx) => {
             let col = batch
                 .column(*col_idx)
                 .ok_or_else(|| QueryError::internal("missing map column"))?;
+            let mut flusher = ChunkFlusher {
+                utf8_schema,
+                scratch,
+                buf_bytes,
+                chunk_buf,
+                agg,
+                batch_limit,
+            };
             for phys_row in active_rows(batch) {
                 let had_entries = visit_map_row(col, phys_row, |k, _v| {
                     if !k.starts_with(INTERNAL_KEY_PREFIX) && matches_query(k, query_ref) {
-                        chunk_buf.push(k.to_owned());
+                        flusher.push(k.to_owned())?;
                     }
+                    Ok(())
                 })?;
                 if !had_entries {
                     *missing = missing.saturating_add(1);
                 }
-                if chunk_buf.len() >= batch_limit {
-                    flush_value_chunk(chunk_buf, utf8_schema, scratch, agg)?;
-                }
             }
+            flusher.flush()?;
         }
         ValueSource::MapValue(col_idx, target_key) => {
             let col = batch
                 .column(*col_idx)
                 .ok_or_else(|| QueryError::internal("missing map column"))?;
+            let mut flusher = ChunkFlusher {
+                utf8_schema,
+                scratch,
+                buf_bytes,
+                chunk_buf,
+                agg,
+                batch_limit,
+            };
             for phys_row in active_rows(batch) {
                 let mut found: Option<String> = None;
                 let _ = visit_map_row(col, phys_row, |k, v_opt| {
                     if k == target_key.as_str() {
                         found = v_opt.map(str::to_owned);
                     }
+                    Ok(())
                 })?;
                 match found {
                     None => *missing = missing.saturating_add(1),
                     Some(v) => {
                         if matches_query(&v, query_ref) {
-                            chunk_buf.push(v);
+                            flusher.push(v)?;
                         }
                     }
                 }
-                if chunk_buf.len() >= batch_limit {
-                    flush_value_chunk(chunk_buf, utf8_schema, scratch, agg)?;
-                }
             }
+            flusher.flush()?;
         }
     }
 
-    if !chunk_buf.is_empty() {
-        flush_value_chunk(chunk_buf, utf8_schema, scratch, agg)?;
-    }
-    Ok(())
-}
-
-fn flush_value_chunk(
-    chunk_buf: &mut Vec<String>,
-    utf8_schema: &Arc<Schema>,
-    scratch: &mut Reservation,
-    agg: &mut Option<HashAgg>,
-) -> Result<(), QueryError> {
-    if chunk_buf.is_empty() {
-        return Ok(());
-    }
-    let len = chunk_buf.len();
-    let utf8 = Utf8Data::try_from_slices(chunk_buf.iter().map(String::as_str))?;
-    chunk_buf.clear();
-    let flat = FlatColumn::try_new(FlatData::Utf8(utf8), None)?;
-    let mini = Batch::try_new(
-        Arc::clone(utf8_schema),
-        vec![Column::Flat(flat)],
-        len,
-        Selection::All,
-    )?;
-    let bytes = mini.memory_bytes();
-    scratch.try_grow(bytes)?;
-    let res = match agg.as_mut() {
-        Some(a) => a.consume(mini),
-        None => Err(QueryError::internal("missing facet HashAgg")),
-    };
-    scratch.free();
-    res?;
     Ok(())
 }
 
@@ -1511,6 +1640,8 @@ fn read_list_utf8_row(
     col: &Column,
     phys_row: usize,
     dedup: &mut HashSet<String>,
+    scratch: &mut Reservation,
+    dedup_bytes: &mut usize,
 ) -> Result<bool, QueryError> {
     if phys_row >= col.len() || col.is_null(phys_row) {
         return Ok(true);
@@ -1523,7 +1654,7 @@ fn read_list_utf8_row(
                 }
                 for sv in values {
                     if let ScalarValue::Utf8(s) = sv {
-                        dedup.insert(s.clone());
+                        insert_dedup(dedup, s.clone(), scratch, dedup_bytes)?;
                     }
                 }
                 Ok(false)
@@ -1531,7 +1662,7 @@ fn read_list_utf8_row(
             ScalarValue::Null(_) => Ok(true),
             _ => Err(QueryError::internal("list scalar mismatch")),
         },
-        Column::Flat(fc) => read_list_flat(fc, phys_row, dedup),
+        Column::Flat(fc) => read_list_flat(fc, phys_row, dedup, scratch, dedup_bytes),
         Column::Dict(d) => {
             if d.is_null(phys_row) {
                 return Ok(true);
@@ -1540,7 +1671,7 @@ fn read_list_utf8_row(
             if d.values().is_null(code) {
                 return Ok(true);
             }
-            read_list_flat(d.values(), code, dedup)
+            read_list_flat(d.values(), code, dedup, scratch, dedup_bytes)
         }
         Column::Rle(r) => {
             let run_idx = r
@@ -1549,15 +1680,32 @@ fn read_list_utf8_row(
             if r.values().is_null(run_idx) {
                 return Ok(true);
             }
-            read_list_flat(r.values(), run_idx, dedup)
+            read_list_flat(r.values(), run_idx, dedup, scratch, dedup_bytes)
         }
     }
+}
+
+fn insert_dedup(
+    dedup: &mut HashSet<String>,
+    s: String,
+    scratch: &mut Reservation,
+    dedup_bytes: &mut usize,
+) -> Result<(), QueryError> {
+    if !dedup.contains(&s) {
+        let delta = size_of::<String>().saturating_add(s.len());
+        scratch.try_grow(delta)?;
+        *dedup_bytes = dedup_bytes.saturating_add(delta);
+        dedup.insert(s);
+    }
+    Ok(())
 }
 
 fn read_list_flat(
     fc: &FlatColumn,
     flat_row: usize,
     dedup: &mut HashSet<String>,
+    scratch: &mut Reservation,
+    dedup_bytes: &mut usize,
 ) -> Result<bool, QueryError> {
     let FlatData::List {
         offsets, values, ..
@@ -1574,7 +1722,7 @@ fn read_list_flat(
         if let Some(s) =
             raw_string_at(values, idx).map_err(|e| QueryError::internal(e.to_string()))?
         {
-            dedup.insert(s);
+            insert_dedup(dedup, s, scratch, dedup_bytes)?;
         }
     }
     Ok(false)
@@ -1585,7 +1733,7 @@ fn read_list_flat(
 fn visit_map_row(
     col: &Column,
     phys_row: usize,
-    mut f: impl FnMut(&str, Option<&str>),
+    mut f: impl FnMut(&str, Option<&str>) -> Result<(), QueryError>,
 ) -> Result<bool, QueryError> {
     if phys_row >= col.len() || col.is_null(phys_row) {
         return Ok(false);
@@ -1597,7 +1745,7 @@ fn visit_map_row(
                     return Ok(false);
                 }
                 for (k, v) in entries {
-                    f(k.as_str(), v.as_deref());
+                    f(k.as_str(), v.as_deref())?;
                 }
                 Ok(true)
             }
@@ -1630,7 +1778,7 @@ fn visit_map_row(
 fn visit_map_flat(
     fc: &FlatColumn,
     flat_row: usize,
-    mut f: impl FnMut(&str, Option<&str>),
+    mut f: impl FnMut(&str, Option<&str>) -> Result<(), QueryError>,
 ) -> Result<bool, QueryError> {
     let FlatData::MapUtf8(map) = fc.data() else {
         return Err(QueryError::internal("map flat storage mismatch"));
@@ -1656,7 +1804,7 @@ fn visit_map_flat(
                     .ok_or_else(|| QueryError::internal("map value offset out of bounds"))?,
             )
         };
-        f(k, v);
+        f(k, v)?;
     }
     Ok(true)
 }
@@ -1687,7 +1835,7 @@ impl BucketFanoutSink {
                 source: NumericSource::resolve(view, schema, h.col_name)?,
                 min: h.min,
                 p99: h.p99,
-                width: (h.p99 - h.min) / HISTOGRAM_BUCKETS as f64,
+                width: (h.p99 / HISTOGRAM_BUCKETS as f64) - (h.min / HISTOGRAM_BUCKETS as f64),
             });
         }
         let tallies = vec![[0u64; HISTOGRAM_BUCKETS + 1]; pending.len()];
@@ -1718,7 +1866,13 @@ impl PushSink for BucketFanoutSink {
                 let bucket_idx = if x >= spec.p99 {
                     HISTOGRAM_BUCKETS
                 } else {
-                    let raw = ((x - spec.min) / spec.width) as i64;
+                    let diff = x - spec.min;
+                    let ratio = if diff.is_finite() {
+                        diff / spec.width
+                    } else {
+                        (x / spec.width) - (spec.min / spec.width)
+                    };
+                    let raw = ratio as i64;
                     (raw.max(0) as usize).min(HISTOGRAM_BUCKETS - 1)
                 };
                 self.tallies[i][bucket_idx] = self.tallies[i][bucket_idx].saturating_add(1);
@@ -2482,6 +2636,17 @@ mod tests {
             .as_ref()
             .expect("hist");
         assert_eq!(hist.buckets.len(), 1);
+
+        // Privacy-safe Debug on ParsedField/CheckedField must not leak map key or query text.
+        let pf = ParsedField::MapValue("metadata", "secret_key_xyz".to_owned());
+        let cf = CheckedField {
+            field: pf.clone(),
+            query: Some("secret_query_abc".to_owned()),
+            limit: 10,
+        };
+        let dbg = format!("{pf:?} {cf:?}");
+        assert!(!dbg.contains("secret_key_xyz"));
+        assert!(!dbg.contains("secret_query_abc"));
 
         let _ = storage.shutdown().await;
     }

@@ -151,6 +151,22 @@ pub(crate) mod wal;
 #[doc(hidden)]
 pub mod fuzz_entry;
 
+/// Native query engine benchmark entry points for `tests/trace_bench.rs`
+/// (`CETRA_TRACE_BENCH_ENGINE=qe`). Not part of the public API until M7 cut-over.
+#[doc(hidden)]
+pub mod qe_bench {
+    pub use cetra_column::Batch;
+    pub use cetra_query::exec::{ExecMetrics, OperatorProfile};
+
+    pub use crate::reads_qe::columns::{f64_at, require_col, string_at};
+    pub use crate::reads_qe::context::EngineContext;
+    pub use crate::reads_qe::cursor::QePage;
+    pub use crate::reads_qe::traces::{
+        QeTraceDetailData, trace_detail, trace_list, trace_list_plan,
+    };
+    pub use crate::reads_qe::widgets::widget_query;
+}
+
 #[cfg(test)]
 mod crash_tests;
 #[cfg(test)]
@@ -833,6 +849,18 @@ impl Storage {
             self.lookback,
             &self.verify,
         )
+    }
+
+    /// Admits a native query engine context against the shared [`QeRuntime`]
+    /// admission pool and returns an [`EngineContext`](crate::qe_bench::EngineContext)
+    /// over the newest published snapshot for `project`.
+    #[doc(hidden)]
+    pub async fn qe_query(
+        &self,
+        project: ProjectId,
+        options: QueryOptions,
+    ) -> Result<reads_qe::context::EngineContext, QueryError> {
+        reads_qe::context::EngineContext::admit_from_storage(self, project, &options).await
     }
 
     /// Registers a `traces` or `user` deletion. Idempotent by `deletion.id`.

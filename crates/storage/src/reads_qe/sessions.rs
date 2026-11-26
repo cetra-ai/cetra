@@ -27,7 +27,9 @@ use crate::reads_qe::context::{
     traces_raw_schema, traces_view_projection, traces_view_schema,
 };
 use crate::reads_qe::cursor::{self, QePage};
-use crate::reads_qe::scope::{scoped_traces_spec, sessions_from_traces};
+use crate::reads_qe::scope::{
+    scoped_traces_spec, sessions_from_traces, sessions_from_traces_projection,
+};
 use crate::reads_qe::scores_join::{apply_compiled_filter, compile_optional_filter};
 
 const LIST: &str = "sessions";
@@ -85,6 +87,7 @@ pub(crate) async fn session_list(
         ));
     }
     let sort_col = session_sort_column(request.sort);
+    let compiled = compile_optional_filter(FilterView::Sessions, request.filter)?;
     let cursor = match request.cursor {
         Some(text) => {
             let decoded = cursor::decode(text, LIST, sort_col, request.order)?;
@@ -95,8 +98,9 @@ pub(crate) async fn session_list(
         }
         None => None,
     };
-    let compiled = compile_optional_filter(FilterView::Sessions, request.filter)?;
-    let spec = scoped_traces_spec(ctx, request.scope, false)?;
+    let mut spec = scoped_traces_spec(ctx, request.scope, false)?;
+    let traces_raw = traces_raw_schema()?;
+    spec.projection = Some(sessions_from_traces_projection(&traces_raw)?);
 
     let ctx_c = ctx.clone();
     let cursor_c = cursor.clone();
@@ -105,12 +109,12 @@ pub(crate) async fn session_list(
 
     let (batches, _) = ctx
         .run_with_ctx(request.timeout, move |exec_ctx| {
-            let traces_raw = traces_raw_schema().map_err(run_err_to_query)?;
+            let proj_schema = ctx_c.traces.projected_schema(&spec)?;
             let raw_streams = ctx_c.traces.open_partitions(&spec, exec_ctx)?;
             if raw_streams.is_empty() {
                 return Ok(Vec::new());
             }
-            let sessions = sessions_from_traces(raw_streams, &traces_raw, exec_ctx)?;
+            let sessions = sessions_from_traces(raw_streams, &proj_schema, exec_ctx)?;
             let mut streams = sessions.streams;
             if let Some(filter) = &compiled {
                 streams =
@@ -133,7 +137,7 @@ pub(crate) async fn session_list(
             }
             let sort_keys = cursor::order_by(&sessions.schema, sort_col, TIES, order)
                 .map_err(run_err_to_query)?;
-            let fetch = limit + 1;
+            let fetch = limit.saturating_add(1);
             let schema_c = Arc::clone(&sessions.schema);
             let keys_c = sort_keys.clone();
             let ctx_sink = exec_ctx.clone();
@@ -185,15 +189,19 @@ pub(crate) async fn session_detail(
         values: vec![session_id.to_owned()],
     });
 
+    let mut sess_spec = spec.clone();
+    sess_spec.projection = Some(sessions_from_traces_projection(&traces_raw)?);
+
     let ctx_c = ctx.clone();
     let (detail, _) = ctx
         .run_with_ctx(timeout, move |exec_ctx| {
             // 1. Session aggregate row (1 row, or None if session does not exist in scope).
-            let raw_streams = ctx_c.traces.open_partitions(&spec, exec_ctx)?;
+            let sess_proj_schema = ctx_c.traces.projected_schema(&sess_spec)?;
+            let raw_streams = ctx_c.traces.open_partitions(&sess_spec, exec_ctx)?;
             if raw_streams.is_empty() {
                 return Ok(None);
             }
-            let sessions = sessions_from_traces(raw_streams, &traces_raw, exec_ctx)?;
+            let sessions = sessions_from_traces(raw_streams, &sess_proj_schema, exec_ctx)?;
             let pool_c = Arc::clone(&exec_ctx.pool);
             let sess_sinks = exec_run_pipeline(
                 exec_ctx,
@@ -205,7 +213,7 @@ pub(crate) async fn session_detail(
                 .into_iter()
                 .flat_map(CollectSink::into_batches)
                 .collect();
-            let Some(session) = single_row(&sess_batches)? else {
+            let Some(session) = single_row(&sess_batches, exec_ctx)? else {
                 return Ok(None);
             };
 
@@ -671,13 +679,15 @@ fn encode_hex_expr(inner: Expr) -> Expr {
     }
 }
 
-fn single_row(batches: &[Batch]) -> Result<Option<Batch>, QueryError> {
+fn single_row(batches: &[Batch], exec_ctx: &ExecContext) -> Result<Option<Batch>, QueryError> {
     let non_empty: Vec<&Batch> = batches.iter().filter(|b| b.num_rows() > 0).collect();
     let Some(first) = non_empty.first() else {
         return Ok(None);
     };
     let schema = Arc::clone(first.schema());
-    let merged = Batch::concat(schema, &non_empty, None)?;
+    let mut res = exec_ctx.pool.register("session_single_row", false);
+    let merged = Batch::concat(schema, &non_empty, Some(&mut res))?;
+    res.free();
     if merged.num_rows() == 0 {
         return Ok(None);
     }

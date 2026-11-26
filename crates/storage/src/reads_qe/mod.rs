@@ -19,6 +19,9 @@ pub(crate) mod traces;
 pub(crate) mod users;
 pub(crate) mod widgets;
 
+#[cfg(test)]
+mod diff_tests;
+
 #[allow(unused_imports)] // used in QE4.2-M7
 pub(crate) use buckets::{BUCKET, Bucket, BucketWidth, bucket_expr, resolve as resolve_bucket};
 #[allow(unused_imports)] // used in QE4.2-M7

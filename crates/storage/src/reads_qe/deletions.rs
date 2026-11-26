@@ -7,15 +7,15 @@ use std::sync::Arc;
 use std::sync::atomic::AtomicUsize;
 use std::time::Duration;
 
-use cetra_column::{Batch, DataType, Field, ScalarValue, Schema};
+use cetra_column::{Batch, CancelToken, DataType, Field, ScalarValue, Schema};
 use cetra_core::ids::TraceId;
 use cetra_core::names::{environment, metadata_key};
 use cetra_core::schema::{spans, traces};
 use cetra_query::exec::hash_join::{HashJoinSpec, JoinType, execute_hash_join};
 use cetra_query::exec::streaming::{LimitOp, ProjectOp};
 use cetra_query::exec::{
-    CollectSink, ExecContext, IdLookupHint, PartitionStream, ScanSource, ScanSpec, TimeRangeHint,
-    run_pipeline as exec_run_pipeline,
+    CollectSink, ControlFlow, ExecContext, IdLookupHint, PartitionStream, PushSink, ScanSource,
+    ScanSpec, TimeRangeHint, run_pipeline as exec_run_pipeline,
 };
 use cetra_query::{BinaryOp, Expr, FilterView, QueryError, UnaryOp};
 
@@ -286,32 +286,24 @@ pub(crate) async fn user_deletion_scope(
             if streams.is_empty() {
                 return Ok(UserDeletionScope::default());
             }
-            let pool_c = Arc::clone(&exec_ctx.pool);
+            let cancel = exec_ctx.eval.cancel.clone();
             let sinks = exec_run_pipeline(
                 exec_ctx,
                 streams,
                 |_| Ok(Vec::new()),
-                move |_| Ok(CollectSink::new(&pool_c)),
+                move |_| {
+                    Ok(UserDeletionSink {
+                        trace_ids: BTreeSet::new(),
+                        session_ids: BTreeSet::new(),
+                        cancel: cancel.clone(),
+                    })
+                },
             )?;
             let mut trace_ids = BTreeSet::new();
             let mut session_ids = BTreeSet::new();
             for sink in sinks {
-                for batch in sink.into_batches() {
-                    if batch.num_rows() == 0 {
-                        continue;
-                    }
-                    let id_col = require_col(&batch, spans::TRACE_ID).map_err(run_err_to_query)?;
-                    let sid_col =
-                        require_col(&batch, spans::SESSION_ID).map_err(run_err_to_query)?;
-                    for phys in active_rows(&batch) {
-                        if let Some(bytes) = raw_fixed16_at(id_col, phys) {
-                            trace_ids.insert(TraceId::from_bytes(bytes).map_err(|_| bad_id())?);
-                        }
-                        if let Some(sid) = raw_string_at(sid_col, phys).map_err(run_err_to_query)? {
-                            session_ids.insert(sid);
-                        }
-                    }
-                }
+                trace_ids.extend(sink.trace_ids);
+                session_ids.extend(sink.session_ids);
             }
             Ok(UserDeletionScope {
                 trace_ids: trace_ids.into_iter().collect(),
@@ -399,7 +391,7 @@ pub(crate) async fn eval_trace_ids(
     };
 
     let ctx_c = ctx.clone();
-    let targets_c = targets.clone();
+    let targets_c = Arc::new(targets.clone());
     let (found, _) = ctx
         .run_with_ctx(timeout, move |exec_ctx| {
             let streams = ctx_c.spans.open_partitions(&spec, exec_ctx)?;
@@ -421,8 +413,9 @@ pub(crate) async fn eval_trace_ids(
                 },
             ];
 
-            let pool_c = Arc::clone(&exec_ctx.pool);
             let ctx_chain = exec_ctx.clone();
+            let targets_sink = Arc::clone(&targets_c);
+            let cancel = exec_ctx.eval.cancel.clone();
             let sinks = exec_run_pipeline(
                 exec_ctx,
                 streams,
@@ -434,36 +427,18 @@ pub(crate) async fn eval_trace_ids(
                     )?;
                     Ok(vec![Box::new(proj)])
                 },
-                move |_| Ok(CollectSink::new(&pool_c)),
+                move |_| {
+                    Ok(EvalTraceSink {
+                        targets: Arc::clone(&targets_sink),
+                        found: BTreeSet::new(),
+                        cancel: cancel.clone(),
+                    })
+                },
             )?;
 
             let mut found = BTreeSet::new();
             for sink in sinks {
-                for batch in sink.into_batches() {
-                    if batch.num_rows() == 0 {
-                        continue;
-                    }
-                    let id_col = require_col(&batch, spans::TRACE_ID).map_err(run_err_to_query)?;
-                    let target_col = require_col(&batch, TARGET_COL).map_err(run_err_to_query)?;
-                    for phys in active_rows(&batch) {
-                        let Some(target_text) =
-                            raw_string_at(target_col, phys).map_err(run_err_to_query)?
-                        else {
-                            continue;
-                        };
-                        let Ok(target_id) = TraceId::from_str(&target_text) else {
-                            continue;
-                        };
-                        if !targets_c.contains(&target_id) {
-                            continue;
-                        }
-                        let bytes = raw_fixed16_at(id_col, phys).ok_or_else(bad_id)?;
-                        let id = TraceId::from_bytes(bytes).map_err(|_| bad_id())?;
-                        if !targets_c.contains(&id) {
-                            found.insert(id);
-                        }
-                    }
-                }
+                found.extend(sink.found);
             }
             Ok(found.into_iter().collect())
         })
@@ -535,47 +510,132 @@ pub(crate) async fn session_ids_of_traces(
     };
 
     let ctx_c = ctx.clone();
-    let traces_c = traces.clone();
+    let traces_c = Arc::new(traces.clone());
     let (found, _) = ctx
         .run_with_ctx(timeout, move |exec_ctx| {
             let streams = ctx_c.spans.open_partitions(&spec, exec_ctx)?;
             if streams.is_empty() {
                 return Ok(Vec::new());
             }
-            let pool_c = Arc::clone(&exec_ctx.pool);
+            let traces_sink = Arc::clone(&traces_c);
+            let cancel = exec_ctx.eval.cancel.clone();
             let sinks = exec_run_pipeline(
                 exec_ctx,
                 streams,
                 |_| Ok(Vec::new()),
-                move |_| Ok(CollectSink::new(&pool_c)),
+                move |_| {
+                    Ok(SessionIdsSink {
+                        traces: Arc::clone(&traces_sink),
+                        found: BTreeSet::new(),
+                        cancel: cancel.clone(),
+                    })
+                },
             )?;
             let mut found = BTreeSet::new();
             for sink in sinks {
-                for batch in sink.into_batches() {
-                    if batch.num_rows() == 0 {
-                        continue;
-                    }
-                    let id_col = require_col(&batch, spans::TRACE_ID).map_err(run_err_to_query)?;
-                    let sid_col =
-                        require_col(&batch, spans::SESSION_ID).map_err(run_err_to_query)?;
-                    for phys in active_rows(&batch) {
-                        let Some(sid) = raw_string_at(sid_col, phys).map_err(run_err_to_query)?
-                        else {
-                            continue;
-                        };
-                        let bytes = raw_fixed16_at(id_col, phys).ok_or_else(bad_id)?;
-                        let trace_id = TraceId::from_bytes(bytes).map_err(|_| bad_id())?;
-                        if traces_c.contains(&trace_id) {
-                            found.insert(sid);
-                        }
-                    }
-                }
+                found.extend(sink.found);
             }
             Ok(found.into_iter().collect())
         })
         .await?;
 
     Ok(found)
+}
+
+struct UserDeletionSink {
+    trace_ids: BTreeSet<TraceId>,
+    session_ids: BTreeSet<String>,
+    cancel: CancelToken,
+}
+
+impl PushSink for UserDeletionSink {
+    fn consume(&mut self, batch: Batch) -> Result<ControlFlow, QueryError> {
+        if self.cancel.is_cancelled() {
+            return Err(QueryError::Cancelled);
+        }
+        if batch.num_rows() == 0 {
+            return Ok(ControlFlow::Continue);
+        }
+        let id_col = require_col(&batch, spans::TRACE_ID).map_err(run_err_to_query)?;
+        let sid_col = require_col(&batch, spans::SESSION_ID).map_err(run_err_to_query)?;
+        for phys in active_rows(&batch) {
+            if let Some(bytes) = raw_fixed16_at(id_col, phys) {
+                self.trace_ids
+                    .insert(TraceId::from_bytes(bytes).map_err(|_| bad_id())?);
+            }
+            if let Some(sid) = raw_string_at(sid_col, phys).map_err(run_err_to_query)? {
+                self.session_ids.insert(sid);
+            }
+        }
+        Ok(ControlFlow::Continue)
+    }
+}
+
+struct EvalTraceSink {
+    targets: Arc<HashSet<TraceId>>,
+    found: BTreeSet<TraceId>,
+    cancel: CancelToken,
+}
+
+impl PushSink for EvalTraceSink {
+    fn consume(&mut self, batch: Batch) -> Result<ControlFlow, QueryError> {
+        if self.cancel.is_cancelled() {
+            return Err(QueryError::Cancelled);
+        }
+        if batch.num_rows() == 0 {
+            return Ok(ControlFlow::Continue);
+        }
+        let id_col = require_col(&batch, spans::TRACE_ID).map_err(run_err_to_query)?;
+        let target_col = require_col(&batch, TARGET_COL).map_err(run_err_to_query)?;
+        for phys in active_rows(&batch) {
+            let Some(target_text) = raw_string_at(target_col, phys).map_err(run_err_to_query)?
+            else {
+                continue;
+            };
+            let Ok(target_id) = TraceId::from_str(&target_text) else {
+                continue;
+            };
+            if !self.targets.contains(&target_id) {
+                continue;
+            }
+            let bytes = raw_fixed16_at(id_col, phys).ok_or_else(bad_id)?;
+            let id = TraceId::from_bytes(bytes).map_err(|_| bad_id())?;
+            if !self.targets.contains(&id) {
+                self.found.insert(id);
+            }
+        }
+        Ok(ControlFlow::Continue)
+    }
+}
+
+struct SessionIdsSink {
+    traces: Arc<HashSet<TraceId>>,
+    found: BTreeSet<String>,
+    cancel: CancelToken,
+}
+
+impl PushSink for SessionIdsSink {
+    fn consume(&mut self, batch: Batch) -> Result<ControlFlow, QueryError> {
+        if self.cancel.is_cancelled() {
+            return Err(QueryError::Cancelled);
+        }
+        if batch.num_rows() == 0 {
+            return Ok(ControlFlow::Continue);
+        }
+        let id_col = require_col(&batch, spans::TRACE_ID).map_err(run_err_to_query)?;
+        let sid_col = require_col(&batch, spans::SESSION_ID).map_err(run_err_to_query)?;
+        for phys in active_rows(&batch) {
+            let Some(sid) = raw_string_at(sid_col, phys).map_err(run_err_to_query)? else {
+                continue;
+            };
+            let bytes = raw_fixed16_at(id_col, phys).ok_or_else(bad_id)?;
+            let trace_id = TraceId::from_bytes(bytes).map_err(|_| bad_id())?;
+            if self.traces.contains(&trace_id) {
+                self.found.insert(sid);
+            }
+        }
+        Ok(ControlFlow::Continue)
+    }
 }
 
 fn encode_trace_id_stream(

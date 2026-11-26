@@ -12,7 +12,7 @@ pub(crate) fn internal(message: impl Into<String>) -> RunError {
 }
 
 /// Returns the column named `name` in `batch`, or `RunError::Internal` if absent.
-pub(crate) fn require_col<'a>(batch: &'a Batch, name: &str) -> Result<&'a Column, RunError> {
+pub fn require_col<'a>(batch: &'a Batch, name: &str) -> Result<&'a Column, RunError> {
     match batch.column_by_name(name) {
         Some(column) => Ok(column),
         None => Err(missing_column(batch, name)),
@@ -202,11 +202,7 @@ pub(crate) fn raw_i64_at(col: &Column, phys_row: usize) -> Result<i64, RunError>
 }
 
 /// Reads an optional `F64` (or `I64` widened to `f64`) at logical `active_row` in `batch`.
-pub(crate) fn f64_at(
-    batch: &Batch,
-    col: &Column,
-    active_row: usize,
-) -> Result<Option<f64>, RunError> {
+pub fn f64_at(batch: &Batch, col: &Column, active_row: usize) -> Result<Option<f64>, RunError> {
     let phys = physical_row(batch, active_row)?;
     raw_f64_at(col, phys)
 }
@@ -279,7 +275,7 @@ pub(crate) fn raw_time_at(col: &Column, phys_row: usize) -> Result<i64, RunError
 }
 
 /// Reads an optional `Utf8` string at logical `active_row` in `batch`.
-pub(crate) fn string_at(
+pub fn string_at(
     batch: &Batch,
     col: &Column,
     active_row: usize,
@@ -422,7 +418,7 @@ fn convert_decimal(value: i128, scale: i8) -> Result<f64, RunError> {
     let out = if scale >= 0 {
         (value as f64) / 10f64.powi(i32::from(scale))
     } else {
-        (value as f64) * 10f64.powi(i32::from(-scale))
+        (value as f64) * 10f64.powi(-i32::from(scale))
     };
     check_finite(out)
 }
