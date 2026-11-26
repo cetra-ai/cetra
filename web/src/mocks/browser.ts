@@ -8,6 +8,7 @@ import { savedViewHandlers, seedSavedViews } from "./saved-views";
 import { sqlHandlers } from "./sql";
 import { fixtureStreamHandlers } from "./sse";
 import { storyPromptHandlers } from "./stories-prompts";
+import { storyConnectionHandlers } from "./story-connections";
 import { storyDashboards } from "./story-dashboards";
 import { writeHandlers } from "./writes";
 
@@ -20,6 +21,7 @@ export const worker = setupWorker(
   ...assistantHandlers(),
   ...writeHandlers,
   ...storyPromptHandlers,
+  ...storyConnectionHandlers,
   ...fallbackHandlers,
   ...handlers,
 );

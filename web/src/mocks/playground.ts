@@ -1,4 +1,6 @@
 import { HttpResponse, http } from "msw";
+import { SCHEDULE_ANSWER, SCHEDULE_QUESTION } from "@/mocks/generated/story-support";
+import { VOICE_AUDIO_TRACE_ID } from "@/mocks/generated/story-voice";
 
 /**
  * A canned playground answer for the dev server's browser worker (track V, M7). A run streams
@@ -26,6 +28,16 @@ const SUPPORT_TRACE_ID = "a0000000000000000000000000000003";
 const PATCH_TRACE_ID = "a0000000000000000000000000000004";
 const VOICE_TRACE_ID = "a0000000000000000000000000000005";
 const INVOICE_TRACE_ID = "a0000000000000000000000000000006";
+
+/**
+ * The traces of the new prompt versions (P7), pinned by the test from the story datasets: the first coding run
+ * tagged `context-window` (index 37), the voice turn that reads the booking back (`voiceAudioTurn`, index 110,
+ * P2's rule) and the first Nordic Freight run tagged `re-extracted` (index 40).
+ */
+const PATCH_SPLIT_TRACE_ID = "a0000000000000000000000000000025";
+const INVOICE_COMMA_TRACE_ID = "a0000000000000000000000000000028";
+/** The third turn of `sess-0142` (support index 9), the schedule question: both support answers open it. */
+const SUPPORT_SCHEDULE_TRACE_ID = "a0000000000000000000000000000009";
 
 /** Any run that names no story: today's answer, and the file's existing `TRACE_ID`. */
 const GENERIC: Answer = {
@@ -98,6 +110,70 @@ const INVOICE_RIGHT: Answer = {
   ttft_ms: 880,
 };
 
+/** write-patch v4: the answer is a three-step plan, not a diff (the file has more than 20 changed files). */
+const PATCH_SPLIT: Answer = {
+  trace_id: PATCH_SPLIT_TRACE_ID,
+  text: "This touches 23 files, so I'll do it in three steps:\n\n1. Rename `Project.owner` in the models and migrations.\n2. Update the API handlers and their tests.\n3. Update the web client and run the full suite.",
+  input: 2140,
+  output: 96,
+  cost_usd: 0.0079,
+  latency_ms: 2900,
+  ttft_ms: 900,
+};
+
+/** voice-reply v5: the reply reads the booking back in one sentence. */
+const VOICE_BOOKING: Answer = {
+  trace_id: VOICE_AUDIO_TRACE_ID,
+  text: "Done: Friday at 9:30, with Dr. Martin.",
+  input: 310,
+  output: 14,
+  cost_usd: 0.0002,
+  latency_ms: 620,
+  ttft_ms: 180,
+};
+
+/** extract-invoice v6: the comma decimals read as 1234.56, whatever the model. */
+const INVOICE_COMMA: Answer = {
+  trace_id: INVOICE_COMMA_TRACE_ID,
+  text: JSON.stringify(
+    {
+      vendor: "Nordic Freight",
+      invoice_number: "INV-2026-0521",
+      total: 1234.56,
+      currency: "EUR",
+    },
+    null,
+    2,
+  ),
+  input: 1180,
+  output: 48,
+  cost_usd: 0.0005,
+  latency_ms: 1400,
+  ttft_ms: 500,
+};
+
+/** support-reply v3: the answer says cetra can't schedule exports, and what to do instead. */
+const SUPPORT_SCHEDULE_V3: Answer = {
+  trace_id: SUPPORT_SCHEDULE_TRACE_ID,
+  text: "cetra can't schedule exports yet. You can export by hand any time from the Traces page with Export → CSV, or call the export API from your own weekly job.",
+  input: 1060,
+  output: 52,
+  cost_usd: 0.0042,
+  latency_ms: 1300,
+  ttft_ms: 300,
+};
+
+/** support-reply v2 on the schedule question: the wrong answer v3 corrects. */
+const SUPPORT_SCHEDULE_V2: Answer = {
+  trace_id: SUPPORT_SCHEDULE_TRACE_ID,
+  text: SCHEDULE_ANSWER,
+  input: 1040,
+  output: 24,
+  cost_usd: 0.0035,
+  latency_ms: 1100,
+  ttft_ms: 280,
+};
+
 const ANSWERS = new Map<string, Answer>([
   ["support-reply", SUPPORT],
   ["write-patch", PATCH],
@@ -105,21 +181,49 @@ const ANSWERS = new Map<string, Answer>([
 ]);
 
 /** The shape of the run body this mock reads; any other field is ignored. */
-type RunBody = { model?: unknown; source?: { prompt?: { name?: unknown } } };
+type RunBody = {
+  model?: unknown;
+  variables?: Record<string, string>;
+  source?: { prompt?: { name?: unknown; version?: unknown } };
+};
 
 /**
- * The answer for a run. The prompt the draft came from (`source.prompt.name`) picks the story; for
- * `extract-invoice` the column's model picks between its two answers (a model whose id starts with
- * `claude` reads the total right). Anything else, including a body that is not JSON, gets GENERIC.
+ * The answer for a run. The prompt the draft came from (`source.prompt.name`) picks the story, and its
+ * version (`source.prompt.version`, a number) picks the newer answers: support-reply v3, write-patch v4,
+ * voice-reply v5 and extract-invoice v6 (whatever the model). support-reply v2 answers the schedule
+ * question (`variables.question`) with the wrong answer, and any other question with today's. Older
+ * versions keep their answers; for `extract-invoice` the column's model picks between the two (a model
+ * whose id starts with `claude` reads the total right).
+ * Anything else, including a body that is not JSON, gets GENERIC.
  */
 function answerOf(body: unknown): Answer {
-  const name = (body as RunBody | null)?.source?.prompt?.name;
+  const run = body as RunBody | null;
+  const prompt = run?.source?.prompt;
+  const name = prompt?.name;
   if (typeof name !== "string") {
     return GENERIC;
   }
+  const version = prompt?.version;
+  if (name === "support-reply") {
+    if (version === 3) {
+      return SUPPORT_SCHEDULE_V3;
+    }
+    if (version === 2 && run?.variables?.question === SCHEDULE_QUESTION) {
+      return SUPPORT_SCHEDULE_V2;
+    }
+  }
   if (name === "extract-invoice") {
+    if (version === 6) {
+      return INVOICE_COMMA;
+    }
     const model = (body as RunBody).model;
     return typeof model === "string" && model.startsWith("claude") ? INVOICE_RIGHT : INVOICE_WRONG;
+  }
+  if (name === "write-patch" && version === 4) {
+    return PATCH_SPLIT;
+  }
+  if (name === "voice-reply" && version === 5) {
+    return VOICE_BOOKING;
   }
   return ANSWERS.get(name) ?? GENERIC;
 }

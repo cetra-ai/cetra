@@ -1,6 +1,7 @@
 import { type HttpHandler, HttpResponse, http } from "msw";
 import assistantConversations from "../../../fixtures/api/responses/assistant-conversations.json";
 import { turnStream } from "../test/turn-stream";
+import { projectOfRef, type StoryId } from "./projects";
 import { STORY_DASHBOARD_IDS, storyDashboards } from "./story-dashboards";
 
 const PROJECT = "/api/v1/projects/:project/assistant";
@@ -286,27 +287,61 @@ const DEFAULT_SCRIPT: Script = {
 /** The call id of a story turn's one tool call. */
 const CALL_ID = "call_1";
 const NEW_BASE = "2026-11-19T12:00:00Z";
+/** The call id of a story turn's dashboard draft, made after the answer. */
+const DASHBOARD_CALL_ID = "call_2";
+const DASHBOARD_CLOSING = "Here is the draft. Open it in the editor to review and save it.";
 
-/** What one story turn says and does. */
+/** What one story turn says and does: its question, one SQL call, the rows it returns and the filter it ends on. */
 type TurnSpec = {
   question: string;
   /** The text before the tool call, as two streamed deltas. */
   intro: [string, string];
   call: { name: string; arguments: Fields };
-  /** The stored result of the call. */
+  /** The stored result of the call: the columns and the rows the SQL returns. */
   result: Fields;
-  /** The rows of a search; absent for a draft. */
-  rows?: number;
-  draft?: { kind: "dashboard"; draft: Fields };
+  /** The number of rows the call returned. */
+  rows: number;
+  /** The filter card the turn drafts before its answer; the shared Explore picture's turn has none (M19 retake). */
+  draft?: { kind: "filter"; draft: Fields };
   answer: string;
+  /**
+   * The story's dashboard draft, which the turn drafts after its answer with a second call. The shared Explore
+   * picture's turn has none: its answer ends by offering one.
+   */
+  dashboard?: Fields;
 };
 
 const USAGE = { input: 1400, output: 160 };
 const COST_USD = 0.0024;
 
 function turnSummaryOf(spec: TurnSpec) {
-  const size_bytes = JSON.stringify(spec.result).length;
-  return spec.rows === undefined ? { size_bytes } : { size_bytes, rows: spec.rows };
+  return { size_bytes: JSON.stringify(spec.result).length, rows: spec.rows };
+}
+
+function dashboardSummaryOf(dashboard: Fields) {
+  return { size_bytes: JSON.stringify(dashboard).length };
+}
+
+/** The stream events of a turn's dashboard call, after its answer; none for a turn without one. */
+function dashboardEvents(dashboard: Fields | undefined): StreamEvent[] {
+  if (dashboard === undefined) {
+    return [];
+  }
+  return [
+    {
+      event: "tool_call",
+      data: { id: DASHBOARD_CALL_ID, name: "draft_dashboard", arguments: dashboard },
+    },
+    {
+      event: "tool_result",
+      data: { id: DASHBOARD_CALL_ID, ok: true, summary: dashboardSummaryOf(dashboard) },
+    },
+    {
+      event: "draft",
+      data: { id: `draft_${DASHBOARD_CALL_ID}`, kind: "dashboard", draft: dashboard },
+    },
+    { event: "text", data: { delta: DASHBOARD_CLOSING } },
+  ];
 }
 
 function storyEvents(spec: TurnSpec, traceId: string, turnId: number): StreamEvent[] {
@@ -325,17 +360,80 @@ function storyEvents(spec: TurnSpec, traceId: string, turnId: number): StreamEve
           {
             event: "draft",
             data: { id: `draft_${CALL_ID}`, kind: spec.draft.kind, draft: spec.draft.draft },
-          },
+          } satisfies StreamEvent,
         ]),
     { event: "text", data: { delta: spec.answer } },
+    ...dashboardEvents(spec.dashboard),
     {
       event: "done",
-      data: { finish_reason: "stop", usage: USAGE, cost_usd: COST_USD, steps: 1 },
+      data: {
+        finish_reason: "stop",
+        usage: USAGE,
+        cost_usd: COST_USD,
+        steps: spec.dashboard === undefined ? 1 : 2,
+      },
     },
   ];
 }
 
-/** The four stored messages of a story turn: question, call, result (and draft), answer. */
+/** The stored messages of a turn's dashboard call (seq 4 to 6); only the answer (seq 4) for a turn without one. */
+function dashboardMessages(
+  spec: TurnSpec,
+  reply: { status: string; turn_trace_id: string; created_at: string },
+): StoredMessage[] {
+  const { dashboard } = spec;
+  if (dashboard === undefined) {
+    return [
+      { seq: 4, role: "assistant", parts: [{ type: "text", content: spec.answer }], ...reply },
+    ];
+  }
+  return [
+    {
+      seq: 4,
+      role: "assistant",
+      parts: [
+        { type: "text", content: spec.answer },
+        {
+          type: "tool_call",
+          id: DASHBOARD_CALL_ID,
+          name: "draft_dashboard",
+          arguments: dashboard,
+        },
+      ],
+      ...reply,
+    },
+    {
+      seq: 5,
+      role: "tool",
+      parts: [
+        {
+          type: "tool_result",
+          id: DASHBOARD_CALL_ID,
+          name: "draft_dashboard",
+          ok: true,
+          result: { status: "drafted" },
+          ...dashboardSummaryOf(dashboard),
+          stubbed: false,
+        },
+        {
+          type: "draft",
+          id: `draft_${DASHBOARD_CALL_ID}`,
+          kind: "dashboard",
+          draft: dashboard,
+        },
+      ],
+      ...reply,
+    },
+    {
+      seq: 6,
+      role: "assistant",
+      parts: [{ type: "text", content: DASHBOARD_CLOSING }],
+      ...reply,
+    },
+  ];
+}
+
+/** The stored messages of a story turn: question, call, result with its draft (if any), answer, dashboard (if any). */
 function storyMessages(
   spec: TurnSpec,
   traceId: string,
@@ -391,7 +489,7 @@ function storyMessages(
       ],
       ...reply,
     },
-    { seq: 4, role: "assistant", parts: [{ type: "text", content: spec.answer }], ...reply },
+    ...dashboardMessages(spec, reply),
   ];
 }
 
@@ -408,17 +506,17 @@ function traceIdAt(index: number): string {
   return `a${index.toString(16).padStart(31, "0")}`;
 }
 
-/** A search result: one row per trace. */
-function searchResult(indexes: number[]): { result: Fields; rows: number } {
-  return {
-    result: { rows: indexes.map((index) => ({ trace_id: traceIdAt(index) })) },
-    rows: indexes.length,
-  };
+/** The SQL call of a story turn, as the assistant's query_sql tool receives it. */
+function queryCall(query: string): TurnSpec["call"] {
+  return { name: "query_sql", arguments: { query, params: {} } };
 }
 
-const STORY_CONTEXT = { page: "traces", range: "24h" };
+/** The filter card a story turn ends on: the traces page, with `filter` over `range`. */
+function filterDraft(filter: string, range: string): Fields {
+  return { view: "traces", filter, range, include_eval: false, include_experiments: false };
+}
 
-/** The turn-2 draft of a story: the story dashboard `id` (`story-dashboards.ts`), as the draft card shows it. */
+/** The dashboard draft a story turn ends on: the story dashboard `id`, as the draft card reads it. */
 function dashboardDraft(id: string): Fields {
   const dashboard = storyDashboards().find((item) => item.id === id);
   if (dashboard === undefined) {
@@ -431,139 +529,164 @@ function dashboardDraft(id: string): Fields {
   };
 }
 
-/** One story: its hero trace, its stored chat, and its two turns (an answer, then a dashboard draft). */
+const SUPPORT_SQL =
+  "SELECT CASE WHEN release = 'v2.14' THEN 'v2.14' ELSE 'before v2.14' END AS release, count(*) AS answers, round(avg(score('correctness')), 2) AS correctness, round(count(*) FILTER (WHERE score('user_feedback') = 0) / count(*) FILTER (WHERE has_score('user_feedback')), 2) AS thumbs_down, round(avg(cost_total), 4) AS cost_per_answer FROM traces WHERE start_time >= now() - INTERVAL '214 hours' GROUP BY 1 ORDER BY 1 DESC";
+const CODING_SQL =
+  "SELECT array_has(tags, 'api-retry') AS retried, count(*) AS runs, sum(cost_total) AS cost FROM traces WHERE start_time >= now() - INTERVAL '14 hours' GROUP BY 1";
+const VOICE_SQL =
+  "SELECT count(*) AS checks, approx_percentile_cont(s.duration_ms, 0.5) AS p50_ms, approx_percentile_cont(s.duration_ms, 0.95) AS p95_ms FROM spans s JOIN traces t ON s.trace_id = t.trace_id WHERE s.name = 'check_availability' AND array_has(t.tags, 'calendar') AND t.start_time >= now() - INTERVAL '30 days'";
+const EXTRACTION_SQL =
+  "SELECT CASE input_preview WHEN 'invoice-2026-0521.pdf (2 pages)' THEN 'Nordic Freight' WHEN 'invoice-2026-0524.pdf (1 page)' THEN 'Baltic Paper' WHEN 'invoice-2026-0527.pdf (3 pages)' THEN 'Rhine Tools' WHEN 'invoice-2026-0530.pdf (1 page)' THEN 'Lyon Bureau' ELSE 'Other vendors' END AS vendor, count(*) AS invoices, round(avg(CASE WHEN array_has(tags, 're-extracted') THEN 1.0 ELSE 0.0 END), 2) AS re_extracted FROM traces WHERE start_time >= now() - INTERVAL '30 days' GROUP BY 1 ORDER BY 3 DESC LIMIT 4";
+
+/** One story: its hero trace, its stored chat, and its one turn (a question answered from SQL). */
 export type Story = {
-  name: "support" | "coding" | "voice" | "extraction";
+  story: StoryId;
   conversationId: string;
   /** When the stored chat started; each story is five minutes older than the one before. */
   base: string;
   heroTraceId: string;
-  turns: [TurnSpec, TurnSpec];
+  /** The range the stored chat's question carried: the page's range, the same as its filter card's. */
+  range: string;
+  turns: [TurnSpec];
 };
-
-function searchTurn(
-  question: string,
-  intro: [string, string],
-  filter: string,
-  from: string,
-  found: { result: Fields; rows: number },
-  answer: string,
-): TurnSpec {
-  return {
-    question,
-    intro,
-    call: { name: "search_traces", arguments: { from, to: "2026-11-19T12:00:00Z", filter } },
-    result: found.result,
-    rows: found.rows,
-    answer,
-  };
-}
-
-function dashboardTurn(question: string, draft: Fields): TurnSpec {
-  return {
-    question,
-    intro: ["I'll draft a dashboard ", "with four widgets. "],
-    call: { name: "draft_dashboard", arguments: draft },
-    result: { status: "drafted" },
-    draft: { kind: "dashboard", draft },
-    answer: "Here is the draft. Open it in the editor to review and save it.",
-  };
-}
 
 export const STORIES: Story[] = [
   {
-    name: "support",
+    story: "support",
     conversationId: "01900000-0000-7000-8000-000000570801",
     base: "2026-11-19T11:50:00Z",
     heroTraceId: traceIdAt(3),
+    range: "7d",
     turns: [
-      searchTurn(
-        "Which answers scored low today?",
-        ["I'll look at today's support answers ", "and their scores. "],
-        "tags @> ['email']",
-        "2026-11-19T00:00:00Z",
-        searchResult([11, 18, 23, 31, 38, 44]),
-        "Answers about refunds scored lowest today. The CSV export answer (support-agent) scored 0.9.",
-      ),
-      dashboardTurn(
-        "Build me a dashboard of answer quality.",
-        dashboardDraft(STORY_DASHBOARD_IDS.answerQuality),
-      ),
+      {
+        question: "Which of our prompts got worse this week?",
+        intro: ["I'll compare quality, feedback and cost ", "before and since Tuesday's deploy. "],
+        call: queryCall(SUPPORT_SQL),
+        result: {
+          columns: ["release", "answers", "correctness", "thumbs_down", "cost_per_answer"],
+          rows: [
+            {
+              release: "v2.14",
+              answers: 1317,
+              correctness: 0.78,
+              thumbs_down: 0.15,
+              cost_per_answer: 0.0065,
+            },
+            {
+              release: "before v2.14",
+              answers: 231,
+              correctness: 0.85,
+              thumbs_down: 0.08,
+              cost_per_answer: 0.0064,
+            },
+          ],
+        },
+        rows: 2,
+        answer: [
+          "**kb-answer v13** got worse. It shipped with release v2.14 on Tuesday:",
+          "",
+          "- correctness 0.85 → **0.78** over **1,317** answers",
+          "- thumbs-down 8% → **15%**",
+          "- cost flat, $0.0064 → $0.0065",
+          "",
+          "**62%** of its downvotes (**41** of 66) quote the old `pricing-2025.md`.",
+          "",
+          "Want me to build a dashboard that tracks quality by prompt version?",
+        ].join("\n"),
+      },
     ],
   },
   {
-    name: "coding",
+    story: "coding",
     conversationId: "01900000-0000-7000-8000-000000570802",
     base: "2026-11-19T11:45:00Z",
     heroTraceId: traceIdAt(4),
+    range: "24h",
     turns: [
-      searchTurn(
-        "Which traces failed in the last day?",
-        ["I'll search the failed traces ", "from the last day. "],
-        "status = 'error' and tags @> ['retry']",
-        "2026-11-18T12:00:00Z",
-        searchResult([4]),
-        "One: coding-agent (a0000000…0004). Its first run_tests call failed with 1 failed, 47 passed, and the second run passed.",
-      ),
-      dashboardTurn(
-        "Build me a dashboard for code-agent: failed runs, cost per run and p95 duration.",
-        dashboardDraft(STORY_DASHBOARD_IDS.codeAgentHealth),
-      ),
+      {
+        question: "Why did cost per run triple yesterday?",
+        intro: ["I'll compare the runs since the cost rose last night ", "with the day before."],
+        call: queryCall(CODING_SQL),
+        result: {
+          columns: ["retried", "runs", "cost"],
+          rows: [
+            { retried: false, runs: 359, cost: 189.42 },
+            { retried: true, runs: 78, cost: 436.58 },
+          ],
+        },
+        rows: 2,
+        draft: { kind: "filter", draft: filterDraft("tags @> ['api-retry']", "24h") },
+        dashboard: dashboardDraft(STORY_DASHBOARD_IDS.codeAgentHealth),
+        answer:
+          "**18%** of runs call `run_tests` more than five times and make **70%** of the cost: they all touch `packages/api`, whose test suite times out at 30 s, so the agent retries.",
+      },
     ],
   },
   {
-    name: "voice",
+    story: "voice",
     conversationId: "01900000-0000-7000-8000-000000570803",
     base: "2026-11-19T11:40:00Z",
     heroTraceId: traceIdAt(5),
+    range: "30d",
     turns: [
-      searchTurn(
-        "Which calls were slow today?",
-        ["I'll look for slow calls ", "from today. "],
-        "tags @> ['voice'] and duration_ns > 3000000000",
-        "2026-11-19T00:00:00Z",
-        searchResult([5, 9, 13, 16, 21, 25, 28, 33, 37, 40, 43, 47]),
-        "Several calls took over 3 s. In voice-agent (a0000000…0005), check_availability alone took 1.22 s.",
-      ),
-      dashboardTurn(
-        "Build me a dashboard of voice latency.",
-        dashboardDraft(STORY_DASHBOARD_IDS.voiceLatency),
-      ),
+      {
+        question: "Why do callers hang up?",
+        intro: ["I'll look at the turn before each hang-up ", "over the last 30 days."],
+        call: queryCall(VOICE_SQL),
+        result: {
+          columns: ["checks", "p50_ms", "p95_ms"],
+          rows: [{ checks: 575, p50_ms: 1486, p95_ms: 3500 }],
+        },
+        rows: 1,
+        draft: {
+          kind: "filter",
+          draft: filterDraft("tags @> ['calendar']", "30d"),
+        },
+        dashboard: dashboardDraft(STORY_DASHBOARD_IDS.voiceLatency),
+        answer:
+          "**71%** of hang-ups follow a turn over 2.5 s, almost all of them `check_availability` on the calendar API (median **1.5 s**, p95 **3.5 s**).",
+      },
     ],
   },
   {
-    name: "extraction",
+    story: "extraction",
     conversationId: "01900000-0000-7000-8000-000000570804",
     base: "2026-11-19T11:35:00Z",
     heroTraceId: traceIdAt(6),
+    range: "30d",
     turns: [
-      searchTurn(
-        "Which invoices needed a retry?",
-        ["I'll look for invoices ", "that ran more than once. "],
-        "tags @> ['billing']",
-        "2026-11-18T12:00:00Z",
-        searchResult([6, 14, 29]),
-        "In extract-invoice (a0000000…0006), the first model read the total as 1,248.00 instead of 1,284.00, and the retry fixed it.",
-      ),
-      dashboardTurn(
-        "Build me a dashboard of invoices, schema-check failures and cost.",
-        dashboardDraft(STORY_DASHBOARD_IDS.invoiceExtraction),
-      ),
+      {
+        question: "Which vendors' invoices fail the most, and why?",
+        intro: ["I'll group the invoices ", "by vendor."],
+        call: queryCall(EXTRACTION_SQL),
+        result: {
+          columns: ["vendor", "invoices", "re_extracted"],
+          rows: [
+            { vendor: "Nordic Freight", invoices: 95, re_extracted: 0.38 },
+            { vendor: "Baltic Paper", invoices: 90, re_extracted: 0.3 },
+            { vendor: "Rhine Tools", invoices: 89, re_extracted: 0.29 },
+            { vendor: "Lyon Bureau", invoices: 96, re_extracted: 0.29 },
+          ],
+        },
+        rows: 4,
+        draft: { kind: "filter", draft: filterDraft("tags @> ['re-extracted']", "30d") },
+        dashboard: dashboardDraft(STORY_DASHBOARD_IDS.invoiceExtraction),
+        answer:
+          'Nordic Freight: **38%** re-extracted, all on `total`. It writes amounts as "1.234,56" and the schema expects a dot; Baltic Paper, Rhine Tools and Lyon Bureau use the same format.',
+      },
     ],
   },
 ];
 
-/** Every story turn's question, lowercased and trimmed, with its script. */
+/** Every story's question, lowercased and trimmed, with its script. */
 const SCRIPTS = new Map<string, Script>(
-  STORIES.flatMap((story) =>
-    story.turns.map((turn): [string, Script] => [
-      turn.question.trim().toLowerCase(),
-      storyScript(turn, story.heroTraceId),
-    ]),
-  ),
+  STORIES.map((story): [string, Script] => {
+    const [turn] = story.turns;
+    return [turn.question.trim().toLowerCase(), storyScript(turn, story.heroTraceId)];
+  }),
 );
 
-/** The script that answers `message`: a story turn's when it is that question (trimmed, any case), else today's. */
+/** The script that answers `message`: a story's when it is that question (trimmed, any case), else today's. */
 export function scriptFor(message: string): Script {
   return SCRIPTS.get(message.trim().toLowerCase()) ?? DEFAULT_SCRIPT;
 }
@@ -576,16 +699,17 @@ type Summary = {
   last_active_at: string;
 };
 
-/** The detail of a stored story chat: both turns, as they were run. */
+/** The detail of a stored story chat: its one turn, as it was run. */
 function storyDetail(story: Story) {
-  const turns: Ran[] = story.turns.map((turn) => ({
-    script: storyScript(turn, story.heroTraceId),
-    context: STORY_CONTEXT,
-  }));
-  const messages = storedMessages(turns, story.base);
+  const [turn] = story.turns;
+  const messages = placed(
+    storyScript(turn, story.heroTraceId).messages({ page: "traces", range: story.range }),
+    1,
+    story.base,
+  );
   return {
     id: story.conversationId,
-    title: story.turns[0].question,
+    title: turn.question,
     message_count: messages.length,
     created_at: stamp(story.base, 0),
     last_active_at: stamp(story.base, messages.length),
@@ -611,12 +735,28 @@ function newConversationDetail() {
   };
 }
 
-/** The new chat first, then the four story chats, then the fixture list. */
-function conversationList() {
-  const stories = STORIES.map((story) => summaryOf(storyDetail(story)));
-  const fixtures = assistantConversations.data;
+/**
+ * The conversations of `project` (a decoded API ref): the new chat, then the project's story chat,
+ * then the fixture list in the support project only.
+ */
+function conversationList(project: unknown) {
+  const ref = typeof project === "string" ? project : undefined;
+  const stories = STORIES.filter((story) => projectOfRef(ref)?.story === story.story).map((story) =>
+    summaryOf(storyDetail(story)),
+  );
+  const fixtures = projectOfRef(ref)?.story === "support" ? assistantConversations.data : [];
   const listed = created ? [summaryOf(newConversationDetail())] : [];
   return { data: [...listed, ...stories, ...fixtures], next_cursor: null };
+}
+
+/**
+ * Whether conversation `id` is served in `project` (a decoded API ref): a story chat only in its
+ * story's project (P-4); every other id, the new chat and the fixtures included, in every project.
+ */
+function servedIn(id: unknown, project: unknown): boolean {
+  const story = STORIES.find((item) => item.conversationId === id);
+  const ref = typeof project === "string" ? project : undefined;
+  return story === undefined || projectOfRef(ref)?.story === story.story;
 }
 
 /**
@@ -631,24 +771,37 @@ export function assistantHandlers(eventDelayMs: number = EVENT_DELAY_MS): HttpHa
       ran = [];
       return HttpResponse.json(newConversation, { status: 201 });
     }),
-    http.get(`${PROJECT}/conversations`, () => HttpResponse.json(conversationList())),
+    http.get(`${PROJECT}/conversations`, ({ params }) =>
+      HttpResponse.json(conversationList(params.project)),
+    ),
     http.get(`${PROJECT}/conversations/:id`, ({ params }) => {
       if (params.id === NEW_CONVERSATION_ID) {
         return HttpResponse.json(newConversationDetail());
+      }
+      if (!servedIn(params.id, params.project)) {
+        return undefined;
       }
       const story = STORIES.find((item) => item.conversationId === params.id);
       return story === undefined ? undefined : HttpResponse.json(storyDetail(story));
     }),
     http.patch(`${PROJECT}/conversations/:id`, async ({ params, request }) => {
+      if (!servedIn(params.id, params.project)) {
+        return undefined;
+      }
       const body = (await request.json()) as { title: string };
       return HttpResponse.json({ ...newConversation, id: params.id, title: body.title });
     }),
-    http.delete(`${PROJECT}/conversations/:id`, () => new HttpResponse(null, { status: 204 })),
+    http.delete(`${PROJECT}/conversations/:id`, ({ params }) =>
+      servedIn(params.id, params.project) ? new HttpResponse(null, { status: 204 }) : undefined,
+    ),
     http.put(
       `${PROJECT}/conversations/:id/messages/:seq/feedback`,
       () => new HttpResponse(null, { status: 204 }),
     ),
     http.post(`${PROJECT}/conversations/:id/turns`, async ({ params, request }) => {
+      if (!servedIn(params.id, params.project)) {
+        return undefined;
+      }
       const turn = await readTurnRequest(request);
       const script = scriptFor(turn.message);
       const isNew = params.id === NEW_CONVERSATION_ID;

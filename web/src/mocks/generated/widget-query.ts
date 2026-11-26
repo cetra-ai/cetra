@@ -81,6 +81,38 @@ const COLUMNS: Record<Source, ReadonlySet<string>> = {
   scores: new Set(["name", "value_num", "data_type", "target"]),
 };
 
+/** A `metadata['key']` field: every source but scores reads its trace's metadata. */
+const METADATA_FIELD = /^metadata\['([^']+)'\]$/;
+
+/** Whether `field` names a column of `source`'s rows, a metadata key included. */
+function hasColumn(source: Source, field: string): boolean {
+  return COLUMNS[source].has(field) || (source !== "scores" && METADATA_FIELD.test(field));
+}
+
+/**
+ * The `metadata['key']` cells of a trace. The normalizer stores plain strings (`claude-code`); the generated
+ * `user.*` values are JSON-encoded, so a JSON string is decoded.
+ */
+function metadataCells(trace: Trace): Row {
+  const cells: Row = {};
+  for (const [key, value] of Object.entries(trace.metadata ?? {})) {
+    cells[`metadata['${key}']`] = decodeMetadata(value);
+  }
+  return cells;
+}
+
+function decodeMetadata(value: string): string {
+  if (!value.startsWith('"')) {
+    return value;
+  }
+  try {
+    const parsed: unknown = JSON.parse(value);
+    return typeof parsed === "string" ? parsed : value;
+  } catch {
+    return value;
+  }
+}
+
 /** List columns: a row counts under each of its values. */
 const LIST_COLUMNS: ReadonlySet<string> = new Set(["models", "tags"]);
 
@@ -99,8 +131,8 @@ class Unsupported extends Error {
  * is no time to first token, and no cache tokens. So the TTFT widget is empty here, and the token
  * and LLM latency widgets show these approximations.
  */
-export function widgetQueryHandler(dataset: Dataset): HttpHandler {
-  return http.post(`${PROJECT}/dashboards/query`, async ({ request }) => {
+export function widgetQueryHandler(dataset: Dataset, prefix: string = PROJECT): HttpHandler {
+  return http.post(`${prefix}/dashboards/query`, async ({ request }) => {
     const body = (await request.json()) as Body;
     try {
       return HttpResponse.json(answer(dataset, body));
@@ -249,6 +281,7 @@ function traceRow(trace: Trace): Row {
     reasoning_tokens: trace.reasoning_tokens ?? null,
     total_tokens: trace.total_tokens ?? null,
     cost_total: trace.cost_total ?? null,
+    ...metadataCells(trace),
     __time: Date.parse(trace.start_time),
   };
 }
@@ -283,6 +316,7 @@ function spanRows(trace: Trace): Row[] {
     service_name: null,
     provider: null,
     operation: null,
+    ...metadataCells(trace),
     __time: Date.parse(trace.start_time),
   }));
 }
@@ -310,8 +344,9 @@ function sourceRows(source: Source, traces: readonly Trace[]): Row[] {
 
 /** Compiles a filter (spec 05 DSL) into a predicate over rows. Anything it does not model is refused. */
 function compile(text: string, columns: ReadonlySet<string>, path: string): Predicate {
+  const withMetadata = columns !== COLUMNS.scores;
   const predicates = splitConjuncts(text).map((conjunct) =>
-    predicateOf(parseChip(conjunct.text), columns, path),
+    predicateOf(parseChip(conjunct.text), columns, withMetadata, path),
   );
   return (row) => predicates.every((predicate) => predicate(row));
 }
@@ -332,21 +367,26 @@ export function tracePredicate(filter: string): ((trace: Trace) => boolean) | un
   }
 }
 
-function predicateOf(chip: Chip, columns: ReadonlySet<string>, path: string): Predicate {
+function predicateOf(
+  chip: Chip,
+  columns: ReadonlySet<string>,
+  withMetadata: boolean,
+  path: string,
+): Predicate {
   switch (chip.kind) {
     case "compare": {
-      const column = plainColumn(chip.field, columns, path);
+      const column = plainColumn(chip.field, columns, withMetadata, path);
       return comparison(column, chip.op, chip.value, path);
     }
     case "null": {
-      const column = plainColumn(chip.field, columns, path);
+      const column = plainColumn(chip.field, columns, withMetadata, path);
       return (row) => {
         const isNull = row[column] === null || row[column] === undefined;
         return chip.negated ? !isNull : isNull;
       };
     }
     case "in": {
-      const column = plainColumn(chip.field, columns, path);
+      const column = plainColumn(chip.field, columns, withMetadata, path);
       const values = chip.values.map((value) => scalar(value, path));
       return (row) => {
         const cell = row[column];
@@ -360,7 +400,7 @@ function predicateOf(chip: Chip, columns: ReadonlySet<string>, path: string): Pr
       };
     }
     case "contains": {
-      const column = plainColumn(chip.field, columns, path);
+      const column = plainColumn(chip.field, columns, withMetadata, path);
       if (!LIST_COLUMNS.has(column)) {
         throw new Unsupported(path);
       }
@@ -374,7 +414,15 @@ function predicateOf(chip: Chip, columns: ReadonlySet<string>, path: string): Pr
   }
 }
 
-function plainColumn(field: Field, columns: ReadonlySet<string>, path: string): string {
+function plainColumn(
+  field: Field,
+  columns: ReadonlySet<string>,
+  withMetadata: boolean,
+  path: string,
+): string {
+  if (withMetadata && "key" in field && field.column === "metadata") {
+    return `metadata['${field.key}']`;
+  }
   if (!("column" in field) || "key" in field || !columns.has(field.column)) {
     throw new Unsupported(path);
   }
@@ -520,7 +568,7 @@ function groupsOf(body: Body, query: Query, rows: readonly Row[]): GroupSpec[] {
   if (field === undefined) {
     return [{ other: false, match: () => true }];
   }
-  if (breakdown && !COLUMNS[query.source].has(field)) {
+  if (breakdown && !hasColumn(query.source, field)) {
     throw new Unsupported("query.breakdown");
   }
   const limit = breakdown ? (breakdown.limit ?? 5) : DASHBOARD_LIMIT;

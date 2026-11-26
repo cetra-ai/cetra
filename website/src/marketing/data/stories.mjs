@@ -16,6 +16,8 @@ export const STORIES = /** @type {const} */ ([
  * @typedef {object} PictureContent
  * @property {string} alt     what the picture shows, one sentence, for screen readers
  * @property {string} caption one line under the picture
+ * @property {number} [start] makes the picture scroll: its frame is as tall as the chapter's tallest other picture,
+ * and it opens `start` CSS px from its top (the coding transcript, which is much taller than the others)
  */
 
 /**
@@ -24,7 +26,9 @@ export const STORIES = /** @type {const} */ ([
  * @property {string} section the page's name, for the picker's accessible name
  * @property {string} base    the shot's base name in screenshots.json
  * @property {string | Record<string, string>} label the Frame's title-bar text; one per story when a record
- * @property {Record<string, PictureContent>} stories keyed by story id
+ * @property {Record<string, PictureContent>} [stories] keyed by story id; absent for a shared picture
+ * @property {PictureContent} [shared] one picture for every story, shown without the story picker: the
+ * shot is `base` itself (the chapter's pages look the same in every story, M19 retake)
  */
 
 /** @type {Picture[]} */
@@ -35,9 +39,9 @@ export const PICTURES = [
     base: "marketing-trace-view",
     label: {
       support: "Traces · Support bot",
-      coding: "Traces · Coding agent",
-      voice: "Traces · Voice agent",
-      extraction: "Traces · Document pipeline",
+      coding: "Traces · Code agent",
+      voice: "Traces · Voice desk",
+      extraction: "Traces · Invoice pipeline",
     },
     stories: {
       support: {
@@ -61,25 +65,31 @@ export const PICTURES = [
   },
   {
     id: "trace",
-    section: "Trace list",
-    base: "marketing-trace-list",
-    label: "Traces",
+    section: "Trace",
+    base: "marketing-trace-page",
+    label: {
+      support: "Session · Support bot",
+      coding: "Trace · Code agent",
+      voice: "Trace · Voice desk",
+      extraction: "Traces · Invoice pipeline",
+    },
     stories: {
       support: {
-        alt: "The trace list filtered to traces tagged email: agent traces with start time, name, duration and cost.",
-        caption: "Every support conversation, with its cost and latency.",
+        alt: "The conversation of a support session: four turns with their scores and costs, the third asking whether it can schedule the export every week and scoring 0.3 on correctness, with a failed user-feedback mark.",
+        caption: "Each turn of a session, with its score, so the bad answer stands out.",
       },
       coding: {
-        alt: "The trace list filtered to traces with status error: failed runs, among them a coding-agent trace, with start time, name, duration and cost.",
-        caption: "Only the failed runs, so nothing broken hides in the traffic.",
+        alt: "A coding agent's transcript: the CSV fix request and plan, one line per tool call, a first patch whose run_tests line reads 1 failed, 47 passed, then a second patch and a run of 48 passed.",
+        caption: "Read the code, patch it and rerun the tests, all in one transcript.",
+        start: 540,
       },
       voice: {
-        alt: "The trace list filtered to voice traces and sorted by duration, longest first: start time, name, duration and cost.",
-        caption: "The slowest calls first, so you fix what callers feel.",
+        alt: "A voice agent's turn in the Chat view: the caller's 3.4 s recording with its transcript, one line for the calendar check with its slots 9:30 and 11:00 and its 2.91 s, and the agent's spoken reply with its transcript.",
+        caption: "Hear the caller and the agent, and read what was said, in one voice turn.",
       },
       extraction: {
-        alt: "The trace list filtered to traces tagged billing: start time, name, duration and cost, with extract-invoice among the rows.",
-        caption: "Every billing trace in one list, with its duration and cost.",
+        alt: "The trace list of the batch tagged batch-1119: process-invoice traces, each with its own invoice file, three failed ones at the top with the output Schema check failed twice, and a totals line of 200 traces, 3 errors and $0.48.",
+        caption: "A 200-invoice batch, with its three failed invoices at the top.",
       },
     },
   },
@@ -88,23 +98,9 @@ export const PICTURES = [
     section: "Assistant",
     base: "marketing-assistant",
     label: "Assistant",
-    stories: {
-      support: {
-        alt: "The assistant's window open over a dashboard: the question about answers that scored low, its answer, and the drafted dashboard of answer quality.",
-        caption: "Ask which answers scored low, then get a quality dashboard built for you.",
-      },
-      coding: {
-        alt: "The assistant's window open over a dashboard: the question about failed traces, an answer that names coding-agent, and the drafted dashboard of failed runs, error rate, cost per run and p95 duration.",
-        caption: "Ask what failed, then get a dashboard for the coding agent built for you.",
-      },
-      voice: {
-        alt: "The assistant's window open over a dashboard: the question about slow calls, its answer, and the drafted dashboard of voice latency.",
-        caption: "Ask which calls were slow, then get a latency dashboard built for you.",
-      },
-      extraction: {
-        alt: "The assistant's window open over a dashboard: the question about invoices that needed a retry, its answer, and the drafted dashboard of invoices, schema-check failures and cost.",
-        caption: "Ask which invoices needed a retry, then get a dashboard built for you.",
-      },
+    shared: {
+      alt: "The assistant's window: the question which prompts got worse this week, a SQL step, the answer that kb-answer v13 dropped correctness from 0.85 to 0.78 with 62% of its downvotes quoting the old pricing page, and an offer to build a dashboard.",
+      caption: "Ask which prompt got worse, and get the numbers and the cause.",
     },
   },
   {
@@ -112,47 +108,19 @@ export const PICTURES = [
     section: "Issues",
     base: "marketing-issue",
     label: "Issues",
-    stories: {
-      support: {
-        alt: "An issue page for the question customers ask most, how to export traces to CSV: its state and actions, a daily chart of occurrences, and five example questions.",
-        caption: "What customers ask most, grouped for you, with real examples.",
-      },
-      coding: {
-        alt: "An issue page for run_tests failing with 1 failed and 47 passed: its state and actions, a daily chart of occurrences, and example traces.",
-        caption: "The same test failure across runs becomes one issue to fix.",
-      },
-      voice: {
-        alt: "An issue page for replies that started more than 800 ms after the caller: its state and actions, a daily chart of occurrences, and check_availability, which took 1.22 s, as its first example.",
-        caption: "Slow replies grouped into one issue, with the trace that shows why.",
-      },
-      extraction: {
-        alt: "An issue page for invoice totals that do not match their line items: its state and actions, a daily chart of occurrences, and an example with a total of 1,248.00 against line items of 1,284.00.",
-        caption: "Wrong totals grouped into one issue, before they reach your books.",
-      },
+    shared: {
+      alt: "An issue page titled Answer contradicts its sources: 100 occurrences in 14 days, a bar for every day, and five examples, from a refund policy and a price to a booking, an invoice total and a test log.",
+      caption: "Answers that contradict their sources, grouped into one issue with their examples.",
     },
   },
   {
     id: "evaluate",
-    section: "Annotation queue",
-    base: "marketing-queue-review",
-    label: "Annotation queue",
-    stories: {
-      support: {
-        alt: "An annotation queue's review form for support answers: the progress, the instructions and the correctness and relevance score fields.",
-        caption: "Reviewers score real answers in a queue.",
-      },
-      coding: {
-        alt: "An annotation queue's review form for patches: the progress, the instructions and the tests-pass and review-verdict fields.",
-        caption: "Review the agent's patches the way you review a pull request.",
-      },
-      voice: {
-        alt: "An annotation queue's review form for calls: the progress, the instructions and the resolved and tone fields.",
-        caption: "Check whether each caller got what they asked for.",
-      },
-      extraction: {
-        alt: "An annotation queue's review form for invoices: the progress, the instructions and the schema-valid and fields-correct fields.",
-        caption: "Check the extracted fields against the invoice, one by one.",
-      },
+    section: "Evaluate",
+    base: "marketing-evaluate",
+    label: "Experiments",
+    shared: {
+      alt: "The comparison of extract-invoice versions 3 and 4 on 300 invoices: total passes 99% against 97%, vat_number 96% against 91%, and cost $0.72 against $0.63.",
+      caption: "Version 4 lifts vat_number from 91% to 96% on 300 invoices.",
     },
   },
   {
@@ -160,23 +128,9 @@ export const PICTURES = [
     section: "Playground",
     base: "marketing-playground",
     label: "Playground",
-    stories: {
-      support: {
-        alt: "The playground with support-reply version 2: its messages, the variables filled in for a question about exporting traces to CSV, and the model's answer with its tokens, cost and latency.",
-        caption: "Try a prompt change on a real question before you ship it.",
-      },
-      coding: {
-        alt: "The playground with write-patch version 3: its messages, the variables filled in for a CSV bug, and the model's answer, a diff, with its tokens, cost and latency.",
-        caption: "Run the patch prompt on a real issue and see the diff.",
-      },
-      voice: {
-        alt: "The playground with voice-reply version 4: its messages, the caller's request to move an appointment, and the model's short spoken answer with its tokens, cost and latency.",
-        caption: "Tune the receptionist prompt for short spoken answers.",
-      },
-      extraction: {
-        alt: "The playground with extract-invoice version 5 in two columns on the same invoice: a cheaper model reads the total as 1248 and claude-sonnet-4-5 as 1284, each with its tokens, cost and latency.",
-        caption: "Compare a cheap and a strong model on the same invoice, with the cost of each.",
-      },
+    shared: {
+      alt: "The playground with support-reply versions 2 and 3 side by side on a question about a weekly schedule: version 2 says you can export any time, and version 3 says cetra can't schedule exports yet and offers the export by hand.",
+      caption: "Run two prompt versions on the same question, and see which one answers right.",
     },
   },
   {
@@ -184,23 +138,9 @@ export const PICTURES = [
     section: "Alerts",
     base: "marketing-alerts",
     label: "Alerts",
-    stories: {
-      support: {
-        alt: "The alerts page with the rule for a correctness score under 0.7 on support-bot selected, with its condition and a preview chart.",
-        caption: "Know when answer quality drops below your bar.",
-      },
-      coding: {
-        alt: "The alerts page with the rule for an error rate above 5% on code-agent selected and firing, with its channel, Team Slack, and a preview chart.",
-        caption: "Know when the coding agent's error rate climbs, in Slack.",
-      },
-      voice: {
-        alt: "The alerts page with the rule for a p95 latency above 1.5 s on voice-agent selected and firing, with its condition and a preview chart.",
-        caption: "Know when callers start waiting, before they hang up.",
-      },
-      extraction: {
-        alt: "The alerts page with the rule for a schema-check pass rate under 97% on billing traces selected, with its condition and a preview chart.",
-        caption: "Know when the schema check pass rate slips.",
-      },
+    shared: {
+      alt: "The alerts page with seven rules, two firing, and the rule Error rate above 15% selected: firing for 12 minutes, last value 25.0%, the Pager webhook, and a 24-hour preview that jumps over its threshold in the last hour.",
+      caption: "Know when the error rate, a score, the cost or an issue crosses your line.",
     },
   },
 ];
@@ -210,6 +150,8 @@ export function shotName(pictureId, storyId) {
   const picture = pictureById(pictureId);
   const story = STORIES.find((s) => s.id === storyId);
   if (!story) throw new Error(`stories: unknown story "${storyId}"`);
+  // A shared picture is the same shot in every story.
+  if (picture.shared) return picture.base;
   // The first story keeps the bare name; the others add their id.
   const suffix = story.id === STORIES[0].id ? "" : `-${story.id}`;
   return `${picture.base}${suffix}`;
@@ -223,11 +165,17 @@ export function pictureById(pictureId) {
 }
 
 /**
- * The four panels of one picture, in STORIES order.
- * @returns {{ story: string, shot: string, label: string, alt: string, caption: string }[]}
+ * The panels of one picture: one per story, in STORIES order, or the one panel of a shared picture
+ * (its `story` is "all").
+ * @returns {{ story: string, shot: string, label: string, alt: string, caption: string, start?: number }[]}
  */
 export function panelsOf(pictureId) {
   const picture = pictureById(pictureId);
+  if (picture.shared) {
+    if (typeof picture.label !== "string")
+      throw new Error(`stories: shared picture "${pictureId}" needs one label`);
+    return [{ story: "all", shot: picture.base, label: picture.label, ...picture.shared }];
+  }
   return STORIES.map(({ id }) => {
     const content = picture.stories[id];
     if (!content) throw new Error(`stories: picture "${pictureId}" has no story "${id}"`);

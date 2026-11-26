@@ -13,7 +13,7 @@ import StoryPicture from "../components/StoryPicture.astro";
     lede="Send OpenTelemetry from any framework or SDK. Every LLM call, tool and retrieval lands in one tree, with tokens, cost and latency."
     features={["Sessions and users", "Cost per call and per model", "Live view while traces arrive", "Images and files in the payload"]}
   >
-    <StoryPicture picture="trace" align="start" fade />
+    <StoryPicture picture="trace" align="start" fade={false} />
   </Chapter>
 </Section>
 
@@ -62,12 +62,13 @@ import StoryPicture from "../components/StoryPicture.astro";
   <Chapter
     bare
     id="ch-prompts"
+    wide
     eyebrow="Prompts"
     title="Change a prompt without a deploy."
     lede="Version your prompts in cetra and point a label such as production at the one to serve. Your app fetches it through the SDK, with a cache and a fallback. Try changes in the playground first."
     features={["Versions and labels", "SDK fetch with a cache and a fallback", "Up to four models side by side in the playground", "Cost, latency and scores per prompt version"]}
   >
-    <StoryPicture picture="prompts" align="start" fade={false} />
+    <StoryPicture picture="prompts" fade={false} />
   </Chapter>
 </Section>
 

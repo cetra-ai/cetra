@@ -44,9 +44,12 @@ import { type TimeZoneSetting, useTimeZone } from "@/lib/settings";
 
 export type PlotKind = "line" | "bar" | "area";
 
-/** The value axis's width and the chart's right margin: the plot is narrower than the chart by these. */
+/**
+ * The value axis's width and the chart's right margin: the plot is narrower than the chart by these. The margin holds
+ * half of the last time label (`11-19 00:00`, about 77 px), which is centred on the plot's right edge.
+ */
 const Y_AXIS_WIDTH = 72;
-const PLOT_RIGHT_MARGIN = 12;
+const PLOT_RIGHT_MARGIN = 32;
 /** The width assumed before the chart is measured: the chart's initial dimension. */
 const UNMEASURED_WIDTH = 640;
 

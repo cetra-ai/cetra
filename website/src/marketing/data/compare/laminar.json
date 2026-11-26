@@ -10,81 +10,115 @@
       "sources": [
         "https://laminar.sh/docs/hosting-options",
         "https://github.com/lmnr-ai/lmnr/blob/main/docker-compose.yml"
-      ]
+      ],
+      "status": "yes",
+      "short": "5 services incl. ClickHouse"
     },
     "selfHostLicence": {
       "value": "Apache 2.0. Signals, clusters, email and Slack alerts need an enterprise licence key when self-hosted",
       "sources": [
         "https://github.com/lmnr-ai/lmnr/blob/main/LICENSE.md",
         "https://laminar.sh/docs/hosting-options"
-      ]
+      ],
+      "status": "partial",
+      "short": "Apache 2.0; Signals need licence"
     },
     "cloudFree": {
       "value": "Free plan, $0/month: 1 GB data, 7-day retention, 1 project, 1 seat",
-      "sources": ["https://laminar.sh/pricing"]
+      "sources": ["https://laminar.sh/pricing"],
+      "status": "yes",
+      "short": "Free: 1 GB, 7-day retention"
     },
     "cloudPaidFrom": {
       "value": "Pro: $30/month with 3 GB data included, then $2/GB; 3-month retention; Signals billed per token",
-      "sources": ["https://laminar.sh/pricing"]
+      "sources": ["https://laminar.sh/pricing"],
+      "status": "yes",
+      "short": "$30/mo with 3 GB"
     },
     "otel": {
       "value": "OTLP over gRPC and HTTP; gen_ai semantic conventions; self-hosted ports 8001 (gRPC) and 8000 (HTTP)",
-      "sources": ["https://laminar.sh/docs/tracing/otel.md"]
+      "sources": ["https://laminar.sh/docs/tracing/otel.md"],
+      "status": "yes",
+      "short": "OTLP HTTP + gRPC"
     },
     "sql": {
       "value": "Yes: SQL editor in the UI, POST /v1/sql/query API, CLI and MCP; SELECT only",
-      "sources": ["https://laminar.sh/docs/platform/sql-editor.md"]
+      "sources": ["https://laminar.sh/docs/platform/sql-editor.md"],
+      "status": "yes",
+      "short": "SQL editor, API, CLI, MCP"
     },
     "mcp": {
       "value": "Yes: run read-only SQL, manage Signals and LLM profiles, tag traces; some tools cloud-only",
-      "sources": ["https://laminar.sh/docs/platform/mcp.md"]
+      "sources": ["https://laminar.sh/docs/platform/mcp.md"],
+      "status": "partial",
+      "short": "MCP: read-only SQL, Signals"
     },
     "onlineEvals": {
       "value": "Signals: an LLM agent analyses finished traces against plain-language instructions, with triggers and sampling",
       "sources": [
         "https://laminar.sh/docs/signals/introduction.md",
         "https://laminar.sh/docs/hosting-options"
-      ]
+      ],
+      "status": "partial",
+      "short": "Signals: LLM agent on traces"
     },
     "datasetsExperiments": {
       "value": "Yes: datasets with versioned datapoints, evaluations SDK with run comparison, agent evaluations via CLI",
       "sources": [
         "https://laminar.sh/docs/datasets/introduction.md",
         "https://laminar.sh/docs/llms.txt"
-      ]
+      ],
+      "status": "yes",
+      "short": "Versioned datapoints, evals SDK"
     },
     "promptManagement": {
       "value": "Unknown",
-      "sources": ["https://laminar.sh/docs/llms.txt"]
+      "sources": ["https://laminar.sh/docs/llms.txt"],
+      "status": "unknown",
+      "short": "Not documented"
     },
     "gateway": {
       "value": "Unknown",
-      "sources": ["https://laminar.sh/docs/llms.txt"]
+      "sources": ["https://laminar.sh/docs/llms.txt"],
+      "status": "unknown",
+      "short": "Not documented"
     },
     "alerts": {
       "value": "Per-Signal alerts: in-app, email, Slack; triggered by a new event or a new cluster",
-      "sources": ["https://laminar.sh/docs/signals/alerts.md"]
+      "sources": ["https://laminar.sh/docs/signals/alerts.md"],
+      "status": "partial",
+      "short": "In-app, email, Slack per Signal"
     },
     "issueDetection": {
       "value": "Signals detect events in traces with an LLM; events are grouped into clusters by meaning, up to three levels",
       "sources": [
         "https://laminar.sh/docs/signals/clusters.md",
         "https://laminar.sh/docs/signals/introduction.md"
-      ]
+      ],
+      "status": "partial",
+      "short": "Signals events; licence to self-host"
     },
     "annotationQueues": {
       "value": "Labeling queues: reviewers edit, approve or discard items from spans, datapoints or SQL; approved items go to a dataset",
-      "sources": ["https://laminar.sh/docs/queues/quickstart.md"]
+      "sources": ["https://laminar.sh/docs/queues/quickstart.md"],
+      "status": "yes",
+      "short": "Labeling queues to datasets"
     },
     "assistant": {
       "value": "Laminar Agent: panel in the app, also Slack, MCP and CLI; queries your data, builds dashboards and opens pull requests",
-      "sources": ["https://laminar.sh/docs/platform/laminar-agent.md"]
+      "sources": ["https://laminar.sh/docs/platform/laminar-agent.md"],
+      "status": "yes",
+      "short": "Laminar Agent: app, Slack, MCP"
     },
     "codingAgents": {
       "value": "Plugin for Claude Code; integration pages for Codex, OpenCode and Pi",
-      "sources": ["https://laminar.sh/docs/llms.txt"]
+      "sources": ["https://laminar.sh/docs/llms.txt"],
+      "status": "yes",
+      "short": "Claude Code plugin; 3 more"
     }
   },
+  "stack": ["Frontend", "App server", "PostgreSQL", "ClickHouse", "Quickwit"],
+  "strengths": ["selfHostStack", "issueDetection", "onlineEvals"],
   "chooseThem": [
     "Failure signals written as plain-language instructions, with triggers, trace filters, sampling and alerts",
     "Agent debugger (record, replay) and agent-evaluation tooling, with docs for browser agents",

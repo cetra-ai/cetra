@@ -8,7 +8,7 @@ const FAQ = "01900000-0000-7000-8000-000000000c01";
 const LEGACY = "support-legacy";
 
 function install(): void {
-  server.use(...experimentHandlers());
+  server.use(...experimentHandlers("acme/support-bot"));
 }
 
 async function getJson<T>(path: string): Promise<{ status: number; body: T }> {
@@ -104,6 +104,12 @@ it("refuses 26 summary ids", async () => {
   ids[0] = list.data[0]?.id ?? "";
   const { status } = await getJson(`/experiments/summaries?ids=${ids.join(",")}`);
   expect(status).toBe(400);
+});
+
+it("answers the support project only", () => {
+  expect(experimentHandlers("acme/invoice-pipeline")).toEqual([]);
+  expect(experimentHandlers("acme/voice-desk")).toEqual([]);
+  expect(experimentHandlers("acme/support-bot").length).toBeGreaterThan(0);
 });
 
 it("keeps the fixture experiment that the mock does not know", async () => {

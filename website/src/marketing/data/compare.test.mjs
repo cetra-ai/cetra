@@ -1,6 +1,13 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { COMPETITORS, formatDate, listFiles, loadProduct, validate } from "./compare.mjs";
+import {
+  COMPETITORS,
+  formatDate,
+  listFiles,
+  loadProduct,
+  strengthProblems,
+  validate,
+} from "./compare.mjs";
 import { formatUnits, OVERAGE_PER_100K, PLANS } from "./pricing.mjs";
 
 const DAY = 86_400_000;
@@ -130,4 +137,67 @@ test("cetra's prices match the pricing data", () => {
 
 test("formatDate", () => {
   assert.equal(formatDate("2026-11-20"), "20 November 2026");
+});
+
+test("every competitor's strengths are areas where cetra is ahead", () => {
+  const cetra = loadProduct("cetra");
+  for (const slug of COMPETITORS) {
+    assert.deepEqual(strengthProblems(loadProduct(slug), cetra), [], slug);
+  }
+});
+
+test("a status outside the list, or unknown on a known value, is reported", () => {
+  const p = langfuse();
+  p.facts.otel.status = "maybe";
+  assert.deepEqual(validate(p, "langfuse", today()), [
+    "otel: status must be one of yes, partial, no, unknown",
+  ]);
+  p.facts.otel.status = "unknown";
+  assert.deepEqual(validate(p, "langfuse", today()), [
+    "otel: status is unknown exactly when the value is Unknown",
+  ]);
+});
+
+test("a missing or long short label is reported", () => {
+  const p = langfuse();
+  p.facts.otel.short = "";
+  assert.deepEqual(validate(p, "langfuse", today()), ["otel: short is required"]);
+  p.facts.otel.short = "a".repeat(37);
+  assert.deepEqual(validate(p, "langfuse", today()), [
+    "otel: short is 37 characters, the limit is 36",
+  ]);
+});
+
+test("strengths must be three different areas that can lead a page", () => {
+  const p = langfuse();
+  p.strengths = ["sql", "sql", "gateway"];
+  assert.deepEqual(validate(p, "langfuse", today()), [
+    "strengths must be 3 different areas",
+    "strengths: gateway cannot be a strength",
+  ]);
+  p.strengths = ["sql"];
+  assert.deepEqual(validate(p, "langfuse", today()), ["strengths must be 3 areas"]);
+});
+
+test("cetra's stack is itself and it has no strengths", () => {
+  const p = structuredClone(loadProduct("cetra"));
+  p.stack = ["cetra", "PostgreSQL"];
+  p.strengths = ["sql", "mcp", "otel"];
+  assert.deepEqual(validate(p, "cetra", today()), [
+    'stack must be ["cetra"]',
+    "cetra has no strengths",
+  ]);
+});
+
+test("a strength where the competitor is as good, or a small stack, is reported", () => {
+  const cetra = loadProduct("cetra");
+  const p = langfuse();
+  p.strengths = ["selfHostStack", "otel", "sql"];
+  p.stack = ["Web", "PostgreSQL"];
+  p.facts.otel.status = "yes";
+  p.facts.sql.status = "no";
+  assert.deepEqual(strengthProblems(p, cetra), [
+    "langfuse: selfHostStack is a strength only against 3 or more services",
+    "langfuse: otel is not a strength: their status is yes too",
+  ]);
 });

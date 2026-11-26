@@ -1,6 +1,9 @@
 import type { Schema } from "@/api/types";
 import { mulberry32 } from "@/mocks/generated/random";
 
+/** Re-exported for the story modules (M17). */
+export { mulberry32 };
+
 const DAY_MS = 86_400_000;
 const NAMES = [
   "support-router",
@@ -89,11 +92,13 @@ type ShowcasePayload = {
  * A hand-written trace of the mock dataset (M11, M12). The homepage hero shows them, and the docs' trace view
  * shows the support agent. The trace's duration is its root span's `to`.
  */
-type Showcase = {
+export type Showcase = {
   index: number;
   ageMs: number;
   service: string;
   user?: string;
+  /** The showcase's session id (M17). */
+  session?: string;
   tags: string[];
   /** The generation models only; embedding and rerank models appear on their spans. */
   models: string[];
@@ -186,7 +191,7 @@ const SUPPORT_SPANS: readonly [ShowcaseSpan, ...ShowcaseSpan[]] = [
   },
 ];
 
-const SUPPORT_SHOWCASE: Showcase = {
+export const SUPPORT_SHOWCASE: Showcase = {
   index: 3,
   ageMs: 120_000,
   service: "support-bot",
@@ -211,7 +216,7 @@ const CODING_ANSWER = [
 ].join("\n");
 const PATCH_SYSTEM = "Write a unified diff that fixes the issue.";
 
-const CODING_SHOWCASE: Showcase = {
+export const CODING_SHOWCASE: Showcase = {
   index: 4,
   ageMs: 150_000,
   service: "code-agent",
@@ -395,7 +400,7 @@ const CODING_SHOWCASE: Showcase = {
 const VOICE_QUESTION = "Hi, can I move my dentist appointment to Friday afternoon?";
 const VOICE_ANSWER = "Sure. On Friday afternoon I have 2 pm or 4:30 pm. Which one works for you?";
 
-const VOICE_SHOWCASE: Showcase = {
+export const VOICE_SHOWCASE: Showcase = {
   index: 5,
   ageMs: 180_000,
   service: "voice-agent",
@@ -521,7 +526,7 @@ const INVOICE_FIELDS = {
 const EXTRACT_SYSTEM =
   "Extract the invoice as JSON: vendor, invoice_number, date, currency, line_items, total.";
 
-const EXTRACTION_SHOWCASE: Showcase = {
+export const EXTRACTION_SHOWCASE: Showcase = {
   index: 6,
   ageMs: 210_000,
   service: "doc-pipeline",
@@ -608,8 +613,8 @@ export const SHOWCASES: readonly Showcase[] = [
   EXTRACTION_SHOWCASE,
 ];
 
-function showcaseAt(index: number): Showcase | undefined {
-  return SHOWCASES.find((showcase) => showcase.index === index);
+function showcaseAt(index: number, profile: Profile): Showcase | undefined {
+  return profile.showcases.find((showcase) => showcase.index === index);
 }
 
 type BuiltSpan = {
@@ -649,24 +654,195 @@ export type Dataset = {
   ): Schema<"EndUserDetail"> | undefined;
 };
 
-export function createDataset(options: { seed: number; now: number; traces: number }): Dataset {
+export type Sessions =
+  /** A share of the traces joins a random session of the pool, as support does today. */
+  | { kind: "pool"; share: number; pool: number; prefix: string }
+  /** Every generated trace belongs to a call: runs of `min` to `max` consecutive generated traces. */
+  | { kind: "calls"; min: number; max: number; prefix: string }
+  | { kind: "none" };
+
+export type Users =
+  | { kind: "pool"; share: number; pool: number; prefix: string; label: string }
+  /** One user per call (needs `sessions.kind === "calls"`): call k has user `${prefix}${pad3(k % pool)}`. */
+  | { kind: "per-call"; pool: number; prefix: string; label: string }
+  | { kind: "none" };
+
+/** A span a mark adds under the root, after the generated spans (M17). */
+export type MarkedSpan = {
+  name: string;
+  kind: Schema<"SpanKind">;
+  /** Offset from the trace's start and length, ms. */
+  fromMs: number;
+  durationMs: number;
+  input?: Schema<"Payload">;
+  output?: Schema<"Payload">;
+  /** Absent: ok. */
+  error?: { message: string; stacktrace: string };
+};
+
+/** What a profile's `marks` changes on one generated trace (M17). Every field is optional. */
+export type Mark = {
+  /** Added to the trace's tags (the result stays sorted and unique). */
+  tags?: readonly string[];
+  release?: string;
+  /** The trace's name, and its root span's: the trace summary and the root of its detail show it. */
+  name?: string;
+  /** Replace the trace's scores with the same name, and add the others. */
+  scores?: readonly { name: string; source: Schema<"ScoreSource">; value: Schema<"ScoreValue"> }[];
+  /** The trace's turn (its previews and its generated LLM payloads) instead of the drawn one. */
+  turn?: Turn;
+  /** The trace becomes an error trace: `count` error spans, named `spanName`, with this message. */
+  error?: { count: number; spanName: string; message: string; stacktrace: string };
+  /** Input and output tokens are multiplied by it (rounded down), so the cost is too. */
+  costFactor?: number;
+  /** A new start time, epoch ms; the end moves with it. */
+  startMs?: number;
+  /** A new duration; marked spans that end later extend it to their end. */
+  durationMs?: number;
+  spans?: readonly MarkedSpan[];
+};
+
+export type MarksContext = {
+  seed: number;
+  now: number;
+  /**
+   * True for the traces a mark may choose: not a showcase, not the big first trace, and visible with the
+   * trace list's defaults (environment not `cetra-eval`, no `cetra.experiment_id` metadata). A mark for
+   * another index is ignored.
+   */
+  eligible: (index: number) => boolean;
+};
+
+/** Every table and range of a generated dataset's traces, sessions and users (M16). */
+export type Profile = {
+  /** `service_name` of every generated span. */
+  service: string;
+  /** `provider` of the generated LLM spans. */
+  provider: string;
+  /** Trace names; a name drawn more often is listed more times. */
+  names: readonly [string, ...string[]];
+  models: readonly [string, ...string[]];
+  /** The span kinds by span index, cycling (index 0 is always "agent"). */
+  kinds: readonly [Schema<"SpanKind">, ...Schema<"SpanKind">[]];
+  /** Span names by kind, picked by span index; a kind without names is named `${kind} ${index}`. */
+  spanNames: Partial<Record<Schema<"SpanKind">, readonly [string, ...string[]]>>;
+  /** Tags every generated trace carries, then 0 to 2 drawn from `pool`. */
+  tags: { base: readonly string[]; pool: readonly [string, ...string[]] };
+  spans: { min: number; span: number; maxDepth: number };
+  /** Drawn duration: `min + floor(r ** skew * span)` ms. */
+  duration: { min: number; span: number; skew: number };
+  /** Traces with this tag rescale their duration into [min, min + span) ms, with no new draw (support's `voice`). */
+  shortTag?: { tag: string; min: number; span: number };
+  errorRate: number;
+  /** The generated error span's status message, and its exception's stack trace. */
+  error: { message: string; stacktrace: string };
+  tokens: { inMin: number; inSpan: number; outMin: number; outSpan: number };
+  /** USD per million tokens. */
+  price: { input: number; output: number };
+  sessions: Sessions;
+  /** Gap between a session's turns' starts, ms. */
+  turnGap: { min: number; max: number };
+  users: Users;
+  /** Trace 0 is a 10,000-span, 60 s trace, 30 s old (support's large-trace check). */
+  bigFirstTrace: boolean;
+  turns: readonly [Turn, ...Turn[]];
+  /** The tool span's call: its arguments and result, from the trace index. */
+  tool: (traceIndex: number) => {
+    arguments: Record<string, unknown>;
+    result: Record<string, unknown>;
+  };
+  systemPrompt: string;
+  failedAnswer: string;
+  /** Scores of a generated trace. */
+  scores: (index: number, errored: boolean) => Schema<"ScoreBrief">[];
+  showcases: readonly Showcase[];
+  /**
+   * More metadata of a generated trace, from its index and its age in ms; absent: none. It draws nothing from the
+   * trace's generator, so adding it moves no other value.
+   */
+  traceMetadata?: (index: number, ageMs: number) => Record<string, string>;
+  /** Changes for chosen generated traces, by index; absent: none (M17). */
+  marks?: (
+    traces: readonly Schema<"TraceSummary">[],
+    context: MarksContext,
+  ) => ReadonlyMap<number, Mark>;
+};
+
+/** The session and user a `calls` profile gives a generated trace. */
+type CallIds = { session: string; user?: string };
+
+/** Salt of the call sizes, so they differ from every other draw of the generator. */
+const CALL_SALT = 0xbb67ae85;
+
+/**
+ * The calls of a profile with `sessions.kind === "calls"`, by trace index: runs of `min` to `max` consecutive
+ * generated traces (showcase indices are skipped). The last call keeps the traces it has, even fewer than `min`.
+ */
+function callsOf(seed: number, traces: number, profile: Profile): Map<number, CallIds> {
+  const calls = new Map<number, CallIds>();
+  if (profile.sessions.kind !== "calls") {
+    return calls;
+  }
+  const { min, max, prefix } = profile.sessions;
+  const showcases = new Set(profile.showcases.map((showcase) => showcase.index));
+  const indices: number[] = [];
+  for (let index = 0; index < traces; index += 1) {
+    if (!showcases.has(index)) {
+      indices.push(index);
+    }
+  }
+  let position = 0;
+  for (let call = 0; position < indices.length; call += 1) {
+    const random = mulberry32(mix(seed ^ CALL_SALT, call));
+    const size = min + Math.floor(random() * (max - min + 1));
+    const ids: CallIds = { session: `${prefix}${String(call).padStart(4, "0")}` };
+    if (profile.users.kind === "per-call") {
+      ids.user = `${profile.users.prefix}${String(call % profile.users.pool).padStart(3, "0")}`;
+    }
+    for (const index of indices.slice(position, position + size)) {
+      calls.set(index, ids);
+    }
+    position += size;
+  }
+  return calls;
+}
+
+export function createDataset(options: {
+  seed: number;
+  now: number;
+  traces: number;
+  /** The generation profile; `SUPPORT_PROFILE` when absent. */
+  profile?: Profile;
+}): Dataset {
+  const profile = options.profile ?? SUPPORT_PROFILE;
+  const calls = callsOf(options.seed, options.traces, profile);
   const bases: Schema<"TraceSummary">[] = [];
   for (let index = 0; index < options.traces; index += 1) {
-    bases.push(traceSummary(options.seed, index, options.now));
+    bases.push(traceSummary(options.seed, index, options.now, profile, calls.get(index)));
   }
   // A session's turns are spread out in time first: the session's turns depend on each other.
-  const timed = spreadSessionTurns(bases, options.seed, options.now);
+  const timed = spreadSessionTurns(bases, options.seed, options.now, profile);
+  // The marks change the timed traces before the sessions are numbered, since the numbering follows start times.
+  const marks = marksOf(timed, options.seed, options.now, profile);
+  const marked = timed.map((trace, index) => {
+    const mark = marks.get(index);
+    return mark ? markedSummary(trace, index, mark, profile) : trace;
+  });
   // A trace's turn depends on its session's other traces, so the previews are set once all are known.
-  const slots = sessionSlots(timed);
+  const slots = sessionSlots(marked);
   const turnAt = (index: number): TraceTurn => {
+    const markedTurn = marks.get(index)?.turn;
+    if (markedTurn) {
+      return { topic: markedTurn, exchange: markedTurn, main: true };
+    }
     const slot = slots.get(index);
-    return turnOf(slot?.topic ?? index, slot?.turn ?? 1);
+    return turnOf(slot?.topic ?? index, slot?.turn ?? 1, profile);
   };
-  const traces = timed.map((trace, index) => {
-    const story = showcaseAt(index)?.story;
+  const traces = marked.map((trace, index) => {
+    const story = showcaseAt(index, profile)?.story;
     return story
       ? { ...trace, input_preview: story.inputPreview, output_preview: story.outputPreview }
-      : withPreviews(trace, turnAt(index));
+      : withPreviews(trace, turnAt(index), profile);
   });
   const indexById = new Map<string, number>();
   for (const [index, trace] of traces.entries()) {
@@ -684,7 +860,7 @@ export function createDataset(options: { seed: number; now: number; traces: numb
     if (cached) {
       return cached;
     }
-    const detail = buildDetail(options.seed, index, trace);
+    const detail = buildDetail(options.seed, index, trace, profile, marks.get(index));
     details.set(traceId, detail);
     return detail;
   }
@@ -700,10 +876,14 @@ export function createDataset(options: { seed: number; now: number; traces: numb
         return undefined;
       }
       const index = indexById.get(traceId) ?? 0;
+      const mark = marks.get(index);
       return spanFromSummary(row.span, {
         traceIndex: index,
         errored: detail.trace.error_count > 0,
         turn: turnAt(index),
+        profile,
+        mark,
+        generatedCount: detail.trace.span_count - markedSpanCount(mark),
       });
     },
     sessions(includeEval, includeExperiments) {
@@ -780,39 +960,210 @@ export function visibleTraces(
   });
 }
 
-function traceSummary(seed: number, index: number, now: number): Schema<"TraceSummary"> {
-  const showcase = showcaseAt(index);
+/** The number of spans a mark adds under the root (M17). */
+function markedSpanCount(mark: Mark | undefined): number {
+  return mark?.spans?.length ?? 0;
+}
+
+/**
+ * Whether a marks hook may choose trace `index` of a profile's dataset (M17): not a showcase, not the big first
+ * trace, and visible with the trace list's defaults. Facts and marks both use this rule.
+ */
+export function isEligibleTrace(
+  profile: Profile,
+  trace: Schema<"TraceSummary">,
+  index: number,
+): boolean {
+  return (
+    showcaseAt(index, profile) === undefined &&
+    !(profile.bigFirstTrace && index === 0) &&
+    visibleTraces([trace], false, false).length === 1
+  );
+}
+
+/**
+ * The traces an even spread picks from `items` in order: rank `r` (from 0) is picked when
+ * `floor((r + 1) p) > floor(r p)`, so `round(p × n)` of the `n` items, give or take one, evenly along the order (M17).
+ */
+export function evenSpread<T>(items: readonly T[], p: number): T[] {
+  return items.filter((_, rank) => Math.floor((rank + 1) * p) > Math.floor(rank * p));
+}
+
+/**
+ * Merges a change into a trace's mark (M17): the later fields win; tags, spans and scores concatenate, except that
+ * a score of `a` with the name of a score of `b` is replaced. Empty lists are left out.
+ */
+export function mergeMarks(a: Mark, b: Mark): Mark {
+  const tags = [...(a.tags ?? []), ...(b.tags ?? [])];
+  const spans = [...(a.spans ?? []), ...(b.spans ?? [])];
+  const scores = [
+    ...(a.scores ?? []).filter((score) => !b.scores?.some((other) => other.name === score.name)),
+    ...(b.scores ?? []),
+  ];
+  return {
+    ...a,
+    ...b,
+    ...(tags.length > 0 ? { tags } : {}),
+    ...(spans.length > 0 ? { spans } : {}),
+    ...(scores.length > 0 ? { scores } : {}),
+  };
+}
+
+/**
+ * The marks of a profile, for its eligible traces only (M17). The profile's `marks` sees every timed summary; a
+ * mark for an ineligible index is dropped.
+ */
+function marksOf(
+  traces: readonly Schema<"TraceSummary">[],
+  seed: number,
+  now: number,
+  profile: Profile,
+): ReadonlyMap<number, Mark> {
+  const result = new Map<number, Mark>();
+  if (!profile.marks) {
+    return result;
+  }
+  const eligible = (index: number): boolean => {
+    const trace = traces[index];
+    return trace !== undefined && isEligibleTrace(profile, trace, index);
+  };
+  for (const [index, mark] of profile.marks(traces, { seed, now, eligible })) {
+    if (eligible(index)) {
+      result.set(index, mark);
+    }
+  }
+  return result;
+}
+
+/** A generated trace's summary after its mark (M17). Its turn and its spans' payloads are applied elsewhere. */
+function markedSummary(
+  trace: Schema<"TraceSummary">,
+  index: number,
+  mark: Mark,
+  profile: Profile,
+): Schema<"TraceSummary"> {
+  const marked = mark.spans ?? [];
+  const startMs = mark.startMs ?? Date.parse(trace.start_time);
+  let durationMs = mark.durationMs ?? trace.duration_ns / 1_000_000;
+  for (const span of marked) {
+    durationMs = Math.max(durationMs, span.fromMs + span.durationMs);
+  }
+  // A mark's error count replaces the drawn one; the marked spans' errors are added to it. The generated spans
+  // that can error are the non-root ones (`errorSpan`), so the mark's count is clamped to them.
+  const markedErrors = marked.filter((span) => span.error !== undefined).length;
+  const generatedErrors = mark.error
+    ? Math.min(mark.error.count, Math.max(0, trace.span_count - 1))
+    : trace.error_count;
+  const errorCount = generatedErrors + markedErrors;
+  // Generated summaries always carry their tokens; the `?? 0` only narrows the optional fields.
+  let inputTokens = trace.input_tokens ?? 0;
+  let outputTokens = trace.output_tokens ?? 0;
+  let costTotal = trace.cost_total;
+  if (mark.costFactor !== undefined) {
+    inputTokens = Math.floor(inputTokens * mark.costFactor);
+    outputTokens = Math.floor(outputTokens * mark.costFactor);
+    costTotal =
+      Math.round(inputTokens * profile.price.input + outputTokens * profile.price.output) /
+      1_000_000;
+  }
+  // The status-derived scores (`profile.scores`) follow the errored flag, so they are drawn again when a mark
+  // changes it. The mark's own scores then replace theirs by name.
+  const errored = errorCount > 0;
+  const baseScores =
+    errored !== trace.error_count > 0 ? profile.scores(index, errored) : trace.scores;
+  return {
+    ...trace,
+    start_time: rfc3339(startMs),
+    end_time: rfc3339(startMs + durationMs),
+    duration_ns: durationMs * 1_000_000,
+    status: errored ? "error" : "ok",
+    name: mark.name ?? trace.name,
+    release: mark.release ?? trace.release,
+    tags: mark.tags ? [...new Set([...trace.tags, ...mark.tags])].sort() : trace.tags,
+    span_count: trace.span_count + marked.length,
+    error_count: errorCount,
+    llm_count: trace.llm_count + marked.filter((span) => span.kind === "llm").length,
+    input_tokens: inputTokens,
+    output_tokens: outputTokens,
+    total_tokens: inputTokens + outputTokens,
+    cost_total: costTotal,
+    scores: mark.scores ? markedScores(baseScores, index, mark.scores) : baseScores,
+  };
+}
+
+/** The scores after a mark: one with a marked name is replaced (keeping its id), the others are added (M17). */
+function markedScores(
+  scores: readonly Schema<"ScoreBrief">[],
+  index: number,
+  changes: NonNullable<Mark["scores"]>,
+): Schema<"ScoreBrief">[] {
+  const result = [...scores];
+  for (const change of changes) {
+    const at = result.findIndex((score) => score.name === change.name);
+    const current = result[at];
+    if (current) {
+      result[at] = { ...current, source: change.source, value: change.value };
+    } else {
+      result.push({
+        name: change.name,
+        score_id: markScoreUuid(index, result.length),
+        source: change.source,
+        value: change.value,
+      });
+    }
+  }
+  return result;
+}
+
+function traceSummary(
+  seed: number,
+  index: number,
+  now: number,
+  profile: Profile,
+  call: CallIds | undefined,
+): Schema<"TraceSummary"> {
+  const showcase = showcaseAt(index, profile);
   if (showcase) {
-    return showcaseSummary(showcase, index, now);
+    return showcaseSummary(showcase, index, now, profile);
   }
   const rng = mulberry32(mix(seed, index));
-  const spanCount = index === 0 ? 10_000 : 3 + Math.floor(rng() * 58);
-  const errored = rng() < 0.08;
+  const bigFirst = profile.bigFirstTrace && index === 0;
+  const spanCount = bigFirst ? 10_000 : profile.spans.min + Math.floor(rng() * profile.spans.span);
+  const errored = rng() < profile.errorRate;
   const errorCount = errored ? Math.min(spanCount, 1 + Math.floor(rng() * 3)) : 0;
   const environment = environmentOf(rng);
   const experiment = environment !== "cetra-eval" && rng() < 0.04;
-  const ageMs = ageOf(rng, index);
-  const drawnMs = index === 0 ? 60_000 : DRAWN_MIN_MS + Math.floor(rng() * DRAWN_SPAN_MS);
+  const ageMs = ageOf(rng, index, profile);
+  const drawnMs = bigFirst
+    ? 60_000
+    : profile.duration.min + Math.floor(rng() ** profile.duration.skew * profile.duration.span);
   const startMs = now - ageMs;
-  const name = NAMES[Math.floor(rng() * NAMES.length)] ?? NAMES[0];
-  const model = MODELS[Math.floor(rng() * MODELS.length)] ?? MODELS[0];
-  const inputTokens = 100 + Math.floor(rng() * 1_900);
-  const outputTokens = 20 + Math.floor(rng() * 400);
-  const session =
-    rng() < 0.5 ? `sess-${String(Math.floor(rng() * 120)).padStart(4, "0")}` : undefined;
-  const user = rng() < 0.6 ? `user-${String(Math.floor(rng() * 40)).padStart(3, "0")}` : undefined;
-  const tags = pickTags(rng);
-  // A voice call is shorter: rescale the drawn duration, with no new random draw. Trace 0 keeps its 60 s.
+  const name = profile.names[Math.floor(rng() * profile.names.length)] ?? profile.names[0];
+  const model = profile.models[Math.floor(rng() * profile.models.length)] ?? profile.models[0];
+  const inputTokens = profile.tokens.inMin + Math.floor(rng() * profile.tokens.inSpan);
+  const outputTokens = profile.tokens.outMin + Math.floor(rng() * profile.tokens.outSpan);
+  // Each roll is drawn for every profile, so the draws after it keep their place.
+  const sessionRoll = rng();
+  const session = sessionOf(profile.sessions, sessionRoll, rng, call);
+  const userRoll = rng();
+  const user = userOf(profile.users, userRoll, rng, call);
+  const tags = pickTags(rng, profile);
+  // A short-tagged trace is rescaled, with no new random draw. Trace 0 keeps its 60 s.
+  const shortTag = profile.shortTag;
   const durationMs =
-    index !== 0 && tags.includes("voice")
-      ? VOICE_MIN_MS + Math.floor(((drawnMs - DRAWN_MIN_MS) * VOICE_SPAN_MS) / DRAWN_SPAN_MS)
+    shortTag && !bigFirst && tags.includes(shortTag.tag)
+      ? shortTag.min +
+        Math.floor(((drawnMs - profile.duration.min) * shortTag.span) / profile.duration.span)
       : drawnMs;
   const metadata: Record<string, string> = {};
   if (experiment) {
     metadata["cetra.experiment_id"] = `exp-${String(index % 12).padStart(2, "0")}`;
   }
   if (user) {
-    Object.assign(metadata, userTraceMetadata(user));
+    Object.assign(metadata, userTraceMetadata(user, profile));
+  }
+  if (profile.traceMetadata) {
+    Object.assign(metadata, profile.traceMetadata(index, ageMs));
   }
   const traceId = `a${index.toString(16).padStart(31, "0")}`;
   return {
@@ -830,20 +1181,27 @@ function traceSummary(seed: number, index: number, now: number): Schema<"TraceSu
     metadata,
     span_count: spanCount,
     error_count: errorCount,
-    llm_count: llmCount(spanCount),
+    llm_count: llmCount(spanCount, profile),
     input_tokens: inputTokens,
     output_tokens: outputTokens,
     total_tokens: inputTokens + outputTokens,
-    cost_total: Math.round(inputTokens * 3 + outputTokens * 15) / 1_000_000,
+    cost_total:
+      Math.round(inputTokens * profile.price.input + outputTokens * profile.price.output) /
+      1_000_000,
     models: [model],
-    scores: index % 2 === 0 ? scoresFor(index) : [],
+    scores: profile.scores(index, errorCount > 0),
     ...(session ? { session_id: session } : {}),
     ...(user ? { user_id: user } : {}),
   };
 }
 
 /** A showcase trace's summary (M11, M12). Its tokens and cost are the sums over `showcase.spans`. */
-function showcaseSummary(showcase: Showcase, index: number, now: number): Schema<"TraceSummary"> {
+function showcaseSummary(
+  showcase: Showcase,
+  index: number,
+  now: number,
+  profile: Profile,
+): Schema<"TraceSummary"> {
   const startMs = now - showcase.ageMs;
   const durationMs = showcase.spans[0].to;
   const inputTokens = showcase.spans.reduce((sum, row) => sum + (row.inputTokens ?? 0), 0);
@@ -862,7 +1220,7 @@ function showcaseSummary(showcase: Showcase, index: number, now: number): Schema
     environment: "production",
     release: "v1.5.0",
     tags: showcase.tags,
-    metadata: showcase.user ? userTraceMetadata(showcase.user) : {},
+    metadata: showcase.user ? userTraceMetadata(showcase.user, profile) : {},
     span_count: showcase.spans.length,
     error_count: errorCount,
     llm_count: showcase.spans.filter((row) => row.kind === "llm").length,
@@ -879,14 +1237,20 @@ function showcaseSummary(showcase: Showcase, index: number, now: number): Schema
       value: score.value,
     })),
     ...(showcase.user ? { user_id: showcase.user } : {}),
+    ...(showcase.session ? { session_id: showcase.session } : {}),
   };
 }
 
-/** `user.*` metadata of a user's traces, derived from the id `user-NNN` so it is stable. Values are JSON-encoded (spec 01). */
-function userTraceMetadata(userId: string): Record<string, string> {
-  const index = Number.parseInt(userId.slice("user-".length), 10);
+/**
+ * `user.*` metadata of a user's traces, derived from the id's trailing digits (`user-NNN`) so it is stable. The name
+ * is the profile's label and those digits. Values are JSON-encoded (spec 01).
+ */
+function userTraceMetadata(userId: string, profile: Profile): Record<string, string> {
+  const digits = /(\d+)$/.exec(userId)?.[1] ?? "";
+  const index = Number.parseInt(digits || "0", 10);
+  const label = profile.users.kind === "none" ? "User" : profile.users.label;
   return {
-    "user.name": JSON.stringify(`User ${userId.slice("user-".length)}`),
+    "user.name": JSON.stringify(`${label} ${digits}`),
     "user.plan": JSON.stringify(USER_PLANS[index % USER_PLANS.length] ?? USER_PLANS[0]),
     "user.country": JSON.stringify(
       USER_COUNTRIES[index % USER_COUNTRIES.length] ?? USER_COUNTRIES[0],
@@ -898,20 +1262,65 @@ function buildDetail(
   seed: number,
   index: number,
   trace: Schema<"TraceSummary">,
+  profile: Profile,
+  mark: Mark | undefined,
 ): Schema<"TraceDetail"> {
-  const showcase = showcaseAt(index);
+  const showcase = showcaseAt(index, profile);
   if (showcase) {
     return showcaseDetail(showcase, index, trace);
   }
   const rng = mulberry32(mix(seed, index + 17));
-  const spanCount = trace.span_count;
-  const maxDepth = index === 0 ? 8 : 6;
-  const shape = spanShape(spanCount, maxDepth, index === 0 ? 2_000 : 0, rng);
+  // The generated spans come first and keep their draws; a mark's spans follow them under the root (M17).
+  const markedSpans = mark?.spans ?? [];
+  const spanCount = trace.span_count - markedSpans.length;
+  const markedErrors = markedSpans.filter((span) => span.error !== undefined).length;
+  const bigFirst = profile.bigFirstTrace && index === 0;
+  const maxDepth = bigFirst ? 8 : profile.spans.maxDepth;
+  const shape = spanShape(spanCount, maxDepth, bigFirst ? 2_000 : 0, rng);
   const startMs = Date.parse(trace.start_time);
   const endMs = Date.parse(trace.end_time);
-  const built = layoutSpans(shape, startMs, endMs, trace.error_count, rng);
-  const spans = built.map((span, spanIndex) => treeSpan(span, spanIndex, index, trace));
-  return { trace, spans, truncated: false };
+  const built = layoutSpans(shape, startMs, endMs, trace.error_count - markedErrors, rng, profile);
+  const spans = built.map((span, spanIndex) =>
+    treeSpan(span, spanIndex, index, trace, profile, mark),
+  );
+  const marked = markedSpans.map((span, i) =>
+    markedTreeSpan(span, spanCount + i, index, trace, profile),
+  );
+  return { trace, spans: [...spans, ...marked], truncated: false };
+}
+
+/** A mark's span under the root, at `position` after the generated spans (M17). */
+function markedTreeSpan(
+  span: MarkedSpan,
+  position: number,
+  traceIndex: number,
+  trace: Schema<"TraceSummary">,
+  profile: Profile,
+): Schema<"TreeSpan"> {
+  const startMs = Date.parse(trace.start_time) + span.fromMs;
+  const row = treeSpan(
+    {
+      depth: 1,
+      detached: false,
+      parent: 0,
+      startMs,
+      endMs: startMs + span.durationMs,
+      kind: span.kind,
+      status: span.error ? "error" : "ok",
+    },
+    position,
+    traceIndex,
+    trace,
+    profile,
+  );
+  return {
+    ...row,
+    span: {
+      ...row.span,
+      name: span.name,
+      ...(span.error ? { status_message: span.error.message } : {}),
+    },
+  };
 }
 
 /** A showcase trace's tree: its spans come in `showcase.spans` order, so every parent comes before its children (M11, M12). */
@@ -995,6 +1404,7 @@ function layoutSpans(
   endMs: number,
   errorCount: number,
   rng: () => number,
+  profile: Profile,
 ): BuiltSpan[] {
   const built: BuiltSpan[] = [];
   const stack: number[] = [];
@@ -1004,7 +1414,7 @@ function layoutSpans(
     if (!row) {
       continue;
     }
-    const kind = kindAt(index);
+    const kind = kindAt(index, profile);
     const status = errorSpan(index, shape.length, errorCount) ? "error" : "ok";
     if (row.detached || row.depth === 0) {
       stack.length = 0;
@@ -1072,28 +1482,42 @@ function treeSpan(
   spanIndex: number,
   traceIndex: number,
   trace: Schema<"TraceSummary">,
+  profile: Profile,
+  mark?: Mark,
 ): Schema<"TreeSpan"> {
   const id = spanId(traceIndex, spanIndex);
+  const names = profile.spanNames[span.kind];
+  // A generated error span takes the mark's error, when the mark has one (M17).
+  const markedError = span.status === "error" && spanIndex > 0 ? mark?.error : undefined;
   const summary: Schema<"SpanSummary"> = {
     span_id: id,
     trace_id: trace.trace_id,
     span_kind: span.kind,
-    name: spanIndex === 0 ? trace.name : `${span.kind} ${spanIndex}`,
+    name:
+      spanIndex === 0
+        ? trace.name
+        : markedError
+          ? markedError.spanName
+          : names
+            ? pick(names, spanIndex)
+            : `${span.kind} ${spanIndex}`,
     start_time: rfc3339(span.startMs),
     end_time: rfc3339(span.endMs),
     duration_ns: (span.endMs - span.startMs) * 1_000_000,
     status: span.status,
     metadata: { ...trace.metadata },
     tags: trace.tags,
-    ...(span.status === "error" ? { status_message: "tool failed" } : {}),
+    ...(span.status === "error"
+      ? { status_message: markedError?.message ?? profile.error.message }
+      : {}),
     ...(span.parent === undefined ? {} : { parent_span_id: spanId(traceIndex, span.parent) }),
     ...(trace.environment ? { environment: trace.environment } : {}),
-    service_name: "support-bot",
+    service_name: profile.service,
     ...(trace.session_id ? { session_id: trace.session_id } : {}),
     ...(trace.user_id ? { user_id: trace.user_id } : {}),
     ...(trace.release ? { release: trace.release } : {}),
     ...(span.kind === "llm" && trace.models[0]
-      ? { model: trace.models[0], provider: "anthropic" }
+      ? { model: trace.models[0], provider: profile.provider }
       : {}),
   };
   if (spanIndex === 0) {
@@ -1114,17 +1538,28 @@ type Exchange = {
   steps: readonly string[];
 };
 
-type SupportTurn = Exchange & {
+/** A topic of a profile's traces: turn 1 is its question, later turns of a session its follow-ups. */
+export type Turn = Exchange & {
   heading: string;
-  snippets: { python: string; ts: string };
-  docs: readonly [string, string, string];
+  /** The main answer's code block; absent: the LLM span answers with `summary` and `steps` only. */
+  snippets?: { python: string; ts: string };
+  /** Retrieved documents; absent: retriever and reranker spans return no documents. */
+  docs?: readonly [string, string, string];
   followUps: readonly [Exchange, Exchange, ...Exchange[]];
 };
 
 /** The question a trace answers: turn 1 of a session is the topic's question, later turns its follow-ups. */
-type TraceTurn = { topic: SupportTurn; exchange: Exchange; main: boolean };
+type TraceTurn = { topic: Turn; exchange: Exchange; main: boolean };
 
-type SpanContext = { traceIndex: number; errored: boolean; turn: TraceTurn };
+type SpanContext = {
+  traceIndex: number;
+  errored: boolean;
+  turn: TraceTurn;
+  profile: Profile;
+  /** The trace's mark (M17). Its spans from `generatedCount` on are the mark's, in order. */
+  mark?: Mark;
+  generatedCount: number;
+};
 
 const FENCE = "```";
 const FAILED_ANSWER =
@@ -1133,7 +1568,7 @@ const TOOL_NAMES = ["lookup_ticket", "get_customer", "search_orders"] as const;
 const RETRIEVER_SCORES = [0.92, 0.81, 0.67] as const;
 const RERANK_SCORES = [0.52, 0.91, 0.84] as const;
 
-export const SUPPORT_TURNS: readonly [SupportTurn, ...SupportTurn[]] = [
+export const SUPPORT_TURNS: readonly [Turn, ...Turn[]] = [
   {
     question: "How do I get a refund for a duplicate charge?",
     heading: "Refunds for duplicate charges",
@@ -1385,15 +1820,50 @@ const TURN_GAP_SALT = 0x6a09e667;
 /** The youngest trace is a minute old (see `ageOf`); a session's last turn never starts later than that. */
 const MIN_TRACE_AGE_MS = 60_000;
 
+/** The support bot's generation (M11 to M15): the draws and tables every support dataset has always had. */
+export const SUPPORT_PROFILE: Profile = {
+  service: "support-bot",
+  provider: "anthropic",
+  names: NAMES,
+  models: MODELS,
+  kinds: KINDS,
+  spanNames: {},
+  tags: { base: [], pool: TAGS },
+  spans: { min: 3, span: 58, maxDepth: 6 },
+  duration: { min: DRAWN_MIN_MS, span: DRAWN_SPAN_MS, skew: 1 },
+  shortTag: { tag: "voice", min: VOICE_MIN_MS, span: VOICE_SPAN_MS },
+  errorRate: 0.08,
+  error: {
+    message: "tool failed",
+    stacktrace: "Error: tool failed\n    at lookup (agent.ts:12:5)",
+  },
+  tokens: { inMin: 100, inSpan: 1_900, outMin: 20, outSpan: 400 },
+  price: { input: 3, output: 15 },
+  sessions: { kind: "pool", share: 0.5, pool: 120, prefix: "sess-" },
+  turnGap: { min: TURN_GAP_MIN_MS, max: TURN_GAP_MAX_MS },
+  users: { kind: "pool", share: 0.6, pool: 40, prefix: "user-", label: "User" },
+  bigFirstTrace: true,
+  turns: SUPPORT_TURNS,
+  tool: (traceIndex) => ({
+    arguments: { ticket_id: `T-${1000 + traceIndex}` },
+    result: { ticket_id: `T-${1000 + traceIndex}`, status: "open", assignee: "queue-2" },
+  }),
+  systemPrompt: "You are a concise support agent. Answer in Markdown.",
+  failedAnswer: FAILED_ANSWER,
+  scores: (index) => (index % 2 === 0 ? scoresFor(index) : []),
+  showcases: [SUPPORT_SHOWCASE],
+};
+
 /**
  * Spreads each session's turns in time (SL-6): the session keeps its earliest trace's start, and each later
- * turn (in start-time order) starts 30 s to 8 min after the previous one. A session whose last turn would
+ * turn (in start-time order; in index order for `calls`) starts 30 s to 8 min after the previous one. A session whose last turn would
  * start after `now` moves earlier as a whole. Traces keep their own durations.
  */
 function spreadSessionTurns(
   traces: readonly Schema<"TraceSummary">[],
   seed: number,
   now: number,
+  profile: Profile,
 ): Schema<"TraceSummary">[] {
   const groups = new Map<string, number[]>();
   traces.forEach((trace, index) => {
@@ -1404,10 +1874,14 @@ function spreadSessionTurns(
   const starts = traces.map((trace) => Date.parse(trace.start_time));
   const timed = [...traces];
   for (const indices of groups.values()) {
-    // Start-time order, ties by index: the same order `sessionSlots` numbers the turns in.
-    const ordered = [...indices].sort(
-      (left, right) => (starts[left] ?? 0) - (starts[right] ?? 0) || left - right,
-    );
+    // Start-time order, ties by index: the same order `sessionSlots` numbers the turns in. A call's
+    // turns are generated in order, so it runs in index order, anchored at its first trace's start.
+    const ordered =
+      profile.sessions.kind === "calls"
+        ? [...indices].sort((left, right) => left - right)
+        : [...indices].sort(
+            (left, right) => (starts[left] ?? 0) - (starts[right] ?? 0) || left - right,
+          );
     const [first, ...later] = ordered;
     if (first === undefined) {
       continue;
@@ -1416,7 +1890,8 @@ function spreadSessionTurns(
     let previous = starts[first] ?? 0;
     for (const index of later) {
       const random = mulberry32(mix(seed ^ TURN_GAP_SALT, index));
-      previous += TURN_GAP_MIN_MS + Math.floor(random() * (TURN_GAP_MAX_MS - TURN_GAP_MIN_MS + 1));
+      const { min, max } = profile.turnGap;
+      previous += min + Math.floor(random() * (max - min + 1));
       chain.set(index, previous);
     }
     const shift = Math.max(0, previous - (now - MIN_TRACE_AGE_MS));
@@ -1466,19 +1941,25 @@ function sessionSlots(
 }
 
 /** Turn 1 is the topic's own question; turn k (k >= 2) is its follow-up `(k - 2) mod count`. */
-function turnOf(topicIndex: number, turn: number): TraceTurn {
-  const topic = pick(SUPPORT_TURNS, topicIndex);
+function turnOf(topicIndex: number, turn: number, profile: Profile): TraceTurn {
+  const topic = pick(profile.turns, topicIndex);
   if (turn <= 1) {
     return { topic, exchange: topic, main: true };
   }
   return { topic, exchange: pick(topic.followUps, turn - 2), main: false };
 }
 
-function withPreviews(trace: Schema<"TraceSummary">, turn: TraceTurn): Schema<"TraceSummary"> {
+function withPreviews(
+  trace: Schema<"TraceSummary">,
+  turn: TraceTurn,
+  profile: Profile,
+): Schema<"TraceSummary"> {
   return {
     ...trace,
     input_preview: turn.exchange.question,
-    output_preview: firstLine(trace.error_count > 0 ? FAILED_ANSWER : shortAnswer(turn.exchange)),
+    output_preview: firstLine(
+      trace.error_count > 0 ? profile.failedAnswer : shortAnswer(turn.exchange),
+    ),
   };
 }
 
@@ -1490,7 +1971,12 @@ function shortAnswer(turn: Exchange): string {
   return [turn.summary, "", ...turn.steps.map((step) => `- ${step}`)].join("\n");
 }
 
-function llmAnswer(turn: SupportTurn, language: "python" | "ts"): string {
+/** The main answer: its heading, summary, steps and code block. A turn without snippets answers as a follow-up does. */
+function llmAnswer(turn: Turn, language: "python" | "ts"): string {
+  const snippet = turn.snippets?.[language];
+  if (snippet === undefined) {
+    return shortAnswer(turn);
+  }
   return [
     `## ${turn.heading}`,
     "",
@@ -1499,16 +1985,16 @@ function llmAnswer(turn: SupportTurn, language: "python" | "ts"): string {
     ...turn.steps.map((step) => `- ${step}`),
     "",
     `${FENCE}${language}`,
-    turn.snippets[language],
+    snippet,
     FENCE,
   ].join("\n");
 }
 
 function scoredDocs(
-  turn: SupportTurn,
+  turn: Turn,
   scores: readonly [number, number, number],
 ): { id: string; score: number; text: string }[] {
-  return turn.docs.map((text, i) => ({ id: `doc-${i + 1}`, score: scores[i] ?? 0, text }));
+  return (turn.docs ?? []).map((text, i) => ({ id: `doc-${i + 1}`, score: scores[i] ?? 0, text }));
 }
 
 function spanFromSummary(span: Schema<"SpanSummary">, context: SpanContext): Schema<"SpanDetail"> {
@@ -1528,7 +2014,7 @@ function spanFromSummary(span: Schema<"SpanSummary">, context: SpanContext): Sch
               name: "exception",
               time: span.end_time,
               attributes: {
-                "exception.stacktrace": "Error: tool failed\n    at lookup (agent.ts:12:5)",
+                "exception.stacktrace": stackTraceOf(context, index),
               },
             },
           ]
@@ -1541,7 +2027,19 @@ function spanFromSummary(span: Schema<"SpanSummary">, context: SpanContext): Sch
     truncated,
     scope_name: "cetra",
   };
-  if (span.span_kind === "llm") {
+  const marked =
+    index >= context.generatedCount
+      ? context.mark?.spans?.[index - context.generatedCount]
+      : undefined;
+  if (marked) {
+    // A marked span's payloads are the mark's; an absent one stays absent.
+    if (marked.input) {
+      detail.input = marked.input;
+    }
+    if (marked.output) {
+      detail.output = marked.output;
+    }
+  } else if (span.span_kind === "llm") {
     const language = index % 2 === 0 ? "python" : "ts";
     detail.input = {
       format: "messages",
@@ -1551,7 +2049,7 @@ function spanFromSummary(span: Schema<"SpanSummary">, context: SpanContext): Sch
           parts: [
             {
               type: "text",
-              content: "You are a concise support agent. Answer in Markdown.",
+              content: context.profile.systemPrompt,
             },
           ],
         },
@@ -1574,15 +2072,10 @@ function spanFromSummary(span: Schema<"SpanSummary">, context: SpanContext): Sch
       ],
     };
   } else if (span.span_kind === "tool") {
-    const name = pick(TOOL_NAMES, index);
-    detail.input = {
-      format: "json",
-      value: { name, arguments: { ticket_id: `T-${1000 + context.traceIndex}` } },
-    };
-    detail.output = {
-      format: "json",
-      value: { ticket_id: `T-${1000 + context.traceIndex}`, status: "open", assignee: "queue-2" },
-    };
+    const tool = context.profile.tool(context.traceIndex);
+    const name = pick(context.profile.spanNames.tool ?? TOOL_NAMES, index);
+    detail.input = { format: "json", value: { name, arguments: tool.arguments } };
+    detail.output = { format: "json", value: tool.result };
   } else if (span.span_kind === "retriever") {
     detail.input = { format: "text", value: exchange.question };
     detail.output = {
@@ -1623,7 +2116,10 @@ function spanFromSummary(span: Schema<"SpanSummary">, context: SpanContext): Sch
   } else if (span.span_kind === "reranker") {
     detail.input = {
       format: "json",
-      value: { query: exchange.question, documents: turn.docs.map((_doc, i) => `doc-${i + 1}`) },
+      value: {
+        query: exchange.question,
+        documents: (turn.docs ?? []).map((_doc, i) => `doc-${i + 1}`),
+      },
     };
     detail.output = {
       format: "json",
@@ -1640,10 +2136,10 @@ function spanFromSummary(span: Schema<"SpanSummary">, context: SpanContext): Sch
     detail.input = { format: "text", value: exchange.question };
     detail.output = {
       format: "text",
-      value: failed ? FAILED_ANSWER : shortAnswer(exchange),
+      value: failed ? context.profile.failedAnswer : shortAnswer(exchange),
     };
   }
-  const showcase = showcaseAt(context.traceIndex);
+  const showcase = showcaseAt(context.traceIndex, context.profile);
   if (showcase) {
     // The generic rule flags every 17th span's input, the root included; the hero shows no truncation badge.
     detail.truncated = [];
@@ -1654,6 +2150,18 @@ function spanFromSummary(span: Schema<"SpanSummary">, context: SpanContext): Sch
     }
   }
   return detail;
+}
+
+/**
+ * The stack trace of an error span at `position`: a marked span's own error, a generated error span's mark error,
+ * or the profile's stack trace (M17).
+ */
+function stackTraceOf(context: SpanContext, position: number): string {
+  if (position >= context.generatedCount) {
+    const marked = context.mark?.spans?.[position - context.generatedCount];
+    return marked?.error?.stacktrace ?? context.profile.error.stacktrace;
+  }
+  return context.mark?.error?.stacktrace ?? context.profile.error.stacktrace;
 }
 
 /** A story span's hand-written payloads; `error` replaces the generic exception event of an error span. */
@@ -2048,17 +2556,17 @@ export function bucketWidth(
   return widths.find((width) => span / width <= 120) ?? DAY_MS;
 }
 
-function kindAt(index: number): Schema<"SpanKind"> {
+function kindAt(index: number, profile: Profile): Schema<"SpanKind"> {
   if (index === 0) {
     return "agent";
   }
-  return KINDS[index % KINDS.length] ?? "span";
+  return profile.kinds[index % profile.kinds.length] ?? "span";
 }
 
-function llmCount(spanCount: number): number {
+function llmCount(spanCount: number, profile: Profile): number {
   let count = 0;
   for (let index = 0; index < spanCount; index += 1) {
-    if (kindAt(index) === "llm") {
+    if (kindAt(index, profile) === "llm") {
       count += 1;
     }
   }
@@ -2086,8 +2594,8 @@ function environmentOf(rng: () => number): string {
   return "production";
 }
 
-function ageOf(rng: () => number, index: number): number {
-  if (index === 0) {
+function ageOf(rng: () => number, index: number, profile: Profile): number {
+  if (profile.bigFirstTrace && index === 0) {
     return 30_000;
   }
   if (rng() < 0.55) {
@@ -2096,16 +2604,55 @@ function ageOf(rng: () => number, index: number): number {
   return DAY_MS + Math.floor(rng() * 29 * DAY_MS);
 }
 
-function pickTags(rng: () => number): string[] {
+/** A trace's tags: the profile's base tags, then 0 to 2 drawn from its pool. */
+function pickTags(rng: () => number, profile: Profile): string[] {
   const count = Math.floor(rng() * 3);
-  const tags = new Set<string>();
+  const tags = new Set<string>(profile.tags.base);
   for (let index = 0; index < count; index += 1) {
-    const tag = TAGS[Math.floor(rng() * TAGS.length)];
+    const tag = profile.tags.pool[Math.floor(rng() * profile.tags.pool.length)];
     if (tag) {
       tags.add(tag);
     }
   }
   return [...tags].sort();
+}
+
+/** A trace's session under its profile: a pool share, the call's session, or none. */
+function sessionOf(
+  sessions: Sessions,
+  roll: number,
+  rng: () => number,
+  call: CallIds | undefined,
+): string | undefined {
+  switch (sessions.kind) {
+    case "pool":
+      return roll < sessions.share
+        ? `${sessions.prefix}${String(Math.floor(rng() * sessions.pool)).padStart(4, "0")}`
+        : undefined;
+    case "calls":
+      return call?.session;
+    case "none":
+      return undefined;
+  }
+}
+
+/** A trace's user under its profile: a pool share, the call's user, or none. */
+function userOf(
+  users: Users,
+  roll: number,
+  rng: () => number,
+  call: CallIds | undefined,
+): string | undefined {
+  switch (users.kind) {
+    case "pool":
+      return roll < users.share
+        ? `${users.prefix}${String(Math.floor(rng() * users.pool)).padStart(3, "0")}`
+        : undefined;
+    case "per-call":
+      return call?.user;
+    case "none":
+      return undefined;
+  }
 }
 
 function scoresFor(index: number): Schema<"ScoreBrief">[] {
@@ -2125,12 +2672,17 @@ function scoresFor(index: number): Schema<"ScoreBrief">[] {
   ];
 }
 
-function scoreUuid(index: number, which: number): string {
+export function scoreUuid(index: number, which: number): string {
   const tail = (index * 2 + which).toString(16).padStart(12, "0");
   return `00000000-0000-7000-8000-${tail}`;
 }
 
-function spanId(traceIndex: number, spanIndex: number): string {
+/** Id of a score a mark adds: never equal to a `scoreUuid` (M17). */
+export function markScoreUuid(index: number, position: number): string {
+  return `00000000-0000-7000-9000-${(index * 8 + position).toString(16).padStart(12, "0")}`;
+}
+
+export function spanId(traceIndex: number, spanIndex: number): string {
   return `${traceIndex.toString(16).padStart(8, "0")}${(spanIndex + 1).toString(16).padStart(8, "0")}`;
 }
 
@@ -2178,6 +2730,6 @@ export function rfc3339(ms: number): string {
     .replace(/\.(\d{3})Z$/, (_match, fraction: string) => `.${fraction}000000Z`);
 }
 
-function mix(seed: number, index: number): number {
+export function mix(seed: number, index: number): number {
   return Math.imul(seed ^ index, 0x9e3779b1) >>> 0;
 }

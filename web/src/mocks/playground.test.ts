@@ -1,5 +1,17 @@
 import { beforeEach, expect, it } from "vitest";
-import { createDataset } from "@/mocks/generated/dataset";
+import { createDataset, isEligibleTrace } from "@/mocks/generated/dataset";
+import { CODING_STORY_PROFILE } from "@/mocks/generated/story-coding";
+import { EXTRACTION_STORY_PROFILE } from "@/mocks/generated/story-extraction";
+import {
+  SCHEDULE_ANSWER,
+  SCHEDULE_QUESTION,
+  SUPPORT_STORY_PROFILE,
+} from "@/mocks/generated/story-support";
+import {
+  VOICE_AUDIO_TRACE_ID,
+  VOICE_STORY_PROFILE,
+  voiceAudioTurn,
+} from "@/mocks/generated/story-voice";
 import { server } from "@/mocks/node";
 import { playgroundHandlers } from "@/mocks/playground";
 
@@ -173,4 +185,149 @@ it("gives both extraction columns the same fields but the total", async () => {
   expect(leftTotal).not.toBe(rightTotal);
   expect(leftRest).toEqual(rightRest);
   expect(leftRest.line_items).toBe(3);
+});
+
+const PATCH_SPLIT_TEXT =
+  "This touches 23 files, so I'll do it in three steps:\n\n1. Rename `Project.owner` in the models and migrations.\n2. Update the API handlers and their tests.\n3. Update the web client and run the full suite.";
+const BOOKING_TEXT = "Done: Friday at 9:30, with Dr. Martin.";
+
+it("answers the three new prompt versions with their text and numbers", async () => {
+  const [patch, voice, invoice] = await Promise.all([
+    run({ model: "claude-sonnet-4-5", source: { prompt: { name: "write-patch", version: 4 } } }),
+    run({ model: "gpt-4.1-mini", source: { prompt: { name: "voice-reply", version: 5 } } }),
+    run({ model: "gemini-2.5-flash", source: { prompt: { name: "extract-invoice", version: 6 } } }),
+  ]);
+
+  expect(streamed(patch)).toBe(PATCH_SPLIT_TEXT);
+  expect(doneOf(patch)).toMatchObject({
+    usage: { input: 2140, output: 96 },
+    cost_usd: 0.0079,
+    latency_ms: 2900,
+  });
+
+  expect(streamed(voice)).toBe(BOOKING_TEXT);
+  expect(doneOf(voice)).toMatchObject({
+    usage: { input: 310, output: 14 },
+    cost_usd: 0.0002,
+    latency_ms: 620,
+    ttft_ms: 180,
+  });
+
+  expect(JSON.parse(streamed(invoice))).toEqual({
+    vendor: "Nordic Freight",
+    invoice_number: "INV-2026-0521",
+    total: 1234.56,
+    currency: "EUR",
+  });
+  expect(doneOf(invoice)).toMatchObject({
+    usage: { input: 1180, output: 48 },
+    cost_usd: 0.0005,
+    latency_ms: 1400,
+  });
+});
+
+it("keeps the older versions' answers, and answers extract-invoice v6 the same for every model", async () => {
+  const [oldPatch, oldVoice, gemini, claude] = await Promise.all([
+    run({ model: "claude-sonnet-4-5", source: { prompt: { name: "write-patch", version: 3 } } }),
+    run({ model: "gpt-4.1-mini", source: { prompt: { name: "voice-reply", version: 4 } } }),
+    run({ model: "gemini-2.5-flash", source: { prompt: { name: "extract-invoice", version: 6 } } }),
+    run({
+      model: "claude-sonnet-4-5",
+      source: { prompt: { name: "extract-invoice", version: 6 } },
+    }),
+  ]);
+  expect(streamed(oldPatch)).toBe(PATCH_TEXT);
+  expect(streamed(oldVoice)).toBe(VOICE_TEXT);
+  expect(streamed(claude)).toBe(streamed(gemini));
+});
+
+it("opens the trace of each new version: the first context-window run, the booking turn, the first Nordic Freight re-extraction", async () => {
+  const coding = createDataset({ seed: 1, now: NOW, traces: 2000, profile: CODING_STORY_PROFILE });
+  const codingIndex = coding.traces.findIndex(
+    (trace, index) =>
+      isEligibleTrace(CODING_STORY_PROFILE, trace, index) && trace.tags.includes("context-window"),
+  );
+  expect(codingIndex).toBe(37);
+  const patch = await run({ source: { prompt: { name: "write-patch", version: 4 } } });
+  expect(patch[0]?.data.trace_id).toBe(coding.traces[codingIndex]?.trace_id);
+  expect(patch[0]?.data.trace_id).toBe("a0000000000000000000000000000025");
+
+  const voice = createDataset({ seed: 1, now: NOW, traces: 2000, profile: VOICE_STORY_PROFILE });
+  const bookingIndex = voiceAudioTurn(voice);
+  expect(bookingIndex).toBe(110);
+  const bookingTrace = voice.traces[bookingIndex]?.trace_id;
+  expect(voice.traceDetail(bookingTrace ?? "")?.spans.at(-1)?.span.name).toBe("check_availability");
+  const booking = await run({ source: { prompt: { name: "voice-reply", version: 5 } } });
+  expect(booking[0]?.data.trace_id).toBe(bookingTrace);
+  expect(booking[0]?.data.trace_id).toBe(VOICE_AUDIO_TRACE_ID);
+
+  const extraction = createDataset({
+    seed: 1,
+    now: NOW,
+    traces: 2000,
+    profile: EXTRACTION_STORY_PROFILE,
+  });
+  const nordic = "invoice-2026-0521.pdf (2 pages)";
+  const nordicIndex = extraction.traces.findIndex(
+    (trace, index) =>
+      isEligibleTrace(EXTRACTION_STORY_PROFILE, trace, index) &&
+      trace.input_preview === nordic &&
+      trace.tags.includes("re-extracted"),
+  );
+  expect(nordicIndex).toBe(40);
+  const invoice = await run({ source: { prompt: { name: "extract-invoice", version: 6 } } });
+  expect(invoice[0]?.data.trace_id).toBe(extraction.traces[nordicIndex]?.trace_id);
+  expect(invoice[0]?.data.trace_id).toBe("a0000000000000000000000000000028");
+});
+
+it("answers support-reply v3 with the export answer, and v2 with the schedule answer only for the schedule question", async () => {
+  const schedule = { prompt: { name: "support-reply", version: 2 } };
+  const [v3, v2Schedule, v2Other] = await Promise.all([
+    run({ model: "gpt-4o", source: { prompt: { name: "support-reply", version: 3 } } }),
+    run({ model: "gpt-4o", variables: { question: SCHEDULE_QUESTION }, source: schedule }),
+    run({ model: "gpt-4o", variables: { question: "Okay, thanks." }, source: schedule }),
+  ]);
+
+  expect(streamed(v3)).toBe(
+    "cetra can't schedule exports yet. You can export by hand any time from the Traces page with Export → CSV, or call the export API from your own weekly job.",
+  );
+  expect(doneOf(v3)).toMatchObject({
+    usage: { input: 1060, output: 52 },
+    cost_usd: 0.0042,
+    latency_ms: 1300,
+    ttft_ms: 300,
+  });
+
+  expect(streamed(v2Schedule)).toBe(SCHEDULE_ANSWER);
+  expect(doneOf(v2Schedule)).toMatchObject({
+    usage: { input: 1040, output: 24 },
+    cost_usd: 0.0035,
+    latency_ms: 1100,
+    ttft_ms: 280,
+  });
+
+  expect(streamed(v2Other)).toBe(SUPPORT_TEXT);
+  expect(doneOf(v2Other)).toMatchObject({
+    usage: { input: 88, output: 44 },
+    cost_usd: 0.00066,
+  });
+});
+
+it("opens the support schedule turn, the third turn of sess-0142, from both support answers", async () => {
+  const dataset = createDataset({
+    seed: 1,
+    now: NOW,
+    traces: 2000,
+    profile: SUPPORT_STORY_PROFILE,
+  });
+  expect(dataset.traces[9]?.trace_id).toBe("a0000000000000000000000000000009");
+  expect(dataset.traces[9]?.input_preview).toBe(SCHEDULE_QUESTION);
+
+  const v3 = await run({ source: { prompt: { name: "support-reply", version: 3 } } });
+  expect(v3[0]?.data.trace_id).toBe("a0000000000000000000000000000009");
+  const v2 = await run({
+    variables: { question: SCHEDULE_QUESTION },
+    source: { prompt: { name: "support-reply", version: 2 } },
+  });
+  expect(v2[0]?.data.trace_id).toBe("a0000000000000000000000000000009");
 });

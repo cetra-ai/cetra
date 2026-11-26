@@ -30,23 +30,64 @@ function shotOf(name: string): ImageMetadata {
 
 const panels = panelsOf(picture);
 const section = pictureById(picture).section;
+// A shared picture is one shot for every story: no story picker, so the page's pickers skip it.
+const shared = pictureById(picture).shared !== undefined;
+const [only] = panels;
+// A panel with a start scrolls in a frame as tall as the tallest other panel's picture (CSS px: the shots are 2x),
+// so it never sets the chapter's height.
+const tallest = Math.max(
+  0,
+  ...panels
+    .filter((panel) => panel.start === undefined)
+    .map((panel) => shotOf(panel.shot).height / 2),
+);
 ---
 
-<div
-  class:list={["story", `story--${align}`]}
-  data-story-picker
->
-  <Tabs id={`story-${picture}`} label={`Story: ${section}`} labels={STORIES.map((story) => story.label)}>
-    {panels.map((panel, i) => (
-      <div data-tab-panel data-story={panel.story} hidden={i !== 0}>
-        <Frame src={shotOf(panel.shot)} alt={panel.alt} label={panel.label} fade={fade} eager={eager && i === 0} />
-        <p class="caption">{panel.caption}</p>
-      </div>
-    ))}
-  </Tabs>
-</div>
+{shared && only ? (
+  <div class:list={["story", `story--${align}`]}>
+    <Frame src={shotOf(only.shot)} alt={only.alt} label={only.label} fade={fade} eager={eager} />
+    <p class="caption">{only.caption}</p>
+  </div>
+) : (
+  <div class:list={["story", `story--${align}`]} data-story-picker>
+    <Tabs id={`story-${picture}`} label={`Story: ${section}`} labels={STORIES.map((story) => story.label)}>
+      {panels.map((panel, i) => (
+        <div data-tab-panel data-story={panel.story} hidden={i !== 0}>
+          <Frame
+            src={shotOf(panel.shot)}
+            alt={panel.alt}
+            label={panel.label}
+            fade={fade && panel.start === undefined}
+            eager={eager && i === 0}
+            height={panel.start === undefined ? undefined : Math.round(tallest)}
+            start={panel.start}
+          />
+          <p class="caption">{panel.caption}</p>
+        </div>
+      ))}
+    </Tabs>
+  </div>
+)}
 
 <style>
+  /* Every story's panel sits in the same grid cell, and the hidden ones keep their box (visibility, not display):
+     the cell is as tall as the tallest panel, so switching stories never moves the page, and each frame keeps its
+     picture's own size. */
+  .story :global([data-tabs]) {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .story :global([data-tabs] > .tablist) {
+    grid-row: 1;
+  }
+  .story :global([data-tabs] > [data-tab-panel]) {
+    grid-row: 2;
+    grid-column: 1;
+  }
+  .story :global([data-tabs] > [data-tab-panel][hidden]) {
+    display: block;
+    visibility: hidden;
+  }
   .story :global(.tablist) {
     justify-content: safe center;
     border-bottom: 0;

@@ -1,6 +1,6 @@
 # Marketing site (cetra.sh)
 
-The design is `docs/website/00-design.md`. It has fifteen milestones, M1–M15, each with its own plan written just before it starts. M6 (benchmarks) waits for the benchmark and is not planned yet.
+The design is `docs/website/00-design.md`. It has nineteen milestones, M1–M19, each with its own plan written just before it starts. M6 (benchmarks) waits for the benchmark and is not planned yet.
 
 | Milestone | Plan | Status |
 |---|---|---|
@@ -19,6 +19,10 @@ The design is `docs/website/00-design.md`. It has fifteen milestones, M1–M15, 
 | M13 Voice story, trace list, issues, alerts | [`13-m13-voice-issues-alerts.md`](13-m13-voice-issues-alerts.md) | done (V1, L1, S1, V2) |
 | M14 Prompts, dashboards, queues, assistant | [`14-m14-prompts-dashboards-queues-assistant.md`](14-m14-prompts-dashboards-queues-assistant.md) | done (P0–P5) |
 | M15 Story screenshots and switcher | [`15-m15-story-shots-and-switcher.md`](15-m15-story-shots-and-switcher.md) | done (Q0–Q2) |
+| M16 A mock project per story | done (P1–P6) | [16-m16-story-projects.md](16-m16-story-projects.md) |
+| M17 Story data | planned | [17-m17-story-data.md](17-m17-story-data.md) |
+| M18 Pictures that need no UI change | done | [18-m18-story-pictures.md](18-m18-story-pictures.md) |
+| M19 Pictures that wait for the UI | done | [19-m19-ui-pictures.md](19-m19-ui-pictures.md) |
 
 ## Branches
 

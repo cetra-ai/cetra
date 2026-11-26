@@ -1,6 +1,7 @@
 import { type HttpHandler, HttpResponse, http } from "msw";
 import type { Schema } from "@/api/types";
 import { mulberry32 } from "@/mocks/generated/random";
+import { projectOfRef } from "@/mocks/projects";
 
 /**
  * Experiments for `?mock=large`: 12 runs on the fixture dataset `faq` (the last one still running)
@@ -83,7 +84,7 @@ type RunSpec = {
   running: boolean;
 };
 
-type Run = {
+export type Run = {
   experiment: Experiment;
   /** The rows the run holds so far, by item id, one repetition each. */
   rows: ResultRow[];
@@ -130,8 +131,16 @@ function uuidOf(n: number): string {
   return `01900000-0000-7000-8000-${n.toString(16).padStart(12, "0")}`;
 }
 
-function itemId(datasetOffset: number, index: number): string {
+export function itemId(datasetOffset: number, index: number): string {
   return uuidOf(0xb0000 + datasetOffset * 0x100 + index);
+}
+
+/**
+ * A run's metadata as the mock stores it: the fields of the run's prompt and model (and version).
+ * The schema types a metadata value as `never`, so the cast is kept here, once.
+ */
+export function runMetadata(fields: Record<string, string | number>): Experiment["metadata"] {
+  return fields as unknown as Experiment["metadata"];
 }
 
 function buildRun(spec: RunSpec, ordinal: number): Run {
@@ -143,8 +152,7 @@ function buildRun(spec: RunSpec, ordinal: number): Run {
     name: spec.name,
     dataset_name: spec.dataset.name,
     dataset_version: spec.dataset.version,
-    // The schema types a metadata value as `never`; the mock stores the strings of a run.
-    metadata: { model: spec.model, prompt: spec.prompt } as unknown as Experiment["metadata"],
+    metadata: runMetadata({ model: spec.model, prompt: spec.prompt }),
     repetitions: 1,
     item_count: ITEM_COUNT,
     result_count: rows.length,
@@ -209,7 +217,7 @@ function round(value: number, digits: number): number {
 
 // Summaries, as the server computes them (rule 4 and rule 5).
 
-function summaryOf(run: Run): ExperimentSummary {
+export function summaryOf(run: Run): ExperimentSummary {
   const types = new Map<string, ScoreDataType>();
   for (const row of run.rows) {
     for (const [name, score] of Object.entries(row.scores)) {
@@ -447,7 +455,7 @@ function compareRow(
 
 type Loaded = { run: Run; cells: Map<string, Cell> };
 
-function compareBody(
+export function compareBody(
   runs: Run[],
   threshold: number,
   only: CompareOnly | undefined,
@@ -556,18 +564,27 @@ function warningsOf(loaded: Loaded[], baseline: Map<string, Cell>): string[] {
 
 // Handlers.
 
-/** The experiment handlers of `?mock=large`. They come before the fixture handlers. */
-export function experimentHandlers(): HttpHandler[] {
+/**
+ * The experiment handlers of `?mock=large`. They come before the fixture handlers. With `project`
+ * (an API ref, `acme/<slug>`) they answer only the support project, the one whose runs these are;
+ * the other projects get none. Without it they answer every project, as before.
+ */
+export function experimentHandlers(project?: string): HttpHandler[] {
+  if (project !== undefined && projectOfRef(project)?.story !== "support") {
+    return [];
+  }
+  const prefix =
+    project === undefined ? PROJECT : `/api/v1/projects/${encodeURIComponent(project)}`;
   return [
-    http.get(`${PROJECT}/experiments`, ({ request }) => listExperiments(new URL(request.url))),
-    http.get(`${PROJECT}/experiments/compare`, ({ request }) => compareRoute(new URL(request.url))),
-    http.get(`${PROJECT}/experiments/summaries`, ({ request }) =>
+    http.get(`${prefix}/experiments`, ({ request }) => listExperiments(new URL(request.url))),
+    http.get(`${prefix}/experiments/compare`, ({ request }) => compareRoute(new URL(request.url))),
+    http.get(`${prefix}/experiments/summaries`, ({ request }) =>
       summariesRoute(new URL(request.url)),
     ),
-    http.get(`${PROJECT}/experiments/:id/results`, ({ request, params }) =>
+    http.get(`${prefix}/experiments/:id/results`, ({ request, params }) =>
       resultsRoute(new URL(request.url), text(params.id)),
     ),
-    http.get(`${PROJECT}/experiments/:id`, ({ params }) => oneExperiment(text(params.id))),
+    http.get(`${prefix}/experiments/:id`, ({ params }) => oneExperiment(text(params.id))),
   ];
 }
 

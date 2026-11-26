@@ -3,11 +3,23 @@ import type { Schema } from "@/api/types";
 import type { Dashboard, Widget } from "@/lib/dashboards/types";
 import { validateDashboard } from "@/lib/dashboards/validate";
 import { dashboardHandlers, seedDashboards } from "@/mocks/dashboards";
-import { createDataset, visibleTraces } from "@/mocks/generated/dataset";
+import {
+  createDataset,
+  type Dataset,
+  type Profile,
+  SUPPORT_PROFILE,
+  visibleTraces,
+} from "@/mocks/generated/dataset";
 import { largeHandlers } from "@/mocks/generated/handlers";
+import { CODING_PROFILE, EXTRACTION_PROFILE, VOICE_PROFILE } from "@/mocks/generated/profiles";
 import { tracePredicate } from "@/mocks/generated/widget-query";
 import { server } from "@/mocks/node";
-import { STORY_DASHBOARD_IDS, storyDashboards } from "@/mocks/story-dashboards";
+import { type StoryId, storyProject } from "@/mocks/projects";
+import {
+  STORY_DASHBOARD_IDS,
+  STORY_DASHBOARD_STORIES,
+  storyDashboards,
+} from "@/mocks/story-dashboards";
 
 const NOW = Date.parse("2026-11-19T12:00:00.000Z");
 const DAY_MS = 86_400_000;
@@ -17,12 +29,27 @@ const RANGE = {
   to: new Date(NOW + DAY_MS).toISOString(),
 };
 
+const PROFILES: Record<StoryId, Profile> = {
+  support: SUPPORT_PROFILE,
+  coding: CODING_PROFILE,
+  voice: VOICE_PROFILE,
+  extraction: EXTRACTION_PROFILE,
+};
+
+/** A story's dataset of `traces` traces, built with the story's profile. */
+function datasetOf(story: StoryId, traces: number): Dataset {
+  return createDataset({ seed: 1, now: NOW, traces, profile: PROFILES[story] });
+}
+
+/** The API base of a story's project: `/api/v1/projects/<encoded ref>`. */
+function baseOf(story: StoryId): string {
+  return `${window.location.origin}/api/v1/projects/${encodeURIComponent(storyProject(story).ref)}`;
+}
+
 type Body = Schema<"WidgetQueryRequest">;
 
-const dataset = createDataset({ seed: 1, now: NOW, traces: 5000 });
-
 beforeEach(() => {
-  server.use(...largeHandlers(dataset));
+  server.use(...largeHandlers(datasetOf("support", 5000)));
 });
 
 function queryOf(widget: Widget): NonNullable<Widget["query"]> {
@@ -66,11 +93,14 @@ function inRange(start: string): boolean {
   return time >= Date.parse(RANGE.from) && time < Date.parse(RANGE.to);
 }
 
-/** The visible traces in the range that carry `tag`. */
-function taggedTraces(tag: string) {
-  return visibleTraces(dataset.traces, false, false).filter(
-    (trace) => inRange(trace.start_time) && trace.tags.includes(tag),
-  );
+/** The visible traces of `dataset` in the range. */
+function inRangeTraces(dataset: Dataset) {
+  return visibleTraces(dataset.traces, false, false).filter((trace) => inRange(trace.start_time));
+}
+
+/** The visible traces of `dataset` in the range that carry `tag`. */
+function taggedTraces(dataset: Dataset, tag: string) {
+  return inRangeTraces(dataset).filter((trace) => trace.tags.includes(tag));
 }
 
 it("the story dashboards have the planned ids, names and widget titles", () => {
@@ -79,6 +109,7 @@ it("the story dashboards have the planned ids, names and widget titles", () => {
     codeAgentHealth: "01900000-0000-7000-8000-000000570402",
     voiceLatency: "01900000-0000-7000-8000-000000570403",
     invoiceExtraction: "01900000-0000-7000-8000-000000570404",
+    codingAgents: "01900000-0000-7000-8000-000000570405",
   });
   const dashboards = storyDashboards();
   expect(dashboards.map((dashboard) => dashboard.id)).toEqual([
@@ -86,19 +117,27 @@ it("the story dashboards have the planned ids, names and widget titles", () => {
     "01900000-0000-7000-8000-000000570402",
     "01900000-0000-7000-8000-000000570403",
     "01900000-0000-7000-8000-000000570404",
+    "01900000-0000-7000-8000-000000570405",
   ]);
-  expect(new Set(dashboards.map((dashboard) => dashboard.id)).size).toBe(4);
+  expect(new Set(dashboards.map((dashboard) => dashboard.id)).size).toBe(5);
   expect(dashboards.map((dashboard) => dashboard.name)).toEqual([
-    "Answer quality",
+    "Prompt quality by version",
     "Code agent health",
     "Voice latency",
     "Invoice extraction",
+    "Coding agents",
   ]);
   expect(dashboards.map((dashboard) => dashboard.definition.widgets.map((w) => w.title))).toEqual([
-    ["Correctness by day", "Answers per day", "Cost per answer", "Answers by model"],
+    [
+      "Correctness by day",
+      "Answers by release",
+      "Cost per answer by release",
+      "p95 latency by release",
+    ],
     ["Failed runs per day", "Error rate", "Cost per run", "p95 duration"],
     ["p95 reply time", "Reply time by day", "Calls over 3 s", "Calls per day"],
     ["Invoices per day", "Schema check failures", "Cost per invoice", "Invoices by model"],
+    ["Cost by repository", "Cost by coding agent", "Cost per repository"],
   ]);
   for (const dashboard of dashboards) {
     for (const widget of dashboard.definition.widgets) {
@@ -130,7 +169,7 @@ it("storyDashboards returns fresh objects", () => {
   firstWidgets.pop();
   first[0] = { ...first[0], name: "changed" } as Dashboard;
   const second = storyDashboards();
-  expect(second[0]?.name).toBe("Answer quality");
+  expect(second[0]?.name).toBe("Prompt quality by version");
   expect(second[0]?.definition.widgets).toHaveLength(4);
 });
 
@@ -140,28 +179,35 @@ it("seedDashboards still returns only the fixture dashboard", () => {
 
 it("the browser mock store lists the story dashboards after the fixture one", async () => {
   server.use(...dashboardHandlers([...seedDashboards(), ...storyDashboards()]));
-  const list = await fetch(`${PROJECT}/dashboards`);
-  const body = (await list.json()) as { data: { name: string }[] };
-  expect(body.data.map((dashboard) => dashboard.name)).toEqual([
-    "Answer quality",
-    "Code agent health",
-    "Invoice extraction",
-    "Support overview",
-    "Voice latency",
-  ]);
   for (const dashboard of storyDashboards()) {
-    const one = await fetch(`${PROJECT}/dashboards/${dashboard.id}`);
+    const story = STORY_DASHBOARD_STORIES[dashboard.id];
+    if (story === undefined) {
+      throw new Error(`no story of dashboard ${dashboard.id}`);
+    }
+    const list = await fetch(`${baseOf(story)}/dashboards`);
+    const body = (await list.json()) as { data: { name: string }[] };
+    const inStory = storyDashboards()
+      .filter((candidate) => STORY_DASHBOARD_STORIES[candidate.id] === story)
+      .map((candidate) => candidate.name);
+    expect(body.data.map((item) => item.name)).toEqual([...inStory, "Support overview"].sort());
+
+    const one = await fetch(`${baseOf(story)}/dashboards/${dashboard.id}`);
     const stored = (await one.json()) as Dashboard;
-    expect(stored.definition.widgets).toHaveLength(4);
+    expect(stored.definition.widgets).toHaveLength(dashboard.definition.widgets.length);
     expect(stored.name).toBe(dashboard.name);
   }
 });
 
 it("the large mock answers every widget of every story dashboard with data", async () => {
   for (const dashboard of storyDashboards()) {
+    const story = STORY_DASHBOARD_STORIES[dashboard.id];
+    if (story === undefined) {
+      throw new Error(`no story of dashboard ${dashboard.id}`);
+    }
+    server.use(...largeHandlers(datasetOf(story, 5000)));
     for (const widget of dashboard.definition.widgets) {
       const type = widget.chart?.type;
-      if (type === "bar_h") {
+      if (type === "bar_h" || type === "table") {
         const answer = await ask(widget, "total");
         expect(answer.status).toBe(200);
         const body = answer.json as { shape: string; rows: { values: unknown[] }[] };
@@ -193,6 +239,8 @@ it("the large mock answers every widget of every story dashboard with data", asy
 });
 
 it("the tag filter reaches only tagged traces", async () => {
+  const dataset = datasetOf("voice", 5000);
+  server.use(...largeHandlers(dataset));
   const calls = storyDashboard(STORY_DASHBOARD_IDS.voiceLatency).definition.widgets[3];
   if (calls === undefined) {
     throw new Error("no widget");
@@ -202,24 +250,31 @@ it("the tag filter reaches only tagged traces", async () => {
   const counted = body.series
     .flatMap((series) => series.points)
     .reduce((sum, point) => sum + (point.value ?? 0), 0);
-  expect(counted).toBe(taggedTraces("voice").length);
+  expect(counted).toBe(taggedTraces(dataset, "voice").length);
 });
 
 it("the rate widgets match the dataset", async () => {
+  const coding = datasetOf("coding", 5000);
+  server.use(...largeHandlers(coding));
   const code = storyDashboard(STORY_DASHBOARD_IDS.codeAgentHealth).definition.widgets[1];
-  const voice = storyDashboard(STORY_DASHBOARD_IDS.voiceLatency).definition.widgets[2];
-  if (code === undefined || voice === undefined) {
+  if (code === undefined) {
     throw new Error("no widget");
   }
-  const retry = taggedTraces("retry");
+  const traces = inRangeTraces(coding);
   const errorRate = (await ask(code, "total")).json as { rows: { values: number[] }[] };
   expect(errorRate.rows[0]?.values[0]).toBeCloseTo(
-    retry.filter((trace) => trace.error_count > 0).length / retry.length,
+    traces.filter((trace) => trace.error_count > 0).length / traces.length,
     6,
   );
 
-  const voiceCalls = taggedTraces("voice");
-  const overThree = (await ask(voice, "total")).json as { rows: { values: number[] }[] };
+  const voice = datasetOf("voice", 5000);
+  server.use(...largeHandlers(voice));
+  const voiceWidget = storyDashboard(STORY_DASHBOARD_IDS.voiceLatency).definition.widgets[2];
+  if (voiceWidget === undefined) {
+    throw new Error("no widget");
+  }
+  const voiceCalls = taggedTraces(voice, "voice");
+  const overThree = (await ask(voiceWidget, "total")).json as { rows: { values: number[] }[] };
   expect(overThree.rows[0]?.values[0]).toBeCloseTo(
     voiceCalls.filter((trace) => trace.duration_ns > 3_000_000_000).length / voiceCalls.length,
     6,
@@ -227,25 +282,58 @@ it("the rate widgets match the dataset", async () => {
 });
 
 it("the hero traces are counted", () => {
-  // Each story's second widget carries its tag filter (the scores widget is the first one).
-  const heroes: [number, string][] = [
-    [3, STORY_DASHBOARD_IDS.answerQuality],
-    [4, STORY_DASHBOARD_IDS.codeAgentHealth],
-    [5, STORY_DASHBOARD_IDS.voiceLatency],
-    [6, STORY_DASHBOARD_IDS.invoiceExtraction],
+  // Each story's second widget carries its tag filter (the scores widget is the first one), except
+  // the coding and support ones: their widgets count every trace of the project.
+  const heroes: [StoryId, number, string][] = [
+    ["support", 3, STORY_DASHBOARD_IDS.answerQuality],
+    ["coding", 4, STORY_DASHBOARD_IDS.codeAgentHealth],
+    ["voice", 5, STORY_DASHBOARD_IDS.voiceLatency],
+    ["extraction", 6, STORY_DASHBOARD_IDS.invoiceExtraction],
   ];
-  for (const [index, id] of heroes) {
+  for (const [story, index, id] of heroes) {
     const second = storyDashboard(id).definition.widgets[1];
     if (second === undefined) {
       throw new Error(`no second widget in ${id}`);
     }
-    const filter = queryOf(second).filter;
-    const predicate = filter === undefined ? undefined : tracePredicate(filter);
-    const trace = dataset.traces[index];
+    const trace = datasetOf(story, 5000).traces[index];
     expect(trace).toBeDefined();
     if (trace === undefined) {
       throw new Error(`no trace ${index}`);
     }
+    const filter = queryOf(second).filter;
+    if (story === "coding" || story === "support") {
+      expect(filter).toBeUndefined();
+      if (story === "coding") {
+        expect(trace.error_count).toBeGreaterThan(0);
+      }
+      continue;
+    }
+    const predicate = filter === undefined ? undefined : tracePredicate(filter);
     expect(predicate?.(trace)).toBe(true);
+  }
+});
+
+it("the coding agents dashboard's cost by repository sums each repository's cost from the runs' metadata", async () => {
+  const coding = datasetOf("coding", 5000);
+  server.use(...largeHandlers(coding));
+  const byRepository = storyDashboard(STORY_DASHBOARD_IDS.codingAgents).definition.widgets[0];
+  if (byRepository === undefined) {
+    throw new Error("no widget");
+  }
+  const answer = await ask(byRepository, "total");
+  expect(answer.status).toBe(200);
+  const body = answer.json as { rows: { group?: string; values: number[] }[] };
+  const expected = new Map<string, number>();
+  for (const trace of inRangeTraces(coding)) {
+    const repository = trace.metadata?.repository;
+    if (repository !== undefined) {
+      expected.set(repository, (expected.get(repository) ?? 0) + (trace.cost_total ?? 0));
+    }
+  }
+  expect(body.rows.map((row) => row.group)).toEqual(
+    [...expected.entries()].sort((left, right) => right[1] - left[1]).map(([name]) => name),
+  );
+  for (const row of body.rows) {
+    expect(row.values[0]).toBeCloseTo(expected.get(row.group ?? "") ?? Number.NaN, 6);
   }
 });

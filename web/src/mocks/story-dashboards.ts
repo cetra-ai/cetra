@@ -1,4 +1,5 @@
 import type { Dashboard, Widget, WidgetQuery } from "@/lib/dashboards/types";
+import type { StoryId } from "./projects";
 
 /**
  * The homepage stories' dashboards (design §12, M14), one per story. Each widget carries its
@@ -17,7 +18,17 @@ export const STORY_DASHBOARD_IDS = {
   codeAgentHealth: "01900000-0000-7000-8000-000000570402",
   voiceLatency: "01900000-0000-7000-8000-000000570403",
   invoiceExtraction: "01900000-0000-7000-8000-000000570404",
+  codingAgents: "01900000-0000-7000-8000-000000570405",
 } as const;
+
+/** The story of each story dashboard, by dashboard id: the dashboard is served in that story's project only. */
+export const STORY_DASHBOARD_STORIES: Readonly<Record<string, StoryId>> = {
+  [STORY_DASHBOARD_IDS.answerQuality]: "support",
+  [STORY_DASHBOARD_IDS.codeAgentHealth]: "coding",
+  [STORY_DASHBOARD_IDS.voiceLatency]: "voice",
+  [STORY_DASHBOARD_IDS.invoiceExtraction]: "extraction",
+  [STORY_DASHBOARD_IDS.codingAgents]: "coding",
+};
 
 /** The 2x2 grid of a story dashboard: widgets 0 and 1 on the first row, 2 and 3 on the second. */
 const SLOTS = [
@@ -31,10 +42,18 @@ function chart(
   slot: 0 | 1 | 2 | 3,
   id: string,
   title: string,
-  type: "line" | "bar" | "bar_h" | "number",
+  type: "line" | "bar" | "bar_h" | "number" | "area",
   query: WidgetQuery,
+  stacked = false,
 ): Widget {
-  return { id, title, layout: { ...SLOTS[slot] }, kind: "chart", chart: { type }, query };
+  return {
+    id,
+    title,
+    layout: { ...SLOTS[slot] },
+    kind: "chart",
+    chart: stacked ? { type, stacked } : { type },
+    query,
+  };
 }
 
 function dashboard(id: string, name: string, description: string, widgets: Widget[]): Dashboard {
@@ -51,9 +70,9 @@ function dashboard(id: string, name: string, description: string, widgets: Widge
   };
 }
 
-const EMAIL = "tags @> ['email']";
-const RETRY = "tags @> ['retry']";
 const VOICE = "tags @> ['voice']";
+/** The runs `cetra agents setup` reported (spec 02 § Coding agents). */
+const REPOSITORY = "metadata['repository'] IS NOT NULL";
 const BILLING = "tags @> ['billing']";
 
 /** The story dashboards, in story order. Fresh objects on every call. */
@@ -61,29 +80,28 @@ export function storyDashboards(): Dashboard[] {
   return [
     dashboard(
       STORY_DASHBOARD_IDS.answerQuality,
-      "Answer quality",
-      "Support answers: quality, volume and cost.",
+      "Prompt quality by version",
+      "Correctness, answers, cost and latency of each release of the support prompts.",
       [
         chart(0, "correctness-by-day", "Correctness by day", "line", {
           source: "scores",
           filter: "name = 'correctness'",
           measures: [{ agg: "avg", field: "value_num", label: "Correctness" }],
         }),
-        chart(1, "answers-per-day", "Answers per day", "bar", {
+        chart(1, "answers-by-release", "Answers by release", "bar_h", {
           source: "traces",
-          filter: EMAIL,
           measures: [{ agg: "count", label: "Answers" }],
+          breakdown: { field: "release", limit: 5 },
         }),
-        chart(2, "cost-per-answer", "Cost per answer", "number", {
+        chart(2, "cost-per-answer-by-release", "Cost per answer by release", "bar_h", {
           source: "traces",
-          filter: EMAIL,
           measures: [{ agg: "avg", field: "cost_total", label: "Cost per answer" }],
+          breakdown: { field: "release", limit: 5 },
         }),
-        chart(3, "answers-by-model", "Answers by model", "bar_h", {
+        chart(3, "p95-latency-by-release", "p95 latency by release", "bar_h", {
           source: "traces",
-          filter: EMAIL,
-          measures: [{ agg: "count", label: "Answers" }],
-          breakdown: { field: "models", limit: 5 },
+          measures: [{ agg: "p95", field: "duration_ns", label: "p95 latency" }],
+          breakdown: { field: "release", limit: 5 },
         }),
       ],
     ),
@@ -94,22 +112,18 @@ export function storyDashboards(): Dashboard[] {
       [
         chart(0, "failed-runs-per-day", "Failed runs per day", "bar", {
           source: "traces",
-          filter: RETRY,
           measures: [{ agg: "count", where: "status = 'error'", label: "Failed runs" }],
         }),
         chart(1, "error-rate", "Error rate", "number", {
           source: "traces",
-          filter: RETRY,
           measures: [{ agg: "rate", where: "error_count > 0", label: "Error rate" }],
         }),
         chart(2, "cost-per-run", "Cost per run", "line", {
           source: "traces",
-          filter: RETRY,
           measures: [{ agg: "avg", field: "cost_total", label: "Cost per run" }],
         }),
         chart(3, "p95-duration", "p95 duration", "number", {
           source: "traces",
-          filter: RETRY,
           measures: [{ agg: "p95", field: "duration_ns", label: "p95 duration" }],
         }),
       ],
@@ -167,6 +181,50 @@ export function storyDashboards(): Dashboard[] {
           measures: [{ agg: "count", label: "Invoices" }],
           breakdown: { field: "models", limit: 5 },
         }),
+      ],
+    ),
+    dashboard(
+      STORY_DASHBOARD_IDS.codingAgents,
+      "Coding agents",
+      "What the coding agents cost, by repository and by agent.",
+      [
+        // Two rows taller than a slot: its legend of five long repository names takes three lines.
+        {
+          ...chart(
+            0,
+            "cost-by-repository",
+            "Cost by repository",
+            "area",
+            {
+              source: "traces",
+              filter: REPOSITORY,
+              measures: [{ agg: "sum", field: "cost_total", label: "Cost" }],
+              breakdown: { field: "metadata['repository']", limit: 5, other: false },
+            },
+            true,
+          ),
+          layout: { x: 0, y: 0, w: 30, h: 8 },
+        },
+        chart(1, "cost-by-coding-agent", "Cost by coding agent", "bar_h", {
+          source: "traces",
+          filter: REPOSITORY,
+          measures: [{ agg: "sum", field: "cost_total", label: "Cost" }],
+          breakdown: { field: "metadata['coding_agent']", limit: 5, other: false },
+        }),
+        // Under the chart: each repository's cost over the range, with its share of the total.
+        {
+          id: "cost-per-repository",
+          title: "Cost per repository",
+          layout: { x: 0, y: 8, w: 30, h: 4 },
+          kind: "chart",
+          chart: { type: "table", share: true },
+          query: {
+            source: "traces",
+            filter: REPOSITORY,
+            measures: [{ agg: "sum", field: "cost_total", label: "Cost" }],
+            breakdown: { field: "metadata['repository']", limit: 5, other: false },
+          },
+        },
       ],
     ),
   ];

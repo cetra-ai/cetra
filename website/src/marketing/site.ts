@@ -52,7 +52,7 @@ export interface NavItem {
 }
 
 export const NAV: NavItem[] = [
-  { label: "Product", href: "/#product", route: "/" },
+  { label: "Product", href: "/", route: "/" },
   { label: "Pricing", href: "/pricing/", route: "/pricing/" },
   { label: "Integrations", href: "/integrations/", route: "/integrations/" },
   { label: "Compare", href: "/compare/", route: "/compare/" },

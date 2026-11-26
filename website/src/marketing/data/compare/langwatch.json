@@ -7,7 +7,9 @@
   "facts": {
     "selfHostStack": {
       "value": "App, Workers, NLP and LangEvals services, plus ClickHouse, PostgreSQL and Redis; object storage for older data",
-      "sources": ["https://langwatch.ai/docs/self-hosting/overview"]
+      "sources": ["https://langwatch.ai/docs/self-hosting/overview"],
+      "status": "yes",
+      "short": "8 services incl. ClickHouse"
     },
     "selfHostLicence": {
       "value": "Apache 2.0 core; enterprise/ directory is commercial. SSO, RBAC, SCIM, audit logs, extended retention need a licence",
@@ -15,74 +17,115 @@
         "https://langwatch.ai/docs/self-hosting/licensing",
         "https://github.com/langwatch/langwatch/blob/main/LICENSE.md",
         "https://github.com/langwatch/langwatch/blob/main/NOTICE"
-      ]
+      ],
+      "status": "partial",
+      "short": "Apache core; SSO, RBAC need licence"
     },
     "cloudFree": {
       "value": "Developer plan, EUR 0: 50k events/month, 14-day data access, 2 users",
-      "sources": ["https://langwatch.ai/pricing"]
+      "sources": ["https://langwatch.ai/pricing"],
+      "status": "yes",
+      "short": "Free: 50k events/mo"
     },
     "cloudPaidFrom": {
       "value": "Growth: EUR 29 per core-seat per month; 200k events included, then EUR 5 per 100k; 30-day retention",
-      "sources": ["https://langwatch.ai/pricing"]
+      "sources": ["https://langwatch.ai/pricing"],
+      "status": "yes",
+      "short": "EUR 29 per seat/mo"
     },
     "otel": {
       "value": "OTLP over HTTP (protobuf or JSON) at /api/otel/v1/traces; OTLP/gRPC not supported",
-      "sources": ["https://langwatch.ai/docs/integration/opentelemetry/guide"]
+      "sources": ["https://langwatch.ai/docs/integration/opentelemetry/guide"],
+      "status": "partial",
+      "short": "HTTP only, no gRPC"
     },
     "sql": {
       "value": "Yes: LangWatchQL analytics SQL via CLI, REST API and MCP; no SQL editor in the UI documented",
-      "sources": ["https://langwatch.ai/docs/features/querying-your-data"]
+      "sources": ["https://langwatch.ai/docs/features/querying-your-data"],
+      "status": "partial",
+      "short": "SQL via CLI, API, MCP; no UI"
     },
     "mcp": {
       "value": "Yes: search and inspect traces, query analytics, manage prompts, evaluators, monitors, experiments, annotations",
-      "sources": ["https://langwatch.ai/docs/integration/mcp"]
+      "sources": ["https://langwatch.ai/docs/integration/mcp"],
+      "status": "yes",
+      "short": "MCP: traces, analytics, prompts"
     },
     "onlineEvals": {
       "value": "Yes: monitors run evaluators (including LLM-as-judge) on production traces, with sampling and preconditions",
-      "sources": ["https://langwatch.ai/docs/evaluations/online-evaluation/overview"]
+      "sources": ["https://langwatch.ai/docs/evaluations/online-evaluation/overview"],
+      "status": "yes",
+      "short": "Monitors with sampling"
     },
     "datasetsExperiments": {
       "value": "Yes: datasets (CSV/JSON upload, from traces) and an experiments workbench, SDK and CI runs",
       "sources": [
         "https://langwatch.ai/docs/datasets/overview",
         "https://langwatch.ai/docs/evaluations/experiments/overview"
-      ]
+      ],
+      "status": "yes",
+      "short": "Datasets and experiments workbench"
     },
     "promptManagement": {
       "value": "Yes: versioned prompt library with tags, playground, CLI and API access",
-      "sources": ["https://langwatch.ai/docs/prompt-management/overview"]
+      "sources": ["https://langwatch.ai/docs/prompt-management/overview"],
+      "status": "yes",
+      "short": "Versioned prompts, playground"
     },
     "gateway": {
       "value": "Yes: AI Gateway with OpenAI- and Anthropic-compatible endpoints, virtual keys, budgets, rate limits, guardrails",
-      "sources": ["https://github.com/langwatch/langwatch/blob/main/docs/ai-gateway/overview.mdx"]
+      "sources": ["https://github.com/langwatch/langwatch/blob/main/docs/ai-gateway/overview.mdx"],
+      "status": "yes",
+      "short": "AI Gateway, virtual keys, budgets"
     },
     "alerts": {
       "value": "Alerts on graph thresholds, per-trace automations, scheduled reports; email, Slack, webhook",
-      "sources": ["https://github.com/langwatch/langwatch/blob/main/docs/features/automations.mdx"]
+      "sources": ["https://github.com/langwatch/langwatch/blob/main/docs/features/automations.mdx"],
+      "status": "yes",
+      "short": "Email, Slack, webhook"
     },
     "issueDetection": {
       "value": "Topic clustering groups traces into topics and subtopics about once a day, on a model you choose",
-      "sources": ["https://langwatch.ai/docs/features/topic-clustering"]
+      "sources": ["https://langwatch.ai/docs/features/topic-clustering"],
+      "status": "partial",
+      "short": "Daily topic clustering"
     },
     "annotationQueues": {
       "value": "Yes: queues with participants and score types; reviewers work an inbox item by item, then send traces to a dataset",
       "sources": [
         "https://langwatch.ai/docs/annotations/queues",
         "https://langwatch.ai/docs/annotations/overview"
-      ]
+      ],
+      "status": "yes",
+      "short": "Queues with inbox review"
     },
     "assistant": {
       "value": "Langy: chat panel that reads traces and evals, writes Scenario tests and opens pull requests",
       "sources": [
         "https://langwatch.ai/docs/langy/overview",
         "https://langwatch.ai/docs/langy/chat"
-      ]
+      ],
+      "status": "yes",
+      "short": "Langy chat, opens pull requests"
     },
     "codingAgents": {
       "value": "Setup for Claude Code, Codex, GitHub Copilot, Gemini CLI, opencode, Grok CLI and pi; Cursor via the gateway",
-      "sources": ["https://langwatch.ai/docs/coding-agents/overview"]
+      "sources": ["https://langwatch.ai/docs/coding-agents/overview"],
+      "status": "yes",
+      "short": "7 coding agents"
     }
   },
+  "stack": [
+    "App",
+    "Workers",
+    "NLP",
+    "LangEvals",
+    "ClickHouse",
+    "PostgreSQL",
+    "Redis",
+    "Object storage"
+  ],
+  "strengths": ["selfHostStack", "sql", "issueDetection"],
   "chooseThem": [
     "Agent simulation testing (scenarios) in the same product as tracing and evals",
     "A built-in AI gateway with virtual keys and budgets alongside observability",

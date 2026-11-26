@@ -22,6 +22,34 @@ export const AREAS = [
   ["alerts", "Alerts"],
 ];
 
+/** How far a product covers an area, as the check table shows it. */
+export const STATUSES = ["yes", "partial", "no", "unknown"];
+
+/** The longest `short` label, in characters: it fits a check-table cell. */
+export const SHORT_MAX = 36;
+
+/**
+ * The areas a competitor page can lead with, and the card title each gets: what cetra does, said
+ * the same way on every page.
+ */
+export const STRENGTH_TITLES = {
+  selfHostStack: "One binary to run",
+  selfHostLicence: "An MIT core you host yourself",
+  otel: "OpenTelemetry over HTTP and gRPC",
+  sql: "SQL over every trace",
+  mcp: "An MCP server for your agents",
+  onlineEvals: "Evaluations on live traffic",
+  issueDetection: "Issues that find you",
+  annotationQueues: "Annotation queues for reviewers",
+  datasetsExperiments: "Datasets and experiments",
+  promptManagement: "Prompts with a playground",
+  assistant: "An assistant that builds for you",
+  codingAgents: "Your coding agents, traced",
+  alerts: "Alerts on cost, scores and issues",
+  cloudFree: "A free cloud tier",
+  cloudPaidFrom: "A paid plan from $30 a month",
+};
+
 /** The competitors, in page order (design §9.3). */
 export const COMPETITORS = [
   "langfuse",
@@ -118,6 +146,20 @@ export function validate(p, fileSlug, now) {
     if (length === 0) problems.push(`${area}: empty value`);
     if (length > 120) problems.push(`${area}: value is ${length} characters, the limit is 120`);
     problems.push(...textProblems(area, fact.value));
+    if (!STATUSES.includes(fact.status)) {
+      problems.push(`${area}: status must be one of ${STATUSES.join(", ")}`);
+    } else if ((fact.status === "unknown") !== isUnknown(fact)) {
+      problems.push(`${area}: status is unknown exactly when the value is Unknown`);
+    }
+    if (typeof fact.short !== "string" || fact.short.trim() === "") {
+      problems.push(`${area}: short is required`);
+    } else {
+      const shortLength = [...fact.short].length;
+      if (shortLength > SHORT_MAX) {
+        problems.push(`${area}: short is ${shortLength} characters, the limit is ${SHORT_MAX}`);
+      }
+      problems.push(...textProblems(area, fact.short));
+    }
     if (!Array.isArray(fact.sources) || fact.sources.length === 0) {
       problems.push(`${area}: no source`);
     } else if (
@@ -134,6 +176,21 @@ export function validate(p, fileSlug, now) {
   }
 
   const isStringArray = (list) => Array.isArray(list) && list.every((s) => typeof s === "string");
+  if (!isStringArray(p.stack) || p.stack.some((s) => s.trim() === "" || [...s].length > 24)) {
+    problems.push("stack must be an array of service names of 1 to 24 characters");
+  } else if (fileSlug === "cetra" && (p.stack.length !== 1 || p.stack[0] !== "cetra")) {
+    problems.push('stack must be ["cetra"]');
+  }
+  if (fileSlug === "cetra") {
+    if (p.strengths !== undefined) problems.push("cetra has no strengths");
+  } else if (!isStringArray(p.strengths) || p.strengths.length !== 3) {
+    problems.push("strengths must be 3 areas");
+  } else {
+    if (new Set(p.strengths).size !== 3) problems.push("strengths must be 3 different areas");
+    for (const area of p.strengths) {
+      if (!(area in STRENGTH_TITLES)) problems.push(`strengths: ${area} cannot be a strength`);
+    }
+  }
   if (!isStringArray(p.chooseThem)) {
     problems.push("chooseThem must be an array of strings");
   } else if (p.chooseThem.length > 4) {
@@ -163,6 +220,30 @@ export function validate(p, fileSlug, now) {
     }
   }
 
+  return problems;
+}
+
+/**
+ * Problems with a competitor's strengths against cetra's file; empty when each one is an area
+ * where cetra is clearly ahead: cetra's status is "yes" and theirs is not, or, for the stack, they
+ * run three or more services or cannot self-host.
+ * @param {Product} them @param {Product} cetra
+ */
+export function strengthProblems(them, cetra) {
+  const problems = [];
+  for (const area of them.strengths ?? []) {
+    if (area === "selfHostStack") {
+      if (them.stack.length > 0 && them.stack.length < 3) {
+        problems.push(`${them.slug}: selfHostStack is a strength only against 3 or more services`);
+      }
+      continue;
+    }
+    if (cetra.facts[area]?.status !== "yes") {
+      problems.push(`${them.slug}: ${area} is a strength only where cetra's status is yes`);
+    } else if (them.facts[area]?.status === "yes") {
+      problems.push(`${them.slug}: ${area} is not a strength: their status is yes too`);
+    }
+  }
   return problems;
 }
 
@@ -201,6 +282,8 @@ export function formatDate(iso) {
 /**
  * @typedef {object} Fact
  * @property {string} value
+ * @property {"yes" | "partial" | "no" | "unknown"} status
+ * @property {string} short at most SHORT_MAX characters, for the check table
  * @property {string[]} sources
  */
 
@@ -214,5 +297,7 @@ export function formatDate(iso) {
  * @property {Record<string, Fact>} facts
  * @property {string[]} chooseThem
  * @property {string[]} chooseUs
+ * @property {string[]} stack the services self-hosting needs; [] when it cannot be self-hosted
+ * @property {string[]} [strengths] three areas the page leads with (competitors only)
  * @property {string} [notes]
  */

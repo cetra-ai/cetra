@@ -9,7 +9,8 @@ const shots = JSON.parse(
 const shotNames = new Set(shots.map((shot) => shot.name));
 const pngDir = new URL("../../assets/screenshots/", import.meta.url);
 
-/** The 28 captions, as the fixed content of plan M15 states them (copy edits touch this table too). */
+/** The 8 captions, as the fixed content of plan M15 states them (copy edits touch this table too): one
+ * per story, or one string for a shared picture (M19 retake). */
 const EXPECTED = {
   hero: {
     support: "See what each step of a support answer cost and how long it took.",
@@ -19,42 +20,21 @@ const EXPECTED = {
       "See the schema check send an invoice back for a second extraction, and what it cost.",
   },
   trace: {
-    support: "Every support conversation, with its cost and latency.",
-    coding: "Only the failed runs, so nothing broken hides in the traffic.",
-    voice: "The slowest calls first, so you fix what callers feel.",
-    extraction: "Every billing trace in one list, with its duration and cost.",
+    support: "Each turn of a session, with its score, so the bad answer stands out.",
+    coding: "Read the code, patch it and rerun the tests, all in one transcript.",
+    voice: "Hear the caller and the agent, and read what was said, in one voice turn.",
+    extraction: "A 200-invoice batch, with its three failed invoices at the top.",
   },
-  explore: {
-    support: "Ask which answers scored low, then get a quality dashboard built for you.",
-    coding: "Ask what failed, then get a dashboard for the coding agent built for you.",
-    voice: "Ask which calls were slow, then get a latency dashboard built for you.",
-    extraction: "Ask which invoices needed a retry, then get a dashboard built for you.",
-  },
-  issues: {
-    support: "What customers ask most, grouped for you, with real examples.",
-    coding: "The same test failure across runs becomes one issue to fix.",
-    voice: "Slow replies grouped into one issue, with the trace that shows why.",
-    extraction: "Wrong totals grouped into one issue, before they reach your books.",
-  },
-  evaluate: {
-    support: "Reviewers score real answers in a queue.",
-    coding: "Review the agent's patches the way you review a pull request.",
-    voice: "Check whether each caller got what they asked for.",
-    extraction: "Check the extracted fields against the invoice, one by one.",
-  },
-  prompts: {
-    support: "Try a prompt change on a real question before you ship it.",
-    coding: "Run the patch prompt on a real issue and see the diff.",
-    voice: "Tune the receptionist prompt for short spoken answers.",
-    extraction: "Compare a cheap and a strong model on the same invoice, with the cost of each.",
-  },
-  alert: {
-    support: "Know when answer quality drops below your bar.",
-    coding: "Know when the coding agent's error rate climbs, in Slack.",
-    voice: "Know when callers start waiting, before they hang up.",
-    extraction: "Know when the schema check pass rate slips.",
-  },
+  explore: "Ask which prompt got worse, and get the numbers and the cause.",
+  issues: "Answers that contradict their sources, grouped into one issue with their examples.",
+  evaluate: "Version 4 lifts vat_number from 91% to 96% on 300 invoices.",
+  prompts: "Run two prompt versions on the same question, and see which one answers right.",
+  alert: "Know when the error rate, a score, the cost or an issue crosses your line.",
 };
+
+/** The pictures shared by every story (M19 retake): the same shot, no story picker. */
+const SHARED = ["explore", "issues", "evaluate", "prompts", "alert"];
+const PANELS = 4 * (7 - SHARED.length) + SHARED.length;
 
 test("the four stories are in the fixed order", () => {
   assert.deepEqual(
@@ -68,16 +48,25 @@ test("the four stories are in the fixed order", () => {
   assert.equal(STORIES[0].id, "support");
 });
 
-test("there are seven pictures of four stories each", () => {
+test("there are seven pictures, of four stories each or shared by all", () => {
   assert.deepEqual(
     PICTURES.map((picture) => picture.id),
     ["hero", "trace", "explore", "issues", "evaluate", "prompts", "alert"],
+  );
+  assert.deepEqual(
+    PICTURES.filter((picture) => picture.shared).map((picture) => picture.id),
+    SHARED,
   );
   for (const picture of PICTURES) {
     const panels = panelsOf(picture.id);
     assert.deepEqual(
       panels.map((panel) => panel.story),
-      STORIES.map((story) => story.id),
+      picture.shared ? ["all"] : STORIES.map((story) => story.id),
+    );
+    assert.equal(
+      picture.shared === undefined,
+      picture.stories !== undefined,
+      `${picture.id}: shared or stories`,
     );
   }
 });
@@ -91,10 +80,14 @@ test("every shot is in screenshots.json and has a PNG", () => {
       names.push(panel.shot);
     }
   }
-  assert.equal(names.length, 28);
-  assert.equal(new Set(names).size, 28);
+  assert.equal(names.length, PANELS);
+  assert.equal(new Set(names).size, PANELS);
   assert.equal(shotName("hero", "voice"), "marketing-trace-view-voice");
-  assert.equal(shotName("trace", "support"), "marketing-trace-list");
+  assert.equal(shotName("trace", "support"), "marketing-trace-page");
+  assert.equal(shotName("trace", "voice"), "marketing-trace-page-voice");
+  assert.equal(shotName("evaluate", "support"), "marketing-evaluate");
+  assert.equal(shotName("evaluate", "coding"), "marketing-evaluate");
+  assert.equal(shotName("issues", "voice"), "marketing-issue");
 });
 
 test("alts are one sentence that describes the picture", () => {
@@ -108,7 +101,7 @@ test("alts are one sentence that describes the picture", () => {
       alts.push(panel.alt);
     }
   }
-  assert.equal(new Set(alts).size, 28, "two alts are the same");
+  assert.equal(new Set(alts).size, PANELS, "two alts are the same");
 });
 
 test("captions are one line", () => {
@@ -122,11 +115,15 @@ test("captions are one line", () => {
       captions.push(panel.caption);
     }
   }
-  assert.equal(new Set(captions).size, 28, "two captions are the same");
+  assert.equal(new Set(captions).size, PANELS, "two captions are the same");
 
   for (const picture of PICTURES) {
     const expected = EXPECTED[picture.id];
     assert.ok(expected, `EXPECTED has no picture "${picture.id}"`);
+    if (picture.shared) {
+      assert.equal(picture.shared.caption, expected, `caption of ${picture.id}`);
+      continue;
+    }
     for (const { id } of STORIES) {
       assert.equal(
         pictureById(picture.id).stories[id].caption,

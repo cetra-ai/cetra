@@ -1,0 +1,49 @@
+---
+type Status = "yes" | "partial" | "no" | "unknown";
+
+interface Props {
+  status: Status;
+}
+const { status } = Astro.props;
+
+/** The mark of each status, and what a screen reader says for it. */
+const MARKS: Record<Status, { glyph: string; label: string }> = {
+  yes: { glyph: "✓", label: "Yes" },
+  partial: { glyph: "", label: "Partly" },
+  no: { glyph: "✕", label: "No" },
+  unknown: { glyph: "?", label: "Not documented" },
+};
+const mark = MARKS[status];
+---
+
+<span class:list={["mark", `mark--${status}`]} aria-hidden="true">{mark.glyph}</span><span
+  class="visually-hidden">{mark.label}:</span
+>
+
+<style>
+  .mark {
+    display: inline-block;
+    width: 1.25em;
+    flex: none;
+    font-weight: 600;
+    text-align: center;
+  }
+  .mark--yes {
+    color: var(--accent);
+  }
+  /* A half-filled circle, drawn: the site's fonts have no ◐. */
+  .mark--partial {
+    position: relative;
+    top: 0.1em;
+    width: 0.8em;
+    height: 0.8em;
+    margin-inline: 0.225em;
+    border: 1.5px solid var(--fg);
+    border-radius: 50%;
+    background: linear-gradient(90deg, var(--fg) 50%, transparent 50%);
+  }
+  .mark--no,
+  .mark--unknown {
+    color: var(--fg-muted);
+  }
+</style>

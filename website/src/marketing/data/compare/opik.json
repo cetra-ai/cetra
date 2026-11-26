@@ -10,79 +10,122 @@
       "sources": [
         "https://www.comet.com/docs/opik/self-host/architecture",
         "https://github.com/comet-ml/opik/blob/main/deployment/docker-compose/docker-compose.yaml"
-      ]
+      ],
+      "status": "yes",
+      "short": "8 services incl. ClickHouse"
     },
     "selfHostLicence": {
       "value": "Apache-2.0 for the full platform; docs say self-hosted has no user management features",
       "sources": [
         "https://github.com/comet-ml/opik/blob/main/LICENSE",
         "https://www.comet.com/docs/opik/self-host/overview"
-      ]
+      ],
+      "status": "yes",
+      "short": "Apache-2.0, no user management"
     },
     "cloudFree": {
       "value": "Free Cloud $0: 10 team members, 25k spans/month, 60-day retention",
-      "sources": ["https://www.comet.com/site/pricing"]
+      "sources": ["https://www.comet.com/site/pricing"],
+      "status": "yes",
+      "short": "Free: 25k spans/mo"
     },
     "cloudPaidFrom": {
       "value": "Pro Cloud $19/month flat incl. 100k spans; extra spans $5 per 100k",
-      "sources": ["https://www.comet.com/site/pricing"]
+      "sources": ["https://www.comet.com/site/pricing"],
+      "status": "yes",
+      "short": "$19/mo incl. 100k spans"
     },
     "otel": {
       "value": "OTLP over HTTP only (gRPC unsupported); GenAI and OpenInference conventions; endpoint /api/v1/private/otel",
-      "sources": ["https://www.comet.com/docs/opik/tracing/opentelemetry/overview"]
+      "sources": ["https://www.comet.com/docs/opik/tracing/opentelemetry/overview"],
+      "status": "partial",
+      "short": "HTTP only, no gRPC"
     },
     "sql": {
       "value": "Not documented: docs describe OQL, a SQL-like filter syntax used in SDK search methods",
       "sources": [
         "https://github.com/comet-ml/opik/blob/main/apps/opik-documentation/documentation/fern/docs-v2/reference/typescript-sdk/opik-query-language.mdx"
-      ]
+      ],
+      "status": "no",
+      "short": "OQL filter syntax, no SQL"
     },
     "mcp": {
       "value": "MCP server for coding agents: read traces, find failures, analyze experiments, add tracing",
-      "sources": ["https://www.comet.com/docs/opik/mcp-server"]
+      "sources": ["https://www.comet.com/docs/opik/mcp-server"],
+      "status": "yes",
+      "short": "MCP for coding agents"
     },
     "onlineEvals": {
       "value": "Yes: online evaluation rules with LLM-as-a-Judge score new production traces as they arrive",
-      "sources": ["https://www.comet.com/docs/opik/production/online-evaluation"]
+      "sources": ["https://www.comet.com/docs/opik/production/online-evaluation"],
+      "status": "yes",
+      "short": "LLM-judge rules on new traces"
     },
     "datasetsExperiments": {
       "value": "Yes: datasets, experiments and side-by-side comparison of versions",
-      "sources": ["https://www.comet.com/docs/opik/evaluation/overview"]
+      "sources": ["https://www.comet.com/docs/opik/evaluation/overview"],
+      "status": "yes",
+      "short": "Datasets and experiments"
     },
     "promptManagement": {
       "value": "Yes: Prompt Library with immutable sequential versions, via UI or SDK",
       "sources": [
         "https://github.com/comet-ml/opik/blob/main/apps/opik-documentation/documentation/fern/docs-v2/prompt_engineering/version-control.mdx"
-      ]
+      ],
+      "status": "yes",
+      "short": "Prompt Library, versions"
     },
     "gateway": {
       "value": "Opik LLM Gateway: OpenAI-format proxy, beta, described as for development and testing",
-      "sources": ["https://www.comet.com/docs/opik/integrations/opik-llm-gateway"]
+      "sources": ["https://www.comet.com/docs/opik/integrations/opik-llm-gateway"],
+      "status": "partial",
+      "short": "Gateway beta, dev/test only"
     },
     "alerts": {
       "value": "Alerts to Slack, PagerDuty or any webhook on trace errors, cost, latency, feedback scores, prompt and experiment events",
-      "sources": ["https://www.comet.com/docs/opik/production/alerts"]
+      "sources": ["https://www.comet.com/docs/opik/production/alerts"],
+      "status": "yes",
+      "short": "Slack, PagerDuty, webhook"
     },
     "issueDetection": {
       "value": "Unknown",
       "sources": [
         "https://www.comet.com/docs/opik/ollie",
         "https://github.com/comet-ml/opik/blob/main/apps/opik-documentation/documentation/fern/docs-v2/changelog/2026-10-19.mdx"
-      ]
+      ],
+      "status": "unknown",
+      "short": "Not documented"
     },
     "annotationQueues": {
       "value": "Queues of traces or threads for reviewers, with instructions and feedback scores; labels can align LLM judges",
-      "sources": ["https://www.comet.com/docs/opik/evaluation/annotation_queues"]
+      "sources": ["https://www.comet.com/docs/opik/evaluation/annotation_queues"],
+      "status": "yes",
+      "short": "Queues with instructions, scores"
     },
     "assistant": {
       "value": "Ollie: chat next to traces, datasets, experiments and prompts; with opik connect it reads and edits your code",
-      "sources": ["https://www.comet.com/docs/opik/ollie"]
+      "sources": ["https://www.comet.com/docs/opik/ollie"],
+      "status": "yes",
+      "short": "Ollie chat; edits code via connect"
     },
     "codingAgents": {
       "value": "Guides for Claude Code (plugin or OpenTelemetry), Cursor, GitHub Copilot and OpenAI Codex sessions",
-      "sources": ["https://www.comet.com/docs/opik/integrations/coding-agents"]
+      "sources": ["https://www.comet.com/docs/opik/integrations/coding-agents"],
+      "status": "yes",
+      "short": "Claude Code, Cursor, Copilot, Codex"
     }
   },
+  "stack": [
+    "Java backend",
+    "Python backend",
+    "Frontend",
+    "ClickHouse",
+    "MySQL",
+    "Redis",
+    "MinIO",
+    "ZooKeeper"
+  ],
+  "strengths": ["selfHostStack", "sql", "otel"],
   "chooseThem": [
     "Full platform under Apache-2.0 plus a managed cloud from Comet, so you can use either",
     "Evaluation tooling: datasets, experiments, online LLM-as-judge and agent optimization",

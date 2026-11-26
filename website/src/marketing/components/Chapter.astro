@@ -9,10 +9,24 @@ interface Props {
   bare?: boolean;
   /** Put the picture on the left at 960 px and wider. */
   flip?: boolean;
+  /**
+   * Put the text above a full-width picture at 960 px and wider, for a screen too wide for the picture column
+   * (the playground): its shot then shows at its own size, with the same text size as the hero.
+   */
+  wide?: boolean;
 }
-const { eyebrow, title, lede, features, id, bare = false, flip = false } = Astro.props;
+const {
+  eyebrow,
+  title,
+  lede,
+  features,
+  id,
+  bare = false,
+  flip = false,
+  wide = false,
+} = Astro.props;
 ---
-<div class:list={["chapter", flip && "chapter--flip"]}>
+<div class:list={["chapter", flip && "chapter--flip", wide && "chapter--wide"]}>
   <div class="text">
     <div class="head">
       {eyebrow && <p class="eyebrow">{eyebrow}</p>}
@@ -61,6 +75,18 @@ const { eyebrow, title, lede, features, id, bare = false, flip = false } = Astro
     }
     .chapter--flip .visual :global(.frame) {
       margin-inline: auto 0;
+    }
+    .chapter.chapter--wide {
+      grid-template-columns: minmax(0, 1fr);
+      gap: var(--space-7);
+    }
+    .chapter--wide .text {
+      grid-template-columns: minmax(0, 5fr) minmax(0, 7fr);
+      gap: var(--space-8);
+      align-items: start;
+    }
+    .chapter--wide .visual :global(.frame) {
+      margin-inline: auto;
     }
   }
   h2 {

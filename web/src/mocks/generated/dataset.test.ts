@@ -1,8 +1,52 @@
+// @ts-expect-error node builtin, available under Vitest
+import { createHash } from "node:crypto";
 import { expect, it } from "vitest";
 import type { Schema } from "@/api/types";
-import { createDataset, type Dataset, SHOWCASES, SUPPORT_TURNS } from "@/mocks/generated/dataset";
+import {
+  createDataset,
+  type Dataset,
+  evenSpread,
+  isEligibleTrace,
+  type Mark,
+  type MarkedSpan,
+  markScoreUuid,
+  mergeMarks,
+  type Profile,
+  rfc3339,
+  SHOWCASES,
+  SUPPORT_PROFILE,
+  SUPPORT_SHOWCASE,
+  SUPPORT_TURNS,
+  type Turn,
+} from "@/mocks/generated/dataset";
+import { CODING_PROFILE, EXTRACTION_PROFILE, VOICE_PROFILE } from "@/mocks/generated/profiles";
+import type { StoryId } from "@/mocks/projects";
 
 const NOW = Date.parse("2026-06-01T00:00:00.000Z");
+
+/** The story whose hand-written trace has each showcase index (P-2). */
+const STORY_OF_INDEX: Readonly<Record<number, StoryId>> = {
+  3: "support",
+  4: "coding",
+  5: "voice",
+  6: "extraction",
+};
+
+const PROFILES: Record<StoryId, Profile> = {
+  support: SUPPORT_PROFILE,
+  coding: CODING_PROFILE,
+  voice: VOICE_PROFILE,
+  extraction: EXTRACTION_PROFILE,
+};
+
+/** The generation profile of showcase `index`'s story: its own dataset holds that showcase. */
+function profileOf(index: number): Profile {
+  const story = STORY_OF_INDEX[index];
+  if (story === undefined) {
+    throw new Error(`no story has showcase index ${index}`);
+  }
+  return PROFILES[story];
+}
 
 /** The topic whose main question is `question`, if any. */
 function topicOf(question: string | undefined): (typeof SUPPORT_TURNS)[number] | undefined {
@@ -326,7 +370,7 @@ function showcaseOf(): {
   trace: Schema<"TraceSummary">;
   spans: readonly Schema<"TreeSpan">[];
 } {
-  const dataset = createDataset({ seed: 1, now: NOW, traces: 10 });
+  const dataset = createDataset({ seed: 1, now: NOW, traces: 10, profile: profileOf(3) });
   const trace = dataset.traces[3];
   if (!trace) {
     throw new Error("a ten-trace dataset has trace 3");
@@ -436,7 +480,7 @@ function scenarioOf(index: number): {
   trace: Schema<"TraceSummary">;
   spans: readonly Schema<"TreeSpan">[];
 } {
-  const dataset = createDataset({ seed: 1, now: NOW, traces: 10 });
+  const dataset = createDataset({ seed: 1, now: NOW, traces: 10, profile: profileOf(index) });
   const trace = dataset.traces[index];
   if (!trace) {
     throw new Error(`a ten-trace dataset has trace ${index}`);
@@ -449,8 +493,8 @@ function scenarioOf(index: number): {
 }
 
 it("makes traces 4 to 6 the hand-written scenario traces", () => {
-  const dataset = createDataset({ seed: 1, now: NOW, traces: 10 });
   for (const index of [4, 5, 6]) {
+    const dataset = createDataset({ seed: 1, now: NOW, traces: 10, profile: profileOf(index) });
     const showcase = SHOWCASES.find((s) => s.index === index);
     const story = showcase?.story;
     const trace = dataset.traces[index];
@@ -669,6 +713,671 @@ it("leaves trace 0 and the showcases alone", () => {
   const dataset = createDataset({ seed: 1, now: NOW, traces: 60 });
   expect(dataset.traces[0]?.duration_ns).toBe(60_000 * 1_000_000);
   for (const showcase of SHOWCASES) {
-    expect(dataset.traces[showcase.index]?.duration_ns).toBe(showcase.spans[0].to * 1_000_000);
+    const own = createDataset({
+      seed: 1,
+      now: NOW,
+      traces: 60,
+      profile: profileOf(showcase.index),
+    });
+    expect(own.traces[showcase.index]?.duration_ns).toBe(showcase.spans[0].to * 1_000_000);
   }
+});
+
+it("the support dataset holds the support hero only", () => {
+  const dataset = createDataset({ seed: 1, now: NOW, traces: 10 });
+  const hero = dataset.traces[3];
+  expect(hero?.span_count).toBe(SUPPORT_SHOWCASE.spans.length);
+  expect(hero?.user_id).toBe("user-012");
+  for (const index of [4, 5, 6]) {
+    const trace = dataset.traces[index];
+    expect(SUPPORT_PROFILE.names).toContain(trace?.name);
+    const preview = trace?.input_preview;
+    expect(
+      SUPPORT_TURNS.some(
+        (topic) =>
+          topic.question === preview ||
+          topic.followUps.some((followUp) => followUp.question === preview),
+      ),
+    ).toBe(true);
+  }
+});
+
+/** The sha256 of the traces and of the details of traces 0, 1, 2, 3, 7 and 16 of a dataset. */
+function digestOf(dataset: Dataset): string {
+  const hash = createHash("sha256");
+  hash.update(JSON.stringify(dataset.traces));
+  for (const index of [0, 1, 2, 3, 7, 16]) {
+    const trace = dataset.traces[index];
+    if (!trace) {
+      throw new Error(`the dataset has trace ${index}`);
+    }
+    const detail = dataset.traceDetail(trace.trace_id);
+    hash.update(JSON.stringify(detail));
+    for (const row of detail?.spans ?? []) {
+      hash.update(JSON.stringify(dataset.spanDetail(trace.trace_id, row.span.span_id)));
+    }
+  }
+  return hash.digest("hex");
+}
+
+/** The digest of the support output before M16 (P1): the profile with every showcase keeps it (the default now holds the support hero only). */
+const SUPPORT_DIGEST = "713b3032e536912b16edde65f86a421942cfe3ba4bdf32cc226667fb05edf471";
+
+it("keeps the support output byte-identical", () => {
+  const explicit = createDataset({
+    seed: 1,
+    now: NOW,
+    traces: 400,
+    profile: { ...SUPPORT_PROFILE, showcases: SHOWCASES },
+  });
+  expect(digestOf(explicit)).toBe(SUPPORT_DIGEST);
+});
+
+/** A profile whose traces are grouped into calls of 4 to 12, one caller per call, with no showcases. */
+const CALL_PROFILE: Profile = {
+  ...SUPPORT_PROFILE,
+  sessions: { kind: "calls", min: 4, max: 12, prefix: "call-" },
+  users: { kind: "per-call", pool: 60, prefix: "caller-", label: "Caller" },
+  showcases: [],
+};
+
+it("gives a profile without a big first trace an ordinary trace 0", () => {
+  const dataset = createDataset({
+    seed: 1,
+    now: NOW,
+    traces: 10,
+    profile: { ...SUPPORT_PROFILE, bigFirstTrace: false },
+  });
+  const trace = dataset.traces[0];
+  if (!trace) {
+    throw new Error("a ten-trace dataset has trace 0");
+  }
+  expect(trace.span_count).toBeLessThanOrEqual(60);
+  expect(NOW - Date.parse(trace.start_time)).toBeGreaterThanOrEqual(60_000);
+});
+
+it("groups consecutive generated traces into calls of 4 to 12, one caller per call", () => {
+  const dataset = createDataset({ seed: 1, now: NOW, traces: 300, profile: CALL_PROFILE });
+  const calls = new Map<string, number[]>();
+  dataset.traces.forEach((trace, index) => {
+    const session = trace.session_id;
+    if (session === undefined) {
+      throw new Error(`trace ${index} belongs to a call`);
+    }
+    calls.set(session, [...(calls.get(session) ?? []), index]);
+  });
+  const ordered = [...calls.values()];
+  expect(ordered.length).toBeGreaterThan(1);
+  expect(ordered[ordered.length - 1]?.at(-1)).toBe(299);
+
+  ordered.forEach((rows, call) => {
+    rows.forEach((index, position) => {
+      if (position > 0) {
+        expect(index).toBe((rows[position - 1] ?? -2) + 1);
+      }
+    });
+    const last = call === ordered.length - 1;
+    expect(rows.length).toBeGreaterThanOrEqual(last ? 1 : 4);
+    expect(rows.length).toBeLessThanOrEqual(12);
+
+    const user = `caller-${String(call % 60).padStart(3, "0")}`;
+    for (const index of rows) {
+      const trace = dataset.traces[index];
+      expect(trace?.user_id).toBe(user);
+      expect(JSON.parse(trace?.metadata["user.name"] ?? "null")).toBe(
+        `Caller ${String(call % 60).padStart(3, "0")}`,
+      );
+    }
+  });
+});
+
+it("skips the showcase indices when it groups calls", () => {
+  const dataset = createDataset({
+    seed: 1,
+    now: NOW,
+    traces: 10,
+    profile: { ...CALL_PROFILE, showcases: [SUPPORT_SHOWCASE] },
+  });
+  expect(dataset.traces[3]?.session_id).toBeUndefined();
+  expect(dataset.traces[2]?.session_id).toBeDefined();
+  // The first call takes at least four generated traces: 0, 1, 2 and then 4.
+  expect(dataset.traces[2]?.session_id).toBe(dataset.traces[4]?.session_id);
+});
+
+it("gives no session and no user to a profile without them", () => {
+  const dataset = createDataset({
+    seed: 1,
+    now: NOW,
+    traces: 100,
+    profile: {
+      ...SUPPORT_PROFILE,
+      sessions: { kind: "none" },
+      users: { kind: "none" },
+      showcases: [],
+    },
+  });
+  for (const trace of dataset.traces) {
+    expect(trace.session_id).toBeUndefined();
+    expect(trace.user_id).toBeUndefined();
+    expect(trace.metadata["user.name"]).toBeUndefined();
+  }
+});
+
+it("gives every generated trace the profile's base tags, sorted and unique", () => {
+  const dataset = createDataset({
+    seed: 1,
+    now: NOW,
+    traces: 300,
+    profile: { ...SUPPORT_PROFILE, tags: { base: ["billing"], pool: ["batch"] }, showcases: [] },
+  });
+  for (const trace of dataset.traces) {
+    expect(trace.tags).toContain("billing");
+    expect(trace.tags).toEqual([...new Set(trace.tags)].sort());
+  }
+});
+
+it("draws the duration with the profile's skew", () => {
+  const dataset = createDataset({
+    seed: 1,
+    now: NOW,
+    traces: 1000,
+    profile: {
+      ...SUPPORT_PROFILE,
+      duration: { min: 400, span: 3_600, skew: 3 },
+      shortTag: undefined,
+      showcases: [],
+    },
+  });
+  // Trace 0 is the 60 s big trace, so the draws are the traces after it.
+  const ms = dataset.traces.slice(1).map((trace) => trace.duration_ns / 1_000_000);
+  for (const value of ms) {
+    expect(value).toBeGreaterThanOrEqual(400);
+    expect(value).toBeLessThan(4_000);
+  }
+  expect(ms.filter((value) => value < 2_000).length / ms.length).toBeGreaterThan(0.7);
+});
+
+it("takes the service, span names and tool names from the profile", () => {
+  const dataset = createDataset({
+    seed: 1,
+    now: NOW,
+    traces: 10,
+    profile: {
+      ...SUPPORT_PROFILE,
+      service: "code-agent",
+      spanNames: { tool: ["run_tests"] },
+      showcases: [],
+    },
+  });
+  const trace = dataset.traces[1];
+  if (!trace) {
+    throw new Error("a ten-trace dataset has trace 1");
+  }
+  const spans = dataset.traceDetail(trace.trace_id)?.spans ?? [];
+  const tools = spans.filter((row) => row.span.span_kind === "tool");
+  expect(tools.length).toBeGreaterThan(0);
+  for (const row of tools) {
+    expect(row.span.name).toBe("run_tests");
+    const detail = dataset.spanDetail(trace.trace_id, row.span.span_id);
+    expect(detail?.input?.format === "json" ? detail.input.value : undefined).toMatchObject({
+      name: "run_tests",
+    });
+  }
+  for (const row of spans) {
+    expect(row.span.service_name).toBe("code-agent");
+  }
+});
+
+/** A topic without its code blocks. */
+function withoutSnippets(turn: Turn): Turn {
+  const { snippets: _snippets, ...rest } = turn;
+  return rest;
+}
+
+it("answers an llm span in plain text when its topics have no snippets", () => {
+  const [first, ...rest] = SUPPORT_TURNS.map(withoutSnippets);
+  if (!first) {
+    throw new Error("the support topics are not empty");
+  }
+  const dataset = createDataset({
+    seed: 1,
+    now: NOW,
+    traces: 40,
+    profile: { ...SUPPORT_PROFILE, turns: [first, ...rest], showcases: [] },
+  });
+  let llmChecked = 0;
+  for (const trace of dataset.traces.slice(1)) {
+    for (const row of dataset.traceDetail(trace.trace_id)?.spans ?? []) {
+      if (row.span.span_kind !== "llm") {
+        continue;
+      }
+      llmChecked += 1;
+      const detail = dataset.spanDetail(trace.trace_id, row.span.span_id);
+      const reply =
+        detail?.output?.format === "messages" ? detail.output.value[0]?.parts[0] : undefined;
+      expect(reply?.type === "text" ? reply.content : "").not.toContain("```");
+    }
+  }
+  expect(llmChecked).toBeGreaterThan(0);
+});
+
+/** SUPPORT_PROFILE without its showcases: the base the mark tests compare against. */
+const PLAIN: Profile = { ...SUPPORT_PROFILE, showcases: [] };
+
+/** The error count and stack trace of a span, by its position in a trace's detail. */
+function errorSpansOf(dataset: Dataset, traceId: string) {
+  return (dataset.traceDetail(traceId)?.spans ?? []).filter((row) => row.span.status === "error");
+}
+
+it("a mark changes one trace and nothing else", () => {
+  const plain = createDataset({ seed: 1, now: NOW, traces: 20, profile: PLAIN });
+  const marked = createDataset({
+    seed: 1,
+    now: NOW,
+    traces: 20,
+    profile: {
+      ...PLAIN,
+      marks: () => new Map<number, Mark>([[11, { tags: ["x"], release: "v9", costFactor: 2 }]]),
+    },
+  });
+  const before = plain.traces[11];
+  const after = marked.traces[11];
+  if (!before || !after) {
+    throw new Error("a 20-trace dataset has trace 11");
+  }
+  expect(after.tags).toEqual([...new Set([...before.tags, "x"])].sort());
+  expect(after.release).toBe("v9");
+  const inputTokens = after.input_tokens ?? Number.NaN;
+  const outputTokens = after.output_tokens ?? Number.NaN;
+  expect(inputTokens).toBe((before.input_tokens ?? Number.NaN) * 2);
+  expect(outputTokens).toBe((before.output_tokens ?? Number.NaN) * 2);
+  expect(after.total_tokens).toBe(inputTokens + outputTokens);
+  expect(after.cost_total).toBe(Math.round(inputTokens * 3 + outputTokens * 15) / 1_000_000);
+  expect(marked.traces.filter((_trace, index) => index !== 11)).toEqual(
+    plain.traces.filter((_trace, index) => index !== 11),
+  );
+});
+
+it("a marked error replaces the drawn errors", () => {
+  const plain = createDataset({ seed: 1, now: NOW, traces: 300, profile: PLAIN });
+  const index = plain.traces.findIndex(
+    (trace, position) => position > 0 && trace.error_count === 3 && trace.span_count >= 6,
+  );
+  expect(index).toBeGreaterThan(0);
+  const dataset = createDataset({
+    seed: 1,
+    now: NOW,
+    traces: 300,
+    profile: {
+      ...PLAIN,
+      marks: () =>
+        new Map<number, Mark>([
+          [
+            index,
+            {
+              error: {
+                count: 2,
+                spanName: "ocr",
+                message: "OCR returned no text",
+                stacktrace: "OcrError: no text on any page (scanned image, 0 characters)",
+              },
+            },
+          ],
+        ]),
+    },
+  });
+  const trace = dataset.traces[index];
+  if (!trace) {
+    throw new Error(`the dataset has trace ${index}`);
+  }
+  expect(trace.error_count).toBe(2);
+  const errors = errorSpansOf(dataset, trace.trace_id);
+  expect(errors).toHaveLength(2);
+  for (const row of errors) {
+    expect(row.span.name).toBe("ocr");
+    expect(row.span.status_message).toBe("OCR returned no text");
+    const detail = dataset.spanDetail(trace.trace_id, row.span.span_id);
+    expect(detail?.events[0]?.attributes).toEqual({
+      "exception.stacktrace": "OcrError: no text on any page (scanned image, 0 characters)",
+    });
+  }
+});
+
+it("marks only reach eligible traces", () => {
+  const plain = createDataset({ seed: 1, now: NOW, traces: 300 });
+  // Trace 3 is the showcase, trace 0 the big first trace; the first cetra-eval trace after them is not eligible.
+  const evalIndex = plain.traces.findIndex(
+    (trace, index) => index > 3 && trace.environment === "cetra-eval",
+  );
+  expect(evalIndex).toBeGreaterThan(3);
+  const ignored: Mark = { tags: ["ignored"] };
+  const dataset = createDataset({
+    seed: 1,
+    now: NOW,
+    traces: 300,
+    profile: {
+      ...SUPPORT_PROFILE,
+      marks: () =>
+        new Map<number, Mark>([
+          [3, ignored],
+          [0, ignored],
+          [evalIndex, ignored],
+        ]),
+    },
+  });
+  for (const index of [0, 3, evalIndex]) {
+    expect(dataset.traces[index]?.tags).not.toContain("ignored");
+  }
+  expect(dataset.traces).toEqual(plain.traces);
+});
+
+it("marked score ids never collide", () => {
+  const mark: Mark = {
+    scores: [
+      { name: "correctness", source: "human", value: { data_type: "numeric", value: 0.11 } },
+      { name: "judge", source: "llm_judge", value: { data_type: "numeric", value: 0.5 } },
+    ],
+  };
+  const dataset = createDataset({
+    seed: 1,
+    now: NOW,
+    traces: 60,
+    profile: {
+      ...PLAIN,
+      marks: (traces) => new Map(traces.map((_trace, index): [number, Mark] => [index, mark])),
+    },
+  });
+  const ids = dataset.traces.flatMap((trace) => trace.scores.map((score) => score.score_id));
+  expect(new Set(ids).size).toBe(ids.length);
+  expect(ids.some((id) => id.startsWith("00000000-0000-7000-9000-"))).toBe(true);
+});
+
+it("marked spans are appended under the root", () => {
+  const mark: Mark = {
+    spans: [
+      {
+        name: "search",
+        kind: "tool",
+        fromMs: 100,
+        durationMs: 400,
+        output: { format: "json", value: { hits: 3 } },
+      },
+      {
+        name: "write",
+        kind: "tool",
+        fromMs: 600,
+        durationMs: 300,
+        error: { message: "disk full", stacktrace: "IOError: disk full" },
+      },
+    ],
+  };
+  const plain = createDataset({ seed: 1, now: NOW, traces: 40, profile: PLAIN });
+  const dataset = createDataset({
+    seed: 1,
+    now: NOW,
+    traces: 40,
+    profile: { ...PLAIN, marks: () => new Map<number, Mark>([[11, mark]]) },
+  });
+  const before = plain.traces[11];
+  const after = dataset.traces[11];
+  if (!before || !after) {
+    throw new Error("a 40-trace dataset has trace 11");
+  }
+  expect(after.span_count).toBe(before.span_count + 2);
+  expect(after.error_count).toBe(before.error_count + 1);
+  expect(after.duration_ns).toBeGreaterThanOrEqual(900_000_000);
+  const spans = dataset.traceDetail(after.trace_id)?.spans ?? [];
+  expect(spans).toHaveLength(after.span_count);
+  const [search, write] = spans.slice(-2);
+  if (!search || !write) {
+    throw new Error("the trace has two marked spans");
+  }
+  expect(search.depth).toBe(1);
+  expect(search.span.name).toBe("search");
+  expect(search.span.parent_span_id).toBe(after.root_span_id);
+  expect(Date.parse(search.span.start_time) - Date.parse(after.start_time)).toBe(100);
+  expect(search.span.duration_ns).toBe(400_000_000);
+  expect(search.span.status).toBe("ok");
+  expect(dataset.spanDetail(after.trace_id, search.span.span_id)?.output).toEqual({
+    format: "json",
+    value: { hits: 3 },
+  });
+  expect(write.depth).toBe(1);
+  expect(write.span.name).toBe("write");
+  expect(write.span.parent_span_id).toBe(after.root_span_id);
+  expect(Date.parse(write.span.start_time) - Date.parse(after.start_time)).toBe(600);
+  expect(write.span.duration_ns).toBe(300_000_000);
+  expect(write.span.status).toBe("error");
+  expect(write.span.status_message).toBe("disk full");
+  expect(dataset.spanDetail(after.trace_id, write.span.span_id)?.events[0]?.attributes).toEqual({
+    "exception.stacktrace": "IOError: disk full",
+  });
+});
+
+it("startMs and durationMs move the trace", () => {
+  const startMs = NOW - 3_600_000;
+  const dataset = createDataset({
+    seed: 1,
+    now: NOW,
+    traces: 40,
+    profile: {
+      ...PLAIN,
+      marks: () => new Map<number, Mark>([[11, { startMs, durationMs: 5_000 }]]),
+    },
+  });
+  const trace = dataset.traces[11];
+  expect(trace?.start_time).toBe(rfc3339(startMs));
+  expect(trace?.end_time).toBe(rfc3339(startMs + 5_000));
+  expect(trace?.duration_ns).toBe(5_000_000_000);
+});
+
+it("scores replace by name", () => {
+  const mark: Mark = {
+    scores: [
+      { name: "correctness", source: "human", value: { data_type: "numeric", value: 0.11 } },
+      { name: "judge", source: "llm_judge", value: { data_type: "numeric", value: 0.5 } },
+    ],
+  };
+  const dataset = createDataset({
+    seed: 1,
+    now: NOW,
+    traces: 40,
+    profile: { ...PLAIN, marks: () => new Map<number, Mark>([[2, mark]]) },
+  });
+  const trace = dataset.traces[2];
+  if (!trace) {
+    throw new Error("a 40-trace dataset has trace 2");
+  }
+  expect(trace.scores.map((score) => score.name)).toEqual(["correctness", "relevance", "judge"]);
+  const correctness = trace.scores[0];
+  expect(correctness?.source).toBe("human");
+  expect(correctness?.value).toEqual({ data_type: "numeric", value: 0.11 });
+  expect(trace.scores[2]?.score_id).toBe(markScoreUuid(2, 2));
+});
+
+it("a marked turn sets the previews", () => {
+  const [topic] = SUPPORT_TURNS;
+  if (!topic) {
+    throw new Error("the support topics are not empty");
+  }
+  const turn: Turn = { ...topic, question: "Can I pay by invoice?" };
+  const dataset = createDataset({
+    seed: 1,
+    now: NOW,
+    traces: 40,
+    profile: { ...PLAIN, marks: () => new Map<number, Mark>([[11, { turn }]]) },
+  });
+  const trace = dataset.traces[11];
+  if (!trace) {
+    throw new Error("a 40-trace dataset has trace 11");
+  }
+  expect(trace.input_preview).toBe("Can I pay by invoice?");
+  expect(rootQuestion(dataset, trace)).toBe("Can I pay by invoice?");
+});
+
+it("a showcase can belong to a session", () => {
+  const dataset = createDataset({
+    seed: 1,
+    now: NOW,
+    traces: 10,
+    profile: { ...SUPPORT_PROFILE, showcases: [{ ...SUPPORT_SHOWCASE, session: "sess-x" }] },
+  });
+  const trace = dataset.traces[3];
+  expect(trace?.session_id).toBe("sess-x");
+  const session = dataset.session("sess-x", true, true);
+  expect(session?.turns.map((turn) => turn.trace.trace_id)).toContain(trace?.trace_id);
+});
+
+/** The first trace after the showcase (index 4) that has a `tests_pass` score and whose errors satisfy `ok`. */
+function firstCodingRun(dataset: Dataset, ok: (errorCount: number) => boolean): number {
+  return dataset.traces.findIndex(
+    (trace, index) =>
+      index > 4 &&
+      ok(trace.error_count) &&
+      trace.scores.some((score) => score.name === "tests_pass"),
+  );
+}
+
+it("a mark that makes a trace errored redraws its status-derived score (M1)", () => {
+  const baseline = createDataset({ seed: 1, now: NOW, traces: 40, profile: CODING_PROFILE });
+  const index = firstCodingRun(baseline, (count) => count === 0);
+  expect(index).toBeGreaterThan(-1);
+  const before = baseline.traces[index]?.scores.find((score) => score.name === "tests_pass");
+  expect(before?.value).toEqual({ data_type: "boolean", value: true });
+
+  const error = {
+    count: 1,
+    spanName: "write patch",
+    message: "ContextWindowExceeded: diff over 23 files",
+    stacktrace: "ContextWindowExceeded: the prompt is too long",
+  };
+  const dataset = createDataset({
+    seed: 1,
+    now: NOW,
+    traces: 40,
+    profile: { ...CODING_PROFILE, marks: () => new Map<number, Mark>([[index, { error }]]) },
+  });
+  const trace = dataset.traces[index];
+  expect(trace?.status).toBe("error");
+  expect(trace?.error_count).toBe(1);
+  const after = trace?.scores.find((score) => score.name === "tests_pass");
+  expect(after?.value).toEqual({ data_type: "boolean", value: false });
+  expect(after?.score_id).toBe(before?.score_id);
+});
+
+it("a mark that clears a trace's errors redraws its status-derived score back (M1)", () => {
+  const baseline = createDataset({ seed: 1, now: NOW, traces: 40, profile: CODING_PROFILE });
+  const index = firstCodingRun(baseline, (count) => count > 0);
+  expect(index).toBeGreaterThan(-1);
+  const error = { count: 0, spanName: "write patch", message: "", stacktrace: "" };
+  const dataset = createDataset({
+    seed: 1,
+    now: NOW,
+    traces: 40,
+    profile: { ...CODING_PROFILE, marks: () => new Map<number, Mark>([[index, { error }]]) },
+  });
+  const trace = dataset.traces[index];
+  expect(trace?.status).toBe("ok");
+  expect(trace?.error_count).toBe(0);
+  expect(trace?.scores.find((score) => score.name === "tests_pass")?.value).toEqual({
+    data_type: "boolean",
+    value: true,
+  });
+});
+
+it("mergeMarks: the later fields win, tags and spans concatenate, scores are replaced by name", () => {
+  const span: MarkedSpan = { name: "run_tests", kind: "tool", fromMs: 0, durationMs: 10 };
+  const merged = mergeMarks(
+    {
+      tags: ["x"],
+      release: "v1",
+      spans: [span],
+      scores: [
+        { name: "k", source: "check", value: { data_type: "boolean", value: true } },
+        { name: "j", source: "check", value: { data_type: "numeric", value: 0.5 } },
+      ],
+    },
+    {
+      tags: ["y"],
+      release: "v2",
+      scores: [{ name: "k", source: "check", value: { data_type: "boolean", value: false } }],
+    },
+  );
+  expect(merged).toEqual({
+    tags: ["x", "y"],
+    release: "v2",
+    spans: [span],
+    scores: [
+      { name: "j", source: "check", value: { data_type: "numeric", value: 0.5 } },
+      { name: "k", source: "check", value: { data_type: "boolean", value: false } },
+    ],
+  });
+});
+
+it("mergeMarks leaves out empty lists", () => {
+  expect(mergeMarks({}, { release: "v1" })).toEqual({ release: "v1" });
+  expect(mergeMarks({}, {})).toEqual({});
+});
+
+it("evenSpread picks round(p × n) of the items, evenly along the order", () => {
+  expect(evenSpread([0, 1, 2, 3, 4, 5, 6, 7, 8, 9], 0.3)).toEqual([3, 6, 9]);
+  expect(evenSpread(["a", "b", "c", "d"], 0)).toEqual([]);
+  expect(evenSpread(["a", "b", "c", "d"], 1)).toEqual(["a", "b", "c", "d"]);
+  expect(
+    evenSpread(
+      Array.from({ length: 1000 }, (_, i) => i),
+      0.18,
+    ),
+  ).toHaveLength(180);
+});
+
+it("isEligibleTrace excludes showcases, the big first trace and the traces the list hides", () => {
+  const profile: Profile = { ...SUPPORT_PROFILE, bigFirstTrace: true };
+  const dataset = createDataset({ seed: 1, now: NOW, traces: 10, profile });
+  const at = (index: number) => {
+    const trace = dataset.traces[index];
+    if (!trace) {
+      throw new Error(`a 10-trace dataset has trace ${index}`);
+    }
+    return trace;
+  };
+  expect(isEligibleTrace(profile, at(1), 1)).toBe(true);
+  expect(isEligibleTrace(profile, at(0), 0)).toBe(false);
+  expect(isEligibleTrace(profile, at(3), 3)).toBe(false);
+  expect(isEligibleTrace(profile, { ...at(1), environment: "cetra-eval" }, 1)).toBe(false);
+  expect(
+    isEligibleTrace(
+      profile,
+      { ...at(1), metadata: { ...at(1).metadata, "cetra.experiment_id": "exp-1" } },
+      1,
+    ),
+  ).toBe(false);
+});
+
+it("a mark's name renames the trace and the root span of its detail, and nothing else", () => {
+  const plain = createDataset({ seed: 1, now: NOW, traces: 20, profile: PLAIN });
+  const marked = createDataset({
+    seed: 1,
+    now: NOW,
+    traces: 20,
+    profile: {
+      ...PLAIN,
+      marks: () => new Map<number, Mark>([[11, { name: "process-invoice" }]]),
+    },
+  });
+  const before = plain.traces[11];
+  const after = marked.traces[11];
+  if (!before || !after) {
+    throw new Error("a 20-trace dataset has trace 11");
+  }
+  expect(after.name).toBe("process-invoice");
+  expect({ ...after, name: before.name }).toEqual(before);
+  const root = marked.traceDetail(after.trace_id)?.spans[0];
+  expect(root?.span.name).toBe("process-invoice");
+  expect(marked.spanDetail(after.trace_id, root?.span.span_id ?? "")?.name).toBe("process-invoice");
+  const other = marked.traces.filter((_trace, index) => index !== 11);
+  expect(other).toEqual(plain.traces.filter((_trace, index) => index !== 11));
+  expect(marked.traceDetail(marked.traces[4]?.trace_id ?? "")?.spans[0]?.span.name).toBe(
+    plain.traceDetail(plain.traces[4]?.trace_id ?? "")?.spans[0]?.span.name,
+  );
 });

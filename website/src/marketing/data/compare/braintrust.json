@@ -10,81 +10,115 @@
       "sources": [
         "https://docs.braintrust.dev/admin/self-hosting",
         "https://www.braintrust.dev/pricing"
-      ]
+      ],
+      "status": "partial",
+      "short": "Hybrid: vendor-hosted control plane"
     },
     "selfHostLicence": {
       "value": "Platform is proprietary; the self-host Terraform and Helm repos are Apache-2.0; SDKs Apache-2.0, proxy MIT",
       "sources": [
         "https://github.com/braintrustdata",
         "https://docs.braintrust.dev/admin/deployment/index"
-      ]
+      ],
+      "status": "no",
+      "short": "Proprietary platform"
     },
     "cloudFree": {
       "value": "Starter $0: 1 GB processed data, 10k scores, 14-day retention, unlimited users",
-      "sources": ["https://www.braintrust.dev/pricing"]
+      "sources": ["https://www.braintrust.dev/pricing"],
+      "status": "yes",
+      "short": "Free: 1 GB, 10k scores"
     },
     "cloudPaidFrom": {
       "value": "Pro $249/month incl. 5 GB data, 50k scores, 30-day retention; then $3/GB, $1.50 per 1k scores",
-      "sources": ["https://www.braintrust.dev/pricing"]
+      "sources": ["https://www.braintrust.dev/pricing"],
+      "status": "yes",
+      "short": "$249/mo incl. 5 GB"
     },
     "otel": {
       "value": "OTLP over HTTP at /otel/v1/traces; gen_ai.* and OpenInference attributes mapped; gRPC not mentioned",
       "sources": [
         "https://docs.braintrust.dev/integrations/sdk-integrations/opentelemetry",
         "https://docs.braintrust.dev/integrations/sdk-integrations/opentelemetry/attributes"
-      ]
+      ],
+      "status": "partial",
+      "short": "HTTP only, gRPC not mentioned"
     },
     "sql": {
       "value": "Yes: SQL on the Query page in the UI, POST to /btql endpoint, and bt sql CLI",
-      "sources": ["https://docs.braintrust.dev/reference/sql"]
+      "sources": ["https://docs.braintrust.dev/reference/sql"],
+      "status": "yes",
+      "short": "SQL UI, /btql API, CLI"
     },
     "mcp": {
       "value": "Hosted MCP server: query data with SQL, manage alerts, prompts, dashboards; run evals, edit datasets",
-      "sources": ["https://docs.braintrust.dev/integrations/developer-tools/mcp"]
+      "sources": ["https://docs.braintrust.dev/integrations/developer-tools/mcp"],
+      "status": "yes",
+      "short": "Hosted MCP: SQL, alerts, evals"
     },
     "onlineEvals": {
       "value": "Yes: online scoring rules run scorers, including LLM-as-a-judge, on production logs with sampling",
-      "sources": ["https://docs.braintrust.dev/evaluate/score-online"]
+      "sources": ["https://docs.braintrust.dev/evaluate/score-online"],
+      "status": "yes",
+      "short": "Scoring rules with sampling"
     },
     "datasetsExperiments": {
       "value": "Yes: versioned datasets that experiments can pin to; experiments run on datasets",
       "sources": [
         "https://docs.braintrust.dev/annotate/datasets",
         "https://docs.braintrust.dev/evaluate/run-evaluations"
-      ]
+      ],
+      "status": "yes",
+      "short": "Versioned datasets, experiments"
     },
     "promptManagement": {
       "value": "Yes: prompts versioned, pinned or assigned to environments; UI edits apply without redeploy",
-      "sources": ["https://docs.braintrust.dev/deploy/prompts"]
+      "sources": ["https://docs.braintrust.dev/deploy/prompts"],
+      "status": "yes",
+      "short": "Versions and environments"
     },
     "gateway": {
       "value": "Yes: Braintrust Gateway, unified API with caching and provider failover; hosted gateway is public preview, no SLA",
-      "sources": ["https://docs.braintrust.dev/deploy/gateway"]
+      "sources": ["https://docs.braintrust.dev/deploy/gateway"],
+      "status": "yes",
+      "short": "Gateway (public preview)"
     },
     "alerts": {
       "value": "Log, time-window and environment alerts to webhook, Slack or PagerDuty",
-      "sources": ["https://docs.braintrust.dev/admin/automations/alerts"]
+      "sources": ["https://docs.braintrust.dev/admin/automations/alerts"],
+      "status": "yes",
+      "short": "Webhook, Slack, PagerDuty"
     },
     "issueDetection": {
       "value": "Topics: classifies logs by task, sentiment and issues, then clusters them into topics; daily regeneration",
-      "sources": ["https://docs.braintrust.dev/observe/topics.md"]
+      "sources": ["https://docs.braintrust.dev/observe/topics.md"],
+      "status": "partial",
+      "short": "Topics clustering, daily"
     },
     "annotationQueues": {
       "value": "Assign logs, experiment or dataset rows to members; a Review page with Kanban columns and email notifications",
-      "sources": ["https://docs.braintrust.dev/annotate/human-review/manage-review-work.md"]
+      "sources": ["https://docs.braintrust.dev/annotate/human-review/manage-review-work.md"],
+      "status": "yes",
+      "short": "Review page, Kanban, email"
     },
     "assistant": {
       "value": "Loop: agent in the app; queries data with SQL, writes scorers, edits prompts and builds dashboards, asks before changes",
-      "sources": ["https://docs.braintrust.dev/observe/loop.md"]
+      "sources": ["https://docs.braintrust.dev/observe/loop.md"],
+      "status": "yes",
+      "short": "Loop agent, asks before changes"
     },
     "codingAgents": {
       "value": "Integration pages for Claude Code (plugin or OpenTelemetry), Codex, Cursor, OpenCode, Pi and Antigravity",
       "sources": [
         "https://docs.braintrust.dev/llms.txt",
         "https://docs.braintrust.dev/integrations/developer-tools/claude-code.md"
-      ]
+      ],
+      "status": "yes",
+      "short": "6 coding agents"
     }
   },
+  "stack": ["API", "PostgreSQL", "Redis", "Object storage", "Brainstore"],
+  "strengths": ["selfHostStack", "otel", "issueDetection"],
   "chooseThem": [
     "Managed cloud with unlimited users on the Starter plan and no infrastructure to run",
     "Online scoring, alerts, dashboards and a hosted MCP server, with LLM-as-judge scorers and prompt environments",

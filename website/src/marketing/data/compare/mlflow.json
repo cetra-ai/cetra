@@ -10,75 +10,105 @@
       "sources": [
         "https://mlflow.org/docs/latest/self-hosting/architecture/overview/",
         "https://github.com/mlflow/mlflow/blob/master/docker-compose/docker-compose.yml"
-      ]
+      ],
+      "status": "yes",
+      "short": "Server, SQL database, artifact store"
     },
     "selfHostLicence": {
       "value": "Apache 2.0, fully open source; no paid tier of the self-hosted code",
-      "sources": ["https://mlflow.org", "https://github.com/mlflow/mlflow/blob/master/LICENSE.txt"]
+      "sources": ["https://mlflow.org", "https://github.com/mlflow/mlflow/blob/master/LICENSE.txt"],
+      "status": "yes",
+      "short": "Apache 2.0, no paid tier"
     },
     "cloudFree": {
       "value": "No hosted tier on mlflow.org; docs point to a Databricks free trial for managed MLflow (trial credits)",
-      "sources": ["https://mlflow.org/docs/latest/genai/getting-started/databricks-trial/"]
+      "sources": ["https://mlflow.org/docs/latest/genai/getting-started/databricks-trial/"],
+      "status": "no",
+      "short": "No hosted tier"
     },
     "cloudPaidFrom": {
       "value": "No managed price on mlflow.org; managed MLflow is sold by Databricks",
-      "sources": ["https://mlflow.org/docs/latest/genai/getting-started/databricks-trial/"]
+      "sources": ["https://mlflow.org/docs/latest/genai/getting-started/databricks-trial/"],
+      "status": "no",
+      "short": "No price on mlflow.org"
     },
     "otel": {
       "value": "OTLP/HTTP at /v1/traces (needs SQL backend; gRPC not supported); maps GenAI, OpenInference, OpenLLMetry attributes",
       "sources": [
         "https://mlflow.org/docs/latest/genai/tracing/opentelemetry/ingest/",
         "https://github.com/mlflow/mlflow/blob/master/docs/docs/genai/tracing/opentelemetry/attribute-mapping.mdx"
-      ]
+      ],
+      "status": "partial",
+      "short": "HTTP only, SQL backend needed"
     },
     "sql": {
       "value": "Not documented: docs describe a SQL-like trace search filter (no OR) in the UI and API",
       "sources": [
         "https://mlflow.org/docs/latest/genai/tracing/search-traces/",
         "https://github.com/mlflow/mlflow/blob/master/docs/docs/genai/tracing/search-traces.mdx"
-      ]
+      ],
+      "status": "no",
+      "short": "SQL-like filter, no OR"
     },
     "mcp": {
       "value": "Yes (experimental): search and get traces, set tags, log feedback and expectations, delete traces",
-      "sources": ["https://mlflow.org/docs/latest/genai/mcp/"]
+      "sources": ["https://mlflow.org/docs/latest/genai/mcp/"],
+      "status": "partial",
+      "short": "MCP (experimental)"
     },
     "onlineEvals": {
       "value": "Yes: automatic evaluation runs LLM judges on traces as they arrive; needs an AI Gateway endpoint; LLM judges only",
-      "sources": ["https://mlflow.org/docs/latest/genai/eval-monitor/automatic-evaluations/"]
+      "sources": ["https://mlflow.org/docs/latest/genai/eval-monitor/automatic-evaluations/"],
+      "status": "partial",
+      "short": "LLM judges only, needs gateway"
     },
     "datasetsExperiments": {
       "value": "Yes: evaluation datasets (SQL backend required) and mlflow.genai.evaluate runs with comparison",
-      "sources": ["https://mlflow.org/docs/latest/genai/datasets/"]
+      "sources": ["https://mlflow.org/docs/latest/genai/datasets/"],
+      "status": "yes",
+      "short": "Eval datasets and genai.evaluate"
     },
     "promptManagement": {
       "value": "Yes: Prompt Registry with immutable versions, aliases, UI and API",
-      "sources": ["https://mlflow.org/docs/latest/genai/prompt-registry/"]
+      "sources": ["https://mlflow.org/docs/latest/genai/prompt-registry/"],
+      "status": "yes",
+      "short": "Registry, versions, aliases"
     },
     "gateway": {
       "value": "Yes: AI Gateway, one endpoint for multiple LLM providers with routing, failover, rate limits, budgets",
       "sources": [
         "https://mlflow.org",
         "https://github.com/mlflow/mlflow/blob/master/docs/docs/genai/governance/ai-gateway/index.mdx"
-      ]
+      ],
+      "status": "yes",
+      "short": "AI Gateway with failover, budgets"
     },
     "alerts": {
       "value": "Gateway budget policies send webhook alerts; registry webhooks exist; trace alerts not documented",
       "sources": [
         "https://github.com/mlflow/mlflow/blob/master/docs/docs/genai/governance/ai-gateway/budget-alerts-limits.mdx",
         "https://github.com/mlflow/mlflow/blob/master/docs/docs/self-hosting/webhooks/index.mdx"
-      ]
+      ],
+      "status": "partial",
+      "short": "Gateway budget webhooks only"
     },
     "issueDetection": {
       "value": "Issue Detection groups findings from experiment traces, using a model you choose, into issues; on demand or scheduled",
-      "sources": ["https://mlflow.org/docs/latest/genai/eval-monitor/ai-insights/detect-issues/"]
+      "sources": ["https://mlflow.org/docs/latest/genai/eval-monitor/ai-insights/detect-issues/"],
+      "status": "yes",
+      "short": "Issues from experiment traces"
     },
     "annotationQueues": {
       "value": "Review queues: traces assigned to reviewers with questions; experimental, added in MLflow 3.14.0",
-      "sources": ["https://mlflow.org/docs/latest/genai/assessments/review-queues/"]
+      "sources": ["https://mlflow.org/docs/latest/genai/assessments/review-queues/"],
+      "status": "partial",
+      "short": "Review queues (experimental)"
     },
     "assistant": {
       "value": "AI Assistant: chat panel on experiment pages; backed by Claude Code or Codex CLI, Ollama or a gateway; debugs traces",
-      "sources": ["https://mlflow.org/docs/latest/genai/getting-started/try-assistant/"]
+      "sources": ["https://mlflow.org/docs/latest/genai/getting-started/try-assistant/"],
+      "status": "yes",
+      "short": "AI Assistant on experiment pages"
     },
     "codingAgents": {
       "value": "Tracing for Claude Code (hooks), Codex (notify hook) and Gemini CLI (OpenTelemetry)",
@@ -86,9 +116,13 @@
         "https://mlflow.org/docs/latest/genai/tracing/integrations/listing/claude_code/",
         "https://mlflow.org/docs/latest/genai/tracing/integrations/listing/codex/",
         "https://mlflow.org/docs/latest/genai/tracing/integrations/listing/gemini_cli/"
-      ]
+      ],
+      "status": "yes",
+      "short": "3 coding agents"
     }
   },
+  "stack": ["Tracking server", "SQL backend", "Artifact store"],
+  "strengths": ["selfHostStack", "sql", "alerts"],
   "chooseThem": [
     "Covers LLM tracing, evaluation, prompt registry, AI gateway and classic ML experiment tracking in one tool",
     "Apache 2.0 licence with no paid tier of the self-hosted code",

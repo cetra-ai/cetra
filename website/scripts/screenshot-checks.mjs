@@ -17,6 +17,24 @@ export function checkStorage(shots) {
   }
 }
 
+// A shot's `clip` is a CSS selector (one element), or a list of at least two selectors whose elements are
+// captured together, as the smallest rectangle around them. Throws on anything else, before the server starts.
+export function checkClip(shots) {
+  for (const shot of shots) {
+    if (shot.clip === undefined) continue;
+    const label = `screenshots.json: shot "${shot.name}"`;
+    const selectors = Array.isArray(shot.clip) ? shot.clip : [shot.clip];
+    if (Array.isArray(shot.clip) && shot.clip.length < 2) {
+      throw new Error(`${label}: a clip list needs at least two selectors; use a string for one`);
+    }
+    for (const selector of selectors) {
+      if (typeof selector !== "string" || selector === "") {
+        throw new Error(`${label}: clip must be a selector or a list of selectors`);
+      }
+    }
+  }
+}
+
 // A shot's `clipRect` is a rectangle in CSS px of its viewport, `{ x, y, width, height }`, with
 // x and y at least 0 and width and height positive integers. A shot has `clip` (an element) or
 // `clipRect` (a rectangle), not both. Throws on anything else, before the server starts.
