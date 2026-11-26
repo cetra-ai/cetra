@@ -734,25 +734,8 @@ fn filter_needed_bits_by_trigram(
         .collect();
 
     let frames = &pack.toc().frames;
-    let mut expected_cid = 0u32;
-    let mut contiguous = !frames.is_empty();
-    for frame in frames {
-        if frame.first_chunk_id != expected_cid {
-            contiguous = false;
-            break;
-        }
-        let Some(next) = expected_cid.checked_add(frame.chunk_count) else {
-            contiguous = false;
-            break;
-        };
-        expected_cid = next;
-    }
-    if expected_cid as usize != pack_chunk_count {
-        contiguous = false;
-    }
-
     let mut surviving = Vec::new();
-    if contiguous {
+    if pack.toc().frames_contiguous {
         for (fid, frame) in frames.iter().enumerate() {
             if !frame_matches.get(fid).copied().unwrap_or(true) || frame.chunk_count == 0 {
                 continue;
@@ -1380,5 +1363,84 @@ mod tests {
             par.iter_ones().collect::<Vec<_>>(),
             vec![0, 7, 14, 21, 28, 35]
         );
+    }
+
+    #[test]
+    fn non_contiguous_chunk_loc_frame_id_sets_flag_false_and_avoids_false_negatives() {
+        use crate::format::{FRAME_ENTRY_LEN, PACK_POSTSCRIPT_LEN};
+
+        let opts = PackWriteOptions {
+            codec: test_codec(),
+            zstd_level: 3,
+            target_frame_raw_bytes: 12 * 1024,
+            enable_trigram_skip: true,
+            compress_toc_lz4: false,
+            write_threads: 1,
+        };
+        let mut builder = ChunkPackBuilder::new([0x88u8; 16], opts);
+
+        // Frame 0: pseudo-random 'a'..'d' (no "ALPHA_NEEDLE_99", stored_len >= 1024 so bloom emits).
+        let mut state: u64 = 0x1122_3344_5566_7788;
+        let mut frame0_chunk = Vec::with_capacity(13 * 1024);
+        for _ in 0..(13 * 1024) {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            frame0_chunk.push(b'a' + ((state >> 24) as u8 % 4));
+        }
+
+        // Frame 1: pseudo-random 'm'..'p' containing "ALPHA_NEEDLE_99".
+        let mut frame1_chunk = Vec::with_capacity(13 * 1024);
+        frame1_chunk.extend_from_slice(b"ALPHA_NEEDLE_99");
+        for _ in 0..(13 * 1024 - 15) {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            frame1_chunk.push(b'm' + ((state >> 24) as u8 % 4));
+        }
+
+        let cid0 = builder.intern_chunk(&frame0_chunk).unwrap();
+        let cid1 = builder.intern_chunk(&frame1_chunk).unwrap();
+        assert_eq!((cid0, cid1), (0, 1));
+
+        let mut pack_bytes = Vec::new();
+        builder.finish(&mut pack_bytes).unwrap();
+
+        let orig_pack =
+            ChunkPackReader::open(Arc::new(SliceReader::new(pack_bytes.clone()))).unwrap();
+        assert!(orig_pack.toc().frames_contiguous);
+        assert_eq!(orig_pack.toc().frames.len(), 2);
+        let ts = orig_pack.read_trigram_section().unwrap();
+        assert!(ts[0].is_some(), "expected trigram bloom on frame 0");
+
+        // Craft a pack with the exact same frames/data/blooms, except swap ChunkLoc[0] and ChunkLoc[1]
+        // while keeping frames[0] = 0..1 and frames[1] = 1..1 (`chunks[0].frame_id == 1`).
+        let ps_orig = *orig_pack.postscript();
+        let toc_start = pack_bytes.len() - ps_orig.toc_stored_len as usize;
+        let mut crafted = pack_bytes[..toc_start].to_vec();
+        let mut new_toc = Vec::with_capacity(2 * FRAME_ENTRY_LEN + 2 * 12);
+        for f in &orig_pack.toc().frames {
+            new_toc.extend_from_slice(&f.encode());
+        }
+        new_toc.extend_from_slice(&orig_pack.toc().chunks[1].encode());
+        new_toc.extend_from_slice(&orig_pack.toc().chunks[0].encode());
+        let new_crc = crc32c::crc32c(&new_toc);
+        crafted.extend_from_slice(&new_toc);
+
+        let mut new_ps = ps_orig;
+        new_ps.toc_raw_len = new_toc.len() as u32;
+        new_ps.toc_stored_len = (new_toc.len() + PACK_POSTSCRIPT_LEN) as u32;
+        new_ps.toc_crc32c = new_crc;
+        crafted.extend_from_slice(&new_ps.encode());
+
+        let crafted_pack = ChunkPackReader::open(Arc::new(SliceReader::new(crafted))).unwrap();
+        assert!(
+            !crafted_pack.toc().frames_contiguous,
+            "mismatched ChunkLoc.frame_id must set frames_contiguous = false"
+        );
+
+        let rows = vec![PayloadRefRow::Chunks(vec![(0, 0)])];
+        let bm = search_pack_rows(&crafted_pack, &rows, 0, b"ALPHA_NEEDLE_99", false).unwrap();
+        assert_eq!(bm.iter_ones().collect::<Vec<_>>(), vec![0]);
     }
 }

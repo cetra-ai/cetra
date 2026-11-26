@@ -751,13 +751,13 @@ impl FsstDecodeTable {
     ) -> Result<(), StatamError> {
         let max_row = coded_row.len().saturating_mul(FSST_MAX_SYM_LEN);
         if pos.saturating_add(max_row) <= max_total_bytes {
-            let needed = *pos + max_row + FSST_MAX_SYM_LEN;
+            let needed = pos.saturating_add(max_row).saturating_add(FSST_MAX_SYM_LEN);
             if needed > out_bytes.len() {
                 let grown = out_bytes
                     .len()
                     .saturating_mul(2)
                     .max(needed)
-                    .min(max_total_bytes + FSST_MAX_SYM_LEN);
+                    .min(max_total_bytes.saturating_add(FSST_MAX_SYM_LEN));
                 out_bytes.resize(grown, 0);
             }
             let mut p = *pos;

@@ -1424,6 +1424,9 @@ pub struct PackToc {
     pub frames: Vec<FrameEntry>,
     /// Chunk location table (`chunk_count` entries).
     pub chunks: Vec<ChunkLoc>,
+    /// True iff `frames` partition `0..chunks.len()` contiguously and every `chunks[cid].frame_id`
+    /// matches its owning frame index.
+    pub(crate) frames_contiguous: bool,
 }
 
 #[derive(Clone)]
@@ -1594,16 +1597,31 @@ impl ChunkPackReader {
         }
 
         let mut frames = Vec::with_capacity(frame_count);
+        let mut expected_cid = 0u32;
+        let mut frames_contiguous = frame_count > 0;
         for idx in 0..frame_count {
             let off = idx * FRAME_ENTRY_LEN;
             let entry = FrameEntry::decode(&toc_raw[off..off + FRAME_ENTRY_LEN])?;
             validate_frame_entry(&entry, &ps, data_end, &trailer_sections)?;
+            if frames_contiguous {
+                if entry.first_chunk_id != expected_cid {
+                    frames_contiguous = false;
+                } else if let Some(next) = expected_cid.checked_add(entry.chunk_count) {
+                    expected_cid = next;
+                } else {
+                    frames_contiguous = false;
+                }
+            }
             frames.push(entry);
+        }
+        if expected_cid as usize != chunk_count {
+            frames_contiguous = false;
         }
 
         let mut chunks = Vec::with_capacity(chunk_count);
         let mut prev_frame = u32::MAX;
         let mut prev_end = 0u32;
+        let mut expected_fid = 0usize;
         for idx in 0..chunk_count {
             let off = frames_bytes + idx * CHUNK_LOC_LEN;
             let mut loc = ChunkLoc::decode(&toc_raw[off..off + CHUNK_LOC_LEN])?;
@@ -1625,6 +1643,18 @@ impl ChunkPackReader {
                     reason: "chunk span exceeds owning frame raw_len",
                 });
             }
+            if frames_contiguous {
+                while expected_fid < frames.len()
+                    && (idx as u64)
+                        >= u64::from(frames[expected_fid].first_chunk_id)
+                            + u64::from(frames[expected_fid].chunk_count)
+                {
+                    expected_fid += 1;
+                }
+                if expected_fid >= frames.len() || loc.frame_id as usize != expected_fid {
+                    frames_contiguous = false;
+                }
+            }
             prev_frame = loc.frame_id;
             prev_end = end;
             chunks.push(loc);
@@ -1636,6 +1666,7 @@ impl ChunkPackReader {
                 postscript: ps,
                 frames,
                 chunks,
+                frames_contiguous,
             },
             data_end,
             inline_dict_framed,

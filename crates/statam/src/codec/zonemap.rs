@@ -974,9 +974,9 @@ fn read_u64_le(buf: &[u8; 16]) -> u64 {
 pub fn zone_map_always_matches(entry: &BlockEntry, dt: &DataType, pred: &ZonePred) -> bool {
     if entry.row_count == 0
         || entry.null_count > 0
-        || (entry.block_flags & BLOCK_FLAG_ALL_NULL) != 0
+        || (entry.block_flags & (BLOCK_FLAG_HAS_NULLS | BLOCK_FLAG_ALL_NULL)) != 0
         || (entry.block_flags & BLOCK_FLAG_MIN_MAX_VALID) == 0
-        || entry.encoding == Encoding::Dict
+        || matches!(entry.encoding, Encoding::Dict | Encoding::PayloadRefs)
     {
         return false;
     }
