@@ -13,9 +13,9 @@ const ROWS: Record<string, unknown>[] = [
 ];
 const RESULT: Schema<"SqlQueryResult"> = {
   columns: [
-    { name: "name", type: "Utf8" },
-    { name: "n", type: "Int64" },
-    { name: "tags", type: "List(Utf8)" },
+    { name: "name", type: "string" },
+    { name: "n", type: "integer" },
+    { name: "tags", type: "string_list" },
   ],
   rows: ROWS as Schema<"SqlQueryResult">["rows"],
   truncated: false,
@@ -41,13 +41,13 @@ afterEach(() => {
 it("builds one column per result column, aligned and iconed by type", () => {
   const columns = sqlColumns({
     columns: [
-      { name: "a b", type: "Utf8" },
-      { name: "n", type: "Int64" },
-      { name: "when", type: 'Timestamp(Nanosecond, Some("UTC"))' },
-      { name: "day", type: "Date32" },
-      { name: "ok", type: "Boolean" },
-      { name: "xs", type: "List(Int64)" },
-      { name: "raw", type: "Binary" },
+      { name: "a b", type: "string" },
+      { name: "n", type: "integer" },
+      { name: "when", type: "timestamp" },
+      { name: "day", type: "date" },
+      { name: "ok", type: "boolean" },
+      { name: "xs", type: "list" },
+      { name: "raw", type: "binary" },
     ],
     rows: [],
     truncated: false,
@@ -88,9 +88,9 @@ it("makes every column sortable and lets only the last one grow", () => {
   expect(columns.map((column) => column.meta?.grow)).toEqual([false, false, true]);
 });
 
-it("shows the Arrow type as a tooltip on the header", () => {
+it("shows the column type as a tooltip on the header", () => {
   render(<SqlResultGrid result={RESULT} />);
-  expect(screen.getByTitle("Int64")).toHaveTextContent("n");
+  expect(screen.getByTitle("integer")).toHaveTextContent("n");
 });
 
 it("cycles a column's sort descending, ascending, then none on header clicks", () => {
@@ -146,8 +146,8 @@ it("renders duplicate column names without a React key warning", () => {
   const duplicateRows: Record<string, unknown>[] = [{ a: 2 }];
   const result: Schema<"SqlQueryResult"> = {
     columns: [
-      { name: "a", type: "Int64" },
-      { name: "a", type: "Int64" },
+      { name: "a", type: "integer" },
+      { name: "a", type: "integer" },
     ],
     rows: duplicateRows as Schema<"SqlQueryResult">["rows"],
     truncated: false,

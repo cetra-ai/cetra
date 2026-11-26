@@ -385,9 +385,9 @@ it("renders NULL and JSON cells", async () => {
   captureSql(() =>
     HttpResponse.json({
       columns: [
-        { name: "a", type: "Utf8" },
-        { name: "n", type: "Int64" },
-        { name: "m", type: "Map(Utf8, Utf8)" },
+        { name: "a", type: "string" },
+        { name: "n", type: "integer" },
+        { name: "m", type: "string_map" },
       ],
       rows: [{ a: null, n: 3, m: { k: "v" } }],
       truncated: true,
@@ -1595,9 +1595,9 @@ it("draws a line chart with one series per value and keeps the tab", async () =>
   captureSql(() =>
     HttpResponse.json({
       columns: [
-        { name: "day", type: 'Timestamp(Nanosecond, Some("UTC"))' },
-        { name: "model", type: "Utf8" },
-        { name: "cost", type: "Float64" },
+        { name: "day", type: "timestamp" },
+        { name: "model", type: "string" },
+        { name: "cost", type: "float" },
       ],
       rows: [
         { day: "2026-01-01T00:00:00.000000000Z", model: "a;}b{", cost: 1 },
@@ -1628,8 +1628,8 @@ it("draws a bar chart", async () => {
   captureSql(() =>
     HttpResponse.json({
       columns: [
-        { name: "name", type: "Utf8" },
-        { name: "traces", type: "Int64" },
+        { name: "name", type: "string" },
+        { name: "traces", type: "integer" },
       ],
       rows: [
         { name: "a", traces: 1 },
@@ -1650,7 +1650,7 @@ it("draws a bar chart", async () => {
 it("says when no chart fits", async () => {
   captureSql(() =>
     HttpResponse.json({
-      columns: [{ name: "name", type: "Utf8" }],
+      columns: [{ name: "name", type: "string" }],
       rows: [{ name: "a" }],
       truncated: false,
     }),
@@ -1666,13 +1666,13 @@ it("notes a clipped chart", async () => {
   captureSql(() =>
     HttpResponse.json({
       columns: [
-        { name: "name", type: "Utf8" },
-        { name: "a", type: "Int64" },
-        { name: "b", type: "Int64" },
-        { name: "c", type: "Int64" },
-        { name: "d", type: "Int64" },
-        { name: "e", type: "Int64" },
-        { name: "f", type: "Int64" },
+        { name: "name", type: "string" },
+        { name: "a", type: "integer" },
+        { name: "b", type: "integer" },
+        { name: "c", type: "integer" },
+        { name: "d", type: "integer" },
+        { name: "e", type: "integer" },
+        { name: "f", type: "integer" },
       ],
       rows: [{ name: "x", a: 1, b: 1, c: 1, d: 1, e: 1, f: 1 }],
       truncated: false,

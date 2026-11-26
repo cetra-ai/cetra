@@ -20,12 +20,13 @@ function sorted(values: unknown[], kind: SqlSortKind, desc: boolean): unknown[] 
   return sortSqlRows(rowsOf(values), (row) => row.value, kind, desc).map((row) => row.value);
 }
 
-it("picks the comparison kind from the Arrow type", () => {
-  expect(sortKindOf("Int64")).toBe("number");
-  expect(sortKindOf("Decimal128(38, 18)")).toBe("number");
-  expect(sortKindOf("Utf8")).toBe("text");
-  expect(sortKindOf('Timestamp(Nanosecond, Some("UTC"))')).toBe("other");
-  expect(sortKindOf("Boolean")).toBe("other");
+it("picks the comparison kind from the column type", () => {
+  expect(sortKindOf("integer")).toBe("number");
+  expect(sortKindOf("float")).toBe("number");
+  expect(sortKindOf("decimal")).toBe("number");
+  expect(sortKindOf("string")).toBe("text");
+  expect(sortKindOf("timestamp")).toBe("other");
+  expect(sortKindOf("boolean")).toBe("other");
 });
 
 it("keeps nulls and missing cells last in both directions", () => {
