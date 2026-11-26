@@ -22,7 +22,9 @@ use crate::reads_qe::context::{
     query_err_to_run, rewrite_view_expr_for_raw, run_err_to_query, scores_raw_schema,
     spans_raw_schema, traces_raw_schema, traces_view_projection, traces_view_schema,
 };
-use crate::reads_qe::scope::{StreamSet, apply_trace_id_semi_join, scoped_traces_spec};
+use crate::reads_qe::scope::{
+    StreamSet, TraceSemiJoinParams, apply_trace_id_semi_join, scoped_traces_spec,
+};
 use crate::reads_qe::scores_join::{apply_compiled_filter, compile_optional_filter};
 use crate::views::TimeWindow;
 
@@ -285,14 +287,17 @@ fn eval_llm_latency_p95(
             streams: raw_streams,
             schema: Arc::clone(&proj_schema),
         },
-        DAY_NS,
-        true,
-        ListScope {
-            window: Some(window),
-            include_eval: false,
-            include_experiments: false,
+        &TraceSemiJoinParams {
+            lookback_ns: DAY_NS,
+            ends_after_from: true,
+            scope: ListScope {
+                window: Some(window),
+                include_eval: false,
+                include_experiments: false,
+            },
+            references_environment: false,
+            dashboard_filter: filter_text,
         },
-        filter_text,
     )?;
 
     let dur_col = col_expr(&proj_schema, spans::DURATION_NS)?;
@@ -415,14 +420,17 @@ fn eval_score_value(
             streams: raw_streams,
             schema: Arc::clone(&proj_schema),
         },
-        SCORE_TRACE_LOOKBACK,
-        false,
-        ListScope {
-            window: Some(window),
-            include_eval: false,
-            include_experiments: false,
+        &TraceSemiJoinParams {
+            lookback_ns: SCORE_TRACE_LOOKBACK,
+            ends_after_from: false,
+            scope: ListScope {
+                window: Some(window),
+                include_eval: false,
+                include_experiments: false,
+            },
+            references_environment: false,
+            dashboard_filter: filter_text,
         },
-        filter_text,
     )?;
 
     let value_col = col_expr(&proj_schema, scores::VALUE_NUM)?;
@@ -925,6 +933,11 @@ mod tests {
                 0.01,
             ),
             (
+                AlertMeasure::LlmLatencyP95,
+                Some("score('helpfulness') > 0.5"),
+                0.01,
+            ),
+            (
                 AlertMeasure::ScoreAvg {
                     name: "helpfulness".to_owned(),
                 },
@@ -939,10 +952,24 @@ mod tests {
                 1e-9,
             ),
             (
+                AlertMeasure::ScoreAvg {
+                    name: "helpfulness".to_owned(),
+                },
+                Some("score('ok') = 1"),
+                1e-9,
+            ),
+            (
                 AlertMeasure::ScorePassRate {
                     name: "ok".to_owned(),
                 },
                 None,
+                1e-9,
+            ),
+            (
+                AlertMeasure::ScorePassRate {
+                    name: "ok".to_owned(),
+                },
+                Some("score('helpfulness') > 0.5"),
                 1e-9,
             ),
             (

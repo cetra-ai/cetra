@@ -3,7 +3,7 @@
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::fmt;
-use std::sync::{Arc, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock, PoisonError};
 use std::time::Duration;
 
 use cetra_column::{
@@ -39,7 +39,7 @@ pub(crate) const DURATION_MS: &str = "duration_ms";
 
 /// Execution context for `reads_qe` queries over one snapshot of a project.
 #[derive(Clone)]
-pub(crate) struct EngineContext {
+pub struct EngineContext {
     pub(crate) spans: Arc<dyn ScanSource>,
     pub(crate) traces: Arc<TracesSource>,
     pub(crate) scores: Arc<ScoresSource>,
@@ -49,6 +49,7 @@ pub(crate) struct EngineContext {
     pub(crate) force_range_mode: bool,
     pub(crate) suspects: Suspects,
     pool: Option<Arc<ScopedPool>>,
+    last_metrics: Arc<Mutex<Option<ExecMetrics>>>,
 }
 
 impl fmt::Debug for EngineContext {
@@ -72,27 +73,78 @@ impl Drop for CancelOnDrop {
 }
 
 impl EngineContext {
+    /// Forces range-mode execution on `trace_list` (disabling widening-window and two-phase list optimizations).
+    #[doc(hidden)]
+    pub fn set_force_range_mode(&mut self, force: bool) {
+        self.force_range_mode = force;
+    }
+
+    /// Returns the [`ExecMetrics`] recorded by the most recent pipeline executed on this context.
+    #[doc(hidden)]
+    pub fn last_metrics(&self) -> Option<ExecMetrics> {
+        self.last_metrics
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
+    }
+
+    /// Admits a query against `storage`'s [`QeRuntime`] admission pool up front (surfacing
+    /// [`crate::error::QueryError::Busy`] on saturation) and then builds an [`EngineContext`]
+    /// over `storage`'s newest published snapshot for `project`.
+    pub(crate) async fn admit_from_storage(
+        storage: &Storage,
+        project: ProjectId,
+        options: &QueryOptions,
+    ) -> Result<Self, crate::error::QueryError> {
+        let pool = storage
+            .qe_runtime
+            .admission
+            .admit(
+                storage.qe_runtime.query_memory.initial,
+                storage.qe_runtime.query_memory.cap,
+                storage.qe_runtime.query_memory.wait,
+            )
+            .await
+            .map_err(|err| match err {
+                QueryError::Busy => crate::error::QueryError::Busy,
+                other => {
+                    crate::error::QueryError::DataFusion(DataFusionError::External(Box::new(other)))
+                }
+            })?;
+        Self::build_from_storage(storage, project, options, Some(pool))
+            .map_err(crate::error::QueryError::DataFusion)
+    }
+
     /// Builds an [`EngineContext`] over `storage`'s current published snapshot for `project`.
     pub(crate) fn from_storage(
         storage: &Storage,
         project: ProjectId,
         options: &QueryOptions,
     ) -> Result<Self, RunError> {
+        Self::build_from_storage(storage, project, options, None).map_err(RunError::Internal)
+    }
+
+    fn build_from_storage(
+        storage: &Storage,
+        project: ProjectId,
+        options: &QueryOptions,
+        pool: Option<Arc<ScopedPool>>,
+    ) -> Result<Self, DataFusionError> {
         let handle = tokio::runtime::Handle::try_current().map_err(|_| {
-            RunError::Internal(DataFusionError::Internal(
+            DataFusionError::Internal(
                 "EngineContext::from_storage requires an active Tokio runtime".to_owned(),
-            ))
+            )
         })?;
         let state = storage.published.load();
         let suspects = Suspects::new(Arc::clone(&storage.verify));
         let store = storage.objects.store();
-        let spans_raw = spans_raw_schema()?;
+        let spans_raw = spans_raw_schema().map_err(run_err_to_df)?;
 
         if state.projects.is_dropped(project) {
             let empty_mem = Arc::new(MemSnapshot::default());
             let no_deletions: Arc<[Arc<PendingDeletion>]> = Arc::from(Vec::new());
             let spans: Arc<dyn ScanSource> =
-                Arc::new(UnionSource::new(spans_raw, Vec::new()).map_err(query_err_to_run)?);
+                Arc::new(UnionSource::new(spans_raw, Vec::new()).map_err(query_err_to_df)?);
             let traces = Arc::new(
                 TracesSource::new(
                     Arc::clone(&store),
@@ -105,7 +157,7 @@ impl EngineContext {
                     suspects.clone(),
                     handle.clone(),
                 )
-                .map_err(query_err_to_run)?,
+                .map_err(query_err_to_df)?,
             );
             let scores = Arc::new(
                 ScoresSource::new(
@@ -119,7 +171,7 @@ impl EngineContext {
                     suspects.clone(),
                     handle,
                 )
-                .map_err(query_err_to_run)?,
+                .map_err(query_err_to_df)?,
             );
             return Ok(Self {
                 spans,
@@ -130,7 +182,8 @@ impl EngineContext {
                 around: options.around(),
                 force_range_mode: false,
                 suspects,
-                pool: None,
+                pool,
+                last_metrics: Arc::new(Mutex::new(None)),
             });
         }
 
@@ -156,7 +209,7 @@ impl EngineContext {
                         keep_from,
                         &deletions,
                     )
-                    .map_err(|e| RunError::Internal(DataFusionError::External(Box::new(e))))?,
+                    .map_err(|e| DataFusionError::External(Box::new(e)))?,
                     deletion::project_snapshot(
                         Table::Scores,
                         &state.scores,
@@ -164,7 +217,7 @@ impl EngineContext {
                         keep_from,
                         &deletions,
                     )
-                    .map_err(|e| RunError::Internal(DataFusionError::External(Box::new(e))))?,
+                    .map_err(|e| DataFusionError::External(Box::new(e)))?,
                 )
             };
 
@@ -202,13 +255,13 @@ impl EngineContext {
             Arc::clone(&spans_snapshot),
             Arc::clone(&deletions),
         )
-        .map_err(query_err_to_run)?;
+        .map_err(query_err_to_df)?;
         let spans: Arc<dyn ScanSource> = Arc::new(
             UnionSource::new(
                 spans_raw,
                 vec![Arc::new(spans_parquet), Arc::new(spans_mem)],
             )
-            .map_err(query_err_to_run)?,
+            .map_err(query_err_to_df)?,
         );
 
         let traces = Arc::new(
@@ -223,7 +276,7 @@ impl EngineContext {
                 suspects.clone(),
                 handle.clone(),
             )
-            .map_err(query_err_to_run)?,
+            .map_err(query_err_to_df)?,
         );
 
         let scores = Arc::new(
@@ -238,7 +291,7 @@ impl EngineContext {
                 suspects.clone(),
                 handle,
             )
-            .map_err(query_err_to_run)?,
+            .map_err(query_err_to_df)?,
         );
 
         Ok(Self {
@@ -250,7 +303,8 @@ impl EngineContext {
             around: options.around(),
             force_range_mode: false,
             suspects,
-            pool: None,
+            pool,
+            last_metrics: Arc::new(Mutex::new(None)),
         })
     }
 
@@ -271,7 +325,11 @@ impl EngineContext {
             Some(p) => Arc::clone(p),
             None => {
                 let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
-                let wait = self.runtime.query_memory.wait.min(remaining);
+                if remaining.is_zero() {
+                    return Err(RunError::Timeout);
+                }
+                let admission_wait = self.runtime.query_memory.wait;
+                let wait = admission_wait.min(remaining);
                 match tokio::time::timeout(
                     remaining,
                     self.runtime.admission.admit(
@@ -283,6 +341,12 @@ impl EngineContext {
                 .await
                 {
                     Ok(Ok(p)) => p,
+                    Ok(Err(QueryError::Busy))
+                        if remaining <= admission_wait
+                            && tokio::time::Instant::now() >= deadline =>
+                    {
+                        return Err(RunError::Timeout);
+                    }
                     Ok(Err(err)) => return Err(query_err_to_run(err)),
                     Err(_) => return Err(RunError::Timeout),
                 }
@@ -307,10 +371,10 @@ impl EngineContext {
 
         let mut handle = tokio::task::spawn_blocking(move || work(&exec_ctx));
         let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
-        match tokio::time::timeout(remaining, &mut handle).await {
+        let res = match tokio::time::timeout(remaining, &mut handle).await {
             Ok(Ok(Ok(value))) => {
                 drop(cancel_guard);
-                Ok((value, metrics))
+                Ok((value, metrics.clone()))
             }
             Ok(Ok(Err(err))) => {
                 drop(cancel_guard);
@@ -328,7 +392,12 @@ impl EngineContext {
                 drop(cancel_guard);
                 Err(RunError::Timeout)
             }
-        }
+        };
+        *self
+            .last_metrics
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = Some(metrics);
+        res
     }
 
     /// Scans `source` with `spec`, pushes through `make_chain` into `make_sink`, and returns
@@ -427,6 +496,17 @@ impl EngineContext {
             timeout,
         )
         .await
+    }
+}
+
+fn query_err_to_df(err: QueryError) -> DataFusionError {
+    DataFusionError::External(Box::new(err))
+}
+
+fn run_err_to_df(err: RunError) -> DataFusionError {
+    match err {
+        RunError::Internal(df) => df,
+        other => DataFusionError::External(Box::new(other)),
     }
 }
 
@@ -746,6 +826,28 @@ pub(crate) fn scores_view_projection(
     project_view_columns(input_schema, Arc::clone(&out_schema), &names, false, ctx)
 }
 
+/// Builds a [`ProjectOp`] projecting all 29 `traces` view columns plus a binary
+/// `FixedBytes16` copy of `trace_id` under `raw_trace_id_col`.
+pub(crate) fn traces_view_projection_with_raw_trace_id(
+    input_schema: &Schema,
+    raw_trace_id_col: &str,
+    ctx: ExecContext,
+) -> Result<(ProjectOp, Arc<Schema>), QueryError> {
+    let view_schema = traces_view_schema().map_err(run_err_to_query)?;
+    let names: Vec<&str> = view_schema
+        .fields()
+        .iter()
+        .map(|f| f.name.as_str())
+        .collect();
+    let mut exprs = view_column_exprs(input_schema, &names, true)?;
+    exprs.push(raw_col_expr(input_schema, traces::TRACE_ID)?);
+    let mut fields = view_schema.fields().to_vec();
+    fields.push(Field::new(raw_trace_id_col, DataType::FixedBytes16, false));
+    let out_schema = Schema::try_new_arc(fields)?;
+    let op = ProjectOp::with_schema(exprs, Arc::clone(&out_schema), ctx)?;
+    Ok((op, out_schema))
+}
+
 /// Builds a [`ProjectOp`] projecting named columns from `input_schema`, converting binary IDs to
 /// lowercase hex and computing derived `duration_ns` / `duration_ms` when absent from `input_schema`.
 pub(crate) fn project_view_columns(
@@ -755,6 +857,15 @@ pub(crate) fn project_view_columns(
     compute_trace_duration: bool,
     ctx: ExecContext,
 ) -> Result<ProjectOp, QueryError> {
+    let exprs = view_column_exprs(input_schema, col_names, compute_trace_duration)?;
+    ProjectOp::with_schema(exprs, out_schema, ctx)
+}
+
+fn view_column_exprs(
+    input_schema: &Schema,
+    col_names: &[&str],
+    compute_trace_duration: bool,
+) -> Result<Vec<Expr>, QueryError> {
     let mut exprs = Vec::with_capacity(col_names.len());
     for &name in col_names {
         let expr = if name == DURATION_NS {
@@ -788,7 +899,7 @@ pub(crate) fn project_view_columns(
         };
         exprs.push(expr);
     }
-    ProjectOp::with_schema(exprs, out_schema, ctx)
+    Ok(exprs)
 }
 
 /// Adapts a [`PartitionStream`] followed by a chain of [`PushOperator`]s back into a
@@ -1902,6 +2013,95 @@ mod tests {
 
         // Standalone GlobalPool smoke check to verify Pool usage.
         let _ = GlobalPool::standalone(1024);
+        let _ = storage.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn admit_from_storage_surfaces_busy_and_fallback_distinguishes_timeout_vs_busy() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut cfg = test_storage_config(dir.path());
+        cfg.query.admission_wait = Duration::from_millis(40);
+        let storage = Storage::open(cfg).await.expect("open storage");
+        let project: ProjectId = "018f6b4e-7c1a-7c1a-8c1a-000000000001"
+            .parse()
+            .expect("project");
+
+        // Build a saturated context with a tiny pool and short admission wait.
+        let cap = 2 * 1024 * 1024;
+        let admission = Arc::new(crate::engine::admission::AsyncAdmissionPool::new(cap));
+        let held = admission
+            .admit(cap, cap, Duration::from_secs(1))
+            .await
+            .expect("hold entire pool");
+
+        let mut base =
+            EngineContext::from_storage(&storage, project, &QueryOptions::new(None, None))
+                .expect("ctx");
+        base.runtime = Arc::new(QeRuntime {
+            admission: Arc::clone(&admission),
+            workers: Default::default(),
+            workers_init: Default::default(),
+            metadata_cache: Arc::clone(&base.runtime.metadata_cache),
+            spill: Arc::clone(&base.runtime.spill),
+            target_partitions: 1,
+            query_memory: crate::QueryMemory {
+                initial: cap,
+                cap,
+                wait: Duration::from_millis(40),
+            },
+        });
+
+        // 1. Caller timeout <= admission_wait -> RunError::Timeout (not Busy).
+        let err_timeout = base
+            .run_with_ctx(Duration::from_millis(15), |_| Ok(()))
+            .await
+            .expect_err("caller timeout shorter than admission_wait");
+        assert!(
+            matches!(err_timeout, RunError::Timeout),
+            "expected Timeout, got {err_timeout:?}"
+        );
+
+        // 2. Caller timeout > admission_wait -> Busy (not Timeout).
+        let err_busy = base
+            .run_with_ctx(Duration::from_millis(200), |_| Ok(()))
+            .await
+            .expect_err("admission_wait expired before caller timeout");
+        assert!(
+            matches!(err_busy, RunError::Internal(_)),
+            "expected Internal(Busy), got {err_busy:?}"
+        );
+
+        // 3. `admit_from_storage` when pool is saturated returns `QueryError::Busy` (HTTP 503).
+        let storage_pool_limit = storage.qe_runtime.admission.limit();
+        let storage_held = storage
+            .qe_runtime
+            .admission
+            .admit(
+                storage_pool_limit,
+                storage_pool_limit,
+                Duration::from_secs(1),
+            )
+            .await
+            .expect("saturate storage pool");
+        let err =
+            EngineContext::admit_from_storage(&storage, project, &QueryOptions::new(None, None))
+                .await
+                .expect_err("saturated storage pool must fail with Busy");
+        assert!(
+            matches!(err, crate::error::QueryError::Busy),
+            "expected crate::error::QueryError::Busy, got {err:?}"
+        );
+        drop(held);
+        drop(storage_held);
+
+        // Verify admitted context succeeds when pool has room.
+        let admitted = storage
+            .qe_query(project, QueryOptions::new(None, None))
+            .await
+            .expect("admit succeeds");
+        assert!(admitted.pool.is_some());
+        drop(admitted);
+
         let _ = storage.shutdown().await;
     }
 }

@@ -22,11 +22,11 @@ use crate::reads_qe::columns::{
 pub(crate) const MAX_CURSOR_BYTES: usize = 4096;
 
 /// One page of `cetra-column` batches and an optional opaque keyset cursor.
-pub(crate) struct QePage {
+pub struct QePage {
     /// Rows in sort order, at most the requested limit.
-    pub(crate) batches: Vec<Batch>,
+    pub batches: Vec<Batch>,
     /// Cursor for the next page. `None` when this page is the last.
-    pub(crate) next_cursor: Option<String>,
+    pub next_cursor: Option<String>,
 }
 
 impl fmt::Debug for QePage {

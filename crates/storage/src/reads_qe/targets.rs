@@ -29,6 +29,7 @@ use crate::reads_qe::context::{
 };
 use crate::reads_qe::scope::{
     SearchPredicate, scoped_spans_spec, scoped_traces_spec, search_predicate, sessions_from_traces,
+    sessions_from_traces_projection,
 };
 use crate::reads_qe::scores_join::{apply_compiled_filter, compile_optional_filter};
 
@@ -257,17 +258,19 @@ pub(crate) async fn filter_session_targets(
         include_eval: false,
         include_experiments: request.include_experiments,
     };
-    let spec = scoped_traces_spec(ctx, scope, false)?;
+    let mut spec = scoped_traces_spec(ctx, scope, false)?;
+    let traces_raw = traces_raw_schema()?;
+    spec.projection = Some(sessions_from_traces_projection(&traces_raw)?);
     let limit = request.limit;
 
     let ctx_c = ctx.clone();
     let (res, _) = ctx
         .run_with_ctx(request.timeout, move |exec_ctx| {
-            let traces_raw = traces_raw_schema().map_err(run_err_to_query)?;
+            let proj_schema = ctx_c.traces.projected_schema(&spec)?;
             let raw_streams = ctx_c.traces.open_partitions(&spec, exec_ctx)?;
             let mut ids = Vec::new();
             if !raw_streams.is_empty() {
-                let sessions = sessions_from_traces(raw_streams, &traces_raw, exec_ctx)?;
+                let sessions = sessions_from_traces(raw_streams, &proj_schema, exec_ctx)?;
                 let streams = match &compiled {
                     Some(f) => apply_compiled_filter(
                         &ctx_c,
@@ -303,7 +306,7 @@ pub(crate) async fn filter_session_targets(
                         exec_ctx,
                         projected,
                         |_| Ok(Vec::new()),
-                        move |_| Ok(DistinctSessionIdSink::new(limit + 1)),
+                        move |_| Ok(DistinctSessionIdSink::new(limit.saturating_add(1))),
                     )?;
                     let mut found = BTreeSet::new();
                     for sink in sinks {

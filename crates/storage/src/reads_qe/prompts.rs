@@ -24,7 +24,7 @@ use crate::reads_qe::columns::{
 use crate::reads_qe::context::{
     EngineContext, OperatorStream, run_err_to_query, scores_raw_schema, spans_raw_schema,
 };
-use crate::reads_qe::scope::{StreamSet, trace_id_semi_join};
+use crate::reads_qe::scope::{StreamSet, TraceSemiJoinParams, trace_id_semi_join};
 use crate::views::TimeWindow;
 
 const DAY_NS: i64 = 86_400_000_000_000;
@@ -69,8 +69,18 @@ pub(crate) async fn prompt_metrics(
                 include_eval: false,
                 include_experiments: false,
             };
-            let Some(semi) = trace_id_semi_join(&ctx_c, exec_ctx, DAY_NS, true, scope, None)
-                .map_err(run_err_to_query)?
+            let Some(semi) = trace_id_semi_join(
+                &ctx_c,
+                exec_ctx,
+                &TraceSemiJoinParams {
+                    lookback_ns: DAY_NS,
+                    ends_after_from: true,
+                    scope,
+                    references_environment: false,
+                    dashboard_filter: None,
+                },
+            )
+            .map_err(run_err_to_query)?
             else {
                 return Err(QueryError::internal(
                     "prompt_metrics trace_id_semi_join unexpectedly returned None",

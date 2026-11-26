@@ -32,7 +32,9 @@ use crate::reads_qe::context::{
     traces_view_projection, traces_view_schema,
 };
 use crate::reads_qe::cursor::{self, QePage};
-use crate::reads_qe::scope::{StreamSet, scoped_traces_spec, sessions_from_traces};
+use crate::reads_qe::scope::{
+    StreamSet, scoped_traces_spec, sessions_from_traces, sessions_from_traces_projection,
+};
 use crate::reads_qe::scores_join::{apply_compiled_filter, compile_optional_filter};
 use crate::views::TimeWindow;
 
@@ -271,7 +273,7 @@ pub(crate) async fn user_detail(
                 .into_iter()
                 .flat_map(CollectSink::into_batches)
                 .collect();
-            let Some(user) = single_row(&user_batches)? else {
+            let Some(user) = single_row(&user_batches, exec_ctx)? else {
                 return Ok(None);
             };
 
@@ -328,6 +330,9 @@ pub(crate) async fn user_detail(
                 expr: Box::new(all_sid_col),
                 data_type: DataType::Bool,
             });
+            all_spec.projection =
+                Some(sessions_from_traces_projection(&traces_raw).map_err(run_err_to_query)?);
+            let all_schema = ctx_c.traces.projected_schema(&all_spec)?;
             let all_streams = ctx_c.traces.open_partitions(&all_spec, exec_ctx)?;
             if all_streams.is_empty() {
                 return Ok(Some(QeUserDetailData {
@@ -337,12 +342,12 @@ pub(crate) async fn user_detail(
             }
             let joined = execute_hash_join(
                 all_streams,
-                Arc::clone(&traces_raw),
+                Arc::clone(&all_schema),
                 right_streams,
                 Arc::clone(&sid_only_schema),
                 HashJoinSpec {
                     join_type: JoinType::LeftSemi,
-                    left_keys: vec![col_expr(&traces_raw, traces::SESSION_ID)?],
+                    left_keys: vec![col_expr(&all_schema, traces::SESSION_ID)?],
                     right_keys: vec![col_expr(&sid_only_schema, traces::SESSION_ID)?],
                     null_equals_null: false,
                     residual_filter: None,
@@ -350,7 +355,7 @@ pub(crate) async fn user_detail(
                 exec_ctx,
             )?;
 
-            let sessions = sessions_from_traces(vec![joined], &traces_raw, exec_ctx)?;
+            let sessions = sessions_from_traces(vec![joined], &all_schema, exec_ctx)?;
             if sessions.streams.is_empty() {
                 return Ok(Some(QeUserDetailData {
                     user,
@@ -1257,13 +1262,15 @@ fn coalesce_expr(primary: Expr, fallback: Expr) -> Expr {
     }
 }
 
-fn single_row(batches: &[Batch]) -> Result<Option<Batch>, QueryError> {
+fn single_row(batches: &[Batch], exec_ctx: &ExecContext) -> Result<Option<Batch>, QueryError> {
     let non_empty: Vec<&Batch> = batches.iter().filter(|b| b.num_rows() > 0).collect();
     let Some(first) = non_empty.first() else {
         return Ok(None);
     };
     let schema = Arc::clone(first.schema());
-    let merged = Batch::concat(schema, &non_empty, None)?;
+    let mut res = exec_ctx.pool.register("user_single_row", false);
+    let merged = Batch::concat(schema, &non_empty, Some(&mut res))?;
+    res.free();
     if merged.num_rows() == 0 {
         return Ok(None);
     }
