@@ -51,6 +51,11 @@ impl Table {
         }
     }
 
+    /// Stored columnar schema, delegating to [`crate::catalog::FileTable::column_schema`].
+    pub(crate) fn column_schema(self) -> std::sync::Arc<cetra_column::Schema> {
+        crate::catalog::FileTable::from(self).column_schema()
+    }
+
     /// Column whose UTC day partitions the memtable.
     ///
     /// Spans use `start_time` until the trace anchor lands. Scores use `created_at`.

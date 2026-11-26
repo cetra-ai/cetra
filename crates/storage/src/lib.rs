@@ -56,6 +56,8 @@ pub(crate) mod disk;
 #[allow(dead_code)] // wired in QE3.7 and M4
 pub(crate) mod engine;
 pub mod error;
+#[allow(dead_code)] // wired in QE6.2–QE6.4
+pub(crate) mod file_format;
 mod filter;
 pub(crate) mod flush;
 pub(crate) mod format;
@@ -334,6 +336,26 @@ impl QeRuntime {
         let _ = self.workers.set(Arc::clone(&pool));
         Ok(pool)
     }
+
+    #[cfg(test)]
+    pub(crate) fn for_test() -> Arc<Self> {
+        Arc::new(Self {
+            admission: Arc::new(engine::admission::AsyncAdmissionPool::new(64 << 20)),
+            workers: std::sync::OnceLock::new(),
+            workers_init: Mutex::new(()),
+            metadata_cache: Arc::new(engine::metadata_cache::MetadataCache::new(64 << 20)),
+            spill: Arc::new(cetra_query::exec::SpillManager::with_fixed_cap(
+                PathBuf::new(),
+                0,
+            )),
+            target_partitions: 2,
+            query_memory: QueryMemory {
+                initial: 1 << 20,
+                cap: 64 << 20,
+                wait: std::time::Duration::from_secs(1),
+            },
+        })
+    }
 }
 
 impl std::fmt::Debug for QeRuntime {
@@ -599,17 +621,23 @@ impl Storage {
                     OpenError::Runtime
                 })?;
             objects.register(&runtime);
+            let compaction_pool = cetra_column::GlobalPool::new(memory);
             Arc::new(compaction::job::Compactor::new(
                 Arc::clone(&committer),
                 Arc::clone(&objects),
                 Arc::clone(&disk),
                 Arc::clone(&verify),
                 Arc::clone(&published),
-                compaction::merge::MergeContext {
+                compaction::merge::MergeContext::new(
                     runtime,
-                    batch_size: 8192,
-                    jobs: config.compaction.threads,
-                },
+                    8192,
+                    config.compaction.threads,
+                    compaction_pool,
+                    Arc::clone(&qe_runtime),
+                    objects.store(),
+                    Arc::clone(&verify),
+                    tokio::runtime::Handle::current(),
+                ),
                 compaction::plan::Policy::from(&config.compaction),
                 compaction::job::CompactorLimits {
                     threads: config.compaction.threads,
@@ -682,16 +710,18 @@ impl Storage {
             tracing::warn!("obsolete file collection failed");
             tracing::debug!(error = error.label(), "obsolete file collection error");
         }
-        let media = MediaGc {
-            committer: Arc::clone(&committer),
-            objects: Arc::clone(&objects),
-            published: Arc::clone(&published),
-            runtime: Arc::clone(&runtime),
+        let media = MediaGc::new(
+            Arc::clone(&committer),
+            Arc::clone(&objects),
+            Arc::clone(&published),
+            Arc::clone(&runtime),
             target_partitions,
             lookback,
-            hooks: share_hooks(&hooks),
-            verify: Arc::clone(&verify),
-        };
+            share_hooks(&hooks),
+            Arc::clone(&verify),
+            Arc::clone(&qe_runtime),
+            tokio::runtime::Handle::current(),
+        );
         // Finish drops interrupted by a crash or a failed media step, after
         // the first obsolete-file collection (spec 03 §7).
         media.finish_drops().await;

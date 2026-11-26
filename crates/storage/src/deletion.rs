@@ -86,6 +86,25 @@ pub(crate) struct PendingDeletion {
     pub(crate) sessions: HashSet<String>,
 }
 
+impl PendingDeletion {
+    /// Converts this pending deletion into a `cetra_query::TombstoneSpec`.
+    pub(crate) fn to_tombstone_spec(&self) -> cetra_query::TombstoneSpec {
+        cetra_query::TombstoneSpec {
+            cutoff: self.cutoff,
+            trace_ids: self.trace_ids.iter().copied().collect(),
+            users: self.users.iter().cloned().collect(),
+            sessions: self.sessions.iter().cloned().collect(),
+        }
+    }
+}
+
+/// Converts a slice of [`PendingDeletion`]s into [`cetra_query::TombstoneSpec`]s.
+pub(crate) fn to_tombstone_specs(
+    deletions: &[Arc<PendingDeletion>],
+) -> Vec<cetra_query::TombstoneSpec> {
+    deletions.iter().map(|d| d.to_tombstone_spec()).collect()
+}
+
 /// Every pending deletion, by project, plus the known sequence.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct Tombstones {
@@ -318,6 +337,19 @@ pub(crate) fn drop_covered(
     };
     let keep = not(&covered)?;
     Ok(filter_record_batch(batch, &keep)?)
+}
+
+/// The rows of `batch` not covered by `predicate`, materialized via [`cetra_column::Batch::compact`].
+pub(crate) fn drop_covered_batch(
+    batch: &cetra_column::Batch,
+    predicate: &cetra_query::Expr,
+) -> Result<cetra_column::Batch, cetra_query::QueryError> {
+    let ctx = cetra_query::EvalContext {
+        now_ns: crate::catalog::now_ns(),
+        cancel: cetra_column::CancelToken::new(),
+    };
+    let filtered = cetra_query::tombstone::filter_uncovered(batch, predicate, &ctx, None)?;
+    Ok(filtered.compact(None)?)
 }
 
 /// A filtered copy of `snapshot` for `project`: every batch without its covered
@@ -794,5 +826,69 @@ mod tests {
             .downcast_ref::<arrow::array::FixedSizeBinaryArray>()
             .unwrap();
         assert_eq!(trace.value(0), span_row(3, 0, 0, 0).trace_id.as_bytes());
+    }
+
+    #[test]
+    fn drop_covered_batch_keeps_uncovered_rows_and_handles_selection_and_encodings() {
+        use cetra_column::{Batch, Column, ScalarValue, Selection};
+        use cetra_query::{TombstoneTable, covered_predicate as native_covered_predicate};
+
+        let mut s1 = span_row(1, 0, 10, 1);
+        s1.user_id = Some("alice".to_owned());
+        let mut s2 = span_row(2, 0, 20, 1);
+        s2.user_id = Some("bob".to_owned());
+        let mut s3 = span_row(3, 0, 30, 1_000);
+        s3.user_id = Some("alice".to_owned());
+
+        let rb = span_rows(&[s1, s2, s3]);
+        let col_batch = crate::column_bridge::record_batch_to_column(&rb).unwrap();
+
+        let del = scoped(&[1], &["bob"], &[], 1);
+        let specs = to_tombstone_specs(std::slice::from_ref(&del));
+        assert_eq!(specs.len(), 1);
+        assert_eq!(specs[0].cutoff, 1);
+        assert_eq!(specs[0].users, vec!["bob".to_owned()]);
+
+        let pred = native_covered_predicate(TombstoneTable::Spans, col_batch.schema(), &specs)
+            .unwrap()
+            .unwrap();
+        let kept = drop_covered_batch(&col_batch, &pred).unwrap();
+        assert_eq!(kept.num_rows(), 1);
+        assert_eq!(
+            kept.column_by_name(spans::TRACE_ID)
+                .unwrap()
+                .get_scalar(0)
+                .unwrap(),
+            ScalarValue::FixedBytes16(*span_row(3, 0, 0, 0).trace_id.as_bytes())
+        );
+
+        // Also check with non-All Selection and Const column encoding.
+        let mut cols = col_batch.columns().to_vec();
+        let ingest_idx = col_batch.schema().index_of(spans::INGEST_TIME).unwrap();
+        cols[ingest_idx] = Column::try_new_const(
+            ScalarValue::TimestampNs {
+                value: 1,
+                utc: true,
+            },
+            3,
+        )
+        .unwrap();
+        let with_const = Batch::try_new(
+            Arc::clone(col_batch.schema()),
+            cols,
+            3,
+            Selection::Indices(vec![2, 0]),
+        )
+        .unwrap();
+        let kept_const = drop_covered_batch(&with_const, &pred).unwrap();
+        assert_eq!(kept_const.num_rows(), 1);
+        assert_eq!(
+            kept_const
+                .column_by_name(spans::TRACE_ID)
+                .unwrap()
+                .get_scalar(0)
+                .unwrap(),
+            ScalarValue::FixedBytes16(*span_row(3, 0, 0, 0).trace_id.as_bytes())
+        );
     }
 }

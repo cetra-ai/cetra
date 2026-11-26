@@ -53,6 +53,47 @@ pub(crate) struct MergeContext {
     /// Jobs that may merge at the same time (`compaction.threads`): each gets
     /// an equal share of the pool when its batch rows are chosen.
     pub(crate) jobs: usize,
+    /// Dedicated compaction memory pool (`compaction.max_memory`).
+    #[allow(dead_code)]
+    pub(crate) pool: Arc<cetra_column::GlobalPool>,
+    /// Persistent native query runtime (`workers` + `metadata_cache`).
+    #[allow(dead_code)]
+    pub(crate) qe_runtime: Arc<crate::QeRuntime>,
+    /// Object store handle for native Parquet scans.
+    #[allow(dead_code)]
+    pub(crate) store: Arc<dyn object_store::ObjectStore>,
+    /// Suspect file queue for native Parquet scans.
+    #[allow(dead_code)]
+    pub(crate) verify: Arc<crate::verify::VerifyQueue>,
+    /// Tokio runtime handle for async object-store reads from worker threads.
+    #[allow(dead_code)]
+    pub(crate) runtime_handle: tokio::runtime::Handle,
+}
+
+impl MergeContext {
+    /// Constructs a [`MergeContext`] with both legacy DataFusion and native engine handles.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn new(
+        runtime: Arc<RuntimeEnv>,
+        batch_size: usize,
+        jobs: usize,
+        pool: Arc<cetra_column::GlobalPool>,
+        qe_runtime: Arc<crate::QeRuntime>,
+        store: Arc<dyn object_store::ObjectStore>,
+        verify: Arc<crate::verify::VerifyQueue>,
+        runtime_handle: tokio::runtime::Handle,
+    ) -> Self {
+        Self {
+            runtime,
+            batch_size,
+            jobs,
+            pool,
+            qe_runtime,
+            store,
+            verify,
+            runtime_handle,
+        }
+    }
 }
 
 /// What `merge_slice` produced.
@@ -519,11 +560,16 @@ mod tests {
             .build_arc()
             .unwrap();
         objects.register(&runtime);
-        MergeContext {
+        MergeContext::new(
             runtime,
             batch_size,
-            jobs: 1,
-        }
+            1,
+            cetra_column::GlobalPool::new(64 << 20),
+            crate::QeRuntime::for_test(),
+            objects.store(),
+            Arc::new(crate::verify::VerifyQueue::default()),
+            tokio::runtime::Handle::current(),
+        )
     }
 
     async fn write_input(
@@ -731,11 +777,22 @@ mod tests {
                 .build_arc()
                 .unwrap()
         };
-        let ctx = MergeContext {
-            runtime: pool(1 << 30),
-            batch_size: 8192,
-            jobs: 3,
-        };
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let store: Arc<dyn object_store::ObjectStore> =
+            Arc::new(object_store::memory::InMemory::new());
+        let ctx = MergeContext::new(
+            pool(1 << 30),
+            8192,
+            3,
+            cetra_column::GlobalPool::new(1 << 30),
+            crate::QeRuntime::for_test(),
+            Arc::clone(&store),
+            Arc::new(crate::verify::VerifyQueue::default()),
+            rt.handle().clone(),
+        );
         // Small rows: the configured batch size.
         let small = sized(100 << 20, 1_000_000);
         assert_eq!(super::batch_rows(&ctx, &[&small, &small]), 8192);
@@ -754,11 +811,16 @@ mod tests {
         let empty = sized(0, 0);
         assert_eq!(super::batch_rows(&ctx, &[&empty]), 8192);
         // No finite pool: the configured batch size.
-        let unbounded = MergeContext {
-            runtime: RuntimeEnvBuilder::new().build_arc().unwrap(),
-            batch_size: 8192,
-            jobs: 3,
-        };
+        let unbounded = MergeContext::new(
+            RuntimeEnvBuilder::new().build_arc().unwrap(),
+            8192,
+            3,
+            cetra_column::GlobalPool::new(usize::MAX),
+            crate::QeRuntime::for_test(),
+            store,
+            Arc::new(crate::verify::VerifyQueue::default()),
+            rt.handle().clone(),
+        );
         assert_eq!(super::batch_rows(&unbounded, &inputs), 8192);
     }
 
@@ -775,11 +837,16 @@ mod tests {
             .build_arc()
             .unwrap();
         objects.register(&runtime);
-        let ctx = MergeContext {
+        let ctx = MergeContext::new(
             runtime,
-            batch_size: 8192,
-            jobs: 1,
-        };
+            8192,
+            1,
+            cetra_column::GlobalPool::new(16 << 20),
+            crate::QeRuntime::for_test(),
+            objects.store(),
+            Arc::new(crate::verify::VerifyQueue::default()),
+            tokio::runtime::Handle::current(),
+        );
         let mut inputs = Vec::new();
         for block in 0..8 {
             inputs.push(
