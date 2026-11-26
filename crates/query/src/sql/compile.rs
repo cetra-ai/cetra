@@ -1,7 +1,7 @@
 //! Compiles an optimized Shape B [`LogicalPlan`] into M3 push pipelines and
 //! formats privacy-safe physical plans for `EXPLAIN`.
 
-use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
+use std::collections::{HashMap, VecDeque};
 use std::fmt::{self, Write as _};
 use std::sync::atomic::AtomicUsize;
 use std::sync::{Arc, Mutex};
@@ -16,7 +16,7 @@ use crate::exec::pipeline::{
     ControlFlow, ExecContext, PushOperator, run_pipeline_with_stop, transfer_or_grow,
 };
 use crate::exec::sort_window::{ExternalSort, eval_window_group};
-use crate::exec::source::{BatchSource, MapProjection, PartitionStream, ScanSource, ScanSpec};
+use crate::exec::source::{BatchSource, PartitionStream, ScanSource, ScanSpec};
 use crate::exec::streaming::{FilterOp, LimitOp, ProjectOp, TopKSink, UnionSource, UnnestOp};
 use crate::ir::Expr;
 
@@ -180,7 +180,7 @@ fn compile_stage(
             time_range,
             id_lookups,
             substrings,
-            map_keys,
+            map_projections,
             limit,
             schema,
             ..
@@ -192,11 +192,11 @@ fn compile_stage(
             };
             let spec = ScanSpec {
                 projection: projection.clone(),
-                map_projections: map_keys_to_projections(map_keys),
+                map_projections: map_projections.clone(),
                 time_range: *time_range,
                 id_lookups: id_lookups.clone(),
                 filters: filters.clone(),
-                substrings: substrings.iter().map(|s| vec![s.clone()]).collect(),
+                substrings: substrings.clone(),
                 sort_hints: Vec::new(),
                 limit: *limit,
             };
@@ -1130,18 +1130,18 @@ fn fmt_physical_node(plan: &LogicalPlan, sources: &SqlSources, depth: usize, out
             time_range,
             id_lookups,
             substrings,
-            map_keys,
+            map_projections,
             limit,
             schema,
             ..
         } => {
             let spec = ScanSpec {
                 projection: projection.clone(),
-                map_projections: map_keys_to_projections(map_keys),
+                map_projections: map_projections.clone(),
                 time_range: *time_range,
                 id_lookups: id_lookups.clone(),
                 filters: filters.clone(),
-                substrings: substrings.iter().map(|s| vec![s.clone()]).collect(),
+                substrings: substrings.clone(),
                 sort_hints: Vec::new(),
                 limit: *limit,
             };
@@ -1171,8 +1171,8 @@ fn fmt_physical_node(plan: &LogicalPlan, sources: &SqlSources, depth: usize, out
             if !substrings.is_empty() {
                 let _ = write!(out, " substrings={substrings:?}");
             }
-            if !map_keys.is_empty() {
-                let _ = write!(out, " map_keys={}", map_keys.len());
+            if !map_projections.is_empty() {
+                let _ = write!(out, " map_projections={}", map_projections.len());
             }
             if let Some(lim) = limit {
                 let _ = write!(out, " limit={lim}");
@@ -1365,23 +1365,10 @@ fn fmt_physical_node(plan: &LogicalPlan, sources: &SqlSources, depth: usize, out
     }
 }
 
-fn map_keys_to_projections(map_keys: &[(String, String)]) -> BTreeMap<String, MapProjection> {
-    let mut out: BTreeMap<String, MapProjection> = BTreeMap::new();
-    for (col, key) in map_keys {
-        let mut set = BTreeSet::new();
-        set.insert(key.clone());
-        match out.get_mut(col) {
-            Some(existing) => existing.merge(MapProjection::Keys(set)),
-            None => {
-                out.insert(col.clone(), MapProjection::Keys(set));
-            }
-        }
-    }
-    out
-}
-
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
+
     use cetra_column::{
         DataType, Field, FlatColumn, FlatData, GlobalPool, ScalarValue, Schema, Utf8Data,
     };
@@ -1454,7 +1441,7 @@ mod tests {
                 time_range: TimeRangeHint::default(),
                 id_lookups: Vec::new(),
                 substrings: Vec::new(),
-                map_keys: Vec::new(),
+                map_projections: BTreeMap::new(),
                 limit: None,
                 schema: Arc::clone(&schema),
             }),
@@ -1502,12 +1489,12 @@ mod tests {
                     column: "user_id".to_owned(),
                     values: vec!["secret-user-lookup".to_owned()],
                 }],
-                substrings: vec![crate::exec::SubstringHint {
+                substrings: vec![vec![crate::exec::SubstringHint {
                     column: "reason".to_owned(),
                     needle: "secret-needle".to_owned(),
                     case_insensitive: true,
-                }],
-                map_keys: vec![],
+                }]],
+                map_projections: BTreeMap::new(),
                 limit: None,
                 schema: Arc::clone(&scores_schema),
             }),
@@ -1575,7 +1562,7 @@ mod tests {
             time_range: TimeRangeHint::default(),
             id_lookups: Vec::new(),
             substrings: Vec::new(),
-            map_keys: Vec::new(),
+            map_projections: BTreeMap::new(),
             limit: None,
             schema,
         };

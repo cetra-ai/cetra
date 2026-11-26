@@ -1,7 +1,7 @@
 //! Shape B SQL AST binder and typechecker (`Statement` -> typed [`LogicalPlan`]).
 
 use std::cell::Cell;
-use std::collections::{BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::fmt;
 use std::sync::Arc;
 
@@ -2361,7 +2361,7 @@ fn expand_view_def(def: &SqlTableDef, catalog: &SqlCatalog) -> Result<LogicalPla
             time_range: TimeRangeHint::default(),
             id_lookups: Vec::new(),
             substrings: Vec::new(),
-            map_keys: Vec::new(),
+            map_projections: BTreeMap::new(),
             limit: None,
             schema: Arc::clone(&def.schema),
         }),
@@ -2561,7 +2561,7 @@ fn expand_view_def(def: &SqlTableDef, catalog: &SqlCatalog) -> Result<LogicalPla
             let s_user_id = agg_col(7);
             let s_tags = agg_col(8);
 
-            let diff_ns = Expr::Binary {
+            let duration_ns = Expr::Binary {
                 left: Box::new(Expr::Cast {
                     expr: Box::new(s_end.clone()),
                     target: DataType::I64,
@@ -2573,11 +2573,6 @@ fn expand_view_def(def: &SqlTableDef, catalog: &SqlCatalog) -> Result<LogicalPla
                     target: DataType::I64,
                     mode: CastMode::Strict,
                 }),
-                data_type: DataType::I64,
-            };
-            let duration_ns = Expr::Call {
-                func: ScalarFn::Greatest,
-                args: vec![diff_ns, Expr::Literal(ScalarValue::I64(0))],
                 data_type: DataType::I64,
             };
             let duration_ms = duration_ms_expr(duration_ns.clone());
@@ -2733,7 +2728,7 @@ fn build_windowed_scan(
         time_range: TimeRangeHint::default(),
         id_lookups: Vec::new(),
         substrings: Vec::new(),
-        map_keys: Vec::new(),
+        map_projections: BTreeMap::new(),
         limit: None,
         schema: full_schema,
     })
@@ -6963,7 +6958,7 @@ mod tests {
             sessions_plan.schema().as_ref(),
             sessions_view_schema().as_ref()
         );
-        // Verify sessions plan wraps Aggregate(SumCostDecimal) -> Project(Cast F64, greatest duration_ns)
+        // Verify sessions plan wraps Aggregate(SumCostDecimal) -> Project(Cast F64, unclamped duration_ns)
         let LogicalPlan::Project { input: outer, .. } = &sessions_plan else {
             panic!("expected outer Project for sessions");
         };
@@ -6976,6 +6971,13 @@ mod tests {
             panic!("expected sessions post-agg Project");
         };
         assert!(matches!(post_agg.as_ref(), LogicalPlan::Aggregate { .. }));
+        assert!(matches!(
+            exprs[3],
+            Expr::Binary {
+                op: BinaryOp::Sub,
+                ..
+            }
+        ));
         assert!(matches!(
             exprs[8],
             Expr::Cast {

@@ -1,6 +1,6 @@
 //! Typed Shape B SQL [`LogicalPlan`] IR, [`SqlColumn`], and output-name validation.
 
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 use std::fmt;
 use std::sync::{Arc, LazyLock};
 
@@ -10,7 +10,7 @@ use crate::error::InvalidQuery;
 use crate::exec::hash_agg::AggExpr;
 use crate::exec::sort_key::SortKey;
 use crate::exec::sort_window::WindowSpec;
-use crate::exec::source::{IdLookupHint, SubstringHint, TimeRangeHint};
+use crate::exec::source::{IdLookupHint, MapProjection, SubstringHint, TimeRangeHint};
 use crate::ir::Expr;
 
 use super::catalog::SqlViewKind;
@@ -121,10 +121,10 @@ pub enum LogicalPlan {
         time_range: TimeRangeHint,
         /// Binary/string ID lookup hints.
         id_lookups: Vec<IdLookupHint>,
-        /// Substring search hints.
-        substrings: Vec<SubstringHint>,
-        /// Referenced `(map_col, key)` pairs for shredded readers.
-        map_keys: Vec<(String, String)>,
+        /// CNF substring search clauses (outer AND, inner OR).
+        substrings: Vec<Vec<SubstringHint>>,
+        /// Map column projections keyed by column name for shredded readers.
+        map_projections: BTreeMap<String, MapProjection>,
         /// Optional scan limit hint.
         limit: Option<usize>,
         /// Projected output schema of this `Scan`.
@@ -295,7 +295,7 @@ impl fmt::Debug for LogicalPlan {
                 filters,
                 id_lookups,
                 substrings,
-                map_keys,
+                map_projections,
                 limit,
                 schema,
                 ..
@@ -307,7 +307,7 @@ impl fmt::Debug for LogicalPlan {
                 .field("filters_len", &filters.len())
                 .field("id_lookups", id_lookups)
                 .field("substrings", substrings)
-                .field("map_keys_len", &map_keys.len())
+                .field("map_projections_len", &map_projections.len())
                 .field("limit", limit)
                 .field("out_cols", &schema.len())
                 .finish(),

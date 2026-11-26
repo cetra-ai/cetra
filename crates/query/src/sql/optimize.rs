@@ -5,22 +5,26 @@
 //! 2. Filter pushdown through `Project` and safe `Join` sides (before hex-ID rewrite).
 //! 3. Hex-literal ID rewrite (`encode(id, 'hex') =/<>/IN` -> `FixedBytes8`/`FixedBytes16`, D89).
 //! 4. Storage-safe `Scan` filter pushdown (`Traces`: `start_time`/`trace_id`, `Scores`: `created_at`)
-//!    and pruning hint extraction (`time_range`, `id_lookups`, `substrings`), retaining full
+//!    and pruning hint extraction (`time_range`, `id_lookups`, CNF `substrings`), retaining full
 //!    predicates in `Scan.filters`.
-//! 5. Top-down projection pruning and `MapIndex` key pushdown into `Scan.map_keys`.
+//! 5. Top-down projection pruning and `MapProjection` pushdown into `Scan.map_projections`.
 //! 6. Bounded `ORDER BY ... LIMIT k [OFFSET n]` -> `TopK` rewrite when `offset + limit <= 65_536`.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
-use cetra_column::{Batch, CancelToken, DataType, ScalarValue, Schema};
+use cetra_column::{
+    Batch, CancelToken, DataType, GlobalPool, Reservation, ScalarValue, Schema, ScopedPool,
+};
 
 use crate::error::QueryError;
 use crate::eval::eval_expr;
 use crate::exec::hash_agg::{AggExpr, AggFunc};
 use crate::exec::sort_key::SortKey;
 use crate::exec::sort_window::{WindowFunc, WindowSpec};
-use crate::exec::source::{IdLookupHint, SubstringHint, TimeRangeHint};
+use crate::exec::source::{
+    IdLookupHint, MapProjection, SubstringHint, TimeRangeHint, collect_expr_map_projections,
+};
 use crate::ir::{BinaryOp, CastMode, EvalContext, Expr, ScalarFn, UnaryOp};
 
 use super::catalog::SqlViewKind;
@@ -28,6 +32,12 @@ use super::logical::{LogicalJoinKind, LogicalPlan};
 
 /// Maximum `offset + limit` rewritten to unspillable in-memory `TopK` (above this, keep spillable `ExternalSort`).
 pub const TOPK_MAX_ROWS: usize = 65_536;
+
+/// Memory budget enforced on each `ConstFolder` `eval_expr` evaluation (64 KiB).
+const FOLD_MEM_CAP: usize = 64 * 1024;
+
+/// Maximum AST nodes allowed when substituting a conjunct through `Project`.
+const MAX_SUBSTITUTED_EXPR_NODES: usize = 2_048;
 
 /// Optimizes a typed [`LogicalPlan`] using the fixed 6-pass rule pipeline.
 pub fn optimize(plan: LogicalPlan) -> Result<LogicalPlan, QueryError> {
@@ -43,9 +53,32 @@ pub fn optimize(plan: LogicalPlan) -> Result<LogicalPlan, QueryError> {
 // Pass 1: Constant folding & boolean simplification
 // ---------------------------------------------------------------------------
 
+#[derive(Clone, Copy, Default)]
+struct FoldFlags {
+    has_col: bool,
+    has_now: bool,
+    has_redacted: bool,
+}
+
+impl FoldFlags {
+    fn merge(self, other: Self) -> Self {
+        Self {
+            has_col: self.has_col || other.has_col,
+            has_now: self.has_now || other.has_now,
+            has_redacted: self.has_redacted || other.has_redacted,
+        }
+    }
+
+    fn is_foldable(self) -> bool {
+        !self.has_col && !self.has_now && !self.has_redacted
+    }
+}
+
 struct ConstFolder {
     batch: Batch,
     eval_ctx: EvalContext,
+    _pool: Arc<ScopedPool>,
+    res: Reservation,
 }
 
 impl ConstFolder {
@@ -53,10 +86,17 @@ impl ConstFolder {
         let empty = Schema::try_new_arc(Vec::new())?;
         let batch = Batch::try_new_all(empty, Vec::new(), 1)?;
         let eval_ctx = EvalContext::new(0, CancelToken::new());
-        Ok(Self { batch, eval_ctx })
+        let pool = GlobalPool::standalone(FOLD_MEM_CAP);
+        let res = pool.register("const_fold", false);
+        Ok(Self {
+            batch,
+            eval_ctx,
+            _pool: pool,
+            res,
+        })
     }
 
-    fn fold_plan(&self, plan: LogicalPlan) -> Result<LogicalPlan, QueryError> {
+    fn fold_plan(&mut self, plan: LogicalPlan) -> Result<LogicalPlan, QueryError> {
         Ok(match plan {
             LogicalPlan::Scan {
                 table,
@@ -67,7 +107,7 @@ impl ConstFolder {
                 time_range,
                 id_lookups,
                 substrings,
-                map_keys,
+                map_projections,
                 limit,
                 schema,
             } => LogicalPlan::Scan {
@@ -90,7 +130,7 @@ impl ConstFolder {
                 time_range,
                 id_lookups,
                 substrings,
-                map_keys,
+                map_projections,
                 limit,
                 schema,
             },
@@ -235,12 +275,12 @@ impl ConstFolder {
         })
     }
 
-    fn fold_sort_key(&self, mut key: SortKey) -> SortKey {
+    fn fold_sort_key(&mut self, mut key: SortKey) -> SortKey {
         key.expr = self.fold_expr(key.expr);
         key
     }
 
-    fn fold_agg(&self, agg: AggExpr) -> AggExpr {
+    fn fold_agg(&mut self, agg: AggExpr) -> AggExpr {
         AggExpr {
             func: map_agg_func_exprs(agg.func, &mut |e| self.fold_expr(e)),
             filter: agg.filter.map(|f| self.fold_expr(f)),
@@ -248,7 +288,7 @@ impl ConstFolder {
         }
     }
 
-    fn fold_window(&self, spec: WindowSpec) -> WindowSpec {
+    fn fold_window(&mut self, spec: WindowSpec) -> WindowSpec {
         WindowSpec {
             partition_by: spec
                 .partition_by
@@ -266,180 +306,472 @@ impl ConstFolder {
         }
     }
 
-    fn fold_expr(&self, expr: Expr) -> Expr {
-        let folded = match expr {
-            Expr::Column { .. } | Expr::Literal(_) => return expr,
-            Expr::Unary {
-                op,
-                expr: inner,
-                data_type,
-            } => {
-                let inner = self.fold_expr(*inner);
-                if op == UnaryOp::Not
-                    && let Expr::Unary {
-                        op: UnaryOp::Not,
-                        expr: grand,
-                        ..
-                    } = inner
-                {
-                    return coerce_null_type(*grand, data_type);
-                }
-                Expr::Unary {
-                    op,
-                    expr: Box::new(inner),
-                    data_type,
-                }
-            }
-            Expr::Binary {
-                left,
-                op,
-                right,
-                data_type,
-            } => {
-                let left = self.fold_expr(*left);
-                let right = self.fold_expr(*right);
-                match op {
-                    BinaryOp::And => {
-                        if is_bool_lit(&left, true) {
-                            return coerce_null_type(right, data_type);
-                        }
-                        if is_bool_lit(&right, true) {
-                            return coerce_null_type(left, data_type);
-                        }
-                        if is_bool_lit(&left, false) {
-                            return Expr::Literal(ScalarValue::Bool(false));
-                        }
-                        if is_bool_lit(&right, false) && is_infallible(&left) {
-                            return Expr::Literal(ScalarValue::Bool(false));
-                        }
-                    }
-                    BinaryOp::Or => {
-                        if is_bool_lit(&left, false) {
-                            return coerce_null_type(right, data_type);
-                        }
-                        if is_bool_lit(&right, false) {
-                            return coerce_null_type(left, data_type);
-                        }
-                        if is_bool_lit(&left, true) {
-                            return Expr::Literal(ScalarValue::Bool(true));
-                        }
-                        if is_bool_lit(&right, true) && is_infallible(&left) {
-                            return Expr::Literal(ScalarValue::Bool(true));
-                        }
-                    }
-                    _ => {}
-                }
-                Expr::Binary {
-                    left: Box::new(left),
-                    op,
-                    right: Box::new(right),
-                    data_type,
-                }
-            }
-            Expr::Cast {
-                expr: inner,
-                target,
-                mode,
-            } => Expr::Cast {
-                expr: Box::new(self.fold_expr(*inner)),
-                target,
-                mode,
-            },
-            Expr::Between {
-                expr: inner,
-                low,
-                high,
-                negated,
-            } => Expr::Between {
-                expr: Box::new(self.fold_expr(*inner)),
-                low: Box::new(self.fold_expr(*low)),
-                high: Box::new(self.fold_expr(*high)),
-                negated,
-            },
-            Expr::InList {
-                expr: inner,
-                list,
-                negated,
-                redacted,
-            } => {
-                let inner = self.fold_expr(*inner);
-                let list = if redacted {
-                    list
-                } else {
-                    list.into_iter().map(|e| self.fold_expr(e)).collect()
-                };
-                Expr::InList {
-                    expr: Box::new(inner),
-                    list,
-                    negated,
-                    redacted,
-                }
-            }
-            Expr::Like {
-                expr: inner,
-                pattern,
-                escape,
-                case_insensitive,
-                negated,
-            } => Expr::Like {
-                expr: Box::new(self.fold_expr(*inner)),
-                pattern: Box::new(self.fold_expr(*pattern)),
-                escape,
-                case_insensitive,
-                negated,
-            },
-            Expr::Case {
-                operand,
-                when_then,
-                else_expr,
-                data_type,
-            } => Expr::Case {
-                operand: operand.map(|o| Box::new(self.fold_expr(*o))),
-                when_then: when_then
-                    .into_iter()
-                    .map(|(w, t)| (self.fold_expr(w), self.fold_expr(t)))
-                    .collect(),
-                else_expr: else_expr.map(|e| Box::new(self.fold_expr(*e))),
-                data_type,
-            },
-            Expr::MapIndex { map, key } => Expr::MapIndex {
-                map: Box::new(self.fold_expr(*map)),
-                key: Box::new(self.fold_expr(*key)),
-            },
-            Expr::MakeArray { elems, item_type } => Expr::MakeArray {
-                elems: elems.into_iter().map(|e| self.fold_expr(e)).collect(),
-                item_type,
-            },
-            Expr::Call {
-                func,
-                args,
-                data_type,
-            } => Expr::Call {
-                func,
-                args: args.into_iter().map(|a| self.fold_expr(a)).collect(),
-                data_type,
-            },
-        };
+    fn try_eval_const(&mut self, expr: Expr, flags: FoldFlags) -> (Expr, FoldFlags) {
+        if !flags.is_foldable() {
+            return (expr, flags);
+        }
+        let orig_dt = expr.data_type();
+        let folded_sv = eval_expr(&expr, &self.batch, &self.eval_ctx, Some(&mut self.res))
+            .ok()
+            .and_then(|col| col.get_scalar(0).ok());
+        self.res.free();
+        if let Some(sv) = folded_sv
+            && sv.heap_bytes() <= FOLD_MEM_CAP
+        {
+            let sv = if sv.is_null() && sv.data_type() != orig_dt {
+                ScalarValue::Null(orig_dt)
+            } else {
+                sv
+            };
+            return (Expr::Literal(sv), FoldFlags::default());
+        }
+        (expr, flags)
+    }
 
-        if can_const_fold(&folded) {
-            let orig_dt = folded.data_type();
-            if let Ok(col) = eval_expr(&folded, &self.batch, &self.eval_ctx, None)
-                && let Ok(sv) = col.get_scalar(0)
-            {
-                let sv = if sv.is_null() && sv.data_type() != orig_dt {
-                    ScalarValue::Null(orig_dt)
-                } else {
-                    sv
-                };
-                return Expr::Literal(sv);
+    fn fold_expr(&mut self, expr: Expr) -> Expr {
+        enum FoldTask {
+            Eval(Expr),
+            BuildUnary {
+                op: UnaryOp,
+                data_type: DataType,
+            },
+            BuildBinary {
+                op: BinaryOp,
+                data_type: DataType,
+            },
+            BuildCast {
+                target: DataType,
+                mode: CastMode,
+            },
+            BuildBetween {
+                negated: bool,
+            },
+            BuildInList {
+                n: usize,
+                negated: bool,
+            },
+            BuildInListRedacted {
+                list: Vec<Expr>,
+                negated: bool,
+            },
+            BuildLike {
+                escape: Option<char>,
+                case_insensitive: bool,
+                negated: bool,
+            },
+            BuildCase {
+                has_op: bool,
+                n_wt: usize,
+                has_else: bool,
+                data_type: DataType,
+            },
+            BuildMapIndex,
+            BuildMakeArray {
+                n: usize,
+                item_type: DataType,
+            },
+            BuildCall {
+                func: ScalarFn,
+                n: usize,
+                data_type: DataType,
+            },
+        }
+
+        let mut tasks = vec![FoldTask::Eval(expr)];
+        let mut vals: Vec<(Expr, FoldFlags)> = Vec::new();
+
+        while let Some(task) = tasks.pop() {
+            match task {
+                FoldTask::Eval(node) => match node {
+                    Expr::Column { .. } => {
+                        vals.push((
+                            node,
+                            FoldFlags {
+                                has_col: true,
+                                ..Default::default()
+                            },
+                        ));
+                    }
+                    Expr::Literal(_) => {
+                        vals.push((node, FoldFlags::default()));
+                    }
+                    Expr::Unary {
+                        op,
+                        expr: inner,
+                        data_type,
+                    } => {
+                        tasks.push(FoldTask::BuildUnary { op, data_type });
+                        tasks.push(FoldTask::Eval(*inner));
+                    }
+                    Expr::Binary {
+                        left,
+                        op,
+                        right,
+                        data_type,
+                    } => {
+                        tasks.push(FoldTask::BuildBinary { op, data_type });
+                        tasks.push(FoldTask::Eval(*right));
+                        tasks.push(FoldTask::Eval(*left));
+                    }
+                    Expr::Cast {
+                        expr: inner,
+                        target,
+                        mode,
+                    } => {
+                        tasks.push(FoldTask::BuildCast { target, mode });
+                        tasks.push(FoldTask::Eval(*inner));
+                    }
+                    Expr::Between {
+                        expr: inner,
+                        low,
+                        high,
+                        negated,
+                    } => {
+                        tasks.push(FoldTask::BuildBetween { negated });
+                        tasks.push(FoldTask::Eval(*high));
+                        tasks.push(FoldTask::Eval(*low));
+                        tasks.push(FoldTask::Eval(*inner));
+                    }
+                    Expr::InList {
+                        expr: inner,
+                        list,
+                        negated,
+                        redacted,
+                    } => {
+                        if redacted {
+                            tasks.push(FoldTask::BuildInListRedacted { list, negated });
+                            tasks.push(FoldTask::Eval(*inner));
+                        } else {
+                            tasks.push(FoldTask::BuildInList {
+                                n: list.len(),
+                                negated,
+                            });
+                            for item in list.into_iter().rev() {
+                                tasks.push(FoldTask::Eval(item));
+                            }
+                            tasks.push(FoldTask::Eval(*inner));
+                        }
+                    }
+                    Expr::Like {
+                        expr: inner,
+                        pattern,
+                        escape,
+                        case_insensitive,
+                        negated,
+                    } => {
+                        tasks.push(FoldTask::BuildLike {
+                            escape,
+                            case_insensitive,
+                            negated,
+                        });
+                        tasks.push(FoldTask::Eval(*pattern));
+                        tasks.push(FoldTask::Eval(*inner));
+                    }
+                    Expr::Case {
+                        operand,
+                        when_then,
+                        else_expr,
+                        data_type,
+                    } => {
+                        tasks.push(FoldTask::BuildCase {
+                            has_op: operand.is_some(),
+                            n_wt: when_then.len(),
+                            has_else: else_expr.is_some(),
+                            data_type,
+                        });
+                        if let Some(el) = else_expr {
+                            tasks.push(FoldTask::Eval(*el));
+                        }
+                        for (w, t) in when_then.into_iter().rev() {
+                            tasks.push(FoldTask::Eval(t));
+                            tasks.push(FoldTask::Eval(w));
+                        }
+                        if let Some(op) = operand {
+                            tasks.push(FoldTask::Eval(*op));
+                        }
+                    }
+                    Expr::MapIndex { map, key } => {
+                        tasks.push(FoldTask::BuildMapIndex);
+                        tasks.push(FoldTask::Eval(*key));
+                        tasks.push(FoldTask::Eval(*map));
+                    }
+                    Expr::MakeArray { elems, item_type } => {
+                        tasks.push(FoldTask::BuildMakeArray {
+                            n: elems.len(),
+                            item_type,
+                        });
+                        for e in elems.into_iter().rev() {
+                            tasks.push(FoldTask::Eval(e));
+                        }
+                    }
+                    Expr::Call {
+                        func,
+                        args,
+                        data_type,
+                    } => {
+                        tasks.push(FoldTask::BuildCall {
+                            func,
+                            n: args.len(),
+                            data_type,
+                        });
+                        for a in args.into_iter().rev() {
+                            tasks.push(FoldTask::Eval(a));
+                        }
+                    }
+                },
+                FoldTask::BuildUnary { op, data_type } => {
+                    let Some((inner, flags)) = vals.pop() else {
+                        break;
+                    };
+                    if op == UnaryOp::Not
+                        && let Expr::Unary {
+                            op: UnaryOp::Not,
+                            expr: grand,
+                            ..
+                        } = inner
+                    {
+                        vals.push((coerce_null_type(*grand, data_type), flags));
+                        continue;
+                    }
+                    let node = Expr::Unary {
+                        op,
+                        expr: Box::new(inner),
+                        data_type,
+                    };
+                    vals.push(self.try_eval_const(node, flags));
+                }
+                FoldTask::BuildBinary { op, data_type } => {
+                    let (Some((right, r_flags)), Some((left, l_flags))) = (vals.pop(), vals.pop())
+                    else {
+                        break;
+                    };
+                    match op {
+                        BinaryOp::And => {
+                            if is_bool_lit(&left, true) {
+                                vals.push((coerce_null_type(right, data_type), r_flags));
+                                continue;
+                            }
+                            if is_bool_lit(&right, true) {
+                                vals.push((coerce_null_type(left, data_type), l_flags));
+                                continue;
+                            }
+                            if is_bool_lit(&left, false) {
+                                vals.push((
+                                    Expr::Literal(ScalarValue::Bool(false)),
+                                    FoldFlags::default(),
+                                ));
+                                continue;
+                            }
+                            if is_bool_lit(&right, false) && is_infallible(&left) {
+                                vals.push((
+                                    Expr::Literal(ScalarValue::Bool(false)),
+                                    FoldFlags::default(),
+                                ));
+                                continue;
+                            }
+                        }
+                        BinaryOp::Or => {
+                            if is_bool_lit(&left, false) {
+                                vals.push((coerce_null_type(right, data_type), r_flags));
+                                continue;
+                            }
+                            if is_bool_lit(&right, false) {
+                                vals.push((coerce_null_type(left, data_type), l_flags));
+                                continue;
+                            }
+                            if is_bool_lit(&left, true) {
+                                vals.push((
+                                    Expr::Literal(ScalarValue::Bool(true)),
+                                    FoldFlags::default(),
+                                ));
+                                continue;
+                            }
+                            if is_bool_lit(&right, true) && is_infallible(&left) {
+                                vals.push((
+                                    Expr::Literal(ScalarValue::Bool(true)),
+                                    FoldFlags::default(),
+                                ));
+                                continue;
+                            }
+                        }
+                        _ => {}
+                    }
+                    let node = Expr::Binary {
+                        left: Box::new(left),
+                        op,
+                        right: Box::new(right),
+                        data_type,
+                    };
+                    vals.push(self.try_eval_const(node, l_flags.merge(r_flags)));
+                }
+                FoldTask::BuildCast { target, mode } => {
+                    let Some((inner, flags)) = vals.pop() else {
+                        break;
+                    };
+                    let node = Expr::Cast {
+                        expr: Box::new(inner),
+                        target,
+                        mode,
+                    };
+                    vals.push(self.try_eval_const(node, flags));
+                }
+                FoldTask::BuildBetween { negated } => {
+                    let (Some((high, h_f)), Some((low, l_f)), Some((inner, i_f))) =
+                        (vals.pop(), vals.pop(), vals.pop())
+                    else {
+                        break;
+                    };
+                    let node = Expr::Between {
+                        expr: Box::new(inner),
+                        low: Box::new(low),
+                        high: Box::new(high),
+                        negated,
+                    };
+                    vals.push(self.try_eval_const(node, i_f.merge(l_f).merge(h_f)));
+                }
+                FoldTask::BuildInList { n, negated } => {
+                    let start = vals.len().saturating_sub(n);
+                    let mut list = Vec::with_capacity(n);
+                    let mut flags = FoldFlags::default();
+                    for (item, f) in vals.drain(start..) {
+                        flags = flags.merge(f);
+                        list.push(item);
+                    }
+                    let Some((inner, i_f)) = vals.pop() else {
+                        break;
+                    };
+                    let node = Expr::InList {
+                        expr: Box::new(inner),
+                        list,
+                        negated,
+                        redacted: false,
+                    };
+                    vals.push(self.try_eval_const(node, i_f.merge(flags)));
+                }
+                FoldTask::BuildInListRedacted { list, negated } => {
+                    let Some((inner, mut flags)) = vals.pop() else {
+                        break;
+                    };
+                    flags.has_redacted = true;
+                    vals.push((
+                        Expr::InList {
+                            expr: Box::new(inner),
+                            list,
+                            negated,
+                            redacted: true,
+                        },
+                        flags,
+                    ));
+                }
+                FoldTask::BuildLike {
+                    escape,
+                    case_insensitive,
+                    negated,
+                } => {
+                    let (Some((pattern, p_f)), Some((inner, i_f))) = (vals.pop(), vals.pop())
+                    else {
+                        break;
+                    };
+                    let node = Expr::Like {
+                        expr: Box::new(inner),
+                        pattern: Box::new(pattern),
+                        escape,
+                        case_insensitive,
+                        negated,
+                    };
+                    vals.push(self.try_eval_const(node, i_f.merge(p_f)));
+                }
+                FoldTask::BuildCase {
+                    has_op,
+                    n_wt,
+                    has_else,
+                    data_type,
+                } => {
+                    let mut flags = FoldFlags::default();
+                    let else_expr = if has_else {
+                        let Some((el, f)) = vals.pop() else {
+                            break;
+                        };
+                        flags = flags.merge(f);
+                        Some(Box::new(el))
+                    } else {
+                        None
+                    };
+                    let wt_start = vals.len().saturating_sub(n_wt * 2);
+                    let mut when_then = Vec::with_capacity(n_wt);
+                    let mut drained = vals.drain(wt_start..);
+                    while let (Some((w, wf)), Some((t, tf))) = (drained.next(), drained.next()) {
+                        flags = flags.merge(wf).merge(tf);
+                        when_then.push((w, t));
+                    }
+                    drop(drained);
+                    let operand = if has_op {
+                        let Some((op, f)) = vals.pop() else {
+                            break;
+                        };
+                        flags = flags.merge(f);
+                        Some(Box::new(op))
+                    } else {
+                        None
+                    };
+                    let node = Expr::Case {
+                        operand,
+                        when_then,
+                        else_expr,
+                        data_type,
+                    };
+                    vals.push(self.try_eval_const(node, flags));
+                }
+                FoldTask::BuildMapIndex => {
+                    let (Some((key, k_f)), Some((map, m_f))) = (vals.pop(), vals.pop()) else {
+                        break;
+                    };
+                    let node = Expr::MapIndex {
+                        map: Box::new(map),
+                        key: Box::new(key),
+                    };
+                    vals.push(self.try_eval_const(node, m_f.merge(k_f)));
+                }
+                FoldTask::BuildMakeArray { n, item_type } => {
+                    let start = vals.len().saturating_sub(n);
+                    let mut elems = Vec::with_capacity(n);
+                    let mut flags = FoldFlags::default();
+                    for (e, f) in vals.drain(start..) {
+                        flags = flags.merge(f);
+                        elems.push(e);
+                    }
+                    let node = Expr::MakeArray { elems, item_type };
+                    vals.push(self.try_eval_const(node, flags));
+                }
+                FoldTask::BuildCall { func, n, data_type } => {
+                    let start = vals.len().saturating_sub(n);
+                    let mut args = Vec::with_capacity(n);
+                    let mut flags = FoldFlags {
+                        has_now: func == ScalarFn::Now,
+                        ..Default::default()
+                    };
+                    for (a, f) in vals.drain(start..) {
+                        flags = flags.merge(f);
+                        args.push(a);
+                    }
+                    let node = Expr::Call {
+                        func,
+                        args,
+                        data_type,
+                    };
+                    vals.push(self.try_eval_const(node, flags));
+                }
             }
         }
-        folded
+
+        vals.pop()
+            .map(|(e, _)| e)
+            .unwrap_or(Expr::Literal(ScalarValue::Null(DataType::Null)))
     }
 }
 
 fn pass1_constant_fold(plan: LogicalPlan) -> Result<LogicalPlan, QueryError> {
-    let folder = ConstFolder::new()?;
+    let mut folder = ConstFolder::new()?;
     folder.fold_plan(plan)
 }
 
@@ -449,87 +781,6 @@ fn is_bool_lit(expr: &Expr, expected: bool) -> bool {
 
 fn is_null_lit(expr: &Expr) -> bool {
     matches!(expr, Expr::Literal(ScalarValue::Null(_)))
-}
-
-fn can_const_fold(expr: &Expr) -> bool {
-    let mut cols = BTreeSet::new();
-    expr.referenced_columns(&mut cols);
-    cols.is_empty() && !contains_now(expr) && !contains_redacted_in_list(expr)
-}
-
-fn contains_now(expr: &Expr) -> bool {
-    match expr {
-        Expr::Column { .. } | Expr::Literal(_) => false,
-        Expr::Unary { expr, .. } | Expr::Cast { expr, .. } => contains_now(expr),
-        Expr::Binary { left, right, .. } => contains_now(left) || contains_now(right),
-        Expr::Between {
-            expr, low, high, ..
-        } => contains_now(expr) || contains_now(low) || contains_now(high),
-        Expr::InList { expr, list, .. } => contains_now(expr) || list.iter().any(contains_now),
-        Expr::Like { expr, pattern, .. } => contains_now(expr) || contains_now(pattern),
-        Expr::Case {
-            operand,
-            when_then,
-            else_expr,
-            ..
-        } => {
-            operand.as_deref().is_some_and(contains_now)
-                || when_then
-                    .iter()
-                    .any(|(w, t)| contains_now(w) || contains_now(t))
-                || else_expr.as_deref().is_some_and(contains_now)
-        }
-        Expr::MapIndex { map, key } => contains_now(map) || contains_now(key),
-        Expr::MakeArray { elems, .. } => elems.iter().any(contains_now),
-        Expr::Call { func, args, .. } => *func == ScalarFn::Now || args.iter().any(contains_now),
-    }
-}
-
-fn contains_redacted_in_list(expr: &Expr) -> bool {
-    match expr {
-        Expr::Column { .. } | Expr::Literal(_) => false,
-        Expr::Unary { expr, .. } | Expr::Cast { expr, .. } => contains_redacted_in_list(expr),
-        Expr::Binary { left, right, .. } => {
-            contains_redacted_in_list(left) || contains_redacted_in_list(right)
-        }
-        Expr::Between {
-            expr, low, high, ..
-        } => {
-            contains_redacted_in_list(expr)
-                || contains_redacted_in_list(low)
-                || contains_redacted_in_list(high)
-        }
-        Expr::InList {
-            expr,
-            list,
-            redacted,
-            ..
-        } => {
-            *redacted
-                || contains_redacted_in_list(expr)
-                || list.iter().any(contains_redacted_in_list)
-        }
-        Expr::Like { expr, pattern, .. } => {
-            contains_redacted_in_list(expr) || contains_redacted_in_list(pattern)
-        }
-        Expr::Case {
-            operand,
-            when_then,
-            else_expr,
-            ..
-        } => {
-            operand.as_deref().is_some_and(contains_redacted_in_list)
-                || when_then
-                    .iter()
-                    .any(|(w, t)| contains_redacted_in_list(w) || contains_redacted_in_list(t))
-                || else_expr.as_deref().is_some_and(contains_redacted_in_list)
-        }
-        Expr::MapIndex { map, key } => {
-            contains_redacted_in_list(map) || contains_redacted_in_list(key)
-        }
-        Expr::MakeArray { elems, .. } => elems.iter().any(contains_redacted_in_list),
-        Expr::Call { args, .. } => args.iter().any(contains_redacted_in_list),
-    }
 }
 
 fn coerce_null_type(expr: Expr, expected: DataType) -> Expr {
@@ -552,111 +803,198 @@ fn contains_decimal(dt: &DataType) -> bool {
 /// Conservative infallibility check so boolean identities never hide division-by-zero,
 /// integer overflow, strict cast errors, decimal comparison errors, or regex/JSONPath errors.
 fn is_infallible(expr: &Expr) -> bool {
-    match expr {
-        Expr::Column { .. } | Expr::Literal(_) => true,
-        Expr::Unary { op, expr, .. } => !matches!(op, UnaryOp::Neg) && is_infallible(expr),
-        Expr::Binary {
-            left, op, right, ..
-        } => {
-            let is_cmp = matches!(
+    let mut stack = vec![expr];
+    while let Some(node) = stack.pop() {
+        match node {
+            Expr::Column { .. } | Expr::Literal(_) => {}
+            Expr::Unary { op, expr, .. } => {
+                if matches!(op, UnaryOp::Neg) {
+                    return false;
+                }
+                stack.push(expr);
+            }
+            Expr::Binary {
+                left,
                 op,
-                BinaryOp::Eq
-                    | BinaryOp::NotEq
-                    | BinaryOp::Lt
-                    | BinaryOp::LtEq
-                    | BinaryOp::Gt
-                    | BinaryOp::GtEq
-                    | BinaryOp::IsDistinctFrom
-                    | BinaryOp::IsNotDistinctFrom
-                    | BinaryOp::ArrayContains
-            );
-            if is_cmp
-                && (contains_decimal(&left.data_type()) || contains_decimal(&right.data_type()))
-            {
-                return false;
+                right,
+                data_type,
+            } => {
+                let is_cmp = matches!(
+                    op,
+                    BinaryOp::Eq
+                        | BinaryOp::NotEq
+                        | BinaryOp::Lt
+                        | BinaryOp::LtEq
+                        | BinaryOp::Gt
+                        | BinaryOp::GtEq
+                        | BinaryOp::IsDistinctFrom
+                        | BinaryOp::IsNotDistinctFrom
+                        | BinaryOp::ArrayContains
+                );
+                if is_cmp {
+                    if contains_decimal(&left.data_type()) || contains_decimal(&right.data_type()) {
+                        return false;
+                    }
+                    stack.push(right);
+                    stack.push(left);
+                } else if matches!(op, BinaryOp::And | BinaryOp::Or) {
+                    stack.push(right);
+                    stack.push(left);
+                } else if *op == BinaryOp::Div && *data_type == DataType::F64 {
+                    let valid_divisor = matches!(left.data_type(), DataType::F64 | DataType::Null)
+                        && matches!(
+                            right.as_ref(),
+                            Expr::Literal(ScalarValue::F64(v)) if v.is_finite() && *v != 0.0
+                        );
+                    if !valid_divisor {
+                        return false;
+                    }
+                    stack.push(left);
+                } else {
+                    return false;
+                }
             }
-            let safe_op = is_cmp || matches!(op, BinaryOp::And | BinaryOp::Or | BinaryOp::Concat);
-            safe_op && is_infallible(left) && is_infallible(right)
-        }
-        Expr::Cast { mode, expr, .. } => *mode == CastMode::Try && is_infallible(expr),
-        Expr::Between {
-            expr, low, high, ..
-        } => {
-            !contains_decimal(&expr.data_type())
-                && !contains_decimal(&low.data_type())
-                && !contains_decimal(&high.data_type())
-                && is_infallible(expr)
-                && is_infallible(low)
-                && is_infallible(high)
-        }
-        Expr::InList { expr, list, .. } => {
-            !contains_decimal(&expr.data_type())
-                && !list.iter().any(|e| contains_decimal(&e.data_type()))
-                && is_infallible(expr)
-                && list.iter().all(is_infallible)
-        }
-        Expr::Like { expr, pattern, .. } => is_infallible(expr) && is_infallible(pattern),
-        Expr::Case {
-            operand,
-            when_then,
-            else_expr,
-            ..
-        } => {
-            if operand
-                .as_deref()
-                .is_some_and(|op| contains_decimal(&op.data_type()))
-            {
-                return false;
+            Expr::Cast {
+                expr: inner,
+                target,
+                mode,
+            } => {
+                let lossless_total = matches!(
+                    (inner.data_type(), target),
+                    (DataType::I64, DataType::F64)
+                        | (DataType::TimestampNs { .. }, DataType::I64)
+                        | (DataType::I64, DataType::TimestampNs { .. })
+                        | (DataType::TimestampNs { .. }, DataType::TimestampNs { .. })
+                        | (
+                            DataType::FixedBytes8 | DataType::FixedBytes16,
+                            DataType::Binary
+                        )
+                        | (DataType::Decimal128 { .. }, DataType::F64)
+                );
+                if *mode != CastMode::Try && !lossless_total {
+                    return false;
+                }
+                stack.push(inner);
             }
-            operand.as_deref().is_none_or(is_infallible)
-                && when_then
-                    .iter()
-                    .all(|(w, t)| is_infallible(w) && is_infallible(t))
-                && else_expr.as_deref().is_none_or(is_infallible)
-        }
-        Expr::MapIndex { map, key } => is_infallible(map) && is_infallible(key),
-        Expr::MakeArray { elems, .. } => elems.iter().all(is_infallible),
-        Expr::Call { func, args, .. } => {
-            if matches!(
-                func,
-                ScalarFn::Greatest | ScalarFn::Least | ScalarFn::Nullif
-            ) && args.iter().any(|a| contains_decimal(&a.data_type()))
-            {
-                return false;
+            Expr::Between {
+                expr, low, high, ..
+            } => {
+                if contains_decimal(&expr.data_type())
+                    || contains_decimal(&low.data_type())
+                    || contains_decimal(&high.data_type())
+                {
+                    return false;
+                }
+                stack.push(high);
+                stack.push(low);
+                stack.push(expr);
             }
-            let safe_fn = matches!(
-                func,
-                ScalarFn::Lower
-                    | ScalarFn::Upper
-                    | ScalarFn::Length
-                    | ScalarFn::Trim
-                    | ScalarFn::Ltrim
-                    | ScalarFn::Rtrim
-                    | ScalarFn::Concat
-                    | ScalarFn::ConcatWs
-                    | ScalarFn::StartsWith
-                    | ScalarFn::EndsWith
-                    | ScalarFn::Contains
-                    | ScalarFn::Strpos
-                    | ScalarFn::Now
-                    | ScalarFn::Floor
-                    | ScalarFn::Ceil
-                    | ScalarFn::Coalesce
-                    | ScalarFn::Nullif
-                    | ScalarFn::Greatest
-                    | ScalarFn::Least
-                    | ScalarFn::IsNan
-                    | ScalarFn::IsFinite
-                    | ScalarFn::ArrayHas
-                    | ScalarFn::ArrayHasAll
-                    | ScalarFn::ArrayLength
-                    | ScalarFn::ArrayDistinct
-                    | ScalarFn::MapKeys
-                    | ScalarFn::MapValues
-            );
-            safe_fn && args.iter().all(is_infallible)
+            Expr::InList { expr, list, .. } => {
+                if contains_decimal(&expr.data_type())
+                    || list.iter().any(|e| contains_decimal(&e.data_type()))
+                {
+                    return false;
+                }
+                for item in list {
+                    stack.push(item);
+                }
+                stack.push(expr);
+            }
+            Expr::Like { .. } => return false,
+            Expr::Case {
+                operand,
+                when_then,
+                else_expr,
+                ..
+            } => {
+                if operand
+                    .as_deref()
+                    .is_some_and(|op| contains_decimal(&op.data_type()))
+                {
+                    return false;
+                }
+                if let Some(el) = else_expr {
+                    stack.push(el);
+                }
+                for (w, t) in when_then {
+                    stack.push(t);
+                    stack.push(w);
+                }
+                if let Some(op) = operand {
+                    stack.push(op);
+                }
+            }
+            Expr::MapIndex { map, key } => {
+                stack.push(key);
+                stack.push(map);
+            }
+            Expr::MakeArray { elems, .. } => {
+                for e in elems {
+                    stack.push(e);
+                }
+            }
+            Expr::Call { func, args, .. } => {
+                if matches!(func, ScalarFn::Encode) {
+                    if args.len() != 2 {
+                        return false;
+                    }
+                    let ok_fmt = matches!(
+                        &args[1],
+                        Expr::Literal(ScalarValue::Utf8(s))
+                            if s.eq_ignore_ascii_case("hex") || s.eq_ignore_ascii_case("base64")
+                    );
+                    if !ok_fmt {
+                        return false;
+                    }
+                    stack.push(&args[0]);
+                    continue;
+                }
+                if matches!(
+                    func,
+                    ScalarFn::Greatest
+                        | ScalarFn::Least
+                        | ScalarFn::Nullif
+                        | ScalarFn::Floor
+                        | ScalarFn::Ceil
+                ) && args.iter().any(|a| contains_decimal(&a.data_type()))
+                {
+                    return false;
+                }
+                let safe_fn = matches!(
+                    func,
+                    ScalarFn::Lower
+                        | ScalarFn::Upper
+                        | ScalarFn::Length
+                        | ScalarFn::Trim
+                        | ScalarFn::Ltrim
+                        | ScalarFn::Rtrim
+                        | ScalarFn::StartsWith
+                        | ScalarFn::EndsWith
+                        | ScalarFn::Contains
+                        | ScalarFn::Strpos
+                        | ScalarFn::Now
+                        | ScalarFn::Floor
+                        | ScalarFn::Ceil
+                        | ScalarFn::Coalesce
+                        | ScalarFn::Nullif
+                        | ScalarFn::Greatest
+                        | ScalarFn::Least
+                        | ScalarFn::IsNan
+                        | ScalarFn::IsFinite
+                        | ScalarFn::ArrayHas
+                        | ScalarFn::ArrayHasAll
+                        | ScalarFn::ArrayLength
+                );
+                if !safe_fn {
+                    return false;
+                }
+                for a in args {
+                    stack.push(a);
+                }
+            }
         }
     }
+    true
 }
 
 // ---------------------------------------------------------------------------
@@ -796,16 +1134,40 @@ fn push_filter(conjuncts: Vec<Expr>, plan: LogicalPlan) -> Result<LogicalPlan, Q
             exprs,
             schema,
         } => {
-            let mut substituted = Vec::with_capacity(conjuncts.len());
+            let mut push_into = Vec::new();
+            let mut keep_above = Vec::new();
             for conj in conjuncts {
-                substituted.push(substitute_expr(conj, &exprs)?);
+                let ref_counts = count_expr_column_refs(&conj, exprs.len())?;
+                let can_push_refs = ref_counts.iter().enumerate().all(|(idx, &cnt)| {
+                    if cnt == 0 {
+                        return true;
+                    }
+                    let proj = &exprs[idx];
+                    if !is_infallible(proj) {
+                        return false;
+                    }
+                    if cnt > 1 && !matches!(proj, Expr::Column { .. } | Expr::Literal(_)) {
+                        return false;
+                    }
+                    true
+                });
+                if can_push_refs && let Some(sub) = substitute_expr(&conj, &exprs)? {
+                    push_into.push(sub);
+                } else {
+                    keep_above.push(conj);
+                }
             }
-            let pushed_input = push_filter(substituted, *input)?;
-            Ok(LogicalPlan::Project {
+            let pushed_input = if push_into.is_empty() {
+                pass2_filter_pushdown(*input)?
+            } else {
+                push_filter(push_into, *input)?
+            };
+            let proj = LogicalPlan::Project {
                 input: Box::new(pushed_input),
                 exprs,
                 schema,
-            })
+            };
+            wrap_filter(proj, keep_above)
         }
         LogicalPlan::Sort { input, keys } => {
             let pushed_input = push_filter(conjuncts, *input)?;
@@ -876,6 +1238,10 @@ fn push_filter(conjuncts: Vec<Expr>, plan: LogicalPlan) -> Result<LogicalPlan, Q
             let mut keep_above = Vec::new();
 
             for conj in conjuncts {
+                if !is_infallible(&conj) {
+                    keep_above.push(conj);
+                    continue;
+                }
                 let mut cols = BTreeSet::new();
                 conj.referenced_columns(&mut cols);
                 if cols.is_empty() {
@@ -957,143 +1323,570 @@ fn wrap_filter(input: LogicalPlan, conjuncts: Vec<Expr>) -> Result<LogicalPlan, 
     }
 }
 
-fn substitute_expr(expr: Expr, project_exprs: &[Expr]) -> Result<Expr, QueryError> {
-    match expr {
-        Expr::Column { index, .. } => project_exprs.get(index).cloned().ok_or_else(|| {
-            QueryError::internal(format!(
-                "filter column index {index} out of bounds for projection ({} cols)",
-                project_exprs.len()
-            ))
-        }),
-        Expr::Literal(v) => Ok(Expr::Literal(v)),
-        Expr::Unary {
-            op,
-            expr: inner,
-            data_type,
-        } => Ok(Expr::Unary {
-            op,
-            expr: Box::new(substitute_expr(*inner, project_exprs)?),
-            data_type,
-        }),
-        Expr::Binary {
-            left,
-            op,
-            right,
-            data_type,
-        } => Ok(Expr::Binary {
-            left: Box::new(substitute_expr(*left, project_exprs)?),
-            op,
-            right: Box::new(substitute_expr(*right, project_exprs)?),
-            data_type,
-        }),
-        Expr::Cast {
-            expr: inner,
-            target,
-            mode,
-        } => Ok(Expr::Cast {
-            expr: Box::new(substitute_expr(*inner, project_exprs)?),
-            target,
-            mode,
-        }),
-        Expr::Between {
-            expr: inner,
-            low,
-            high,
-            negated,
-        } => Ok(Expr::Between {
-            expr: Box::new(substitute_expr(*inner, project_exprs)?),
-            low: Box::new(substitute_expr(*low, project_exprs)?),
-            high: Box::new(substitute_expr(*high, project_exprs)?),
-            negated,
-        }),
-        Expr::InList {
-            expr: inner,
-            list,
-            negated,
-            redacted,
-        } => {
-            let mut new_list = Vec::with_capacity(list.len());
-            for item in list {
-                new_list.push(substitute_expr(item, project_exprs)?);
+fn count_expr_column_refs(expr: &Expr, num_cols: usize) -> Result<Vec<usize>, QueryError> {
+    let mut counts = vec![0usize; num_cols];
+    let mut stack = vec![expr];
+    while let Some(node) = stack.pop() {
+        match node {
+            Expr::Column { index, .. } => {
+                let slot = counts.get_mut(*index).ok_or_else(|| {
+                    QueryError::internal(format!(
+                        "filter column index {index} out of bounds for projection ({num_cols} cols)"
+                    ))
+                })?;
+                *slot = slot.saturating_add(1);
             }
-            Ok(Expr::InList {
-                expr: Box::new(substitute_expr(*inner, project_exprs)?),
-                list: new_list,
-                negated,
+            Expr::Literal(_) => {}
+            Expr::Unary { expr, .. } | Expr::Cast { expr, .. } => stack.push(expr),
+            Expr::Binary { left, right, .. } => {
+                stack.push(right);
+                stack.push(left);
+            }
+            Expr::Between {
+                expr, low, high, ..
+            } => {
+                stack.push(high);
+                stack.push(low);
+                stack.push(expr);
+            }
+            Expr::InList {
+                expr,
+                list,
                 redacted,
-            })
-        }
-        Expr::Like {
-            expr: inner,
-            pattern,
-            escape,
-            case_insensitive,
-            negated,
-        } => Ok(Expr::Like {
-            expr: Box::new(substitute_expr(*inner, project_exprs)?),
-            pattern: Box::new(substitute_expr(*pattern, project_exprs)?),
-            escape,
-            case_insensitive,
-            negated,
-        }),
-        Expr::Case {
-            operand,
-            when_then,
-            else_expr,
-            data_type,
-        } => {
-            let operand = match operand {
-                Some(op) => Some(Box::new(substitute_expr(*op, project_exprs)?)),
-                None => None,
-            };
-            let mut wt = Vec::with_capacity(when_then.len());
-            for (w, t) in when_then {
-                wt.push((
-                    substitute_expr(w, project_exprs)?,
-                    substitute_expr(t, project_exprs)?,
-                ));
+                ..
+            } => {
+                if !redacted {
+                    for item in list {
+                        stack.push(item);
+                    }
+                }
+                stack.push(expr);
             }
-            let else_expr = match else_expr {
-                Some(el) => Some(Box::new(substitute_expr(*el, project_exprs)?)),
-                None => None,
-            };
-            Ok(Expr::Case {
+            Expr::Like { expr, pattern, .. } => {
+                stack.push(pattern);
+                stack.push(expr);
+            }
+            Expr::Case {
                 operand,
-                when_then: wt,
+                when_then,
                 else_expr,
-                data_type,
-            })
-        }
-        Expr::MapIndex { map, key } => Ok(Expr::MapIndex {
-            map: Box::new(substitute_expr(*map, project_exprs)?),
-            key: Box::new(substitute_expr(*key, project_exprs)?),
-        }),
-        Expr::MakeArray { elems, item_type } => {
-            let mut out = Vec::with_capacity(elems.len());
-            for e in elems {
-                out.push(substitute_expr(e, project_exprs)?);
+                ..
+            } => {
+                if let Some(el) = else_expr {
+                    stack.push(el);
+                }
+                for (w, t) in when_then {
+                    stack.push(t);
+                    stack.push(w);
+                }
+                if let Some(op) = operand {
+                    stack.push(op);
+                }
             }
-            Ok(Expr::MakeArray {
-                elems: out,
-                item_type,
-            })
-        }
-        Expr::Call {
-            func,
-            args,
-            data_type,
-        } => {
-            let mut out = Vec::with_capacity(args.len());
-            for a in args {
-                out.push(substitute_expr(a, project_exprs)?);
+            Expr::MapIndex { map, key } => {
+                stack.push(key);
+                stack.push(map);
             }
-            Ok(Expr::Call {
-                func,
-                args: out,
-                data_type,
-            })
+            Expr::MakeArray { elems, .. } => {
+                for e in elems {
+                    stack.push(e);
+                }
+            }
+            Expr::Call { args, .. } => {
+                for a in args {
+                    stack.push(a);
+                }
+            }
         }
     }
+    Ok(counts)
+}
+
+fn expr_node_count(expr: &Expr) -> usize {
+    let mut count = 0usize;
+    let mut stack = vec![expr];
+    while let Some(node) = stack.pop() {
+        count = count.saturating_add(1);
+        match node {
+            Expr::Column { .. } | Expr::Literal(_) => {}
+            Expr::Unary { expr, .. } | Expr::Cast { expr, .. } => stack.push(expr),
+            Expr::Binary { left, right, .. } => {
+                stack.push(right);
+                stack.push(left);
+            }
+            Expr::Between {
+                expr, low, high, ..
+            } => {
+                stack.push(high);
+                stack.push(low);
+                stack.push(expr);
+            }
+            Expr::InList {
+                expr,
+                list,
+                redacted,
+                ..
+            } => {
+                if !redacted {
+                    for item in list {
+                        stack.push(item);
+                    }
+                }
+                stack.push(expr);
+            }
+            Expr::Like { expr, pattern, .. } => {
+                stack.push(pattern);
+                stack.push(expr);
+            }
+            Expr::Case {
+                operand,
+                when_then,
+                else_expr,
+                ..
+            } => {
+                if let Some(el) = else_expr {
+                    stack.push(el);
+                }
+                for (w, t) in when_then {
+                    stack.push(t);
+                    stack.push(w);
+                }
+                if let Some(op) = operand {
+                    stack.push(op);
+                }
+            }
+            Expr::MapIndex { map, key } => {
+                stack.push(key);
+                stack.push(map);
+            }
+            Expr::MakeArray { elems, .. } => {
+                for e in elems {
+                    stack.push(e);
+                }
+            }
+            Expr::Call { args, .. } => {
+                for a in args {
+                    stack.push(a);
+                }
+            }
+        }
+    }
+    count
+}
+
+fn substitute_expr(expr: &Expr, project_exprs: &[Expr]) -> Result<Option<Expr>, QueryError> {
+    enum SubTask<'a> {
+        Visit(&'a Expr),
+        BuildUnary {
+            op: UnaryOp,
+            data_type: DataType,
+        },
+        BuildBinary {
+            op: BinaryOp,
+            data_type: DataType,
+        },
+        BuildCast {
+            target: DataType,
+            mode: CastMode,
+        },
+        BuildBetween {
+            negated: bool,
+        },
+        BuildInList {
+            n: usize,
+            negated: bool,
+        },
+        BuildInListRedacted {
+            list: &'a [Expr],
+            negated: bool,
+        },
+        BuildLike {
+            escape: Option<char>,
+            case_insensitive: bool,
+            negated: bool,
+        },
+        BuildCase {
+            has_op: bool,
+            n_wt: usize,
+            has_else: bool,
+            data_type: DataType,
+        },
+        BuildMapIndex,
+        BuildMakeArray {
+            n: usize,
+            item_type: DataType,
+        },
+        BuildCall {
+            func: ScalarFn,
+            n: usize,
+            data_type: DataType,
+        },
+    }
+
+    let mut nodes_used = 0usize;
+    let mut tasks = vec![SubTask::Visit(expr)];
+    let mut vals: Vec<Expr> = Vec::new();
+
+    while let Some(task) = tasks.pop() {
+        match task {
+            SubTask::Visit(node) => match node {
+                Expr::Column { index, .. } => {
+                    let repl = project_exprs.get(*index).ok_or_else(|| {
+                        QueryError::internal(format!(
+                            "filter column index {index} out of bounds for projection ({} cols)",
+                            project_exprs.len()
+                        ))
+                    })?;
+                    nodes_used = nodes_used.saturating_add(expr_node_count(repl));
+                    if nodes_used > MAX_SUBSTITUTED_EXPR_NODES {
+                        return Ok(None);
+                    }
+                    vals.push(repl.clone());
+                }
+                Expr::Literal(v) => {
+                    nodes_used = nodes_used.saturating_add(1);
+                    if nodes_used > MAX_SUBSTITUTED_EXPR_NODES {
+                        return Ok(None);
+                    }
+                    vals.push(Expr::Literal(v.clone()));
+                }
+                Expr::Unary {
+                    op,
+                    expr: inner,
+                    data_type,
+                } => {
+                    nodes_used = nodes_used.saturating_add(1);
+                    if nodes_used > MAX_SUBSTITUTED_EXPR_NODES {
+                        return Ok(None);
+                    }
+                    tasks.push(SubTask::BuildUnary {
+                        op: *op,
+                        data_type: data_type.clone(),
+                    });
+                    tasks.push(SubTask::Visit(inner));
+                }
+                Expr::Binary {
+                    left,
+                    op,
+                    right,
+                    data_type,
+                } => {
+                    nodes_used = nodes_used.saturating_add(1);
+                    if nodes_used > MAX_SUBSTITUTED_EXPR_NODES {
+                        return Ok(None);
+                    }
+                    tasks.push(SubTask::BuildBinary {
+                        op: *op,
+                        data_type: data_type.clone(),
+                    });
+                    tasks.push(SubTask::Visit(right));
+                    tasks.push(SubTask::Visit(left));
+                }
+                Expr::Cast {
+                    expr: inner,
+                    target,
+                    mode,
+                } => {
+                    nodes_used = nodes_used.saturating_add(1);
+                    if nodes_used > MAX_SUBSTITUTED_EXPR_NODES {
+                        return Ok(None);
+                    }
+                    tasks.push(SubTask::BuildCast {
+                        target: target.clone(),
+                        mode: *mode,
+                    });
+                    tasks.push(SubTask::Visit(inner));
+                }
+                Expr::Between {
+                    expr: inner,
+                    low,
+                    high,
+                    negated,
+                } => {
+                    nodes_used = nodes_used.saturating_add(1);
+                    if nodes_used > MAX_SUBSTITUTED_EXPR_NODES {
+                        return Ok(None);
+                    }
+                    tasks.push(SubTask::BuildBetween { negated: *negated });
+                    tasks.push(SubTask::Visit(high));
+                    tasks.push(SubTask::Visit(low));
+                    tasks.push(SubTask::Visit(inner));
+                }
+                Expr::InList {
+                    expr: inner,
+                    list,
+                    negated,
+                    redacted,
+                } => {
+                    nodes_used = nodes_used.saturating_add(1);
+                    if nodes_used > MAX_SUBSTITUTED_EXPR_NODES {
+                        return Ok(None);
+                    }
+                    if *redacted {
+                        tasks.push(SubTask::BuildInListRedacted {
+                            list,
+                            negated: *negated,
+                        });
+                        tasks.push(SubTask::Visit(inner));
+                    } else {
+                        tasks.push(SubTask::BuildInList {
+                            n: list.len(),
+                            negated: *negated,
+                        });
+                        for item in list.iter().rev() {
+                            tasks.push(SubTask::Visit(item));
+                        }
+                        tasks.push(SubTask::Visit(inner));
+                    }
+                }
+                Expr::Like {
+                    expr: inner,
+                    pattern,
+                    escape,
+                    case_insensitive,
+                    negated,
+                } => {
+                    nodes_used = nodes_used.saturating_add(1);
+                    if nodes_used > MAX_SUBSTITUTED_EXPR_NODES {
+                        return Ok(None);
+                    }
+                    tasks.push(SubTask::BuildLike {
+                        escape: *escape,
+                        case_insensitive: *case_insensitive,
+                        negated: *negated,
+                    });
+                    tasks.push(SubTask::Visit(pattern));
+                    tasks.push(SubTask::Visit(inner));
+                }
+                Expr::Case {
+                    operand,
+                    when_then,
+                    else_expr,
+                    data_type,
+                } => {
+                    nodes_used = nodes_used.saturating_add(1);
+                    if nodes_used > MAX_SUBSTITUTED_EXPR_NODES {
+                        return Ok(None);
+                    }
+                    tasks.push(SubTask::BuildCase {
+                        has_op: operand.is_some(),
+                        n_wt: when_then.len(),
+                        has_else: else_expr.is_some(),
+                        data_type: data_type.clone(),
+                    });
+                    if let Some(el) = else_expr {
+                        tasks.push(SubTask::Visit(el));
+                    }
+                    for (w, t) in when_then.iter().rev() {
+                        tasks.push(SubTask::Visit(t));
+                        tasks.push(SubTask::Visit(w));
+                    }
+                    if let Some(op) = operand {
+                        tasks.push(SubTask::Visit(op));
+                    }
+                }
+                Expr::MapIndex { map, key } => {
+                    nodes_used = nodes_used.saturating_add(1);
+                    if nodes_used > MAX_SUBSTITUTED_EXPR_NODES {
+                        return Ok(None);
+                    }
+                    tasks.push(SubTask::BuildMapIndex);
+                    tasks.push(SubTask::Visit(key));
+                    tasks.push(SubTask::Visit(map));
+                }
+                Expr::MakeArray { elems, item_type } => {
+                    nodes_used = nodes_used.saturating_add(1);
+                    if nodes_used > MAX_SUBSTITUTED_EXPR_NODES {
+                        return Ok(None);
+                    }
+                    tasks.push(SubTask::BuildMakeArray {
+                        n: elems.len(),
+                        item_type: item_type.clone(),
+                    });
+                    for e in elems.iter().rev() {
+                        tasks.push(SubTask::Visit(e));
+                    }
+                }
+                Expr::Call {
+                    func,
+                    args,
+                    data_type,
+                } => {
+                    nodes_used = nodes_used.saturating_add(1);
+                    if nodes_used > MAX_SUBSTITUTED_EXPR_NODES {
+                        return Ok(None);
+                    }
+                    tasks.push(SubTask::BuildCall {
+                        func: *func,
+                        n: args.len(),
+                        data_type: data_type.clone(),
+                    });
+                    for a in args.iter().rev() {
+                        tasks.push(SubTask::Visit(a));
+                    }
+                }
+            },
+            SubTask::BuildUnary { op, data_type } => {
+                let inner = vals.pop().ok_or_else(|| {
+                    QueryError::internal("substitute_expr stack underflow on Unary")
+                })?;
+                vals.push(Expr::Unary {
+                    op,
+                    expr: Box::new(inner),
+                    data_type,
+                });
+            }
+            SubTask::BuildBinary { op, data_type } => {
+                let right = vals.pop().ok_or_else(|| {
+                    QueryError::internal("substitute_expr stack underflow on Binary right")
+                })?;
+                let left = vals.pop().ok_or_else(|| {
+                    QueryError::internal("substitute_expr stack underflow on Binary left")
+                })?;
+                vals.push(Expr::Binary {
+                    left: Box::new(left),
+                    op,
+                    right: Box::new(right),
+                    data_type,
+                });
+            }
+            SubTask::BuildCast { target, mode } => {
+                let inner = vals.pop().ok_or_else(|| {
+                    QueryError::internal("substitute_expr stack underflow on Cast")
+                })?;
+                vals.push(Expr::Cast {
+                    expr: Box::new(inner),
+                    target,
+                    mode,
+                });
+            }
+            SubTask::BuildBetween { negated } => {
+                let high = vals.pop().ok_or_else(|| {
+                    QueryError::internal("substitute_expr stack underflow on Between high")
+                })?;
+                let low = vals.pop().ok_or_else(|| {
+                    QueryError::internal("substitute_expr stack underflow on Between low")
+                })?;
+                let inner = vals.pop().ok_or_else(|| {
+                    QueryError::internal("substitute_expr stack underflow on Between inner")
+                })?;
+                vals.push(Expr::Between {
+                    expr: Box::new(inner),
+                    low: Box::new(low),
+                    high: Box::new(high),
+                    negated,
+                });
+            }
+            SubTask::BuildInList { n, negated } => {
+                let start = vals.len().saturating_sub(n);
+                let list: Vec<Expr> = vals.drain(start..).collect();
+                let inner = vals.pop().ok_or_else(|| {
+                    QueryError::internal("substitute_expr stack underflow on InList")
+                })?;
+                vals.push(Expr::InList {
+                    expr: Box::new(inner),
+                    list,
+                    negated,
+                    redacted: false,
+                });
+            }
+            SubTask::BuildInListRedacted { list, negated } => {
+                let inner = vals.pop().ok_or_else(|| {
+                    QueryError::internal("substitute_expr stack underflow on InListRedacted")
+                })?;
+                vals.push(Expr::InList {
+                    expr: Box::new(inner),
+                    list: list.to_vec(),
+                    negated,
+                    redacted: true,
+                });
+            }
+            SubTask::BuildLike {
+                escape,
+                case_insensitive,
+                negated,
+            } => {
+                let pattern = vals.pop().ok_or_else(|| {
+                    QueryError::internal("substitute_expr stack underflow on Like pattern")
+                })?;
+                let inner = vals.pop().ok_or_else(|| {
+                    QueryError::internal("substitute_expr stack underflow on Like inner")
+                })?;
+                vals.push(Expr::Like {
+                    expr: Box::new(inner),
+                    pattern: Box::new(pattern),
+                    escape,
+                    case_insensitive,
+                    negated,
+                });
+            }
+            SubTask::BuildCase {
+                has_op,
+                n_wt,
+                has_else,
+                data_type,
+            } => {
+                let else_expr = if has_else {
+                    Some(Box::new(vals.pop().ok_or_else(|| {
+                        QueryError::internal("substitute_expr stack underflow on Case else")
+                    })?))
+                } else {
+                    None
+                };
+                let wt_start = vals.len().saturating_sub(n_wt * 2);
+                let mut when_then = Vec::with_capacity(n_wt);
+                let mut drained = vals.drain(wt_start..);
+                while let (Some(w), Some(t)) = (drained.next(), drained.next()) {
+                    when_then.push((w, t));
+                }
+                drop(drained);
+                let operand = if has_op {
+                    Some(Box::new(vals.pop().ok_or_else(|| {
+                        QueryError::internal("substitute_expr stack underflow on Case operand")
+                    })?))
+                } else {
+                    None
+                };
+                vals.push(Expr::Case {
+                    operand,
+                    when_then,
+                    else_expr,
+                    data_type,
+                });
+            }
+            SubTask::BuildMapIndex => {
+                let key = vals.pop().ok_or_else(|| {
+                    QueryError::internal("substitute_expr stack underflow on MapIndex key")
+                })?;
+                let map = vals.pop().ok_or_else(|| {
+                    QueryError::internal("substitute_expr stack underflow on MapIndex map")
+                })?;
+                vals.push(Expr::MapIndex {
+                    map: Box::new(map),
+                    key: Box::new(key),
+                });
+            }
+            SubTask::BuildMakeArray { n, item_type } => {
+                let start = vals.len().saturating_sub(n);
+                let elems: Vec<Expr> = vals.drain(start..).collect();
+                vals.push(Expr::MakeArray { elems, item_type });
+            }
+            SubTask::BuildCall { func, n, data_type } => {
+                let start = vals.len().saturating_sub(n);
+                let args: Vec<Expr> = vals.drain(start..).collect();
+                vals.push(Expr::Call {
+                    func,
+                    args,
+                    data_type,
+                });
+            }
+        }
+    }
+
+    let out = vals
+        .pop()
+        .ok_or_else(|| QueryError::internal("substitute_expr missing result"))?;
+    Ok(Some(out))
 }
 
 fn retag_expr_columns(expr: &Expr, schema: &Schema) -> Expr {
@@ -1125,17 +1918,20 @@ fn split_conjuncts(expr: Expr) -> Vec<Expr> {
 }
 
 fn split_conjuncts_into(expr: Expr, out: &mut Vec<Expr>) {
-    match expr {
-        Expr::Binary {
-            left,
-            op: BinaryOp::And,
-            right,
-            ..
-        } => {
-            split_conjuncts_into(*left, out);
-            split_conjuncts_into(*right, out);
+    let mut stack = vec![expr];
+    while let Some(node) = stack.pop() {
+        match node {
+            Expr::Binary {
+                left,
+                op: BinaryOp::And,
+                right,
+                ..
+            } => {
+                stack.push(*right);
+                stack.push(*left);
+            }
+            other => out.push(other),
         }
-        other => out.push(other),
     }
 }
 
@@ -1310,7 +2106,7 @@ fn pass4_scan_pushdown(plan: LogicalPlan) -> Result<LogicalPlan, QueryError> {
                 mut time_range,
                 mut id_lookups,
                 mut substrings,
-                map_keys,
+                map_projections,
                 mut limit,
                 schema,
             } => {
@@ -1358,7 +2154,7 @@ fn pass4_scan_pushdown(plan: LogicalPlan) -> Result<LogicalPlan, QueryError> {
                     time_range,
                     id_lookups,
                     substrings,
-                    map_keys,
+                    map_projections,
                     limit,
                     schema,
                 };
@@ -1381,7 +2177,7 @@ fn pass4_scan_pushdown(plan: LogicalPlan) -> Result<LogicalPlan, QueryError> {
             mut time_range,
             mut id_lookups,
             mut substrings,
-            map_keys,
+            map_projections,
             mut limit,
             schema,
         } => {
@@ -1405,7 +2201,7 @@ fn pass4_scan_pushdown(plan: LogicalPlan) -> Result<LogicalPlan, QueryError> {
                 time_range,
                 id_lookups,
                 substrings,
-                map_keys,
+                map_projections,
                 limit,
                 schema,
             })
@@ -1538,10 +2334,9 @@ fn is_scan_filter_safe(kind: SqlViewKind, expr: &Expr, full_schema: &Schema) -> 
             expr.referenced_columns(&mut cols);
             !cols.is_empty()
                 && cols.iter().all(|&idx| {
-                    full_schema
-                        .fields()
-                        .get(idx)
-                        .is_some_and(|f| f.name == "created_at")
+                    full_schema.fields().get(idx).is_some_and(|f| {
+                        matches!(f.name.as_str(), "created_at" | "trace_id" | "score_id")
+                    })
                 })
         }
         SqlViewKind::Sessions => false,
@@ -1554,7 +2349,7 @@ fn extract_scan_hints(
     filters: &[Expr],
     time_range: &mut TimeRangeHint,
     id_lookups: &mut Vec<IdLookupHint>,
-    substrings: &mut Vec<SubstringHint>,
+    substrings: &mut Vec<Vec<SubstringHint>>,
 ) {
     let time_col = match kind {
         SqlViewKind::Spans | SqlViewKind::Traces => Some("start_time"),
@@ -1654,85 +2449,91 @@ fn extract_time_range(filters: &[Expr], full_schema: &Schema, column: &str) -> T
 }
 
 fn walk_time_bounds(bounds: &mut TimeBounds, expr: &Expr, full_schema: &Schema, column: &str) {
-    match expr {
-        Expr::Binary {
-            left,
-            op: BinaryOp::And,
-            right,
-            ..
-        } => {
-            walk_time_bounds(bounds, left, full_schema, column);
-            walk_time_bounds(bounds, right, full_schema, column);
-        }
-        Expr::Binary {
-            op: BinaryOp::Or, ..
-        } => {
-            let mut disjuncts = Vec::new();
-            collect_or_disjuncts(expr, &mut disjuncts);
-            let mut union: Option<TimeBounds> = None;
-            for disjunct in disjuncts {
-                if let Expr::Unary {
-                    op: UnaryOp::IsNull,
-                    expr: inner,
-                    ..
-                } = disjunct
-                    && is_schema_column(inner.as_ref(), full_schema, column)
+    let mut stack = vec![expr];
+    while let Some(node) = stack.pop() {
+        match node {
+            Expr::Binary {
+                left,
+                op: BinaryOp::And,
+                right,
+                ..
+            } => {
+                stack.push(right);
+                stack.push(left);
+            }
+            Expr::Binary {
+                op: BinaryOp::Or, ..
+            } => {
+                let mut disjuncts = Vec::new();
+                collect_or_disjuncts(node, &mut disjuncts);
+                let mut union: Option<TimeBounds> = None;
+                for disjunct in disjuncts {
+                    if let Expr::Unary {
+                        op: UnaryOp::IsNull,
+                        expr: inner,
+                        ..
+                    } = disjunct
+                        && is_schema_column(inner.as_ref(), full_schema, column)
+                    {
+                        continue;
+                    }
+                    let mut sep = TimeBounds::default();
+                    walk_time_bounds(&mut sep, disjunct, full_schema, column);
+                    union = Some(match union {
+                        None => sep,
+                        Some(acc) => acc.union_with(sep),
+                    });
+                }
+                if let Some(u) = union {
+                    *bounds = bounds.intersect_with(u);
+                }
+            }
+            Expr::Binary {
+                left, op, right, ..
+            } => {
+                if is_schema_column(left.as_ref(), full_schema, column) {
+                    if let Some(ns) = expr_timestamp_ns(right) {
+                        apply_time_cmp(bounds, *op, ns, true);
+                    }
+                } else if is_schema_column(right.as_ref(), full_schema, column)
+                    && let Some(ns) = expr_timestamp_ns(left)
                 {
-                    continue;
+                    apply_time_cmp(bounds, *op, ns, false);
                 }
-                let mut sep = TimeBounds::default();
-                walk_time_bounds(&mut sep, disjunct, full_schema, column);
-                union = Some(match union {
-                    None => sep,
-                    Some(acc) => acc.union_with(sep),
-                });
             }
-            if let Some(u) = union {
-                *bounds = bounds.intersect_with(u);
-            }
-        }
-        Expr::Binary {
-            left, op, right, ..
-        } => {
-            if is_schema_column(left.as_ref(), full_schema, column) {
-                if let Some(ns) = expr_timestamp_ns(right) {
-                    apply_time_cmp(bounds, *op, ns, true);
+            Expr::Between {
+                expr: inner,
+                low,
+                high,
+                negated: false,
+            } if is_schema_column(inner.as_ref(), full_schema, column) => {
+                if let Some(lo) = expr_timestamp_ns(low) {
+                    bounds.raise_min(lo);
                 }
-            } else if is_schema_column(right.as_ref(), full_schema, column)
-                && let Some(ns) = expr_timestamp_ns(left)
-            {
-                apply_time_cmp(bounds, *op, ns, false);
+                if let Some(hi) = expr_timestamp_ns(high) {
+                    bounds.lower_max(hi);
+                }
             }
+            _ => {}
         }
-        Expr::Between {
-            expr: inner,
-            low,
-            high,
-            negated: false,
-        } if is_schema_column(inner.as_ref(), full_schema, column) => {
-            if let Some(lo) = expr_timestamp_ns(low) {
-                bounds.raise_min(lo);
-            }
-            if let Some(hi) = expr_timestamp_ns(high) {
-                bounds.lower_max(hi);
-            }
-        }
-        _ => {}
     }
 }
 
 fn collect_or_disjuncts<'a>(expr: &'a Expr, out: &mut Vec<&'a Expr>) {
-    match expr {
-        Expr::Binary {
-            left,
-            op: BinaryOp::Or,
-            right,
-            ..
-        } => {
-            collect_or_disjuncts(left, out);
-            collect_or_disjuncts(right, out);
+    let mut stack = vec![expr];
+    while let Some(node) = stack.pop() {
+        match node {
+            Expr::Binary {
+                left,
+                op: BinaryOp::Or,
+                right,
+                ..
+            } => {
+                stack.push(right);
+                stack.push(left);
+            }
+            other => out.push(other),
         }
-        other => out.push(other),
     }
 }
 
@@ -1776,120 +2577,147 @@ fn expr_timestamp_ns(expr: &Expr) -> Option<i64> {
 }
 
 fn extract_id_lookups_from_expr(expr: &Expr, full_schema: &Schema, out: &mut Vec<IdLookupHint>) {
-    match expr {
-        Expr::Binary {
-            left,
-            op: BinaryOp::And,
-            right,
-            ..
-        } => {
-            extract_id_lookups_from_expr(left, full_schema, out);
-            extract_id_lookups_from_expr(right, full_schema, out);
-        }
-        Expr::Binary {
-            left,
-            op: BinaryOp::Eq,
-            right,
-            ..
-        } => {
-            let (col_idx, lit) = match (left.as_ref(), right.as_ref()) {
-                (Expr::Column { index, .. }, Expr::Literal(sv)) => (*index, sv),
-                (Expr::Literal(sv), Expr::Column { index, .. }) => (*index, sv),
-                _ => return,
-            };
-            let Some(field) = full_schema.fields().get(col_idx) else {
-                return;
-            };
-            let hint = match lit {
-                ScalarValue::FixedBytes16(b) if field.data_type == DataType::FixedBytes16 => {
-                    IdLookupHint::Fixed16 {
-                        column: field.name.clone(),
-                        values: vec![*b],
-                    }
-                }
-                ScalarValue::FixedBytes8(b) if field.data_type == DataType::FixedBytes8 => {
-                    IdLookupHint::Fixed8 {
-                        column: field.name.clone(),
-                        values: vec![*b],
-                    }
-                }
-                ScalarValue::Utf8(s) if is_utf8_id_column(&field.name) => IdLookupHint::Utf8 {
-                    column: field.name.clone(),
-                    values: vec![s.clone()],
-                },
-                _ => return,
-            };
-            push_unique_id_lookup(out, hint);
-        }
-        Expr::InList {
-            expr: inner,
-            list,
-            negated: false,
-            redacted: false,
-        } => {
-            let Expr::Column { index, .. } = inner.as_ref() else {
-                return;
-            };
-            let Some(field) = full_schema.fields().get(*index) else {
-                return;
-            };
-            let hint = match &field.data_type {
-                DataType::FixedBytes16 => {
-                    let mut vals = Vec::new();
-                    for item in list {
-                        let Expr::Literal(sv) = item else {
-                            return;
-                        };
-                        match sv {
-                            ScalarValue::Null(_) => {}
-                            ScalarValue::FixedBytes16(b) => vals.push(*b),
-                            _ => return,
+    let mut stack = vec![expr];
+    while let Some(node) = stack.pop() {
+        match node {
+            Expr::Binary {
+                left,
+                op: BinaryOp::And,
+                right,
+                ..
+            } => {
+                stack.push(right);
+                stack.push(left);
+            }
+            Expr::Binary {
+                left,
+                op: BinaryOp::Eq,
+                right,
+                ..
+            } => {
+                let (col_idx, lit) = match (left.as_ref(), right.as_ref()) {
+                    (Expr::Column { index, .. }, Expr::Literal(sv)) => (*index, sv),
+                    (Expr::Literal(sv), Expr::Column { index, .. }) => (*index, sv),
+                    _ => continue,
+                };
+                let Some(field) = full_schema.fields().get(col_idx) else {
+                    continue;
+                };
+                let hint = match lit {
+                    ScalarValue::FixedBytes16(b) if field.data_type == DataType::FixedBytes16 => {
+                        IdLookupHint::Fixed16 {
+                            column: field.name.clone(),
+                            values: vec![*b],
                         }
                     }
-                    IdLookupHint::Fixed16 {
-                        column: field.name.clone(),
-                        values: vals,
-                    }
-                }
-                DataType::FixedBytes8 => {
-                    let mut vals = Vec::new();
-                    for item in list {
-                        let Expr::Literal(sv) = item else {
-                            return;
-                        };
-                        match sv {
-                            ScalarValue::Null(_) => {}
-                            ScalarValue::FixedBytes8(b) => vals.push(*b),
-                            _ => return,
+                    ScalarValue::FixedBytes8(b) if field.data_type == DataType::FixedBytes8 => {
+                        IdLookupHint::Fixed8 {
+                            column: field.name.clone(),
+                            values: vec![*b],
                         }
                     }
-                    IdLookupHint::Fixed8 {
+                    ScalarValue::Utf8(s) if is_utf8_id_column(&field.name) => IdLookupHint::Utf8 {
                         column: field.name.clone(),
-                        values: vals,
-                    }
-                }
-                DataType::Utf8 if is_utf8_id_column(&field.name) => {
-                    let mut vals = Vec::new();
-                    for item in list {
-                        let Expr::Literal(sv) = item else {
-                            return;
-                        };
-                        match sv {
-                            ScalarValue::Null(_) => {}
-                            ScalarValue::Utf8(s) => vals.push(s.clone()),
-                            _ => return,
+                        values: vec![s.clone()],
+                    },
+                    _ => continue,
+                };
+                push_unique_id_lookup(out, hint);
+            }
+            Expr::InList {
+                expr: inner,
+                list,
+                negated: false,
+                redacted: false,
+            } => {
+                let Expr::Column { index, .. } = inner.as_ref() else {
+                    continue;
+                };
+                let Some(field) = full_schema.fields().get(*index) else {
+                    continue;
+                };
+                let hint = match &field.data_type {
+                    DataType::FixedBytes16 => {
+                        let mut vals = Vec::new();
+                        let mut valid = true;
+                        for item in list {
+                            let Expr::Literal(sv) = item else {
+                                valid = false;
+                                break;
+                            };
+                            match sv {
+                                ScalarValue::Null(_) => {}
+                                ScalarValue::FixedBytes16(b) => vals.push(*b),
+                                _ => {
+                                    valid = false;
+                                    break;
+                                }
+                            }
+                        }
+                        if !valid {
+                            continue;
+                        }
+                        IdLookupHint::Fixed16 {
+                            column: field.name.clone(),
+                            values: vals,
                         }
                     }
-                    IdLookupHint::Utf8 {
-                        column: field.name.clone(),
-                        values: vals,
+                    DataType::FixedBytes8 => {
+                        let mut vals = Vec::new();
+                        let mut valid = true;
+                        for item in list {
+                            let Expr::Literal(sv) = item else {
+                                valid = false;
+                                break;
+                            };
+                            match sv {
+                                ScalarValue::Null(_) => {}
+                                ScalarValue::FixedBytes8(b) => vals.push(*b),
+                                _ => {
+                                    valid = false;
+                                    break;
+                                }
+                            }
+                        }
+                        if !valid {
+                            continue;
+                        }
+                        IdLookupHint::Fixed8 {
+                            column: field.name.clone(),
+                            values: vals,
+                        }
                     }
-                }
-                _ => return,
-            };
-            push_unique_id_lookup(out, hint);
+                    DataType::Utf8 if is_utf8_id_column(&field.name) => {
+                        let mut vals = Vec::new();
+                        let mut valid = true;
+                        for item in list {
+                            let Expr::Literal(sv) = item else {
+                                valid = false;
+                                break;
+                            };
+                            match sv {
+                                ScalarValue::Null(_) => {}
+                                ScalarValue::Utf8(s) => vals.push(s.clone()),
+                                _ => {
+                                    valid = false;
+                                    break;
+                                }
+                            }
+                        }
+                        if !valid {
+                            continue;
+                        }
+                        IdLookupHint::Utf8 {
+                            column: field.name.clone(),
+                            values: vals,
+                        }
+                    }
+                    _ => continue,
+                };
+                push_unique_id_lookup(out, hint);
+            }
+            _ => {}
         }
-        _ => {}
     }
 }
 
@@ -1903,17 +2731,8 @@ fn push_unique_id_lookup(out: &mut Vec<IdLookupHint>, hint: IdLookupHint) {
     }
 }
 
-fn extract_substrings_from_expr(expr: &Expr, full_schema: &Schema, out: &mut Vec<SubstringHint>) {
+fn extract_single_substring_hint(expr: &Expr, full_schema: &Schema) -> Option<SubstringHint> {
     match expr {
-        Expr::Binary {
-            left,
-            op: BinaryOp::And,
-            right,
-            ..
-        } => {
-            extract_substrings_from_expr(left, full_schema, out);
-            extract_substrings_from_expr(right, full_schema, out);
-        }
         Expr::Like {
             expr: inner,
             pattern,
@@ -1922,48 +2741,92 @@ fn extract_substrings_from_expr(expr: &Expr, full_schema: &Schema, out: &mut Vec
             negated: false,
         } => {
             let Expr::Column { index, .. } = inner.as_ref() else {
-                return;
+                return None;
             };
-            let Some(field) = full_schema.fields().get(*index) else {
-                return;
-            };
+            let field = full_schema.fields().get(*index)?;
             let Expr::Literal(ScalarValue::Utf8(pat)) = pattern.as_ref() else {
-                return;
+                return None;
             };
-            if let Some(needle) = longest_like_literal(pat, *escape) {
-                let hint = SubstringHint {
-                    column: field.name.clone(),
-                    needle,
-                    case_insensitive: *case_insensitive,
-                };
-                if !out.contains(&hint) {
-                    out.push(hint);
-                }
-            }
+            let needle = longest_like_literal(pat, *escape)?;
+            Some(SubstringHint {
+                column: field.name.clone(),
+                needle,
+                case_insensitive: *case_insensitive,
+            })
         }
         Expr::Call {
             func: ScalarFn::Contains | ScalarFn::StartsWith | ScalarFn::EndsWith,
             args,
             ..
         } => {
-            if let [
+            let [
                 Expr::Column { index, .. },
                 Expr::Literal(ScalarValue::Utf8(needle)),
             ] = args.as_slice()
-                && !needle.is_empty()
-                && let Some(field) = full_schema.fields().get(*index)
-            {
-                let hint = SubstringHint {
-                    column: field.name.clone(),
-                    needle: needle.clone(),
-                    case_insensitive: false,
-                };
-                if !out.contains(&hint) {
-                    out.push(hint);
+            else {
+                return None;
+            };
+            if needle.is_empty() {
+                return None;
+            }
+            let field = full_schema.fields().get(*index)?;
+            Some(SubstringHint {
+                column: field.name.clone(),
+                needle: needle.clone(),
+                case_insensitive: false,
+            })
+        }
+        _ => None,
+    }
+}
+
+fn extract_substrings_from_expr(
+    expr: &Expr,
+    full_schema: &Schema,
+    out: &mut Vec<Vec<SubstringHint>>,
+) {
+    let mut stack = vec![expr];
+    while let Some(node) = stack.pop() {
+        match node {
+            Expr::Binary {
+                left,
+                op: BinaryOp::And,
+                right,
+                ..
+            } => {
+                stack.push(right);
+                stack.push(left);
+            }
+            Expr::Binary {
+                op: BinaryOp::Or, ..
+            } => {
+                let mut disjuncts = Vec::new();
+                collect_or_disjuncts(node, &mut disjuncts);
+                let mut clause: Vec<SubstringHint> = Vec::with_capacity(disjuncts.len());
+                let mut all_matched = !disjuncts.is_empty();
+                for disjunct in disjuncts {
+                    if let Some(hint) = extract_single_substring_hint(disjunct, full_schema) {
+                        if !clause.contains(&hint) {
+                            clause.push(hint);
+                        }
+                    } else {
+                        all_matched = false;
+                        break;
+                    }
+                }
+                if all_matched && !clause.is_empty() && !out.contains(&clause) {
+                    out.push(clause);
+                }
+            }
+            other => {
+                if let Some(hint) = extract_single_substring_hint(other, full_schema) {
+                    let clause = vec![hint];
+                    if !out.contains(&clause) {
+                        out.push(clause);
+                    }
                 }
             }
         }
-        _ => {}
     }
 }
 
@@ -1976,6 +2839,9 @@ fn longest_like_literal(pattern: &str, escape: Option<char>) -> Option<String> {
         if escape == Some(ch) {
             if let Some(escaped) = chars.next() {
                 cur.push(escaped);
+            } else {
+                // Trailing lone escape matches itself literally (fn_string.rs parity).
+                cur.push(ch);
             }
         } else if ch == '%' || ch == '_' {
             if cur.len() > best.len() {
@@ -1994,21 +2860,78 @@ fn longest_like_literal(pattern: &str, escape: Option<char>) -> Option<String> {
 }
 
 // ---------------------------------------------------------------------------
-// Pass 5: Top-down projection & MapIndex key pushdown
+// Pass 5: Top-down projection & MapProjection pushdown
 // ---------------------------------------------------------------------------
+
+fn full_map_reqs(schema: &Schema) -> BTreeMap<usize, MapProjection> {
+    let mut out = BTreeMap::new();
+    for (idx, field) in schema.fields().iter().enumerate() {
+        if field.data_type == DataType::MapUtf8 {
+            out.insert(idx, MapProjection::Full);
+        }
+    }
+    out
+}
+
+fn merge_map_proj_idx(dst: &mut BTreeMap<usize, MapProjection>, idx: usize, proj: MapProjection) {
+    match dst.get_mut(&idx) {
+        Some(existing) => existing.merge(proj),
+        None => {
+            dst.insert(idx, proj);
+        }
+    }
+}
+
+fn merge_map_proj_name(dst: &mut BTreeMap<String, MapProjection>, col: &str, proj: MapProjection) {
+    match dst.get_mut(col) {
+        Some(existing) => existing.merge(proj),
+        None => {
+            dst.insert(col.to_owned(), proj);
+        }
+    }
+}
+
+fn merge_map_proj_maps(
+    dst: &mut BTreeMap<usize, MapProjection>,
+    src: &BTreeMap<usize, MapProjection>,
+    limit: usize,
+) {
+    for (&idx, proj) in src {
+        if idx < limit {
+            merge_map_proj_idx(dst, idx, proj.clone());
+        }
+    }
+}
+
+fn collect_expr_map_proj_indices(
+    expr: &Expr,
+    schema: &Schema,
+    out: &mut BTreeMap<usize, MapProjection>,
+) {
+    let mut by_name = BTreeMap::new();
+    collect_expr_map_projections(expr, schema, &mut by_name);
+    if by_name.is_empty() {
+        return;
+    }
+    for (idx, field) in schema.fields().iter().enumerate() {
+        if let Some(proj) = by_name.get(&field.name) {
+            merge_map_proj_idx(out, idx, proj.clone());
+        }
+    }
+}
 
 fn pass5_projection_and_map_keys(plan: LogicalPlan) -> Result<LogicalPlan, QueryError> {
     let n = plan.schema().len();
     let required: BTreeSet<usize> = (0..n).collect();
-    let map_keys = vec![BTreeSet::new(); n];
-    let (pruned, _) = prune_node(plan, &required, &map_keys)?;
+    let required_maps = full_map_reqs(plan.schema());
+    let (pruned, _) = prune_node(plan, &required, &required_maps)?;
     Ok(pruned)
 }
 
 fn prune_node(
     plan: LogicalPlan,
     required: &BTreeSet<usize>,
-    required_map_keys: &[BTreeSet<String>],
+    required_maps: &BTreeMap<usize, MapProjection>,
 ) -> Result<(LogicalPlan, Vec<Option<usize>>), QueryError> {
     match plan {
         LogicalPlan::Scan {
@@ -2020,36 +2943,27 @@ fn prune_node(
             time_range,
             id_lookups,
             substrings,
-            mut map_keys,
+            mut map_projections,
             limit,
             schema,
         } => {
             let out_len = schema.len();
             let kept_out: Vec<usize> = required.iter().copied().filter(|&i| i < out_len).collect();
 
-            let mut collected_keys: BTreeSet<(String, String)> = map_keys.drain(..).collect();
-
-            let mut filter_keys = vec![BTreeSet::new(); full_schema.len()];
             for f in &filters {
-                collect_expr_map_keys(f, &mut filter_keys);
-            }
-            for (full_idx, keys) in filter_keys.into_iter().enumerate() {
-                if let Some(field) = full_schema.fields().get(full_idx) {
-                    for k in keys {
-                        collected_keys.insert((field.name.clone(), k));
-                    }
-                }
+                collect_expr_map_projections(f, &full_schema, &mut map_projections);
             }
 
-            for (out_idx, keys) in required_map_keys.iter().enumerate() {
-                if keys.is_empty() || out_idx >= out_len {
-                    continue;
-                }
+            for &out_idx in &kept_out {
                 let full_idx = projection.as_ref().map_or(out_idx, |p| p[out_idx]);
-                if let Some(field) = full_schema.fields().get(full_idx) {
-                    for k in keys {
-                        collected_keys.insert((field.name.clone(), k.clone()));
-                    }
+                if let Some(field) = full_schema.fields().get(full_idx)
+                    && field.data_type == DataType::MapUtf8
+                {
+                    let proj = required_maps
+                        .get(&out_idx)
+                        .cloned()
+                        .unwrap_or(MapProjection::Full);
+                    merge_map_proj_name(&mut map_projections, &field.name, proj);
                 }
             }
 
@@ -2081,7 +2995,7 @@ fn prune_node(
                     time_range,
                     id_lookups,
                     substrings,
-                    map_keys: collected_keys.into_iter().collect(),
+                    map_projections,
                     limit,
                     schema: new_schema,
                 },
@@ -2115,15 +3029,16 @@ fn prune_node(
         }
         LogicalPlan::EmptyRow { schema } => Ok((LogicalPlan::EmptyRow { schema }, Vec::new())),
         LogicalPlan::Filter { input, predicate } => {
-            let in_len = input.schema().len();
+            let in_schema = Arc::clone(input.schema());
+            let in_len = in_schema.len();
             let mut child_needed = required.clone();
             predicate.referenced_columns(&mut child_needed);
 
-            let mut child_keys = vec![BTreeSet::new(); in_len];
-            merge_map_keys(&mut child_keys, required_map_keys);
-            collect_expr_map_keys(&predicate, &mut child_keys);
+            let mut child_maps = BTreeMap::new();
+            merge_map_proj_maps(&mut child_maps, required_maps, in_len);
+            collect_expr_map_proj_indices(&predicate, &in_schema, &mut child_maps);
 
-            let (new_input, child_map) = prune_node(*input, &child_needed, &child_keys)?;
+            let (new_input, child_map) = prune_node(*input, &child_needed, &child_maps)?;
             let new_pred = predicate.remap_columns(&child_map)?;
             Ok((
                 LogicalPlan::Filter {
@@ -2139,24 +3054,26 @@ fn prune_node(
             schema,
         } => {
             let out_len = schema.len();
-            let in_len = input.schema().len();
+            let in_schema = Arc::clone(input.schema());
             let kept_out: Vec<usize> = required.iter().copied().filter(|&i| i < out_len).collect();
 
             let mut child_needed = BTreeSet::new();
-            let mut child_keys = vec![BTreeSet::new(); in_len];
+            let mut child_maps = BTreeMap::new();
             for &out_idx in &kept_out {
                 let expr = &exprs[out_idx];
                 expr.referenced_columns(&mut child_needed);
-                collect_expr_map_keys(expr, &mut child_keys);
-                if let Expr::Column { index, .. } = expr
-                    && let Some(keys) = required_map_keys.get(out_idx)
-                    && let Some(dst) = child_keys.get_mut(*index)
-                {
-                    dst.extend(keys.iter().cloned());
+                if let Expr::Column { index, .. } = expr {
+                    if let Some(proj) = required_maps.get(&out_idx) {
+                        merge_map_proj_idx(&mut child_maps, *index, proj.clone());
+                    } else if expr.data_type() == DataType::MapUtf8 {
+                        merge_map_proj_idx(&mut child_maps, *index, MapProjection::Full);
+                    }
+                } else {
+                    collect_expr_map_proj_indices(expr, &in_schema, &mut child_maps);
                 }
             }
 
-            let (new_input, child_map) = prune_node(*input, &child_needed, &child_keys)?;
+            let (new_input, child_map) = prune_node(*input, &child_needed, &child_maps)?;
             let mut new_exprs = Vec::with_capacity(kept_out.len());
             for &out_idx in &kept_out {
                 new_exprs.push(exprs[out_idx].remap_columns(&child_map)?);
@@ -2184,7 +3101,7 @@ fn prune_node(
         } => {
             let group_len = group_by.len();
             let out_len = schema.len();
-            let in_len = input.schema().len();
+            let in_schema = Arc::clone(input.schema());
 
             // Always keep all GROUP BY keys so grouping semantics never change; prune unused aggs.
             let mut kept_out: Vec<usize> = (0..group_len).collect();
@@ -2198,22 +3115,17 @@ fn prune_node(
             }
 
             let mut child_needed = BTreeSet::new();
-            let mut child_keys = vec![BTreeSet::new(); in_len];
-            for (g_idx, (_, g_expr)) in group_by.iter().enumerate() {
+            let mut child_maps = BTreeMap::new();
+            for (_, g_expr) in &group_by {
                 g_expr.referenced_columns(&mut child_needed);
-                collect_expr_map_keys(g_expr, &mut child_keys);
-                if let Expr::Column { index, .. } = g_expr
-                    && let Some(keys) = required_map_keys.get(g_idx)
-                    && let Some(dst) = child_keys.get_mut(*index)
-                {
-                    dst.extend(keys.iter().cloned());
-                }
+                // Grouping hashes/compares the whole key expr (whole MapUtf8 -> Full, MapIndex -> Keys).
+                collect_expr_map_proj_indices(g_expr, &in_schema, &mut child_maps);
             }
             for &agg_i in &kept_agg_indices {
-                collect_agg_refs(&aggs[agg_i], &mut child_needed, &mut child_keys);
+                collect_agg_refs(&aggs[agg_i], &in_schema, &mut child_needed, &mut child_maps);
             }
 
-            let (new_input, child_map) = prune_node(*input, &child_needed, &child_keys)?;
+            let (new_input, child_map) = prune_node(*input, &child_needed, &child_maps)?;
             let mut new_group_by = Vec::with_capacity(group_by.len());
             for (name, g_expr) in group_by {
                 new_group_by.push((name, g_expr.remap_columns(&child_map)?));
@@ -2246,7 +3158,8 @@ fn prune_node(
             specs,
             schema,
         } => {
-            let in_len = input.schema().len();
+            let in_schema = Arc::clone(input.schema());
+            let in_len = in_schema.len();
             let out_len = schema.len();
 
             let mut kept_specs_idx = Vec::new();
@@ -2260,8 +3173,9 @@ fn prune_node(
             if kept_specs_idx.is_empty() {
                 let in_required: BTreeSet<usize> =
                     required.iter().copied().filter(|&i| i < in_len).collect();
-                let in_keys = required_map_keys[..in_len.min(required_map_keys.len())].to_vec();
-                let (new_input, child_map) = prune_node(*input, &in_required, &in_keys)?;
+                let mut in_maps = BTreeMap::new();
+                merge_map_proj_maps(&mut in_maps, required_maps, in_len);
+                let (new_input, child_map) = prune_node(*input, &in_required, &in_maps)?;
                 let mut old_to_new = vec![None; out_len];
                 for (i, mapped) in child_map.into_iter().enumerate() {
                     old_to_new[i] = mapped;
@@ -2271,25 +3185,27 @@ fn prune_node(
 
             let mut child_needed: BTreeSet<usize> =
                 required.iter().copied().filter(|&i| i < in_len).collect();
-            let mut child_keys = vec![BTreeSet::new(); in_len];
-            merge_map_keys(
-                &mut child_keys,
-                &required_map_keys[..in_len.min(required_map_keys.len())],
-            );
+            let mut child_maps = BTreeMap::new();
+            merge_map_proj_maps(&mut child_maps, required_maps, in_len);
 
             for p in &partition_by {
                 p.referenced_columns(&mut child_needed);
-                collect_expr_map_keys(p, &mut child_keys);
+                collect_expr_map_proj_indices(p, &in_schema, &mut child_maps);
             }
             for k in &order_by {
                 k.expr.referenced_columns(&mut child_needed);
-                collect_expr_map_keys(&k.expr, &mut child_keys);
+                collect_expr_map_proj_indices(&k.expr, &in_schema, &mut child_maps);
             }
             for &s_idx in &kept_specs_idx {
-                collect_window_refs(&specs[s_idx], &mut child_needed, &mut child_keys);
+                collect_window_refs(
+                    &specs[s_idx],
+                    &in_schema,
+                    &mut child_needed,
+                    &mut child_maps,
+                );
             }
 
-            let (new_input, child_map) = prune_node(*input, &child_needed, &child_keys)?;
+            let (new_input, child_map) = prune_node(*input, &child_needed, &child_maps)?;
             let new_in_len = new_input.schema().len();
 
             let mut new_partition = Vec::with_capacity(partition_by.len());
@@ -2332,15 +3248,16 @@ fn prune_node(
             ))
         }
         LogicalPlan::Sort { input, keys } => {
-            let in_len = input.schema().len();
+            let in_schema = Arc::clone(input.schema());
+            let in_len = in_schema.len();
             let mut child_needed = required.clone();
-            let mut child_keys = vec![BTreeSet::new(); in_len];
-            merge_map_keys(&mut child_keys, required_map_keys);
+            let mut child_maps = BTreeMap::new();
+            merge_map_proj_maps(&mut child_maps, required_maps, in_len);
             for k in &keys {
                 k.expr.referenced_columns(&mut child_needed);
-                collect_expr_map_keys(&k.expr, &mut child_keys);
+                collect_expr_map_proj_indices(&k.expr, &in_schema, &mut child_maps);
             }
-            let (new_input, child_map) = prune_node(*input, &child_needed, &child_keys)?;
+            let (new_input, child_map) = prune_node(*input, &child_needed, &child_maps)?;
             let mut new_keys = Vec::with_capacity(keys.len());
             for k in keys {
                 new_keys.push(remap_sort_key(k, &child_map)?);
@@ -2359,15 +3276,16 @@ fn prune_node(
             limit,
             offset,
         } => {
-            let in_len = input.schema().len();
+            let in_schema = Arc::clone(input.schema());
+            let in_len = in_schema.len();
             let mut child_needed = required.clone();
-            let mut child_keys = vec![BTreeSet::new(); in_len];
-            merge_map_keys(&mut child_keys, required_map_keys);
+            let mut child_maps = BTreeMap::new();
+            merge_map_proj_maps(&mut child_maps, required_maps, in_len);
             for k in &keys {
                 k.expr.referenced_columns(&mut child_needed);
-                collect_expr_map_keys(&k.expr, &mut child_keys);
+                collect_expr_map_proj_indices(&k.expr, &in_schema, &mut child_maps);
             }
-            let (new_input, child_map) = prune_node(*input, &child_needed, &child_keys)?;
+            let (new_input, child_map) = prune_node(*input, &child_needed, &child_maps)?;
             let mut new_keys = Vec::with_capacity(keys.len());
             for k in keys {
                 new_keys.push(remap_sort_key(k, &child_map)?);
@@ -2383,7 +3301,7 @@ fn prune_node(
             ))
         }
         LogicalPlan::Limit { input, skip, fetch } => {
-            let (new_input, child_map) = prune_node(*input, required, required_map_keys)?;
+            let (new_input, child_map) = prune_node(*input, required, required_maps)?;
             Ok((
                 LogicalPlan::Limit {
                     input: Box::new(new_input),
@@ -2395,11 +3313,11 @@ fn prune_node(
         }
         LogicalPlan::Distinct { input } => {
             // Distinct compares every column in its input schema.
-            let in_len = input.schema().len();
+            let in_schema = Arc::clone(input.schema());
+            let in_len = in_schema.len();
             let all_needed: BTreeSet<usize> = (0..in_len).collect();
-            let mut child_keys = vec![BTreeSet::new(); in_len];
-            merge_map_keys(&mut child_keys, required_map_keys);
-            let (new_input, child_map) = prune_node(*input, &all_needed, &child_keys)?;
+            let child_maps = full_map_reqs(&in_schema);
+            let (new_input, child_map) = prune_node(*input, &all_needed, &child_maps)?;
             Ok((
                 LogicalPlan::Distinct {
                     input: Box::new(new_input),
@@ -2417,8 +3335,10 @@ fn prune_node(
             residual,
             schema,
         } => {
-            let left_len = left.schema().len();
-            let right_len = right.schema().len();
+            let left_schema = Arc::clone(left.schema());
+            let right_schema = Arc::clone(right.schema());
+            let left_len = left_schema.len();
+            let right_len = right_schema.len();
             let out_len = schema.len();
 
             let is_semi_anti = matches!(
@@ -2428,31 +3348,31 @@ fn prune_node(
 
             let mut left_needed = BTreeSet::new();
             let mut right_needed = BTreeSet::new();
-            let mut left_map_keys = vec![BTreeSet::new(); left_len];
-            let mut right_map_keys = vec![BTreeSet::new(); right_len];
+            let mut left_maps = BTreeMap::new();
+            let mut right_maps = BTreeMap::new();
 
             for &idx in required {
                 if idx < left_len {
                     left_needed.insert(idx);
-                    if let Some(keys) = required_map_keys.get(idx) {
-                        left_map_keys[idx].extend(keys.iter().cloned());
+                    if let Some(proj) = required_maps.get(&idx) {
+                        merge_map_proj_idx(&mut left_maps, idx, proj.clone());
                     }
                 } else if !is_semi_anti && idx < left_len + right_len {
                     let r_idx = idx - left_len;
                     right_needed.insert(r_idx);
-                    if let Some(keys) = required_map_keys.get(idx) {
-                        right_map_keys[r_idx].extend(keys.iter().cloned());
+                    if let Some(proj) = required_maps.get(&idx) {
+                        merge_map_proj_idx(&mut right_maps, r_idx, proj.clone());
                     }
                 }
             }
 
             for lk in &left_keys {
                 lk.referenced_columns(&mut left_needed);
-                collect_expr_map_keys(lk, &mut left_map_keys);
+                collect_expr_map_proj_indices(lk, &left_schema, &mut left_maps);
             }
             for rk in &right_keys {
                 rk.referenced_columns(&mut right_needed);
-                collect_expr_map_keys(rk, &mut right_map_keys);
+                collect_expr_map_proj_indices(rk, &right_schema, &mut right_maps);
             }
             if let Some(res) = &residual {
                 let mut res_cols = BTreeSet::new();
@@ -2464,19 +3384,27 @@ fn prune_node(
                         right_needed.insert(idx - left_len);
                     }
                 }
-                let mut combined_keys = vec![BTreeSet::new(); left_len + right_len];
-                collect_expr_map_keys(res, &mut combined_keys);
-                for (idx, keys) in combined_keys.into_iter().enumerate() {
+                let combined_schema = Schema::try_new(
+                    left_schema
+                        .fields()
+                        .iter()
+                        .chain(right_schema.fields().iter())
+                        .cloned()
+                        .collect(),
+                )?;
+                let mut combined_maps = BTreeMap::new();
+                collect_expr_map_proj_indices(res, &combined_schema, &mut combined_maps);
+                for (idx, proj) in combined_maps {
                     if idx < left_len {
-                        left_map_keys[idx].extend(keys);
+                        merge_map_proj_idx(&mut left_maps, idx, proj);
                     } else if idx < left_len + right_len {
-                        right_map_keys[idx - left_len].extend(keys);
+                        merge_map_proj_idx(&mut right_maps, idx - left_len, proj);
                     }
                 }
             }
 
-            let (new_left, left_map) = prune_node(*left, &left_needed, &left_map_keys)?;
-            let (new_right, right_map) = prune_node(*right, &right_needed, &right_map_keys)?;
+            let (new_left, left_map) = prune_node(*left, &left_needed, &left_maps)?;
+            let (new_right, right_map) = prune_node(*right, &right_needed, &right_maps)?;
             let new_left_len = new_left.schema().len();
 
             let mut new_left_keys = Vec::with_capacity(left_keys.len());
@@ -2531,17 +3459,23 @@ fn prune_node(
             schema,
         } => {
             let out_len = schema.len();
-            let effective_required: BTreeSet<usize> = if all {
-                required.iter().copied().filter(|&i| i < out_len).collect()
+            let (effective_required, effective_maps): (
+                BTreeSet<usize>,
+                BTreeMap<usize, MapProjection>,
+            ) = if all {
+                let req = required.iter().copied().filter(|&i| i < out_len).collect();
+                let mut maps = BTreeMap::new();
+                merge_map_proj_maps(&mut maps, required_maps, out_len);
+                (req, maps)
             } else {
                 // `UNION` deduplicates across all columns.
-                (0..out_len).collect()
+                ((0..out_len).collect(), full_map_reqs(&schema))
             };
             let kept_out: Vec<usize> = effective_required.iter().copied().collect();
             let mut new_inputs = Vec::with_capacity(inputs.len());
             for branch in inputs {
                 let (new_branch, branch_map) =
-                    prune_node(branch, &effective_required, required_map_keys)?;
+                    prune_node(branch, &effective_required, &effective_maps)?;
                 let needs_project = new_branch.schema().len() != kept_out.len()
                     || kept_out.iter().enumerate().any(|(new_idx, &old_idx)| {
                         branch_map.get(old_idx).copied().flatten() != Some(new_idx)
@@ -2607,10 +3541,10 @@ fn prune_node(
                 child_needed.insert(c);
             }
             let in_len = input.schema().len();
-            let mut child_keys = vec![BTreeSet::new(); in_len];
-            merge_map_keys(&mut child_keys, required_map_keys);
+            let mut child_maps = BTreeMap::new();
+            merge_map_proj_maps(&mut child_maps, required_maps, in_len);
 
-            let (new_input, child_map) = prune_node(*input, &child_needed, &child_keys)?;
+            let (new_input, child_map) = prune_node(*input, &child_needed, &child_maps)?;
             let mut new_cols = Vec::with_capacity(columns.len());
             for c in columns {
                 let mapped = child_map.get(c).copied().flatten().ok_or_else(|| {
@@ -2633,10 +3567,11 @@ fn prune_node(
             ))
         }
         LogicalPlan::Explain { inner, schema } => {
-            let inner_len = inner.schema().len();
+            let inner_schema = Arc::clone(inner.schema());
+            let inner_len = inner_schema.len();
             let inner_req: BTreeSet<usize> = (0..inner_len).collect();
-            let inner_keys = vec![BTreeSet::new(); inner_len];
-            let (new_inner, _) = prune_node(*inner, &inner_req, &inner_keys)?;
+            let inner_maps = full_map_reqs(&inner_schema);
+            let (new_inner, _) = prune_node(*inner, &inner_req, &inner_maps)?;
             let exp_len = schema.len();
             let old_to_new = (0..exp_len).map(Some).collect();
             Ok((
@@ -2650,87 +3585,19 @@ fn prune_node(
     }
 }
 
-fn merge_map_keys(dst: &mut [BTreeSet<String>], src: &[BTreeSet<String>]) {
-    for (d, s) in dst.iter_mut().zip(src.iter()) {
-        d.extend(s.iter().cloned());
-    }
-}
-
-fn collect_expr_map_keys(expr: &Expr, out: &mut [BTreeSet<String>]) {
-    match expr {
-        Expr::Column { .. } | Expr::Literal(_) => {}
-        Expr::Unary { expr, .. } | Expr::Cast { expr, .. } => {
-            collect_expr_map_keys(expr, out);
-        }
-        Expr::Binary { left, right, .. } => {
-            collect_expr_map_keys(left, out);
-            collect_expr_map_keys(right, out);
-        }
-        Expr::Between {
-            expr, low, high, ..
-        } => {
-            collect_expr_map_keys(expr, out);
-            collect_expr_map_keys(low, out);
-            collect_expr_map_keys(high, out);
-        }
-        Expr::InList { expr, list, .. } => {
-            collect_expr_map_keys(expr, out);
-            for item in list {
-                collect_expr_map_keys(item, out);
-            }
-        }
-        Expr::Like { expr, pattern, .. } => {
-            collect_expr_map_keys(expr, out);
-            collect_expr_map_keys(pattern, out);
-        }
-        Expr::Case {
-            operand,
-            when_then,
-            else_expr,
-            ..
-        } => {
-            if let Some(op) = operand {
-                collect_expr_map_keys(op, out);
-            }
-            for (w, t) in when_then {
-                collect_expr_map_keys(w, out);
-                collect_expr_map_keys(t, out);
-            }
-            if let Some(el) = else_expr {
-                collect_expr_map_keys(el, out);
-            }
-        }
-        Expr::MapIndex { map, key } => {
-            if let Expr::Column { index, .. } = map.as_ref()
-                && let Expr::Literal(ScalarValue::Utf8(k)) = key.as_ref()
-                && let Some(slot) = out.get_mut(*index)
-            {
-                slot.insert(k.clone());
-            }
-            collect_expr_map_keys(map, out);
-            collect_expr_map_keys(key, out);
-        }
-        Expr::MakeArray { elems, .. } => {
-            for e in elems {
-                collect_expr_map_keys(e, out);
-            }
-        }
-        Expr::Call { args, .. } => {
-            for a in args {
-                collect_expr_map_keys(a, out);
-            }
-        }
-    }
-}
-
-fn collect_agg_refs(agg: &AggExpr, cols: &mut BTreeSet<usize>, map_keys: &mut [BTreeSet<String>]) {
+fn collect_agg_refs(
+    agg: &AggExpr,
+    schema: &Schema,
+    cols: &mut BTreeSet<usize>,
+    map_projs: &mut BTreeMap<usize, MapProjection>,
+) {
     if let Some(f) = &agg.filter {
         f.referenced_columns(cols);
-        collect_expr_map_keys(f, map_keys);
+        collect_expr_map_proj_indices(f, schema, map_projs);
     }
     visit_agg_func_exprs(&agg.func, &mut |e| {
         e.referenced_columns(cols);
-        collect_expr_map_keys(e, map_keys);
+        collect_expr_map_proj_indices(e, schema, map_projs);
     });
 }
 
@@ -2749,20 +3616,21 @@ fn remap_agg(agg: AggExpr, map: &[Option<usize>]) -> Result<AggExpr, QueryError>
 
 fn collect_window_refs(
     spec: &WindowSpec,
+    schema: &Schema,
     cols: &mut BTreeSet<usize>,
-    map_keys: &mut [BTreeSet<String>],
+    map_projs: &mut BTreeMap<usize, MapProjection>,
 ) {
     for p in &spec.partition_by {
         p.referenced_columns(cols);
-        collect_expr_map_keys(p, map_keys);
+        collect_expr_map_proj_indices(p, schema, map_projs);
     }
     for k in &spec.order_by {
         k.expr.referenced_columns(cols);
-        collect_expr_map_keys(&k.expr, map_keys);
+        collect_expr_map_proj_indices(&k.expr, schema, map_projs);
     }
     visit_window_func_exprs(&spec.func, &mut |e| {
         e.referenced_columns(cols);
-        collect_expr_map_keys(e, map_keys);
+        collect_expr_map_proj_indices(e, schema, map_projs);
     });
 }
 
@@ -2958,118 +3826,332 @@ fn pass6_topk_rewrite(plan: LogicalPlan) -> LogicalPlan {
 // ---------------------------------------------------------------------------
 
 fn map_expr_bottom_up(expr: Expr, f: &mut impl FnMut(Expr) -> Expr) -> Expr {
-    let mapped = match expr {
-        Expr::Column { .. } | Expr::Literal(_) => expr,
-        Expr::Unary {
-            op,
-            expr: inner,
-            data_type,
-        } => Expr::Unary {
-            op,
-            expr: Box::new(map_expr_bottom_up(*inner, f)),
-            data_type,
+    enum MapTask {
+        Visit(Expr),
+        BuildUnary {
+            op: UnaryOp,
+            data_type: DataType,
         },
-        Expr::Binary {
-            left,
-            op,
-            right,
-            data_type,
-        } => Expr::Binary {
-            left: Box::new(map_expr_bottom_up(*left, f)),
-            op,
-            right: Box::new(map_expr_bottom_up(*right, f)),
-            data_type,
+        BuildBinary {
+            op: BinaryOp,
+            data_type: DataType,
         },
-        Expr::Cast {
-            expr: inner,
-            target,
-            mode,
-        } => Expr::Cast {
-            expr: Box::new(map_expr_bottom_up(*inner, f)),
-            target,
-            mode,
+        BuildCast {
+            target: DataType,
+            mode: CastMode,
         },
-        Expr::Between {
-            expr: inner,
-            low,
-            high,
-            negated,
-        } => Expr::Between {
-            expr: Box::new(map_expr_bottom_up(*inner, f)),
-            low: Box::new(map_expr_bottom_up(*low, f)),
-            high: Box::new(map_expr_bottom_up(*high, f)),
-            negated,
+        BuildBetween {
+            negated: bool,
         },
-        Expr::InList {
-            expr: inner,
-            list,
-            negated,
-            redacted,
-        } => {
-            let inner = map_expr_bottom_up(*inner, f);
-            let list = if redacted {
-                list
-            } else {
-                list.into_iter()
-                    .map(|item| map_expr_bottom_up(item, f))
-                    .collect()
-            };
-            Expr::InList {
-                expr: Box::new(inner),
-                list,
+        BuildInList {
+            n: usize,
+            negated: bool,
+        },
+        BuildInListRedacted {
+            list: Vec<Expr>,
+            negated: bool,
+        },
+        BuildLike {
+            escape: Option<char>,
+            case_insensitive: bool,
+            negated: bool,
+        },
+        BuildCase {
+            has_op: bool,
+            n_wt: usize,
+            has_else: bool,
+            data_type: DataType,
+        },
+        BuildMapIndex,
+        BuildMakeArray {
+            n: usize,
+            item_type: DataType,
+        },
+        BuildCall {
+            func: ScalarFn,
+            n: usize,
+            data_type: DataType,
+        },
+    }
+
+    let mut tasks = vec![MapTask::Visit(expr)];
+    let mut vals: Vec<Expr> = Vec::new();
+
+    while let Some(task) = tasks.pop() {
+        match task {
+            MapTask::Visit(node) => match node {
+                Expr::Column { .. } | Expr::Literal(_) => vals.push(f(node)),
+                Expr::Unary {
+                    op,
+                    expr: inner,
+                    data_type,
+                } => {
+                    tasks.push(MapTask::BuildUnary { op, data_type });
+                    tasks.push(MapTask::Visit(*inner));
+                }
+                Expr::Binary {
+                    left,
+                    op,
+                    right,
+                    data_type,
+                } => {
+                    tasks.push(MapTask::BuildBinary { op, data_type });
+                    tasks.push(MapTask::Visit(*right));
+                    tasks.push(MapTask::Visit(*left));
+                }
+                Expr::Cast {
+                    expr: inner,
+                    target,
+                    mode,
+                } => {
+                    tasks.push(MapTask::BuildCast { target, mode });
+                    tasks.push(MapTask::Visit(*inner));
+                }
+                Expr::Between {
+                    expr: inner,
+                    low,
+                    high,
+                    negated,
+                } => {
+                    tasks.push(MapTask::BuildBetween { negated });
+                    tasks.push(MapTask::Visit(*high));
+                    tasks.push(MapTask::Visit(*low));
+                    tasks.push(MapTask::Visit(*inner));
+                }
+                Expr::InList {
+                    expr: inner,
+                    list,
+                    negated,
+                    redacted,
+                } => {
+                    if redacted {
+                        tasks.push(MapTask::BuildInListRedacted { list, negated });
+                        tasks.push(MapTask::Visit(*inner));
+                    } else {
+                        tasks.push(MapTask::BuildInList {
+                            n: list.len(),
+                            negated,
+                        });
+                        for item in list.into_iter().rev() {
+                            tasks.push(MapTask::Visit(item));
+                        }
+                        tasks.push(MapTask::Visit(*inner));
+                    }
+                }
+                Expr::Like {
+                    expr: inner,
+                    pattern,
+                    escape,
+                    case_insensitive,
+                    negated,
+                } => {
+                    tasks.push(MapTask::BuildLike {
+                        escape,
+                        case_insensitive,
+                        negated,
+                    });
+                    tasks.push(MapTask::Visit(*pattern));
+                    tasks.push(MapTask::Visit(*inner));
+                }
+                Expr::Case {
+                    operand,
+                    when_then,
+                    else_expr,
+                    data_type,
+                } => {
+                    tasks.push(MapTask::BuildCase {
+                        has_op: operand.is_some(),
+                        n_wt: when_then.len(),
+                        has_else: else_expr.is_some(),
+                        data_type,
+                    });
+                    if let Some(el) = else_expr {
+                        tasks.push(MapTask::Visit(*el));
+                    }
+                    for (w, t) in when_then.into_iter().rev() {
+                        tasks.push(MapTask::Visit(t));
+                        tasks.push(MapTask::Visit(w));
+                    }
+                    if let Some(op) = operand {
+                        tasks.push(MapTask::Visit(*op));
+                    }
+                }
+                Expr::MapIndex { map, key } => {
+                    tasks.push(MapTask::BuildMapIndex);
+                    tasks.push(MapTask::Visit(*key));
+                    tasks.push(MapTask::Visit(*map));
+                }
+                Expr::MakeArray { elems, item_type } => {
+                    tasks.push(MapTask::BuildMakeArray {
+                        n: elems.len(),
+                        item_type,
+                    });
+                    for e in elems.into_iter().rev() {
+                        tasks.push(MapTask::Visit(e));
+                    }
+                }
+                Expr::Call {
+                    func,
+                    args,
+                    data_type,
+                } => {
+                    tasks.push(MapTask::BuildCall {
+                        func,
+                        n: args.len(),
+                        data_type,
+                    });
+                    for a in args.into_iter().rev() {
+                        tasks.push(MapTask::Visit(a));
+                    }
+                }
+            },
+            MapTask::BuildUnary { op, data_type } => {
+                let Some(inner) = vals.pop() else {
+                    break;
+                };
+                vals.push(f(Expr::Unary {
+                    op,
+                    expr: Box::new(inner),
+                    data_type,
+                }));
+            }
+            MapTask::BuildBinary { op, data_type } => {
+                let (Some(right), Some(left)) = (vals.pop(), vals.pop()) else {
+                    break;
+                };
+                vals.push(f(Expr::Binary {
+                    left: Box::new(left),
+                    op,
+                    right: Box::new(right),
+                    data_type,
+                }));
+            }
+            MapTask::BuildCast { target, mode } => {
+                let Some(inner) = vals.pop() else {
+                    break;
+                };
+                vals.push(f(Expr::Cast {
+                    expr: Box::new(inner),
+                    target,
+                    mode,
+                }));
+            }
+            MapTask::BuildBetween { negated } => {
+                let (Some(high), Some(low), Some(inner)) = (vals.pop(), vals.pop(), vals.pop())
+                else {
+                    break;
+                };
+                vals.push(f(Expr::Between {
+                    expr: Box::new(inner),
+                    low: Box::new(low),
+                    high: Box::new(high),
+                    negated,
+                }));
+            }
+            MapTask::BuildInList { n, negated } => {
+                let start = vals.len().saturating_sub(n);
+                let list: Vec<Expr> = vals.drain(start..).collect();
+                let Some(inner) = vals.pop() else {
+                    break;
+                };
+                vals.push(f(Expr::InList {
+                    expr: Box::new(inner),
+                    list,
+                    negated,
+                    redacted: false,
+                }));
+            }
+            MapTask::BuildInListRedacted { list, negated } => {
+                let Some(inner) = vals.pop() else {
+                    break;
+                };
+                vals.push(f(Expr::InList {
+                    expr: Box::new(inner),
+                    list,
+                    negated,
+                    redacted: true,
+                }));
+            }
+            MapTask::BuildLike {
+                escape,
+                case_insensitive,
                 negated,
-                redacted,
+            } => {
+                let (Some(pattern), Some(inner)) = (vals.pop(), vals.pop()) else {
+                    break;
+                };
+                vals.push(f(Expr::Like {
+                    expr: Box::new(inner),
+                    pattern: Box::new(pattern),
+                    escape,
+                    case_insensitive,
+                    negated,
+                }));
+            }
+            MapTask::BuildCase {
+                has_op,
+                n_wt,
+                has_else,
+                data_type,
+            } => {
+                let else_expr = if has_else {
+                    let Some(el) = vals.pop() else {
+                        break;
+                    };
+                    Some(Box::new(el))
+                } else {
+                    None
+                };
+                let wt_start = vals.len().saturating_sub(n_wt * 2);
+                let mut when_then = Vec::with_capacity(n_wt);
+                let mut drained = vals.drain(wt_start..);
+                while let (Some(w), Some(t)) = (drained.next(), drained.next()) {
+                    when_then.push((w, t));
+                }
+                drop(drained);
+                let operand = if has_op {
+                    let Some(op) = vals.pop() else {
+                        break;
+                    };
+                    Some(Box::new(op))
+                } else {
+                    None
+                };
+                vals.push(f(Expr::Case {
+                    operand,
+                    when_then,
+                    else_expr,
+                    data_type,
+                }));
+            }
+            MapTask::BuildMapIndex => {
+                let (Some(key), Some(map)) = (vals.pop(), vals.pop()) else {
+                    break;
+                };
+                vals.push(f(Expr::MapIndex {
+                    map: Box::new(map),
+                    key: Box::new(key),
+                }));
+            }
+            MapTask::BuildMakeArray { n, item_type } => {
+                let start = vals.len().saturating_sub(n);
+                let elems: Vec<Expr> = vals.drain(start..).collect();
+                vals.push(f(Expr::MakeArray { elems, item_type }));
+            }
+            MapTask::BuildCall { func, n, data_type } => {
+                let start = vals.len().saturating_sub(n);
+                let args: Vec<Expr> = vals.drain(start..).collect();
+                vals.push(f(Expr::Call {
+                    func,
+                    args,
+                    data_type,
+                }));
             }
         }
-        Expr::Like {
-            expr: inner,
-            pattern,
-            escape,
-            case_insensitive,
-            negated,
-        } => Expr::Like {
-            expr: Box::new(map_expr_bottom_up(*inner, f)),
-            pattern: Box::new(map_expr_bottom_up(*pattern, f)),
-            escape,
-            case_insensitive,
-            negated,
-        },
-        Expr::Case {
-            operand,
-            when_then,
-            else_expr,
-            data_type,
-        } => Expr::Case {
-            operand: operand.map(|o| Box::new(map_expr_bottom_up(*o, f))),
-            when_then: when_then
-                .into_iter()
-                .map(|(w, t)| (map_expr_bottom_up(w, f), map_expr_bottom_up(t, f)))
-                .collect(),
-            else_expr: else_expr.map(|e| Box::new(map_expr_bottom_up(*e, f))),
-            data_type,
-        },
-        Expr::MapIndex { map, key } => Expr::MapIndex {
-            map: Box::new(map_expr_bottom_up(*map, f)),
-            key: Box::new(map_expr_bottom_up(*key, f)),
-        },
-        Expr::MakeArray { elems, item_type } => Expr::MakeArray {
-            elems: elems
-                .into_iter()
-                .map(|e| map_expr_bottom_up(e, f))
-                .collect(),
-            item_type,
-        },
-        Expr::Call {
-            func,
-            args,
-            data_type,
-        } => Expr::Call {
-            func,
-            args: args.into_iter().map(|a| map_expr_bottom_up(a, f)).collect(),
-            data_type,
-        },
-    };
-    f(mapped)
+    }
+
+    vals.pop()
+        .unwrap_or(Expr::Literal(ScalarValue::Null(DataType::Null)))
 }
 
 fn map_plan_exprs(
@@ -3086,7 +4168,7 @@ fn map_plan_exprs(
             time_range,
             id_lookups,
             substrings,
-            map_keys,
+            map_projections,
             limit,
             schema,
         } => LogicalPlan::Scan {
@@ -3098,7 +4180,7 @@ fn map_plan_exprs(
             time_range,
             id_lookups,
             substrings,
-            map_keys,
+            map_projections,
             limit,
             schema,
         },
@@ -3548,7 +4630,7 @@ mod tests {
             time_range: TimeRangeHint::default(),
             id_lookups: Vec::new(),
             substrings: Vec::new(),
-            map_keys: Vec::new(),
+            map_projections: BTreeMap::new(),
             limit: None,
             schema,
         }
@@ -3918,11 +5000,11 @@ mod tests {
         );
         assert_eq!(
             substrings,
-            vec![SubstringHint {
+            vec![vec![SubstringHint {
                 column: "name".to_owned(),
                 needle: "hello".to_owned(),
                 case_insensitive: true,
-            }]
+            }]]
         );
     }
 
@@ -4264,7 +5346,7 @@ mod tests {
         };
         let LogicalPlan::Scan {
             projection,
-            map_keys,
+            map_projections,
             schema,
             ..
         } = *input
@@ -4276,11 +5358,17 @@ mod tests {
         assert_eq!(proj_names, vec!["name", "metadata"]);
         assert_eq!(projection.as_ref().map(Vec::len), Some(2));
         assert_eq!(
-            map_keys,
-            vec![
-                ("attributes".to_owned(), "http.status_code".to_owned()),
-                ("metadata".to_owned(), "customer".to_owned()),
-            ]
+            map_projections,
+            BTreeMap::from([
+                (
+                    "attributes".to_owned(),
+                    MapProjection::Keys(BTreeSet::from(["http.status_code".to_owned()])),
+                ),
+                (
+                    "metadata".to_owned(),
+                    MapProjection::Keys(BTreeSet::from(["customer".to_owned()])),
+                ),
+            ])
         );
 
         // SELECT count(*) FROM spans -> Scan.projection = Some(vec![])
@@ -4488,7 +5576,7 @@ mod tests {
 
     #[test]
     fn pass1_boolean_identities_preserve_bool_null_type_and_decimal_cmp_not_infallible() {
-        let folder = ConstFolder::new().unwrap();
+        let mut folder = ConstFolder::new().unwrap();
         let untyped_null = Expr::Literal(ScalarValue::Null(DataType::Null));
         let bool_null = Expr::Literal(ScalarValue::Null(DataType::Bool));
 
@@ -4625,11 +5713,11 @@ mod tests {
         assert_eq!(time_range.min_ns, Some(1_000));
         assert_eq!(
             substrings,
-            vec![SubstringHint {
+            vec![vec![SubstringHint {
                 column: "name".to_owned(),
                 needle: "needle".to_owned(),
                 case_insensitive: false,
-            }]
+            }]]
         );
     }
 
@@ -4697,5 +5785,527 @@ mod tests {
                 if matches!(input.as_ref(), LogicalPlan::Aggregate { .. })
                     && matches!(exprs.as_slice(), [Expr::Column { index: 1, .. }])
         ));
+    }
+
+    fn bind_and_opt(sql: &str) -> LogicalPlan {
+        let catalog = crate::sql::SqlCatalog::new(None, None);
+        let (stmt, _) =
+            crate::sql::validate::parse_and_validate_sql(sql, &catalog.registered_names()).unwrap();
+        let plan = crate::sql::binder::bind_statement(
+            &stmt,
+            &catalog,
+            &crate::sql::BoundParams::Values(&[]),
+        )
+        .unwrap();
+        optimize(plan).unwrap()
+    }
+
+    fn find_first_scan(plan: &LogicalPlan) -> Option<&LogicalPlan> {
+        let mut stack = vec![plan];
+        while let Some(node) = stack.pop() {
+            match node {
+                LogicalPlan::Scan { .. } => return Some(node),
+                LogicalPlan::Filter { input, .. }
+                | LogicalPlan::Project { input, .. }
+                | LogicalPlan::Aggregate { input, .. }
+                | LogicalPlan::Window { input, .. }
+                | LogicalPlan::Sort { input, .. }
+                | LogicalPlan::Limit { input, .. }
+                | LogicalPlan::TopK { input, .. }
+                | LogicalPlan::Distinct { input }
+                | LogicalPlan::Unnest { input, .. } => stack.push(input),
+                LogicalPlan::Join { left, right, .. } => {
+                    stack.push(right);
+                    stack.push(left);
+                }
+                LogicalPlan::Union { inputs, .. } => {
+                    for b in inputs {
+                        stack.push(b);
+                    }
+                }
+                LogicalPlan::Explain { inner, .. } => stack.push(inner),
+                LogicalPlan::Values { .. } | LogicalPlan::EmptyRow { .. } => {}
+            }
+        }
+        None
+    }
+
+    #[test]
+    fn const_folder_enforces_64kib_cap_and_resets_reservation() {
+        let mut folder = ConstFolder::new().unwrap();
+        let big_a = Expr::Literal(ScalarValue::Utf8("a".repeat(40 * 1024)));
+        let big_b = Expr::Literal(ScalarValue::Utf8("b".repeat(40 * 1024)));
+        let oversized = Expr::Binary {
+            left: Box::new(big_a),
+            op: BinaryOp::Concat,
+            right: Box::new(big_b),
+            data_type: DataType::Utf8,
+        };
+        let out = folder.fold_expr(oversized);
+        assert!(
+            matches!(
+                out,
+                Expr::Binary {
+                    op: BinaryOp::Concat,
+                    ..
+                }
+            ),
+            "expected oversized concat to stay unfolded, got {out:?}"
+        );
+        assert_eq!(folder.res.size(), 0);
+
+        // Subsequent small constant fold succeeds cleanly.
+        let small = bin(
+            Expr::Literal(ScalarValue::I64(10)),
+            BinaryOp::Add,
+            Expr::Literal(ScalarValue::I64(32)),
+        );
+        assert_eq!(folder.fold_expr(small), Expr::Literal(ScalarValue::I64(42)));
+        assert_eq!(folder.res.size(), 0);
+    }
+
+    #[test]
+    fn pass2_project_substitution_bounds_nodes_and_duplicate_nontrivial_refs() {
+        let schema = Schema::try_new_arc(vec![Field::new("a", DataType::Utf8, false)]).unwrap();
+        let int_schema = Schema::try_new_arc(vec![Field::new("x", DataType::I64, false)]).unwrap();
+
+        // Duplicate non-trivial projection ref (`WHERE p = p` over `SELECT coalesce(a, 'x') AS p`)
+        // keeps conjunct above Project even though `coalesce` is infallible.
+        let proj_coalesce = LogicalPlan::Project {
+            input: Box::new(raw_scan("t", SqlViewKind::Batch, Arc::clone(&schema))),
+            exprs: vec![Expr::Call {
+                func: ScalarFn::Coalesce,
+                args: vec![
+                    col_expr(&schema, "a"),
+                    Expr::Literal(ScalarValue::Utf8("x".to_owned())),
+                ],
+                data_type: DataType::Utf8,
+            }],
+            schema: Schema::try_new_arc(vec![Field::new("p", DataType::Utf8, false)]).unwrap(),
+        };
+        let dup_filter = LogicalPlan::Filter {
+            input: Box::new(proj_coalesce),
+            predicate: bin(
+                Expr::Column {
+                    index: 0,
+                    name: "p".to_owned(),
+                    data_type: DataType::Utf8,
+                },
+                BinaryOp::Eq,
+                Expr::Column {
+                    index: 0,
+                    name: "p".to_owned(),
+                    data_type: DataType::Utf8,
+                },
+            ),
+        };
+        let opt_dup = optimize(dup_filter).unwrap();
+        assert!(matches!(opt_dup, LogicalPlan::Filter { .. }));
+
+        // `substitute_expr` rejects > MAX_SUBSTITUTED_EXPR_NODES (2_048) cleanly.
+        let big_proj_expr = (0..1_200).fold(col_expr(&int_schema, "x"), |acc, _| Expr::Call {
+            func: ScalarFn::Coalesce,
+            args: vec![acc, Expr::Literal(ScalarValue::I64(0))],
+            data_type: DataType::I64,
+        });
+        let big_conj = bin(
+            Expr::Column {
+                index: 0,
+                name: "x".to_owned(),
+                data_type: DataType::I64,
+            },
+            BinaryOp::Eq,
+            Expr::Literal(ScalarValue::I64(1)),
+        );
+        assert!(
+            substitute_expr(&big_conj, &[big_proj_expr])
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn is_infallible_and_base_view_trace_id_pushdown() {
+        let dec_ty = DataType::Decimal128 {
+            precision: 10,
+            scale: 2,
+        };
+        let str_col = Expr::Column {
+            index: 0,
+            name: "s".to_owned(),
+            data_type: DataType::Utf8,
+        };
+        let i64_col = Expr::Column {
+            index: 0,
+            name: "i".to_owned(),
+            data_type: DataType::I64,
+        };
+        let f64_col = Expr::Column {
+            index: 0,
+            name: "f".to_owned(),
+            data_type: DataType::F64,
+        };
+        let dec_col = Expr::Column {
+            index: 0,
+            name: "d".to_owned(),
+            data_type: dec_ty.clone(),
+        };
+        let map_col = Expr::Column {
+            index: 0,
+            name: "m".to_owned(),
+            data_type: DataType::MapUtf8,
+        };
+        let arr_col = Expr::Column {
+            index: 0,
+            name: "a".to_owned(),
+            data_type: DataType::List(Box::new(DataType::Utf8)),
+        };
+
+        // Newly marked fallible forms
+        assert!(!is_infallible(&Expr::Binary {
+            left: Box::new(str_col.clone()),
+            op: BinaryOp::Concat,
+            right: Box::new(str_col.clone()),
+            data_type: DataType::Utf8,
+        }));
+        assert!(!is_infallible(&Expr::Like {
+            expr: Box::new(str_col.clone()),
+            pattern: Box::new(Expr::Literal(ScalarValue::Utf8("%a%".to_owned()))),
+            escape: Some('\\'),
+            case_insensitive: false,
+            negated: false,
+        }));
+        for (func, arg, dt) in [
+            (ScalarFn::Concat, str_col.clone(), DataType::Utf8),
+            (ScalarFn::ConcatWs, str_col, DataType::Utf8),
+            (
+                ScalarFn::ArrayDistinct,
+                arr_col,
+                DataType::List(Box::new(DataType::Utf8)),
+            ),
+            (
+                ScalarFn::MapKeys,
+                map_col.clone(),
+                DataType::List(Box::new(DataType::Utf8)),
+            ),
+            (
+                ScalarFn::MapValues,
+                map_col,
+                DataType::List(Box::new(DataType::Utf8)),
+            ),
+            (ScalarFn::Floor, dec_col.clone(), dec_ty.clone()),
+            (ScalarFn::Ceil, dec_col.clone(), dec_ty),
+        ] {
+            assert!(!is_infallible(&Expr::Call {
+                func,
+                args: vec![arg],
+                data_type: dt,
+            }));
+        }
+
+        // Explicitly infallible forms (R1-B1)
+        let fb16_col = Expr::Column {
+            index: 0,
+            name: "trace_id".to_owned(),
+            data_type: DataType::FixedBytes16,
+        };
+        for fmt in ["hex", "HEX", "base64", "BASE64"] {
+            assert!(is_infallible(&Expr::Call {
+                func: ScalarFn::Encode,
+                args: vec![
+                    fb16_col.clone(),
+                    Expr::Literal(ScalarValue::Utf8(fmt.to_owned()))
+                ],
+                data_type: DataType::Utf8,
+            }));
+        }
+        assert!(!is_infallible(&Expr::Call {
+            func: ScalarFn::Encode,
+            args: vec![
+                fb16_col.clone(),
+                Expr::Literal(ScalarValue::Utf8("utf8".to_owned()))
+            ],
+            data_type: DataType::Utf8,
+        }));
+
+        for (src, dst) in [
+            (i64_col.clone(), DataType::F64),
+            (
+                Expr::Column {
+                    index: 0,
+                    name: "ts".to_owned(),
+                    data_type: DataType::timestamp_utc(),
+                },
+                DataType::I64,
+            ),
+            (i64_col, DataType::timestamp_utc()),
+            (
+                Expr::Column {
+                    index: 0,
+                    name: "ts".to_owned(),
+                    data_type: DataType::timestamp_utc(),
+                },
+                DataType::TimestampNs { utc: false },
+            ),
+            (fb16_col, DataType::Binary),
+            (dec_col, DataType::F64),
+        ] {
+            assert!(is_infallible(&Expr::Cast {
+                expr: Box::new(src),
+                target: dst,
+                mode: CastMode::Strict,
+            }));
+        }
+        assert!(is_infallible(&Expr::Binary {
+            left: Box::new(f64_col.clone()),
+            op: BinaryOp::Div,
+            right: Box::new(Expr::Literal(ScalarValue::F64(1_000_000.0))),
+            data_type: DataType::F64,
+        }));
+        assert!(!is_infallible(&Expr::Binary {
+            left: Box::new(f64_col),
+            op: BinaryOp::Div,
+            right: Box::new(Expr::Literal(ScalarValue::F64(0.0))),
+            data_type: DataType::F64,
+        }));
+
+        // trace_id = '<32 hex>' pushes IdLookupHint::Fixed16 into Scan for spans, traces, and scores!
+        let trace_hex = "0102030405060708090a0b0c0d0e0f10";
+        let expected_bytes: [u8; 16] = hex::decode(trace_hex).unwrap().try_into().unwrap();
+        for view in ["spans", "traces", "scores"] {
+            let sql = format!("SELECT trace_id FROM {view} WHERE trace_id = '{trace_hex}'");
+            let plan = bind_and_opt(&sql);
+            let LogicalPlan::Scan { id_lookups, .. } = find_first_scan(&plan).expect("Scan node")
+            else {
+                unreachable!()
+            };
+            assert_eq!(
+                id_lookups,
+                &vec![IdLookupHint::Fixed16 {
+                    column: "trace_id".to_owned(),
+                    values: vec![expected_bytes],
+                }],
+                "missing trace_id IdLookupHint for {view}: {plan:?}"
+            );
+        }
+
+        // duration_ms > 5.0 on spans pushes down into Scan.filters
+        let ms_plan = bind_and_opt("SELECT name FROM spans WHERE duration_ms > 5.0");
+        let LogicalPlan::Scan { filters, .. } = find_first_scan(&ms_plan).unwrap() else {
+            unreachable!()
+        };
+        assert_eq!(filters.len(), 1);
+    }
+
+    #[test]
+    fn join_does_not_push_fallible_conjuncts_or_constants() {
+        let ab_schema = Schema::try_new_arc(vec![
+            Field::new("id", DataType::I64, false),
+            Field::new("x", DataType::I64, false),
+        ])
+        .unwrap();
+        let make_join = || LogicalPlan::Join {
+            left: Box::new(raw_scan("a", SqlViewKind::Batch, Arc::clone(&ab_schema))),
+            right: Box::new(raw_scan("b", SqlViewKind::Batch, Arc::clone(&ab_schema))),
+            kind: LogicalJoinKind::Inner,
+            left_keys: vec![col_expr(&ab_schema, "id")],
+            right_keys: vec![col_expr(&ab_schema, "id")],
+            null_equals_null: false,
+            residual: None,
+            schema: Schema::try_new_arc(vec![
+                Field::new("id", DataType::I64, false),
+                Field::new("x", DataType::I64, false),
+                Field::new("id_r", DataType::I64, false),
+                Field::new("x_r", DataType::I64, false),
+            ])
+            .unwrap(),
+        };
+
+        // 100 / a.x > 10 directly above Join must stay above Join.
+        let div_pred = bin(
+            Expr::Binary {
+                left: Box::new(Expr::Literal(ScalarValue::I64(100))),
+                op: BinaryOp::Div,
+                right: Box::new(Expr::Column {
+                    index: 1,
+                    name: "x".to_owned(),
+                    data_type: DataType::I64,
+                }),
+                data_type: DataType::I64,
+            },
+            BinaryOp::Gt,
+            Expr::Literal(ScalarValue::I64(10)),
+        );
+        let opt = optimize(LogicalPlan::Filter {
+            input: Box::new(make_join()),
+            predicate: div_pred,
+        })
+        .unwrap();
+        let LogicalPlan::Filter { input, .. } = opt else {
+            panic!("expected fallible predicate to stay above Join, got {opt:?}");
+        };
+        let LogicalPlan::Join { left, right, .. } = *input else {
+            panic!("expected Join below Filter");
+        };
+        assert!(matches!(*left, LogicalPlan::Scan { filters, .. } if filters.is_empty()));
+        assert!(matches!(*right, LogicalPlan::Scan { filters, .. } if filters.is_empty()));
+
+        // Constant fallible conjunct (`1 / 0 = 1`) must also stay above Join.
+        let const_div = bin(
+            Expr::Binary {
+                left: Box::new(Expr::Literal(ScalarValue::I64(1))),
+                op: BinaryOp::Div,
+                right: Box::new(Expr::Literal(ScalarValue::I64(0))),
+                data_type: DataType::I64,
+            },
+            BinaryOp::Eq,
+            Expr::Literal(ScalarValue::I64(1)),
+        );
+        let opt_const = optimize(LogicalPlan::Filter {
+            input: Box::new(make_join()),
+            predicate: const_div,
+        })
+        .unwrap();
+        assert!(matches!(opt_const, LogicalPlan::Filter { .. }));
+    }
+
+    #[test]
+    fn pass4_cnf_substrings_and_trailing_escape_and_pass5_map_projections() {
+        // 4-column OR ILIKE -> single 4-element CNF clause
+        let or4 = bind_and_opt(
+            "SELECT name FROM spans WHERE name ILIKE '%abc%' OR status ILIKE '%abc%' OR status_message ILIKE '%abc%' OR model ILIKE '%abc%'",
+        );
+        let LogicalPlan::Scan { substrings, .. } = find_first_scan(&or4).unwrap() else {
+            unreachable!()
+        };
+        assert_eq!(substrings.len(), 1);
+        assert_eq!(substrings[0].len(), 4);
+        assert!(
+            substrings[0]
+                .iter()
+                .all(|h| h.needle == "abc" && h.case_insensitive)
+        );
+
+        // Mixed OR (substring OR equality) -> no substring clause emitted
+        let mixed_or =
+            bind_and_opt("SELECT name FROM spans WHERE name ILIKE '%abc%' OR status = 'error'");
+        let LogicalPlan::Scan { substrings, .. } = find_first_scan(&mixed_or).unwrap() else {
+            unreachable!()
+        };
+        assert!(substrings.is_empty());
+
+        // Trailing lone escape char in longest_like_literal matches fn_string.rs
+        assert_eq!(
+            longest_like_literal(r"abc\", Some('\\')),
+            Some(r"abc\".to_owned())
+        );
+
+        // Pass 5 MapProjection cases
+        let cases = [
+            (
+                "SELECT metadata, metadata['k'] FROM spans",
+                Some(MapProjection::Full),
+            ),
+            (
+                "SELECT map_keys(metadata) FROM spans",
+                Some(MapProjection::KeysOnly),
+            ),
+            (
+                "SELECT map_keys(metadata) FROM spans WHERE metadata['env'] = 'prod'",
+                Some(MapProjection::Full),
+            ),
+            (
+                "SELECT map_values(metadata) FROM spans",
+                Some(MapProjection::Full),
+            ),
+            (
+                "SELECT count(*) FROM spans GROUP BY metadata",
+                Some(MapProjection::Full),
+            ),
+            (
+                "SELECT DISTINCT metadata FROM spans",
+                Some(MapProjection::Full),
+            ),
+        ];
+        for (sql, expected) in cases {
+            let plan = bind_and_opt(sql);
+            let LogicalPlan::Scan {
+                map_projections, ..
+            } = find_first_scan(&plan).unwrap()
+            else {
+                unreachable!()
+            };
+            assert_eq!(map_projections.get("metadata"), expected.as_ref(), "{sql}");
+        }
+    }
+
+    #[test]
+    fn iterative_walkers_handle_512_deep_binary_on_2mib_stack() {
+        let handle = std::thread::Builder::new()
+            .stack_size(2 * 1024 * 1024)
+            .spawn(|| {
+                let mut add_expr = Expr::Literal(ScalarValue::I64(1));
+                let mut and_expr = Expr::Column {
+                    index: 0,
+                    name: "b".to_owned(),
+                    data_type: DataType::Bool,
+                };
+                let mut or_expr = Expr::Column {
+                    index: 0,
+                    name: "b".to_owned(),
+                    data_type: DataType::Bool,
+                };
+                for _ in 0..512 {
+                    add_expr = bin(add_expr, BinaryOp::Add, Expr::Literal(ScalarValue::I64(1)));
+                    and_expr = bin(
+                        and_expr,
+                        BinaryOp::And,
+                        Expr::Column {
+                            index: 0,
+                            name: "b".to_owned(),
+                            data_type: DataType::Bool,
+                        },
+                    );
+                    or_expr = bin(
+                        or_expr,
+                        BinaryOp::Or,
+                        Expr::Column {
+                            index: 0,
+                            name: "b".to_owned(),
+                            data_type: DataType::Bool,
+                        },
+                    );
+                }
+
+                let mut folder = ConstFolder::new().unwrap();
+                assert_eq!(
+                    folder.fold_expr(add_expr),
+                    Expr::Literal(ScalarValue::I64(513))
+                );
+                assert!(is_infallible(&and_expr));
+                assert!(is_infallible(&or_expr));
+
+                let sub = substitute_expr(
+                    &and_expr,
+                    &[Expr::Column {
+                        index: 0,
+                        name: "c".to_owned(),
+                        data_type: DataType::Bool,
+                    }],
+                )
+                .unwrap()
+                .unwrap();
+                let conjuncts = split_conjuncts(sub);
+                assert_eq!(conjuncts.len(), 513);
+
+                let mut disjuncts = Vec::new();
+                collect_or_disjuncts(&or_expr, &mut disjuncts);
+                assert_eq!(disjuncts.len(), 513);
+
+                let mapped = map_expr_bottom_up(or_expr, &mut |e| e);
+                assert!(is_infallible(&mapped));
+            })
+            .unwrap();
+        handle.join().unwrap();
     }
 }

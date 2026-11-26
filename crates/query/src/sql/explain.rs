@@ -73,7 +73,7 @@ fn fmt_node(plan: &LogicalPlan, depth: usize, out: &mut String) {
             time_range,
             id_lookups,
             substrings,
-            map_keys,
+            map_projections,
             limit,
             schema,
             ..
@@ -100,8 +100,8 @@ fn fmt_node(plan: &LogicalPlan, depth: usize, out: &mut String) {
             if !substrings.is_empty() {
                 let _ = write!(out, " substrings={substrings:?}");
             }
-            if !map_keys.is_empty() {
-                let _ = write!(out, " map_keys={}", map_keys.len());
+            if !map_projections.is_empty() {
+                let _ = write!(out, " map_projections={}", map_projections.len());
             }
             if let Some(lim) = limit {
                 let _ = write!(out, " limit={lim}");
@@ -389,13 +389,14 @@ fn fmt_bound(b: FrameBound) -> String {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::{BTreeMap, BTreeSet};
     use std::sync::Arc;
 
     use cetra_column::{DataType, Field, ScalarValue, Schema};
 
     use super::*;
     use crate::eval::read_str;
-    use crate::exec::source::{IdLookupHint, SubstringHint, TimeRangeHint};
+    use crate::exec::source::{IdLookupHint, MapProjection, SubstringHint, TimeRangeHint};
     use crate::ir::{BinaryOp, UnaryOp};
     use crate::sql::catalog::{SqlViewKind, raw_scores_schema};
     use crate::sql::optimize::optimize;
@@ -459,12 +460,15 @@ mod tests {
                     column: "user_id".to_owned(),
                     values: vec!["lookup-user-secret".to_owned()],
                 }],
-                substrings: vec![SubstringHint {
+                substrings: vec![vec![SubstringHint {
                     column: "reason".to_owned(),
                     needle: "secret-substring-needle".to_owned(),
                     case_insensitive: true,
-                }],
-                map_keys: vec![("metadata".to_owned(), "secret-map-key".to_owned())],
+                }]],
+                map_projections: BTreeMap::from([(
+                    "metadata".to_owned(),
+                    MapProjection::Keys(BTreeSet::from(["secret-map-key".to_owned()])),
+                )]),
                 limit: None,
                 schema: scores_schema,
             }),

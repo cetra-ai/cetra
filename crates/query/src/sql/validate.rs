@@ -4,12 +4,15 @@
 //! matching `crates/storage/src/sql/validate.rs` limits, error strings, and positions.
 
 use std::collections::HashSet;
-use std::ops::ControlFlow;
 
 use sqlparser::ast::{
-    DescribeAlias, Expr, GroupByExpr, Ident, NamedWindowExpr, ObjectName, ObjectNamePart, Query,
-    Select, SetExpr, SetOperator, SetQuantifier, Spanned, Statement, TableFactor, Visit, Visitor,
-    WindowFrame, WindowFrameBound, WindowFrameUnits, WindowType,
+    AccessExpr, CaseWhen, ConnectByKind, DescribeAlias, Distinct, Expr, FunctionArg,
+    FunctionArgExpr, FunctionArgumentClause, FunctionArguments, GroupByExpr, HavingBound, Ident,
+    Join, JoinConstraint, JoinOperator, JsonPathElem, LimitClause, NamedWindowExpr, ObjectName,
+    ObjectNamePart, OrderBy, OrderByExpr, OrderByKind, Query, Select, SelectItem,
+    SelectItemQualifiedWildcardKind, SetExpr, SetOperator, SetQuantifier, Spanned, Statement,
+    Subscript, TableFactor, TopQuantity, WildcardAdditionalOptions, WindowFrame, WindowFrameBound,
+    WindowFrameUnits, WindowSpec, WindowType,
 };
 use sqlparser::tokenizer::{Span, Token};
 
@@ -118,18 +121,14 @@ pub fn validate_statement(
         }
     };
 
-    let mut ctes = CteNames::default();
-    let _ = query.visit(&mut CollectCtes { names: &mut ctes });
+    let ctes = collect_ctes(query);
     let mut walk = Walk {
         registered,
         ctes,
         text,
         tables: 0,
     };
-    match query.visit(&mut walk) {
-        ControlFlow::Break(error) => Err(error),
-        ControlFlow::Continue(()) => Ok(()),
-    }
+    walk.run(query)
 }
 
 #[derive(Default)]
@@ -156,21 +155,54 @@ impl CteNames {
     }
 }
 
-struct CollectCtes<'a> {
-    names: &'a mut CteNames,
+enum WorkItem<'a> {
+    Query(&'a Query),
+    SetExpr(&'a SetExpr),
+    Select(&'a Select),
+    TableFactor(&'a TableFactor),
+    Join(&'a Join),
+    Expr(&'a Expr),
+    OrderBy(&'a OrderBy),
+    OrderByExpr(&'a OrderByExpr),
+    LimitClause(&'a LimitClause),
+    WindowSpec(&'a WindowSpec),
 }
 
-impl Visitor for CollectCtes<'_> {
-    type Break = ();
-
-    fn pre_visit_query(&mut self, query: &Query) -> ControlFlow<Self::Break> {
-        if let Some(with) = &query.with {
-            for cte in &with.cte_tables {
-                self.names.insert(&cte.alias.name);
+fn collect_ctes(query: &Query) -> CteNames {
+    let mut names = CteNames::default();
+    let mut stack = vec![WorkItem::Query(query)];
+    while let Some(item) = stack.pop() {
+        match item {
+            WorkItem::Query(q) => {
+                if let Some(with) = &q.with {
+                    for cte in &with.cte_tables {
+                        names.insert(&cte.alias.name);
+                    }
+                }
+                push_query_children(q, &mut stack);
             }
+            WorkItem::SetExpr(mut body) => {
+                let mut rhs = Vec::new();
+                while let SetExpr::SetOperation { left, right, .. } = body {
+                    rhs.push(right.as_ref());
+                    body = left.as_ref();
+                }
+                for r in rhs {
+                    stack.push(WorkItem::SetExpr(r));
+                }
+                push_set_expr_leaf_children(body, &mut stack);
+            }
+            WorkItem::Select(s) => push_select_children(s, &mut stack),
+            WorkItem::TableFactor(tf) => push_table_factor_children(tf, &mut stack),
+            WorkItem::Join(j) => push_join_children(j, &mut stack),
+            WorkItem::Expr(e) => push_expr_children(e, &mut stack),
+            WorkItem::OrderBy(ob) => push_order_by_children(ob, &mut stack),
+            WorkItem::OrderByExpr(obe) => push_order_by_expr_children(obe, &mut stack),
+            WorkItem::LimitClause(lc) => push_limit_clause_children(lc, &mut stack),
+            WorkItem::WindowSpec(ws) => push_window_spec_children(ws, &mut stack),
         }
-        ControlFlow::Continue(())
     }
+    names
 }
 
 struct Walk<'a> {
@@ -180,92 +212,130 @@ struct Walk<'a> {
     tables: usize,
 }
 
-impl Walk<'_> {
-    fn count_table(&mut self, span: Span) -> ControlFlow<InvalidQuery> {
+impl<'a> Walk<'a> {
+    fn count_table(&mut self, span: Span) -> Result<(), InvalidQuery> {
         self.tables += 1;
         if self.tables > MAX_TABLES {
-            return ControlFlow::Break(InvalidQuery::new(
+            return Err(InvalidQuery::new(
                 format!(
                     "the query reads more than {MAX_TABLES} tables (each INTERSECT or EXCEPT counts as one)"
                 ),
                 at(span),
             ));
         }
-        ControlFlow::Continue(())
+        Ok(())
     }
-}
 
-impl Visitor for Walk<'_> {
-    type Break = InvalidQuery;
+    fn run(&mut self, root: &'a Query) -> Result<(), InvalidQuery> {
+        let mut stack = vec![WorkItem::Query(root)];
+        while let Some(item) = stack.pop() {
+            match item {
+                WorkItem::Query(query) => self.visit_query(query, &mut stack)?,
+                WorkItem::SetExpr(body) => self.visit_set_expr(body, &mut stack)?,
+                WorkItem::Select(select) => self.visit_select(select, &mut stack)?,
+                WorkItem::TableFactor(factor) => self.visit_table_factor(factor, &mut stack)?,
+                WorkItem::Join(join) => push_join_children(join, &mut stack),
+                WorkItem::Expr(expr) => self.visit_expr(expr, &mut stack)?,
+                WorkItem::OrderBy(ob) => push_order_by_children(ob, &mut stack),
+                WorkItem::OrderByExpr(obe) => push_order_by_expr_children(obe, &mut stack),
+                WorkItem::LimitClause(lc) => push_limit_clause_children(lc, &mut stack),
+                WorkItem::WindowSpec(ws) => push_window_spec_children(ws, &mut stack),
+            }
+        }
+        Ok(())
+    }
 
-    fn pre_visit_query(&mut self, query: &Query) -> ControlFlow<Self::Break> {
+    fn visit_query(
+        &mut self,
+        query: &'a Query,
+        stack: &mut Vec<WorkItem<'a>>,
+    ) -> Result<(), InvalidQuery> {
         if query.with.as_ref().is_some_and(|with| with.recursive) {
-            return ControlFlow::Break(InvalidQuery::new(
+            return Err(InvalidQuery::new(
                 "recursive queries are not allowed",
                 at(query.span()),
             ));
         }
-        // Set operations nest left-deep; walk iteratively so deep UNION chains never overflow stack.
-        let mut pending = vec![query.body.as_ref()];
-        while let Some(mut body) = pending.pop() {
-            let mut chain = Vec::new();
-            while let SetExpr::SetOperation {
-                op,
-                set_quantifier,
-                left,
-                right,
-            } = body
-            {
-                chain.push((op, set_quantifier, right.as_ref()));
-                body = left;
+        if !query.pipe_operators.is_empty() {
+            return Err(InvalidQuery::new(
+                "pipe syntax (`|>`) is not allowed",
+                at(query.span()),
+            ));
+        }
+        push_query_children(query, stack);
+        Ok(())
+    }
+
+    fn visit_set_expr(
+        &mut self,
+        mut body: &'a SetExpr,
+        stack: &mut Vec<WorkItem<'a>>,
+    ) -> Result<(), InvalidQuery> {
+        // Set operations nest left-deep; unwrap iteratively so deep UNION chains never overflow stack.
+        let mut chain = Vec::new();
+        while let SetExpr::SetOperation {
+            op,
+            set_quantifier,
+            left,
+            right,
+        } = body
+        {
+            chain.push((op, set_quantifier, right.as_ref()));
+            body = left.as_ref();
+        }
+        // Validate in left-to-right order (matching original spine traversal).
+        for &(op, quantifier, right) in chain.iter().rev() {
+            if matches!(
+                quantifier,
+                SetQuantifier::ByName | SetQuantifier::AllByName | SetQuantifier::DistinctByName
+            ) {
+                return Err(InvalidQuery::new(
+                    "BY NAME set operations are not supported",
+                    at(right.span()),
+                ));
             }
-            for (op, quantifier, right) in chain.into_iter().rev() {
-                if matches!(
-                    quantifier,
-                    SetQuantifier::ByName
-                        | SetQuantifier::AllByName
-                        | SetQuantifier::DistinctByName
-                ) {
-                    return ControlFlow::Break(InvalidQuery::new(
-                        "BY NAME set operations are not supported",
+            if matches!(
+                op,
+                SetOperator::Intersect | SetOperator::Except | SetOperator::Minus
+            ) {
+                if matches!(quantifier, SetQuantifier::All) {
+                    return Err(InvalidQuery::new(
+                        "INTERSECT ALL and EXCEPT ALL are not supported",
                         at(right.span()),
                     ));
                 }
-                if matches!(
-                    op,
-                    SetOperator::Intersect | SetOperator::Except | SetOperator::Minus
-                ) {
-                    if matches!(quantifier, SetQuantifier::All) {
-                        return ControlFlow::Break(InvalidQuery::new(
-                            "INTERSECT ALL and EXCEPT ALL are not supported",
-                            at(right.span()),
-                        ));
-                    }
-                    self.count_table(right.span())?;
-                }
-                pending.push(right);
+                self.count_table(right.span())?;
             }
         }
-        ControlFlow::Continue(())
+        // Push rights in forward order (so reversed LIFO pops left-to-right), then leftmost leaf on top.
+        for &(_, _, right) in &chain {
+            stack.push(WorkItem::SetExpr(right));
+        }
+        push_set_expr_leaf_children(body, stack);
+        Ok(())
     }
 
-    fn pre_visit_select(&mut self, select: &Select) -> ControlFlow<Self::Break> {
+    fn visit_select(
+        &mut self,
+        select: &'a Select,
+        stack: &mut Vec<WorkItem<'a>>,
+    ) -> Result<(), InvalidQuery> {
         if let Some(into) = &select.into {
-            return ControlFlow::Break(InvalidQuery::new(
+            return Err(InvalidQuery::new(
                 "SELECT INTO is not allowed",
                 at(into.name.span()),
             ));
         }
         match &select.group_by {
             GroupByExpr::All(_) => {
-                return ControlFlow::Break(InvalidQuery::new(
+                return Err(InvalidQuery::new(
                     "GROUP BY ALL is not supported",
                     at(select.span()),
                 ));
             }
             GroupByExpr::Expressions(exprs, modifiers) => {
                 if !modifiers.is_empty() {
-                    return ControlFlow::Break(InvalidQuery::new(
+                    return Err(InvalidQuery::new(
                         "ROLLUP, CUBE, and GROUPING SETS are not supported",
                         at(select.span()),
                     ));
@@ -275,7 +345,7 @@ impl Visitor for Walk<'_> {
                         expr,
                         Expr::Rollup(_) | Expr::Cube(_) | Expr::GroupingSets(_)
                     ) {
-                        return ControlFlow::Break(InvalidQuery::new(
+                        return Err(InvalidQuery::new(
                             "ROLLUP, CUBE, and GROUPING SETS are not supported",
                             at(expr.span()),
                         ));
@@ -290,121 +360,820 @@ impl Visitor for Walk<'_> {
                 validate_window_frame(frame, named.0.span)?;
             }
         }
-        ControlFlow::Continue(())
+        push_select_children(select, stack);
+        Ok(())
     }
 
-    fn pre_visit_table_factor(&mut self, factor: &TableFactor) -> ControlFlow<Self::Break> {
+    fn visit_table_factor(
+        &mut self,
+        factor: &'a TableFactor,
+        stack: &mut Vec<WorkItem<'a>>,
+    ) -> Result<(), InvalidQuery> {
         if !matches!(factor, TableFactor::NestedJoin { .. }) {
             self.count_table(factor.span())?;
         }
         match factor {
-            TableFactor::Derived { lateral, .. } => {
+            TableFactor::Derived {
+                lateral,
+                subquery: _,
+                alias: _,
+                sample,
+            } => {
                 if *lateral {
-                    ControlFlow::Break(InvalidQuery::new(
+                    return Err(InvalidQuery::new(
                         "LATERAL subqueries are not supported",
                         at(factor.span()),
-                    ))
-                } else {
-                    ControlFlow::Continue(())
+                    ));
                 }
+                if sample.is_some() {
+                    return Err(InvalidQuery::new(
+                        "TABLESAMPLE is not supported",
+                        at(factor.span()),
+                    ));
+                }
+                push_table_factor_children(factor, stack);
+                Ok(())
             }
             TableFactor::NestedJoin { .. } | TableFactor::UNNEST { .. } => {
-                ControlFlow::Continue(())
+                push_table_factor_children(factor, stack);
+                Ok(())
             }
-            TableFactor::Table { name, args, .. } => {
+            TableFactor::Table {
+                name,
+                alias: _,
+                args,
+                with_hints,
+                version,
+                with_ordinality,
+                partitions,
+                json_path,
+                sample,
+                index_hints,
+            } => {
                 if args.is_some() {
-                    return ControlFlow::Break(InvalidQuery::new(
+                    return Err(InvalidQuery::new(
                         "table functions are not allowed",
+                        at(factor.span()),
+                    ));
+                }
+                if !with_hints.is_empty() {
+                    return Err(InvalidQuery::new(
+                        "table hints are not supported",
+                        at(factor.span()),
+                    ));
+                }
+                if version.is_some() {
+                    return Err(InvalidQuery::new(
+                        "table time-travel qualifiers are not supported",
+                        at(factor.span()),
+                    ));
+                }
+                if *with_ordinality {
+                    return Err(InvalidQuery::new(
+                        "WITH ORDINALITY is not supported",
+                        at(factor.span()),
+                    ));
+                }
+                if !partitions.is_empty() {
+                    return Err(InvalidQuery::new(
+                        "table partition clauses are not supported",
+                        at(factor.span()),
+                    ));
+                }
+                if json_path.is_some() {
+                    return Err(InvalidQuery::new(
+                        "table JSON path qualifiers are not supported",
+                        at(factor.span()),
+                    ));
+                }
+                if sample.is_some() {
+                    return Err(InvalidQuery::new(
+                        "TABLESAMPLE is not supported",
+                        at(factor.span()),
+                    ));
+                }
+                if !index_hints.is_empty() {
+                    return Err(InvalidQuery::new(
+                        "index hints are not supported",
                         at(factor.span()),
                     ));
                 }
                 self.relation(name)
             }
-            TableFactor::TableFunction { .. } => ControlFlow::Break(InvalidQuery::new(
+            TableFactor::TableFunction { .. } => Err(InvalidQuery::new(
                 "`TABLE` is not allowed in FROM",
                 at(factor.span()),
             )),
-            TableFactor::Function { .. } => ControlFlow::Break(InvalidQuery::new(
+            TableFactor::Function { .. } => Err(InvalidQuery::new(
                 "`FUNCTION` is not allowed in FROM",
                 at(factor.span()),
             )),
-            TableFactor::JsonTable { .. } => ControlFlow::Break(InvalidQuery::new(
+            TableFactor::JsonTable { .. } => Err(InvalidQuery::new(
                 "`JSON_TABLE` is not allowed in FROM",
                 at(factor.span()),
             )),
-            TableFactor::OpenJsonTable { .. } => ControlFlow::Break(InvalidQuery::new(
+            TableFactor::OpenJsonTable { .. } => Err(InvalidQuery::new(
                 "`OPENJSON` is not allowed in FROM",
                 at(factor.span()),
             )),
-            TableFactor::Pivot { .. } => ControlFlow::Break(InvalidQuery::new(
+            TableFactor::Pivot { .. } => Err(InvalidQuery::new(
                 "`PIVOT` is not allowed in FROM",
                 at(factor.span()),
             )),
-            TableFactor::Unpivot { .. } => ControlFlow::Break(InvalidQuery::new(
+            TableFactor::Unpivot { .. } => Err(InvalidQuery::new(
                 "`UNPIVOT` is not allowed in FROM",
                 at(factor.span()),
             )),
-            TableFactor::MatchRecognize { .. } => ControlFlow::Break(InvalidQuery::new(
+            TableFactor::MatchRecognize { .. } => Err(InvalidQuery::new(
                 "`MATCH_RECOGNIZE` is not allowed in FROM",
                 at(factor.span()),
             )),
-            TableFactor::XmlTable { .. } => ControlFlow::Break(InvalidQuery::new(
+            TableFactor::XmlTable { .. } => Err(InvalidQuery::new(
                 "`XMLTABLE` is not allowed in FROM",
                 at(factor.span()),
             )),
-            TableFactor::SemanticView { .. } => ControlFlow::Break(InvalidQuery::new(
+            TableFactor::SemanticView { .. } => Err(InvalidQuery::new(
                 "`SEMANTIC_VIEW` is not allowed in FROM",
                 at(factor.span()),
             )),
         }
     }
 
-    fn pre_visit_expr(&mut self, expr: &Expr) -> ControlFlow<Self::Break> {
+    fn visit_expr(
+        &mut self,
+        expr: &'a Expr,
+        stack: &mut Vec<WorkItem<'a>>,
+    ) -> Result<(), InvalidQuery> {
         if matches!(
             expr,
             Expr::Rollup(_) | Expr::Cube(_) | Expr::GroupingSets(_)
         ) {
-            return ControlFlow::Break(InvalidQuery::new(
+            return Err(InvalidQuery::new(
                 "ROLLUP, CUBE, and GROUPING SETS are not supported",
                 at(expr.span()),
             ));
         }
-        let Expr::Function(function) = expr else {
-            return ControlFlow::Continue(());
-        };
-        if let Some(name) = bare_name(&function.name) {
+        if let Expr::Function(function) = expr {
+            let Some(name) = bare_name(&function.name) else {
+                return Err(InvalidQuery::new(
+                    "qualified function names are not supported",
+                    at(expr.span()),
+                ));
+            };
             if DENIED_FUNCTIONS.contains(&name.as_str()) {
-                return ControlFlow::Break(InvalidQuery::new(
+                return Err(InvalidQuery::new(
                     format!("function `{name}` is not available in the SQL console"),
                     at(expr.span()),
                 ));
             }
             if matches!(name.as_str(), "score" | "score_label" | "has_score") {
-                return ControlFlow::Break(InvalidQuery::new(
+                return Err(InvalidQuery::new(
                     "score functions are only available in filters; join the scores view instead",
                     at(expr.span()),
                 ));
             }
+            if let Some(WindowType::WindowSpec(spec)) = &function.over
+                && let Some(frame) = &spec.window_frame
+            {
+                validate_window_frame(frame, expr.span())?;
+            }
         }
-        if let Some(WindowType::WindowSpec(spec)) = &function.over
-            && let Some(frame) = &spec.window_frame
-        {
-            validate_window_frame(frame, expr.span())?;
+        push_expr_children(expr, stack);
+        Ok(())
+    }
+}
+
+fn push_query_children<'a>(query: &'a Query, stack: &mut Vec<WorkItem<'a>>) {
+    let Query {
+        with,
+        body,
+        order_by,
+        limit_clause,
+        fetch,
+        locks: _,
+        for_clause: _,
+        settings,
+        format_clause: _,
+        pipe_operators: _,
+    } = query;
+
+    if let Some(settings_list) = settings {
+        for s in settings_list.iter().rev() {
+            stack.push(WorkItem::Expr(&s.value));
         }
-        ControlFlow::Continue(())
+    }
+    if let Some(f) = fetch
+        && let Some(q) = &f.quantity
+    {
+        stack.push(WorkItem::Expr(q));
+    }
+    if let Some(lc) = limit_clause {
+        stack.push(WorkItem::LimitClause(lc));
+    }
+    if let Some(ob) = order_by {
+        stack.push(WorkItem::OrderBy(ob));
+    }
+    stack.push(WorkItem::SetExpr(body.as_ref()));
+    if let Some(w) = with {
+        for cte in w.cte_tables.iter().rev() {
+            stack.push(WorkItem::Query(cte.query.as_ref()));
+        }
+    }
+}
+
+fn push_set_expr_leaf_children<'a>(body: &'a SetExpr, stack: &mut Vec<WorkItem<'a>>) {
+    match body {
+        SetExpr::Select(select) => stack.push(WorkItem::Select(select.as_ref())),
+        SetExpr::Query(query) => stack.push(WorkItem::Query(query.as_ref())),
+        SetExpr::SetOperation { .. } => {
+            // Callers flatten `SetOperation` spines before calling `push_set_expr_leaf_children`.
+            stack.push(WorkItem::SetExpr(body));
+        }
+        SetExpr::Values(values) => {
+            for row in values.rows.iter().rev() {
+                for expr in row.iter().rev() {
+                    stack.push(WorkItem::Expr(expr));
+                }
+            }
+        }
+        SetExpr::Insert(_)
+        | SetExpr::Update(_)
+        | SetExpr::Delete(_)
+        | SetExpr::Merge(_)
+        | SetExpr::Table(_) => {}
+    }
+}
+
+fn push_select_children<'a>(select: &'a Select, stack: &mut Vec<WorkItem<'a>>) {
+    let Select {
+        select_token: _,
+        optimizer_hints: _,
+        distinct,
+        select_modifiers: _,
+        top,
+        top_before_distinct: _,
+        projection,
+        exclude: _,
+        into: _,
+        from,
+        lateral_views,
+        prewhere,
+        selection,
+        connect_by,
+        group_by,
+        cluster_by,
+        distribute_by,
+        sort_by,
+        having,
+        named_window,
+        qualify,
+        window_before_qualify: _,
+        value_table_mode: _,
+        flavor: _,
+    } = select;
+
+    if let Some(q) = qualify {
+        stack.push(WorkItem::Expr(q));
+    }
+    for named in named_window.iter().rev() {
+        if let NamedWindowExpr::WindowSpec(spec) = &named.1 {
+            stack.push(WorkItem::WindowSpec(spec));
+        }
+    }
+    if let Some(h) = having {
+        stack.push(WorkItem::Expr(h));
+    }
+    for obe in sort_by.iter().rev() {
+        stack.push(WorkItem::OrderByExpr(obe));
+    }
+    for e in distribute_by.iter().rev() {
+        stack.push(WorkItem::Expr(e));
+    }
+    for e in cluster_by.iter().rev() {
+        stack.push(WorkItem::Expr(e));
+    }
+    match group_by {
+        GroupByExpr::All(_) => {}
+        GroupByExpr::Expressions(exprs, _) => {
+            for e in exprs.iter().rev() {
+                stack.push(WorkItem::Expr(e));
+            }
+        }
+    }
+    for cb in connect_by.iter().rev() {
+        match cb {
+            ConnectByKind::ConnectBy {
+                connect_token: _,
+                nocycle: _,
+                relationships,
+            } => {
+                for r in relationships.iter().rev() {
+                    stack.push(WorkItem::Expr(r));
+                }
+            }
+            ConnectByKind::StartWith {
+                start_token: _,
+                condition,
+            } => {
+                stack.push(WorkItem::Expr(condition.as_ref()));
+            }
+        }
+    }
+    if let Some(sel) = selection {
+        stack.push(WorkItem::Expr(sel));
+    }
+    if let Some(pw) = prewhere {
+        stack.push(WorkItem::Expr(pw));
+    }
+    for lv in lateral_views.iter().rev() {
+        stack.push(WorkItem::Expr(&lv.lateral_view));
+    }
+    for twj in from.iter().rev() {
+        for j in twj.joins.iter().rev() {
+            stack.push(WorkItem::Join(j));
+        }
+        stack.push(WorkItem::TableFactor(&twj.relation));
+    }
+    for item in projection.iter().rev() {
+        match item {
+            SelectItem::UnnamedExpr(e)
+            | SelectItem::ExprWithAlias { expr: e, .. }
+            | SelectItem::ExprWithAliases { expr: e, .. } => {
+                stack.push(WorkItem::Expr(e));
+            }
+            SelectItem::QualifiedWildcard(kind, opts) => {
+                push_wildcard_opts_children(opts, stack);
+                if let SelectItemQualifiedWildcardKind::Expr(e) = kind {
+                    stack.push(WorkItem::Expr(e));
+                }
+            }
+            SelectItem::Wildcard(opts) => {
+                push_wildcard_opts_children(opts, stack);
+            }
+        }
+    }
+    if let Some(t) = top
+        && let Some(TopQuantity::Expr(e)) = &t.quantity
+    {
+        stack.push(WorkItem::Expr(e));
+    }
+    if let Some(Distinct::On(exprs)) = distinct {
+        for e in exprs.iter().rev() {
+            stack.push(WorkItem::Expr(e));
+        }
+    }
+}
+
+fn push_wildcard_opts_children<'a>(
+    opts: &'a WildcardAdditionalOptions,
+    stack: &mut Vec<WorkItem<'a>>,
+) {
+    if let Some(replace) = &opts.opt_replace {
+        for elem in replace.items.iter().rev() {
+            stack.push(WorkItem::Expr(&elem.expr));
+        }
+    }
+}
+
+fn push_table_factor_children<'a>(factor: &'a TableFactor, stack: &mut Vec<WorkItem<'a>>) {
+    match factor {
+        TableFactor::Derived { subquery, .. } => {
+            stack.push(WorkItem::Query(subquery.as_ref()));
+        }
+        TableFactor::NestedJoin {
+            table_with_joins, ..
+        } => {
+            for j in table_with_joins.joins.iter().rev() {
+                stack.push(WorkItem::Join(j));
+            }
+            stack.push(WorkItem::TableFactor(&table_with_joins.relation));
+        }
+        TableFactor::UNNEST { array_exprs, .. } => {
+            for e in array_exprs.iter().rev() {
+                stack.push(WorkItem::Expr(e));
+            }
+        }
+        TableFactor::Table { .. }
+        | TableFactor::TableFunction { .. }
+        | TableFactor::Function { .. }
+        | TableFactor::JsonTable { .. }
+        | TableFactor::OpenJsonTable { .. }
+        | TableFactor::Pivot { .. }
+        | TableFactor::Unpivot { .. }
+        | TableFactor::MatchRecognize { .. }
+        | TableFactor::XmlTable { .. }
+        | TableFactor::SemanticView { .. } => {}
+    }
+}
+
+fn push_join_children<'a>(join: &'a Join, stack: &mut Vec<WorkItem<'a>>) {
+    let Join {
+        relation,
+        global: _,
+        join_operator,
+    } = join;
+    match join_operator {
+        JoinOperator::Join(c)
+        | JoinOperator::Inner(c)
+        | JoinOperator::Left(c)
+        | JoinOperator::LeftOuter(c)
+        | JoinOperator::Right(c)
+        | JoinOperator::RightOuter(c)
+        | JoinOperator::FullOuter(c)
+        | JoinOperator::CrossJoin(c)
+        | JoinOperator::Semi(c)
+        | JoinOperator::LeftSemi(c)
+        | JoinOperator::RightSemi(c)
+        | JoinOperator::Anti(c)
+        | JoinOperator::LeftAnti(c)
+        | JoinOperator::RightAnti(c)
+        | JoinOperator::StraightJoin(c) => {
+            push_join_constraint_children(c, stack);
+        }
+        JoinOperator::AsOf {
+            match_condition,
+            constraint,
+        } => {
+            push_join_constraint_children(constraint, stack);
+            stack.push(WorkItem::Expr(match_condition));
+        }
+        JoinOperator::CrossApply
+        | JoinOperator::OuterApply
+        | JoinOperator::ArrayJoin
+        | JoinOperator::LeftArrayJoin
+        | JoinOperator::InnerArrayJoin => {}
+    }
+    stack.push(WorkItem::TableFactor(relation));
+}
+
+fn push_join_constraint_children<'a>(
+    constraint: &'a JoinConstraint,
+    stack: &mut Vec<WorkItem<'a>>,
+) {
+    match constraint {
+        JoinConstraint::On(expr) => stack.push(WorkItem::Expr(expr)),
+        JoinConstraint::Using(_) | JoinConstraint::Natural | JoinConstraint::None => {}
+    }
+}
+
+fn push_order_by_children<'a>(order_by: &'a OrderBy, stack: &mut Vec<WorkItem<'a>>) {
+    if let Some(interp) = &order_by.interpolate
+        && let Some(exprs) = &interp.exprs
+    {
+        for ie in exprs.iter().rev() {
+            if let Some(e) = &ie.expr {
+                stack.push(WorkItem::Expr(e));
+            }
+        }
+    }
+    if let OrderByKind::Expressions(exprs) = &order_by.kind {
+        for obe in exprs.iter().rev() {
+            stack.push(WorkItem::OrderByExpr(obe));
+        }
+    }
+}
+
+fn push_order_by_expr_children<'a>(obe: &'a OrderByExpr, stack: &mut Vec<WorkItem<'a>>) {
+    if let Some(wf) = &obe.with_fill {
+        if let Some(step) = &wf.step {
+            stack.push(WorkItem::Expr(step));
+        }
+        if let Some(to) = &wf.to {
+            stack.push(WorkItem::Expr(to));
+        }
+        if let Some(from) = &wf.from {
+            stack.push(WorkItem::Expr(from));
+        }
+    }
+    stack.push(WorkItem::Expr(&obe.expr));
+}
+
+fn push_limit_clause_children<'a>(lc: &'a LimitClause, stack: &mut Vec<WorkItem<'a>>) {
+    match lc {
+        LimitClause::LimitOffset {
+            limit,
+            offset,
+            limit_by,
+        } => {
+            for e in limit_by.iter().rev() {
+                stack.push(WorkItem::Expr(e));
+            }
+            if let Some(off) = offset {
+                stack.push(WorkItem::Expr(&off.value));
+            }
+            if let Some(lim) = limit {
+                stack.push(WorkItem::Expr(lim));
+            }
+        }
+        LimitClause::OffsetCommaLimit { offset, limit } => {
+            stack.push(WorkItem::Expr(limit));
+            stack.push(WorkItem::Expr(offset));
+        }
+    }
+}
+
+fn push_window_spec_children<'a>(spec: &'a WindowSpec, stack: &mut Vec<WorkItem<'a>>) {
+    for obe in spec.order_by.iter().rev() {
+        stack.push(WorkItem::OrderByExpr(obe));
+    }
+    for e in spec.partition_by.iter().rev() {
+        stack.push(WorkItem::Expr(e));
+    }
+}
+
+fn push_function_args_children<'a>(args: &'a FunctionArguments, stack: &mut Vec<WorkItem<'a>>) {
+    match args {
+        FunctionArguments::None => {}
+        FunctionArguments::Subquery(q) => stack.push(WorkItem::Query(q.as_ref())),
+        FunctionArguments::List(list) => {
+            for clause in list.clauses.iter().rev() {
+                match clause {
+                    FunctionArgumentClause::OrderBy(obes) => {
+                        for obe in obes.iter().rev() {
+                            stack.push(WorkItem::OrderByExpr(obe));
+                        }
+                    }
+                    FunctionArgumentClause::Limit(e)
+                    | FunctionArgumentClause::Having(HavingBound(_, e)) => {
+                        stack.push(WorkItem::Expr(e));
+                    }
+                    FunctionArgumentClause::IgnoreOrRespectNulls(_)
+                    | FunctionArgumentClause::OnOverflow(_)
+                    | FunctionArgumentClause::Separator(_)
+                    | FunctionArgumentClause::JsonNullClause(_)
+                    | FunctionArgumentClause::JsonReturningClause(_) => {}
+                }
+            }
+            for arg in list.args.iter().rev() {
+                match arg {
+                    FunctionArg::Named { arg: inner, .. } | FunctionArg::Unnamed(inner) => {
+                        push_function_arg_expr_children(inner, stack);
+                    }
+                    FunctionArg::ExprNamed {
+                        name, arg: inner, ..
+                    } => {
+                        push_function_arg_expr_children(inner, stack);
+                        stack.push(WorkItem::Expr(name));
+                    }
+                }
+            }
+        }
+    }
+}
+
+fn push_function_arg_expr_children<'a>(arg: &'a FunctionArgExpr, stack: &mut Vec<WorkItem<'a>>) {
+    match arg {
+        FunctionArgExpr::Expr(e) => stack.push(WorkItem::Expr(e)),
+        FunctionArgExpr::WildcardWithOptions(opts) => push_wildcard_opts_children(opts, stack),
+        FunctionArgExpr::QualifiedWildcard(_) | FunctionArgExpr::Wildcard => {}
+    }
+}
+
+fn push_expr_children<'a>(expr: &'a Expr, stack: &mut Vec<WorkItem<'a>>) {
+    match expr {
+        Expr::Identifier(_)
+        | Expr::CompoundIdentifier(_)
+        | Expr::Value(_)
+        | Expr::TypedString(_)
+        | Expr::MatchAgainst { .. }
+        | Expr::Wildcard(_)
+        | Expr::QualifiedWildcard(_, _) => {}
+        Expr::CompoundFieldAccess { root, access_chain } => {
+            for access in access_chain.iter().rev() {
+                match access {
+                    AccessExpr::Dot(e) => stack.push(WorkItem::Expr(e)),
+                    AccessExpr::Subscript(Subscript::Index { index }) => {
+                        stack.push(WorkItem::Expr(index));
+                    }
+                    AccessExpr::Subscript(Subscript::Slice {
+                        lower_bound,
+                        upper_bound,
+                        stride,
+                    }) => {
+                        if let Some(s) = stride {
+                            stack.push(WorkItem::Expr(s));
+                        }
+                        if let Some(u) = upper_bound {
+                            stack.push(WorkItem::Expr(u));
+                        }
+                        if let Some(l) = lower_bound {
+                            stack.push(WorkItem::Expr(l));
+                        }
+                    }
+                }
+            }
+            stack.push(WorkItem::Expr(root.as_ref()));
+        }
+        Expr::JsonAccess { value, path } => {
+            for elem in path.path.iter().rev() {
+                if let JsonPathElem::Bracket { key } = elem {
+                    stack.push(WorkItem::Expr(key));
+                }
+            }
+            stack.push(WorkItem::Expr(value.as_ref()));
+        }
+        Expr::IsFalse(inner)
+        | Expr::IsNotFalse(inner)
+        | Expr::IsTrue(inner)
+        | Expr::IsNotTrue(inner)
+        | Expr::IsNull(inner)
+        | Expr::IsNotNull(inner)
+        | Expr::IsUnknown(inner)
+        | Expr::IsNotUnknown(inner)
+        | Expr::IsNormalized { expr: inner, .. }
+        | Expr::UnaryOp { expr: inner, .. }
+        | Expr::Cast { expr: inner, .. }
+        | Expr::Extract { expr: inner, .. }
+        | Expr::Ceil { expr: inner, .. }
+        | Expr::Floor { expr: inner, .. }
+        | Expr::Collate { expr: inner, .. }
+        | Expr::Nested(inner)
+        | Expr::Prefixed { value: inner, .. }
+        | Expr::Named { expr: inner, .. }
+        | Expr::OuterJoin(inner)
+        | Expr::Prior(inner) => {
+            stack.push(WorkItem::Expr(inner.as_ref()));
+        }
+        Expr::IsDistinctFrom(left, right)
+        | Expr::IsNotDistinctFrom(left, right)
+        | Expr::BinaryOp { left, right, .. }
+        | Expr::AnyOp { left, right, .. }
+        | Expr::AllOp { left, right, .. }
+        | Expr::AtTimeZone {
+            timestamp: left,
+            time_zone: right,
+        }
+        | Expr::Position {
+            expr: left,
+            r#in: right,
+        } => {
+            stack.push(WorkItem::Expr(right.as_ref()));
+            stack.push(WorkItem::Expr(left.as_ref()));
+        }
+        Expr::InList { expr, list, .. } => {
+            for item in list.iter().rev() {
+                stack.push(WorkItem::Expr(item));
+            }
+            stack.push(WorkItem::Expr(expr.as_ref()));
+        }
+        Expr::InSubquery { expr, subquery, .. } => {
+            stack.push(WorkItem::Query(subquery.as_ref()));
+            stack.push(WorkItem::Expr(expr.as_ref()));
+        }
+        Expr::InUnnest {
+            expr, array_expr, ..
+        } => {
+            stack.push(WorkItem::Expr(array_expr.as_ref()));
+            stack.push(WorkItem::Expr(expr.as_ref()));
+        }
+        Expr::Between {
+            expr, low, high, ..
+        } => {
+            stack.push(WorkItem::Expr(high.as_ref()));
+            stack.push(WorkItem::Expr(low.as_ref()));
+            stack.push(WorkItem::Expr(expr.as_ref()));
+        }
+        Expr::Like { expr, pattern, .. }
+        | Expr::ILike { expr, pattern, .. }
+        | Expr::SimilarTo { expr, pattern, .. }
+        | Expr::RLike { expr, pattern, .. } => {
+            stack.push(WorkItem::Expr(pattern.as_ref()));
+            stack.push(WorkItem::Expr(expr.as_ref()));
+        }
+        Expr::Convert { expr, styles, .. } => {
+            for s in styles.iter().rev() {
+                stack.push(WorkItem::Expr(s));
+            }
+            stack.push(WorkItem::Expr(expr.as_ref()));
+        }
+        Expr::Substring {
+            expr,
+            substring_from,
+            substring_for,
+            ..
+        } => {
+            if let Some(f) = substring_for {
+                stack.push(WorkItem::Expr(f.as_ref()));
+            }
+            if let Some(f) = substring_from {
+                stack.push(WorkItem::Expr(f.as_ref()));
+            }
+            stack.push(WorkItem::Expr(expr.as_ref()));
+        }
+        Expr::Trim {
+            trim_what,
+            expr,
+            trim_characters,
+            ..
+        } => {
+            if let Some(chars) = trim_characters {
+                for c in chars.iter().rev() {
+                    stack.push(WorkItem::Expr(c));
+                }
+            }
+            if let Some(tw) = trim_what {
+                stack.push(WorkItem::Expr(tw.as_ref()));
+            }
+            stack.push(WorkItem::Expr(expr.as_ref()));
+        }
+        Expr::Overlay {
+            expr,
+            overlay_what,
+            overlay_from,
+            overlay_for,
+        } => {
+            if let Some(f) = overlay_for {
+                stack.push(WorkItem::Expr(f.as_ref()));
+            }
+            stack.push(WorkItem::Expr(overlay_from.as_ref()));
+            stack.push(WorkItem::Expr(overlay_what.as_ref()));
+            stack.push(WorkItem::Expr(expr.as_ref()));
+        }
+        Expr::Function(f) => {
+            if let Some(WindowType::WindowSpec(spec)) = &f.over {
+                stack.push(WorkItem::WindowSpec(spec));
+            }
+            for obe in f.within_group.iter().rev() {
+                stack.push(WorkItem::OrderByExpr(obe));
+            }
+            if let Some(filter) = &f.filter {
+                stack.push(WorkItem::Expr(filter.as_ref()));
+            }
+            push_function_args_children(&f.args, stack);
+            push_function_args_children(&f.parameters, stack);
+        }
+        Expr::Case {
+            case_token: _,
+            end_token: _,
+            operand,
+            conditions,
+            else_result,
+        } => {
+            if let Some(el) = else_result {
+                stack.push(WorkItem::Expr(el.as_ref()));
+            }
+            for CaseWhen { condition, result } in conditions.iter().rev() {
+                stack.push(WorkItem::Expr(result));
+                stack.push(WorkItem::Expr(condition));
+            }
+            if let Some(op) = operand {
+                stack.push(WorkItem::Expr(op.as_ref()));
+            }
+        }
+        Expr::Exists { subquery, .. } | Expr::Subquery(subquery) => {
+            stack.push(WorkItem::Query(subquery.as_ref()));
+        }
+        Expr::GroupingSets(groups) | Expr::Cube(groups) | Expr::Rollup(groups) => {
+            for g in groups.iter().rev() {
+                for e in g.iter().rev() {
+                    stack.push(WorkItem::Expr(e));
+                }
+            }
+        }
+        Expr::Tuple(exprs) | Expr::Struct { values: exprs, .. } => {
+            for e in exprs.iter().rev() {
+                stack.push(WorkItem::Expr(e));
+            }
+        }
+        Expr::Dictionary(fields) => {
+            for f in fields.iter().rev() {
+                stack.push(WorkItem::Expr(f.value.as_ref()));
+            }
+        }
+        Expr::Map(map) => {
+            for entry in map.entries.iter().rev() {
+                stack.push(WorkItem::Expr(entry.value.as_ref()));
+                stack.push(WorkItem::Expr(entry.key.as_ref()));
+            }
+        }
+        Expr::Array(arr) => {
+            for e in arr.elem.iter().rev() {
+                stack.push(WorkItem::Expr(e));
+            }
+        }
+        Expr::Interval(iv) => {
+            stack.push(WorkItem::Expr(iv.value.as_ref()));
+        }
+        Expr::Lambda(lf) => {
+            stack.push(WorkItem::Expr(lf.body.as_ref()));
+        }
+        Expr::MemberOf(mo) => {
+            stack.push(WorkItem::Expr(mo.array.as_ref()));
+            stack.push(WorkItem::Expr(mo.value.as_ref()));
+        }
     }
 }
 
 impl Walk<'_> {
-    fn relation(&self, name: &ObjectName) -> ControlFlow<InvalidQuery> {
+    fn relation(&self, name: &ObjectName) -> Result<(), InvalidQuery> {
         let [part] = name.0.as_slice() else {
-            return ControlFlow::Break(InvalidQuery::new(
+            return Err(InvalidQuery::new(
                 "use the view name alone, without catalog or schema",
                 at(name.span()),
             ));
         };
         let ObjectNamePart::Identifier(ident) = part else {
-            return ControlFlow::Break(InvalidQuery::new(
+            return Err(InvalidQuery::new(
                 "table functions are not allowed",
                 at(name.span()),
             ));
@@ -416,9 +1185,9 @@ impl Walk<'_> {
             self.registered.contains(&folded) || self.ctes.contains(ident)
         };
         if known {
-            ControlFlow::Continue(())
+            Ok(())
         } else {
-            ControlFlow::Break(InvalidQuery::new(
+            Err(InvalidQuery::new(
                 format!("unknown table `{}`", ident.value),
                 self.located(ident),
             ))
@@ -439,10 +1208,10 @@ impl Walk<'_> {
     }
 }
 
-fn validate_window_frame(frame: &WindowFrame, span: Span) -> ControlFlow<InvalidQuery> {
+fn validate_window_frame(frame: &WindowFrame, span: Span) -> Result<(), InvalidQuery> {
     match frame.units {
-        WindowFrameUnits::Rows => ControlFlow::Continue(()),
-        WindowFrameUnits::Groups => ControlFlow::Break(InvalidQuery::new(
+        WindowFrameUnits::Rows => Ok(()),
+        WindowFrameUnits::Groups => Err(InvalidQuery::new(
             "GROUPS window frames are not supported",
             at(span),
         )),
@@ -455,12 +1224,12 @@ fn validate_window_frame(frame: &WindowFrame, span: Span) -> ControlFlow<Invalid
                 )
             );
             if !is_default_range {
-                ControlFlow::Break(InvalidQuery::new(
+                Err(InvalidQuery::new(
                     "non-row RANGE window frames are not supported; use ROWS BETWEEN instead",
                     at(span),
                 ))
             } else {
-                ControlFlow::Continue(())
+                Ok(())
             }
         }
     }
@@ -693,5 +1462,72 @@ mod tests {
             union_sql.push_str(" UNION SELECT 1");
         }
         parse_and_validate_sql(&union_sql, &reg).unwrap();
+    }
+
+    #[test]
+    fn exhaustive_nested_containers_table_modifiers_and_qualified_fns_rejected() {
+        let reg = registered();
+        let nested_rejects = [
+            // Unknown table inside CTE, subquery, CASE, FILTER, OVER
+            "WITH bad AS (SELECT * FROM secret_tbl) SELECT * FROM spans",
+            "SELECT (SELECT count(*) FROM secret_tbl) FROM spans",
+            "SELECT * FROM spans WHERE trace_id IN (SELECT trace_id FROM secret_tbl)",
+            "SELECT * FROM spans WHERE EXISTS (SELECT 1 FROM secret_tbl)",
+            "SELECT CASE WHEN EXISTS (SELECT 1 FROM secret_tbl) THEN 1 ELSE 0 END FROM spans",
+            "SELECT count(*) FILTER (WHERE EXISTS (SELECT 1 FROM secret_tbl)) FROM spans",
+            "SELECT sum(duration_ns) OVER (PARTITION BY (SELECT 1 FROM secret_tbl)) FROM spans",
+            // Denied functions inside CTE, CASE, FILTER, OVER, JOIN ON
+            "WITH c AS (SELECT repeat('a', 2) AS x FROM spans) SELECT x FROM c",
+            "SELECT CASE WHEN true THEN levenshtein('a', 'b') ELSE 0 END FROM spans",
+            "SELECT count(*) FILTER (WHERE repeat('x', 2) = 'y') FROM spans",
+            "SELECT sum(duration_ns) OVER (ORDER BY length(repeat('a', 2))) FROM spans",
+            "SELECT * FROM spans a JOIN spans b ON repeat(a.name, 2) = b.name",
+            // score* functions inside nested positions
+            "WITH c AS (SELECT score('x') AS s FROM traces) SELECT s FROM c",
+            "SELECT CASE WHEN score('x') > 0.5 THEN 1 ELSE 0 END FROM traces",
+            "SELECT count(*) FILTER (WHERE has_score('x')) FROM traces",
+            "SELECT count(*) OVER (ORDER BY score_label('x')) FROM traces",
+            // RANGE / GROUPS window frames in OVER and named WINDOW
+            "SELECT sum(duration_ns) OVER (ORDER BY start_time RANGE BETWEEN 1 PRECEDING AND CURRENT ROW) FROM spans",
+            "SELECT sum(duration_ns) OVER (ORDER BY start_time GROUPS BETWEEN 1 PRECEDING AND 1 FOLLOWING) FROM spans",
+            // MAX_TABLES exceeded across CTE + subqueries + joins
+            &format!(
+                "WITH c AS (SELECT 1 FROM {}) SELECT * FROM c CROSS JOIN spans",
+                vec!["spans"; 32].join(" CROSS JOIN ")
+            ),
+            // Qualified function names
+            "SELECT public.lower(name) FROM spans",
+            "SELECT pg_catalog.count(*) FROM spans",
+            "SELECT sum(pg_catalog.abs(duration_ns)) OVER () FROM spans",
+            // TableFactor::Table and Derived modifiers
+            "SELECT * FROM spans TABLESAMPLE BERNOULLI (10)",
+            "SELECT * FROM (SELECT * FROM spans) t TABLESAMPLE SYSTEM (10)",
+            "SELECT * FROM spans WITH (NOLOCK)",
+            "SELECT * FROM spans PARTITION (p0)",
+            "SELECT * FROM spans USE INDEX (idx_name)",
+            "SELECT * FROM spans FOR SYSTEM_TIME AS OF '2026-01-01'",
+        ];
+        for sql in nested_rejects {
+            parse_and_validate_sql(sql, &reg).expect_err(sql);
+        }
+
+        let err = parse_and_validate_sql("SELECT public.lower(name) FROM spans", &reg).unwrap_err();
+        assert_eq!(err.message, "qualified function names are not supported");
+    }
+
+    #[test]
+    fn validates_512_op_binary_and_512_way_union_all_on_2mib_stack() {
+        let reg = registered();
+        let handle = std::thread::Builder::new()
+            .stack_size(2 * 1024 * 1024)
+            .spawn(move || {
+                let expr_512 = format!("SELECT {} FROM spans", vec!["1"; 513].join(" + "));
+                parse_and_validate_sql(&expr_512, &reg).unwrap();
+
+                let union_512 = vec!["SELECT 1 AS x"; 512].join(" UNION ALL ");
+                parse_and_validate_sql(&union_512, &reg).unwrap();
+            })
+            .unwrap();
+        handle.join().unwrap();
     }
 }

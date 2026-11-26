@@ -512,8 +512,12 @@ fn rollback_res(res: Option<&mut Reservation>, before: usize) {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
+    use std::time::{Duration, Instant};
+
     use cetra_column::{
-        Bitmap, Column, DataType, Field, FlatColumn, FlatData, GlobalPool, Schema, Utf8Data,
+        Bitmap, Column, DataType, Field, FlatColumn, FlatData, GlobalPool, ScalarValue, Schema,
+        Utf8Data,
     };
 
     use super::*;
@@ -733,7 +737,7 @@ mod tests {
             time_range: TimeRangeHint::default(),
             id_lookups: Vec::new(),
             substrings: Vec::new(),
-            map_keys: Vec::new(),
+            map_projections: BTreeMap::new(),
             limit: None,
             schema: Arc::clone(&schema),
         };
@@ -881,5 +885,169 @@ mod tests {
         )
         .unwrap();
         assert!(matches!(explain, LogicalPlan::Explain { .. }));
+    }
+
+    #[test]
+    fn stacked_7_level_concat_completes_under_50ms_in_sql_check_and_sql_json() {
+        let (catalog, sources) = sample_catalog_and_sources();
+        let (ctx, _dir) = test_ctx(1024 * 1024);
+        let sql = "\
+            WITH \
+                t0 AS (SELECT label AS a FROM dataset_items), \
+                t1 AS (SELECT a || a AS a FROM t0), \
+                t2 AS (SELECT a || a AS a FROM t1), \
+                t3 AS (SELECT a || a AS a FROM t2), \
+                t4 AS (SELECT a || a AS a FROM t3), \
+                t5 AS (SELECT a || a AS a FROM t4), \
+                t6 AS (SELECT a || a AS a FROM t5), \
+                t7 AS (SELECT a || a AS a FROM t6) \
+            SELECT a FROM t7 WHERE a = 'z'";
+
+        let t_check = Instant::now();
+        let cols = sql_check(&catalog, sql, &Map::new()).unwrap();
+        assert!(
+            t_check.elapsed() < Duration::from_millis(50),
+            "sql_check took {:?}",
+            t_check.elapsed()
+        );
+        assert_eq!(cols.len(), 1);
+        assert_eq!(cols[0].name, "a");
+
+        let t_exec = Instant::now();
+        let res = sql_json(&catalog, &sources, &ctx, sql, &Map::new(), 100).unwrap();
+        assert!(
+            t_exec.elapsed() < Duration::from_millis(50),
+            "sql_json took {:?}",
+            t_exec.elapsed()
+        );
+        assert_eq!(res.rows.len(), 0);
+        assert_eq!(ctx.pool.reserved(), 0);
+    }
+
+    #[test]
+    fn join_div_by_zero_guard_in_sql_json() {
+        let ab_schema = Schema::try_new_arc(vec![
+            Field::new("id", DataType::I64, false),
+            Field::new("x", DataType::I64, false),
+        ])
+        .unwrap();
+        let batch_a = Batch::try_new_all(
+            Arc::clone(&ab_schema),
+            vec![
+                Column::Flat(FlatColumn::try_new(FlatData::I64(vec![1]), None).unwrap()),
+                Column::Flat(FlatColumn::try_new(FlatData::I64(vec![0]), None).unwrap()),
+            ],
+            1,
+        )
+        .unwrap();
+        let batch_b = Batch::try_new_all(
+            Arc::clone(&ab_schema),
+            vec![
+                Column::Flat(FlatColumn::try_new(FlatData::I64(vec![2]), None).unwrap()),
+                Column::Flat(FlatColumn::try_new(FlatData::I64(vec![5]), None).unwrap()),
+            ],
+            1,
+        )
+        .unwrap();
+        let src_a = Arc::new(BatchSource::new(Arc::clone(&ab_schema), vec![batch_a]).unwrap());
+        let src_b = Arc::new(BatchSource::new(ab_schema, vec![batch_b]).unwrap());
+        let mut catalog = SqlCatalog::new(None, None);
+        catalog.register_batch_source("a", src_a).unwrap();
+        catalog.register_batch_source("b", src_b).unwrap();
+        let mut sources = SqlSources::new();
+        sources.register_catalog_batches(&catalog);
+
+        let (ctx, _dir) = test_ctx(1024 * 1024);
+        let sql = "SELECT * FROM (SELECT 100 / a.x AS r FROM a INNER JOIN b ON a.id = b.id AND a.x != 0) t WHERE r > 10";
+        let res = sql_json(&catalog, &sources, &ctx, sql, &Map::new(), 100).unwrap();
+        assert!(res.rows.is_empty());
+        assert_eq!(ctx.pool.reserved(), 0);
+    }
+
+    #[test]
+    fn deep_512_op_and_512_union_all_prepare_on_2mib_stack() {
+        let handle = std::thread::Builder::new()
+            .stack_size(2 * 1024 * 1024)
+            .spawn(|| {
+                let (catalog, _) = sample_catalog_and_sources();
+                let add_512 = format!("SELECT {} AS total", vec!["1"; 513].join(" + "));
+                let plan_add = prepare_sql_plan(&catalog, &add_512, &Map::new()).unwrap();
+                assert_eq!(plan_add.schema().fields()[0].name, "total");
+
+                let union_512 = vec!["SELECT 1 AS x"; 512].join(" UNION ALL ");
+                let plan_union = prepare_sql_plan(&catalog, &union_512, &Map::new()).unwrap();
+                assert_eq!(plan_union.schema().fields()[0].name, "x");
+            })
+            .unwrap();
+        handle.join().unwrap();
+    }
+
+    #[test]
+    fn sessions_duration_ns_is_negative_when_end_before_start() {
+        let raw_traces = crate::sql::catalog::raw_traces_schema();
+        let cols: Vec<Column> = raw_traces
+            .fields()
+            .iter()
+            .map(|f| {
+                let value = match f.name.as_str() {
+                    "project_id" => ScalarValue::Utf8("proj".to_owned()),
+                    "trace_id" => ScalarValue::FixedBytes16([1u8; 16]),
+                    "start_time" => ScalarValue::TimestampNs {
+                        value: 2_000_000_000,
+                        utc: true,
+                    },
+                    "end_time" => ScalarValue::TimestampNs {
+                        value: 1_500_000_000,
+                        utc: true,
+                    },
+                    "name" => ScalarValue::Utf8("t".to_owned()),
+                    "has_root" => ScalarValue::Bool(true),
+                    "status" => ScalarValue::Utf8("ok".to_owned()),
+                    "session_id" => ScalarValue::Utf8("sess-neg".to_owned()),
+                    "tags" | "models" | "prompts" => ScalarValue::List {
+                        values: Vec::new(),
+                        item_type: DataType::Utf8,
+                    },
+                    "metadata" => ScalarValue::MapUtf8(Vec::new()),
+                    "span_count" | "error_count" | "llm_count" | "partial_count" => {
+                        ScalarValue::I64(1)
+                    }
+                    "last_ingest_time" => ScalarValue::TimestampNs {
+                        value: 2_000_000_000,
+                        utc: true,
+                    },
+                    _ => ScalarValue::Null(f.data_type.clone()),
+                };
+                Column::Const { value, len: 1 }
+            })
+            .collect();
+        let batch = Batch::try_new_all(Arc::clone(&raw_traces), cols, 1).unwrap();
+        let traces_src = Arc::new(BatchSource::new(raw_traces, vec![batch]).unwrap());
+
+        let catalog = SqlCatalog::new(None, None);
+        let mut sources = SqlSources::new();
+        sources.register("traces", traces_src);
+
+        let (ctx, _dir) = test_ctx(1024 * 1024);
+        let res = sql_json(
+            &catalog,
+            &sources,
+            &ctx,
+            "SELECT session_id, duration_ns, duration_ms FROM sessions",
+            &Map::new(),
+            10,
+        )
+        .unwrap();
+        assert_eq!(res.rows.len(), 1);
+        assert_eq!(
+            res.rows[0].get("session_id"),
+            Some(&Value::String("sess-neg".to_owned()))
+        );
+        assert_eq!(
+            res.rows[0].get("duration_ns"),
+            Some(&Value::from(-500_000_000i64))
+        );
+        assert_eq!(res.rows[0].get("duration_ms"), Some(&Value::from(-500.0)));
+        assert_eq!(ctx.pool.reserved(), 0);
     }
 }
