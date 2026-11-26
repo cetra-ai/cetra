@@ -1,4 +1,4 @@
-Status: approved (2026-11-25). M1–M2 complete; M3 in progress.
+Status: approved (2026-11-25). M1–M3 complete; M4–M5 in progress (M4, M5, M6 plans approved).
 
 # QE · Custom query engine and columnar format — design
 
