@@ -198,6 +198,13 @@ pub enum MemtableError {
     Arrow(#[source] ArrowError),
 }
 
+impl MemtableError {
+    #[allow(dead_code, clippy::needless_pass_by_value)]
+    pub(crate) fn from_column(err: cetra_column::ColumnError) -> Self {
+        Self::Arrow(ArrowError::ExternalError(Box::new(err)))
+    }
+}
+
 /// A WAL codec, segment, or replay failure.
 ///
 /// Callers outside the WAL map this into [`OpenError`] or [`AppendError`].
@@ -277,6 +284,21 @@ impl WalError {
             action,
             path: path.to_path_buf(),
             source,
+        }
+    }
+
+    #[allow(dead_code, clippy::needless_pass_by_value)]
+    pub(crate) fn from_column(err: cetra_column::ColumnError) -> Self {
+        match err {
+            cetra_column::ColumnError::InvalidFrame { reason }
+            | cetra_column::ColumnError::InvalidBatch { reason }
+            | cetra_column::ColumnError::Overflow { reason } => Self::InvalidPayload { reason },
+            cetra_column::ColumnError::InvalidUtf8 => Self::InvalidPayload {
+                reason: "invalid utf-8 in column data",
+            },
+            cetra_column::ColumnError::MemoryLimit { .. } => Self::InvalidPayload {
+                reason: "memory limit exceeded",
+            },
         }
     }
 }
@@ -701,6 +723,16 @@ impl AnchorError {
     pub(crate) fn parquet(source: parquet::errors::ParquetError) -> Self {
         Self::Parquet(Box::new(source))
     }
+
+    #[allow(dead_code, clippy::needless_pass_by_value)]
+    pub(crate) fn from_column(err: cetra_column::ColumnError) -> Self {
+        Self::Arrow(ArrowError::ExternalError(Box::new(err)))
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn is_store_error(&self) -> bool {
+        matches!(self, Self::Parquet(err) if crate::verify::is_store_error(err))
+    }
 }
 
 /// Building or merging trace partials failed.
@@ -725,6 +757,11 @@ impl PartialsError {
         Self::Column {
             name: name.to_owned(),
         }
+    }
+
+    #[allow(dead_code, clippy::needless_pass_by_value)]
+    pub(crate) fn from_column(err: cetra_column::ColumnError) -> Self {
+        Self::Arrow(ArrowError::ExternalError(Box::new(err)))
     }
 }
 
@@ -946,6 +983,49 @@ mod tests {
         assert!(!text.contains("9f86d081"), "{text}");
         assert_eq!(text, "deleting an orphan: store");
     }
+
+    #[test]
+    fn query_err_to_df_preserves_corrupt_vs_store_vs_resources_exhausted() {
+        use super::{AnchorError, query_err_to_df};
+        use crate::verify::may_be_corrupt;
+        use cetra_query::QueryError;
+
+        let too_large = query_err_to_df(QueryError::TooLarge);
+        assert!(!may_be_corrupt(&too_large));
+        assert_eq!(
+            CompactionError::Read { source: too_large }.read_source(),
+            Some("resources_exhausted")
+        );
+
+        let corrupt = query_err_to_df(QueryError::internal("corrupt parquet file"));
+        assert!(may_be_corrupt(&corrupt));
+        assert_eq!(
+            CompactionError::Read { source: corrupt }.read_source(),
+            Some("parquet")
+        );
+
+        let store = query_err_to_df(QueryError::internal("storage read error"));
+        assert!(!may_be_corrupt(&store));
+        assert_eq!(
+            CompactionError::Read { source: store }.read_source(),
+            Some("external")
+        );
+
+        let anchor_store = AnchorError::parquet(parquet::errors::ParquetError::External(Box::new(
+            object_store::Error::Generic {
+                store: "test",
+                source: "err".into(),
+            },
+        )));
+        assert!(anchor_store.is_store_error());
+        let anchor_missing = AnchorError::parquet(parquet::errors::ParquetError::External(
+            Box::new(object_store::Error::NotFound {
+                path: "x".to_owned(),
+                source: "missing".into(),
+            }),
+        ));
+        assert!(!anchor_missing.is_store_error());
+    }
 }
 
 /// A batch could not be deduplicated. `reason` is a static description, never row content.
@@ -1048,5 +1128,29 @@ impl ParquetWriteError {
         Self::Parquet {
             source: Box::new(source),
         }
+    }
+
+    #[allow(dead_code, clippy::needless_pass_by_value)]
+    pub(crate) fn from_column(err: cetra_column::ColumnError) -> Self {
+        Self::Arrow {
+            source: ArrowError::ExternalError(Box::new(err)),
+        }
+    }
+}
+
+/// Maps a native `cetra_query::QueryError` into a legacy `DataFusionError` while
+/// preserving `may_be_corrupt` and `ResourcesExhausted` until M7 removes DataFusion.
+#[allow(dead_code)]
+pub(crate) fn query_err_to_df(err: cetra_query::QueryError) -> datafusion::error::DataFusionError {
+    match err {
+        cetra_query::QueryError::TooLarge => {
+            datafusion::error::DataFusionError::ResourcesExhausted(err.to_string())
+        }
+        cetra_query::QueryError::Internal(ref msg) if msg == "corrupt parquet file" => {
+            datafusion::error::DataFusionError::ParquetError(Box::new(
+                parquet::errors::ParquetError::General(msg.clone()),
+            ))
+        }
+        other => datafusion::error::DataFusionError::External(Box::new(other)),
     }
 }

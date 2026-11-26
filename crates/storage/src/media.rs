@@ -79,6 +79,12 @@ pub(crate) struct MediaGc {
     pub(crate) hooks: Hooks,
     /// The suspects of the live-set query go here (spec 03 §10).
     pub(crate) verify: Arc<VerifyQueue>,
+    /// Persistent native query runtime (`workers` + `metadata_cache`).
+    #[allow(dead_code)]
+    pub(crate) qe_runtime: Arc<crate::QeRuntime>,
+    /// Tokio runtime handle for async object-store reads from worker threads.
+    #[allow(dead_code)]
+    pub(crate) runtime_handle: tokio::runtime::Handle,
 }
 
 impl std::fmt::Debug for MediaGc {
@@ -88,6 +94,33 @@ impl std::fmt::Debug for MediaGc {
 }
 
 impl MediaGc {
+    /// Constructs a [`MediaGc`] with both legacy DataFusion and native engine handles.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn new(
+        committer: Arc<Committer>,
+        objects: Arc<Objects>,
+        published: Arc<Published>,
+        runtime: Arc<RuntimeEnv>,
+        target_partitions: NonZeroUsize,
+        lookback: i64,
+        hooks: Hooks,
+        verify: Arc<VerifyQueue>,
+        qe_runtime: Arc<crate::QeRuntime>,
+        runtime_handle: tokio::runtime::Handle,
+    ) -> Self {
+        Self {
+            committer,
+            objects,
+            published,
+            runtime,
+            target_partitions,
+            lookback,
+            hooks,
+            verify,
+            qe_runtime,
+            runtime_handle,
+        }
+    }
     /// One project's unreferenced blobs (spec 03 §9): every hash whose row is
     /// stale (`last_seen_at` more than [`MEDIA_GRACE`] before `now`) and that
     /// no `spans` row of the project references. Rows hidden by tombstones

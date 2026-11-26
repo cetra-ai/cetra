@@ -21,6 +21,10 @@ use arrow::array::{
 use arrow::datatypes::{
     DataType, Float64Type, Int32Type, Int64Type, Schema, TimeUnit, TimestampNanosecondType,
 };
+use cetra_column::{
+    Batch, Bitmap, Column as Col, DataType as ColType, FlatColumn, FlatData, MapData, ScalarValue,
+    Selection, Utf8Data,
+};
 use cetra_core::enums::{SpanKind, SpanStatus};
 use cetra_core::ids::TraceId;
 use cetra_core::schema::{spans, spans_schema, traces, traces_schema};
@@ -803,6 +807,630 @@ pub(crate) fn partials_from_spans(spans: &RecordBatch) -> Result<RecordBatch, Pa
     build_batch(&traces, &MergeColumns::all().output)
 }
 
+/// One partial per trace of a [`Batch`] (`spans` schema, one project, any row order,
+/// any [`Col`] encoding, any [`Selection`]). Rows: `traces` columnar schema,
+/// sorted by `(start_time, trace_id)`, `partial_count = 1`.
+pub(crate) fn partials_from_spans_batch(spans: &Batch) -> Result<Batch, PartialsError> {
+    let mut readers: HashMap<&'static str, &Col> = HashMap::new();
+    for name in SPAN_COLUMNS {
+        let col = spans
+            .column_by_name(name)
+            .ok_or_else(|| PartialsError::column(name))?;
+        if !col_matches_span_type(name, &col.data_type()) {
+            return Err(PartialsError::column(name));
+        }
+        readers.insert(name, col);
+    }
+
+    let mut grouped: BTreeMap<[u8; 16], Vec<usize>> = BTreeMap::new();
+    let trace_col = readers
+        .get(spans::TRACE_ID)
+        .copied()
+        .ok_or_else(|| PartialsError::column(spans::TRACE_ID))?;
+    for_each_active_row(spans, |row| {
+        let Some(trace) = read_col_fixed16(trace_col, row) else {
+            return Err(PartialsError::column(spans::TRACE_ID));
+        };
+        grouped.entry(trace).or_default().push(row);
+        Ok(())
+    })?;
+
+    let start_col = readers
+        .get(spans::START_TIME)
+        .copied()
+        .ok_or_else(|| PartialsError::column(spans::START_TIME))?;
+    let span_col = readers
+        .get(spans::SPAN_ID)
+        .copied()
+        .ok_or_else(|| PartialsError::column(spans::SPAN_ID))?;
+    let parent_col = readers
+        .get(spans::PARENT_SPAN_ID)
+        .copied()
+        .ok_or_else(|| PartialsError::column(spans::PARENT_SPAN_ID))?;
+
+    let mut traces: Vec<(TraceId, TraceAcc)> = Vec::with_capacity(grouped.len());
+    for (trace_bytes, rows) in grouped {
+        let trace = TraceId::from_slice(&trace_bytes).map_err(|_| PartialsError::InvalidTraceId)?;
+        let mut ordered: Vec<(usize, i64, [u8; 8])> = Vec::with_capacity(rows.len());
+        for row in &rows {
+            let Some(start) = read_col_ts(start_col, *row) else {
+                return Err(PartialsError::column(spans::START_TIME));
+            };
+            let Some(span) = read_col_fixed8(span_col, *row) else {
+                return Err(PartialsError::column(spans::SPAN_ID));
+            };
+            ordered.push((*row, start, span));
+        }
+        ordered.sort_by_key(|left| (left.1, left.2));
+        let mut chosen_root: Option<[u8; 8]> = None;
+        for (row, _, span) in &ordered {
+            if parent_col.is_null(*row) {
+                chosen_root = Some(*span);
+                break;
+            }
+        }
+        let mut acc = TraceAcc::new();
+        for (row, _, _) in ordered {
+            append_span_col(&mut acc, &readers, row, chosen_root)?;
+        }
+        *acc.slot(Column::PartialCount) = Some(Acc::I32(1));
+        traces.push((trace, acc));
+    }
+    traces.sort_by(|(left_id, left), (right_id, right)| {
+        let time = |acc: &TraceAcc| match acc.values[Column::StartTime.index()] {
+            Some(Acc::I64(value)) => value,
+            _ => 0,
+        };
+        (time(left), left_id.as_bytes()).cmp(&(time(right), right_id.as_bytes()))
+    });
+    build_column_batch(&traces)
+}
+
+fn col_matches_span_type(name: &str, dt: &ColType) -> bool {
+    match name {
+        spans::PROJECT_ID
+        | spans::NAME
+        | spans::SPAN_KIND
+        | spans::STATUS
+        | spans::SESSION_ID
+        | spans::USER_ID
+        | spans::ENVIRONMENT
+        | spans::RELEASE
+        | spans::REQUEST_MODEL
+        | spans::RESPONSE_MODEL
+        | spans::PROMPT_NAME
+        | spans::INPUT_PREVIEW
+        | spans::OUTPUT_PREVIEW => *dt == ColType::Utf8,
+        spans::TRACE_ID => *dt == ColType::FixedBytes16,
+        spans::SPAN_ID | spans::PARENT_SPAN_ID => *dt == ColType::FixedBytes8,
+        spans::START_TIME | spans::END_TIME | spans::INGEST_TIME => {
+            matches!(dt, ColType::TimestampNs { .. })
+        }
+        spans::TAGS => matches!(dt, ColType::List(inner) if **inner == ColType::Utf8),
+        spans::METADATA => *dt == ColType::MapUtf8,
+        spans::PROMPT_VERSION
+        | spans::INPUT_TOKENS
+        | spans::OUTPUT_TOKENS
+        | spans::CACHE_READ_TOKENS
+        | spans::CACHE_WRITE_TOKENS
+        | spans::REASONING_TOKENS
+        | spans::TOTAL_TOKENS => *dt == ColType::I64,
+        spans::COST_TOTAL => *dt == ColType::F64,
+        _ => false,
+    }
+}
+
+fn for_each_active_row(
+    batch: &Batch,
+    mut f: impl FnMut(usize) -> Result<(), PartialsError>,
+) -> Result<(), PartialsError> {
+    let raw_len = batch.raw_len();
+    match batch.selection() {
+        Selection::All => {
+            for row in 0..raw_len {
+                f(row)?;
+            }
+        }
+        Selection::Mask(mask) => {
+            for row in mask.iter_ones() {
+                f(row)?;
+            }
+        }
+        Selection::Indices(indices) => {
+            for &row in indices {
+                f(row as usize)?;
+            }
+        }
+    }
+    Ok(())
+}
+
+fn col_val(
+    readers: &HashMap<&'static str, &Col>,
+    name: &'static str,
+    row: usize,
+) -> Result<Val, PartialsError> {
+    let col = readers
+        .get(name)
+        .copied()
+        .ok_or_else(|| PartialsError::column(name))?;
+    Ok(read_col_val(col, row))
+}
+
+fn append_span_col(
+    acc: &mut TraceAcc,
+    readers: &HashMap<&'static str, &Col>,
+    row: usize,
+    chosen_root: Option<[u8; 8]>,
+) -> Result<(), PartialsError> {
+    let Val::I64(start_time) = col_val(readers, spans::START_TIME, row)? else {
+        return Err(PartialsError::column(spans::START_TIME));
+    };
+    let Val::Bytes(span_id) = col_val(readers, spans::SPAN_ID, row)? else {
+        return Err(PartialsError::column(spans::SPAN_ID));
+    };
+    let root = col_val(readers, spans::PARENT_SPAN_ID, row)? == Val::Null;
+    let chosen = chosen_root.is_some_and(|root_id| root_id.as_slice() == span_id.as_slice());
+    let Val::Str(kind) = col_val(readers, spans::SPAN_KIND, row)? else {
+        return Err(PartialsError::column(spans::SPAN_KIND));
+    };
+    let Val::Str(status) = col_val(readers, spans::STATUS, row)? else {
+        return Err(PartialsError::column(spans::STATUS));
+    };
+    let Val::I64(ingest) = col_val(readers, spans::INGEST_TIME, row)? else {
+        return Err(PartialsError::column(spans::INGEST_TIME));
+    };
+    let ctx = RowCtx {
+        rank: Rank {
+            root: u8::from(!chosen),
+            start_time,
+            tie: Some(span_id.clone()),
+        },
+        root,
+        preview: chosen || kind == SpanKind::Llm.as_str(),
+    };
+
+    for (name, column) in DIRECT {
+        acc.update(*column, col_val(readers, name, row)?, &ctx);
+    }
+    if ctx.preview {
+        for (name, column) in [
+            (spans::INPUT_PREVIEW, Column::InputPreview),
+            (spans::OUTPUT_PREVIEW, Column::OutputPreview),
+        ] {
+            acc.update(column, col_val(readers, name, row)?, &ctx);
+        }
+    }
+    if root {
+        acc.update(Column::Status, Val::Str(status.clone()), &ctx);
+        acc.update(Column::RootSpanId, Val::Bytes(span_id), &ctx);
+    }
+    acc.update(Column::HasRoot, Val::Bool(root), &ctx);
+    let model = match col_val(readers, spans::RESPONSE_MODEL, row)? {
+        Val::Str(model) => Some(model),
+        _ => match col_val(readers, spans::REQUEST_MODEL, row)? {
+            Val::Str(model) => Some(model),
+            _ => None,
+        },
+    };
+    if let Some(model) = model {
+        acc.update(Column::Models, Val::StrList(vec![model]), &ctx);
+    }
+    let prompt_name = match col_val(readers, spans::PROMPT_NAME, row)? {
+        Val::Str(name) => Some(name),
+        _ => None,
+    };
+    let prompt_version = match col_val(readers, spans::PROMPT_VERSION, row)? {
+        Val::I64(version) => Some(version),
+        _ => None,
+    };
+    if let (Some(name), Some(version)) = (prompt_name, prompt_version) {
+        acc.update(
+            Column::Prompts,
+            Val::StrList(vec![format!("{name}@{version}")]),
+            &ctx,
+        );
+    }
+    acc.update(Column::SpanCount, Val::I64(1), &ctx);
+    acc.update(
+        Column::ErrorCount,
+        Val::I64(i64::from(status == SpanStatus::Error.as_str())),
+        &ctx,
+    );
+    acc.update(
+        Column::LlmCount,
+        Val::I64(i64::from(kind == SpanKind::Llm.as_str())),
+        &ctx,
+    );
+    acc.update(Column::LastIngestTime, Val::I64(ingest), &ctx);
+    acc.update(Column::PartialCount, Val::I32(1), &ctx);
+    Ok(())
+}
+
+fn resolve_flat_row(col: &Col, row: usize) -> Option<(&FlatColumn, usize)> {
+    match col {
+        Col::Flat(flat) => (!flat.is_null(row)).then_some((flat, row)),
+        Col::Dict(dict) => {
+            if dict.is_null(row) {
+                return None;
+            }
+            let code = *dict.codes().get(row)? as usize;
+            (!dict.values().is_null(code)).then_some((dict.values(), code))
+        }
+        Col::Rle(rle) => {
+            if row >= rle.len() {
+                return None;
+            }
+            let run = rle.run_ends().partition_point(|&end| (end as usize) <= row);
+            (!rle.values().is_null(run)).then_some((rle.values(), run))
+        }
+        Col::Const { .. } => None,
+    }
+}
+
+fn read_col_fixed16(col: &Col, row: usize) -> Option<[u8; 16]> {
+    if let Col::Const { value, len } = col {
+        return (row < *len).then_some(value).and_then(|v| match v {
+            ScalarValue::FixedBytes16(b) => Some(*b),
+            _ => None,
+        });
+    }
+    let (flat, idx) = resolve_flat_row(col, row)?;
+    match flat.data() {
+        FlatData::FixedBytes16(v) => v.get(idx).copied(),
+        _ => None,
+    }
+}
+
+fn read_col_fixed8(col: &Col, row: usize) -> Option<[u8; 8]> {
+    if let Col::Const { value, len } = col {
+        return (row < *len).then_some(value).and_then(|v| match v {
+            ScalarValue::FixedBytes8(b) => Some(*b),
+            _ => None,
+        });
+    }
+    let (flat, idx) = resolve_flat_row(col, row)?;
+    match flat.data() {
+        FlatData::FixedBytes8(v) => v.get(idx).copied(),
+        _ => None,
+    }
+}
+
+fn read_col_ts(col: &Col, row: usize) -> Option<i64> {
+    if let Col::Const { value, len } = col {
+        return (row < *len).then_some(value).and_then(|v| match v {
+            ScalarValue::TimestampNs { value, .. } => Some(*value),
+            _ => None,
+        });
+    }
+    let (flat, idx) = resolve_flat_row(col, row)?;
+    match flat.data() {
+        FlatData::TimestampNs { values, .. } => values.get(idx).copied(),
+        _ => None,
+    }
+}
+
+fn read_col_str(col: &Col, row: usize) -> Option<&str> {
+    if let Col::Const { value, len } = col {
+        return (row < *len).then_some(value).and_then(|v| match v {
+            ScalarValue::Utf8(s) => Some(s.as_str()),
+            _ => None,
+        });
+    }
+    let (flat, idx) = resolve_flat_row(col, row)?;
+    match flat.data() {
+        FlatData::Utf8(u) => u.get(idx),
+        _ => None,
+    }
+}
+
+fn read_col_val(col: &Col, row: usize) -> Val {
+    if let Col::Const { value, len } = col {
+        if row >= *len || value.is_null() {
+            return Val::Null;
+        }
+        return match value {
+            ScalarValue::Utf8(s) => Val::Str(s.clone()),
+            ScalarValue::FixedBytes8(b) => Val::Bytes(b.to_vec()),
+            ScalarValue::FixedBytes16(b) => Val::Bytes(b.to_vec()),
+            ScalarValue::Bool(b) => Val::Bool(*b),
+            ScalarValue::I64(v) => Val::I64(*v),
+            ScalarValue::F64(v) => Val::F64(*v),
+            ScalarValue::TimestampNs { value, .. } => Val::I64(*value),
+            ScalarValue::List { values, .. } => Val::StrList(
+                values
+                    .iter()
+                    .filter_map(|v| match v {
+                        ScalarValue::Utf8(s) => Some(s.clone()),
+                        _ => None,
+                    })
+                    .collect(),
+            ),
+            ScalarValue::MapUtf8(entries) => Val::StrMap(
+                entries
+                    .iter()
+                    .filter_map(|(k, v)| v.as_ref().map(|val| (k.clone(), val.clone())))
+                    .collect(),
+            ),
+            _ => Val::Null,
+        };
+    }
+    let Some((flat, idx)) = resolve_flat_row(col, row) else {
+        return Val::Null;
+    };
+    match flat.data() {
+        FlatData::Utf8(u) => u.get(idx).map_or(Val::Null, |s| Val::Str(s.to_owned())),
+        FlatData::FixedBytes8(v) => v.get(idx).map_or(Val::Null, |b| Val::Bytes(b.to_vec())),
+        FlatData::FixedBytes16(v) => v.get(idx).map_or(Val::Null, |b| Val::Bytes(b.to_vec())),
+        FlatData::Bool(bm) => {
+            if idx < bm.len() {
+                Val::Bool(bm.get(idx))
+            } else {
+                Val::Null
+            }
+        }
+        FlatData::I64(v) => v.get(idx).copied().map_or(Val::Null, Val::I64),
+        FlatData::F64(v) => v.get(idx).copied().map_or(Val::Null, Val::F64),
+        FlatData::TimestampNs { values, .. } => {
+            values.get(idx).copied().map_or(Val::Null, Val::I64)
+        }
+        FlatData::List {
+            offsets, values, ..
+        } => {
+            let (Some(&start), Some(&end)) = (offsets.get(idx), offsets.get(idx + 1)) else {
+                return Val::Null;
+            };
+            let mut out = Vec::with_capacity((end as usize).saturating_sub(start as usize));
+            for i in (start as usize)..(end as usize) {
+                if let Some(s) = read_col_str(values, i) {
+                    out.push(s.to_owned());
+                }
+            }
+            Val::StrList(out)
+        }
+        FlatData::MapUtf8(map) => {
+            let Some(entries) = map.get(idx) else {
+                return Val::Null;
+            };
+            Val::StrMap(
+                entries
+                    .into_iter()
+                    .filter_map(|(k, v)| v.map(|val| (k, val)))
+                    .collect(),
+            )
+        }
+        _ => Val::Null,
+    }
+}
+
+fn build_column_batch(traces: &[(TraceId, TraceAcc)]) -> Result<Batch, PartialsError> {
+    let schema = crate::catalog::FileTable::Traces.column_schema();
+    let n = traces.len();
+    if n == 0 {
+        return Ok(Batch::empty(schema));
+    }
+    let mut columns = Vec::with_capacity(Column::ALL.len());
+    for column in Column::ALL {
+        columns.push(build_col_column(column, traces)?);
+    }
+    Batch::try_new_all(schema, columns, n).map_err(PartialsError::from_column)
+}
+
+fn opt_nulls(nulls: Bitmap) -> Option<Bitmap> {
+    if nulls.all_ones() { None } else { Some(nulls) }
+}
+
+fn build_col_column(column: Column, traces: &[(TraceId, TraceAcc)]) -> Result<Col, PartialsError> {
+    let n = traces.len();
+    let slot_idx = column.index();
+    let flat = match column {
+        Column::Status => {
+            let vals: Vec<String> = traces.iter().map(|(_, acc)| status_of(acc)).collect();
+            let refs: Vec<&str> = vals.iter().map(String::as_str).collect();
+            let data = Utf8Data::try_from_slices(refs).map_err(PartialsError::from_column)?;
+            FlatColumn::try_new(FlatData::Utf8(data), None).map_err(PartialsError::from_column)?
+        }
+        Column::ProjectId
+        | Column::Name
+        | Column::SessionId
+        | Column::UserId
+        | Column::Environment
+        | Column::Release
+        | Column::InputPreview
+        | Column::OutputPreview => {
+            let mut nulls = Bitmap::new_ones(n);
+            let mut vals = Vec::with_capacity(n);
+            for (i, (_, acc)) in traces.iter().enumerate() {
+                match &acc.values[slot_idx] {
+                    Some(Acc::RankedStr(ranked)) => vals.push(ranked.value.as_str()),
+                    Some(Acc::Str(text)) => vals.push(text.as_str()),
+                    _ => {
+                        let _ = nulls.set(i, false);
+                        vals.push("");
+                    }
+                }
+            }
+            let data = Utf8Data::try_from_slices(vals).map_err(PartialsError::from_column)?;
+            FlatColumn::try_new(FlatData::Utf8(data), opt_nulls(nulls))
+                .map_err(PartialsError::from_column)?
+        }
+        Column::TraceId => {
+            let mut vals = Vec::with_capacity(n);
+            for (trace_id, acc) in traces {
+                if let Some(Acc::Bytes(bytes)) = &acc.values[slot_idx]
+                    && let Ok(arr) = <[u8; 16]>::try_from(bytes.as_slice())
+                {
+                    vals.push(arr);
+                } else {
+                    vals.push(*trace_id.as_bytes());
+                }
+            }
+            FlatColumn::try_new(FlatData::FixedBytes16(vals), None)
+                .map_err(PartialsError::from_column)?
+        }
+        Column::RootSpanId => {
+            let mut nulls = Bitmap::new_ones(n);
+            let mut vals = Vec::with_capacity(n);
+            for (i, (_, acc)) in traces.iter().enumerate() {
+                if let Some(Acc::RankedBytes(ranked)) = &acc.values[slot_idx]
+                    && let Ok(arr) = <[u8; 8]>::try_from(ranked.value.as_slice())
+                {
+                    vals.push(arr);
+                } else {
+                    let _ = nulls.set(i, false);
+                    vals.push([0u8; 8]);
+                }
+            }
+            FlatColumn::try_new(FlatData::FixedBytes8(vals), opt_nulls(nulls))
+                .map_err(PartialsError::from_column)?
+        }
+        Column::HasRoot => {
+            let mut bm = Bitmap::new_zeroed(n);
+            for (i, (_, acc)) in traces.iter().enumerate() {
+                if let Some(Acc::Bool(true)) = &acc.values[slot_idx] {
+                    let _ = bm.set(i, true);
+                }
+            }
+            FlatColumn::try_new(FlatData::Bool(bm), None).map_err(PartialsError::from_column)?
+        }
+        Column::StartTime | Column::EndTime | Column::LastIngestTime => {
+            let mut nulls = Bitmap::new_ones(n);
+            let mut vals = Vec::with_capacity(n);
+            for (i, (_, acc)) in traces.iter().enumerate() {
+                match &acc.values[slot_idx] {
+                    Some(Acc::I64(value)) => vals.push(*value),
+                    _ => {
+                        let _ = nulls.set(i, false);
+                        vals.push(0);
+                    }
+                }
+            }
+            FlatColumn::try_new(
+                FlatData::TimestampNs {
+                    values: vals,
+                    utc: true,
+                },
+                opt_nulls(nulls),
+            )
+            .map_err(PartialsError::from_column)?
+        }
+        Column::SpanCount
+        | Column::ErrorCount
+        | Column::LlmCount
+        | Column::InputTokens
+        | Column::OutputTokens
+        | Column::CacheReadTokens
+        | Column::CacheWriteTokens
+        | Column::ReasoningTokens
+        | Column::TotalTokens => {
+            let mut nulls = Bitmap::new_ones(n);
+            let mut vals = Vec::with_capacity(n);
+            for (i, (_, acc)) in traces.iter().enumerate() {
+                match &acc.values[slot_idx] {
+                    Some(Acc::I64(value)) => vals.push(*value),
+                    _ => {
+                        let _ = nulls.set(i, false);
+                        vals.push(0);
+                    }
+                }
+            }
+            FlatColumn::try_new(FlatData::I64(vals), opt_nulls(nulls))
+                .map_err(PartialsError::from_column)?
+        }
+        Column::PartialCount => {
+            let mut nulls = Bitmap::new_ones(n);
+            let mut vals = Vec::with_capacity(n);
+            for (i, (_, acc)) in traces.iter().enumerate() {
+                match &acc.values[slot_idx] {
+                    Some(Acc::I32(value)) => vals.push(i64::from(*value)),
+                    _ => {
+                        let _ = nulls.set(i, false);
+                        vals.push(0);
+                    }
+                }
+            }
+            FlatColumn::try_new(FlatData::I64(vals), opt_nulls(nulls))
+                .map_err(PartialsError::from_column)?
+        }
+        Column::CostTotal => {
+            let mut nulls = Bitmap::new_ones(n);
+            let mut vals = Vec::with_capacity(n);
+            for (i, (_, acc)) in traces.iter().enumerate() {
+                match &acc.values[slot_idx] {
+                    Some(Acc::Usd(units)) => vals.push(usd_from_units(*units)),
+                    _ => {
+                        let _ = nulls.set(i, false);
+                        vals.push(0.0);
+                    }
+                }
+            }
+            FlatColumn::try_new(FlatData::F64(vals), opt_nulls(nulls))
+                .map_err(PartialsError::from_column)?
+        }
+        Column::Tags | Column::Models | Column::Prompts => {
+            let mut offsets = Vec::with_capacity(n + 1);
+            offsets.push(0u32);
+            let mut items: Vec<&str> = Vec::new();
+            for (_, acc) in traces {
+                if let Some(Acc::StrSet(set)) = &acc.values[slot_idx] {
+                    for s in set {
+                        items.push(s.as_str());
+                    }
+                }
+                let end = u32::try_from(items.len()).map_err(|_| {
+                    PartialsError::from_column(cetra_column::ColumnError::Overflow {
+                        reason: "list items exceed u32::MAX",
+                    })
+                })?;
+                offsets.push(end);
+            }
+            let child = FlatColumn::try_new(
+                FlatData::Utf8(
+                    Utf8Data::try_from_slices(items).map_err(PartialsError::from_column)?,
+                ),
+                None,
+            )
+            .map_err(PartialsError::from_column)?;
+            FlatColumn::try_new(
+                FlatData::List {
+                    item_type: ColType::Utf8,
+                    offsets,
+                    values: Box::new(Col::Flat(child)),
+                },
+                None,
+            )
+            .map_err(PartialsError::from_column)?
+        }
+        Column::Metadata => {
+            let mut offsets = Vec::with_capacity(n + 1);
+            offsets.push(0u32);
+            let mut keys: Vec<&str> = Vec::new();
+            let mut vals: Vec<&str> = Vec::new();
+            for (_, acc) in traces {
+                if let Some(Acc::StrMap(map)) = &acc.values[slot_idx] {
+                    for (k, r) in map {
+                        keys.push(k.as_str());
+                        vals.push(r.value.as_str());
+                    }
+                }
+                let end = u32::try_from(keys.len()).map_err(|_| {
+                    PartialsError::from_column(cetra_column::ColumnError::Overflow {
+                        reason: "map entries exceed u32::MAX",
+                    })
+                })?;
+                offsets.push(end);
+            }
+            let keys_data = Utf8Data::try_from_slices(keys).map_err(PartialsError::from_column)?;
+            let vals_data = Utf8Data::try_from_slices(vals).map_err(PartialsError::from_column)?;
+            let map_data = MapData::try_new(offsets, keys_data, vals_data, None)
+                .map_err(PartialsError::from_column)?;
+            FlatColumn::try_new(FlatData::MapUtf8(Box::new(map_data)), None)
+                .map_err(PartialsError::from_column)?
+        }
+    };
+    Ok(Col::Flat(flat))
+}
+
 /// Spans columns the span-level rules read. Some map straight to a `traces`
 /// column; the rest are handled in [`append_span`].
 const SPAN_COLUMNS: &[&str] = &[
@@ -1146,14 +1774,20 @@ mod tests {
     use arrow::array::{Array, ArrayRef, AsArray, Int32Array, Int64Array, RecordBatch};
     use arrow::compute::{SortColumn, lexsort_to_indices, take_record_batch};
     use arrow::datatypes::{DataType, Field, Float64Type, Schema};
+    use cetra_column::{
+        Batch, Bitmap, Column as Col, DictColumn, FlatColumn, FlatData, RleColumn, ScalarValue,
+        Selection, Utf8Data,
+    };
     use cetra_core::batch::spans_to_record_batch;
     use cetra_core::enums::{SpanKind, SpanStatus};
     use cetra_core::ids::{ProjectId, SpanId, TraceId};
-    use cetra_core::schema::{traces, traces_schema};
+    use cetra_core::schema::{spans, traces, traces_schema};
     use cetra_core::span::Span;
     use proptest::prelude::*;
 
-    use super::{Acc, Column, MergeColumns, TraceMerger, partials_from_spans};
+    use super::{
+        Acc, Column, MergeColumns, TraceMerger, partials_from_spans, partials_from_spans_batch,
+    };
     use crate::error::PartialsError;
     use crate::test_support::{dataset_spans, trace_batch};
 
@@ -1847,7 +2481,7 @@ mod tests {
         let fields: Vec<Field> = names
             .iter()
             .map(|name| {
-                if *name == cetra_core::schema::spans::START_TIME {
+                if *name == spans::START_TIME {
                     Field::new(*name, DataType::Int64, true)
                 } else {
                     good.schema().field_with_name(name).unwrap().clone()
@@ -1857,7 +2491,7 @@ mod tests {
         let columns: Vec<ArrayRef> = names
             .iter()
             .map(|name| {
-                if *name == cetra_core::schema::spans::START_TIME {
+                if *name == spans::START_TIME {
                     Arc::new(Int64Array::from(vec![10_i64])) as ArrayRef
                 } else {
                     Arc::clone(good.column_by_name(name).unwrap())
@@ -1940,5 +2574,94 @@ mod tests {
             let big = project_columns(&full, &subset.output());
             assert_batches_equal(&small, &big);
         }
+    }
+
+    #[test]
+    fn partials_from_spans_batch_matches_arrow_across_encodings_and_selection() {
+        let spans = dataset_spans();
+        let arrow_spans = spans_to_record_batch(&spans).unwrap();
+        let expected_arrow = partials_from_spans(&arrow_spans).unwrap();
+
+        let col_spans = crate::column_bridge::record_batch_to_column(&arrow_spans).unwrap();
+        let actual_col = partials_from_spans_batch(&col_spans).unwrap();
+        let actual_arrow =
+            crate::column_bridge::column_to_record_batch(&actual_col, Some(&traces_schema()))
+                .unwrap();
+        assert_eq!(actual_arrow, expected_arrow);
+
+        // Also test empty selection -> empty Batch.
+        let empty_masked = col_spans
+            .filter_mask(&Bitmap::new_zeroed(col_spans.raw_len()))
+            .unwrap();
+        assert_eq!(
+            partials_from_spans_batch(&empty_masked).unwrap().num_rows(),
+            0
+        );
+
+        // Test Const, Dict, Rle encodings and Selection::Indices on a small spans batch.
+        let mut s1 = base_span(trace_id(1), span_id(1), 100);
+        s1.cost_total = Some(0.1);
+        s1.span_kind = SpanKind::Llm;
+        s1.response_model = Some("gpt-4o".to_owned());
+        s1.tags = vec!["alpha".to_owned()];
+        s1.metadata.insert("k".to_owned(), "v1".to_owned());
+        let mut s2 = base_span(trace_id(1), span_id(2), 200);
+        s2.parent_span_id = Some(span_id(1));
+        s2.cost_total = Some(0.2);
+        s2.tags = vec!["beta".to_owned()];
+        s2.metadata.insert("k".to_owned(), "v2".to_owned());
+        let s3 = base_span(trace_id(2), span_id(3), 50);
+
+        let rb = spans_to_record_batch(&[s1, s2, s3]).unwrap();
+        let base_batch = crate::column_bridge::record_batch_to_column(&rb).unwrap();
+        let schema = Arc::clone(base_batch.schema());
+        let mut cols = base_batch.columns().to_vec();
+
+        // ProjectId -> Const
+        cols[schema.index_of(spans::PROJECT_ID).unwrap()] =
+            Col::try_new_const(ScalarValue::Utf8(project().to_string()), 3).unwrap();
+        // Status -> Dict
+        cols[schema.index_of(spans::STATUS).unwrap()] = Col::Dict(
+            DictColumn::try_new(
+                FlatColumn::try_new(
+                    FlatData::Utf8(Utf8Data::try_from_slices(["unset"]).unwrap()),
+                    None,
+                )
+                .unwrap(),
+                vec![0, 0, 0],
+                None,
+            )
+            .unwrap(),
+        );
+        // CostTotal -> Rle
+        cols[schema.index_of(spans::COST_TOTAL).unwrap()] = Col::Rle(
+            RleColumn::try_new(
+                FlatColumn::try_new(
+                    FlatData::F64(vec![0.1, 0.2]),
+                    Some(Bitmap::from_bools(&[true, true])),
+                )
+                .unwrap(),
+                vec![1, 2, 3][..2].to_vec(),
+            )
+            .unwrap(),
+        );
+        // Wait: 3 rows -> run_ends must end at 3! Use [1, 3] for [0.1, 0.2].
+        cols[schema.index_of(spans::COST_TOTAL).unwrap()] = Col::Rle(
+            RleColumn::try_new(
+                FlatColumn::try_new(FlatData::F64(vec![0.1, 0.2]), None).unwrap(),
+                vec![1, 3],
+            )
+            .unwrap(),
+        );
+
+        let enc_batch = Batch::try_new(schema, cols, 3, Selection::Indices(vec![1, 0])).unwrap();
+        let enc_partials = partials_from_spans_batch(&enc_batch).unwrap();
+        assert_eq!(enc_partials.num_rows(), 1);
+        let cost = enc_partials
+            .column_by_name(traces::COST_TOTAL)
+            .unwrap()
+            .get_scalar(0)
+            .unwrap();
+        assert_eq!(cost, ScalarValue::F64(0.3));
     }
 }

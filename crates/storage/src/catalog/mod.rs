@@ -19,7 +19,7 @@ pub(crate) use db::{check_file_sources, load, load_project_states, load_tombston
 
 use std::collections::BTreeMap;
 use std::ops::RangeInclusive;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use cetra_core::ids::ProjectId;
 use chrono::NaiveDate;
@@ -46,6 +46,25 @@ impl FileTable {
             Self::Traces => "traces",
             Self::Scores => "scores",
         }
+    }
+
+    /// Stored columnar schema of this table, cached for the process lifetime.
+    pub(crate) fn column_schema(self) -> Arc<cetra_column::Schema> {
+        static SPANS: OnceLock<Arc<cetra_column::Schema>> = OnceLock::new();
+        static TRACES: OnceLock<Arc<cetra_column::Schema>> = OnceLock::new();
+        static SCORES: OnceLock<Arc<cetra_column::Schema>> = OnceLock::new();
+        let (slot, arrow) = match self {
+            Self::Spans => (&SPANS, cetra_core::schema::spans_schema()),
+            Self::Traces => (&TRACES, cetra_core::schema::traces_schema()),
+            Self::Scores => (&SCORES, cetra_core::schema::scores_schema()),
+        };
+        Arc::clone(slot.get_or_init(|| {
+            // Infallible: `spans_schema()`, `traces_schema()`, and `scores_schema()` are
+            // static Arrow schemas containing only supported `cetra_column` types.
+            let schema = crate::column_bridge::arrow_schema_to_column(arrow.as_ref())
+                .unwrap_or_else(|err| unreachable!("static table schema conversion failed: {err}"));
+            Arc::new(schema)
+        }))
     }
 }
 
