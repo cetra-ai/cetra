@@ -152,7 +152,8 @@
   2. Mid-plan code review Phases 1–4 (`f4d29e9`)
   3. Phase 5 code review (`c1073e3`)
   4. Optimization Passes 1–3 cold review (`4644a34`)
-  5. Optimization Pass 6 cold review (0 blockers; all 4 majors + 4 minors fixed in Pass 6b)
+  5. Optimization Pass 6 cold review (`36bbe48`; 0 blockers; all 4 majors + 4 minors fixed)
+  6. Optimization Pass 7 / Option C cold review (0 blockers, 0 majors; all 4 minors + tiny-flush gating fixed)
 
 ---
 
@@ -162,5 +163,26 @@
 2. **Sparse Selected Decoding for Point Lookups:** Added sparse-mask decode for `ShreddedMap`, `ShreddedSubCol`, `List`, `Events`, `Links`, and `Plain Utf8/Binary` — slashing `W3_spans` `point_lookup_full` from **`17.70 ms → 5.19 ms` (`3.4×` faster)**, `W2` from `9.48 → 6.92 ms`, `W1` from `24.56 → 18.98 ms`, and `W4` from `8.15 → 5.31 ms`.
 3. **`L0Fast` Write Speed on Wide Structured Tables:** Hoisted bloom hash loops, added `O(1)` `Column::Const` mini-block emission, bypassed nested zone-map scans on `L0Fast`, and aligned `L0Fast` Spans blooms with `pq_cetra` — bringing `L0Fast` to **5/5 Gate 2 PASS** (`1.19×–2.68×` faster than `pq_cetra` across all workloads).
 4. **Zero-Copy `.stpk` Frame Substring Scanning (`scan_chunks_in_frames`) & Opt-In `DictSection`:** Cut `W4` substring search by `1.28×` (`22.7 → 17.8 ms`) and implemented full spec-compliant `PACK_FLAG_HAS_DICT` / `PACK_FRAME_FLAG_USES_DICT` Zstd dictionary support via `ChunkPackBuilder::new_with_dict` (kept opt-in by default so `W1`/`W2` retain optimal `1 MiB`-frame compression and write throughput).
+
+---
+
+## 7. Pass 7 (Option C) — Bounded Multi-Threaded Writer (`write_threads`, `precision-5770-vm`)
+
+Added opt-in `WriteOptions::write_threads` and `PackWriteOptions::write_threads` (default `1`, zero new dependencies via `std::thread::scope`, bounded `<= 32 MiB` queued raw frames, automatic single-threaded inline fast path for tiny flushes `< 1,024` rows). Produces **100% bit-for-bit identical `.statam` and `.stpk` files** across thread counts (`97` unit tests + `2` fuzz-replay tests passing).
+
+| Workload | Format | Stored (KiB) | `1T` (ms) | `8T` (ms) | `20T` (ms) | Speedup (`8T`/`20T`) | vs `pq_cetra` (`1T`) | vs `strata` (`20T`) |
+|---|---|---:|---:|---:|---:|---:|---:|---:|
+| `W1_agents` | `statam_l0` | 39,233.1 | 513.18 | 356.99 | **315.89** | 1.44× / **1.62×** | **2.45× faster** | **1.17× faster** |
+| `W1_agents` | `statam_l1` | 8,486.6 | 522.35 | **364.84** | 367.02 | **1.43×** | **2.12× faster** | **1.01× faster** |
+| `W2_chat_4files` | `statam_l0` | 30,811.2 | 196.08 | 98.92 | **97.04** | 1.98× / **2.02×** | **3.13× faster** | **5.47× faster** |
+| `W2_chat_4files` | `statam_l1` | 15,006.2 | 490.96 | **234.93** | 248.44 | **2.09×** | **1.29× faster** | **2.26× faster** |
+| `W3_spans` | `statam_l0` | 41,431.7 | 397.22 | 133.35 | **128.48** | 2.98× / **3.09×** | **3.77× faster** | **10.66× faster** |
+| `W3_spans` | `statam_l1` | 13,823.3 | 572.39 | **114.84** | 128.97 | **4.98×** | **4.22× faster** | **11.93× faster** |
+| `W3_scores` | `statam_l0` | 12,125.1 | 80.97 | **25.43** | 28.82 | **3.18×** | **4.43× faster** | **16.41× faster** |
+| `W3_scores` | `statam_l1` | 5,266.8 | 131.72 | 45.85 | **35.85** | 2.87× / **3.67×** | **3.15× faster** | **11.64× faster** |
+| `W4_adversarial` | `statam_l0` | 27,432.1 | 41.11 | **29.13** | 31.64 | **1.41×** | **2.44× faster** | **10.81× faster** |
+| `W4_adversarial` | `statam_l1` | 20,117.5 | 132.99 | 66.24 | **62.06** | 2.01× / **2.14×** | **1.15× faster** | **5.08× faster** |
+| `W4_1row_avg` | `statam_l0` | 3.9 | **0.07** | **0.08** | **0.08** | 0 regression | **12.8× faster** | **4.0× faster** |
+| `W4_1row_avg` | `statam_l1` | 4.4 | **0.12** | **0.12** | **0.12** | 0 regression | **8.5× faster** | **2.7× faster** |
 
 **Stage 3 Status:** `crates/storage`, `crates/core`, `crates/column`, and `crates/query` remain **completely untouched** per the Stage 2/Stage 3 gate. Ready for user sign-off on Stage 3 (`cetra-storage` integration).

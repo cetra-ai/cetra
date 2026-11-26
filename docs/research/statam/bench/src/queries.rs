@@ -205,6 +205,7 @@ fn write_statam_files(
     table: TableKindBench,
     batches: &[Batch],
     use_pack: bool,
+    write_threads: usize,
 ) -> BenchResult<(Vec<Bytes>, Option<Bytes>, f64)> {
     let t0 = Instant::now();
     let table_kind = match table {
@@ -216,11 +217,18 @@ fn write_statam_files(
         TableKindBench::Scores => vec![20u16],     // created_at
     };
 
-    let mut pb = use_pack.then(|| ChunkPackBuilder::new(PACK_ID, PackWriteOptions::default()));
+    let mut pack_opts = PackWriteOptions::default();
+    if write_threads > 1 {
+        pack_opts.write_threads = write_threads;
+    }
+    let mut pb = use_pack.then(|| ChunkPackBuilder::new(PACK_ID, pack_opts));
     let mut files = Vec::with_capacity(batches.len());
     for b in batches {
         let mut opts = WriteOptions::for_table(table_kind, profile);
         opts.sort_cols = sort_cols.clone();
+        if write_threads > 1 {
+            opts.write_threads = write_threads;
+        }
         if pb.is_some() {
             opts.pack_id = Some(PACK_ID);
         }
@@ -267,6 +275,7 @@ pub(crate) async fn encode_spans_workload(
     slices: &[&[SpanRow]],
     enabled: &[&str],
     vortex_session: &VortexSession,
+    write_threads: usize,
 ) -> BenchResult<EncodedWorkload> {
     let raw_bytes = spans_raw_bytes(slices);
     let arrow_schema = arrow_spans_schema();
@@ -293,6 +302,7 @@ pub(crate) async fn encode_spans_workload(
         true,
         enabled,
         vortex_session,
+        write_threads,
     )
     .await
 }
@@ -302,6 +312,7 @@ pub(crate) async fn encode_scores_workload(
     rows: &[ScoreRow],
     enabled: &[&str],
     vortex_session: &VortexSession,
+    write_threads: usize,
 ) -> BenchResult<EncodedWorkload> {
     let raw_bytes = scores_raw_bytes(rows);
     let arrow_schema = arrow_scores_schema();
@@ -320,6 +331,7 @@ pub(crate) async fn encode_scores_workload(
         false,
         enabled,
         vortex_session,
+        write_threads,
     )
     .await
 }
@@ -336,6 +348,7 @@ async fn encode_workload_inner(
     l1_use_pack: bool,
     enabled: &[&str],
     vortex_session: &VortexSession,
+    write_threads: usize,
 ) -> BenchResult<EncodedWorkload> {
     let mut write_rows = Vec::new();
 
@@ -413,7 +426,13 @@ async fn encode_workload_inner(
     };
 
     let statam_l0 = if enabled.contains(&"statam_l0") {
-        let (files, _, ms) = write_statam_files(WriteProfile::L0Fast, table, cetra_batches, false)?;
+        let (files, _, ms) = write_statam_files(
+            WriteProfile::L0Fast,
+            table,
+            cetra_batches,
+            false,
+            write_threads,
+        )?;
         write_rows.push(mk_write_row(
             name,
             "statam_l0",
@@ -427,8 +446,13 @@ async fn encode_workload_inner(
     };
 
     let (statam_l1, statam_l1_pack) = if enabled.contains(&"statam_l1") {
-        let (files, pack, ms) =
-            write_statam_files(WriteProfile::L1Compact, table, cetra_batches, l1_use_pack)?;
+        let (files, pack, ms) = write_statam_files(
+            WriteProfile::L1Compact,
+            table,
+            cetra_batches,
+            l1_use_pack,
+            write_threads,
+        )?;
         let total = sum_bytes(&files) + pack.as_ref().map_or(0, |p| p.len() as u64);
         write_rows.push(mk_write_row(name, "statam_l1", raw_bytes, total, ms));
         (files, pack)
@@ -456,6 +480,7 @@ pub(crate) async fn bench_tiny_flushes(
     flushes: &[Vec<SpanRow>],
     enabled: &[&str],
     vortex_session: &VortexSession,
+    write_threads: usize,
 ) -> BenchResult<Vec<WriteBenchRow>> {
     let n = flushes.len() as u64;
     let mut raw_sum = 0u64;
@@ -509,14 +534,24 @@ pub(crate) async fn bench_tiny_flushes(
             ms[4] += st_ms;
         }
         if enabled.contains(&"statam_l0") {
-            let (l0, _, l0_ms) =
-                write_statam_files(WriteProfile::L0Fast, TableKindBench::Spans, &cb, false)?;
+            let (l0, _, l0_ms) = write_statam_files(
+                WriteProfile::L0Fast,
+                TableKindBench::Spans,
+                &cb,
+                false,
+                write_threads,
+            )?;
             sz[5] += l0[0].len() as u64;
             ms[5] += l0_ms;
         }
         if enabled.contains(&"statam_l1") {
-            let (l1, p1, l1_ms) =
-                write_statam_files(WriteProfile::L1Compact, TableKindBench::Spans, &cb, true)?;
+            let (l1, p1, l1_ms) = write_statam_files(
+                WriteProfile::L1Compact,
+                TableKindBench::Spans,
+                &cb,
+                true,
+                write_threads,
+            )?;
             sz[6] += l1[0].len() as u64 + p1.map_or(0, |p| p.len() as u64);
             ms[6] += l1_ms;
         }

@@ -4708,6 +4708,7 @@ mod tests {
             target_frame_raw_bytes: 16 * 1024,
             enable_trigram_skip: true,
             compress_toc_lz4: true,
+            write_threads: 1,
         }
     }
 

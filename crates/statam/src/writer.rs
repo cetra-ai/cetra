@@ -30,6 +30,7 @@ use crate::format::{
     RowGroupEntry, ShreddedMapDir, ShreddedMapKeyEntry, TableKind, encode_schema,
     write_framed_block, write_framed_pack_frame,
 };
+use crate::parallel::{MAX_WRITE_THREADS, parallel_map_in_order};
 use crate::payload::chunker::{
     DedupBypassDetector, INLINE_PAYLOAD_THRESHOLD, chunk_json_array_continuation, chunk_payload,
 };
@@ -56,6 +57,10 @@ const HOT_DICT_MAX_BYTES: usize = 8 * 1024;
 const BLOOM_FPP: f64 = 0.01;
 /// Target uncompressed bytes per L0 local payload `PF` frame (512 KiB).
 const L0_PAYLOAD_FRAME_TARGET_BYTES: usize = 512 * 1024;
+/// Minimum Row Group rows required before spawning parallel RG worker threads.
+const MIN_PARALLEL_RG_ROWS: usize = 1_024;
+/// Maximum total raw bytes queued in `LocalL0PayloadBuilder::pending_frames` before flushing (32 MiB).
+const MAX_PENDING_RAW_BYTES: usize = 32 * 1024 * 1024;
 /// Magic bytes for the local L0 payload directory inside `l0_payload_offset`.
 pub(crate) const L0_PAYLOAD_DIR_MAGIC: [u8; 4] = *b"L0P1";
 /// Magic bytes for a per-block narrow-column trigram section.
@@ -72,6 +77,8 @@ type PrechunkedRefs<'a> = (
 );
 type PayloadPrefixCacheEntry = (usize, usize, Vec<(u16, u32)>);
 type PayloadExactCacheEntry = (usize, Vec<(u16, u32)>);
+type Rg0DictResult = (FileDict, Vec<u32>, Option<cetra_column::Bitmap>);
+type PendingL0Frame = (Vec<u8>, Vec<(u32, u32)>);
 
 /// Tier-1A small Hot Analytics `Core` columns written FIRST at `core_offset`.
 const HOT_ANALYTICS_TIER1_SMALL_COLS: &[&str] = &[
@@ -193,6 +200,8 @@ pub struct WriteOptions {
     pub compress_hot_tail_lz4: bool,
     /// External `.stpk` pack ID when writing `L1Compact` with a [`ChunkPackBuilder`].
     pub pack_id: Option<[u8; 16]>,
+    /// Number of worker threads for parallel Row Group encoding (default: `1`).
+    pub write_threads: usize,
 }
 
 impl Default for WriteOptions {
@@ -257,6 +266,7 @@ impl WriteOptions {
             zstd_level,
             compress_hot_tail_lz4: true,
             pack_id: None,
+            write_threads: 1,
         }
     }
 }
@@ -466,7 +476,8 @@ impl<'a> StatamWriter<'a> {
         };
 
         let num_logical = fields.len();
-        let pending_l0_local = LocalL0PayloadBuilder::new(options.zstd_level);
+        let pending_l0_local =
+            LocalL0PayloadBuilder::new_with_threads(options.zstd_level, options.write_threads);
         Ok(Self {
             schema,
             options,
@@ -1376,36 +1387,79 @@ impl<'a> StatamWriter<'a> {
                 reason: "row_group first_row overflows u32",
             })?;
 
+        // Gate RG-level worker thread spawning on large RGs so tiny/1-row flushes stay 1T.
+        let rg_threads = if rg_rows >= MIN_PARALLEL_RG_ROWS {
+            self.options.write_threads
+        } else {
+            1
+        };
+
         // RG0 initialization: promote ShreddedMap keys (L1Compact) & seed FileDicts
         // BEFORE building RG0 blooms so dict-encoded columns hash only unique dict entries.
         let is_rg0 = !self.rg0_initialized;
         if is_rg0 {
-            self.init_rg0(rg_cols, base_row_off, rg_rows)?;
+            if rg_threads > 1 {
+                self.init_rg0_parallel(rg_cols, base_row_off, rg_rows)?;
+            } else {
+                self.init_rg0(rg_cols, base_row_off, rg_rows)?;
+            }
             self.rg0_initialized = true;
         }
 
         // Build per-RG SBBF bloom filters immediately (never accumulate file-wide Vec<u64>).
-        let bloom_indices: Vec<usize> = self.bloom_col_set.iter().copied().collect();
-        for cidx in bloom_indices {
-            let col_name = self.schema.fields()[cidx].name.as_str();
-            let rg0_dict = if is_rg0 {
-                self.phys_col_meta[cidx].dict.as_deref()
-            } else {
-                None
-            };
-            let (sbbf, had_any) = build_rg_sbbf(
-                &rg_cols[cidx],
-                base_row_off,
-                rg_rows,
-                self.options.profile,
-                col_name,
-                rg0_dict,
-            )?;
-            if had_any {
-                self.bloom_has_values.insert(cidx, true);
+        let mut bloom_indices: Vec<usize> = self.bloom_col_set.iter().copied().collect();
+        bloom_indices.sort_unstable();
+        if rg_threads > 1 && bloom_indices.len() > 1 {
+            let profile = self.options.profile;
+            let schema_ref = &self.schema;
+            let phys_meta_ref = &self.phys_col_meta;
+            let results = parallel_map_in_order(bloom_indices, rg_threads, |cidx| {
+                let col_name = schema_ref.fields()[cidx].name.as_str();
+                let rg0_dict = if is_rg0 {
+                    phys_meta_ref[cidx].dict.as_deref()
+                } else {
+                    None
+                };
+                let (sbbf, had_any) = build_rg_sbbf(
+                    &rg_cols[cidx],
+                    base_row_off,
+                    rg_rows,
+                    profile,
+                    col_name,
+                    rg0_dict,
+                )?;
+                Ok((cidx, sbbf, had_any))
+            })?;
+            for (cidx, sbbf, had_any) in results {
+                if had_any {
+                    self.bloom_has_values.insert(cidx, true);
+                }
+                if let Some(rgs) = self.bloom_rgs.get_mut(&cidx) {
+                    rgs.push(sbbf);
+                }
             }
-            if let Some(rgs) = self.bloom_rgs.get_mut(&cidx) {
-                rgs.push(sbbf);
+        } else {
+            for cidx in bloom_indices {
+                let col_name = self.schema.fields()[cidx].name.as_str();
+                let rg0_dict = if is_rg0 {
+                    self.phys_col_meta[cidx].dict.as_deref()
+                } else {
+                    None
+                };
+                let (sbbf, had_any) = build_rg_sbbf(
+                    &rg_cols[cidx],
+                    base_row_off,
+                    rg_rows,
+                    self.options.profile,
+                    col_name,
+                    rg0_dict,
+                )?;
+                if had_any {
+                    self.bloom_has_values.insert(cidx, true);
+                }
+                if let Some(rgs) = self.bloom_rgs.get_mut(&cidx) {
+                    rgs.push(sbbf);
+                }
             }
         }
 
@@ -1419,7 +1473,7 @@ impl<'a> StatamWriter<'a> {
         let mut wide_buf = Vec::new();
         let mut l0_local_builder = std::mem::replace(
             &mut self.pending_l0_local,
-            LocalL0PayloadBuilder::new(zstd_level),
+            LocalL0PayloadBuilder::new_with_threads(zstd_level, self.options.write_threads),
         );
 
         let core_offset = self.cur_data_offset;
@@ -1427,247 +1481,271 @@ impl<'a> StatamWriter<'a> {
         let schema = Arc::clone(&self.schema);
         let fields = schema.fields();
 
-        // Tier 1A: Small Hot Analytics Core filter/agg columns written FIRST at `core_offset`.
-        for (cidx, rg_col) in rg_cols.iter().enumerate() {
-            if self.logical_locality[cidx] != LocalityGroup::Core {
-                continue;
+        let (core_len, wide_offset) = if rg_threads > 1 {
+            self.encode_rg_columns_parallel(
+                rg_cols,
+                base_row_off,
+                rg_rows,
+                first_row_u32,
+                mb_size,
+                core_offset,
+                preferred_codec,
+                zstd_level,
+                prechunked,
+                &mut core_buf,
+                &mut wide_buf,
+                &mut l0_local_builder,
+            )?
+        } else {
+            // Tier 1A: Small Hot Analytics Core filter/agg columns written FIRST at `core_offset`.
+            for (cidx, rg_col) in rg_cols.iter().enumerate() {
+                if self.logical_locality[cidx] != LocalityGroup::Core {
+                    continue;
+                }
+                if !HOT_ANALYTICS_TIER1_SMALL_COLS.contains(&fields[cidx].name.as_str()) {
+                    continue;
+                }
+                self.encode_rg_scalar_or_nested_col(
+                    cidx,
+                    rg_col,
+                    base_row_off,
+                    rg_rows,
+                    first_row_u32,
+                    mb_size,
+                    core_offset,
+                    zstd_level,
+                    &mut core_buf,
+                )?;
             }
-            if !HOT_ANALYTICS_TIER1_SMALL_COLS.contains(&fields[cidx].name.as_str()) {
-                continue;
+
+            // Tier 1B: Hot timestamp columns immediately before `metadata` shredded sub-columns.
+            for (cidx, rg_col) in rg_cols.iter().enumerate() {
+                if self.logical_locality[cidx] != LocalityGroup::Core {
+                    continue;
+                }
+                if !HOT_ANALYTICS_TIER1_TIME_COLS.contains(&fields[cidx].name.as_str()) {
+                    continue;
+                }
+                self.encode_rg_scalar_or_nested_col(
+                    cidx,
+                    rg_col,
+                    base_row_off,
+                    rg_rows,
+                    first_row_u32,
+                    mb_size,
+                    core_offset,
+                    zstd_level,
+                    &mut core_buf,
+                )?;
             }
-            self.encode_rg_scalar_or_nested_col(
-                cidx,
-                rg_col,
+
+            // Tier 2 (Phase B1): `metadata` shredded sub-columns right inside block #0 (< 1 MiB).
+            let mut deferred_wide_residuals: Vec<(usize, Vec<EncodedMiniBlock>, Vec<u16>)> =
+                Vec::new();
+            self.encode_shredded_maps_group(
+                rg_cols,
                 base_row_off,
                 rg_rows,
                 first_row_u32,
                 mb_size,
                 core_offset,
                 zstd_level,
+                true,
                 &mut core_buf,
+                &mut deferred_wide_residuals,
             )?;
-        }
 
-        // Tier 1B: Hot timestamp columns immediately before `metadata` shredded sub-columns.
-        for (cidx, rg_col) in rg_cols.iter().enumerate() {
-            if self.logical_locality[cidx] != LocalityGroup::Core {
-                continue;
+            // Tier 3a: `trace_id` immediately after `metadata.*`.
+            for (cidx, rg_col) in rg_cols.iter().enumerate() {
+                if self.logical_locality[cidx] != LocalityGroup::Core {
+                    continue;
+                }
+                if fields[cidx].name != "trace_id" {
+                    continue;
+                }
+                self.encode_rg_scalar_or_nested_col(
+                    cidx,
+                    rg_col,
+                    base_row_off,
+                    rg_rows,
+                    first_row_u32,
+                    mb_size,
+                    core_offset,
+                    zstd_level,
+                    &mut core_buf,
+                )?;
             }
-            if !HOT_ANALYTICS_TIER1_TIME_COLS.contains(&fields[cidx].name.as_str()) {
-                continue;
+
+            // Tier 3b: `cost_total` & `total_tokens` after `trace_id` and before `span_id`.
+            for (cidx, rg_col) in rg_cols.iter().enumerate() {
+                if self.logical_locality[cidx] != LocalityGroup::Core {
+                    continue;
+                }
+                if !HOT_ANALYTICS_POST_TRACE_COLS.contains(&fields[cidx].name.as_str()) {
+                    continue;
+                }
+                self.encode_rg_scalar_or_nested_col(
+                    cidx,
+                    rg_col,
+                    base_row_off,
+                    rg_rows,
+                    first_row_u32,
+                    mb_size,
+                    core_offset,
+                    zstd_level,
+                    &mut core_buf,
+                )?;
             }
-            self.encode_rg_scalar_or_nested_col(
-                cidx,
-                rg_col,
+
+            // Tier 3c: Remaining ID Core columns (`span_id`, `score_id`, `parent_span_id`, ...).
+            for (cidx, rg_col) in rg_cols.iter().enumerate() {
+                if self.logical_locality[cidx] != LocalityGroup::Core {
+                    continue;
+                }
+                let name = fields[cidx].name.as_str();
+                if name == "trace_id" || !ID_CORE_COLS.contains(&name) {
+                    continue;
+                }
+                self.encode_rg_scalar_or_nested_col(
+                    cidx,
+                    rg_col,
+                    base_row_off,
+                    rg_rows,
+                    first_row_u32,
+                    mb_size,
+                    core_offset,
+                    zstd_level,
+                    &mut core_buf,
+                )?;
+            }
+
+            // Tier 4: Tier-2 Hot Analytics Core columns (`duration_ns`, `environment`, `provider`, etc.).
+            for (cidx, rg_col) in rg_cols.iter().enumerate() {
+                if self.logical_locality[cidx] != LocalityGroup::Core {
+                    continue;
+                }
+                if !HOT_ANALYTICS_TIER2_COLS.contains(&fields[cidx].name.as_str()) {
+                    continue;
+                }
+                self.encode_rg_scalar_or_nested_col(
+                    cidx,
+                    rg_col,
+                    base_row_off,
+                    rg_rows,
+                    first_row_u32,
+                    mb_size,
+                    core_offset,
+                    zstd_level,
+                    &mut core_buf,
+                )?;
+            }
+
+            // Tier 5 (Phase B2): Remaining shredded sub-columns (`attributes.*`, `resource_attributes.*`).
+            self.encode_shredded_maps_group(
+                rg_cols,
                 base_row_off,
                 rg_rows,
                 first_row_u32,
                 mb_size,
                 core_offset,
                 zstd_level,
+                false,
                 &mut core_buf,
+                &mut deferred_wide_residuals,
             )?;
-        }
 
-        // Tier 2 (Phase B1): `metadata` shredded sub-columns right inside block #0 (< 1 MiB).
-        let mut deferred_wide_residuals: Vec<(usize, Vec<EncodedMiniBlock>, Vec<u16>)> = Vec::new();
-        self.encode_shredded_maps_group(
-            rg_cols,
-            base_row_off,
-            rg_rows,
-            first_row_u32,
-            mb_size,
-            core_offset,
-            zstd_level,
-            true,
-            &mut core_buf,
-            &mut deferred_wide_residuals,
-        )?;
+            // Tier 6: Remaining cold Core columns.
+            for (cidx, rg_col) in rg_cols.iter().enumerate() {
+                if self.logical_locality[cidx] != LocalityGroup::Core {
+                    continue;
+                }
+                let name = fields[cidx].name.as_str();
+                if HOT_ANALYTICS_TIER1_SMALL_COLS.contains(&name)
+                    || HOT_ANALYTICS_TIER1_TIME_COLS.contains(&name)
+                    || HOT_ANALYTICS_POST_TRACE_COLS.contains(&name)
+                    || HOT_ANALYTICS_TIER2_COLS.contains(&name)
+                    || ID_CORE_COLS.contains(&name)
+                {
+                    continue;
+                }
+                self.encode_rg_scalar_or_nested_col(
+                    cidx,
+                    rg_col,
+                    base_row_off,
+                    rg_rows,
+                    first_row_u32,
+                    mb_size,
+                    core_offset,
+                    zstd_level,
+                    &mut core_buf,
+                )?;
+            }
 
-        // Tier 3a: `trace_id` immediately after `metadata.*`.
-        for (cidx, rg_col) in rg_cols.iter().enumerate() {
-            if self.logical_locality[cidx] != LocalityGroup::Core {
-                continue;
-            }
-            if fields[cidx].name != "trace_id" {
-                continue;
-            }
-            self.encode_rg_scalar_or_nested_col(
-                cidx,
-                rg_col,
-                base_row_off,
-                rg_rows,
-                first_row_u32,
-                mb_size,
-                core_offset,
-                zstd_level,
-                &mut core_buf,
-            )?;
-        }
-
-        // Tier 3b: `cost_total` & `total_tokens` after `trace_id` and before `span_id`.
-        for (cidx, rg_col) in rg_cols.iter().enumerate() {
-            if self.logical_locality[cidx] != LocalityGroup::Core {
-                continue;
-            }
-            if !HOT_ANALYTICS_POST_TRACE_COLS.contains(&fields[cidx].name.as_str()) {
-                continue;
-            }
-            self.encode_rg_scalar_or_nested_col(
-                cidx,
-                rg_col,
-                base_row_off,
-                rg_rows,
-                first_row_u32,
-                mb_size,
-                core_offset,
-                zstd_level,
-                &mut core_buf,
-            )?;
-        }
-
-        // Tier 3c: Remaining ID Core columns (`span_id`, `score_id`, `parent_span_id`, ...).
-        for (cidx, rg_col) in rg_cols.iter().enumerate() {
-            if self.logical_locality[cidx] != LocalityGroup::Core {
-                continue;
-            }
-            let name = fields[cidx].name.as_str();
-            if name == "trace_id" || !ID_CORE_COLS.contains(&name) {
-                continue;
-            }
-            self.encode_rg_scalar_or_nested_col(
-                cidx,
-                rg_col,
-                base_row_off,
-                rg_rows,
-                first_row_u32,
-                mb_size,
-                core_offset,
-                zstd_level,
-                &mut core_buf,
-            )?;
-        }
-
-        // Tier 4: Tier-2 Hot Analytics Core columns (`duration_ns`, `environment`, `provider`, etc.).
-        for (cidx, rg_col) in rg_cols.iter().enumerate() {
-            if self.logical_locality[cidx] != LocalityGroup::Core {
-                continue;
-            }
-            if !HOT_ANALYTICS_TIER2_COLS.contains(&fields[cidx].name.as_str()) {
-                continue;
-            }
-            self.encode_rg_scalar_or_nested_col(
-                cidx,
-                rg_col,
-                base_row_off,
-                rg_rows,
-                first_row_u32,
-                mb_size,
-                core_offset,
-                zstd_level,
-                &mut core_buf,
-            )?;
-        }
-
-        // Tier 5 (Phase B2): Remaining shredded sub-columns (`attributes.*`, `resource_attributes.*`).
-        self.encode_shredded_maps_group(
-            rg_cols,
-            base_row_off,
-            rg_rows,
-            first_row_u32,
-            mb_size,
-            core_offset,
-            zstd_level,
-            false,
-            &mut core_buf,
-            &mut deferred_wide_residuals,
-        )?;
-
-        // Tier 6: Remaining cold Core columns.
-        for (cidx, rg_col) in rg_cols.iter().enumerate() {
-            if self.logical_locality[cidx] != LocalityGroup::Core {
-                continue;
-            }
-            let name = fields[cidx].name.as_str();
-            if HOT_ANALYTICS_TIER1_SMALL_COLS.contains(&name)
-                || HOT_ANALYTICS_TIER1_TIME_COLS.contains(&name)
-                || HOT_ANALYTICS_POST_TRACE_COLS.contains(&name)
-                || HOT_ANALYTICS_TIER2_COLS.contains(&name)
-                || ID_CORE_COLS.contains(&name)
-            {
-                continue;
-            }
-            self.encode_rg_scalar_or_nested_col(
-                cidx,
-                rg_col,
-                base_row_off,
-                rg_rows,
-                first_row_u32,
-                mb_size,
-                core_offset,
-                zstd_level,
-                &mut core_buf,
-            )?;
-        }
-
-        let core_len = u32::try_from(core_buf.len()).map_err(|_| StatamError::BoundsExceeded {
-            reason: "row group core_len overflows u32",
-        })?;
-        let wide_offset =
-            core_offset
-                .checked_add(u64::from(core_len))
-                .ok_or(StatamError::BoundsExceeded {
-                    reason: "wide_offset overflow",
+            let core_len =
+                u32::try_from(core_buf.len()).map_err(|_| StatamError::BoundsExceeded {
+                    reason: "row group core_len overflows u32",
                 })?;
+            let wide_offset = core_offset.checked_add(u64::from(core_len)).ok_or(
+                StatamError::BoundsExceeded {
+                    reason: "wide_offset overflow",
+                },
+            )?;
 
-        // Phase C: Write WideRow blocks (regular WideRow cols, deferred shredded residuals, and PayloadRefs).
-        for (logical_col, mb_residuals, mb_row_counts) in deferred_wide_residuals {
-            let mut cur_first = first_row_u32;
-            for (enc, rc) in mb_residuals.iter().zip(mb_row_counts.iter()) {
-                let entry =
-                    enc.write_framed_entry(cur_first, *rc, wide_offset, zstd_level, &mut wide_buf)?;
-                self.phys_blocks[logical_col].push(entry);
-                cur_first += u32::from(*rc);
+            // Phase C: Write WideRow blocks (regular WideRow cols, deferred shredded residuals, and PayloadRefs).
+            for (logical_col, mb_residuals, mb_row_counts) in deferred_wide_residuals {
+                let mut cur_first = first_row_u32;
+                for (enc, rc) in mb_residuals.iter().zip(mb_row_counts.iter()) {
+                    let entry = enc.write_framed_entry(
+                        cur_first,
+                        *rc,
+                        wide_offset,
+                        zstd_level,
+                        &mut wide_buf,
+                    )?;
+                    self.phys_blocks[logical_col].push(entry);
+                    cur_first += u32::from(*rc);
+                }
             }
-        }
 
-        for (cidx, rg_col) in rg_cols.iter().enumerate() {
-            match self.logical_locality[cidx] {
-                LocalityGroup::Core => {}
-                LocalityGroup::WideRow => {
-                    if self.logical_to_shredded.contains_key(&cidx) {
-                        continue;
+            for (cidx, rg_col) in rg_cols.iter().enumerate() {
+                match self.logical_locality[cidx] {
+                    LocalityGroup::Core => {}
+                    LocalityGroup::WideRow => {
+                        if self.logical_to_shredded.contains_key(&cidx) {
+                            continue;
+                        }
+                        self.encode_rg_scalar_or_nested_col(
+                            cidx,
+                            rg_col,
+                            base_row_off,
+                            rg_rows,
+                            first_row_u32,
+                            mb_size,
+                            wide_offset,
+                            zstd_level,
+                            &mut wide_buf,
+                        )?;
                     }
-                    self.encode_rg_scalar_or_nested_col(
-                        cidx,
-                        rg_col,
-                        base_row_off,
-                        rg_rows,
-                        first_row_u32,
-                        mb_size,
-                        wide_offset,
-                        zstd_level,
-                        &mut wide_buf,
-                    )?;
-                }
-                LocalityGroup::ExternalPayload => {
-                    self.encode_rg_payload_col(
-                        cidx,
-                        rg_col,
-                        base_row_off,
-                        rg_rows,
-                        first_row_u32,
-                        mb_size,
-                        wide_offset,
-                        preferred_codec,
-                        zstd_level,
-                        prechunked,
-                        &mut wide_buf,
-                        &mut l0_local_builder,
-                    )?;
+                    LocalityGroup::ExternalPayload => {
+                        self.encode_rg_payload_col(
+                            cidx,
+                            rg_col,
+                            base_row_off,
+                            rg_rows,
+                            first_row_u32,
+                            mb_size,
+                            wide_offset,
+                            preferred_codec,
+                            zstd_level,
+                            prechunked,
+                            &mut wide_buf,
+                            &mut l0_local_builder,
+                        )?;
+                    }
                 }
             }
-        }
+            (core_len, wide_offset)
+        };
 
         let wide_len = u32::try_from(wide_buf.len()).map_err(|_| StatamError::BoundsExceeded {
             reason: "row group wide_len overflows u32",
@@ -1721,6 +1799,383 @@ impl<'a> StatamWriter<'a> {
         self.rg_data_blobs.push(rg_blob);
 
         Ok(())
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn encode_rg_columns_parallel(
+        &mut self,
+        rg_cols: &[Column],
+        base_row_off: usize,
+        rg_rows: usize,
+        first_row_u32: u32,
+        mb_size: usize,
+        core_offset: u64,
+        preferred_codec: Codec,
+        zstd_level: i32,
+        prechunked: Option<PrechunkedRefs<'_>>,
+        core_buf: &mut Vec<u8>,
+        wide_buf: &mut Vec<u8>,
+        l0_local_builder: &mut LocalL0PayloadBuilder,
+    ) -> Result<(u32, u64), StatamError> {
+        let num_logical = self.schema.len();
+        let num_shredded = self.shredded_maps.len();
+        let mut rg0_codes_map = std::mem::take(&mut self.rg0_dict_codes);
+
+        enum RgEncodeTask {
+            ShreddedMap(usize),
+            ScalarOrNested {
+                cidx: usize,
+                precomputed_rg0: Option<(Vec<u32>, Option<cetra_column::Bitmap>)>,
+            },
+        }
+
+        enum RgEncodeResult {
+            ShreddedMap(usize, EncodedShreddedMap),
+            ScalarOrNested(usize, EncodedScalarCol),
+        }
+
+        // Schedule heaviest tasks (shredded maps + WideRow cols) before small Core cols.
+        let mut tasks = Vec::with_capacity(num_shredded + num_logical);
+        for s_idx in 0..num_shredded {
+            tasks.push(RgEncodeTask::ShreddedMap(s_idx));
+        }
+        for cidx in 0..num_logical {
+            if self.logical_locality[cidx] == LocalityGroup::WideRow
+                && !self.logical_to_shredded.contains_key(&cidx)
+            {
+                tasks.push(RgEncodeTask::ScalarOrNested {
+                    cidx,
+                    precomputed_rg0: rg0_codes_map.remove(&cidx),
+                });
+            }
+        }
+        for cidx in 0..num_logical {
+            if self.logical_locality[cidx] == LocalityGroup::Core {
+                tasks.push(RgEncodeTask::ScalarOrNested {
+                    cidx,
+                    precomputed_rg0: rg0_codes_map.remove(&cidx),
+                });
+            }
+        }
+
+        let schema_ref = &self.schema;
+        let logical_locality = &self.logical_locality;
+        let phys_col_meta = &self.phys_col_meta;
+        let narrow_trigram_col_set = &self.narrow_trigram_col_set;
+        let shredded_maps = &self.shredded_maps;
+        let profile = self.options.profile;
+
+        let encoded =
+            parallel_map_in_order(tasks, self.options.write_threads, |task| match task {
+                RgEncodeTask::ShreddedMap(s_idx) => {
+                    let sm = &shredded_maps[s_idx];
+                    let logical_col = sm.logical_col_idx as usize;
+                    let is_metadata = schema_ref.fields()[logical_col].name == "metadata";
+                    let res = encode_shredded_map_to_local(
+                        sm,
+                        is_metadata,
+                        &rg_cols[logical_col],
+                        base_row_off,
+                        rg_rows,
+                        first_row_u32,
+                        mb_size,
+                        profile,
+                        zstd_level,
+                    )?;
+                    Ok(RgEncodeResult::ShreddedMap(s_idx, res))
+                }
+                RgEncodeTask::ScalarOrNested {
+                    cidx,
+                    precomputed_rg0,
+                } => {
+                    let dt = &schema_ref.fields()[cidx].data_type;
+                    let is_wide_row = logical_locality[cidx] == LocalityGroup::WideRow;
+                    let dict = phys_col_meta[cidx].dict.as_deref();
+                    let track_trigram = narrow_trigram_col_set.contains(&cidx);
+                    let mut local_buf = Vec::new();
+                    let mut blocks = Vec::new();
+                    let mut local_tris = Vec::new();
+                    let (used_dict_encoding, has_non_dict_data_block, null_count_total) =
+                        encode_scalar_or_nested_col_into(
+                            &rg_cols[cidx],
+                            dt,
+                            profile,
+                            is_wide_row,
+                            dict,
+                            precomputed_rg0,
+                            base_row_off,
+                            rg_rows,
+                            first_row_u32,
+                            mb_size,
+                            0,
+                            zstd_level,
+                            &mut local_buf,
+                            &mut blocks,
+                            track_trigram.then_some(&mut local_tris),
+                        )?;
+                    Ok(RgEncodeResult::ScalarOrNested(
+                        cidx,
+                        EncodedScalarCol {
+                            local_buf,
+                            blocks,
+                            used_dict_encoding,
+                            has_non_dict_data_block,
+                            null_count_total,
+                            narrow_trigrams: track_trigram.then_some(local_tris),
+                        },
+                    ))
+                }
+            })?;
+
+        let mut col_results: Vec<Option<EncodedScalarCol>> =
+            (0..num_logical).map(|_| None).collect();
+        let mut shred_results: Vec<Option<EncodedShreddedMap>> =
+            (0..num_shredded).map(|_| None).collect();
+        for item in encoded {
+            match item {
+                RgEncodeResult::ScalarOrNested(cidx, res) => {
+                    col_results[cidx] = Some(res);
+                }
+                RgEncodeResult::ShreddedMap(s_idx, res) => {
+                    shred_results[s_idx] = Some(res);
+                }
+            }
+        }
+
+        let commit_core_col = |cidx: usize,
+                               col_results: &mut [Option<EncodedScalarCol>],
+                               phys_col_meta: &mut [PhysColWriteState],
+                               phys_blocks: &mut [Vec<BlockEntry>],
+                               narrow_trigrams: &mut HashMap<usize, Vec<Option<Vec<u8>>>>,
+                               core_buf: &mut Vec<u8>|
+         -> Result<(), StatamError> {
+            if let Some(res) = col_results[cidx].take() {
+                commit_scalar_col_result(
+                    phys_col_meta,
+                    phys_blocks,
+                    narrow_trigrams,
+                    cidx,
+                    res,
+                    core_offset,
+                    core_buf,
+                )?;
+            }
+            Ok(())
+        };
+
+        let schema = Arc::clone(&self.schema);
+        let fields = schema.fields();
+
+        // Tier 1A
+        for (cidx, field) in fields.iter().enumerate() {
+            if self.logical_locality[cidx] == LocalityGroup::Core
+                && HOT_ANALYTICS_TIER1_SMALL_COLS.contains(&field.name.as_str())
+            {
+                commit_core_col(
+                    cidx,
+                    &mut col_results,
+                    &mut self.phys_col_meta,
+                    &mut self.phys_blocks,
+                    &mut self.narrow_trigrams,
+                    core_buf,
+                )?;
+            }
+        }
+        // Tier 1B
+        for (cidx, field) in fields.iter().enumerate() {
+            if self.logical_locality[cidx] == LocalityGroup::Core
+                && HOT_ANALYTICS_TIER1_TIME_COLS.contains(&field.name.as_str())
+            {
+                commit_core_col(
+                    cidx,
+                    &mut col_results,
+                    &mut self.phys_col_meta,
+                    &mut self.phys_blocks,
+                    &mut self.narrow_trigrams,
+                    core_buf,
+                )?;
+            }
+        }
+        // Tier 2 (Phase B1): `metadata` shredded sub-columns
+        for (sm, slot) in self.shredded_maps.iter_mut().zip(shred_results.iter_mut()) {
+            if let Some(shred) = slot.as_mut()
+                && shred.is_metadata
+            {
+                commit_shredded_subcols(sm, &mut self.phys_blocks, shred, core_offset, core_buf)?;
+            }
+        }
+        // Tier 3a: `trace_id`
+        for (cidx, field) in fields.iter().enumerate() {
+            if self.logical_locality[cidx] == LocalityGroup::Core && field.name == "trace_id" {
+                commit_core_col(
+                    cidx,
+                    &mut col_results,
+                    &mut self.phys_col_meta,
+                    &mut self.phys_blocks,
+                    &mut self.narrow_trigrams,
+                    core_buf,
+                )?;
+            }
+        }
+        // Tier 3b: `cost_total` & `total_tokens`
+        for (cidx, field) in fields.iter().enumerate() {
+            if self.logical_locality[cidx] == LocalityGroup::Core
+                && HOT_ANALYTICS_POST_TRACE_COLS.contains(&field.name.as_str())
+            {
+                commit_core_col(
+                    cidx,
+                    &mut col_results,
+                    &mut self.phys_col_meta,
+                    &mut self.phys_blocks,
+                    &mut self.narrow_trigrams,
+                    core_buf,
+                )?;
+            }
+        }
+        // Tier 3c: Remaining ID Core columns
+        for (cidx, field) in fields.iter().enumerate() {
+            let name = field.name.as_str();
+            if self.logical_locality[cidx] == LocalityGroup::Core
+                && name != "trace_id"
+                && ID_CORE_COLS.contains(&name)
+            {
+                commit_core_col(
+                    cidx,
+                    &mut col_results,
+                    &mut self.phys_col_meta,
+                    &mut self.phys_blocks,
+                    &mut self.narrow_trigrams,
+                    core_buf,
+                )?;
+            }
+        }
+        // Tier 4: Tier-2 Hot Analytics Core columns
+        for (cidx, field) in fields.iter().enumerate() {
+            if self.logical_locality[cidx] == LocalityGroup::Core
+                && HOT_ANALYTICS_TIER2_COLS.contains(&field.name.as_str())
+            {
+                commit_core_col(
+                    cidx,
+                    &mut col_results,
+                    &mut self.phys_col_meta,
+                    &mut self.phys_blocks,
+                    &mut self.narrow_trigrams,
+                    core_buf,
+                )?;
+            }
+        }
+        // Tier 5 (Phase B2): Remaining shredded sub-columns
+        for (sm, slot) in self.shredded_maps.iter_mut().zip(shred_results.iter_mut()) {
+            if let Some(shred) = slot.as_mut()
+                && !shred.is_metadata
+            {
+                commit_shredded_subcols(sm, &mut self.phys_blocks, shred, core_offset, core_buf)?;
+            }
+        }
+        // Tier 6: Remaining cold Core columns
+        for (cidx, field) in fields.iter().enumerate() {
+            if self.logical_locality[cidx] != LocalityGroup::Core {
+                continue;
+            }
+            let name = field.name.as_str();
+            if HOT_ANALYTICS_TIER1_SMALL_COLS.contains(&name)
+                || HOT_ANALYTICS_TIER1_TIME_COLS.contains(&name)
+                || HOT_ANALYTICS_POST_TRACE_COLS.contains(&name)
+                || HOT_ANALYTICS_TIER2_COLS.contains(&name)
+                || ID_CORE_COLS.contains(&name)
+            {
+                continue;
+            }
+            commit_core_col(
+                cidx,
+                &mut col_results,
+                &mut self.phys_col_meta,
+                &mut self.phys_blocks,
+                &mut self.narrow_trigrams,
+                core_buf,
+            )?;
+        }
+
+        let core_len = u32::try_from(core_buf.len()).map_err(|_| StatamError::BoundsExceeded {
+            reason: "row group core_len overflows u32",
+        })?;
+        let wide_offset =
+            core_offset
+                .checked_add(u64::from(core_len))
+                .ok_or(StatamError::BoundsExceeded {
+                    reason: "wide_offset overflow",
+                })?;
+
+        // Phase C: Deferred shredded map residuals (B1 then B2), then WideRow & ExternalPayload in cidx order.
+        for slot in &mut shred_results {
+            if slot.as_ref().is_some_and(|s| s.is_metadata)
+                && let Some(shred) = slot.take()
+            {
+                self.phys_col_meta[shred.logical_col].null_count_total = self.phys_col_meta
+                    [shred.logical_col]
+                    .null_count_total
+                    .saturating_add(shred.res_null_count_total);
+                append_col_blocks(
+                    wide_buf,
+                    wide_offset,
+                    &shred.local_wide_buf,
+                    shred.residual_blocks,
+                    &mut self.phys_blocks[shred.logical_col],
+                )?;
+            }
+        }
+        for slot in &mut shred_results {
+            if let Some(shred) = slot.take() {
+                self.phys_col_meta[shred.logical_col].null_count_total = self.phys_col_meta
+                    [shred.logical_col]
+                    .null_count_total
+                    .saturating_add(shred.res_null_count_total);
+                append_col_blocks(
+                    wide_buf,
+                    wide_offset,
+                    &shred.local_wide_buf,
+                    shred.residual_blocks,
+                    &mut self.phys_blocks[shred.logical_col],
+                )?;
+            }
+        }
+
+        for (cidx, rg_col) in rg_cols.iter().enumerate() {
+            match self.logical_locality[cidx] {
+                LocalityGroup::Core => {}
+                LocalityGroup::WideRow => {
+                    if let Some(res) = col_results[cidx].take() {
+                        commit_scalar_col_result(
+                            &mut self.phys_col_meta,
+                            &mut self.phys_blocks,
+                            &mut self.narrow_trigrams,
+                            cidx,
+                            res,
+                            wide_offset,
+                            wide_buf,
+                        )?;
+                    }
+                }
+                LocalityGroup::ExternalPayload => {
+                    self.encode_rg_payload_col(
+                        cidx,
+                        rg_col,
+                        base_row_off,
+                        rg_rows,
+                        first_row_u32,
+                        mb_size,
+                        wide_offset,
+                        preferred_codec,
+                        zstd_level,
+                        prechunked,
+                        wide_buf,
+                        l0_local_builder,
+                    )?;
+                }
+            }
+        }
+
+        Ok((core_len, wide_offset))
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -1833,7 +2288,8 @@ impl<'a> StatamWriter<'a> {
         base_row_off: usize,
         rg_rows: usize,
     ) -> Result<(), StatamError> {
-        let fields = self.schema.fields();
+        let schema = Arc::clone(&self.schema);
+        let fields = schema.fields();
 
         // 1. Shredded maps in L1Compact.
         if self.options.profile == WriteProfile::L1Compact {
@@ -1841,134 +2297,152 @@ impl<'a> StatamWriter<'a> {
                 if field.data_type != DataType::MapUtf8 {
                     continue;
                 }
-                let sliced_owned;
-                let col_ref = if base_row_off == 0 && rg_rows == rg_cols[cidx].len() {
-                    &rg_cols[cidx]
-                } else {
-                    sliced_owned = rg_cols[cidx].slice(base_row_off, rg_rows)?;
-                    &sliced_owned
-                };
-                let flat = as_flat_cow(col_ref)?;
-                let FlatData::MapUtf8(map) = flat.data() else {
-                    continue;
-                };
-                let promoted = select_shredded_keys(map);
+                let promoted = extract_rg0_shredded_keys(&rg_cols[cidx], base_row_off, rg_rows)?;
                 if promoted.is_empty() {
                     continue;
                 }
-
-                let mut key_entries = Vec::with_capacity(promoted.len());
-                for key in promoted {
-                    let sub_idx = self.phys_col_meta.len();
-                    if sub_idx >= MAX_COLUMNS {
-                        return Err(StatamError::BoundsExceeded {
-                            reason: "physical column count with shredded maps exceeds MAX_COLUMNS",
-                        });
-                    }
-                    let sub_u16 = sub_idx as u16;
-                    self.phys_col_meta.push(PhysColWriteState {
-                        phys_col_id: sub_u16,
-                        logical_col_id: cidx as u16,
-                        locality_group: LocalityGroup::Core,
-                        is_shredded_subcol: true,
-                        is_payload_refs: false,
-                        dict: None,
-                        used_dict_encoding: false,
-                        has_non_dict_data_block: false,
-                        null_count_total: 0,
-                    });
-                    self.phys_blocks.push(Vec::new());
-                    key_entries.push(ShreddedMapKeyEntry {
-                        key,
-                        sub_col_idx: sub_u16,
-                        residual_count: 0,
-                    });
-                }
-
-                let sm_idx = self.shredded_maps.len();
-                self.shredded_maps.push(ShreddedMapDir {
-                    logical_col_idx: cidx as u16,
-                    keys: key_entries,
-                });
-                self.logical_to_shredded.insert(cidx, sm_idx);
+                self.register_shredded_map(cidx, promoted)?;
             }
         }
 
         // 2. Seed file-level dictionaries from RG0 on low-cardinality columns.
         for (cidx, field) in fields.iter().enumerate() {
-            if self.logical_locality[cidx] == LocalityGroup::ExternalPayload {
+            if !is_rg0_dict_candidate(field, self.logical_locality[cidx], self.options.profile) {
                 continue;
             }
-            if DictValueKind::from_data_type(&field.data_type).is_none() {
-                continue;
-            }
-            if HIGH_CARDINALITY_ID_COLS.contains(&field.name.as_str()) {
-                continue;
-            }
-            if self.options.profile == WriteProfile::L0Fast
-                && (!KNOWN_LOW_CARD_DICT_COLS.contains(&field.name.as_str())
-                    || matches!(field.name.as_str(), "session_id" | "user_id"))
-            {
-                continue;
-            }
-            let sliced_owned;
-            let col_ref = if base_row_off == 0 && rg_rows == rg_cols[cidx].len() {
-                &rg_cols[cidx]
-            } else {
-                sliced_owned = rg_cols[cidx].slice(base_row_off, rg_rows)?;
-                &sliced_owned
-            };
-            let flat = as_flat_cow(col_ref)?;
-            let is_known_low_card = KNOWN_LOW_CARD_DICT_COLS.contains(&field.name.as_str());
-            let is_core = self.logical_locality[cidx] == LocalityGroup::Core;
-            let is_wide_non_known =
-                self.logical_locality[cidx] == LocalityGroup::WideRow && !is_known_low_card;
-            let max_entries = match self.options.profile {
-                WriteProfile::L0Fast => 512,
-                WriteProfile::L1Compact => {
-                    if is_known_low_card || is_core {
-                        16_384
-                    } else if is_wide_non_known {
-                        1_024
-                    } else {
-                        4_096
-                    }
-                }
-            };
-            let builder = match self.options.profile {
-                WriteProfile::L0Fast => DictBuilder::l0_with_max(max_entries),
-                WriteProfile::L1Compact => DictBuilder::l1_with_max(max_entries),
-            };
-            let Some((dict, codes)) = builder.build(&flat)? else {
-                continue;
-            };
-            if is_wide_non_known
-                && (dict.len() > 1_024 || dict.memory_bytes() > DICT_PASSTHROUGH_MAX_BYTES)
-            {
-                continue;
-            }
-            let non_null_rows = flat
-                .len()
-                .saturating_sub(flat.nulls().map_or(0, |bm| bm.count_zeros()));
-            let ratio_den = if dict.len() > 4_096 { 4 } else { 2 };
-            let low_ndv = if is_known_low_card {
-                dict.len() <= max_entries
-                    && (non_null_rows < 16 || dict.len() * ratio_den <= non_null_rows + 4)
-            } else {
-                dict.len() <= max_entries
-                    && ((non_null_rows >= 16 && dict.len() * ratio_den <= non_null_rows)
-                        || dict.len() <= 8)
-            };
-            if low_ndv {
+            if let Some((dict, codes, nulls)) = eval_rg0_dict_candidate(
+                &rg_cols[cidx],
+                field.name.as_str(),
+                self.logical_locality[cidx],
+                self.options.profile,
+                base_row_off,
+                rg_rows,
+            )? {
                 let dict_len = dict.len();
                 self.phys_col_meta[cidx].dict = Some(Arc::new(dict));
                 if dict_len >= 2 {
-                    self.rg0_dict_codes
-                        .insert(cidx, (codes, flat.nulls().cloned()));
+                    self.rg0_dict_codes.insert(cidx, (codes, nulls));
                 }
             }
         }
 
+        Ok(())
+    }
+
+    fn init_rg0_parallel(
+        &mut self,
+        rg_cols: &[Column],
+        base_row_off: usize,
+        rg_rows: usize,
+    ) -> Result<(), StatamError> {
+        enum Rg0InitTask {
+            ShreddedMap(usize),
+            DictCandidate(usize),
+        }
+
+        enum Rg0InitResult {
+            ShreddedMap(usize, Vec<String>),
+            DictCandidate(usize, Option<Rg0DictResult>),
+        }
+
+        let schema = Arc::clone(&self.schema);
+        let fields = schema.fields();
+        let mut tasks = Vec::new();
+        if self.options.profile == WriteProfile::L1Compact {
+            for (cidx, field) in fields.iter().enumerate() {
+                if field.data_type == DataType::MapUtf8 {
+                    tasks.push(Rg0InitTask::ShreddedMap(cidx));
+                }
+            }
+        }
+        for (cidx, field) in fields.iter().enumerate() {
+            if is_rg0_dict_candidate(field, self.logical_locality[cidx], self.options.profile) {
+                tasks.push(Rg0InitTask::DictCandidate(cidx));
+            }
+        }
+
+        let profile = self.options.profile;
+        let logical_locality = &self.logical_locality;
+        let results =
+            parallel_map_in_order(tasks, self.options.write_threads, |task| match task {
+                Rg0InitTask::ShreddedMap(cidx) => {
+                    let promoted =
+                        extract_rg0_shredded_keys(&rg_cols[cidx], base_row_off, rg_rows)?;
+                    Ok(Rg0InitResult::ShreddedMap(cidx, promoted))
+                }
+                Rg0InitTask::DictCandidate(cidx) => {
+                    let res = eval_rg0_dict_candidate(
+                        &rg_cols[cidx],
+                        fields[cidx].name.as_str(),
+                        logical_locality[cidx],
+                        profile,
+                        base_row_off,
+                        rg_rows,
+                    )?;
+                    Ok(Rg0InitResult::DictCandidate(cidx, res))
+                }
+            })?;
+
+        for res in results {
+            match res {
+                Rg0InitResult::ShreddedMap(cidx, promoted) => {
+                    if !promoted.is_empty() {
+                        self.register_shredded_map(cidx, promoted)?;
+                    }
+                }
+                Rg0InitResult::DictCandidate(cidx, Some((dict, codes, nulls))) => {
+                    let dict_len = dict.len();
+                    self.phys_col_meta[cidx].dict = Some(Arc::new(dict));
+                    if dict_len >= 2 {
+                        self.rg0_dict_codes.insert(cidx, (codes, nulls));
+                    }
+                }
+                Rg0InitResult::DictCandidate(_, None) => {}
+            }
+        }
+
+        Ok(())
+    }
+
+    fn register_shredded_map(
+        &mut self,
+        cidx: usize,
+        promoted: Vec<String>,
+    ) -> Result<(), StatamError> {
+        let mut key_entries = Vec::with_capacity(promoted.len());
+        for key in promoted {
+            let sub_idx = self.phys_col_meta.len();
+            if sub_idx >= MAX_COLUMNS {
+                return Err(StatamError::BoundsExceeded {
+                    reason: "physical column count with shredded maps exceeds MAX_COLUMNS",
+                });
+            }
+            let sub_u16 = sub_idx as u16;
+            self.phys_col_meta.push(PhysColWriteState {
+                phys_col_id: sub_u16,
+                logical_col_id: cidx as u16,
+                locality_group: LocalityGroup::Core,
+                is_shredded_subcol: true,
+                is_payload_refs: false,
+                dict: None,
+                used_dict_encoding: false,
+                has_non_dict_data_block: false,
+                null_count_total: 0,
+            });
+            self.phys_blocks.push(Vec::new());
+            key_entries.push(ShreddedMapKeyEntry {
+                key,
+                sub_col_idx: sub_u16,
+                residual_count: 0,
+            });
+        }
+
+        let sm_idx = self.shredded_maps.len();
+        self.shredded_maps.push(ShreddedMapDir {
+            logical_col_idx: cidx as u16,
+            keys: key_entries,
+        });
+        self.logical_to_shredded.insert(cidx, sm_idx);
         Ok(())
     }
 
@@ -1986,213 +2460,36 @@ impl<'a> StatamWriter<'a> {
         out_buf: &mut Vec<u8>,
     ) -> Result<(), StatamError> {
         let dt = self.schema.fields()[cidx].data_type.clone();
-        let track_trigram = self.narrow_trigram_col_set.contains(&cidx);
         let precomputed_rg0 = self.rg0_dict_codes.remove(&cidx);
-        let precomputed_rg_n = if precomputed_rg0.is_none()
-            && rg_rows >= 256
-            && let Some(dict) = self.phys_col_meta[cidx].dict.as_deref()
-        {
-            let rg_slice_owned;
-            let rg_slice = if base_row_off == 0 && rg_rows == col.len() {
-                col
-            } else {
-                rg_slice_owned = col.slice(base_row_off, rg_rows)?;
-                &rg_slice_owned
-            };
-            if let Ok(flat) = as_flat_cow(rg_slice)
-                && let Some(codes) = dict.try_map_column(&flat)?
-            {
-                Some((codes, flat.nulls().cloned()))
-            } else {
-                None
-            }
-        } else {
-            None
-        };
-        if let Some((rg0_codes, rg0_nulls)) = precomputed_rg0.or(precomputed_rg_n) {
-            let mut row_off = 0usize;
-            while row_off < rg_rows {
-                let mb_len = (rg_rows - row_off).min(mb_size);
-                let mb_first_row = first_row_u32 + row_off as u32;
-                let mb_nulls_owned;
-                let mb_nulls = match &rg0_nulls {
-                    None => None,
-                    Some(bm) => {
-                        let mut sub_bm = cetra_column::Bitmap::new_ones(mb_len);
-                        let mut has_null = false;
-                        for i in 0..mb_len {
-                            if !bm.get(row_off + i) {
-                                let _ = sub_bm.set(i, false);
-                                has_null = true;
-                            }
-                        }
-                        if has_null {
-                            mb_nulls_owned = sub_bm;
-                            Some(&mb_nulls_owned)
-                        } else {
-                            None
-                        }
-                    }
-                };
-                let enc = encode_dict_codes_precomputed(
-                    &rg0_codes[row_off..row_off + mb_len],
-                    mb_nulls,
-                    self.options.profile,
-                    0,
-                )?;
-                if enc.encoding == Encoding::Dict {
-                    self.phys_col_meta[cidx].used_dict_encoding = true;
-                }
-                self.phys_col_meta[cidx].null_count_total = self.phys_col_meta[cidx]
-                    .null_count_total
-                    .saturating_add(u32::from(enc.null_count));
-                let entry = enc.write_framed_entry(
-                    mb_first_row,
-                    mb_len as u16,
-                    base_offset,
-                    zstd_level,
-                    out_buf,
-                )?;
-                self.phys_blocks[cidx].push(entry);
-                if track_trigram && let Some(list) = self.narrow_trigrams.get_mut(&cidx) {
-                    list.push(None);
-                }
-                row_off += mb_len;
-            }
-            return Ok(());
-        }
-
         let dict_clone = self.phys_col_meta[cidx].dict.as_ref().map(Arc::clone);
         let is_wide_row = self.logical_locality[cidx] == LocalityGroup::WideRow;
-
-        // O(1) mini-block fast path for `Column::Const` (all-null or inline <=16B / empty collection).
-        if let Column::Const { value, .. } = col {
-            if value.is_null() || matches!(dt, DataType::Null) {
-                let mut row_off = 0usize;
-                while row_off < rg_rows {
-                    let mb_len = (rg_rows - row_off).min(mb_size);
-                    let mb_u16 = mb_len as u16;
-                    self.phys_col_meta[cidx].null_count_total = self.phys_col_meta[cidx]
-                        .null_count_total
-                        .saturating_add(mb_len as u32);
-                    self.phys_blocks[cidx].push(BlockEntry {
-                        first_row: first_row_u32 + row_off as u32,
-                        row_count: mb_u16,
-                        null_count: mb_u16,
-                        offset: 0,
-                        stored_len: 0,
-                        raw_len: 0,
-                        encoding: Encoding::ConstNull,
-                        codec: Codec::None,
-                        block_flags: BLOCK_FLAG_ALL_NULL | BLOCK_FLAG_HAS_NULLS,
-                        min_inline_len: 0,
-                        max_inline_len: 0,
-                        reserved: [0; 3],
-                        min_inline: [0u8; 16],
-                        max_inline: [0u8; 16],
-                    });
-                    if track_trigram && let Some(list) = self.narrow_trigrams.get_mut(&cidx) {
-                        list.push(None);
-                    }
-                    row_off += mb_len;
-                }
-                return Ok(());
-            }
-
-            let single = Column::Const {
-                value: value.clone(),
-                len: 1,
-            };
-            let template = encode_mini_block_with_locality(
-                &single,
-                &dt,
-                self.options.profile,
-                dict_clone.as_deref(),
-                is_wide_row,
-            )?;
-            if template.encoding == Encoding::Const {
-                let mut row_off = 0usize;
-                while row_off < rg_rows {
-                    let mb_len = (rg_rows - row_off).min(mb_size);
-                    self.phys_blocks[cidx].push(BlockEntry {
-                        first_row: first_row_u32 + row_off as u32,
-                        row_count: mb_len as u16,
-                        null_count: 0,
-                        offset: 0,
-                        stored_len: 0,
-                        raw_len: 0,
-                        encoding: Encoding::Const,
-                        codec: Codec::None,
-                        block_flags: template.block_flags,
-                        min_inline_len: template.min_inline_len,
-                        max_inline_len: template.max_inline_len,
-                        reserved: [0; 3],
-                        min_inline: template.min_inline,
-                        max_inline: template.max_inline,
-                    });
-                    if track_trigram && let Some(list) = self.narrow_trigrams.get_mut(&cidx) {
-                        list.push(None);
-                    }
-                    row_off += mb_len;
-                }
-                return Ok(());
-            }
+        let out_trigrams = self.narrow_trigrams.get_mut(&cidx);
+        let (used_dict, has_non_dict, null_total) = encode_scalar_or_nested_col_into(
+            col,
+            &dt,
+            self.options.profile,
+            is_wide_row,
+            dict_clone.as_deref(),
+            precomputed_rg0,
+            base_row_off,
+            rg_rows,
+            first_row_u32,
+            mb_size,
+            base_offset,
+            zstd_level,
+            out_buf,
+            &mut self.phys_blocks[cidx],
+            out_trigrams,
+        )?;
+        if used_dict {
+            self.phys_col_meta[cidx].used_dict_encoding = true;
         }
-
-        let mut row_off = 0usize;
-        while row_off < rg_rows {
-            let mb_len = (rg_rows - row_off).min(mb_size);
-            let mb_first_row = first_row_u32 + row_off as u32;
-            let abs_off = base_row_off + row_off;
-            let sliced_owned;
-            let sliced = if abs_off == 0 && mb_len == col.len() {
-                col
-            } else {
-                sliced_owned = col.slice(abs_off, mb_len)?;
-                &sliced_owned
-            };
-            let enc = encode_mini_block_with_locality(
-                sliced,
-                &dt,
-                self.options.profile,
-                dict_clone.as_deref(),
-                is_wide_row,
-            )?;
-
-            if enc.encoding == Encoding::Dict {
-                self.phys_col_meta[cidx].used_dict_encoding = true;
-            } else if enc.encoding != Encoding::ConstNull && enc.encoding != Encoding::Const {
-                self.phys_col_meta[cidx].has_non_dict_data_block = true;
-            }
-            self.phys_col_meta[cidx].null_count_total = self.phys_col_meta[cidx]
-                .null_count_total
-                .saturating_add(u32::from(enc.null_count));
-
-            let entry = enc.write_framed_entry(
-                mb_first_row,
-                mb_len as u16,
-                base_offset,
-                zstd_level,
-                out_buf,
-            )?;
-            self.phys_blocks[cidx].push(entry);
-
-            if track_trigram {
-                let filter = if enc.encoding != Encoding::Dict
-                    && enc.encoding != Encoding::Const
-                    && enc.encoding != Encoding::ConstNull
-                {
-                    build_narrow_trigram_for_mb(sliced, entry.stored_len as usize)
-                } else {
-                    None
-                };
-                if let Some(list) = self.narrow_trigrams.get_mut(&cidx) {
-                    list.push(filter);
-                }
-            }
-
-            row_off += mb_len;
+        if has_non_dict {
+            self.phys_col_meta[cidx].has_non_dict_data_block = true;
         }
+        self.phys_col_meta[cidx].null_count_total = self.phys_col_meta[cidx]
+            .null_count_total
+            .saturating_add(null_total);
         Ok(())
     }
 
@@ -2905,24 +3202,576 @@ fn build_rg_sbbf(
     Ok((sbbf, true))
 }
 
+struct EncodedScalarCol {
+    local_buf: Vec<u8>,
+    blocks: Vec<BlockEntry>,
+    used_dict_encoding: bool,
+    has_non_dict_data_block: bool,
+    null_count_total: u32,
+    narrow_trigrams: Option<Vec<Option<Vec<u8>>>>,
+}
+
+struct EncodedShreddedMap {
+    logical_col: usize,
+    is_metadata: bool,
+    local_core_buf: Vec<u8>,
+    sub_col_indices: Vec<usize>,
+    sub_blocks: Vec<Vec<BlockEntry>>,
+    residual_counts: Vec<u32>,
+    res_null_count_total: u32,
+    local_wide_buf: Vec<u8>,
+    residual_blocks: Vec<BlockEntry>,
+}
+
+fn append_col_blocks(
+    dst_buf: &mut Vec<u8>,
+    group_base_offset: u64,
+    local_buf: &[u8],
+    blocks: Vec<BlockEntry>,
+    dst_blocks: &mut Vec<BlockEntry>,
+) -> Result<(), StatamError> {
+    let col_rel_off = dst_buf.len() as u64;
+    let abs_base =
+        group_base_offset
+            .checked_add(col_rel_off)
+            .ok_or(StatamError::BoundsExceeded {
+                reason: "column block offset overflow",
+            })?;
+    dst_buf.extend_from_slice(local_buf);
+    for mut blk in blocks {
+        if !matches!(blk.encoding, Encoding::ConstNull | Encoding::Const) {
+            blk.offset = blk
+                .offset
+                .checked_add(abs_base)
+                .ok_or(StatamError::BoundsExceeded {
+                    reason: "block offset overflow",
+                })?;
+        }
+        dst_blocks.push(blk);
+    }
+    Ok(())
+}
+
+fn commit_scalar_col_result(
+    phys_col_meta: &mut [PhysColWriteState],
+    phys_blocks: &mut [Vec<BlockEntry>],
+    narrow_trigrams: &mut HashMap<usize, Vec<Option<Vec<u8>>>>,
+    cidx: usize,
+    res: EncodedScalarCol,
+    group_base_offset: u64,
+    dst_buf: &mut Vec<u8>,
+) -> Result<(), StatamError> {
+    if res.used_dict_encoding {
+        phys_col_meta[cidx].used_dict_encoding = true;
+    }
+    if res.has_non_dict_data_block {
+        phys_col_meta[cidx].has_non_dict_data_block = true;
+    }
+    phys_col_meta[cidx].null_count_total = phys_col_meta[cidx]
+        .null_count_total
+        .saturating_add(res.null_count_total);
+    if let Some(tris) = res.narrow_trigrams
+        && let Some(list) = narrow_trigrams.get_mut(&cidx)
+    {
+        list.extend(tris);
+    }
+    append_col_blocks(
+        dst_buf,
+        group_base_offset,
+        &res.local_buf,
+        res.blocks,
+        &mut phys_blocks[cidx],
+    )
+}
+
+fn commit_shredded_subcols(
+    shredded_map: &mut ShreddedMapDir,
+    phys_blocks: &mut [Vec<BlockEntry>],
+    shred: &mut EncodedShreddedMap,
+    core_offset: u64,
+    core_buf: &mut Vec<u8>,
+) -> Result<(), StatamError> {
+    let col_rel_off = core_buf.len() as u64;
+    let abs_base = core_offset
+        .checked_add(col_rel_off)
+        .ok_or(StatamError::BoundsExceeded {
+            reason: "shredded subcol block offset overflow",
+        })?;
+    core_buf.extend_from_slice(&shred.local_core_buf);
+    drop(std::mem::take(&mut shred.local_core_buf));
+    for (k_idx, &sub_pidx) in shred.sub_col_indices.iter().enumerate() {
+        shredded_map.keys[k_idx].residual_count = shredded_map.keys[k_idx]
+            .residual_count
+            .saturating_add(shred.residual_counts[k_idx]);
+        for mut blk in std::mem::take(&mut shred.sub_blocks[k_idx]) {
+            if !matches!(blk.encoding, Encoding::ConstNull | Encoding::Const) {
+                blk.offset =
+                    blk.offset
+                        .checked_add(abs_base)
+                        .ok_or(StatamError::BoundsExceeded {
+                            reason: "block offset overflow",
+                        })?;
+            }
+            phys_blocks[sub_pidx].push(blk);
+        }
+    }
+    Ok(())
+}
+
+fn extract_rg0_shredded_keys(
+    col: &Column,
+    base_row_off: usize,
+    rg_rows: usize,
+) -> Result<Vec<String>, StatamError> {
+    let sliced_owned;
+    let col_ref = if base_row_off == 0 && rg_rows == col.len() {
+        col
+    } else {
+        sliced_owned = col.slice(base_row_off, rg_rows)?;
+        &sliced_owned
+    };
+    let flat = as_flat_cow(col_ref)?;
+    let FlatData::MapUtf8(map) = flat.data() else {
+        return Ok(Vec::new());
+    };
+    Ok(select_shredded_keys(map))
+}
+
+fn is_rg0_dict_candidate(
+    field: &cetra_column::Field,
+    locality: LocalityGroup,
+    profile: WriteProfile,
+) -> bool {
+    if locality == LocalityGroup::ExternalPayload {
+        return false;
+    }
+    if DictValueKind::from_data_type(&field.data_type).is_none() {
+        return false;
+    }
+    if HIGH_CARDINALITY_ID_COLS.contains(&field.name.as_str()) {
+        return false;
+    }
+    if profile == WriteProfile::L0Fast
+        && (!KNOWN_LOW_CARD_DICT_COLS.contains(&field.name.as_str())
+            || matches!(field.name.as_str(), "session_id" | "user_id"))
+    {
+        return false;
+    }
+    true
+}
+
+fn eval_rg0_dict_candidate(
+    col: &Column,
+    field_name: &str,
+    locality: LocalityGroup,
+    profile: WriteProfile,
+    base_row_off: usize,
+    rg_rows: usize,
+) -> Result<Option<Rg0DictResult>, StatamError> {
+    let sliced_owned;
+    let col_ref = if base_row_off == 0 && rg_rows == col.len() {
+        col
+    } else {
+        sliced_owned = col.slice(base_row_off, rg_rows)?;
+        &sliced_owned
+    };
+    let flat = as_flat_cow(col_ref)?;
+    let is_known_low_card = KNOWN_LOW_CARD_DICT_COLS.contains(&field_name);
+    let is_core = locality == LocalityGroup::Core;
+    let is_wide_non_known = locality == LocalityGroup::WideRow && !is_known_low_card;
+    let max_entries = match profile {
+        WriteProfile::L0Fast => 512,
+        WriteProfile::L1Compact => {
+            if is_known_low_card || is_core {
+                16_384
+            } else if is_wide_non_known {
+                1_024
+            } else {
+                4_096
+            }
+        }
+    };
+    let builder = match profile {
+        WriteProfile::L0Fast => DictBuilder::l0_with_max(max_entries),
+        WriteProfile::L1Compact => DictBuilder::l1_with_max(max_entries),
+    };
+    let Some((dict, codes)) = builder.build(&flat)? else {
+        return Ok(None);
+    };
+    if is_wide_non_known && (dict.len() > 1_024 || dict.memory_bytes() > DICT_PASSTHROUGH_MAX_BYTES)
+    {
+        return Ok(None);
+    }
+    let non_null_rows = flat
+        .len()
+        .saturating_sub(flat.nulls().map_or(0, |bm| bm.count_zeros()));
+    let ratio_den = if dict.len() > 4_096 { 4 } else { 2 };
+    let low_ndv = if is_known_low_card {
+        dict.len() <= max_entries
+            && (non_null_rows < 16 || dict.len() * ratio_den <= non_null_rows + 4)
+    } else {
+        dict.len() <= max_entries
+            && ((non_null_rows >= 16 && dict.len() * ratio_den <= non_null_rows) || dict.len() <= 8)
+    };
+    if low_ndv {
+        Ok(Some((dict, codes, flat.nulls().cloned())))
+    } else {
+        Ok(None)
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn encode_scalar_or_nested_col_into(
+    col: &Column,
+    dt: &DataType,
+    profile: WriteProfile,
+    is_wide_row: bool,
+    dict: Option<&FileDict>,
+    precomputed_rg0: Option<(Vec<u32>, Option<cetra_column::Bitmap>)>,
+    base_row_off: usize,
+    rg_rows: usize,
+    first_row_u32: u32,
+    mb_size: usize,
+    base_offset: u64,
+    zstd_level: i32,
+    out_buf: &mut Vec<u8>,
+    out_blocks: &mut Vec<BlockEntry>,
+    mut out_trigrams: Option<&mut Vec<Option<Vec<u8>>>>,
+) -> Result<(bool, bool, u32), StatamError> {
+    let mut used_dict_encoding = false;
+    let mut has_non_dict_data_block = false;
+    let mut null_count_total = 0u32;
+
+    let precomputed_rg_n = if precomputed_rg0.is_none()
+        && rg_rows >= 256
+        && let Some(d) = dict
+    {
+        let rg_slice_owned;
+        let rg_slice = if base_row_off == 0 && rg_rows == col.len() {
+            col
+        } else {
+            rg_slice_owned = col.slice(base_row_off, rg_rows)?;
+            &rg_slice_owned
+        };
+        if let Ok(flat) = as_flat_cow(rg_slice)
+            && let Some(codes) = d.try_map_column(&flat)?
+        {
+            Some((codes, flat.nulls().cloned()))
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+
+    if let Some((rg0_codes, rg0_nulls)) = precomputed_rg0.or(precomputed_rg_n) {
+        let mut row_off = 0usize;
+        while row_off < rg_rows {
+            let mb_len = (rg_rows - row_off).min(mb_size);
+            let mb_first_row = first_row_u32 + row_off as u32;
+            let mb_nulls_owned;
+            let mb_nulls = match &rg0_nulls {
+                None => None,
+                Some(bm) => {
+                    let mut sub_bm = cetra_column::Bitmap::new_ones(mb_len);
+                    let mut has_null = false;
+                    for i in 0..mb_len {
+                        if !bm.get(row_off + i) {
+                            let _ = sub_bm.set(i, false);
+                            has_null = true;
+                        }
+                    }
+                    if has_null {
+                        mb_nulls_owned = sub_bm;
+                        Some(&mb_nulls_owned)
+                    } else {
+                        None
+                    }
+                }
+            };
+            let enc = encode_dict_codes_precomputed(
+                &rg0_codes[row_off..row_off + mb_len],
+                mb_nulls,
+                profile,
+                0,
+            )?;
+            if enc.encoding == Encoding::Dict {
+                used_dict_encoding = true;
+            }
+            null_count_total = null_count_total.saturating_add(u32::from(enc.null_count));
+            let entry = enc.write_framed_entry(
+                mb_first_row,
+                mb_len as u16,
+                base_offset,
+                zstd_level,
+                out_buf,
+            )?;
+            out_blocks.push(entry);
+            if let Some(list) = out_trigrams.as_deref_mut() {
+                list.push(None);
+            }
+            row_off += mb_len;
+        }
+        return Ok((
+            used_dict_encoding,
+            has_non_dict_data_block,
+            null_count_total,
+        ));
+    }
+
+    // O(1) mini-block fast path for `Column::Const` (all-null or inline <=16B / empty collection).
+    if let Column::Const { value, .. } = col {
+        if value.is_null() || matches!(dt, DataType::Null) {
+            let mut row_off = 0usize;
+            while row_off < rg_rows {
+                let mb_len = (rg_rows - row_off).min(mb_size);
+                let mb_u16 = mb_len as u16;
+                null_count_total = null_count_total.saturating_add(mb_len as u32);
+                out_blocks.push(BlockEntry {
+                    first_row: first_row_u32 + row_off as u32,
+                    row_count: mb_u16,
+                    null_count: mb_u16,
+                    offset: 0,
+                    stored_len: 0,
+                    raw_len: 0,
+                    encoding: Encoding::ConstNull,
+                    codec: Codec::None,
+                    block_flags: BLOCK_FLAG_ALL_NULL | BLOCK_FLAG_HAS_NULLS,
+                    min_inline_len: 0,
+                    max_inline_len: 0,
+                    reserved: [0; 3],
+                    min_inline: [0u8; 16],
+                    max_inline: [0u8; 16],
+                });
+                if let Some(list) = out_trigrams.as_deref_mut() {
+                    list.push(None);
+                }
+                row_off += mb_len;
+            }
+            return Ok((
+                used_dict_encoding,
+                has_non_dict_data_block,
+                null_count_total,
+            ));
+        }
+
+        let single = Column::Const {
+            value: value.clone(),
+            len: 1,
+        };
+        let template = encode_mini_block_with_locality(&single, dt, profile, dict, is_wide_row)?;
+        if template.encoding == Encoding::Const {
+            let mut row_off = 0usize;
+            while row_off < rg_rows {
+                let mb_len = (rg_rows - row_off).min(mb_size);
+                out_blocks.push(BlockEntry {
+                    first_row: first_row_u32 + row_off as u32,
+                    row_count: mb_len as u16,
+                    null_count: 0,
+                    offset: 0,
+                    stored_len: 0,
+                    raw_len: 0,
+                    encoding: Encoding::Const,
+                    codec: Codec::None,
+                    block_flags: template.block_flags,
+                    min_inline_len: template.min_inline_len,
+                    max_inline_len: template.max_inline_len,
+                    reserved: [0; 3],
+                    min_inline: template.min_inline,
+                    max_inline: template.max_inline,
+                });
+                if let Some(list) = out_trigrams.as_deref_mut() {
+                    list.push(None);
+                }
+                row_off += mb_len;
+            }
+            return Ok((
+                used_dict_encoding,
+                has_non_dict_data_block,
+                null_count_total,
+            ));
+        }
+    }
+
+    let mut row_off = 0usize;
+    while row_off < rg_rows {
+        let mb_len = (rg_rows - row_off).min(mb_size);
+        let mb_first_row = first_row_u32 + row_off as u32;
+        let abs_off = base_row_off + row_off;
+        let sliced_owned;
+        let sliced = if abs_off == 0 && mb_len == col.len() {
+            col
+        } else {
+            sliced_owned = col.slice(abs_off, mb_len)?;
+            &sliced_owned
+        };
+        let enc = encode_mini_block_with_locality(sliced, dt, profile, dict, is_wide_row)?;
+
+        if enc.encoding == Encoding::Dict {
+            used_dict_encoding = true;
+        } else if enc.encoding != Encoding::ConstNull && enc.encoding != Encoding::Const {
+            has_non_dict_data_block = true;
+        }
+        null_count_total = null_count_total.saturating_add(u32::from(enc.null_count));
+
+        let entry = enc.write_framed_entry(
+            mb_first_row,
+            mb_len as u16,
+            base_offset,
+            zstd_level,
+            out_buf,
+        )?;
+        out_blocks.push(entry);
+
+        if let Some(list) = out_trigrams.as_deref_mut() {
+            let filter = if enc.encoding != Encoding::Dict
+                && enc.encoding != Encoding::Const
+                && enc.encoding != Encoding::ConstNull
+            {
+                build_narrow_trigram_for_mb(sliced, entry.stored_len as usize)
+            } else {
+                None
+            };
+            list.push(filter);
+        }
+
+        row_off += mb_len;
+    }
+
+    Ok((
+        used_dict_encoding,
+        has_non_dict_data_block,
+        null_count_total,
+    ))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn encode_shredded_map_to_local(
+    sm: &ShreddedMapDir,
+    is_metadata: bool,
+    col: &Column,
+    base_row_off: usize,
+    rg_rows: usize,
+    first_row_u32: u32,
+    mb_size: usize,
+    profile: WriteProfile,
+    zstd_level: i32,
+) -> Result<EncodedShreddedMap, StatamError> {
+    let logical_col = sm.logical_col_idx as usize;
+    let promoted_keys: Vec<String> = sm.keys.iter().map(|k| k.key.clone()).collect();
+    let sub_col_indices: Vec<usize> = sm.keys.iter().map(|k| k.sub_col_idx as usize).collect();
+
+    let mut local_core_buf = Vec::new();
+    let mut sub_blocks = vec![Vec::new(); sub_col_indices.len()];
+    let mut residual_counts = vec![0u32; sub_col_indices.len()];
+    let mut res_null_count_total = 0u32;
+    let mut local_wide_buf = Vec::new();
+    let mut residual_blocks = Vec::new();
+
+    let mut row_off = 0usize;
+    while row_off < rg_rows {
+        let mb_len = (rg_rows - row_off).min(mb_size);
+        let mb_first_row = first_row_u32 + row_off as u32;
+        let abs_off = base_row_off + row_off;
+        let sliced_owned;
+        let sliced = if abs_off == 0 && mb_len == col.len() {
+            col
+        } else {
+            sliced_owned = col.slice(abs_off, mb_len)?;
+            &sliced_owned
+        };
+        let flat = as_flat_cow(sliced)?;
+        let shredded = shred_map(&flat, &promoted_keys)?;
+
+        for (k_idx, _) in sub_col_indices.iter().enumerate() {
+            residual_counts[k_idx] =
+                residual_counts[k_idx].saturating_add(shredded.residual_counts[k_idx]);
+            let (sub_codec, sub_raw) =
+                encode_shredded_subcol_with_codec(&shredded.sub_cols[k_idx], profile)?;
+            let blk_off = local_core_buf.len() as u64;
+            let info = write_framed_block(
+                Encoding::ShreddedMap,
+                &sub_raw,
+                sub_codec,
+                zstd_level,
+                &mut local_core_buf,
+            )?;
+            sub_blocks[k_idx].push(BlockEntry {
+                first_row: mb_first_row,
+                row_count: mb_len as u16,
+                null_count: 0,
+                offset: blk_off,
+                stored_len: info.stored_len,
+                raw_len: info.raw_len,
+                encoding: Encoding::ShreddedMap,
+                codec: info.codec,
+                block_flags: 0,
+                min_inline_len: 0,
+                max_inline_len: 0,
+                reserved: [0; 3],
+                min_inline: [0; 16],
+                max_inline: [0; 16],
+            });
+        }
+
+        let res_enc = crate::codec::encode_shredded_residual_block(&shredded.residual, profile)?;
+        res_null_count_total = res_null_count_total.saturating_add(u32::from(res_enc.null_count));
+        let res_entry = res_enc.write_framed_entry(
+            mb_first_row,
+            mb_len as u16,
+            0,
+            zstd_level,
+            &mut local_wide_buf,
+        )?;
+        residual_blocks.push(res_entry);
+
+        row_off += mb_len;
+    }
+
+    Ok(EncodedShreddedMap {
+        logical_col,
+        is_metadata,
+        local_core_buf,
+        sub_col_indices,
+        sub_blocks,
+        residual_counts,
+        res_null_count_total,
+        local_wide_buf,
+        residual_blocks,
+    })
+}
+
 struct LocalL0PayloadBuilder {
     zstd_level: i32,
+    write_threads: usize,
     frames: Vec<(u64, u32, u32, Vec<u8>)>, // (rel_frame_off, stored_len, raw_len, framed_bytes)
     chunks: Vec<ChunkLoc>,
     cur_raw: Vec<u8>,
     cur_chunks: Vec<(u32, u32)>, // (offset_in_frame, raw_len)
+    pending_frames: Vec<PendingL0Frame>,
+    pending_chunk_count: usize,
+    pending_frame_raw_bytes: usize,
 }
 
 impl LocalL0PayloadBuilder {
     fn new(zstd_level: i32) -> Self {
+        Self::new_with_threads(zstd_level, 1)
+    }
+
+    fn new_with_threads(zstd_level: i32, write_threads: usize) -> Self {
         Self {
             zstd_level,
+            write_threads,
             frames: Vec::new(),
             chunks: Vec::new(),
             cur_raw: Vec::new(),
             cur_chunks: Vec::new(),
+            pending_frames: Vec::new(),
+            pending_chunk_count: 0,
+            pending_frame_raw_bytes: 0,
         }
     }
+
     fn add_chunk(&mut self, bytes: &[u8]) -> Result<u32, StatamError> {
         if bytes.len() > MAX_FRAME_RAW_BYTES {
             return Err(StatamError::BoundsExceeded {
@@ -2934,11 +3783,11 @@ impl LocalL0PayloadBuilder {
         {
             self.flush_frame()?;
         }
-        let cid = u32::try_from(self.chunks.len() + self.cur_chunks.len()).map_err(|_| {
-            StatamError::BoundsExceeded {
-                reason: "L0 payload chunk_id overflows u32",
-            }
-        })?;
+        let cid =
+            u32::try_from(self.chunks.len() + self.pending_chunk_count + self.cur_chunks.len())
+                .map_err(|_| StatamError::BoundsExceeded {
+                    reason: "L0 payload chunk_id overflows u32",
+                })?;
         let off_in_frame =
             u32::try_from(self.cur_raw.len()).map_err(|_| StatamError::BoundsExceeded {
                 reason: "L0 payload offset_in_frame overflows u32",
@@ -2957,6 +3806,29 @@ impl LocalL0PayloadBuilder {
 
     fn flush_frame(&mut self) -> Result<(), StatamError> {
         if self.cur_raw.is_empty() {
+            return Ok(());
+        }
+        if self.write_threads > 1 {
+            let batch_cap = self.write_threads.clamp(1, MAX_WRITE_THREADS);
+            if !self.pending_frames.is_empty()
+                && (self.pending_frames.len() >= batch_cap
+                    || self
+                        .pending_frame_raw_bytes
+                        .saturating_add(self.cur_raw.len())
+                        > MAX_PENDING_RAW_BYTES)
+            {
+                self.flush_pending()?;
+            }
+            let raw = std::mem::take(&mut self.cur_raw);
+            let frame_chunks = std::mem::take(&mut self.cur_chunks);
+            self.pending_chunk_count = self.pending_chunk_count.saturating_add(frame_chunks.len());
+            self.pending_frame_raw_bytes = self.pending_frame_raw_bytes.saturating_add(raw.len());
+            self.pending_frames.push((raw, frame_chunks));
+            if self.pending_frames.len() >= batch_cap
+                || self.pending_frame_raw_bytes >= MAX_PENDING_RAW_BYTES
+            {
+                self.flush_pending()?;
+            }
             return Ok(());
         }
         let mut framed = Vec::new();
@@ -2981,9 +3853,48 @@ impl LocalL0PayloadBuilder {
         Ok(())
     }
 
+    fn flush_pending(&mut self) -> Result<(), StatamError> {
+        let batch = std::mem::take(&mut self.pending_frames);
+        self.pending_chunk_count = 0;
+        self.pending_frame_raw_bytes = 0;
+        if batch.is_empty() {
+            return Ok(());
+        }
+        let zstd_level = self.zstd_level;
+        let encoded = parallel_map_in_order(batch, self.write_threads, |(raw, frame_chunks)| {
+            let mut framed = Vec::new();
+            let codec = if raw.len() < 1024 {
+                Codec::Lz4
+            } else {
+                default_l1_codec()
+            };
+            let info = write_framed_pack_frame(&raw, codec, 0, zstd_level, &mut framed)?;
+            drop(raw);
+            Ok((info.stored_len, info.raw_len, framed, frame_chunks))
+        })?;
+        for (stored_len, raw_len, framed, frame_chunks) in encoded {
+            let fid =
+                u32::try_from(self.frames.len()).map_err(|_| StatamError::BoundsExceeded {
+                    reason: "L0 payload frame_id overflows u32",
+                })?;
+            for (off_in_frame, chunk_raw_len) in frame_chunks {
+                self.chunks.push(ChunkLoc {
+                    frame_id: fid,
+                    offset_in_frame: off_in_frame,
+                    raw_len: chunk_raw_len,
+                });
+            }
+            self.frames.push((0, stored_len, raw_len, framed));
+        }
+        Ok(())
+    }
+
     fn finish(mut self) -> Result<Vec<u8>, StatamError> {
         if !self.cur_raw.is_empty() {
             self.flush_frame()?;
+        }
+        if !self.pending_frames.is_empty() {
+            self.flush_pending()?;
         }
         if self.chunks.is_empty() {
             return Ok(Vec::new());
@@ -4165,6 +5076,7 @@ mod tests {
             target_frame_raw_bytes: 16 * 1024,
             enable_trigram_skip: true,
             compress_toc_lz4: true,
+            write_threads: 1,
         };
         let mut pb = ChunkPackBuilder::new(pack_id, pack_opts);
         let mut file_bytes = Vec::new();
@@ -4365,6 +5277,7 @@ mod tests {
                 target_frame_raw_bytes: 16 * 1024,
                 enable_trigram_skip: true,
                 compress_toc_lz4: true,
+                write_threads: 1,
             },
         );
         let mut l1_opts = WriteOptions::for_table(TableKind::Spans, WriteProfile::L1Compact);
@@ -4465,6 +5378,406 @@ mod tests {
             reader.meta().col_dir[2].col_flags & COL_FLAG_HAS_FILE_DICT,
             0,
             "compact WideRow column <= 1024 entries and <= 256 KiB may keep a FileDict"
+        );
+    }
+
+    fn make_mt_spans_batch(n: usize) -> (Arc<Schema>, Batch) {
+        use cetra_column::MapData;
+
+        let schema = Schema::try_new_arc(vec![
+            Field::new("status", DataType::Utf8, false),
+            Field::new("model", DataType::Utf8, true),
+            Field::new("name", DataType::Utf8, false),
+            Field::new("start_time", DataType::TimestampNs { utc: true }, false),
+            Field::new("metadata", DataType::MapUtf8, true),
+            Field::new("trace_id", DataType::FixedBytes16, false),
+            Field::new("cost_total", DataType::F64, false),
+            Field::new("total_tokens", DataType::I64, false),
+            Field::new("span_id", DataType::FixedBytes8, false),
+            Field::new("user_id", DataType::Utf8, true),
+            Field::new("session_id", DataType::Utf8, true),
+            Field::new("duration_ns", DataType::I64, false),
+            Field::new("provider", DataType::Utf8, false),
+            Field::new("attributes", DataType::MapUtf8, true),
+            Field::new("prompt_tokens", DataType::I64, false),
+            Field::new("input_preview", DataType::Utf8, true),
+            Field::new("all_null_col", DataType::Utf8, true),
+            Field::new("const_str_col", DataType::Utf8, false),
+            Field::new("input", DataType::Utf8, true),
+            Field::new("output", DataType::Utf8, true),
+        ])
+        .unwrap();
+
+        let statuses: Vec<&str> = (0..n)
+            .map(|i| if i % 5 == 0 { "ERR" } else { "OK" })
+            .collect();
+        let models: Vec<&str> = (0..n).map(|i| ["m-a", "m-b", "m-c"][i % 3]).collect();
+        // High-cardinality unique `name` so FileDict is skipped and narrow_trigram_cols activates.
+        let names: Vec<String> = (0..n)
+            .map(|i| format!("span-op-{i:05}-{}", "x".repeat(24)))
+            .collect();
+        let start_times: Vec<i64> = (0..n)
+            .map(|i| 1_700_000_000_000_000_000 + (i as i64) * 1_000)
+            .collect();
+
+        let build_map = |prefix: &str| -> Column {
+            let mut offsets = Vec::with_capacity(n + 1);
+            offsets.push(0u32);
+            let mut keys = Vec::new();
+            let mut vals = Vec::new();
+            for i in 0..n {
+                keys.push(format!("{prefix}.env"));
+                vals.push(if i % 2 == 0 {
+                    "prod".to_owned()
+                } else {
+                    "dev".to_owned()
+                });
+                keys.push(format!("{prefix}.region"));
+                vals.push(format!("r{}", i % 4));
+                if i % 10 == 0 {
+                    keys.push(format!("{prefix}.rare_{i}"));
+                    vals.push(format!("v_{i}"));
+                }
+                offsets.push(keys.len() as u32);
+            }
+            let kd = Utf8Data::try_from_slices(keys.iter().map(String::as_str)).unwrap();
+            let vd = Utf8Data::try_from_slices(vals.iter().map(String::as_str)).unwrap();
+            Column::Flat(
+                FlatColumn::try_new(
+                    FlatData::MapUtf8(Box::new(MapData::try_new(offsets, kd, vd, None).unwrap())),
+                    None,
+                )
+                .unwrap(),
+            )
+        };
+
+        let trace_ids: Vec<[u8; 16]> = (0..n)
+            .map(|i| {
+                let mut b = [0u8; 16];
+                b[0..8].copy_from_slice(&((i / 4) as u64).to_le_bytes());
+                b
+            })
+            .collect();
+        let costs: Vec<f64> = (0..n).map(|i| (i as f64) * 0.001).collect();
+        let tokens: Vec<i64> = (0..n).map(|i| 100 + (i as i64 % 500)).collect();
+        let span_ids: Vec<[u8; 8]> = (0..n).map(|i| (i as u64).to_be_bytes()).collect();
+        let users: Vec<String> = (0..n).map(|i| format!("u_{:02}", i % 16)).collect();
+        let sessions: Vec<String> = (0..n).map(|i| format!("s_{:02}", i % 32)).collect();
+        let durations: Vec<i64> = (0..n).map(|i| 10_000 + (i as i64 * 7)).collect();
+        let providers: Vec<&str> = (0..n).map(|i| ["openai", "anthropic"][i % 2]).collect();
+        let prompt_tokens: Vec<i64> = (0..n).map(|i| 50 + (i as i64 % 200)).collect();
+        let previews: Vec<String> = (0..n)
+            .map(|i| format!("preview-{i:04}-{}", "abc ".repeat(16)))
+            .collect();
+        let inputs: Vec<String> = (0..n)
+            .map(|i| {
+                format!(
+                    "[{{\"role\":\"user\",\"content\":\"msg-{i:04}-{}\"}}]",
+                    "Z".repeat(600)
+                )
+            })
+            .collect();
+        let outputs: Vec<String> = (0..n)
+            .map(|i| format!("reply-{i:04}-{}", "W".repeat(400)))
+            .collect();
+
+        let batch = Batch::try_new_all(
+            Arc::clone(&schema),
+            vec![
+                Column::Flat(
+                    FlatColumn::try_new(
+                        FlatData::Utf8(Utf8Data::try_from_slices(statuses).unwrap()),
+                        None,
+                    )
+                    .unwrap(),
+                ),
+                Column::Flat(
+                    FlatColumn::try_new(
+                        FlatData::Utf8(Utf8Data::try_from_slices(models).unwrap()),
+                        None,
+                    )
+                    .unwrap(),
+                ),
+                Column::Flat(
+                    FlatColumn::try_new(
+                        FlatData::Utf8(
+                            Utf8Data::try_from_slices(names.iter().map(String::as_str)).unwrap(),
+                        ),
+                        None,
+                    )
+                    .unwrap(),
+                ),
+                Column::Flat(
+                    FlatColumn::try_new(
+                        FlatData::TimestampNs {
+                            values: start_times,
+                            utc: true,
+                        },
+                        None,
+                    )
+                    .unwrap(),
+                ),
+                build_map("m"),
+                Column::Flat(FlatColumn::try_new(FlatData::FixedBytes16(trace_ids), None).unwrap()),
+                Column::Flat(FlatColumn::try_new(FlatData::F64(costs), None).unwrap()),
+                Column::Flat(FlatColumn::try_new(FlatData::I64(tokens), None).unwrap()),
+                Column::Flat(FlatColumn::try_new(FlatData::FixedBytes8(span_ids), None).unwrap()),
+                Column::Flat(
+                    FlatColumn::try_new(
+                        FlatData::Utf8(
+                            Utf8Data::try_from_slices(users.iter().map(String::as_str)).unwrap(),
+                        ),
+                        None,
+                    )
+                    .unwrap(),
+                ),
+                Column::Flat(
+                    FlatColumn::try_new(
+                        FlatData::Utf8(
+                            Utf8Data::try_from_slices(sessions.iter().map(String::as_str)).unwrap(),
+                        ),
+                        None,
+                    )
+                    .unwrap(),
+                ),
+                Column::Flat(FlatColumn::try_new(FlatData::I64(durations), None).unwrap()),
+                Column::Flat(
+                    FlatColumn::try_new(
+                        FlatData::Utf8(Utf8Data::try_from_slices(providers).unwrap()),
+                        None,
+                    )
+                    .unwrap(),
+                ),
+                build_map("a"),
+                Column::Flat(FlatColumn::try_new(FlatData::I64(prompt_tokens), None).unwrap()),
+                Column::Flat(
+                    FlatColumn::try_new(
+                        FlatData::Utf8(
+                            Utf8Data::try_from_slices(previews.iter().map(String::as_str)).unwrap(),
+                        ),
+                        None,
+                    )
+                    .unwrap(),
+                ),
+                Column::try_new_const(ScalarValue::Null(DataType::Utf8), n).unwrap(),
+                Column::try_new_const(ScalarValue::Utf8("constant_tag".to_owned()), n).unwrap(),
+                Column::Flat(
+                    FlatColumn::try_new(
+                        FlatData::Utf8(
+                            Utf8Data::try_from_slices(inputs.iter().map(String::as_str)).unwrap(),
+                        ),
+                        None,
+                    )
+                    .unwrap(),
+                ),
+                Column::Flat(
+                    FlatColumn::try_new(
+                        FlatData::Utf8(
+                            Utf8Data::try_from_slices(outputs.iter().map(String::as_str)).unwrap(),
+                        ),
+                        None,
+                    )
+                    .unwrap(),
+                ),
+            ],
+            n,
+        )
+        .unwrap();
+        (schema, batch)
+    }
+
+    #[test]
+    fn writer_l1_multithreaded_is_bit_exact_with_single_threaded() {
+        let total_n = 1_250usize;
+        let (schema, batch) = make_mt_spans_batch(total_n);
+        let pack_id = [0xC1u8; 16];
+
+        let run = |threads: usize,
+                   src: &Batch,
+                   split_at: Option<usize>|
+         -> (Vec<u8>, Vec<u8>, WriteStats) {
+            let pack_opts = PackWriteOptions {
+                write_threads: threads,
+                target_frame_raw_bytes: 32 * 1024,
+                ..PackWriteOptions::default()
+            };
+            let mut pb = ChunkPackBuilder::new(pack_id, pack_opts);
+            let mut opts = WriteOptions::for_table(TableKind::Spans, WriteProfile::L1Compact);
+            opts.row_group_size = 1_024;
+            opts.mini_block_size = 128;
+            opts.pack_id = Some(pack_id);
+            opts.write_threads = threads;
+
+            let mut statam_bytes = Vec::new();
+            let stats = {
+                let mut w = StatamWriter::new(Arc::clone(&schema), opts, Some(&mut pb)).unwrap();
+                if let Some(mid) = split_at {
+                    w.write_batch(&src.slice(0, mid).unwrap()).unwrap();
+                    w.write_batch(&src.slice(mid, src.num_rows() - mid).unwrap())
+                        .unwrap();
+                } else {
+                    w.write_batch(src).unwrap();
+                }
+                w.finish(&mut statam_bytes).unwrap()
+            };
+            let mut pack_bytes = Vec::new();
+            pb.finish(&mut pack_bytes).unwrap();
+            (statam_bytes, pack_bytes, stats)
+        };
+
+        let (s_0t, p_0t, st_0t) = run(0, &batch, Some(300));
+        let (s_1t, p_1t, st_1t) = run(1, &batch, Some(300));
+        let (s_4t, p_4t, st_4t) = run(4, &batch, Some(300));
+        assert_eq!(st_1t, st_0t);
+        assert_eq!(s_1t, s_0t, ".statam L1 output must be bit-exact 1T vs 0T");
+        assert_eq!(p_1t, p_0t, ".stpk output must be bit-exact 1T vs 0T");
+        assert_eq!(st_1t, st_4t);
+        assert_eq!(s_1t, s_4t, ".statam L1 output must be bit-exact 1T vs 4T");
+        assert_eq!(p_1t, p_4t, ".stpk output must be bit-exact 1T vs 4T");
+
+        // 1-row tiny-flush parity check with write_threads = 8 (gated to 1T RG path).
+        let one_row = batch.slice(0, 1).unwrap();
+        let (one_s1, one_p1, one_st1) = run(1, &one_row, None);
+        let (one_s8, one_p8, one_st8) = run(8, &one_row, None);
+        assert_eq!(one_st1, one_st8);
+        assert_eq!(one_s1, one_s8, "1-row L1 output must be bit-exact 1T vs 8T");
+        assert_eq!(one_p1, one_p8, "1-row L1 .stpk must be bit-exact 1T vs 8T");
+
+        let pack_reader =
+            Arc::new(ChunkPackReader::open(Arc::new(SliceReader::new(p_4t))).unwrap());
+        let mut resolver = InMemoryPackResolver::new();
+        resolver.insert(pack_id, pack_reader);
+        let reader =
+            StatamReader::open(Arc::new(SliceReader::new(s_4t)), Some(Arc::new(resolver))).unwrap();
+        reader.verify_full().unwrap();
+        assert!(reader.meta().rg_dir.len() >= 2);
+        assert!(reader.meta().rg_dir[0].row_count >= MIN_PARALLEL_RG_ROWS as u32);
+        assert!(!reader.meta().schema_meta.shredded_maps.is_empty());
+        let scanned = reader.scan(&ScanRequest::default()).unwrap();
+        let total_rows: usize = scanned.iter().map(Batch::num_rows).sum();
+        assert_eq!(total_rows, total_n);
+    }
+
+    #[test]
+    fn writer_l0_multithreaded_is_bit_exact_with_single_threaded() {
+        let schema = Schema::try_new_arc(vec![
+            Field::new("trace_id", DataType::FixedBytes16, false),
+            Field::new("status", DataType::Utf8, false),
+            Field::new("duration_ns", DataType::I64, false),
+            Field::new("input_preview", DataType::Utf8, true),
+            Field::new("input", DataType::Utf8, true),
+        ])
+        .unwrap();
+
+        // Build >= 1_024 rows and > 3 MiB of L0 local payloads so RG0 exercises
+        // parallel RG encoding and LocalL0PayloadBuilder queues >= 6 frames.
+        let n = 1_250usize;
+        let tids: Vec<[u8; 16]> = (0..n)
+            .map(|i| {
+                let mut b = [0u8; 16];
+                b[0..8].copy_from_slice(&(i as u64).to_le_bytes());
+                b
+            })
+            .collect();
+        let statuses: Vec<&str> = (0..n)
+            .map(|i| if i % 3 == 0 { "ERR" } else { "OK" })
+            .collect();
+        let durs: Vec<i64> = (0..n).map(|i| 1000 + i as i64 * 17).collect();
+        let previews: Vec<String> = (0..n).map(|i| format!("prev-{i:04}")).collect();
+        let inputs: Vec<String> = (0..n)
+            .map(|i| {
+                format!(
+                    "{{\"idx\":{i:04},\"data\":\"{}\"}}",
+                    "payload_chunk_".repeat(200)
+                )
+            })
+            .collect();
+
+        let batch = Batch::try_new_all(
+            Arc::clone(&schema),
+            vec![
+                Column::Flat(FlatColumn::try_new(FlatData::FixedBytes16(tids), None).unwrap()),
+                Column::Flat(
+                    FlatColumn::try_new(
+                        FlatData::Utf8(Utf8Data::try_from_slices(statuses).unwrap()),
+                        None,
+                    )
+                    .unwrap(),
+                ),
+                Column::Flat(FlatColumn::try_new(FlatData::I64(durs), None).unwrap()),
+                Column::Flat(
+                    FlatColumn::try_new(
+                        FlatData::Utf8(
+                            Utf8Data::try_from_slices(previews.iter().map(String::as_str)).unwrap(),
+                        ),
+                        None,
+                    )
+                    .unwrap(),
+                ),
+                Column::Flat(
+                    FlatColumn::try_new(
+                        FlatData::Utf8(
+                            Utf8Data::try_from_slices(inputs.iter().map(String::as_str)).unwrap(),
+                        ),
+                        None,
+                    )
+                    .unwrap(),
+                ),
+            ],
+            n,
+        )
+        .unwrap();
+
+        let run = |threads: usize, src: &Batch, split_at: Option<usize>| -> (Vec<u8>, WriteStats) {
+            let mut opts = WriteOptions::for_table(TableKind::Spans, WriteProfile::L0Fast);
+            opts.row_group_size = 1_024;
+            opts.mini_block_size = 128;
+            opts.write_threads = threads;
+            let mut out = Vec::new();
+            let mut w = StatamWriter::new(Arc::clone(&schema), opts, None).unwrap();
+            if let Some(mid) = split_at {
+                w.write_batch(&src.slice(0, mid).unwrap()).unwrap();
+                w.write_batch(&src.slice(mid, src.num_rows() - mid).unwrap())
+                    .unwrap();
+            } else {
+                w.write_batch(src).unwrap();
+            }
+            let stats = w.finish(&mut out).unwrap();
+            (out, stats)
+        };
+
+        let (bytes_0t, stats_0t) = run(0, &batch, Some(300));
+        let (bytes_1t, stats_1t) = run(1, &batch, Some(300));
+        let (bytes_4t, stats_4t) = run(4, &batch, Some(300));
+        assert_eq!(stats_1t, stats_0t);
+        assert_eq!(
+            bytes_1t, bytes_0t,
+            ".statam L0 output must be bit-exact 1T vs 0T"
+        );
+        assert_eq!(stats_1t, stats_4t);
+        assert!(stats_4t.l0_payload_bytes > 0);
+        assert_eq!(
+            bytes_1t, bytes_4t,
+            ".statam L0 output with multi-frame L0 local payloads must be bit-exact 1T vs 4T"
+        );
+
+        // 1-row tiny-flush parity check with write_threads = 8 (gated to 1T RG path).
+        let one_row = batch.slice(0, 1).unwrap();
+        let (one_1t, one_s1) = run(1, &one_row, None);
+        let (one_8t, one_s8) = run(8, &one_row, None);
+        assert_eq!(one_s1, one_s8);
+        assert_eq!(one_1t, one_8t, "1-row L0 output must be bit-exact 1T vs 8T");
+
+        let reader = StatamReader::open(Arc::new(SliceReader::new(bytes_4t)), None).unwrap();
+        reader.verify_full().unwrap();
+        assert!(reader.meta().rg_dir.len() >= 2);
+        assert!(reader.meta().rg_dir[0].row_count >= MIN_PARALLEL_RG_ROWS as u32);
+        let scanned = reader.scan(&ScanRequest::default()).unwrap();
+        let total_rows: usize = scanned.iter().map(Batch::num_rows).sum();
+        assert_eq!(total_rows, n);
+        assert_eq!(
+            scanned[0].column(4).unwrap().get_scalar(0).unwrap(),
+            ScalarValue::Utf8(inputs[0].clone())
         );
     }
 }

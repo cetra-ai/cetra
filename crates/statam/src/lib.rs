@@ -5,6 +5,7 @@ pub mod error;
 pub mod format;
 pub mod gdpr;
 pub mod io;
+pub(crate) mod parallel;
 pub mod payload;
 pub mod reader;
 pub mod simd;

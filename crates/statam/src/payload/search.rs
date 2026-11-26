@@ -685,6 +685,7 @@ mod tests {
             target_frame_raw_bytes: 16 * 1024,
             enable_trigram_skip: true,
             compress_toc_lz4: true,
+            write_threads: 1,
         };
         let mut builder = ChunkPackBuilder::new([0x55u8; 16], opts);
 
@@ -828,6 +829,7 @@ mod tests {
             target_frame_raw_bytes: 12 * 1024,
             enable_trigram_skip: true,
             compress_toc_lz4: true,
+            write_threads: 1,
         };
         let mut builder = ChunkPackBuilder::new([0x77u8; 16], opts);
 
@@ -887,6 +889,7 @@ mod tests {
             target_frame_raw_bytes: 10 * 1024,
             enable_trigram_skip: true,
             compress_toc_lz4: true,
+            write_threads: 1,
         };
         let mut builder = ChunkPackBuilder::new([0x88u8; 16], opts);
 
@@ -968,6 +971,7 @@ mod tests {
             target_frame_raw_bytes: 128 * 1024,
             enable_trigram_skip: true,
             compress_toc_lz4: true,
+            write_threads: 1,
         };
         let mut builder = ChunkPackBuilder::new([0x42u8; 16], opts);
 

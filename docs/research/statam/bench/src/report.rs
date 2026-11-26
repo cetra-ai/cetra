@@ -40,6 +40,7 @@ pub(crate) fn format_kib(bytes: u64) -> String {
 pub(crate) fn render_markdown_report(
     scale: &str,
     machine_info: &str,
+    statam_write_threads: usize,
     enabled_formats: &[&str],
     write_rows: &[WriteBenchRow],
     query_rows: &[QueryBenchRow],
@@ -51,6 +52,7 @@ pub(crate) fn render_markdown_report(
         "\n# Statam 7-Format Benchmark Report (`scale={scale}`)"
     );
     let _ = writeln!(out, "\n- **Host:** {machine_info}");
+    let _ = writeln!(out, "- **Statam Write Threads:** `{statam_write_threads}`");
     let _ = writeln!(out, "- **Formats:** `{}`", enabled_formats.join("`, `"));
     let _ = writeln!(
         out,

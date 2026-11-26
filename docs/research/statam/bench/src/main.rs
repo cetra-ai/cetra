@@ -250,7 +250,39 @@ fn evaluate_gates(
     ]
 }
 
+fn parse_cli_args() -> BenchResult<usize> {
+    let mut statam_write_threads = 1usize;
+    let mut args = std::env::args().skip(1);
+    while let Some(arg) = args.next() {
+        if let Some(val) = arg.strip_prefix("--statam-write-threads=") {
+            statam_write_threads = val.parse::<usize>().map_err(|_| {
+                format!("invalid --statam-write-threads value '{val}' (expected integer >= 1)")
+            })?;
+            if statam_write_threads == 0 {
+                return Err("--statam-write-threads must be >= 1".into());
+            }
+        } else if arg == "--statam-write-threads" {
+            let val = args
+                .next()
+                .ok_or("--statam-write-threads requires an integer argument")?;
+            statam_write_threads = val.parse::<usize>().map_err(|_| {
+                format!("invalid --statam-write-threads value '{val}' (expected integer >= 1)")
+            })?;
+            if statam_write_threads == 0 {
+                return Err("--statam-write-threads must be >= 1".into());
+            }
+        } else {
+            return Err(format!(
+                "unknown argument '{arg}' (supported: --statam-write-threads <N>)"
+            )
+            .into());
+        }
+    }
+    Ok(statam_write_threads)
+}
+
 async fn run_suite() -> BenchResult<()> {
+    let write_threads = parse_cli_args()?;
     let scale = BenchScale::from_env();
     let enabled = parse_enabled_formats()?;
     let warm_runs = if scale == BenchScale::Quick { 5 } else { 10 };
@@ -258,22 +290,54 @@ async fn run_suite() -> BenchResult<()> {
 
     let data = generate_all_workloads(scale)?;
 
-    let w1 =
-        encode_spans_workload("W1_agents", &[&data.w1_spans], &enabled, &vortex_session).await?;
+    let w1 = encode_spans_workload(
+        "W1_agents",
+        &[&data.w1_spans],
+        &enabled,
+        &vortex_session,
+        write_threads,
+    )
+    .await?;
     let w2_refs: Vec<&[schema::SpanRow]> = data.w2_slices.iter().map(Vec::as_slice).collect();
-    let w2 = encode_spans_workload("W2_chat_4files", &w2_refs, &enabled, &vortex_session).await?;
-    let w3_sp =
-        encode_spans_workload("W3_spans", &[&data.w3_spans], &enabled, &vortex_session).await?;
-    let w3_sc =
-        encode_scores_workload("W3_scores", &data.w3_scores, &enabled, &vortex_session).await?;
+    let w2 = encode_spans_workload(
+        "W2_chat_4files",
+        &w2_refs,
+        &enabled,
+        &vortex_session,
+        write_threads,
+    )
+    .await?;
+    let w3_sp = encode_spans_workload(
+        "W3_spans",
+        &[&data.w3_spans],
+        &enabled,
+        &vortex_session,
+        write_threads,
+    )
+    .await?;
+    let w3_sc = encode_scores_workload(
+        "W3_scores",
+        &data.w3_scores,
+        &enabled,
+        &vortex_session,
+        write_threads,
+    )
+    .await?;
     let w4 = encode_spans_workload(
         "W4_adversarial",
         &[&data.w4_spans],
         &enabled,
         &vortex_session,
+        write_threads,
     )
     .await?;
-    let w4_tiny = bench_tiny_flushes(&data.w4_tiny_flushes, &enabled, &vortex_session).await?;
+    let w4_tiny = bench_tiny_flushes(
+        &data.w4_tiny_flushes,
+        &enabled,
+        &vortex_session,
+        write_threads,
+    )
+    .await?;
 
     let mut write_rows = Vec::new();
     write_rows.extend(w1.write_rows.clone());
@@ -294,6 +358,7 @@ async fn run_suite() -> BenchResult<()> {
     let md = render_markdown_report(
         scale.label(),
         &machine_summary(),
+        write_threads,
         &enabled,
         &write_rows,
         &query_rows,

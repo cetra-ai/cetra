@@ -295,6 +295,7 @@ pub fn gdpr_rewrite_day(
                 || toc.frames.iter().any(|f| f.filter_len > 0),
             compress_toc_lz4: (toc.postscript.flags & (PACK_FLAG_TOC_LZ4 | PACK_FLAG_TOC_ZSTD))
                 != 0,
+            write_threads: 1,
         };
         let mut builder = ChunkPackBuilder::new(new_pack_id, pack_opts);
 
@@ -663,6 +664,7 @@ mod tests {
             target_frame_raw_bytes: 16 * 1024,
             enable_trigram_skip: true,
             compress_toc_lz4: true,
+            write_threads: 1,
         }
     }
 
@@ -1220,6 +1222,7 @@ mod tests {
             target_frame_raw_bytes: 256 * 1024,
             enable_trigram_skip: true,
             compress_toc_lz4: true,
+            write_threads: 1,
         };
         let mut pb = ChunkPackBuilder::new_with_dict(pack_id, pack_opts);
 
