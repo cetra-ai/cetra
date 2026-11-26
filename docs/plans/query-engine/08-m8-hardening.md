@@ -1,6 +1,6 @@
 # Track QE — Milestone 8 Implementation Plan (Post-Review Hardening & Verification Gates)
 
-**Status:** Approved (Neon High R1: 8 Blockers, 8 Majors, 5 Minors — all resolved below)
+**Status:** Done (2026-11-26) — All waves H1–H4b implemented, cold-reviewed by Neon High, and verified across H5–H6.
 **Track / Milestone:** QE — M8 (Hardening follow-up to M1–M7 on branch `qe-query-engine`)
 **Source:** Clean-room blind design review (`qe_plan_blind_review.md`) + read-only code triage (`qe_code_triage.md`) against PR #267 (`e63bd7c`)
 **Scope:** Close **all 9 confirmed Blockers**, **Seam #3**, **all 26 confirmed Majors**, **12 remaining Minors** (`QE-m13` slim `arrow` umbrella swap explicitly deferred until Statam replaces Parquet), **1 newly discovered `ChunkFlusher` reservation leak** in `reads/facets.rs`, and **CodeQL alerts `#152` & `#153`** across `H1`–`H4b` + full verification (`H5`) + Neon High cold code review (`H6`).
@@ -230,7 +230,26 @@ Closed: `QE-B1` (column side), `QE-B2`, `QE-M3`, `QE-M4` (types side), `QE-M35`,
 
 ---
 
-## Phases H5 & H6 — Verification Gates (`QE-B20`) & Cold Neon High Review
+## Phases H5 & H6 — Verification Gates (`QE-B20`) & Cold Neon High Review *(Done)*
 
-- **H5:** Run `just check`, `just e2e`, `just resources-memory`, `just resources`, `just model 100`, `just stress 60`, locally available extended gates (`just lazyfs`, `just model-s3`, `just s3-chaos`, bounded `just fuzz`), and post-cutover `trace_bench` + `ingest_bench`.
-- **H6:** Cold Gemini 4 Neon (High) review over `git diff e63bd7c..HEAD`, fix any findings, sync `design.md`, final `just check`, and push to PR #267.
+### H5 Verification Results (2026-11-26, Linux 7.3.4, Ryzen 9 3950X 16c/32t, 62 GiB RAM)
+
+- **`just check`:** PASS (Rust fmt/clippy/unit/integration/crash/doctests, `cargo-deny` policy, EE headers, golden dirs, web, Python SDK, TypeScript SDK, `node-cli`, 545-page docs site + link validator).
+- **`just e2e`:** PASS (embedded UI + Rust e2e + Python SDK + TypeScript SDK + `node-cli` against live `cetra serve`).
+- **`just resources` (`small_fs`, `disk_full`, `descriptors`):** PASS (15/15 tests, including `SPILL_SQL` + `a_spilling_query_stops_at_min_free` + low `RLIMIT_NOFILE`).
+- **`just resources-memory` (with `mimalloc` in `cetra-storage` lib tests matching `cetra-cli` / `tests/it/main.rs`, M5-8):**
+  - `child_sees_the_scope_limit`: **PASS**
+  - `defaults_at_the_documented_minimum` (10.5 GiB cgroup limit): **PASS** (`peak_rss = 8.85 GiB`, `6,695` queries ok, `0` `too_large`, `0` `busy`).
+  - `small_profile_at_its_minimum` (provisional 1.25 GiB limit): killed at `1.25 GiB` under `mimalloc` on 32 cores (measured `1.51 GiB` peak RSS under 4 GiB scope — **>2.1× lower** than DataFusion + `mimalloc` on `main`'s `3.21 GiB`; with `MALLOC_ARENA_MAX=2` glibc, passes at `1.25 GiB` with `1.11 GiB` peak RSS). `MIN_MEMORY_SMALL` remains untouched per `hardening.md` M5-7/M5-8.
+- **`just model 100`:** PASS (3/3 tests, 15.74s).
+- **`just model-s3 50`:** PASS (1/1 test, 87.99s).
+- **`just stress 60`:** PASS (19 epochs, 95 rounds, 5,492 steps, 409,439 matched reads, 0 busy/stale/wait_limit, 712 compaction passes, 4,968 GC deletions, 60.13s).
+- **ASan libFuzzer (`CC=clang` `just fuzz-ci <target> 20`, all 7 targets):** PASS — **1,500,753 total runs, 0 crashes, 0 OOMs, 0 timeouts** (`column_frame`: 62,186; `query_expr`: 8,676; `sql`: 61,242; `wal_record`: 1,229,970; `wal_replay`: 76,184; `parquet_file`: 6,736; `filter_dsl`: 55,759).
+- **`ingest_bench` (15s, oasst2 corpus):** PASS — **34,339 spans/s** (`166.4 MiB/s`), `5.60×` compression, `28.8 MiB/s` compaction (0 failed), `1.99` write amplification.
+- **`trace_bench` (100k traces / 1M spans, oasst2 corpus, 122 spans files, 2.5 GiB on disk):** **9/9 PASS, 0 differing IDs** — Q1 `2.9ms` p50 (`3.7ms` p95), Q2 `9.5ms` p50, Q2r-2h `10.2ms`, Q2r-15h `22.6ms`, Q3 `2.9ms` p50 (`3.1ms` p95), Q6 `12.0ms`, Q4a `15.5ms`, Q4b `15.5ms`, Q5 SQL `93.8ms` p50 (`99.4ms` p95), 5-measure widget series `86.3ms` p50; peak RSS `3.6 GiB`.
+- **Skipped due to missing host binaries:** `just lazyfs` (`lazyfs` binary not installed) and `just s3-chaos` (`versitygw`/`toxiproxy-server` not installed; `s3_chaos` & `s3_probe` targets verified compiling cleanly).
+
+### H6 Cold Reviews & Final Sync
+
+- Every wave (`H1`, `H2`, `H3a`, `H3b`, `H4a`, `H4b`) received an independent cold Neon High code review and every finding was fixed and verified in follow-up commits (`e2af788`, `fb9268b`, `43386a3`, `9eec660`, `e131209`).
+- `design.md` synced with hardened contracts (`Arc<Column>`, `EvalCache`, `MapProjection`, CNF `substrings`, `SpillAppender`, `ScopedPool::child`, `bg_workers`, `ScoresSource` pre-LWW pushdown).

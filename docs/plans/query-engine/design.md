@@ -1,4 +1,4 @@
-Status: done (2026-11-26). M1–M7 complete: `cetra-column` and `cetra-query` live across the workspace; DataFusion removed completely (`arrow`/`parquet` isolated inside `cetra-storage::file_format` and `engine/parquet_*` until Strata).
+Status: done (2026-11-26). M1–M8 complete: `cetra-column` and `cetra-query` live and hardened across the workspace; DataFusion removed completely (`arrow`/`parquet` isolated inside `cetra-storage::file_format` and `engine/parquet_*` until Strata).
 
 # QE · Custom query engine and columnar format — design
 
@@ -143,11 +143,11 @@ HTTP / MCP / CLI / Alerts / Online Rules / SSE / Storage Maintenance
   - `MapUtf8` (string-to-string maps for `metadata`, `attributes`, `resource_attributes`),
   - Dedicated typed `Events` and `Links` columns matching spec 01's fixed struct lists (D-QE-11), formatting to JSON only at API and SQL output boundaries.
 
-**Column encodings.** Every column in a `Batch` is one of four representations:
+**Column encodings.** Every column in a `Batch` is stored as `Arc<Column>` (zero-copy projection/pass-through) in one of four representations:
 - `Flat`: contiguous value buffers + optional null bitmap.
-- `Const`: one scalar value (or null) repeated for the batch length (zero allocation for all-null columns, literals, partition constants and schema-evolution missing columns).
-- `Dict`: dictionary of distinct values + compact integer codes (`u16` or `u32`) + optional null bitmap — preserves Parquet and Strata dictionary encoding into filtering and hashing without eager string expansion.
-- `Rle`: run-length encoded values + run lengths — preserves sorted/low-cardinality runs from Strata.
+- `Const`: one scalar value (or null) repeated for the batch length (zero allocation for all-null columns, literals, partition constants and schema-evolution missing columns; zero-alloc wire encoding).
+- `Dict`: dictionary of distinct values (`Arc<FlatColumn>`) + compact integer codes (`u16` or `u32`) + optional null bitmap — preserves Parquet and Strata dictionary encoding into filtering and hashing without eager string expansion.
+- `Rle`: run-length encoded values (`Arc<FlatColumn>`) + run lengths — preserves sorted/low-cardinality runs from Strata.
 
 Operators that benefit from encodings (`Filter`, `HashAgg`, `Facets`, `Project`) work on them directly; any operator requiring flat data calls a single `materialize` path tracked against `MemoryPool`.
 
@@ -162,9 +162,9 @@ Filtering updates `Selection` instead of copying 50 KiB `input`/`output` strings
 - `MemoryPool` (`cetra-column`, synchronous and `tokio`-free): replaces DataFusion's memory pool while preserving every spec 03 § Resource limits guarantee:
   - Process-wide global cap split into query budget and separate `compaction.max_memory` budget.
   - Synchronous `try_admit(initial_bytes)` + release-notification hook; `cetra-storage` wraps this asynchronously with `tokio::sync::Notify` to wait up to `query.admission_wait` before returning `503 busy` (D-A1-8).
-  - `FairSpill` accounting (D-A1-13) dividing a query's cap fairly across concurrent spillable consumers while protecting unspillable allocations.
+  - `FairSpill` accounting (D-A1-13) dividing a query's cap fairly across concurrent spillable consumers while protecting unspillable allocations, plus demand-allocated `ScopedPool::child(name, cap)` for per-field facet isolation and atomic `Reservation::transfer_to` across pipeline stages.
   - Every `Batch` buffer, hash table, sort run, accumulator and string-expression output reserves its byte footprint before allocating (`Batch::memory_bytes()` also drives memtable `flush.max_bytes` and `memtable.hard_limit`); failure returns `TooLarge` (`422 query_too_large`). Dropping any guard releases bytes immediately.
-- `CancelToken`: cheap atomic flag shared across I/O prefetchers and CPU workers, checked on every batch boundary and inside long loops (regex, string scan, merge). Dropping a query or export stream triggers cancellation and synchronously drains in-flight CPU workers so no detached task holds `MemoryPool` reservations past drop.
+- `CancelToken`: cheap atomic flag with race-free `register_waker` notifications shared across I/O prefetchers and CPU workers, checked on every batch boundary and inside long loops (regex, string scan, merge). Dropping a query or export stream triggers cancellation and synchronously drains in-flight CPU workers so no detached task holds `MemoryPool` reservations past drop.
 
 **Checksummed binary batch framing.** Replaces Arrow IPC for WAL records and temporary spill files (+ LZ4 compression), preserving every hardening invariant of `wal/record.rs`:
 - CRC-32C checksum over header + payload;
@@ -176,19 +176,19 @@ Filtering updates `Selection` instead of copying 50 KiB `input`/`output` strings
 The boundary between `cetra-query` and any table/file implementation (`ParquetSource`, future `StrataSource`, memtable, or server-registered in-memory `BatchSource`).
 
 A scan receives a `ScanSpec` describing:
-- **Projection:** exact columns needed, plus **projected map keys** (e.g. `metadata['customer']`, `attributes['http.status_code']`). Strata reads a shredded sub-column; Parquet reads the map column.
+- **Projection:** exact columns needed, plus **projected map access (`MapProjection`: `KeysOnly`, `Keys(BTreeSet<String>)`, `Full`)** (e.g. `map_keys(metadata)` skips Parquet value leaves; `metadata['customer']` lets Strata read a shredded sub-column).
 - **Time bounds & pruning hints:**
   - nanosecond range on `start_time` (or `created_at` for scores), derived from the user window, `visible_from` (D-P-21), and `WHERE` predicates;
   - trace-anchor day widening (±1 day slack on file day pruning for `spans` and `traces`, exact on memtable, D86);
   - `QueryOptions::around` (±1 day pruning hint for trace lookups, D154).
 - **ID lookups:** equality or `IN (...)` sets on binary IDs (`trace_id`, `span_id`) and string IDs (`session_id`, `user_id`), enabling bloom-filter and sort-key pruning.
 - **Pushdown predicates:** conjunctive comparisons (`=`, `!=`, `<`, `<=`, `>`, `>=`, `IN`, `IS [NOT] NULL`, `@>`).
-- **Substring search hints:** `column ILIKE '%needle%'` / `LIKE` predicates pushed down so Strata can use its n-gram frame index and unique-chunk scanning, while Parquet applies late materialization (filter light columns before reading heavy payload columns).
+- **Substring search hints:** CNF (`Vec<Vec<SubstringHint>>`, outer AND, inner OR) `column ILIKE '%needle%'` / `LIKE` predicates pushed down so Strata can use its n-gram frame index and unique-chunk scanning, while Parquet applies late materialization (filter light columns before reading heavy payload columns).
 - **Sort & limit hints:** optional `limit` and requested ordering (e.g. `start_time DESC LIMIT 50`) for widening-window early stop.
 
 **Mandatory pushdown safety invariants (enforced by storage sources, never violated by the optimizer):**
 - **`TracesSource`:** only `start_time` (padded by `±trace_lookback`) and `trace_id` `=`/`IN` may be pushed below `TraceMerger` (spec 03 §6). All other filters evaluate *after* partials are merged.
-- **`ScoresSource`:** only `created_at` may be pushed below LWW deduplication. Pushing `name`, `deleted`, or `value_num` below LWW would resurrect superseded versions.
+- **`ScoresSource`:** only `created_at` and immutable `score_id` (plus infallible conjuncts over them) may be pushed below LWW deduplication (`trace_id`, `name`, `deleted`, and `value_num` can change on explicit `score_id` upsert and must evaluate post-LWW).
 - **Parquet schema evolution:** scanning an older file that lacks a newly added nullable column produces `Const(Null)` for that column (spec 03 §3).
 
 **Row-level storage semantics owned by `cetra-storage`:**
@@ -216,8 +216,9 @@ A scan receives a `ScanSpec` describing:
 
 Queries compile to a DAG of **pipelines** separated by pipeline breakers (`HashAgg`, `Sort`, `HashJoin` build side, `Window` partition sort, `TraceMerger` barrier):
 
-- **Bounded CPU worker pool:** one process-wide worker pool with an 8 MiB worker stack size (matching `cetra-cli`'s Tokio worker stack) runs synchronous batch loops at concurrency bounded by `storage.query.target_partitions`. Tokio handles only disk/S3/network I/O.
-- **Batch flow & early stop:** operators process fixed-cap batches (exact default batch size tuned in M3; spec 05's `batch_size` note updates in M7 if changed from 8,192), return `Continue` or `Stop` (for `LIMIT` / `match_count` early exit), and check `CancelToken` every batch.
+- **Bounded CPU worker pools:** one process-wide reentrant query `WorkerPool` (8 MiB worker stacks, concurrency `storage.query.target_partitions`) plus a dedicated low-concurrency `bg_workers` pool (`(target_partitions / 2).clamp(1, 4)`) isolating compaction and media GC from interactive queries, and a shared process-wide `coordinator_slots` semaphore. Tokio handles only disk/S3/network I/O.
+- **Batch flow, caching & early stop:** operators process fixed-cap batches (8,192 rows default, dynamically byte-capped per Parquet row group), share a bounded thread-safe per-query `EvalCache` (regex/LIKE/JSONPath/IN-list, 256 entries / 4 MiB cap), pass `Reservation`s across operators/sinks via `transfer_or_grow`, return `Continue` or `Stop` (with two-token `LimitOp` early-stop cancellation), and check `CancelToken` every batch.
+- **Zero-lookahead streaming `WindowStream`:** `ROW_NUMBER`, `RANK`, `DENSE_RANK`, bounded `LAG`, and `ROWS` frames with `end_bound <= CURRENT ROW` stream directly off `ExternalSort` in O(1)/bounded memory without materializing full partitions.
 - **Thread-local aggregation & shared scans:**
   - `HashAgg`, `TopK`, `Facets`, and `WidgetAgg` keep lock-free thread-local state per worker and perform one final combine.
   - **`POST /facets` (with per-field error isolation matching spec 05):**
@@ -234,7 +235,7 @@ Queries compile to a DAG of **pipelines** separated by pipeline breakers (`HashA
     - Breakdown widgets (`limit` 1–20, `other: true`) run in **two bounded scans** per range: pass 1 ranks the top-`limit` groups by the first measure (spillable `HashAgg`); pass 2 computes all measures across buckets for those ≤20 groups plus one `other` group in one shared scan (avoiding `O(all_groups × 2,000 buckets)` accumulators).
 - **Spilling (out-of-core execution):**
   - Streaming operators (`Scan`, `Filter`, `Project`, `TopK`, `Limit`, `Union`) run in small fixed RAM.
-  - `Sort`, `HashAgg`, `HashJoin`, and `TraceMerger` spill runs/partitions to `<data_dir>/tmp/query/` using `cetra-column` binary framing, integrated with `Disk` to enforce `storage.min_free_bytes`, mapping `ENOSPC`/`EDQUOT` to `422 query_too_large`, and bounding open file descriptors during k-way merge (spec 03 § Resource needs).
+  - `Sort`, `HashAgg` (including spillable global and grouped `COUNT(DISTINCT)` via `ExternalSort` + left-outer merge), `HashJoin`, and `TraceMerger` spill runs/partitions to `<data_dir>/tmp/query/` using `cetra-column` binary framing and zero-idle-FD `SpillAppender`s (keeping peak open FDs `<= MAX_MERGE_WAY + 1 = 33`), integrated with `Disk` to enforce `storage.min_free_bytes` (spec 03 § Resource needs).
 
 #### 4. Filter DSL & Shape B SQL contract
 
@@ -337,6 +338,7 @@ Milestones run in order. Each gets its own plan written just before it starts, f
 - [x] **M5** — Shape B SQL frontend (`sql/`) and exports
 - [x] **M6** — Storage internals, WAL framing and memtable migration
 - [x] **M7** — Atomic workspace cut-over, DataFusion removal, and full verification
+- [x] **M8** — Post-review architectural hardening, security/DoS bounds, and verification gates (`08-m8-hardening.md`)
 
 ### M1 — `cetra-column` data plane and checksummed binary framing *(Done)*
 

@@ -33,7 +33,6 @@
 
 use std::future::Future;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use bytesize::ByteSize;
@@ -47,10 +46,11 @@ use cetra_storage::config::{
     WalSync,
 };
 use cetra_storage::{
-    Agg, Bucket, BucketWidth, ListScope, Measure, Page, QueryContext, QueryOptions, Shape,
-    SortOrder, TimeWindow, TraceListRequest, TraceSort, WidgetQuery, WidgetRequest, WidgetSource,
-    trace_detail, trace_list, trace_list_plan, widget_query,
+    Agg, Bucket, BucketWidth, ListScope, Measure, Page, QueryContext, QueryOptions, SQL_MAX_ROWS,
+    Shape, SortOrder, SqlRequest, TimeWindow, TraceListRequest, TraceSort, WidgetQuery,
+    WidgetRequest, WidgetSource, trace_detail, trace_list, trace_list_plan, widget_query,
 };
+use chrono::{TimeZone, Utc};
 use common::corpus::{CORPUS_SHA256, Corpus};
 use common::machine::{dir_bytes, machine};
 use common::payload::{Payloads, span_payload_bytes};
@@ -1263,13 +1263,27 @@ async fn run_benchmark(
         }
 
         // Q5 — SQL dashboard over the 7 days.
+        let empty_params = serde_json::Map::new();
         let stats = measure(untimed, || async {
-            let res = ctx.sql_json(Q5_SQL, 30_000, TIMEOUT).await.unwrap();
+            let res = ctx
+                .sql_json(SqlRequest {
+                    query: Q5_SQL,
+                    params: &empty_params,
+                    limit: SQL_MAX_ROWS,
+                    timeout: TIMEOUT,
+                })
+                .await
+                .unwrap();
             std::hint::black_box(res.rows.len());
         })
         .await;
         let q5_rows = ctx
-            .sql_json(Q5_SQL, 30_000, TIMEOUT)
+            .sql_json(SqlRequest {
+                query: Q5_SQL,
+                params: &empty_params,
+                limit: SQL_MAX_ROWS,
+                timeout: TIMEOUT,
+            })
             .await
             .unwrap()
             .rows
@@ -1435,7 +1449,15 @@ async fn run_benchmark(
                     }
                 }
                 MissKind::Sql => {
-                    let _ = ctx.sql_json(Q5_SQL, 30_000, TIMEOUT).await;
+                    let empty_params = serde_json::Map::new();
+                    let _ = ctx
+                        .sql_json(SqlRequest {
+                            query: Q5_SQL,
+                            params: &empty_params,
+                            limit: SQL_MAX_ROWS,
+                            timeout: TIMEOUT,
+                        })
+                        .await;
                 }
             }
         }

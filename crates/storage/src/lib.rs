@@ -140,6 +140,12 @@ pub mod fuzz_entry;
 #[doc(hidden)]
 pub use file_format::read_parquet_rows_for_test;
 
+// The shipped binary's allocator (D56), so the lib resource tests (`model_tests::resources::memory`)
+// measure the memory `cetra` uses rather than glibc per-thread arenas (M5-8).
+#[cfg(test)]
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 #[cfg(test)]
 mod crash_tests;
 #[cfg(test)]
@@ -363,7 +369,7 @@ impl QeRuntime {
         Ok(pool)
     }
 
-    #[cfg(any(test, fuzzing))]
+    #[cfg(test)]
     pub(crate) fn for_test() -> Arc<Self> {
         Self::for_test_with_cache(64 << 20)
     }
