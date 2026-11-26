@@ -5,22 +5,43 @@ use std::sync::{Arc, OnceLock};
 
 use cetra_column::{
     Batch, BinaryData, Bitmap, COST_DECIMAL_PRECISION, COST_DECIMAL_SCALE, CancelToken, Column,
-    DataType, DictColumn, Field, FlatColumn, FlatData, GlobalPool, Interval, MapData, RleColumn,
-    ScalarValue, Schema, Selection, Utf8Data,
+    DataType, DictColumn, EventItem, Field, FlatColumn, FlatData, GlobalPool, Interval, LinkItem,
+    MapData, RleColumn, ScalarValue, Schema, Selection, Utf8Data,
 };
+use serde_json::{Map, Value};
 
 use crate::bind::{bind_expr, compile_filter};
+use crate::encode::{
+    EXPORT_MAX_CHUNK_BYTES, EXPORT_PIECE_BYTES, encode_csv_chunk, encode_csv_header,
+    encode_ndjson_chunk, export_piece_ranges,
+};
 use crate::eval::{eval_expr, eval_filter};
+use crate::exec::{BatchSource, ExecContext, ExecMetrics, SpillManager, WorkerPool};
 use crate::filter::{FilterView, like_pattern, parse_filter_ast};
 use crate::fn_time::{parse_date_days, parse_interval, parse_timestamp_ns};
 use crate::ir::{EvalContext, Expr};
+use crate::sql::{
+    LogicalPlan, ParamKind, SqlCatalog, SqlSources, execute_plan_json, parse_and_validate_sql,
+    prepare_sql_plan, raw_scores_schema, raw_spans_schema, raw_traces_schema, sql_check,
+    sql_export_plan_stream,
+};
 use crate::text::{FILTER_LIMITS, TextKind, expect_end, parser, tokenize};
 use crate::tombstone::{TombstoneSpec, TombstoneTable, covered_predicate, filter_uncovered};
 
 const FUZZ_POOL_LIMIT: usize = 256 * 1024;
+const FUZZ_SQL_POOL_LIMIT: usize = 1024 * 1024;
 const FUZZ_NOW_NS: i64 = 1_767_225_700_000_000_000;
 
 static FUZZ_BATCHES: OnceLock<Option<(Batch, Batch)>> = OnceLock::new();
+static FUZZ_SQL_ENV: OnceLock<Option<FuzzSqlEnv>> = OnceLock::new();
+
+struct FuzzSqlEnv {
+    catalog: SqlCatalog,
+    sources: SqlSources,
+    workers: Arc<WorkerPool>,
+    spill: Arc<SpillManager>,
+    _spill_dir: tempfile::TempDir,
+}
 
 /// Exercises Filter DSL parsing & compilation, SQL expression parsing & binding, vectorized
 /// evaluation with `Reservation` accounting, `fn_time` parsers, and `tombstone` predicates.
@@ -429,6 +450,328 @@ fn try_build_fuzz_batches() -> Result<(Batch, Batch), cetra_column::ColumnError>
     Ok((batch_all, batch_masked))
 }
 
+// ---------------------------------------------------------------------------
+// Shape B SQL fuzzer (`fuzz_sql`)
+// ---------------------------------------------------------------------------
+
+/// Exercises Shape B SQL tokenization, parameter scanning/coercion, parsing, validation,
+/// binding, optimization, compilation, and execution on small synthetic `BatchSource` tables
+/// under a tight 1 MiB `ScopedPool`. Must never panic.
+pub fn fuzz_sql(data: &[u8]) {
+    let Some(env) = FUZZ_SQL_ENV.get_or_init(build_fuzz_sql_env).as_ref() else {
+        return;
+    };
+
+    let text_cow = String::from_utf8_lossy(data);
+    let text = text_cow.as_ref();
+    let registered = env.catalog.registered_names();
+
+    let Ok((_, placeholders)) = parse_and_validate_sql(text, &registered) else {
+        return;
+    };
+
+    let mut params = Map::new();
+    for (idx, ph) in placeholders.iter().enumerate() {
+        let use_bad = data.get(idx).is_some_and(|b| (*b & 0x80) != 0);
+        let val = if use_bad {
+            Value::String("bad-param".to_owned())
+        } else {
+            match ph.kind {
+                ParamKind::String => Value::String("llm".to_owned()),
+                ParamKind::Int => Value::from(1),
+                ParamKind::Float => Value::from(0.5),
+                ParamKind::Bool => Value::from(true),
+                ParamKind::Timestamp => Value::String("2026-01-01T00:00:00Z".to_owned()),
+            }
+        };
+        params.insert(ph.name.clone(), val);
+    }
+
+    let _ = sql_check(&env.catalog, text, &params);
+
+    let Ok(plan) = prepare_sql_plan(&env.catalog, text, &params) else {
+        return;
+    };
+
+    // Guard against exponential multi-way cartesian products timing out libFuzzer.
+    if count_joins(&plan) > 4 {
+        return;
+    }
+
+    let pool = GlobalPool::standalone(FUZZ_SQL_POOL_LIMIT);
+    let ctx = ExecContext {
+        pool: Arc::clone(&pool),
+        eval: EvalContext {
+            now_ns: FUZZ_NOW_NS,
+            cancel: CancelToken::new(),
+        },
+        spill: Arc::clone(&env.spill),
+        workers: Arc::clone(&env.workers),
+        batch_size: 16,
+        target_partitions: 2,
+        metrics: ExecMetrics::default(),
+    };
+
+    let _ = execute_plan_json(&plan, &env.sources, &ctx, 16, 256 * 1024);
+
+    if let Ok((schema, mut stream)) = sql_export_plan_stream(&plan, &env.sources, &ctx, 16) {
+        let _ = encode_csv_header(&schema);
+        let mut pull_res = pool.register("fuzz_export_pull", false);
+        for _ in 0..4 {
+            match stream.next_batch(&ctx.eval.cancel, Some(&mut pull_res)) {
+                Ok(Some(batch)) => {
+                    if !batch.is_empty()
+                        && let Ok(ranges) =
+                            export_piece_ranges(&batch, EXPORT_PIECE_BYTES, EXPORT_MAX_CHUNK_BYTES)
+                    {
+                        for range in ranges {
+                            let _ = encode_csv_chunk(
+                                &batch,
+                                range.clone(),
+                                EXPORT_MAX_CHUNK_BYTES,
+                                None,
+                            );
+                            let _ =
+                                encode_ndjson_chunk(&batch, range, EXPORT_MAX_CHUNK_BYTES, None);
+                        }
+                    }
+                    drop(batch);
+                    pull_res.free();
+                }
+                Ok(None) | Err(_) => {
+                    pull_res.free();
+                    break;
+                }
+            }
+        }
+        drop(stream);
+        pull_res.free();
+    }
+    assert_eq!(pool.reserved(), 0, "fuzz_sql leaked pool reservation");
+}
+
+fn count_joins(plan: &LogicalPlan) -> usize {
+    match plan {
+        LogicalPlan::Scan { .. } | LogicalPlan::Values { .. } | LogicalPlan::EmptyRow { .. } => 0,
+        LogicalPlan::Filter { input, .. }
+        | LogicalPlan::Project { input, .. }
+        | LogicalPlan::Aggregate { input, .. }
+        | LogicalPlan::Window { input, .. }
+        | LogicalPlan::Sort { input, .. }
+        | LogicalPlan::Limit { input, .. }
+        | LogicalPlan::TopK { input, .. }
+        | LogicalPlan::Distinct { input }
+        | LogicalPlan::Unnest { input, .. }
+        | LogicalPlan::Explain { inner: input, .. } => count_joins(input),
+        LogicalPlan::Join { left, right, .. } => 1 + count_joins(left) + count_joins(right),
+        LogicalPlan::Union { inputs, .. } => inputs.iter().map(count_joins).sum(),
+    }
+}
+
+fn build_fuzz_sql_env() -> Option<FuzzSqlEnv> {
+    try_build_fuzz_sql_env().ok()
+}
+
+fn try_build_fuzz_sql_env() -> Result<FuzzSqlEnv, crate::error::QueryError> {
+    let mut catalog = SqlCatalog::new(None, None);
+    let mut sources = SqlSources::new();
+
+    let spans_schema = raw_spans_schema();
+    let spans_batch = build_synthetic_2row_batch(&spans_schema)?;
+    sources.register(
+        "spans",
+        Arc::new(BatchSource::new(spans_schema, vec![spans_batch])?),
+    );
+
+    let traces_schema = raw_traces_schema();
+    let traces_batch = build_synthetic_2row_batch(&traces_schema)?;
+    sources.register(
+        "traces",
+        Arc::new(BatchSource::new(traces_schema, vec![traces_batch])?),
+    );
+
+    let scores_schema = raw_scores_schema();
+    let scores_batch = build_synthetic_2row_batch(&scores_schema)?;
+    sources.register(
+        "scores",
+        Arc::new(BatchSource::new(scores_schema, vec![scores_batch])?),
+    );
+
+    let ds_schema = Schema::try_new_arc(vec![
+        Field::new("id", DataType::I64, false),
+        Field::new("label", DataType::Utf8, true),
+    ])?;
+    let ds_batch = Batch::try_new_all(
+        Arc::clone(&ds_schema),
+        vec![
+            Column::Flat(FlatColumn::try_new(FlatData::I64(vec![1, 2]), None)?),
+            Column::Flat(FlatColumn::try_new(
+                FlatData::Utf8(Utf8Data::try_from_slices(["pass", "fail"])?),
+                None,
+            )?),
+        ],
+        2,
+    )?;
+    let ds_src = Arc::new(BatchSource::new(ds_schema, vec![ds_batch])?);
+    catalog.register_batch_source("dataset_items", Arc::clone(&ds_src))?;
+    sources.register("dataset_items", ds_src);
+
+    let spill_dir =
+        tempfile::tempdir().map_err(|e| crate::error::QueryError::internal(e.to_string()))?;
+    let spill = Arc::new(SpillManager::with_fixed_cap(
+        spill_dir.path().to_path_buf(),
+        1024 * 1024,
+    ));
+    let workers = Arc::new(WorkerPool::new(1)?);
+
+    Ok(FuzzSqlEnv {
+        catalog,
+        sources,
+        workers,
+        spill,
+        _spill_dir: spill_dir,
+    })
+}
+
+fn build_synthetic_2row_batch(schema: &Arc<Schema>) -> Result<Batch, cetra_column::ColumnError> {
+    let mut cols = Vec::with_capacity(schema.len());
+    let tid1 = [
+        0x00, 0x01, 0x00, 0x01, 0x00, 0x01, 0x00, 0x01, 0x00, 0x01, 0x00, 0x01, 0x00, 0x01, 0x00,
+        0x01,
+    ];
+    let tid2 = [
+        0x00, 0x02, 0x00, 0x02, 0x00, 0x02, 0x00, 0x02, 0x00, 0x02, 0x00, 0x02, 0x00, 0x02, 0x00,
+        0x02,
+    ];
+    let sid1 = [0x11; 8];
+    let sid2 = [0x22; 8];
+
+    for field in schema.fields() {
+        let col = match (field.name.as_str(), &field.data_type) {
+            ("trace_id", DataType::FixedBytes16) => Column::Flat(FlatColumn::try_new(
+                FlatData::FixedBytes16(vec![tid1, tid2]),
+                None,
+            )?),
+            ("span_id" | "root_span_id", DataType::FixedBytes8) => Column::Flat(
+                FlatColumn::try_new(FlatData::FixedBytes8(vec![sid1, sid2]), None)?,
+            ),
+            ("span_kind", DataType::Utf8) => Column::Flat(FlatColumn::try_new(
+                FlatData::Utf8(Utf8Data::try_from_slices(["llm", "tool"])?),
+                None,
+            )?),
+            ("status", DataType::Utf8) => Column::Flat(FlatColumn::try_new(
+                FlatData::Utf8(Utf8Data::try_from_slices(["ok", "error"])?),
+                None,
+            )?),
+            ("source", DataType::Utf8) => Column::Flat(FlatColumn::try_new(
+                FlatData::Utf8(Utf8Data::try_from_slices(["llm_judge", "api"])?),
+                None,
+            )?),
+            ("name", DataType::Utf8) => Column::Flat(FlatColumn::try_new(
+                FlatData::Utf8(Utf8Data::try_from_slices(["chat", "search"])?),
+                None,
+            )?),
+            ("model" | "release" | "session_id" | "user_id" | "evaluator_id", DataType::Utf8) => {
+                Column::Flat(FlatColumn::try_new(
+                    FlatData::Utf8(Utf8Data::try_from_slices(["v1", "v2"])?),
+                    None,
+                )?)
+            }
+            ("start_time" | "created_at", DataType::TimestampNs { utc }) => {
+                Column::Flat(FlatColumn::try_new(
+                    FlatData::TimestampNs {
+                        values: vec![1_767_225_600_000_000_000, 1_767_225_660_000_000_000],
+                        utc: *utc,
+                    },
+                    None,
+                )?)
+            }
+            (
+                "end_time" | "updated_at" | "ingest_time" | "last_ingest_time",
+                DataType::TimestampNs { utc },
+            ) => Column::Flat(FlatColumn::try_new(
+                FlatData::TimestampNs {
+                    values: vec![1_767_225_601_000_000_000, 1_767_225_662_000_000_000],
+                    utc: *utc,
+                },
+                None,
+            )?),
+            ("duration_ns", DataType::I64) => Column::Flat(FlatColumn::try_new(
+                FlatData::I64(vec![1_000_000_000, 2_000_000_000]),
+                None,
+            )?),
+            ("cost_total" | "value_num", DataType::F64) => {
+                Column::Flat(FlatColumn::try_new(FlatData::F64(vec![0.1, 0.2]), None)?)
+            }
+            (_, DataType::Bool) => Column::Flat(FlatColumn::try_new(
+                FlatData::Bool(Bitmap::from_bools(&[false, true])),
+                None,
+            )?),
+            (_, DataType::I64) => {
+                Column::Flat(FlatColumn::try_new(FlatData::I64(vec![1, 2]), None)?)
+            }
+            (_, DataType::F64) => {
+                Column::Flat(FlatColumn::try_new(FlatData::F64(vec![1.0, 2.0]), None)?)
+            }
+            (_, DataType::Utf8) => Column::Flat(FlatColumn::try_new(
+                FlatData::Utf8(Utf8Data::try_from_slices(["a", "b"])?),
+                None,
+            )?),
+            (_, DataType::TimestampNs { utc }) => Column::Flat(FlatColumn::try_new(
+                FlatData::TimestampNs {
+                    values: vec![1_767_225_600_000_000_000, 1_767_225_660_000_000_000],
+                    utc: *utc,
+                },
+                None,
+            )?),
+            (_, DataType::FixedBytes8) => Column::Flat(FlatColumn::try_new(
+                FlatData::FixedBytes8(vec![sid1, sid2]),
+                None,
+            )?),
+            (_, DataType::FixedBytes16) => Column::Flat(FlatColumn::try_new(
+                FlatData::FixedBytes16(vec![tid1, tid2]),
+                None,
+            )?),
+            (_, DataType::List(inner)) => {
+                let sv = match inner.as_ref() {
+                    DataType::Utf8 => ScalarValue::List {
+                        item_type: DataType::Utf8,
+                        values: vec![ScalarValue::Utf8("alpha".to_owned())],
+                    },
+                    other => ScalarValue::List {
+                        item_type: other.clone(),
+                        values: Vec::new(),
+                    },
+                };
+                Column::try_new_const(sv, 2)?
+            }
+            (_, DataType::MapUtf8) => Column::try_new_const(
+                ScalarValue::MapUtf8(vec![("k1".to_owned(), Some("v1".to_owned()))]),
+                2,
+            )?,
+            (_, DataType::Events) => Column::try_new_const(
+                ScalarValue::Events(vec![EventItem {
+                    time: 1_767_225_600_000_000_000,
+                    name: "ev".to_owned(),
+                    attributes: None,
+                }]),
+                2,
+            )?,
+            (_, DataType::Links) => Column::try_new_const(
+                ScalarValue::Links(vec![LinkItem {
+                    trace_id: tid1,
+                    span_id: sid1,
+                    attributes: None,
+                }]),
+                2,
+            )?,
+            (_, dt) => Column::try_new_const(ScalarValue::Null(dt.clone()), 2)?,
+        };
+        cols.push(col);
+    }
+    Batch::try_new_all(Arc::clone(schema), cols, 2)
+}
+
 #[cfg(test)]
 pub(crate) mod tests {
     use std::path::{Path, PathBuf};
@@ -498,9 +841,91 @@ pub(crate) mod tests {
         ),
     ];
 
+    const SQL_SEEDS: &[(&str, &str)] = &[
+        (
+            "seed-01",
+            "SELECT date_trunc('day', start_time) AS day, model, sum(cost_total) AS cost FROM spans WHERE span_kind = 'llm' AND model IS NOT NULL GROUP BY day, model ORDER BY day, cost DESC",
+        ),
+        (
+            "seed-02",
+            "SELECT model, approx_percentile_cont(duration_ms, 0.5) AS p50, count(*) AS calls FROM spans GROUP BY model ORDER BY calls DESC",
+        ),
+        (
+            "seed-03",
+            "SELECT t.release, s.name, avg(s.value_num) AS avg_score FROM scores s JOIN traces t ON s.trace_id = t.trace_id WHERE s.source = 'llm_judge' GROUP BY t.release, s.name ORDER BY t.release, s.name",
+        ),
+        (
+            "seed-04",
+            "SELECT session_id, trace_count, cost_total, tags FROM sessions WHERE trace_count >= {min:Int} ORDER BY cost_total DESC NULLS LAST LIMIT 10",
+        ),
+        (
+            "seed-05",
+            "WITH cte AS (SELECT trace_id, span_id, duration_ns, row_number() OVER (PARTITION BY trace_id ORDER BY start_time ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS rn FROM spans) SELECT trace_id, span_id FROM cte WHERE rn = 1",
+        ),
+        (
+            "seed-06",
+            "SELECT id, label FROM dataset_items WHERE id IN (SELECT 1) AND id NOT IN (SELECT 99) AND EXISTS (SELECT 1 FROM spans)",
+        ),
+        (
+            "seed-07",
+            "SELECT name, count(*) FILTER (WHERE status = 'error') AS errs, percentile_cont(0.5) WITHIN GROUP (ORDER BY duration_ms DESC) AS p50 FROM spans GROUP BY name",
+        ),
+        (
+            "seed-08",
+            "SELECT unnest(tags) AS tag FROM traces UNION SELECT label FROM dataset_items EXCEPT VALUES ('x')",
+        ),
+        (
+            "seed-09",
+            "EXPLAIN SELECT trace_id, name FROM traces WHERE trace_id = '00010001000100010001000100010001' AND metadata['k1'] = 'v1'",
+        ),
+        (
+            "seed-10",
+            "SELECT coalesce(nullif(name, ''), 'anon') AS n, CAST(duration_ns AS DOUBLE) / 1000.0 AS us FROM spans WHERE start_time >= {since:Timestamp} AND name ILIKE '%chat%'",
+        ),
+    ];
+
     #[test]
     fn replay_query_expr_corpus() {
         replay("query_expr", fuzz_query_expr);
+    }
+
+    #[test]
+    fn replay_sql_corpus() {
+        replay("sql", fuzz_sql);
+    }
+
+    #[test]
+    fn valid_sql_seeds_execute() {
+        let env = try_build_fuzz_sql_env().expect("fuzz sql env");
+        let pool = GlobalPool::standalone(FUZZ_SQL_POOL_LIMIT);
+        let ctx = ExecContext {
+            pool,
+            eval: EvalContext {
+                now_ns: FUZZ_NOW_NS,
+                cancel: CancelToken::new(),
+            },
+            spill: Arc::clone(&env.spill),
+            workers: Arc::clone(&env.workers),
+            batch_size: 16,
+            target_partitions: 2,
+            metrics: ExecMetrics::default(),
+        };
+        for (name, sql) in SQL_SEEDS {
+            let mut params = Map::new();
+            if *name == "seed-04" {
+                params.insert("min".to_owned(), Value::from(1));
+            } else if *name == "seed-10" {
+                params.insert(
+                    "since".to_owned(),
+                    Value::String("2025-01-01T00:00:00Z".to_owned()),
+                );
+            }
+            let plan = prepare_sql_plan(&env.catalog, sql, &params)
+                .unwrap_or_else(|e| panic!("{name} prepare_sql_plan failed: {e}"));
+            execute_plan_json(&plan, &env.sources, &ctx, 16, 256 * 1024)
+                .unwrap_or_else(|e| panic!("{name} execute_plan_json failed: {e}"));
+            assert_eq!(ctx.pool.reserved(), 0, "{name} leaked reservation");
+        }
     }
 
     #[test]
@@ -558,14 +983,21 @@ pub(crate) mod tests {
         }
     }
 
-    /// Writes the seed corpus for `query_expr` (`just fuzz-seed`).
+    /// Writes the seed corpora for `query_expr` and `sql` (`just fuzz-seed`).
     #[test]
     #[ignore]
     fn write_seed_corpus() {
-        let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../fuzz/corpus/query_expr");
-        std::fs::create_dir_all(&dir).expect("create the corpus directory");
+        let fuzz_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../fuzz/corpus");
+        let expr_dir = fuzz_dir.join("query_expr");
+        std::fs::create_dir_all(&expr_dir).expect("create query_expr corpus directory");
         for (name, text) in SEEDS {
-            std::fs::write(dir.join(name), text.as_bytes()).expect("write a seed");
+            std::fs::write(expr_dir.join(name), text.as_bytes()).expect("write query_expr seed");
+        }
+
+        let sql_dir = fuzz_dir.join("sql");
+        std::fs::create_dir_all(&sql_dir).expect("create sql corpus directory");
+        for (name, text) in SQL_SEEDS {
+            std::fs::write(sql_dir.join(name), text.as_bytes()).expect("write sql seed");
         }
     }
 }

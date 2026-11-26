@@ -1,0 +1,1 @@
+SELECT session_id, trace_count, cost_total, tags FROM sessions WHERE trace_count >= {min:Int} ORDER BY cost_total DESC NULLS LAST LIMIT 10

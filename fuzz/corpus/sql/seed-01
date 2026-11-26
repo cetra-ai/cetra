@@ -1,0 +1,1 @@
+SELECT date_trunc('day', start_time) AS day, model, sum(cost_total) AS cost FROM spans WHERE span_kind = 'llm' AND model IS NOT NULL GROUP BY day, model ORDER BY day, cost DESC
