@@ -1,6 +1,6 @@
 //! Exact substring search (`LIKE` / `ILIKE`) over inline payloads and `.stpk` chunk packs.
 
-use std::collections::{BTreeSet, HashMap, HashSet};
+use std::collections::{HashMap, HashSet};
 
 use cetra_column::Bitmap;
 use memchr::memmem;
@@ -241,7 +241,7 @@ fn search_pack_rows_impl(
     }
 
     let mut chunk_rows = Vec::new();
-    let mut needed_chunks = BTreeSet::new();
+    let mut needed_bits = vec![0u64; pack_chunk_count.div_ceil(64)];
 
     visit_active_rows(row_refs.len(), active_mask, |row_idx| {
         match &row_refs[row_idx] {
@@ -255,12 +255,13 @@ fn search_pack_rows_impl(
                 let mut has_pack = false;
                 for &(p, cid) in refs {
                     if p == pack_idx {
-                        if (cid as usize) >= pack_chunk_count {
+                        let cid_usize = cid as usize;
+                        if cid_usize >= pack_chunk_count {
                             return Err(StatamError::Corrupt {
                                 reason: "payload ref chunk_id out of pack bounds",
                             });
                         }
-                        needed_chunks.insert(cid);
+                        bitset_set(&mut needed_bits, cid_usize);
                         has_pack = true;
                     }
                 }
@@ -281,12 +282,13 @@ fn search_pack_rows_impl(
             pack,
             row_refs,
             pack_idx,
+            pack_chunk_count,
             needle,
             case_insensitive,
             read_threads,
             &mut matcher,
             &chunk_rows,
-            &needed_chunks,
+            &needed_bits,
             &mut results,
         )?;
     } else {
@@ -297,7 +299,7 @@ fn search_pack_rows_impl(
             read_threads,
             &mut matcher,
             &chunk_rows,
-            &needed_chunks,
+            &needed_bits,
             &mut results,
         )?;
     }
@@ -310,12 +312,13 @@ fn search_short_needle_rows(
     pack: &ChunkPackReader,
     row_refs: &[PayloadRefRow],
     pack_idx: u16,
+    pack_chunk_count: usize,
     needle: &[u8],
     case_insensitive: bool,
     read_threads: usize,
     matcher: &mut NeedleMatcher,
     chunk_rows: &[usize],
-    needed_chunks: &BTreeSet<u32>,
+    needed_bits: &[u64],
     results: &mut Bitmap,
 ) -> Result<(), StatamError> {
     let skip_boundary = if needle.len() >= 5
@@ -328,16 +331,21 @@ fn search_short_needle_rows(
         false
     };
 
-    // Step A: Interior matches via trigram bloom pruning + single-pass unique chunk scan.
-    let all_needed: Vec<u32> = needed_chunks.iter().copied().collect();
-    let surviving_chunks =
-        filter_candidates_by_trigram(pack, &all_needed, needle, case_insensitive)?;
+    // Step A: Interior matches via frame-level trigram bloom pruning + flat-bitset chunk scan.
+    let surviving_chunks = filter_needed_bits_by_trigram(
+        pack,
+        needed_bits,
+        pack_chunk_count,
+        needle,
+        case_insensitive,
+    )?;
 
     if surviving_chunks.is_empty() && skip_boundary {
         return Ok(());
     }
 
-    let mut matched_chunks = HashSet::new();
+    let mut matched_bits = vec![0u64; needed_bits.len()];
+    let mut any_matched = false;
     if !surviving_chunks.is_empty() {
         if read_threads.clamp(1, crate::parallel::MAX_WRITE_THREADS) > 1 {
             let matched = pack.scan_chunks_in_frames_parallel(
@@ -346,23 +354,27 @@ fn search_short_needle_rows(
                 || Ok(NeedleMatcher::new(needle, case_insensitive)),
                 |m, cid, bytes| m.matches(bytes).then_some(cid),
             )?;
-            matched_chunks.extend(matched);
+            for cid in matched {
+                bitset_set(&mut matched_bits, cid as usize);
+                any_matched = true;
+            }
         } else {
             pack.scan_chunks_in_frames(&surviving_chunks, |cid, bytes| {
                 if matcher.matches(bytes) {
-                    matched_chunks.insert(cid);
+                    bitset_set(&mut matched_bits, cid as usize);
+                    any_matched = true;
                 }
             })?;
         }
     }
 
     if skip_boundary {
-        if !matched_chunks.is_empty() {
+        if any_matched {
             for &row_idx in chunk_rows {
                 if let PayloadRefRow::Chunks(refs) = &row_refs[row_idx]
                     && refs
                         .iter()
-                        .any(|&(p, cid)| p == pack_idx && matched_chunks.contains(&cid))
+                        .any(|&(p, cid)| p == pack_idx && bitset_get(&matched_bits, cid as usize))
                 {
                     let _ = results.set(row_idx, true);
                 }
@@ -371,19 +383,24 @@ fn search_short_needle_rows(
         return Ok(());
     }
 
-    let mut remaining_rows = Vec::new();
-    for &row_idx in chunk_rows {
-        if let PayloadRefRow::Chunks(refs) = &row_refs[row_idx] {
-            let hit = refs
-                .iter()
-                .any(|&(p, cid)| p == pack_idx && matched_chunks.contains(&cid));
-            if hit {
-                let _ = results.set(row_idx, true);
-            } else {
-                remaining_rows.push(row_idx);
+    let mut remaining_owned = Vec::new();
+    let remaining_rows: &[usize] = if any_matched {
+        for &row_idx in chunk_rows {
+            if let PayloadRefRow::Chunks(refs) = &row_refs[row_idx] {
+                let hit = refs
+                    .iter()
+                    .any(|&(p, cid)| p == pack_idx && bitset_get(&matched_bits, cid as usize));
+                if hit {
+                    let _ = results.set(row_idx, true);
+                } else {
+                    remaining_owned.push(row_idx);
+                }
             }
         }
-    }
+        &remaining_owned
+    } else {
+        chunk_rows
+    };
 
     if remaining_rows.is_empty() {
         return Ok(());
@@ -391,7 +408,7 @@ fn search_short_needle_rows(
 
     // Step B: Cross-chunk boundary matches using EdgeTable (0 extra data frame reads).
     let mut distinct_pairs = HashSet::new();
-    for &row_idx in &remaining_rows {
+    for &row_idx in remaining_rows {
         if let PayloadRefRow::Chunks(refs) = &row_refs[row_idx] {
             for w in refs.windows(2) {
                 if w[0].0 == pack_idx && w[1].0 == pack_idx {
@@ -438,7 +455,7 @@ fn search_short_needle_rows(
     }
 
     if !matched_pairs.is_empty() {
-        for &row_idx in &remaining_rows {
+        for &row_idx in remaining_rows {
             if let PayloadRefRow::Chunks(refs) = &row_refs[row_idx] {
                 let hit = refs.windows(2).any(|w| {
                     w[0].0 == pack_idx
@@ -463,10 +480,10 @@ fn search_long_needle_rows(
     read_threads: usize,
     matcher: &mut NeedleMatcher,
     chunk_rows: &[usize],
-    needed_chunks: &BTreeSet<u32>,
+    needed_bits: &[u64],
     results: &mut Bitmap,
 ) -> Result<(), StatamError> {
-    let all_needed: Vec<u32> = needed_chunks.iter().copied().collect();
+    let all_needed = collect_set_bits(needed_bits);
     let fetched: HashMap<u32, Vec<u8>> =
         if read_threads.clamp(1, crate::parallel::MAX_WRITE_THREADS) > 1 {
             pack.scan_chunks_in_frames_parallel(
@@ -631,6 +648,143 @@ pub(crate) fn pack_short_circuits_all(
         .iter()
         .any(|opt| opt.as_ref().is_none_or(|b| b.may_contain_hashes(&hashes)));
     Ok(!any_frame_may)
+}
+
+#[inline]
+fn bitset_set(bits: &mut [u64], idx: usize) {
+    if let Some(word) = bits.get_mut(idx >> 6) {
+        *word |= 1u64 << (idx & 63);
+    }
+}
+
+#[inline]
+fn bitset_get(bits: &[u64], idx: usize) -> bool {
+    bits.get(idx >> 6)
+        .is_some_and(|&word| (word & (1u64 << (idx & 63))) != 0)
+}
+
+fn collect_set_bits(bits: &[u64]) -> Vec<u32> {
+    let mut out = Vec::new();
+    for (w_idx, &word) in bits.iter().enumerate() {
+        let mut w = word;
+        let base = (w_idx << 6) as u32;
+        while w != 0 {
+            let tz = w.trailing_zeros();
+            out.push(base + tz);
+            w &= w - 1;
+        }
+    }
+    out
+}
+
+fn filter_needed_bits_by_trigram(
+    pack: &ChunkPackReader,
+    needed_bits: &[u64],
+    pack_chunk_count: usize,
+    needle: &[u8],
+    case_insensitive: bool,
+) -> Result<Vec<u32>, StatamError> {
+    if pack_chunk_count == 0 {
+        return Ok(Vec::new());
+    }
+    if pack.toc().postscript.trigram_len == 0 || (case_insensitive && !needle.is_ascii()) {
+        return Ok(collect_set_bits(needed_bits));
+    }
+
+    let mut hashes = Vec::new();
+    extract_trigram_hashes(needle, case_insensitive, &mut hashes);
+    if hashes.is_empty() {
+        return Ok(collect_set_bits(needed_bits));
+    }
+
+    let blooms = &pack.trigram_section_cached()?.frame_blooms;
+    let frame_matches: Vec<bool> = blooms
+        .iter()
+        .map(|opt| match opt {
+            None => true,
+            Some(bloom) => bloom.may_contain_hashes(&hashes),
+        })
+        .collect();
+
+    let frames = &pack.toc().frames;
+    let mut expected_cid = 0u32;
+    let mut contiguous = !frames.is_empty();
+    for frame in frames {
+        if frame.first_chunk_id != expected_cid {
+            contiguous = false;
+            break;
+        }
+        let Some(next) = expected_cid.checked_add(frame.chunk_count) else {
+            contiguous = false;
+            break;
+        };
+        expected_cid = next;
+    }
+    if expected_cid as usize != pack_chunk_count {
+        contiguous = false;
+    }
+
+    let mut surviving = Vec::new();
+    if contiguous {
+        for (fid, frame) in frames.iter().enumerate() {
+            if !frame_matches.get(fid).copied().unwrap_or(true) || frame.chunk_count == 0 {
+                continue;
+            }
+            let start = frame.first_chunk_id as usize;
+            let end = start + frame.chunk_count as usize;
+            let first_word = start >> 6;
+            let last_word = (end - 1) >> 6;
+            for (w_idx, &word) in needed_bits
+                .iter()
+                .enumerate()
+                .take(last_word + 1)
+                .skip(first_word)
+            {
+                let mut w = word;
+                if w_idx == first_word {
+                    w &= !0u64 << (start & 63);
+                }
+                if w_idx == last_word {
+                    let rem = end & 63;
+                    if rem != 0 {
+                        w &= (1u64 << rem) - 1;
+                    }
+                }
+                let base = (w_idx << 6) as u32;
+                while w != 0 {
+                    let tz = w.trailing_zeros();
+                    surviving.push(base + tz);
+                    w &= w - 1;
+                }
+            }
+        }
+    } else {
+        for (w_idx, &word) in needed_bits.iter().enumerate() {
+            let mut w = word;
+            let base = (w_idx << 6) as u32;
+            while w != 0 {
+                let tz = w.trailing_zeros();
+                let cid = base + tz;
+                let loc = pack
+                    .toc()
+                    .chunks
+                    .get(cid as usize)
+                    .ok_or(StatamError::Corrupt {
+                        reason: "chunk_id out of bounds during trigram filter",
+                    })?;
+                if frame_matches
+                    .get(loc.frame_id as usize)
+                    .copied()
+                    .unwrap_or(true)
+                {
+                    surviving.push(cid);
+                }
+                w &= w - 1;
+            }
+        }
+    }
+
+    Ok(surviving)
 }
 
 fn filter_candidates_by_trigram(

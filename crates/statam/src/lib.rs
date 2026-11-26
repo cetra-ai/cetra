@@ -21,7 +21,8 @@ pub use codec::{
     ShreddedMapBlocks, ShreddedSubCol, WriteProfile, ZoneMapSummary, ZonePred, ZoneValue,
     block_zone_map, decode_mini_block, decode_shredded_residual_block, decode_shredded_subcol,
     decode_single_map_key, encode_mini_block, encode_shredded_residual_block,
-    encode_shredded_subcol, select_shredded_keys, shred_map, unshred_map, zone_map_may_match,
+    encode_shredded_subcol, select_shredded_keys, shred_map, unshred_map, zone_map_always_matches,
+    zone_map_may_match,
 };
 pub use error::StatamError;
 pub use format::{

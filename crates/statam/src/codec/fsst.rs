@@ -251,45 +251,6 @@ impl FsstTable {
         Ok(())
     }
 
-    /// Computes the exact decoded byte length of a single row's coded bytes while
-    /// validating all symbol codes and literal escapes.
-    fn validated_decoded_len(&self, coded: &[u8]) -> Result<usize, StatamError> {
-        let mut i = 0usize;
-        let mut decoded_len = 0usize;
-        let sym_count = self.sym_count();
-        while i < coded.len() {
-            let b = coded[i];
-            if b == FSST_ESCAPE {
-                if i + 1 >= coded.len() {
-                    return Err(StatamError::Corrupt {
-                        reason: "truncated fsst literal escape",
-                    });
-                }
-                decoded_len = decoded_len
-                    .checked_add(1)
-                    .ok_or(StatamError::BoundsExceeded {
-                        reason: "fsst decoded size overflow",
-                    })?;
-                i += 2;
-            } else {
-                let code = usize::from(b);
-                if code >= sym_count {
-                    return Err(StatamError::Corrupt {
-                        reason: "fsst symbol code out of bounds",
-                    });
-                }
-                let slen = usize::from(self.sym_lens[code]);
-                decoded_len = decoded_len
-                    .checked_add(slen)
-                    .ok_or(StatamError::BoundsExceeded {
-                        reason: "fsst decoded size overflow",
-                    })?;
-                i += 1;
-            }
-        }
-        Ok(decoded_len)
-    }
-
     /// Parses the leading symbol table from `src`, returning `(table, bytes_consumed)`.
     pub fn parse_header(src: &[u8]) -> Result<(Self, usize), StatamError> {
         let Some(&sym_count_u8) = src.first() else {
@@ -621,10 +582,192 @@ pub fn encode_fsst_body(values: &[&[u8]]) -> Result<Option<Vec<u8>>, StatamError
 /// Decoded `(offsets, raw_bytes, optional_null_bitmap)` returned by [`FsstBlockView::decode_selected`].
 pub type FsstSelectedRows = (Vec<u32>, Vec<u8>, Option<Bitmap>);
 
+/// Lightweight stack-allocated FSST decode table (`<= 255` symbols of `1..=8` bytes).
+#[derive(Clone)]
+struct FsstDecodeTable {
+    words: [[u8; FSST_MAX_SYM_LEN]; 256],
+    /// `1..=8` for valid symbol codes `0..sym_count`, `0xFF` for invalid codes `sym_count..256`.
+    lens: [u8; 256],
+    sym_count: u8,
+}
+
+impl fmt::Debug for FsstDecodeTable {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("FsstDecodeTable")
+            .field("sym_count", &self.sym_count)
+            .finish()
+    }
+}
+
+impl FsstDecodeTable {
+    fn empty() -> Self {
+        Self {
+            words: [[0u8; FSST_MAX_SYM_LEN]; 256],
+            lens: [FSST_ESCAPE; 256],
+            sym_count: 0,
+        }
+    }
+
+    fn parse_header(src: &[u8]) -> Result<(Self, usize), StatamError> {
+        let Some(&sym_count_u8) = src.first() else {
+            return Err(StatamError::Corrupt {
+                reason: "truncated fsst symbol count",
+            });
+        };
+        let sym_count = usize::from(sym_count_u8);
+        if sym_count > FSST_MAX_SYMBOLS {
+            return Err(StatamError::Corrupt {
+                reason: "fsst sym_count exceeds 255",
+            });
+        }
+        let lens_end = 1 + sym_count;
+        if src.len() < lens_end {
+            return Err(StatamError::Corrupt {
+                reason: "truncated fsst symbol lengths",
+            });
+        }
+        let sym_lens_slice = &src[1..lens_end];
+        let mut total_sym_bytes = 0usize;
+        for &slen in sym_lens_slice {
+            if !(1..=FSST_MAX_SYM_LEN as u8).contains(&slen) {
+                return Err(StatamError::Corrupt {
+                    reason: "invalid fsst symbol length (must be 1..=8)",
+                });
+            }
+            total_sym_bytes += usize::from(slen);
+        }
+        let syms_end = lens_end + total_sym_bytes;
+        if src.len() < syms_end {
+            return Err(StatamError::Corrupt {
+                reason: "truncated fsst symbol table bytes",
+            });
+        }
+
+        let mut words = [[0u8; FSST_MAX_SYM_LEN]; 256];
+        let mut lens = [FSST_ESCAPE; 256];
+        let mut off = lens_end;
+        for (code, &slen) in sym_lens_slice.iter().enumerate() {
+            let len_usize = usize::from(slen);
+            words[code][..len_usize].copy_from_slice(&src[off..off + len_usize]);
+            lens[code] = slen;
+            off += len_usize;
+        }
+
+        Ok((
+            Self {
+                words,
+                lens,
+                sym_count: sym_count_u8,
+            },
+            syms_end,
+        ))
+    }
+
+    fn decode_row_checked(
+        &self,
+        coded: &[u8],
+        out: &mut Vec<u8>,
+        max_total_bytes: usize,
+    ) -> Result<(), StatamError> {
+        let mut i = 0usize;
+        while i < coded.len() {
+            let b = coded[i];
+            if b == FSST_ESCAPE {
+                if i + 1 >= coded.len() {
+                    return Err(StatamError::Corrupt {
+                        reason: "truncated fsst literal escape",
+                    });
+                }
+                if out.len() >= max_total_bytes {
+                    return Err(StatamError::BoundsExceeded {
+                        reason: "fsst decoded size exceeds MAX_BLOCK_RAW_BYTES",
+                    });
+                }
+                out.push(coded[i + 1]);
+                i += 2;
+            } else {
+                let slen = self.lens[usize::from(b)];
+                if slen == FSST_ESCAPE {
+                    return Err(StatamError::Corrupt {
+                        reason: "fsst symbol code out of bounds",
+                    });
+                }
+                let slen_usize = usize::from(slen);
+                if out
+                    .len()
+                    .checked_add(slen_usize)
+                    .is_none_or(|n| n > max_total_bytes)
+                {
+                    return Err(StatamError::BoundsExceeded {
+                        reason: "fsst decoded size exceeds MAX_BLOCK_RAW_BYTES",
+                    });
+                }
+                out.extend_from_slice(&self.words[usize::from(b)][..slen_usize]);
+                i += 1;
+            }
+        }
+        Ok(())
+    }
+
+    #[inline]
+    fn decode_row_fast(
+        &self,
+        coded_row: &[u8],
+        out_bytes: &mut Vec<u8>,
+        pos: &mut usize,
+        max_total_bytes: usize,
+    ) -> Result<(), StatamError> {
+        let max_row = coded_row.len().saturating_mul(FSST_MAX_SYM_LEN);
+        if pos.saturating_add(max_row) <= max_total_bytes {
+            let needed = *pos + max_row + FSST_MAX_SYM_LEN;
+            if needed > out_bytes.len() {
+                let grown = out_bytes
+                    .len()
+                    .saturating_mul(2)
+                    .max(needed)
+                    .min(max_total_bytes + FSST_MAX_SYM_LEN);
+                out_bytes.resize(grown, 0);
+            }
+            let mut p = *pos;
+            let mut i = 0usize;
+            while i < coded_row.len() {
+                let b = coded_row[i];
+                if b == FSST_ESCAPE {
+                    if i + 1 >= coded_row.len() {
+                        return Err(StatamError::Corrupt {
+                            reason: "truncated fsst literal escape",
+                        });
+                    }
+                    out_bytes[p] = coded_row[i + 1];
+                    p += 1;
+                    i += 2;
+                } else {
+                    let slen = self.lens[usize::from(b)];
+                    if slen == FSST_ESCAPE {
+                        return Err(StatamError::Corrupt {
+                            reason: "fsst symbol code out of bounds",
+                        });
+                    }
+                    out_bytes[p..p + FSST_MAX_SYM_LEN].copy_from_slice(&self.words[usize::from(b)]);
+                    p += usize::from(slen);
+                    i += 1;
+                }
+            }
+            *pos = p;
+            Ok(())
+        } else {
+            out_bytes.truncate(*pos);
+            self.decode_row_checked(coded_row, out_bytes, max_total_bytes)?;
+            *pos = out_bytes.len();
+            Ok(())
+        }
+    }
+}
+
 /// Zero-copy view over an FSST-encoded block supporting O(1) single-row decode.
 #[derive(Clone)]
 pub struct FsstBlockView<'a> {
-    table: FsstTable,
+    table: FsstDecodeTable,
     offsets: Vec<u32>,
     coded: &'a [u8],
 }
@@ -657,13 +800,13 @@ impl<'a> FsstBlockView<'a> {
                 });
             }
             return Ok(Self {
-                table: FsstTable::empty(),
+                table: FsstDecodeTable::empty(),
                 offsets: vec![0],
                 coded: &[],
             });
         }
 
-        let (table, header_end) = FsstTable::parse_header(src)?;
+        let (table, header_end) = FsstDecodeTable::parse_header(src)?;
         let rest = &src[header_end..];
         let Some(&len_bw) = rest.first() else {
             return Err(StatamError::Corrupt {
@@ -683,29 +826,28 @@ impl<'a> FsstBlockView<'a> {
                 reason: "truncated fsst packed row lengths",
             });
         }
-        let mut row_lens = Vec::with_capacity(row_count);
+        let mut offsets = Vec::with_capacity(row_count + 1);
+        offsets.push(0u32);
         unpack_u32(
             &packed_lens_slice[..packed_lens_bytes],
             row_count,
             len_bw,
-            &mut row_lens,
+            &mut offsets,
         )?;
         let coded = &packed_lens_slice[packed_lens_bytes..];
 
-        let mut offsets = Vec::with_capacity(row_count + 1);
-        offsets.push(0);
         let mut total_coded = 0usize;
-        for &rlen in &row_lens {
+        for off_slot in &mut offsets[1..] {
             total_coded =
                 total_coded
-                    .checked_add(rlen as usize)
+                    .checked_add(*off_slot as usize)
                     .ok_or(StatamError::BoundsExceeded {
                         reason: "fsst coded byte total overflow",
                     })?;
             let off_u32 = u32::try_from(total_coded).map_err(|_| StatamError::BoundsExceeded {
                 reason: "fsst coded byte offset exceeds u32::MAX",
             })?;
-            offsets.push(off_u32);
+            *off_slot = off_u32;
         }
         if total_coded != coded.len() {
             return Err(StatamError::Corrupt {
@@ -739,52 +881,47 @@ impl<'a> FsstBlockView<'a> {
         }
         let start = self.offsets[row_idx] as usize;
         let end = self.offsets[row_idx + 1] as usize;
+        let mut pos = out.len();
         self.table
-            .decode_row_checked(&self.coded[start..end], out, MAX_BLOCK_RAW_BYTES)
+            .decode_row_fast(&self.coded[start..end], out, &mut pos, MAX_BLOCK_RAW_BYTES)?;
+        out.truncate(pos);
+        Ok(())
     }
 
-    /// Decodes all rows into `(offsets, bytes)`, enforcing `MAX_BLOCK_RAW_BYTES` before allocating.
+    /// Decodes all rows into `(offsets, bytes)`, enforcing `MAX_BLOCK_RAW_BYTES`.
     pub fn decode_all(&self) -> Result<(Vec<u32>, Vec<u8>), StatamError> {
         let row_count = self.len();
         if row_count == 0 {
             return Ok((vec![0], Vec::new()));
         }
 
-        // Pre-pass: validate escapes/codes per row and compute exact total decoded byte count.
-        let mut total_decoded = 0usize;
+        let mut out_offsets = Vec::with_capacity(row_count + 1);
+        out_offsets.push(0);
+        let initial_cap =
+            (self.coded.len().saturating_mul(2) + 64).min(MAX_BLOCK_RAW_BYTES) + FSST_MAX_SYM_LEN;
+        let mut out_bytes = vec![0u8; initial_cap];
+        let mut pos = 0usize;
+
         for row in 0..row_count {
             let start = self.offsets[row] as usize;
             let end = self.offsets[row + 1] as usize;
-            let row_decoded = self.table.validated_decoded_len(&self.coded[start..end])?;
-            total_decoded =
-                total_decoded
-                    .checked_add(row_decoded)
-                    .ok_or(StatamError::BoundsExceeded {
-                        reason: "fsst total decoded size overflow",
-                    })?;
-            if total_decoded > MAX_BLOCK_RAW_BYTES {
+            self.table.decode_row_fast(
+                &self.coded[start..end],
+                &mut out_bytes,
+                &mut pos,
+                MAX_BLOCK_RAW_BYTES,
+            )?;
+            if pos > MAX_BLOCK_RAW_BYTES {
                 return Err(StatamError::BoundsExceeded {
                     reason: "fsst decoded size exceeds MAX_BLOCK_RAW_BYTES",
                 });
             }
+            let pos_u32 = u32::try_from(pos).map_err(|_| StatamError::BoundsExceeded {
+                reason: "fsst decoded size exceeds u32::MAX",
+            })?;
+            out_offsets.push(pos_u32);
         }
-        let _ = u32::try_from(total_decoded).map_err(|_| StatamError::BoundsExceeded {
-            reason: "fsst decoded size exceeds u32::MAX",
-        })?;
-
-        let mut out_offsets = Vec::with_capacity(row_count + 1);
-        out_offsets.push(0);
-        let mut out_bytes = Vec::with_capacity(total_decoded);
-        for row in 0..row_count {
-            let start = self.offsets[row] as usize;
-            let end = self.offsets[row + 1] as usize;
-            self.table.decode_row_checked(
-                &self.coded[start..end],
-                &mut out_bytes,
-                total_decoded,
-            )?;
-            out_offsets.push(out_bytes.len() as u32);
-        }
+        out_bytes.truncate(pos);
         Ok((out_offsets, out_bytes))
     }
 
@@ -810,61 +947,66 @@ impl<'a> FsstBlockView<'a> {
             return Ok((vec![0], Vec::new(), None));
         }
 
-        let mut total_decoded = 0usize;
-        for row in mask.iter_ones() {
-            if row >= row_count {
-                break;
-            }
-            if nulls.is_some_and(|bm| !bm.get(row)) {
-                continue;
-            }
-            let start = self.offsets[row] as usize;
-            let end = self.offsets[row + 1] as usize;
-            let row_decoded = self.table.validated_decoded_len(&self.coded[start..end])?;
-            total_decoded =
-                total_decoded
-                    .checked_add(row_decoded)
-                    .ok_or(StatamError::BoundsExceeded {
-                        reason: "fsst total decoded size overflow",
-                    })?;
-            if total_decoded > MAX_BLOCK_RAW_BYTES {
-                return Err(StatamError::BoundsExceeded {
-                    reason: "fsst decoded size exceeds MAX_BLOCK_RAW_BYTES",
-                });
-            }
+        let selected_count = mask.count_ones();
+        if selected_count == 0 {
+            return Ok((
+                vec![0u32; row_count + 1],
+                Vec::new(),
+                Some(Bitmap::new_zeroed(row_count)),
+            ));
         }
-        let _ = u32::try_from(total_decoded).map_err(|_| StatamError::BoundsExceeded {
-            reason: "fsst decoded size exceeds u32::MAX",
-        })?;
+
+        let avg_coded = self.coded.len() / row_count.max(1);
+        let est_decoded = avg_coded
+            .saturating_mul(selected_count)
+            .saturating_mul(2)
+            .saturating_add(64);
+        let initial_cap = est_decoded.min(MAX_BLOCK_RAW_BYTES) + FSST_MAX_SYM_LEN;
 
         let mut out_offsets = Vec::with_capacity(row_count + 1);
         out_offsets.push(0u32);
-        let mut out_bytes = Vec::with_capacity(total_decoded);
+        let mut out_bytes = vec![0u8; initial_cap];
+        let mut pos = 0usize;
         let mut out_nulls = Bitmap::new_zeroed(row_count);
+
         for row in mask.iter_ones() {
             if row >= row_count {
                 break;
             }
-            let cur_off = out_bytes.len() as u32;
+            let cur_off = u32::try_from(pos).map_err(|_| StatamError::BoundsExceeded {
+                reason: "fsst decoded size exceeds u32::MAX",
+            })?;
             if out_offsets.len() <= row {
                 out_offsets.resize(row + 1, cur_off);
             }
             if nulls.is_none_or(|bm| bm.get(row)) {
                 let start = self.offsets[row] as usize;
                 let end = self.offsets[row + 1] as usize;
-                self.table.decode_row_checked(
+                self.table.decode_row_fast(
                     &self.coded[start..end],
                     &mut out_bytes,
-                    total_decoded,
+                    &mut pos,
+                    MAX_BLOCK_RAW_BYTES,
                 )?;
+                if pos > MAX_BLOCK_RAW_BYTES {
+                    return Err(StatamError::BoundsExceeded {
+                        reason: "fsst decoded size exceeds MAX_BLOCK_RAW_BYTES",
+                    });
+                }
                 let _ = out_nulls.set(row, true);
             }
-            out_offsets.push(out_bytes.len() as u32);
+            let end_off = u32::try_from(pos).map_err(|_| StatamError::BoundsExceeded {
+                reason: "fsst decoded size exceeds u32::MAX",
+            })?;
+            out_offsets.push(end_off);
         }
-        let tail_off = out_bytes.len() as u32;
+        let tail_off = u32::try_from(pos).map_err(|_| StatamError::BoundsExceeded {
+            reason: "fsst decoded size exceeds u32::MAX",
+        })?;
         if out_offsets.len() < row_count + 1 {
             out_offsets.resize(row_count + 1, tail_off);
         }
+        out_bytes.truncate(pos);
         Ok((out_offsets, out_bytes, Some(out_nulls)))
     }
 }
@@ -945,5 +1087,203 @@ mod tests {
                 reason: "null bitmap length mismatch",
             })
         ));
+    }
+
+    #[test]
+    fn fsst_single_pass_8b_decode_matches_reference_and_rejects_corrupt_and_oversized() {
+        // 1. Mixed empty strings, 1-byte..8-byte symbols, literal 0xFF escapes, non-ASCII, and large strings.
+        let mut big_url = String::from("https://api.example.com/v1/traces/");
+        for i in 0..1500 {
+            big_url.push_str(&format!("seg{i}_"));
+        }
+        let mut raw_rows: Vec<Vec<u8>> = vec![
+            Vec::new(),
+            b"a".to_vec(),
+            b"https://".to_vec(),
+            vec![0xFF, 0x00, 0xFF, 0xFE, 0x7F],
+            b"{\"url\":\"https://cdn.example.net/assets/app.js?v=12345\"}".to_vec(),
+            big_url.into_bytes(),
+        ];
+        // Add enough repeated patterns so FSST compresses >= 1.15x and trains 1..=8 byte symbols.
+        for i in 0..120 {
+            raw_rows.push(
+                format!("https://observability.cetra.sh/api/v1/spans/trace_{i:04}/events")
+                    .into_bytes(),
+            );
+        }
+        let refs: Vec<&[u8]> = raw_rows.iter().map(Vec::as_slice).collect();
+        let body = encode_fsst_body(&refs).unwrap().unwrap();
+        let view = FsstBlockView::parse(&body, refs.len()).unwrap();
+
+        // decode_all parity
+        let (offs, decoded_bytes) = view.decode_all().unwrap();
+        assert_eq!(offs.len(), refs.len() + 1);
+        for (idx, expected) in refs.iter().enumerate() {
+            let s = offs[idx] as usize;
+            let e = offs[idx + 1] as usize;
+            assert_eq!(&decoded_bytes[s..e], *expected);
+        }
+
+        // decode_row parity (including buffer reuse)
+        let mut row_buf = Vec::new();
+        for (idx, expected) in refs.iter().enumerate() {
+            row_buf.clear();
+            view.decode_row(idx, &mut row_buf).unwrap();
+            assert_eq!(row_buf.as_slice(), *expected);
+        }
+
+        // decode_selected parity (sparse mask + nulls)
+        let mut mask = Bitmap::new_zeroed(refs.len());
+        let mut nulls = Bitmap::new_ones(refs.len());
+        let _ = mask.set(0, true);
+        let _ = mask.set(2, true);
+        let _ = mask.set(3, true);
+        let _ = mask.set(5, true);
+        let _ = mask.set(25, true);
+        let _ = nulls.set(2, false); // selected but null
+        let (sel_offs, sel_bytes, sel_nulls) = view.decode_selected(&mask, Some(&nulls)).unwrap();
+        let sel_nulls = sel_nulls.unwrap();
+        for (idx, expected) in refs.iter().enumerate() {
+            let s = sel_offs[idx] as usize;
+            let e = sel_offs[idx + 1] as usize;
+            if mask.get(idx) && nulls.get(idx) {
+                assert!(sel_nulls.get(idx));
+                assert_eq!(&sel_bytes[s..e], *expected);
+            } else {
+                assert!(!sel_nulls.get(idx));
+                assert_eq!(s, e);
+            }
+        }
+
+        // 2. sym_count == 255 with 8-byte symbols + 0xFF literal escape.
+        let mut sym_entries = Vec::with_capacity(255);
+        for code in 0..255u8 {
+            let mut b = [b'A'; 8];
+            b[0] = code;
+            b[7] = code ^ 0x5A;
+            sym_entries.push(SymEntry { len: 8, bytes: b });
+        }
+        let full_table = FsstTable::from_entries(&sym_entries);
+        let mut full_body = Vec::new();
+        full_table.write_header(&mut full_body);
+        // 1 row, coded length = 3 (code 0, code 254, literal escape 0xFF 0x42)
+        // Wait: 0xFF followed by 0x42 is 4 coded bytes total.
+        let coded_row = [0u8, 254u8, FSST_ESCAPE, 0x42u8];
+        full_body.push(3); // len_bw = 3 -> value 4 fits in 3 bits
+        pack_u32(&[coded_row.len() as u32], 3, &mut full_body).unwrap();
+        full_body.extend_from_slice(&coded_row);
+
+        let full_view = FsstBlockView::parse(&full_body, 1).unwrap();
+        let (f_offs, f_bytes) = full_view.decode_all().unwrap();
+        let mut expected_full = Vec::new();
+        expected_full.extend_from_slice(&sym_entries[0].bytes);
+        expected_full.extend_from_slice(&sym_entries[254].bytes);
+        expected_full.push(0x42);
+        assert_eq!(
+            &f_bytes[f_offs[0] as usize..f_offs[1] as usize],
+            expected_full.as_slice()
+        );
+
+        // 3. Corrupt cases: truncated escape and out-of-bounds symbol code.
+        let build_raw_block = |sym_count: u8, slens: &[u8], syms: &[u8], coded: &[u8]| -> Vec<u8> {
+            let mut buf = Vec::new();
+            buf.push(sym_count);
+            buf.extend_from_slice(slens);
+            buf.extend_from_slice(syms);
+            let rlen = coded.len() as u32;
+            let bw = min_bits_u32(&[rlen]);
+            buf.push(bw);
+            pack_u32(&[rlen], bw, &mut buf).unwrap();
+            buf.extend_from_slice(coded);
+            buf
+        };
+
+        let trunc_escape = build_raw_block(1, &[1], b"x", &[0, FSST_ESCAPE]);
+        let trunc_view = FsstBlockView::parse(&trunc_escape, 1).unwrap();
+        assert!(matches!(
+            trunc_view.decode_all(),
+            Err(StatamError::Corrupt {
+                reason: "truncated fsst literal escape",
+            })
+        ));
+        assert!(matches!(
+            trunc_view.decode_row(0, &mut Vec::new()),
+            Err(StatamError::Corrupt {
+                reason: "truncated fsst literal escape",
+            })
+        ));
+
+        let oob_code = build_raw_block(2, &[1, 2], b"xyy", &[0, 2]);
+        let oob_view = FsstBlockView::parse(&oob_code, 1).unwrap();
+        assert!(matches!(
+            oob_view.decode_all(),
+            Err(StatamError::Corrupt {
+                reason: "fsst symbol code out of bounds",
+            })
+        ));
+        assert!(matches!(
+            oob_view.decode_selected(&Bitmap::new_ones(1), None),
+            Err(StatamError::Corrupt {
+                reason: "fsst symbol code out of bounds",
+            })
+        ));
+
+        // 4. Fallback near max_total_bytes: valid near limit succeeds, +1 byte rejects with BoundsExceeded.
+        let (dec_tbl, _) =
+            FsstDecodeTable::parse_header(&[1, 8, b'a', b'b', b'c', b'd', b'e', b'f', b'g', b'h'])
+                .unwrap();
+        let coded_64b = [0u8; 8]; // 8 * 8 = 64 bytes decoded
+        let mut small_buf = Vec::new();
+        let mut pos = 0usize;
+        dec_tbl
+            .decode_row_fast(&coded_64b, &mut small_buf, &mut pos, 64)
+            .unwrap();
+        assert_eq!(pos, 64);
+        assert_eq!(&small_buf[..pos], b"abcdefgh".repeat(8).as_slice());
+
+        // Trigger fallback (`pos + max_row > max_total_bytes`) where actual decoded fits (escape consumes 2 -> 1 byte).
+        let mut mixed_coded = vec![0u8; 7]; // 56 bytes
+        mixed_coded.extend_from_slice(&[FSST_ESCAPE, b'Z']); // +1 = 57 bytes, max_row = 9*8 = 72 > 64!
+        let mut fallback_buf = Vec::new();
+        let mut fb_pos = 0usize;
+        dec_tbl
+            .decode_row_fast(&mixed_coded, &mut fallback_buf, &mut fb_pos, 64)
+            .unwrap();
+        assert_eq!(fb_pos, 57);
+        assert_eq!(
+            &fallback_buf[..fb_pos],
+            [b"abcdefgh".repeat(7), vec![b'Z']].concat().as_slice()
+        );
+
+        // Exceeds limit (72 > 64) -> BoundsExceeded
+        let coded_72b = [0u8; 9];
+        let mut over_buf = Vec::new();
+        let mut over_pos = 0usize;
+        assert!(matches!(
+            dec_tbl.decode_row_fast(&coded_72b, &mut over_buf, &mut over_pos, 64),
+            Err(StatamError::BoundsExceeded {
+                reason: "fsst decoded size exceeds MAX_BLOCK_RAW_BYTES",
+            })
+        ));
+
+        // Full MAX_BLOCK_RAW_BYTES (64 MiB) boundary via decode_all (non-Miri).
+        #[cfg(not(miri))]
+        {
+            let exact_codes = MAX_BLOCK_RAW_BYTES / 8;
+            let exact_block = build_raw_block(1, &[8], b"01234567", &vec![0u8; exact_codes]);
+            let exact_view = FsstBlockView::parse(&exact_block, 1).unwrap();
+            let (eo, eb) = exact_view.decode_all().unwrap();
+            assert_eq!(eo, vec![0, MAX_BLOCK_RAW_BYTES as u32]);
+            assert_eq!(eb.len(), MAX_BLOCK_RAW_BYTES);
+
+            let over_block = build_raw_block(1, &[8], b"01234567", &vec![0u8; exact_codes + 1]);
+            let over_view = FsstBlockView::parse(&over_block, 1).unwrap();
+            assert!(matches!(
+                over_view.decode_all(),
+                Err(StatamError::BoundsExceeded {
+                    reason: "fsst decoded size exceeds MAX_BLOCK_RAW_BYTES",
+                })
+            ));
+        }
     }
 }

@@ -20,7 +20,8 @@ use crate::codec::nested::{
     unshred_map_selected,
 };
 use crate::codec::{
-    ZonePred, ZoneValue, decode_mini_block, decode_mini_block_selected, zone_map_may_match,
+    ZonePred, ZoneValue, decode_mini_block, decode_mini_block_selected, zone_map_always_matches,
+    zone_map_may_match,
 };
 use crate::format::{
     BLOCK_ENTRY_LEN, BLOCK_FLAG_HAS_NAN, BLOCK_FLAG_MIN_MAX_VALID, BLOCK_FRAME_HEADER_LEN,
@@ -1538,6 +1539,7 @@ impl StatamReader {
                 &proj_indices,
                 &empty_map_keys,
                 None,
+                TimeRange::ALL,
                 &[],
                 &[],
                 &[],
@@ -1654,22 +1656,18 @@ impl StatamReader {
                 read_threads,
             )?;
 
-            for (mb_idx, mask, decoded_p1) in active_mbs {
-                let batch = self.materialize_phase2_mb(
-                    rg_idx,
-                    mb_idx,
-                    &mask,
-                    decoded_p1,
-                    &plan,
-                    &proj_indices,
-                    &proj_schema,
-                    &empty_map_keys,
-                    &rg_resolved_chunks,
-                    &read_block,
-                    read_threads,
-                )?;
-                out_batches.push(batch);
-            }
+            let mut rg_batches = self.materialize_phase2_mbs(
+                rg_idx,
+                active_mbs,
+                &plan,
+                &proj_indices,
+                &proj_schema,
+                &empty_map_keys,
+                &rg_resolved_chunks,
+                &read_block,
+                read_threads,
+            )?;
+            out_batches.append(&mut rg_batches);
         }
 
         Ok(out_batches)
@@ -2150,6 +2148,7 @@ impl StatamReader {
             proj_indices,
             map_keys_by_col,
             time_col_idx,
+            time_range,
             lookups,
             preds,
             subs,
@@ -2299,34 +2298,21 @@ impl StatamReader {
             Ok(body)
         };
 
-        let mut active_mbs: Vec<(usize, Bitmap, HashMap<usize, DecodedPhase1>)> = Vec::new();
-        let mut active_rows = 0usize;
-        for &mb_idx in surviving_mbs {
-            let (mask, decoded_p1) = self.eval_phase1_mb(
-                rg_idx,
-                mb_idx,
-                &plan,
-                time_col_idx,
-                time_range,
-                lookups,
-                preds,
-                subs,
-                dict_sub_bitmaps,
-                l0_parsed.as_ref(),
-                &block_lookup,
-                read_threads,
-            )?;
-            let hits = mask.count_ones();
-            if hits > 0 {
-                active_rows = active_rows.saturating_add(hits);
-                active_mbs.push((mb_idx, mask, decoded_p1));
-                if let Some(lim) = limit_remaining
-                    && active_rows >= lim
-                {
-                    break;
-                }
-            }
-        }
+        let mut active_mbs = self.eval_phase1_mbs(
+            rg_idx,
+            surviving_mbs,
+            &plan,
+            time_col_idx,
+            time_range,
+            lookups,
+            preds,
+            subs,
+            dict_sub_bitmaps,
+            l0_parsed.as_ref(),
+            &block_lookup,
+            limit_remaining,
+            read_threads,
+        )?;
         if active_mbs.is_empty() {
             return Ok(Vec::new());
         }
@@ -2340,24 +2326,17 @@ impl StatamReader {
             read_threads,
         )?;
 
-        let mut batches = Vec::with_capacity(active_mbs.len());
-        for (mb_idx, mask, decoded_p1) in active_mbs {
-            let batch = self.materialize_phase2_mb(
-                rg_idx,
-                mb_idx,
-                &mask,
-                decoded_p1,
-                &plan,
-                proj_indices,
-                proj_schema,
-                map_keys_by_col,
-                &rg_resolved_chunks,
-                &block_lookup,
-                read_threads,
-            )?;
-            batches.push(batch);
-        }
-        Ok(batches)
+        self.materialize_phase2_mbs(
+            rg_idx,
+            active_mbs,
+            &plan,
+            proj_indices,
+            proj_schema,
+            map_keys_by_col,
+            &rg_resolved_chunks,
+            &block_lookup,
+            read_threads,
+        )
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -2383,6 +2362,7 @@ impl StatamReader {
             proj_indices,
             map_keys_by_col,
             time_col_idx,
+            time_range,
             lookups,
             preds,
             subs,
@@ -2439,45 +2419,40 @@ impl StatamReader {
             None
         };
 
-        // Evaluate Phase 1 on each surviving mini-block.
-        let mut active_mbs: Vec<(usize, Bitmap, HashMap<usize, DecodedPhase1>)> = Vec::new();
-        for &mb_idx in surviving_mbs {
-            let p1_lookup = |blk: &BlockEntry| -> Result<Vec<u8>, StatamError> {
-                if blk.stored_len == 0 {
-                    return Ok(Vec::new());
-                }
-                let end = blk
-                    .offset
-                    .checked_add(BLOCK_FRAME_HEADER_LEN as u64 + u64::from(blk.stored_len))
-                    .ok_or(StatamError::BoundsExceeded {
-                        reason: "Phase 1 block key overflow",
-                    })?;
-                let key = (blk.offset, end);
-                let frame = p1_cache.get(&key).ok_or(StatamError::Corrupt {
-                    reason: "missing Phase 1 fetched block",
-                })?;
-                let (_, _, body) = read_framed_block(frame, MAX_BLOCK_RAW_BYTES)?;
-                Ok(body)
-            };
-
-            let (mask, decoded_p1) = self.eval_phase1_mb(
-                rg_idx,
-                mb_idx,
-                &plan,
-                time_col_idx,
-                time_range,
-                lookups,
-                preds,
-                subs,
-                dict_sub_bitmaps,
-                l0_from_p1.as_ref(),
-                &p1_lookup,
-                read_threads,
-            )?;
-            if mask.count_ones() > 0 {
-                active_mbs.push((mb_idx, mask, decoded_p1));
+        let p1_lookup = |blk: &BlockEntry| -> Result<Vec<u8>, StatamError> {
+            if blk.stored_len == 0 {
+                return Ok(Vec::new());
             }
-        }
+            let end = blk
+                .offset
+                .checked_add(BLOCK_FRAME_HEADER_LEN as u64 + u64::from(blk.stored_len))
+                .ok_or(StatamError::BoundsExceeded {
+                    reason: "Phase 1 block key overflow",
+                })?;
+            let key = (blk.offset, end);
+            let frame = p1_cache.get(&key).ok_or(StatamError::Corrupt {
+                reason: "missing Phase 1 fetched block",
+            })?;
+            let (_, _, body) = read_framed_block(frame, MAX_BLOCK_RAW_BYTES)?;
+            Ok(body)
+        };
+
+        // Evaluate Phase 1 on each surviving mini-block (in parallel across MBs when read_threads > 1).
+        let mut active_mbs = self.eval_phase1_mbs(
+            rg_idx,
+            surviving_mbs,
+            &plan,
+            time_col_idx,
+            time_range,
+            lookups,
+            preds,
+            subs,
+            dict_sub_bitmaps,
+            l0_from_p1.as_ref(),
+            &p1_lookup,
+            None,
+            read_threads,
+        )?;
 
         if active_mbs.is_empty() {
             return Ok(Vec::new());
@@ -2586,25 +2561,17 @@ impl StatamReader {
             read_threads,
         )?;
 
-        let mut batches = Vec::with_capacity(active_mbs.len());
-        for (mb_idx, mask, decoded_p1) in active_mbs {
-            let batch = self.materialize_phase2_mb(
-                rg_idx,
-                mb_idx,
-                &mask,
-                decoded_p1,
-                &plan,
-                proj_indices,
-                proj_schema,
-                map_keys_by_col,
-                &rg_resolved_chunks,
-                &p2_lookup,
-                read_threads,
-            )?;
-            batches.push(batch);
-        }
-
-        Ok(batches)
+        self.materialize_phase2_mbs(
+            rg_idx,
+            active_mbs,
+            &plan,
+            proj_indices,
+            proj_schema,
+            map_keys_by_col,
+            &rg_resolved_chunks,
+            &p2_lookup,
+            read_threads,
+        )
     }
 
     fn resolve_rg_payload_chunks(
@@ -2735,17 +2702,30 @@ impl StatamReader {
         proj_indices: &[usize],
         map_keys_by_col: &HashMap<usize, Vec<String>>,
         time_col_idx: Option<usize>,
+        time_range: TimeRange,
         lookups: &[(usize, &IdLookup)],
         preds: &[(usize, &Predicate)],
         subs: &[(usize, &SubstringQuery)],
     ) -> RgIoPlan {
+        let fields = self.meta.schema_meta.schema.fields();
         let mut phase1_set = BTreeSet::new();
         let mut phase2_set = BTreeSet::new();
         let mut phase1_map_fast_path = HashSet::new();
         let mut phase2_map_fast_path = HashSet::new();
 
         if let Some(tc) = time_col_idx {
-            phase1_set.insert(tc);
+            let time_pred = ZonePred::Between(
+                ZoneValue::TimestampNs(time_range.min_ns),
+                ZoneValue::TimestampNs(time_range.max_ns),
+            );
+            let blks = self.meta.rg_blocks(tc, rg_idx);
+            let dt = &fields[tc].data_type;
+            if surviving_mbs
+                .iter()
+                .any(|&mb| !zone_map_always_matches(&blks[mb], dt, &time_pred))
+            {
+                phase1_set.insert(tc);
+            }
         }
         for &(cidx, _) in lookups {
             phase1_set.insert(cidx);
@@ -2773,7 +2753,14 @@ impl StatamReader {
                     phase1_set.insert(cidx);
                 }
             } else {
-                phase1_set.insert(cidx);
+                let blks = self.meta.rg_blocks(cidx, rg_idx);
+                let dt = &fields[cidx].data_type;
+                if surviving_mbs
+                    .iter()
+                    .any(|&mb| !zone_map_always_matches(&blks[mb], dt, &pred.pred))
+                {
+                    phase1_set.insert(cidx);
+                }
             }
         }
         for &(cidx, _) in subs {
@@ -2855,6 +2842,141 @@ impl StatamReader {
     }
 
     #[allow(clippy::too_many_arguments)]
+    fn eval_phase1_mbs(
+        &self,
+        rg_idx: usize,
+        surviving_mbs: &[usize],
+        plan: &RgIoPlan,
+        time_col_idx: Option<usize>,
+        time_range: TimeRange,
+        lookups: &[(usize, &IdLookup)],
+        preds: &[(usize, &Predicate)],
+        subs: &[(usize, &SubstringQuery)],
+        dict_sub_bitmaps: &[Option<Bitmap>],
+        l0_local: Option<&ParsedL0Payload<'_>>,
+        read_block: &(dyn Fn(&BlockEntry) -> Result<Vec<u8>, StatamError> + Sync),
+        limit_remaining: Option<usize>,
+        read_threads: usize,
+    ) -> Result<Vec<ActiveMiniBlock>, StatamError> {
+        let threads = read_threads.clamp(1, MAX_WRITE_THREADS);
+        if threads > 1 && surviving_mbs.len() >= 2 && limit_remaining.is_none() {
+            let inner_threads = if surviving_mbs.len() >= threads {
+                1
+            } else {
+                (threads / surviving_mbs.len()).max(1)
+            };
+            let per_mb = parallel_map_in_order(surviving_mbs.to_vec(), threads, |mb_idx| {
+                let (mask, decoded_p1) = self.eval_phase1_mb(
+                    rg_idx,
+                    mb_idx,
+                    plan,
+                    time_col_idx,
+                    time_range,
+                    lookups,
+                    preds,
+                    subs,
+                    dict_sub_bitmaps,
+                    l0_local,
+                    read_block,
+                    inner_threads,
+                )?;
+                Ok((mb_idx, mask, decoded_p1))
+            })?;
+            return Ok(per_mb
+                .into_iter()
+                .filter(|(_, mask, _)| mask.count_ones() > 0)
+                .collect());
+        }
+
+        let mut active_mbs = Vec::new();
+        let mut active_rows = 0usize;
+        for &mb_idx in surviving_mbs {
+            let (mask, decoded_p1) = self.eval_phase1_mb(
+                rg_idx,
+                mb_idx,
+                plan,
+                time_col_idx,
+                time_range,
+                lookups,
+                preds,
+                subs,
+                dict_sub_bitmaps,
+                l0_local,
+                read_block,
+                read_threads,
+            )?;
+            let hits = mask.count_ones();
+            if hits > 0 {
+                active_rows = active_rows.saturating_add(hits);
+                active_mbs.push((mb_idx, mask, decoded_p1));
+                if let Some(lim) = limit_remaining
+                    && active_rows >= lim
+                {
+                    break;
+                }
+            }
+        }
+        Ok(active_mbs)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn materialize_phase2_mbs(
+        &self,
+        rg_idx: usize,
+        active_mbs: Vec<(usize, Bitmap, HashMap<usize, DecodedPhase1>)>,
+        plan: &RgIoPlan,
+        proj_indices: &[usize],
+        proj_schema: &Arc<Schema>,
+        map_keys_by_col: &HashMap<usize, Vec<String>>,
+        resolved_chunks: &HashMap<(u16, u32), Vec<u8>>,
+        read_block: &(dyn Fn(&BlockEntry) -> Result<Vec<u8>, StatamError> + Sync),
+        read_threads: usize,
+    ) -> Result<Vec<Batch>, StatamError> {
+        let threads = read_threads.clamp(1, MAX_WRITE_THREADS);
+        if threads > 1 && active_mbs.len() >= 2 {
+            let inner_threads = if active_mbs.len() >= threads {
+                1
+            } else {
+                (threads / active_mbs.len()).max(1)
+            };
+            return parallel_map_in_order(active_mbs, threads, |(mb_idx, mask, decoded_p1)| {
+                self.materialize_phase2_mb(
+                    rg_idx,
+                    mb_idx,
+                    &mask,
+                    decoded_p1,
+                    plan,
+                    proj_indices,
+                    proj_schema,
+                    map_keys_by_col,
+                    resolved_chunks,
+                    read_block,
+                    inner_threads,
+                )
+            });
+        }
+
+        let mut batches = Vec::with_capacity(active_mbs.len());
+        for (mb_idx, mask, decoded_p1) in active_mbs {
+            let batch = self.materialize_phase2_mb(
+                rg_idx,
+                mb_idx,
+                &mask,
+                decoded_p1,
+                plan,
+                proj_indices,
+                proj_schema,
+                map_keys_by_col,
+                resolved_chunks,
+                read_block,
+                read_threads,
+            )?;
+            batches.push(batch);
+        }
+        Ok(batches)
+    }
+
+    #[allow(clippy::too_many_arguments)]
     fn eval_phase1_mb(
         &self,
         rg_idx: usize,
@@ -2876,31 +2998,31 @@ impl StatamReader {
         let mut decoded_p1: HashMap<usize, DecodedPhase1> = HashMap::new();
 
         if let Some(tc) = time_col_idx {
-            self.ensure_p1_col(
-                tc,
-                rg_idx,
-                mb_idx,
-                mb_row_count,
-                read_block,
-                &mut decoded_p1,
-            )?;
-            let DecodedPhase1::Col(col) = &decoded_p1[&tc] else {
-                return Err(StatamError::Corrupt {
-                    reason: "unexpected Phase 1 decoded type for time column",
-                });
-            };
             let blk = &self.meta.rg_blocks(tc, rg_idx)[mb_idx];
-            let bm = eval_column_pred(
-                col,
-                &ZonePred::Between(
-                    ZoneValue::TimestampNs(time_range.min_ns),
-                    ZoneValue::TimestampNs(time_range.max_ns),
-                ),
-                (blk.block_flags & BLOCK_FLAG_HAS_NAN) != 0,
-            )?;
-            mask = mask.and(&bm)?;
-            if mask.all_zeros() {
-                return Ok((mask, decoded_p1));
+            let time_pred = ZonePred::Between(
+                ZoneValue::TimestampNs(time_range.min_ns),
+                ZoneValue::TimestampNs(time_range.max_ns),
+            );
+            if !zone_map_always_matches(blk, &fields[tc].data_type, &time_pred) {
+                self.ensure_p1_col(
+                    tc,
+                    rg_idx,
+                    mb_idx,
+                    mb_row_count,
+                    read_block,
+                    &mut decoded_p1,
+                )?;
+                let DecodedPhase1::Col(col) = &decoded_p1[&tc] else {
+                    return Err(StatamError::Corrupt {
+                        reason: "unexpected Phase 1 decoded type for time column",
+                    });
+                };
+                let bm =
+                    eval_column_pred(col, &time_pred, (blk.block_flags & BLOCK_FLAG_HAS_NAN) != 0)?;
+                mask = mask.and(&bm)?;
+                if mask.all_zeros() {
+                    return Ok((mask, decoded_p1));
+                }
             }
         }
 
@@ -3005,25 +3127,30 @@ impl StatamReader {
                     return Ok((mask, decoded_p1));
                 }
             } else {
-                self.ensure_p1_col(
-                    cidx,
-                    rg_idx,
-                    mb_idx,
-                    mb_row_count,
-                    read_block,
-                    &mut decoded_p1,
-                )?;
-                let DecodedPhase1::Col(col) = &decoded_p1[&cidx] else {
-                    return Err(StatamError::Corrupt {
-                        reason: "expected scalar/nested Column in Phase 1",
-                    });
-                };
                 let blk = &self.meta.rg_blocks(cidx, rg_idx)[mb_idx];
-                let bm =
-                    eval_column_pred(col, &pred.pred, (blk.block_flags & BLOCK_FLAG_HAS_NAN) != 0)?;
-                mask = mask.and(&bm)?;
-                if mask.all_zeros() {
-                    return Ok((mask, decoded_p1));
+                if !zone_map_always_matches(blk, &fields[cidx].data_type, &pred.pred) {
+                    self.ensure_p1_col(
+                        cidx,
+                        rg_idx,
+                        mb_idx,
+                        mb_row_count,
+                        read_block,
+                        &mut decoded_p1,
+                    )?;
+                    let DecodedPhase1::Col(col) = &decoded_p1[&cidx] else {
+                        return Err(StatamError::Corrupt {
+                            reason: "expected scalar/nested Column in Phase 1",
+                        });
+                    };
+                    let bm = eval_column_pred(
+                        col,
+                        &pred.pred,
+                        (blk.block_flags & BLOCK_FLAG_HAS_NAN) != 0,
+                    )?;
+                    mask = mask.and(&bm)?;
+                    if mask.all_zeros() {
+                        return Ok((mask, decoded_p1));
+                    }
                 }
             }
         }
@@ -4213,6 +4340,8 @@ impl RgIoPlan {
             .chain(self.phase2_only_phys_cols.iter())
     }
 }
+
+type ActiveMiniBlock = (usize, Bitmap, HashMap<usize, DecodedPhase1>);
 
 enum DecodedPhase1 {
     Col(Column),
@@ -7913,6 +8042,201 @@ mod tests {
             let taken_zero = reader.take_rows(&indices_100, Some(&[]), 1).unwrap();
             let zero_rows: usize = taken_zero.iter().map(Batch::num_rows).sum();
             assert_eq!(zero_rows, expected_100.len());
+        }
+    }
+
+    #[test]
+    fn parallel_miniblock_scan_matches_single_threaded_across_multiple_mbs() {
+        // Multi-MB dataset (>= 4 mini-blocks inside one RG) with:
+        // - `ts`: sorted TimestampNs
+        // - `url`: FSST-compressible non-empty URL strings (tautological `url <> ''`)
+        // - `title`: Utf8 column queried with `LIKE`
+        // - `region_id`: I64 bucketed metric
+        let schema = Arc::new(
+            Schema::try_new(vec![
+                Field::new("ts", DataType::TimestampNs { utc: true }, false),
+                Field::new("url", DataType::Utf8, false),
+                Field::new("title", DataType::Utf8, false),
+                Field::new("region_id", DataType::I64, false),
+            ])
+            .unwrap(),
+        );
+
+        let total_rows = 12_500usize; // > 3 * 4096 -> 4 mini-blocks in 1 RG
+        let mut ts_vals = Vec::with_capacity(total_rows);
+        let mut urls = Vec::with_capacity(total_rows);
+        let mut titles = Vec::with_capacity(total_rows);
+        let mut regions = Vec::with_capacity(total_rows);
+
+        for i in 0..total_rows {
+            ts_vals.push(1_700_000_000_000_000_000i64 + (i as i64) * 1_000_000);
+            urls.push(format!(
+                "https://cdn.example.org/assets/v2/tenant_{:02}/item_{:05}/index.html?ref=home",
+                i % 17,
+                i
+            ));
+            if i % 9 == 0 {
+                titles.push(format!("Breaking News Special Report #{i}"));
+            } else {
+                titles.push(format!("Daily Digest Summary Entry #{i}"));
+            }
+            regions.push((i % 7) as i64);
+        }
+
+        let batch = Batch::try_new(
+            Arc::clone(&schema),
+            vec![
+                Column::Flat(
+                    FlatColumn::try_new(
+                        FlatData::TimestampNs {
+                            values: ts_vals,
+                            utc: true,
+                        },
+                        None,
+                    )
+                    .unwrap(),
+                ),
+                Column::Flat(
+                    FlatColumn::try_new(
+                        FlatData::Utf8(
+                            Utf8Data::try_from_slices(urls.iter().map(String::as_str)).unwrap(),
+                        ),
+                        None,
+                    )
+                    .unwrap(),
+                ),
+                Column::Flat(
+                    FlatColumn::try_new(
+                        FlatData::Utf8(
+                            Utf8Data::try_from_slices(titles.iter().map(String::as_str)).unwrap(),
+                        ),
+                        None,
+                    )
+                    .unwrap(),
+                ),
+                Column::Flat(FlatColumn::try_new(FlatData::I64(regions), None).unwrap()),
+            ],
+            total_rows,
+            Selection::All,
+        )
+        .unwrap();
+
+        let opts = WriteOptions {
+            profile: WriteProfile::L1Compact,
+            table_kind: TableKind::Spans,
+            sort_cols: vec![0],
+            mini_block_size: 4096,
+            row_group_size: 65_536,
+            ..WriteOptions::default()
+        };
+        let mut writer = StatamWriter::new(Arc::clone(&schema), opts, None).unwrap();
+        writer.write_batch(&batch).unwrap();
+        let mut file_bytes = Vec::new();
+        writer.finish(&mut file_bytes).unwrap();
+
+        let s3 = Arc::new(SimulatedS3Reader::from_bytes(
+            file_bytes,
+            SimulatedS3Config::default(),
+        ));
+        let reader = StatamReader::open(Arc::clone(&s3) as Arc<dyn RangeReader>, None).unwrap();
+        assert!(reader.meta().rg_blocks(0, 0).len() >= 4);
+        // Confirm `url` uses FSST across mini-blocks so tautology + FSST decode both exercise.
+        assert!(
+            reader
+                .meta()
+                .rg_blocks(1, 0)
+                .iter()
+                .any(|b| b.encoding == Encoding::Fsst)
+        );
+
+        // 1. CB_Q24-style `url <> ''` unprojected (tautology skips reading `url` in Phase 1 & Phase 2).
+        s3.reset_counters();
+        let req_unproj = ScanRequest {
+            projection: Some(vec![0]),
+            predicates: vec![Predicate::new(
+                "url",
+                ZonePred::Ne(ZoneValue::Bytes(Vec::new())),
+            )],
+            coalesce_mode: CoalesceMode::Scan,
+            read_threads: 1,
+            ..ScanRequest::default()
+        };
+        let batches_unproj_1 = reader.scan(&req_unproj).unwrap();
+        let unproj_bytes = s3.counters().bytes_requested;
+
+        let req_unproj_4 = ScanRequest {
+            read_threads: 4,
+            ..req_unproj
+        };
+        let batches_unproj_4 = reader.scan(&req_unproj_4).unwrap();
+        let proj_0_schema = Arc::new(schema.project(&[0]).unwrap());
+        let cat_u1 = concat_scanned_batches(&proj_0_schema, &batches_unproj_1);
+        let cat_u4 = concat_scanned_batches(&proj_0_schema, &batches_unproj_4);
+        assert_eq!(cat_u1.num_rows(), total_rows);
+        assert_eq!(cat_u4.num_rows(), total_rows);
+        for c in 0..proj_0_schema.len() {
+            assert!(
+                cat_u1
+                    .column(c)
+                    .unwrap()
+                    .semantic_eq(cat_u4.column(c).unwrap())
+            );
+        }
+
+        // Compare bytes requested when `url` IS projected (must be strictly larger than unprojected).
+        s3.reset_counters();
+        let req_proj_url = ScanRequest {
+            projection: Some(vec![0, 1]),
+            predicates: vec![Predicate::new(
+                "url",
+                ZonePred::Ne(ZoneValue::Bytes(Vec::new())),
+            )],
+            coalesce_mode: CoalesceMode::Scan,
+            read_threads: 1,
+            ..ScanRequest::default()
+        };
+        let _ = reader.scan(&req_proj_url).unwrap();
+        let proj_bytes = s3.counters().bytes_requested;
+        assert!(
+            unproj_bytes < proj_bytes,
+            "expected tautology url <> '' unprojected ({unproj_bytes}) < projected ({proj_bytes})"
+        );
+
+        // 2. Combined CB_Q24-style `url <> ''` + CB_Q23-style `LIKE` + TimeRange across Scan & Point modes.
+        let tr = TimeRange::new(
+            1_700_000_000_000_000_000i64 + 1_000 * 1_000_000,
+            1_700_000_000_000_000_000i64 + 11_500 * 1_000_000,
+        );
+        for mode in [CoalesceMode::Scan, CoalesceMode::Point] {
+            let req_1 = ScanRequest {
+                projection: None,
+                time_range: tr,
+                predicates: vec![Predicate::new(
+                    "url",
+                    ZonePred::Ne(ZoneValue::Bytes(Vec::new())),
+                )],
+                substrings: vec![SubstringQuery::like("title", b"Special Report")],
+                coalesce_mode: mode,
+                read_threads: 1,
+                ..ScanRequest::default()
+            };
+            let req_4 = ScanRequest {
+                read_threads: 4,
+                ..req_1.clone()
+            };
+            let b1 = reader.scan(&req_1).unwrap();
+            let b4 = reader.scan(&req_4).unwrap();
+            let c1 = concat_scanned_batches(&schema, &b1);
+            let c4 = concat_scanned_batches(&schema, &b4);
+            let expected_rows = (1000..=11_500).filter(|i| i % 9 == 0).count();
+            assert_eq!(c1.num_rows(), expected_rows);
+            assert_eq!(c4.num_rows(), expected_rows);
+            for c in 0..schema.len() {
+                assert!(
+                    c1.column(c).unwrap().semantic_eq(c4.column(c).unwrap()),
+                    "mode={mode:?} col={c} mismatch between read_threads=1 and 4"
+                );
+            }
         }
     }
 }

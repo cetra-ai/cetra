@@ -44,7 +44,8 @@ pub use nested::{
     unshred_map, unshred_map_selected,
 };
 pub use zonemap::{
-    ZoneMapSummary, ZonePred, ZoneValue, compute_zone_map as block_zone_map, zone_map_may_match,
+    ZoneMapSummary, ZonePred, ZoneValue, compute_zone_map as block_zone_map,
+    zone_map_always_matches, zone_map_may_match,
 };
 
 /// Encoding and compression profile controlling speed vs. density trade-offs.

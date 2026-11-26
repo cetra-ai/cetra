@@ -965,3 +965,436 @@ fn read_u64_le(buf: &[u8; 16]) -> u64 {
         buf[0], buf[1], buf[2], buf[3], buf[4], buf[5], buf[6], buf[7],
     ])
 }
+
+/// Returns `true` ONLY when every single row in `entry` is mathematically guaranteed
+/// to satisfy `pred` (zero false positives).
+///
+/// Returning `false` is always safe; returning `true` allows callers to skip
+/// reading, decoding, and evaluating `entry` for `pred`.
+pub fn zone_map_always_matches(entry: &BlockEntry, dt: &DataType, pred: &ZonePred) -> bool {
+    if entry.row_count == 0
+        || entry.null_count > 0
+        || (entry.block_flags & BLOCK_FLAG_ALL_NULL) != 0
+        || (entry.block_flags & BLOCK_FLAG_MIN_MAX_VALID) == 0
+        || entry.encoding == Encoding::Dict
+    {
+        return false;
+    }
+
+    let has_nan = (entry.block_flags & BLOCK_FLAG_HAS_NAN) != 0;
+    if matches!(dt, DataType::F64) && has_nan {
+        return false;
+    }
+
+    match dt {
+        DataType::Null
+        | DataType::Interval
+        | DataType::List(_)
+        | DataType::MapUtf8
+        | DataType::Events
+        | DataType::Links => false,
+        DataType::Bool => {
+            if entry.min_inline_len < 1 || entry.max_inline_len < 1 {
+                return false;
+            }
+            let min_b = entry.min_inline[0] != 0;
+            let max_b = entry.max_inline[0] != 0;
+            eval_ord_always_matches(min_b, max_b, pred, |v| match v {
+                ZoneValue::Bool(b) => Some(*b),
+                _ => None,
+            })
+        }
+        DataType::I64 | DataType::TimestampNs { .. } => {
+            if entry.min_inline_len < 8 || entry.max_inline_len < 8 {
+                return false;
+            }
+            let min_v = read_i64_le(&entry.min_inline);
+            let max_v = read_i64_le(&entry.max_inline);
+            eval_ord_always_matches(min_v, max_v, pred, |v| match v {
+                ZoneValue::I64(x) | ZoneValue::TimestampNs(x) => Some(*x),
+                _ => None,
+            })
+        }
+        DataType::Date => {
+            if entry.min_inline_len < 4 || entry.max_inline_len < 4 {
+                return false;
+            }
+            let min_v = read_i32_le(&entry.min_inline);
+            let max_v = read_i32_le(&entry.max_inline);
+            eval_ord_always_matches(min_v, max_v, pred, |v| match v {
+                ZoneValue::Date(x) => Some(*x),
+                _ => None,
+            })
+        }
+        DataType::Decimal128 { .. } => {
+            if entry.min_inline_len < 16 || entry.max_inline_len < 16 {
+                return false;
+            }
+            let min_v = i128::from_le_bytes(entry.min_inline);
+            let max_v = i128::from_le_bytes(entry.max_inline);
+            eval_ord_always_matches(min_v, max_v, pred, |v| match v {
+                ZoneValue::Decimal128(x) => Some(*x),
+                _ => None,
+            })
+        }
+        DataType::F64 => {
+            if entry.min_inline_len < 8 || entry.max_inline_len < 8 {
+                return false;
+            }
+            let min_f = canonicalize_f64(f64::from_bits(read_u64_le(&entry.min_inline)));
+            let max_f = canonicalize_f64(f64::from_bits(read_u64_le(&entry.max_inline)));
+            if min_f.is_nan() || max_f.is_nan() || min_f > max_f {
+                return false;
+            }
+            eval_f64_always_matches(min_f, max_f, pred)
+        }
+        DataType::FixedBytes8 => {
+            if entry.min_inline_len != 8 || entry.max_inline_len != 8 {
+                return false;
+            }
+            let min_b = &entry.min_inline[..8];
+            let max_b = &entry.max_inline[..8];
+            eval_exact_bytes_always_matches(min_b, max_b, pred)
+        }
+        DataType::FixedBytes16 => {
+            if entry.min_inline_len != 16 || entry.max_inline_len != 16 {
+                return false;
+            }
+            let min_b = &entry.min_inline[..16];
+            let max_b = &entry.max_inline[..16];
+            eval_exact_bytes_always_matches(min_b, max_b, pred)
+        }
+        DataType::Utf8 | DataType::Binary => {
+            if entry.min_inline_len > 16 || entry.max_inline_len > 16 {
+                return false;
+            }
+            match pred {
+                ZonePred::IsNotNull => true,
+                ZonePred::Ne(ZoneValue::Bytes(t)) if t.is_empty() => entry.min_inline_len > 0,
+                _ => {
+                    if entry.min_inline_len < 16 && entry.max_inline_len < 16 {
+                        let min_b = &entry.min_inline[..usize::from(entry.min_inline_len)];
+                        let max_b = &entry.max_inline[..usize::from(entry.max_inline_len)];
+                        eval_exact_bytes_always_matches(min_b, max_b, pred)
+                    } else {
+                        false
+                    }
+                }
+            }
+        }
+    }
+}
+
+fn eval_ord_always_matches<T: Ord + Copy>(
+    min_v: T,
+    max_v: T,
+    pred: &ZonePred,
+    extract: impl Fn(&ZoneValue) -> Option<T>,
+) -> bool {
+    if min_v > max_v {
+        return false;
+    }
+    match pred {
+        ZonePred::IsNotNull => true,
+        ZonePred::Eq(v) => extract(v).is_some_and(|x| min_v == max_v && min_v == x),
+        ZonePred::Ne(v) => extract(v).is_some_and(|x| max_v < x || min_v > x),
+        ZonePred::Lt(v) => extract(v).is_some_and(|x| max_v < x),
+        ZonePred::Le(v) => extract(v).is_some_and(|x| max_v <= x),
+        ZonePred::Gt(v) => extract(v).is_some_and(|x| min_v > x),
+        ZonePred::Ge(v) => extract(v).is_some_and(|x| min_v >= x),
+        ZonePred::Between(lo, hi) => match (extract(lo), extract(hi)) {
+            (Some(l), Some(h)) => l <= h && min_v >= l && max_v <= h,
+            _ => false,
+        },
+        ZonePred::In(vs) => {
+            min_v == max_v && vs.iter().any(|v| extract(v).is_some_and(|x| x == min_v))
+        }
+        ZonePred::IsNull | ZonePred::Prefix(_) => false,
+    }
+}
+
+fn eval_f64_always_matches(min_f: f64, max_f: f64, pred: &ZonePred) -> bool {
+    match pred {
+        ZonePred::IsNotNull => true,
+        ZonePred::Eq(ZoneValue::F64(x)) => {
+            !x.is_nan() && {
+                let c = canonicalize_f64(*x);
+                min_f == max_f && min_f == c
+            }
+        }
+        ZonePred::Ne(ZoneValue::F64(x)) => {
+            !x.is_nan() && {
+                let c = canonicalize_f64(*x);
+                max_f < c || min_f > c
+            }
+        }
+        ZonePred::Lt(ZoneValue::F64(x)) => !x.is_nan() && max_f < canonicalize_f64(*x),
+        ZonePred::Le(ZoneValue::F64(x)) => !x.is_nan() && max_f <= canonicalize_f64(*x),
+        ZonePred::Gt(ZoneValue::F64(x)) => !x.is_nan() && min_f > canonicalize_f64(*x),
+        ZonePred::Ge(ZoneValue::F64(x)) => !x.is_nan() && min_f >= canonicalize_f64(*x),
+        ZonePred::Between(ZoneValue::F64(lo), ZoneValue::F64(hi)) => {
+            if lo.is_nan() || hi.is_nan() {
+                return false;
+            }
+            let l = canonicalize_f64(*lo);
+            let h = canonicalize_f64(*hi);
+            l <= h && min_f >= l && max_f <= h
+        }
+        ZonePred::In(vs) => {
+            min_f == max_f
+                && vs.iter().any(|v| match v {
+                    ZoneValue::F64(x) if !x.is_nan() => canonicalize_f64(*x) == min_f,
+                    _ => false,
+                })
+        }
+        _ => false,
+    }
+}
+
+fn eval_exact_bytes_always_matches(min_b: &[u8], max_b: &[u8], pred: &ZonePred) -> bool {
+    if min_b > max_b {
+        return false;
+    }
+    match pred {
+        ZonePred::IsNotNull => true,
+        ZonePred::Eq(ZoneValue::Bytes(t)) => {
+            let t = t.as_slice();
+            min_b == max_b && min_b == t
+        }
+        ZonePred::Ne(ZoneValue::Bytes(t)) => {
+            let t = t.as_slice();
+            max_b < t || min_b > t
+        }
+        ZonePred::Lt(ZoneValue::Bytes(t)) => max_b < t.as_slice(),
+        ZonePred::Le(ZoneValue::Bytes(t)) => max_b <= t.as_slice(),
+        ZonePred::Gt(ZoneValue::Bytes(t)) => min_b > t.as_slice(),
+        ZonePred::Ge(ZoneValue::Bytes(t)) => min_b >= t.as_slice(),
+        ZonePred::Between(ZoneValue::Bytes(lo), ZoneValue::Bytes(hi)) => {
+            let (l, h) = (lo.as_slice(), hi.as_slice());
+            l <= h && min_b >= l && max_b <= h
+        }
+        ZonePred::In(vs) => {
+            min_b == max_b
+                && vs
+                    .iter()
+                    .any(|v| matches!(v, ZoneValue::Bytes(t) if t.as_slice() == min_b))
+        }
+        ZonePred::Prefix(p) => min_b.starts_with(p) && max_b.starts_with(p),
+        _ => false,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::format::{Codec, Encoding};
+    use cetra_column::{Bitmap, Utf8Data};
+
+    fn make_entry(encoding: Encoding, zm: ZoneMapSummary, row_count: u16) -> BlockEntry {
+        BlockEntry {
+            first_row: 0,
+            row_count,
+            null_count: zm.null_count,
+            offset: 0,
+            stored_len: 0,
+            raw_len: 0,
+            encoding,
+            codec: Codec::None,
+            block_flags: zm.block_flags,
+            min_inline_len: zm.min_inline_len,
+            max_inline_len: zm.max_inline_len,
+            reserved: [0; 3],
+            min_inline: zm.min_inline,
+            max_inline: zm.max_inline,
+        }
+    }
+
+    #[test]
+    fn zone_map_always_matches_soundness_numeric_f64_nan_and_utf8_non_empty() {
+        // 1. Utf8 non-empty (`col <> ''`)
+        let non_empty_col = Column::Flat(
+            FlatColumn::try_new(
+                FlatData::Utf8(
+                    Utf8Data::try_from_slices([
+                        "https://a.com",
+                        "https://example.com/very/long/url/exceeding/16/bytes",
+                    ])
+                    .unwrap(),
+                ),
+                None,
+            )
+            .unwrap(),
+        );
+        let zm_non_empty = compute_zone_map(&non_empty_col, false);
+        let blk_non_empty = make_entry(Encoding::Fsst, zm_non_empty, 2);
+        assert!(zone_map_always_matches(
+            &blk_non_empty,
+            &DataType::Utf8,
+            &ZonePred::Ne(ZoneValue::Bytes(Vec::new())),
+        ));
+        assert!(zone_map_always_matches(
+            &blk_non_empty,
+            &DataType::Utf8,
+            &ZonePred::IsNotNull,
+        ));
+
+        // Dict encoding must NEVER report always_matches for Ne("") because min_inline holds code, not bytes.
+        let blk_dict = make_entry(Encoding::Dict, zm_non_empty, 2);
+        assert!(!zone_map_always_matches(
+            &blk_dict,
+            &DataType::Utf8,
+            &ZonePred::Ne(ZoneValue::Bytes(Vec::new())),
+        ));
+
+        // With null_count > 0: returns false.
+        let mut null_bm = Bitmap::new_zeroed(2);
+        let _ = null_bm.set(0, true);
+        let with_null = Column::Flat(
+            FlatColumn::try_new(
+                FlatData::Utf8(
+                    Utf8Data::try_from_slices(["https://a.com", "https://b.com"]).unwrap(),
+                ),
+                Some(null_bm),
+            )
+            .unwrap(),
+        );
+        let blk_with_null = make_entry(Encoding::Plain, compute_zone_map(&with_null, false), 2);
+        assert!(!zone_map_always_matches(
+            &blk_with_null,
+            &DataType::Utf8,
+            &ZonePred::Ne(ZoneValue::Bytes(Vec::new())),
+        ));
+
+        // With empty string present: min_inline_len == 0 -> returns false.
+        let with_empty = Column::Flat(
+            FlatColumn::try_new(
+                FlatData::Utf8(Utf8Data::try_from_slices(["", "https://a.com"]).unwrap()),
+                None,
+            )
+            .unwrap(),
+        );
+        let blk_with_empty = make_entry(Encoding::Plain, compute_zone_map(&with_empty, false), 2);
+        assert!(!zone_map_always_matches(
+            &blk_with_empty,
+            &DataType::Utf8,
+            &ZonePred::Ne(ZoneValue::Bytes(Vec::new())),
+        ));
+
+        // Short (< 16 B) constant Utf8 supports Eq; >= 16 B prefix-truncated Utf8 does NOT.
+        let short_const = Column::try_new_const(ScalarValue::Utf8("ok".to_string()), 4).unwrap();
+        let blk_short_const = make_entry(Encoding::Const, compute_zone_map(&short_const, false), 4);
+        assert!(zone_map_always_matches(
+            &blk_short_const,
+            &DataType::Utf8,
+            &ZonePred::Eq(ZoneValue::Bytes(b"ok".to_vec())),
+        ));
+        let long_const =
+            Column::try_new_const(ScalarValue::Utf8("0123456789abcdef_long".to_string()), 4)
+                .unwrap();
+        let blk_long_const = make_entry(Encoding::Const, compute_zone_map(&long_const, false), 4);
+        assert!(!zone_map_always_matches(
+            &blk_long_const,
+            &DataType::Utf8,
+            &ZonePred::Eq(ZoneValue::Bytes(b"0123456789abcdef_long".to_vec())),
+        ));
+
+        // 2. Numeric I64 / TimestampNs bounds
+        let ts_col = Column::Flat(
+            FlatColumn::try_new(
+                FlatData::TimestampNs {
+                    values: vec![100, 150, 200],
+                    utc: true,
+                },
+                None,
+            )
+            .unwrap(),
+        );
+        let ts_dt = DataType::TimestampNs { utc: true };
+        let blk_ts = make_entry(Encoding::DeltaBitpack, compute_zone_map(&ts_col, false), 3);
+        assert!(zone_map_always_matches(
+            &blk_ts,
+            &ts_dt,
+            &ZonePred::Between(ZoneValue::TimestampNs(100), ZoneValue::TimestampNs(200)),
+        ));
+        assert!(!zone_map_always_matches(
+            &blk_ts,
+            &ts_dt,
+            &ZonePred::Between(ZoneValue::TimestampNs(101), ZoneValue::TimestampNs(200)),
+        ));
+        assert!(zone_map_always_matches(
+            &blk_ts,
+            &ts_dt,
+            &ZonePred::Gt(ZoneValue::TimestampNs(99)),
+        ));
+        assert!(!zone_map_always_matches(
+            &blk_ts,
+            &ts_dt,
+            &ZonePred::Gt(ZoneValue::TimestampNs(100)),
+        ));
+        assert!(zone_map_always_matches(
+            &blk_ts,
+            &ts_dt,
+            &ZonePred::Ge(ZoneValue::TimestampNs(100)),
+        ));
+        assert!(zone_map_always_matches(
+            &blk_ts,
+            &ts_dt,
+            &ZonePred::Lt(ZoneValue::TimestampNs(201)),
+        ));
+        assert!(zone_map_always_matches(
+            &blk_ts,
+            &ts_dt,
+            &ZonePred::Le(ZoneValue::TimestampNs(200)),
+        ));
+        assert!(zone_map_always_matches(
+            &blk_ts,
+            &ts_dt,
+            &ZonePred::Ne(ZoneValue::TimestampNs(99)),
+        ));
+        assert!(!zone_map_always_matches(
+            &blk_ts,
+            &ts_dt,
+            &ZonePred::Ne(ZoneValue::TimestampNs(150)),
+        ));
+
+        // 3. F64 without NaN vs with NaN
+        let f64_clean =
+            Column::Flat(FlatColumn::try_new(FlatData::F64(vec![1.5, 2.5, 3.5]), None).unwrap());
+        let blk_f64_clean = make_entry(Encoding::Alp, compute_zone_map(&f64_clean, false), 3);
+        assert!(zone_map_always_matches(
+            &blk_f64_clean,
+            &DataType::F64,
+            &ZonePred::Between(ZoneValue::F64(1.0), ZoneValue::F64(4.0)),
+        ));
+        assert!(zone_map_always_matches(
+            &blk_f64_clean,
+            &DataType::F64,
+            &ZonePred::Ne(ZoneValue::F64(5.0)),
+        ));
+        assert!(!zone_map_always_matches(
+            &blk_f64_clean,
+            &DataType::F64,
+            &ZonePred::Ne(ZoneValue::F64(f64::NAN)),
+        ));
+
+        let f64_nan = Column::Flat(
+            FlatColumn::try_new(FlatData::F64(vec![1.5, f64::NAN, 3.5]), None).unwrap(),
+        );
+        let blk_f64_nan = make_entry(Encoding::Plain, compute_zone_map(&f64_nan, false), 3);
+        assert!(!zone_map_always_matches(
+            &blk_f64_nan,
+            &DataType::F64,
+            &ZonePred::Between(ZoneValue::F64(0.0), ZoneValue::F64(10.0)),
+        ));
+        assert!(!zone_map_always_matches(
+            &blk_f64_nan,
+            &DataType::F64,
+            &ZonePred::Ne(ZoneValue::F64(5.0)),
+        ));
+        assert!(!zone_map_always_matches(
+            &blk_f64_nan,
+            &DataType::F64,
+            &ZonePred::IsNotNull,
+        ));
+    }
+}
