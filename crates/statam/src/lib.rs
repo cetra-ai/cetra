@@ -10,6 +10,11 @@ pub mod reader;
 pub mod simd;
 pub mod writer;
 
+/// Fuzz entry points. Not part of the public API.
+#[cfg(any(test, fuzzing))]
+#[doc(hidden)]
+pub mod fuzz_entry;
+
 pub use codec::{
     DICT_PASSTHROUGH_MAX_BYTES, DictBuilder, EncodedMiniBlock, FsstBlockView, FsstTable,
     ShreddedMapBlocks, ShreddedSubCol, WriteProfile, ZoneMapSummary, ZonePred, ZoneValue,
