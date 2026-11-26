@@ -82,6 +82,16 @@ impl EngineError {
         self.kind == EngineErrorKind::Busy
     }
 
+    pub(crate) fn to_query_error(self) -> cetra_query::QueryError {
+        match self.kind {
+            EngineErrorKind::ResourcesExhausted => cetra_query::QueryError::TooLarge,
+            EngineErrorKind::Busy => cetra_query::QueryError::Busy,
+            EngineErrorKind::Parquet => cetra_query::QueryError::internal("corrupt parquet file"),
+            EngineErrorKind::ObjectStore => cetra_query::QueryError::internal("storage read error"),
+            _ => cetra_query::QueryError::internal(self.kind.label()),
+        }
+    }
+
     pub(crate) fn from_query(err: &cetra_query::QueryError) -> Self {
         let kind = match err {
             cetra_query::QueryError::TooLarge => EngineErrorKind::ResourcesExhausted,

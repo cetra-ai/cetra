@@ -104,9 +104,8 @@ pub(crate) fn spawn(
                         }
                         Ok(_) => {}
                         Err(error) => {
-                            // The label only: a DataFusion error raised by a
-                            // plan holding the covered-row predicate may quote
-                            // its literals (spec 03 §7).
+                            // The label only, so covered-row predicates never
+                            // leak literals into logs (spec 03 §7).
                             tracing::warn!(error = error.label(), "deletion pass failed");
                         }
                     }

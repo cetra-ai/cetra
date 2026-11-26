@@ -1924,7 +1924,7 @@ mod tests {
         assert_eq!(matched[0].start_time, 300);
         assert_eq!(matched[1].start_time, 200);
 
-        // Out-of-range schema_version fails conversion cleanly.
+        // Missing required columns fail conversion cleanly.
         let bad_schema = Schema::try_new_arc(vec![Field::new(
             spans::SCHEMA_VERSION,
             DataType::I64,
@@ -1939,7 +1939,45 @@ mod tests {
         .unwrap();
         assert!(matches!(
             span(&bad_batch, project_id),
-            Err(ConvertError::Missing(_))
+            Err(ConvertError::Missing(spans::TRACE_ID))
         ));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn out_of_range_schema_version_fails_with_value_error() {
+        let (_app, ctx) = example_context().await;
+        let project_id = ProjectId::from_uuid(Uuid::now_v7());
+        let base = cetra_storage::span_detail(
+            &ctx,
+            "a1000000000000000000000000000001",
+            "b100000000000012",
+            READ_TIMEOUT,
+        )
+        .await
+        .unwrap()
+        .expect("example dataset has span b100000000000012");
+        let sv_idx = base
+            .schema()
+            .index_of(spans::SCHEMA_VERSION)
+            .expect("schema_version column");
+        let raw_len = base.raw_len();
+        for bad_version in [i64::from(u16::MAX) + 1, -1] {
+            let mut cols = base.columns().to_vec();
+            cols[sv_idx] = Column::try_new_const(ScalarValue::I64(bad_version), raw_len).unwrap();
+            let bad_batch = Batch::try_new(
+                Arc::clone(base.schema()),
+                cols,
+                raw_len,
+                base.selection().clone(),
+            )
+            .unwrap();
+            assert!(
+                matches!(
+                    span(&bad_batch, project_id),
+                    Err(ConvertError::Value(spans::SCHEMA_VERSION))
+                ),
+                "expected ConvertError::Value(schema_version) for {bad_version}"
+            );
+        }
     }
 }

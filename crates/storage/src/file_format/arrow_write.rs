@@ -293,10 +293,24 @@ where
 }
 
 fn offsets_to_i32(offsets: &[u32]) -> Result<OffsetBuffer<i32>, ColumnError> {
-    let mut out = Vec::with_capacity(offsets.len());
-    for &o in offsets {
-        out.push(i32::try_from(o).map_err(|_| overflow("offset exceeds i32::MAX"))?);
+    if offsets.is_empty() {
+        return Err(ColumnError::InvalidBatch {
+            reason: "empty offset buffer",
+        });
     }
+    let mut out = Vec::with_capacity(offsets.len());
+    let mut prev: i32 = 0;
+    for &o in offsets {
+        let v = i32::try_from(o).map_err(|_| overflow("offset exceeds i32::MAX"))?;
+        if v < prev {
+            return Err(ColumnError::InvalidBatch {
+                reason: "non-monotonic offset buffer",
+            });
+        }
+        prev = v;
+        out.push(v);
+    }
+    // Non-empty, non-negative, monotonically non-decreasing: OffsetBuffer::new cannot panic.
     Ok(OffsetBuffer::new(ScalarBuffer::from(out)))
 }
 

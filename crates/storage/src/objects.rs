@@ -71,8 +71,8 @@ pub(crate) struct Objects {
     kind: Kind,
     /// The store itself: S3, or a test store standing in for it.
     raw: Arc<dyn ObjectStore>,
-    /// `raw` behind the read cache (spec 03 §6), or `raw` itself. Registered
-    /// with DataFusion, so queries, compaction and GC read through the cache.
+    /// `raw` behind the read cache (spec 03 §6), or `raw` itself. Used by
+    /// queries, compaction and GC so reads go through the cache.
     store: Arc<dyn ObjectStore>,
     /// Set by [`Self::with_read_cache`], remote stores only.
     cache: Option<Arc<ReadCache>>,

@@ -221,9 +221,8 @@ impl Compactor {
                 let outcome = compactor.run(job, policy).await;
                 if let Err(error) = &outcome {
                     // A conflict's text is its static reason. Every other error
-                    // is named by its label only: a DataFusion error raised by a
-                    // plan holding the covered-row predicate may quote its
-                    // literals (spec 03 §7).
+                    // is named by its label only, so covered-row predicates
+                    // never leak literals into logs (spec 03 §7).
                     if matches!(error, CompactionError::Commit(CommitError::Conflict { .. })) {
                         tracing::info!(
                             table,

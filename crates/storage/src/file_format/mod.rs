@@ -386,12 +386,6 @@ impl<W: Write + Send> BatchFileWriter<W> {
         Ok(())
     }
 
-    /// Rows written so far.
-    #[allow(dead_code)]
-    pub(crate) fn rows(&self) -> u64 {
-        self.rows
-    }
-
     /// Writes the footer and returns the sink and file summary.
     ///
     /// A file with no rows is an error.
@@ -1987,7 +1981,7 @@ mod tests {
         .unwrap();
         let mut writer = BatchFileWriter::new(FileTable::Scores, 1, Vec::new(), 1).unwrap();
         writer.write(&masked).unwrap();
-        assert_eq!(writer.rows(), 1);
+        assert_eq!(writer.rows, 1);
         let (buf, summary) = writer.finish().unwrap();
         assert_eq!(summary.rows, 1);
         assert_eq!(summary.min_time, 10);
@@ -2032,7 +2026,7 @@ mod tests {
         for b in &small {
             writer.write(b).unwrap();
         }
-        assert_eq!(writer.rows(), 3_000);
+        assert_eq!(writer.rows, 3_000);
         let (mut sink, summary) = writer.finish().unwrap();
         sink.seek(SeekFrom::Start(0)).unwrap();
         let mut buffer = Vec::new();

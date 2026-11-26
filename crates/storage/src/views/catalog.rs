@@ -2,7 +2,7 @@
 
 use super::ViewName;
 
-/// Arrow-facing kind of a view column.
+/// Columnar kind of a view column.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ColumnKind {
     /// `Utf8`.

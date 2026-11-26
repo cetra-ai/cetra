@@ -212,9 +212,8 @@ impl Compactor {
                 Ok((_, Ok(Checked::Clean { id, applied }))) => clean.push((id, applied)),
                 Ok((_, Ok(Checked::Failed))) => report.failed += 1,
                 Ok((id, Err(error))) => {
-                    // The label only: a DataFusion error raised by a plan
-                    // holding the covered-row predicate may quote its
-                    // literals (spec 03 §7).
+                    // The label only, so covered-row predicates never leak
+                    // literals into logs (spec 03 §7).
                     report.failed += 1;
                     tracing::warn!(
                         file = %id,

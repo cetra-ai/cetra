@@ -564,7 +564,7 @@ pub(crate) fn run_err_to_query(err: RunError) -> QueryError {
         RunError::Failed(msg) => QueryError::Failed(msg),
         RunError::Timeout => QueryError::Cancelled,
         RunError::TooLarge => QueryError::TooLarge,
-        RunError::Internal(engine_err) => QueryError::internal(engine_err.kind_label()),
+        RunError::Internal(engine_err) => engine_err.to_query_error(),
     }
 }
 
