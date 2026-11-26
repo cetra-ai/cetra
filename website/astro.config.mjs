@@ -28,6 +28,8 @@ export default defineConfig({
         TwoColumnContent: "./src/components/TwoColumnContent.astro",
         // Title actions: copy or view the page as Markdown (D-AO-12).
         PageTitle: "./src/components/PageTitle.astro",
+        // The site's header bar, with the docs' search and theme switch.
+        Header: "./src/components/Header.astro",
       },
       social: [{ icon: "github", label: "GitHub", href: "https://github.com/cetra-ai/cetra" }],
       editLink: { baseUrl: "https://github.com/cetra-ai/cetra/edit/main/website/" },
