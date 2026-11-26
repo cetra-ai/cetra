@@ -39,10 +39,10 @@ use cetra_column::{
     Schema as ColSchema, Utf8Data,
 };
 use cetra_statam::{
-    ChunkPackBuilder, CoalesceMode, IdLookup, InMemoryPackResolver, PackResolver, PackWriteOptions,
-    Predicate as StatamPred, RangeReader, ScanRequest, SimulatedS3Config, SimulatedS3Reader,
-    SliceReader, StatamReader, StatamWriter, SubstringQuery, TableKind, WriteOptions, WriteProfile,
-    ZonePred, ZoneValue,
+    ChunkPackBuilder, ChunkPackReader, CoalesceMode, IdLookup, InMemoryPackResolver, PackResolver,
+    PackWriteOptions, Predicate as StatamPred, RangeReader, ScanRequest, SimulatedS3Config,
+    SimulatedS3Reader, SliceReader, StatamReader, StatamWriter, SubstringQuery, TableKind,
+    WriteOptions, WriteProfile, ZonePred, ZoneValue,
 };
 use flate2::read::GzDecoder;
 use futures::stream::TryStreamExt;
@@ -439,11 +439,111 @@ fn write_generic_statam(
     } else {
         None
     };
+    let statam_bytes = Bytes::from(buf);
+    if std::env::var_os("STATAM_DUMP_STATS").is_some() && profile == WriteProfile::L1Compact {
+        dump_statam_breakdown(&statam_bytes, pack_bytes.as_ref())?;
+    }
     Ok((
-        Bytes::from(buf),
+        statam_bytes,
         pack_bytes,
         t0.elapsed().as_secs_f64() * 1000.0,
     ))
+}
+
+fn dump_statam_breakdown(statam_bytes: &Bytes, pack_bytes: Option<&Bytes>) -> BenchResult<()> {
+    let reader = StatamReader::open(Arc::new(SliceReader::new(statam_bytes.clone())), None)?;
+    let meta = reader.meta();
+    let mut by_enc: BTreeMap<String, (usize, u64, u64)> = BTreeMap::new();
+    let mut by_col: Vec<(String, u64, u64, usize)> = Vec::new();
+    for c in &meta.col_dir {
+        let name = meta
+            .schema_meta
+            .schema
+            .fields()
+            .get(usize::from(c.logical_col_id))
+            .map_or_else(|| format!("phys_{}", c.phys_col_id), |f| f.name.clone());
+        let start = c.first_block_idx as usize;
+        let end = start + c.num_blocks as usize;
+        let mut col_stored = 0u64;
+        let mut col_raw = 0u64;
+        for b in &meta.block_dir[start..end] {
+            let e = by_enc
+                .entry(format!("{:?}/{:?}", b.encoding, b.codec))
+                .or_insert((0, 0, 0));
+            e.0 += 1;
+            e.1 += u64::from(b.stored_len);
+            e.2 += u64::from(b.raw_len);
+            col_stored += u64::from(b.stored_len);
+            col_raw += u64::from(b.raw_len);
+        }
+        by_col.push((
+            format!("{name}(p{})", c.phys_col_id),
+            col_stored,
+            col_raw,
+            c.num_blocks as usize,
+        ));
+    }
+    by_col.sort_by(|a, b| b.1.cmp(&a.1));
+    let mut lazy_by_kind: BTreeMap<String, u64> = BTreeMap::new();
+    for le in &meta.lazy_dir {
+        *lazy_by_kind.entry(format!("{:?}", le.kind)).or_insert(0) += u64::from(le.len);
+    }
+    let hot_tail_len = meta.file_len.saturating_sub(meta.hot_tail_start);
+    eprintln!(
+        "[STATAM_STATS] .statam={} KiB | rows={} rgs={} blocks={} | hot_tail={} KiB (hot_bloom={} KiB, hot_dict={} KiB) | lazy={:?}",
+        statam_bytes.len() / 1024,
+        meta.postscript.row_count,
+        meta.postscript.num_row_groups,
+        meta.postscript.total_blocks,
+        hot_tail_len / 1024,
+        meta.hot_bloom_bytes.len() / 1024,
+        meta.hot_dict_bytes.len() / 1024,
+        lazy_by_kind
+            .iter()
+            .map(|(k, v)| format!("{k}={}KiB", v / 1024))
+            .collect::<Vec<_>>()
+    );
+    eprintln!(
+        "[STATAM_STATS]   encodings: {:?}",
+        by_enc
+            .iter()
+            .map(|(k, (n, s, r))| format!("{k}:{n}blk/{}KiB(raw {}KiB)", s / 1024, r / 1024))
+            .collect::<Vec<_>>()
+    );
+    eprintln!(
+        "[STATAM_STATS]   top_cols: {:?}",
+        by_col
+            .iter()
+            .take(6)
+            .map(|(n, s, r, nb)| format!("{n}={}KiB(raw {}KiB,{nb}mb)", s / 1024, r / 1024))
+            .collect::<Vec<_>>()
+    );
+    if let Some(pb) = pack_bytes {
+        let pack = ChunkPackReader::open(Arc::new(SliceReader::new(pb.clone())))?;
+        let ps = pack.postscript();
+        let frame_stored: u64 = pack
+            .toc()
+            .frames
+            .iter()
+            .map(|f| u64::from(f.stored_len))
+            .sum();
+        let frame_raw: u64 = pack.toc().frames.iter().map(|f| u64::from(f.raw_len)).sum();
+        let hash_bytes = u64::from(ps.chunk_count) * 16;
+        eprintln!(
+            "[STATAM_STATS] .stpk={} KiB | frames={} chunks={} | frame_data={} KiB (raw {} KiB) | hash_tbl={} KiB | edge_tbl={} KiB | trigram={} KiB | dict={} KiB | toc={} KiB",
+            pb.len() / 1024,
+            ps.frame_count,
+            ps.chunk_count,
+            frame_stored / 1024,
+            frame_raw / 1024,
+            hash_bytes / 1024,
+            ps.edge_table_len / 1024,
+            ps.trigram_len / 1024,
+            ps.dict_len / 1024,
+            ps.toc_stored_len / 1024,
+        );
+    }
+    Ok(())
 }
 
 async fn try_write_lance(
@@ -1457,6 +1557,11 @@ fn run_statam_bench_query(
     expected_matches: &mut Option<usize>,
     query_rows: &mut Vec<QueryBenchRow>,
 ) -> BenchResult<()> {
+    if let Ok(only) = std::env::var("STATAM_ONLY_QUERY")
+        && only != qname
+    {
+        return Ok(());
+    }
     for (fmt, bytes_opt, pack_opt) in [
         ("statam_l0", statam_l0, None),
         ("statam_l1", statam_l1, statam_l1_pack),
@@ -2027,6 +2132,11 @@ async fn run_clickbench_suite(
             });
         }
 
+        if let Ok(only) = std::env::var("STATAM_ONLY_QUERY")
+            && only != qname
+        {
+            continue;
+        }
         for (fmt, bytes_opt, local_opt) in [
             ("statam_l0", &statam_l0, &statam_l0_local),
             ("statam_l1", &statam_l1, &statam_l1_local),
@@ -2958,6 +3068,11 @@ async fn run_row_filter_suite(
             });
         }
 
+        if let Ok(only) = std::env::var("STATAM_ONLY_QUERY")
+            && only != qname
+        {
+            continue;
+        }
         for (fmt, bytes_opt, local_opt) in [
             ("statam_l0", &statam_l0, &statam_l0_local),
             ("statam_l1", &statam_l1, &statam_l1_local),
@@ -3427,6 +3542,11 @@ async fn run_random_access_suite(
             .await?;
         }
 
+        if let Ok(only) = std::env::var("STATAM_ONLY_QUERY")
+            && only != qname
+        {
+            continue;
+        }
         for (fmt, bytes_opt, local_opt) in [
             ("statam_l0", &statam_l0, &statam_l0_local),
             ("statam_l1", &statam_l1, &statam_l1_local),
@@ -6206,7 +6326,11 @@ fn render_external_report(
 async fn run() -> BenchResult<()> {
     let cli = parse_cli_args()?;
     let scale = BenchScale::from_env();
-    let warm_runs = if scale == BenchScale::Quick { 5 } else { 10 };
+    let warm_runs = std::env::var("STATAM_WARM_RUNS")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+        .filter(|&n| n > 0)
+        .unwrap_or(if scale == BenchScale::Quick { 5 } else { 10 });
     let vortex_session = new_vortex_session();
 
     let mut write_rows = Vec::new();

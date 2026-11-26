@@ -156,6 +156,7 @@
   6. Optimization Pass 7 / Option C cold review (0 blockers, 0 majors; all 4 minors + tiny-flush gating fixed)
   7. Optimization Pass 8 cold review (`57aab1b`; 1 blocker, 2 majors, 4 minors — all fixed)
   8. Optimization Pass 9 cold review (`b6211b9`; 0 blockers, 1 major, 2 minors — all fixed; `105` unit tests + `2` `fuzz_replay` tests passing)
+  9. Optimization Pass 10 cold review (2 blockers, 4 majors, 4 minors — all fixed with dedicated regression tests; `125` unit tests + `2` `fuzz_replay` tests passing, `0` clippy warnings)
 
 ---
 
@@ -325,5 +326,44 @@ Added **Lance V2.2** (`lance-file 14.0.3`, Arrow 58 IPC bridge, `SimulatedS3Obje
 - **Shredded `MapUtf8` on Real Bluesky JSON (`JB_Q3_map_type`):** Statam's shredded map layout delivers **`2.04 ms (1R)` / `1.23 ms (8R)`** — **`6.4×–10.7×` faster than Strata, `13.6×–22.6×` faster than Vortex, `26.6×–44.1×` faster than Lance, and `30.5×–50.5×` faster than Parquet** — while also winning S3 (`159 ms`, 4 GETs).
 - **Multilingual WildChat-1M & Unicode `ILIKE` (`WC_Q4_unicode_ilike`):** At `8R`, Statam's parallel `.stpk` frame scan is **`3.4×–6.6×` faster than all 6 competitors** (`21.90 ms` vs `75–145 ms`). At `1R` (`90.97 ms`), non-ASCII `ILIKE` currently disables ASCII-trigram bloom pruning; extracting pure-ASCII runs `>= 3` bytes (e.g., `"alienaci"` from `"Alienación"`) for the trigram bloom is a clean future optimization that would drop `1R` latency below `3 ms`.
 - **Small-Row `.stpk` Trade-offs (Honest Findings):** On `jsonbench_100k` (small ~400 B `raw_json` per event, 265 scattered DID hits), `.stpk` framing + blooms add ~7 MiB over Parquet/Vortex and cost `28.9 ms (1R)` / `8.5 ms (8R)` locally on `JB_Q5_did_full` vs Strata `4.35 ms` (though Statam still wins S3 at `251 ms` vs `411 ms`). Similarly on tiny `hermes_fc` (`1,893` rows, `1.8 MiB`), `HF_Q3_tool_like` favors inline columns (`1.69–1.81 ms` on Parquet/Vortex vs `3.04 ms` on `statam_l1 8R`), while Statam wins `HF_Q1_cat_cnt` (`7 µs`, `1` S3 GET) and `HF_Q4_out_absent` (`0.297 ms`) and matches Vortex's `10.0×` compression ratio while writing **`15.6×` faster**.
+
+---
+
+## 12. Pass 10 — `perf`-Driven Elimination of Remaining Competitor Gaps (`precision-5770-vm`)
+
+Following a dedicated `perf` + `STATAM_DUMP_STATS` pass across all 8 lagging queries, implemented five targeted improvements (audited by Cold Review #9, `125` unit tests + `2` `fuzz_replay` tests passing, `0` clippy warnings):
+1. **Zero-`from_utf8` Raw Phase-1 `LIKE`/`ILIKE` (`reader.rs`, `codec/fsst.rs`):** Scans `Rle` (once per unique run!), `Fsst` (`FsstBlockView::decode_row_into`), `Plain`, `Const`, and `Dict` (`dict_sub_bitmap`) directly on raw bytes without constructing full `Utf8Data` blocks (`CB_Q23_like` `41.6%` `from_utf8` eliminated).
+2. **Cached Zero-Alloc `FlatEdgeTable` + CSR `FlatPayloadRefs` + Exhaustively-Verified Unicode `ILIKE` Trigram Extraction (`payload/{mod,pack,search}.rs`):** Eliminated `65,642` per-query `malloc`/`free` calls in `read_edge_table()` / `decode_payload_refs`, skipped dead `EdgeTable` / boundary pair work on `edge_table_len == 0` packs (with strict `StatamError::Corrupt` guard against crafted multi-chunk references), and added sound ASCII-run trigram extraction (`extract_unicode_ilike_trigram_hashes_in_slice`, proven across all `0..=0x10FFFF`).
+3. **Sparse `Dict` & Sparse `Rle` Decode in Phase 2 & `take_rows` (`codec/{dict,mod}.rs`):** Avoids full-column materialization + `take` on selective point lookups and scattered `take_rows`.
+4. **Boundary-Aware Dead `EdgeTable` Pruning + Optional `emit_hash_table` (`payload/pack.rs`, `writer.rs`, `gdpr.rs`):** Omits `EdgeTable` completely (`edge_table_len = 0`) on single-chunk packs (`jsonbench_100k`: `4,486 KiB → 0 KiB`), zeros non-boundary chunk edges on mixed packs (`wildchat_15k`: `1,336 KiB → 670 KiB`), and adds `PackWriteOptions::emit_hash_table` (default `true`; safe in `gdpr_rewrite_day`).
+5. **`8,192`-Row Mini-Blocks + `512 KiB` `.stpk` Frames + Proportional Trigram Budget (`writer.rs`, `payload/pack.rs`):** Finer skipping & parallelism (`4×` more mini-blocks, `2×` finer `.stpk` frames) with `min(stored_len / 6, raw.len() / 32)` trigram cap.
+
+### 12.1 Before vs. After Pass 10 — Latency Breakthroughs (`statam_l1`, `precision-5770-vm`)
+
+| Workload / Query | Pre-Pass 10 (`1R` / `8R`) | Pass 10 (`1R` / `8R`) | Speedup | Competitive Result |
+|---|---:|---:|---:|---|
+| `ClickBench` `CB_Q23_like` | 13.34 / 5.99 ms | **2.43 / 1.71 ms** (`l0` **1.27 ms**) | **5.5× / 3.5×** | **Beats Strata (`4.05 ms`) even on 1 thread** (`2.4×–3.2×` at `8R`) |
+| `ClickBench` `CB_Q24` | 13.04 / 4.89 ms | 12.99 / **2.64 ms** (`l0` **1.06 ms**) | `1.9×` (`l0` `2.1×`) | `l0 (8R)` **beats Strata (`1.75 ms`) & Vortex (`2.43 ms`) — #1 of 8** |
+| `ClickBench` `CB_Q20` | 1.91 / 1.89 ms | **0.40 / 0.42 ms** | **4.8×** | **#1 S3 (`81 ms`, 2 GETs)**, `4×–8×` faster local than Parquet/Vortex |
+| `ClickBench` `CB_wide_point` *(105 cols)* | 7.36 / 1.71 ms | **1.91 / 0.53 ms** | **3.9× / 3.2×** | **3.0× faster than Strata (`1.57 ms`), 440× faster than Lance!** |
+| `RowFilter` `RF_pt_0_001pct` | 0.613 / 0.368 ms | **0.161 / 0.131 ms** (`l0` **0.098 ms**) | **3.8× / 2.8×** | **Beats Strata (`0.154 ms`) — #1 across all 6/6 patterns** |
+| `RandomAccess` `RA_take_100` / `1000` | 21.8 / 3.94–4.21 ms | 22.0 / **3.54–3.66 ms** | `1.15×` (`8R`) | **S3 cut to 3 GETs / `168 ms`** (`4.4×` faster than Lance) |
+| `JSONBench` `JB_Q5_did_full` *(10 cols)* | 28.87 / 8.50 ms | **17.90 / 4.33 ms** (`l0` **4.10 ms**) | **1.6× / 2.0×** | **Beats Strata (`4.35 ms`) — sweeps all 5/5 JSONBench #1!** |
+| `WildChat` `WC_Q5_input_absent` | 12.43 / 9.24 ms | **3.28 / 1.77 ms** | **3.8× / 5.2×** | **Beats Strata (`2.64 ms`) by `1.49×`**; S3 `97.5 ms` (`2.3 MiB`) |
+| `WildChat` `WC_Q4_unicode_ilike` | 90.97 / 21.90 ms | 83.02 / **13.44 ms** | **1.6× (`8R`)** | **`5.6×–10.8×` faster than every other format** |
+| `WildChat` `WC_Q3_trace_full` | 6.15 / 4.43 ms | **4.24 / 2.66 ms** (`l0` **1.92 ms**) | **1.5× / 1.7×** | Beats Parquet even on `1R`, `18×` faster than Vortex, `154×` faster than Lance |
+| `Hermes` `HF_Q3_tool_like` | 3.77 / 3.04 ms | **1.17 / 0.87 ms** | **3.2× / 3.5×** | **Beats Parquet (`1.69 ms`), Vortex (`1.81 ms`), Lance & Strata even on `1R`!** |
+| `Hermes` `HF_Q4_out_absent` | 0.298 / 0.297 ms | **0.163 / 0.164 ms** | **1.8×** | **`1.9×–6.2×` faster than every competitor** |
+| `W1_agents` `substring_rare` *(858 MiB)* | 33.35 / 16.86 ms | **24.49 / 8.77 ms** | **1.9× (`8R`)** | **1.95× faster than Strata (`17.14 ms`), 162× faster than Parquet!** |
+| `W1_agents` `point_lookup_full` *(56 cols)* | 12.52 / 8.28 ms | **6.68 / 4.94 ms** | **1.9× / 1.7×** | Beats Vortex (`9.69 ms`) even on `1R` |
+| `W1_agents` `substring_absent` | 1.94 ms (`1R`) | 2.00 / **0.99 ms** | **2.0× (`8R`)** | **S3 cut to 3 GETs / `110.6 ms`** (down from 4 GETs / `143 ms`) |
+| `W2_chat_4files` `substring_rare` / `absent` | 39.3 / 33.4 ms | **6.49 / 4.08 ms (`8R`)** | **6.1× / 8.2×** | Huge multi-file `.stpk` speedup |
+| `W3_spans` `point_lookup_full` | 5.19 / 1.44 ms | **1.59 / 0.53 ms** | **3.3× / 2.7×** | **Beats Strata (`0.72–1.16 ms`), `303×` faster than Parquet!** |
+| `W3_scores` `point_lookup_narrow` | 1.52 / 0.89 ms | **0.64 / 0.38 ms** | **2.4× / 2.3×** | **`3.2×` faster than Vortex, `4.1×` faster than Strata!** |
+
+### 12.2 Honest Regressions & Trade-offs in Pass 10
+- **Storage Size:** `jsonbench_100k` shrank **`-12.4%`** (`27,222 → 23,855 KiB`, now beats Strata `24,160 KiB`), `wildchat_15k` shrank **`-2.2%`** (`14,919 → 14,595 KiB`, beats `pq_tuned`), `row_filter_100k` (`1,024 KiB`), `W4_adversarial` (`20,090 KiB`), and `W4_1row_avg` (`4.2 KiB`) all shrank. Smaller `8,192`-row mini-blocks + `512 KiB` frames added **`+0.9%` to `+3.2%`** on `W1` (`8,487 → 8,762 KiB`, still `-25.0%` vs best Parquet), `W2` (`15,006 → 15,209 KiB`, still #1 smallest of 7), `W3_spans` (`13,823 → 13,999 KiB`, `-5.3%` vs best Parquet), `W3_scores` (`5,267 → 5,314 KiB`, `-9.9%` vs best Parquet), `clickbench_100k` (`8,033 → 8,290 KiB`, `-7.5%` vs Parquet), and `random_access_250k` (`9,447 → 9,549 KiB`, still #1 smallest of 7). **All Gate 1 size checks remain PASS.**
+- **Minor `1R` Full-Scan Overhead:** `3.25×` more mini-blocks (`8,192` vs `32,768`) slightly slowed a few single-threaded full-column scans (`CB_Q10 1R`: `0.35 → 0.63 ms`, `CB_Q12 1R`: `0.52 → 1.06 ms`, `JB_Q3_map_type 1R`: `2.04 → 3.75 ms`, `RF_unsel_99pct 1R`: `1.92 → 3.04 ms`), while `8R` remained faster or improved (`JB_Q3 8R`: `1.23 → 0.85 ms`).
+- **Minor S3 / Write Shifts:** `W3_scores point_lookup_narrow` S3 shifted from `2 GETs / 91 ms` to `3 GETs / 127 ms` due to a `1 MiB` ReadCache boundary crossing (still #1 fastest S3 vs Strata `132 ms`, Vortex `173 ms`, Parquet `180–208 ms`); `clickbench_100k` write (`8W`) moved from `174 → 203 ms` (`1,365` vs `420` mini-blocks across 105 cols; still faster than Parquet `273 ms` & Strata `892 ms`).
 
 **Stage 3 Status:** `crates/storage`, `crates/core`, `crates/column`, and `crates/query` remain **completely untouched** per the Stage 2/Stage 3 gate. Awaiting explicit user go-ahead for Stage 3 (`cetra-storage` integration).
