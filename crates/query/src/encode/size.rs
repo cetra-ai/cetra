@@ -6,7 +6,7 @@ use std::ops::Range;
 
 use cetra_column::{
     Batch, Column, EventItem, EventsData, FlatColumn, FlatData, LinkItem, LinksData, MapData,
-    Reservation, ScalarValue, Selection,
+    Reservation, ScalarValue, Schema, Selection,
 };
 
 use crate::error::QueryError;
@@ -62,18 +62,27 @@ fn decimal_digits_bound(precision: u8, scale: i8) -> u64 {
 /// Each row is sized independently so batches can be sliced at any row boundary, and nested
 /// `List`/`MapUtf8`/`Events`/`Links` values only inspect elements reachable by active rows.
 pub fn batch_row_sizes(batch: &Batch) -> Result<Vec<u64>, QueryError> {
-    batch_row_sizes_prefix(batch, batch.num_rows())
+    batch_row_sizes_prefix(batch.schema(), batch, batch.num_rows())
 }
 
-pub(crate) fn batch_row_sizes_prefix(batch: &Batch, count: usize) -> Result<Vec<u64>, QueryError> {
+pub(crate) fn batch_row_sizes_prefix(
+    schema: &Schema,
+    batch: &Batch,
+    count: usize,
+) -> Result<Vec<u64>, QueryError> {
     if count > batch.num_rows() {
         return Err(QueryError::internal("row prefix count out of bounds"));
+    }
+    if schema.len() != batch.columns().len() {
+        return Err(QueryError::internal(
+            "schema column count does not match batch",
+        ));
     }
     if count == 0 {
         return Ok(Vec::new());
     }
     let mut totals = vec![BRACKETS; count];
-    for (field, col) in batch.schema().fields().iter().zip(batch.columns()) {
+    for (field, col) in schema.fields().iter().zip(batch.columns()) {
         let member = to_u64(field.name.len()).saturating_add(MEMBER_BYTES);
         add_column_sizes_for_selection(
             &mut totals,
@@ -545,6 +554,7 @@ pub struct CappedBuffer<'a> {
     reservation: Option<&'a mut Reservation>,
     before: usize,
     refused: bool,
+    armed: bool,
 }
 
 impl fmt::Debug for CappedBuffer<'_> {
@@ -554,6 +564,14 @@ impl fmt::Debug for CappedBuffer<'_> {
             .field("max_bytes", &self.max_bytes)
             .field("refused", &self.refused)
             .finish()
+    }
+}
+
+impl Drop for CappedBuffer<'_> {
+    fn drop(&mut self) {
+        if self.armed {
+            self.rollback();
+        }
     }
 }
 
@@ -567,6 +585,7 @@ impl<'a> CappedBuffer<'a> {
             reservation,
             before,
             refused: false,
+            armed: true,
         }
     }
 
@@ -628,29 +647,39 @@ impl<'a> CappedBuffer<'a> {
     }
 
     /// Consumes the buffer and returns the written bytes, keeping any reservation intact.
-    pub fn into_bytes(self) -> Vec<u8> {
-        self.bytes
+    pub fn into_bytes(mut self) -> Vec<u8> {
+        self.armed = false;
+        std::mem::take(&mut self.bytes)
     }
 
-    /// Runs `f` against an isolated temporary [`CappedBuffer`] sharing this buffer's
-    /// remaining byte budget and [`Reservation`], then shrinks the temporary reservation
-    /// before returning the temporary bytes.
-    pub(crate) fn encode_temp(
+    /// Runs `build` against an isolated temporary [`CappedBuffer`] sharing this buffer's
+    /// remaining byte budget and [`Reservation`], then passes the temporary bytes to
+    /// `use_temp` while keeping the temporary reservation held until the buffer is dropped.
+    pub(crate) fn with_temp(
         &mut self,
-        f: impl FnOnce(&mut CappedBuffer<'_>) -> Result<(), QueryError>,
-    ) -> Result<Vec<u8>, QueryError> {
+        build: impl FnOnce(&mut CappedBuffer<'_>) -> Result<(), QueryError>,
+        use_temp: impl FnOnce(&[u8], &mut CappedBuffer<'_>) -> Result<(), QueryError>,
+    ) -> Result<(), QueryError> {
         let outer_bytes = std::mem::take(&mut self.bytes);
         let outer_max = self.max_bytes;
         self.max_bytes = outer_max.saturating_sub(outer_bytes.len());
-        let res = f(self);
+        let build_res = build(self);
         let temp = std::mem::replace(&mut self.bytes, outer_bytes);
         self.max_bytes = outer_max;
-        match res {
+        if let Err(err) = build_res {
+            drop(temp);
+            self.rollback();
+            return Err(err);
+        }
+        let temp_len = temp.len();
+        let use_res = use_temp(&temp, self);
+        drop(temp);
+        match use_res {
             Ok(()) => {
                 if let Some(r) = self.reservation.as_deref_mut() {
-                    r.shrink(temp.len());
+                    r.shrink(temp_len);
                 }
-                Ok(temp)
+                Ok(())
             }
             Err(err) => {
                 self.rollback();
@@ -686,6 +715,7 @@ pub fn export_piece_ranges(
     if num_rows == 0 {
         return Ok(Vec::new());
     }
+    let piece_cap = max_piece_bytes.min(max_chunk_bytes);
     let sizes = batch_row_sizes(batch)?;
     let mut ranges = Vec::new();
     let mut next = 0usize;
@@ -694,7 +724,7 @@ pub fn export_piece_ranges(
         let mut keep = 0usize;
         for &sz in &sizes[next..] {
             let next_total = total.saturating_add(sz);
-            if keep > 0 && exceeds(next_total, max_piece_bytes) {
+            if keep > 0 && exceeds(next_total, piece_cap) {
                 break;
             }
             total = next_total;
@@ -899,6 +929,7 @@ mod tests {
         // Pool cap (128) is hit before max_bytes (200), rolling back reservation.
         let err = buf.push_bytes(&[b'x'; 120]).unwrap_err();
         assert!(matches!(err, QueryError::TooLarge));
+        drop(buf);
         assert_eq!(res.size(), 0);
 
         // max_bytes cap is hit before pool cap.
@@ -907,6 +938,7 @@ mod tests {
         let err2 = buf2.write_all(b"0123456789a").unwrap_err();
         assert_eq!(err2.kind(), io::ErrorKind::Other);
         assert!(buf2.was_refused());
+        drop(buf2);
         assert_eq!(res2.size(), 0);
     }
 
@@ -952,5 +984,57 @@ mod tests {
         let err = export_piece_ranges(&huge_batch, EXPORT_PIECE_BYTES, EXPORT_MAX_CHUNK_BYTES)
             .unwrap_err();
         assert!(matches!(err, QueryError::TooLarge));
+
+        // max_piece_bytes > max_chunk_bytes clamps piece_cap to max_chunk_bytes instead of
+        // spuriously failing multi-row pieces with TooLarge.
+        let small = "s".repeat(100);
+        let small_col = Column::Flat(
+            FlatColumn::try_new(
+                FlatData::Utf8(
+                    Utf8Data::try_from_slices([small.as_str(), small.as_str()]).unwrap(),
+                ),
+                None,
+            )
+            .unwrap(),
+        );
+        let small_batch =
+            Batch::try_new_all(Arc::clone(huge_batch.schema()), vec![small_col], 2).unwrap();
+        let clamped = export_piece_ranges(&small_batch, 1024, 150).unwrap();
+        assert_eq!(clamped, vec![0..1, 1..2]);
+    }
+
+    #[test]
+    fn capped_buffer_drop_rolls_back_unless_disarmed_and_batch_sizes_use_output_schema() {
+        let scope = GlobalPool::standalone(256);
+        let mut res = scope.register("drop_test", false);
+        res.try_grow(10).unwrap();
+
+        {
+            let mut buf = CappedBuffer::new(200, Some(&mut res));
+            buf.push_bytes(b"hello").unwrap();
+            assert_eq!(buf.len(), 5);
+        }
+        // Dropped without into_bytes -> rolled back to `before` (10).
+        assert_eq!(res.size(), 10);
+
+        let mut buf2 = CappedBuffer::new(200, Some(&mut res));
+        buf2.push_bytes(b"world").unwrap();
+        let bytes = buf2.into_bytes();
+        assert_eq!(bytes, b"world");
+        // Disarmed by into_bytes -> reservation stays at 15.
+        assert_eq!(res.size(), 15);
+
+        let batch_schema =
+            Schema::try_new_arc(vec![Field::new("a", DataType::I64, false)]).unwrap();
+        let aliased_schema =
+            Schema::try_new_arc(vec![Field::new("very_long_alias", DataType::I64, false)]).unwrap();
+        let col = Column::Flat(FlatColumn::try_new(FlatData::I64(vec![1]), None).unwrap());
+        let batch = Batch::try_new_all(batch_schema, vec![col], 1).unwrap();
+        let batch_sz = batch_row_sizes_prefix(batch.schema(), &batch, 1).unwrap();
+        let alias_sz = batch_row_sizes_prefix(&aliased_schema, &batch, 1).unwrap();
+        assert_eq!(
+            alias_sz[0] - batch_sz[0],
+            ("very_long_alias".len() - "a".len()) as u64
+        );
     }
 }

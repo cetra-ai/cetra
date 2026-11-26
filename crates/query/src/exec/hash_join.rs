@@ -194,6 +194,11 @@ fn validate_spec(
         ));
     }
     if spec.join_type == JoinType::LeftAntiNullAware {
+        if spec.left_keys.len() != 1 {
+            return Err(QueryError::failed(
+                "LeftAntiNullAware join requires a single equi-join key",
+            ));
+        }
         if spec.null_equals_null {
             return Err(QueryError::failed(
                 "LeftAntiNullAware join cannot have null_equals_null = true",
@@ -4330,7 +4335,7 @@ mod tests {
         assert_eq!(tight_ctx.pool.reserved(), 0);
         assert_eq!(tight_ctx.spill.spilled_bytes(), 0);
 
-        // Invalid specs rejected cleanly.
+        // Invalid specs rejected cleanly (null_equals_null = true, multi-column keys).
         let l_src = BatchSource::empty(Arc::clone(&schema));
         let r_src = BatchSource::empty(Arc::clone(&schema));
         assert!(
@@ -4350,5 +4355,31 @@ mod tests {
             )
             .is_err()
         );
+        let l_src2 = BatchSource::empty(Arc::clone(&schema));
+        let r_src2 = BatchSource::empty(Arc::clone(&schema));
+        let multi_key_err = match execute_hash_join(
+            l_src2.open_partitions(&ScanSpec::default(), &ctx).unwrap(),
+            Arc::clone(&schema),
+            r_src2.open_partitions(&ScanSpec::default(), &ctx).unwrap(),
+            Arc::clone(&schema),
+            HashJoinSpec {
+                join_type: JoinType::LeftAntiNullAware,
+                left_keys: vec![
+                    col_expr(0, "k", DataType::I64),
+                    col_expr(1, "v", DataType::I64),
+                ],
+                right_keys: vec![
+                    col_expr(0, "k", DataType::I64),
+                    col_expr(1, "v", DataType::I64),
+                ],
+                null_equals_null: false,
+                residual_filter: None,
+            },
+            &ctx,
+        ) {
+            Err(err) => err,
+            Ok(_) => panic!("expected LeftAntiNullAware multi-key error"),
+        };
+        assert!(matches!(multi_key_err, QueryError::Failed(_)));
     }
 }

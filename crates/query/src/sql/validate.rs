@@ -7,9 +7,9 @@ use std::collections::HashSet;
 use std::ops::ControlFlow;
 
 use sqlparser::ast::{
-    DescribeAlias, Expr, GroupByExpr, Ident, ObjectName, ObjectNamePart, Query, Select, SetExpr,
-    SetOperator, SetQuantifier, Spanned, Statement, TableFactor, Visit, Visitor, WindowFrameBound,
-    WindowFrameUnits, WindowType,
+    DescribeAlias, Expr, GroupByExpr, Ident, NamedWindowExpr, ObjectName, ObjectNamePart, Query,
+    Select, SetExpr, SetOperator, SetQuantifier, Spanned, Statement, TableFactor, Visit, Visitor,
+    WindowFrame, WindowFrameBound, WindowFrameUnits, WindowType,
 };
 use sqlparser::tokenizer::{Span, Token};
 
@@ -88,7 +88,6 @@ pub fn validate_statement(
             statement,
             format,
             options,
-            ..
         } if *describe_alias == DescribeAlias::Explain
             && !analyze
             && !verbose
@@ -284,6 +283,13 @@ impl Visitor for Walk<'_> {
                 }
             }
         }
+        for named in &select.named_window {
+            if let NamedWindowExpr::WindowSpec(spec) = &named.1
+                && let Some(frame) = &spec.window_frame
+            {
+                validate_window_frame(frame, named.0.span)?;
+            }
+        }
         ControlFlow::Continue(())
     }
 
@@ -383,32 +389,7 @@ impl Visitor for Walk<'_> {
         if let Some(WindowType::WindowSpec(spec)) = &function.over
             && let Some(frame) = &spec.window_frame
         {
-            match frame.units {
-                WindowFrameUnits::Rows => {}
-                WindowFrameUnits::Groups => {
-                    return ControlFlow::Break(InvalidQuery::new(
-                        "GROUPS window frames are not supported",
-                        at(expr.span()),
-                    ));
-                }
-                WindowFrameUnits::Range => {
-                    let is_default_range = matches!(
-                        (&frame.start_bound, &frame.end_bound),
-                        (
-                            WindowFrameBound::Preceding(None),
-                            None | Some(
-                                WindowFrameBound::CurrentRow | WindowFrameBound::Following(None)
-                            )
-                        )
-                    );
-                    if !is_default_range {
-                        return ControlFlow::Break(InvalidQuery::new(
-                            "non-row RANGE window frames are not supported; use ROWS BETWEEN instead",
-                            at(expr.span()),
-                        ));
-                    }
-                }
-            }
+            validate_window_frame(frame, expr.span())?;
         }
         ControlFlow::Continue(())
     }
@@ -455,6 +436,33 @@ impl Walk<'_> {
         self.text
             .find(&needle)
             .map(|index| position_at(self.text, index))
+    }
+}
+
+fn validate_window_frame(frame: &WindowFrame, span: Span) -> ControlFlow<InvalidQuery> {
+    match frame.units {
+        WindowFrameUnits::Rows => ControlFlow::Continue(()),
+        WindowFrameUnits::Groups => ControlFlow::Break(InvalidQuery::new(
+            "GROUPS window frames are not supported",
+            at(span),
+        )),
+        WindowFrameUnits::Range => {
+            let is_default_range = matches!(
+                (&frame.start_bound, &frame.end_bound),
+                (
+                    WindowFrameBound::Preceding(None),
+                    None | Some(WindowFrameBound::CurrentRow | WindowFrameBound::Following(None))
+                )
+            );
+            if !is_default_range {
+                ControlFlow::Break(InvalidQuery::new(
+                    "non-row RANGE window frames are not supported; use ROWS BETWEEN instead",
+                    at(span),
+                ))
+            } else {
+                ControlFlow::Continue(())
+            }
+        }
     }
 }
 
@@ -637,6 +645,8 @@ mod tests {
             "SELECT name, count(*) FROM spans GROUP BY GROUPING SETS ((name), ())",
             "SELECT sum(duration_ns) OVER (ORDER BY start_time GROUPS BETWEEN 1 PRECEDING AND CURRENT ROW) FROM spans",
             "SELECT sum(duration_ns) OVER (ORDER BY start_time RANGE BETWEEN 10 PRECEDING AND CURRENT ROW) FROM spans",
+            "SELECT sum(duration_ns) OVER w FROM spans WINDOW w AS (ORDER BY start_time GROUPS BETWEEN 1 PRECEDING AND CURRENT ROW)",
+            "SELECT sum(duration_ns) OVER w FROM spans WINDOW w AS (ORDER BY start_time RANGE BETWEEN 10 PRECEDING AND CURRENT ROW)",
             "SELECT 1 INTERSECT ALL SELECT 1",
             "SELECT 1 EXCEPT ALL SELECT 1",
         ];

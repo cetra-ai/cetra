@@ -3239,7 +3239,13 @@ impl HashAgg {
             partial_schema: &self.partial_schema,
             output_schema: &self.output_schema,
         };
-        match fold_spill_partition_or_repartition(&layout, &self.ctx, file, depth)? {
+        match fold_spill_partition_or_repartition(
+            &layout,
+            &self.ctx,
+            &self.ctx.eval.cancel,
+            file,
+            depth,
+        )? {
             FoldPartitionResult::Empty => Ok(()),
             FoldPartitionResult::Ready(mut mem) => {
                 let keys: Vec<Vec<KeyAtom>> = mem.keys.into_iter().flatten().collect();
@@ -4641,6 +4647,7 @@ enum FoldPartitionResult {
 fn fold_spill_partition_or_repartition(
     layout: &AggLayout<'_>,
     ctx: &ExecContext,
+    cancel: &CancelToken,
     file: SpillFile,
     depth: usize,
 ) -> Result<FoldPartitionResult, QueryError> {
@@ -4653,7 +4660,7 @@ fn fold_spill_partition_or_repartition(
     let mut max_batch_bytes = frame_cap;
 
     while let Some(batch) = reader.next_batch(Some(&mut reader_res))? {
-        if ctx.eval.cancel.is_cancelled() {
+        if cancel.is_cancelled() || ctx.eval.cancel.is_cancelled() {
             return Err(QueryError::Cancelled);
         }
         max_batch_bytes = max_batch_bytes.max(batch.memory_bytes());
@@ -4713,6 +4720,9 @@ fn fold_spill_partition_or_repartition(
                 reader_res.free();
 
                 while let Some(rem_batch) = reader.next_batch(Some(&mut reader_res))? {
+                    if cancel.is_cancelled() || ctx.eval.cancel.is_cancelled() {
+                        return Err(QueryError::Cancelled);
+                    }
                     route_partial_batch_to_writers(
                         &rem_batch,
                         0,
@@ -4823,7 +4833,7 @@ impl PartitionStream for HashAggStream {
     ) -> Result<Option<Batch>, QueryError> {
         let before = res.as_ref().map_or(0, |r| r.size());
         loop {
-            if cancel.is_cancelled() {
+            if cancel.is_cancelled() || self.ctx.eval.cancel.is_cancelled() {
                 self.cleanup();
                 rollback_res(res, before);
                 return Err(QueryError::Cancelled);
@@ -4855,6 +4865,9 @@ impl PartitionStream for HashAggStream {
                     mem.pos = end;
 
                     let (chunk_sp, chunk_unsp) = chunk_owned_bytes(&chunk_keys, &chunk_states);
+                    let mut scratch = res
+                        .is_none()
+                        .then(|| self.ctx.pool.register("hash_agg_emit", false));
                     let built = build_output_batch_opt(
                         Arc::clone(&self.output_schema),
                         &self.group_types,
@@ -4862,8 +4875,9 @@ impl PartitionStream for HashAggStream {
                         &chunk_keys,
                         &chunk_states,
                         &self.ctx.eval,
-                        None,
+                        res.as_deref_mut().or(scratch.as_mut()),
                     );
+                    drop(scratch);
                     drop(chunk_keys);
                     drop(chunk_states);
 
@@ -4907,7 +4921,9 @@ impl PartitionStream for HashAggStream {
                 partial_schema: &self.partial_schema,
                 output_schema: &self.output_schema,
             };
-            match fold_spill_partition_or_repartition(&layout, &self.ctx, task.file, task.depth) {
+            match fold_spill_partition_or_repartition(
+                &layout, &self.ctx, cancel, task.file, task.depth,
+            ) {
                 Ok(FoldPartitionResult::Empty) => {}
                 Ok(FoldPartitionResult::Ready(mem)) => {
                     self.active = Some(mem);

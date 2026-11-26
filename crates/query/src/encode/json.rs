@@ -90,7 +90,7 @@ pub fn encode_json_result(
             n
         };
 
-        let sizes = batch_row_sizes_prefix(batch, take_n)?;
+        let sizes = batch_row_sizes_prefix(schema, batch, take_n)?;
         let mut fits = 0usize;
         for &sz in &sizes {
             let next = est_bytes
@@ -342,5 +342,25 @@ mod tests {
         assert!(out.truncated);
         let vals: Vec<i64> = out.rows.iter().map(|m| m["v"].as_i64().unwrap()).collect();
         assert_eq!(vals, vec![20, 40, 50]);
+    }
+
+    #[test]
+    fn aliased_output_schema_drives_size_cap_estimate() {
+        let (_, batch) = i64_batch(vec![1, 2]);
+        let aliased = Schema::try_new(vec![Field::new(
+            "very_long_output_column_name",
+            DataType::I64,
+            false,
+        )])
+        .unwrap();
+        // Batch schema ("v") estimates 50B for 1 row; aliased schema estimates 77B (28B name + 4B
+        // member + 40B VALUE_BYTES + 2B row brackets + 2B array + 1B sep), so max_bytes=60 rejects.
+        let err = encode_json_result(&aliased, std::slice::from_ref(&batch), 10, 60, false, None)
+            .unwrap_err();
+        assert!(matches!(err, QueryError::TooLarge));
+
+        let ok = encode_json_result(&aliased, &[batch], 10, 100, false, None).unwrap();
+        assert_eq!(ok.rows.len(), 1);
+        assert!(ok.truncated);
     }
 }

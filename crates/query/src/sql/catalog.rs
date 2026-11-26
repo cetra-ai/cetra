@@ -213,8 +213,7 @@ fn str_list() -> DataType {
 
 fn schema_arc(fields: Vec<Field>) -> Arc<Schema> {
     // All static schema definitions below have non-empty names and valid DataTypes.
-    Schema::try_new_arc(fields)
-        .unwrap_or_else(|_| Arc::new(Schema::try_new(vec![]).unwrap_or_else(|_| unreachable!())))
+    Schema::try_new_arc(fields).unwrap_or_else(|_| unreachable!())
 }
 
 static RAW_SPANS_SCHEMA: LazyLock<Arc<Schema>> = LazyLock::new(|| {

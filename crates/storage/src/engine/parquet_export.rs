@@ -7,11 +7,12 @@ use std::fmt;
 use std::sync::Arc;
 
 use cetra_column::{
-    Batch, Column, DataType, EventItem, EventsData, FlatColumn, FlatData, Interval, LinkItem,
-    LinksData, MapData, Reservation, ScalarValue, Schema, ScopedPool, Selection,
+    Batch, Column, DataType, EventItem, EventsData, FlatColumn, FlatData, LinkItem, LinksData,
+    MapData, Reservation, ScalarValue, Schema, ScopedPool, Selection,
 };
 use cetra_core::schema::{event_field, link_field};
 use cetra_query::QueryError;
+use cetra_query::encode::format_interval;
 use parquet::basic::{
     Compression, LogicalType, Repetition, TimeUnit, Type as PhysicalType, ZstdLevel,
 };
@@ -29,6 +30,9 @@ pub(crate) const PARQUET_ROW_GROUP_ROWS: usize = 1_048_576;
 
 /// Default maximum buffered batch bytes before flushing a Parquet row group.
 pub(crate) const PARQUET_CHUNK_BYTES: usize = 32 * 1024 * 1024;
+
+/// Maximum top-level rows buffered in [`LeafBuffer`] before calling `write_batch`.
+const LEAF_CHUNK_ROWS: usize = 4_096;
 
 /// Streaming low-level Parquet exporter consuming [`Batch`]es and yielding
 /// completed Parquet chunks on row-group flushes.
@@ -71,8 +75,8 @@ impl ParquetBatchExporter {
         max_row_group_bytes: usize,
     ) -> Result<Self, QueryError> {
         if schema.is_empty() {
-            return Err(QueryError::Failed(
-                "cannot export zero-column result to parquet".into(),
+            return Err(QueryError::failed(
+                "cannot export zero-column result to parquet",
             ));
         }
         if max_row_group_rows == 0 || max_row_group_bytes == 0 {
@@ -107,7 +111,7 @@ impl ParquetBatchExporter {
     /// buffered rows reach `max_row_group_rows` or buffered bytes reach
     /// `max_row_group_bytes`.
     pub(crate) fn push_batch(&mut self, batch: Batch) -> Result<Vec<Vec<u8>>, QueryError> {
-        if batch.schema().as_ref() != self.schema.as_ref() {
+        if !schemas_compatible(&self.schema, batch.schema()) {
             return Err(QueryError::failed(
                 "batch schema does not match parquet export schema",
             ));
@@ -118,7 +122,17 @@ impl ParquetBatchExporter {
         }
 
         let bytes = batch.memory_bytes();
-        self.reservation.try_grow(bytes)?;
+        let mut chunks = Vec::new();
+        if let Err(err) = self.reservation.try_grow(bytes) {
+            if self.buffered_batches.is_empty() {
+                return Err(err.into());
+            }
+            let chunk = self.flush_row_group()?;
+            if !chunk.is_empty() {
+                chunks.push(chunk);
+            }
+            self.reservation.try_grow(bytes)?;
+        }
         self.buffered_batches.push(batch);
         self.buffered_rows = self.buffered_rows.saturating_add(rows);
         self.buffered_bytes = self.buffered_bytes.saturating_add(bytes);
@@ -128,10 +142,10 @@ impl ParquetBatchExporter {
         {
             let chunk = self.flush_row_group()?;
             if !chunk.is_empty() {
-                return Ok(vec![chunk]);
+                chunks.push(chunk);
             }
         }
-        Ok(Vec::new())
+        Ok(chunks)
     }
 
     /// Flushes any remaining buffered rows, writes the Parquet footer, and
@@ -154,17 +168,32 @@ impl ParquetBatchExporter {
             return Ok(());
         }
 
-        let mut rg = self.writer.next_row_group().map_err(|e| parquet_err(&e))?;
-        write_columns_for_batches(&mut rg, &self.schema, &self.buffered_batches)?;
-        rg.close().map_err(|e| parquet_err(&e))?;
+        let res = (|| {
+            let mut rg = self.writer.next_row_group().map_err(|e| parquet_err(&e))?;
+            write_columns_for_batches(&mut rg, &self.schema, &self.buffered_batches)?;
+            rg.close().map_err(|e| parquet_err(&e))?;
+            Ok(())
+        })();
 
         self.buffered_batches.clear();
         self.buffered_rows = 0;
         self.buffered_bytes = 0;
-        let reserved = self.reservation.size();
-        self.reservation.shrink(reserved);
-        Ok(())
+        self.reservation.free();
+        res
     }
+}
+
+fn schemas_compatible(expected: &Schema, actual: &Schema) -> bool {
+    expected.len() == actual.len()
+        && expected
+            .fields()
+            .iter()
+            .zip(actual.fields())
+            .all(|(exp, act)| {
+                exp.name == act.name
+                    && exp.data_type == act.data_type
+                    && (exp.nullable || !act.nullable)
+            })
 }
 
 fn parquet_err(err: &ParquetError) -> QueryError {
@@ -454,19 +483,18 @@ fn write_columns_for_batches(
             let mut buf = LeafBuffer::for_writer(&mut col_writer, max_def > 0, max_rep > 0)?;
 
             for batch in batches {
-                buf.clear();
                 let col = batch
                     .column(col_idx)
                     .ok_or_else(|| QueryError::internal("batch missing expected column"))?;
-                emit_column_for_selection(
+                emit_column_for_selection_chunked(
                     col,
                     batch.raw_len(),
                     batch.selection(),
                     leaf_idx,
                     field.nullable,
                     &mut buf,
+                    &mut col_writer,
                 )?;
-                buf.write_to(&mut col_writer)?;
             }
 
             col_writer.close().map_err(|e| parquet_err(&e))?;
@@ -665,13 +693,14 @@ struct EmitLevel {
     nullable: bool,
 }
 
-fn emit_column_for_selection(
+fn emit_column_for_selection_chunked(
     col: &Column,
     raw_len: usize,
     selection: &Selection,
     leaf_idx: usize,
     nullable: bool,
     buf: &mut LeafBuffer,
+    col_writer: &mut SerializedColumnWriter<'_>,
 ) -> Result<(), QueryError> {
     let lvl = EmitLevel {
         parent_def: 0,
@@ -681,18 +710,40 @@ fn emit_column_for_selection(
     };
     match selection {
         Selection::All => {
-            for row in 0..raw_len {
-                emit_column_row(col, row, leaf_idx, lvl, buf)?;
+            let mut start = 0usize;
+            while start < raw_len {
+                let end = (start + LEAF_CHUNK_ROWS).min(raw_len);
+                buf.clear();
+                for row in start..end {
+                    emit_column_row(col, row, leaf_idx, lvl, buf)?;
+                }
+                buf.write_to(col_writer)?;
+                start = end;
             }
         }
         Selection::Mask(mask) => {
+            buf.clear();
+            let mut in_buf = 0usize;
             for row in mask.iter_ones() {
                 emit_column_row(col, row, leaf_idx, lvl, buf)?;
+                in_buf += 1;
+                if in_buf >= LEAF_CHUNK_ROWS {
+                    buf.write_to(col_writer)?;
+                    buf.clear();
+                    in_buf = 0;
+                }
+            }
+            if in_buf > 0 {
+                buf.write_to(col_writer)?;
             }
         }
         Selection::Indices(indices) => {
-            for &idx in indices {
-                emit_column_row(col, idx as usize, leaf_idx, lvl, buf)?;
+            for chunk in indices.chunks(LEAF_CHUNK_ROWS) {
+                buf.clear();
+                for &idx in chunk {
+                    emit_column_row(col, idx as usize, leaf_idx, lvl, buf)?;
+                }
+                buf.write_to(col_writer)?;
             }
         }
     }
@@ -1291,56 +1342,6 @@ fn format_decimal_neg_scale(value: i128, scale: i8) -> String {
         s.push('0');
     }
     s
-}
-
-/// Formats a calendar-aware [`Interval`] into canonical SQL interval text
-/// matching Arrow's `IntervalMonthDayNano` display formatting.
-fn format_interval(iv: Interval) -> String {
-    use std::fmt::Write as _;
-
-    if iv.months == 0 && iv.days == 0 && iv.nanos == 0 {
-        return "0 secs".to_owned();
-    }
-
-    let mut out = String::new();
-    let mut prefix = "";
-
-    if iv.months != 0 {
-        let _ = write!(out, "{prefix}{} mons", iv.months);
-        prefix = " ";
-    }
-    if iv.days != 0 {
-        let _ = write!(out, "{prefix}{} days", iv.days);
-        prefix = " ";
-    }
-    if iv.nanos != 0 {
-        let total_secs = iv.nanos / 1_000_000_000;
-        let total_mins = total_secs / 60;
-        let hours = total_mins / 60;
-        let mins = total_mins - hours * 60;
-        let secs = total_secs - total_mins * 60;
-        let rem_nanos = iv.nanos % 1_000_000_000;
-
-        if hours != 0 {
-            let _ = write!(out, "{prefix}{hours} hours");
-            prefix = " ";
-        }
-        if mins != 0 {
-            let _ = write!(out, "{prefix}{mins} mins");
-            prefix = " ";
-        }
-        if secs != 0 || rem_nanos != 0 {
-            let sign = if secs < 0 || rem_nanos < 0 { "-" } else { "" };
-            let _ = write!(
-                out,
-                "{prefix}{sign}{}.{:09} secs",
-                secs.unsigned_abs(),
-                rem_nanos.unsigned_abs()
-            );
-        }
-    }
-
-    out
 }
 
 #[cfg(test)]
@@ -2527,5 +2528,74 @@ mod tests {
         assert_eq!(ld_0_d.value(0), 50);
         assert!(ld_0_d.is_null(1));
         assert_eq!(ld_0_d.value(2), -30);
+    }
+
+    #[test]
+    fn tight_pool_flushes_buffered_row_group_before_failing_and_allows_non_null_batch_in_nullable_schema()
+     {
+        let nullable_schema =
+            Schema::try_new_arc(vec![Field::new("x", DataType::I64, true)]).unwrap();
+        let non_null_schema =
+            Schema::try_new_arc(vec![Field::new("x", DataType::I64, false)]).unwrap();
+
+        let mk_batch = |schema: &Arc<Schema>, vals: Vec<i64>| {
+            let len = vals.len();
+            let col = Column::Flat(FlatColumn::try_new(FlatData::I64(vals), None).unwrap());
+            Batch::try_new_all(Arc::clone(schema), vec![col], len).unwrap()
+        };
+
+        // Two batches of 128 i64s (~1024 B each). Pool fits 1 batch (1536 B), not 2 (2048 B).
+        let b1 = mk_batch(&non_null_schema, (0..128).collect());
+        let b2 = mk_batch(&non_null_schema, (128..256).collect());
+        assert!(b1.memory_bytes() < 1536);
+        assert!(b1.memory_bytes() + b2.memory_bytes() > 1536);
+
+        let pool = GlobalPool::standalone(1536);
+        let mut exporter = ParquetBatchExporter::with_row_group_limits(
+            Arc::clone(&nullable_schema),
+            &pool,
+            10_000,
+            10 * 1024 * 1024,
+        )
+        .unwrap();
+
+        // Batch 1 is buffered without flushing (normal threshold not reached).
+        let chunks1 = exporter.push_batch(b1).unwrap();
+        assert!(chunks1.is_empty());
+
+        // Batch 2 exceeds tight pool -> flushes batch 1's row group first, then buffers batch 2!
+        let chunks2 = exporter.push_batch(b2).unwrap();
+        assert_eq!(chunks2.len(), 1);
+
+        let mut out = Vec::new();
+        for c in chunks2 {
+            out.extend_from_slice(&c);
+        }
+        out.extend_from_slice(&exporter.finish().unwrap());
+        assert_eq!(pool.reserved(), 0);
+
+        let arrow_batches = read_arrow(&out);
+        let total_rows: usize = arrow_batches.iter().map(|b| b.num_rows()).sum();
+        assert_eq!(total_rows, 256);
+
+        // Nullable batch into non-nullable exporter schema must still fail.
+        let mut strict_exporter =
+            ParquetBatchExporter::new(Arc::clone(&non_null_schema), &pool).unwrap();
+        let bad_batch = mk_batch(&nullable_schema, vec![1, 2, 3]);
+        assert!(strict_exporter.push_batch(bad_batch).is_err());
+        assert_eq!(pool.reserved(), 0);
+    }
+
+    #[test]
+    fn chunked_leaf_buffer_exports_large_const_and_masked_batches() {
+        let schema = Schema::try_new_arc(vec![Field::new("c", DataType::I64, true)]).unwrap();
+        let const_col = Column::try_new_const(ScalarValue::I64(42), 10_000).unwrap();
+        let batch = Batch::try_new_all(Arc::clone(&schema), vec![const_col], 10_000).unwrap();
+        let pool = GlobalPool::standalone(1024 * 1024);
+        let bytes = export_batches(Arc::clone(&schema), vec![batch], &pool).unwrap();
+        assert_eq!(pool.reserved(), 0);
+        let arrow_batches = read_arrow(&bytes);
+        let total_rows: usize = arrow_batches.iter().map(|b| b.num_rows()).sum();
+        assert_eq!(total_rows, 10_000);
     }
 }

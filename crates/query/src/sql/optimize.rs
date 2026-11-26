@@ -285,7 +285,7 @@ impl ConstFolder {
                         ..
                     } = inner
                 {
-                    return *grand;
+                    return coerce_null_type(*grand, data_type);
                 }
                 Expr::Unary {
                     op,
@@ -304,10 +304,10 @@ impl ConstFolder {
                 match op {
                     BinaryOp::And => {
                         if is_bool_lit(&left, true) {
-                            return right;
+                            return coerce_null_type(right, data_type);
                         }
                         if is_bool_lit(&right, true) {
-                            return left;
+                            return coerce_null_type(left, data_type);
                         }
                         if is_bool_lit(&left, false) {
                             return Expr::Literal(ScalarValue::Bool(false));
@@ -318,10 +318,10 @@ impl ConstFolder {
                     }
                     BinaryOp::Or => {
                         if is_bool_lit(&left, false) {
-                            return right;
+                            return coerce_null_type(right, data_type);
                         }
                         if is_bool_lit(&right, false) {
-                            return left;
+                            return coerce_null_type(left, data_type);
                         }
                         if is_bool_lit(&left, true) {
                             return Expr::Literal(ScalarValue::Bool(true));
@@ -535,8 +535,25 @@ fn contains_redacted_in_list(expr: &Expr) -> bool {
     }
 }
 
+fn coerce_null_type(expr: Expr, expected: DataType) -> Expr {
+    match expr {
+        Expr::Literal(ScalarValue::Null(dt)) if dt != expected => {
+            Expr::Literal(ScalarValue::Null(expected))
+        }
+        other => other,
+    }
+}
+
+fn contains_decimal(dt: &DataType) -> bool {
+    match dt {
+        DataType::Decimal128 { .. } => true,
+        DataType::List(inner) => contains_decimal(inner),
+        _ => false,
+    }
+}
+
 /// Conservative infallibility check so boolean identities never hide division-by-zero,
-/// integer overflow, strict cast errors, or regex/JSONPath errors.
+/// integer overflow, strict cast errors, decimal comparison errors, or regex/JSONPath errors.
 fn is_infallible(expr: &Expr) -> bool {
     match expr {
         Expr::Column { .. } | Expr::Literal(_) => true,
@@ -544,11 +561,9 @@ fn is_infallible(expr: &Expr) -> bool {
         Expr::Binary {
             left, op, right, ..
         } => {
-            let safe_op = matches!(
+            let is_cmp = matches!(
                 op,
-                BinaryOp::And
-                    | BinaryOp::Or
-                    | BinaryOp::Eq
+                BinaryOp::Eq
                     | BinaryOp::NotEq
                     | BinaryOp::Lt
                     | BinaryOp::LtEq
@@ -556,16 +571,33 @@ fn is_infallible(expr: &Expr) -> bool {
                     | BinaryOp::GtEq
                     | BinaryOp::IsDistinctFrom
                     | BinaryOp::IsNotDistinctFrom
-                    | BinaryOp::Concat
                     | BinaryOp::ArrayContains
             );
+            if is_cmp
+                && (contains_decimal(&left.data_type()) || contains_decimal(&right.data_type()))
+            {
+                return false;
+            }
+            let safe_op = is_cmp || matches!(op, BinaryOp::And | BinaryOp::Or | BinaryOp::Concat);
             safe_op && is_infallible(left) && is_infallible(right)
         }
         Expr::Cast { mode, expr, .. } => *mode == CastMode::Try && is_infallible(expr),
         Expr::Between {
             expr, low, high, ..
-        } => is_infallible(expr) && is_infallible(low) && is_infallible(high),
-        Expr::InList { expr, list, .. } => is_infallible(expr) && list.iter().all(is_infallible),
+        } => {
+            !contains_decimal(&expr.data_type())
+                && !contains_decimal(&low.data_type())
+                && !contains_decimal(&high.data_type())
+                && is_infallible(expr)
+                && is_infallible(low)
+                && is_infallible(high)
+        }
+        Expr::InList { expr, list, .. } => {
+            !contains_decimal(&expr.data_type())
+                && !list.iter().any(|e| contains_decimal(&e.data_type()))
+                && is_infallible(expr)
+                && list.iter().all(is_infallible)
+        }
         Expr::Like { expr, pattern, .. } => is_infallible(expr) && is_infallible(pattern),
         Expr::Case {
             operand,
@@ -573,6 +605,12 @@ fn is_infallible(expr: &Expr) -> bool {
             else_expr,
             ..
         } => {
+            if operand
+                .as_deref()
+                .is_some_and(|op| contains_decimal(&op.data_type()))
+            {
+                return false;
+            }
             operand.as_deref().is_none_or(is_infallible)
                 && when_then
                     .iter()
@@ -582,6 +620,13 @@ fn is_infallible(expr: &Expr) -> bool {
         Expr::MapIndex { map, key } => is_infallible(map) && is_infallible(key),
         Expr::MakeArray { elems, .. } => elems.iter().all(is_infallible),
         Expr::Call { func, args, .. } => {
+            if matches!(
+                func,
+                ScalarFn::Greatest | ScalarFn::Least | ScalarFn::Nullif
+            ) && args.iter().any(|a| contains_decimal(&a.data_type()))
+            {
+                return false;
+            }
             let safe_fn = matches!(
                 func,
                 ScalarFn::Lower
@@ -1285,14 +1330,17 @@ fn pass4_scan_pushdown(plan: LogicalPlan) -> Result<LogicalPlan, QueryError> {
                         Some(map) => conj.remap_columns(map)?,
                         None => conj.clone(),
                     };
-                    if is_bool_lit(&full_conj, false) {
-                        limit = Some(0);
-                    }
                     if is_scan_filter_safe(kind, &full_conj, &full_schema) {
                         filters.push(full_conj);
                     } else {
                         keep_above.push(conj);
                     }
+                }
+                if filters.iter().any(|f| is_bool_lit(f, false))
+                    && filters.iter().all(is_infallible)
+                    && keep_above.iter().all(is_infallible)
+                {
+                    limit = Some(0);
                 }
 
                 extract_scan_hints(
@@ -1340,7 +1388,7 @@ fn pass4_scan_pushdown(plan: LogicalPlan) -> Result<LogicalPlan, QueryError> {
             mut limit,
             schema,
         } => {
-            if filters.iter().any(|f| is_bool_lit(f, false)) {
+            if filters.iter().any(|f| is_bool_lit(f, false)) && filters.iter().all(is_infallible) {
                 limit = Some(0);
             }
             extract_scan_hints(
@@ -1517,13 +1565,13 @@ fn extract_scan_hints(
         SqlViewKind::Batch | SqlViewKind::Sessions => None,
     };
     if let Some(col) = time_col {
-        let extracted = extract_time_range(filters, col);
+        let extracted = extract_time_range(filters, full_schema, col);
         *time_range = intersect_time_range(*time_range, extracted);
     }
 
     for filter in filters {
         extract_id_lookups_from_expr(filter, full_schema, id_lookups);
-        extract_substrings_from_expr(filter, substrings);
+        extract_substrings_from_expr(filter, full_schema, substrings);
     }
 }
 
@@ -1586,10 +1634,20 @@ fn intersect_time_range(a: TimeRangeHint, b: TimeRangeHint) -> TimeRangeHint {
     }
 }
 
-fn extract_time_range(filters: &[Expr], column: &str) -> TimeRangeHint {
+fn is_schema_column(expr: &Expr, full_schema: &Schema, expected_name: &str) -> bool {
+    let Expr::Column { index, .. } = expr else {
+        return false;
+    };
+    full_schema
+        .fields()
+        .get(*index)
+        .is_some_and(|f| f.name == expected_name)
+}
+
+fn extract_time_range(filters: &[Expr], full_schema: &Schema, column: &str) -> TimeRangeHint {
     let mut bounds = TimeBounds::default();
     for filter in filters {
-        walk_time_bounds(&mut bounds, filter, column);
+        walk_time_bounds(&mut bounds, filter, full_schema, column);
     }
     TimeRangeHint {
         min_ns: bounds.min,
@@ -1598,7 +1656,7 @@ fn extract_time_range(filters: &[Expr], column: &str) -> TimeRangeHint {
     }
 }
 
-fn walk_time_bounds(bounds: &mut TimeBounds, expr: &Expr, column: &str) {
+fn walk_time_bounds(bounds: &mut TimeBounds, expr: &Expr, full_schema: &Schema, column: &str) {
     match expr {
         Expr::Binary {
             left,
@@ -1606,8 +1664,8 @@ fn walk_time_bounds(bounds: &mut TimeBounds, expr: &Expr, column: &str) {
             right,
             ..
         } => {
-            walk_time_bounds(bounds, left, column);
-            walk_time_bounds(bounds, right, column);
+            walk_time_bounds(bounds, left, full_schema, column);
+            walk_time_bounds(bounds, right, full_schema, column);
         }
         Expr::Binary {
             op: BinaryOp::Or, ..
@@ -1616,18 +1674,17 @@ fn walk_time_bounds(bounds: &mut TimeBounds, expr: &Expr, column: &str) {
             collect_or_disjuncts(expr, &mut disjuncts);
             let mut union: Option<TimeBounds> = None;
             for disjunct in disjuncts {
-                if matches!(
-                    disjunct,
-                    Expr::Unary {
-                        op: UnaryOp::IsNull,
-                        expr: inner,
-                        ..
-                    } if matches!(inner.as_ref(), Expr::Column { name, .. } if name == column)
-                ) {
+                if let Expr::Unary {
+                    op: UnaryOp::IsNull,
+                    expr: inner,
+                    ..
+                } = disjunct
+                    && is_schema_column(inner.as_ref(), full_schema, column)
+                {
                     continue;
                 }
                 let mut sep = TimeBounds::default();
-                walk_time_bounds(&mut sep, disjunct, column);
+                walk_time_bounds(&mut sep, disjunct, full_schema, column);
                 union = Some(match union {
                     None => sep,
                     Some(acc) => acc.union_with(sep),
@@ -1639,32 +1696,28 @@ fn walk_time_bounds(bounds: &mut TimeBounds, expr: &Expr, column: &str) {
         }
         Expr::Binary {
             left, op, right, ..
-        } => match (left.as_ref(), right.as_ref()) {
-            (Expr::Column { name, .. }, other) if name == column => {
-                if let Some(ns) = expr_timestamp_ns(other) {
+        } => {
+            if is_schema_column(left.as_ref(), full_schema, column) {
+                if let Some(ns) = expr_timestamp_ns(right) {
                     apply_time_cmp(bounds, *op, ns, true);
                 }
+            } else if is_schema_column(right.as_ref(), full_schema, column)
+                && let Some(ns) = expr_timestamp_ns(left)
+            {
+                apply_time_cmp(bounds, *op, ns, false);
             }
-            (other, Expr::Column { name, .. }) if name == column => {
-                if let Some(ns) = expr_timestamp_ns(other) {
-                    apply_time_cmp(bounds, *op, ns, false);
-                }
-            }
-            _ => {}
-        },
+        }
         Expr::Between {
             expr: inner,
             low,
             high,
             negated: false,
-        } => {
-            if matches!(inner.as_ref(), Expr::Column { name, .. } if name == column) {
-                if let Some(lo) = expr_timestamp_ns(low) {
-                    bounds.raise_min(lo);
-                }
-                if let Some(hi) = expr_timestamp_ns(high) {
-                    bounds.lower_max(hi);
-                }
+        } if is_schema_column(inner.as_ref(), full_schema, column) => {
+            if let Some(lo) = expr_timestamp_ns(low) {
+                bounds.raise_min(lo);
+            }
+            if let Some(hi) = expr_timestamp_ns(high) {
+                bounds.lower_max(hi);
             }
         }
         _ => {}
@@ -1853,7 +1906,7 @@ fn push_unique_id_lookup(out: &mut Vec<IdLookupHint>, hint: IdLookupHint) {
     }
 }
 
-fn extract_substrings_from_expr(expr: &Expr, out: &mut Vec<SubstringHint>) {
+fn extract_substrings_from_expr(expr: &Expr, full_schema: &Schema, out: &mut Vec<SubstringHint>) {
     match expr {
         Expr::Binary {
             left,
@@ -1861,8 +1914,8 @@ fn extract_substrings_from_expr(expr: &Expr, out: &mut Vec<SubstringHint>) {
             right,
             ..
         } => {
-            extract_substrings_from_expr(left, out);
-            extract_substrings_from_expr(right, out);
+            extract_substrings_from_expr(left, full_schema, out);
+            extract_substrings_from_expr(right, full_schema, out);
         }
         Expr::Like {
             expr: inner,
@@ -1871,7 +1924,10 @@ fn extract_substrings_from_expr(expr: &Expr, out: &mut Vec<SubstringHint>) {
             case_insensitive,
             negated: false,
         } => {
-            let Expr::Column { name, .. } = inner.as_ref() else {
+            let Expr::Column { index, .. } = inner.as_ref() else {
+                return;
+            };
+            let Some(field) = full_schema.fields().get(*index) else {
                 return;
             };
             let Expr::Literal(ScalarValue::Utf8(pat)) = pattern.as_ref() else {
@@ -1879,7 +1935,7 @@ fn extract_substrings_from_expr(expr: &Expr, out: &mut Vec<SubstringHint>) {
             };
             if let Some(needle) = longest_like_literal(pat, *escape) {
                 let hint = SubstringHint {
-                    column: name.clone(),
+                    column: field.name.clone(),
                     needle,
                     case_insensitive: *case_insensitive,
                 };
@@ -1894,13 +1950,14 @@ fn extract_substrings_from_expr(expr: &Expr, out: &mut Vec<SubstringHint>) {
             ..
         } => {
             if let [
-                Expr::Column { name, .. },
+                Expr::Column { index, .. },
                 Expr::Literal(ScalarValue::Utf8(needle)),
             ] = args.as_slice()
                 && !needle.is_empty()
+                && let Some(field) = full_schema.fields().get(*index)
             {
                 let hint = SubstringHint {
-                    column: name.clone(),
+                    column: field.name.clone(),
                     needle: needle.clone(),
                     case_insensitive: false,
                 };
@@ -2486,8 +2543,45 @@ fn prune_node(
             let kept_out: Vec<usize> = effective_required.iter().copied().collect();
             let mut new_inputs = Vec::with_capacity(inputs.len());
             for branch in inputs {
-                let (new_branch, _) = prune_node(branch, &effective_required, required_map_keys)?;
-                new_inputs.push(new_branch);
+                let (new_branch, branch_map) =
+                    prune_node(branch, &effective_required, required_map_keys)?;
+                let needs_project = new_branch.schema().len() != kept_out.len()
+                    || kept_out.iter().enumerate().any(|(new_idx, &old_idx)| {
+                        branch_map.get(old_idx).copied().flatten() != Some(new_idx)
+                    });
+                let aligned = if needs_project {
+                    let branch_schema = new_branch.schema();
+                    let mut exprs = Vec::with_capacity(kept_out.len());
+                    let mut fields = Vec::with_capacity(kept_out.len());
+                    for &old_idx in &kept_out {
+                        let mapped =
+                            branch_map.get(old_idx).copied().flatten().ok_or_else(|| {
+                                QueryError::internal(format!(
+                                    "union branch column {old_idx} missing after prune"
+                                ))
+                            })?;
+                        let field = branch_schema.fields().get(mapped).ok_or_else(|| {
+                            QueryError::internal(format!(
+                                "union branch field {mapped} out of bounds"
+                            ))
+                        })?;
+                        exprs.push(Expr::Column {
+                            index: mapped,
+                            name: field.name.clone(),
+                            data_type: field.data_type.clone(),
+                        });
+                        fields.push(field.clone());
+                    }
+                    let proj_schema = Arc::new(Schema::try_new(fields)?);
+                    LogicalPlan::Project {
+                        input: Box::new(new_branch),
+                        exprs,
+                        schema: proj_schema,
+                    }
+                } else {
+                    new_branch
+                };
+                new_inputs.push(aligned);
             }
             let new_schema = Arc::new(schema.project(&kept_out)?);
             let mut old_to_new = vec![None; out_len];
@@ -3635,12 +3729,13 @@ mod tests {
             ),
         })
         .unwrap();
-        let LogicalPlan::Scan { filters, .. } = keep_err else {
+        let LogicalPlan::Scan { filters, limit, .. } = keep_err else {
             panic!("expected Scan");
         };
         assert_eq!(filters.len(), 2);
         assert_eq!(filters[0], div_zero);
         assert_eq!(filters[1], Expr::Literal(ScalarValue::Bool(false)));
+        assert_eq!(limit, None);
 
         // Constant `1 / 0` MUST NOT be folded or swallowed; `false AND (1 / 0 = 1)` short-circuits to false
         let const_div_zero = bin(
@@ -4392,5 +4487,218 @@ mod tests {
         // Only `status` needed from Scan (duration_ns was pruned!)
         assert_eq!(schema.len(), 1);
         assert_eq!(schema.fields()[0].name, "status");
+    }
+
+    #[test]
+    fn pass1_boolean_identities_preserve_bool_null_type_and_decimal_cmp_not_infallible() {
+        let folder = ConstFolder::new().unwrap();
+        let untyped_null = Expr::Literal(ScalarValue::Null(DataType::Null));
+        let bool_null = Expr::Literal(ScalarValue::Null(DataType::Bool));
+
+        // NULL AND true -> ScalarValue::Null(DataType::Bool)
+        let null_and_true = folder.fold_expr(bin(
+            untyped_null.clone(),
+            BinaryOp::And,
+            Expr::Literal(ScalarValue::Bool(true)),
+        ));
+        assert_eq!(null_and_true, bool_null);
+        assert_eq!(null_and_true.data_type(), DataType::Bool);
+
+        // false OR NULL -> ScalarValue::Null(DataType::Bool)
+        let false_or_null = folder.fold_expr(bin(
+            Expr::Literal(ScalarValue::Bool(false)),
+            BinaryOp::Or,
+            untyped_null.clone(),
+        ));
+        assert_eq!(false_or_null, bool_null);
+        assert_eq!(false_or_null.data_type(), DataType::Bool);
+
+        // NOT NOT NULL -> ScalarValue::Null(DataType::Bool)
+        let not_not_null = folder.fold_expr(Expr::Unary {
+            op: UnaryOp::Not,
+            expr: Box::new(Expr::Unary {
+                op: UnaryOp::Not,
+                expr: Box::new(untyped_null),
+                data_type: DataType::Bool,
+            }),
+            data_type: DataType::Bool,
+        });
+        assert_eq!(not_not_null, bool_null);
+        assert_eq!(not_not_null.data_type(), DataType::Bool);
+
+        // Decimal128 comparison is excluded from is_infallible, so `dec_cmp AND false` is preserved.
+        let dec_col = Expr::Column {
+            index: 0,
+            name: "price".to_owned(),
+            data_type: DataType::Decimal128 {
+                precision: 10,
+                scale: 2,
+            },
+        };
+        let dec_lit = Expr::Literal(ScalarValue::Decimal128 {
+            value: 100,
+            precision: 10,
+            scale: 4,
+        });
+        let dec_cmp = bin(dec_col, BinaryOp::Eq, dec_lit);
+        assert!(!is_infallible(&dec_cmp));
+        let folded_dec = folder.fold_expr(bin(
+            dec_cmp,
+            BinaryOp::And,
+            Expr::Literal(ScalarValue::Bool(false)),
+        ));
+        assert!(matches!(
+            folded_dec,
+            Expr::Binary {
+                op: BinaryOp::And,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn pass4_fallible_conjunct_keeps_limit_none_and_resolves_full_schema_column_names() {
+        let raw = raw_spans_schema();
+        let scan = raw_scan("spans", SqlViewKind::Spans, Arc::clone(&raw));
+
+        // `(1 / duration_ns = 1) AND false` must NOT set `limit = Some(0)`!
+        let div_zero = bin(
+            bin(
+                Expr::Literal(ScalarValue::I64(1)),
+                BinaryOp::Div,
+                col_expr(&raw, "duration_ns"),
+            ),
+            BinaryOp::Eq,
+            Expr::Literal(ScalarValue::I64(1)),
+        );
+        let opt = optimize(LogicalPlan::Filter {
+            input: Box::new(scan.clone()),
+            predicate: bin(
+                div_zero,
+                BinaryOp::And,
+                Expr::Literal(ScalarValue::Bool(false)),
+            ),
+        })
+        .unwrap();
+        let LogicalPlan::Scan { filters, limit, .. } = opt else {
+            panic!("expected Scan");
+        };
+        assert_eq!(filters.len(), 2);
+        assert_eq!(limit, None);
+
+        // Aliased/stale Expr::Column.name still extracts hints using full_schema.fields()[index].
+        let st_idx = raw.index_of("start_time").unwrap();
+        let name_idx = raw.index_of("name").unwrap();
+        let stale_time_pred = bin(
+            Expr::Column {
+                index: st_idx,
+                name: "aliased_ts".to_owned(),
+                data_type: DataType::TimestampNs { utc: true },
+            },
+            BinaryOp::GtEq,
+            Expr::Literal(ScalarValue::TimestampNs {
+                value: 1_000,
+                utc: true,
+            }),
+        );
+        let stale_like_pred = Expr::Like {
+            expr: Box::new(Expr::Column {
+                index: name_idx,
+                name: "aliased_name".to_owned(),
+                data_type: DataType::Utf8,
+            }),
+            pattern: Box::new(Expr::Literal(ScalarValue::Utf8("%needle%".to_owned()))),
+            escape: None,
+            case_insensitive: false,
+            negated: false,
+        };
+        let opt_hints = optimize(LogicalPlan::Filter {
+            input: Box::new(scan),
+            predicate: bin(stale_time_pred, BinaryOp::And, stale_like_pred),
+        })
+        .unwrap();
+        let LogicalPlan::Scan {
+            time_range,
+            substrings,
+            ..
+        } = opt_hints
+        else {
+            panic!("expected Scan");
+        };
+        assert_eq!(time_range.min_ns, Some(1_000));
+        assert_eq!(
+            substrings,
+            vec![SubstringHint {
+                column: "name".to_owned(),
+                needle: "needle".to_owned(),
+                case_insensitive: false,
+            }]
+        );
+    }
+
+    #[test]
+    fn pass5_union_all_with_aggregate_branch_and_outer_project_aligns_branch_schemas() {
+        let raw = raw_spans_schema();
+        let agg_schema = Schema::try_new_arc(vec![
+            Field::new("status", DataType::Utf8, false),
+            Field::new("cnt", DataType::I64, false),
+        ])
+        .unwrap();
+        // Branch 0: Aggregate (GROUP BY status, COUNT(*) AS cnt).
+        // Pass 5 keeps `status` in Aggregate even when outer Project only reads `cnt`!
+        let agg_branch = LogicalPlan::Aggregate {
+            input: Box::new(raw_scan("spans", SqlViewKind::Spans, Arc::clone(&raw))),
+            group_by: vec![("status".to_owned(), col_expr(&raw, "status"))],
+            aggs: vec![AggExpr {
+                func: AggFunc::CountStar,
+                filter: None,
+                output_name: "cnt".to_owned(),
+            }],
+            schema: Arc::clone(&agg_schema),
+        };
+        // Branch 1: Project selecting (status, 1).
+        let proj_branch = LogicalPlan::Project {
+            input: Box::new(raw_scan("spans", SqlViewKind::Spans, Arc::clone(&raw))),
+            exprs: vec![col_expr(&raw, "status"), Expr::Literal(ScalarValue::I64(1))],
+            schema: Arc::clone(&agg_schema),
+        };
+
+        let union_plan = LogicalPlan::Union {
+            inputs: vec![agg_branch, proj_branch],
+            all: true,
+            schema: Arc::clone(&agg_schema),
+        };
+        // Outer Project keeps only column 1 (`cnt`).
+        let outer = LogicalPlan::Project {
+            input: Box::new(union_plan),
+            exprs: vec![col_expr(&agg_schema, "cnt")],
+            schema: Schema::try_new_arc(vec![Field::new("cnt", DataType::I64, false)]).unwrap(),
+        };
+
+        let opt = optimize(outer).unwrap();
+        let LogicalPlan::Project { input, .. } = opt else {
+            panic!("expected outer Project");
+        };
+        let LogicalPlan::Union { inputs, schema, .. } = *input else {
+            panic!("expected Union");
+        };
+        assert_eq!(schema.len(), 1);
+        assert_eq!(schema.fields()[0].name, "cnt");
+        assert_eq!(inputs.len(), 2);
+        for (i, branch) in inputs.iter().enumerate() {
+            assert_eq!(
+                branch.schema().len(),
+                schema.len(),
+                "branch {i} schema len mismatch"
+            );
+            assert_eq!(branch.schema().fields()[0].data_type, DataType::I64);
+        }
+        // Branch 0 must be wrapped in Project selecting [cnt] (index 1 from Aggregate).
+        assert!(matches!(
+            &inputs[0],
+            LogicalPlan::Project { input, exprs, .. }
+                if matches!(input.as_ref(), LogicalPlan::Aggregate { .. })
+                    && matches!(exprs.as_slice(), [Expr::Column { index: 1, .. }])
+        ));
     }
 }

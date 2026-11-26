@@ -14,7 +14,7 @@ use crate::fn_time::format_date_days;
 
 use super::size::CappedBuffer;
 use super::{
-    BufferedSink, encode_cell_json_bounded, for_each_active_row, write_hex_to_string,
+    BufferedSink, for_each_active_row, write_cell_json_to_csv_sink, write_hex_to_string,
     write_interval, write_timestamp_ns_fixed9,
 };
 
@@ -228,11 +228,9 @@ fn write_csv_cell(
             write_csv_field_sink(scratch, true, out)
         }
         DataType::List(_) | DataType::MapUtf8 | DataType::Events | DataType::Links => {
-            out.flush()?;
-            let encoded = encode_cell_json_bounded(col, phys_row, out.sink_mut())?;
-            let text = std::str::from_utf8(&encoded)
-                .map_err(|_| QueryError::internal("non-utf8 JSON cell"))?;
-            write_csv_field_sink(text, false, out)
+            write_cell_json_to_csv_sink(col, phys_row, out, |text, sink| {
+                write_csv_field_sink(text, false, sink)
+            })
         }
     }
 }
@@ -412,5 +410,46 @@ mod tests {
         let err = encode_csv_chunk(&batch, 0..1, 1024, Some(&mut res)).unwrap_err();
         assert!(matches!(err, QueryError::TooLarge));
         assert_eq!(res.size(), 0);
+
+        // Peak simultaneous reservation holds temp JSON (104B for 100-byte elem) + CSV output (108B):
+        // pool cap 150B must reject even though each piece alone is < 150B; cap 240B succeeds and
+        // shrinks back to final CSV length.
+        let med = "a".repeat(100);
+        let med_elems = Column::Flat(
+            FlatColumn::try_new(
+                FlatData::Utf8(Utf8Data::try_from_slices([med.as_str()]).unwrap()),
+                None,
+            )
+            .unwrap(),
+        );
+        let med_col = Column::Flat(
+            FlatColumn::try_new(
+                FlatData::List {
+                    item_type: DataType::Utf8,
+                    offsets: vec![0, 1],
+                    values: Box::new(med_elems),
+                },
+                None,
+            )
+            .unwrap(),
+        );
+        let med_schema = Schema::try_new_arc(vec![Field::new(
+            "list",
+            DataType::List(Box::new(DataType::Utf8)),
+            false,
+        )])
+        .unwrap();
+        let med_batch = Batch::try_new_all(med_schema, vec![med_col], 1).unwrap();
+
+        let tight = GlobalPool::standalone(150);
+        let mut tight_res = tight.register("csv_tight", false);
+        let err_peak = encode_csv_chunk(&med_batch, 0..1, 1024, Some(&mut tight_res)).unwrap_err();
+        assert!(matches!(err_peak, QueryError::TooLarge));
+        assert_eq!(tight_res.size(), 0);
+
+        let roomy = GlobalPool::standalone(240);
+        let mut roomy_res = roomy.register("csv_roomy", false);
+        let ok_bytes = encode_csv_chunk(&med_batch, 0..1, 1024, Some(&mut roomy_res)).unwrap();
+        assert_eq!(roomy_res.size(), ok_bytes.len());
     }
 }
