@@ -5,6 +5,7 @@
     clippy::too_many_lines
 )]
 
+pub mod lance_bench;
 pub mod queries;
 pub mod report;
 pub mod s3_parquet;

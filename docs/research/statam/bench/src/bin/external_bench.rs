@@ -1,7 +1,10 @@
-//! External Parquet + Vortex Benchmark Suites:
+//! External Parquet + Vortex + Lance + Strata + Statam Benchmark Suites:
 //! - Suite A (`clickbench`): Real ClickBench `hits_1.parquet` (100k rows x 105 cols)
 //! - Suite B (`row-filter`): Parquet's 6-Pattern Selectivity x Clustering Matrix (100k rows x 10 cols)
 //! - Suite C (`random-access`): Vortex's scattered multi-row take (100 & 1,000 rows from 250k x 12 cols)
+//! - Suite D (`jsonbench`): Real Bluesky Jetstream JSON (`bluesky_0001.json.gz`, 100k events, ShreddedMap + `.stpk`)
+//! - Suite E (`wildchat`): Real WildChat-1M (`wildchat_00000.parquet`, 15k multilingual turns + Unicode `ILIKE`)
+//! - Suite F (`hermes`): Real Hermes Function Calling (`hermes_fc.parquet`, cross-trace `tool_definitions` dedup)
 
 #![allow(
     clippy::cast_precision_loss,
@@ -10,28 +13,40 @@
     clippy::too_many_lines
 )]
 
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fmt::Write as _;
 use std::fs::File;
+use std::io::{BufRead, BufReader};
 use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Instant;
 
 use arrow::array::{
-    Array, ArrayRef, BooleanArray, Float64Array, Int64Array, RecordBatch, StringArray,
-    StringBuilder,
+    Array, ArrayRef, BooleanArray, Float64Array, Int64Array, LargeListArray, LargeStringArray,
+    ListArray, MapArray, MapBuilder, RecordBatch, StringArray, StringBuilder, StringViewArray,
+    StructArray, TimestampMicrosecondArray, TimestampMillisecondArray, TimestampNanosecondArray,
+    TimestampSecondArray,
 };
 use arrow::compute::concat_batches;
-use arrow::datatypes::{DataType, Field, Schema, SchemaRef};
+use arrow::datatypes::{DataType, Field, Fields, Schema, SchemaRef, TimeUnit};
+use arrow_array_60::Array as Array60;
+use arrow_array_60::cast::AsArray as AsArray60;
+use arrow_array_60::{ListArray as ListArray60, MapArray as MapArray60};
 use bytes::Bytes;
-use cetra_column::Batch;
-use cetra_statam::{
-    CoalesceMode, IdLookup, Predicate as StatamPred, RangeReader, ScanRequest, SimulatedS3Config,
-    SimulatedS3Reader, SliceReader, StatamReader, StatamWriter, SubstringQuery, TableKind,
-    WriteOptions, WriteProfile, ZonePred, ZoneValue,
+use cetra_column::{
+    Batch, Bitmap, Column, DataType as ColType, Field as ColField, FlatColumn, FlatData, MapData,
+    Schema as ColSchema, Utf8Data,
 };
+use cetra_statam::{
+    ChunkPackBuilder, CoalesceMode, IdLookup, InMemoryPackResolver, PackResolver, PackWriteOptions,
+    Predicate as StatamPred, RangeReader, ScanRequest, SimulatedS3Config, SimulatedS3Reader,
+    SliceReader, StatamReader, StatamWriter, SubstringQuery, TableKind, WriteOptions, WriteProfile,
+    ZonePred, ZoneValue,
+};
+use flate2::read::GzDecoder;
 use futures::stream::TryStreamExt;
+use lance_file::reader::FileReader as LanceFileReader;
 use object_store::ObjectStore;
 use object_store::path::Path as ObjectPath;
 use parquet::arrow::ProjectionMask;
@@ -48,6 +63,7 @@ use parquet::file::statistics::Statistics;
 use parquet::schema::types::SchemaDescriptor;
 use rand::rngs::SmallRng;
 use rand::{RngExt, SeedableRng};
+use serde_json::Value;
 use strata::{
     CmpOp, Config as StrataConfig, Lit, Predicate as StrataPred, ScanKind,
     ScanRequest as StrataScanRequest, StrataFile, StrataWriter,
@@ -57,7 +73,13 @@ use vortex::expr::{Expression, and, col, eq, gt_eq, lit, lt_eq, not, root, selec
 use vortex::file::{OpenOptionsSessionExt, VortexFile};
 use vortex::session::VortexSession;
 
-use statam_bench7::queries::{ALL_FORMATS, check_parity, measure_local_async_ms, measure_local_ms};
+use statam_bench7::lance_bench::{
+    lance_scan_projected, lance_take_indices, open_lance_local, open_lance_s3,
+    prepare_lance_batches, write_lance_bytes,
+};
+use statam_bench7::queries::{
+    PACK_ID, SimS3PackResolver, check_parity, measure_local_async_ms, measure_local_ms,
+};
 use statam_bench7::report::{QueryBenchRow, WriteBenchRow, format_kib};
 use statam_bench7::s3_parquet::{SimS3ChunkReader, find_leaf_idx, open_parquet_builder};
 use statam_bench7::schema::{
@@ -66,15 +88,27 @@ use statam_bench7::schema::{
 };
 use statam_bench7::strata_bench::{SimS3ObjectStore, SliceObjectStore};
 use statam_bench7::vortex_bench::{
-    SimS3VortexRead, chunk_to_record_batch, new_vortex_session, open_vortex_local, str_value_at,
-    write_vortex_files,
+    SimS3VortexRead, chunk_to_record_batch, new_vortex_session, open_vortex_local,
+    str_value_at as vortex_str_value_at, write_vortex_files,
 };
 use statam_bench7::workloads::{BenchScale, DAY_START};
 
-const DEFAULT_EXTERNAL_FORMATS: [&str; 6] = [
+const DEFAULT_EXTERNAL_FORMATS: [&str; 7] = [
     "pq_default",
     "pq_tuned",
     "vortex",
+    "lance",
+    "strata",
+    "statam_l0",
+    "statam_l1",
+];
+
+const ALL_EXTERNAL_FORMATS: [&str; 8] = [
+    "pq_default",
+    "pq_tuned",
+    "pq_cetra",
+    "vortex",
+    "lance",
     "strata",
     "statam_l0",
     "statam_l1",
@@ -86,6 +120,9 @@ enum SuiteSelection {
     ClickBench,
     RowFilter,
     RandomAccess,
+    JsonBench,
+    WildChat,
+    Hermes,
 }
 
 impl SuiteSelection {
@@ -100,6 +137,18 @@ impl SuiteSelection {
     fn includes_random_access(self) -> bool {
         matches!(self, Self::All | Self::RandomAccess)
     }
+
+    fn includes_jsonbench(self) -> bool {
+        matches!(self, Self::All | Self::JsonBench)
+    }
+
+    fn includes_wildchat(self) -> bool {
+        matches!(self, Self::All | Self::WildChat)
+    }
+
+    fn includes_hermes(self) -> bool {
+        matches!(self, Self::All | Self::Hermes)
+    }
 }
 
 struct CliConfig {
@@ -107,19 +156,20 @@ struct CliConfig {
     statam_write_threads: usize,
     statam_read_threads: usize,
     hits_parquet: PathBuf,
+    bluesky_json: PathBuf,
+    wildchat_parquet: PathBuf,
+    hermes_parquet: PathBuf,
     formats: Vec<&'static str>,
 }
 
-fn default_hits_path() -> PathBuf {
-    if let Ok(p) = std::env::var("STATAM_HITS_PARQUET")
+fn default_corpus_path(env_var: &str, filename: &str) -> PathBuf {
+    if let Ok(p) = std::env::var(env_var)
         && !p.trim().is_empty()
     {
         return PathBuf::from(p);
     }
     let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_owned());
-    PathBuf::from(home)
-        .join("statam-corpora")
-        .join("hits_1.parquet")
+    PathBuf::from(home).join("statam-corpora").join(filename)
 }
 
 fn parse_formats_csv(raw: &str) -> BenchResult<Vec<&'static str>> {
@@ -132,15 +182,15 @@ fn parse_formats_csv(raw: &str) -> BenchResult<Vec<&'static str>> {
         return Ok(DEFAULT_EXTERNAL_FORMATS.to_vec());
     }
     for r in &requested {
-        if !ALL_FORMATS.contains(r) {
+        if !ALL_EXTERNAL_FORMATS.contains(r) {
             return Err(format!(
                 "unknown format '{r}' (expected subset of {:?})",
-                ALL_FORMATS
+                ALL_EXTERNAL_FORMATS
             )
             .into());
         }
     }
-    Ok(ALL_FORMATS
+    Ok(ALL_EXTERNAL_FORMATS
         .iter()
         .copied()
         .filter(|f| requested.contains(f))
@@ -153,8 +203,11 @@ fn parse_suite(val: &str) -> BenchResult<SuiteSelection> {
         "clickbench" => Ok(SuiteSelection::ClickBench),
         "row-filter" | "row_filter" => Ok(SuiteSelection::RowFilter),
         "random-access" | "random_access" => Ok(SuiteSelection::RandomAccess),
+        "jsonbench" | "json-bench" | "json_bench" => Ok(SuiteSelection::JsonBench),
+        "wildchat" | "wild-chat" | "wild_chat" => Ok(SuiteSelection::WildChat),
+        "hermes" => Ok(SuiteSelection::Hermes),
         other => Err(format!(
-            "unknown --suite '{other}' (expected all|clickbench|row-filter|random-access)"
+            "unknown --suite '{other}' (expected all|clickbench|row-filter|random-access|jsonbench|wildchat|hermes)"
         )
         .into()),
     }
@@ -174,7 +227,11 @@ fn parse_cli_args() -> BenchResult<CliConfig> {
     let mut suite = SuiteSelection::All;
     let mut statam_write_threads = 1usize;
     let mut statam_read_threads = 1usize;
-    let mut hits_parquet = default_hits_path();
+    let mut hits_parquet = default_corpus_path("STATAM_HITS_PARQUET", "hits_1.parquet");
+    let mut bluesky_json = default_corpus_path("STATAM_BLUESKY_JSON", "bluesky_0001.json.gz");
+    let mut wildchat_parquet =
+        default_corpus_path("STATAM_WILDCHAT_PARQUET", "wildchat_00000.parquet");
+    let mut hermes_parquet = default_corpus_path("STATAM_HERMES_PARQUET", "hermes_fc.parquet");
     let mut formats_override: Option<String> = None;
 
     let mut args = std::env::args().skip(1);
@@ -203,6 +260,21 @@ fn parse_cli_args() -> BenchResult<CliConfig> {
         } else if arg == "--hits-parquet" {
             let val = args.next().ok_or("--hits-parquet requires a path")?;
             hits_parquet = PathBuf::from(val);
+        } else if let Some(val) = arg.strip_prefix("--bluesky-json=") {
+            bluesky_json = PathBuf::from(val);
+        } else if arg == "--bluesky-json" {
+            let val = args.next().ok_or("--bluesky-json requires a path")?;
+            bluesky_json = PathBuf::from(val);
+        } else if let Some(val) = arg.strip_prefix("--wildchat-parquet=") {
+            wildchat_parquet = PathBuf::from(val);
+        } else if arg == "--wildchat-parquet" {
+            let val = args.next().ok_or("--wildchat-parquet requires a path")?;
+            wildchat_parquet = PathBuf::from(val);
+        } else if let Some(val) = arg.strip_prefix("--hermes-parquet=") {
+            hermes_parquet = PathBuf::from(val);
+        } else if arg == "--hermes-parquet" {
+            let val = args.next().ok_or("--hermes-parquet requires a path")?;
+            hermes_parquet = PathBuf::from(val);
         } else if let Some(val) = arg.strip_prefix("--formats=") {
             formats_override = Some(val.to_owned());
         } else if arg == "--formats" {
@@ -210,7 +282,7 @@ fn parse_cli_args() -> BenchResult<CliConfig> {
             formats_override = Some(val);
         } else {
             return Err(format!(
-                "unknown argument '{arg}' (supported: --suite, --statam-write-threads, --statam-read-threads, --hits-parquet, --formats)"
+                "unknown argument '{arg}' (supported: --suite, --statam-write-threads, --statam-read-threads, --hits-parquet, --bluesky-json, --wildchat-parquet, --hermes-parquet, --formats)"
             )
             .into());
         }
@@ -231,6 +303,9 @@ fn parse_cli_args() -> BenchResult<CliConfig> {
         statam_write_threads,
         statam_read_threads,
         hits_parquet,
+        bluesky_json,
+        wildchat_parquet,
+        hermes_parquet,
         formats,
     })
 }
@@ -317,6 +392,7 @@ fn write_generic_strata(
     Ok((Bytes::from(buf), t0.elapsed().as_secs_f64() * 1000.0))
 }
 
+#[allow(clippy::too_many_arguments)]
 fn write_generic_statam(
     batch: &Batch,
     profile: WriteProfile,
@@ -324,26 +400,77 @@ fn write_generic_statam(
     bloom_cols: &[&str],
     hot_bloom_col: Option<&str>,
     narrow_trigram_cols: &[&str],
+    payload_cols: &[&str],
+    use_pack: bool,
     write_threads: usize,
-) -> BenchResult<(Bytes, f64)> {
+) -> BenchResult<(Bytes, Option<Bytes>, f64)> {
     let t0 = Instant::now();
+    let mut pack_opts = PackWriteOptions::default();
+    if write_threads > 1 {
+        pack_opts.write_threads = write_threads;
+    }
+    let mut pb = use_pack.then(|| ChunkPackBuilder::new(PACK_ID, pack_opts));
+
     let mut opts = WriteOptions::for_table(TableKind::Generic, profile);
     opts.sort_cols = sort_cols.to_vec();
     opts.bloom_cols = bloom_cols.iter().map(|&s| s.to_owned()).collect();
     opts.hot_bloom_col = hot_bloom_col.map(str::to_owned);
+    opts.payload_cols = payload_cols.iter().map(|&s| s.to_owned()).collect();
     opts.narrow_trigram_cols = if profile == WriteProfile::L1Compact {
         narrow_trigram_cols.iter().map(|&s| s.to_owned()).collect()
     } else {
         Vec::new()
     };
+    if pb.is_some() {
+        opts.pack_id = Some(PACK_ID);
+    }
     if write_threads > 1 {
         opts.write_threads = write_threads;
     }
+
     let mut buf = Vec::new();
-    let mut w = StatamWriter::new(Arc::clone(batch.schema()), opts, None)?;
+    let mut w = StatamWriter::new(Arc::clone(batch.schema()), opts, pb.as_mut())?;
     w.write_batch(batch)?;
     w.finish(&mut buf)?;
-    Ok((Bytes::from(buf), t0.elapsed().as_secs_f64() * 1000.0))
+    let pack_bytes = if let Some(builder) = pb {
+        let mut pbuf = Vec::new();
+        builder.finish(&mut pbuf)?;
+        Some(Bytes::from(pbuf))
+    } else {
+        None
+    };
+    Ok((
+        Bytes::from(buf),
+        pack_bytes,
+        t0.elapsed().as_secs_f64() * 1000.0,
+    ))
+}
+
+async fn try_write_lance(
+    wl: &str,
+    suite_label: &str,
+    batch: &RecordBatch,
+    raw_bytes: u64,
+    write_rows: &mut Vec<WriteBenchRow>,
+    notes: &mut Vec<String>,
+) -> Option<Bytes> {
+    let prepared = match prepare_lance_batches(std::slice::from_ref(batch)) {
+        Ok(p) => p,
+        Err(e) => {
+            notes.push(format!("{suite_label}: `lance` = N/A ({e})"));
+            return None;
+        }
+    };
+    match write_lance_bytes(&prepared).await {
+        Ok((b, ms)) => {
+            write_rows.push(mk_write_row(wl, "lance", raw_bytes, b.len() as u64, ms));
+            Some(b)
+        }
+        Err(e) => {
+            notes.push(format!("{suite_label}: `lance` = N/A ({e})"));
+            None
+        }
+    }
 }
 
 async fn open_single_strata_local(bytes: &Bytes) -> BenchResult<Arc<StrataFile>> {
@@ -375,12 +502,39 @@ async fn open_single_strata_s3(
 
 #[derive(Clone)]
 enum GenPqPred {
-    I64Eq { col: String, val: i64 },
-    I64Ne { col: String, val: i64 },
-    I64Between { col: String, lo: i64, hi: i64 },
-    Utf8Eq { col: String, val: String },
-    Utf8NonEmpty { col: String },
-    Utf8Like { col: String, needle: String },
+    I64Eq {
+        col: String,
+        val: i64,
+    },
+    I64Ne {
+        col: String,
+        val: i64,
+    },
+    I64Between {
+        col: String,
+        lo: i64,
+        hi: i64,
+    },
+    Utf8Eq {
+        col: String,
+        val: String,
+    },
+    Utf8NonEmpty {
+        col: String,
+    },
+    Utf8Like {
+        col: String,
+        needle: String,
+    },
+    Utf8Ilike {
+        col: String,
+        needle_lower: String,
+    },
+    MapKeyEq {
+        col: String,
+        key: String,
+        val: String,
+    },
 }
 
 impl GenPqPred {
@@ -391,7 +545,9 @@ impl GenPqPred {
             | Self::I64Between { col, .. }
             | Self::Utf8Eq { col, .. }
             | Self::Utf8NonEmpty { col }
-            | Self::Utf8Like { col, .. } => col.as_str(),
+            | Self::Utf8Like { col, .. }
+            | Self::Utf8Ilike { col, .. }
+            | Self::MapKeyEq { col, .. } => col.as_str(),
         }
     }
 }
@@ -714,6 +870,83 @@ fn build_gen_row_preds(
                     Ok(bools)
                 })));
             }
+            GenPqPred::Utf8Ilike { needle_lower, .. } => {
+                let nd = needle_lower.clone();
+                row_preds.push(Box::new(ArrowPredicateFn::new(mask, move |batch| {
+                    let arr = batch
+                        .column(0)
+                        .as_any()
+                        .downcast_ref::<StringArray>()
+                        .ok_or_else(|| {
+                            arrow::error::ArrowError::InvalidArgumentError(
+                                "expected StringArray".to_owned(),
+                            )
+                        })?;
+                    let bools: BooleanArray = (0..arr.len())
+                        .map(|i| {
+                            (!arr.is_null(i))
+                                .then(|| arr.value(i).to_lowercase().contains(nd.as_str()))
+                        })
+                        .collect();
+                    Ok(bools)
+                })));
+            }
+            GenPqPred::MapKeyEq { key, val, .. } => {
+                let target_k = key.clone();
+                let target_v = val.clone();
+                row_preds.push(Box::new(ArrowPredicateFn::new(mask, move |batch| {
+                    let ma = batch
+                        .column(0)
+                        .as_any()
+                        .downcast_ref::<MapArray>()
+                        .ok_or_else(|| {
+                            arrow::error::ArrowError::InvalidArgumentError(
+                                "expected MapArray".to_owned(),
+                            )
+                        })?;
+                    let ks = ma
+                        .keys()
+                        .as_any()
+                        .downcast_ref::<StringArray>()
+                        .ok_or_else(|| {
+                            arrow::error::ArrowError::InvalidArgumentError(
+                                "expected StringArray map keys".to_owned(),
+                            )
+                        })?;
+                    let vs = ma
+                        .values()
+                        .as_any()
+                        .downcast_ref::<StringArray>()
+                        .ok_or_else(|| {
+                            arrow::error::ArrowError::InvalidArgumentError(
+                                "expected StringArray map values".to_owned(),
+                            )
+                        })?;
+                    let offsets = ma.value_offsets();
+                    let bools: BooleanArray = (0..ma.len())
+                        .map(|r| {
+                            if ma.is_null(r) {
+                                return Some(false);
+                            }
+                            let s = offsets[r] as usize;
+                            let e = offsets[r + 1] as usize;
+                            let mut hit = false;
+                            for j in s..e {
+                                if !ks.is_null(j)
+                                    && ks.value(j) == target_k.as_str()
+                                    && !vs.is_null(j)
+                                    && vs.value(j) == target_v.as_str()
+                                {
+                                    hit = true;
+                                    break;
+                                }
+                            }
+                            Some(hit)
+                        })
+                        .collect();
+                    Ok(bools)
+                })));
+            }
         }
     }
     row_preds
@@ -838,12 +1071,83 @@ fn execute_gen_parquet_s3(
     execute_gen_parquet_scan_with_builder(reader, builder, proj_roots, filters)
 }
 
-async fn execute_vortex_scan(
+#[derive(Clone, Copy)]
+enum VortexPostFilter<'a> {
+    None,
+    Like {
+        col: &'a str,
+        needle: &'a str,
+    },
+    Ilike {
+        col: &'a str,
+        needle_lower: &'a str,
+    },
+    MapKeyEq {
+        col: &'a str,
+        key: &'a str,
+        val: &'a str,
+    },
+}
+
+fn eval_vortex_map_key_eq(
+    b: &arrow_array_60::RecordBatch,
+    col_name: &str,
+    key: &str,
+    val: &str,
+) -> usize {
+    let Some(col) = b.column_by_name(col_name) else {
+        return 0;
+    };
+    let mut matched = 0usize;
+    if let Some(ma) = col.as_any().downcast_ref::<MapArray60>() {
+        let keys = ma.keys();
+        let vals = ma.values();
+        let offsets = ma.value_offsets();
+        for r in 0..Array60::len(ma) {
+            if Array60::is_null(ma, r) {
+                continue;
+            }
+            let s = offsets[r] as usize;
+            let e = offsets[r + 1] as usize;
+            for j in s..e {
+                if vortex_str_value_at(keys.as_ref(), j) == Some(key)
+                    && vortex_str_value_at(vals.as_ref(), j) == Some(val)
+                {
+                    matched += 1;
+                    break;
+                }
+            }
+        }
+    } else if let Some(la) = col.as_any().downcast_ref::<ListArray60>() {
+        let entries = la.values().as_struct();
+        let keys = entries.column(0);
+        let vals = entries.column(1);
+        let offsets = la.value_offsets();
+        for r in 0..Array60::len(la) {
+            if Array60::is_null(la, r) {
+                continue;
+            }
+            let s = offsets[r] as usize;
+            let e = offsets[r + 1] as usize;
+            for j in s..e {
+                if vortex_str_value_at(keys.as_ref(), j) == Some(key)
+                    && vortex_str_value_at(vals.as_ref(), j) == Some(val)
+                {
+                    matched += 1;
+                    break;
+                }
+            }
+        }
+    }
+    matched
+}
+
+async fn execute_vortex_scan_with_post(
     session: &VortexSession,
     file: &VortexFile,
     proj_expr: &Expression,
     filter_opt: Option<&Expression>,
-    like_check: Option<(&str, &str)>,
+    post: VortexPostFilter<'_>,
 ) -> BenchResult<usize> {
     let projection = proj_expr.clone().bind(file.dtype())?.optimize_recursive()?;
     let mut builder = file.scan()?.with_projection(projection);
@@ -857,28 +1161,368 @@ async fn execute_vortex_scan(
         if chunk.is_empty() {
             continue;
         }
-        if let Some((col_name, needle)) = like_check {
-            let batch = chunk_to_record_batch(session, chunk)?;
-            if let Some(arr) = batch.column_by_name(col_name) {
-                for i in 0..batch.num_rows() {
-                    if let Some(s) = str_value_at(arr.as_ref(), i)
-                        && s.contains(needle)
-                    {
-                        total += 1;
+        let batch = chunk_to_record_batch(session, chunk)?;
+        match post {
+            VortexPostFilter::None => {
+                total += batch.num_rows();
+            }
+            VortexPostFilter::Like { col, needle } => {
+                if let Some(arr) = batch.column_by_name(col) {
+                    for i in 0..batch.num_rows() {
+                        if let Some(s) = vortex_str_value_at(arr.as_ref(), i)
+                            && s.contains(needle)
+                        {
+                            total += 1;
+                        }
                     }
                 }
             }
-        } else {
-            let batch = chunk_to_record_batch(session, chunk)?;
-            total += batch.num_rows();
+            VortexPostFilter::Ilike { col, needle_lower } => {
+                if let Some(arr) = batch.column_by_name(col) {
+                    for i in 0..batch.num_rows() {
+                        if let Some(s) = vortex_str_value_at(arr.as_ref(), i)
+                            && s.to_lowercase().contains(needle_lower)
+                        {
+                            total += 1;
+                        }
+                    }
+                }
+            }
+            VortexPostFilter::MapKeyEq { col, key, val } => {
+                total += eval_vortex_map_key_eq(&batch, col, key, val);
+            }
         }
     }
     Ok(total)
 }
 
+async fn execute_vortex_scan(
+    session: &VortexSession,
+    file: &VortexFile,
+    proj_expr: &Expression,
+    filter_opt: Option<&Expression>,
+    like_check: Option<(&str, &str)>,
+) -> BenchResult<usize> {
+    let post = match like_check {
+        Some((col, needle)) => VortexPostFilter::Like { col, needle },
+        None => VortexPostFilter::None,
+    };
+    execute_vortex_scan_with_post(session, file, proj_expr, filter_opt, post).await
+}
+
 fn execute_statam_scan(reader: &StatamReader, req: &ScanRequest) -> BenchResult<usize> {
     let batches = reader.scan(req)?;
     Ok(batches.iter().map(Batch::num_rows).sum())
+}
+
+fn extract_str_at<'a>(arr: &'a dyn Array, idx: usize) -> Option<&'a str> {
+    if arr.is_null(idx) {
+        return None;
+    }
+    if let Some(sa) = arr.as_any().downcast_ref::<StringArray>() {
+        Some(sa.value(idx))
+    } else if let Some(sa) = arr.as_any().downcast_ref::<LargeStringArray>() {
+        Some(sa.value(idx))
+    } else if let Some(sa) = arr.as_any().downcast_ref::<StringViewArray>() {
+        Some(sa.value(idx))
+    } else {
+        None
+    }
+}
+
+fn extract_ts_ns_at(arr: &dyn Array, idx: usize) -> i64 {
+    if arr.is_null(idx) {
+        return 0;
+    }
+    if let Some(a) = arr.as_any().downcast_ref::<TimestampNanosecondArray>() {
+        a.value(idx)
+    } else if let Some(a) = arr.as_any().downcast_ref::<TimestampMicrosecondArray>() {
+        a.value(idx).saturating_mul(1_000)
+    } else if let Some(a) = arr.as_any().downcast_ref::<TimestampMillisecondArray>() {
+        a.value(idx).saturating_mul(1_000_000)
+    } else if let Some(a) = arr.as_any().downcast_ref::<TimestampSecondArray>() {
+        a.value(idx).saturating_mul(1_000_000_000)
+    } else if let Some(a) = arr.as_any().downcast_ref::<Int64Array>() {
+        a.value(idx)
+    } else {
+        0
+    }
+}
+
+fn eval_arrow_map_key_eq(batch: &RecordBatch, col_name: &str, key: &str, val: &str) -> usize {
+    let Some(ma) = batch
+        .column_by_name(col_name)
+        .and_then(|c| c.as_any().downcast_ref::<MapArray>())
+    else {
+        return 0;
+    };
+    let keys = ma.keys();
+    let vals = ma.values();
+    let offsets = ma.value_offsets();
+    let mut matched = 0usize;
+    for r in 0..ma.len() {
+        if ma.is_null(r) {
+            continue;
+        }
+        let s = offsets[r] as usize;
+        let e = offsets[r + 1] as usize;
+        for j in s..e {
+            if extract_str_at(keys.as_ref(), j) == Some(key)
+                && extract_str_at(vals.as_ref(), j) == Some(val)
+            {
+                matched += 1;
+                break;
+            }
+        }
+    }
+    matched
+}
+
+#[allow(clippy::too_many_arguments)]
+fn run_parquet_bench_query(
+    wl: &str,
+    qname: &str,
+    pq_default: &Option<Bytes>,
+    pq_tuned: &Option<Bytes>,
+    pq_cetra: &Option<Bytes>,
+    pq_proj: &[usize],
+    pq_preds: &[GenPqPred],
+    warm_runs: usize,
+    s3_cfg: SimulatedS3Config,
+    expected_matches: &mut Option<usize>,
+    query_rows: &mut Vec<QueryBenchRow>,
+) -> BenchResult<()> {
+    for (fmt, bytes_opt, with_pi) in [
+        ("pq_default", pq_default, false),
+        ("pq_tuned", pq_tuned, true),
+        ("pq_cetra", pq_cetra, true),
+    ] {
+        let Some(bytes) = bytes_opt else { continue };
+        let opts = ArrowReaderOptions::new().with_page_index_policy(if with_pi {
+            PageIndexPolicy::Optional
+        } else {
+            PageIndexPolicy::Skip
+        });
+        let meta = ArrowReaderMetadata::load(bytes, opts)?;
+        let (matched, local_ms, local_p95_ms) = measure_local_ms(
+            || execute_gen_parquet_local(bytes, &meta, pq_proj, pq_preds),
+            warm_runs,
+        )?;
+
+        let s3_reader = SimS3ChunkReader::new(Arc::new(SimulatedS3Reader::from_bytes(
+            bytes.clone(),
+            s3_cfg,
+        )));
+        s3_reader.s3().evict_all();
+        s3_reader.s3().reset_counters();
+        let s3_matched = execute_gen_parquet_s3(&s3_reader, with_pi, pq_proj, pq_preds)?;
+        if s3_matched != matched {
+            return Err(format!("{fmt} {qname}: s3 {s3_matched} != local {matched}").into());
+        }
+        check_parity(expected_matches, wl, qname, fmt, matched)?;
+        query_rows.push(QueryBenchRow {
+            workload: wl.to_owned(),
+            query: qname.to_owned(),
+            format: fmt.to_owned(),
+            rows_matched: matched,
+            local_ms,
+            local_p95_ms,
+            s3_ms: s3_reader.s3().simulated_latency_ms(),
+            s3_gets: s3_reader.s3().counters().gets,
+            s3_bytes: s3_reader.s3().counters().bytes_from_s3,
+            cold_open_gets: None,
+            cold_open_tail_bytes: None,
+        });
+    }
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn run_vortex_bench_query(
+    wl: &str,
+    qname: &str,
+    vortex_session: &VortexSession,
+    bytes: &Bytes,
+    local_file: &VortexFile,
+    proj: &Expression,
+    filt: Option<&Expression>,
+    post: VortexPostFilter<'_>,
+    warm_runs: usize,
+    s3_cfg: SimulatedS3Config,
+    expected_matches: &mut Option<usize>,
+    query_rows: &mut Vec<QueryBenchRow>,
+) -> BenchResult<()> {
+    let (matched, local_ms, local_p95_ms) = measure_local_async_ms(
+        || execute_vortex_scan_with_post(vortex_session, local_file, proj, filt, post),
+        warm_runs,
+    )
+    .await?;
+
+    let s3_reader = Arc::new(SimulatedS3Reader::from_bytes(bytes.clone(), s3_cfg));
+    s3_reader.evict_all();
+    s3_reader.reset_counters();
+    let vx_read = Arc::new(SimS3VortexRead::new(
+        Arc::clone(&s3_reader) as Arc<dyn RangeReader>
+    ));
+    let s3_file = vortex_session.open_options().open_read(vx_read).await?;
+    let s3_matched =
+        execute_vortex_scan_with_post(vortex_session, &s3_file, proj, filt, post).await?;
+    if s3_matched != matched {
+        return Err(format!("vortex {qname}: s3 {s3_matched} != local {matched}").into());
+    }
+    check_parity(expected_matches, wl, qname, "vortex", matched)?;
+    query_rows.push(QueryBenchRow {
+        workload: wl.to_owned(),
+        query: qname.to_owned(),
+        format: "vortex".to_owned(),
+        rows_matched: matched,
+        local_ms,
+        local_p95_ms,
+        s3_ms: s3_reader.simulated_latency_ms(),
+        s3_gets: s3_reader.counters().gets,
+        s3_bytes: s3_reader.counters().bytes_from_s3,
+        cold_open_gets: None,
+        cold_open_tail_bytes: None,
+    });
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn run_lance_bench_query<F>(
+    wl: &str,
+    qname: &str,
+    bytes: &Bytes,
+    local_reader: &LanceFileReader,
+    mut exec: F,
+    warm_runs: usize,
+    s3_cfg: SimulatedS3Config,
+    expected_matches: &mut Option<usize>,
+    query_rows: &mut Vec<QueryBenchRow>,
+) -> BenchResult<()>
+where
+    F: AsyncFnMut(&LanceFileReader) -> BenchResult<usize>,
+{
+    let mut samples = Vec::with_capacity(warm_runs.max(1));
+    let mut matched = 0usize;
+    let runs = warm_runs.max(1);
+    for i in 0..=runs {
+        let t0 = Instant::now();
+        let n = exec(local_reader).await?;
+        let ms = t0.elapsed().as_secs_f64() * 1_000.0;
+        if i == 0 {
+            matched = n;
+        } else {
+            samples.push(ms);
+        }
+    }
+    samples.sort_by(f64::total_cmp);
+    let local_ms = samples[samples.len() / 2];
+    let p95_idx = ((samples.len() as f64 * 0.95).ceil() as usize)
+        .saturating_sub(1)
+        .min(samples.len() - 1);
+    let local_p95_ms = samples[p95_idx];
+
+    let (s3_reader, s3_file) = open_lance_s3(bytes, s3_cfg).await?;
+    let s3_matched = exec(&s3_reader).await?;
+    if s3_matched != matched {
+        return Err(format!("lance {qname}: s3 {s3_matched} != local {matched}").into());
+    }
+    check_parity(expected_matches, wl, qname, "lance", matched)?;
+    query_rows.push(QueryBenchRow {
+        workload: wl.to_owned(),
+        query: qname.to_owned(),
+        format: "lance".to_owned(),
+        rows_matched: matched,
+        local_ms,
+        local_p95_ms,
+        s3_ms: s3_file.simulated_latency_ms(),
+        s3_gets: s3_file.counters().gets,
+        s3_bytes: s3_file.counters().bytes_from_s3,
+        cold_open_gets: None,
+        cold_open_tail_bytes: None,
+    });
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn run_statam_bench_query(
+    wl: &str,
+    qname: &str,
+    statam_l0: &Option<Bytes>,
+    statam_l1: &Option<Bytes>,
+    statam_l1_pack: Option<&Bytes>,
+    req: &ScanRequest,
+    warm_runs: usize,
+    s3_cfg: SimulatedS3Config,
+    expected_matches: &mut Option<usize>,
+    query_rows: &mut Vec<QueryBenchRow>,
+) -> BenchResult<()> {
+    for (fmt, bytes_opt, pack_opt) in [
+        ("statam_l0", statam_l0, None),
+        ("statam_l1", statam_l1, statam_l1_pack),
+    ] {
+        let Some(bytes) = bytes_opt else { continue };
+        let warm_pack: Option<Arc<dyn PackResolver>> = if let Some(pb) = pack_opt {
+            let mut res = InMemoryPackResolver::new();
+            res.insert_bytes(PACK_ID, pb.clone())?;
+            Some(Arc::new(res))
+        } else {
+            None
+        };
+        let local_reader =
+            StatamReader::open(Arc::new(SliceReader::new(bytes.clone())), warm_pack)?;
+        let (matched, local_ms, local_p95_ms) =
+            measure_local_ms(|| execute_statam_scan(&local_reader, req), warm_runs)?;
+
+        let s3_file = Arc::new(SimulatedS3Reader::from_bytes(bytes.clone(), s3_cfg));
+        s3_file.evict_all();
+        s3_file.reset_counters();
+        let s3_pack =
+            pack_opt.map(|pb| Arc::new(SimulatedS3Reader::from_bytes(pb.clone(), s3_cfg)));
+        let s3_resolver = s3_pack
+            .as_ref()
+            .map(|ps3| Arc::new(SimS3PackResolver::new(PACK_ID, Arc::clone(ps3))));
+        if let Some(ps3) = &s3_pack {
+            ps3.evict_all();
+            ps3.reset_counters();
+        }
+        if let Some(res) = &s3_resolver {
+            res.reset_opened();
+        }
+        let pack_dyn = s3_resolver
+            .as_ref()
+            .map(|r| Arc::clone(r) as Arc<dyn PackResolver>);
+        let s3_reader = StatamReader::open(Arc::clone(&s3_file) as Arc<dyn RangeReader>, pack_dyn)?;
+        let s3_matched = execute_statam_scan(&s3_reader, req)?;
+        if s3_matched != matched {
+            return Err(format!("{fmt} {qname}: s3 {s3_matched} != local {matched}").into());
+        }
+
+        let mut gets = s3_file.counters().gets;
+        let mut s3_bytes = s3_file.counters().bytes_from_s3;
+        let mut s3_ms = s3_file.simulated_latency_ms();
+        if let Some(ps3) = &s3_pack {
+            gets += ps3.counters().gets;
+            s3_bytes += ps3.counters().bytes_from_s3;
+            s3_ms += ps3.simulated_latency_ms();
+        }
+
+        check_parity(expected_matches, wl, qname, fmt, matched)?;
+        query_rows.push(QueryBenchRow {
+            workload: wl.to_owned(),
+            query: qname.to_owned(),
+            format: fmt.to_owned(),
+            rows_matched: matched,
+            local_ms,
+            local_p95_ms,
+            s3_ms,
+            s3_gets: gets,
+            s3_bytes,
+            cold_open_gets: None,
+            cold_open_tail_bytes: None,
+        });
+    }
+    Ok(())
 }
 
 // ============================================================================
@@ -1138,6 +1782,19 @@ async fn run_clickbench_suite(
     } else {
         None
     };
+    let lance_bytes = if enabled.contains(&"lance") {
+        try_write_lance(
+            wl,
+            "Suite A (`clickbench`)",
+            &norm_batch,
+            raw_bytes,
+            write_rows,
+            notes,
+        )
+        .await
+    } else {
+        None
+    };
     let strata_bytes = if enabled.contains(&"strata") {
         match write_generic_strata(&norm_batch, &[], &bloom_names) {
             Ok((b, ms)) => {
@@ -1153,13 +1810,15 @@ async fn run_clickbench_suite(
         None
     };
     let statam_l0 = if enabled.contains(&"statam_l0") {
-        let (b, ms) = write_generic_statam(
+        let (b, _, ms) = write_generic_statam(
             &cetra_batch,
             WriteProfile::L0Fast,
             &[],
             &bloom_names,
             Some("UserID"),
             &[],
+            &[],
+            false,
             write_threads,
         )?;
         write_rows.push(mk_write_row(wl, "statam_l0", raw_bytes, b.len() as u64, ms));
@@ -1168,13 +1827,15 @@ async fn run_clickbench_suite(
         None
     };
     let statam_l1 = if enabled.contains(&"statam_l1") {
-        let (b, ms) = write_generic_statam(
+        let (b, _, ms) = write_generic_statam(
             &cetra_batch,
             WriteProfile::L1Compact,
             &[],
             &bloom_names,
             Some("UserID"),
             &["Title", "URL", "SearchPhrase"],
+            &[],
+            false,
             write_threads,
         )?;
         write_rows.push(mk_write_row(wl, "statam_l1", raw_bytes, b.len() as u64, ms));
@@ -1201,6 +1862,10 @@ async fn run_clickbench_suite(
     };
     let vortex_file_local = match &vortex_bytes {
         Some(b) => Some(open_vortex_local(vortex_session, &[b.clone()]).await?),
+        None => None,
+    };
+    let lance_file_local = match &lance_bytes {
+        Some(b) => Some(open_lance_local(b).await?),
         None => None,
     };
     let statam_l0_local = statam_l0
@@ -1293,6 +1958,21 @@ async fn run_clickbench_suite(
                 cold_open_gets: None,
                 cold_open_tail_bytes: None,
             });
+        }
+
+        if let (Some(bytes), Some(local_reader)) = (&lance_bytes, &lance_file_local) {
+            run_lance_bench_query(
+                wl,
+                qname,
+                bytes,
+                local_reader,
+                async |r: &LanceFileReader| execute_clickbench_lance(r, qname, &params).await,
+                warm_runs,
+                s3_cfg,
+                &mut expected_matches,
+                query_rows,
+            )
+            .await?;
         }
 
         if let (Some(bytes), Some(local_file)) = (&strata_bytes, &strata_file_local) {
@@ -1744,6 +2424,103 @@ fn clickbench_statam_spec(qname: &str, p: &ClickBenchParams) -> ScanRequest {
     }
 }
 
+async fn execute_clickbench_lance(
+    reader: &LanceFileReader,
+    qname: &str,
+    p: &ClickBenchParams,
+) -> BenchResult<usize> {
+    let proj_cols: Option<&[&str]> = match qname {
+        "CB_Q1" => Some(&["AdvEngineID"]),
+        "CB_Q10" => Some(&["MobilePhoneModel", "UserID"]),
+        "CB_Q12" => Some(&["SearchPhrase", "UserID"]),
+        "CB_Q20" => Some(&["UserID", "EventTime", "URL", "Title"]),
+        "CB_Q23_like" => Some(&["Title", "URL"]),
+        "CB_Q24" => Some(&["URL"]),
+        "CB_Q39_range" => Some(&["CounterID", "EventTime", "UserID"]),
+        "CB_wide_point" => None,
+        _ => return Ok(0),
+    };
+    let batches = lance_scan_projected(reader, proj_cols).await?;
+    let mut matched = 0usize;
+    for b in &batches {
+        match qname {
+            "CB_Q1" => {
+                if let Some(arr) = b
+                    .column_by_name("AdvEngineID")
+                    .and_then(|c| c.as_any().downcast_ref::<Int64Array>())
+                {
+                    for i in 0..arr.len() {
+                        if !arr.is_null(i) && arr.value(i) != 0 {
+                            matched += 1;
+                        }
+                    }
+                }
+            }
+            "CB_Q10" | "CB_Q12" | "CB_Q24" => {
+                let col_name = match qname {
+                    "CB_Q10" => "MobilePhoneModel",
+                    "CB_Q12" => "SearchPhrase",
+                    _ => "URL",
+                };
+                if let Some(arr) = b.column_by_name(col_name) {
+                    for i in 0..b.num_rows() {
+                        if let Some(s) = extract_str_at(arr.as_ref(), i)
+                            && !s.is_empty()
+                        {
+                            matched += 1;
+                        }
+                    }
+                }
+            }
+            "CB_Q20" | "CB_wide_point" => {
+                if let Some(arr) = b
+                    .column_by_name("UserID")
+                    .and_then(|c| c.as_any().downcast_ref::<Int64Array>())
+                {
+                    for i in 0..arr.len() {
+                        if !arr.is_null(i) && arr.value(i) == p.first_nonzero_uid {
+                            matched += 1;
+                        }
+                    }
+                }
+            }
+            "CB_Q23_like" => {
+                if let Some(arr) = b.column_by_name(p.like_col) {
+                    for i in 0..b.num_rows() {
+                        if let Some(s) = extract_str_at(arr.as_ref(), i)
+                            && s.contains(p.like_needle)
+                        {
+                            matched += 1;
+                        }
+                    }
+                }
+            }
+            "CB_Q39_range" => {
+                let cid = b
+                    .column_by_name("CounterID")
+                    .and_then(|c| c.as_any().downcast_ref::<Int64Array>());
+                let et = b
+                    .column_by_name("EventTime")
+                    .and_then(|c| c.as_any().downcast_ref::<Int64Array>());
+                if let (Some(cid), Some(et)) = (cid, et) {
+                    for i in 0..b.num_rows() {
+                        if !cid.is_null(i)
+                            && cid.value(i) == p.most_freq_cid
+                            && !et.is_null(i)
+                            && et.value(i) >= p.et_lo
+                            && et.value(i) <= p.et_hi
+                        {
+                            matched += 1;
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    Ok(matched)
+}
+
 // ============================================================================
 // Suite B: Row-Filter (Parquet's 6-Pattern Selectivity x Clustering Matrix)
 // ============================================================================
@@ -1906,6 +2683,19 @@ async fn run_row_filter_suite(
     } else {
         None
     };
+    let lance_bytes = if enabled.contains(&"lance") {
+        try_write_lance(
+            wl,
+            "Suite B (`row-filter`)",
+            &batch,
+            raw_bytes,
+            write_rows,
+            notes,
+        )
+        .await
+    } else {
+        None
+    };
     let strata_bytes = if enabled.contains(&"strata") {
         match write_generic_strata(&batch, &[], &[]) {
             Ok((b, ms)) => {
@@ -1921,13 +2711,15 @@ async fn run_row_filter_suite(
         None
     };
     let statam_l0 = if enabled.contains(&"statam_l0") {
-        let (b, ms) = write_generic_statam(
+        let (b, _, ms) = write_generic_statam(
             &cetra_batch,
             WriteProfile::L0Fast,
             &[],
             &[],
             None,
             &[],
+            &[],
+            false,
             write_threads,
         )?;
         write_rows.push(mk_write_row(wl, "statam_l0", raw_bytes, b.len() as u64, ms));
@@ -1936,13 +2728,15 @@ async fn run_row_filter_suite(
         None
     };
     let statam_l1 = if enabled.contains(&"statam_l1") {
-        let (b, ms) = write_generic_statam(
+        let (b, _, ms) = write_generic_statam(
             &cetra_batch,
             WriteProfile::L1Compact,
             &[],
             &[],
             None,
             &[],
+            &[],
+            false,
             write_threads,
         )?;
         write_rows.push(mk_write_row(wl, "statam_l1", raw_bytes, b.len() as u64, ms));
@@ -1988,6 +2782,10 @@ async fn run_row_filter_suite(
     };
     let vortex_file_local = match &vortex_bytes {
         Some(b) => Some(open_vortex_local(vortex_session, &[b.clone()]).await?),
+        None => None,
+    };
+    let lance_file_local = match &lance_bytes {
+        Some(b) => Some(open_lance_local(b).await?),
         None => None,
     };
     let statam_l0_local = statam_l0
@@ -2084,6 +2882,35 @@ async fn run_row_filter_suite(
                 cold_open_gets: None,
                 cold_open_tail_bytes: None,
             });
+        }
+
+        if let (Some(bytes), Some(local_reader)) = (&lance_bytes, &lance_file_local) {
+            let proj = ["int64", "float64", "utf8", "ts", filter_col];
+            run_lance_bench_query(
+                wl,
+                qname,
+                bytes,
+                local_reader,
+                async |r: &LanceFileReader| {
+                    let batches = lance_scan_projected(r, Some(&proj)).await?;
+                    let mut matched = 0usize;
+                    for b in &batches {
+                        if let Some(arr) = b.column_by_name(filter_col) {
+                            for i in 0..b.num_rows() {
+                                if extract_str_at(arr.as_ref(), i) == Some(filter_val) {
+                                    matched += 1;
+                                }
+                            }
+                        }
+                    }
+                    Ok(matched)
+                },
+                warm_runs,
+                s3_cfg,
+                &mut expected_matches,
+                query_rows,
+            )
+            .await?;
         }
 
         if let (Some(bytes), Some(local_file)) = (&strata_bytes, &strata_file_local) {
@@ -2412,6 +3239,19 @@ async fn run_random_access_suite(
     } else {
         None
     };
+    let lance_bytes = if enabled.contains(&"lance") {
+        try_write_lance(
+            wl,
+            "Suite C (`random-access`)",
+            &batch,
+            raw_bytes,
+            write_rows,
+            notes,
+        )
+        .await
+    } else {
+        None
+    };
     if enabled.contains(&"strata") {
         match write_generic_strata(&batch, &["row_id"], &["row_id"]) {
             Ok((b, ms)) => {
@@ -2424,13 +3264,15 @@ async fn run_random_access_suite(
         }
     }
     let statam_l0 = if enabled.contains(&"statam_l0") {
-        let (b, ms) = write_generic_statam(
+        let (b, _, ms) = write_generic_statam(
             &cetra_batch,
             WriteProfile::L0Fast,
             &[0],
             &["row_id"],
             Some("row_id"),
             &[],
+            &[],
+            false,
             write_threads,
         )?;
         write_rows.push(mk_write_row(wl, "statam_l0", raw_bytes, b.len() as u64, ms));
@@ -2439,13 +3281,15 @@ async fn run_random_access_suite(
         None
     };
     let statam_l1 = if enabled.contains(&"statam_l1") {
-        let (b, ms) = write_generic_statam(
+        let (b, _, ms) = write_generic_statam(
             &cetra_batch,
             WriteProfile::L1Compact,
             &[0],
             &["row_id"],
             Some("row_id"),
             &[],
+            &[],
+            false,
             write_threads,
         )?;
         write_rows.push(mk_write_row(wl, "statam_l1", raw_bytes, b.len() as u64, ms));
@@ -2461,6 +3305,10 @@ async fn run_random_access_suite(
 
     let vortex_file_local = match &vortex_bytes {
         Some(b) => Some(open_vortex_local(vortex_session, &[b.clone()]).await?),
+        None => None,
+    };
+    let lance_file_local = match &lance_bytes {
+        Some(b) => Some(open_lance_local(b).await?),
         None => None,
     };
     let statam_l0_local = statam_l0
@@ -2559,6 +3407,26 @@ async fn run_random_access_suite(
             });
         }
 
+        if let (Some(bytes), Some(local_reader)) = (&lance_bytes, &lance_file_local) {
+            let u32_indices: Vec<u32> = indices.iter().map(|&i| i as u32).collect();
+            let u32_ref = u32_indices.as_slice();
+            run_lance_bench_query(
+                wl,
+                qname,
+                bytes,
+                local_reader,
+                async |r: &LanceFileReader| {
+                    let batches = lance_take_indices(r, u32_ref, None).await?;
+                    Ok(batches.iter().map(RecordBatch::num_rows).sum())
+                },
+                warm_runs,
+                s3_cfg,
+                &mut expected_matches,
+                query_rows,
+            )
+            .await?;
+        }
+
         for (fmt, bytes_opt, local_opt) in [
             ("statam_l0", &statam_l0, &statam_l0_local),
             ("statam_l1", &statam_l1, &statam_l1_local),
@@ -2601,6 +3469,2653 @@ async fn run_random_access_suite(
     Ok(())
 }
 
+// ============================================================================
+// Shared Helpers for Real-World Suites (D, E, F)
+// ============================================================================
+
+fn col_utf8_from_strings(vals: &[String]) -> BenchResult<Column> {
+    let data = Utf8Data::try_from_slices(vals.iter().map(String::as_str))?;
+    Ok(Column::Flat(FlatColumn::try_new(
+        FlatData::Utf8(data),
+        None,
+    )?))
+}
+
+fn col_i64_from_slice(vals: &[i64]) -> BenchResult<Column> {
+    Ok(Column::Flat(FlatColumn::try_new(
+        FlatData::I64(vals.to_vec()),
+        None,
+    )?))
+}
+
+fn col_ts_ns_from_slice(vals: &[i64]) -> BenchResult<Column> {
+    Ok(Column::Flat(FlatColumn::try_new(
+        FlatData::TimestampNs {
+            values: vals.to_vec(),
+            utc: true,
+        },
+        None,
+    )?))
+}
+
+fn col_map_utf8_from_btreemaps(maps: &[BTreeMap<String, Option<String>>]) -> BenchResult<Column> {
+    let mut offsets = vec![0u32];
+    let mut keys: Vec<&str> = Vec::new();
+    let mut vals: Vec<&str> = Vec::new();
+    let mut valid: Vec<bool> = Vec::new();
+    let mut any_null = false;
+    for m in maps {
+        for (k, v) in m {
+            keys.push(k.as_str());
+            match v {
+                Some(s) => {
+                    vals.push(s.as_str());
+                    valid.push(true);
+                }
+                None => {
+                    vals.push("");
+                    valid.push(false);
+                    any_null = true;
+                }
+            }
+        }
+        offsets.push(u32::try_from(keys.len())?);
+    }
+    let kd = Utf8Data::try_from_slices(keys)?;
+    let vd = Utf8Data::try_from_slices(vals)?;
+    let vnulls = any_null.then(|| Bitmap::from_bools(&valid));
+    let md = MapData::try_new(offsets, kd, vd, vnulls)?;
+    Ok(Column::Flat(FlatColumn::try_new(
+        FlatData::MapUtf8(Box::new(md)),
+        None,
+    )?))
+}
+
+fn extract_list_parts(arr: &dyn Array) -> BenchResult<(Vec<usize>, &StructArray)> {
+    if let Some(la) = arr.as_any().downcast_ref::<ListArray>() {
+        let offsets: Vec<usize> = la.offsets().iter().map(|&o| o as usize).collect();
+        let sa = la
+            .values()
+            .as_any()
+            .downcast_ref::<StructArray>()
+            .ok_or("expected StructArray inside ListArray")?;
+        Ok((offsets, sa))
+    } else if let Some(la) = arr.as_any().downcast_ref::<LargeListArray>() {
+        let offsets: Vec<usize> = la.offsets().iter().map(|&o| o as usize).collect();
+        let sa = la
+            .values()
+            .as_any()
+            .downcast_ref::<StructArray>()
+            .ok_or("expected StructArray inside LargeListArray")?;
+        Ok((offsets, sa))
+    } else {
+        Err(format!(
+            "expected ListArray or LargeListArray, got {}",
+            arr.data_type()
+        )
+        .into())
+    }
+}
+
+fn pick_frequent_string(vals: &[String], exclude_ci: Option<&str>) -> String {
+    let mut counts: BTreeMap<&str, usize> = BTreeMap::new();
+    for v in vals {
+        if v.is_empty() {
+            continue;
+        }
+        if let Some(ex) = exclude_ci
+            && v.eq_ignore_ascii_case(ex)
+        {
+            continue;
+        }
+        *counts.entry(v.as_str()).or_insert(0) += 1;
+    }
+    counts
+        .into_iter()
+        .max_by(|(k1, c1), (k2, c2)| c1.cmp(c2).then_with(|| k2.cmp(k1)))
+        .map_or_else(String::new, |(k, _)| k.to_owned())
+}
+
+fn pick_ascii_needle_in_range(
+    vals: &[String],
+    preferred: Option<&str>,
+    min_hits: usize,
+    max_hits: usize,
+) -> String {
+    if let Some(pref) = preferred {
+        let hits = vals.iter().filter(|s| s.contains(pref)).count();
+        if hits > 0 {
+            return pref.to_owned();
+        }
+    }
+    let mut doc_freq: BTreeMap<String, usize> = BTreeMap::new();
+    for s in vals.iter().take(5_000) {
+        if s.is_empty() {
+            continue;
+        }
+        let mut seen = BTreeSet::new();
+        for tok in s.split(|c: char| !c.is_ascii_alphanumeric() && c != '_') {
+            if tok.len() >= 4 && tok.len() <= 20 && seen.insert(tok) {
+                *doc_freq.entry(tok.to_owned()).or_insert(0) += 1;
+            }
+            if seen.len() >= 24 {
+                break;
+            }
+        }
+    }
+    if let Some((tok, _)) = doc_freq
+        .iter()
+        .filter(|&(_, &c)| c >= min_hits && c <= max_hits)
+        .min_by(|(k1, c1), (k2, c2)| c1.cmp(c2).then_with(|| k1.cmp(k2)))
+    {
+        return tok.clone();
+    }
+    if let Some((tok, _)) = doc_freq
+        .iter()
+        .filter(|&(_, &c)| c >= 1)
+        .min_by(|(k1, c1), (k2, c2)| c1.cmp(c2).then_with(|| k1.cmp(k2)))
+    {
+        return tok.clone();
+    }
+    "function".to_owned()
+}
+
+fn pick_unicode_ilike_needle(vals: &[String]) -> (String, usize) {
+    let mut candidates: BTreeMap<String, (usize, bool)> = BTreeMap::new();
+    for s in vals {
+        if s.is_ascii() {
+            continue;
+        }
+        let mut seen = BTreeSet::new();
+        for tok in s.split(|c: char| c.is_whitespace() || c.is_ascii_punctuation()) {
+            if tok.is_ascii() || tok.len() < 6 {
+                continue;
+            }
+            let char_len = tok.chars().count();
+            if !(3..=10).contains(&char_len) {
+                continue;
+            }
+            let lower = tok.to_lowercase();
+            let has_cased_non_ascii = tok.chars().any(|c| {
+                !c.is_ascii() && c.to_lowercase().to_string() != c.to_uppercase().to_string()
+            });
+            if seen.insert(lower.clone()) {
+                let entry = candidates
+                    .entry(tok.to_owned())
+                    .or_insert((0, has_cased_non_ascii));
+                entry.0 += 1;
+            }
+            if seen.len() >= 16 {
+                break;
+            }
+        }
+        if candidates.len() >= 2_000 {
+            break;
+        }
+    }
+
+    let mut ranked: Vec<(String, usize, bool)> = candidates
+        .into_iter()
+        .map(|(tok, (approx, cased))| (tok, approx, cased))
+        .collect();
+    ranked.sort_by(|a, b| {
+        b.2.cmp(&a.2)
+            .then_with(|| a.1.cmp(&b.1))
+            .then_with(|| a.0.cmp(&b.0))
+    });
+
+    let mut best_fallback: Option<(String, usize)> = None;
+    for (tok, _, _) in ranked.into_iter().take(200) {
+        let lower = tok.to_lowercase();
+        let exact_hits = vals
+            .iter()
+            .filter(|s| s.to_lowercase().contains(&lower))
+            .count();
+        if (3..=200).contains(&exact_hits) {
+            return (tok, exact_hits);
+        }
+        if exact_hits > 0 && best_fallback.as_ref().is_none_or(|(_, c)| exact_hits < *c) {
+            best_fallback = Some((tok, exact_hits));
+        }
+    }
+
+    if let Some(best) = best_fallback {
+        return best;
+    }
+
+    for fallback in ["привет", "café", "模型"] {
+        let lower = fallback.to_lowercase();
+        let hits = vals
+            .iter()
+            .filter(|s| s.to_lowercase().contains(&lower))
+            .count();
+        if hits > 0 {
+            return (fallback.to_owned(), hits);
+        }
+    }
+
+    for s in vals {
+        if let Some(ch) = s.chars().find(|c| !c.is_ascii() && !c.is_whitespace()) {
+            let tok = ch.to_string();
+            let lower = tok.to_lowercase();
+            let hits = vals
+                .iter()
+                .filter(|x| x.to_lowercase().contains(&lower))
+                .count();
+            if hits > 0 {
+                return (tok, hits);
+            }
+        }
+    }
+
+    ("café".to_owned(), 0)
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn run_strata_bench_query<F, Fut>(
+    wl: &str,
+    qname: &str,
+    bytes: &Bytes,
+    local_file: &Arc<StrataFile>,
+    mut exec: F,
+    warm_runs: usize,
+    s3_cfg: SimulatedS3Config,
+    expected_matches: &mut Option<usize>,
+    query_rows: &mut Vec<QueryBenchRow>,
+) -> BenchResult<()>
+where
+    F: FnMut(Arc<StrataFile>) -> Fut,
+    Fut: std::future::Future<Output = BenchResult<usize>>,
+{
+    let (matched, local_ms, local_p95_ms) =
+        measure_local_async_ms(|| exec(Arc::clone(local_file)), warm_runs).await?;
+
+    let (s3_file, s3_reader) = open_single_strata_s3(bytes, s3_cfg).await?;
+    let s3_matched = exec(s3_file).await?;
+    if s3_matched != matched {
+        return Err(format!("strata {qname}: s3 {s3_matched} != local {matched}").into());
+    }
+    check_parity(expected_matches, wl, qname, "strata", matched)?;
+    query_rows.push(QueryBenchRow {
+        workload: wl.to_owned(),
+        query: qname.to_owned(),
+        format: "strata".to_owned(),
+        rows_matched: matched,
+        local_ms,
+        local_p95_ms,
+        s3_ms: s3_reader.simulated_latency_ms(),
+        s3_gets: s3_reader.counters().gets,
+        s3_bytes: s3_reader.counters().bytes_from_s3,
+        cold_open_gets: None,
+        cold_open_tail_bytes: None,
+    });
+    Ok(())
+}
+
+// ============================================================================
+// Suite D: JSONBench (Bluesky Jetstream JSON, 100k events)
+// ============================================================================
+
+fn flatten_json_record(
+    prefix: &str,
+    val: &Value,
+    out: &mut BTreeMap<String, Option<String>>,
+    depth: usize,
+) {
+    if depth > 4 {
+        return;
+    }
+    match val {
+        Value::Object(map) => {
+            for (k, v) in map {
+                let next_key = if prefix.is_empty() {
+                    k.clone()
+                } else {
+                    format!("{prefix}.{k}")
+                };
+                flatten_json_record(&next_key, v, out, depth + 1);
+            }
+        }
+        Value::String(s) => {
+            if !prefix.is_empty() {
+                out.insert(prefix.to_owned(), Some(s.clone()));
+            }
+        }
+        Value::Number(n) => {
+            if !prefix.is_empty() {
+                out.insert(prefix.to_owned(), Some(n.to_string()));
+            }
+        }
+        Value::Bool(b) => {
+            if !prefix.is_empty() {
+                out.insert(
+                    prefix.to_owned(),
+                    Some(if *b { "true" } else { "false" }.to_owned()),
+                );
+            }
+        }
+        Value::Null => {
+            if !prefix.is_empty() {
+                out.insert(prefix.to_owned(), None);
+            }
+        }
+        Value::Array(arr) => {
+            if !prefix.is_empty()
+                && let Ok(s) = serde_json::to_string(arr)
+            {
+                out.insert(prefix.to_owned(), Some(s));
+            }
+        }
+    }
+}
+
+struct JsonBenchData {
+    arrow_batch: RecordBatch,
+    cetra_batch: Batch,
+    top_did: String,
+    like_needle: String,
+}
+
+fn load_jsonbench_100k(path: &Path) -> BenchResult<JsonBenchData> {
+    let file = File::open(path)?;
+    let reader = BufReader::new(GzDecoder::new(file));
+
+    let cap = 100_000usize;
+    let mut dids = Vec::with_capacity(cap);
+    let mut times_us = Vec::with_capacity(cap);
+    let mut kinds = Vec::with_capacity(cap);
+    let mut operations = Vec::with_capacity(cap);
+    let mut collections = Vec::with_capacity(cap);
+    let mut rkeys = Vec::with_capacity(cap);
+    let mut langs = Vec::with_capacity(cap);
+    let mut texts = Vec::with_capacity(cap);
+    let mut raw_jsons = Vec::with_capacity(cap);
+    let mut attrs_list = Vec::with_capacity(cap);
+
+    for line_res in reader.lines() {
+        let line = line_res?;
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let val: Value = match serde_json::from_str(trimmed) {
+            Ok(v) => v,
+            Err(_) => continue,
+        };
+        let did = val
+            .get("did")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_owned();
+        let time_us = val.get("time_us").and_then(Value::as_i64).unwrap_or(0);
+        let kind = val
+            .get("kind")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_owned();
+
+        let commit = val.get("commit");
+        let operation = commit
+            .and_then(|c| c.get("operation"))
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_owned();
+        let collection = commit
+            .and_then(|c| c.get("collection"))
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_owned();
+        let rkey = commit
+            .and_then(|c| c.get("rkey"))
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_owned();
+
+        let record = commit.and_then(|c| c.get("record"));
+        let lang = record
+            .and_then(|r| r.get("langs"))
+            .and_then(Value::as_array)
+            .and_then(|a| a.first())
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_owned();
+        let text = record
+            .and_then(|r| r.get("text"))
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_owned();
+
+        let mut attrs = BTreeMap::new();
+        if let Some(rec) = record {
+            flatten_json_record("", rec, &mut attrs, 0);
+        }
+
+        dids.push(did);
+        times_us.push(time_us);
+        kinds.push(kind);
+        operations.push(operation);
+        collections.push(collection);
+        rkeys.push(rkey);
+        langs.push(lang);
+        texts.push(text);
+        raw_jsons.push(trimmed.to_owned());
+        attrs_list.push(attrs);
+
+        if dids.len() >= cap {
+            break;
+        }
+    }
+
+    if dids.is_empty() {
+        return Err(format!("bluesky JSON '{}' contained 0 valid events", path.display()).into());
+    }
+
+    let top_did = pick_frequent_string(&dids, None);
+    let like_needle = pick_ascii_needle_in_range(&texts, Some("http"), 5, 5000);
+
+    let mut did_b = StringBuilder::with_capacity(dids.len(), dids.len() * 32);
+    let mut kind_b = StringBuilder::with_capacity(kinds.len(), kinds.len() * 8);
+    let mut op_b = StringBuilder::with_capacity(operations.len(), operations.len() * 8);
+    let mut col_b = StringBuilder::with_capacity(collections.len(), collections.len() * 20);
+    let mut rkey_b = StringBuilder::with_capacity(rkeys.len(), rkeys.len() * 14);
+    let mut lang_b = StringBuilder::with_capacity(langs.len(), langs.len() * 4);
+    let mut text_b = StringBuilder::with_capacity(texts.len(), texts.len() * 48);
+    let mut raw_b = StringBuilder::with_capacity(raw_jsons.len(), raw_jsons.len() * 256);
+    let mut map_b = MapBuilder::new(None, StringBuilder::new(), StringBuilder::new())
+        .with_values_field(Field::new("values", DataType::Utf8, true));
+
+    for i in 0..dids.len() {
+        did_b.append_value(&dids[i]);
+        kind_b.append_value(&kinds[i]);
+        op_b.append_value(&operations[i]);
+        col_b.append_value(&collections[i]);
+        rkey_b.append_value(&rkeys[i]);
+        lang_b.append_value(&langs[i]);
+        text_b.append_value(&texts[i]);
+        raw_b.append_value(&raw_jsons[i]);
+        for (k, v) in &attrs_list[i] {
+            map_b.keys().append_value(k);
+            match v {
+                Some(s) => map_b.values().append_value(s),
+                None => map_b.values().append_null(),
+            }
+        }
+        map_b.append(true)?;
+    }
+
+    let map_entries = Field::new(
+        "entries",
+        DataType::Struct(Fields::from(vec![
+            Field::new("keys", DataType::Utf8, false),
+            Field::new("values", DataType::Utf8, true),
+        ])),
+        false,
+    );
+    let arrow_schema: SchemaRef = Arc::new(Schema::new(vec![
+        Field::new("did", DataType::Utf8, false),
+        Field::new("time_us", DataType::Int64, false),
+        Field::new("kind", DataType::Utf8, false),
+        Field::new("operation", DataType::Utf8, false),
+        Field::new("collection", DataType::Utf8, false),
+        Field::new("rkey", DataType::Utf8, false),
+        Field::new("lang", DataType::Utf8, false),
+        Field::new("text", DataType::Utf8, false),
+        Field::new("raw_json", DataType::Utf8, false),
+        Field::new("attrs", DataType::Map(Arc::new(map_entries), false), false),
+    ]));
+    let arrow_batch = RecordBatch::try_new(
+        arrow_schema,
+        vec![
+            Arc::new(did_b.finish()),
+            Arc::new(Int64Array::from(times_us.clone())),
+            Arc::new(kind_b.finish()),
+            Arc::new(op_b.finish()),
+            Arc::new(col_b.finish()),
+            Arc::new(rkey_b.finish()),
+            Arc::new(lang_b.finish()),
+            Arc::new(text_b.finish()),
+            Arc::new(raw_b.finish()),
+            Arc::new(map_b.finish()),
+        ],
+    )?;
+
+    let col_schema = ColSchema::try_new_arc(vec![
+        ColField::new("did", ColType::Utf8, false),
+        ColField::new("time_us", ColType::I64, false),
+        ColField::new("kind", ColType::Utf8, false),
+        ColField::new("operation", ColType::Utf8, false),
+        ColField::new("collection", ColType::Utf8, false),
+        ColField::new("rkey", ColType::Utf8, false),
+        ColField::new("lang", ColType::Utf8, false),
+        ColField::new("text", ColType::Utf8, false),
+        ColField::new("raw_json", ColType::Utf8, false),
+        ColField::new("attrs", ColType::MapUtf8, false),
+    ])?;
+    let cetra_batch = Batch::try_new_all(
+        col_schema,
+        vec![
+            col_utf8_from_strings(&dids)?,
+            col_i64_from_slice(&times_us)?,
+            col_utf8_from_strings(&kinds)?,
+            col_utf8_from_strings(&operations)?,
+            col_utf8_from_strings(&collections)?,
+            col_utf8_from_strings(&rkeys)?,
+            col_utf8_from_strings(&langs)?,
+            col_utf8_from_strings(&texts)?,
+            col_utf8_from_strings(&raw_jsons)?,
+            col_map_utf8_from_btreemaps(&attrs_list)?,
+        ],
+        dids.len(),
+    )?;
+
+    Ok(JsonBenchData {
+        arrow_batch,
+        cetra_batch,
+        top_did,
+        like_needle,
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn run_jsonbench_suite(
+    bluesky_path: &Path,
+    enabled: &[&str],
+    warm_runs: usize,
+    write_threads: usize,
+    read_threads: usize,
+    vortex_session: &VortexSession,
+    write_rows: &mut Vec<WriteBenchRow>,
+    query_rows: &mut Vec<QueryBenchRow>,
+    notes: &mut Vec<String>,
+) -> BenchResult<()> {
+    if !bluesky_path.exists() {
+        notes.push(format!(
+            "Suite D (`jsonbench`): SKIPPED (`{}` not found; pass `--bluesky-json` or set `STATAM_BLUESKY_JSON`)",
+            bluesky_path.display()
+        ));
+        return Ok(());
+    }
+
+    let data = load_jsonbench_100k(bluesky_path)?;
+    let raw_bytes = data.arrow_batch.get_array_memory_size() as u64;
+    let wl = "jsonbench_100k";
+
+    notes.push(format!(
+        "Suite D (`jsonbench`): {} rows x {} cols, `top_did={}`, `JB_Q4_text_like.contains(\"{}\")`",
+        data.arrow_batch.num_rows(),
+        data.arrow_batch.num_columns(),
+        data.top_did,
+        data.like_needle
+    ));
+
+    let bloom_names = ["did"];
+    let pq_default = if enabled.contains(&"pq_default") {
+        let (b, ms) = write_generic_parquet(
+            ParquetVariant::Default,
+            &data.arrow_batch,
+            &bloom_names,
+            &[],
+            1_000_000,
+        )?;
+        write_rows.push(mk_write_row(
+            wl,
+            "pq_default",
+            raw_bytes,
+            b.len() as u64,
+            ms,
+        ));
+        Some(b)
+    } else {
+        None
+    };
+    let pq_tuned = if enabled.contains(&"pq_tuned") {
+        let (b, ms) = write_generic_parquet(
+            ParquetVariant::Tuned,
+            &data.arrow_batch,
+            &bloom_names,
+            &[],
+            32_768,
+        )?;
+        write_rows.push(mk_write_row(wl, "pq_tuned", raw_bytes, b.len() as u64, ms));
+        Some(b)
+    } else {
+        None
+    };
+    let pq_cetra = if enabled.contains(&"pq_cetra") {
+        let (b, ms) = write_generic_parquet(
+            ParquetVariant::Cetra,
+            &data.arrow_batch,
+            &bloom_names,
+            &[],
+            100_000,
+        )?;
+        write_rows.push(mk_write_row(wl, "pq_cetra", raw_bytes, b.len() as u64, ms));
+        Some(b)
+    } else {
+        None
+    };
+    let vortex_bytes = if enabled.contains(&"vortex") {
+        match write_vortex_files(vortex_session, &[data.arrow_batch.clone()]).await {
+            Ok((files, ms)) => {
+                let b = files.into_iter().next().ok_or("missing vortex output")?;
+                write_rows.push(mk_write_row(wl, "vortex", raw_bytes, b.len() as u64, ms));
+                Some(b)
+            }
+            Err(e) => {
+                notes.push(format!("Suite D (`jsonbench`): `vortex` = N/A ({e})"));
+                None
+            }
+        }
+    } else {
+        None
+    };
+    let lance_bytes = if enabled.contains(&"lance") {
+        try_write_lance(
+            wl,
+            "Suite D (`jsonbench`)",
+            &data.arrow_batch,
+            raw_bytes,
+            write_rows,
+            notes,
+        )
+        .await
+    } else {
+        None
+    };
+    let strata_bytes = if enabled.contains(&"strata") {
+        match write_generic_strata(&data.arrow_batch, &[], &bloom_names) {
+            Ok((b, ms)) => {
+                write_rows.push(mk_write_row(wl, "strata", raw_bytes, b.len() as u64, ms));
+                Some(b)
+            }
+            Err(e) => {
+                notes.push(format!("Suite D (`jsonbench`): `strata` = N/A ({e})"));
+                None
+            }
+        }
+    } else {
+        None
+    };
+    let statam_l0 = if enabled.contains(&"statam_l0") {
+        let (b, _, ms) = write_generic_statam(
+            &data.cetra_batch,
+            WriteProfile::L0Fast,
+            &[],
+            &bloom_names,
+            Some("did"),
+            &[],
+            &["raw_json"],
+            false,
+            write_threads,
+        )?;
+        write_rows.push(mk_write_row(wl, "statam_l0", raw_bytes, b.len() as u64, ms));
+        Some(b)
+    } else {
+        None
+    };
+    let (statam_l1, statam_l1_pack) = if enabled.contains(&"statam_l1") {
+        let (b, pack, ms) = write_generic_statam(
+            &data.cetra_batch,
+            WriteProfile::L1Compact,
+            &[],
+            &bloom_names,
+            Some("did"),
+            &["text"],
+            &["raw_json"],
+            true,
+            write_threads,
+        )?;
+        let stored = b.len() as u64 + pack.as_ref().map_or(0, |p| p.len() as u64);
+        write_rows.push(mk_write_row(wl, "statam_l1", raw_bytes, stored, ms));
+        (Some(b), pack)
+    } else {
+        (None, None)
+    };
+
+    let s3_cfg = SimulatedS3Config::default();
+    let vortex_file_local = match &vortex_bytes {
+        Some(b) => Some(open_vortex_local(vortex_session, &[b.clone()]).await?),
+        None => None,
+    };
+    let lance_file_local = match &lance_bytes {
+        Some(b) => Some(open_lance_local(b).await?),
+        None => None,
+    };
+    let strata_file_local = match &strata_bytes {
+        Some(b) => Some(open_single_strata_local(b).await?),
+        None => None,
+    };
+
+    let queries = [
+        "JB_Q1_posts",
+        "JB_Q2_did_pt",
+        "JB_Q3_map_type",
+        "JB_Q4_text_like",
+        "JB_Q5_did_full",
+    ];
+    for &qname in &queries {
+        let mut expected_matches: Option<usize> = None;
+
+        let (pq_proj, pq_preds): (Vec<usize>, Vec<GenPqPred>) = match qname {
+            "JB_Q1_posts" => (
+                vec![4, 3],
+                vec![
+                    GenPqPred::Utf8Eq {
+                        col: "collection".to_owned(),
+                        val: "app.bsky.feed.post".to_owned(),
+                    },
+                    GenPqPred::Utf8Eq {
+                        col: "operation".to_owned(),
+                        val: "create".to_owned(),
+                    },
+                ],
+            ),
+            "JB_Q2_did_pt" => (
+                vec![0, 1, 4, 7],
+                vec![GenPqPred::Utf8Eq {
+                    col: "did".to_owned(),
+                    val: data.top_did.clone(),
+                }],
+            ),
+            "JB_Q3_map_type" => (
+                vec![0, 1, 9],
+                vec![GenPqPred::MapKeyEq {
+                    col: "attrs".to_owned(),
+                    key: "$type".to_owned(),
+                    val: "app.bsky.feed.post".to_owned(),
+                }],
+            ),
+            "JB_Q4_text_like" => (
+                vec![0, 7],
+                vec![GenPqPred::Utf8Like {
+                    col: "text".to_owned(),
+                    needle: data.like_needle.clone(),
+                }],
+            ),
+            "JB_Q5_did_full" => (
+                (0..10).collect(),
+                vec![GenPqPred::Utf8Eq {
+                    col: "did".to_owned(),
+                    val: data.top_did.clone(),
+                }],
+            ),
+            _ => (vec![], vec![]),
+        };
+        run_parquet_bench_query(
+            wl,
+            qname,
+            &pq_default,
+            &pq_tuned,
+            &pq_cetra,
+            &pq_proj,
+            &pq_preds,
+            warm_runs,
+            s3_cfg,
+            &mut expected_matches,
+            query_rows,
+        )?;
+
+        if let (Some(bytes), Some(local_files)) = (&vortex_bytes, &vortex_file_local) {
+            let (proj, filt, post): (Expression, Option<Expression>, VortexPostFilter<'_>) =
+                match qname {
+                    "JB_Q1_posts" => (
+                        select(["collection", "operation"], root()),
+                        Some(and(
+                            eq(col("collection"), lit("app.bsky.feed.post")),
+                            eq(col("operation"), lit("create")),
+                        )),
+                        VortexPostFilter::None,
+                    ),
+                    "JB_Q2_did_pt" => (
+                        select(["did", "time_us", "collection", "text"], root()),
+                        Some(eq(col("did"), lit(data.top_did.as_str()))),
+                        VortexPostFilter::None,
+                    ),
+                    "JB_Q3_map_type" => (
+                        select(["did", "time_us", "attrs"], root()),
+                        None,
+                        VortexPostFilter::MapKeyEq {
+                            col: "attrs",
+                            key: "$type",
+                            val: "app.bsky.feed.post",
+                        },
+                    ),
+                    "JB_Q4_text_like" => (
+                        select(["did", "text"], root()),
+                        None,
+                        VortexPostFilter::Like {
+                            col: "text",
+                            needle: data.like_needle.as_str(),
+                        },
+                    ),
+                    "JB_Q5_did_full" => (
+                        root(),
+                        Some(eq(col("did"), lit(data.top_did.as_str()))),
+                        VortexPostFilter::None,
+                    ),
+                    _ => (root(), None, VortexPostFilter::None),
+                };
+            run_vortex_bench_query(
+                wl,
+                qname,
+                vortex_session,
+                bytes,
+                &local_files[0],
+                &proj,
+                filt.as_ref(),
+                post,
+                warm_runs,
+                s3_cfg,
+                &mut expected_matches,
+                query_rows,
+            )
+            .await?;
+        }
+
+        if let (Some(bytes), Some(local_reader)) = (&lance_bytes, &lance_file_local) {
+            let top_did = data.top_did.as_str();
+            let like_needle = data.like_needle.as_str();
+            run_lance_bench_query(
+                wl,
+                qname,
+                bytes,
+                local_reader,
+                async |r: &LanceFileReader| {
+                    let proj_cols: Option<&[&str]> = match qname {
+                        "JB_Q1_posts" => Some(&["collection", "operation"]),
+                        "JB_Q2_did_pt" => Some(&["did", "time_us", "collection", "text"]),
+                        "JB_Q3_map_type" => Some(&["did", "time_us", "attrs"]),
+                        "JB_Q4_text_like" => Some(&["did", "text"]),
+                        "JB_Q5_did_full" => None,
+                        _ => return Ok(0),
+                    };
+                    let batches = lance_scan_projected(r, proj_cols).await?;
+                    let mut matched = 0usize;
+                    for b in &batches {
+                        match qname {
+                            "JB_Q1_posts" => {
+                                if let (Some(c), Some(o)) = (
+                                    b.column_by_name("collection"),
+                                    b.column_by_name("operation"),
+                                ) {
+                                    for i in 0..b.num_rows() {
+                                        if extract_str_at(c.as_ref(), i)
+                                            == Some("app.bsky.feed.post")
+                                            && extract_str_at(o.as_ref(), i) == Some("create")
+                                        {
+                                            matched += 1;
+                                        }
+                                    }
+                                }
+                            }
+                            "JB_Q2_did_pt" | "JB_Q5_did_full" => {
+                                if let Some(d) = b.column_by_name("did") {
+                                    for i in 0..b.num_rows() {
+                                        if extract_str_at(d.as_ref(), i) == Some(top_did) {
+                                            matched += 1;
+                                        }
+                                    }
+                                }
+                            }
+                            "JB_Q3_map_type" => {
+                                matched += eval_arrow_map_key_eq(
+                                    b,
+                                    "attrs",
+                                    "$type",
+                                    "app.bsky.feed.post",
+                                );
+                            }
+                            "JB_Q4_text_like" => {
+                                if let Some(t) = b.column_by_name("text") {
+                                    for i in 0..b.num_rows() {
+                                        if let Some(s) = extract_str_at(t.as_ref(), i)
+                                            && s.contains(like_needle)
+                                        {
+                                            matched += 1;
+                                        }
+                                    }
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
+                    Ok(matched)
+                },
+                warm_runs,
+                s3_cfg,
+                &mut expected_matches,
+                query_rows,
+            )
+            .await?;
+        }
+
+        if let (Some(bytes), Some(local_file)) = (&strata_bytes, &strata_file_local) {
+            let use_contains = if qname == "JB_Q4_text_like" {
+                let probe = StrataScanRequest {
+                    projection: vec![0, 7],
+                    predicate: Some(StrataPred::Contains(
+                        7,
+                        data.like_needle.as_bytes().to_vec(),
+                    )),
+                    row_ranges: None,
+                    limit: None,
+                    kind: ScanKind::Sparse,
+                    views: false,
+                    top: None,
+                    row_filter: None,
+                };
+                local_file.scan(&probe).await.is_ok()
+            } else {
+                false
+            };
+            let top_did = data.top_did.clone();
+            let like_needle = data.like_needle.clone();
+            run_strata_bench_query(
+                wl,
+                qname,
+                bytes,
+                local_file,
+                move |f| {
+                    let top_did = top_did.clone();
+                    let like_needle = like_needle.clone();
+                    async move {
+                        let req = match qname {
+                            "JB_Q1_posts" => StrataScanRequest {
+                                projection: vec![4, 3],
+                                predicate: Some(StrataPred::And(vec![
+                                    StrataPred::Cmp(
+                                        4,
+                                        CmpOp::Eq,
+                                        Lit::Utf8("app.bsky.feed.post".to_owned()),
+                                    ),
+                                    StrataPred::Cmp(3, CmpOp::Eq, Lit::Utf8("create".to_owned())),
+                                ])),
+                                row_ranges: None,
+                                limit: None,
+                                kind: ScanKind::Scan,
+                                views: false,
+                                top: None,
+                                row_filter: None,
+                            },
+                            "JB_Q2_did_pt" => StrataScanRequest {
+                                projection: vec![0, 1, 4, 7],
+                                predicate: Some(StrataPred::Cmp(
+                                    0,
+                                    CmpOp::Eq,
+                                    Lit::Utf8(top_did.clone()),
+                                )),
+                                row_ranges: None,
+                                limit: None,
+                                kind: ScanKind::Point,
+                                views: false,
+                                top: None,
+                                row_filter: None,
+                            },
+                            "JB_Q3_map_type" => StrataScanRequest {
+                                projection: vec![0, 1, 9],
+                                predicate: Some(StrataPred::MapKeyEq(
+                                    9,
+                                    "$type".to_owned(),
+                                    Lit::Utf8("app.bsky.feed.post".to_owned()),
+                                )),
+                                row_ranges: None,
+                                limit: None,
+                                kind: ScanKind::Sparse,
+                                views: false,
+                                top: None,
+                                row_filter: None,
+                            },
+                            "JB_Q4_text_like" => StrataScanRequest {
+                                projection: vec![0, 7],
+                                predicate: use_contains.then(|| {
+                                    StrataPred::Contains(7, like_needle.as_bytes().to_vec())
+                                }),
+                                row_ranges: None,
+                                limit: None,
+                                kind: if use_contains {
+                                    ScanKind::Sparse
+                                } else {
+                                    ScanKind::Scan
+                                },
+                                views: false,
+                                top: None,
+                                row_filter: None,
+                            },
+                            "JB_Q5_did_full" => StrataScanRequest {
+                                projection: (0..10).collect(),
+                                predicate: Some(StrataPred::Cmp(
+                                    0,
+                                    CmpOp::Eq,
+                                    Lit::Utf8(top_did.clone()),
+                                )),
+                                row_ranges: None,
+                                limit: None,
+                                kind: ScanKind::Point,
+                                views: false,
+                                top: None,
+                                row_filter: None,
+                            },
+                            _ => return Ok(0),
+                        };
+                        let batches = f.scan(&req).await?;
+                        let mut matched = 0usize;
+                        if qname == "JB_Q4_text_like" && !use_contains {
+                            for b in &batches {
+                                if let Some(t) = b.column_by_name("text") {
+                                    for i in 0..b.num_rows() {
+                                        if let Some(s) = extract_str_at(t.as_ref(), i)
+                                            && s.contains(like_needle.as_str())
+                                        {
+                                            matched += 1;
+                                        }
+                                    }
+                                }
+                            }
+                        } else {
+                            for b in &batches {
+                                matched += b.num_rows();
+                            }
+                        }
+                        Ok(matched)
+                    }
+                },
+                warm_runs,
+                s3_cfg,
+                &mut expected_matches,
+                query_rows,
+            )
+            .await?;
+        }
+
+        let mut statam_req = match qname {
+            "JB_Q1_posts" => ScanRequest {
+                projection: Some(vec![4, 3]),
+                predicates: vec![
+                    StatamPred::new(
+                        "collection",
+                        ZonePred::Eq(ZoneValue::Bytes(b"app.bsky.feed.post".to_vec())),
+                    ),
+                    StatamPred::new(
+                        "operation",
+                        ZonePred::Eq(ZoneValue::Bytes(b"create".to_vec())),
+                    ),
+                ],
+                ..ScanRequest::default()
+            },
+            "JB_Q2_did_pt" => ScanRequest {
+                projection: Some(vec![0, 1, 4, 7]),
+                id_lookups: vec![IdLookup::eq("did", data.top_did.as_bytes().to_vec())],
+                coalesce_mode: CoalesceMode::Point,
+                ..ScanRequest::default()
+            },
+            "JB_Q3_map_type" => ScanRequest {
+                projection: Some(vec![0, 1]),
+                map_keys: vec![("attrs".to_owned(), "$type".to_owned())],
+                predicates: vec![StatamPred::map_key(
+                    "attrs",
+                    "$type",
+                    ZonePred::Eq(ZoneValue::Bytes(b"app.bsky.feed.post".to_vec())),
+                )],
+                ..ScanRequest::default()
+            },
+            "JB_Q4_text_like" => ScanRequest {
+                projection: Some(vec![0, 7]),
+                substrings: vec![SubstringQuery::like("text", data.like_needle.as_str())],
+                ..ScanRequest::default()
+            },
+            "JB_Q5_did_full" => ScanRequest {
+                projection: None,
+                id_lookups: vec![IdLookup::eq("did", data.top_did.as_bytes().to_vec())],
+                coalesce_mode: CoalesceMode::Point,
+                ..ScanRequest::default()
+            },
+            _ => ScanRequest::default(),
+        };
+        statam_req.read_threads = read_threads;
+        run_statam_bench_query(
+            wl,
+            qname,
+            &statam_l0,
+            &statam_l1,
+            statam_l1_pack.as_ref(),
+            &statam_req,
+            warm_runs,
+            s3_cfg,
+            &mut expected_matches,
+            query_rows,
+        )?;
+    }
+
+    Ok(())
+}
+
+// ============================================================================
+// Suite E: WildChat-1M (`wildchat_00000.parquet`, 15k multilingual turns + Unicode ILIKE)
+// ============================================================================
+
+struct WildChatData {
+    arrow_batch: RecordBatch,
+    cetra_batch: Batch,
+    top_model: String,
+    top_non_en_lang: String,
+    multi_turn_tid: String,
+    unicode_needle: String,
+    unicode_needle_hits: usize,
+}
+
+fn load_wildchat_15k(path: &Path) -> BenchResult<WildChatData> {
+    let file = File::open(path)?;
+    let reader = ParquetRecordBatchReaderBuilder::try_new(file)?
+        .with_batch_size(4_096)
+        .build()?;
+
+    let max_rows = 15_000usize;
+    let mut trace_ids = Vec::with_capacity(max_rows);
+    let mut start_times = Vec::with_capacity(max_rows);
+    let mut models = Vec::with_capacity(max_rows);
+    let mut languages = Vec::with_capacity(max_rows);
+    let mut countries = Vec::with_capacity(max_rows);
+    let mut turn_idxs = Vec::with_capacity(max_rows);
+    let mut inputs = Vec::with_capacity(max_rows);
+    let mut outputs = Vec::with_capacity(max_rows);
+
+    for batch_res in reader {
+        let batch = batch_res?;
+        let hash_col = batch
+            .column_by_name("conversation_hash")
+            .ok_or("wildchat missing conversation_hash")?;
+        let model_col = batch
+            .column_by_name("model")
+            .ok_or("wildchat missing model")?;
+        let ts_col = batch
+            .column_by_name("timestamp")
+            .ok_or("wildchat missing timestamp")?;
+        let conv_col = batch
+            .column_by_name("conversation")
+            .ok_or("wildchat missing conversation")?;
+        let row_lang_col = batch.column_by_name("language");
+        let row_country_col = batch.column_by_name("country");
+
+        let (offsets, turns_struct) = extract_list_parts(conv_col.as_ref())?;
+        let turn_role_col = turns_struct.column_by_name("role");
+        let turn_content_col = turns_struct.column_by_name("content");
+        let turn_lang_col = turns_struct.column_by_name("language");
+        let turn_country_col = turns_struct.column_by_name("country");
+
+        for r in 0..batch.num_rows() {
+            if trace_ids.len() >= max_rows {
+                break;
+            }
+            if conv_col.is_null(r) {
+                continue;
+            }
+            let tid = extract_str_at(hash_col.as_ref(), r).unwrap_or("");
+            if tid.is_empty() {
+                continue;
+            }
+            let model = extract_str_at(model_col.as_ref(), r).unwrap_or("");
+            let ts_ns = extract_ts_ns_at(ts_col.as_ref(), r);
+            let row_lang = row_lang_col
+                .and_then(|c| extract_str_at(c.as_ref(), r))
+                .unwrap_or("");
+            let row_country = row_country_col
+                .and_then(|c| extract_str_at(c.as_ref(), r))
+                .unwrap_or("");
+
+            let s = offsets[r];
+            let e = offsets[r + 1];
+            let mut prefix_turns: Vec<Value> = Vec::new();
+            for (t_idx, elem_idx) in (s..e).enumerate() {
+                let role = turn_role_col
+                    .and_then(|c| extract_str_at(c.as_ref(), elem_idx))
+                    .unwrap_or("");
+                let content = turn_content_col
+                    .and_then(|c| extract_str_at(c.as_ref(), elem_idx))
+                    .unwrap_or("");
+                let t_lang = turn_lang_col
+                    .and_then(|c| extract_str_at(c.as_ref(), elem_idx))
+                    .filter(|x| !x.is_empty())
+                    .unwrap_or(row_lang);
+                let t_country = turn_country_col
+                    .and_then(|c| extract_str_at(c.as_ref(), elem_idx))
+                    .filter(|x| !x.is_empty())
+                    .unwrap_or(row_country);
+
+                if role == "assistant" {
+                    let input_json = serde_json::to_string(&prefix_turns)?;
+                    trace_ids.push(tid.to_owned());
+                    start_times.push(ts_ns);
+                    models.push(model.to_owned());
+                    languages.push(t_lang.to_owned());
+                    countries.push(t_country.to_owned());
+                    turn_idxs.push(t_idx as i64);
+                    inputs.push(input_json);
+                    outputs.push(content.to_owned());
+                    if trace_ids.len() >= max_rows {
+                        break;
+                    }
+                }
+                prefix_turns.push(serde_json::json!({
+                    "role": role,
+                    "content": content,
+                }));
+            }
+        }
+        if trace_ids.len() >= max_rows {
+            break;
+        }
+    }
+
+    if trace_ids.is_empty() {
+        return Err(format!("wildchat '{}' produced 0 assistant turns", path.display()).into());
+    }
+
+    let top_model = pick_frequent_string(&models, None);
+    let non_en = pick_frequent_string(&languages, Some("English"));
+    let top_non_en_lang = if non_en.is_empty() {
+        pick_frequent_string(&languages, None)
+    } else {
+        non_en
+    };
+
+    let mut tid_counts: BTreeMap<&str, usize> = BTreeMap::new();
+    for tid in &trace_ids {
+        *tid_counts.entry(tid.as_str()).or_insert(0) += 1;
+    }
+    let multi_turn_tid = tid_counts
+        .into_iter()
+        .filter(|&(_, c)| c >= 2)
+        .max_by(|(k1, c1), (k2, c2)| c1.cmp(c2).then_with(|| k2.cmp(k1)))
+        .map_or_else(|| trace_ids[0].clone(), |(k, _)| k.to_owned());
+
+    let (unicode_needle, unicode_needle_hits) = pick_unicode_ilike_needle(&outputs);
+
+    let mut tid_b = StringBuilder::with_capacity(trace_ids.len(), trace_ids.len() * 32);
+    let mut model_b = StringBuilder::with_capacity(models.len(), models.len() * 16);
+    let mut lang_b = StringBuilder::with_capacity(languages.len(), languages.len() * 10);
+    let mut country_b = StringBuilder::with_capacity(countries.len(), countries.len() * 16);
+    let mut input_b = StringBuilder::with_capacity(inputs.len(), inputs.len() * 256);
+    let mut output_b = StringBuilder::with_capacity(outputs.len(), outputs.len() * 256);
+    for i in 0..trace_ids.len() {
+        tid_b.append_value(&trace_ids[i]);
+        model_b.append_value(&models[i]);
+        lang_b.append_value(&languages[i]);
+        country_b.append_value(&countries[i]);
+        input_b.append_value(&inputs[i]);
+        output_b.append_value(&outputs[i]);
+    }
+    let ts_arr = TimestampNanosecondArray::from(start_times.clone()).with_timezone("UTC");
+
+    let arrow_schema: SchemaRef = Arc::new(Schema::new(vec![
+        Field::new("trace_id", DataType::Utf8, false),
+        Field::new(
+            "start_time",
+            DataType::Timestamp(TimeUnit::Nanosecond, Some("UTC".into())),
+            false,
+        ),
+        Field::new("model", DataType::Utf8, false),
+        Field::new("language", DataType::Utf8, false),
+        Field::new("country", DataType::Utf8, false),
+        Field::new("turn_idx", DataType::Int64, false),
+        Field::new("input", DataType::Utf8, false),
+        Field::new("output", DataType::Utf8, false),
+    ]));
+    let arrow_batch = RecordBatch::try_new(
+        arrow_schema,
+        vec![
+            Arc::new(tid_b.finish()),
+            Arc::new(ts_arr),
+            Arc::new(model_b.finish()),
+            Arc::new(lang_b.finish()),
+            Arc::new(country_b.finish()),
+            Arc::new(Int64Array::from(turn_idxs.clone())),
+            Arc::new(input_b.finish()),
+            Arc::new(output_b.finish()),
+        ],
+    )?;
+
+    let col_schema = ColSchema::try_new_arc(vec![
+        ColField::new("trace_id", ColType::Utf8, false),
+        ColField::new("start_time", ColType::TimestampNs { utc: true }, false),
+        ColField::new("model", ColType::Utf8, false),
+        ColField::new("language", ColType::Utf8, false),
+        ColField::new("country", ColType::Utf8, false),
+        ColField::new("turn_idx", ColType::I64, false),
+        ColField::new("input", ColType::Utf8, false),
+        ColField::new("output", ColType::Utf8, false),
+    ])?;
+    let cetra_batch = Batch::try_new_all(
+        col_schema,
+        vec![
+            col_utf8_from_strings(&trace_ids)?,
+            col_ts_ns_from_slice(&start_times)?,
+            col_utf8_from_strings(&models)?,
+            col_utf8_from_strings(&languages)?,
+            col_utf8_from_strings(&countries)?,
+            col_i64_from_slice(&turn_idxs)?,
+            col_utf8_from_strings(&inputs)?,
+            col_utf8_from_strings(&outputs)?,
+        ],
+        trace_ids.len(),
+    )?;
+
+    Ok(WildChatData {
+        arrow_batch,
+        cetra_batch,
+        top_model,
+        top_non_en_lang,
+        multi_turn_tid,
+        unicode_needle,
+        unicode_needle_hits,
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn run_wildchat_suite(
+    wildchat_path: &Path,
+    enabled: &[&str],
+    warm_runs: usize,
+    write_threads: usize,
+    read_threads: usize,
+    vortex_session: &VortexSession,
+    write_rows: &mut Vec<WriteBenchRow>,
+    query_rows: &mut Vec<QueryBenchRow>,
+    notes: &mut Vec<String>,
+) -> BenchResult<()> {
+    if !wildchat_path.exists() {
+        notes.push(format!(
+            "Suite E (`wildchat`): SKIPPED (`{}` not found; pass `--wildchat-parquet` or set `STATAM_WILDCHAT_PARQUET`)",
+            wildchat_path.display()
+        ));
+        return Ok(());
+    }
+
+    let data = load_wildchat_15k(wildchat_path)?;
+    if data.unicode_needle_hits == 0 {
+        return Err(
+            "Suite E (`wildchat`): failed to discover a matching Unicode ILIKE needle".into(),
+        );
+    }
+    let raw_bytes = data.arrow_batch.get_array_memory_size() as u64;
+    let wl = "wildchat_15k";
+    let unicode_lower = data.unicode_needle.to_lowercase();
+    let absent_needle = "NEVER_IN_WILDCHAT_XYZ_999";
+
+    notes.push(format!(
+        "Suite E (`wildchat`): {} rows x {} cols, `model={}`, `language={}`, `trace_id={}`, `WC_Q4_unicode_ilike=\"{}\" ({} hits)`",
+        data.arrow_batch.num_rows(),
+        data.arrow_batch.num_columns(),
+        data.top_model,
+        data.top_non_en_lang,
+        data.multi_turn_tid,
+        data.unicode_needle,
+        data.unicode_needle_hits
+    ));
+
+    let bloom_names = ["trace_id", "model", "language"];
+    let pq_default = if enabled.contains(&"pq_default") {
+        let (b, ms) = write_generic_parquet(
+            ParquetVariant::Default,
+            &data.arrow_batch,
+            &bloom_names,
+            &[],
+            1_000_000,
+        )?;
+        write_rows.push(mk_write_row(
+            wl,
+            "pq_default",
+            raw_bytes,
+            b.len() as u64,
+            ms,
+        ));
+        Some(b)
+    } else {
+        None
+    };
+    let pq_tuned = if enabled.contains(&"pq_tuned") {
+        let (b, ms) = write_generic_parquet(
+            ParquetVariant::Tuned,
+            &data.arrow_batch,
+            &bloom_names,
+            &[],
+            32_768,
+        )?;
+        write_rows.push(mk_write_row(wl, "pq_tuned", raw_bytes, b.len() as u64, ms));
+        Some(b)
+    } else {
+        None
+    };
+    let pq_cetra = if enabled.contains(&"pq_cetra") {
+        let (b, ms) = write_generic_parquet(
+            ParquetVariant::Cetra,
+            &data.arrow_batch,
+            &bloom_names,
+            &[],
+            100_000,
+        )?;
+        write_rows.push(mk_write_row(wl, "pq_cetra", raw_bytes, b.len() as u64, ms));
+        Some(b)
+    } else {
+        None
+    };
+    let vortex_bytes = if enabled.contains(&"vortex") {
+        match write_vortex_files(vortex_session, &[data.arrow_batch.clone()]).await {
+            Ok((files, ms)) => {
+                let b = files.into_iter().next().ok_or("missing vortex output")?;
+                write_rows.push(mk_write_row(wl, "vortex", raw_bytes, b.len() as u64, ms));
+                Some(b)
+            }
+            Err(e) => {
+                notes.push(format!("Suite E (`wildchat`): `vortex` = N/A ({e})"));
+                None
+            }
+        }
+    } else {
+        None
+    };
+    let lance_bytes = if enabled.contains(&"lance") {
+        try_write_lance(
+            wl,
+            "Suite E (`wildchat`)",
+            &data.arrow_batch,
+            raw_bytes,
+            write_rows,
+            notes,
+        )
+        .await
+    } else {
+        None
+    };
+    let strata_bytes = if enabled.contains(&"strata") {
+        match write_generic_strata(&data.arrow_batch, &[], &bloom_names) {
+            Ok((b, ms)) => {
+                write_rows.push(mk_write_row(wl, "strata", raw_bytes, b.len() as u64, ms));
+                Some(b)
+            }
+            Err(e) => {
+                notes.push(format!("Suite E (`wildchat`): `strata` = N/A ({e})"));
+                None
+            }
+        }
+    } else {
+        None
+    };
+    let statam_l0 = if enabled.contains(&"statam_l0") {
+        let (b, _, ms) = write_generic_statam(
+            &data.cetra_batch,
+            WriteProfile::L0Fast,
+            &[],
+            &bloom_names,
+            Some("trace_id"),
+            &[],
+            &["input", "output"],
+            false,
+            write_threads,
+        )?;
+        write_rows.push(mk_write_row(wl, "statam_l0", raw_bytes, b.len() as u64, ms));
+        Some(b)
+    } else {
+        None
+    };
+    let (statam_l1, statam_l1_pack) = if enabled.contains(&"statam_l1") {
+        let (b, pack, ms) = write_generic_statam(
+            &data.cetra_batch,
+            WriteProfile::L1Compact,
+            &[],
+            &bloom_names,
+            Some("trace_id"),
+            &[],
+            &["input", "output"],
+            true,
+            write_threads,
+        )?;
+        let stored = b.len() as u64 + pack.as_ref().map_or(0, |p| p.len() as u64);
+        write_rows.push(mk_write_row(wl, "statam_l1", raw_bytes, stored, ms));
+        (Some(b), pack)
+    } else {
+        (None, None)
+    };
+
+    let s3_cfg = SimulatedS3Config::default();
+    let vortex_file_local = match &vortex_bytes {
+        Some(b) => Some(open_vortex_local(vortex_session, &[b.clone()]).await?),
+        None => None,
+    };
+    let lance_file_local = match &lance_bytes {
+        Some(b) => Some(open_lance_local(b).await?),
+        None => None,
+    };
+    let strata_file_local = match &strata_bytes {
+        Some(b) => Some(open_single_strata_local(b).await?),
+        None => None,
+    };
+
+    let queries = [
+        "WC_Q1_model_cnt",
+        "WC_Q2_lang_filter",
+        "WC_Q3_trace_full",
+        "WC_Q4_unicode_ilike",
+        "WC_Q5_input_absent",
+    ];
+    for &qname in &queries {
+        let mut expected_matches: Option<usize> = None;
+
+        let (pq_proj, pq_preds): (Vec<usize>, Vec<GenPqPred>) = match qname {
+            "WC_Q1_model_cnt" => (
+                vec![2],
+                vec![GenPqPred::Utf8Eq {
+                    col: "model".to_owned(),
+                    val: data.top_model.clone(),
+                }],
+            ),
+            "WC_Q2_lang_filter" => (
+                vec![0, 2, 3],
+                vec![GenPqPred::Utf8Eq {
+                    col: "language".to_owned(),
+                    val: data.top_non_en_lang.clone(),
+                }],
+            ),
+            "WC_Q3_trace_full" => (
+                (0..8).collect(),
+                vec![GenPqPred::Utf8Eq {
+                    col: "trace_id".to_owned(),
+                    val: data.multi_turn_tid.clone(),
+                }],
+            ),
+            "WC_Q4_unicode_ilike" => (
+                vec![0, 7],
+                vec![GenPqPred::Utf8Ilike {
+                    col: "output".to_owned(),
+                    needle_lower: unicode_lower.clone(),
+                }],
+            ),
+            "WC_Q5_input_absent" => (
+                vec![0, 6],
+                vec![GenPqPred::Utf8Like {
+                    col: "input".to_owned(),
+                    needle: absent_needle.to_owned(),
+                }],
+            ),
+            _ => (vec![], vec![]),
+        };
+        run_parquet_bench_query(
+            wl,
+            qname,
+            &pq_default,
+            &pq_tuned,
+            &pq_cetra,
+            &pq_proj,
+            &pq_preds,
+            warm_runs,
+            s3_cfg,
+            &mut expected_matches,
+            query_rows,
+        )?;
+
+        if let (Some(bytes), Some(local_files)) = (&vortex_bytes, &vortex_file_local) {
+            let (proj, filt, post): (Expression, Option<Expression>, VortexPostFilter<'_>) =
+                match qname {
+                    "WC_Q1_model_cnt" => (
+                        select(["model"], root()),
+                        Some(eq(col("model"), lit(data.top_model.as_str()))),
+                        VortexPostFilter::None,
+                    ),
+                    "WC_Q2_lang_filter" => (
+                        select(["trace_id", "model", "language"], root()),
+                        Some(eq(col("language"), lit(data.top_non_en_lang.as_str()))),
+                        VortexPostFilter::None,
+                    ),
+                    "WC_Q3_trace_full" => (
+                        root(),
+                        Some(eq(col("trace_id"), lit(data.multi_turn_tid.as_str()))),
+                        VortexPostFilter::None,
+                    ),
+                    "WC_Q4_unicode_ilike" => (
+                        select(["trace_id", "output"], root()),
+                        None,
+                        VortexPostFilter::Ilike {
+                            col: "output",
+                            needle_lower: unicode_lower.as_str(),
+                        },
+                    ),
+                    "WC_Q5_input_absent" => (
+                        select(["trace_id", "input"], root()),
+                        None,
+                        VortexPostFilter::Like {
+                            col: "input",
+                            needle: absent_needle,
+                        },
+                    ),
+                    _ => (root(), None, VortexPostFilter::None),
+                };
+            run_vortex_bench_query(
+                wl,
+                qname,
+                vortex_session,
+                bytes,
+                &local_files[0],
+                &proj,
+                filt.as_ref(),
+                post,
+                warm_runs,
+                s3_cfg,
+                &mut expected_matches,
+                query_rows,
+            )
+            .await?;
+        }
+
+        if let (Some(bytes), Some(local_reader)) = (&lance_bytes, &lance_file_local) {
+            let top_model = data.top_model.as_str();
+            let top_lang = data.top_non_en_lang.as_str();
+            let tid = data.multi_turn_tid.as_str();
+            let uni_lower = unicode_lower.as_str();
+            run_lance_bench_query(
+                wl,
+                qname,
+                bytes,
+                local_reader,
+                async |r: &LanceFileReader| {
+                    let proj_cols: Option<&[&str]> = match qname {
+                        "WC_Q1_model_cnt" => Some(&["model"]),
+                        "WC_Q2_lang_filter" => Some(&["trace_id", "model", "language"]),
+                        "WC_Q3_trace_full" => None,
+                        "WC_Q4_unicode_ilike" => Some(&["trace_id", "output"]),
+                        "WC_Q5_input_absent" => Some(&["trace_id", "input"]),
+                        _ => return Ok(0),
+                    };
+                    let batches = lance_scan_projected(r, proj_cols).await?;
+                    let mut matched = 0usize;
+                    for b in &batches {
+                        match qname {
+                            "WC_Q1_model_cnt" => {
+                                if let Some(m) = b.column_by_name("model") {
+                                    for i in 0..b.num_rows() {
+                                        if extract_str_at(m.as_ref(), i) == Some(top_model) {
+                                            matched += 1;
+                                        }
+                                    }
+                                }
+                            }
+                            "WC_Q2_lang_filter" => {
+                                if let Some(l) = b.column_by_name("language") {
+                                    for i in 0..b.num_rows() {
+                                        if extract_str_at(l.as_ref(), i) == Some(top_lang) {
+                                            matched += 1;
+                                        }
+                                    }
+                                }
+                            }
+                            "WC_Q3_trace_full" => {
+                                if let Some(t) = b.column_by_name("trace_id") {
+                                    for i in 0..b.num_rows() {
+                                        if extract_str_at(t.as_ref(), i) == Some(tid) {
+                                            matched += 1;
+                                        }
+                                    }
+                                }
+                            }
+                            "WC_Q4_unicode_ilike" => {
+                                if let Some(o) = b.column_by_name("output") {
+                                    for i in 0..b.num_rows() {
+                                        if let Some(s) = extract_str_at(o.as_ref(), i)
+                                            && s.to_lowercase().contains(uni_lower)
+                                        {
+                                            matched += 1;
+                                        }
+                                    }
+                                }
+                            }
+                            "WC_Q5_input_absent" => {
+                                if let Some(inp) = b.column_by_name("input") {
+                                    for i in 0..b.num_rows() {
+                                        if let Some(s) = extract_str_at(inp.as_ref(), i)
+                                            && s.contains(absent_needle)
+                                        {
+                                            matched += 1;
+                                        }
+                                    }
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
+                    Ok(matched)
+                },
+                warm_runs,
+                s3_cfg,
+                &mut expected_matches,
+                query_rows,
+            )
+            .await?;
+        }
+
+        if let (Some(bytes), Some(local_file)) = (&strata_bytes, &strata_file_local) {
+            let use_contains = if qname == "WC_Q5_input_absent" {
+                let probe = StrataScanRequest {
+                    projection: vec![0, 6],
+                    predicate: Some(StrataPred::Contains(6, absent_needle.as_bytes().to_vec())),
+                    row_ranges: None,
+                    limit: None,
+                    kind: ScanKind::Sparse,
+                    views: false,
+                    top: None,
+                    row_filter: None,
+                };
+                local_file.scan(&probe).await.is_ok()
+            } else {
+                false
+            };
+            let top_model = data.top_model.clone();
+            let top_lang = data.top_non_en_lang.clone();
+            let tid = data.multi_turn_tid.clone();
+            let uni_lower = unicode_lower.clone();
+            run_strata_bench_query(
+                wl,
+                qname,
+                bytes,
+                local_file,
+                move |f| {
+                    let top_model = top_model.clone();
+                    let top_lang = top_lang.clone();
+                    let tid = tid.clone();
+                    let uni_lower = uni_lower.clone();
+                    async move {
+                        let req = match qname {
+                            "WC_Q1_model_cnt" => StrataScanRequest {
+                                projection: vec![2],
+                                predicate: Some(StrataPred::Cmp(
+                                    2,
+                                    CmpOp::Eq,
+                                    Lit::Utf8(top_model.clone()),
+                                )),
+                                row_ranges: None,
+                                limit: None,
+                                kind: ScanKind::Scan,
+                                views: false,
+                                top: None,
+                                row_filter: None,
+                            },
+                            "WC_Q2_lang_filter" => StrataScanRequest {
+                                projection: vec![0, 2, 3],
+                                predicate: Some(StrataPred::Cmp(
+                                    3,
+                                    CmpOp::Eq,
+                                    Lit::Utf8(top_lang.clone()),
+                                )),
+                                row_ranges: None,
+                                limit: None,
+                                kind: ScanKind::Scan,
+                                views: false,
+                                top: None,
+                                row_filter: None,
+                            },
+                            "WC_Q3_trace_full" => StrataScanRequest {
+                                projection: (0..8).collect(),
+                                predicate: Some(StrataPred::Cmp(
+                                    0,
+                                    CmpOp::Eq,
+                                    Lit::Utf8(tid.clone()),
+                                )),
+                                row_ranges: None,
+                                limit: None,
+                                kind: ScanKind::Point,
+                                views: false,
+                                top: None,
+                                row_filter: None,
+                            },
+                            "WC_Q4_unicode_ilike" => StrataScanRequest {
+                                projection: vec![0, 7],
+                                predicate: None,
+                                row_ranges: None,
+                                limit: None,
+                                kind: ScanKind::Scan,
+                                views: false,
+                                top: None,
+                                row_filter: None,
+                            },
+                            "WC_Q5_input_absent" => StrataScanRequest {
+                                projection: vec![0, 6],
+                                predicate: use_contains.then(|| {
+                                    StrataPred::Contains(6, absent_needle.as_bytes().to_vec())
+                                }),
+                                row_ranges: None,
+                                limit: None,
+                                kind: if use_contains {
+                                    ScanKind::Sparse
+                                } else {
+                                    ScanKind::Scan
+                                },
+                                views: false,
+                                top: None,
+                                row_filter: None,
+                            },
+                            _ => return Ok(0),
+                        };
+                        let batches = f.scan(&req).await?;
+                        let mut matched = 0usize;
+                        match qname {
+                            "WC_Q4_unicode_ilike" => {
+                                for b in &batches {
+                                    if let Some(o) = b.column_by_name("output") {
+                                        for i in 0..b.num_rows() {
+                                            if let Some(s) = extract_str_at(o.as_ref(), i)
+                                                && s.to_lowercase().contains(uni_lower.as_str())
+                                            {
+                                                matched += 1;
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                            "WC_Q5_input_absent" if !use_contains => {
+                                for b in &batches {
+                                    if let Some(inp) = b.column_by_name("input") {
+                                        for i in 0..b.num_rows() {
+                                            if let Some(s) = extract_str_at(inp.as_ref(), i)
+                                                && s.contains(absent_needle)
+                                            {
+                                                matched += 1;
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                            _ => {
+                                for b in &batches {
+                                    matched += b.num_rows();
+                                }
+                            }
+                        }
+                        Ok(matched)
+                    }
+                },
+                warm_runs,
+                s3_cfg,
+                &mut expected_matches,
+                query_rows,
+            )
+            .await?;
+        }
+
+        let mut statam_req = match qname {
+            "WC_Q1_model_cnt" => ScanRequest {
+                projection: Some(vec![2]),
+                predicates: vec![StatamPred::new(
+                    "model",
+                    ZonePred::Eq(ZoneValue::Bytes(data.top_model.as_bytes().to_vec())),
+                )],
+                ..ScanRequest::default()
+            },
+            "WC_Q2_lang_filter" => ScanRequest {
+                projection: Some(vec![0, 2, 3]),
+                predicates: vec![StatamPred::new(
+                    "language",
+                    ZonePred::Eq(ZoneValue::Bytes(data.top_non_en_lang.as_bytes().to_vec())),
+                )],
+                ..ScanRequest::default()
+            },
+            "WC_Q3_trace_full" => ScanRequest {
+                projection: None,
+                id_lookups: vec![IdLookup::eq(
+                    "trace_id",
+                    data.multi_turn_tid.as_bytes().to_vec(),
+                )],
+                coalesce_mode: CoalesceMode::Point,
+                ..ScanRequest::default()
+            },
+            "WC_Q4_unicode_ilike" => ScanRequest {
+                projection: Some(vec![0, 7]),
+                substrings: vec![SubstringQuery::ilike(
+                    "output",
+                    data.unicode_needle.as_str(),
+                )],
+                ..ScanRequest::default()
+            },
+            "WC_Q5_input_absent" => ScanRequest {
+                projection: Some(vec![0, 6]),
+                substrings: vec![SubstringQuery::like("input", absent_needle)],
+                ..ScanRequest::default()
+            },
+            _ => ScanRequest::default(),
+        };
+        statam_req.read_threads = read_threads;
+        run_statam_bench_query(
+            wl,
+            qname,
+            &statam_l0,
+            &statam_l1,
+            statam_l1_pack.as_ref(),
+            &statam_req,
+            warm_runs,
+            s3_cfg,
+            &mut expected_matches,
+            query_rows,
+        )?;
+    }
+
+    Ok(())
+}
+
+// ============================================================================
+// Suite F: Hermes Function Calling (`hermes_fc.parquet`, cross-trace dedup)
+// ============================================================================
+
+struct HermesData {
+    arrow_batch: RecordBatch,
+    cetra_batch: Batch,
+    top_category: String,
+    sample_id: String,
+    tool_needle: String,
+}
+
+fn load_hermes_all(path: &Path) -> BenchResult<HermesData> {
+    let file = File::open(path)?;
+    let reader = ParquetRecordBatchReaderBuilder::try_new(file)?
+        .with_batch_size(4_096)
+        .build()?;
+
+    let mut ids = Vec::new();
+    let mut categories = Vec::new();
+    let mut subcategories = Vec::new();
+    let mut tasks = Vec::new();
+    let mut tool_defs = Vec::new();
+    let mut inputs = Vec::new();
+    let mut outputs = Vec::new();
+
+    for batch_res in reader {
+        let batch = batch_res?;
+        let id_col = batch.column_by_name("id").ok_or("hermes missing id")?;
+        let conv_col = batch
+            .column_by_name("conversations")
+            .ok_or("hermes missing conversations")?;
+        let tools_col = batch
+            .column_by_name("tools")
+            .ok_or("hermes missing tools")?;
+        let cat_col = batch
+            .column_by_name("category")
+            .ok_or("hermes missing category")?;
+        let subcat_col = batch
+            .column_by_name("subcategory")
+            .ok_or("hermes missing subcategory")?;
+        let task_col = batch.column_by_name("task").ok_or("hermes missing task")?;
+
+        let (offsets, turns_struct) = extract_list_parts(conv_col.as_ref())?;
+        let from_col = turns_struct.column_by_name("from");
+        let val_col = turns_struct.column_by_name("value");
+
+        for r in 0..batch.num_rows() {
+            let id = extract_str_at(id_col.as_ref(), r).unwrap_or("").to_owned();
+            let category = extract_str_at(cat_col.as_ref(), r).unwrap_or("").to_owned();
+            let subcategory = extract_str_at(subcat_col.as_ref(), r)
+                .unwrap_or("")
+                .to_owned();
+            let task = extract_str_at(task_col.as_ref(), r)
+                .unwrap_or("")
+                .to_owned();
+            let tools = extract_str_at(tools_col.as_ref(), r)
+                .unwrap_or("")
+                .to_owned();
+
+            let mut turns: Vec<(&str, &str)> = Vec::new();
+            if !conv_col.is_null(r) {
+                let s = offsets[r];
+                let e = offsets[r + 1];
+                for elem_idx in s..e {
+                    let from = from_col
+                        .and_then(|c| extract_str_at(c.as_ref(), elem_idx))
+                        .unwrap_or("");
+                    let val = val_col
+                        .and_then(|c| extract_str_at(c.as_ref(), elem_idx))
+                        .unwrap_or("");
+                    turns.push((from, val));
+                }
+            }
+
+            let out_idx = turns
+                .iter()
+                .rposition(|&(from, _)| from == "gpt" || from == "assistant")
+                .or_else(|| (!turns.is_empty()).then_some(turns.len() - 1));
+            let (input_json, output_str) = match out_idx {
+                Some(idx) => {
+                    let prefix: Vec<Value> = turns[..idx]
+                        .iter()
+                        .map(|&(from, val)| serde_json::json!({"from": from, "value": val}))
+                        .collect();
+                    (serde_json::to_string(&prefix)?, turns[idx].1.to_owned())
+                }
+                None => ("[]".to_owned(), String::new()),
+            };
+
+            ids.push(id);
+            categories.push(category);
+            subcategories.push(subcategory);
+            tasks.push(task);
+            tool_defs.push(tools);
+            inputs.push(input_json);
+            outputs.push(output_str);
+        }
+    }
+
+    if ids.is_empty() {
+        return Err(format!("hermes '{}' contained 0 rows", path.display()).into());
+    }
+
+    let top_category = pick_frequent_string(&categories, None);
+    let sample_id = ids[ids.len() / 2].clone();
+    let tool_needle = pick_ascii_needle_in_range(&tool_defs, None, 5, 500);
+
+    let mut id_b = StringBuilder::with_capacity(ids.len(), ids.len() * 24);
+    let mut cat_b = StringBuilder::with_capacity(categories.len(), categories.len() * 16);
+    let mut subcat_b = StringBuilder::with_capacity(subcategories.len(), subcategories.len() * 16);
+    let mut task_b = StringBuilder::with_capacity(tasks.len(), tasks.len() * 16);
+    let mut tools_b = StringBuilder::with_capacity(tool_defs.len(), tool_defs.len() * 256);
+    let mut input_b = StringBuilder::with_capacity(inputs.len(), inputs.len() * 256);
+    let mut output_b = StringBuilder::with_capacity(outputs.len(), outputs.len() * 128);
+    for i in 0..ids.len() {
+        id_b.append_value(&ids[i]);
+        cat_b.append_value(&categories[i]);
+        subcat_b.append_value(&subcategories[i]);
+        task_b.append_value(&tasks[i]);
+        tools_b.append_value(&tool_defs[i]);
+        input_b.append_value(&inputs[i]);
+        output_b.append_value(&outputs[i]);
+    }
+
+    let arrow_schema: SchemaRef = Arc::new(Schema::new(vec![
+        Field::new("id", DataType::Utf8, false),
+        Field::new("category", DataType::Utf8, false),
+        Field::new("subcategory", DataType::Utf8, false),
+        Field::new("task", DataType::Utf8, false),
+        Field::new("tool_definitions", DataType::Utf8, false),
+        Field::new("input", DataType::Utf8, false),
+        Field::new("output", DataType::Utf8, false),
+    ]));
+    let arrow_batch = RecordBatch::try_new(
+        arrow_schema,
+        vec![
+            Arc::new(id_b.finish()),
+            Arc::new(cat_b.finish()),
+            Arc::new(subcat_b.finish()),
+            Arc::new(task_b.finish()),
+            Arc::new(tools_b.finish()),
+            Arc::new(input_b.finish()),
+            Arc::new(output_b.finish()),
+        ],
+    )?;
+
+    let col_schema = ColSchema::try_new_arc(vec![
+        ColField::new("id", ColType::Utf8, false),
+        ColField::new("category", ColType::Utf8, false),
+        ColField::new("subcategory", ColType::Utf8, false),
+        ColField::new("task", ColType::Utf8, false),
+        ColField::new("tool_definitions", ColType::Utf8, false),
+        ColField::new("input", ColType::Utf8, false),
+        ColField::new("output", ColType::Utf8, false),
+    ])?;
+    let cetra_batch = Batch::try_new_all(
+        col_schema,
+        vec![
+            col_utf8_from_strings(&ids)?,
+            col_utf8_from_strings(&categories)?,
+            col_utf8_from_strings(&subcategories)?,
+            col_utf8_from_strings(&tasks)?,
+            col_utf8_from_strings(&tool_defs)?,
+            col_utf8_from_strings(&inputs)?,
+            col_utf8_from_strings(&outputs)?,
+        ],
+        ids.len(),
+    )?;
+
+    Ok(HermesData {
+        arrow_batch,
+        cetra_batch,
+        top_category,
+        sample_id,
+        tool_needle,
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn run_hermes_suite(
+    hermes_path: &Path,
+    enabled: &[&str],
+    warm_runs: usize,
+    write_threads: usize,
+    read_threads: usize,
+    vortex_session: &VortexSession,
+    write_rows: &mut Vec<WriteBenchRow>,
+    query_rows: &mut Vec<QueryBenchRow>,
+    notes: &mut Vec<String>,
+) -> BenchResult<()> {
+    if !hermes_path.exists() {
+        notes.push(format!(
+            "Suite F (`hermes`): SKIPPED (`{}` not found; pass `--hermes-parquet` or set `STATAM_HERMES_PARQUET`)",
+            hermes_path.display()
+        ));
+        return Ok(());
+    }
+
+    let data = load_hermes_all(hermes_path)?;
+    let raw_bytes = data.arrow_batch.get_array_memory_size() as u64;
+    let wl = "hermes_fc";
+    let absent_needle = "NEVER_IN_HERMES_XYZ_999";
+
+    notes.push(format!(
+        "Suite F (`hermes`): {} rows x {} cols, `category={}`, `sample_id={}`, `HF_Q3_tool_like.contains(\"{}\")`",
+        data.arrow_batch.num_rows(),
+        data.arrow_batch.num_columns(),
+        data.top_category,
+        data.sample_id,
+        data.tool_needle
+    ));
+
+    let bloom_names = ["id", "category"];
+    let pq_default = if enabled.contains(&"pq_default") {
+        let (b, ms) = write_generic_parquet(
+            ParquetVariant::Default,
+            &data.arrow_batch,
+            &bloom_names,
+            &[],
+            1_000_000,
+        )?;
+        write_rows.push(mk_write_row(
+            wl,
+            "pq_default",
+            raw_bytes,
+            b.len() as u64,
+            ms,
+        ));
+        Some(b)
+    } else {
+        None
+    };
+    let pq_tuned = if enabled.contains(&"pq_tuned") {
+        let (b, ms) = write_generic_parquet(
+            ParquetVariant::Tuned,
+            &data.arrow_batch,
+            &bloom_names,
+            &[],
+            32_768,
+        )?;
+        write_rows.push(mk_write_row(wl, "pq_tuned", raw_bytes, b.len() as u64, ms));
+        Some(b)
+    } else {
+        None
+    };
+    let pq_cetra = if enabled.contains(&"pq_cetra") {
+        let (b, ms) = write_generic_parquet(
+            ParquetVariant::Cetra,
+            &data.arrow_batch,
+            &bloom_names,
+            &[],
+            100_000,
+        )?;
+        write_rows.push(mk_write_row(wl, "pq_cetra", raw_bytes, b.len() as u64, ms));
+        Some(b)
+    } else {
+        None
+    };
+    let vortex_bytes = if enabled.contains(&"vortex") {
+        match write_vortex_files(vortex_session, &[data.arrow_batch.clone()]).await {
+            Ok((files, ms)) => {
+                let b = files.into_iter().next().ok_or("missing vortex output")?;
+                write_rows.push(mk_write_row(wl, "vortex", raw_bytes, b.len() as u64, ms));
+                Some(b)
+            }
+            Err(e) => {
+                notes.push(format!("Suite F (`hermes`): `vortex` = N/A ({e})"));
+                None
+            }
+        }
+    } else {
+        None
+    };
+    let lance_bytes = if enabled.contains(&"lance") {
+        try_write_lance(
+            wl,
+            "Suite F (`hermes`)",
+            &data.arrow_batch,
+            raw_bytes,
+            write_rows,
+            notes,
+        )
+        .await
+    } else {
+        None
+    };
+    let strata_bytes = if enabled.contains(&"strata") {
+        match write_generic_strata(&data.arrow_batch, &[], &bloom_names) {
+            Ok((b, ms)) => {
+                write_rows.push(mk_write_row(wl, "strata", raw_bytes, b.len() as u64, ms));
+                Some(b)
+            }
+            Err(e) => {
+                notes.push(format!("Suite F (`hermes`): `strata` = N/A ({e})"));
+                None
+            }
+        }
+    } else {
+        None
+    };
+    let statam_l0 = if enabled.contains(&"statam_l0") {
+        let (b, _, ms) = write_generic_statam(
+            &data.cetra_batch,
+            WriteProfile::L0Fast,
+            &[],
+            &bloom_names,
+            Some("id"),
+            &[],
+            &["tool_definitions", "input", "output"],
+            false,
+            write_threads,
+        )?;
+        write_rows.push(mk_write_row(wl, "statam_l0", raw_bytes, b.len() as u64, ms));
+        Some(b)
+    } else {
+        None
+    };
+    let (statam_l1, statam_l1_pack) = if enabled.contains(&"statam_l1") {
+        let (b, pack, ms) = write_generic_statam(
+            &data.cetra_batch,
+            WriteProfile::L1Compact,
+            &[],
+            &bloom_names,
+            Some("id"),
+            &[],
+            &["tool_definitions", "input", "output"],
+            true,
+            write_threads,
+        )?;
+        let stored = b.len() as u64 + pack.as_ref().map_or(0, |p| p.len() as u64);
+        write_rows.push(mk_write_row(wl, "statam_l1", raw_bytes, stored, ms));
+        (Some(b), pack)
+    } else {
+        (None, None)
+    };
+
+    let s3_cfg = SimulatedS3Config::default();
+    let vortex_file_local = match &vortex_bytes {
+        Some(b) => Some(open_vortex_local(vortex_session, &[b.clone()]).await?),
+        None => None,
+    };
+    let lance_file_local = match &lance_bytes {
+        Some(b) => Some(open_lance_local(b).await?),
+        None => None,
+    };
+    let strata_file_local = match &strata_bytes {
+        Some(b) => Some(open_single_strata_local(b).await?),
+        None => None,
+    };
+
+    let queries = [
+        "HF_Q1_cat_cnt",
+        "HF_Q2_pt_full",
+        "HF_Q3_tool_like",
+        "HF_Q4_out_absent",
+    ];
+    for &qname in &queries {
+        let mut expected_matches: Option<usize> = None;
+
+        let (pq_proj, pq_preds): (Vec<usize>, Vec<GenPqPred>) = match qname {
+            "HF_Q1_cat_cnt" => (
+                vec![1],
+                vec![GenPqPred::Utf8Eq {
+                    col: "category".to_owned(),
+                    val: data.top_category.clone(),
+                }],
+            ),
+            "HF_Q2_pt_full" => (
+                (0..7).collect(),
+                vec![GenPqPred::Utf8Eq {
+                    col: "id".to_owned(),
+                    val: data.sample_id.clone(),
+                }],
+            ),
+            "HF_Q3_tool_like" => (
+                vec![0, 1],
+                vec![GenPqPred::Utf8Like {
+                    col: "tool_definitions".to_owned(),
+                    needle: data.tool_needle.clone(),
+                }],
+            ),
+            "HF_Q4_out_absent" => (
+                vec![0],
+                vec![GenPqPred::Utf8Like {
+                    col: "output".to_owned(),
+                    needle: absent_needle.to_owned(),
+                }],
+            ),
+            _ => (vec![], vec![]),
+        };
+        run_parquet_bench_query(
+            wl,
+            qname,
+            &pq_default,
+            &pq_tuned,
+            &pq_cetra,
+            &pq_proj,
+            &pq_preds,
+            warm_runs,
+            s3_cfg,
+            &mut expected_matches,
+            query_rows,
+        )?;
+
+        if let (Some(bytes), Some(local_files)) = (&vortex_bytes, &vortex_file_local) {
+            let (proj, filt, post): (Expression, Option<Expression>, VortexPostFilter<'_>) =
+                match qname {
+                    "HF_Q1_cat_cnt" => (
+                        select(["category"], root()),
+                        Some(eq(col("category"), lit(data.top_category.as_str()))),
+                        VortexPostFilter::None,
+                    ),
+                    "HF_Q2_pt_full" => (
+                        root(),
+                        Some(eq(col("id"), lit(data.sample_id.as_str()))),
+                        VortexPostFilter::None,
+                    ),
+                    "HF_Q3_tool_like" => (
+                        select(["id", "category", "tool_definitions"], root()),
+                        None,
+                        VortexPostFilter::Like {
+                            col: "tool_definitions",
+                            needle: data.tool_needle.as_str(),
+                        },
+                    ),
+                    "HF_Q4_out_absent" => (
+                        select(["id", "output"], root()),
+                        None,
+                        VortexPostFilter::Like {
+                            col: "output",
+                            needle: absent_needle,
+                        },
+                    ),
+                    _ => (root(), None, VortexPostFilter::None),
+                };
+            run_vortex_bench_query(
+                wl,
+                qname,
+                vortex_session,
+                bytes,
+                &local_files[0],
+                &proj,
+                filt.as_ref(),
+                post,
+                warm_runs,
+                s3_cfg,
+                &mut expected_matches,
+                query_rows,
+            )
+            .await?;
+        }
+
+        if let (Some(bytes), Some(local_reader)) = (&lance_bytes, &lance_file_local) {
+            let top_cat = data.top_category.as_str();
+            let sample_id = data.sample_id.as_str();
+            let tool_needle = data.tool_needle.as_str();
+            run_lance_bench_query(
+                wl,
+                qname,
+                bytes,
+                local_reader,
+                async |r: &LanceFileReader| {
+                    let proj_cols: Option<&[&str]> = match qname {
+                        "HF_Q1_cat_cnt" => Some(&["category"]),
+                        "HF_Q2_pt_full" => None,
+                        "HF_Q3_tool_like" => Some(&["id", "category", "tool_definitions"]),
+                        "HF_Q4_out_absent" => Some(&["id", "output"]),
+                        _ => return Ok(0),
+                    };
+                    let batches = lance_scan_projected(r, proj_cols).await?;
+                    let mut matched = 0usize;
+                    for b in &batches {
+                        match qname {
+                            "HF_Q1_cat_cnt" => {
+                                if let Some(c) = b.column_by_name("category") {
+                                    for i in 0..b.num_rows() {
+                                        if extract_str_at(c.as_ref(), i) == Some(top_cat) {
+                                            matched += 1;
+                                        }
+                                    }
+                                }
+                            }
+                            "HF_Q2_pt_full" => {
+                                if let Some(id_c) = b.column_by_name("id") {
+                                    for i in 0..b.num_rows() {
+                                        if extract_str_at(id_c.as_ref(), i) == Some(sample_id) {
+                                            matched += 1;
+                                        }
+                                    }
+                                }
+                            }
+                            "HF_Q3_tool_like" => {
+                                if let Some(t) = b.column_by_name("tool_definitions") {
+                                    for i in 0..b.num_rows() {
+                                        if let Some(s) = extract_str_at(t.as_ref(), i)
+                                            && s.contains(tool_needle)
+                                        {
+                                            matched += 1;
+                                        }
+                                    }
+                                }
+                            }
+                            "HF_Q4_out_absent" => {
+                                if let Some(o) = b.column_by_name("output") {
+                                    for i in 0..b.num_rows() {
+                                        if let Some(s) = extract_str_at(o.as_ref(), i)
+                                            && s.contains(absent_needle)
+                                        {
+                                            matched += 1;
+                                        }
+                                    }
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
+                    Ok(matched)
+                },
+                warm_runs,
+                s3_cfg,
+                &mut expected_matches,
+                query_rows,
+            )
+            .await?;
+        }
+
+        if let (Some(bytes), Some(local_file)) = (&strata_bytes, &strata_file_local) {
+            let (probe_col, probe_needle) = if qname == "HF_Q3_tool_like" {
+                (4usize, data.tool_needle.as_str())
+            } else {
+                (6usize, absent_needle)
+            };
+            let use_contains = if matches!(qname, "HF_Q3_tool_like" | "HF_Q4_out_absent") {
+                let probe = StrataScanRequest {
+                    projection: if qname == "HF_Q3_tool_like" {
+                        vec![0, 1]
+                    } else {
+                        vec![0]
+                    },
+                    predicate: Some(StrataPred::Contains(
+                        probe_col,
+                        probe_needle.as_bytes().to_vec(),
+                    )),
+                    row_ranges: None,
+                    limit: None,
+                    kind: ScanKind::Sparse,
+                    views: false,
+                    top: None,
+                    row_filter: None,
+                };
+                local_file.scan(&probe).await.is_ok()
+            } else {
+                false
+            };
+            let top_cat = data.top_category.clone();
+            let sample_id = data.sample_id.clone();
+            let tool_needle = data.tool_needle.clone();
+            run_strata_bench_query(
+                wl,
+                qname,
+                bytes,
+                local_file,
+                move |f| {
+                    let top_cat = top_cat.clone();
+                    let sample_id = sample_id.clone();
+                    let tool_needle = tool_needle.clone();
+                    async move {
+                        let req = match qname {
+                            "HF_Q1_cat_cnt" => StrataScanRequest {
+                                projection: vec![1],
+                                predicate: Some(StrataPred::Cmp(
+                                    1,
+                                    CmpOp::Eq,
+                                    Lit::Utf8(top_cat.clone()),
+                                )),
+                                row_ranges: None,
+                                limit: None,
+                                kind: ScanKind::Scan,
+                                views: false,
+                                top: None,
+                                row_filter: None,
+                            },
+                            "HF_Q2_pt_full" => StrataScanRequest {
+                                projection: (0..7).collect(),
+                                predicate: Some(StrataPred::Cmp(
+                                    0,
+                                    CmpOp::Eq,
+                                    Lit::Utf8(sample_id.clone()),
+                                )),
+                                row_ranges: None,
+                                limit: None,
+                                kind: ScanKind::Point,
+                                views: false,
+                                top: None,
+                                row_filter: None,
+                            },
+                            "HF_Q3_tool_like" => StrataScanRequest {
+                                projection: if use_contains {
+                                    vec![0, 1]
+                                } else {
+                                    vec![0, 1, 4]
+                                },
+                                predicate: use_contains.then(|| {
+                                    StrataPred::Contains(4, tool_needle.as_bytes().to_vec())
+                                }),
+                                row_ranges: None,
+                                limit: None,
+                                kind: if use_contains {
+                                    ScanKind::Sparse
+                                } else {
+                                    ScanKind::Scan
+                                },
+                                views: false,
+                                top: None,
+                                row_filter: None,
+                            },
+                            "HF_Q4_out_absent" => StrataScanRequest {
+                                projection: if use_contains { vec![0] } else { vec![0, 6] },
+                                predicate: use_contains.then(|| {
+                                    StrataPred::Contains(6, absent_needle.as_bytes().to_vec())
+                                }),
+                                row_ranges: None,
+                                limit: None,
+                                kind: if use_contains {
+                                    ScanKind::Sparse
+                                } else {
+                                    ScanKind::Scan
+                                },
+                                views: false,
+                                top: None,
+                                row_filter: None,
+                            },
+                            _ => return Ok(0),
+                        };
+                        let batches = f.scan(&req).await?;
+                        let mut matched = 0usize;
+                        if matches!(qname, "HF_Q3_tool_like" | "HF_Q4_out_absent") && !use_contains
+                        {
+                            let (col_name, nd) = if qname == "HF_Q3_tool_like" {
+                                ("tool_definitions", tool_needle.as_str())
+                            } else {
+                                ("output", absent_needle)
+                            };
+                            for b in &batches {
+                                if let Some(arr) = b.column_by_name(col_name) {
+                                    for i in 0..b.num_rows() {
+                                        if let Some(s) = extract_str_at(arr.as_ref(), i)
+                                            && s.contains(nd)
+                                        {
+                                            matched += 1;
+                                        }
+                                    }
+                                }
+                            }
+                        } else {
+                            for b in &batches {
+                                matched += b.num_rows();
+                            }
+                        }
+                        Ok(matched)
+                    }
+                },
+                warm_runs,
+                s3_cfg,
+                &mut expected_matches,
+                query_rows,
+            )
+            .await?;
+        }
+
+        let mut statam_req = match qname {
+            "HF_Q1_cat_cnt" => ScanRequest {
+                projection: Some(vec![1]),
+                predicates: vec![StatamPred::new(
+                    "category",
+                    ZonePred::Eq(ZoneValue::Bytes(data.top_category.as_bytes().to_vec())),
+                )],
+                ..ScanRequest::default()
+            },
+            "HF_Q2_pt_full" => ScanRequest {
+                projection: None,
+                id_lookups: vec![IdLookup::eq("id", data.sample_id.as_bytes().to_vec())],
+                coalesce_mode: CoalesceMode::Point,
+                ..ScanRequest::default()
+            },
+            "HF_Q3_tool_like" => ScanRequest {
+                projection: Some(vec![0, 1]),
+                substrings: vec![SubstringQuery::like(
+                    "tool_definitions",
+                    data.tool_needle.as_str(),
+                )],
+                ..ScanRequest::default()
+            },
+            "HF_Q4_out_absent" => ScanRequest {
+                projection: Some(vec![0]),
+                substrings: vec![SubstringQuery::like("output", absent_needle)],
+                ..ScanRequest::default()
+            },
+            _ => ScanRequest::default(),
+        };
+        statam_req.read_threads = read_threads;
+        run_statam_bench_query(
+            wl,
+            qname,
+            &statam_l0,
+            &statam_l1,
+            statam_l1_pack.as_ref(),
+            &statam_req,
+            warm_runs,
+            s3_cfg,
+            &mut expected_matches,
+            query_rows,
+        )?;
+    }
+
+    Ok(())
+}
+
 fn render_external_report(
     cli: &CliConfig,
     scale: BenchScale,
@@ -2611,7 +6126,7 @@ fn render_external_report(
     let mut out = String::new();
     let _ = writeln!(
         out,
-        "\n# External Parquet + Vortex Benchmark Report (`scale={}`)",
+        "\n# External Parquet + Vortex + Lance + Strata + Statam Benchmark Report (`scale={}`)",
         scale.label()
     );
     let _ = writeln!(out, "\n- **Host:** {}", machine_summary());
@@ -2729,6 +6244,51 @@ async fn run() -> BenchResult<()> {
 
     if cli.suite.includes_random_access() {
         run_random_access_suite(
+            &cli.formats,
+            warm_runs,
+            cli.statam_write_threads,
+            cli.statam_read_threads,
+            &vortex_session,
+            &mut write_rows,
+            &mut query_rows,
+            &mut notes,
+        )
+        .await?;
+    }
+
+    if cli.suite.includes_jsonbench() {
+        run_jsonbench_suite(
+            &cli.bluesky_json,
+            &cli.formats,
+            warm_runs,
+            cli.statam_write_threads,
+            cli.statam_read_threads,
+            &vortex_session,
+            &mut write_rows,
+            &mut query_rows,
+            &mut notes,
+        )
+        .await?;
+    }
+
+    if cli.suite.includes_wildchat() {
+        run_wildchat_suite(
+            &cli.wildchat_parquet,
+            &cli.formats,
+            warm_runs,
+            cli.statam_write_threads,
+            cli.statam_read_threads,
+            &vortex_session,
+            &mut write_rows,
+            &mut query_rows,
+            &mut notes,
+        )
+        .await?;
+    }
+
+    if cli.suite.includes_hermes() {
+        run_hermes_suite(
+            &cli.hermes_parquet,
             &cli.formats,
             warm_runs,
             cli.statam_write_threads,

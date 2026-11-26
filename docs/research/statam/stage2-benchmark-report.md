@@ -154,6 +154,8 @@
   4. Optimization Passes 1–3 cold review (`4644a34`)
   5. Optimization Pass 6 cold review (`36bbe48`; 0 blockers; all 4 majors + 4 minors fixed)
   6. Optimization Pass 7 / Option C cold review (0 blockers, 0 majors; all 4 minors + tiny-flush gating fixed)
+  7. Optimization Pass 8 cold review (`57aab1b`; 1 blocker, 2 majors, 4 minors — all fixed)
+  8. Optimization Pass 9 cold review (`b6211b9`; 0 blockers, 1 major, 2 minors — all fixed; `105` unit tests + `2` `fuzz_replay` tests passing)
 
 ---
 
@@ -247,5 +249,81 @@ Benchmarked via `docs/research/statam/bench/src/bin/{external_bench,peak_mem_ben
 | **`W1_agents` Full Scan** *(52 analytics cols)* | 32.9 / 67.9 | 14.2 / 39.3 | 33.3 / 68.0 | **14.1 / 23.7** | **14.3 / 31.4** |
 | **`W3_spans` Write** *(250k × 55)* | **32.7** / 756 | 113.8 / 2,526 | 71.9 / 863 | 146.1 / 751 · 143.9 / 817 | 97.6 / **639** · 103.5 / **653** |
 | **`W3_spans` Point Lookup** *(4 rows, 56 cols)* | 194.1 / 380.6 | 7.2 / 14.2 | **0.95 / 1.8** | 8.8 / 20.3 | **7.7 / 17.4** *(25× less than pq)* |
+
+---
+
+## 10. Pass 9 + 9b — `perf`-Guided Optimization (`precision-5770-vm`, `b307fa1`..`b6211b9`)
+
+Profiled with `perf record` on `precision-5770-vm` (`kernel.perf_event_paranoid=1`). Five targeted zero-wire-change optimizations eliminated the top CPU hotspots:
+1. **Single-Pass 8-Byte Word-Store FSST Decode + `u64`-Masked Longest Match (`codec/fsst.rs`):** Stack-allocated `FsstDecodeTable`, direct 8-byte unaligned write loop, in-place prefix-sum offsets, and `u64`-masked encoder matching (`perf` FSST decode share `15.89% → 7.01%`).
+2. **Flat-Bitset `.stpk` Search + `FastPairHasher` (`payload/search.rs`):** Replaced `BTreeMap`/`Vec::sort_unstable` with flat `Vec<u64>` bitsets (`needed_bits`/`matched_bits`) and a deterministic `FastPairHasher` (`perf` `quicksort::<u32>` `7.44% → 0.00%`, `BTreeMap::insert` `2.46% → 0.00%`, `SipHasher` `2.71% → 0.42%`).
+3. **Zone-Map Tautology Elimination (`codec/zonemap.rs`, `reader.rs`):** `zone_map_always_matches` skips Phase-1 evaluation on mini-blocks whose `[min, max]` guarantees 100% match (e.g., `URL <> ''` when `min > ""` and `null_count == 0`).
+4. **Parallel Mini-Block Phase 1 & Phase 2 (`reader.rs`):** When `read_threads > 1`, fans out mini-block filtering and materialization across threads.
+5. **Direct AVX2 `TrigramBloom::insert_bytes` + `fold_half()` (`writer.rs`):** Eliminated temporary buffer copies during narrow trigram bloom construction (`clickbench_100k` `L1` write `320.6 → 174.1 ms`, `1.84×` faster).
+
+| Workload / Query | Format | Pre-Pass 9 (`1R`) | Pass 9 (`1R`) | Pass 9 (`8R`) | Speedup | Competitive Standing |
+|---|---|---:|---:|---:|---:|---|
+| `ClickBench` `CB_Q24` (`URL <> ''`) | `statam_l1` | 39.80 ms | **13.04 ms** | **4.89 ms** | **8.1×** | `1R` beats Parquet (`15.2 ms`); `l0 (8R)` **`2.20 ms`** beats Vortex (`2.43 ms`) |
+| `ClickBench` `CB_Q23_like` (`Title LIKE '%Google%'`) | `statam_l1` | 13.24 ms | 13.34 ms | **5.99 ms** | **2.2×** | Beats Parquet (`8.06 ms`) & Vortex (`8.95 ms`) |
+| `W1_agents` `substring_rare` *(858 MiB)* | `statam_l1` | 84.53 ms | **33.35 ms** | **16.86 ms** | **5.0×** | **Beats Strata (`17.21 ms`)**; **118× faster than Parquet** |
+| `RandomAccess` `RA_take_100` / `1000` | `statam_l1` | 22.02 / 22.46 ms | 21.78 / 21.91 ms | **3.94 / 4.21 ms** | **5.6× / 5.3×** | **6.1×–6.3× faster than Vortex** (`24.1–26.4 ms`) |
+| `RowFilter` *(all 6 patterns)* | `statam_l1` | 0.65–2.24 ms | 0.61–2.06 ms | **0.37–0.64 ms** | **3.2×–3.5×** | **3×–9× faster than Parquet, Vortex & Strata** across 6/6 |
+| `ClickBench` Write (`8W`) | `statam_l1` | 320.6 ms | **174.1 ms** | — | **1.84×** | `W3_spans L1` `109.2 ms` & `W3_scores L1` `32.5 ms` both beat Vortex |
+
+*(Top remaining CPU hotspot on ClickBench in post-Pass-9 `perf`: `9.6%` in `core::str::from_utf8` inside `cetra_column::Utf8Data::try_new` — tracked for Stage 3 since `crates/column/` is off-limits in Stage 2.)*
+
+---
+
+## 11. Expanded External Benchmarks — Lance V2.2 (8th Format), JSONBench, WildChat-1M & Hermes (`precision-5770-vm`)
+
+Added **Lance V2.2** (`lance-file 14.0.3`, Arrow 58 IPC bridge, `SimulatedS3ObjectStore14`) as an 8th format across all 6 external suites, plus three real-world public corpora with **100% row-count parity** across all 7 tested formats (`pq_default`, `pq_tuned`, `vortex 0.95.0`, `lance 14.0.3`, `strata` PR #158, `statam_l0`, `statam_l1`):
+- **Suite D (`jsonbench_100k`):** Real ClickHouse JSONBench Bluesky Jetstream (`bluesky_0001.json.gz`, 100,000 events × 10 cols, 92.1 MiB raw; `attrs: MapUtf8` shredded map + `raw_json` `.stpk` payload + `text` narrow trigram).
+- **Suite E (`wildchat_15k`):** Real `allenai/WildChat-1M` (`wildchat_00000.parquet`, 15,000 multilingual multi-turn spans × 8 cols, 151.7 MiB raw; deterministic Unicode `ILIKE` needle `"Alienación"`, 3 hits).
+- **Suite F (`hermes_fc`):** Real `NousResearch/hermes-function-calling-v1` (`hermes_fc.parquet`, 1,893 tool-calling conversations × 7 cols, 18.4 MiB raw; cross-trace `tool_definitions` `.stpk` dedup).
+
+### 11.1 Storage Size & Write Speed Across All 6 External Suites (`8W` for Statam, `20T` for Strata)
+
+| Suite (Raw) | `pq_default` | `pq_tuned` | `vortex` | `lance v2.2` | `strata` | `statam_l0 (8W)` | `statam_l1 (8W)` |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| **`clickbench_100k`** *(99.1 MiB)* | 8,960 KiB · 273 ms | 9,253 KiB · 351 ms | **7,128 KiB** · 106 ms | 19,856 KiB · **66.3 ms** | 9,149 KiB · 892 ms | 13,966 KiB · 119 ms | 8,033 KiB (`12.3×`, `2.47×` < Lance) · 174 ms |
+| **`row_filter_100k`** *(14.3 MiB)* | 1,259 KiB · 31.1 ms | 1,360 KiB · 32.6 ms | **894 KiB** · 19.3 ms | 1,602 KiB · 12.5 ms | 1,085 KiB · 74.6 ms | 1,690 KiB · 14.0 ms | 1,032 KiB (`13.8×`, `1.55×` < Lance) · **10.1 ms** |
+| **`random_access_250k`** *(85.9 MiB)* | 12,893 KiB · 157 ms | 14,519 KiB · 172 ms | 9,912 KiB · 78.3 ms | 19,382 KiB · **57.9 ms** | 10,608 KiB · 574 ms | 17,935 KiB · 68.5 ms | **9,447 KiB (#1 of 7, `9.10×`)** · 135 ms |
+| **`jsonbench_100k`** *(92.1 MiB)* | 20,522 KiB · 350 ms | 22,335 KiB · 330 ms | **20,177 KiB** · 155 ms | 42,696 KiB · 195 ms | 24,160 KiB · 1,205 ms | 38,288 KiB · **137 ms** | 27,222 KiB (`3.38×`, `1.57×` < Lance) · 415 ms |
+| **`wildchat_15k`** *(151.7 MiB)* | 13,007 KiB · 269 ms | 14,605 KiB · 251 ms | 12,360 KiB · 665 ms | 37,493 KiB · 399 ms | **12,061 KiB** · 215 ms | 22,928 KiB · **103 ms** | 14,919 KiB (`10.17×`, `2.51×` < Lance) · 275 ms |
+| **`hermes_fc`** *(18.4 MiB)* | 2,623 KiB · 57.3 ms | 4,192 KiB · 82.5 ms | 1,831 KiB · 966 ms | 9,878 KiB · 59.9 ms | **1,626 KiB** · 49.1 ms | 6,699 KiB · **14.9 ms** | 1,835 KiB (`10.01×`, `5.38×` < Lance) · 62.1 ms |
+
+### 11.2 Query Results — Lance V2.2 + JSONBench + WildChat-1M + Hermes (Local Median ms / Simulated S3)
+
+| Suite / Query | Matched | `pq_default` | `pq_tuned` | `vortex` | `lance v2.2` | `strata` | `statam_l1 (1R)` | `statam_l1 (8R)` | S3 Winner (`ms`, GETs) |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---|
+| `RandomAccess` `RA_take_100` | 100 | 41.00 | 39.10 | 24.13 | **2.58** | N/A | 21.78 | 3.94 | **`statam_l1` (`192 ms`, 4 GETs)** vs Lance `664 ms` (19 GETs) |
+| `RandomAccess` `RA_take_1000` | 1,000 | 43.07 | 47.91 | 26.37 | 12.32 | N/A | 21.91 | **4.21** | **`statam_l1` (`192 ms`, 4 GETs)** vs Lance `734 ms` (21 GETs) |
+| `ClickBench` `CB_Q1` | 43 | 0.343 | 0.370 | 0.216 | 0.880 | 0.701 | **0.016** | 0.109 | `lance` (`63.9 ms`, 2 GETs) / `statam_l0` (`66.4 ms`) |
+| `ClickBench` `CB_Q20` *(4 cols)* | 6 | 3.124 | 1.737 | 3.406 | 31.44 | **0.163** | 1.910 | 1.890 | **`statam_l1` (`78.4 ms`, 2 GETs)** |
+| `ClickBench` `CB_Q23_like` | 3 | 8.062 | 8.469 | 8.945 | 32.41 | **4.053** | 13.34 | 5.99 | `strata` (`109 ms`) / `statam_l1` (`113 ms`, 3 GETs) |
+| `ClickBench` `CB_Q24` (`URL <> ''`) | 100,000 | 15.22 | 15.89 | 2.427 | 16.85 | **1.746** | 13.04 | 4.89 (`l0` 2.20) | **`statam_l1` (`78.4 ms`, 2 GETs)** |
+| `ClickBench` `CB_wide_point` *(105 cols)* | 6 | 10.71 | 6.477 | 13.55 | 234.4 | **1.574** | 7.363 | 1.708 (`l0` 1.570) | **`statam_l1` (`128 ms`, 2 GETs)** vs Lance `644 ms` (18 GETs) |
+| `RowFilter` *(6-pattern range)* | 1–99k | 2.19–4.82 | 0.63–5.52 | 0.99–2.50 | 5.02–7.96 | 0.15–2.34 | 0.61–2.06 | **0.37–0.64** | **`statam_l1` (`35.1 ms`, 1 GET)** across all 6/6 |
+| `JSONBench` `JB_Q1_posts` | 8,737 | 5.016 | 5.093 | 2.021 | 6.687 | 1.611 | 0.574 | **0.328** | `pq_default` (`60.4 ms`) / `statam_l1` (`69.3 ms`, 2 GETs) |
+| `JSONBench` `JB_Q2_did_pt` *(4 cols)* | 265 | 6.549 | 4.837 | 4.012 | 17.82 | **2.223** | 8.262 | 3.220 (`l0` 1.824) | **`statam_l1` (`89.3 ms`, 2 GETs)** |
+| `JSONBench` `JB_Q3_map_type` *(Map)* | 8,737 | 62.28 | 73.46 | 27.82 | 54.32 | 13.18 | **2.044** | **1.232** | **`statam_l1` (`159 ms`, 4 GETs)** — **50× faster local than pq!** |
+| `JSONBench` `JB_Q4_text_like` | 192 | 3.757 | 6.294 | 3.897 | 12.99 | 2.508 | 4.917 | 2.491 (`l0` **1.147**) | **`statam_l1` (`114 ms`, 3 GETs)** |
+| `JSONBench` `JB_Q5_did_full` *(10 cols)* | 265 | 20.83 | 11.47 | 21.35 | 280.9 | **4.348** | 28.87 | 8.500 (`l0` 7.715) | **`statam_l1` (`251 ms`, 5 GETs)** vs Strata `411 ms`, Lance `942 ms` |
+| `WildChat` `WC_Q1_model_cnt` | 10,201 | 0.559 | 0.564 | 0.309 | 0.620 | 0.404 | 0.045 | **0.043** | **`statam_l1` (`29.7 ms`, 1 GET, 478 KiB)** |
+| `WildChat` `WC_Q2_lang_filter` | 4,730 | 1.271 | 1.204 | 0.785 | 1.243 | **0.398** | 0.491 | 0.486 | **`statam_l1` (`29.7 ms`, 1 GET, 478 KiB)** |
+| `WildChat` `WC_Q3_trace_full` *(55 turns)* | 55 | 5.733 | 4.386 | 48.00 | 409.4 | **0.679** | 6.152 | 4.432 (`l0` 2.623) | `strata` (`113 ms`, 3 GETs) / `pq_tuned` (`168 ms`) / `statam_l1` (`171 ms`) |
+| `WildChat` `WC_Q4_unicode_ilike` *("Alienación")* | 3 | 79.97 | 78.86 | 75.18 | 144.7 | 78.35 | 90.97 | **21.90** | `vortex` (`181 ms`, 4 GETs) / `statam_l1` (`196 ms`, 4 GETs) |
+| `WildChat` `WC_Q5_input_absent` | 0 | 75.21 | 76.31 | 29.78 | 324.7 | **2.640** | 12.43 | 9.238 | `strata` (`77.8 ms`, 2 GETs) / `statam_l1` (`101 ms`, 3 GETs, 2.6 MiB) |
+| `Hermes` `HF_Q1_cat_cnt` | 796 | 0.064 | 0.062 | 0.251 | 0.146 | 0.117 | **0.007** | **0.007** | **`statam_l1` (`26.1 ms`, 1 GET, 109 KiB)** |
+| `Hermes` `HF_Q2_pt_full` *(7 cols)* | 1 | 4.022 | 3.234 | 8.314 | 39.41 | **0.498** | 2.700 | 1.484 (`l0` 0.949) | `strata` (`40.9 ms`, 1 GET) / `pq_default` (`65.6 ms`) / `statam_l1` (`92.9 ms`) |
+| `Hermes` `HF_Q3_tool_like` *("Amazon")* | 5 | **1.693** | 1.717 | 1.810 | 2.837 | 4.902 | 3.767 | 3.036 (`l0` 2.171) | `strata` (`40.9 ms`) / `pq_tuned` (`60.9 ms`) / `statam_l1` (`92.9 ms`) |
+| `Hermes` `HF_Q4_out_absent` | 0 | 0.870 | 0.864 | 1.002 | 1.023 | 0.309 | 0.298 | **0.297** | `pq_default` (`30.6 ms`, 1 GET) / `strata` (`40.9 ms`) / `statam_l1` (`57.9 ms`) |
+
+### 11.3 Key Honest Takeaways from the 8-Format Expansion
+
+- **Lance V2.2 (`lance-file 14.0.3`):** Excels on local single-threaded scattered random access (`RA_take_100`: `2.58 ms`) and flat-table write speed (`1.45 GiB/s`), but its lack of heavy block compression and row-group/zone-map pruning costs **`1.55×–5.38×` larger files**, **`2×–5×` higher S3 latency** (`18–21` GETs vs Statam's `2–4` GETs), and **`15×–137×` slower wide/LLM point lookups** (`CB_wide_point`: `234.4 ms`, `WC_Q3_trace_full`: `409.4 ms`, `JB_Q5_did_full`: `280.9 ms`). At `8R`, Statam beats Lance even on `RA_take_1000` (`4.21 ms` vs `12.32 ms`, `2.9×` faster).
+- **Shredded `MapUtf8` on Real Bluesky JSON (`JB_Q3_map_type`):** Statam's shredded map layout delivers **`2.04 ms (1R)` / `1.23 ms (8R)`** — **`6.4×–10.7×` faster than Strata, `13.6×–22.6×` faster than Vortex, `26.6×–44.1×` faster than Lance, and `30.5×–50.5×` faster than Parquet** — while also winning S3 (`159 ms`, 4 GETs).
+- **Multilingual WildChat-1M & Unicode `ILIKE` (`WC_Q4_unicode_ilike`):** At `8R`, Statam's parallel `.stpk` frame scan is **`3.4×–6.6×` faster than all 6 competitors** (`21.90 ms` vs `75–145 ms`). At `1R` (`90.97 ms`), non-ASCII `ILIKE` currently disables ASCII-trigram bloom pruning; extracting pure-ASCII runs `>= 3` bytes (e.g., `"alienaci"` from `"Alienación"`) for the trigram bloom is a clean future optimization that would drop `1R` latency below `3 ms`.
+- **Small-Row `.stpk` Trade-offs (Honest Findings):** On `jsonbench_100k` (small ~400 B `raw_json` per event, 265 scattered DID hits), `.stpk` framing + blooms add ~7 MiB over Parquet/Vortex and cost `28.9 ms (1R)` / `8.5 ms (8R)` locally on `JB_Q5_did_full` vs Strata `4.35 ms` (though Statam still wins S3 at `251 ms` vs `411 ms`). Similarly on tiny `hermes_fc` (`1,893` rows, `1.8 MiB`), `HF_Q3_tool_like` favors inline columns (`1.69–1.81 ms` on Parquet/Vortex vs `3.04 ms` on `statam_l1 8R`), while Statam wins `HF_Q1_cat_cnt` (`7 µs`, `1` S3 GET) and `HF_Q4_out_absent` (`0.297 ms`) and matches Vortex's `10.0×` compression ratio while writing **`15.6×` faster**.
 
 **Stage 3 Status:** `crates/storage`, `crates/core`, `crates/column`, and `crates/query` remain **completely untouched** per the Stage 2/Stage 3 gate. Awaiting explicit user go-ahead for Stage 3 (`cetra-storage` integration).
