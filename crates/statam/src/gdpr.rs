@@ -389,17 +389,53 @@ pub fn gdpr_rewrite_day(
         }
 
         stats.files_rewritten += 1;
-        let write_opts = input
-            .write_options
-            .clone()
-            .unwrap_or_else(|| derive_write_options_from_meta(meta));
+        let expected_payload_cols: Vec<String> = (0..meta.schema().len())
+            .filter(|&i| meta.col_dir[i].locality_group == LocalityGroup::ExternalPayload)
+            .map(|i| meta.schema().fields()[i].name.clone())
+            .collect();
+        let write_opts = match &input.write_options {
+            Some(opts) => {
+                let mut cloned = opts.clone();
+                cloned.payload_cols = expected_payload_cols;
+                cloned
+            }
+            None => derive_write_options_from_meta(meta),
+        };
 
-        // Build remapped pack_ids list for surviving chunks of this file.
+        // Build remapped pack_ids list strictly from packs actually referenced by surviving rows.
+        let mut used_old_pidxs = BTreeSet::new();
+        for rg_plan in &plan.rg_plans {
+            if rg_plan.surviving_indices.is_empty() {
+                continue;
+            }
+            for rows in rg_plan.payload_refs.values() {
+                for row in rows {
+                    if let PayloadRefRow::Chunks(refs) = row {
+                        for &(pidx, _) in refs {
+                            if pidx != L0_LOCAL_PACK_IDX {
+                                used_old_pidxs.insert(pidx);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
         let mut new_pack_ids: Vec<[u8; 16]> = Vec::new();
         let mut pack_id_to_new_idx: HashMap<[u8; 16], u16> = HashMap::new();
-        for &old_pid in &meta.schema_meta.pack_ids {
+        for old_pidx in used_old_pidxs {
+            let old_pid =
+                *meta
+                    .schema_meta
+                    .pack_ids
+                    .get(old_pidx as usize)
+                    .ok_or(StatamError::Corrupt {
+                        reason: "surviving payload ref pack_idx out of bounds during GDPR",
+                    })?;
             if fully_dead_packs.contains(&old_pid) {
-                continue;
+                return Err(StatamError::Corrupt {
+                    reason: "surviving row references retired 100%-dead pack",
+                });
             }
             let target_pid = pack_remap
                 .get(&old_pid)
@@ -446,7 +482,13 @@ pub fn gdpr_rewrite_day(
                                     needed_l0_cids.insert(old_cid);
                                     new_refs.push((L0_LOCAL_PACK_IDX, old_cid));
                                 } else {
-                                    let old_pid = meta.schema_meta.pack_ids[old_pidx as usize];
+                                    let old_pid = *meta
+                                        .schema_meta
+                                        .pack_ids
+                                        .get(old_pidx as usize)
+                                        .ok_or(StatamError::Corrupt {
+                                            reason: "payload ref pack_idx out of bounds during GDPR remap",
+                                        })?;
                                     if let Some((new_pid, remap)) = pack_remap.get(&old_pid) {
                                         let new_cid = remap
                                             .get(old_cid as usize)
@@ -555,14 +597,14 @@ fn derive_write_options_from_meta(meta: &crate::reader::StatamFileMeta) -> Write
         .collect();
 
     let mut bloom_cols = Vec::new();
-    let mut hot_bloom = None;
+    let mut hot_bloom: Option<String> = None;
     let mut trigram_cols = Vec::new();
     for (i, f) in fields.iter().enumerate() {
         let cd = &meta.col_dir[i];
         if cd.bloom_len > 0 {
             bloom_cols.push(f.name.clone());
             if (cd.col_flags & crate::format::COL_FLAG_BLOOM_IN_HOT_TAIL) != 0
-                && hot_bloom.is_none()
+                && (f.name == "trace_id" || hot_bloom.is_none())
             {
                 hot_bloom = Some(f.name.clone());
             }
@@ -570,6 +612,9 @@ fn derive_write_options_from_meta(meta: &crate::reader::StatamFileMeta) -> Write
         if (cd.col_flags & crate::format::COL_FLAG_HAS_TRIGRAM_INDEX) != 0 {
             trigram_cols.push(f.name.clone());
         }
+    }
+    if hot_bloom.is_none() && bloom_cols.iter().any(|n| n == "trace_id") {
+        hot_bloom = Some("trace_id".to_owned());
     }
     opts.bloom_cols = bloom_cols;
     opts.hot_bloom_col = hot_bloom;
@@ -946,6 +991,204 @@ mod tests {
         assert_eq!(
             out[0].column(1).unwrap().get_scalar(0).unwrap(),
             cetra_column::ScalarValue::Utf8(format!("LIVE_L0_KEEP_{}", "k".repeat(600)))
+        );
+    }
+
+    #[test]
+    fn gdpr_rewrite_handles_100_percent_erased_l1_and_l0_files() {
+        let schema = Schema::try_new_arc(vec![
+            Field::new("user_id", DataType::Utf8, false),
+            Field::new("name", DataType::Utf8, false),
+            Field::new("input", DataType::Utf8, true),
+        ])
+        .unwrap();
+
+        let pack_id = [0x44u8; 16];
+        let mut pb = ChunkPackBuilder::new(pack_id, test_pack_opts());
+        let mut opts = WriteOptions::for_table(TableKind::Spans, WriteProfile::L1Compact);
+        opts.payload_cols = vec!["input".to_owned()];
+        opts.pack_id = Some(pack_id);
+
+        let secret = format!("ALL_ERASED_SECRET_{}", "z".repeat(1024));
+        let batch = build_gdpr_batch(&schema, &[("u_all_dead", "op", &secret)]);
+        let mut file_bytes = Vec::new();
+        {
+            let mut w = StatamWriter::new(Arc::clone(&schema), opts, Some(&mut pb)).unwrap();
+            w.write_batch(&batch).unwrap();
+            w.finish(&mut file_bytes).unwrap();
+        }
+        let mut pack_bytes = Vec::new();
+        pb.finish(&mut pack_bytes).unwrap();
+
+        let inputs = vec![GdprFileInput {
+            file_id: "dead_l1".to_owned(),
+            reader: Arc::new(SliceReader::new(file_bytes)),
+            write_options: None,
+        }];
+        let mut packs: HashMap<[u8; 16], Arc<dyn RangeReader>> = HashMap::new();
+        packs.insert(pack_id, Arc::new(SliceReader::new(pack_bytes)));
+
+        // Erase 100% of rows!
+        let report = gdpr_rewrite_day(&inputs, &packs, &|_, _| true).unwrap();
+        assert_eq!(report.stats.files_rewritten, 1);
+        assert_eq!(report.stats.packs_rewritten, 0);
+        assert_eq!(report.retired_pack_ids, vec![pack_id]);
+        assert!(report.new_packs.is_empty());
+
+        let rw = &report.rewritten_files[0];
+        assert_eq!(rw.stats.row_count, 0);
+        assert!(rw.stats.pack_ids.is_empty());
+        assert!(memmem::find(&rw.bytes, b"ALL_ERASED_SECRET").is_none());
+        assert!(memmem::find(&rw.bytes, b"u_all_dead").is_none());
+
+        let r = StatamReader::open(Arc::new(SliceReader::new(rw.bytes.clone())), None).unwrap();
+        r.verify_full().unwrap();
+        assert_eq!(r.meta().row_count(), 0);
+        assert!(r.meta().schema_meta.pack_ids.is_empty());
+        assert!(r.scan(&ScanRequest::default()).unwrap().is_empty());
+    }
+
+    #[test]
+    fn gdpr_rewrite_multi_pack_prunes_unreferenced_packs_and_forces_payload_cols() {
+        let schema = Schema::try_new_arc(vec![
+            Field::new("user_id", DataType::Utf8, false),
+            Field::new("name", DataType::Utf8, false),
+            Field::new("input", DataType::Utf8, true),
+        ])
+        .unwrap();
+
+        // Build two distinct packs: pack_a and pack_b.
+        let pack_a_id = [0xA1u8; 16];
+        let pack_b_id = [0xB2u8; 16];
+        let mut pb_a = ChunkPackBuilder::new(pack_a_id, test_pack_opts());
+        let mut pb_b = ChunkPackBuilder::new(pack_b_id, test_pack_opts());
+
+        let keep_a_payload = format!("KEEP_PACK_A_{}", "a".repeat(600));
+        let dead_b_payload = format!("ERASE_PACK_B_{}", "b".repeat(600));
+        let other_b_payload = format!("OTHER_FILE_KEEP_B_{}", "c".repeat(600));
+
+        let cid_a = pb_a.intern_chunk(keep_a_payload.as_bytes()).unwrap();
+        let cid_b_dead = pb_b.intern_chunk(dead_b_payload.as_bytes()).unwrap();
+        let cid_b_live = pb_b.intern_chunk(other_b_payload.as_bytes()).unwrap();
+
+        let mut opts_multi = WriteOptions::for_table(TableKind::Spans, WriteProfile::L1Compact);
+        opts_multi.payload_cols = vec!["input".to_owned()];
+
+        // File 1 references BOTH pack_a (row 0, surviving) and pack_b (row 1, erased!).
+        let batch1 = build_gdpr_batch(&schema, &[("u_keep", "op0", ""), ("u_erase", "op1", "")]);
+        let mut refs1 = HashMap::new();
+        refs1.insert(
+            2usize,
+            vec![
+                PayloadRefRow::Chunks(vec![(0u16, cid_a)]),
+                PayloadRefRow::Chunks(vec![(1u16, cid_b_dead)]),
+            ],
+        );
+        let mut file1_bytes = Vec::new();
+        {
+            let mut w1 = StatamWriter::new(Arc::clone(&schema), opts_multi.clone(), None).unwrap();
+            w1.set_pack_ids(vec![pack_a_id, pack_b_id]);
+            w1.write_batch_with_prechunked_refs(&batch1, &refs1, &HashMap::new())
+                .unwrap();
+            w1.finish(&mut file1_bytes).unwrap();
+        }
+
+        // File 2 keeps cid_b_live alive in pack_b so pack_b is NOT 100%-dead (only rewritten).
+        let batch2 = build_gdpr_batch(&schema, &[("u_other", "op2", "")]);
+        let mut refs2 = HashMap::new();
+        refs2.insert(
+            2usize,
+            vec![PayloadRefRow::Chunks(vec![(0u16, cid_b_live)])],
+        );
+        let mut file2_bytes = Vec::new();
+        {
+            let mut w2 = StatamWriter::new(Arc::clone(&schema), opts_multi, None).unwrap();
+            w2.set_pack_ids(vec![pack_b_id]);
+            w2.write_batch_with_prechunked_refs(&batch2, &refs2, &HashMap::new())
+                .unwrap();
+            w2.finish(&mut file2_bytes).unwrap();
+        }
+
+        let mut pack_a_bytes = Vec::new();
+        pb_a.finish(&mut pack_a_bytes).unwrap();
+        let mut pack_b_bytes = Vec::new();
+        pb_b.finish(&mut pack_b_bytes).unwrap();
+
+        // Pass `WriteOptions::default()` (missing `payload_cols: ["input"]`) on file1 to prove
+        // GDPR forces `payload_cols` to match input `meta`'s `ExternalPayload` columns!
+        let inputs = vec![
+            GdprFileInput {
+                file_id: "file_multi".to_owned(),
+                reader: Arc::new(SliceReader::new(file1_bytes)),
+                write_options: Some(WriteOptions::default()),
+            },
+            GdprFileInput {
+                file_id: "file_b_only".to_owned(),
+                reader: Arc::new(SliceReader::new(file2_bytes)),
+                write_options: None,
+            },
+        ];
+        let mut packs: HashMap<[u8; 16], Arc<dyn RangeReader>> = HashMap::new();
+        packs.insert(pack_a_id, Arc::new(SliceReader::new(pack_a_bytes.clone())));
+        packs.insert(pack_b_id, Arc::new(SliceReader::new(pack_b_bytes)));
+
+        let report = gdpr_rewrite_day(&inputs, &packs, &|b, row| {
+            matches!(
+                b.column_by_name("user_id").and_then(|c| c.get_scalar(row).ok()),
+                Some(cetra_column::ScalarValue::Utf8(ref u)) if u == "u_erase"
+            )
+        })
+        .unwrap();
+
+        let rw_multi = report
+            .rewritten_files
+            .iter()
+            .find(|f| f.file_id == "file_multi")
+            .unwrap();
+        let rw_b = report
+            .rewritten_files
+            .iter()
+            .find(|f| f.file_id == "file_b_only")
+            .unwrap();
+
+        // file_multi no longer references pack_b at all -> its `pack_ids` must ONLY contain pack_a!
+        assert_eq!(rw_multi.stats.pack_ids, vec![pack_a_id]);
+        assert!(memmem::find(&rw_multi.bytes, b"ERASE_PACK_B").is_none());
+
+        let mut resolver = InMemoryPackResolver::new();
+        resolver.insert_bytes(pack_a_id, pack_a_bytes).unwrap();
+        for np in &report.new_packs {
+            assert!(memmem::find(&np.bytes, b"ERASE_PACK_B").is_none());
+            resolver
+                .insert_bytes(np.new_pack_id, np.bytes.clone())
+                .unwrap();
+        }
+        let resolver: Arc<dyn PackResolver> = Arc::new(resolver);
+
+        let r1 = StatamReader::open(
+            Arc::new(SliceReader::new(rw_multi.bytes.clone())),
+            Some(Arc::clone(&resolver)),
+        )
+        .unwrap();
+        r1.verify_full().unwrap();
+        let out1 = r1.scan(&ScanRequest::default()).unwrap();
+        assert_eq!(out1[0].num_rows(), 1);
+        assert_eq!(
+            out1[0].column(2).unwrap().get_scalar(0).unwrap(),
+            cetra_column::ScalarValue::Utf8(keep_a_payload)
+        );
+
+        let r2 = StatamReader::open(
+            Arc::new(SliceReader::new(rw_b.bytes.clone())),
+            Some(Arc::clone(&resolver)),
+        )
+        .unwrap();
+        r2.verify_full().unwrap();
+        let out2 = r2.scan(&ScanRequest::default()).unwrap();
+        assert_eq!(out2[0].num_rows(), 1);
+        assert_eq!(
+            out2[0].column(2).unwrap().get_scalar(0).unwrap(),
+            cetra_column::ScalarValue::Utf8(other_b_payload)
         );
     }
 }

@@ -125,6 +125,7 @@ pub struct ChunkPackBuilder {
     trigram_buf: Vec<u8>,
     cur_raw: Vec<u8>,
     cur_chunks: Vec<PendingChunk>,
+    cur_is_bypass: bool,
     dedup_hits: u64,
     raw_chunk_bytes: u64,
     stored_frame_bytes: u64,
@@ -164,10 +165,16 @@ impl ChunkPackBuilder {
             trigram_buf: Vec::new(),
             cur_raw: Vec::new(),
             cur_chunks: Vec::new(),
+            cur_is_bypass: false,
             dedup_hits: 0,
             raw_chunk_bytes: 0,
             stored_frame_bytes: 0,
         }
+    }
+
+    /// Returns the 128-bit pack identifier.
+    pub fn pack_id(&self) -> [u8; 16] {
+        self.pack_id
     }
 
     /// Interns `bytes` using BLAKE3-128 content addressing, returning its unique `chunk_id`.
@@ -177,6 +184,10 @@ impl ChunkPackBuilder {
                 reason: "chunk length exceeds MAX_FRAME_RAW_BYTES",
             });
         }
+        if self.cur_is_bypass && !self.cur_raw.is_empty() {
+            self.flush_current_frame()?;
+        }
+        self.cur_is_bypass = false;
 
         let hash = blake3::hash(bytes);
         let mut hash16 = [0u8; 16];
@@ -231,6 +242,66 @@ impl ChunkPackBuilder {
         Ok(chunk_id)
     }
 
+    /// Appends a raw chunk directly in incompressible `W4` bypass mode (`Codec::None`,
+    /// no deduplication map lookup, and no trigram bloom extraction).
+    pub fn append_raw_uncompressed_bypass(&mut self, bytes: &[u8]) -> Result<u32, StatamError> {
+        if bytes.len() > MAX_FRAME_RAW_BYTES {
+            return Err(StatamError::BoundsExceeded {
+                reason: "chunk length exceeds MAX_FRAME_RAW_BYTES",
+            });
+        }
+        if !self.cur_is_bypass && !self.cur_raw.is_empty() {
+            self.flush_current_frame()?;
+        }
+        self.cur_is_bypass = true;
+
+        let total_chunks = self.chunk_locs.len() + self.cur_chunks.len();
+        if total_chunks >= MAX_PACK_CHUNKS {
+            return Err(StatamError::BoundsExceeded {
+                reason: "pack chunk count exceeds MAX_PACK_CHUNKS",
+            });
+        }
+        let chunk_id = u32::try_from(total_chunks).map_err(|_| StatamError::BoundsExceeded {
+            reason: "chunk_id overflows u32",
+        })?;
+
+        let target = self.options.target_frame_raw_bytes.max(1);
+        if !self.cur_raw.is_empty() && self.cur_raw.len().saturating_add(bytes.len()) > target {
+            self.flush_current_frame()?;
+        }
+
+        let offset_in_frame =
+            u32::try_from(self.cur_raw.len()).map_err(|_| StatamError::BoundsExceeded {
+                reason: "chunk offset_in_frame overflows u32",
+            })?;
+        let raw_len = u32::try_from(bytes.len()).map_err(|_| StatamError::BoundsExceeded {
+            reason: "chunk raw_len overflows u32",
+        })?;
+
+        let hash = blake3::hash(bytes);
+        let mut hash16 = [0u8; 16];
+        hash16.copy_from_slice(&hash.as_bytes()[..16]);
+
+        self.cur_raw.extend_from_slice(bytes);
+        let head = bytes[..bytes.len().min(EDGE_LEN)].to_vec();
+        let tail = bytes[bytes.len().saturating_sub(EDGE_LEN)..].to_vec();
+
+        self.cur_chunks.push(PendingChunk {
+            hash16,
+            offset_in_frame,
+            raw_len,
+            head,
+            tail,
+        });
+        self.raw_chunk_bytes = self.raw_chunk_bytes.saturating_add(bytes.len() as u64);
+
+        if self.cur_raw.len() >= target {
+            self.flush_current_frame()?;
+        }
+
+        Ok(chunk_id)
+    }
+
     /// Appends a pre-compressed `PF` frame verbatim without decompressing or recompressing.
     ///
     /// Used by `gdpr_rewrite_day` for 100%-live frames. Returns the newly assigned
@@ -246,6 +317,7 @@ impl ChunkPackBuilder {
         if !self.cur_raw.is_empty() {
             self.flush_current_frame()?;
         }
+        self.cur_is_bypass = false;
         if chunks.len() != entry.chunk_count as usize || edges.len() != chunks.len() {
             return Err(StatamError::Corrupt {
                 reason: "append_raw_frame chunk count mismatch",
@@ -405,6 +477,7 @@ impl ChunkPackBuilder {
         if !self.cur_raw.is_empty() {
             self.flush_current_frame()?;
         }
+        self.cur_is_bypass = false;
 
         let frame_count =
             u32::try_from(self.frames.len()).map_err(|_| StatamError::BoundsExceeded {
@@ -603,20 +676,20 @@ impl ChunkPackBuilder {
         }
 
         let mut framed = Vec::new();
-        let info = write_framed_pack_frame(
-            &self.cur_raw,
-            self.options.codec,
-            0,
-            self.options.zstd_level,
-            &mut framed,
-        )?;
+        let (frame_codec, zstd_level) = if self.cur_is_bypass {
+            (Codec::None, 0)
+        } else {
+            (self.options.codec, self.options.zstd_level)
+        };
+        let info = write_framed_pack_frame(&self.cur_raw, frame_codec, 0, zstd_level, &mut framed)?;
         self.apply_1mib_boundary_guard(framed.len());
 
         let frame_offset = self.buf.len() as u64;
         self.buf.extend_from_slice(&framed);
         self.stored_frame_bytes = self.stored_frame_bytes.saturating_add(framed.len() as u64);
 
-        let (filter_off, filter_len) = if self.options.enable_trigram_skip
+        let (filter_off, filter_len) = if !self.cur_is_bypass
+            && self.options.enable_trigram_skip
             && (info.stored_len as usize) >= MIN_FRAME_FOR_TRIGRAM
         {
             self.build_frame_trigram_filter(info.stored_len as usize)?

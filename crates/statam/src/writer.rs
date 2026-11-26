@@ -17,14 +17,14 @@ use crate::format::{
     BLOCK_ENTRY_LEN, BLOCK_FLAG_ALL_NULL, BLOCK_FLAG_HAS_NULLS, BlockEntry, CHECKSUM_ALG_CRC32C,
     COL_FLAG_BLOOM_IN_HOT_TAIL, COL_FLAG_DICT_IN_HOT_TAIL, COL_FLAG_DICT_SORTED,
     COL_FLAG_HAS_FILE_DICT, COL_FLAG_HAS_TRIGRAM_INDEX, COL_FLAG_IS_PAYLOAD_REFS,
-    COL_FLAG_IS_SHREDDED_SUBCOL, COLUMN_DIR_ENTRY_LEN, ChunkLoc, Codec, ColumnDirEntry, Encoding,
-    FILE_HEADER_LEN, FLAG_HAS_PACK_REFS, FLAG_HAS_SHREDDED_MAPS, FLAG_HAS_TRIGRAM_INDEX,
-    FLAG_HOT_TAIL_LZ4, FLAG_L1_COMPACT, FORMAT_VERSION, FileHeader, FileSchemaMeta,
-    LAZY_INDEX_ENTRY_LEN, LazyIndexEntry, LazyIndexKind, LocalityGroup, MAX_BLOCK_RAW_BYTES,
-    MAX_COLUMNS, MAX_FRAME_RAW_BYTES, MAX_HOT_TAIL_BYTES, MAX_PACK_REFS, MAX_ROW_GROUPS,
-    MAX_ROWS_PER_FILE, MAX_TOTAL_BLOCKS, MINI_BLOCK_SIZE, POSTSCRIPT_LEN, Postscript,
-    ROW_GROUP_ENTRY_LEN, ROW_GROUP_SIZE, RowGroupEntry, ShreddedMapDir, ShreddedMapKeyEntry,
-    TableKind, encode_schema, write_framed_block, write_framed_pack_frame,
+    COL_FLAG_IS_SHREDDED_SUBCOL, COLUMN_DIR_ENTRY_LEN, ChunkLoc, Codec, ColumnDirEntry,
+    DEFAULT_TAIL_HINT, Encoding, FILE_HEADER_LEN, FLAG_HAS_PACK_REFS, FLAG_HAS_SHREDDED_MAPS,
+    FLAG_HAS_TRIGRAM_INDEX, FLAG_HOT_TAIL_LZ4, FLAG_L1_COMPACT, FORMAT_VERSION, FileHeader,
+    FileSchemaMeta, LAZY_INDEX_ENTRY_LEN, LazyIndexEntry, LazyIndexKind, LocalityGroup,
+    MAX_BLOCK_RAW_BYTES, MAX_COLUMNS, MAX_FRAME_RAW_BYTES, MAX_HOT_TAIL_BYTES, MAX_PACK_REFS,
+    MAX_ROW_GROUPS, MAX_ROWS_PER_FILE, MAX_TOTAL_BLOCKS, MINI_BLOCK_SIZE, POSTSCRIPT_LEN,
+    Postscript, ROW_GROUP_ENTRY_LEN, ROW_GROUP_SIZE, RowGroupEntry, ShreddedMapDir,
+    ShreddedMapKeyEntry, TableKind, encode_schema, write_framed_block, write_framed_pack_frame,
 };
 use crate::payload::chunker::{DedupBypassDetector, INLINE_PAYLOAD_THRESHOLD, chunk_payload};
 use crate::payload::pack::ChunkPackBuilder;
@@ -34,8 +34,12 @@ use crate::simd::trigram::{
     MAX_TRIGRAM_BLOOM_BYTES, MIN_TRIGRAM_BLOOM_BYTES, TrigramBloom, extract_trigram_hashes,
 };
 
-/// Hot Tail target size cap (768 KiB) before spilling secondary blooms/dicts to Lazy Index.
-const HOT_TAIL_BUDGET_BYTES: usize = 768 * 1024;
+/// Compressed Hot Tail soft budget (960 KiB) for keeping small FileDicts and secondary blooms hot.
+const HOT_TAIL_SOFT_BUDGET_BYTES: usize = 960 * 1024;
+/// Hard Hot Tail budget (1 MiB = `DEFAULT_TAIL_HINT`) guaranteeing 1-GET cold open.
+const HOT_TAIL_HARD_BUDGET_BYTES: usize = DEFAULT_TAIL_HINT as usize;
+/// Minimum compressed mini-block bytes required to emit a narrow-column trigram filter.
+const MIN_NARROW_TRIGRAM_STORED_BYTES: usize = 2560;
 /// Maximum size of a single FileDict kept inside the Hot Tail (8 KiB).
 const HOT_DICT_MAX_BYTES: usize = 8 * 1024;
 /// Target SBBF false-positive probability.
@@ -260,7 +264,7 @@ struct PhysColWriteState {
     locality_group: LocalityGroup,
     is_shredded_subcol: bool,
     is_payload_refs: bool,
-    dict: Option<FileDict>,
+    dict: Option<Arc<FileDict>>,
     used_dict_encoding: bool,
     has_non_dict_data_block: bool,
     null_count_total: u32,
@@ -625,112 +629,40 @@ impl<'a> StatamWriter<'a> {
         let rg_dir_bytes_len = self.rg_entries.len() * ROW_GROUP_ENTRY_LEN;
         let block_dir_bytes_len = total_blocks_usize * BLOCK_ENTRY_LEN;
 
-        let mut cur_hot_tail_size = POSTSCRIPT_LEN
-            + schema_bytes.len()
-            + col_dir_bytes_len
-            + rg_dir_bytes_len
-            + block_dir_bytes_len;
-
-        let mut hot_bloom_buf = Vec::new();
-        let mut hot_dict_buf = Vec::new();
-        let mut lazy_data_buf = Vec::new();
-        let mut lazy_entries = Vec::new();
-        let mut cur_file_off = self.cur_data_offset;
-
-        // 1. Primary Hot Bloom (e.g. `trace_id`) goes into Hot Tail when present.
-        if let Some(hot_idx) = self.hot_bloom_col_idx
-            && let Some(bloom_bytes) = self.build_bloom_for_col(hot_idx)?
-        {
-            if cur_hot_tail_size + bloom_bytes.len() <= MAX_HOT_TAIL_BYTES {
-                let off = hot_bloom_buf.len() as u64;
-                let len = bloom_bytes.len() as u32;
-                hot_bloom_buf.extend_from_slice(&bloom_bytes);
-                cur_hot_tail_size += bloom_bytes.len();
-                col_dirs[hot_idx].col_flags |= COL_FLAG_BLOOM_IN_HOT_TAIL;
-                col_dirs[hot_idx].bloom_offset = off;
-                col_dirs[hot_idx].bloom_len = len;
-            } else {
-                append_lazy_entry(
-                    LazyIndexKind::Bloom,
-                    hot_idx as u32,
-                    &bloom_bytes,
-                    &mut cur_file_off,
-                    &mut lazy_data_buf,
-                    &mut lazy_entries,
-                    &mut col_dirs[hot_idx],
-                )?;
-                cur_hot_tail_size += LAZY_INDEX_ENTRY_LEN;
+        let mut rg_dir_bytes = Vec::with_capacity(rg_dir_bytes_len);
+        for rg in &self.rg_entries {
+            rg_dir_bytes.extend_from_slice(&rg.encode());
+        }
+        let mut block_dir_bytes = Vec::with_capacity(block_dir_bytes_len);
+        for col_blocks in &self.phys_blocks {
+            for blk in col_blocks {
+                block_dir_bytes.extend_from_slice(&blk.encode());
             }
         }
 
-        // 2. Small file-level dictionaries (<= 8 KiB each while Hot Tail <= 768 KiB).
-        for (pidx, state) in self.phys_col_meta.iter().enumerate() {
-            if !state.used_dict_encoding {
-                continue;
+        // Measure compressed directory baseline (`schema + col_dir + rg_dir + block_dir`)
+        // so 1M-row files keep stored Hot Tail <= 1 MiB while small dicts/blooms stay hot
+        // whenever compressed Hot Tail remains <= 960 KiB.
+        let base_dirs_len =
+            schema_bytes.len() + col_dir_bytes_len + rg_dir_bytes.len() + block_dir_bytes.len();
+        let base_compressed_len = if self.options.compress_hot_tail_lz4 {
+            let mut base_raw = Vec::with_capacity(base_dirs_len);
+            base_raw.extend_from_slice(&schema_bytes);
+            for cd in &col_dirs {
+                base_raw.extend_from_slice(&cd.encode());
             }
-            let Some(dict) = &state.dict else {
-                continue;
-            };
-            let dict_bytes = dict.encode(dict_codec, zstd_level)?;
-            if dict_bytes.len() <= HOT_DICT_MAX_BYTES
-                && cur_hot_tail_size + dict_bytes.len() <= HOT_TAIL_BUDGET_BYTES
-            {
-                let off = hot_dict_buf.len() as u64;
-                let len = dict_bytes.len() as u32;
-                hot_dict_buf.extend_from_slice(&dict_bytes);
-                cur_hot_tail_size += dict_bytes.len();
-                col_dirs[pidx].col_flags |= COL_FLAG_DICT_IN_HOT_TAIL;
-                col_dirs[pidx].dict_offset = off;
-                col_dirs[pidx].dict_len = len;
-            } else {
-                append_lazy_entry(
-                    LazyIndexKind::Dict,
-                    pidx as u32,
-                    &dict_bytes,
-                    &mut cur_file_off,
-                    &mut lazy_data_buf,
-                    &mut lazy_entries,
-                    &mut col_dirs[pidx],
-                )?;
-                cur_hot_tail_size += LAZY_INDEX_ENTRY_LEN;
-            }
-        }
+            base_raw.extend_from_slice(&rg_dir_bytes);
+            base_raw.extend_from_slice(&block_dir_bytes);
+            lz4_flex::block::compress(&base_raw)
+                .len()
+                .min(base_dirs_len)
+        } else {
+            base_dirs_len
+        };
 
-        // 3. Secondary blooms (Hot Tail while total <= 768 KiB, else Lazy Index).
-        let mut bloom_indices: Vec<usize> = self.bloom_col_set.iter().copied().collect();
-        bloom_indices.sort_unstable();
-        for cidx in bloom_indices {
-            if Some(cidx) == self.hot_bloom_col_idx {
-                continue;
-            }
-            if let Some(bloom_bytes) = self.build_bloom_for_col(cidx)? {
-                if cur_hot_tail_size + bloom_bytes.len() + LAZY_INDEX_ENTRY_LEN
-                    <= HOT_TAIL_BUDGET_BYTES
-                {
-                    let off = hot_bloom_buf.len() as u64;
-                    let len = bloom_bytes.len() as u32;
-                    hot_bloom_buf.extend_from_slice(&bloom_bytes);
-                    cur_hot_tail_size += bloom_bytes.len();
-                    col_dirs[cidx].col_flags |= COL_FLAG_BLOOM_IN_HOT_TAIL;
-                    col_dirs[cidx].bloom_offset = off;
-                    col_dirs[cidx].bloom_len = len;
-                } else {
-                    append_lazy_entry(
-                        LazyIndexKind::Bloom,
-                        cidx as u32,
-                        &bloom_bytes,
-                        &mut cur_file_off,
-                        &mut lazy_data_buf,
-                        &mut lazy_entries,
-                        &mut col_dirs[cidx],
-                    )?;
-                    cur_hot_tail_size += LAZY_INDEX_ENTRY_LEN;
-                }
-            }
-        }
-
-        // 4. Narrow-column trigram index sections (L1Compact, when not purely Dict/ConstNull).
-        let mut has_any_trigram = false;
+        // Prebuild narrow trigrams, FileDict encodings, secondary blooms, and primary hot bloom
+        // without cloning bloom hash vectors.
+        let mut trigram_items: Vec<(usize, Vec<u8>)> = Vec::new();
         let mut trigram_indices: Vec<usize> = self.narrow_trigram_col_set.iter().copied().collect();
         trigram_indices.sort_unstable();
         for cidx in trigram_indices {
@@ -740,105 +672,154 @@ impl<'a> StatamWriter<'a> {
             if let Some(filters) = self.narrow_trigrams.get(&cidx)
                 && let Some(sec_bytes) = encode_narrow_trigram_section(filters)?
             {
-                append_lazy_entry(
-                    LazyIndexKind::NarrowTrigram,
-                    cidx as u32,
-                    &sec_bytes,
-                    &mut cur_file_off,
-                    &mut lazy_data_buf,
-                    &mut lazy_entries,
-                    &mut col_dirs[cidx],
-                )?;
-                col_dirs[cidx].col_flags |= COL_FLAG_HAS_TRIGRAM_INDEX;
-                has_any_trigram = true;
+                trigram_items.push((cidx, sec_bytes));
+            }
+        }
+        let has_any_trigram = !trigram_items.is_empty();
+
+        let mut dict_items: Vec<(usize, Vec<u8>, bool)> = Vec::new();
+        for (pidx, state) in self.phys_col_meta.iter().enumerate() {
+            if !state.used_dict_encoding {
+                continue;
+            }
+            let Some(dict) = &state.dict else {
+                continue;
+            };
+            let dict_bytes = dict.encode(dict_codec, zstd_level)?;
+            dict_items.push((pidx, dict_bytes, false));
+        }
+
+        let mut sec_blooms: Vec<(usize, Vec<u8>, bool)> = Vec::new();
+        let mut bloom_indices: Vec<usize> = self.bloom_col_set.iter().copied().collect();
+        bloom_indices.sort_unstable();
+        for cidx in bloom_indices {
+            if Some(cidx) == self.hot_bloom_col_idx {
+                continue;
+            }
+            if let Some(bloom_bytes) = self.take_and_build_bloom_for_col(cidx)? {
+                sec_blooms.push((cidx, bloom_bytes, false));
             }
         }
 
-        // 5. Assemble uncompressed Hot Tail body.
-        let mut hot_tail_raw = Vec::with_capacity(cur_hot_tail_size);
-        let schema_off = 0u32;
-        let schema_len =
-            u32::try_from(schema_bytes.len()).map_err(|_| StatamError::BoundsExceeded {
-                reason: "schema_len overflows u32",
-            })?;
-        hot_tail_raw.extend_from_slice(&schema_bytes);
+        let max_lazy_overhead = (trigram_items.len() + dict_items.len() + sec_blooms.len() + 1)
+            .saturating_mul(LAZY_INDEX_ENTRY_LEN);
+        let avail_1mib_for_primary = HOT_TAIL_HARD_BUDGET_BYTES.saturating_sub(
+            POSTSCRIPT_LEN
+                .saturating_add(base_compressed_len)
+                .saturating_add(max_lazy_overhead)
+                .saturating_add(256),
+        );
 
-        let col_dir_off = hot_tail_raw.len() as u32;
-        for cd in &col_dirs {
-            hot_tail_raw.extend_from_slice(&cd.encode());
-        }
-
-        let rg_dir_off = hot_tail_raw.len() as u32;
-        for rg in &self.rg_entries {
-            hot_tail_raw.extend_from_slice(&rg.encode());
-        }
-
-        let block_dir_off = hot_tail_raw.len() as u32;
-        for col_blocks in &self.phys_blocks {
-            for blk in col_blocks {
-                hot_tail_raw.extend_from_slice(&blk.encode());
-            }
-        }
-
-        let (hot_bloom_off, hot_bloom_len) = if hot_bloom_buf.is_empty() {
-            (0u32, 0u32)
-        } else {
-            let off = hot_tail_raw.len() as u32;
-            let len = hot_bloom_buf.len() as u32;
-            hot_tail_raw.extend_from_slice(&hot_bloom_buf);
-            (off, len)
-        };
-
-        let (hot_dict_off, hot_dict_len) = if hot_dict_buf.is_empty() {
-            (0u32, 0u32)
-        } else {
-            let off = hot_tail_raw.len() as u32;
-            let len = hot_dict_buf.len() as u32;
-            hot_tail_raw.extend_from_slice(&hot_dict_buf);
-            (off, len)
-        };
-
-        let (lazy_dir_off, lazy_dir_len) = if lazy_entries.is_empty() {
-            (0u32, 0u32)
-        } else {
-            let off = hot_tail_raw.len() as u32;
-            for entry in &lazy_entries {
-                hot_tail_raw.extend_from_slice(&entry.encode());
-            }
-            let len = (lazy_entries.len() * LAZY_INDEX_ENTRY_LEN) as u32;
-            (off, len)
-        };
-
-        if hot_tail_raw.len() > MAX_HOT_TAIL_BYTES {
-            return Err(StatamError::BoundsExceeded {
-                reason: "uncompressed hot tail exceeds MAX_HOT_TAIL_BYTES",
-            });
-        }
-        let hot_tail_raw_len = hot_tail_raw.len() as u32;
-
-        let (hot_tail_stored, is_lz4) = if self.options.compress_hot_tail_lz4 {
-            let compressed = lz4_flex::block::compress(&hot_tail_raw);
-            if compressed.len().saturating_add(16) < hot_tail_raw.len() {
-                (compressed, true)
+        let mut primary_bloom: Option<(usize, Vec<u8>, bool)> =
+            if let Some(hot_idx) = self.hot_bloom_col_idx {
+                self.take_and_build_primary_bloom(hot_idx, avail_1mib_for_primary)?
+                    .map(|(bytes, fits_hot)| (hot_idx, bytes, fits_hot))
             } else {
-                (hot_tail_raw, false)
-            }
-        } else {
-            (hot_tail_raw, false)
-        };
+                None
+            };
 
-        let hot_tail_len = hot_tail_stored
-            .len()
-            .checked_add(POSTSCRIPT_LEN)
-            .and_then(|v| u32::try_from(v).ok())
-            .ok_or(StatamError::BoundsExceeded {
-                reason: "hot_tail_len overflows u32",
-            })?;
-        if (hot_tail_len as usize) > MAX_HOT_TAIL_BYTES {
-            return Err(StatamError::BoundsExceeded {
-                reason: "stored hot tail exceeds MAX_HOT_TAIL_BYTES",
-            });
+        // Decide initial Hot Tail placement against the 960 KiB compressed soft budget.
+        let mut est_stored = POSTSCRIPT_LEN
+            .saturating_add(base_compressed_len)
+            .saturating_add(trigram_items.len().saturating_mul(LAZY_INDEX_ENTRY_LEN));
+        if let Some((_, ref bytes, in_hot)) = primary_bloom {
+            if in_hot {
+                est_stored = est_stored.saturating_add(bytes.len());
+            } else {
+                est_stored = est_stored.saturating_add(LAZY_INDEX_ENTRY_LEN);
+            }
         }
+        let mut remaining_lazy_entries = dict_items.len() + sec_blooms.len();
+        for (_, bytes, in_hot) in &mut dict_items {
+            remaining_lazy_entries = remaining_lazy_entries.saturating_sub(1);
+            let reserve = remaining_lazy_entries * LAZY_INDEX_ENTRY_LEN;
+            if bytes.len() <= HOT_DICT_MAX_BYTES
+                && est_stored
+                    .saturating_add(bytes.len())
+                    .saturating_add(reserve)
+                    <= HOT_TAIL_SOFT_BUDGET_BYTES
+            {
+                *in_hot = true;
+                est_stored = est_stored.saturating_add(bytes.len());
+            } else {
+                *in_hot = false;
+                est_stored = est_stored.saturating_add(LAZY_INDEX_ENTRY_LEN);
+            }
+        }
+        for (_, bytes, in_hot) in &mut sec_blooms {
+            remaining_lazy_entries = remaining_lazy_entries.saturating_sub(1);
+            let reserve = remaining_lazy_entries * LAZY_INDEX_ENTRY_LEN;
+            if est_stored
+                .saturating_add(bytes.len())
+                .saturating_add(reserve)
+                <= HOT_TAIL_SOFT_BUDGET_BYTES
+            {
+                *in_hot = true;
+                est_stored = est_stored.saturating_add(bytes.len());
+            } else {
+                *in_hot = false;
+                est_stored = est_stored.saturating_add(LAZY_INDEX_ENTRY_LEN);
+            }
+        }
+
+        let mut assembled = assemble_hot_tail_and_lazy(
+            &col_dirs,
+            &schema_bytes,
+            &rg_dir_bytes,
+            &block_dir_bytes,
+            self.cur_data_offset,
+            self.options.compress_hot_tail_lz4,
+            primary_bloom.as_ref(),
+            &dict_items,
+            &sec_blooms,
+            &trigram_items,
+        )?;
+
+        // Spill secondary blooms, then small hot dicts, then primary bloom if actual
+        // compressed Hot Tail exceeds 1 MiB (`DEFAULT_TAIL_HINT`).
+        while assembled.hot_tail_len as usize > HOT_TAIL_HARD_BUDGET_BYTES {
+            if let Some(item) = sec_blooms.iter_mut().rev().find(|x| x.2) {
+                item.2 = false;
+            } else if let Some(item) = dict_items.iter_mut().rev().find(|x| x.2) {
+                item.2 = false;
+            } else if let Some((_, _, ref mut in_hot)) = primary_bloom
+                && *in_hot
+            {
+                *in_hot = false;
+            } else {
+                break;
+            }
+            assembled = assemble_hot_tail_and_lazy(
+                &col_dirs,
+                &schema_bytes,
+                &rg_dir_bytes,
+                &block_dir_bytes,
+                self.cur_data_offset,
+                self.options.compress_hot_tail_lz4,
+                primary_bloom.as_ref(),
+                &dict_items,
+                &sec_blooms,
+                &trigram_items,
+            )?;
+        }
+
+        let hot_tail_raw_len = assembled.hot_tail_raw_len;
+        let hot_tail_len = assembled.hot_tail_len;
+        let hot_tail_stored = assembled.hot_tail_stored;
+        let is_lz4 = assembled.is_lz4;
+        let lazy_data_buf = assembled.lazy_data_buf;
+        let cur_file_off = assembled.cur_file_off;
+        let schema_off = 0u32;
+        let schema_len = assembled.schema_len;
+        let col_dir_off = assembled.col_dir_off;
+        let rg_dir_off = assembled.rg_dir_off;
+        let block_dir_off = assembled.block_dir_off;
+        let hot_bloom_off = assembled.hot_bloom_off;
+        let hot_bloom_len = assembled.hot_bloom_len;
+        let hot_dict_off = assembled.hot_dict_off;
+        let hot_dict_len = assembled.hot_dict_len;
+        let lazy_dir_off = assembled.lazy_dir_off;
+        let lazy_dir_len = assembled.lazy_dir_len;
 
         let mut flags = 0u16;
         if self.options.profile == WriteProfile::L1Compact {
@@ -1258,6 +1239,14 @@ impl<'a> StatamWriter<'a> {
             if HIGH_CARDINALITY_ID_COLS.contains(&field.name.as_str()) {
                 continue;
             }
+            if self.options.profile == WriteProfile::L0Fast {
+                let is_known_low_card = KNOWN_LOW_CARD_DICT_COLS.contains(&field.name.as_str());
+                let is_core_utf8 = self.logical_locality[cidx] == LocalityGroup::Core
+                    && field.data_type == DataType::Utf8;
+                if !is_known_low_card && !is_core_utf8 {
+                    continue;
+                }
+            }
             let flat = rg_cols[cidx].materialize(None)?;
             let builder = match self.options.profile {
                 WriteProfile::L0Fast => DictBuilder::l0_fast(),
@@ -1277,7 +1266,7 @@ impl<'a> StatamWriter<'a> {
                     && ((non_null_rows >= 16 && dict.len() * 2 <= non_null_rows) || dict.len() <= 8)
             };
             if low_ndv {
-                self.phys_col_meta[cidx].dict = Some(dict);
+                self.phys_col_meta[cidx].dict = Some(Arc::new(dict));
             }
         }
 
@@ -1298,14 +1287,14 @@ impl<'a> StatamWriter<'a> {
         let dt = self.schema.fields()[cidx].data_type.clone();
         let rg_rows = col.len();
         let track_trigram = self.narrow_trigram_col_set.contains(&cidx);
-        let dict_clone = self.phys_col_meta[cidx].dict.clone();
+        let dict_clone = self.phys_col_meta[cidx].dict.as_ref().map(Arc::clone);
 
         let mut row_off = 0usize;
         while row_off < rg_rows {
             let mb_len = (rg_rows - row_off).min(mb_size);
             let mb_first_row = first_row_u32 + row_off as u32;
             let sliced = col.slice(row_off, mb_len)?;
-            let enc = encode_mini_block(&sliced, &dt, self.options.profile, dict_clone.as_ref())?;
+            let enc = encode_mini_block(&sliced, &dt, self.options.profile, dict_clone.as_deref())?;
 
             if enc.encoding == Encoding::Dict {
                 self.phys_col_meta[cidx].used_dict_encoding = true;
@@ -1326,7 +1315,14 @@ impl<'a> StatamWriter<'a> {
             self.phys_blocks[cidx].push(entry);
 
             if track_trigram {
-                let filter = build_narrow_trigram_for_mb(&sliced, entry.stored_len as usize);
+                let filter = if enc.encoding != Encoding::Dict
+                    && enc.encoding != Encoding::Const
+                    && enc.encoding != Encoding::ConstNull
+                {
+                    build_narrow_trigram_for_mb(&sliced, entry.stored_len as usize)
+                } else {
+                    None
+                };
                 if let Some(list) = self.narrow_trigrams.get_mut(&cidx) {
                     list.push(filter);
                 }
@@ -1509,9 +1505,9 @@ impl<'a> StatamWriter<'a> {
                 let mut refs = Vec::new();
 
                 if bypassed {
-                    // W4 incompressible bypass: skip CDC hashing and intern direct slices.
+                    // W4 incompressible bypass: skip CDC hashing, dedup map, Zstd, and trigrams.
                     for slice in bytes.chunks(MAX_FRAME_RAW_BYTES.min(64 * 1024)) {
-                        let cid = pb.intern_chunk(slice)?;
+                        let cid = pb.append_raw_uncompressed_bypass(slice)?;
                         refs.push((0u16, cid));
                     }
                 } else {
@@ -1554,21 +1550,80 @@ impl<'a> StatamWriter<'a> {
         Ok(out)
     }
 
-    fn build_bloom_for_col(&self, cidx: usize) -> Result<Option<Vec<u8>>, StatamError> {
-        let Some(hashes) = self.bloom_hashes.get(&cidx) else {
+    fn take_and_build_bloom_for_col(
+        &mut self,
+        cidx: usize,
+    ) -> Result<Option<Vec<u8>>, StatamError> {
+        let Some(mut hashes) = self.bloom_hashes.remove(&cidx) else {
             return Ok(None);
         };
         if hashes.is_empty() {
             return Ok(None);
         }
-        let mut unique = hashes.clone();
-        unique.sort_unstable();
-        unique.dedup();
-        let mut sbbf = Sbbf::new_for_ndv(unique.len(), BLOOM_FPP);
-        for h in unique {
+        let skip_dedup = self.options.profile == WriteProfile::L0Fast
+            && matches!(
+                self.schema.fields()[cidx].name.as_str(),
+                "span_id" | "score_id"
+            );
+        if !skip_dedup {
+            hashes.sort_unstable();
+            hashes.dedup();
+        }
+        let mut sbbf = Sbbf::new_for_ndv(hashes.len(), BLOOM_FPP);
+        for h in hashes {
             sbbf.insert_hash(h);
         }
         Ok(Some(sbbf.to_bytes()))
+    }
+
+    fn take_and_build_primary_bloom(
+        &mut self,
+        cidx: usize,
+        avail_bytes: usize,
+    ) -> Result<Option<(Vec<u8>, bool)>, StatamError> {
+        let Some(mut hashes) = self.bloom_hashes.remove(&cidx) else {
+            return Ok(None);
+        };
+        if hashes.is_empty() {
+            return Ok(None);
+        }
+        hashes.sort_unstable();
+        hashes.dedup();
+        let ndv = hashes.len();
+
+        let default_sbbf = Sbbf::new_for_ndv(ndv, BLOOM_FPP);
+        if default_sbbf.encoded_len() <= avail_bytes {
+            let mut sbbf = default_sbbf;
+            for h in hashes {
+                sbbf.insert_hash(h);
+            }
+            return Ok(Some((sbbf.to_bytes(), true)));
+        }
+
+        if avail_bytes >= 32 * 1024 && Sbbf::new_for_ndv(ndv, 0.50).encoded_len() <= avail_bytes {
+            let mut lo = BLOOM_FPP;
+            let mut hi = 0.50;
+            for _ in 0..24 {
+                let mid = 0.5 * (lo + hi);
+                if Sbbf::new_for_ndv(ndv, mid).encoded_len() <= avail_bytes {
+                    hi = mid;
+                } else {
+                    lo = mid;
+                }
+            }
+            let mut sbbf = Sbbf::new_for_ndv(ndv, hi);
+            for h in hashes {
+                sbbf.insert_hash(h);
+            }
+            return Ok(Some((sbbf.to_bytes(), true)));
+        }
+
+        // Cannot fit inside 1 MiB Hot Tail even at FPP 0.50 -> spill at full FPP to Lazy Index.
+        let mut sbbf = default_sbbf;
+        for h in hashes {
+            sbbf.insert_hash(h);
+        }
+        Ok(Some((sbbf.to_bytes(), false)))
     }
 }
 
@@ -2099,15 +2154,16 @@ fn collect_column_bloom_hashes(col: &Column, out: &mut Vec<u64>) -> Result<(), S
         }
         Column::Dict(d) => {
             let flat_vals = d.values();
-            let mut val_hashes = Vec::with_capacity(flat_vals.len());
-            for i in 0..flat_vals.len() {
-                val_hashes.push(flat_row_bloom_hash(flat_vals, i));
-            }
+            let mut seen = vec![false; flat_vals.len()];
             for (r, &c) in d.codes().iter().enumerate() {
                 if !d.is_null(r)
-                    && let Some(Some(h)) = val_hashes.get(c as usize)
+                    && let Some(slot) = seen.get_mut(c as usize)
+                    && !*slot
                 {
-                    out.push(*h);
+                    *slot = true;
+                    if let Some(h) = flat_row_bloom_hash(flat_vals, c as usize) {
+                        out.push(h);
+                    }
                 }
             }
         }
@@ -2164,7 +2220,7 @@ fn flat_row_bloom_hash(flat: &FlatColumn, row: usize) -> Option<u64> {
 }
 
 fn build_narrow_trigram_for_mb(col: &Column, stored_len: usize) -> Option<Vec<u8>> {
-    if stored_len == 0 || col.is_empty() {
+    if stored_len < MIN_NARROW_TRIGRAM_STORED_BYTES || col.is_empty() {
         return None;
     }
     let flat = col.materialize(None).ok()?;
@@ -2186,14 +2242,19 @@ fn build_narrow_trigram_for_mb(col: &Column, stored_len: usize) -> Option<Vec<u8
     hashes.sort_unstable();
     hashes.dedup();
 
+    let max_bytes = (stored_len / 10).min(MAX_TRIGRAM_BLOOM_BYTES);
+    if max_bytes < MIN_TRIGRAM_BLOOM_BYTES {
+        return None;
+    }
+    let cap_pow2 = 1usize << (usize::BITS as usize - 1 - max_bytes.leading_zeros() as usize);
     let desired = hashes
         .len()
         .saturating_mul(10)
         .checked_div(8)
         .unwrap_or(MIN_TRIGRAM_BLOOM_BYTES)
-        .clamp(MIN_TRIGRAM_BLOOM_BYTES, MAX_TRIGRAM_BLOOM_BYTES)
+        .max(MIN_TRIGRAM_BLOOM_BYTES)
         .next_power_of_two()
-        .min(MAX_TRIGRAM_BLOOM_BYTES);
+        .min(cap_pow2);
 
     let mut bloom = TrigramBloom::new(desired);
     bloom.insert_hashes(&hashes);
@@ -2201,6 +2262,226 @@ fn build_narrow_trigram_for_mb(col: &Column, stored_len: usize) -> Option<Vec<u8
         return None;
     }
     Some(bloom.as_bytes().to_vec())
+}
+
+struct AssembledHotTail {
+    hot_tail_raw_len: u32,
+    hot_tail_len: u32,
+    hot_tail_stored: Vec<u8>,
+    is_lz4: bool,
+    lazy_data_buf: Vec<u8>,
+    cur_file_off: u64,
+    schema_len: u32,
+    col_dir_off: u32,
+    rg_dir_off: u32,
+    block_dir_off: u32,
+    hot_bloom_off: u32,
+    hot_bloom_len: u32,
+    hot_dict_off: u32,
+    hot_dict_len: u32,
+    lazy_dir_off: u32,
+    lazy_dir_len: u32,
+}
+
+#[allow(clippy::too_many_arguments)]
+fn assemble_hot_tail_and_lazy(
+    base_col_dirs: &[ColumnDirEntry],
+    schema_bytes: &[u8],
+    rg_dir_bytes: &[u8],
+    block_dir_bytes: &[u8],
+    data_end_offset: u64,
+    compress_hot_tail_lz4: bool,
+    primary_bloom: Option<&(usize, Vec<u8>, bool)>,
+    dict_items: &[(usize, Vec<u8>, bool)],
+    sec_blooms: &[(usize, Vec<u8>, bool)],
+    trigram_items: &[(usize, Vec<u8>)],
+) -> Result<AssembledHotTail, StatamError> {
+    let mut col_dirs = base_col_dirs.to_vec();
+    let mut hot_bloom_buf = Vec::new();
+    let mut hot_dict_buf = Vec::new();
+    let mut lazy_data_buf = Vec::new();
+    let mut lazy_entries = Vec::new();
+    let mut cur_file_off = data_end_offset;
+
+    if let Some((hot_idx, bloom_bytes, in_hot)) = primary_bloom {
+        if *in_hot {
+            let off = hot_bloom_buf.len() as u64;
+            let len = bloom_bytes.len() as u32;
+            hot_bloom_buf.extend_from_slice(bloom_bytes);
+            col_dirs[*hot_idx].col_flags |= COL_FLAG_BLOOM_IN_HOT_TAIL;
+            col_dirs[*hot_idx].bloom_offset = off;
+            col_dirs[*hot_idx].bloom_len = len;
+        } else {
+            append_lazy_entry(
+                LazyIndexKind::Bloom,
+                *hot_idx as u32,
+                bloom_bytes,
+                &mut cur_file_off,
+                &mut lazy_data_buf,
+                &mut lazy_entries,
+                &mut col_dirs[*hot_idx],
+            )?;
+        }
+    }
+
+    for (pidx, dict_bytes, in_hot) in dict_items {
+        if *in_hot {
+            let off = hot_dict_buf.len() as u64;
+            let len = dict_bytes.len() as u32;
+            hot_dict_buf.extend_from_slice(dict_bytes);
+            col_dirs[*pidx].col_flags |= COL_FLAG_DICT_IN_HOT_TAIL;
+            col_dirs[*pidx].dict_offset = off;
+            col_dirs[*pidx].dict_len = len;
+        } else {
+            append_lazy_entry(
+                LazyIndexKind::Dict,
+                *pidx as u32,
+                dict_bytes,
+                &mut cur_file_off,
+                &mut lazy_data_buf,
+                &mut lazy_entries,
+                &mut col_dirs[*pidx],
+            )?;
+        }
+    }
+
+    for (cidx, bloom_bytes, in_hot) in sec_blooms {
+        if *in_hot {
+            let off = hot_bloom_buf.len() as u64;
+            let len = bloom_bytes.len() as u32;
+            hot_bloom_buf.extend_from_slice(bloom_bytes);
+            col_dirs[*cidx].col_flags |= COL_FLAG_BLOOM_IN_HOT_TAIL;
+            col_dirs[*cidx].bloom_offset = off;
+            col_dirs[*cidx].bloom_len = len;
+        } else {
+            append_lazy_entry(
+                LazyIndexKind::Bloom,
+                *cidx as u32,
+                bloom_bytes,
+                &mut cur_file_off,
+                &mut lazy_data_buf,
+                &mut lazy_entries,
+                &mut col_dirs[*cidx],
+            )?;
+        }
+    }
+
+    for (cidx, sec_bytes) in trigram_items {
+        append_lazy_entry(
+            LazyIndexKind::NarrowTrigram,
+            *cidx as u32,
+            sec_bytes,
+            &mut cur_file_off,
+            &mut lazy_data_buf,
+            &mut lazy_entries,
+            &mut col_dirs[*cidx],
+        )?;
+        col_dirs[*cidx].col_flags |= COL_FLAG_HAS_TRIGRAM_INDEX;
+    }
+
+    let exact_raw_len = schema_bytes.len()
+        + col_dirs.len() * COLUMN_DIR_ENTRY_LEN
+        + rg_dir_bytes.len()
+        + block_dir_bytes.len()
+        + hot_bloom_buf.len()
+        + hot_dict_buf.len()
+        + lazy_entries.len() * LAZY_INDEX_ENTRY_LEN;
+    if exact_raw_len > MAX_HOT_TAIL_BYTES {
+        return Err(StatamError::BoundsExceeded {
+            reason: "uncompressed hot tail exceeds MAX_HOT_TAIL_BYTES",
+        });
+    }
+
+    let mut hot_tail_raw = Vec::with_capacity(exact_raw_len);
+    let schema_len =
+        u32::try_from(schema_bytes.len()).map_err(|_| StatamError::BoundsExceeded {
+            reason: "schema_len overflows u32",
+        })?;
+    hot_tail_raw.extend_from_slice(schema_bytes);
+
+    let col_dir_off = hot_tail_raw.len() as u32;
+    for cd in &col_dirs {
+        hot_tail_raw.extend_from_slice(&cd.encode());
+    }
+
+    let rg_dir_off = hot_tail_raw.len() as u32;
+    hot_tail_raw.extend_from_slice(rg_dir_bytes);
+
+    let block_dir_off = hot_tail_raw.len() as u32;
+    hot_tail_raw.extend_from_slice(block_dir_bytes);
+
+    let (hot_bloom_off, hot_bloom_len) = if hot_bloom_buf.is_empty() {
+        (0u32, 0u32)
+    } else {
+        let off = hot_tail_raw.len() as u32;
+        let len = hot_bloom_buf.len() as u32;
+        hot_tail_raw.extend_from_slice(&hot_bloom_buf);
+        (off, len)
+    };
+
+    let (hot_dict_off, hot_dict_len) = if hot_dict_buf.is_empty() {
+        (0u32, 0u32)
+    } else {
+        let off = hot_tail_raw.len() as u32;
+        let len = hot_dict_buf.len() as u32;
+        hot_tail_raw.extend_from_slice(&hot_dict_buf);
+        (off, len)
+    };
+
+    let (lazy_dir_off, lazy_dir_len) = if lazy_entries.is_empty() {
+        (0u32, 0u32)
+    } else {
+        let off = hot_tail_raw.len() as u32;
+        for entry in &lazy_entries {
+            hot_tail_raw.extend_from_slice(&entry.encode());
+        }
+        let len = (lazy_entries.len() * LAZY_INDEX_ENTRY_LEN) as u32;
+        (off, len)
+    };
+
+    let hot_tail_raw_len = hot_tail_raw.len() as u32;
+    let (hot_tail_stored, is_lz4) = if compress_hot_tail_lz4 {
+        let compressed = lz4_flex::block::compress(&hot_tail_raw);
+        if compressed.len().saturating_add(16) < hot_tail_raw.len() {
+            (compressed, true)
+        } else {
+            (hot_tail_raw, false)
+        }
+    } else {
+        (hot_tail_raw, false)
+    };
+
+    let hot_tail_len = hot_tail_stored
+        .len()
+        .checked_add(POSTSCRIPT_LEN)
+        .and_then(|v| u32::try_from(v).ok())
+        .ok_or(StatamError::BoundsExceeded {
+            reason: "hot_tail_len overflows u32",
+        })?;
+    if (hot_tail_len as usize) > MAX_HOT_TAIL_BYTES {
+        return Err(StatamError::BoundsExceeded {
+            reason: "stored hot tail exceeds MAX_HOT_TAIL_BYTES",
+        });
+    }
+
+    Ok(AssembledHotTail {
+        hot_tail_raw_len,
+        hot_tail_len,
+        hot_tail_stored,
+        is_lz4,
+        lazy_data_buf,
+        cur_file_off,
+        schema_len,
+        col_dir_off,
+        rg_dir_off,
+        block_dir_off,
+        hot_bloom_off,
+        hot_bloom_len,
+        hot_dict_off,
+        hot_dict_len,
+        lazy_dir_off,
+        lazy_dir_len,
+    })
 }
 
 fn encode_narrow_trigram_section(
@@ -2300,4 +2581,245 @@ fn default_l1_codec() -> Codec {
 #[cfg(miri)]
 fn default_l1_codec() -> Codec {
     Codec::Lz4
+}
+
+#[cfg(test)]
+mod tests {
+    use cetra_column::Field;
+
+    use super::*;
+    use crate::io::SliceReader;
+    use crate::payload::pack::{ChunkPackReader, PackWriteOptions};
+    use crate::reader::{InMemoryPackResolver, PackResolver, ScanRequest, StatamReader};
+
+    #[test]
+    fn l0fast_skips_widerow_dict_probing_and_narrow_trigram_skips_dict() {
+        let schema = Schema::try_new_arc(vec![
+            Field::new("name", DataType::Utf8, false),
+            Field::new("input_preview", DataType::Utf8, false),
+            Field::new("output_preview", DataType::Utf8, false),
+            Field::new("request_params", DataType::Utf8, false),
+            Field::new("status_message", DataType::Utf8, false),
+        ])
+        .unwrap();
+
+        // Low cardinality on all columns (only 3 distinct values across 64 rows).
+        let n = 64usize;
+        let vals: Vec<String> = (0..n).map(|i| format!("val_{}", i % 3)).collect();
+        let refs: Vec<&str> = vals.iter().map(String::as_str).collect();
+        let make_col = || {
+            Column::Flat(
+                FlatColumn::try_new(
+                    FlatData::Utf8(Utf8Data::try_from_slices(refs.iter().copied()).unwrap()),
+                    None,
+                )
+                .unwrap(),
+            )
+        };
+        let batch = Batch::try_new_all(
+            Arc::clone(&schema),
+            vec![make_col(), make_col(), make_col(), make_col(), make_col()],
+            n,
+        )
+        .unwrap();
+
+        // L0Fast: `name` (Core) gets FileDict, WideRow preview/params/status_message MUST NOT.
+        let mut opts_l0 = WriteOptions::for_table(TableKind::Spans, WriteProfile::L0Fast);
+        opts_l0.bloom_cols.clear();
+        opts_l0.hot_bloom_col = None;
+        let mut l0_bytes = Vec::new();
+        let mut w0 = StatamWriter::new(Arc::clone(&schema), opts_l0, None).unwrap();
+        w0.write_batch(&batch).unwrap();
+        w0.finish(&mut l0_bytes).unwrap();
+        let r0 = StatamReader::open(Arc::new(SliceReader::new(l0_bytes)), None).unwrap();
+        assert_ne!(
+            r0.meta().col_dir[0].col_flags & COL_FLAG_HAS_FILE_DICT,
+            0,
+            "Core narrow Utf8 col `name` should get FileDict"
+        );
+        for wide_idx in 1..=4 {
+            assert_eq!(
+                r0.meta().col_dir[wide_idx].col_flags & COL_FLAG_HAS_FILE_DICT,
+                0,
+                "L0Fast must NOT probe FileDict on WideRow col {wide_idx}"
+            );
+        }
+
+        // L1Compact: `name` is Dict-encoded -> must skip narrow trigram index!
+        let mut opts_l1 = WriteOptions::for_table(TableKind::Spans, WriteProfile::L1Compact);
+        opts_l1.bloom_cols.clear();
+        opts_l1.hot_bloom_col = None;
+        let mut l1_bytes = Vec::new();
+        let mut w1 = StatamWriter::new(Arc::clone(&schema), opts_l1, None).unwrap();
+        w1.write_batch(&batch).unwrap();
+        w1.finish(&mut l1_bytes).unwrap();
+        let r1 = StatamReader::open(Arc::new(SliceReader::new(l1_bytes)), None).unwrap();
+        assert_eq!(
+            r1.meta().col_dir[0].col_flags & COL_FLAG_HAS_TRIGRAM_INDEX,
+            0,
+            "Dict-encoded `name` must not build NarrowTrigram index"
+        );
+    }
+
+    #[test]
+    fn w4_bypass_writes_uncompressed_raw_pack_frames_without_trigrams() {
+        let schema = Schema::try_new_arc(vec![
+            Field::new("id", DataType::I64, false),
+            Field::new("input", DataType::Utf8, true),
+        ])
+        .unwrap();
+
+        let pack_id = [0x55u8; 16];
+        let mut opts = WriteOptions::for_table(TableKind::Spans, WriteProfile::L1Compact);
+        opts.payload_cols = vec!["input".to_owned()];
+        opts.pack_id = Some(pack_id);
+
+        // 128 rows of high-entropy incompressible 2 KiB ASCII strings -> triggers W4 bypass after 64 chunks.
+        let n = 128usize;
+        let ids: Vec<i64> = (0..n as i64).collect();
+        let mut rng = 0x1234_5678_9abc_def0u64;
+        let mut payloads = Vec::with_capacity(n);
+        for i in 0..n {
+            let mut s = format!("W4_ROW_{i:04}_");
+            for _ in 0..2048 {
+                rng = rng
+                    .wrapping_mul(6364136223846793005)
+                    .wrapping_add(1442695040888963407);
+                s.push((b'!' + ((rng >> 56) as u8 % 90)) as char);
+            }
+            payloads.push(s);
+        }
+        let p_refs: Vec<&str> = payloads.iter().map(String::as_str).collect();
+        let batch = Batch::try_new_all(
+            Arc::clone(&schema),
+            vec![
+                Column::Flat(FlatColumn::try_new(FlatData::I64(ids), None).unwrap()),
+                Column::Flat(
+                    FlatColumn::try_new(
+                        FlatData::Utf8(Utf8Data::try_from_slices(p_refs).unwrap()),
+                        None,
+                    )
+                    .unwrap(),
+                ),
+            ],
+            n,
+        )
+        .unwrap();
+
+        let pack_opts = PackWriteOptions {
+            #[cfg(miri)]
+            codec: Codec::Lz4,
+            #[cfg(not(miri))]
+            codec: Codec::Zstd,
+            zstd_level: 3,
+            target_frame_raw_bytes: 16 * 1024,
+            enable_trigram_skip: true,
+            compress_toc_lz4: true,
+        };
+        let mut pb = ChunkPackBuilder::new(pack_id, pack_opts);
+        let mut file_bytes = Vec::new();
+        let mut w = StatamWriter::new(Arc::clone(&schema), opts, Some(&mut pb)).unwrap();
+        w.write_batch(&batch).unwrap();
+        w.finish(&mut file_bytes).unwrap();
+        let mut pack_bytes = Vec::new();
+        pb.finish(&mut pack_bytes).unwrap();
+
+        let pack_reader =
+            Arc::new(ChunkPackReader::open(Arc::new(SliceReader::new(pack_bytes))).unwrap());
+        let bypass_frames: Vec<_> = pack_reader
+            .toc()
+            .frames
+            .iter()
+            .filter(|f| f.codec == Codec::None && f.filter_len == 0)
+            .collect();
+        assert!(
+            !bypass_frames.is_empty(),
+            "W4 bypass must emit raw Codec::None frames with filter_len == 0"
+        );
+
+        let mut resolver = InMemoryPackResolver::new();
+        resolver.insert(pack_id, pack_reader);
+        let resolver: Arc<dyn PackResolver> = Arc::new(resolver);
+        let reader = StatamReader::open(
+            Arc::new(SliceReader::new(file_bytes)),
+            Some(Arc::clone(&resolver)),
+        )
+        .unwrap();
+        reader.verify_full().unwrap();
+        let out = reader.scan(&ScanRequest::default()).unwrap();
+        assert_eq!(out[0].num_rows(), n);
+        assert_eq!(
+            out[0].column(1).unwrap().get_scalar(120).unwrap(),
+            ScalarValue::Utf8(payloads[120].clone())
+        );
+    }
+
+    #[test]
+    fn hot_tail_stays_within_1mib_and_keeps_small_dicts_when_compressed_fits() {
+        // Test with small RG/MB sizes producing thousands of blocks + primary/secondary blooms + small dict.
+        let schema = Schema::try_new_arc(vec![
+            Field::new("trace_id", DataType::FixedBytes16, false),
+            Field::new("span_id", DataType::FixedBytes8, false),
+            Field::new("status_code", DataType::Utf8, false),
+        ])
+        .unwrap();
+
+        let mut opts = WriteOptions::for_table(TableKind::Spans, WriteProfile::L0Fast);
+        opts.row_group_size = 64;
+        opts.mini_block_size = 32;
+
+        // 8,192 rows -> 128 RGs * 2 MBs * 3 cols = 768 blocks (~49 KiB raw block_dir)
+        // + unique trace_id/span_id blooms + small status_code FileDict.
+        let n = 8_192usize;
+        let tids: Vec<[u8; 16]> = (0..n)
+            .map(|i| {
+                let mut b = [0u8; 16];
+                b[0..8].copy_from_slice(&(i as u64).to_le_bytes());
+                b
+            })
+            .collect();
+        let sids: Vec<[u8; 8]> = (0..n).map(|i| (i as u64).to_be_bytes()).collect();
+        let statuses: Vec<&str> = (0..n)
+            .map(|i| if i % 2 == 0 { "OK" } else { "ERR" })
+            .collect();
+
+        let batch = Batch::try_new_all(
+            Arc::clone(&schema),
+            vec![
+                Column::Flat(FlatColumn::try_new(FlatData::FixedBytes16(tids), None).unwrap()),
+                Column::Flat(FlatColumn::try_new(FlatData::FixedBytes8(sids), None).unwrap()),
+                Column::Flat(
+                    FlatColumn::try_new(
+                        FlatData::Utf8(Utf8Data::try_from_slices(statuses).unwrap()),
+                        None,
+                    )
+                    .unwrap(),
+                ),
+            ],
+            n,
+        )
+        .unwrap();
+
+        let mut file_bytes = Vec::new();
+        let mut w = StatamWriter::new(Arc::clone(&schema), opts, None).unwrap();
+        w.write_batch(&batch).unwrap();
+        let stats = w.finish(&mut file_bytes).unwrap();
+        assert!(
+            stats.hot_tail_bytes <= DEFAULT_TAIL_HINT,
+            "hot_tail_bytes {} exceeded 1 MiB DEFAULT_TAIL_HINT",
+            stats.hot_tail_bytes
+        );
+
+        let reader = StatamReader::open(Arc::new(SliceReader::new(file_bytes)), None).unwrap();
+        reader.verify_full().unwrap();
+        assert_ne!(
+            reader.meta().col_dir[0].col_flags & COL_FLAG_BLOOM_IN_HOT_TAIL,
+            0
+        );
+        assert_ne!(
+            reader.meta().col_dir[2].col_flags & COL_FLAG_DICT_IN_HOT_TAIL,
+            0,
+            "small FileDict must remain in Hot Tail when compressed Hot Tail <= 960 KiB"
+        );
+    }
 }
