@@ -2636,18 +2636,6 @@ mod tests {
         // CostTotal -> Rle
         cols[schema.index_of(spans::COST_TOTAL).unwrap()] = Col::Rle(
             RleColumn::try_new(
-                FlatColumn::try_new(
-                    FlatData::F64(vec![0.1, 0.2]),
-                    Some(Bitmap::from_bools(&[true, true])),
-                )
-                .unwrap(),
-                vec![1, 2, 3][..2].to_vec(),
-            )
-            .unwrap(),
-        );
-        // Wait: 3 rows -> run_ends must end at 3! Use [1, 3] for [0.1, 0.2].
-        cols[schema.index_of(spans::COST_TOTAL).unwrap()] = Col::Rle(
-            RleColumn::try_new(
                 FlatColumn::try_new(FlatData::F64(vec![0.1, 0.2]), None).unwrap(),
                 vec![1, 3],
             )
