@@ -3,7 +3,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use cetra_column::{Batch, DataType, Field, ScalarValue, Schema};
+use cetra_column::{Batch, DataType, Field, Reservation, ScalarValue, Schema};
 use cetra_core::enums::{ScoreDataType, ScoreTargetKind, SpanKind, SpanStatus};
 use cetra_core::schema::{scores, spans};
 use cetra_query::exec::hash_agg::execute_hash_agg_streams;
@@ -386,10 +386,14 @@ struct PromptFanSink {
 }
 
 impl PushSink for PromptFanSink {
-    fn consume(&mut self, batch: Batch) -> Result<ControlFlow, QueryError> {
-        let f1 = self.span_agg.consume(batch.clone())?;
-        let f2 = self.pairs.consume(batch.clone())?;
-        let f3 = self.trace_versions.consume(batch)?;
+    fn consume(
+        &mut self,
+        batch: Batch,
+        batch_res: &mut Reservation,
+    ) -> Result<ControlFlow, QueryError> {
+        let f1 = self.span_agg.consume(batch.clone(), batch_res)?;
+        let f2 = self.pairs.consume(batch.clone(), batch_res)?;
+        let f3 = self.trace_versions.consume(batch, batch_res)?;
         if f1 == ControlFlow::Stop && f2 == ControlFlow::Stop && f3 == ControlFlow::Stop {
             Ok(ControlFlow::Stop)
         } else {

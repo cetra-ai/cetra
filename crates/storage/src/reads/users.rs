@@ -5,7 +5,7 @@ use std::fmt;
 use std::sync::Arc;
 use std::time::Duration;
 
-use cetra_column::{Batch, DataType, Field, ScalarValue, Schema};
+use cetra_column::{Batch, DataType, Field, Reservation, ScalarValue, Schema};
 use cetra_core::enums::{ScoreDataType, ScoreSource};
 use cetra_core::schema::{scores, traces};
 use cetra_query::exec::hash_agg::execute_hash_agg_streams;
@@ -595,9 +595,13 @@ struct ExtrasFanSink {
 }
 
 impl PushSink for ExtrasFanSink {
-    fn consume(&mut self, batch: Batch) -> Result<ControlFlow, QueryError> {
-        let f1 = self.activity.consume(batch.clone())?;
-        let f2 = self.metadata.consume(batch)?;
+    fn consume(
+        &mut self,
+        batch: Batch,
+        batch_res: &mut Reservation,
+    ) -> Result<ControlFlow, QueryError> {
+        let f1 = self.activity.consume(batch.clone(), batch_res)?;
+        let f2 = self.metadata.consume(batch, batch_res)?;
         if f1 == ControlFlow::Stop && f2 == ControlFlow::Stop {
             Ok(ControlFlow::Stop)
         } else {

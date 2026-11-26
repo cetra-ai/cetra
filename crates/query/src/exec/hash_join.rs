@@ -17,7 +17,7 @@ use crate::eval::{
     list_ref_elem, list_ref_len,
 };
 use crate::exec::{
-    ExecContext, PartitionStream, SpillFile, SpillManager, SpillReader, SpillWriter,
+    ExecContext, PartitionStream, SpillAppender, SpillFile, SpillManager, SpillReader,
 };
 use crate::ir::{EvalContext, Expr};
 
@@ -431,10 +431,9 @@ fn hash_elem_ref(mut state: u64, elem: ElemRef<'_>) -> u64 {
         DataType::TimestampNs { .. } => mix_u64(state, elem.read_timestamp().unwrap_or(0) as u64),
         DataType::Date => mix_u64(state, elem.read_date().unwrap_or(0) as i64 as u64),
         DataType::Interval => {
-            let iv = elem.read_interval().unwrap_or_default();
-            state = mix_u64(state, iv.months as i64 as u64);
-            state = mix_u64(state, iv.days as i64 as u64);
-            mix_u64(state, iv.nanos as u64)
+            let key = elem.read_interval().unwrap_or_default().canonical_key();
+            state = mix_u64(state, key as u64);
+            mix_u64(state, (key >> 64) as u64)
         }
         DataType::Utf8 => mix_bytes(state, elem.read_str().unwrap_or("").as_bytes()),
         DataType::Binary | DataType::FixedBytes8 | DataType::FixedBytes16 => {
@@ -606,7 +605,10 @@ fn elem_eq(ea: ElemRef<'_>, eb: ElemRef<'_>) -> Result<bool, QueryError> {
             Ok(ea.read_timestamp() == eb.read_timestamp())
         }
         (DataType::Date, DataType::Date) => Ok(ea.read_date() == eb.read_date()),
-        (DataType::Interval, DataType::Interval) => Ok(ea.read_interval() == eb.read_interval()),
+        (DataType::Interval, DataType::Interval) => {
+            Ok(ea.read_interval().map(|x| x.canonical_key())
+                == eb.read_interval().map(|x| x.canonical_key()))
+        }
         (DataType::Utf8, DataType::Utf8) => Ok(ea.read_str() == eb.read_str()),
         (
             DataType::Binary | DataType::FixedBytes8 | DataType::FixedBytes16,
@@ -781,7 +783,7 @@ impl BuildTable {
     }
 }
 
-fn new_writer_array() -> [Option<SpillWriter>; NUM_JOIN_PARTITIONS] {
+fn new_writer_array() -> [Option<SpillAppender>; NUM_JOIN_PARTITIONS] {
     std::array::from_fn(|_| None)
 }
 
@@ -790,19 +792,19 @@ fn new_file_array() -> [Option<SpillFile>; NUM_JOIN_PARTITIONS] {
 }
 
 fn finish_writers(
-    writers: &mut [Option<SpillWriter>; NUM_JOIN_PARTITIONS],
-) -> Result<[Option<SpillFile>; NUM_JOIN_PARTITIONS], QueryError> {
+    writers: &mut [Option<SpillAppender>; NUM_JOIN_PARTITIONS],
+) -> [Option<SpillFile>; NUM_JOIN_PARTITIONS] {
     let mut files = new_file_array();
     for (p, slot) in writers.iter_mut().enumerate() {
         if let Some(w) = slot.take() {
-            files[p] = Some(w.finish()?);
+            files[p] = w.finish();
         }
     }
-    Ok(files)
+    files
 }
 
 fn write_chunked_sub_batch(
-    writer: &mut SpillWriter,
+    writer: &mut SpillAppender,
     batch: &Batch,
     indices: &[u32],
     frame_budget: usize,
@@ -864,7 +866,7 @@ fn write_chunked_sub_batch(
                 res.as_deref_mut(),
             )?;
         } else {
-            writer.write_batch(&sub)?;
+            writer.append_batch(&sub, None)?;
             drop(sub);
             rollback_res(res.as_deref_mut(), before);
         }
@@ -904,7 +906,7 @@ struct PartitionSink<'a> {
     null_equals_null: bool,
     drop_null_keys: bool,
     seed: u64,
-    writers: &'a mut [Option<SpillWriter>; NUM_JOIN_PARTITIONS],
+    writers: &'a mut [Option<SpillAppender>; NUM_JOIN_PARTITIONS],
     spill: &'a SpillManager,
     frame_budget: usize,
     allowed_partitions: Option<&'a [bool; NUM_JOIN_PARTITIONS]>,
@@ -942,7 +944,7 @@ fn partition_batch_into_writers(
             continue;
         }
         if sink.writers[p].is_none() {
-            sink.writers[p] = Some(sink.spill.create_file()?);
+            sink.writers[p] = Some(sink.spill.create_appender());
         }
         if let Some(w) = sink.writers[p].as_mut() {
             write_chunked_sub_batch(w, batch, indices, sink.frame_budget, Some(sink.scratch_res))?;
@@ -1265,14 +1267,14 @@ struct BuildRightState {
     buffered_rows: usize,
     max_batch_bytes: usize,
     spilled: bool,
-    build_writers: [Option<SpillWriter>; NUM_JOIN_PARTITIONS],
+    build_writers: [Option<SpillAppender>; NUM_JOIN_PARTITIONS],
     build_res: Reservation,
 }
 
 struct SpillPartitionLeftState {
     left_streams: VecDeque<Box<dyn PartitionStream>>,
     build_files: [Option<SpillFile>; NUM_JOIN_PARTITIONS],
-    probe_writers: [Option<SpillWriter>; NUM_JOIN_PARTITIONS],
+    probe_writers: [Option<SpillAppender>; NUM_JOIN_PARTITIONS],
     allowed_partitions: [bool; NUM_JOIN_PARTITIONS],
     build_res: Reservation,
 }
@@ -1913,7 +1915,7 @@ impl HashJoinStream {
                         &mut sink,
                         &mut st.build_res,
                     )?;
-                    let build_files = finish_writers(&mut st.build_writers)?;
+                    let build_files = finish_writers(&mut st.build_writers);
                     let mut allowed = [false; NUM_JOIN_PARTITIONS];
                     for (p, f) in build_files.iter().enumerate() {
                         allowed[p] = f.is_some();
@@ -1929,7 +1931,7 @@ impl HashJoinStream {
                 Err(err) => return Err(err.into()),
             }
         } else {
-            let build_files = finish_writers(&mut st.build_writers)?;
+            let build_files = finish_writers(&mut st.build_writers);
             let mut allowed = [false; NUM_JOIN_PARTITIONS];
             for (p, f) in build_files.iter().enumerate() {
                 allowed[p] = f.is_some();
@@ -2028,7 +2030,7 @@ impl HashJoinStream {
             }
         }
 
-        let mut probe_files = finish_writers(&mut st.probe_writers)?;
+        let mut probe_files = finish_writers(&mut st.probe_writers);
         let mut tasks = Vec::new();
         let emit_unmatched_build = matches!(self.spec.join_type, JoinType::Right | JoinType::Full);
         for p in (0..NUM_JOIN_PARTITIONS).rev() {
@@ -2153,7 +2155,7 @@ impl HashJoinStream {
 
         drop(input.build_reader);
         drop(input.build_file);
-        let mut sub_build_files = finish_writers(&mut sub_build_writers)?;
+        let mut sub_build_files = finish_writers(&mut sub_build_writers);
         let mut allowed = [false; NUM_JOIN_PARTITIONS];
         for (p, f) in sub_build_files.iter().enumerate() {
             allowed[p] = f.is_some();
@@ -2169,7 +2171,7 @@ impl HashJoinStream {
             .probe_file
             .open_reader(Arc::clone(&self.left_schema))?;
         let mut sub_probe_writers = new_writer_array();
-        let mut unmatched_probe_writer: Option<SpillWriter> = None;
+        let mut unmatched_probe_writer: Option<SpillAppender> = None;
         while let Some(pbatch) = probe_reader.next_batch(Some(&mut self.pull_res))? {
             self.check_cancel(cancel)?;
             if pbatch.is_empty() {
@@ -2203,7 +2205,7 @@ impl HashJoinStream {
             if emit_unmatched_left && !bypassed.is_empty() {
                 let w = match &mut unmatched_probe_writer {
                     Some(w) => w,
-                    slot @ None => slot.insert(self.ctx.spill.create_file()?),
+                    slot @ None => slot.insert(self.ctx.spill.create_appender()),
                 };
                 write_chunked_sub_batch(
                     w,
@@ -2219,12 +2221,11 @@ impl HashJoinStream {
         }
         drop(probe_reader);
         drop(input.probe_file);
-        let mut sub_probe_files = finish_writers(&mut sub_probe_writers)?;
-        if let Some(w) = unmatched_probe_writer.take() {
-            let upf = w.finish()?;
-            if upf.byte_len() > 0 {
-                tasks.push(PartitionTask::EmitUnmatchedProbe(upf));
-            }
+        let mut sub_probe_files = finish_writers(&mut sub_probe_writers);
+        if let Some(w) = unmatched_probe_writer.take()
+            && let Some(upf) = w.finish()
+        {
+            tasks.push(PartitionTask::EmitUnmatchedProbe(upf));
         }
 
         for p in (0..NUM_JOIN_PARTITIONS).rev() {
@@ -4381,5 +4382,89 @@ mod tests {
             Ok(_) => panic!("expected LeftAntiNullAware multi-key error"),
         };
         assert!(matches!(multi_key_err, QueryError::Failed(_)));
+    }
+
+    #[test]
+    fn hash_join_canonical_interval_matches_1_day_and_24_hours() {
+        use cetra_column::Interval;
+
+        let (ctx, _dir) = make_ctx(1024 * 1024, 1024 * 1024);
+        let l_schema = Schema::try_new_arc(vec![
+            Field::new("iv", DataType::Interval, false),
+            Field::new("lid", DataType::I64, false),
+        ])
+        .unwrap();
+        let r_schema = Schema::try_new_arc(vec![
+            Field::new("iv", DataType::Interval, false),
+            Field::new("rid", DataType::I64, false),
+        ])
+        .unwrap();
+
+        let l_batch = Batch::try_new_all(
+            Arc::clone(&l_schema),
+            vec![
+                Column::Flat(
+                    FlatColumn::try_new(
+                        FlatData::Interval(vec![Interval {
+                            months: 0,
+                            days: 1,
+                            nanos: 0,
+                        }]),
+                        None,
+                    )
+                    .unwrap(),
+                ),
+                Column::Flat(FlatColumn::try_new(FlatData::I64(vec![10]), None).unwrap()),
+            ],
+            1,
+        )
+        .unwrap();
+        let r_batch = Batch::try_new_all(
+            Arc::clone(&r_schema),
+            vec![
+                Column::Flat(
+                    FlatColumn::try_new(
+                        FlatData::Interval(vec![Interval {
+                            months: 0,
+                            days: 0,
+                            nanos: 24 * 3_600_000_000_000,
+                        }]),
+                        None,
+                    )
+                    .unwrap(),
+                ),
+                Column::Flat(FlatColumn::try_new(FlatData::I64(vec![20]), None).unwrap()),
+            ],
+            1,
+        )
+        .unwrap();
+
+        let l_src = BatchSource::new(Arc::clone(&l_schema), vec![l_batch]).unwrap();
+        let r_src = BatchSource::new(Arc::clone(&r_schema), vec![r_batch]).unwrap();
+        let mut stream = execute_hash_join(
+            l_src.open_partitions(&ScanSpec::default(), &ctx).unwrap(),
+            Arc::clone(&l_schema),
+            r_src.open_partitions(&ScanSpec::default(), &ctx).unwrap(),
+            Arc::clone(&r_schema),
+            HashJoinSpec {
+                join_type: JoinType::Inner,
+                left_keys: vec![col_expr(0, "iv", DataType::Interval)],
+                right_keys: vec![col_expr(0, "iv", DataType::Interval)],
+                null_equals_null: false,
+                residual_filter: None,
+            },
+            &ctx,
+        )
+        .unwrap();
+
+        let mut pairs = Vec::new();
+        while let Some(b) = stream.next_batch(&ctx.eval.cancel, None).unwrap() {
+            for r in 0..b.num_rows() {
+                let lid = read_i64(b.column(1).unwrap(), r).unwrap();
+                let rid = read_i64(b.column(3).unwrap(), r).unwrap();
+                pairs.push((lid, rid));
+            }
+        }
+        assert_eq!(pairs, vec![(10, 20)]);
     }
 }

@@ -1420,7 +1420,11 @@ impl FacetFanoutSink {
 }
 
 impl PushSink for FacetFanoutSink {
-    fn consume(&mut self, batch: Batch) -> Result<ControlFlow, QueryError> {
+    fn consume(
+        &mut self,
+        batch: Batch,
+        _batch_res: &mut Reservation,
+    ) -> Result<ControlFlow, QueryError> {
         if self.exec_ctx.eval.cancel.is_cancelled() {
             return Err(QueryError::Cancelled);
         }
@@ -1545,11 +1549,10 @@ impl ChunkFlusher<'_> {
         let bytes = mini.memory_bytes();
         self.scratch.try_grow(bytes)?;
         let res = match self.agg.as_mut() {
-            Some(a) => a.consume(mini),
+            Some(a) => a.consume(mini, self.scratch),
             None => Err(QueryError::internal("missing facet HashAgg")),
         };
-        self.scratch
-            .shrink(self.scratch.size().saturating_sub(bytes));
+        self.scratch.free();
         res?;
         Ok(())
     }
@@ -1966,7 +1969,11 @@ impl BucketFanoutSink {
 }
 
 impl PushSink for BucketFanoutSink {
-    fn consume(&mut self, batch: Batch) -> Result<ControlFlow, QueryError> {
+    fn consume(
+        &mut self,
+        batch: Batch,
+        _batch_res: &mut Reservation,
+    ) -> Result<ControlFlow, QueryError> {
         if self.cancel.is_cancelled() {
             return Err(QueryError::Cancelled);
         }

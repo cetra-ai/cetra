@@ -12,7 +12,9 @@ use crate::error::QueryError;
 use crate::eval::{build_flat_from_sources, eval_expr};
 use crate::exec::hash_agg::{HashAggSpec, execute_hash_agg_streams};
 use crate::exec::hash_join::{HashJoinSpec, JoinType, execute_hash_join};
-use crate::exec::pipeline::{ControlFlow, ExecContext, PushOperator, run_pipeline};
+use crate::exec::pipeline::{
+    ControlFlow, ExecContext, PushOperator, run_pipeline_with_stop, transfer_or_grow,
+};
 use crate::exec::sort_window::{ExternalSort, eval_window_group};
 use crate::exec::source::{BatchSource, MapProjection, PartitionStream, ScanSource, ScanSpec};
 use crate::exec::streaming::{FilterOp, LimitOp, ProjectOp, TopKSink, UnionSource, UnnestOp};
@@ -100,6 +102,7 @@ struct CompiledStage {
     streams: Vec<Box<dyn PartitionStream>>,
     chains: Vec<Vec<Box<dyn PushOperator>>>,
     schema: Arc<Schema>,
+    stop_cancel: Option<CancelToken>,
 }
 
 impl CompiledStage {
@@ -109,6 +112,7 @@ impl CompiledStage {
             streams,
             chains,
             schema,
+            stop_cancel: None,
         }
     }
 
@@ -117,6 +121,7 @@ impl CompiledStage {
             streams: Vec::new(),
             chains: Vec::new(),
             schema,
+            stop_cancel: None,
         }
     }
 
@@ -131,14 +136,16 @@ impl CompiledStage {
     }
 
     fn into_streams(self, ctx: &ExecContext) -> Vec<Box<dyn PartitionStream>> {
+        let stop_cancel = self.stop_cancel;
         self.streams
             .into_iter()
             .zip(self.chains)
             .map(|(stream, ops)| {
-                if ops.is_empty() {
+                if ops.is_empty() && stop_cancel.is_none() {
                     stream
                 } else {
-                    Box::new(OpStream::new(stream, ops, ctx)) as Box<dyn PartitionStream>
+                    Box::new(OpStream::new(stream, ops, stop_cancel.clone(), ctx))
+                        as Box<dyn PartitionStream>
                 }
             })
             .collect()
@@ -267,6 +274,7 @@ fn compile_stage(
                     streams: vec![single],
                     chains: vec![vec![op]],
                     schema,
+                    stop_cancel: None,
                 });
             }
             // skip == 0 && fetch.is_some()
@@ -275,13 +283,14 @@ fn compile_stage(
                     .push(Box::new(LimitOp::new(0, *fetch, None)) as Box<dyn PushOperator>);
             } else if let Some(limit_val) = *fetch {
                 let shared = Arc::new(AtomicUsize::new(limit_val));
+                let stop_cancel = stage.stop_cancel.clone().unwrap_or_default();
                 stage.push_op(|| {
-                    Ok(Box::new(LimitOp::new(
-                        0,
-                        Some(limit_val),
-                        Some(Arc::clone(&shared)),
-                    )))
+                    Ok(Box::new(
+                        LimitOp::new(0, Some(limit_val), Some(Arc::clone(&shared)))
+                            .with_stop_cancel(stop_cancel.clone()),
+                    ))
                 })?;
+                stage.stop_cancel = Some(stop_cancel);
             }
             Ok(stage)
         }
@@ -293,19 +302,20 @@ fn compile_stage(
             }
             let schema = Arc::clone(&stage.schema);
             let make_chain = shared_chains(stage.chains);
-            let sinks = run_pipeline(ctx, stage.streams, make_chain, {
-                let schema_c = Arc::clone(&schema);
-                let keys_c = keys.clone();
-                let ctx_c = ctx.clone();
-                move |_| {
-                    Ok(ExternalSort::new(
-                        Arc::clone(&schema_c),
-                        keys_c.clone(),
-                        None,
-                        ctx_c.clone(),
-                    ))
-                }
-            })?;
+            let sinks =
+                run_pipeline_with_stop(ctx, stage.stop_cancel, stage.streams, make_chain, {
+                    let schema_c = Arc::clone(&schema);
+                    let keys_c = keys.clone();
+                    let ctx_c = ctx.clone();
+                    move |_| {
+                        Ok(ExternalSort::new(
+                            Arc::clone(&schema_c),
+                            keys_c.clone(),
+                            None,
+                            ctx_c.clone(),
+                        ))
+                    }
+                })?;
             let merged =
                 ExternalSort::merge_sinks(sinks, Arc::clone(&schema), keys.clone(), None, ctx)?;
             Ok(CompiledStage::from_streams(vec![merged], schema))
@@ -330,26 +340,28 @@ fn compile_stage(
                     streams: vec![single],
                     chains: vec![vec![op]],
                     schema,
+                    stop_cancel: None,
                 });
             }
             let schema = Arc::clone(&stage.schema);
             let make_chain = shared_chains(stage.chains);
-            let sinks = run_pipeline(ctx, stage.streams, make_chain, {
-                let schema_c = Arc::clone(&schema);
-                let keys_c = keys.clone();
-                let limit_v = *limit;
-                let offset_v = *offset;
-                let ctx_c = ctx.clone();
-                move |_| {
-                    Ok(TopKSink::new(
-                        Arc::clone(&schema_c),
-                        keys_c.clone(),
-                        limit_v,
-                        offset_v,
-                        ctx_c.clone(),
-                    ))
-                }
-            })?;
+            let sinks =
+                run_pipeline_with_stop(ctx, stage.stop_cancel, stage.streams, make_chain, {
+                    let schema_c = Arc::clone(&schema);
+                    let keys_c = keys.clone();
+                    let limit_v = *limit;
+                    let offset_v = *offset;
+                    let ctx_c = ctx.clone();
+                    move |_| {
+                        Ok(TopKSink::new(
+                            Arc::clone(&schema_c),
+                            keys_c.clone(),
+                            limit_v,
+                            offset_v,
+                            ctx_c.clone(),
+                        ))
+                    }
+                })?;
             let batches = TopKSink::merge(sinks, Arc::clone(&schema), keys, *offset, *limit, ctx)?;
             if batches.is_empty() {
                 return Ok(CompiledStage::empty(schema));
@@ -392,6 +404,7 @@ fn compile_stage(
                     streams: vec![single],
                     chains: vec![vec![op]],
                     schema,
+                    stop_cancel: None,
                 });
             }
             let partitions = stage.into_streams(ctx);
@@ -499,6 +512,7 @@ fn compile_stage(
                     streams: vec![single],
                     chains: vec![vec![op]],
                     schema: Arc::clone(schema),
+                    stop_cancel: None,
                 })
             } else {
                 let distinct_stream = compile_distinct(partitions, schema, ctx)?;
@@ -816,6 +830,7 @@ struct OpStream {
     queued: VecDeque<Batch>,
     pull_res: Reservation,
     queue_res: Reservation,
+    stop_cancel: Option<CancelToken>,
     finished: bool,
 }
 
@@ -823,6 +838,7 @@ impl OpStream {
     fn new(
         inner: Box<dyn PartitionStream>,
         ops: Vec<Box<dyn PushOperator>>,
+        stop_cancel: Option<CancelToken>,
         ctx: &ExecContext,
     ) -> Self {
         Self {
@@ -831,6 +847,7 @@ impl OpStream {
             queued: VecDeque::new(),
             pull_res: ctx.pool.register("op_stream_pull", false),
             queue_res: ctx.pool.register("op_stream_queue", false),
+            stop_cancel,
             finished: false,
         }
     }
@@ -868,17 +885,49 @@ impl PartitionStream for OpStream {
                 rollback_res(res, before);
                 return Ok(None);
             }
+            if self
+                .stop_cancel
+                .as_ref()
+                .is_some_and(CancelToken::is_cancelled)
+            {
+                self.finished = true;
+                self.pull_res.free();
+                self.queue_res.free();
+                rollback_res(res, before);
+                return Ok(None);
+            }
 
-            let next = self.inner.next_batch(cancel, Some(&mut self.pull_res));
+            let next = if let Some(sc) = &self.stop_cancel {
+                let eff = CancelToken::new();
+                if cancel.is_cancelled() || sc.is_cancelled() {
+                    eff.cancel();
+                }
+                let _g1 = cancel.register_waker({
+                    let e = eff.clone();
+                    move || e.cancel()
+                });
+                let _g2 = sc.register_waker({
+                    let e = eff.clone();
+                    move || e.cancel()
+                });
+                self.inner.next_batch(&eff, Some(&mut self.pull_res))
+            } else {
+                self.inner.next_batch(cancel, Some(&mut self.pull_res))
+            };
             match next {
                 Ok(Some(batch)) => {
                     let queue_res = &mut self.queue_res;
                     let queued = &mut self.queued;
-                    let flow = push_through_slice(&mut self.ops, batch, &mut |out| {
-                        queue_res.try_grow(out.memory_bytes())?;
-                        queued.push_back(out);
-                        Ok(ControlFlow::Continue)
-                    });
+                    let flow = push_through_slice(
+                        &mut self.ops,
+                        batch,
+                        &mut self.pull_res,
+                        &mut |out, out_res| {
+                            transfer_or_grow(out_res, queue_res, out.memory_bytes())?;
+                            queued.push_back(out);
+                            Ok(ControlFlow::Continue)
+                        },
+                    );
                     self.pull_res.free();
                     match flow {
                         Ok(ControlFlow::Continue) => {}
@@ -898,8 +947,8 @@ impl PartitionStream for OpStream {
                     self.finished = true;
                     let queue_res = &mut self.queue_res;
                     let queued = &mut self.queued;
-                    if let Err(err) = finish_ops(&mut self.ops, &mut |out| {
-                        queue_res.try_grow(out.memory_bytes())?;
+                    if let Err(err) = finish_ops(&mut self.ops, &mut |out, out_res| {
+                        transfer_or_grow(out_res, queue_res, out.memory_bytes())?;
                         queued.push_back(out);
                         Ok(ControlFlow::Continue)
                     }) {
@@ -908,6 +957,16 @@ impl PartitionStream for OpStream {
                         rollback_res(res, before);
                         return Err(err);
                     }
+                }
+                Err(QueryError::Cancelled)
+                    if !cancel.is_cancelled()
+                        && self
+                            .stop_cancel
+                            .as_ref()
+                            .is_some_and(CancelToken::is_cancelled) =>
+                {
+                    self.pull_res.free();
+                    self.finished = true;
                 }
                 Err(err) => {
                     self.pull_res.free();
@@ -924,14 +983,15 @@ impl PartitionStream for OpStream {
 fn push_through_slice(
     ops: &mut [Box<dyn PushOperator>],
     batch: Batch,
-    sink: &mut impl FnMut(Batch) -> Result<ControlFlow, QueryError>,
+    batch_res: &mut Reservation,
+    sink: &mut impl FnMut(Batch, &mut Reservation) -> Result<ControlFlow, QueryError>,
 ) -> Result<ControlFlow, QueryError> {
     let Some((op, rest)) = ops.split_first_mut() else {
-        return sink(batch);
+        return sink(batch, batch_res);
     };
     let mut downstream_flow = ControlFlow::Continue;
-    let op_flow = op.push(batch, &mut |out_batch| {
-        let f = push_through_slice(rest, out_batch, sink)?;
+    let op_flow = op.push(batch, batch_res, &mut |out_batch, out_res| {
+        let f = push_through_slice(rest, out_batch, out_res, sink)?;
         if f == ControlFlow::Stop {
             downstream_flow = ControlFlow::Stop;
         }
@@ -946,13 +1006,13 @@ fn push_through_slice(
 
 fn finish_ops(
     ops: &mut [Box<dyn PushOperator>],
-    sink: &mut impl FnMut(Batch) -> Result<ControlFlow, QueryError>,
+    sink: &mut impl FnMut(Batch, &mut Reservation) -> Result<ControlFlow, QueryError>,
 ) -> Result<(), QueryError> {
     for i in 0..ops.len() {
         let mut downstream_flow = ControlFlow::Continue;
         let (head, tail) = ops.split_at_mut(i + 1);
-        head[i].finish(&mut |out_batch| {
-            let f = push_through_slice(tail, out_batch, sink)?;
+        head[i].finish(&mut |out_batch, out_res| {
+            let f = push_through_slice(tail, out_batch, out_res, sink)?;
             if f == ControlFlow::Stop {
                 downstream_flow = ControlFlow::Stop;
             }

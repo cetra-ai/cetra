@@ -14,7 +14,7 @@ use std::time::Duration;
 
 use bytes::Bytes;
 use cetra_column::{
-    Batch, CancelToken, Column, DataType, FlatData, GlobalPool, ScalarValue, Selection,
+    Batch, CancelToken, Column, DataType, FlatData, GlobalPool, Reservation, ScalarValue, Selection,
 };
 use cetra_core::ids::ProjectId;
 use cetra_core::schema::spans;
@@ -369,7 +369,11 @@ struct MediaRefSink {
 }
 
 impl PushSink for MediaRefSink {
-    fn consume(&mut self, batch: Batch) -> Result<ControlFlow, QueryError> {
+    fn consume(
+        &mut self,
+        batch: Batch,
+        _batch_res: &mut Reservation,
+    ) -> Result<ControlFlow, QueryError> {
         insert_media_refs(&batch, &mut self.live)?;
         Ok(ControlFlow::Continue)
     }

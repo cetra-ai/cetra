@@ -6,7 +6,9 @@ use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration;
 
-use cetra_column::{Batch, Column, DataType, Field, FlatColumn, FlatData, ScalarValue, Schema};
+use cetra_column::{
+    Batch, Column, DataType, Field, FlatColumn, FlatData, Reservation, ScalarValue, Schema,
+};
 use cetra_core::ids::{SpanId, TraceId};
 use cetra_core::schema::{spans, traces};
 use cetra_query::exec::streaming::ProjectOp;
@@ -430,7 +432,11 @@ impl SpanPairSink {
 }
 
 impl PushSink for SpanPairSink {
-    fn consume(&mut self, batch: Batch) -> Result<ControlFlow, QueryError> {
+    fn consume(
+        &mut self,
+        batch: Batch,
+        _batch_res: &mut Reservation,
+    ) -> Result<ControlFlow, QueryError> {
         if batch.num_rows() == 0 {
             return Ok(ControlFlow::Continue);
         }
@@ -484,7 +490,11 @@ impl DistinctSessionIdSink {
 }
 
 impl PushSink for DistinctSessionIdSink {
-    fn consume(&mut self, batch: Batch) -> Result<ControlFlow, QueryError> {
+    fn consume(
+        &mut self,
+        batch: Batch,
+        _batch_res: &mut Reservation,
+    ) -> Result<ControlFlow, QueryError> {
         if batch.num_rows() == 0 {
             return Ok(ControlFlow::Continue);
         }

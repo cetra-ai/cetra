@@ -1,13 +1,13 @@
 //! Process-wide bounded CPU worker pool with 8 MiB worker stacks and fair round-robin
 //! scheduling across concurrent queries (`D-QE-5`, `design.md` § Contracts 3).
 
+use std::cell::Cell;
 use std::collections::{HashMap, VecDeque};
 use std::fmt;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
 use std::thread::{self, JoinHandle};
-use std::time::Duration;
 
 use cetra_column::CancelToken;
 
@@ -15,8 +15,31 @@ use crate::error::QueryError;
 
 /// Fixed OS stack size for every query worker thread (8 MiB, matching `cetra-cli`'s Tokio stack).
 const WORKER_STACK_BYTES: usize = 8 * 1024 * 1024;
-/// Polling interval when waiting on an active query whose `CancelToken` may be triggered externally.
-const CANCEL_POLL_INTERVAL: Duration = Duration::from_micros(200);
+
+thread_local! {
+    static IN_WORKER_POOL: Cell<bool> = const { Cell::new(false) };
+}
+
+struct InWorkerPoolGuard {
+    prev: bool,
+}
+
+impl InWorkerPoolGuard {
+    fn enter() -> Self {
+        let prev = IN_WORKER_POOL.with(|flag| {
+            let prev = flag.get();
+            flag.set(true);
+            prev
+        });
+        Self { prev }
+    }
+}
+
+impl Drop for InWorkerPoolGuard {
+    fn drop(&mut self) {
+        IN_WORKER_POOL.with(|flag| flag.set(self.prev));
+    }
+}
 
 type TaskFn = Box<dyn FnOnce(InFlightGuard) + Send>;
 
@@ -157,6 +180,27 @@ impl WorkerPool {
             return Err(QueryError::Cancelled);
         }
 
+        if IN_WORKER_POOL.with(Cell::get) {
+            let mut out = Vec::with_capacity(tasks.len());
+            for (idx, task) in tasks.into_iter().enumerate() {
+                if cancel.is_cancelled() {
+                    return Err(QueryError::Cancelled);
+                }
+                match catch_unwind(AssertUnwindSafe(|| task(idx))) {
+                    Ok(Ok(val)) => out.push(val),
+                    Ok(Err(err)) => {
+                        cancel.cancel();
+                        return Err(err);
+                    }
+                    Err(_) => {
+                        cancel.cancel();
+                        return Err(QueryError::internal("query worker panicked"));
+                    }
+                }
+            }
+            return Ok(out);
+        }
+
         let total = tasks.len();
         let scope = Arc::new(ScopeShared::<T>::new(total));
         let mut queue = VecDeque::with_capacity(total);
@@ -183,6 +227,14 @@ impl WorkerPool {
         };
         self.shared.cv.notify_all();
 
+        let _cancel_guard = cancel.register_waker({
+            let s = Arc::clone(&scope);
+            move || {
+                let _g = s.lock();
+                s.cv.notify_all();
+            }
+        });
+
         let mut guard = scope.lock();
         loop {
             if !guard.drained_pool && (guard.first_err.is_some() || cancel.is_cancelled()) {
@@ -197,11 +249,7 @@ impl WorkerPool {
             if guard.finished + guard.drained >= total {
                 break;
             }
-            if guard.aborted {
-                guard = scope.wait(guard);
-            } else {
-                guard = scope.wait_timeout(guard, CANCEL_POLL_INTERVAL);
-            }
+            guard = scope.wait(guard);
         }
 
         if let Some(err) = guard.first_err.take() {
@@ -304,18 +352,6 @@ impl<T> ScopeShared<T> {
 
     fn wait<'a>(&self, guard: MutexGuard<'a, ScopeInner<T>>) -> MutexGuard<'a, ScopeInner<T>> {
         self.cv.wait(guard).unwrap_or_else(PoisonError::into_inner)
-    }
-
-    fn wait_timeout<'a>(
-        &self,
-        guard: MutexGuard<'a, ScopeInner<T>>,
-        dur: Duration,
-    ) -> MutexGuard<'a, ScopeInner<T>> {
-        let (next, _) = self
-            .cv
-            .wait_timeout(guard, dur)
-            .unwrap_or_else(PoisonError::into_inner);
-        next
     }
 
     fn is_aborted(&self) -> bool {
@@ -435,6 +471,7 @@ fn worker_loop(shared: &Arc<PoolShared>) {
         };
 
         let (task, guard) = next;
+        let _in_pool = InWorkerPoolGuard::enter();
         let _ = catch_unwind(AssertUnwindSafe(|| task(guard)));
     }
 }
@@ -443,7 +480,7 @@ fn worker_loop(shared: &Arc<PoolShared>) {
 mod tests {
     use super::*;
     use std::sync::Barrier;
-    use std::time::Instant;
+    use std::time::{Duration, Instant};
 
     #[test]
     fn fair_round_robin_order_and_cancel_drains_all_workers() {
@@ -660,5 +697,121 @@ mod tests {
         let err = workers.run_scoped(&cancel, tasks).unwrap_err();
         assert!(matches!(err, QueryError::TooLarge));
         assert_eq!(workers.in_flight_count(), 0);
+    }
+
+    #[test]
+    fn reentrant_run_scoped_does_not_deadlock_and_propagates_cancel_error() {
+        for num_workers in [1, 4] {
+            let pool = Arc::new(WorkerPool::new(num_workers).unwrap());
+            let cancel = CancelToken::new();
+
+            let outer_tasks: Vec<_> = (0..3)
+                .map(|outer_idx| {
+                    let p = Arc::clone(&pool);
+                    let c = cancel.clone();
+                    move |_idx: usize| -> Result<Vec<usize>, QueryError> {
+                        let inner_tasks: Vec<_> = (0..4)
+                            .map(|inner_idx| {
+                                move |idx: usize| -> Result<usize, QueryError> {
+                                    assert_eq!(idx, inner_idx);
+                                    Ok(outer_idx * 100 + inner_idx)
+                                }
+                            })
+                            .collect();
+                        p.run_scoped(&c, inner_tasks)
+                    }
+                })
+                .collect();
+
+            let res = pool.run_scoped(&cancel, outer_tasks).unwrap();
+            assert_eq!(
+                res,
+                vec![
+                    vec![0, 1, 2, 3],
+                    vec![100, 101, 102, 103],
+                    vec![200, 201, 202, 203],
+                ]
+            );
+            assert_eq!(pool.in_flight_count(), 0);
+
+            // Reentrant error cancels token and stops remaining sequential inner tasks
+            let ran_after_err = Arc::new(AtomicUsize::new(0));
+            let p_err = Arc::clone(&pool);
+            let ran_flag = Arc::clone(&ran_after_err);
+            let err = pool
+                .run_scoped(
+                    &CancelToken::new(),
+                    vec![move |_| -> Result<(), QueryError> {
+                        let c_inner = CancelToken::new();
+                        let c_check = c_inner.clone();
+                        let inner_err = p_err
+                            .run_scoped(
+                                &c_inner,
+                                vec![
+                                    Box::new(|_| Err(QueryError::TooLarge))
+                                        as Box<dyn FnOnce(usize) -> Result<(), QueryError> + Send>,
+                                    Box::new(move |_| {
+                                        ran_flag.fetch_add(1, Ordering::SeqCst);
+                                        Ok(())
+                                    }),
+                                ],
+                            )
+                            .unwrap_err();
+                        assert!(c_check.is_cancelled());
+                        Err(inner_err)
+                    }],
+                )
+                .unwrap_err();
+            assert!(matches!(err, QueryError::TooLarge));
+            assert_eq!(ran_after_err.load(Ordering::SeqCst), 0);
+            assert_eq!(pool.in_flight_count(), 0);
+        }
+    }
+
+    #[test]
+    fn external_cancel_wakes_run_scoped_immediately() {
+        let pool = Arc::new(WorkerPool::new(2).unwrap());
+        let cancel = CancelToken::new();
+        let started = Arc::new(Barrier::new(2));
+
+        let c_task = cancel.clone();
+        let b_task = Arc::clone(&started);
+        let p_run = Arc::clone(&pool);
+        let c_run = cancel.clone();
+        let handle = thread::spawn(move || {
+            p_run.run_scoped(
+                &c_run,
+                vec![move |_| -> Result<(), QueryError> {
+                    b_task.wait();
+                    // Wait cleanly until cancelled via waker-driven sleep/park
+                    let pair = Arc::new((Mutex::new(false), Condvar::new()));
+                    let _g = c_task.register_waker({
+                        let p = Arc::clone(&pair);
+                        move || {
+                            let mut done = p.0.lock().unwrap();
+                            *done = true;
+                            p.1.notify_all();
+                        }
+                    });
+                    let mut done = pair.0.lock().unwrap();
+                    while !*done && !c_task.is_cancelled() {
+                        done = pair.1.wait(done).unwrap();
+                    }
+                    Err(QueryError::Cancelled)
+                }],
+            )
+        });
+
+        started.wait();
+        let t0 = Instant::now();
+        cancel.cancel();
+        let res = handle.join().unwrap();
+        let elapsed = t0.elapsed();
+        assert!(matches!(res, Err(QueryError::Cancelled)));
+        assert!(
+            elapsed < Duration::from_millis(20),
+            "cancel wakeup took {elapsed:?}"
+        );
+        assert_eq!(pool.in_flight_count(), 0);
     }
 }

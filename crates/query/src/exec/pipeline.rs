@@ -3,7 +3,7 @@
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Instant;
 
-use cetra_column::{Batch, Reservation, ScopedPool};
+use cetra_column::{Batch, CancelToken, ColumnError, Reservation, ScopedPool};
 
 use crate::error::QueryError;
 use crate::ir::EvalContext;
@@ -89,21 +89,50 @@ pub struct ExecContext {
     pub metrics: ExecMetrics,
 }
 
+/// Moves `bytes` from `src` into `dst` without double-counting; if `src.size() < bytes`,
+/// transfers `src.size()` first and grows `dst` by the remainder (rolling back on error).
+pub(crate) fn transfer_or_grow(
+    src: &mut Reservation,
+    dst: &mut Reservation,
+    bytes: usize,
+) -> Result<(), ColumnError> {
+    if bytes == 0 {
+        return Ok(());
+    }
+    let avail = src.size();
+    if avail >= bytes {
+        src.transfer_to(dst, bytes)
+    } else {
+        if avail > 0 {
+            src.transfer_to(dst, avail)?;
+        }
+        if let Err(err) = dst.try_grow(bytes - avail) {
+            if avail > 0 {
+                let _ = dst.transfer_to(src, avail);
+            }
+            return Err(err);
+        }
+        Ok(())
+    }
+}
+
 /// Push-based stateless/stateful pipeline operator transforming one `Batch` into zero or more `Batch`es.
 pub trait PushOperator: Send {
     /// Operator name for `EXPLAIN` and [`ExecMetrics`].
     fn name(&self) -> &'static str;
-    /// Processes `batch` and forwards zero or more output batches to `emit`.
-    /// Scratch `Reservation`s held for an output batch MUST be freed right after `emit(out)` returns.
+    /// Processes `batch` (whose memory reservation is held in `batch_res`) and forwards zero or
+    /// more `(out_batch, out_res)` pairs to `emit`.
+    /// Scratch `Reservation`s held for an output batch MUST be freed right after `emit` returns.
     fn push(
         &mut self,
         batch: Batch,
-        emit: &mut dyn FnMut(Batch) -> Result<ControlFlow, QueryError>,
+        batch_res: &mut Reservation,
+        emit: &mut dyn FnMut(Batch, &mut Reservation) -> Result<ControlFlow, QueryError>,
     ) -> Result<ControlFlow, QueryError>;
     /// Called once when upstream finishes cleanly (not cancelled/stopped) to flush buffered output.
     fn finish(
         &mut self,
-        emit: &mut dyn FnMut(Batch) -> Result<ControlFlow, QueryError>,
+        emit: &mut dyn FnMut(Batch, &mut Reservation) -> Result<ControlFlow, QueryError>,
     ) -> Result<(), QueryError> {
         let _ = emit;
         Ok(())
@@ -112,8 +141,13 @@ pub trait PushOperator: Send {
 
 /// Terminal consumer of one pipeline partition.
 pub trait PushSink: Send {
-    /// Consumes one batch; returning `ControlFlow::Stop` terminates the partition early.
-    fn consume(&mut self, batch: Batch) -> Result<ControlFlow, QueryError>;
+    /// Consumes one batch (whose memory reservation is held in `batch_res`); returning
+    /// `ControlFlow::Stop` terminates the partition early.
+    fn consume(
+        &mut self,
+        batch: Batch,
+        batch_res: &mut Reservation,
+    ) -> Result<ControlFlow, QueryError>;
     /// Called once when the partition finishes cleanly.
     fn finish(&mut self) -> Result<(), QueryError> {
         Ok(())
@@ -135,9 +169,33 @@ where
     FChain: Fn(usize) -> Result<Vec<Box<dyn PushOperator>>, QueryError> + Send + Sync + 'static,
     FSink: Fn(usize) -> Result<S, QueryError> + Send + Sync + 'static,
 {
+    run_pipeline_with_stop(ctx, None, partitions, make_chain, make_sink)
+}
+
+/// Like [`run_pipeline`], wiring an optional pipeline-local `stop_cancel` token linked to
+/// `ctx.eval.cancel` so `LimitOp` early-stop can halt sibling partitions without returning
+/// `Err(QueryError::Cancelled)`.
+pub fn run_pipeline_with_stop<S, FChain, FSink>(
+    ctx: &ExecContext,
+    stop_cancel: Option<CancelToken>,
+    partitions: Vec<Box<dyn PartitionStream>>,
+    make_chain: FChain,
+    make_sink: FSink,
+) -> Result<Vec<S>, QueryError>
+where
+    S: PushSink + Send + 'static,
+    FChain: Fn(usize) -> Result<Vec<Box<dyn PushOperator>>, QueryError> + Send + Sync + 'static,
+    FSink: Fn(usize) -> Result<S, QueryError> + Send + Sync + 'static,
+{
     if partitions.is_empty() {
         return Ok(Vec::new());
     }
+
+    let stop_cancel = stop_cancel.unwrap_or_default();
+    let _cancel_link = ctx.eval.cancel.register_waker({
+        let sc = stop_cancel.clone();
+        move || sc.cancel()
+    });
 
     let make_chain = Arc::new(make_chain);
     let make_sink = Arc::new(make_sink);
@@ -148,7 +206,8 @@ where
             let make_chain = Arc::clone(&make_chain);
             let make_sink = Arc::clone(&make_sink);
             let pool = Arc::clone(&ctx.pool);
-            let cancel = ctx.eval.cancel.clone();
+            let parent_cancel = ctx.eval.cancel.clone();
+            let stop_cancel = stop_cancel.clone();
             let metrics = ctx.metrics.clone();
 
             move |_worker_task_idx: usize| -> Result<S, QueryError> {
@@ -168,15 +227,27 @@ where
                 let mut stopped = false;
 
                 while !stopped {
-                    if cancel.is_cancelled() {
+                    if parent_cancel.is_cancelled() {
                         scan_res.free();
                         return Err(QueryError::Cancelled);
                     }
-                    let next = stream.next_batch(&cancel, Some(&mut scan_res));
+                    if stop_cancel.is_cancelled() {
+                        scan_res.free();
+                        stopped = true;
+                        break;
+                    }
+                    let next = stream.next_batch(&stop_cancel, Some(&mut scan_res));
                     let batch = match next {
                         Ok(Some(b)) => b,
                         Ok(None) => {
                             scan_res.free();
+                            break;
+                        }
+                        Err(QueryError::Cancelled)
+                            if !parent_cancel.is_cancelled() && stop_cancel.is_cancelled() =>
+                        {
+                            scan_res.free();
+                            stopped = true;
                             break;
                         }
                         Err(err) => {
@@ -185,23 +256,35 @@ where
                         }
                     };
 
-                    let push_res = push_through_slice(&mut chain, &mut profiles, batch, &mut sink);
+                    let push_res = push_through_slice(
+                        &mut chain,
+                        &mut profiles,
+                        batch,
+                        &mut scan_res,
+                        &mut sink,
+                    );
                     scan_res.free();
-                    match push_res? {
-                        ControlFlow::Continue => {}
-                        ControlFlow::Stop => {
+                    match push_res {
+                        Ok(ControlFlow::Continue) => {}
+                        Ok(ControlFlow::Stop) => {
                             stopped = true;
                         }
+                        Err(QueryError::Cancelled)
+                            if !parent_cancel.is_cancelled() && stop_cancel.is_cancelled() =>
+                        {
+                            stopped = true;
+                        }
+                        Err(err) => return Err(err),
                     }
                 }
 
-                if cancel.is_cancelled() {
+                if parent_cancel.is_cancelled() {
                     return Err(QueryError::Cancelled);
                 }
 
                 if !stopped {
                     for i in 0..chain.len() {
-                        if cancel.is_cancelled() {
+                        if parent_cancel.is_cancelled() {
                             return Err(QueryError::Cancelled);
                         }
                         let mut downstream_flow = ControlFlow::Continue;
@@ -212,12 +295,13 @@ where
                         let op_prof = &mut prof_head[i];
 
                         let t0 = Instant::now();
-                        op.finish(&mut |out_batch| {
+                        op.finish(&mut |out_batch, out_res| {
                             op_prof.rows_out =
                                 op_prof.rows_out.saturating_add(out_batch.num_rows() as u64);
                             op_prof.batches_out = op_prof.batches_out.saturating_add(1);
                             let te = Instant::now();
-                            let f = push_through_slice(tail, prof_tail, out_batch, &mut sink);
+                            let f =
+                                push_through_slice(tail, prof_tail, out_batch, out_res, &mut sink);
                             emit_ns = emit_ns.saturating_add(
                                 te.elapsed().as_nanos().min(u64::MAX as u128) as u64,
                             );
@@ -238,7 +322,7 @@ where
                     }
                 }
 
-                if cancel.is_cancelled() {
+                if parent_cancel.is_cancelled() {
                     return Err(QueryError::Cancelled);
                 }
                 sink.finish()?;
@@ -257,10 +341,11 @@ fn push_through_slice<S: PushSink>(
     chain: &mut [Box<dyn PushOperator>],
     profiles: &mut [OperatorProfile],
     batch: Batch,
+    batch_res: &mut Reservation,
     sink: &mut S,
 ) -> Result<ControlFlow, QueryError> {
     let Some((op, rest)) = chain.split_first_mut() else {
-        return sink.consume(batch);
+        return sink.consume(batch, batch_res);
     };
     let Some((prof, rest_prof)) = profiles.split_first_mut() else {
         return Err(QueryError::internal("operator profile count mismatch"));
@@ -269,11 +354,11 @@ fn push_through_slice<S: PushSink>(
     let mut downstream_flow = ControlFlow::Continue;
     let mut emit_ns: u64 = 0;
     let t0 = Instant::now();
-    let op_flow = op.push(batch, &mut |out_batch| {
+    let op_flow = op.push(batch, batch_res, &mut |out_batch, out_res| {
         prof.rows_out = prof.rows_out.saturating_add(out_batch.num_rows() as u64);
         prof.batches_out = prof.batches_out.saturating_add(1);
         let te = Instant::now();
-        let f = push_through_slice(rest, rest_prof, out_batch, sink);
+        let f = push_through_slice(rest, rest_prof, out_batch, out_res, sink);
         emit_ns = emit_ns.saturating_add(te.elapsed().as_nanos().min(u64::MAX as u128) as u64);
         let f = f?;
         if f == ControlFlow::Stop {
@@ -326,8 +411,12 @@ impl CollectSink {
 }
 
 impl PushSink for CollectSink {
-    fn consume(&mut self, batch: Batch) -> Result<ControlFlow, QueryError> {
-        self.res.try_grow(batch.memory_bytes())?;
+    fn consume(
+        &mut self,
+        batch: Batch,
+        batch_res: &mut Reservation,
+    ) -> Result<ControlFlow, QueryError> {
+        transfer_or_grow(batch_res, &mut self.res, batch.memory_bytes())?;
         self.batches.push(batch);
         Ok(ControlFlow::Continue)
     }
@@ -353,16 +442,17 @@ mod tests {
         fn push(
             &mut self,
             batch: Batch,
-            emit: &mut dyn FnMut(Batch) -> Result<ControlFlow, QueryError>,
+            batch_res: &mut Reservation,
+            emit: &mut dyn FnMut(Batch, &mut Reservation) -> Result<ControlFlow, QueryError>,
         ) -> Result<ControlFlow, QueryError> {
             self.seen = true;
-            let _ = emit(batch)?;
+            let _ = emit(batch, batch_res)?;
             Ok(ControlFlow::Stop)
         }
 
         fn finish(
             &mut self,
-            _emit: &mut dyn FnMut(Batch) -> Result<ControlFlow, QueryError>,
+            _emit: &mut dyn FnMut(Batch, &mut Reservation) -> Result<ControlFlow, QueryError>,
         ) -> Result<(), QueryError> {
             panic!("finish must not be called after ControlFlow::Stop");
         }
@@ -370,6 +460,7 @@ mod tests {
 
     struct PassThroughAndFlushOp {
         flushed: Option<Batch>,
+        scratch: Reservation,
     }
 
     impl PushOperator for PassThroughAndFlushOp {
@@ -380,17 +471,21 @@ mod tests {
         fn push(
             &mut self,
             batch: Batch,
-            emit: &mut dyn FnMut(Batch) -> Result<ControlFlow, QueryError>,
+            batch_res: &mut Reservation,
+            emit: &mut dyn FnMut(Batch, &mut Reservation) -> Result<ControlFlow, QueryError>,
         ) -> Result<ControlFlow, QueryError> {
-            emit(batch)
+            emit(batch, batch_res)
         }
 
         fn finish(
             &mut self,
-            emit: &mut dyn FnMut(Batch) -> Result<ControlFlow, QueryError>,
+            emit: &mut dyn FnMut(Batch, &mut Reservation) -> Result<ControlFlow, QueryError>,
         ) -> Result<(), QueryError> {
             if let Some(b) = self.flushed.take() {
-                let _ = emit(b)?;
+                self.scratch.try_grow(b.memory_bytes())?;
+                let res = emit(b, &mut self.scratch);
+                self.scratch.free();
+                let _ = res?;
             }
             Ok(())
         }
@@ -404,16 +499,24 @@ mod tests {
     }
 
     impl PushSink for CheckingSink {
-        fn consume(&mut self, batch: Batch) -> Result<ControlFlow, QueryError> {
-            // While `consume` runs, `run_pipeline` still holds `scan_res == batch.memory_bytes()`.
-            let expected_min = batch.memory_bytes() + self.inner.reserved_bytes();
+        fn consume(
+            &mut self,
+            batch: Batch,
+            batch_res: &mut Reservation,
+        ) -> Result<ControlFlow, QueryError> {
+            // `scan_res` holds `batch.memory_bytes()`, and `CollectSink` transfers from it
+            // without double-counting, so `pool.reserved()` never spikes by an extra copy.
+            let expected_before = batch.memory_bytes() + self.inner.reserved_bytes();
             assert!(
-                self.pool.reserved() >= expected_min,
-                "expected reserved >= {expected_min}, got {}",
+                self.pool.reserved() >= expected_before,
+                "expected reserved >= {expected_before}, got {}",
                 self.pool.reserved()
             );
-            self.batch_bytes_seen.push(batch.memory_bytes());
-            self.inner.consume(batch)
+            let bytes = batch.memory_bytes();
+            self.batch_bytes_seen.push(bytes);
+            let flow = self.inner.consume(batch, batch_res)?;
+            assert_eq!(self.pool.reserved(), self.inner.reserved_bytes());
+            Ok(flow)
         }
 
         fn finish(&mut self) -> Result<(), QueryError> {
@@ -500,12 +603,14 @@ mod tests {
         let parts2 = source.open_partitions(&ScanSpec::default(), &ctx2).unwrap();
         assert_eq!(parts2.len(), 2);
         let pool2 = Arc::clone(&pool);
+        let pool2_op = Arc::clone(&pool);
         let sinks2 = run_pipeline(
             &ctx2,
             parts2,
             move |_| {
                 Ok(vec![Box::new(PassThroughAndFlushOp {
                     flushed: Some(extra.clone()),
+                    scratch: pool2_op.register("flush_test", false),
                 })])
             },
             move |_| Ok(CollectSink::new(&pool2)),
@@ -525,5 +630,80 @@ mod tests {
         assert_eq!(snap2[0].name, "PassThroughAndFlush");
         assert_eq!(snap2[0].rows_out, 11);
         assert_eq!(snap2[0].batches_out, 5);
+    }
+
+    #[test]
+    fn run_pipeline_scan_res_transfer_stays_within_single_batch_cap() {
+        let dir = tempfile::tempdir().unwrap();
+        let schema = Schema::try_new_arc(vec![Field::new("v", DataType::I64, false)]).unwrap();
+        let vals: Vec<i64> = (0..4096).collect();
+        let batch = make_int_batch(&schema, vals);
+        let batch_bytes = batch.memory_bytes();
+        // Cap is strictly smaller than 2x batch_bytes, proving zero-double-count transfer.
+        let tight_cap = batch_bytes + 256;
+        assert!(tight_cap < batch_bytes * 2);
+
+        let pool = GlobalPool::standalone(tight_cap);
+        let ctx = ExecContext {
+            pool: Arc::clone(&pool),
+            eval: EvalContext::new(0, CancelToken::new()),
+            spill: Arc::new(SpillManager::with_fixed_cap(
+                dir.path().to_path_buf(),
+                1024 * 1024,
+            )),
+            workers: Arc::new(WorkerPool::new(1).unwrap()),
+            batch_size: DEFAULT_BATCH_SIZE,
+            target_partitions: 1,
+            metrics: ExecMetrics::new(),
+        };
+
+        let source = BatchSource::new(Arc::clone(&schema), vec![batch.clone()]).unwrap();
+        let partitions = source.open_partitions(&ScanSpec::default(), &ctx).unwrap();
+
+        #[derive(Debug)]
+        struct PeakCheckSink {
+            pool: Arc<ScopedPool>,
+            inner: CollectSink,
+            peak_reserved: usize,
+        }
+
+        impl PushSink for PeakCheckSink {
+            fn consume(
+                &mut self,
+                batch: Batch,
+                batch_res: &mut Reservation,
+            ) -> Result<ControlFlow, QueryError> {
+                self.peak_reserved = self.peak_reserved.max(self.pool.reserved());
+                let flow = self.inner.consume(batch, batch_res)?;
+                self.peak_reserved = self.peak_reserved.max(self.pool.reserved());
+                Ok(flow)
+            }
+        }
+
+        let p_sink = Arc::clone(&pool);
+        let sinks = run_pipeline(
+            &ctx,
+            partitions,
+            |_| Ok(Vec::new()),
+            move |_| {
+                Ok(PeakCheckSink {
+                    pool: Arc::clone(&p_sink),
+                    inner: CollectSink::new(&p_sink),
+                    peak_reserved: 0,
+                })
+            },
+        )
+        .unwrap();
+
+        assert_eq!(sinks.len(), 1);
+        assert!(
+            sinks[0].peak_reserved <= batch_bytes,
+            "peak_reserved={} exceeded 1x batch_bytes={batch_bytes}",
+            sinks[0].peak_reserved
+        );
+        assert_eq!(sinks[0].inner.batches().len(), 1);
+        assert!(sinks[0].inner.batches()[0].semantic_eq(&batch));
+        drop(sinks);
+        assert_eq!(pool.reserved(), 0);
     }
 }

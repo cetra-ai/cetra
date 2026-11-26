@@ -631,7 +631,7 @@ mod tests {
         use std::time::{Duration, Instant};
 
         use bytes::Bytes;
-        use cetra_column::{Batch, CancelToken, GlobalPool, Schema};
+        use cetra_column::{Batch, CancelToken, GlobalPool, Reservation, Schema};
         use cetra_core::ids::ProjectId;
         use cetra_core::schema::{scores, traces};
         use cetra_core::score::Score;
@@ -854,7 +854,11 @@ mod tests {
             }
 
             impl PushSink for RowCountSink {
-                fn consume(&mut self, batch: Batch) -> Result<ControlFlow, QueryError> {
+                fn consume(
+                    &mut self,
+                    batch: Batch,
+                    _batch_res: &mut Reservation,
+                ) -> Result<ControlFlow, QueryError> {
                     self.rows += batch.num_rows();
                     Ok(ControlFlow::Continue)
                 }

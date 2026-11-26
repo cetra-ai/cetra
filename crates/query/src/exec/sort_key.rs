@@ -6,7 +6,8 @@ use std::cmp::Ordering;
 use cetra_column::{Column, DataType};
 
 use crate::eval::{
-    self, ElemRef, compare_decimals, f64_cmp, list_ref_at, list_ref_elem, list_ref_len,
+    self, ElemRef, EventsRef, LinksRef, MapRef, compare_decimals, f64_cmp, list_ref_at,
+    list_ref_elem, list_ref_len,
 };
 use crate::ir::Expr;
 
@@ -113,7 +114,7 @@ fn compare_non_null_cols(col_a: &Column, a: usize, col_b: &Column, b: usize) -> 
         }
         (DataType::Interval, DataType::Interval) => {
             match (eval::read_interval(col_a, a), eval::read_interval(col_b, b)) {
-                (Some(x), Some(y)) => (x.months, x.days, x.nanos).cmp(&(y.months, y.days, y.nanos)),
+                (Some(x), Some(y)) => x.canonical_key().cmp(&y.canonical_key()),
                 _ => Ordering::Equal,
             }
         }
@@ -122,14 +123,96 @@ fn compare_non_null_cols(col_a: &Column, a: usize, col_b: &Column, b: usize) -> 
             DataType::Binary | DataType::FixedBytes8 | DataType::FixedBytes16,
             DataType::Binary | DataType::FixedBytes8 | DataType::FixedBytes16,
         ) => eval::read_bytes(col_a, a).cmp(&eval::read_bytes(col_b, b)),
-        (DataType::List(_), DataType::List(_)) => {
+        (DataType::List(_), DataType::List(_))
+        | (DataType::MapUtf8, DataType::MapUtf8)
+        | (DataType::Events, DataType::Events)
+        | (DataType::Links, DataType::Links) => {
             compare_elem_refs(ElemRef::Col(col_a, a), ElemRef::Col(col_b, b))
         }
         _ => Ordering::Equal,
     }
 }
 
-fn compare_elem_refs(ea: ElemRef<'_>, eb: ElemRef<'_>) -> Ordering {
+fn map_ref_len(m: MapRef<'_>) -> usize {
+    match m {
+        MapRef::Const(v) => v.len(),
+        MapRef::Flat { start, end, .. } => end - start,
+    }
+}
+
+fn map_ref_entry(m: MapRef<'_>, idx: usize) -> (&str, Option<&str>) {
+    match m {
+        MapRef::Const(v) => (v[idx].0.as_str(), v[idx].1.as_deref()),
+        MapRef::Flat { data, start, .. } => {
+            let pos = start + idx;
+            let k = data.keys().get(pos).unwrap_or("");
+            let v = if data.value_nulls().is_some_and(|bm| !bm.get(pos)) {
+                None
+            } else {
+                data.values().get(pos)
+            };
+            (k, v)
+        }
+    }
+}
+
+fn events_ref_len(e: EventsRef<'_>) -> usize {
+    match e {
+        EventsRef::Const(v) => v.len(),
+        EventsRef::Flat { start, end, .. } => end - start,
+    }
+}
+
+fn events_ref_item(e: EventsRef<'_>, idx: usize) -> (i64, &str, Option<&str>) {
+    match e {
+        EventsRef::Const(v) => (
+            v[idx].time,
+            v[idx].name.as_str(),
+            v[idx].attributes.as_deref(),
+        ),
+        EventsRef::Flat { data, start, .. } => {
+            let pos = start + idx;
+            let t = data.times()[pos];
+            let n = data.names().get(pos).unwrap_or("");
+            let a = if data.attribute_nulls().is_some_and(|bm| !bm.get(pos)) {
+                None
+            } else {
+                data.attributes().get(pos)
+            };
+            (t, n, a)
+        }
+    }
+}
+
+fn links_ref_len(l: LinksRef<'_>) -> usize {
+    match l {
+        LinksRef::Const(v) => v.len(),
+        LinksRef::Flat { start, end, .. } => end - start,
+    }
+}
+
+fn links_ref_item(l: LinksRef<'_>, idx: usize) -> (&[u8; 16], &[u8; 8], Option<&str>) {
+    match l {
+        LinksRef::Const(v) => (
+            &v[idx].trace_id,
+            &v[idx].span_id,
+            v[idx].attributes.as_deref(),
+        ),
+        LinksRef::Flat { data, start, .. } => {
+            let pos = start + idx;
+            let tid = &data.trace_ids()[pos];
+            let sid = &data.span_ids()[pos];
+            let a = if data.attribute_nulls().is_some_and(|bm| !bm.get(pos)) {
+                None
+            } else {
+                data.attributes().get(pos)
+            };
+            (tid, sid, a)
+        }
+    }
+}
+
+pub(crate) fn compare_elem_refs(ea: ElemRef<'_>, eb: ElemRef<'_>) -> Ordering {
     match (ea.is_null(), eb.is_null()) {
         (true, true) => return Ordering::Equal,
         (true, false) => return Ordering::Less,
@@ -159,7 +242,7 @@ fn compare_elem_refs(ea: ElemRef<'_>, eb: ElemRef<'_>) -> Ordering {
         (DataType::Date, DataType::Date) => ea.read_date().cmp(&eb.read_date()),
         (DataType::Interval, DataType::Interval) => {
             match (ea.read_interval(), eb.read_interval()) {
-                (Some(x), Some(y)) => (x.months, x.days, x.nanos).cmp(&(y.months, y.days, y.nanos)),
+                (Some(x), Some(y)) => x.canonical_key().cmp(&y.canonical_key()),
                 _ => Ordering::Equal,
             }
         }
@@ -185,6 +268,48 @@ fn compare_elem_refs(ea: ElemRef<'_>, eb: ElemRef<'_>) -> Ordering {
             let len_b = list_ref_len(lb);
             for i in 0..len_a.min(len_b) {
                 let ord = compare_elem_refs(list_ref_elem(la, i), list_ref_elem(lb, i));
+                if ord != Ordering::Equal {
+                    return ord;
+                }
+            }
+            len_a.cmp(&len_b)
+        }
+        (DataType::MapUtf8, DataType::MapUtf8) => {
+            let (Some(ma), Some(mb)) = (ea.as_map_ref(), eb.as_map_ref()) else {
+                return Ordering::Equal;
+            };
+            let len_a = map_ref_len(ma);
+            let len_b = map_ref_len(mb);
+            for i in 0..len_a.min(len_b) {
+                let ord = map_ref_entry(ma, i).cmp(&map_ref_entry(mb, i));
+                if ord != Ordering::Equal {
+                    return ord;
+                }
+            }
+            len_a.cmp(&len_b)
+        }
+        (DataType::Events, DataType::Events) => {
+            let (Some(eva), Some(evb)) = (ea.as_events_ref(), eb.as_events_ref()) else {
+                return Ordering::Equal;
+            };
+            let len_a = events_ref_len(eva);
+            let len_b = events_ref_len(evb);
+            for i in 0..len_a.min(len_b) {
+                let ord = events_ref_item(eva, i).cmp(&events_ref_item(evb, i));
+                if ord != Ordering::Equal {
+                    return ord;
+                }
+            }
+            len_a.cmp(&len_b)
+        }
+        (DataType::Links, DataType::Links) => {
+            let (Some(lka), Some(lkb)) = (ea.as_links_ref(), eb.as_links_ref()) else {
+                return Ordering::Equal;
+            };
+            let len_a = links_ref_len(lka);
+            let len_b = links_ref_len(lkb);
+            for i in 0..len_a.min(len_b) {
+                let ord = links_ref_item(lka, i).cmp(&links_ref_item(lkb, i));
                 if ord != Ordering::Equal {
                     return ord;
                 }
@@ -443,5 +568,35 @@ mod tests {
             compare_rows(&[k0, k1], &[key(false, false), key(true, false)], 0, 1),
             Ordering::Greater
         );
+
+        // Canonical interval comparison: 1 day == 24 hours
+        let iv_canon = Column::Flat(
+            FlatColumn::try_new(
+                FlatData::Interval(vec![
+                    Interval {
+                        months: 0,
+                        days: 1,
+                        nanos: 0,
+                    },
+                    Interval {
+                        months: 0,
+                        days: 0,
+                        nanos: 24 * 3_600_000_000_000,
+                    },
+                    Interval {
+                        months: 1,
+                        days: 0,
+                        nanos: 0,
+                    },
+                ]),
+                None,
+            )
+            .unwrap(),
+        );
+        assert_eq!(
+            compare_rows(std::slice::from_ref(&iv_canon), &k_asc, 0, 1),
+            Ordering::Equal
+        );
+        assert_eq!(compare_rows(&[iv_canon], &k_asc, 0, 2), Ordering::Less);
     }
 }

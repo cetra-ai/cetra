@@ -914,25 +914,41 @@ impl OperatorStream {
         }
     }
 
-    fn push_pending(&mut self, batch: Batch) -> Result<(), QueryError> {
+    fn push_pending_from(
+        buf_res: &mut Reservation,
+        pending: &mut VecDeque<Batch>,
+        batch: Batch,
+        out_res: &mut Reservation,
+    ) -> Result<ControlFlow, QueryError> {
         let bytes = batch.memory_bytes();
-        self.buf_res.try_grow(bytes)?;
-        self.pending.push_back(batch);
-        Ok(())
+        let xfer = out_res.size().min(bytes);
+        if xfer > 0 {
+            out_res.transfer_to(buf_res, xfer)?;
+        }
+        if bytes > xfer
+            && let Err(err) = buf_res.try_grow(bytes - xfer)
+        {
+            if xfer > 0 {
+                let _ = buf_res.transfer_to(out_res, xfer);
+            }
+            return Err(err.into());
+        }
+        pending.push_back(batch);
+        Ok(ControlFlow::Continue)
     }
 
     fn push_through_ops(
         ops: &mut [Box<dyn PushOperator>],
         batch: Batch,
-        out: &mut Vec<Batch>,
+        batch_res: &mut Reservation,
+        sink: &mut impl FnMut(Batch, &mut Reservation) -> Result<ControlFlow, QueryError>,
     ) -> Result<ControlFlow, QueryError> {
         let Some((op, rest)) = ops.split_first_mut() else {
-            out.push(batch);
-            return Ok(ControlFlow::Continue);
+            return sink(batch, batch_res);
         };
         let mut downstream = ControlFlow::Continue;
-        let flow = op.push(batch, &mut |b| {
-            let f = Self::push_through_ops(rest, b, out)?;
+        let flow = op.push(batch, batch_res, &mut |b, b_res| {
+            let f = Self::push_through_ops(rest, b, b_res, sink)?;
             if f == ControlFlow::Stop {
                 downstream = ControlFlow::Stop;
             }
@@ -947,14 +963,14 @@ impl OperatorStream {
 
     fn finish_ops(
         ops: &mut [Box<dyn PushOperator>],
-        out: &mut Vec<Batch>,
+        sink: &mut impl FnMut(Batch, &mut Reservation) -> Result<ControlFlow, QueryError>,
     ) -> Result<(), QueryError> {
         for i in 0..ops.len() {
             let (head, tail) = ops.split_at_mut(i + 1);
             let op = &mut head[i];
             let mut downstream = ControlFlow::Continue;
-            op.finish(&mut |b| {
-                let f = Self::push_through_ops(tail, b, out)?;
+            op.finish(&mut |b, b_res| {
+                let f = Self::push_through_ops(tail, b, b_res, sink)?;
                 if f == ControlFlow::Stop {
                     downstream = ControlFlow::Stop;
                 }
@@ -996,42 +1012,39 @@ impl PartitionStream for OperatorStream {
             }
             match self.input.next_batch(cancel, Some(&mut self.input_res)) {
                 Ok(Some(batch)) => {
-                    let mut emitted = Vec::new();
-                    let flow = Self::push_through_ops(&mut self.ops, batch, &mut emitted);
+                    let buf_res = &mut self.buf_res;
+                    let pending = &mut self.pending;
+                    let flow = Self::push_through_ops(
+                        &mut self.ops,
+                        batch,
+                        &mut self.input_res,
+                        &mut |b, b_res| Self::push_pending_from(buf_res, pending, b, b_res),
+                    );
                     self.input_res.free();
                     let flow = match flow {
                         Ok(f) => f,
                         Err(err) => {
                             self.buf_res.free();
+                            self.pending.clear();
                             rollback_res(res, before);
                             return Err(err);
                         }
                     };
-                    for b in emitted {
-                        if let Err(err) = self.push_pending(b) {
-                            self.buf_res.free();
-                            rollback_res(res, before);
-                            return Err(err);
-                        }
-                    }
                     if flow == ControlFlow::Stop {
                         self.finished_ops = true;
                     }
                 }
                 Ok(None) => {
                     self.input_res.free();
-                    let mut emitted = Vec::new();
-                    if let Err(err) = Self::finish_ops(&mut self.ops, &mut emitted) {
+                    let buf_res = &mut self.buf_res;
+                    let pending = &mut self.pending;
+                    if let Err(err) = Self::finish_ops(&mut self.ops, &mut |b, b_res| {
+                        Self::push_pending_from(buf_res, pending, b, b_res)
+                    }) {
                         self.buf_res.free();
+                        self.pending.clear();
                         rollback_res(res, before);
                         return Err(err);
-                    }
-                    for b in emitted {
-                        if let Err(err) = self.push_pending(b) {
-                            self.buf_res.free();
-                            rollback_res(res, before);
-                            return Err(err);
-                        }
                     }
                     self.finished_ops = true;
                 }

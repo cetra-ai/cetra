@@ -3,25 +3,33 @@
 use std::cmp::Ordering;
 use std::collections::VecDeque;
 use std::fmt;
+use std::mem::size_of;
 use std::sync::Arc;
 
 use cetra_column::{
     Batch, Bitmap, CancelToken, Column, ColumnError, DataType, Field, FlatColumn, FlatData,
-    Reservation, Schema, ScopedPool, Selection,
+    Reservation, ScalarValue, Schema, ScopedPool, Selection,
 };
 
 use crate::error::{InvalidQuery, QueryError};
 use crate::eval::{
-    self, ElemRef, check_cancel, eval_expr, pool_size, reconcile_output, rollback_to,
+    self, ElemRef, check_cancel, eval_expr, pool_size, read_scalar, reconcile_output, rollback_to,
 };
 use crate::ir::{EvalContext, Expr};
 
-use super::pipeline::{ControlFlow, ExecContext, PushSink};
-use super::sort_key::{SortKey, compare_rows, compare_rows_across};
+use super::pipeline::{ControlFlow, ExecContext, PushSink, transfer_or_grow};
+use super::sort_key::{SortKey, compare_elem_refs, compare_rows, compare_rows_across};
 use super::source::PartitionStream;
 use super::spill::{MAX_MERGE_WAY, SpillFile, SpillReader, SpillWriter};
 
 const CANCEL_CHECK_MASK: usize = 1023;
+const MAX_STREAMING_WINDOW_LAG: usize = 4096;
+
+fn effective_merge_way(pool: &ScopedPool, max_merge_way: usize) -> usize {
+    (pool.spill_share() / 4096)
+        .saturating_sub(2)
+        .clamp(2, max_merge_way.max(2))
+}
 
 /// Computes the target spill frame size in bytes so `max_merge_way` active merge batches
 /// plus output/scratch batches fit inside a tight `ScopedPool`.
@@ -279,11 +287,15 @@ impl ExternalSort {
         self.runs.len()
     }
 
-    fn try_buffer_batch(&mut self, batch: &Batch) -> Result<(), QueryError> {
+    fn try_buffer_batch(
+        &mut self,
+        batch: &Batch,
+        batch_res: &mut Reservation,
+    ) -> Result<(), QueryError> {
         let before = self.res.size();
         let compacted = if batch.selection().is_all(batch.raw_len()) {
             let mem = batch.memory_bytes();
-            if let Err(err) = self.res.try_grow(mem) {
+            if let Err(err) = transfer_or_grow(batch_res, &mut self.res, mem) {
                 self.res.shrink(self.res.size().saturating_sub(before));
                 return Err(err.into());
             }
@@ -367,7 +379,8 @@ impl ExternalSort {
             return Ok(());
         }
 
-        let frame_bytes = target_frame_bytes(&self.ctx.pool, self.max_merge_way);
+        let merge_way = effective_merge_way(&self.ctx.pool, self.max_merge_way);
+        let frame_bytes = target_frame_bytes(&self.ctx.pool, merge_way);
         let total_mem: usize = self.buffered.iter().map(|b| b.batch.memory_bytes()).sum();
         let avg_row = (total_mem / self.buffered_rows.max(1)).max(1);
         let rows_per_chunk = (frame_bytes / avg_row)
@@ -413,7 +426,8 @@ impl ExternalSort {
                 self.res.free();
                 return Ok(Box::new(EmptyStream));
             }
-            let frame_bytes = target_frame_bytes(&self.ctx.pool, self.max_merge_way);
+            let merge_way = effective_merge_way(&self.ctx.pool, self.max_merge_way);
+            let frame_bytes = target_frame_bytes(&self.ctx.pool, merge_way);
             return Ok(Box::new(InMemorySortedStream {
                 schema: self.schema,
                 ctx: self.ctx,
@@ -433,16 +447,17 @@ impl ExternalSort {
         self.res.free();
         drop(self.res);
 
+        let merge_way = effective_merge_way(&self.ctx.pool, self.max_merge_way);
         merge_spill_passes(
             &mut self.runs,
             &self.schema,
             &self.keys,
             self.limit,
-            self.max_merge_way,
+            merge_way,
             &self.ctx,
         )?;
 
-        let frame_bytes = target_frame_bytes(&self.ctx.pool, self.max_merge_way);
+        let frame_bytes = target_frame_bytes(&self.ctx.pool, merge_way);
         let max_output_rows = self.ctx.batch_size.max(1);
         MergeStream::from_spill_files(
             self.runs,
@@ -487,6 +502,7 @@ impl ExternalSort {
             .min()
             .unwrap_or(MAX_MERGE_WAY)
             .max(2);
+        let merge_way = effective_merge_way(&ctx.pool, max_merge_way);
 
         let mut non_empty: Vec<Self> = Vec::with_capacity(sinks.len());
         for mut sink in sinks {
@@ -515,10 +531,9 @@ impl ExternalSort {
 
         let any_spilled = non_empty.iter().any(|s| !s.runs.is_empty());
         let total_reserved: usize = non_empty.iter().map(|s| s.res.size()).sum();
-        let frame_bytes = target_frame_bytes(&ctx.pool, max_merge_way);
-        let can_stay_in_memory = !any_spilled
-            && non_empty.len() <= max_merge_way
-            && total_reserved <= ctx.pool.cap() / 2;
+        let frame_bytes = target_frame_bytes(&ctx.pool, merge_way);
+        let can_stay_in_memory =
+            !any_spilled && non_empty.len() <= merge_way && total_reserved <= ctx.pool.cap() / 2;
 
         if can_stay_in_memory {
             let mut streams: Vec<Box<dyn PartitionStream>> = Vec::with_capacity(non_empty.len());
@@ -557,7 +572,7 @@ impl ExternalSort {
             all_runs.append(&mut sink.runs);
         }
 
-        merge_spill_passes(&mut all_runs, &schema, &keys, limit, max_merge_way, ctx)?;
+        merge_spill_passes(&mut all_runs, &schema, &keys, limit, merge_way, ctx)?;
 
         MergeStream::from_spill_files(
             all_runs,
@@ -572,7 +587,11 @@ impl ExternalSort {
 }
 
 impl PushSink for ExternalSort {
-    fn consume(&mut self, batch: Batch) -> Result<ControlFlow, QueryError> {
+    fn consume(
+        &mut self,
+        batch: Batch,
+        batch_res: &mut Reservation,
+    ) -> Result<ControlFlow, QueryError> {
         if self.limit == Some(0) {
             return Ok(ControlFlow::Stop);
         }
@@ -590,12 +609,12 @@ impl PushSink for ExternalSort {
         }
 
         self.max_batch_bytes = self.max_batch_bytes.max(batch.memory_bytes());
-        match self.try_buffer_batch(&batch) {
+        match self.try_buffer_batch(&batch, batch_res) {
             Ok(()) => {}
             Err(QueryError::TooLarge) if self.buffered_rows > 0 => {
                 self.spill_buffered()?;
                 // Buffered rows are now 0; never loop if this batch still exceeds memory.
-                self.try_buffer_batch(&batch)?;
+                self.try_buffer_batch(&batch, batch_res)?;
             }
             Err(err) => return Err(err),
         }
@@ -1350,8 +1369,19 @@ impl PartitionStream for MergeStream {
 
         if staged.len() == 1 {
             let out = staged.remove(0);
+            let out_bytes = out.memory_bytes();
+            if let Some(cr) = res.as_deref_mut() {
+                let xfer = self.out_res.size().min(out_bytes);
+                if xfer > 0
+                    && let Err(err) = self.out_res.transfer_to(cr, xfer)
+                {
+                    self.out_res.free();
+                    rollback_to(&mut res, before);
+                    return Err(err.into());
+                }
+            }
             self.out_res.free();
-            if let Err(err) = reconcile_output(&mut res, before, out.memory_bytes()) {
+            if let Err(err) = reconcile_output(&mut res, before, out_bytes) {
                 rollback_to(&mut res, before);
                 return Err(err);
             }
@@ -1600,6 +1630,11 @@ pub fn eval_window_group(
     sort_keys.extend(order_by.iter().cloned());
 
     let res = ctx.pool.register("window_partition", false);
+    let streaming = if specs_are_zero_lookahead_streamable(&specs) {
+        Some(StreamingWindowState::new(&specs, &out_types)?)
+    } else {
+        None
+    };
     Ok(Box::new(WindowStream {
         input: Some(input),
         sorted: None,
@@ -1613,8 +1648,577 @@ pub fn eval_window_group(
         ctx: ctx.clone(),
         lookahead: None,
         queued_out: VecDeque::new(),
+        streaming,
         res,
     }))
+}
+
+fn frame_is_zero_lookahead(frame: Option<(FrameBound, FrameBound)>) -> bool {
+    let Some((start, end)) = frame else {
+        return false;
+    };
+    let end_ok = match end {
+        FrameBound::CurrentRow => true,
+        FrameBound::Preceding(n) => n <= MAX_STREAMING_WINDOW_LAG as u64,
+        FrameBound::UnboundedPreceding
+        | FrameBound::Following(_)
+        | FrameBound::UnboundedFollowing => false,
+    };
+    if !end_ok {
+        return false;
+    }
+    match start {
+        FrameBound::UnboundedPreceding => true,
+        FrameBound::Preceding(m) => m <= MAX_STREAMING_WINDOW_LAG as u64,
+        FrameBound::CurrentRow => matches!(end, FrameBound::CurrentRow),
+        FrameBound::Following(_) | FrameBound::UnboundedFollowing => false,
+    }
+}
+
+/// Returns `true` iff every spec in `specs` can stream row-by-row off `ExternalSort`
+/// with zero full-partition lookahead.
+fn specs_are_zero_lookahead_streamable(specs: &[WindowSpec]) -> bool {
+    specs.iter().all(|spec| match &spec.func {
+        WindowFunc::RowNumber | WindowFunc::Rank | WindowFunc::DenseRank => true,
+        WindowFunc::Lag { offset, .. } => {
+            *offset >= 0 && *offset <= MAX_STREAMING_WINDOW_LAG as i64
+        }
+        WindowFunc::Lead { .. } => false,
+        WindowFunc::FirstValue(_)
+        | WindowFunc::LastValue(_)
+        | WindowFunc::Sum(_)
+        | WindowFunc::Count(_)
+        | WindowFunc::Avg(_)
+        | WindowFunc::Min(_)
+        | WindowFunc::Max(_) => frame_is_zero_lookahead(spec.frame),
+    })
+}
+
+fn normalize_bound(b: FrameBound) -> FrameBound {
+    match b {
+        FrameBound::Preceding(0) => FrameBound::CurrentRow,
+        other => other,
+    }
+}
+
+fn opt_scalar_bytes(sv: &Option<ScalarValue>) -> usize {
+    size_of::<Option<ScalarValue>>() + sv.as_ref().map_or(0, ScalarValue::heap_bytes)
+}
+
+#[derive(Clone)]
+enum StreamSumAcc {
+    Null,
+    I64(Option<i64>),
+    F64(Option<f64>),
+    Decimal128 {
+        acc: Option<i128>,
+        precision: u8,
+        scale: i8,
+    },
+}
+
+impl StreamSumAcc {
+    fn from_types(out_dt: &DataType) -> Result<Self, QueryError> {
+        match out_dt {
+            DataType::Null => Ok(Self::Null),
+            DataType::I64 => Ok(Self::I64(None)),
+            DataType::F64 => Ok(Self::F64(None)),
+            DataType::Decimal128 { precision, scale } => Ok(Self::Decimal128 {
+                acc: None,
+                precision: *precision,
+                scale: *scale,
+            }),
+            _ => Err(QueryError::failed("unsupported SUM input type")),
+        }
+    }
+
+    fn reset(&mut self) {
+        match self {
+            Self::Null => {}
+            Self::I64(v) => *v = None,
+            Self::F64(v) => *v = None,
+            Self::Decimal128 { acc, .. } => *acc = None,
+        }
+    }
+
+    fn add_scalar(&mut self, val: Option<&ScalarValue>) -> Result<(), QueryError> {
+        let Some(sv) = val else {
+            return Ok(());
+        };
+        match (self, sv) {
+            (Self::Null, _) => Ok(()),
+            (Self::I64(acc), ScalarValue::I64(v)) => {
+                *acc = Some(match *acc {
+                    Some(cur) => cur
+                        .checked_add(*v)
+                        .ok_or_else(|| QueryError::failed("window SUM(I64) overflow"))?,
+                    None => *v,
+                });
+                Ok(())
+            }
+            (Self::F64(acc), ScalarValue::F64(v)) => {
+                *acc = Some(acc.map_or(*v, |cur| cur + *v));
+                Ok(())
+            }
+            (Self::Decimal128 { acc, precision, .. }, ScalarValue::Decimal128 { value, .. }) => {
+                let next = match *acc {
+                    Some(cur) => cur
+                        .checked_add(*value)
+                        .ok_or_else(|| QueryError::failed("window SUM(Decimal128) overflow"))?,
+                    None => *value,
+                };
+                *acc = Some(check_dec_bounds(next, *precision)?);
+                Ok(())
+            }
+            _ => Err(QueryError::failed("unsupported SUM input type")),
+        }
+    }
+
+    fn to_scalar(&self) -> Option<ScalarValue> {
+        match self {
+            Self::Null => None,
+            Self::I64(v) => v.map(ScalarValue::I64),
+            Self::F64(v) => v.map(ScalarValue::F64),
+            Self::Decimal128 {
+                acc,
+                precision,
+                scale,
+            } => acc.map(|value| ScalarValue::Decimal128 {
+                value,
+                precision: *precision,
+                scale: *scale,
+            }),
+        }
+    }
+}
+
+#[derive(Clone)]
+enum StreamAvgAcc {
+    Null,
+    I64 {
+        sum: i128,
+        cnt: u64,
+    },
+    F64 {
+        sum: f64,
+        cnt: u64,
+    },
+    Decimal128 {
+        sum: i128,
+        cnt: u128,
+        scale_factor: u128,
+        out_p: u8,
+        out_s: i8,
+    },
+}
+
+impl StreamAvgAcc {
+    fn from_types(in_dt: &DataType, out_dt: &DataType) -> Result<Self, QueryError> {
+        match (in_dt, out_dt) {
+            (DataType::Null, _) => Ok(Self::Null),
+            (DataType::I64, DataType::F64) => Ok(Self::I64 { sum: 0, cnt: 0 }),
+            (DataType::F64, DataType::F64) => Ok(Self::F64 { sum: 0.0, cnt: 0 }),
+            (
+                DataType::Decimal128 {
+                    scale: in_scale, ..
+                },
+                DataType::Decimal128 {
+                    precision: out_p,
+                    scale: out_s,
+                },
+            ) => {
+                let scale_diff = (i32::from(*out_s) - i32::from(*in_scale)).max(0) as u32;
+                let scale_factor = 10u128
+                    .checked_pow(scale_diff)
+                    .ok_or_else(|| QueryError::failed("decimal AVG scale overflow"))?;
+                Ok(Self::Decimal128 {
+                    sum: 0,
+                    cnt: 0,
+                    scale_factor,
+                    out_p: *out_p,
+                    out_s: *out_s,
+                })
+            }
+            _ => Err(QueryError::failed("unsupported AVG input type")),
+        }
+    }
+
+    fn reset(&mut self) {
+        match self {
+            Self::Null => {}
+            Self::I64 { sum, cnt } => {
+                *sum = 0;
+                *cnt = 0;
+            }
+            Self::F64 { sum, cnt } => {
+                *sum = 0.0;
+                *cnt = 0;
+            }
+            Self::Decimal128 { sum, cnt, .. } => {
+                *sum = 0;
+                *cnt = 0;
+            }
+        }
+    }
+
+    fn add_scalar(&mut self, val: Option<&ScalarValue>) -> Result<(), QueryError> {
+        let Some(sv) = val else {
+            return Ok(());
+        };
+        match (self, sv) {
+            (Self::Null, _) => Ok(()),
+            (Self::I64 { sum, cnt }, ScalarValue::I64(v)) => {
+                *sum += i128::from(*v);
+                *cnt += 1;
+                Ok(())
+            }
+            (Self::F64 { sum, cnt }, ScalarValue::F64(v)) => {
+                *sum += *v;
+                *cnt += 1;
+                Ok(())
+            }
+            (Self::Decimal128 { sum, cnt, .. }, ScalarValue::Decimal128 { value, .. }) => {
+                *sum = sum
+                    .checked_add(*value)
+                    .ok_or_else(|| QueryError::failed("window AVG(Decimal128) overflow"))?;
+                *cnt += 1;
+                Ok(())
+            }
+            _ => Err(QueryError::failed("unsupported AVG input type")),
+        }
+    }
+
+    fn to_scalar(&self) -> Result<Option<ScalarValue>, QueryError> {
+        match self {
+            Self::Null => Ok(None),
+            Self::I64 { sum, cnt } => {
+                Ok((*cnt > 0).then(|| ScalarValue::F64((*sum as f64) / (*cnt as f64))))
+            }
+            Self::F64 { sum, cnt } => {
+                Ok((*cnt > 0).then(|| ScalarValue::F64(*sum / (*cnt as f64))))
+            }
+            Self::Decimal128 {
+                sum,
+                cnt,
+                scale_factor,
+                out_p,
+                out_s,
+            } => {
+                if *cnt == 0 {
+                    Ok(None)
+                } else {
+                    let v = decimal_avg(*sum, *cnt, *scale_factor, *out_p)?;
+                    Ok(Some(ScalarValue::Decimal128 {
+                        value: v,
+                        precision: *out_p,
+                        scale: *out_s,
+                    }))
+                }
+            }
+        }
+    }
+}
+
+enum StreamingSpecState {
+    RowNumber,
+    Rank {
+        current_rank: i64,
+    },
+    DenseRank {
+        current_dense_rank: i64,
+    },
+    Lag {
+        offset: usize,
+        ring: VecDeque<Option<ScalarValue>>,
+    },
+    FrameFirstLast {
+        is_last: bool,
+        start: FrameBound,
+        end: FrameBound,
+        first_val: Option<Option<ScalarValue>>,
+        ring: VecDeque<Option<ScalarValue>>,
+        ring_start: usize,
+    },
+    FrameCount {
+        has_expr: bool,
+        start: FrameBound,
+        end: FrameBound,
+        prefix: i64,
+        ring: VecDeque<bool>,
+        ring_start: usize,
+    },
+    FrameSum {
+        start: FrameBound,
+        end: FrameBound,
+        acc: StreamSumAcc,
+        ring: VecDeque<Option<ScalarValue>>,
+        ring_start: usize,
+    },
+    FrameAvg {
+        start: FrameBound,
+        end: FrameBound,
+        acc: StreamAvgAcc,
+        ring: VecDeque<Option<ScalarValue>>,
+        ring_start: usize,
+    },
+    FrameMinMax {
+        is_max: bool,
+        start: FrameBound,
+        end: FrameBound,
+        best: Option<ScalarValue>,
+        ring: VecDeque<Option<ScalarValue>>,
+        ring_start: usize,
+    },
+}
+
+impl StreamingSpecState {
+    fn from_spec(spec: &WindowSpec, out_dt: &DataType) -> Result<Self, QueryError> {
+        let norm_frame = || -> Result<(FrameBound, FrameBound), QueryError> {
+            let Some((s, e)) = spec.frame else {
+                return Err(QueryError::internal(
+                    "missing frame on streaming window spec",
+                ));
+            };
+            Ok((normalize_bound(s), normalize_bound(e)))
+        };
+        match &spec.func {
+            WindowFunc::RowNumber => Ok(Self::RowNumber),
+            WindowFunc::Rank => Ok(Self::Rank { current_rank: 1 }),
+            WindowFunc::DenseRank => Ok(Self::DenseRank {
+                current_dense_rank: 1,
+            }),
+            WindowFunc::Lag { offset, .. } => Ok(Self::Lag {
+                offset: usize::try_from(*offset)
+                    .map_err(|_| QueryError::internal("negative offset in streaming LAG"))?,
+                ring: VecDeque::new(),
+            }),
+            WindowFunc::FirstValue(_) => {
+                let (start, end) = norm_frame()?;
+                Ok(Self::FrameFirstLast {
+                    is_last: false,
+                    start,
+                    end,
+                    first_val: None,
+                    ring: VecDeque::new(),
+                    ring_start: 0,
+                })
+            }
+            WindowFunc::LastValue(_) => {
+                let (start, end) = norm_frame()?;
+                Ok(Self::FrameFirstLast {
+                    is_last: true,
+                    start,
+                    end,
+                    first_val: None,
+                    ring: VecDeque::new(),
+                    ring_start: 0,
+                })
+            }
+            WindowFunc::Count(expr_opt) => {
+                let (start, end) = norm_frame()?;
+                Ok(Self::FrameCount {
+                    has_expr: expr_opt.is_some(),
+                    start,
+                    end,
+                    prefix: 0,
+                    ring: VecDeque::new(),
+                    ring_start: 0,
+                })
+            }
+            WindowFunc::Sum(_) => {
+                let (start, end) = norm_frame()?;
+                Ok(Self::FrameSum {
+                    start,
+                    end,
+                    acc: StreamSumAcc::from_types(out_dt)?,
+                    ring: VecDeque::new(),
+                    ring_start: 0,
+                })
+            }
+            WindowFunc::Avg(expr) => {
+                let (start, end) = norm_frame()?;
+                Ok(Self::FrameAvg {
+                    start,
+                    end,
+                    acc: StreamAvgAcc::from_types(&expr.data_type(), out_dt)?,
+                    ring: VecDeque::new(),
+                    ring_start: 0,
+                })
+            }
+            WindowFunc::Min(_) | WindowFunc::Max(_) => {
+                let (start, end) = norm_frame()?;
+                Ok(Self::FrameMinMax {
+                    is_max: matches!(spec.func, WindowFunc::Max(_)),
+                    start,
+                    end,
+                    best: None,
+                    ring: VecDeque::new(),
+                    ring_start: 0,
+                })
+            }
+            WindowFunc::Lead { .. } => Err(QueryError::internal(
+                "LEAD cannot be evaluated in streaming mode",
+            )),
+        }
+    }
+
+    fn reset(&mut self) {
+        match self {
+            Self::RowNumber => {}
+            Self::Rank { current_rank } => *current_rank = 1,
+            Self::DenseRank { current_dense_rank } => *current_dense_rank = 1,
+            Self::Lag { ring, .. } => ring.clear(),
+            Self::FrameFirstLast {
+                first_val,
+                ring,
+                ring_start,
+                ..
+            } => {
+                *first_val = None;
+                ring.clear();
+                *ring_start = 0;
+            }
+            Self::FrameCount {
+                prefix,
+                ring,
+                ring_start,
+                ..
+            } => {
+                *prefix = 0;
+                ring.clear();
+                *ring_start = 0;
+            }
+            Self::FrameSum {
+                acc,
+                ring,
+                ring_start,
+                ..
+            } => {
+                acc.reset();
+                ring.clear();
+                *ring_start = 0;
+            }
+            Self::FrameAvg {
+                acc,
+                ring,
+                ring_start,
+                ..
+            } => {
+                acc.reset();
+                ring.clear();
+                *ring_start = 0;
+            }
+            Self::FrameMinMax {
+                best,
+                ring,
+                ring_start,
+                ..
+            } => {
+                *best = None;
+                ring.clear();
+                *ring_start = 0;
+            }
+        }
+    }
+
+    fn heap_bytes(&self) -> usize {
+        match self {
+            Self::RowNumber | Self::Rank { .. } | Self::DenseRank { .. } => 0,
+            Self::Lag { ring, .. } => ring.iter().map(opt_scalar_bytes).sum(),
+            Self::FrameFirstLast {
+                first_val, ring, ..
+            } => {
+                first_val.as_ref().map_or(0, opt_scalar_bytes)
+                    + ring.iter().map(opt_scalar_bytes).sum::<usize>()
+            }
+            Self::FrameCount { ring, .. } => ring.capacity() * size_of::<bool>(),
+            Self::FrameSum { ring, .. } | Self::FrameAvg { ring, .. } => {
+                ring.iter().map(opt_scalar_bytes).sum()
+            }
+            Self::FrameMinMax { best, ring, .. } => {
+                best.as_ref().map_or(0, ScalarValue::heap_bytes)
+                    + ring.iter().map(opt_scalar_bytes).sum::<usize>()
+            }
+        }
+    }
+}
+
+fn stream_frame_bounds(start: FrameBound, end: FrameBound, row: usize) -> Option<(usize, usize)> {
+    let r = row as i128;
+    let lo = match start {
+        FrameBound::UnboundedPreceding => 0,
+        FrameBound::Preceding(m) => r - (m as i128),
+        FrameBound::CurrentRow => r,
+        FrameBound::Following(_) | FrameBound::UnboundedFollowing => return None,
+    };
+    let hi = match end {
+        FrameBound::Preceding(n) => r - (n as i128),
+        FrameBound::CurrentRow => r,
+        FrameBound::UnboundedPreceding
+        | FrameBound::Following(_)
+        | FrameBound::UnboundedFollowing => return None,
+    };
+    let s = lo.max(0);
+    if s > hi {
+        None
+    } else {
+        Some((s as usize, (hi as usize) + 1))
+    }
+}
+
+fn min_max_better(cand: &ScalarValue, cur: &ScalarValue, is_max: bool) -> bool {
+    let ord = compare_elem_refs(ElemRef::Scalar(cand), ElemRef::Scalar(cur));
+    if is_max {
+        ord == Ordering::Greater
+    } else {
+        ord == Ordering::Less
+    }
+}
+
+struct StreamingWindowState {
+    prev_part_row: Option<Vec<Column>>,
+    prev_order_row: Option<Vec<Column>>,
+    row_in_partition: usize,
+    spec_states: Vec<StreamingSpecState>,
+}
+
+impl StreamingWindowState {
+    fn new(specs: &[WindowSpec], out_types: &[DataType]) -> Result<Self, QueryError> {
+        let mut spec_states = Vec::with_capacity(specs.len());
+        for (spec, dt) in specs.iter().zip(out_types) {
+            spec_states.push(StreamingSpecState::from_spec(spec, dt)?);
+        }
+        Ok(Self {
+            prev_part_row: None,
+            prev_order_row: None,
+            row_in_partition: 0,
+            spec_states,
+        })
+    }
+
+    fn reset_partition(&mut self) {
+        self.row_in_partition = 0;
+        for st in &mut self.spec_states {
+            st.reset();
+        }
+    }
+
+    fn state_bytes(&self) -> usize {
+        let part_b: usize = self
+            .prev_part_row
+            .as_ref()
+            .map_or(0, |cols| cols.iter().map(Column::memory_bytes).sum());
+        let ord_b: usize = self
+            .prev_order_row
+            .as_ref()
+            .map_or(0, |cols| cols.iter().map(Column::memory_bytes).sum());
+        let spec_b: usize = self
+            .spec_states
+            .iter()
+            .map(StreamingSpecState::heap_bytes)
+            .sum();
+        part_b + ord_b + spec_b
+    }
 }
 
 struct WindowStream {
@@ -1630,6 +2234,7 @@ struct WindowStream {
     ctx: ExecContext,
     lookahead: Option<Batch>,
     queued_out: VecDeque<Batch>,
+    streaming: Option<StreamingWindowState>,
     res: Reservation,
 }
 
@@ -1665,7 +2270,7 @@ impl WindowStream {
                     return Err(err);
                 }
             };
-            let flow = sort.consume(batch);
+            let flow = sort.consume(batch, &mut scan_res);
             scan_res.free();
             if flow? == ControlFlow::Stop {
                 break;
@@ -1719,12 +2324,235 @@ impl WindowStream {
     fn current_held_bytes(&self, extra: usize) -> usize {
         let lookahead_bytes = self.lookahead.as_ref().map_or(0, Batch::memory_bytes);
         let queued_bytes: usize = self.queued_out.iter().map(Batch::memory_bytes).sum();
-        lookahead_bytes + queued_bytes + extra
+        let stream_bytes = self
+            .streaming
+            .as_ref()
+            .map_or(0, StreamingWindowState::state_bytes);
+        lookahead_bytes + queued_bytes + stream_bytes + extra
     }
 
     fn reconcile_window_res(&mut self) -> Result<(), QueryError> {
         let target = self.current_held_bytes(0);
         self.res.resize(target).map_err(QueryError::from)
+    }
+
+    fn next_streaming_batch(
+        &mut self,
+        cancel: &CancelToken,
+        mut caller_res: Option<&mut Reservation>,
+    ) -> Result<Option<Batch>, QueryError> {
+        let before = pool_size(&caller_res);
+        let Some(batch) = self.pull_next_sorted_batch(cancel)? else {
+            self.sorted = None;
+            if let Some(st) = &mut self.streaming {
+                st.prev_part_row = None;
+                st.prev_order_row = None;
+                st.reset_partition();
+            }
+            self.res.free();
+            return Ok(None);
+        };
+
+        let n = batch.num_rows();
+        let eval_ctx = self.ctx.eval.with_cancel(cancel.clone());
+        let part_sort_keys: Vec<SortKey> = self
+            .partition_by
+            .iter()
+            .map(|e| SortKey {
+                expr: e.clone(),
+                descending: false,
+                nulls_first: false,
+            })
+            .collect();
+
+        let part_extra = if part_sort_keys.is_empty() {
+            Vec::new()
+        } else {
+            eval_extra_sort_keys(&part_sort_keys, &batch, &eval_ctx, &mut self.res)?
+        };
+        let needs_peers = !self.order_by.is_empty()
+            && self
+                .specs
+                .iter()
+                .any(|s| matches!(s.func, WindowFunc::Rank | WindowFunc::DenseRank));
+        let order_extra = if needs_peers {
+            eval_extra_sort_keys(&self.order_by, &batch, &eval_ctx, &mut self.res)?
+        } else {
+            Vec::new()
+        };
+
+        let mut st = self
+            .streaming
+            .take()
+            .ok_or_else(|| QueryError::internal("missing streaming window state"))?;
+
+        let eval_res = (|| -> Result<Batch, QueryError> {
+            let mut part_reset = vec![false; n];
+            let mut part_row = vec![0usize; n];
+            let mut is_new_peer = vec![false; n];
+
+            {
+                let part_refs = if part_sort_keys.is_empty() {
+                    Vec::new()
+                } else {
+                    resolve_key_col_refs(&part_sort_keys, &batch, &part_extra)?
+                };
+                let order_refs = if needs_peers {
+                    resolve_key_col_refs(&self.order_by, &batch, &order_extra)?
+                } else {
+                    Vec::new()
+                };
+
+                for row in 0..n {
+                    let boundary = if row == 0 {
+                        match &st.prev_part_row {
+                            None => true,
+                            Some(prev_cols) if !part_sort_keys.is_empty() => {
+                                let prev_refs: Vec<&Column> = prev_cols.iter().collect();
+                                compare_key_refs_across(
+                                    &prev_refs,
+                                    0,
+                                    &part_refs,
+                                    0,
+                                    &part_sort_keys,
+                                ) != Ordering::Equal
+                            }
+                            Some(_) => false,
+                        }
+                    } else if !part_sort_keys.is_empty() {
+                        compare_key_refs_across(
+                            &part_refs,
+                            row - 1,
+                            &part_refs,
+                            row,
+                            &part_sort_keys,
+                        ) != Ordering::Equal
+                    } else {
+                        false
+                    };
+
+                    if boundary {
+                        part_reset[row] = true;
+                        st.row_in_partition = 0;
+                    }
+                    part_row[row] = st.row_in_partition;
+                    st.row_in_partition += 1;
+
+                    if needs_peers {
+                        is_new_peer[row] = if boundary {
+                            true
+                        } else if row == 0 {
+                            match &st.prev_order_row {
+                                None => true,
+                                Some(prev_cols) => {
+                                    let prev_refs: Vec<&Column> = prev_cols.iter().collect();
+                                    compare_key_refs_across(
+                                        &prev_refs,
+                                        0,
+                                        &order_refs,
+                                        0,
+                                        &self.order_by,
+                                    ) != Ordering::Equal
+                                }
+                            }
+                        } else {
+                            compare_key_refs_across(
+                                &order_refs,
+                                row - 1,
+                                &order_refs,
+                                row,
+                                &self.order_by,
+                            ) != Ordering::Equal
+                        };
+                    }
+                }
+
+                st.prev_part_row = if part_refs.is_empty() {
+                    Some(Vec::new())
+                } else {
+                    let mut saved = Vec::with_capacity(part_refs.len());
+                    for col in &part_refs {
+                        saved.push(Column::try_new_const(read_scalar(col, n - 1), 1)?);
+                    }
+                    Some(saved)
+                };
+                st.prev_order_row = if needs_peers {
+                    let mut saved = Vec::with_capacity(order_refs.len());
+                    for col in &order_refs {
+                        saved.push(Column::try_new_const(read_scalar(col, n - 1), 1)?);
+                    }
+                    Some(saved)
+                } else {
+                    None
+                };
+            }
+
+            drop(part_extra);
+            drop(order_extra);
+
+            let mut out_cols: Vec<Column> = Vec::with_capacity(self.specs.len());
+            for (spec_idx, spec) in self.specs.iter().enumerate() {
+                if cancel.is_cancelled() {
+                    return Err(QueryError::Cancelled);
+                }
+                let out_dt = &self.out_types[spec_idx];
+                let col = eval_streaming_spec_col(
+                    &mut st.spec_states[spec_idx],
+                    spec,
+                    out_dt,
+                    &batch,
+                    &part_reset,
+                    &part_row,
+                    &is_new_peer,
+                    &eval_ctx,
+                    &mut self.res,
+                )?;
+                out_cols.push(col);
+            }
+
+            let mut all_cols = Vec::with_capacity(self.output_schema.len());
+            all_cols.extend(batch.columns().iter().cloned());
+            all_cols.extend(out_cols.into_iter().map(Arc::new));
+            drop(batch);
+
+            Ok(Batch::try_new_shared(
+                Arc::clone(&self.output_schema),
+                all_cols,
+                n,
+                Selection::All,
+            )?)
+        })();
+
+        let keep_bytes = st.state_bytes();
+        self.streaming = Some(st);
+
+        let out = match eval_res {
+            Ok(b) => b,
+            Err(err) => {
+                let _ = self.res.resize(keep_bytes);
+                rollback_to(&mut caller_res, before);
+                return Err(err);
+            }
+        };
+
+        let out_bytes = out.memory_bytes();
+        if let Some(cr) = caller_res.as_deref_mut() {
+            let excess = self.res.size().saturating_sub(keep_bytes);
+            let xfer = excess.min(out_bytes);
+            if xfer > 0
+                && let Err(err) = self.res.transfer_to(cr, xfer)
+            {
+                let _ = self.res.resize(keep_bytes);
+                rollback_to(&mut caller_res, before);
+                return Err(err.into());
+            }
+        }
+        self.res.resize(keep_bytes)?;
+        if let Err(err) = reconcile_output(&mut caller_res, before, out_bytes) {
+            rollback_to(&mut caller_res, before);
+            return Err(err);
+        }
+        Ok(Some(out))
     }
 
     fn read_next_partition(&mut self, cancel: &CancelToken) -> Result<Option<Batch>, QueryError> {
@@ -1952,6 +2780,10 @@ impl PartitionStream for WindowStream {
             return Err(err);
         }
 
+        if self.streaming.is_some() {
+            return self.next_streaming_batch(cancel, res);
+        }
+
         while self.queued_out.is_empty() {
             let part_opt = match self.read_next_partition(cancel) {
                 Ok(p) => p,
@@ -1983,6 +2815,515 @@ impl PartitionStream for WindowStream {
             return Err(err);
         }
         Ok(Some(batch))
+    }
+}
+
+fn build_opt_scalar_col(
+    out_dt: &DataType,
+    vals: &[Option<ScalarValue>],
+    eval_ctx: &EvalContext,
+    res: &mut Reservation,
+    before: usize,
+) -> Result<Column, QueryError> {
+    let refs: Vec<ElemRef<'_>> = vals
+        .iter()
+        .map(|opt| match opt {
+            Some(sv) if !sv.is_null() => ElemRef::Scalar(sv),
+            _ => ElemRef::Null,
+        })
+        .collect();
+    eval::build_flat_from_elem_refs(out_dt, &refs, &mut Some(res), eval_ctx, before)
+}
+
+#[expect(
+    clippy::too_many_arguments,
+    reason = "streaming window spec evaluator needs batch, partition boundaries, peer flags, and reservation"
+)]
+fn eval_streaming_spec_col(
+    state: &mut StreamingSpecState,
+    spec: &WindowSpec,
+    out_dt: &DataType,
+    batch: &Batch,
+    part_reset: &[bool],
+    part_row: &[usize],
+    is_new_peer: &[bool],
+    eval_ctx: &EvalContext,
+    res: &mut Reservation,
+) -> Result<Column, QueryError> {
+    let n = batch.num_rows();
+    let before = res.size();
+
+    match (state, &spec.func) {
+        (StreamingSpecState::RowNumber, WindowFunc::RowNumber) => {
+            res.try_grow(eval::checked_fixed_bytes(n, 8, false)?)?;
+            let vals: Vec<i64> = part_row.iter().map(|&r| (r + 1) as i64).collect();
+            let col = Column::Flat(FlatColumn::try_new(FlatData::I64(vals), None)?);
+            reconcile_output(&mut Some(res), before, col.memory_bytes())?;
+            Ok(col)
+        }
+        (StreamingSpecState::Rank { current_rank }, WindowFunc::Rank) => {
+            res.try_grow(eval::checked_fixed_bytes(n, 8, false)?)?;
+            let mut vals = Vec::with_capacity(n);
+            for row in 0..n {
+                if part_reset[row] {
+                    *current_rank = 1;
+                } else if is_new_peer[row] {
+                    *current_rank = (part_row[row] + 1) as i64;
+                }
+                vals.push(*current_rank);
+            }
+            let col = Column::Flat(FlatColumn::try_new(FlatData::I64(vals), None)?);
+            reconcile_output(&mut Some(res), before, col.memory_bytes())?;
+            Ok(col)
+        }
+        (StreamingSpecState::DenseRank { current_dense_rank }, WindowFunc::DenseRank) => {
+            res.try_grow(eval::checked_fixed_bytes(n, 8, false)?)?;
+            let mut vals = Vec::with_capacity(n);
+            for row in 0..n {
+                if part_reset[row] {
+                    *current_dense_rank = 1;
+                } else if is_new_peer[row] {
+                    *current_dense_rank += 1;
+                }
+                vals.push(*current_dense_rank);
+            }
+            let col = Column::Flat(FlatColumn::try_new(FlatData::I64(vals), None)?);
+            reconcile_output(&mut Some(res), before, col.memory_bytes())?;
+            Ok(col)
+        }
+        (StreamingSpecState::Lag { offset, ring }, WindowFunc::Lag { expr, default, .. }) => {
+            let val_access = eval_or_borrow(expr, batch, eval_ctx, res)?;
+            let def_access = match default {
+                Some(d) => Some(eval_or_borrow(d, batch, eval_ctx, res)?),
+                None => None,
+            };
+            let val_col = val_access.as_col();
+            let def_col = def_access.as_ref().map(ColAccess::as_col);
+            let mut out_vals: Vec<Option<ScalarValue>> = Vec::with_capacity(n);
+            for row in 0..n {
+                if (row & CANCEL_CHECK_MASK) == 0 {
+                    check_cancel(eval_ctx, &mut Some(res), before)?;
+                }
+                if part_reset[row] {
+                    ring.clear();
+                }
+                let cur_val = (!val_col.is_null(row)).then(|| read_scalar(val_col, row));
+                if *offset == 0 {
+                    out_vals.push(cur_val);
+                } else {
+                    let out = if part_row[row] < *offset {
+                        def_col.and_then(|dc| (!dc.is_null(row)).then(|| read_scalar(dc, row)))
+                    } else {
+                        ring.pop_front().flatten()
+                    };
+                    ring.push_back(cur_val);
+                    out_vals.push(out);
+                }
+            }
+            drop(def_access);
+            drop(val_access);
+            let col = build_opt_scalar_col(out_dt, &out_vals, eval_ctx, res, before)?;
+            reconcile_output(&mut Some(res), before, col.memory_bytes())?;
+            Ok(col)
+        }
+        (
+            StreamingSpecState::FrameFirstLast {
+                is_last,
+                start,
+                end,
+                first_val,
+                ring,
+                ring_start,
+            },
+            WindowFunc::FirstValue(expr) | WindowFunc::LastValue(expr),
+        ) => {
+            let val_access = eval_or_borrow(expr, batch, eval_ctx, res)?;
+            let val_col = val_access.as_col();
+            let mut out_vals: Vec<Option<ScalarValue>> = Vec::with_capacity(n);
+            for row in 0..n {
+                if (row & CANCEL_CHECK_MASK) == 0 {
+                    check_cancel(eval_ctx, &mut Some(res), before)?;
+                }
+                if part_reset[row] {
+                    *first_val = None;
+                    ring.clear();
+                    *ring_start = 0;
+                }
+                let cur_val = (!val_col.is_null(row)).then(|| read_scalar(val_col, row));
+                let p_row = part_row[row];
+                let out = match (*start, *end) {
+                    (FrameBound::UnboundedPreceding, FrameBound::CurrentRow) => {
+                        if p_row == 0 {
+                            *first_val = Some(cur_val.clone());
+                        }
+                        if *is_last {
+                            cur_val
+                        } else {
+                            first_val.as_ref().cloned().flatten()
+                        }
+                    }
+                    (FrameBound::UnboundedPreceding, FrameBound::Preceding(k)) => {
+                        if p_row == 0 {
+                            *first_val = Some(cur_val.clone());
+                        }
+                        let delay = k as usize;
+                        ring.push_back(cur_val);
+                        if p_row < delay {
+                            None
+                        } else {
+                            let end_val = ring.pop_front().flatten();
+                            if *is_last {
+                                end_val
+                            } else {
+                                first_val.as_ref().cloned().flatten()
+                            }
+                        }
+                    }
+                    (FrameBound::CurrentRow, FrameBound::CurrentRow) => cur_val,
+                    (FrameBound::Preceding(m), _) => {
+                        let max_keep = (m as usize) + 1;
+                        ring.push_back(cur_val);
+                        if ring.len() > max_keep {
+                            ring.pop_front();
+                            *ring_start += 1;
+                        }
+                        match stream_frame_bounds(*start, *end, p_row) {
+                            None => None,
+                            Some((s, e)) => {
+                                let idx = if *is_last { e - 1 } else { s };
+                                ring[idx - *ring_start].clone()
+                            }
+                        }
+                    }
+                    _ => {
+                        return Err(QueryError::internal(
+                            "non-streamable frame in streaming path",
+                        ));
+                    }
+                };
+                out_vals.push(out);
+            }
+            drop(val_access);
+            let col = build_opt_scalar_col(out_dt, &out_vals, eval_ctx, res, before)?;
+            reconcile_output(&mut Some(res), before, col.memory_bytes())?;
+            Ok(col)
+        }
+        (
+            StreamingSpecState::FrameCount {
+                has_expr,
+                start,
+                end,
+                prefix,
+                ring,
+                ring_start,
+            },
+            WindowFunc::Count(expr_opt),
+        ) => {
+            let val_access = match (has_expr, expr_opt) {
+                (true, Some(e)) => Some(eval_or_borrow(e, batch, eval_ctx, res)?),
+                _ => None,
+            };
+            res.try_grow(eval::checked_fixed_bytes(n, 8, false)?)?;
+            let mut counts = Vec::with_capacity(n);
+            if let Some(va) = &val_access {
+                let col = va.as_col();
+                for row in 0..n {
+                    if (row & CANCEL_CHECK_MASK) == 0 {
+                        check_cancel(eval_ctx, &mut Some(res), before)?;
+                    }
+                    if part_reset[row] {
+                        *prefix = 0;
+                        ring.clear();
+                        *ring_start = 0;
+                    }
+                    let non_null = !col.is_null(row);
+                    let p_row = part_row[row];
+                    let c = match (*start, *end) {
+                        (FrameBound::UnboundedPreceding, FrameBound::CurrentRow) => {
+                            if non_null {
+                                *prefix += 1;
+                            }
+                            *prefix
+                        }
+                        (FrameBound::UnboundedPreceding, FrameBound::Preceding(k)) => {
+                            let delay = k as usize;
+                            ring.push_back(non_null);
+                            if p_row < delay {
+                                0
+                            } else {
+                                if ring.pop_front() == Some(true) {
+                                    *prefix += 1;
+                                }
+                                *prefix
+                            }
+                        }
+                        (FrameBound::CurrentRow, FrameBound::CurrentRow) => i64::from(non_null),
+                        (FrameBound::Preceding(m), _) => {
+                            let max_keep = (m as usize) + 1;
+                            ring.push_back(non_null);
+                            if ring.len() > max_keep {
+                                ring.pop_front();
+                                *ring_start += 1;
+                            }
+                            match stream_frame_bounds(*start, *end, p_row) {
+                                None => 0,
+                                Some((s, e)) => ring
+                                    .range((s - *ring_start)..(e - *ring_start))
+                                    .filter(|&&b| b)
+                                    .count() as i64,
+                            }
+                        }
+                        _ => return Err(QueryError::internal("non-streamable frame in COUNT")),
+                    };
+                    counts.push(c);
+                }
+            } else {
+                for &p_row in part_row {
+                    let c = match stream_frame_bounds(*start, *end, p_row) {
+                        None => 0,
+                        Some((s, e)) => (e - s) as i64,
+                    };
+                    counts.push(c);
+                }
+            }
+            drop(val_access);
+            let col = Column::Flat(FlatColumn::try_new(FlatData::I64(counts), None)?);
+            reconcile_output(&mut Some(res), before, col.memory_bytes())?;
+            Ok(col)
+        }
+        (
+            StreamingSpecState::FrameSum {
+                start,
+                end,
+                acc,
+                ring,
+                ring_start,
+            },
+            WindowFunc::Sum(expr),
+        ) => {
+            let val_access = eval_or_borrow(expr, batch, eval_ctx, res)?;
+            let col = val_access.as_col();
+            let mut out_vals: Vec<Option<ScalarValue>> = Vec::with_capacity(n);
+            for row in 0..n {
+                if (row & CANCEL_CHECK_MASK) == 0 {
+                    check_cancel(eval_ctx, &mut Some(res), before)?;
+                }
+                if part_reset[row] {
+                    acc.reset();
+                    ring.clear();
+                    *ring_start = 0;
+                }
+                let cur_val = (!col.is_null(row)).then(|| read_scalar(col, row));
+                let p_row = part_row[row];
+                let out = match (*start, *end) {
+                    (FrameBound::UnboundedPreceding, FrameBound::CurrentRow) => {
+                        acc.add_scalar(cur_val.as_ref())?;
+                        acc.to_scalar()
+                    }
+                    (FrameBound::UnboundedPreceding, FrameBound::Preceding(k)) => {
+                        let delay = k as usize;
+                        ring.push_back(cur_val);
+                        if p_row < delay {
+                            None
+                        } else {
+                            let old = ring.pop_front().flatten();
+                            acc.add_scalar(old.as_ref())?;
+                            acc.to_scalar()
+                        }
+                    }
+                    (FrameBound::CurrentRow, FrameBound::CurrentRow) => {
+                        acc.reset();
+                        acc.add_scalar(cur_val.as_ref())?;
+                        acc.to_scalar()
+                    }
+                    (FrameBound::Preceding(m), _) => {
+                        let max_keep = (m as usize) + 1;
+                        ring.push_back(cur_val);
+                        if ring.len() > max_keep {
+                            ring.pop_front();
+                            *ring_start += 1;
+                        }
+                        match stream_frame_bounds(*start, *end, p_row) {
+                            None => None,
+                            Some((s, e)) => {
+                                acc.reset();
+                                for v in ring.range((s - *ring_start)..(e - *ring_start)) {
+                                    acc.add_scalar(v.as_ref())?;
+                                }
+                                acc.to_scalar()
+                            }
+                        }
+                    }
+                    _ => return Err(QueryError::internal("non-streamable frame in SUM")),
+                };
+                out_vals.push(out);
+            }
+            drop(val_access);
+            let out_col = build_opt_scalar_col(out_dt, &out_vals, eval_ctx, res, before)?;
+            reconcile_output(&mut Some(res), before, out_col.memory_bytes())?;
+            Ok(out_col)
+        }
+        (
+            StreamingSpecState::FrameAvg {
+                start,
+                end,
+                acc,
+                ring,
+                ring_start,
+            },
+            WindowFunc::Avg(expr),
+        ) => {
+            let val_access = eval_or_borrow(expr, batch, eval_ctx, res)?;
+            let col = val_access.as_col();
+            let mut out_vals: Vec<Option<ScalarValue>> = Vec::with_capacity(n);
+            for row in 0..n {
+                if (row & CANCEL_CHECK_MASK) == 0 {
+                    check_cancel(eval_ctx, &mut Some(res), before)?;
+                }
+                if part_reset[row] {
+                    acc.reset();
+                    ring.clear();
+                    *ring_start = 0;
+                }
+                let cur_val = (!col.is_null(row)).then(|| read_scalar(col, row));
+                let p_row = part_row[row];
+                let out = match (*start, *end) {
+                    (FrameBound::UnboundedPreceding, FrameBound::CurrentRow) => {
+                        acc.add_scalar(cur_val.as_ref())?;
+                        acc.to_scalar()?
+                    }
+                    (FrameBound::UnboundedPreceding, FrameBound::Preceding(k)) => {
+                        let delay = k as usize;
+                        ring.push_back(cur_val);
+                        if p_row < delay {
+                            None
+                        } else {
+                            let old = ring.pop_front().flatten();
+                            acc.add_scalar(old.as_ref())?;
+                            acc.to_scalar()?
+                        }
+                    }
+                    (FrameBound::CurrentRow, FrameBound::CurrentRow) => {
+                        acc.reset();
+                        acc.add_scalar(cur_val.as_ref())?;
+                        acc.to_scalar()?
+                    }
+                    (FrameBound::Preceding(m), _) => {
+                        let max_keep = (m as usize) + 1;
+                        ring.push_back(cur_val);
+                        if ring.len() > max_keep {
+                            ring.pop_front();
+                            *ring_start += 1;
+                        }
+                        match stream_frame_bounds(*start, *end, p_row) {
+                            None => None,
+                            Some((s, e)) => {
+                                acc.reset();
+                                for v in ring.range((s - *ring_start)..(e - *ring_start)) {
+                                    acc.add_scalar(v.as_ref())?;
+                                }
+                                acc.to_scalar()?
+                            }
+                        }
+                    }
+                    _ => return Err(QueryError::internal("non-streamable frame in AVG")),
+                };
+                out_vals.push(out);
+            }
+            drop(val_access);
+            let out_col = build_opt_scalar_col(out_dt, &out_vals, eval_ctx, res, before)?;
+            reconcile_output(&mut Some(res), before, out_col.memory_bytes())?;
+            Ok(out_col)
+        }
+        (
+            StreamingSpecState::FrameMinMax {
+                is_max,
+                start,
+                end,
+                best,
+                ring,
+                ring_start,
+            },
+            WindowFunc::Min(expr) | WindowFunc::Max(expr),
+        ) => {
+            let val_access = eval_or_borrow(expr, batch, eval_ctx, res)?;
+            let col = val_access.as_col();
+            let mut out_vals: Vec<Option<ScalarValue>> = Vec::with_capacity(n);
+            for row in 0..n {
+                if (row & CANCEL_CHECK_MASK) == 0 {
+                    check_cancel(eval_ctx, &mut Some(res), before)?;
+                }
+                if part_reset[row] {
+                    *best = None;
+                    ring.clear();
+                    *ring_start = 0;
+                }
+                let cur_val = (!col.is_null(row)).then(|| read_scalar(col, row));
+                let p_row = part_row[row];
+                let out = match (*start, *end) {
+                    (FrameBound::UnboundedPreceding, FrameBound::CurrentRow) => {
+                        if let Some(cand) = cur_val {
+                            let take = best
+                                .as_ref()
+                                .is_none_or(|cur| min_max_better(&cand, cur, *is_max));
+                            if take {
+                                *best = Some(cand);
+                            }
+                        }
+                        best.clone()
+                    }
+                    (FrameBound::UnboundedPreceding, FrameBound::Preceding(k)) => {
+                        let delay = k as usize;
+                        ring.push_back(cur_val);
+                        if p_row < delay {
+                            None
+                        } else {
+                            if let Some(cand) = ring.pop_front().flatten() {
+                                let take = best
+                                    .as_ref()
+                                    .is_none_or(|cur| min_max_better(&cand, cur, *is_max));
+                                if take {
+                                    *best = Some(cand);
+                                }
+                            }
+                            best.clone()
+                        }
+                    }
+                    (FrameBound::CurrentRow, FrameBound::CurrentRow) => cur_val,
+                    (FrameBound::Preceding(m), _) => {
+                        let max_keep = (m as usize) + 1;
+                        ring.push_back(cur_val);
+                        if ring.len() > max_keep {
+                            ring.pop_front();
+                            *ring_start += 1;
+                        }
+                        match stream_frame_bounds(*start, *end, p_row) {
+                            None => None,
+                            Some((s, e)) => {
+                                let mut local_best: Option<&ScalarValue> = None;
+                                for cand in
+                                    ring.range((s - *ring_start)..(e - *ring_start)).flatten()
+                                {
+                                    let take = local_best
+                                        .is_none_or(|cur| min_max_better(cand, cur, *is_max));
+                                    if take {
+                                        local_best = Some(cand);
+                                    }
+                                }
+                                local_best.cloned()
+                            }
+                        }
+                    }
+                    _ => return Err(QueryError::internal("non-streamable frame in MIN/MAX")),
+                };
+                out_vals.push(out);
+            }
+            drop(val_access);
+            let out_col = build_opt_scalar_col(out_dt, &out_vals, eval_ctx, res, before)?;
+            reconcile_output(&mut Some(res), before, out_col.memory_bytes())?;
+            Ok(out_col)
+        }
+        _ => Err(QueryError::internal("streaming window state mismatch")),
     }
 }
 
@@ -2454,7 +3795,7 @@ fn eval_window_sum(
 
     let out = match out_dt {
         DataType::Null => Column::Const {
-            value: cetra_column::ScalarValue::Null(DataType::Null),
+            value: ScalarValue::Null(DataType::Null),
             len: n,
         },
         DataType::I64 => {
@@ -2642,7 +3983,7 @@ fn eval_window_avg(
 
     let out = match (expr.data_type(), out_dt) {
         (DataType::Null, _) => Column::Const {
-            value: cetra_column::ScalarValue::Null(DataType::Null),
+            value: ScalarValue::Null(DataType::Null),
             len: n,
         },
         (DataType::I64, DataType::F64) => {
@@ -3037,6 +4378,7 @@ mod tests {
         // Feed 160 batches (~19.5 KiB each = ~3.1 MiB total) -> forces > 40 runs in 64 KiB pool.
         let pad = "x".repeat(580);
         let mut expected_rows: Vec<(Option<i64>, String)> = Vec::new();
+        let mut dummy_res = ctx.pool.register("test_in", false);
         for batch_id in 0..160i64 {
             let mut ks = Vec::with_capacity(32);
             let mut k_valid = Vec::with_capacity(32);
@@ -3062,7 +4404,10 @@ mod tests {
                 .unwrap(),
             );
             let batch = Batch::try_new_all(Arc::clone(&schema), vec![c0, c1], 32).unwrap();
-            assert_eq!(sort.consume(batch).unwrap(), ControlFlow::Continue);
+            assert_eq!(
+                sort.consume(batch, &mut dummy_res).unwrap(),
+                ControlFlow::Continue
+            );
         }
 
         assert!(
@@ -3124,7 +4469,8 @@ mod tests {
             1,
         )
         .unwrap();
-        let err = tiny_sort.consume(big_batch).unwrap_err();
+        let err = tiny_sort.consume(big_batch, &mut dummy_res).unwrap_err();
+        drop(dummy_res);
         assert!(matches!(err, QueryError::TooLarge));
         drop(tiny_sort);
         assert_eq!(ctx.spill.spilled_bytes(), 0);
@@ -3884,7 +5230,10 @@ mod tests {
             .next_batch(&single_ctx.eval.cancel, Some(&mut scan_res))
             .unwrap()
         {
-            assert_eq!(sort.consume(batch).unwrap(), ControlFlow::Continue);
+            assert_eq!(
+                sort.consume(batch, &mut scan_res).unwrap(),
+                ControlFlow::Continue
+            );
             scan_res.free();
         }
         drop(scan_res);
@@ -3945,5 +5294,221 @@ mod tests {
         );
         assert_eq!(single_ctx.spill.spilled_bytes(), 0);
         assert_eq!(single_ctx.pool.reserved(), 0);
+    }
+
+    #[test]
+    fn external_sort_default_max_merge_way_32_succeeds_in_64kib_pool() {
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = test_ctx(dir.path(), 64 * 1024, 10 * 1024 * 1024);
+        let schema = Schema::try_new_arc(vec![
+            Field::new("k", DataType::I64, false),
+            Field::new("v", DataType::I64, false),
+        ])
+        .unwrap();
+        let keys = vec![SortKey {
+            expr: col_expr(0, "k", DataType::I64),
+            descending: false,
+            nulls_first: false,
+        }];
+
+        // Use default max_merge_way = 32!
+        let mut sort = ExternalSort::new(Arc::clone(&schema), keys, None, ctx.clone());
+        let mut dummy_res = ctx.pool.register("in", false);
+        // Feed 700 batches of 128 rows (~2 KiB each = ~1.4 MiB total -> >20 runs in 64 KiB pool).
+        let mut total_rows = 0usize;
+        for batch_id in 0..700i64 {
+            let ks: Vec<i64> = (0..128i64)
+                .map(|j| (batch_id * 31 + j * 17) % 10_000)
+                .collect();
+            let vs: Vec<i64> = (0..128i64).map(|j| batch_id * 128 + j).collect();
+            total_rows += 128;
+            let b = Batch::try_new_all(
+                Arc::clone(&schema),
+                vec![
+                    Column::Flat(FlatColumn::try_new(FlatData::I64(ks), None).unwrap()),
+                    Column::Flat(FlatColumn::try_new(FlatData::I64(vs), None).unwrap()),
+                ],
+                128,
+            )
+            .unwrap();
+            assert_eq!(
+                sort.consume(b, &mut dummy_res).unwrap(),
+                ControlFlow::Continue
+            );
+        }
+        drop(dummy_res);
+        assert!(sort.spilled_run_count() > 20);
+
+        let mut stream = sort.into_stream().unwrap();
+        let out = drain_stream(stream.as_mut(), &ctx).unwrap();
+        drop(stream);
+        assert_eq!(ctx.spill.spilled_bytes(), 0);
+        assert_eq!(ctx.pool.reserved(), 0);
+
+        let mut prev = i64::MIN;
+        let mut got_rows = 0usize;
+        for b in &out {
+            for r in 0..b.num_rows() {
+                let k = eval::read_i64(b.column(0).unwrap(), r).unwrap();
+                assert!(k >= prev, "out of order: {k} < {prev}");
+                prev = k;
+                got_rows += 1;
+            }
+        }
+        assert_eq!(got_rows, total_rows);
+    }
+
+    #[test]
+    fn streaming_window_50k_rows_succeeds_in_64kib_pool() {
+        let dir = tempfile::tempdir().unwrap();
+        // Tight 64 KiB pool across 50,000 unpartitioned rows!
+        let mut ctx = test_ctx(dir.path(), 64 * 1024, 64 * 1024 * 1024);
+        ctx.batch_size = 256;
+        ctx.target_partitions = 1;
+
+        let schema = Schema::try_new_arc(vec![
+            Field::new("k", DataType::I64, false),
+            Field::new("val", DataType::I64, false),
+        ])
+        .unwrap();
+
+        let total_rows = 50_000usize;
+        let chunk = 250usize;
+        let mut batches = Vec::with_capacity(total_rows / chunk);
+        for b_idx in 0..(total_rows / chunk) {
+            let mut ks = Vec::with_capacity(chunk);
+            let mut vs = Vec::with_capacity(chunk);
+            for j in 0..chunk {
+                let row_num = (b_idx * chunk + j) as i64;
+                // Deterministic pseudo-shuffled keys with peer ties (div by 2)
+                let rev = (total_rows as i64 - 1) - row_num;
+                ks.push(rev / 2);
+                vs.push((rev / 2) + 1);
+            }
+            batches.push(
+                Batch::try_new_all(
+                    Arc::clone(&schema),
+                    vec![
+                        Column::Flat(FlatColumn::try_new(FlatData::I64(ks), None).unwrap()),
+                        Column::Flat(FlatColumn::try_new(FlatData::I64(vs), None).unwrap()),
+                    ],
+                    chunk,
+                )
+                .unwrap(),
+            );
+        }
+
+        let order_by = vec![SortKey {
+            expr: col_expr(0, "k", DataType::I64),
+            descending: false,
+            nulls_first: false,
+        }];
+        let specs = vec![
+            WindowSpec {
+                partition_by: vec![],
+                order_by: order_by.clone(),
+                frame: None,
+                func: WindowFunc::RowNumber,
+                output_name: "rn".to_owned(),
+            },
+            WindowSpec {
+                partition_by: vec![],
+                order_by: order_by.clone(),
+                frame: None,
+                func: WindowFunc::Rank,
+                output_name: "rk".to_owned(),
+            },
+            WindowSpec {
+                partition_by: vec![],
+                order_by: order_by.clone(),
+                frame: None,
+                func: WindowFunc::DenseRank,
+                output_name: "drk".to_owned(),
+            },
+            WindowSpec {
+                partition_by: vec![],
+                order_by: order_by.clone(),
+                frame: None,
+                func: WindowFunc::Lag {
+                    expr: col_expr(0, "k", DataType::I64),
+                    offset: 1,
+                    default: Some(Expr::Literal(ScalarValue::I64(-1))),
+                },
+                output_name: "lag1".to_owned(),
+            },
+            WindowSpec {
+                partition_by: vec![],
+                order_by: order_by.clone(),
+                frame: Some((FrameBound::UnboundedPreceding, FrameBound::CurrentRow)),
+                func: WindowFunc::Sum(col_expr(1, "val", DataType::I64)),
+                output_name: "run_sum".to_owned(),
+            },
+        ];
+        assert!(specs_are_zero_lookahead_streamable(&specs));
+
+        let src = BatchSource::new(Arc::clone(&schema), batches).unwrap();
+        let input = src
+            .open_partitions(&ScanSpec::default(), &ctx)
+            .unwrap()
+            .remove(0);
+        let mut win =
+            eval_window_group(input, Arc::clone(&schema), vec![], order_by, specs, &ctx).unwrap();
+        let out = drain_stream(win.as_mut(), &ctx).unwrap();
+        drop(win);
+        assert_eq!(ctx.spill.spilled_bytes(), 0);
+        assert_eq!(ctx.pool.reserved(), 0);
+
+        let mut seen = 0i64;
+        let mut running_sum = 0i64;
+        for b in &out {
+            for r in 0..b.num_rows() {
+                let k = eval::read_i64(b.column(0).unwrap(), r).unwrap();
+                let val = eval::read_i64(b.column(1).unwrap(), r).unwrap();
+                let rn = eval::read_i64(b.column(2).unwrap(), r).unwrap();
+                let rk = eval::read_i64(b.column(3).unwrap(), r).unwrap();
+                let drk = eval::read_i64(b.column(4).unwrap(), r).unwrap();
+                let lag1 = eval::read_i64(b.column(5).unwrap(), r).unwrap();
+                let rsum = eval::read_i64(b.column(6).unwrap(), r).unwrap();
+
+                let expected_k = seen / 2;
+                assert_eq!(k, expected_k);
+                assert_eq!(rn, seen + 1);
+                assert_eq!(rk, (seen & !1) + 1);
+                assert_eq!(drk, (seen / 2) + 1);
+                let expected_lag = if seen == 0 { -1 } else { (seen - 1) / 2 };
+                assert_eq!(lag1, expected_lag);
+                running_sum += val;
+                assert_eq!(rsum, running_sum);
+                seen += 1;
+            }
+        }
+        assert_eq!(seen, total_rows as i64);
+
+        // Verify non-streamable specs return false and order_by.is_empty() Rank/DenseRank emit 1
+        assert!(!specs_are_zero_lookahead_streamable(&[WindowSpec {
+            partition_by: vec![],
+            order_by: vec![],
+            frame: None,
+            func: WindowFunc::Sum(col_expr(0, "k", DataType::I64)),
+            output_name: "s".to_owned(),
+        }]));
+        assert!(!specs_are_zero_lookahead_streamable(&[WindowSpec {
+            partition_by: vec![],
+            order_by: vec![],
+            frame: None,
+            func: WindowFunc::Lead {
+                expr: col_expr(0, "k", DataType::I64),
+                offset: 1,
+                default: None,
+            },
+            output_name: "ld".to_owned(),
+        }]));
+        assert!(specs_are_zero_lookahead_streamable(&[WindowSpec {
+            partition_by: vec![],
+            order_by: vec![],
+            frame: None,
+            func: WindowFunc::Rank,
+            output_name: "rk".to_owned(),
+        }]));
     }
 }

@@ -2657,7 +2657,11 @@ struct CountSink {
 }
 
 impl PushSink for CountSink {
-    fn consume(&mut self, batch: Batch) -> Result<ControlFlow, QueryError> {
+    fn consume(
+        &mut self,
+        batch: Batch,
+        _batch_res: &mut Reservation,
+    ) -> Result<ControlFlow, QueryError> {
         self.count = self.count.saturating_add(batch.num_rows());
         Ok(ControlFlow::Continue)
     }

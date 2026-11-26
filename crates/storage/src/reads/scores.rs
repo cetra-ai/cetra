@@ -683,17 +683,19 @@ fn project_batches_to_scores_view(
         return Ok(Vec::new());
     }
     let mut proj = scores_view_projection(raw_schema, exec_ctx.clone())?;
+    let mut dummy_res = exec_ctx.pool.register("scores_proj_in", false);
     let mut out = Vec::with_capacity(batches.len());
     for batch in batches {
         if batch.is_empty() {
             continue;
         }
-        proj.push(batch, &mut |projected| {
+        proj.push(batch, &mut dummy_res, &mut |projected, _out_res| {
             if !projected.is_empty() {
                 out.push(projected);
             }
             Ok(ControlFlow::Continue)
         })?;
+        dummy_res.free();
     }
     Ok(out)
 }

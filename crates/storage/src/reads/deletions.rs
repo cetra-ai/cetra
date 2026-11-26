@@ -7,7 +7,7 @@ use std::sync::Arc;
 use std::sync::atomic::AtomicUsize;
 use std::time::Duration;
 
-use cetra_column::{Batch, CancelToken, DataType, Field, ScalarValue, Schema};
+use cetra_column::{Batch, CancelToken, DataType, Field, Reservation, ScalarValue, Schema};
 use cetra_core::ids::TraceId;
 use cetra_core::names::{environment, metadata_key};
 use cetra_core::schema::{spans, traces};
@@ -590,7 +590,11 @@ struct UserDeletionSink {
 }
 
 impl PushSink for UserDeletionSink {
-    fn consume(&mut self, batch: Batch) -> Result<ControlFlow, QueryError> {
+    fn consume(
+        &mut self,
+        batch: Batch,
+        _batch_res: &mut Reservation,
+    ) -> Result<ControlFlow, QueryError> {
         if self.cancel.is_cancelled() {
             return Err(QueryError::Cancelled);
         }
@@ -619,7 +623,11 @@ struct EvalTraceSink {
 }
 
 impl PushSink for EvalTraceSink {
-    fn consume(&mut self, batch: Batch) -> Result<ControlFlow, QueryError> {
+    fn consume(
+        &mut self,
+        batch: Batch,
+        _batch_res: &mut Reservation,
+    ) -> Result<ControlFlow, QueryError> {
         if self.cancel.is_cancelled() {
             return Err(QueryError::Cancelled);
         }
@@ -656,7 +664,11 @@ struct SessionIdsSink {
 }
 
 impl PushSink for SessionIdsSink {
-    fn consume(&mut self, batch: Batch) -> Result<ControlFlow, QueryError> {
+    fn consume(
+        &mut self,
+        batch: Batch,
+        _batch_res: &mut Reservation,
+    ) -> Result<ControlFlow, QueryError> {
         if self.cancel.is_cancelled() {
             return Err(QueryError::Cancelled);
         }

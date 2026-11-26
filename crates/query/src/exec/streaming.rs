@@ -18,7 +18,7 @@ use crate::eval::{
 };
 use crate::ir::Expr;
 
-use super::pipeline::{ControlFlow, ExecContext, PushOperator, PushSink};
+use super::pipeline::{ControlFlow, ExecContext, PushOperator, PushSink, transfer_or_grow};
 use super::sort_key::{SortKey, compare_rows_across_borrowed};
 use super::source::{
     IdLookupHint, MapProjection, PartitionStream, ScanSource, ScanSpec, SortHint, SubstringHint,
@@ -99,7 +99,8 @@ impl PushOperator for FilterOp {
     fn push(
         &mut self,
         batch: Batch,
-        emit: &mut dyn FnMut(Batch) -> Result<ControlFlow, QueryError>,
+        batch_res: &mut Reservation,
+        emit: &mut dyn FnMut(Batch, &mut Reservation) -> Result<ControlFlow, QueryError>,
     ) -> Result<ControlFlow, QueryError> {
         if self.ctx.eval.cancel.is_cancelled() {
             return Err(QueryError::Cancelled);
@@ -137,22 +138,28 @@ impl PushOperator for FilterOp {
 
         let active = filtered.num_rows();
         let raw_len = filtered.raw_len();
-        let out = if active.saturating_mul(4) < raw_len {
+        if active.saturating_mul(4) < raw_len {
             self.scratch.free();
-            match filtered.compact(Some(&mut self.scratch)) {
+            let out = match filtered.compact(Some(&mut self.scratch)) {
                 Ok(b) => b,
                 Err(err) => {
                     self.scratch.free();
                     return Err(err.into());
                 }
+            };
+            drop(filtered);
+            batch_res.free();
+            if let Err(err) = reconcile_res(&mut self.scratch, out.memory_bytes()) {
+                self.scratch.free();
+                return Err(err);
             }
+            let flow = emit(out, &mut self.scratch);
+            self.scratch.free();
+            flow
         } else {
-            filtered
-        };
-
-        let flow = emit(out);
-        self.scratch.free();
-        flow
+            self.scratch.free();
+            emit(filtered, batch_res)
+        }
     }
 }
 
@@ -235,7 +242,8 @@ impl PushOperator for ProjectOp {
     fn push(
         &mut self,
         batch: Batch,
-        emit: &mut dyn FnMut(Batch) -> Result<ControlFlow, QueryError>,
+        batch_res: &mut Reservation,
+        emit: &mut dyn FnMut(Batch, &mut Reservation) -> Result<ControlFlow, QueryError>,
     ) -> Result<ControlFlow, QueryError> {
         if self.ctx.eval.cancel.is_cancelled() {
             return Err(QueryError::Cancelled);
@@ -263,12 +271,23 @@ impl PushOperator for ProjectOp {
                 return Err(err.into());
             }
         };
-        if let Err(err) = reconcile_res(&mut self.scratch, out.memory_bytes()) {
+        let out_bytes = out.memory_bytes();
+        let xfer = batch_res
+            .size()
+            .min(out_bytes.saturating_sub(self.scratch.size()));
+        if xfer > 0
+            && let Err(err) = batch_res.transfer_to(&mut self.scratch, xfer)
+        {
+            self.scratch.free();
+            return Err(err.into());
+        }
+        batch_res.free();
+        if let Err(err) = reconcile_res(&mut self.scratch, out_bytes) {
             self.scratch.free();
             return Err(err);
         }
 
-        let flow = emit(out);
+        let flow = emit(out, &mut self.scratch);
         self.scratch.free();
         flow
     }
@@ -287,6 +306,7 @@ pub struct LimitOp {
     offset_remaining: usize,
     limit_remaining: Option<usize>,
     shared_remaining: Option<Arc<AtomicUsize>>,
+    stop_cancel: Option<CancelToken>,
 }
 
 impl LimitOp {
@@ -300,7 +320,15 @@ impl LimitOp {
             offset_remaining: offset,
             limit_remaining: limit,
             shared_remaining,
+            stop_cancel: None,
         }
+    }
+
+    /// Attaches a pipeline-local `stop_cancel` token cancelled once `shared_remaining` / `limit`
+    /// reaches `0` (after emitting the final slice) to stop sibling partitions early.
+    pub fn with_stop_cancel(mut self, stop_cancel: CancelToken) -> Self {
+        self.stop_cancel = Some(stop_cancel);
+        self
     }
 }
 
@@ -341,7 +369,8 @@ impl PushOperator for LimitOp {
     fn push(
         &mut self,
         batch: Batch,
-        emit: &mut dyn FnMut(Batch) -> Result<ControlFlow, QueryError>,
+        batch_res: &mut Reservation,
+        emit: &mut dyn FnMut(Batch, &mut Reservation) -> Result<ControlFlow, QueryError>,
     ) -> Result<ControlFlow, QueryError> {
         if self.limit_remaining == Some(0) {
             return Ok(ControlFlow::Stop);
@@ -405,7 +434,10 @@ impl PushOperator for LimitOp {
         }
 
         let out = slice_active_batch(batch, skip, take)?;
-        let flow = emit(out)?;
+        let flow = emit(out, batch_res)?;
+        if exhausted && let Some(stop_cancel) = &self.stop_cancel {
+            stop_cancel.cancel();
+        }
         if flow == ControlFlow::Stop || exhausted {
             Ok(ControlFlow::Stop)
         } else {
@@ -512,7 +544,7 @@ impl UnnestOp {
         plan: &UnnestSchemaPlan,
         chunk_rows: &[u32],
         unnest_refs: &[Vec<ElemRef<'_>>],
-        emit: &mut dyn FnMut(Batch) -> Result<ControlFlow, QueryError>,
+        emit: &mut dyn FnMut(Batch, &mut Reservation) -> Result<ControlFlow, QueryError>,
     ) -> Result<ControlFlow, QueryError> {
         let chunk_len = chunk_rows.len();
         if chunk_len == 0 {
@@ -546,7 +578,7 @@ impl UnnestOp {
 
         let out_batch = Batch::try_new_all(Arc::clone(&plan.output_schema), out_cols, chunk_len)?;
         reconcile_res(&mut self.scratch, out_batch.memory_bytes())?;
-        let flow = emit(out_batch);
+        let flow = emit(out_batch, &mut self.scratch);
         self.scratch.free();
         flow
     }
@@ -560,7 +592,8 @@ impl PushOperator for UnnestOp {
     fn push(
         &mut self,
         batch: Batch,
-        emit: &mut dyn FnMut(Batch) -> Result<ControlFlow, QueryError>,
+        batch_res: &mut Reservation,
+        emit: &mut dyn FnMut(Batch, &mut Reservation) -> Result<ControlFlow, QueryError>,
     ) -> Result<ControlFlow, QueryError> {
         if self.ctx.eval.cancel.is_cancelled() {
             return Err(QueryError::Cancelled);
@@ -570,7 +603,7 @@ impl PushOperator for UnnestOp {
             return Ok(ControlFlow::Continue);
         }
         if self.unnest_cols.is_empty() {
-            return emit(batch);
+            return emit(batch, batch_res);
         }
 
         let chunk_limit = self.ctx.batch_size.max(1);
@@ -971,14 +1004,15 @@ fn compare_heap_items(
     compare_rows_across_borrowed(cols_a, row_a, cols_b, row_b, keys).then_with(|| a.seq.cmp(&b.seq))
 }
 
-fn kept_bytes(row_batches: &[Batch], key_batches: &[Vec<Arc<Column>>]) -> usize {
+fn kept_bytes(row_batches: &[Batch], key_batches: &[Vec<Arc<Column>>], heap: &[HeapItem]) -> usize {
     let batch_bytes: usize = row_batches.iter().map(Batch::memory_bytes).sum();
     let key_bytes: usize = key_batches
         .iter()
         .flat_map(|cols| cols.iter())
         .map(|c| c.memory_bytes())
         .sum();
-    batch_bytes + key_bytes
+    let heap_bytes = heap.len().saturating_mul(size_of::<HeapItem>());
+    batch_bytes + key_bytes + heap_bytes
 }
 
 /// Bounded-memory `ORDER BY ... LIMIT ... OFFSET ...` partition sink (`PushSink`).
@@ -1033,8 +1067,8 @@ impl TopKSink {
             limit,
             offset,
             keep,
+            heap: Vec::with_capacity(keep.min(ctx.batch_size)),
             ctx,
-            heap: Vec::new(),
             row_batches: Vec::new(),
             key_batches: Vec::new(),
             stored_rows: 0,
@@ -1063,7 +1097,8 @@ impl TopKSink {
             self.row_batches.clear();
             self.key_batches.clear();
             self.stored_rows = 0;
-            reconcile_res(&mut self.res, 0)?;
+            let target = kept_bytes(&self.row_batches, &self.key_batches, &self.heap);
+            reconcile_res(&mut self.res, target)?;
             return Ok(());
         }
         if self.stored_rows <= live_stored {
@@ -1120,8 +1155,10 @@ impl TopKSink {
             }
         };
 
-        let target_bytes =
-            new_batch.memory_bytes() + new_key_cols.iter().map(|c| c.memory_bytes()).sum::<usize>();
+        let heap_bytes = self.heap.len().saturating_mul(size_of::<HeapItem>());
+        let target_bytes = new_batch.memory_bytes()
+            + new_key_cols.iter().map(|c| c.memory_bytes()).sum::<usize>()
+            + heap_bytes;
         if let Err(err) = reconcile_res(&mut self.res, target_bytes) {
             let cur = self.res.size();
             if cur > before {
@@ -1270,6 +1307,7 @@ impl TopKSink {
 
         // Drop sort-key columns across all sinks before allocating output batches.
         for sink in &mut sinks {
+            sink.heap.clear();
             sink.key_batches.clear();
             let batch_bytes: usize = sink.row_batches.iter().map(Batch::memory_bytes).sum();
             reconcile_res(&mut sink.res, batch_bytes)?;
@@ -1341,7 +1379,11 @@ impl TopKSink {
 }
 
 impl PushSink for TopKSink {
-    fn consume(&mut self, batch: Batch) -> Result<ControlFlow, QueryError> {
+    fn consume(
+        &mut self,
+        batch: Batch,
+        batch_res: &mut Reservation,
+    ) -> Result<ControlFlow, QueryError> {
         if self.limit == 0 {
             return Ok(ControlFlow::Stop);
         }
@@ -1423,52 +1465,96 @@ impl PushSink for TopKSink {
         }
 
         if !winner_rows.is_empty() {
+            let winner_bytes = winner_rows.capacity().saturating_mul(size_of::<u32>());
+            if let Err(err) = self.res.try_grow(winner_bytes) {
+                self.scratch.free();
+                return Err(err.into());
+            }
             let live_stored_count = self
                 .heap
                 .iter()
                 .filter(|item| matches!(item.source, HeapSource::Stored { .. }))
                 .count();
-            let (won_batch, won_keys) = match self.take_winners(&batch, &key_cols, &winner_rows) {
-                Ok(pair) => pair,
-                Err(QueryError::TooLarge) if self.stored_rows > live_stored_count => {
-                    // Evicted rows are holding memory; compact them before failing.
-                    self.compact_kept().inspect_err(|_| self.scratch.free())?;
-                    self.take_winners(&batch, &key_cols, &winner_rows)
-                        .inspect_err(|_| self.scratch.free())?
-                }
-                Err(err) => {
+            let all_rows_won =
+                winner_rows.len() == batch.raw_len() && batch.selection().is_all(batch.raw_len());
+            if all_rows_won {
+                let batch_bytes = batch.memory_bytes();
+                let key_bytes: usize = key_cols.iter().map(|c| c.memory_bytes()).sum();
+                let needed = batch_bytes.saturating_add(key_bytes);
+                let transfer_res = match transfer_or_grow(batch_res, &mut self.res, needed) {
+                    Ok(()) => Ok(()),
+                    Err(ColumnError::MemoryLimit { .. })
+                        if self.stored_rows > live_stored_count =>
+                    {
+                        self.compact_kept().inspect_err(|_| self.scratch.free())?;
+                        transfer_or_grow(batch_res, &mut self.res, needed).map_err(QueryError::from)
+                    }
+                    Err(err) => Err(err.into()),
+                };
+                if let Err(err) = transfer_res {
                     self.scratch.free();
                     return Err(err);
                 }
-            };
-
-            let updated_batch_idx = self.row_batches.len();
-            self.row_batches.push(won_batch);
-            self.key_batches.push(won_keys);
-            self.stored_rows += winner_rows.len();
-
-            let mut pos = 0usize;
-            for item in &mut self.heap {
-                if matches!(item.source, HeapSource::Incoming { .. }) {
-                    item.source = HeapSource::Stored {
-                        batch_idx: updated_batch_idx,
-                        row_idx: pos,
-                    };
-                    pos += 1;
+                let updated_batch_idx = self.row_batches.len();
+                let won_count = winner_rows.len();
+                self.row_batches.push(batch);
+                self.key_batches.push(key_cols);
+                self.stored_rows += won_count;
+                for item in &mut self.heap {
+                    if let HeapSource::Incoming { row_idx } = item.source {
+                        item.source = HeapSource::Stored {
+                            batch_idx: updated_batch_idx,
+                            row_idx,
+                        };
+                    }
                 }
+            } else {
+                let (won_batch, won_keys) = match self.take_winners(&batch, &key_cols, &winner_rows)
+                {
+                    Ok(pair) => pair,
+                    Err(QueryError::TooLarge) if self.stored_rows > live_stored_count => {
+                        // Evicted rows are holding memory; compact them before failing.
+                        self.compact_kept().inspect_err(|_| self.scratch.free())?;
+                        self.take_winners(&batch, &key_cols, &winner_rows)
+                            .inspect_err(|_| self.scratch.free())?
+                    }
+                    Err(err) => {
+                        self.scratch.free();
+                        return Err(err);
+                    }
+                };
+
+                let updated_batch_idx = self.row_batches.len();
+                self.row_batches.push(won_batch);
+                self.key_batches.push(won_keys);
+                self.stored_rows += winner_rows.len();
+
+                let mut pos = 0usize;
+                for item in &mut self.heap {
+                    if matches!(item.source, HeapSource::Incoming { .. }) {
+                        item.source = HeapSource::Stored {
+                            batch_idx: updated_batch_idx,
+                            row_idx: pos,
+                        };
+                        pos += 1;
+                    }
+                }
+                drop(key_cols);
+                drop(batch);
             }
+        } else {
+            drop(key_cols);
+            drop(batch);
         }
 
         self.scratch.free();
-        drop(key_cols);
-        drop(batch);
 
         if self.stored_rows > self.keep.saturating_mul(2).max(64) {
             self.compact_kept()?;
         } else {
             reconcile_res(
                 &mut self.res,
-                kept_bytes(&self.row_batches, &self.key_batches),
+                kept_bytes(&self.row_batches, &self.key_batches, &self.heap),
             )?;
         }
 
@@ -1554,11 +1640,13 @@ mod tests {
         )
         .unwrap();
 
+        let mut dummy_res = ctx.pool.register("test_in", false);
+
         // Filter id > 4 -> 4 active out of 8 (4 * 4 < 8 is false -> keeps Selection::Mask, zero-copy)
         let mut f_dense = FilterOp::new(gt_i64(col_expr(0, "id", DataType::I64), 4), ctx.clone());
         let mut dense_out = Vec::new();
         let flow = f_dense
-            .push(b_dense.clone(), &mut |out| {
+            .push(b_dense.clone(), &mut dummy_res, &mut |out, _res| {
                 dense_out.push(out);
                 Ok(ControlFlow::Continue)
             })
@@ -1574,7 +1662,7 @@ mod tests {
         let mut f_sparse = FilterOp::new(gt_i64(col_expr(0, "id", DataType::I64), 7), ctx.clone());
         let mut sparse_out = Vec::new();
         f_sparse
-            .push(b_dense.clone(), &mut |out| {
+            .push(b_dense.clone(), &mut dummy_res, &mut |out, _res| {
                 sparse_out.push(out);
                 Ok(ControlFlow::Continue)
             })
@@ -1589,7 +1677,7 @@ mod tests {
         let mut f_empty = FilterOp::new(gt_i64(col_expr(0, "id", DataType::I64), 100), ctx.clone());
         let mut empty_out = Vec::new();
         f_empty
-            .push(b_dense.clone(), &mut |out| {
+            .push(b_dense.clone(), &mut dummy_res, &mut |out, _res| {
                 empty_out.push(out);
                 Ok(ControlFlow::Continue)
             })
@@ -1611,12 +1699,17 @@ mod tests {
             ctx.clone(),
         );
         let mut proj_out = Vec::new();
-        proj.push(dense_out.pop().unwrap(), &mut |out| {
-            // While inside emit, scratch reservation is active.
-            assert!(ctx.pool.reserved() >= out.memory_bytes());
-            proj_out.push(out);
-            Ok(ControlFlow::Continue)
-        })
+        proj.push(
+            dense_out.pop().unwrap(),
+            &mut dummy_res,
+            &mut |out, out_res| {
+                // While inside emit, scratch reservation is active.
+                assert!(out_res.size() >= out.memory_bytes());
+                assert!(ctx.pool.reserved() >= out.memory_bytes());
+                proj_out.push(out);
+                Ok(ControlFlow::Continue)
+            },
+        )
         .unwrap();
         assert_eq!(ctx.pool.reserved(), 0);
         assert_eq!(proj_out.len(), 1);
@@ -1636,7 +1729,7 @@ mod tests {
         let mut lim_zero = LimitOp::new(2, Some(0), None);
         let mut zero_out = Vec::new();
         let flow_zero = lim_zero
-            .push(b_dense.clone(), &mut |out| {
+            .push(b_dense.clone(), &mut dummy_res, &mut |out, _res| {
                 zero_out.push(out);
                 Ok(ControlFlow::Continue)
             })
@@ -1647,7 +1740,7 @@ mod tests {
         let mut lim_off = LimitOp::new(3, Some(2), None);
         let mut off_out = Vec::new();
         let flow_off = lim_off
-            .push(b_dense, &mut |out| {
+            .push(b_dense, &mut dummy_res, &mut |out, _res| {
                 off_out.push(out);
                 Ok(ControlFlow::Continue)
             })
@@ -1760,7 +1853,11 @@ mod tests {
             1,
         )
         .unwrap();
-        assert_eq!(sink_zero.consume(b_one).unwrap(), ControlFlow::Stop);
+        let mut dummy_res = ctx.pool.register("test_in", false);
+        assert_eq!(
+            sink_zero.consume(b_one, &mut dummy_res).unwrap(),
+            ControlFlow::Stop
+        );
         assert_eq!(sink_zero.reserved_bytes(), 0);
         let merged_zero =
             TopKSink::merge(vec![sink_zero], Arc::clone(&schema), &[], 2, 0, &ctx).unwrap();
@@ -1967,6 +2064,7 @@ mod tests {
             0,
             ctx.clone(),
         );
+        let mut dummy_res = ctx.pool.register("test_in", false);
         for round in (0..200).rev() {
             let b = Batch::try_new_all(
                 Arc::clone(&small_schema),
@@ -1976,7 +2074,10 @@ mod tests {
                 1,
             )
             .unwrap();
-            assert_eq!(sink_compact.consume(b).unwrap(), ControlFlow::Continue);
+            assert_eq!(
+                sink_compact.consume(b, &mut dummy_res).unwrap(),
+                ControlFlow::Continue
+            );
         }
         assert!(sink_compact.stored_rows <= 64);
         let merged_small = TopKSink::merge(
@@ -2094,10 +2195,12 @@ mod tests {
         };
 
         // preserve_nulls = true -> 3 + 1 + 2 + 1 = 7 rows across chunk_size=3 batches (3, 3, 1)
+        let mut dummy_res = ctx.pool.register("test_in", false);
         let mut op_preserve = UnnestOp::new(vec![1, 2], true, ctx.clone());
         let mut out_preserve = Vec::new();
         op_preserve
-            .push(batch.clone(), &mut |b| {
+            .push(batch.clone(), &mut dummy_res, &mut |b, out_res| {
+                assert!(out_res.size() >= b.memory_bytes());
                 assert!(ctx.pool.reserved() >= b.memory_bytes());
                 assert!(b.num_rows() <= 3);
                 out_preserve.push(b);
@@ -2123,7 +2226,8 @@ mod tests {
         let mut op_drop = UnnestOp::new(vec![1, 2], false, ctx.clone());
         let mut out_drop = Vec::new();
         op_drop
-            .push(batch, &mut |b| {
+            .push(batch, &mut dummy_res, &mut |b, out_res| {
+                assert!(out_res.size() >= b.memory_bytes());
                 assert!(ctx.pool.reserved() >= b.memory_bytes());
                 assert!(b.num_rows() <= 3);
                 out_drop.push(b);
@@ -2274,13 +2378,17 @@ mod tests {
 
         // Measure memory footprint of 3 stored rows (2 dead + 1 live) + 1 live row + 2 new rows.
         let (probe_ctx, _probe_dir) = test_ctx(1024 * 1024, 1);
+        let mut probe_in_res = probe_ctx.pool.register("probe_in", false);
         let mut probe = TopKSink::new(Arc::clone(&schema), keys.clone(), 3, 0, probe_ctx.clone());
-        probe.consume(make_batch(&[50, 40, 30])).unwrap();
-        probe.consume(make_batch(&[20])).unwrap();
+        probe
+            .consume(make_batch(&[50, 40, 30]), &mut probe_in_res)
+            .unwrap();
+        probe.consume(make_batch(&[20]), &mut probe_in_res).unwrap();
         let bytes_before_b3 = probe.reserved_bytes(); // 4 stored rows: 50 (dead), 40, 30, 20
         assert_eq!(probe.stored_rows, 4);
-        probe.consume(make_batch(&[15])).unwrap();
+        probe.consume(make_batch(&[15]), &mut probe_in_res).unwrap();
         let bytes_5_rows = probe.reserved_bytes(); // 5 stored rows (30..50 dead, 20 & 15 live)
+        drop(probe_in_res);
         drop(probe);
 
         // Case 1: Pool fits (4 stored rows + 1 compacted live row), so take_winners on [10, 5]
@@ -2289,12 +2397,18 @@ mod tests {
         let one_row_est = bytes_5_rows - bytes_before_b3;
         let tight_ok_cap = bytes_before_b3 + one_row_est + 64;
         let (ok_ctx, _d_ok) = test_ctx(tight_ok_cap, 1);
+        let mut ok_in_res = ok_ctx.pool.register("ok_in", false);
         let mut sink_compact_ok =
             TopKSink::new(Arc::clone(&schema), keys.clone(), 3, 0, ok_ctx.clone());
-        sink_compact_ok.consume(make_batch(&[50, 40, 30])).unwrap();
-        sink_compact_ok.consume(make_batch(&[20])).unwrap();
+        sink_compact_ok
+            .consume(make_batch(&[50, 40, 30]), &mut ok_in_res)
+            .unwrap();
+        sink_compact_ok
+            .consume(make_batch(&[20]), &mut ok_in_res)
+            .unwrap();
         assert_eq!(sink_compact_ok.stored_rows, 4);
-        let res_b3 = sink_compact_ok.consume(make_batch(&[10, 5]));
+        let res_b3 = sink_compact_ok.consume(make_batch(&[10, 5]), &mut ok_in_res);
+        drop(ok_in_res);
         assert!(
             matches!(res_b3, Ok(ControlFlow::Continue)),
             "expected Ok after compaction, got {res_b3:?}"
@@ -2325,6 +2439,7 @@ mod tests {
 
         // Case 2: All stored rows are evicted by incoming batch (live_stored == 0) under tight cap
         let (zero_live_ctx, _d_zero) = test_ctx(bytes_before_b3 + 64, 1);
+        let mut zero_in_res = zero_live_ctx.pool.register("zero_in", false);
         let mut sink_zero_live = TopKSink::new(
             Arc::clone(&schema),
             keys.clone(),
@@ -2332,9 +2447,14 @@ mod tests {
             0,
             zero_live_ctx.clone(),
         );
-        sink_zero_live.consume(make_batch(&[50, 40, 30])).unwrap();
-        sink_zero_live.consume(make_batch(&[20])).unwrap();
-        let res_evict_all = sink_zero_live.consume(make_batch(&[3, 2, 1]));
+        sink_zero_live
+            .consume(make_batch(&[50, 40, 30]), &mut zero_in_res)
+            .unwrap();
+        sink_zero_live
+            .consume(make_batch(&[20]), &mut zero_in_res)
+            .unwrap();
+        let res_evict_all = sink_zero_live.consume(make_batch(&[3, 2, 1]), &mut zero_in_res);
+        drop(zero_in_res);
         assert!(
             matches!(res_evict_all, Ok(ControlFlow::Continue)),
             "expected Ok when all stored rows evicted, got {res_evict_all:?}"
@@ -2345,11 +2465,19 @@ mod tests {
 
         // Case 3: Ultra-tight cap where even compact_kept cannot fit -> clean TooLarge, NEVER Internal
         let (too_tight_ctx, _d_tight) = test_ctx(bytes_before_b3 + 16, 1);
+        let mut tight_in_res = too_tight_ctx.pool.register("tight_in", false);
         let mut sink_too_tight =
             TopKSink::new(Arc::clone(&schema), keys, 3, 0, too_tight_ctx.clone());
-        sink_too_tight.consume(make_batch(&[50, 40, 30])).unwrap();
-        sink_too_tight.consume(make_batch(&[20])).unwrap();
-        let err = sink_too_tight.consume(make_batch(&[10, 5])).unwrap_err();
+        sink_too_tight
+            .consume(make_batch(&[50, 40, 30]), &mut tight_in_res)
+            .unwrap();
+        sink_too_tight
+            .consume(make_batch(&[20]), &mut tight_in_res)
+            .unwrap();
+        let err = sink_too_tight
+            .consume(make_batch(&[10, 5]), &mut tight_in_res)
+            .unwrap_err();
+        drop(tight_in_res);
         assert!(
             matches!(err, QueryError::TooLarge),
             "expected QueryError::TooLarge, got {err:?}"
@@ -2536,7 +2664,8 @@ mod tests {
         .unwrap();
 
         let mut emitted = Vec::new();
-        op.push(batch, &mut |b| {
+        let mut dummy_res = ctx.pool.register("test_in", false);
+        op.push(batch, &mut dummy_res, &mut |b, _res| {
             emitted.push(b);
             Ok(ControlFlow::Continue)
         })
@@ -2575,9 +2704,12 @@ mod tests {
         )
         .unwrap();
         let err = strict_op
-            .push(batch_with_null, &mut |_| Ok(ControlFlow::Continue))
+            .push(batch_with_null, &mut dummy_res, &mut |_, _| {
+                Ok(ControlFlow::Continue)
+            })
             .unwrap_err();
         assert!(matches!(err, QueryError::Column(_)));
+        drop(dummy_res);
 
         // ProjectOp shares passthrough Column Arc zero-copy via try_new_shared.
         let (ctx2, _dir2) = test_ctx(64 * 1024, 1);
@@ -2589,7 +2721,7 @@ mod tests {
                 data_type: DataType::I64,
             }],
             Arc::clone(&pass_schema),
-            ctx2,
+            ctx2.clone(),
         )
         .unwrap();
         let shared_in = Batch::try_new_all(
@@ -2600,16 +2732,156 @@ mod tests {
             2,
         )
         .unwrap();
+        let mut pass_in_res = ctx2.pool.register("pass_in", false);
+        pass_in_res.try_grow(shared_in.memory_bytes()).unwrap();
         let mut out_batches = Vec::new();
         pass_op
-            .push(shared_in.clone(), &mut |b| {
+            .push(shared_in.clone(), &mut pass_in_res, &mut |b, out_res| {
+                assert_eq!(out_res.size(), b.memory_bytes());
+                assert_eq!(ctx2.pool.reserved(), b.memory_bytes());
                 out_batches.push(b);
                 Ok(ControlFlow::Continue)
             })
             .unwrap();
+        assert_eq!(ctx2.pool.reserved(), 0);
         assert!(Arc::ptr_eq(
             out_batches[0].column_arc(0).unwrap(),
             shared_in.column_arc(0).unwrap()
         ));
+    }
+
+    #[test]
+    fn limit_op_two_token_early_stop_halts_sibling_without_cancelled_error() {
+        use crate::exec::run_pipeline_with_stop;
+        use std::sync::Barrier;
+
+        struct FastAndSlowStream {
+            batches: Vec<Batch>,
+            barrier: Arc<Barrier>,
+            is_slow: bool,
+            step: usize,
+        }
+
+        impl PartitionStream for FastAndSlowStream {
+            fn next_batch(
+                &mut self,
+                cancel: &CancelToken,
+                res: Option<&mut Reservation>,
+            ) -> Result<Option<Batch>, QueryError> {
+                if self.is_slow {
+                    if self.step == 0 {
+                        self.barrier.wait();
+                    }
+                    self.step += 1;
+                    // Wait until stop_cancel cancels this sibling partition.
+                    while !cancel.is_cancelled() {
+                        std::thread::sleep(std::time::Duration::from_micros(200));
+                    }
+                    return Err(QueryError::Cancelled);
+                }
+                if self.step == 0 {
+                    self.barrier.wait();
+                }
+                if cancel.is_cancelled() {
+                    return Err(QueryError::Cancelled);
+                }
+                if self.step < self.batches.len() {
+                    let b = self.batches[self.step].clone();
+                    if let Some(r) = res {
+                        r.try_grow(b.memory_bytes())?;
+                    }
+                    self.step += 1;
+                    Ok(Some(b))
+                } else {
+                    Ok(None)
+                }
+            }
+        }
+
+        let (ctx, _dir) = test_ctx(1024 * 1024, 2);
+        let schema = Schema::try_new_arc(vec![Field::new("v", DataType::I64, false)]).unwrap();
+        let b = Batch::try_new_all(
+            Arc::clone(&schema),
+            vec![Column::Flat(
+                FlatColumn::try_new(FlatData::I64(vec![1, 2, 3, 4, 5]), None).unwrap(),
+            )],
+            5,
+        )
+        .unwrap();
+
+        let barrier = Arc::new(Barrier::new(2));
+        let streams: Vec<Box<dyn PartitionStream>> = vec![
+            Box::new(FastAndSlowStream {
+                batches: vec![b],
+                barrier: Arc::clone(&barrier),
+                is_slow: false,
+                step: 0,
+            }),
+            Box::new(FastAndSlowStream {
+                batches: Vec::new(),
+                barrier,
+                is_slow: true,
+                step: 0,
+            }),
+        ];
+
+        let shared_rem = Arc::new(AtomicUsize::new(3));
+        let stop_cancel = CancelToken::new();
+        let pool_c = Arc::clone(&ctx.pool);
+        let sinks = run_pipeline_with_stop(
+            &ctx,
+            Some(stop_cancel.clone()),
+            streams,
+            move |_| {
+                Ok(vec![Box::new(
+                    LimitOp::new(0, Some(3), Some(Arc::clone(&shared_rem)))
+                        .with_stop_cancel(stop_cancel.clone()),
+                ) as Box<dyn PushOperator>])
+            },
+            move |_| Ok(CollectSink::new(&pool_c)),
+        )
+        .unwrap();
+
+        assert!(!ctx.eval.cancel.is_cancelled());
+        let total_rows: usize = sinks
+            .iter()
+            .flat_map(|s| s.batches())
+            .map(Batch::num_rows)
+            .sum();
+        assert_eq!(total_rows, 3);
+        drop(sinks);
+        assert_eq!(ctx.pool.reserved(), 0);
+    }
+
+    #[test]
+    fn topk_caps_initial_heap_capacity_and_tracks_heap_bytes() {
+        let (ctx, _dir) = test_ctx(64 * 1024, 1);
+        let schema = Schema::try_new_arc(vec![Field::new("v", DataType::I64, false)]).unwrap();
+        let keys = vec![SortKey {
+            expr: col_expr(0, "v", DataType::I64),
+            descending: false,
+            nulls_first: false,
+        }];
+        let mut sink = TopKSink::new(Arc::clone(&schema), keys, usize::MAX, 0, ctx.clone());
+        assert!(sink.heap.capacity() <= ctx.batch_size);
+
+        let batch = Batch::try_new_all(
+            Arc::clone(&schema),
+            vec![Column::Flat(
+                FlatColumn::try_new(FlatData::I64(vec![3, 1, 2]), None).unwrap(),
+            )],
+            3,
+        )
+        .unwrap();
+        let expected_batch_bytes = batch.memory_bytes();
+        let mut in_res = ctx.pool.register("in", false);
+        in_res.try_grow(expected_batch_bytes).unwrap();
+        sink.consume(batch, &mut in_res).unwrap();
+        drop(in_res);
+
+        // Reservation includes stored batch, key column, and heap item bytes.
+        assert!(sink.reserved_bytes() >= expected_batch_bytes + 3 * size_of::<HeapItem>());
+        drop(sink);
+        assert_eq!(ctx.pool.reserved(), 0);
     }
 }
