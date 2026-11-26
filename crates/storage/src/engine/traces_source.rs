@@ -1,7 +1,7 @@
 //! Native spillable `NativeTraceMerger` and `TracesSource` (`mode=lookup`, `mode=list`,
 //! `mode=range`, and generalized `TwoPhase` rank→fetch for non-time sorts).
 
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use std::mem::size_of;
 use std::sync::Arc;
 
@@ -15,8 +15,8 @@ use cetra_core::schema::{traces, traces_schema};
 use cetra_query::exec::sort_window::ExternalSort;
 use cetra_query::exec::streaming::TopKSink;
 use cetra_query::exec::{
-    BatchSource, ExecContext, IdLookupHint, PartitionStream, ScanSource, ScanSpec, SortKey,
-    TimeRangeHint, run_pipeline,
+    ExecContext, IdLookupHint, PartitionStream, ScanSource, ScanSpec, SortKey, TimeRangeHint,
+    run_pipeline,
 };
 use cetra_query::{BinaryOp, EvalContext, Expr, QueryError, eval_filter};
 use chrono::NaiveDate;
@@ -32,8 +32,9 @@ use crate::verify::Suspects;
 use super::metadata_cache::MetadataCache;
 use super::parquet_source::ParquetSource;
 use super::{
-    BufferedBatchStream, DAY_NS, TimeBounds, cap_partitions, day_of_ns, extract_time_bounds,
-    read_fixed16_at, read_str_at, reconcile_res, rollback_res,
+    BufferedBatchStream, DAY_NS, TimeBounds, apply_tombstones_and_filters, cap_partitions,
+    day_of_ns, extract_time_bounds, read_bool_at, read_fixed16_at, read_str_at, reconcile_res,
+    rollback_res,
 };
 
 const MERGE_CHUNK_ROWS: usize = 1024;
@@ -66,7 +67,7 @@ pub(crate) enum TraceListMode {
 
 /// Native [`ScanSource`] for the `traces` view over `traces` Parquet files and
 /// pre-filtered `spans` memtable partials.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub(crate) struct TracesSource {
     store: Arc<dyn ObjectStore>,
     project: ProjectId,
@@ -79,6 +80,31 @@ pub(crate) struct TracesSource {
     suspects: Suspects,
     runtime: tokio::runtime::Handle,
     list_mode: Option<TraceListMode>,
+}
+
+impl std::fmt::Debug for TracesSource {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let mode = match &self.list_mode {
+            Some(TraceListMode::Widening { .. }) => "widening",
+            Some(TraceListMode::TwoPhase { .. }) => "two_phase",
+            None => "range",
+        };
+        let mem_batches: usize = self
+            .spans_mem
+            .partitions
+            .iter()
+            .filter(|(key, _)| key.project == self.project)
+            .map(|(_, batches)| batches.len())
+            .sum();
+        f.debug_struct("TracesSource")
+            .field("mode", &mode)
+            .field("files", &self.files.len())
+            .field("mem_batches", &mem_batches)
+            .field("deletions", &self.deletions.len())
+            .field("lookback", &self.lookback)
+            .field("schema_len", &self.schema.len())
+            .finish_non_exhaustive()
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -312,38 +338,25 @@ impl TracesSource {
             partial_streams.extend(parquet_src.open_partitions(&file_spec, ctx)?);
         }
 
-        // Convert memtable spans into cached partials (projected to `input_indices`).
+        // Lazily stream memtable spans into cached partials (projected to `input_indices`).
         let mem_batches = select_mem_batches(&self.spans_mem, self.project, padded);
         if !mem_batches.is_empty() {
-            let mut col_batches = Vec::with_capacity(mem_batches.len());
-            for mem_batch in mem_batches {
-                if ctx.eval.cancel.is_cancelled() {
-                    return Err(QueryError::Cancelled);
-                }
-                let partials_rb = mem_batch
-                    .trace_partials()
-                    .map_err(|e| QueryError::internal(format!("trace partials error: {e}")))?;
-                if partials_rb.num_rows() == 0 {
+            let slots = ctx.target_partitions.max(1).min(mem_batches.len());
+            let mut grouped: Vec<VecDeque<MemBatch>> =
+                (0..slots).map(|_| VecDeque::new()).collect();
+            for (idx, mem_batch) in mem_batches.into_iter().enumerate() {
+                grouped[idx % slots].push_back(mem_batch);
+            }
+            for batches in grouped {
+                if batches.is_empty() {
                     continue;
                 }
-                let projected_rb = partials_rb
-                    .project(&input_indices)
-                    .map_err(|_| QueryError::internal("failed to project memtable partials"))?;
-                col_batches.push(record_batch_to_column(&projected_rb)?);
-            }
-            if !col_batches.is_empty() {
-                let mem_src = BatchSource::new(Arc::clone(&input_schema), col_batches)?;
-                let mem_spec = ScanSpec {
-                    projection: None,
-                    map_keys: Vec::new(),
-                    time_range: TimeRangeHint::default(),
-                    id_lookups: Vec::new(),
-                    filters: partial_filters_input,
-                    substrings: Vec::new(),
-                    sort_hints: Vec::new(),
-                    limit: None,
-                };
-                partial_streams.extend(mem_src.open_partitions(&mem_spec, ctx)?);
+                partial_streams.push(Box::new(MemPartialsStream {
+                    batches,
+                    input_indices: input_indices.clone(),
+                    filters: partial_filters_input.clone(),
+                    now_ns: ctx.eval.now_ns,
+                }));
             }
         }
 
@@ -503,11 +516,16 @@ impl TracesSource {
             slice: usize,
         }
 
+        let mut p1_res = ctx.pool.register("widening_p1", false);
         let mut seen: BTreeSet<[u8; 16]> = BTreeSet::new();
         let mut candidates: Vec<Candidate> = Vec::new();
+        let widening_p1_bytes = |seen: &BTreeSet<[u8; 16]>, candidates: &[Candidate]| -> usize {
+            seen.len() * (size_of::<[u8; 16]>() + 16) + size_of_val(candidates)
+        };
 
         for (slice_idx, window) in windows.iter().copied().enumerate() {
             if ctx.eval.cancel.is_cancelled() {
+                p1_res.free();
                 return Err(QueryError::Cancelled);
             }
             let Some(stream) = self.open_range_stream(
@@ -573,17 +591,20 @@ impl TracesSource {
                     }
                     Ok(())
                 })?;
+                reconcile_res(Some(&mut p1_res), 0, widening_p1_bytes(&seen, &candidates))?;
             }
 
             candidates.sort_by(|l, r| r.start.cmp(&l.start).then_with(|| r.id.cmp(&l.id)));
             candidates.truncate(effective_fetch);
             seen = candidates.iter().map(|c| c.id).collect();
+            reconcile_res(Some(&mut p1_res), 0, widening_p1_bytes(&seen, &candidates))?;
             if candidates.len() >= effective_fetch {
                 break;
             }
         }
 
         if candidates.is_empty() {
+            p1_res.free();
             return Ok(Vec::new());
         }
 
@@ -592,6 +613,14 @@ impl TracesSource {
         for c in &candidates {
             groups.entry(c.slice).or_default().insert(c.id);
         }
+        drop(candidates);
+        drop(seen);
+        let groups_bytes: usize = groups.len() * (size_of::<usize>() + 32)
+            + groups
+                .values()
+                .map(|ids| ids.len() * (size_of::<[u8; 16]>() + 16))
+                .sum::<usize>();
+        reconcile_res(Some(&mut p1_res), 0, groups_bytes)?;
 
         let mut phase2_names = requested_col_names(&self.schema, spec.projection.as_deref())?;
         phase2_names.extend(filter_names);
@@ -628,6 +657,10 @@ impl TracesSource {
 
         let mut phase2_streams: Vec<Box<dyn PartitionStream>> = Vec::with_capacity(groups.len());
         for (slice_idx, ids) in groups {
+            if ctx.eval.cancel.is_cancelled() {
+                p1_res.free();
+                return Err(QueryError::Cancelled);
+            }
             if let Some(stream) = self.open_range_stream(
                 RangeScanArgs {
                     bounds: windows[slice_idx],
@@ -643,6 +676,7 @@ impl TracesSource {
                 phase2_streams.push(stream);
             }
         }
+        p1_res.free();
         if phase2_streams.is_empty() {
             return Ok(Vec::new());
         }
@@ -788,6 +822,7 @@ impl TracesSource {
         let p1_trace_idx = phase1_schema
             .index_of(traces::TRACE_ID)
             .ok_or_else(|| QueryError::internal("phase 1 trace_id missing"))?;
+        let mut meta_res = ctx.pool.register("two_phase_meta", false);
         let mut winning_ids: Vec<[u8; 16]> = Vec::new();
         for batch in &ranked_batches {
             let id_col = batch
@@ -799,8 +834,15 @@ impl TracesSource {
                 winning_ids.push(id);
                 Ok(())
             })?;
+            reconcile_res(
+                Some(&mut meta_res),
+                0,
+                winning_ids.capacity() * size_of::<[u8; 16]>(),
+            )?;
         }
+        drop(ranked_batches);
         if winning_ids.is_empty() {
+            meta_res.free();
             return Ok(Vec::new());
         }
 
@@ -815,12 +857,19 @@ impl TracesSource {
             .ok_or_else(|| QueryError::internal("phase 2 trace_id missing"))?;
 
         let winning_set: BTreeSet<[u8; 16]> = winning_ids.iter().copied().collect();
+        let winning_ids_bytes = winning_ids.capacity() * size_of::<[u8; 16]>();
+        let winning_set_bytes = winning_set.len() * (size_of::<[u8; 16]>() + 16);
+        reconcile_res(
+            Some(&mut meta_res),
+            0,
+            winning_ids_bytes + winning_set_bytes,
+        )?;
         let p2_around = if trace_ids.is_some() {
             spec.time_range.around_ns
         } else {
             None
         };
-        let Some(p2_stream) = self.open_range_stream(
+        let p2_stream_opt = self.open_range_stream(
             RangeScanArgs {
                 bounds,
                 around_ns: p2_around,
@@ -831,8 +880,11 @@ impl TracesSource {
                 limit: None,
             },
             ctx,
-        )?
-        else {
+        )?;
+        drop(winning_set);
+        reconcile_res(Some(&mut meta_res), 0, winning_ids_bytes)?;
+        let Some(p2_stream) = p2_stream_opt else {
+            meta_res.free();
             return Ok(Vec::new());
         };
 
@@ -846,60 +898,99 @@ impl TracesSource {
         }
         if p2_batches.is_empty() {
             p2_res.free();
+            meta_res.free();
             return Ok(Vec::new());
         }
 
         let refs: Vec<&Batch> = p2_batches.iter().collect();
         let combined = Batch::concat(Arc::clone(&phase2_schema), &refs, Some(&mut p2_res))?;
         drop(p2_batches);
+        reconcile_res(Some(&mut p2_res), 0, combined.memory_bytes())?;
 
         let id_col = combined
             .column(p2_trace_idx)
             .ok_or_else(|| QueryError::internal("phase 2 trace_id column missing"))?;
         let mut row_by_id: HashMap<[u8; 16], u32> = HashMap::with_capacity(combined.num_rows());
+        let row_by_id_bytes = row_by_id.capacity() * (size_of::<[u8; 16]>() + size_of::<u32>() + 8);
+        reconcile_res(Some(&mut meta_res), 0, winning_ids_bytes + row_by_id_bytes)?;
         for row in 0..combined.num_rows() {
+            if (row & 1023) == 0 && ctx.eval.cancel.is_cancelled() {
+                drop(combined);
+                p2_res.free();
+                meta_res.free();
+                return Err(QueryError::Cancelled);
+            }
             if let Some(id) = read_fixed16_at(id_col, row) {
                 row_by_id.insert(id, row as u32);
             }
         }
 
         let mut gather_indices = Vec::with_capacity(winning_ids.len());
-        for id in &winning_ids {
+        let gather_bytes = gather_indices.capacity() * size_of::<u32>();
+        reconcile_res(
+            Some(&mut meta_res),
+            0,
+            winning_ids_bytes + row_by_id_bytes + gather_bytes,
+        )?;
+        for (i, id) in winning_ids.iter().enumerate() {
+            if (i & 1023) == 0 && ctx.eval.cancel.is_cancelled() {
+                drop(combined);
+                p2_res.free();
+                meta_res.free();
+                return Err(QueryError::Cancelled);
+            }
             if let Some(&row_idx) = row_by_id.get(id) {
                 gather_indices.push(row_idx);
             }
         }
+        drop(row_by_id);
+        drop(winning_ids);
+        reconcile_res(Some(&mut meta_res), 0, gather_bytes)?;
 
-        let mut reordered_cols = Vec::with_capacity(combined.columns().len());
-        for col in combined.columns() {
-            reordered_cols.push(Column::Flat(col.take(&gather_indices, Some(&mut p2_res))?));
+        if gather_indices.is_empty() {
+            drop(gather_indices);
+            meta_res.free();
+            drop(combined);
+            p2_res.free();
+            return Ok(Vec::new());
         }
-        let reordered = Batch::try_new_all(
-            Arc::clone(&phase2_schema),
-            reordered_cols,
-            gather_indices.len(),
-        )?;
-        drop(combined);
-        p2_res.free();
 
-        let projected = project_batch_to_requested(
-            reordered,
+        let combined = project_batch_to_requested(
+            combined,
             &self.schema,
             &phase2_indices,
             spec.projection.as_deref(),
         )?;
+        reconcile_res(Some(&mut p2_res), 0, combined.memory_bytes())?;
 
+        let out_schema = combined.schema();
         let chunk_size = ctx.batch_size.max(1);
         let mut chunks = Vec::new();
         let mut out_res = ctx.pool.register("two_phase_out", false);
-        let mut start = 0usize;
-        while start < projected.num_rows() {
-            let len = chunk_size.min(projected.num_rows() - start);
-            let slice = projected.slice(start, len)?;
-            out_res.try_grow(slice.memory_bytes())?;
-            chunks.push(slice);
-            start += len;
+        for chunk_indices in gather_indices.chunks(chunk_size) {
+            if ctx.eval.cancel.is_cancelled() {
+                drop(chunks);
+                out_res.free();
+                drop(gather_indices);
+                meta_res.free();
+                drop(combined);
+                p2_res.free();
+                return Err(QueryError::Cancelled);
+            }
+            let chunk_start_res = out_res.size();
+            let mut cols = Vec::with_capacity(combined.columns().len());
+            for col in combined.columns() {
+                cols.push(Column::Flat(col.take(chunk_indices, Some(&mut out_res))?));
+            }
+            let chunk = Batch::try_new_all(Arc::clone(out_schema), cols, chunk_indices.len())?;
+            reconcile_res(Some(&mut out_res), chunk_start_res, chunk.memory_bytes())?;
+            chunks.push(chunk);
         }
+        drop(gather_indices);
+        meta_res.free();
+        drop(combined);
+        p2_res.free();
+
         if chunks.is_empty() {
             out_res.free();
             return Ok(Vec::new());
@@ -1042,8 +1133,87 @@ fn project_and_buffer_batches(
 }
 
 // ---------------------------------------------------------------------------
-// Stream wrapper: NativeTraceMergeStream
+// Stream wrapper: MemPartialsStream & NativeTraceMergeStream
 // ---------------------------------------------------------------------------
+
+struct MemPartialsStream {
+    batches: VecDeque<MemBatch>,
+    input_indices: Vec<usize>,
+    filters: Vec<Expr>,
+    now_ns: i64,
+}
+
+impl PartitionStream for MemPartialsStream {
+    fn next_batch(
+        &mut self,
+        cancel: &CancelToken,
+        mut res: Option<&mut Reservation>,
+    ) -> Result<Option<Batch>, QueryError> {
+        let before = res.as_ref().map_or(0, |r| r.size());
+        let eval_ctx = EvalContext {
+            now_ns: self.now_ns,
+            cancel: cancel.clone(),
+        };
+
+        while let Some(mem_batch) = self.batches.pop_front() {
+            if cancel.is_cancelled() {
+                rollback_res(res, before);
+                return Err(QueryError::Cancelled);
+            }
+            if mem_batch.batch.num_rows() == 0 {
+                continue;
+            }
+
+            let partials_rb = match mem_batch.trace_partials() {
+                Ok(rb) => rb,
+                Err(e) => {
+                    rollback_res(res, before);
+                    return Err(QueryError::internal(format!("trace partials error: {e}")));
+                }
+            };
+            if partials_rb.num_rows() == 0 {
+                continue;
+            }
+            let projected_rb = match partials_rb.project(&self.input_indices) {
+                Ok(rb) => rb,
+                Err(_) => {
+                    rollback_res(res, before);
+                    return Err(QueryError::internal("failed to project memtable partials"));
+                }
+            };
+            let batch = match record_batch_to_column(&projected_rb) {
+                Ok(b) => b,
+                Err(err) => {
+                    rollback_res(res, before);
+                    return Err(err.into());
+                }
+            };
+            drop(projected_rb);
+            drop(partials_rb);
+
+            reconcile_res(res.as_deref_mut(), before, batch.memory_bytes())?;
+
+            let filtered = apply_tombstones_and_filters(
+                batch,
+                None,
+                &self.filters,
+                &eval_ctx,
+                res.as_deref_mut(),
+                before,
+            )?;
+            if filtered.is_empty() {
+                rollback_res(res.as_deref_mut(), before);
+                continue;
+            }
+
+            reconcile_res(res, before, filtered.memory_bytes())?;
+            return Ok(Some(filtered));
+        }
+
+        rollback_res(res, before);
+        Ok(None)
+    }
+}
 
 struct NativeTraceMergeStream {
     input: Box<dyn PartitionStream>,
@@ -1082,7 +1252,7 @@ impl NativeTraceMergeStream {
         }
         let mut merged = merger.finish()?;
         self.merger_res.free();
-        self.scratch_res.try_grow(merged.memory_bytes())?;
+        reconcile_res(Some(&mut self.scratch_res), 0, merged.memory_bytes())?;
 
         // 1. Evaluate unpadded `start_time` bounds `[a, b]`.
         if self.bounds.min.is_some() || self.bounds.max.is_some() {
@@ -1092,14 +1262,17 @@ impl NativeTraceMergeStream {
             let raw_len = merged.raw_len();
             let mut mask = Bitmap::new_ones(raw_len);
             for row in 0..raw_len {
-                if let Some(ts) = read_ts_at(start_col, row)
-                    && (self.bounds.min.is_some_and(|lo| ts < lo)
-                        || self.bounds.max.is_some_and(|hi| ts > hi))
-                {
+                let keep = read_ts_at(start_col, row).is_some_and(|ts| {
+                    self.bounds.min.is_none_or(|lo| ts >= lo)
+                        && self.bounds.max.is_none_or(|hi| ts <= hi)
+                });
+                if !keep {
                     let _ = mask.set(row, false);
                 }
             }
             merged = merged.into_filter_mask(&mask)?;
+            drop(mask);
+            reconcile_res(Some(&mut self.scratch_res), 0, merged.memory_bytes())?;
             if merged.is_empty() {
                 self.scratch_res.free();
                 return Ok(None);
@@ -1111,6 +1284,7 @@ impl NativeTraceMergeStream {
             let mask = eval_filter(filter, &merged, eval_ctx, Some(&mut self.scratch_res))?;
             merged = merged.into_filter_mask(&mask)?;
             drop(mask);
+            reconcile_res(Some(&mut self.scratch_res), 0, merged.memory_bytes())?;
             if merged.is_empty() {
                 self.scratch_res.free();
                 return Ok(None);
@@ -1123,6 +1297,8 @@ impl NativeTraceMergeStream {
             *rem -= take;
             if *rem == 0 {
                 self.done = true;
+                self.active_input = None;
+                self.input_res.free();
             }
             if take == 0 {
                 self.scratch_res.free();
@@ -1140,17 +1316,21 @@ impl NativeTraceMergeStream {
                     Selection::Indices(idx) => Selection::Indices(idx[..take].to_vec()),
                 };
                 merged = merged.into_with_selection(sel)?;
+                reconcile_res(Some(&mut self.scratch_res), 0, merged.memory_bytes())?;
             }
         }
 
         // 4. Project to requested output schema.
         if let Some(indices) = &self.projection {
             merged = merged.into_project(indices)?;
+            reconcile_res(Some(&mut self.scratch_res), 0, merged.memory_bytes())?;
         }
 
         if merged.num_rows().saturating_mul(4) < merged.raw_len() {
-            self.scratch_res.free();
-            merged = merged.compact(Some(&mut self.scratch_res))?;
+            let compacted = merged.compact(Some(&mut self.scratch_res))?;
+            drop(merged);
+            merged = compacted;
+            reconcile_res(Some(&mut self.scratch_res), 0, merged.memory_bytes())?;
         }
 
         Ok(Some(merged))
@@ -1196,7 +1376,21 @@ impl PartitionStream for NativeTraceMergeStream {
                             b
                         } else {
                             match b.compact(Some(&mut self.input_res)) {
-                                Ok(c) => c,
+                                Ok(c) => {
+                                    drop(b);
+                                    if let Err(err) = reconcile_res(
+                                        Some(&mut self.input_res),
+                                        0,
+                                        c.memory_bytes(),
+                                    ) {
+                                        self.scratch_res.free();
+                                        self.merger_res.free();
+                                        self.input_res.free();
+                                        rollback_res(res, before);
+                                        return Err(err);
+                                    }
+                                    c
+                                }
                                 Err(err) => {
                                     self.scratch_res.free();
                                     self.merger_res.free();
@@ -1292,17 +1486,7 @@ impl PartitionStream for NativeTraceMergeStream {
                     run_end += 1;
                 }
 
-                let slice = match batch.slice(offset, run_end - offset) {
-                    Ok(s) => s,
-                    Err(err) => {
-                        self.scratch_res.free();
-                        self.merger_res.free();
-                        self.input_res.free();
-                        rollback_res(res, before);
-                        return Err(err.into());
-                    }
-                };
-                if let Err(err) = self.merger.push(&slice) {
+                if let Err(err) = self.merger.push_range(&batch, offset, run_end) {
                     self.scratch_res.free();
                     self.merger_res.free();
                     self.input_res.free();
@@ -1778,10 +1962,22 @@ impl NativeTraceMerger {
         self.size
     }
 
-    /// Folds active rows of `partials` into the trace accumulators.
-    pub(crate) fn push(&mut self, partials: &Batch) -> Result<(), QueryError> {
-        if partials.is_empty() {
+    /// Folds rows in `start..end` of `partials` (`Selection::All`) into the trace
+    /// accumulators without copying column buffers.
+    pub(crate) fn push_range(
+        &mut self,
+        partials: &Batch,
+        start: usize,
+        end: usize,
+    ) -> Result<(), QueryError> {
+        if start >= end || partials.is_empty() {
             return Ok(());
+        }
+        if end > partials.raw_len() || !partials.selection().is_all(partials.raw_len()) {
+            return Err(ColumnError::InvalidBatch {
+                reason: "push_range requires Selection::All and valid start..end bounds",
+            }
+            .into());
         }
         let mut col_refs: Vec<(usize, TraceColumn, &Column)> =
             Vec::with_capacity(self.input_cols.len());
@@ -1810,7 +2006,7 @@ impl NativeTraceMerger {
         let traces = &mut self.traces;
         let size = &mut self.size;
 
-        for_each_active_row(partials, |row| {
+        for row in start..end {
             let start_time = read_ts_at(start_col, row)
                 .ok_or_else(|| QueryError::internal("partial start_time missing"))?;
             let root = read_bool_at(has_root_col, row)
@@ -1839,8 +2035,8 @@ impl NativeTraceMerger {
             for &(slot_idx, col_kind, col) in &col_refs {
                 *size += acc.update_from_col(slot_idx, col_kind, col, row, &ctx)?;
             }
-            Ok(())
-        })
+        }
+        Ok(())
     }
 
     /// Finalizes all accumulated traces into a compacted `cetra_column::Batch`.
@@ -2341,7 +2537,11 @@ fn expr_fixed16(expr: &Expr) -> Option<[u8; 16]> {
     match expr {
         Expr::Literal(ScalarValue::FixedBytes16(b)) => Some(*b),
         Expr::Literal(ScalarValue::Binary(b)) if b.len() == 16 => b.as_slice().try_into().ok(),
-        Expr::Cast { expr, .. } => expr_fixed16(expr),
+        Expr::Cast {
+            expr,
+            target: DataType::FixedBytes16,
+            ..
+        } => expr_fixed16(expr),
         _ => None,
     }
 }
@@ -2413,55 +2613,6 @@ fn for_each_active_row(
         }
     }
     Ok(())
-}
-
-fn read_bool_at(col: &Column, row: usize) -> Option<bool> {
-    match col {
-        Column::Flat(f) => {
-            if f.is_null(row) {
-                return None;
-            }
-            match f.data() {
-                FlatData::Bool(bm) => Some(bm.get(row)),
-                _ => None,
-            }
-        }
-        Column::Const { value, len } => {
-            if row >= *len {
-                return None;
-            }
-            match value {
-                ScalarValue::Bool(b) => Some(*b),
-                _ => None,
-            }
-        }
-        Column::Dict(d) => {
-            if d.is_null(row) {
-                return None;
-            }
-            let code = *d.codes().get(row)? as usize;
-            if d.values().is_null(code) {
-                return None;
-            }
-            match d.values().data() {
-                FlatData::Bool(bm) => Some(bm.get(code)),
-                _ => None,
-            }
-        }
-        Column::Rle(r) => {
-            if row >= r.len() {
-                return None;
-            }
-            let phys = r.run_ends().partition_point(|&e| (e as usize) <= row);
-            if r.values().is_null(phys) {
-                return None;
-            }
-            match r.values().data() {
-                FlatData::Bool(bm) => Some(bm.get(phys)),
-                _ => None,
-            }
-        }
-    }
 }
 
 fn read_i64_at(col: &Column, row: usize) -> Option<i64> {

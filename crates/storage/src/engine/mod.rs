@@ -145,8 +145,7 @@ pub(super) fn apply_tombstones_and_filters(
 }
 
 pub(super) struct ChainedPartitionStream {
-    streams: Vec<Box<dyn PartitionStream>>,
-    cursor: usize,
+    streams: std::collections::VecDeque<Box<dyn PartitionStream>>,
 }
 
 impl PartitionStream for ChainedPartitionStream {
@@ -156,15 +155,21 @@ impl PartitionStream for ChainedPartitionStream {
         mut res: Option<&mut Reservation>,
     ) -> Result<Option<Batch>, QueryError> {
         let before = res.as_ref().map_or(0, |r| r.size());
-        while self.cursor < self.streams.len() {
+        while let Some(front) = self.streams.front_mut() {
             if cancel.is_cancelled() {
                 rollback_res(res, before);
                 return Err(QueryError::Cancelled);
             }
-            if let Some(batch) = self.streams[self.cursor].next_batch(cancel, res.as_deref_mut())? {
-                return Ok(Some(batch));
+            match front.next_batch(cancel, res.as_deref_mut()) {
+                Ok(Some(batch)) => return Ok(Some(batch)),
+                Ok(None) => {
+                    self.streams.pop_front();
+                }
+                Err(err) => {
+                    rollback_res(res, before);
+                    return Err(err);
+                }
             }
-            self.cursor += 1;
         }
         rollback_res(res, before);
         Ok(None)
@@ -179,18 +184,17 @@ pub(super) fn cap_partitions(
     if streams.len() <= cap {
         return streams;
     }
-    let mut grouped: Vec<Vec<Box<dyn PartitionStream>>> = (0..cap).map(|_| Vec::new()).collect();
+    let mut grouped: Vec<std::collections::VecDeque<Box<dyn PartitionStream>>> = (0..cap)
+        .map(|_| std::collections::VecDeque::new())
+        .collect();
     for (idx, stream) in streams.into_iter().enumerate() {
-        grouped[idx % cap].push(stream);
+        grouped[idx % cap].push_back(stream);
     }
     grouped
         .into_iter()
         .filter(|g| !g.is_empty())
         .map(|group| {
-            Box::new(ChainedPartitionStream {
-                streams: group,
-                cursor: 0,
-            }) as Box<dyn PartitionStream>
+            Box::new(ChainedPartitionStream { streams: group }) as Box<dyn PartitionStream>
         })
         .collect()
 }
@@ -488,6 +492,56 @@ pub(super) fn read_fixed16_at(col: &cetra_column::Column, row: usize) -> Option<
             }
             match r.values().data() {
                 FlatData::FixedBytes16(v) => v.get(phys).copied(),
+                _ => None,
+            }
+        }
+    }
+}
+
+pub(super) fn read_bool_at(col: &cetra_column::Column, row: usize) -> Option<bool> {
+    use cetra_column::{Column, FlatData, ScalarValue};
+    match col {
+        Column::Flat(f) => {
+            if f.is_null(row) {
+                return None;
+            }
+            match f.data() {
+                FlatData::Bool(bm) => Some(bm.get(row)),
+                _ => None,
+            }
+        }
+        Column::Const { value, len } => {
+            if row >= *len {
+                return None;
+            }
+            match value {
+                ScalarValue::Bool(b) => Some(*b),
+                _ => None,
+            }
+        }
+        Column::Dict(d) => {
+            if d.is_null(row) {
+                return None;
+            }
+            let code = *d.codes().get(row)? as usize;
+            if d.values().is_null(code) {
+                return None;
+            }
+            match d.values().data() {
+                FlatData::Bool(bm) => Some(bm.get(code)),
+                _ => None,
+            }
+        }
+        Column::Rle(r) => {
+            if row >= r.len() {
+                return None;
+            }
+            let phys = r.run_ends().partition_point(|&end| (end as usize) <= row);
+            if r.values().is_null(phys) {
+                return None;
+            }
+            match r.values().data() {
+                FlatData::Bool(bm) => Some(bm.get(phys)),
                 _ => None,
             }
         }
