@@ -5,32 +5,32 @@
 //! [`crate::Storage::apply_deletions`] for tests. Compaction and the rewriter
 //! never run on the same file: both claim their files first.
 
+use std::collections::BTreeSet;
+use std::path::PathBuf;
 use std::sync::{Arc, PoisonError};
 
-use arrow::datatypes::SchemaRef;
+use cetra_column::{CancelToken, DataType, ScalarValue, Schema};
 use cetra_core::ids::ProjectId;
-use cetra_core::schema::{scores_schema, spans_schema};
+use cetra_core::schema::{scores, spans};
+use cetra_query::exec::{
+    ExecContext, ExecMetrics, IdLookupHint, ScanSource, ScanSpec, SpillManager, TimeRangeHint,
+};
+use cetra_query::tombstone::{TombstoneTable, covered_predicate};
+use cetra_query::{BinaryOp, EvalContext, Expr, QueryError};
 use chrono::NaiveDate;
-use datafusion::datasource::physical_plan::ParquetSource;
-use datafusion::execution::TaskContext;
-use datafusion::execution::context::SessionConfig;
-use datafusion::physical_expr::PhysicalExpr;
-use datafusion::physical_plan::execute_stream;
-use datafusion::physical_plan::filter::FilterExec;
-use datafusion::physical_plan::limit::GlobalLimitExec;
-use futures::StreamExt;
 use tokio::sync::Semaphore;
 use tokio::task::JoinSet;
 
 use crate::catalog::{CatalogEdit, FileId, FileMeta, FileTable, now_ns};
 use crate::compaction::job::{ClaimGuard, Compactor};
-use crate::compaction::merge::{MergeContext, file_scan, ordering_of, read_error};
+use crate::compaction::merge::{MergeContext, read_error};
 use crate::compaction::plan::{Job, JobKind, Policy};
-use crate::deletion::{PendingDeletion, Tombstones, applicable, covered_predicate, key_columns};
-use crate::error::{CommitError, CompactionError};
+use crate::deletion::{PendingDeletion, Tombstones, applicable, to_tombstone_specs};
+use crate::error::{CommitError, CompactionError, query_err_to_df};
 use crate::memtable::MemSnapshot;
+use crate::parquet::ingest_column;
 use crate::read_state::{ReadState, publish_catalog, publish_tombstones};
-use crate::verify::may_be_corrupt;
+use crate::verify::{Suspects, may_be_corrupt};
 
 /// What one deletion pass did.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -333,15 +333,17 @@ async fn check_and_rewrite(
     file: &Arc<FileMeta>,
     policy: Policy,
 ) -> Result<Checked, CompactionError> {
-    let schema = table_schema(file.table)?;
+    let col_schema = table_column_schema(file.table)?;
+    let tombstone_table = tombstone_table_of(file.table)?;
     let deletions = applicable(
         &tombstones.for_project(file.project),
         Some(file.deletions_applied_seq),
         file.min_ingest_time,
     );
+    let specs = to_tombstone_specs(&deletions);
     // Not `None`: the list is not empty and every pending deletion has at
     // least one term for `spans` and `scores`. Treated as clean regardless.
-    let Some(covered) = covered_predicate(file.table, &schema, &deletions).map_err(|_| {
+    let Some(covered) = covered_predicate(tombstone_table, &col_schema, &specs).map_err(|_| {
         CompactionError::Deletion {
             reason: "building the deletion filter",
         }
@@ -352,7 +354,8 @@ async fn check_and_rewrite(
             applied: file.deletions_applied_seq,
         });
     };
-    let holds = match holds_covered(&compactor.merge, file, &schema, &covered, &deletions).await {
+    let holds = match holds_covered(&compactor.merge, file, &col_schema, &covered, &deletions).await
+    {
         Ok(holds) => holds,
         Err(error) => {
             if let CompactionError::Read { source } = &error
@@ -423,72 +426,219 @@ async fn check_and_rewrite(
     }
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum SingleTarget {
+    Trace,
+    User,
+    Session,
+}
+
+/// Populates `ScanSpec::id_lookups` ONLY when every active deletion on `table`
+/// targets the exact same single column, unioning all values into one hint.
+fn single_target_id_lookup(
+    table: FileTable,
+    deletions: &[Arc<PendingDeletion>],
+) -> Vec<IdLookupHint> {
+    let mut common_target: Option<SingleTarget> = None;
+    let mut trace_ids: BTreeSet<[u8; 16]> = BTreeSet::new();
+    let mut users: BTreeSet<String> = BTreeSet::new();
+    let mut sessions: BTreeSet<String> = BTreeSet::new();
+
+    for deletion in deletions {
+        let has_trace = !deletion.trace_ids.is_empty();
+        let has_user = table != FileTable::Traces && !deletion.users.is_empty();
+        let has_session = table == FileTable::Scores && !deletion.sessions.is_empty();
+        let active_cols = usize::from(has_trace) + usize::from(has_user) + usize::from(has_session);
+        if active_cols == 0 {
+            continue;
+        }
+        if active_cols > 1 {
+            return Vec::new();
+        }
+        let target = if has_trace {
+            SingleTarget::Trace
+        } else if has_user {
+            SingleTarget::User
+        } else {
+            SingleTarget::Session
+        };
+        match common_target {
+            None => common_target = Some(target),
+            Some(existing) if existing != target => return Vec::new(),
+            Some(_) => {}
+        }
+        match target {
+            SingleTarget::Trace => trace_ids.extend(deletion.trace_ids.iter().copied()),
+            SingleTarget::User => users.extend(deletion.users.iter().cloned()),
+            SingleTarget::Session => sessions.extend(deletion.sessions.iter().cloned()),
+        }
+    }
+
+    match common_target {
+        Some(SingleTarget::Trace) if !trace_ids.is_empty() => vec![IdLookupHint::Fixed16 {
+            column: spans::TRACE_ID.to_owned(),
+            values: trace_ids.into_iter().collect(),
+        }],
+        Some(SingleTarget::User) if !users.is_empty() => vec![IdLookupHint::Utf8 {
+            column: spans::USER_ID.to_owned(),
+            values: users.into_iter().collect(),
+        }],
+        Some(SingleTarget::Session) if !sessions.is_empty() => vec![IdLookupHint::Utf8 {
+            column: scores::SESSION_ID.to_owned(),
+            values: sessions.into_iter().collect(),
+        }],
+        _ => Vec::new(),
+    }
+}
+
 /// Does `file` hold a row covered by `deletions`? A `LIMIT 1` scan of the key
 /// columns with the covered-row predicate pushed down (spec 03 §7):
 /// statistics prune row groups on `ingest_time`, the bloom filters on
-/// `trace_id` (plus `user_id` and `session_id` for `spans`).
+/// `trace_id` (plus `user_id` and `session_id` when single-target).
 async fn holds_covered(
     ctx: &MergeContext,
     file: &Arc<FileMeta>,
-    schema: &SchemaRef,
-    covered_full: &Arc<dyn PhysicalExpr>,
+    col_schema: &Arc<Schema>,
+    covered: &Expr,
     deletions: &[Arc<PendingDeletion>],
 ) -> Result<bool, CompactionError> {
-    let keys = key_columns(file.table);
+    let tombstone_table = tombstone_table_of(file.table)?;
+    let keys = cetra_query::tombstone::key_columns(tombstone_table);
     let mut key_indices = Vec::with_capacity(keys.len());
     for name in keys {
-        key_indices.push(
-            schema
-                .index_of(name)
-                .map_err(|_| CompactionError::Deletion {
-                    reason: "building the deletion filter",
-                })?,
-        );
+        key_indices.push(col_schema.index_of(name).ok_or(CompactionError::Deletion {
+            reason: "building the deletion filter",
+        })?);
     }
-    let projected =
-        Arc::new(
-            schema
-                .project(&key_indices)
-                .map_err(|_| CompactionError::Deletion {
-                    reason: "building the deletion filter",
-                })?,
-        );
-    let Some(covered_projected) =
-        covered_predicate(file.table, &projected, deletions).map_err(|_| {
-            CompactionError::Deletion {
-                reason: "building the deletion filter",
-            }
-        })?
-    else {
+
+    let Some(max_cutoff) = deletions.iter().map(|d| d.cutoff).max() else {
         return Ok(false);
     };
-    let ordering = ordering_of(file.table, schema)?;
-    let source = ParquetSource::new(Arc::clone(schema))
-        .with_pushdown_filters(true)
-        .with_predicate(Arc::clone(covered_full));
-    let scan = file_scan(&[file], source, &ordering, Some(key_indices))?;
-    let filter = FilterExec::try_new(Arc::clone(&covered_projected), scan)
-        .map_err(|source| CompactionError::Read { source })?;
-    let limit = GlobalLimitExec::new(Arc::new(filter), 0, Some(1));
-    let task = Arc::new(
-        TaskContext::default()
-            .with_session_config(SessionConfig::new().with_batch_size(ctx.batch_size))
-            .with_runtime(Arc::clone(&ctx.runtime)),
+    let ingest_col = ingest_column(file.table);
+    let ingest_idx = col_schema
+        .index_of(ingest_col)
+        .ok_or(CompactionError::Deletion {
+            reason: "building the deletion filter",
+        })?;
+    let DataType::TimestampNs { utc } = col_schema.fields()[ingest_idx].data_type else {
+        return Err(CompactionError::Deletion {
+            reason: "building the deletion filter",
+        });
+    };
+    let ingest_lte_cutoff = Expr::Binary {
+        left: Box::new(Expr::Column {
+            index: ingest_idx,
+            name: ingest_col.to_owned(),
+            data_type: DataType::TimestampNs { utc },
+        }),
+        op: BinaryOp::LtEq,
+        right: Box::new(Expr::Literal(ScalarValue::TimestampNs {
+            value: max_cutoff,
+            utc,
+        })),
+        data_type: DataType::Bool,
+    };
+
+    let spec = ScanSpec {
+        projection: Some(key_indices),
+        // Leave `time_range` open: `time_range` prunes `start_time`/`created_at`,
+        // NOT `ingest_time`. `ingest_lte_cutoff` prunes `ingest_time` instead.
+        time_range: TimeRangeHint::default(),
+        id_lookups: single_target_id_lookup(file.table, deletions),
+        filters: vec![covered.clone(), ingest_lte_cutoff],
+        limit: Some(1),
+        ..ScanSpec::default()
+    };
+
+    let scoped_pool = ctx
+        .pool
+        .try_admit(0, ctx.pool.limit())
+        .ok_or_else(|| read_error(query_err_to_df(QueryError::TooLarge)))?;
+    let workers = ctx
+        .qe_runtime
+        .workers()
+        .map_err(query_err_to_df)
+        .map_err(read_error)?;
+    let cancel = CancelToken::new();
+    let exec_ctx = ExecContext {
+        pool: Arc::clone(&scoped_pool),
+        eval: EvalContext {
+            now_ns: now_ns(),
+            cancel: cancel.clone(),
+        },
+        spill: Arc::new(SpillManager::with_fixed_cap(PathBuf::new(), 0)),
+        workers: Arc::clone(&workers),
+        batch_size: ctx.batch_size,
+        target_partitions: 1,
+        metrics: ExecMetrics::new(),
+    };
+
+    // Inline tombstones MUST be disabled (`Arc::from([])`) so covered rows
+    // are not stripped before `spec.filters` sees them.
+    let source = crate::engine::parquet_source::ParquetSource::new(
+        Arc::clone(&ctx.store),
+        file.table,
+        Arc::clone(col_schema),
+        vec![Arc::clone(file)],
+        Arc::from([]),
+        Arc::clone(&ctx.qe_runtime.metadata_cache),
+        Suspects::new(Arc::clone(&ctx.verify)),
+        ctx.runtime_handle.clone(),
     );
-    let mut stream = execute_stream(Arc::new(limit), task).map_err(read_error)?;
-    while let Some(item) = stream.next().await {
-        if item.map_err(read_error)?.num_rows() > 0 {
-            return Ok(true);
-        }
-    }
-    Ok(false)
+    let mut streams = source
+        .open_partitions(&spec, &exec_ctx)
+        .map_err(query_err_to_df)
+        .map_err(read_error)?;
+    let Some(mut stream) = streams.pop() else {
+        return Ok(false);
+    };
+
+    tokio::task::spawn_blocking(move || {
+        let task_cancel = cancel.clone();
+        let mut out = workers
+            .run_scoped(
+                &cancel,
+                vec![move |_worker_idx| {
+                    let mut res = scoped_pool.register("holds_covered", false);
+                    loop {
+                        res.free();
+                        match stream.next_batch(&task_cancel, Some(&mut res))? {
+                            Some(batch) => {
+                                if batch.num_rows() > 0 {
+                                    res.free();
+                                    return Ok(true);
+                                }
+                            }
+                            None => {
+                                res.free();
+                                return Ok(false);
+                            }
+                        }
+                    }
+                }],
+            )
+            .map_err(query_err_to_df)
+            .map_err(read_error)?;
+        out.pop().ok_or(CompactionError::Task)
+    })
+    .await
+    .map_err(|_| CompactionError::Task)?
 }
 
-/// The stored schema of a rewritten table.
-fn table_schema(table: FileTable) -> Result<SchemaRef, CompactionError> {
+fn tombstone_table_of(table: FileTable) -> Result<TombstoneTable, CompactionError> {
     match table {
-        FileTable::Spans => Ok(spans_schema()),
-        FileTable::Scores => Ok(scores_schema()),
+        FileTable::Spans => Ok(TombstoneTable::Spans),
+        FileTable::Scores => Ok(TombstoneTable::Scores),
+        FileTable::Traces => Err(CompactionError::Input {
+            reason: "traces are not rewritten",
+        }),
+    }
+}
+
+/// The stored columnar schema of a rewritten table.
+fn table_column_schema(table: FileTable) -> Result<Arc<Schema>, CompactionError> {
+    match table {
+        FileTable::Spans | FileTable::Scores => Ok(table.column_schema()),
         FileTable::Traces => Err(CompactionError::Input {
             reason: "traces are not rewritten",
         }),
@@ -1504,6 +1654,255 @@ mod tests {
             .find(|file| file.id == broken.id)
             .unwrap();
         assert_eq!(still_broken.deletions_applied_seq, 0);
+        storage.shutdown().await.unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn holds_covered_disjunctive_user_deletion_never_has_false_negatives() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = config_in(dir.path(), quiet_compaction(8), Duration::from_secs(3_600));
+        let mut storage = Storage::open(config.clone()).await.unwrap();
+        let time = at(10, 0, 0);
+
+        // File 1 (spans): matches ONLY `user_id = "erased-user"`, NOT `trace_ids`.
+        let mut span_by_user = span_row(2, 0, time, time + 1);
+        span_by_user.user_id = Some("erased-user".to_owned());
+        let span_other = span_row(3, 0, time, time + 1);
+        storage = flush_cycle(&config, storage, span_rows(&[span_by_user, span_other])).await;
+
+        // File 2 (spans): matches ONLY `trace_id = trace 1`, NOT `user_id`.
+        let span_by_trace = span_row(1, 0, time, time + 1);
+        storage = flush_cycle(&config, storage, span_rows(&[span_by_trace])).await;
+
+        // File 3 (scores): matches ONLY `session_id = "erased-sess"`, NOT `user_id` or `trace_id`.
+        let mut score_by_session = score_row(0x11, 2, time, time, time + 1, false, "sess");
+        score_by_session.target = ScoreTarget::Session {
+            session_id: "erased-sess".to_owned(),
+        };
+        let score_kept = score_row(0x22, 3, time, time, time + 1, false, "kept");
+        storage = flush_scores(
+            &config,
+            storage,
+            score_rows(&[score_by_session, score_kept]),
+        )
+        .await;
+
+        // File 4 (scores): matches ONLY `user_id = "erased-user"`, NOT `session_id` or `trace_id`.
+        let mut score_by_user = score_row(0x33, 2, time, time, time + 1, false, "by-user");
+        score_by_user.user_id = Some("erased-user".to_owned());
+        storage = flush_scores(&config, storage, score_rows(&[score_by_user])).await;
+
+        let deletion = Deletion {
+            id: Uuid::now_v7(),
+            project: project(),
+            cutoff: time + 1,
+            scope: DeletionScope::User {
+                user_id: "erased-user".to_owned(),
+                trace_ids: vec![span_row(1, 0, 0, 0).trace_id],
+                session_ids: vec!["erased-sess".to_owned()],
+            },
+        };
+        storage.register_deletion(deletion.clone()).await.unwrap();
+
+        // Direct `holds_covered` unit checks on each file + `single_target_id_lookup`.
+        let tombstones = Arc::clone(&storage.published.load().tombstones);
+        let project_deletions = tombstones.for_project(project());
+        assert!(
+            super::single_target_id_lookup(FileTable::Spans, &project_deletions).is_empty(),
+            "disjunctive User deletion must NOT populate single-column id_lookups"
+        );
+        assert!(
+            super::single_target_id_lookup(FileTable::Scores, &project_deletions).is_empty(),
+            "disjunctive User deletion on scores must NOT populate id_lookups"
+        );
+
+        let spans_schema = FileTable::Spans.column_schema();
+        let spans_covered = cetra_query::tombstone::covered_predicate(
+            cetra_query::tombstone::TombstoneTable::Spans,
+            &spans_schema,
+            &crate::deletion::to_tombstone_specs(&project_deletions),
+        )
+        .unwrap()
+        .unwrap();
+        for file in storage.catalog_files(Table::Spans) {
+            assert!(
+                super::holds_covered(
+                    &storage.compactor.merge,
+                    &file,
+                    &spans_schema,
+                    &spans_covered,
+                    &project_deletions,
+                )
+                .await
+                .unwrap(),
+                "spans file matching only one disjunct must be detected"
+            );
+        }
+
+        let scores_schema = FileTable::Scores.column_schema();
+        let scores_covered = cetra_query::tombstone::covered_predicate(
+            cetra_query::tombstone::TombstoneTable::Scores,
+            &scores_schema,
+            &crate::deletion::to_tombstone_specs(&project_deletions),
+        )
+        .unwrap()
+        .unwrap();
+        for file in storage.catalog_files(Table::Scores) {
+            assert!(
+                super::holds_covered(
+                    &storage.compactor.merge,
+                    &file,
+                    &scores_schema,
+                    &scores_covered,
+                    &project_deletions,
+                )
+                .await
+                .unwrap(),
+                "scores file matching only one disjunct must be detected"
+            );
+        }
+
+        // End-to-end rewrite removes all 4 covered rows and keeps only the uncovered ones.
+        let report = storage.apply_deletions(at(11, 0, 0)).await.unwrap();
+        assert_eq!(
+            (report.rewritten, report.applied, report.failed),
+            (4, 1, 0),
+            "{report:?}"
+        );
+        let spans_files = storage.catalog_files(Table::Spans);
+        assert_eq!(spans_files.len(), 1);
+        assert_eq!(
+            spans_trace_ids(dir.path(), &spans_files[0]),
+            vec![trace_bytes(3)]
+        );
+        let scores = score_file_rows(dir.path(), &storage);
+        assert_eq!(scores.len(), 1, "{scores:?}");
+        assert!(scores[0].0.ends_with("22"), "{scores:?}");
+        assert_eq!(
+            status(&storage, &deletion).await,
+            DeletionStatus::Applied {
+                applied_at: at(11, 0, 0)
+            }
+        );
+        storage.shutdown().await.unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn holds_covered_when_start_time_exceeds_cutoff_but_ingest_time_is_within_cutoff() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = config_in(dir.path(), quiet_compaction(8), Duration::from_secs(3_600));
+        let mut storage = Storage::open(config.clone()).await.unwrap();
+
+        // `start_time` / `created_at` is AFTER `cutoff`, while `ingest_time` is AT/BEFORE `cutoff`.
+        let cutoff = at(10, 0, 0);
+        let late_event_time = at(12, 0, 0);
+        let early_ingest_time = at(9, 0, 0);
+
+        storage = flush_cycle(
+            &config,
+            storage,
+            span_rows(&[
+                span_row(1, 0, late_event_time, early_ingest_time),
+                span_row(2, 0, late_event_time, early_ingest_time),
+            ]),
+        )
+        .await;
+        storage = flush_scores(
+            &config,
+            storage,
+            score_rows(&[
+                score_row(
+                    0x11,
+                    1,
+                    late_event_time,
+                    late_event_time,
+                    early_ingest_time,
+                    false,
+                    "covered-late-created",
+                ),
+                score_row(
+                    0x22,
+                    2,
+                    late_event_time,
+                    late_event_time,
+                    early_ingest_time,
+                    false,
+                    "kept",
+                ),
+            ]),
+        )
+        .await;
+
+        let deletion = traces_deletion(&[1], cutoff);
+        storage.register_deletion(deletion.clone()).await.unwrap();
+
+        let tombstones = Arc::clone(&storage.published.load().tombstones);
+        let project_deletions = tombstones.for_project(project());
+        // Single-target `Traces` deletion must populate a single `trace_id` hint.
+        assert_eq!(
+            super::single_target_id_lookup(FileTable::Spans, &project_deletions).len(),
+            1
+        );
+
+        let spans_file = storage.catalog_files(Table::Spans).pop().unwrap();
+        let spans_schema = FileTable::Spans.column_schema();
+        let spans_covered = cetra_query::tombstone::covered_predicate(
+            cetra_query::tombstone::TombstoneTable::Spans,
+            &spans_schema,
+            &crate::deletion::to_tombstone_specs(&project_deletions),
+        )
+        .unwrap()
+        .unwrap();
+        assert!(
+            super::holds_covered(
+                &storage.compactor.merge,
+                &spans_file,
+                &spans_schema,
+                &spans_covered,
+                &project_deletions,
+            )
+            .await
+            .unwrap(),
+            "spans file with start_time > cutoff and ingest_time <= cutoff must be covered"
+        );
+
+        let scores_file = storage.catalog_files(Table::Scores).pop().unwrap();
+        let scores_schema = FileTable::Scores.column_schema();
+        let scores_covered = cetra_query::tombstone::covered_predicate(
+            cetra_query::tombstone::TombstoneTable::Scores,
+            &scores_schema,
+            &crate::deletion::to_tombstone_specs(&project_deletions),
+        )
+        .unwrap()
+        .unwrap();
+        assert!(
+            super::holds_covered(
+                &storage.compactor.merge,
+                &scores_file,
+                &scores_schema,
+                &scores_covered,
+                &project_deletions,
+            )
+            .await
+            .unwrap(),
+            "scores file with created_at > cutoff and ingest_time <= cutoff must be covered"
+        );
+
+        let report = storage.apply_deletions(at(13, 0, 0)).await.unwrap();
+        assert_eq!(
+            (report.rewritten, report.applied, report.failed),
+            (2, 1, 0),
+            "{report:?}"
+        );
+        let remaining_spans = storage.catalog_files(Table::Spans);
+        assert_eq!(remaining_spans.len(), 1);
+        assert_eq!(
+            spans_trace_ids(dir.path(), &remaining_spans[0]),
+            vec![trace_bytes(2)]
+        );
+        let remaining_scores = score_file_rows(dir.path(), &storage);
+        assert_eq!(remaining_scores.len(), 1);
+        assert!(remaining_scores[0].0.ends_with("22"));
         storage.shutdown().await.unwrap();
     }
 }
