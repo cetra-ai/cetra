@@ -637,9 +637,7 @@ mod tests {
         assert_eq!(scope.reserved(), 250);
         assert_eq!(scope.spill_share(), 50);
 
-        // Transferring 100 fits: post_unspillable = 100, share = (300 - 100) / 2 = 100.
-        //Wait: 50 + 100 = 150 > 100, whereas transferring 50 -> post_unspillable = 150, share = 75 -> 100 > 75.
-        // Transferring 100 to sink2 (0 -> 100): post_unspillable = 100, share = 100 -> 100 <= 100 succeeds!
+        // Transferring 100 to sink2 (0 -> 100): post_unspillable = 100, share = (300 - 100) / 2 = 100 -> 100 <= 100 succeeds!
         scan_res
             .transfer_to(&mut sink2, 100)
             .expect("transfer to sink2");

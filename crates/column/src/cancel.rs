@@ -1,21 +1,25 @@
 //! Cooperative cancellation token with lock-free polling and wakeup hooks.
 
 use std::fmt;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 
 type WakerFn = Arc<dyn Fn() + Send + Sync>;
 
+struct CancelState {
+    next_id: u64,
+    listeners: Vec<(u64, WakerFn)>,
+}
+
 struct CancelInner {
     cancelled: AtomicBool,
-    listeners: Mutex<Vec<(u64, WakerFn)>>,
-    next_id: AtomicU64,
+    state: Mutex<CancelState>,
 }
 
 impl fmt::Debug for CancelInner {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("CancelInner")
-            .field("cancelled", &self.cancelled.load(Ordering::Relaxed))
+            .field("cancelled", &self.cancelled.load(Ordering::Acquire))
             .finish()
     }
 }
@@ -50,12 +54,21 @@ impl Drop for CancelGuard {
         if self.id == u64::MAX {
             return;
         }
-        let mut guard = self
-            .inner
-            .listeners
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner);
-        guard.retain(|(id, _)| *id != self.id);
+        let removed = {
+            let mut guard = self
+                .inner
+                .state
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
+            guard
+                .listeners
+                .iter()
+                .position(|(id, _)| *id == self.id)
+                .map(|idx| guard.listeners.remove(idx))
+        };
+        // Drop the captured waker closure outside the lock so a Drop impl that
+        // calls `token.cancel()` or drops another `CancelGuard` never deadlocks.
+        drop(removed);
     }
 }
 
@@ -65,8 +78,10 @@ impl CancelToken {
         Self {
             inner: Arc::new(CancelInner {
                 cancelled: AtomicBool::new(false),
-                listeners: Mutex::new(Vec::new()),
-                next_id: AtomicU64::new(0),
+                state: Mutex::new(CancelState {
+                    next_id: 0,
+                    listeners: Vec::new(),
+                }),
             }),
         }
     }
@@ -77,13 +92,13 @@ impl CancelToken {
         let wakers = {
             let mut guard = self
                 .inner
-                .listeners
+                .state
                 .lock()
                 .unwrap_or_else(PoisonError::into_inner);
             if self.inner.cancelled.swap(true, Ordering::Release) {
                 return;
             }
-            std::mem::take(&mut *guard)
+            std::mem::take(&mut guard.listeners)
         };
         for (_, waker) in wakers {
             waker();
@@ -92,7 +107,7 @@ impl CancelToken {
 
     /// True once [`Self::cancel`] has been called (lock-free).
     pub fn is_cancelled(&self) -> bool {
-        self.inner.cancelled.load(Ordering::Relaxed)
+        self.inner.cancelled.load(Ordering::Acquire)
     }
 
     /// Registers a wakeup callback invoked when [`Self::cancel`] is called (or immediately
@@ -102,14 +117,15 @@ impl CancelToken {
         let id = {
             let mut guard = self
                 .inner
-                .listeners
+                .state
                 .lock()
                 .unwrap_or_else(PoisonError::into_inner);
             if self.inner.cancelled.load(Ordering::Acquire) {
                 u64::MAX
             } else {
-                let id = self.inner.next_id.fetch_add(1, Ordering::Relaxed);
-                guard.push((id, Arc::clone(&waker)));
+                let id = guard.next_id;
+                guard.next_id += 1;
+                guard.listeners.push((id, Arc::clone(&waker)));
                 id
             }
         };
@@ -208,5 +224,38 @@ mod tests {
             let _guard = h2.join().expect("join register");
             assert_eq!(hits.load(Ordering::SeqCst), 1);
         }
+    }
+
+    #[test]
+    fn dropping_guard_whose_waker_reenters_token_does_not_deadlock() {
+        struct ReentrantDrop {
+            inner_guard: Option<CancelGuard>,
+            token: CancelToken,
+            dropped: Arc<AtomicUsize>,
+        }
+
+        impl Drop for ReentrantDrop {
+            fn drop(&mut self) {
+                drop(self.inner_guard.take());
+                self.token.cancel();
+                self.dropped.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+
+        let token = CancelToken::new();
+        let inner_guard = token.register_waker(|| {});
+        let dropped = Arc::new(AtomicUsize::new(0));
+        let reentrant = ReentrantDrop {
+            inner_guard: Some(inner_guard),
+            token: token.clone(),
+            dropped: Arc::clone(&dropped),
+        };
+        let outer_guard = token.register_waker(move || {
+            let _keep = &reentrant;
+        });
+
+        drop(outer_guard);
+        assert_eq!(dropped.load(Ordering::SeqCst), 1);
+        assert!(token.is_cancelled());
     }
 }

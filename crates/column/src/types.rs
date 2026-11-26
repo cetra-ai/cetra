@@ -668,5 +668,26 @@ mod tests {
             nanos: 0,
         };
         assert_eq!(one_month.canonical_key(), thirty_days.canonical_key());
+
+        let min_iv = Interval {
+            months: i32::MIN,
+            days: i32::MIN,
+            nanos: i64::MIN,
+        };
+        let max_iv = Interval {
+            months: i32::MAX,
+            days: i32::MAX,
+            nanos: i64::MAX,
+        };
+        let expected_min = (i32::MIN as i128) * 30 * 86_400_000_000_000
+            + (i32::MIN as i128) * 86_400_000_000_000
+            + (i64::MIN as i128);
+        let expected_max = (i32::MAX as i128) * 30 * 86_400_000_000_000
+            + (i32::MAX as i128) * 86_400_000_000_000
+            + (i64::MAX as i128);
+        assert_eq!(min_iv.canonical_key(), expected_min);
+        assert_eq!(max_iv.canonical_key(), expected_max);
+        assert!(min_iv.canonical_key() < 0);
+        assert!(max_iv.canonical_key() > 0);
     }
 }

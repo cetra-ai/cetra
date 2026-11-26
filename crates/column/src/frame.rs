@@ -302,6 +302,340 @@ fn flat_column_wire_len(fc: &FlatColumn, max_decoded: u32) -> Result<usize, Colu
         })
 }
 
+fn scalar_groups_flat_data_wire_len(
+    dt: &DataType,
+    groups: &[&[ScalarValue]],
+    max_decoded: u32,
+) -> Result<usize, ColumnError> {
+    let mut count = 0usize;
+    for g in groups {
+        count = count.checked_add(g.len()).ok_or(ColumnError::Overflow {
+            reason: "const scalar length overflow",
+        })?;
+    }
+    let len = match dt {
+        DataType::Null => Ok(0),
+        DataType::Bool => Ok(count.div_ceil(8)),
+        DataType::I64 | DataType::TimestampNs { .. } | DataType::F64 | DataType::FixedBytes8 => {
+            count.checked_mul(8).ok_or(ColumnError::Overflow {
+                reason: "const column wire length overflow",
+            })
+        }
+        DataType::Decimal128 { .. } | DataType::Interval | DataType::FixedBytes16 => {
+            count.checked_mul(16).ok_or(ColumnError::Overflow {
+                reason: "const column wire length overflow",
+            })
+        }
+        DataType::Date => count.checked_mul(4).ok_or(ColumnError::Overflow {
+            reason: "const column wire length overflow",
+        }),
+        DataType::Utf8 => {
+            let mut str_bytes = 0usize;
+            for g in groups {
+                for v in *g {
+                    if let ScalarValue::Utf8(s) = v {
+                        str_bytes =
+                            str_bytes
+                                .checked_add(s.len())
+                                .ok_or(ColumnError::Overflow {
+                                    reason: "utf8 wire length overflow",
+                                })?;
+                    }
+                }
+            }
+            let _ = checked_u32(str_bytes, "utf8 bytes length exceeds u32::MAX")?;
+            count
+                .checked_add(1)
+                .and_then(|s| s.checked_mul(4))
+                .and_then(|s| s.checked_add(4))
+                .and_then(|s| s.checked_add(str_bytes))
+                .ok_or(ColumnError::Overflow {
+                    reason: "utf8 wire length overflow",
+                })
+        }
+        DataType::Binary => {
+            let mut bin_bytes = 0usize;
+            for g in groups {
+                for v in *g {
+                    if let ScalarValue::Binary(b) = v {
+                        bin_bytes =
+                            bin_bytes
+                                .checked_add(b.len())
+                                .ok_or(ColumnError::Overflow {
+                                    reason: "binary wire length overflow",
+                                })?;
+                    }
+                }
+            }
+            let _ = checked_u32(bin_bytes, "binary bytes length exceeds u32::MAX")?;
+            count
+                .checked_add(1)
+                .and_then(|s| s.checked_mul(4))
+                .and_then(|s| s.checked_add(4))
+                .and_then(|s| s.checked_add(bin_bytes))
+                .ok_or(ColumnError::Overflow {
+                    reason: "binary wire length overflow",
+                })
+        }
+        DataType::List(inner) => {
+            let off_bytes = count.checked_add(1).and_then(|s| s.checked_mul(4)).ok_or(
+                ColumnError::Overflow {
+                    reason: "list wire length overflow",
+                },
+            )?;
+            let mut child_groups: Vec<&[ScalarValue]> = Vec::new();
+            let mut child_len = 0usize;
+            let mut has_nulls = false;
+            let check_nulls = !matches!(inner.as_ref(), DataType::Null);
+            for g in groups {
+                for v in *g {
+                    if let ScalarValue::List { values, .. } = v {
+                        child_len =
+                            child_len
+                                .checked_add(values.len())
+                                .ok_or(ColumnError::Overflow {
+                                    reason: "list scalar length exceeds u32::MAX",
+                                })?;
+                        if check_nulls && !has_nulls && values.iter().any(ScalarValue::is_null) {
+                            has_nulls = true;
+                        }
+                        child_groups.push(values.as_slice());
+                    }
+                }
+            }
+            let _ = checked_u32(child_len, "list scalar length exceeds u32::MAX")?;
+            let null_wire = if has_nulls {
+                1usize
+                    .checked_add(child_len.div_ceil(8))
+                    .ok_or(ColumnError::Overflow {
+                        reason: "list wire length overflow",
+                    })?
+            } else {
+                1
+            };
+            let child_data_wire =
+                scalar_groups_flat_data_wire_len(inner, &child_groups, max_decoded)?;
+            off_bytes
+                .checked_add(4)
+                .and_then(|s| s.checked_add(1))
+                .and_then(|s| s.checked_add(null_wire))
+                .and_then(|s| s.checked_add(child_data_wire))
+                .ok_or(ColumnError::Overflow {
+                    reason: "list wire length overflow",
+                })
+        }
+        DataType::MapUtf8 => {
+            let row_off = count.checked_add(1).and_then(|s| s.checked_mul(4)).ok_or(
+                ColumnError::Overflow {
+                    reason: "map wire length overflow",
+                },
+            )?;
+            let mut entry_count = 0usize;
+            let mut k_bytes = 0usize;
+            let mut v_bytes = 0usize;
+            let mut has_nulls = false;
+            for g in groups {
+                for v in *g {
+                    if let ScalarValue::MapUtf8(entries) = v {
+                        entry_count = entry_count.checked_add(entries.len()).ok_or(
+                            ColumnError::Overflow {
+                                reason: "map scalar entries exceed u32::MAX",
+                            },
+                        )?;
+                        for (k, mv) in entries {
+                            k_bytes =
+                                k_bytes.checked_add(k.len()).ok_or(ColumnError::Overflow {
+                                    reason: "map wire length overflow",
+                                })?;
+                            if let Some(val) = mv {
+                                v_bytes = v_bytes.checked_add(val.len()).ok_or(
+                                    ColumnError::Overflow {
+                                        reason: "map wire length overflow",
+                                    },
+                                )?;
+                            } else {
+                                has_nulls = true;
+                            }
+                        }
+                    }
+                }
+            }
+            let _ = checked_u32(entry_count, "map entry count exceeds u32::MAX")?;
+            let _ = checked_u32(k_bytes, "utf8 bytes length exceeds u32::MAX")?;
+            let _ = checked_u32(v_bytes, "utf8 bytes length exceeds u32::MAX")?;
+            let entry_off = entry_count
+                .checked_add(1)
+                .and_then(|s| s.checked_mul(4))
+                .ok_or(ColumnError::Overflow {
+                    reason: "map wire length overflow",
+                })?;
+            let null_wire = if has_nulls {
+                1usize
+                    .checked_add(entry_count.div_ceil(8))
+                    .ok_or(ColumnError::Overflow {
+                        reason: "map wire length overflow",
+                    })?
+            } else {
+                1
+            };
+            row_off
+                .checked_add(4)
+                .and_then(|s| s.checked_add(entry_off))
+                .and_then(|s| s.checked_add(4))
+                .and_then(|s| s.checked_add(k_bytes))
+                .and_then(|s| s.checked_add(entry_off))
+                .and_then(|s| s.checked_add(4))
+                .and_then(|s| s.checked_add(v_bytes))
+                .and_then(|s| s.checked_add(null_wire))
+                .ok_or(ColumnError::Overflow {
+                    reason: "map wire length overflow",
+                })
+        }
+        DataType::Events => {
+            let row_off = count.checked_add(1).and_then(|s| s.checked_mul(4)).ok_or(
+                ColumnError::Overflow {
+                    reason: "events wire length overflow",
+                },
+            )?;
+            let mut ev_count = 0usize;
+            let mut name_bytes = 0usize;
+            let mut attr_bytes = 0usize;
+            let mut has_nulls = false;
+            for g in groups {
+                for v in *g {
+                    if let ScalarValue::Events(evs) = v {
+                        ev_count =
+                            ev_count
+                                .checked_add(evs.len())
+                                .ok_or(ColumnError::Overflow {
+                                    reason: "events scalar count exceeds u32::MAX",
+                                })?;
+                        for ev in evs {
+                            name_bytes = name_bytes.checked_add(ev.name.len()).ok_or(
+                                ColumnError::Overflow {
+                                    reason: "events wire length overflow",
+                                },
+                            )?;
+                            if let Some(attr) = &ev.attributes {
+                                attr_bytes = attr_bytes.checked_add(attr.len()).ok_or(
+                                    ColumnError::Overflow {
+                                        reason: "events wire length overflow",
+                                    },
+                                )?;
+                            } else {
+                                has_nulls = true;
+                            }
+                        }
+                    }
+                }
+            }
+            let _ = checked_u32(ev_count, "events count exceeds u32::MAX")?;
+            let _ = checked_u32(name_bytes, "utf8 bytes length exceeds u32::MAX")?;
+            let _ = checked_u32(attr_bytes, "utf8 bytes length exceeds u32::MAX")?;
+            let times_bytes = ev_count.checked_mul(8).ok_or(ColumnError::Overflow {
+                reason: "events wire length overflow",
+            })?;
+            let entry_off = ev_count
+                .checked_add(1)
+                .and_then(|s| s.checked_mul(4))
+                .ok_or(ColumnError::Overflow {
+                    reason: "events wire length overflow",
+                })?;
+            let null_wire = if has_nulls {
+                1usize
+                    .checked_add(ev_count.div_ceil(8))
+                    .ok_or(ColumnError::Overflow {
+                        reason: "events wire length overflow",
+                    })?
+            } else {
+                1
+            };
+            row_off
+                .checked_add(4)
+                .and_then(|s| s.checked_add(times_bytes))
+                .and_then(|s| s.checked_add(entry_off))
+                .and_then(|s| s.checked_add(4))
+                .and_then(|s| s.checked_add(name_bytes))
+                .and_then(|s| s.checked_add(entry_off))
+                .and_then(|s| s.checked_add(4))
+                .and_then(|s| s.checked_add(attr_bytes))
+                .and_then(|s| s.checked_add(null_wire))
+                .ok_or(ColumnError::Overflow {
+                    reason: "events wire length overflow",
+                })
+        }
+        DataType::Links => {
+            let row_off = count.checked_add(1).and_then(|s| s.checked_mul(4)).ok_or(
+                ColumnError::Overflow {
+                    reason: "links wire length overflow",
+                },
+            )?;
+            let mut lk_count = 0usize;
+            let mut attr_bytes = 0usize;
+            let mut has_nulls = false;
+            for g in groups {
+                for v in *g {
+                    if let ScalarValue::Links(lks) = v {
+                        lk_count =
+                            lk_count
+                                .checked_add(lks.len())
+                                .ok_or(ColumnError::Overflow {
+                                    reason: "links scalar count exceeds u32::MAX",
+                                })?;
+                        for lk in lks {
+                            if let Some(attr) = &lk.attributes {
+                                attr_bytes = attr_bytes.checked_add(attr.len()).ok_or(
+                                    ColumnError::Overflow {
+                                        reason: "links wire length overflow",
+                                    },
+                                )?;
+                            } else {
+                                has_nulls = true;
+                            }
+                        }
+                    }
+                }
+            }
+            let _ = checked_u32(lk_count, "links count exceeds u32::MAX")?;
+            let _ = checked_u32(attr_bytes, "utf8 bytes length exceeds u32::MAX")?;
+            let ids_bytes = lk_count.checked_mul(24).ok_or(ColumnError::Overflow {
+                reason: "links wire length overflow",
+            })?;
+            let entry_off = lk_count
+                .checked_add(1)
+                .and_then(|s| s.checked_mul(4))
+                .ok_or(ColumnError::Overflow {
+                    reason: "links wire length overflow",
+                })?;
+            let null_wire = if has_nulls {
+                1usize
+                    .checked_add(lk_count.div_ceil(8))
+                    .ok_or(ColumnError::Overflow {
+                        reason: "links wire length overflow",
+                    })?
+            } else {
+                1
+            };
+            row_off
+                .checked_add(4)
+                .and_then(|s| s.checked_add(ids_bytes))
+                .and_then(|s| s.checked_add(entry_off))
+                .and_then(|s| s.checked_add(4))
+                .and_then(|s| s.checked_add(attr_bytes))
+                .and_then(|s| s.checked_add(null_wire))
+                .ok_or(ColumnError::Overflow {
+                    reason: "links wire length overflow",
+                })
+        }
+    }?;
+    if len > max_decoded as usize {
+        return Err(ColumnError::InvalidFrame {
+            reason: "uncompressed body exceeds maximum decoded bytes",
+        });
+    }
+    Ok(len)
+}
+
 fn column_wire_len(col: &Column, max_decoded: u32) -> Result<usize, ColumnError> {
     match col {
         Column::Flat(fc) => 1usize
@@ -313,17 +647,15 @@ fn column_wire_len(col: &Column, max_decoded: u32) -> Result<usize, ColumnError>
             if value.is_null() {
                 Ok(2)
             } else {
-                if value.heap_bytes() > max_decoded as usize {
-                    return Err(ColumnError::InvalidFrame {
-                        reason: "uncompressed body exceeds maximum decoded bytes",
-                    });
-                }
-                let one = Column::try_new_const(value.clone(), 1)?.materialize(None)?;
-                2usize
-                    .checked_add(flat_data_wire_len(one.data(), max_decoded)?)
-                    .ok_or(ColumnError::Overflow {
-                        reason: "const column wire length overflow",
-                    })
+                let dt = value.data_type();
+                let data_wire = scalar_groups_flat_data_wire_len(
+                    &dt,
+                    &[std::slice::from_ref(value)],
+                    max_decoded,
+                )?;
+                2usize.checked_add(data_wire).ok_or(ColumnError::Overflow {
+                    reason: "const column wire length overflow",
+                })
             }
         }
         Column::Dict(d) => {
@@ -456,6 +788,7 @@ fn encode_batch_inner(
         reconcile_reservation(pool.as_deref_mut(), before, peak_body)?;
         body.reserve_exact(est);
         write_body(target, &mut body)?;
+        debug_assert_eq!(body.len(), est);
         body.len()
     };
     reconcile_reservation(pool.as_deref_mut(), before, body_len)?;
@@ -611,6 +944,27 @@ pub fn decode_batch_with_limit(
     }
 }
 
+struct EofTrackingSlice<'a> {
+    slice: &'a [u8],
+    hit_eof: bool,
+}
+
+impl Read for EofTrackingSlice<'_> {
+    fn read(&mut self, dst: &mut [u8]) -> std::io::Result<usize> {
+        if dst.is_empty() {
+            return Ok(0);
+        }
+        if self.slice.is_empty() {
+            self.hit_eof = true;
+            return Ok(0);
+        }
+        let n = self.slice.len().min(dst.len());
+        dst[..n].copy_from_slice(&self.slice[..n]);
+        self.slice = &self.slice[n..];
+        Ok(n)
+    }
+}
+
 fn decode_batch_inner(
     frame: &[u8],
     expected_schema: Option<&Schema>,
@@ -660,8 +1014,11 @@ fn decode_batch_inner(
             res.try_grow(scratch_len)?;
         }
         let limit = u64::from(parsed.uncompressed_len) + 1;
-        let mut payload_cursor = payload;
-        let mut decoder = FrameDecoder::new(&mut payload_cursor).take(limit);
+        let mut cursor = EofTrackingSlice {
+            slice: payload,
+            hit_eof: false,
+        };
+        let mut decoder = FrameDecoder::new(&mut cursor).take(limit);
         let mut buf = Vec::new();
         decoder
             .read_to_end(&mut buf)
@@ -674,7 +1031,12 @@ fn decode_batch_inner(
                 reason: "lz4 decoded length does not match header",
             });
         }
-        if !payload_cursor.is_empty() {
+        if cursor.hit_eof {
+            return Err(ColumnError::InvalidFrame {
+                reason: "truncated lz4 frame endmark",
+            });
+        }
+        if !cursor.slice.is_empty() {
             return Err(ColumnError::InvalidFrame {
                 reason: "trailing bytes after lz4 frame",
             });
@@ -728,6 +1090,8 @@ fn decode_batch_inner(
         });
     }
 
+    let max_decoded_usize = max_decoded as usize;
+    let mut materialized_bytes = 0usize;
     let mut columns = Vec::with_capacity(col_count);
     for field in schema.fields() {
         let col = read_column(
@@ -739,6 +1103,9 @@ fn decode_batch_inner(
             max_decoded,
             &mut logical_elements,
         )?;
+        let col_bytes =
+            estimate_column_materialized_bytes(&col, max_decoded_usize - materialized_bytes)?;
+        materialized_bytes += col_bytes;
         columns.push(col);
     }
 
@@ -926,6 +1293,485 @@ fn write_flat_column(out: &mut Vec<u8>, fc: &FlatColumn) -> Result<(), ColumnErr
     write_flat_data(out, fc.data())
 }
 
+fn write_scalar_groups_flat_data(
+    out: &mut Vec<u8>,
+    dt: &DataType,
+    groups: &[&[ScalarValue]],
+) -> Result<(), ColumnError> {
+    let count: usize = groups.iter().map(|g| g.len()).sum();
+    match dt {
+        DataType::Null => {}
+        DataType::Bool => {
+            let start = out.len();
+            out.resize(start + count.div_ceil(8), 0);
+            let mut i = 0usize;
+            for g in groups {
+                for v in *g {
+                    if let ScalarValue::Bool(true) = v {
+                        out[start + i / 8] |= 1u8 << (i % 8);
+                    }
+                    i += 1;
+                }
+            }
+        }
+        DataType::I64 | DataType::TimestampNs { .. } => {
+            for g in groups {
+                for v in *g {
+                    let x = match v {
+                        ScalarValue::I64(x) | ScalarValue::TimestampNs { value: x, .. } => *x,
+                        _ => 0,
+                    };
+                    out.extend_from_slice(&x.to_le_bytes());
+                }
+            }
+        }
+        DataType::F64 => {
+            for g in groups {
+                for v in *g {
+                    let x = match v {
+                        ScalarValue::F64(x) => *x,
+                        _ => 0.0,
+                    };
+                    out.extend_from_slice(&x.to_bits().to_le_bytes());
+                }
+            }
+        }
+        DataType::Decimal128 { .. } => {
+            for g in groups {
+                for v in *g {
+                    let x = match v {
+                        ScalarValue::Decimal128 { value, .. } => *value,
+                        _ => 0,
+                    };
+                    out.extend_from_slice(&x.to_le_bytes());
+                }
+            }
+        }
+        DataType::Date => {
+            for g in groups {
+                for v in *g {
+                    let x = match v {
+                        ScalarValue::Date(x) => *x,
+                        _ => 0,
+                    };
+                    out.extend_from_slice(&x.to_le_bytes());
+                }
+            }
+        }
+        DataType::Interval => {
+            for g in groups {
+                for v in *g {
+                    let iv = match v {
+                        ScalarValue::Interval(iv) => *iv,
+                        _ => Interval::default(),
+                    };
+                    out.extend_from_slice(&iv.months.to_le_bytes());
+                    out.extend_from_slice(&iv.days.to_le_bytes());
+                    out.extend_from_slice(&iv.nanos.to_le_bytes());
+                }
+            }
+        }
+        DataType::FixedBytes8 => {
+            for g in groups {
+                for v in *g {
+                    let b = match v {
+                        ScalarValue::FixedBytes8(b) => *b,
+                        _ => [0u8; 8],
+                    };
+                    out.extend_from_slice(&b);
+                }
+            }
+        }
+        DataType::FixedBytes16 => {
+            for g in groups {
+                for v in *g {
+                    let b = match v {
+                        ScalarValue::FixedBytes16(b) => *b,
+                        _ => [0u8; 16],
+                    };
+                    out.extend_from_slice(&b);
+                }
+            }
+        }
+        DataType::Utf8 => {
+            let mut off = 0usize;
+            out.extend_from_slice(&0u32.to_le_bytes());
+            for g in groups {
+                for v in *g {
+                    if let ScalarValue::Utf8(s) = v {
+                        off += s.len();
+                    }
+                    let u = checked_u32(off, "utf8 bytes length exceeds u32::MAX")?;
+                    out.extend_from_slice(&u.to_le_bytes());
+                }
+            }
+            let bytes_len = checked_u32(off, "utf8 bytes length exceeds u32::MAX")?;
+            out.extend_from_slice(&bytes_len.to_le_bytes());
+            for g in groups {
+                for v in *g {
+                    if let ScalarValue::Utf8(s) = v {
+                        out.extend_from_slice(s.as_bytes());
+                    }
+                }
+            }
+        }
+        DataType::Binary => {
+            let mut off = 0usize;
+            out.extend_from_slice(&0u32.to_le_bytes());
+            for g in groups {
+                for v in *g {
+                    if let ScalarValue::Binary(b) = v {
+                        off += b.len();
+                    }
+                    let u = checked_u32(off, "binary bytes length exceeds u32::MAX")?;
+                    out.extend_from_slice(&u.to_le_bytes());
+                }
+            }
+            let bytes_len = checked_u32(off, "binary bytes length exceeds u32::MAX")?;
+            out.extend_from_slice(&bytes_len.to_le_bytes());
+            for g in groups {
+                for v in *g {
+                    if let ScalarValue::Binary(b) = v {
+                        out.extend_from_slice(b);
+                    }
+                }
+            }
+        }
+        DataType::List(inner) => {
+            let mut off = 0usize;
+            let mut child_groups: Vec<&[ScalarValue]> = Vec::new();
+            let mut has_nulls = false;
+            let check_nulls = !matches!(inner.as_ref(), DataType::Null);
+            out.extend_from_slice(&0u32.to_le_bytes());
+            for g in groups {
+                for v in *g {
+                    if let ScalarValue::List { values, .. } = v {
+                        off += values.len();
+                        if check_nulls && !has_nulls && values.iter().any(ScalarValue::is_null) {
+                            has_nulls = true;
+                        }
+                        child_groups.push(values.as_slice());
+                    }
+                    let u = checked_u32(off, "list child length exceeds u32::MAX")?;
+                    out.extend_from_slice(&u.to_le_bytes());
+                }
+            }
+            let child_len = checked_u32(off, "list child length exceeds u32::MAX")?;
+            out.extend_from_slice(&child_len.to_le_bytes());
+            out.push(0); // Column::Flat
+            if has_nulls {
+                out.push(1);
+                let bm_start = out.len();
+                out.resize(bm_start + off.div_ceil(8), 0);
+                let mut i = 0usize;
+                for cg in &child_groups {
+                    for cv in *cg {
+                        if !cv.is_null() {
+                            out[bm_start + i / 8] |= 1u8 << (i % 8);
+                        }
+                        i += 1;
+                    }
+                }
+            } else {
+                out.push(0);
+            }
+            write_scalar_groups_flat_data(out, inner, &child_groups)?;
+        }
+        DataType::MapUtf8 => {
+            let mut entry_count = 0usize;
+            let mut has_nulls = false;
+            out.extend_from_slice(&0u32.to_le_bytes());
+            for g in groups {
+                for v in *g {
+                    if let ScalarValue::MapUtf8(entries) = v {
+                        entry_count += entries.len();
+                        if !has_nulls && entries.iter().any(|(_, mv)| mv.is_none()) {
+                            has_nulls = true;
+                        }
+                    }
+                    let u = checked_u32(entry_count, "map entry count exceeds u32::MAX")?;
+                    out.extend_from_slice(&u.to_le_bytes());
+                }
+            }
+            let ec_u32 = checked_u32(entry_count, "map entry count exceeds u32::MAX")?;
+            out.extend_from_slice(&ec_u32.to_le_bytes());
+
+            // keys
+            let mut k_off = 0usize;
+            out.extend_from_slice(&0u32.to_le_bytes());
+            for g in groups {
+                for v in *g {
+                    if let ScalarValue::MapUtf8(entries) = v {
+                        for (k, _) in entries {
+                            k_off += k.len();
+                            let u = checked_u32(k_off, "utf8 bytes length exceeds u32::MAX")?;
+                            out.extend_from_slice(&u.to_le_bytes());
+                        }
+                    }
+                }
+            }
+            let k_len = checked_u32(k_off, "utf8 bytes length exceeds u32::MAX")?;
+            out.extend_from_slice(&k_len.to_le_bytes());
+            for g in groups {
+                for v in *g {
+                    if let ScalarValue::MapUtf8(entries) = v {
+                        for (k, _) in entries {
+                            out.extend_from_slice(k.as_bytes());
+                        }
+                    }
+                }
+            }
+
+            // values
+            let mut v_off = 0usize;
+            out.extend_from_slice(&0u32.to_le_bytes());
+            for g in groups {
+                for v in *g {
+                    if let ScalarValue::MapUtf8(entries) = v {
+                        for (_, mv) in entries {
+                            if let Some(val) = mv {
+                                v_off += val.len();
+                            }
+                            let u = checked_u32(v_off, "utf8 bytes length exceeds u32::MAX")?;
+                            out.extend_from_slice(&u.to_le_bytes());
+                        }
+                    }
+                }
+            }
+            let v_len = checked_u32(v_off, "utf8 bytes length exceeds u32::MAX")?;
+            out.extend_from_slice(&v_len.to_le_bytes());
+            for g in groups {
+                for v in *g {
+                    if let ScalarValue::MapUtf8(entries) = v {
+                        for (_, mv) in entries {
+                            if let Some(val) = mv {
+                                out.extend_from_slice(val.as_bytes());
+                            }
+                        }
+                    }
+                }
+            }
+
+            if has_nulls {
+                out.push(1);
+                let bm_start = out.len();
+                out.resize(bm_start + entry_count.div_ceil(8), 0);
+                let mut i = 0usize;
+                for g in groups {
+                    for v in *g {
+                        if let ScalarValue::MapUtf8(entries) = v {
+                            for (_, mv) in entries {
+                                if mv.is_some() {
+                                    out[bm_start + i / 8] |= 1u8 << (i % 8);
+                                }
+                                i += 1;
+                            }
+                        }
+                    }
+                }
+            } else {
+                out.push(0);
+            }
+        }
+        DataType::Events => {
+            let mut ev_count = 0usize;
+            let mut has_nulls = false;
+            out.extend_from_slice(&0u32.to_le_bytes());
+            for g in groups {
+                for v in *g {
+                    if let ScalarValue::Events(evs) = v {
+                        ev_count += evs.len();
+                        if !has_nulls && evs.iter().any(|ev| ev.attributes.is_none()) {
+                            has_nulls = true;
+                        }
+                    }
+                    let u = checked_u32(ev_count, "events count exceeds u32::MAX")?;
+                    out.extend_from_slice(&u.to_le_bytes());
+                }
+            }
+            let ev_u32 = checked_u32(ev_count, "events count exceeds u32::MAX")?;
+            out.extend_from_slice(&ev_u32.to_le_bytes());
+
+            for g in groups {
+                for v in *g {
+                    if let ScalarValue::Events(evs) = v {
+                        for ev in evs {
+                            out.extend_from_slice(&ev.time.to_le_bytes());
+                        }
+                    }
+                }
+            }
+
+            // names
+            let mut n_off = 0usize;
+            out.extend_from_slice(&0u32.to_le_bytes());
+            for g in groups {
+                for v in *g {
+                    if let ScalarValue::Events(evs) = v {
+                        for ev in evs {
+                            n_off += ev.name.len();
+                            let u = checked_u32(n_off, "utf8 bytes length exceeds u32::MAX")?;
+                            out.extend_from_slice(&u.to_le_bytes());
+                        }
+                    }
+                }
+            }
+            let n_len = checked_u32(n_off, "utf8 bytes length exceeds u32::MAX")?;
+            out.extend_from_slice(&n_len.to_le_bytes());
+            for g in groups {
+                for v in *g {
+                    if let ScalarValue::Events(evs) = v {
+                        for ev in evs {
+                            out.extend_from_slice(ev.name.as_bytes());
+                        }
+                    }
+                }
+            }
+
+            // attributes
+            let mut a_off = 0usize;
+            out.extend_from_slice(&0u32.to_le_bytes());
+            for g in groups {
+                for v in *g {
+                    if let ScalarValue::Events(evs) = v {
+                        for ev in evs {
+                            if let Some(attr) = &ev.attributes {
+                                a_off += attr.len();
+                            }
+                            let u = checked_u32(a_off, "utf8 bytes length exceeds u32::MAX")?;
+                            out.extend_from_slice(&u.to_le_bytes());
+                        }
+                    }
+                }
+            }
+            let a_len = checked_u32(a_off, "utf8 bytes length exceeds u32::MAX")?;
+            out.extend_from_slice(&a_len.to_le_bytes());
+            for g in groups {
+                for v in *g {
+                    if let ScalarValue::Events(evs) = v {
+                        for ev in evs {
+                            if let Some(attr) = &ev.attributes {
+                                out.extend_from_slice(attr.as_bytes());
+                            }
+                        }
+                    }
+                }
+            }
+
+            if has_nulls {
+                out.push(1);
+                let bm_start = out.len();
+                out.resize(bm_start + ev_count.div_ceil(8), 0);
+                let mut i = 0usize;
+                for g in groups {
+                    for v in *g {
+                        if let ScalarValue::Events(evs) = v {
+                            for ev in evs {
+                                if ev.attributes.is_some() {
+                                    out[bm_start + i / 8] |= 1u8 << (i % 8);
+                                }
+                                i += 1;
+                            }
+                        }
+                    }
+                }
+            } else {
+                out.push(0);
+            }
+        }
+        DataType::Links => {
+            let mut lk_count = 0usize;
+            let mut has_nulls = false;
+            out.extend_from_slice(&0u32.to_le_bytes());
+            for g in groups {
+                for v in *g {
+                    if let ScalarValue::Links(lks) = v {
+                        lk_count += lks.len();
+                        if !has_nulls && lks.iter().any(|lk| lk.attributes.is_none()) {
+                            has_nulls = true;
+                        }
+                    }
+                    let u = checked_u32(lk_count, "links count exceeds u32::MAX")?;
+                    out.extend_from_slice(&u.to_le_bytes());
+                }
+            }
+            let lk_u32 = checked_u32(lk_count, "links count exceeds u32::MAX")?;
+            out.extend_from_slice(&lk_u32.to_le_bytes());
+
+            for g in groups {
+                for v in *g {
+                    if let ScalarValue::Links(lks) = v {
+                        for lk in lks {
+                            out.extend_from_slice(&lk.trace_id);
+                        }
+                    }
+                }
+            }
+            for g in groups {
+                for v in *g {
+                    if let ScalarValue::Links(lks) = v {
+                        for lk in lks {
+                            out.extend_from_slice(&lk.span_id);
+                        }
+                    }
+                }
+            }
+
+            // attributes
+            let mut a_off = 0usize;
+            out.extend_from_slice(&0u32.to_le_bytes());
+            for g in groups {
+                for v in *g {
+                    if let ScalarValue::Links(lks) = v {
+                        for lk in lks {
+                            if let Some(attr) = &lk.attributes {
+                                a_off += attr.len();
+                            }
+                            let u = checked_u32(a_off, "utf8 bytes length exceeds u32::MAX")?;
+                            out.extend_from_slice(&u.to_le_bytes());
+                        }
+                    }
+                }
+            }
+            let a_len = checked_u32(a_off, "utf8 bytes length exceeds u32::MAX")?;
+            out.extend_from_slice(&a_len.to_le_bytes());
+            for g in groups {
+                for v in *g {
+                    if let ScalarValue::Links(lks) = v {
+                        for lk in lks {
+                            if let Some(attr) = &lk.attributes {
+                                out.extend_from_slice(attr.as_bytes());
+                            }
+                        }
+                    }
+                }
+            }
+
+            if has_nulls {
+                out.push(1);
+                let bm_start = out.len();
+                out.resize(bm_start + lk_count.div_ceil(8), 0);
+                let mut i = 0usize;
+                for g in groups {
+                    for v in *g {
+                        if let ScalarValue::Links(lks) = v {
+                            for lk in lks {
+                                if lk.attributes.is_some() {
+                                    out[bm_start + i / 8] |= 1u8 << (i % 8);
+                                }
+                                i += 1;
+                            }
+                        }
+                    }
+                }
+            } else {
+                out.push(0);
+            }
+        }
+    }
+    Ok(())
+}
+
 fn write_column(out: &mut Vec<u8>, col: &Column) -> Result<(), ColumnError> {
     match col {
         Column::Flat(fc) => {
@@ -938,8 +1784,11 @@ fn write_column(out: &mut Vec<u8>, col: &Column) -> Result<(), ColumnError> {
                 out.push(1);
             } else {
                 out.push(0);
-                let one = Column::try_new_const(value.clone(), 1)?.materialize(None)?;
-                write_flat_data(out, one.data())?;
+                write_scalar_groups_flat_data(
+                    out,
+                    &value.data_type(),
+                    &[std::slice::from_ref(value)],
+                )?;
             }
         }
         Column::Dict(d) => {
@@ -1502,6 +2351,361 @@ fn estimate_flat_row_heap_bytes(
         | FlatData::FixedBytes8(_)
         | FlatData::FixedBytes16(_) => Ok(0),
     }
+}
+
+fn check_mat_add(acc: usize, add: usize, budget: usize) -> Result<usize, ColumnError> {
+    acc.checked_add(add)
+        .filter(|&sum| sum <= budget)
+        .ok_or(ColumnError::InvalidFrame {
+            reason: "decoded materialized size exceeds max_decoded",
+        })
+}
+
+fn check_mat_mul(count: usize, elem: usize, budget: usize) -> Result<usize, ColumnError> {
+    count
+        .checked_mul(elem)
+        .filter(|&prod| prod <= budget)
+        .ok_or(ColumnError::InvalidFrame {
+            reason: "decoded materialized size exceeds max_decoded",
+        })
+}
+
+fn scalar_materialized_bytes(value: &ScalarValue, budget: usize) -> Result<usize, ColumnError> {
+    let bytes = match value {
+        ScalarValue::Null(_) | ScalarValue::Bool(_) => 1,
+        ScalarValue::Date(_) => 4,
+        ScalarValue::I64(_)
+        | ScalarValue::F64(_)
+        | ScalarValue::TimestampNs { .. }
+        | ScalarValue::FixedBytes8(_) => 8,
+        ScalarValue::Decimal128 { .. }
+        | ScalarValue::Interval(_)
+        | ScalarValue::FixedBytes16(_) => 16,
+        ScalarValue::Utf8(s) => check_mat_add(4, s.len(), budget)?,
+        ScalarValue::Binary(b) => check_mat_add(4, b.len(), budget)?,
+        ScalarValue::List { values, .. } => {
+            let mut total = 4usize;
+            if total > budget {
+                return Err(ColumnError::InvalidFrame {
+                    reason: "decoded materialized size exceeds max_decoded",
+                });
+            }
+            for v in values {
+                let elem = scalar_materialized_bytes(v, budget - total)?;
+                total += elem;
+            }
+            total
+        }
+        ScalarValue::MapUtf8(entries) => {
+            let mut total = 4usize;
+            if total > budget {
+                return Err(ColumnError::InvalidFrame {
+                    reason: "decoded materialized size exceeds max_decoded",
+                });
+            }
+            for (k, v) in entries {
+                let entry_bytes = 8usize
+                    .checked_add(k.len())
+                    .and_then(|s| s.checked_add(v.as_ref().map_or(0, String::len)))
+                    .ok_or(ColumnError::InvalidFrame {
+                        reason: "decoded materialized size exceeds max_decoded",
+                    })?;
+                total = check_mat_add(total, entry_bytes, budget)?;
+            }
+            total
+        }
+        ScalarValue::Events(evs) => {
+            let mut total = 4usize;
+            if total > budget {
+                return Err(ColumnError::InvalidFrame {
+                    reason: "decoded materialized size exceeds max_decoded",
+                });
+            }
+            for ev in evs {
+                let ev_bytes = 16usize
+                    .checked_add(ev.name.len())
+                    .and_then(|s| s.checked_add(ev.attributes.as_ref().map_or(0, String::len)))
+                    .ok_or(ColumnError::InvalidFrame {
+                        reason: "decoded materialized size exceeds max_decoded",
+                    })?;
+                total = check_mat_add(total, ev_bytes, budget)?;
+            }
+            total
+        }
+        ScalarValue::Links(lks) => {
+            let mut total = 4usize;
+            if total > budget {
+                return Err(ColumnError::InvalidFrame {
+                    reason: "decoded materialized size exceeds max_decoded",
+                });
+            }
+            for lk in lks {
+                let lk_bytes = 28usize
+                    .checked_add(lk.attributes.as_ref().map_or(0, String::len))
+                    .ok_or(ColumnError::InvalidFrame {
+                        reason: "decoded materialized size exceeds max_decoded",
+                    })?;
+                total = check_mat_add(total, lk_bytes, budget)?;
+            }
+            total
+        }
+    };
+    if bytes > budget {
+        return Err(ColumnError::InvalidFrame {
+            reason: "decoded materialized size exceeds max_decoded",
+        });
+    }
+    Ok(bytes)
+}
+
+fn flat_null_slot_bytes(data: &FlatData) -> usize {
+    match data {
+        FlatData::Null(_) | FlatData::Bool(_) => 1,
+        FlatData::Date(_)
+        | FlatData::Utf8(_)
+        | FlatData::Binary(_)
+        | FlatData::List { .. }
+        | FlatData::MapUtf8(_)
+        | FlatData::Events(_)
+        | FlatData::Links(_) => 4,
+        FlatData::I64(_)
+        | FlatData::F64(_)
+        | FlatData::TimestampNs { .. }
+        | FlatData::FixedBytes8(_) => 8,
+        FlatData::Decimal128 { .. } | FlatData::Interval(_) | FlatData::FixedBytes16(_) => 16,
+    }
+}
+
+fn flat_data_non_list_range_bytes(
+    data: &FlatData,
+    start: usize,
+    end: usize,
+    budget: usize,
+) -> Result<usize, ColumnError> {
+    let count = end - start;
+    if count == 0 {
+        return Ok(0);
+    }
+    match data {
+        FlatData::Null(_) | FlatData::Bool(_) => check_mat_mul(count, 1, budget),
+        FlatData::Date(_) => check_mat_mul(count, 4, budget),
+        FlatData::I64(_)
+        | FlatData::F64(_)
+        | FlatData::TimestampNs { .. }
+        | FlatData::FixedBytes8(_) => check_mat_mul(count, 8, budget),
+        FlatData::Decimal128 { .. } | FlatData::Interval(_) | FlatData::FixedBytes16(_) => {
+            check_mat_mul(count, 16, budget)
+        }
+        FlatData::Utf8(u) => {
+            let off_bytes = check_mat_mul(count, 4, budget)?;
+            let str_bytes = (u.offsets()[end] - u.offsets()[start]) as usize;
+            check_mat_add(off_bytes, str_bytes, budget)
+        }
+        FlatData::Binary(b) => {
+            let off_bytes = check_mat_mul(count, 4, budget)?;
+            let bin_bytes = (b.offsets()[end] - b.offsets()[start]) as usize;
+            check_mat_add(off_bytes, bin_bytes, budget)
+        }
+        FlatData::MapUtf8(m) => {
+            let row_off = check_mat_mul(count, 4, budget)?;
+            let e_start = m.offsets()[start] as usize;
+            let e_end = m.offsets()[end] as usize;
+            let entries = e_end - e_start;
+            let entry_off = check_mat_mul(entries, 8, budget)?;
+            let key_bytes = (m.keys().offsets()[e_end] - m.keys().offsets()[e_start]) as usize;
+            let val_bytes = (m.values().offsets()[e_end] - m.values().offsets()[e_start]) as usize;
+            let total = check_mat_add(row_off, entry_off, budget)?;
+            let total = check_mat_add(total, key_bytes, budget)?;
+            check_mat_add(total, val_bytes, budget)
+        }
+        FlatData::Events(e) => {
+            let row_off = check_mat_mul(count, 4, budget)?;
+            let e_start = e.offsets()[start] as usize;
+            let e_end = e.offsets()[end] as usize;
+            let entries = e_end - e_start;
+            let entry_fixed = check_mat_mul(entries, 16, budget)?;
+            let name_bytes = (e.names().offsets()[e_end] - e.names().offsets()[e_start]) as usize;
+            let attr_bytes =
+                (e.attributes().offsets()[e_end] - e.attributes().offsets()[e_start]) as usize;
+            let total = check_mat_add(row_off, entry_fixed, budget)?;
+            let total = check_mat_add(total, name_bytes, budget)?;
+            check_mat_add(total, attr_bytes, budget)
+        }
+        FlatData::Links(l) => {
+            let row_off = check_mat_mul(count, 4, budget)?;
+            let e_start = l.offsets()[start] as usize;
+            let e_end = l.offsets()[end] as usize;
+            let entries = e_end - e_start;
+            let entry_fixed = check_mat_mul(entries, 28, budget)?;
+            let attr_bytes =
+                (l.attributes().offsets()[e_end] - l.attributes().offsets()[e_start]) as usize;
+            let total = check_mat_add(row_off, entry_fixed, budget)?;
+            check_mat_add(total, attr_bytes, budget)
+        }
+        FlatData::List { .. } => unreachable!(),
+    }
+}
+
+fn estimate_flat_column_range_sizes(
+    fc: &FlatColumn,
+    ranges: &[Range<usize>],
+    remaining_budget: usize,
+    enforce_total: bool,
+) -> Result<Vec<usize>, ColumnError> {
+    if let FlatData::List {
+        offsets, values, ..
+    } = fc.data()
+    {
+        let child_ranges: Vec<Range<usize>> = ranges
+            .iter()
+            .map(|r| (offsets[r.start] as usize)..(offsets[r.end] as usize))
+            .collect();
+        let child_sizes =
+            estimate_column_range_sizes(values, &child_ranges, remaining_budget, enforce_total)?;
+        let mut total = 0usize;
+        let mut out = Vec::with_capacity(ranges.len());
+        for (r, child_sz) in ranges.iter().zip(child_sizes) {
+            let row_off = check_mat_mul(r.end - r.start, 4, remaining_budget)?;
+            let sz = check_mat_add(row_off, child_sz, remaining_budget)?;
+            if enforce_total {
+                total = check_mat_add(total, sz, remaining_budget)?;
+            }
+            out.push(sz);
+        }
+        return Ok(out);
+    }
+
+    let mut total = 0usize;
+    let mut out = Vec::with_capacity(ranges.len());
+    for r in ranges {
+        let sz = flat_data_non_list_range_bytes(fc.data(), r.start, r.end, remaining_budget)?;
+        if enforce_total {
+            total = check_mat_add(total, sz, remaining_budget)?;
+        }
+        out.push(sz);
+    }
+    Ok(out)
+}
+
+fn estimate_column_range_sizes(
+    col: &Column,
+    ranges: &[Range<usize>],
+    remaining_budget: usize,
+    enforce_total: bool,
+) -> Result<Vec<usize>, ColumnError> {
+    match col {
+        Column::Flat(fc) => {
+            estimate_flat_column_range_sizes(fc, ranges, remaining_budget, enforce_total)
+        }
+        Column::Const { value, .. } => {
+            if ranges.iter().all(|r| r.start >= r.end) {
+                return Ok(vec![0; ranges.len()]);
+            }
+            let elem_bytes = scalar_materialized_bytes(value, remaining_budget)?;
+            let mut total = 0usize;
+            let mut out = Vec::with_capacity(ranges.len());
+            for r in ranges {
+                let sz = if r.start >= r.end {
+                    0
+                } else {
+                    check_mat_mul(r.end - r.start, elem_bytes, remaining_budget)?
+                };
+                if enforce_total {
+                    total = check_mat_add(total, sz, remaining_budget)?;
+                }
+                out.push(sz);
+            }
+            Ok(out)
+        }
+        Column::Dict(d) => {
+            let dict_len = d.values().len();
+            let unit_ranges: Vec<Range<usize>> = (0..dict_len).map(|i| i..i + 1).collect();
+            let entry_sizes = estimate_flat_column_range_sizes(
+                d.values(),
+                &unit_ranges,
+                remaining_budget,
+                false,
+            )?;
+            let codes = d.codes();
+            let nulls = d.nulls();
+            let null_slot = flat_null_slot_bytes(d.values().data());
+            let mut total = 0usize;
+            let mut out = Vec::with_capacity(ranges.len());
+            for r in ranges {
+                let mut range_sum = 0usize;
+                for row in r.start..r.end {
+                    let elem = if nulls.is_some_and(|bm| !bm.get(row)) {
+                        null_slot
+                    } else {
+                        entry_sizes[codes[row] as usize]
+                    };
+                    range_sum = check_mat_add(range_sum, elem, remaining_budget)?;
+                }
+                if enforce_total {
+                    total = check_mat_add(total, range_sum, remaining_budget)?;
+                }
+                out.push(range_sum);
+            }
+            Ok(out)
+        }
+        Column::Rle(r) => {
+            let run_count = r.values().len();
+            if run_count == 0 {
+                return Ok(vec![0; ranges.len()]);
+            }
+            let unit_ranges: Vec<Range<usize>> = (0..run_count).map(|i| i..i + 1).collect();
+            let run_sizes = estimate_flat_column_range_sizes(
+                r.values(),
+                &unit_ranges,
+                remaining_budget,
+                false,
+            )?;
+            let run_ends = r.run_ends();
+            let mut run_idx = 0usize;
+            let mut total = 0usize;
+            let mut out = Vec::with_capacity(ranges.len());
+            for range in ranges {
+                if range.start >= range.end {
+                    out.push(0);
+                    continue;
+                }
+                while run_idx < run_ends.len() && (run_ends[run_idx] as usize) <= range.start {
+                    run_idx += 1;
+                }
+                let mut cur = range.start;
+                let mut range_sum = 0usize;
+                while cur < range.end {
+                    let run_end = (run_ends[run_idx] as usize).min(range.end);
+                    let count = run_end - cur;
+                    let part = check_mat_mul(count, run_sizes[run_idx], remaining_budget)?;
+                    range_sum = check_mat_add(range_sum, part, remaining_budget)?;
+                    cur = run_end;
+                    if (run_ends[run_idx] as usize) <= range.end {
+                        run_idx += 1;
+                    }
+                }
+                if enforce_total {
+                    total = check_mat_add(total, range_sum, remaining_budget)?;
+                }
+                out.push(range_sum);
+            }
+            Ok(out)
+        }
+    }
+}
+
+fn estimate_column_materialized_bytes(
+    col: &Column,
+    remaining_budget: usize,
+) -> Result<usize, ColumnError> {
+    let full_range = 0..col.len();
+    let sizes = estimate_column_range_sizes(
+        col,
+        std::slice::from_ref(&full_range),
+        remaining_budget,
+        true,
+    )?;
+    Ok(sizes[0])
 }
 
 fn add_logical_elements(
@@ -3151,5 +4355,242 @@ mod tests {
         assert!(matches!(err, ColumnError::MemoryLimit { .. }));
         assert_eq!(tight_res.size(), 32);
         assert_eq!(out_err, vec![1, 2, 3]);
+    }
+
+    #[test]
+    fn multiplicative_list_rle_dict_const_and_wide_bombs_rejected() {
+        let scope = GlobalPool::standalone(1024 * 1024);
+
+        // 1. 8-level nested List + Rle (~230-byte frame expanding to 10^24 elements) -> rejected!
+        let mut nested_dt = DataType::I64;
+        for _ in 0..MAX_NESTING_DEPTH {
+            nested_dt = DataType::List(Box::new(nested_dt));
+        }
+        let mut body_rle = Vec::new();
+        write_body_header(&mut body_rle, 1000, "a", &nested_dt);
+        for _ in 0..MAX_NESTING_DEPTH {
+            body_rle.push(3); // Rle
+            body_rle.extend_from_slice(&1u32.to_le_bytes()); // run_count = 1
+            body_rle.push(0); // values has_nulls = false
+            body_rle.extend_from_slice(&0u32.to_le_bytes()); // offsets[0]
+            body_rle.extend_from_slice(&1000u32.to_le_bytes()); // offsets[1]
+            body_rle.extend_from_slice(&1000u32.to_le_bytes()); // child_len = 1000
+        }
+        body_rle.push(3); // leaf Rle(I64)
+        body_rle.extend_from_slice(&1u32.to_le_bytes()); // run_count = 1
+        body_rle.push(0); // has_nulls = false
+        body_rle.extend_from_slice(&42i64.to_le_bytes());
+        body_rle.extend_from_slice(&1000u32.to_le_bytes()); // run_ends = [1000]
+        // Close the 8 outer Rle run_ends vectors
+        for _ in 0..MAX_NESTING_DEPTH {
+            body_rle.extend_from_slice(&1000u32.to_le_bytes());
+        }
+        let frame_rle = wrap_uncompressed_body(&body_rle);
+        assert!(
+            frame_rle.len() <= 260,
+            "8-level Rle bomb frame should stay tiny, got {}",
+            frame_rle.len()
+        );
+        let mut res_rle = scope.register("rle_bomb", true);
+        let err_rle = decode_batch(&frame_rle, None, Some(&mut res_rle)).unwrap_err();
+        assert!(matches!(
+            err_rle,
+            ColumnError::InvalidFrame {
+                reason: "decoded materialized size exceeds max_decoded"
+            }
+        ));
+        assert_eq!(res_rle.size(), 0);
+
+        // 2. 8-level nested List + Dict (dict_len = 1, codes = [0; 100]) -> rejected!
+        let mut col_dict = Column::Dict(
+            DictColumn::try_new(
+                FlatColumn::try_new(FlatData::I64(vec![7]), None).unwrap(),
+                vec![0u32; 100],
+                None,
+            )
+            .unwrap(),
+        );
+        let mut cur_dt = DataType::I64;
+        for _ in 0..MAX_NESTING_DEPTH {
+            let list_fc = FlatColumn::try_new(
+                FlatData::List {
+                    item_type: cur_dt.clone(),
+                    offsets: vec![0, 100],
+                    values: Box::new(col_dict),
+                },
+                None,
+            )
+            .unwrap();
+            col_dict = Column::Dict(DictColumn::try_new(list_fc, vec![0u32; 100], None).unwrap());
+            cur_dt = DataType::List(Box::new(cur_dt));
+        }
+        let schema_dict = Schema::try_new_arc(vec![Field::new("d", cur_dt, false)]).unwrap();
+        let batch_dict = Batch::try_new_all(schema_dict, vec![col_dict], 100).unwrap();
+        let mut frame_dict = Vec::new();
+        encode_batch(&batch_dict, &mut frame_dict, None).unwrap();
+
+        let mut res_dict = scope.register("dict_bomb", true);
+        let err_dict = decode_batch(&frame_dict, None, Some(&mut res_dict)).unwrap_err();
+        assert!(matches!(
+            err_dict,
+            ColumnError::InvalidFrame {
+                reason: "decoded materialized size exceeds max_decoded"
+            }
+        ));
+        assert_eq!(res_dict.size(), 0);
+
+        // 3. Flat(List(Utf8)) with offsets = [0, 1_000_000] over Const(Utf8("x" * 100_000)) -> rejected!
+        let big_str = "x".repeat(100_000);
+        let list_const_utf8 = Column::Flat(
+            FlatColumn::try_new(
+                FlatData::List {
+                    item_type: DataType::Utf8,
+                    offsets: vec![0, 1_000_000],
+                    values: Box::new(
+                        Column::try_new_const(ScalarValue::Utf8(big_str), 1_000_000).unwrap(),
+                    ),
+                },
+                None,
+            )
+            .unwrap(),
+        );
+        let schema_list_const = Schema::try_new_arc(vec![Field::new(
+            "l",
+            DataType::List(Box::new(DataType::Utf8)),
+            false,
+        )])
+        .unwrap();
+        let batch_list_const =
+            Batch::try_new_all(schema_list_const, vec![list_const_utf8], 1).unwrap();
+        let mut frame_list_const = Vec::new();
+        encode_batch(&batch_list_const, &mut frame_list_const, None).unwrap();
+
+        let mut res_list_const = scope.register("list_const_bomb", true);
+        let err_list_const =
+            decode_batch(&frame_list_const, None, Some(&mut res_list_const)).unwrap_err();
+        assert!(matches!(
+            err_list_const,
+            ColumnError::InvalidFrame {
+                reason: "decoded materialized size exceeds max_decoded"
+            }
+        ));
+        assert_eq!(res_list_const.size(), 0);
+
+        // 4. Wide Const(I64) (raw_len = 1 << 20, 200 columns -> 1600 MiB > 1 GiB) -> rejected!
+        let wide_raw_len = 1usize << 20;
+        let wide_fields: Vec<Field> = (0..200)
+            .map(|i| Field::new(format!("c{i}"), DataType::I64, false))
+            .collect();
+        let wide_cols: Vec<Column> = (0..200)
+            .map(|i| Column::try_new_const(ScalarValue::I64(i), wide_raw_len).unwrap())
+            .collect();
+        let wide_schema = Schema::try_new_arc(wide_fields).unwrap();
+        let wide_batch = Batch::try_new_all(wide_schema, wide_cols, wide_raw_len).unwrap();
+        let mut wide_frame = Vec::new();
+        encode_batch(&wide_batch, &mut wide_frame, None).unwrap();
+
+        let mut res_wide = scope.register("wide_const_bomb", true);
+        let err_wide = decode_batch(&wide_frame, None, Some(&mut res_wide)).unwrap_err();
+        assert!(matches!(
+            err_wide,
+            ColumnError::InvalidFrame {
+                reason: "decoded materialized size exceeds max_decoded"
+            }
+        ));
+        assert_eq!(res_wide.size(), 0);
+    }
+
+    #[test]
+    fn lz4_truncated_endmark_and_trailing_garbage_rejected() {
+        let real_body = vec![9u8; 256];
+        let mut enc = FrameEncoder::new(Vec::new());
+        enc.write_all(&real_body).unwrap();
+        let valid_payload = enc.finish().unwrap();
+        assert!(valid_payload.ends_with(&[0, 0, 0, 0]));
+
+        let frame_with_lz4_payload = |payload: &[u8]| -> Vec<u8> {
+            let mut frame = Vec::with_capacity(FRAME_HEADER_LEN + payload.len());
+            let mut hdr = [0u8; FRAME_HEADER_LEN];
+            hdr[0..4].copy_from_slice(&FRAME_MAGIC);
+            hdr[4] = FRAME_VERSION;
+            hdr[5] = FLAG_LZ4;
+            hdr[8..12].copy_from_slice(&(real_body.len() as u32).to_le_bytes());
+            hdr[12..16].copy_from_slice(&(payload.len() as u32).to_le_bytes());
+            let crc = crc32c::crc32c_append(crc32c::crc32c(&hdr[0..16]), payload);
+            hdr[16..20].copy_from_slice(&crc.to_le_bytes());
+            frame.extend_from_slice(&hdr);
+            frame.extend_from_slice(payload);
+            frame
+        };
+
+        // (a) Stripping the 4-byte LZ4 EndMark (00 00 00 00) is rejected.
+        let stripped = &valid_payload[..valid_payload.len() - 4];
+        let err_stripped = decode_batch(&frame_with_lz4_payload(stripped), None, None).unwrap_err();
+        assert!(matches!(err_stripped, ColumnError::InvalidFrame { .. }));
+
+        // (b) Replacing EndMark with 1, 2, or 3 arbitrary garbage bytes is rejected.
+        for suffix in [&b"a"[..], &b"ab"[..], &b"abc"[..]] {
+            let mut replaced = stripped.to_vec();
+            replaced.extend_from_slice(suffix);
+            let err_rep = decode_batch(&frame_with_lz4_payload(&replaced), None, None).unwrap_err();
+            assert!(matches!(err_rep, ColumnError::InvalidFrame { .. }));
+        }
+
+        // (c) Appending 1..=4 trailing bytes after a valid EndMark is rejected.
+        for extra in 1..=4usize {
+            let mut trailing = valid_payload.clone();
+            trailing.extend(std::iter::repeat_n(0x55, extra));
+            let err_trail =
+                decode_batch(&frame_with_lz4_payload(&trailing), None, None).unwrap_err();
+            assert!(matches!(
+                err_trail,
+                ColumnError::InvalidFrame {
+                    reason: "trailing bytes after lz4 frame"
+                }
+            ));
+        }
+    }
+
+    #[test]
+    fn encode_const_large_utf8_and_list_under_tight_reservation() {
+        let schema = Schema::try_new_arc(vec![
+            Field::new("big_s", DataType::Utf8, false),
+            Field::new("big_l", DataType::List(Box::new(DataType::I64)), false),
+        ])
+        .unwrap();
+        let big_str = "z".repeat(16 * 1024);
+        let big_list = ScalarValue::List {
+            item_type: DataType::I64,
+            values: (0..1024).map(ScalarValue::I64).collect(),
+        };
+        let batch = Batch::try_new_all(
+            Arc::clone(&schema),
+            vec![
+                Column::try_new_const(ScalarValue::Utf8(big_str), 4).unwrap(),
+                Column::try_new_const(big_list, 4).unwrap(),
+            ],
+            4,
+        )
+        .unwrap();
+
+        // Tight reservation smaller than uncompressed body is rejected before write_body with MemoryLimit.
+        let tight = GlobalPool::standalone(4096);
+        let mut tight_res = tight.register("const_encode_tight", true);
+        let mut out_err = Vec::new();
+        let err = encode_batch(&batch, &mut out_err, Some(&mut tight_res)).unwrap_err();
+        assert!(matches!(err, ColumnError::MemoryLimit { .. }));
+        assert_eq!(tight_res.size(), 0);
+        assert!(out_err.is_empty());
+
+        // Ample reservation encodes cleanly, restores size, and round-trips semantically.
+        let ample = GlobalPool::standalone(1024 * 1024);
+        let mut res = ample.register("const_encode_ample", true);
+        res.try_grow(16).unwrap();
+        let mut frame = Vec::new();
+        encode_batch(&batch, &mut frame, Some(&mut res)).unwrap();
+        assert_eq!(res.size(), 16);
+
+        let decoded = decode_batch(&frame, Some(&schema), None).unwrap();
+        assert!(batch.semantic_eq(&decoded));
     }
 }

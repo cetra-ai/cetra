@@ -5,8 +5,110 @@ use std::sync::Arc;
 
 use crate::column::{FlatPiece, reconcile_reservation, rollback_reservation};
 use crate::{
-    Bitmap, Column, ColumnError, FlatColumn, MAX_NESTING_DEPTH, Reservation, Schema, Selection,
+    Bitmap, Column, ColumnError, FlatColumn, FlatData, MAX_NESTING_DEPTH, Reservation, Schema,
+    Selection,
 };
+
+struct SeenPtrs<T: Copy + PartialEq> {
+    inline: [T; 64],
+    inline_len: usize,
+    overflow: Vec<T>,
+}
+
+impl<T: Copy + PartialEq> SeenPtrs<T> {
+    fn new(zero: T) -> Self {
+        Self {
+            inline: [zero; 64],
+            inline_len: 0,
+            overflow: Vec::new(),
+        }
+    }
+
+    fn insert(&mut self, ptr: T) -> bool {
+        if self.inline[..self.inline_len].contains(&ptr) || self.overflow.contains(&ptr) {
+            return false;
+        }
+        if self.inline_len < self.inline.len() {
+            self.inline[self.inline_len] = ptr;
+            self.inline_len += 1;
+        } else {
+            self.overflow.push(ptr);
+        }
+        true
+    }
+}
+
+fn dedup_flat_column_bytes(
+    fc: &FlatColumn,
+    seen_flats: &mut SeenPtrs<*const FlatColumn>,
+) -> Result<usize, ColumnError> {
+    if let FlatData::List {
+        offsets, values, ..
+    } = fc.data()
+    {
+        let offsets_bytes = offsets.len().checked_mul(4).ok_or(ColumnError::Overflow {
+            reason: "list column byte total overflow",
+        })?;
+        let nulls_bytes = fc.nulls().map_or(0, Bitmap::memory_bytes);
+        let child_bytes = dedup_column_bytes(values, seen_flats)?;
+        return offsets_bytes
+            .checked_add(nulls_bytes)
+            .and_then(|s| s.checked_add(child_bytes))
+            .ok_or(ColumnError::Overflow {
+                reason: "batch column byte total overflow",
+            });
+    }
+    Ok(fc.memory_bytes())
+}
+
+fn dedup_column_bytes(
+    col: &Column,
+    seen_flats: &mut SeenPtrs<*const FlatColumn>,
+) -> Result<usize, ColumnError> {
+    match col {
+        Column::Flat(fc) => dedup_flat_column_bytes(fc, seen_flats),
+        Column::Const { value, .. } => Ok(value.heap_bytes()),
+        Column::Dict(d) => {
+            let codes_bytes = d
+                .codes()
+                .len()
+                .checked_mul(4)
+                .ok_or(ColumnError::Overflow {
+                    reason: "dict column byte total overflow",
+                })?;
+            let base = codes_bytes
+                .checked_add(d.nulls().map_or(0, Bitmap::memory_bytes))
+                .ok_or(ColumnError::Overflow {
+                    reason: "dict column byte total overflow",
+                })?;
+            if seen_flats.insert(Arc::as_ptr(d.values_arc())) {
+                base.checked_add(dedup_flat_column_bytes(d.values(), seen_flats)?)
+                    .ok_or(ColumnError::Overflow {
+                        reason: "batch column byte total overflow",
+                    })
+            } else {
+                Ok(base)
+            }
+        }
+        Column::Rle(r) => {
+            let base = r
+                .run_ends()
+                .len()
+                .checked_mul(4)
+                .ok_or(ColumnError::Overflow {
+                    reason: "rle column byte total overflow",
+                })?;
+            if seen_flats.insert(Arc::as_ptr(r.values_arc())) {
+                base.checked_add(dedup_flat_column_bytes(r.values(), seen_flats)?)
+                    .ok_or(ColumnError::Overflow {
+                        reason: "batch column byte total overflow",
+                    })
+            } else {
+                Ok(base)
+            }
+        }
+    }
+}
 
 /// Columnar batch of rows with an attached [`Selection`] filter.
 #[derive(Clone, PartialEq)]
@@ -244,15 +346,47 @@ impl Batch {
     }
 
     /// Slices physical rows `offset..offset + len`, slicing `selection` accordingly.
-    /// Deduplicates shared `Arc<Column>` pointers and accounts for newly allocated slice buffers
-    /// in `pool` when `Some` (rolling back on error).
+    /// Deduplicates shared `Arc<Column>` and `Arc<FlatColumn>` pointers and reserves the
+    /// sliced batch's full `memory_bytes()` in `pool` when `Some` (rolling back on error).
     pub fn slice(
         &self,
         offset: usize,
         len: usize,
         mut pool: Option<&mut Reservation>,
     ) -> Result<Self, ColumnError> {
+        self.selection.validate(self.raw_len)?;
+        if offset.checked_add(len).is_none_or(|end| end > self.raw_len) {
+            return Err(ColumnError::InvalidBatch {
+                reason: "selection slice out of bounds",
+            });
+        }
+
         let before = pool.as_ref().map_or(0, |p| p.size());
+        let sel_bytes = match &self.selection {
+            Selection::All => 0,
+            Selection::Mask(_) => len
+                .div_ceil(64)
+                .checked_mul(8)
+                .ok_or(ColumnError::Overflow {
+                    reason: "selection slice bitmap overflow",
+                })?,
+            Selection::Indices(idx) => {
+                let end = offset + len;
+                let count = idx
+                    .iter()
+                    .filter(|&&i| (i as usize) >= offset && (i as usize) < end)
+                    .count();
+                count.checked_mul(4).ok_or(ColumnError::Overflow {
+                    reason: "selection slice indices overflow",
+                })?
+            }
+        };
+        if let Some(res) = pool.as_deref_mut()
+            && let Err(err) = res.try_grow(sel_bytes)
+        {
+            rollback_reservation(pool, before);
+            return Err(err);
+        }
         let new_sel = match self.selection.slice(self.raw_len, offset, len) {
             Ok(s) => s,
             Err(err) => {
@@ -260,16 +394,12 @@ impl Batch {
                 return Err(err);
             }
         };
-        if let Some(res) = pool.as_deref_mut()
-            && let Err(err) = res.try_grow(new_sel.memory_bytes())
-        {
-            rollback_reservation(pool, before);
-            return Err(err);
-        }
+        debug_assert_eq!(new_sel.memory_bytes(), sel_bytes);
 
         let mut seen_inline: [(*const Column, usize); 64] = [(std::ptr::null(), 0); 64];
         let mut seen_inline_len = 0usize;
         let mut seen_overflow: Vec<(*const Column, usize)> = Vec::new();
+        let mut seen_dict_values: SeenPtrs<*const FlatColumn> = SeenPtrs::new(std::ptr::null());
         let mut new_cols: Vec<Arc<Column>> = Vec::with_capacity(self.columns.len());
 
         for col in &self.columns {
@@ -288,7 +418,15 @@ impl Batch {
                 continue;
             }
 
-            let sliced = match col.slice(offset, len, pool.as_deref_mut()) {
+            let slice_res = match col.as_ref() {
+                Column::Dict(d) => {
+                    let account_values = seen_dict_values.insert(Arc::as_ptr(d.values_arc()));
+                    d.slice_with_accounting(offset, len, pool.as_deref_mut(), account_values)
+                        .map(Column::Dict)
+                }
+                _ => col.slice(offset, len, pool.as_deref_mut()),
+            };
+            let sliced = match slice_res {
                 Ok(c) => Arc::new(c),
                 Err(err) => {
                     rollback_reservation(pool, before);
@@ -305,41 +443,28 @@ impl Batch {
             new_cols.push(sliced);
         }
 
-        match Self::try_new_shared(Arc::clone(&self.schema), new_cols, len, new_sel) {
-            Ok(batch) => Ok(batch),
+        let out = match Self::try_new_shared(Arc::clone(&self.schema), new_cols, len, new_sel) {
+            Ok(batch) => batch,
             Err(err) => {
                 rollback_reservation(pool, before);
-                Err(err)
+                return Err(err);
             }
-        }
+        };
+        reconcile_reservation(pool, before, out.memory_bytes())?;
+        Ok(out)
     }
 
     fn checked_dedup_columns_memory_bytes(&self) -> Result<usize, ColumnError> {
         let mut total = 0usize;
-        let mut seen_inline: [*const Column; 64] = [std::ptr::null(); 64];
-        let mut seen_inline_len = 0usize;
-        let mut seen_overflow: Vec<*const Column> = Vec::new();
+        let mut seen_cols: SeenPtrs<*const Column> = SeenPtrs::new(std::ptr::null());
+        let mut seen_flats: SeenPtrs<*const FlatColumn> = SeenPtrs::new(std::ptr::null());
 
         for col in &self.columns {
-            let ptr = Arc::as_ptr(col);
-            let already_seen = if seen_inline[..seen_inline_len].contains(&ptr) {
-                true
-            } else if seen_inline_len < seen_inline.len() {
-                seen_inline[seen_inline_len] = ptr;
-                seen_inline_len += 1;
-                false
-            } else if seen_overflow.contains(&ptr) {
-                true
-            } else {
-                seen_overflow.push(ptr);
-                false
-            };
-            if !already_seen {
-                total = total
-                    .checked_add(col.memory_bytes())
-                    .ok_or(ColumnError::Overflow {
-                        reason: "batch column byte total overflow",
-                    })?;
+            if seen_cols.insert(Arc::as_ptr(col)) {
+                let col_bytes = dedup_column_bytes(col, &mut seen_flats)?;
+                total = total.checked_add(col_bytes).ok_or(ColumnError::Overflow {
+                    reason: "batch column byte total overflow",
+                })?;
             }
         }
         Ok(total)
@@ -549,33 +674,13 @@ impl Batch {
         true
     }
 
-    /// Deterministic logical heap bytes across unique columns (deduplicated by `Arc::as_ptr`)
-    /// and selection.
+    /// Deterministic logical heap bytes across unique columns (deduplicated by `Arc::as_ptr`
+    /// for both `Arc<Column>` and inner `Dict`/`Rle` `Arc<FlatColumn>`) and selection.
     pub fn memory_bytes(&self) -> usize {
-        let mut total = self.selection.memory_bytes();
-        let mut seen_inline: [*const Column; 64] = [std::ptr::null(); 64];
-        let mut seen_inline_len = 0usize;
-        let mut seen_overflow: Vec<*const Column> = Vec::new();
-
-        for col in &self.columns {
-            let ptr = Arc::as_ptr(col);
-            let already_seen = if seen_inline[..seen_inline_len].contains(&ptr) {
-                true
-            } else if seen_inline_len < seen_inline.len() {
-                seen_inline[seen_inline_len] = ptr;
-                seen_inline_len += 1;
-                false
-            } else if seen_overflow.contains(&ptr) {
-                true
-            } else {
-                seen_overflow.push(ptr);
-                false
-            };
-            if !already_seen {
-                total += col.memory_bytes();
-            }
-        }
-        total
+        self.selection.memory_bytes().saturating_add(
+            self.checked_dedup_columns_memory_bytes()
+                .unwrap_or(usize::MAX),
+        )
     }
 }
 
@@ -1215,7 +1320,7 @@ mod tests {
         assert!(Arc::ptr_eq(into_proj.column_arc(1).unwrap(), &c1));
         assert_eq!(into_proj.memory_bytes(), c1.memory_bytes());
 
-        // slice with pool accounts only for newly allocated slice buffers and deduplicates shared columns
+        // slice with pool reserves full out.memory_bytes() and shares Dict values Arc across columns
         let scope = GlobalPool::standalone(4096);
         let mut res = scope.register("slice", true);
         let sliced = proj.slice(1, 2, Some(&mut res)).unwrap();
@@ -1227,13 +1332,76 @@ mod tests {
             sliced.column_arc(0).unwrap(),
             sliced.column_arc(3).unwrap()
         ));
-        // Newly allocated: c0 slice (2*8 = 16) + c1 slice codes (2*4 = 8; dict values shared) = 24 bytes
-        assert_eq!(res.size(), 16 + 8);
+        let (Column::Dict(orig_dict), Column::Dict(sliced_dict)) = (
+            proj.column_arc(2).unwrap().as_ref(),
+            sliced.column_arc(2).unwrap().as_ref(),
+        ) else {
+            panic!("expected Dict columns");
+        };
+        assert!(Arc::ptr_eq(
+            orig_dict.values_arc(),
+            sliced_dict.values_arc()
+        ));
+        assert_eq!(res.size(), sliced.memory_bytes());
+        res.shrink(sliced.memory_bytes());
+        assert_eq!(res.size(), 0);
 
-        // Tight pool rejects and rolls back cleanly
-        let tight = GlobalPool::standalone(23);
+        // Tight pool smaller than sliced.memory_bytes() rejects and rolls back cleanly
+        let tight = GlobalPool::standalone(sliced.memory_bytes() - 1);
         let mut tight_res = tight.register("tight_slice", true);
         let err = proj.slice(1, 2, Some(&mut tight_res)).unwrap_err();
+        assert!(matches!(err, ColumnError::MemoryLimit { .. }));
+        assert_eq!(tight_res.size(), 0);
+    }
+
+    #[test]
+    fn distinct_dict_columns_sharing_values_arc_deduplicate_memory_bytes_and_slice() {
+        let schema = Schema::try_new_arc(vec![
+            Field::new("d1", DataType::Utf8, false),
+            Field::new("d2", DataType::Utf8, false),
+        ])
+        .unwrap();
+
+        let shared_vals = Arc::new(
+            FlatColumn::try_new(
+                FlatData::Utf8(
+                    Utf8Data::try_from_slices(["long_alpha_payload", "long_beta_payload"]).unwrap(),
+                ),
+                None,
+            )
+            .unwrap(),
+        );
+        let d1 = Arc::new(Column::Dict(
+            DictColumn::try_new_shared(Arc::clone(&shared_vals), vec![0, 1, 0, 1], None).unwrap(),
+        ));
+        let d2 = Arc::new(Column::Dict(
+            DictColumn::try_new_shared(Arc::clone(&shared_vals), vec![1, 0, 1, 0], None).unwrap(),
+        ));
+        assert!(!Arc::ptr_eq(&d1, &d2));
+
+        let batch = Batch::try_new_shared(
+            Arc::clone(&schema),
+            vec![Arc::clone(&d1), Arc::clone(&d2)],
+            4,
+            Selection::Indices(vec![1, 2, 3]),
+        )
+        .unwrap();
+        // shared_vals counted once + 2 * (4 * 4) codes + 3 * 4 selection indices
+        let expected_batch_bytes = shared_vals.memory_bytes() + 16 + 16 + 12;
+        assert_eq!(batch.memory_bytes(), expected_batch_bytes);
+
+        // Exact tight pool for slice succeeds without double-counting shared_vals
+        let expected_slice_bytes = shared_vals.memory_bytes() + 8 + 8 + 8;
+        let scope = GlobalPool::standalone(expected_slice_bytes);
+        let mut res = scope.register("distinct_dict_slice", true);
+        let sliced = batch.slice(1, 2, Some(&mut res)).unwrap();
+        assert_eq!(sliced.memory_bytes(), expected_slice_bytes);
+        assert_eq!(res.size(), sliced.memory_bytes());
+
+        // 1 byte tighter fails cleanly
+        let too_tight = GlobalPool::standalone(expected_slice_bytes - 1);
+        let mut tight_res = too_tight.register("too_tight", true);
+        let err = batch.slice(1, 2, Some(&mut tight_res)).unwrap_err();
         assert!(matches!(err, ColumnError::MemoryLimit { .. }));
         assert_eq!(tight_res.size(), 0);
     }

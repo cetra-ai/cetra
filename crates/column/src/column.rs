@@ -3386,12 +3386,22 @@ impl DictColumn {
     }
 
     /// Slices `offset..offset + len` (shares `values` `Arc`, slices `codes` and `nulls`,
-    /// and accounts for newly allocated `codes` and `nulls` bytes in `pool`).
+    /// and reserves the sliced column's full `memory_bytes()` in `pool`, rolling back on error).
     pub fn slice(
         &self,
         offset: usize,
         len: usize,
+        pool: Option<&mut Reservation>,
+    ) -> Result<Self, ColumnError> {
+        self.slice_with_accounting(offset, len, pool, true)
+    }
+
+    pub(crate) fn slice_with_accounting(
+        &self,
+        offset: usize,
+        len: usize,
         mut pool: Option<&mut Reservation>,
+        account_values: bool,
     ) -> Result<Self, ColumnError> {
         if offset.checked_add(len).is_none_or(|end| end > self.len()) {
             return Err(ColumnError::InvalidBatch {
@@ -3399,6 +3409,11 @@ impl DictColumn {
             });
         }
         let before = pool.as_ref().map_or(0, |p| p.size());
+        let values_bytes = if account_values {
+            self.values.memory_bytes()
+        } else {
+            0
+        };
         let codes_bytes = match checked_mul_bytes(len, 4, "dict slice codes overflow") {
             Ok(b) => b,
             Err(err) => {
@@ -3417,7 +3432,8 @@ impl DictColumn {
         } else {
             0
         };
-        let pre_bytes = match checked_add_bytes(codes_bytes, nulls_max_bytes, "dict slice overflow")
+        let pre_bytes = match checked_add_bytes(values_bytes, codes_bytes, "dict slice overflow")
+            .and_then(|s| checked_add_bytes(s, nulls_max_bytes, "dict slice overflow"))
         {
             Ok(b) => b,
             Err(err) => {
@@ -3439,17 +3455,18 @@ impl DictColumn {
                 return Err(err);
             }
         };
-        if nulls.is_none()
-            && nulls_max_bytes > 0
-            && let Some(res) = pool
-        {
-            res.shrink(nulls_max_bytes);
-        }
-        Ok(Self {
+        let out = Self {
             values: Arc::clone(&self.values),
             codes,
             nulls,
-        })
+        };
+        let target_bytes = if account_values {
+            out.memory_bytes()
+        } else {
+            out.codes.len() * 4 + out.nulls.as_ref().map_or(0, Bitmap::memory_bytes)
+        };
+        reconcile_reservation(pool, before, target_bytes)?;
+        Ok(out)
     }
 
     /// Deterministic logical heap bytes (`values.memory_bytes() + codes.len() * 4 + nulls`).
@@ -3475,6 +3492,16 @@ impl fmt::Debug for RleColumn {
             .field("run_count", &self.run_ends.len())
             .field("values", &self.values)
             .finish()
+    }
+}
+
+fn empty_flat_memory_bytes(dt: &DataType) -> usize {
+    match dt {
+        DataType::Utf8 | DataType::Binary => 4,
+        DataType::Links => 8,
+        DataType::MapUtf8 | DataType::Events => 12,
+        DataType::List(inner) => 4 + empty_flat_memory_bytes(inner),
+        _ => 0,
     }
 }
 
@@ -3568,7 +3595,7 @@ impl RleColumn {
     }
 
     /// Slices `offset..offset + len`, trimming and rebasing `run_ends` to `0..len`
-    /// and accounting for newly allocated buffers in `pool`.
+    /// and reserving the sliced column's full `memory_bytes()` in `pool` (rolling back on error).
     pub fn slice(
         &self,
         offset: usize,
@@ -3580,13 +3607,22 @@ impl RleColumn {
                 reason: "rle column slice out of bounds",
             });
         }
+        let before = pool.as_ref().map_or(0, |p| p.size());
         if len == 0 {
-            return Ok(Self {
+            let empty_bytes = empty_flat_memory_bytes(&self.data_type());
+            if let Some(res) = pool.as_deref_mut()
+                && let Err(err) = res.try_grow(empty_bytes)
+            {
+                rollback_reservation(pool, before);
+                return Err(err);
+            }
+            let empty = Self {
                 values: Arc::new(FlatColumn::empty(&self.data_type())),
                 run_ends: Vec::new(),
-            });
+            };
+            debug_assert_eq!(empty.memory_bytes(), empty_bytes);
+            return Ok(empty);
         }
-        let before = pool.as_ref().map_or(0, |p| p.size());
         let end_row = offset + len;
         let first_run = self
             .run_ends
@@ -3619,10 +3655,12 @@ impl RleColumn {
             .iter()
             .map(|&re| ((re as usize).min(end_row) - offset) as u32)
             .collect();
-        Ok(Self {
+        let out = Self {
             values: Arc::new(new_values),
             run_ends: new_run_ends,
-        })
+        };
+        reconcile_reservation(pool, before, out.memory_bytes())?;
+        Ok(out)
     }
 
     /// Deterministic logical heap bytes (`values.memory_bytes() + run_ends.len() * 4`).
@@ -4016,8 +4054,8 @@ impl Column {
         }
     }
 
-    /// Slices `offset..offset + len` (`Const` is O(1)), accounting for newly allocated slice
-    /// buffers in `pool` when `Some` (rolling back on error).
+    /// Slices `offset..offset + len` (`Const` is O(1)), reserving the sliced column's full
+    /// `memory_bytes()` in `pool` when `Some` (rolling back on error).
     pub fn slice(
         &self,
         offset: usize,
@@ -4942,7 +4980,7 @@ mod tests {
     }
 
     #[test]
-    fn dict_slice_shares_values_arc_and_accounts_only_new_buffers() {
+    fn dict_slice_shares_values_arc_and_reserves_memory_bytes() {
         let dict_vals = FlatColumn::try_new(
             FlatData::Utf8(
                 Utf8Data::try_from_slices(["alpha_long_entry", "beta_long_entry"]).unwrap(),
@@ -4961,13 +4999,45 @@ mod tests {
         let mut res = scope.register("dict_slice", true);
         let sliced = dict.slice(1, 2, Some(&mut res)).unwrap();
         assert!(Arc::ptr_eq(dict.values_arc(), sliced.values_arc()));
-        // Only codes (2 * 4 = 8) + nulls (8) = 16 bytes newly allocated; dictionary is shared.
-        assert_eq!(res.size(), 16);
+        assert_eq!(res.size(), sliced.memory_bytes());
+        res.shrink(sliced.memory_bytes());
+        assert_eq!(res.size(), 0);
 
-        // Tight pool smaller than 16 bytes rejects and rolls back cleanly.
-        let tight = GlobalPool::standalone(15);
+        // Tight pool smaller than sliced.memory_bytes() rejects and rolls back cleanly.
+        let tight = GlobalPool::standalone(sliced.memory_bytes() - 1);
         let mut tight_res = tight.register("tight", true);
         let err = dict.slice(1, 2, Some(&mut tight_res)).unwrap_err();
+        assert!(matches!(err, ColumnError::MemoryLimit { .. }));
+        assert_eq!(tight_res.size(), 0);
+    }
+
+    #[test]
+    fn rle_slice_zero_len_reserves_empty_memory_bytes() {
+        let map_col = FlatColumn::try_new(
+            FlatData::MapUtf8(Box::new(
+                MapData::try_new(
+                    vec![0, 1],
+                    Utf8Data::try_from_slices(["k"]).unwrap(),
+                    Utf8Data::try_from_slices(["v"]).unwrap(),
+                    None,
+                )
+                .unwrap(),
+            )),
+            None,
+        )
+        .unwrap();
+        let rle = RleColumn::try_new(map_col, vec![3]).unwrap();
+
+        let scope = GlobalPool::standalone(4096);
+        let mut res = scope.register("rle_empty", true);
+        let empty = rle.slice(1, 0, Some(&mut res)).unwrap();
+        assert_eq!(empty.len(), 0);
+        assert!(empty.memory_bytes() > 0);
+        assert_eq!(res.size(), empty.memory_bytes());
+
+        let tight = GlobalPool::standalone(empty.memory_bytes() - 1);
+        let mut tight_res = tight.register("tight_rle_empty", true);
+        let err = rle.slice(1, 0, Some(&mut tight_res)).unwrap_err();
         assert!(matches!(err, ColumnError::MemoryLimit { .. }));
         assert_eq!(tight_res.size(), 0);
     }
