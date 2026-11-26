@@ -27,7 +27,6 @@ use cetra_query::{EvalContext, QueryError};
 use chrono::NaiveDate;
 
 use crate::catalog::{Committer, FileMeta, FileTable, now_ns};
-use crate::deletion::project_snapshot;
 use crate::engine::mem_source::MemtableSource;
 use crate::engine::parquet_source::ParquetSource;
 use crate::error::{MediaError, query_err_to_df};
@@ -106,7 +105,6 @@ impl MediaGc {
         committer: Arc<Committer>,
         objects: Arc<Objects>,
         published: Arc<Published>,
-        _runtime: Arc<datafusion::execution::runtime_env::RuntimeEnv>,
         _target_partitions: NonZeroUsize,
         _lookback: i64,
         hooks: Hooks,
@@ -273,26 +271,6 @@ impl MediaGc {
             .cloned()
             .collect();
 
-        let has_late = keep_from.is_some_and(|keep| {
-            state
-                .spans
-                .partitions
-                .keys()
-                .any(|key| key.project == project && key.day < keep)
-        });
-        let spans_snapshot = if deletions.is_empty() && !has_late {
-            Arc::clone(&state.spans)
-        } else {
-            project_snapshot(Table::Spans, &state.spans, project, keep_from, &deletions).map_err(
-                |err| match err {
-                    crate::error::QueryError::DataFusion(e) => MediaError::Query(e),
-                    crate::error::QueryError::Busy => {
-                        MediaError::Query(query_err_to_df(QueryError::Busy))
-                    }
-                },
-            )?
-        };
-
         let schema = FileTable::Spans.column_schema();
         let media_refs_idx = schema.index_of(spans::MEDIA_REFS).ok_or_else(|| {
             query_err_to_media(QueryError::internal("spans schema missing media_refs"))
@@ -309,9 +287,14 @@ impl MediaGc {
             suspects,
             self.runtime_handle.clone(),
         );
-        let mem_source =
-            MemtableSource::new(Table::Spans, project, keep_from, spans_snapshot, deletions)
-                .map_err(query_err_to_media)?;
+        let mem_source = MemtableSource::new(
+            Table::Spans,
+            project,
+            keep_from,
+            Arc::clone(&state.spans),
+            deletions,
+        )
+        .map_err(query_err_to_media)?;
         let union = UnionSource::new(schema, vec![Arc::new(parquet_source), Arc::new(mem_source)])
             .map_err(query_err_to_media)?;
 

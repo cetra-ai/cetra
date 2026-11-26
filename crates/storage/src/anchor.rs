@@ -19,7 +19,7 @@ use crate::catalog::{Catalog, FileMeta, FileTable, now_ns};
 use crate::error::AnchorError;
 use crate::memtable::{FrozenView, PartitionKey};
 use crate::objects::Objects;
-use crate::verify::{VerifyQueue, is_store_error};
+use crate::verify::VerifyQueue;
 
 /// Nanoseconds in a UTC day.
 pub(crate) const DAY_NS: i64 = 86_400_000_000_000;
@@ -121,7 +121,7 @@ impl Anchors {
                     return Err(AnchorError::column(spans::TRACE_ID));
                 };
                 if read_ts(start, row).is_none() {
-                    return Err(AnchorError::column(spans::TRACE_ID));
+                    return Err(AnchorError::column(spans::START_TIME));
                 }
                 let index = u32::try_from(row).map_err(|_| {
                     AnchorError::from_column(ColumnError::Overflow {
@@ -232,8 +232,8 @@ impl Anchors {
         for file in &files {
             match self.rebuild_file(file, objects.store(), since).await {
                 Ok(rows) => rows_read = rows_read.saturating_add(rows),
-                Err(AnchorError::Parquet(error)) if is_store_error(&error) => {
-                    return Err(AnchorError::Parquet(error));
+                Err(error) if error.is_store_error() => {
+                    return Err(error);
                 }
                 Err(_) => {
                     // The anchors collected from this file stay: they are hints.

@@ -2,12 +2,14 @@
 //!
 //! [`covered_predicate`] is the one place the covered-row rule exists (D-A1-3):
 //! queries, flush and compaction all use it.
-#![allow(dead_code)]
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
 
-use arrow::array::{Array, AsArray, RecordBatch};
+use arrow::array::RecordBatch;
+#[cfg(test)]
+use arrow::array::{Array, AsArray};
+#[cfg(test)]
 use arrow::compute::{filter_record_batch, not, prep_null_mask_filter};
 use arrow::datatypes::{DataType, Schema, SchemaRef};
 use cetra_core::ids::{ProjectId, TraceId};
@@ -319,6 +321,7 @@ pub(crate) fn applicable(
 /// A null predicate value counts as "not covered": `prep_null_mask_filter`
 /// turns it into `false` before the negation, a second guard behind the
 /// `IS NOT NULL` terms of [`covered_predicate`].
+#[cfg(test)]
 pub(crate) fn drop_covered(
     batch: &RecordBatch,
     predicate: &Arc<dyn PhysicalExpr>,

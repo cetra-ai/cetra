@@ -66,7 +66,7 @@ fn encode_within(
 ) -> Result<(), WalError> {
     let mut payload = Vec::new();
     cetra_column::frame::encode_batch_with_limit(batch, &mut payload, max_decoded)
-        .map_err(WalError::from_column)?;
+        .map_err(|err| WalError::from_column(&err))?;
     let Ok(len) = u32::try_from(payload.len()) else {
         return Err(WalError::InvalidPayload {
             reason: "payload exceeds 256MiB",
@@ -156,7 +156,7 @@ pub(crate) fn read_batch(payload: &[u8], table: Table) -> Result<Batch, WalError
         });
     }
     let batch = cetra_column::frame::decode_batch(payload, Some(&table.column_schema()), None)
-        .map_err(WalError::from_column)?;
+        .map_err(|err| WalError::from_column(&err))?;
     if !batch.columns().iter().all(is_all_flat) {
         return Err(WalError::InvalidPayload {
             reason: "non-flat column encoding in WAL record",
