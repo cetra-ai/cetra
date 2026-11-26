@@ -270,7 +270,13 @@ impl DiffHarness {
         .await;
 
         let mut spans_mt = Memtable::new(Table::Spans);
-        spans_mt.insert(project(), span_rows(mem_spans), 1).unwrap();
+        spans_mt
+            .insert(
+                project(),
+                record_batch_to_column(&span_rows(mem_spans)).unwrap(),
+                1,
+            )
+            .unwrap();
 
         // Scores: dataset_scores + evaluator/rule/experiment/LWW/tombstone scores.
         let mut all_scores = dataset_scores();
@@ -382,7 +388,11 @@ impl DiffHarness {
         .await;
         let mut scores_mt = Memtable::new(Table::Scores);
         scores_mt
-            .insert(project(), score_rows(mem_scores), 1)
+            .insert(
+                project(),
+                record_batch_to_column(&score_rows(mem_scores)).unwrap(),
+                1,
+            )
             .unwrap();
 
         // GDPR tombstones
