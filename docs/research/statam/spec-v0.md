@@ -15,7 +15,7 @@
    - Strictly smaller on `W1` (agent trajectories), `W2` (multi-turn chat), `W3` (narrow spans/scores), and within ≤ 5% on `W4` (adversarial/incompressible).
    - `WriteProfile::L0Fast` strictly faster than `pq_cetra` on all 4 workloads; `WriteProfile::L1Compact` competitive with or faster than `pq_cetra` at higher compression density.
    - Strictly lower read latency (local warm/cold and simulated S3 with 25 ms/GET + 100 MB/s + exact 1 MiB `ReadCache` block rounding) on narrow scans, aggregates, top-k, `map['key']`, point lookups (`trace_detail`/`span_detail`), and substring search (`LIKE`/`ILIKE`).
-   - Cold file open + prune in **≤ 1 GET** (`DEFAULT_TAIL_HINT = 128 KiB` default tail fetch; `120 KiB` soft / `1 MiB` hard Hot Tail budget); point lookup in **≤ 2 GETs** and strictly fewer S3 bytes than `pq_tuned` and `pq_cetra` (see exact GET accounting in §3.3 & §5.2).
+   - Cold file open + prune in **1 GET** when compressed Hot Tail `<= DEFAULT_TAIL_HINT` (`128 KiB`), or **2 GETs** when Hot Tail exceeds `128 KiB` (up to `1 MiB` hard Hot Tail budget); point lookup in **≤ 2 GETs** (metadata-cached) and strictly fewer S3 bytes than `pq_tuned` and `pq_cetra` (see exact GET accounting in §3.3 & §5.2).
    - Fast L1 compaction merge (zero recompression of surviving chunks), O(1) day retention drop, and **airtight GDPR erasure** (0 bytes of erased payloads surviving on disk or S3).
 3. **Controlled, audited `unsafe` SIMD** inside `crates/statam` only (AVX2 / NEON with safe portable scalar fallback), verified by `cargo miri test` (on all pure-Rust/scalar/SIMD-dispatch tests) and a committed `cargo fuzz` target (`statam_file`), with zero panics, zero OOM aborts, and privacy-safe `Debug`/errors.
 4. **Encryption-at-rest readiness:** reserved header/postscript envelope slot for optional per-file / per-pack AEAD encryption (zero byte/CPU overhead when off; non-breaking to enable later).
@@ -38,15 +38,15 @@ Statam defines **two immutable binary file types** backed by an abstract byte-ra
 2. **Chunk Pack (`.stpk`, L1 only):** Immutable content-addressed payload store scoped strictly to one `(project_id, day)`, keyed by **BLAKE3-128** (`[u8; 16]`). Packs unique chunks into **`512 KiB` raw `Zstd(3)` frames** by default (configurable via `target_frame_raw_bytes`; guarded on `W4` bypass with single-chunk empty `EdgeTable` entries; 1 MiB `ReadCache` boundary-guarded for `< 32 KiB` frames within `< 8 KiB` of boundary), with a compact read-path TOC (LZ4 or Zstd-3 delta-coded `ChunkLoc`s, optional 16 B hashes kept in a separate compaction-only section controlled by `emit_hash_table` so read-path TOC stays tiny!), `TS02` trigram skip section (dynamic 4 KiB / 8 KiB edge tail/head blooms + adaptive per-frame blooms capped at `min(stored_len / 6, raw.len() / 32)` up to 16 KiB), boundary-pruned `head_63 + tail_63` edge table (`edge_table_len == 0` when all rows are single-chunk), and opt-in `PF`-framed Zstd `DictSection` (`ChunkPackBuilder::new_with_dict`, trained once unique raw chunks reach `>= 2 MiB`).
 
 ### Public Crate API (`crates/statam`)
-- **Profiles & Options:** `WriteProfile::{L0Fast, L1Compact}`, `WriteOptions` (including `mini_block_size = 8_192`, `write_threads`), `PackWriteOptions` (including `target_frame_raw_bytes = 512 KiB`, `write_threads`, `emit_hash_table`), `TableKind::{Generic, Spans, Traces, Scores}`.
+- **Profiles & Options:** `WriteProfile::{L0Fast, L1Compact}`, `WriteOptions` (including `mini_block_size = MINI_BLOCK_SIZE = 8_192`, `max_row_group_bytes = 64 MiB`, `write_threads`), `PackWriteOptions` (including `target_frame_raw_bytes = 512 KiB`, `write_threads`, `emit_hash_table`), `TableKind::{Generic, Spans, Traces, Scores}`.
 - **Writers:**
-  - `StatamWriter::new(schema: Arc<Schema>, options: WriteOptions, pack_builder: Option<&mut ChunkPackBuilder>)` -> `write_batch(&mut self, batch: &Batch)` -> `finish<W: Write>(self, out: W) -> Result<WriteStats, StatamError>`
+  - `StatamWriter::new<W: Write + Seek>(out: W, schema: Arc<Schema>, options: WriteOptions, pack_builder: Option<&mut ChunkPackBuilder>)` -> `write_batch(&mut self, batch: &Batch)` -> `finish(self) -> Result<WriteStats, StatamError>` (streams Row Groups directly to `out`, patches the 32-byte header at `start_offset`, seeks to EOF, and calls `flush()`)
   - `ChunkPackBuilder::new(pack_id: [u8; 16], options: PackWriteOptions)` (plus `enable_boundary_tracking()`) -> `intern_chunk(&mut self, bytes: &[u8]) -> Result<u32, StatamError>` -> `finish<W: Write>(self, out: W) -> Result<PackWriteStats, StatamError>`
 - **Readers & I/O:**
   - `RangeReader`: `file_len(&self) -> u64`, `read_range(&self, range: Range<u64>) -> Result<Bytes, StatamError>`, `read_ranges(&self, ranges: &[Range<u64>]) -> Result<Vec<Bytes>, StatamError>`.
   - Built-in impls: `SliceReader`, `FileReader`, `SimulatedS3Reader` (exact `ReadCache` 1 MiB aligned block rounding `(start / 1MiB)..=((end - 1) / 1MiB)` + consecutive-run coalescing + configurable RTT/bandwidth + `IoCounters`).
   - `PackResolver` trait: resolves `pack_id: [u8; 16]` -> `Arc<ChunkPackReader>` (with cached `PackToc`, `FlatEdgeTable`, and `TS02` trigram blooms).
-  - `StatamFileMeta::read_from(reader: &dyn RangeReader, tail_hint: Option<u32>) -> Result<Self, StatamError>` (1-GET cold open; validates Postscript CRC-32C + Hot Tail CRC-32C; never needs byte 0 unless byte 0 is already inside the fetched slice or `verify_full` is called).
+  - `StatamFileMeta::read_from(reader: &dyn RangeReader, tail_hint: Option<u32>) -> Result<Self, StatamError>` (1-GET cold open when Hot Tail `<= tail_hint`, else 2 GETs; validates Postscript CRC-32C + Hot Tail CRC-32C; never needs byte 0 unless byte 0 is already inside the fetched slice or `verify_full` is called).
   - `StatamReader::open(reader, resolver)` / `open_with_meta(reader, meta, resolver)` -> `scan(&self, req: &ScanRequest) -> Result<Vec<Batch>, StatamError>` and `take_rows(&self, row_indices: &[u64], projection: Option<&[usize]>, read_threads: usize) -> Result<Vec<Batch>, StatamError>` (random-access sparse decode).
   - `ScanRequest`: `projection: Option<Vec<usize>>` (`Some(vec![])` emits 0-col row-count batches), `map_keys: Vec<(String, String)>` (prunes projected `MapUtf8` columns to only requested keys when specified), `time_range: TimeRange`, `id_lookups: Vec<IdLookup>`, `predicates: Vec<Predicate>`, `substrings: Vec<SubstringQuery>`, `sort_desc_hint: bool` (enables reverse RG iteration for `start_time DESC LIMIT k`), `limit: Option<usize>`, `coalesce_mode: CoalesceMode::{Auto, Point, Scan}`, `read_threads: usize` (`0`/`1` sequential, clamped to `1..=32`).
 - **GDPR Erasure:** `gdpr_rewrite_day(...) -> Result<GdprRewriteReport, StatamError>` (single-rewrite protocol, §5.4).
@@ -171,12 +171,12 @@ When `flags & FLAG_ENCRYPTED != 0`: `enc_envelope_offset..enc_envelope_offset + 
    - **Lazy Index Directory (`lazy_dir_off`):** Array of **24 B entries** `{kind: u8 (1=Bloom, 2=Dict, 3=NarrowTrigram), reserved: [u8; 3], phys_col_id: u32, offset: u64, len: u32, crc32c: u32}`.
 
 6. **File-Level Dictionary Wire Format:**
-   - **12 B header:** `magic: b"DT01"`, `entry_count: u32`, `codec: u8 (0=None, 1=Lz4, 2=Zstd)`, `value_kind: u8 (0=Utf8, 1=Binary, 2=Fixed8, 3=Fixed16)`, `reserved: u16`, `raw_len: u32`, `crc32c: u32` (20 B total), followed by body (`[u32; entry_count + 1]` offsets + bytes for var-width, or fixed bytes).
-   - **Pass-through cap:** `StatamReader` emits `Column::Dict` directly when `dict_raw_bytes <= 256 KiB` (avoiding cloning multi-MB dicts per 4k mini-block); larger dicts materialize per mini-block.
+   - **20 B header:** `magic: b"DT01"`, `entry_count: u32`, `codec: u8 (0=None, 1=Lz4, 2=Zstd)`, `value_kind: u8 (0=Utf8, 1=Binary, 2=Fixed8, 3=Fixed16)`, `reserved: u16`, `raw_len: u32`, `crc32c: u32` (20 B total), followed by body (`[u32; entry_count + 1]` offsets + bytes for var-width, or fixed bytes).
+   - **Pass-through cap:** `StatamReader` emits `Column::Dict` directly when `dict_raw_bytes <= 256 KiB` (avoiding cloning multi-MB dicts per 8k mini-block); larger dicts materialize per mini-block.
 
 ### 3.5 Data Block Framing (16 B Header)
-Every non-inline data block starts with **16 B**: `magic: b"SB"`, `encoding: u8`, `codec: u8`, `raw_len: u32`, `stored_len: u32`, `crc32c: u32` (CRC-32C over the `stored_len` bytes following the header).  
-**Incompressibility guard:** Store compressed ONLY if `compressed.len() + 16 < raw.len()`, else `codec = 0 (None)`.
+Every non-inline data block starts with **16 B**: `magic: b"SB"`, `encoding: u8`, `codec: u8`, `raw_len: u32`, `stored_len: u32`, `crc32c: u32` (header-inclusive CRC-32C over header prefix `frame[0..12]` followed by the `stored_len` bytes after the header). Runtime readers validate `encoding`, `codec`, and `raw_len` against the corresponding `BlockEntry` and return `Cow::Borrowed` zero-copy when `codec == Codec::None`.  
+**Incompressibility & minimum-savings guard:** Store compressed ONLY if `compressed.len() + 16 < raw.len()`, within `MAX_DECOMPRESS_RATIO`, and (when `min_savings_pct > 0 && raw.len() >= 1024`, e.g. Pass 11's `12%` threshold on high-entropy numeric/varlen blocks) saving at least `min_savings_pct` percent; else `codec = 0 (None)`.
 
 ---
 
@@ -223,18 +223,19 @@ Every non-inline data block starts with **16 B**: `magic: b"SB"`, `encoding: u8`
 [Frames 0..F-1]  (target 512 KiB raw Zstd(3) by default; 1 MiB ReadCache boundary guard for < 32 KiB frames:
   if cur_off % 1MiB leaves < 8 KiB before next 1 MiB boundary and frame < 32 KiB, pad to 1 MiB)
   FrameHeader (16 B): magic b"PF", codec u8 (0=None,1=Lz4,2=Zstd), flags u8 (0x01 USES_DICT),
-  raw_len u32, stored_len u32, crc32c u32
+  raw_len u32, stored_len u32, crc32c u32 (header-inclusive CRC-32C over header[0..12] || stored)
 
-[ChunkHashTable] (optional compaction-only: [ [u8; 16]; chunk_count ], NEVER read by queries;
-  omitted with `hash_table_off = 0` when `PackWriteOptions::emit_hash_table == false`)
+[ChunkHashTable] (optional compaction-only: [[u8; 16]; chunk_count] || crc32c: u32, NEVER read by queries;
+  omitted with `hash_table_off = 0` when `!PackWriteOptions::emit_hash_table || chunk_count == 0`)
 [TrigramSkipSection] (optional, `TS02` header:
-  magic: b"TS02", edge_bloom_bytes: u32 (4096 if stored_frame_bytes < 2 MiB else 8192), reserved: u32=0,
+  magic: b"TS02", edge_bloom_bytes: u32 (4096 if stored_frame_bytes < 2 MiB else 8192),
+  crc32c: u32 (CRC-32C over header[0..8] || section[12..]),
   edge_tail_bloom: [u8; edge_bloom_bytes] (ASCII-lowercased trigrams of every chunk's tail_63),
   edge_head_bloom: [u8; edge_bloom_bytes] (ASCII-lowercased trigrams of every chunk's head_63),
   followed by per-frame lowercase ASCII trigram bloom filters with `filter_off` relative to section start;
   cap = clamp(min(stored_len / 6, clamp(raw_len / 32, 256, 16_384)), 256, 16_384) rounded down to power of 2;
   omitted (filter_len = 0) if stored_len < 1024 or bit density > 72%; `TS02` magic required when `trigram_len > 0`)
-[EdgeTable] (Zstd-3 compressed: per unique chunk [u8 head_len, head_bytes (<=63), u8 tail_len, tail_bytes (<=63)];
+[EdgeTable] (`PF`-framed Zstd-3 compressed payload capped at `MAX_BLOCK_RAW_BYTES = 64 MiB`: per unique chunk [u8 head_len, head_bytes (<=63), u8 tail_len, tail_bytes (<=63)];
   when boundary tracking is enabled, omitted (`edge_table_len = 0`) if all rows are single-chunk, and non-boundary
   chunks store zero-length edges on mixed packs; multi-chunk rows referencing an `edge_table_len == 0` pack return `Corrupt`)
 [DictSection] (opt-in via `ChunkPackBuilder::new_with_dict`, 0 B by default or when unique raw chunks < 2 MiB; otherwise a `PF`-framed Zstd-3 compressed
@@ -255,7 +256,7 @@ Every non-inline data block starts with **16 B**: `magic: b"SB"`, `encoding: u8`
 *Exact PackPostscript sum: `4+4+2+2+4+16+4+4+8+8+4+4+8+8+4+8+4+4+4+4+4 = 112 B`.*
 
 **Exact S3 GET Budget Analysis (Gate #4):**
-- **Cold `.statam` open + prune:** **1 GET** (`min(file_len, 128 KiB)` reads LZ4-compressed Hot Tail without straddling 1 MiB `ReadCache` block boundaries).
+- **Cold `.statam` open + prune:** **1 GET** when compressed Hot Tail `<= 128 KiB` (`min(file_len, 128 KiB)` reads LZ4-compressed Hot Tail without straddling 1 MiB `ReadCache` block boundaries), or **2 GETs** for larger files whose Hot Tail exceeds `128 KiB` (up to `1 MiB` hard budget).
 - **Point lookup (`trace_detail` narrow / `span_detail` / L0 full):** **≤ 2 GETs** (GET #1 Hot Tail, GET #2 contiguous `core_offset..wide_offset+wide_len` RG slice ≤ 1 MiB).
 - **Point lookup (`trace_detail` full `SELECT *` on L1 with external `.stpk`):**
   - Steady state (`.statam` Hot Tail + day's `.stpk` Pack TOC cached in `MetadataCache`): **1 GET** on `.statam` RG + **1 coalesced GET** on `.stpk` frames = **2 GETs**, ~0.2–0.8 MiB total (vs `pq_cetra` 74 GETs / 2.6 MiB and `pq_tuned` 101 GETs / 3.4 MiB).
@@ -287,7 +288,7 @@ Every non-inline data block starts with **16 B**: `magic: b"SB"`, `encoding: u8`
 
 ## 6. Streaming Writer Memory & Profile Matrix
 
-**Bounded `L1Compact` Streaming:** `StatamWriter` buffers at most **1 Row Group (`131,072` rows)** at a time. RG0 determines the `ShreddedMap` promoted keys (`<= 64`, `>= 5%` presence) and initial sorted file-level dicts (`<= 16,384` entries). In RG1..G-1, unseen map keys spill to residual (updating `residual_count`), and unseen string values in dict-encoded columns fall back to `Fsst`/`Plain` for that mini-block — guaranteeing bounded O(1 RG) RAM even on multi-hundred-MB compactions.
+**Bounded `L1Compact` Streaming:** `StatamWriter<'a, W: Write + Seek>` buffers at most **1 Row Group** (`<= row_group_size` rows and `<= max_row_group_bytes`, default `131,072` rows / `64 MiB` encoded/stored bytes) and streams each flushed RG directly into `W` without retaining previous RG blobs in RAM. RG0 determines the `ShreddedMap` promoted keys (`<= 64`, `>= 5%` presence) and initial sorted file-level dicts (`<= 16,384` entries). In RG1..G-1, unseen map keys spill to residual (updating `residual_count`), and unseen string values in dict-encoded columns fall back to `Fsst`/`Plain` for that mini-block — guaranteeing bounded O(1 RG) RAM even on multi-hundred-MB compactions.
 
 *(Profile table: `L0Fast` = self-contained, FastLanes + Rle (64-element sample) + Const + bounded hash-dict ≤ 512 + Plain MapUtf8 + `Lz4` on `>= 64 B` varlen/nested/`Plain`/`PayloadRefs` + `Zstd(-5)`/`Lz4(<1 KiB)` on 512 KiB local frames + `Codec::None` on fixed-width/For/Delta/BitpackBool/Rle/Dict + AVX2 SBBF, no map shredding / no FSST / no trigrams / no `.stpk`; `L1Compact` = full cascade + ALP + sorted Dict + FSST (non-WideRow) + ShreddedMap + `Zstd(3)` on all non-inline mini-block encodings and shredded sub-columns + Structural JSON/FastCDC + BLAKE3-128 `.stpk` `Zstd(3)` 512 KiB frames + `TS02` trigram + boundary-pruned edge table + opt-in streaming Zstd dict via `new_with_dict` for `>= 2 MiB` packs.)*
 

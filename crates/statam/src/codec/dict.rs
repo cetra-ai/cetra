@@ -5,12 +5,12 @@
 //! dictionaries, plus zero-expansion `Column::Dict` pass-through up to 256 KiB.
 
 use std::cmp::Ordering;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::hash::BuildHasherDefault;
 
 #[derive(Default)]
-struct FastSliceHasher(u64);
+pub(crate) struct FastSliceHasher(u64);
 
 impl std::hash::Hasher for FastSliceHasher {
     #[inline]
@@ -121,6 +121,9 @@ impl fmt::Debug for FileDict {
 
 impl FileDict {
     /// Constructs a [`FileDict`] from a validated non-null `FlatColumn`.
+    ///
+    /// Enforces strict ascending order (`prev < cur`) when `sorted == true`, and
+    /// entry uniqueness (via HashDoS-safe `HashSet`) when `sorted == false`.
     pub fn from_flat(values: FlatColumn, sorted: bool) -> Result<Self, StatamError> {
         if values.has_nulls() {
             return Err(StatamError::SchemaMismatch {
@@ -132,6 +135,7 @@ impl FileDict {
                 reason: "unsupported dictionary value data type",
             });
         }
+        validate_dict_entries(&values, sorted)?;
         Ok(Self { values, sorted })
     }
 
@@ -422,11 +426,46 @@ impl FileDict {
         };
 
         let flat = FlatColumn::try_new(data, None)?;
-        Ok(Self {
-            values: flat,
-            sorted,
-        })
+        Self::from_flat(flat, sorted)
     }
+}
+
+fn validate_dict_entries(values: &FlatColumn, sorted: bool) -> Result<(), StatamError> {
+    let n = values.len();
+    if n <= 1 {
+        return Ok(());
+    }
+    if sorted {
+        let mut prev = flat_row_bytes(values, 0).ok_or(StatamError::Corrupt {
+            reason: "dictionary entry missing",
+        })?;
+        for i in 1..n {
+            let cur = flat_row_bytes(values, i).ok_or(StatamError::Corrupt {
+                reason: "dictionary entry missing",
+            })?;
+            if prev >= cur {
+                return Err(StatamError::Corrupt {
+                    reason: "sorted dictionary entries are not strictly ascending",
+                });
+            }
+            prev = cur;
+        }
+    } else {
+        // Use std HashSet (SipHash-1-3) so untrusted unsorted dicts cannot trigger HashDoS,
+        // and cap initial reservation so a duplicate-heavy dict fails before large allocations.
+        let mut seen: HashSet<&[u8]> = HashSet::with_capacity(n.min(4_096));
+        for i in 0..n {
+            let cur = flat_row_bytes(values, i).ok_or(StatamError::Corrupt {
+                reason: "dictionary entry missing",
+            })?;
+            if !seen.insert(cur) {
+                return Err(StatamError::Corrupt {
+                    reason: "dictionary contains duplicate entries",
+                });
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Profile mode for [`DictBuilder`].
@@ -727,6 +766,83 @@ pub fn encode_dict_codes_body(
     Ok(out)
 }
 
+struct ParsedDictRle {
+    run_ends: Vec<u32>,
+    rv_base: u32,
+    rv_deltas: Vec<u32>,
+}
+
+fn parse_dict_rle_body(src: &[u8], row_count: usize) -> Result<ParsedDictRle, StatamError> {
+    if src.len() < 6 {
+        return Err(StatamError::Corrupt {
+            reason: "truncated dict Rle header",
+        });
+    }
+    let num_runs = u32::from_le_bytes([src[1], src[2], src[3], src[4]]) as usize;
+    if num_runs == 0 || num_runs > row_count {
+        return Err(StatamError::Corrupt {
+            reason: "invalid dict Rle num_runs",
+        });
+    }
+    let re_bw = src[5];
+    if re_bw > 32 {
+        return Err(StatamError::Corrupt {
+            reason: "invalid u32 bit_width",
+        });
+    }
+    let re_bytes = packed_bytes_len(num_runs, re_bw)?;
+    let pos_after_re = 6 + re_bytes;
+    if src.len() < pos_after_re + 5 {
+        return Err(StatamError::Corrupt {
+            reason: "truncated dict Rle values header",
+        });
+    }
+    let rv_base = u32::from_le_bytes([
+        src[pos_after_re],
+        src[pos_after_re + 1],
+        src[pos_after_re + 2],
+        src[pos_after_re + 3],
+    ]);
+    let rv_bw = src[pos_after_re + 4];
+    if rv_bw > 32 {
+        return Err(StatamError::Corrupt {
+            reason: "invalid u32 bit_width",
+        });
+    }
+    let rv_bytes = packed_bytes_len(num_runs, rv_bw)?;
+    if src.len() != pos_after_re + 5 + rv_bytes {
+        return Err(StatamError::Corrupt {
+            reason: "dict Rle length mismatch",
+        });
+    }
+
+    let mut run_ends = Vec::with_capacity(num_runs);
+    unpack_u32(&src[6..pos_after_re], num_runs, re_bw, &mut run_ends)?;
+    let mut prev = 0u32;
+    for &end in &run_ends {
+        if end <= prev || (end as usize) > row_count {
+            return Err(StatamError::Corrupt {
+                reason: "invalid dict Rle run_ends",
+            });
+        }
+        prev = end;
+    }
+    if prev as usize != row_count {
+        return Err(StatamError::Corrupt {
+            reason: "dict Rle run_ends do not cover row_count",
+        });
+    }
+
+    let mut rv_deltas = Vec::with_capacity(num_runs);
+    unpack_u32(&src[pos_after_re + 5..], num_runs, rv_bw, &mut rv_deltas)?;
+
+    Ok(ParsedDictRle {
+        run_ends,
+        rv_base,
+        rv_deltas,
+    })
+}
+
 /// Decodes `u32` dictionary codes (without leading row null bitmap) for `row_count` rows.
 pub fn decode_dict_codes_body(
     src: &[u8],
@@ -765,6 +881,11 @@ pub fn decode_dict_codes_body(
             }
             let base = u32::from_le_bytes([src[1], src[2], src[3], src[4]]);
             let bw = src[5];
+            if bw > 32 {
+                return Err(StatamError::Corrupt {
+                    reason: "invalid u32 bit_width",
+                });
+            }
             let needed = packed_bytes_len(row_count, bw)?;
             if src.len() != 6 + needed {
                 return Err(StatamError::Corrupt {
@@ -782,62 +903,11 @@ pub fn decode_dict_codes_body(
             out
         }
         1 => {
-            if src.len() < 6 {
-                return Err(StatamError::Corrupt {
-                    reason: "truncated dict Rle header",
-                });
-            }
-            let num_runs = u32::from_le_bytes([src[1], src[2], src[3], src[4]]) as usize;
-            if num_runs == 0 || num_runs > row_count {
-                return Err(StatamError::Corrupt {
-                    reason: "invalid dict Rle num_runs",
-                });
-            }
-            let re_bw = src[5];
-            let re_bytes = packed_bytes_len(num_runs, re_bw)?;
-            let pos_after_re = 6 + re_bytes;
-            if src.len() < pos_after_re + 5 {
-                return Err(StatamError::Corrupt {
-                    reason: "truncated dict Rle values header",
-                });
-            }
-            let mut run_ends = Vec::with_capacity(num_runs);
-            unpack_u32(&src[6..pos_after_re], num_runs, re_bw, &mut run_ends)?;
-            let mut prev = 0u32;
-            for &end in &run_ends {
-                if end <= prev || (end as usize) > row_count {
-                    return Err(StatamError::Corrupt {
-                        reason: "invalid dict Rle run_ends",
-                    });
-                }
-                prev = end;
-            }
-            if prev as usize != row_count {
-                return Err(StatamError::Corrupt {
-                    reason: "dict Rle run_ends do not cover row_count",
-                });
-            }
-
-            let rv_base = u32::from_le_bytes([
-                src[pos_after_re],
-                src[pos_after_re + 1],
-                src[pos_after_re + 2],
-                src[pos_after_re + 3],
-            ]);
-            let rv_bw = src[pos_after_re + 4];
-            let rv_bytes = packed_bytes_len(num_runs, rv_bw)?;
-            if src.len() != pos_after_re + 5 + rv_bytes {
-                return Err(StatamError::Corrupt {
-                    reason: "dict Rle length mismatch",
-                });
-            }
-            let mut rv_deltas = Vec::with_capacity(num_runs);
-            unpack_u32(&src[pos_after_re + 5..], num_runs, rv_bw, &mut rv_deltas)?;
-
+            let parsed = parse_dict_rle_body(src, row_count)?;
             let mut out = Vec::with_capacity(row_count);
             let mut cur_start = 0usize;
-            for (&end, &d) in run_ends.iter().zip(&rv_deltas) {
-                let code = rv_base.checked_add(d).ok_or(StatamError::Corrupt {
+            for (&end, &d) in parsed.run_ends.iter().zip(&parsed.rv_deltas) {
+                let code = parsed.rv_base.checked_add(d).ok_or(StatamError::Corrupt {
                     reason: "dict Rle code overflow",
                 })?;
                 let end_usize = end as usize;
@@ -864,6 +934,85 @@ pub fn decode_dict_codes_body(
     Ok(codes)
 }
 
+/// Computes an accurate logical materialized byte estimate for a dictionary column,
+/// returning `Err(BoundsExceeded)` if it exceeds `limit`.
+pub(crate) fn dict_logical_materialized_bytes(
+    dict_values: &FlatColumn,
+    codes: &[u32],
+    nulls: Option<&Bitmap>,
+    limit: usize,
+) -> Result<usize, StatamError> {
+    let nulls_bytes = if nulls.is_some() {
+        codes.len().div_ceil(8)
+    } else {
+        0
+    };
+    let data_bytes = match dict_values.data() {
+        FlatData::Utf8(u) => {
+            let offsets_bytes = codes
+                .len()
+                .checked_add(1)
+                .and_then(|n| n.checked_mul(4))
+                .ok_or(StatamError::BoundsExceeded {
+                    reason: "materialized dict offsets overflow",
+                })?;
+            let payload = sum_varlen_take_bytes(u.offsets(), codes, nulls, limit)?;
+            offsets_bytes
+                .checked_add(payload)
+                .ok_or(StatamError::BoundsExceeded {
+                    reason: "materialized dict byte length overflow",
+                })?
+        }
+        FlatData::Binary(b) => {
+            let offsets_bytes = codes
+                .len()
+                .checked_add(1)
+                .and_then(|n| n.checked_mul(4))
+                .ok_or(StatamError::BoundsExceeded {
+                    reason: "materialized dict offsets overflow",
+                })?;
+            let payload = sum_varlen_take_bytes(b.offsets(), codes, nulls, limit)?;
+            offsets_bytes
+                .checked_add(payload)
+                .ok_or(StatamError::BoundsExceeded {
+                    reason: "materialized dict byte length overflow",
+                })?
+        }
+        FlatData::FixedBytes8(_) => {
+            codes
+                .len()
+                .checked_mul(8)
+                .ok_or(StatamError::BoundsExceeded {
+                    reason: "materialized Fixed8 dict overflow",
+                })?
+        }
+        FlatData::FixedBytes16(_) => {
+            codes
+                .len()
+                .checked_mul(16)
+                .ok_or(StatamError::BoundsExceeded {
+                    reason: "materialized Fixed16 dict overflow",
+                })?
+        }
+        _ => {
+            return Err(StatamError::SchemaMismatch {
+                reason: "unsupported dictionary value data type",
+            });
+        }
+    };
+    let total = data_bytes
+        .checked_add(nulls_bytes)
+        .ok_or(StatamError::BoundsExceeded {
+            reason: "materialized dict byte length overflow",
+        })?;
+    if total > limit {
+        return Err(StatamError::BoundsExceeded {
+            reason: "materialized dict bytes exceed MAX_BLOCK_RAW_BYTES",
+        });
+    }
+    Ok(total)
+}
+
 /// Decodes a `Dict` mini-block body into either `Column::Dict` (zero-expansion pass-through
 /// when `dict.memory_bytes() <= DICT_PASSTHROUGH_MAX_BYTES`) or a materialized `Column::Flat`.
 pub fn decode_dict_column(
@@ -882,6 +1031,12 @@ pub fn decode_dict_column(
     }
 
     if dict.memory_bytes() <= DICT_PASSTHROUGH_MAX_BYTES {
+        let _ = dict_logical_materialized_bytes(
+            dict.values(),
+            &codes,
+            nulls.as_ref(),
+            MAX_BLOCK_RAW_BYTES,
+        )?;
         let dc = DictColumn::try_new(dict.values().clone(), codes, nulls)?;
         return Ok(Column::Dict(dc));
     }
@@ -1017,72 +1172,23 @@ pub fn decode_dict_selected(
             }
         }
         1 => {
-            if src.len() < 6 {
-                return Err(StatamError::Corrupt {
-                    reason: "truncated dict Rle header",
-                });
-            }
-            let num_runs = u32::from_le_bytes([src[1], src[2], src[3], src[4]]) as usize;
-            if num_runs == 0 || num_runs > row_count {
-                return Err(StatamError::Corrupt {
-                    reason: "invalid dict Rle num_runs",
-                });
-            }
-            let re_bw = src[5];
-            let re_bytes = packed_bytes_len(num_runs, re_bw)?;
-            let pos_after_re = 6 + re_bytes;
-            if src.len() < pos_after_re + 5 {
-                return Err(StatamError::Corrupt {
-                    reason: "truncated dict Rle values header",
-                });
-            }
-            let mut run_ends = Vec::with_capacity(num_runs);
-            unpack_u32(&src[6..pos_after_re], num_runs, re_bw, &mut run_ends)?;
-            let mut prev = 0u32;
-            for &end in &run_ends {
-                if end <= prev || (end as usize) > row_count {
-                    return Err(StatamError::Corrupt {
-                        reason: "invalid dict Rle run_ends",
-                    });
-                }
-                prev = end;
-            }
-            if prev as usize != row_count {
-                return Err(StatamError::Corrupt {
-                    reason: "dict Rle run_ends do not cover row_count",
-                });
-            }
-
-            let rv_base = u32::from_le_bytes([
-                src[pos_after_re],
-                src[pos_after_re + 1],
-                src[pos_after_re + 2],
-                src[pos_after_re + 3],
-            ]);
-            let rv_bw = src[pos_after_re + 4];
-            let rv_bytes = packed_bytes_len(num_runs, rv_bw)?;
-            if src.len() != pos_after_re + 5 + rv_bytes {
-                return Err(StatamError::Corrupt {
-                    reason: "dict Rle length mismatch",
-                });
-            }
-            let mut rv_deltas = Vec::with_capacity(num_runs);
-            unpack_u32(&src[pos_after_re + 5..], num_runs, rv_bw, &mut rv_deltas)?;
+            let parsed = parse_dict_rle_body(src, row_count)?;
             if selected_count > 0 {
                 let mut run_idx = 0usize;
                 for row in mask.iter_ones() {
                     if row >= row_count {
                         break;
                     }
-                    while (run_ends[run_idx] as usize) <= row {
+                    while (parsed.run_ends[run_idx] as usize) <= row {
                         run_idx += 1;
                     }
                     if nulls.as_ref().is_none_or(|bm| bm.get(row)) {
-                        let code = rv_base.checked_add(rv_deltas[run_idx]).ok_or(
-                            StatamError::Corrupt {
+                        let code = parsed
+                            .rv_base
+                            .checked_add(parsed.rv_deltas[run_idx])
+                            .ok_or(StatamError::Corrupt {
                                 reason: "dict Rle code overflow",
-                            },
-                        )?;
+                            })?;
                         if (code as usize) >= dict_len {
                             return Err(StatamError::Corrupt {
                                 reason: "dict code out of bounds",
@@ -1093,8 +1199,8 @@ pub fn decode_dict_selected(
                 }
             } else {
                 let mut run_start = 0usize;
-                for (&end, &d) in run_ends.iter().zip(&rv_deltas) {
-                    let code = rv_base.checked_add(d).ok_or(StatamError::Corrupt {
+                for (&end, &d) in parsed.run_ends.iter().zip(&parsed.rv_deltas) {
+                    let code = parsed.rv_base.checked_add(d).ok_or(StatamError::Corrupt {
                         reason: "dict Rle code overflow",
                     })?;
                     let run_end = end as usize;
@@ -1139,6 +1245,12 @@ pub fn decode_dict_selected(
         } else {
             Some(out_nulls)
         };
+        let _ = dict_logical_materialized_bytes(
+            dict.values(),
+            &codes,
+            nulls_opt.as_ref(),
+            MAX_BLOCK_RAW_BYTES,
+        )?;
         let dc = DictColumn::try_new(dict.values().clone(), codes, nulls_opt)?;
         return Ok(Column::Dict(dc));
     }
@@ -1288,105 +1400,29 @@ pub(crate) fn decode_dict_take(
             }
         }
         1 => {
-            if after_nulls.len() < 6 {
-                return Err(StatamError::Corrupt {
-                    reason: "truncated dict Rle header",
-                });
-            }
-            let num_runs = u32::from_le_bytes([
-                after_nulls[1],
-                after_nulls[2],
-                after_nulls[3],
-                after_nulls[4],
-            ]) as usize;
-            if num_runs == 0 || num_runs > row_count {
-                return Err(StatamError::Corrupt {
-                    reason: "invalid dict Rle num_runs",
-                });
-            }
-            let re_bw = after_nulls[5];
-            if re_bw > 32 {
-                return Err(StatamError::Corrupt {
-                    reason: "invalid u32 bit_width",
-                });
-            }
-            let re_bytes = packed_bytes_len(num_runs, re_bw)?;
-            let pos_after_re = 6 + re_bytes;
-            if after_nulls.len() < pos_after_re + 5 {
-                return Err(StatamError::Corrupt {
-                    reason: "truncated dict Rle values header",
-                });
-            }
-            let mut run_ends = Vec::with_capacity(num_runs);
-            unpack_u32(
-                &after_nulls[6..pos_after_re],
-                num_runs,
-                re_bw,
-                &mut run_ends,
-            )?;
-            let mut prev = 0u32;
-            for &end in &run_ends {
-                if end <= prev || (end as usize) > row_count {
-                    return Err(StatamError::Corrupt {
-                        reason: "invalid dict Rle run_ends",
-                    });
-                }
-                prev = end;
-            }
-            if prev as usize != row_count {
-                return Err(StatamError::Corrupt {
-                    reason: "dict Rle run_ends do not cover row_count",
-                });
-            }
-
-            let rv_base = u32::from_le_bytes([
-                after_nulls[pos_after_re],
-                after_nulls[pos_after_re + 1],
-                after_nulls[pos_after_re + 2],
-                after_nulls[pos_after_re + 3],
-            ]);
-            let rv_bw = after_nulls[pos_after_re + 4];
-            if rv_bw > 32 {
-                return Err(StatamError::Corrupt {
-                    reason: "invalid u32 bit_width",
-                });
-            }
-            let rv_bytes = packed_bytes_len(num_runs, rv_bw)?;
-            if after_nulls.len() != pos_after_re + 5 + rv_bytes {
-                return Err(StatamError::Corrupt {
-                    reason: "dict Rle length mismatch",
-                });
-            }
-            let mut rv_deltas = Vec::with_capacity(num_runs);
-            unpack_u32(
-                &after_nulls[pos_after_re + 5..],
-                num_runs,
-                rv_bw,
-                &mut rv_deltas,
-            )?;
-
+            let parsed = parse_dict_rle_body(after_nulls, row_count)?;
             let mut run_idx = 0usize;
             let mut run_start = 0usize;
             for (out_pos, &row) in indices.iter().enumerate() {
                 if row < run_start {
-                    run_idx = run_ends.partition_point(|&e| (e as usize) <= row);
+                    run_idx = parsed.run_ends.partition_point(|&e| (e as usize) <= row);
                 } else {
-                    while (run_ends[run_idx] as usize) <= row {
+                    while (parsed.run_ends[run_idx] as usize) <= row {
                         run_idx += 1;
                     }
                 }
                 run_start = if run_idx == 0 {
                     0
                 } else {
-                    run_ends[run_idx - 1] as usize
+                    parsed.run_ends[run_idx - 1] as usize
                 };
                 if nulls.is_none_or(|bm| bm.get(row)) {
-                    let code =
-                        rv_base
-                            .checked_add(rv_deltas[run_idx])
-                            .ok_or(StatamError::Corrupt {
-                                reason: "dict Rle code overflow",
-                            })?;
+                    let code = parsed
+                        .rv_base
+                        .checked_add(parsed.rv_deltas[run_idx])
+                        .ok_or(StatamError::Corrupt {
+                            reason: "dict Rle code overflow",
+                        })?;
                     if (code as usize) >= dict_len {
                         return Err(StatamError::Corrupt {
                             reason: "dict code out of bounds",
@@ -1547,11 +1583,12 @@ fn materialize_varlen_selected(
     Ok((out_offsets, out_bytes))
 }
 
-pub(crate) fn check_varlen_take_bytes(
+pub(crate) fn sum_varlen_take_bytes(
     offsets: &[u32],
     codes: &[u32],
     nulls: Option<&Bitmap>,
-) -> Result<(), StatamError> {
+    limit: usize,
+) -> Result<usize, StatamError> {
     let mut total_bytes: usize = 0;
     for (i, &c) in codes.iter().enumerate() {
         if nulls.is_none_or(|bm| bm.get(i)) {
@@ -1567,13 +1604,22 @@ pub(crate) fn check_varlen_take_bytes(
                 .ok_or(StatamError::BoundsExceeded {
                     reason: "materialized dict byte length overflow",
                 })?;
-            if total_bytes > MAX_BLOCK_RAW_BYTES {
+            if total_bytes > limit {
                 return Err(StatamError::BoundsExceeded {
                     reason: "materialized dict bytes exceed MAX_BLOCK_RAW_BYTES",
                 });
             }
         }
     }
+    Ok(total_bytes)
+}
+
+pub(crate) fn check_varlen_take_bytes(
+    offsets: &[u32],
+    codes: &[u32],
+    nulls: Option<&Bitmap>,
+) -> Result<(), StatamError> {
+    let _ = sum_varlen_take_bytes(offsets, codes, nulls, MAX_BLOCK_RAW_BYTES)?;
     Ok(())
 }
 
@@ -1606,7 +1652,10 @@ pub(crate) fn materialize_from_dict(
                 if nulls.as_ref().is_some_and(|bm| !bm.get(i)) {
                     out.push([0u8; 8]);
                 } else {
-                    out.push(v[c as usize]);
+                    let entry = v.get(c as usize).ok_or(StatamError::Corrupt {
+                        reason: "dict code out of bounds",
+                    })?;
+                    out.push(*entry);
                 }
             }
             FlatData::FixedBytes8(out)
@@ -1626,7 +1675,10 @@ pub(crate) fn materialize_from_dict(
                 if nulls.as_ref().is_some_and(|bm| !bm.get(i)) {
                     out.push([0u8; 16]);
                 } else {
-                    out.push(v[c as usize]);
+                    let entry = v.get(c as usize).ok_or(StatamError::Corrupt {
+                        reason: "dict code out of bounds",
+                    })?;
+                    out.push(*entry);
                 }
             }
             FlatData::FixedBytes16(out)
@@ -1809,6 +1861,89 @@ mod tests {
             decode_dict_selected(&rle_bad, row_count, None, &dict, &empty_mask),
             Err(StatamError::Corrupt {
                 reason: "dict code out of bounds",
+            })
+        ));
+    }
+
+    #[test]
+    fn file_dict_rejects_unsorted_and_duplicate_entries_in_from_flat_and_decode() {
+        // 1. Unsorted when sorted == true -> Corrupt.
+        let unsorted_flat = FlatColumn::try_new(
+            FlatData::Utf8(Utf8Data::try_from_slices(["zebra", "apple"]).unwrap()),
+            None,
+        )
+        .unwrap();
+        assert!(matches!(
+            FileDict::from_flat(unsorted_flat.clone(), true),
+            Err(StatamError::Corrupt {
+                reason: "sorted dictionary entries are not strictly ascending",
+            })
+        ));
+        // Valid unsorted dict encoded to DT01 bytes, then decoded with sorted == true -> Corrupt.
+        let unsorted_dict = FileDict::from_flat(unsorted_flat, false).unwrap();
+        let encoded_unsorted = unsorted_dict.encode(Codec::None, 0).unwrap();
+        assert!(matches!(
+            FileDict::decode(&encoded_unsorted, true),
+            Err(StatamError::Corrupt {
+                reason: "sorted dictionary entries are not strictly ascending",
+            })
+        ));
+
+        // 2. Duplicate entries rejected for both sorted == true and sorted == false.
+        let dup_flat = FlatColumn::try_new(
+            FlatData::Utf8(Utf8Data::try_from_slices(["a", "b", "b"]).unwrap()),
+            None,
+        )
+        .unwrap();
+        assert!(matches!(
+            FileDict::from_flat(dup_flat.clone(), true),
+            Err(StatamError::Corrupt {
+                reason: "sorted dictionary entries are not strictly ascending",
+            })
+        ));
+        assert!(matches!(
+            FileDict::from_flat(dup_flat, false),
+            Err(StatamError::Corrupt {
+                reason: "dictionary contains duplicate entries",
+            })
+        ));
+
+        // 3. Hand-crafted DT01 with duplicate entries rejected by FileDict::decode(..., false).
+        let mut raw_body = Vec::new();
+        for off in [0u32, 1, 2] {
+            raw_body.extend_from_slice(&off.to_le_bytes());
+        }
+        raw_body.extend_from_slice(b"aa");
+        let crc = crc32c::crc32c(&raw_body);
+        let mut dt01 = Vec::new();
+        dt01.extend_from_slice(&DICT_MAGIC);
+        dt01.extend_from_slice(&2u32.to_le_bytes());
+        dt01.push(Codec::None as u8);
+        dt01.push(DictValueKind::Utf8 as u8);
+        dt01.extend_from_slice(&0u16.to_le_bytes());
+        dt01.extend_from_slice(&(raw_body.len() as u32).to_le_bytes());
+        dt01.extend_from_slice(&crc.to_le_bytes());
+        dt01.extend_from_slice(&raw_body);
+        assert!(matches!(
+            FileDict::decode(&dt01, false),
+            Err(StatamError::Corrupt {
+                reason: "dictionary contains duplicate entries",
+            })
+        ));
+
+        // 4. Invalid bit_width (> 32) rejected early in ForBitpack and Rle dict code bodies.
+        let bad_fb_bw = [0u8, 0, 0, 0, 0, 33];
+        assert!(matches!(
+            decode_dict_codes_body(&bad_fb_bw, 4, 2, None),
+            Err(StatamError::Corrupt {
+                reason: "invalid u32 bit_width",
+            })
+        ));
+        let bad_rle_bw = [1u8, 1, 0, 0, 0, 33];
+        assert!(matches!(
+            decode_dict_codes_body(&bad_rle_bw, 4, 2, None),
+            Err(StatamError::Corrupt {
+                reason: "invalid u32 bit_width",
             })
         ));
     }

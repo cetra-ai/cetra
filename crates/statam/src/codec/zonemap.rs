@@ -14,7 +14,7 @@
 
 use std::fmt;
 
-use cetra_column::{Column, DataType, FlatColumn, FlatData, ScalarValue};
+use cetra_column::{Bitmap, Column, DataType, FlatColumn, FlatData, ScalarValue};
 
 use crate::codec::dict::FileDict;
 use crate::format::{
@@ -177,7 +177,7 @@ fn next_prefix(prefix: &[u8]) -> Option<Vec<u8>> {
     None
 }
 
-fn count_nulls_col(col: &Column) -> usize {
+pub(crate) fn count_col_nulls(col: &Column) -> usize {
     match col {
         Column::Flat(f) => f.nulls().map_or_else(
             || usize::from(matches!(f.data(), FlatData::Null(_))) * f.len(),
@@ -216,14 +216,14 @@ fn count_nulls_col(col: &Column) -> usize {
     }
 }
 
-/// Computes a sound [`ZoneMapSummary`] for `col` (at most 4,096 rows per mini-block).
-pub fn compute_zone_map(col: &Column, _dict_sorted: bool) -> ZoneMapSummary {
+/// Computes a sound value-space [`ZoneMapSummary`] for `col` (at most `u16::MAX` rows per mini-block).
+pub fn compute_zone_map(col: &Column) -> ZoneMapSummary {
     let len = col.len();
     if len == 0 {
         return ZoneMapSummary::empty();
     }
 
-    let null_count_usize = count_nulls_col(col);
+    let null_count_usize = count_col_nulls(col);
     let null_count = u16::try_from(null_count_usize).unwrap_or(u16::MAX);
     let mut flags = if null_count_usize > 0 {
         BLOCK_FLAG_HAS_NULLS
@@ -239,28 +239,22 @@ pub fn compute_zone_map(col: &Column, _dict_sorted: bool) -> ZoneMapSummary {
     }
 
     if let Column::Dict(d) = col {
-        let mut min_code = u32::MAX;
-        let mut max_code = 0u32;
+        let dict_len = d.values().len();
+        let mut present = Bitmap::new_zeroed(dict_len);
         let mut any = false;
         for (i, &code) in d.codes().iter().enumerate() {
-            if !d.is_null(i) {
+            if !d.is_null(i) && (code as usize) < dict_len {
+                let _ = present.set(code as usize, true);
                 any = true;
-                min_code = min_code.min(code);
-                max_code = max_code.max(code);
             }
         }
-        let mut s = ZoneMapSummary::empty();
-        s.null_count = null_count;
-        if any {
-            s.block_flags = flags | BLOCK_FLAG_MIN_MAX_VALID;
-            s.min_inline_len = 4;
-            s.max_inline_len = 4;
-            s.min_inline[0..4].copy_from_slice(&min_code.to_le_bytes());
-            s.max_inline[0..4].copy_from_slice(&max_code.to_le_bytes());
-        } else {
+        if !any {
+            let mut s = ZoneMapSummary::empty();
+            s.null_count = null_count;
             s.block_flags = flags | BLOCK_FLAG_ALL_NULL;
+            return s;
         }
-        return s;
+        return zone_map_from_flat_masked(d.values(), null_count, flags, Some(&present));
     }
 
     if let Column::Const { value, .. } = col {
@@ -268,11 +262,11 @@ pub fn compute_zone_map(col: &Column, _dict_sorted: bool) -> ZoneMapSummary {
     }
 
     if let Column::Rle(r) = col {
-        return zone_map_from_flat(r.values(), null_count, flags);
+        return zone_map_from_flat_masked(r.values(), null_count, flags, None);
     }
 
     if let Column::Flat(f) = col {
-        return zone_map_from_flat(f, null_count, flags);
+        return zone_map_from_flat_masked(f, null_count, flags, None);
     }
 
     ZoneMapSummary::empty()
@@ -362,12 +356,19 @@ fn zone_map_from_scalar(value: &ScalarValue, null_count: u16, base_flags: u8) ->
     s
 }
 
-fn zone_map_from_flat(flat: &FlatColumn, null_count: u16, base_flags: u8) -> ZoneMapSummary {
+fn zone_map_from_flat_masked(
+    flat: &FlatColumn,
+    null_count: u16,
+    base_flags: u8,
+    active: Option<&Bitmap>,
+) -> ZoneMapSummary {
     let mut s = ZoneMapSummary::empty();
     s.null_count = null_count;
     s.block_flags = base_flags;
     let nulls = flat.nulls();
     let n = flat.len();
+    let is_included =
+        |i: usize| active.is_none_or(|a| a.get(i)) && nulls.is_none_or(|nbm| nbm.get(i));
 
     match flat.data() {
         FlatData::Null(_) => {
@@ -378,7 +379,7 @@ fn zone_map_from_flat(flat: &FlatColumn, null_count: u16, base_flags: u8) -> Zon
             let mut max_v = false;
             let mut any = false;
             for i in 0..n {
-                if nulls.is_none_or(|nbm| nbm.get(i)) {
+                if is_included(i) {
                     let b = bm.get(i);
                     any = true;
                     min_v &= b;
@@ -398,7 +399,7 @@ fn zone_map_from_flat(flat: &FlatColumn, null_count: u16, base_flags: u8) -> Zon
             let mut max_v = i64::MIN;
             let mut any = false;
             for (i, &v) in vals.iter().enumerate() {
-                if nulls.is_none_or(|bm| bm.get(i)) {
+                if is_included(i) {
                     any = true;
                     min_v = min_v.min(v);
                     max_v = max_v.max(v);
@@ -418,7 +419,7 @@ fn zone_map_from_flat(flat: &FlatColumn, null_count: u16, base_flags: u8) -> Zon
             let mut max_v = f64::NEG_INFINITY;
             let mut any_non_nan = false;
             for (i, &v) in vals.iter().enumerate() {
-                if nulls.is_some_and(|bm| !bm.get(i)) {
+                if !is_included(i) {
                     continue;
                 }
                 if v.is_nan() {
@@ -455,7 +456,7 @@ fn zone_map_from_flat(flat: &FlatColumn, null_count: u16, base_flags: u8) -> Zon
             let mut max_v = i128::MIN;
             let mut any = false;
             for (i, &v) in values.iter().enumerate() {
-                if nulls.is_none_or(|bm| bm.get(i)) {
+                if is_included(i) {
                     any = true;
                     min_v = min_v.min(v);
                     max_v = max_v.max(v);
@@ -474,7 +475,7 @@ fn zone_map_from_flat(flat: &FlatColumn, null_count: u16, base_flags: u8) -> Zon
             let mut max_v = i32::MIN;
             let mut any = false;
             for (i, &v) in vals.iter().enumerate() {
-                if nulls.is_none_or(|bm| bm.get(i)) {
+                if is_included(i) {
                     any = true;
                     min_v = min_v.min(v);
                     max_v = max_v.max(v);
@@ -493,7 +494,7 @@ fn zone_map_from_flat(flat: &FlatColumn, null_count: u16, base_flags: u8) -> Zon
             let mut max_v = [0x00u8; 8];
             let mut any = false;
             for (i, v) in vals.iter().enumerate() {
-                if nulls.is_none_or(|bm| bm.get(i)) {
+                if is_included(i) {
                     if !any {
                         min_v = *v;
                         max_v = *v;
@@ -521,7 +522,7 @@ fn zone_map_from_flat(flat: &FlatColumn, null_count: u16, base_flags: u8) -> Zon
             let mut max_v = [0x00u8; 16];
             let mut any = false;
             for (i, v) in vals.iter().enumerate() {
-                if nulls.is_none_or(|bm| bm.get(i)) {
+                if is_included(i) {
                     if !any {
                         min_v = *v;
                         max_v = *v;
@@ -548,7 +549,7 @@ fn zone_map_from_flat(flat: &FlatColumn, null_count: u16, base_flags: u8) -> Zon
             let mut min_s: Option<&[u8]> = None;
             let mut max_s: Option<&[u8]> = None;
             for i in 0..n {
-                if nulls.is_none_or(|bm| bm.get(i))
+                if is_included(i)
                     && let Some(val) = u.get(i)
                 {
                     let b = val.as_bytes();
@@ -570,7 +571,7 @@ fn zone_map_from_flat(flat: &FlatColumn, null_count: u16, base_flags: u8) -> Zon
             let mut min_s: Option<&[u8]> = None;
             let mut max_s: Option<&[u8]> = None;
             for i in 0..n {
-                if nulls.is_none_or(|bm| bm.get(i))
+                if is_included(i)
                     && let Some(b) = bdata.get(i)
                 {
                     min_s = Some(match min_s {
@@ -725,6 +726,9 @@ pub fn zone_map_may_match(
             eval_f64_pred(min_f, max_f, has_nan, pred)
         }
         DataType::Utf8 | DataType::Binary | DataType::FixedBytes8 | DataType::FixedBytes16 => {
+            if entry.min_inline_len > 16 || entry.max_inline_len > 16 {
+                return true;
+            }
             let min_b = &entry.min_inline[..usize::from(entry.min_inline_len)];
             let max_b = &entry.max_inline[..usize::from(entry.max_inline_len)];
             eval_bytes_pred(min_b, max_b, pred)
@@ -1225,7 +1229,7 @@ mod tests {
             )
             .unwrap(),
         );
-        let zm_non_empty = compute_zone_map(&non_empty_col, false);
+        let zm_non_empty = compute_zone_map(&non_empty_col);
         let blk_non_empty = make_entry(Encoding::Fsst, zm_non_empty, 2);
         assert!(zone_map_always_matches(
             &blk_non_empty,
@@ -1258,7 +1262,7 @@ mod tests {
             )
             .unwrap(),
         );
-        let blk_with_null = make_entry(Encoding::Plain, compute_zone_map(&with_null, false), 2);
+        let blk_with_null = make_entry(Encoding::Plain, compute_zone_map(&with_null), 2);
         assert!(!zone_map_always_matches(
             &blk_with_null,
             &DataType::Utf8,
@@ -1273,7 +1277,7 @@ mod tests {
             )
             .unwrap(),
         );
-        let blk_with_empty = make_entry(Encoding::Plain, compute_zone_map(&with_empty, false), 2);
+        let blk_with_empty = make_entry(Encoding::Plain, compute_zone_map(&with_empty), 2);
         assert!(!zone_map_always_matches(
             &blk_with_empty,
             &DataType::Utf8,
@@ -1282,7 +1286,7 @@ mod tests {
 
         // Short (< 16 B) constant Utf8 supports Eq; >= 16 B prefix-truncated Utf8 does NOT.
         let short_const = Column::try_new_const(ScalarValue::Utf8("ok".to_string()), 4).unwrap();
-        let blk_short_const = make_entry(Encoding::Const, compute_zone_map(&short_const, false), 4);
+        let blk_short_const = make_entry(Encoding::Const, compute_zone_map(&short_const), 4);
         assert!(zone_map_always_matches(
             &blk_short_const,
             &DataType::Utf8,
@@ -1291,7 +1295,7 @@ mod tests {
         let long_const =
             Column::try_new_const(ScalarValue::Utf8("0123456789abcdef_long".to_string()), 4)
                 .unwrap();
-        let blk_long_const = make_entry(Encoding::Const, compute_zone_map(&long_const, false), 4);
+        let blk_long_const = make_entry(Encoding::Const, compute_zone_map(&long_const), 4);
         assert!(!zone_map_always_matches(
             &blk_long_const,
             &DataType::Utf8,
@@ -1310,7 +1314,7 @@ mod tests {
             .unwrap(),
         );
         let ts_dt = DataType::TimestampNs { utc: true };
-        let blk_ts = make_entry(Encoding::DeltaBitpack, compute_zone_map(&ts_col, false), 3);
+        let blk_ts = make_entry(Encoding::DeltaBitpack, compute_zone_map(&ts_col), 3);
         assert!(zone_map_always_matches(
             &blk_ts,
             &ts_dt,
@@ -1360,7 +1364,7 @@ mod tests {
         // 3. F64 without NaN vs with NaN
         let f64_clean =
             Column::Flat(FlatColumn::try_new(FlatData::F64(vec![1.5, 2.5, 3.5]), None).unwrap());
-        let blk_f64_clean = make_entry(Encoding::Alp, compute_zone_map(&f64_clean, false), 3);
+        let blk_f64_clean = make_entry(Encoding::Alp, compute_zone_map(&f64_clean), 3);
         assert!(zone_map_always_matches(
             &blk_f64_clean,
             &DataType::F64,
@@ -1380,7 +1384,7 @@ mod tests {
         let f64_nan = Column::Flat(
             FlatColumn::try_new(FlatData::F64(vec![1.5, f64::NAN, 3.5]), None).unwrap(),
         );
-        let blk_f64_nan = make_entry(Encoding::Plain, compute_zone_map(&f64_nan, false), 3);
+        let blk_f64_nan = make_entry(Encoding::Plain, compute_zone_map(&f64_nan), 3);
         assert!(!zone_map_always_matches(
             &blk_f64_nan,
             &DataType::F64,
@@ -1396,5 +1400,32 @@ mod tests {
             &DataType::F64,
             &ZonePred::IsNotNull,
         ));
+    }
+
+    #[test]
+    fn zone_map_may_match_handles_oversized_inline_len_without_panicking() {
+        let mut entry = make_entry(Encoding::Plain, ZoneMapSummary::empty(), 4);
+        entry.block_flags = BLOCK_FLAG_MIN_MAX_VALID;
+        entry.min_inline_len = 25;
+        entry.max_inline_len = 25;
+        for dt in [
+            DataType::Utf8,
+            DataType::Binary,
+            DataType::FixedBytes8,
+            DataType::FixedBytes16,
+        ] {
+            assert!(zone_map_may_match(
+                &entry,
+                &dt,
+                0,
+                &ZonePred::Eq(ZoneValue::Bytes(b"abc".to_vec())),
+                None,
+            ));
+            assert!(!zone_map_always_matches(
+                &entry,
+                &dt,
+                &ZonePred::Eq(ZoneValue::Bytes(b"abc".to_vec())),
+            ));
+        }
     }
 }

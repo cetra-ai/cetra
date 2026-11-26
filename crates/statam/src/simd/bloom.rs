@@ -115,12 +115,11 @@ impl Sbbf {
     pub fn insert_hash(&mut self, h: u64) {
         let block_idx = self.block_index(h);
         let key = h as u32;
-        let block = &mut self.words[block_idx * 8..(block_idx + 1) * 8];
+        let block = &mut self.words.as_chunks_mut::<8>().0[block_idx];
         #[cfg(all(target_arch = "x86_64", not(miri)))]
         {
             if std::arch::is_x86_feature_detected!("avx2") {
-                // SAFETY: `is_x86_feature_detected!("avx2")` verified above and
-                // `block.len() == 8`.
+                // SAFETY: `is_x86_feature_detected!("avx2")` verified above.
                 unsafe {
                     block_insert_avx2(block, key);
                 }
@@ -134,8 +133,7 @@ impl Sbbf {
             not(miri)
         ))]
         {
-            // SAFETY: `target_feature = "neon"` is enabled at compile time and
-            // `block.len() == 8`.
+            // SAFETY: `cfg(target_feature = "neon")` guarantees NEON at compile time.
             unsafe {
                 block_insert_neon(block, key);
             }
@@ -156,12 +154,11 @@ impl Sbbf {
     pub fn contains_hash(&self, h: u64) -> bool {
         let block_idx = self.block_index(h);
         let key = h as u32;
-        let block = &self.words[block_idx * 8..(block_idx + 1) * 8];
+        let block = &self.words.as_chunks::<8>().0[block_idx];
         #[cfg(all(target_arch = "x86_64", not(miri)))]
         {
             if std::arch::is_x86_feature_detected!("avx2") {
-                // SAFETY: `is_x86_feature_detected!("avx2")` verified above and
-                // `block.len() == 8`.
+                // SAFETY: `is_x86_feature_detected!("avx2")` verified above.
                 return unsafe { block_check_avx2(block, key) };
             }
         }
@@ -172,8 +169,7 @@ impl Sbbf {
             not(miri)
         ))]
         {
-            // SAFETY: `target_feature = "neon"` is enabled at compile time and
-            // `block.len() == 8`.
+            // SAFETY: `cfg(target_feature = "neon")` guarantees NEON at compile time.
             return unsafe { block_check_neon(block, key) };
         }
         #[allow(unreachable_code)]
@@ -417,7 +413,7 @@ impl BloomIndex {
 }
 
 #[inline]
-fn block_insert_scalar(block: &mut [u32], key: u32) {
+fn block_insert_scalar(block: &mut [u32; 8], key: u32) {
     for (slot, &salt) in block.iter_mut().zip(&SBBF_SALT) {
         let bit = key.wrapping_mul(salt) >> 27;
         *slot |= 1u32 << bit;
@@ -425,7 +421,7 @@ fn block_insert_scalar(block: &mut [u32], key: u32) {
 }
 
 #[inline]
-fn block_check_scalar(block: &[u32], key: u32) -> bool {
+fn block_check_scalar(block: &[u32; 8], key: u32) -> bool {
     for (&word, &salt) in block.iter().zip(&SBBF_SALT) {
         let bit = key.wrapping_mul(salt) >> 27;
         if (word & (1u32 << bit)) == 0 {
@@ -449,11 +445,10 @@ unsafe fn sbbf_mask_avx2(key: u32) -> std::arch::x86_64::__m256i {
 
 #[cfg(all(target_arch = "x86_64", not(miri)))]
 #[target_feature(enable = "avx2")]
-unsafe fn block_insert_avx2(block: &mut [u32], key: u32) {
+unsafe fn block_insert_avx2(block: &mut [u32; 8], key: u32) {
     use std::arch::x86_64::*;
 
-    debug_assert_eq!(block.len(), 8);
-    // SAFETY: AVX2 is active; `block.len() == 8` (32 bytes); unaligned load/store are valid.
+    // SAFETY: AVX2 is active; `block` is `[u32; 8]` (32 bytes); unaligned load/store are valid.
     unsafe {
         let mask = sbbf_mask_avx2(key);
         let cur = _mm256_loadu_si256(block.as_ptr() as *const __m256i);
@@ -464,11 +459,10 @@ unsafe fn block_insert_avx2(block: &mut [u32], key: u32) {
 
 #[cfg(all(target_arch = "x86_64", not(miri)))]
 #[target_feature(enable = "avx2")]
-unsafe fn block_check_avx2(block: &[u32], key: u32) -> bool {
+unsafe fn block_check_avx2(block: &[u32; 8], key: u32) -> bool {
     use std::arch::x86_64::*;
 
-    debug_assert_eq!(block.len(), 8);
-    // SAFETY: AVX2 is active; `block.len() == 8` (32 bytes); unaligned load is valid.
+    // SAFETY: AVX2 is active; `block` is `[u32; 8]` (32 bytes); unaligned load is valid.
     unsafe {
         let mask = sbbf_mask_avx2(key);
         let cur = _mm256_loadu_si256(block.as_ptr() as *const __m256i);
@@ -483,7 +477,7 @@ unsafe fn block_check_avx2(block: &[u32], key: u32) -> bool {
     not(miri)
 ))]
 #[target_feature(enable = "neon")]
-unsafe fn sbbf_mask_neon(
+fn sbbf_mask_neon(
     key: u32,
 ) -> (
     std::arch::aarch64::uint32x4_t,
@@ -492,14 +486,39 @@ unsafe fn sbbf_mask_neon(
     use std::arch::aarch64::*;
 
     // SAFETY: `SBBF_SALT` is a `[u32; 8]` (aligned to 4 bytes); both 4-lane loads are in bounds.
+    let (salt_lo, salt_hi) = unsafe {
+        (
+            vld1q_u32(SBBF_SALT.as_ptr()),
+            vld1q_u32(SBBF_SALT.as_ptr().add(4)),
+        )
+    };
+    let k = vdupq_n_u32(key);
+    let ones = vdupq_n_u32(1);
+    let shift_lo = vreinterpretq_s32_u32(vshrq_n_u32::<27>(vmulq_u32(k, salt_lo)));
+    let shift_hi = vreinterpretq_s32_u32(vshrq_n_u32::<27>(vmulq_u32(k, salt_hi)));
+    (vshlq_u32(ones, shift_lo), vshlq_u32(ones, shift_hi))
+}
+
+#[cfg(all(
+    target_arch = "aarch64",
+    target_feature = "neon",
+    target_endian = "little",
+    not(miri)
+))]
+#[target_feature(enable = "neon")]
+fn block_insert_neon(block: &mut [u32; 8], key: u32) {
+    use std::arch::aarch64::*;
+
+    let (mask_lo, mask_hi) = sbbf_mask_neon(key);
+    let ptr = block.as_mut_ptr();
+    // SAFETY: `block` is `[u32; 8]` (two 4-lane `u32` vectors).
+    let (cur_lo, cur_hi) = unsafe { (vld1q_u32(ptr), vld1q_u32(ptr.add(4))) };
+    let out_lo = vorrq_u32(cur_lo, mask_lo);
+    let out_hi = vorrq_u32(cur_hi, mask_hi);
+    // SAFETY: `block` is `[u32; 8]` (two 4-lane `u32` vectors).
     unsafe {
-        let salt_lo = vld1q_u32(SBBF_SALT.as_ptr());
-        let salt_hi = vld1q_u32(SBBF_SALT.as_ptr().add(4));
-        let k = vdupq_n_u32(key);
-        let ones = vdupq_n_u32(1);
-        let shift_lo = vreinterpretq_s32_u32(vshrq_n_u32::<27>(vmulq_u32(k, salt_lo)));
-        let shift_hi = vreinterpretq_s32_u32(vshrq_n_u32::<27>(vmulq_u32(k, salt_hi)));
-        (vshlq_u32(ones, shift_lo), vshlq_u32(ones, shift_hi))
+        vst1q_u32(ptr, out_lo);
+        vst1q_u32(ptr.add(4), out_hi);
     }
 }
 
@@ -510,44 +529,18 @@ unsafe fn sbbf_mask_neon(
     not(miri)
 ))]
 #[target_feature(enable = "neon")]
-unsafe fn block_insert_neon(block: &mut [u32], key: u32) {
+fn block_check_neon(block: &[u32; 8], key: u32) -> bool {
     use std::arch::aarch64::*;
 
-    debug_assert_eq!(block.len(), 8);
-    // SAFETY: NEON is active and `block.len() == 8` (two 4-lane `u32` vectors).
-    unsafe {
-        let (mask_lo, mask_hi) = sbbf_mask_neon(key);
-        let ptr = block.as_mut_ptr();
-        let cur_lo = vld1q_u32(ptr);
-        let cur_hi = vld1q_u32(ptr.add(4));
-        vst1q_u32(ptr, vorrq_u32(cur_lo, mask_lo));
-        vst1q_u32(ptr.add(4), vorrq_u32(cur_hi, mask_hi));
-    }
-}
-
-#[cfg(all(
-    target_arch = "aarch64",
-    target_feature = "neon",
-    target_endian = "little",
-    not(miri)
-))]
-#[target_feature(enable = "neon")]
-unsafe fn block_check_neon(block: &[u32], key: u32) -> bool {
-    use std::arch::aarch64::*;
-
-    debug_assert_eq!(block.len(), 8);
-    // SAFETY: NEON is active and `block.len() == 8` (two 4-lane `u32` vectors).
+    let (mask_lo, mask_hi) = sbbf_mask_neon(key);
+    let ptr = block.as_ptr();
+    // SAFETY: `block` is `[u32; 8]` (two 4-lane `u32` vectors).
+    let (cur_lo, cur_hi) = unsafe { (vld1q_u32(ptr), vld1q_u32(ptr.add(4))) };
     // Each lane of `mask_lo`/`mask_hi` has exactly 1 bit set, so `vtstq_u32(cur, mask)`
     // (`(cur & mask) != 0`) is bit-identical to `(cur & mask) == mask`.
-    unsafe {
-        let (mask_lo, mask_hi) = sbbf_mask_neon(key);
-        let ptr = block.as_ptr();
-        let cur_lo = vld1q_u32(ptr);
-        let cur_hi = vld1q_u32(ptr.add(4));
-        let eq_lo = vtstq_u32(cur_lo, mask_lo);
-        let eq_hi = vtstq_u32(cur_hi, mask_hi);
-        vminvq_u32(vandq_u32(eq_lo, eq_hi)) != 0
-    }
+    let eq_lo = vtstq_u32(cur_lo, mask_lo);
+    let eq_hi = vtstq_u32(cur_hi, mask_hi);
+    vminvq_u32(vandq_u32(eq_lo, eq_hi)) != 0
 }
 
 #[cfg(test)]
@@ -568,7 +561,7 @@ mod tests {
             simd_bf.insert_hash(h);
 
             let b = scalar_bf.block_index(h);
-            block_insert_scalar(&mut scalar_bf.words[b * 8..(b + 1) * 8], h as u32);
+            block_insert_scalar(&mut scalar_bf.words.as_chunks_mut::<8>().0[b], h as u32);
         }
 
         assert_eq!(simd_bf, scalar_bf, "SBBF insert SIMD != scalar");
@@ -579,7 +572,7 @@ mod tests {
             let h = statam_bloom_hash(key.as_bytes());
             let b = scalar_bf.block_index(h);
             assert!(block_check_scalar(
-                &scalar_bf.words[b * 8..(b + 1) * 8],
+                &scalar_bf.words.as_chunks::<8>().0[b],
                 h as u32
             ));
         }
@@ -591,7 +584,7 @@ mod tests {
             let h = statam_bloom_hash(probe.as_bytes());
             let simd_hit = simd_bf.contains_hash(h);
             let b = scalar_bf.block_index(h);
-            let scalar_hit = block_check_scalar(&scalar_bf.words[b * 8..(b + 1) * 8], h as u32);
+            let scalar_hit = block_check_scalar(&scalar_bf.words.as_chunks::<8>().0[b], h as u32);
             assert_eq!(simd_hit, scalar_hit);
             if simd_hit {
                 fp += 1;
@@ -712,12 +705,12 @@ mod tests {
             };
             for &h in &keys {
                 bf_simd.insert_hash(h);
-                block_insert_scalar(&mut bf_scalar.words, h as u32);
+                block_insert_scalar(&mut bf_scalar.words.as_chunks_mut::<8>().0[0], h as u32);
             }
             prop_assert_eq!(&bf_simd.words, &bf_scalar.words);
             for &h in &probes {
                 let s1 = bf_simd.contains_hash(h);
-                let s2 = block_check_scalar(&bf_scalar.words, h as u32);
+                let s2 = block_check_scalar(&bf_scalar.words.as_chunks::<8>().0[0], h as u32);
                 prop_assert_eq!(s1, s2);
             }
         }

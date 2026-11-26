@@ -1,13 +1,34 @@
 //! Bounded `std::thread::scope` parallel map helpers with deterministic ordering.
 
+use std::cell::Cell;
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use crate::StatamError;
 
 /// Maximum worker threads spawned by [`parallel_map_in_order`].
-pub(crate) const MAX_WRITE_THREADS: usize = 32;
+pub(crate) const MAX_PARALLEL_THREADS: usize = 32;
 
-/// Applies `f` across `items` using up to `threads.clamp(1, MAX_WRITE_THREADS)` worker threads,
+thread_local! {
+    static IN_PARALLEL_SCOPE: Cell<bool> = const { Cell::new(false) };
+}
+
+struct ParallelScopeGuard(bool);
+
+impl ParallelScopeGuard {
+    fn enter() -> Self {
+        let prev = IN_PARALLEL_SCOPE.with(|flag| flag.replace(true));
+        Self(prev)
+    }
+}
+
+impl Drop for ParallelScopeGuard {
+    fn drop(&mut self) {
+        IN_PARALLEL_SCOPE.with(|flag| flag.set(self.0));
+    }
+}
+
+/// Applies `f` across `items` using up to `threads.clamp(1, MAX_PARALLEL_THREADS)` worker threads,
 /// returning outputs in input order or the first [`StatamError`] in input order.
 pub(crate) fn parallel_map_in_order<T, R, F>(
     items: Vec<T>,
@@ -23,7 +44,7 @@ where
 }
 
 /// Applies `f` with lazy per-worker state initialized once by `init`, using up to
-/// `threads.clamp(1, MAX_WRITE_THREADS)` threads, returning outputs or the first error in input order.
+/// `threads.clamp(1, MAX_PARALLEL_THREADS)` threads, returning outputs or the first error in input order.
 pub(crate) fn parallel_map_in_order_with_init<T, S, R, Init, F>(
     items: Vec<T>,
     threads: usize,
@@ -36,7 +57,12 @@ where
     Init: Fn() -> Result<S, StatamError> + Sync,
     F: Fn(&mut S, T) -> Result<R, StatamError> + Sync,
 {
-    let threads = threads.clamp(1, MAX_WRITE_THREADS);
+    let nested = IN_PARALLEL_SCOPE.with(Cell::get);
+    let threads = if nested {
+        1
+    } else {
+        threads.clamp(1, MAX_PARALLEL_THREADS)
+    };
     let len = items.len();
     if len == 0 {
         return Ok(Vec::new());
@@ -56,13 +82,19 @@ where
 
     let workers = threads.min(len);
     let queue = Mutex::new(items.into_iter().enumerate());
+    let first_err_idx = AtomicUsize::new(usize::MAX);
     let run_worker = || -> Vec<(usize, Result<R, StatamError>)> {
+        let _scope_guard = ParallelScopeGuard::enter();
         let mut local = Vec::new();
         let mut state: Option<S> = None;
         loop {
             let next = {
                 let mut guard = queue.lock().unwrap_or_else(|p| p.into_inner());
-                guard.next()
+                if first_err_idx.load(Ordering::Acquire) != usize::MAX {
+                    None
+                } else {
+                    guard.next()
+                }
             };
             let Some((idx, item)) = next else {
                 break;
@@ -72,12 +104,21 @@ where
                 None => match init() {
                     Ok(s) => state.insert(s),
                     Err(e) => {
+                        first_err_idx.fetch_min(idx, Ordering::AcqRel);
                         local.push((idx, Err(e)));
-                        continue;
+                        break;
                     }
                 },
             };
-            local.push((idx, f(st, item)));
+            let res = f(st, item);
+            let is_err = res.is_err();
+            if is_err {
+                first_err_idx.fetch_min(idx, Ordering::AcqRel);
+            }
+            local.push((idx, res));
+            if is_err {
+                break;
+            }
         }
         local
     };
@@ -87,9 +128,13 @@ where
 
     let mut thread_panicked = false;
     std::thread::scope(|scope| {
+        let _main_scope_guard = ParallelScopeGuard::enter();
         let mut handles = Vec::with_capacity(workers - 1);
         for _ in 1..workers {
-            handles.push(scope.spawn(run_worker));
+            match std::thread::Builder::new().spawn_scoped(scope, run_worker) {
+                Ok(handle) => handles.push(handle),
+                Err(_) => break,
+            }
         }
         let main_results = run_worker();
         for (idx, res) in main_results {
@@ -136,6 +181,8 @@ where
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashSet;
+    use std::sync::Barrier;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     use super::*;
@@ -190,5 +237,107 @@ mod tests {
             (1..=4).contains(&calls),
             "expected 1..=4 inits, got {calls}"
         );
+    }
+
+    #[test]
+    fn panic_inside_f_does_not_poison_in_parallel_scope() {
+        assert!(!IN_PARALLEL_SCOPE.with(Cell::get));
+
+        // Every item panics so both the main thread and workers unwind out of `run_worker`.
+        let panicked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _ = parallel_map_in_order(vec![0usize, 1, 2, 3], 4, |_x| -> Result<usize, _> {
+                panic!("intentional worker/main panic");
+            });
+        }));
+        assert!(panicked.is_err());
+        assert!(
+            !IN_PARALLEL_SCOPE.with(Cell::get),
+            "IN_PARALLEL_SCOPE remained poisoned after panic"
+        );
+
+        // Subsequent parallel call must still run in parallel across > 1 OS thread.
+        let barrier = Barrier::new(2);
+        let tids = parallel_map_in_order(vec![0usize, 1], 2, |_x| {
+            assert!(IN_PARALLEL_SCOPE.with(Cell::get));
+            barrier.wait();
+            Ok(std::thread::current().id())
+        })
+        .unwrap();
+        let unique: HashSet<_> = tids.into_iter().collect();
+        assert_eq!(unique.len(), 2);
+        assert!(!IN_PARALLEL_SCOPE.with(Cell::get));
+    }
+
+    #[test]
+    fn init_error_propagates_earliest_error_without_missing_slot() {
+        let init_attempt = AtomicUsize::new(0);
+        let init_barrier = Barrier::new(2);
+        let err = parallel_map_in_order_with_init(
+            (0usize..16).collect(),
+            2,
+            || {
+                let n = init_attempt.fetch_add(1, Ordering::AcqRel);
+                init_barrier.wait();
+                if n == 0 {
+                    Ok(())
+                } else {
+                    Err(StatamError::Corrupt {
+                        reason: "init_failed",
+                    })
+                }
+            },
+            |(), x| Ok(x),
+        )
+        .unwrap_err();
+        assert!(matches!(
+            err,
+            StatamError::Corrupt {
+                reason: "init_failed"
+            }
+        ));
+
+        // All workers failing `init()` also returns cleanly with the earliest error.
+        let err_all = parallel_map_in_order_with_init(
+            (0usize..8).collect(),
+            4,
+            || -> Result<(), StatamError> {
+                Err(StatamError::BoundsExceeded {
+                    reason: "all_init_failed",
+                })
+            },
+            |(), x| Ok(x),
+        )
+        .unwrap_err();
+        assert!(matches!(
+            err_all,
+            StatamError::BoundsExceeded {
+                reason: "all_init_failed"
+            }
+        ));
+    }
+
+    #[test]
+    fn later_error_finishing_before_earlier_error_returns_lowest_index_deterministically() {
+        // Synchronize items 1 and 2 on a barrier so item 2 finishes with Err *before* item 1
+        // finishes with Err, while items 3..16 should short-circuit without creating holes.
+        let both_started = Barrier::new(2);
+        let late_errored = AtomicUsize::new(0);
+        let err = parallel_map_in_order((0usize..16).collect(), 4, |x| {
+            if x == 1 {
+                both_started.wait();
+                while late_errored.load(Ordering::Acquire) == 0 {
+                    std::thread::yield_now();
+                }
+                Err(StatamError::Corrupt { reason: "err_at_1" })
+            } else if x == 2 {
+                both_started.wait();
+                late_errored.store(1, Ordering::Release);
+                Err(StatamError::BoundsExceeded { reason: "err_at_2" })
+            } else {
+                Ok(x)
+            }
+        })
+        .unwrap_err();
+        assert!(matches!(err, StatamError::Corrupt { reason: "err_at_1" }));
     }
 }

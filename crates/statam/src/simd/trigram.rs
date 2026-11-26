@@ -40,8 +40,7 @@ pub fn ascii_lowercase_into(src: &[u8], dst: &mut Vec<u8>) {
         not(miri)
     ))]
     {
-        // SAFETY: `target_feature = "neon"` is enabled at compile time and
-        // `dst.len() == src.len()`.
+        // SAFETY: `cfg(target_feature = "neon")` guarantees NEON at compile time.
         unsafe {
             ascii_lowercase_neon(src, dst);
         }
@@ -160,9 +159,7 @@ impl TrigramBloom {
         ))]
         {
             if bytes.len() >= 16 {
-                // SAFETY: `target_feature = "neon"` is enabled at compile time,
-                // `bytes.len() >= 16`, and `self.bits.len()` is a non-zero power of two
-                // in `256..=16_384`.
+                // SAFETY: `cfg(target_feature = "neon")` guarantees NEON at compile time.
                 unsafe {
                     self.insert_bytes_neon(bytes);
                 }
@@ -170,13 +167,6 @@ impl TrigramBloom {
             }
         }
         self.insert_bytes_scalar(bytes);
-    }
-
-    /// ASCII-lowercases `bytes` and inserts every 3-byte trigram into the filter
-    /// (zero-copy direct insertion; `scratch` is cleared and left unused).
-    pub fn insert_bytes_with_scratch(&mut self, bytes: &[u8], scratch: &mut Vec<u8>) {
-        scratch.clear();
-        self.insert_bytes(bytes);
     }
 
     #[inline]
@@ -188,7 +178,7 @@ impl TrigramBloom {
         let bit_mask = (self.bits.len() * 8) - 1;
         let bits = &mut self.bits;
         let mut i = 0usize;
-        let end = bytes.len() - 2;
+        let end = bytes.len().saturating_sub(2);
         while i < end {
             let h = trigram_hash(
                 bytes[i].to_ascii_lowercase(),
@@ -224,14 +214,18 @@ impl TrigramBloom {
 
         // Packed `(idx | mask << 16)` layout requires `idx < 65_536`.
         const { assert!(MAX_TRIGRAM_BLOOM_BYTES <= 65_536) };
-        debug_assert!(bytes.len() >= 16);
-        debug_assert!(self.bits.len().is_power_of_two());
-        debug_assert!(self.bits.len() <= MAX_TRIGRAM_BLOOM_BYTES);
+        if !self.bits.len().is_power_of_two() || self.bits.len() > MAX_TRIGRAM_BLOOM_BYTES {
+            self.insert_bytes_scalar(bytes);
+            return;
+        }
         let byte_mask = self.bits.len() - 1;
         let bit_mask = (self.bits.len() * 8) - 1;
         let bits = &mut self.bits;
         let ptr = bits.as_mut_ptr();
 
+        let offset_256 = _mm256_set1_epi8(0x3Fi8);
+        let upper_256 = _mm256_set1_epi8(-102i8);
+        let bit20_256 = _mm256_set1_epi8(0x20i8);
         let offset_128 = _mm_set1_epi8(0x3Fi8);
         let upper_128 = _mm_set1_epi8(-102i8);
         let bit20_128 = _mm_set1_epi8(0x20i8);
@@ -246,6 +240,65 @@ impl TrigramBloom {
         let seven_v = _mm256_set1_epi32(7);
 
         let mut i = 0usize;
+        // Wide 32-byte path: lowercase 32 bytes once and hash 24 trigrams (3 × 8 lanes) interleaved.
+        while i + 32 <= bytes.len() {
+            // SAFETY: `i + 32 <= bytes.len()`, so unaligned 32-byte load is within bounds.
+            let v = unsafe { _mm256_loadu_si256(bytes.as_ptr().add(i) as *const __m256i) };
+            let shifted = _mm256_add_epi8(v, offset_256);
+            let is_upper = _mm256_cmpgt_epi8(upper_256, shifted);
+            let lowered = _mm256_or_si256(v, _mm256_and_si256(is_upper, bit20_256));
+
+            let lo_128 = _mm256_castsi256_si128(lowered);
+            let hi_128 = _mm256_extracti128_si256::<1>(lowered);
+            let mid_128 = _mm_alignr_epi8::<8>(hi_128, lo_128);
+
+            let mut x0 = _mm256_shuffle_epi8(_mm256_broadcastsi128_si256(lo_128), shuf_mask);
+            let mut x1 = _mm256_shuffle_epi8(_mm256_broadcastsi128_si256(mid_128), shuf_mask);
+            let mut x2 = _mm256_shuffle_epi8(_mm256_broadcastsi128_si256(hi_128), shuf_mask);
+
+            x0 = _mm256_xor_si256(x0, _mm256_srli_epi32(x0, 16));
+            x1 = _mm256_xor_si256(x1, _mm256_srli_epi32(x1, 16));
+            x2 = _mm256_xor_si256(x2, _mm256_srli_epi32(x2, 16));
+            x0 = _mm256_mullo_epi32(x0, c1);
+            x1 = _mm256_mullo_epi32(x1, c1);
+            x2 = _mm256_mullo_epi32(x2, c1);
+            x0 = _mm256_xor_si256(x0, _mm256_srli_epi32(x0, 13));
+            x1 = _mm256_xor_si256(x1, _mm256_srli_epi32(x1, 13));
+            x2 = _mm256_xor_si256(x2, _mm256_srli_epi32(x2, 13));
+            x0 = _mm256_mullo_epi32(x0, c2);
+            x1 = _mm256_mullo_epi32(x1, c2);
+            x2 = _mm256_mullo_epi32(x2, c2);
+            x0 = _mm256_xor_si256(x0, _mm256_srli_epi32(x0, 16));
+            x1 = _mm256_xor_si256(x1, _mm256_srli_epi32(x1, 16));
+            x2 = _mm256_xor_si256(x2, _mm256_srli_epi32(x2, 16));
+
+            for x in [x0, x1, x2] {
+                let p1_vec = _mm256_and_si256(x, mask_v);
+                let rot16 = _mm256_or_si256(_mm256_srli_epi32(x, 16), _mm256_slli_epi32(x, 16));
+                let p2_vec = _mm256_and_si256(rot16, mask_v);
+                let idx1_vec = _mm256_srli_epi32(p1_vec, 3);
+                let mask1_vec = _mm256_sllv_epi32(ones_v, _mm256_and_si256(p1_vec, seven_v));
+                let idx2_vec = _mm256_srli_epi32(p2_vec, 3);
+                let mask2_vec = _mm256_sllv_epi32(ones_v, _mm256_and_si256(p2_vec, seven_v));
+
+                let v1 = _mm256_or_si256(idx1_vec, _mm256_slli_epi32(mask1_vec, 16));
+                let v2 = _mm256_or_si256(idx2_vec, _mm256_slli_epi32(mask2_vec, 16));
+
+                // SAFETY: `ptr` points to `bits` of length `byte_mask + 1` (power of two, `<= 16_384`).
+                unsafe {
+                    set_two_lanes(ptr, byte_mask, _mm256_extract_epi64::<0>(v1) as u64);
+                    set_two_lanes(ptr, byte_mask, _mm256_extract_epi64::<1>(v1) as u64);
+                    set_two_lanes(ptr, byte_mask, _mm256_extract_epi64::<2>(v1) as u64);
+                    set_two_lanes(ptr, byte_mask, _mm256_extract_epi64::<3>(v1) as u64);
+                    set_two_lanes(ptr, byte_mask, _mm256_extract_epi64::<0>(v2) as u64);
+                    set_two_lanes(ptr, byte_mask, _mm256_extract_epi64::<1>(v2) as u64);
+                    set_two_lanes(ptr, byte_mask, _mm256_extract_epi64::<2>(v2) as u64);
+                    set_two_lanes(ptr, byte_mask, _mm256_extract_epi64::<3>(v2) as u64);
+                }
+            }
+            i += 24;
+        }
+
         while i + 16 <= bytes.len() {
             // SAFETY: `i + 16 <= bytes.len()`, so unaligned 16-byte load is within bounds.
             let v = unsafe { _mm_loadu_si128(bytes.as_ptr().add(i) as *const __m128i) };
@@ -286,7 +339,7 @@ impl TrigramBloom {
             i += 8;
         }
 
-        let end = bytes.len() - 2;
+        let end = bytes.len().saturating_sub(2);
         while i < end {
             let h = trigram_hash(
                 bytes[i].to_ascii_lowercase(),
@@ -308,7 +361,7 @@ impl TrigramBloom {
         not(miri)
     ))]
     #[target_feature(enable = "neon")]
-    unsafe fn insert_bytes_neon(&mut self, bytes: &[u8]) {
+    fn insert_bytes_neon(&mut self, bytes: &[u8]) {
         use std::arch::aarch64::*;
 
         #[inline(always)]
@@ -333,9 +386,10 @@ impl TrigramBloom {
 
         // Packed `(idx | mask << 16)` layout requires `idx < 65_536`.
         const { assert!(MAX_TRIGRAM_BLOOM_BYTES <= 65_536) };
-        debug_assert!(bytes.len() >= 16);
-        debug_assert!(self.bits.len().is_power_of_two());
-        debug_assert!(self.bits.len() <= MAX_TRIGRAM_BLOOM_BYTES);
+        if !self.bits.len().is_power_of_two() || self.bits.len() > MAX_TRIGRAM_BLOOM_BYTES {
+            self.insert_bytes_scalar(bytes);
+            return;
+        }
         let byte_mask = self.bits.len() - 1;
         let bit_mask = (self.bits.len() * 8) - 1;
         let bits = &mut self.bits;
@@ -434,7 +488,7 @@ impl TrigramBloom {
             i += 12;
         }
 
-        let end = bytes.len() - 2;
+        let end = bytes.len().saturating_sub(2);
         while i < end {
             let h = trigram_hash(
                 bytes[i].to_ascii_lowercase(),
@@ -509,16 +563,17 @@ unsafe fn ascii_lowercase_avx2(src: &[u8], dst: &mut [u8]) {
     use std::arch::x86_64::*;
 
     debug_assert_eq!(src.len(), dst.len());
+    let len = src.len().min(dst.len());
     // Map 'A'..='Z' (0x41..=0x5A) to -128..=-103 via wrapping +0x3F so signed
     // `cmpgt(-102, x)` selects strictly 'A'..='Z' and leaves non-ASCII untouched.
     let offset = _mm256_set1_epi8(0x3Fi8);
     let upper_bound = _mm256_set1_epi8(-102i8);
     let bit20 = _mm256_set1_epi8(0x20i8);
 
-    let full_chunks = src.len() / 32;
+    let full_chunks = len / 32;
     for i in 0..full_chunks {
         let byte_off = i * 32;
-        // SAFETY: `i * 32 + 32 <= src.len() == dst.len()`; unaligned load/store are valid.
+        // SAFETY: `i * 32 + 32 <= len <= min(src.len(), dst.len())`; unaligned load/store are valid.
         unsafe {
             let v = _mm256_loadu_si256(src.as_ptr().add(byte_off) as *const __m256i);
             let shifted = _mm256_add_epi8(v, offset);
@@ -529,8 +584,8 @@ unsafe fn ascii_lowercase_avx2(src: &[u8], dst: &mut [u8]) {
     }
 
     let rem_start = full_chunks * 32;
-    if rem_start < src.len() {
-        ascii_lowercase_scalar(&src[rem_start..], &mut dst[rem_start..]);
+    if rem_start < len {
+        ascii_lowercase_scalar(&src[rem_start..len], &mut dst[rem_start..len]);
     }
 }
 
@@ -541,29 +596,31 @@ unsafe fn ascii_lowercase_avx2(src: &[u8], dst: &mut [u8]) {
     not(miri)
 ))]
 #[target_feature(enable = "neon")]
-unsafe fn ascii_lowercase_neon(src: &[u8], dst: &mut [u8]) {
+fn ascii_lowercase_neon(src: &[u8], dst: &mut [u8]) {
     use std::arch::aarch64::*;
 
     debug_assert_eq!(src.len(), dst.len());
+    let len = src.len().min(dst.len());
     let cap_a = vdupq_n_u8(b'A');
     let alpha_len = vdupq_n_u8(26);
     let bit20 = vdupq_n_u8(0x20);
 
-    let full_chunks = src.len() / 16;
+    let full_chunks = len / 16;
     for i in 0..full_chunks {
         let byte_off = i * 16;
-        // SAFETY: `i * 16 + 16 <= src.len() == dst.len()`; byte load/store allow any alignment.
+        // SAFETY: `i * 16 + 16 <= len <= min(src.len(), dst.len())`; byte load allows any alignment.
+        let v = unsafe { vld1q_u8(src.as_ptr().add(byte_off)) };
+        let is_upper = vcltq_u8(vsubq_u8(v, cap_a), alpha_len);
+        let lowered = vorrq_u8(v, vandq_u8(is_upper, bit20));
+        // SAFETY: `i * 16 + 16 <= len <= dst.len()`; byte store allows any alignment.
         unsafe {
-            let v = vld1q_u8(src.as_ptr().add(byte_off));
-            let is_upper = vcltq_u8(vsubq_u8(v, cap_a), alpha_len);
-            let lowered = vorrq_u8(v, vandq_u8(is_upper, bit20));
             vst1q_u8(dst.as_mut_ptr().add(byte_off), lowered);
         }
     }
 
     let rem_start = full_chunks * 16;
-    if rem_start < src.len() {
-        ascii_lowercase_scalar(&src[rem_start..], &mut dst[rem_start..]);
+    if rem_start < len {
+        ascii_lowercase_scalar(&src[rem_start..len], &mut dst[rem_start..len]);
     }
 }
 

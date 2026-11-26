@@ -110,9 +110,7 @@ pub fn pack_u32(values: &[u32], bit_width: u8, out: &mut Vec<u8>) -> Result<(), 
             not(miri)
         ))]
         {
-            // SAFETY: `target_feature = "neon"` is enabled at compile time, `1 <= bit_width <= 32`,
-            // `tile_src_len == full_tiles * 1024 <= values.len()`, and
-            // `tile_dst_len == full_tiles * 128 * bit_width <= dst.len()`.
+            // SAFETY: `cfg(target_feature = "neon")` guarantees NEON at compile time.
             unsafe {
                 pack_u32_tiles_neon(&values[..tile_src_len], bit_width, &mut dst[..tile_dst_len]);
             }
@@ -204,9 +202,7 @@ pub fn unpack_u32(
             not(miri)
         ))]
         {
-            // SAFETY: `target_feature = "neon"` is enabled at compile time, `1 <= bit_width <= 32`,
-            // `tile_src_len == full_tiles * 128 * bit_width <= src.len()`, and
-            // `tile_dst_len == full_tiles * 1024 <= dst.len()`.
+            // SAFETY: `cfg(target_feature = "neon")` guarantees NEON at compile time.
             unsafe {
                 unpack_u32_tiles_neon(&src[..tile_src_len], bit_width, &mut dst[..tile_dst_len]);
             }
@@ -282,9 +278,7 @@ pub fn pack_u64(values: &[u64], bit_width: u8, out: &mut Vec<u8>) -> Result<(), 
             not(miri)
         ))]
         {
-            // SAFETY: `target_feature = "neon"` is enabled at compile time, `1 <= bit_width <= 64`,
-            // `tile_src_len == full_tiles * 1024 <= values.len()`, and
-            // `tile_dst_len == full_tiles * 128 * bit_width <= dst.len()`.
+            // SAFETY: `cfg(target_feature = "neon")` guarantees NEON at compile time.
             unsafe {
                 pack_u64_tiles_neon(&values[..tile_src_len], bit_width, &mut dst[..tile_dst_len]);
             }
@@ -376,9 +370,7 @@ pub fn unpack_u64(
             not(miri)
         ))]
         {
-            // SAFETY: `target_feature = "neon"` is enabled at compile time, `1 <= bit_width <= 64`,
-            // `tile_src_len == full_tiles * 128 * bit_width <= src.len()`, and
-            // `tile_dst_len == full_tiles * 1024 <= dst.len()`.
+            // SAFETY: `cfg(target_feature = "neon")` guarantees NEON at compile time.
             unsafe {
                 unpack_u64_tiles_neon(&src[..tile_src_len], bit_width, &mut dst[..tile_dst_len]);
             }
@@ -474,8 +466,7 @@ pub fn delta_encode_i64(values: &[i64], bases_out: &mut Vec<i64>, deltas_out: &m
             not(miri)
         ))]
         {
-            // SAFETY: `target_feature = "neon"` is enabled at compile time and
-            // output slices are pre-sized to `full_tiles * 8` and `full_tiles * 1024`.
+            // SAFETY: `cfg(target_feature = "neon")` guarantees NEON at compile time.
             unsafe {
                 delta_encode_i64_tiles_neon(
                     &values[..tile_val_len],
@@ -575,8 +566,7 @@ pub fn delta_decode_i64(
             not(miri)
         ))]
         {
-            // SAFETY: `target_feature = "neon"` is enabled at compile time and
-            // input/output slices are exact multiples of `full_tiles`.
+            // SAFETY: `cfg(target_feature = "neon")` guarantees NEON at compile time.
             unsafe {
                 delta_decode_i64_tiles_neon(
                     &bases[..tile_base_len],
@@ -1503,13 +1493,22 @@ fn delta_decode_i64_tiles_scalar(bases: &[i64], deltas: &[i64], dst: &mut [i64])
 unsafe fn pack_u32_tiles_avx2(values: &[u32], bit_width: u8, dst: &mut [u8]) {
     use std::arch::x86_64::*;
 
+    assert!((1..=32).contains(&bit_width));
+    if bit_width == 32 {
+        assert_eq!(values.len().checked_mul(size_of::<u32>()), Some(dst.len()));
+        // SAFETY: `values.len() * 4 == dst.len()` (`x86_64` is little-endian) and slices do not alias.
+        unsafe {
+            std::ptr::copy_nonoverlapping(
+                values.as_ptr().cast::<u8>(),
+                dst.as_mut_ptr(),
+                dst.len(),
+            );
+        }
+        return;
+    }
+
     let bw = u32::from(bit_width);
-    let mask_scalar = if bit_width == 32 {
-        u32::MAX
-    } else {
-        (1u32 << bw) - 1
-    };
-    let mask = _mm256_set1_epi32(mask_scalar as i32);
+    let mask = _mm256_set1_epi32(((1u32 << bw) - 1) as i32);
     let tile_out_bytes = 128 * usize::from(bit_width);
 
     for (tile_in, tile_out) in values
@@ -1527,8 +1526,8 @@ unsafe fn pack_u32_tiles_avx2(values: &[u32], bit_width: u8, dst: &mut [u8]) {
             // `_mm256_loadu_si256` allows arbitrary alignment.
             let raw = unsafe { _mm256_loadu_si256(tile_in.as_ptr().add(k * 8) as *const __m256i) };
             let v = _mm256_and_si256(raw, mask);
-            let lshift = _mm256_set1_epi32(bit_pos as i32);
-            acc = _mm256_or_si256(acc, _mm256_sllv_epi32(v, lshift));
+            let lshift = _mm_cvtsi32_si128(bit_pos as i32);
+            acc = _mm256_or_si256(acc, _mm256_sll_epi32(v, lshift));
 
             let next_bit_pos = bit_pos + bw;
             if next_bit_pos >= 32 {
@@ -1543,8 +1542,8 @@ unsafe fn pack_u32_tiles_avx2(values: &[u32], bit_width: u8, dst: &mut [u8]) {
                 word_idx += 1;
                 let rem_bits = next_bit_pos - 32;
                 if rem_bits > 0 {
-                    let rshift = _mm256_set1_epi32((32 - bit_pos) as i32);
-                    acc = _mm256_srlv_epi32(v, rshift);
+                    let rshift = _mm_cvtsi32_si128((32 - bit_pos) as i32);
+                    acc = _mm256_srl_epi32(v, rshift);
                 } else {
                     acc = _mm256_setzero_si256();
                 }
@@ -1561,13 +1560,18 @@ unsafe fn pack_u32_tiles_avx2(values: &[u32], bit_width: u8, dst: &mut [u8]) {
 unsafe fn unpack_u32_tiles_avx2(src: &[u8], bit_width: u8, dst: &mut [u32]) {
     use std::arch::x86_64::*;
 
+    assert!((1..=32).contains(&bit_width));
+    if bit_width == 32 {
+        assert_eq!(dst.len().checked_mul(size_of::<u32>()), Some(src.len()));
+        // SAFETY: `src.len() == dst.len() * 4` (`x86_64` is little-endian) and slices do not alias.
+        unsafe {
+            std::ptr::copy_nonoverlapping(src.as_ptr(), dst.as_mut_ptr().cast::<u8>(), src.len());
+        }
+        return;
+    }
+
     let bw = u32::from(bit_width);
-    let mask_scalar = if bit_width == 32 {
-        u32::MAX
-    } else {
-        (1u32 << bw) - 1
-    };
-    let mask = _mm256_set1_epi32(mask_scalar as i32);
+    let mask = _mm256_set1_epi32(((1u32 << bw) - 1) as i32);
     let tile_in_bytes = 128 * usize::from(bit_width);
     let total_words = 4 * usize::from(bit_width);
 
@@ -1581,8 +1585,8 @@ unsafe fn unpack_u32_tiles_avx2(src: &[u8], bit_width: u8, dst: &mut [u32]) {
         let mut bit_pos: u32 = 0;
 
         for k in 0..128 {
-            let rshift = _mm256_set1_epi32(bit_pos as i32);
-            let mut vals = _mm256_and_si256(_mm256_srlv_epi32(cur, rshift), mask);
+            let rshift = _mm_cvtsi32_si128(bit_pos as i32);
+            let mut vals = _mm256_srl_epi32(cur, rshift);
 
             let next_bit_pos = bit_pos + bw;
             if next_bit_pos >= 32 {
@@ -1594,9 +1598,8 @@ unsafe fn unpack_u32_tiles_avx2(src: &[u8], bit_width: u8, dst: &mut [u32]) {
                         _mm256_loadu_si256(tile_in.as_ptr().add(word_idx * 32) as *const __m256i)
                     };
                     if rem_bits > 0 {
-                        let lshift = _mm256_set1_epi32((32 - bit_pos) as i32);
-                        let hi = _mm256_and_si256(_mm256_sllv_epi32(next, lshift), mask);
-                        vals = _mm256_or_si256(vals, hi);
+                        let lshift = _mm_cvtsi32_si128((32 - bit_pos) as i32);
+                        vals = _mm256_or_si256(vals, _mm256_sll_epi32(next, lshift));
                     }
                     cur = next;
                 }
@@ -1604,6 +1607,7 @@ unsafe fn unpack_u32_tiles_avx2(src: &[u8], bit_width: u8, dst: &mut [u32]) {
             } else {
                 bit_pos = next_bit_pos;
             }
+            vals = _mm256_and_si256(vals, mask);
             // SAFETY: `tile_out` has length 1024 and `k * 8 + 8 <= 1024`; unaligned store is valid.
             unsafe {
                 _mm256_storeu_si256(tile_out.as_mut_ptr().add(k * 8) as *mut __m256i, vals);
@@ -1617,13 +1621,22 @@ unsafe fn unpack_u32_tiles_avx2(src: &[u8], bit_width: u8, dst: &mut [u32]) {
 unsafe fn pack_u64_tiles_avx2(values: &[u64], bit_width: u8, dst: &mut [u8]) {
     use std::arch::x86_64::*;
 
+    assert!((1..=64).contains(&bit_width));
+    if bit_width == 64 {
+        assert_eq!(values.len().checked_mul(size_of::<u64>()), Some(dst.len()));
+        // SAFETY: `values.len() * 8 == dst.len()` (`x86_64` is little-endian) and slices do not alias.
+        unsafe {
+            std::ptr::copy_nonoverlapping(
+                values.as_ptr().cast::<u8>(),
+                dst.as_mut_ptr(),
+                dst.len(),
+            );
+        }
+        return;
+    }
+
     let bw = u32::from(bit_width);
-    let mask_scalar = if bit_width == 64 {
-        u64::MAX
-    } else {
-        (1u64 << bw) - 1
-    };
-    let mask = _mm256_set1_epi64x(mask_scalar as i64);
+    let mask = _mm256_set1_epi64x(((1u64 << bw) - 1) as i64);
     let tile_out_bytes = 128 * usize::from(bit_width);
 
     for (tile_in, tile_out) in values
@@ -1640,8 +1653,8 @@ unsafe fn pack_u64_tiles_avx2(values: &[u64], bit_width: u8, dst: &mut [u8]) {
             // SAFETY: `tile_in` has length 1024 and `k * 4 + 4 <= 1024`; unaligned load is valid.
             let raw = unsafe { _mm256_loadu_si256(tile_in.as_ptr().add(k * 4) as *const __m256i) };
             let v = _mm256_and_si256(raw, mask);
-            let lshift = _mm256_set1_epi64x(i64::from(bit_pos));
-            acc = _mm256_or_si256(acc, _mm256_sllv_epi64(v, lshift));
+            let lshift = _mm_cvtsi32_si128(bit_pos as i32);
+            acc = _mm256_or_si256(acc, _mm256_sll_epi64(v, lshift));
 
             let next_bit_pos = bit_pos + bw;
             if next_bit_pos >= 64 {
@@ -1655,8 +1668,8 @@ unsafe fn pack_u64_tiles_avx2(values: &[u64], bit_width: u8, dst: &mut [u8]) {
                 word_idx += 1;
                 let rem_bits = next_bit_pos - 64;
                 if rem_bits > 0 {
-                    let rshift = _mm256_set1_epi64x(i64::from(64 - bit_pos));
-                    acc = _mm256_srlv_epi64(v, rshift);
+                    let rshift = _mm_cvtsi32_si128((64 - bit_pos) as i32);
+                    acc = _mm256_srl_epi64(v, rshift);
                 } else {
                     acc = _mm256_setzero_si256();
                 }
@@ -1673,13 +1686,18 @@ unsafe fn pack_u64_tiles_avx2(values: &[u64], bit_width: u8, dst: &mut [u8]) {
 unsafe fn unpack_u64_tiles_avx2(src: &[u8], bit_width: u8, dst: &mut [u64]) {
     use std::arch::x86_64::*;
 
+    assert!((1..=64).contains(&bit_width));
+    if bit_width == 64 {
+        assert_eq!(dst.len().checked_mul(size_of::<u64>()), Some(src.len()));
+        // SAFETY: `src.len() == dst.len() * 8` (`x86_64` is little-endian) and slices do not alias.
+        unsafe {
+            std::ptr::copy_nonoverlapping(src.as_ptr(), dst.as_mut_ptr().cast::<u8>(), src.len());
+        }
+        return;
+    }
+
     let bw = u32::from(bit_width);
-    let mask_scalar = if bit_width == 64 {
-        u64::MAX
-    } else {
-        (1u64 << bw) - 1
-    };
-    let mask = _mm256_set1_epi64x(mask_scalar as i64);
+    let mask = _mm256_set1_epi64x(((1u64 << bw) - 1) as i64);
     let tile_in_bytes = 128 * usize::from(bit_width);
     let total_words = 4 * usize::from(bit_width);
 
@@ -1693,8 +1711,8 @@ unsafe fn unpack_u64_tiles_avx2(src: &[u8], bit_width: u8, dst: &mut [u64]) {
         let mut bit_pos: u32 = 0;
 
         for k in 0..256 {
-            let rshift = _mm256_set1_epi64x(i64::from(bit_pos));
-            let mut vals = _mm256_and_si256(_mm256_srlv_epi64(cur, rshift), mask);
+            let rshift = _mm_cvtsi32_si128(bit_pos as i32);
+            let mut vals = _mm256_srl_epi64(cur, rshift);
 
             let next_bit_pos = bit_pos + bw;
             if next_bit_pos >= 64 {
@@ -1706,9 +1724,8 @@ unsafe fn unpack_u64_tiles_avx2(src: &[u8], bit_width: u8, dst: &mut [u64]) {
                         _mm256_loadu_si256(tile_in.as_ptr().add(word_idx * 32) as *const __m256i)
                     };
                     if rem_bits > 0 {
-                        let lshift = _mm256_set1_epi64x(i64::from(64 - bit_pos));
-                        let hi = _mm256_and_si256(_mm256_sllv_epi64(next, lshift), mask);
-                        vals = _mm256_or_si256(vals, hi);
+                        let lshift = _mm_cvtsi32_si128((64 - bit_pos) as i32);
+                        vals = _mm256_or_si256(vals, _mm256_sll_epi64(next, lshift));
                     }
                     cur = next;
                 }
@@ -1716,6 +1733,7 @@ unsafe fn unpack_u64_tiles_avx2(src: &[u8], bit_width: u8, dst: &mut [u64]) {
             } else {
                 bit_pos = next_bit_pos;
             }
+            vals = _mm256_and_si256(vals, mask);
             // SAFETY: `tile_out` has length 1024 and `k * 4 + 4 <= 1024`; unaligned store is valid.
             unsafe {
                 _mm256_storeu_si256(tile_out.as_mut_ptr().add(k * 4) as *mut __m256i, vals);
@@ -1726,12 +1744,49 @@ unsafe fn unpack_u64_tiles_avx2(src: &[u8], bit_width: u8, dst: &mut [u64]) {
 
 #[cfg(all(target_arch = "x86_64", not(miri)))]
 #[target_feature(enable = "avx2")]
+#[inline]
+unsafe fn transpose_4x4_i64_avx2(
+    r0: std::arch::x86_64::__m256i,
+    r1: std::arch::x86_64::__m256i,
+    r2: std::arch::x86_64::__m256i,
+    r3: std::arch::x86_64::__m256i,
+) -> (
+    std::arch::x86_64::__m256i,
+    std::arch::x86_64::__m256i,
+    std::arch::x86_64::__m256i,
+    std::arch::x86_64::__m256i,
+) {
+    use std::arch::x86_64::*;
+
+    let t0 = _mm256_unpacklo_epi64(r0, r1);
+    let t1 = _mm256_unpackhi_epi64(r0, r1);
+    let t2 = _mm256_unpacklo_epi64(r2, r3);
+    let t3 = _mm256_unpackhi_epi64(r2, r3);
+    (
+        _mm256_permute2x128_si256::<0x20>(t0, t2),
+        _mm256_permute2x128_si256::<0x20>(t1, t3),
+        _mm256_permute2x128_si256::<0x31>(t0, t2),
+        _mm256_permute2x128_si256::<0x31>(t1, t3),
+    )
+}
+
+#[cfg(all(target_arch = "x86_64", not(miri)))]
+#[target_feature(enable = "avx2")]
 unsafe fn delta_encode_i64_tiles_avx2(
     values: &[i64],
     bases_out: &mut [i64],
     deltas_out: &mut [i64],
 ) {
     use std::arch::x86_64::*;
+
+    const S0: usize = FASTLANES_ORDER_8[0] * 128;
+    const S1: usize = FASTLANES_ORDER_8[1] * 128;
+    const S2: usize = FASTLANES_ORDER_8[2] * 128;
+    const S3: usize = FASTLANES_ORDER_8[3] * 128;
+    const S4: usize = FASTLANES_ORDER_8[4] * 128;
+    const S5: usize = FASTLANES_ORDER_8[5] * 128;
+    const S6: usize = FASTLANES_ORDER_8[6] * 128;
+    const S7: usize = FASTLANES_ORDER_8[7] * 128;
 
     for ((tile_in, tile_bases), tile_deltas) in values
         .as_chunks::<FASTLANES_TILE_SIZE>()
@@ -1748,35 +1803,56 @@ unsafe fn delta_encode_i64_tiles_avx2(
         for lane in 0..8 {
             let seg = FASTLANES_ORDER_8[lane];
             tile_bases[lane] = tile_in[seg * 128];
-            tile_deltas[lane] = 0;
         }
-        let mut prev0 =
-            _mm256_set_epi64x(tile_bases[3], tile_bases[2], tile_bases[1], tile_bases[0]);
-        let mut prev1 =
-            _mm256_set_epi64x(tile_bases[7], tile_bases[6], tile_bases[5], tile_bases[4]);
-        for r in 1..128 {
-            let cur0 = _mm256_set_epi64x(
-                tile_in[FASTLANES_ORDER_8[3] * 128 + r],
-                tile_in[FASTLANES_ORDER_8[2] * 128 + r],
-                tile_in[FASTLANES_ORDER_8[1] * 128 + r],
-                tile_in[FASTLANES_ORDER_8[0] * 128 + r],
-            );
-            let cur1 = _mm256_set_epi64x(
-                tile_in[FASTLANES_ORDER_8[7] * 128 + r],
-                tile_in[FASTLANES_ORDER_8[6] * 128 + r],
-                tile_in[FASTLANES_ORDER_8[5] * 128 + r],
-                tile_in[FASTLANES_ORDER_8[4] * 128 + r],
-            );
-            let d0 = _mm256_sub_epi64(cur0, prev0);
-            let d1 = _mm256_sub_epi64(cur1, prev1);
-            // SAFETY: `r < 128` so `r * 8 + 8 <= 1024 == tile_deltas.len()`; unaligned store is valid.
+        // SAFETY: `tile_bases.len() == 8`; two 4-lane `i64` loads are in bounds.
+        let (mut prev0, mut prev1) = unsafe {
+            (
+                _mm256_loadu_si256(tile_bases.as_ptr() as *const __m256i),
+                _mm256_loadu_si256(tile_bases.as_ptr().add(4) as *const __m256i),
+            )
+        };
+
+        // Process 4 rows (`r..r + 4`) per iteration using contiguous 256-bit loads and
+        // in-register 4×4 `i64` transposes. At `r == 0`, `c0_0 == prev0` and `c1_0 == prev1`,
+        // so row 0 deltas naturally compute to 0.
+        let in_ptr = tile_in.as_ptr();
+        let out_ptr = tile_deltas.as_mut_ptr();
+        for quad in 0..32 {
+            let r = quad * 4;
+            // SAFETY: AVX2 is active, each `S* + r + 4 <= 1024 == tile_in.len()`, and
+            // `(r + 3) * 8 + 8 <= 1024 == tile_deltas.len()`.
             unsafe {
-                let dst_ptr = tile_deltas.as_mut_ptr().add(r * 8);
-                _mm256_storeu_si256(dst_ptr as *mut __m256i, d0);
-                _mm256_storeu_si256(dst_ptr.add(4) as *mut __m256i, d1);
+                let l0 = _mm256_loadu_si256(in_ptr.add(S0 + r) as *const __m256i);
+                let l1 = _mm256_loadu_si256(in_ptr.add(S1 + r) as *const __m256i);
+                let l2 = _mm256_loadu_si256(in_ptr.add(S2 + r) as *const __m256i);
+                let l3 = _mm256_loadu_si256(in_ptr.add(S3 + r) as *const __m256i);
+                let l4 = _mm256_loadu_si256(in_ptr.add(S4 + r) as *const __m256i);
+                let l5 = _mm256_loadu_si256(in_ptr.add(S5 + r) as *const __m256i);
+                let l6 = _mm256_loadu_si256(in_ptr.add(S6 + r) as *const __m256i);
+                let l7 = _mm256_loadu_si256(in_ptr.add(S7 + r) as *const __m256i);
+
+                let (c0_0, c0_1, c0_2, c0_3) = transpose_4x4_i64_avx2(l0, l1, l2, l3);
+                let (c1_0, c1_1, c1_2, c1_3) = transpose_4x4_i64_avx2(l4, l5, l6, l7);
+
+                let dst0 = out_ptr.add(r * 8);
+                _mm256_storeu_si256(dst0 as *mut __m256i, _mm256_sub_epi64(c0_0, prev0));
+                _mm256_storeu_si256(dst0.add(4) as *mut __m256i, _mm256_sub_epi64(c1_0, prev1));
+
+                let dst1 = dst0.add(8);
+                _mm256_storeu_si256(dst1 as *mut __m256i, _mm256_sub_epi64(c0_1, c0_0));
+                _mm256_storeu_si256(dst1.add(4) as *mut __m256i, _mm256_sub_epi64(c1_1, c1_0));
+
+                let dst2 = dst0.add(16);
+                _mm256_storeu_si256(dst2 as *mut __m256i, _mm256_sub_epi64(c0_2, c0_1));
+                _mm256_storeu_si256(dst2.add(4) as *mut __m256i, _mm256_sub_epi64(c1_2, c1_1));
+
+                let dst3 = dst0.add(24);
+                _mm256_storeu_si256(dst3 as *mut __m256i, _mm256_sub_epi64(c0_3, c0_2));
+                _mm256_storeu_si256(dst3.add(4) as *mut __m256i, _mm256_sub_epi64(c1_3, c1_2));
+
+                prev0 = c0_3;
+                prev1 = c1_3;
             }
-            prev0 = cur0;
-            prev1 = cur1;
         }
     }
 }
@@ -1785,6 +1861,15 @@ unsafe fn delta_encode_i64_tiles_avx2(
 #[target_feature(enable = "avx2")]
 unsafe fn delta_decode_i64_tiles_avx2(bases: &[i64], deltas: &[i64], dst: &mut [i64]) {
     use std::arch::x86_64::*;
+
+    const S0: usize = FASTLANES_ORDER_8[0] * 128;
+    const S1: usize = FASTLANES_ORDER_8[1] * 128;
+    const S2: usize = FASTLANES_ORDER_8[2] * 128;
+    const S3: usize = FASTLANES_ORDER_8[3] * 128;
+    const S4: usize = FASTLANES_ORDER_8[4] * 128;
+    const S5: usize = FASTLANES_ORDER_8[5] * 128;
+    const S6: usize = FASTLANES_ORDER_8[6] * 128;
+    const S7: usize = FASTLANES_ORDER_8[7] * 128;
 
     for ((tile_bases, tile_deltas), tile_out) in bases
         .as_chunks::<8>()
@@ -1800,27 +1885,43 @@ unsafe fn delta_decode_i64_tiles_avx2(bases: &[i64], deltas: &[i64], dst: &mut [
                 _mm256_loadu_si256(tile_bases.as_ptr().add(4) as *const __m256i),
             )
         };
-        let mut lanes = [0i64; 8];
 
-        for r in 0..128 {
-            // SAFETY: `r < 128` so `r * 8 + 8 <= 1024 == tile_deltas.len()`; unaligned loads are valid.
-            let (d0, d1) = unsafe {
-                let ptr = tile_deltas.as_ptr().add(r * 8);
-                (
-                    _mm256_loadu_si256(ptr as *const __m256i),
-                    _mm256_loadu_si256(ptr.add(4) as *const __m256i),
-                )
-            };
-            acc0 = _mm256_add_epi64(acc0, d0);
-            acc1 = _mm256_add_epi64(acc1, d1);
-            // SAFETY: `lanes` is an 8-element `[i64; 8]` array on the stack.
+        // Process 4 rows (`r..r + 4`) per iteration using 4×4 `i64` transposes
+        // and contiguous 256-bit stores into each FastLanes segment.
+        let in_ptr = tile_deltas.as_ptr();
+        let out_ptr = tile_out.as_mut_ptr();
+        for quad in 0..32 {
+            let r = quad * 4;
+            // SAFETY: AVX2 is active, `(r + 3) * 8 + 8 <= 1024 == tile_deltas.len()`, and
+            // each `S* + r + 4 <= 1024 == tile_out.len()`.
             unsafe {
-                _mm256_storeu_si256(lanes.as_mut_ptr() as *mut __m256i, acc0);
-                _mm256_storeu_si256(lanes.as_mut_ptr().add(4) as *mut __m256i, acc1);
-            }
-            for lane in 0..8 {
-                let seg = FASTLANES_ORDER_8[lane];
-                tile_out[seg * 128 + r] = lanes[lane];
+                let p0 = in_ptr.add(r * 8);
+                let a0_0 = _mm256_add_epi64(acc0, _mm256_loadu_si256(p0 as *const __m256i));
+                let a1_0 = _mm256_add_epi64(acc1, _mm256_loadu_si256(p0.add(4) as *const __m256i));
+
+                let p1 = p0.add(8);
+                let a0_1 = _mm256_add_epi64(a0_0, _mm256_loadu_si256(p1 as *const __m256i));
+                let a1_1 = _mm256_add_epi64(a1_0, _mm256_loadu_si256(p1.add(4) as *const __m256i));
+
+                let p2 = p0.add(16);
+                let a0_2 = _mm256_add_epi64(a0_1, _mm256_loadu_si256(p2 as *const __m256i));
+                let a1_2 = _mm256_add_epi64(a1_1, _mm256_loadu_si256(p2.add(4) as *const __m256i));
+
+                let p3 = p0.add(24);
+                acc0 = _mm256_add_epi64(a0_2, _mm256_loadu_si256(p3 as *const __m256i));
+                acc1 = _mm256_add_epi64(a1_2, _mm256_loadu_si256(p3.add(4) as *const __m256i));
+
+                let (s0, s1, s2, s3) = transpose_4x4_i64_avx2(a0_0, a0_1, a0_2, acc0);
+                let (s4, s5, s6, s7) = transpose_4x4_i64_avx2(a1_0, a1_1, a1_2, acc1);
+
+                _mm256_storeu_si256(out_ptr.add(S0 + r) as *mut __m256i, s0);
+                _mm256_storeu_si256(out_ptr.add(S1 + r) as *mut __m256i, s1);
+                _mm256_storeu_si256(out_ptr.add(S2 + r) as *mut __m256i, s2);
+                _mm256_storeu_si256(out_ptr.add(S3 + r) as *mut __m256i, s3);
+                _mm256_storeu_si256(out_ptr.add(S4 + r) as *mut __m256i, s4);
+                _mm256_storeu_si256(out_ptr.add(S5 + r) as *mut __m256i, s5);
+                _mm256_storeu_si256(out_ptr.add(S6 + r) as *mut __m256i, s6);
+                _mm256_storeu_si256(out_ptr.add(S7 + r) as *mut __m256i, s7);
             }
         }
     }
@@ -1835,11 +1936,12 @@ unsafe fn delta_decode_i64_tiles_avx2(bases: &[i64], deltas: &[i64], dst: &mut [
     not(miri)
 ))]
 #[target_feature(enable = "neon")]
-unsafe fn pack_u32_tiles_neon(values: &[u32], bit_width: u8, dst: &mut [u8]) {
+fn pack_u32_tiles_neon(values: &[u32], bit_width: u8, dst: &mut [u8]) {
     use std::arch::aarch64::*;
 
-    debug_assert!((1..=32).contains(&bit_width));
+    assert!((1..=32).contains(&bit_width));
     if bit_width == 32 {
+        assert_eq!(values.len().checked_mul(size_of::<u32>()), Some(dst.len()));
         // SAFETY: `values.len() * 4 == dst.len()` (little-endian gated) and slices do not alias.
         unsafe {
             std::ptr::copy_nonoverlapping(
@@ -1881,12 +1983,14 @@ unsafe fn pack_u32_tiles_neon(values: &[u32], bit_width: u8, dst: &mut [u8]) {
 
             let next_bit_pos = bit_pos + bw;
             if next_bit_pos >= 32 {
+                let b0 = vreinterpretq_u8_u32(acc0);
+                let b1 = vreinterpretq_u8_u32(acc1);
                 // SAFETY: `word_idx < 4 * bit_width`, so `word_idx * 32 + 32 <= tile_out.len()`;
                 // `vst1q_u8` uses 1-byte pointer alignment and little-endian byte order is gated.
                 unsafe {
                     let out_ptr = tile_out.as_mut_ptr().add(word_idx * 32);
-                    vst1q_u8(out_ptr, vreinterpretq_u8_u32(acc0));
-                    vst1q_u8(out_ptr.add(16), vreinterpretq_u8_u32(acc1));
+                    vst1q_u8(out_ptr, b0);
+                    vst1q_u8(out_ptr.add(16), b1);
                 }
                 word_idx += 1;
                 let rem_bits = next_bit_pos - 32;
@@ -1914,11 +2018,12 @@ unsafe fn pack_u32_tiles_neon(values: &[u32], bit_width: u8, dst: &mut [u8]) {
     not(miri)
 ))]
 #[target_feature(enable = "neon")]
-unsafe fn unpack_u32_tiles_neon(src: &[u8], bit_width: u8, dst: &mut [u32]) {
+fn unpack_u32_tiles_neon(src: &[u8], bit_width: u8, dst: &mut [u32]) {
     use std::arch::aarch64::*;
 
-    debug_assert!((1..=32).contains(&bit_width));
+    assert!((1..=32).contains(&bit_width));
     if bit_width == 32 {
+        assert_eq!(dst.len().checked_mul(size_of::<u32>()), Some(src.len()));
         // SAFETY: `src.len() == dst.len() * 4` (little-endian gated) and slices do not alias.
         unsafe {
             std::ptr::copy_nonoverlapping(src.as_ptr(), dst.as_mut_ptr().cast::<u8>(), src.len());
@@ -1936,13 +2041,12 @@ unsafe fn unpack_u32_tiles_neon(src: &[u8], bit_width: u8, dst: &mut [u32]) {
         .zip(dst.as_chunks_mut::<FASTLANES_TILE_SIZE>().0.iter_mut())
     {
         // SAFETY: `bit_width >= 1`, so `tile_in.len() >= 128 >= 32`; `vld1q_u8` accepts any alignment.
-        let (mut cur0, mut cur1) = unsafe {
+        let (raw_cur0, raw_cur1) = unsafe {
             let ptr = tile_in.as_ptr();
-            (
-                vreinterpretq_u32_u8(vld1q_u8(ptr)),
-                vreinterpretq_u32_u8(vld1q_u8(ptr.add(16))),
-            )
+            (vld1q_u8(ptr), vld1q_u8(ptr.add(16)))
         };
+        let mut cur0 = vreinterpretq_u32_u8(raw_cur0);
+        let mut cur1 = vreinterpretq_u32_u8(raw_cur1);
         let mut word_idx: usize = 0;
         let mut bit_pos: u32 = 0;
 
@@ -1958,13 +2062,12 @@ unsafe fn unpack_u32_tiles_neon(src: &[u8], bit_width: u8, dst: &mut [u32]) {
                 word_idx += 1;
                 if word_idx < total_words {
                     // SAFETY: `word_idx < total_words == 4 * bit_width`, so `word_idx * 32 + 32 <= tile_in.len()`.
-                    let (next0, next1) = unsafe {
+                    let (raw_next0, raw_next1) = unsafe {
                         let ptr = tile_in.as_ptr().add(word_idx * 32);
-                        (
-                            vreinterpretq_u32_u8(vld1q_u8(ptr)),
-                            vreinterpretq_u32_u8(vld1q_u8(ptr.add(16))),
-                        )
+                        (vld1q_u8(ptr), vld1q_u8(ptr.add(16)))
                     };
+                    let next0 = vreinterpretq_u32_u8(raw_next0);
+                    let next1 = vreinterpretq_u32_u8(raw_next1);
                     if rem_bits > 0 {
                         let lshift = vdupq_n_s32((32 - bit_pos) as i32);
                         v0 = vorrq_u32(v0, vshlq_u32(next0, lshift));
@@ -1996,11 +2099,12 @@ unsafe fn unpack_u32_tiles_neon(src: &[u8], bit_width: u8, dst: &mut [u32]) {
     not(miri)
 ))]
 #[target_feature(enable = "neon")]
-unsafe fn pack_u64_tiles_neon(values: &[u64], bit_width: u8, dst: &mut [u8]) {
+fn pack_u64_tiles_neon(values: &[u64], bit_width: u8, dst: &mut [u8]) {
     use std::arch::aarch64::*;
 
-    debug_assert!((1..=64).contains(&bit_width));
+    assert!((1..=64).contains(&bit_width));
     if bit_width == 64 {
+        assert_eq!(values.len().checked_mul(size_of::<u64>()), Some(dst.len()));
         // SAFETY: `values.len() * 8 == dst.len()` (little-endian gated) and slices do not alias.
         unsafe {
             std::ptr::copy_nonoverlapping(
@@ -2042,12 +2146,14 @@ unsafe fn pack_u64_tiles_neon(values: &[u64], bit_width: u8, dst: &mut [u8]) {
 
             let next_bit_pos = bit_pos + bw;
             if next_bit_pos >= 64 {
+                let b0 = vreinterpretq_u8_u64(acc0);
+                let b1 = vreinterpretq_u8_u64(acc1);
                 // SAFETY: `word_idx < 4 * bit_width`, so `word_idx * 32 + 32 <= tile_out.len()`;
                 // `vst1q_u8` accepts any alignment and little-endian byte order is gated.
                 unsafe {
                     let out_ptr = tile_out.as_mut_ptr().add(word_idx * 32);
-                    vst1q_u8(out_ptr, vreinterpretq_u8_u64(acc0));
-                    vst1q_u8(out_ptr.add(16), vreinterpretq_u8_u64(acc1));
+                    vst1q_u8(out_ptr, b0);
+                    vst1q_u8(out_ptr.add(16), b1);
                 }
                 word_idx += 1;
                 let rem_bits = next_bit_pos - 64;
@@ -2075,11 +2181,12 @@ unsafe fn pack_u64_tiles_neon(values: &[u64], bit_width: u8, dst: &mut [u8]) {
     not(miri)
 ))]
 #[target_feature(enable = "neon")]
-unsafe fn unpack_u64_tiles_neon(src: &[u8], bit_width: u8, dst: &mut [u64]) {
+fn unpack_u64_tiles_neon(src: &[u8], bit_width: u8, dst: &mut [u64]) {
     use std::arch::aarch64::*;
 
-    debug_assert!((1..=64).contains(&bit_width));
+    assert!((1..=64).contains(&bit_width));
     if bit_width == 64 {
+        assert_eq!(dst.len().checked_mul(size_of::<u64>()), Some(src.len()));
         // SAFETY: `src.len() == dst.len() * 8` (little-endian gated) and slices do not alias.
         unsafe {
             std::ptr::copy_nonoverlapping(src.as_ptr(), dst.as_mut_ptr().cast::<u8>(), src.len());
@@ -2097,13 +2204,12 @@ unsafe fn unpack_u64_tiles_neon(src: &[u8], bit_width: u8, dst: &mut [u64]) {
         .zip(dst.as_chunks_mut::<FASTLANES_TILE_SIZE>().0.iter_mut())
     {
         // SAFETY: `bit_width >= 1`, so `tile_in.len() >= 128 >= 32`; `vld1q_u8` accepts any alignment.
-        let (mut cur0, mut cur1) = unsafe {
+        let (raw_cur0, raw_cur1) = unsafe {
             let ptr = tile_in.as_ptr();
-            (
-                vreinterpretq_u64_u8(vld1q_u8(ptr)),
-                vreinterpretq_u64_u8(vld1q_u8(ptr.add(16))),
-            )
+            (vld1q_u8(ptr), vld1q_u8(ptr.add(16)))
         };
+        let mut cur0 = vreinterpretq_u64_u8(raw_cur0);
+        let mut cur1 = vreinterpretq_u64_u8(raw_cur1);
         let mut word_idx: usize = 0;
         let mut bit_pos: u32 = 0;
 
@@ -2119,13 +2225,12 @@ unsafe fn unpack_u64_tiles_neon(src: &[u8], bit_width: u8, dst: &mut [u64]) {
                 word_idx += 1;
                 if word_idx < total_words {
                     // SAFETY: `word_idx < total_words == 4 * bit_width`, so `word_idx * 32 + 32 <= tile_in.len()`.
-                    let (next0, next1) = unsafe {
+                    let (raw_next0, raw_next1) = unsafe {
                         let ptr = tile_in.as_ptr().add(word_idx * 32);
-                        (
-                            vreinterpretq_u64_u8(vld1q_u8(ptr)),
-                            vreinterpretq_u64_u8(vld1q_u8(ptr.add(16))),
-                        )
+                        (vld1q_u8(ptr), vld1q_u8(ptr.add(16)))
                     };
+                    let next0 = vreinterpretq_u64_u8(raw_next0);
+                    let next1 = vreinterpretq_u64_u8(raw_next1);
                     if rem_bits > 0 {
                         let lshift = vdupq_n_s64(i64::from(64 - bit_pos));
                         v0 = vorrq_u64(v0, vshlq_u64(next0, lshift));
@@ -2157,11 +2262,7 @@ unsafe fn unpack_u64_tiles_neon(src: &[u8], bit_width: u8, dst: &mut [u64]) {
     not(miri)
 ))]
 #[target_feature(enable = "neon")]
-unsafe fn delta_encode_i64_tiles_neon(
-    values: &[i64],
-    bases_out: &mut [i64],
-    deltas_out: &mut [i64],
-) {
+fn delta_encode_i64_tiles_neon(values: &[i64], bases_out: &mut [i64], deltas_out: &mut [i64]) {
     use std::arch::aarch64::*;
 
     const S0: usize = FASTLANES_ORDER_8[0] * 128;
@@ -2207,44 +2308,58 @@ unsafe fn delta_encode_i64_tiles_neon(
         let out_ptr = tile_deltas.as_mut_ptr();
         for pair in 0..64 {
             let r = pair * 2;
-            // SAFETY: each `S* + r + 2 <= 1024 == tile_in.len()` and
-            // `(r + 1) * 8 + 8 <= 1024 == tile_deltas.len()`.
+            // SAFETY: each `S* + r + 2 <= 1024 == tile_in.len()`.
+            let (l0, l1, l2, l3, l4, l5, l6, l7) = unsafe {
+                (
+                    vld1q_s64(in_ptr.add(S0 + r)),
+                    vld1q_s64(in_ptr.add(S1 + r)),
+                    vld1q_s64(in_ptr.add(S2 + r)),
+                    vld1q_s64(in_ptr.add(S3 + r)),
+                    vld1q_s64(in_ptr.add(S4 + r)),
+                    vld1q_s64(in_ptr.add(S5 + r)),
+                    vld1q_s64(in_ptr.add(S6 + r)),
+                    vld1q_s64(in_ptr.add(S7 + r)),
+                )
+            };
+
+            let cur0_a = vzip1q_s64(l0, l1);
+            let cur0_b = vzip2q_s64(l0, l1);
+            let cur1_a = vzip1q_s64(l2, l3);
+            let cur1_b = vzip2q_s64(l2, l3);
+            let cur2_a = vzip1q_s64(l4, l5);
+            let cur2_b = vzip2q_s64(l4, l5);
+            let cur3_a = vzip1q_s64(l6, l7);
+            let cur3_b = vzip2q_s64(l6, l7);
+
+            let d0_a = vsubq_s64(cur0_a, prev0);
+            let d1_a = vsubq_s64(cur1_a, prev1);
+            let d2_a = vsubq_s64(cur2_a, prev2);
+            let d3_a = vsubq_s64(cur3_a, prev3);
+
+            let d0_b = vsubq_s64(cur0_b, cur0_a);
+            let d1_b = vsubq_s64(cur1_b, cur1_a);
+            let d2_b = vsubq_s64(cur2_b, cur2_a);
+            let d3_b = vsubq_s64(cur3_b, cur3_a);
+
+            // SAFETY: `(r + 1) * 8 + 8 <= 1024 == tile_deltas.len()`.
             unsafe {
-                let l0 = vld1q_s64(in_ptr.add(S0 + r));
-                let l1 = vld1q_s64(in_ptr.add(S1 + r));
-                let l2 = vld1q_s64(in_ptr.add(S2 + r));
-                let l3 = vld1q_s64(in_ptr.add(S3 + r));
-                let l4 = vld1q_s64(in_ptr.add(S4 + r));
-                let l5 = vld1q_s64(in_ptr.add(S5 + r));
-                let l6 = vld1q_s64(in_ptr.add(S6 + r));
-                let l7 = vld1q_s64(in_ptr.add(S7 + r));
-
-                let cur0_a = vzip1q_s64(l0, l1);
-                let cur0_b = vzip2q_s64(l0, l1);
-                let cur1_a = vzip1q_s64(l2, l3);
-                let cur1_b = vzip2q_s64(l2, l3);
-                let cur2_a = vzip1q_s64(l4, l5);
-                let cur2_b = vzip2q_s64(l4, l5);
-                let cur3_a = vzip1q_s64(l6, l7);
-                let cur3_b = vzip2q_s64(l6, l7);
-
                 let dst_a = out_ptr.add(r * 8);
-                vst1q_s64(dst_a, vsubq_s64(cur0_a, prev0));
-                vst1q_s64(dst_a.add(2), vsubq_s64(cur1_a, prev1));
-                vst1q_s64(dst_a.add(4), vsubq_s64(cur2_a, prev2));
-                vst1q_s64(dst_a.add(6), vsubq_s64(cur3_a, prev3));
+                vst1q_s64(dst_a, d0_a);
+                vst1q_s64(dst_a.add(2), d1_a);
+                vst1q_s64(dst_a.add(4), d2_a);
+                vst1q_s64(dst_a.add(6), d3_a);
 
                 let dst_b = dst_a.add(8);
-                vst1q_s64(dst_b, vsubq_s64(cur0_b, cur0_a));
-                vst1q_s64(dst_b.add(2), vsubq_s64(cur1_b, cur1_a));
-                vst1q_s64(dst_b.add(4), vsubq_s64(cur2_b, cur2_a));
-                vst1q_s64(dst_b.add(6), vsubq_s64(cur3_b, cur3_a));
-
-                prev0 = cur0_b;
-                prev1 = cur1_b;
-                prev2 = cur2_b;
-                prev3 = cur3_b;
+                vst1q_s64(dst_b, d0_b);
+                vst1q_s64(dst_b.add(2), d1_b);
+                vst1q_s64(dst_b.add(4), d2_b);
+                vst1q_s64(dst_b.add(6), d3_b);
             }
+
+            prev0 = cur0_b;
+            prev1 = cur1_b;
+            prev2 = cur2_b;
+            prev3 = cur3_b;
         }
     }
 }
@@ -2256,7 +2371,7 @@ unsafe fn delta_encode_i64_tiles_neon(
     not(miri)
 ))]
 #[target_feature(enable = "neon")]
-unsafe fn delta_decode_i64_tiles_neon(bases: &[i64], deltas: &[i64], dst: &mut [i64]) {
+fn delta_decode_i64_tiles_neon(bases: &[i64], deltas: &[i64], dst: &mut [i64]) {
     use std::arch::aarch64::*;
 
     const S0: usize = FASTLANES_ORDER_8[0] * 128;
@@ -2292,29 +2407,51 @@ unsafe fn delta_decode_i64_tiles_neon(bases: &[i64], deltas: &[i64], dst: &mut [
         let out_ptr = tile_out.as_mut_ptr();
         for pair in 0..64 {
             let r = pair * 2;
-            // SAFETY: `(r + 1) * 8 + 8 <= 1024 == tile_deltas.len()` and
-            // each `S* + r + 2 <= 1024 == tile_out.len()`.
-            unsafe {
+            // SAFETY: `(r + 1) * 8 + 8 <= 1024 == tile_deltas.len()`.
+            let (da0, da1, da2, da3, db0, db1, db2, db3) = unsafe {
                 let p_a = in_ptr.add(r * 8);
-                let a0 = vaddq_s64(acc0, vld1q_s64(p_a));
-                let a1 = vaddq_s64(acc1, vld1q_s64(p_a.add(2)));
-                let a2 = vaddq_s64(acc2, vld1q_s64(p_a.add(4)));
-                let a3 = vaddq_s64(acc3, vld1q_s64(p_a.add(6)));
-
                 let p_b = p_a.add(8);
-                acc0 = vaddq_s64(a0, vld1q_s64(p_b));
-                acc1 = vaddq_s64(a1, vld1q_s64(p_b.add(2)));
-                acc2 = vaddq_s64(a2, vld1q_s64(p_b.add(4)));
-                acc3 = vaddq_s64(a3, vld1q_s64(p_b.add(6)));
+                (
+                    vld1q_s64(p_a),
+                    vld1q_s64(p_a.add(2)),
+                    vld1q_s64(p_a.add(4)),
+                    vld1q_s64(p_a.add(6)),
+                    vld1q_s64(p_b),
+                    vld1q_s64(p_b.add(2)),
+                    vld1q_s64(p_b.add(4)),
+                    vld1q_s64(p_b.add(6)),
+                )
+            };
 
-                vst1q_s64(out_ptr.add(S0 + r), vzip1q_s64(a0, acc0));
-                vst1q_s64(out_ptr.add(S1 + r), vzip2q_s64(a0, acc0));
-                vst1q_s64(out_ptr.add(S2 + r), vzip1q_s64(a1, acc1));
-                vst1q_s64(out_ptr.add(S3 + r), vzip2q_s64(a1, acc1));
-                vst1q_s64(out_ptr.add(S4 + r), vzip1q_s64(a2, acc2));
-                vst1q_s64(out_ptr.add(S5 + r), vzip2q_s64(a2, acc2));
-                vst1q_s64(out_ptr.add(S6 + r), vzip1q_s64(a3, acc3));
-                vst1q_s64(out_ptr.add(S7 + r), vzip2q_s64(a3, acc3));
+            let a0 = vaddq_s64(acc0, da0);
+            let a1 = vaddq_s64(acc1, da1);
+            let a2 = vaddq_s64(acc2, da2);
+            let a3 = vaddq_s64(acc3, da3);
+
+            acc0 = vaddq_s64(a0, db0);
+            acc1 = vaddq_s64(a1, db1);
+            acc2 = vaddq_s64(a2, db2);
+            acc3 = vaddq_s64(a3, db3);
+
+            let o0 = vzip1q_s64(a0, acc0);
+            let o1 = vzip2q_s64(a0, acc0);
+            let o2 = vzip1q_s64(a1, acc1);
+            let o3 = vzip2q_s64(a1, acc1);
+            let o4 = vzip1q_s64(a2, acc2);
+            let o5 = vzip2q_s64(a2, acc2);
+            let o6 = vzip1q_s64(a3, acc3);
+            let o7 = vzip2q_s64(a3, acc3);
+
+            // SAFETY: each `S* + r + 2 <= 1024 == tile_out.len()`.
+            unsafe {
+                vst1q_s64(out_ptr.add(S0 + r), o0);
+                vst1q_s64(out_ptr.add(S1 + r), o1);
+                vst1q_s64(out_ptr.add(S2 + r), o2);
+                vst1q_s64(out_ptr.add(S3 + r), o3);
+                vst1q_s64(out_ptr.add(S4 + r), o4);
+                vst1q_s64(out_ptr.add(S5 + r), o5);
+                vst1q_s64(out_ptr.add(S6 + r), o6);
+                vst1q_s64(out_ptr.add(S7 + r), o7);
             }
         }
     }
@@ -2603,10 +2740,22 @@ mod tests {
             bw64 in 0u8..=64,
             raw in prop::collection::vec(any::<u64>(), 0..=2100),
         ) {
+            let full_tiles = raw.len() / FASTLANES_TILE_SIZE;
+            let tile_elems = full_tiles * FASTLANES_TILE_SIZE;
+
             let mask32 = if bw32 == 0 { 0 } else if bw32 == 32 { u32::MAX } else { (1u32 << bw32) - 1 };
             let v32: Vec<u32> = raw.iter().map(|&x| (x as u32) & mask32).collect();
             let mut p32 = Vec::new();
             pack_u32(&v32, bw32, &mut p32).unwrap();
+            if full_tiles > 0 && bw32 > 0 {
+                let tile_bytes32 = full_tiles * 128 * usize::from(bw32);
+                let mut scalar_p32 = vec![0u8; tile_bytes32];
+                pack_u32_tiles_scalar(&v32[..tile_elems], bw32, &mut scalar_p32);
+                prop_assert_eq!(&p32[..tile_bytes32], &scalar_p32[..]);
+                let mut scalar_u32 = vec![0u32; tile_elems];
+                unpack_u32_tiles_scalar(&p32[..tile_bytes32], bw32, &mut scalar_u32);
+                prop_assert_eq!(&scalar_u32[..], &v32[..tile_elems]);
+            }
             let mut u32_out = Vec::new();
             unpack_u32(&p32, v32.len(), bw32, &mut u32_out).unwrap();
             prop_assert_eq!(u32_out, v32);
@@ -2615,6 +2764,15 @@ mod tests {
             let v64: Vec<u64> = raw.iter().map(|&x| x & mask64).collect();
             let mut p64 = Vec::new();
             pack_u64(&v64, bw64, &mut p64).unwrap();
+            if full_tiles > 0 && bw64 > 0 {
+                let tile_bytes64 = full_tiles * 128 * usize::from(bw64);
+                let mut scalar_p64 = vec![0u8; tile_bytes64];
+                pack_u64_tiles_scalar(&v64[..tile_elems], bw64, &mut scalar_p64);
+                prop_assert_eq!(&p64[..tile_bytes64], &scalar_p64[..]);
+                let mut scalar_u64 = vec![0u64; tile_elems];
+                unpack_u64_tiles_scalar(&p64[..tile_bytes64], bw64, &mut scalar_u64);
+                prop_assert_eq!(&scalar_u64[..], &v64[..tile_elems]);
+            }
             let mut u64_out = Vec::new();
             unpack_u64(&p64, v64.len(), bw64, &mut u64_out).unwrap();
             prop_assert_eq!(u64_out, v64);
@@ -2625,6 +2783,29 @@ mod tests {
             let mut bases = Vec::new();
             let mut deltas = Vec::new();
             delta_encode_i64(&vals, &mut bases, &mut deltas);
+
+            let full_tiles = vals.len() / FASTLANES_TILE_SIZE;
+            if full_tiles > 0 {
+                let tile_elems = full_tiles * FASTLANES_TILE_SIZE;
+                let mut scalar_bases = vec![0i64; full_tiles * 8];
+                let mut scalar_deltas = vec![0i64; tile_elems];
+                delta_encode_i64_tiles_scalar(
+                    &vals[..tile_elems],
+                    &mut scalar_bases,
+                    &mut scalar_deltas,
+                );
+                prop_assert_eq!(&bases[..full_tiles * 8], &scalar_bases[..]);
+                prop_assert_eq!(&deltas[..tile_elems], &scalar_deltas[..]);
+
+                let mut scalar_decoded = vec![0i64; tile_elems];
+                delta_decode_i64_tiles_scalar(
+                    &bases[..full_tiles * 8],
+                    &deltas[..tile_elems],
+                    &mut scalar_decoded,
+                );
+                prop_assert_eq!(&scalar_decoded[..], &vals[..tile_elems]);
+            }
+
             let mut out = Vec::new();
             delta_decode_i64(&bases, &deltas, vals.len(), &mut out).unwrap();
             prop_assert_eq!(out, vals);
@@ -2802,6 +2983,60 @@ mod tests {
             delta_decode_i64_indices(&[], &[], usize::MAX, 0, false, &[]),
             Err(StatamError::BoundsExceeded { .. })
         ));
+    }
+
+    #[test]
+    fn delta_decode_i64_indices_unsorted_duplicate_and_wrapping_deltas() {
+        let len = 2_500usize;
+        // Extreme jumps across `i64::MIN` / `i64::MAX` exercise wrapping subtraction/addition
+        // across FastLanes tiles and the sequential scalar tail.
+        let wrapping_vals: Vec<i64> = (0..len)
+            .map(|i| match i % 6 {
+                0 => i64::MIN.wrapping_add((i as i64).wrapping_mul(17)),
+                1 => i64::MAX.wrapping_sub((i as i64).wrapping_mul(31)),
+                2 => i64::MIN,
+                3 => i64::MAX,
+                4 => -1,
+                _ => 0,
+            })
+            .collect();
+
+        let unsorted_indices = [
+            len - 1,
+            0,
+            2048,
+            1023,
+            2049,
+            1024,
+            1023,
+            0,
+            2047,
+            512,
+            len - 1,
+            1025,
+            2048,
+        ];
+
+        for is_zigzag in [false, true] {
+            let mut bases = Vec::new();
+            let mut deltas = Vec::new();
+            delta_encode_i64(&wrapping_vals, &mut bases, &mut deltas);
+
+            let u64_deltas: Vec<u64> = if is_zigzag {
+                deltas.iter().map(|&d| zigzag_encode_i64(d)).collect()
+            } else {
+                deltas.iter().map(|&d| d as u64).collect()
+            };
+            let bw = min_bits_u64(&u64_deltas);
+            let mut packed = Vec::new();
+            pack_u64(&u64_deltas, bw, &mut packed).unwrap();
+
+            let got =
+                delta_decode_i64_indices(&bases, &packed, len, bw, is_zigzag, &unsorted_indices)
+                    .unwrap();
+            let expected: Vec<i64> = unsorted_indices.iter().map(|&i| wrapping_vals[i]).collect();
+            assert_eq!(got, expected, "unsorted wrapping zigzag={is_zigzag}");
+        }
     }
 
     #[test]

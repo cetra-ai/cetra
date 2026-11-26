@@ -9,8 +9,9 @@ use cetra_column::{Batch, Bitmap, Column, DataType};
 use crate::StatamError;
 use crate::codec::WriteProfile;
 use crate::format::{
-    Codec, Encoding, FLAG_L1_COMPACT, LocalityGroup, MAX_BATCH_DECODED_BYTES, PACK_FLAG_HAS_DICT,
-    PACK_FLAG_HAS_TRIGRAM, PACK_FLAG_TOC_LZ4, PACK_FLAG_TOC_ZSTD, PACK_FRAME_FLAG_USES_DICT,
+    ChunkLoc, Codec, Encoding, FLAG_L1_COMPACT, LocalityGroup, MAX_BATCH_DECODED_BYTES,
+    PACK_FLAG_HAS_DICT, PACK_FLAG_HAS_TRIGRAM, PACK_FLAG_TOC_LZ4, PACK_FLAG_TOC_ZSTD,
+    PACK_FRAME_FLAG_USES_DICT,
 };
 use crate::io::RangeReader;
 use crate::payload::pack::{ChunkPackBuilder, ChunkPackReader, PackWriteOptions, PackWriteStats};
@@ -147,15 +148,17 @@ pub fn gdpr_rewrite_day(
     packs: &HashMap<[u8; 16], Arc<dyn RangeReader>>,
     should_erase: &dyn Fn(&Batch, usize) -> bool,
 ) -> Result<GdprRewriteResult, StatamError> {
-    // Open all packs and initialize live-chunk bitmaps.
+    // Open all packs and initialize live-chunk and boundary-chunk bitmaps.
     let mut pack_readers: HashMap<[u8; 16], Arc<ChunkPackReader>> =
         HashMap::with_capacity(packs.len());
     let mut live_chunks: HashMap<[u8; 16], Bitmap> = HashMap::with_capacity(packs.len());
+    let mut boundary_old_chunks: HashMap<[u8; 16], Bitmap> = HashMap::with_capacity(packs.len());
     for (&pack_id, pack_reader) in packs {
         let opened = Arc::new(ChunkPackReader::open(Arc::clone(pack_reader))?);
         let chunk_count = opened.toc().chunks.len();
         pack_readers.insert(pack_id, opened);
         live_chunks.insert(pack_id, Bitmap::new_zeroed(chunk_count));
+        boundary_old_chunks.insert(pack_id, Bitmap::new_zeroed(chunk_count));
     }
 
     // Step 1: Identify surviving rows across all files & mark live chunks per pack.
@@ -163,6 +166,11 @@ pub fn gdpr_rewrite_day(
     for input in files {
         let statam = StatamReader::open(Arc::clone(&input.reader), None)?;
         let meta = statam.meta();
+        for &pack_id in &meta.schema_meta.pack_ids {
+            if !pack_readers.contains_key(&pack_id) {
+                return Err(StatamError::MissingPack { pack_id });
+            }
+        }
         let num_rgs = meta.num_row_groups();
         let payload_cols: Vec<usize> = (0..meta.schema().len())
             .filter(|&i| meta.col_dir[i].locality_group == LocalityGroup::ExternalPayload)
@@ -211,6 +219,7 @@ pub fn gdpr_rewrite_day(
                     for &idx in &surviving_indices {
                         let row_ref = &all_rg_refs[idx as usize];
                         if let PayloadRefRow::Chunks(refs) = row_ref {
+                            let is_multi_chunk = refs.len() > 1;
                             for &(pidx, cid) in refs {
                                 if pidx != L0_LOCAL_PACK_IDX {
                                     let pack_id = *meta
@@ -229,6 +238,11 @@ pub fn gdpr_rewrite_day(
                                         });
                                     }
                                     let _ = bm.set(cid as usize, true);
+                                    if is_multi_chunk
+                                        && let Some(b_bm) = boundary_old_chunks.get_mut(&pack_id)
+                                    {
+                                        let _ = b_bm.set(cid as usize, true);
+                                    }
                                 }
                             }
                         }
@@ -299,6 +313,8 @@ pub fn gdpr_rewrite_day(
             write_threads: 1,
         };
         let mut builder = ChunkPackBuilder::new(new_pack_id, pack_opts);
+        builder.enable_boundary_tracking();
+        let boundary_old = &boundary_old_chunks[&old_pack_id];
 
         let hashes = pack.read_hash_table()?;
         let has_hashes = hashes.len() == total_chunks;
@@ -306,63 +322,123 @@ pub fn gdpr_rewrite_day(
         let edges = pack.read_edge_table()?;
         let mut chunk_remap = vec![None; total_chunks];
 
-        for (fid, f_entry) in toc.frames.iter().enumerate() {
-            let first_cid = f_entry.first_chunk_id as usize;
-            let cnt = f_entry.chunk_count as usize;
-            let live_in_frame = (first_cid..first_cid + cnt)
-                .filter(|&c| live.get(c))
-                .count();
+        if toc.frames_contiguous {
+            for (fid, f_entry) in toc.frames.iter().enumerate() {
+                let first_cid = f_entry.first_chunk_id as usize;
+                let cnt = f_entry.chunk_count as usize;
+                let live_in_frame = (first_cid..first_cid + cnt)
+                    .filter(|&c| live.get(c))
+                    .count();
 
-            if live_in_frame == 0 {
-                stats.frames_dropped += 1;
-                stats.chunks_purged += cnt;
-                for cid in first_cid..first_cid + cnt {
-                    stats.bytes_purged = stats
-                        .bytes_purged
-                        .saturating_add(u64::from(toc.chunks[cid].raw_len));
+                if live_in_frame == 0 {
+                    stats.frames_dropped += 1;
+                    stats.chunks_purged += cnt;
+                    for cid in first_cid..first_cid + cnt {
+                        stats.bytes_purged = stats
+                            .bytes_purged
+                            .saturating_add(u64::from(toc.chunks[cid].raw_len));
+                    }
+                    continue;
                 }
-            } else if live_in_frame == cnt
-                && has_hashes
-                && (f_entry.flags & PACK_FRAME_FLAG_USES_DICT) == 0
-            {
-                let raw_frame = pack.read_frame_raw(fid as u32)?;
-                let chunk_meta: Vec<([u8; 16], u32, u32)> = (first_cid..first_cid + cnt)
-                    .map(|cid| {
+
+                let edges_ok = edges.len() == total_chunks
+                    && (first_cid..first_cid + cnt).all(|cid| {
                         let loc = toc.chunks[cid];
-                        (hashes[cid], loc.offset_in_frame, loc.raw_len)
-                    })
-                    .collect();
-                let filter_slice = trigrams[fid].as_ref().map(|b| b.as_bytes()).unwrap_or(&[]);
-                let edge_slice = &edges[first_cid..first_cid + cnt];
+                        !(boundary_old.get(cid)
+                            && loc.raw_len > 0
+                            && (edges[cid].0.is_empty() || edges[cid].1.is_empty()))
+                    });
 
-                let new_cids = builder.append_raw_frame(
-                    &raw_frame,
-                    *f_entry,
-                    &chunk_meta,
-                    filter_slice,
-                    edge_slice,
-                )?;
-                for (offset, new_cid) in new_cids.into_iter().enumerate() {
-                    chunk_remap[first_cid + offset] = Some(new_cid);
-                }
-                stats.frames_copied_verbatim += 1;
-            } else {
-                let decoded = pack.read_frame_decompressed(fid as u32)?;
-                for (old_cid, slot) in chunk_remap.iter_mut().enumerate().skip(first_cid).take(cnt)
+                if live_in_frame == cnt
+                    && frame_has_no_slack(&toc.chunks[first_cid..first_cid + cnt], f_entry.raw_len)
+                    && (f_entry.flags & PACK_FRAME_FLAG_USES_DICT) == 0
+                    && has_hashes
+                    && edges_ok
                 {
-                    let loc = toc.chunks[old_cid];
+                    let raw_frame = pack.read_frame_raw(fid as u32)?;
+                    let chunk_meta: Vec<([u8; 16], u32, u32)> = (first_cid..first_cid + cnt)
+                        .map(|cid| {
+                            let loc = toc.chunks[cid];
+                            (hashes[cid], loc.offset_in_frame, loc.raw_len)
+                        })
+                        .collect();
+                    let filter_slice = trigrams[fid].as_ref().map(|b| b.as_bytes()).unwrap_or(&[]);
+                    let edge_slice = &edges[first_cid..first_cid + cnt];
+
+                    let new_cids = builder.append_raw_frame(
+                        &raw_frame,
+                        *f_entry,
+                        &chunk_meta,
+                        filter_slice,
+                        edge_slice,
+                    )?;
+                    for (offset, new_cid) in new_cids.into_iter().enumerate() {
+                        let old_cid = first_cid + offset;
+                        chunk_remap[old_cid] = Some(new_cid);
+                        if boundary_old.get(old_cid) {
+                            builder.mark_boundary_chunk(new_cid);
+                        }
+                    }
+                    stats.frames_copied_verbatim += 1;
+                } else {
+                    let decoded = pack.read_frame_decompressed(fid as u32)?;
+                    for (old_cid, slot) in
+                        chunk_remap.iter_mut().enumerate().skip(first_cid).take(cnt)
+                    {
+                        let loc = toc.chunks[old_cid];
+                        if live.get(old_cid) {
+                            let start = loc.offset_in_frame as usize;
+                            let end = start + loc.raw_len as usize;
+                            let slice = decoded.get(start..end).ok_or(StatamError::Corrupt {
+                                reason: "chunk slice out of decompressed frame bounds during GDPR",
+                            })?;
+                            let new_cid = builder.intern_chunk(slice)?;
+                            *slot = Some(new_cid);
+                            if boundary_old.get(old_cid) {
+                                builder.mark_boundary_chunk(new_cid);
+                            }
+                        } else {
+                            stats.chunks_purged += 1;
+                            stats.bytes_purged =
+                                stats.bytes_purged.saturating_add(u64::from(loc.raw_len));
+                        }
+                    }
+                    stats.frames_rewritten += 1;
+                }
+            }
+        } else {
+            let mut chunks_by_frame: Vec<Vec<usize>> = vec![Vec::new(); toc.frames.len()];
+            for (old_cid, loc) in toc.chunks.iter().enumerate() {
+                chunks_by_frame[loc.frame_id as usize].push(old_cid);
+            }
+            for (fid, frame_cids) in chunks_by_frame.into_iter().enumerate() {
+                let mut live_cids = Vec::new();
+                for old_cid in frame_cids {
                     if live.get(old_cid) {
-                        let start = loc.offset_in_frame as usize;
-                        let end = start + loc.raw_len as usize;
-                        let slice = decoded.get(start..end).ok_or(StatamError::Corrupt {
-                            reason: "chunk slice out of decompressed frame bounds during GDPR",
-                        })?;
-                        let new_cid = builder.intern_chunk(slice)?;
-                        *slot = Some(new_cid);
+                        live_cids.push(old_cid);
                     } else {
                         stats.chunks_purged += 1;
-                        stats.bytes_purged =
-                            stats.bytes_purged.saturating_add(u64::from(loc.raw_len));
+                        stats.bytes_purged = stats
+                            .bytes_purged
+                            .saturating_add(u64::from(toc.chunks[old_cid].raw_len));
+                    }
+                }
+                if live_cids.is_empty() {
+                    stats.frames_dropped += 1;
+                    continue;
+                }
+                let decoded = pack.read_frame_decompressed(fid as u32)?;
+                for old_cid in live_cids {
+                    let loc = toc.chunks[old_cid];
+                    let start = loc.offset_in_frame as usize;
+                    let end = start + loc.raw_len as usize;
+                    let slice = decoded.get(start..end).ok_or(StatamError::Corrupt {
+                        reason: "chunk slice out of decompressed frame bounds during GDPR",
+                    })?;
+                    let new_cid = builder.intern_chunk(slice)?;
+                    chunk_remap[old_cid] = Some(new_cid);
+                    if boundary_old.get(old_cid) {
+                        builder.mark_boundary_chunk(new_cid);
                     }
                 }
                 stats.frames_rewritten += 1;
@@ -459,7 +535,13 @@ pub fn gdpr_rewrite_day(
             }
         }
 
-        let mut writer = StatamWriter::new(Arc::clone(meta.schema()), write_opts, None)?;
+        let mut new_bytes = Vec::new();
+        let mut writer = StatamWriter::new(
+            std::io::Cursor::new(&mut new_bytes),
+            Arc::clone(meta.schema()),
+            write_opts,
+            None,
+        )?;
         writer.set_pack_ids(new_pack_ids);
 
         for (rg_idx, rg_plan) in plan.rg_plans.into_iter().enumerate() {
@@ -472,7 +554,7 @@ pub fn gdpr_rewrite_day(
                 &rg_plan.surviving_indices,
             )?;
 
-            let mut needed_l0_cids = BTreeSet::new();
+            let mut has_l0_chunks = false;
             let mut remapped_refs: HashMap<usize, Vec<PayloadRefRow>> =
                 HashMap::with_capacity(rg_plan.payload_refs.len());
 
@@ -486,7 +568,7 @@ pub fn gdpr_rewrite_day(
                             let mut new_refs = Vec::with_capacity(refs.len());
                             for (old_pidx, old_cid) in refs {
                                 if old_pidx == L0_LOCAL_PACK_IDX {
-                                    needed_l0_cids.insert(old_cid);
+                                    has_l0_chunks = true;
                                     new_refs.push((L0_LOCAL_PACK_IDX, old_cid));
                                 } else {
                                     let old_pid = *meta
@@ -518,36 +600,26 @@ pub fn gdpr_rewrite_day(
                 remapped_refs.insert(cidx, out_rows);
             }
 
-            let mut l0_chunks: HashMap<(usize, u32), Vec<u8>> = HashMap::new();
-            if !needed_l0_cids.is_empty() {
-                let cids_vec: Vec<u32> = needed_l0_cids.into_iter().collect();
-                let fetched = plan
-                    .reader
-                    .read_l0_payload_chunks_for_rg(rg_idx, &cids_vec)?;
-                for (&cidx, rows) in &remapped_refs {
-                    for row in rows {
-                        if let PayloadRefRow::Chunks(refs) = row {
-                            for &(pidx, cid) in refs {
-                                if pidx == L0_LOCAL_PACK_IDX
-                                    && let Some(bytes) = fetched.get(&cid)
-                                {
-                                    l0_chunks.insert((cidx, cid), bytes.clone());
-                                }
-                            }
-                        }
-                    }
-                }
-            }
+            let mut l0_source = if has_l0_chunks {
+                let src =
+                    plan.reader
+                        .open_l0_payload_for_rg(rg_idx)?
+                        .ok_or(StatamError::Corrupt {
+                            reason: "missing L0 payload region for L0 chunk reference",
+                        })?;
+                Some(src)
+            } else {
+                None
+            };
 
             writer.write_batch_with_prechunked_refs(
                 &surviving_batch,
                 &remapped_refs,
-                &l0_chunks,
+                l0_source.as_mut(),
             )?;
         }
 
-        let mut new_bytes = Vec::new();
-        let write_stats = writer.finish(&mut new_bytes)?;
+        let write_stats = writer.finish()?;
         rewritten_files.push(RewrittenStatamFile {
             file_id: input.file_id.clone(),
             bytes: new_bytes,
@@ -561,6 +633,49 @@ pub fn gdpr_rewrite_day(
         retired_pack_ids,
         stats,
     })
+}
+
+/// Returns `true` iff `chunks` cover `0..raw_len` completely with zero unreferenced slack bytes.
+fn frame_has_no_slack(chunks: &[ChunkLoc], raw_len: u32) -> bool {
+    let mut cursor = 0u32;
+    let mut fast_ok = true;
+    for loc in chunks {
+        if loc.offset_in_frame != cursor {
+            fast_ok = false;
+            break;
+        }
+        let Some(next) = cursor.checked_add(loc.raw_len) else {
+            return false;
+        };
+        cursor = next;
+    }
+    if fast_ok {
+        return cursor == raw_len;
+    }
+
+    let mut intervals: Vec<(u32, u32)> = Vec::with_capacity(chunks.len());
+    for loc in chunks {
+        let Some(end) = loc.offset_in_frame.checked_add(loc.raw_len) else {
+            return false;
+        };
+        if end > raw_len {
+            return false;
+        }
+        if loc.raw_len > 0 {
+            intervals.push((loc.offset_in_frame, end));
+        }
+    }
+    intervals.sort_unstable_by_key(|&(start, _)| start);
+    let mut covered_end = 0u32;
+    for (start, end) in intervals {
+        if start > covered_end {
+            return false;
+        }
+        if end > covered_end {
+            covered_end = end;
+        }
+    }
+    covered_end == raw_len
 }
 
 fn gather_surviving_non_payload_batch(
@@ -674,6 +789,17 @@ mod tests {
         }
     }
 
+    fn make_gdpr_schema() -> Arc<Schema> {
+        Arc::new(
+            Schema::try_new(vec![
+                Field::new("user_id", DataType::Utf8, false),
+                Field::new("name", DataType::Utf8, false),
+                Field::new("input", DataType::Utf8, true),
+            ])
+            .unwrap(),
+        )
+    }
+
     fn build_gdpr_batch(schema: &Arc<Schema>, rows: &[(&str, &str, &str)]) -> Batch {
         let uids: Vec<&str> = rows.iter().map(|r| r.0).collect();
         let names: Vec<&str> = rows.iter().map(|r| r.1).collect();
@@ -750,10 +876,15 @@ mod tests {
         );
         let mut file_a_bytes = Vec::new();
         {
-            let mut wa =
-                StatamWriter::new(Arc::clone(&schema), opts.clone(), Some(&mut pb)).unwrap();
+            let mut wa = StatamWriter::new(
+                std::io::Cursor::new(&mut file_a_bytes),
+                Arc::clone(&schema),
+                opts.clone(),
+                Some(&mut pb),
+            )
+            .unwrap();
             wa.write_batch(&batch_a).unwrap();
-            wa.finish(&mut file_a_bytes).unwrap();
+            wa.finish().unwrap();
         }
 
         // File B (100% surviving rows, referencing pack Frame 2 -> untouched rows, BUT references rewritten pack!)
@@ -766,9 +897,15 @@ mod tests {
         );
         let mut file_b_bytes = Vec::new();
         {
-            let mut wb = StatamWriter::new(Arc::clone(&schema), opts, Some(&mut pb)).unwrap();
+            let mut wb = StatamWriter::new(
+                std::io::Cursor::new(&mut file_b_bytes),
+                Arc::clone(&schema),
+                opts,
+                Some(&mut pb),
+            )
+            .unwrap();
             wb.write_batch(&batch_b).unwrap();
-            wb.finish(&mut file_b_bytes).unwrap();
+            wb.finish().unwrap();
         }
 
         // File C (self-contained L0Fast with no erased rows -> must NOT be rewritten!)
@@ -777,9 +914,15 @@ mod tests {
         let batch_c = build_gdpr_batch(&schema, &[("user_keep_3", "span_5", "clean_l0_payload")]);
         let mut file_c_bytes = Vec::new();
         {
-            let mut wc = StatamWriter::new(Arc::clone(&schema), opts_c, None).unwrap();
+            let mut wc = StatamWriter::new(
+                std::io::Cursor::new(&mut file_c_bytes),
+                Arc::clone(&schema),
+                opts_c,
+                None,
+            )
+            .unwrap();
             wc.write_batch(&batch_c).unwrap();
-            wc.finish(&mut file_c_bytes).unwrap();
+            wc.finish().unwrap();
         }
 
         let mut old_pack_bytes = Vec::new();
@@ -979,9 +1122,15 @@ mod tests {
         .unwrap();
 
         let mut l0_bytes = Vec::new();
-        let mut w = StatamWriter::new(Arc::clone(&schema), opts, None).unwrap();
+        let mut w = StatamWriter::new(
+            std::io::Cursor::new(&mut l0_bytes),
+            Arc::clone(&schema),
+            opts,
+            None,
+        )
+        .unwrap();
         w.write_batch(&batch).unwrap();
-        w.finish(&mut l0_bytes).unwrap();
+        w.finish().unwrap();
 
         let inputs = vec![GdprFileInput {
             file_id: "l0_file".to_owned(),
@@ -1032,9 +1181,15 @@ mod tests {
         let batch = build_gdpr_batch(&schema, &[("u_all_dead", "op", &secret)]);
         let mut file_bytes = Vec::new();
         {
-            let mut w = StatamWriter::new(Arc::clone(&schema), opts, Some(&mut pb)).unwrap();
+            let mut w = StatamWriter::new(
+                std::io::Cursor::new(&mut file_bytes),
+                Arc::clone(&schema),
+                opts,
+                Some(&mut pb),
+            )
+            .unwrap();
             w.write_batch(&batch).unwrap();
-            w.finish(&mut file_bytes).unwrap();
+            w.finish().unwrap();
         }
         let mut pack_bytes = Vec::new();
         pb.finish(&mut pack_bytes).unwrap();
@@ -1105,11 +1260,17 @@ mod tests {
         );
         let mut file1_bytes = Vec::new();
         {
-            let mut w1 = StatamWriter::new(Arc::clone(&schema), opts_multi.clone(), None).unwrap();
+            let mut w1 = StatamWriter::new(
+                std::io::Cursor::new(&mut file1_bytes),
+                Arc::clone(&schema),
+                opts_multi.clone(),
+                None,
+            )
+            .unwrap();
             w1.set_pack_ids(vec![pack_a_id, pack_b_id]);
-            w1.write_batch_with_prechunked_refs(&batch1, &refs1, &HashMap::new())
+            w1.write_batch_with_prechunked_refs(&batch1, &refs1, None)
                 .unwrap();
-            w1.finish(&mut file1_bytes).unwrap();
+            w1.finish().unwrap();
         }
 
         // File 2 keeps cid_b_live alive in pack_b so pack_b is NOT 100%-dead (only rewritten).
@@ -1121,11 +1282,17 @@ mod tests {
         );
         let mut file2_bytes = Vec::new();
         {
-            let mut w2 = StatamWriter::new(Arc::clone(&schema), opts_multi, None).unwrap();
+            let mut w2 = StatamWriter::new(
+                std::io::Cursor::new(&mut file2_bytes),
+                Arc::clone(&schema),
+                opts_multi,
+                None,
+            )
+            .unwrap();
             w2.set_pack_ids(vec![pack_b_id]);
-            w2.write_batch_with_prechunked_refs(&batch2, &refs2, &HashMap::new())
+            w2.write_batch_with_prechunked_refs(&batch2, &refs2, None)
                 .unwrap();
-            w2.finish(&mut file2_bytes).unwrap();
+            w2.finish().unwrap();
         }
 
         let mut pack_a_bytes = Vec::new();
@@ -1269,9 +1436,15 @@ mod tests {
         let batch = build_gdpr_batch(&schema, &row_refs);
         let mut file_bytes = Vec::new();
         {
-            let mut w = StatamWriter::new(Arc::clone(&schema), opts, Some(&mut pb)).unwrap();
+            let mut w = StatamWriter::new(
+                std::io::Cursor::new(&mut file_bytes),
+                Arc::clone(&schema),
+                opts,
+                Some(&mut pb),
+            )
+            .unwrap();
             w.write_batch(&batch).unwrap();
-            w.finish(&mut file_bytes).unwrap();
+            w.finish().unwrap();
         }
 
         let mut old_pack_bytes = Vec::new();
@@ -1361,5 +1534,567 @@ mod tests {
             }
         }
         assert_eq!(actual_survivors, expected_survivors);
+    }
+
+    fn build_custom_pack_bytes(
+        pack_id: [u8; 16],
+        frames_raw: &[Vec<u8>],
+        frame_first_and_count: &[(u32, u32)],
+        chunks: &[ChunkLoc],
+        hashes: &[[u8; 16]],
+    ) -> Vec<u8> {
+        use crate::format::{
+            FORMAT_VERSION, FrameEntry, PACK_HEADER_LEN, PACK_POSTSCRIPT_LEN, PackHeader,
+            PackPostscript, write_framed_pack_frame,
+        };
+
+        let mut buf = vec![0u8; PACK_HEADER_LEN];
+        let mut frame_entries = Vec::with_capacity(frames_raw.len());
+        for (raw, &(first_cid, cnt)) in frames_raw.iter().zip(frame_first_and_count.iter()) {
+            let offset = buf.len() as u64;
+            let mut framed = Vec::new();
+            let info = write_framed_pack_frame(raw, Codec::None, 0, 3, &mut framed).unwrap();
+            buf.extend_from_slice(&framed);
+            frame_entries.push(FrameEntry {
+                offset,
+                stored_len: info.stored_len,
+                raw_len: info.raw_len,
+                codec: info.codec,
+                flags: 0,
+                dict_id: 0,
+                first_chunk_id: first_cid,
+                chunk_count: cnt,
+                filter_off: 0,
+                filter_len: 0,
+                crc32c: info.crc32c,
+            });
+        }
+
+        let hash_table_off = if hashes.is_empty() {
+            0
+        } else {
+            let off = buf.len() as u64;
+            let start = buf.len();
+            for h in hashes {
+                buf.extend_from_slice(h);
+            }
+            let crc = crc32c::crc32c(&buf[start..]);
+            buf.extend_from_slice(&crc.to_le_bytes());
+            off
+        };
+
+        let mut toc_raw = Vec::new();
+        for f in &frame_entries {
+            toc_raw.extend_from_slice(&f.encode());
+        }
+        for c in chunks {
+            toc_raw.extend_from_slice(&c.encode());
+        }
+        let toc_crc32c = crc32c::crc32c(&toc_raw);
+        let toc_stored_len = (toc_raw.len() + PACK_POSTSCRIPT_LEN) as u32;
+        buf.extend_from_slice(&toc_raw);
+
+        let ps = PackPostscript {
+            toc_stored_len,
+            toc_raw_len: toc_raw.len() as u32,
+            format_version: FORMAT_VERSION,
+            flags: 0,
+            required_features: 0,
+            pack_id,
+            frame_count: frame_entries.len() as u32,
+            chunk_count: chunks.len() as u32,
+            hash_table_off,
+            trigram_off: 0,
+            trigram_len: 0,
+            edge_table_len: 0,
+            edge_table_off: 0,
+            dict_off: 0,
+            dict_len: 0,
+            enc_envelope_offset: 0,
+            enc_envelope_len: 0,
+            reserved: 0,
+            toc_crc32c,
+        };
+        let header = PackHeader {
+            format_version: FORMAT_VERSION,
+            flags: 0,
+            required_features: 0,
+            pack_id,
+            enc_envelope_offset: 0,
+            enc_envelope_len: 0,
+            reserved: 0,
+        };
+        buf[0..PACK_HEADER_LEN].copy_from_slice(&header.encode());
+        buf.extend_from_slice(&ps.encode());
+        buf
+    }
+
+    #[test]
+    fn b1_gdpr_non_contiguous_pack_erases_pii_and_preserves_survivors() {
+        let schema = make_gdpr_schema();
+        let pack_id = [0xB1u8; 16];
+        let erased_bytes = b"ERASED_NONCONTIG_PII_SECRET_VALUE".repeat(12);
+        let live_bytes = b"SURVIVING_NONCONTIG_CLEAN_PAYLOAD".repeat(12);
+
+        // Frame 0 holds erased cid 1; Frame 1 holds live cid 0 -> toc.frames_contiguous == false!
+        let chunks = vec![
+            ChunkLoc {
+                frame_id: 1,
+                offset_in_frame: 0,
+                raw_len: live_bytes.len() as u32,
+            },
+            ChunkLoc {
+                frame_id: 0,
+                offset_in_frame: 0,
+                raw_len: erased_bytes.len() as u32,
+            },
+        ];
+        let h0: [u8; 16] = blake3::hash(&live_bytes).as_bytes()[..16]
+            .try_into()
+            .unwrap();
+        let h1: [u8; 16] = blake3::hash(&erased_bytes).as_bytes()[..16]
+            .try_into()
+            .unwrap();
+        let pack_bytes = build_custom_pack_bytes(
+            pack_id,
+            &[erased_bytes.clone(), live_bytes.clone()],
+            &[(0, 1), (1, 1)],
+            &chunks,
+            &[h0, h1],
+        );
+        let opened = ChunkPackReader::open(Arc::new(SliceReader::new(pack_bytes.clone()))).unwrap();
+        assert!(!opened.toc().frames_contiguous);
+
+        let batch = build_gdpr_batch(&schema, &[("u_keep", "op0", ""), ("u_erase", "op1", "")]);
+        let mut refs = HashMap::new();
+        refs.insert(
+            2usize,
+            vec![
+                PayloadRefRow::Chunks(vec![(0, 0)]),
+                PayloadRefRow::Chunks(vec![(0, 1)]),
+            ],
+        );
+        let mut file_bytes = Vec::new();
+        let mut opts = WriteOptions::for_table(TableKind::Spans, WriteProfile::L1Compact);
+        opts.payload_cols = vec!["input".to_owned()];
+        {
+            let mut w = StatamWriter::new(
+                std::io::Cursor::new(&mut file_bytes),
+                Arc::clone(&schema),
+                opts,
+                None,
+            )
+            .unwrap();
+            w.set_pack_ids(vec![pack_id]);
+            w.write_batch_with_prechunked_refs(&batch, &refs, None)
+                .unwrap();
+            w.finish().unwrap();
+        }
+
+        let mut packs: HashMap<[u8; 16], Arc<dyn RangeReader>> = HashMap::new();
+        packs.insert(pack_id, Arc::new(SliceReader::new(pack_bytes)));
+        let inputs = vec![GdprFileInput {
+            file_id: "non_contig".to_owned(),
+            reader: Arc::new(SliceReader::new(file_bytes)),
+            write_options: None,
+        }];
+
+        let report = gdpr_rewrite_day(&inputs, &packs, &|b, r| {
+            b.column_by_name("user_id").unwrap().get_scalar(r).unwrap()
+                == cetra_column::ScalarValue::Utf8("u_erase".to_owned())
+        })
+        .unwrap();
+
+        assert_eq!(report.stats.frames_copied_verbatim, 0);
+        assert_eq!(report.stats.frames_dropped, 1);
+        assert_eq!(report.stats.frames_rewritten, 1);
+        assert_eq!(report.stats.chunks_purged, 1);
+        assert_eq!(report.stats.bytes_purged, erased_bytes.len() as u64);
+        assert_eq!(report.new_packs.len(), 1);
+        let new_pack = &report.new_packs[0];
+        assert!(memmem::find(&new_pack.bytes, b"ERASED_NONCONTIG_PII").is_none());
+        let new_pr =
+            ChunkPackReader::open(Arc::new(SliceReader::new(new_pack.bytes.clone()))).unwrap();
+        for fid in 0..new_pr.toc().frames.len() as u32 {
+            let dec = new_pr.read_frame_decompressed(fid).unwrap();
+            assert!(memmem::find(&dec, b"ERASED_NONCONTIG_PII").is_none());
+        }
+
+        let mut resolver = InMemoryPackResolver::new();
+        resolver.insert(new_pack.new_pack_id, Arc::new(new_pr));
+        let reader = StatamReader::open(
+            Arc::new(SliceReader::new(report.rewritten_files[0].bytes.clone())),
+            Some(Arc::new(resolver)),
+        )
+        .unwrap();
+        let out = reader.scan(&ScanRequest::default()).unwrap();
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].num_rows(), 1);
+        assert_eq!(
+            out[0]
+                .column_by_name("input")
+                .unwrap()
+                .get_scalar(0)
+                .unwrap(),
+            cetra_column::ScalarValue::Utf8(String::from_utf8(live_bytes).unwrap())
+        );
+    }
+
+    #[test]
+    fn b1_gdpr_overlapping_chunk_slack_frame_purges_erased_bytes() {
+        let schema = make_gdpr_schema();
+        let pack_id = [0xB2u8; 16];
+        let live_half = b"LIVE_CHUNK_BYTES_0123456789_LIVE_CHUNK_BYTES_01234".to_vec();
+        assert_eq!(live_half.len(), 50);
+        let erased_slack = b"ERASED_SLACK_PII_BYTES_MUST_NOT_SURVIVE_0123456789".to_vec();
+        assert_eq!(erased_slack.len(), 50);
+        let mut frame0_raw = Vec::with_capacity(100);
+        frame0_raw.extend_from_slice(&live_half);
+        frame0_raw.extend_from_slice(&erased_slack);
+        let frame1_erased = b"ERASED_FRAME1_PAYLOAD_BYTES_1234567890".to_vec();
+
+        // Contiguous pack where Frame 0 has overlapping [0..50], [0..50] leaving [50..100] as unreferenced slack.
+        let chunks = vec![
+            ChunkLoc {
+                frame_id: 0,
+                offset_in_frame: 0,
+                raw_len: 50,
+            },
+            ChunkLoc {
+                frame_id: 0,
+                offset_in_frame: 0,
+                raw_len: 50,
+            },
+            ChunkLoc {
+                frame_id: 1,
+                offset_in_frame: 0,
+                raw_len: frame1_erased.len() as u32,
+            },
+        ];
+        let h_live: [u8; 16] = blake3::hash(&live_half).as_bytes()[..16]
+            .try_into()
+            .unwrap();
+        let h_dead: [u8; 16] = blake3::hash(&frame1_erased).as_bytes()[..16]
+            .try_into()
+            .unwrap();
+        let pack_bytes = build_custom_pack_bytes(
+            pack_id,
+            &[frame0_raw, frame1_erased],
+            &[(0, 2), (2, 1)],
+            &chunks,
+            &[h_live, h_live, h_dead],
+        );
+        let opened = ChunkPackReader::open(Arc::new(SliceReader::new(pack_bytes.clone()))).unwrap();
+        assert!(opened.toc().frames_contiguous);
+
+        let batch = build_gdpr_batch(
+            &schema,
+            &[
+                ("u_keep0", "op0", ""),
+                ("u_keep1", "op1", ""),
+                ("u_erase", "op2", ""),
+            ],
+        );
+        let mut refs = HashMap::new();
+        refs.insert(
+            2usize,
+            vec![
+                PayloadRefRow::Chunks(vec![(0, 0)]),
+                PayloadRefRow::Chunks(vec![(0, 1)]),
+                PayloadRefRow::Chunks(vec![(0, 2)]),
+            ],
+        );
+        let mut file_bytes = Vec::new();
+        let mut opts = WriteOptions::for_table(TableKind::Spans, WriteProfile::L1Compact);
+        opts.payload_cols = vec!["input".to_owned()];
+        {
+            let mut w = StatamWriter::new(
+                std::io::Cursor::new(&mut file_bytes),
+                Arc::clone(&schema),
+                opts,
+                None,
+            )
+            .unwrap();
+            w.set_pack_ids(vec![pack_id]);
+            w.write_batch_with_prechunked_refs(&batch, &refs, None)
+                .unwrap();
+            w.finish().unwrap();
+        }
+
+        let mut packs: HashMap<[u8; 16], Arc<dyn RangeReader>> = HashMap::new();
+        packs.insert(pack_id, Arc::new(SliceReader::new(pack_bytes)));
+        let inputs = vec![GdprFileInput {
+            file_id: "slack".to_owned(),
+            reader: Arc::new(SliceReader::new(file_bytes)),
+            write_options: None,
+        }];
+
+        let report = gdpr_rewrite_day(&inputs, &packs, &|b, r| {
+            b.column_by_name("user_id").unwrap().get_scalar(r).unwrap()
+                == cetra_column::ScalarValue::Utf8("u_erase".to_owned())
+        })
+        .unwrap();
+
+        assert_eq!(report.stats.frames_copied_verbatim, 0);
+        assert_eq!(report.stats.frames_rewritten, 1);
+        assert_eq!(report.stats.frames_dropped, 1);
+        let new_pack = &report.new_packs[0];
+        assert!(memmem::find(&new_pack.bytes, b"ERASED_SLACK_PII").is_none());
+        let new_pr =
+            ChunkPackReader::open(Arc::new(SliceReader::new(new_pack.bytes.clone()))).unwrap();
+        for fid in 0..new_pr.toc().frames.len() as u32 {
+            let dec = new_pr.read_frame_decompressed(fid).unwrap();
+            assert!(memmem::find(&dec, b"ERASED_SLACK_PII").is_none());
+        }
+
+        let mut resolver = InMemoryPackResolver::new();
+        resolver.insert(new_pack.new_pack_id, Arc::new(new_pr));
+        let reader = StatamReader::open(
+            Arc::new(SliceReader::new(report.rewritten_files[0].bytes.clone())),
+            Some(Arc::new(resolver)),
+        )
+        .unwrap();
+        let out = reader.scan(&ScanRequest::default()).unwrap();
+        assert_eq!(out[0].num_rows(), 2);
+        let expected_str = String::from_utf8(live_half).unwrap();
+        for row in 0..2 {
+            assert_eq!(
+                out[0]
+                    .column_by_name("input")
+                    .unwrap()
+                    .get_scalar(row)
+                    .unwrap(),
+                cetra_column::ScalarValue::Utf8(expected_str.clone())
+            );
+        }
+    }
+
+    #[test]
+    fn b2_gdpr_duplicate_chunk_across_single_and_multi_chunk_frames_preserves_boundary_search() {
+        let schema = make_gdpr_schema();
+        let pack_id = [0xB3u8; 16];
+        let chunk_x = format!("{}BOUNDARY_", "x".repeat(300));
+        let chunk_y = format!("SPAN_NEEDLE{}", "y".repeat(300));
+        let chunk_z = format!("ERASED_DEAD_CHUNK_{}", "z".repeat(300));
+
+        // Build pack: Frame 0 = [X] (single-chunk, empty edge via bypass), Frame 1 = [X, Y, Z] (mixed).
+        let mut pb = ChunkPackBuilder::new(
+            pack_id,
+            PackWriteOptions {
+                codec: default_gdpr_pack_codec(),
+                target_frame_raw_bytes: 320,
+                enable_trigram_skip: true,
+                compress_toc_lz4: false,
+                emit_hash_table: true,
+                write_threads: 1,
+                zstd_level: 3,
+            },
+        );
+        let cid_x_single = pb
+            .append_raw_bypass_with_edge(chunk_x.as_bytes(), false)
+            .unwrap();
+        let cid_x_multi = pb
+            .append_raw_bypass_with_edge(chunk_x.as_bytes(), true)
+            .unwrap();
+        let cid_y = pb
+            .append_raw_bypass_with_edge(chunk_y.as_bytes(), true)
+            .unwrap();
+        let cid_z_dead = pb
+            .append_raw_bypass_with_edge(chunk_z.as_bytes(), false)
+            .unwrap();
+        let mut pack_bytes = Vec::new();
+        pb.finish(&mut pack_bytes).unwrap();
+
+        let batch = build_gdpr_batch(
+            &schema,
+            &[
+                ("u_keep_single", "op0", ""),
+                ("u_keep_multi", "op1", ""),
+                ("u_erase", "op2", ""),
+            ],
+        );
+        let mut refs = HashMap::new();
+        refs.insert(
+            2usize,
+            vec![
+                PayloadRefRow::Chunks(vec![(0, cid_x_single)]),
+                PayloadRefRow::Chunks(vec![(0, cid_x_multi), (0, cid_y)]),
+                PayloadRefRow::Chunks(vec![(0, cid_z_dead)]),
+            ],
+        );
+        let mut file_bytes = Vec::new();
+        let mut opts = WriteOptions::for_table(TableKind::Spans, WriteProfile::L1Compact);
+        opts.payload_cols = vec!["input".to_owned()];
+        {
+            let mut w = StatamWriter::new(
+                std::io::Cursor::new(&mut file_bytes),
+                Arc::clone(&schema),
+                opts,
+                None,
+            )
+            .unwrap();
+            w.set_pack_ids(vec![pack_id]);
+            w.write_batch_with_prechunked_refs(&batch, &refs, None)
+                .unwrap();
+            w.finish().unwrap();
+        }
+
+        let mut packs: HashMap<[u8; 16], Arc<dyn RangeReader>> = HashMap::new();
+        packs.insert(pack_id, Arc::new(SliceReader::new(pack_bytes)));
+        let inputs = vec![GdprFileInput {
+            file_id: "b2_dup".to_owned(),
+            reader: Arc::new(SliceReader::new(file_bytes)),
+            write_options: None,
+        }];
+
+        let report = gdpr_rewrite_day(&inputs, &packs, &|b, r| {
+            b.column_by_name("user_id").unwrap().get_scalar(r).unwrap()
+                == cetra_column::ScalarValue::Utf8("u_erase".to_owned())
+        })
+        .unwrap();
+
+        let new_pack = &report.new_packs[0];
+        let mut resolver = InMemoryPackResolver::new();
+        resolver
+            .insert_bytes(new_pack.new_pack_id, new_pack.bytes.clone())
+            .unwrap();
+        let reader = StatamReader::open(
+            Arc::new(SliceReader::new(report.rewritten_files[0].bytes.clone())),
+            Some(Arc::new(resolver)),
+        )
+        .unwrap();
+
+        for ci in [false, true] {
+            let needle = if ci {
+                b"boundary_span_needle".to_vec()
+            } else {
+                b"BOUNDARY_SPAN_NEEDLE".to_vec()
+            };
+            let hits = reader
+                .scan(&ScanRequest {
+                    substrings: vec![crate::reader::SubstringQuery {
+                        column: "input".to_owned(),
+                        needle,
+                        case_insensitive: ci,
+                    }],
+                    ..ScanRequest::default()
+                })
+                .unwrap();
+            let matched: usize = hits.iter().map(Batch::num_rows).sum();
+            assert_eq!(
+                matched, 1,
+                "cross-chunk LIKE/ILIKE (ci={ci}) must find X||Y"
+            );
+        }
+    }
+
+    #[test]
+    fn m8_gdpr_rejects_missing_pack_referenced_only_by_erased_rows() {
+        let schema = make_gdpr_schema();
+        let pack_id = [0x88u8; 16];
+        let mut pb = ChunkPackBuilder::new(pack_id, PackWriteOptions::default());
+        let mut opts = WriteOptions::for_table(TableKind::Spans, WriteProfile::L1Compact);
+        opts.payload_cols = vec!["input".to_owned()];
+        opts.pack_id = Some(pack_id);
+        let big = "ERASED_ONLY_PACK_PAYLOAD_".repeat(20);
+        let batch = build_gdpr_batch(&schema, &[("u_erase", "op0", &big)]);
+        let mut file_bytes = Vec::new();
+        {
+            let mut w = StatamWriter::new(
+                std::io::Cursor::new(&mut file_bytes),
+                Arc::clone(&schema),
+                opts,
+                Some(&mut pb),
+            )
+            .unwrap();
+            w.write_batch(&batch).unwrap();
+            w.finish().unwrap();
+        }
+
+        let inputs = vec![GdprFileInput {
+            file_id: "all_erased".to_owned(),
+            reader: Arc::new(SliceReader::new(file_bytes)),
+            write_options: None,
+        }];
+        let empty_packs: HashMap<[u8; 16], Arc<dyn RangeReader>> = HashMap::new();
+        let err = gdpr_rewrite_day(&inputs, &empty_packs, &|_, _| true).unwrap_err();
+        assert!(matches!(err, StatamError::MissingPack { pack_id: pid } if pid == pack_id));
+    }
+
+    #[test]
+    fn b7_gdpr_streams_multi_frame_l0_rewrite_bit_exact() {
+        let schema = make_gdpr_schema();
+        let mut opts = WriteOptions::for_table(TableKind::Spans, WriteProfile::L0Fast);
+        opts.payload_cols = vec!["input".to_owned()];
+
+        // 12 rows x ~20 KiB = ~240 KiB -> spans multiple 64 KiB L0 frames in 1 RG.
+        let mut owned = Vec::new();
+        for i in 0..12usize {
+            let uid = if i % 3 == 0 {
+                format!("u_erase_{i}")
+            } else {
+                format!("u_keep_{i}")
+            };
+            let payload = if i % 3 == 0 {
+                format!("ERASED_L0_STREAM_{i:02}_").repeat(900)
+            } else {
+                format!("SURVIVING_L0_STREAM_{i:02}_").repeat(900)
+            };
+            owned.push((uid, format!("op_{i}"), payload));
+        }
+        let rows_ref: Vec<(&str, &str, &str)> = owned
+            .iter()
+            .map(|(u, o, p)| (u.as_str(), o.as_str(), p.as_str()))
+            .collect();
+        let batch = build_gdpr_batch(&schema, &rows_ref);
+        let mut file_bytes = Vec::new();
+        {
+            let mut w = StatamWriter::new(
+                std::io::Cursor::new(&mut file_bytes),
+                Arc::clone(&schema),
+                opts,
+                None,
+            )
+            .unwrap();
+            w.write_batch(&batch).unwrap();
+            w.finish().unwrap();
+        }
+
+        let inputs = vec![GdprFileInput {
+            file_id: "l0_multi_frame".to_owned(),
+            reader: Arc::new(SliceReader::new(file_bytes)),
+            write_options: None,
+        }];
+        let empty_packs = HashMap::new();
+        let report = gdpr_rewrite_day(&inputs, &empty_packs, &|b, r| {
+            matches!(
+                b.column_by_name("user_id").unwrap().get_scalar(r).unwrap(),
+                cetra_column::ScalarValue::Utf8(s) if s.starts_with("u_erase_")
+            )
+        })
+        .unwrap();
+
+        assert_eq!(report.rewritten_files.len(), 1);
+        let rw = &report.rewritten_files[0];
+        assert!(memmem::find(&rw.bytes, b"ERASED_L0_STREAM_").is_none());
+        let reader =
+            StatamReader::open(Arc::new(SliceReader::new(rw.bytes.clone())), None).unwrap();
+        reader.verify_full().unwrap();
+        let out = reader.scan(&ScanRequest::default()).unwrap();
+        let expected: Vec<String> = owned
+            .iter()
+            .filter(|(u, _, _)| !u.starts_with("u_erase_"))
+            .map(|(_, _, p)| p.clone())
+            .collect();
+        let mut actual = Vec::new();
+        for b in &out {
+            let col = b.column_by_name("input").unwrap();
+            for r in 0..b.num_rows() {
+                if let cetra_column::ScalarValue::Utf8(s) = col.get_scalar(r).unwrap() {
+                    actual.push(s);
+                }
+            }
+        }
+        assert_eq!(actual, expected);
     }
 }

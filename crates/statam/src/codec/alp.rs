@@ -287,6 +287,11 @@ pub fn decode_alp_body(
             reason: "alp decode count exceeds MAX_BLOCK_RAW_BYTES",
         });
     }
+    if nulls.is_some_and(|bm| bm.len() != count) {
+        return Err(StatamError::Corrupt {
+            reason: "alp null bitmap length mismatch",
+        });
+    }
     if count == 0 {
         if !src.is_empty() {
             return Err(StatamError::Corrupt {
@@ -325,7 +330,6 @@ pub fn decode_alp_body(
         });
     }
 
-    let mut deltas = Vec::with_capacity(count);
     let packed_slice = &src[13..];
     let packed_len = crate::simd::bitpack::packed_bytes_len(count, bit_width)?;
     if packed_slice.len() < packed_len {
@@ -333,19 +337,26 @@ pub fn decode_alp_body(
             reason: "truncated alp packed deltas",
         });
     }
-    unpack_u64(&packed_slice[..packed_len], count, bit_width, &mut deltas)?;
-
     let exc_bytes_needed = exc_count
         .checked_mul(10)
         .ok_or(StatamError::BoundsExceeded {
             reason: "alp exception table size overflow",
         })?;
-    let exc_slice = &packed_slice[packed_len..];
-    if exc_slice.len() != exc_bytes_needed {
+    let expected_total = 13usize
+        .checked_add(packed_len)
+        .and_then(|n| n.checked_add(exc_bytes_needed))
+        .ok_or(StatamError::BoundsExceeded {
+            reason: "alp block size overflow",
+        })?;
+    if src.len() != expected_total {
         return Err(StatamError::Corrupt {
             reason: "alp exception table length mismatch",
         });
     }
+    let exc_slice = &packed_slice[packed_len..];
+
+    let mut deltas = Vec::with_capacity(count);
+    unpack_u64(&packed_slice[..packed_len], count, bit_width, &mut deltas)?;
 
     let mut out = Vec::with_capacity(count);
     for &d in &deltas {
@@ -385,4 +396,51 @@ pub fn decode_alp_body(
     }
 
     Ok(out)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn decode_alp_rejects_mismatched_length_and_nulls_before_allocating() {
+        // 13-byte header claiming 8M rows (64 MiB) with bit_width=1 (needs 1 MiB packed)
+        // must fail immediately on truncated payload without allocating.
+        let mut hdr = vec![0u8; 13];
+        hdr[12] = 1; // bit_width = 1
+        assert!(matches!(
+            decode_alp_body(&hdr, MAX_BLOCK_RAW_BYTES / 8, None),
+            Err(StatamError::Corrupt {
+                reason: "truncated alp packed deltas",
+            })
+        ));
+
+        // Trailing bytes after valid 0-bit-width block must be rejected before allocating.
+        let mut with_trailing = vec![0u8; 14];
+        with_trailing[12] = 0; // bit_width = 0 -> packed_len = 0, exc_count = 0 -> exact len 13
+        assert!(matches!(
+            decode_alp_body(&with_trailing, MAX_BLOCK_RAW_BYTES / 8, None),
+            Err(StatamError::Corrupt {
+                reason: "alp exception table length mismatch",
+            })
+        ));
+
+        // Mismatched null bitmap length must return Corrupt instead of silently zeroing trailing rows.
+        let vals: Vec<f64> = (0..32).map(|i| (i as f64) * 0.25).collect();
+        let body = encode_alp_body(&vals, None).unwrap().unwrap();
+        let short_nulls = Bitmap::new_ones(16);
+        assert!(matches!(
+            decode_alp_body(&body, vals.len(), Some(&short_nulls)),
+            Err(StatamError::Corrupt {
+                reason: "alp null bitmap length mismatch",
+            })
+        ));
+        let long_nulls = Bitmap::new_ones(64);
+        assert!(matches!(
+            decode_alp_body(&body, vals.len(), Some(&long_nulls)),
+            Err(StatamError::Corrupt {
+                reason: "alp null bitmap length mismatch",
+            })
+        ));
+    }
 }

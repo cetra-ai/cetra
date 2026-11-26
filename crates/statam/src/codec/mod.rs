@@ -20,14 +20,13 @@ use crate::codec::nested::{decode_nested_column, encode_nested_column};
 use crate::codec::numeric::{
     decode_const_block, decode_inner_flat, decode_narrow_column, decode_narrow_column_selected,
     decode_narrow_column_take, decode_plain_varlen_selected, encode_narrow_column_with_locality,
-    read_optional_nulls, try_encode_const_or_null, write_optional_nulls,
+    parse_rle_header, read_optional_nulls, try_encode_const_or_null, write_optional_nulls,
 };
-use crate::codec::zonemap::compute_zone_map;
+use crate::codec::zonemap::{compute_zone_map, count_col_nulls};
 use crate::format::{
     BLOCK_FLAG_ALL_NULL, BLOCK_FLAG_HAS_NULLS, BLOCK_FLAG_MIN_MAX_VALID, BlockEntry, Codec,
     Encoding, MAX_NESTING_DEPTH, write_framed_block_with_min_savings,
 };
-use crate::simd::bitpack::{packed_bytes_len, unpack_u32};
 
 pub use alp::{ALP_MAX_EXP, decode_alp_body, encode_alp_body};
 pub use dict::{
@@ -258,32 +257,7 @@ pub(crate) fn encode_mini_block_with_locality(
         DataType::List(_) | DataType::MapUtf8 | DataType::Events | DataType::Links
     ) {
         let len = col.len();
-        let null_count_usize = match col {
-            Column::Flat(f) => f.nulls().map_or(0, Bitmap::count_zeros),
-            Column::Const { value, .. } => {
-                if value.is_null() {
-                    len
-                } else {
-                    0
-                }
-            }
-            Column::Dict(d) => (0..d.len()).filter(|&i| d.is_null(i)).count(),
-            Column::Rle(r) => {
-                if !r.has_nulls() {
-                    0
-                } else {
-                    let mut n = 0usize;
-                    let mut prev = 0u32;
-                    for (idx, &end) in r.run_ends().iter().enumerate() {
-                        if r.values().is_null(idx) {
-                            n += (end - prev) as usize;
-                        }
-                        prev = end;
-                    }
-                    n
-                }
-            }
-        };
+        let null_count_usize = count_col_nulls(col);
         let null_count = u16::try_from(null_count_usize).unwrap_or(u16::MAX);
         let mut block_flags = if null_count_usize > 0 {
             BLOCK_FLAG_HAS_NULLS
@@ -307,7 +281,7 @@ pub(crate) fn encode_mini_block_with_locality(
         return encode_nested_column(col, dt, profile, MAX_NESTING_DEPTH, Some(&zm));
     }
 
-    let zm = compute_zone_map(col, file_dict.is_some_and(FileDict::is_sorted));
+    let zm = compute_zone_map(col);
     if let Some(inline) = try_encode_const_or_null(col, dt, &zm) {
         return Ok(inline);
     }
@@ -633,7 +607,17 @@ pub(crate) fn decode_mini_block_take(
         u32_indices.push(idx_u32);
     }
     let col = decode_mini_block_selected(raw_body, entry, dt, file_dict, &mask)?;
-    Ok(Column::Flat(col.take(&u32_indices, None)?))
+    let pool = cetra_column::GlobalPool::standalone(crate::MAX_BATCH_DECODED_BYTES);
+    let mut res = pool.register("decode_mini_block_take", false);
+    let taken = col
+        .take(&u32_indices, Some(&mut res))
+        .map_err(|e| match e {
+            cetra_column::ColumnError::MemoryLimit { .. } => StatamError::BoundsExceeded {
+                reason: "mini-block take exceeds MAX_BATCH_DECODED_BYTES",
+            },
+            other => StatamError::Column(other),
+        })?;
+    Ok(Column::Flat(taken))
 }
 
 fn decode_rle_block_selected(
@@ -651,68 +635,12 @@ fn decode_rle_block_selected(
         }
         return Ok(Column::Flat(FlatColumn::empty(dt)));
     }
-    if raw_body.len() < 4 {
-        return Err(StatamError::Corrupt {
-            reason: "truncated Rle num_runs",
-        });
-    }
-    let num_runs =
-        u32::from_le_bytes([raw_body[0], raw_body[1], raw_body[2], raw_body[3]]) as usize;
-    if num_runs == 0 || num_runs > row_count {
-        return Err(StatamError::Corrupt {
-            reason: "invalid Rle num_runs",
-        });
-    }
-    if num_runs
-        .checked_mul(4)
-        .is_none_or(|b| b > crate::MAX_BLOCK_RAW_BYTES)
-    {
-        return Err(StatamError::BoundsExceeded {
-            reason: "Rle num_runs exceeds MAX_BLOCK_RAW_BYTES",
-        });
-    }
-    let (run_nulls, after_nulls) =
-        read_optional_nulls(&raw_body[4..], num_runs, entry.block_flags)?;
-    let Some(&re_bw) = after_nulls.first() else {
-        return Err(StatamError::Corrupt {
-            reason: "truncated Rle run_ends bit_width",
-        });
-    };
-    if re_bw > 32 {
-        return Err(StatamError::Corrupt {
-            reason: "invalid Rle run_ends bit_width",
-        });
-    }
-    let re_bytes = packed_bytes_len(num_runs, re_bw)?;
-    if after_nulls.len() < 1 + re_bytes + 1 {
-        return Err(StatamError::Corrupt {
-            reason: "truncated Rle body",
-        });
-    }
-    let mut run_ends = Vec::with_capacity(num_runs);
-    unpack_u32(
-        &after_nulls[1..1 + re_bytes],
-        num_runs,
-        re_bw,
-        &mut run_ends,
-    )?;
-    let mut prev = 0u32;
-    for &end in &run_ends {
-        if end <= prev || (end as usize) > row_count {
-            return Err(StatamError::Corrupt {
-                reason: "invalid Rle run_ends monotonicity",
-            });
-        }
-        prev = end;
-    }
-    if prev as usize != row_count {
-        return Err(StatamError::Corrupt {
-            reason: "Rle run_ends do not sum to row_count",
-        });
-    }
-
-    let inner_enc = Encoding::from_u8(after_nulls[1 + re_bytes])?;
-    let inner_body = &after_nulls[1 + re_bytes + 1..];
+    let hdr = parse_rle_header(raw_body, row_count, entry.block_flags)?;
+    let num_runs = hdr.num_runs;
+    let run_nulls = hdr.run_nulls;
+    let run_ends = hdr.run_ends;
+    let inner_enc = hdr.inner_enc;
+    let inner_body = hdr.inner_body;
 
     let mut run_mask = Bitmap::new_zeroed(num_runs);
     let mut run_idx = 0usize;
@@ -788,6 +716,7 @@ mod tests {
         BLOCK_FLAG_HAS_NAN, BLOCK_FLAG_MIN_MAX_VALID, COL_FLAG_DICT_SORTED, MAX_BLOCK_RAW_BYTES,
         MAX_SHREDDED_KEYS, read_framed_block,
     };
+    use crate::simd::bitpack::packed_bytes_len;
 
     fn roundtrip_via_frame(
         col: &Column,
@@ -1580,7 +1509,7 @@ mod tests {
         let f_col = Column::Flat(
             FlatColumn::try_new(FlatData::F64(vec![-0.0, 10.0, f64::NAN, 5.0]), None).unwrap(),
         );
-        let zm = compute_zone_map(&f_col, false);
+        let zm = compute_zone_map(&f_col);
         assert_ne!(zm.block_flags & BLOCK_FLAG_HAS_NAN, 0);
         assert_ne!(zm.block_flags & BLOCK_FLAG_MIN_MAX_VALID, 0);
         let f_entry = BlockEntry {
@@ -1674,7 +1603,7 @@ mod tests {
         let nan_col = Column::Flat(
             FlatColumn::try_new(FlatData::F64(vec![f64::NAN, f64::NAN]), None).unwrap(),
         );
-        let nan_zm = compute_zone_map(&nan_col, false);
+        let nan_zm = compute_zone_map(&nan_col);
         assert_ne!(nan_zm.block_flags & BLOCK_FLAG_HAS_NAN, 0);
         assert_eq!(nan_zm.block_flags & BLOCK_FLAG_MIN_MAX_VALID, 0);
 
@@ -1687,7 +1616,7 @@ mod tests {
             )
             .unwrap(),
         );
-        let u_zm = compute_zone_map(&u_col, false);
+        let u_zm = compute_zone_map(&u_col);
         assert_ne!(u_zm.block_flags & BLOCK_FLAG_MIN_MAX_VALID, 0);
         // Carry increment on "aaaaaaaaaaaaaaaz" -> "aaaaaaaaaaaaaab{..."? Actually 'z' + 1 = '{' (0x7B).
         assert_eq!(&u_zm.max_inline[..16], b"aaaaaaaaaaaaaaa{");
@@ -1733,7 +1662,7 @@ mod tests {
             )
             .unwrap(),
         );
-        let b_zm = compute_zone_map(&b_col, false);
+        let b_zm = compute_zone_map(&b_col);
         assert_eq!(b_zm.block_flags & BLOCK_FLAG_MIN_MAX_VALID, 0);
 
         // 3. Unsorted L0Fast Dict vs Sorted L1Compact Dict:
@@ -1821,7 +1750,7 @@ mod tests {
             )
             .unwrap(),
         );
-        let iv_zm = compute_zone_map(&iv_col, false);
+        let iv_zm = compute_zone_map(&iv_col);
         assert_eq!(iv_zm.block_flags & BLOCK_FLAG_MIN_MAX_VALID, 0);
     }
 
@@ -3799,5 +3728,282 @@ mod tests {
                 &dense,
             );
         }
+    }
+
+    #[test]
+    fn column_dict_value_space_zonemap_non_const_and_const_soundness() {
+        // 1. Non-constant Column::Dict<Utf8> encoded with file_dict = None (narrow fallback):
+        // dict values are ["zebra", "apple"], codes = [0, 1, 0, 1].
+        // Value-space bounds MUST be ["apple", "zebra"], NOT u32 codes [0..1].
+        let utf8_dict_vals = FlatColumn::try_new(
+            FlatData::Utf8(Utf8Data::try_from_slices(["zebra", "apple", "unused"]).unwrap()),
+            None,
+        )
+        .unwrap();
+        let utf8_dict_col =
+            Column::Dict(DictColumn::try_new(utf8_dict_vals, vec![0, 1, 0, 1], None).unwrap());
+        let (enc_u, entry_u, dec_u) =
+            roundtrip_via_frame(&utf8_dict_col, &DataType::Utf8, WriteProfile::L0Fast, None);
+        assert_ne!(enc_u.encoding, Encoding::Dict);
+        assert!(dec_u.semantic_eq(&utf8_dict_col));
+        assert!(zone_map_may_match(
+            &entry_u,
+            &DataType::Utf8,
+            0,
+            &ZonePred::Eq(ZoneValue::Bytes(b"apple".to_vec())),
+            None,
+        ));
+        assert!(zone_map_may_match(
+            &entry_u,
+            &DataType::Utf8,
+            0,
+            &ZonePred::Eq(ZoneValue::Bytes(b"zebra".to_vec())),
+            None,
+        ));
+        assert!(!zone_map_may_match(
+            &entry_u,
+            &DataType::Utf8,
+            0,
+            &ZonePred::Eq(ZoneValue::Bytes(b"aardvark".to_vec())),
+            None,
+        ));
+        assert!(!zone_map_may_match(
+            &entry_u,
+            &DataType::Utf8,
+            0,
+            &ZonePred::Gt(ZoneValue::Bytes(b"zzz".to_vec())),
+            None,
+        ));
+        assert!(zone_map_always_matches(
+            &entry_u,
+            &DataType::Utf8,
+            &ZonePred::Between(
+                ZoneValue::Bytes(b"apple".to_vec()),
+                ZoneValue::Bytes(b"zebra".to_vec()),
+            ),
+        ));
+        // Unused dict entry "unused" doesn't affect bounds, and false-positive tautology on code [0..1] is gone:
+        assert!(!zone_map_always_matches(
+            &entry_u,
+            &DataType::Utf8,
+            &ZonePred::Lt(ZoneValue::Bytes(b"banana".to_vec())),
+        ));
+
+        // 2. Non-constant Column::Dict<Date> with narrow fallback:
+        let date_vals =
+            FlatColumn::try_new(FlatData::Date(vec![20_000, 19_000, 99_999]), None).unwrap();
+        let date_dict_col =
+            Column::Dict(DictColumn::try_new(date_vals, vec![0, 1, 0, 1], None).unwrap());
+        let (enc_d, entry_d, dec_d) =
+            roundtrip_via_frame(&date_dict_col, &DataType::Date, WriteProfile::L0Fast, None);
+        assert_ne!(enc_d.encoding, Encoding::Dict);
+        assert!(dec_d.semantic_eq(&date_dict_col));
+        assert!(zone_map_may_match(
+            &entry_d,
+            &DataType::Date,
+            0,
+            &ZonePred::Eq(ZoneValue::Date(19_500)),
+            None,
+        ));
+        assert!(!zone_map_may_match(
+            &entry_d,
+            &DataType::Date,
+            0,
+            &ZonePred::Gt(ZoneValue::Date(20_000)),
+            None,
+        ));
+        assert!(zone_map_always_matches(
+            &entry_d,
+            &DataType::Date,
+            &ZonePred::Between(ZoneValue::Date(19_000), ZoneValue::Date(20_000)),
+        ));
+
+        // 3. Non-constant Column::Dict<Bool> with narrow fallback:
+        let bool_vals =
+            FlatColumn::try_new(FlatData::Bool(Bitmap::from_bools(&[true, false])), None).unwrap();
+        let bool_dict_col =
+            Column::Dict(DictColumn::try_new(bool_vals, vec![0, 1, 0, 1], None).unwrap());
+        let (_, entry_b, dec_b) =
+            roundtrip_via_frame(&bool_dict_col, &DataType::Bool, WriteProfile::L0Fast, None);
+        assert!(dec_b.semantic_eq(&bool_dict_col));
+        assert!(zone_map_may_match(
+            &entry_b,
+            &DataType::Bool,
+            0,
+            &ZonePred::Eq(ZoneValue::Bool(true)),
+            None,
+        ));
+        assert!(zone_map_may_match(
+            &entry_b,
+            &DataType::Bool,
+            0,
+            &ZonePred::Eq(ZoneValue::Bool(false)),
+            None,
+        ));
+        assert!(!zone_map_always_matches(
+            &entry_b,
+            &DataType::Bool,
+            &ZonePred::Eq(ZoneValue::Bool(true)),
+        ));
+
+        // 4. Non-constant Column::Dict<F64> containing NaN + -0.0:
+        let f64_vals =
+            FlatColumn::try_new(FlatData::F64(vec![-0.0, f64::NAN, 100.0]), None).unwrap();
+        let f64_dict_col =
+            Column::Dict(DictColumn::try_new(f64_vals, vec![0, 1, 0, 1], None).unwrap());
+        let (_, entry_f, dec_f) =
+            roundtrip_via_frame(&f64_dict_col, &DataType::F64, WriteProfile::L1Compact, None);
+        assert!(dec_f.semantic_eq(&f64_dict_col));
+        assert_ne!(entry_f.block_flags & BLOCK_FLAG_HAS_NAN, 0);
+        assert_ne!(entry_f.block_flags & BLOCK_FLAG_MIN_MAX_VALID, 0);
+        // -0.0 canonicalized to +0.0, unused 100.0 excluded:
+        assert_eq!(
+            f64::from_le_bytes(entry_f.min_inline[0..8].try_into().unwrap()).to_bits(),
+            0.0f64.to_bits()
+        );
+        assert_eq!(
+            f64::from_le_bytes(entry_f.max_inline[0..8].try_into().unwrap()).to_bits(),
+            0.0f64.to_bits()
+        );
+        assert!(zone_map_may_match(
+            &entry_f,
+            &DataType::F64,
+            0,
+            &ZonePred::Eq(ZoneValue::F64(f64::NAN)),
+            None,
+        ));
+        assert!(zone_map_may_match(
+            &entry_f,
+            &DataType::F64,
+            0,
+            &ZonePred::Gt(ZoneValue::F64(10.0)),
+            None,
+        ));
+        assert!(!zone_map_always_matches(
+            &entry_f,
+            &DataType::F64,
+            &ZonePred::Eq(ZoneValue::F64(0.0)),
+        ));
+
+        // 5. Non-constant Column::Dict<Interval> clears MIN_MAX_VALID:
+        let iv_vals = FlatColumn::try_new(
+            FlatData::Interval(vec![
+                Interval {
+                    months: 1,
+                    days: 2,
+                    nanos: 3,
+                },
+                Interval {
+                    months: 4,
+                    days: 5,
+                    nanos: 6,
+                },
+            ]),
+            None,
+        )
+        .unwrap();
+        let iv_dict_col =
+            Column::Dict(DictColumn::try_new(iv_vals, vec![0, 1, 0, 1], None).unwrap());
+        let (_, entry_iv, dec_iv) = roundtrip_via_frame(
+            &iv_dict_col,
+            &DataType::Interval,
+            WriteProfile::L0Fast,
+            None,
+        );
+        assert!(dec_iv.semantic_eq(&iv_dict_col));
+        assert_eq!(entry_iv.block_flags & BLOCK_FLAG_MIN_MAX_VALID, 0);
+
+        // 6. Constant Column::Dict encoded as Encoding::Const for Date, Bool, F64(NaN), Utf8:
+        let const_date_vals = FlatColumn::try_new(FlatData::Date(vec![10, 20_123]), None).unwrap();
+        let const_date_dict =
+            Column::Dict(DictColumn::try_new(const_date_vals, vec![1, 1, 1, 1], None).unwrap());
+        let (enc_cd, entry_cd, dec_cd) = roundtrip_via_frame(
+            &const_date_dict,
+            &DataType::Date,
+            WriteProfile::L0Fast,
+            None,
+        );
+        assert_eq!(enc_cd.encoding, Encoding::Const);
+        assert!(dec_cd.semantic_eq(&const_date_dict));
+        assert!(zone_map_always_matches(
+            &entry_cd,
+            &DataType::Date,
+            &ZonePred::Eq(ZoneValue::Date(20_123)),
+        ));
+        assert!(!zone_map_may_match(
+            &entry_cd,
+            &DataType::Date,
+            0,
+            &ZonePred::Eq(ZoneValue::Date(1)),
+            None,
+        ));
+
+        let const_bool_vals =
+            FlatColumn::try_new(FlatData::Bool(Bitmap::from_bools(&[false, true])), None).unwrap();
+        let const_bool_dict =
+            Column::Dict(DictColumn::try_new(const_bool_vals, vec![1, 1, 1, 1], None).unwrap());
+        let (enc_cb, entry_cb, dec_cb) = roundtrip_via_frame(
+            &const_bool_dict,
+            &DataType::Bool,
+            WriteProfile::L0Fast,
+            None,
+        );
+        assert_eq!(enc_cb.encoding, Encoding::Const);
+        assert!(dec_cb.semantic_eq(&const_bool_dict));
+        assert!(zone_map_always_matches(
+            &entry_cb,
+            &DataType::Bool,
+            &ZonePred::Eq(ZoneValue::Bool(true)),
+        ));
+        assert!(!zone_map_may_match(
+            &entry_cb,
+            &DataType::Bool,
+            0,
+            &ZonePred::Eq(ZoneValue::Bool(false)),
+            None,
+        ));
+
+        let const_nan_vals = FlatColumn::try_new(FlatData::F64(vec![1.0, f64::NAN]), None).unwrap();
+        let const_nan_dict =
+            Column::Dict(DictColumn::try_new(const_nan_vals, vec![1, 1, 1, 1], None).unwrap());
+        let (enc_cn, entry_cn, dec_cn) =
+            roundtrip_via_frame(&const_nan_dict, &DataType::F64, WriteProfile::L0Fast, None);
+        assert_eq!(enc_cn.encoding, Encoding::Const);
+        assert!(dec_cn.semantic_eq(&const_nan_dict));
+        assert_ne!(entry_cn.block_flags & BLOCK_FLAG_HAS_NAN, 0);
+        assert_eq!(entry_cn.block_flags & BLOCK_FLAG_MIN_MAX_VALID, 0);
+        assert!(zone_map_may_match(
+            &entry_cn,
+            &DataType::F64,
+            0,
+            &ZonePred::Eq(ZoneValue::F64(f64::NAN)),
+            None,
+        ));
+        assert!(!zone_map_always_matches(
+            &entry_cn,
+            &DataType::F64,
+            &ZonePred::IsNotNull,
+        ));
+    }
+
+    #[test]
+    fn decode_mini_block_take_caps_amplification_via_reservation() {
+        // 1-row Rle<Utf8> with a 1 MiB string; taking row 0 300 times would amplify to 300 MiB > 256 MiB.
+        let big = "a".repeat(1024 * 1024);
+        let run_vals = FlatColumn::try_new(
+            FlatData::Utf8(Utf8Data::try_from_slices([big.as_str(), "b"]).unwrap()),
+            None,
+        )
+        .unwrap();
+        let rle_col = Column::Rle(RleColumn::try_new(run_vals, vec![10, 20]).unwrap());
+        let enc = encode_mini_block(&rle_col, &DataType::Utf8, WriteProfile::L0Fast, None).unwrap();
+        assert_eq!(enc.encoding, Encoding::Rle);
+        let mut framed = Vec::new();
+        let entry = enc.write_framed_entry(0, 20, 0, 3, &mut framed).unwrap();
+        let (_, _, raw_body) = read_framed_block(&framed, MAX_BLOCK_RAW_BYTES).unwrap();
+
+        let dup_indices = vec![0usize; 300];
+        let err = decode_mini_block_take(&raw_body, &entry, &DataType::Utf8, None, &dup_indices);
+        assert!(matches!(err, Err(StatamError::BoundsExceeded { .. })));
     }
 }

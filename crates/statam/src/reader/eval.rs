@@ -1,0 +1,1746 @@
+//! Phase 1 predicate evaluation, raw UTF-8 substring matching, and SIMD filter dispatch.
+
+use std::borrow::Cow;
+use std::collections::HashMap;
+
+use cetra_column::{Bitmap, Column, DataType, FlatColumn, FlatData, ScalarValue, Utf8Data};
+use memchr::memmem;
+
+use crate::StatamError;
+use crate::codec::dict::{FileDict, decode_dict_codes_body};
+use crate::codec::fsst::FsstBlockView;
+use crate::codec::nested::{
+    ShreddedSubCol, decode_shredded_residual_block, decode_shredded_subcol, decode_single_map_key,
+};
+use crate::codec::numeric::read_optional_nulls;
+use crate::codec::{ZonePred, ZoneValue, decode_mini_block, zone_map_always_matches};
+use crate::format::{
+    BLOCK_FLAG_CONST_EMPTY_COLLECTION, BLOCK_FLAG_HAS_NAN, BlockEntry, COL_FLAG_IS_SHREDDED_SUBCOL,
+    Encoding, LocalityGroup, MAX_BATCH_DECODED_BYTES, MAX_BLOCK_RAW_BYTES,
+};
+use crate::parallel::{MAX_PARALLEL_THREADS, parallel_map_in_order};
+use crate::payload::search::{pack_short_circuits_all, unicode_lowercase_context_free_into};
+use crate::payload::{
+    FlatPayloadRefs, decode_payload_refs_flat, scan_payload_refs_inline_substring,
+};
+use crate::simd::bitpack::{packed_bytes_len, unpack_u32};
+use crate::simd::filter::{FilterOp, filter_f64, filter_i64, filter_i64_between, filter_u32};
+use crate::simd::trigram::ascii_lowercase_into;
+
+use super::payload::ParsedL0Payload;
+use super::plan::{ActiveMiniBlock, BlockReader, DecodedPhase1, RgIoPlan};
+use super::{
+    IdLookup, MIN_PARALLEL_WORK_BYTES, Predicate, StatamReader, SubstringQuery, TimeRange,
+};
+
+impl StatamReader {
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn eval_phase1_mbs<'a>(
+        &self,
+        rg_idx: usize,
+        surviving_mbs: &[usize],
+        plan: &RgIoPlan,
+        time_col_idx: Option<usize>,
+        time_range: TimeRange,
+        lookups: &[(usize, &IdLookup)],
+        preds: &[(usize, &Predicate)],
+        subs: &[(usize, &SubstringQuery)],
+        dict_sub_bitmaps: &[Option<Bitmap>],
+        l0_local: Option<&ParsedL0Payload<'_>>,
+        read_block: &BlockReader<'a>,
+        limit_remaining: Option<usize>,
+        trim_tail: bool,
+        read_threads: usize,
+    ) -> Result<Vec<ActiveMiniBlock>, StatamError> {
+        if limit_remaining == Some(0) {
+            return Ok(Vec::new());
+        }
+        let threads = read_threads.clamp(1, MAX_PARALLEL_THREADS);
+        let touches_payload = plan
+            .phase1_phys_cols
+            .iter()
+            .any(|&pidx| self.meta.col_dir[pidx].locality_group == LocalityGroup::ExternalPayload);
+        let work_bytes = if touches_payload {
+            MIN_PARALLEL_WORK_BYTES
+        } else {
+            let mut total = 0usize;
+            for &mb_idx in surviving_mbs {
+                for &pidx in &plan.phase1_phys_cols {
+                    total = total
+                        .saturating_add(self.meta.rg_blocks(pidx, rg_idx)[mb_idx].raw_len as usize);
+                }
+            }
+            total
+        };
+        if threads > 1
+            && surviving_mbs.len() >= 2
+            && limit_remaining.is_none()
+            && (touches_payload || work_bytes >= MIN_PARALLEL_WORK_BYTES)
+        {
+            let inner_threads = if surviving_mbs.len() >= threads {
+                1
+            } else {
+                (threads / surviving_mbs.len()).max(1)
+            };
+            let per_mb = parallel_map_in_order(surviving_mbs.to_vec(), threads, |mb_idx| {
+                let (mask, decoded_p1) = self.eval_phase1_mb(
+                    rg_idx,
+                    mb_idx,
+                    plan,
+                    time_col_idx,
+                    time_range,
+                    lookups,
+                    preds,
+                    subs,
+                    dict_sub_bitmaps,
+                    l0_local,
+                    read_block,
+                    inner_threads,
+                )?;
+                Ok((mb_idx, mask, decoded_p1))
+            })?;
+            return Ok(per_mb
+                .into_iter()
+                .filter(|(_, mask, _)| mask.count_ones() > 0)
+                .collect());
+        }
+
+        let mut active_mbs = Vec::new();
+        let mut active_rows = 0usize;
+        for &mb_idx in surviving_mbs {
+            let (mut mask, decoded_p1) = self.eval_phase1_mb(
+                rg_idx,
+                mb_idx,
+                plan,
+                time_col_idx,
+                time_range,
+                lookups,
+                preds,
+                subs,
+                dict_sub_bitmaps,
+                l0_local,
+                read_block,
+                read_threads,
+            )?;
+            let hits = mask.count_ones();
+            if hits > 0 {
+                if let Some(lim) = limit_remaining {
+                    let rem = lim.saturating_sub(active_rows);
+                    if rem == 0 {
+                        break;
+                    }
+                    if hits > rem {
+                        trim_bitmap_mask(&mut mask, rem, trim_tail);
+                        active_mbs.push((mb_idx, mask, decoded_p1));
+                        break;
+                    }
+                    active_rows = active_rows.saturating_add(hits);
+                    active_mbs.push((mb_idx, mask, decoded_p1));
+                    if active_rows >= lim {
+                        break;
+                    }
+                } else {
+                    active_rows = active_rows.saturating_add(hits);
+                    active_mbs.push((mb_idx, mask, decoded_p1));
+                }
+            }
+        }
+        Ok(active_mbs)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn eval_phase1_mb<'a>(
+        &self,
+        rg_idx: usize,
+        mb_idx: usize,
+        plan: &RgIoPlan,
+        time_col_idx: Option<usize>,
+        time_range: TimeRange,
+        lookups: &[(usize, &IdLookup)],
+        preds: &[(usize, &Predicate)],
+        subs: &[(usize, &SubstringQuery)],
+        dict_sub_bitmaps: &[Option<Bitmap>],
+        l0_local: Option<&ParsedL0Payload<'_>>,
+        read_block: &BlockReader<'a>,
+        read_threads: usize,
+    ) -> Result<(Bitmap, HashMap<usize, DecodedPhase1>), StatamError> {
+        let fields = self.meta.schema_meta.schema.fields();
+        let mb_row_count = self.meta.rg_blocks(0, rg_idx)[mb_idx].row_count as usize;
+        let mut mask = Bitmap::new_ones(mb_row_count);
+        let mut decoded_p1: HashMap<usize, DecodedPhase1> = HashMap::new();
+
+        if let Some(tc) = time_col_idx {
+            let blk = &self.meta.rg_blocks(tc, rg_idx)[mb_idx];
+            let time_pred = ZonePred::Between(
+                ZoneValue::TimestampNs(time_range.min_ns),
+                ZoneValue::TimestampNs(time_range.max_ns),
+            );
+            if !zone_map_always_matches(blk, &fields[tc].data_type, &time_pred) {
+                self.ensure_p1_col(
+                    tc,
+                    rg_idx,
+                    mb_idx,
+                    mb_row_count,
+                    read_block,
+                    &mut decoded_p1,
+                )?;
+                let DecodedPhase1::Col(col) = &decoded_p1[&tc] else {
+                    return Err(StatamError::Corrupt {
+                        reason: "unexpected Phase 1 decoded type for time column",
+                    });
+                };
+                let bm =
+                    eval_column_pred(col, &time_pred, (blk.block_flags & BLOCK_FLAG_HAS_NAN) != 0)?;
+                mask = mask.and(&bm)?;
+                if mask.all_zeros() {
+                    return Ok((mask, decoded_p1));
+                }
+            }
+        }
+
+        for &(cidx, lk) in lookups {
+            self.ensure_p1_col(
+                cidx,
+                rg_idx,
+                mb_idx,
+                mb_row_count,
+                read_block,
+                &mut decoded_p1,
+            )?;
+            let DecodedPhase1::Col(col) = &decoded_p1[&cidx] else {
+                return Err(StatamError::Corrupt {
+                    reason: "unexpected Phase 1 decoded type for id_lookup",
+                });
+            };
+            let bm = eval_id_lookup(col, &fields[cidx].data_type, &lk.values)?;
+            mask = mask.and(&bm)?;
+            if mask.all_zeros() {
+                return Ok((mask, decoded_p1));
+            }
+        }
+
+        for &(cidx, pred) in preds {
+            if let Some(key) = &pred.map_key {
+                let bm = if let Some((sub_pidx, res_count)) = self.find_shredded_subcol(cidx, key) {
+                    let fast_no_res =
+                        res_count == 0 && plan.phase1_map_fast_path.contains(&(mb_idx, cidx));
+                    if fast_no_res {
+                        self.ensure_p1_col(
+                            sub_pidx,
+                            rg_idx,
+                            mb_idx,
+                            mb_row_count,
+                            read_block,
+                            &mut decoded_p1,
+                        )?;
+                        let DecodedPhase1::ShreddedSub(sub) = &decoded_p1[&sub_pidx] else {
+                            return Err(StatamError::Corrupt {
+                                reason: "expected ShreddedSub in Phase 1",
+                            });
+                        };
+                        eval_shredded_subcol_pred(sub, &pred.pred)?
+                    } else {
+                        self.ensure_p1_col(
+                            sub_pidx,
+                            rg_idx,
+                            mb_idx,
+                            mb_row_count,
+                            read_block,
+                            &mut decoded_p1,
+                        )?;
+                        self.ensure_p1_col(
+                            cidx,
+                            rg_idx,
+                            mb_idx,
+                            mb_row_count,
+                            read_block,
+                            &mut decoded_p1,
+                        )?;
+                        let DecodedPhase1::ShreddedSub(sub) = &decoded_p1[&sub_pidx] else {
+                            return Err(StatamError::Corrupt {
+                                reason: "expected ShreddedSub in Phase 1",
+                            });
+                        };
+                        let DecodedPhase1::Col(res_col) = &decoded_p1[&cidx] else {
+                            return Err(StatamError::Corrupt {
+                                reason: "expected MapUtf8 residual in Phase 1",
+                            });
+                        };
+                        let res_flat = res_col.materialize(None)?;
+                        let single_map = decode_single_map_key(
+                            mb_row_count,
+                            res_flat.nulls(),
+                            key,
+                            sub,
+                            res_count,
+                            Some(&res_flat),
+                        )?;
+                        eval_map_key_pred(&single_map, key, &pred.pred)?
+                    }
+                } else {
+                    self.ensure_p1_col(
+                        cidx,
+                        rg_idx,
+                        mb_idx,
+                        mb_row_count,
+                        read_block,
+                        &mut decoded_p1,
+                    )?;
+                    let DecodedPhase1::Col(col) = &decoded_p1[&cidx] else {
+                        return Err(StatamError::Corrupt {
+                            reason: "expected MapUtf8 in Phase 1",
+                        });
+                    };
+                    let flat = col.materialize(None)?;
+                    eval_map_key_pred(&flat, key, &pred.pred)?
+                };
+                mask = mask.and(&bm)?;
+                if mask.all_zeros() {
+                    return Ok((mask, decoded_p1));
+                }
+            } else {
+                let blk = &self.meta.rg_blocks(cidx, rg_idx)[mb_idx];
+                if !zone_map_always_matches(blk, &fields[cidx].data_type, &pred.pred) {
+                    self.ensure_p1_col(
+                        cidx,
+                        rg_idx,
+                        mb_idx,
+                        mb_row_count,
+                        read_block,
+                        &mut decoded_p1,
+                    )?;
+                    let DecodedPhase1::Col(col) = &decoded_p1[&cidx] else {
+                        return Err(StatamError::Corrupt {
+                            reason: "expected scalar/nested Column in Phase 1",
+                        });
+                    };
+                    let bm = eval_column_pred(
+                        col,
+                        &pred.pred,
+                        (blk.block_flags & BLOCK_FLAG_HAS_NAN) != 0,
+                    )?;
+                    mask = mask.and(&bm)?;
+                    if mask.all_zeros() {
+                        return Ok((mask, decoded_p1));
+                    }
+                }
+            }
+        }
+
+        // Evaluate non-payload substring queries BEFORE ExternalPayload substrings so
+        // `mask` is as narrow as possible before touching `.stpk` or L0 payload chunks.
+        for pass_payload in [false, true] {
+            for (sq_idx, &(cidx, sq)) in subs.iter().enumerate() {
+                let is_payload =
+                    self.meta.col_dir[cidx].locality_group == LocalityGroup::ExternalPayload;
+                if is_payload != pass_payload {
+                    continue;
+                }
+                if is_payload
+                    && l0_local.is_none()
+                    && !self.meta.schema_meta.pack_ids.is_empty()
+                    && !decoded_p1.contains_key(&cidx)
+                {
+                    let blk = &self.meta.rg_blocks(cidx, rg_idx)[mb_idx];
+                    if blk.encoding == Encoding::ConstNull {
+                        return Ok((Bitmap::new_zeroed(mb_row_count), decoded_p1));
+                    }
+                    let mut all_short_circuit = true;
+                    let mut pack_chunk_counts =
+                        Vec::with_capacity(self.meta.schema_meta.pack_ids.len());
+                    let mut pack_has_edges =
+                        Vec::with_capacity(self.meta.schema_meta.pack_ids.len());
+                    for &pack_id in &self.meta.schema_meta.pack_ids {
+                        let pack = self.resolve_pack(pack_id)?;
+                        if !pack_short_circuits_all(&pack, &sq.needle, sq.case_insensitive)? {
+                            all_short_circuit = false;
+                            break;
+                        }
+                        pack_chunk_counts.push(pack.toc().chunks.len());
+                        pack_has_edges.push(pack.postscript().edge_table_len > 0);
+                    }
+                    if all_short_circuit {
+                        let mut needed_by_other = false;
+                        for (j, &(oc, osq)) in subs.iter().enumerate() {
+                            if j != sq_idx && oc == cidx {
+                                for &pack_id in &self.meta.schema_meta.pack_ids {
+                                    let pack = self.resolve_pack(pack_id)?;
+                                    if !pack_short_circuits_all(
+                                        &pack,
+                                        &osq.needle,
+                                        osq.case_insensitive,
+                                    )? {
+                                        needed_by_other = true;
+                                        break;
+                                    }
+                                }
+                                if needed_by_other {
+                                    break;
+                                }
+                            }
+                        }
+                        if !needed_by_other {
+                            let raw = read_block(blk)?;
+                            let mut matcher = Utf8Matcher::new(&sq.needle, sq.case_insensitive);
+                            let bm = scan_payload_refs_inline_substring(
+                                &raw,
+                                mb_row_count,
+                                &mask,
+                                &pack_chunk_counts,
+                                &pack_has_edges,
+                                |bytes| matcher.matches(bytes),
+                            )?;
+                            mask = mask.and(&bm)?;
+                            if mask.all_zeros() {
+                                return Ok((mask, decoded_p1));
+                            }
+                            continue;
+                        }
+                    }
+                }
+                if !is_payload && !decoded_p1.contains_key(&cidx) {
+                    let blk = &self.meta.rg_blocks(cidx, rg_idx)[mb_idx];
+                    if matches!(
+                        blk.encoding,
+                        Encoding::ConstNull
+                            | Encoding::Const
+                            | Encoding::Rle
+                            | Encoding::Plain
+                            | Encoding::Fsst
+                            | Encoding::Dict
+                    ) {
+                        let dict_bm = dict_sub_bitmaps.get(sq_idx).and_then(Option::as_ref);
+                        let dict = if blk.encoding == Encoding::Dict {
+                            self.get_cached_dict(cidx)
+                        } else {
+                            None
+                        };
+                        if blk.encoding != Encoding::Dict
+                            || (dict.is_some() && (dict_bm.is_some() || sq.needle.is_empty()))
+                        {
+                            let raw =
+                                if matches!(blk.encoding, Encoding::ConstNull | Encoding::Const)
+                                    || blk.stored_len == 0
+                                {
+                                    Cow::Borrowed(&[][..])
+                                } else {
+                                    read_block(blk)?
+                                };
+                            let bm = eval_utf8_block_substring_raw(
+                                &raw,
+                                blk,
+                                mb_row_count,
+                                &mask,
+                                &sq.needle,
+                                sq.case_insensitive,
+                                dict_bm,
+                                dict.as_deref(),
+                            )?;
+                            mask = mask.and(&bm)?;
+                            if mask.all_zeros() {
+                                return Ok((mask, decoded_p1));
+                            }
+                            continue;
+                        }
+                    }
+                }
+                self.ensure_p1_col(
+                    cidx,
+                    rg_idx,
+                    mb_idx,
+                    mb_row_count,
+                    read_block,
+                    &mut decoded_p1,
+                )?;
+                let item = &decoded_p1[&cidx];
+                let bm = match item {
+                    DecodedPhase1::Col(col) => eval_utf8_substring(
+                        col,
+                        &sq.needle,
+                        sq.case_insensitive,
+                        dict_sub_bitmaps.get(sq_idx).and_then(Option::as_ref),
+                    )?,
+                    DecodedPhase1::FlatPayloadRefs(refs) => self.eval_payload_refs_substring(
+                        refs,
+                        &mask,
+                        &sq.needle,
+                        sq.case_insensitive,
+                        l0_local,
+                        read_threads,
+                    )?,
+                    DecodedPhase1::SelectedPayloadRefs(_) | DecodedPhase1::ShreddedSub(_) => {
+                        return Err(StatamError::Corrupt {
+                            reason: "unexpected Phase 1 variant for substring query",
+                        });
+                    }
+                };
+                mask = mask.and(&bm)?;
+                if mask.all_zeros() {
+                    return Ok((mask, decoded_p1));
+                }
+            }
+        }
+
+        Ok((mask, decoded_p1))
+    }
+
+    fn ensure_p1_col<'a>(
+        &self,
+        pidx: usize,
+        rg_idx: usize,
+        mb_idx: usize,
+        mb_row_count: usize,
+        read_block: &BlockReader<'a>,
+        decoded_p1: &mut HashMap<usize, DecodedPhase1>,
+    ) -> Result<(), StatamError> {
+        if decoded_p1.contains_key(&pidx) {
+            return Ok(());
+        }
+        let fields = self.meta.schema_meta.schema.fields();
+        let blk = &self.meta.rg_blocks(pidx, rg_idx)[mb_idx];
+        let cd = &self.meta.col_dir[pidx];
+        let item = if (cd.col_flags & COL_FLAG_IS_SHREDDED_SUBCOL) != 0 {
+            let raw = read_block(blk)?;
+            let sub = decode_shredded_subcol(&raw, mb_row_count)?;
+            DecodedPhase1::ShreddedSub(sub)
+        } else if cd.locality_group == LocalityGroup::ExternalPayload {
+            if blk.encoding == Encoding::ConstNull {
+                DecodedPhase1::FlatPayloadRefs(FlatPayloadRefs::all_null(mb_row_count))
+            } else {
+                let raw = read_block(blk)?;
+                let refs = decode_payload_refs_flat(&raw, mb_row_count, MAX_BATCH_DECODED_BYTES)?;
+                DecodedPhase1::FlatPayloadRefs(refs)
+            }
+        } else if self
+            .meta
+            .schema_meta
+            .shredded_maps
+            .iter()
+            .any(|s| s.logical_col_idx as usize == pidx)
+        {
+            let raw = if blk.stored_len > 0 {
+                read_block(blk)?
+            } else {
+                Cow::Borrowed(&[][..])
+            };
+            let flat = decode_shredded_residual_block(&raw, blk)?;
+            DecodedPhase1::Col(Column::Flat(flat))
+        } else {
+            let raw = if blk.stored_len > 0 {
+                read_block(blk)?
+            } else {
+                Cow::Borrowed(&[][..])
+            };
+            let dict = if blk.encoding == Encoding::Dict {
+                self.get_cached_dict(pidx)
+            } else {
+                None
+            };
+            let dt = &fields[cd.logical_col_id as usize].data_type;
+            let col = decode_mini_block(&raw, blk, dt, dict.as_deref())?;
+            DecodedPhase1::Col(col)
+        };
+        decoded_p1.insert(pidx, item);
+        Ok(())
+    }
+}
+
+#[inline]
+fn f64_total_cmp(a: f64, b: f64) -> std::cmp::Ordering {
+    match (a.is_nan(), b.is_nan()) {
+        (true, true) => std::cmp::Ordering::Equal,
+        (true, false) => std::cmp::Ordering::Greater,
+        (false, true) => std::cmp::Ordering::Less,
+        (false, false) => {
+            let ca = if a == 0.0 { 0.0 } else { a };
+            let cb = if b == 0.0 { 0.0 } else { b };
+            ca.total_cmp(&cb)
+        }
+    }
+}
+
+fn filter_f64_total_cmp(vals: &[f64], op: FilterOp, rhs: f64) -> Bitmap {
+    let mut out = Bitmap::new_zeroed(vals.len());
+    for (r, &v) in vals.iter().enumerate() {
+        let ord = f64_total_cmp(v, rhs);
+        let hit = match op {
+            FilterOp::Eq => ord == std::cmp::Ordering::Equal,
+            FilterOp::Ne => ord != std::cmp::Ordering::Equal,
+            FilterOp::Lt => ord == std::cmp::Ordering::Less,
+            FilterOp::Le => ord != std::cmp::Ordering::Greater,
+            FilterOp::Gt => ord == std::cmp::Ordering::Greater,
+            FilterOp::Ge => ord != std::cmp::Ordering::Less,
+        };
+        if hit {
+            let _ = out.set(r, true);
+        }
+    }
+    out
+}
+
+pub(super) fn is_always_false_pred(pred: &ZonePred) -> bool {
+    match pred {
+        ZonePred::In(vs) => vs.is_empty(),
+        ZonePred::Between(a, b) => match (a, b) {
+            (ZoneValue::I64(x), ZoneValue::I64(y))
+            | (ZoneValue::TimestampNs(x), ZoneValue::TimestampNs(y)) => x > y,
+            (ZoneValue::Date(x), ZoneValue::Date(y)) => x > y,
+            (ZoneValue::Decimal128(x), ZoneValue::Decimal128(y)) => x > y,
+            (ZoneValue::Bytes(x), ZoneValue::Bytes(y)) => x > y,
+            (ZoneValue::F64(x), ZoneValue::F64(y)) => {
+                f64_total_cmp(*x, *y) == std::cmp::Ordering::Greater
+            }
+            _ => false,
+        },
+        _ => false,
+    }
+}
+
+pub(super) fn is_supported_id_lookup_type(dt: &DataType) -> bool {
+    matches!(
+        dt,
+        DataType::Utf8
+            | DataType::Binary
+            | DataType::FixedBytes8
+            | DataType::FixedBytes16
+            | DataType::I64
+            | DataType::TimestampNs { .. }
+            | DataType::Date
+            | DataType::Decimal128 { .. }
+    )
+}
+
+pub(super) fn id_lookup_zone_pred(dt: &DataType, values: &[Vec<u8>]) -> Option<ZonePred> {
+    let to_zval = |b: &[u8]| -> Option<ZoneValue> {
+        match dt {
+            DataType::Utf8 | DataType::Binary | DataType::FixedBytes8 | DataType::FixedBytes16 => {
+                Some(ZoneValue::Bytes(b.to_vec()))
+            }
+            DataType::I64 if b.len() == 8 => {
+                Some(ZoneValue::I64(i64::from_le_bytes(b.try_into().ok()?)))
+            }
+            DataType::TimestampNs { .. } if b.len() == 8 => Some(ZoneValue::TimestampNs(
+                i64::from_le_bytes(b.try_into().ok()?),
+            )),
+            DataType::Date if b.len() == 4 => {
+                Some(ZoneValue::Date(i32::from_le_bytes(b.try_into().ok()?)))
+            }
+            DataType::Decimal128 { .. } if b.len() == 16 => Some(ZoneValue::Decimal128(
+                i128::from_le_bytes(b.try_into().ok()?),
+            )),
+            _ => None,
+        }
+    };
+    if values.len() == 1 {
+        to_zval(&values[0]).map(ZonePred::Eq)
+    } else {
+        let mut zvals = Vec::with_capacity(values.len());
+        for v in values {
+            zvals.push(to_zval(v)?);
+        }
+        Some(ZonePred::In(zvals))
+    }
+}
+
+fn eval_id_lookup(col: &Column, dt: &DataType, values: &[Vec<u8>]) -> Result<Bitmap, StatamError> {
+    if let Some(pred) = id_lookup_zone_pred(dt, values) {
+        eval_column_pred(col, &pred, false)
+    } else {
+        Ok(Bitmap::new_zeroed(col.len()))
+    }
+}
+
+fn eval_column_pred(col: &Column, pred: &ZonePred, has_nan: bool) -> Result<Bitmap, StatamError> {
+    let n = col.len();
+    if n == 0 {
+        return Ok(Bitmap::new_zeroed(0));
+    }
+
+    match col {
+        Column::Const { value, .. } => {
+            let hit = eval_scalar_pred(value, pred);
+            Ok(if hit {
+                Bitmap::new_ones(n)
+            } else {
+                Bitmap::new_zeroed(n)
+            })
+        }
+        Column::Rle(r) => {
+            let run_mask = eval_flat_pred(r.values(), pred, has_nan)?;
+            let mut out = Bitmap::new_zeroed(n);
+            let mut prev = 0u32;
+            for (run_idx, &end) in r.run_ends().iter().enumerate() {
+                if run_mask.get(run_idx) {
+                    for row in prev as usize..end as usize {
+                        let _ = out.set(row, true);
+                    }
+                }
+                prev = end;
+            }
+            Ok(out)
+        }
+        Column::Dict(d) => eval_dict_pred(d, pred, has_nan),
+        Column::Flat(f) => eval_flat_pred(f, pred, has_nan),
+    }
+}
+
+pub(super) fn eval_dict_pred(
+    d: &cetra_column::DictColumn,
+    pred: &ZonePred,
+    has_nan: bool,
+) -> Result<Bitmap, StatamError> {
+    let n = d.len();
+    match pred {
+        ZonePred::IsNull => {
+            let mut bm = Bitmap::new_zeroed(n);
+            for r in 0..n {
+                if d.is_null(r) {
+                    let _ = bm.set(r, true);
+                }
+            }
+            Ok(bm)
+        }
+        ZonePred::IsNotNull => {
+            let mut bm = Bitmap::new_zeroed(n);
+            for r in 0..n {
+                if !d.is_null(r) {
+                    let _ = bm.set(r, true);
+                }
+            }
+            Ok(bm)
+        }
+        _ => {
+            // Evaluate predicate on the small dictionary values table, then filter u32 codes via SIMD!
+            let val_mask = eval_flat_pred(d.values(), pred, has_nan)?;
+            let ones = val_mask.count_ones();
+            if ones == 0 {
+                return Ok(Bitmap::new_zeroed(n));
+            }
+            if ones == d.values().len() {
+                return Ok(match d.nulls() {
+                    Some(code_nulls) => code_nulls.clone(),
+                    None => Bitmap::new_ones(n),
+                });
+            }
+            let mut bm = if ones == 1
+                && let Some(target_code) = val_mask.iter_ones().next()
+            {
+                filter_u32(d.codes(), FilterOp::Eq, target_code as u32)
+            } else {
+                let mut out = Bitmap::new_zeroed(n);
+                for (r, &c) in d.codes().iter().enumerate() {
+                    if val_mask.get(c as usize) {
+                        let _ = out.set(r, true);
+                    }
+                }
+                out
+            };
+            if let Some(code_nulls) = d.nulls() {
+                bm = bm.and(code_nulls)?;
+            }
+            Ok(bm)
+        }
+    }
+}
+
+fn eval_flat_pred(
+    flat: &FlatColumn,
+    pred: &ZonePred,
+    has_nan: bool,
+) -> Result<Bitmap, StatamError> {
+    let n = flat.len();
+    let nulls = flat.nulls();
+
+    match pred {
+        ZonePred::IsNull => {
+            if matches!(flat.data(), FlatData::Null(_)) {
+                return Ok(Bitmap::new_ones(n));
+            }
+            return Ok(match nulls {
+                Some(bm) => bm.not(),
+                None => Bitmap::new_zeroed(n),
+            });
+        }
+        ZonePred::IsNotNull => {
+            if matches!(flat.data(), FlatData::Null(_)) {
+                return Ok(Bitmap::new_zeroed(n));
+            }
+            return Ok(match nulls {
+                Some(bm) => bm.clone(),
+                None => Bitmap::new_ones(n),
+            });
+        }
+        _ => {}
+    }
+
+    if matches!(flat.data(), FlatData::Null(_)) {
+        return Ok(Bitmap::new_zeroed(n));
+    }
+
+    let mut bm = match flat.data() {
+        FlatData::Null(_) => Bitmap::new_zeroed(n),
+        FlatData::I64(vals) | FlatData::TimestampNs { values: vals, .. } => match pred {
+            ZonePred::Eq(ZoneValue::I64(x) | ZoneValue::TimestampNs(x)) => {
+                filter_i64(vals, FilterOp::Eq, *x)
+            }
+            ZonePred::Ne(ZoneValue::I64(x) | ZoneValue::TimestampNs(x)) => {
+                filter_i64(vals, FilterOp::Ne, *x)
+            }
+            ZonePred::Lt(ZoneValue::I64(x) | ZoneValue::TimestampNs(x)) => {
+                filter_i64(vals, FilterOp::Lt, *x)
+            }
+            ZonePred::Le(ZoneValue::I64(x) | ZoneValue::TimestampNs(x)) => {
+                filter_i64(vals, FilterOp::Le, *x)
+            }
+            ZonePred::Gt(ZoneValue::I64(x) | ZoneValue::TimestampNs(x)) => {
+                filter_i64(vals, FilterOp::Gt, *x)
+            }
+            ZonePred::Ge(ZoneValue::I64(x) | ZoneValue::TimestampNs(x)) => {
+                filter_i64(vals, FilterOp::Ge, *x)
+            }
+            ZonePred::Between(
+                ZoneValue::I64(lo) | ZoneValue::TimestampNs(lo),
+                ZoneValue::I64(hi) | ZoneValue::TimestampNs(hi),
+            ) => filter_i64_between(vals, *lo, *hi),
+            ZonePred::In(vs) => {
+                let mut acc = Bitmap::new_zeroed(n);
+                for v in vs {
+                    if let ZoneValue::I64(x) | ZoneValue::TimestampNs(x) = v {
+                        acc = acc.or(&filter_i64(vals, FilterOp::Eq, *x))?;
+                    }
+                }
+                acc
+            }
+            _ => Bitmap::new_zeroed(n),
+        },
+        FlatData::F64(vals) => {
+            let eval_one = |op: FilterOp, rhs: f64| -> Bitmap {
+                if !has_nan && !rhs.is_nan() {
+                    filter_f64(vals, op, rhs)
+                } else {
+                    filter_f64_total_cmp(vals, op, rhs)
+                }
+            };
+            match pred {
+                ZonePred::Eq(ZoneValue::F64(x)) => eval_one(FilterOp::Eq, *x),
+                ZonePred::Ne(ZoneValue::F64(x)) => eval_one(FilterOp::Ne, *x),
+                ZonePred::Lt(ZoneValue::F64(x)) => eval_one(FilterOp::Lt, *x),
+                ZonePred::Le(ZoneValue::F64(x)) => eval_one(FilterOp::Le, *x),
+                ZonePred::Gt(ZoneValue::F64(x)) => eval_one(FilterOp::Gt, *x),
+                ZonePred::Ge(ZoneValue::F64(x)) => eval_one(FilterOp::Ge, *x),
+                ZonePred::Between(ZoneValue::F64(lo), ZoneValue::F64(hi)) => {
+                    if f64_total_cmp(*lo, *hi) == std::cmp::Ordering::Greater {
+                        Bitmap::new_zeroed(n)
+                    } else if !has_nan && !lo.is_nan() && !hi.is_nan() {
+                        let ge_lo = filter_f64(vals, FilterOp::Ge, *lo);
+                        let le_hi = filter_f64(vals, FilterOp::Le, *hi);
+                        ge_lo.and(&le_hi)?
+                    } else {
+                        let mut out = Bitmap::new_zeroed(n);
+                        for (r, &v) in vals.iter().enumerate() {
+                            if f64_total_cmp(v, *lo) != std::cmp::Ordering::Less
+                                && f64_total_cmp(v, *hi) != std::cmp::Ordering::Greater
+                            {
+                                let _ = out.set(r, true);
+                            }
+                        }
+                        out
+                    }
+                }
+                ZonePred::In(vs) => {
+                    let mut acc = Bitmap::new_zeroed(n);
+                    for v in vs {
+                        if let ZoneValue::F64(x) = v {
+                            acc = acc.or(&eval_one(FilterOp::Eq, *x))?;
+                        }
+                    }
+                    acc
+                }
+                _ => Bitmap::new_zeroed(n),
+            }
+        }
+        FlatData::Date(vals) => eval_ord_slice(vals, pred, |zv| match zv {
+            ZoneValue::Date(d) => Some(*d),
+            _ => None,
+        }),
+        FlatData::Decimal128 { values, .. } => eval_ord_slice(values, pred, |zv| match zv {
+            ZoneValue::Decimal128(d) => Some(*d),
+            _ => None,
+        }),
+        FlatData::Bool(b_bm) => {
+            let mut out = Bitmap::new_zeroed(n);
+            for r in 0..n {
+                if eval_ord_val(b_bm.get(r), pred, |zv| match zv {
+                    ZoneValue::Bool(b) => Some(*b),
+                    _ => None,
+                }) {
+                    let _ = out.set(r, true);
+                }
+            }
+            out
+        }
+        FlatData::Utf8(u) => eval_bytes_rows(n, |r| u.get(r).map(str::as_bytes), pred),
+        FlatData::Binary(b) => eval_bytes_rows(n, |r| b.get(r), pred),
+        FlatData::FixedBytes8(v) => eval_bytes_rows(n, |r| Some(v[r].as_slice()), pred),
+        FlatData::FixedBytes16(v) => eval_bytes_rows(n, |r| Some(v[r].as_slice()), pred),
+        FlatData::Interval(_)
+        | FlatData::List { .. }
+        | FlatData::MapUtf8(_)
+        | FlatData::Events(_)
+        | FlatData::Links(_) => Bitmap::new_zeroed(n),
+    };
+
+    if let Some(nbm) = nulls {
+        bm = bm.and(nbm)?;
+    }
+    Ok(bm)
+}
+
+fn eval_ord_slice<T: Ord + Copy>(
+    vals: &[T],
+    pred: &ZonePred,
+    extract: impl Fn(&ZoneValue) -> Option<T>,
+) -> Bitmap {
+    let mut out = Bitmap::new_zeroed(vals.len());
+    for (r, &v) in vals.iter().enumerate() {
+        if eval_ord_val(v, pred, &extract) {
+            let _ = out.set(r, true);
+        }
+    }
+    out
+}
+
+fn eval_ord_val<T: Ord + Copy>(
+    val: T,
+    pred: &ZonePred,
+    extract: impl Fn(&ZoneValue) -> Option<T>,
+) -> bool {
+    match pred {
+        ZonePred::Eq(v) => extract(v).is_some_and(|x| val == x),
+        ZonePred::Ne(v) => extract(v).is_some_and(|x| val != x),
+        ZonePred::Lt(v) => extract(v).is_some_and(|x| val < x),
+        ZonePred::Le(v) => extract(v).is_some_and(|x| val <= x),
+        ZonePred::Gt(v) => extract(v).is_some_and(|x| val > x),
+        ZonePred::Ge(v) => extract(v).is_some_and(|x| val >= x),
+        ZonePred::Between(lo, hi) => match (extract(lo), extract(hi)) {
+            (Some(l), Some(h)) => val >= l && val <= h,
+            _ => false,
+        },
+        ZonePred::In(vs) => vs.iter().any(|v| extract(v).is_some_and(|x| val == x)),
+        ZonePred::IsNull | ZonePred::IsNotNull | ZonePred::Prefix(_) => false,
+    }
+}
+
+fn eval_bytes_rows<'a>(
+    n: usize,
+    get: impl Fn(usize) -> Option<&'a [u8]>,
+    pred: &ZonePred,
+) -> Bitmap {
+    let mut out = Bitmap::new_zeroed(n);
+    for r in 0..n {
+        let Some(b) = get(r) else {
+            continue;
+        };
+        let hit = match pred {
+            ZonePred::Eq(ZoneValue::Bytes(t)) => b == t.as_slice(),
+            ZonePred::Ne(ZoneValue::Bytes(t)) => b != t.as_slice(),
+            ZonePred::Lt(ZoneValue::Bytes(t)) => b < t.as_slice(),
+            ZonePred::Le(ZoneValue::Bytes(t)) => b <= t.as_slice(),
+            ZonePred::Gt(ZoneValue::Bytes(t)) => b > t.as_slice(),
+            ZonePred::Ge(ZoneValue::Bytes(t)) => b >= t.as_slice(),
+            ZonePred::Between(ZoneValue::Bytes(lo), ZoneValue::Bytes(hi)) => {
+                b >= lo.as_slice() && b <= hi.as_slice()
+            }
+            ZonePred::In(vs) => vs
+                .iter()
+                .any(|v| matches!(v, ZoneValue::Bytes(t) if b == t.as_slice())),
+            ZonePred::Prefix(p) => b.starts_with(p),
+            _ => false,
+        };
+        if hit {
+            let _ = out.set(r, true);
+        }
+    }
+    out
+}
+
+fn eval_scalar_pred(val: &ScalarValue, pred: &ZonePred) -> bool {
+    if val.is_null() {
+        return matches!(pred, ZonePred::IsNull);
+    }
+    if matches!(pred, ZonePred::IsNotNull) {
+        return true;
+    }
+    if matches!(pred, ZonePred::IsNull) {
+        return false;
+    }
+    match val {
+        ScalarValue::Bool(b) => eval_ord_val(*b, pred, |zv| match zv {
+            ZoneValue::Bool(x) => Some(*x),
+            _ => None,
+        }),
+        ScalarValue::I64(v) | ScalarValue::TimestampNs { value: v, .. } => {
+            eval_ord_val(*v, pred, |zv| match zv {
+                ZoneValue::I64(x) | ZoneValue::TimestampNs(x) => Some(*x),
+                _ => None,
+            })
+        }
+        ScalarValue::Date(v) => eval_ord_val(*v, pred, |zv| match zv {
+            ZoneValue::Date(x) => Some(*x),
+            _ => None,
+        }),
+        ScalarValue::Decimal128 { value: v, .. } => eval_ord_val(*v, pred, |zv| match zv {
+            ZoneValue::Decimal128(x) => Some(*x),
+            _ => None,
+        }),
+        ScalarValue::F64(v) => match pred {
+            ZonePred::Eq(ZoneValue::F64(x)) => f64_total_cmp(*v, *x) == std::cmp::Ordering::Equal,
+            ZonePred::Ne(ZoneValue::F64(x)) => f64_total_cmp(*v, *x) != std::cmp::Ordering::Equal,
+            ZonePred::Lt(ZoneValue::F64(x)) => f64_total_cmp(*v, *x) == std::cmp::Ordering::Less,
+            ZonePred::Le(ZoneValue::F64(x)) => {
+                f64_total_cmp(*v, *x) != std::cmp::Ordering::Greater
+            }
+            ZonePred::Gt(ZoneValue::F64(x)) => {
+                f64_total_cmp(*v, *x) == std::cmp::Ordering::Greater
+            }
+            ZonePred::Ge(ZoneValue::F64(x)) => f64_total_cmp(*v, *x) != std::cmp::Ordering::Less,
+            ZonePred::Between(ZoneValue::F64(lo), ZoneValue::F64(hi)) => {
+                f64_total_cmp(*v, *lo) != std::cmp::Ordering::Less
+                    && f64_total_cmp(*v, *hi) != std::cmp::Ordering::Greater
+            }
+            ZonePred::In(vs) => vs.iter().any(|z| {
+                matches!(z, ZoneValue::F64(x) if f64_total_cmp(*v, *x) == std::cmp::Ordering::Equal)
+            }),
+            _ => false,
+        },
+        ScalarValue::Utf8(s) => eval_bytes_val(s.as_bytes(), pred),
+        ScalarValue::Binary(b) => eval_bytes_val(b, pred),
+        ScalarValue::FixedBytes8(b) => eval_bytes_val(b, pred),
+        ScalarValue::FixedBytes16(b) => eval_bytes_val(b, pred),
+        _ => false,
+    }
+}
+
+fn eval_bytes_val(b: &[u8], pred: &ZonePred) -> bool {
+    match pred {
+        ZonePred::Eq(ZoneValue::Bytes(t)) => b == t.as_slice(),
+        ZonePred::Ne(ZoneValue::Bytes(t)) => b != t.as_slice(),
+        ZonePred::Lt(ZoneValue::Bytes(t)) => b < t.as_slice(),
+        ZonePred::Le(ZoneValue::Bytes(t)) => b <= t.as_slice(),
+        ZonePred::Gt(ZoneValue::Bytes(t)) => b > t.as_slice(),
+        ZonePred::Ge(ZoneValue::Bytes(t)) => b >= t.as_slice(),
+        ZonePred::Between(ZoneValue::Bytes(lo), ZoneValue::Bytes(hi)) => {
+            b >= lo.as_slice() && b <= hi.as_slice()
+        }
+        ZonePred::In(vs) => vs
+            .iter()
+            .any(|v| matches!(v, ZoneValue::Bytes(t) if b == t.as_slice())),
+        ZonePred::Prefix(p) => b.starts_with(p),
+        _ => false,
+    }
+}
+
+fn eval_shredded_subcol_pred(sub: &ShreddedSubCol, pred: &ZonePred) -> Result<Bitmap, StatamError> {
+    let n = sub.in_map.len();
+    match pred {
+        ZonePred::IsNull => {
+            // Key absent OR key present with SQL NULL value.
+            let present_valid = sub.in_map.and(&sub.value_null)?;
+            Ok(present_valid.not())
+        }
+        ZonePred::IsNotNull => Ok(sub.in_map.and(&sub.value_null)?),
+        _ => {
+            let val_mask = eval_column_pred(&sub.values, pred, false)?;
+            let present_valid = sub.in_map.and(&sub.value_null)?;
+            if present_valid.len() != n {
+                return Err(StatamError::Corrupt {
+                    reason: "shredded subcol bitmap length mismatch",
+                });
+            }
+            Ok(val_mask.and(&present_valid)?)
+        }
+    }
+}
+
+fn eval_map_key_pred(
+    map_col: &FlatColumn,
+    key: &str,
+    pred: &ZonePred,
+) -> Result<Bitmap, StatamError> {
+    let FlatData::MapUtf8(map) = map_col.data() else {
+        return Err(StatamError::SchemaMismatch {
+            reason: "eval_map_key_pred expects MapUtf8",
+        });
+    };
+    let n = map_col.len();
+    let mut out = Bitmap::new_zeroed(n);
+    let offsets = map.offsets();
+    let keys = map.keys();
+    let vals = map.values();
+    let val_nulls = map.value_nulls();
+    let row_nulls = map_col.nulls();
+
+    for r in 0..n {
+        if row_nulls.is_some_and(|bm| !bm.get(r)) {
+            if matches!(pred, ZonePred::IsNull) {
+                let _ = out.set(r, true);
+            }
+            continue;
+        }
+        let s = offsets[r] as usize;
+        let e = offsets[r + 1] as usize;
+        let mut found: Option<Option<&[u8]>> = None;
+        for idx in s..e {
+            if keys.get(idx) == Some(key) {
+                if val_nulls.is_some_and(|bm| !bm.get(idx)) {
+                    found = Some(None);
+                } else {
+                    found = Some(vals.get(idx).map(str::as_bytes));
+                }
+            }
+        }
+        let hit = match (found, pred) {
+            (None | Some(None), ZonePred::IsNull) => true,
+            (Some(Some(_)), ZonePred::IsNotNull) => true,
+            (Some(Some(b)), _) => eval_bytes_val(b, pred),
+            _ => false,
+        };
+        if hit {
+            let _ = out.set(r, true);
+        }
+    }
+    Ok(out)
+}
+
+pub(super) fn filter_residual_to_keys(
+    map_col: &FlatColumn,
+    keys_keep: &[String],
+) -> Result<FlatColumn, StatamError> {
+    let FlatData::MapUtf8(map) = map_col.data() else {
+        return Err(StatamError::SchemaMismatch {
+            reason: "filter_residual_to_keys expects MapUtf8",
+        });
+    };
+    if map.entry_count() == 0 {
+        return Ok(map_col.clone());
+    }
+    let n = map_col.len();
+    let mut out_offsets = Vec::with_capacity(n + 1);
+    out_offsets.push(0u32);
+    let mut out_keys = Vec::new();
+    let mut out_vals = Vec::new();
+    let mut out_val_valid = Vec::new();
+
+    let offsets = map.offsets();
+    let mkeys = map.keys();
+    let mvals = map.values();
+    let mval_nulls = map.value_nulls();
+    let row_nulls = map_col.nulls();
+
+    for r in 0..n {
+        if row_nulls.is_none_or(|bm| bm.get(r)) {
+            let s = offsets[r] as usize;
+            let e = offsets[r + 1] as usize;
+            for idx in s..e {
+                let k = mkeys.get(idx).unwrap_or("");
+                if keys_keep.iter().any(|keep| keep == k) {
+                    let valid = mval_nulls.is_none_or(|bm| bm.get(idx));
+                    let v = if valid {
+                        mvals.get(idx).unwrap_or("")
+                    } else {
+                        ""
+                    };
+                    out_keys.push(k);
+                    out_vals.push(v);
+                    out_val_valid.push(valid);
+                }
+            }
+        }
+        out_offsets.push(out_keys.len() as u32);
+    }
+
+    let keys_data = Utf8Data::try_from_slices(out_keys)?;
+    let vals_data = Utf8Data::try_from_slices(out_vals)?;
+    let val_nulls = if out_val_valid.iter().all(|&b| b) {
+        None
+    } else {
+        Some(Bitmap::from_bools(&out_val_valid))
+    };
+    let m = cetra_column::MapData::try_new(out_offsets, keys_data, vals_data, val_nulls)?;
+    Ok(FlatColumn::try_new(
+        FlatData::MapUtf8(Box::new(m)),
+        row_nulls.cloned(),
+    )?)
+}
+
+/// Evaluates a `Utf8` mini-block substring filter directly over raw encoded block bytes.
+///
+/// Bits outside `active_mask` are unspecified; caller must intersect with `active_mask`.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn eval_utf8_block_substring_raw(
+    raw: &[u8],
+    blk: &BlockEntry,
+    mb_row_count: usize,
+    active_mask: &Bitmap,
+    needle: &[u8],
+    case_insensitive: bool,
+    dict_sub_bitmap: Option<&Bitmap>,
+    file_dict: Option<&FileDict>,
+) -> Result<Bitmap, StatamError> {
+    if active_mask.len() != mb_row_count {
+        return Err(StatamError::Corrupt {
+            reason: "active_mask length mismatch in raw substring eval",
+        });
+    }
+    if mb_row_count == 0 {
+        if !matches!(blk.encoding, Encoding::ConstNull | Encoding::Const) && !raw.is_empty() {
+            return Err(StatamError::Corrupt {
+                reason: "trailing bytes in empty narrow block",
+            });
+        }
+        return Ok(Bitmap::new_zeroed(0));
+    }
+    if active_mask.all_zeros() {
+        return Ok(Bitmap::new_zeroed(mb_row_count));
+    }
+
+    match blk.encoding {
+        Encoding::ConstNull => Ok(Bitmap::new_zeroed(mb_row_count)),
+        Encoding::Const => {
+            if blk.null_count != 0 {
+                return Err(StatamError::Corrupt {
+                    reason: "Const block cannot have non-zero null_count",
+                });
+            }
+            if (blk.block_flags & BLOCK_FLAG_CONST_EMPTY_COLLECTION) != 0 {
+                return Err(StatamError::Corrupt {
+                    reason: "CONST_EMPTY_COLLECTION set on non-collection DataType",
+                });
+            }
+            let inline_len = usize::from(blk.min_inline_len);
+            if inline_len > 16 {
+                return Err(StatamError::Corrupt {
+                    reason: "invalid Const Utf8 inline length",
+                });
+            }
+            let bytes = &blk.min_inline[..inline_len];
+            let s = std::str::from_utf8(bytes).map_err(|_| StatamError::Corrupt {
+                reason: "invalid UTF-8 in Const Utf8 inline",
+            })?;
+            let hit = needle.is_empty()
+                || Utf8Matcher::new(needle, case_insensitive).matches(s.as_bytes());
+            Ok(if hit {
+                Bitmap::new_ones(mb_row_count)
+            } else {
+                Bitmap::new_zeroed(mb_row_count)
+            })
+        }
+        Encoding::Plain => {
+            let (nulls, body) = read_optional_nulls(raw, mb_row_count, blk.block_flags)?;
+            let (off_raw, data) = parse_plain_varlen_slices(body, mb_row_count)?;
+            if needle.is_empty() {
+                return Ok(nulls.unwrap_or_else(|| Bitmap::new_ones(mb_row_count)));
+            }
+            let mut matcher = Utf8Matcher::new(needle, case_insensitive);
+            let mut out = Bitmap::new_zeroed(mb_row_count);
+            for row in active_mask.iter_ones() {
+                if row >= mb_row_count {
+                    break;
+                }
+                if nulls.as_ref().is_none_or(|bm| bm.get(row)) {
+                    let start = read_u32_le_at(off_raw, row);
+                    let end = read_u32_le_at(off_raw, row + 1);
+                    if matcher.matches(&data[start..end]) {
+                        let _ = out.set(row, true);
+                    }
+                }
+            }
+            Ok(out)
+        }
+        Encoding::Fsst => {
+            let (nulls, body) = read_optional_nulls(raw, mb_row_count, blk.block_flags)?;
+            let view = FsstBlockView::parse(body, mb_row_count)?;
+            if needle.is_empty() {
+                return Ok(nulls.unwrap_or_else(|| Bitmap::new_ones(mb_row_count)));
+            }
+            let mut matcher = Utf8Matcher::new(needle, case_insensitive);
+            let mut scratch = Vec::new();
+            let mut out = Bitmap::new_zeroed(mb_row_count);
+            for row in active_mask.iter_ones() {
+                if row >= mb_row_count {
+                    break;
+                }
+                if nulls.as_ref().is_none_or(|bm| bm.get(row)) {
+                    let slice = view.decode_row_into(row, &mut scratch)?;
+                    if matcher.matches(slice) {
+                        let _ = out.set(row, true);
+                    }
+                }
+            }
+            Ok(out)
+        }
+        Encoding::Rle => {
+            if raw.len() < 4 {
+                return Err(StatamError::Corrupt {
+                    reason: "truncated Rle num_runs",
+                });
+            }
+            let num_runs = u32::from_le_bytes([raw[0], raw[1], raw[2], raw[3]]) as usize;
+            if num_runs == 0 || num_runs > mb_row_count {
+                return Err(StatamError::Corrupt {
+                    reason: "invalid Rle num_runs",
+                });
+            }
+            if num_runs
+                .checked_mul(4)
+                .is_none_or(|b| b > MAX_BLOCK_RAW_BYTES)
+            {
+                return Err(StatamError::BoundsExceeded {
+                    reason: "Rle num_runs exceeds MAX_BLOCK_RAW_BYTES",
+                });
+            }
+            let (run_nulls, after_nulls) =
+                read_optional_nulls(&raw[4..], num_runs, blk.block_flags)?;
+            let Some(&re_bw) = after_nulls.first() else {
+                return Err(StatamError::Corrupt {
+                    reason: "truncated Rle run_ends bit_width",
+                });
+            };
+            if re_bw > 32 {
+                return Err(StatamError::Corrupt {
+                    reason: "invalid Rle run_ends bit_width",
+                });
+            }
+            let re_bytes = packed_bytes_len(num_runs, re_bw)?;
+            if after_nulls.len() < 1 + re_bytes + 1 {
+                return Err(StatamError::Corrupt {
+                    reason: "truncated Rle body",
+                });
+            }
+            let mut run_ends = Vec::with_capacity(num_runs);
+            unpack_u32(
+                &after_nulls[1..1 + re_bytes],
+                num_runs,
+                re_bw,
+                &mut run_ends,
+            )?;
+            let mut prev = 0u32;
+            for &end in &run_ends {
+                if end <= prev || (end as usize) > mb_row_count {
+                    return Err(StatamError::Corrupt {
+                        reason: "invalid Rle run_ends monotonicity",
+                    });
+                }
+                prev = end;
+            }
+            if prev as usize != mb_row_count {
+                return Err(StatamError::Corrupt {
+                    reason: "Rle run_ends do not sum to row_count",
+                });
+            }
+
+            let inner_enc = Encoding::from_u8(after_nulls[1 + re_bytes])?;
+            let inner_body = &after_nulls[1 + re_bytes + 1..];
+            let mut out_words = vec![0u64; mb_row_count.div_ceil(64)];
+            let active_words = active_mask.words();
+            let mut matcher = Utf8Matcher::new(needle, case_insensitive);
+
+            match inner_enc {
+                Encoding::Plain => {
+                    let (off_raw, data) = parse_plain_varlen_slices(inner_body, num_runs)?;
+                    let mut run_start = 0usize;
+                    for (run_idx, &end_u32) in run_ends.iter().enumerate() {
+                        let run_end = end_u32 as usize;
+                        if run_nulls.as_ref().is_none_or(|bm| bm.get(run_idx))
+                            && range_has_any_one(active_words, run_start, run_end)
+                        {
+                            let start = read_u32_le_at(off_raw, run_idx);
+                            let end = read_u32_le_at(off_raw, run_idx + 1);
+                            if needle.is_empty() || matcher.matches(&data[start..end]) {
+                                set_bit_range(&mut out_words, run_start, run_end);
+                            }
+                        }
+                        run_start = run_end;
+                    }
+                }
+                Encoding::Fsst => {
+                    let view = FsstBlockView::parse(inner_body, num_runs)?;
+                    let mut scratch = Vec::new();
+                    let mut run_start = 0usize;
+                    for (run_idx, &end_u32) in run_ends.iter().enumerate() {
+                        let run_end = end_u32 as usize;
+                        if run_nulls.as_ref().is_none_or(|bm| bm.get(run_idx))
+                            && range_has_any_one(active_words, run_start, run_end)
+                        {
+                            let hit = if needle.is_empty() {
+                                true
+                            } else {
+                                let slice = view.decode_row_into(run_idx, &mut scratch)?;
+                                matcher.matches(slice)
+                            };
+                            if hit {
+                                set_bit_range(&mut out_words, run_start, run_end);
+                            }
+                        }
+                        run_start = run_end;
+                    }
+                }
+                _ => {
+                    return Err(StatamError::Corrupt {
+                        reason: "incompatible Rle inner encoding for Utf8",
+                    });
+                }
+            }
+            Ok(Bitmap::from_words(out_words, mb_row_count)?)
+        }
+        Encoding::Dict => {
+            let Some(dict) = file_dict else {
+                return Err(StatamError::Corrupt {
+                    reason: "Dict mini-block requires FileDict",
+                });
+            };
+            if dict.values().data_type() != DataType::Utf8 {
+                return Err(StatamError::SchemaMismatch {
+                    reason: "FileDict DataType mismatch",
+                });
+            }
+            let (nulls, body) = read_optional_nulls(raw, mb_row_count, blk.block_flags)?;
+            let codes = decode_dict_codes_body(body, mb_row_count, dict.len(), nulls.as_ref())?;
+            if needle.is_empty() {
+                return Ok(nulls.unwrap_or_else(|| Bitmap::new_ones(mb_row_count)));
+            }
+            let Some(code_bm) = dict_sub_bitmap else {
+                return Err(StatamError::Corrupt {
+                    reason: "missing dict_sub_bitmap for Dict substring",
+                });
+            };
+            if code_bm.len() != dict.len() {
+                return Err(StatamError::Corrupt {
+                    reason: "dict_sub_bitmap length mismatch",
+                });
+            }
+            if code_bm.all_zeros() {
+                return Ok(Bitmap::new_zeroed(mb_row_count));
+            }
+            if code_bm.all_ones() {
+                return Ok(nulls.unwrap_or_else(|| Bitmap::new_ones(mb_row_count)));
+            }
+            let mut out = Bitmap::new_zeroed(mb_row_count);
+            for row in active_mask.iter_ones() {
+                if row >= mb_row_count {
+                    break;
+                }
+                if nulls.as_ref().is_none_or(|bm| bm.get(row)) && code_bm.get(codes[row] as usize) {
+                    let _ = out.set(row, true);
+                }
+            }
+            Ok(out)
+        }
+        _ => Err(StatamError::Corrupt {
+            reason: "unsupported encoding for raw Utf8 substring eval",
+        }),
+    }
+}
+
+#[inline]
+fn read_u32_le_at(raw: &[u8], idx: usize) -> usize {
+    let off = idx * 4;
+    u32::from_le_bytes([raw[off], raw[off + 1], raw[off + 2], raw[off + 3]]) as usize
+}
+
+fn parse_plain_varlen_slices(body: &[u8], row_count: usize) -> Result<(&[u8], &[u8]), StatamError> {
+    let offsets_count = row_count
+        .checked_add(1)
+        .ok_or(StatamError::BoundsExceeded {
+            reason: "plain varlen offsets count overflow",
+        })?;
+    let offsets_bytes = offsets_count
+        .checked_mul(4)
+        .ok_or(StatamError::BoundsExceeded {
+            reason: "plain varlen offsets size overflow",
+        })?;
+    if offsets_bytes > MAX_BLOCK_RAW_BYTES {
+        return Err(StatamError::BoundsExceeded {
+            reason: "plain varlen offsets exceed MAX_BLOCK_RAW_BYTES",
+        });
+    }
+    if body.len() < offsets_bytes {
+        return Err(StatamError::Corrupt {
+            reason: "truncated plain varlen offsets",
+        });
+    }
+    let data_len = body.len() - offsets_bytes;
+    if data_len > MAX_BLOCK_RAW_BYTES {
+        return Err(StatamError::BoundsExceeded {
+            reason: "plain varlen data exceeds MAX_BLOCK_RAW_BYTES",
+        });
+    }
+    let off_raw = &body[..offsets_bytes];
+    let mut prev = 0usize;
+    for (idx, &chunk) in off_raw.as_chunks::<4>().0.iter().enumerate() {
+        let v = u32::from_le_bytes(chunk) as usize;
+        if (idx == 0 && v != 0) || v < prev || v > data_len {
+            return Err(StatamError::Corrupt {
+                reason: "invalid plain varlen offsets",
+            });
+        }
+        prev = v;
+    }
+    if prev != data_len {
+        return Err(StatamError::Corrupt {
+            reason: "plain varlen final offset mismatch",
+        });
+    }
+    Ok((off_raw, &body[offsets_bytes..]))
+}
+
+#[inline]
+fn range_has_any_one(words: &[u64], start: usize, end: usize) -> bool {
+    if start >= end {
+        return false;
+    }
+    let first_w = start >> 6;
+    let last_w = (end - 1) >> 6;
+    let start_mask = !0u64 << (start & 63);
+    let end_rem = end & 63;
+    let end_mask = if end_rem == 0 {
+        !0u64
+    } else {
+        (1u64 << end_rem) - 1
+    };
+    if first_w == last_w {
+        return (words[first_w] & start_mask & end_mask) != 0;
+    }
+    if (words[first_w] & start_mask) != 0 {
+        return true;
+    }
+    for &w in &words[first_w + 1..last_w] {
+        if w != 0 {
+            return true;
+        }
+    }
+    (words[last_w] & end_mask) != 0
+}
+
+#[inline]
+fn set_bit_range(words: &mut [u64], start: usize, end: usize) {
+    if start >= end {
+        return;
+    }
+    let first_w = start >> 6;
+    let last_w = (end - 1) >> 6;
+    let start_mask = !0u64 << (start & 63);
+    let end_rem = end & 63;
+    let end_mask = if end_rem == 0 {
+        !0u64
+    } else {
+        (1u64 << end_rem) - 1
+    };
+    if first_w == last_w {
+        words[first_w] |= start_mask & end_mask;
+        return;
+    }
+    words[first_w] |= start_mask;
+    for w in &mut words[first_w + 1..last_w] {
+        *w = !0u64;
+    }
+    words[last_w] |= end_mask;
+}
+
+pub(super) fn eval_utf8_substring(
+    col: &Column,
+    needle: &[u8],
+    case_insensitive: bool,
+    precomputed_dict_bm: Option<&Bitmap>,
+) -> Result<Bitmap, StatamError> {
+    let n = col.len();
+    if needle.is_empty() {
+        let mut out = Bitmap::new_zeroed(n);
+        for r in 0..n {
+            if !col.is_null(r) {
+                let _ = out.set(r, true);
+            }
+        }
+        return Ok(out);
+    }
+    match col {
+        Column::Const { value, .. } => {
+            let mut matcher = Utf8Matcher::new(needle, case_insensitive);
+            let hit = match value {
+                ScalarValue::Utf8(s) => matcher.matches(s.as_bytes()),
+                _ => false,
+            };
+            Ok(if hit {
+                Bitmap::new_ones(n)
+            } else {
+                Bitmap::new_zeroed(n)
+            })
+        }
+        Column::Dict(d) => {
+            let owned_bm;
+            let val_match = if let Some(bm) = precomputed_dict_bm
+                && bm.len() == d.values().len()
+            {
+                bm
+            } else {
+                let mut matcher = Utf8Matcher::new(needle, case_insensitive);
+                let mut vm = Bitmap::new_zeroed(d.values().len());
+                if let FlatData::Utf8(u) = d.values().data() {
+                    for i in 0..u.len() {
+                        if let Some(s) = u.get(i)
+                            && matcher.matches(s.as_bytes())
+                        {
+                            let _ = vm.set(i, true);
+                        }
+                    }
+                }
+                owned_bm = vm;
+                &owned_bm
+            };
+            if val_match.all_zeros() {
+                return Ok(Bitmap::new_zeroed(n));
+            }
+            if val_match.all_ones() {
+                return Ok(match d.nulls() {
+                    Some(nulls) => nulls.clone(),
+                    None => Bitmap::new_ones(n),
+                });
+            }
+            let mut out = Bitmap::new_zeroed(n);
+            for (r, &c) in d.codes().iter().enumerate() {
+                if !d.is_null(r) && val_match.get(c as usize) {
+                    let _ = out.set(r, true);
+                }
+            }
+            Ok(out)
+        }
+        Column::Rle(r) => {
+            let mut matcher = Utf8Matcher::new(needle, case_insensitive);
+            let mut run_match = Bitmap::new_zeroed(r.values().len());
+            if let FlatData::Utf8(u) = r.values().data() {
+                for i in 0..u.len() {
+                    if !r.values().is_null(i)
+                        && let Some(s) = u.get(i)
+                        && matcher.matches(s.as_bytes())
+                    {
+                        let _ = run_match.set(i, true);
+                    }
+                }
+            }
+            let mut out = Bitmap::new_zeroed(n);
+            let mut prev = 0u32;
+            for (run_idx, &end) in r.run_ends().iter().enumerate() {
+                if run_match.get(run_idx) {
+                    for row in prev as usize..end as usize {
+                        let _ = out.set(row, true);
+                    }
+                }
+                prev = end;
+            }
+            Ok(out)
+        }
+        Column::Flat(f) => {
+            let mut matcher = Utf8Matcher::new(needle, case_insensitive);
+            let mut out = Bitmap::new_zeroed(n);
+            if let FlatData::Utf8(u) = f.data() {
+                let nulls = f.nulls();
+                for r in 0..n {
+                    if nulls.is_none_or(|bm| bm.get(r))
+                        && let Some(s) = u.get(r)
+                        && matcher.matches(s.as_bytes())
+                    {
+                        let _ = out.set(r, true);
+                    }
+                }
+            }
+            Ok(out)
+        }
+    }
+}
+
+fn trim_bitmap_mask(mask: &mut Bitmap, keep: usize, trim_tail: bool) {
+    let mut trimmed = Bitmap::new_zeroed(mask.len());
+    if trim_tail {
+        let skip = mask.count_ones().saturating_sub(keep);
+        for idx in mask.iter_ones().skip(skip) {
+            let _ = trimmed.set(idx, true);
+        }
+    } else {
+        for idx in mask.iter_ones().take(keep) {
+            let _ = trimmed.set(idx, true);
+        }
+    }
+    *mask = trimmed;
+}
+
+pub(super) enum Utf8Matcher {
+    Exact(memmem::Finder<'static>),
+    AsciiIlike {
+        finder: memmem::Finder<'static>,
+        scratch: Vec<u8>,
+    },
+    UnicodeIlike {
+        finder: memmem::Finder<'static>,
+        needle_raw_lower: Vec<u8>,
+        scratch: Vec<u8>,
+        uni_scratch: String,
+    },
+}
+
+impl Utf8Matcher {
+    pub(super) fn new(needle: &[u8], case_insensitive: bool) -> Self {
+        if !case_insensitive {
+            return Self::Exact(memmem::Finder::new(needle).into_owned());
+        }
+        if needle.is_ascii() {
+            let mut lowered = Vec::new();
+            ascii_lowercase_into(needle, &mut lowered);
+            return Self::AsciiIlike {
+                finder: memmem::Finder::new(&lowered).into_owned(),
+                scratch: Vec::new(),
+            };
+        }
+        let mut ascii_lowered = Vec::new();
+        ascii_lowercase_into(needle, &mut ascii_lowered);
+        match std::str::from_utf8(needle) {
+            Ok(s) => {
+                let mut uni_lower = String::new();
+                unicode_lowercase_context_free_into(s, &mut uni_lower);
+                Self::UnicodeIlike {
+                    finder: memmem::Finder::new(uni_lower.as_bytes()).into_owned(),
+                    needle_raw_lower: ascii_lowered,
+                    scratch: Vec::new(),
+                    uni_scratch: String::new(),
+                }
+            }
+            Err(_) => Self::AsciiIlike {
+                finder: memmem::Finder::new(&ascii_lowered).into_owned(),
+                scratch: Vec::new(),
+            },
+        }
+    }
+
+    pub(super) fn matches(&mut self, haystack: &[u8]) -> bool {
+        match self {
+            Self::Exact(finder) => finder.find(haystack).is_some(),
+            Self::AsciiIlike { finder, scratch } => {
+                ascii_lowercase_into(haystack, scratch);
+                finder.find(scratch).is_some()
+            }
+            Self::UnicodeIlike {
+                finder,
+                needle_raw_lower,
+                scratch,
+                uni_scratch,
+            } => {
+                if let Ok(s) = std::str::from_utf8(haystack) {
+                    unicode_lowercase_context_free_into(s, uni_scratch);
+                    finder.find(uni_scratch.as_bytes()).is_some()
+                } else {
+                    ascii_lowercase_into(haystack, scratch);
+                    memmem::find(scratch, needle_raw_lower).is_some()
+                }
+            }
+        }
+    }
+}

@@ -429,9 +429,14 @@ fn write_generic_statam(
     }
 
     let mut buf = Vec::new();
-    let mut w = StatamWriter::new(Arc::clone(batch.schema()), opts, pb.as_mut())?;
+    let mut w = StatamWriter::new(
+        std::io::Cursor::new(&mut buf),
+        Arc::clone(batch.schema()),
+        opts,
+        pb.as_mut(),
+    )?;
     w.write_batch(batch)?;
-    w.finish(&mut buf)?;
+    w.finish()?;
     let pack_bytes = if let Some(builder) = pb {
         let mut pbuf = Vec::new();
         builder.finish(&mut pbuf)?;

@@ -191,15 +191,17 @@ impl IoCounters {
     /// Computes simulated latency as a [`Duration`].
     pub fn simulated_latency(&self, config: &SimulatedS3Config) -> Duration {
         let ms = self.simulated_latency_ms(config);
-        if ms <= 0.0 || !ms.is_finite() {
+        if ms.is_nan() || ms <= 0.0 {
             Duration::ZERO
+        } else if !ms.is_finite() {
+            Duration::MAX
         } else {
-            Duration::from_secs_f64(ms / 1000.0)
+            Duration::try_from_secs_f64(ms / 1000.0).unwrap_or(Duration::MAX)
         }
     }
 }
 
-#[derive(Debug, Default)]
+#[derive(Default)]
 struct LruBlockCache {
     capacity: usize,
     seq: u64,
@@ -261,7 +263,6 @@ impl LruBlockCache {
     }
 }
 
-#[derive(Debug)]
 struct S3State {
     cache: LruBlockCache,
     counters: IoCounters,
@@ -403,20 +404,24 @@ impl RangeReader for SimulatedS3Reader {
                 }
             }
             guard.counters.cache_hits = guard.counters.cache_hits.saturating_add(hits);
-            guard.counters.cache_misses = guard
-                .counters
-                .cache_misses
-                .saturating_add(missing.len() as u64);
         }
 
         if !missing.is_empty() {
             let runs = coalesce_runs(&missing);
-            let byte_ranges: Vec<Range<u64>> = runs
-                .iter()
-                .map(|&(first, last)| {
-                    (first * S3_CACHE_BLOCK_BYTES)..((last + 1) * S3_CACHE_BLOCK_BYTES).min(size)
-                })
-                .collect();
+            let mut byte_ranges: Vec<Range<u64>> = Vec::with_capacity(runs.len());
+            for &(first, last) in &runs {
+                let start =
+                    first
+                        .checked_mul(S3_CACHE_BLOCK_BYTES)
+                        .ok_or(StatamError::BoundsExceeded {
+                            reason: "read cache run start overflows u64",
+                        })?;
+                let end = last
+                    .checked_add(1)
+                    .and_then(|n| n.checked_mul(S3_CACHE_BLOCK_BYTES))
+                    .map_or(size, |v| v.min(size));
+                byte_ranges.push(start..end);
+            }
 
             let parts = self.backing.read_ranges(&byte_ranges)?;
             if parts.len() != runs.len() {
@@ -434,16 +439,22 @@ impl RangeReader for SimulatedS3Reader {
                     let expected = block_len(size, index).ok_or(StatamError::Corrupt {
                         reason: "read cache block lies past file end",
                     })?;
-                    let data = slice_block_from_run(
-                        part,
-                        (index - first) * S3_CACHE_BLOCK_BYTES,
-                        expected,
-                    )?;
+                    let run_off = index
+                        .checked_sub(first)
+                        .and_then(|d| d.checked_mul(S3_CACHE_BLOCK_BYTES))
+                        .ok_or(StatamError::BoundsExceeded {
+                            reason: "read cache run offset overflows u64",
+                        })?;
+                    let data = slice_block_from_run(part, run_off, expected)?;
                     fetched.push((index, data));
                 }
             }
 
             let mut guard = self.state.lock().unwrap_or_else(|p| p.into_inner());
+            guard.counters.cache_misses = guard
+                .counters
+                .cache_misses
+                .saturating_add(missing.len() as u64);
             guard.counters.gets = guard.counters.gets.saturating_add(runs.len() as u64);
             guard.counters.bytes_from_s3 =
                 guard.counters.bytes_from_s3.saturating_add(fetched_bytes);
@@ -470,7 +481,7 @@ pub fn coalesce_runs(sorted: &[u64]) -> Vec<(u64, u64)> {
     let mut runs: Vec<(u64, u64)> = Vec::new();
     for &index in sorted {
         match runs.last_mut() {
-            Some((_, last)) if *last + 1 == index => *last = index,
+            Some((_, last)) if last.checked_add(1) == Some(index) => *last = index,
             _ => runs.push((index, index)),
         }
     }
@@ -519,7 +530,11 @@ fn assemble_range(range: &Range<u64>, blocks: &BTreeMap<u64, Bytes>) -> Result<B
         let block = blocks.get(&first).ok_or(StatamError::Corrupt {
             reason: "missing cached block during assembly",
         })?;
-        let base = first * S3_CACHE_BLOCK_BYTES;
+        let base = first
+            .checked_mul(S3_CACHE_BLOCK_BYTES)
+            .ok_or(StatamError::BoundsExceeded {
+                reason: "block base offset overflows u64",
+            })?;
         return slice_block_from_run(block, range.start - base, range.end - range.start);
     }
     let capacity =
@@ -531,11 +546,28 @@ fn assemble_range(range: &Range<u64>, blocks: &BTreeMap<u64, Bytes>) -> Result<B
         let block = blocks.get(&index).ok_or(StatamError::Corrupt {
             reason: "missing cached block during multi-block assembly",
         })?;
-        let base = index * S3_CACHE_BLOCK_BYTES;
+        let base = index
+            .checked_mul(S3_CACHE_BLOCK_BYTES)
+            .ok_or(StatamError::BoundsExceeded {
+                reason: "block base offset overflows u64",
+            })?;
         let from = range.start.max(base) - base;
-        let to = range.end.min(base.saturating_add(block.len() as u64)) - base;
+        let to = range
+            .end
+            .min(base.saturating_add(block.len() as u64))
+            .saturating_sub(base);
+        if from > to {
+            return Err(StatamError::Corrupt {
+                reason: "short cached block during multi-block assembly",
+            });
+        }
         let part = slice_block_from_run(block, from, to - from)?;
         out.extend_from_slice(&part);
+    }
+    if out.len() != capacity {
+        return Err(StatamError::Corrupt {
+            reason: "assembled range length mismatch",
+        });
     }
     Ok(out.freeze())
 }
@@ -664,5 +696,80 @@ mod tests {
         assert_eq!(file_reader.read_range(0..0).unwrap().len(), 0);
         assert_eq!(file_reader.read_range(6..12).unwrap().as_ref(), b"statam");
         assert!(file_reader.read_range(0..100).is_err());
+    }
+
+    #[test]
+    fn m4_coalesce_runs_overflow_latency_clamp_short_assemble_and_failed_miss_accounting() {
+        // coalesce_runs handles u64::MAX without overflow panic.
+        assert_eq!(
+            coalesce_runs(&[u64::MAX - 1, u64::MAX]),
+            vec![(u64::MAX - 1, u64::MAX)]
+        );
+        assert_eq!(
+            coalesce_runs(&[u64::MAX, u64::MAX]),
+            vec![(u64::MAX, u64::MAX), (u64::MAX, u64::MAX)]
+        );
+
+        // Huge finite and +Inf f64 latencies clamp to Duration::MAX without panicking.
+        let huge_counters = IoCounters {
+            gets: 1,
+            ..IoCounters::default()
+        };
+        let huge_finite_cfg = SimulatedS3Config {
+            rtt_ms: 1e30,
+            ..SimulatedS3Config::default()
+        };
+        assert_eq!(
+            huge_counters.simulated_latency(&huge_finite_cfg),
+            Duration::MAX
+        );
+        let inf_cfg = SimulatedS3Config {
+            rtt_ms: 1e308,
+            ..SimulatedS3Config::default()
+        };
+        assert_eq!(
+            IoCounters {
+                gets: u64::MAX,
+                ..IoCounters::default()
+            }
+            .simulated_latency(&inf_cfg),
+            Duration::MAX
+        );
+
+        // assemble_range rejects short first block (from > to) and short middle block (out.len() != capacity).
+        let mib = S3_CACHE_BLOCK_BYTES;
+        let mut blocks_short_first = BTreeMap::new();
+        blocks_short_first.insert(0, Bytes::from_static(&[0u8; 10]));
+        blocks_short_first.insert(1, Bytes::from(vec![0u8; mib as usize]));
+        assert!(matches!(
+            assemble_range(&((mib - 100)..(mib + 10)), &blocks_short_first),
+            Err(StatamError::Corrupt { .. })
+        ));
+
+        let mut blocks_short_mid = BTreeMap::new();
+        blocks_short_mid.insert(0, Bytes::from(vec![0u8; mib as usize]));
+        blocks_short_mid.insert(1, Bytes::from_static(&[0u8; 16]));
+        blocks_short_mid.insert(2, Bytes::from(vec![0u8; mib as usize]));
+        assert!(matches!(
+            assemble_range(&(0..(2 * mib + 16)), &blocks_short_mid),
+            Err(StatamError::Corrupt { .. })
+        ));
+
+        // Failing backing RangeReader must not increment cache_misses.
+        struct FailingReader;
+        impl RangeReader for FailingReader {
+            fn file_len(&self) -> u64 {
+                2 * S3_CACHE_BLOCK_BYTES
+            }
+            fn read_range(&self, _range: Range<u64>) -> Result<Bytes, StatamError> {
+                Err(StatamError::Corrupt {
+                    reason: "injected backing failure",
+                })
+            }
+        }
+        let s3 = SimulatedS3Reader::new(Arc::new(FailingReader), SimulatedS3Config::default());
+        assert!(s3.read_range(0..64).is_err());
+        assert_eq!(s3.counters().cache_misses, 0);
+        assert_eq!(s3.counters().gets, 0);
     }
 }

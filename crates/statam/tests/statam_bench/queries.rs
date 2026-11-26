@@ -173,9 +173,14 @@ fn write_statam_files(
             opts.pack_id = Some(PACK_ID);
         }
         let mut buf = Vec::new();
-        let mut w = StatamWriter::new(Arc::clone(b.schema()), opts, pb.as_mut())?;
+        let mut w = StatamWriter::new(
+            std::io::Cursor::new(&mut buf),
+            Arc::clone(b.schema()),
+            opts,
+            pb.as_mut(),
+        )?;
         w.write_batch(b)?;
-        w.finish(&mut buf)?;
+        w.finish()?;
         files.push(Bytes::from(buf));
     }
     let pack_bytes = if let Some(builder) = pb {

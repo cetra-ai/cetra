@@ -23,6 +23,7 @@ pub enum FilterOp {
 
 #[inline]
 fn words_to_bitmap(words: Vec<u64>, len: usize) -> Bitmap {
+    debug_assert_eq!(words.len(), len.div_ceil(64));
     Bitmap::from_words(words, len).unwrap_or_else(|_| Bitmap::new_zeroed(len))
 }
 
@@ -45,7 +46,7 @@ pub fn filter_i64(values: &[i64], op: FilterOp, rhs: i64) -> Bitmap {
         not(miri)
     ))]
     {
-        // SAFETY: `target_feature = "neon"` is enabled at compile time.
+        // SAFETY: `cfg(target_feature = "neon")` guarantees NEON at compile time.
         return unsafe { filter_i64_neon(values, op, rhs) };
     }
     #[allow(unreachable_code)]
@@ -71,7 +72,7 @@ pub fn filter_i64_between(values: &[i64], lo: i64, hi: i64) -> Bitmap {
         not(miri)
     ))]
     {
-        // SAFETY: `target_feature = "neon"` is enabled at compile time.
+        // SAFETY: `cfg(target_feature = "neon")` guarantees NEON at compile time.
         return unsafe { filter_i64_between_neon(values, lo, hi) };
     }
     #[allow(unreachable_code)]
@@ -97,7 +98,7 @@ pub fn filter_u32(values: &[u32], op: FilterOp, rhs: u32) -> Bitmap {
         not(miri)
     ))]
     {
-        // SAFETY: `target_feature = "neon"` is enabled at compile time.
+        // SAFETY: `cfg(target_feature = "neon")` guarantees NEON at compile time.
         return unsafe { filter_u32_neon(values, op, rhs) };
     }
     #[allow(unreachable_code)]
@@ -126,7 +127,7 @@ pub fn filter_f64(values: &[f64], op: FilterOp, rhs: f64) -> Bitmap {
         not(miri)
     ))]
     {
-        // SAFETY: `target_feature = "neon"` is enabled at compile time.
+        // SAFETY: `cfg(target_feature = "neon")` guarantees NEON at compile time.
         return unsafe { filter_f64_neon(values, op, rhs) };
     }
     #[allow(unreachable_code)]
@@ -234,28 +235,7 @@ fn filter_f64_scalar(values: &[f64], op: FilterOp, rhs: f64) -> Bitmap {
 
 #[cfg(all(target_arch = "x86_64", not(miri)))]
 #[target_feature(enable = "avx2")]
-unsafe fn eval_i64_vec_mask(
-    v: std::arch::x86_64::__m256i,
-    vrhs: std::arch::x86_64::__m256i,
-    op: FilterOp,
-) -> u64 {
-    use std::arch::x86_64::*;
-
-    let (cmp, invert) = match op {
-        FilterOp::Eq => (_mm256_cmpeq_epi64(v, vrhs), false),
-        FilterOp::Ne => (_mm256_cmpeq_epi64(v, vrhs), true),
-        FilterOp::Gt => (_mm256_cmpgt_epi64(v, vrhs), false),
-        FilterOp::Le => (_mm256_cmpgt_epi64(v, vrhs), true),
-        FilterOp::Lt => (_mm256_cmpgt_epi64(vrhs, v), false),
-        FilterOp::Ge => (_mm256_cmpgt_epi64(vrhs, v), true),
-    };
-    let mask = _mm256_movemask_pd(_mm256_castsi256_pd(cmp)) as u64;
-    if invert { (!mask) & 0xF } else { mask }
-}
-
-#[cfg(all(target_arch = "x86_64", not(miri)))]
-#[target_feature(enable = "avx2")]
-unsafe fn filter_i64_avx2(values: &[i64], op: FilterOp, rhs: i64) -> Bitmap {
+unsafe fn filter_i64_avx2_op<const OP: u8>(values: &[i64], op: FilterOp, rhs: i64) -> Bitmap {
     use std::arch::x86_64::*;
 
     let vrhs = _mm256_set1_epi64x(rhs);
@@ -268,8 +248,16 @@ unsafe fn filter_i64_avx2(values: &[i64], op: FilterOp, rhs: i64) -> Bitmap {
             // SAFETY: `q < chunk.len() / 4`, so `q * 4 + 4 <= chunk.len()`;
             // `_mm256_loadu_si256` accepts any alignment.
             let v = unsafe { _mm256_loadu_si256(chunk.as_ptr().add(q * 4) as *const __m256i) };
-            // SAFETY: AVX2 target feature is active for this function.
-            let m = unsafe { eval_i64_vec_mask(v, vrhs, op) };
+            let (cmp, invert) = match OP {
+                0 => (_mm256_cmpeq_epi64(v, vrhs), false),
+                1 => (_mm256_cmpeq_epi64(v, vrhs), true),
+                2 => (_mm256_cmpgt_epi64(vrhs, v), false),
+                3 => (_mm256_cmpgt_epi64(v, vrhs), true),
+                4 => (_mm256_cmpgt_epi64(v, vrhs), false),
+                _ => (_mm256_cmpgt_epi64(vrhs, v), true),
+            };
+            let mask = _mm256_movemask_pd(_mm256_castsi256_pd(cmp)) as u64;
+            let m = if invert { (!mask) & 0xF } else { mask };
             word |= m << (q * 4);
         }
         let rem_start = full_quads * 4;
@@ -281,6 +269,22 @@ unsafe fn filter_i64_avx2(values: &[i64], op: FilterOp, rhs: i64) -> Bitmap {
         words[word_idx] = word;
     }
     words_to_bitmap(words, values.len())
+}
+
+#[cfg(all(target_arch = "x86_64", not(miri)))]
+#[target_feature(enable = "avx2")]
+unsafe fn filter_i64_avx2(values: &[i64], op: FilterOp, rhs: i64) -> Bitmap {
+    // SAFETY: AVX2 target feature is active for this function.
+    unsafe {
+        match op {
+            FilterOp::Eq => filter_i64_avx2_op::<0>(values, op, rhs),
+            FilterOp::Ne => filter_i64_avx2_op::<1>(values, op, rhs),
+            FilterOp::Lt => filter_i64_avx2_op::<2>(values, op, rhs),
+            FilterOp::Le => filter_i64_avx2_op::<3>(values, op, rhs),
+            FilterOp::Gt => filter_i64_avx2_op::<4>(values, op, rhs),
+            FilterOp::Ge => filter_i64_avx2_op::<5>(values, op, rhs),
+        }
+    }
 }
 
 #[cfg(all(target_arch = "x86_64", not(miri)))]
@@ -317,7 +321,7 @@ unsafe fn filter_i64_between_avx2(values: &[i64], lo: i64, hi: i64) -> Bitmap {
 
 #[cfg(all(target_arch = "x86_64", not(miri)))]
 #[target_feature(enable = "avx2")]
-unsafe fn filter_u32_avx2(values: &[u32], op: FilterOp, rhs: u32) -> Bitmap {
+unsafe fn filter_u32_avx2_op<const OP: u8>(values: &[u32], op: FilterOp, rhs: u32) -> Bitmap {
     use std::arch::x86_64::*;
 
     let bias = _mm256_set1_epi32(i32::MIN);
@@ -331,25 +335,25 @@ unsafe fn filter_u32_avx2(values: &[u32], op: FilterOp, rhs: u32) -> Bitmap {
         for o in 0..full_octs {
             // SAFETY: `o * 8 + 8 <= chunk.len()`; unaligned load is valid.
             let v_raw = unsafe { _mm256_loadu_si256(chunk.as_ptr().add(o * 8) as *const __m256i) };
-            let (cmp, invert) = match op {
-                FilterOp::Eq => (_mm256_cmpeq_epi32(v_raw, vrhs_raw), false),
-                FilterOp::Ne => (_mm256_cmpeq_epi32(v_raw, vrhs_raw), true),
-                FilterOp::Gt => {
-                    let v_biased = _mm256_xor_si256(v_raw, bias);
-                    (_mm256_cmpgt_epi32(v_biased, vrhs_biased), false)
-                }
-                FilterOp::Le => {
-                    let v_biased = _mm256_xor_si256(v_raw, bias);
-                    (_mm256_cmpgt_epi32(v_biased, vrhs_biased), true)
-                }
-                FilterOp::Lt => {
-                    let v_biased = _mm256_xor_si256(v_raw, bias);
-                    (_mm256_cmpgt_epi32(vrhs_biased, v_biased), false)
-                }
-                FilterOp::Ge => {
-                    let v_biased = _mm256_xor_si256(v_raw, bias);
-                    (_mm256_cmpgt_epi32(vrhs_biased, v_biased), true)
-                }
+            let (cmp, invert) = match OP {
+                0 => (_mm256_cmpeq_epi32(v_raw, vrhs_raw), false),
+                1 => (_mm256_cmpeq_epi32(v_raw, vrhs_raw), true),
+                2 => (
+                    _mm256_cmpgt_epi32(vrhs_biased, _mm256_xor_si256(v_raw, bias)),
+                    false,
+                ),
+                3 => (
+                    _mm256_cmpgt_epi32(_mm256_xor_si256(v_raw, bias), vrhs_biased),
+                    true,
+                ),
+                4 => (
+                    _mm256_cmpgt_epi32(_mm256_xor_si256(v_raw, bias), vrhs_biased),
+                    false,
+                ),
+                _ => (
+                    _mm256_cmpgt_epi32(vrhs_biased, _mm256_xor_si256(v_raw, bias)),
+                    true,
+                ),
             };
             let mask = _mm256_movemask_ps(_mm256_castsi256_ps(cmp)) as u64;
             let m = if invert { (!mask) & 0xFF } else { mask };
@@ -368,7 +372,23 @@ unsafe fn filter_u32_avx2(values: &[u32], op: FilterOp, rhs: u32) -> Bitmap {
 
 #[cfg(all(target_arch = "x86_64", not(miri)))]
 #[target_feature(enable = "avx2")]
-unsafe fn filter_f64_avx2(values: &[f64], op: FilterOp, rhs: f64) -> Bitmap {
+unsafe fn filter_u32_avx2(values: &[u32], op: FilterOp, rhs: u32) -> Bitmap {
+    // SAFETY: AVX2 target feature is active for this function.
+    unsafe {
+        match op {
+            FilterOp::Eq => filter_u32_avx2_op::<0>(values, op, rhs),
+            FilterOp::Ne => filter_u32_avx2_op::<1>(values, op, rhs),
+            FilterOp::Lt => filter_u32_avx2_op::<2>(values, op, rhs),
+            FilterOp::Le => filter_u32_avx2_op::<3>(values, op, rhs),
+            FilterOp::Gt => filter_u32_avx2_op::<4>(values, op, rhs),
+            FilterOp::Ge => filter_u32_avx2_op::<5>(values, op, rhs),
+        }
+    }
+}
+
+#[cfg(all(target_arch = "x86_64", not(miri)))]
+#[target_feature(enable = "avx2")]
+unsafe fn filter_f64_avx2_op<const OP: u8>(values: &[f64], op: FilterOp, rhs: f64) -> Bitmap {
     use std::arch::x86_64::*;
 
     let vrhs = _mm256_set1_pd(rhs);
@@ -380,13 +400,13 @@ unsafe fn filter_f64_avx2(values: &[f64], op: FilterOp, rhs: f64) -> Bitmap {
         for q in 0..full_quads {
             // SAFETY: `q * 4 + 4 <= chunk.len()`; `_mm256_loadu_pd` allows arbitrary alignment.
             let v = unsafe { _mm256_loadu_pd(chunk.as_ptr().add(q * 4)) };
-            let cmp = match op {
-                FilterOp::Eq => _mm256_cmp_pd::<_CMP_EQ_OQ>(v, vrhs),
-                FilterOp::Ne => _mm256_cmp_pd::<_CMP_NEQ_UQ>(v, vrhs),
-                FilterOp::Lt => _mm256_cmp_pd::<_CMP_LT_OQ>(v, vrhs),
-                FilterOp::Le => _mm256_cmp_pd::<_CMP_LE_OQ>(v, vrhs),
-                FilterOp::Gt => _mm256_cmp_pd::<_CMP_GT_OQ>(v, vrhs),
-                FilterOp::Ge => _mm256_cmp_pd::<_CMP_GE_OQ>(v, vrhs),
+            let cmp = match OP {
+                0 => _mm256_cmp_pd::<_CMP_EQ_OQ>(v, vrhs),
+                1 => _mm256_cmp_pd::<_CMP_NEQ_UQ>(v, vrhs),
+                2 => _mm256_cmp_pd::<_CMP_LT_OQ>(v, vrhs),
+                3 => _mm256_cmp_pd::<_CMP_LE_OQ>(v, vrhs),
+                4 => _mm256_cmp_pd::<_CMP_GT_OQ>(v, vrhs),
+                _ => _mm256_cmp_pd::<_CMP_GE_OQ>(v, vrhs),
             };
             let m = _mm256_movemask_pd(cmp) as u64;
             word |= m << (q * 4);
@@ -400,6 +420,22 @@ unsafe fn filter_f64_avx2(values: &[f64], op: FilterOp, rhs: f64) -> Bitmap {
         words[word_idx] = word;
     }
     words_to_bitmap(words, values.len())
+}
+
+#[cfg(all(target_arch = "x86_64", not(miri)))]
+#[target_feature(enable = "avx2")]
+unsafe fn filter_f64_avx2(values: &[f64], op: FilterOp, rhs: f64) -> Bitmap {
+    // SAFETY: AVX2 target feature is active for this function.
+    unsafe {
+        match op {
+            FilterOp::Eq => filter_f64_avx2_op::<0>(values, op, rhs),
+            FilterOp::Ne => filter_f64_avx2_op::<1>(values, op, rhs),
+            FilterOp::Lt => filter_f64_avx2_op::<2>(values, op, rhs),
+            FilterOp::Le => filter_f64_avx2_op::<3>(values, op, rhs),
+            FilterOp::Gt => filter_f64_avx2_op::<4>(values, op, rhs),
+            FilterOp::Ge => filter_f64_avx2_op::<5>(values, op, rhs),
+        }
+    }
 }
 
 // --- aarch64 NEON Implementations ---
@@ -420,7 +456,7 @@ const NEON_WEIGHTS_8: [u16; 8] = [1, 2, 4, 8, 16, 32, 64, 128];
 ))]
 #[target_feature(enable = "neon")]
 #[inline]
-unsafe fn pack_4x2_u64_masks_neon(
+fn pack_4x2_u64_masks_neon(
     c0: std::arch::aarch64::uint64x2_t,
     c1: std::arch::aarch64::uint64x2_t,
     c2: std::arch::aarch64::uint64x2_t,
@@ -442,7 +478,7 @@ unsafe fn pack_4x2_u64_masks_neon(
     not(miri)
 ))]
 #[target_feature(enable = "neon")]
-unsafe fn filter_i64_neon_op<const OP: u8>(values: &[i64], op: FilterOp, rhs: i64) -> Bitmap {
+fn filter_i64_neon_op<const OP: u8>(values: &[i64], op: FilterOp, rhs: i64) -> Bitmap {
     use std::arch::aarch64::*;
 
     let vrhs = vdupq_n_s64(rhs);
@@ -455,60 +491,54 @@ unsafe fn filter_i64_neon_op<const OP: u8>(values: &[i64], op: FilterOp, rhs: i6
         let full_octs = chunk.len() / 8;
         for o in 0..full_octs {
             // SAFETY: `o * 8 + 8 <= chunk.len()`, so four 2-lane `i64` loads are in bounds.
-            let m = unsafe {
+            let (v0, v1, v2, v3) = unsafe {
                 let ptr = chunk.as_ptr().add(o * 8);
-                let v0 = vld1q_s64(ptr);
-                let v1 = vld1q_s64(ptr.add(2));
-                let v2 = vld1q_s64(ptr.add(4));
-                let v3 = vld1q_s64(ptr.add(6));
-                let (c0, c1, c2, c3) = match OP {
-                    0 => (
-                        vceqq_s64(v0, vrhs),
-                        vceqq_s64(v1, vrhs),
-                        vceqq_s64(v2, vrhs),
-                        vceqq_s64(v3, vrhs),
-                    ),
-                    1 => (
-                        vreinterpretq_u64_u32(vmvnq_u32(vreinterpretq_u32_u64(vceqq_s64(
-                            v0, vrhs,
-                        )))),
-                        vreinterpretq_u64_u32(vmvnq_u32(vreinterpretq_u32_u64(vceqq_s64(
-                            v1, vrhs,
-                        )))),
-                        vreinterpretq_u64_u32(vmvnq_u32(vreinterpretq_u32_u64(vceqq_s64(
-                            v2, vrhs,
-                        )))),
-                        vreinterpretq_u64_u32(vmvnq_u32(vreinterpretq_u32_u64(vceqq_s64(
-                            v3, vrhs,
-                        )))),
-                    ),
-                    2 => (
-                        vcltq_s64(v0, vrhs),
-                        vcltq_s64(v1, vrhs),
-                        vcltq_s64(v2, vrhs),
-                        vcltq_s64(v3, vrhs),
-                    ),
-                    3 => (
-                        vcleq_s64(v0, vrhs),
-                        vcleq_s64(v1, vrhs),
-                        vcleq_s64(v2, vrhs),
-                        vcleq_s64(v3, vrhs),
-                    ),
-                    4 => (
-                        vcgtq_s64(v0, vrhs),
-                        vcgtq_s64(v1, vrhs),
-                        vcgtq_s64(v2, vrhs),
-                        vcgtq_s64(v3, vrhs),
-                    ),
-                    _ => (
-                        vcgeq_s64(v0, vrhs),
-                        vcgeq_s64(v1, vrhs),
-                        vcgeq_s64(v2, vrhs),
-                        vcgeq_s64(v3, vrhs),
-                    ),
-                };
-                pack_4x2_u64_masks_neon(c0, c1, c2, c3, weights)
+                (
+                    vld1q_s64(ptr),
+                    vld1q_s64(ptr.add(2)),
+                    vld1q_s64(ptr.add(4)),
+                    vld1q_s64(ptr.add(6)),
+                )
             };
+            let (c0, c1, c2, c3) = match OP {
+                0 => (
+                    vceqq_s64(v0, vrhs),
+                    vceqq_s64(v1, vrhs),
+                    vceqq_s64(v2, vrhs),
+                    vceqq_s64(v3, vrhs),
+                ),
+                1 => (
+                    vreinterpretq_u64_u32(vmvnq_u32(vreinterpretq_u32_u64(vceqq_s64(v0, vrhs)))),
+                    vreinterpretq_u64_u32(vmvnq_u32(vreinterpretq_u32_u64(vceqq_s64(v1, vrhs)))),
+                    vreinterpretq_u64_u32(vmvnq_u32(vreinterpretq_u32_u64(vceqq_s64(v2, vrhs)))),
+                    vreinterpretq_u64_u32(vmvnq_u32(vreinterpretq_u32_u64(vceqq_s64(v3, vrhs)))),
+                ),
+                2 => (
+                    vcltq_s64(v0, vrhs),
+                    vcltq_s64(v1, vrhs),
+                    vcltq_s64(v2, vrhs),
+                    vcltq_s64(v3, vrhs),
+                ),
+                3 => (
+                    vcleq_s64(v0, vrhs),
+                    vcleq_s64(v1, vrhs),
+                    vcleq_s64(v2, vrhs),
+                    vcleq_s64(v3, vrhs),
+                ),
+                4 => (
+                    vcgtq_s64(v0, vrhs),
+                    vcgtq_s64(v1, vrhs),
+                    vcgtq_s64(v2, vrhs),
+                    vcgtq_s64(v3, vrhs),
+                ),
+                _ => (
+                    vcgeq_s64(v0, vrhs),
+                    vcgeq_s64(v1, vrhs),
+                    vcgeq_s64(v2, vrhs),
+                    vcgeq_s64(v3, vrhs),
+                ),
+            };
+            let m = pack_4x2_u64_masks_neon(c0, c1, c2, c3, weights);
             word |= m << (o * 8);
         }
         let rem_start = full_octs * 8;
@@ -529,17 +559,14 @@ unsafe fn filter_i64_neon_op<const OP: u8>(values: &[i64], op: FilterOp, rhs: i6
     not(miri)
 ))]
 #[target_feature(enable = "neon")]
-unsafe fn filter_i64_neon(values: &[i64], op: FilterOp, rhs: i64) -> Bitmap {
-    // SAFETY: NEON target feature is active for this function.
-    unsafe {
-        match op {
-            FilterOp::Eq => filter_i64_neon_op::<0>(values, op, rhs),
-            FilterOp::Ne => filter_i64_neon_op::<1>(values, op, rhs),
-            FilterOp::Lt => filter_i64_neon_op::<2>(values, op, rhs),
-            FilterOp::Le => filter_i64_neon_op::<3>(values, op, rhs),
-            FilterOp::Gt => filter_i64_neon_op::<4>(values, op, rhs),
-            FilterOp::Ge => filter_i64_neon_op::<5>(values, op, rhs),
-        }
+fn filter_i64_neon(values: &[i64], op: FilterOp, rhs: i64) -> Bitmap {
+    match op {
+        FilterOp::Eq => filter_i64_neon_op::<0>(values, op, rhs),
+        FilterOp::Ne => filter_i64_neon_op::<1>(values, op, rhs),
+        FilterOp::Lt => filter_i64_neon_op::<2>(values, op, rhs),
+        FilterOp::Le => filter_i64_neon_op::<3>(values, op, rhs),
+        FilterOp::Gt => filter_i64_neon_op::<4>(values, op, rhs),
+        FilterOp::Ge => filter_i64_neon_op::<5>(values, op, rhs),
     }
 }
 
@@ -550,7 +577,7 @@ unsafe fn filter_i64_neon(values: &[i64], op: FilterOp, rhs: i64) -> Bitmap {
     not(miri)
 ))]
 #[target_feature(enable = "neon")]
-unsafe fn filter_i64_between_neon(values: &[i64], lo: i64, hi: i64) -> Bitmap {
+fn filter_i64_between_neon(values: &[i64], lo: i64, hi: i64) -> Bitmap {
     use std::arch::aarch64::*;
 
     let vlo = vdupq_n_s64(lo);
@@ -564,18 +591,20 @@ unsafe fn filter_i64_between_neon(values: &[i64], lo: i64, hi: i64) -> Bitmap {
         let full_octs = chunk.len() / 8;
         for o in 0..full_octs {
             // SAFETY: `o * 8 + 8 <= chunk.len()`, so four 2-lane `i64` loads are in bounds.
-            let m = unsafe {
+            let (v0, v1, v2, v3) = unsafe {
                 let ptr = chunk.as_ptr().add(o * 8);
-                let v0 = vld1q_s64(ptr);
-                let v1 = vld1q_s64(ptr.add(2));
-                let v2 = vld1q_s64(ptr.add(4));
-                let v3 = vld1q_s64(ptr.add(6));
-                let c0 = vandq_u64(vcgeq_s64(v0, vlo), vcleq_s64(v0, vhi));
-                let c1 = vandq_u64(vcgeq_s64(v1, vlo), vcleq_s64(v1, vhi));
-                let c2 = vandq_u64(vcgeq_s64(v2, vlo), vcleq_s64(v2, vhi));
-                let c3 = vandq_u64(vcgeq_s64(v3, vlo), vcleq_s64(v3, vhi));
-                pack_4x2_u64_masks_neon(c0, c1, c2, c3, weights)
+                (
+                    vld1q_s64(ptr),
+                    vld1q_s64(ptr.add(2)),
+                    vld1q_s64(ptr.add(4)),
+                    vld1q_s64(ptr.add(6)),
+                )
             };
+            let c0 = vandq_u64(vcgeq_s64(v0, vlo), vcleq_s64(v0, vhi));
+            let c1 = vandq_u64(vcgeq_s64(v1, vlo), vcleq_s64(v1, vhi));
+            let c2 = vandq_u64(vcgeq_s64(v2, vlo), vcleq_s64(v2, vhi));
+            let c3 = vandq_u64(vcgeq_s64(v3, vlo), vcleq_s64(v3, vhi));
+            let m = pack_4x2_u64_masks_neon(c0, c1, c2, c3, weights);
             word |= m << (o * 8);
         }
         let rem_start = full_octs * 8;
@@ -596,7 +625,7 @@ unsafe fn filter_i64_between_neon(values: &[i64], lo: i64, hi: i64) -> Bitmap {
     not(miri)
 ))]
 #[target_feature(enable = "neon")]
-unsafe fn filter_u32_neon_op<const OP: u8>(values: &[u32], op: FilterOp, rhs: u32) -> Bitmap {
+fn filter_u32_neon_op<const OP: u8>(values: &[u32], op: FilterOp, rhs: u32) -> Bitmap {
     use std::arch::aarch64::*;
 
     let vrhs = vdupq_n_u32(rhs);
@@ -609,24 +638,23 @@ unsafe fn filter_u32_neon_op<const OP: u8>(values: &[u32], op: FilterOp, rhs: u3
         let full_octs = chunk.len() / 8;
         for o in 0..full_octs {
             // SAFETY: `o * 8 + 8 <= chunk.len()`, so two 4-lane `u32` loads are in bounds.
-            let m = unsafe {
+            let (v0, v1) = unsafe {
                 let ptr = chunk.as_ptr().add(o * 8);
-                let v0 = vld1q_u32(ptr);
-                let v1 = vld1q_u32(ptr.add(4));
-                let (c0, c1) = match OP {
-                    0 => (vceqq_u32(v0, vrhs), vceqq_u32(v1, vrhs)),
-                    1 => (
-                        vmvnq_u32(vceqq_u32(v0, vrhs)),
-                        vmvnq_u32(vceqq_u32(v1, vrhs)),
-                    ),
-                    2 => (vcltq_u32(v0, vrhs), vcltq_u32(v1, vrhs)),
-                    3 => (vcleq_u32(v0, vrhs), vcleq_u32(v1, vrhs)),
-                    4 => (vcgtq_u32(v0, vrhs), vcgtq_u32(v1, vrhs)),
-                    _ => (vcgeq_u32(v0, vrhs), vcgeq_u32(v1, vrhs)),
-                };
-                let m8 = vuzp1q_u16(vreinterpretq_u16_u32(c0), vreinterpretq_u16_u32(c1));
-                u64::from(vaddvq_u16(vandq_u16(m8, weights)))
+                (vld1q_u32(ptr), vld1q_u32(ptr.add(4)))
             };
+            let (c0, c1) = match OP {
+                0 => (vceqq_u32(v0, vrhs), vceqq_u32(v1, vrhs)),
+                1 => (
+                    vmvnq_u32(vceqq_u32(v0, vrhs)),
+                    vmvnq_u32(vceqq_u32(v1, vrhs)),
+                ),
+                2 => (vcltq_u32(v0, vrhs), vcltq_u32(v1, vrhs)),
+                3 => (vcleq_u32(v0, vrhs), vcleq_u32(v1, vrhs)),
+                4 => (vcgtq_u32(v0, vrhs), vcgtq_u32(v1, vrhs)),
+                _ => (vcgeq_u32(v0, vrhs), vcgeq_u32(v1, vrhs)),
+            };
+            let m8 = vuzp1q_u16(vreinterpretq_u16_u32(c0), vreinterpretq_u16_u32(c1));
+            let m = u64::from(vaddvq_u16(vandq_u16(m8, weights)));
             word |= m << (o * 8);
         }
         let rem_start = full_octs * 8;
@@ -647,17 +675,14 @@ unsafe fn filter_u32_neon_op<const OP: u8>(values: &[u32], op: FilterOp, rhs: u3
     not(miri)
 ))]
 #[target_feature(enable = "neon")]
-unsafe fn filter_u32_neon(values: &[u32], op: FilterOp, rhs: u32) -> Bitmap {
-    // SAFETY: NEON target feature is active for this function.
-    unsafe {
-        match op {
-            FilterOp::Eq => filter_u32_neon_op::<0>(values, op, rhs),
-            FilterOp::Ne => filter_u32_neon_op::<1>(values, op, rhs),
-            FilterOp::Lt => filter_u32_neon_op::<2>(values, op, rhs),
-            FilterOp::Le => filter_u32_neon_op::<3>(values, op, rhs),
-            FilterOp::Gt => filter_u32_neon_op::<4>(values, op, rhs),
-            FilterOp::Ge => filter_u32_neon_op::<5>(values, op, rhs),
-        }
+fn filter_u32_neon(values: &[u32], op: FilterOp, rhs: u32) -> Bitmap {
+    match op {
+        FilterOp::Eq => filter_u32_neon_op::<0>(values, op, rhs),
+        FilterOp::Ne => filter_u32_neon_op::<1>(values, op, rhs),
+        FilterOp::Lt => filter_u32_neon_op::<2>(values, op, rhs),
+        FilterOp::Le => filter_u32_neon_op::<3>(values, op, rhs),
+        FilterOp::Gt => filter_u32_neon_op::<4>(values, op, rhs),
+        FilterOp::Ge => filter_u32_neon_op::<5>(values, op, rhs),
     }
 }
 
@@ -668,7 +693,7 @@ unsafe fn filter_u32_neon(values: &[u32], op: FilterOp, rhs: u32) -> Bitmap {
     not(miri)
 ))]
 #[target_feature(enable = "neon")]
-unsafe fn filter_f64_neon_op<const OP: u8>(values: &[f64], op: FilterOp, rhs: f64) -> Bitmap {
+fn filter_f64_neon_op<const OP: u8>(values: &[f64], op: FilterOp, rhs: f64) -> Bitmap {
     use std::arch::aarch64::*;
 
     let vrhs = vdupq_n_f64(rhs);
@@ -681,63 +706,57 @@ unsafe fn filter_f64_neon_op<const OP: u8>(values: &[f64], op: FilterOp, rhs: f6
         let full_octs = chunk.len() / 8;
         for o in 0..full_octs {
             // SAFETY: `o * 8 + 8 <= chunk.len()`, so four 2-lane `f64` loads are in bounds.
+            let (v0, v1, v2, v3) = unsafe {
+                let ptr = chunk.as_ptr().add(o * 8);
+                (
+                    vld1q_f64(ptr),
+                    vld1q_f64(ptr.add(2)),
+                    vld1q_f64(ptr.add(4)),
+                    vld1q_f64(ptr.add(6)),
+                )
+            };
             // ARM64 `fcmeq`/`fcmlt`/`fcmle`/`fcmgt`/`fcmge` all return 0 when either operand
             // is NaN; bitwise-inverting `vceqq_f64` yields all-1s on NaN for `Ne` and 0 for
             // `-0.0 != +0.0`, matching Rust IEEE-754 semantics bit-for-bit.
-            let m = unsafe {
-                let ptr = chunk.as_ptr().add(o * 8);
-                let v0 = vld1q_f64(ptr);
-                let v1 = vld1q_f64(ptr.add(2));
-                let v2 = vld1q_f64(ptr.add(4));
-                let v3 = vld1q_f64(ptr.add(6));
-                let (c0, c1, c2, c3) = match OP {
-                    0 => (
-                        vceqq_f64(v0, vrhs),
-                        vceqq_f64(v1, vrhs),
-                        vceqq_f64(v2, vrhs),
-                        vceqq_f64(v3, vrhs),
-                    ),
-                    1 => (
-                        vreinterpretq_u64_u32(vmvnq_u32(vreinterpretq_u32_u64(vceqq_f64(
-                            v0, vrhs,
-                        )))),
-                        vreinterpretq_u64_u32(vmvnq_u32(vreinterpretq_u32_u64(vceqq_f64(
-                            v1, vrhs,
-                        )))),
-                        vreinterpretq_u64_u32(vmvnq_u32(vreinterpretq_u32_u64(vceqq_f64(
-                            v2, vrhs,
-                        )))),
-                        vreinterpretq_u64_u32(vmvnq_u32(vreinterpretq_u32_u64(vceqq_f64(
-                            v3, vrhs,
-                        )))),
-                    ),
-                    2 => (
-                        vcltq_f64(v0, vrhs),
-                        vcltq_f64(v1, vrhs),
-                        vcltq_f64(v2, vrhs),
-                        vcltq_f64(v3, vrhs),
-                    ),
-                    3 => (
-                        vcleq_f64(v0, vrhs),
-                        vcleq_f64(v1, vrhs),
-                        vcleq_f64(v2, vrhs),
-                        vcleq_f64(v3, vrhs),
-                    ),
-                    4 => (
-                        vcgtq_f64(v0, vrhs),
-                        vcgtq_f64(v1, vrhs),
-                        vcgtq_f64(v2, vrhs),
-                        vcgtq_f64(v3, vrhs),
-                    ),
-                    _ => (
-                        vcgeq_f64(v0, vrhs),
-                        vcgeq_f64(v1, vrhs),
-                        vcgeq_f64(v2, vrhs),
-                        vcgeq_f64(v3, vrhs),
-                    ),
-                };
-                pack_4x2_u64_masks_neon(c0, c1, c2, c3, weights)
+            let (c0, c1, c2, c3) = match OP {
+                0 => (
+                    vceqq_f64(v0, vrhs),
+                    vceqq_f64(v1, vrhs),
+                    vceqq_f64(v2, vrhs),
+                    vceqq_f64(v3, vrhs),
+                ),
+                1 => (
+                    vreinterpretq_u64_u32(vmvnq_u32(vreinterpretq_u32_u64(vceqq_f64(v0, vrhs)))),
+                    vreinterpretq_u64_u32(vmvnq_u32(vreinterpretq_u32_u64(vceqq_f64(v1, vrhs)))),
+                    vreinterpretq_u64_u32(vmvnq_u32(vreinterpretq_u32_u64(vceqq_f64(v2, vrhs)))),
+                    vreinterpretq_u64_u32(vmvnq_u32(vreinterpretq_u32_u64(vceqq_f64(v3, vrhs)))),
+                ),
+                2 => (
+                    vcltq_f64(v0, vrhs),
+                    vcltq_f64(v1, vrhs),
+                    vcltq_f64(v2, vrhs),
+                    vcltq_f64(v3, vrhs),
+                ),
+                3 => (
+                    vcleq_f64(v0, vrhs),
+                    vcleq_f64(v1, vrhs),
+                    vcleq_f64(v2, vrhs),
+                    vcleq_f64(v3, vrhs),
+                ),
+                4 => (
+                    vcgtq_f64(v0, vrhs),
+                    vcgtq_f64(v1, vrhs),
+                    vcgtq_f64(v2, vrhs),
+                    vcgtq_f64(v3, vrhs),
+                ),
+                _ => (
+                    vcgeq_f64(v0, vrhs),
+                    vcgeq_f64(v1, vrhs),
+                    vcgeq_f64(v2, vrhs),
+                    vcgeq_f64(v3, vrhs),
+                ),
             };
+            let m = pack_4x2_u64_masks_neon(c0, c1, c2, c3, weights);
             word |= m << (o * 8);
         }
         let rem_start = full_octs * 8;
@@ -758,17 +777,14 @@ unsafe fn filter_f64_neon_op<const OP: u8>(values: &[f64], op: FilterOp, rhs: f6
     not(miri)
 ))]
 #[target_feature(enable = "neon")]
-unsafe fn filter_f64_neon(values: &[f64], op: FilterOp, rhs: f64) -> Bitmap {
-    // SAFETY: NEON target feature is active for this function.
-    unsafe {
-        match op {
-            FilterOp::Eq => filter_f64_neon_op::<0>(values, op, rhs),
-            FilterOp::Ne => filter_f64_neon_op::<1>(values, op, rhs),
-            FilterOp::Lt => filter_f64_neon_op::<2>(values, op, rhs),
-            FilterOp::Le => filter_f64_neon_op::<3>(values, op, rhs),
-            FilterOp::Gt => filter_f64_neon_op::<4>(values, op, rhs),
-            FilterOp::Ge => filter_f64_neon_op::<5>(values, op, rhs),
-        }
+fn filter_f64_neon(values: &[f64], op: FilterOp, rhs: f64) -> Bitmap {
+    match op {
+        FilterOp::Eq => filter_f64_neon_op::<0>(values, op, rhs),
+        FilterOp::Ne => filter_f64_neon_op::<1>(values, op, rhs),
+        FilterOp::Lt => filter_f64_neon_op::<2>(values, op, rhs),
+        FilterOp::Le => filter_f64_neon_op::<3>(values, op, rhs),
+        FilterOp::Gt => filter_f64_neon_op::<4>(values, op, rhs),
+        FilterOp::Ge => filter_f64_neon_op::<5>(values, op, rhs),
     }
 }
 

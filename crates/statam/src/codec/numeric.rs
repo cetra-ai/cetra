@@ -96,7 +96,6 @@ pub(crate) fn try_encode_const_or_null(
     };
 
     let scalar = const_scalar?;
-    let from_dict = matches!(col, Column::Dict(_));
     let mut min_inline = [0u8; 16];
     let min_inline_len: u8;
     let mut max_inline = zm.max_inline;
@@ -127,18 +126,10 @@ pub(crate) fn try_encode_const_or_null(
         ScalarValue::FixedBytes8(b) => {
             min_inline[0..8].copy_from_slice(b);
             min_inline_len = 8;
-            if from_dict {
-                max_inline = min_inline;
-                max_inline_len = min_inline_len;
-            }
         }
         ScalarValue::FixedBytes16(b) => {
             min_inline.copy_from_slice(b);
             min_inline_len = 16;
-            if from_dict {
-                max_inline = min_inline;
-                max_inline_len = min_inline_len;
-            }
         }
         ScalarValue::Interval(iv) => {
             min_inline[0..4].copy_from_slice(&iv.months.to_le_bytes());
@@ -151,18 +142,10 @@ pub(crate) fn try_encode_const_or_null(
         ScalarValue::Utf8(s) if s.len() <= 16 => {
             min_inline[..s.len()].copy_from_slice(s.as_bytes());
             min_inline_len = s.len() as u8;
-            if from_dict {
-                max_inline = min_inline;
-                max_inline_len = min_inline_len;
-            }
         }
         ScalarValue::Binary(b) if b.len() <= 16 => {
             min_inline[..b.len()].copy_from_slice(b);
             min_inline_len = b.len() as u8;
-            if from_dict {
-                max_inline = min_inline;
-                max_inline_len = min_inline_len;
-            }
         }
         ScalarValue::List { values, .. } if values.is_empty() => {
             block_flags |= BLOCK_FLAG_CONST_EMPTY_COLLECTION;
@@ -352,6 +335,11 @@ pub(crate) fn decode_const_block(entry: &BlockEntry, dt: &DataType) -> Result<Co
     }
 
     let inline_len = usize::from(entry.min_inline_len);
+    if inline_len > 16 {
+        return Err(StatamError::Corrupt {
+            reason: "Const inline length exceeds 16",
+        });
+    }
     let bytes = &entry.min_inline[..inline_len];
     let val = match dt {
         DataType::Bool => {
@@ -511,7 +499,7 @@ pub(crate) fn encode_narrow_column_with_locality(
     let zm = match precomputed_zm {
         Some(z) => z,
         None => {
-            owned_zm = compute_zone_map(col, false);
+            owned_zm = compute_zone_map(col);
             if let Some(inline) = try_encode_const_or_null(col, dt, &owned_zm) {
                 return Ok(inline);
             }
@@ -2240,12 +2228,19 @@ pub(crate) fn decode_narrow_column(
     Ok(Column::Flat(flat))
 }
 
-pub(crate) fn decode_rle_block(
+pub(crate) struct ParsedRleHeader<'a> {
+    pub num_runs: usize,
+    pub run_nulls: Option<Bitmap>,
+    pub run_ends: Vec<u32>,
+    pub inner_enc: Encoding,
+    pub inner_body: &'a [u8],
+}
+
+pub(crate) fn parse_rle_header(
     raw_body: &[u8],
     row_count: usize,
     block_flags: u8,
-    dt: &DataType,
-) -> Result<Column, StatamError> {
+) -> Result<ParsedRleHeader<'_>, StatamError> {
     if raw_body.len() < 4 {
         return Err(StatamError::Corrupt {
             reason: "truncated Rle num_runs",
@@ -2300,8 +2295,30 @@ pub(crate) fn decode_rle_block(
 
     let inner_enc = Encoding::from_u8(after_nulls[1 + re_bytes])?;
     let inner_body = &after_nulls[1 + re_bytes + 1..];
-    let run_values = decode_inner_flat(inner_body, inner_enc, num_runs, dt, run_nulls)?;
-    let rle = RleColumn::try_new(run_values, run_ends)?;
+    Ok(ParsedRleHeader {
+        num_runs,
+        run_nulls,
+        run_ends,
+        inner_enc,
+        inner_body,
+    })
+}
+
+pub(crate) fn decode_rle_block(
+    raw_body: &[u8],
+    row_count: usize,
+    block_flags: u8,
+    dt: &DataType,
+) -> Result<Column, StatamError> {
+    let hdr = parse_rle_header(raw_body, row_count, block_flags)?;
+    let run_values = decode_inner_flat(
+        hdr.inner_body,
+        hdr.inner_enc,
+        hdr.num_runs,
+        dt,
+        hdr.run_nulls,
+    )?;
+    let rle = RleColumn::try_new(run_values, hdr.run_ends)?;
     Ok(Column::Rle(rle))
 }
 
@@ -3286,6 +3303,32 @@ mod tests {
         assert!(matches!(
             decode_delta_i64_body(&delta_bw0, huge_rows, None),
             Err(StatamError::BoundsExceeded { .. })
+        ));
+    }
+
+    #[test]
+    fn decode_const_block_rejects_inline_len_over_16() {
+        let bad_entry = BlockEntry {
+            first_row: 0,
+            row_count: 4,
+            null_count: 0,
+            offset: 0,
+            stored_len: 0,
+            raw_len: 0,
+            encoding: Encoding::Const,
+            codec: Codec::None,
+            block_flags: 0,
+            min_inline_len: 17,
+            max_inline_len: 17,
+            reserved: [0; 3],
+            min_inline: [0; 16],
+            max_inline: [0; 16],
+        };
+        assert!(matches!(
+            decode_const_block(&bad_entry, &DataType::Utf8),
+            Err(StatamError::Corrupt {
+                reason: "Const inline length exceeds 16",
+            })
         ));
     }
 }

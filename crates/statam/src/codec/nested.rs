@@ -6,49 +6,16 @@ use std::collections::HashMap;
 use std::fmt;
 use std::hash::BuildHasherDefault;
 
-#[derive(Default)]
-struct FastStrHasher(u64);
-
-impl std::hash::Hasher for FastStrHasher {
-    #[inline]
-    fn write(&mut self, bytes: &[u8]) {
-        let mut h = self.0 ^ (bytes.len() as u64).wrapping_mul(0x9e37_79b9_7f4a_7c15);
-        let (chunks, rem) = bytes.as_chunks::<8>();
-        for &c in chunks {
-            let v = u64::from_le_bytes(c);
-            h = (h ^ v).wrapping_mul(0x9e37_79b9_7f4a_7c15);
-        }
-        if !rem.is_empty() {
-            let mut tail = [0u8; 8];
-            tail[..rem.len()].copy_from_slice(rem);
-            let v = u64::from_le_bytes(tail);
-            h = (h ^ v).wrapping_mul(0x9e37_79b9_7f4a_7c15);
-        }
-        self.0 = h;
-    }
-
-    #[inline]
-    fn write_usize(&mut self, i: usize) {
-        self.0 = (self.0 ^ (i as u64)).wrapping_mul(0x9e37_79b9_7f4a_7c15);
-    }
-
-    #[inline]
-    fn finish(&self) -> u64 {
-        let mut z = self.0;
-        z = (z ^ (z >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
-        z = (z ^ (z >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
-        z ^ (z >> 31)
-    }
-}
-
 use cetra_column::{
     BinaryData, Bitmap, Column, DataType, DictColumn, EventsData, FlatColumn, FlatData, LinksData,
-    MapData, ScalarValue, Utf8Data,
+    MapData, RleColumn, ScalarValue, Utf8Data,
 };
 
 use crate::codec::dict::{
-    DICT_PASSTHROUGH_MAX_BYTES, DictBuilder, FileDict, check_varlen_take_bytes,
-    decode_dict_codes_body, decode_dict_column, encode_dict_codes_body, materialize_from_dict,
+    DICT_PASSTHROUGH_MAX_BYTES, DictBuilder, DictValueKind, FastSliceHasher, FileDict,
+    decode_dict_codes_body, decode_dict_column, decode_dict_selected,
+    dict_logical_materialized_bytes, encode_dict_codes_body, materialize_from_dict,
+    sum_varlen_take_bytes,
 };
 use crate::codec::fsst::{
     FsstBlockView, decode_fsst_utf8, decode_fsst_utf8_selected, encode_fsst_body,
@@ -59,7 +26,7 @@ use crate::codec::numeric::{
     encode_plain_utf8, read_optional_nulls, read_u32_le_at, try_encode_const_or_null,
     validate_plain_offsets_raw, write_optional_nulls,
 };
-use crate::codec::zonemap::{ZoneMapSummary, compute_zone_map};
+use crate::codec::zonemap::{ZoneMapSummary, compute_zone_map, count_col_nulls};
 use crate::codec::{EncodedMiniBlock, WriteProfile, preferred_block_codec};
 use crate::format::{BLOCK_FLAG_HAS_NULLS, BlockEntry, Codec, Encoding, MAX_SHREDDED_KEYS};
 use crate::simd::bitpack::{min_bits_u32, pack_u32, packed_bytes_len, unpack_u32};
@@ -124,7 +91,7 @@ pub fn select_shredded_keys(map: &MapData) -> Vec<String> {
         return Vec::new();
     }
 
-    let mut counts: HashMap<&str, (usize, usize), BuildHasherDefault<FastStrHasher>> =
+    let mut counts: HashMap<&str, (usize, usize), BuildHasherDefault<FastSliceHasher>> =
         HashMap::default();
     let offsets = map.offsets();
     let keys = map.keys();
@@ -201,7 +168,7 @@ pub fn shred_map(
 
     let row_count = col.len();
     let k_count = promoted_keys.len();
-    let mut key_to_idx: HashMap<&str, usize, BuildHasherDefault<FastStrHasher>> =
+    let mut key_to_idx: HashMap<&str, usize, BuildHasherDefault<FastSliceHasher>> =
         HashMap::with_capacity_and_hasher(k_count, BuildHasherDefault::default());
     for (idx, k) in promoted_keys.iter().enumerate() {
         if key_to_idx.insert(k.as_str(), idx).is_some() {
@@ -1017,16 +984,19 @@ fn parse_shredded_subcol_header(
 /// Decodes a [`ShreddedSubCol`] encoded by [`encode_shredded_subcol`].
 pub fn decode_shredded_subcol(src: &[u8], row_count: usize) -> Result<ShreddedSubCol, StatamError> {
     let hdr = parse_shredded_subcol_header(src, row_count)?;
+    let mut budget = MAX_BLOCK_RAW_BYTES;
     let values = decode_child_column(
         hdr.body,
         hdr.enc,
         hdr.flags,
         row_count,
+        None,
         hdr.min_inline_len,
         hdr.min_inline,
         &DataType::Utf8,
         hdr.dict.as_ref(),
         1,
+        &mut budget,
     )?;
 
     Ok(ShreddedSubCol {
@@ -1039,8 +1009,9 @@ pub fn decode_shredded_subcol(src: &[u8], row_count: usize) -> Result<ShreddedSu
 /// Decodes a [`ShreddedSubCol`] decoding only `mask`-selected rows when sparse
 /// (`!mask.all_ones() && mask.count_ones().saturating_mul(16) < row_count`).
 ///
-/// `Dict`, `Rle`, `Const`, and `ConstNull` child encodings are passed through directly
-/// without string expansion; `Fsst` and `Plain` decode only active rows.
+/// `Dict` dispatches to `decode_dict_selected` (avoiding full-block string materialization on
+/// large dictionaries); `Rle`, `Const`, and `ConstNull` pass through directly; `Fsst` and `Plain`
+/// decode only active rows.
 pub fn decode_shredded_subcol_selected(
     src: &[u8],
     row_count: usize,
@@ -1057,6 +1028,11 @@ pub fn decode_shredded_subcol_selected(
 
     let hdr = parse_shredded_subcol_header(src, row_count)?;
     let values = if row_count == 0 {
+        if !hdr.body.is_empty() {
+            return Err(StatamError::Corrupt {
+                reason: "trailing bytes in empty child column",
+            });
+        }
         Column::Flat(FlatColumn::empty(&DataType::Utf8))
     } else if hdr.enc == Encoding::Fsst {
         let (nulls, after_nulls) = read_optional_nulls(hdr.body, row_count, hdr.flags)?;
@@ -1071,17 +1047,33 @@ pub fn decode_shredded_subcol_selected(
             FlatData::Utf8(Utf8Data::try_new(offsets, bytes)?),
             nulls,
         )?)
+    } else if hdr.enc == Encoding::Dict {
+        let Some(dict) = hdr.dict.as_ref() else {
+            return Err(StatamError::Corrupt {
+                reason: "shredded subcol Dict missing inline dict",
+            });
+        };
+        if dict.values().data_type() != DataType::Utf8 {
+            return Err(StatamError::SchemaMismatch {
+                reason: "child FileDict DataType mismatch",
+            });
+        }
+        let (nulls, after_nulls) = read_optional_nulls(hdr.body, row_count, hdr.flags)?;
+        decode_dict_selected(after_nulls, row_count, nulls, dict, mask)?
     } else {
+        let mut budget = MAX_BLOCK_RAW_BYTES;
         decode_child_column(
             hdr.body,
             hdr.enc,
             hdr.flags,
             row_count,
+            None,
             hdr.min_inline_len,
             hdr.min_inline,
             &DataType::Utf8,
             hdr.dict.as_ref(),
             1,
+            &mut budget,
         )?
     };
 
@@ -1124,7 +1116,7 @@ fn encode_shredded_residual_block_with_zm(
         Some(z) => z,
         None => {
             let as_col = Column::Flat(col.clone());
-            owned_zm = compute_zone_map(&as_col, false);
+            owned_zm = compute_zone_map(&as_col);
             if let Some(inline) = try_encode_const_or_null(&as_col, &DataType::MapUtf8, &owned_zm) {
                 return Ok(inline);
             }
@@ -1154,7 +1146,8 @@ fn encode_shredded_residual_block_with_zm(
     let entry_count = map.entry_count();
     if entry_count > 0 {
         // Build compact key dictionary for this mini-block.
-        let mut key_map: HashMap<&str, u32, BuildHasherDefault<FastStrHasher>> = HashMap::default();
+        let mut key_map: HashMap<&str, u32, BuildHasherDefault<FastSliceHasher>> =
+            HashMap::default();
         let mut unique_keys: Vec<&str> = Vec::new();
         let mut key_codes = Vec::with_capacity(entry_count);
         for idx in 0..entry_count {
@@ -1291,12 +1284,57 @@ struct ParsedShreddedResidual<'a> {
     val_src: &'a [u8],
 }
 
-fn parse_shredded_residual_parts(
-    raw_body: &[u8],
+fn debit_budget(budget: &mut usize, bytes: usize, reason: &'static str) -> Result<(), StatamError> {
+    if bytes > *budget {
+        return Err(StatamError::BoundsExceeded { reason });
+    }
+    *budget -= bytes;
+    Ok(())
+}
+
+fn empty_map_with_rows(rows: usize) -> Result<MapData, StatamError> {
+    Ok(MapData::try_new(
+        vec![0u32; rows + 1],
+        Utf8Data::empty(),
+        Utf8Data::empty(),
+        None,
+    )?)
+}
+
+fn parse_shredded_residual_parts<'a>(
+    raw_body: &'a [u8],
     row_count: usize,
     block_flags: u8,
-) -> Result<ParsedShreddedResidual<'_>, StatamError> {
+    budget: &mut usize,
+) -> Result<ParsedShreddedResidual<'a>, StatamError> {
     let (row_nulls, rest) = read_optional_nulls(raw_body, row_count, block_flags)?;
+    if row_nulls.is_some() {
+        debit_budget(
+            budget,
+            row_count.div_ceil(8),
+            "shredded residual allocations exceed MAX_BLOCK_RAW_BYTES",
+        )?;
+    }
+    let counts_bytes = row_count
+        .checked_mul(4)
+        .ok_or(StatamError::BoundsExceeded {
+            reason: "shredded residual row_count overflow",
+        })?;
+    let offsets_bytes = row_count
+        .checked_add(1)
+        .and_then(|n| n.checked_mul(4))
+        .ok_or(StatamError::BoundsExceeded {
+            reason: "shredded residual offsets overflow",
+        })?;
+    debit_budget(
+        budget,
+        counts_bytes
+            .checked_add(offsets_bytes)
+            .ok_or(StatamError::BoundsExceeded {
+                reason: "shredded residual allocation overflow",
+            })?,
+        "shredded residual allocations exceed MAX_BLOCK_RAW_BYTES",
+    )?;
     let (counts, mut rest) = read_packed_counts(rest, row_count)?;
     let (offsets, entry_count) = counts_to_offsets(&counts)?;
 
@@ -1330,6 +1368,11 @@ fn parse_shredded_residual_parts(
         });
     }
     let klen_bw = rest[4];
+    if klen_bw > 32 {
+        return Err(StatamError::Corrupt {
+            reason: "invalid shredded residual key length bit_width",
+        });
+    }
     rest = &rest[5..];
     let klen_packed = packed_bytes_len(num_keys, klen_bw)?;
     if rest.len() < klen_packed + 4 {
@@ -1337,34 +1380,80 @@ fn parse_shredded_residual_parts(
             reason: "truncated shredded residual key lengths",
         });
     }
-    let mut key_lens = Vec::with_capacity(num_keys);
-    unpack_u32(&rest[..klen_packed], num_keys, klen_bw, &mut key_lens)?;
-    rest = &rest[klen_packed..];
-
-    let keys_raw_bytes = u32::from_le_bytes([rest[0], rest[1], rest[2], rest[3]]) as usize;
-    rest = &rest[4..];
-    if keys_raw_bytes > MAX_BLOCK_RAW_BYTES || rest.len() < keys_raw_bytes + 1 {
+    let keys_raw_bytes = u32::from_le_bytes([
+        rest[klen_packed],
+        rest[klen_packed + 1],
+        rest[klen_packed + 2],
+        rest[klen_packed + 3],
+    ]) as usize;
+    if keys_raw_bytes > MAX_BLOCK_RAW_BYTES || rest.len() < klen_packed + 4 + keys_raw_bytes + 1 {
         return Err(StatamError::Corrupt {
             reason: "truncated or oversized shredded residual keys",
         });
     }
-    let keys_blob = &rest[..keys_raw_bytes];
-    rest = &rest[keys_raw_bytes..];
+    let kcode_bw_off = klen_packed + 4 + keys_raw_bytes;
+    let kcode_bw = rest[kcode_bw_off];
+    if kcode_bw > 32 {
+        return Err(StatamError::Corrupt {
+            reason: "invalid shredded residual key code bit_width",
+        });
+    }
+    let kcode_packed = packed_bytes_len(entry_count, kcode_bw)?;
+    if rest.len() < kcode_bw_off + 1 + kcode_packed + 1 {
+        return Err(StatamError::Corrupt {
+            reason: "truncated shredded residual key codes",
+        });
+    }
+
+    // Bound combined allocations (key_offsets, keys_blob, key_codes, and entry offsets) BEFORE allocating.
+    let key_offsets_bytes = num_keys
+        .checked_add(1)
+        .and_then(|n| n.checked_mul(4))
+        .ok_or(StatamError::BoundsExceeded {
+            reason: "shredded key_offsets size overflow",
+        })?;
+    let key_codes_bytes = entry_count
+        .checked_mul(4)
+        .ok_or(StatamError::BoundsExceeded {
+            reason: "shredded key_codes size overflow",
+        })?;
+    let val_offsets_bytes = entry_count
+        .checked_add(1)
+        .and_then(|n| n.checked_mul(4))
+        .ok_or(StatamError::BoundsExceeded {
+            reason: "shredded value offsets size overflow",
+        })?;
+    let combined = key_offsets_bytes
+        .checked_add(keys_raw_bytes)
+        .and_then(|n| n.checked_add(key_codes_bytes))
+        .and_then(|n| n.checked_add(val_offsets_bytes))
+        .ok_or(StatamError::BoundsExceeded {
+            reason: "shredded residual allocations overflow",
+        })?;
+    debit_budget(
+        budget,
+        combined,
+        "shredded residual allocations exceed MAX_BLOCK_RAW_BYTES",
+    )?;
 
     let mut key_offsets = Vec::with_capacity(num_keys + 1);
     key_offsets.push(0u32);
+    unpack_u32(&rest[..klen_packed], num_keys, klen_bw, &mut key_offsets)?;
+    rest = &rest[klen_packed + 4..];
+
+    let keys_blob = &rest[..keys_raw_bytes];
+    rest = &rest[keys_raw_bytes..];
+
     let mut running = 0usize;
-    for &kl in &key_lens {
+    for off_slot in &mut key_offsets[1..] {
         running = running
-            .checked_add(kl as usize)
+            .checked_add(*off_slot as usize)
             .ok_or(StatamError::BoundsExceeded {
                 reason: "shredded key offset overflow",
             })?;
-        key_offsets.push(
-            u32::try_from(running).map_err(|_| StatamError::BoundsExceeded {
-                reason: "shredded key offset exceeds u32::MAX",
-            })?,
-        );
+        *off_slot = u32::try_from(running).map_err(|_| StatamError::BoundsExceeded {
+            reason: "shredded key offset exceeds u32::MAX",
+        })?;
     }
     if running != keys_raw_bytes {
         return Err(StatamError::Corrupt {
@@ -1372,14 +1461,7 @@ fn parse_shredded_residual_parts(
         });
     }
 
-    let kcode_bw = rest[0];
-    rest = &rest[1..];
-    let kcode_packed = packed_bytes_len(entry_count, kcode_bw)?;
-    if rest.len() < kcode_packed + 1 {
-        return Err(StatamError::Corrupt {
-            reason: "truncated shredded residual key codes",
-        });
-    }
+    rest = &rest[1..]; // skip already-validated kcode_bw
     let mut key_codes = Vec::with_capacity(entry_count);
     unpack_u32(&rest[..kcode_packed], entry_count, kcode_bw, &mut key_codes)?;
     for &c in &key_codes {
@@ -1392,6 +1474,13 @@ fn parse_shredded_residual_parts(
     rest = &rest[kcode_packed..];
 
     let (val_nulls, val_src) = read_flag_bitmap(rest, entry_count)?;
+    if val_nulls.is_some() {
+        debit_budget(
+            budget,
+            entry_count.div_ceil(8),
+            "shredded residual allocations exceed MAX_BLOCK_RAW_BYTES",
+        )?;
+    }
 
     Ok(ParsedShreddedResidual {
         row_nulls,
@@ -1410,21 +1499,53 @@ fn decode_shredded_residual_with_count(
     row_count: usize,
     block_flags: u8,
 ) -> Result<FlatColumn, StatamError> {
+    let mut budget = MAX_BLOCK_RAW_BYTES;
+    decode_shredded_residual_with_count_budgeted(raw_body, row_count, block_flags, &mut budget)
+}
+
+fn decode_shredded_residual_with_count_budgeted(
+    raw_body: &[u8],
+    row_count: usize,
+    block_flags: u8,
+    budget: &mut usize,
+) -> Result<FlatColumn, StatamError> {
     if row_count == 0 {
         return Ok(FlatColumn::empty(&DataType::MapUtf8));
     }
-    let parsed = parse_shredded_residual_parts(raw_body, row_count, block_flags)?;
+    let parsed = parse_shredded_residual_parts(raw_body, row_count, block_flags, budget)?;
     if parsed.entry_count == 0 {
         return Ok(FlatColumn::try_new(
-            FlatData::MapUtf8(Box::new(MapData::empty_with_rows(row_count)?)),
+            FlatData::MapUtf8(Box::new(empty_map_with_rows(row_count)?)),
             parsed.row_nulls,
         )?);
     }
 
     let key_dict = Utf8Data::try_new(parsed.key_offsets, parsed.keys_blob.to_vec())?;
-    check_varlen_take_bytes(key_dict.offsets(), &parsed.key_codes, None)?;
+    let keys_mat_bytes =
+        sum_varlen_take_bytes(key_dict.offsets(), &parsed.key_codes, None, *budget)?;
+    let keys_offs_bytes = parsed
+        .entry_count
+        .checked_add(1)
+        .and_then(|n| n.checked_mul(4))
+        .ok_or(StatamError::BoundsExceeded {
+            reason: "shredded key offsets overflow",
+        })?;
+    debit_budget(
+        budget,
+        keys_mat_bytes
+            .checked_add(keys_offs_bytes)
+            .ok_or(StatamError::BoundsExceeded {
+                reason: "shredded key bytes overflow",
+            })?,
+        "shredded residual keys exceed MAX_BLOCK_RAW_BYTES",
+    )?;
     let keys_data = key_dict.take(&parsed.key_codes, None)?;
     let vals_data = decode_utf8_fsst_or_plain(parsed.val_src, parsed.entry_count)?;
+    debit_budget(
+        budget,
+        vals_data.bytes().len(),
+        "shredded residual values exceed MAX_BLOCK_RAW_BYTES",
+    )?;
 
     let map = MapData::try_new(parsed.offsets, keys_data, vals_data, parsed.val_nulls)?;
     Ok(FlatColumn::try_new(
@@ -1442,10 +1563,11 @@ fn decode_shredded_residual_with_count_selected(
     if row_count == 0 {
         return Ok(FlatColumn::empty(&DataType::MapUtf8));
     }
-    let parsed = parse_shredded_residual_parts(raw_body, row_count, block_flags)?;
+    let mut budget = MAX_BLOCK_RAW_BYTES;
+    let parsed = parse_shredded_residual_parts(raw_body, row_count, block_flags, &mut budget)?;
     if parsed.entry_count == 0 {
         return Ok(FlatColumn::try_new(
-            FlatData::MapUtf8(Box::new(MapData::empty_with_rows(row_count)?)),
+            FlatData::MapUtf8(Box::new(empty_map_with_rows(row_count)?)),
             parsed.row_nulls,
         )?);
     }
@@ -1537,6 +1659,7 @@ fn decode_shredded_residual_with_count_selected(
     let mut out_key_bytes = Vec::new();
     let mut out_val_offsets = vec![0u32];
     let mut out_val_bytes = Vec::new();
+    let mut out_val_pos = 0usize;
     let mut out_val_valid = Vec::new();
 
     for row in mask.iter_ones() {
@@ -1564,20 +1687,28 @@ fn decode_shredded_residual_with_count_selected(
 
             match &val_source {
                 ValSource::Fsst(view) => {
-                    view.decode_row(idx, &mut out_val_bytes)?;
+                    view.decode_row_at(idx, &mut out_val_bytes, &mut out_val_pos)?;
                 }
                 ValSource::Plain { off_raw, data } => {
                     let vs = read_u32_le_at(off_raw, idx);
                     let ve = read_u32_le_at(off_raw, idx + 1);
+                    let vlen = ve - vs;
+                    if out_val_pos.saturating_add(vlen) > MAX_BLOCK_RAW_BYTES {
+                        return Err(StatamError::BoundsExceeded {
+                            reason: "shredded residual values exceed MAX_BLOCK_RAW_BYTES",
+                        });
+                    }
                     out_val_bytes.extend_from_slice(&data[vs..ve]);
+                    out_val_pos += vlen;
                 }
             }
-            out_val_offsets.push(out_val_bytes.len() as u32);
+            out_val_offsets.push(out_val_pos as u32);
 
             out_val_valid.push(parsed.val_nulls.as_ref().is_none_or(|bm| bm.get(idx)));
         }
         out_offsets.push(out_val_valid.len() as u32);
     }
+    out_val_bytes.truncate(out_val_pos);
 
     let tail_entries = out_val_valid.len() as u32;
     if out_offsets.len() < row_count + 1 {
@@ -1596,21 +1727,6 @@ fn decode_shredded_residual_with_count_selected(
         FlatData::MapUtf8(Box::new(map)),
         parsed.row_nulls,
     )?)
-}
-
-trait MapDataExt {
-    fn empty_with_rows(rows: usize) -> Result<MapData, StatamError>;
-}
-
-impl MapDataExt for MapData {
-    fn empty_with_rows(rows: usize) -> Result<MapData, StatamError> {
-        Ok(MapData::try_new(
-            vec![0u32; rows + 1],
-            Utf8Data::empty(),
-            Utf8Data::empty(),
-            None,
-        )?)
-    }
 }
 
 /// Encodes `List(T)`, `Events`, or `Links` into [`EncodedMiniBlock`].
@@ -1650,7 +1766,7 @@ pub(crate) fn encode_nested_column(
     let zm = match precomputed_zm {
         Some(z) => z,
         None => {
-            owned_zm = compute_zone_map(col, false);
+            owned_zm = compute_zone_map(col);
             if let Some(inline) = try_encode_const_or_null(col, dt, &owned_zm) {
                 return Ok(inline);
             }
@@ -1697,7 +1813,11 @@ pub(crate) fn encode_nested_column(
             let child_len = values.len() as u32;
             let child_payload =
                 encode_child_column_payload(values, inner, profile, remaining_depth - 1)?;
-            let child_null_count = count_col_nulls_u32(values);
+            let child_null_count = u32::try_from(count_col_nulls(values)).map_err(|_| {
+                StatamError::BoundsExceeded {
+                    reason: "ListEncoded child null_count exceeds u32::MAX",
+                }
+            })?;
 
             raw.push(child_payload.encoding as u8);
             raw.push(child_payload.block_flags);
@@ -1935,7 +2055,7 @@ pub fn decode_nested_column_selected(
             max_depth,
             mask,
         ),
-        (Encoding::ShreddedMap, DataType::MapUtf8) => Ok(Column::Flat(
+        (Encoding::ShreddedMap | Encoding::Plain, DataType::MapUtf8) => Ok(Column::Flat(
             decode_shredded_residual_block_selected(raw_body, entry, mask)?,
         )),
         (Encoding::EventsStruct, DataType::Events) => {
@@ -2033,6 +2153,7 @@ fn decode_selected_utf8_or_binary(
 
     let mut out_offsets = vec![0u32];
     let mut out_bytes = Vec::new();
+    let mut out_pos = 0usize;
     let mut out_nulls: Option<Bitmap> = None;
     let mut active_idx = 0usize;
 
@@ -2047,17 +2168,19 @@ fn decode_selected_utf8_or_binary(
             if valid {
                 match &source {
                     Source::Fsst(view) => {
-                        view.decode_row(idx, &mut out_bytes)?;
+                        view.decode_row_at(idx, &mut out_bytes, &mut out_pos)?;
                     }
                     Source::Plain { off_raw, data } => {
                         let s = read_u32_le_at(off_raw, idx);
                         let e = read_u32_le_at(off_raw, idx + 1);
-                        if out_bytes.len().saturating_add(e - s) > MAX_BLOCK_RAW_BYTES {
+                        let vlen = e - s;
+                        if out_pos.saturating_add(vlen) > MAX_BLOCK_RAW_BYTES {
                             return Err(StatamError::BoundsExceeded {
                                 reason: "active varlen bytes exceed MAX_BLOCK_RAW_BYTES",
                             });
                         }
                         out_bytes.extend_from_slice(&data[s..e]);
+                        out_pos += vlen;
                     }
                 }
             } else if out_nulls.is_none() {
@@ -2073,10 +2196,11 @@ fn decode_selected_utf8_or_binary(
             } else if let Some(bm) = out_nulls.as_mut() {
                 let _ = bm.set(active_idx, false);
             }
-            out_offsets.push(out_bytes.len() as u32);
+            out_offsets.push(out_pos as u32);
             active_idx += 1;
         }
     }
+    out_bytes.truncate(out_pos);
 
     Ok((out_offsets, out_bytes, out_nulls))
 }
@@ -2146,24 +2270,21 @@ fn validate_list_child_header(
     Ok(())
 }
 
-fn decode_list_body_selected(
-    raw_body: &[u8],
-    row_count: usize,
-    block_flags: u8,
-    inner: &DataType,
-    remaining_depth: usize,
-    mask: &Bitmap,
-) -> Result<Column, StatamError> {
-    if remaining_depth == 0 {
-        return Err(StatamError::BoundsExceeded {
-            reason: "DataType::List nesting exceeds MAX_NESTING_DEPTH",
-        });
-    }
+struct ParsedListChildHeader<'a> {
+    child_enc: Encoding,
+    child_flags: u8,
+    child_len: usize,
+    child_null_count: u32,
+    child_min_inline_len: u8,
+    child_min_inline: [u8; 16],
+    dict: Option<FileDict>,
+    child_body: &'a [u8],
+}
 
-    let (row_nulls, rest) = read_optional_nulls(raw_body, row_count, block_flags)?;
-    let (counts, rest) = read_packed_counts(rest, row_count)?;
-    let (offsets, total_child) = counts_to_offsets(&counts)?;
-
+fn parse_list_child_header(
+    rest: &[u8],
+    total_child: usize,
+) -> Result<ParsedListChildHeader<'_>, StatamError> {
     if rest.len() < 28 {
         return Err(StatamError::Corrupt {
             reason: "truncated ListEncoded child header",
@@ -2231,9 +2352,188 @@ fn decode_list_body_selected(
             reason: "ListEncoded child_body_len mismatch",
         });
     }
-    let child_body = &rest[pos..];
+    Ok(ParsedListChildHeader {
+        child_enc,
+        child_flags,
+        child_len,
+        child_null_count,
+        child_min_inline_len,
+        child_min_inline,
+        dict,
+        child_body: &rest[pos..],
+    })
+}
+
+fn debit_list_level_budget(
+    budget: &mut usize,
+    row_count: usize,
+    has_row_nulls: bool,
+) -> Result<(), StatamError> {
+    let counts_bytes = row_count
+        .checked_mul(4)
+        .ok_or(StatamError::BoundsExceeded {
+            reason: "ListEncoded row_count overflow",
+        })?;
+    let offsets_bytes = row_count
+        .checked_add(1)
+        .and_then(|n| n.checked_mul(4))
+        .ok_or(StatamError::BoundsExceeded {
+            reason: "ListEncoded offsets overflow",
+        })?;
+    let nulls_bytes = if has_row_nulls {
+        row_count.div_ceil(8)
+    } else {
+        0
+    };
+    let level_bytes = counts_bytes
+        .checked_add(offsets_bytes)
+        .and_then(|n| n.checked_add(nulls_bytes))
+        .ok_or(StatamError::BoundsExceeded {
+            reason: "ListEncoded allocation overflow",
+        })?;
+    debit_budget(
+        budget,
+        level_bytes,
+        "ListEncoded allocations exceed MAX_BLOCK_RAW_BYTES",
+    )
+}
+
+fn logical_const_null_bytes(dt: &DataType, len: usize) -> Option<usize> {
+    let nulls_bytes = len.div_ceil(8);
+    let data_bytes = match dt {
+        DataType::Null => 0,
+        DataType::Bool => len.div_ceil(8),
+        DataType::Date => len.checked_mul(4)?,
+        DataType::I64 | DataType::TimestampNs { .. } | DataType::F64 | DataType::FixedBytes8 => {
+            len.checked_mul(8)?
+        }
+        DataType::Decimal128 { .. } | DataType::Interval | DataType::FixedBytes16 => {
+            len.checked_mul(16)?
+        }
+        DataType::Utf8
+        | DataType::Binary
+        | DataType::List(_)
+        | DataType::MapUtf8
+        | DataType::Events
+        | DataType::Links => len.checked_add(1)?.checked_mul(4)?,
+    };
+    data_bytes.checked_add(nulls_bytes)
+}
+
+fn logical_const_value_bytes(dt: &DataType, inline_len: usize, len: usize) -> Option<usize> {
+    match dt {
+        DataType::Null => Some(0),
+        DataType::Bool => Some(len.div_ceil(8)),
+        DataType::Date => len.checked_mul(4),
+        DataType::I64 | DataType::TimestampNs { .. } | DataType::F64 | DataType::FixedBytes8 => {
+            len.checked_mul(8)
+        }
+        DataType::Decimal128 { .. } | DataType::Interval | DataType::FixedBytes16 => {
+            len.checked_mul(16)
+        }
+        DataType::Utf8 | DataType::Binary => {
+            let offs = len.checked_add(1)?.checked_mul(4)?;
+            let data = len.checked_mul(inline_len)?;
+            offs.checked_add(data)
+        }
+        DataType::List(_) | DataType::MapUtf8 | DataType::Events | DataType::Links => {
+            len.checked_add(1)?.checked_mul(4)
+        }
+    }
+}
+
+fn logical_rle_bytes(rle: &RleColumn, dt: &DataType) -> Option<usize> {
+    let total_len = rle.len();
+    let nulls_bytes = if rle.has_nulls() {
+        total_len.div_ceil(8)
+    } else {
+        0
+    };
+    let data_bytes = match rle.values().data() {
+        FlatData::Utf8(u) => {
+            let mut sum = 4usize;
+            let mut prev = 0u32;
+            let run_nulls = rle.values().nulls();
+            for (i, &end) in rle.run_ends().iter().enumerate() {
+                let run_len = (end - prev) as usize;
+                let val_len = if run_nulls.is_some_and(|bm| !bm.get(i)) {
+                    0usize
+                } else {
+                    u.get(i).map_or(0, str::len)
+                };
+                let per_row = val_len.checked_add(4)?;
+                sum = sum.checked_add(run_len.checked_mul(per_row)?)?;
+                prev = end;
+            }
+            sum
+        }
+        FlatData::Binary(b) => {
+            let mut sum = 4usize;
+            let mut prev = 0u32;
+            let run_nulls = rle.values().nulls();
+            for (i, &end) in rle.run_ends().iter().enumerate() {
+                let run_len = (end - prev) as usize;
+                let val_len = if run_nulls.is_some_and(|bm| !bm.get(i)) {
+                    0usize
+                } else {
+                    b.get(i).map_or(0, <[u8]>::len)
+                };
+                let per_row = val_len.checked_add(4)?;
+                sum = sum.checked_add(run_len.checked_mul(per_row)?)?;
+                prev = end;
+            }
+            sum
+        }
+        _ => logical_const_value_bytes(dt, 0, total_len)?,
+    };
+    data_bytes.checked_add(nulls_bytes)
+}
+
+fn decode_list_body_selected(
+    raw_body: &[u8],
+    row_count: usize,
+    block_flags: u8,
+    inner: &DataType,
+    remaining_depth: usize,
+    mask: &Bitmap,
+) -> Result<Column, StatamError> {
+    if remaining_depth == 0 {
+        return Err(StatamError::BoundsExceeded {
+            reason: "DataType::List nesting exceeds MAX_NESTING_DEPTH",
+        });
+    }
+
+    let mut budget = MAX_BLOCK_RAW_BYTES;
+    let (row_nulls, rest) = read_optional_nulls(raw_body, row_count, block_flags)?;
+    debit_list_level_budget(&mut budget, row_count, row_nulls.is_some())?;
+    let (counts, rest) = read_packed_counts(rest, row_count)?;
+    let (offsets, total_child) = counts_to_offsets(&counts)?;
+
+    let hdr = parse_list_child_header(rest, total_child)?;
+    let child_enc = hdr.child_enc;
+    let child_flags = hdr.child_flags;
+    let child_len = hdr.child_len;
+    let child_null_count = hdr.child_null_count;
+    let child_min_inline_len = hdr.child_min_inline_len;
+    let child_min_inline = hdr.child_min_inline;
+    let dict = hdr.dict;
+    let child_body = hdr.child_body;
 
     validate_list_child_header(child_enc, child_len, inner, dict.as_ref())?;
+    if (child_len == 0 || matches!(child_enc, Encoding::ConstNull | Encoding::Const))
+        && !child_body.is_empty()
+    {
+        return Err(StatamError::Corrupt {
+            reason: "trailing bytes in ListEncoded inline child column",
+        });
+    }
+    if child_enc == Encoding::Const
+        && (child_null_count != 0 || (child_flags & BLOCK_FLAG_HAS_NULLS) != 0)
+    {
+        return Err(StatamError::Corrupt {
+            reason: "Const child column cannot have nulls",
+        });
+    }
 
     let (out_offsets, active_child_count) = build_active_nested_offsets(&offsets, row_count, mask);
     if active_child_count == 0 {
@@ -2249,21 +2549,35 @@ fn decode_list_body_selected(
     }
 
     let compact_child: Option<Column> = match (child_enc, inner) {
-        (Encoding::ConstNull, _) => Some(Column::Const {
-            value: ScalarValue::Null(inner.clone()),
-            len: active_child_count,
-        }),
+        (Encoding::ConstNull, _) => {
+            let logical = logical_const_null_bytes(inner, active_child_count).ok_or(
+                StatamError::BoundsExceeded {
+                    reason: "ListEncoded ConstNull child exceeds MAX_BLOCK_RAW_BYTES",
+                },
+            )?;
+            debit_budget(
+                &mut budget,
+                logical,
+                "ListEncoded ConstNull child exceeds MAX_BLOCK_RAW_BYTES",
+            )?;
+            Some(Column::Const {
+                value: ScalarValue::Null(inner.clone()),
+                len: active_child_count,
+            })
+        }
         (Encoding::Const, _) => {
             let mut c = decode_child_column(
                 child_body,
                 child_enc,
                 child_flags,
                 active_child_count,
+                Some(child_null_count),
                 child_min_inline_len,
                 child_min_inline,
                 inner,
                 dict.as_ref(),
                 remaining_depth - 1,
+                &mut budget,
             )?;
             if let Column::Const { len, .. } = &mut c {
                 *len = active_child_count;
@@ -2281,6 +2595,11 @@ fn decode_list_body_selected(
                     reason: "child FileDict DataType mismatch",
                 });
             }
+            debit_budget(
+                &mut budget,
+                d.memory_bytes(),
+                "ListEncoded Dict child exceeds MAX_BLOCK_RAW_BYTES",
+            )?;
             let (c_nulls, after_nulls) = read_optional_nulls(child_body, child_len, child_flags)?;
             let full_codes =
                 decode_dict_codes_body(after_nulls, child_len, d.len(), c_nulls.as_ref())?;
@@ -2310,6 +2629,17 @@ fn decode_list_body_selected(
                     aidx += 1;
                 }
             }
+            let logical = dict_logical_materialized_bytes(
+                d.values(),
+                &active_codes,
+                active_nulls.as_ref(),
+                budget,
+            )?;
+            debit_budget(
+                &mut budget,
+                logical,
+                "ListEncoded Dict child exceeds MAX_BLOCK_RAW_BYTES",
+            )?;
             if d.memory_bytes() <= DICT_PASSTHROUGH_MAX_BYTES {
                 let dc = DictColumn::try_new(d.values().clone(), active_codes, active_nulls)?;
                 Some(Column::Dict(dc))
@@ -2467,11 +2797,13 @@ fn decode_list_body_selected(
             child_enc,
             child_flags,
             child_len,
+            Some(child_null_count),
             child_min_inline_len,
             child_min_inline,
             inner,
             dict.as_ref(),
             remaining_depth - 1,
+            &mut budget,
         )?;
         (offsets, full_child)
     };
@@ -2610,7 +2942,7 @@ fn decode_events_body_selected(
 
     if !matches!(
         t_enc,
-        Encoding::Plain | Encoding::ForBitpack | Encoding::DeltaBitpack | Encoding::Rle
+        Encoding::Plain | Encoding::ForBitpack | Encoding::DeltaBitpack
     ) {
         return Err(StatamError::Corrupt {
             reason: "unsupported EventsStruct times encoding",
@@ -2935,14 +3267,18 @@ pub(crate) fn decode_nested_column(
     }
 
     match (entry.encoding, dt) {
-        (Encoding::ListEncoded, DataType::List(inner)) => decode_list_body(
-            raw_body,
-            row_count,
-            entry.block_flags,
-            inner,
-            remaining_depth,
-        ),
-        (Encoding::ShreddedMap, DataType::MapUtf8) => Ok(Column::Flat(
+        (Encoding::ListEncoded, DataType::List(inner)) => {
+            let mut budget = MAX_BLOCK_RAW_BYTES;
+            decode_list_body(
+                raw_body,
+                row_count,
+                entry.block_flags,
+                inner,
+                remaining_depth,
+                &mut budget,
+            )
+        }
+        (Encoding::ShreddedMap | Encoding::Plain, DataType::MapUtf8) => Ok(Column::Flat(
             decode_shredded_residual_block(raw_body, entry)?,
         )),
         (Encoding::EventsStruct, DataType::Events) => {
@@ -2963,6 +3299,7 @@ fn decode_list_body(
     block_flags: u8,
     inner: &DataType,
     remaining_depth: usize,
+    budget: &mut usize,
 ) -> Result<Column, StatamError> {
     if remaining_depth == 0 {
         return Err(StatamError::BoundsExceeded {
@@ -2971,88 +3308,23 @@ fn decode_list_body(
     }
 
     let (row_nulls, rest) = read_optional_nulls(raw_body, row_count, block_flags)?;
+    debit_list_level_budget(budget, row_count, row_nulls.is_some())?;
     let (counts, rest) = read_packed_counts(rest, row_count)?;
     let (offsets, total_child) = counts_to_offsets(&counts)?;
 
-    if rest.len() < 28 {
-        return Err(StatamError::Corrupt {
-            reason: "truncated ListEncoded child header",
-        });
-    }
-    let child_enc = Encoding::from_u8(rest[0])?;
-    let child_flags = rest[1];
-    let child_len = u32::from_le_bytes([rest[2], rest[3], rest[4], rest[5]]) as usize;
-    let child_null_count = u32::from_le_bytes([rest[6], rest[7], rest[8], rest[9]]);
-    let child_min_inline_len = rest[10];
-    if child_len != total_child {
-        return Err(StatamError::Corrupt {
-            reason: "ListEncoded child_len mismatch with sum of counts",
-        });
-    }
-    if child_null_count as usize > child_len || child_min_inline_len > 16 {
-        return Err(StatamError::Corrupt {
-            reason: "invalid ListEncoded child metadata",
-        });
-    }
-    let mut child_min_inline = [0u8; 16];
-    child_min_inline.copy_from_slice(&rest[11..27]);
-    let has_dict = rest[27];
-    let mut pos = 28usize;
-
-    let dict = match has_dict {
-        0 => None,
-        1 => {
-            if rest.len() < pos + 5 {
-                return Err(StatamError::Corrupt {
-                    reason: "truncated ListEncoded inline dict header",
-                });
-            }
-            let sorted = rest[pos] != 0;
-            let dict_len =
-                u32::from_le_bytes([rest[pos + 1], rest[pos + 2], rest[pos + 3], rest[pos + 4]])
-                    as usize;
-            pos += 5;
-            if dict_len > MAX_DICT_BYTES || rest.len().saturating_sub(pos) < dict_len {
-                return Err(StatamError::Corrupt {
-                    reason: "truncated or oversized ListEncoded inline dict",
-                });
-            }
-            let d = FileDict::decode(&rest[pos..pos + dict_len], sorted)?;
-            pos += dict_len;
-            Some(d)
-        }
-        _ => {
-            return Err(StatamError::Corrupt {
-                reason: "invalid ListEncoded has_dict flag",
-            });
-        }
-    };
-
-    if rest.len().saturating_sub(pos) < 4 {
-        return Err(StatamError::Corrupt {
-            reason: "truncated ListEncoded child_body_len",
-        });
-    }
-    let child_body_len =
-        u32::from_le_bytes([rest[pos], rest[pos + 1], rest[pos + 2], rest[pos + 3]]) as usize;
-    pos += 4;
-    if rest.len().saturating_sub(pos) != child_body_len {
-        return Err(StatamError::Corrupt {
-            reason: "ListEncoded child_body_len mismatch",
-        });
-    }
-    let child_body = &rest[pos..];
-
+    let hdr = parse_list_child_header(rest, total_child)?;
     let child_col = decode_child_column(
-        child_body,
-        child_enc,
-        child_flags,
-        child_len,
-        child_min_inline_len,
-        child_min_inline,
+        hdr.child_body,
+        hdr.child_enc,
+        hdr.child_flags,
+        hdr.child_len,
+        Some(hdr.child_null_count),
+        hdr.child_min_inline_len,
+        hdr.child_min_inline,
         inner,
-        dict.as_ref(),
+        hdr.dict.as_ref(),
         remaining_depth - 1,
+        budget,
     )?;
 
     let list_flat = FlatColumn::try_new(
@@ -3072,22 +3344,58 @@ fn decode_child_column(
     enc: Encoding,
     flags: u8,
     len: usize,
+    null_count: Option<u32>,
     min_inline_len: u8,
     min_inline: [u8; 16],
     dt: &DataType,
     dict: Option<&FileDict>,
     remaining_depth: usize,
+    budget: &mut usize,
 ) -> Result<Column, StatamError> {
     if len == 0 {
+        if !body.is_empty() {
+            return Err(StatamError::Corrupt {
+                reason: "trailing bytes in empty child column",
+            });
+        }
         return Ok(Column::Flat(FlatColumn::empty(dt)));
     }
     if enc == Encoding::ConstNull {
+        if !body.is_empty() {
+            return Err(StatamError::Corrupt {
+                reason: "trailing bytes in ConstNull child column",
+            });
+        }
+        let logical = logical_const_null_bytes(dt, len).ok_or(StatamError::BoundsExceeded {
+            reason: "ConstNull child exceeds MAX_BLOCK_RAW_BYTES",
+        })?;
+        debit_budget(
+            budget,
+            logical,
+            "ConstNull child exceeds MAX_BLOCK_RAW_BYTES",
+        )?;
         return Ok(Column::Const {
             value: ScalarValue::Null(dt.clone()),
             len,
         });
     }
     if enc == Encoding::Const {
+        if !body.is_empty() {
+            return Err(StatamError::Corrupt {
+                reason: "trailing bytes in Const child column",
+            });
+        }
+        if null_count.is_some_and(|n| n != 0) || (flags & BLOCK_FLAG_HAS_NULLS) != 0 {
+            return Err(StatamError::Corrupt {
+                reason: "Const child column cannot have nulls",
+            });
+        }
+        let logical = logical_const_value_bytes(dt, usize::from(min_inline_len), len).ok_or(
+            StatamError::BoundsExceeded {
+                reason: "Const child exceeds MAX_BLOCK_RAW_BYTES",
+            },
+        )?;
+        debit_budget(budget, logical, "Const child exceeds MAX_BLOCK_RAW_BYTES")?;
         let fake = BlockEntry {
             first_row: 0,
             row_count: 1,
@@ -3122,34 +3430,110 @@ fn decode_child_column(
                 reason: "child FileDict DataType mismatch",
             });
         }
+        // Debit dictionary heap bytes before decoding codes, then debit logical materialized
+        // bytes so a small dict cannot expand to multi-GiB/TiB downstream.
+        let dict_mem = d.memory_bytes();
+        let codes_bytes = len.checked_mul(4).ok_or(StatamError::BoundsExceeded {
+            reason: "Dict child codes exceed MAX_BLOCK_RAW_BYTES",
+        })?;
+        if dict_mem
+            .checked_add(codes_bytes)
+            .is_none_or(|b| b > *budget)
+        {
+            return Err(StatamError::BoundsExceeded {
+                reason: "Dict child exceeds MAX_BLOCK_RAW_BYTES",
+            });
+        }
+        debit_budget(budget, dict_mem, "Dict child exceeds MAX_BLOCK_RAW_BYTES")?;
         let (nulls, after_nulls) = read_optional_nulls(body, len, flags)?;
-        return decode_dict_column(after_nulls, len, nulls, d);
+        let col = decode_dict_column(after_nulls, len, nulls, d)?;
+        let logical = match &col {
+            Column::Dict(dc) => {
+                dict_logical_materialized_bytes(dc.values(), dc.codes(), dc.nulls(), *budget)?
+            }
+            other => other.memory_bytes(),
+        };
+        debit_budget(
+            budget,
+            logical.max(codes_bytes),
+            "Dict child exceeds MAX_BLOCK_RAW_BYTES",
+        )?;
+        return Ok(col);
     }
 
     match dt {
         DataType::List(inner) if enc == Encoding::ListEncoded => {
-            decode_list_body(body, len, flags, inner, remaining_depth)
+            decode_list_body(body, len, flags, inner, remaining_depth, budget)
         }
         DataType::MapUtf8 if enc == Encoding::ShreddedMap => Ok(Column::Flat(
-            decode_shredded_residual_with_count(body, len, flags)?,
+            decode_shredded_residual_with_count_budgeted(body, len, flags, budget)?,
         )),
         DataType::MapUtf8 if enc == Encoding::Plain => {
             let (nulls, after_nulls) = read_optional_nulls(body, len, flags)?;
             let data = decode_inner_data(after_nulls, Encoding::Plain, len, dt, nulls.as_ref())?;
-            Ok(Column::Flat(FlatColumn::try_new(data, nulls)?))
+            let flat = FlatColumn::try_new(data, nulls)?;
+            debit_budget(
+                budget,
+                flat.memory_bytes(),
+                "nested child exceeds MAX_BLOCK_RAW_BYTES",
+            )?;
+            Ok(Column::Flat(flat))
         }
-        DataType::Events if enc == Encoding::EventsStruct => decode_events_body(body, len, flags),
-        DataType::Links if enc == Encoding::LinksStruct => decode_links_body(body, len, flags),
+        DataType::Events if enc == Encoding::EventsStruct => {
+            let col = decode_events_body(body, len, flags)?;
+            debit_budget(
+                budget,
+                col.memory_bytes(),
+                "nested child exceeds MAX_BLOCK_RAW_BYTES",
+            )?;
+            Ok(col)
+        }
+        DataType::Links if enc == Encoding::LinksStruct => {
+            let col = decode_links_body(body, len, flags)?;
+            debit_budget(
+                budget,
+                col.memory_bytes(),
+                "nested child exceeds MAX_BLOCK_RAW_BYTES",
+            )?;
+            Ok(col)
+        }
         DataType::MapUtf8 | DataType::Events | DataType::Links => Err(StatamError::Corrupt {
             reason: "incompatible nested encoding for DataType",
         }),
         _ => {
             if enc == Encoding::Rle {
-                return decode_rle_block(body, len, flags, dt);
+                let col = decode_rle_block(body, len, flags, dt)?;
+                let logical = match &col {
+                    Column::Rle(r) => {
+                        logical_rle_bytes(r, dt).ok_or(StatamError::BoundsExceeded {
+                            reason: "Rle child logical size exceeds MAX_BLOCK_RAW_BYTES",
+                        })?
+                    }
+                    other => other.memory_bytes(),
+                };
+                debit_budget(
+                    budget,
+                    logical,
+                    "Rle child logical size exceeds MAX_BLOCK_RAW_BYTES",
+                )?;
+                return Ok(col);
+            }
+            if let Some(min_logical) = logical_const_value_bytes(dt, 0, len)
+                && min_logical > *budget
+            {
+                return Err(StatamError::BoundsExceeded {
+                    reason: "nested child exceeds MAX_BLOCK_RAW_BYTES",
+                });
             }
             let (nulls, after_nulls) = read_optional_nulls(body, len, flags)?;
             let data = decode_inner_data(after_nulls, enc, len, dt, nulls.as_ref())?;
-            Ok(Column::Flat(FlatColumn::try_new(data, nulls)?))
+            let flat = FlatColumn::try_new(data, nulls)?;
+            debit_budget(
+                budget,
+                flat.memory_bytes(),
+                "nested child exceeds MAX_BLOCK_RAW_BYTES",
+            )?;
+            Ok(Column::Flat(flat))
         }
     }
 }
@@ -3181,9 +3565,12 @@ fn encode_child_column_payload(
     }
 
     // Try Dict encoding for Dict column or Utf8/Binary/FixedBytes leaf inside List/SubCol.
-    if let Column::Dict(d) = col {
-        let dict = FileDict::from_flat(d.values().clone(), false)?;
-        let dict_bytes = dict.encode(Codec::None, 0)?;
+    if let Column::Dict(d) = col
+        && DictValueKind::from_data_type(&d.values().data_type()).is_some()
+        && !d.values().has_nulls()
+        && let Ok(dict) = FileDict::from_flat(d.values().clone(), false)
+        && let Ok(dict_bytes) = dict.encode(Codec::None, 0)
+    {
         let mut body = Vec::new();
         write_optional_nulls(d.nulls(), &mut body);
         body.extend_from_slice(&encode_dict_codes_body(d.codes(), d.nulls())?);
@@ -3209,12 +3596,9 @@ fn encode_child_column_payload(
         )
         && let Column::Flat(f) = col
         && f.len() >= 4
-        && !f.all_null_check()
+        && !f.nulls().is_some_and(Bitmap::all_zeros)
     {
-        let builder = match profile {
-            WriteProfile::L0Fast => DictBuilder::l0_fast(),
-            WriteProfile::L1Compact => DictBuilder::l1_compact(),
-        };
+        let builder = DictBuilder::l1_compact();
         if let Some((dict, codes)) = builder.build(f)?
             && dict.len() * 2 <= f.len()
         {
@@ -3254,53 +3638,6 @@ fn encode_child_column_payload(
         inline_dict: None,
         body: enc_block.raw_body,
     })
-}
-
-trait AllNullHelper {
-    fn all_null_check(&self) -> bool;
-}
-
-impl AllNullHelper for FlatColumn {
-    fn all_null_check(&self) -> bool {
-        self.nulls().is_some_and(|bm| bm.all_zeros())
-    }
-}
-
-fn count_col_nulls_u32(col: &Column) -> u32 {
-    match col {
-        Column::Flat(f) => f.nulls().map_or_else(
-            || {
-                if matches!(f.data(), FlatData::Null(_)) {
-                    f.len() as u32
-                } else {
-                    0
-                }
-            },
-            |bm| bm.count_zeros() as u32,
-        ),
-        Column::Const { value, len } => {
-            if value.is_null() {
-                *len as u32
-            } else {
-                0
-            }
-        }
-        Column::Dict(d) => (0..d.len()).filter(|&i| d.is_null(i)).count() as u32,
-        Column::Rle(r) => {
-            if !r.has_nulls() {
-                return 0;
-            }
-            let mut n = 0u32;
-            let mut prev = 0u32;
-            for (i, &end) in r.run_ends().iter().enumerate() {
-                if r.values().is_null(i) {
-                    n += end - prev;
-                }
-                prev = end;
-            }
-            n
-        }
-    }
 }
 
 fn decode_events_body(
@@ -3389,7 +3726,7 @@ fn decode_events_body(
                 reason: "EventsStruct names dict is not Utf8",
             });
         };
-        check_varlen_take_bytes(dict_u.offsets(), &codes, None)?;
+        let _ = sum_varlen_take_bytes(dict_u.offsets(), &codes, None, MAX_BLOCK_RAW_BYTES)?;
         dict_u.take(&codes, None)?
     } else {
         if rest.len() < 4 {
@@ -3515,6 +3852,14 @@ fn decode_links_body(
 }
 
 fn read_packed_counts(src: &[u8], row_count: usize) -> Result<(Vec<u32>, &[u8]), StatamError> {
+    if row_count
+        .checked_mul(4)
+        .is_none_or(|b| b > MAX_BLOCK_RAW_BYTES)
+    {
+        return Err(StatamError::BoundsExceeded {
+            reason: "packed counts row_count exceeds MAX_BLOCK_RAW_BYTES",
+        });
+    }
     let Some(&bw) = src.first() else {
         return Err(StatamError::Corrupt {
             reason: "truncated packed counts bit_width",
@@ -3538,6 +3883,16 @@ fn read_packed_counts(src: &[u8], row_count: usize) -> Result<(Vec<u32>, &[u8]),
 }
 
 fn counts_to_offsets(counts: &[u32]) -> Result<(Vec<u32>, usize), StatamError> {
+    if counts
+        .len()
+        .checked_add(1)
+        .and_then(|n| n.checked_mul(4))
+        .is_none_or(|b| b > MAX_BLOCK_RAW_BYTES)
+    {
+        return Err(StatamError::BoundsExceeded {
+            reason: "nested offsets length exceeds MAX_BLOCK_RAW_BYTES",
+        });
+    }
     let mut offsets = Vec::with_capacity(counts.len() + 1);
     offsets.push(0u32);
     let mut total = 0usize;
@@ -3547,7 +3902,7 @@ fn counts_to_offsets(counts: &[u32]) -> Result<(Vec<u32>, usize), StatamError> {
             .ok_or(StatamError::BoundsExceeded {
                 reason: "nested total item count overflow",
             })?;
-        if total > MAX_BLOCK_RAW_BYTES {
+        if total.checked_mul(4).is_none_or(|b| b > MAX_BLOCK_RAW_BYTES) {
             return Err(StatamError::BoundsExceeded {
                 reason: "nested total item count exceeds MAX_BLOCK_RAW_BYTES",
             });
@@ -3707,5 +4062,438 @@ mod tests {
             decode_events_body_selected(&bad_dict, 2, 0, &mask),
             Err(StatamError::Corrupt { .. })
         ));
+
+        // EventsStruct with Rle times encoding must be rejected (m14).
+        let mut rle_t = bad_t.clone();
+        rle_t[3] = Encoding::Rle as u8;
+        assert!(matches!(
+            decode_events_body_selected(&rle_t, 2, 0, &mask),
+            Err(StatamError::Corrupt { .. })
+        ));
+    }
+
+    #[test]
+    fn nested_bombs_return_bounds_exceeded_or_corrupt_immediately() {
+        // 1. 30-byte ShreddedMap residual bomb: 1 row claiming 16,000,000 entries, num_keys=1,
+        //    klen_bw=0, keys_raw_bytes=0, kcode_bw=0.
+        let mut res_bomb = Vec::new();
+        let entry_count = 16_000_000u32;
+        let cnt_bw = min_bits_u32(&[entry_count]);
+        res_bomb.push(cnt_bw);
+        pack_u32(&[entry_count], cnt_bw, &mut res_bomb).unwrap();
+        res_bomb.extend_from_slice(&1u32.to_le_bytes()); // num_keys = 1
+        res_bomb.push(0); // klen_bw = 0
+        res_bomb.extend_from_slice(&0u32.to_le_bytes()); // keys_raw_bytes = 0
+        res_bomb.push(0); // kcode_bw = 0
+        res_bomb.push(0); // val_nulls = None
+        res_bomb.push(Encoding::Fsst as u8);
+        res_bomb.extend_from_slice(&2u32.to_le_bytes());
+        res_bomb.extend_from_slice(&[0u8, 0u8]); // sym_count=0, len_bw=0
+        assert!(res_bomb.len() <= 30);
+        assert!(matches!(
+            decode_shredded_residual_with_count(&res_bomb, 1, 0),
+            Err(StatamError::BoundsExceeded { .. } | StatamError::Corrupt { .. })
+        ));
+
+        // 2. 8-level List<List<...<I64>>> bomb where each level claims millions of elements via bw=0 / small counts.
+        let mut dt = DataType::I64;
+        // Innermost leaf: ConstNull of 4,000,000 I64s (32 MiB) inside 7 outer list levels each with 4,000,000 offsets (32 MiB/level).
+        let level_n = 4_000_000u32;
+        let mut child_body = Vec::new();
+        let mut child_enc = Encoding::ConstNull;
+        for _ in 0..8 {
+            let mut body = Vec::new();
+            let bw = min_bits_u32(&[level_n]);
+            body.push(bw);
+            pack_u32(&[level_n], bw, &mut body).unwrap();
+            body.push(child_enc as u8);
+            body.push(0); // child_flags
+            body.extend_from_slice(&level_n.to_le_bytes()); // child_len
+            body.extend_from_slice(&0u32.to_le_bytes()); // child_null_count
+            body.push(0); // min_inline_len
+            body.extend_from_slice(&[0u8; 16]);
+            body.push(0); // has_dict = 0
+            body.extend_from_slice(&(child_body.len() as u32).to_le_bytes());
+            body.extend_from_slice(&child_body);
+
+            child_body = body;
+            child_enc = Encoding::ListEncoded;
+            dt = DataType::List(Box::new(dt));
+        }
+        let DataType::List(outer_inner) = &dt else {
+            unreachable!();
+        };
+        let mut budget = MAX_BLOCK_RAW_BYTES;
+        assert!(matches!(
+            decode_list_body(&child_body, 1, 0, outer_inner, 8, &mut budget),
+            Err(StatamError::BoundsExceeded { .. } | StatamError::Corrupt { .. })
+        ));
+
+        // 3. List<Utf8> Rle petabyte bomb: 1 run repeating a 1 MiB string 16,000,000 times (~16 TB).
+        let big_str = "x".repeat(1024 * 1024);
+        let rle_len = 16_000_000u32;
+        let mut rle_body = Vec::new();
+        rle_body.extend_from_slice(&1u32.to_le_bytes()); // num_runs = 1
+        let re_bw = min_bits_u32(&[rle_len]);
+        rle_body.push(re_bw);
+        pack_u32(&[rle_len], re_bw, &mut rle_body).unwrap();
+        rle_body.push(Encoding::Plain as u8);
+        rle_body.extend_from_slice(&0u32.to_le_bytes());
+        rle_body.extend_from_slice(&(big_str.len() as u32).to_le_bytes());
+        rle_body.extend_from_slice(big_str.as_bytes());
+
+        let mut list_rle = Vec::new();
+        let l_bw = min_bits_u32(&[rle_len]);
+        list_rle.push(l_bw);
+        pack_u32(&[rle_len], l_bw, &mut list_rle).unwrap();
+        list_rle.push(Encoding::Rle as u8);
+        list_rle.push(0); // child_flags
+        list_rle.extend_from_slice(&rle_len.to_le_bytes());
+        list_rle.extend_from_slice(&0u32.to_le_bytes());
+        list_rle.push(0);
+        list_rle.extend_from_slice(&[0u8; 16]);
+        list_rle.push(0); // has_dict = 0
+        list_rle.extend_from_slice(&(rle_body.len() as u32).to_le_bytes());
+        list_rle.extend_from_slice(&rle_body);
+        let mut budget = MAX_BLOCK_RAW_BYTES;
+        assert!(matches!(
+            decode_list_body(&list_rle, 1, 0, &DataType::Utf8, 4, &mut budget),
+            Err(StatamError::BoundsExceeded { .. } | StatamError::Corrupt { .. })
+        ));
+
+        // 4. List<Utf8> small-dict 3 TiB bomb: 1-entry 200 KiB dict (<= 256 KiB passthrough)
+        //    with 16,000,000 zero codes (bw=0).
+        let big_entry = "z".repeat(200 * 1024);
+        let small_dict = FileDict::from_flat(
+            FlatColumn::try_new(
+                FlatData::Utf8(Utf8Data::try_from_slices([big_entry.as_str()]).unwrap()),
+                None,
+            )
+            .unwrap(),
+            true,
+        )
+        .unwrap();
+        assert!(small_dict.memory_bytes() <= DICT_PASSTHROUGH_MAX_BYTES);
+        let dict_bytes = small_dict.encode(Codec::None, 0).unwrap();
+        let dict_codes_body = [0u8, 0, 0, 0, 0, 0]; // sub_enc=ForBitpack, base=0, bw=0 (0 packed bytes)
+        let child_n = 16_000_000u32;
+        let mut list_dict = Vec::new();
+        let ld_bw = min_bits_u32(&[child_n]);
+        list_dict.push(ld_bw);
+        pack_u32(&[child_n], ld_bw, &mut list_dict).unwrap();
+        list_dict.push(Encoding::Dict as u8);
+        list_dict.push(0); // child_flags
+        list_dict.extend_from_slice(&child_n.to_le_bytes());
+        list_dict.extend_from_slice(&0u32.to_le_bytes());
+        list_dict.push(0);
+        list_dict.extend_from_slice(&[0u8; 16]);
+        list_dict.push(1); // has_dict = 1
+        list_dict.push(1); // sorted = true
+        list_dict.extend_from_slice(&(dict_bytes.len() as u32).to_le_bytes());
+        list_dict.extend_from_slice(&dict_bytes);
+        list_dict.extend_from_slice(&(dict_codes_body.len() as u32).to_le_bytes());
+        list_dict.extend_from_slice(&dict_codes_body);
+        let mut budget = MAX_BLOCK_RAW_BYTES;
+        assert!(matches!(
+            decode_list_body(&list_dict, 1, 0, &DataType::Utf8, 4, &mut budget),
+            Err(StatamError::BoundsExceeded { .. } | StatamError::Corrupt { .. })
+        ));
+
+        // 5. ConstNull(FixedBytes16) 16M-elem 256 MiB bomb rejected by logical budget.
+        let mut list_cnull = Vec::new();
+        list_cnull.push(ld_bw);
+        pack_u32(&[child_n], ld_bw, &mut list_cnull).unwrap();
+        list_cnull.push(Encoding::ConstNull as u8);
+        list_cnull.push(0);
+        list_cnull.extend_from_slice(&child_n.to_le_bytes());
+        list_cnull.extend_from_slice(&child_n.to_le_bytes());
+        list_cnull.push(0);
+        list_cnull.extend_from_slice(&[0u8; 16]);
+        list_cnull.push(0);
+        list_cnull.extend_from_slice(&0u32.to_le_bytes());
+        let mut budget = MAX_BLOCK_RAW_BYTES;
+        assert!(matches!(
+            decode_list_body(&list_cnull, 1, 0, &DataType::FixedBytes16, 4, &mut budget),
+            Err(StatamError::BoundsExceeded { .. })
+        ));
+    }
+
+    #[test]
+    fn list_with_non_byte_and_nullable_dict_children_falls_back_cleanly() {
+        // 1. List<I64> whose child is Column::Dict<I64> (unsupported DictValueKind):
+        let i64_vals = FlatColumn::try_new(FlatData::I64(vec![10, 20, 30]), None).unwrap();
+        let i64_dict =
+            Column::Dict(DictColumn::try_new(i64_vals, vec![0, 1, 2, 1, 0], None).unwrap());
+        let list_i64 = Column::Flat(
+            FlatColumn::try_new(
+                FlatData::List {
+                    item_type: DataType::I64,
+                    offsets: vec![0, 2, 5],
+                    values: Box::new(i64_dict),
+                },
+                None,
+            )
+            .unwrap(),
+        );
+        let dt_i64 = DataType::List(Box::new(DataType::I64));
+        let enc_i64 =
+            encode_nested_column(&list_i64, &dt_i64, WriteProfile::L1Compact, 4, None).unwrap();
+        let entry_i64 = BlockEntry {
+            first_row: 0,
+            row_count: 2,
+            null_count: enc_i64.null_count,
+            offset: 0,
+            stored_len: 0,
+            raw_len: enc_i64.raw_body.len() as u32,
+            encoding: enc_i64.encoding,
+            codec: Codec::None,
+            block_flags: enc_i64.block_flags,
+            min_inline_len: enc_i64.min_inline_len,
+            max_inline_len: enc_i64.max_inline_len,
+            reserved: [0; 3],
+            min_inline: enc_i64.min_inline,
+            max_inline: enc_i64.max_inline,
+        };
+        let dec_i64 = decode_nested_column(&enc_i64.raw_body, &entry_i64, &dt_i64, 4).unwrap();
+        assert!(dec_i64.semantic_eq(&list_i64));
+
+        // 2. List<Utf8> whose child is Column::Dict<Utf8> with nulls inside dict.values():
+        let dict_vals_null = FlatColumn::try_new(
+            FlatData::Utf8(Utf8Data::try_from_slices(["ok", "", "done"]).unwrap()),
+            Some(Bitmap::from_bools(&[true, false, true])),
+        )
+        .unwrap();
+        let utf8_dict =
+            Column::Dict(DictColumn::try_new(dict_vals_null, vec![0, 1, 2, 0], None).unwrap());
+        let list_u = Column::Flat(
+            FlatColumn::try_new(
+                FlatData::List {
+                    item_type: DataType::Utf8,
+                    offsets: vec![0, 2, 4],
+                    values: Box::new(utf8_dict),
+                },
+                None,
+            )
+            .unwrap(),
+        );
+        let dt_u = DataType::List(Box::new(DataType::Utf8));
+        let enc_u = encode_nested_column(&list_u, &dt_u, WriteProfile::L1Compact, 4, None).unwrap();
+        let entry_u = BlockEntry {
+            first_row: 0,
+            row_count: 2,
+            null_count: enc_u.null_count,
+            offset: 0,
+            stored_len: 0,
+            raw_len: enc_u.raw_body.len() as u32,
+            encoding: enc_u.encoding,
+            codec: Codec::None,
+            block_flags: enc_u.block_flags,
+            min_inline_len: enc_u.min_inline_len,
+            max_inline_len: enc_u.max_inline_len,
+            reserved: [0; 3],
+            min_inline: enc_u.min_inline,
+            max_inline: enc_u.max_inline,
+        };
+        let dec_u = decode_nested_column(&enc_u.raw_body, &entry_u, &dt_u, 4).unwrap();
+        assert!(dec_u.semantic_eq(&list_u));
+    }
+
+    #[test]
+    fn nested_minors_plain_map_large_dict_subcol_and_const_child_validation() {
+        // m15: L0Fast Plain MapUtf8 routes cleanly through decode_nested_column & decode_nested_column_selected.
+        let map = MapData::try_new(
+            vec![0, 1, 2, 2, 3],
+            Utf8Data::try_from_slices(["a", "b", "c"]).unwrap(),
+            Utf8Data::try_from_slices(["1", "2", "3"]).unwrap(),
+            None,
+        )
+        .unwrap();
+        let map_col =
+            Column::Flat(FlatColumn::try_new(FlatData::MapUtf8(Box::new(map)), None).unwrap());
+        let enc_map =
+            encode_nested_column(&map_col, &DataType::MapUtf8, WriteProfile::L0Fast, 4, None)
+                .unwrap();
+        assert_eq!(enc_map.encoding, Encoding::Plain);
+        let entry_map = BlockEntry {
+            first_row: 0,
+            row_count: 4,
+            null_count: enc_map.null_count,
+            offset: 0,
+            stored_len: 0,
+            raw_len: enc_map.raw_body.len() as u32,
+            encoding: enc_map.encoding,
+            codec: Codec::None,
+            block_flags: enc_map.block_flags,
+            min_inline_len: 0,
+            max_inline_len: 0,
+            reserved: [0; 3],
+            min_inline: [0; 16],
+            max_inline: [0; 16],
+        };
+        let dec_full =
+            decode_nested_column(&enc_map.raw_body, &entry_map, &DataType::MapUtf8, 4).unwrap();
+        assert!(dec_full.semantic_eq(&map_col));
+        let mut mask = Bitmap::new_zeroed(4);
+        let _ = mask.set(0, true);
+        let dec_sel = decode_nested_column_selected(
+            &enc_map.raw_body,
+            &entry_map,
+            &DataType::MapUtf8,
+            4,
+            &mask,
+        )
+        .unwrap();
+        assert_eq!(
+            dec_sel.get_scalar(0).unwrap(),
+            map_col.get_scalar(0).unwrap()
+        );
+
+        // m16: large-dict (> 256 KiB) ShreddedSubCol dispatches to decode_dict_selected.
+        let pad = "p".repeat(4096);
+        let dict_vals: Vec<String> = (0..80).map(|k| format!("k{k:03}-{pad}")).collect();
+        let row_count = 256usize;
+        let row_strs: Vec<&str> = (0..row_count).map(|i| dict_vals[i % 80].as_str()).collect();
+        let sub = ShreddedSubCol {
+            in_map: Bitmap::new_ones(row_count),
+            value_null: Bitmap::new_ones(row_count),
+            values: Column::Flat(
+                FlatColumn::try_new(
+                    FlatData::Utf8(Utf8Data::try_from_slices(row_strs.iter().copied()).unwrap()),
+                    None,
+                )
+                .unwrap(),
+            ),
+        };
+        let encoded_sub = encode_shredded_subcol(&sub, WriteProfile::L1Compact).unwrap();
+        let mut sub_mask = Bitmap::new_zeroed(row_count);
+        let _ = sub_mask.set(7, true);
+        let _ = sub_mask.set(199, true);
+        let dec_sub = decode_shredded_subcol_selected(&encoded_sub, row_count, &sub_mask).unwrap();
+        assert_eq!(
+            dec_sub.values.get_scalar(7).unwrap(),
+            sub.values.get_scalar(7).unwrap()
+        );
+        assert_eq!(
+            dec_sub.values.get_scalar(199).unwrap(),
+            sub.values.get_scalar(199).unwrap()
+        );
+        assert!(dec_sub.values.is_null(0));
+
+        // m14: decode_child_column rejects trailing bytes on Const/ConstNull and nulls on Const.
+        let mut budget = MAX_BLOCK_RAW_BYTES;
+        assert!(matches!(
+            decode_child_column(
+                &[1u8],
+                Encoding::Const,
+                0,
+                4,
+                Some(0),
+                1,
+                [1u8; 16],
+                &DataType::Bool,
+                None,
+                2,
+                &mut budget,
+            ),
+            Err(StatamError::Corrupt { .. })
+        ));
+        assert!(matches!(
+            decode_child_column(
+                &[],
+                Encoding::Const,
+                0,
+                4,
+                Some(1),
+                1,
+                [1u8; 16],
+                &DataType::Bool,
+                None,
+                2,
+                &mut budget,
+            ),
+            Err(StatamError::Corrupt { .. })
+        ));
+    }
+
+    #[test]
+    fn nested_fsst_sparse_decode_20k_100b_is_fast_and_exact() {
+        // B9: 20,000 x ~100 B FSST-encoded strings inside a List<Utf8> (row 0 holds all 20,000 items,
+        // rows 1..64 are empty; selecting only row 0 triggers sparse decode_selected_utf8_or_binary).
+        let item_count = 20_000usize;
+        let row_count = 64usize;
+        let items: Vec<String> = (0..item_count)
+            .map(|i| {
+                format!(
+                    "https://observability.cetra.sh/api/v1/spans/trace_{i:06}/events/item_{:04}/payload_end",
+                    i % 997
+                )
+            })
+            .collect();
+        let child_col = Column::Flat(
+            FlatColumn::try_new(
+                FlatData::Utf8(
+                    Utf8Data::try_from_slices(items.iter().map(String::as_str)).unwrap(),
+                ),
+                None,
+            )
+            .unwrap(),
+        );
+        let mut offsets = Vec::with_capacity(row_count + 1);
+        offsets.push(0u32);
+        offsets.resize(row_count + 1, item_count as u32);
+        let list_col = Column::Flat(
+            FlatColumn::try_new(
+                FlatData::List {
+                    item_type: DataType::Utf8,
+                    offsets,
+                    values: Box::new(child_col),
+                },
+                None,
+            )
+            .unwrap(),
+        );
+        let dt = DataType::List(Box::new(DataType::Utf8));
+        let enc = encode_nested_column(&list_col, &dt, WriteProfile::L1Compact, 4, None).unwrap();
+        let entry = BlockEntry {
+            first_row: 0,
+            row_count: row_count as u16,
+            null_count: enc.null_count,
+            offset: 0,
+            stored_len: 0,
+            raw_len: enc.raw_body.len() as u32,
+            encoding: enc.encoding,
+            codec: Codec::None,
+            block_flags: enc.block_flags,
+            min_inline_len: 0,
+            max_inline_len: 0,
+            reserved: [0; 3],
+            min_inline: [0; 16],
+            max_inline: [0; 16],
+        };
+        let mut mask = Bitmap::new_zeroed(row_count);
+        let _ = mask.set(0, true);
+        let dec = decode_nested_column_selected(&enc.raw_body, &entry, &dt, 4, &mask).unwrap();
+        let Column::Flat(fc) = &dec else {
+            panic!("expected Flat List");
+        };
+        let FlatData::List {
+            offsets: dec_offs,
+            values: dec_vals,
+            ..
+        } = fc.data()
+        else {
+            panic!("expected FlatData::List");
+        };
+        assert_eq!(dec_offs[0], 0);
+        assert_eq!(dec_offs[1] as usize, item_count);
+        let Column::Flat(vf) = dec_vals.as_ref() else {
+            panic!("expected Flat child");
+        };
+        let FlatData::Utf8(u) = vf.data() else {
+            panic!("expected Utf8 child");
+        };
+        assert_eq!(u.len(), item_count);
+        assert_eq!(u.get(0), Some(items[0].as_str()));
+        assert_eq!(u.get(item_count - 1), Some(items[item_count - 1].as_str()));
     }
 }

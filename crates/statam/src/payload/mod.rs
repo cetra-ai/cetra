@@ -426,9 +426,19 @@ pub fn decode_payload_refs(
                 total_decoded_bytes = add_budget(total_decoded_bytes, mem_bytes, effective_max)?;
 
                 let mut refs = Vec::with_capacity(n_chunks);
+                let mut first_pack: Option<u16> = None;
                 for _ in 0..n_chunks {
                     let pack_idx = cur.read_u16()?;
                     let chunk_id = cur.read_u32()?;
+                    if let Some(fp) = first_pack {
+                        if pack_idx != fp {
+                            return Err(StatamError::Corrupt {
+                                reason: "mixed pack indices within a single payload row",
+                            });
+                        }
+                    } else {
+                        first_pack = Some(pack_idx);
+                    }
                     refs.push((pack_idx, chunk_id));
                 }
                 push_history(&mut history, Some((refs.clone(), 0)));
@@ -501,6 +511,7 @@ pub fn decode_payload_refs(
                 } else {
                     (0u16, 0u32)
                 };
+                let mut row_pack = (keep_prefix > 0).then_some(prev.0);
                 for _ in 0..n_new {
                     let p_delta = zigzag_decode_i64(cur.read_varint_u64()?);
                     let c_delta = zigzag_decode_i64(cur.read_varint_u64()?);
@@ -510,6 +521,15 @@ pub fn decode_payload_refs(
                         .ok_or(StatamError::Corrupt {
                             reason: "payload ref pack_idx delta out of u16 range",
                         })?;
+                    if let Some(rp) = row_pack {
+                        if next_pack != rp {
+                            return Err(StatamError::Corrupt {
+                                reason: "mixed pack indices within a single payload row",
+                            });
+                        }
+                    } else {
+                        row_pack = Some(next_pack);
+                    }
                     let next_chunk = i64::from(prev.1)
                         .checked_add(c_delta)
                         .and_then(|v| u32::try_from(v).ok())
@@ -792,9 +812,19 @@ pub fn decode_payload_refs_flat(
                     })?;
                 row_pack_idxs.reserve(n_chunks);
                 chunk_ids.reserve(n_chunks);
+                let mut first_pack: Option<u16> = None;
                 for _ in 0..n_chunks {
                     let pack_idx = cur.read_u16()?;
                     let chunk_id = cur.read_u32()?;
+                    if let Some(fp) = first_pack {
+                        if pack_idx != fp {
+                            return Err(StatamError::Corrupt {
+                                reason: "mixed pack indices within a single payload row",
+                            });
+                        }
+                    } else {
+                        first_pack = Some(pack_idx);
+                    }
                     row_pack_idxs.push(pack_idx);
                     chunk_ids.push(chunk_id);
                 }
@@ -880,6 +910,7 @@ pub fn decode_payload_refs_flat(
                 } else {
                     (0u16, 0u32)
                 };
+                let mut row_pack = (keep_prefix > 0).then_some(prev.0);
                 for _ in 0..n_new {
                     let p_delta = zigzag_decode_i64(cur.read_varint_u64()?);
                     let c_delta = zigzag_decode_i64(cur.read_varint_u64()?);
@@ -889,6 +920,15 @@ pub fn decode_payload_refs_flat(
                         .ok_or(StatamError::Corrupt {
                             reason: "payload ref pack_idx delta out of u16 range",
                         })?;
+                    if let Some(rp) = row_pack {
+                        if next_pack != rp {
+                            return Err(StatamError::Corrupt {
+                                reason: "mixed pack indices within a single payload row",
+                            });
+                        }
+                    } else {
+                        row_pack = Some(next_pack);
+                    }
                     let next_chunk = i64::from(prev.1)
                         .checked_add(c_delta)
                         .and_then(|v| u32::try_from(v).ok())
@@ -985,6 +1025,7 @@ fn skip_payload_delta_entries(
         parent_chunks_opt.map(|p| p[keep_prefix - 1])
     };
     if let Some(mut prev) = exact_prev {
+        let mut row_pack = (keep_prefix > 0).then_some(prev.0);
         for _ in 0..n_new {
             let p_delta = zigzag_decode_i64(cur.read_varint_u64()?);
             let c_delta = zigzag_decode_i64(cur.read_varint_u64()?);
@@ -994,6 +1035,15 @@ fn skip_payload_delta_entries(
                 .ok_or(StatamError::Corrupt {
                     reason: "payload ref pack_idx delta out of u16 range",
                 })?;
+            if let Some(rp) = row_pack {
+                if next_pack != rp {
+                    return Err(StatamError::Corrupt {
+                        reason: "mixed pack indices within a single payload row",
+                    });
+                }
+            } else {
+                row_pack = Some(next_pack);
+            }
             let next_chunk = i64::from(prev.1)
                 .checked_add(c_delta)
                 .and_then(|v| u32::try_from(v).ok())
@@ -1003,12 +1053,14 @@ fn skip_payload_delta_entries(
             prev = (next_pack, next_chunk);
         }
     } else {
+        // `keep_prefix > 0` with `HistorySlot::Summary`: every new entry must keep the parent's
+        // uniform pack_idx, so `p_delta` must be `0`.
         for _ in 0..n_new {
             let p_delta = zigzag_decode_i64(cur.read_varint_u64()?);
             let c_delta = zigzag_decode_i64(cur.read_varint_u64()?);
-            if p_delta.unsigned_abs() > u64::from(u16::MAX) {
+            if p_delta != 0 {
                 return Err(StatamError::Corrupt {
-                    reason: "payload ref pack_idx delta out of u16 range",
+                    reason: "mixed pack indices within a single payload row",
                 });
             }
             if c_delta.unsigned_abs() > u64::from(u32::MAX) {
@@ -1202,7 +1254,18 @@ fn decode_payload_refs_selected_inner(
                     });
                 }
                 if !is_active && !need_full {
-                    let _ = cur.read_exact(wire_bytes)?;
+                    let raw_pairs = cur.read_exact(wire_bytes)?;
+                    if n_chunks > 1 {
+                        let first_pack = u16::from_le_bytes([raw_pairs[0], raw_pairs[1]]);
+                        for pair in raw_pairs.as_chunks::<6>().0.iter().skip(1) {
+                            let pack_idx = u16::from_le_bytes([pair[0], pair[1]]);
+                            if pack_idx != first_pack {
+                                return Err(StatamError::Corrupt {
+                                    reason: "mixed pack indices within a single payload row",
+                                });
+                            }
+                        }
+                    }
                     push_slot(
                         &mut history,
                         HistorySlot::Summary {
@@ -1219,9 +1282,19 @@ fn decode_payload_refs_selected_inner(
                     total_decoded_bytes =
                         add_budget(total_decoded_bytes, mem_bytes, effective_max)?;
                     let mut refs = Vec::with_capacity(n_chunks);
+                    let mut first_pack: Option<u16> = None;
                     for _ in 0..n_chunks {
                         let pack_idx = cur.read_u16()?;
                         let chunk_id = cur.read_u32()?;
+                        if let Some(fp) = first_pack {
+                            if pack_idx != fp {
+                                return Err(StatamError::Corrupt {
+                                    reason: "mixed pack indices within a single payload row",
+                                });
+                            }
+                        } else {
+                            first_pack = Some(pack_idx);
+                        }
                         refs.push((pack_idx, chunk_id));
                     }
                     if is_active && need_full {
@@ -1346,6 +1419,7 @@ fn decode_payload_refs_selected_inner(
                     } else {
                         (0u16, 0u32)
                     };
+                    let mut row_pack = (keep_prefix > 0).then_some(prev.0);
                     for _ in 0..n_new {
                         let p_delta = zigzag_decode_i64(cur.read_varint_u64()?);
                         let c_delta = zigzag_decode_i64(cur.read_varint_u64()?);
@@ -1355,6 +1429,15 @@ fn decode_payload_refs_selected_inner(
                             .ok_or(StatamError::Corrupt {
                                 reason: "payload ref pack_idx delta out of u16 range",
                             })?;
+                        if let Some(rp) = row_pack {
+                            if next_pack != rp {
+                                return Err(StatamError::Corrupt {
+                                    reason: "mixed pack indices within a single payload row",
+                                });
+                            }
+                        } else {
+                            row_pack = Some(next_pack);
+                        }
                         let next_chunk = i64::from(prev.1)
                             .checked_add(c_delta)
                             .and_then(|v| u32::try_from(v).ok())
@@ -1506,6 +1589,11 @@ pub(crate) fn scan_payload_refs_inline_substring(
     pack_has_edges: &[bool],
     mut match_inline: impl FnMut(&[u8]) -> bool,
 ) -> Result<Bitmap, StatamError> {
+    if active_mask.len() != row_count {
+        return Err(StatamError::Corrupt {
+            reason: "active mask length mismatch in payload refs scan",
+        });
+    }
     if pack_has_edges.len() != pack_chunk_counts.len() {
         return Err(StatamError::Corrupt {
             reason: "pack metadata length mismatch in payload refs scan",
@@ -1606,9 +1694,19 @@ pub(crate) fn scan_payload_refs_inline_substring(
                     add_budget(total_decoded_bytes, mem_bytes, MAX_BATCH_DECODED_BYTES)?;
                 let raw_pairs = cur.read_exact(wire_bytes)?;
                 let check_edges = any_no_edges && n_chunks > 1;
+                let mut first_pack: Option<u16> = None;
                 for pair in raw_pairs.as_chunks::<6>().0 {
                     let pack_idx = u16::from_le_bytes([pair[0], pair[1]]);
                     let chunk_id = u32::from_le_bytes([pair[2], pair[3], pair[4], pair[5]]);
+                    if let Some(fp) = first_pack {
+                        if pack_idx != fp {
+                            return Err(StatamError::Corrupt {
+                                reason: "mixed pack indices within a single payload row",
+                            });
+                        }
+                    } else {
+                        first_pack = Some(pack_idx);
+                    }
                     validate_pack_chunk(pack_idx, chunk_id, pack_chunk_counts)?;
                     if check_edges {
                         record_pack_ref_in_row(
@@ -1745,6 +1843,7 @@ pub(crate) fn scan_payload_refs_inline_substring(
                             }
                         }
                     }
+                    let mut row_pack = (keep_prefix > 0).then_some(prev.0);
                     for _ in 0..n_new {
                         let p_delta = zigzag_decode_i64(cur.read_varint_u64()?);
                         let c_delta = zigzag_decode_i64(cur.read_varint_u64()?);
@@ -1754,6 +1853,15 @@ pub(crate) fn scan_payload_refs_inline_substring(
                             .ok_or(StatamError::Corrupt {
                                 reason: "payload ref pack_idx delta out of u16 range",
                             })?;
+                        if let Some(rp) = row_pack {
+                            if next_pack != rp {
+                                return Err(StatamError::Corrupt {
+                                    reason: "mixed pack indices within a single payload row",
+                                });
+                            }
+                        } else {
+                            row_pack = Some(next_pack);
+                        }
                         let next_chunk = i64::from(prev.1)
                             .checked_add(c_delta)
                             .and_then(|v| u32::try_from(v).ok())
@@ -1798,6 +1906,7 @@ pub(crate) fn scan_payload_refs_inline_substring(
                             unreachable!()
                         }
                     }
+                    let mut row_pack = (keep_prefix > 0).then_some(prev.0);
                     for _ in 0..n_new {
                         let p_delta = zigzag_decode_i64(cur.read_varint_u64()?);
                         let c_delta = zigzag_decode_i64(cur.read_varint_u64()?);
@@ -1807,6 +1916,15 @@ pub(crate) fn scan_payload_refs_inline_substring(
                             .ok_or(StatamError::Corrupt {
                                 reason: "payload ref pack_idx delta out of u16 range",
                             })?;
+                        if let Some(rp) = row_pack {
+                            if next_pack != rp {
+                                return Err(StatamError::Corrupt {
+                                    reason: "mixed pack indices within a single payload row",
+                                });
+                            }
+                        } else {
+                            row_pack = Some(next_pack);
+                        }
                         let next_chunk = i64::from(prev.1)
                             .checked_add(c_delta)
                             .and_then(|v| u32::try_from(v).ok())
@@ -2418,9 +2536,10 @@ mod tests {
                 )),
                 _ => {
                     let base = (i / 10) as u32;
-                    let mut chunks = vec![(0, base), (0, base + 1), (0, base + 2)];
-                    if i % 3 == 0 {
-                        chunks.push((1, i as u32));
+                    let pidx = if i % 3 == 0 { 1u16 } else { 0u16 };
+                    let mut chunks = vec![(pidx, base), (pidx, base + 1), (pidx, base + 2)];
+                    if i % 5 == 0 {
+                        chunks.push((pidx, i as u32));
                     }
                     rows.push(PayloadRefRow::Chunks(chunks));
                 }
@@ -2521,5 +2640,143 @@ mod tests {
         })
         .unwrap();
         assert_eq!(bm.iter_ones().collect::<Vec<_>>(), vec![1]);
+    }
+
+    #[test]
+    fn m7_m19_rejects_mixed_pack_indices_across_all_decoders_and_bad_mask_len() {
+        // 1. Keyframe mixing (0, 1) + (1, 2) and (0xFFFF, 0) + (0, 1).
+        for pair in [
+            ((0u16, 1u32), (1u16, 2u32)),
+            ((0xFFFFu16, 0u32), (0u16, 1u32)),
+        ] {
+            let mut enc = vec![0u8]; // has_nulls = 0
+            enc.push(TAG_KEYFRAME);
+            enc.extend_from_slice(&2u16.to_le_bytes());
+            enc.extend_from_slice(&pair.0.0.to_le_bytes());
+            enc.extend_from_slice(&pair.0.1.to_le_bytes());
+            enc.extend_from_slice(&pair.1.0.to_le_bytes());
+            enc.extend_from_slice(&pair.1.1.to_le_bytes());
+
+            let all_active = Bitmap::new_ones(1);
+            let none_active = Bitmap::new_zeroed(1);
+            assert!(matches!(
+                decode_payload_refs(&enc, 1, MAX_BATCH_DECODED_BYTES),
+                Err(StatamError::Corrupt { .. })
+            ));
+            assert!(matches!(
+                decode_payload_refs_flat(&enc, 1, MAX_BATCH_DECODED_BYTES),
+                Err(StatamError::Corrupt { .. })
+            ));
+            assert!(matches!(
+                decode_payload_refs_selected(&enc, 1, &all_active, MAX_BATCH_DECODED_BYTES),
+                Err(StatamError::Corrupt { .. })
+            ));
+            assert!(matches!(
+                decode_payload_refs_selected(&enc, 1, &none_active, MAX_BATCH_DECODED_BYTES),
+                Err(StatamError::Corrupt { .. })
+            ));
+            assert!(matches!(
+                scan_payload_refs_inline_substring(
+                    &enc,
+                    1,
+                    &all_active,
+                    &[10, 10],
+                    &[true, true],
+                    |_| false,
+                ),
+                Err(StatamError::Corrupt { .. })
+            ));
+        }
+
+        // 2. Delta with keep_prefix = 1 changing pack_idx (p_delta = +1), both active and skipped.
+        let mut enc_delta_kp1 = vec![0u8];
+        enc_delta_kp1.push(TAG_KEYFRAME);
+        enc_delta_kp1.extend_from_slice(&1u16.to_le_bytes());
+        enc_delta_kp1.extend_from_slice(&0u16.to_le_bytes());
+        enc_delta_kp1.extend_from_slice(&5u32.to_le_bytes());
+        enc_delta_kp1.push(TAG_DELTA);
+        enc_delta_kp1.push(1); // back = 1
+        enc_delta_kp1.extend_from_slice(&1u16.to_le_bytes()); // keep_prefix = 1
+        enc_delta_kp1.extend_from_slice(&1u16.to_le_bytes()); // n_new = 1
+        encode_varint_u64(zigzag_encode_i64(1), &mut enc_delta_kp1); // p_delta = +1 -> pack 1
+        encode_varint_u64(zigzag_encode_i64(1), &mut enc_delta_kp1);
+
+        let all2 = Bitmap::new_ones(2);
+        let none2 = Bitmap::new_zeroed(2);
+        assert!(matches!(
+            decode_payload_refs(&enc_delta_kp1, 2, MAX_BATCH_DECODED_BYTES),
+            Err(StatamError::Corrupt { .. })
+        ));
+        assert!(matches!(
+            decode_payload_refs_flat(&enc_delta_kp1, 2, MAX_BATCH_DECODED_BYTES),
+            Err(StatamError::Corrupt { .. })
+        ));
+        assert!(matches!(
+            decode_payload_refs_selected(&enc_delta_kp1, 2, &all2, MAX_BATCH_DECODED_BYTES),
+            Err(StatamError::Corrupt { .. })
+        ));
+        assert!(matches!(
+            decode_payload_refs_selected(&enc_delta_kp1, 2, &none2, MAX_BATCH_DECODED_BYTES),
+            Err(StatamError::Corrupt { .. })
+        ));
+        assert!(matches!(
+            scan_payload_refs_inline_substring(
+                &enc_delta_kp1,
+                2,
+                &all2,
+                &[10, 10],
+                &[true, true],
+                |_| false,
+            ),
+            Err(StatamError::Corrupt { .. })
+        ));
+
+        // 3. Delta with keep_prefix = 0, n_new = 2 where second entry changes pack_idx.
+        let mut enc_delta_kp0 = vec![0u8];
+        enc_delta_kp0.push(TAG_KEYFRAME);
+        enc_delta_kp0.extend_from_slice(&1u16.to_le_bytes());
+        enc_delta_kp0.extend_from_slice(&0u16.to_le_bytes());
+        enc_delta_kp0.extend_from_slice(&5u32.to_le_bytes());
+        enc_delta_kp0.push(TAG_DELTA);
+        enc_delta_kp0.push(1);
+        enc_delta_kp0.extend_from_slice(&0u16.to_le_bytes()); // keep_prefix = 0
+        enc_delta_kp0.extend_from_slice(&2u16.to_le_bytes()); // n_new = 2
+        encode_varint_u64(zigzag_encode_i64(0), &mut enc_delta_kp0); // pack 0
+        encode_varint_u64(zigzag_encode_i64(1), &mut enc_delta_kp0);
+        encode_varint_u64(zigzag_encode_i64(1), &mut enc_delta_kp0); // pack 1 (mixed!)
+        encode_varint_u64(zigzag_encode_i64(1), &mut enc_delta_kp0);
+
+        assert!(matches!(
+            decode_payload_refs(&enc_delta_kp0, 2, MAX_BATCH_DECODED_BYTES),
+            Err(StatamError::Corrupt { .. })
+        ));
+        assert!(matches!(
+            decode_payload_refs_flat(&enc_delta_kp0, 2, MAX_BATCH_DECODED_BYTES),
+            Err(StatamError::Corrupt { .. })
+        ));
+        assert!(matches!(
+            decode_payload_refs_selected(&enc_delta_kp0, 2, &none2, MAX_BATCH_DECODED_BYTES),
+            Err(StatamError::Corrupt { .. })
+        ));
+        assert!(matches!(
+            scan_payload_refs_inline_substring(
+                &enc_delta_kp0,
+                2,
+                &all2,
+                &[10, 10],
+                &[true, true],
+                |_| false,
+            ),
+            Err(StatamError::Corrupt { .. })
+        ));
+
+        // 4. m19: mismatched active_mask.len() returns Corrupt.
+        let mut valid = Vec::new();
+        encode_payload_refs(&[PayloadRefRow::Inline(b"ok".to_vec())], &mut valid).unwrap();
+        let wrong_mask = Bitmap::new_ones(2);
+        assert!(matches!(
+            scan_payload_refs_inline_substring(&valid, 1, &wrong_mask, &[], &[], |_| false),
+            Err(StatamError::Corrupt { .. })
+        ));
     }
 }

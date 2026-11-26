@@ -18,6 +18,30 @@ use crate::simd::trigram::{TrigramBloom, ascii_lowercase_into, extract_trigram_h
 /// and lie completely inside `tail_63(left) || head_63(right)` when crossing a boundary.
 const MAX_EDGE_NEEDLE_LEN: usize = 64;
 
+/// Context-free Unicode lowercasing for `ILIKE` matching.
+///
+/// Lowers each Unicode scalar independently (`char::to_lowercase`) and folds Greek Final Sigma
+/// `'ς'` (`U+03C2`) to `'σ'` (`U+03C3`), guaranteeing strict homomorphism
+/// `lower(A || B) == lower(A) || lower(B)` across arbitrary UTF-8 chunk boundaries while keeping
+/// `"ΟΔΥΣΣΕΥΣ" ILIKE '%ς'` exact.
+pub(crate) fn unicode_lowercase_context_free_into(s: &str, out: &mut String) {
+    out.clear();
+    out.reserve(s.len());
+    for c in s.chars() {
+        if c == '\u{03C2}' {
+            out.push('\u{03C3}');
+        } else {
+            for lc in c.to_lowercase() {
+                if lc == '\u{03C2}' {
+                    out.push('\u{03C3}');
+                } else {
+                    out.push(lc);
+                }
+            }
+        }
+    }
+}
+
 enum NeedleMatcher {
     Exact(memmem::Finder<'static>),
     AsciiIlike {
@@ -28,6 +52,7 @@ enum NeedleMatcher {
         finder: memmem::Finder<'static>,
         needle_raw_lower: Vec<u8>,
         scratch: Vec<u8>,
+        uni_scratch: String,
     },
 }
 
@@ -49,11 +74,13 @@ impl NeedleMatcher {
         ascii_lowercase_into(needle, &mut ascii_lowered);
         match std::str::from_utf8(needle) {
             Ok(s) => {
-                let uni_lower = s.to_lowercase();
+                let mut uni_lower = String::new();
+                unicode_lowercase_context_free_into(s, &mut uni_lower);
                 Self::UnicodeIlike {
                     finder: memmem::Finder::new(uni_lower.as_bytes()).into_owned(),
                     needle_raw_lower: ascii_lowered,
                     scratch: Vec::new(),
+                    uni_scratch: String::new(),
                 }
             }
             Err(_) => Self::AsciiIlike {
@@ -74,15 +101,17 @@ impl NeedleMatcher {
                 finder,
                 needle_raw_lower,
                 scratch,
+                uni_scratch,
             } => {
                 if let Ok(s) = std::str::from_utf8(haystack) {
-                    let lowered = s.to_lowercase();
-                    finder.find(lowered.as_bytes()).is_some()
+                    unicode_lowercase_context_free_into(s, uni_scratch);
+                    finder.find(uni_scratch.as_bytes()).is_some()
                 } else {
                     // Fallback for invalid UTF-8 slices (e.g. clipped boundary edge):
                     // try lossy UTF-8 Unicode lowercase AND raw ASCII lowercase.
-                    let lossy = String::from_utf8_lossy(haystack).to_lowercase();
-                    if finder.find(lossy.as_bytes()).is_some() {
+                    let lossy = String::from_utf8_lossy(haystack);
+                    unicode_lowercase_context_free_into(&lossy, uni_scratch);
+                    if finder.find(uni_scratch.as_bytes()).is_some() {
                         return true;
                     }
                     ascii_lowercase_into(haystack, scratch);
@@ -517,8 +546,13 @@ fn search_pack_rows_impl<S: PayloadRefSource>(
     }
 
     let max_match_bytes = if case_insensitive && !needle.is_ascii() {
-        let uni_lower = std::str::from_utf8(needle).ok().map(str::to_lowercase);
-        let nl: &[u8] = uni_lower.as_deref().map_or(needle, str::as_bytes);
+        let mut uni_lower = String::new();
+        let nl: &[u8] = if let Ok(s) = std::str::from_utf8(needle) {
+            unicode_lowercase_context_free_into(s, &mut uni_lower);
+            uni_lower.as_bytes()
+        } else {
+            needle
+        };
         max_unicode_haystack_match_bytes(nl)
     } else {
         needle.len()
@@ -607,7 +641,7 @@ fn search_short_needle_rows<S: PayloadRefSource>(
     let mut matched_bits = vec![0u64; needed_bits.len()];
     let mut any_matched = false;
     if !surviving_chunks.is_empty() {
-        if read_threads.clamp(1, crate::parallel::MAX_WRITE_THREADS) > 1 {
+        if read_threads.clamp(1, crate::parallel::MAX_PARALLEL_THREADS) > 1 {
             let matched = pack.scan_chunks_in_frames_parallel(
                 &surviving_chunks,
                 read_threads,
@@ -733,8 +767,11 @@ fn search_long_needle_rows<S: PayloadRefSource>(
     results: &mut Bitmap,
 ) -> Result<(), StatamError> {
     let all_needed = collect_set_bits(needed_bits);
+    let mut total_chunk_bytes = 0usize;
+    let mut total_frame_bytes = 0usize;
+    pack.check_chunks_budget(&all_needed, &mut total_chunk_bytes, &mut total_frame_bytes)?;
     let fetched: HashMap<u32, Vec<u8>> =
-        if read_threads.clamp(1, crate::parallel::MAX_WRITE_THREADS) > 1 {
+        if read_threads.clamp(1, crate::parallel::MAX_PARALLEL_THREADS) > 1 {
             pack.scan_chunks_in_frames_parallel(
                 &all_needed,
                 read_threads,
@@ -944,8 +981,13 @@ pub(crate) fn pack_rejects_boundary_pigeonhole(
     if needle.len() > MAX_EDGE_NEEDLE_LEN {
         return false;
     }
-    let uni_lower = std::str::from_utf8(needle).ok().map(str::to_lowercase);
-    let nl: &[u8] = uni_lower.as_deref().map_or(needle, str::as_bytes);
+    let mut uni_lower = String::new();
+    let nl: &[u8] = if let Ok(s) = std::str::from_utf8(needle) {
+        unicode_lowercase_context_free_into(s, &mut uni_lower);
+        uni_lower.as_bytes()
+    } else {
+        needle
+    };
     if nl.len() < 5 || max_unicode_haystack_match_bytes(nl) > MAX_EDGE_NEEDLE_LEN {
         return false;
     }
@@ -2051,5 +2093,78 @@ mod tests {
                 reason: "multi-chunk row references pack without edge table",
             }
         ));
+    }
+
+    #[test]
+    fn m11_unicode_ilike_greek_final_sigma_across_chunk_boundaries() {
+        let mut builder = ChunkPackBuilder::new(
+            [0x91u8; 16],
+            PackWriteOptions {
+                codec: test_codec(),
+                target_frame_raw_bytes: 16 * 1024,
+                enable_trigram_skip: true,
+                ..PackWriteOptions::default()
+            },
+        );
+        // Row 0: "...αΣ" || "a..."
+        let c0_left = format!("{}αΣ", "x".repeat(300));
+        let c0_right = format!("a{}", "y".repeat(300));
+        let cid0_l = builder.intern_chunk(c0_left.as_bytes()).unwrap();
+        let cid0_r = builder.intern_chunk(c0_right.as_bytes()).unwrap();
+
+        // Row 1: "...αΣ" || ("." * 63 + "a")
+        let c1_right = format!("{}a{}", ".".repeat(63), "z".repeat(250));
+        let cid1_r = builder.intern_chunk(c1_right.as_bytes()).unwrap();
+
+        // Row 2: "ΟΔΥΣΣΕΥΣ" chunked across two chunks.
+        let c2_left = format!("{}ΟΔΥΣ", "m".repeat(300));
+        let c2_right = format!("ΣΕΥΣ{}", "n".repeat(300));
+        let cid2_l = builder.intern_chunk(c2_left.as_bytes()).unwrap();
+        let cid2_r = builder.intern_chunk(c2_right.as_bytes()).unwrap();
+
+        let mut pack_bytes = Vec::new();
+        builder.finish(&mut pack_bytes).unwrap();
+        let pack = ChunkPackReader::open(Arc::new(SliceReader::new(pack_bytes))).unwrap();
+
+        let chunked_rows = vec![
+            PayloadRefRow::Chunks(vec![(0, cid0_l), (0, cid0_r)]),
+            PayloadRefRow::Chunks(vec![(0, cid0_l), (0, cid1_r)]),
+            PayloadRefRow::Chunks(vec![(0, cid2_l), (0, cid2_r)]),
+        ];
+        let inline_rows = vec![
+            PayloadRefRow::Inline(format!("{c0_left}{c0_right}").into_bytes()),
+            PayloadRefRow::Inline(format!("{c0_left}{c1_right}").into_bytes()),
+            PayloadRefRow::Inline(format!("{c2_left}{c2_right}").into_bytes()),
+        ];
+
+        for needle in [
+            "ασa".as_bytes(),
+            "αΣa".as_bytes(),
+            "ας".as_bytes(),
+            format!("ασ{}a", ".".repeat(63)).as_bytes(),
+            "οδυσσευς".as_bytes(),
+            "ς".as_bytes(),
+        ] {
+            let chunked_hits = search_pack_rows(&pack, &chunked_rows, 0, needle, true).unwrap();
+            let inline_hits = search_pack_rows(&pack, &inline_rows, 0, needle, true).unwrap();
+            assert_eq!(
+                chunked_hits.iter_ones().collect::<Vec<_>>(),
+                inline_hits.iter_ones().collect::<Vec<_>>(),
+                "mismatch for needle {:?}",
+                std::str::from_utf8(needle)
+            );
+        }
+
+        // Verify `"ΟΔΥΣΣΕΥΣ" ILIKE '%ς'` hits row 2 (and `"ασa"` hits row 0).
+        let hit_final_sigma = search_pack_rows(&pack, &chunked_rows, 0, "ς".as_bytes(), true)
+            .unwrap()
+            .iter_ones()
+            .collect::<Vec<_>>();
+        assert!(hit_final_sigma.contains(&2));
+        let hit_split = search_pack_rows(&pack, &chunked_rows, 0, "ασa".as_bytes(), true)
+            .unwrap()
+            .iter_ones()
+            .collect::<Vec<_>>();
+        assert_eq!(hit_split, vec![0]);
     }
 }

@@ -1,6 +1,7 @@
 //! Statam v0 binary wire format constants, structs, schema codecs, and framing.
 
 use std::borrow::Cow;
+use std::collections::HashSet;
 use std::fmt;
 use std::sync::Arc;
 
@@ -39,8 +40,8 @@ pub const DEFAULT_TAIL_HINT: u32 = 128 * 1024;
 pub const ROW_GROUP_SIZE: usize = 131_072;
 /// Hard upper bound on rows per PAX Row Group (`RowGroupEntry::row_count`).
 pub const MAX_ROW_GROUP_SIZE: usize = 262_144;
-/// Target rows per Mini-Block (`L1Compact`).
-pub const MINI_BLOCK_SIZE: usize = 4_096;
+/// Target rows per Mini-Block (`L1Compact` and `L0Fast`).
+pub const MINI_BLOCK_SIZE: usize = 8_192;
 /// Hard upper bound on rows per Mini-Block (`BlockEntry::row_count`).
 pub const MAX_MINI_BLOCK_SIZE: usize = u16::MAX as usize;
 
@@ -129,6 +130,14 @@ pub const COL_FLAG_DICT_IN_HOT_TAIL: u8 = 0x10;
 pub const COL_FLAG_BLOOM_IN_HOT_TAIL: u8 = 0x20;
 /// Column has a narrow trigram index.
 pub const COL_FLAG_HAS_TRIGRAM_INDEX: u8 = 0x40;
+/// Mask of all recognized column directory flags in v1.
+pub const KNOWN_COL_FLAGS: u8 = COL_FLAG_HAS_FILE_DICT
+    | COL_FLAG_DICT_SORTED
+    | COL_FLAG_IS_PAYLOAD_REFS
+    | COL_FLAG_IS_SHREDDED_SUBCOL
+    | COL_FLAG_DICT_IN_HOT_TAIL
+    | COL_FLAG_BLOOM_IN_HOT_TAIL
+    | COL_FLAG_HAS_TRIGRAM_INDEX;
 
 // --- Mini-block flags ---
 
@@ -142,6 +151,12 @@ pub const BLOCK_FLAG_MIN_MAX_VALID: u8 = 0x04;
 pub const BLOCK_FLAG_HAS_NAN: u8 = 0x08;
 /// Constant empty `List`/`MapUtf8`/`Events`/`Links` collection.
 pub const BLOCK_FLAG_CONST_EMPTY_COLLECTION: u8 = 0x10;
+/// Mask of all recognized mini-block flags in v1.
+pub const KNOWN_BLOCK_FLAGS: u8 = BLOCK_FLAG_HAS_NULLS
+    | BLOCK_FLAG_ALL_NULL
+    | BLOCK_FLAG_MIN_MAX_VALID
+    | BLOCK_FLAG_HAS_NAN
+    | BLOCK_FLAG_CONST_EMPTY_COLLECTION;
 
 // --- Hard Untrusted-Input Bounds (spec-v0.md §7) ---
 
@@ -690,66 +705,61 @@ impl Postscript {
 
         // Validate every Hot Tail section lies strictly within hot_tail_raw_len.
         let raw_limit = hot_tail_raw_len as usize;
-        check_slice_range(schema_off, schema_len, raw_limit, "schema section")?;
+        check_slice_range(schema_off, schema_len, raw_limit)?;
         let col_dir_bytes = (num_phys_cols as usize)
             .checked_mul(COLUMN_DIR_ENTRY_LEN)
             .ok_or(StatamError::BoundsExceeded {
                 reason: "column directory byte length overflow",
             })?;
-        check_range_usize(
-            col_dir_off as usize,
-            col_dir_bytes,
-            raw_limit,
-            "column directory",
-        )?;
+        check_range_usize(col_dir_off as usize, col_dir_bytes, raw_limit)?;
         let rg_dir_bytes = (num_row_groups as usize)
             .checked_mul(ROW_GROUP_ENTRY_LEN)
             .ok_or(StatamError::BoundsExceeded {
                 reason: "row group directory byte length overflow",
             })?;
-        check_range_usize(
-            rg_dir_off as usize,
-            rg_dir_bytes,
-            raw_limit,
-            "row group directory",
-        )?;
+        check_range_usize(rg_dir_off as usize, rg_dir_bytes, raw_limit)?;
         let block_dir_bytes = (total_blocks as usize).checked_mul(BLOCK_ENTRY_LEN).ok_or(
             StatamError::BoundsExceeded {
                 reason: "block directory byte length overflow",
             },
         )?;
-        check_range_usize(
-            block_dir_off as usize,
-            block_dir_bytes,
-            raw_limit,
-            "block directory",
-        )?;
+        check_range_usize(block_dir_off as usize, block_dir_bytes, raw_limit)?;
 
         if (hot_bloom_len as usize) > MAX_BLOOM_BYTES {
             return Err(StatamError::BoundsExceeded {
                 reason: "hot_bloom_len exceeds MAX_BLOOM_BYTES",
             });
         }
-        check_slice_range(hot_bloom_off, hot_bloom_len, raw_limit, "hot bloom section")?;
+        if hot_bloom_len == 0 && hot_bloom_off != 0 {
+            return Err(StatamError::Corrupt {
+                reason: "non-zero hot_bloom_off when hot_bloom_len is 0",
+            });
+        }
+        check_slice_range(hot_bloom_off, hot_bloom_len, raw_limit)?;
 
         if (hot_dict_len as usize) > MAX_DICT_BYTES {
             return Err(StatamError::BoundsExceeded {
                 reason: "hot_dict_len exceeds MAX_DICT_BYTES",
             });
         }
-        check_slice_range(hot_dict_off, hot_dict_len, raw_limit, "hot dict section")?;
+        if hot_dict_len == 0 && hot_dict_off != 0 {
+            return Err(StatamError::Corrupt {
+                reason: "non-zero hot_dict_off when hot_dict_len is 0",
+            });
+        }
+        check_slice_range(hot_dict_off, hot_dict_len, raw_limit)?;
 
         if !(lazy_dir_len as usize).is_multiple_of(LAZY_INDEX_ENTRY_LEN) {
             return Err(StatamError::Corrupt {
                 reason: "lazy_dir_len is not a multiple of entry size",
             });
         }
-        check_slice_range(
-            lazy_dir_off,
-            lazy_dir_len,
-            raw_limit,
-            "lazy index directory",
-        )?;
+        if lazy_dir_len == 0 && lazy_dir_off != 0 {
+            return Err(StatamError::Corrupt {
+                reason: "non-zero lazy_dir_off when lazy_dir_len is 0",
+            });
+        }
+        check_slice_range(lazy_dir_off, lazy_dir_len, raw_limit)?;
 
         Ok(Self {
             hot_tail_len,
@@ -1093,9 +1103,29 @@ impl PackPostscript {
                 reason: "non-zero encryption envelope on unencrypted pack postscript",
             });
         }
-        if (dict_len as usize) > MAX_DICT_BYTES {
+        if chunk_count == 0 && hash_table_off != 0 {
+            return Err(StatamError::Corrupt {
+                reason: "non-zero hash_table_off when chunk_count is 0",
+            });
+        }
+        if trigram_len == 0 && trigram_off != 0 {
+            return Err(StatamError::Corrupt {
+                reason: "non-zero trigram_off when trigram_len is 0",
+            });
+        }
+        if edge_table_len == 0 && edge_table_off != 0 {
+            return Err(StatamError::Corrupt {
+                reason: "non-zero edge_table_off when edge_table_len is 0",
+            });
+        }
+        if dict_len == 0 && dict_off != 0 {
+            return Err(StatamError::Corrupt {
+                reason: "non-zero dict_off when dict_len is 0",
+            });
+        }
+        if (dict_len as usize) > MAX_PACK_DICT_BYTES + 1024 {
             return Err(StatamError::BoundsExceeded {
-                reason: "pack dict_len exceeds MAX_DICT_BYTES",
+                reason: "pack dict_len exceeds MAX_PACK_DICT_BYTES + 1024",
             });
         }
         if (trigram_len as usize) > MAX_BLOOM_BYTES {
@@ -1103,9 +1133,9 @@ impl PackPostscript {
                 reason: "pack trigram_len exceeds MAX_BLOOM_BYTES",
             });
         }
-        if (edge_table_len as usize) > MAX_BLOCK_RAW_BYTES {
+        if (edge_table_len as usize) > MAX_BLOCK_RAW_BYTES + PACK_FRAME_HEADER_LEN {
             return Err(StatamError::BoundsExceeded {
-                reason: "pack edge_table_len exceeds MAX_BLOCK_RAW_BYTES",
+                reason: "pack edge_table_len exceeds MAX_BLOCK_RAW_BYTES + PACK_FRAME_HEADER_LEN",
             });
         }
 
@@ -1206,12 +1236,24 @@ impl ColumnDirEntry {
                 reason: "column bloom_len exceeds MAX_BLOOM_BYTES",
             });
         }
+        let col_flags = buf[5];
+        if col_flags & !KNOWN_COL_FLAGS != 0 {
+            return Err(StatamError::Corrupt {
+                reason: "unknown column directory flags",
+            });
+        }
+        let reserved = read_u16_le(buf, 6);
+        if reserved != 0 {
+            return Err(StatamError::Corrupt {
+                reason: "non-zero reserved bytes in column directory entry",
+            });
+        }
         Ok(Self {
             phys_col_id: read_u16_le(buf, 0),
             logical_col_id: read_u16_le(buf, 2),
             locality_group: LocalityGroup::from_u8(buf[4])?,
-            col_flags: buf[5],
-            reserved: read_u16_le(buf, 6),
+            col_flags,
+            reserved,
             num_blocks: read_u32_le(buf, 8),
             first_block_idx: read_u32_le(buf, 12),
             dict_offset: read_u64_le(buf, 16),
@@ -1393,11 +1435,6 @@ impl BlockEntry {
         }
         let row_count = read_u16_le(buf, 4);
         let null_count = read_u16_le(buf, 6);
-        if (row_count as usize) > MAX_MINI_BLOCK_SIZE {
-            return Err(StatamError::BoundsExceeded {
-                reason: "mini-block row_count exceeds MAX_MINI_BLOCK_SIZE",
-            });
-        }
         if null_count > row_count {
             return Err(StatamError::Corrupt {
                 reason: "mini-block null_count exceeds row_count",
@@ -1417,6 +1454,12 @@ impl BlockEntry {
         }
         let encoding = Encoding::from_u8(buf[24])?;
         let codec = Codec::from_u8(buf[25])?;
+        let block_flags = buf[26];
+        if block_flags & !KNOWN_BLOCK_FLAGS != 0 {
+            return Err(StatamError::Corrupt {
+                reason: "unknown block directory flags",
+            });
+        }
         let min_inline_len = buf[27];
         let max_inline_len = buf[28];
         if min_inline_len > 16 || max_inline_len > 16 {
@@ -1426,6 +1469,11 @@ impl BlockEntry {
         }
         let mut reserved = [0u8; 3];
         reserved.copy_from_slice(&buf[29..32]);
+        if reserved != [0; 3] {
+            return Err(StatamError::Corrupt {
+                reason: "non-zero reserved bytes in block directory entry",
+            });
+        }
         let mut min_inline = [0u8; 16];
         min_inline.copy_from_slice(&buf[32..48]);
         let mut max_inline = [0u8; 16];
@@ -1440,7 +1488,7 @@ impl BlockEntry {
             raw_len,
             encoding,
             codec,
-            block_flags: buf[26],
+            block_flags,
             min_inline_len,
             max_inline_len,
             reserved,
@@ -1455,7 +1503,7 @@ impl BlockEntry {
 pub struct FrameEntry {
     /// Absolute offset of the `PF` frame in the `.stpk` file.
     pub offset: u64,
-    /// Total stored frame bytes (including 16-byte `PF` header, or stored payload len).
+    /// Stored payload byte length (excluding the 16-byte `PF` header).
     pub stored_len: u32,
     /// Uncompressed frame payload bytes.
     pub raw_len: u32,
@@ -1473,7 +1521,7 @@ pub struct FrameEntry {
     pub filter_off: u32,
     /// Byte length of this frame's trigram filter (`0` if omitted).
     pub filter_len: u32,
-    /// CRC-32C of compressed payload.
+    /// Header-inclusive CRC-32C over `PF` header prefix `[0..12]` and compressed payload.
     pub crc32c: u32,
 }
 
@@ -1515,13 +1563,25 @@ impl FrameEntry {
             });
         }
         let codec = Codec::from_u8(buf[16])?;
+        let flags = buf[17];
+        if flags & !PACK_FRAME_FLAG_USES_DICT != 0 {
+            return Err(StatamError::Corrupt {
+                reason: "unknown pack frame entry flags",
+            });
+        }
+        let dict_id = read_u16_le(buf, 18);
+        if (flags & PACK_FRAME_FLAG_USES_DICT) == 0 && dict_id != 0 {
+            return Err(StatamError::Corrupt {
+                reason: "non-zero dict_id when PACK_FRAME_FLAG_USES_DICT is clear",
+            });
+        }
         Ok(Self {
             offset: read_u64_le(buf, 0),
             stored_len,
             raw_len,
             codec,
-            flags: buf[17],
-            dict_id: read_u16_le(buf, 18),
+            flags,
+            dict_id,
             first_chunk_id: read_u32_le(buf, 20),
             chunk_count: read_u32_le(buf, 24),
             filter_off: read_u32_le(buf, 28),
@@ -1613,6 +1673,11 @@ impl LazyIndexEntry {
         let kind = LazyIndexKind::from_u8(buf[0])?;
         let mut reserved = [0u8; 3];
         reserved.copy_from_slice(&buf[1..4]);
+        if reserved != [0; 3] {
+            return Err(StatamError::Corrupt {
+                reason: "non-zero reserved bytes in lazy index entry",
+            });
+        }
         let len = read_u32_le(buf, 16);
         let max_len = match kind {
             LazyIndexKind::Bloom => MAX_BLOOM_BYTES,
@@ -1636,7 +1701,7 @@ impl LazyIndexEntry {
 }
 
 /// One promoted key entry in a [`ShreddedMapDir`].
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct ShreddedMapKeyEntry {
     /// Promoted map key name.
     pub key: String,
@@ -1644,6 +1709,16 @@ pub struct ShreddedMapKeyEntry {
     pub sub_col_idx: u16,
     /// Number of rows where this key spilled to residual (e.g. duplicate keys or late RG).
     pub residual_count: u32,
+}
+
+impl fmt::Debug for ShreddedMapKeyEntry {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ShreddedMapKeyEntry")
+            .field("key_len", &self.key.len())
+            .field("sub_col_idx", &self.sub_col_idx)
+            .field("residual_count", &self.residual_count)
+            .finish()
+    }
 }
 
 /// Shredded map metadata for one logical `MapUtf8` column.
@@ -1656,7 +1731,7 @@ pub struct ShreddedMapDir {
 }
 
 /// Complete decoded Schema & Table Metadata section (`schema_off..schema_off + schema_len`).
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct FileSchemaMeta {
     /// Table kind (`Generic`, `Spans`, `Traces`, `Scores`).
     pub table_kind: TableKind,
@@ -1670,6 +1745,19 @@ pub struct FileSchemaMeta {
     pub locality_groups: Vec<LocalityGroup>,
     /// Shredded map metadata for promoted `MapUtf8` columns.
     pub shredded_maps: Vec<ShreddedMapDir>,
+}
+
+impl fmt::Debug for FileSchemaMeta {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("FileSchemaMeta")
+            .field("table_kind", &self.table_kind)
+            .field("sort_cols_len", &self.sort_cols.len())
+            .field("pack_ids_len", &self.pack_ids.len())
+            .field("fields_len", &self.schema.fields().len())
+            .field("locality_groups_len", &self.locality_groups.len())
+            .field("shredded_maps_len", &self.shredded_maps.len())
+            .finish()
+    }
 }
 
 /// Encodes [`FileSchemaMeta`] into the Hot Tail Schema section wire format.
@@ -1690,10 +1778,16 @@ pub fn encode_schema(meta: &FileSchemaMeta) -> Result<Vec<u8>, StatamError> {
             reason: "invalid sort_cols count",
         });
     }
+    let mut seen_sort = HashSet::with_capacity(meta.sort_cols.len());
     for &sc in &meta.sort_cols {
         if (sc as usize) >= fields.len() {
             return Err(StatamError::SchemaMismatch {
                 reason: "sort column index out of bounds",
+            });
+        }
+        if !seen_sort.insert(sc) {
+            return Err(StatamError::SchemaMismatch {
+                reason: "duplicate sort column index",
             });
         }
     }
@@ -1734,12 +1828,19 @@ pub fn encode_schema(meta: &FileSchemaMeta) -> Result<Vec<u8>, StatamError> {
     }
 
     out.extend_from_slice(&(meta.shredded_maps.len() as u16).to_le_bytes());
+    let mut seen_shredded_cols = HashSet::with_capacity(meta.shredded_maps.len());
+    let mut seen_sub_cols = HashSet::new();
     for sm in &meta.shredded_maps {
         let Some(field) = fields.get(sm.logical_col_idx as usize) else {
             return Err(StatamError::SchemaMismatch {
                 reason: "shredded map logical_col_idx out of bounds",
             });
         };
+        if !seen_shredded_cols.insert(sm.logical_col_idx) {
+            return Err(StatamError::SchemaMismatch {
+                reason: "duplicate shredded map logical_col_idx",
+            });
+        }
         if field.data_type != DataType::MapUtf8 {
             return Err(StatamError::SchemaMismatch {
                 reason: "shredded map logical column is not MapUtf8",
@@ -1752,7 +1853,18 @@ pub fn encode_schema(meta: &FileSchemaMeta) -> Result<Vec<u8>, StatamError> {
         }
         out.extend_from_slice(&sm.logical_col_idx.to_le_bytes());
         out.extend_from_slice(&(sm.keys.len() as u16).to_le_bytes());
+        let mut seen_keys = HashSet::with_capacity(sm.keys.len());
         for k in &sm.keys {
+            if !seen_keys.insert(k.key.as_str()) {
+                return Err(StatamError::SchemaMismatch {
+                    reason: "duplicate promoted shredded map key",
+                });
+            }
+            if !seen_sub_cols.insert(k.sub_col_idx) {
+                return Err(StatamError::SchemaMismatch {
+                    reason: "duplicate shredded map sub_col_idx",
+                });
+            }
             let kb = k.key.as_bytes();
             let klen = u16::try_from(kb.len()).map_err(|_| StatamError::BoundsExceeded {
                 reason: "shredded key name exceeds u16::MAX bytes",
@@ -1838,10 +1950,16 @@ pub fn decode_schema(bytes: &[u8]) -> Result<FileSchemaMeta, StatamError> {
         locality_groups.push(lg);
     }
 
+    let mut seen_sort = HashSet::with_capacity(sort_cols.len());
     for &sc in &sort_cols {
         if (sc as usize) >= fields.len() {
             return Err(StatamError::SchemaMismatch {
                 reason: "sort column index out of bounds",
+            });
+        }
+        if !seen_sort.insert(sc) {
+            return Err(StatamError::Corrupt {
+                reason: "duplicate sort column index in schema",
             });
         }
     }
@@ -1863,6 +1981,8 @@ pub fn decode_schema(bytes: &[u8]) -> Result<FileSchemaMeta, StatamError> {
     cur.require_bytes(min_sm_bytes, "truncated shredded maps")?;
 
     let mut shredded_maps = Vec::with_capacity(shredded_map_count);
+    let mut seen_shredded_cols = HashSet::with_capacity(shredded_map_count);
+    let mut seen_sub_cols = HashSet::new();
     for _ in 0..shredded_map_count {
         let logical_col_idx = cur.read_u16()?;
         let key_count = cur.read_u16()? as usize;
@@ -1876,6 +1996,11 @@ pub fn decode_schema(bytes: &[u8]) -> Result<FileSchemaMeta, StatamError> {
                 reason: "shredded map logical_col_idx out of bounds",
             });
         };
+        if !seen_shredded_cols.insert(logical_col_idx) {
+            return Err(StatamError::Corrupt {
+                reason: "duplicate shredded map logical_col_idx in schema",
+            });
+        }
         if field.data_type != DataType::MapUtf8 {
             return Err(StatamError::SchemaMismatch {
                 reason: "shredded map logical column is not MapUtf8",
@@ -1890,6 +2015,7 @@ pub fn decode_schema(bytes: &[u8]) -> Result<FileSchemaMeta, StatamError> {
         cur.require_bytes(min_key_bytes, "truncated shredded map keys")?;
 
         let mut keys = Vec::with_capacity(key_count);
+        let mut seen_keys = HashSet::with_capacity(key_count);
         for _ in 0..key_count {
             let key_len = cur.read_u16()? as usize;
             let key_slice = cur.read_exact(key_len)?;
@@ -1898,7 +2024,17 @@ pub fn decode_schema(bytes: &[u8]) -> Result<FileSchemaMeta, StatamError> {
                     reason: "invalid utf-8 shredded key name",
                 })?
                 .to_owned();
+            if !seen_keys.insert(key.clone()) {
+                return Err(StatamError::Corrupt {
+                    reason: "duplicate promoted shredded map key in schema",
+                });
+            }
             let sub_col_idx = cur.read_u16()?;
+            if !seen_sub_cols.insert(sub_col_idx) {
+                return Err(StatamError::Corrupt {
+                    reason: "duplicate shredded map sub_col_idx in schema",
+                });
+            }
             let residual_count = cur.read_u32()?;
             keys.push(ShreddedMapKeyEntry {
                 key,
@@ -2029,11 +2165,11 @@ pub fn compress_guarded_min_savings(
     zstd_level: i32,
     min_savings_pct: u8,
 ) -> Result<(Codec, Vec<u8>), StatamError> {
-    if codec == Codec::None || raw.is_empty() {
-        return Ok((Codec::None, raw.to_vec()));
+    if raw.is_empty() {
+        return Ok((Codec::None, Vec::new()));
     }
     let compressed = match codec {
-        Codec::None => unreachable!(),
+        Codec::None => return Ok((Codec::None, raw.to_vec())),
         Codec::Lz4 => lz4_flex::block::compress(raw),
         Codec::Zstd => compress_zstd(raw, zstd_level)?,
     };
@@ -2326,8 +2462,20 @@ pub struct FramedWriteInfo {
     pub stored_len: u32,
     /// Uncompressed payload byte length.
     pub raw_len: u32,
-    /// CRC-32C over the stored payload bytes.
+    /// Header-inclusive CRC-32C over the 12-byte header prefix and stored payload bytes.
     pub crc32c: u32,
+}
+
+/// Computes the header-inclusive CRC-32C for a `.statam` `SB` data block frame.
+#[inline]
+pub(crate) fn block_frame_crc(header_prefix_12: &[u8], stored: &[u8]) -> u32 {
+    crc32c::crc32c_append(crc32c::crc32c(header_prefix_12), stored)
+}
+
+/// Computes the header-inclusive CRC-32C for a `.stpk` `PF` pack frame.
+#[inline]
+pub(crate) fn pack_frame_crc(header_prefix_12: &[u8], stored: &[u8]) -> u32 {
+    crc32c::crc32c_append(crc32c::crc32c(header_prefix_12), stored)
 }
 
 /// Writes a 16-byte `SB` block header followed by the guarded compressed payload,
@@ -2353,14 +2501,16 @@ pub fn write_framed_block_with_min_savings(
     let stored_len = u32::try_from(stored.len()).map_err(|_| StatamError::BoundsExceeded {
         reason: "block stored_len overflows u32",
     })?;
-    let crc = crc32c::crc32c(&stored);
+    let mut header_prefix = [0u8; 12];
+    header_prefix[0..2].copy_from_slice(&BLOCK_MAGIC);
+    header_prefix[2] = encoding as u8;
+    header_prefix[3] = actual_codec as u8;
+    header_prefix[4..8].copy_from_slice(&raw_len.to_le_bytes());
+    header_prefix[8..12].copy_from_slice(&stored_len.to_le_bytes());
+    let crc = block_frame_crc(&header_prefix, &stored);
 
     out.reserve(BLOCK_FRAME_HEADER_LEN + stored.len());
-    out.extend_from_slice(&BLOCK_MAGIC);
-    out.push(encoding as u8);
-    out.push(actual_codec as u8);
-    out.extend_from_slice(&raw_len.to_le_bytes());
-    out.extend_from_slice(&stored_len.to_le_bytes());
+    out.extend_from_slice(&header_prefix);
     out.extend_from_slice(&crc.to_le_bytes());
     out.extend_from_slice(&stored);
 
@@ -2417,7 +2567,7 @@ pub fn read_framed_block_cow<'a>(
         });
     }
     let stored = &frame[BLOCK_FRAME_HEADER_LEN..total_len];
-    let actual_crc = crc32c::crc32c(stored);
+    let actual_crc = block_frame_crc(&frame[0..12], stored);
     if actual_crc != expected_crc {
         return Err(StatamError::ChecksumMismatch {
             context: "data block",
@@ -2440,6 +2590,22 @@ pub fn read_framed_block_cow<'a>(
     Ok((encoding, codec, body))
 }
 
+/// Reads, checksum-verifies, decompresses, and cross-checks a framed `.statam` `SB`
+/// data block against its [`BlockEntry`] metadata (`encoding`, `codec`, `raw_len`).
+pub(crate) fn read_framed_block_checked_cow<'a>(
+    frame: &'a [u8],
+    blk: &BlockEntry,
+    max_raw: usize,
+) -> Result<Cow<'a, [u8]>, StatamError> {
+    let (enc, codec, body) = read_framed_block_cow(frame, max_raw)?;
+    if enc != blk.encoding || codec != blk.codec || body.len() != blk.raw_len as usize {
+        return Err(StatamError::Corrupt {
+            reason: "block frame header does not match BlockEntry",
+        });
+    }
+    Ok(body)
+}
+
 /// Reads, checksum-verifies, and decompresses a framed `.statam` `SB` data block.
 pub fn read_framed_block(
     frame: &[u8],
@@ -2447,6 +2613,33 @@ pub fn read_framed_block(
 ) -> Result<(Encoding, Codec, Vec<u8>), StatamError> {
     let (encoding, codec, body) = read_framed_block_cow(frame, max_raw)?;
     Ok((encoding, codec, body.into_owned()))
+}
+
+/// Writes a 16-byte `PF` pack frame header followed by the guarded compressed payload,
+/// enforcing `max_raw` as the upper bound on `raw.len()`.
+pub fn write_framed_pack_frame_with_limit(
+    raw: &[u8],
+    codec: Codec,
+    flags: u8,
+    zstd_level: i32,
+    max_raw: usize,
+    out: &mut Vec<u8>,
+) -> Result<FramedWriteInfo, StatamError> {
+    if flags != 0 {
+        return Err(StatamError::Corrupt {
+            reason: "pack frame flags invalid without dictionary compressor",
+        });
+    }
+    if raw.len() > max_raw {
+        return Err(StatamError::BoundsExceeded {
+            reason: "pack frame raw payload exceeds max_raw",
+        });
+    }
+    let raw_len = u32::try_from(raw.len()).map_err(|_| StatamError::BoundsExceeded {
+        reason: "pack frame raw_len overflows u32",
+    })?;
+    let (actual_codec, stored) = compress_guarded(raw, codec, zstd_level)?;
+    emit_pack_frame_bytes(raw_len, actual_codec, flags, &stored, out)
 }
 
 /// Writes a 16-byte `PF` pack frame header followed by the guarded compressed payload.
@@ -2457,16 +2650,7 @@ pub fn write_framed_pack_frame(
     zstd_level: i32,
     out: &mut Vec<u8>,
 ) -> Result<FramedWriteInfo, StatamError> {
-    if raw.len() > MAX_FRAME_RAW_BYTES {
-        return Err(StatamError::BoundsExceeded {
-            reason: "pack frame raw payload exceeds MAX_FRAME_RAW_BYTES",
-        });
-    }
-    let raw_len = u32::try_from(raw.len()).map_err(|_| StatamError::BoundsExceeded {
-        reason: "pack frame raw_len overflows u32",
-    })?;
-    let (actual_codec, stored) = compress_guarded(raw, codec, zstd_level)?;
-    emit_pack_frame_bytes(raw_len, actual_codec, flags, &stored, out)
+    write_framed_pack_frame_with_limit(raw, codec, flags, zstd_level, MAX_FRAME_RAW_BYTES, out)
 }
 
 /// Writes a 16-byte `PF` pack frame header, optionally compressing with `dict_compressor`.
@@ -2483,6 +2667,11 @@ pub fn write_framed_pack_frame_with_compressor(
     dict_compressor: Option<&mut PackDictCompressor>,
     out: &mut Vec<u8>,
 ) -> Result<FramedWriteInfo, StatamError> {
+    if flags & !PACK_FRAME_FLAG_USES_DICT != 0 {
+        return Err(StatamError::Corrupt {
+            reason: "unknown pack frame flags",
+        });
+    }
     if raw.len() > MAX_FRAME_RAW_BYTES {
         return Err(StatamError::BoundsExceeded {
             reason: "pack frame raw payload exceeds MAX_FRAME_RAW_BYTES",
@@ -2502,7 +2691,7 @@ pub fn write_framed_pack_frame_with_compressor(
             <= (compressed.len() as u64)
                 .saturating_mul(MAX_DECOMPRESS_RATIO)
                 .saturating_add(MAX_DECOMPRESS_SLACK);
-        return if compressed.len() < raw.len() && ratio_ok {
+        return if compressed.len().saturating_add(16) < raw.len() && ratio_ok {
             emit_pack_frame_bytes(
                 raw_len,
                 Codec::Zstd,
@@ -2542,14 +2731,16 @@ fn emit_pack_frame_bytes(
     let stored_len = u32::try_from(stored.len()).map_err(|_| StatamError::BoundsExceeded {
         reason: "pack frame stored_len overflows u32",
     })?;
-    let crc = crc32c::crc32c(stored);
+    let mut header_prefix = [0u8; 12];
+    header_prefix[0..2].copy_from_slice(&PACK_FRAME_MAGIC);
+    header_prefix[2] = actual_codec as u8;
+    header_prefix[3] = actual_flags;
+    header_prefix[4..8].copy_from_slice(&raw_len.to_le_bytes());
+    header_prefix[8..12].copy_from_slice(&stored_len.to_le_bytes());
+    let crc = pack_frame_crc(&header_prefix, stored);
 
     out.reserve(PACK_FRAME_HEADER_LEN + stored.len());
-    out.extend_from_slice(&PACK_FRAME_MAGIC);
-    out.push(actual_codec as u8);
-    out.push(actual_flags);
-    out.extend_from_slice(&raw_len.to_le_bytes());
-    out.extend_from_slice(&stored_len.to_le_bytes());
+    out.extend_from_slice(&header_prefix);
     out.extend_from_slice(&crc.to_le_bytes());
     out.extend_from_slice(stored);
 
@@ -2595,7 +2786,7 @@ fn parse_verified_pack_frame(frame: &[u8]) -> Result<(Codec, u8, usize, &[u8]), 
         });
     }
     let stored = &frame[PACK_FRAME_HEADER_LEN..total_len];
-    let actual_crc = crc32c::crc32c(stored);
+    let actual_crc = pack_frame_crc(&frame[0..12], stored);
     if actual_crc != expected_crc {
         return Err(StatamError::ChecksumMismatch {
             context: "pack frame",
@@ -2609,9 +2800,7 @@ pub fn read_framed_pack_frame(
     frame: &[u8],
     max_raw: usize,
 ) -> Result<(Codec, u8, Vec<u8>), StatamError> {
-    let (codec, flags, raw_len, stored) = parse_verified_pack_frame(frame)?;
-    let decompressed = decompress_checked(stored, codec, raw_len, max_raw)?;
-    Ok((codec, flags, decompressed))
+    read_framed_pack_frame_with_dict(frame, max_raw, None)
 }
 
 /// Reads, checksum-verifies, and decompresses a framed `.stpk` `PF` pack frame,
@@ -2645,21 +2834,11 @@ pub fn read_framed_pack_frame_with_dict(
     }
 }
 
-fn check_slice_range(
-    off: u32,
-    len: u32,
-    limit: usize,
-    _label: &'static str,
-) -> Result<(), StatamError> {
-    check_range_usize(off as usize, len as usize, limit, _label)
+fn check_slice_range(off: u32, len: u32, limit: usize) -> Result<(), StatamError> {
+    check_range_usize(off as usize, len as usize, limit)
 }
 
-fn check_range_usize(
-    off: usize,
-    len: usize,
-    limit: usize,
-    _label: &'static str,
-) -> Result<(), StatamError> {
+fn check_range_usize(off: usize, len: usize, limit: usize) -> Result<(), StatamError> {
     let end = off.checked_add(len).ok_or(StatamError::BoundsExceeded {
         reason: "hot tail section offset + length overflow",
     })?;
@@ -3317,10 +3496,20 @@ mod tests {
             ),
             Err(StatamError::BoundsExceeded { .. })
         ));
+        assert!(
+            PackPostscript::decode(
+                &PackPostscript {
+                    edge_table_len: (MAX_BLOCK_RAW_BYTES + PACK_FRAME_HEADER_LEN) as u32,
+                    ..base_pps
+                }
+                .encode()
+            )
+            .is_ok()
+        );
         assert!(matches!(
             PackPostscript::decode(
                 &PackPostscript {
-                    edge_table_len: (MAX_BLOCK_RAW_BYTES + 1) as u32,
+                    edge_table_len: (MAX_BLOCK_RAW_BYTES + PACK_FRAME_HEADER_LEN + 1) as u32,
                     ..base_pps
                 }
                 .encode()
@@ -3420,19 +3609,33 @@ mod tests {
         assert_eq!(decoded, payload);
 
         let mut pframed = Vec::new();
-        let pinfo = write_framed_pack_frame(
-            &payload,
-            Codec::Zstd,
-            PACK_FRAME_FLAG_USES_DICT,
-            3,
-            &mut pframed,
-        )
-        .unwrap();
+        let pinfo = write_framed_pack_frame(&payload, Codec::Zstd, 0, 3, &mut pframed).unwrap();
         assert_eq!(pinfo.codec, Codec::Zstd);
         let (pc, pflags, pdecoded) = read_framed_pack_frame(&pframed, MAX_FRAME_RAW_BYTES).unwrap();
         assert_eq!(pc, Codec::Zstd);
-        assert_eq!(pflags, PACK_FRAME_FLAG_USES_DICT);
+        assert_eq!(pflags, 0);
         assert_eq!(pdecoded, payload);
+
+        // write_framed_pack_frame rejects PACK_FRAME_FLAG_USES_DICT and unknown flags.
+        let mut bad = Vec::new();
+        assert!(matches!(
+            write_framed_pack_frame(
+                &payload,
+                Codec::Zstd,
+                PACK_FRAME_FLAG_USES_DICT,
+                3,
+                &mut bad
+            ),
+            Err(StatamError::Corrupt { .. })
+        ));
+        assert!(matches!(
+            write_framed_pack_frame(&payload, Codec::Zstd, 0x80, 3, &mut bad),
+            Err(StatamError::Corrupt { .. })
+        ));
+        assert!(matches!(
+            write_framed_pack_frame_with_compressor(&payload, Codec::Zstd, 0x80, 3, None, &mut bad),
+            Err(StatamError::Corrupt { .. })
+        ));
     }
 
     #[cfg(not(miri))]
@@ -3477,9 +3680,16 @@ mod tests {
         let err = read_framed_pack_frame_with_dict(&framed, MAX_FRAME_RAW_BYTES, None).unwrap_err();
         assert!(matches!(err, StatamError::Corrupt { .. }));
 
-        // Dict flag with Codec::None must return Corrupt.
+        // Dict flag with Codec::None must return Corrupt (even with recomputed header-inclusive CRC).
         let mut bad_codec = framed.clone();
         bad_codec[2] = Codec::None as u8;
+        // Without recomputing CRC, flipping the header codec byte triggers ChecksumMismatch.
+        let err_crc =
+            read_framed_pack_frame_with_dict(&bad_codec, MAX_FRAME_RAW_BYTES, Some(&dec_dict))
+                .unwrap_err();
+        assert!(matches!(err_crc, StatamError::ChecksumMismatch { .. }));
+        let new_crc = pack_frame_crc(&bad_codec[0..12], &bad_codec[PACK_FRAME_HEADER_LEN..]);
+        bad_codec[12..16].copy_from_slice(&new_crc.to_le_bytes());
         let err =
             read_framed_pack_frame_with_dict(&bad_codec, MAX_FRAME_RAW_BYTES, Some(&dec_dict))
                 .unwrap_err();
@@ -3584,5 +3794,468 @@ mod tests {
         assert_eq!(c_z, Codec::Zstd);
         assert!(matches!(cow_z, Cow::Owned(_)));
         assert_eq!(cow_z.as_ref(), compressible.as_slice());
+    }
+
+    #[test]
+    fn m3_privacy_safe_debug_for_shredded_map_and_schema_meta() {
+        let secret_key = "SECRET_USER_MAP_KEY_123";
+        let entry = ShreddedMapKeyEntry {
+            key: secret_key.to_owned(),
+            sub_col_idx: 7,
+            residual_count: 2,
+        };
+        let entry_dbg = format!("{entry:?}");
+        assert!(entry_dbg.contains("key_len"));
+        assert!(!entry_dbg.contains(secret_key));
+
+        let dir = ShreddedMapDir {
+            logical_col_idx: 3,
+            keys: vec![entry],
+        };
+        let dir_dbg = format!("{dir:?}");
+        assert!(!dir_dbg.contains(secret_key));
+
+        let schema = Arc::new(
+            Schema::try_new(vec![
+                Field::new("id", DataType::I64, false),
+                Field::new("attrs", DataType::MapUtf8, true),
+            ])
+            .unwrap(),
+        );
+        let meta = FileSchemaMeta {
+            table_kind: TableKind::Spans,
+            sort_cols: vec![0],
+            pack_ids: vec![[0xAB; 16]],
+            schema,
+            locality_groups: vec![LocalityGroup::Core, LocalityGroup::WideRow],
+            shredded_maps: vec![dir],
+        };
+        let meta_dbg = format!("{meta:?}");
+        assert!(meta_dbg.contains("fields_len"));
+        assert!(meta_dbg.contains("shredded_maps_len"));
+        assert!(!meta_dbg.contains(secret_key));
+    }
+
+    #[test]
+    fn m1_m9_pack_frame_flags_and_custom_max_raw_limit() {
+        let raw = vec![b'x'; 256];
+        let mut framed = Vec::new();
+        let info =
+            write_framed_pack_frame_with_limit(&raw, Codec::Lz4, 0, 3, 256, &mut framed).unwrap();
+        assert_eq!(info.raw_len, 256);
+        let (_, flags, dec) = read_framed_pack_frame(&framed, 256).unwrap();
+        assert_eq!(flags, 0);
+        assert_eq!(dec, raw);
+
+        // Exceeding custom max_raw returns BoundsExceeded.
+        let mut over = Vec::new();
+        assert!(matches!(
+            write_framed_pack_frame_with_limit(&raw, Codec::Lz4, 0, 3, 255, &mut over),
+            Err(StatamError::BoundsExceeded { .. })
+        ));
+
+        // Flipping PF flags without updating header-inclusive CRC returns ChecksumMismatch;
+        // after recomputing CRC, read_framed_pack_frame rejects PACK_FRAME_FLAG_USES_DICT as Corrupt.
+        let mut dict_flagged = framed.clone();
+        dict_flagged[3] = PACK_FRAME_FLAG_USES_DICT;
+        assert!(matches!(
+            read_framed_pack_frame(&dict_flagged, MAX_FRAME_RAW_BYTES),
+            Err(StatamError::ChecksumMismatch { .. })
+        ));
+        let recomputed =
+            pack_frame_crc(&dict_flagged[0..12], &dict_flagged[PACK_FRAME_HEADER_LEN..]);
+        dict_flagged[12..16].copy_from_slice(&recomputed.to_le_bytes());
+        assert!(matches!(
+            read_framed_pack_frame(&dict_flagged, MAX_FRAME_RAW_BYTES),
+            Err(StatamError::Corrupt { .. })
+        ));
+    }
+
+    #[test]
+    fn m2_m5_header_inclusive_crcs_strict_entries_and_schema_uniqueness() {
+        assert_eq!(MINI_BLOCK_SIZE, 8_192);
+
+        // 1. SB block header-inclusive CRC catches single-bit flips in header bytes [2..12].
+        let raw = vec![b'z'; 512];
+        let mut sb = Vec::new();
+        let sb_info = write_framed_block(Encoding::Plain, &raw, Codec::Lz4, 3, &mut sb).unwrap();
+        let blk = BlockEntry {
+            first_row: 0,
+            row_count: 1,
+            null_count: 0,
+            offset: 0,
+            stored_len: sb_info.stored_len,
+            raw_len: sb_info.raw_len,
+            encoding: Encoding::Plain,
+            codec: sb_info.codec,
+            block_flags: 0,
+            min_inline_len: 0,
+            max_inline_len: 0,
+            reserved: [0; 3],
+            min_inline: [0; 16],
+            max_inline: [0; 16],
+        };
+        assert_eq!(
+            read_framed_block_checked_cow(&sb, &blk, MAX_BLOCK_RAW_BYTES)
+                .unwrap()
+                .as_ref(),
+            raw.as_slice()
+        );
+        for hdr_byte in [2usize, 3, 4] {
+            let mut tampered = sb.clone();
+            tampered[hdr_byte] ^= 0x01;
+            // Make sure encoding/codec byte stays valid enum so CRC check runs.
+            if hdr_byte == 2 {
+                tampered[2] = Encoding::Rle as u8;
+            } else if hdr_byte == 3 {
+                tampered[3] = Codec::None as u8;
+            }
+            assert!(matches!(
+                read_framed_block_cow(&tampered, MAX_BLOCK_RAW_BYTES),
+                Err(StatamError::ChecksumMismatch { .. })
+            ));
+        }
+        // Recomputing SB CRC with mismatched encoding triggers read_framed_block_checked_cow Corrupt.
+        let mut wrong_enc_sb = sb.clone();
+        wrong_enc_sb[2] = Encoding::Rle as u8;
+        let new_crc = block_frame_crc(
+            &wrong_enc_sb[0..12],
+            &wrong_enc_sb[BLOCK_FRAME_HEADER_LEN..],
+        );
+        wrong_enc_sb[12..16].copy_from_slice(&new_crc.to_le_bytes());
+        assert!(matches!(
+            read_framed_block_checked_cow(&wrong_enc_sb, &blk, MAX_BLOCK_RAW_BYTES),
+            Err(StatamError::Corrupt { .. })
+        ));
+
+        // 2. ColumnDirEntry / BlockEntry / LazyIndexEntry / FrameEntry unknown flags & reserved.
+        let mut bad_col = ColumnDirEntry {
+            phys_col_id: 0,
+            logical_col_id: 0,
+            locality_group: LocalityGroup::Core,
+            col_flags: 0x80,
+            reserved: 0,
+            num_blocks: 0,
+            first_block_idx: 0,
+            dict_offset: 0,
+            dict_len: 0,
+            dict_entry_count: 0,
+            bloom_offset: 0,
+            bloom_len: 0,
+            null_count_total: 0,
+            trigram_offset: 0,
+        };
+        assert!(matches!(
+            ColumnDirEntry::decode(&bad_col.encode()),
+            Err(StatamError::Corrupt { .. })
+        ));
+        bad_col.col_flags = 0;
+        bad_col.reserved = 1;
+        assert!(matches!(
+            ColumnDirEntry::decode(&bad_col.encode()),
+            Err(StatamError::Corrupt { .. })
+        ));
+
+        let mut bad_blk = blk;
+        bad_blk.block_flags = 0x80;
+        assert!(matches!(
+            BlockEntry::decode(&bad_blk.encode()),
+            Err(StatamError::Corrupt { .. })
+        ));
+        bad_blk.block_flags = 0;
+        bad_blk.reserved = [0, 1, 0];
+        assert!(matches!(
+            BlockEntry::decode(&bad_blk.encode()),
+            Err(StatamError::Corrupt { .. })
+        ));
+
+        let bad_lazy = LazyIndexEntry {
+            kind: LazyIndexKind::Bloom,
+            reserved: [0, 0, 1],
+            phys_col_id: 0,
+            offset: 32,
+            len: 64,
+            crc32c: 0,
+        };
+        assert!(matches!(
+            LazyIndexEntry::decode(&bad_lazy.encode()),
+            Err(StatamError::Corrupt { .. })
+        ));
+
+        let base_fe = FrameEntry {
+            offset: PACK_HEADER_LEN as u64,
+            stored_len: 16,
+            raw_len: 16,
+            codec: Codec::None,
+            flags: 0,
+            dict_id: 0,
+            first_chunk_id: 0,
+            chunk_count: 1,
+            filter_off: 0,
+            filter_len: 0,
+            crc32c: 0,
+        };
+        assert!(matches!(
+            FrameEntry::decode(
+                &FrameEntry {
+                    flags: 0x02,
+                    ..base_fe
+                }
+                .encode()
+            ),
+            Err(StatamError::Corrupt { .. })
+        ));
+        assert!(matches!(
+            FrameEntry::decode(
+                &FrameEntry {
+                    dict_id: 1,
+                    ..base_fe
+                }
+                .encode()
+            ),
+            Err(StatamError::Corrupt { .. })
+        ));
+
+        // 3. Postscript & PackPostscript enforce off == 0 when len == 0 and dict_len cap.
+        let base_ps = Postscript {
+            hot_tail_len: POSTSCRIPT_LEN as u32,
+            hot_tail_raw_len: 0,
+            format_version: FORMAT_VERSION,
+            flags: 0,
+            required_features: 0,
+            row_count: 0,
+            num_logical_cols: 0,
+            num_phys_cols: 0,
+            num_row_groups: 0,
+            total_blocks: 0,
+            schema_off: 0,
+            schema_len: 0,
+            col_dir_off: 0,
+            rg_dir_off: 0,
+            block_dir_off: 0,
+            hot_bloom_off: 0,
+            hot_bloom_len: 0,
+            hot_dict_off: 0,
+            hot_dict_len: 0,
+            lazy_dir_off: 0,
+            lazy_dir_len: 0,
+            enc_envelope_len: 0,
+            enc_envelope_offset: 0,
+            hot_tail_crc32c: 0,
+            reserved: 0,
+        };
+        for mutated in [
+            Postscript {
+                hot_bloom_off: 1,
+                ..base_ps
+            },
+            Postscript {
+                hot_dict_off: 1,
+                ..base_ps
+            },
+            Postscript {
+                lazy_dir_off: 1,
+                ..base_ps
+            },
+        ] {
+            assert!(matches!(
+                Postscript::decode(&mutated.encode()),
+                Err(StatamError::Corrupt { .. })
+            ));
+        }
+
+        let base_pps = PackPostscript {
+            toc_stored_len: PACK_POSTSCRIPT_LEN as u32,
+            toc_raw_len: 0,
+            format_version: FORMAT_VERSION,
+            flags: 0,
+            required_features: 0,
+            pack_id: [0; 16],
+            frame_count: 0,
+            chunk_count: 0,
+            hash_table_off: 0,
+            trigram_off: 0,
+            trigram_len: 0,
+            edge_table_len: 0,
+            edge_table_off: 0,
+            dict_off: 0,
+            dict_len: 0,
+            enc_envelope_offset: 0,
+            enc_envelope_len: 0,
+            reserved: 0,
+            toc_crc32c: 0,
+        };
+        for mutated in [
+            PackPostscript {
+                hash_table_off: 48,
+                ..base_pps
+            },
+            PackPostscript {
+                trigram_off: 48,
+                ..base_pps
+            },
+            PackPostscript {
+                edge_table_off: 48,
+                ..base_pps
+            },
+            PackPostscript {
+                dict_off: 48,
+                ..base_pps
+            },
+        ] {
+            assert!(matches!(
+                PackPostscript::decode(&mutated.encode()),
+                Err(StatamError::Corrupt { .. })
+            ));
+        }
+        assert!(matches!(
+            PackPostscript::decode(
+                &PackPostscript {
+                    dict_off: 48,
+                    dict_len: (MAX_PACK_DICT_BYTES + 1025) as u32,
+                    ..base_pps
+                }
+                .encode()
+            ),
+            Err(StatamError::BoundsExceeded { .. })
+        ));
+
+        // 4. Schema uniqueness checks in both encode_schema and decode_schema.
+        let schema = Schema::try_new_arc(vec![
+            Field::new("ts", DataType::I64, false),
+            Field::new("m1", DataType::MapUtf8, true),
+            Field::new("m2", DataType::MapUtf8, true),
+        ])
+        .unwrap();
+        let valid_meta = FileSchemaMeta {
+            table_kind: TableKind::Generic,
+            sort_cols: vec![0],
+            pack_ids: Vec::new(),
+            schema: Arc::clone(&schema),
+            locality_groups: vec![
+                LocalityGroup::Core,
+                LocalityGroup::WideRow,
+                LocalityGroup::WideRow,
+            ],
+            shredded_maps: vec![
+                ShreddedMapDir {
+                    logical_col_idx: 1,
+                    keys: vec![
+                        ShreddedMapKeyEntry {
+                            key: "k1".to_owned(),
+                            sub_col_idx: 3,
+                            residual_count: 0,
+                        },
+                        ShreddedMapKeyEntry {
+                            key: "k2".to_owned(),
+                            sub_col_idx: 4,
+                            residual_count: 0,
+                        },
+                    ],
+                },
+                ShreddedMapDir {
+                    logical_col_idx: 2,
+                    keys: vec![ShreddedMapKeyEntry {
+                        key: "k1".to_owned(),
+                        sub_col_idx: 5,
+                        residual_count: 0,
+                    }],
+                },
+            ],
+        };
+        let encoded_valid = encode_schema(&valid_meta).unwrap();
+        assert_eq!(decode_schema(&encoded_valid).unwrap(), valid_meta);
+
+        // Duplicate sort_cols rejected by encode_schema.
+        assert!(matches!(
+            encode_schema(&FileSchemaMeta {
+                sort_cols: vec![0, 0],
+                ..valid_meta.clone()
+            }),
+            Err(StatamError::SchemaMismatch { .. })
+        ));
+        // Duplicate shredded logical_col_idx rejected by encode_schema.
+        assert!(matches!(
+            encode_schema(&FileSchemaMeta {
+                shredded_maps: vec![
+                    ShreddedMapDir {
+                        logical_col_idx: 1,
+                        keys: vec![],
+                    },
+                    ShreddedMapDir {
+                        logical_col_idx: 1,
+                        keys: vec![],
+                    },
+                ],
+                ..valid_meta.clone()
+            }),
+            Err(StatamError::SchemaMismatch { .. })
+        ));
+        // Duplicate promoted key within one map rejected by encode_schema.
+        assert!(matches!(
+            encode_schema(&FileSchemaMeta {
+                shredded_maps: vec![ShreddedMapDir {
+                    logical_col_idx: 1,
+                    keys: vec![
+                        ShreddedMapKeyEntry {
+                            key: "dup".to_owned(),
+                            sub_col_idx: 3,
+                            residual_count: 0,
+                        },
+                        ShreddedMapKeyEntry {
+                            key: "dup".to_owned(),
+                            sub_col_idx: 4,
+                            residual_count: 0,
+                        },
+                    ],
+                }],
+                ..valid_meta.clone()
+            }),
+            Err(StatamError::SchemaMismatch { .. })
+        ));
+        // Duplicate sub_col_idx across shredded maps rejected by encode_schema.
+        assert!(matches!(
+            encode_schema(&FileSchemaMeta {
+                shredded_maps: vec![
+                    ShreddedMapDir {
+                        logical_col_idx: 1,
+                        keys: vec![ShreddedMapKeyEntry {
+                            key: "a".to_owned(),
+                            sub_col_idx: 3,
+                            residual_count: 0,
+                        }],
+                    },
+                    ShreddedMapDir {
+                        logical_col_idx: 2,
+                        keys: vec![ShreddedMapKeyEntry {
+                            key: "b".to_owned(),
+                            sub_col_idx: 3,
+                            residual_count: 0,
+                        }],
+                    },
+                ],
+                ..valid_meta
+            }),
+            Err(StatamError::SchemaMismatch { .. })
+        ));
+
+        // Craft raw schema bytes with duplicate sort_cols / duplicate shredded entries to verify decode_schema.
+        let mut raw_dup_sort = Vec::new();
+        raw_dup_sort.push(TableKind::Generic as u8);
+        raw_dup_sort.push(2); // sort_col_count = 2
+        raw_dup_sort.extend_from_slice(&0u16.to_le_bytes());
+        raw_dup_sort.extend_from_slice(&0u16.to_le_bytes()); // duplicate
+        raw_dup_sort.extend_from_slice(&0u16.to_le_bytes()); // pack_refs
+        raw_dup_sort.extend_from_slice(&1u16.to_le_bytes()); // 1 field
+        raw_dup_sort.extend_from_slice(&2u16.to_le_bytes());
+        raw_dup_sort.extend_from_slice(b"ts");
+        raw_dup_sort.push(2); // I64
+        raw_dup_sort.push(0); // nullable = false
+        raw_dup_sort.push(0); // Core
+        raw_dup_sort.extend_from_slice(&0u16.to_le_bytes()); // shredded_maps
+        assert!(matches!(
+            decode_schema(&raw_dup_sort),
+            Err(StatamError::Corrupt { .. })
+        ));
     }
 }

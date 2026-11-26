@@ -5,11 +5,16 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use bytes::Bytes;
-use cetra_column::DataType;
+use cetra_column::{Bitmap, DataType};
 
 use crate::codec::dict::FileDict;
-use crate::codec::{ZonePred, ZoneValue};
-use crate::format::{MAX_BATCH_DECODED_BYTES, decode_schema};
+use crate::codec::{
+    ZonePred, ZoneValue, decode_mini_block, decode_mini_block_selected, decode_mini_block_take,
+};
+use crate::format::{
+    BlockEntry, Codec, Encoding, MAX_BATCH_DECODED_BYTES, MAX_BLOCK_RAW_BYTES, MAX_FRAME_RAW_BYTES,
+    PackDecoderDict, decode_schema, read_framed_block_cow, read_framed_pack_frame_with_dict,
+};
 use crate::gdpr::{GdprFileInput, gdpr_rewrite_day};
 use crate::io::{RangeReader, SliceReader};
 use crate::payload::chunker::chunk_payload;
@@ -20,7 +25,13 @@ use crate::reader::{
     CoalesceMode, IdLookup, InMemoryPackResolver, PackResolver, Predicate, ScanRequest,
     StatamFileMeta, StatamReader, SubstringQuery, TimeRange,
 };
-use crate::simd::bloom::Sbbf;
+use crate::simd::bitpack::{
+    delta_decode_i64, delta_decode_i64_indices, unpack_u32, unpack_u32_at, unpack_u32_indices,
+    unpack_u64, unpack_u64_at, unpack_u64_indices,
+};
+use crate::simd::bloom::{BloomIndex, Sbbf};
+use crate::simd::filter::{FilterOp, filter_f64, filter_i64, filter_i64_between, filter_u32};
+use crate::simd::trigram::{TrigramBloom, ascii_lowercase_into, extract_trigram_hashes};
 
 const MAX_FUZZ_PACK_CHUNKS_TO_READ: usize = 32;
 const MAX_FUZZ_PACK_FRAMES_TO_READ: usize = 4;
@@ -31,8 +42,17 @@ pub fn fuzz_statam_file(data: &[u8]) {
     // 1. Low-level decoders directly.
     let _ = decode_schema(data);
     let _ = Sbbf::from_bytes(data);
+    let _ = BloomIndex::from_bytes(data);
     let _ = FileDict::decode(data, false);
     let _ = FileDict::decode(data, true);
+    let _ = read_framed_block_cow(data, MAX_BLOCK_RAW_BYTES);
+    let _ = read_framed_pack_frame_with_dict(data, MAX_FRAME_RAW_BYTES, None);
+    if let Ok(dict) = PackDecoderDict::new(data) {
+        let _ = read_framed_pack_frame_with_dict(data, MAX_FRAME_RAW_BYTES, Some(&dict));
+    }
+
+    exercise_direct_mini_block_decoders(data);
+    exercise_direct_simd_kernels(data);
 
     let row_count_hint = if data.len() >= 2 {
         u16::from_le_bytes([data[0], data[1]]) as usize
@@ -71,6 +91,168 @@ pub fn fuzz_statam_file(data: &[u8]) {
             let split = len_a % body.len();
             exercise_paired(&body[..split], &body[split..]);
         }
+    }
+}
+
+fn exercise_direct_mini_block_decoders(data: &[u8]) {
+    if data.len() < 8 {
+        return;
+    }
+    let dt = match data[0] % 16 {
+        0 => DataType::Null,
+        1 => DataType::Bool,
+        2 => DataType::I64,
+        3 => DataType::F64,
+        4 => DataType::cost_decimal(),
+        5 => DataType::TimestampNs { utc: true },
+        6 => DataType::Date,
+        7 => DataType::Interval,
+        8 => DataType::Utf8,
+        9 => DataType::Binary,
+        10 => DataType::FixedBytes8,
+        11 => DataType::FixedBytes16,
+        12 => DataType::List(Box::new(DataType::Utf8)),
+        13 => DataType::MapUtf8,
+        14 => DataType::Events,
+        _ => DataType::Links,
+    };
+    let Ok(encoding) = Encoding::from_u8(data[1] % 15) else {
+        return;
+    };
+    let row_count = (u16::from_le_bytes([data[2], data[3]]) % 2_049) as usize;
+    let null_count = if row_count == 0 {
+        0
+    } else {
+        (u16::from_le_bytes([data[4], data[5]]) as usize % (row_count + 1)) as u16
+    };
+    let block_flags = data[6] & 0x1F;
+    let inline_len = data[7].min(16);
+    let body = &data[8..];
+    let mut min_inline = [0u8; 16];
+    let copy_n = (inline_len as usize).min(body.len());
+    min_inline[..copy_n].copy_from_slice(&body[..copy_n]);
+
+    let entry = BlockEntry {
+        first_row: 0,
+        row_count: row_count as u16,
+        null_count,
+        offset: 0,
+        stored_len: body.len().min(u32::MAX as usize) as u32,
+        raw_len: body.len().min(u32::MAX as usize) as u32,
+        encoding,
+        codec: Codec::None,
+        block_flags,
+        min_inline_len: inline_len,
+        max_inline_len: inline_len,
+        reserved: [0; 3],
+        min_inline,
+        max_inline: min_inline,
+    };
+
+    let _ = decode_mini_block(body, &entry, &dt, None);
+
+    if row_count > 0 {
+        let mut mask = Bitmap::new_zeroed(row_count);
+        let step = (row_count / 8).max(1);
+        let mut idx = 0usize;
+        let mut take_indices = Vec::with_capacity(12);
+        while idx < row_count && take_indices.len() < 8 {
+            let _ = mask.set(idx, true);
+            take_indices.push(idx);
+            idx = idx.saturating_add(step);
+        }
+        let _ = mask.set(row_count - 1, true);
+        take_indices.push(row_count - 1);
+        take_indices.push(0); // Exercise duplicate & out-of-order take indices.
+        let _ = decode_mini_block_selected(body, &entry, &dt, None, &mask);
+        let _ = decode_mini_block_take(body, &entry, &dt, None, &take_indices);
+    }
+}
+
+fn exercise_direct_simd_kernels(data: &[u8]) {
+    if data.is_empty() {
+        return;
+    }
+
+    // Trigram SIMD kernels (`TrigramBloom::from_bytes`, `ascii_lowercase_into`, `extract_trigram_hashes`).
+    let _ = TrigramBloom::from_bytes(data.to_vec());
+    let trigram_slice = &data[..data.len().min(4096)];
+    let mut lowered = Vec::new();
+    ascii_lowercase_into(trigram_slice, &mut lowered);
+    let mut hashes = Vec::new();
+    extract_trigram_hashes(trigram_slice, false, &mut hashes);
+    extract_trigram_hashes(trigram_slice, true, &mut hashes);
+
+    if data.len() < 4 {
+        return;
+    }
+
+    // Bitpack & delta SIMD kernels (up to 2,050 elements to exercise full 1024-elem tiles + tail).
+    let bw_u64 = data[0] % 65;
+    let bw_u32 = data[0] % 33;
+    let count = (u16::from_le_bytes([data[1], data[2]]) % 2_051) as usize;
+    let packed = &data[3..];
+    let mut out_u32 = Vec::new();
+    let _ = unpack_u32(packed, count, bw_u32, &mut out_u32);
+    let mut out_u64 = Vec::new();
+    let _ = unpack_u64(packed, count, bw_u64, &mut out_u64);
+    if count > 0 {
+        let probe_indices = [0usize, count / 2, count - 1, 0];
+        let _ = unpack_u32_at(packed, count, bw_u32, count - 1);
+        let _ = unpack_u64_at(packed, count, bw_u64, count - 1);
+        let mut idx_u32 = Vec::new();
+        let _ = unpack_u32_indices(packed, count, bw_u32, &probe_indices, &mut idx_u32);
+        let mut idx_u64 = Vec::new();
+        let _ = unpack_u64_indices(packed, count, bw_u64, &probe_indices, &mut idx_u64);
+        let num_bases = (count / 1024) * 8 + usize::from(!count.is_multiple_of(1024));
+        let bases = vec![i64::from(data[3]); num_bases];
+        let deltas_i64: Vec<i64> = out_u64.iter().map(|&v| v as i64).collect();
+        let mut delta_out = Vec::new();
+        let _ = delta_decode_i64(&bases, &deltas_i64, count, &mut delta_out);
+        let _ = delta_decode_i64_indices(
+            &bases,
+            packed,
+            count,
+            bw_u64,
+            (data[3] & 1) != 0,
+            &probe_indices,
+        );
+    }
+
+    // Filter SIMD kernels (`filter_i64`, `filter_i64_between`, `filter_u32`, `filter_f64`).
+    let op = match data[0] % 6 {
+        0 => FilterOp::Eq,
+        1 => FilterOp::Ne,
+        2 => FilterOp::Lt,
+        3 => FilterOp::Le,
+        4 => FilterOp::Gt,
+        _ => FilterOp::Ge,
+    };
+    let n_u32 = (data.len() / 4).min(1_056);
+    if n_u32 > 0 {
+        let vals_u32: Vec<u32> = data[..n_u32 * 4]
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .map(|&c| u32::from_le_bytes(c))
+            .collect();
+        let _ = filter_u32(&vals_u32, op, vals_u32[0]);
+    }
+    let n_64 = (data.len() / 8).min(1_056);
+    if n_64 > 0 {
+        let vals_i64: Vec<i64> = data[..n_64 * 8]
+            .as_chunks::<8>()
+            .0
+            .iter()
+            .map(|&c| i64::from_le_bytes(c))
+            .collect();
+        let _ = filter_i64(&vals_i64, op, vals_i64[0]);
+        let lo = vals_i64[0].min(vals_i64[n_64 - 1]);
+        let hi = vals_i64[0].max(vals_i64[n_64 - 1]);
+        let _ = filter_i64_between(&vals_i64, lo, hi);
+
+        let vals_f64: Vec<f64> = vals_i64.iter().map(|&v| f64::from_bits(v as u64)).collect();
+        let _ = filter_f64(&vals_f64, op, vals_f64[0]);
     }
 }
 
@@ -740,11 +922,17 @@ pub(crate) mod tests {
 
     fn write_statam_bytes(schema: &Arc<Schema>, batches: &[&Batch], opts: WriteOptions) -> Vec<u8> {
         let mut out = Vec::new();
-        let mut w = StatamWriter::new(Arc::clone(schema), opts, None).unwrap();
+        let mut w = StatamWriter::new(
+            std::io::Cursor::new(&mut out),
+            Arc::clone(schema),
+            opts,
+            None,
+        )
+        .unwrap();
         for b in batches {
             w.write_batch(b).unwrap();
         }
-        w.finish(&mut out).unwrap();
+        w.finish().unwrap();
         out
     }
 
@@ -1097,11 +1285,15 @@ pub(crate) mod tests {
         let mut paired_pb = ChunkPackBuilder::new(paired_pack_id, PackWriteOptions::default());
         let mut paired_statam = Vec::new();
         {
-            let mut w =
-                StatamWriter::new(Arc::clone(&sp_schema), paired_opts, Some(&mut paired_pb))
-                    .unwrap();
+            let mut w = StatamWriter::new(
+                std::io::Cursor::new(&mut paired_statam),
+                Arc::clone(&sp_schema),
+                paired_opts,
+                Some(&mut paired_pb),
+            )
+            .unwrap();
             w.write_batch(&sp_batch_long).unwrap();
-            w.finish(&mut paired_statam).unwrap();
+            w.finish().unwrap();
         }
         let mut paired_pack = Vec::new();
         paired_pb.finish(&mut paired_pack).unwrap();
@@ -1177,10 +1369,15 @@ pub(crate) mod tests {
         let mut mt_pb = ChunkPackBuilder::new(mt_pack_id, mt_pack_opts);
         let mut mt_statam = Vec::new();
         {
-            let mut w =
-                StatamWriter::new(Arc::clone(&mt_schema), mt_opts, Some(&mut mt_pb)).unwrap();
+            let mut w = StatamWriter::new(
+                std::io::Cursor::new(&mut mt_statam),
+                Arc::clone(&mt_schema),
+                mt_opts,
+                Some(&mut mt_pb),
+            )
+            .unwrap();
             w.write_batch(&mt_batch).unwrap();
-            w.finish(&mut mt_statam).unwrap();
+            w.finish().unwrap();
         }
         let mut mt_pack = Vec::new();
         mt_pb.finish(&mut mt_pack).unwrap();
@@ -1242,6 +1439,108 @@ pub(crate) mod tests {
             *last ^= 0xFF;
         }
         write("seed-18-corrupt-crc-statam", &corrupt);
+
+        // 19: >= 1,030-row L1Compact file exercising full FastLanes-1024 SIMD tiles + scalar tail.
+        let simd_n = 1_030usize;
+        let simd_schema = Schema::try_new_arc(vec![
+            Field::new("start_time", DataType::timestamp_utc(), false),
+            Field::new("duration_ns", DataType::I64, false),
+            Field::new("cost", DataType::F64, true),
+            Field::new("ok", DataType::Bool, false),
+            Field::new("trace_id", DataType::FixedBytes16, false),
+            Field::new("model", DataType::Utf8, false),
+            Field::new("name", DataType::Utf8, false),
+        ])
+        .unwrap();
+        let simd_times: Vec<i64> = (0..simd_n as i64)
+            .map(|i| 1_700_000_000_000 + i * 1_000 + (i % 7))
+            .collect();
+        let simd_dur: Vec<i64> = (0..simd_n as i64)
+            .map(|i| 500 + (i * 37) % 10_000)
+            .collect();
+        let simd_cost: Vec<f64> = (0..simd_n)
+            .map(|i| match i {
+                5 => f64::NAN,
+                9 => -0.0,
+                _ => ((i % 250) as f64) * 0.01,
+            })
+            .collect();
+        let simd_ok = Bitmap::from_bools(&(0..simd_n).map(|i| i % 5 != 0).collect::<Vec<_>>());
+        let simd_tids: Vec<[u8; 16]> = (0..simd_n)
+            .map(|i| {
+                let mut id = [0u8; 16];
+                id[0..8].copy_from_slice(&((i / 4) as u64).to_le_bytes());
+                id
+            })
+            .collect();
+        let models = ["gpt-4o", "claude-3-7-sonnet", "gemini-2.5-pro", "llama-3.3"];
+        let simd_models: Vec<&str> = (0..simd_n).map(|i| models[i % models.len()]).collect();
+        let simd_names: Vec<String> = (0..simd_n)
+            .map(|i| format!("agent.step.{:04}.run_{}", i % 192, i % 13))
+            .collect();
+        let simd_batch = Batch::try_new_all(
+            Arc::clone(&simd_schema),
+            vec![
+                Column::Flat(
+                    FlatColumn::try_new(
+                        FlatData::TimestampNs {
+                            values: simd_times,
+                            utc: true,
+                        },
+                        None,
+                    )
+                    .unwrap(),
+                ),
+                Column::Flat(FlatColumn::try_new(FlatData::I64(simd_dur), None).unwrap()),
+                Column::Flat(FlatColumn::try_new(FlatData::F64(simd_cost), None).unwrap()),
+                Column::Flat(FlatColumn::try_new(FlatData::Bool(simd_ok), None).unwrap()),
+                Column::Flat(FlatColumn::try_new(FlatData::FixedBytes16(simd_tids), None).unwrap()),
+                Column::Flat(
+                    FlatColumn::try_new(
+                        FlatData::Utf8(Utf8Data::try_from_slices(simd_models).unwrap()),
+                        None,
+                    )
+                    .unwrap(),
+                ),
+                Column::Flat(
+                    FlatColumn::try_new(
+                        FlatData::Utf8(
+                            Utf8Data::try_from_slices(
+                                simd_names.iter().map(String::as_str).collect::<Vec<_>>(),
+                            )
+                            .unwrap(),
+                        ),
+                        None,
+                    )
+                    .unwrap(),
+                ),
+            ],
+            simd_n,
+        )
+        .unwrap();
+        let mut simd_opts = WriteOptions::for_table(TableKind::Spans, WriteProfile::L1Compact);
+        simd_opts.sort_cols = vec![0];
+        simd_opts.bloom_cols = vec!["trace_id".to_owned()];
+        simd_opts.hot_bloom_col = Some("trace_id".to_owned());
+        simd_opts.narrow_trigram_cols = vec!["name".to_owned()];
+        simd_opts.payload_cols = Vec::new();
+        let simd_bytes = write_statam_bytes(&simd_schema, &[&simd_batch], simd_opts);
+        write("seed-19-simd-1030-l1", &simd_bytes);
+
+        // 20: Standalone `.stpk` pack trained with `ChunkPackBuilder::new_with_dict` (>= 2 MiB raw).
+        let dict_pack_id = [0x61u8; 16];
+        let mut dict_pb =
+            ChunkPackBuilder::new_with_dict(dict_pack_id, PackWriteOptions::default());
+        for i in 0..1_080u32 {
+            let chunk = format!(
+                "{{\"role\":\"assistant\",\"model\":\"claude-3-7-sonnet\",\"span\":\"{i:06}\",\"payload\":\"{}\"}}",
+                "structured_observability_json_segment_alpha_beta_".repeat(42)
+            );
+            dict_pb.intern_chunk(chunk.as_bytes()).unwrap();
+        }
+        let mut dict_pack_bytes = Vec::new();
+        dict_pb.finish(&mut dict_pack_bytes).unwrap();
+        write("seed-20-stpk-zstd-dict", &dict_pack_bytes);
     }
 
     /// Writes the seed corpus for `statam_file` (`just fuzz-seed`).
