@@ -1,7 +1,7 @@
 # Statam v0 (`crates/statam`) — Binary Specification & Design Document
 
 **Date:** 2026-11-26  
-**Status:** Stage 1 deliverable — Cold-Reviewed & Finalized (v0.1)  
+**Status:** Stage 2 complete — Cold-Reviewed (Passes 1–10) & Gate-Verified (v0.2)  
 **Crate:** `crates/statam` (`cetra-statam`)  
 **Supersedes:** `docs/research/file-format/prototype-plan.md` (Strata v0)
 
@@ -32,23 +32,23 @@
 
 Statam defines **two immutable binary file types** backed by an abstract byte-range reader (`RangeReader` trait supporting slices, local files, and simulated/real S3 + exact 1 MiB `ReadCache`):
 
-1. **Data File (`.statam`):** Stores one sorted table slice (`spans` 56 cols, `traces` 30 cols, `scores` 24 cols, or generic `cetra_column::Schema`) in **PAX Row Groups (131,072 rows, capped at `MAX_ROW_GROUP_SIZE = 262,144`)** composed of **Mini-Blocks (32,768 rows in both `L1Compact` and `L0Fast`, capped at `MAX_MINI_BLOCK_SIZE = 65,535`)**, with Core columns tiered at `core_offset` (small analytics -> `start_time`/`created_at` -> `metadata` shredded sub-columns -> ID Core cols -> Tier-2 analytics -> remaining shredded sub-columns -> cold Core cols), and a **Self-Sufficient Hot Tail (LZ4-compressible, `DEFAULT_TAIL_HINT = 128 KiB` default tail fetch, `120 KiB` soft / `1 MiB` hard budget)** containing Postscript, Schema, fixed-width Column Directory, RowGroup & Block Zone Maps, Sort-Key Index, Hot Bloom (`trace_id`), and small File-Level Dictionaries.
+1. **Data File (`.statam`):** Stores one sorted table slice (`spans` 56 cols, `traces` 30 cols, `scores` 24 cols, or generic `cetra_column::Schema`) in **PAX Row Groups (131,072 rows, capped at `MAX_ROW_GROUP_SIZE = 262,144`)** composed of **Mini-Blocks (`8,192` rows default in both `L1Compact` and `L0Fast`, capped at `MAX_MINI_BLOCK_SIZE = 65,535`)**, with Core columns tiered at `core_offset` (small analytics -> `start_time`/`created_at` -> `metadata` shredded sub-columns -> ID Core cols -> Tier-2 analytics -> remaining shredded sub-columns -> cold Core cols), and a **Self-Sufficient Hot Tail (LZ4-compressible, `DEFAULT_TAIL_HINT = 128 KiB` default tail fetch, `120 KiB` soft / `1 MiB` hard budget)** containing Postscript, Schema, fixed-width Column Directory, RowGroup & Block Zone Maps, Sort-Key Index, Hot Bloom (`trace_id`), and small File-Level Dictionaries.
    - `WriteProfile::L0Fast`: 100% self-contained single file; fast single-pass encodings (`Const`, `Rle` with 64-element early run sample, FastLanes `ForBitpack`/`DeltaBitpack`, bounded `Dict <= 512`, `Plain` for `MapUtf8`, `Lz4` on `>= 64 B` varlen/nested/`Plain`/`PayloadRefs`, `Codec::None` on fixed-width/`ForBitpack`/`DeltaBitpack`/`BitpackBool`/`Rle`/`Dict`, `Zstd(-5)` on `>= 1 KiB` 512 KiB local payload frames, AVX2 SBBF).
    - `WriteProfile::L1Compact`: Bounded-memory (1-RG streaming, RG0-seeded) full encoding cascade (`Const`, `Rle`, sorted `Dict <= 16,384` for Core / `<= 1,024` & `<= 256 KiB` for non-known-low-card WideRow, FastLanes `DeltaBitpack`/`ForBitpack`, `Alp` with exact decimal division mode, `Fsst` on non-WideRow strings, `ShreddedMap`, `Zstd(3)` on all non-inline mini-block encodings and shredded sub-columns), adaptive trigram skip indexes, and shared per-`(project_id, day)` immutable **Chunk Packs (`.stpk`)**.
-2. **Chunk Pack (`.stpk`, L1 only):** Immutable content-addressed payload store scoped strictly to one `(project_id, day)`, keyed by **BLAKE3-128** (`[u8; 16]`). Packs unique chunks into 1 MiB raw `Zstd(3)` frames (guarded on `W4` bypass with single-chunk empty `EdgeTable` entries; 1 MiB `ReadCache` boundary-guarded for `< 32 KiB` frames within `< 8 KiB` of boundary), with a compact read-path TOC (LZ4 or Zstd-3 delta-coded `ChunkLoc`s, 16 B hashes kept in a separate compaction-only section so read-path TOC stays tiny!), `TS02` trigram skip section (dynamic 4 KiB / 8 KiB edge tail/head blooms + adaptive per-frame blooms up to 16 KiB), `head_63 + tail_63` edge table, and opt-in `PF`-framed Zstd `DictSection` (`ChunkPackBuilder::new_with_dict`, trained once unique raw chunks reach `>= 2 MiB`).
+2. **Chunk Pack (`.stpk`, L1 only):** Immutable content-addressed payload store scoped strictly to one `(project_id, day)`, keyed by **BLAKE3-128** (`[u8; 16]`). Packs unique chunks into **`512 KiB` raw `Zstd(3)` frames** by default (configurable via `target_frame_raw_bytes`; guarded on `W4` bypass with single-chunk empty `EdgeTable` entries; 1 MiB `ReadCache` boundary-guarded for `< 32 KiB` frames within `< 8 KiB` of boundary), with a compact read-path TOC (LZ4 or Zstd-3 delta-coded `ChunkLoc`s, optional 16 B hashes kept in a separate compaction-only section controlled by `emit_hash_table` so read-path TOC stays tiny!), `TS02` trigram skip section (dynamic 4 KiB / 8 KiB edge tail/head blooms + adaptive per-frame blooms capped at `min(stored_len / 6, raw.len() / 32)` up to 16 KiB), boundary-pruned `head_63 + tail_63` edge table (`edge_table_len == 0` when all rows are single-chunk), and opt-in `PF`-framed Zstd `DictSection` (`ChunkPackBuilder::new_with_dict`, trained once unique raw chunks reach `>= 2 MiB`).
 
 ### Public Crate API (`crates/statam`)
-- **Profiles & Options:** `WriteProfile::{L0Fast, L1Compact}`, `WriteOptions`, `TableKind::{Generic, Spans, Traces, Scores}`.
+- **Profiles & Options:** `WriteProfile::{L0Fast, L1Compact}`, `WriteOptions` (including `mini_block_size = 8_192`, `write_threads`), `PackWriteOptions` (including `target_frame_raw_bytes = 512 KiB`, `write_threads`, `emit_hash_table`), `TableKind::{Generic, Spans, Traces, Scores}`.
 - **Writers:**
   - `StatamWriter::new(schema: Arc<Schema>, options: WriteOptions, pack_builder: Option<&mut ChunkPackBuilder>)` -> `write_batch(&mut self, batch: &Batch)` -> `finish<W: Write>(self, out: W) -> Result<WriteStats, StatamError>`
-  - `ChunkPackBuilder::new(pack_id: [u8; 16], options: PackWriteOptions)` -> `intern_chunk(&mut self, bytes: &[u8]) -> Result<u32, StatamError>` -> `finish<W: Write>(self, out: W) -> Result<PackWriteStats, StatamError>`
+  - `ChunkPackBuilder::new(pack_id: [u8; 16], options: PackWriteOptions)` (plus `enable_boundary_tracking()`) -> `intern_chunk(&mut self, bytes: &[u8]) -> Result<u32, StatamError>` -> `finish<W: Write>(self, out: W) -> Result<PackWriteStats, StatamError>`
 - **Readers & I/O:**
   - `RangeReader`: `file_len(&self) -> u64`, `read_range(&self, range: Range<u64>) -> Result<Bytes, StatamError>`, `read_ranges(&self, ranges: &[Range<u64>]) -> Result<Vec<Bytes>, StatamError>`.
   - Built-in impls: `SliceReader`, `FileReader`, `SimulatedS3Reader` (exact `ReadCache` 1 MiB aligned block rounding `(start / 1MiB)..=((end - 1) / 1MiB)` + consecutive-run coalescing + configurable RTT/bandwidth + `IoCounters`).
-  - `PackResolver` trait: resolves `pack_id: [u8; 16]` -> `Arc<ChunkPackReader>` (with cached `PackToc`).
+  - `PackResolver` trait: resolves `pack_id: [u8; 16]` -> `Arc<ChunkPackReader>` (with cached `PackToc`, `FlatEdgeTable`, and `TS02` trigram blooms).
   - `StatamFileMeta::read_from(reader: &dyn RangeReader, tail_hint: Option<u32>) -> Result<Self, StatamError>` (1-GET cold open; validates Postscript CRC-32C + Hot Tail CRC-32C; never needs byte 0 unless byte 0 is already inside the fetched slice or `verify_full` is called).
-  - `StatamReader::open(reader, resolver)` / `open_with_meta(reader, meta, resolver)` -> `scan(&self, req: &ScanRequest) -> Result<Vec<Batch>, StatamError>`.
-  - `ScanRequest`: `projection: Option<Vec<usize>>` (`Some(vec![])` emits 0-col row-count batches), `map_keys: Vec<(String, String)>` (prunes projected `MapUtf8` columns to only requested keys when specified), `time_range: TimeRange`, `id_lookups: Vec<IdLookup>`, `predicates: Vec<Predicate>`, `substrings: Vec<SubstringQuery>`, `sort_desc_hint: bool` (enables reverse RG iteration for `start_time DESC LIMIT k`), `limit: Option<usize>`, `coalesce_mode: CoalesceMode::{Auto, Point, Scan}`.
+  - `StatamReader::open(reader, resolver)` / `open_with_meta(reader, meta, resolver)` -> `scan(&self, req: &ScanRequest) -> Result<Vec<Batch>, StatamError>` and `take_rows(&self, row_indices: &[u64], projection: Option<&[usize]>, read_threads: usize) -> Result<Vec<Batch>, StatamError>` (random-access sparse decode).
+  - `ScanRequest`: `projection: Option<Vec<usize>>` (`Some(vec![])` emits 0-col row-count batches), `map_keys: Vec<(String, String)>` (prunes projected `MapUtf8` columns to only requested keys when specified), `time_range: TimeRange`, `id_lookups: Vec<IdLookup>`, `predicates: Vec<Predicate>`, `substrings: Vec<SubstringQuery>`, `sort_desc_hint: bool` (enables reverse RG iteration for `start_time DESC LIMIT k`), `limit: Option<usize>`, `coalesce_mode: CoalesceMode::{Auto, Point, Scan}`, `read_threads: usize` (`0`/`1` sequential, clamped to `1..=32`).
 - **GDPR Erasure:** `gdpr_rewrite_day(...) -> Result<GdprRewriteReport, StatamError>` (single-rewrite protocol, §5.4).
 - **Error Type:** `StatamError` (`thiserror`, privacy-safe `Display`/`Debug`, never prints payload content, IDs, or map values).
 
@@ -144,7 +144,7 @@ When `flags & FLAG_ENCRYPTED != 0`: `enc_envelope_offset..enc_envelope_offset + 
    - `44..48`: `rg_flags: u32` (`0` in v1)
 
 4. **Mini-Block Directory (`block_dir_off`, `total_blocks` × **64 B**):**
-   - `0..4`: `first_row: u32`, `4..6`: `row_count: u16` (`32,768` default in `L1Compact` and `L0Fast`, `<= MAX_MINI_BLOCK_SIZE = 65,535`), `6..8`: `null_count: u16`
+   - `0..4`: `first_row: u32`, `4..6`: `row_count: u16` (`8,192` default in `L1Compact` and `L0Fast`, `<= MAX_MINI_BLOCK_SIZE = 65,535`), `6..8`: `null_count: u16`
    - `8..16`: `offset: u64` (`0` for inline `Const`/`ConstNull`)
    - `16..20`: `stored_len: u32`, `20..24`: `raw_len: u32`
    - `24`: `encoding: u8`, `25`: `codec: u8` (`0=None, 1=Lz4, 2=Zstd`), `26`: `block_flags: u8` (`0x01 HAS_NULLS`, `0x02 ALL_NULL`, `0x04 MIN_MAX_VALID`, `0x08 HAS_NAN`, `0x10 CONST_EMPTY_COLLECTION`), `27`: `min_inline_len: u8` (`0..=16`), `28`: `max_inline_len: u8` (`0..=16`), `29..32`: `reserved: [u8; 3]`
@@ -220,20 +220,23 @@ Every non-inline data block starts with **16 B**: `magic: b"SB"`, `encoding: u8`
   pack_id: [u8; 16], enc_envelope_offset: u64, enc_envelope_len: u32,
   reserved: u32=0, header_crc32c: u32
 
-[Frames 0..F-1]  (target 1 MiB raw Zstd(3); 1 MiB ReadCache boundary guard for < 32 KiB frames:
+[Frames 0..F-1]  (target 512 KiB raw Zstd(3) by default; 1 MiB ReadCache boundary guard for < 32 KiB frames:
   if cur_off % 1MiB leaves < 8 KiB before next 1 MiB boundary and frame < 32 KiB, pad to 1 MiB)
   FrameHeader (16 B): magic b"PF", codec u8 (0=None,1=Lz4,2=Zstd), flags u8 (0x01 USES_DICT),
   raw_len u32, stored_len u32, crc32c u32
 
-[ChunkHashTable] (compaction-only: [ [u8; 16]; chunk_count ], NEVER read by queries!)
+[ChunkHashTable] (optional compaction-only: [ [u8; 16]; chunk_count ], NEVER read by queries;
+  omitted with `hash_table_off = 0` when `PackWriteOptions::emit_hash_table == false`)
 [TrigramSkipSection] (optional, `TS02` header:
   magic: b"TS02", edge_bloom_bytes: u32 (4096 if stored_frame_bytes < 2 MiB else 8192), reserved: u32=0,
   edge_tail_bloom: [u8; edge_bloom_bytes] (ASCII-lowercased trigrams of every chunk's tail_63),
   edge_head_bloom: [u8; edge_bloom_bytes] (ASCII-lowercased trigrams of every chunk's head_63),
   followed by per-frame lowercase ASCII trigram bloom filters with `filter_off` relative to section start;
-  filter_bytes = clamp(next_pow2(unique_trigrams), 256, min(16_384, stored_len / 6));
+  cap = clamp(min(stored_len / 6, clamp(raw_len / 32, 256, 16_384)), 256, 16_384) rounded down to power of 2;
   omitted (filter_len = 0) if stored_len < 1024 or bit density > 72%; `TS02` magic required when `trigram_len > 0`)
-[EdgeTable] (Zstd-3 compressed: per unique chunk [u8 head_len, head_bytes (<=63), u8 tail_len, tail_bytes (<=63)])
+[EdgeTable] (Zstd-3 compressed: per unique chunk [u8 head_len, head_bytes (<=63), u8 tail_len, tail_bytes (<=63)];
+  when boundary tracking is enabled, omitted (`edge_table_len = 0`) if all rows are single-chunk, and non-boundary
+  chunks store zero-length edges on mixed packs; multi-chunk rows referencing an `edge_table_len == 0` pack return `Corrupt`)
 [DictSection] (opt-in via `ChunkPackBuilder::new_with_dict`, 0 B by default or when unique raw chunks < 2 MiB; otherwise a `PF`-framed Zstd-3 compressed
   64 KiB dictionary trained once unique raw chunks reach >= 2 MiB from <= 1,024 uniformly strided
   <= 2,048 B chunk samples, placed right before Pack TOC Body with `PACK_FLAG_HAS_DICT = 0x0008`)
@@ -259,14 +262,14 @@ Every non-inline data block starts with **16 B**: `magic: b"SB"`, `encoding: u8`
   - Completely cold (no metadata cache): 1 GET `.statam` tail + 1 GET `.statam` RG + 1 GET `.stpk` TOC + 1 GET `.stpk` frames (still 25× fewer GETs and 3–5× fewer bytes than Parquet; both cold and metadata-cached numbers are reported explicitly in the Stage 2 benchmark!).
 
 ### 5.3 Exact Substring Search (`LIKE` / `ILIKE '%needle%'`)
-1. **Inline values (`<= 256 B`):** Always scanned directly in `PayloadRefs` blocks (zero missed short matches).
-2. **Narrow `Utf8` columns (e.g. `spans.name`):** If `Dict`-encoded, scan dictionary entries ONCE and map matching codes via `Bitmap`; if `Fsst`/`Plain` with `HAS_TRIGRAM_INDEX`, prune blocks via per-block trigram filter in `LazyIndexDir`.
+1. **Inline values (`<= 256 B`):** Always scanned directly in `PayloadRefs` blocks (zero missed short matches; decoded into zero-per-row-allocation CSR `FlatPayloadRefs`).
+2. **Narrow `Utf8` columns (e.g. `spans.name`):** Phase-1 `LIKE`/`ILIKE` evaluates directly on raw bytes without `from_utf8` validation (`Const` once, `Dict` once per dictionary entry, `Rle` once per unique run, `Fsst` via reusable `FsstBlockView` scratch buffer, `Plain` via raw slice scan); blocks with `HAS_TRIGRAM_INDEX` are pruned via per-block trigram filters in `LazyIndexDir`.
 3. **External `.stpk` payloads:**
-   - **ASCII trigram extraction:** On both build and query, `simd/trigram.rs` performs **exact ASCII-only lowercasing** (`A..Z -> a..z`, non-ASCII untouched). For `ILIKE`, only pure-ASCII trigrams (`b0,b1,b2 < 128`) are queried in the trigram bloom (if none exist or `needle.len() < 3`, skip bloom pruning and scan all unique chunks).
-   - **Case `needle.len() <= 64`:**
+   - **ASCII trigram extraction:** On both build and query, `simd/trigram.rs` performs **exact ASCII-only lowercasing** (`A..Z -> a..z`, non-ASCII untouched). For `ILIKE`, sound ASCII-run extraction (`extract_ilike_trigram_hashes`) extracts trigrams from contiguous ASCII segments excluding characters with cross-ASCII Unicode case folds (`K`/`k` ↔ `K`, `S`/`s` ↔ `ſ`, `I`/`i` ↔ `İ`), allowing even multilingual Unicode `ILIKE` needles (e.g. `"Alienación"`) to prune `.stpk` frames with 0 false negatives (if no safe trigrams exist or `needle.len() < 3`, skip bloom pruning and scan all unique chunks).
+   - **Case `needle.len() <= 64` (and `max_unicode_haystack_match_bytes <= 64` for Unicode `ILIKE`):**
      - **Step A (Interior matches):** Decompress ONLY frames whose trigram bloom matches all extracted trigrams (`filter_len == 0` frames are always scanned). Scan each unique chunk ONCE via `memchr::memmem` (or AVX2 ASCII lowercase + `memmem` for ASCII `ILIKE`, Unicode `to_lowercase()` for non-ASCII `ILIKE`).
-     - **Step B (Boundary matches — Pigeonhole skip + 0 extra frame decompression!):** For `needle.len() >= 5` (`LIKE` or ASCII `ILIKE`), check `edge_tail_bloom` for `needle[0..3]` and `edge_head_bloom` for `needle[len-3..len]`. If BOTH reject (`!tail_may && !head_may`), no match can cross any chunk boundary by the Pigeonhole Principle — skip `EdgeTable` and all boundary pair loops completely! Otherwise, check every distinct adjacent chunk pair `(left, right)` in surviving rows using `EdgeTable`'s `tail_63(left) || head_63(right)`. Guarantees **0 false negatives** even when `needle` straddles two chunks whose frames were both skipped in Step A!
-   - **Case `needle.len() > 64`:** Reconstruct payloads for surviving rows (still deduplicating identical chunk-ref sequences) and run exact `memmem`/Unicode search — zero false negatives!
+     - **Step B (Boundary matches — Pigeonhole skip + 0 extra frame decompression!):** For `needle.len() >= 5`, check `edge_tail_bloom` for trigrams in the needle's prefix half and `edge_head_bloom` for trigrams in its suffix half (sound for both `LIKE`, ASCII `ILIKE`, and Unicode `ILIKE`). If BOTH reject (`!tail_may && !head_may`), no match can cross any chunk boundary by the Pigeonhole Principle — skip `EdgeTable` and all boundary pair loops completely! Otherwise, check every distinct adjacent chunk pair `(left, right)` in surviving rows using the cached zero-allocation `FlatEdgeTable`'s `tail_63(left) || head_63(right)`. Guarantees **0 false negatives** even when `needle` straddles two chunks whose frames were both skipped in Step A!
+   - **Case `needle.len() > 64` (or Unicode `ILIKE` worst-case haystack match `> 64 B`):** Reconstruct payloads for surviving rows (still deduplicating identical chunk-ref sequences) and run exact `memmem`/Unicode search — zero false negatives!
 
 ### 5.4 Airtight Single-Rewrite GDPR Erasure Protocol
 1. Identify affected `.statam` files in `(project_id, day)` and evaluate the erasure predicate on surviving rows.
@@ -286,7 +289,7 @@ Every non-inline data block starts with **16 B**: `magic: b"SB"`, `encoding: u8`
 
 **Bounded `L1Compact` Streaming:** `StatamWriter` buffers at most **1 Row Group (`131,072` rows)** at a time. RG0 determines the `ShreddedMap` promoted keys (`<= 64`, `>= 5%` presence) and initial sorted file-level dicts (`<= 16,384` entries). In RG1..G-1, unseen map keys spill to residual (updating `residual_count`), and unseen string values in dict-encoded columns fall back to `Fsst`/`Plain` for that mini-block — guaranteeing bounded O(1 RG) RAM even on multi-hundred-MB compactions.
 
-*(Profile table: `L0Fast` = self-contained, FastLanes + Rle (64-element sample) + Const + bounded hash-dict ≤ 512 + Plain MapUtf8 + `Lz4` on `>= 64 B` varlen/nested/`Plain`/`PayloadRefs` + `Zstd(-5)`/`Lz4(<1 KiB)` on 512 KiB local frames + `Codec::None` on fixed-width/For/Delta/BitpackBool/Rle/Dict + AVX2 SBBF, no map shredding / no FSST / no trigrams / no `.stpk`; `L1Compact` = full cascade + ALP + sorted Dict + FSST (non-WideRow) + ShreddedMap + `Zstd(3)` on all non-inline mini-block encodings and shredded sub-columns + Structural JSON/FastCDC + BLAKE3-128 `.stpk` `Zstd(3)` 1 MiB frames + `TS02` trigram + edge table + opt-in streaming Zstd dict via `new_with_dict` for `>= 2 MiB` packs.)*
+*(Profile table: `L0Fast` = self-contained, FastLanes + Rle (64-element sample) + Const + bounded hash-dict ≤ 512 + Plain MapUtf8 + `Lz4` on `>= 64 B` varlen/nested/`Plain`/`PayloadRefs` + `Zstd(-5)`/`Lz4(<1 KiB)` on 512 KiB local frames + `Codec::None` on fixed-width/For/Delta/BitpackBool/Rle/Dict + AVX2 SBBF, no map shredding / no FSST / no trigrams / no `.stpk`; `L1Compact` = full cascade + ALP + sorted Dict + FSST (non-WideRow) + ShreddedMap + `Zstd(3)` on all non-inline mini-block encodings and shredded sub-columns + Structural JSON/FastCDC + BLAKE3-128 `.stpk` `Zstd(3)` 512 KiB frames + `TS02` trigram + boundary-pruned edge table + opt-in streaming Zstd dict via `new_with_dict` for `>= 2 MiB` packs.)*
 
 ---
 
@@ -310,8 +313,8 @@ Every non-inline data block starts with **16 B**: `magic: b"SB"`, `encoding: u8`
 ## 8. Milestones
 
 - **Stage 1 (Done):** `prior-art.md` + `spec-v0.md` (cold-reviewed and finalized).
-- **Stage 2 (Standalone `crates/statam` + Adversarial 4-Workload Benchmark + Hard Go/No-Go Gate):**
-  - **M2.1:** Crate scaffold, error/bounds, header/postscript/format framing, SIMD kernels (`bitpack`, `filter`, `bloom`, `trigram`), and all 16-type narrow/structured codecs (`Const`, `Rle`, `ForBitpack`, `DeltaBitpack`, `Alp`, `Dict`, `Fsst`, `BitpackBool`, `Plain`, `List`, `ShreddedMap`, `Events`, `Links`).
-  - **M2.2:** Payload chunker (Structural JSON + FastCDC + strict `>= 256 B` invariant), `.stpk` pack writer/reader + adaptive trigram + `head_63 + tail_63` edge table, `StatamWriter` (`L0Fast` & `L1Compact`) + `StatamReader` (1-GET tail, pruning, late materialization, `Dict`/`Rle`/`Const` pass-through, `map_keys`, exact substring search), and single-rewrite `gdpr_rewrite_day` with 0-byte proof.
-  - **M2.3:** `fuzz/fuzz_targets/statam_file.rs` + seed corpus + replay tests, Miri verification, `SimulatedS3Reader` (exact 1 MiB `ReadCache`), 4-workload adversarial benchmark (`W1`–`W4`) against `pq_default`/`pq_tuned`/`pq_cetra` on `precision-5770-vm`, and optimization loop until all 5 Go/No-Go gates pass.
-- **Stage 3 (Gated on Stage 2 Pass + User Sign-Off):** `cetra-storage` integration (`StatamSource`, `StatamFileWriter`, `catalog.db`, compaction, GDPR, verify, dropping Arrow/Parquet storage reads).
+- **Stage 2 (Done — All 5 Go/No-Go Gates Passed; see `stage2-benchmark-report.md`):**
+  - **M2.1 (Done):** Crate scaffold, error/bounds, header/postscript/format framing, SIMD kernels (`bitpack`, `filter`, `bloom`, `trigram`), and all 16-type narrow/structured codecs (`Const`, `Rle`, `ForBitpack`, `DeltaBitpack`, `Alp`, `Dict`, `Fsst`, `BitpackBool`, `Plain`, `List`, `ShreddedMap`, `Events`, `Links`).
+  - **M2.2 (Done):** Payload chunker (Structural JSON + FastCDC + strict `>= 256 B` invariant), `.stpk` pack writer/reader + adaptive `TS02` trigram + boundary-pruned `head_63 + tail_63` edge table, `StatamWriter` (`L0Fast` & `L1Compact`, multi-threaded) + `StatamReader` (1-GET tail, pruning, late materialization, `Dict`/`Rle`/`Const` pass-through, `map_keys`, exact substring search, `take_rows`, multi-threaded), and single-rewrite `gdpr_rewrite_day` with 0-byte proof.
+  - **M2.3 (Done):** `fuzz/fuzz_targets/statam_file.rs` + seed corpus + replay tests, Miri verification, ASan libFuzzer campaign, `SimulatedS3Reader` (exact 1 MiB `ReadCache`), 4-workload Cetra + 6-workload public external benchmarks (`W1`–`W4`, `ClickBench`, `Row-Filter`, `Random-Access`, `JSONBench`, `WildChat-1M`, `Hermes-FC`) against Parquet/Vortex/Lance/Strata on `precision-5770-vm`, and 10 optimization + 9 cold-review passes until all 5 Go/No-Go gates passed.
+- **Stage 3 (Gated on User Sign-Off):** `cetra-storage` integration (`StatamSource`, `StatamFileWriter`, `catalog.db`, compaction, GDPR, verify, dropping Arrow/Parquet storage reads).

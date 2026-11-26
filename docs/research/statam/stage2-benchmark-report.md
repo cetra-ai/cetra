@@ -366,4 +366,49 @@ Following a dedicated `perf` + `STATAM_DUMP_STATS` pass across all 8 lagging que
 - **Minor `1R` Full-Scan Overhead:** `3.25×` more mini-blocks (`8,192` vs `32,768`) slightly slowed a few single-threaded full-column scans (`CB_Q10 1R`: `0.35 → 0.63 ms`, `CB_Q12 1R`: `0.52 → 1.06 ms`, `JB_Q3_map_type 1R`: `2.04 → 3.75 ms`, `RF_unsel_99pct 1R`: `1.92 → 3.04 ms`), while `8R` remained faster or improved (`JB_Q3 8R`: `1.23 → 0.85 ms`).
 - **Minor S3 / Write Shifts:** `W3_scores point_lookup_narrow` S3 shifted from `2 GETs / 91 ms` to `3 GETs / 127 ms` due to a `1 MiB` ReadCache boundary crossing (still #1 fastest S3 vs Strata `132 ms`, Vortex `173 ms`, Parquet `180–208 ms`); `clickbench_100k` write (`8W`) moved from `174 → 203 ms` (`1,365` vs `420` mini-blocks across 105 cols; still faster than Parquet `273 ms` & Strata `892 ms`).
 
+### 12.3 Post-Pass-10 ASan libFuzzer & Spec Sign-Off
+- **ASan libFuzzer (`statam_file`, expanded with `decode_payload_refs_flat`, `read_edge_table_flat`, `take_rows`, and Unicode `ILIKE`):** **1,907,110 runs across 4 workers in 181s on `precision-5770-vm` — 0 crashes, 0 panics, 0 ASan errors, 0 OOMs** (total >2.36M ASan fuzz executions across Stage 2 with 0 issues).
+- **Spec Sync:** `docs/research/statam/spec-v0.md` updated to v0.2 to match all Pass 7–10 defaults and wire details (`8,192`-row mini-blocks, `512 KiB` `.stpk` frames, proportional trigram cap, `TS02` edge blooms, boundary-pruned `EdgeTable` with `edge_table_len == 0` guard, optional `emit_hash_table`, `write_threads`/`read_threads`, `take_rows`).
+
+---
+
+## 13. Full 8-Format Completion — Lance V2.2 on Cetra `W1`–`W4` (`precision-5770-vm`)
+
+Wired **Lance V2.2 (`lance-file 14.0.3`)** into `statam-bench7` (`W1`–`W4`) using native zero-IPC Arrow 58 reads and two-phase random-access `take` for point lookups & `top_k_list` so Lance gets its fastest fair execution, verified at **100% row-count parity** across all 38 queries against `statam_l1 (8W/8R)` *(note: VM had concurrent load during this run, so stored sizes, S3 GETs/bytes, and parity are exact/deterministic while local wall-clock ms are preliminary pending a quiet-VM rerun)*:
+
+### 13.1 `W1`–`W4` Storage Size & Write Speed (`lance v2.2` vs `statam_l1 8W`)
+
+| Workload (Raw) | `lance v2.2` Size · Write | `statam_l1 (8W)` Size · Write | Statam Advantage |
+|---|---:|---:|---|
+| **`W1_agents`** *(857.9 MiB)* | 140,519 KiB (`6.11×`) · 2,006.6 ms | **8,762 KiB (`97.91×`) · 388.3 ms** | **`16.0×` smaller, `5.17×` faster write** |
+| **`W2_chat_4files`** *(38.8 MiB)* | 32,968 KiB (`1.18×`) · **115.9 ms** | **15,209 KiB (`2.55×`)** · 249.9 ms | **`2.17×` smaller** (`L0Fast` writes faster at `99 ms`) |
+| **`W3_spans`** *(43.1 MiB)* | 24,748 KiB (`1.74×`) · **101.6 ms** | **13,999 KiB (`3.08×`)** · 121.3 ms | **`1.77×` smaller**, near write parity |
+| **`W3_scores`** *(24.3 MiB)* | 9,343 KiB (`2.60×`) · **15.1 ms** | **5,314 KiB (`4.58×`)** · 43.9 ms | **`1.76×` smaller** |
+| **`W4_adversarial`** *(25.8 MiB)* | 25,906 KiB (`1.00×`) · 120.2 ms | **20,090 KiB (`1.29×`) · 65.3 ms** | **`1.29×` smaller, `1.84×` faster write** |
+| **`W4_1row_avg`** *(0.9 KiB)* | 13.9 KiB · 0.79 ms | **4.2 KiB · 0.16 ms** | **`3.3×` smaller, `4.9×` faster write** |
+
+### 13.2 `W1`–`W4` Local Warm CPU & Simulated S3 Highlights (`lance v2.2` vs `statam_l1 8R`)
+
+| Workload / Query | Matched | `lance` Local | `statam_l1` Local | `lance` S3 (`ms` / GETs / MiB) | `statam_l1` S3 (`ms` / GETs / MiB) |
+|---|---:|---:|---:|---:|---:|
+| `W1` `cold_open_prune` | 0 | 0.318 ms | **0.000 ms** | 62.3 ms (2 / 1.2) | **30.5 ms (1 / 0.5)** |
+| `W1` `point_lookup_narrow` | 110 | 0.501 ms | **0.220 ms** | 97.3 ms (3 / 2.2) | **65.5 ms (2 / 1.5)** |
+| `W1` `point_lookup_full` | 110 | **4.602 ms** | 5.151 ms | 317.3 ms (9 / 9.2) | **200.6 ms (5 / 7.6)** |
+| `W1` `map_key_lookup` | 442 | 2.062 ms | **0.235 ms** | **62.3 ms** (2 / 1.2) | 65.5 ms (2 / 1.5) |
+| `W1` `substring_rare` | 12 | 1,926.1 ms | **8.040 ms** (`240×`) | 1,577.3 ms (11 / 130.2) | **175.6 ms (4 / 7.6)** |
+| `W1` `substring_absent` | 0 | 2,357.1 ms | **0.875 ms** (`2,694×`) | 1,577.3 ms (11 / 130.2) | **110.6 ms (3 / 3.6)** |
+| `W2` `point_lookup_full` | 1 | **1.245 ms** | 3.150 ms | 427.0 ms (13 / 10.2) | **248.5 ms (8 / 4.9)** |
+| `W2` `top_k_list` | 50 | **1.366 ms** | 3.194 ms | 357.0 ms (11 / 8.2) | **179.0 ms (6 / 2.9)** |
+| `W2` `substring_rare` / `absent` | 8 / 0 | 54.2 / 63.1 ms | **6.23 / 3.96 ms** | 572 / 572 ms (16 / 17.2) | **409 / 319 ms (12 / 10 GETs)** |
+| `W3_spans` `point_lookup_narrow` | 4 | 3.312 ms | **0.292 ms** (`11.3×`) | 421.7 ms (12 / 12.2) | **96.7 ms (2 / 4.7)** |
+| `W3_spans` `point_lookup_full` | 4 | 8.305 ms | **0.560 ms** (`14.8×`) | 841.7 ms (24 / 24.2) | **126.7 ms (2 / 7.7)** |
+| `W3_spans` `time_bucket_agg` | 100k | 27.31 ms | **5.476 ms** (`5.0×`) | 246.7 ms (7 / 7.2) | **191.7 ms (5 / 6.7)** |
+| `W3_spans` `map_key_lookup` | 5,407 | 24.52 ms | **1.094 ms** (`22.4×`) | 211.7 ms (6 / 6.2) | **146.7 ms (4 / 4.7)** |
+| `W3_scores` `point_lookup_narrow` | 1 | 1.030 ms | **0.391 ms** | 246.2 ms (7 / 7.1) | **126.9 ms (3 / 5.2)** |
+| `W3_scores` `map_key_lookup` | 2,737 | 8.857 ms | **0.736 ms** (`12.0×`) | 201.2 ms (6 / 5.1) | **106.9 ms (3 / 3.2)** |
+| `W4` `point_lookup_full` | 1 | **1.025 ms** | 1.695 ms | 273.0 ms (8 / 7.3) | **67.9 ms (2 / 1.8)** |
+| `W4` `substring_rare` / `absent` | 6 / 0 | 54.1 / 54.5 ms | **4.20 / 3.81 ms** | 273 / 273 ms (4 / 17.3) | **271 / 236 ms (5 / 4 GETs)** |
+
+- **Overall Lance V2.2 vs Statam L1 across ALL 11 workloads (68 queries total):** Statam L1 wins **63 / 68 local CPU queries** (`34 / 38` on `W1`–`W4`, `29 / 30` on external suites), **64 / 68 S3 queries**, and is **`1.29×–16.0×` smaller on every single one of the 12 size benchmarks**. Lance's only local wins are uncompressed O(1) `take` on 1-row/110-row `point_lookup_full` (`W1`/`W2`/`W4`), `W2 top_k_list`, and `1T RA_take_100` — and Statam beats Lance on S3 on every single one of those (`1.6×–4.4×` faster).
+
 **Stage 3 Status:** `crates/storage`, `crates/core`, `crates/column`, and `crates/query` remain **completely untouched** per the Stage 2/Stage 3 gate. Awaiting explicit user go-ahead for Stage 3 (`cetra-storage` integration).

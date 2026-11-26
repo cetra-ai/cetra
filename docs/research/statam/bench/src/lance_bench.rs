@@ -1,3 +1,5 @@
+use std::cmp::Reverse;
+use std::collections::{BTreeMap, BinaryHeap};
 use std::fmt;
 use std::io::Cursor;
 use std::ops::Range;
@@ -6,7 +8,12 @@ use std::time::{Instant, SystemTime};
 
 use arrow::array::RecordBatch as RecordBatch59;
 use arrow::compute::concat_batches;
-use arrow_array_58::{RecordBatch as RecordBatch58, UInt32Array as UInt32Array58};
+use arrow_array_58::{
+    Array as Array58, FixedSizeBinaryArray as FixedSizeBinaryArray58,
+    Float64Array as Float64Array58, Int64Array as Int64Array58, MapArray as MapArray58,
+    RecordBatch as RecordBatch58, StringArray as StringArray58,
+    TimestampNanosecondArray as TimestampNanosecondArray58, UInt32Array as UInt32Array58,
+};
 use bytes::Bytes;
 use cetra_statam::{RangeReader, SimulatedS3Config, SimulatedS3Reader};
 use futures::stream::{BoxStream, StreamExt, TryStreamExt};
@@ -28,7 +35,9 @@ use object_store_14::{
     PutMultipartOptions, PutOptions, PutPayload, PutResult,
 };
 
-use crate::schema::BenchResult;
+use crate::queries::{contains_ascii_ci, push_topk};
+use crate::schema::{BenchResult, TableKindBench};
+use crate::workloads::{ABSENT_NEEDLE, DAY_START, HOUR_NS, RARE_NEEDLE};
 
 fn test_cache() -> LanceCache {
     LanceCache::no_cache()
@@ -399,4 +408,398 @@ pub async fn lance_take_indices(
         proj_cols,
     )
     .await
+}
+
+async fn lance_read_params_58(
+    reader: &FileReader,
+    params: ReadBatchParams,
+    proj_cols: Option<&[&str]>,
+) -> BenchResult<Vec<RecordBatch58>> {
+    let batches58: Vec<RecordBatch58> = if let Some(cols) = proj_cols {
+        let projection = reader_projection_from_column_names(
+            reader.metadata().version(),
+            reader.schema(),
+            cols,
+        )?;
+        let stream = reader
+            .read_stream_projected(params, 16_384, 1, projection, FilterExpression::no_filter())
+            .await?;
+        stream.try_collect().await?
+    } else {
+        let stream = reader
+            .read_stream(params, 16_384, 1, FilterExpression::no_filter())
+            .await?;
+        stream.try_collect().await?
+    };
+    Ok(batches58)
+}
+
+/// Writes one Lance V2.2 file per batch (Arrow 59 -> 58 conversion done outside the timer).
+pub async fn write_lance_files(batches59: &[RecordBatch59]) -> BenchResult<(Vec<Bytes>, f64)> {
+    let prepared = prepare_lance_batches(batches59)?;
+    let mut out = Vec::with_capacity(prepared.len());
+    let mut total_ms = 0.0f64;
+    for b58 in &prepared {
+        let (bytes, ms) = write_lance_bytes(std::slice::from_ref(b58)).await?;
+        out.push(bytes);
+        total_ms += ms;
+    }
+    Ok((out, total_ms))
+}
+
+/// Opens multiple in-memory Lance V2.2 files for local warm CPU measurements.
+pub async fn open_lance_local_files(files: &[Bytes]) -> BenchResult<Vec<FileReader>> {
+    let mut opened = Vec::with_capacity(files.len());
+    for b in files {
+        opened.push(open_lance_local(b).await?);
+    }
+    Ok(opened)
+}
+
+/// Runs a `W1`–`W4` benchmark query over Lance V2.2 files backed by [`SimulatedS3Reader`].
+pub async fn run_lance_query_s3(
+    files: &[Bytes],
+    s3_cfg: SimulatedS3Config,
+    table: TableKindBench,
+    qname: &str,
+    sample_tid: [u8; 16],
+) -> BenchResult<(usize, u64, u64, f64)> {
+    let mut readers = Vec::with_capacity(files.len());
+    let mut s3_readers = Vec::with_capacity(files.len());
+    for b in files {
+        let (r, s3) = open_lance_s3(b, s3_cfg).await?;
+        readers.push(r);
+        s3_readers.push(s3);
+    }
+    let matched = run_lance_query(&readers, table, qname, sample_tid).await?;
+    let gets: u64 = s3_readers.iter().map(|r| r.counters().gets).sum();
+    let bytes: u64 = s3_readers.iter().map(|r| r.counters().bytes_from_s3).sum();
+    let s3_ms: f64 = s3_readers.iter().map(|r| r.simulated_latency_ms()).sum();
+    Ok((matched, gets, bytes, s3_ms))
+}
+
+/// Evaluates a `W1`–`W4` benchmark query natively on Arrow 58 `RecordBatch`es from Lance V2.2
+/// (zero IPC conversion overhead, using two-phase `take` for point lookups & `top_k_list`).
+pub async fn run_lance_query(
+    files: &[FileReader],
+    table: TableKindBench,
+    qname: &str,
+    sample_tid: [u8; 16],
+) -> BenchResult<usize> {
+    let (t_lo, t_hi) = (DAY_START + 8 * HOUR_NS, DAY_START + 14 * HOUR_NS);
+    let (top_lo, top_hi) = (DAY_START + 6 * HOUR_NS, DAY_START + 18 * HOUR_NS);
+
+    if qname == "cold_open_prune" {
+        let absent = [0xAAu8; 16];
+        let mut matched = 0usize;
+        for f in files {
+            let batches =
+                lance_read_params_58(f, ReadBatchParams::RangeFull, Some(&["trace_id"])).await?;
+            for b in &batches {
+                if let Some(arr) = b
+                    .column_by_name("trace_id")
+                    .and_then(|c| c.as_any().downcast_ref::<FixedSizeBinaryArray58>())
+                {
+                    for i in 0..arr.len() {
+                        if !arr.is_null(i) && arr.value(i) == absent.as_slice() {
+                            matched += 1;
+                        }
+                    }
+                }
+            }
+        }
+        return Ok(matched);
+    }
+
+    let mut total = 0usize;
+    let mut agg: BTreeMap<(i64, String), (usize, f64, i64)> = BTreeMap::new();
+    let mut topk: BinaryHeap<Reverse<(i64, usize)>> = BinaryHeap::new();
+
+    for f in files {
+        match (table, qname) {
+            (_, "point_lookup_narrow" | "point_lookup_full") => {
+                // Phase 1: scan trace_id only, then use Lance's O(1) random-access take.
+                let id_batches =
+                    lance_read_params_58(f, ReadBatchParams::RangeFull, Some(&["trace_id"]))
+                        .await?;
+                let mut indices = Vec::new();
+                let mut row_base = 0u32;
+                for b in &id_batches {
+                    if let Some(arr) = b
+                        .column_by_name("trace_id")
+                        .and_then(|c| c.as_any().downcast_ref::<FixedSizeBinaryArray58>())
+                    {
+                        for i in 0..arr.len() {
+                            if !arr.is_null(i) && arr.value(i) == sample_tid.as_slice() {
+                                indices.push(row_base + i as u32);
+                            }
+                        }
+                    }
+                    row_base += b.num_rows() as u32;
+                }
+                if !indices.is_empty() {
+                    let proj: Option<&[&str]> = match (table, qname) {
+                        (TableKindBench::Spans, "point_lookup_narrow") => Some(&[
+                            "trace_id",
+                            "span_id",
+                            "parent_span_id",
+                            "name",
+                            "start_time",
+                            "end_time",
+                            "status",
+                            "model",
+                            "total_tokens",
+                            "cost_total",
+                        ]),
+                        (TableKindBench::Scores, "point_lookup_narrow") => Some(&[
+                            "score_id",
+                            "trace_id",
+                            "name",
+                            "value_num",
+                            "value_str",
+                            "created_at",
+                        ]),
+                        _ => None,
+                    };
+                    let taken = lance_read_params_58(
+                        f,
+                        ReadBatchParams::Indices(UInt32Array58::from(indices)),
+                        proj,
+                    )
+                    .await?;
+                    total += taken.iter().map(RecordBatch58::num_rows).sum::<usize>();
+                }
+            }
+            (TableKindBench::Spans, "filtered_count") => {
+                let batches = lance_read_params_58(
+                    f,
+                    ReadBatchParams::RangeFull,
+                    Some(&["start_time", "status"]),
+                )
+                .await?;
+                for b in &batches {
+                    let ts = b
+                        .column_by_name("start_time")
+                        .and_then(|c| c.as_any().downcast_ref::<TimestampNanosecondArray58>());
+                    let st = b
+                        .column_by_name("status")
+                        .and_then(|c| c.as_any().downcast_ref::<StringArray58>());
+                    if let (Some(ts), Some(st)) = (ts, st) {
+                        for i in 0..b.num_rows() {
+                            let t = ts.value(i);
+                            if t >= t_lo && t <= t_hi && st.value(i) == "error" {
+                                total += 1;
+                            }
+                        }
+                    }
+                }
+            }
+            (TableKindBench::Scores, "filtered_count") => {
+                let batches = lance_read_params_58(
+                    f,
+                    ReadBatchParams::RangeFull,
+                    Some(&["created_at", "name"]),
+                )
+                .await?;
+                for b in &batches {
+                    let ts = b
+                        .column_by_name("created_at")
+                        .and_then(|c| c.as_any().downcast_ref::<TimestampNanosecondArray58>());
+                    let nm = b
+                        .column_by_name("name")
+                        .and_then(|c| c.as_any().downcast_ref::<StringArray58>());
+                    if let (Some(ts), Some(nm)) = (ts, nm) {
+                        for i in 0..b.num_rows() {
+                            let t = ts.value(i);
+                            if t >= t_lo && t <= t_hi && nm.value(i) == "faithfulness" {
+                                total += 1;
+                            }
+                        }
+                    }
+                }
+            }
+            (TableKindBench::Spans, "time_bucket_agg") => {
+                let batches = lance_read_params_58(
+                    f,
+                    ReadBatchParams::RangeFull,
+                    Some(&[
+                        "span_kind",
+                        "start_time",
+                        "model",
+                        "total_tokens",
+                        "cost_total",
+                    ]),
+                )
+                .await?;
+                for b in &batches {
+                    let sk = b
+                        .column_by_name("span_kind")
+                        .and_then(|c| c.as_any().downcast_ref::<StringArray58>());
+                    let ts = b
+                        .column_by_name("start_time")
+                        .and_then(|c| c.as_any().downcast_ref::<TimestampNanosecondArray58>());
+                    let md = b
+                        .column_by_name("model")
+                        .and_then(|c| c.as_any().downcast_ref::<StringArray58>());
+                    let tok = b
+                        .column_by_name("total_tokens")
+                        .and_then(|c| c.as_any().downcast_ref::<Int64Array58>());
+                    let cost = b
+                        .column_by_name("cost_total")
+                        .and_then(|c| c.as_any().downcast_ref::<Float64Array58>());
+                    if let (Some(sk), Some(ts), Some(md), Some(tok), Some(cost)) =
+                        (sk, ts, md, tok, cost)
+                    {
+                        for i in 0..b.num_rows() {
+                            if sk.value(i) != "llm" {
+                                continue;
+                            }
+                            let bucket = ts.value(i) / HOUR_NS;
+                            let model = if md.is_null(i) {
+                                "unknown"
+                            } else {
+                                md.value(i)
+                            };
+                            let entry =
+                                agg.entry((bucket, model.to_owned())).or_insert((0, 0.0, 0));
+                            entry.0 += 1;
+                            if !cost.is_null(i) {
+                                let c = cost.value(i);
+                                if !c.is_nan() {
+                                    entry.1 += c;
+                                }
+                            }
+                            if !tok.is_null(i) {
+                                entry.2 += tok.value(i);
+                            }
+                        }
+                    }
+                }
+            }
+            (TableKindBench::Spans, "top_k_list") => {
+                // Phase 1: scan start_time & span_kind, find top-50 row indices, Phase 2: take 10 cols.
+                let filter_batches = lance_read_params_58(
+                    f,
+                    ReadBatchParams::RangeFull,
+                    Some(&["start_time", "span_kind"]),
+                )
+                .await?;
+                let mut file_topk: BinaryHeap<Reverse<(i64, usize)>> = BinaryHeap::new();
+                let mut row_base = 0usize;
+                for b in &filter_batches {
+                    let ts = b
+                        .column_by_name("start_time")
+                        .and_then(|c| c.as_any().downcast_ref::<TimestampNanosecondArray58>());
+                    let sk = b
+                        .column_by_name("span_kind")
+                        .and_then(|c| c.as_any().downcast_ref::<StringArray58>());
+                    if let (Some(ts), Some(sk)) = (ts, sk) {
+                        for i in 0..b.num_rows() {
+                            let t = ts.value(i);
+                            if sk.value(i) == "llm" && t >= top_lo && t <= top_hi {
+                                push_topk(&mut file_topk, t, row_base + i);
+                                push_topk(&mut topk, t, row_base + i);
+                            }
+                        }
+                    }
+                    row_base += b.num_rows();
+                }
+                if !file_topk.is_empty() {
+                    let mut idxs: Vec<u32> = file_topk
+                        .into_iter()
+                        .map(|Reverse((_, r))| r as u32)
+                        .collect();
+                    idxs.sort_unstable();
+                    let _ = lance_read_params_58(
+                        f,
+                        ReadBatchParams::Indices(UInt32Array58::from(idxs)),
+                        Some(&[
+                            "trace_id",
+                            "span_id",
+                            "name",
+                            "start_time",
+                            "duration_ns",
+                            "status",
+                            "model",
+                            "total_tokens",
+                            "cost_total",
+                            "input_preview",
+                        ]),
+                    )
+                    .await?;
+                }
+            }
+            (_, "map_key_lookup") => {
+                let cols: &[&str] = match table {
+                    TableKindBench::Spans => &["trace_id", "start_time", "metadata"],
+                    TableKindBench::Scores => &["score_id", "metadata", "created_at"],
+                };
+                let batches =
+                    lance_read_params_58(f, ReadBatchParams::RangeFull, Some(cols)).await?;
+                for b in &batches {
+                    if let Some(ma) = b
+                        .column_by_name("metadata")
+                        .and_then(|c| c.as_any().downcast_ref::<MapArray58>())
+                    {
+                        let keys = ma.keys().as_any().downcast_ref::<StringArray58>();
+                        let vals = ma.values().as_any().downcast_ref::<StringArray58>();
+                        if let (Some(ks), Some(vs)) = (keys, vals) {
+                            let offsets = ma.value_offsets();
+                            for r in 0..ma.len() {
+                                if ma.is_null(r) {
+                                    continue;
+                                }
+                                let s = offsets[r] as usize;
+                                let e = offsets[r + 1] as usize;
+                                for j in s..e {
+                                    if ks.value(j) == "customer_id"
+                                        && !vs.is_null(j)
+                                        && vs.value(j) == "cust-42"
+                                    {
+                                        total += 1;
+                                        break;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            (TableKindBench::Spans, "substring_rare" | "substring_absent") => {
+                let needle = if qname == "substring_rare" {
+                    RARE_NEEDLE.as_bytes()
+                } else {
+                    ABSENT_NEEDLE.as_bytes()
+                };
+                let batches = lance_read_params_58(
+                    f,
+                    ReadBatchParams::RangeFull,
+                    Some(&["trace_id", "input"]),
+                )
+                .await?;
+                for b in &batches {
+                    if let Some(inp) = b
+                        .column_by_name("input")
+                        .and_then(|c| c.as_any().downcast_ref::<StringArray58>())
+                    {
+                        for i in 0..inp.len() {
+                            if !inp.is_null(i) && contains_ascii_ci(inp.value(i).as_bytes(), needle)
+                            {
+                                total += 1;
+                            }
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    if qname == "time_bucket_agg" {
+        return Ok(agg.values().map(|v| v.0).sum());
+    }
+    if qname == "top_k_list" {
+        return Ok(topk.len());
+    }
+    Ok(total)
 }

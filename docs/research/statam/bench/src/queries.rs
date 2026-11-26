@@ -24,6 +24,9 @@ use parquet::arrow::arrow_reader::{
 use parquet::arrow::arrow_writer::ArrowWriter;
 use vortex::session::VortexSession;
 
+use crate::lance_bench::{
+    open_lance_local_files, run_lance_query, run_lance_query_s3, write_lance_files,
+};
 use crate::report::{QueryBenchRow, WriteBenchRow};
 use crate::s3_parquet::{
     PqFilter, SimS3ChunkReader, execute_parquet_scan, open_parquet_builder,
@@ -42,11 +45,12 @@ use crate::vortex_bench::{
 };
 use crate::workloads::{ABSENT_NEEDLE, DAY_START, HOUR_NS, RARE_NEEDLE};
 
-pub const ALL_FORMATS: [&str; 7] = [
+pub const ALL_FORMATS: [&str; 8] = [
     "pq_default",
     "pq_tuned",
     "pq_cetra",
     "vortex",
+    "lance",
     "strata",
     "statam_l0",
     "statam_l1",
@@ -131,6 +135,7 @@ pub struct EncodedWorkload {
     pub pq_tuned: Vec<Bytes>,
     pub pq_cetra: Vec<Bytes>,
     pub vortex: Vec<Bytes>,
+    pub lance: Vec<Bytes>,
     pub strata: Vec<Bytes>,
     pub statam_l0: Vec<Bytes>,
     pub statam_l1: Vec<Bytes>,
@@ -411,6 +416,20 @@ async fn encode_workload_inner(
         Vec::new()
     };
 
+    let lance = if enabled.contains(&"lance") {
+        let (files, ms) = write_lance_files(arrow_batches).await?;
+        write_rows.push(mk_write_row(
+            name,
+            "lance",
+            raw_bytes,
+            sum_bytes(&files),
+            ms,
+        ));
+        files
+    } else {
+        Vec::new()
+    };
+
     let strata = if enabled.contains(&"strata") {
         let (files, ms) = write_strata_files(table, arrow_batches)?;
         write_rows.push(mk_write_row(
@@ -467,6 +486,7 @@ async fn encode_workload_inner(
         pq_tuned,
         pq_cetra,
         vortex,
+        lance,
         strata,
         statam_l0,
         statam_l1,
@@ -484,8 +504,8 @@ pub async fn bench_tiny_flushes(
 ) -> BenchResult<Vec<WriteBenchRow>> {
     let n = flushes.len() as u64;
     let mut raw_sum = 0u64;
-    let mut sz = [0u64; 7];
-    let mut ms = [0.0f64; 7];
+    let mut sz = [0u64; 8];
+    let mut ms = [0.0f64; 8];
     let arrow_schema = arrow_spans_schema();
 
     for rows in flushes {
@@ -528,10 +548,15 @@ pub async fn bench_tiny_flushes(
             sz[3] += v[0].len() as u64;
             ms[3] += v_ms;
         }
+        if enabled.contains(&"lance") {
+            let (la, la_ms) = write_lance_files(&ab).await?;
+            sz[4] += la[0].len() as u64;
+            ms[4] += la_ms;
+        }
         if enabled.contains(&"strata") {
             let (st, st_ms) = write_strata_files(TableKindBench::Spans, &ab)?;
-            sz[4] += st[0].len() as u64;
-            ms[4] += st_ms;
+            sz[5] += st[0].len() as u64;
+            ms[5] += st_ms;
         }
         if enabled.contains(&"statam_l0") {
             let (l0, _, l0_ms) = write_statam_files(
@@ -541,8 +566,8 @@ pub async fn bench_tiny_flushes(
                 false,
                 write_threads,
             )?;
-            sz[5] += l0[0].len() as u64;
-            ms[5] += l0_ms;
+            sz[6] += l0[0].len() as u64;
+            ms[6] += l0_ms;
         }
         if enabled.contains(&"statam_l1") {
             let (l1, p1, l1_ms) = write_statam_files(
@@ -552,8 +577,8 @@ pub async fn bench_tiny_flushes(
                 true,
                 write_threads,
             )?;
-            sz[6] += l1[0].len() as u64 + p1.map_or(0, |p| p.len() as u64);
-            ms[6] += l1_ms;
+            sz[7] += l1[0].len() as u64 + p1.map_or(0, |p| p.len() as u64);
+            ms[7] += l1_ms;
         }
     }
 
@@ -821,6 +846,37 @@ async fn run_query_across_formats(
             workload: wl.name.clone(),
             query: qname.to_owned(),
             format: "vortex".to_owned(),
+            rows_matched: matched,
+            local_ms,
+            local_p95_ms,
+            s3_ms,
+            s3_gets: gets,
+            s3_bytes: bytes,
+            cold_open_gets: is_cold_open.then_some(gets),
+            cold_open_tail_bytes: is_cold_open.then_some(bytes),
+        });
+    }
+
+    // 4b: Lance V2.2
+    if enabled.contains(&"lance") {
+        let warm_files = open_lance_local_files(&wl.lance).await?;
+        let (matched, local_ms, local_p95_ms) = measure_local_async_ms(
+            || run_lance_query(&warm_files, wl.table, qname, wl.sample_trace_id),
+            warm_runs,
+        )
+        .await?;
+
+        let (s3_matched, gets, bytes, s3_ms) =
+            run_lance_query_s3(&wl.lance, s3_cfg, wl.table, qname, wl.sample_trace_id).await?;
+        if s3_matched != matched {
+            return Err(format!("lance {qname}: s3 {s3_matched} != local {matched}").into());
+        }
+        check_parity(&mut expected_matches, &wl.name, qname, "lance", matched)?;
+
+        results.push(QueryBenchRow {
+            workload: wl.name.clone(),
+            query: qname.to_owned(),
+            format: "lance".to_owned(),
             rows_matched: matched,
             local_ms,
             local_p95_ms,

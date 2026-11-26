@@ -13,9 +13,9 @@ use crate::format::{MAX_BATCH_DECODED_BYTES, decode_schema};
 use crate::gdpr::{GdprFileInput, gdpr_rewrite_day};
 use crate::io::{RangeReader, SliceReader};
 use crate::payload::chunker::chunk_payload;
-use crate::payload::decode_payload_refs;
 use crate::payload::pack::ChunkPackReader;
 use crate::payload::search::search_pack_chunks;
+use crate::payload::{decode_payload_refs, decode_payload_refs_flat};
 use crate::reader::{
     CoalesceMode, IdLookup, InMemoryPackResolver, PackResolver, Predicate, ScanRequest,
     StatamFileMeta, StatamReader, SubstringQuery, TimeRange,
@@ -42,6 +42,8 @@ pub fn fuzz_statam_file(data: &[u8]) {
     let payload_slice = if data.len() >= 2 { &data[2..] } else { data };
     let _ = decode_payload_refs(payload_slice, row_count_hint, MAX_BATCH_DECODED_BYTES);
     let _ = decode_payload_refs(data, 4, MAX_BATCH_DECODED_BYTES);
+    let _ = decode_payload_refs_flat(payload_slice, row_count_hint, MAX_BATCH_DECODED_BYTES);
+    let _ = decode_payload_refs_flat(data, 4, MAX_BATCH_DECODED_BYTES);
 
     let mut chunks = Vec::new();
     chunk_payload(data, &mut chunks);
@@ -102,6 +104,7 @@ fn exercise_standalone_pack(data: &[u8]) {
         return;
     };
     let _ = pack.read_edge_table();
+    let _ = pack.read_edge_table_flat();
     let _ = pack.read_trigram_section();
     let _ = pack.read_hash_table();
 
@@ -117,6 +120,7 @@ fn exercise_standalone_pack(data: &[u8]) {
 
     let _ = search_pack_chunks(&pack, b"err", false);
     let _ = search_pack_chunks(&pack, b"ERR", true);
+    let _ = search_pack_chunks(&pack, "Alienación".as_bytes(), true);
     let _ = search_pack_chunks(&pack, &[b'a'; 72], false);
 }
 
@@ -185,6 +189,12 @@ fn exercise_reader_queries(reader: &StatamReader) {
     });
 
     let meta = reader.meta();
+    let row_count = meta.postscript.row_count;
+    let take_indices = [0u64, 1, 5, row_count.saturating_sub(1), row_count];
+    let _ = reader.take_rows(&take_indices, None, 1);
+    if !meta.schema().is_empty() {
+        let _ = reader.take_rows(&take_indices, Some(&[0]), 1);
+    }
     let fields = meta.schema().fields();
 
     let utf8_cols: Vec<&str> = fields
@@ -260,6 +270,14 @@ fn run_utf8_queries(reader: &StatamReader, col_name: &str) {
     });
     let _ = reader.scan(&ScanRequest {
         substrings: vec![SubstringQuery::ilike(col_name, b"PROMPT")],
+        ..Default::default()
+    });
+    let _ = reader.scan(&ScanRequest {
+        substrings: vec![SubstringQuery::ilike(col_name, "Alienación".as_bytes())],
+        ..Default::default()
+    });
+    let _ = reader.scan(&ScanRequest {
+        substrings: vec![SubstringQuery::ilike(col_name, "\u{212A}".as_bytes())],
         ..Default::default()
     });
     let _ = reader.scan(&ScanRequest {
