@@ -10,7 +10,7 @@ pub mod zonemap;
 
 use std::fmt;
 
-use cetra_column::{Column, DataType, FlatColumn};
+use cetra_column::{Bitmap, Column, DataType, FlatColumn};
 
 use crate::StatamError;
 use crate::codec::dict::{FileDict, decode_dict_column, encode_dict_codes_body};
@@ -21,7 +21,8 @@ use crate::codec::numeric::{
 };
 use crate::codec::zonemap::compute_zone_map;
 use crate::format::{
-    BLOCK_FLAG_MIN_MAX_VALID, BlockEntry, Codec, Encoding, MAX_NESTING_DEPTH, write_framed_block,
+    BLOCK_FLAG_ALL_NULL, BLOCK_FLAG_HAS_NULLS, BLOCK_FLAG_MIN_MAX_VALID, BlockEntry, Codec,
+    Encoding, MAX_NESTING_DEPTH, write_framed_block,
 };
 
 pub use alp::{ALP_MAX_EXP, decode_alp_body, encode_alp_body};
@@ -47,10 +48,40 @@ pub use zonemap::{
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum WriteProfile {
     /// Fast self-contained single-pass profile (`Const`, `Rle`, `ForBitpack`/`DeltaBitpack` via
-    /// 32-element monotonicity sample, `BitpackBool`, bounded `Dict <= 4096`, `Plain + Lz4`).
+    /// 32-element monotonicity sample, `BitpackBool`, bounded `Dict <= 4096`, `Plain + Zstd(-3)/Lz4`).
     L0Fast,
     /// Full compression cascade (`+ sorted Dict`, `Alp`, `Fsst`, `ShreddedMap`, `Zstd(3)`).
     L1Compact,
+}
+
+#[cfg(not(miri))]
+#[inline]
+pub(crate) fn zstd_or_lz4_codec() -> Codec {
+    Codec::Zstd
+}
+
+#[cfg(miri)]
+#[inline]
+pub(crate) fn zstd_or_lz4_codec() -> Codec {
+    Codec::Lz4
+}
+
+#[inline]
+pub(crate) fn preferred_block_codec(
+    profile: WriteProfile,
+    raw_len: usize,
+    compress_in_l0: bool,
+) -> Codec {
+    match profile {
+        WriteProfile::L1Compact => zstd_or_lz4_codec(),
+        WriteProfile::L0Fast => {
+            if !compress_in_l0 || raw_len < 64 {
+                Codec::None
+            } else {
+                Codec::Lz4
+            }
+        }
+    }
 }
 
 /// Encoded mini-block payload and metadata prior to framing and outer compression.
@@ -199,7 +230,7 @@ pub(crate) fn encode_mini_block_with_locality(
     }
 
     if let Some(dict) = file_dict
-        && let Some(dict_block) = try_encode_with_file_dict(col, dict, &zm)?
+        && let Some(dict_block) = try_encode_with_file_dict(col, dict, profile, &zm)?
     {
         return Ok(dict_block);
     }
@@ -217,6 +248,7 @@ pub(crate) fn encode_mini_block_with_locality(
 fn try_encode_with_file_dict(
     col: &Column,
     dict: &FileDict,
+    profile: WriteProfile,
     zm: &ZoneMapSummary,
 ) -> Result<Option<EncodedMiniBlock>, StatamError> {
     if col.data_type() != dict.values().data_type() {
@@ -247,11 +279,44 @@ fn try_encode_with_file_dict(
         }
     };
 
+    Ok(Some(encode_dict_codes_precomputed(
+        &codes,
+        nulls_opt.as_ref(),
+        profile,
+        zm.block_flags & !BLOCK_FLAG_MIN_MAX_VALID,
+    )?))
+}
+
+pub(crate) fn encode_dict_codes_precomputed(
+    codes: &[u32],
+    nulls_opt: Option<&Bitmap>,
+    profile: WriteProfile,
+    base_block_flags: u8,
+) -> Result<EncodedMiniBlock, StatamError> {
+    let n = codes.len();
+    let null_count_usize = nulls_opt.map_or(0, |bm| n.saturating_sub(bm.count_ones()));
+    let null_count = u16::try_from(null_count_usize).map_err(|_| StatamError::BoundsExceeded {
+        reason: "mini-block null_count overflows u16",
+    })?;
+    if null_count_usize == n {
+        return Ok(EncodedMiniBlock {
+            encoding: Encoding::ConstNull,
+            block_flags: BLOCK_FLAG_ALL_NULL | BLOCK_FLAG_HAS_NULLS,
+            null_count,
+            min_inline_len: 0,
+            max_inline_len: 0,
+            min_inline: [0u8; 16],
+            max_inline: [0u8; 16],
+            raw_body: Vec::new(),
+            preferred_codec: Codec::None,
+        });
+    }
+
     let mut min_code = u32::MAX;
     let mut max_code = 0u32;
     let mut any_valid = false;
     for (i, &c) in codes.iter().enumerate() {
-        if nulls_opt.as_ref().is_none_or(|bm| bm.get(i)) {
+        if nulls_opt.is_none_or(|bm| bm.get(i)) {
             any_valid = true;
             min_code = min_code.min(c);
             max_code = max_code.max(c);
@@ -259,12 +324,15 @@ fn try_encode_with_file_dict(
     }
 
     let mut raw = Vec::new();
-    write_optional_nulls(nulls_opt.as_ref(), &mut raw);
-    raw.extend_from_slice(&encode_dict_codes_body(&codes, nulls_opt.as_ref())?);
+    write_optional_nulls(nulls_opt, &mut raw);
+    raw.extend_from_slice(&encode_dict_codes_body(codes, nulls_opt)?);
 
     let mut min_inline = [0u8; 16];
     let mut max_inline = [0u8; 16];
-    let mut block_flags = zm.block_flags & !BLOCK_FLAG_MIN_MAX_VALID;
+    let mut block_flags = base_block_flags & !BLOCK_FLAG_MIN_MAX_VALID;
+    if null_count > 0 {
+        block_flags |= BLOCK_FLAG_HAS_NULLS;
+    }
     let (min_len, max_len) = if any_valid {
         block_flags |= BLOCK_FLAG_MIN_MAX_VALID;
         min_inline[0..4].copy_from_slice(&min_code.to_le_bytes());
@@ -274,17 +342,18 @@ fn try_encode_with_file_dict(
         (0u8, 0u8)
     };
 
-    Ok(Some(EncodedMiniBlock {
+    let preferred_codec = preferred_block_codec(profile, raw.len(), false);
+    Ok(EncodedMiniBlock {
         encoding: Encoding::Dict,
         block_flags,
-        null_count: zm.null_count,
+        null_count,
         min_inline_len: min_len,
         max_inline_len: max_len,
         min_inline,
         max_inline,
         raw_body: raw,
-        preferred_codec: Codec::None,
-    }))
+        preferred_codec,
+    })
 }
 
 /// Decodes one mini-block from its decompressed `raw_body` and [`BlockEntry`].

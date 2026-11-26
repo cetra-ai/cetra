@@ -21,7 +21,7 @@ use crate::codec::numeric::{
     try_encode_const_or_null, write_optional_nulls,
 };
 use crate::codec::zonemap::{ZoneMapSummary, compute_zone_map};
-use crate::codec::{EncodedMiniBlock, WriteProfile};
+use crate::codec::{EncodedMiniBlock, WriteProfile, preferred_block_codec};
 use crate::format::{BLOCK_FLAG_HAS_NULLS, BlockEntry, Codec, Encoding, MAX_SHREDDED_KEYS};
 use crate::simd::bitpack::{min_bits_u32, pack_u32, packed_bytes_len, unpack_u32};
 use crate::{MAX_BLOCK_RAW_BYTES, MAX_DICT_BYTES, StatamError};
@@ -658,13 +658,7 @@ pub(crate) fn encode_shredded_subcol_with_codec(
     out.extend_from_slice(&(child_payload.body.len() as u32).to_le_bytes());
     out.extend_from_slice(&child_payload.body);
 
-    let codec = match child_payload.encoding {
-        Encoding::Dict | Encoding::Const | Encoding::ConstNull | Encoding::Rle => Codec::None,
-        _ => match profile {
-            WriteProfile::L0Fast => Codec::Lz4,
-            WriteProfile::L1Compact => Codec::Zstd,
-        },
-    };
+    let codec = preferred_block_codec(profile, out.len(), true);
     Ok((codec, out))
 }
 
@@ -865,10 +859,7 @@ fn encode_shredded_residual_block_with_zm(
         raw.extend_from_slice(&val_bytes);
     }
 
-    let preferred_codec = match profile {
-        WriteProfile::L0Fast => Codec::Lz4,
-        WriteProfile::L1Compact => Codec::Zstd,
-    };
+    let preferred_codec = preferred_block_codec(profile, raw.len(), true);
 
     Ok(EncodedMiniBlock {
         encoding: Encoding::ShreddedMap,
@@ -891,7 +882,27 @@ pub fn decode_shredded_residual_block(
     if entry.encoding == Encoding::ConstNull || entry.encoding == Encoding::Const {
         return Ok(decode_const_block(entry, &DataType::MapUtf8)?.materialize(None)?);
     }
-    decode_shredded_residual_with_count(raw_body, entry.row_count as usize, entry.block_flags)
+    let row_count = entry.row_count as usize;
+    if row_count == 0 {
+        if !raw_body.is_empty() {
+            return Err(StatamError::Corrupt {
+                reason: "trailing bytes in empty shredded residual",
+            });
+        }
+        return Ok(FlatColumn::empty(&DataType::MapUtf8));
+    }
+    if entry.encoding == Encoding::Plain {
+        let (nulls, body) = read_optional_nulls(raw_body, row_count, entry.block_flags)?;
+        let data = decode_inner_data(
+            body,
+            Encoding::Plain,
+            row_count,
+            &DataType::MapUtf8,
+            nulls.as_ref(),
+        )?;
+        return Ok(FlatColumn::try_new(data, nulls)?);
+    }
+    decode_shredded_residual_with_count(raw_body, row_count, entry.block_flags)
 }
 
 fn decode_shredded_residual_with_count(
@@ -1074,11 +1085,6 @@ pub(crate) fn encode_nested_column(
         }
     };
 
-    let preferred_codec = match profile {
-        WriteProfile::L0Fast => Codec::Lz4,
-        WriteProfile::L1Compact => Codec::Zstd,
-    };
-
     match dt {
         DataType::List(inner) => {
             if remaining_depth == 0 {
@@ -1128,6 +1134,7 @@ pub(crate) fn encode_nested_column(
             raw.extend_from_slice(&(child_payload.body.len() as u32).to_le_bytes());
             raw.extend_from_slice(&child_payload.body);
 
+            let preferred_codec = preferred_block_codec(profile, raw.len(), true);
             Ok(EncodedMiniBlock {
                 encoding: Encoding::ListEncoded,
                 block_flags: zm.block_flags,
@@ -1140,7 +1147,34 @@ pub(crate) fn encode_nested_column(
                 preferred_codec,
             })
         }
-        DataType::MapUtf8 => encode_shredded_residual_block_with_zm(flat, profile, Some(zm)),
+        DataType::MapUtf8 => {
+            if profile == WriteProfile::L0Fast {
+                let raw = if let Some(bm) = flat.nulls() {
+                    let bm_bytes = bm.to_bytes();
+                    let body = encode_plain_body(flat)?;
+                    let mut out = Vec::with_capacity(bm_bytes.len() + body.len());
+                    out.extend_from_slice(&bm_bytes);
+                    out.extend_from_slice(&body);
+                    out
+                } else {
+                    encode_plain_body(flat)?
+                };
+                let preferred_codec = preferred_block_codec(profile, raw.len(), true);
+                Ok(EncodedMiniBlock {
+                    encoding: Encoding::Plain,
+                    block_flags: zm.block_flags,
+                    null_count: zm.null_count,
+                    min_inline_len: 0,
+                    max_inline_len: 0,
+                    min_inline: [0u8; 16],
+                    max_inline: [0u8; 16],
+                    raw_body: raw,
+                    preferred_codec,
+                })
+            } else {
+                encode_shredded_residual_block_with_zm(flat, profile, Some(zm))
+            }
+        }
         DataType::Events => {
             let FlatData::Events(ev) = flat.data() else {
                 return Err(StatamError::SchemaMismatch {
@@ -1180,10 +1214,11 @@ pub(crate) fn encode_nested_column(
 
                 let names_flat = FlatColumn::try_new(FlatData::Utf8(ev.names().clone()), None)?;
                 let builder = match profile {
-                    WriteProfile::L0Fast => DictBuilder::l0_fast(),
-                    WriteProfile::L1Compact => DictBuilder::l1_compact(),
+                    WriteProfile::L0Fast => None,
+                    WriteProfile::L1Compact => Some(DictBuilder::l1_compact()),
                 };
-                if let Some((dict, codes)) = builder.build(&names_flat)?
+                if let Some(b) = builder
+                    && let Some((dict, codes)) = b.build(&names_flat)?
                     && dict.len() * 2 <= event_count
                 {
                     let dict_bytes = dict.encode(Codec::None, 0)?;
@@ -1214,6 +1249,7 @@ pub(crate) fn encode_nested_column(
                 raw.extend_from_slice(&a_bytes);
             }
 
+            let preferred_codec = preferred_block_codec(profile, raw.len(), true);
             Ok(EncodedMiniBlock {
                 encoding: Encoding::EventsStruct,
                 block_flags: zm.block_flags,
@@ -1265,6 +1301,7 @@ pub(crate) fn encode_nested_column(
                 raw.extend_from_slice(&a_bytes);
             }
 
+            let preferred_codec = preferred_block_codec(profile, raw.len(), true);
             Ok(EncodedMiniBlock {
                 encoding: Encoding::LinksStruct,
                 block_flags: zm.block_flags,
@@ -1503,6 +1540,11 @@ fn decode_child_column(
         DataType::MapUtf8 if enc == Encoding::ShreddedMap => Ok(Column::Flat(
             decode_shredded_residual_with_count(body, len, flags)?,
         )),
+        DataType::MapUtf8 if enc == Encoding::Plain => {
+            let (nulls, after_nulls) = read_optional_nulls(body, len, flags)?;
+            let data = decode_inner_data(after_nulls, Encoding::Plain, len, dt, nulls.as_ref())?;
+            Ok(Column::Flat(FlatColumn::try_new(data, nulls)?))
+        }
         DataType::Events if enc == Encoding::EventsStruct => decode_events_body(body, len, flags),
         DataType::Links if enc == Encoding::LinksStruct => decode_links_body(body, len, flags),
         DataType::MapUtf8 | DataType::Events | DataType::Links => Err(StatamError::Corrupt {
@@ -1567,10 +1609,12 @@ fn encode_child_column_payload(
         });
     }
 
-    if matches!(
-        dt,
-        DataType::Utf8 | DataType::Binary | DataType::FixedBytes8 | DataType::FixedBytes16
-    ) && let Column::Flat(f) = col
+    if profile == WriteProfile::L1Compact
+        && matches!(
+            dt,
+            DataType::Utf8 | DataType::Binary | DataType::FixedBytes8 | DataType::FixedBytes16
+        )
+        && let Column::Flat(f) = col
         && f.len() >= 4
         && !f.all_null_check()
     {

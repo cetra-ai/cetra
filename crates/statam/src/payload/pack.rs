@@ -28,25 +28,34 @@ pub const EDGE_LEN: usize = 63;
 /// `(head_63, tail_63)` edge bytes for one chunk.
 pub type ChunkEdge = (Vec<u8>, Vec<u8>);
 
+/// Magic bytes at offset 0 of a `TS02` TrigramSkipSection header.
+pub const TRIGRAM_SECTION_MAGIC: [u8; 4] = *b"TS02";
+/// Fixed 12-byte header size preceding the two 4 KiB edge trigram blooms in `TS02`.
+const TS02_HEADER_LEN: usize = 12;
+/// Byte size of each edge trigram bloom (`edge_tail_bloom` and `edge_head_bloom`).
+const EDGE_TRIGRAM_BLOOM_BYTES: usize = MAX_TRIGRAM_BLOOM_BYTES;
+/// Total byte length of the `TS02` prefix before per-frame trigram blooms (`12 + 4096 + 4096`).
+const TS02_PREFIX_LEN: usize = TS02_HEADER_LEN + 2 * EDGE_TRIGRAM_BLOOM_BYTES;
+
 /// Minimum compressed frame length required to emit a trigram bloom (`< 1024` omitted).
 const MIN_FRAME_FOR_TRIGRAM: usize = 1024;
 /// Maximum trigram bloom bit density (`> 50%` saturated blooms are omitted).
 const MAX_TRIGRAM_DENSITY: f64 = 0.50;
-/// 1 MiB `ReadCache` boundary guard threshold: pad if `< 16 KiB` left in current 1 MiB block.
-const BOUNDARY_GUARD_THRESHOLD: usize = 16_384;
-/// 1 MiB `ReadCache` boundary guard max frame size (`< 64 KiB`).
-const BOUNDARY_GUARD_MAX_FRAME: usize = 65_536;
-/// Default target raw bytes per `.stpk` frame (256 KiB).
-const DEFAULT_TARGET_FRAME_RAW_BYTES: usize = 256 * 1024;
+/// 1 MiB `ReadCache` boundary guard threshold: pad if `< 8 KiB` left in current 1 MiB block.
+const BOUNDARY_GUARD_THRESHOLD: usize = 8_192;
+/// 1 MiB `ReadCache` boundary guard max frame size (`< 32 KiB`).
+const BOUNDARY_GUARD_MAX_FRAME: usize = 32_768;
+/// Default target raw bytes per `.stpk` frame (512 KiB).
+const DEFAULT_TARGET_FRAME_RAW_BYTES: usize = 512 * 1024;
 
 /// Configuration options for [`ChunkPackBuilder`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PackWriteOptions {
     /// Compression codec for pack frames (default: `Codec::Zstd`).
     pub codec: Codec,
-    /// Zstd compression level when `codec == Codec::Zstd` (default: `3`).
+    /// Zstd compression level when `codec == Codec::Zstd` (default: `9`).
     pub zstd_level: i32,
-    /// Target uncompressed frame size in bytes (default: `256 KiB`).
+    /// Target uncompressed frame size in bytes (default: `512 KiB`).
     pub target_frame_raw_bytes: usize,
     /// Whether to emit adaptive per-frame trigram skip filters (default: `true`).
     pub enable_trigram_skip: bool,
@@ -58,7 +67,7 @@ impl Default for PackWriteOptions {
     fn default() -> Self {
         Self {
             codec: Codec::Zstd,
-            zstd_level: 3,
+            zstd_level: 9,
             target_frame_raw_bytes: DEFAULT_TARGET_FRAME_RAW_BYTES,
             enable_trigram_skip: true,
             compress_toc_lz4: true,
@@ -244,8 +253,16 @@ impl ChunkPackBuilder {
 
     /// Appends a raw chunk directly in `W4` bypass mode: skips CDC chunking,
     /// deduplication map lookup, and trigram bloom extraction, while compressing
-    /// frames with `Codec::Zstd(1)` (automatically falling back to `Codec::None` if incompressible).
+    /// frames with `Codec::Zstd` (automatically falling back to `Codec::None` if incompressible).
     pub fn append_raw_bypass(&mut self, bytes: &[u8]) -> Result<u32, StatamError> {
+        self.append_raw_bypass_with_edge(bytes, true)
+    }
+
+    pub(crate) fn append_raw_bypass_with_edge(
+        &mut self,
+        bytes: &[u8],
+        record_edge: bool,
+    ) -> Result<u32, StatamError> {
         if bytes.len() > MAX_FRAME_RAW_BYTES {
             return Err(StatamError::BoundsExceeded {
                 reason: "chunk length exceeds MAX_FRAME_RAW_BYTES",
@@ -284,8 +301,14 @@ impl ChunkPackBuilder {
         hash16.copy_from_slice(&hash.as_bytes()[..16]);
 
         self.cur_raw.extend_from_slice(bytes);
-        let head = bytes[..bytes.len().min(EDGE_LEN)].to_vec();
-        let tail = bytes[bytes.len().saturating_sub(EDGE_LEN)..].to_vec();
+        let (head, tail) = if record_edge {
+            (
+                bytes[..bytes.len().min(EDGE_LEN)].to_vec(),
+                bytes[bytes.len().saturating_sub(EDGE_LEN)..].to_vec(),
+            )
+        } else {
+            (Vec::new(), Vec::new())
+        };
 
         self.cur_chunks.push(PendingChunk {
             hash16,
@@ -499,12 +522,46 @@ impl ChunkPackBuilder {
         }
         cur_off = cur_off.saturating_add(hash_table_bytes.len() as u64);
 
-        // 2. TrigramSkipSection
+        // 2. TrigramSkipSection (`TS02`: 12 B header + 4 KiB tail bloom + 4 KiB head bloom + per-frame blooms)
+        let mut trigram_section = Vec::new();
         let (trigram_off, trigram_len) = if !self.trigram_buf.is_empty() {
-            let len =
-                u32::try_from(self.trigram_buf.len()).map_err(|_| StatamError::BoundsExceeded {
-                    reason: "trigram section exceeds u32",
+            let mut edge_tail_bloom = TrigramBloom::new(EDGE_TRIGRAM_BLOOM_BYTES);
+            let mut edge_head_bloom = TrigramBloom::new(EDGE_TRIGRAM_BLOOM_BYTES);
+            for (head, tail) in &self.edges {
+                edge_tail_bloom.insert_bytes(tail);
+                edge_head_bloom.insert_bytes(head);
+            }
+
+            let prefix_u32 =
+                u32::try_from(TS02_PREFIX_LEN).map_err(|_| StatamError::BoundsExceeded {
+                    reason: "TS02 prefix length overflows u32",
                 })?;
+            for f in &mut self.frames {
+                if f.filter_len > 0 {
+                    f.filter_off = f.filter_off.checked_add(prefix_u32).ok_or(
+                        StatamError::BoundsExceeded {
+                            reason: "frame filter_off overflows u32",
+                        },
+                    )?;
+                }
+            }
+
+            let total_len = TS02_PREFIX_LEN.checked_add(self.trigram_buf.len()).ok_or(
+                StatamError::BoundsExceeded {
+                    reason: "trigram section size overflow",
+                },
+            )?;
+            let len = u32::try_from(total_len).map_err(|_| StatamError::BoundsExceeded {
+                reason: "trigram section exceeds u32",
+            })?;
+            trigram_section.reserve(total_len);
+            trigram_section.extend_from_slice(&TRIGRAM_SECTION_MAGIC);
+            trigram_section.extend_from_slice(&(EDGE_TRIGRAM_BLOOM_BYTES as u32).to_le_bytes());
+            trigram_section.extend_from_slice(&0u32.to_le_bytes());
+            trigram_section.extend_from_slice(edge_tail_bloom.as_bytes());
+            trigram_section.extend_from_slice(edge_head_bloom.as_bytes());
+            trigram_section.extend_from_slice(&self.trigram_buf);
+
             let off = cur_off;
             cur_off = cur_off.saturating_add(u64::from(len));
             (off, len)
@@ -628,8 +685,8 @@ impl ChunkPackBuilder {
 
         out.write_all(&self.buf)?;
         out.write_all(&hash_table_bytes)?;
-        if !self.trigram_buf.is_empty() {
-            out.write_all(&self.trigram_buf)?;
+        if !trigram_section.is_empty() {
+            out.write_all(&trigram_section)?;
         }
         if !edge_framed.is_empty() {
             out.write_all(&edge_framed)?;
@@ -678,7 +735,7 @@ impl ChunkPackBuilder {
 
         let mut framed = Vec::new();
         let (frame_codec, zstd_level) = if self.cur_is_bypass {
-            (default_bypass_codec(), 1)
+            (default_bypass_codec(), self.options.zstd_level)
         } else {
             (self.options.codec, self.options.zstd_level)
         };
@@ -809,12 +866,18 @@ pub struct PackToc {
     pub chunks: Vec<ChunkLoc>,
 }
 
+#[derive(Clone)]
+pub(crate) struct TrigramSectionData {
+    pub(crate) edge_blooms: Option<(TrigramBloom, TrigramBloom)>,
+    pub(crate) frame_blooms: Vec<Option<TrigramBloom>>,
+}
+
 /// Range-based reader for an immutable `.stpk` chunk pack.
 pub struct ChunkPackReader {
     reader: Arc<dyn RangeReader>,
     toc: PackToc,
     data_end: u64,
-    trigram_cache: OnceLock<Vec<Option<TrigramBloom>>>,
+    trigram_cache: OnceLock<TrigramSectionData>,
     edge_cache: OnceLock<Vec<ChunkEdge>>,
 }
 
@@ -1097,18 +1160,35 @@ impl ChunkPackReader {
 
     /// Reads and validates the per-frame trigram bloom filters (`None` where omitted), cached per reader.
     pub fn read_trigram_section(&self) -> Result<Vec<Option<TrigramBloom>>, StatamError> {
-        if let Some(cached) = self.trigram_cache.get() {
-            return Ok(cached.clone());
-        }
-        let out = self.read_trigram_section_uncached()?;
-        let _ = self.trigram_cache.set(out.clone());
-        Ok(out)
+        Ok(self.trigram_section_cached()?.frame_blooms.clone())
     }
 
-    fn read_trigram_section_uncached(&self) -> Result<Vec<Option<TrigramBloom>>, StatamError> {
+    /// Reads and validates the `TS02` boundary edge trigram blooms `(edge_tail_bloom, edge_head_bloom)`,
+    /// returning `None` if absent or legacy raw format.
+    pub fn read_edge_trigram_blooms(
+        &self,
+    ) -> Result<Option<(TrigramBloom, TrigramBloom)>, StatamError> {
+        Ok(self.trigram_section_cached()?.edge_blooms.clone())
+    }
+
+    pub(crate) fn trigram_section_cached(&self) -> Result<&TrigramSectionData, StatamError> {
+        if let Some(cached) = self.trigram_cache.get() {
+            return Ok(cached);
+        }
+        let data = self.read_trigram_section_uncached()?;
+        let _ = self.trigram_cache.set(data);
+        self.trigram_cache.get().ok_or(StatamError::Corrupt {
+            reason: "trigram cache uninitialized",
+        })
+    }
+
+    fn read_trigram_section_uncached(&self) -> Result<TrigramSectionData, StatamError> {
         let ps = &self.toc.postscript;
         if ps.trigram_len == 0 {
-            return Ok(vec![None; self.toc.frames.len()]);
+            return Ok(TrigramSectionData {
+                edge_blooms: None,
+                frame_blooms: vec![None; self.toc.frames.len()],
+            });
         }
         if (ps.trigram_len as usize) > MAX_BLOOM_BYTES {
             return Err(StatamError::BoundsExceeded {
@@ -1136,12 +1216,58 @@ impl ChunkPackReader {
             });
         }
 
-        let mut out = Vec::with_capacity(self.toc.frames.len());
+        let (edge_blooms, min_frame_off) = if section.starts_with(&TRIGRAM_SECTION_MAGIC) {
+            if section.len() < TS02_HEADER_LEN {
+                return Err(StatamError::Corrupt {
+                    reason: "truncated TS02 trigram header",
+                });
+            }
+            let edge_bytes = read_u32_le(&section, 4) as usize;
+            let reserved = read_u32_le(&section, 8);
+            if reserved != 0 {
+                return Err(StatamError::Corrupt {
+                    reason: "non-zero reserved field in TS02 trigram header",
+                });
+            }
+            if !(MIN_TRIGRAM_BLOOM_BYTES..=MAX_TRIGRAM_BLOOM_BYTES).contains(&edge_bytes)
+                || !edge_bytes.is_power_of_two()
+            {
+                return Err(StatamError::Corrupt {
+                    reason: "invalid TS02 edge bloom length",
+                });
+            }
+            let prefix_len = TS02_HEADER_LEN
+                .checked_add(edge_bytes.saturating_mul(2))
+                .ok_or(StatamError::BoundsExceeded {
+                    reason: "TS02 prefix length overflow",
+                })?;
+            if section.len() < prefix_len {
+                return Err(StatamError::Corrupt {
+                    reason: "truncated TS02 edge trigram blooms",
+                });
+            }
+            let tail_bloom = TrigramBloom::from_bytes(
+                section[TS02_HEADER_LEN..TS02_HEADER_LEN + edge_bytes].to_vec(),
+            )?;
+            let head_bloom = TrigramBloom::from_bytes(
+                section[TS02_HEADER_LEN + edge_bytes..prefix_len].to_vec(),
+            )?;
+            (Some((tail_bloom, head_bloom)), prefix_len)
+        } else {
+            (None, 0usize)
+        };
+
+        let mut frame_blooms = Vec::with_capacity(self.toc.frames.len());
         for frame in &self.toc.frames {
             if frame.filter_len == 0 {
-                out.push(None);
+                frame_blooms.push(None);
             } else {
                 let f_start = frame.filter_off as usize;
+                if f_start < min_frame_off {
+                    return Err(StatamError::Corrupt {
+                        reason: "frame trigram filter overlaps TS02 header",
+                    });
+                }
                 let f_end = f_start.checked_add(frame.filter_len as usize).ok_or(
                     StatamError::BoundsExceeded {
                         reason: "frame trigram filter slice overflow",
@@ -1150,10 +1276,13 @@ impl ChunkPackReader {
                 let slice = section.get(f_start..f_end).ok_or(StatamError::Corrupt {
                     reason: "frame trigram filter out of section bounds",
                 })?;
-                out.push(Some(TrigramBloom::from_bytes(slice.to_vec())?));
+                frame_blooms.push(Some(TrigramBloom::from_bytes(slice.to_vec())?));
             }
         }
-        Ok(out)
+        Ok(TrigramSectionData {
+            edge_blooms,
+            frame_blooms,
+        })
     }
 
     /// Reads and decodes the `EdgeTable` returning `(head_63, tail_63)` per unique chunk, cached per reader.
@@ -1472,20 +1601,20 @@ mod tests {
         let opts = PackWriteOptions {
             codec: test_codec(),
             zstd_level: 3,
-            target_frame_raw_bytes: 32 * 1024,
+            target_frame_raw_bytes: 16 * 1024,
             enable_trigram_skip: true,
             compress_toc_lz4: true,
         };
         let mut builder = ChunkPackBuilder::new(pack_id, opts);
 
         // Emit enough distinct chunks so we cross a 1 MiB boundary and verify the guard.
-        // Each chunk is ~35 KiB of pseudo-random incompressible data so frames stay ~35 KiB
-        // (< 65,536 B), guaranteeing a frame eventually lands inside the last 16 KiB of 1 MiB!
+        // Each chunk is 20 KiB of pseudo-random incompressible data so frames stay ~20 KiB
+        // (< BOUNDARY_GUARD_MAX_FRAME = 32 KiB), guaranteeing frames cross/hit the last 8 KiB of 1 MiB!
         let mut chunk_ids = Vec::new();
         let mut expected_chunks: Vec<Vec<u8>> = Vec::new();
         let mut state: u64 = 0x1234_5678_9abc_def0;
 
-        for i in 0..38u32 {
+        for i in 0..64u32 {
             // Every 5th chunk duplicates chunk 0 to verify BLAKE3-128 dedup.
             if i > 0 && i % 5 == 0 {
                 let dup_id = builder.intern_chunk(&expected_chunks[0]).unwrap();
@@ -1493,7 +1622,7 @@ mod tests {
                 chunk_ids.push(dup_id);
                 continue;
             }
-            let mut data = vec![0u8; 34 * 1024];
+            let mut data = vec![0u8; 20 * 1024];
             for b in &mut data {
                 state ^= state << 13;
                 state ^= state >> 7;
@@ -1509,25 +1638,29 @@ mod tests {
         let stats = builder.finish(&mut bytes).unwrap();
         assert_eq!(stats.pack_id, pack_id);
         assert_eq!(stats.chunk_count as usize, expected_chunks.len());
-        assert_eq!(stats.dedup_hits, 7);
+        assert_eq!(stats.dedup_hits, 12);
 
         let reader = ChunkPackReader::open(Arc::new(SliceReader::new(bytes.clone()))).unwrap();
         assert_eq!(reader.pack_id(), pack_id);
         assert_eq!(reader.toc().chunks.len(), expected_chunks.len());
 
-        // Verify 1 MiB boundary guard: no frame < 65536 B crosses a 1 MiB boundary when
-        // starting within the last 16384 B of a 1 MiB block.
+        // Verify 1 MiB boundary guard: no frame < BOUNDARY_GUARD_MAX_FRAME crosses a 1 MiB boundary
+        // from within the last BOUNDARY_GUARD_THRESHOLD bytes of a 1 MiB block.
         let mib = S3_CACHE_BLOCK_BYTES;
         for f in &reader.toc().frames {
             let total = PACK_FRAME_HEADER_LEN as u64 + u64::from(f.stored_len);
             if total < BOUNDARY_GUARD_MAX_FRAME as u64 {
-                let start_block = f.offset / mib;
-                let end_block = (f.offset + total - 1) / mib;
-                assert_eq!(
-                    start_block, end_block,
-                    "small frame at {} (len {total}) crossed 1 MiB boundary!",
-                    f.offset
-                );
+                let pos_in_block = f.offset % mib;
+                let remaining = mib - pos_in_block;
+                if remaining < BOUNDARY_GUARD_THRESHOLD as u64 {
+                    let start_block = f.offset / mib;
+                    let end_block = (f.offset + total - 1) / mib;
+                    assert_eq!(
+                        start_block, end_block,
+                        "small frame at {} (len {total}, remaining {remaining}) crossed 1 MiB boundary!",
+                        f.offset
+                    );
+                }
             }
         }
 

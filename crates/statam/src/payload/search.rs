@@ -9,7 +9,9 @@ use crate::StatamError;
 use crate::format::MAX_ROW_PAYLOAD_BYTES;
 use crate::payload::PayloadRefRow;
 use crate::payload::pack::ChunkPackReader;
-use crate::simd::trigram::{ascii_lowercase_into, extract_trigram_hashes};
+use crate::simd::trigram::{
+    TrigramBloom, ascii_lowercase_into, extract_trigram_hashes, trigram_hash,
+};
 
 /// Maximum needle byte length guaranteed to span at most two adjacent `>= 256 B` chunks
 /// and lie completely inside `tail_63(left) || head_63(right)` when crossing a boundary.
@@ -156,9 +158,33 @@ pub fn search_pack_rows(
     }
 
     let mut matcher = NeedleMatcher::new(needle, case_insensitive);
+    let pack_chunk_count = pack.toc().chunks.len();
+
+    if pack_short_circuits_all(pack, needle, case_insensitive)? {
+        for (row_idx, row) in row_refs.iter().enumerate() {
+            match row {
+                PayloadRefRow::Null => {}
+                PayloadRefRow::Inline(bytes) => {
+                    if matcher.matches(bytes) {
+                        let _ = results.set(row_idx, true);
+                    }
+                }
+                PayloadRefRow::Chunks(refs) => {
+                    for &(p, cid) in refs {
+                        if p == pack_idx && (cid as usize) >= pack_chunk_count {
+                            return Err(StatamError::Corrupt {
+                                reason: "payload ref chunk_id out of pack bounds",
+                            });
+                        }
+                    }
+                }
+            }
+        }
+        return Ok(results);
+    }
+
     let mut chunk_rows = Vec::new();
     let mut needed_chunks = BTreeSet::new();
-    let pack_chunk_count = pack.toc().chunks.len();
 
     for (row_idx, row) in row_refs.iter().enumerate() {
         match row {
@@ -231,10 +257,24 @@ fn search_short_needle_rows(
     needed_chunks: &BTreeSet<u32>,
     results: &mut Bitmap,
 ) -> Result<(), StatamError> {
+    let skip_boundary = if needle.len() >= 5
+        && (!case_insensitive || needle.is_ascii())
+        && pack.toc().postscript.trigram_len > 0
+    {
+        let ts = pack.trigram_section_cached()?;
+        pack_rejects_boundary_pigeonhole(ts.edge_blooms.as_ref(), needle, case_insensitive)
+    } else {
+        false
+    };
+
     // Step A: Interior matches via trigram bloom pruning + single-pass unique chunk scan.
     let all_needed: Vec<u32> = needed_chunks.iter().copied().collect();
     let surviving_chunks =
         filter_candidates_by_trigram(pack, &all_needed, needle, case_insensitive)?;
+
+    if surviving_chunks.is_empty() && skip_boundary {
+        return Ok(());
+    }
 
     let mut matched_chunks = HashSet::new();
     if !surviving_chunks.is_empty() {
@@ -247,6 +287,21 @@ fn search_short_needle_rows(
                 matched_chunks.insert(cid);
             }
         }
+    }
+
+    if skip_boundary {
+        if !matched_chunks.is_empty() {
+            for &row_idx in chunk_rows {
+                if let PayloadRefRow::Chunks(refs) = &row_refs[row_idx]
+                    && refs
+                        .iter()
+                        .any(|&(p, cid)| p == pack_idx && matched_chunks.contains(&cid))
+                {
+                    let _ = results.set(row_idx, true);
+                }
+            }
+        }
+        return Ok(());
     }
 
     let mut remaining_rows = Vec::new();
@@ -268,7 +323,7 @@ fn search_short_needle_rows(
     }
 
     // Step B: Cross-chunk boundary matches using EdgeTable (0 extra data frame reads).
-    let mut distinct_pairs = BTreeSet::new();
+    let mut distinct_pairs = HashSet::new();
     for &row_idx in &remaining_rows {
         if let PayloadRefRow::Chunks(refs) = &row_refs[row_idx] {
             for w in refs.windows(2) {
@@ -441,6 +496,64 @@ fn trim_trailing_incomplete_utf8(bytes: &[u8]) -> &[u8] {
     }
 }
 
+pub(crate) fn pack_rejects_boundary_pigeonhole(
+    edge_blooms: Option<&(TrigramBloom, TrigramBloom)>,
+    needle: &[u8],
+    case_insensitive: bool,
+) -> bool {
+    if needle.len() < 5 || (case_insensitive && !needle.is_ascii()) {
+        return false;
+    }
+    let Some((tail_bloom, head_bloom)) = edge_blooms else {
+        return false;
+    };
+    let n = needle.len();
+    let prefix_tri = trigram_hash(
+        needle[0].to_ascii_lowercase(),
+        needle[1].to_ascii_lowercase(),
+        needle[2].to_ascii_lowercase(),
+    );
+    let suffix_tri = trigram_hash(
+        needle[n - 3].to_ascii_lowercase(),
+        needle[n - 2].to_ascii_lowercase(),
+        needle[n - 1].to_ascii_lowercase(),
+    );
+    let tail_may = tail_bloom.may_contain_hashes(&[prefix_tri]);
+    let head_may = head_bloom.may_contain_hashes(&[suffix_tri]);
+    !tail_may && !head_may
+}
+
+pub(crate) fn pack_short_circuits_all(
+    pack: &ChunkPackReader,
+    needle: &[u8],
+    case_insensitive: bool,
+) -> Result<bool, StatamError> {
+    if needle.len() < 5
+        || needle.len() > MAX_EDGE_NEEDLE_LEN
+        || (case_insensitive && !needle.is_ascii())
+        || pack.toc().postscript.trigram_len == 0
+    {
+        return Ok(false);
+    }
+
+    let ts = pack.trigram_section_cached()?;
+    if !pack_rejects_boundary_pigeonhole(ts.edge_blooms.as_ref(), needle, case_insensitive) {
+        return Ok(false);
+    }
+
+    let mut hashes = Vec::new();
+    extract_trigram_hashes(needle, case_insensitive, &mut hashes);
+    if hashes.is_empty() {
+        return Ok(false);
+    }
+
+    let any_frame_may = ts
+        .frame_blooms
+        .iter()
+        .any(|opt| opt.as_ref().is_none_or(|b| b.may_contain_hashes(&hashes)));
+    Ok(!any_frame_may)
+}
+
 fn filter_candidates_by_trigram(
     pack: &ChunkPackReader,
     chunk_ids: &[u32],
@@ -465,7 +578,7 @@ fn filter_candidates_by_trigram(
         return Ok(chunk_ids.to_vec());
     }
 
-    let blooms = pack.read_trigram_section()?;
+    let blooms = &pack.trigram_section_cached()?.frame_blooms;
     let frame_matches: Vec<bool> = blooms
         .iter()
         .map(|opt| match opt {
@@ -791,5 +904,127 @@ mod tests {
         // while still matching row 2's genuine U+FFFD!
         let bm_fffd = search_pack_rows(&pack, &rows, 0, "\u{FFFD}".as_bytes(), true).unwrap();
         assert_eq!(bm_fffd.iter_ones().collect::<Vec<_>>(), vec![2]);
+    }
+
+    #[test]
+    fn pigeonhole_boundary_bloom_zero_false_negatives_for_all_splits_5_to_64() {
+        // Construct a pack with TS02 header (`edge_tail_bloom` + `edge_head_bloom`) and
+        // test EVERY boundary split `1..needle.len()` for needles of length `5..=64`,
+        // both case-sensitive (`LIKE`) and ASCII case-insensitive (`ILIKE`), ensuring
+        // Pigeonhole boundary bloom NEVER causes a false negative AND skips EdgeTable when absent.
+        let opts = PackWriteOptions {
+            codec: test_codec(),
+            zstd_level: 3,
+            target_frame_raw_bytes: 128 * 1024,
+            enable_trigram_skip: true,
+            compress_toc_lz4: true,
+        };
+        let mut builder = ChunkPackBuilder::new([0x42u8; 16], opts);
+
+        // Emit one low-density frame >= 1024 B compressed so TS02 header is always written.
+        let mut state: u64 = 0x55aa_1122_3344_5566;
+        let mut filler = Vec::with_capacity(12 * 1024);
+        for _ in 0..(12 * 1024) {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            filler.push(b'a' + ((state >> 24) as u8 % 4));
+        }
+        let filler_cid = builder.intern_chunk(&filler).unwrap();
+
+        // Master 64-byte needle mixing uppercase, lowercase, digits, and symbols ('E'..'Z', '0'..'9', '_').
+        let full_needle: Vec<u8> = (0..64)
+            .map(|i| match i % 3 {
+                0 => b'E' + (i as u8 % 12),
+                1 => b'0' + (i as u8 % 10),
+                _ => b'_',
+            })
+            .collect();
+
+        // Build one representative split pair for every (len in 5..=64, split in 1..len).
+        // Group splits into a few tests across chunk pairs by storing each (len, split) pair
+        // in its own chunk pair (using unique length-prefix padding in `'a'..'d'` so chunks are >= 256 B).
+        let mut cases = Vec::new();
+        for len in 5..=64usize {
+            let needle = &full_needle[..len];
+            for split in 1..len {
+                let mut left = vec![b'a'; 260];
+                // Encode unique marker in `'a'..'d'` so chunks don't dedup into identical IDs.
+                let tag = ((len * 64 + split) as u32).to_le_bytes();
+                for (j, b) in tag.iter().enumerate() {
+                    left[j * 2] = b'a' + (b & 3);
+                    left[j * 2 + 1] = b'a' + ((b >> 2) & 3);
+                }
+                left.extend_from_slice(&needle[..split]);
+
+                let mut right = needle[split..].to_vec();
+                right.extend_from_slice(&vec![b'b'; 260]);
+                for (j, b) in tag.iter().enumerate() {
+                    let pos = right.len() - 16 + j * 2;
+                    right[pos] = b'a' + ((b >> 4) & 3);
+                    right[pos + 1] = b'a' + ((b >> 6) & 3);
+                }
+
+                let lc = builder.intern_chunk(&left).unwrap();
+                let rc = builder.intern_chunk(&right).unwrap();
+                cases.push((len, split, lc, rc));
+            }
+        }
+
+        let mut pack_bytes = Vec::new();
+        builder.finish(&mut pack_bytes).unwrap();
+
+        let s3 = Arc::new(SimulatedS3Reader::from_bytes(
+            pack_bytes,
+            SimulatedS3Config::default(),
+        ));
+        let pack = ChunkPackReader::open(s3.clone()).unwrap();
+        let edge_blooms = pack.read_edge_trigram_blooms().unwrap();
+        assert!(edge_blooms.is_some(), "TS02 edge blooms must be present");
+
+        // Verify every single (len in 5..=64, split in 1..len) is NOT rejected by Pigeonhole
+        // and matches via `search_pack_rows` for both LIKE and ASCII-lowercased ILIKE!
+        for &(len, _split, lc, rc) in &cases {
+            let needle = &full_needle[..len];
+            assert!(
+                !pack_rejects_boundary_pigeonhole(edge_blooms.as_ref(), needle, false),
+                "false negative on LIKE pigeonhole check for len={len}"
+            );
+            let lower_needle: Vec<u8> = needle.iter().map(u8::to_ascii_lowercase).collect();
+            assert!(
+                !pack_rejects_boundary_pigeonhole(edge_blooms.as_ref(), &lower_needle, true),
+                "false negative on ILIKE pigeonhole check for len={len}"
+            );
+
+            let rows = vec![
+                PayloadRefRow::Chunks(vec![(0, filler_cid)]),
+                PayloadRefRow::Chunks(vec![(0, lc), (0, rc)]),
+            ];
+            let bm_like = search_pack_rows(&pack, &rows, 0, needle, false).unwrap();
+            assert_eq!(bm_like.iter_ones().collect::<Vec<_>>(), vec![1]);
+
+            let bm_ilike = search_pack_rows(&pack, &rows, 0, &lower_needle, true).unwrap();
+            assert_eq!(bm_ilike.iter_ones().collect::<Vec<_>>(), vec![1]);
+        }
+
+        // Verify absent needle with disjoint prefix/suffix trigrams skips EdgeTable completely!
+        let fresh_pack = ChunkPackReader::open(s3.clone()).unwrap();
+        s3.reset_counters();
+        let absent = b"XYZ_NEVER_IN_EDGES_999";
+        let ts = fresh_pack.trigram_section_cached().unwrap();
+        assert!(pack_rejects_boundary_pigeonhole(
+            ts.edge_blooms.as_ref(),
+            absent,
+            false
+        ));
+        let rows = vec![PayloadRefRow::Chunks(vec![
+            (0, cases[0].2),
+            (0, cases[0].3),
+        ])];
+        let bm_abs = search_pack_rows(&fresh_pack, &rows, 0, absent, false).unwrap();
+        assert_eq!(bm_abs.count_ones(), 0);
+        // Only the TS02 trigram section was read (never EdgeTable or data frames)!
+        let counters_after = s3.counters();
+        assert!(counters_after.bytes_requested <= fresh_pack.postscript().trigram_len as u64);
     }
 }

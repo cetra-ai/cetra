@@ -32,7 +32,7 @@ use crate::format::{
 };
 use crate::io::RangeReader;
 use crate::payload::pack::ChunkPackReader;
-use crate::payload::search::search_pack_rows;
+use crate::payload::search::{pack_short_circuits_all, search_pack_rows};
 use crate::payload::{PayloadRefRow, decode_payload_refs};
 use crate::simd::bloom::{BloomIndex, statam_bloom_hash};
 use crate::simd::filter::{FilterOp, filter_f64, filter_i64, filter_i64_between, filter_u32};
@@ -2838,6 +2838,31 @@ impl StatamReader {
         }
 
         for pack_idx in external_pack_idxs {
+            let pack_id = *self
+                .meta
+                .schema_meta
+                .pack_ids
+                .get(pack_idx as usize)
+                .ok_or(StatamError::Corrupt {
+                    reason: "payload ref pack_idx out of bounds",
+                })?;
+            let pack = self.resolve_pack(pack_id)?;
+            if pack_short_circuits_all(&pack, needle, case_insensitive)? {
+                let pack_chunk_count = pack.toc().chunks.len();
+                for &r in &active_chunk_rows {
+                    if let PayloadRefRow::Chunks(chunks) = &refs[r] {
+                        for &(p, cid) in chunks {
+                            if p == pack_idx && (cid as usize) >= pack_chunk_count {
+                                return Err(StatamError::Corrupt {
+                                    reason: "payload ref chunk_id out of pack bounds",
+                                });
+                            }
+                        }
+                    }
+                }
+                continue;
+            }
+
             let mut orig_rows = Vec::new();
             let mut filtered_refs = Vec::new();
             for &r in &active_chunk_rows {
@@ -2854,15 +2879,6 @@ impl StatamReader {
             if filtered_refs.is_empty() {
                 continue;
             }
-            let pack_id = *self
-                .meta
-                .schema_meta
-                .pack_ids
-                .get(pack_idx as usize)
-                .ok_or(StatamError::Corrupt {
-                    reason: "payload ref pack_idx out of bounds",
-                })?;
-            let pack = self.resolve_pack(pack_id)?;
             let bm = search_pack_rows(&pack, &filtered_refs, pack_idx, needle, case_insensitive)?;
             for bit in bm.iter_ones() {
                 let _ = results.set(orig_rows[bit], true);

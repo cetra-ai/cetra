@@ -34,11 +34,13 @@ pub const CHECKSUM_ALG_CRC32C: u8 = 1;
 pub const DEFAULT_TAIL_HINT: u32 = 1 << 20;
 
 /// Target rows per PAX Row Group.
-pub const ROW_GROUP_SIZE: usize = 65_536;
+pub const ROW_GROUP_SIZE: usize = 131_072;
 /// Hard upper bound on rows per PAX Row Group (`RowGroupEntry::row_count`).
-pub const MAX_ROW_GROUP_SIZE: usize = 131_072;
-/// Target rows per Mini-Block.
+pub const MAX_ROW_GROUP_SIZE: usize = 262_144;
+/// Target rows per Mini-Block (`L1Compact`).
 pub const MINI_BLOCK_SIZE: usize = 4_096;
+/// Hard upper bound on rows per Mini-Block (`BlockEntry::row_count`).
+pub const MAX_MINI_BLOCK_SIZE: usize = u16::MAX as usize;
 
 /// Exact serialized byte length of [`FileHeader`].
 pub const FILE_HEADER_LEN: usize = 32;
@@ -153,7 +155,7 @@ pub const MAX_BLOCK_RAW_BYTES: usize = 64 * 1024 * 1024;
 /// Maximum uncompressed pack frame size (16 MiB).
 pub const MAX_FRAME_RAW_BYTES: usize = 16 * 1024 * 1024;
 /// Maximum decompression expansion ratio before rejecting as a zip bomb.
-pub const MAX_DECOMPRESS_RATIO: u64 = 256;
+pub const MAX_DECOMPRESS_RATIO: u64 = 16_384;
 /// Fixed slack bytes added to ratio check for small blocks.
 pub const MAX_DECOMPRESS_SLACK: u64 = 4_096;
 /// Maximum promoted keys per shredded `MapUtf8` column.
@@ -1295,7 +1297,7 @@ impl RowGroupEntry {
 pub struct BlockEntry {
     /// Starting row index relative to the file.
     pub first_row: u32,
-    /// Number of rows in this mini-block (`<= MINI_BLOCK_SIZE`).
+    /// Number of rows in this mini-block (`<= MAX_MINI_BLOCK_SIZE`).
     pub row_count: u16,
     /// Number of null rows (`<= row_count`).
     pub null_count: u16,
@@ -1371,9 +1373,9 @@ impl BlockEntry {
         }
         let row_count = read_u16_le(buf, 4);
         let null_count = read_u16_le(buf, 6);
-        if (row_count as usize) > MINI_BLOCK_SIZE {
+        if (row_count as usize) > MAX_MINI_BLOCK_SIZE {
             return Err(StatamError::BoundsExceeded {
-                reason: "mini-block row_count exceeds MINI_BLOCK_SIZE",
+                reason: "mini-block row_count exceeds MAX_MINI_BLOCK_SIZE",
             });
         }
         if null_count > row_count {
@@ -1995,7 +1997,8 @@ fn decode_data_type(cur: &mut Cursor<'_>, remaining_depth: usize) -> Result<Data
     }
 }
 
-/// Compresses `raw` using `codec` only if `compressed.len() + 16 < raw.len()`.
+/// Compresses `raw` using `codec` only if `compressed.len() + 16 < raw.len()` and
+/// the expansion ratio fits within `MAX_DECOMPRESS_RATIO * stored + MAX_DECOMPRESS_SLACK`.
 ///
 /// Otherwise falls back to `(Codec::None, raw.to_vec())`.
 pub fn compress_guarded(
@@ -2011,7 +2014,11 @@ pub fn compress_guarded(
         Codec::Lz4 => lz4_flex::block::compress(raw),
         Codec::Zstd => compress_zstd(raw, zstd_level)?,
     };
-    if compressed.len().saturating_add(16) < raw.len() {
+    let ratio_ok = (raw.len() as u64)
+        <= (compressed.len() as u64)
+            .saturating_mul(MAX_DECOMPRESS_RATIO)
+            .saturating_add(MAX_DECOMPRESS_SLACK);
+    if compressed.len().saturating_add(16) < raw.len() && ratio_ok {
         Ok((codec, compressed))
     } else {
         Ok((Codec::None, raw.to_vec()))
@@ -2019,7 +2026,7 @@ pub fn compress_guarded(
 }
 
 /// Decompresses `stored` into `raw_len` bytes after enforcing `max_raw` and the
-/// `256x + 4096` expansion ratio guard BEFORE allocating.
+/// `MAX_DECOMPRESS_RATIO * stored + MAX_DECOMPRESS_SLACK` expansion ratio guard BEFORE allocating.
 pub fn decompress_checked(
     stored: &[u8],
     codec: Codec,
@@ -2076,7 +2083,7 @@ pub fn check_decompress_bounds(
         .saturating_add(MAX_DECOMPRESS_SLACK);
     if (raw_len as u64) > max_by_ratio {
         return Err(StatamError::BoundsExceeded {
-            reason: "decompressed ratio exceeds 256x + 4096",
+            reason: "decompressed ratio exceeds MAX_DECOMPRESS_RATIO + slack",
         });
     }
     Ok(())

@@ -32,10 +32,10 @@
 
 Statam defines **two immutable binary file types** backed by an abstract byte-range reader (`RangeReader` trait supporting slices, local files, and simulated/real S3 + exact 1 MiB `ReadCache`):
 
-1. **Data File (`.statam`):** Stores one sorted table slice (`spans` 56 cols, `traces` 30 cols, `scores` 24 cols, or generic `cetra_column::Schema`) in **PAX Row Groups (65,536 rows; 32,768 rows for `Scores`, capped at `MAX_ROW_GROUP_SIZE = 131,072`)** composed of **Mini-Blocks (4,096 rows)**, with Analytics Core columns + shredded sub-columns front-packed at `core_offset`, and a **Self-Sufficient Hot Tail (LZ4-compressible, target ≤ 1 MiB)** containing Postscript, Schema, fixed-width Column Directory, RowGroup & Block Zone Maps, Sort-Key Index, Hot Bloom (`trace_id`), and small File-Level Dictionaries.
-   - `WriteProfile::L0Fast`: 100% self-contained single file; fast single-pass encodings (`Const`, `Rle`, FastLanes `ForBitpack`/`DeltaBitpack`, bounded `Dict`, raw-block `Lz4` on `Plain`/`PayloadRefs`/`WideRow` only, AVX2 SBBF).
-   - `WriteProfile::L1Compact`: Bounded-memory (1-RG streaming, RG0-seeded) full encoding cascade (`Const`, `Rle`, sorted `Dict`, FastLanes `DeltaBitpack`/`ForBitpack`, `Alp`, `Fsst` on small Core strings `<= 16 KiB`, `ShreddedMap`, `Zstd(1)` on `Plain`/nested blocks), adaptive trigram skip indexes, and shared per-`(project_id, day)` immutable **Chunk Packs (`.stpk`)**.
-2. **Chunk Pack (`.stpk`, L1 only):** Immutable content-addressed payload store scoped strictly to one `(project_id, day)`, keyed by **BLAKE3-128** (`[u8; 16]`). Packs unique chunks into 256 KiB raw frames (1 MiB `ReadCache` boundary-guarded for `< 64 KiB` frames), with a compact read-path TOC (LZ4-compressible, 16 B hashes kept in a separate compaction-only section so read-path TOC stays tiny!), adaptive trigram skip section, `head_63 + tail_63` edge table, and optional `DictSection`.
+1. **Data File (`.statam`):** Stores one sorted table slice (`spans` 56 cols, `traces` 30 cols, `scores` 24 cols, or generic `cetra_column::Schema`) in **PAX Row Groups (131,072 rows, capped at `MAX_ROW_GROUP_SIZE = 262,144`)** composed of **Mini-Blocks (32,768 rows in both `L1Compact` and `L0Fast`, capped at `MAX_MINI_BLOCK_SIZE = 65,535`)**, with Core columns tiered at `core_offset` (small analytics -> `start_time`/`created_at` -> `metadata` shredded sub-columns -> ID Core cols -> Tier-2 analytics -> remaining shredded sub-columns -> cold Core cols), and a **Self-Sufficient Hot Tail (LZ4-compressible, target ≤ 1 MiB)** containing Postscript, Schema, fixed-width Column Directory, RowGroup & Block Zone Maps, Sort-Key Index, Hot Bloom (`trace_id`), and small File-Level Dictionaries.
+   - `WriteProfile::L0Fast`: 100% self-contained single file; fast single-pass encodings (`Const`, `Rle` with 64-element early run sample, FastLanes `ForBitpack`/`DeltaBitpack`, bounded `Dict <= 512`, `Plain` for `MapUtf8`, `Lz4` on `>= 64 B` varlen/nested/`Plain`/`PayloadRefs`, `Codec::None` on fixed-width/`ForBitpack`/`DeltaBitpack`/`BitpackBool`/`Rle`/`Dict`, `Zstd(-5)` on `>= 1 KiB` 512 KiB local payload frames, AVX2 SBBF).
+   - `WriteProfile::L1Compact`: Bounded-memory (1-RG streaming, RG0-seeded) full encoding cascade (`Const`, `Rle`, sorted `Dict <= 16,384`, FastLanes `DeltaBitpack`/`ForBitpack`, `Alp`, `Fsst` on small Core strings `<= 16 KiB`, `ShreddedMap`, `Zstd(19)` on all non-inline mini-block encodings and shredded sub-columns), adaptive trigram skip indexes, and shared per-`(project_id, day)` immutable **Chunk Packs (`.stpk`)**.
+2. **Chunk Pack (`.stpk`, L1 only):** Immutable content-addressed payload store scoped strictly to one `(project_id, day)`, keyed by **BLAKE3-128** (`[u8; 16]`). Packs unique chunks into 512 KiB raw `Zstd(9)` frames (guarded on `W4` bypass with single-chunk empty `EdgeTable` entries; 1 MiB `ReadCache` boundary-guarded for `< 32 KiB` frames within `< 8 KiB` of boundary), with a compact read-path TOC (LZ4-compressible, 16 B hashes kept in a separate compaction-only section so read-path TOC stays tiny!), `TS02` trigram skip section (4 KiB edge tail/head blooms + adaptive per-frame blooms), `head_63 + tail_63` edge table, and optional `DictSection`.
 
 ### Public Crate API (`crates/statam`)
 - **Profiles & Options:** `WriteProfile::{L0Fast, L1Compact}`, `WriteOptions`, `TableKind::{Generic, Spans, Traces, Scores}`.
@@ -137,14 +137,14 @@ When `flags & FLAG_ENCRYPTED != 0`: `enc_envelope_offset..enc_envelope_offset + 
    - `48..56`: `trigram_offset: u64` (file-absolute offset of narrow-column trigram section, e.g. `spans.name`; `0` if none)
 
 3. **Row-Group Directory (`rg_dir_off`, `num_row_groups` × **48 B**):**
-   - `0..4`: `first_row: u32`, `4..8`: `row_count: u32` (default `65,536` / `32,768` for `Scores`, `<= MAX_ROW_GROUP_SIZE = 131,072`)
+   - `0..4`: `first_row: u32`, `4..8`: `row_count: u32` (default `131,072`, `<= MAX_ROW_GROUP_SIZE = 262,144`)
    - `8..16`: `core_offset: u64`, `16..20`: `core_len: u32`
    - `20..24`: `wide_len: u32`, `24..32`: `wide_offset: u64` (`wide_offset == core_offset + core_len` — Core + Wide are strictly contiguous!)
    - `32..40`: `l0_payload_offset: u64`, `40..44`: `l0_payload_len: u32` (immediately after `wide_offset + wide_len` in `L0Fast`; `0` in `L1Compact`)
    - `44..48`: `rg_flags: u32` (`0` in v1)
 
 4. **Mini-Block Directory (`block_dir_off`, `total_blocks` × **64 B**):**
-   - `0..4`: `first_row: u32`, `4..6`: `row_count: u16` (`<= 4,096`), `6..8`: `null_count: u16`
+   - `0..4`: `first_row: u32`, `4..6`: `row_count: u16` (`32,768` default in `L1Compact` and `L0Fast`, `<= MAX_MINI_BLOCK_SIZE = 65,535`), `6..8`: `null_count: u16`
    - `8..16`: `offset: u64` (`0` for inline `Const`/`ConstNull`)
    - `16..20`: `stored_len: u32`, `20..24`: `raw_len: u32`
    - `24`: `encoding: u8`, `25`: `codec: u8` (`0=None, 1=Lz4, 2=Zstd`), `26`: `block_flags: u8` (`0x01 HAS_NULLS`, `0x02 ALL_NULL`, `0x04 MIN_MAX_VALID`, `0x08 HAS_NAN`, `0x10 CONST_EMPTY_COLLECTION`), `27`: `min_inline_len: u8` (`0..=16`), `28`: `max_inline_len: u8` (`0..=16`), `29..32`: `reserved: [u8; 3]`
@@ -209,7 +209,7 @@ Every non-inline data block starts with **16 B**: `magic: b"SB"`, `encoding: u8`
 - `len > 256 B`:
   - Leading `[` (after ASCII whitespace): **Structural JSON Array Chunker** cuts at top-level element boundaries once accumulated chunk `>= 256 B`. Splits trailing `]` ONLY when the current accumulated chunk ALREADY has `>= 256 B`. Any single element `> 8,192 B` (or malformed unclosed quote exceeding `8,192 B`) is sub-chunked with **FastCDC (Gear hash, min 512 B, avg 2,048 B, max 8,192 B)**.
   - **Strict non-last length invariant:** NEVER emit a non-last chunk `< 256 B`. When sub-chunking a slice of length `L`, if `L > 8,192 && L <= 8,192 + 256`, cut at `L - 256`; if an element's final remainder is `< 256 B` and more elements follow, carry it into the next element's accumulator. Result: every non-last chunk has `len >= 256 B`, guaranteeing any `<= 64 B` needle spans **at most 2 adjacent chunks**.
-  - **Adversarial `W4` bypass:** If the first 64 chunks of a column have `< 2%` dedup hit rate and `< 1.05×` compressibility, bypass CDC hashing, BLAKE3 dedup, and trigram extraction, and emit direct `Zstd(1)`-guarded frames (auto-falling back to `Codec::None` if incompressible).
+  - **Adversarial `W4` bypass:** If the first 64 chunks of a column have `< 2%` dedup hit rate and `< 1.05×` compressibility, bypass CDC hashing, BLAKE3 dedup, and trigram extraction, omit redundant `EdgeTable` bytes for single-chunk payloads, and emit direct `Zstd`-guarded frames (auto-falling back to `Codec::None` if incompressible).
 - **Content hash:** `BLAKE3-128` (first 16 bytes of `blake3::hash(chunk)`).
 
 ### 5.2 `.stpk` Pack Binary Format
@@ -220,15 +220,20 @@ Every non-inline data block starts with **16 B**: `magic: b"SB"`, `encoding: u8`
   pack_id: [u8; 16], enc_envelope_offset: u64, enc_envelope_len: u32,
   reserved: u32=0, header_crc32c: u32
 
-[Frames 0..F-1]  (target 256 KiB raw; 1 MiB ReadCache boundary guard for < 64 KiB frames:
-  if cur_off % 1MiB leaves < 16 KiB before next 1 MiB boundary and frame < 64 KiB, pad to 1 MiB)
+[Frames 0..F-1]  (target 512 KiB raw Zstd(9); 1 MiB ReadCache boundary guard for < 32 KiB frames:
+  if cur_off % 1MiB leaves < 8 KiB before next 1 MiB boundary and frame < 32 KiB, pad to 1 MiB)
   FrameHeader (16 B): magic b"PF", codec u8 (0=None,1=Lz4,2=Zstd), flags u8 (0x01 USES_DICT),
   raw_len u32, stored_len u32, crc32c u32
 
 [ChunkHashTable] (compaction-only: [ [u8; 16]; chunk_count ], NEVER read by queries!)
-[TrigramSkipSection] (optional: per-frame lowercase ASCII trigram bloom filters;
+[TrigramSkipSection] (optional, `TS02` header:
+  magic: b"TS02", edge_bloom_bytes: u32=4096, reserved: u32=0,
+  edge_tail_bloom: [u8; 4096] (ASCII-lowercased trigrams of every chunk's tail_63),
+  edge_head_bloom: [u8; 4096] (ASCII-lowercased trigrams of every chunk's head_63),
+  followed by per-frame lowercase ASCII trigram bloom filters with `filter_off` relative to section start;
   filter_bytes = clamp(next_pow2(unique_trigrams), 256, min(4096, stored_len / 6));
-  omitted (filter_len = 0) if stored_len < 1024 or bit density > 50%)
+  omitted (filter_len = 0) if stored_len < 1024 or bit density > 50%;
+  readers also support legacy raw format without `TS02` header)
 [EdgeTable] (Zstd-3 compressed: per unique chunk [u8 head_len, head_bytes (<=63), u8 tail_len, tail_bytes (<=63)])
 [DictSection] (optional, 0 B by default)
 [Optional AEAD Envelope] (0 B when !ENCRYPTED)
@@ -259,7 +264,7 @@ Every non-inline data block starts with **16 B**: `magic: b"SB"`, `encoding: u8`
    - **ASCII trigram extraction:** On both build and query, `simd/trigram.rs` performs **exact ASCII-only lowercasing** (`A..Z -> a..z`, non-ASCII untouched). For `ILIKE`, only pure-ASCII trigrams (`b0,b1,b2 < 128`) are queried in the trigram bloom (if none exist or `needle.len() < 3`, skip bloom pruning and scan all unique chunks).
    - **Case `needle.len() <= 64`:**
      - **Step A (Interior matches):** Decompress ONLY frames whose trigram bloom matches all extracted trigrams (`filter_len == 0` frames are always scanned). Scan each unique chunk ONCE via `memchr::memmem` (or AVX2 ASCII lowercase + `memmem` for ASCII `ILIKE`, Unicode `to_lowercase()` for non-ASCII `ILIKE`).
-     - **Step B (Boundary matches — 0 extra frame decompression!):** Check every distinct adjacent chunk pair `(left, right)` in surviving rows using `EdgeTable`'s `tail_63(left) || head_63(right)`. Guarantees **0 false negatives** even when `needle` straddles two chunks whose frames were both skipped in Step A!
+     - **Step B (Boundary matches — Pigeonhole skip + 0 extra frame decompression!):** For `needle.len() >= 5` (`LIKE` or ASCII `ILIKE`), check `edge_tail_bloom` for `needle[0..3]` and `edge_head_bloom` for `needle[len-3..len]`. If BOTH reject (`!tail_may && !head_may`), no match can cross any chunk boundary by the Pigeonhole Principle — skip `EdgeTable` and all boundary pair loops completely! Otherwise, check every distinct adjacent chunk pair `(left, right)` in surviving rows using `EdgeTable`'s `tail_63(left) || head_63(right)`. Guarantees **0 false negatives** even when `needle` straddles two chunks whose frames were both skipped in Step A!
    - **Case `needle.len() > 64`:** Reconstruct payloads for surviving rows (still deduplicating identical chunk-ref sequences) and run exact `memmem`/Unicode search — zero false negatives!
 
 ### 5.4 Airtight Single-Rewrite GDPR Erasure Protocol
@@ -278,9 +283,9 @@ Every non-inline data block starts with **16 B**: `magic: b"SB"`, `encoding: u8`
 
 ## 6. Streaming Writer Memory & Profile Matrix
 
-**Bounded `L1Compact` Streaming:** `StatamWriter` buffers at most **1 Row Group (`65,536` rows; `32,768` for `Scores`)** at a time. RG0 determines the `ShreddedMap` promoted keys (`<= 64`, `>= 5%` presence) and initial sorted file-level dicts. In RG1..G-1, unseen map keys spill to residual (updating `residual_count`), and unseen string values in dict-encoded columns fall back to `Fsst`/`Plain` for that mini-block — guaranteeing bounded O(1 RG) RAM even on multi-hundred-MB compactions.
+**Bounded `L1Compact` Streaming:** `StatamWriter` buffers at most **1 Row Group (`131,072` rows)** at a time. RG0 determines the `ShreddedMap` promoted keys (`<= 64`, `>= 5%` presence) and initial sorted file-level dicts (`<= 16,384` entries). In RG1..G-1, unseen map keys spill to residual (updating `residual_count`), and unseen string values in dict-encoded columns fall back to `Fsst`/`Plain` for that mini-block — guaranteeing bounded O(1 RG) RAM even on multi-hundred-MB compactions.
 
-*(Profile table: `L0Fast` = self-contained, FastLanes + Rle + Const + bounded hash-dict ≤ 4096 + raw-block LZ4 + AVX2 SBBF, no map shredding / no FSST / no trigrams / no `.stpk`; `L1Compact` = full cascade + ALP + sorted Dict + FSST + ShreddedMap + Structural JSON/FastCDC + BLAKE3-128 `.stpk` + adaptive trigram + edge table.)*
+*(Profile table: `L0Fast` = self-contained, FastLanes + Rle (64-element sample) + Const + bounded hash-dict ≤ 512 + Plain MapUtf8 + `Lz4` on `>= 64 B` varlen/nested/`Plain`/`PayloadRefs` + `Zstd(-5)`/`Lz4(<1 KiB)` on 512 KiB local frames + `Codec::None` on fixed-width/For/Delta/BitpackBool/Rle/Dict + AVX2 SBBF, no map shredding / no FSST / no trigrams / no `.stpk`; `L1Compact` = full cascade + ALP + sorted Dict + FSST + ShreddedMap + `Zstd(19)` on all non-inline mini-block encodings and shredded sub-columns + Structural JSON/FastCDC + BLAKE3-128 `.stpk` `Zstd(9)` 512 KiB frames + `TS02` trigram + edge table.)*
 
 ---
 
@@ -292,7 +297,7 @@ Every non-inline data block starts with **16 B**: `magic: b"SB"`, `encoding: u8`
   - `MAX_ROWS_PER_FILE = u32::MAX as u64`
   - `MAX_HOT_TAIL_BYTES = 16 MiB` (writer targets `<= 1 MiB`)
   - `MAX_COLUMNS = 1,024`, `MAX_NESTING_DEPTH = 8`, `MAX_ROW_GROUPS = 262,144`, `MAX_TOTAL_BLOCKS = 4,194,304`
-  - `MAX_BLOCK_RAW_BYTES = 64 MiB`, `MAX_FRAME_RAW_BYTES = 16 MiB`, `MAX_DECOMPRESS_RATIO = 256× + 4,096 B`
+  - `MAX_BLOCK_RAW_BYTES = 64 MiB`, `MAX_FRAME_RAW_BYTES = 16 MiB`, `MAX_DECOMPRESS_RATIO = 16,384× + 4,096 B`
   - `MAX_SHREDDED_KEYS = 64`, `MAX_REF_CHAIN_DEPTH = 15`, `MAX_CHUNKS_PER_ROW = 65,536`
   - `MAX_ROW_PAYLOAD_BYTES = 64 MiB`, `MAX_BATCH_DECODED_BYTES = 256 MiB` (defeats dedup/tail-sharing amplification bombs!)
   - `MAX_DICT_BYTES = 32 MiB`, `MAX_BLOOM_BYTES = 32 MiB`

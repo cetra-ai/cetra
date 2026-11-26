@@ -2,14 +2,14 @@
 //! `ForBitpack`, `DeltaBitpack`, `Alp`, `BitpackBool`, `Plain`).
 
 use cetra_column::{
-    BinaryData, Bitmap, Column, DataType, FlatColumn, FlatData, Interval, RleColumn, ScalarValue,
-    Utf8Data,
+    BinaryData, Bitmap, Column, DataType, FlatColumn, FlatData, Interval, MapData, RleColumn,
+    ScalarValue, Utf8Data,
 };
 
 use crate::codec::alp::{decode_alp_body, encode_alp_body};
 use crate::codec::fsst::{decode_fsst_binary, decode_fsst_utf8, encode_fsst_body};
 use crate::codec::zonemap::{ZoneMapSummary, compute_zone_map};
-use crate::codec::{EncodedMiniBlock, WriteProfile};
+use crate::codec::{EncodedMiniBlock, WriteProfile, preferred_block_codec};
 use crate::format::{
     BLOCK_FLAG_ALL_NULL, BLOCK_FLAG_CONST_EMPTY_COLLECTION, BLOCK_FLAG_HAS_NULLS, BlockEntry,
     Codec, Encoding,
@@ -529,11 +529,6 @@ pub(crate) fn encode_narrow_column_with_locality(
         }
     };
 
-    let plain_codec = match profile {
-        WriteProfile::L0Fast => Codec::Lz4,
-        WriteProfile::L1Compact => Codec::Zstd,
-    };
-
     match dt {
         DataType::Bool => {
             let mut raw = Vec::new();
@@ -541,6 +536,7 @@ pub(crate) fn encode_narrow_column_with_locality(
             if let FlatData::Bool(bm) = flat.data() {
                 raw.extend_from_slice(&bm.to_bytes());
             }
+            let preferred_codec = preferred_block_codec(profile, raw.len(), false);
             Ok(EncodedMiniBlock {
                 encoding: Encoding::BitpackBool,
                 block_flags: zm.block_flags,
@@ -550,7 +546,7 @@ pub(crate) fn encode_narrow_column_with_locality(
                 min_inline: zm.min_inline,
                 max_inline: zm.max_inline,
                 raw_body: raw,
-                preferred_codec: Codec::None,
+                preferred_codec,
             })
         }
         DataType::I64 | DataType::TimestampNs { .. } | DataType::Date => {
@@ -581,15 +577,9 @@ pub(crate) fn encode_narrow_column_with_locality(
                 }
             };
 
-            let mut raw = Vec::new();
-            write_optional_nulls(flat.nulls(), &mut raw);
-            raw.extend_from_slice(&inner_body);
+            let raw = prepend_optional_nulls(flat.nulls(), inner_body);
 
-            let block_codec = if enc == Encoding::Plain {
-                plain_codec
-            } else {
-                Codec::None
-            };
+            let block_codec = preferred_block_codec(profile, raw.len(), enc == Encoding::Plain);
             Ok(EncodedMiniBlock {
                 encoding: enc,
                 block_flags: zm.block_flags,
@@ -608,14 +598,8 @@ pub(crate) fn encode_narrow_column_with_locality(
             } else {
                 (Encoding::Plain, encode_plain_body(flat)?)
             };
-            let mut raw = Vec::new();
-            write_optional_nulls(flat.nulls(), &mut raw);
-            raw.extend_from_slice(&inner_body);
-            let block_codec = if enc == Encoding::Plain {
-                plain_codec
-            } else {
-                Codec::None
-            };
+            let raw = prepend_optional_nulls(flat.nulls(), inner_body);
+            let block_codec = preferred_block_codec(profile, raw.len(), enc == Encoding::Plain);
             Ok(EncodedMiniBlock {
                 encoding: enc,
                 block_flags: zm.block_flags,
@@ -643,14 +627,8 @@ pub(crate) fn encode_narrow_column_with_locality(
             } else {
                 (Encoding::Plain, encode_plain_body(flat)?)
             };
-            let mut raw = Vec::new();
-            write_optional_nulls(flat.nulls(), &mut raw);
-            raw.extend_from_slice(&inner_body);
-            let block_codec = if enc == Encoding::Plain {
-                plain_codec
-            } else {
-                Codec::None
-            };
+            let raw = prepend_optional_nulls(flat.nulls(), inner_body);
+            let block_codec = preferred_block_codec(profile, raw.len(), false);
             Ok(EncodedMiniBlock {
                 encoding: enc,
                 block_flags: zm.block_flags,
@@ -682,14 +660,8 @@ pub(crate) fn encode_narrow_column_with_locality(
             } else {
                 (Encoding::Plain, encode_plain_body(flat)?)
             };
-            let mut raw = Vec::new();
-            write_optional_nulls(flat.nulls(), &mut raw);
-            raw.extend_from_slice(&inner_body);
-            let block_codec = if enc == Encoding::Plain {
-                plain_codec
-            } else {
-                Codec::None
-            };
+            let raw = prepend_optional_nulls(flat.nulls(), inner_body);
+            let block_codec = preferred_block_codec(profile, raw.len(), true);
             Ok(EncodedMiniBlock {
                 encoding: enc,
                 block_flags: zm.block_flags,
@@ -703,9 +675,8 @@ pub(crate) fn encode_narrow_column_with_locality(
             })
         }
         DataType::Interval | DataType::FixedBytes8 | DataType::FixedBytes16 | DataType::Null => {
-            let mut raw = Vec::new();
-            write_optional_nulls(flat.nulls(), &mut raw);
-            raw.extend_from_slice(&encode_plain_body(flat)?);
+            let raw = prepend_optional_nulls(flat.nulls(), encode_plain_body(flat)?);
+            let preferred_codec = preferred_block_codec(profile, raw.len(), false);
             Ok(EncodedMiniBlock {
                 encoding: Encoding::Plain,
                 block_flags: zm.block_flags,
@@ -715,7 +686,7 @@ pub(crate) fn encode_narrow_column_with_locality(
                 min_inline: zm.min_inline,
                 max_inline: zm.max_inline,
                 raw_body: raw,
-                preferred_codec: plain_codec,
+                preferred_codec,
             })
         }
         DataType::List(_) | DataType::MapUtf8 | DataType::Events | DataType::Links => {
@@ -724,6 +695,18 @@ pub(crate) fn encode_narrow_column_with_locality(
             })
         }
     }
+}
+
+#[inline]
+pub(crate) fn prepend_optional_nulls(nulls: Option<&Bitmap>, inner_body: Vec<u8>) -> Vec<u8> {
+    let Some(bm) = nulls else {
+        return inner_body;
+    };
+    let bm_bytes = bm.to_bytes();
+    let mut raw = Vec::with_capacity(bm_bytes.len() + inner_body.len());
+    raw.extend_from_slice(&bm_bytes);
+    raw.extend_from_slice(&inner_body);
+    raw
 }
 
 fn is_monotonic_sample_32(flat: &FlatColumn) -> bool {
@@ -853,6 +836,9 @@ fn try_encode_rle(
             (single, vec![*len as u32])
         }
         Column::Flat(f) => {
+            if profile == WriteProfile::L0Fast && !has_runs_sample_64(f) {
+                return Ok(None);
+            }
             let Some((vals, ends)) = compute_flat_runs(f)? else {
                 return Ok(None);
             };
@@ -886,6 +872,7 @@ fn try_encode_rle(
         block_flags |= BLOCK_FLAG_HAS_NULLS;
     }
 
+    let preferred_codec = preferred_block_codec(profile, raw.len(), false);
     Ok(Some(EncodedMiniBlock {
         encoding: Encoding::Rle,
         block_flags,
@@ -895,7 +882,7 @@ fn try_encode_rle(
         min_inline: zm.min_inline,
         max_inline: zm.max_inline,
         raw_body: raw,
-        preferred_codec: Codec::None,
+        preferred_codec,
     }))
 }
 
@@ -947,6 +934,22 @@ fn encode_rle_inner(
         }
         _ => Ok((Encoding::Plain, encode_plain_body(run_values)?)),
     }
+}
+
+fn has_runs_sample_64(flat: &FlatColumn) -> bool {
+    let sample_n = flat.len().min(64);
+    if sample_n < 4 {
+        return true;
+    }
+    let mut transitions = 0usize;
+    let mut run_start = 0usize;
+    for i in 1..sample_n {
+        if !flat_rows_equal(flat, run_start, i) {
+            transitions += 1;
+            run_start = i;
+        }
+    }
+    transitions * 4 <= sample_n
 }
 
 fn compute_flat_runs(flat: &FlatColumn) -> Result<Option<(FlatColumn, Vec<u32>)>, StatamError> {
@@ -1234,6 +1237,47 @@ pub(crate) fn encode_plain_body(flat: &FlatColumn) -> Result<Vec<u8>, StatamErro
                 out.extend_from_slice(&off.to_le_bytes());
             }
             out.extend_from_slice(b.bytes());
+        }
+        FlatData::MapUtf8(m) => {
+            let offsets = m.offsets();
+            let entry_count = m.entry_count();
+            let keys = m.keys();
+            let vals = m.values();
+            out.reserve(
+                offsets.len() * 4
+                    + if entry_count > 0 {
+                        5 + keys.offsets().len() * 4
+                            + keys.bytes().len()
+                            + vals.offsets().len() * 4
+                            + vals.bytes().len()
+                    } else {
+                        0
+                    },
+            );
+            for &off in offsets {
+                out.extend_from_slice(&off.to_le_bytes());
+            }
+            if entry_count > 0 {
+                if let Some(vn) = m.value_nulls() {
+                    out.push(1);
+                    out.extend_from_slice(&vn.to_bytes());
+                } else {
+                    out.push(0);
+                }
+                let keys_bytes_len =
+                    u32::try_from(keys.bytes().len()).map_err(|_| StatamError::BoundsExceeded {
+                        reason: "Plain MapUtf8 keys bytes exceeds u32::MAX",
+                    })?;
+                out.extend_from_slice(&keys_bytes_len.to_le_bytes());
+                for &off in keys.offsets() {
+                    out.extend_from_slice(&off.to_le_bytes());
+                }
+                out.extend_from_slice(keys.bytes());
+                for &off in vals.offsets() {
+                    out.extend_from_slice(&off.to_le_bytes());
+                }
+                out.extend_from_slice(vals.bytes());
+            }
         }
         _ => {
             return Err(StatamError::SchemaMismatch {
@@ -1556,6 +1600,7 @@ pub(crate) fn decode_inner_data(
             let (offsets, data_bytes) = decode_plain_varlen(body, row_count)?;
             FlatData::Binary(BinaryData::try_new(offsets, data_bytes)?)
         }
+        (Encoding::Plain, DataType::MapUtf8) => decode_plain_map(body, row_count)?,
         _ => {
             return Err(StatamError::Corrupt {
                 reason: "incompatible encoding for DataType",
@@ -1614,6 +1659,134 @@ fn decode_plain_varlen(body: &[u8], row_count: usize) -> Result<(Vec<u32>, Vec<u
     }
     let data_bytes = body[offsets_bytes..].to_vec();
     Ok((offsets, data_bytes))
+}
+
+fn decode_plain_map(body: &[u8], row_count: usize) -> Result<FlatData, StatamError> {
+    let offsets_count = row_count
+        .checked_add(1)
+        .ok_or(StatamError::BoundsExceeded {
+            reason: "plain map offsets count overflow",
+        })?;
+    let offsets_bytes = check_mul(offsets_count, 4, "plain map offsets size overflow")?;
+    if body.len() < offsets_bytes {
+        return Err(StatamError::Corrupt {
+            reason: "truncated plain map offsets",
+        });
+    }
+    let mut offsets = Vec::with_capacity(offsets_count);
+    let mut prev = 0u32;
+    for (idx, &chunk) in body[..offsets_bytes].as_chunks::<4>().0.iter().enumerate() {
+        let v = u32::from_le_bytes(chunk);
+        if (idx == 0 && v != 0) || v < prev {
+            return Err(StatamError::Corrupt {
+                reason: "non-monotonic plain map offsets",
+            });
+        }
+        prev = v;
+        offsets.push(v);
+    }
+    let entry_count = prev as usize;
+    if entry_count > MAX_BLOCK_RAW_BYTES {
+        return Err(StatamError::BoundsExceeded {
+            reason: "plain map entry_count exceeds MAX_BLOCK_RAW_BYTES",
+        });
+    }
+    let rest = &body[offsets_bytes..];
+    if entry_count == 0 {
+        if !rest.is_empty() {
+            return Err(StatamError::Corrupt {
+                reason: "trailing bytes in empty plain map",
+            });
+        }
+        let map = MapData::try_new(offsets, Utf8Data::empty(), Utf8Data::empty(), None)?;
+        return Ok(FlatData::MapUtf8(Box::new(map)));
+    }
+
+    let Some(&has_vn) = rest.first() else {
+        return Err(StatamError::Corrupt {
+            reason: "truncated plain map value_nulls flag",
+        });
+    };
+    let rest = &rest[1..];
+    let (val_nulls, rest) = match has_vn {
+        0 => (None, rest),
+        1 => {
+            let vn_bytes = entry_count.div_ceil(8);
+            if rest.len() < vn_bytes {
+                return Err(StatamError::Corrupt {
+                    reason: "truncated plain map value_nulls bitmap",
+                });
+            }
+            let bm = Bitmap::from_bytes(&rest[..vn_bytes], entry_count)?;
+            (Some(bm), &rest[vn_bytes..])
+        }
+        _ => {
+            return Err(StatamError::Corrupt {
+                reason: "invalid plain map value_nulls flag",
+            });
+        }
+    };
+
+    if rest.len() < 4 {
+        return Err(StatamError::Corrupt {
+            reason: "truncated plain map keys_bytes_len",
+        });
+    }
+    let keys_bytes_len = u32::from_le_bytes([rest[0], rest[1], rest[2], rest[3]]) as usize;
+    if keys_bytes_len > MAX_BLOCK_RAW_BYTES {
+        return Err(StatamError::BoundsExceeded {
+            reason: "plain map keys_bytes_len exceeds MAX_BLOCK_RAW_BYTES",
+        });
+    }
+    let rest = &rest[4..];
+
+    let kv_offsets_count = entry_count
+        .checked_add(1)
+        .ok_or(StatamError::BoundsExceeded {
+            reason: "plain map kv offsets overflow",
+        })?;
+    let kv_offsets_bytes = check_mul(kv_offsets_count, 4, "plain map kv offsets size overflow")?;
+    let keys_total =
+        kv_offsets_bytes
+            .checked_add(keys_bytes_len)
+            .ok_or(StatamError::BoundsExceeded {
+                reason: "plain map keys section overflow",
+            })?;
+    let min_needed =
+        keys_total
+            .checked_add(kv_offsets_bytes)
+            .ok_or(StatamError::BoundsExceeded {
+                reason: "plain map total payload overflow",
+            })?;
+    if rest.len() < min_needed {
+        return Err(StatamError::Corrupt {
+            reason: "truncated plain map keys/values payload",
+        });
+    }
+
+    let mut key_offsets = Vec::with_capacity(kv_offsets_count);
+    for &chunk in rest[..kv_offsets_bytes].as_chunks::<4>().0 {
+        key_offsets.push(u32::from_le_bytes(chunk));
+    }
+    let key_bytes = rest[kv_offsets_bytes..keys_total].to_vec();
+    let keys = Utf8Data::try_new(key_offsets, key_bytes)?;
+
+    let v_rest = &rest[keys_total..];
+    let val_bytes_len = v_rest.len() - kv_offsets_bytes;
+    if val_bytes_len > MAX_BLOCK_RAW_BYTES {
+        return Err(StatamError::BoundsExceeded {
+            reason: "plain map values exceed MAX_BLOCK_RAW_BYTES",
+        });
+    }
+    let mut val_offsets = Vec::with_capacity(kv_offsets_count);
+    for &chunk in v_rest[..kv_offsets_bytes].as_chunks::<4>().0 {
+        val_offsets.push(u32::from_le_bytes(chunk));
+    }
+    let val_bytes = v_rest[kv_offsets_bytes..].to_vec();
+    let vals = Utf8Data::try_new(val_offsets, val_bytes)?;
+
+    let map = MapData::try_new(offsets, keys, vals, val_nulls)?;
+    Ok(FlatData::MapUtf8(Box::new(map)))
 }
 
 fn decode_for_i64_body(

@@ -13,7 +13,9 @@ use cetra_column::{
 use crate::StatamError;
 use crate::codec::dict::{DictBuilder, DictValueKind, FileDict};
 use crate::codec::nested::{encode_shredded_subcol_with_codec, select_shredded_keys, shred_map};
-use crate::codec::{EncodedMiniBlock, WriteProfile, encode_mini_block_with_locality};
+use crate::codec::{
+    EncodedMiniBlock, WriteProfile, encode_dict_codes_precomputed, encode_mini_block_with_locality,
+};
 use crate::format::{
     BLOCK_ENTRY_LEN, BLOCK_FLAG_ALL_NULL, BLOCK_FLAG_HAS_NULLS, BlockEntry, CHECKSUM_ALG_CRC32C,
     COL_FLAG_BLOOM_IN_HOT_TAIL, COL_FLAG_DICT_IN_HOT_TAIL, COL_FLAG_DICT_SORTED,
@@ -22,8 +24,8 @@ use crate::format::{
     DEFAULT_TAIL_HINT, Encoding, FILE_HEADER_LEN, FLAG_HAS_PACK_REFS, FLAG_HAS_SHREDDED_MAPS,
     FLAG_HAS_TRIGRAM_INDEX, FLAG_HOT_TAIL_LZ4, FLAG_L1_COMPACT, FORMAT_VERSION, FileHeader,
     FileSchemaMeta, LAZY_INDEX_ENTRY_LEN, LazyIndexEntry, LazyIndexKind, LocalityGroup,
-    MAX_BLOCK_RAW_BYTES, MAX_COLUMNS, MAX_FRAME_RAW_BYTES, MAX_HOT_TAIL_BYTES, MAX_PACK_REFS,
-    MAX_ROW_GROUP_SIZE, MAX_ROW_GROUPS, MAX_ROWS_PER_FILE, MAX_TOTAL_BLOCKS, MINI_BLOCK_SIZE,
+    MAX_BLOCK_RAW_BYTES, MAX_COLUMNS, MAX_FRAME_RAW_BYTES, MAX_HOT_TAIL_BYTES, MAX_MINI_BLOCK_SIZE,
+    MAX_PACK_REFS, MAX_ROW_GROUP_SIZE, MAX_ROW_GROUPS, MAX_ROWS_PER_FILE, MAX_TOTAL_BLOCKS,
     POSTSCRIPT_LEN, Postscript, ROW_GROUP_ENTRY_LEN, ROW_GROUP_SIZE, RowGroupEntry, ShreddedMapDir,
     ShreddedMapKeyEntry, TableKind, encode_schema, write_framed_block, write_framed_pack_frame,
 };
@@ -48,8 +50,8 @@ const MIN_NARROW_TRIGRAM_STORED_BYTES: usize = 2560;
 const HOT_DICT_MAX_BYTES: usize = 8 * 1024;
 /// Target SBBF false-positive probability.
 const BLOOM_FPP: f64 = 0.01;
-/// Target uncompressed bytes per L0 local payload `PF` frame (256 KiB).
-const L0_PAYLOAD_FRAME_TARGET_BYTES: usize = 256 * 1024;
+/// Target uncompressed bytes per L0 local payload `PF` frame (512 KiB).
+const L0_PAYLOAD_FRAME_TARGET_BYTES: usize = 512 * 1024;
 /// Magic bytes for the local L0 payload directory inside `l0_payload_offset`.
 pub(crate) const L0_PAYLOAD_DIR_MAGIC: [u8; 4] = *b"L0P1";
 /// Magic bytes for a per-block narrow-column trigram section.
@@ -65,17 +67,25 @@ type PrechunkedRefs<'a> = (
     &'a HashMap<(usize, u32), Vec<u8>>,
 );
 
-/// Hot Analytics `Core` columns written FIRST at `core_offset` so every RG's analytics
-/// columns + shredded sub-columns pack inside the first 1 MiB `ReadCache` block.
-const HOT_ANALYTICS_CORE_COLS: &[&str] = &[
-    "start_time",
-    "created_at",
+/// Tier-1A small Hot Analytics `Core` columns written FIRST at `core_offset`.
+const HOT_ANALYTICS_TIER1_SMALL_COLS: &[&str] = &[
     "status",
     "span_kind",
     "model",
     "name",
     "cost_total",
     "total_tokens",
+    "data_type",
+    "value_num",
+    "value_str",
+];
+
+/// Tier-1B Timestamp `Core` columns placed immediately before `metadata` shredded sub-columns
+/// so `start_time`/`created_at`, `metadata.*`, and `trace_id` pack contiguously in the first block.
+const HOT_ANALYTICS_TIER1_TIME_COLS: &[&str] = &["start_time", "created_at"];
+
+/// Tier-2 Hot Analytics `Core` columns written immediately after `ID_CORE_COLS`.
+const HOT_ANALYTICS_TIER2_COLS: &[&str] = &[
     "duration_ns",
     "environment",
     "provider",
@@ -83,14 +93,16 @@ const HOT_ANALYTICS_CORE_COLS: &[&str] = &[
     "release",
 ];
 
-/// High-frequency ID / trailing `Core` columns written at the back of `Core`.
+/// High-frequency ID `Core` columns written immediately after Tier-2 (before cold `Core` cols
+/// and non-`metadata` shredded sub-columns) so `map_key_lookup`, `top_k_list`, and point lookups
+/// stay contiguous near the front of each Row Group.
 const ID_CORE_COLS: &[&str] = &[
     "trace_id",
     "span_id",
+    "score_id",
     "parent_span_id",
     "user_id",
     "session_id",
-    "score_id",
     "end_time",
     "ingest_time",
 ];
@@ -163,11 +175,11 @@ pub struct WriteOptions {
     pub payload_cols: Vec<String>,
     /// Narrow `Utf8` column names receiving per-block `TrigramBloom` in `L1Compact` when not dict-encoded.
     pub narrow_trigram_cols: Vec<String>,
-    /// Rows per PAX Row Group (default: `65_536` for Spans/Traces/Generic, `32_768` for Scores).
+    /// Rows per PAX Row Group (default: `131_072` for Spans/Traces/Generic, `65_536` for Scores).
     pub row_group_size: usize,
-    /// Rows per Mini-Block (default: `MINI_BLOCK_SIZE = 4_096`).
+    /// Rows per Mini-Block (default: `4_096` for `L1Compact`, `16_384` for `L0Fast`).
     pub mini_block_size: usize,
-    /// Zstd compression level when `profile == L1Compact` (default: `1`).
+    /// Zstd compression level (`-3` for `L0Fast`, `3` for `L1Compact`).
     pub zstd_level: i32,
     /// Whether to LZ4-compress the Hot Tail body when smaller (default: `true`).
     pub compress_hot_tail_lz4: bool,
@@ -212,9 +224,11 @@ impl WriteOptions {
             (TableKind::Spans, WriteProfile::L1Compact) => vec!["name".to_owned()],
             _ => Vec::new(),
         };
-        let row_group_size = match table_kind {
-            TableKind::Scores => 32_768,
-            TableKind::Spans | TableKind::Traces | TableKind::Generic => ROW_GROUP_SIZE,
+        let row_group_size = ROW_GROUP_SIZE;
+        let mini_block_size = 32_768;
+        let zstd_level = match profile {
+            WriteProfile::L0Fast => -5,
+            WriteProfile::L1Compact => 19,
         };
 
         Self {
@@ -226,8 +240,8 @@ impl WriteOptions {
             payload_cols,
             narrow_trigram_cols,
             row_group_size,
-            mini_block_size: MINI_BLOCK_SIZE,
-            zstd_level: 1,
+            mini_block_size,
+            zstd_level,
             compress_hot_tail_lz4: true,
             pack_id: None,
         }
@@ -278,6 +292,10 @@ pub struct StatamWriter<'a> {
     // Bounded 1-RG input buffer (`<= row_group_size` rows).
     rg_buf_cols: Vec<Vec<Column>>,
     rg_buf_rows: usize,
+    // Zero-copy L0Fast ExternalPayload accumulators for the current partial RG.
+    pending_l0_local: LocalL0PayloadBuilder,
+    pending_l0_mbs: HashMap<usize, Vec<(u16, u16, Vec<u8>)>>,
+    pending_l0_partial: HashMap<usize, Vec<PayloadRefRow>>,
 
     // RG0-initialized file-level schema/dict state.
     rg0_initialized: bool,
@@ -304,6 +322,8 @@ pub struct StatamWriter<'a> {
     narrow_trigrams: HashMap<usize, Vec<Option<Vec<u8>>>>,
     // Highest chunk_id observed per logical payload col for dedup hit tracking.
     max_chunk_id_seen: HashMap<usize, u32>,
+    // Precomputed RG0 FileDict codes + column null bitmaps from `init_rg0` to avoid double-hashing.
+    rg0_dict_codes: HashMap<usize, (Vec<u32>, Option<cetra_column::Bitmap>)>,
 }
 
 struct PhysColWriteState {
@@ -350,9 +370,9 @@ impl<'a> StatamWriter<'a> {
                 reason: "row_group_size must be in 1..=MAX_ROW_GROUP_SIZE",
             });
         }
-        if options.mini_block_size == 0 || options.mini_block_size > MINI_BLOCK_SIZE {
+        if options.mini_block_size == 0 || options.mini_block_size > MAX_MINI_BLOCK_SIZE {
             return Err(StatamError::BoundsExceeded {
-                reason: "mini_block_size must be in 1..=MINI_BLOCK_SIZE",
+                reason: "mini_block_size must be in 1..=MAX_MINI_BLOCK_SIZE",
             });
         }
         if options.sort_cols.len() > u8::MAX as usize || options.sort_cols.len() > fields.len() {
@@ -430,6 +450,7 @@ impl<'a> StatamWriter<'a> {
         };
 
         let num_logical = fields.len();
+        let pending_l0_local = LocalL0PayloadBuilder::new(options.zstd_level);
         Ok(Self {
             schema,
             options,
@@ -442,6 +463,9 @@ impl<'a> StatamWriter<'a> {
             uses_external_pack: false,
             rg_buf_cols: vec![Vec::new(); num_logical],
             rg_buf_rows: 0,
+            pending_l0_local,
+            pending_l0_mbs: HashMap::new(),
+            pending_l0_partial: HashMap::new(),
             rg0_initialized: false,
             shredded_maps: Vec::new(),
             logical_to_shredded: HashMap::new(),
@@ -459,6 +483,7 @@ impl<'a> StatamWriter<'a> {
             bypass_detectors: HashMap::new(),
             narrow_trigrams,
             max_chunk_id_seen: HashMap::new(),
+            rg0_dict_codes: HashMap::new(),
         })
     }
 
@@ -496,30 +521,34 @@ impl<'a> StatamWriter<'a> {
 
         let total = active_batch.raw_len();
         let rg_size = self.options.row_group_size;
+        let is_l0_fast = self.options.profile == WriteProfile::L0Fast;
         let mut offset = 0usize;
         while offset < total {
             if self.rg_buf_rows == 0 && total - offset >= rg_size {
-                if offset == 0 && total == rg_size {
-                    self.flush_rg_columns(active_batch.columns(), rg_size, None)?;
-                } else {
-                    let mut rg_cols = Vec::with_capacity(active_batch.columns().len());
-                    for col in active_batch.columns() {
-                        rg_cols.push(col.slice(offset, rg_size)?);
+                if is_l0_fast {
+                    for (col_idx, col) in active_batch.columns().iter().enumerate() {
+                        if self.logical_locality[col_idx] == LocalityGroup::ExternalPayload {
+                            self.append_l0_payload_slice(col_idx, col, offset, rg_size)?;
+                        }
                     }
-                    self.flush_rg_columns(&rg_cols, rg_size, None)?;
                 }
+                self.flush_rg_columns(active_batch.columns(), offset, rg_size, None)?;
                 offset += rg_size;
                 continue;
             }
             let space = rg_size - self.rg_buf_rows;
             let take = (total - offset).min(space);
             for (col_idx, col) in active_batch.columns().iter().enumerate() {
-                let piece = if offset == 0 && take == total {
-                    col.clone()
+                if is_l0_fast && self.logical_locality[col_idx] == LocalityGroup::ExternalPayload {
+                    self.append_l0_payload_slice(col_idx, col, offset, take)?;
                 } else {
-                    col.slice(offset, take)?
-                };
-                self.rg_buf_cols[col_idx].push(piece);
+                    let piece = if offset == 0 && take == total {
+                        col.clone()
+                    } else {
+                        col.slice(offset, take)?
+                    };
+                    self.rg_buf_cols[col_idx].push(piece);
+                }
             }
             self.rg_buf_rows += take;
             offset += take;
@@ -527,6 +556,163 @@ impl<'a> StatamWriter<'a> {
             if self.rg_buf_rows == rg_size {
                 self.flush_row_group()?;
             }
+        }
+
+        Ok(())
+    }
+
+    fn append_l0_payload_slice(
+        &mut self,
+        cidx: usize,
+        col: &Column,
+        offset: usize,
+        take: usize,
+    ) -> Result<(), StatamError> {
+        if take == 0 {
+            return Ok(());
+        }
+        let mb_size = self.options.mini_block_size;
+
+        if let Column::Const { value, .. } = col
+            && value.is_null()
+        {
+            let mut pos = 0usize;
+            {
+                let partial = self.pending_l0_partial.entry(cidx).or_default();
+                if !partial.is_empty() {
+                    let fill = (mb_size - partial.len()).min(take);
+                    partial.resize(partial.len() + fill, PayloadRefRow::Null);
+                    pos += fill;
+                    if partial.len() == mb_size {
+                        let null_count_usize = partial
+                            .iter()
+                            .filter(|r| matches!(r, PayloadRefRow::Null))
+                            .count();
+                        let null_count = u16::try_from(null_count_usize).unwrap_or(u16::MAX);
+                        let raw_body = if null_count_usize == mb_size {
+                            Vec::new()
+                        } else {
+                            let mut rb = Vec::new();
+                            encode_payload_refs_l0_direct(partial, &mut rb)?;
+                            rb
+                        };
+                        self.pending_l0_mbs.entry(cidx).or_default().push((
+                            mb_size as u16,
+                            null_count,
+                            raw_body,
+                        ));
+                        partial.clear();
+                    }
+                }
+            }
+            while take - pos >= mb_size {
+                let mb_u16 = mb_size as u16;
+                self.pending_l0_mbs
+                    .entry(cidx)
+                    .or_default()
+                    .push((mb_u16, mb_u16, Vec::new()));
+                pos += mb_size;
+            }
+            if pos < take {
+                let partial = self.pending_l0_partial.entry(cidx).or_default();
+                partial.resize(partial.len() + (take - pos), PayloadRefRow::Null);
+            }
+            return Ok(());
+        }
+
+        let fc = as_flat_cow(col)?;
+        let FlatData::Utf8(u) = fc.data() else {
+            return Err(StatamError::SchemaMismatch {
+                reason: "ExternalPayload column must be DataType::Utf8",
+            });
+        };
+        let col_nulls = fc.nulls();
+        let mut pos = 0usize;
+
+        let push_row_ref = |r: usize,
+                            local: &mut LocalL0PayloadBuilder,
+                            dst: &mut Vec<PayloadRefRow>|
+         -> Result<(), StatamError> {
+            if col_nulls.is_some_and(|bm| !bm.get(r)) {
+                dst.push(PayloadRefRow::Null);
+                return Ok(());
+            }
+            let bytes = u.get(r).unwrap_or("").as_bytes();
+            if bytes.len() <= INLINE_PAYLOAD_THRESHOLD {
+                dst.push(PayloadRefRow::Inline(bytes.to_vec()));
+            } else {
+                let mut refs = Vec::new();
+                for slice in bytes.chunks(MAX_FRAME_RAW_BYTES) {
+                    let cid = local.add_chunk(slice)?;
+                    refs.push((L0_LOCAL_PACK_IDX, cid));
+                }
+                dst.push(PayloadRefRow::Chunks(refs));
+            }
+            Ok(())
+        };
+
+        let has_partial = self
+            .pending_l0_partial
+            .get(&cidx)
+            .is_some_and(|p| !p.is_empty());
+        if has_partial {
+            let mut partial = self.pending_l0_partial.remove(&cidx).unwrap_or_default();
+            let fill = (mb_size - partial.len()).min(take);
+            for r in offset..offset + fill {
+                push_row_ref(r, &mut self.pending_l0_local, &mut partial)?;
+            }
+            pos += fill;
+            if partial.len() == mb_size {
+                let null_count_usize = partial
+                    .iter()
+                    .filter(|r| matches!(r, PayloadRefRow::Null))
+                    .count();
+                let null_count = u16::try_from(null_count_usize).unwrap_or(u16::MAX);
+                let raw_body = if null_count_usize == mb_size {
+                    Vec::new()
+                } else {
+                    let mut rb = Vec::new();
+                    encode_payload_refs_l0_direct(&partial, &mut rb)?;
+                    rb
+                };
+                self.pending_l0_mbs.entry(cidx).or_default().push((
+                    mb_size as u16,
+                    null_count,
+                    raw_body,
+                ));
+                partial.clear();
+            }
+            if !partial.is_empty() {
+                self.pending_l0_partial.insert(cidx, partial);
+            }
+        }
+
+        while take - pos >= mb_size {
+            let mut raw_body = Vec::new();
+            let null_count = encode_payload_refs_l0_from_utf8(
+                u,
+                col_nulls,
+                offset + pos,
+                mb_size,
+                INLINE_PAYLOAD_THRESHOLD,
+                L0_LOCAL_PACK_IDX,
+                |slice| self.pending_l0_local.add_chunk(slice),
+                &mut raw_body,
+            )?;
+            self.pending_l0_mbs.entry(cidx).or_default().push((
+                mb_size as u16,
+                null_count,
+                raw_body,
+            ));
+            pos += mb_size;
+        }
+
+        if pos < take {
+            let mut partial = self.pending_l0_partial.remove(&cidx).unwrap_or_default();
+            for r in offset + pos..offset + take {
+                push_row_ref(r, &mut self.pending_l0_local, &mut partial)?;
+            }
+            self.pending_l0_partial.insert(cidx, partial);
         }
 
         Ok(())
@@ -988,19 +1174,27 @@ impl<'a> StatamWriter<'a> {
         // Concatenate each logical column's buffered slices for this RG.
         let mut rg_cols = Vec::with_capacity(self.schema.len());
         for (cidx, pieces) in self.rg_buf_cols.iter_mut().enumerate() {
-            let dt = &self.schema.fields()[cidx].data_type;
-            let combined = concat_rg_column(dt, pieces, rg_rows)?;
-            pieces.clear();
-            rg_cols.push(combined);
+            if pieces.is_empty()
+                && self.options.profile == WriteProfile::L0Fast
+                && self.logical_locality[cidx] == LocalityGroup::ExternalPayload
+            {
+                rg_cols.push(Column::Flat(FlatColumn::empty(&DataType::Utf8)));
+            } else {
+                let dt = &self.schema.fields()[cidx].data_type;
+                let combined = concat_rg_column(dt, pieces, rg_rows)?;
+                pieces.clear();
+                rg_cols.push(combined);
+            }
         }
         self.rg_buf_rows = 0;
 
-        self.flush_rg_columns(&rg_cols, rg_rows, prechunked)
+        self.flush_rg_columns(&rg_cols, 0, rg_rows, prechunked)
     }
 
     fn flush_rg_columns(
         &mut self,
         rg_cols: &[Column],
+        base_row_off: usize,
         rg_rows: usize,
         prechunked: Option<PrechunkedRefs<'_>>,
     ) -> Result<(), StatamError> {
@@ -1027,7 +1221,8 @@ impl<'a> StatamWriter<'a> {
         // Build per-RG SBBF bloom filters immediately (never accumulate file-wide Vec<u64>).
         let bloom_indices: Vec<usize> = self.bloom_col_set.iter().copied().collect();
         for cidx in bloom_indices {
-            let (sbbf, had_any) = build_rg_sbbf(&rg_cols[cidx], self.options.profile)?;
+            let (sbbf, had_any) =
+                build_rg_sbbf(&rg_cols[cidx], base_row_off, rg_rows, self.options.profile)?;
             if had_any {
                 self.bloom_has_values.insert(cidx, true);
             }
@@ -1038,7 +1233,7 @@ impl<'a> StatamWriter<'a> {
 
         // RG0 initialization: promote ShreddedMap keys (L1Compact) & seed FileDicts.
         if !self.rg0_initialized {
-            self.init_rg0(rg_cols)?;
+            self.init_rg0(rg_cols, base_row_off, rg_rows)?;
             self.rg0_initialized = true;
         }
 
@@ -1050,24 +1245,29 @@ impl<'a> StatamWriter<'a> {
 
         let mut core_buf = Vec::new();
         let mut wide_buf = Vec::new();
-        let mut l0_local_builder = LocalL0PayloadBuilder::default();
+        let mut l0_local_builder = std::mem::replace(
+            &mut self.pending_l0_local,
+            LocalL0PayloadBuilder::new(zstd_level),
+        );
 
         let core_offset = self.cur_data_offset;
         let mb_size = self.options.mini_block_size;
         let schema = Arc::clone(&self.schema);
         let fields = schema.fields();
 
-        // Phase A1: Hot Analytics Core columns written FIRST at `core_offset`.
+        // Tier 1A: Small Hot Analytics Core filter/agg columns written FIRST at `core_offset`.
         for (cidx, rg_col) in rg_cols.iter().enumerate() {
             if self.logical_locality[cidx] != LocalityGroup::Core {
                 continue;
             }
-            if !HOT_ANALYTICS_CORE_COLS.contains(&fields[cidx].name.as_str()) {
+            if !HOT_ANALYTICS_TIER1_SMALL_COLS.contains(&fields[cidx].name.as_str()) {
                 continue;
             }
             self.encode_rg_scalar_or_nested_col(
                 cidx,
                 rg_col,
+                base_row_off,
+                rg_rows,
                 first_row_u32,
                 mb_size,
                 core_offset,
@@ -1076,112 +1276,43 @@ impl<'a> StatamWriter<'a> {
             )?;
         }
 
-        // Phase B: ShreddedMap sub-columns (in Analytics Core front!) and deferred WideRow residuals.
-        let num_shredded = self.shredded_maps.len();
+        // Tier 1B: Hot timestamp columns immediately before `metadata` shredded sub-columns.
+        for (cidx, rg_col) in rg_cols.iter().enumerate() {
+            if self.logical_locality[cidx] != LocalityGroup::Core {
+                continue;
+            }
+            if !HOT_ANALYTICS_TIER1_TIME_COLS.contains(&fields[cidx].name.as_str()) {
+                continue;
+            }
+            self.encode_rg_scalar_or_nested_col(
+                cidx,
+                rg_col,
+                base_row_off,
+                rg_rows,
+                first_row_u32,
+                mb_size,
+                core_offset,
+                zstd_level,
+                &mut core_buf,
+            )?;
+        }
+
+        // Tier 2 (Phase B1): `metadata` shredded sub-columns right inside block #0 (< 1 MiB).
         let mut deferred_wide_residuals: Vec<(usize, Vec<EncodedMiniBlock>, Vec<u16>)> = Vec::new();
-        for s_idx in 0..num_shredded {
-            let logical_col = self.shredded_maps[s_idx].logical_col_idx as usize;
-            let promoted_keys: Vec<String> = self.shredded_maps[s_idx]
-                .keys
-                .iter()
-                .map(|k| k.key.clone())
-                .collect();
-            let sub_col_indices: Vec<usize> = self.shredded_maps[s_idx]
-                .keys
-                .iter()
-                .map(|k| k.sub_col_idx as usize)
-                .collect();
+        self.encode_shredded_maps_group(
+            rg_cols,
+            base_row_off,
+            rg_rows,
+            first_row_u32,
+            mb_size,
+            core_offset,
+            zstd_level,
+            true,
+            &mut core_buf,
+            &mut deferred_wide_residuals,
+        )?;
 
-            let mut mb_residuals = Vec::new();
-            let mut mb_row_counts = Vec::new();
-
-            let mut row_off = 0usize;
-            while row_off < rg_rows {
-                let mb_len = (rg_rows - row_off).min(mb_size);
-                let mb_first_row = first_row_u32 + row_off as u32;
-                let sliced_owned;
-                let sliced = if row_off == 0 && mb_len == rg_rows {
-                    &rg_cols[logical_col]
-                } else {
-                    sliced_owned = rg_cols[logical_col].slice(row_off, mb_len)?;
-                    &sliced_owned
-                };
-                let flat = as_flat_cow(sliced)?;
-                let shredded = shred_map(&flat, &promoted_keys)?;
-
-                for (k_idx, &sub_pidx) in sub_col_indices.iter().enumerate() {
-                    self.shredded_maps[s_idx].keys[k_idx].residual_count =
-                        self.shredded_maps[s_idx].keys[k_idx]
-                            .residual_count
-                            .saturating_add(shredded.residual_counts[k_idx]);
-
-                    let (sub_codec, sub_raw) = encode_shredded_subcol_with_codec(
-                        &shredded.sub_cols[k_idx],
-                        self.options.profile,
-                    )?;
-                    let blk_off = core_offset + core_buf.len() as u64;
-                    let info = write_framed_block(
-                        Encoding::ShreddedMap,
-                        &sub_raw,
-                        sub_codec,
-                        zstd_level,
-                        &mut core_buf,
-                    )?;
-                    self.phys_blocks[sub_pidx].push(BlockEntry {
-                        first_row: mb_first_row,
-                        row_count: mb_len as u16,
-                        null_count: 0,
-                        offset: blk_off,
-                        stored_len: info.stored_len,
-                        raw_len: info.raw_len,
-                        encoding: Encoding::ShreddedMap,
-                        codec: info.codec,
-                        block_flags: 0,
-                        min_inline_len: 0,
-                        max_inline_len: 0,
-                        reserved: [0; 3],
-                        min_inline: [0; 16],
-                        max_inline: [0; 16],
-                    });
-                }
-
-                let res_enc = crate::codec::encode_shredded_residual_block(
-                    &shredded.residual,
-                    self.options.profile,
-                )?;
-                self.phys_col_meta[logical_col].null_count_total = self.phys_col_meta[logical_col]
-                    .null_count_total
-                    .saturating_add(u32::from(res_enc.null_count));
-                mb_residuals.push(res_enc);
-                mb_row_counts.push(mb_len as u16);
-
-                row_off += mb_len;
-            }
-
-            deferred_wide_residuals.push((logical_col, mb_residuals, mb_row_counts));
-        }
-
-        // Phase A2: Remaining non-ID Core columns.
-        for (cidx, rg_col) in rg_cols.iter().enumerate() {
-            if self.logical_locality[cidx] != LocalityGroup::Core {
-                continue;
-            }
-            let name = fields[cidx].name.as_str();
-            if HOT_ANALYTICS_CORE_COLS.contains(&name) || ID_CORE_COLS.contains(&name) {
-                continue;
-            }
-            self.encode_rg_scalar_or_nested_col(
-                cidx,
-                rg_col,
-                first_row_u32,
-                mb_size,
-                core_offset,
-                zstd_level,
-                &mut core_buf,
-            )?;
-        }
-
-        // Phase A3: ID Core columns at the back of Core.
+        // Tier 3: ID Core columns immediately after `metadata.*` (`trace_id`, `span_id`, `score_id`, ...).
         for (cidx, rg_col) in rg_cols.iter().enumerate() {
             if self.logical_locality[cidx] != LocalityGroup::Core {
                 continue;
@@ -1192,6 +1323,69 @@ impl<'a> StatamWriter<'a> {
             self.encode_rg_scalar_or_nested_col(
                 cidx,
                 rg_col,
+                base_row_off,
+                rg_rows,
+                first_row_u32,
+                mb_size,
+                core_offset,
+                zstd_level,
+                &mut core_buf,
+            )?;
+        }
+
+        // Tier 4: Tier-2 Hot Analytics Core columns (`duration_ns`, `environment`, `provider`, etc.).
+        for (cidx, rg_col) in rg_cols.iter().enumerate() {
+            if self.logical_locality[cidx] != LocalityGroup::Core {
+                continue;
+            }
+            if !HOT_ANALYTICS_TIER2_COLS.contains(&fields[cidx].name.as_str()) {
+                continue;
+            }
+            self.encode_rg_scalar_or_nested_col(
+                cidx,
+                rg_col,
+                base_row_off,
+                rg_rows,
+                first_row_u32,
+                mb_size,
+                core_offset,
+                zstd_level,
+                &mut core_buf,
+            )?;
+        }
+
+        // Tier 5 (Phase B2): Remaining shredded sub-columns (`attributes.*`, `resource_attributes.*`).
+        self.encode_shredded_maps_group(
+            rg_cols,
+            base_row_off,
+            rg_rows,
+            first_row_u32,
+            mb_size,
+            core_offset,
+            zstd_level,
+            false,
+            &mut core_buf,
+            &mut deferred_wide_residuals,
+        )?;
+
+        // Tier 6: Remaining cold Core columns.
+        for (cidx, rg_col) in rg_cols.iter().enumerate() {
+            if self.logical_locality[cidx] != LocalityGroup::Core {
+                continue;
+            }
+            let name = fields[cidx].name.as_str();
+            if HOT_ANALYTICS_TIER1_SMALL_COLS.contains(&name)
+                || HOT_ANALYTICS_TIER1_TIME_COLS.contains(&name)
+                || HOT_ANALYTICS_TIER2_COLS.contains(&name)
+                || ID_CORE_COLS.contains(&name)
+            {
+                continue;
+            }
+            self.encode_rg_scalar_or_nested_col(
+                cidx,
+                rg_col,
+                base_row_off,
+                rg_rows,
                 first_row_u32,
                 mb_size,
                 core_offset,
@@ -1231,6 +1425,8 @@ impl<'a> StatamWriter<'a> {
                     self.encode_rg_scalar_or_nested_col(
                         cidx,
                         rg_col,
+                        base_row_off,
+                        rg_rows,
                         first_row_u32,
                         mb_size,
                         wide_offset,
@@ -1242,6 +1438,8 @@ impl<'a> StatamWriter<'a> {
                     self.encode_rg_payload_col(
                         cidx,
                         rg_col,
+                        base_row_off,
+                        rg_rows,
                         first_row_u32,
                         mb_size,
                         wide_offset,
@@ -1303,12 +1501,122 @@ impl<'a> StatamWriter<'a> {
         self.l0_payload_bytes = self
             .l0_payload_bytes
             .saturating_add(u64::from(l0_payload_len));
+        self.rg0_dict_codes.clear();
         self.rg_data_blobs.push(rg_blob);
 
         Ok(())
     }
 
-    fn init_rg0(&mut self, rg_cols: &[Column]) -> Result<(), StatamError> {
+    #[allow(clippy::too_many_arguments)]
+    fn encode_shredded_maps_group(
+        &mut self,
+        rg_cols: &[Column],
+        base_row_off: usize,
+        rg_rows: usize,
+        first_row_u32: u32,
+        mb_size: usize,
+        core_offset: u64,
+        zstd_level: i32,
+        want_metadata: bool,
+        core_buf: &mut Vec<u8>,
+        deferred_wide_residuals: &mut Vec<(usize, Vec<EncodedMiniBlock>, Vec<u16>)>,
+    ) -> Result<(), StatamError> {
+        let num_shredded = self.shredded_maps.len();
+        for s_idx in 0..num_shredded {
+            let logical_col = self.shredded_maps[s_idx].logical_col_idx as usize;
+            let is_metadata = self.schema.fields()[logical_col].name == "metadata";
+            if is_metadata != want_metadata {
+                continue;
+            }
+            let promoted_keys: Vec<String> = self.shredded_maps[s_idx]
+                .keys
+                .iter()
+                .map(|k| k.key.clone())
+                .collect();
+            let sub_col_indices: Vec<usize> = self.shredded_maps[s_idx]
+                .keys
+                .iter()
+                .map(|k| k.sub_col_idx as usize)
+                .collect();
+
+            let mut mb_residuals = Vec::new();
+            let mut mb_row_counts = Vec::new();
+
+            let mut row_off = 0usize;
+            while row_off < rg_rows {
+                let mb_len = (rg_rows - row_off).min(mb_size);
+                let mb_first_row = first_row_u32 + row_off as u32;
+                let abs_off = base_row_off + row_off;
+                let sliced_owned;
+                let sliced = if abs_off == 0 && mb_len == rg_cols[logical_col].len() {
+                    &rg_cols[logical_col]
+                } else {
+                    sliced_owned = rg_cols[logical_col].slice(abs_off, mb_len)?;
+                    &sliced_owned
+                };
+                let flat = as_flat_cow(sliced)?;
+                let shredded = shred_map(&flat, &promoted_keys)?;
+
+                for (k_idx, &sub_pidx) in sub_col_indices.iter().enumerate() {
+                    self.shredded_maps[s_idx].keys[k_idx].residual_count =
+                        self.shredded_maps[s_idx].keys[k_idx]
+                            .residual_count
+                            .saturating_add(shredded.residual_counts[k_idx]);
+
+                    let (sub_codec, sub_raw) = encode_shredded_subcol_with_codec(
+                        &shredded.sub_cols[k_idx],
+                        self.options.profile,
+                    )?;
+                    let blk_off = core_offset + core_buf.len() as u64;
+                    let info = write_framed_block(
+                        Encoding::ShreddedMap,
+                        &sub_raw,
+                        sub_codec,
+                        zstd_level,
+                        core_buf,
+                    )?;
+                    self.phys_blocks[sub_pidx].push(BlockEntry {
+                        first_row: mb_first_row,
+                        row_count: mb_len as u16,
+                        null_count: 0,
+                        offset: blk_off,
+                        stored_len: info.stored_len,
+                        raw_len: info.raw_len,
+                        encoding: Encoding::ShreddedMap,
+                        codec: info.codec,
+                        block_flags: 0,
+                        min_inline_len: 0,
+                        max_inline_len: 0,
+                        reserved: [0; 3],
+                        min_inline: [0; 16],
+                        max_inline: [0; 16],
+                    });
+                }
+
+                let res_enc = crate::codec::encode_shredded_residual_block(
+                    &shredded.residual,
+                    self.options.profile,
+                )?;
+                self.phys_col_meta[logical_col].null_count_total = self.phys_col_meta[logical_col]
+                    .null_count_total
+                    .saturating_add(u32::from(res_enc.null_count));
+                mb_residuals.push(res_enc);
+                mb_row_counts.push(mb_len as u16);
+
+                row_off += mb_len;
+            }
+
+            deferred_wide_residuals.push((logical_col, mb_residuals, mb_row_counts));
+        }
+        Ok(())
+    }
+
+    fn init_rg0(
+        &mut self,
+        rg_cols: &[Column],
+        base_row_off: usize,
+        rg_rows: usize,
+    ) -> Result<(), StatamError> {
         let fields = self.schema.fields();
 
         // 1. Shredded maps in L1Compact.
@@ -1317,7 +1625,14 @@ impl<'a> StatamWriter<'a> {
                 if field.data_type != DataType::MapUtf8 {
                     continue;
                 }
-                let flat = as_flat_cow(&rg_cols[cidx])?;
+                let sliced_owned;
+                let col_ref = if base_row_off == 0 && rg_rows == rg_cols[cidx].len() {
+                    &rg_cols[cidx]
+                } else {
+                    sliced_owned = rg_cols[cidx].slice(base_row_off, rg_rows)?;
+                    &sliced_owned
+                };
+                let flat = as_flat_cow(col_ref)?;
                 let FlatData::MapUtf8(map) = flat.data() else {
                     continue;
                 };
@@ -1375,30 +1690,50 @@ impl<'a> StatamWriter<'a> {
                 continue;
             }
             if self.options.profile == WriteProfile::L0Fast
-                && !KNOWN_LOW_CARD_DICT_COLS.contains(&field.name.as_str())
+                && (!KNOWN_LOW_CARD_DICT_COLS.contains(&field.name.as_str())
+                    || matches!(field.name.as_str(), "session_id" | "user_id"))
             {
                 continue;
             }
-            let flat = as_flat_cow(&rg_cols[cidx])?;
+            let sliced_owned;
+            let col_ref = if base_row_off == 0 && rg_rows == rg_cols[cidx].len() {
+                &rg_cols[cidx]
+            } else {
+                sliced_owned = rg_cols[cidx].slice(base_row_off, rg_rows)?;
+                &sliced_owned
+            };
+            let flat = as_flat_cow(col_ref)?;
             let builder = match self.options.profile {
-                WriteProfile::L0Fast => DictBuilder::l0_fast(),
+                WriteProfile::L0Fast => DictBuilder::l0_with_max(512),
                 WriteProfile::L1Compact => DictBuilder::l1_compact(),
             };
-            let Some((dict, _)) = builder.build(&flat)? else {
+            let Some((dict, codes)) = builder.build(&flat)? else {
                 continue;
             };
             let non_null_rows = flat
                 .len()
                 .saturating_sub(flat.nulls().map_or(0, |bm| bm.count_zeros()));
             let is_known_low_card = KNOWN_LOW_CARD_DICT_COLS.contains(&field.name.as_str());
+            let max_entries = match self.options.profile {
+                WriteProfile::L0Fast => 512,
+                WriteProfile::L1Compact => 16_384,
+            };
+            let ratio_den = if dict.len() > 4_096 { 4 } else { 2 };
             let low_ndv = if is_known_low_card {
-                dict.len() <= 4_096 && (non_null_rows < 16 || dict.len() * 2 <= non_null_rows + 4)
+                dict.len() <= max_entries
+                    && (non_null_rows < 16 || dict.len() * ratio_den <= non_null_rows + 4)
             } else {
-                dict.len() <= 4_096
-                    && ((non_null_rows >= 16 && dict.len() * 2 <= non_null_rows) || dict.len() <= 8)
+                dict.len() <= max_entries
+                    && ((non_null_rows >= 16 && dict.len() * ratio_den <= non_null_rows)
+                        || dict.len() <= 8)
             };
             if low_ndv {
+                let dict_len = dict.len();
                 self.phys_col_meta[cidx].dict = Some(Arc::new(dict));
+                if dict_len >= 2 {
+                    self.rg0_dict_codes
+                        .insert(cidx, (codes, flat.nulls().cloned()));
+                }
             }
         }
 
@@ -1410,6 +1745,8 @@ impl<'a> StatamWriter<'a> {
         &mut self,
         cidx: usize,
         col: &Column,
+        base_row_off: usize,
+        rg_rows: usize,
         first_row_u32: u32,
         mb_size: usize,
         base_offset: u64,
@@ -1417,8 +1754,61 @@ impl<'a> StatamWriter<'a> {
         out_buf: &mut Vec<u8>,
     ) -> Result<(), StatamError> {
         let dt = self.schema.fields()[cidx].data_type.clone();
-        let rg_rows = col.len();
         let track_trigram = self.narrow_trigram_col_set.contains(&cidx);
+        let precomputed_rg0 = self.rg0_dict_codes.remove(&cidx);
+        if let Some((rg0_codes, rg0_nulls)) = precomputed_rg0 {
+            let mut row_off = 0usize;
+            while row_off < rg_rows {
+                let mb_len = (rg_rows - row_off).min(mb_size);
+                let mb_first_row = first_row_u32 + row_off as u32;
+                let mb_nulls_owned;
+                let mb_nulls = match &rg0_nulls {
+                    None => None,
+                    Some(bm) => {
+                        let mut sub_bm = cetra_column::Bitmap::new_ones(mb_len);
+                        let mut has_null = false;
+                        for i in 0..mb_len {
+                            if !bm.get(row_off + i) {
+                                let _ = sub_bm.set(i, false);
+                                has_null = true;
+                            }
+                        }
+                        if has_null {
+                            mb_nulls_owned = sub_bm;
+                            Some(&mb_nulls_owned)
+                        } else {
+                            None
+                        }
+                    }
+                };
+                let enc = encode_dict_codes_precomputed(
+                    &rg0_codes[row_off..row_off + mb_len],
+                    mb_nulls,
+                    self.options.profile,
+                    0,
+                )?;
+                if enc.encoding == Encoding::Dict {
+                    self.phys_col_meta[cidx].used_dict_encoding = true;
+                }
+                self.phys_col_meta[cidx].null_count_total = self.phys_col_meta[cidx]
+                    .null_count_total
+                    .saturating_add(u32::from(enc.null_count));
+                let entry = enc.write_framed_entry(
+                    mb_first_row,
+                    mb_len as u16,
+                    base_offset,
+                    zstd_level,
+                    out_buf,
+                )?;
+                self.phys_blocks[cidx].push(entry);
+                if track_trigram && let Some(list) = self.narrow_trigrams.get_mut(&cidx) {
+                    list.push(None);
+                }
+                row_off += mb_len;
+            }
+            return Ok(());
+        }
+
         let dict_clone = self.phys_col_meta[cidx].dict.as_ref().map(Arc::clone);
         let is_wide_row = self.logical_locality[cidx] == LocalityGroup::WideRow;
 
@@ -1426,11 +1816,12 @@ impl<'a> StatamWriter<'a> {
         while row_off < rg_rows {
             let mb_len = (rg_rows - row_off).min(mb_size);
             let mb_first_row = first_row_u32 + row_off as u32;
+            let abs_off = base_row_off + row_off;
             let sliced_owned;
-            let sliced = if row_off == 0 && mb_len == rg_rows {
+            let sliced = if abs_off == 0 && mb_len == col.len() {
                 col
             } else {
-                sliced_owned = col.slice(row_off, mb_len)?;
+                sliced_owned = col.slice(abs_off, mb_len)?;
                 &sliced_owned
             };
             let enc = encode_mini_block_with_locality(
@@ -1483,6 +1874,8 @@ impl<'a> StatamWriter<'a> {
         &mut self,
         cidx: usize,
         col: &Column,
+        base_row_off: usize,
+        rg_rows: usize,
         first_row_u32: u32,
         mb_size: usize,
         base_offset: u64,
@@ -1492,10 +1885,128 @@ impl<'a> StatamWriter<'a> {
         wide_buf: &mut Vec<u8>,
         l0_local: &mut LocalL0PayloadBuilder,
     ) -> Result<(), StatamError> {
-        let rg_rows = col.len();
+        if prechunked.is_none()
+            && self.options.profile == WriteProfile::L0Fast
+            && (self.pending_l0_mbs.contains_key(&cidx)
+                || self.pending_l0_partial.contains_key(&cidx))
+        {
+            let mut mbs = self.pending_l0_mbs.remove(&cidx).unwrap_or_default();
+            if let Some(partial) = self.pending_l0_partial.remove(&cidx)
+                && !partial.is_empty()
+            {
+                let mb_len = partial.len();
+                let null_count_usize = partial
+                    .iter()
+                    .filter(|r| matches!(r, PayloadRefRow::Null))
+                    .count();
+                let null_count = u16::try_from(null_count_usize).unwrap_or(u16::MAX);
+                let raw_body = if null_count_usize == mb_len {
+                    Vec::new()
+                } else {
+                    let mut rb = Vec::new();
+                    encode_payload_refs_l0_direct(&partial, &mut rb)?;
+                    rb
+                };
+                mbs.push((mb_len as u16, null_count, raw_body));
+            }
+
+            let mut cur_first = first_row_u32;
+            for (mb_len_u16, null_count, raw_body) in mbs {
+                self.phys_col_meta[cidx].null_count_total = self.phys_col_meta[cidx]
+                    .null_count_total
+                    .saturating_add(u32::from(null_count));
+                if null_count == mb_len_u16 {
+                    self.phys_blocks[cidx].push(BlockEntry {
+                        first_row: cur_first,
+                        row_count: mb_len_u16,
+                        null_count,
+                        offset: 0,
+                        stored_len: 0,
+                        raw_len: 0,
+                        encoding: Encoding::ConstNull,
+                        codec: Codec::None,
+                        block_flags: BLOCK_FLAG_ALL_NULL | BLOCK_FLAG_HAS_NULLS,
+                        min_inline_len: 0,
+                        max_inline_len: 0,
+                        reserved: [0; 3],
+                        min_inline: [0; 16],
+                        max_inline: [0; 16],
+                    });
+                } else {
+                    let block_codec = if raw_body.len() < 1024 {
+                        Codec::Lz4
+                    } else {
+                        default_l1_codec()
+                    };
+                    let blk_off = base_offset + wide_buf.len() as u64;
+                    let info = write_framed_block(
+                        Encoding::PayloadRefs,
+                        &raw_body,
+                        block_codec,
+                        zstd_level,
+                        wide_buf,
+                    )?;
+                    let block_flags = if null_count > 0 {
+                        BLOCK_FLAG_HAS_NULLS
+                    } else {
+                        0
+                    };
+                    self.phys_blocks[cidx].push(BlockEntry {
+                        first_row: cur_first,
+                        row_count: mb_len_u16,
+                        null_count,
+                        offset: blk_off,
+                        stored_len: info.stored_len,
+                        raw_len: info.raw_len,
+                        encoding: Encoding::PayloadRefs,
+                        codec: info.codec,
+                        block_flags,
+                        min_inline_len: 0,
+                        max_inline_len: 0,
+                        reserved: [0; 3],
+                        min_inline: [0; 16],
+                        max_inline: [0; 16],
+                    });
+                }
+                cur_first += u32::from(mb_len_u16);
+            }
+            return Ok(());
+        }
+
         if prechunked.is_none()
             && (self.options.profile == WriteProfile::L0Fast || self.pack_builder.is_none())
         {
+            if let Column::Const { value, .. } = col
+                && value.is_null()
+            {
+                let mut row_off = 0usize;
+                while row_off < rg_rows {
+                    let mb_len = (rg_rows - row_off).min(mb_size);
+                    let mb_u16 = mb_len as u16;
+                    self.phys_col_meta[cidx].null_count_total = self.phys_col_meta[cidx]
+                        .null_count_total
+                        .saturating_add(u32::from(mb_u16));
+                    self.phys_blocks[cidx].push(BlockEntry {
+                        first_row: first_row_u32 + row_off as u32,
+                        row_count: mb_u16,
+                        null_count: mb_u16,
+                        offset: 0,
+                        stored_len: 0,
+                        raw_len: 0,
+                        encoding: Encoding::ConstNull,
+                        codec: Codec::None,
+                        block_flags: BLOCK_FLAG_ALL_NULL | BLOCK_FLAG_HAS_NULLS,
+                        min_inline_len: 0,
+                        max_inline_len: 0,
+                        reserved: [0; 3],
+                        min_inline: [0; 16],
+                        max_inline: [0; 16],
+                    });
+                    row_off += mb_len;
+                }
+                return Ok(());
+            }
+
             let fc = as_flat_cow(col)?;
             let FlatData::Utf8(u) = fc.data() else {
                 return Err(StatamError::SchemaMismatch {
@@ -1512,7 +2023,7 @@ impl<'a> StatamWriter<'a> {
                 let null_count = encode_payload_refs_l0_from_utf8(
                     u,
                     col_nulls,
-                    row_off,
+                    base_row_off + row_off,
                     mb_len,
                     INLINE_PAYLOAD_THRESHOLD,
                     L0_LOCAL_PACK_IDX,
@@ -1540,11 +2051,20 @@ impl<'a> StatamWriter<'a> {
                         max_inline: [0; 16],
                     });
                 } else {
+                    let block_codec = if self.options.profile == WriteProfile::L0Fast {
+                        if raw_body.len() < 1024 {
+                            Codec::Lz4
+                        } else {
+                            default_l1_codec()
+                        }
+                    } else {
+                        preferred_codec
+                    };
                     let blk_off = base_offset + wide_buf.len() as u64;
                     let info = write_framed_block(
                         Encoding::PayloadRefs,
                         &raw_body,
-                        preferred_codec,
+                        block_codec,
                         zstd_level,
                         wide_buf,
                     )?;
@@ -1624,7 +2144,7 @@ impl<'a> StatamWriter<'a> {
                 let fc = flat.as_ref().ok_or(StatamError::Corrupt {
                     reason: "missing materialized payload column",
                 })?;
-                self.build_payload_ref_rows(cidx, fc, row_off, mb_len, l0_local)?
+                self.build_payload_ref_rows(cidx, fc, base_row_off + row_off, mb_len, l0_local)?
             };
 
             let null_count_usize = ref_rows
@@ -1736,9 +2256,11 @@ impl<'a> StatamWriter<'a> {
                 let mut refs = Vec::new();
 
                 if bypassed {
-                    // W4 bypass: skip CDC hashing, dedup map, and trigrams (Zstd-1 guarded -> Codec::None if incompressible).
-                    for slice in bytes.chunks(MAX_FRAME_RAW_BYTES.min(256 * 1024)) {
-                        let cid = pb.append_raw_bypass(slice)?;
+                    // W4 bypass: skip CDC hashing, dedup map, and trigrams; omit edge bytes for single-chunk payloads.
+                    let bypass_chunk_max = MAX_FRAME_RAW_BYTES.min(512 * 1024);
+                    let single_chunk = bytes.len() <= bypass_chunk_max;
+                    for slice in bytes.chunks(bypass_chunk_max) {
+                        let cid = pb.append_raw_bypass_with_edge(slice, !single_chunk)?;
                         refs.push((0u16, cid));
                     }
                 } else {
@@ -1821,8 +2343,13 @@ fn as_flat_cow(col: &Column) -> Result<Cow<'_, FlatColumn>, StatamError> {
     }
 }
 
-fn build_rg_sbbf(col: &Column, profile: WriteProfile) -> Result<(Sbbf, bool), StatamError> {
-    if col.is_empty() {
+fn build_rg_sbbf(
+    col: &Column,
+    base_row_off: usize,
+    rg_rows: usize,
+    profile: WriteProfile,
+) -> Result<(Sbbf, bool), StatamError> {
+    if rg_rows == 0 || col.is_empty() {
         return Ok((Sbbf::new_for_ndv(1, BLOOM_FPP), false));
     }
 
@@ -1830,15 +2357,20 @@ fn build_rg_sbbf(col: &Column, profile: WriteProfile) -> Result<(Sbbf, bool), St
     if profile == WriteProfile::L0Fast
         && let Column::Flat(f) = col
     {
-        let non_nulls = f
-            .len()
-            .saturating_sub(f.nulls().map_or(0, |bm| bm.count_zeros()));
+        let end = base_row_off + rg_rows;
+        let non_nulls = match f.nulls() {
+            None => rg_rows,
+            Some(bm) if base_row_off == 0 && rg_rows == f.len() => {
+                rg_rows.saturating_sub(bm.count_zeros())
+            }
+            Some(bm) => (base_row_off..end).filter(|&r| bm.get(r)).count(),
+        };
         if non_nulls == 0 {
             return Ok((Sbbf::new_for_ndv(1, BLOOM_FPP), false));
         }
         let mut sbbf = Sbbf::new_for_ndv(non_nulls, BLOOM_FPP);
         let mut had_any = false;
-        for row in 0..f.len() {
+        for row in base_row_off..end {
             if let Some(h) = flat_row_bloom_hash(f, row) {
                 sbbf.insert_hash(h);
                 had_any = true;
@@ -1848,7 +2380,12 @@ fn build_rg_sbbf(col: &Column, profile: WriteProfile) -> Result<(Sbbf, bool), St
     }
 
     let mut hashes = Vec::new();
-    collect_column_bloom_hashes(col, &mut hashes)?;
+    if base_row_off == 0 && rg_rows == col.len() {
+        collect_column_bloom_hashes(col, &mut hashes)?;
+    } else {
+        let sliced = col.slice(base_row_off, rg_rows)?;
+        collect_column_bloom_hashes(&sliced, &mut hashes)?;
+    }
     if hashes.is_empty() {
         return Ok((Sbbf::new_for_ndv(1, BLOOM_FPP), false));
     }
@@ -1863,8 +2400,8 @@ fn build_rg_sbbf(col: &Column, profile: WriteProfile) -> Result<(Sbbf, bool), St
     Ok((sbbf, true))
 }
 
-#[derive(Default)]
 struct LocalL0PayloadBuilder {
+    zstd_level: i32,
     frames: Vec<(u64, u32, u32, Vec<u8>)>, // (rel_frame_off, stored_len, raw_len, framed_bytes)
     chunks: Vec<ChunkLoc>,
     cur_raw: Vec<u8>,
@@ -1872,6 +2409,15 @@ struct LocalL0PayloadBuilder {
 }
 
 impl LocalL0PayloadBuilder {
+    fn new(zstd_level: i32) -> Self {
+        Self {
+            zstd_level,
+            frames: Vec::new(),
+            chunks: Vec::new(),
+            cur_raw: Vec::new(),
+            cur_chunks: Vec::new(),
+        }
+    }
     fn add_chunk(&mut self, bytes: &[u8]) -> Result<u32, StatamError> {
         if bytes.len() > MAX_FRAME_RAW_BYTES {
             return Err(StatamError::BoundsExceeded {
@@ -1909,7 +2455,12 @@ impl LocalL0PayloadBuilder {
             return Ok(());
         }
         let mut framed = Vec::new();
-        let info = write_framed_pack_frame(&self.cur_raw, Codec::Lz4, 0, 0, &mut framed)?;
+        let codec = if self.cur_raw.len() < 1024 {
+            Codec::Lz4
+        } else {
+            default_l1_codec()
+        };
+        let info = write_framed_pack_frame(&self.cur_raw, codec, 0, self.zstd_level, &mut framed)?;
         let fid = u32::try_from(self.frames.len()).map_err(|_| StatamError::BoundsExceeded {
             reason: "L0 payload frame_id overflows u32",
         })?;
@@ -1990,11 +2541,13 @@ fn classify_locality_group(
 
 fn concat_rg_column(
     dt: &DataType,
-    pieces: &[Column],
+    pieces: &mut Vec<Column>,
     total_rows: usize,
 ) -> Result<Column, StatamError> {
-    if pieces.len() == 1 {
-        return Ok(pieces[0].clone());
+    if pieces.len() == 1
+        && let Some(only) = pieces.pop()
+    {
+        return Ok(only);
     }
     // Preserve Column::Const if every piece is an identical Const.
     if let Some(Column::Const {
