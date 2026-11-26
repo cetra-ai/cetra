@@ -22,13 +22,12 @@ use crate::catalog::{Catalog, CatalogEdit, Committer, FileId, FileMeta, FileTabl
 use crate::dedup;
 use crate::deletion::{Tombstones, applicable, drop_covered_batch, to_tombstone_specs};
 use crate::error::FlushError;
-use crate::file_format::write_file_batch;
+use crate::file_format::{WrittenFile, write_file_batch};
 use crate::hooks::{HookPoint, Hooks};
 #[cfg(test)]
 use crate::memtable::MemBatch;
 use crate::memtable::{FrozenView, Memtable, PartitionKey};
 use crate::objects::Objects;
-use crate::parquet::WrittenFile;
 use crate::partials::partials_from_spans_batch;
 use crate::projects::ProjectStates;
 use crate::read_state::{Published, ReadState};
@@ -817,10 +816,8 @@ mod tests {
     use crate::QueryOptions;
     use bytesize::ByteSize;
     use std::path::Path;
-    use std::sync::Arc;
     use std::time::{Duration, Instant};
 
-    use arrow::array::Array;
     use cetra_column::{Batch, ScalarValue};
     use cetra_core::ids::ProjectId;
     use chrono::{Datelike, NaiveDate};
@@ -829,21 +826,18 @@ mod tests {
     use crate::Storage;
     use crate::anchor::DAY_NS;
     use crate::catalog::FileTable;
-    use crate::column_bridge::record_batch_to_column;
     use crate::config::{
         FlushConfig, MemtableConfig, QueryConfig, S3Config, StorageConfig, WalConfig,
     };
     use crate::hooks::HookPoint;
     use crate::memtable::MemBatch;
-    use crate::test_support::{object_rows, trace_ids_of};
+    use crate::reads::columns::{require_col, string_at};
+    use crate::test_support::{object_rows, rows, trace_ids_of};
+    use crate::views::QueryContext;
     use crate::wal::{Table, spans_named};
 
     fn batch(starts: &[i64], name: &str) -> MemBatch {
-        MemBatch::from_batch(
-            Table::Spans,
-            record_batch_to_column(&spans_named(starts, name)).unwrap(),
-        )
-        .unwrap()
+        MemBatch::from_batch(Table::Spans, spans_named(starts, name)).unwrap()
     }
 
     fn names(batch: &Batch) -> Vec<String> {
@@ -944,16 +938,10 @@ mod tests {
         }
     }
 
-    fn values_of(rows: &arrow::array::RecordBatch, column: &str) -> Vec<String> {
-        use arrow::array::Array;
-
-        let column = rows.column_by_name(column).unwrap();
-        let array = column
-            .as_any()
-            .downcast_ref::<arrow::array::StringArray>()
-            .unwrap();
-        (0..array.len())
-            .map(|row| array.value(row).to_owned())
+    fn values_of(batch: &Batch, column: &str) -> Vec<String> {
+        let col = require_col(batch, column).unwrap();
+        (0..batch.num_rows())
+            .map(|row| string_at(batch, col, row).unwrap().unwrap())
             .collect()
     }
 
@@ -1246,25 +1234,9 @@ mod tests {
             .query(project(), QueryOptions::new(None, None))
             .await
             .unwrap();
-        let ctx = datafusion::execution::context::SessionContext::new_with_config_rt(
-            datafusion::execution::context::SessionConfig::new(),
-            Arc::clone(&query.runtime),
-        );
-        ctx.register_table("spans_t", query.spans).unwrap();
-        let counted = ctx
-            .sql("SELECT count(*) FROM spans_t")
-            .await
-            .unwrap()
-            .collect()
-            .await
-            .unwrap();
-        let total = counted[0]
-            .column(0)
-            .as_any()
-            .downcast_ref::<arrow::array::Int64Array>()
-            .unwrap()
-            .value(0);
-        assert_eq!(total, 0);
+        let ctx = QueryContext::new(query, None).unwrap();
+        let counted = rows(&ctx, "SELECT count(*) AS n FROM spans").await;
+        assert_eq!(counted[0]["n"].as_i64().unwrap(), 0);
         storage.shutdown().await.unwrap();
     }
 

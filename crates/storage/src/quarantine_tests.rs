@@ -6,7 +6,6 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
-use arrow::array::{Array, Int64Array, RecordBatch};
 use object_store::ObjectStore;
 use object_store::local::LocalFileSystem;
 use object_store::memory::InMemory;
@@ -109,13 +108,8 @@ async fn count(storage: &Storage, sql: &str) -> i64 {
         .await
         .unwrap();
     let ctx = QueryContext::new(query, None).unwrap();
-    let batches: Vec<RecordBatch> = rows(&ctx, sql).await;
-    batches[0]
-        .column(0)
-        .as_any()
-        .downcast_ref::<Int64Array>()
-        .unwrap()
-        .value(0)
+    let result = rows(&ctx, sql).await;
+    result[0].values().next().unwrap().as_i64().unwrap()
 }
 
 /// The active spans file whose earliest start is `start` (one row per file).

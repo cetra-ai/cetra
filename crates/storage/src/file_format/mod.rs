@@ -4,17 +4,22 @@
 //! [`write_file_batch`], [`verify_parquet_file`], [`read_time_column`], and
 //! [`read_trace_anchors`].
 
+mod arrow_write;
+
 use std::io::Write;
 use std::ops::Range;
 use std::panic::AssertUnwindSafe;
 use std::sync::Arc;
 
 use arrow::datatypes::SchemaRef;
+use arrow_write::{
+    arrow_scores_schema, arrow_spans_schema, arrow_traces_schema, batch_to_record_batch,
+};
 use bytes::{Buf, Bytes};
 use cetra_column::{
     Batch, Bitmap, Column, DataType, Field, FlatColumn, FlatData, ScalarValue, Schema, Selection,
 };
-use cetra_core::schema::{scores, scores_schema, spans, spans_schema, traces, traces_schema};
+use cetra_core::schema::{scores, spans, traces};
 use cetra_query::Expr;
 use cetra_query::exec::{SortKey, compare_rows};
 use futures::FutureExt;
@@ -40,16 +45,16 @@ use parquet::file::statistics::Statistics;
 use parquet::schema::types::{ColumnDescPtr, ColumnPath, SchemaDescriptor};
 
 use crate::catalog::{FileMeta, FileTable};
-use crate::column_bridge::column_to_record_batch;
-use crate::error::{AnchorError, CompactionError, ParquetWriteError};
+use crate::error::{AnchorError, CompactionError, EngineError, ParquetWriteError};
 use crate::format::FORMAT_VERSION;
-use crate::parquet::{
-    FileSummary, SCORES_DICTIONARY_COLUMNS, SPANS_DICTIONARY_COLUMNS, TRACES_DICTIONARY_COLUMNS,
-    WrittenFile, footer_size_from_tail, ingest_column, sort_columns, time_column,
-};
 use crate::unwind::{decoder_panicked, guard_sync};
 use crate::verify::{Verdict, is_store_error};
 
+/// `cetra.schema_version` written into every file: the row normalization
+/// version (spec 01), **not** the file format version (`cetra.format_version`,
+/// spec 03 § 12).
+///
+/// It follows the stored row `schema_version` (spec 01). Rows are version 1.
 const SCHEMA_VERSION: &str = "1";
 
 const KEY_TABLE: &str = "cetra.table";
@@ -61,9 +66,146 @@ const KEY_MAX_TIME: &str = "cetra.max_time";
 const KEY_MIN_INGEST_TIME: &str = "cetra.min_ingest_time";
 const KEY_MAX_INGEST_TIME: &str = "cetra.max_ingest_time";
 
+/// Columns spec 01 marks `(dict)` for `spans`, in schema order.
+///
+/// `conventions` is `List(Utf8 dict)`: dictionary encoding applies to the list
+/// values. Every other column, including `input`, `output` and `attributes`,
+/// is plain.
+pub(crate) const SPANS_DICTIONARY_COLUMNS: &[&str] = &[
+    spans::PROJECT_ID,
+    spans::SPAN_KIND,
+    spans::STATUS,
+    spans::SERVICE_NAME,
+    spans::ENVIRONMENT,
+    spans::RELEASE,
+    spans::PROVIDER,
+    spans::REQUEST_MODEL,
+    spans::RESPONSE_MODEL,
+    spans::MODEL,
+    spans::PROMPT_NAME,
+    spans::OPERATION,
+    spans::COST_SOURCE,
+    spans::INPUT_FORMAT,
+    spans::OUTPUT_FORMAT,
+    spans::SCOPE_NAME,
+    spans::SCOPE_VERSION,
+    spans::CONVENTIONS,
+];
+
+/// Columns spec 01 marks `(dict)` for `scores`, in schema order.
+pub(crate) const SCORES_DICTIONARY_COLUMNS: &[&str] = &[
+    scores::TARGET,
+    scores::NAME,
+    scores::DATA_TYPE,
+    scores::SOURCE,
+];
+
+/// Low-cardinality strings of `traces`, in schema order. Spec 03 §3.
+pub(crate) const TRACES_DICTIONARY_COLUMNS: &[&str] = &[
+    traces::NAME,
+    traces::STATUS,
+    traces::ENVIRONMENT,
+    traces::RELEASE,
+];
+
 const SPANS_BLOOM_COLUMNS: &[&str] = &[spans::TRACE_ID, spans::SESSION_ID, spans::USER_ID];
 const TRACES_BLOOM_COLUMNS: &[&str] = &[traces::TRACE_ID, traces::SESSION_ID, traces::USER_ID];
 const SCORES_BLOOM_COLUMNS: &[&str] = &[scores::TRACE_ID, scores::SCORE_ID];
+
+/// One encoded Parquet object and the catalog fields that describe it.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct WrittenFile {
+    /// The complete file, including the footer.
+    pub(crate) bytes: Bytes,
+    /// Rows in the file.
+    pub(crate) rows: u64,
+    /// Footer metadata length plus the 8-byte trailer.
+    ///
+    /// A reader can open the file with one ranged read of this many trailing bytes.
+    pub(crate) footer_size: u64,
+    /// Smallest event time, nanoseconds. `start_time` for spans, `created_at` for scores.
+    pub(crate) min_time: i64,
+    /// Largest event time, nanoseconds.
+    pub(crate) max_time: i64,
+    /// Smallest `ingest_time`, nanoseconds.
+    pub(crate) min_ingest_time: i64,
+    /// Largest `ingest_time`, nanoseconds.
+    pub(crate) max_ingest_time: i64,
+}
+
+/// What [`BatchFileWriter::finish`] measured. The footer size is computed by the
+/// caller from the file's last 8 bytes ([`footer_size_from_tail`]), because
+/// only the caller can read `W` back.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct FileSummary {
+    /// Rows written.
+    pub(crate) rows: u64,
+    /// Smallest event time, nanoseconds.
+    pub(crate) min_time: i64,
+    /// Largest event time, nanoseconds.
+    pub(crate) max_time: i64,
+    /// Smallest `ingest_time`, nanoseconds.
+    pub(crate) min_ingest_time: i64,
+    /// Largest `ingest_time`, nanoseconds.
+    pub(crate) max_ingest_time: i64,
+}
+
+pub(crate) fn sort_columns(table: FileTable) -> &'static [&'static str] {
+    match table {
+        FileTable::Spans => &[spans::TRACE_ID, spans::START_TIME],
+        FileTable::Traces => &[traces::START_TIME, traces::TRACE_ID],
+        FileTable::Scores => &[scores::CREATED_AT],
+    }
+}
+
+pub(crate) fn time_column(table: FileTable) -> &'static str {
+    match table {
+        FileTable::Spans => spans::START_TIME,
+        FileTable::Traces => traces::START_TIME,
+        FileTable::Scores => scores::CREATED_AT,
+    }
+}
+
+pub(crate) fn ingest_column(table: FileTable) -> &'static str {
+    match table {
+        FileTable::Spans => spans::INGEST_TIME,
+        FileTable::Traces => traces::LAST_INGEST_TIME,
+        FileTable::Scores => scores::INGEST_TIME,
+    }
+}
+
+/// Footer size (metadata length + 8) from a file's last 8 bytes and its length.
+/// Errors unless the bytes end in `PAR1` and the footer fits in the file.
+pub(crate) fn footer_size_from_tail(
+    tail: &[u8; 8],
+    file_len: u64,
+) -> Result<u64, ParquetWriteError> {
+    if &tail[4..] != b"PAR1" {
+        return Err(ParquetWriteError::invalid("parquet footer"));
+    }
+    let mut length = [0_u8; 4];
+    length.copy_from_slice(&tail[..4]);
+    let metadata = u64::from(u32::from_le_bytes(length));
+    let total = metadata + 8;
+    if total > file_len {
+        return Err(ParquetWriteError::invalid("parquet footer"));
+    }
+    Ok(total)
+}
+
+/// The `cetra.format_version` of a file, if it has one that parses.
+#[cfg(test)]
+pub(crate) fn file_format_version(metadata: &ParquetMetaData) -> Option<u16> {
+    metadata
+        .file_metadata()
+        .key_value_metadata()?
+        .iter()
+        .find(|pair| pair.key == KEY_FORMAT_VERSION)?
+        .value
+        .as_deref()?
+        .parse()
+        .ok()
+}
 
 const ROW_GROUP_ROWS: usize = 100_000;
 const ROW_GROUP_BYTES: usize = 64 * 1024 * 1024;
@@ -217,7 +359,7 @@ impl<W: Write + Send> BatchFileWriter<W> {
             let slice = dense
                 .slice(offset, len)
                 .map_err(ParquetWriteError::from_column)?;
-            let arrow_slice = column_to_record_batch(&slice, Some(self.arrow_schema.as_ref()))
+            let arrow_slice = batch_to_record_batch(&slice, &self.arrow_schema)
                 .map_err(ParquetWriteError::from_column)?;
             self.writer
                 .write(&arrow_slice)
@@ -418,9 +560,9 @@ fn read_ts(col: &Column, row: usize) -> Option<i64> {
 
 fn table_schema(table: FileTable) -> SchemaRef {
     match table {
-        FileTable::Spans => spans_schema(),
-        FileTable::Traces => traces_schema(),
-        FileTable::Scores => scores_schema(),
+        FileTable::Spans => arrow_spans_schema(),
+        FileTable::Traces => arrow_traces_schema(),
+        FileTable::Scores => arrow_scores_schema(),
     }
 }
 
@@ -1062,7 +1204,7 @@ pub(crate) async fn read_time_column(
             PageIndexPolicy::Optional,
         )
         .await
-        .map_err(compaction_parquet_error)?;
+        .map_err(|e| compaction_parquet_error(&e))?;
 
         let descr = meta.file_metadata().schema_descr_ptr();
         let Some(leaf_idx) = descr
@@ -1078,22 +1220,25 @@ pub(crate) async fn read_time_column(
 
         for rg_idx in 0..meta.num_row_groups() {
             let rg = meta.row_group(rg_idx);
-            let rg_rows = checked_rg_num_rows(rg, file.size).map_err(compaction_parquet_error)?;
+            let rg_rows =
+                checked_rg_num_rows(rg, file.size).map_err(|e| compaction_parquet_error(&e))?;
             let range = checked_column_byte_range(rg, leaf_idx, file.size)
-                .map_err(compaction_parquet_error)?;
+                .map_err(|e| compaction_parquet_error(&e))?;
             if range.is_empty() {
                 if rg_rows == 0 {
                     continue;
                 }
-                return Err(compaction_parquet_error(ParquetError::General(
+                return Err(compaction_parquet_error(&ParquetError::General(
                     "empty column chunk".to_owned(),
                 )));
             }
             let bufs = fetch_ranges_guarded(store, &path, std::slice::from_ref(&range))
                 .await
-                .map_err(compaction_parquet_error)?;
+                .map_err(|e| compaction_parquet_error(&e))?;
             let [bytes]: [Bytes; 1] = bufs.try_into().map_err(|_| {
-                compaction_parquet_error(ParquetError::General("unexpected range count".to_owned()))
+                compaction_parquet_error(&ParquetError::General(
+                    "unexpected range count".to_owned(),
+                ))
             })?;
             let chunk_reader =
                 Arc::new(SliceChunkReader::from_single(range.start, bytes, file.size));
@@ -1165,7 +1310,7 @@ pub(crate) async fn read_time_column(
                 }
                 Ok(RgTimeOutcome::Ok(rg_vals))
             })
-            .map_err(compaction_parquet_error)?;
+            .map_err(|e| compaction_parquet_error(&e))?;
 
             match outcome {
                 RgTimeOutcome::Ok(mut rg_vals) => values.append(&mut rg_vals),
@@ -1181,9 +1326,9 @@ pub(crate) async fn read_time_column(
     Ok(values)
 }
 
-fn compaction_parquet_error(source: ParquetError) -> CompactionError {
+fn compaction_parquet_error(source: &ParquetError) -> CompactionError {
     CompactionError::Read {
-        source: datafusion::error::DataFusionError::ParquetError(Box::new(source)),
+        source: EngineError::from_parquet(source),
     }
 }
 
@@ -1550,6 +1695,8 @@ fn row_groups_to_read(metadata: &ParquetMetaData, since: i64) -> Vec<usize> {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
+    use std::io::{Read, Seek, SeekFrom};
     use std::sync::Arc;
 
     use arrow::array::RecordBatch;
@@ -1562,13 +1709,13 @@ mod tests {
     use object_store::{ObjectStore, ObjectStoreExt, PutPayload};
     use parquet::arrow::ArrowWriter;
     use parquet::arrow::arrow_reader::{ArrowReaderOptions, ParquetRecordBatchReaderBuilder};
+    use parquet::basic::{Compression, Encoding};
+    use parquet::bloom_filter::Sbbf;
     use parquet::file::metadata::{PageIndexPolicy, ParquetMetaDataReader};
     use parquet::file::properties::{EnabledStatistics, WriterProperties};
 
     use super::*;
     use crate::catalog::FileId;
-    use crate::column_bridge::record_batch_to_column;
-    use crate::parquet::write_file;
     use crate::test_support::{
         Call, ChaosStore, Fault, score_row, score_rows, span_row, span_rows, trace_batch,
     };
@@ -1611,43 +1758,223 @@ mod tests {
         concat_batches(&schema, &batches).unwrap()
     }
 
+    fn metadata(bytes: &Bytes) -> ParquetMetaData {
+        let mut reader =
+            ParquetMetaDataReader::new().with_page_index_policy(PageIndexPolicy::Required);
+        reader.try_parse(&bytes.clone()).unwrap();
+        reader.finish().unwrap()
+    }
+
+    fn dictionary_names_follow_the_schema(schema: &Schema, columns: &[&str]) {
+        let positions: Vec<_> = columns
+            .iter()
+            .map(|name| schema.index_of(name).expect(name))
+            .collect();
+        assert!(positions.windows(2).all(|pair| pair[0] < pair[1]));
+        let mut unique = columns.to_vec();
+        unique.sort_unstable();
+        unique.dedup();
+        assert_eq!(unique.len(), columns.len());
+    }
+
     #[test]
-    fn batch_file_writer_and_write_file_batch_round_trip_matches_arrow() {
+    fn dictionary_lists_match_the_schemas() {
+        dictionary_names_follow_the_schema(
+            cetra_core::schema::spans_schema().as_ref(),
+            SPANS_DICTIONARY_COLUMNS,
+        );
+        dictionary_names_follow_the_schema(
+            cetra_core::schema::traces_schema().as_ref(),
+            TRACES_DICTIONARY_COLUMNS,
+        );
+        dictionary_names_follow_the_schema(
+            cetra_core::schema::scores_schema().as_ref(),
+            SCORES_DICTIONARY_COLUMNS,
+        );
+        assert_eq!(SCHEMA_VERSION, "1");
+    }
+
+    fn assert_file_settings(
+        bytes: &Bytes,
+        table: &str,
+        level: &str,
+        written: &WrittenFile,
+        dictionary: &[&str],
+        bloom: &[&str],
+        sort: &[&str],
+    ) {
+        let file = metadata(bytes);
+        assert!(file.column_index().is_some());
+        assert!(file.offset_index().is_some());
+        let pairs = file.file_metadata().key_value_metadata().unwrap();
+        let value = |key: &str| {
+            pairs
+                .iter()
+                .find(|pair| pair.key == key)
+                .and_then(|pair| pair.value.clone())
+                .unwrap()
+        };
+        assert_eq!(value("cetra.table"), table);
+        assert_eq!(value("cetra.schema_version"), SCHEMA_VERSION);
+        assert_eq!(value("cetra.format_version"), FORMAT_VERSION.to_string());
+        assert_eq!(file_format_version(&file), Some(FORMAT_VERSION));
+        assert_eq!(value("cetra.level"), level);
+        assert_eq!(value("cetra.min_time"), written.min_time.to_string());
+        assert_eq!(value("cetra.max_time"), written.max_time.to_string());
+        assert_eq!(
+            value("cetra.min_ingest_time"),
+            written.min_ingest_time.to_string()
+        );
+        assert_eq!(
+            value("cetra.max_ingest_time"),
+            written.max_ingest_time.to_string()
+        );
+        let tail = &bytes[bytes.len() - 8..];
+        let metadata_len = u32::from_le_bytes(tail[..4].try_into().unwrap());
+        assert_eq!(&tail[4..], b"PAR1");
+        assert_eq!(written.footer_size, u64::from(metadata_len) + 8);
+
+        let dictionary: std::collections::HashSet<_> = dictionary.iter().copied().collect();
+        let bloom: std::collections::HashSet<_> = bloom.iter().copied().collect();
+        for group_index in 0..file.num_row_groups() {
+            let group = file.row_group(group_index);
+            let declared: Vec<_> = group
+                .sorting_columns()
+                .unwrap()
+                .iter()
+                .map(|column| {
+                    group
+                        .schema_descr()
+                        .column(usize::try_from(column.column_idx).unwrap())
+                        .name()
+                        .to_owned()
+                })
+                .collect();
+            assert_eq!(declared, sort);
+            assert!(
+                group
+                    .sorting_columns()
+                    .unwrap()
+                    .iter()
+                    .all(|column| !column.descending && !column.nulls_first)
+            );
+            for column_index in 0..group.num_columns() {
+                let column = group.column(column_index);
+                let root = column.column_path().parts()[0].as_str();
+                assert!(
+                    matches!(column.compression(), Compression::ZSTD(_)),
+                    "{root}"
+                );
+                let encoded = column.encodings().any(|encoding| {
+                    matches!(
+                        encoding,
+                        Encoding::RLE_DICTIONARY | Encoding::PLAIN_DICTIONARY
+                    )
+                });
+                assert_eq!(encoded, dictionary.contains(root), "{root}");
+                assert_eq!(
+                    column.bloom_filter_offset().is_some(),
+                    bloom.contains(root),
+                    "{root}"
+                );
+                assert!(column.offset_index_offset().is_some(), "{root}");
+                assert!(column.column_index_offset().is_some(), "{root}");
+            }
+        }
+    }
+
+    fn bloom_contains(bytes: &Bytes, column: &str, value: &[u8]) -> bool {
+        let file = metadata(bytes);
+        let cursor = bytes.clone();
+        for group_index in 0..file.num_row_groups() {
+            let group = file.row_group(group_index);
+            for column_index in 0..group.num_columns() {
+                let chunk = group.column(column_index);
+                let parts = chunk.column_path().parts();
+                if parts.len() == 1 && parts[0] == column {
+                    let Some(filter) = Sbbf::read_from_column_chunk(chunk, &cursor).unwrap() else {
+                        continue;
+                    };
+                    if filter.check(value) {
+                        return true;
+                    }
+                }
+            }
+        }
+        false
+    }
+
+    #[test]
+    fn batch_file_writer_and_write_file_batch_round_trip() {
         let mut s1 = span_row(2, 1, 100, 30);
         s1.schema_version = 2;
         let s2 = span_row(1, 2, 50, 10);
         let s3 = span_row(1, 1, 20, 40);
-        let rb = span_rows(&[s1, s2, s3]);
-        let col_batch = Arc::new(record_batch_to_column(&rb).unwrap());
+        let col_batch = Arc::new(span_rows(&[s1, s2, s3]));
 
-        let arrow_written = write_file(FileTable::Spans, 0, &[Arc::new(rb)]).unwrap();
         let batch_written =
             write_file_batch(FileTable::Spans, 0, &[Arc::clone(&col_batch)]).unwrap();
-        assert_eq!(batch_written.rows, arrow_written.rows);
-        assert_eq!(batch_written.min_time, arrow_written.min_time);
-        assert_eq!(batch_written.max_time, arrow_written.max_time);
-        assert_eq!(batch_written.min_ingest_time, arrow_written.min_ingest_time);
-        assert_eq!(batch_written.max_ingest_time, arrow_written.max_ingest_time);
+        assert_eq!(batch_written.rows, 3);
+        assert_eq!((batch_written.min_time, batch_written.max_time), (20, 100));
         assert_eq!(
-            read_arrow(&batch_written.bytes),
-            read_arrow(&arrow_written.bytes)
+            (batch_written.min_ingest_time, batch_written.max_ingest_time),
+            (10, 40)
         );
+        let rb = read_arrow(&batch_written.bytes);
+        assert_eq!(rb.num_rows(), 3);
+        assert_file_settings(
+            &batch_written.bytes,
+            "spans",
+            "0",
+            &batch_written,
+            SPANS_DICTIONARY_COLUMNS,
+            &[spans::TRACE_ID, spans::SESSION_ID, spans::USER_ID],
+            &[spans::TRACE_ID, spans::START_TIME],
+        );
+        let trace_bytes = arrow::array::AsArray::as_fixed_size_binary(
+            rb.column_by_name(spans::TRACE_ID).unwrap().as_ref(),
+        )
+        .value(0)
+        .to_vec();
+        assert!(bloom_contains(
+            &batch_written.bytes,
+            spans::TRACE_ID,
+            &trace_bytes
+        ));
 
-        // Traces round-trip (checks Int32 partial_count and KV metadata).
-        let traces_rb = trace_batch(&[span_row(2, 1, 100, 30), span_row(1, 2, 50, 10)]);
-        let traces_col = Arc::new(record_batch_to_column(&traces_rb).unwrap());
-        let traces_arrow = write_file(FileTable::Traces, 0, &[Arc::new(traces_rb)]).unwrap();
-        let traces_batch = write_file_batch(FileTable::Traces, 0, &[traces_col]).unwrap();
-        assert_eq!(
-            read_arrow(&traces_batch.bytes),
-            read_arrow(&traces_arrow.bytes)
+        // Traces round-trip (checks Int32 partial_count, KV metadata, and bloom filter).
+        let traces_col = Arc::new(trace_batch(&[
+            span_row(2, 1, 100, 30),
+            span_row(1, 2, 50, 10),
+        ]));
+        let traces_written = write_file_batch(FileTable::Traces, 0, &[traces_col]).unwrap();
+        let tr_rb = read_arrow(&traces_written.bytes);
+        assert_eq!(tr_rb.num_rows(), 2);
+        assert_file_settings(
+            &traces_written.bytes,
+            "traces",
+            "0",
+            &traces_written,
+            TRACES_DICTIONARY_COLUMNS,
+            &[traces::TRACE_ID, traces::SESSION_ID, traces::USER_ID],
+            &[traces::START_TIME, traces::TRACE_ID],
         );
 
         // Scores round-trip + streamed BatchFileWriter with Const & Selection::Mask.
         let sc1 = score_row(1, 0, 20, 21, 22, false, "a");
         let sc2 = score_row(2, 0, 10, 11, 12, false, "b");
-        let scores_rb = score_rows(&[sc1, sc2]);
-        let scores_col = record_batch_to_column(&scores_rb).unwrap();
+        let scores_col = score_rows(&[sc1, sc2]);
+        let scores_written =
+            write_file_batch(FileTable::Scores, 1, &[Arc::new(scores_col.clone())]).unwrap();
+        assert_file_settings(
+            &scores_written.bytes,
+            "scores",
+            "1",
+            &scores_written,
+            SCORES_DICTIONARY_COLUMNS,
+            &[scores::TRACE_ID, scores::SCORE_ID],
+            &[scores::CREATED_AT],
+        );
         let mut cols = scores_col.columns().to_vec();
         let p_idx = scores_col.schema().index_of(scores::PROJECT_ID).unwrap();
         cols[p_idx] = Column::try_new_const(ScalarValue::Utf8(project().to_string()), 2).unwrap();
@@ -1670,14 +1997,111 @@ mod tests {
         assert_eq!(read_arrow(&Bytes::from(buf)).num_rows(), 1);
     }
 
+    #[test]
+    fn many_small_rows_split_row_groups_and_both_writers_match() {
+        let mut spans_vec = Vec::with_capacity(1_000);
+        for i in 0..1_000_i64 {
+            let mut s = span_row(1, 0, i, i);
+            s.span_id = cetra_core::ids::SpanId::from_bytes((i + 1).to_be_bytes()).unwrap();
+            spans_vec.push(s);
+        }
+        let chunk = Arc::new(span_rows(&spans_vec));
+        let batches = vec![Arc::clone(&chunk); 250];
+        let written = write_file_batch(FileTable::Spans, 0, &batches).unwrap();
+        assert_eq!(written.rows, 250_000);
+        assert_eq!(metadata(&written.bytes).num_row_groups(), 3);
+
+        // Streamed BatchFileWriter produces identical output to write_file_batch for sorted inputs.
+        let small: Vec<Arc<Batch>> = (0..3_i64)
+            .map(|k| {
+                let rows: Vec<_> = (0..1_000_i64)
+                    .map(|i| {
+                        let ts = k * 1_000 + i;
+                        let mut s = span_row(1, 0, ts, ts);
+                        s.span_id =
+                            cetra_core::ids::SpanId::from_bytes((ts + 1).to_be_bytes()).unwrap();
+                        s
+                    })
+                    .collect();
+                Arc::new(span_rows(&rows))
+            })
+            .collect();
+        let small_written = write_file_batch(FileTable::Spans, 0, &small).unwrap();
+        let sink = tempfile::tempfile().unwrap();
+        let mut writer = BatchFileWriter::new(FileTable::Spans, 0, sink, 3_000).unwrap();
+        for b in &small {
+            writer.write(b).unwrap();
+        }
+        assert_eq!(writer.rows(), 3_000);
+        let (mut sink, summary) = writer.finish().unwrap();
+        sink.seek(SeekFrom::Start(0)).unwrap();
+        let mut buffer = Vec::new();
+        sink.read_to_end(&mut buffer).unwrap();
+        let streamed = Bytes::from(buffer);
+        assert_eq!(read_arrow(&streamed), read_arrow(&small_written.bytes));
+        assert_eq!(summary.rows, small_written.rows);
+        assert_eq!(summary.min_time, small_written.min_time);
+        assert_eq!(summary.max_time, small_written.max_time);
+        assert_eq!(summary.min_ingest_time, small_written.min_ingest_time);
+        assert_eq!(summary.max_ingest_time, small_written.max_ingest_time);
+
+        let kv_map = |bytes: &Bytes| {
+            metadata(bytes)
+                .file_metadata()
+                .key_value_metadata()
+                .unwrap()
+                .iter()
+                .map(|pair| (pair.key.clone(), pair.value.clone().unwrap()))
+                .collect::<BTreeMap<String, String>>()
+        };
+        assert_eq!(kv_map(&small_written.bytes), kv_map(&streamed));
+    }
+
+    #[test]
+    fn empty_and_foreign_batches_are_rejected() {
+        let writer = BatchFileWriter::new(FileTable::Spans, 0, Vec::new(), 0).unwrap();
+        let error = writer.finish().unwrap_err();
+        assert!(matches!(
+            error,
+            ParquetWriteError::Invalid {
+                reason: "empty file"
+            }
+        ));
+
+        let scores = score_rows(&[score_row(1, 0, 1, 1, 1, false, "accuracy")]);
+        let mut writer = BatchFileWriter::new(FileTable::Spans, 0, Vec::new(), 1).unwrap();
+        assert!(matches!(
+            writer.write(&scores).unwrap_err(),
+            ParquetWriteError::Invalid { .. }
+        ));
+        assert!(matches!(
+            BatchFileWriter::new(FileTable::Spans, 2, Vec::new(), 1),
+            Err(ParquetWriteError::Invalid { .. })
+        ));
+
+        let spans = span_rows(&[span_row(1, 0, 1, 1)]);
+        let empty = spans.slice(0, 0).unwrap();
+        assert!(matches!(
+            write_file_batch(FileTable::Spans, 0, &[Arc::new(empty)]).unwrap_err(),
+            ParquetWriteError::Invalid { .. }
+        ));
+        assert!(matches!(
+            write_file_batch(FileTable::Spans, 0, &[Arc::new(scores)]).unwrap_err(),
+            ParquetWriteError::Invalid { .. }
+        ));
+        assert!(matches!(
+            write_file_batch(FileTable::Spans, 2, &[Arc::new(spans)]).unwrap_err(),
+            ParquetWriteError::Invalid { .. }
+        ));
+    }
+
     #[tokio::test]
     async fn verify_parquet_file_reports_all_verdicts_and_mid_page_corruption() {
-        let rb = span_rows(&[
+        let col = Arc::new(span_rows(&[
             span_row(1, 1, 10, 100),
             span_row(2, 2, 20, 200),
             span_row(3, 3, 30, 300),
-        ]);
-        let col = Arc::new(record_batch_to_column(&rb).unwrap());
+        ]));
         let written = write_file_batch(FileTable::Spans, 0, &[col]).unwrap();
         let path_str = "tables/spans/test.parquet";
         let meta = file_meta(FileTable::Spans, path_str, &written);
@@ -1791,21 +2215,16 @@ mod tests {
         let f1 = write_file_batch(
             FileTable::Spans,
             0,
-            &[Arc::new(
-                record_batch_to_column(&span_rows(&[span_row(1, 1, 30, 100)])).unwrap(),
-            )],
+            &[Arc::new(span_rows(&[span_row(1, 1, 30, 100)]))],
         )
         .unwrap();
         let f2 = write_file_batch(
             FileTable::Spans,
             0,
-            &[Arc::new(
-                record_batch_to_column(&span_rows(&[
-                    span_row(2, 1, 10, 100),
-                    span_row(3, 1, 20, 100),
-                ]))
-                .unwrap(),
-            )],
+            &[Arc::new(span_rows(&[
+                span_row(2, 1, 10, 100),
+                span_row(3, 1, 20, 100),
+            ]))],
         )
         .unwrap();
 
@@ -1865,13 +2284,16 @@ mod tests {
 
     #[tokio::test]
     async fn read_trace_anchors_prunes_row_groups_and_preserves_store_error() {
-        let rb1 = trace_batch(&[span_row(1, 1, 100, 10)]);
-        let rb2 = trace_batch(&[span_row(2, 2, 200, 500)]);
+        let b1 = trace_batch(&[span_row(1, 1, 100, 10)]);
+        let b2 = trace_batch(&[span_row(2, 2, 200, 500)]);
+        let schema = arrow_traces_schema();
+        let rb1 = batch_to_record_batch(&b1, &schema).unwrap();
+        let rb2 = batch_to_record_batch(&b2, &schema).unwrap();
         let mut buf = Vec::new();
         let props = WriterProperties::builder()
             .set_statistics_enabled(EnabledStatistics::Page)
             .build();
-        let mut aw = ArrowWriter::try_new(&mut buf, traces_schema(), Some(props)).unwrap();
+        let mut aw = ArrowWriter::try_new(&mut buf, schema, Some(props)).unwrap();
         aw.write(&rb1).unwrap();
         aw.flush().unwrap();
         aw.write(&rb2).unwrap();
@@ -1988,8 +2410,7 @@ mod tests {
 
     #[tokio::test]
     async fn negative_offsets_and_truncated_rg_columns_return_corrupt_without_panicking() {
-        let traces_rb = trace_batch(&[span_row(1, 1, 100, 10)]);
-        let traces_col = Arc::new(record_batch_to_column(&traces_rb).unwrap());
+        let traces_col = Arc::new(trace_batch(&[span_row(1, 1, 100, 10)]));
         let written = write_file_batch(FileTable::Traces, 0, &[traces_col]).unwrap();
 
         let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
@@ -2131,8 +2552,7 @@ mod tests {
 
     #[tokio::test]
     async fn zero_length_byte_range_and_rle_bomb_are_corrupt_not_unavailable() {
-        let traces_rb = trace_batch(&[span_row(1, 1, 100, 10)]);
-        let traces_col = Arc::new(record_batch_to_column(&traces_rb).unwrap());
+        let traces_col = Arc::new(trace_batch(&[span_row(1, 1, 100, 10)]));
         let written = write_file_batch(FileTable::Traces, 0, &[traces_col]).unwrap();
 
         let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
@@ -2395,8 +2815,7 @@ mod tests {
                 )
             })
             .collect();
-        let rb = trace_batch(&spans_vec);
-        let col_batch = Arc::new(record_batch_to_column(&rb).unwrap());
+        let col_batch = Arc::new(trace_batch(&spans_vec));
         let written = write_file_batch(FileTable::Traces, 0, &[col_batch]).unwrap();
         let meta = file_meta(FileTable::Traces, "tables/traces/chunked.parquet", &written);
         store

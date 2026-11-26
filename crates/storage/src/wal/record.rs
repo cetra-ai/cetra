@@ -216,7 +216,7 @@ mod tests {
     use cetra_column::{
         DataType, DictColumn, Field, FlatColumn, FlatData, RleColumn, ScalarValue, Schema,
     };
-    use cetra_core::batch::{scores_to_record_batch, spans_to_record_batch};
+    use cetra_core::batch::{scores_to_batch, spans_to_batch};
     use cetra_core::enums::{ScoreSource, SpanKind, SpanStatus};
     use cetra_core::ids::{ProjectId, SpanId, TraceId};
     use cetra_core::schema::spans as span_cols;
@@ -224,7 +224,6 @@ mod tests {
     use cetra_core::span::{Span, SpanEvent};
     use proptest::prelude::*;
 
-    use crate::column_bridge::record_batch_to_column;
     use crate::wal::{sample_span_batch, segment_name};
 
     use super::*;
@@ -350,17 +349,15 @@ mod tests {
     }
 
     fn spans_batch() -> Batch {
-        let rb = spans_to_record_batch(&[span("root", false), span("chat", true)]).unwrap();
-        record_batch_to_column(&rb).unwrap()
+        spans_to_batch(&[span("root", false), span("chat", true)]).unwrap()
     }
 
     fn scores_batch() -> Batch {
-        let rb = scores_to_record_batch(&[score(false), score(true)]).unwrap();
-        record_batch_to_column(&rb).unwrap()
+        scores_to_batch(&[score(false), score(true)]).unwrap()
     }
 
     fn sample_span_col_batch() -> Batch {
-        record_batch_to_column(&sample_span_batch()).unwrap()
+        sample_span_batch()
     }
 
     fn round_trip(table: Table, batch: &Batch) {

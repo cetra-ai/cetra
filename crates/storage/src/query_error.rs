@@ -4,13 +4,7 @@
 //! failures carry their message on [`RunError::Failed`], which is returned to the
 //! caller and never logged. Callers that log use [`RunError::kind`] (D94).
 
-use std::error::Error as StdError;
-use std::io;
-
-use datafusion::arrow::error::ArrowError;
-use datafusion::error::DataFusionError;
-
-use crate::query_text::{cap_message, planning_failure};
+use crate::error::EngineError;
 
 /// 1-based line and column, counted in characters (spec 09).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -61,102 +55,11 @@ pub enum RunError {
     /// The server maps this to 422 `query_too_large`.
     #[error("the query needed more memory or temporary disk space than allowed")]
     TooLarge,
-    /// DataFusion failed on something that is not the caller's fault.
+    /// The query engine failed on something that is not the caller's fault.
     ///
     /// Logged by kind only.
     #[error("internal query error")]
-    Internal(#[source] DataFusionError),
-}
-
-/// Map a DataFusion error to the caller's [`RunError`].
-///
-/// `Context`, `Shared` and `Diagnostic` are wrappers. The loop unwraps all
-/// three before matching the root. `find_root` walks `source()`, which does
-/// cover `Diagnostic` in 55.2, but the match stays here so a future wrapper
-/// change is visible.
-pub(crate) fn classify(error: DataFusionError) -> RunError {
-    let root = root(&error);
-    match root {
-        DataFusionError::ResourcesExhausted(_) => RunError::TooLarge,
-        _ if spill_exhausted(root) => RunError::TooLarge,
-        DataFusionError::Plan(_)
-        | DataFusionError::SchemaError(_, _)
-        | DataFusionError::SQL(_, _)
-        | DataFusionError::NotImplemented(_) => RunError::Invalid(planning_failure(&error)),
-        DataFusionError::Execution(_)
-        | DataFusionError::ArrowError(_, _)
-        | DataFusionError::Internal(_) => RunError::Failed(cap_message(&root.strip_backtrace())),
-        _ => RunError::Internal(error),
-    }
-}
-
-/// DataFusion's spill limit text (`datafusion-execution` 55.2, `FileSpillWriter::write`).
-/// `a_spill_past_the_cap_fails_as_too_large` breaks if an upgrade changes it.
-const SPILL_LIMIT_TEXT: &str = "exceeded the allowable limit";
-
-/// How deep the walk goes through wrapped errors. The chains seen are three or four long.
-const MAX_DEPTH: u8 = 8;
-
-/// The query ran out of spill space: DataFusion's spill limit, `ENOSPC` or `EDQUOT`, found in
-/// the I/O errors under `error`.
-fn spill_exhausted(error: &DataFusionError) -> bool {
-    exhausted_in_datafusion(error, 0)
-}
-
-fn exhausted_in_datafusion(error: &DataFusionError, depth: u8) -> bool {
-    if depth > MAX_DEPTH {
-        return false;
-    }
-    match error {
-        DataFusionError::IoError(error) => io_exhausted(error, depth + 1),
-        DataFusionError::ArrowError(arrow, _) => match arrow.as_ref() {
-            ArrowError::IoError(_, error) => io_exhausted(error, depth + 1),
-            ArrowError::ExternalError(source) => exhausted_in_source(source.as_ref(), depth + 1),
-            _ => false,
-        },
-        DataFusionError::External(source) => exhausted_in_source(source.as_ref(), depth + 1),
-        _ => false,
-    }
-}
-
-/// A wrapped error that is a DataFusion error or an I/O error.
-fn exhausted_in_source(source: &(dyn StdError + Send + Sync + 'static), depth: u8) -> bool {
-    if let Some(error) = source.downcast_ref::<DataFusionError>() {
-        return exhausted_in_datafusion(error, depth);
-    }
-    if let Some(error) = source.downcast_ref::<io::Error>() {
-        return io_exhausted(error, depth);
-    }
-    false
-}
-
-/// `kind()` is `StorageFull` or `QuotaExceeded`, or the text has `SPILL_LIMIT_TEXT`, or
-/// `get_ref()` holds a DataFusion error or an I/O error that does. `io::Error::source()`
-/// skips the custom payload, so `get_ref()` is the link followed.
-fn io_exhausted(error: &io::Error, depth: u8) -> bool {
-    if matches!(
-        error.kind(),
-        io::ErrorKind::StorageFull | io::ErrorKind::QuotaExceeded
-    ) || error.to_string().contains(SPILL_LIMIT_TEXT)
-    {
-        return true;
-    }
-    depth < MAX_DEPTH
-        && error
-            .get_ref()
-            .is_some_and(|inner| exhausted_in_source(inner, depth + 1))
-}
-
-/// The error under every `Context`, `Shared` and `Diagnostic` wrapper.
-pub(crate) fn root(error: &DataFusionError) -> &DataFusionError {
-    let mut current = error;
-    loop {
-        current = match current {
-            DataFusionError::Context(_, inner) | DataFusionError::Diagnostic(_, inner) => inner,
-            DataFusionError::Shared(inner) => inner.as_ref(),
-            _ => return current,
-        };
-    }
+    Internal(#[source] EngineError),
 }
 
 impl RunError {

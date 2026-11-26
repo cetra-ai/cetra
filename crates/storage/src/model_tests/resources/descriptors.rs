@@ -10,8 +10,8 @@ use std::process::Command;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::time::Duration;
 
-use arrow::array::RecordBatch;
 use bytesize::ByteSize;
+use cetra_column::Batch;
 use rustix::process::{Resource, Rlimit, getrlimit, setrlimit};
 
 use super::super::check::check_full;
@@ -184,7 +184,7 @@ impl Tally {
 }
 
 /// The next filler batch: `counter % 60_000` numbers it, and `counter % 60` picks its day.
-fn next_batch(counter: &AtomicU32) -> RecordBatch {
+fn next_batch(counter: &AtomicU32) -> Batch {
     let number = counter.fetch_add(1, Ordering::SeqCst);
     let batch = u16::try_from(number % 60_000).expect("a batch number below 60 000 fits in u16");
     let day_offset = u8::try_from(number % 60).expect("a day offset below 60 fits in u8");
@@ -210,7 +210,7 @@ async fn appender(
     let mut tally = Tally::default();
     while !stop.load(Ordering::SeqCst) && bytes.load(Ordering::SeqCst) < LOAD_BYTES {
         let batch = next_batch(counter);
-        let size = batch.get_array_memory_size() as u64;
+        let size = batch.memory_bytes() as u64;
         let outcome =
             match tokio::time::timeout(CALL_TIMEOUT, storage.append_spans(filler(), batch)).await {
                 Err(_elapsed) => panic!("an append wedged past {CALL_TIMEOUT:?}"),
@@ -468,12 +468,11 @@ fn open_error_kind(error: &OpenError) -> &'static str {
         OpenError::Catalog(_) => "catalog",
         OpenError::Anchor(_) => "anchor",
         OpenError::Objects(_) => "objects",
-        OpenError::Runtime => "runtime",
     }
 }
 
 /// The open child: builds the runtime, lowers the limit, then only opens the storage. An open
-/// that fails for a descriptor reason must be a clean refusal, so `Config`, `Locked`, `Runtime`
+/// that fails for a descriptor reason must be a clean refusal, so `Config`, `Locked`
 /// and `WalCorrupt` fail the child.
 fn open_child(limit: u64, dir: &Path) {
     let data = dir.join("data");
@@ -496,7 +495,7 @@ fn open_child(limit: u64, dir: &Path) {
         Err(error) => {
             let kind = open_error_kind(&error);
             match error {
-                OpenError::Config(_) | OpenError::Locked { .. } | OpenError::Runtime => {
+                OpenError::Config(_) | OpenError::Locked { .. } => {
                     panic!("opening at limit {limit} failed with {kind}: {error}")
                 }
                 OpenError::WalCorrupt { .. } => {

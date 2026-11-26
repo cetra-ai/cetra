@@ -3,16 +3,11 @@
 //! and `ScoresSource`).
 
 pub(crate) mod admission;
-#[cfg(test)]
-mod diff_tests;
 pub(crate) mod mem_source;
 pub(crate) mod metadata_cache;
 pub(crate) mod parquet_export;
 pub(crate) mod parquet_source;
 pub(crate) mod scores_source;
-pub(crate) mod sql;
-#[cfg(test)]
-mod sql_diff_tests;
 pub(crate) mod traces_source;
 
 use std::sync::Arc;
@@ -629,5 +624,633 @@ mod tests {
         let out = apply_tombstones_and_filters(batch, None, &filters, &ctx, Some(&mut res), before)
             .unwrap();
         assert_eq!(res.size(), before + out.memory_bytes());
+    }
+
+    mod integration_tests {
+        use std::collections::HashSet;
+        use std::ops::Range;
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::time::{Duration, Instant};
+
+        use bytes::Bytes;
+        use cetra_column::{Batch, CancelToken, GlobalPool, Schema};
+        use cetra_core::ids::ProjectId;
+        use cetra_core::schema::{scores, traces};
+        use cetra_core::score::Score;
+        use cetra_core::span::Span;
+        use cetra_query::exec::{
+            CollectSink, ControlFlow, ExecContext, ExecMetrics, PushSink, ScanSource, ScanSpec,
+            SortKey, SpillManager, WorkerPool, run_pipeline,
+        };
+        use cetra_query::{EvalContext, Expr, QueryError};
+        use chrono::NaiveDate;
+        use futures::stream::BoxStream;
+        use object_store::memory::InMemory;
+        use object_store::path::Path as ObjectPath;
+        use object_store::{
+            CopyOptions, GetOptions, GetResult, ListResult, MultipartUpload, ObjectMeta,
+            ObjectStore, PutMultipartOptions, PutOptions, PutPayload, PutResult,
+        };
+        use uuid::Uuid;
+
+        use crate::catalog::{FileId, FileMeta, FileTable};
+        use crate::deletion::{PendingDeletion, Tombstones};
+        use crate::engine::DAY_NS;
+        use crate::engine::admission::AsyncAdmissionPool;
+        use crate::engine::day_of_ns;
+        use crate::engine::metadata_cache::MetadataCache;
+        use crate::engine::scores_source::ScoresSource;
+        use crate::engine::traces_source::{TraceListMode, TracesSource};
+        use crate::file_format::write_file_batch;
+        use crate::memtable::Memtable;
+        use crate::partials::partials_from_spans_batch;
+        use crate::test_support::{score_row, score_rows, span_row, span_rows};
+        use crate::verify::{Suspects, VerifyQueue};
+        use crate::wal::Table;
+
+        fn project() -> ProjectId {
+            "018f6b4e-7c1a-7c1a-8c1a-000000000001".parse().unwrap()
+        }
+
+        fn day_of(ns: i64) -> NaiveDate {
+            day_of_ns(ns).unwrap()
+        }
+
+        fn make_ctx(
+            cap: usize,
+            spill_cap: u64,
+            partitions: usize,
+        ) -> (ExecContext, tempfile::TempDir) {
+            let dir = tempfile::tempdir().unwrap();
+            let ctx = ExecContext {
+                pool: GlobalPool::standalone(cap),
+                eval: EvalContext {
+                    now_ns: 0,
+                    cancel: CancelToken::new(),
+                },
+                spill: Arc::new(SpillManager::with_fixed_cap(
+                    dir.path().to_path_buf(),
+                    spill_cap,
+                )),
+                workers: Arc::new(WorkerPool::new(partitions.max(1)).unwrap()),
+                batch_size: 128,
+                target_partitions: partitions,
+                metrics: ExecMetrics::default(),
+            };
+            (ctx, dir)
+        }
+
+        fn run_source(
+            source: &dyn ScanSource,
+            spec: &ScanSpec,
+            ctx: &ExecContext,
+        ) -> Result<Vec<Batch>, QueryError> {
+            let partitions = source.open_partitions(spec, ctx)?;
+            if partitions.is_empty() {
+                return Ok(Vec::new());
+            }
+            let pool = Arc::clone(&ctx.pool);
+            let sinks = run_pipeline(
+                ctx,
+                partitions,
+                |_| Ok(Vec::new()),
+                move |_| Ok(CollectSink::new(&pool)),
+            )?;
+            Ok(sinks
+                .into_iter()
+                .flat_map(CollectSink::into_batches)
+                .collect())
+        }
+
+        fn write_table_file(
+            rt: &tokio::runtime::Runtime,
+            store: &Arc<dyn ObjectStore>,
+            table: FileTable,
+            day: NaiveDate,
+            path: &str,
+            batch: Batch,
+            deletions_applied_seq: u64,
+        ) -> Arc<FileMeta> {
+            use object_store::ObjectStoreExt;
+            let written = write_file_batch(table, 0, &[Arc::new(batch)]).unwrap();
+            let size = written.bytes.len() as u64;
+            rt.block_on(store.put(&ObjectPath::from(path), PutPayload::from(written.bytes)))
+                .unwrap();
+            Arc::new(FileMeta {
+                id: FileId::new_v7(),
+                table,
+                project: project(),
+                day,
+                level: 0,
+                path: path.to_owned(),
+                size,
+                footer_size: written.footer_size.max(8),
+                rows: written.rows,
+                min_time: written.min_time,
+                max_time: written.max_time,
+                min_ingest_time: written.min_ingest_time,
+                max_ingest_time: written.max_ingest_time,
+                fully_merged: false,
+                deletions_applied_seq,
+            })
+        }
+
+        fn col_expr(schema: &Schema, name: &str) -> Expr {
+            let idx = schema.index_of(name).unwrap();
+            Expr::Column {
+                index: idx,
+                name: name.to_owned(),
+                data_type: schema.fields()[idx].data_type.clone(),
+            }
+        }
+
+        struct HangingStore {
+            inner: Arc<dyn ObjectStore>,
+            hang: AtomicBool,
+        }
+
+        impl std::fmt::Debug for HangingStore {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.debug_struct("HangingStore")
+                    .field("hang", &self.hang.load(Ordering::Relaxed))
+                    .finish()
+            }
+        }
+
+        impl std::fmt::Display for HangingStore {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                write!(f, "HangingStore")
+            }
+        }
+
+        #[async_trait::async_trait]
+        impl ObjectStore for HangingStore {
+            async fn put_opts(
+                &self,
+                location: &ObjectPath,
+                payload: PutPayload,
+                opts: PutOptions,
+            ) -> object_store::Result<PutResult> {
+                self.inner.put_opts(location, payload, opts).await
+            }
+
+            async fn put_multipart_opts(
+                &self,
+                location: &ObjectPath,
+                opts: PutMultipartOptions,
+            ) -> object_store::Result<Box<dyn MultipartUpload>> {
+                self.inner.put_multipart_opts(location, opts).await
+            }
+
+            async fn get_opts(
+                &self,
+                location: &ObjectPath,
+                options: GetOptions,
+            ) -> object_store::Result<GetResult> {
+                self.inner.get_opts(location, options).await
+            }
+
+            async fn get_ranges(
+                &self,
+                location: &ObjectPath,
+                ranges: &[Range<u64>],
+            ) -> object_store::Result<Vec<Bytes>> {
+                if self.hang.load(Ordering::Relaxed) {
+                    futures::future::pending::<()>().await;
+                }
+                self.inner.get_ranges(location, ranges).await
+            }
+
+            fn delete_stream(
+                &self,
+                locations: BoxStream<'static, object_store::Result<ObjectPath>>,
+            ) -> BoxStream<'static, object_store::Result<ObjectPath>> {
+                self.inner.delete_stream(locations)
+            }
+
+            fn list(
+                &self,
+                prefix: Option<&ObjectPath>,
+            ) -> BoxStream<'static, object_store::Result<ObjectMeta>> {
+                self.inner.list(prefix)
+            }
+
+            async fn list_with_delimiter(
+                &self,
+                prefix: Option<&ObjectPath>,
+            ) -> object_store::Result<ListResult> {
+                self.inner.list_with_delimiter(prefix).await
+            }
+
+            async fn copy_opts(
+                &self,
+                from: &ObjectPath,
+                to: &ObjectPath,
+                options: CopyOptions,
+            ) -> object_store::Result<()> {
+                self.inner.copy_opts(from, to, options).await
+            }
+        }
+
+        #[test]
+        fn spill_under_tight_memory_traces_and_scores() {
+            struct RowCountSink {
+                rows: usize,
+            }
+
+            impl PushSink for RowCountSink {
+                fn consume(&mut self, batch: Batch) -> Result<ControlFlow, QueryError> {
+                    self.rows += batch.num_rows();
+                    Ok(ControlFlow::Continue)
+                }
+            }
+
+            fn count_source_rows(
+                source: &dyn ScanSource,
+                spec: &ScanSpec,
+                ctx: &ExecContext,
+            ) -> Result<(usize, u64), QueryError> {
+                let partitions = source.open_partitions(spec, ctx)?;
+                if partitions.is_empty() {
+                    return Ok((0, 0));
+                }
+                let spilled_after_open = ctx.spill.spilled_bytes();
+                let sinks = run_pipeline(
+                    ctx,
+                    partitions,
+                    |_| Ok(Vec::new()),
+                    |_| Ok(RowCountSink { rows: 0 }),
+                )?;
+                Ok((sinks.into_iter().map(|s| s.rows).sum(), spilled_after_open))
+            }
+
+            let rt = tokio::runtime::Builder::new_multi_thread()
+                .worker_threads(2)
+                .enable_all()
+                .build()
+                .unwrap();
+            let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+            let cache = Arc::new(MetadataCache::new(1024 * 1024));
+            let suspects = Suspects::new(Arc::new(VerifyQueue::default()));
+
+            let base = 20_000 * DAY_NS;
+            let day = day_of(base);
+
+            let mut spans_vec: Vec<Span> = Vec::with_capacity(200);
+            let mut scores_vec: Vec<Score> = Vec::with_capacity(200);
+            for i in 1..=200_u16 {
+                let mut s = span_row(i, 1, base + i64::from(i) * 100, base + 10);
+                s.name = format!("trace-name-{:02}-{}", i % 16, "x".repeat(700));
+                spans_vec.push(s);
+
+                let mut sc = score_row(
+                    u128::from(i),
+                    i,
+                    base + 100,
+                    base + 200,
+                    base + 200,
+                    false,
+                    &format!("score-{:02}-{}", i % 16, "y".repeat(700)),
+                );
+                sc.reason = Some(format!("reason-{:02}-{}", i % 16, "z".repeat(700)));
+                scores_vec.push(sc);
+            }
+
+            let f_trace_a = write_table_file(
+                &rt,
+                &store,
+                FileTable::Traces,
+                day,
+                "tables/traces/spill_a.parquet",
+                partials_from_spans_batch(&span_rows(&spans_vec[..100])).unwrap(),
+                0,
+            );
+            let f_trace_b = write_table_file(
+                &rt,
+                &store,
+                FileTable::Traces,
+                day,
+                "tables/traces/spill_b.parquet",
+                partials_from_spans_batch(&span_rows(&spans_vec[100..])).unwrap(),
+                0,
+            );
+            let f_score_a = write_table_file(
+                &rt,
+                &store,
+                FileTable::Scores,
+                day,
+                "tables/scores/spill_a.parquet",
+                score_rows(&scores_vec[..100]),
+                0,
+            );
+            let f_score_b = write_table_file(
+                &rt,
+                &store,
+                FileTable::Scores,
+                day,
+                "tables/scores/spill_b.parquet",
+                score_rows(&scores_vec[100..]),
+                0,
+            );
+
+            // 1. Tight pool for TracesSource (96 KiB, 16-row batches).
+            let (mut tight_trace_ctx, _tdir) = make_ctx(96 * 1024, 16 * 1024 * 1024, 1);
+            tight_trace_ctx.batch_size = 16;
+            let traces_src = TracesSource::new(
+                Arc::clone(&store),
+                project(),
+                vec![f_trace_a, f_trace_b],
+                Memtable::new(Table::Spans).snapshot(),
+                0,
+                Arc::from([]),
+                Arc::clone(&cache),
+                suspects.clone(),
+                rt.handle().clone(),
+            )
+            .unwrap();
+            let t_schema = traces_src.schema();
+            let t_spec = ScanSpec {
+                projection: Some(vec![
+                    t_schema.index_of(traces::TRACE_ID).unwrap(),
+                    t_schema.index_of(traces::NAME).unwrap(),
+                ]),
+                ..Default::default()
+            };
+            let (total_traces, trace_spilled_bytes) =
+                count_source_rows(&traces_src, &t_spec, &tight_trace_ctx).unwrap();
+            assert_eq!(total_traces, 200);
+            assert!(
+                trace_spilled_bytes > 0,
+                "expected TracesSource ExternalSort to spill under tight 96 KiB pool"
+            );
+            assert_eq!(tight_trace_ctx.spill.spilled_bytes(), 0);
+            assert_eq!(tight_trace_ctx.pool.reserved(), 0);
+
+            // 2. Tight pool for ScoresSource (96 KiB, 16-row batches).
+            let (mut tight_score_ctx, _sdir) = make_ctx(96 * 1024, 16 * 1024 * 1024, 1);
+            tight_score_ctx.batch_size = 16;
+            let scores_src = ScoresSource::new(
+                Arc::clone(&store),
+                project(),
+                vec![f_score_a, f_score_b],
+                Memtable::new(Table::Scores).snapshot(),
+                None,
+                Arc::from([]),
+                cache,
+                suspects,
+                rt.handle().clone(),
+            )
+            .unwrap();
+            let s_schema = scores_src.schema();
+            let s_spec = ScanSpec {
+                projection: Some(vec![
+                    s_schema.index_of(scores::SCORE_ID).unwrap(),
+                    s_schema.index_of(scores::NAME).unwrap(),
+                    s_schema.index_of(scores::REASON).unwrap(),
+                ]),
+                ..Default::default()
+            };
+            let (total_scores, score_spilled_bytes) =
+                count_source_rows(&scores_src, &s_spec, &tight_score_ctx).unwrap();
+            assert_eq!(total_scores, 200);
+            assert!(
+                score_spilled_bytes > 0,
+                "expected ScoresSource ExternalSort to spill under tight 96 KiB pool"
+            );
+            assert_eq!(tight_score_ctx.spill.spilled_bytes(), 0);
+            assert_eq!(tight_score_ctx.pool.reserved(), 0);
+        }
+
+        #[test]
+        fn cancel_token_aborts_and_drains_synchronously_with_admission() {
+            let rt = tokio::runtime::Builder::new_multi_thread()
+                .worker_threads(2)
+                .enable_all()
+                .build()
+                .unwrap();
+            let inner_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+            let hanging = Arc::new(HangingStore {
+                inner: inner_store,
+                hang: AtomicBool::new(false),
+            });
+            let store: Arc<dyn ObjectStore> = hanging.clone();
+            let cache = Arc::new(MetadataCache::new(0));
+            let suspects = Suspects::new(Arc::new(VerifyQueue::default()));
+
+            let base = 20_000 * DAY_NS;
+            let day = day_of(base);
+            let f_trace = write_table_file(
+                &rt,
+                &store,
+                FileTable::Traces,
+                day,
+                "tables/traces/cancel.parquet",
+                partials_from_spans_batch(&span_rows(&[span_row(1, 1, base, base)])).unwrap(),
+                0,
+            );
+
+            let admission = AsyncAdmissionPool::new(1024 * 1024);
+            let held = rt
+                .block_on(admission.admit(1024 * 1024, 1024 * 1024, Duration::from_millis(50)))
+                .unwrap();
+            let busy_err = rt
+                .block_on(admission.admit(512 * 1024, 512 * 1024, Duration::from_millis(15)))
+                .unwrap_err();
+            assert!(matches!(busy_err, QueryError::Busy));
+            drop(held);
+
+            let scoped = rt
+                .block_on(admission.admit(64 * 1024, 1024 * 1024, Duration::from_millis(50)))
+                .unwrap();
+
+            let dir = tempfile::tempdir().unwrap();
+            let cancel_ctx = ExecContext {
+                pool: Arc::clone(&scoped),
+                eval: EvalContext {
+                    now_ns: 0,
+                    cancel: CancelToken::new(),
+                },
+                spill: Arc::new(SpillManager::with_fixed_cap(
+                    dir.path().to_path_buf(),
+                    16 * 1024 * 1024,
+                )),
+                workers: Arc::new(WorkerPool::new(2).unwrap()),
+                batch_size: 128,
+                target_partitions: 2,
+                metrics: ExecMetrics::default(),
+            };
+
+            let traces_src = TracesSource::new(
+                store,
+                project(),
+                vec![f_trace],
+                Memtable::new(Table::Spans).snapshot(),
+                0,
+                Arc::from([]),
+                cache,
+                suspects,
+                rt.handle().clone(),
+            )
+            .unwrap();
+
+            hanging.hang.store(true, Ordering::Relaxed);
+            let cancel = cancel_ctx.eval.cancel.clone();
+            std::thread::spawn(move || {
+                std::thread::sleep(Duration::from_millis(10));
+                cancel.cancel();
+            });
+
+            let t0 = Instant::now();
+            let err = run_source(&traces_src, &ScanSpec::default(), &cancel_ctx).unwrap_err();
+            assert!(matches!(err, QueryError::Cancelled));
+            assert!(
+                t0.elapsed() < Duration::from_secs(2),
+                "cancellation took {:?}",
+                t0.elapsed()
+            );
+            assert_eq!(cancel_ctx.spill.spilled_bytes(), 0);
+            assert_eq!(cancel_ctx.pool.reserved(), 0);
+            drop(cancel_ctx);
+            drop(scoped);
+            assert_eq!(admission.used(), 0);
+        }
+
+        #[test]
+        fn traces_and_scores_source_debug_is_privacy_safe() {
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap();
+            let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+            let cache = Arc::new(MetadataCache::new(1024));
+            let suspects = Suspects::new(Arc::new(VerifyQueue::default()));
+            let base = 20_000 * DAY_NS;
+
+            let mut s = span_row(1, 1, base, base + 100);
+            s.name = "secret-span-name".to_owned();
+            s.user_id = Some("alice-pii@example.com".to_owned());
+            s.session_id = Some("secret-session-xyz".to_owned());
+            s.input = Some("top-secret-prompt-content".to_owned());
+            s.output = Some("top-secret-completion".to_owned());
+
+            let mut spans_mt = Memtable::new(Table::Spans);
+            spans_mt.insert(project(), span_rows(&[s]), 1).unwrap();
+
+            let mut sc = score_row(1, 1, base, base, base, false, "secret-score-name");
+            sc.user_id = Some("bob-pii@example.com".to_owned());
+            sc.session_id = Some("secret-score-session".to_owned());
+            sc.reason = Some("secret-score-reason".to_owned());
+
+            let mut scores_mt = Memtable::new(Table::Scores);
+            scores_mt.insert(project(), score_rows(&[sc]), 1).unwrap();
+
+            let deletion = PendingDeletion {
+                id: Uuid::now_v7(),
+                seq: 1,
+                project: project(),
+                cutoff: base + 1_000,
+                registered_at: base + 1_000,
+                trace_ids: HashSet::new(),
+                users: ["erased-user-pii".to_owned()].into_iter().collect(),
+                sessions: ["erased-session-xyz".to_owned()].into_iter().collect(),
+            };
+            let tombstones = Tombstones::default().with(deletion);
+            let deletions = tombstones.for_project(project());
+
+            let traces_src = TracesSource::new(
+                Arc::clone(&store),
+                project(),
+                Vec::new(),
+                spans_mt.snapshot(),
+                60_000_000_000,
+                Arc::clone(&deletions),
+                Arc::clone(&cache),
+                suspects.clone(),
+                rt.handle().clone(),
+            )
+            .unwrap();
+            let widening_src = traces_src
+                .clone()
+                .with_list_mode(TraceListMode::Widening { fetch: 10 });
+            let schema = traces_src.schema();
+            let two_phase_src = traces_src.clone().with_list_mode(TraceListMode::TwoPhase {
+                sort_keys: vec![SortKey {
+                    expr: col_expr(&schema, traces::COST_TOTAL),
+                    descending: true,
+                    nulls_first: false,
+                }],
+                limit: 10,
+                offset: 0,
+            });
+
+            let scores_src = ScoresSource::new(
+                store,
+                project(),
+                Vec::new(),
+                scores_mt.snapshot(),
+                None,
+                deletions,
+                cache,
+                suspects,
+                rt.handle().clone(),
+            )
+            .unwrap();
+
+            let forbidden = [
+                "secret-span-name",
+                "alice-pii@example.com",
+                "secret-session-xyz",
+                "top-secret-prompt-content",
+                "top-secret-completion",
+                "secret-score-name",
+                "bob-pii@example.com",
+                "secret-score-session",
+                "secret-score-reason",
+                "erased-user-pii",
+                "erased-session-xyz",
+            ];
+
+            for dbg in [
+                format!("{traces_src:?}"),
+                format!("{widening_src:?}"),
+                format!("{two_phase_src:?}"),
+            ] {
+                assert!(dbg.contains("TracesSource"), "missing struct name: {dbg}");
+                assert!(dbg.contains("files: 0"), "missing file count: {dbg}");
+                assert!(dbg.contains("mem_batches: 1"), "missing mem count: {dbg}");
+                assert!(
+                    dbg.contains("deletions: 1"),
+                    "missing deletion count: {dbg}"
+                );
+                for secret in forbidden {
+                    assert!(!dbg.contains(secret), "Debug leaked `{secret}`: {dbg}");
+                }
+            }
+
+            let scores_dbg = format!("{scores_src:?}");
+            assert!(
+                scores_dbg.contains("ScoresSource"),
+                "missing struct name: {scores_dbg}"
+            );
+            assert!(
+                scores_dbg.contains("files: 0"),
+                "missing file count: {scores_dbg}"
+            );
+            assert!(
+                scores_dbg.contains("mem_batches: 1"),
+                "missing mem count: {scores_dbg}"
+            );
+            assert!(
+                scores_dbg.contains("deletions: 1"),
+                "missing deletion count: {scores_dbg}"
+            );
+            for secret in forbidden {
+                assert!(
+                    !scores_dbg.contains(secret),
+                    "Debug leaked `{secret}`: {scores_dbg}"
+                );
+            }
+        }
     }
 }

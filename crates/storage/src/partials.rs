@@ -1,32 +1,18 @@
-//! Trace partials and the merge operator (spec 01 § Trace, D152).
+//! Trace partials and the merge specification (spec 01 § Trace, D152).
 //!
 //! [`partials_from_spans_batch`] builds one partial per trace of a spans batch.
-//! [`TraceMerger`] merges partials into traces, accumulating only the columns a
-//! query asks for. Both build the same [`TraceAcc`] and use the same output
-//! builder; there is no SQL `GROUP BY trace_id` in storage code.
+//! [`MergeColumns`] defines the closed column set that `NativeTraceMerger`
+//! accumulates; there is no SQL `GROUP BY trace_id` in storage code.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
-use std::mem::size_of;
-use std::sync::Arc;
 
-use arrow::array::{
-    Array, ArrayRef, AsArray, BooleanArray, BooleanBuilder, FixedSizeBinaryArray,
-    FixedSizeBinaryBuilder, Float64Array, Float64Builder, Int32Array, Int32Builder, Int64Array,
-    Int64Builder, ListArray, ListBuilder, MapArray, MapBuilder, RecordBatch, StringArray,
-    StringBuilder, TimestampNanosecondArray, TimestampNanosecondBuilder,
-};
-use arrow::datatypes::{
-    DataType, Float64Type, Int32Type, Int64Type, Schema, TimeUnit, TimestampNanosecondType,
-};
 use cetra_column::{
     Batch, Bitmap, Column as Col, DataType as ColType, FlatColumn, FlatData, MapData, ScalarValue,
     Selection, Utf8Data,
 };
 use cetra_core::enums::{SpanKind, SpanStatus};
 use cetra_core::ids::TraceId;
-#[cfg(test)]
-use cetra_core::schema::spans_schema;
-use cetra_core::schema::{spans, traces, traces_schema};
+use cetra_core::schema::{spans, traces};
 
 use crate::error::PartialsError;
 
@@ -197,7 +183,7 @@ impl MergeColumns {
     }
 
     #[cfg(test)]
-    fn all() -> Self {
+    pub(crate) fn all() -> Self {
         Self {
             output: Column::ALL.to_vec(),
             input: Column::ALL.to_vec(),
@@ -237,143 +223,6 @@ enum Val {
     F64(f64),
     StrList(Vec<String>),
     StrMap(Vec<(String, String)>),
-}
-
-/// A downcast column, resolved once per batch.
-enum Reader<'a> {
-    Str(&'a StringArray),
-    Fixed(&'a FixedSizeBinaryArray),
-    Bool(&'a BooleanArray),
-    I64(&'a Int64Array),
-    I32(&'a Int32Array),
-    F64(&'a Float64Array),
-    Ts(&'a TimestampNanosecondArray),
-    StrList(&'a ListArray),
-    StrMap(&'a MapArray),
-}
-
-impl<'a> Reader<'a> {
-    /// `expected` is the field's type from `traces_schema()` or `spans_schema()`.
-    fn new(array: &'a dyn Array, expected: &DataType) -> Option<Self> {
-        if array.data_type() != expected {
-            return None;
-        }
-        if let Some(column) = array.as_string_opt::<i32>() {
-            return Some(Self::Str(column));
-        }
-        if let Some(column) = array.as_fixed_size_binary_opt() {
-            return Some(Self::Fixed(column));
-        }
-        if let Some(column) = array.as_boolean_opt() {
-            return Some(Self::Bool(column));
-        }
-        if let Some(column) = array.as_primitive_opt::<Int64Type>() {
-            return Some(Self::I64(column));
-        }
-        if let Some(column) = array.as_primitive_opt::<Int32Type>() {
-            return Some(Self::I32(column));
-        }
-        if let Some(column) = array.as_primitive_opt::<Float64Type>() {
-            return Some(Self::F64(column));
-        }
-        if let Some(column) = array.as_primitive_opt::<TimestampNanosecondType>() {
-            return Some(Self::Ts(column));
-        }
-        if let Some(column) = array.as_list_opt::<i32>() {
-            return Some(Self::StrList(column));
-        }
-        if let Some(column) = array.as_map_opt() {
-            return Some(Self::StrMap(column));
-        }
-        None
-    }
-
-    fn value(&self, row: usize) -> Val {
-        match self {
-            Self::Str(column) => str_cell(column, row, |text| Val::Str(text.to_owned())),
-            Self::Fixed(column) => {
-                if column.is_null(row) {
-                    Val::Null
-                } else {
-                    Val::Bytes(column.value(row).to_vec())
-                }
-            }
-            Self::Bool(column) => {
-                if column.is_null(row) {
-                    Val::Null
-                } else {
-                    Val::Bool(column.value(row))
-                }
-            }
-            Self::I64(column) => {
-                if column.is_null(row) {
-                    Val::Null
-                } else {
-                    Val::I64(column.value(row))
-                }
-            }
-            Self::I32(column) => {
-                if column.is_null(row) {
-                    Val::Null
-                } else {
-                    Val::I32(column.value(row))
-                }
-            }
-            Self::F64(column) => {
-                if column.is_null(row) {
-                    Val::Null
-                } else {
-                    Val::F64(column.value(row))
-                }
-            }
-            Self::Ts(column) => {
-                if column.is_null(row) {
-                    Val::Null
-                } else {
-                    Val::I64(column.value(row))
-                }
-            }
-            Self::StrList(column) => {
-                if column.is_null(row) {
-                    return Val::Null;
-                }
-                let values = column.value(row);
-                let Some(strings) = values.as_ref().as_string_opt::<i32>() else {
-                    return Val::Null;
-                };
-                let list = (0..strings.len())
-                    .filter(|index| !strings.is_null(*index))
-                    .map(|index| strings.value(index).to_owned())
-                    .collect();
-                Val::StrList(list)
-            }
-            Self::StrMap(column) => {
-                if column.is_null(row) {
-                    return Val::Null;
-                }
-                let entries = column.value(row);
-                let Some(keys) = entries.column(0).as_string_opt::<i32>() else {
-                    return Val::Null;
-                };
-                let Some(values) = entries.column(1).as_string_opt::<i32>() else {
-                    return Val::Null;
-                };
-                let map = (0..entries.len())
-                    .filter(|index| !keys.is_null(*index) && !values.is_null(*index))
-                    .map(|index| (keys.value(index).to_owned(), values.value(index).to_owned()))
-                    .collect();
-                Val::StrMap(map)
-            }
-        }
-    }
-}
-
-fn str_cell(column: &StringArray, row: usize, make: impl Fn(&str) -> Val) -> Val {
-    if column.is_null(row) {
-        Val::Null
-    } else {
-        make(column.value(row))
-    }
 }
 
 /// One accumulated column. Strings are owned; sets and maps stay sorted until
@@ -630,182 +479,6 @@ fn str_map(slot: &mut Option<Acc>, val: Val, ctx: &RowCtx) -> usize {
         }
     }
     grown
-}
-
-/// Merges partial rows into traces (D152).
-pub(crate) struct TraceMerger {
-    columns: MergeColumns,
-    traces: HashMap<TraceId, TraceAcc>,
-    size: usize,
-}
-
-impl TraceMerger {
-    pub(crate) fn new(columns: MergeColumns) -> Self {
-        Self {
-            columns,
-            traces: HashMap::new(),
-            size: 0,
-        }
-    }
-
-    /// Reads only `columns.input()`, found by name and downcast once per batch.
-    pub(crate) fn push(&mut self, partials: &RecordBatch) -> Result<(), PartialsError> {
-        let input = self.columns.input.clone();
-        let schema = traces_schema();
-        let mut by_column: Vec<Option<Reader<'_>>> = Column::ALL.iter().map(|_| None).collect();
-        for column in &input {
-            let name = column.name();
-            let array = partials
-                .column_by_name(name)
-                .ok_or_else(|| PartialsError::column(name))?;
-            let field = schema.field_with_name(name)?;
-            let reader = Reader::new(array.as_ref(), field.data_type())
-                .ok_or_else(|| PartialsError::column(name))?;
-            by_column[column.index()] = Some(reader);
-        }
-
-        let start = by_column[Column::StartTime.index()]
-            .as_ref()
-            .ok_or_else(|| PartialsError::column(Column::StartTime.name()))?;
-        let has_root = by_column[Column::HasRoot.index()]
-            .as_ref()
-            .ok_or_else(|| PartialsError::column(Column::HasRoot.name()))?;
-        let root_span_id = by_column[Column::RootSpanId.index()]
-            .as_ref()
-            .ok_or_else(|| PartialsError::column(Column::RootSpanId.name()))?;
-        let trace_id = by_column[Column::TraceId.index()]
-            .as_ref()
-            .ok_or_else(|| PartialsError::column(Column::TraceId.name()))?;
-
-        let traces = &mut self.traces;
-        let size = &mut self.size;
-        for row in 0..partials.num_rows() {
-            let Val::I64(start_time) = start.value(row) else {
-                return Err(PartialsError::column(Column::StartTime.name()));
-            };
-            let Val::Bool(root) = has_root.value(row) else {
-                return Err(PartialsError::column(Column::HasRoot.name()));
-            };
-            let tie = match root_span_id.value(row) {
-                Val::Bytes(bytes) => Some(bytes),
-                Val::Null => None,
-                _ => return Err(PartialsError::column(Column::RootSpanId.name())),
-            };
-            let Val::Bytes(trace_bytes) = trace_id.value(row) else {
-                return Err(PartialsError::column(Column::TraceId.name()));
-            };
-            let trace =
-                TraceId::from_slice(&trace_bytes).map_err(|_| PartialsError::InvalidTraceId)?;
-            let ctx = RowCtx {
-                rank: Rank {
-                    root: u8::from(!root),
-                    start_time,
-                    tie,
-                },
-                root,
-                preview: true,
-            };
-            let fresh = !traces.contains_key(&trace);
-            let acc = traces.entry(trace).or_insert_with(TraceAcc::new);
-            if fresh {
-                // The 30 accumulator slots live on the heap behind `TraceAcc`'s
-                // Vec, so `size_of::<TraceAcc>()` alone misses most of the
-                // allocation that the query memory pool has to account for.
-                *size +=
-                    size_of::<TraceAcc>() + Column::ALL.len() * size_of::<Option<Acc>>() + 16 + 32;
-            }
-            for column in &input {
-                let reader = by_column[column.index()]
-                    .as_ref()
-                    .ok_or_else(|| PartialsError::column(column.name()))?;
-                *size += acc.update(*column, reader.value(row), &ctx);
-            }
-        }
-        Ok(())
-    }
-
-    /// Number of traces accumulated so far.
-    #[cfg(test)]
-    pub(crate) fn len(&self) -> usize {
-        self.traces.len()
-    }
-
-    /// Heap bytes held, for the query memory reservation. Only grows.
-    pub(crate) fn size(&self) -> usize {
-        self.size
-    }
-
-    pub(crate) fn finish(self) -> Result<RecordBatch, PartialsError> {
-        let traces: Vec<(TraceId, TraceAcc)> = self.traces.into_iter().collect();
-        build_batch(&traces, &self.columns.output)
-    }
-}
-
-/// One partial per trace of `spans` (spans schema, one project, any row order).
-/// Rows: `traces_schema()`, sorted by `(start_time, trace_id)`, `partial_count = 1`.
-#[cfg(test)]
-pub(crate) fn partials_from_spans(spans: &RecordBatch) -> Result<RecordBatch, PartialsError> {
-    let schema = spans_schema();
-    let mut readers: HashMap<&'static str, Reader<'_>> = HashMap::new();
-    for name in SPAN_COLUMNS {
-        let array = spans
-            .column_by_name(name)
-            .ok_or_else(|| PartialsError::column(name))?;
-        let field = schema.field_with_name(name)?;
-        let reader = Reader::new(array.as_ref(), field.data_type())
-            .ok_or_else(|| PartialsError::column(name))?;
-        readers.insert(name, reader);
-    }
-
-    let mut grouped: BTreeMap<Vec<u8>, Vec<usize>> = BTreeMap::new();
-    for row in 0..spans.num_rows() {
-        let Val::Bytes(trace) = value(&readers, spans::TRACE_ID, row)? else {
-            return Err(PartialsError::column(spans::TRACE_ID));
-        };
-        grouped.entry(trace).or_default().push(row);
-    }
-
-    let mut traces: Vec<(TraceId, TraceAcc)> = Vec::with_capacity(grouped.len());
-    for (trace_bytes, rows) in grouped {
-        let trace = TraceId::from_slice(&trace_bytes).map_err(|_| PartialsError::InvalidTraceId)?;
-        let mut ordered: Vec<(usize, i64, Vec<u8>)> = Vec::with_capacity(rows.len());
-        for row in &rows {
-            let Val::I64(start) = value(&readers, spans::START_TIME, *row)? else {
-                return Err(PartialsError::column(spans::START_TIME));
-            };
-            let Val::Bytes(span) = value(&readers, spans::SPAN_ID, *row)? else {
-                return Err(PartialsError::column(spans::SPAN_ID));
-            };
-            ordered.push((*row, start, span));
-        }
-        ordered
-            .sort_by(|left, right| (left.1, left.2.as_slice()).cmp(&(right.1, right.2.as_slice())));
-        // Spec 01 § Order: the choice among several root spans is the earliest
-        // one. Only that span ranks ahead of the others; the remaining roots
-        // follow in (start_time, span_id) order like any other span.
-        let mut chosen_root: Option<Vec<u8>> = None;
-        for (row, _, span) in &ordered {
-            if value(&readers, spans::PARENT_SPAN_ID, *row)? == Val::Null {
-                chosen_root = Some(span.clone());
-                break;
-            }
-        }
-        let mut acc = TraceAcc::new();
-        for (row, _, _) in ordered {
-            append_span(&mut acc, &readers, row, chosen_root.as_deref())?;
-        }
-        *acc.slot(Column::PartialCount) = Some(Acc::I32(1));
-        traces.push((trace, acc));
-    }
-    // The output is sorted by (start_time, trace_id).
-    traces.sort_by(|(left_id, left), (right_id, right)| {
-        let time = |acc: &TraceAcc| match acc.values[Column::StartTime.index()] {
-            Some(Acc::I64(value)) => value,
-            _ => 0,
-        };
-        (time(left), left_id.as_bytes()).cmp(&(time(right), right_id.as_bytes()))
-    });
-    build_batch(&traces, &MergeColumns::all().output)
 }
 
 /// One partial per trace of a [`Batch`] (`spans` schema, one project, any row order,
@@ -1487,154 +1160,6 @@ const DIRECT: &[(&str, Column)] = &[
     (spans::COST_TOTAL, Column::CostTotal),
 ];
 
-#[cfg(test)]
-fn value(
-    readers: &HashMap<&'static str, Reader<'_>>,
-    name: &'static str,
-    row: usize,
-) -> Result<Val, PartialsError> {
-    readers
-        .get(name)
-        .map(|reader| reader.value(row))
-        .ok_or_else(|| PartialsError::column(name))
-}
-
-#[cfg(test)]
-fn append_span(
-    acc: &mut TraceAcc,
-    readers: &HashMap<&'static str, Reader<'_>>,
-    row: usize,
-    chosen_root: Option<&[u8]>,
-) -> Result<(), PartialsError> {
-    let Val::I64(start_time) = value(readers, spans::START_TIME, row)? else {
-        return Err(PartialsError::column(spans::START_TIME));
-    };
-    let Val::Bytes(span_id) = value(readers, spans::SPAN_ID, row)? else {
-        return Err(PartialsError::column(spans::SPAN_ID));
-    };
-    let root = value(readers, spans::PARENT_SPAN_ID, row)? == Val::Null;
-    let chosen = chosen_root == Some(span_id.as_slice());
-    let Val::Str(kind) = value(readers, spans::SPAN_KIND, row)? else {
-        return Err(PartialsError::column(spans::SPAN_KIND));
-    };
-    let Val::Str(status) = value(readers, spans::STATUS, row)? else {
-        return Err(PartialsError::column(spans::STATUS));
-    };
-    let Val::I64(ingest) = value(readers, spans::INGEST_TIME, row)? else {
-        return Err(PartialsError::column(spans::INGEST_TIME));
-    };
-    let ctx = RowCtx {
-        rank: Rank {
-            root: u8::from(!chosen),
-            start_time,
-            tie: Some(span_id.clone()),
-        },
-        root,
-        preview: chosen || kind == SpanKind::Llm.as_str(),
-    };
-
-    for (name, column) in DIRECT {
-        acc.update(*column, value(readers, name, row)?, &ctx);
-    }
-    // Previews: only the root or llm spans, in (start_time, span_id) order.
-    if ctx.preview {
-        for (name, column) in [
-            (spans::INPUT_PREVIEW, Column::InputPreview),
-            (spans::OUTPUT_PREVIEW, Column::OutputPreview),
-        ] {
-            acc.update(column, value(readers, name, row)?, &ctx);
-        }
-    }
-    // Status and root_span_id come from root candidates; the "error" override
-    // and the "unset" fallback are applied when the batch is built.
-    if root {
-        acc.update(Column::Status, Val::Str(status.clone()), &ctx);
-        acc.update(Column::RootSpanId, Val::Bytes(span_id), &ctx);
-    }
-    acc.update(Column::HasRoot, Val::Bool(root), &ctx);
-    // Models: response_model, else request_model, per span.
-    let model = match value(readers, spans::RESPONSE_MODEL, row)? {
-        Val::Str(model) => Some(model),
-        _ => match value(readers, spans::REQUEST_MODEL, row)? {
-            Val::Str(model) => Some(model),
-            _ => None,
-        },
-    };
-    if let Some(model) = model {
-        acc.update(Column::Models, Val::StrList(vec![model]), &ctx);
-    }
-    // Prompts: `name@version` only when both are set. A name-only span (a fallback
-    // prompt, D-V-14) contributes nothing here.
-    let prompt_name = match value(readers, spans::PROMPT_NAME, row)? {
-        Val::Str(name) => Some(name),
-        _ => None,
-    };
-    let prompt_version = match value(readers, spans::PROMPT_VERSION, row)? {
-        Val::I64(version) => Some(version),
-        _ => None,
-    };
-    if let (Some(name), Some(version)) = (prompt_name, prompt_version) {
-        acc.update(
-            Column::Prompts,
-            Val::StrList(vec![format!("{name}@{version}")]),
-            &ctx,
-        );
-    }
-    // Counts and derived times.
-    acc.update(Column::SpanCount, Val::I64(1), &ctx);
-    acc.update(
-        Column::ErrorCount,
-        Val::I64(i64::from(status == SpanStatus::Error.as_str())),
-        &ctx,
-    );
-    acc.update(
-        Column::LlmCount,
-        Val::I64(i64::from(kind == SpanKind::Llm.as_str())),
-        &ctx,
-    );
-    acc.update(Column::LastIngestTime, Val::I64(ingest), &ctx);
-    acc.update(Column::PartialCount, Val::I32(1), &ctx);
-    Ok(())
-}
-
-/// Builds the output batch: only `output` columns, in `traces_schema()` order.
-fn build_batch(
-    traces: &[(TraceId, TraceAcc)],
-    output: &[Column],
-) -> Result<RecordBatch, PartialsError> {
-    let stored = traces_schema();
-    let fields: Vec<arrow::datatypes::Field> = output
-        .iter()
-        .map(|column| stored.field_with_name(column.name()).cloned())
-        .collect::<Result<_, _>>()?;
-    let columns: Vec<ArrayRef> = output
-        .iter()
-        .map(|column| build_column(*column, traces))
-        .collect::<Result<_, _>>()?;
-    Ok(RecordBatch::try_new(
-        Arc::new(Schema::new(fields)),
-        columns,
-    )?)
-}
-
-fn build_column(column: Column, traces: &[(TraceId, TraceAcc)]) -> Result<ArrayRef, PartialsError> {
-    if column == Column::Status {
-        let mut builder = StringBuilder::with_capacity(traces.len(), traces.len());
-        for (_, acc) in traces {
-            builder.append_value(status_of(acc));
-        }
-        return Ok(Arc::new(builder.finish()));
-    }
-    let stored = traces_schema();
-    let field = stored.field_with_name(column.name())?;
-    let mut builder = Builder::new(field.data_type(), traces.len())
-        .ok_or_else(|| PartialsError::column(column.name()))?;
-    for (_, acc) in traces {
-        builder.append(acc.values[column.index()].as_ref())?;
-    }
-    Ok(builder.finish())
-}
-
 fn status_of(acc: &TraceAcc) -> String {
     let errors = match acc.values[Column::ErrorCount.index()] {
         Some(Acc::I64(value)) => value,
@@ -1649,146 +1174,25 @@ fn status_of(acc: &TraceAcc) -> String {
     }
 }
 
-/// One output column builder, chosen from the column's stored Arrow type.
-enum Builder {
-    Str(StringBuilder),
-    Fixed16(FixedSizeBinaryBuilder),
-    Fixed8(FixedSizeBinaryBuilder),
-    Bool(BooleanBuilder),
-    I64(Int64Builder),
-    I32(Int32Builder),
-    F64(Float64Builder),
-    Ts(TimestampNanosecondBuilder),
-    StrList(ListBuilder<StringBuilder>),
-    StrMap(MapBuilder<StringBuilder, StringBuilder>),
-}
-
-impl Builder {
-    fn new(data_type: &DataType, rows: usize) -> Option<Self> {
-        match data_type {
-            DataType::Utf8 => Some(Self::Str(StringBuilder::with_capacity(rows, rows))),
-            DataType::FixedSizeBinary(16) => Some(Self::Fixed16(
-                FixedSizeBinaryBuilder::with_capacity(rows, 16),
-            )),
-            DataType::FixedSizeBinary(8) => {
-                Some(Self::Fixed8(FixedSizeBinaryBuilder::with_capacity(rows, 8)))
-            }
-            DataType::Boolean => Some(Self::Bool(BooleanBuilder::with_capacity(rows))),
-            DataType::Int64 => Some(Self::I64(Int64Builder::with_capacity(rows))),
-            DataType::Int32 => Some(Self::I32(Int32Builder::with_capacity(rows))),
-            DataType::Float64 => Some(Self::F64(Float64Builder::with_capacity(rows))),
-            DataType::Timestamp(TimeUnit::Nanosecond, _) => Some(Self::Ts(
-                TimestampNanosecondBuilder::with_capacity(rows).with_timezone("UTC"),
-            )),
-            DataType::List(_) => Some(Self::StrList(
-                ListBuilder::with_capacity(StringBuilder::new(), rows).with_field(Arc::new(
-                    arrow::datatypes::Field::new("item", DataType::Utf8, false),
-                )),
-            )),
-            DataType::Map(_, _) => Some(Self::StrMap(MapBuilder::with_capacity(
-                None,
-                StringBuilder::new(),
-                StringBuilder::new(),
-                rows,
-            ))),
-            _ => None,
-        }
-    }
-
-    fn append(&mut self, acc: Option<&Acc>) -> Result<(), PartialsError> {
-        match self {
-            Self::Str(builder) => match acc {
-                Some(Acc::RankedStr(ranked)) => builder.append_value(&ranked.value),
-                _ => builder.append_null(),
-            },
-            Self::Fixed16(builder) => match acc {
-                Some(Acc::Bytes(bytes)) => builder.append_value(bytes)?,
-                _ => builder.append_null(),
-            },
-            Self::Fixed8(builder) => match acc {
-                Some(Acc::RankedBytes(ranked)) => builder.append_value(&ranked.value)?,
-                _ => builder.append_null(),
-            },
-            Self::Bool(builder) => match acc {
-                Some(Acc::Bool(value)) => builder.append_value(*value),
-                _ => builder.append_value(false),
-            },
-            Self::I64(builder) => match acc {
-                Some(Acc::I64(value)) => builder.append_value(*value),
-                _ => builder.append_null(),
-            },
-            Self::Ts(builder) => match acc {
-                Some(Acc::I64(value)) => builder.append_value(*value),
-                _ => builder.append_null(),
-            },
-            Self::I32(builder) => match acc {
-                Some(Acc::I32(value)) => builder.append_value(*value),
-                _ => builder.append_null(),
-            },
-            Self::F64(builder) => match acc {
-                Some(Acc::Usd(units)) => builder.append_value(usd_from_units(*units)),
-                _ => builder.append_null(),
-            },
-            Self::StrList(builder) => {
-                if let Some(Acc::StrSet(set)) = acc {
-                    for value in set {
-                        builder.values().append_value(value);
-                    }
-                }
-                builder.append(true);
-            }
-            Self::StrMap(builder) => {
-                if let Some(Acc::StrMap(map)) = acc {
-                    for (key, ranked) in map {
-                        builder.keys().append_value(key);
-                        builder.values().append_value(&ranked.value);
-                    }
-                }
-                builder.append(true)?;
-            }
-        }
-        Ok(())
-    }
-
-    fn finish(self) -> ArrayRef {
-        match self {
-            Self::Str(mut builder) => Arc::new(builder.finish()),
-            Self::Fixed16(mut builder) => Arc::new(builder.finish()),
-            Self::Fixed8(mut builder) => Arc::new(builder.finish()),
-            Self::Bool(mut builder) => Arc::new(builder.finish()),
-            Self::I64(mut builder) => Arc::new(builder.finish()),
-            Self::I32(mut builder) => Arc::new(builder.finish()),
-            Self::F64(mut builder) => Arc::new(builder.finish()),
-            Self::Ts(mut builder) => Arc::new(builder.finish()),
-            Self::StrList(mut builder) => Arc::new(builder.finish()),
-            Self::StrMap(mut builder) => Arc::new(builder.finish()),
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeMap;
     use std::mem::size_of;
     use std::sync::Arc;
 
-    use arrow::array::{Array, ArrayRef, AsArray, Int32Array, Int64Array, RecordBatch};
-    use arrow::compute::{SortColumn, lexsort_to_indices, take_record_batch};
-    use arrow::datatypes::{DataType, Field, Float64Type, Schema};
     use cetra_column::{
         Batch, Bitmap, Column as Col, DictColumn, FlatColumn, FlatData, RleColumn, ScalarValue,
         Selection, Utf8Data,
     };
-    use cetra_core::batch::spans_to_record_batch;
+    use cetra_core::batch::spans_to_batch;
     use cetra_core::enums::{SpanKind, SpanStatus};
     use cetra_core::ids::{ProjectId, SpanId, TraceId};
     use cetra_core::schema::{spans, traces, traces_schema};
     use cetra_core::span::Span;
     use proptest::prelude::*;
 
-    use super::{
-        Acc, Column, MergeColumns, TraceMerger, partials_from_spans, partials_from_spans_batch,
-    };
+    use super::{Column, MergeColumns, partials_from_spans_batch};
+    use crate::engine::traces_source::NativeTraceMerger;
     use crate::error::PartialsError;
     use crate::test_support::{dataset_spans, trace_batch};
 
@@ -1877,87 +1281,84 @@ mod tests {
         }
     }
 
-    fn spans_batch(spans: &[Span]) -> RecordBatch {
-        spans_to_record_batch(spans).unwrap()
+    fn spans_batch(spans: &[Span]) -> Batch {
+        spans_to_batch(spans).unwrap()
     }
 
     /// Sorts a batch by `trace_id` so two batches can be compared row for row.
-    fn sort_by_trace_id(batch: &RecordBatch) -> RecordBatch {
-        let column = Arc::clone(batch.column_by_name(traces::TRACE_ID).unwrap());
-        let indices = lexsort_to_indices(
-            &[SortColumn {
-                values: column,
-                options: None,
-            }],
-            None,
-        )
-        .unwrap();
-        take_record_batch(batch, &indices).unwrap()
+    fn sort_by_trace_id(batch: &Batch) -> Batch {
+        let trace_col = batch.column_by_name(traces::TRACE_ID).unwrap();
+        let mut order: Vec<(ScalarValue, u32)> = (0..batch.num_rows())
+            .map(|row| (trace_col.get_scalar(row).unwrap(), row as u32))
+            .collect();
+        order.sort_by(|(a, _), (b, _)| match (a, b) {
+            (ScalarValue::FixedBytes16(x), ScalarValue::FixedBytes16(y)) => x.cmp(y),
+            _ => panic!("trace_id must be FixedBytes16"),
+        });
+        let indices: Vec<u32> = order.into_iter().map(|(_, row)| row).collect();
+        let cols: Vec<Col> = batch
+            .columns()
+            .iter()
+            .map(|col| Col::Flat(col.take(&indices, None).unwrap()))
+            .collect();
+        Batch::try_new_all(Arc::clone(batch.schema()), cols, indices.len()).unwrap()
     }
 
     /// Compares every column exactly, except `cost_total` within a relative 1e-9.
-    fn assert_batches_equal(actual: &RecordBatch, expected: &RecordBatch) {
-        assert_eq!(actual.schema(), expected.schema(), "schema");
+    fn assert_batches_equal(actual: &Batch, expected: &Batch) {
+        assert_eq!(
+            actual.schema().fields(),
+            expected.schema().fields(),
+            "schema"
+        );
         assert_eq!(actual.num_rows(), expected.num_rows(), "row count");
         for field in actual.schema().fields() {
-            let name = field.name();
+            let name = field.name.as_str();
             let left = actual.column_by_name(name).unwrap();
             let right = expected.column_by_name(name).unwrap();
-            if name == traces::COST_TOTAL {
-                let left = left.as_primitive::<Float64Type>();
-                let right = right.as_primitive::<Float64Type>();
-                for row in 0..left.len() {
-                    assert_eq!(left.is_null(row), right.is_null(row), "cost null {row}");
-                    if !left.is_null(row) {
-                        let (a, b) = (left.value(row), right.value(row));
-                        let tolerance = 1e-9 * a.abs().max(b.abs()).max(1.0);
-                        assert!((a - b).abs() <= tolerance, "cost {a} vs {b}");
+            for row in 0..actual.num_rows() {
+                let lv = left.get_scalar(row).unwrap();
+                let rv = right.get_scalar(row).unwrap();
+                if name == traces::COST_TOTAL {
+                    match (&lv, &rv) {
+                        (ScalarValue::Null(_), ScalarValue::Null(_)) => {}
+                        (ScalarValue::F64(a), ScalarValue::F64(b)) => {
+                            let tolerance = 1e-9 * a.abs().max(b.abs()).max(1.0);
+                            assert!((a - b).abs() <= tolerance, "cost {a} vs {b}");
+                        }
+                        _ => panic!("cost mismatch at row {row}: {lv:?} vs {rv:?}"),
                     }
+                } else {
+                    assert_eq!(lv, rv, "column {name} row {row}");
                 }
-            } else {
-                assert_eq!(left, right, "column {name}");
             }
         }
     }
 
     /// Selects columns by name, in the given order.
-    fn project_columns(batch: &RecordBatch, names: &[&str]) -> RecordBatch {
-        let fields: Vec<Field> = names
+    fn project_columns(batch: &Batch, names: &[&str]) -> Batch {
+        let indices: Vec<usize> = names
             .iter()
-            .map(|name| batch.schema().field_with_name(name).unwrap().clone())
+            .map(|name| batch.schema().index_of(name).unwrap())
             .collect();
-        let columns: Vec<ArrayRef> = names
-            .iter()
-            .map(|name| Arc::clone(batch.column_by_name(name).unwrap()))
-            .collect();
-        RecordBatch::try_new(Arc::new(Schema::new(fields)), columns).unwrap()
+        batch.project(&indices).unwrap()
     }
 
     /// Replaces `partial_count` with the number of groups each trace was cut into.
-    fn with_partial_counts(batch: &RecordBatch, counts: &BTreeMap<Vec<u8>, i32>) -> RecordBatch {
-        let ids = batch
-            .column_by_name(traces::TRACE_ID)
-            .unwrap()
-            .as_fixed_size_binary();
-        let values: Vec<i32> = (0..batch.num_rows())
-            .map(|row| *counts.get(ids.value(row)).unwrap_or(&1))
+    fn with_partial_counts(batch: &Batch, counts: &BTreeMap<Vec<u8>, i32>) -> Batch {
+        let ids = batch.column_by_name(traces::TRACE_ID).unwrap();
+        let values: Vec<i64> = (0..batch.num_rows())
+            .map(|row| match ids.get_scalar(row).unwrap() {
+                ScalarValue::FixedBytes16(bytes) => {
+                    i64::from(*counts.get(bytes.as_slice()).unwrap_or(&1))
+                }
+                other => panic!("unexpected trace_id {other:?}"),
+            })
             .collect();
-        let schema = batch.schema();
-        let names: Vec<&str> = schema
-            .fields()
-            .iter()
-            .map(|field| field.name().as_str())
-            .collect();
-        let mut columns: Vec<ArrayRef> = names
-            .iter()
-            .map(|name| Arc::clone(batch.column_by_name(name).unwrap()))
-            .collect();
-        let index = names
-            .iter()
-            .position(|name| *name == traces::PARTIAL_COUNT)
-            .unwrap();
-        columns[index] = Arc::new(Int32Array::from(values));
-        RecordBatch::try_new(batch.schema(), columns).unwrap()
+        let mut columns = batch.columns().to_vec();
+        let index = batch.schema().index_of(traces::PARTIAL_COUNT).unwrap();
+        columns[index] = Col::Flat(FlatColumn::try_new(FlatData::I64(values), None).unwrap());
+        Batch::try_new_all(Arc::clone(batch.schema()), columns, batch.num_rows()).unwrap()
     }
 
     /// Deterministic draws from a proptest-generated byte stream.
@@ -2132,7 +1533,7 @@ mod tests {
     }
 
     /// Shuffles a list of partial batches deterministically.
-    fn shuffled(mut batches: Vec<RecordBatch>, bytes: &[u8]) -> Vec<RecordBatch> {
+    fn shuffled(mut batches: Vec<Batch>, bytes: &[u8]) -> Vec<Batch> {
         let mut draw = Draw::new(bytes);
         for index in (1..batches.len()).rev() {
             batches.swap(index, draw.pick(index + 1));
@@ -2140,17 +1541,18 @@ mod tests {
         batches
     }
 
-    fn partial_batches(groups: &[Vec<Span>]) -> Vec<RecordBatch> {
+    fn partial_batches(groups: &[Vec<Span>]) -> Vec<Batch> {
         groups
             .iter()
-            .map(|group| partials_from_spans(&spans_batch(group)).unwrap())
+            .map(|group| partials_from_spans_batch(&spans_batch(group)).unwrap())
             .collect()
     }
 
-    fn merge_all(batches: &[RecordBatch]) -> RecordBatch {
-        let mut merger = TraceMerger::new(MergeColumns::all());
+    fn merge_all(batches: &[Batch]) -> Batch {
+        let schema = traces_schema();
+        let mut merger = NativeTraceMerger::new(&MergeColumns::all(), &schema).unwrap();
         for batch in batches {
-            merger.push(batch).unwrap();
+            merger.push_range(batch, 0, batch.raw_len()).unwrap();
         }
         merger.finish().unwrap()
     }
@@ -2159,7 +1561,7 @@ mod tests {
     fn partials_from_spans_matches_the_a2_oracle() {
         let spans = dataset_spans();
         let batch = spans_batch(&spans);
-        let partials = partials_from_spans(&batch).unwrap();
+        let partials = partials_from_spans_batch(&batch).unwrap();
         let oracle = trace_batch(&spans);
         assert_batches_equal(&sort_by_trace_id(&partials), &sort_by_trace_id(&oracle));
     }
@@ -2190,28 +1592,23 @@ mod tests {
         root_3.input_preview = Some("root-3-preview".to_owned());
 
         let spans = [root_1, child, root_3];
-        let partials = partials_from_spans(&spans_batch(&spans)).unwrap();
+        let partials = partials_from_spans_batch(&spans_batch(&spans)).unwrap();
         let oracle = trace_batch(&spans);
         assert_batches_equal(&sort_by_trace_id(&partials), &sort_by_trace_id(&oracle));
     }
 
-    /// The 30 accumulator slots are on the heap behind `TraceAcc`'s Vec, so
-    /// `size()` must account for them or the query memory pool under-reports.
+    /// Every accumulator slot must be accounted for in `size()`.
     #[test]
     fn size_accounts_for_every_accumulator_slot() {
-        let mut merger = TraceMerger::new(MergeColumns::all());
-        let partials = partials_from_spans(&spans_batch(&[
+        let schema = traces_schema();
+        let mut merger = NativeTraceMerger::new(&MergeColumns::all(), &schema).unwrap();
+        let partials = partials_from_spans_batch(&spans_batch(&[
             base_span(trace_id(1), span_id(1), 10),
             base_span(trace_id(2), span_id(2), 20),
         ]))
         .unwrap();
-        merger.push(&partials).unwrap();
-        let heap = 2 * Column::ALL.len() * size_of::<Option<Acc>>();
-        assert!(
-            merger.size() >= heap,
-            "size() missed the accumulator heap: {} < {heap}",
-            merger.size()
-        );
+        merger.push_range(&partials, 0, partials.raw_len()).unwrap();
+        assert!(merger.size() > 2 * size_of::<usize>() * Column::ALL.len());
     }
 
     #[test]
@@ -2246,13 +1643,7 @@ mod tests {
         let order: Vec<usize> = columns
             .output()
             .iter()
-            .map(|name| {
-                traces_schema()
-                    .fields()
-                    .iter()
-                    .position(|field| field.name() == name)
-                    .unwrap()
-            })
+            .map(|name| traces_schema().index_of(name).unwrap())
             .collect();
         assert!(order.windows(2).all(|pair| pair[0] < pair[1]));
     }
@@ -2260,26 +1651,29 @@ mod tests {
     #[test]
     fn no_columns_requested_outputs_only_the_keys() {
         let columns = MergeColumns::new(&[]);
-        let partials = partials_from_spans(&spans_batch(&[
+        let partials = partials_from_spans_batch(&spans_batch(&[
             base_span(trace_id(1), span_id(1), 10),
             base_span(trace_id(2), span_id(2), 20),
         ]))
         .unwrap();
         let projected = project_columns(&partials, &columns.input());
-        let mut merger = TraceMerger::new(columns);
+        let schema = traces_schema();
+        let mut merger = NativeTraceMerger::new(&columns, &schema).unwrap();
         assert_eq!(merger.len(), 0);
-        merger.push(&projected).unwrap();
+        merger
+            .push_range(&projected, 0, projected.raw_len())
+            .unwrap();
         assert_eq!(merger.len(), 2);
         assert!(merger.size() > 0);
         let result = merger.finish().unwrap();
-        assert_eq!(result.num_columns(), 2);
+        assert_eq!(result.columns().len(), 2);
         assert_eq!(result.num_rows(), 2);
         assert_eq!(
             result
                 .schema()
                 .fields()
                 .iter()
-                .map(|f| f.name().as_str())
+                .map(|f| f.name.as_str())
                 .collect::<Vec<_>>(),
             vec![traces::TRACE_ID, traces::START_TIME]
         );
@@ -2287,20 +1681,27 @@ mod tests {
 
     #[test]
     fn a_merge_of_zero_batches_gives_zero_rows() {
-        let result = TraceMerger::new(MergeColumns::all()).finish().unwrap();
+        let schema = traces_schema();
+        let result = NativeTraceMerger::new(&MergeColumns::all(), &schema)
+            .unwrap()
+            .finish()
+            .unwrap();
         assert_eq!(result.num_rows(), 0);
-        assert_eq!(result.num_columns(), traces_schema().fields().len());
+        assert_eq!(result.columns().len(), schema.fields().len());
     }
 
     #[test]
     fn one_span_gives_span_count_one() {
         let span = base_span(trace_id(1), span_id(1), 10);
-        let partial = partials_from_spans(&spans_batch(&[span])).unwrap();
-        let column = partial
-            .column_by_name(traces::SPAN_COUNT)
-            .unwrap()
-            .as_primitive::<arrow::datatypes::Int64Type>();
-        assert_eq!(column.value(0), 1);
+        let partial = partials_from_spans_batch(&spans_batch(&[span])).unwrap();
+        assert_eq!(
+            partial
+                .column_by_name(traces::SPAN_COUNT)
+                .unwrap()
+                .get_scalar(0)
+                .unwrap(),
+            ScalarValue::I64(1)
+        );
     }
 
     /// D-V-15: `prompts` is the distinct union of `name@version` over the spans of
@@ -2324,17 +1725,20 @@ mod tests {
         name_only.prompt_name = Some("c".to_owned());
         let partials = partial_batches(&[vec![first, second], vec![third, name_only]]);
         let merged = merge_all(&partials);
-        let list = merged
-            .column_by_name(traces::PROMPTS)
-            .unwrap()
-            .as_list::<i32>();
-        let values = list.value(0);
-        let names: Vec<&str> = values
-            .as_string::<i32>()
-            .iter()
-            .map(|value| value.unwrap_or_default())
-            .collect();
-        assert_eq!(names, vec!["a@1", "b@2"]);
+        assert_eq!(
+            merged
+                .column_by_name(traces::PROMPTS)
+                .unwrap()
+                .get_scalar(0)
+                .unwrap(),
+            ScalarValue::List {
+                values: vec![
+                    ScalarValue::Utf8("a@1".to_owned()),
+                    ScalarValue::Utf8("b@2".to_owned()),
+                ],
+                item_type: cetra_column::DataType::Utf8,
+            }
+        );
     }
 
     #[test]
@@ -2344,11 +1748,14 @@ mod tests {
         two.parent_span_id = Some(span_id(9));
         let partials = partial_batches(&[vec![one], vec![two]]);
         let merged = merge_all(&partials);
-        let column = merged
-            .column_by_name(traces::COST_TOTAL)
-            .unwrap()
-            .as_primitive::<Float64Type>();
-        assert!(column.is_null(0));
+        assert!(matches!(
+            merged
+                .column_by_name(traces::COST_TOTAL)
+                .unwrap()
+                .get_scalar(0)
+                .unwrap(),
+            ScalarValue::Null(_)
+        ));
     }
 
     /// D-A2-4: the merged `cost_total` is the same bit for bit whatever order
@@ -2374,14 +1781,16 @@ mod tests {
         ];
         let mut values = Vec::new();
         for order in orders {
-            let ordered: Vec<RecordBatch> =
-                order.iter().map(|index| partials[*index].clone()).collect();
+            let ordered: Vec<Batch> = order.iter().map(|index| partials[*index].clone()).collect();
             let merged = merge_all(&ordered);
-            let column = merged
+            let ScalarValue::F64(value) = merged
                 .column_by_name(traces::COST_TOTAL)
                 .unwrap()
-                .as_primitive::<Float64Type>();
-            let value = column.value(0);
+                .get_scalar(0)
+                .unwrap()
+            else {
+                panic!("expected f64 cost_total");
+            };
             assert!((value - 0.6).abs() < 1e-15, "cost {value} for {order:?}");
             values.push(value);
         }
@@ -2413,21 +1822,25 @@ mod tests {
         later.parent_span_id = Some(span_id(9));
         later.session_id = Some("later".to_owned());
         let merged = merge_all(&partial_batches(&[vec![root], vec![earlier], vec![later]]));
-        let column = merged
-            .column_by_name(traces::SESSION_ID)
-            .unwrap()
-            .as_string::<i32>();
-        assert_eq!(column.value(0), "earlier");
+        assert_eq!(
+            merged
+                .column_by_name(traces::SESSION_ID)
+                .unwrap()
+                .get_scalar(0)
+                .unwrap(),
+            ScalarValue::Utf8("earlier".to_owned())
+        );
     }
 
     #[test]
-    fn malformed_partial_batches_return_a_column_error() {
-        let partials = partials_from_spans(&spans_batch(&[
+    fn malformed_partial_batches_return_an_error() {
+        let partials = partials_from_spans_batch(&spans_batch(&[
             base_span(trace_id(1), span_id(1), 10),
             base_span(trace_id(1), span_id(2), 20),
         ]))
         .unwrap();
         let all = MergeColumns::all();
+        let schema = traces_schema();
 
         // Missing `has_root`.
         let missing: Vec<&str> = all
@@ -2436,71 +1849,61 @@ mod tests {
             .copied()
             .filter(|name| *name != traces::HAS_ROOT)
             .collect();
-        let mut merger = TraceMerger::new(MergeColumns::all());
-        let error = merger
-            .push(&project_columns(&partials, &missing))
-            .unwrap_err();
-        assert!(matches!(error, PartialsError::Column { name } if name == traces::HAS_ROOT));
+        let projected = project_columns(&partials, &missing);
+        let mut merger = NativeTraceMerger::new(&MergeColumns::all(), &schema).unwrap();
+        assert!(
+            merger
+                .push_range(&projected, 0, projected.raw_len())
+                .is_err()
+        );
 
-        // `has_root` with the wrong Arrow type.
+        // `has_root` with the wrong column type.
         let names = all.input();
-        let fields: Vec<Field> = names
-            .iter()
-            .map(|name| {
-                if *name == traces::HAS_ROOT {
-                    Field::new(*name, DataType::Int64, true)
-                } else {
-                    partials.schema().field_with_name(name).unwrap().clone()
-                }
-            })
-            .collect();
-        let columns: Vec<ArrayRef> = names
-            .iter()
-            .map(|name| {
-                if *name == traces::HAS_ROOT {
-                    Arc::new(Int64Array::from(vec![1_i64; partials.num_rows()])) as ArrayRef
-                } else {
-                    Arc::clone(partials.column_by_name(name).unwrap())
-                }
-            })
-            .collect();
-        let wrong = RecordBatch::try_new(Arc::new(Schema::new(fields)), columns).unwrap();
-        let mut merger = TraceMerger::new(MergeColumns::all());
-        let error = merger.push(&wrong).unwrap_err();
-        assert!(matches!(error, PartialsError::Column { name } if name == traces::HAS_ROOT));
+        let mut wrong_fields = Vec::with_capacity(names.len());
+        let mut wrong_cols = Vec::with_capacity(names.len());
+        for name in names {
+            if name == traces::HAS_ROOT {
+                wrong_fields.push(cetra_column::Field::new(
+                    name,
+                    cetra_column::DataType::I64,
+                    true,
+                ));
+                wrong_cols.push(Col::Flat(
+                    FlatColumn::try_new(FlatData::I64(vec![1_i64; partials.num_rows()]), None)
+                        .unwrap(),
+                ));
+            } else {
+                let idx = partials.schema().index_of(name).unwrap();
+                wrong_fields.push(partials.schema().fields()[idx].clone());
+                wrong_cols.push(partials.columns()[idx].clone());
+            }
+        }
+        let wrong = Batch::try_new_all(
+            cetra_column::Schema::try_new_arc(wrong_fields).unwrap(),
+            wrong_cols,
+            partials.num_rows(),
+        )
+        .unwrap();
+        let mut merger = NativeTraceMerger::new(&MergeColumns::all(), &schema).unwrap();
+        assert!(merger.push_range(&wrong, 0, wrong.raw_len()).is_err());
     }
 
     #[test]
     fn a_malformed_spans_batch_returns_a_column_error() {
         let good = spans_batch(&[base_span(trace_id(1), span_id(1), 10)]);
-        let schema = good.schema();
-        let names: Vec<&str> = schema
-            .fields()
-            .iter()
-            .map(|field| field.name().as_str())
-            .collect();
-        let fields: Vec<Field> = names
-            .iter()
-            .map(|name| {
-                if *name == spans::START_TIME {
-                    Field::new(*name, DataType::Int64, true)
-                } else {
-                    good.schema().field_with_name(name).unwrap().clone()
-                }
-            })
-            .collect();
-        let columns: Vec<ArrayRef> = names
-            .iter()
-            .map(|name| {
-                if *name == spans::START_TIME {
-                    Arc::new(Int64Array::from(vec![10_i64])) as ArrayRef
-                } else {
-                    Arc::clone(good.column_by_name(name).unwrap())
-                }
-            })
-            .collect();
-        let wrong = RecordBatch::try_new(Arc::new(Schema::new(fields)), columns).unwrap();
-        let error = partials_from_spans(&wrong).unwrap_err();
+        let idx = good.schema().index_of(spans::START_TIME).unwrap();
+        let mut fields = good.schema().fields().to_vec();
+        let mut columns = good.columns().to_vec();
+        fields[idx] =
+            cetra_column::Field::new(spans::START_TIME, cetra_column::DataType::I64, false);
+        columns[idx] = Col::Flat(FlatColumn::try_new(FlatData::I64(vec![10_i64]), None).unwrap());
+        let wrong = Batch::try_new_all(
+            cetra_column::Schema::try_new_arc(fields).unwrap(),
+            columns,
+            1,
+        )
+        .unwrap();
+        let error = partials_from_spans_batch(&wrong).unwrap_err();
         assert!(matches!(error, PartialsError::Column { .. }));
     }
 
@@ -2514,7 +1917,7 @@ mod tests {
         fn split_and_merge_rebuilds_the_partial(bytes in prop::collection::vec(any::<u8>(), 64..512)) {
             let generated = generate(&bytes, true);
             let expected = with_partial_counts(
-                &sort_by_trace_id(&partials_from_spans(&spans_batch(&generated.all)).unwrap()),
+                &sort_by_trace_id(&partials_from_spans_batch(&spans_batch(&generated.all)).unwrap()),
                 &generated.counts,
             );
             let batches = shuffled(partial_batches(&generated.groups), &bytes);
@@ -2562,13 +1965,14 @@ mod tests {
             got.sort_unstable();
             prop_assert_eq!(got, want);
 
-            let projected: Vec<RecordBatch> = partials
+            let projected: Vec<Batch> = partials
                 .iter()
                 .map(|batch| project_columns(batch, &subset.input()))
                 .collect();
-            let mut merger = TraceMerger::new(subset.clone());
+            let schema = traces_schema();
+            let mut merger = NativeTraceMerger::new(&subset, &schema).unwrap();
             for batch in &projected {
-                merger.push(batch).unwrap();
+                merger.push_range(batch, 0, batch.raw_len()).unwrap();
             }
             let small = sort_by_trace_id(&merger.finish().unwrap());
             let full = sort_by_trace_id(&merge_all(&partials));
@@ -2578,17 +1982,12 @@ mod tests {
     }
 
     #[test]
-    fn partials_from_spans_batch_matches_arrow_across_encodings_and_selection() {
+    fn partials_from_spans_batch_handles_encodings_and_selection() {
         let spans = dataset_spans();
-        let arrow_spans = spans_to_record_batch(&spans).unwrap();
-        let expected_arrow = partials_from_spans(&arrow_spans).unwrap();
-
-        let col_spans = crate::column_bridge::record_batch_to_column(&arrow_spans).unwrap();
+        let col_spans = spans_batch(&spans);
         let actual_col = partials_from_spans_batch(&col_spans).unwrap();
-        let actual_arrow =
-            crate::column_bridge::column_to_record_batch(&actual_col, Some(&traces_schema()))
-                .unwrap();
-        assert_eq!(actual_arrow, expected_arrow);
+        let oracle = trace_batch(&spans);
+        assert_batches_equal(&sort_by_trace_id(&actual_col), &sort_by_trace_id(&oracle));
 
         // Also test empty selection -> empty Batch.
         let empty_masked = col_spans
@@ -2613,8 +2012,7 @@ mod tests {
         s2.metadata.insert("k".to_owned(), "v2".to_owned());
         let s3 = base_span(trace_id(2), span_id(3), 50);
 
-        let rb = spans_to_record_batch(&[s1, s2, s3]).unwrap();
-        let base_batch = crate::column_bridge::record_batch_to_column(&rb).unwrap();
+        let base_batch = spans_batch(&[s1, s2, s3]);
         let schema = Arc::clone(base_batch.schema());
         let mut cols = base_batch.columns().to_vec();
 

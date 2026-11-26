@@ -38,9 +38,9 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use arrow::array::RecordBatch;
 use bytesize::ByteSize;
-use cetra_core::batch::spans_to_record_batch;
+use cetra_column::Batch;
+use cetra_core::batch::spans_to_batch;
 use cetra_core::enums::SpanKind;
 use cetra_core::ids::{ProjectId, TraceId};
 use cetra_core::span::Span;
@@ -168,10 +168,10 @@ async fn write_until(
         for span in &mut spans {
             span.ingest_time = now;
         }
-        let batch: RecordBatch = spans_to_record_batch(&spans).unwrap();
+        let batch: Batch = spans_to_batch(&spans).unwrap();
         counts.gen_nanos += generating.elapsed().as_nanos() as u64;
         drop(spans);
-        counts.arrow_bytes += batch.get_array_memory_size() as u64;
+        counts.arrow_bytes += batch.memory_bytes() as u64;
         loop {
             match storage.append_spans(project(), batch.clone()).await {
                 Ok(_) => break,

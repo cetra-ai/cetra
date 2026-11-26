@@ -76,15 +76,15 @@ pub(crate) async fn time_values(
 mod tests {
     use std::sync::Arc;
 
-    use arrow::array::RecordBatch;
+    use cetra_column::Batch;
     use object_store::ObjectStore;
     use object_store::ObjectStoreExt;
     use object_store::memory::InMemory;
 
     use super::{Slice, slice_count, slices, time_values};
     use crate::catalog::{FileMeta, FileTable};
-    use crate::parquet::write_file;
-    use crate::test_support::{span_row, span_rows};
+    use crate::file_format::write_file_batch;
+    use crate::test_support::{parquet_rows, span_row, span_rows};
 
     fn project() -> cetra_core::ids::ProjectId {
         "018f6b4e-7c1a-7c1a-8c1a-000000000001".parse().unwrap()
@@ -103,7 +103,8 @@ mod tests {
                 span_row(0, u8::try_from(index).unwrap_or(0), *start, start + 200)
             })
             .collect();
-        let written = write_file(FileTable::Spans, 0, &[Arc::new(span_rows(&spans))]).unwrap();
+        let written =
+            write_file_batch(FileTable::Spans, 0, &[Arc::new(span_rows(&spans))]).unwrap();
         let (path, id) =
             crate::objects::Objects::table_file_path(FileTable::Spans, project(), day(), 0);
         store
@@ -132,16 +133,8 @@ mod tests {
         }
     }
 
-    fn read_spans(bytes: bytes::Bytes) -> RecordBatch {
-        use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
-        let builder = ParquetRecordBatchReaderBuilder::try_new(bytes).unwrap();
-        let schema = Arc::clone(builder.schema());
-        let batches: Vec<RecordBatch> = builder
-            .build()
-            .unwrap()
-            .map(|batch| batch.unwrap())
-            .collect();
-        arrow::compute::concat_batches(&schema, &batches).unwrap()
+    fn read_spans(bytes: bytes::Bytes) -> Batch {
+        parquet_rows(bytes)
     }
 
     /// Reads the store back for one file, so the test can see what was written.

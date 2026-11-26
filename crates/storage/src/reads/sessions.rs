@@ -1,37 +1,34 @@
-//! Session list and session detail.
-//!
-//! A session's aggregates cover the traces inside the caller's window. Traces
-//! are scoped first (the `traces` view, the window on `start_time`, and the
-//! default exclusions). `references_environment` stays false: the sessions
-//! view has no environment column. Spec 05 says the same.
+//! Native query engine implementations of `session_list`, `session_detail`, and `session_extras`.
 
 use std::collections::BTreeSet;
+use std::fmt;
+use std::sync::Arc;
 use std::time::Duration;
 
-use arrow::array::{Array, AsArray};
-use arrow::compute::concat_batches;
-use arrow::record_batch::RecordBatch;
+use cetra_column::{Batch, DataType, Field, ScalarValue, Schema, Selection};
 use cetra_core::schema::{spans, traces};
-use datafusion::common::ScalarValue;
-use datafusion::error::DataFusionError;
-use datafusion::functions_aggregate::expr_fn::{max, sum};
-use datafusion::functions_window::expr_fn::row_number;
-use datafusion::logical_expr::{Expr, ExprFunctionExt, col, lit, when};
-use datafusion::prelude::DataFrame;
-use futures::StreamExt;
+use cetra_query::exec::hash_join::{HashJoinSpec, JoinType, execute_hash_join};
+use cetra_query::exec::streaming::{FilterOp, ProjectOp, TopKSink};
+use cetra_query::exec::{
+    AggExpr, AggFunc, BatchSource, CollectSink, ExecContext, HashAgg, HashAggSpec, IdLookupHint,
+    PartitionStream, ScanSource, ScanSpec, SortKey, TimeRangeHint,
+    run_pipeline as exec_run_pipeline,
+};
+use cetra_query::{BinaryOp, Expr, FilterView, QueryError, ScalarFn};
 
-use super::cursor::{after, assemble, decode, order_by};
-use super::deletions::utf8;
-use super::{ListScope, MAX_PAGE, Page, SortOrder, present, scoped_traces};
-use crate::filter::{Filter, FilterView};
-use crate::query_error::{RunError, classify};
-use crate::views::{QueryContext, TimeWindow, sessions_from_traces};
-
-const LIST: &str = "sessions";
-const TRACE_COUNT: &str = "trace_count";
-const TIES: &[&str] = &[traces::SESSION_ID];
-const RANK_FIRST: &str = "first_rank";
-const RANK_LAST: &str = "last_rank";
+use crate::query_error::RunError;
+use crate::reads::columns::{internal, physical_row, raw_string_at, require_col};
+use crate::reads::context::{
+    EngineContext, OperatorStream, query_err_to_run, run_err_to_query, spans_raw_schema,
+    traces_raw_schema, traces_view_projection, traces_view_schema,
+};
+use crate::reads::cursor::{self, Page};
+use crate::reads::scope::{
+    scoped_traces_spec, sessions_from_traces, sessions_from_traces_projection,
+};
+use crate::reads::scores_join::{apply_compiled_filter, compile_optional_filter};
+use crate::reads::{ListScope, MAX_PAGE, SortOrder};
+use crate::views::QueryContext;
 
 /// Output column of [`session_extras`]: traces of the session whose status is `error`.
 pub const SESSION_ERROR_TRACE_COUNT: &str = "error_trace_count";
@@ -40,116 +37,39 @@ pub const SESSION_FIRST_INPUT_PREVIEW: &str = "first_input_preview";
 /// Output column of [`session_extras`]: `output_preview` of the session's latest-starting trace.
 pub const SESSION_LAST_OUTPUT_PREVIEW: &str = "last_output_preview";
 
-/// Most turns `session_detail` returns.
+/// Most turns [`session_detail`] returns.
 pub const MAX_SESSION_TURNS: usize = 1000;
 
 /// Column a session list sorts by.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SessionSort {
-    /// `start_time`.
+    /// Start time of the session's first trace.
     StartTime,
-    /// `end_time`.
+    /// End time of the session's last trace.
     EndTime,
-    /// `trace_count`.
+    /// Number of traces in the session.
     TraceCount,
-    /// `cost_total`.
+    /// Total cost across the session's traces.
     CostTotal,
-}
-
-impl SessionSort {
-    fn column(self) -> &'static str {
-        match self {
-            Self::StartTime => traces::START_TIME,
-            Self::EndTime => traces::END_TIME,
-            Self::TraceCount => TRACE_COUNT,
-            Self::CostTotal => traces::COST_TOTAL,
-        }
-    }
 }
 
 /// One page of the sessions view.
 #[derive(Debug, Clone)]
 pub struct SessionListRequest<'a> {
-    /// Filter text over the sessions view. Empty or whitespace means no filter.
+    /// Filter expression evaluated over the `sessions` view.
     pub filter: Option<&'a str>,
-    /// Window and default exclusions, applied to the traces before aggregation.
+    /// Time window and default exclusions (`cetra-eval`, experiments).
     pub scope: ListScope,
     /// Sort column.
     pub sort: SessionSort,
-    /// Sort direction. Nulls are last.
+    /// Sort direction.
     pub order: SortOrder,
-    /// Rows to return, from 1 to [`super::MAX_PAGE`].
+    /// Page size, `1..=MAX_PAGE`.
     pub limit: usize,
-    /// Cursor from the previous page.
+    /// Opaque keyset cursor from the previous page.
     pub cursor: Option<&'a str>,
-    /// Time allowed for planning and running.
+    /// Time allowed for the query.
     pub timeout: Duration,
-}
-
-/// One session, its turns, and those turns' root payloads.
-#[derive(Debug)]
-pub struct SessionDetailData {
-    /// The sessions-view row.
-    pub session: RecordBatch,
-    /// Scoped traces, `start_time ASC, trace_id ASC`, at most [`MAX_SESSION_TURNS`].
-    pub turns: Vec<RecordBatch>,
-    /// Root span `trace_id`, `input`, `input_format`, `output`, `output_format`.
-    ///
-    /// Turns without a root have no row.
-    pub roots: Vec<RecordBatch>,
-    /// True when more than [`MAX_SESSION_TURNS`] traces were stored.
-    pub truncated: bool,
-}
-
-/// One page of sessions.
-///
-/// Traces are scoped first: the `traces` view, [`ListScope::window`] on
-/// `start_time`, and the default exclusions. The environment exclusion always
-/// applies, because a session filter cannot name `environment`. Aggregates
-/// then cover the traces inside that window.
-///
-/// # Errors
-///
-/// [`RunError::InvalidRequest`] for a bad limit or cursor. [`RunError::Invalid`]
-/// for filter text. [`RunError::Timeout`] when the query exceeds `timeout`.
-pub async fn session_list(
-    ctx: &QueryContext,
-    request: SessionListRequest<'_>,
-) -> Result<Page, RunError> {
-    if !(1..=MAX_PAGE).contains(&request.limit) {
-        return Err(RunError::InvalidRequest(
-            "limit must be between 1 and 1000".to_owned(),
-        ));
-    }
-    match tokio::time::timeout(request.timeout, list(ctx, &request)).await {
-        Err(_) => Err(RunError::Timeout),
-        Ok(result) => result,
-    }
-}
-
-/// The session, its turns, and their root payloads. No time window.
-///
-/// An unknown `session_id` is `Ok(None)`.
-///
-/// # Errors
-///
-/// [`RunError::Timeout`] when the query exceeds `timeout`.
-pub async fn session_detail(
-    ctx: &QueryContext,
-    session_id: &str,
-    include_eval: bool,
-    include_experiments: bool,
-    timeout: Duration,
-) -> Result<Option<SessionDetailData>, RunError> {
-    match tokio::time::timeout(
-        timeout,
-        load(ctx, session_id, include_eval, include_experiments),
-    )
-    .await
-    {
-        Err(_) => Err(RunError::Timeout),
-        Ok(result) => result,
-    }
 }
 
 /// Inputs of [`session_extras`].
@@ -163,315 +83,679 @@ pub struct SessionExtrasRequest<'a> {
     pub timeout: Duration,
 }
 
-/// Per-session extras of a page of sessions: [`SESSION_ERROR_TRACE_COUNT`],
-/// [`SESSION_FIRST_INPUT_PREVIEW`] and [`SESSION_LAST_OUTPUT_PREVIEW`].
-///
-/// Traces are scoped as the session list scopes them (window and default
-/// exclusions, no filter: the list's filter applies to sessions), restricted to
-/// `session_ids`. The earliest trace is the least `start_time`, then the least
-/// `trace_id`; the latest is the greatest of both. A session without traces in
-/// scope has no row.
-///
-/// # Errors
-///
-/// [`RunError::InvalidRequest`] for more than [`MAX_PAGE`] sessions.
-/// [`RunError::Timeout`] when the query exceeds `timeout`.
+const LIST: &str = "sessions";
+const TRACE_COUNT: &str = "trace_count";
+const TIES: &[&str] = &[traces::SESSION_ID];
+const ROOT_TRACE_ALIAS: &str = "__root_trace";
+const ROOT_SPAN_ALIAS: &str = "__root_span";
+
+/// One session, its turns, and those turns' root payloads.
+pub struct SessionDetailData {
+    /// The sessions-view row (11 columns).
+    pub session: Batch,
+    /// Scoped traces, `start_time ASC, trace_id ASC`, at most [`MAX_SESSION_TURNS`].
+    pub turns: Vec<Batch>,
+    /// Root span `trace_id`, `input`, `input_format`, `output`, `output_format`.
+    ///
+    /// Turns without a root have no row.
+    pub roots: Vec<Batch>,
+    /// True when more than [`MAX_SESSION_TURNS`] traces were stored.
+    pub truncated: bool,
+}
+
+impl fmt::Debug for SessionDetailData {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let turn_rows: usize = self.turns.iter().map(Batch::num_rows).sum();
+        let root_rows: usize = self.roots.iter().map(Batch::num_rows).sum();
+        f.debug_struct("SessionDetailData")
+            .field("session_rows", &self.session.num_rows())
+            .field("turns_batches", &self.turns.len())
+            .field("turn_rows", &turn_rows)
+            .field("roots_batches", &self.roots.len())
+            .field("root_rows", &root_rows)
+            .field("truncated", &self.truncated)
+            .finish()
+    }
+}
+
+fn session_sort_column(sort: SessionSort) -> &'static str {
+    match sort {
+        SessionSort::StartTime => traces::START_TIME,
+        SessionSort::EndTime => traces::END_TIME,
+        SessionSort::TraceCount => TRACE_COUNT,
+        SessionSort::CostTotal => traces::COST_TOTAL,
+    }
+}
+
+/// One page of sessions (`references_environment = false`, `FilterView::Sessions`).
+pub async fn session_list(
+    ctx: &QueryContext,
+    request: SessionListRequest<'_>,
+) -> Result<Page, RunError> {
+    let ctx = ctx.engine();
+    if !(1..=MAX_PAGE).contains(&request.limit) {
+        return Err(RunError::InvalidRequest(
+            "limit must be between 1 and 1000".to_owned(),
+        ));
+    }
+    let sort_col = session_sort_column(request.sort);
+    let compiled = compile_optional_filter(FilterView::Sessions, request.filter)?;
+    let cursor = match request.cursor {
+        Some(text) => {
+            let decoded = cursor::decode(text, LIST, sort_col, request.order)?;
+            if decoded.tie_len() != 1 {
+                return Err(RunError::InvalidRequest("invalid cursor".to_owned()));
+            }
+            Some(decoded)
+        }
+        None => None,
+    };
+    let mut spec = scoped_traces_spec(ctx, request.scope, false)?;
+    let traces_raw = traces_raw_schema()?;
+    spec.projection = Some(sessions_from_traces_projection(&traces_raw)?);
+
+    let ctx_c = ctx.clone();
+    let cursor_c = cursor.clone();
+    let limit = request.limit;
+    let order = request.order;
+
+    let (batches, _) = ctx
+        .run_with_ctx(request.timeout, move |exec_ctx| {
+            let proj_schema = ctx_c.traces.projected_schema(&spec)?;
+            let raw_streams = ctx_c.traces.open_partitions(&spec, exec_ctx)?;
+            if raw_streams.is_empty() {
+                return Ok(Vec::new());
+            }
+            let sessions = sessions_from_traces(raw_streams, &proj_schema, exec_ctx)?;
+            let mut streams = sessions.streams;
+            if let Some(filter) = &compiled {
+                streams =
+                    apply_compiled_filter(&ctx_c, exec_ctx, streams, &sessions.schema, filter)?;
+            }
+            if let Some(cur) = &cursor_c {
+                let pred = cursor::after_expr(cur, &sessions.schema, sort_col, TIES)
+                    .map_err(run_err_to_query)?;
+                streams = streams
+                    .into_iter()
+                    .map(|s| {
+                        let op = FilterOp::new(pred.clone(), exec_ctx.clone());
+                        Box::new(OperatorStream::new(s, vec![Box::new(op)], exec_ctx))
+                            as Box<dyn PartitionStream>
+                    })
+                    .collect();
+            }
+            if streams.is_empty() {
+                return Ok(Vec::new());
+            }
+            let sort_keys = cursor::order_by(&sessions.schema, sort_col, TIES, order)
+                .map_err(run_err_to_query)?;
+            let fetch = limit.saturating_add(1);
+            let schema_c = Arc::clone(&sessions.schema);
+            let keys_c = sort_keys.clone();
+            let ctx_sink = exec_ctx.clone();
+            let sinks = exec_run_pipeline(
+                exec_ctx,
+                streams,
+                |_| Ok(Vec::new()),
+                move |_| {
+                    Ok(TopKSink::new(
+                        Arc::clone(&schema_c),
+                        keys_c.clone(),
+                        fetch,
+                        0,
+                        ctx_sink.clone(),
+                    ))
+                },
+            )?;
+            TopKSink::merge(sinks, sessions.schema, &sort_keys, 0, fetch, exec_ctx)
+        })
+        .await?;
+
+    cursor::assemble(batches, request.limit, LIST, sort_col, request.order, TIES)
+}
+
+/// The session, its turns, and their root payloads. No time window.
+pub async fn session_detail(
+    ctx: &QueryContext,
+    session_id: &str,
+    include_eval: bool,
+    include_experiments: bool,
+    timeout: Duration,
+) -> Result<Option<SessionDetailData>, RunError> {
+    let ctx = ctx.engine();
+    let scope = ListScope {
+        window: None,
+        include_eval,
+        include_experiments,
+    };
+    let mut spec = scoped_traces_spec(ctx, scope, false)?;
+    let traces_raw = traces_raw_schema()?;
+    let session_col = col_expr(&traces_raw, traces::SESSION_ID).map_err(query_err_to_run)?;
+    spec.filters.push(Expr::Binary {
+        left: Box::new(session_col),
+        op: BinaryOp::Eq,
+        right: Box::new(Expr::Literal(ScalarValue::Utf8(session_id.to_owned()))),
+        data_type: DataType::Bool,
+    });
+    spec.id_lookups.push(IdLookupHint::Utf8 {
+        column: traces::SESSION_ID.to_owned(),
+        values: vec![session_id.to_owned()],
+    });
+
+    let mut sess_spec = spec.clone();
+    sess_spec.projection = Some(sessions_from_traces_projection(&traces_raw)?);
+
+    let ctx_c = ctx.clone();
+    let (detail, _) = ctx
+        .run_with_ctx(timeout, move |exec_ctx| {
+            // 1. Session aggregate row (1 row, or None if session does not exist in scope).
+            let sess_proj_schema = ctx_c.traces.projected_schema(&sess_spec)?;
+            let raw_streams = ctx_c.traces.open_partitions(&sess_spec, exec_ctx)?;
+            if raw_streams.is_empty() {
+                return Ok(None);
+            }
+            let sessions = sessions_from_traces(raw_streams, &sess_proj_schema, exec_ctx)?;
+            let pool_c = Arc::clone(&exec_ctx.pool);
+            let sess_sinks = exec_run_pipeline(
+                exec_ctx,
+                sessions.streams,
+                |_| Ok(Vec::new()),
+                move |_| Ok(CollectSink::new(&pool_c)),
+            )?;
+            let sess_batches: Vec<Batch> = sess_sinks
+                .into_iter()
+                .flat_map(CollectSink::into_batches)
+                .collect();
+            let Some(session) = single_row(&sess_batches, exec_ctx)? else {
+                return Ok(None);
+            };
+
+            // 2. Turns ordered (start_time ASC, trace_id ASC), capped at MAX_SESSION_TURNS + 1.
+            let view_schema = traces_view_schema().map_err(run_err_to_query)?;
+            let turn_sort_keys = cursor::order_by(
+                &view_schema,
+                traces::START_TIME,
+                &[traces::TRACE_ID],
+                SortOrder::Asc,
+            )
+            .map_err(run_err_to_query)?;
+
+            let turn_raw_streams = ctx_c.traces.open_partitions(&spec, exec_ctx)?;
+            let fetch = MAX_SESSION_TURNS + 1;
+            let turn_batches = if turn_raw_streams.is_empty() {
+                Vec::new()
+            } else {
+                let raw_c = Arc::clone(&traces_raw);
+                let view_c = Arc::clone(&view_schema);
+                let keys_c = turn_sort_keys.clone();
+                let ctx_chain = exec_ctx.clone();
+                let ctx_sink = exec_ctx.clone();
+                let sinks = exec_run_pipeline(
+                    exec_ctx,
+                    turn_raw_streams,
+                    move |_| {
+                        let proj = traces_view_projection(&raw_c, ctx_chain.clone())?;
+                        Ok(vec![Box::new(proj)])
+                    },
+                    move |_| {
+                        Ok(TopKSink::new(
+                            Arc::clone(&view_c),
+                            keys_c.clone(),
+                            fetch,
+                            0,
+                            ctx_sink.clone(),
+                        ))
+                    },
+                )?;
+                TopKSink::merge(
+                    sinks,
+                    Arc::clone(&view_schema),
+                    &turn_sort_keys,
+                    0,
+                    fetch,
+                    exec_ctx,
+                )?
+            };
+            let (turns, truncated) = cap_rows(turn_batches, MAX_SESSION_TURNS)?;
+
+            // 3. Root span payloads via inner join on (trace_id, root_span_id) = (trace_id, span_id)
+            // pushing <= 1,000 turn trace_id/span_id values as IdLookupHints.
+            let roots = load_root_payloads(&ctx_c, exec_ctx, &view_schema, &turns)?;
+
+            Ok(Some(SessionDetailData {
+                session,
+                turns,
+                roots,
+                truncated,
+            }))
+        })
+        .await?;
+
+    Ok(detail)
+}
+
+fn load_root_payloads(
+    ctx: &EngineContext,
+    exec_ctx: &ExecContext,
+    turns_schema: &Arc<Schema>,
+    turns: &[Batch],
+) -> Result<Vec<Batch>, QueryError> {
+    let mut trace_ids = BTreeSet::<[u8; 16]>::new();
+    let mut span_ids = BTreeSet::<[u8; 8]>::new();
+    for batch in turns {
+        if batch.num_rows() == 0 {
+            continue;
+        }
+        let trace_col = require_col(batch, traces::TRACE_ID).map_err(run_err_to_query)?;
+        let root_col = require_col(batch, traces::ROOT_SPAN_ID).map_err(run_err_to_query)?;
+        for active_row in 0..batch.num_rows() {
+            let phys = physical_row(batch, active_row).map_err(run_err_to_query)?;
+            let Some(root_hex) = raw_string_at(root_col, phys).map_err(run_err_to_query)? else {
+                continue;
+            };
+            let Some(trace_hex) = raw_string_at(trace_col, phys).map_err(run_err_to_query)? else {
+                continue;
+            };
+            let Ok(trace_bytes) = hex::decode(&trace_hex) else {
+                continue;
+            };
+            let Ok(span_bytes) = hex::decode(&root_hex) else {
+                continue;
+            };
+            if let (Ok(t), Ok(s)) = (trace_bytes.try_into(), span_bytes.try_into()) {
+                trace_ids.insert(t);
+                span_ids.insert(s);
+            }
+        }
+    }
+    if trace_ids.is_empty() || span_ids.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let spans_raw = spans_raw_schema().map_err(run_err_to_query)?;
+    let trace_vec: Vec<[u8; 16]> = trace_ids.into_iter().collect();
+    let span_vec: Vec<[u8; 8]> = span_ids.into_iter().collect();
+
+    let proj_names = [
+        spans::TRACE_ID,
+        spans::SPAN_ID,
+        spans::INPUT,
+        spans::INPUT_FORMAT,
+        spans::OUTPUT,
+        spans::OUTPUT_FORMAT,
+    ];
+    let mut proj_indices = Vec::with_capacity(proj_names.len());
+    for name in proj_names {
+        let idx = spans_raw.index_of(name).ok_or_else(|| {
+            QueryError::internal(format!("missing column {name} in spans schema"))
+        })?;
+        proj_indices.push(idx);
+    }
+
+    let trace_raw_col = col_expr(&spans_raw, spans::TRACE_ID)?;
+    let span_raw_col = col_expr(&spans_raw, spans::SPAN_ID)?;
+    let mut filters = vec![
+        Expr::InList {
+            expr: Box::new(trace_raw_col),
+            list: trace_vec
+                .iter()
+                .map(|b| Expr::Literal(ScalarValue::FixedBytes16(*b)))
+                .collect(),
+            negated: false,
+            redacted: false,
+        },
+        Expr::InList {
+            expr: Box::new(span_raw_col),
+            list: span_vec
+                .iter()
+                .map(|b| Expr::Literal(ScalarValue::FixedBytes8(*b)))
+                .collect(),
+            negated: false,
+            redacted: false,
+        },
+    ];
+    if let Some(vf) = ctx.visible_from {
+        let start_col = col_expr(&spans_raw, spans::START_TIME)?;
+        filters.push(Expr::Binary {
+            left: Box::new(start_col),
+            op: BinaryOp::GtEq,
+            right: Box::new(Expr::Literal(ScalarValue::TimestampNs {
+                value: vf,
+                utc: true,
+            })),
+            data_type: DataType::Bool,
+        });
+    }
+
+    let span_spec = ScanSpec {
+        projection: Some(proj_indices),
+        map_keys: Vec::new(),
+        time_range: TimeRangeHint {
+            min_ns: ctx.visible_from,
+            max_ns: None,
+            around_ns: ctx.around,
+        },
+        id_lookups: vec![
+            IdLookupHint::Fixed16 {
+                column: spans::TRACE_ID.to_owned(),
+                values: trace_vec,
+            },
+            IdLookupHint::Fixed8 {
+                column: spans::SPAN_ID.to_owned(),
+                values: span_vec,
+            },
+        ],
+        filters,
+        substrings: Vec::new(),
+        sort_hints: Vec::new(),
+        limit: None,
+    };
+
+    let raw_span_streams = ctx.spans.open_partitions(&span_spec, exec_ctx)?;
+    if raw_span_streams.is_empty() {
+        return Ok(Vec::new());
+    }
+    let span_proj_schema = ctx.spans.projected_schema(&span_spec)?;
+
+    let right_schema = Schema::try_new_arc(vec![
+        Field::new(ROOT_TRACE_ALIAS, DataType::Utf8, false),
+        Field::new(ROOT_SPAN_ALIAS, DataType::Utf8, false),
+        Field::new(spans::INPUT, DataType::Utf8, true),
+        Field::new(spans::INPUT_FORMAT, DataType::Utf8, true),
+        Field::new(spans::OUTPUT, DataType::Utf8, true),
+        Field::new(spans::OUTPUT_FORMAT, DataType::Utf8, true),
+    ])?;
+
+    let right_exprs = vec![
+        encode_hex_expr(col_expr(&span_proj_schema, spans::TRACE_ID)?),
+        encode_hex_expr(col_expr(&span_proj_schema, spans::SPAN_ID)?),
+        col_expr(&span_proj_schema, spans::INPUT)?,
+        col_expr(&span_proj_schema, spans::INPUT_FORMAT)?,
+        col_expr(&span_proj_schema, spans::OUTPUT)?,
+        col_expr(&span_proj_schema, spans::OUTPUT_FORMAT)?,
+    ];
+    let right_streams: Vec<Box<dyn PartitionStream>> = raw_span_streams
+        .into_iter()
+        .map(|s| {
+            let proj = ProjectOp::with_schema(
+                right_exprs.clone(),
+                Arc::clone(&right_schema),
+                exec_ctx.clone(),
+            )?;
+            Ok(
+                Box::new(OperatorStream::new(s, vec![Box::new(proj)], exec_ctx))
+                    as Box<dyn PartitionStream>,
+            )
+        })
+        .collect::<Result<Vec<_>, QueryError>>()?;
+
+    let turns_src = BatchSource::new(Arc::clone(turns_schema), turns.to_vec())?;
+    let left_streams = turns_src.open_partitions(&ScanSpec::default(), exec_ctx)?;
+    if left_streams.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let left_trace = col_expr(turns_schema, traces::TRACE_ID)?;
+    let left_root = col_expr(turns_schema, traces::ROOT_SPAN_ID)?;
+    let right_trace = col_expr(&right_schema, ROOT_TRACE_ALIAS)?;
+    let right_span = col_expr(&right_schema, ROOT_SPAN_ALIAS)?;
+
+    let joined_stream = execute_hash_join(
+        left_streams,
+        Arc::clone(turns_schema),
+        right_streams,
+        Arc::clone(&right_schema),
+        HashJoinSpec {
+            join_type: JoinType::Inner,
+            left_keys: vec![left_trace, left_root],
+            right_keys: vec![right_trace, right_span],
+            null_equals_null: false,
+            residual_filter: None,
+        },
+        exec_ctx,
+    )?;
+
+    let joined_schema = cetra_query::exec::hash_join::join_output_schema(
+        JoinType::Inner,
+        turns_schema,
+        &right_schema,
+    );
+    let out_schema = Schema::try_new_arc(vec![
+        Field::new(traces::TRACE_ID, DataType::Utf8, false),
+        Field::new(spans::INPUT, DataType::Utf8, true),
+        Field::new(spans::INPUT_FORMAT, DataType::Utf8, true),
+        Field::new(spans::OUTPUT, DataType::Utf8, true),
+        Field::new(spans::OUTPUT_FORMAT, DataType::Utf8, true),
+    ])?;
+    let out_exprs = vec![
+        col_expr(&joined_schema, traces::TRACE_ID)?,
+        col_expr(&joined_schema, spans::INPUT)?,
+        col_expr(&joined_schema, spans::INPUT_FORMAT)?,
+        col_expr(&joined_schema, spans::OUTPUT)?,
+        col_expr(&joined_schema, spans::OUTPUT_FORMAT)?,
+    ];
+    let pool_c = Arc::clone(&exec_ctx.pool);
+    let ctx_chain = exec_ctx.clone();
+    let out_sinks = exec_run_pipeline(
+        exec_ctx,
+        vec![joined_stream],
+        move |_| {
+            let proj = ProjectOp::with_schema(
+                out_exprs.clone(),
+                Arc::clone(&out_schema),
+                ctx_chain.clone(),
+            )?;
+            Ok(vec![Box::new(proj)])
+        },
+        move |_| Ok(CollectSink::new(&pool_c)),
+    )?;
+    Ok(out_sinks
+        .into_iter()
+        .flat_map(CollectSink::into_batches)
+        .filter(|b| b.num_rows() > 0)
+        .collect())
+}
+
+/// Per-session extras (`error_trace_count`, `first_input_preview`, `last_output_preview`) in 1 pass
+/// using NULL-preserving [`AggFunc::FirstByOrder`].
 pub async fn session_extras(
     ctx: &QueryContext,
     request: SessionExtrasRequest<'_>,
-) -> Result<Vec<RecordBatch>, RunError> {
+) -> Result<Vec<Batch>, RunError> {
+    let ctx = ctx.engine();
     if request.session_ids.len() > MAX_PAGE {
         return Err(RunError::InvalidRequest("too many sessions".to_owned()));
     }
     if request.session_ids.is_empty() {
         return Ok(Vec::new());
     }
-    match tokio::time::timeout(request.timeout, extras(ctx, &request)).await {
-        Err(_) => Err(RunError::Timeout),
-        Ok(result) => result,
-    }
-}
 
-async fn extras(
-    ctx: &QueryContext,
-    request: &SessionExtrasRequest<'_>,
-) -> Result<Vec<RecordBatch>, RunError> {
-    let ids: Vec<Expr> = request.session_ids.iter().map(|id| lit(*id)).collect();
-    let first = row_number()
-        .partition_by(vec![col(traces::SESSION_ID)])
-        .order_by(vec![
-            col(traces::START_TIME).sort(true, false),
-            col(traces::TRACE_ID).sort(true, false),
-        ])
-        .build()
-        .map_err(classify)?
-        .alias(RANK_FIRST);
-    let last = row_number()
-        .partition_by(vec![col(traces::SESSION_ID)])
-        .order_by(vec![
-            col(traces::START_TIME).sort(false, true),
-            col(traces::TRACE_ID).sort(false, true),
-        ])
-        .build()
-        .map_err(classify)?
-        .alias(RANK_LAST);
-    let frame = scoped_traces(ctx, request.scope, false)
-        .await?
-        .filter(col(traces::SESSION_ID).in_list(ids, false))
-        .map_err(classify)?
-        // One window stage per sort order: DataFusion needs the expressions of a stage to share sort keys.
-        .window(vec![first])
-        .map_err(classify)?
-        .window(vec![last])
-        .map_err(classify)?
-        .aggregate(
-            vec![col(traces::SESSION_ID)],
-            vec![
-                sum(error_trace_flag()?).alias(SESSION_ERROR_TRACE_COUNT),
-                ranked_value(RANK_FIRST, traces::INPUT_PREVIEW)?.alias(SESSION_FIRST_INPUT_PREVIEW),
-                ranked_value(RANK_LAST, traces::OUTPUT_PREVIEW)?.alias(SESSION_LAST_OUTPUT_PREVIEW),
-            ],
-        )
-        .map_err(classify)?;
-    let batches = frame.collect().await.map_err(|error| ctx.fail(error))?;
-    Ok(batches
+    let mut spec = scoped_traces_spec(ctx, request.scope, false)?;
+    let traces_raw = traces_raw_schema()?;
+    let distinct_ids: Vec<String> = request
+        .session_ids
+        .iter()
+        .map(|s| (*s).to_owned())
+        .collect::<BTreeSet<_>>()
         .into_iter()
-        .filter(|batch| batch.num_rows() > 0)
-        .collect())
-}
+        .collect();
+    let session_raw_col = col_expr(&traces_raw, traces::SESSION_ID).map_err(query_err_to_run)?;
+    spec.filters.push(Expr::InList {
+        expr: Box::new(session_raw_col),
+        list: distinct_ids
+            .iter()
+            .map(|id| Expr::Literal(ScalarValue::Utf8(id.clone())))
+            .collect(),
+        negated: false,
+        redacted: false,
+    });
+    spec.id_lookups.push(IdLookupHint::Utf8 {
+        column: traces::SESSION_ID.to_owned(),
+        values: distinct_ids,
+    });
 
-/// 1 for a trace whose status is `error`, else 0.
-fn error_trace_flag() -> Result<Expr, RunError> {
-    when(col(traces::STATUS).eq(lit("error")), lit(1_i64))
-        .otherwise(lit(0_i64))
-        .map_err(classify)
-}
-
-/// `column` of the one row per group whose `rank` is 1, null elsewhere. Each group has
-/// exactly one such row, so the maximum is that row's value (null when it is null).
-fn ranked_value(rank: &str, column: &str) -> Result<Expr, RunError> {
-    let value = when(col(rank).eq(lit(ScalarValue::UInt64(Some(1)))), col(column))
-        .otherwise(lit(ScalarValue::Utf8(None)))
-        .map_err(classify)?;
-    Ok(max(value))
-}
-
-/// The sessions of the window, one row per session, with `filter` applied. No cursor, sort or
-/// limit: the facets read these rows too.
-pub(crate) async fn session_rows(
-    ctx: &QueryContext,
-    scope: ListScope,
-    filter: Option<Filter>,
-) -> Result<DataFrame, RunError> {
-    let scoped = scoped_traces(ctx, scope, false).await?;
-    let plan = sessions_from_traces(scoped.into_unoptimized_plan()).map_err(RunError::Internal)?;
-    let mut frame = DataFrame::new(ctx.session().state(), plan);
-    if let Some(filter) = filter {
-        frame = filter.apply(frame, ctx).await.map_err(classify)?;
+    let needed = [
+        traces::SESSION_ID,
+        traces::START_TIME,
+        traces::TRACE_ID,
+        traces::STATUS,
+        traces::INPUT_PREVIEW,
+        traces::OUTPUT_PREVIEW,
+    ];
+    let mut proj_indices = Vec::with_capacity(needed.len());
+    for name in needed {
+        let idx = traces_raw
+            .index_of(name)
+            .ok_or_else(|| internal(format!("missing column {name} in traces schema")))?;
+        proj_indices.push(idx);
     }
-    Ok(frame)
+    spec.projection = Some(proj_indices);
+
+    let ctx_c = ctx.clone();
+    let (batches, _) = ctx
+        .run_with_ctx(request.timeout, move |exec_ctx| {
+            let proj_schema = ctx_c.traces.projected_schema(&spec)?;
+            let streams = ctx_c.traces.open_partitions(&spec, exec_ctx)?;
+            if streams.is_empty() {
+                return Ok(Vec::new());
+            }
+
+            let session_col = col_expr(&proj_schema, traces::SESSION_ID)?;
+            let start_col = col_expr(&proj_schema, traces::START_TIME)?;
+            let trace_col = col_expr(&proj_schema, traces::TRACE_ID)?;
+            let status_col = col_expr(&proj_schema, traces::STATUS)?;
+            let input_preview_col = col_expr(&proj_schema, traces::INPUT_PREVIEW)?;
+            let output_preview_col = col_expr(&proj_schema, traces::OUTPUT_PREVIEW)?;
+
+            let error_flag = Expr::Case {
+                operand: None,
+                when_then: vec![(
+                    Expr::Binary {
+                        left: Box::new(status_col),
+                        op: BinaryOp::Eq,
+                        right: Box::new(Expr::Literal(ScalarValue::Utf8("error".to_owned()))),
+                        data_type: DataType::Bool,
+                    },
+                    Expr::Literal(ScalarValue::I64(1)),
+                )],
+                else_expr: Some(Box::new(Expr::Literal(ScalarValue::I64(0)))),
+                data_type: DataType::I64,
+            };
+
+            let first_order = vec![
+                SortKey {
+                    expr: start_col.clone(),
+                    descending: false,
+                    nulls_first: false,
+                },
+                SortKey {
+                    expr: trace_col.clone(),
+                    descending: false,
+                    nulls_first: false,
+                },
+            ];
+            let last_order = vec![
+                SortKey {
+                    expr: start_col,
+                    descending: true,
+                    nulls_first: true,
+                },
+                SortKey {
+                    expr: trace_col,
+                    descending: true,
+                    nulls_first: true,
+                },
+            ];
+
+            let agg_spec = HashAggSpec {
+                group_by: vec![(traces::SESSION_ID.to_owned(), session_col)],
+                aggs: vec![
+                    AggExpr {
+                        func: AggFunc::Sum(error_flag),
+                        filter: None,
+                        output_name: SESSION_ERROR_TRACE_COUNT.to_owned(),
+                    },
+                    AggExpr {
+                        func: AggFunc::FirstByOrder {
+                            value: input_preview_col,
+                            order_by: first_order,
+                        },
+                        filter: None,
+                        output_name: SESSION_FIRST_INPUT_PREVIEW.to_owned(),
+                    },
+                    AggExpr {
+                        func: AggFunc::FirstByOrder {
+                            value: output_preview_col,
+                            order_by: last_order,
+                        },
+                        filter: None,
+                        output_name: SESSION_LAST_OUTPUT_PREVIEW.to_owned(),
+                    },
+                ],
+            };
+
+            let spec_c = agg_spec.clone();
+            let schema_c = Arc::clone(&proj_schema);
+            let ctx_sink = exec_ctx.clone();
+            let sinks = exec_run_pipeline(
+                exec_ctx,
+                streams,
+                |_| Ok(Vec::new()),
+                move |_| HashAgg::new(spec_c.clone(), Arc::clone(&schema_c), ctx_sink.clone()),
+            )?;
+            let out = HashAgg::merge_sinks(sinks, &agg_spec, &proj_schema, exec_ctx)?;
+            Ok(out.into_iter().filter(|b| b.num_rows() > 0).collect())
+        })
+        .await?;
+
+    Ok(batches)
 }
 
-/// The distinct session ids the sessions list selects for `filter` over `window` (see
-/// [`session_rows`]), at most `limit`. Which ids come back when more match is unspecified.
-/// Null session ids are left out.
-pub(crate) async fn filtered_session_ids(
-    ctx: &QueryContext,
-    filter: Option<Filter>,
-    window: TimeWindow,
-    include_experiments: bool,
-    limit: usize,
-) -> Result<Vec<String>, RunError> {
-    let scope = ListScope {
-        window: Some(window),
-        include_eval: false,
-        include_experiments,
-    };
-    let frame = session_rows(ctx, scope, filter)
-        .await?
-        .select(vec![col(traces::SESSION_ID)])
-        .map_err(classify)?;
-    let mut stream = frame
-        .execute_stream()
-        .await
-        .map_err(|error| ctx.fail(error))?;
-    let mut found = BTreeSet::new();
-    'read: while let Some(batch) = stream.next().await {
-        let batch = batch.map_err(|error| ctx.fail(error))?;
-        let sessions = utf8(batch.column(0))?;
-        let sessions = sessions.as_string::<i32>();
-        for row in 0..sessions.len() {
-            if sessions.is_null(row) {
-                continue;
-            }
-            found.insert(sessions.value(row).to_owned());
-            if found.len() >= limit {
-                break 'read;
-            }
-        }
+fn col_expr(schema: &Schema, name: &str) -> Result<Expr, QueryError> {
+    let idx = schema
+        .index_of(name)
+        .ok_or_else(|| QueryError::internal(format!("missing column {name} in schema")))?;
+    Ok(Expr::Column {
+        index: idx,
+        name: name.to_owned(),
+        data_type: schema.fields()[idx].data_type.clone(),
+    })
+}
+
+fn encode_hex_expr(inner: Expr) -> Expr {
+    if inner.data_type() == DataType::Utf8 {
+        return inner;
     }
-    Ok(found.into_iter().collect())
-}
-
-async fn list(ctx: &QueryContext, request: &SessionListRequest<'_>) -> Result<Page, RunError> {
-    let filter = match present(request.filter) {
-        Some(text) => Some(ctx.parse_filter(FilterView::Sessions, text)?),
-        None => None,
-    };
-    let cursor = match request.cursor {
-        Some(text) => {
-            let cursor = decode(text, LIST, request.sort.column(), request.order)?;
-            if cursor.tie_len() != 1 {
-                return Err(RunError::InvalidRequest("invalid cursor".to_owned()));
-            }
-            Some(cursor)
-        }
-        None => None,
-    };
-    let mut frame = session_rows(ctx, request.scope, filter).await?;
-    if let Some(cursor) = &cursor {
-        frame = frame
-            .filter(after(cursor, request.sort.column(), TIES))
-            .map_err(classify)?;
+    Expr::Call {
+        func: ScalarFn::Encode,
+        args: vec![inner, Expr::Literal(ScalarValue::Utf8("hex".to_owned()))],
+        data_type: DataType::Utf8,
     }
-    let frame = frame
-        .sort(order_by(request.sort.column(), TIES, request.order))
-        .map_err(classify)?
-        .limit(0, Some(request.limit + 1))
-        .map_err(classify)?;
-    let batches = frame.collect().await.map_err(|error| ctx.fail(error))?;
-    assemble(
-        batches,
-        request.limit,
-        LIST,
-        request.sort.column(),
-        request.order,
-        TIES,
-    )
 }
 
-async fn load(
-    ctx: &QueryContext,
-    session_id: &str,
-    include_eval: bool,
-    include_experiments: bool,
-) -> Result<Option<SessionDetailData>, RunError> {
-    let scope = ListScope {
-        window: None,
-        include_eval,
-        include_experiments,
-    };
-    let scoped = scoped_traces(ctx, scope, false)
-        .await?
-        .filter(col(traces::SESSION_ID).eq(lit(session_id)))
-        .map_err(classify)?;
-    let plan = scoped.logical_plan().clone();
-    let state = ctx.session().state();
-    let session_plan = sessions_from_traces(plan.clone()).map_err(RunError::Internal)?;
-    let session = DataFrame::new(state.clone(), session_plan)
-        .collect()
-        .await
-        .map_err(|error| ctx.fail(error))?;
-    let Some(session) = single_row(&session)? else {
+fn single_row(batches: &[Batch], exec_ctx: &ExecContext) -> Result<Option<Batch>, QueryError> {
+    let non_empty: Vec<&Batch> = batches.iter().filter(|b| b.num_rows() > 0).collect();
+    let Some(first) = non_empty.first() else {
         return Ok(None);
     };
-    let turns = DataFrame::new(state, plan)
-        .sort(order_by(
-            traces::START_TIME,
-            &[traces::TRACE_ID],
-            SortOrder::Asc,
-        ))
-        .map_err(classify)?
-        .limit(0, Some(MAX_SESSION_TURNS + 1))
-        .map_err(classify)?
-        .collect()
-        .await
-        .map_err(|error| ctx.fail(error))?;
-    let (turns, truncated) = cap_rows(turns, MAX_SESSION_TURNS);
-    let roots = root_payloads(ctx, &turns).await?;
-    Ok(Some(SessionDetailData {
-        session,
-        turns,
-        roots,
-        truncated,
-    }))
-}
-
-async fn root_payloads(
-    ctx: &QueryContext,
-    turns: &[RecordBatch],
-) -> Result<Vec<RecordBatch>, RunError> {
-    let Some(schema) = turns
-        .iter()
-        .find(|batch| batch.num_rows() > 0)
-        .map(RecordBatch::schema)
-    else {
-        return Ok(Vec::new());
-    };
-    let turns = concat_batches(&schema, turns).map_err(arrow_failure)?;
-    let spans = ctx
-        .session()
-        .table("spans")
-        .await
-        .map_err(classify)?
-        .select(vec![
-            col(spans::TRACE_ID).alias("__root_trace"),
-            col(spans::SPAN_ID).alias("__root_span"),
-            col(spans::INPUT),
-            col(spans::INPUT_FORMAT),
-            col(spans::OUTPUT),
-            col(spans::OUTPUT_FORMAT),
-        ])
-        .map_err(classify)?;
-    let joined = ctx
-        .session()
-        .read_batch(turns)
-        .map_err(RunError::Internal)?
-        .join(
-            spans,
-            datafusion::logical_expr::JoinType::Inner,
-            &[traces::TRACE_ID, traces::ROOT_SPAN_ID],
-            &["__root_trace", "__root_span"],
-            None,
-        )
-        .map_err(classify)?
-        .select(vec![
-            col(traces::TRACE_ID),
-            col(spans::INPUT),
-            col(spans::INPUT_FORMAT),
-            col(spans::OUTPUT),
-            col(spans::OUTPUT_FORMAT),
-        ])
-        .map_err(classify)?;
-    joined.collect().await.map_err(|error| ctx.fail(error))
-}
-
-fn row_count(batches: &[RecordBatch]) -> usize {
-    batches.iter().map(RecordBatch::num_rows).sum()
-}
-
-fn single_row(batches: &[RecordBatch]) -> Result<Option<RecordBatch>, RunError> {
-    let Some(schema) = batches
-        .iter()
-        .find(|batch| batch.num_rows() > 0)
-        .map(RecordBatch::schema)
-    else {
-        return Ok(None);
-    };
-    let batch = concat_batches(&schema, batches).map_err(arrow_failure)?;
-    if batch.num_rows() == 0 {
+    let schema = Arc::clone(first.schema());
+    let mut res = exec_ctx.pool.register("session_single_row", false);
+    let merged = Batch::concat(schema, &non_empty, Some(&mut res))?;
+    res.free();
+    if merged.num_rows() == 0 {
         return Ok(None);
     }
-    if batch.num_rows() == 1 {
-        return Ok(Some(batch));
+    if merged.num_rows() == 1 {
+        return Ok(Some(merged));
     }
-    Ok(Some(batch.slice(0, 1)))
+    Ok(Some(slice_active_batch(&merged, 0, 1)?))
 }
 
-fn cap_rows(batches: Vec<RecordBatch>, limit: usize) -> (Vec<RecordBatch>, bool) {
-    let total = row_count(&batches);
+fn cap_rows(batches: Vec<Batch>, limit: usize) -> Result<(Vec<Batch>, bool), QueryError> {
+    let total: usize = batches.iter().map(Batch::num_rows).sum();
     if total <= limit {
-        return (batches, false);
+        let non_empty = batches.into_iter().filter(|b| b.num_rows() > 0).collect();
+        return Ok((non_empty, false));
     }
     let mut kept = Vec::new();
     let mut remaining = limit;
@@ -479,458 +763,478 @@ fn cap_rows(batches: Vec<RecordBatch>, limit: usize) -> (Vec<RecordBatch>, bool)
         if remaining == 0 {
             break;
         }
-        if batch.num_rows() <= remaining {
-            remaining -= batch.num_rows();
+        let n = batch.num_rows();
+        if n == 0 {
+            continue;
+        }
+        if n <= remaining {
+            remaining -= n;
             kept.push(batch);
         } else {
-            kept.push(batch.slice(0, remaining));
+            kept.push(slice_active_batch(&batch, 0, remaining)?);
             remaining = 0;
         }
     }
-    (kept, true)
+    Ok((kept, true))
 }
 
-fn arrow_failure(error: arrow::error::ArrowError) -> RunError {
-    RunError::Internal(DataFusionError::ArrowError(Box::new(error), None))
+fn slice_active_batch(batch: &Batch, start: usize, len: usize) -> Result<Batch, QueryError> {
+    let sliced = match batch.selection() {
+        Selection::All => batch.slice(start, len),
+        Selection::Mask(bm) => {
+            let indices: Vec<u32> = bm
+                .iter_ones()
+                .skip(start)
+                .take(len)
+                .map(|i| i as u32)
+                .collect();
+            batch.with_selection(Selection::Indices(indices))
+        }
+        Selection::Indices(idx) => {
+            batch.with_selection(Selection::Indices(idx[start..start + len].to_vec()))
+        }
+    }?;
+    Ok(sliced)
 }
 
 #[cfg(test)]
 mod tests {
     use std::time::Duration;
 
-    use arrow::json::{ArrayWriter, WriterBuilder};
-    use arrow::record_batch::RecordBatch;
-    use cetra_core::time_serde::parse_rfc3339;
+    use bytesize::ByteSize;
+    use cetra_core::enums::SpanStatus;
+    use cetra_core::ids::ProjectId;
+    use cetra_core::names::environment;
+    use cetra_core::score::{ScoreTarget, ScoreValue};
+    use cetra_query::encode::encode_json_result;
     use serde_json::Value;
 
-    use cetra_core::enums::SpanStatus;
-    use cetra_core::names::environment;
-    use cetra_core::span::Span;
-
-    use super::{
-        SESSION_ERROR_TRACE_COUNT, SESSION_FIRST_INPUT_PREVIEW, SESSION_LAST_OUTPUT_PREVIEW,
-        SessionExtrasRequest, SessionListRequest, SessionSort, session_detail, session_extras,
-        session_list,
+    use super::*;
+    use crate::QueryOptions;
+    use crate::config::{
+        FlushConfig, MemtableConfig, QueryConfig, S3Config, StorageConfig, WalConfig,
     };
-    use crate::query_error::RunError;
-    use crate::reads::{ListScope, MAX_PAGE, Page, SortOrder};
-    use crate::test_support::{example_query, span_row, spans_table, traces_table};
+    use crate::reads::{ListScope, SortOrder};
+    use crate::sql::{SQL_MAX_RESULT_BYTES, SQL_MAX_ROWS};
+    use crate::test_support::{
+        dataset_scores, dataset_spans, score_row, score_rows, span_row, span_rows,
+    };
     use crate::views::{QueryContext, TimeWindow};
 
     const TIMEOUT: Duration = Duration::from_secs(30);
 
-    fn context() -> QueryContext {
-        QueryContext::new(example_query(), None).expect("context")
-    }
-
-    fn context_of(spans: &[Span]) -> QueryContext {
-        let mut query = example_query();
-        query.spans = spans_table(spans);
-        query.traces = traces_table(spans);
-        QueryContext::new(query, None).expect("context")
-    }
-
-    fn scope(window: Option<TimeWindow>, include_eval: bool) -> ListScope {
-        ListScope {
-            window,
-            include_eval,
-            include_experiments: false,
+    fn test_config(dir: &std::path::Path) -> StorageConfig {
+        StorageConfig {
+            delete_objects: true,
+            data_dir: dir.to_path_buf(),
+            min_free_bytes: ByteSize::b(0),
+            object_store: None,
+            s3: S3Config::default(),
+            wal: WalConfig::default(),
+            flush: FlushConfig::default(),
+            memtable: MemtableConfig::default(),
+            query: QueryConfig {
+                target_partitions: 2,
+                ..QueryConfig::default()
+            },
+            anchor: Default::default(),
+            gc: Default::default(),
+            compaction: Default::default(),
+            deletion: Default::default(),
         }
     }
 
-    fn request<'a>(
-        scope: ListScope,
-        sort: SessionSort,
-        order: SortOrder,
-    ) -> SessionListRequest<'a> {
-        SessionListRequest {
-            filter: None,
-            scope,
-            sort,
-            order,
+    fn batches_to_json(batches: &[Batch]) -> Vec<Value> {
+        let non_empty: Vec<Batch> = batches
+            .iter()
+            .filter(|b| b.num_rows() > 0)
+            .cloned()
+            .collect();
+        let Some(first) = non_empty.first() else {
+            return Vec::new();
+        };
+        let encoded = encode_json_result(
+            first.schema(),
+            &non_empty,
+            SQL_MAX_ROWS,
+            SQL_MAX_RESULT_BYTES,
+            false,
+            None,
+        )
+        .expect("encode json");
+        encoded.rows.into_iter().map(Value::Object).collect()
+    }
+
+    async fn setup_storage_with_dataset() -> (tempfile::TempDir, crate::Storage, ProjectId) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let storage = crate::Storage::open(test_config(dir.path()))
+            .await
+            .expect("open");
+        let spans = dataset_spans();
+        let scores = dataset_scores();
+        let project = spans[0].project_id;
+        storage
+            .append_spans(project, span_rows(&spans))
+            .await
+            .expect("spans");
+        storage
+            .append_scores(project, score_rows(&scores))
+            .await
+            .expect("scores");
+        (dir, storage, project)
+    }
+
+    #[tokio::test]
+    async fn session_list_all_sorts_orders_filters_and_cursors() {
+        let (_dir, storage, project) = setup_storage_with_dataset().await;
+        let pq = storage
+            .query(project, QueryOptions::new(None, None))
+            .await
+            .expect("pq");
+        let ctx = QueryContext::new(pq, None).expect("ctx");
+
+        for include_eval in [false, true] {
+            for sort in [
+                SessionSort::StartTime,
+                SessionSort::EndTime,
+                SessionSort::TraceCount,
+                SessionSort::CostTotal,
+            ] {
+                for order in [SortOrder::Asc, SortOrder::Desc] {
+                    let mut cursor: Option<String> = None;
+                    let mut collected = Vec::new();
+                    loop {
+                        let req = SessionListRequest {
+                            filter: None,
+                            scope: ListScope {
+                                window: None,
+                                include_eval,
+                                include_experiments: false,
+                            },
+                            sort,
+                            order,
+                            limit: 1,
+                            cursor: cursor.as_deref(),
+                            timeout: TIMEOUT,
+                        };
+                        let page = session_list(&ctx, req).await.expect("list");
+                        let rows = batches_to_json(&page.batches);
+                        assert!(rows.len() <= 1);
+                        collected.extend(rows);
+                        match page.next_cursor {
+                            Some(next) => cursor = Some(next),
+                            None => break,
+                        }
+                    }
+                    let full = session_list(
+                        &ctx,
+                        SessionListRequest {
+                            filter: None,
+                            scope: ListScope {
+                                window: None,
+                                include_eval,
+                                include_experiments: false,
+                            },
+                            sort,
+                            order,
+                            limit: 50,
+                            cursor: None,
+                            timeout: TIMEOUT,
+                        },
+                    )
+                    .await
+                    .expect("full");
+                    assert_eq!(collected, batches_to_json(&full.batches));
+                    assert!(!collected.is_empty());
+                }
+            }
+        }
+
+        // Session filters including score() and environment validation
+        let req_count = SessionListRequest {
+            filter: Some("trace_count >= 2"),
+            scope: ListScope {
+                window: None,
+                include_eval: false,
+                include_experiments: false,
+            },
+            sort: SessionSort::StartTime,
+            order: SortOrder::Desc,
             limit: 50,
             cursor: None,
             timeout: TIMEOUT,
-        }
-    }
-
-    fn fixture(name: &str) -> Value {
-        let text = match name {
-            "sessions.json" => include_str!("../../../../fixtures/api/responses/sessions.json"),
-            "sessions-include-eval.json" => {
-                include_str!("../../../../fixtures/api/responses/sessions-include-eval.json")
-            }
-            other => panic!("unknown fixture {other}"),
         };
-        serde_json::from_str(text).expect(name)
-    }
+        let count_rows =
+            batches_to_json(&session_list(&ctx, req_count).await.expect("list").batches);
+        assert!(
+            count_rows
+                .iter()
+                .all(|r| r["trace_count"].as_i64().unwrap_or(0) >= 2)
+        );
 
-    fn fixture_file(path: &str) -> Value {
-        let full = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("../..")
-            .join(path);
-        let text = std::fs::read_to_string(&full)
-            .unwrap_or_else(|error| panic!("{}: {error}", full.display()));
-        serde_json::from_str(&text).unwrap_or_else(|error| panic!("{path}: {error}"))
-    }
-
-    fn json_rows(batches: &[RecordBatch]) -> Vec<Value> {
-        if batches.iter().all(|batch| batch.num_rows() == 0) {
-            return Vec::new();
-        }
-        let mut buffer = Vec::new();
-        let mut writer: ArrayWriter<&mut Vec<u8>> = WriterBuilder::new()
-            .with_explicit_nulls(true)
-            .with_timestamp_tz_format("%Y-%m-%dT%H:%M:%S%.9fZ".to_owned())
-            .with_timestamp_format("%Y-%m-%dT%H:%M:%S%.9f".to_owned())
-            .build(&mut buffer);
-        for batch in batches {
-            writer.write(batch).expect("encode");
-        }
-        writer.finish().expect("finish");
-        drop(writer);
-        serde_json::from_slice(&buffer).expect("rows")
-    }
-
-    fn rows(page: &Page) -> Vec<Value> {
-        json_rows(&page.batches)
-    }
-
-    fn values_match(actual: &Value, expected: &Value) -> bool {
-        match (actual, expected) {
-            (Value::Number(left), Value::Number(right)) => match (left.as_i64(), right.as_i64()) {
-                (Some(left), Some(right)) => left == right,
-                _ => {
-                    let left = left.as_f64().expect("left");
-                    let right = right.as_f64().expect("right");
-                    (left - right).abs() < 1e-12
-                }
+        let req_score = SessionListRequest {
+            filter: Some("has_score('resolved')"),
+            scope: ListScope {
+                window: None,
+                include_eval: false,
+                include_experiments: false,
             },
-            (Value::Array(left), Value::Array(right)) => {
-                left.len() == right.len()
-                    && left
-                        .iter()
-                        .zip(right)
-                        .all(|(left, right)| values_match(left, right))
-            }
-            (Value::Object(left), Value::Object(right)) => {
-                left.len() == right.len()
-                    && left.iter().all(|(key, value)| {
-                        right
-                            .get(key)
-                            .is_some_and(|expected| values_match(value, expected))
-                    })
-            }
-            _ => actual == expected,
-        }
-    }
+            sort: SessionSort::StartTime,
+            order: SortOrder::Desc,
+            limit: 50,
+            cursor: None,
+            timeout: TIMEOUT,
+        };
+        let _ = session_list(&ctx, req_score).await.expect("has_score");
 
-    fn assert_rows(actual: &[Value], expected: &[Value]) {
-        assert_eq!(actual.len(), expected.len());
-        for (row, fixture) in actual.iter().zip(expected) {
-            for (key, value) in fixture.as_object().expect("object") {
-                // Scores and the per-session extras are added by the server, not this view.
-                if matches!(
-                    key.as_str(),
-                    "scores" | "error_trace_count" | "first_input_preview" | "last_output_preview"
-                ) {
-                    continue;
-                }
-                assert!(
-                    values_match(&row[key], value),
-                    "{key}: {} vs {value}",
-                    row[key]
-                );
-            }
-        }
-    }
+        let req_env = SessionListRequest {
+            filter: Some("environment = 'cetra-eval'"),
+            scope: ListScope {
+                window: None,
+                include_eval: false,
+                include_experiments: false,
+            },
+            sort: SessionSort::StartTime,
+            order: SortOrder::Desc,
+            limit: 50,
+            cursor: None,
+            timeout: TIMEOUT,
+        };
+        assert!(matches!(
+            session_list(&ctx, req_env).await,
+            Err(RunError::Invalid(_))
+        ));
 
-    fn ids(rows: &[Value]) -> Vec<String> {
-        rows.iter()
-            .map(|row| row["session_id"].as_str().expect("id").to_owned())
-            .collect()
+        let _ = storage.shutdown().await;
     }
 
     #[tokio::test]
-    async fn session_lists_match_the_fixtures() {
-        let ctx = context();
-        let page = session_list(
-            &ctx,
-            request(scope(None, false), SessionSort::StartTime, SortOrder::Desc),
-        )
-        .await
-        .expect("list");
-        let listed = fixture("sessions.json");
-        assert_rows(&rows(&page), listed["data"].as_array().expect("data"));
-        assert!(page.next_cursor.is_none());
+    async fn session_detail_returns_turns_roots_and_missing() {
+        let (_dir, storage, project) = setup_storage_with_dataset().await;
+        let pq = storage
+            .query(project, QueryOptions::new(None, None))
+            .await
+            .expect("pq");
+        let ctx = QueryContext::new(pq, None).expect("ctx");
 
-        let page = session_list(
-            &ctx,
-            request(scope(None, true), SessionSort::StartTime, SortOrder::Desc),
-        )
-        .await
-        .expect("eval");
-        let listed = fixture("sessions-include-eval.json");
-        assert_rows(&rows(&page), listed["data"].as_array().expect("data"));
-    }
-
-    #[tokio::test]
-    async fn session_detail_matches_the_fixture() {
-        let ctx = context();
-        for (include_eval, file) in [
-            (false, "fixtures/api/responses/sessions/sess-001.json"),
-            (
-                true,
-                "fixtures/api/responses/sessions/sess-001-include-eval.json",
-            ),
-        ] {
+        for include_eval in [false, true] {
             let detail = session_detail(&ctx, "sess-001", include_eval, false, TIMEOUT)
                 .await
                 .expect("detail")
-                .expect("session");
-            let fixture = fixture_file(file);
-            assert_rows(
-                &json_rows(std::slice::from_ref(&detail.session)),
-                std::slice::from_ref(&fixture["session"]),
-            );
-            let turns = json_rows(&detail.turns);
-            let expected = fixture["turns"].as_array().expect("turns");
-            let actual_ids: Vec<_> = turns
-                .iter()
-                .map(|row| row["trace_id"].as_str().expect("id").to_owned())
-                .collect();
-            let expected_ids: Vec<_> = expected
-                .iter()
-                .map(|turn| turn["trace"]["trace_id"].as_str().expect("id").to_owned())
-                .collect();
-            assert_eq!(actual_ids, expected_ids, "{file}");
-            let roots = json_rows(&detail.roots);
-            for turn in expected {
-                if turn.get("input").is_none() {
-                    continue;
-                }
-                let id = turn["trace"]["trace_id"].as_str().expect("id");
-                let root = roots
-                    .iter()
-                    .find(|row| row["trace_id"] == id)
-                    .unwrap_or_else(|| panic!("missing root {id}"));
-                assert!(!root["input"].is_null(), "{id}");
-                if turn["input"]["format"] == "text" {
-                    assert_eq!(root["input"], turn["input"]["value"], "{id}");
-                }
-            }
-            assert!(!detail.truncated, "{file}");
-        }
-        let missing = session_detail(&ctx, "missing", false, false, TIMEOUT)
-            .await
-            .expect("missing");
-        assert!(missing.is_none());
-    }
+                .expect("some");
+            assert!(!detail.truncated);
+            let session_rows = batches_to_json(&[detail.session]);
+            assert_eq!(session_rows.len(), 1);
+            assert_eq!(session_rows[0]["session_id"], "sess-001");
 
-    #[tokio::test]
-    async fn session_pages_cover_every_sort() {
-        let ctx = context();
-        let sorts = [
-            SessionSort::StartTime,
-            SessionSort::EndTime,
-            SessionSort::TraceCount,
-            SessionSort::CostTotal,
-        ];
-        for sort in sorts {
-            for order in [SortOrder::Asc, SortOrder::Desc] {
-                let mut full = request(scope(None, true), sort, order);
-                full.limit = 50;
-                let full = session_list(&ctx, full).await.expect("full");
-                let expected = ids(&rows(&full));
-                assert!(full.next_cursor.is_none());
-                let mut walked = Vec::new();
-                let mut cursor = None;
-                loop {
-                    let mut page_request = request(scope(None, true), sort, order);
-                    page_request.limit = 1;
-                    page_request.cursor = cursor.as_deref();
-                    let page = session_list(&ctx, page_request).await.expect("page");
-                    let page_ids = ids(&rows(&page));
-                    assert!(page_ids.len() <= 1);
-                    walked.extend(page_ids);
-                    match page.next_cursor {
-                        Some(next) => cursor = Some(next),
-                        None => break,
-                    }
-                }
-                assert_eq!(walked, expected, "{sort:?} {order:?}");
-            }
+            let turn_rows = batches_to_json(&detail.turns);
+            assert!(!turn_rows.is_empty());
+            assert!(turn_rows.len() <= MAX_SESSION_TURNS);
+
+            let root_rows = batches_to_json(&detail.roots);
+            assert!(root_rows.len() <= turn_rows.len());
         }
-        let costs = session_list(
-            &ctx,
-            request(scope(None, true), SessionSort::CostTotal, SortOrder::Desc),
-        )
-        .await
-        .expect("costs");
+
         assert!(
-            rows(&costs).iter().any(|row| row["cost_total"].is_null()),
-            "cost_total has a null"
+            session_detail(&ctx, "does-not-exist", false, false, TIMEOUT)
+                .await
+                .expect("detail")
+                .is_none()
         );
+
+        let _ = storage.shutdown().await;
     }
 
     #[tokio::test]
-    async fn session_filters_keep_the_matching_sessions() {
-        let ctx = context();
-        for text in ["trace_count >= 2", "has_score('resolved')"] {
-            let mut request = request(scope(None, false), SessionSort::StartTime, SortOrder::Desc);
-            request.filter = Some(text);
-            let page = session_list(&ctx, request).await.expect(text);
-            assert_eq!(ids(&rows(&page)), ["sess-001"], "{text}");
-        }
-    }
-
-    #[tokio::test]
-    async fn a_window_counts_only_the_traces_inside_it() {
-        let from = parse_rfc3339("2026-01-01T10:05:00Z").expect("from");
-        let to = parse_rfc3339("2026-01-01T10:06:00Z").expect("to");
-        let window = TimeWindow::new(from, to).expect("window");
-        let page = session_list(
-            &context(),
-            request(
-                scope(Some(window), false),
-                SessionSort::StartTime,
-                SortOrder::Desc,
-            ),
-        )
-        .await
-        .expect("window");
-        let rows = rows(&page);
-        assert_eq!(ids(&rows), ["sess-001"]);
-        assert_eq!(rows[0]["trace_count"], 1);
-    }
-
-    #[tokio::test]
-    async fn a_session_with_only_excluded_traces_is_none() {
-        let mut root = span_row(7, 0, 1_000, 1_000);
-        root.session_id = Some("eval-only".to_owned());
-        root.environment = Some(environment::EVAL.to_owned());
-        let spans = [root];
-        let ctx = context_of(&spans);
-        let hidden = session_detail(&ctx, "eval-only", false, false, TIMEOUT)
+    async fn session_extras_preserves_null_on_earliest_and_latest_trace() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let storage = crate::Storage::open(test_config(dir.path()))
             .await
-            .expect("hidden");
-        assert!(hidden.is_none());
-        let shown = session_detail(&ctx, "eval-only", true, false, TIMEOUT)
+            .expect("open");
+        let project: ProjectId = "018f6b4e-7c1a-7c1a-8c1a-000000000001".parse().expect("pid");
+
+        // Trace 1 (earliest): input_preview = None (MUST remain NULL, not fall back to trace 2!)
+        let mut t1 = span_row(1, 0, 1_000, 1_000);
+        t1.session_id = Some("s1".to_owned());
+        t1.status = SpanStatus::Error;
+        t1.input_preview = None;
+        t1.output_preview = Some("out1".to_owned());
+
+        // Trace 2 (middle): both previews present
+        let mut t2 = span_row(2, 0, 2_000, 2_000);
+        t2.session_id = Some("s1".to_owned());
+        t2.input_preview = Some("in2".to_owned());
+        t2.output_preview = Some("out2".to_owned());
+
+        // Trace 3 (latest): output_preview = None (MUST remain NULL, not fall back to trace 2!)
+        let mut t3 = span_row(3, 0, 3_000, 3_000);
+        t3.session_id = Some("s1".to_owned());
+        t3.input_preview = Some("in3".to_owned());
+        t3.output_preview = None;
+
+        // Trace 4 (another session with both present + eval excluded trace)
+        let mut t4 = span_row(4, 0, 4_000, 4_000);
+        t4.session_id = Some("s2".to_owned());
+        t4.input_preview = Some("in4".to_owned());
+        t4.output_preview = Some("out4".to_owned());
+
+        let mut t5 = span_row(5, 0, 5_000, 5_000);
+        t5.session_id = Some("s2".to_owned());
+        t5.environment = Some(environment::EVAL.to_owned());
+        t5.output_preview = Some("eval-out".to_owned());
+
+        storage
+            .append_spans(project, span_rows(&[t1, t2, t3, t4, t5]))
             .await
-            .expect("eval");
-        assert!(shown.is_some());
-    }
+            .expect("append");
 
-    /// A span that is the root of its trace, in `session`, with the given previews.
-    fn turn(trace: u16, start: i64, session: &str, previews: Option<(&str, &str)>) -> Span {
-        let mut span = span_row(trace, 0, start, start);
-        span.session_id = Some(session.to_owned());
-        if let Some((input, output)) = previews {
-            span.input_preview = Some(input.to_owned());
-            span.output_preview = Some(output.to_owned());
-        }
-        span
-    }
+        let pq = storage
+            .query(project, QueryOptions::new(None, None))
+            .await
+            .expect("pq");
+        let ctx = QueryContext::new(pq, None).expect("ctx");
 
-    fn extras_scope(window: Option<TimeWindow>) -> ListScope {
-        ListScope {
-            window,
-            include_eval: false,
-            include_experiments: false,
-        }
-    }
-
-    async fn extras_of(
-        ctx: &QueryContext,
-        window: Option<TimeWindow>,
-        session_ids: &[&str],
-    ) -> Vec<Value> {
-        let batches = session_extras(
-            ctx,
-            SessionExtrasRequest {
-                scope: extras_scope(window),
-                session_ids,
-                timeout: TIMEOUT,
+        let req = SessionExtrasRequest {
+            scope: ListScope {
+                window: None,
+                include_eval: false,
+                include_experiments: false,
             },
-        )
-        .await
-        .expect("extras");
-        json_rows(&batches)
-    }
+            session_ids: &["s1", "s2", "missing"],
+            timeout: TIMEOUT,
+        };
+        let batches = session_extras(&ctx, req).await.expect("extras");
 
-    fn row_of<'a>(rows: &'a [Value], session: &str) -> &'a Value {
-        rows.iter()
-            .find(|row| row["session_id"] == session)
-            .unwrap_or_else(|| panic!("no extras row for {session}"))
-    }
+        let mut rows = batches_to_json(&batches);
+        rows.sort_by(|a, b| a["session_id"].as_str().cmp(&b["session_id"].as_str()));
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0]["session_id"], "s1");
+        assert_eq!(rows[0][SESSION_ERROR_TRACE_COUNT], 1);
+        assert!(rows[0][SESSION_FIRST_INPUT_PREVIEW].is_null());
+        assert!(rows[0][SESSION_LAST_OUTPUT_PREVIEW].is_null());
+        assert_eq!(rows[1]["session_id"], "s2");
+        assert_eq!(rows[1][SESSION_FIRST_INPUT_PREVIEW], "in4");
+        assert_eq!(rows[1][SESSION_LAST_OUTPUT_PREVIEW], "out4");
 
-    #[tokio::test]
-    async fn session_extras_counts_errors_and_takes_the_first_and_last_previews() {
-        let mut failed = turn(1, 1_000, "s", Some(("first", "out-1")));
-        failed.status = SpanStatus::Error;
-        let spans = [
-            failed,
-            // Same start as trace 1 with a larger trace_id: not the earliest.
-            turn(5, 1_000, "s", Some(("tie-first", "out-5"))),
-            turn(2, 2_000, "s", Some(("second", "out-2"))),
-            turn(3, 3_000, "s", Some(("third", "out-3"))),
-            // Same start as trace 3 with a larger trace_id: the latest.
-            turn(4, 3_000, "s", Some(("fourth", "out-4"))),
-            turn(6, 1_000, "quiet", None),
-        ];
-        let ctx = context_of(&spans);
-        let rows = extras_of(&ctx, None, &["s", "quiet", "missing"]).await;
-        assert_eq!(rows.len(), 2, "{rows:?}");
-
-        let s = row_of(&rows, "s");
-        assert_eq!(s[SESSION_ERROR_TRACE_COUNT], 1);
-        assert_eq!(s[SESSION_FIRST_INPUT_PREVIEW], "first");
-        assert_eq!(s[SESSION_LAST_OUTPUT_PREVIEW], "out-4");
-
-        let quiet = row_of(&rows, "quiet");
-        assert_eq!(quiet[SESSION_ERROR_TRACE_COUNT], 0);
-        assert!(quiet[SESSION_FIRST_INPUT_PREVIEW].is_null(), "{quiet}");
-        assert!(quiet[SESSION_LAST_OUTPUT_PREVIEW].is_null(), "{quiet}");
-    }
-
-    #[tokio::test]
-    async fn session_extras_ignores_traces_outside_the_window() {
-        let spans = [
-            turn(1, 1_000, "s", Some(("in", "in-out"))),
-            turn(2, 9_000, "s", Some(("late", "late-out"))),
-        ];
-        let ctx = context_of(&spans);
-        let window = TimeWindow::new(0, 5_000).expect("window");
-        let rows = extras_of(&ctx, Some(window), &["s"]).await;
-        let s = row_of(&rows, "s");
-        assert_eq!(s[SESSION_FIRST_INPUT_PREVIEW], "in");
-        assert_eq!(s[SESSION_LAST_OUTPUT_PREVIEW], "in-out");
-        assert_eq!(s[SESSION_ERROR_TRACE_COUNT], 0);
-    }
-
-    #[tokio::test]
-    async fn session_extras_of_unknown_or_no_sessions_is_empty() {
-        let spans = [turn(1, 1_000, "s", Some(("in", "out")))];
-        let ctx = context_of(&spans);
-        assert!(extras_of(&ctx, None, &["missing"]).await.is_empty());
-        assert!(extras_of(&ctx, None, &[]).await.is_empty());
-    }
-
-    #[tokio::test]
-    async fn session_extras_rejects_more_than_a_page_of_sessions() {
-        let ids: Vec<&str> = vec!["s"; MAX_PAGE + 1];
-        let result = session_extras(
-            &context(),
-            SessionExtrasRequest {
-                scope: extras_scope(None),
-                session_ids: &ids,
-                timeout: TIMEOUT,
-            },
-        )
-        .await;
+        // Verify limit validation and empty session_ids
+        let too_many = vec!["s"; MAX_PAGE + 1];
+        assert!(matches!(
+            session_extras(
+                &ctx,
+                SessionExtrasRequest {
+                    scope: ListScope {
+                        window: None,
+                        include_eval: false,
+                        include_experiments: false,
+                    },
+                    session_ids: &too_many,
+                    timeout: TIMEOUT,
+                }
+            )
+            .await,
+            Err(RunError::InvalidRequest(_))
+        ));
         assert!(
-            matches!(result, Err(RunError::InvalidRequest(_))),
-            "{result:?}"
+            session_extras(
+                &ctx,
+                SessionExtrasRequest {
+                    scope: ListScope {
+                        window: None,
+                        include_eval: false,
+                        include_experiments: false,
+                    },
+                    session_ids: &[],
+                    timeout: TIMEOUT,
+                }
+            )
+            .await
+            .expect("empty")
+            .is_empty()
         );
+
+        let _ = storage.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn session_list_cost_null_and_window() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let storage = crate::Storage::open(test_config(dir.path()))
+            .await
+            .expect("open");
+        let project: ProjectId = "018f6b4e-7c1a-7c1a-8c1a-000000000001".parse().expect("pid");
+
+        let mut s1 = span_row(1, 0, 1_000, 1_000);
+        s1.session_id = Some("s1".to_owned());
+        s1.cost_total = Some(0.1);
+        let mut s2 = span_row(2, 0, 2_000, 2_000);
+        s2.session_id = Some("s2".to_owned());
+        s2.cost_total = None;
+
+        let mut sc = score_row(1, 1, 1_000, 1_000, 1_000, false, "resolved");
+        sc.target = ScoreTarget::Session {
+            session_id: "s1".to_owned(),
+        };
+        sc.value = ScoreValue::Boolean(true);
+
+        storage
+            .append_spans(project, span_rows(&[s1, s2]))
+            .await
+            .expect("append spans");
+        storage
+            .append_scores(project, score_rows(&[sc]))
+            .await
+            .expect("append scores");
+
+        let pq = storage
+            .query(project, QueryOptions::new(None, None))
+            .await
+            .expect("pq");
+        let ctx = QueryContext::new(pq, None).expect("ctx");
+
+        for order in [SortOrder::Asc, SortOrder::Desc] {
+            let req = SessionListRequest {
+                filter: None,
+                scope: ListScope {
+                    window: Some(TimeWindow::new(0, 5_000).expect("win")),
+                    include_eval: false,
+                    include_experiments: false,
+                },
+                sort: SessionSort::CostTotal,
+                order,
+                limit: 10,
+                cursor: None,
+                timeout: TIMEOUT,
+            };
+            let q = session_list(&ctx, req).await.expect("list");
+            let q_json = batches_to_json(&q.batches);
+            assert_eq!(q_json.len(), 2);
+            assert_eq!(q_json[0]["session_id"], "s1");
+            assert!(q_json[1]["cost_total"].is_null());
+        }
+
+        // Verify filter with score() works on session_list
+        let req = SessionListRequest {
+            filter: Some("score('resolved') = 1"),
+            scope: ListScope {
+                window: None,
+                include_eval: false,
+                include_experiments: false,
+            },
+            sort: SessionSort::StartTime,
+            order: SortOrder::Desc,
+            limit: 10,
+            cursor: None,
+            timeout: TIMEOUT,
+        };
+        let q = session_list(&ctx, req).await.expect("list");
+        let rows = batches_to_json(&q.batches);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0]["session_id"], "s1");
+        assert_eq!(
+            raw_string_at(&q.batches[0].columns()[0], 0).expect("str"),
+            Some("s1".to_owned())
+        );
+
+        let _ = storage.shutdown().await;
     }
 }

@@ -12,22 +12,22 @@ use cetra_column::{
 use cetra_core::ids::ProjectId;
 use cetra_core::schema::{scores, scores_schema, spans, spans_schema, traces, traces_schema};
 use cetra_query::exec::streaming::{ProjectOp, UnionSource};
+#[cfg(test)]
+use cetra_query::exec::{CollectSink, PushSink, run_pipeline as exec_run_pipeline};
 use cetra_query::exec::{
-    CollectSink, ControlFlow, DEFAULT_BATCH_SIZE, ExecContext, ExecMetrics, IdLookupHint,
-    PartitionStream, PushOperator, PushSink, ScanSource, ScanSpec,
-    run_pipeline as exec_run_pipeline,
+    ControlFlow, DEFAULT_BATCH_SIZE, ExecContext, ExecMetrics, IdLookupHint, PartitionStream,
+    PushOperator, ScanSource, ScanSpec,
 };
 use cetra_query::{BinaryOp, CastMode, EvalContext, Expr, FilterView, QueryError, ScalarFn};
 use chrono::NaiveDate;
-use datafusion::error::DataFusionError;
 
 use crate::catalog::{FileMeta, FileTable};
-use crate::column_bridge::arrow_schema_to_column;
 use crate::deletion::{self, PendingDeletion};
 use crate::engine::mem_source::MemtableSource;
 use crate::engine::parquet_source::ParquetSource;
 use crate::engine::scores_source::ScoresSource;
 use crate::engine::traces_source::TracesSource;
+use crate::error::EngineError;
 use crate::memtable::MemSnapshot;
 use crate::query_error::{InvalidQuery, Position, RunError};
 use crate::verify::Suspects;
@@ -37,18 +37,18 @@ use crate::{QeRuntime, QueryOptions, Storage};
 pub(crate) const DURATION_NS: &str = "duration_ns";
 pub(crate) const DURATION_MS: &str = "duration_ms";
 
-/// Execution context for `reads_qe` queries over one snapshot of a project.
+/// Execution context for read queries over one snapshot of a project.
 #[derive(Clone)]
-pub struct EngineContext {
+pub(crate) struct EngineContext {
     pub(crate) spans: Arc<dyn ScanSource>,
     pub(crate) traces: Arc<TracesSource>,
     pub(crate) scores: Arc<ScoresSource>,
+    pub(crate) suspects: Suspects,
     pub(crate) runtime: Arc<QeRuntime>,
     pub(crate) visible_from: Option<i64>,
     pub(crate) around: Option<i64>,
     pub(crate) force_range_mode: bool,
-    pub(crate) suspects: Suspects,
-    pool: Option<Arc<ScopedPool>>,
+    pub(crate) pool: Option<Arc<ScopedPool>>,
     last_metrics: Arc<Mutex<Option<ExecMetrics>>>,
 }
 
@@ -74,18 +74,21 @@ impl Drop for CancelOnDrop {
 
 impl EngineContext {
     /// Forces range-mode execution on `trace_list` (disabling widening-window and two-phase list optimizations).
-    #[doc(hidden)]
-    pub fn set_force_range_mode(&mut self, force: bool) {
+    pub(crate) fn set_force_range_mode(&mut self, force: bool) {
         self.force_range_mode = force;
     }
 
     /// Returns the [`ExecMetrics`] recorded by the most recent pipeline executed on this context.
-    #[doc(hidden)]
-    pub fn last_metrics(&self) -> Option<ExecMetrics> {
+    pub(crate) fn last_metrics(&self) -> Option<ExecMetrics> {
         self.last_metrics
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .clone()
+    }
+
+    /// Returns the pre-admitted [`ScopedPool`], if this context was admitted via [`Storage::query`].
+    pub(crate) fn pool(&self) -> Option<&Arc<ScopedPool>> {
+        self.pool.as_ref()
     }
 
     /// Admits a query against `storage`'s [`QeRuntime`] admission pool up front (surfacing
@@ -107,15 +110,14 @@ impl EngineContext {
             .await
             .map_err(|err| match err {
                 QueryError::Busy => crate::error::QueryError::Busy,
-                other => {
-                    crate::error::QueryError::DataFusion(DataFusionError::External(Box::new(other)))
-                }
+                other => crate::error::QueryError::Internal(EngineError::from_query(&other)),
             })?;
         Self::build_from_storage(storage, project, options, Some(pool))
-            .map_err(crate::error::QueryError::DataFusion)
+            .map_err(crate::error::QueryError::Internal)
     }
 
     /// Builds an [`EngineContext`] over `storage`'s current published snapshot for `project`.
+    #[cfg(test)]
     pub(crate) fn from_storage(
         storage: &Storage,
         project: ProjectId,
@@ -129,35 +131,75 @@ impl EngineContext {
         project: ProjectId,
         options: &QueryOptions,
         pool: Option<Arc<ScopedPool>>,
-    ) -> Result<Self, DataFusionError> {
-        let handle = tokio::runtime::Handle::try_current().map_err(|_| {
-            DataFusionError::Internal(
-                "EngineContext::from_storage requires an active Tokio runtime".to_owned(),
-            )
-        })?;
+    ) -> Result<Self, EngineError> {
+        let handle = tokio::runtime::Handle::try_current()
+            .map_err(|_| EngineError::internal("EngineContext requires an active Tokio runtime"))?;
         let state = storage.published.load();
-        let suspects = Suspects::new(Arc::clone(&storage.verify));
-        let store = storage.objects.store();
-        let spans_raw = spans_raw_schema().map_err(run_err_to_df)?;
+        Self::build_from_state(
+            &state,
+            storage.objects.store(),
+            project,
+            options,
+            Arc::clone(&storage.qe_runtime),
+            storage.lookback,
+            &storage.verify,
+            handle,
+            pool,
+        )
+    }
+
+    /// Builds an [`EngineContext`] over an explicit [`ReadState`] and `ObjectStore`.
+    #[cfg(any(test, fuzzing))]
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn from_state(
+        state: &crate::read_state::ReadState,
+        store: Arc<dyn object_store::ObjectStore>,
+        project: ProjectId,
+        options: &QueryOptions,
+        runtime: Arc<QeRuntime>,
+        lookback: i64,
+        verify: &Arc<crate::verify::VerifyQueue>,
+        handle: tokio::runtime::Handle,
+    ) -> Result<Self, EngineError> {
+        Self::build_from_state(
+            state, store, project, options, runtime, lookback, verify, handle, None,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn build_from_state(
+        state: &crate::read_state::ReadState,
+        store: Arc<dyn object_store::ObjectStore>,
+        project: ProjectId,
+        options: &QueryOptions,
+        runtime: Arc<QeRuntime>,
+        lookback: i64,
+        verify: &Arc<crate::verify::VerifyQueue>,
+        handle: tokio::runtime::Handle,
+        pool: Option<Arc<ScopedPool>>,
+    ) -> Result<Self, EngineError> {
+        let suspects = Suspects::new(Arc::clone(verify));
+        let spans_raw = spans_schema();
 
         if state.projects.is_dropped(project) {
             let empty_mem = Arc::new(MemSnapshot::default());
             let no_deletions: Arc<[Arc<PendingDeletion>]> = Arc::from(Vec::new());
-            let spans: Arc<dyn ScanSource> =
-                Arc::new(UnionSource::new(spans_raw, Vec::new()).map_err(query_err_to_df)?);
+            let spans: Arc<dyn ScanSource> = Arc::new(
+                UnionSource::new(spans_raw, Vec::new()).map_err(|e| EngineError::from_query(&e))?,
+            );
             let traces = Arc::new(
                 TracesSource::new(
                     Arc::clone(&store),
                     project,
                     Vec::new(),
                     Arc::clone(&empty_mem),
-                    storage.lookback,
+                    lookback,
                     Arc::clone(&no_deletions),
-                    Arc::clone(&storage.qe_runtime.metadata_cache),
+                    Arc::clone(&runtime.metadata_cache),
                     suspects.clone(),
                     handle.clone(),
                 )
-                .map_err(query_err_to_df)?,
+                .map_err(|e| EngineError::from_query(&e))?,
             );
             let scores = Arc::new(
                 ScoresSource::new(
@@ -167,21 +209,21 @@ impl EngineContext {
                     empty_mem,
                     None,
                     no_deletions,
-                    Arc::clone(&storage.qe_runtime.metadata_cache),
+                    Arc::clone(&runtime.metadata_cache),
                     suspects.clone(),
                     handle,
                 )
-                .map_err(query_err_to_df)?,
+                .map_err(|e| EngineError::from_query(&e))?,
             );
             return Ok(Self {
                 spans,
                 traces,
                 scores,
-                runtime: Arc::clone(&storage.qe_runtime),
+                suspects,
+                runtime,
                 visible_from: options.visible_from(),
                 around: options.around(),
                 force_range_mode: false,
-                suspects,
                 pool,
                 last_metrics: Arc::new(Mutex::new(None)),
             });
@@ -209,7 +251,7 @@ impl EngineContext {
                         keep_from,
                         &deletions,
                     )
-                    .map_err(|e| DataFusionError::External(Box::new(e)))?,
+                    .map_err(|e| query_err_to_engine(&e))?,
                     deletion::project_snapshot(
                         Table::Scores,
                         &state.scores,
@@ -217,7 +259,7 @@ impl EngineContext {
                         keep_from,
                         &deletions,
                     )
-                    .map_err(|e| DataFusionError::External(Box::new(e)))?,
+                    .map_err(|e| query_err_to_engine(&e))?,
                 )
             };
 
@@ -244,7 +286,7 @@ impl EngineContext {
             Arc::clone(&spans_raw),
             spans_files,
             Arc::clone(&deletions),
-            Arc::clone(&storage.qe_runtime.metadata_cache),
+            Arc::clone(&runtime.metadata_cache),
             suspects.clone(),
             handle.clone(),
         );
@@ -255,13 +297,13 @@ impl EngineContext {
             Arc::clone(&spans_snapshot),
             Arc::clone(&deletions),
         )
-        .map_err(query_err_to_df)?;
+        .map_err(|e| EngineError::from_query(&e))?;
         let spans: Arc<dyn ScanSource> = Arc::new(
             UnionSource::new(
                 spans_raw,
                 vec![Arc::new(spans_parquet), Arc::new(spans_mem)],
             )
-            .map_err(query_err_to_df)?,
+            .map_err(|e| EngineError::from_query(&e))?,
         );
 
         let traces = Arc::new(
@@ -270,13 +312,13 @@ impl EngineContext {
                 project,
                 traces_files,
                 spans_snapshot,
-                storage.lookback,
+                lookback,
                 Arc::clone(&deletions),
-                Arc::clone(&storage.qe_runtime.metadata_cache),
+                Arc::clone(&runtime.metadata_cache),
                 suspects.clone(),
                 handle.clone(),
             )
-            .map_err(query_err_to_df)?,
+            .map_err(|e| EngineError::from_query(&e))?,
         );
 
         let scores = Arc::new(
@@ -287,22 +329,22 @@ impl EngineContext {
                 scores_snapshot,
                 keep_from,
                 deletions,
-                Arc::clone(&storage.qe_runtime.metadata_cache),
+                Arc::clone(&runtime.metadata_cache),
                 suspects.clone(),
                 handle,
             )
-            .map_err(query_err_to_df)?,
+            .map_err(|e| EngineError::from_query(&e))?,
         );
 
         Ok(Self {
             spans,
             traces,
             scores,
-            runtime: Arc::clone(&storage.qe_runtime),
+            suspects,
+            runtime,
             visible_from: options.visible_from(),
             around: options.around(),
             force_range_mode: false,
-            suspects,
             pool,
             last_metrics: Arc::new(Mutex::new(None)),
         })
@@ -378,13 +420,17 @@ impl EngineContext {
             }
             Ok(Ok(Err(err))) => {
                 drop(cancel_guard);
-                Err(query_err_to_run(err))
+                let run_err = query_err_to_run(err);
+                if let RunError::Internal(engine) = &run_err {
+                    self.suspects.report(engine);
+                }
+                Err(run_err)
             }
-            Ok(Err(join_err)) => {
+            Ok(Err(_join_err)) => {
                 drop(cancel_guard);
-                Err(RunError::Internal(DataFusionError::External(Box::new(
-                    join_err,
-                ))))
+                Err(RunError::Internal(EngineError::internal(
+                    "query execution worker panicked",
+                )))
             }
             Err(_elapsed) => {
                 cancel.cancel();
@@ -400,43 +446,9 @@ impl EngineContext {
         res
     }
 
-    /// Scans `source` with `spec`, pushes through `make_chain` into `make_sink`, and returns
-    /// finalized sinks in partition index order.
-    pub(crate) async fn run_with_sink<S, FChain, FSink>(
-        &self,
-        source: Arc<dyn ScanSource>,
-        spec: ScanSpec,
-        make_chain: FChain,
-        make_sink: FSink,
-        timeout: Duration,
-    ) -> Result<(Vec<S>, ExecMetrics), RunError>
-    where
-        S: PushSink + Send + 'static,
-        FChain: Fn(usize, &ExecContext) -> Result<Vec<Box<dyn PushOperator>>, QueryError>
-            + Send
-            + Sync
-            + 'static,
-        FSink: Fn(usize, &ExecContext) -> Result<S, QueryError> + Send + Sync + 'static,
-    {
-        self.run_with_ctx(timeout, move |ctx| {
-            let partitions = source.open_partitions(&spec, ctx)?;
-            if partitions.is_empty() {
-                return Ok(Vec::new());
-            }
-            let ctx_chain = ctx.clone();
-            let ctx_sink = ctx.clone();
-            exec_run_pipeline(
-                ctx,
-                partitions,
-                move |idx| make_chain(idx, &ctx_chain),
-                move |idx| make_sink(idx, &ctx_sink),
-            )
-        })
-        .await
-    }
-
     /// Runs a scan + push pipeline and combines the resulting sinks synchronously inside the
     /// bounded worker execution scope.
+    #[cfg(test)]
     pub(crate) async fn run_pipeline<S, FChain, FSink, R, FCombine>(
         &self,
         source: Arc<dyn ScanSource>,
@@ -476,6 +488,7 @@ impl EngineContext {
     }
 
     /// Scans `source` with `spec` and collects all output batches.
+    #[cfg(test)]
     pub(crate) async fn collect_batches(
         &self,
         source: Arc<dyn ScanSource>,
@@ -499,14 +512,10 @@ impl EngineContext {
     }
 }
 
-fn query_err_to_df(err: QueryError) -> DataFusionError {
-    DataFusionError::External(Box::new(err))
-}
-
-fn run_err_to_df(err: RunError) -> DataFusionError {
+fn query_err_to_engine(err: &crate::error::QueryError) -> EngineError {
     match err {
-        RunError::Internal(df) => df,
-        other => DataFusionError::External(Box::new(other)),
+        crate::error::QueryError::Internal(engine) => *engine,
+        crate::error::QueryError::Busy => EngineError::from_query(&QueryError::Busy),
     }
 }
 
@@ -515,13 +524,17 @@ pub(crate) fn query_err_to_run(err: QueryError) -> RunError {
     match err {
         QueryError::TooLarge => RunError::TooLarge,
         QueryError::Cancelled => RunError::Timeout,
-        QueryError::Invalid(inv) => invalid_err_to_run(inv),
+        QueryError::Invalid(inv) => RunError::Invalid(InvalidQuery {
+            message: inv.message,
+            position: inv.position.map(|p| Position {
+                line: p.line,
+                column: p.column,
+            }),
+        }),
         QueryError::InvalidRequest(msg) => RunError::InvalidRequest(msg),
         QueryError::Failed(msg) => RunError::Failed(msg),
-        QueryError::Column(e) => RunError::Internal(DataFusionError::External(Box::new(e))),
-        QueryError::Internal(msg) => RunError::Internal(DataFusionError::External(msg.into())),
-        QueryError::Busy => {
-            RunError::Internal(DataFusionError::External(Box::new(QueryError::Busy)))
+        err @ (QueryError::Column(_) | QueryError::Internal(_) | QueryError::Busy) => {
+            RunError::Internal(EngineError::from_query(&err))
         }
     }
 }
@@ -551,50 +564,23 @@ pub(crate) fn run_err_to_query(err: RunError) -> QueryError {
         RunError::Failed(msg) => QueryError::Failed(msg),
         RunError::Timeout => QueryError::Cancelled,
         RunError::TooLarge => QueryError::TooLarge,
-        RunError::Internal(df_err) => QueryError::internal(df_err.to_string()),
+        RunError::Internal(engine_err) => QueryError::internal(engine_err.kind_label()),
     }
 }
 
 /// Raw `spans` `cetra_column::Schema` (56 stored columns).
 pub(crate) fn spans_raw_schema() -> Result<Arc<Schema>, RunError> {
-    static SCHEMA: OnceLock<Arc<Schema>> = OnceLock::new();
-    if let Some(s) = SCHEMA.get() {
-        return Ok(Arc::clone(s));
-    }
-    let s = Arc::new(
-        arrow_schema_to_column(&spans_schema())
-            .map_err(|e| RunError::Internal(DataFusionError::External(Box::new(e))))?,
-    );
-    let _ = SCHEMA.set(Arc::clone(&s));
-    Ok(s)
+    Ok(spans_schema())
 }
 
 /// Raw `traces` `cetra_column::Schema` (30 stored columns).
 pub(crate) fn traces_raw_schema() -> Result<Arc<Schema>, RunError> {
-    static SCHEMA: OnceLock<Arc<Schema>> = OnceLock::new();
-    if let Some(s) = SCHEMA.get() {
-        return Ok(Arc::clone(s));
-    }
-    let s = Arc::new(
-        arrow_schema_to_column(&traces_schema())
-            .map_err(|e| RunError::Internal(DataFusionError::External(Box::new(e))))?,
-    );
-    let _ = SCHEMA.set(Arc::clone(&s));
-    Ok(s)
+    Ok(traces_schema())
 }
 
 /// Raw `scores` `cetra_column::Schema` (24 stored columns).
 pub(crate) fn scores_raw_schema() -> Result<Arc<Schema>, RunError> {
-    static SCHEMA: OnceLock<Arc<Schema>> = OnceLock::new();
-    if let Some(s) = SCHEMA.get() {
-        return Ok(Arc::clone(s));
-    }
-    let s = Arc::new(
-        arrow_schema_to_column(&scores_schema())
-            .map_err(|e| RunError::Internal(DataFusionError::External(Box::new(e))))?,
-    );
-    let _ = SCHEMA.set(Arc::clone(&s));
-    Ok(s)
+    Ok(scores_schema())
 }
 
 /// View `spans` `cetra_column::Schema` (56 columns: skips `project_id`, hex IDs, adds `duration_ms`).
@@ -622,7 +608,7 @@ pub(crate) fn spans_view_schema() -> Result<Arc<Schema>, RunError> {
         }
     }
     let built = Schema::try_new_arc(fields)
-        .map_err(|e| RunError::Internal(DataFusionError::External(Box::new(e))))?;
+        .map_err(|e| RunError::Internal(EngineError::from_column(&e)))?;
     let _ = SCHEMA.set(Arc::clone(&built));
     Ok(built)
 }
@@ -659,7 +645,7 @@ pub(crate) fn traces_view_schema() -> Result<Arc<Schema>, RunError> {
         }
     }
     let built = Schema::try_new_arc(fields)
-        .map_err(|e| RunError::Internal(DataFusionError::External(Box::new(e))))?;
+        .map_err(|e| RunError::Internal(EngineError::from_column(&e)))?;
     let _ = SCHEMA.set(Arc::clone(&built));
     Ok(built)
 }
@@ -686,12 +672,12 @@ pub(crate) fn scores_view_schema() -> Result<Arc<Schema>, RunError> {
         fields.push(Field::new(name, dt, field.nullable));
     }
     let built = Schema::try_new_arc(fields)
-        .map_err(|e| RunError::Internal(DataFusionError::External(Box::new(e))))?;
+        .map_err(|e| RunError::Internal(EngineError::from_column(&e)))?;
     let _ = SCHEMA.set(Arc::clone(&built));
     Ok(built)
 }
 
-/// View `sessions` `cetra_column::Schema` (11 columns matching `views/sessions.rs`).
+/// View `sessions` `cetra_column::Schema` (11 columns).
 pub(crate) fn sessions_view_schema() -> Result<Arc<Schema>, RunError> {
     static SCHEMA: OnceLock<Arc<Schema>> = OnceLock::new();
     if let Some(s) = SCHEMA.get() {
@@ -715,7 +701,7 @@ pub(crate) fn sessions_view_schema() -> Result<Arc<Schema>, RunError> {
             false,
         ),
     ])
-    .map_err(|e| RunError::Internal(DataFusionError::External(Box::new(e))))?;
+    .map_err(|e| RunError::Internal(EngineError::from_column(&e)))?;
     let _ = SCHEMA.set(Arc::clone(&built));
     Ok(built)
 }
@@ -2096,10 +2082,10 @@ mod tests {
 
         // Verify admitted context succeeds when pool has room.
         let admitted = storage
-            .qe_query(project, QueryOptions::new(None, None))
+            .query(project, QueryOptions::new(None, None))
             .await
             .expect("admit succeeds");
-        assert!(admitted.pool.is_some());
+        assert!(admitted.inner.pool.is_some());
         drop(admitted);
 
         let _ = storage.shutdown().await;

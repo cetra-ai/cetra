@@ -1095,29 +1095,16 @@ mod tests {
         assert!(object_exists(dir.path(), &file_path));
 
         // The old snapshot still reads its one row.
-        let ctx = datafusion::execution::context::SessionContext::new_with_config_rt(
-            datafusion::execution::context::SessionConfig::new(),
-            Arc::clone(&held.runtime),
+        let ctx = crate::views::QueryContext::new(held, None).unwrap();
+        let counted = crate::test_support::rows(&ctx, "SELECT count(*) AS n FROM spans").await;
+        assert_eq!(
+            counted[0]["n"].as_i64().unwrap(),
+            1,
+            "the pre-raise snapshot reads its row"
         );
-        ctx.register_table("spans_t", held.spans.clone()).unwrap();
-        let counted = ctx
-            .sql("SELECT count(*) FROM spans_t")
-            .await
-            .unwrap()
-            .collect()
-            .await
-            .unwrap();
-        let total = counted[0]
-            .column(0)
-            .as_any()
-            .downcast_ref::<arrow::array::Int64Array>()
-            .unwrap()
-            .value(0);
-        assert_eq!(total, 1, "the pre-raise snapshot reads its row");
 
         // Once the snapshot is gone, every obsolete file goes.
         drop(ctx);
-        drop(held);
         let collected = storage.collect_obsolete(Duration::ZERO).await.unwrap();
         assert!(collected.deleted >= 1, "{collected:?}");
         assert!(!object_exists(dir.path(), &file_path));

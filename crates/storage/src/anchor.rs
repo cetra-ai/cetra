@@ -491,14 +491,13 @@ mod tests {
     use std::collections::BTreeMap;
     use std::sync::Arc;
 
-    use cetra_core::batch::spans_to_record_batch;
+    use cetra_core::batch::spans_to_batch;
     use cetra_core::enums::{SpanKind, SpanStatus};
     use cetra_core::ids::{ProjectId, SpanId, TraceId};
     use cetra_core::span::Span;
     use chrono::{Duration as ChronoDuration, NaiveDate};
 
     use super::*;
-    use crate::column_bridge::record_batch_to_column;
     use crate::memtable::MemBatch;
 
     const NS_PER_SEC: i64 = 1_000_000_000;
@@ -589,7 +588,7 @@ mod tests {
 
     /// Builds a frozen view partitioned by each row's own UTC day.
     fn view(spans: &[Span]) -> FrozenView {
-        let batch = record_batch_to_column(&spans_to_record_batch(spans).unwrap()).unwrap();
+        let batch = spans_to_batch(spans).unwrap();
         let starts = ts_column(&batch, spans::START_TIME).unwrap();
         let mut by_day: BTreeMap<NaiveDate, Vec<u32>> = BTreeMap::new();
         for row in 0..batch.num_rows() {

@@ -267,7 +267,6 @@ fn read_bool(col: &Column, row: usize) -> Option<bool> {
 mod tests {
     use std::sync::Arc;
 
-    use arrow::array::RecordBatch;
     use cetra_column::{
         Batch, Bitmap, Column, DictColumn, Field, FlatColumn, FlatData, RleColumn, ScalarValue,
         Schema, Selection, Utf8Data,
@@ -275,7 +274,6 @@ mod tests {
     use cetra_core::schema::{scores, spans};
 
     use super::{latest_scores_batch, latest_spans_batch};
-    use crate::column_bridge::record_batch_to_column;
     use crate::wal::spans_keyed;
 
     fn names(batch: &Batch) -> Vec<String> {
@@ -302,10 +300,8 @@ mod tests {
     fn the_greatest_ingest_time_wins_in_either_order() {
         let older = spans_keyed(&[10, 11], "older", 1);
         let newer = spans_keyed(&[50, 51], "newer", 1);
-        let either = |first: &RecordBatch, second: &RecordBatch| {
-            let schema = first.schema();
-            let combined = arrow::compute::concat_batches(&schema, [first, second]).unwrap();
-            let batch = record_batch_to_column(&combined).unwrap();
+        let either = |first: &Batch, second: &Batch| {
+            let batch = concat_col(first, second);
             names(&latest_spans_batch(&batch).unwrap())
         };
         assert_eq!(either(&older, &newer), vec!["newer".to_owned(); 2]);
@@ -316,9 +312,7 @@ mod tests {
     fn an_equal_ingest_time_keeps_the_later_row() {
         let first = spans_keyed(&[10, 11], "first", 1);
         let second = spans_keyed(&[10, 11], "second", 1);
-        let schema = first.schema();
-        let combined = arrow::compute::concat_batches(&schema, [&first, &second]).unwrap();
-        let batch = record_batch_to_column(&combined).unwrap();
+        let batch = concat_col(&first, &second);
         assert_eq!(
             names(&latest_spans_batch(&batch).unwrap()),
             vec!["second".to_owned(); 2]
@@ -329,9 +323,7 @@ mod tests {
     fn kept_rows_stay_in_input_order() {
         let older = spans_keyed(&[50, 40], "a", 1);
         let newer = spans_keyed(&[45], "b", 2);
-        let schema = older.schema();
-        let combined = arrow::compute::concat_batches(&schema, [&older, &newer]).unwrap();
-        let batch = record_batch_to_column(&combined).unwrap();
+        let batch = concat_col(&older, &newer);
         let kept = latest_spans_batch(&batch).unwrap();
         // `45` (id 2, later) beats `40`, and the survivors keep their input
         // order, not start-time order.
@@ -381,8 +373,8 @@ mod tests {
     }
 
     /// `[(score_id, updated_at, ingest_time, name)]` as one scores batch.
-    fn score_rows(rows: &[(u128, i64, i64, &str)]) -> RecordBatch {
-        use cetra_core::batch::scores_to_record_batch;
+    fn score_rows(rows: &[(u128, i64, i64, &str)]) -> Batch {
+        use cetra_core::batch::scores_to_batch;
         use cetra_core::enums::ScoreSource;
         use cetra_core::score::{Score, ScoreTarget, ScoreValue};
 
@@ -413,18 +405,16 @@ mod tests {
                 ingest_time: *ingest,
             })
             .collect();
-        scores_to_record_batch(&scores).unwrap()
+        scores_to_batch(&scores).unwrap()
     }
 
-    fn concat_col(first: &RecordBatch, second: &RecordBatch) -> Batch {
-        let schema = first.schema();
-        let rb = arrow::compute::concat_batches(&schema, [first, second]).unwrap();
-        record_batch_to_column(&rb).unwrap()
+    fn concat_col(first: &Batch, second: &Batch) -> Batch {
+        Batch::concat(Arc::clone(first.schema()), &[first, second], None).unwrap()
     }
 
     #[test]
     fn a_null_span_id_is_an_error() {
-        let source = record_batch_to_column(&spans_keyed(&[10], "row", 1)).unwrap();
+        let source = spans_keyed(&[10], "row", 1);
         let fields: Vec<Field> = source
             .schema()
             .fields()

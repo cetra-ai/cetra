@@ -1,35 +1,37 @@
-//! The alert measure: one aggregate over a sliding window (spec 07, D-K-2, D-K-11).
-//!
-//! The filter is a `traces` expression. Trace measures filter the traces
-//! directly; span and score measures keep the rows whose trace passes it,
-//! through the same semi-join as the dashboard (spec 05). Experiment traces
-//! are always excluded; evaluation traces are excluded unless the filter
-//! names `environment` (spec 05 § Default exclusions).
+//! Native query engine implementation of `alert_value` (spec 07, D-K-2, D-K-11).
 
 use std::sync::Arc;
 use std::time::Duration;
 
-use arrow::record_batch::RecordBatch;
+use cetra_column::{Batch, DataType, ScalarValue, Schema};
 use cetra_core::enums::{ScoreDataType, ScoreTargetKind, SpanKind};
 use cetra_core::schema::{scores, spans, traces};
-use datafusion::common::ScalarValue;
-use datafusion::functions_aggregate::expr_fn::{avg, count, sum};
-use datafusion::logical_expr::expr_fn::when;
-use datafusion::logical_expr::{Expr, LogicalPlan, col, in_subquery, lit};
+use cetra_query::exec::streaming::ProjectOp;
+use cetra_query::exec::{
+    AggExpr, AggFunc, ExecContext, HashAgg, HashAggSpec, PartitionStream, ScanSource, ScanSpec,
+    TimeRangeHint, run_pipeline as exec_run_pipeline,
+};
+use cetra_query::{BinaryOp, CompiledFilter, Expr, FilterView, QueryError, UnaryOp};
 
-use super::columns::{f64_at, i64_at, internal, percentile, require};
-use super::scores::MAX_COUNT_NAMES;
-use super::{ListScope, present, scoped_traces};
-use crate::filter::{Filter, FilterView};
-use crate::query_error::{RunError, classify};
-use crate::views::{QueryContext, TimeWindow, exact_cost_sum};
+use crate::query_error::RunError;
+use crate::reads::columns::{decimal_to_f64_at, f64_at, i64_at, internal, require_col};
+use crate::reads::context::{
+    DURATION_NS, EngineContext, OperatorStream, duration_ns_from_bounds_expr, populate_id_lookups,
+    query_err_to_run, rewrite_view_expr_for_raw, run_err_to_query, scores_raw_schema,
+    spans_raw_schema, traces_raw_schema, traces_view_projection, traces_view_schema,
+};
+use crate::reads::scope::{
+    StreamSet, TraceSemiJoinParams, apply_trace_id_semi_join, scoped_traces_spec,
+};
+use crate::reads::scores_join::{apply_compiled_filter, compile_optional_filter};
+use crate::reads::{ListScope, MAX_COUNT_NAMES, present};
+use crate::views::{QueryContext, TimeWindow};
 
 const COUNT: &str = "alert_count";
 const ERRORS: &str = "alert_errors";
 const VALUE: &str = "alert_value";
-const DURATION_NS: &str = "duration_ns";
 const NS_PER_MS: f64 = 1_000_000.0;
-pub(super) const DAY_NS: i64 = 86_400_000_000_000;
+const DAY_NS: i64 = 86_400_000_000_000;
 /// How long before the window a trace may have started and still have its scores
 /// counted (D-K-17). Span measures look back one day (D-K-3).
 const SCORE_TRACE_LOOKBACK: i64 = 7 * DAY_NS;
@@ -89,26 +91,11 @@ pub struct AlertValue {
 }
 
 /// Measures one alert over its window.
-///
-/// # Errors
-///
-/// [`RunError::Invalid`] for filter text, [`RunError::Timeout`] when the query
-/// exceeds `timeout`, and the other [`RunError`] variants from planning and running.
 pub async fn alert_value(
     ctx: &QueryContext,
     request: AlertValueRequest<'_>,
 ) -> Result<AlertValue, RunError> {
-    let timeout = request.timeout;
-    match tokio::time::timeout(timeout, compute(ctx, request)).await {
-        Err(_) => Err(RunError::Timeout),
-        Ok(result) => result,
-    }
-}
-
-async fn compute(
-    ctx: &QueryContext,
-    request: AlertValueRequest<'_>,
-) -> Result<AlertValue, RunError> {
+    let ctx = ctx.engine();
     if matches!(request.measure, AlertMeasure::ScoreCount { .. })
         && present(request.filter).is_some()
     {
@@ -116,176 +103,499 @@ async fn compute(
             "a score count takes no filter".to_owned(),
         ));
     }
-    let filter = match present(request.filter) {
-        Some(text) => Some(ctx.parse_filter(FilterView::Traces, text)?),
-        None => None,
-    };
-    let references_environment = filter
-        .as_ref()
-        .is_some_and(|filter| filter.references_environment);
+
+    let filter = compile_optional_filter(FilterView::Traces, request.filter)?;
+    let filter_text = present(request.filter).map(str::to_owned);
     let window = request.window;
-    match &request.measure {
-        AlertMeasure::ErrorRate => {
-            let batches = trace_batches(
-                ctx,
+
+    if let AlertMeasure::ScoreCount { names } = &request.measure {
+        if names.len() > MAX_COUNT_NAMES {
+            return Err(RunError::InvalidRequest(format!(
+                "at most {MAX_COUNT_NAMES} names"
+            )));
+        }
+        if names.is_empty() {
+            return Ok(AlertValue {
+                count: 0,
+                value: Some(0.0),
+            });
+        }
+    }
+
+    let measure = request.measure.clone();
+    let ctx_clone = ctx.clone();
+    let (value, _) = ctx
+        .run_with_ctx(request.timeout, move |exec_ctx| {
+            run_alert(
+                &ctx_clone,
+                exec_ctx,
                 window,
                 filter,
-                references_environment,
-                vec![
-                    count(lit(1_i64)).alias(COUNT),
-                    sum(error_flag()?).alias(ERRORS),
-                ],
+                filter_text.as_deref(),
+                &measure,
             )
-            .await?;
-            let batch = single_row(&batches)?;
-            let count = i64_at(require(batch, COUNT)?, 0)?;
-            let errors = f64_at(require(batch, ERRORS)?, 0)?.unwrap_or(0.0);
-            Ok(AlertValue {
-                count,
-                value: (count > 0).then(|| errors / count as f64),
-            })
-        }
-        AlertMeasure::Cost => {
-            let batches = trace_batches(
-                ctx,
-                window,
-                filter,
-                references_environment,
-                vec![
-                    count(lit(1_i64)).alias(COUNT),
-                    exact_cost_sum(col(traces::COST_TOTAL)).alias(VALUE),
-                ],
-            )
-            .await?;
-            let batch = single_row(&batches)?;
-            let count = i64_at(require(batch, COUNT)?, 0)?;
-            let cost = f64_at(require(batch, VALUE)?, 0)?.unwrap_or(0.0);
-            Ok(AlertValue {
-                count,
-                value: Some(cost),
-            })
-        }
-        AlertMeasure::TraceLatencyP95 => {
-            let batches = trace_batches(
-                ctx,
-                window,
-                filter,
-                references_environment,
-                vec![
-                    count(lit(1_i64)).alias(COUNT),
-                    percentile(DURATION_NS, 0.95).alias(VALUE),
-                ],
-            )
-            .await?;
-            let batch = single_row(&batches)?;
-            let count = i64_at(require(batch, COUNT)?, 0)?;
-            Ok(AlertValue {
-                count,
-                value: latency_ms(batch, count)?,
-            })
-        }
-        AlertMeasure::LlmLatencyP95 => {
-            let ids =
-                trace_id_plan(ctx, window, DAY_NS, true, filter, references_environment).await?;
-            let batches = ctx
-                .session()
-                .table("spans")
-                .await
-                .map_err(classify)?
-                .filter(
-                    window
-                        .predicate(spans::END_TIME)
-                        .and(col(spans::SPAN_KIND).eq(lit(SpanKind::Llm.as_str())))
-                        .and(in_subquery(col(spans::TRACE_ID), Arc::new(ids))),
-                )
-                .map_err(classify)?
-                .aggregate(
-                    vec![],
-                    vec![
-                        count(lit(1_i64)).alias(COUNT),
-                        percentile(spans::DURATION_NS, 0.95).alias(VALUE),
-                    ],
-                )
-                .map_err(classify)?
-                .collect()
-                .await
-                .map_err(|error| ctx.fail(error))?;
-            let batch = single_row(&batches)?;
-            let count = i64_at(require(batch, COUNT)?, 0)?;
-            Ok(AlertValue {
-                count,
-                value: latency_ms(batch, count)?,
-            })
-        }
+            .map_err(run_err_to_query)
+        })
+        .await?;
+    Ok(value)
+}
+
+fn run_alert(
+    ctx: &EngineContext,
+    exec_ctx: &ExecContext,
+    window: TimeWindow,
+    filter: Option<CompiledFilter>,
+    filter_text: Option<&str>,
+    measure: &AlertMeasure,
+) -> Result<AlertValue, RunError> {
+    match measure {
+        AlertMeasure::ErrorRate => eval_error_rate(ctx, exec_ctx, window, filter),
+        AlertMeasure::Cost => eval_cost(ctx, exec_ctx, window, filter),
+        AlertMeasure::TraceLatencyP95 => eval_trace_latency_p95(ctx, exec_ctx, window, filter),
+        AlertMeasure::LlmLatencyP95 => eval_llm_latency_p95(ctx, exec_ctx, window, filter_text),
         AlertMeasure::ScoreAvg { name } => {
-            score_value(ctx, window, filter, references_environment, name, false).await
+            eval_score_value(ctx, exec_ctx, window, filter_text, name, false)
         }
         AlertMeasure::ScorePassRate { name } => {
-            score_value(ctx, window, filter, references_environment, name, true).await
+            eval_score_value(ctx, exec_ctx, window, filter_text, name, true)
         }
-        AlertMeasure::ScoreCount { names } => score_count(ctx, window, names).await,
+        AlertMeasure::ScoreCount { names } => eval_score_count(ctx, exec_ctx, window, names),
     }
 }
 
-/// The number of live scores named in `names` whose `created_at` is in the window, of any
-/// target. No trace join, no default exclusions (D-IC-20).
-async fn score_count(
-    ctx: &QueryContext,
+fn eval_error_rate(
+    ctx: &EngineContext,
+    exec_ctx: &ExecContext,
+    window: TimeWindow,
+    filter: Option<CompiledFilter>,
+) -> Result<AlertValue, RunError> {
+    let StreamSet { streams, schema } =
+        open_scoped_traces(ctx, exec_ctx, window, filter, &[traces::ERROR_COUNT])?;
+    let err_col = col_expr(&schema, traces::ERROR_COUNT)?;
+    let has_err = Expr::Binary {
+        left: Box::new(err_col),
+        op: BinaryOp::Gt,
+        right: Box::new(Expr::Literal(ScalarValue::I64(0))),
+        data_type: DataType::Bool,
+    };
+    let agg_spec = HashAggSpec {
+        group_by: Vec::new(),
+        aggs: vec![
+            AggExpr {
+                func: AggFunc::CountStar,
+                filter: None,
+                output_name: COUNT.to_owned(),
+            },
+            AggExpr {
+                func: AggFunc::CountStar,
+                filter: Some(has_err),
+                output_name: ERRORS.to_owned(),
+            },
+        ],
+    };
+    let batches = run_global_agg(streams, schema, agg_spec, exec_ctx)?;
+    let batch = single_row(&batches)?;
+    let count = i64_at(batch, require_col(batch, COUNT)?, 0)?;
+    let errors = i64_at(batch, require_col(batch, ERRORS)?, 0)?;
+    Ok(AlertValue {
+        count,
+        value: (count > 0).then(|| errors as f64 / count as f64),
+    })
+}
+
+fn eval_cost(
+    ctx: &EngineContext,
+    exec_ctx: &ExecContext,
+    window: TimeWindow,
+    filter: Option<CompiledFilter>,
+) -> Result<AlertValue, RunError> {
+    let StreamSet { streams, schema } =
+        open_scoped_traces(ctx, exec_ctx, window, filter, &[traces::COST_TOTAL])?;
+    let cost_col = col_expr(&schema, traces::COST_TOTAL)?;
+    let agg_spec = HashAggSpec {
+        group_by: Vec::new(),
+        aggs: vec![
+            AggExpr {
+                func: AggFunc::CountStar,
+                filter: None,
+                output_name: COUNT.to_owned(),
+            },
+            AggExpr {
+                func: AggFunc::SumCostDecimal(cost_col),
+                filter: None,
+                output_name: VALUE.to_owned(),
+            },
+        ],
+    };
+    let batches = run_global_agg(streams, schema, agg_spec, exec_ctx)?;
+    let batch = single_row(&batches)?;
+    let count = i64_at(batch, require_col(batch, COUNT)?, 0)?;
+    let cost = decimal_to_f64_at(batch, require_col(batch, VALUE)?, 0)?.unwrap_or(0.0);
+    Ok(AlertValue {
+        count,
+        value: Some(cost),
+    })
+}
+
+fn eval_trace_latency_p95(
+    ctx: &EngineContext,
+    exec_ctx: &ExecContext,
+    window: TimeWindow,
+    filter: Option<CompiledFilter>,
+) -> Result<AlertValue, RunError> {
+    let uses_scores = filter.as_ref().is_some_and(|f| !f.scores.is_empty());
+    let cols: &[&str] = if uses_scores {
+        &[DURATION_NS]
+    } else {
+        &[traces::START_TIME, traces::END_TIME]
+    };
+    let StreamSet { streams, schema } = open_scoped_traces(ctx, exec_ctx, window, filter, cols)?;
+    let dur_expr = if schema.index_of(DURATION_NS).is_some() {
+        col_expr(&schema, DURATION_NS)?
+    } else {
+        duration_ns_from_bounds_expr(&schema).map_err(query_err_to_run)?
+    };
+    let agg_spec = HashAggSpec {
+        group_by: Vec::new(),
+        aggs: vec![
+            AggExpr {
+                func: AggFunc::CountStar,
+                filter: None,
+                output_name: COUNT.to_owned(),
+            },
+            AggExpr {
+                func: AggFunc::ApproxPercentileCont {
+                    expr: dur_expr,
+                    quantile: 0.95,
+                },
+                filter: None,
+                output_name: VALUE.to_owned(),
+            },
+        ],
+    };
+    let batches = run_global_agg(streams, schema, agg_spec, exec_ctx)?;
+    let batch = single_row(&batches)?;
+    let count = i64_at(batch, require_col(batch, COUNT)?, 0)?;
+    Ok(AlertValue {
+        count,
+        value: latency_ms(batch, count)?,
+    })
+}
+
+fn eval_llm_latency_p95(
+    ctx: &EngineContext,
+    exec_ctx: &ExecContext,
+    window: TimeWindow,
+    filter_text: Option<&str>,
+) -> Result<AlertValue, RunError> {
+    let spans_raw = spans_raw_schema()?;
+    let trace_id_idx = col_index(&spans_raw, spans::TRACE_ID)?;
+    let duration_idx = col_index(&spans_raw, spans::DURATION_NS)?;
+
+    let end_col = col_expr(&spans_raw, spans::END_TIME)?;
+    let kind_col = col_expr(&spans_raw, spans::SPAN_KIND)?;
+    let mut filters = vec![
+        cmp_ts(&end_col, BinaryOp::GtEq, window.from()),
+        cmp_ts(&end_col, BinaryOp::Lt, window.to()),
+        Expr::Binary {
+            left: Box::new(kind_col),
+            op: BinaryOp::Eq,
+            right: Box::new(Expr::Literal(ScalarValue::Utf8(
+                SpanKind::Llm.as_str().to_owned(),
+            ))),
+            data_type: DataType::Bool,
+        },
+    ];
+    if let Some(vf) = ctx.visible_from {
+        let start_col = col_expr(&spans_raw, spans::START_TIME)?;
+        filters.push(cmp_ts(&start_col, BinaryOp::GtEq, vf));
+    }
+
+    let spec = ScanSpec {
+        projection: Some(vec![trace_id_idx, duration_idx]),
+        map_keys: Vec::new(),
+        time_range: TimeRangeHint {
+            min_ns: ctx.visible_from,
+            max_ns: None,
+            around_ns: None,
+        },
+        id_lookups: Vec::new(),
+        filters,
+        substrings: Vec::new(),
+        sort_hints: Vec::new(),
+        limit: None,
+    };
+    let proj_schema = ctx
+        .spans
+        .projected_schema(&spec)
+        .map_err(query_err_to_run)?;
+    let raw_streams = ctx
+        .spans
+        .open_partitions(&spec, exec_ctx)
+        .map_err(query_err_to_run)?;
+
+    let joined_streams = apply_trace_id_semi_join(
+        ctx,
+        exec_ctx,
+        StreamSet {
+            streams: raw_streams,
+            schema: Arc::clone(&proj_schema),
+        },
+        &TraceSemiJoinParams {
+            lookback_ns: DAY_NS,
+            ends_after_from: true,
+            scope: ListScope {
+                window: Some(window),
+                include_eval: false,
+                include_experiments: false,
+            },
+            references_environment: false,
+            dashboard_filter: filter_text,
+        },
+    )?;
+
+    let dur_col = col_expr(&proj_schema, spans::DURATION_NS)?;
+    let agg_spec = HashAggSpec {
+        group_by: Vec::new(),
+        aggs: vec![
+            AggExpr {
+                func: AggFunc::CountStar,
+                filter: None,
+                output_name: COUNT.to_owned(),
+            },
+            AggExpr {
+                func: AggFunc::ApproxPercentileCont {
+                    expr: dur_col,
+                    quantile: 0.95,
+                },
+                filter: None,
+                output_name: VALUE.to_owned(),
+            },
+        ],
+    };
+    let batches = run_global_agg(joined_streams, proj_schema, agg_spec, exec_ctx)?;
+    let batch = single_row(&batches)?;
+    let count = i64_at(batch, require_col(batch, COUNT)?, 0)?;
+    Ok(AlertValue {
+        count,
+        value: latency_ms(batch, count)?,
+    })
+}
+
+fn eval_score_value(
+    ctx: &EngineContext,
+    exec_ctx: &ExecContext,
+    window: TimeWindow,
+    filter_text: Option<&str>,
+    name: &str,
+    pass_rate: bool,
+) -> Result<AlertValue, RunError> {
+    let scores_raw = scores_raw_schema()?;
+    let trace_id_idx = col_index(&scores_raw, scores::TRACE_ID)?;
+    let val_idx = col_index(&scores_raw, scores::VALUE_NUM)?;
+
+    let created_col = col_expr(&scores_raw, scores::CREATED_AT)?;
+    let name_col = col_expr(&scores_raw, scores::NAME)?;
+    let target_col = col_expr(&scores_raw, scores::TARGET)?;
+    let val_col = col_expr(&scores_raw, scores::VALUE_NUM)?;
+
+    let mut min_ns = window.from();
+    if let Some(vf) = ctx.visible_from {
+        min_ns = min_ns.max(vf);
+    }
+    let mut filters = vec![
+        cmp_ts(&created_col, BinaryOp::GtEq, window.from()),
+        cmp_ts(&created_col, BinaryOp::Lt, window.to()),
+        Expr::Binary {
+            left: Box::new(name_col),
+            op: BinaryOp::Eq,
+            right: Box::new(Expr::Literal(ScalarValue::Utf8(name.to_owned()))),
+            data_type: DataType::Bool,
+        },
+        Expr::InList {
+            expr: Box::new(target_col),
+            list: vec![
+                Expr::Literal(ScalarValue::Utf8(
+                    ScoreTargetKind::Trace.as_str().to_owned(),
+                )),
+                Expr::Literal(ScalarValue::Utf8(ScoreTargetKind::Span.as_str().to_owned())),
+            ],
+            negated: false,
+            redacted: false,
+        },
+        Expr::Unary {
+            op: UnaryOp::IsNotNull,
+            expr: Box::new(val_col),
+            data_type: DataType::Bool,
+        },
+    ];
+    if let Some(vf) = ctx.visible_from {
+        filters.push(cmp_ts(&created_col, BinaryOp::GtEq, vf));
+    }
+    if pass_rate {
+        let dt_col = col_expr(&scores_raw, scores::DATA_TYPE)?;
+        filters.push(Expr::Binary {
+            left: Box::new(dt_col),
+            op: BinaryOp::Eq,
+            right: Box::new(Expr::Literal(ScalarValue::Utf8(
+                ScoreDataType::Boolean.as_str().to_owned(),
+            ))),
+            data_type: DataType::Bool,
+        });
+    }
+
+    let spec = ScanSpec {
+        projection: Some(vec![trace_id_idx, val_idx]),
+        map_keys: Vec::new(),
+        time_range: TimeRangeHint {
+            min_ns: Some(min_ns),
+            max_ns: window.to().checked_sub(1),
+            around_ns: None,
+        },
+        id_lookups: Vec::new(),
+        filters,
+        substrings: Vec::new(),
+        sort_hints: Vec::new(),
+        limit: None,
+    };
+    let proj_schema = ctx
+        .scores
+        .projected_schema(&spec)
+        .map_err(query_err_to_run)?;
+    let raw_streams = ctx
+        .scores
+        .open_partitions(&spec, exec_ctx)
+        .map_err(query_err_to_run)?;
+
+    let joined_streams = apply_trace_id_semi_join(
+        ctx,
+        exec_ctx,
+        StreamSet {
+            streams: raw_streams,
+            schema: Arc::clone(&proj_schema),
+        },
+        &TraceSemiJoinParams {
+            lookback_ns: SCORE_TRACE_LOOKBACK,
+            ends_after_from: false,
+            scope: ListScope {
+                window: Some(window),
+                include_eval: false,
+                include_experiments: false,
+            },
+            references_environment: false,
+            dashboard_filter: filter_text,
+        },
+    )?;
+
+    let value_col = col_expr(&proj_schema, scores::VALUE_NUM)?;
+    let agg_spec = HashAggSpec {
+        group_by: Vec::new(),
+        aggs: vec![
+            AggExpr {
+                func: AggFunc::CountStar,
+                filter: None,
+                output_name: COUNT.to_owned(),
+            },
+            AggExpr {
+                func: AggFunc::Avg(value_col),
+                filter: None,
+                output_name: VALUE.to_owned(),
+            },
+        ],
+    };
+    let batches = run_global_agg(joined_streams, proj_schema, agg_spec, exec_ctx)?;
+    let batch = single_row(&batches)?;
+    let count = i64_at(batch, require_col(batch, COUNT)?, 0)?;
+    let value = if count == 0 {
+        None
+    } else {
+        f64_at(batch, require_col(batch, VALUE)?, 0)?
+    };
+    Ok(AlertValue { count, value })
+}
+
+fn eval_score_count(
+    ctx: &EngineContext,
+    exec_ctx: &ExecContext,
     window: TimeWindow,
     names: &[String],
 ) -> Result<AlertValue, RunError> {
-    if names.len() > MAX_COUNT_NAMES {
-        return Err(RunError::InvalidRequest(format!(
-            "at most {MAX_COUNT_NAMES} names"
-        )));
+    let scores_raw = scores_raw_schema()?;
+    let created_idx = col_index(&scores_raw, scores::CREATED_AT)?;
+    let created_col = col_expr(&scores_raw, scores::CREATED_AT)?;
+    let name_col = col_expr(&scores_raw, scores::NAME)?;
+
+    let mut min_ns = window.from();
+    if let Some(vf) = ctx.visible_from {
+        min_ns = min_ns.max(vf);
     }
-    if names.is_empty() {
-        return Ok(AlertValue {
-            count: 0,
-            value: Some(0.0),
-        });
+    let list = names
+        .iter()
+        .map(|n| Expr::Literal(ScalarValue::Utf8(n.clone())))
+        .collect();
+    let mut filters = vec![
+        Expr::InList {
+            expr: Box::new(name_col),
+            list,
+            negated: false,
+            redacted: false,
+        },
+        cmp_ts(&created_col, BinaryOp::GtEq, window.from()),
+        cmp_ts(&created_col, BinaryOp::Lt, window.to()),
+    ];
+    if let Some(vf) = ctx.visible_from {
+        filters.push(cmp_ts(&created_col, BinaryOp::GtEq, vf));
     }
-    let list: Vec<Expr> = names.iter().map(|name| lit(name.as_str())).collect();
-    let batches = ctx
-        .session()
-        .table("scores")
-        .await
-        .map_err(classify)?
-        .filter(
-            col(scores::NAME)
-                .in_list(list, false)
-                .and(window.predicate(scores::CREATED_AT)),
-        )
-        .map_err(classify)?
-        .aggregate(vec![], vec![count(lit(1_i64)).alias(COUNT)])
-        .map_err(classify)?
-        .collect()
-        .await
-        .map_err(|error| ctx.fail(error))?;
+
+    let spec = ScanSpec {
+        projection: Some(vec![created_idx]),
+        map_keys: Vec::new(),
+        time_range: TimeRangeHint {
+            min_ns: Some(min_ns),
+            max_ns: window.to().checked_sub(1),
+            around_ns: None,
+        },
+        id_lookups: Vec::new(),
+        filters,
+        substrings: Vec::new(),
+        sort_hints: Vec::new(),
+        limit: None,
+    };
+    let proj_schema = ctx
+        .scores
+        .projected_schema(&spec)
+        .map_err(query_err_to_run)?;
+    let raw_streams = ctx
+        .scores
+        .open_partitions(&spec, exec_ctx)
+        .map_err(query_err_to_run)?;
+
+    let agg_spec = HashAggSpec {
+        group_by: Vec::new(),
+        aggs: vec![AggExpr {
+            func: AggFunc::CountStar,
+            filter: None,
+            output_name: COUNT.to_owned(),
+        }],
+    };
+    let batches = run_global_agg(raw_streams, proj_schema, agg_spec, exec_ctx)?;
     let batch = single_row(&batches)?;
-    let count = i64_at(require(batch, COUNT)?, 0)?;
+    let count = i64_at(batch, require_col(batch, COUNT)?, 0)?;
     Ok(AlertValue {
         count,
         value: Some(count as f64),
     })
 }
 
-/// `1` for a trace with errors, `0` otherwise.
-fn error_flag() -> Result<Expr, RunError> {
-    when(col(traces::ERROR_COUNT).gt(lit(0_i64)), lit(1_i64))
-        .otherwise(lit(0_i64))
-        .map_err(classify)
-}
-
-/// Runs `aggregates` with no group keys over the scoped and filtered traces.
-async fn trace_batches(
-    ctx: &QueryContext,
+fn open_scoped_traces(
+    ctx: &EngineContext,
+    exec_ctx: &ExecContext,
     window: TimeWindow,
-    filter: Option<Filter>,
-    references_environment: bool,
-    aggregates: Vec<Expr>,
-) -> Result<Vec<RecordBatch>, RunError> {
-    let mut frame = scoped_traces(
+    filter: Option<CompiledFilter>,
+    needed_cols: &[&str],
+) -> Result<StreamSet, RunError> {
+    let references_environment = filter.as_ref().is_some_and(|f| f.references_environment);
+    let mut spec = scoped_traces_spec(
         ctx,
         ListScope {
             window: Some(window),
@@ -293,778 +603,559 @@ async fn trace_batches(
             include_experiments: false,
         },
         references_environment,
-    )
-    .await?;
-    if let Some(filter) = filter {
-        frame = filter.apply(frame, ctx).await.map_err(classify)?;
+    )?;
+    // Alerts use explicit sliding windows; avoid caller `around` hints.
+    spec.time_range.around_ns = None;
+    let traces_raw = traces_raw_schema()?;
+
+    match filter {
+        None => {
+            let mut indices = Vec::with_capacity(needed_cols.len());
+            for &name in needed_cols {
+                indices.push(col_index(&traces_raw, name)?);
+            }
+            spec.projection = Some(indices);
+            let proj_schema = ctx
+                .traces
+                .projected_schema(&spec)
+                .map_err(query_err_to_run)?;
+            let streams = ctx
+                .traces
+                .open_partitions(&spec, exec_ctx)
+                .map_err(query_err_to_run)?;
+            Ok(StreamSet {
+                streams,
+                schema: proj_schema,
+            })
+        }
+        Some(f) if f.scores.is_empty() => {
+            let rewritten = rewrite_view_expr_for_raw(
+                &f.expr,
+                &traces_raw,
+                &[traces::TRACE_ID, traces::ROOT_SPAN_ID],
+                true,
+            )
+            .map_err(query_err_to_run)?;
+            spec.filters.push(rewritten);
+            populate_id_lookups(&mut spec);
+            let mut indices = Vec::with_capacity(needed_cols.len());
+            for &name in needed_cols {
+                indices.push(col_index(&traces_raw, name)?);
+            }
+            spec.projection = Some(indices);
+            let proj_schema = ctx
+                .traces
+                .projected_schema(&spec)
+                .map_err(query_err_to_run)?;
+            let streams = ctx
+                .traces
+                .open_partitions(&spec, exec_ctx)
+                .map_err(query_err_to_run)?;
+            Ok(StreamSet {
+                streams,
+                schema: proj_schema,
+            })
+        }
+        Some(f) => {
+            let raw_streams = ctx
+                .traces
+                .open_partitions(&spec, exec_ctx)
+                .map_err(query_err_to_run)?;
+            let view_schema = traces_view_schema()?;
+            let view_streams: Vec<Box<dyn PartitionStream>> = raw_streams
+                .into_iter()
+                .map(|s| {
+                    let proj = traces_view_projection(&traces_raw, exec_ctx.clone())?;
+                    Ok(
+                        Box::new(OperatorStream::new(s, vec![Box::new(proj)], exec_ctx))
+                            as Box<dyn PartitionStream>,
+                    )
+                })
+                .collect::<Result<Vec<_>, QueryError>>()
+                .map_err(query_err_to_run)?;
+            let filtered = apply_compiled_filter(ctx, exec_ctx, view_streams, &view_schema, &f)
+                .map_err(query_err_to_run)?;
+            // Project down to only `needed_cols` after score filtering.
+            let mut out_fields = Vec::with_capacity(needed_cols.len());
+            let mut proj_exprs = Vec::with_capacity(needed_cols.len());
+            for &name in needed_cols {
+                let idx = col_index(&view_schema, name)?;
+                let field = &view_schema.fields()[idx];
+                out_fields.push(field.clone());
+                proj_exprs.push(Expr::Column {
+                    index: idx,
+                    name: field.name.clone(),
+                    data_type: field.data_type.clone(),
+                });
+            }
+            let out_schema =
+                Schema::try_new_arc(out_fields).map_err(|e| query_err_to_run(e.into()))?;
+            let narrowed = filtered
+                .into_iter()
+                .map(|s| {
+                    let proj = ProjectOp::with_schema(
+                        proj_exprs.clone(),
+                        Arc::clone(&out_schema),
+                        exec_ctx.clone(),
+                    )?;
+                    Ok(
+                        Box::new(OperatorStream::new(s, vec![Box::new(proj)], exec_ctx))
+                            as Box<dyn PartitionStream>,
+                    )
+                })
+                .collect::<Result<Vec<_>, QueryError>>()
+                .map_err(query_err_to_run)?;
+            Ok(StreamSet {
+                streams: narrowed,
+                schema: out_schema,
+            })
+        }
     }
-    frame
-        .aggregate(vec![], aggregates)
-        .map_err(classify)?
-        .collect()
-        .await
-        .map_err(|error| ctx.fail(error))
 }
 
-/// The trace ids a span or score measure keeps: traces that start in
-/// `[from − lookback, to)` and pass the filter, with the default exclusions applied.
-/// With `ends_after_from`, also traces that end at or after the window start.
-pub(super) async fn trace_id_plan(
-    ctx: &QueryContext,
-    window: TimeWindow,
-    lookback: i64,
-    ends_after_from: bool,
-    filter: Option<Filter>,
-    references_environment: bool,
-) -> Result<LogicalPlan, RunError> {
-    let start = window
-        .from()
-        .checked_sub(lookback)
-        .ok_or_else(|| RunError::InvalidRequest("from is out of range".to_owned()))?;
-    let wide = TimeWindow::new(start, window.to())?;
-    let mut frame = scoped_traces(
-        ctx,
-        ListScope {
-            window: Some(wide),
-            include_eval: false,
-            include_experiments: false,
-        },
-        references_environment,
-    )
-    .await?;
-    if ends_after_from {
-        frame = frame
-            .filter(col(traces::END_TIME).gt_eq(Expr::Literal(
-                ScalarValue::TimestampNanosecond(Some(window.from()), Some("UTC".into())),
-                None,
-            )))
-            .map_err(classify)?;
+fn run_global_agg(
+    streams: Vec<Box<dyn PartitionStream>>,
+    schema: Arc<Schema>,
+    agg_spec: HashAggSpec,
+    exec_ctx: &ExecContext,
+) -> Result<Vec<Batch>, RunError> {
+    if streams.is_empty() {
+        let agg = HashAgg::new(agg_spec, schema, exec_ctx.clone()).map_err(query_err_to_run)?;
+        return agg.into_batches().map_err(query_err_to_run);
     }
-    if let Some(filter) = filter {
-        frame = filter.apply(frame, ctx).await.map_err(classify)?;
-    }
-    let frame = frame
-        .select(vec![col(traces::TRACE_ID)])
-        .map_err(classify)?;
-    Ok(frame.logical_plan().clone())
+    let sinks = exec_run_pipeline(exec_ctx, streams, |_| Ok(Vec::new()), {
+        let spec_c = agg_spec.clone();
+        let schema_c = Arc::clone(&schema);
+        let ctx_c = exec_ctx.clone();
+        move |_| HashAgg::new(spec_c.clone(), Arc::clone(&schema_c), ctx_c.clone())
+    })
+    .map_err(query_err_to_run)?;
+    HashAgg::merge_sinks(sinks, &agg_spec, &schema, exec_ctx).map_err(query_err_to_run)
 }
 
-/// `avg(value_num)` of the live trace and span scores named `name`, optionally
-/// only boolean ones, on traces that pass the filter.
-async fn score_value(
-    ctx: &QueryContext,
-    window: TimeWindow,
-    filter: Option<Filter>,
-    references_environment: bool,
-    name: &str,
-    pass_rate: bool,
-) -> Result<AlertValue, RunError> {
-    // Scores are counted whenever they were created, so their traces are not
-    // required to end in the window (D-K-17).
-    let ids = trace_id_plan(
-        ctx,
-        window,
-        SCORE_TRACE_LOOKBACK,
-        false,
-        filter,
-        references_environment,
-    )
-    .await?;
-    let mut predicate = window
-        .predicate(scores::CREATED_AT)
-        .and(col(scores::NAME).eq(lit(name)))
-        .and(col(scores::TARGET).in_list(
-            vec![
-                lit(ScoreTargetKind::Trace.as_str()),
-                lit(ScoreTargetKind::Span.as_str()),
-            ],
-            false,
-        ))
-        .and(col(scores::VALUE_NUM).is_not_null())
-        .and(in_subquery(col(scores::TRACE_ID), Arc::new(ids)));
-    if pass_rate {
-        predicate = predicate.and(col(scores::DATA_TYPE).eq(lit(ScoreDataType::Boolean.as_str())));
-    }
-    let batches = ctx
-        .session()
-        .table("scores")
-        .await
-        .map_err(classify)?
-        .filter(predicate)
-        .map_err(classify)?
-        .aggregate(
-            vec![],
-            vec![
-                count(lit(1_i64)).alias(COUNT),
-                avg(col(scores::VALUE_NUM)).alias(VALUE),
-            ],
-        )
-        .map_err(classify)?
-        .collect()
-        .await
-        .map_err(|error| ctx.fail(error))?;
-    let batch = single_row(&batches)?;
-    let count = i64_at(require(batch, COUNT)?, 0)?;
-    let value = if count == 0 {
-        None
-    } else {
-        f64_at(require(batch, VALUE)?, 0)?
-    };
-    Ok(AlertValue { count, value })
-}
-
-/// A p95 in nanoseconds, as milliseconds. `None` when `count` is 0.
-fn latency_ms(batch: &RecordBatch, count: i64) -> Result<Option<f64>, RunError> {
+fn latency_ms(batch: &Batch, count: i64) -> Result<Option<f64>, RunError> {
     if count == 0 {
         return Ok(None);
     }
-    Ok(f64_at(require(batch, VALUE)?, 0)?.map(|ns| ns / NS_PER_MS))
+    Ok(f64_at(batch, require_col(batch, VALUE)?, 0)?.map(|ns| ns / NS_PER_MS))
 }
 
-/// The one batch that has rows. An aggregate with no group keys returns exactly
-/// one row, also over zero input rows, so any other count is an internal error.
-fn single_row(batches: &[RecordBatch]) -> Result<&RecordBatch, RunError> {
+fn single_row(batches: &[Batch]) -> Result<&Batch, RunError> {
     let mut found = None;
     for batch in batches {
         if batch.num_rows() == 0 {
             continue;
         }
         if found.is_some() || batch.num_rows() != 1 {
-            return Err(internal("alert aggregate row count".to_owned()));
+            return Err(internal("alert aggregate row count"));
         }
         found = Some(batch);
     }
-    found.ok_or_else(|| internal("alert aggregate row count".to_owned()))
+    found.ok_or_else(|| internal("alert aggregate row count"))
+}
+
+fn col_index(schema: &Schema, name: &str) -> Result<usize, RunError> {
+    schema
+        .index_of(name)
+        .ok_or_else(|| internal(format!("missing column {name} in schema")))
+}
+
+fn col_expr(schema: &Schema, name: &str) -> Result<Expr, RunError> {
+    let idx = col_index(schema, name)?;
+    Ok(Expr::Column {
+        index: idx,
+        name: name.to_owned(),
+        data_type: schema.fields()[idx].data_type.clone(),
+    })
+}
+
+fn cmp_ts(col: &Expr, op: BinaryOp, ns: i64) -> Expr {
+    Expr::Binary {
+        left: Box::new(col.clone()),
+        op,
+        right: Box::new(Expr::Literal(ScalarValue::TimestampNs {
+            value: ns,
+            utc: true,
+        })),
+        data_type: DataType::Bool,
+    }
 }
 
 #[cfg(test)]
 mod tests {
-    use std::num::NonZeroUsize;
-    use std::sync::Arc;
     use std::time::Duration;
 
-    use cetra_core::enums::{SpanKind, SpanStatus};
+    use bytesize::ByteSize;
+    use cetra_core::enums::{ScoreSource, SpanKind, SpanStatus};
+    use cetra_core::ids::ProjectId;
     use cetra_core::names::{environment, metadata_key};
     use cetra_core::score::{Score, ScoreTarget, ScoreValue};
     use cetra_core::span::Span;
-    use datafusion::execution::runtime_env::RuntimeEnv;
 
     use super::*;
-    use crate::test_support::{live_scores_table, score_row, span_row, spans_table, traces_table};
-    use crate::views::ProjectQuery;
+    use crate::QueryOptions;
+    use crate::config::{
+        FlushConfig, MemtableConfig, QueryConfig, S3Config, StorageConfig, WalConfig,
+    };
+    use crate::test_support::{score_row, score_rows, span_row, span_rows};
+    use crate::views::QueryContext;
 
     const T0: i64 = 1_700_000_000_000_000_000;
     const MIN: i64 = 60_000_000_000;
 
-    fn context(spans: &[Span], scores: &[Score]) -> QueryContext {
-        let query = ProjectQuery {
-            spans: spans_table(spans),
-            traces: traces_table(spans),
-            scores: live_scores_table(scores),
-            runtime: Arc::new(RuntimeEnv::default()),
-            target_partitions: NonZeroUsize::new(2).expect("two partitions"),
-            optimizer_rules: Vec::new(),
-            suspects: crate::verify::Suspects::detached(),
-            visible_from: None,
-        };
-        QueryContext::new(query, None).expect("context")
+    fn test_config(dir: &std::path::Path) -> StorageConfig {
+        StorageConfig {
+            delete_objects: true,
+            data_dir: dir.to_path_buf(),
+            min_free_bytes: ByteSize::b(0),
+            object_store: None,
+            s3: S3Config::default(),
+            wal: WalConfig::default(),
+            flush: FlushConfig::default(),
+            memtable: MemtableConfig::default(),
+            query: QueryConfig {
+                target_partitions: 2,
+                ..QueryConfig::default()
+            },
+            anchor: Default::default(),
+            gc: Default::default(),
+            compaction: Default::default(),
+            deletion: Default::default(),
+        }
     }
 
     fn window() -> TimeWindow {
         TimeWindow::new(T0, T0 + 10 * MIN).expect("window")
     }
 
-    /// A root span of `trace` starting at `start`, in the test window unless the
-    /// test says otherwise.
     fn root(trace: u16, start: i64) -> Span {
-        span_row(trace, 0, start, 1)
+        span_row(trace, 0, start, start)
     }
 
-    /// A root span of `trace` at `T0 + MIN`.
     fn in_window(trace: u16) -> Span {
         root(trace, T0 + MIN)
     }
 
-    /// An `llm` child of `parent`, lasting `duration` ns.
     fn llm_child(parent: &Span, trace: u16, start: i64, duration: i64) -> Span {
-        let mut child = span_row(trace, 1, start, 1);
+        let mut child = span_row(trace, 1, start, start);
         child.span_kind = SpanKind::Llm;
         child.parent_span_id = Some(parent.span_id);
         child.end_time = start + duration;
         child
     }
 
-    /// A score on `trace` created at `T0 + MIN`, named `name`, with `value`.
-    fn score(id: u128, trace: u16, name: &str, value: ScoreValue) -> Score {
-        let mut score = score_row(id, trace, T0 + MIN, T0 + MIN, T0 + MIN, false, name);
-        score.value = value;
-        score
+    fn mk_score(id: u128, trace: u16, created_at: i64, name: &str, value: ScoreValue) -> Score {
+        let mut s = score_row(id, trace, created_at, created_at, created_at, false, name);
+        s.value = value;
+        s
     }
 
-    async fn measure(
-        ctx: &QueryContext,
-        measure: AlertMeasure,
-        filter: Option<&str>,
-    ) -> Result<AlertValue, RunError> {
-        alert_value(
-            ctx,
-            AlertValueRequest {
-                window: window(),
-                filter,
-                measure,
-                timeout: Duration::from_secs(30),
-            },
-        )
-        .await
-    }
-
-    fn assert_close(actual: Option<f64>, expected: f64, tolerance: f64) {
-        let actual = actual.expect("a value");
-        assert!(
-            (actual - expected).abs() <= tolerance,
-            "{actual} is not {expected} within {tolerance}"
-        );
-    }
-
-    #[tokio::test]
-    async fn error_rate_counts_traces_with_errors() {
-        let mut spans: Vec<Span> = (0..4).map(in_window).collect();
-        spans[1].status = SpanStatus::Error;
-        let ctx = context(&spans, &[]);
-        let value = measure(&ctx, AlertMeasure::ErrorRate, None)
-            .await
-            .expect("value");
-        assert_eq!(value.count, 4);
-        assert_close(value.value, 0.25, 1e-9);
-    }
-
-    #[tokio::test]
-    async fn error_rate_without_traces_is_none() {
-        let ctx = context(&[], &[]);
-        let value = measure(&ctx, AlertMeasure::ErrorRate, None)
-            .await
-            .expect("value");
-        assert_eq!(
-            value,
-            AlertValue {
-                count: 0,
-                value: None
+    fn assert_alert(
+        actual: AlertValue,
+        expected_count: i64,
+        expected_value: Option<f64>,
+        tol_rel: f64,
+    ) {
+        assert_eq!(actual.count, expected_count);
+        match (actual.value, expected_value) {
+            (None, None) => {}
+            (Some(a), Some(e)) => {
+                let bound = (e.abs() * tol_rel).max(1e-9);
+                assert!(
+                    (a - e).abs() <= bound,
+                    "alert value mismatch: actual={a}, expected={e}, bound={bound}"
+                );
             }
-        );
+            other => panic!("alert value presence mismatch: {other:?}"),
+        }
     }
 
     #[tokio::test]
-    async fn traces_outside_the_window_are_ignored() {
-        let spans = vec![root(0, T0 - 1), root(1, T0 + 10 * MIN), in_window(2)];
-        let ctx = context(&spans, &[]);
-        let value = measure(&ctx, AlertMeasure::ErrorRate, None)
+    async fn all_seven_alert_measures_and_empty_cases() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let storage = crate::Storage::open(test_config(dir.path()))
             .await
-            .expect("value");
-        assert_eq!(value.count, 1);
-    }
+            .expect("open");
+        let project: ProjectId = "018f6b4e-7c1a-7c1a-8c1a-000000000001".parse().expect("pid");
 
-    #[tokio::test]
-    async fn cost_sums_and_is_zero_without_traces() {
-        let mut spans: Vec<Span> = (0..3).map(in_window).collect();
-        spans[0].cost_total = Some(1.5);
-        spans[1].cost_total = Some(2.25);
-        let ctx = context(&spans, &[]);
-        let value = measure(&ctx, AlertMeasure::Cost, None)
-            .await
-            .expect("value");
-        assert_eq!(value.count, 3);
-        assert_close(value.value, 3.75, 1e-9);
-
-        let ctx = context(&[], &[]);
-        let value = measure(&ctx, AlertMeasure::Cost, None)
-            .await
-            .expect("value");
-        assert_eq!(
-            value,
-            AlertValue {
-                count: 0,
-                value: Some(0.0)
-            }
-        );
-    }
-
-    #[tokio::test]
-    async fn trace_latency_is_milliseconds() {
-        let spans: Vec<Span> = (1..=20_u64)
-            .map(|k| {
-                let mut span = in_window(u16::try_from(k).expect("small"));
-                span.end_time = span.start_time + i64::try_from(k).expect("small") * 1_000_000;
-                span
-            })
-            .collect();
-        let ctx = context(&spans, &[]);
-        let value = measure(&ctx, AlertMeasure::TraceLatencyP95, None)
-            .await
-            .expect("value");
-        assert_eq!(value.count, 20);
-        let p95 = value.value.expect("a value");
-        assert!((18.0..=20.0).contains(&p95), "p95 {p95}");
-    }
-
-    #[tokio::test]
-    async fn llm_latency_reads_llm_spans_only() {
         let mut spans = Vec::new();
-        for trace in 0..3_u16 {
-            let parent = in_window(trace);
-            let child = llm_child(&parent, trace, T0 + MIN, 5_000_000);
-            spans.push(parent);
+        // 4 normal traces in window, 1 with error, with costs and varying durations.
+        for t in 0..4_u16 {
+            let mut s = in_window(t);
+            s.end_time = s.start_time + (i64::from(t) + 1) * 10_000_000;
+            s.environment = Some(if t < 2 { "prod" } else { "staging" }.to_owned());
+            s.cost_total = Some(0.1 * f64::from(t + 1));
+            if t == 1 {
+                s.status = SpanStatus::Error;
+            }
+            let child = llm_child(
+                &s,
+                t,
+                T0 + MIN + i64::from(t) * 1_000,
+                (i64::from(t) + 1) * 5_000_000,
+            );
+            spans.push(s);
             spans.push(child);
         }
-        let mut slow = in_window(3);
-        slow.end_time = slow.start_time + 50_000_000;
-        spans.push(slow);
-        let ctx = context(&spans, &[]);
-        let value = measure(&ctx, AlertMeasure::LlmLatencyP95, None)
-            .await
-            .expect("value");
-        assert_eq!(value.count, 3);
-        assert_close(value.value, 5.0, 0.5);
-    }
+        // Early trace starting 2h before window, ending inside window, with an llm span inside window.
+        let mut early = root(10, T0 - 2 * 60 * MIN);
+        early.end_time = T0 + 2 * MIN;
+        early.cost_total = Some(1.0);
+        let early_llm = llm_child(&early, 10, T0 + 2 * MIN, 20_000_000);
+        spans.push(early);
+        spans.push(early_llm);
 
-    #[tokio::test]
-    async fn score_avg_and_pass_rate() {
-        let spans = vec![
-            in_window(0),
-            in_window(1),
-            in_window(2),
-            in_window(3),
-            in_window(4),
-            in_window(5),
-            in_window(6),
-            in_window(7),
-            in_window(8),
-        ];
+        // Eval trace and experiment trace in window (must be excluded unless filter names environment).
+        let mut eval_s = in_window(20);
+        eval_s.environment = Some(environment::EVAL.to_owned());
+        eval_s.status = SpanStatus::Error;
+        eval_s.cost_total = Some(99.0);
+        spans.push(eval_s);
+
+        let mut exp_s = in_window(21);
+        exp_s
+            .metadata
+            .insert(metadata_key::EXPERIMENT_ID.to_owned(), "exp-1".to_owned());
+        exp_s.cost_total = Some(88.0);
+        spans.push(exp_s);
+
+        // Scores: numeric, categorical with value, categorical without value, boolean, issue, and on eval/early traces.
+        let mut sc_issue = mk_score(
+            9,
+            0,
+            T0 + MIN,
+            "helpfulness",
+            ScoreValue::Text("bad".to_owned()),
+        );
+        sc_issue.source = ScoreSource::Issue;
+        let mut sc_session = mk_score(10, 0, T0 + MIN, "session_q", ScoreValue::Numeric(1.0));
+        sc_session.target = ScoreTarget::Session {
+            session_id: "sess-1".to_owned(),
+        };
         let scores = vec![
-            score(1, 0, "helpfulness", ScoreValue::Numeric(0.2)),
-            score(2, 1, "helpfulness", ScoreValue::Numeric(0.8)),
-            score(3, 2, "ok", ScoreValue::Boolean(true)),
-            score(4, 3, "ok", ScoreValue::Boolean(true)),
-            score(5, 4, "ok", ScoreValue::Boolean(false)),
-            score(
-                6,
-                5,
-                "ok",
-                ScoreValue::Categorical {
-                    label: "fine".to_owned(),
-                    value: None,
-                },
-            ),
-            score(7, 6, "other", ScoreValue::Numeric(1.0)),
-            score(8, 7, "ok", ScoreValue::Text("fine".to_owned())),
-            score(
-                9,
-                8,
+            mk_score(1, 0, T0 + MIN, "helpfulness", ScoreValue::Numeric(0.2)),
+            mk_score(2, 1, T0 + MIN, "helpfulness", ScoreValue::Numeric(0.8)),
+            mk_score(
+                3,
+                2,
+                T0 + MIN,
                 "helpfulness",
                 ScoreValue::Categorical {
-                    label: "neutral".to_owned(),
+                    label: "mid".to_owned(),
                     value: Some(0.5),
                 },
             ),
+            mk_score(4, 10, T0 + MIN, "helpfulness", ScoreValue::Numeric(0.9)),
+            mk_score(5, 20, T0 + MIN, "helpfulness", ScoreValue::Numeric(0.0)), // eval -> excluded
+            mk_score(6, 0, T0 + MIN, "ok", ScoreValue::Boolean(true)),
+            mk_score(7, 1, T0 + MIN, "ok", ScoreValue::Boolean(false)),
+            mk_score(8, 2, T0 + MIN, "ok", ScoreValue::Boolean(true)),
+            sc_issue,
+            sc_session,
         ];
-        let ctx = context(&spans, &scores);
-        let avg = measure(
-            &ctx,
-            AlertMeasure::ScoreAvg {
-                name: "helpfulness".to_owned(),
-            },
-            None,
-        )
-        .await
-        .expect("value");
-        // 0.2, 0.8 and the categorical score mapped to 0.5.
-        assert_eq!(avg.count, 3);
-        assert_close(avg.value, 0.5, 1e-9);
 
-        let rate = measure(
-            &ctx,
-            AlertMeasure::ScorePassRate {
-                name: "ok".to_owned(),
-            },
-            None,
-        )
-        .await
-        .expect("value");
-        assert_eq!(rate.count, 3);
-        assert_close(rate.value, 2.0 / 3.0, 1e-9);
-    }
-
-    #[tokio::test]
-    async fn score_on_a_filtered_out_trace_is_ignored() {
-        let mut prod = in_window(0);
-        prod.environment = Some("prod".to_owned());
-        let mut dev = in_window(1);
-        dev.environment = Some("dev".to_owned());
-        let scores = vec![
-            score(1, 0, "helpfulness", ScoreValue::Numeric(0.5)),
-            score(2, 1, "helpfulness", ScoreValue::Numeric(0.5)),
-        ];
-        let ctx = context(&[prod, dev], &scores);
-        let value = measure(
-            &ctx,
-            AlertMeasure::ScoreAvg {
-                name: "helpfulness".to_owned(),
-            },
-            Some("environment = 'prod'"),
-        )
-        .await
-        .expect("value");
-        assert_eq!(value.count, 1);
-    }
-
-    /// One normal, one evaluation and one experiment trace.
-    fn three_kinds() -> Vec<Span> {
-        let normal = in_window(0);
-        let mut eval = in_window(1);
-        eval.environment = Some(environment::EVAL.to_owned());
-        let mut experiment = in_window(2);
-        experiment
-            .metadata
-            .insert(metadata_key::EXPERIMENT_ID.to_owned(), "e1".to_owned());
-        vec![normal, eval, experiment]
-    }
-
-    #[tokio::test]
-    async fn evaluation_and_experiment_traces_are_excluded() {
-        let ctx = context(&three_kinds(), &[]);
-        let value = measure(&ctx, AlertMeasure::ErrorRate, None)
+        storage
+            .append_spans(project, span_rows(&spans))
             .await
-            .expect("value");
-        assert_eq!(value.count, 1);
-
-        let filter = format!("environment = '{}'", environment::EVAL);
-        let value = measure(&ctx, AlertMeasure::ErrorRate, Some(&filter))
+            .expect("append spans");
+        storage
+            .append_scores(project, score_rows(&scores))
             .await
-            .expect("value");
-        assert_eq!(value.count, 1);
-    }
+            .expect("append scores");
 
-    #[tokio::test]
-    async fn scores_ignore_eval_and_experiment_traces() {
-        let scores: Vec<Score> = (0..3_u16)
-            .map(|trace| {
-                score(
-                    u128::from(trace) + 1,
-                    trace,
-                    "helpfulness",
-                    ScoreValue::Numeric(1.0),
-                )
-            })
-            .collect();
-        let ctx = context(&three_kinds(), &scores);
-        let value = measure(
-            &ctx,
-            AlertMeasure::ScoreAvg {
-                name: "helpfulness".to_owned(),
-            },
-            None,
-        )
-        .await
-        .expect("value");
-        assert_eq!(value.count, 1);
-    }
+        let opts = QueryOptions::new(None, None);
+        let ctx = QueryContext::new(storage.query(project, opts).await.expect("query"), None)
+            .expect("ctx");
 
-    #[tokio::test]
-    async fn a_trace_started_before_the_window_still_counts_its_spans() {
-        // Starts before the window, ends inside it: its llm child is in the window.
-        let mut early = root(0, T0 - 2 * MIN);
-        early.end_time = T0 + 2 * MIN;
-        let child = llm_child(&early, 0, T0 + MIN, 5_000_000);
-        // Ends before the window: nothing from it counts.
-        let mut gone = root(1, T0 - 3 * MIN);
-        gone.end_time = T0 - MIN;
-        let gone_child = llm_child(&gone, 1, T0 - 2 * MIN, 5_000_000);
-        let ctx = context(&[early, child, gone, gone_child], &[]);
-        let value = measure(&ctx, AlertMeasure::LlmLatencyP95, None)
-            .await
-            .expect("value");
-        assert_eq!(value.count, 1);
-    }
-
-    /// Like [`measure`], over `window` instead of the default one.
-    async fn measure_over(
-        ctx: &QueryContext,
-        window: TimeWindow,
-        measure: AlertMeasure,
-    ) -> Result<AlertValue, RunError> {
-        alert_value(
-            ctx,
-            AlertValueRequest {
-                window,
-                filter: None,
-                measure,
-                timeout: Duration::from_secs(30),
-            },
-        )
-        .await
-    }
-
-    /// A `helpfulness` score on `trace`, created at `created_at`.
-    fn score_at(id: u128, trace: u16, created_at: i64) -> Score {
-        let mut score = score_row(
-            id,
-            trace,
-            created_at,
-            created_at,
-            created_at,
-            false,
-            "helpfulness",
-        );
-        score.value = ScoreValue::Numeric(1.0);
-        score
-    }
-
-    fn helpfulness() -> AlertMeasure {
-        AlertMeasure::ScoreAvg {
-            name: "helpfulness".to_owned(),
-        }
-    }
-
-    #[tokio::test]
-    async fn score_created_after_its_trace_ended_counts() {
-        // Trace runs T0+1m..T0+2m; the score comes 10 minutes later, in a 5m window.
-        let mut trace = root(0, T0 + MIN);
-        trace.end_time = T0 + 2 * MIN;
-        let ctx = context(&[trace], &[score_at(1, 0, T0 + 12 * MIN)]);
-        let window = TimeWindow::new(T0 + 10 * MIN, T0 + 15 * MIN).expect("window");
-        let value = measure_over(&ctx, window, helpfulness())
-            .await
-            .expect("value");
-        assert_eq!(value.count, 1);
-    }
-
-    #[tokio::test]
-    async fn score_on_a_trace_started_two_days_earlier_counts() {
-        let mut trace = root(0, T0 - 2 * DAY_NS);
-        trace.end_time = T0 - 2 * DAY_NS + MIN;
-        let ctx = context(&[trace], &[score_at(1, 0, T0 + 10 * MIN)]);
-        let window = TimeWindow::new(T0, T0 + 60 * MIN).expect("window");
-        let value = measure_over(&ctx, window, helpfulness())
-            .await
-            .expect("value");
-        assert_eq!(value.count, 1);
-    }
-
-    #[tokio::test]
-    async fn score_on_a_trace_started_eight_days_earlier_does_not_count() {
-        let mut trace = root(0, T0 - 8 * DAY_NS);
-        trace.end_time = T0 - 8 * DAY_NS + MIN;
-        let ctx = context(&[trace], &[score_at(1, 0, T0 + 10 * MIN)]);
-        let window = TimeWindow::new(T0, T0 + 60 * MIN).expect("window");
-        let value = measure_over(&ctx, window, helpfulness())
-            .await
-            .expect("value");
-        assert_eq!(
-            value,
-            AlertValue {
-                count: 0,
-                value: None
-            }
-        );
-    }
-
-    #[tokio::test]
-    async fn llm_span_that_ended_in_the_window_counts_though_it_started_before() {
-        // A 90 s llm span ending at T0+5m30s: it started before the 1m window
-        // [T0+5m, T0+6m) but ended inside it.
-        let mut parent = root(0, T0 + 3 * MIN);
-        parent.end_time = T0 + 6 * MIN;
-        let mut child = llm_child(&parent, 0, T0 + 4 * MIN, 90_000_000_000);
-        child.end_time = T0 + 5 * MIN + 30_000_000_000;
-        let ctx = context(&[parent, child], &[]);
-        let window = TimeWindow::new(T0 + 5 * MIN, T0 + 6 * MIN).expect("window");
-        let value = measure_over(&ctx, window, AlertMeasure::LlmLatencyP95)
-            .await
-            .expect("value");
-        assert_eq!(value.count, 1);
-        assert_close(value.value, 90_000.0, 1.0);
-    }
-
-    #[tokio::test]
-    async fn session_scores_are_not_counted() {
-        let spans = vec![in_window(0)];
-        let mut session = score(1, 0, "helpfulness", ScoreValue::Numeric(0.5));
-        session.target = ScoreTarget::Session {
-            session_id: "s1".to_owned(),
-        };
-        let ctx = context(&spans, &[session]);
-        let value = measure(
-            &ctx,
-            AlertMeasure::ScoreAvg {
-                name: "helpfulness".to_owned(),
-            },
-            None,
-        )
-        .await
-        .expect("value");
-        assert_eq!(
-            value,
-            AlertValue {
-                count: 0,
-                value: None
-            }
-        );
-    }
-
-    #[tokio::test]
-    async fn blank_filter_is_no_filter() {
-        let mut spans: Vec<Span> = (0..4).map(in_window).collect();
-        spans[0].status = SpanStatus::Error;
-        let ctx = context(&spans, &[]);
-        let none = measure(&ctx, AlertMeasure::ErrorRate, None)
-            .await
-            .expect("value");
-        let blank = measure(&ctx, AlertMeasure::ErrorRate, Some("  "))
-            .await
-            .expect("value");
-        assert_eq!(none, blank);
-    }
-
-    #[tokio::test]
-    async fn filter_errors_are_invalid() {
-        let ctx = context(&[in_window(0)], &[]);
-        let result = measure(&ctx, AlertMeasure::ErrorRate, Some("nonsense_column = 1")).await;
-        assert!(matches!(result, Err(RunError::Invalid(_))), "{result:?}");
-    }
-
-    fn count_names(names: &[&str]) -> AlertMeasure {
-        AlertMeasure::ScoreCount {
-            names: names.iter().map(|name| (*name).to_owned()).collect(),
-        }
-    }
-
-    #[tokio::test]
-    async fn score_count_counts_names_in_the_window() {
-        let scores = vec![
-            score_row(1, 0, T0 + MIN, T0 + MIN, T0 + MIN, false, "a"),
-            score_row(2, 0, T0 + 2 * MIN, T0 + 2 * MIN, T0 + 2 * MIN, false, "b"),
-            score_row(3, 0, T0 + 3 * MIN, T0 + 3 * MIN, T0 + 3 * MIN, false, "c"),
-            // Before the window start, and at the window end (exclusive).
-            score_row(4, 0, T0 - 1, T0 - 1, T0 - 1, false, "a"),
-            score_row(
-                5,
+        let measures = vec![
+            (AlertMeasure::ErrorRate, None, 4, Some(0.25), 1e-9),
+            (
+                AlertMeasure::ErrorRate,
+                Some("environment = 'prod'"),
+                2,
+                Some(0.5),
+                1e-9,
+            ),
+            (
+                AlertMeasure::ErrorRate,
+                Some("environment = 'cetra-eval'"),
+                1,
+                Some(1.0),
+                1e-9,
+            ),
+            (AlertMeasure::Cost, None, 4, Some(1.0), 1e-9),
+            (
+                AlertMeasure::Cost,
+                Some("environment = 'prod'"),
+                2,
+                Some(0.3),
+                1e-9,
+            ),
+            (AlertMeasure::TraceLatencyP95, None, 4, Some(40.0), 0.15),
+            (
+                AlertMeasure::TraceLatencyP95,
+                Some("score('helpfulness') > 0.5"),
+                1,
+                Some(20.0),
+                1e-9,
+            ),
+            (AlertMeasure::LlmLatencyP95, None, 5, Some(20.0), 0.15),
+            (
+                AlertMeasure::LlmLatencyP95,
+                Some("environment = 'prod'"),
+                2,
+                Some(10.0),
+                0.15,
+            ),
+            (
+                AlertMeasure::LlmLatencyP95,
+                Some("score('helpfulness') > 0.5"),
+                2,
+                Some(20.0),
+                0.15,
+            ),
+            (
+                AlertMeasure::ScoreAvg {
+                    name: "helpfulness".to_owned(),
+                },
+                None,
+                4,
+                Some((0.2 + 0.8 + 0.5 + 0.9) / 4.0),
+                1e-9,
+            ),
+            (
+                AlertMeasure::ScoreAvg {
+                    name: "helpfulness".to_owned(),
+                },
+                Some("environment = 'prod'"),
+                2,
+                Some(0.5),
+                1e-9,
+            ),
+            (
+                AlertMeasure::ScoreAvg {
+                    name: "helpfulness".to_owned(),
+                },
+                Some("score('ok') = 1"),
+                2,
+                Some((0.2 + 0.5) / 2.0),
+                1e-9,
+            ),
+            (
+                AlertMeasure::ScorePassRate {
+                    name: "ok".to_owned(),
+                },
+                None,
+                3,
+                Some(2.0 / 3.0),
+                1e-9,
+            ),
+            (
+                AlertMeasure::ScorePassRate {
+                    name: "ok".to_owned(),
+                },
+                Some("score('helpfulness') > 0.5"),
+                1,
+                Some(0.0),
+                1e-9,
+            ),
+            (
+                AlertMeasure::ScoreCount {
+                    names: vec!["helpfulness".to_owned(), "session_q".to_owned()],
+                },
+                None,
+                7,
+                Some(7.0),
+                1e-9,
+            ),
+            (
+                AlertMeasure::ScoreCount { names: vec![] },
+                None,
                 0,
-                T0 + 10 * MIN,
-                T0 + 10 * MIN,
-                T0 + 10 * MIN,
-                false,
-                "b",
+                Some(0.0),
+                1e-9,
             ),
         ];
-        let ctx = context(&[], &scores);
-        let value = measure(&ctx, count_names(&["a", "b"]), None)
-            .await
-            .expect("value");
-        assert_eq!(
-            value,
-            AlertValue {
-                count: 2,
-                value: Some(2.0)
-            }
-        );
-    }
 
-    #[tokio::test]
-    async fn score_count_counts_every_target_and_ignores_traces() {
-        let span = in_window(0);
-        let mut span_score = score(1, 0, "issue:x", ScoreValue::Numeric(1.0));
-        span_score.target = ScoreTarget::Span {
-            trace_id: span.trace_id,
-            span_id: span.span_id,
-        };
-        let mut session_score = score(2, 1, "issue:x", ScoreValue::Numeric(1.0));
-        session_score.target = ScoreTarget::Session {
-            session_id: "s1".to_owned(),
-        };
-        let trace_score = score(3, 2, "issue:x", ScoreValue::Numeric(1.0));
-        // No span or trace of these scores is in the context.
-        let ctx = context(&[], &[span_score, session_score, trace_score]);
-        let value = measure(&ctx, count_names(&["issue:x"]), None)
-            .await
-            .expect("value");
-        assert_eq!(value.count, 3);
-        assert_eq!(value.value, Some(3.0));
-    }
+        for (measure, filter, count, val, tol) in measures {
+            let req = AlertValueRequest {
+                window: window(),
+                filter,
+                measure: measure.clone(),
+                timeout: Duration::from_secs(10),
+            };
+            let actual = alert_value(&ctx, req).await.expect("alert");
+            assert_alert(actual, count, val, tol);
+        }
 
-    #[tokio::test]
-    async fn score_count_zero_is_a_value() {
-        let scores = vec![score_row(
-            1,
-            0,
-            T0 + MIN,
-            T0 + MIN,
-            T0 + MIN,
-            false,
-            "other",
-        )];
-        let ctx = context(&[], &scores);
-        let value = measure(&ctx, count_names(&["a"]), None)
-            .await
-            .expect("value");
-        assert_eq!(
-            value,
-            AlertValue {
-                count: 0,
-                value: Some(0.0)
-            }
-        );
-    }
+        // Empty window checks: Cost returns Some(0.0), others return None.
+        let empty_win = TimeWindow::new(T0 + 100 * MIN, T0 + 110 * MIN).expect("empty win");
+        for (measure, expect_val) in [
+            (AlertMeasure::ErrorRate, None),
+            (AlertMeasure::Cost, Some(0.0)),
+            (AlertMeasure::TraceLatencyP95, None),
+            (AlertMeasure::LlmLatencyP95, None),
+            (
+                AlertMeasure::ScoreAvg {
+                    name: "helpfulness".to_owned(),
+                },
+                None,
+            ),
+            (
+                AlertMeasure::ScorePassRate {
+                    name: "ok".to_owned(),
+                },
+                None,
+            ),
+            (
+                AlertMeasure::ScoreCount {
+                    names: vec!["helpfulness".to_owned()],
+                },
+                Some(0.0),
+            ),
+        ] {
+            let req = AlertValueRequest {
+                window: empty_win,
+                filter: None,
+                measure,
+                timeout: Duration::from_secs(10),
+            };
+            let actual = alert_value(&ctx, req).await.expect("empty");
+            assert_eq!(actual.count, 0);
+            assert_eq!(actual.value, expect_val);
+        }
 
-    #[tokio::test]
-    async fn score_count_with_no_names_is_zero_without_a_query() {
-        let scores = vec![score_row(1, 0, T0 + MIN, T0 + MIN, T0 + MIN, false, "a")];
-        let ctx = context(&[], &scores);
-        let value = measure(&ctx, count_names(&[]), None).await.expect("value");
-        assert_eq!(
-            value,
-            AlertValue {
-                count: 0,
-                value: Some(0.0)
-            }
-        );
-    }
+        // ScoreCount forbids filter.
+        let err = alert_value(
+            &ctx,
+            AlertValueRequest {
+                window: window(),
+                filter: Some("status = 'ok'"),
+                measure: AlertMeasure::ScoreCount {
+                    names: vec!["ok".to_owned()],
+                },
+                timeout: Duration::from_secs(10),
+            },
+        )
+        .await
+        .expect_err("ScoreCount with filter must fail");
+        assert!(matches!(err, RunError::InvalidRequest(_)));
 
-    #[tokio::test]
-    async fn score_count_refuses_more_than_the_name_cap() {
-        let ctx = context(&[], &[]);
-        let many = vec!["a"; MAX_COUNT_NAMES + 1];
-        let result = measure(&ctx, count_names(&many), None).await;
-        assert!(
-            matches!(result, Err(RunError::InvalidRequest(_))),
-            "{result:?}"
-        );
+        // Lookback underflow returns InvalidRequest("from is out of range").
+        let min_win = TimeWindow::new(i64::MIN + 1, i64::MIN + 100).expect("min win");
+        let err = alert_value(
+            &ctx,
+            AlertValueRequest {
+                window: min_win,
+                filter: None,
+                measure: AlertMeasure::LlmLatencyP95,
+                timeout: Duration::from_secs(10),
+            },
+        )
+        .await
+        .expect_err("underflow");
+        assert!(matches!(err, RunError::InvalidRequest(ref m) if m == "from is out of range"));
 
-        let at_cap = vec!["a"; MAX_COUNT_NAMES];
-        let result = measure(&ctx, count_names(&at_cap), None).await;
-        assert!(result.is_ok(), "{result:?}");
-    }
-
-    #[tokio::test]
-    async fn score_count_refuses_a_filter() {
-        let ctx = context(&[in_window(0)], &[]);
-        let result = measure(&ctx, count_names(&["a"]), Some("status = 'error'")).await;
-        assert!(
-            matches!(result, Err(RunError::InvalidRequest(_))),
-            "{result:?}"
-        );
-    }
-
-    #[tokio::test]
-    async fn score_count_skips_deleted_scores() {
-        // A later tombstone version of score 1 hides it from the live view.
-        let scores = vec![
-            score_row(1, 0, T0 + MIN, T0 + MIN, T0 + MIN, false, "a"),
-            score_row(1, 0, T0 + MIN, T0 + 2 * MIN, T0 + 2 * MIN, true, "a"),
-            score_row(2, 0, T0 + MIN, T0 + MIN, T0 + MIN, false, "a"),
-        ];
-        let ctx = context(&[], &scores);
-        let value = measure(&ctx, count_names(&["a"]), None)
-            .await
-            .expect("value");
-        assert_eq!(value.count, 1);
+        let _ = storage.shutdown().await;
     }
 }

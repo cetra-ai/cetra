@@ -15,16 +15,21 @@ use cetra_query::exec::{
 use cetra_query::{BinaryOp, CompiledFilter, Expr, FilterView, QueryError, ScalarFn, UnaryOp};
 
 use crate::query_error::RunError;
-use crate::reads::present;
-use crate::reads_qe::context::{
+use crate::reads::context::{
     OperatorStream, invalid_err_to_run, remap_expr_by_name, run_err_to_query, scores_raw_schema,
     view_schema,
 };
-use crate::views::ViewName;
+use crate::reads::present;
+use crate::views::{QueryContext, ViewName};
 
-/// Validates `text` as a Filter DSL expression over `view` without running a query.
-/// Empty or whitespace-only text is accepted.
-pub(crate) fn validate_filter(view: ViewName, text: &str) -> Result<(), RunError> {
+/// Parses `text` as a Filter DSL expression of `view` without running anything (D-I-30).
+/// Empty or whitespace-only text is accepted (it means no filter).
+///
+/// # Errors
+///
+/// [`RunError::Invalid`] when the text does not parse or names an unknown column;
+/// [`RunError::InvalidRequest`] for a view other than traces, spans, sessions or scores.
+pub fn validate_filter(_ctx: &QueryContext, view: ViewName, text: &str) -> Result<(), RunError> {
     let filter_view = match view {
         ViewName::Traces => FilterView::Traces,
         ViewName::Spans => FilterView::Spans,
@@ -67,7 +72,7 @@ pub(crate) fn compile_optional_filter(
 /// `source != 'issue'`) when `compiled.scores` is non-empty, evaluating the filter predicate,
 /// and stripping `__score_{i}_*` helper columns so the output matches `left_schema`.
 pub(crate) fn apply_compiled_filter(
-    ctx: &crate::reads_qe::context::EngineContext,
+    ctx: &crate::reads::context::EngineContext,
     exec_ctx: &ExecContext,
     left_streams: Vec<Box<dyn PartitionStream>>,
     left_schema: &Arc<Schema>,
@@ -179,7 +184,7 @@ struct LatestScoreStream {
 }
 
 struct LatestScoreParams<'a> {
-    ctx: &'a crate::reads_qe::context::EngineContext,
+    ctx: &'a crate::reads::context::EngineContext,
     exec_ctx: &'a ExecContext,
     scores_raw: &'a Arc<Schema>,
     left_schema: &'a Schema,
@@ -414,8 +419,8 @@ mod tests {
     use crate::config::{
         FlushConfig, MemtableConfig, QueryConfig, S3Config, StorageConfig, WalConfig,
     };
-    use crate::reads_qe::columns::{require_col, string_at};
-    use crate::reads_qe::context::{EngineContext, traces_raw_schema, traces_view_projection};
+    use crate::reads::columns::{require_col, string_at};
+    use crate::reads::context::{EngineContext, traces_raw_schema, traces_view_projection};
     use crate::test_support::{score_row, score_rows, span_row, span_rows};
     use crate::views::ViewName;
 
@@ -442,21 +447,22 @@ mod tests {
 
     #[test]
     fn validate_filter_rejects_non_boolean_and_unsupported_views() {
-        assert!(validate_filter(ViewName::Traces, "").is_ok());
-        assert!(validate_filter(ViewName::Traces, "   ").is_ok());
-        assert!(validate_filter(ViewName::Traces, "error_count > 0").is_ok());
-        assert!(validate_filter(ViewName::Spans, "span_kind = 'llm'").is_ok());
-        assert!(validate_filter(ViewName::Sessions, "trace_count > 1").is_ok());
-        assert!(validate_filter(ViewName::Scores, "name = 'x'").is_ok());
+        let ctx = QueryContext::new(crate::test_support::example_query(), None).unwrap();
+        assert!(validate_filter(&ctx, ViewName::Traces, "").is_ok());
+        assert!(validate_filter(&ctx, ViewName::Traces, "   ").is_ok());
+        assert!(validate_filter(&ctx, ViewName::Traces, "error_count > 0").is_ok());
+        assert!(validate_filter(&ctx, ViewName::Spans, "span_kind = 'llm'").is_ok());
+        assert!(validate_filter(&ctx, ViewName::Sessions, "trace_count > 1").is_ok());
+        assert!(validate_filter(&ctx, ViewName::Scores, "name = 'x'").is_ok());
 
-        match validate_filter(ViewName::Traces, "1 + 2") {
+        match validate_filter(&ctx, ViewName::Traces, "1 + 2") {
             Err(RunError::Invalid(inv)) => {
                 assert_eq!(inv.message, "the filter must be a true/false expression");
             }
             other => panic!("expected Invalid, got {other:?}"),
         }
 
-        match validate_filter(ViewName::ExperimentItems, "name = 'x'") {
+        match validate_filter(&ctx, ViewName::ExperimentItems, "name = 'x'") {
             Err(RunError::InvalidRequest(msg)) => {
                 assert_eq!(
                     msg,
@@ -535,7 +541,7 @@ mod tests {
                     })
                     .collect::<Result<Vec<_>, QueryError>>()?;
                 let view_schema =
-                    crate::reads_qe::context::traces_view_schema().map_err(run_err_to_query)?;
+                    crate::reads::context::traces_view_schema().map_err(run_err_to_query)?;
                 let filtered = apply_compiled_filter(
                     &ctx_clone,
                     exec_ctx,

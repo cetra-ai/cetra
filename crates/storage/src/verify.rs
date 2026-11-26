@@ -5,30 +5,16 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
-use arrow::error::ArrowError;
-use datafusion::error::DataFusionError;
 use object_store::ObjectStore;
 use parquet::errors::ParquetError;
 
 use crate::catalog::{self, FileId, FileMeta};
-use crate::query_error::root;
+use crate::error::{EngineError, EngineErrorKind};
 
 /// Whether `error` may come from a corrupt Parquet file rather than the object
 /// store or the query (spec 03 §10). False positives only cost a verification.
-pub(crate) fn may_be_corrupt(error: &DataFusionError) -> bool {
-    match root(error) {
-        DataFusionError::ParquetError(error) => !is_store_error(error),
-        DataFusionError::ArrowError(error, _) => matches!(**error, ArrowError::ParquetError(_)),
-        DataFusionError::External(error) => {
-            error
-                .downcast_ref::<ParquetError>()
-                .is_some_and(|error| !is_store_error(error))
-                || error
-                    .downcast_ref::<ArrowError>()
-                    .is_some_and(|error| matches!(error, ArrowError::ParquetError(_)))
-        }
-        _ => false,
-    }
+pub(crate) fn may_be_corrupt(error: &EngineError) -> bool {
+    error.kind() == EngineErrorKind::Parquet
 }
 
 /// A `ParquetError::External` holding an `object_store::Error` other than
@@ -134,7 +120,7 @@ impl VerifyQueue {
 
 /// The files one query's scans read, and the queue to report them to (spec 03 §10).
 #[derive(Debug, Clone)]
-pub struct Suspects {
+pub(crate) struct Suspects {
     inner: Arc<SuspectsInner>,
 }
 
@@ -155,13 +141,6 @@ impl Suspects {
         }
     }
 
-    /// Not connected to any storage: reports go nowhere. For `ProjectQuery`
-    /// values built by tests.
-    #[cfg(test)]
-    pub(crate) fn detached() -> Self {
-        Self::new(Arc::new(VerifyQueue::default()))
-    }
-
     /// Records the files a scan reads.
     pub(crate) fn record(&self, files: &[Arc<FileMeta>]) {
         let mut recorded = self
@@ -172,8 +151,8 @@ impl Suspects {
         recorded.extend(files.iter().map(|file| file.id));
     }
 
-    /// Queues the recorded files when `error` may come from a corrupt file.
-    pub(crate) fn report(&self, error: &DataFusionError) {
+    /// Queues every recorded file when `error` may mean one of them is corrupt.
+    pub(crate) fn report(&self, error: &EngineError) {
         if !may_be_corrupt(error) {
             return;
         }
@@ -229,9 +208,7 @@ pub(crate) async fn verify_file(store: &Arc<dyn ObjectStore>, file: &FileMeta) -
 mod tests {
     use std::sync::Arc;
 
-    use arrow::error::ArrowError;
     use bytes::Bytes;
-    use datafusion::error::DataFusionError;
     use object_store::path::Path as ObjectPath;
     use object_store::{ObjectStoreExt, PutPayload};
     use parquet::errors::ParquetError;
@@ -264,64 +241,20 @@ mod tests {
 
     #[test]
     fn a_parquet_error_is_corruption_unless_the_store_failed() {
-        assert!(may_be_corrupt(&DataFusionError::ParquetError(Box::new(
-            parquet_error()
-        ))));
-        assert!(!may_be_corrupt(&DataFusionError::ParquetError(Box::new(
-            ParquetError::External(Box::new(store_error()))
-        ))));
-        assert!(may_be_corrupt(&DataFusionError::ParquetError(Box::new(
-            ParquetError::External(Box::new(missing()))
-        ))));
-    }
-
-    #[test]
-    fn an_arrow_wrapped_parquet_error_is_corruption() {
-        let error = DataFusionError::ArrowError(
-            Box::new(ArrowError::ParquetError("bad page".to_owned())),
-            None,
-        );
-        assert!(may_be_corrupt(&error));
-        let other = DataFusionError::ArrowError(Box::new(ArrowError::DivideByZero), None);
-        assert!(!may_be_corrupt(&other));
-    }
-
-    #[test]
-    fn an_external_parquet_or_arrow_error_is_corruption() {
-        let parquet = DataFusionError::External(Box::new(parquet_error()));
-        assert!(may_be_corrupt(&parquet));
-        let arrow =
-            DataFusionError::External(Box::new(ArrowError::ParquetError("bad page".to_owned())));
-        assert!(may_be_corrupt(&arrow));
-        let store =
-            DataFusionError::External(Box::new(ParquetError::External(Box::new(store_error()))));
-        assert!(!may_be_corrupt(&store));
-    }
-
-    #[test]
-    fn wrappers_are_looked_through() {
-        let inner = DataFusionError::ParquetError(Box::new(parquet_error()));
-        let context = DataFusionError::Context("reading".to_owned(), Box::new(inner));
-        let shared = DataFusionError::Shared(Arc::new(context));
-        assert!(may_be_corrupt(&shared));
-        let store = DataFusionError::Shared(Arc::new(DataFusionError::Context(
-            "reading".to_owned(),
-            Box::new(DataFusionError::ParquetError(Box::new(
-                ParquetError::External(Box::new(store_error())),
-            ))),
+        assert!(may_be_corrupt(&EngineError::from_parquet(&parquet_error())));
+        assert!(!may_be_corrupt(&EngineError::from_parquet(
+            &ParquetError::External(Box::new(store_error()))
         )));
-        assert!(!may_be_corrupt(&store));
+        assert!(may_be_corrupt(&EngineError::from_parquet(
+            &ParquetError::External(Box::new(missing()))
+        )));
     }
 
     #[test]
     fn other_errors_are_not_corruption() {
-        assert!(!may_be_corrupt(&DataFusionError::ObjectStore(Box::new(
-            store_error()
-        ))));
-        assert!(!may_be_corrupt(&DataFusionError::ResourcesExhausted(
-            "full".to_owned()
-        )));
-        assert!(!may_be_corrupt(&DataFusionError::Plan("bad".to_owned())));
+        assert!(!may_be_corrupt(&EngineError::from_resources_exhausted()));
+        assert!(!may_be_corrupt(&EngineError::from_io()));
+        assert!(!may_be_corrupt(&EngineError::internal("plan")));
     }
 
     #[test]
@@ -382,19 +315,12 @@ mod tests {
     }
 
     #[test]
-    fn a_report_queues_the_recorded_files_only_for_a_decode_error() {
+    fn a_report_corrupt_queues_the_file() {
         let queue = Arc::new(VerifyQueue::default());
         let suspects = Suspects::new(Arc::clone(&queue));
         suspects.record(&[recorded_file(file_id(7)), recorded_file(file_id(8))]);
-
-        suspects.report(&DataFusionError::ResourcesExhausted("full".to_owned()));
-        assert!(queue.take(10).is_empty());
-
-        suspects.report(&DataFusionError::ParquetError(Box::new(parquet_error())));
-        // The recorded files come from a set, so their order is not fixed.
-        let mut queued = queue.take(10);
-        queued.sort();
-        assert_eq!(queued, vec![file_id(7), file_id(8)]);
+        suspects.report_corrupt(file_id(7));
+        assert_eq!(queue.take(10), vec![file_id(7)]);
     }
 
     #[test]

@@ -29,7 +29,7 @@ use chrono::NaiveDate;
 use crate::catalog::{Committer, FileMeta, FileTable, now_ns};
 use crate::engine::mem_source::MemtableSource;
 use crate::engine::parquet_source::ParquetSource;
-use crate::error::{MediaError, query_err_to_df};
+use crate::error::{EngineError, MediaError};
 use crate::hooks::{HookPoint, Hooks};
 use crate::objects::Objects;
 use crate::read_state::Published;
@@ -273,7 +273,7 @@ impl MediaGc {
 
         let schema = FileTable::Spans.column_schema();
         let media_refs_idx = schema.index_of(spans::MEDIA_REFS).ok_or_else(|| {
-            query_err_to_media(QueryError::internal("spans schema missing media_refs"))
+            query_err_to_media(&QueryError::internal("spans schema missing media_refs"))
         })?;
 
         let suspects = Suspects::new(Arc::clone(&self.verify));
@@ -294,11 +294,14 @@ impl MediaGc {
             Arc::clone(&state.spans),
             deletions,
         )
-        .map_err(query_err_to_media)?;
+        .map_err(|e| query_err_to_media(&e))?;
         let union = UnionSource::new(schema, vec![Arc::new(parquet_source), Arc::new(mem_source)])
-            .map_err(query_err_to_media)?;
+            .map_err(|e| query_err_to_media(&e))?;
 
-        let workers = self.qe_runtime.workers().map_err(query_err_to_media)?;
+        let workers = self
+            .qe_runtime
+            .workers()
+            .map_err(|e| query_err_to_media(&e))?;
         let target_partitions = self.qe_runtime.target_partitions.max(1);
         let cancel = CancelToken::new();
         let cancel_guard = CancelOnDrop(cancel.clone());
@@ -343,8 +346,8 @@ impl MediaGc {
             Ok(merged)
         })
         .await
-        .map_err(|_| query_err_to_media(QueryError::internal("media GC scan task failed")))?
-        .map_err(query_err_to_media)?;
+        .map_err(|_| query_err_to_media(&QueryError::internal("media GC scan task failed")))?
+        .map_err(|e| query_err_to_media(&e))?;
 
         drop(cancel_guard);
         Ok(live)
@@ -359,8 +362,8 @@ impl Drop for CancelOnDrop {
     }
 }
 
-fn query_err_to_media(err: QueryError) -> MediaError {
-    MediaError::Query(query_err_to_df(err))
+fn query_err_to_media(err: &QueryError) -> MediaError {
+    MediaError::Query(EngineError::from_query(err))
 }
 
 #[derive(Default)]

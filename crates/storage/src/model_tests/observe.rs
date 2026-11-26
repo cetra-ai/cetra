@@ -9,8 +9,7 @@
 
 use std::time::Duration;
 
-use arrow::array::{Array, AsArray, Float64Array, Int64Array, RecordBatch, StringArray};
-use arrow::datatypes::{Float64Type, Int64Type, TimestampNanosecondType};
+use cetra_column::{Batch, Column, ScalarValue};
 
 use super::model::{ExpectedScore, ExpectedTrace};
 use super::ops::{SESSIONS, TRACES};
@@ -133,13 +132,11 @@ pub(super) async fn observe_spans(
         )
         .await?;
         for batch in &page.batches {
-            let trace_ids = utf8(batch, spans::TRACE_ID);
-            let span_ids = utf8(batch, spans::SPAN_ID);
             for row in 0..batch.num_rows() {
                 keys.push((
                     timestamp(batch, spans::START_TIME, row),
-                    trace_ids.value(row).to_owned(),
-                    span_ids.value(row).to_owned(),
+                    req_string(batch, spans::TRACE_ID, row),
+                    req_string(batch, spans::SPAN_ID, row),
                 ));
             }
         }
@@ -214,9 +211,8 @@ pub(super) async fn observe_trace_detail(
     let row = trace_from_batch(&detail.trace, 0)?;
     let mut span_ids = Vec::new();
     for batch in &detail.spans {
-        let ids = utf8(batch, spans::SPAN_ID);
         for index in 0..batch.num_rows() {
-            span_ids.push(ids.value(index).to_owned());
+            span_ids.push(req_string(batch, spans::SPAN_ID, index));
         }
     }
     Ok(Some((row, span_ids)))
@@ -374,20 +370,13 @@ pub(super) async fn observe_sessions(
         )
         .await?;
         for batch in &page.batches {
-            let sessions = utf8(batch, traces::SESSION_ID);
             for row in 0..batch.num_rows() {
                 rows.push(SessionRow {
-                    session_id: sessions.value(row).to_owned(),
+                    session_id: req_string(batch, traces::SESSION_ID, row),
                     trace_count: int(batch, "trace_count", row),
                     error_count: int(batch, traces::ERROR_COUNT, row),
-                    total_tokens: opt_i64(
-                        column(batch, traces::TOTAL_TOKENS).as_primitive::<Int64Type>(),
-                        row,
-                    ),
-                    cost_total: opt_f64(
-                        column(batch, traces::COST_TOTAL).as_primitive::<Float64Type>(),
-                        row,
-                    ),
+                    total_tokens: opt_i64(batch, traces::TOTAL_TOKENS, row),
+                    cost_total: opt_f64(batch, traces::COST_TOTAL, row),
                 });
             }
         }
@@ -422,9 +411,11 @@ pub(super) async fn observe_users(
         )
         .await?;
         for batch in &page.batches {
-            let users = utf8(batch, traces::USER_ID);
             for row in 0..batch.num_rows() {
-                rows.push((users.value(row).to_owned(), int(batch, "trace_count", row)));
+                rows.push((
+                    req_string(batch, traces::USER_ID, row),
+                    int(batch, "trace_count", row),
+                ));
             }
         }
         match page.next_cursor {
@@ -529,13 +520,14 @@ pub(super) async fn observe_alert(
 }
 
 /// One `int64` cell, by column name.
-fn int(batch: &RecordBatch, name: &str, row: usize) -> i64 {
-    column(batch, name).as_primitive::<Int64Type>().value(row)
+fn int(batch: &Batch, name: &str, row: usize) -> i64 {
+    crate::reads::columns::i64_at(batch, column(batch, name), row)
+        .unwrap_or_else(|e| panic!("read int64 column {name}: {e}"))
 }
 
 /// One row of the `scores` view, read by column name.
-fn score_from_batch(batch: &RecordBatch, row: usize) -> Result<ExpectedScore, ReadFailure> {
-    let target_kind = match utf8(batch, scores::TARGET).value(row) {
+fn score_from_batch(batch: &Batch, row: usize) -> Result<ExpectedScore, ReadFailure> {
+    let target_kind = match req_string(batch, scores::TARGET, row).as_str() {
         "trace" => "trace",
         "session" => "session",
         other => {
@@ -544,75 +536,84 @@ fn score_from_batch(batch: &RecordBatch, row: usize) -> Result<ExpectedScore, Re
             )));
         }
     };
-    let value_num = opt_f64(
-        column(batch, scores::VALUE_NUM).as_primitive::<Float64Type>(),
-        row,
-    )
-    .ok_or_else(|| ReadFailure::Error("a scores row has no numeric value".to_owned()))?;
+    let value_num = opt_f64(batch, scores::VALUE_NUM, row)
+        .ok_or_else(|| ReadFailure::Error("a scores row has no numeric value".to_owned()))?;
     Ok(ExpectedScore {
-        score_id: utf8(batch, scores::SCORE_ID).value(row).to_owned(),
-        name: utf8(batch, scores::NAME).value(row).to_owned(),
+        score_id: req_string(batch, scores::SCORE_ID, row),
+        name: req_string(batch, scores::NAME, row),
         target_kind,
-        trace_id: opt_string(utf8(batch, scores::TRACE_ID), row),
-        session_id: opt_string(utf8(batch, scores::SESSION_ID), row),
+        trace_id: opt_string(batch, scores::TRACE_ID, row),
+        session_id: opt_string(batch, scores::SESSION_ID, row),
         value_num,
         created_at: timestamp(batch, scores::CREATED_AT, row),
-        user_id: opt_string(utf8(batch, scores::USER_ID), row),
+        user_id: opt_string(batch, scores::USER_ID, row),
     })
 }
 
 /// One row of `latest_scores`. Its key column is `target_key`
 /// (`reads/scores.rs`, `LATEST_SCORE_COLUMNS`).
-fn latest_from_batch(batch: &RecordBatch, row: usize) -> Result<LatestScore, ReadFailure> {
-    let value_num = opt_f64(
-        column(batch, scores::VALUE_NUM).as_primitive::<Float64Type>(),
-        row,
-    )
-    .ok_or_else(|| ReadFailure::Error("a latest_scores row has no numeric value".to_owned()))?;
+fn latest_from_batch(batch: &Batch, row: usize) -> Result<LatestScore, ReadFailure> {
+    let value_num = opt_f64(batch, scores::VALUE_NUM, row)
+        .ok_or_else(|| ReadFailure::Error("a latest_scores row has no numeric value".to_owned()))?;
     Ok(LatestScore {
-        target_key: utf8(batch, "target_key").value(row).to_owned(),
-        name: utf8(batch, scores::NAME).value(row).to_owned(),
-        score_id: utf8(batch, scores::SCORE_ID).value(row).to_owned(),
+        target_key: req_string(batch, "target_key", row),
+        name: req_string(batch, scores::NAME, row),
+        score_id: req_string(batch, scores::SCORE_ID, row),
         value_num,
     })
 }
 
 /// A column of `batch` by name. The view names are the constants of `cetra_core::schema`.
-fn column<'a>(batch: &'a RecordBatch, name: &str) -> &'a arrow::array::ArrayRef {
-    batch
-        .column_by_name(name)
-        .unwrap_or_else(|| panic!("the view has a {name} column"))
+fn column<'a>(batch: &'a Batch, name: &str) -> &'a Column {
+    crate::reads::columns::require_col(batch, name)
+        .unwrap_or_else(|e| panic!("the view has a {name} column: {e}"))
 }
 
-fn utf8<'a>(batch: &'a RecordBatch, name: &str) -> &'a StringArray {
-    column(batch, name).as_string::<i32>()
+fn opt_string(batch: &Batch, name: &str, row: usize) -> Option<String> {
+    crate::reads::columns::string_at(batch, column(batch, name), row)
+        .unwrap_or_else(|e| panic!("read string column {name}: {e}"))
 }
 
-fn timestamp(batch: &RecordBatch, name: &str, row: usize) -> i64 {
-    column(batch, name)
-        .as_primitive::<TimestampNanosecondType>()
-        .value(row)
+fn req_string(batch: &Batch, name: &str, row: usize) -> String {
+    opt_string(batch, name, row).unwrap_or_else(|| panic!("column {name} is unexpectedly null"))
 }
 
-fn opt_string(array: &StringArray, row: usize) -> Option<String> {
-    (!array.is_null(row)).then(|| array.value(row).to_owned())
+fn timestamp(batch: &Batch, name: &str, row: usize) -> i64 {
+    crate::reads::columns::time_at(batch, column(batch, name), row)
+        .unwrap_or_else(|e| panic!("read timestamp column {name}: {e}"))
 }
 
-fn opt_i64(array: &Int64Array, row: usize) -> Option<i64> {
-    (!array.is_null(row)).then(|| array.value(row))
+fn opt_i64(batch: &Batch, name: &str, row: usize) -> Option<i64> {
+    let col = column(batch, name);
+    let phys = crate::reads::columns::physical_row(batch, row).unwrap_or_else(|e| panic!("{e}"));
+    match col.get_scalar(phys).unwrap_or_else(|e| panic!("{e}")) {
+        ScalarValue::Null(_) => None,
+        ScalarValue::I64(v) => Some(v),
+        other => panic!("column {name} has unexpected type {other:?}"),
+    }
 }
 
-fn opt_f64(array: &Float64Array, row: usize) -> Option<f64> {
-    (!array.is_null(row)).then(|| array.value(row))
+fn opt_f64(batch: &Batch, name: &str, row: usize) -> Option<f64> {
+    crate::reads::columns::decimal_to_f64_at(batch, column(batch, name), row)
+        .unwrap_or_else(|e| panic!("read float/decimal column {name}: {e}"))
 }
 
 /// A `List<Utf8>` cell, sorted.
-fn string_list(batch: &RecordBatch, name: &str, row: usize) -> Vec<String> {
-    let list = column(batch, name).as_list::<i32>().value(row);
-    let items = list.as_string::<i32>();
-    let mut values: Vec<String> = (0..items.len())
-        .map(|index| items.value(index).to_owned())
-        .collect();
+fn string_list(batch: &Batch, name: &str, row: usize) -> Vec<String> {
+    let col = column(batch, name);
+    let phys = crate::reads::columns::physical_row(batch, row).unwrap_or_else(|e| panic!("{e}"));
+    let mut values = match col.get_scalar(phys).unwrap_or_else(|e| panic!("{e}")) {
+        ScalarValue::Null(_) => Vec::new(),
+        ScalarValue::List { values, .. } => values
+            .into_iter()
+            .filter_map(|item| match item {
+                ScalarValue::Utf8(s) => Some(s),
+                ScalarValue::Null(_) => None,
+                other => panic!("column {name} list item has unexpected type {other:?}"),
+            })
+            .collect(),
+        other => panic!("column {name} has unexpected type {other:?}"),
+    };
     values.sort();
     values
 }
@@ -630,33 +631,29 @@ fn static_status(text: &str) -> Result<&'static str, ReadFailure> {
 }
 
 /// One row of the `traces` view, read by column name.
-fn trace_from_batch(batch: &RecordBatch, row: usize) -> Result<ExpectedTrace, ReadFailure> {
-    let count = |name: &str| column(batch, name).as_primitive::<Int64Type>().value(row);
-    let status = static_status(utf8(batch, traces::STATUS).value(row))?;
+fn trace_from_batch(batch: &Batch, row: usize) -> Result<ExpectedTrace, ReadFailure> {
+    let status = static_status(&req_string(batch, traces::STATUS, row))?;
+    let has_root = crate::reads::columns::bool_at(batch, column(batch, traces::HAS_ROOT), row)
+        .unwrap_or_else(|e| panic!("read has_root: {e}"))
+        .expect("has_root is non-null");
     Ok(ExpectedTrace {
-        trace_id: utf8(batch, traces::TRACE_ID).value(row).to_owned(),
+        trace_id: req_string(batch, traces::TRACE_ID, row),
         start_time: timestamp(batch, traces::START_TIME, row),
         end_time: timestamp(batch, traces::END_TIME, row),
-        name: utf8(batch, traces::NAME).value(row).to_owned(),
-        root_span_id: opt_string(utf8(batch, traces::ROOT_SPAN_ID), row),
-        has_root: column(batch, traces::HAS_ROOT).as_boolean().value(row),
+        name: req_string(batch, traces::NAME, row),
+        root_span_id: opt_string(batch, traces::ROOT_SPAN_ID, row),
+        has_root,
         status,
-        session_id: opt_string(utf8(batch, traces::SESSION_ID), row),
-        user_id: opt_string(utf8(batch, traces::USER_ID), row),
-        environment: opt_string(utf8(batch, traces::ENVIRONMENT), row),
+        session_id: opt_string(batch, traces::SESSION_ID, row),
+        user_id: opt_string(batch, traces::USER_ID, row),
+        environment: opt_string(batch, traces::ENVIRONMENT, row),
         tags: string_list(batch, traces::TAGS, row),
         models: string_list(batch, traces::MODELS, row),
         prompts: string_list(batch, traces::PROMPTS, row),
-        span_count: count(traces::SPAN_COUNT),
-        error_count: count(traces::ERROR_COUNT),
-        llm_count: count(traces::LLM_COUNT),
-        total_tokens: opt_i64(
-            column(batch, traces::TOTAL_TOKENS).as_primitive::<Int64Type>(),
-            row,
-        ),
-        cost_total: opt_f64(
-            column(batch, traces::COST_TOTAL).as_primitive::<Float64Type>(),
-            row,
-        ),
+        span_count: int(batch, traces::SPAN_COUNT, row),
+        error_count: int(batch, traces::ERROR_COUNT, row),
+        llm_count: int(batch, traces::LLM_COUNT, row),
+        total_tokens: opt_i64(batch, traces::TOTAL_TOKENS, row),
+        cost_total: opt_f64(batch, traces::COST_TOTAL, row),
     })
 }

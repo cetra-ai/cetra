@@ -19,7 +19,6 @@ use chrono::NaiveDate;
 use object_store::ObjectStore;
 
 use crate::catalog::{FileMeta, FileTable};
-use crate::column_bridge::arrow_schema_to_column;
 use crate::deletion::PendingDeletion;
 use crate::verify::Suspects;
 use crate::wal::Table;
@@ -80,7 +79,7 @@ impl ScoresSource {
         suspects: Suspects,
         runtime: tokio::runtime::Handle,
     ) -> Result<Self, QueryError> {
-        let schema = Arc::new(arrow_schema_to_column(&scores_schema())?);
+        let schema = scores_schema();
         Ok(Self {
             store,
             project,

@@ -570,7 +570,7 @@ mod tests {
     use std::sync::Arc;
     use std::time::Instant;
 
-    use cetra_core::batch::scores_to_record_batch;
+    use cetra_core::batch::scores_to_batch;
     use cetra_core::enums::ScoreSource;
     use cetra_core::ids::{ProjectId, TraceId};
     use cetra_core::schema::spans::START_TIME;
@@ -578,7 +578,6 @@ mod tests {
     use chrono::NaiveDate;
 
     use super::*;
-    use crate::column_bridge::record_batch_to_column;
     use crate::wal::spans_at;
 
     const DAY: i64 = DAY_NS;
@@ -596,7 +595,7 @@ mod tests {
     }
 
     fn spans_col(starts: &[i64]) -> Batch {
-        record_batch_to_column(&spans_at(starts)).unwrap()
+        spans_at(starts)
     }
 
     fn start_times(batch: &MemBatch) -> Vec<i64> {
@@ -693,7 +692,7 @@ mod tests {
             deleted: false,
             ingest_time: DAY + 7,
         };
-        let batch = record_batch_to_column(&scores_to_record_batch(&[score]).unwrap()).unwrap();
+        let batch = scores_to_batch(&[score]).unwrap();
         table.insert(project(), batch, 1).unwrap();
         assert!(table.partitions().contains_key(&PartitionKey {
             project: project(),

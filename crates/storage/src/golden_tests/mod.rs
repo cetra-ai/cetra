@@ -13,11 +13,9 @@ use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 use std::time::Instant;
 
-use arrow::array::StringArray;
 use cetra_core::ids::ProjectId;
 use cetra_core::schema::spans;
 use chrono::NaiveDate;
-use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 use serde_json::Value;
 use sqlx::sqlite::SqliteConnectOptions;
 use sqlx::{ConnectOptions, Connection};
@@ -221,7 +219,7 @@ fn build_leaves_the_expected_shape() {
             .parse_and_finish(&bytes::Bytes::from(bytes))
             .expect("read a Parquet footer");
         assert_eq!(
-            crate::parquet::file_format_version(&metadata),
+            crate::file_format::file_format_version(&metadata),
             Some(FORMAT_VERSION),
             "the format version of {}",
             file.display()
@@ -576,7 +574,7 @@ async fn check_dir(dir: &Path) {
                 panic!("{name}: step 5: read an active Parquet footer: {error}")
             });
             assert_eq!(
-                crate::parquet::file_format_version(reader.metadata()),
+                crate::file_format::file_format_version(reader.metadata()),
                 Some(format),
                 "{name}: step 5: the format version of an active Parquet file"
             );
@@ -736,20 +734,19 @@ fn active_user_rows(storage: &Storage, project: ProjectId, dir: &Path, user: &st
         if file.project != project {
             continue;
         }
-        let path = dir.join("objects").join(&file.path);
-        let handle = fs::File::open(&path)
-            .unwrap_or_else(|error| panic!("open an active spans file: {error}"));
-        let reader = ParquetRecordBatchReaderBuilder::try_new(handle)
-            .unwrap_or_else(|error| panic!("read an active spans file: {error}"))
-            .build()
-            .unwrap_or_else(|error| panic!("read an active spans file: {error}"));
-        for batch in reader {
-            let batch = batch.unwrap_or_else(|error| panic!("read a spans batch: {error}"));
-            let users = batch
-                .column_by_name(spans::USER_ID)
-                .and_then(|column| column.as_any().downcast_ref::<StringArray>())
-                .unwrap_or_else(|| panic!("a spans file has a Utf8 {} column", spans::USER_ID));
-            rows += users.iter().filter(|value| *value == Some(user)).count();
+        let batch = crate::test_support::object_rows(dir, &file);
+        let col =
+            crate::reads::columns::require_col(&batch, spans::USER_ID).unwrap_or_else(|error| {
+                panic!("a spans file has a {} column: {error}", spans::USER_ID)
+            });
+        for row in 0..batch.num_rows() {
+            if crate::reads::columns::string_at(&batch, col, row)
+                .unwrap_or_else(|error| panic!("read {} column: {error}", spans::USER_ID))
+                .as_deref()
+                == Some(user)
+            {
+                rows += 1;
+            }
         }
     }
     rows

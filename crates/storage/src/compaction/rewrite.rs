@@ -27,8 +27,8 @@ use crate::compaction::merge::MergeContext;
 use crate::compaction::plan::{Job, JobKind, Policy};
 use crate::deletion::{PendingDeletion, Tombstones, applicable, to_tombstone_specs};
 use crate::error::{CommitError, CompactionError};
+use crate::file_format::ingest_column;
 use crate::memtable::MemSnapshot;
-use crate::parquet::ingest_column;
 use crate::read_state::{ReadState, publish_catalog, publish_tombstones};
 use crate::verify::{Suspects, may_be_corrupt};
 
@@ -553,11 +553,8 @@ async fn holds_covered(
     let scoped_pool = ctx
         .pool
         .try_admit(0, ctx.pool.limit())
-        .ok_or_else(|| CompactionError::from_query(QueryError::TooLarge))?;
-    let workers = ctx
-        .qe_runtime
-        .workers()
-        .map_err(CompactionError::from_query)?;
+        .ok_or_else(|| CompactionError::from(QueryError::TooLarge))?;
+    let workers = ctx.qe_runtime.workers().map_err(CompactionError::from)?;
     let cancel = CancelToken::new();
     let _cancel_guard = super::CancelOnDrop(cancel.clone());
     let exec_ctx = ExecContext {
@@ -587,7 +584,7 @@ async fn holds_covered(
     );
     let mut streams = source
         .open_partitions(&spec, &exec_ctx)
-        .map_err(CompactionError::from_query)?;
+        .map_err(CompactionError::from)?;
     let Some(mut stream) = streams.pop() else {
         return Ok(false);
     };
@@ -616,7 +613,7 @@ async fn holds_covered(
                     }
                 }],
             )
-            .map_err(CompactionError::from_query)?;
+            .map_err(CompactionError::from)?;
         out.pop().ok_or(CompactionError::Task)
     })
     .await
@@ -678,8 +675,6 @@ mod tests {
     use std::sync::{Arc, PoisonError};
     use std::time::{Duration, Instant};
 
-    use arrow::array::{Array, AsArray, RecordBatch};
-    use arrow::datatypes::Int64Type;
     use cetra_core::ids::ProjectId;
     use cetra_core::schema::traces;
     use cetra_core::score::ScoreTarget;
@@ -694,8 +689,9 @@ mod tests {
     };
     use crate::deletion::{Deletion, DeletionScope, DeletionStatus};
     use crate::hooks::HookPoint;
+    use crate::reads::columns::{active_rows, i64_at, require_col};
     use crate::reads::{ListScope, MAX_PAGE, SortOrder, TraceListRequest, TraceSort, trace_list};
-    use crate::test_support::{rows, score_row, score_rows, span_row, span_rows};
+    use crate::test_support::{parquet_rows, rows, score_row, score_rows, span_row, span_rows};
     use crate::views::QueryContext;
     use crate::wal::Table;
 
@@ -723,11 +719,10 @@ mod tests {
         .unwrap();
         let mut counts = Vec::new();
         for batch in &page.batches {
-            let column = batch
-                .column_by_name(traces::SPAN_COUNT)
-                .unwrap()
-                .as_primitive::<Int64Type>();
-            counts.extend(column.values().iter().copied());
+            let col = require_col(batch, traces::SPAN_COUNT).unwrap();
+            for row in 0..batch.num_rows() {
+                counts.push(i64_at(batch, col, row).unwrap());
+            }
         }
         counts
     }
@@ -773,26 +768,17 @@ mod tests {
     /// The raw 16-byte trace ids stored in one Parquet object.
     fn object_trace_ids(dir: &Path, file: &FileMeta, column: &str) -> Vec<[u8; 16]> {
         let bytes = std::fs::read(dir.join("objects").join(&file.path)).unwrap();
-        let builder = parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder::try_new(
-            bytes::Bytes::from(bytes),
-        )
-        .unwrap();
-        let schema = Arc::clone(builder.schema());
-        let batches: Vec<RecordBatch> = builder
-            .build()
-            .unwrap()
-            .map(|batch| batch.unwrap())
-            .collect();
-        let all = arrow::compute::concat_batches(&schema, &batches).unwrap();
-        let array = all
-            .column_by_name(column)
-            .unwrap()
-            .as_any()
-            .downcast_ref::<arrow::array::FixedSizeBinaryArray>()
-            .unwrap();
-        (0..array.len())
-            .map(|row| <[u8; 16]>::try_from(array.value(row)).unwrap())
-            .collect()
+        let all = parquet_rows(bytes::Bytes::from(bytes));
+        let col = all.column_by_name(column).unwrap();
+        match col {
+            cetra_column::Column::Flat(flat) => match flat.data() {
+                cetra_column::FlatData::FixedBytes16(arr) => {
+                    active_rows(&all).map(|row| arr[row]).collect()
+                }
+                other => panic!("unexpected trace_id flat data: {other:?}"),
+            },
+            other => panic!("unexpected trace_id encoding: {other:?}"),
+        }
     }
 
     fn spans_trace_ids(dir: &Path, file: &FileMeta) -> Vec<[u8; 16]> {
@@ -803,64 +789,24 @@ mod tests {
         object_trace_ids(dir, file, traces::TRACE_ID)
     }
 
-    /// The first `i64` of the first row of `sql`.
+    /// The first integer scalar of the first row of `sql`.
     async fn scalar(storage: &Storage, sql: &str) -> i64 {
         let query = storage
             .query(project(), QueryOptions::new(None, None))
             .await
             .unwrap();
         let ctx = QueryContext::new(query, None).unwrap();
-        let batches = rows(&ctx, sql).await;
-        let column = batches[0]
-            .column(0)
-            .as_any()
-            .downcast_ref::<arrow::array::Int64Array>()
-            .unwrap();
-        column.value(0)
+        let result = rows(&ctx, sql).await;
+        result[0].values().next().unwrap().as_i64().unwrap()
     }
 
     async fn span_count(storage: &Storage, trace: u16) -> i64 {
         let hex = span_row(trace, 0, 0, 0).trace_id.to_hex();
         scalar(
             storage,
-            &format!("SELECT count(*) FROM spans WHERE trace_id = '{hex}'"),
+            &format!("SELECT count(*) AS n FROM spans WHERE trace_id = '{hex}'"),
         )
         .await
-    }
-
-    /// Every string cell of `sql`'s result, one per line (EXPLAIN plans).
-    async fn text(storage: &Storage, sql: &str) -> String {
-        let query = storage
-            .query(project(), QueryOptions::new(None, None))
-            .await
-            .unwrap();
-        let ctx = QueryContext::new(query, None).unwrap();
-        let batches = rows(&ctx, sql).await;
-        let mut text = String::new();
-        for batch in &batches {
-            for column in batch.columns() {
-                let Some(values) = column.as_any().downcast_ref::<arrow::array::StringArray>()
-                else {
-                    continue;
-                };
-                for index in 0..values.len() {
-                    text.push_str(values.value(index));
-                    text.push('\n');
-                }
-            }
-        }
-        text
-    }
-
-    /// `EXPLAIN` lines whose predicate names `ingest_time`: the tombstone
-    /// filter, absent once the tombstones are empty.
-    fn ingest_time_filters(plan: &str) -> usize {
-        plan.lines()
-            .filter(|line| {
-                (line.contains("FilterExec") || line.contains("predicate="))
-                    && line.contains("ingest_time")
-            })
-            .count()
     }
 
     /// The deletion's status, unwrapped.
@@ -1071,11 +1017,14 @@ mod tests {
                 applied_at: at(12, 0, 0)
             }
         );
-        let plan = text(&storage, "EXPLAIN SELECT * FROM spans").await;
-        assert_eq!(
-            ingest_time_filters(&plan),
-            0,
-            "the published tombstones are empty:\n{plan}"
+        assert!(
+            storage
+                .published
+                .load()
+                .tombstones
+                .for_project(project())
+                .is_empty(),
+            "the published tombstones are empty"
         );
         storage.shutdown().await.unwrap();
     }
@@ -1411,7 +1360,7 @@ mod tests {
             .parse_and_finish(&bytes::Bytes::from(bytes))
             .unwrap();
         assert_eq!(
-            crate::parquet::file_format_version(&metadata),
+            crate::file_format::file_format_version(&metadata),
             Some(crate::format::FORMAT_VERSION),
             "the rewritten file carries the format version"
         );

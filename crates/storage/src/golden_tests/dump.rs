@@ -8,7 +8,6 @@ use std::future::Future;
 use std::path::Path;
 use std::time::Duration;
 
-use arrow::array::RecordBatch;
 use cetra_column::{
     Batch, Column, EventsData, FlatColumn, FlatData, Interval, LinksData, MapData, ScalarValue,
     Selection,
@@ -62,21 +61,18 @@ async fn context(storage: &Storage, project: ProjectId) -> QueryContext {
 }
 
 /// The rows of `batches`, projected to `columns` by name, as JSON objects in order.
-fn rows(batches: &[RecordBatch], columns: &[&str]) -> Vec<Value> {
+fn rows(batches: &[Batch], columns: &[&str]) -> Vec<Value> {
     let mut out = Vec::new();
     for batch in batches {
         if batch.num_rows() == 0 {
             continue;
         }
-        let col_batch = crate::column_bridge::record_batch_to_column(batch)
-            .expect("convert a read result to cetra_column::Batch");
-        out.extend(batch_rows(&col_batch, columns));
+        out.extend(batch_rows(batch, columns));
     }
     out
 }
 
-/// The rows of `batch`, projected to `columns` by name, as JSON objects in order.
-/// Matches `arrow::json::ArrayWriter` (`explicit_nulls = false`) across all encodings and selections.
+/// The rows of `batch`, projected to `columns` by name, as JSON objects in order (omitting null fields).
 fn batch_rows(batch: &Batch, columns: &[&str]) -> Vec<Value> {
     if batch.is_empty() {
         return Vec::new();
@@ -965,266 +961,297 @@ pub(super) fn expected_of(dir: &Path) -> Value {
 mod tests {
     use std::sync::Arc;
 
-    use arrow::array::{
-        Array, ArrayRef, BinaryArray, BooleanArray, Date32Array, Decimal128Array, DictionaryArray,
-        FixedSizeBinaryArray, Float64Array, Int32Array, Int64Array, IntervalMonthDayNanoArray,
-        ListArray, MapArray, RecordBatch, RunArray, StringArray, StructArray,
-        TimestampNanosecondArray,
-    };
-    use arrow::buffer::{NullBuffer, OffsetBuffer};
-    use arrow::datatypes::{
-        DataType as ArrowDataType, Field as ArrowField, Fields, IntervalMonthDayNano, IntervalUnit,
-        Schema as ArrowSchema, TimeUnit,
-    };
     use cetra_column::{
-        Batch, Bitmap, Column, DataType as ColDataType, DictColumn, Field as ColField, FlatColumn,
-        FlatData, RleColumn, ScalarValue, Schema as ColSchema, Selection,
+        Batch, BinaryData, Bitmap, Column, DataType as ColDataType, DictColumn, EventsData,
+        Field as ColField, FlatColumn, FlatData, Interval, LinksData, MapData, RleColumn,
+        ScalarValue, Schema as ColSchema, Selection, Utf8Data,
     };
-    use serde_json::Value;
+    use serde_json::{Value, json};
 
-    use super::{batch_rows, rows, sorted_keys};
-
-    fn arrow_writer_rows(batch: &RecordBatch) -> Vec<Value> {
-        let mut writer = arrow::json::ArrayWriter::new(Vec::new());
-        writer.write(batch).expect("arrow json write");
-        writer.finish().expect("arrow json finish");
-        let Value::Array(values) =
-            serde_json::from_slice(&writer.into_inner()).expect("parse arrow json")
-        else {
-            panic!("ArrayWriter must emit a JSON array");
-        };
-        values.into_iter().map(sorted_keys).collect()
-    }
+    use super::{batch_rows, rows};
 
     #[test]
-    fn batch_json_formatter_matches_arrow_array_writer_across_all_types() {
+    fn batch_json_formatter_handles_all_types() {
         let trace_a = [0x11_u8; 16];
         let trace_b = [0xab_u8; 16];
         let span_a = [0x01_u8; 8];
         let span_b = [0xfe_u8; 8];
 
-        let map_entries_fields = Fields::from(vec![
-            ArrowField::new("keys", ArrowDataType::Utf8, false),
-            ArrowField::new("values", ArrowDataType::Utf8, true),
-        ]);
-        let map_field = Arc::new(ArrowField::new(
-            "entries",
-            ArrowDataType::Struct(map_entries_fields.clone()),
-            false,
-        ));
-        let map_struct = StructArray::try_new(
-            map_entries_fields,
-            vec![
-                Arc::new(StringArray::from(vec!["z", "a", "null_val"])) as ArrayRef,
-                Arc::new(StringArray::from(vec![Some("1"), Some("2"), None])) as ArrayRef,
-            ],
+        let map_data = MapData::try_new(
+            vec![0, 3, 3, 3],
+            Utf8Data::try_from_slices(["z", "a", "null_val"]).unwrap(),
+            Utf8Data::try_from_slices(["1", "2", ""]).unwrap(),
+            Some(Bitmap::from_bools(&[true, true, false])),
+        )
+        .unwrap();
+
+        let list_values = Column::Flat(
+            FlatColumn::try_new(
+                FlatData::Utf8(Utf8Data::try_from_slices(["tag1", ""]).unwrap()),
+                Some(Bitmap::from_bools(&[true, false])),
+            )
+            .unwrap(),
+        );
+        let list_col = Column::Flat(
+            FlatColumn::try_new(
+                FlatData::List {
+                    item_type: ColDataType::Utf8,
+                    offsets: vec![0, 2, 2, 2],
+                    values: Box::new(list_values),
+                },
+                Some(Bitmap::from_bools(&[true, true, false])),
+            )
+            .unwrap(),
+        );
+
+        let events_data = EventsData::try_new(
+            vec![0, 1, 1, 1],
+            vec![1_770_717_600_000_000_000_i64],
+            Utf8Data::try_from_slices(["evt"]).unwrap(),
+            Utf8Data::try_from_slices([""]).unwrap(),
+            Some(Bitmap::from_bools(&[false])),
+        )
+        .unwrap();
+
+        let links_data = LinksData::try_new(
+            vec![0, 1, 1, 1],
+            vec![trace_a],
+            vec![span_a],
+            Utf8Data::try_from_slices(["{\"k\":1}"]).unwrap(),
             None,
         )
         .unwrap();
-        let map_arr = MapArray::try_new(
-            Arc::clone(&map_field),
-            OffsetBuffer::new(vec![0, 3, 3, 3].into()),
-            map_struct,
-            Some(NullBuffer::from(vec![true, true, false])),
-            false,
-        )
-        .unwrap();
 
-        let list_arr = ListArray::try_new(
-            Arc::new(ArrowField::new("item", ArrowDataType::Utf8, true)),
-            OffsetBuffer::new(vec![0, 2, 2, 2].into()),
-            Arc::new(StringArray::from(vec![Some("tag1"), None])),
-            Some(NullBuffer::from(vec![true, true, false])),
-        )
-        .unwrap();
-
-        let event_fields = Fields::from(vec![
-            ArrowField::new(
-                "time",
-                ArrowDataType::Timestamp(TimeUnit::Nanosecond, Some("UTC".into())),
-                false,
-            ),
-            ArrowField::new("name", ArrowDataType::Utf8, false),
-            ArrowField::new("attributes", ArrowDataType::Utf8, true),
-        ]);
-        let events_struct = StructArray::try_new(
-            event_fields.clone(),
-            vec![
-                Arc::new(
-                    TimestampNanosecondArray::from(vec![1_770_717_600_000_000_000_i64])
-                        .with_timezone("UTC"),
-                ) as ArrayRef,
-                Arc::new(StringArray::from(vec!["evt"])) as ArrayRef,
-                Arc::new(StringArray::from(vec![Option::<&str>::None])) as ArrayRef,
-            ],
+        let dict_vals = FlatColumn::try_new(
+            FlatData::Utf8(Utf8Data::try_from_slices(["ok", "error"]).unwrap()),
             None,
         )
         .unwrap();
-        let events_arr = ListArray::try_new(
-            Arc::new(ArrowField::new(
-                "item",
-                ArrowDataType::Struct(event_fields),
-                false,
-            )),
-            OffsetBuffer::new(vec![0, 1, 1, 1].into()),
-            Arc::new(events_struct),
-            Some(NullBuffer::from(vec![true, true, false])),
-        )
-        .unwrap();
-
-        let link_fields = Fields::from(vec![
-            ArrowField::new("trace_id", ArrowDataType::FixedSizeBinary(16), false),
-            ArrowField::new("span_id", ArrowDataType::FixedSizeBinary(8), false),
-            ArrowField::new("attributes", ArrowDataType::Utf8, true),
-        ]);
-        let links_struct = StructArray::try_new(
-            link_fields.clone(),
-            vec![
-                Arc::new(
-                    FixedSizeBinaryArray::try_from_iter([trace_a.as_slice()].into_iter()).unwrap(),
-                ) as ArrayRef,
-                Arc::new(
-                    FixedSizeBinaryArray::try_from_iter([span_a.as_slice()].into_iter()).unwrap(),
-                ) as ArrayRef,
-                Arc::new(StringArray::from(vec![Some("{\"k\":1}")])) as ArrayRef,
-            ],
+        let dict_col = Column::Dict(
+            DictColumn::try_new(
+                dict_vals,
+                vec![0, 0, 1],
+                Some(Bitmap::from_bools(&[true, false, true])),
+            )
+            .unwrap(),
+        );
+        let rle_vals = FlatColumn::try_new(
+            FlatData::Utf8(Utf8Data::try_from_slices(["rle-a", "rle-b"]).unwrap()),
             None,
         )
         .unwrap();
-        let links_arr = ListArray::try_new(
-            Arc::new(ArrowField::new(
-                "item",
-                ArrowDataType::Struct(link_fields),
-                false,
-            )),
-            OffsetBuffer::new(vec![0, 1, 1, 1].into()),
-            Arc::new(links_struct),
-            Some(NullBuffer::from(vec![true, true, false])),
-        )
+        let rle_col = Column::Rle(RleColumn::try_new(rle_vals, vec![2, 3]).unwrap());
+
+        let schema = ColSchema::try_new_arc(vec![
+            ColField::new("b", ColDataType::Bool, true),
+            ColField::new("i", ColDataType::I64, true),
+            ColField::new("f", ColDataType::F64, true),
+            ColField::new(
+                "dec",
+                ColDataType::Decimal128 {
+                    precision: 38,
+                    scale: 18,
+                },
+                true,
+            ),
+            ColField::new("ts_utc", ColDataType::TimestampNs { utc: true }, true),
+            ColField::new("ts_naive", ColDataType::TimestampNs { utc: false }, true),
+            ColField::new("d", ColDataType::Date, true),
+            ColField::new("iv", ColDataType::Interval, true),
+            ColField::new("s", ColDataType::Utf8, true),
+            ColField::new("bin", ColDataType::Binary, true),
+            ColField::new("tid", ColDataType::FixedBytes16, true),
+            ColField::new("sid", ColDataType::FixedBytes8, true),
+            ColField::new("tags", ColDataType::List(Box::new(ColDataType::Utf8)), true),
+            ColField::new("attrs", ColDataType::MapUtf8, true),
+            ColField::new("events", ColDataType::Events, true),
+            ColField::new("links", ColDataType::Links, true),
+            ColField::new("dict_col", ColDataType::Utf8, true),
+            ColField::new("rle_col", ColDataType::Utf8, true),
+        ])
         .unwrap();
 
-        let dict_arr: DictionaryArray<arrow::datatypes::Int32Type> =
-            vec![Some("ok"), None, Some("error")].into_iter().collect();
-        let run_arr = RunArray::try_new(
-            &Int32Array::from(vec![2, 3]),
-            &StringArray::from(vec![Some("rle-a"), Some("rle-b")]),
-        )
-        .unwrap();
-
-        let schema = Arc::new(ArrowSchema::new(vec![
-            ArrowField::new("b", ArrowDataType::Boolean, true),
-            ArrowField::new("i", ArrowDataType::Int64, true),
-            ArrowField::new("f", ArrowDataType::Float64, true),
-            ArrowField::new("dec", ArrowDataType::Decimal128(38, 18), true),
-            ArrowField::new(
-                "ts_utc",
-                ArrowDataType::Timestamp(TimeUnit::Nanosecond, Some("UTC".into())),
-                true,
-            ),
-            ArrowField::new(
-                "ts_naive",
-                ArrowDataType::Timestamp(TimeUnit::Nanosecond, None),
-                true,
-            ),
-            ArrowField::new("d", ArrowDataType::Date32, true),
-            ArrowField::new(
-                "iv",
-                ArrowDataType::Interval(IntervalUnit::MonthDayNano),
-                true,
-            ),
-            ArrowField::new("s", ArrowDataType::Utf8, true),
-            ArrowField::new("bin", ArrowDataType::Binary, true),
-            ArrowField::new("tid", ArrowDataType::FixedSizeBinary(16), true),
-            ArrowField::new("sid", ArrowDataType::FixedSizeBinary(8), true),
-            ArrowField::new("tags", list_arr.data_type().clone(), true),
-            ArrowField::new("attrs", map_arr.data_type().clone(), true),
-            ArrowField::new("events", events_arr.data_type().clone(), true),
-            ArrowField::new("links", links_arr.data_type().clone(), true),
-            ArrowField::new("dict_col", dict_arr.data_type().clone(), true),
-            ArrowField::new("rle_col", run_arr.data_type().clone(), true),
-        ]));
-
-        let batch = RecordBatch::try_new(
-            schema,
+        let nulls_row3 = Some(Bitmap::from_bools(&[true, true, false]));
+        let batch = Batch::try_new_all(
+            Arc::clone(&schema),
             vec![
-                Arc::new(BooleanArray::from(vec![Some(true), Some(false), None])),
-                Arc::new(Int64Array::from(vec![Some(-42), Some(0), None])),
-                Arc::new(Float64Array::from(vec![Some(1.25), Some(0.0), None])),
-                Arc::new(
-                    Decimal128Array::from(vec![
-                        Some(123_450_000_000_000_000_i128),
-                        Some(-1_000_000_000_000_000_000_i128),
-                        None,
-                    ])
-                    .with_precision_and_scale(38, 18)
-                    .unwrap(),
-                ),
-                Arc::new(
-                    TimestampNanosecondArray::from(vec![
-                        Some(1_770_717_600_000_000_000_i64), // 2026-02-10T10:00:00Z
-                        Some(1_770_717_600_100_000_001_i64), // .100000001Z
-                        None,
-                    ])
-                    .with_timezone("UTC"),
-                ),
-                Arc::new(TimestampNanosecondArray::from(vec![
-                    Some(1_770_717_600_000_000_000_i64),
-                    Some(1_770_717_600_100_000_000_i64),
-                    None,
-                ])),
-                Arc::new(Date32Array::from(vec![Some(20_494), Some(0), None])),
-                Arc::new(IntervalMonthDayNanoArray::from(vec![
-                    Some(IntervalMonthDayNano::new(0, 0, 0)),
-                    Some(IntervalMonthDayNano::new(14, -2, -1_500_000_000)),
-                    None,
-                ])),
-                Arc::new(StringArray::from(vec![
-                    Some("hello\n\"world\""),
-                    Some(""),
-                    None,
-                ])),
-                Arc::new(BinaryArray::from(vec![
-                    Some(b"\x00\xff".as_slice()),
-                    Some(b"".as_slice()),
-                    None,
-                ])),
-                Arc::new(
-                    FixedSizeBinaryArray::try_from_sparse_iter_with_size(
-                        [Some(trace_a.as_slice()), Some(trace_b.as_slice()), None].into_iter(),
-                        16,
+                Column::Flat(
+                    FlatColumn::try_new(
+                        FlatData::Bool(Bitmap::from_bools(&[true, false, false])),
+                        nulls_row3.clone(),
                     )
                     .unwrap(),
                 ),
-                Arc::new(
-                    FixedSizeBinaryArray::try_from_sparse_iter_with_size(
-                        [Some(span_a.as_slice()), Some(span_b.as_slice()), None].into_iter(),
-                        8,
+                Column::Flat(
+                    FlatColumn::try_new(FlatData::I64(vec![-42, 0, 0]), nulls_row3.clone())
+                        .unwrap(),
+                ),
+                Column::Flat(
+                    FlatColumn::try_new(FlatData::F64(vec![1.25, 0.0, 0.0]), nulls_row3.clone())
+                        .unwrap(),
+                ),
+                Column::Flat(
+                    FlatColumn::try_new(
+                        FlatData::Decimal128 {
+                            values: vec![
+                                123_450_000_000_000_000_i128,
+                                -1_000_000_000_000_000_000_i128,
+                                0,
+                            ],
+                            precision: 38,
+                            scale: 18,
+                        },
+                        nulls_row3.clone(),
                     )
                     .unwrap(),
                 ),
-                Arc::new(list_arr),
-                Arc::new(map_arr),
-                Arc::new(events_arr),
-                Arc::new(links_arr),
-                Arc::new(dict_arr),
-                Arc::new(run_arr),
+                Column::Flat(
+                    FlatColumn::try_new(
+                        FlatData::TimestampNs {
+                            values: vec![
+                                1_770_717_600_000_000_000_i64,
+                                1_770_717_600_100_000_001_i64,
+                                0,
+                            ],
+                            utc: true,
+                        },
+                        nulls_row3.clone(),
+                    )
+                    .unwrap(),
+                ),
+                Column::Flat(
+                    FlatColumn::try_new(
+                        FlatData::TimestampNs {
+                            values: vec![
+                                1_770_717_600_000_000_000_i64,
+                                1_770_717_600_100_000_000_i64,
+                                0,
+                            ],
+                            utc: false,
+                        },
+                        nulls_row3.clone(),
+                    )
+                    .unwrap(),
+                ),
+                Column::Flat(
+                    FlatColumn::try_new(FlatData::Date(vec![20_494, 0, 0]), nulls_row3.clone())
+                        .unwrap(),
+                ),
+                Column::Flat(
+                    FlatColumn::try_new(
+                        FlatData::Interval(vec![
+                            Interval {
+                                months: 0,
+                                days: 0,
+                                nanos: 0,
+                            },
+                            Interval {
+                                months: 14,
+                                days: -2,
+                                nanos: -1_500_000_000,
+                            },
+                            Interval {
+                                months: 0,
+                                days: 0,
+                                nanos: 0,
+                            },
+                        ]),
+                        nulls_row3.clone(),
+                    )
+                    .unwrap(),
+                ),
+                Column::Flat(
+                    FlatColumn::try_new(
+                        FlatData::Utf8(
+                            Utf8Data::try_from_slices(["hello\n\"world\"", "", ""]).unwrap(),
+                        ),
+                        nulls_row3.clone(),
+                    )
+                    .unwrap(),
+                ),
+                Column::Flat(
+                    FlatColumn::try_new(
+                        FlatData::Binary(
+                            BinaryData::try_from_slices([
+                                b"\x00\xff".as_slice(),
+                                b"".as_slice(),
+                                b"".as_slice(),
+                            ])
+                            .unwrap(),
+                        ),
+                        nulls_row3.clone(),
+                    )
+                    .unwrap(),
+                ),
+                Column::Flat(
+                    FlatColumn::try_new(
+                        FlatData::FixedBytes16(vec![trace_a, trace_b, [0; 16]]),
+                        nulls_row3.clone(),
+                    )
+                    .unwrap(),
+                ),
+                Column::Flat(
+                    FlatColumn::try_new(
+                        FlatData::FixedBytes8(vec![span_a, span_b, [0; 8]]),
+                        nulls_row3.clone(),
+                    )
+                    .unwrap(),
+                ),
+                list_col,
+                Column::Flat(
+                    FlatColumn::try_new(FlatData::MapUtf8(Box::new(map_data)), nulls_row3.clone())
+                        .unwrap(),
+                ),
+                Column::Flat(
+                    FlatColumn::try_new(
+                        FlatData::Events(Box::new(events_data)),
+                        nulls_row3.clone(),
+                    )
+                    .unwrap(),
+                ),
+                Column::Flat(
+                    FlatColumn::try_new(FlatData::Links(Box::new(links_data)), nulls_row3).unwrap(),
+                ),
+                dict_col,
+                rle_col,
             ],
+            3,
         )
         .unwrap();
 
-        let batch_schema = batch.schema();
-        let col_names: Vec<&str> = batch_schema
-            .fields()
-            .iter()
-            .map(|f| f.name().as_str())
-            .collect();
+        let col_names: Vec<&str> = schema.fields().iter().map(|f| f.name.as_str()).collect();
         let actual = rows(std::slice::from_ref(&batch), &col_names);
-        let expected = arrow_writer_rows(&batch);
-        assert_eq!(actual, expected);
+        assert_eq!(actual.len(), 3);
         assert_eq!(
             actual[0]["ts_utc"],
             Value::String("2026-02-10T10:00:00Z".to_owned())
         );
+        assert_eq!(
+            actual[0]["ts_naive"],
+            Value::String("2026-02-10T10:00:00".to_owned())
+        );
+        assert_eq!(actual[0]["d"], Value::String("2026-02-10".to_owned()));
+        assert_eq!(actual[0]["iv"], Value::String("0 secs".to_owned()));
+        assert_eq!(actual[0]["bin"], Value::String("00ff".to_owned()));
+        assert_eq!(actual[0]["tid"], Value::String("11".repeat(16)));
+        assert_eq!(actual[0]["sid"], Value::String("01".repeat(8)));
+        assert_eq!(actual[0]["tags"], json!(["tag1", null]));
+        assert_eq!(actual[0]["attrs"], json!({"a": "2", "z": "1"}));
+        assert_eq!(
+            actual[0]["events"],
+            json!([{"name": "evt", "time": "2026-02-10T10:00:00Z"}])
+        );
+        assert_eq!(
+            actual[0]["links"],
+            json!([{"attributes": "{\"k\":1}", "span_id": "01".repeat(8), "trace_id": "11".repeat(16)}])
+        );
+        assert_eq!(actual[0]["dict_col"], json!("ok"));
+        assert_eq!(actual[0]["rle_col"], json!("rle-a"));
+        assert_eq!(
+            actual[1]["iv"],
+            Value::String("14 mons -2 days -1.500000000 secs".to_owned())
+        );
+        assert_eq!(actual[2], json!({"dict_col": "error", "rle_col": "rle-b"}));
     }
 
     #[test]

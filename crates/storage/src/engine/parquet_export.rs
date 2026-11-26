@@ -63,6 +63,7 @@ impl fmt::Debug for ParquetBatchExporter {
 
 impl ParquetBatchExporter {
     /// Creates an exporter using [`PARQUET_ROW_GROUP_ROWS`] and [`PARQUET_CHUNK_BYTES`].
+    #[cfg(test)]
     pub(crate) fn new(schema: Arc<Schema>, pool: &Arc<ScopedPool>) -> Result<Self, QueryError> {
         Self::with_row_group_limits(schema, pool, PARQUET_ROW_GROUP_ROWS, PARQUET_CHUNK_BYTES)
     }

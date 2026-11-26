@@ -25,11 +25,6 @@ impl AsyncAdmissionPool {
         Self { pool, freed }
     }
 
-    /// Underlying synchronous global pool.
-    pub(crate) fn pool(&self) -> &Arc<GlobalPool> {
-        &self.pool
-    }
-
     /// Bytes currently held across all admitted scopes.
     pub(crate) fn used(&self) -> usize {
         self.pool.used()

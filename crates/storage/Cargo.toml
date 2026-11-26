@@ -14,21 +14,19 @@ workspace = true
 cetra-column.workspace = true
 cetra-core.workspace = true
 cetra-query.workspace = true
-arrow = { workspace = true, features = ["ipc_compression", "json"] }
+arrow = { workspace = true }
 async-trait.workspace = true
 bytes.workspace = true
 bytesize.workspace = true
 chrono.workspace = true
 crc32c.workspace = true
-datafusion.workspace = true
-datafusion-datasource.workspace = true
 futures.workspace = true
 hex.workspace = true
 humantime-serde.workspace = true
 lz4_flex = { workspace = true }
 # `fs` is already a default feature of the pin. `aws` is the S3 backend (D119).
 object_store = { workspace = true, features = ["fs", "aws"] }
-parquet.workspace = true
+parquet = { workspace = true, features = ["arrow", "zstd", "snap", "lz4", "flate2-zlib-rs"] }
 rustix = { workspace = true }
 serde.workspace = true
 serde_json.workspace = true

@@ -76,15 +76,7 @@ datafusion = { version = "55.2", default-features = false, features = [
 ] }
 arrow = { version = "59.2", default-features = false }
 # parquet 59 has no `flate2` feature. `flate2-zlib-rs` is that release's deflate backend.
-parquet = { version = "59.2", default-features = false, features = [
-    "arrow",
-    "async",
-    "object_store",
-    "zstd",
-    "snap",
-    "lz4",
-    "flate2-zlib-rs",
-] }
+parquet = { version = "59.2", default-features = false }
 object_store = "0.13"
 # Structured fuzz inputs (track R M3). Storage uses it under cfg(fuzzing) and in tests.
 arbitrary = { version = "1.5.0", features = ["derive"] }

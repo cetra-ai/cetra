@@ -1,29 +1,18 @@
 //! Deletion requests, their tombstone set, and the covered-row rule (spec 03 §7).
 //!
-//! [`covered_predicate`] is the one place the covered-row rule exists (D-A1-3):
-//! queries, flush and compaction all use it.
+//! [`cetra_query::tombstone::covered_predicate`] is the one place the
+//! covered-row rule exists (D-A1-3): queries, flush and compaction all use it.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
 
-use arrow::array::RecordBatch;
-#[cfg(test)]
-use arrow::array::{Array, AsArray};
-#[cfg(test)]
-use arrow::compute::{filter_record_batch, not, prep_null_mask_filter};
-use arrow::datatypes::{DataType, Schema, SchemaRef};
 use cetra_core::ids::{ProjectId, TraceId};
-use cetra_core::schema::{scores, spans, traces};
+#[cfg(test)]
+use cetra_core::schema::spans;
 use chrono::NaiveDate;
-use datafusion::common::ScalarValue;
-use datafusion::error::DataFusionError;
-use datafusion::logical_expr::{ColumnarValue, Operator};
-use datafusion::physical_expr::PhysicalExpr;
-use datafusion::physical_expr::expressions::{BinaryExpr, Column, IsNotNullExpr, Literal, in_list};
 use uuid::Uuid;
 
-use crate::catalog::FileTable;
-use crate::error::QueryError;
+use crate::error::{EngineError, QueryError};
 use crate::memtable::{MemBatch, MemSnapshot, PartitionKey};
 use crate::wal::Table;
 
@@ -74,7 +63,7 @@ pub enum DeletionStatus {
 }
 
 /// A pending deletion as the read path and the jobs use it.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub(crate) struct PendingDeletion {
     pub(crate) id: Uuid,
     pub(crate) seq: u64,
@@ -86,6 +75,21 @@ pub(crate) struct PendingDeletion {
     pub(crate) users: HashSet<String>,
     /// Empty for a `Traces` scope.
     pub(crate) sessions: HashSet<String>,
+}
+
+impl std::fmt::Debug for PendingDeletion {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PendingDeletion")
+            .field("id", &self.id)
+            .field("seq", &self.seq)
+            .field("project", &self.project)
+            .field("cutoff", &self.cutoff)
+            .field("registered_at", &self.registered_at)
+            .field("trace_ids_len", &self.trace_ids.len())
+            .field("users_len", &self.users.len())
+            .field("sessions_len", &self.sessions.len())
+            .finish()
+    }
 }
 
 impl PendingDeletion {
@@ -220,83 +224,6 @@ impl Tombstones {
     }
 }
 
-/// The columns each table's covered-row predicate reads (spec 03 §7).
-pub(crate) fn key_columns(table: FileTable) -> &'static [&'static str] {
-    match table {
-        FileTable::Spans => &[spans::TRACE_ID, spans::USER_ID, spans::INGEST_TIME],
-        FileTable::Scores => &[
-            scores::TRACE_ID,
-            scores::USER_ID,
-            scores::SESSION_ID,
-            scores::INGEST_TIME,
-        ],
-        FileTable::Traces => &[traces::TRACE_ID],
-    }
-}
-
-/// `Some(expr)` that is true for rows covered by any of `deletions`, against
-/// `schema` (the table's stored schema, or a projection of it that holds the
-/// columns the rule reads). `None` when `deletions` is empty.
-///
-/// Per deletion `d`: `ingest_time <= d.cutoff AND (T OR U [OR S])`, where `T` is
-/// `trace_id IS NOT NULL AND trace_id IN …`, `U` the same on `user_id` and `S`
-/// on `session_id` (`scores` only). A partial carries no per-row ingest time,
-/// so [`FileTable::Traces`] gets the trace-id term only (D-A1-3). Every `IN`
-/// term is guarded by `IS NOT NULL`, whatever the column's nullability, so the
-/// expression is never null.
-pub(crate) fn covered_predicate(
-    table: FileTable,
-    schema: &SchemaRef,
-    deletions: &[Arc<PendingDeletion>],
-) -> Result<Option<Arc<dyn PhysicalExpr>>, DataFusionError> {
-    let mut covered: Option<Arc<dyn PhysicalExpr>> = None;
-    for deletion in deletions {
-        let mut terms: Vec<Arc<dyn PhysicalExpr>> = Vec::new();
-        if !deletion.trace_ids.is_empty() {
-            let mut ids: Vec<&[u8; 16]> = deletion.trace_ids.iter().collect();
-            ids.sort_unstable();
-            terms.push(in_term(
-                schema,
-                spans::TRACE_ID,
-                |id| ScalarValue::FixedSizeBinary(16, Some(id.to_vec())),
-                &ids,
-            )?);
-        }
-        if table != FileTable::Traces && !deletion.users.is_empty() {
-            let mut users: Vec<&String> = deletion.users.iter().collect();
-            users.sort_unstable();
-            terms.push(utf8_term(schema, spans::USER_ID, &users)?);
-        }
-        if table == FileTable::Scores && !deletion.sessions.is_empty() {
-            let mut sessions: Vec<&String> = deletion.sessions.iter().collect();
-            sessions.sort_unstable();
-            terms.push(utf8_term(schema, scores::SESSION_ID, &sessions)?);
-        }
-        // A deletion whose terms are all absent for this table covers no row of it.
-        let Some(mut expression) = or_together(terms) else {
-            continue;
-        };
-        if table != FileTable::Traces {
-            let cutoff = Literal::new(ScalarValue::TimestampNanosecond(
-                Some(deletion.cutoff),
-                timestamp_timezone(schema, spans::INGEST_TIME)?,
-            ));
-            let ingest = Arc::new(Column::new(
-                spans::INGEST_TIME,
-                column_index(schema, spans::INGEST_TIME)?,
-            )) as Arc<dyn PhysicalExpr>;
-            let within = Arc::new(BinaryExpr::new(ingest, Operator::LtEq, Arc::new(cutoff)))
-                as Arc<dyn PhysicalExpr>;
-            expression = Arc::new(BinaryExpr::new(within, Operator::And, expression));
-        }
-        covered = Some(match covered {
-            None => expression,
-            Some(existing) => Arc::new(BinaryExpr::new(existing, Operator::Or, expression)),
-        });
-    }
-    Ok(covered)
-}
-
 /// The deletions that may cover rows of a file or batch: those with `seq`
 /// above `applied` (`None` for a memtable batch) and `cutoff` at or after
 /// `min_ingest_time` (spec 03 §7).
@@ -313,33 +240,6 @@ pub(crate) fn applicable(
         })
         .cloned()
         .collect()
-}
-
-/// The rows of `batch` not covered by `predicate`. `batch` holds every column
-/// `predicate` reads.
-///
-/// A null predicate value counts as "not covered": `prep_null_mask_filter`
-/// turns it into `false` before the negation, a second guard behind the
-/// `IS NOT NULL` terms of [`covered_predicate`].
-#[cfg(test)]
-pub(crate) fn drop_covered(
-    batch: &RecordBatch,
-    predicate: &Arc<dyn PhysicalExpr>,
-) -> Result<RecordBatch, DataFusionError> {
-    let covered = predicate.evaluate(batch)?;
-    let covered = covered.into_array(batch.num_rows())?;
-    let covered = covered.as_boolean_opt().ok_or_else(|| {
-        DataFusionError::Internal("the covered-row predicate is not boolean".into())
-    })?;
-    // `prep_null_mask_filter` assumes nulls are present; with the `IS NOT NULL`
-    // guards they are not, and the mask is used as is.
-    let covered = if covered.null_count() > 0 {
-        prep_null_mask_filter(covered)
-    } else {
-        covered.clone()
-    };
-    let keep = not(&covered)?;
-    Ok(filter_record_batch(batch, &keep)?)
 }
 
 /// The rows of `batch` not covered by `predicate`, materialized via [`cetra_column::Batch::compact`].
@@ -392,18 +292,18 @@ pub(crate) fn project_snapshot(
                 batch.batch.schema(),
                 &specs,
             )
-            .map_err(|err| QueryError::DataFusion(crate::error::query_err_to_df(err)))?
+            .map_err(|err| QueryError::Internal(EngineError::from_query(&err)))?
             else {
                 kept.push(batch.clone());
                 continue;
             };
             let filtered = drop_covered_batch(&batch.batch, &predicate)
-                .map_err(|err| QueryError::DataFusion(crate::error::query_err_to_df(err)))?;
+                .map_err(|err| QueryError::Internal(EngineError::from_query(&err)))?;
             if filtered.num_rows() == 0 {
                 continue;
             }
-            let rebuilt = MemBatch::from_batch(table, filtered).map_err(|error| {
-                QueryError::DataFusion(DataFusionError::External(Box::new(error)))
+            let rebuilt = MemBatch::from_batch(table, filtered).map_err(|_| {
+                QueryError::Internal(EngineError::internal("memtable rebuild failed"))
             })?;
             kept.push(rebuilt);
         }
@@ -414,155 +314,15 @@ pub(crate) fn project_snapshot(
     Ok(Arc::new(MemSnapshot { partitions }))
 }
 
-/// `col IS NOT NULL AND col IN (values)`, with the values already sorted.
-fn in_term<T, F>(
-    schema: &SchemaRef,
-    column: &str,
-    literal: F,
-    values: &[T],
-) -> Result<Arc<dyn PhysicalExpr>, DataFusionError>
-where
-    F: Fn(&T) -> ScalarValue,
-{
-    let expr =
-        Arc::new(Column::new(column, column_index(schema, column)?)) as Arc<dyn PhysicalExpr>;
-    let list: Vec<Arc<dyn PhysicalExpr>> = values
-        .iter()
-        .map(|value| Arc::new(Literal::new(literal(value))) as Arc<dyn PhysicalExpr>)
-        .collect();
-    let membership = in_list(Arc::clone(&expr), list, &false, schema.as_ref())?;
-    let guard = Arc::new(IsNotNullExpr::new(Arc::clone(&expr)));
-    Ok(Arc::new(BinaryExpr::new(guard, Operator::And, membership)))
-}
-
-/// [`in_term`] on a `Utf8` column, wrapped in [`Redacted`]: the values are an
-/// erased person's identifiers (`user_id`, `session_id`), so the plan text never
-/// shows them.
-fn utf8_term(
-    schema: &SchemaRef,
-    column: &'static str,
-    values: &[&String],
-) -> Result<Arc<dyn PhysicalExpr>, DataFusionError> {
-    let inner = in_term(
-        schema,
-        column,
-        |value| ScalarValue::Utf8(Some((*value).to_owned())),
-        values,
-    )?;
-    Ok(Arc::new(Redacted {
-        inner,
-        column,
-        count: values.len(),
-    }))
-}
-
-/// A covered-row term whose literals are personal identifiers. It evaluates
-/// exactly as `inner`, but its `Display`, `Debug` and SQL forms print only the
-/// column and the number of values, so a plain `EXPLAIN` in the SQL console
-/// (spec 05, D96) does not reveal who asked to be erased (X17).
-struct Redacted {
-    inner: Arc<dyn PhysicalExpr>,
-    column: &'static str,
-    count: usize,
-}
-
-impl PartialEq for Redacted {
-    fn eq(&self, other: &Self) -> bool {
-        self.column == other.column && self.count == other.count && self.inner.eq(&other.inner)
-    }
-}
-
-impl Eq for Redacted {}
-
-impl std::hash::Hash for Redacted {
-    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
-        self.inner.hash(state);
-        self.column.hash(state);
-        self.count.hash(state);
-    }
-}
-
-impl std::fmt::Display for Redacted {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{} IN (<{} redacted>)", self.column, self.count)
-    }
-}
-
-impl std::fmt::Debug for Redacted {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "Redacted({self})")
-    }
-}
-
-impl PhysicalExpr for Redacted {
-    fn data_type(&self, input_schema: &Schema) -> Result<DataType, DataFusionError> {
-        self.inner.data_type(input_schema)
-    }
-
-    fn nullable(&self, input_schema: &Schema) -> Result<bool, DataFusionError> {
-        self.inner.nullable(input_schema)
-    }
-
-    fn evaluate(&self, batch: &RecordBatch) -> Result<ColumnarValue, DataFusionError> {
-        self.inner.evaluate(batch)
-    }
-
-    fn children(&self) -> Vec<&Arc<dyn PhysicalExpr>> {
-        vec![&self.inner]
-    }
-
-    fn with_new_children(
-        self: Arc<Self>,
-        children: Vec<Arc<dyn PhysicalExpr>>,
-    ) -> Result<Arc<dyn PhysicalExpr>, DataFusionError> {
-        let [inner] = <[Arc<dyn PhysicalExpr>; 1]>::try_from(children).map_err(|children| {
-            DataFusionError::Internal(format!(
-                "a redacted term has one child, got {}",
-                children.len()
-            ))
-        })?;
-        Ok(Arc::new(Self {
-            inner,
-            column: self.column,
-            count: self.count,
-        }))
-    }
-
-    fn fmt_sql(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        std::fmt::Display::fmt(self, f)
-    }
-}
-
-fn or_together(terms: Vec<Arc<dyn PhysicalExpr>>) -> Option<Arc<dyn PhysicalExpr>> {
-    let mut terms = terms.into_iter();
-    let first = terms.next()?;
-    Some(terms.fold(first, |acc, term| {
-        Arc::new(BinaryExpr::new(acc, Operator::Or, term))
-    }))
-}
-
-fn column_index(schema: &SchemaRef, name: &str) -> Result<usize, DataFusionError> {
-    schema.index_of(name).map_err(|_| {
-        // A caller bug: the caller must project the columns the rule reads.
-        DataFusionError::Plan(format!("{name} is missing from the scan schema"))
-    })
-}
-
-/// The timezone of a timestamp column, kept so literals compare equal to it.
-fn timestamp_timezone(schema: &SchemaRef, name: &str) -> Result<Option<Arc<str>>, DataFusionError> {
-    match schema.field(column_index(schema, name)?).data_type() {
-        DataType::Timestamp(_, timezone) => Ok(timezone.clone()),
-        other => Err(DataFusionError::Plan(format!(
-            "{name} is {other}, not a timestamp"
-        ))),
-    }
-}
-
 #[cfg(test)]
 mod tests {
-    use arrow::array::Array;
-    use cetra_core::schema::{scores_schema, spans_schema, traces_schema};
+    use cetra_column::{Batch, CancelToken, Column, ScalarValue, Selection};
+    use cetra_core::schema::{
+        scores_schema as core_scores_schema, spans_schema as core_spans_schema,
+        traces_schema as core_traces_schema,
+    };
     use cetra_core::score::ScoreTarget;
+    use cetra_query::{EvalContext, Expr, TombstoneTable, covered_predicate, eval_expr};
 
     use super::*;
     use crate::test_support::{score_row, score_rows, span_row, span_rows, trace_batch};
@@ -613,20 +373,17 @@ mod tests {
     }
 
     /// The predicate's value for every row of `batch`: `None` is a null.
-    fn values_of(predicate: &Arc<dyn PhysicalExpr>, batch: &RecordBatch) -> Vec<Option<bool>> {
-        let array = predicate
-            .evaluate(batch)
-            .unwrap()
-            .into_array(batch.num_rows())
-            .unwrap();
-        let array = array.as_boolean_opt().unwrap();
-        (0..array.len())
-            .map(|row| {
-                if array.is_null(row) {
-                    None
-                } else {
-                    Some(array.value(row))
-                }
+    fn values_of(predicate: &Expr, batch: &Batch) -> Vec<Option<bool>> {
+        let ctx = EvalContext {
+            now_ns: crate::catalog::now_ns(),
+            cancel: CancelToken::new(),
+        };
+        let col = eval_expr(predicate, batch, &ctx, None).unwrap();
+        (0..batch.num_rows())
+            .map(|row| match col.get_scalar(row).unwrap() {
+                ScalarValue::Null(_) => None,
+                ScalarValue::Bool(b) => Some(b),
+                other => panic!("expected bool or null, got {other:?}"),
             })
             .collect()
     }
@@ -683,14 +440,10 @@ mod tests {
             span_row(1, 1, 20, cutoff + 1),
             span_row(2, 0, 30, cutoff),
         ]);
-        let deletion = scoped(&[1], &[], &[], cutoff);
-        let predicate = covered_predicate(
-            FileTable::Spans,
-            &spans_schema(),
-            std::slice::from_ref(&deletion),
-        )
-        .unwrap()
-        .unwrap();
+        let specs = to_tombstone_specs(&[scoped(&[1], &[], &[], cutoff)]);
+        let predicate = covered_predicate(TombstoneTable::Spans, batch.schema(), &specs)
+            .unwrap()
+            .unwrap();
         assert_eq!(
             values_of(&predicate, &batch),
             vec![Some(true), Some(false), Some(false)]
@@ -703,14 +456,10 @@ mod tests {
         covered.user_id = Some("u".to_owned());
         let plain = span_row(2, 0, 20, 1);
         let batch = span_rows(&[covered, plain]);
-        let deletion = scoped(&[], &["u"], &[], 1_000);
-        let predicate = covered_predicate(
-            FileTable::Spans,
-            &spans_schema(),
-            std::slice::from_ref(&deletion),
-        )
-        .unwrap()
-        .unwrap();
+        let specs = to_tombstone_specs(&[scoped(&[], &["u"], &[], 1_000)]);
+        let predicate = covered_predicate(TombstoneTable::Spans, batch.schema(), &specs)
+            .unwrap()
+            .unwrap();
         // Trace 1 carries the user id, trace 2 does not. The guard keeps the
         // expression false, never null, on the null user id.
         assert_eq!(values_of(&predicate, &batch), vec![Some(true), Some(false)]);
@@ -728,25 +477,17 @@ mod tests {
             session_id: "s".to_owned(),
         };
         let scores_batch = score_rows(&[score]);
-        let deletion = scoped(&[], &["someone-else"], &["s"], 1_000);
+        let specs = to_tombstone_specs(&[scoped(&[], &["someone-else"], &["s"], 1_000)]);
 
-        let on_scores = covered_predicate(
-            FileTable::Scores,
-            &scores_schema(),
-            std::slice::from_ref(&deletion),
-        )
-        .unwrap()
-        .unwrap();
+        let on_scores = covered_predicate(TombstoneTable::Scores, scores_batch.schema(), &specs)
+            .unwrap()
+            .unwrap();
         assert_eq!(values_of(&on_scores, &scores_batch), vec![Some(true)]);
 
         // `session_id` matches `scores` only: both spans stay.
-        let on_spans = covered_predicate(
-            FileTable::Spans,
-            &spans_schema(),
-            std::slice::from_ref(&deletion),
-        )
-        .unwrap()
-        .unwrap();
+        let on_spans = covered_predicate(TombstoneTable::Spans, spans_batch.schema(), &specs)
+            .unwrap()
+            .unwrap();
         assert_eq!(
             values_of(&on_spans, &spans_batch),
             vec![Some(false), Some(false)]
@@ -760,8 +501,9 @@ mod tests {
             span_row(2, 0, 20, 1),
             span_row(3, 0, 30, 1),
         ]);
-        let deletions = [scoped(&[1], &[], &[], 1_000), scoped(&[2], &[], &[], 1_000)];
-        let predicate = covered_predicate(FileTable::Spans, &spans_schema(), &deletions)
+        let specs =
+            to_tombstone_specs(&[scoped(&[1], &[], &[], 1_000), scoped(&[2], &[], &[], 1_000)]);
+        let predicate = covered_predicate(TombstoneTable::Spans, batch.schema(), &specs)
             .unwrap()
             .unwrap();
         assert_eq!(
@@ -772,22 +514,24 @@ mod tests {
 
     #[test]
     fn empty_deletions_build_no_predicate_and_traces_tests_only_the_trace_id() {
+        let spans_schema = core_spans_schema();
         assert!(
-            covered_predicate(FileTable::Spans, &spans_schema(), &[])
+            covered_predicate(TombstoneTable::Spans, &spans_schema, &[])
                 .unwrap()
                 .is_none()
         );
         // A partial carries no per-row ingest time: a row ingested after the
         // cut-off is still covered, and a user scope covers no partial at all.
         let traces = trace_batch(&[span_row(1, 0, 10, 1_000)]);
-        let by_trace = scoped(&[1], &[], &[], 1);
-        let predicate = covered_predicate(FileTable::Traces, &traces_schema(), &[by_trace])
+        let by_trace = to_tombstone_specs(&[scoped(&[1], &[], &[], 1)]);
+        let predicate = covered_predicate(TombstoneTable::Traces, traces.schema(), &by_trace)
             .unwrap()
             .unwrap();
         assert_eq!(values_of(&predicate, &traces), vec![Some(true)]);
-        let by_user = scoped(&[], &["u"], &["s"], 1_000);
+        let by_user = to_tombstone_specs(&[scoped(&[], &["u"], &["s"], 1_000)]);
+        let traces_schema = core_traces_schema();
         assert!(
-            covered_predicate(FileTable::Traces, &traces_schema(), &[by_user])
+            covered_predicate(TombstoneTable::Traces, &traces_schema, &by_user)
                 .unwrap()
                 .is_none()
         );
@@ -800,49 +544,17 @@ mod tests {
             session_id: "s".to_owned(),
         };
         let batch = score_rows(&[score]);
-        let deletion = scoped(&[1], &[], &[], 1_000);
-        let predicate = covered_predicate(
-            FileTable::Scores,
-            &scores_schema(),
-            std::slice::from_ref(&deletion),
-        )
-        .unwrap()
-        .unwrap();
+        let specs = to_tombstone_specs(&[scoped(&[1], &[], &[], 1_000)]);
+        let scores_schema = core_scores_schema();
+        let predicate = covered_predicate(TombstoneTable::Scores, &scores_schema, &specs)
+            .unwrap()
+            .unwrap();
         // A null `trace_id` makes the term false, not null.
         assert_eq!(values_of(&predicate, &batch), vec![Some(false)]);
     }
 
     #[test]
-    fn drop_covered_keeps_the_uncovered_rows() {
-        let batch = span_rows(&[
-            span_row(1, 0, 10, 1),
-            span_row(2, 0, 20, 1),
-            span_row(3, 0, 30, 1_000),
-        ]);
-        let deletion = scoped(&[1, 2], &[], &[], 1);
-        let predicate = covered_predicate(
-            FileTable::Spans,
-            &spans_schema(),
-            std::slice::from_ref(&deletion),
-        )
-        .unwrap()
-        .unwrap();
-        let kept = drop_covered(&batch, &predicate).unwrap();
-        assert_eq!(kept.num_rows(), 1);
-        let trace = kept
-            .column_by_name(spans::TRACE_ID)
-            .unwrap()
-            .as_any()
-            .downcast_ref::<arrow::array::FixedSizeBinaryArray>()
-            .unwrap();
-        assert_eq!(trace.value(0), span_row(3, 0, 0, 0).trace_id.as_bytes());
-    }
-
-    #[test]
     fn drop_covered_batch_keeps_uncovered_rows_and_handles_selection_and_encodings() {
-        use cetra_column::{Batch, Column, ScalarValue, Selection};
-        use cetra_query::{TombstoneTable, covered_predicate as native_covered_predicate};
-
         let mut s1 = span_row(1, 0, 10, 1);
         s1.user_id = Some("alice".to_owned());
         let mut s2 = span_row(2, 0, 20, 1);
@@ -850,8 +562,7 @@ mod tests {
         let mut s3 = span_row(3, 0, 30, 1_000);
         s3.user_id = Some("alice".to_owned());
 
-        let rb = span_rows(&[s1, s2, s3]);
-        let col_batch = crate::column_bridge::record_batch_to_column(&rb).unwrap();
+        let col_batch = span_rows(&[s1, s2, s3]);
 
         let del = scoped(&[1], &["bob"], &[], 1);
         let specs = to_tombstone_specs(std::slice::from_ref(&del));
@@ -859,7 +570,7 @@ mod tests {
         assert_eq!(specs[0].cutoff, 1);
         assert_eq!(specs[0].users, vec!["bob".to_owned()]);
 
-        let pred = native_covered_predicate(TombstoneTable::Spans, col_batch.schema(), &specs)
+        let pred = covered_predicate(TombstoneTable::Spans, col_batch.schema(), &specs)
             .unwrap()
             .unwrap();
         let kept = drop_covered_batch(&col_batch, &pred).unwrap();

@@ -28,8 +28,7 @@ use crate::catalog::{FileMeta, FileTable};
 use crate::compaction::slice::Slice;
 use crate::dedup;
 use crate::error::CompactionError;
-use crate::file_format::BatchFileWriter;
-use crate::parquet::{sort_columns, time_column};
+use crate::file_format::{BatchFileWriter, sort_columns, time_column};
 use crate::partials::partials_from_spans_batch;
 use crate::verify::Suspects;
 
@@ -187,11 +186,8 @@ pub(crate) async fn merge_slice<W: Write + Send + 'static>(
     let scoped_pool = ctx
         .pool
         .try_admit(0, ctx.pool.limit())
-        .ok_or_else(|| CompactionError::from_query(QueryError::TooLarge))?;
-    let workers = ctx
-        .qe_runtime
-        .workers()
-        .map_err(CompactionError::from_query)?;
+        .ok_or_else(|| CompactionError::from(QueryError::TooLarge))?;
+    let workers = ctx.qe_runtime.workers().map_err(CompactionError::from)?;
     let cancel = CancelToken::new();
     let _cancel_guard = super::CancelOnDrop(cancel.clone());
     let eval_ctx = EvalContext {
@@ -223,7 +219,7 @@ pub(crate) async fn merge_slice<W: Write + Send + 'static>(
         );
         let partitions = source
             .open_partitions(&spec, &exec_ctx)
-            .map_err(CompactionError::from_query)?;
+            .map_err(CompactionError::from)?;
         for stream in partitions {
             raw_streams.push((input_index, stream));
         }
@@ -254,7 +250,7 @@ pub(crate) async fn merge_slice<W: Write + Send + 'static>(
         let active_rows = batch
             .selection()
             .to_indices(batch.raw_len())
-            .map_err(|e| CompactionError::from_query(e.into()))?;
+            .map_err(CompactionError::from)?;
         let Some(&first_phys) = active_rows.first() else {
             res.free();
             continue;
@@ -336,7 +332,7 @@ pub(crate) async fn merge_slice<W: Write + Send + 'static>(
                 let active_rows = next_batch
                     .selection()
                     .to_indices(next_batch.raw_len())
-                    .map_err(|e| CompactionError::from_query(e.into()))?;
+                    .map_err(CompactionError::from)?;
                 if let Some(&first_phys) = active_rows.first() {
                     st.key_cols = Arc::clone(&key_cols);
                     st.active_rows = active_rows;
@@ -416,25 +412,23 @@ pub(crate) async fn merge_slice<W: Write + Send + 'static>(
                     split -= 1;
                 }
                 if split > 0 {
-                    let chunk = combined
-                        .slice(0, split)
-                        .map_err(|e| CompactionError::from_query(e.into()))?;
+                    let chunk = combined.slice(0, split).map_err(CompactionError::from)?;
                     let tail = combined
                         .slice(split, combined.num_rows() - split)
-                        .map_err(|e| CompactionError::from_query(e.into()))?;
+                        .map_err(CompactionError::from)?;
                     drop(combined);
                     scratch_res.free();
 
                     let tail_bytes = tail.memory_bytes();
                     pending_res
                         .resize(tail_bytes)
-                        .map_err(|e| CompactionError::from_query(e.into()))?;
+                        .map_err(CompactionError::from)?;
                     pending = Some(tail);
 
                     let chunk_bytes = chunk.memory_bytes();
                     chunk_res
                         .resize(chunk_bytes)
-                        .map_err(|e| CompactionError::from_query(e.into()))?;
+                        .map_err(CompactionError::from)?;
                     let (next_writer, next_partials, written) = emit_chunk(
                         table,
                         drop_deleted,
@@ -459,7 +453,7 @@ pub(crate) async fn merge_slice<W: Write + Send + 'static>(
                     scratch_res = scoped_pool.register("merge_scratch", false);
                     pending_res
                         .resize(pending_bytes)
-                        .map_err(|e| CompactionError::from_query(e.into()))?;
+                        .map_err(CompactionError::from)?;
                     pending = Some(combined);
                 }
             }
@@ -554,7 +548,7 @@ async fn pull_all_initial(
             .collect();
         workers
             .run_scoped(&cancel, tasks)
-            .map_err(CompactionError::from_query)
+            .map_err(CompactionError::from)
     })
     .await
     .map_err(join_error)?
@@ -591,7 +585,7 @@ async fn pull_stream_next(
                     Ok((stream, res, batch_out))
                 }],
             )
-            .map_err(CompactionError::from_query)?;
+            .map_err(CompactionError::from)?;
         out.pop().ok_or(CompactionError::Task)
     })
     .await
@@ -619,23 +613,23 @@ fn gather_batch_rows(
             Ok(flat) => cols.push(Column::Flat(flat)),
             Err(err) => {
                 rollback(res);
-                return Err(CompactionError::from_query(err.into()));
+                return Err(CompactionError::from(err));
             }
         }
     }
     let piece = Batch::try_new_all(Arc::clone(schema), cols, indices.len()).map_err(|err| {
         rollback(res);
-        CompactionError::from_query(err.into())
+        CompactionError::from(err)
     })?;
     let Some(target) = before.checked_add(piece.memory_bytes()) else {
         rollback(res);
-        return Err(CompactionError::from_query(QueryError::TooLarge));
+        return Err(CompactionError::from(QueryError::TooLarge));
     };
     match target.cmp(&res.size()) {
         Ordering::Greater => {
             if let Err(err) = res.try_grow(target - res.size()) {
                 rollback(res);
-                return Err(CompactionError::from_query(err.into()));
+                return Err(CompactionError::from(err));
             }
         }
         Ordering::Less => res.shrink(res.size() - target),
@@ -678,7 +672,7 @@ fn flush_picks(
             }
         };
         let local_idx = u32::try_from(per_stream[slot].1.len())
-            .map_err(|_| CompactionError::from_query(QueryError::TooLarge))?;
+            .map_err(|_| CompactionError::from(QueryError::TooLarge))?;
         per_stream[slot].1.push(phys);
         stream_pos.push((slot, local_idx));
     }
@@ -694,7 +688,7 @@ fn flush_picks(
         bases.push(offset);
         offset = offset.saturating_add(
             u32::try_from(indices.len())
-                .map_err(|_| CompactionError::from_query(QueryError::TooLarge))?,
+                .map_err(|_| CompactionError::from(QueryError::TooLarge))?,
         );
         let sub = gather_batch_rows(schema, batch, &indices, &mut sub_res)?;
         subs.push(sub);
@@ -706,16 +700,16 @@ fn flush_picks(
         .collect();
     let sub_refs: Vec<&Batch> = subs.iter().collect();
     let combined = Batch::concat(Arc::clone(schema), &sub_refs, Some(scratch_res))
-        .map_err(|e| CompactionError::from_query(e.into()))?;
+        .map_err(CompactionError::from)?;
     drop(subs);
     sub_res.free();
 
     let reordered = combined
         .into_with_selection(Selection::Indices(perm))
-        .map_err(|e| CompactionError::from_query(e.into()))?;
+        .map_err(CompactionError::from)?;
     let piece = reordered
         .compact(Some(chunk_res))
-        .map_err(|e| CompactionError::from_query(e.into()))?;
+        .map_err(CompactionError::from)?;
     drop(reordered);
     scratch_res.free();
     picks.clear();
@@ -740,7 +734,7 @@ fn combine_pending_and_pieces(
             refs.push(piece);
         }
         Batch::concat(Arc::clone(schema), &refs, Some(scratch_res))
-            .map_err(|e| CompactionError::from_query(e.into()))?
+            .map_err(CompactionError::from)?
     };
     drop(pending);
     pending_res.free();
@@ -1081,7 +1075,7 @@ async fn emit_chunk<W: Write + Send + 'static>(
             let kept = filter_uncovered(&chunk, predicate, eval_ctx, Some(scratch_res)).map_err(
                 |err| {
                     if matches!(err, QueryError::TooLarge | QueryError::Cancelled) {
-                        CompactionError::from_query(err)
+                        CompactionError::from(err)
                     } else {
                         CompactionError::Deletion {
                             reason: "applying the deletion filter",
@@ -1104,7 +1098,7 @@ async fn emit_chunk<W: Write + Send + 'static>(
             chunk_res.free();
             scratch_res
                 .resize(rows.memory_bytes())
-                .map_err(|e| CompactionError::from_query(e.into()))?;
+                .map_err(CompactionError::from)?;
             let partial = partials_from_spans_batch(&rows)?;
             let written = u64::try_from(rows.num_rows()).unwrap_or(u64::MAX);
             let writer = blocking_write(writer, rows).await?;
@@ -1122,7 +1116,7 @@ async fn emit_chunk<W: Write + Send + 'static>(
             }
             scratch_res
                 .resize(rows.memory_bytes())
-                .map_err(|e| CompactionError::from_query(e.into()))?;
+                .map_err(CompactionError::from)?;
             let written = u64::try_from(rows.num_rows()).unwrap_or(u64::MAX);
             let writer = blocking_write(writer, rows).await?;
             scratch_res.free();
@@ -1154,23 +1148,17 @@ mod tests {
     use std::io::{Read, Seek, SeekFrom};
     use std::sync::Arc;
 
-    use arrow::array::{AsArray, RecordBatch};
-    use arrow::compute::{
-        SortColumn, SortOptions, concat_batches, lexsort_to_indices, take_record_batch,
-    };
-    use cetra_column::Batch;
-    use cetra_core::batch::scores_to_record_batch;
+    use cetra_column::{Batch, ScalarValue, Selection};
+    use cetra_core::batch::scores_to_batch;
     use cetra_core::enums::ScoreSource;
     use cetra_core::ids::ProjectId;
     use cetra_core::schema::{scores, spans, traces};
     use cetra_core::score::{Score, ScoreTarget, ScoreValue};
     use chrono::NaiveDate;
-    use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
     use uuid::Uuid;
 
     use super::{MergeContext, merge_slice};
     use crate::catalog::{FileId, FileMeta, FileTable};
-    use crate::column_bridge::{column_to_record_batch, record_batch_to_column};
     use crate::compaction::slice::{Slice, slices, time_values};
     use crate::config::{
         FlushConfig, MemtableConfig, ObjectStoreUrl, QueryConfig, S3Config, StorageConfig,
@@ -1181,7 +1169,8 @@ mod tests {
     use crate::hooks::Hooks;
     use crate::objects::Objects;
     use crate::partials::partials_from_spans_batch;
-    use crate::test_support::{span_row, span_rows};
+    use crate::reads::columns::{bool_at, i64_at, require_col, string_at, time_at};
+    use crate::test_support::{parquet_rows, span_row, span_rows};
     use crate::verify::may_be_corrupt;
 
     fn project() -> ProjectId {
@@ -1224,12 +1213,8 @@ mod tests {
         )
     }
 
-    async fn write_input(
-        objects: &Arc<Objects>,
-        table: FileTable,
-        rows: RecordBatch,
-    ) -> Arc<FileMeta> {
-        let col_batch = Arc::new(record_batch_to_column(&rows).unwrap());
+    async fn write_input(objects: &Arc<Objects>, table: FileTable, rows: Batch) -> Arc<FileMeta> {
+        let col_batch = Arc::new(rows);
         let written = write_file_batch(table, 0, &[col_batch]).unwrap();
         let file_day = chrono::DateTime::from_timestamp_nanos(written.min_time).date_naive();
         let (path, id) = Objects::table_file_path(table, project(), file_day, 0);
@@ -1263,7 +1248,7 @@ mod tests {
         inputs: &[Arc<FileMeta>],
         slice: Slice,
         drop_deleted: bool,
-    ) -> (RecordBatch, Vec<RecordBatch>) {
+    ) -> (Batch, Vec<Batch>) {
         let sink = tempfile::tempfile().unwrap();
         let writer = BatchFileWriter::new(table, 1, sink, 0).unwrap();
         let merged = merge_slice(ctx, table, inputs, slice, drop_deleted, None, writer)
@@ -1276,76 +1261,77 @@ mod tests {
         file.seek(SeekFrom::Start(0)).unwrap();
         let mut buffer = Vec::new();
         file.read_to_end(&mut buffer).unwrap();
-        let builder = ParquetRecordBatchReaderBuilder::try_new(bytes::Bytes::from(buffer)).unwrap();
-        let schema = Arc::clone(builder.schema());
-        let batches: Vec<RecordBatch> = builder
-            .build()
-            .unwrap()
-            .map(|batch| batch.unwrap())
-            .collect();
-        let arrow_partials: Vec<RecordBatch> = merged
-            .partials
-            .iter()
-            .map(|p| {
-                column_to_record_batch(p, Some(cetra_core::schema::traces_schema().as_ref()))
-                    .unwrap()
-            })
-            .collect();
-        (concat_batches(&schema, &batches).unwrap(), arrow_partials)
+        (
+            parquet_rows(bytes::Bytes::from(buffer)),
+            merged
+                .partials
+                .into_iter()
+                .map(Arc::unwrap_or_clone)
+                .collect(),
+        )
     }
 
     /// `(trace_id, span_id, start_time, ingest_time)` of every row.
-    fn span_tuples(batch: &RecordBatch) -> Vec<(Vec<u8>, Vec<u8>, i64, i64)> {
-        let ids = batch
-            .column_by_name(spans::TRACE_ID)
-            .unwrap()
-            .as_fixed_size_binary();
-        let span_ids = batch
-            .column_by_name(spans::SPAN_ID)
-            .unwrap()
-            .as_fixed_size_binary();
-        let starts = batch
-            .column_by_name(spans::START_TIME)
-            .unwrap()
-            .as_primitive::<arrow::datatypes::TimestampNanosecondType>();
-        let ingests = batch
-            .column_by_name(spans::INGEST_TIME)
-            .unwrap()
-            .as_primitive::<arrow::datatypes::TimestampNanosecondType>();
+    fn span_tuples(batch: &Batch) -> Vec<(Vec<u8>, Vec<u8>, i64, i64)> {
+        let ids = require_col(batch, spans::TRACE_ID).unwrap();
+        let span_ids = require_col(batch, spans::SPAN_ID).unwrap();
+        let starts = require_col(batch, spans::START_TIME).unwrap();
+        let ingests = require_col(batch, spans::INGEST_TIME).unwrap();
         (0..batch.num_rows())
             .map(|row| {
+                let tid = match ids.get_scalar(row).unwrap() {
+                    ScalarValue::FixedBytes16(b) => b.to_vec(),
+                    other => panic!("unexpected trace_id: {other:?}"),
+                };
+                let sid = match span_ids.get_scalar(row).unwrap() {
+                    ScalarValue::FixedBytes8(b) => b.to_vec(),
+                    other => panic!("unexpected span_id: {other:?}"),
+                };
                 (
-                    ids.value(row).to_vec(),
-                    span_ids.value(row).to_vec(),
-                    starts.value(row),
-                    ingests.value(row),
+                    tid,
+                    sid,
+                    time_at(batch, starts, row).unwrap(),
+                    time_at(batch, ingests, row).unwrap(),
                 )
             })
             .collect()
     }
 
     /// Sorts `batch` by `trace_id` alone, the order partials are compared in.
-    fn sorted_by_trace(batch: &RecordBatch) -> RecordBatch {
-        let key = SortColumn {
-            values: Arc::clone(batch.column_by_name(traces::TRACE_ID).unwrap()),
-            options: Some(SortOptions {
-                descending: false,
-                nulls_first: false,
-            }),
-        };
-        let indices = lexsort_to_indices(&[key], None).unwrap();
-        take_record_batch(batch, &indices).unwrap()
+    fn sorted_by_trace(batch: &Batch) -> Batch {
+        let tid_col = batch.column_by_name(traces::TRACE_ID).unwrap();
+        let mut keyed: Vec<([u8; 16], u32)> = (0..batch.num_rows())
+            .map(|row| {
+                let bytes = match tid_col.get_scalar(row).unwrap() {
+                    ScalarValue::FixedBytes16(b) => b,
+                    other => panic!("unexpected trace_id: {other:?}"),
+                };
+                (bytes, u32::try_from(row).unwrap())
+            })
+            .collect();
+        keyed.sort_by_key(|(bytes, _)| *bytes);
+        let indices: Vec<u32> = keyed.into_iter().map(|(_, idx)| idx).collect();
+        batch
+            .clone()
+            .into_with_selection(Selection::Indices(indices))
+            .unwrap()
+            .compact(None)
+            .unwrap()
     }
 
-    fn assert_columns_equal(actual: &RecordBatch, expected: &RecordBatch) {
+    fn assert_columns_equal(actual: &Batch, expected: &Batch) {
         assert_eq!(actual.num_rows(), expected.num_rows());
         for field in expected.schema().fields() {
-            let name = field.name();
-            assert_eq!(
-                actual.column_by_name(name),
-                expected.column_by_name(name),
-                "{name}"
-            );
+            let name = field.name.as_str();
+            let a_col = actual.column_by_name(name).unwrap();
+            let e_col = expected.column_by_name(name).unwrap();
+            for row in 0..expected.num_rows() {
+                assert_eq!(
+                    a_col.get_scalar(row).unwrap(),
+                    e_col.get_scalar(row).unwrap(),
+                    "{name} row {row}"
+                );
+            }
         }
     }
 
@@ -1388,7 +1374,7 @@ mod tests {
 
     /// `rows` spans of trace block `block`, each with `len` bytes of
     /// incompressible printable input (SplitMix64, as `big_span_batch`).
-    fn big_spans(block: u16, rows: u16, len: usize) -> RecordBatch {
+    fn big_spans(block: u16, rows: u16, len: usize) -> Batch {
         let mut state = 0x5eed_u64.wrapping_add(u64::from(block));
         let spans: Vec<_> = (0..rows)
             .map(|row| {
@@ -1580,17 +1566,11 @@ mod tests {
         assert_eq!(a_one.3, 20, "the newer duplicate of A/1 wins");
 
         // The partials of all chunks equal the partials of the whole output.
-        let combined = concat_batches(&partials[0].schema(), &partials).unwrap();
+        let refs: Vec<&Batch> = partials.iter().collect();
+        let combined = Batch::concat(Arc::clone(partials[0].schema()), &refs, None).unwrap();
         let actual = sorted_by_trace(&combined);
-        let out_col = Arc::new(record_batch_to_column(&output).unwrap());
-        let expected_col: Batch = partials_from_spans_batch(&out_col).unwrap();
-        let expected = sorted_by_trace(
-            &column_to_record_batch(
-                &expected_col,
-                Some(cetra_core::schema::traces_schema().as_ref()),
-            )
-            .unwrap(),
-        );
+        let expected_col = partials_from_spans_batch(&output).unwrap();
+        let expected = sorted_by_trace(&expected_col);
         assert_columns_equal(&actual, &expected);
         assert_eq!(actual.num_rows(), 2, "one partial per trace");
     }
@@ -1621,11 +1601,11 @@ mod tests {
         let (output, _) =
             merge_read(&ctx, FileTable::Spans, &reversed_inputs, open_slice(), true).await;
         assert_eq!(output.num_rows(), 1);
-        let names = output
-            .column_by_name(spans::NAME)
-            .unwrap()
-            .as_string::<i32>();
-        assert_eq!(names.value(0), "newer-uuidv7");
+        let names = require_col(&output, spans::NAME).unwrap();
+        assert_eq!(
+            string_at(&output, names, 0).unwrap().as_deref(),
+            Some("newer-uuidv7")
+        );
 
         // Also check distinct spans sharing `(trace_id, start_time)` across two files:
         // rows from the older file (`input_index = 0`) must precede rows from the newer
@@ -1696,13 +1676,17 @@ mod tests {
         // Trace B has spans on both sides of the boundary, so each slice's
         // partials hold one row for it.
         for partials in [&first_partials, &second_partials] {
-            let combined = concat_batches(&partials[0].schema(), partials).unwrap();
+            let refs: Vec<&Batch> = partials.iter().collect();
+            let combined = Batch::concat(Arc::clone(partials[0].schema()), &refs, None).unwrap();
             let sorted = sorted_by_trace(&combined);
             let ids = sorted.column_by_name(traces::TRACE_ID).unwrap();
-            let trace_b = ids.as_fixed_size_binary();
+            let expected = trace_bytes(1);
             assert_eq!(
                 (0..sorted.num_rows())
-                    .filter(|row| trace_b.value(*row) == trace_bytes(1).as_slice())
+                    .filter(|row| matches!(
+                        ids.get_scalar(*row).unwrap(),
+                        ScalarValue::FixedBytes16(b) if b == expected.as_slice()
+                    ))
                     .count(),
                 1
             );
@@ -1771,11 +1755,8 @@ mod tests {
         assert_eq!(partials.len(), 1, "one partial batch for one group");
         let partial = &partials[0];
         assert_eq!(partial.num_rows(), 1);
-        let counts = partial
-            .column_by_name(traces::SPAN_COUNT)
-            .unwrap()
-            .as_primitive::<arrow::datatypes::Int64Type>();
-        assert_eq!(counts.value(0), 7);
+        let counts_col = require_col(partial, traces::SPAN_COUNT).unwrap();
+        assert_eq!(i64_at(partial, counts_col, 0).unwrap(), 7);
     }
 
     #[tokio::test]
@@ -1814,10 +1795,8 @@ mod tests {
             .iter()
             .map(|p| {
                 assert_eq!(p.num_rows(), 1);
-                p.column_by_name(traces::SPAN_COUNT)
-                    .unwrap()
-                    .as_primitive::<arrow::datatypes::Int64Type>()
-                    .value(0)
+                let col = require_col(p, traces::SPAN_COUNT).unwrap();
+                i64_at(p, col, 0).unwrap()
             })
             .collect();
         assert_eq!(counts, vec![2, 5]);
@@ -1862,14 +1841,13 @@ mod tests {
     async fn three_score_inputs(objects: &Arc<Objects>) -> Vec<Arc<FileMeta>> {
         let s = Uuid::from_u128(0x11);
         let t = Uuid::from_u128(0x22);
-        let one = scores_to_record_batch(&[
+        let one = scores_to_batch(&[
             score_version(s, 1000, 1, 100, false, "s-v1"),
             score_version(t, 2000, 5, 500, false, "t"),
         ])
         .unwrap();
-        let two = scores_to_record_batch(&[score_version(s, 1000, 3, 300, true, "s-v3")]).unwrap();
-        let three =
-            scores_to_record_batch(&[score_version(s, 1000, 2, 200, false, "s-v2")]).unwrap();
+        let two = scores_to_batch(&[score_version(s, 1000, 3, 300, true, "s-v3")]).unwrap();
+        let three = scores_to_batch(&[score_version(s, 1000, 2, 200, false, "s-v2")]).unwrap();
         vec![
             write_input(objects, FileTable::Scores, one).await,
             write_input(objects, FileTable::Scores, two).await,
@@ -1877,27 +1855,18 @@ mod tests {
         ]
     }
 
-    fn score_tuples(batch: &RecordBatch) -> Vec<(String, i64, bool, String)> {
-        let ids = batch
-            .column_by_name(scores::SCORE_ID)
-            .unwrap()
-            .as_string::<i32>();
-        let updated = batch
-            .column_by_name(scores::UPDATED_AT)
-            .unwrap()
-            .as_primitive::<arrow::datatypes::TimestampNanosecondType>();
-        let deleted = batch.column_by_name(scores::DELETED).unwrap().as_boolean();
-        let names = batch
-            .column_by_name(scores::NAME)
-            .unwrap()
-            .as_string::<i32>();
+    fn score_tuples(batch: &Batch) -> Vec<(String, i64, bool, String)> {
+        let ids = require_col(batch, scores::SCORE_ID).unwrap();
+        let updated = require_col(batch, scores::UPDATED_AT).unwrap();
+        let deleted = require_col(batch, scores::DELETED).unwrap();
+        let names = require_col(batch, scores::NAME).unwrap();
         (0..batch.num_rows())
             .map(|row| {
                 (
-                    ids.value(row).to_owned(),
-                    updated.value(row),
-                    deleted.value(row),
-                    names.value(row).to_owned(),
+                    string_at(batch, ids, row).unwrap().unwrap(),
+                    time_at(batch, updated, row).unwrap(),
+                    bool_at(batch, deleted, row).unwrap().unwrap(),
+                    string_at(batch, names, row).unwrap().unwrap(),
                 )
             })
             .collect()

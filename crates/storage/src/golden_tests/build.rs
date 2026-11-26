@@ -27,7 +27,7 @@ use crate::config::{
     WalConfig, WalSync,
 };
 use crate::deletion::{Deletion, DeletionScope};
-use crate::disk::{Disk, test_spill};
+use crate::disk::Disk;
 use crate::read_cache::ReadCache;
 use crate::test_support::{clean_life, crashed_life, score_row, score_rows, span_row, span_rows};
 use crate::wal::Table;
@@ -778,10 +778,7 @@ fn assert_wal_tail(dir: &Path) {
 /// Step 7: the read cache entry of the golden directory, one 4 KiB object of the byte pattern
 /// `i % 251`, written through the cache's own API.
 fn write_cache_entry(dir: &Path) {
-    let spill = tempfile::tempdir().expect("a temp dir for the spill directory");
-    let disk = Arc::new(
-        Disk::open(vec![dir.to_path_buf()], 0, test_spill(spill.path())).expect("open the disk"),
-    );
+    let disk = Arc::new(Disk::open(vec![dir.to_path_buf()], 0).expect("open the disk"));
     let cache = ReadCache::open(dir.join("cache"), 1 << 30, disk, 0).expect("open the read cache");
     cache
         .set_size(CACHE_NAME, CACHE_SIZE)

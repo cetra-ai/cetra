@@ -1089,12 +1089,10 @@ dependencies = [
 name = "cetra-core"
 version = "0.1.0-rc.2"
 dependencies = [
- "arrow",
- "bytes",
+ "cetra-column",
  "chrono",
  "hex",
  "insta",
- "parquet",
  "serde",
  "serde_json",
  "strum",
@@ -1292,8 +1290,6 @@ dependencies = [
  "cetra-query",
  "chrono",
  "crc32c",
- "datafusion",
- "datafusion-datasource",
  "flate2",
  "futures",
  "hex",

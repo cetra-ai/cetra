@@ -121,6 +121,7 @@ impl MetadataCache {
     }
 
     /// Removes `id` from the cache if present.
+    #[cfg(test)]
     pub(crate) fn invalidate(&self, id: FileId) {
         let mut state = self.lock();
         state.remove_entry(id);
@@ -132,11 +133,13 @@ impl MetadataCache {
     }
 
     /// Total cache hits.
+    #[cfg(test)]
     pub(crate) fn hits(&self) -> u64 {
         self.hits.load(Ordering::Relaxed)
     }
 
     /// Total cache misses.
+    #[cfg(test)]
     pub(crate) fn misses(&self) -> u64 {
         self.misses.load(Ordering::Relaxed)
     }

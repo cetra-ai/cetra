@@ -224,6 +224,7 @@ pub struct ExternalSort {
     ctx: ExecContext,
     buffered: Vec<BufferedBatch>,
     buffered_rows: usize,
+    max_batch_bytes: usize,
     runs: Vec<SpillFile>,
     res: Reservation,
 }
@@ -236,6 +237,7 @@ impl fmt::Debug for ExternalSort {
             .field("limit", &self.limit)
             .field("max_merge_way", &self.max_merge_way)
             .field("buffered_rows", &self.buffered_rows)
+            .field("max_batch_bytes", &self.max_batch_bytes)
             .field("runs", &self.runs.len())
             .field("reserved_bytes", &self.res.size())
             .finish()
@@ -259,6 +261,7 @@ impl ExternalSort {
             ctx,
             buffered: Vec::new(),
             buffered_rows: 0,
+            max_batch_bytes: 0,
             runs: Vec::new(),
             res,
         }
@@ -586,16 +589,36 @@ impl PushSink for ExternalSort {
             .into());
         }
 
+        self.max_batch_bytes = self.max_batch_bytes.max(batch.memory_bytes());
         match self.try_buffer_batch(&batch) {
-            Ok(()) => Ok(ControlFlow::Continue),
+            Ok(()) => {}
             Err(QueryError::TooLarge) if self.buffered_rows > 0 => {
                 self.spill_buffered()?;
                 // Buffered rows are now 0; never loop if this batch still exceeds memory.
                 self.try_buffer_batch(&batch)?;
-                Ok(ControlFlow::Continue)
             }
-            Err(err) => Err(err),
+            Err(err) => return Err(err),
         }
+        // Leave enough pool headroom after `consume` returns: an upstream `OpStream`
+        // (source pull + operator scratch + output queue) can transiently hold ~3x one batch
+        // across unspillable reservations before releasing them.
+        let cap = self.ctx.pool.cap();
+        if self.buffered_rows > 0
+            && (self
+                .res
+                .size()
+                .saturating_add(self.max_batch_bytes.saturating_mul(3))
+                > cap
+                || self
+                    .ctx
+                    .pool
+                    .reserved()
+                    .saturating_add(self.max_batch_bytes)
+                    > cap)
+        {
+            self.spill_buffered()?;
+        }
+        Ok(ControlFlow::Continue)
     }
 }
 
@@ -3808,5 +3831,142 @@ mod tests {
                 .err()
                 .expect("mismatched sink keys must fail");
         assert!(matches!(err_k, QueryError::Invalid(_)), "got {err_k:?}");
+    }
+
+    #[test]
+    fn external_sort_and_window_proactively_spill_with_wide_batches_and_scan_res() {
+        let dir = tempfile::tempdir().unwrap();
+        // 32 MiB pool cap with ~4.7 MiB batches (~42 MiB total) so unspilled accumulation
+        // without proactive headroom would exhaust `cap` on `scan_res` at `spilled == 0`.
+        let ctx = test_ctx(dir.path(), 32 * 1024 * 1024, 256 * 1024 * 1024);
+        let schema = Schema::try_new_arc(vec![
+            Field::new("part", DataType::I64, false),
+            Field::new("id", DataType::I64, false),
+            Field::new("payload", DataType::Utf8, false),
+        ])
+        .unwrap();
+
+        let rows_per_batch = 4600_usize;
+        let num_batches = 9_usize;
+        let payload = "p".repeat(1024);
+        let mut batches = Vec::with_capacity(num_batches);
+        for b in 0..num_batches {
+            let parts = vec![i64::try_from(b).unwrap(); rows_per_batch];
+            let ids: Vec<i64> = (0..rows_per_batch)
+                .map(|r| i64::try_from(rows_per_batch - r).unwrap())
+                .collect();
+            let payloads = vec![payload.as_str(); rows_per_batch];
+            batches.push(
+                Batch::try_new_all(
+                    Arc::clone(&schema),
+                    vec![
+                        Column::Flat(FlatColumn::try_new(FlatData::I64(parts), None).unwrap()),
+                        Column::Flat(FlatColumn::try_new(FlatData::I64(ids), None).unwrap()),
+                        Column::Flat(
+                            FlatColumn::try_new(
+                                FlatData::Utf8(Utf8Data::try_from_slices(payloads).unwrap()),
+                                None,
+                            )
+                            .unwrap(),
+                        ),
+                    ],
+                    rows_per_batch,
+                )
+                .unwrap(),
+            );
+        }
+
+        // 1. Direct ExternalSort with a concurrent unspillable `scan_res` held during `consume`.
+        let mut single_ctx = ctx;
+        single_ctx.target_partitions = 1;
+        let keys = vec![
+            SortKey {
+                expr: col_expr(0, "part", DataType::I64),
+                descending: false,
+                nulls_first: false,
+            },
+            SortKey {
+                expr: col_expr(2, "payload", DataType::Utf8),
+                descending: false,
+                nulls_first: false,
+            },
+            SortKey {
+                expr: col_expr(1, "id", DataType::I64),
+                descending: false,
+                nulls_first: false,
+            },
+        ];
+        let src = BatchSource::new(Arc::clone(&schema), batches.clone()).unwrap();
+        let mut scan_stream = src
+            .open_partitions(&ScanSpec::default(), &single_ctx)
+            .unwrap()
+            .remove(0);
+        let mut sort = ExternalSort::new(Arc::clone(&schema), keys, None, single_ctx.clone());
+        let mut scan_res = single_ctx.pool.register("scan_res", false);
+        while let Some(batch) = scan_stream
+            .next_batch(&single_ctx.eval.cancel, Some(&mut scan_res))
+            .unwrap()
+        {
+            assert_eq!(sort.consume(batch).unwrap(), ControlFlow::Continue);
+            scan_res.free();
+        }
+        drop(scan_res);
+        drop(scan_stream);
+        assert!(
+            sort.spilled_run_count() > 0,
+            "expected proactive spill before scan_res exceeded 32 MiB cap"
+        );
+        let mut sorted = sort.into_stream().unwrap();
+        let sorted_out = drain_stream(sorted.as_mut(), &single_ctx).unwrap();
+        drop(sorted);
+        assert_eq!(
+            sorted_out.iter().map(Batch::num_rows).sum::<usize>(),
+            num_batches * rows_per_batch
+        );
+        assert_eq!(single_ctx.spill.spilled_bytes(), 0);
+        assert_eq!(single_ctx.pool.reserved(), 0);
+
+        // 2. End-to-end WindowStream (`PARTITION BY part ORDER BY payload, id`) over BatchSource.
+        let win_src = BatchSource::new(Arc::clone(&schema), batches).unwrap();
+        let win_in = win_src
+            .open_partitions(&ScanSpec::default(), &single_ctx)
+            .unwrap()
+            .remove(0);
+        let p_by = vec![col_expr(0, "part", DataType::I64)];
+        let o_by = vec![
+            SortKey {
+                expr: col_expr(2, "payload", DataType::Utf8),
+                descending: false,
+                nulls_first: false,
+            },
+            SortKey {
+                expr: col_expr(1, "id", DataType::I64),
+                descending: false,
+                nulls_first: false,
+            },
+        ];
+        let mut win = eval_window_group(
+            win_in,
+            Arc::clone(&schema),
+            p_by.clone(),
+            o_by.clone(),
+            vec![WindowSpec {
+                partition_by: p_by,
+                order_by: o_by,
+                frame: None,
+                func: WindowFunc::RowNumber,
+                output_name: "rn".to_owned(),
+            }],
+            &single_ctx,
+        )
+        .unwrap();
+        let win_out = drain_stream(win.as_mut(), &single_ctx).unwrap();
+        drop(win);
+        assert_eq!(
+            win_out.iter().map(Batch::num_rows).sum::<usize>(),
+            num_batches * rows_per_batch
+        );
+        assert_eq!(single_ctx.spill.spilled_bytes(), 0);
+        assert_eq!(single_ctx.pool.reserved(), 0);
     }
 }

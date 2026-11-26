@@ -77,13 +77,8 @@ async fn scalar(storage: &Storage, which: ProjectId, sql: &str) -> i64 {
         .await
         .unwrap();
     let ctx = QueryContext::new(query, None).unwrap();
-    let batches = rows(&ctx, sql).await;
-    let column = batches[0]
-        .column(0)
-        .as_any()
-        .downcast_ref::<arrow::array::Int64Array>()
-        .unwrap();
-    column.value(0)
+    let result = rows(&ctx, sql).await;
+    result[0].values().next().unwrap().as_i64().unwrap()
 }
 
 /// The `projects.state` of `which`.
@@ -154,7 +149,7 @@ async fn scope_counts(dir: &Path, id: Uuid) -> (i64, i64, i64) {
 /// blob: one `spans`, one `traces` and one `scores` file per project after the
 /// shutdown flush and the reopen.
 /// One span of `which`, as an appendable batch.
-fn span_batch(which: ProjectId, trace: u16, time: i64) -> arrow::array::RecordBatch {
+fn span_batch(which: ProjectId, trace: u16, time: i64) -> cetra_column::Batch {
     let mut span = span_row(trace, 0, time, time);
     span.project_id = which;
     span_rows(&[span])
@@ -167,7 +162,7 @@ fn score_batch(
     trace: u16,
     time: i64,
     name: &str,
-) -> arrow::array::RecordBatch {
+) -> cetra_column::Batch {
     let mut score = score_row(score_id, trace, time, time, time, false, name);
     score.project_id = which;
     score_rows(&[score])

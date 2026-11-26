@@ -966,7 +966,6 @@ mod tests {
     use cetra_core::schema::spans::START_TIME;
 
     use super::*;
-    use crate::column_bridge::record_batch_to_column;
     use crate::config::WalSync;
     use crate::hooks::HookPoint;
     use crate::read_state::{Published, ReadState};
@@ -1033,13 +1032,13 @@ mod tests {
     }
 
     async fn append_at(handle: &WalWriterHandle, start: i64) -> Result<AppendReceipt, AppendError> {
-        let batch = record_batch_to_column(&spans_at(&[start])).unwrap();
+        let batch = spans_at(&[start]);
         let bytes = batch.memory_bytes();
         handle.append(project(), batch, bytes).await
     }
 
     fn batch_bytes() -> u64 {
-        let batch = record_batch_to_column(&spans_at(&[0])).unwrap();
+        let batch = spans_at(&[0]);
         u64::try_from(batch.memory_bytes()).unwrap()
     }
 
@@ -1385,7 +1384,7 @@ mod tests {
         if state.failed() {
             return Err(AppendError::WalFailed);
         }
-        let batch = record_batch_to_column(&spans_at(&[start])).unwrap();
+        let batch = spans_at(&[start]);
         let bytes = batch.memory_bytes();
         let (ack, rx) = oneshot::channel();
         tx.send(AppendRequest {

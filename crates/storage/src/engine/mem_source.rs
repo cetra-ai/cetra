@@ -308,7 +308,6 @@ mod tests {
     use uuid::Uuid;
 
     use super::*;
-    use crate::column_bridge::record_batch_to_column;
     use crate::engine::DAY_NS;
     use crate::memtable::Memtable;
     use crate::test_support::{span_row, span_rows};
@@ -352,18 +351,9 @@ mod tests {
         let mut s_other_proj = span_row(4, 0, 2 * DAY_NS + 300, 1_000);
         s_other_proj.project_id = p2;
 
-        mt.insert(
-            p1,
-            record_batch_to_column(&span_rows(&[s_old, s_keep, s_erased])).unwrap(),
-            1,
-        )
-        .unwrap();
-        mt.insert(
-            p2,
-            record_batch_to_column(&span_rows(&[s_other_proj])).unwrap(),
-            2,
-        )
-        .unwrap();
+        mt.insert(p1, span_rows(&[s_old, s_keep, s_erased]), 1)
+            .unwrap();
+        mt.insert(p2, span_rows(&[s_other_proj]), 2).unwrap();
         let snapshot = mt.snapshot();
 
         let keep_from = NaiveDate::from_ymd_opt(1970, 1, 2).unwrap();
@@ -451,12 +441,9 @@ mod tests {
         s3.project_id = p2;
         s3.user_id = Some("secret-other-user".to_owned());
 
-        mt.insert(p1, record_batch_to_column(&span_rows(&[s1])).unwrap(), 1)
-            .unwrap();
-        mt.insert(p1, record_batch_to_column(&span_rows(&[s2])).unwrap(), 2)
-            .unwrap();
-        mt.insert(p2, record_batch_to_column(&span_rows(&[s3])).unwrap(), 3)
-            .unwrap();
+        mt.insert(p1, span_rows(&[s1]), 1).unwrap();
+        mt.insert(p1, span_rows(&[s2]), 2).unwrap();
+        mt.insert(p2, span_rows(&[s3]), 3).unwrap();
         let snapshot = mt.snapshot();
 
         let deletion = Arc::new(PendingDeletion {

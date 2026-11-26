@@ -44,7 +44,7 @@ use parquet::schema::types::{ColumnDescPtr, SchemaDescriptor, Type as SchemaType
 
 use crate::catalog::{FileId, FileMeta, FileTable};
 use crate::deletion::{PendingDeletion, applicable};
-use crate::parquet::footer_size_from_tail;
+use crate::file_format::footer_size_from_tail;
 use crate::unwind::guard_sync;
 use crate::verify::Suspects;
 
@@ -4924,17 +4924,17 @@ impl PartitionStream for ParquetPartitionStream {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
     use arrow::array::Array;
     use arrow::record_batch::RecordBatch;
     use async_trait::async_trait;
-    use cetra_column::{Column, DataType, Field, GlobalPool, ScalarValue, Schema};
+    use cetra_column::{Batch, Column, DataType, Field, GlobalPool, ScalarValue, Schema};
     use cetra_core::enums::{Convention, SpanStatus};
     use cetra_core::ids::{SpanId, TraceId};
-    use cetra_core::schema::spans;
+    use cetra_core::schema::{scores_schema, spans, spans_schema, traces_schema};
     use cetra_core::span::{SpanEvent, SpanLink};
     use cetra_query::exec::{
         CollectSink, ExecContext, ExecMetrics, IdLookupHint, ScanSource, ScanSpec, SpillManager,
@@ -4954,11 +4954,81 @@ mod tests {
 
     use super::*;
     use crate::catalog::{FileId, FileMeta, FileTable};
-    use crate::column_bridge::arrow_schema_to_column;
     use crate::engine::day_start_ns;
-    use crate::parquet::write_file;
+    use crate::file_format::{footer_size_from_tail, write_file_batch};
     use crate::test_support::{score_row, score_rows, span_row, span_rows, trace_batch};
     use crate::verify::{Suspects, VerifyQueue};
+
+    /// Reads one stored Parquet object (`spans`, `traces`, or `scores`) into a single `Batch`.
+    pub(crate) fn read_stored_parquet(
+        bytes: Bytes,
+        table: FileTable,
+        schema: Arc<Schema>,
+    ) -> Batch {
+        std::thread::spawn(move || {
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("rt");
+            let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+            let size = bytes.len() as u64;
+            let meta = parquet::file::metadata::ParquetMetaDataReader::new()
+                .parse_and_finish(&bytes)
+                .ok();
+            let num_rows = meta
+                .as_ref()
+                .map(|m| u64::try_from(m.file_metadata().num_rows()).unwrap_or(0))
+                .unwrap_or(1);
+            let footer_size = if bytes.len() >= 8 {
+                let tail: [u8; 8] = bytes[bytes.len() - 8..].try_into().expect("tail");
+                footer_size_from_tail(&tail, size).unwrap_or(8)
+            } else {
+                8
+            };
+            rt.block_on(store.put(&ObjectPath::from("test.parquet"), PutPayload::from(bytes)))
+                .expect("put");
+            let fm = Arc::new(FileMeta {
+                id: FileId::new_v7(),
+                table,
+                project: "018f6b4e-7c1a-7c1a-8c1a-000000000001"
+                    .parse()
+                    .expect("project"),
+                day: NaiveDate::from_ymd_opt(2026, 1, 1).expect("day"),
+                level: 0,
+                path: "test.parquet".to_owned(),
+                size,
+                footer_size: footer_size.max(8),
+                rows: num_rows,
+                min_time: i64::MIN,
+                max_time: i64::MAX,
+                min_ingest_time: i64::MIN,
+                max_ingest_time: i64::MAX,
+                fully_merged: false,
+                deletions_applied_seq: 0,
+            });
+            let cache = Arc::new(MetadataCache::new(1024 * 1024));
+            let suspects = Suspects::new(Arc::new(VerifyQueue::default()));
+            let source = ParquetSource::new(
+                store,
+                table,
+                Arc::clone(&schema),
+                vec![fm],
+                Arc::from([]),
+                cache,
+                suspects,
+                rt.handle().clone(),
+            );
+            let exec = test_ctx(512 * 1024 * 1024);
+            let batches = drain_on_workers(&source, &ScanSpec::default(), &exec).expect("scan");
+            if batches.is_empty() {
+                return Batch::empty(schema);
+            }
+            let refs: Vec<&Batch> = batches.iter().collect();
+            Batch::concat(schema, &refs, None).expect("concat")
+        })
+        .join()
+        .expect("parquet reader thread")
+    }
 
     #[derive(Debug)]
     struct CountingStore {
@@ -5119,12 +5189,12 @@ mod tests {
         file_id: FileId,
         table: FileTable,
         day: NaiveDate,
-        batch: RecordBatch,
+        batch: Batch,
     ) -> Arc<FileMeta> {
         let project: cetra_core::ids::ProjectId = "018f6b4e-7c1a-7c1a-8c1a-000000000001"
             .parse()
             .expect("project");
-        let written = write_file(table, 0, &[Arc::new(batch)]).expect("write_file");
+        let written = write_file_batch(table, 0, &[Arc::new(batch)]).expect("write_file");
         let size = written.bytes.len() as u64;
         let obj_path = ObjectPath::from(path);
         rt.block_on(store.put(&obj_path, PutPayload::from(written.bytes)))
@@ -5190,8 +5260,7 @@ mod tests {
 
         let trace1_bytes = *s1.trace_id.as_bytes();
         let span_rb = span_rows(&[s1.clone(), s2.clone()]);
-        let span_schema =
-            Arc::new(arrow_schema_to_column(&span_rb.schema()).expect("convert span schema"));
+        let span_schema = spans_schema();
         let span_file = write_parquet_into_store(
             &rt,
             &obj_store,
@@ -5358,8 +5427,7 @@ mod tests {
 
         // 3. Traces & Scores tables also decode cleanly.
         let trace_rb = trace_batch(&[s1, s2]);
-        let trace_schema =
-            Arc::new(arrow_schema_to_column(&trace_rb.schema()).expect("trace schema"));
+        let trace_schema = traces_schema();
         let trace_file = write_parquet_into_store(
             &rt,
             &obj_store,
@@ -5393,8 +5461,7 @@ mod tests {
             "accuracy",
         );
         let score_rb = score_rows(&[sc]);
-        let score_schema =
-            Arc::new(arrow_schema_to_column(&score_rb.schema()).expect("score schema"));
+        let score_schema = scores_schema();
         let score_file = write_parquet_into_store(
             &rt,
             &obj_store,
@@ -5643,8 +5710,8 @@ mod tests {
         }
         let dict_rb = RecordBatch::try_new(Arc::clone(&dict_schema), vec![Arc::new(sb.finish())])
             .expect("rb");
-        let col_schema =
-            Arc::new(arrow_schema_to_column(&dict_schema).expect("convert dict schema"));
+        let col_schema = Schema::try_new_arc(vec![Field::new("tag", DataType::Utf8, true)])
+            .expect("convert dict schema");
         let props_dict = WriterProperties::builder()
             .set_dictionary_enabled(true)
             .build();
@@ -5746,8 +5813,8 @@ mod tests {
                 deletions_applied_seq: 0,
             })
         };
-        let fb_col_schema =
-            Arc::new(arrow_schema_to_column(&dict_schema).expect("convert fb schema"));
+        let fb_col_schema = Schema::try_new_arc(vec![Field::new("tag", DataType::Utf8, true)])
+            .expect("convert fb schema");
         let fb_source = ParquetSource::new(
             Arc::clone(&store),
             FileTable::Spans,
@@ -5809,8 +5876,12 @@ mod tests {
             vec![list_arr, map_arr, all_null_arr],
         )
         .expect("nested rb");
-        let nested_col_schema =
-            Arc::new(arrow_schema_to_column(&nested_schema).expect("nested col schema"));
+        let nested_col_schema = Schema::try_new_arc(vec![
+            Field::new("tags", DataType::List(Box::new(DataType::Utf8)), true),
+            Field::new("attrs", DataType::MapUtf8, true),
+            Field::new("all_null", DataType::Utf8, true),
+        ])
+        .expect("nested col schema");
         let nested_props = WriterProperties::builder()
             .set_dictionary_enabled(true)
             .set_statistics_enabled(EnabledStatistics::Page)
@@ -6047,8 +6118,8 @@ mod tests {
         let s1 = span_row(1, 0, base_ns + 1_000, base_ns + 2_000);
         let trace_bytes = *s1.trace_id.as_bytes();
         let rb = span_rows(&[s1]);
-        let schema = Arc::new(arrow_schema_to_column(&rb.schema()).expect("schema"));
-        let written = write_file(FileTable::Spans, 0, &[Arc::new(rb)]).expect("write_file");
+        let schema = spans_schema();
+        let written = write_file_batch(FileTable::Spans, 0, &[Arc::new(rb)]).expect("write_file");
         let mut raw = written.bytes.to_vec();
         let meta = ParquetMetaDataReader::new()
             .parse_and_finish(&Bytes::from(raw.clone()))
@@ -6188,7 +6259,8 @@ mod tests {
             &[rb_nan, rb_hi],
             props,
         );
-        let col_schema = Arc::new(arrow_schema_to_column(&arrow_schema).expect("col schema"));
+        let col_schema =
+            Schema::try_new_arc(vec![Field::new("val", DataType::F64, false)]).expect("col schema");
         let source = ParquetSource::new(
             store,
             FileTable::Spans,

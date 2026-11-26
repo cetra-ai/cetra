@@ -310,7 +310,7 @@ mod tests {
     use crate::wal::{sample_span_batch, segment_name};
 
     fn write_segments(dir: &Path, segment_bytes: u64, seqs: &[u64]) {
-        let batch = crate::column_bridge::record_batch_to_column(&sample_span_batch()).unwrap();
+        let batch = sample_span_batch();
         let hooks = Hooks::default();
         let mut writer = SegmentWriter::create(dir, seqs[0], segment_bytes, hooks.clone()).unwrap();
         for (index, seq) in seqs.iter().copied().enumerate() {
@@ -348,7 +348,7 @@ mod tests {
     }
 
     fn encoded(seq: u64) -> Vec<u8> {
-        let batch = crate::column_bridge::record_batch_to_column(&sample_span_batch()).unwrap();
+        let batch = sample_span_batch();
         let mut buf = Vec::new();
         encode(seq, &batch, &mut buf).unwrap();
         buf

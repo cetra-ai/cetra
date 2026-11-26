@@ -942,15 +942,7 @@ mod tests {
     fn fixture(dir: &Path, capacity: u64, min_free: u64) -> Fixture {
         let inner = Arc::new(InMemory::new());
         let fault = ChaosStore::new(Arc::clone(&inner) as Arc<dyn ObjectStore>);
-        let spill_dir = tempfile::tempdir().unwrap();
-        let disk = Arc::new(
-            Disk::open(
-                vec![dir.to_path_buf()],
-                0,
-                crate::disk::test_spill(spill_dir.path()),
-            )
-            .unwrap(),
-        );
+        let disk = Arc::new(Disk::open(vec![dir.to_path_buf()], 0).unwrap());
         let cache_dir = dir.join("cache");
         let cache = Arc::new(ReadCache::open(cache_dir.clone(), capacity, disk, min_free).unwrap());
         let store = CacheStore {
@@ -998,15 +990,7 @@ mod tests {
         // D7: the monitor measures once a second, so the stored value can say writable after the
         // disk has filled. `write_blocks` must measure again before it writes.
         let dir = tempfile::tempdir().unwrap();
-        let spill_dir = tempfile::tempdir().unwrap();
-        let disk = Arc::new(
-            Disk::open(
-                vec![dir.path().to_path_buf()],
-                MIB,
-                crate::disk::test_spill(spill_dir.path()),
-            )
-            .unwrap(),
-        );
+        let disk = Arc::new(Disk::open(vec![dir.path().to_path_buf()], MIB).unwrap());
         disk.set_free_for_test(Some(10 * MIB));
         let cache =
             ReadCache::open(dir.path().join("cache"), 64 * MIB, Arc::clone(&disk), MIB).unwrap();
@@ -1025,15 +1009,7 @@ mod tests {
     #[test]
     fn a_block_written_after_its_object_was_evicted_is_not_indexed() {
         let dir = tempfile::tempdir().unwrap();
-        let spill_dir = tempfile::tempdir().unwrap();
-        let disk = Arc::new(
-            Disk::open(
-                vec![dir.path().to_path_buf()],
-                MIB,
-                crate::disk::test_spill(spill_dir.path()),
-            )
-            .unwrap(),
-        );
+        let disk = Arc::new(Disk::open(vec![dir.path().to_path_buf()], MIB).unwrap());
         disk.set_free_for_test(Some(10 * MIB));
         let cache =
             ReadCache::open(dir.path().join("cache"), 64 * MIB, Arc::clone(&disk), MIB).unwrap();
@@ -1190,15 +1166,7 @@ mod tests {
         let inner = Arc::clone(&fixture.inner);
         drop(fixture);
 
-        let spill_dir = tempfile::tempdir().unwrap();
-        let disk = Arc::new(
-            Disk::open(
-                vec![dir.path().to_path_buf()],
-                0,
-                crate::disk::test_spill(spill_dir.path()),
-            )
-            .unwrap(),
-        );
+        let disk = Arc::new(Disk::open(vec![dir.path().to_path_buf()], 0).unwrap());
         let cache = Arc::new(ReadCache::open(cache_dir, 64 * MIB, disk, 0).unwrap());
         assert_eq!(cache.stats().blocks, 3);
         let store = CacheStore {
@@ -1234,15 +1202,7 @@ mod tests {
             let temp = tempfile::tempdir().unwrap();
             let copy = temp.path().join("golden");
             crate::test_support::copy_dir(dir, &copy);
-            let spill_dir = tempfile::tempdir().unwrap();
-            let disk = Arc::new(
-                Disk::open(
-                    vec![copy.clone()],
-                    0,
-                    crate::disk::test_spill(spill_dir.path()),
-                )
-                .unwrap(),
-            );
+            let disk = Arc::new(Disk::open(vec![copy.clone()], 0).unwrap());
             let cache = Arc::new(ReadCache::open(copy.join("cache"), 64 * MIB, disk, 0).unwrap());
             assert_eq!(
                 cache.size(crate::golden_tests::CACHE_NAME),
@@ -1276,15 +1236,7 @@ mod tests {
         fs::create_dir_all(cache_dir.join(NAME)).unwrap();
         fs::write(cache_dir.join(NAME).join(SIZE_FILE), "12x").unwrap();
         fs::write(cache_dir.join(NAME).join("0"), b"stray").unwrap();
-        let spill_dir = tempfile::tempdir().unwrap();
-        let disk = Arc::new(
-            Disk::open(
-                vec![dir.path().to_path_buf()],
-                0,
-                crate::disk::test_spill(spill_dir.path()),
-            )
-            .unwrap(),
-        );
+        let disk = Arc::new(Disk::open(vec![dir.path().to_path_buf()], 0).unwrap());
         let cache = ReadCache::open(cache_dir.clone(), 64 * MIB, disk, 0).unwrap();
         assert_eq!(cache.stats().blocks, 0);
         assert!(!cache_dir.join(NAME).exists());
@@ -1304,15 +1256,7 @@ mod tests {
             put(&inner, DATA, content(LEN)).await;
             let location = ObjectPath::parse(DATA).unwrap();
             let open_store = || {
-                let spill_dir = tempfile::tempdir().unwrap();
-                let disk = Arc::new(
-                    Disk::open(
-                        vec![data.clone()],
-                        0,
-                        crate::disk::test_spill(spill_dir.path()),
-                    )
-                    .unwrap(),
-                );
+                let disk = Arc::new(Disk::open(vec![data.clone()], 0).unwrap());
                 let cache =
                     Arc::new(ReadCache::open(cache_dir.clone(), 64 * MIB, disk, 0).unwrap());
                 CacheStore {
@@ -1409,15 +1353,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let inner = Arc::new(InMemory::new());
         put(&inner, DATA, content(2 * MIB)).await;
-        let spill_dir = tempfile::tempdir().unwrap();
-        let disk = Arc::new(
-            Disk::open(
-                vec![dir.path().to_path_buf()],
-                MIB,
-                crate::disk::test_spill(spill_dir.path()),
-            )
-            .unwrap(),
-        );
+        let disk = Arc::new(Disk::open(vec![dir.path().to_path_buf()], MIB).unwrap());
         disk.set_free_for_test(Some(MIB));
         let cache_dir = dir.path().join("cache");
         let cache = Arc::new(ReadCache::open(cache_dir.clone(), 64 * MIB, disk, MIB).unwrap());
