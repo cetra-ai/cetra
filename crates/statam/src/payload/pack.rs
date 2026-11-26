@@ -29,17 +29,13 @@ pub type ChunkEdge = (Vec<u8>, Vec<u8>);
 
 /// Magic bytes at offset 0 of a `TS02` TrigramSkipSection header.
 pub const TRIGRAM_SECTION_MAGIC: [u8; 4] = *b"TS02";
-/// Fixed 12-byte header size preceding the two 4 KiB edge trigram blooms in `TS02`.
+/// Fixed 12-byte header size preceding the two edge trigram blooms in `TS02`.
 const TS02_HEADER_LEN: usize = 12;
-/// Byte size of each edge trigram bloom (`edge_tail_bloom` and `edge_head_bloom`).
-const EDGE_TRIGRAM_BLOOM_BYTES: usize = MAX_TRIGRAM_BLOOM_BYTES;
-/// Total byte length of the `TS02` prefix before per-frame trigram blooms (`12 + 4096 + 4096`).
-const TS02_PREFIX_LEN: usize = TS02_HEADER_LEN + 2 * EDGE_TRIGRAM_BLOOM_BYTES;
 
 /// Minimum compressed frame length required to emit a trigram bloom (`< 1024` omitted).
 const MIN_FRAME_FOR_TRIGRAM: usize = 1024;
-/// Maximum trigram bloom bit density (`> 50%` saturated blooms are omitted).
-const MAX_TRIGRAM_DENSITY: f64 = 0.50;
+/// Maximum trigram bloom bit density (`> 55%` saturated blooms are omitted).
+const MAX_TRIGRAM_DENSITY: f64 = 0.55;
 /// 1 MiB `ReadCache` boundary guard threshold: pad if `< 8 KiB` left in current 1 MiB block.
 const BOUNDARY_GUARD_THRESHOLD: usize = 8_192;
 /// 1 MiB `ReadCache` boundary guard max frame size (`< 32 KiB`).
@@ -50,7 +46,7 @@ const DEFAULT_TARGET_FRAME_RAW_BYTES: usize = 1024 * 1024;
 /// Configuration options for [`ChunkPackBuilder`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PackWriteOptions {
-    /// Compression codec for pack frames (default: `Codec::Zstd`).
+    /// Compression codec for pack frames (default: `Codec::Zstd`, or `Codec::Lz4` under Miri).
     pub codec: Codec,
     /// Zstd compression level when `codec == Codec::Zstd` (default: `3`).
     pub zstd_level: i32,
@@ -65,7 +61,7 @@ pub struct PackWriteOptions {
 impl Default for PackWriteOptions {
     fn default() -> Self {
         Self {
-            codec: Codec::Zstd,
+            codec: default_pack_codec(),
             zstd_level: 3,
             target_frame_raw_bytes: DEFAULT_TARGET_FRAME_RAW_BYTES,
             enable_trigram_skip: true,
@@ -642,18 +638,24 @@ impl ChunkPackBuilder {
         }
         cur_off = cur_off.saturating_add(hash_table_bytes.len() as u64);
 
-        // 2. TrigramSkipSection (`TS02`: 12 B header + 4 KiB tail bloom + 4 KiB head bloom + per-frame blooms)
+        // 2. TrigramSkipSection (`TS02`: 12 B header + 2 * edge_bloom_bytes + per-frame blooms)
         let mut trigram_section = Vec::new();
         let (trigram_off, trigram_len) = if !self.trigram_buf.is_empty() {
-            let mut edge_tail_bloom = TrigramBloom::new(EDGE_TRIGRAM_BLOOM_BYTES);
-            let mut edge_head_bloom = TrigramBloom::new(EDGE_TRIGRAM_BLOOM_BYTES);
+            let edge_bloom_bytes = if self.stored_frame_bytes >= 2 * 1024 * 1024 {
+                8_192
+            } else {
+                4_096
+            };
+            let prefix_len = TS02_HEADER_LEN + 2 * edge_bloom_bytes;
+            let mut edge_tail_bloom = TrigramBloom::new(edge_bloom_bytes);
+            let mut edge_head_bloom = TrigramBloom::new(edge_bloom_bytes);
             for (head, tail) in &self.edges {
                 edge_tail_bloom.insert_bytes(tail.as_slice());
                 edge_head_bloom.insert_bytes(head.as_slice());
             }
 
             let prefix_u32 =
-                u32::try_from(TS02_PREFIX_LEN).map_err(|_| StatamError::BoundsExceeded {
+                u32::try_from(prefix_len).map_err(|_| StatamError::BoundsExceeded {
                     reason: "TS02 prefix length overflows u32",
                 })?;
             for f in &mut self.frames {
@@ -666,7 +668,7 @@ impl ChunkPackBuilder {
                 }
             }
 
-            let total_len = TS02_PREFIX_LEN.checked_add(self.trigram_buf.len()).ok_or(
+            let total_len = prefix_len.checked_add(self.trigram_buf.len()).ok_or(
                 StatamError::BoundsExceeded {
                     reason: "trigram section size overflow",
                 },
@@ -676,7 +678,7 @@ impl ChunkPackBuilder {
             })?;
             trigram_section.reserve(total_len);
             trigram_section.extend_from_slice(&TRIGRAM_SECTION_MAGIC);
-            trigram_section.extend_from_slice(&(EDGE_TRIGRAM_BLOOM_BYTES as u32).to_le_bytes());
+            trigram_section.extend_from_slice(&(edge_bloom_bytes as u32).to_le_bytes());
             trigram_section.extend_from_slice(&0u32.to_le_bytes());
             trigram_section.extend_from_slice(edge_tail_bloom.as_bytes());
             trigram_section.extend_from_slice(edge_head_bloom.as_bytes());
@@ -1012,6 +1014,16 @@ fn default_bypass_codec() -> Codec {
 }
 
 #[cfg(not(miri))]
+fn default_pack_codec() -> Codec {
+    Codec::Zstd
+}
+
+#[cfg(miri)]
+fn default_pack_codec() -> Codec {
+    Codec::Lz4
+}
+
+#[cfg(not(miri))]
 fn default_edge_codec() -> Codec {
     Codec::Zstd
 }
@@ -1058,7 +1070,7 @@ impl fmt::Debug for ChunkPackReader {
 }
 
 impl ChunkPackReader {
-    /// Opens a `.stpk` pack by reading its tail (`DEFAULT_TAIL_HINT` = 1 MiB) in 1 GET.
+    /// Opens a `.stpk` pack by reading its tail (`DEFAULT_TAIL_HINT` = 192 KiB) in 1 GET.
     pub fn open(reader: Arc<dyn RangeReader>) -> Result<Self, StatamError> {
         Self::open_with_tail_hint(reader, None)
     }
@@ -1392,7 +1404,7 @@ impl ChunkPackReader {
             });
         }
 
-        if section.len() < TS02_PREFIX_LEN || section[0..4] != TRIGRAM_SECTION_MAGIC {
+        if section.len() < TS02_HEADER_LEN || section[0..4] != TRIGRAM_SECTION_MAGIC {
             return Err(StatamError::Corrupt {
                 reason: "invalid trigram section magic",
             });
@@ -2035,5 +2047,89 @@ mod tests {
             ChunkPackReader::open(Arc::new(SliceReader::new(bytes))),
             Err(StatamError::Corrupt { .. })
         ));
+    }
+
+    #[test]
+    fn ts02_trigram_section_uses_8kib_edge_blooms_and_reads_4kib_edge_blooms_dynamically() {
+        let mut b = ChunkPackBuilder::new([12u8; 16], PackWriteOptions::default());
+        assert_eq!(b.options.target_frame_raw_bytes, 1024 * 1024);
+
+        // Emit enough distinct chunks so compressed frame >= 1024 B (`MIN_FRAME_FOR_TRIGRAM`)
+        // while keeping trigram density < 55% and stored_frame_bytes < 2 MiB so TS02 uses 4 KiB edge blooms.
+        for c in 0..250u32 {
+            let mut chunk = format!("hdr_{c:04}_").into_bytes();
+            for j in 0..40u32 {
+                chunk.extend_from_slice(
+                    format!("token_{:02}_alpha_beta_gamma_", (c + j) % 25).as_bytes(),
+                );
+            }
+            b.intern_chunk(&chunk).unwrap();
+        }
+        let mut pack_bytes = Vec::new();
+        b.finish(&mut pack_bytes).unwrap();
+
+        let r = ChunkPackReader::open(Arc::new(SliceReader::new(pack_bytes))).unwrap();
+        let (tail_b, head_b) = r.read_edge_trigram_blooms().unwrap().unwrap();
+        assert_eq!(tail_b.as_bytes().len(), 4_096);
+        assert_eq!(head_b.as_bytes().len(), 4_096);
+
+        // Verify TS02 decoder also handles 8 KiB edge blooms dynamically (as emitted for >= 2 MiB packs).
+        let mut toc_body = Vec::new();
+        let mut fe = r.toc().frames[0];
+        let old_filter = r.read_trigram_section().unwrap()[0].clone().unwrap();
+        let mut ts_8k = Vec::new();
+        ts_8k.extend_from_slice(&TRIGRAM_SECTION_MAGIC);
+        ts_8k.extend_from_slice(&8192u32.to_le_bytes());
+        ts_8k.extend_from_slice(&0u32.to_le_bytes());
+        ts_8k.extend_from_slice(tail_b.as_bytes());
+        ts_8k.extend_from_slice(&[0u8; 4096]);
+        ts_8k.extend_from_slice(head_b.as_bytes());
+        ts_8k.extend_from_slice(&[0u8; 4096]);
+        fe.filter_off = (TS02_HEADER_LEN + 2 * 8192) as u32;
+        fe.filter_len = old_filter.as_bytes().len() as u32;
+        ts_8k.extend_from_slice(old_filter.as_bytes());
+
+        toc_body.extend_from_slice(&fe.encode());
+        for c in &r.toc().chunks {
+            toc_body.extend_from_slice(&c.encode());
+        }
+        let mut ps = r.toc().postscript;
+        let data_end = ps.hash_table_off;
+        let mut crafted = vec![0u8; data_end as usize + ts_8k.len()];
+        let mut hdr = PackHeader {
+            format_version: FORMAT_VERSION,
+            flags: ps.flags & !(PACK_FLAG_TOC_LZ4 | PACK_FLAG_TOC_ZSTD),
+            required_features: 0,
+            pack_id: ps.pack_id,
+            enc_envelope_offset: 0,
+            enc_envelope_len: 0,
+            reserved: 0,
+        };
+        crafted[..PACK_HEADER_LEN].copy_from_slice(&hdr.encode());
+        // Copy frame 0 bytes cleanly into crafted.
+        let frame_total = PACK_FRAME_HEADER_LEN + fe.stored_len as usize;
+        let frame_raw = r.read_frame_raw(0).unwrap();
+        let frame_off = fe.offset as usize;
+        crafted[frame_off..frame_off + frame_total].copy_from_slice(&frame_raw);
+        let ts_off = data_end as usize;
+        crafted[ts_off..ts_off + ts_8k.len()].copy_from_slice(&ts_8k);
+
+        ps.flags = hdr.flags;
+        ps.trigram_off = ts_off as u64;
+        ps.trigram_len = ts_8k.len() as u32;
+        ps.edge_table_off = 0;
+        ps.edge_table_len = 0;
+        ps.toc_raw_len = toc_body.len() as u32;
+        ps.toc_stored_len = (toc_body.len() + PACK_POSTSCRIPT_LEN) as u32;
+        ps.toc_crc32c = crc32c::crc32c(&toc_body);
+        hdr.flags = ps.flags;
+        crafted[..PACK_HEADER_LEN].copy_from_slice(&hdr.encode());
+        crafted.extend_from_slice(&toc_body);
+        crafted.extend_from_slice(&ps.encode());
+
+        let r_8k = ChunkPackReader::open(Arc::new(SliceReader::new(crafted))).unwrap();
+        let (t8, h8) = r_8k.read_edge_trigram_blooms().unwrap().unwrap();
+        assert_eq!(t8.as_bytes().len(), 8192);
+        assert_eq!(h8.as_bytes().len(), 8192);
     }
 }

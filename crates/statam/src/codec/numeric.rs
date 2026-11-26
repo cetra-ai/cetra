@@ -637,7 +637,7 @@ pub(crate) fn encode_narrow_column_with_locality(
             };
             let (enc, inner_body) = if profile == WriteProfile::L1Compact
                 && (256..=8 * 1024 * 1024).contains(&raw_varlen_bytes)
-                && (!is_wide_row || raw_varlen_bytes >= 16 * 1024)
+                && !is_wide_row
             {
                 let slices = extract_varlen_slices(flat)?;
                 if let Some(fsst) = encode_fsst_body(&slices)? {

@@ -83,9 +83,9 @@ impl Sbbf {
         } else {
             0.01
         };
-        // Standard 8-probe split-block sizing with 1.25x Poisson load-variance margin.
+        // Standard 8-probe split-block sizing with 1.05x Poisson load-variance margin.
         let denom = -(1.0 - clamped_fpp.powf(1.0 / 8.0)).ln();
-        let bits = ((8.0 * ndv_f / denom) * 1.25).ceil();
+        let bits = ((8.0 * ndv_f / denom) * 1.05).ceil();
         let max_blocks = (MAX_BLOOM_BYTES - SBBF_HEADER_LEN) / 32;
         let num_blocks = if bits.is_finite() && bits > 0.0 {
             ((bits as usize).div_ceil(256)).clamp(1, max_blocks)

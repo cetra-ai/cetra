@@ -30,8 +30,9 @@ pub const DICT_MAGIC: [u8; 4] = *b"DT01";
 pub const FORMAT_VERSION: u16 = 1;
 /// Checksum algorithm identifier: CRC-32C.
 pub const CHECKSUM_ALG_CRC32C: u8 = 1;
-/// Default tail fetch size (1 MiB) for 1-GET cold open.
-pub const DEFAULT_TAIL_HINT: u32 = 1 << 20;
+/// Default tail fetch size (128 KiB) for 1-GET cold open without straddling `1 MiB` `ReadCache`
+/// block boundaries; Hot Tail remains hard-capped at `1 MiB`.
+pub const DEFAULT_TAIL_HINT: u32 = 128 * 1024;
 
 /// Target rows per PAX Row Group.
 pub const ROW_GROUP_SIZE: usize = 131_072;

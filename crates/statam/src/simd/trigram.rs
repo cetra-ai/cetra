@@ -9,7 +9,7 @@ use crate::StatamError;
 /// Minimum allowed byte length for a [`TrigramBloom`] bitset.
 pub const MIN_TRIGRAM_BLOOM_BYTES: usize = 256;
 /// Maximum allowed byte length for a [`TrigramBloom`] bitset.
-pub const MAX_TRIGRAM_BLOOM_BYTES: usize = 4096;
+pub const MAX_TRIGRAM_BLOOM_BYTES: usize = 16_384;
 
 /// Writes ASCII-lowercased `src` into `dst` (clearing `dst` first).
 ///
@@ -67,7 +67,7 @@ pub fn extract_trigram_hashes(bytes: &[u8], ascii_only: bool, out: &mut Vec<u32>
     }
 }
 
-/// Adaptive power-of-two byte-sized trigram bloom filter (`256..=4096` bytes).
+/// Adaptive power-of-two byte-sized trigram bloom filter (`256..=16_384` bytes).
 #[derive(Clone, PartialEq, Eq)]
 pub struct TrigramBloom {
     bits: Vec<u8>,
@@ -82,7 +82,7 @@ impl fmt::Debug for TrigramBloom {
 }
 
 impl TrigramBloom {
-    /// Creates an empty `TrigramBloom` clamped and rounded to a power of two in `256..=4096` bytes.
+    /// Creates an empty `TrigramBloom` clamped and rounded to a power of two in `256..=16_384` bytes.
     pub fn new(byte_len: usize) -> Self {
         let clamped = byte_len
             .clamp(MIN_TRIGRAM_BLOOM_BYTES, MAX_TRIGRAM_BLOOM_BYTES)
@@ -93,7 +93,7 @@ impl TrigramBloom {
         }
     }
 
-    /// Wraps serialized filter bytes after validating power-of-two size in `256..=4096`.
+    /// Wraps serialized filter bytes after validating power-of-two size in `256..=16_384`.
     pub fn from_bytes(bytes: Vec<u8>) -> Result<Self, StatamError> {
         let len = bytes.len();
         if !(MIN_TRIGRAM_BLOOM_BYTES..=MAX_TRIGRAM_BLOOM_BYTES).contains(&len)
@@ -130,7 +130,7 @@ impl TrigramBloom {
         {
             if bytes.len() >= 16 && std::arch::is_x86_feature_detected!("avx2") {
                 // SAFETY: `is_x86_feature_detected!("avx2")` verified above and
-                // `self.bits.len()` is a non-zero power of two in `256..=4096`.
+                // `self.bits.len()` is a non-zero power of two in `256..=16_384`.
                 unsafe {
                     self.insert_bytes_avx2(bytes);
                 }
@@ -183,7 +183,7 @@ impl TrigramBloom {
             let idx1 = ((word >> 32) as usize) & byte_mask;
             let mask1 = (word >> 48) as u8;
             // SAFETY: caller ensures `byte_mask == bits.len() - 1` and `bits.len()` is a power of two
-            // (`<= MAX_TRIGRAM_BLOOM_BYTES == 4096`), so `idx0 < bits.len()` and `idx1 < bits.len()`.
+            // (`<= MAX_TRIGRAM_BLOOM_BYTES == 16_384`), so `idx0 < bits.len()` and `idx1 < bits.len()`.
             unsafe {
                 *ptr.add(idx0) |= mask0;
                 *ptr.add(idx1) |= mask1;
@@ -227,7 +227,8 @@ impl TrigramBloom {
             x = _mm256_xor_si256(x, _mm256_srli_epi32(x, 16));
 
             let p1_vec = _mm256_and_si256(x, mask_v);
-            let p2_vec = _mm256_and_si256(_mm256_srli_epi32(x, 16), mask_v);
+            let rot16 = _mm256_or_si256(_mm256_srli_epi32(x, 16), _mm256_slli_epi32(x, 16));
+            let p2_vec = _mm256_and_si256(rot16, mask_v);
             let idx1_vec = _mm256_srli_epi32(p1_vec, 3);
             let mask1_vec = _mm256_sllv_epi32(ones_v, _mm256_and_si256(p1_vec, seven_v));
             let idx2_vec = _mm256_srli_epi32(p2_vec, 3);
@@ -236,7 +237,7 @@ impl TrigramBloom {
             let v1 = _mm256_or_si256(idx1_vec, _mm256_slli_epi32(mask1_vec, 16));
             let v2 = _mm256_or_si256(idx2_vec, _mm256_slli_epi32(mask2_vec, 16));
 
-            // SAFETY: `ptr` points to `bits` of length `byte_mask + 1` (power of two, `<= 4096`).
+            // SAFETY: `ptr` points to `bits` of length `byte_mask + 1` (power of two, `<= 16_384`).
             unsafe {
                 set_two_lanes(ptr, byte_mask, _mm256_extract_epi64::<0>(v1) as u64);
                 set_two_lanes(ptr, byte_mask, _mm256_extract_epi64::<1>(v1) as u64);
@@ -416,19 +417,30 @@ mod tests {
             Err(StatamError::Corrupt { .. })
         ));
         assert!(matches!(
-            TrigramBloom::from_bytes(vec![0u8; 8192]),
+            TrigramBloom::from_bytes(vec![0u8; 32_768]),
             Err(StatamError::Corrupt { .. })
         ));
+        assert!(TrigramBloom::from_bytes(vec![0u8; 16_384]).is_ok());
     }
 
     #[test]
     fn trigram_bloom_fold_half_matches_direct_half_sized_insert() {
         let sample =
             b"{\"role\":\"assistant\",\"content\":\"Tool call trace: Bearer TOKEN_ABC_12345\"}";
-        let mut big = TrigramBloom::new(4096);
+        let mut big = TrigramBloom::new(16_384);
         big.insert_bytes(sample);
 
-        let folded_2048 = big.fold_half();
+        let folded_8192 = big.fold_half();
+        let mut direct_8192 = TrigramBloom::new(8_192);
+        direct_8192.insert_bytes(sample);
+        assert_eq!(folded_8192.as_bytes(), direct_8192.as_bytes());
+
+        let folded_4096 = folded_8192.fold_half();
+        let mut direct_4096 = TrigramBloom::new(4_096);
+        direct_4096.insert_bytes(sample);
+        assert_eq!(folded_4096.as_bytes(), direct_4096.as_bytes());
+
+        let folded_2048 = folded_4096.fold_half();
         let mut direct_2048 = TrigramBloom::new(2048);
         direct_2048.insert_bytes(sample);
         assert_eq!(folded_2048.as_bytes(), direct_2048.as_bytes());
@@ -476,7 +488,7 @@ mod tests {
         #[test]
         fn proptest_trigram_bloom_simd_scalar_parity(
             bytes in prop::collection::vec(any::<u8>(), 0..=512),
-            cap_shift in 0usize..=4,
+            cap_shift in 0usize..=6,
         ) {
             let cap = 256usize << cap_shift;
             let mut simd = TrigramBloom::new(cap);

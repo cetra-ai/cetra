@@ -11,7 +11,7 @@ use cetra_column::{
 };
 
 use crate::StatamError;
-use crate::codec::dict::{DictBuilder, DictValueKind, FileDict};
+use crate::codec::dict::{DICT_PASSTHROUGH_MAX_BYTES, DictBuilder, DictValueKind, FileDict};
 use crate::codec::nested::{encode_shredded_subcol_with_codec, select_shredded_keys, shred_map};
 use crate::codec::{
     EncodedMiniBlock, WriteProfile, encode_dict_codes_precomputed, encode_mini_block_with_locality,
@@ -43,10 +43,11 @@ use crate::simd::trigram::{
     MAX_TRIGRAM_BLOOM_BYTES, MIN_TRIGRAM_BLOOM_BYTES, TrigramBloom, extract_trigram_hashes,
 };
 
-/// Compressed Hot Tail soft budget (960 KiB) for keeping small FileDicts and secondary blooms hot.
-const HOT_TAIL_SOFT_BUDGET_BYTES: usize = 960 * 1024;
-/// Hard Hot Tail budget (1 MiB = `DEFAULT_TAIL_HINT`) guaranteeing 1-GET cold open.
-const HOT_TAIL_HARD_BUDGET_BYTES: usize = DEFAULT_TAIL_HINT as usize;
+/// Compressed Hot Tail soft budget (120 KiB) for keeping small FileDicts and secondary blooms hot
+/// within `DEFAULT_TAIL_HINT` (128 KiB).
+const HOT_TAIL_SOFT_BUDGET_BYTES: usize = 120 * 1024;
+/// Hard Hot Tail budget (1 MiB) so large files with >128 KiB directories still keep primary bloom hot.
+const HOT_TAIL_HARD_BUDGET_BYTES: usize = 1 << 20;
 /// Minimum compressed mini-block bytes required to emit a narrow-column trigram filter.
 const MIN_NARROW_TRIGRAM_STORED_BYTES: usize = 2560;
 /// Maximum size of a single FileDict kept inside the Hot Tail (8 KiB).
@@ -1042,8 +1043,9 @@ impl<'a> StatamWriter<'a> {
         }
 
         // Measure compressed directory baseline (`schema + col_dir + rg_dir + block_dir`)
-        // so 1M-row files keep stored Hot Tail <= 1 MiB while small dicts/blooms stay hot
-        // whenever compressed Hot Tail remains <= 960 KiB.
+        // so normal files fit cleanly in <= 128 KiB (`DEFAULT_TAIL_HINT`) while small dicts/blooms
+        // stay hot whenever compressed Hot Tail remains <= 120 KiB (`HOT_TAIL_SOFT_BUDGET_BYTES`),
+        // and large files still keep primary bloom hot up to 1 MiB (`HOT_TAIL_HARD_BUDGET_BYTES`).
         let base_dirs_len =
             schema_bytes.len() + col_dir_bytes_len + rg_dir_bytes.len() + block_dir_bytes.len();
         let base_compressed_len = if self.options.compress_hot_tail_lz4 {
@@ -1104,22 +1106,21 @@ impl<'a> StatamWriter<'a> {
 
         let max_lazy_overhead = (trigram_items.len() + dict_items.len() + sec_blooms.len() + 1)
             .saturating_mul(LAZY_INDEX_ENTRY_LEN);
-        let avail_1mib_for_primary = HOT_TAIL_HARD_BUDGET_BYTES.saturating_sub(
-            POSTSCRIPT_LEN
-                .saturating_add(base_compressed_len)
-                .saturating_add(max_lazy_overhead)
-                .saturating_add(256),
-        );
+        let fixed_overhead = POSTSCRIPT_LEN
+            .saturating_add(base_compressed_len)
+            .saturating_add(max_lazy_overhead)
+            .saturating_add(256);
+        let avail_for_primary = HOT_TAIL_HARD_BUDGET_BYTES.saturating_sub(fixed_overhead);
 
         let mut primary_bloom: Option<(usize, Vec<u8>, bool)> =
             if let Some(hot_idx) = self.hot_bloom_col_idx {
-                self.take_and_build_primary_bloom(hot_idx, avail_1mib_for_primary)?
+                self.take_and_build_primary_bloom(hot_idx, avail_for_primary)?
                     .map(|(bytes, fits_hot)| (hot_idx, bytes, fits_hot))
             } else {
                 None
             };
 
-        // Decide initial Hot Tail placement against the 960 KiB compressed soft budget.
+        // Decide initial Hot Tail placement against the 120 KiB compressed soft budget.
         let mut est_stored = POSTSCRIPT_LEN
             .saturating_add(base_compressed_len)
             .saturating_add(trigram_items.len().saturating_mul(LAZY_INDEX_ENTRY_LEN));
@@ -1176,14 +1177,15 @@ impl<'a> StatamWriter<'a> {
             &trigram_items,
         )?;
 
-        // Spill secondary blooms, then small hot dicts, then primary bloom if actual
-        // compressed Hot Tail exceeds 1 MiB (`DEFAULT_TAIL_HINT`).
-        while assembled.hot_tail_len as usize > HOT_TAIL_HARD_BUDGET_BYTES {
+        // Spill secondary blooms, then small hot dicts if compressed Hot Tail exceeds 128 KiB
+        // (`DEFAULT_TAIL_HINT`), and spill primary bloom only if it exceeds 1 MiB (`HOT_TAIL_HARD_BUDGET_BYTES`).
+        while assembled.hot_tail_len as usize > DEFAULT_TAIL_HINT as usize {
             if let Some(item) = sec_blooms.iter_mut().rev().find(|x| x.2) {
                 item.2 = false;
             } else if let Some(item) = dict_items.iter_mut().rev().find(|x| x.2) {
                 item.2 = false;
-            } else if let Some((_, _, ref mut in_hot)) = primary_bloom
+            } else if assembled.hot_tail_len as usize > HOT_TAIL_HARD_BUDGET_BYTES
+                && let Some((_, _, ref mut in_hot)) = primary_bloom
                 && *in_hot
             {
                 *in_hot = false;
@@ -1912,11 +1914,15 @@ impl<'a> StatamWriter<'a> {
             let flat = as_flat_cow(col_ref)?;
             let is_known_low_card = KNOWN_LOW_CARD_DICT_COLS.contains(&field.name.as_str());
             let is_core = self.logical_locality[cidx] == LocalityGroup::Core;
+            let is_wide_non_known =
+                self.logical_locality[cidx] == LocalityGroup::WideRow && !is_known_low_card;
             let max_entries = match self.options.profile {
                 WriteProfile::L0Fast => 512,
                 WriteProfile::L1Compact => {
                     if is_known_low_card || is_core {
                         16_384
+                    } else if is_wide_non_known {
+                        1_024
                     } else {
                         4_096
                     }
@@ -1929,6 +1935,11 @@ impl<'a> StatamWriter<'a> {
             let Some((dict, codes)) = builder.build(&flat)? else {
                 continue;
             };
+            if is_wide_non_known
+                && (dict.len() > 1_024 || dict.memory_bytes() > DICT_PASSTHROUGH_MAX_BYTES)
+            {
+                continue;
+            }
             let non_null_rows = flat
                 .len()
                 .saturating_sub(flat.nulls().map_or(0, |bm| bm.count_zeros()));
@@ -2736,6 +2747,11 @@ fn as_flat_cow(col: &Column) -> Result<Cow<'_, FlatColumn>, StatamError> {
     }
 }
 
+#[inline]
+fn bloom_fpp_for_ndv(ndv: usize) -> f64 {
+    if ndv > 80_000 { 0.04 } else { BLOOM_FPP }
+}
+
 fn build_rg_sbbf(
     col: &Column,
     base_row_off: usize,
@@ -2754,7 +2770,7 @@ fn build_rg_sbbf(
         if dict_len == 0 {
             return Ok((Sbbf::new_for_ndv(1, BLOOM_FPP), false));
         }
-        let mut sbbf = Sbbf::new_for_ndv(dict_len, BLOOM_FPP);
+        let mut sbbf = Sbbf::new_for_ndv(dict_len, bloom_fpp_for_ndv(dict_len));
         let mut had_any = false;
         let dict_vals = dict.values();
         for idx in 0..dict_len {
@@ -2782,7 +2798,7 @@ fn build_rg_sbbf(
         if non_nulls == 0 {
             return Ok((Sbbf::new_for_ndv(1, BLOOM_FPP), false));
         }
-        let mut sbbf = Sbbf::new_for_ndv(non_nulls, BLOOM_FPP);
+        let mut sbbf = Sbbf::new_for_ndv(non_nulls, bloom_fpp_for_ndv(non_nulls));
         let mut had_any = false;
         for row in base_row_off..end {
             if let Some(h) = flat_row_bloom_hash(f, row) {
@@ -2807,7 +2823,7 @@ fn build_rg_sbbf(
         hashes.sort_unstable();
         hashes.dedup();
     }
-    let mut sbbf = Sbbf::new_for_ndv(hashes.len(), BLOOM_FPP);
+    let mut sbbf = Sbbf::new_for_ndv(hashes.len(), bloom_fpp_for_ndv(hashes.len()));
     for h in hashes {
         sbbf.insert_hash(h);
     }
@@ -4031,7 +4047,7 @@ mod tests {
         let stats = w.finish(&mut file_bytes).unwrap();
         assert!(
             stats.hot_tail_bytes <= DEFAULT_TAIL_HINT,
-            "hot_tail_bytes {} exceeded 1 MiB DEFAULT_TAIL_HINT",
+            "hot_tail_bytes {} exceeded 128 KiB DEFAULT_TAIL_HINT",
             stats.hot_tail_bytes
         );
 
@@ -4044,7 +4060,7 @@ mod tests {
         assert_ne!(
             reader.meta().col_dir[2].col_flags & COL_FLAG_DICT_IN_HOT_TAIL,
             0,
-            "small FileDict must remain in Hot Tail when compressed Hot Tail <= 960 KiB"
+            "small FileDict must remain in Hot Tail when compressed Hot Tail <= 120 KiB"
         );
     }
 
@@ -4155,5 +4171,73 @@ mod tests {
                 ScalarValue::Utf8(exp.clone())
             );
         }
+    }
+
+    #[test]
+    fn wide_row_file_dict_caps_entries_and_memory_bytes() {
+        use crate::format::COL_FLAG_HAS_FILE_DICT;
+
+        let schema = Schema::try_new_arc(vec![
+            Field::new("id", DataType::I64, false),
+            Field::new("input_preview", DataType::Utf8, true),
+            Field::new("output_preview", DataType::Utf8, true),
+        ])
+        .unwrap();
+
+        let n = 2_048usize;
+        let ids: Vec<i64> = (0..n as i64).collect();
+        // 512 unique ~600 B previews (~307 KiB > 256 KiB DICT_PASSTHROUGH_MAX_BYTES): must NOT build a FileDict.
+        let large_previews: Vec<String> = (0..n)
+            .map(|i| format!("preview_{:04}_{}", i % 512, "x".repeat(590)))
+            .collect();
+        // 64 unique ~16 B previews (~1 KiB <= 256 KiB cap): MAY build a FileDict.
+        let small_previews: Vec<String> =
+            (0..n).map(|i| format!("short_{:02}_ok", i % 64)).collect();
+
+        let large_refs: Vec<&str> = large_previews.iter().map(String::as_str).collect();
+        let small_refs: Vec<&str> = small_previews.iter().map(String::as_str).collect();
+        let batch = Batch::try_new_all(
+            Arc::clone(&schema),
+            vec![
+                Column::Flat(FlatColumn::try_new(FlatData::I64(ids), None).unwrap()),
+                Column::Flat(
+                    FlatColumn::try_new(
+                        FlatData::Utf8(Utf8Data::try_from_slices(large_refs).unwrap()),
+                        None,
+                    )
+                    .unwrap(),
+                ),
+                Column::Flat(
+                    FlatColumn::try_new(
+                        FlatData::Utf8(Utf8Data::try_from_slices(small_refs).unwrap()),
+                        None,
+                    )
+                    .unwrap(),
+                ),
+            ],
+            n,
+        )
+        .unwrap();
+
+        let mut opts = WriteOptions::for_table(TableKind::Spans, WriteProfile::L1Compact);
+        opts.row_group_size = n;
+        opts.mini_block_size = 512;
+
+        let mut file_bytes = Vec::new();
+        let mut w = StatamWriter::new(Arc::clone(&schema), opts, None).unwrap();
+        w.write_batch(&batch).unwrap();
+        w.finish(&mut file_bytes).unwrap();
+
+        let reader = StatamReader::open(Arc::new(SliceReader::new(file_bytes)), None).unwrap();
+        assert_eq!(
+            reader.meta().col_dir[1].col_flags & COL_FLAG_HAS_FILE_DICT,
+            0,
+            "WideRow column > 256 KiB (DICT_PASSTHROUGH_MAX_BYTES) dict memory must not build a FileDict"
+        );
+        assert_ne!(
+            reader.meta().col_dir[2].col_flags & COL_FLAG_HAS_FILE_DICT,
+            0,
+            "compact WideRow column <= 1024 entries and <= 256 KiB may keep a FileDict"
+        );
     }
 }
