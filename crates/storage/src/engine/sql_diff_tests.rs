@@ -518,7 +518,7 @@ impl DiffHarness {
                 None,
                 deletions,
                 cache,
-                suspects.clone(),
+                suspects,
                 tokio::runtime::Handle::current(),
             )
             .unwrap(),
@@ -542,7 +542,6 @@ impl DiffHarness {
             visible_from,
             qe_window,
             HashMap::new(),
-            suspects,
         );
 
         // Register extra tables (dataset_items & experiment_items) in both DataFusion and Shape B
@@ -930,6 +929,52 @@ async fn diff_mcp_patterns_window_visible_from_and_params() {
         true,
         1e-12,
         "cross join extra tables",
+    )
+    .await;
+
+    // LEFT / RIGHT / FULL OUTER JOIN with unmatched rows and NULL keys
+    assert_parity(
+        &h,
+        "SELECT d.id AS did, d.label, e.id AS eid, e.experiment_id \
+         FROM dataset_items d LEFT JOIN experiment_items e ON d.id = e.id \
+         ORDER BY did NULLS LAST, d.label NULLS LAST, eid NULLS LAST, e.experiment_id NULLS LAST",
+        &empty,
+        true,
+        1e-12,
+        "left join with unmatched rows and null keys",
+    )
+    .await;
+    assert_parity(
+        &h,
+        "SELECT d.id AS did, d.label, e.id AS eid, e.experiment_id \
+         FROM dataset_items d RIGHT JOIN experiment_items e ON d.id = e.id \
+         ORDER BY eid NULLS LAST, e.experiment_id NULLS LAST, did NULLS LAST, d.label NULLS LAST",
+        &empty,
+        true,
+        1e-12,
+        "right join with unmatched rows and null keys",
+    )
+    .await;
+    assert_parity(
+        &h,
+        "SELECT d.id AS did, d.label, e.id AS eid, e.experiment_id \
+         FROM dataset_items d FULL OUTER JOIN experiment_items e ON d.id = e.id \
+         ORDER BY did NULLS LAST, d.label NULLS LAST, eid NULLS LAST, e.experiment_id NULLS LAST",
+        &empty,
+        true,
+        1e-12,
+        "full outer join with unmatched rows and null keys",
+    )
+    .await;
+    assert_parity(
+        &h,
+        "SELECT d.id AS did, d.label, e.id AS eid, e.experiment_id \
+         FROM dataset_items d FULL OUTER JOIN experiment_items e ON d.id = e.id AND d.label = 'ok' \
+         ORDER BY did NULLS LAST, d.label NULLS LAST, eid NULLS LAST, e.experiment_id NULLS LAST",
+        &empty,
+        true,
+        1e-12,
+        "full outer join with residual filter and null keys",
     )
     .await;
 

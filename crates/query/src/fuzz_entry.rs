@@ -12,8 +12,8 @@ use serde_json::{Map, Value};
 
 use crate::bind::{bind_expr, compile_filter};
 use crate::encode::{
-    EXPORT_MAX_CHUNK_BYTES, EXPORT_PIECE_BYTES, encode_csv_chunk, encode_csv_header,
-    encode_ndjson_chunk, export_piece_ranges,
+    EXPORT_PIECE_BYTES, encode_csv_chunk, encode_csv_header, encode_ndjson_chunk,
+    export_piece_ranges,
 };
 use crate::eval::{eval_expr, eval_filter};
 use crate::exec::{BatchSource, ExecContext, ExecMetrics, SpillManager, WorkerPool};
@@ -21,26 +21,52 @@ use crate::filter::{FilterView, like_pattern, parse_filter_ast};
 use crate::fn_time::{parse_date_days, parse_interval, parse_timestamp_ns};
 use crate::ir::{EvalContext, Expr};
 use crate::sql::{
-    LogicalPlan, ParamKind, SqlCatalog, SqlSources, execute_plan_json, parse_and_validate_sql,
-    prepare_sql_plan, raw_scores_schema, raw_spans_schema, raw_traces_schema, sql_check,
-    sql_export_plan_stream,
+    BoundParams, LogicalPlan, ParamKind, SqlCatalog, SqlSources, bind_statement,
+    columns_from_schema, execute_plan_json, optimize, parse_and_validate_sql, parse_param_values,
+    raw_scores_schema, raw_spans_schema, raw_traces_schema, sql_export_plan_stream,
 };
 use crate::text::{FILTER_LIMITS, TextKind, expect_end, parser, tokenize};
 use crate::tombstone::{TombstoneSpec, TombstoneTable, covered_predicate, filter_uncovered};
 
 const FUZZ_POOL_LIMIT: usize = 256 * 1024;
 const FUZZ_SQL_POOL_LIMIT: usize = 1024 * 1024;
+const FUZZ_EXPORT_CHUNK_CAP: usize = 256 * 1024;
 const FUZZ_NOW_NS: i64 = 1_767_225_700_000_000_000;
 
 static FUZZ_BATCHES: OnceLock<Option<(Batch, Batch)>> = OnceLock::new();
 static FUZZ_SQL_ENV: OnceLock<Option<FuzzSqlEnv>> = OnceLock::new();
+
+struct FuzzScratchDir(std::path::PathBuf);
+
+impl FuzzScratchDir {
+    fn new() -> Result<Self, crate::error::QueryError> {
+        static NEXT_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let seq = NEXT_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_nanos());
+        let path = std::env::temp_dir().join(format!(
+            "cetra-query-fuzz-{}-{nanos}-{seq}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&path)
+            .map_err(|e| crate::error::QueryError::internal(e.to_string()))?;
+        Ok(Self(path))
+    }
+}
+
+impl Drop for FuzzScratchDir {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
 
 struct FuzzSqlEnv {
     catalog: SqlCatalog,
     sources: SqlSources,
     workers: Arc<WorkerPool>,
     spill: Arc<SpillManager>,
-    _spill_dir: tempfile::TempDir,
+    _spill_dir: FuzzScratchDir,
 }
 
 /// Exercises Filter DSL parsing & compilation, SQL expression parsing & binding, vectorized
@@ -466,7 +492,7 @@ pub fn fuzz_sql(data: &[u8]) {
     let text = text_cow.as_ref();
     let registered = env.catalog.registered_names();
 
-    let Ok((_, placeholders)) = parse_and_validate_sql(text, &registered) else {
+    let Ok((stmt, placeholders)) = parse_and_validate_sql(text, &registered) else {
         return;
     };
 
@@ -487,11 +513,14 @@ pub fn fuzz_sql(data: &[u8]) {
         params.insert(ph.name.clone(), val);
     }
 
-    let _ = sql_check(&env.catalog, text, &params);
-
-    let Ok(plan) = prepare_sql_plan(&env.catalog, text, &params) else {
+    let Ok(param_values) = parse_param_values(&placeholders, &params) else {
         return;
     };
+    let bound = BoundParams::Values(&param_values);
+    let Ok(plan) = bind_statement(&stmt, &env.catalog, &bound).and_then(optimize) else {
+        return;
+    };
+    let _ = columns_from_schema(plan.schema());
 
     // Guard against exponential multi-way cartesian products timing out libFuzzer.
     if count_joins(&plan) > 4 {
@@ -512,27 +541,34 @@ pub fn fuzz_sql(data: &[u8]) {
         metrics: ExecMetrics::default(),
     };
 
-    let _ = execute_plan_json(&plan, &env.sources, &ctx, 16, 256 * 1024);
+    let _ = execute_plan_json(&plan, &env.sources, &ctx, 16, FUZZ_EXPORT_CHUNK_CAP);
 
     if let Ok((schema, mut stream)) = sql_export_plan_stream(&plan, &env.sources, &ctx, 16) {
         let _ = encode_csv_header(&schema);
         let mut pull_res = pool.register("fuzz_export_pull", false);
+        let mut chunk_res = pool.register("fuzz_export_chunk", false);
         for _ in 0..4 {
             match stream.next_batch(&ctx.eval.cancel, Some(&mut pull_res)) {
                 Ok(Some(batch)) => {
                     if !batch.is_empty()
                         && let Ok(ranges) =
-                            export_piece_ranges(&batch, EXPORT_PIECE_BYTES, EXPORT_MAX_CHUNK_BYTES)
+                            export_piece_ranges(&batch, EXPORT_PIECE_BYTES, FUZZ_EXPORT_CHUNK_CAP)
                     {
                         for range in ranges {
                             let _ = encode_csv_chunk(
                                 &batch,
                                 range.clone(),
-                                EXPORT_MAX_CHUNK_BYTES,
-                                None,
+                                FUZZ_EXPORT_CHUNK_CAP,
+                                Some(&mut chunk_res),
                             );
-                            let _ =
-                                encode_ndjson_chunk(&batch, range, EXPORT_MAX_CHUNK_BYTES, None);
+                            chunk_res.free();
+                            let _ = encode_ndjson_chunk(
+                                &batch,
+                                range,
+                                FUZZ_EXPORT_CHUNK_CAP,
+                                Some(&mut chunk_res),
+                            );
+                            chunk_res.free();
                         }
                     }
                     drop(batch);
@@ -546,8 +582,10 @@ pub fn fuzz_sql(data: &[u8]) {
         }
         drop(stream);
         pull_res.free();
+        chunk_res.free();
     }
     assert_eq!(pool.reserved(), 0, "fuzz_sql leaked pool reservation");
+    assert_eq!(env.spill.spilled_bytes(), 0, "fuzz_sql leaked spill bytes");
 }
 
 fn count_joins(plan: &LogicalPlan) -> usize {
@@ -616,10 +654,9 @@ fn try_build_fuzz_sql_env() -> Result<FuzzSqlEnv, crate::error::QueryError> {
     catalog.register_batch_source("dataset_items", Arc::clone(&ds_src))?;
     sources.register("dataset_items", ds_src);
 
-    let spill_dir =
-        tempfile::tempdir().map_err(|e| crate::error::QueryError::internal(e.to_string()))?;
+    let spill_dir = FuzzScratchDir::new()?;
     let spill = Arc::new(SpillManager::with_fixed_cap(
-        spill_dir.path().to_path_buf(),
+        spill_dir.0.clone(),
         1024 * 1024,
     ));
     let workers = Arc::new(WorkerPool::new(1)?);
@@ -920,7 +957,7 @@ pub(crate) mod tests {
                     Value::String("2025-01-01T00:00:00Z".to_owned()),
                 );
             }
-            let plan = prepare_sql_plan(&env.catalog, sql, &params)
+            let plan = crate::sql::prepare_sql_plan(&env.catalog, sql, &params)
                 .unwrap_or_else(|e| panic!("{name} prepare_sql_plan failed: {e}"));
             execute_plan_json(&plan, &env.sources, &ctx, 16, 256 * 1024)
                 .unwrap_or_else(|e| panic!("{name} execute_plan_json failed: {e}"));

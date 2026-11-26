@@ -3,14 +3,15 @@
 
 use std::sync::Arc;
 
-use cetra_column::{Batch, CancelToken, Reservation, Schema, ScopedPool};
+use cetra_column::{Batch, CancelToken, ColumnError, Reservation, Schema, ScopedPool, Selection};
 use serde_json::{Map, Value};
 
-use crate::encode::size::{JSON_ARRAY_BYTES, JSON_ROW_SEPARATOR_BYTES, exceeds};
+use crate::encode::size::{
+    JSON_ARRAY_BYTES, JSON_ROW_SEPARATOR_BYTES, batch_row_sizes_prefix, exceeds,
+};
 use crate::encode::{
-    EXPORT_MAX_ROWS, SQL_MAX_RESULT_BYTES, SQL_MAX_ROWS, SqlJsonResult, batch_row_sizes,
-    encode_csv_chunk, encode_csv_header, encode_json_result, encode_ndjson_chunk,
-    export_piece_ranges,
+    EXPORT_MAX_ROWS, SQL_MAX_RESULT_BYTES, SQL_MAX_ROWS, SqlJsonResult, encode_csv_chunk,
+    encode_csv_header, encode_json_result, encode_ndjson_chunk, export_piece_ranges,
 };
 use crate::error::QueryError;
 use crate::exec::pipeline::ExecContext;
@@ -33,10 +34,29 @@ pub fn prepare_sql_plan(
     sql: &str,
     params_json: &Map<String, Value>,
 ) -> Result<LogicalPlan, QueryError> {
+    prepare_sql_plan_with_limit(catalog, sql, params_json, None)
+}
+
+/// Like [`prepare_sql_plan`], wrapping non-`EXPLAIN` plans in `LIMIT max_rows` before
+/// optimization so bounded `ORDER BY` queries without an explicit `LIMIT` rewrite to `TopK`.
+pub fn prepare_sql_plan_with_limit(
+    catalog: &SqlCatalog,
+    sql: &str,
+    params_json: &Map<String, Value>,
+    max_rows: Option<usize>,
+) -> Result<LogicalPlan, QueryError> {
     let (stmt, placeholders) = parse_and_validate_sql(sql, &catalog.registered_names())?;
     let param_values = parse_param_values(&placeholders, params_json)?;
     let bound = BoundParams::Values(&param_values);
     let plan = bind_statement(&stmt, catalog, &bound)?;
+    let plan = match (max_rows, plan) {
+        (Some(fetch), p) if !matches!(p, LogicalPlan::Explain { .. }) => LogicalPlan::Limit {
+            input: Box::new(p),
+            skip: 0,
+            fetch: Some(fetch),
+        },
+        (_, p) => p,
+    };
     optimize(plan)
 }
 
@@ -82,7 +102,7 @@ pub fn sql_json_within(
     max_bytes: usize,
 ) -> Result<SqlJsonResult, QueryError> {
     validate_json_limit(limit)?;
-    let plan = prepare_sql_plan(catalog, sql, params_json)?;
+    let plan = prepare_sql_plan_with_limit(catalog, sql, params_json, Some(limit + 1))?;
     execute_plan_json(&plan, sources, ctx, limit, max_bytes)
 }
 
@@ -145,12 +165,12 @@ pub fn execute_plan_json(
         let room = limit - rows_kept;
         let mut batch = if batch.num_rows() > room {
             already_truncated = true;
-            batch.slice(0, room)?
+            slice_active_batch(batch, room)?
         } else {
             batch
         };
 
-        let sizes = batch_row_sizes(&batch)?;
+        let sizes = batch_row_sizes_prefix(&schema, &batch, batch.num_rows())?;
         let mut fits = 0usize;
         for &sz in &sizes {
             let next_est = est_bytes
@@ -178,7 +198,7 @@ pub fn execute_plan_json(
         }
         if fits < batch.num_rows() {
             already_truncated = true;
-            batch = batch.slice(0, fits)?;
+            batch = slice_active_batch(batch, fits)?;
         }
 
         if batch.num_rows().saturating_mul(4) < batch.raw_len() {
@@ -231,7 +251,7 @@ pub fn sql_export_stream(
     sql: &str,
     params_json: &Map<String, Value>,
 ) -> Result<(Arc<Schema>, Box<dyn PartitionStream>), QueryError> {
-    let plan = prepare_sql_plan(catalog, sql, params_json)?;
+    let plan = prepare_sql_plan_with_limit(catalog, sql, params_json, Some(EXPORT_MAX_ROWS))?;
     sql_export_plan_stream(&plan, sources, ctx, EXPORT_MAX_ROWS)
 }
 
@@ -429,11 +449,11 @@ impl PartitionStream for RowCapStream {
         let keep = self.remaining;
         self.remaining = 0;
         self.inner = None;
-        let sliced = match batch.slice(0, keep) {
+        let sliced = match slice_active_batch(batch, keep) {
             Ok(b) => b,
             Err(err) => {
                 rollback_res(res, before);
-                return Err(err.into());
+                return Err(err);
             }
         };
         if let Some(r) = res {
@@ -452,6 +472,35 @@ impl PartitionStream for RowCapStream {
     }
 }
 
+fn slice_active_batch(batch: Batch, take: usize) -> Result<Batch, QueryError> {
+    let active = batch.num_rows();
+    if take >= active {
+        return Ok(batch);
+    }
+    let new_sel = match batch.selection() {
+        Selection::All => {
+            let end = u32::try_from(take).map_err(|_| ColumnError::Overflow {
+                reason: "slice length exceeds u32::MAX",
+            })?;
+            Selection::Indices((0..end).collect())
+        }
+        Selection::Mask(mask) => {
+            let indices: Vec<u32> = mask
+                .iter_ones()
+                .take(take)
+                .map(|i| {
+                    u32::try_from(i).map_err(|_| ColumnError::Overflow {
+                        reason: "selection index exceeds u32::MAX",
+                    })
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            Selection::Indices(indices)
+        }
+        Selection::Indices(idx) => Selection::Indices(idx[..take].to_vec()),
+    };
+    Ok(batch.into_with_selection(new_sel)?)
+}
+
 fn rollback_res(res: Option<&mut Reservation>, before: usize) {
     if let Some(r) = res {
         let cur = r.size();
@@ -464,13 +513,15 @@ fn rollback_res(res: Option<&mut Reservation>, before: usize) {
 #[cfg(test)]
 mod tests {
     use cetra_column::{
-        Column, DataType, Field, FlatColumn, FlatData, GlobalPool, Schema, Utf8Data,
+        Bitmap, Column, DataType, Field, FlatColumn, FlatData, GlobalPool, Schema, Utf8Data,
     };
 
     use super::*;
     use crate::encode::{EXPORT_MAX_CHUNK_BYTES, EXPORT_PIECE_BYTES};
-    use crate::exec::{BatchSource, ExecMetrics, SpillManager, WorkerPool};
+    use crate::eval::{read_i64, read_str};
+    use crate::exec::{BatchSource, ExecMetrics, SpillManager, TimeRangeHint, WorkerPool};
     use crate::ir::EvalContext;
+    use crate::sql::SqlViewKind;
 
     fn test_ctx(cap: usize) -> (ExecContext, tempfile::TempDir) {
         let dir = tempfile::tempdir().unwrap();
@@ -666,5 +717,172 @@ mod tests {
             "{\"id\":1,\"label\":\"a\"}\n{\"id\":2,\"label\":\"=1+1\"}\n{\"id\":3,\"label\":\"c\"}\n{\"id\":4,\"label\":\"d\"}\n{\"id\":5,\"label\":\"e\"}\n"
         );
         assert_eq!(ctx.pool.reserved(), 0);
+    }
+
+    fn make_selected_scan_plan(
+        table: &str,
+        batch: Batch,
+    ) -> (LogicalPlan, SqlSources, Arc<Schema>) {
+        let schema = Arc::clone(batch.schema());
+        let src = Arc::new(BatchSource::new(Arc::clone(&schema), vec![batch]).unwrap());
+        let mut sources = SqlSources::new();
+        sources.register(table, src);
+        let plan = LogicalPlan::Scan {
+            table: table.to_owned(),
+            kind: SqlViewKind::Batch,
+            full_schema: Arc::clone(&schema),
+            projection: None,
+            filters: Vec::new(),
+            time_range: TimeRangeHint::default(),
+            id_lookups: Vec::new(),
+            substrings: Vec::new(),
+            map_keys: Vec::new(),
+            limit: None,
+            schema: Arc::clone(&schema),
+        };
+        (plan, sources, schema)
+    }
+
+    fn base_6row_cols() -> (Arc<Schema>, Vec<Column>) {
+        let schema = Schema::try_new_arc(vec![
+            Field::new("id", DataType::I64, false),
+            Field::new("tag", DataType::Utf8, false),
+        ])
+        .unwrap();
+        let cols = vec![
+            Column::Flat(
+                FlatColumn::try_new(FlatData::I64(vec![10, 20, 30, 40, 50, 60]), None).unwrap(),
+            ),
+            Column::Flat(
+                FlatColumn::try_new(
+                    FlatData::Utf8(
+                        Utf8Data::try_from_slices(["r0", "r1", "r2", "r3", "r4", "r5"]).unwrap(),
+                    ),
+                    None,
+                )
+                .unwrap(),
+            ),
+        ];
+        (schema, cols)
+    }
+
+    #[test]
+    fn active_row_slicing_works_for_mask_and_indices_in_json_and_row_cap_stream() {
+        let (schema, cols) = base_6row_cols();
+        let masked_batch = Batch::try_new(
+            Arc::clone(&schema),
+            cols.clone(),
+            6,
+            Selection::Mask(Bitmap::from_bools(&[false, false, true, false, true, true])),
+        )
+        .unwrap();
+        let indices_batch = Batch::try_new(
+            Arc::clone(&schema),
+            cols,
+            6,
+            Selection::Indices(vec![4, 1, 5, 2]),
+        )
+        .unwrap();
+
+        let cases = [
+            ("mask", masked_batch, vec![(30_i64, "r2"), (50, "r4")]),
+            ("indices", indices_batch, vec![(50_i64, "r4"), (20, "r1")]),
+        ];
+
+        for (label, batch, expected) in cases {
+            let (ctx, _dir) = test_ctx(1024 * 1024);
+            let (plan, sources, _) = make_selected_scan_plan("items", batch);
+
+            // 1. execute_plan_json row-limit slice
+            let row_limited =
+                execute_plan_json(&plan, &sources, &ctx, 2, SQL_MAX_RESULT_BYTES).unwrap();
+            assert!(row_limited.truncated, "{label} row_limit truncated");
+            assert_eq!(row_limited.rows.len(), 2, "{label} row_limit len");
+            assert_eq!(row_limited.rows[0]["id"], Value::from(expected[0].0));
+            assert_eq!(row_limited.rows[0]["tag"], Value::from(expected[0].1));
+            assert_eq!(row_limited.rows[1]["id"], Value::from(expected[1].0));
+            assert_eq!(row_limited.rows[1]["tag"], Value::from(expected[1].1));
+            assert_eq!(ctx.pool.reserved(), 0);
+
+            // 2. execute_plan_json byte-cap slice (fits 2 of 3/4 active rows)
+            let byte_limited = execute_plan_json(&plan, &sources, &ctx, 10, 150).unwrap();
+            assert!(byte_limited.truncated, "{label} byte_cap truncated");
+            assert_eq!(byte_limited.rows.len(), 2, "{label} byte_cap len");
+            assert_eq!(byte_limited.rows[0]["id"], Value::from(expected[0].0));
+            assert_eq!(byte_limited.rows[0]["tag"], Value::from(expected[0].1));
+            assert_eq!(byte_limited.rows[1]["id"], Value::from(expected[1].0));
+            assert_eq!(byte_limited.rows[1]["tag"], Value::from(expected[1].1));
+            assert_eq!(ctx.pool.reserved(), 0);
+
+            // 3. RowCapStream slice
+            let (_, mut stream) = sql_export_plan_stream(&plan, &sources, &ctx, 2).unwrap();
+            let mut pull_res = ctx.pool.register("row_cap_test", false);
+            let out = stream
+                .next_batch(&ctx.eval.cancel, Some(&mut pull_res))
+                .unwrap()
+                .expect("expected capped batch");
+            assert_eq!(out.num_rows(), 2, "{label} row_cap num_rows");
+            let compacted = out.compact(None).unwrap();
+            assert_eq!(
+                read_i64(compacted.column(0).unwrap(), 0).unwrap(),
+                expected[0].0
+            );
+            assert_eq!(
+                read_str(compacted.column(1).unwrap(), 0).unwrap(),
+                expected[0].1
+            );
+            assert_eq!(
+                read_i64(compacted.column(0).unwrap(), 1).unwrap(),
+                expected[1].0
+            );
+            assert_eq!(
+                read_str(compacted.column(1).unwrap(), 1).unwrap(),
+                expected[1].1
+            );
+            assert!(
+                stream
+                    .next_batch(&ctx.eval.cancel, Some(&mut pull_res))
+                    .unwrap()
+                    .is_none()
+            );
+            drop(out);
+            drop(stream);
+            pull_res.free();
+            assert_eq!(ctx.pool.reserved(), 0);
+        }
+    }
+
+    #[test]
+    fn prepare_sql_plan_with_limit_triggers_topk_and_skips_explain() {
+        let (catalog, _) = sample_catalog_and_sources();
+        let plan = prepare_sql_plan_with_limit(
+            &catalog,
+            "SELECT id, label FROM dataset_items ORDER BY id DESC",
+            &Map::new(),
+            Some(4),
+        )
+        .unwrap();
+        let has_topk = matches!(
+            &plan,
+            LogicalPlan::TopK {
+                limit: 4,
+                offset: 0,
+                ..
+            }
+        ) || matches!(
+            &plan,
+            LogicalPlan::Project { input, .. }
+                if matches!(input.as_ref(), LogicalPlan::TopK { limit: 4, offset: 0, .. })
+        );
+        assert!(has_topk, "expected TopK(4) rewrite, got: {plan:?}");
+
+        let explain = prepare_sql_plan_with_limit(
+            &catalog,
+            "EXPLAIN SELECT id FROM dataset_items ORDER BY id DESC",
+            &Map::new(),
+            Some(4),
+        )
+        .unwrap();
+        assert!(matches!(explain, LogicalPlan::Explain { .. }));
     }
 }

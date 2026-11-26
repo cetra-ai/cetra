@@ -17,21 +17,21 @@ use cetra_query::exec::{
     BatchSource, DEFAULT_BATCH_SIZE, ExecContext, ExecMetrics, PartitionStream, ScanSource,
     SpillManager, WorkerPool,
 };
+use cetra_query::sql::run::prepare_sql_plan_with_limit;
 use cetra_query::sql::{
     LogicalPlan, SqlCatalog, SqlColumn, SqlSources, TimeWindow, encode_csv_batch_pieces,
-    encode_ndjson_batch_pieces, execute_plan_json, prepare_sql_plan, sql_check as query_sql_check,
+    encode_ndjson_batch_pieces, execute_plan_json, sql_check as query_sql_check,
     sql_export_plan_stream,
 };
 use cetra_query::{EvalContext, QueryError};
 use datafusion::error::DataFusionError;
 use futures::stream::{BoxStream, StreamExt};
 use serde_json::{Map, Value};
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::{OwnedSemaphorePermit, Semaphore, mpsc, oneshot};
 
 use crate::column_bridge::{arrow_schema_to_column, record_batch_to_column};
 use crate::query_error::{InvalidQuery, Position, RunError};
 use crate::sql::{ExportFormat, SqlRequest};
-use crate::verify::Suspects;
 
 use super::admission::AsyncAdmissionPool;
 use super::parquet_export::{PARQUET_CHUNK_BYTES, PARQUET_ROW_GROUP_ROWS, ParquetBatchExporter};
@@ -56,7 +56,7 @@ pub(crate) struct SqlEngineContext {
     visible_from: Option<i64>,
     window: Option<TimeWindow>,
     extra_tables: HashMap<String, Arc<BatchSource>>,
-    suspects: Suspects,
+    coordinator_slots: Arc<Semaphore>,
     target_partitions: usize,
     initial_memory: usize,
     max_memory: usize,
@@ -72,6 +72,10 @@ impl fmt::Debug for SqlEngineContext {
             .field("visible_from", &self.visible_from)
             .field("window", &self.window)
             .field("extra_tables", &extra_names)
+            .field(
+                "coordinator_slots_available",
+                &self.coordinator_slots.available_permits(),
+            )
             .field("target_partitions", &self.target_partitions)
             .field("initial_memory", &self.initial_memory)
             .field("max_memory", &self.max_memory)
@@ -94,10 +98,10 @@ impl SqlEngineContext {
         visible_from: Option<i64>,
         window: Option<TimeWindow>,
         extra_tables: HashMap<String, Arc<BatchSource>>,
-        suspects: Suspects,
     ) -> Self {
         let max_memory = admission.limit();
         let target_partitions = DEFAULT_TARGET_PARTITIONS.min(workers.num_workers().max(1));
+        let max_coordinators = workers.num_workers().saturating_mul(4).max(32);
         Self {
             spans,
             traces,
@@ -108,7 +112,7 @@ impl SqlEngineContext {
             visible_from,
             window,
             extra_tables,
-            suspects,
+            coordinator_slots: Arc::new(Semaphore::new(max_coordinators)),
             target_partitions,
             initial_memory: 0,
             max_memory,
@@ -140,12 +144,6 @@ impl SqlEngineContext {
     pub(crate) fn with_batch_size(mut self, batch_size: usize) -> Self {
         self.batch_size = batch_size.max(1);
         self
-    }
-
-    /// Returns the corrupt-file [`Suspects`] tracker attached to this context.
-    #[allow(dead_code)]
-    pub(crate) fn suspects(&self) -> &Suspects {
-        &self.suspects
     }
 
     /// Returns the admission pool attached to this context.
@@ -246,17 +244,19 @@ impl SqlEngineContext {
             ));
         }
 
+        let deadline = tokio::time::Instant::now() + request.timeout;
         // Synchronous parse + validate + param bind + optimize BEFORE any `.await`.
+        let limit = request.limit;
         let (catalog, sources) = self.build_catalog_and_sources()?;
         let plan =
-            prepare_sql_plan(&catalog, request.query, request.params).map_err(map_query_error)?;
-        let limit = request.limit;
+            prepare_sql_plan_with_limit(&catalog, request.query, request.params, Some(limit + 1))
+                .map_err(map_query_error)?;
 
-        let deadline = tokio::time::Instant::now() + request.timeout;
         let scoped_pool = self.admit_until(deadline).await?;
+        let permit = self.acquire_coordinator_until(deadline).await?;
 
         let cancel = CancelToken::new();
-        let _drop_guard = CancelOnDrop(cancel.clone());
+        let _drop_guard = CancelOnDrop::new(cancel.clone());
         let exec_ctx = self.make_exec_ctx(scoped_pool, cancel.clone());
 
         let (done_tx, mut done_rx) = oneshot::channel();
@@ -264,7 +264,11 @@ impl SqlEngineContext {
             .name("cetra-sql-json".to_owned())
             .stack_size(8 * 1024 * 1024)
             .spawn(move || {
+                let _permit = permit;
                 let res = execute_plan_json(&plan, &sources, &exec_ctx, limit, max_bytes);
+                drop(exec_ctx);
+                drop(plan);
+                drop(sources);
                 let _ = done_tx.send(res);
             })
             .map_err(|e| {
@@ -274,13 +278,7 @@ impl SqlEngineContext {
             })?;
 
         match tokio::time::timeout_at(deadline, &mut done_rx).await {
-            Ok(Ok(result)) => {
-                let _ = tokio::task::spawn_blocking(move || {
-                    let _ = join.join();
-                })
-                .await;
-                result.map_err(map_query_error)
-            }
+            Ok(Ok(result)) => result.map_err(map_query_error),
             Ok(Err(_closed)) => {
                 cancel.cancel();
                 let _ = tokio::task::spawn_blocking(move || {
@@ -356,24 +354,30 @@ impl SqlEngineContext {
         parquet_rows: usize,
         parquet_bytes: usize,
     ) -> Result<BoxStream<'static, Result<Bytes, RunError>>, RunError> {
+        let deadline = tokio::time::Instant::now() + request.timeout;
         // Synchronous parse + validate + param bind + optimize BEFORE any `.await`.
         let (catalog, sources) = self.build_catalog_and_sources()?;
         let plan =
-            prepare_sql_plan(&catalog, request.query, request.params).map_err(map_query_error)?;
+            prepare_sql_plan_with_limit(&catalog, request.query, request.params, Some(row_cap))
+                .map_err(map_query_error)?;
 
-        let deadline = tokio::time::Instant::now() + request.timeout;
         if tokio::time::Instant::now() >= deadline {
             return Ok(timeout_stream());
         }
 
-        let scoped_pool =
-            match tokio::time::timeout_at(deadline, self.admit_for_export(deadline)).await {
-                Ok(Ok(pool)) => pool,
-                Ok(Err(err)) => return Err(err),
-                Err(_) => return Ok(timeout_stream()),
-            };
+        let scoped_pool = match self.admit_until(deadline).await {
+            Ok(pool) => pool,
+            Err(RunError::Timeout) => return Ok(timeout_stream()),
+            Err(err) => return Err(err),
+        };
+        let permit = match self.acquire_coordinator_until(deadline).await {
+            Ok(permit) => permit,
+            Err(RunError::Timeout) => return Ok(timeout_stream()),
+            Err(err) => return Err(err),
+        };
 
         let cancel = CancelToken::new();
+        let mut init_guard = CancelOnDrop::new(cancel.clone());
         let exec_ctx = self.make_exec_ctx(scoped_pool, cancel.clone());
         let (tx, rx) = mpsc::channel::<Result<Bytes, RunError>>(EXPORT_CHANNEL_CAPACITY);
         let (init_tx, init_rx) = oneshot::channel::<Result<(), RunError>>();
@@ -394,7 +398,9 @@ impl SqlEngineContext {
             .name("cetra-sql-export".to_owned())
             .stack_size(8 * 1024 * 1024)
             .spawn(move || {
+                let _permit = permit;
                 run_export_producer(&cfg, init_tx, &tx);
+                drop(cfg);
                 let _ = done_tx.send(());
             })
             .map_err(|e| {
@@ -444,6 +450,7 @@ impl SqlEngineContext {
             deadline,
             done: false,
         };
+        init_guard.disarm();
 
         Ok(futures::stream::unfold(state, |mut state| async move {
             if state.done {
@@ -490,15 +497,13 @@ impl SqlEngineContext {
         deadline: tokio::time::Instant,
     ) -> Result<Arc<ScopedPool>, RunError> {
         let now = tokio::time::Instant::now();
-        let remaining = deadline.saturating_duration_since(now);
-        if remaining.is_zero() {
+        if deadline <= now {
             return Err(RunError::Timeout);
         }
-        let wait = self.admission_wait.min(remaining);
         match tokio::time::timeout_at(
             deadline,
             self.admission
-                .admit(self.initial_memory, self.max_memory, wait),
+                .admit(self.initial_memory, self.max_memory, self.admission_wait),
         )
         .await
         {
@@ -508,16 +513,25 @@ impl SqlEngineContext {
         }
     }
 
-    async fn admit_for_export(
+    async fn acquire_coordinator_until(
         &self,
         deadline: tokio::time::Instant,
-    ) -> Result<Arc<ScopedPool>, RunError> {
-        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
-        let wait = self.admission_wait.min(remaining);
-        self.admission
-            .admit(self.initial_memory, self.max_memory, wait)
-            .await
-            .map_err(map_query_error)
+    ) -> Result<OwnedSemaphorePermit, RunError> {
+        if tokio::time::Instant::now() >= deadline {
+            return Err(RunError::Timeout);
+        }
+        match tokio::time::timeout_at(
+            deadline,
+            Arc::clone(&self.coordinator_slots).acquire_owned(),
+        )
+        .await
+        {
+            Ok(Ok(permit)) => Ok(permit),
+            Ok(Err(_closed)) => Err(RunError::Internal(DataFusionError::Internal(
+                "sql coordinator semaphore closed".to_owned(),
+            ))),
+            Err(_) => Err(RunError::Timeout),
+        }
     }
 
     fn make_exec_ctx(&self, pool: Arc<ScopedPool>, cancel: CancelToken) -> ExecContext {
@@ -582,11 +596,23 @@ impl Drop for ExportStreamState {
     }
 }
 
-struct CancelOnDrop(CancelToken);
+struct CancelOnDrop(Option<CancelToken>);
+
+impl CancelOnDrop {
+    fn new(cancel: CancelToken) -> Self {
+        Self(Some(cancel))
+    }
+
+    fn disarm(&mut self) {
+        self.0 = None;
+    }
+}
 
 impl Drop for CancelOnDrop {
     fn drop(&mut self) {
-        self.0.cancel();
+        if let Some(cancel) = &self.0 {
+            cancel.cancel();
+        }
     }
 }
 
@@ -688,40 +714,42 @@ fn drive_export_loop(
 
         let send_res: Result<bool, QueryError> = match cfg.format {
             ExportFormat::Csv => {
-                let mut closed = false;
                 let r = encode_csv_batch_pieces(
                     &batch,
                     cfg.piece_bytes,
                     cfg.chunk_bytes,
                     &cfg.exec_ctx.pool,
                     |chunk| {
-                        if tx.blocking_send(Ok(Bytes::from(chunk))).is_err() {
-                            closed = true;
+                        if cancel.is_cancelled()
+                            || tx.blocking_send(Ok(Bytes::from(chunk))).is_err()
+                        {
+                            return Err(QueryError::Cancelled);
                         }
                         Ok(())
                     },
                 );
                 drop(batch);
                 pull_res.free();
-                r.map(|()| closed)
+                r.map(|()| false)
             }
             ExportFormat::Ndjson => {
-                let mut closed = false;
                 let r = encode_ndjson_batch_pieces(
                     &batch,
                     cfg.piece_bytes,
                     cfg.chunk_bytes,
                     &cfg.exec_ctx.pool,
                     |chunk| {
-                        if tx.blocking_send(Ok(Bytes::from(chunk))).is_err() {
-                            closed = true;
+                        if cancel.is_cancelled()
+                            || tx.blocking_send(Ok(Bytes::from(chunk))).is_err()
+                        {
+                            return Err(QueryError::Cancelled);
                         }
                         Ok(())
                     },
                 );
                 drop(batch);
                 pull_res.free();
-                r.map(|()| closed)
+                r.map(|()| false)
             }
             ExportFormat::Parquet => {
                 let Some(exp) = parquet_exporter.as_mut() else {
@@ -801,7 +829,7 @@ pub(crate) fn map_query_error(err: QueryError) -> RunError {
         }
         QueryError::Internal(msg) => RunError::Internal(DataFusionError::External(msg.into())),
         QueryError::Busy => {
-            RunError::Internal(DataFusionError::External("query admission busy".into()))
+            RunError::Internal(DataFusionError::External(Box::new(QueryError::Busy)))
         }
     }
 }
@@ -817,7 +845,7 @@ mod tests {
 
     use super::*;
     use crate::memtable::Memtable;
-    use crate::verify::VerifyQueue;
+    use crate::verify::{Suspects, VerifyQueue};
     use crate::wal::Table;
 
     fn empty_engine_ctx(pool_bytes: usize) -> (SqlEngineContext, tempfile::TempDir) {
@@ -862,7 +890,7 @@ mod tests {
                 None,
                 Arc::from([]),
                 cache,
-                suspects.clone(),
+                suspects,
                 rt,
             )
             .unwrap(),
@@ -884,7 +912,6 @@ mod tests {
             None,
             None,
             HashMap::new(),
-            suspects,
         );
         (ctx, dir)
     }
@@ -1011,6 +1038,97 @@ mod tests {
         let first = stream2.next().await.unwrap().unwrap();
         assert!(!first.is_empty());
         drop(stream2);
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        while ctx.admission.used() > 0 && tokio::time::Instant::now() < deadline {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert_eq!(ctx.admission.used(), 0);
+    }
+
+    #[tokio::test]
+    async fn admission_deadline_returns_timeout_and_busy_is_boxed() {
+        let (ctx, _dir) = empty_engine_ctx(1024);
+        let ctx = ctx.with_memory_limits(1024, 1024, Duration::from_secs(5));
+        let held = ctx
+            .admission
+            .admit(1024, 1024, Duration::from_millis(100))
+            .await
+            .unwrap();
+
+        let params = Map::new();
+        let err = ctx
+            .sql_json(SqlRequest {
+                query: "SELECT 1",
+                params: &params,
+                limit: 10,
+                timeout: Duration::from_millis(30),
+            })
+            .await
+            .unwrap_err();
+        assert!(matches!(err, RunError::Timeout), "{err:?}");
+
+        let mut exp_stream = ctx
+            .sql_export_csv(SqlRequest {
+                query: "SELECT 1",
+                params: &params,
+                limit: 10,
+                timeout: Duration::from_millis(30),
+            })
+            .await
+            .unwrap();
+        let first = exp_stream.next().await.unwrap().unwrap_err();
+        assert!(matches!(first, RunError::Timeout), "{first:?}");
+        drop(held);
+
+        let mapped = map_query_error(QueryError::Busy);
+        match mapped {
+            RunError::Internal(DataFusionError::External(inner)) => {
+                assert!(matches!(
+                    inner.downcast_ref::<QueryError>(),
+                    Some(QueryError::Busy)
+                ));
+            }
+            other => panic!("expected boxed QueryError::Busy, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn sql_json_happy_path_releases_memory_and_export_drop_during_init_drains() {
+        let (ctx, _dir) = empty_engine_ctx(64 * 1024 * 1024);
+        let ctx = ctx.with_memory_limits(1024 * 1024, 64 * 1024 * 1024, Duration::from_secs(5));
+        let schema = Schema::try_new_arc(vec![Field::new("v", DataType::I64, false)]).unwrap();
+        let values: Vec<i64> = (0..10_000).collect();
+        let col = Column::Flat(FlatColumn::try_new(FlatData::I64(values), None).unwrap());
+        let batch = Batch::try_new_all(Arc::clone(&schema), vec![col], 10_000).unwrap();
+        let mut ctx = ctx;
+        ctx.register_extra_table(
+            "experiment_items",
+            Arc::new(BatchSource::new(schema, vec![batch]).unwrap()),
+        )
+        .unwrap();
+
+        let params = Map::new();
+        let res = ctx
+            .sql_json(SqlRequest {
+                query: "SELECT v FROM experiment_items ORDER BY v DESC",
+                params: &params,
+                limit: 5,
+                timeout: Duration::from_secs(5),
+            })
+            .await
+            .unwrap();
+        assert_eq!(res.rows.len(), 5);
+        assert!(res.truncated);
+        assert_eq!(ctx.admission.used(), 0);
+
+        // Dropping an export future before init completes cancels and releases admission.
+        let fut = ctx.sql_export_csv(SqlRequest {
+            query: "SELECT sum(a.v + b.v) AS total FROM experiment_items a CROSS JOIN experiment_items b",
+            params: &params,
+            limit: SQL_MAX_ROWS,
+            timeout: Duration::from_secs(30),
+        });
+        let _ = tokio::time::timeout(Duration::from_millis(5), fut).await;
         let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
         while ctx.admission.used() > 0 && tokio::time::Instant::now() < deadline {
             tokio::time::sleep(Duration::from_millis(10)).await;

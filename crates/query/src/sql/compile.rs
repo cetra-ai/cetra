@@ -10,19 +10,19 @@ use cetra_column::{Batch, CancelToken, Column, Reservation, Schema};
 
 use crate::error::QueryError;
 use crate::eval::{build_flat_from_sources, eval_expr};
-use crate::exec::hash_agg::{AggExpr, AggFunc, HashAggSpec, execute_hash_agg_streams};
+use crate::exec::hash_agg::{HashAggSpec, execute_hash_agg_streams};
 use crate::exec::hash_join::{HashJoinSpec, JoinType, execute_hash_join};
 use crate::exec::pipeline::{ControlFlow, ExecContext, PushOperator, run_pipeline};
-use crate::exec::sort_key::SortKey;
-use crate::exec::sort_window::{
-    ExternalSort, FrameBound, WindowFunc, WindowSpec, eval_window_group,
-};
-use crate::exec::source::{BatchSource, PartitionStream, ScanSource, ScanSpec, TimeRangeHint};
+use crate::exec::sort_window::{ExternalSort, eval_window_group};
+use crate::exec::source::{BatchSource, PartitionStream, ScanSource, ScanSpec};
 use crate::exec::streaming::{FilterOp, LimitOp, ProjectOp, TopKSink, UnionSource, UnnestOp};
 use crate::ir::Expr;
 
 use super::catalog::SqlCatalog;
-use super::explain::{explain_batch, format_logical_plan};
+use super::explain::{
+    explain_batch, fmt_agg, fmt_indent, fmt_sort_key, fmt_window_spec, format_logical_plan,
+    has_time_range,
+};
 use super::logical::{LogicalJoinKind, LogicalPlan, explain_schema};
 
 /// Registry mapping canonical lowercase SQL table names to [`ScanSource`]s.
@@ -354,7 +354,7 @@ fn compile_stage(
             if batches.is_empty() {
                 return Ok(CompiledStage::empty(schema));
             }
-            let stream = Box::new(VecBatchStream::new(batches)) as Box<dyn PartitionStream>;
+            let stream = Box::new(VecBatchStream::new(batches, ctx)?) as Box<dyn PartitionStream>;
             Ok(CompiledStage::from_streams(vec![stream], schema))
         }
 
@@ -657,13 +657,23 @@ impl PartitionStream for EmptyStream {
 
 struct VecBatchStream {
     batches: VecDeque<Batch>,
+    queue_res: Reservation,
 }
 
 impl VecBatchStream {
-    fn new(batches: Vec<Batch>) -> Self {
-        Self {
-            batches: batches.into(),
+    fn new(batches: Vec<Batch>, ctx: &ExecContext) -> Result<Self, QueryError> {
+        let mut queue_res = ctx.pool.register("topk_queue", false);
+        let total_bytes: usize = batches
+            .iter()
+            .try_fold(0usize, |acc, b| acc.checked_add(b.memory_bytes()))
+            .ok_or(QueryError::TooLarge)?;
+        if total_bytes > 0 {
+            queue_res.try_grow(total_bytes)?;
         }
+        Ok(Self {
+            batches: batches.into(),
+            queue_res,
+        })
     }
 }
 
@@ -675,14 +685,23 @@ impl PartitionStream for VecBatchStream {
     ) -> Result<Option<Batch>, QueryError> {
         let before = res.as_ref().map_or(0, |r| r.size());
         if cancel.is_cancelled() {
+            self.batches.clear();
+            self.queue_res.free();
             rollback_res(res, before);
             return Err(QueryError::Cancelled);
         }
         let Some(batch) = self.batches.pop_front() else {
+            self.queue_res.free();
             rollback_res(res, before);
             return Ok(None);
         };
-        reconcile_res(res, before, batch.memory_bytes())?;
+        let bytes = batch.memory_bytes();
+        self.queue_res.shrink(self.queue_res.size().min(bytes));
+        if let Err(err) = reconcile_res(res, before, bytes) {
+            self.batches.clear();
+            self.queue_res.free();
+            return Err(err);
+        }
         Ok(Some(batch))
     }
 }
@@ -1026,12 +1045,6 @@ fn reconcile_res(
 // Privacy-safe physical plan formatter
 // ---------------------------------------------------------------------------
 
-fn fmt_indent(depth: usize, out: &mut String) {
-    for _ in 0..depth {
-        out.push_str("  ");
-    }
-}
-
 fn fmt_physical_node(plan: &LogicalPlan, sources: &SqlSources, depth: usize, out: &mut String) {
     if !out.is_empty() {
         out.push('\n');
@@ -1281,116 +1294,6 @@ fn fmt_physical_node(plan: &LogicalPlan, sources: &SqlSources, depth: usize, out
     }
 }
 
-fn has_time_range(tr: TimeRangeHint) -> bool {
-    tr.min_ns.is_some() || tr.max_ns.is_some() || tr.around_ns.is_some()
-}
-
-fn fmt_sort_key(key: &SortKey) -> String {
-    let dir = if key.descending { "DESC" } else { "ASC" };
-    let nulls = if key.nulls_first {
-        "NULLS FIRST"
-    } else {
-        "NULLS LAST"
-    };
-    format!("{} {dir} {nulls}", key.expr.fmt_plan())
-}
-
-fn fmt_agg(agg: &AggExpr) -> String {
-    let base = match &agg.func {
-        AggFunc::CountStar => "count(*)".to_owned(),
-        AggFunc::Count(e) => format!("count({})", e.fmt_plan()),
-        AggFunc::CountDistinct(e) => format!("count(DISTINCT {})", e.fmt_plan()),
-        AggFunc::Sum(e) => format!("sum({})", e.fmt_plan()),
-        AggFunc::SumCostDecimal(e) => format!("sum_cost_decimal({})", e.fmt_plan()),
-        AggFunc::Avg(e) => format!("avg({})", e.fmt_plan()),
-        AggFunc::Min(e) => format!("min({})", e.fmt_plan()),
-        AggFunc::Max(e) => format!("max({})", e.fmt_plan()),
-        AggFunc::BoolOr(e) => format!("bool_or({})", e.fmt_plan()),
-        AggFunc::BoolAnd(e) => format!("bool_and({})", e.fmt_plan()),
-        AggFunc::ApproxPercentileCont { expr, quantile } => {
-            format!("approx_percentile_cont({}, {quantile})", expr.fmt_plan())
-        }
-        AggFunc::PercentileCont { expr, quantile } => {
-            format!(
-                "percentile_cont({quantile}) WITHIN GROUP ({})",
-                expr.fmt_plan()
-            )
-        }
-        AggFunc::ArrayAgg { expr, distinct } => {
-            if *distinct {
-                format!("array_agg(DISTINCT {})", expr.fmt_plan())
-            } else {
-                format!("array_agg({})", expr.fmt_plan())
-            }
-        }
-        AggFunc::FirstNonNullByOrder { value, order_by } => {
-            let ords: Vec<String> = order_by.iter().map(fmt_sort_key).collect();
-            format!(
-                "first_non_null({}, [{}])",
-                value.fmt_plan(),
-                ords.join(", ")
-            )
-        }
-        AggFunc::FirstByOrder { value, order_by } => {
-            let ords: Vec<String> = order_by.iter().map(fmt_sort_key).collect();
-            format!("first({}, [{}])", value.fmt_plan(), ords.join(", "))
-        }
-        AggFunc::TagUnion(e) => format!("tag_union({})", e.fmt_plan()),
-    };
-    let with_filter = match &agg.filter {
-        Some(f) => format!("{base} FILTER (WHERE {})", f.fmt_plan()),
-        None => base,
-    };
-    format!("{with_filter} AS {}", agg.output_name)
-}
-
-fn fmt_window_spec(spec: &WindowSpec) -> String {
-    let f = match &spec.func {
-        WindowFunc::RowNumber => "row_number()".to_owned(),
-        WindowFunc::Rank => "rank()".to_owned(),
-        WindowFunc::DenseRank => "dense_rank()".to_owned(),
-        WindowFunc::Lag {
-            expr,
-            offset,
-            default,
-        } => match default {
-            Some(d) => format!("lag({}, {offset}, {})", expr.fmt_plan(), d.fmt_plan()),
-            None => format!("lag({}, {offset})", expr.fmt_plan()),
-        },
-        WindowFunc::Lead {
-            expr,
-            offset,
-            default,
-        } => match default {
-            Some(d) => format!("lead({}, {offset}, {})", expr.fmt_plan(), d.fmt_plan()),
-            None => format!("lead({}, {offset})", expr.fmt_plan()),
-        },
-        WindowFunc::FirstValue(e) => format!("first_value({})", e.fmt_plan()),
-        WindowFunc::LastValue(e) => format!("last_value({})", e.fmt_plan()),
-        WindowFunc::Sum(e) => format!("sum({})", e.fmt_plan()),
-        WindowFunc::Count(Some(e)) => format!("count({})", e.fmt_plan()),
-        WindowFunc::Count(None) => "count(*)".to_owned(),
-        WindowFunc::Avg(e) => format!("avg({})", e.fmt_plan()),
-        WindowFunc::Min(e) => format!("min({})", e.fmt_plan()),
-        WindowFunc::Max(e) => format!("max({})", e.fmt_plan()),
-    };
-    let frame = match spec.frame {
-        Some((start, end)) => format!(" ROWS BETWEEN {} AND {}", fmt_bound(start), fmt_bound(end)),
-        None => String::new(),
-    };
-    format!("{f}{frame} AS {}", spec.output_name)
-}
-
-fn fmt_bound(b: FrameBound) -> String {
-    match b {
-        FrameBound::UnboundedPreceding => "UNBOUNDED PRECEDING".to_owned(),
-        FrameBound::Preceding(n) => format!("{n} PRECEDING"),
-        FrameBound::CurrentRow => "CURRENT ROW".to_owned(),
-        FrameBound::Following(n) => format!("{n} FOLLOWING"),
-        FrameBound::UnboundedFollowing => "UNBOUNDED FOLLOWING".to_owned(),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use cetra_column::{
@@ -1399,6 +1302,7 @@ mod tests {
 
     use super::*;
     use crate::eval::{read_i64, read_str};
+    use crate::exec::source::TimeRangeHint;
     use crate::exec::{ExecMetrics, SpillManager, WorkerPool};
     use crate::sql::catalog::raw_scores_schema;
     use crate::sql::optimize::optimize;
@@ -1614,5 +1518,50 @@ mod tests {
                 .unwrap()
                 .contains("ScanExec: items")
         );
+    }
+
+    #[test]
+    fn vec_batch_stream_tracks_and_releases_queued_memory() {
+        let schema = Schema::try_new_arc(vec![Field::new("id", DataType::I64, false)]).unwrap();
+        let b1 = Batch::try_new_all(
+            Arc::clone(&schema),
+            vec![Column::Flat(
+                FlatColumn::try_new(FlatData::I64(vec![1, 2]), None).unwrap(),
+            )],
+            2,
+        )
+        .unwrap();
+        let b2 = Batch::try_new_all(
+            Arc::clone(&schema),
+            vec![Column::Flat(
+                FlatColumn::try_new(FlatData::I64(vec![3, 4]), None).unwrap(),
+            )],
+            2,
+        )
+        .unwrap();
+        let bytes1 = b1.memory_bytes();
+        let bytes2 = b2.memory_bytes();
+
+        let (ctx, _dir) = test_ctx(1024 * 1024);
+        let mut stream = VecBatchStream::new(vec![b1, b2], &ctx).unwrap();
+        assert_eq!(ctx.pool.reserved(), bytes1 + bytes2);
+
+        let mut pull_res = ctx.pool.register("pull", false);
+        let got1 = stream
+            .next_batch(&ctx.eval.cancel, Some(&mut pull_res))
+            .unwrap()
+            .unwrap();
+        assert_eq!(got1.num_rows(), 2);
+        assert_eq!(pull_res.size(), bytes1);
+        assert_eq!(stream.queue_res.size(), bytes2);
+        assert_eq!(ctx.pool.reserved(), bytes1 + bytes2);
+
+        drop(got1);
+        pull_res.free();
+        assert_eq!(ctx.pool.reserved(), bytes2);
+
+        // Dropping stream early frees remaining queued memory.
+        drop(stream);
+        assert_eq!(ctx.pool.reserved(), 0);
     }
 }
