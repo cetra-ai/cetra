@@ -1,0 +1,454 @@
+{
+  "label": "vm-q4-qrt",
+  "passed": true,
+  "rules": [
+    {
+      "name": "rss_growth",
+      "verdict": "info",
+      "detail": "not enforced in this run: no growth"
+    },
+    {
+      "name": "fd_growth",
+      "verdict": "info",
+      "detail": "not enforced in this run: no growth"
+    },
+    {
+      "name": "thread_growth",
+      "verdict": "info",
+      "detail": "not enforced in this run: no growth"
+    },
+    {
+      "name": "wal_growth",
+      "verdict": "info",
+      "detail": "not enforced in this run: no growth"
+    },
+    {
+      "name": "memtable_growth",
+      "verdict": "info",
+      "detail": "not enforced in this run: no growth"
+    },
+    {
+      "name": "l0_growth",
+      "verdict": "info",
+      "detail": "not enforced in this run: no growth"
+    },
+    {
+      "name": "query_growth_list",
+      "verdict": "info",
+      "detail": "not enforced in this run: no growth"
+    },
+    {
+      "name": "query_growth_filter",
+      "verdict": "info",
+      "detail": "not enforced in this run: no growth"
+    },
+    {
+      "name": "query_growth_detail",
+      "verdict": "info",
+      "detail": "not enforced in this run: 95th percentiles per quarter grow: [213.973, 281.902, 424.340, 592.241]"
+    },
+    {
+      "name": "query_growth_sessions",
+      "verdict": "info",
+      "detail": "not enforced in this run: no growth"
+    },
+    {
+      "name": "query_growth_metrics",
+      "verdict": "info",
+      "detail": "not enforced in this run: 95th percentiles per quarter grow: [559.233, 995.384, 1412.359, 1935.061]"
+    },
+    {
+      "name": "query_growth_scores",
+      "verdict": "info",
+      "detail": "not enforced in this run: 95th percentiles per quarter grow: [276.441, 351.197, 468.520, 634.970]"
+    },
+    {
+      "name": "rss_max",
+      "verdict": "pass",
+      "detail": ""
+    },
+    {
+      "name": "ingest_rate",
+      "verdict": "pass",
+      "detail": ""
+    },
+    {
+      "name": "compaction_lag",
+      "verdict": "pass",
+      "detail": ""
+    },
+    {
+      "name": "day_close",
+      "verdict": "pass",
+      "detail": ""
+    },
+    {
+      "name": "retention",
+      "verdict": "pass",
+      "detail": ""
+    },
+    {
+      "name": "deletion_lag",
+      "verdict": "pass",
+      "detail": ""
+    },
+    {
+      "name": "orphans",
+      "verdict": "pass",
+      "detail": ""
+    },
+    {
+      "name": "wal_failed",
+      "verdict": "pass",
+      "detail": ""
+    },
+    {
+      "name": "sampling",
+      "verdict": "pass",
+      "detail": ""
+    },
+    {
+      "name": "appends",
+      "verdict": "pass",
+      "detail": ""
+    },
+    {
+      "name": "queries",
+      "verdict": "pass",
+      "detail": ""
+    },
+    {
+      "name": "deletions",
+      "verdict": "pass",
+      "detail": ""
+    },
+    {
+      "name": "retention_calls",
+      "verdict": "pass",
+      "detail": ""
+    },
+    {
+      "name": "log_errors",
+      "verdict": "pass",
+      "detail": ""
+    },
+    {
+      "name": "oracle",
+      "verdict": "pass",
+      "detail": ""
+    },
+    {
+      "name": "settled",
+      "verdict": "pass",
+      "detail": ""
+    }
+  ],
+  "stats": {
+    "elapsed_s": 43739.317574203,
+    "spans_per_s": 987.9638594427112,
+    "payload_bytes_per_span": 4632.476621970833,
+    "payload_total": 203233359950,
+    "scores_written": 856004,
+    "deletions": {
+      "registered": 84,
+      "applied": 84,
+      "pending_at_end": 0,
+      "lag_s": {
+        "p50": 539.572975692,
+        "p95": 1259.613791465,
+        "max": 1859.708637413
+      }
+    },
+    "retention_reports": [
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ]
+    ],
+    "shutdown_s": 5.228995987,
+    "reopen_s": 1.164083595,
+    "compaction_passes": 3,
+    "queries": {
+      "list": {
+        "n": 46664,
+        "p50_ms_median_of_samples": 266.703097,
+        "p95_ms_p95_of_samples": 958.449026,
+        "max_ms": 2495.875608
+      },
+      "filter": {
+        "n": 23249,
+        "p50_ms_median_of_samples": 286.99342900000005,
+        "p95_ms_p95_of_samples": 968.1883610000001,
+        "max_ms": 2536.2057560000003
+      },
+      "detail": {
+        "n": 39001,
+        "p50_ms_median_of_samples": 58.583083,
+        "p95_ms_p95_of_samples": 512.020115,
+        "max_ms": 1491.389034
+      },
+      "sessions": {
+        "n": 15430,
+        "p50_ms_median_of_samples": 284.266966,
+        "p95_ms_p95_of_samples": 847.262934,
+        "max_ms": 1524.2522410000001
+      },
+      "metrics": {
+        "n": 15583,
+        "p50_ms_median_of_samples": 466.940666,
+        "p95_ms_p95_of_samples": 1596.571215,
+        "max_ms": 2799.100284
+      },
+      "scores": {
+        "n": 15349,
+        "p50_ms_median_of_samples": 87.884986,
+        "p95_ms_p95_of_samples": 533.019107,
+        "max_ms": 971.593701
+      }
+    },
+    "appends": {
+      "n": 1389228,
+      "p50_ms_median_of_samples": 15.04139,
+      "p99_ms_p95_of_samples": 58.970546,
+      "max_ms": 1177.033341,
+      "tick_late_p99_ms_p95_of_samples": 16.922023000000003,
+      "tick_late_max_ms": 1120.55211
+    },
+    "rss_bytes": {
+      "min": 1674432512.0,
+      "median": 3369512960.0,
+      "p95": 4440555520.0,
+      "max": 5662724096.0
+    },
+    "fds": {
+      "min": 24.0,
+      "median": 24.0,
+      "p95": 27.0,
+      "max": 32.0
+    },
+    "wal_bytes": {
+      "min": 2479169.0,
+      "median": 129413854.0,
+      "p95": 186909945.0,
+      "max": 197238676.0
+    },
+    "memtable_bytes": {
+      "min": 0.0,
+      "median": 145055731.0,
+      "p95": 265851776.0,
+      "max": 285773475.0
+    },
+    "l0_files": {
+      "min": 0.0,
+      "median": 20.0,
+      "p95": 39.0,
+      "max": 56.0
+    },
+    "l0_oldest_age_s": {
+      "min": 0.0,
+      "median": 182.803218731,
+      "p95": 370.159063453,
+      "max": 401.268677173
+    },
+    "objects_bytes": {
+      "min": 4528519949.0,
+      "median": 23500926982.0,
+      "p95": 40629131446.0,
+      "max": 44688794396.0
+    },
+    "warn_messages_top20": [
+      {
+        "message": "compaction job failed",
+        "count": 52
+      }
+    ]
+  }
+}

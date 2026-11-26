@@ -48,6 +48,7 @@ Growth rules are enforced only when `hours ≥ max(warmup_hours, (retention_days
 | `20261124-vm-noq-12h` | 2026-11-24 | b0e5710 | VM, 12 vCPUs, virtual disk | local | 12 | 1,000, no queries | fail: `rss_max`, `ingest_rate` (0.9885 at worst) | [`soak/20261124-vm-noq-12h/`](soak/20261124-vm-noq-12h/) |
 | `20261124-vm-q-12h` | 2026-11-24 | b0e5710 | VM, 12 vCPUs, virtual disk | local | 12 | 1,000, 1 query/s | fail: `rss_max`, `ingest_rate` | [`soak/20261124-vm-q-12h/`](soak/20261124-vm-q-12h/) |
 | `20261125-vm-q4-12h` | 2026-11-25 | 8487c09 | VM, 12 vCPUs, virtual disk | local | 12 | 1,000, 4 queries/s from 4 tasks | pass (28 rules; growth rules reported, not enforced) | [`soak/20261125-vm-q4-12h/`](soak/20261125-vm-q4-12h/) |
+| `20261125-vm-q4-qrt-12h` | 2026-11-25 | b99b20a | VM, 12 vCPUs, virtual disk | local | 12 | 1,000, 4 queries/s from 4 tasks, query runtime (D-R-39) | pass (28 rules; growth rules reported, not enforced) | [`soak/20261125-vm-q4-qrt-12h/`](soak/20261125-vm-q4-qrt-12h/) |
 
 The VM run is a dry run on a virtual disk, on a shared VM: its numbers are not publishable bare-metal numbers and back no claim.
 
@@ -218,6 +219,72 @@ Per hour: the ingest ratio, the process's CPU, RSS at the end of the hour, and t
   - **RSS stays under 5 GiB with mimalloc (M7-2 was glibc's).** It moves between 2 and 3.5 GB with spikes to 4–4.9 GB on the hour (the hourly retention and oracle round), returns after each, and its baseline rises slowly with the retained data (about 1.8 → 2.6 GB). The glibc runs held 12–15 GB.
   - **Queries delay ingest as the day grows (M7-5).** The append p50 stays at 11–12 ms, but the append p99 grows from 38 to 307 ms and the ticks' lateness p99 from 25 to 453 ms, in step with the queries' latency. A late tick means the ingest task waited for a runtime worker: the queries' DataFusion work runs on the same 8 Tokio workers and keeps them busy longer as the scans grow. Throughput holds; latency does not.
 - **Caveats.** A shared VM on a virtual disk. 12 h does not enforce the growth rules, nor cross a retention drop. The soak's runtime has 8 workers for load, queries and storage alike, like a server's one runtime.
+
+## 20261125-vm-q4-qrt-12h: the same load on the query runtime
+
+`20261125-vm-q4-12h` again, with the query runtime (D-R-39): every query's and every compaction job's DataFusion execution runs on storage's own `cetra-query` runtime (12 workers, the VM's CPU count, at nice 10), and the soak's 8 workers keep the load, ingest and the rest of storage.
+
+- **Machine.** The same VM, alone on it.
+- **Code.** A `git archive` of b99b20a (PR #258).
+- **Command.** As `20261125-vm-q4-12h`, with `CETRA_SOAK_LABEL=vm-q4-qrt`. Started 2026-11-25 14:06 UTC, ended 2026-11-26 02:15 UTC (43,739 s, settle included). Three minutes in, the process had 29 `cetra-query` threads (12 workers and the runtime's blocking threads), all at nice 10.
+- **Result.** Pass: 28 rules, none failed. The growth rules are reported, not enforced, at 12 h.
+
+| hour | ingest | CPU, cores | RSS, GB | append p50, ms | append p99, ms | tick lateness p99, ms |
+|---:|---:|---:|---:|---:|---:|---:|
+| 1 | 1.000 | 1.35 | 2.37 | 12.4 | 34.1 | 3.7 |
+| 2 | 1.000 | 2.27 | 2.94 | 14.7 | 41.3 | 4.6 |
+| 4 | 1.000 | 3.02 | 4.13 | 15.1 | 43.1 | 6.7 |
+| 6 | 1.000 | 3.38 | 4.41 | 15.0 | 41.4 | 7.9 |
+| 8 | 1.000 | 4.13 | 3.20 | 14.9 | 43.1 | 9.0 |
+| 10 | 1.000 | 4.46 | 4.80 | 15.3 | 42.1 | 8.3 |
+| 12 | 1.000 | 4.72 | 5.13 | 15.5 | 42.7 | 7.5 |
+
+Columns as in `20261125-vm-q4-12h`.
+
+| series | min | median | p95 | max |
+|---|---:|---:|---:|---:|
+| RSS, GiB | 1.559 | 3.138 | 4.136 | 5.274 |
+| fds | 24 | 24 | 27 | 32 |
+| threads | 33 | 88 | 89 | 89 |
+| WAL, MiB | 2.364 | 123.4 | 178.3 | 188.1 |
+| memtable, MiB | 0 | 138.3 | 253.5 | 272.5 |
+| spans L0 files | 0 | 20 | 39 | 56 |
+| oldest L0 file, s | 0 | 182.8 | 370.2 | 401.3 |
+| objects, GiB | 4.218 | 21.89 | 37.84 | 41.62 |
+
+Query p95 per hour, the median of the per-minute p95s, in ms, `20261125-vm-q4-12h` → this run:
+
+| hour | list | detail | scores | metrics |
+|---:|---:|---:|---:|---:|
+| 1 | 163 → 194 | 69 → 90 | 72 → 91 | 82 → 110 |
+| 2 | 307 → 453 | 74 → 132 | 104 → 166 | 159 → 252 |
+| 4 | 333 → 547 | 83 → 139 | 113 → 172 | 339 → 452 |
+| 8 | 489 → 589 | 143 → 208 | 169 → 238 | 838 → 868 |
+| 12 | 863 → 846 | 261 → 412 | 277 → 382 | 1,620 → 1,369 |
+
+  - Ingest: 988 spans/s over the run, settle included; 1.000 of target in every hour. No backpressure.
+  - Queries: 3.9–4.0 per second, 155 k in all, no error. p95 of the per-minute p95s: list 958 ms, filter 968 ms, detail 512 ms, sessions 847 ms, metrics 1,597 ms (max 2,799 ms), scores 533 ms.
+  - Appends: 1.39 M; p50 15.0 ms; p99 (p95 of the samples) 59 ms, max 1,177 ms. Ticks: lateness p99 17 ms, max 1,121 ms.
+  - Deletions: 84 registered and applied, lag p95 1,260 s. Shutdown 5.2 s, reopen 1.16 s, settled in 3 passes. The 52 `compaction job failed` warnings in `summary.json` are all `error = "stopped"`, logged within one second at 02:07:09 when the end of the run stopped a deletion pass mid-rewrite, as in `20261122-vm-48h`; none happened during the run. `events.jsonl.gz` is the scrubbed log, gzipped; it holds IDs, sizes and counts only.
+- **Plots.**
+
+![memory](soak/20261125-vm-q4-qrt-12h/plots/memory.png)
+![appends](soak/20261125-vm-q4-qrt-12h/plots/appends.png)
+![ingest](soak/20261125-vm-q4-qrt-12h/plots/ingest.png)
+![queries](soak/20261125-vm-q4-qrt-12h/plots/queries.png)
+![lag](soak/20261125-vm-q4-qrt-12h/plots/lag.png)
+![files](soak/20261125-vm-q4-qrt-12h/plots/files.png)
+![wal and memtable](soak/20261125-vm-q4-qrt-12h/plots/wal_memtable.png)
+![disk](soak/20261125-vm-q4-qrt-12h/plots/disk.png)
+![fds and threads](soak/20261125-vm-q4-qrt-12h/plots/fds_threads.png)
+
+- **What it shows.**
+  - **Queries no longer delay ingest as the day grows (M7-5 fixed).** The ticks' lateness p99 stays between 4 and 9 ms in every hour, where it grew from 25 to 453 ms on the shared runtime, and the append p99 stays at 34–45 ms, where it grew from 38 to 307 ms. Neither follows the queries' latency any more.
+  - **The append p50 is higher, 15 ms instead of 11–12 ms**, from the second hour on and flat. Not investigated: the appends now share the machine's cores with 12 query workers instead of 8 shared workers, and the p50 is still a fifth of the p99 it replaces.
+  - **Short queries are slower, long ones as before.** detail and scores lose 20–70 ms at p95 in the early hours and about 100–150 ms at 12 h; list matches by 12 h, and metrics is faster at 12 h (1,369 against 1,620 ms). The run-wide list, filter, sessions and metrics p95s are within 4% or better; detail (512 against 314 ms) and scores (533 against 353 ms) are worse. Each query now crosses runtimes (spawn and a channel of two batches) and runs at nice 10, and the VM's 12 vCPUs are shared with the host; this run does not tell those apart.
+  - **The rest holds.** RSS peaks at 5.27 GiB (4.88 before), with the same hourly spikes; 29 more threads; spans L0 peaks at 56 files (32 before; p95 39 against 32), with compaction now at nice 10 too; CPU is 0.2–0.7 cores higher per hour.
+  - **Single stalls remain.** The append max (1.2 s) and the tick lateness max (1.1 s) are below the shared runtime's (1.6 s, 1.5 s) but not gone; the hourly maxima do not grow with the data. Their cause (a slow fsync on the virtual disk, a blocking call on the main runtime) is not located.
+- **Caveats.** As `20261125-vm-q4-12h`. One run of each, on a shared VM: the query latency differences are within what a busier host could cause, and an A/B at nice 0 would tell the priority's share from the runtime hop's.
 
 ## Claims
 
