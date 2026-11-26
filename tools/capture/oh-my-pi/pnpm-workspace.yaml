@@ -1,0 +1,9 @@
+packages: []
+
+# Minutes. D74/D117: no release younger than 7 days.
+minimumReleaseAge: 10080
+
+# bun's install script links the platform binary that omp runs on; without it the scenario
+# cannot find the runtime.
+allowBuilds:
+  "bun@1.4.4": true

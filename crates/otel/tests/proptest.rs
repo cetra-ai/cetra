@@ -53,13 +53,65 @@ const PREFIXES: &[&str] = &[
     "traceloop.",
     "langfuse.",
     "lmnr.",
+    "voltagent.",
     "gcp.vertex.agent.",
     "cetra.",
     "embedding.",
     "retrieval.",
     "tool.",
     "llm.request.functions.",
+    "mastra.",
+    "mirascope.",
+    "pydantic_ai.",
 ];
+
+/// Framework keys the rules read or gate on, by their exact names.
+const FRAMEWORK_KEYS: &[&str] = &[
+    "mastra.span.type",
+    "mastra.agent_run.input",
+    "mastra.completion_start_time",
+    "mirascope.type",
+    "mirascope.trace.arg_values",
+    "mirascope.trace.output",
+    "mirascope.ops.session.id",
+    "pydantic_ai.all_messages",
+    "final_result",
+    "executor.id",
+    "edge_group.id",
+    "workflow.id",
+    "gen_ai.server.time_to_first_token",
+    "llm.input_messages.0.function.0",
+];
+
+/// Instrumentation scopes whose names gate framework rules (exact values).
+const SCOPE_GATES: &[&str] = &[
+    "pydantic-ai",
+    "agent_framework",
+    "strands.telemetry.tracer",
+    "mirascope.ops",
+    "mirascope.llm",
+    "@voltagent/core",
+    "cetra-pi",
+    "openclaw",
+    "cetra-opencode",
+    "goose",
+    "@oh-my-pi/pi-agent-core",
+    "hermes-otel-plugin",
+];
+
+/// Span attributes that select an operation or a span type a reader branches on.
+const GATE_VALUES: &[(&str, &str)] = &[
+    ("gen_ai.operation.name", "chat"),
+    ("gen_ai.operation.name", "execute_event_loop_cycle"),
+    ("gen_ai.operation.name", "invoke_agent"),
+    ("gen_ai.operation.name", "execute_tool"),
+    ("mastra.span.type", "agent_run"),
+    ("mastra.span.type", "llm_generation"),
+    ("mastra.span.type", "tool_call"),
+];
+
+/// Keys of the legacy GenAI events' attributes (Strands, Logfire bridges).
+const EVENT_ATTRIBUTE_KEYS: &[&str] = &["content", "message", "id", "finish_reason", "role"];
 
 const PROMOTED: &[&str] = &[
     "service.name",
@@ -103,7 +155,7 @@ const AGENT_SPAN_NAMES: &[&str] = &[
 ];
 
 /// Service names of the coding agents' resources (D-CA-3).
-const AGENT_SERVICE_NAMES: &[&str] = &["codex_exec", "gemini-cli", "claude-code"];
+const AGENT_SERVICE_NAMES: &[&str] = &["codex_exec", "gemini-cli", "claude-code", "qwen-code"];
 
 const GENAI_EVENTS: &[&str] = &[
     "gen_ai.system.message",
@@ -114,9 +166,10 @@ const GENAI_EVENTS: &[&str] = &[
     "gen_ai.client.inference.operation.details",
 ];
 
-const PRECEDENCE: [Convention; 8] = [
+const PRECEDENCE: [Convention; 9] = [
     Convention::Cetra,
     Convention::Genai,
+    Convention::Voltagent,
     Convention::Openinference,
     Convention::Vercel,
     Convention::Openllmetry,
@@ -184,6 +237,15 @@ fn scope_text() -> impl Strategy<Value = String> {
     ]
 }
 
+/// An instrumentation scope name: mostly the sentinel and generated text, and
+/// sometimes exactly a framework's gate value, so the scope-gated rules run.
+fn scope_label() -> impl Strategy<Value = String> {
+    prop_oneof![
+        4 => scope_text().prop_map(|name| format!("{SENTINEL}-{name}")),
+        1 => prop::sample::select(SCOPE_GATES).prop_map(str::to_owned),
+    ]
+}
+
 fn event_name() -> impl Strategy<Value = String> {
     prop_oneof![
         3 => prop::sample::select(GENAI_EVENTS).prop_map(str::to_owned),
@@ -220,6 +282,7 @@ fn key() -> impl Strategy<Value = String> {
         2 => Just(SENTINEL.to_owned()),
         2 => "[a-zA-Z0-9._]{1,24}",
         4 => prop::sample::select([PROMOTED, AGENT_KEYS].concat()).prop_map(str::to_owned),
+        3 => prop::sample::select(FRAMEWORK_KEYS).prop_map(str::to_owned),
     ]
 }
 
@@ -293,10 +356,12 @@ fn attributes() -> impl Strategy<Value = Vec<KeyValue>> {
         prop::collection::vec(kv(generated_value().boxed()), 0..6),
         prop::collection::vec(promoted_kv(), 0..3),
         prop::option::of(dispatch_kv()),
+        prop::option::of(gate_kv()),
     )
-        .prop_map(|(mut items, promoted, dispatch)| {
+        .prop_map(|(mut items, promoted, dispatch, gate)| {
             items.extend(promoted);
             items.extend(dispatch);
+            items.extend(gate);
             if let Some(first) = items.first().cloned() {
                 items.push(first);
             }
@@ -311,6 +376,37 @@ fn dispatch_kv() -> impl Strategy<Value = KeyValue> {
         value: Some(string_value("dispatch".to_owned())),
         key_strindex: 0,
     })
+}
+
+/// An operation or span-type value that a reader branches on, in about half the cases.
+fn gate_kv() -> impl Strategy<Value = KeyValue> {
+    prop::sample::select(GATE_VALUES).prop_map(|(key, value)| KeyValue {
+        key: key.to_owned(),
+        value: Some(string_value(value.to_owned())),
+        key_strindex: 0,
+    })
+}
+
+/// An event's attributes: the generated ones, plus legacy GenAI event attributes
+/// (`content`, `message`, `id`, ...) that the legacy readers parse.
+fn event_attributes() -> impl Strategy<Value = Vec<KeyValue>> {
+    (
+        attributes(),
+        prop::collection::vec(
+            (prop::sample::select(EVENT_ATTRIBUTE_KEYS), text()).prop_map(|(key, value)| {
+                KeyValue {
+                    key: key.to_owned(),
+                    value: Some(string_value(value)),
+                    key_strindex: 0,
+                }
+            }),
+            0..3,
+        ),
+    )
+        .prop_map(|(mut items, legacy)| {
+            items.extend(legacy);
+            items
+        })
 }
 
 /// The resource attributes, with a coding agent's service name in about half the cases.
@@ -370,7 +466,7 @@ fn timestamp() -> impl Strategy<Value = u64> {
 }
 
 fn event() -> impl Strategy<Value = Event> {
-    (event_name(), timestamp(), attributes()).prop_map(|(name, time, attributes)| Event {
+    (event_name(), timestamp(), event_attributes()).prop_map(|(name, time, attributes)| Event {
         time_unix_nano: time,
         name,
         attributes,
@@ -443,7 +539,7 @@ fn request() -> impl Strategy<Value = ExportTraceServiceRequest> {
     prop::collection::vec(
         (
             resource_attributes(),
-            scope_text(),
+            scope_label(),
             scope_text(),
             prop::collection::vec(otlp_span(), 0..=2),
         ),
@@ -461,7 +557,7 @@ fn request() -> impl Strategy<Value = ExportTraceServiceRequest> {
                     }),
                     scope_spans: vec![ScopeSpans {
                         scope: Some(InstrumentationScope {
-                            name: format!("{SENTINEL}-{scope_name}"),
+                            name: scope_name,
                             version: scope_version,
                             attributes: Vec::new(),
                             dropped_attributes_count: 0,

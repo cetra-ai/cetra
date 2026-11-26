@@ -1,0 +1,22 @@
+{
+  "description": "Mastra agent run with one tool call, exported by Mastra's OtelExporter with its default span tree.",
+  "origin": "captured",
+  "source": {
+    "instrumentation": "@mastra/otel-exporter",
+    "instrumentation_version": "1.5.2",
+    "language": "typescript",
+    "libraries": {
+      "@mastra/core": "1.83.0",
+      "@mastra/observability": "1.24.0",
+      "@mastra/otel-exporter": "1.5.2"
+    },
+    "captured_at": "2026-11-23T20:18:52Z"
+  },
+  "spec_refs": [
+    "02 § Convention detection",
+    "02 § Mapping tables / Span kind",
+    "02 § Mapping tables / Model, provider, usage",
+    "02 § Mapping tables / Input / output"
+  ],
+  "notes": "The agent is weather-agent with one tool, get_weather, on openai.chat('gpt-4o-mini') at the mock. The exporter gets the runner's traces endpoint itself, with logs off, and the scenario calls shutdown to flush. The kept tree is invoke_agent [agent] > agent_step [model step] > chat [llm] and execute_tool get_weather, plus generic and model_generation spans; the agent span and its steps carry the run's input and output in mastra.* keys. processor_run and model_chunk spans are dropped: their names and count are exporter internals. mastra.metadata.runId and mastra.metadata.headers (the response date) are random or time-based, and mastra.model_generation.input repeats the prompt with createdAt clock stamps; all three are listed as volatile. mastra.completion_start_time is an instant, shifted with the spans. No telemetry leaves the process: the mock is the only host."
+}

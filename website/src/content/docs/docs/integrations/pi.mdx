@@ -1,0 +1,93 @@
+---
+title: Pi
+description: "Connect pi to cetra with a cetra extension: each prompt becomes one trace of model and tool calls, with the session, tokens and the prompts."
+---
+
+import Backing from "../../../../components/Backing.astro";
+
+This page shows how to send pi's traces to cetra with `cetra agents setup pi`, and what you see in the UI.
+
+<Backing fixtures={["pi/read-file"]} />
+
+pi has no hook and no config file for telemetry. cetra's setup writes an extension that pi loads, and it reads the server and the key from your shell environment.
+
+## Connect pi
+
+1. Create a project key with the `ingest` scope in the project's [API keys](/docs/platform/api-keys/) page. Copy the `sk-cetra-…` value.
+2. Install the `cetra` binary and run this in a terminal, with `<SK_CETRA_KEY>` set to your key and `<CETRA_URL>` set to your server:
+
+```bash
+export CETRA_INGEST_KEY=<SK_CETRA_KEY>
+cetra agents setup pi --url <CETRA_URL>
+```
+
+3. Setup prints `export` lines, with your server and key in them. Add them to your shell profile. Setup does not edit the profile. The lines look like this:
+
+```bash
+export OTEL_EXPORTER_OTLP_ENDPOINT=<CETRA_URL>
+export OTEL_EXPORTER_OTLP_HEADERS=Authorization=Bearer%20<SK_CETRA_KEY>
+export OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT=true
+```
+
+4. Open a new shell so that the lines load, and run pi as usual. Its traces then go to cetra.
+
+The third line turns on the prompts and the answers. Setup prints it only without `--no-content`. With `--no-content`, setup prints `unset OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT` instead, and asks you to remove the content line from your profile if an earlier setup added it.
+
+## What setup writes
+
+`cetra agents setup pi` writes one file, the extension:
+
+- `~/.pi/agent/extensions/cetra.ts`. When `PI_CODING_AGENT_DIR` is set, the file goes to `$PI_CODING_AGENT_DIR/extensions/cetra.ts` instead.
+
+The first line of the file says that cetra wrote it. Setup overwrites the file only when it is missing or has that line. When another file is there, setup stops and writes nothing, so move that file away and run setup again.
+
+The extension loads only when `OTEL_EXPORTER_OTLP_ENDPOINT` is set. Without it, pi runs as before and nothing is sent.
+
+Setup writes no `agents.toml`, because pi has no hook that would read it.
+
+To see the file without writing it, add `--print`. It prints the extension and the `export` lines, and writes nothing.
+
+To undo setup, run this. It deletes the extension when cetra wrote it, and reminds you to remove the `OTEL_*` lines from your shell profile:
+
+```bash
+cetra agents remove pi
+```
+
+## What you get
+
+Each prompt is one trace. Its root is an `agent` span, `invoke_agent`, and each model call and tool call is a child of it.
+
+- each model call is an `llm` span named after the model, such as `chat gpt-4o-mini`, with the model and its input and output tokens;
+- each tool call is a `tool` span named after the tool, such as `read`;
+- the prompt and the answers are on the spans, when content is on.
+
+Each trace has these fields:
+
+- the session, from pi's session id in `gen_ai.conversation.id`;
+- `metadata.coding_agent` set to `pi`.
+
+pi sends no repository, branch or person, because it has no hook. cetra gets none of them for pi traces.
+
+Use the [Coding agents dashboard template](/docs/tracing/custom-dashboards/) to see API-equivalent cost per session and tool usage.
+
+## API-equivalent cost
+
+cetra prices each model call from its token counts, using its price table. pi's spans carry the token counts, and cetra does not read a cost from pi.
+
+API-equivalent cost is what the same tokens would cost at API prices. If you use a subscription plan, it is not what you pay.
+
+## Limits
+
+- Tested with pi 1.5.2, in `pi -p` mode. The interactive terminal interface was not captured.
+- The `OTEL_*` lines must be in your shell profile, or the extension does not load. Without them, pi sends nothing to cetra.
+- The system prompt is not captured. pi keeps it outside the messages.
+- A provider retry gives two `chat` spans for one model call.
+- A compaction summary call is a plain `chat` span. cetra does not mark it as a summary.
+- A broken extension file stops pi. Setup writes only the file that was tested with pi 1.5.2.
+- pi sends no repository, branch or person, so cetra cannot group its traces by repository or branch.
+
+## Next
+
+- [Traces](/docs/tracing/traces/): read the trace as a tree and a timeline.
+- [Sessions](/docs/tracing/sessions/): the calls of one pi session.
+- [Custom dashboards](/docs/tracing/custom-dashboards/): build your own cost views, or start from the Coding agents template.

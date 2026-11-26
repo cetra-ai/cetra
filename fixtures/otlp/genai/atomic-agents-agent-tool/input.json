@@ -1,0 +1,375 @@
+{
+  "resourceSpans": [
+    {
+      "resource": {
+        "attributes": [
+          {
+            "key": "telemetry.sdk.language",
+            "value": {
+              "stringValue": "python"
+            }
+          },
+          {
+            "key": "telemetry.sdk.name",
+            "value": {
+              "stringValue": "opentelemetry"
+            }
+          },
+          {
+            "key": "telemetry.sdk.version",
+            "value": {
+              "stringValue": "1.45.2"
+            }
+          },
+          {
+            "key": "service.name",
+            "value": {
+              "stringValue": "capture-app"
+            }
+          }
+        ],
+        "droppedAttributesCount": 0,
+        "entityRefs": []
+      },
+      "scopeSpans": [
+        {
+          "scope": {
+            "name": "capture.app",
+            "version": "",
+            "attributes": [],
+            "droppedAttributesCount": 0
+          },
+          "spans": [
+            {
+              "traceId": "6c6047b102e76d52a50e66b78fe9399c",
+              "spanId": "ce3ae6c5cf3d4ba9",
+              "traceState": "",
+              "parentSpanId": "",
+              "flags": 256,
+              "name": "turn",
+              "kind": 1,
+              "startTimeUnixNano": "1767225590000000000",
+              "endTimeUnixNano": "1767225590045000000",
+              "attributes": [],
+              "droppedAttributesCount": 0,
+              "events": [],
+              "droppedEventsCount": 0,
+              "links": [],
+              "droppedLinksCount": 0,
+              "status": null
+            }
+          ],
+          "schemaUrl": ""
+        },
+        {
+          "scope": {
+            "name": "atomic_agents",
+            "version": "2.16.0",
+            "attributes": [],
+            "droppedAttributesCount": 0
+          },
+          "spans": [
+            {
+              "traceId": "6c6047b102e76d52a50e66b78fe9399c",
+              "spanId": "1a2c285caa7ac526",
+              "traceState": "",
+              "parentSpanId": "ce3ae6c5cf3d4ba9",
+              "flags": 256,
+              "name": "invoke_agent AtomicAgent",
+              "kind": 1,
+              "startTimeUnixNano": "1767225590000000000",
+              "endTimeUnixNano": "1767225590044000000",
+              "attributes": [
+                {
+                  "key": "gen_ai.operation.name",
+                  "value": {
+                    "stringValue": "invoke_agent"
+                  }
+                },
+                {
+                  "key": "gen_ai.agent.name",
+                  "value": {
+                    "stringValue": "AtomicAgent"
+                  }
+                },
+                {
+                  "key": "atomic_agents.agent.class",
+                  "value": {
+                    "stringValue": "AtomicAgent[BasicChatInputSchema, BasicChatOutputSchema]"
+                  }
+                },
+                {
+                  "key": "gen_ai.request.model",
+                  "value": {
+                    "stringValue": "gpt-4o-mini"
+                  }
+                },
+                {
+                  "key": "atomic_agents.model",
+                  "value": {
+                    "stringValue": "gpt-4o-mini"
+                  }
+                },
+                {
+                  "key": "atomic_agents.mode",
+                  "value": {
+                    "stringValue": "tool_call"
+                  }
+                },
+                {
+                  "key": "atomic_agents.input_schema",
+                  "value": {
+                    "stringValue": "BasicChatInputSchema"
+                  }
+                },
+                {
+                  "key": "atomic_agents.output_schema",
+                  "value": {
+                    "stringValue": "BasicChatOutputSchema"
+                  }
+                },
+                {
+                  "key": "atomic_agents.history.message_count",
+                  "value": {
+                    "intValue": "0"
+                  }
+                },
+                {
+                  "key": "atomic_agents.context_providers",
+                  "value": {
+                    "arrayValue": {
+                      "values": []
+                    }
+                  }
+                },
+                {
+                  "key": "atomic_agents.system_prompt.sha256",
+                  "value": {
+                    "stringValue": "b2b7b028318583b7e1df0db9e7febfbc203bfd0629673fe2572661f7eb87f85c"
+                  }
+                },
+                {
+                  "key": "gen_ai.provider.name",
+                  "value": {
+                    "stringValue": "openai"
+                  }
+                },
+                {
+                  "key": "atomic_agents.input",
+                  "value": {
+                    "stringValue": "{\"chat_message\":\"Read hello.txt and tell me what it says.\"}"
+                  }
+                },
+                {
+                  "key": "gen_ai.response.model",
+                  "value": {
+                    "stringValue": "gpt-4o-mini"
+                  }
+                },
+                {
+                  "key": "atomic_agents.output",
+                  "value": {
+                    "stringValue": "{\"chat_message\":\"I will read hello.txt.\"}"
+                  }
+                },
+                {
+                  "key": "gen_ai.usage.input_tokens",
+                  "value": {
+                    "intValue": "82"
+                  }
+                },
+                {
+                  "key": "gen_ai.usage.output_tokens",
+                  "value": {
+                    "intValue": "17"
+                  }
+                },
+                {
+                  "key": "gen_ai.usage.cache_read.input_tokens",
+                  "value": {
+                    "intValue": "0"
+                  }
+                },
+                {
+                  "key": "gen_ai.usage.reasoning.output_tokens",
+                  "value": {
+                    "intValue": "0"
+                  }
+                },
+                {
+                  "key": "atomic_agents.llm.attempts",
+                  "value": {
+                    "intValue": "1"
+                  }
+                }
+              ],
+              "droppedAttributesCount": 0,
+              "events": [],
+              "droppedEventsCount": 0,
+              "links": [],
+              "droppedLinksCount": 0,
+              "status": {
+                "message": "",
+                "code": 1
+              }
+            },
+            {
+              "traceId": "6c6047b102e76d52a50e66b78fe9399c",
+              "spanId": "56345aea83791784",
+              "traceState": "",
+              "parentSpanId": "1a2c285caa7ac526",
+              "flags": 256,
+              "name": "chat gpt-4o-mini",
+              "kind": 3,
+              "startTimeUnixNano": "1767225590003000000",
+              "endTimeUnixNano": "1767225590042000000",
+              "attributes": [
+                {
+                  "key": "gen_ai.operation.name",
+                  "value": {
+                    "stringValue": "chat"
+                  }
+                },
+                {
+                  "key": "gen_ai.request.model",
+                  "value": {
+                    "stringValue": "gpt-4o-mini"
+                  }
+                },
+                {
+                  "key": "atomic_agents.llm.attempt",
+                  "value": {
+                    "intValue": "1"
+                  }
+                },
+                {
+                  "key": "gen_ai.provider.name",
+                  "value": {
+                    "stringValue": "openai"
+                  }
+                },
+                {
+                  "key": "gen_ai.input.messages",
+                  "value": {
+                    "stringValue": "[{\"role\":\"system\",\"parts\":[{\"type\":\"text\",\"content\":\"# IDENTITY and PURPOSE\\n- This is a conversation with a helpful and friendly AI assistant.\\n\\n# OUTPUT INSTRUCTIONS\\n- Always respond using the proper JSON schema.\\n- Always use the available additional information and context to enhance the response.\"}]},{\"role\":\"user\",\"parts\":[{\"type\":\"text\",\"content\":\"{\\\"chat_message\\\":\\\"Read hello.txt and tell me what it says.\\\"}\"}]}]"
+                  }
+                },
+                {
+                  "key": "gen_ai.response.model",
+                  "value": {
+                    "stringValue": "gpt-4o-mini"
+                  }
+                },
+                {
+                  "key": "gen_ai.usage.input_tokens",
+                  "value": {
+                    "intValue": "82"
+                  }
+                },
+                {
+                  "key": "gen_ai.usage.output_tokens",
+                  "value": {
+                    "intValue": "17"
+                  }
+                },
+                {
+                  "key": "gen_ai.usage.cache_read.input_tokens",
+                  "value": {
+                    "intValue": "0"
+                  }
+                },
+                {
+                  "key": "gen_ai.usage.reasoning.output_tokens",
+                  "value": {
+                    "intValue": "0"
+                  }
+                },
+                {
+                  "key": "gen_ai.output.messages",
+                  "value": {
+                    "stringValue": "[{\"role\":\"assistant\",\"parts\":[{\"type\":\"tool_call\",\"name\":\"BasicChatOutputSchema\",\"arguments\":{\"chat_message\":\"I will read hello.txt.\"},\"id\":\"call_chat_1\"}]}]"
+                  }
+                }
+              ],
+              "droppedAttributesCount": 0,
+              "events": [],
+              "droppedEventsCount": 0,
+              "links": [],
+              "droppedLinksCount": 0,
+              "status": {
+                "message": "",
+                "code": 1
+              }
+            },
+            {
+              "traceId": "6c6047b102e76d52a50e66b78fe9399c",
+              "spanId": "1d2cb6c0f0c2f44c",
+              "traceState": "",
+              "parentSpanId": "ce3ae6c5cf3d4ba9",
+              "flags": 256,
+              "name": "execute_tool ReadFileInput",
+              "kind": 1,
+              "startTimeUnixNano": "1767225590045000000",
+              "endTimeUnixNano": "1767225590045000000",
+              "attributes": [
+                {
+                  "key": "gen_ai.operation.name",
+                  "value": {
+                    "stringValue": "execute_tool"
+                  }
+                },
+                {
+                  "key": "gen_ai.tool.name",
+                  "value": {
+                    "stringValue": "ReadFileInput"
+                  }
+                },
+                {
+                  "key": "atomic_agents.tool.class",
+                  "value": {
+                    "stringValue": "ReadFileTool"
+                  }
+                },
+                {
+                  "key": "gen_ai.tool.type",
+                  "value": {
+                    "stringValue": "function"
+                  }
+                },
+                {
+                  "key": "gen_ai.tool.description",
+                  "value": {
+                    "stringValue": "Path of a file to read from the working directory."
+                  }
+                },
+                {
+                  "key": "gen_ai.tool.call.arguments",
+                  "value": {
+                    "stringValue": "{\"path\":\"hello.txt\"}"
+                  }
+                },
+                {
+                  "key": "gen_ai.tool.call.result",
+                  "value": {
+                    "stringValue": "{\"result\":\"hello from cetra\\n\"}"
+                  }
+                }
+              ],
+              "droppedAttributesCount": 0,
+              "events": [],
+              "droppedEventsCount": 0,
+              "links": [],
+              "droppedLinksCount": 0,
+              "status": {
+                "message": "",
+                "code": 1
+              }
+            }
+          ],
+          "schemaUrl": ""
+        }
+      ],
+      "schemaUrl": ""
+    }
+  ]
+}

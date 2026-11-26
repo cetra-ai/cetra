@@ -1,0 +1,18 @@
+{
+  "description": "Hermes Agent 0.23.2 with the hermes-otel 1.33.0 plugin: one read_file call (hello.txt), then the answer; traces with prompts.",
+  "origin": "captured",
+  "source": {
+    "instrumentation": "hermes-otel",
+    "instrumentation_version": "1.33.0",
+    "language": "typescript",
+    "libraries": {
+      "hermes-agent": "0.23.2",
+      "hermes-otel": "1.33.0"
+    },
+    "captured_at": "2026-11-24T15:18:15Z"
+  },
+  "spec_refs": [
+    "02 § Coding agents"
+  ],
+  "notes": "The telemetry is hermes-otel's, a community plugin installed into Hermes's own environment (D-IN-29 item 7; `cetra agents setup` has no hermes-agent target), configured by .hermes/hermes_otel.yaml with cetra's endpoint and key. The provider is Hermes's custom provider, an OpenAI-compatible endpoint pointed at the mock with the mock key; the spans therefore show provider custom and no cost. Hermes probes the provider beside its turns (POST /api/show, GET /v1/models/gpt-4o-mini, GET /api/v1/models), which the mock answers without a turn. The read tool of the base toolset takes a path relative to the repo. Hermes wraps each model call in an llm.<model> span with no tokens (a chain in cetra's rules) around the api.<model> call that carries them. gen_ai.conversation.id is Hermes's session id, which differs between runs, so it is volatile. The system prompt embeds the repo's git state (the init commit hash differs per run), carried by gen_ai.input.messages and input.value; llm.response.duration_ms and hermes.api.ttfc_ms are measured, so the check ignores their values."
+}

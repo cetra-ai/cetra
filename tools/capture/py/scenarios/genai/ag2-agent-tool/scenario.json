@@ -1,0 +1,53 @@
+{
+  "description": "AG2 agent run with one tool call, traced by AG2's telemetry middleware.",
+  "spec_refs": [
+    "02 § Convention detection",
+    "02 § Mapping tables / Span kind",
+    "02 § Mapping tables / Model, provider, usage",
+    "02 § Mapping tables / Input / output",
+    "02 § Normalization rules"
+  ],
+  "notes": "TelemetryMiddleware on the harness provider, with agent_name weather_agent, provider_name openai and the model name. Each chat span is followed by a record_usage model_call span that repeats its tokens (ag2.span.type usage). The usage span is a span, not an llm span, so the tokens count once (D-IN-23 item 1). ag2.usage.event_id is a random id per run and is volatile.",
+  "instrumentation": "ag2",
+  "libraries": [
+    "ag2",
+    "opentelemetry-sdk"
+  ],
+  "volatile_attributes": [
+    "ag2.usage.event_id"
+  ],
+  "turns": [
+    {
+      "api": "openai.chat",
+      "model": "gpt-4o-mini-2024-07-18",
+      "message": {
+        "tool_calls": [
+          {
+            "id": "call_weather_1",
+            "name": "get_weather",
+            "arguments": {
+              "city": "Paris"
+            }
+          }
+        ]
+      },
+      "finish": "tool_calls",
+      "usage": {
+        "input": 82,
+        "output": 17
+      }
+    },
+    {
+      "api": "openai.chat",
+      "model": "gpt-4o-mini-2024-07-18",
+      "message": {
+        "text": "It is sunny in Paris."
+      },
+      "finish": "stop",
+      "usage": {
+        "input": 131,
+        "output": 12
+      }
+    }
+  ]
+}

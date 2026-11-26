@@ -1,0 +1,44 @@
+[project]
+name = "cetra-capture-env-livekit"
+version = "0.0.0"
+requires-python = "==3.13.*"
+dependencies = [
+  # LiveKit Agents, text mode (M6 captures A, spikes/m6-apps.md § 4). Its own environment:
+  # livekit-agents needs json-repair 0.63, which beeai-framework (tools/capture/py) does not allow.
+  "livekit-agents==1.8.12",
+  "livekit-plugins-openai==1.8.12",
+  # The capture harness, a package of its own (tools/capture/harness, module capture_py).
+  "cetra-capture-harness",
+]
+
+[dependency-groups]
+dev = ["ruff==0.17.3", "mypy==2.4.1"]
+
+[tool.uv]
+package = false
+exclude-newer = "7 days" # D74/D117: no release younger than 7 days
+
+[tool.uv.sources]
+cetra-capture-harness = { path = "../../harness", editable = true }
+
+[tool.ruff]
+target-version = "py313"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "W", "F", "I", "B", "UP", "SIM", "RUF", "PT", "ANN", "S", "BLE", "N"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["capture_py"]
+
+[tool.mypy]
+strict = true
+python_version = "3.13"
+files = ["scenarios"]
+# Every scenario entry point is main.py. mypy maps those paths to one module.
+exclude = ["main\\.py$"]
+
+# livekit's decorators and session classes are typed loosely; the scenario only has to run.
+[[tool.mypy.overrides]]
+module = "livekit.*"
+ignore_missing_imports = true

@@ -1,0 +1,70 @@
+---
+title: UQLM
+description: "Run UQLM scorers and send each result to cetra as a score on the trace, with the sampled model calls traced. Setup only: not run."
+---
+
+UQLM measures how consistent a model's answers are, by generating several responses to the same prompt and comparing them. This page traces the model calls it makes and sends each scorer result to cetra as a score on the trace. It is setup only: the sample was not run.
+
+## Install
+
+```bash
+pip install "cetra-sdk[openai]" uqlm langchain-openai
+```
+
+## Set up
+
+UQLM generates its samples with the langchain chat model you pass it. A `ChatOpenAI` model makes its calls with the OpenAI SDK, which cetra's OpenAI instrumentation traces, as on the [OpenAI](/docs/integrations/openai/) page. Score inside a span, so the score has a trace to attach to:
+
+{/* untested: needs OPENAI_API_KEY and CETRA_API_KEY; the scorer run was checked in the spike offline, this wiring was not run */}
+```python
+import asyncio
+
+import cetra
+from langchain_openai import ChatOpenAI
+from uqlm import BlackBoxUQ
+
+cetra.init(instrument=["openai"])
+
+scorers = ["exact_match"]
+scorer = BlackBoxUQ(llm=ChatOpenAI(model="gpt-4o-mini"), scorers=scorers)
+
+
+async def main() -> None:
+    question = "What is the capital of France?"
+    async with cetra.span("uqlm", input={"question": question}):
+        result = await scorer.generate_and_score(
+            prompts=[question],
+            num_responses=3,
+            show_progress_bars=False,
+        )
+        for row in result.to_df().to_dict("records"):
+            for name in scorers:
+                cetra.score(
+                    trace_id=cetra.current_trace_id(),
+                    name=name,
+                    value=row[name],
+                )
+
+
+asyncio.run(main())
+cetra.flush()
+```
+
+Set `CETRA_API_KEY` to your `sk-cetra-…` key first.
+
+## What you get
+
+- One `llm` span for each model call: the answer and each sampled candidate are separate calls, so a prompt with `num_responses=3` makes four.
+- One numeric score per scorer and per prompt, named after the scorer, on the trace of the `uqlm` span. `exact_match` is the share of sampled candidates that equal the answer exactly, from 0 to 1.
+
+## Limits
+
+- Setup only: the sample on this page was not run. The spike ran `BlackBoxUQ` with `exact_match` and read the resulting table; the `cetra.score` wiring was not run.
+- UQLM writes no spans of its own. The trace holds your `uqlm` span and the model spans of the OpenAI instrumentation.
+- The scorers other than `exact_match` download models from Hugging Face on first use. They were not run.
+- One answer plus one call per sampled candidate means the trace grows with `num_responses` and the number of prompts.
+
+## Next
+
+- [Scores](/docs/evaluation/scores/): the score API and how scores are read.
+- [OpenAI](/docs/integrations/openai/): the instrumentation that traces the sampled calls.

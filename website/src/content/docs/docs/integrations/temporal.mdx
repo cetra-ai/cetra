@@ -1,0 +1,92 @@
+---
+title: Temporal
+description: "Trace OpenAI Agents SDK workflows on Temporal with cetra from Python, through Temporal's OpenAI Agents plugin."
+---
+
+import { Tabs, TabItem } from "@astrojs/starlight/components";
+import Backing from "../../../../components/Backing.astro";
+
+Trace OpenAI Agents SDK workflows on Temporal with cetra from Python, through Temporal's OpenAI Agents plugin.
+
+<Backing fixtures={["openinference/temporal-openai-agents"]} />
+
+## Install
+
+<Tabs syncKey="lang">
+  <TabItem label="Python">
+
+```bash
+pip install cetra-sdk "temporalio-openai-agents[openinference]" temporalio
+```
+
+  </TabItem>
+</Tabs>
+
+## Set up
+
+<Tabs syncKey="lang">
+  <TabItem label="Python">
+
+{/* untested: needs a Temporal server and an OpenAI key */}
+```python
+import asyncio
+
+from opentelemetry import trace
+from temporalio.client import Client
+from temporalio.contrib.opentelemetry import OpenTelemetryPlugin, create_tracer_provider
+from temporalio.openai_agents import OpenAIAgentsPlugin
+
+import cetra
+
+provider = create_tracer_provider()
+trace.set_tracer_provider(provider)
+cetra.init(use_global_provider=True)
+
+
+async def main() -> None:
+    client = await Client.connect(
+        "localhost:7233",
+        plugins=[
+            OpenAIAgentsPlugin(use_otel_instrumentation=True),
+            OpenTelemetryPlugin(add_temporal_spans=True),
+        ],
+    )
+    # Run workers and workflows as usual.
+
+
+asyncio.run(main())
+```
+
+  </TabItem>
+</Tabs>
+
+Set the tracer provider before `cetra.init()`: with `use_global_provider=True`, cetra adds its exporter to the provider you set instead of building its own.
+
+`OpenAIAgentsPlugin(use_otel_instrumentation=True)` instruments the OpenAI Agents SDK itself. `OpenTelemetryPlugin(add_temporal_spans=True)` adds Temporal's own workflow and activity spans. Define your workflows in their own module, not in the one you run: the worker re-imports it, and a workflow defined in `__main__` fails to validate.
+
+For tests and local runs, `WorkflowEnvironment.start_local()` starts the dev server; pass `dev_server_existing_path` if you want it to use a Temporal CLI binary you already have, because otherwise the SDK downloads one at runtime.
+
+## What you get
+
+A workflow that runs an agent with one activity tool produces:
+
+- an `agent` span for the workflow and one for the agent;
+- one `chain` span per turn, and one pair of `temporal:startActivity` and `temporal:executeActivity` `chain` spans around each model call and each tool;
+- an `llm` span for each model call, with the provider, the token counts, the cost computed from the prices, and the messages, with the tool call and the tool result on the turns that have them;
+- a `tool` span for the activity tool, with its input and output.
+
+The span shapes are those of the [OpenAI Agents](/docs/integrations/openai-agents/) page. With `OpenTelemetryPlugin(add_temporal_spans=True)`, Temporal's own `StartWorkflow`, `RunWorkflow`, `StartActivity` and `RunActivity` spans arrive too, as plain spans that carry no convention.
+
+## Limits
+
+- The fixture was captured with `temporalio` 1.36.1, `temporalio-openai-agents` 2.0.0, `openai-agents` 0.24.0, OpenInference 2.7.0 and the Temporal CLI 1.10.1.
+- `temporalio-openai-agents` 2.0.0 is the version for `openai-agents` 0.24.x; 1.1.0 needs 0.22.x.
+- Do not also pass `instrument=["openai-agents"]`: the plugin instruments the OpenAI Agents SDK itself, and the calls would be recorded twice.
+- With `use_global_provider=True`, cetra's default export filter keeps only spans of LLM instrumentations, so Temporal's own workflow and activity spans are not sent. The `export_filter` option keeps them; see [Python OpenTelemetry](/docs/reference/python/opentelemetry/).
+- If a field is missing, look at the span's **Attributes** tab and compare it with [Span attributes](/docs/reference/attributes/).
+
+## Next
+
+- [Traces](/docs/tracing/traces/): read the trace as a tree and a timeline.
+- [Cost and tokens](/docs/tracing/cost-and-tokens/): how cost is computed from the token counts.
+- [Online rules](/docs/evaluation/online-rules/): score these traces automatically.

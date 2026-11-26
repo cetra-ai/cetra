@@ -1,0 +1,98 @@
+---
+title: TanStack AI
+description: "Trace TanStack AI chats with cetra from TypeScript, through OpenInference's TanStack AI middleware: the chat, its model calls and its tool calls."
+---
+
+import { Tabs, TabItem } from "@astrojs/starlight/components";
+import Backing from "../../../../components/Backing.astro";
+
+cetra traces TanStack AI chats from TypeScript, through OpenInference's TanStack AI middleware: the chat, its model calls and its tool calls.
+
+<Backing fixtures={["openinference/tanstack-ai-tool"]} />
+
+## Install
+
+<Tabs syncKey="lang">
+  <TabItem label="TypeScript">
+
+```bash
+npm install @tanstack/ai @tanstack/ai-openai @arizeai/openinference-tanstack-ai @opentelemetry/api @opentelemetry/sdk-trace-node @opentelemetry/exporter-trace-otlp-proto zod
+```
+
+  </TabItem>
+</Tabs>
+
+## Set up
+
+The middleware emits through the tracer you give it. Register a tracer provider with an OTLP exporter pointed at cetra, and pass the middleware to `chat`. Set `CETRA_API_KEY` to your `sk-cetra-…` key; the OpenAI adapter reads `OPENAI_API_KEY`.
+
+<Tabs syncKey="lang">
+  <TabItem label="TypeScript">
+
+{/* untested: calls OpenAI through TanStack AI and needs CETRA_API_KEY and OPENAI_API_KEY */}
+```ts
+import { readFileSync } from "node:fs";
+import { openInferenceMiddleware } from "@arizeai/openinference-tanstack-ai";
+import { trace } from "@opentelemetry/api";
+import { OTLPTraceExporter } from "@opentelemetry/exporter-trace-otlp-proto";
+import { BatchSpanProcessor, NodeTracerProvider } from "@opentelemetry/sdk-trace-node";
+import { chat, toolDefinition } from "@tanstack/ai";
+import { openaiText } from "@tanstack/ai-openai";
+import { z } from "zod";
+
+const provider = new NodeTracerProvider({
+  spanProcessors: [
+    new BatchSpanProcessor(
+      new OTLPTraceExporter({
+        url: "http://<HOST>:8080/v1/traces",
+        headers: { Authorization: `Bearer ${process.env.CETRA_API_KEY}` },
+      }),
+    ),
+  ],
+});
+provider.register();
+
+const tracer = trace.getTracer("my-app");
+const readFile = toolDefinition({
+  name: "read_file",
+  description: "Read a file from disk",
+  inputSchema: z.object({ path: z.string() }),
+  outputSchema: z.object({ content: z.string() }),
+}).server(async ({ path }) => ({ content: readFileSync(path, "utf8") }));
+
+// The OpenAI adapter calls the Responses API. Consuming the stream drives the
+// run: the model calls and the tools execute while it is iterated.
+const stream = chat({
+  adapter: openaiText("gpt-4o-mini"),
+  messages: [{ role: "user", content: "Read hello.txt and tell me what it says." }],
+  tools: [readFile],
+  middleware: [openInferenceMiddleware({ tracer })],
+});
+for await (const chunk of stream) {
+  // Handle the stream's chunks.
+}
+```
+
+  </TabItem>
+</Tabs>
+
+## What you get
+
+With one tool call, a chat produces:
+
+- an `agent` span named `ai.chat` as the trace root, with the chat's input (its messages and tool names) as its input and the answer as its output;
+- an `llm` span named `ai.llm 1`, `ai.llm 2`, … for each model call, with the provider `openai`, the model, the token counts, the cost computed from the built-in prices, and the messages;
+- a `tool` span named `ai.tool read_file`, with the arguments as its input and the result as its output.
+
+## Limits
+
+- This page's route is OpenInference's middleware. TanStack's own `otelMiddleware` also exports spans, but its root span repeats the run's token counts and cetra reads it as a model call, so the tokens count twice (from TanStack AI's source, not captured; the citation is in the fixture's case notes).
+- The OpenAI adapter calls the Responses API, streamed.
+- The fixture was captured with `@tanstack/ai` 1.5.0, `@tanstack/ai-openai` 1.1.1 and `@arizeai/openinference-tanstack-ai` 0.3.5.
+- If a field is missing, look at the span's **Attributes** tab and compare it with [Span attributes](/docs/reference/attributes/).
+
+## Next
+
+- [Traces](/docs/tracing/traces/): read the trace as a tree and a timeline.
+- [Cost and tokens](/docs/tracing/cost-and-tokens/): how cost is computed from the token counts.
+- [Online rules](/docs/evaluation/online-rules/): score these traces automatically.

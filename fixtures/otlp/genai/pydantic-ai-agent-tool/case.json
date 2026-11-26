@@ -1,0 +1,21 @@
+{
+  "description": "Pydantic AI agent run with one tool call, traced by Pydantic AI's own OpenTelemetry support with message content.",
+  "origin": "captured",
+  "source": {
+    "instrumentation": "pydantic-ai-slim",
+    "instrumentation_version": "2.68.0",
+    "language": "python",
+    "libraries": {
+      "opentelemetry-sdk": "1.45.2",
+      "pydantic-ai-slim": "2.68.0"
+    },
+    "captured_at": "2026-11-23T20:01:48Z"
+  },
+  "spec_refs": [
+    "02 § Convention detection",
+    "02 § Mapping tables / Span kind",
+    "02 § Mapping tables / Model, provider, usage",
+    "02 § Mapping tables / Input / output"
+  ],
+  "notes": "Agent.instrument_all sets Pydantic AI's instrumentation to the harness provider with include_content on. The model is OpenAIChatModel pointed at the mock. The tree is invoke_agent [agent], then chat [llm], execute_tool get_weather [tool], and chat [llm] again. The agent span's input is pydantic_ai.all_messages and its output is final_result. Each llm span's input and output are gen_ai.input.messages and gen_ai.output.messages. Tool call tool_call_response parts carry result, not response. gen_ai.agent.call.id and gen_ai.conversation.id are UUIDv7 values that change per run and are listed as volatile. No telemetry leaves the process: the mock is the only host."
+}

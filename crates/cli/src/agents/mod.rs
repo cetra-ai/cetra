@@ -1,10 +1,17 @@
-//! `cetra agents`: connects coding agents (Claude Code, Codex, Gemini CLI, Copilot) to cetra
-//! (track CA, M4). `setup` writes the agent's user settings and `remove` takes them back;
-//! `hook` posts a session's repository, branch and person. `agents.toml` holds the server, key
-//! and person the hook posts with.
+//! `cetra agents`: connects coding agents (Claude Code, Codex, Gemini CLI, Copilot, Pi, Qwen Code,
+//! OpenClaw, OpenCode, Goose, Oh My Pi) to cetra (track CA, M4; Pi, Qwen Code, OpenClaw, OpenCode,
+//! Goose and Oh My Pi in track IN, M7). `setup` writes the agent's user settings and `remove` takes
+//! them back; `hook` posts a session's repository, branch and person. `agents.toml` holds the
+//! server, key and person the hook posts with.
 
 mod codex;
+mod goose;
 pub(crate) mod hook;
+mod oh_my_pi;
+mod openclaw;
+mod opencode;
+mod pi;
+mod qwen_code;
 mod setup;
 
 use std::fmt;
@@ -18,7 +25,7 @@ use serde::{Deserialize, Serialize};
 use crate::client::Token;
 use crate::credentials::write_private_file;
 
-/// The coding agents `cetra agents` configures (D-CA-1). Wire names are D-CA-4's.
+/// The coding agents `cetra agents` configures (D-CA-1, D-IN-28). Wire names are D-CA-4's.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
 pub(crate) enum Agent {
     #[value(name = "claude-code")]
@@ -29,6 +36,24 @@ pub(crate) enum Agent {
     GeminiCli,
     #[value(name = "copilot")]
     Copilot,
+    /// Pi: its extension file is written by setup; no hook (D-IN-28 item 9).
+    #[value(name = "pi")]
+    Pi,
+    /// Qwen Code: a Gemini CLI fork, set up like Gemini CLI (D-IN-28 item 7).
+    #[value(name = "qwen-code")]
+    QwenCode,
+    /// OpenClaw: setup installs its diagnostics plugin and merges its config (D-IN-28 items 5, 6).
+    #[value(name = "openclaw")]
+    OpenClaw,
+    /// OpenCode: cetra's plugin and its config file are written by setup; no hook (D-IN-29).
+    #[value(name = "opencode")]
+    OpenCode,
+    /// Goose: setup prints its environment lines; no hook (D-IN-29).
+    #[value(name = "goose")]
+    Goose,
+    /// Oh My Pi: setup writes its .env lines; no hook (D-IN-29).
+    #[value(name = "oh-my-pi")]
+    OhMyPi,
 }
 
 impl Agent {
@@ -38,6 +63,12 @@ impl Agent {
             Self::Codex => "codex",
             Self::GeminiCli => "gemini-cli",
             Self::Copilot => "copilot",
+            Self::Pi => "pi",
+            Self::QwenCode => "qwen-code",
+            Self::OpenClaw => "openclaw",
+            Self::OpenCode => "opencode",
+            Self::Goose => "goose",
+            Self::OhMyPi => "oh-my-pi",
         }
     }
 }

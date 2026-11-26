@@ -1,0 +1,265 @@
+{
+  "spans": [
+    {
+      "project_id": "01900000-0000-7000-8000-000000000001",
+      "trace_id": "c621da4877f4a89f1f05c3d252395325",
+      "span_id": "8c41a6632b1d9671",
+      "name": "create_agent weather_agent",
+      "span_kind": "agent",
+      "start_time": "2025-12-31T23:59:50.000000000Z",
+      "end_time": "2025-12-31T23:59:50.000000000Z",
+      "status": "unset",
+      "service_name": "capture-app",
+      "operation": "create_agent",
+      "attributes": {
+        "gen_ai.agent.description": "An agent that provides assistance with ability to use tools.",
+        "gen_ai.agent.name": "weather_agent",
+        "gen_ai.operation.name": "create_agent",
+        "gen_ai.system": "autogen"
+      },
+      "resource_attributes": {
+        "telemetry.sdk.language": "python",
+        "telemetry.sdk.name": "opentelemetry",
+        "telemetry.sdk.version": "1.45.2"
+      },
+      "scope_name": "autogen-core",
+      "conventions": [
+        "genai"
+      ],
+      "ingest_time": "2026-01-01T00:00:00.000000000Z",
+      "schema_version": 2
+    },
+    {
+      "project_id": "01900000-0000-7000-8000-000000000001",
+      "trace_id": "f3445b28721093fe615c94c1186d0511",
+      "span_id": "b4a0d17568c35de2",
+      "name": "invoke_agent weather_agent",
+      "span_kind": "agent",
+      "start_time": "2025-12-31T23:59:50.002000000Z",
+      "end_time": "2025-12-31T23:59:50.109000000Z",
+      "status": "unset",
+      "service_name": "capture-app",
+      "operation": "invoke_agent",
+      "attributes": {
+        "gen_ai.agent.description": "An agent that provides assistance with ability to use tools.",
+        "gen_ai.agent.name": "weather_agent",
+        "gen_ai.operation.name": "invoke_agent",
+        "gen_ai.system": "autogen"
+      },
+      "resource_attributes": {
+        "telemetry.sdk.language": "python",
+        "telemetry.sdk.name": "opentelemetry",
+        "telemetry.sdk.version": "1.45.2"
+      },
+      "scope_name": "autogen-core",
+      "conventions": [
+        "genai"
+      ],
+      "ingest_time": "2026-01-01T00:00:00.000000000Z",
+      "schema_version": 2
+    },
+    {
+      "project_id": "01900000-0000-7000-8000-000000000001",
+      "trace_id": "f3445b28721093fe615c94c1186d0511",
+      "span_id": "f87a276db2692340",
+      "parent_span_id": "b4a0d17568c35de2",
+      "name": "weather_agent.on_messages_stream",
+      "span_kind": "agent",
+      "start_time": "2025-12-31T23:59:50.002000000Z",
+      "end_time": "2025-12-31T23:59:50.110000000Z",
+      "status": "ok",
+      "service_name": "capture-app",
+      "input": "{\"messages\": [\"id='00000000-0000-0000-0000-000000000001' source='user' models_usage=None metadata={} created_at=datetime.datetime(2026, 1, 1, 0, 0, tzinfo=datetime.timezone.utc) content='What is the weather in Paris?' type='TextMessage'\"], \"cancellation_token\": \"<CancellationToken>\"}",
+      "input_format": "text",
+      "input_preview": "{\"messages\": [\"id='00000000-0000-0000-0000-000000000001' source='user' models_usage=None metadata={} created_at=datetime.datetime(2026, 1, 1, 0, 0, tzinfo=datetime.timezone.utc) content='What is the weather in Paris?' type='TextMessage'\"], \"cancellation_token\": \"<CancellationToken>\"}",
+      "attributes": {
+        "graph.node.id": "weather_agent",
+        "graph.node.parent_id": "start",
+        "openinference.span.kind": "AGENT"
+      },
+      "resource_attributes": {
+        "telemetry.sdk.language": "python",
+        "telemetry.sdk.name": "opentelemetry",
+        "telemetry.sdk.version": "1.45.2"
+      },
+      "scope_name": "openinference.instrumentation.autogen_agentchat",
+      "scope_version": "0.1.29",
+      "events": [
+        {
+          "time": "2025-12-31T23:59:50.110000000Z",
+          "name": "exception",
+          "attributes": "{\"exception.type\":\"asyncio.exceptions.CancelledError\",\"exception.message\":\"\",\"exception.stacktrace\":\"Traceback (most recent call last):\\n  File \\\"/capture/tools/capture/py/.venv/lib/python3.13/site-packages/openinference/instrumentation/autogen_agentchat/_wrappers.py\\\", line 217, in wrapped_generator\\n    yield event\\nasyncio.exceptions.CancelledError\\n\",\"exception.escaped\":\"False\"}"
+        }
+      ],
+      "conventions": [
+        "openinference"
+      ],
+      "ingest_time": "2026-01-01T00:00:00.000000000Z",
+      "schema_version": 2
+    },
+    {
+      "project_id": "01900000-0000-7000-8000-000000000001",
+      "trace_id": "f3445b28721093fe615c94c1186d0511",
+      "span_id": "92da1c7038f51691",
+      "parent_span_id": "f87a276db2692340",
+      "name": "OpenAIChatCompletionClient.create",
+      "span_kind": "llm",
+      "start_time": "2025-12-31T23:59:50.003000000Z",
+      "end_time": "2025-12-31T23:59:50.071000000Z",
+      "status": "ok",
+      "service_name": "capture-app",
+      "provider": "openai",
+      "request_model": "gpt-4o-mini-2024-07-18",
+      "input_tokens": 82,
+      "output_tokens": 17,
+      "total_tokens": 99,
+      "cost_input": 0.000082,
+      "cost_output": 0.000068,
+      "cost_total": 0.00015000000000000001,
+      "cost_source": "computed",
+      "input": "[{\"role\":\"developer\",\"parts\":[{\"type\":\"text\",\"content\":\"You are a weather bot.\"}]},{\"role\":\"user\",\"parts\":[{\"type\":\"text\",\"content\":\"What is the weather in Paris?\"}]}]",
+      "input_format": "messages",
+      "output": "[{\"role\":\"assistant\",\"parts\":[{\"type\":\"tool_call\",\"id\":\"call_weather_1\",\"name\":\"get_weather\",\"arguments\":{\"city\":\"Paris\"}}]}]",
+      "output_format": "messages",
+      "input_preview": "What is the weather in Paris?",
+      "attributes": {
+        "llm.model_name": "gpt-4o-mini-2024-07-18",
+        "llm.token_count.completion": "17",
+        "llm.token_count.prompt": "82",
+        "llm.token_count.total": "99",
+        "openinference.span.kind": "LLM",
+        "output.mime_type": "application/json"
+      },
+      "resource_attributes": {
+        "telemetry.sdk.language": "python",
+        "telemetry.sdk.name": "opentelemetry",
+        "telemetry.sdk.version": "1.45.2"
+      },
+      "scope_name": "openinference.instrumentation.autogen_agentchat",
+      "scope_version": "0.1.29",
+      "conventions": [
+        "openinference"
+      ],
+      "ingest_time": "2026-01-01T00:00:00.000000000Z",
+      "schema_version": 2
+    },
+    {
+      "project_id": "01900000-0000-7000-8000-000000000001",
+      "trace_id": "f3445b28721093fe615c94c1186d0511",
+      "span_id": "3d81a77e8102ef23",
+      "parent_span_id": "e5950a8d8684556a",
+      "name": "execute_tool get_weather",
+      "span_kind": "tool",
+      "start_time": "2025-12-31T23:59:50.072000000Z",
+      "end_time": "2025-12-31T23:59:50.072000000Z",
+      "status": "unset",
+      "service_name": "capture-app",
+      "operation": "execute_tool",
+      "attributes": {
+        "gen_ai.operation.name": "execute_tool",
+        "gen_ai.system": "autogen",
+        "gen_ai.tool.call.id": "call_weather_1",
+        "gen_ai.tool.description": "Get the weather.",
+        "gen_ai.tool.name": "get_weather"
+      },
+      "resource_attributes": {
+        "telemetry.sdk.language": "python",
+        "telemetry.sdk.name": "opentelemetry",
+        "telemetry.sdk.version": "1.45.2"
+      },
+      "scope_name": "autogen-core",
+      "conventions": [
+        "genai"
+      ],
+      "ingest_time": "2026-01-01T00:00:00.000000000Z",
+      "schema_version": 2
+    },
+    {
+      "project_id": "01900000-0000-7000-8000-000000000001",
+      "trace_id": "f3445b28721093fe615c94c1186d0511",
+      "span_id": "e5950a8d8684556a",
+      "parent_span_id": "f87a276db2692340",
+      "name": "weather_agent.get_weather",
+      "span_kind": "tool",
+      "start_time": "2025-12-31T23:59:50.072000000Z",
+      "end_time": "2025-12-31T23:59:50.073000000Z",
+      "status": "ok",
+      "service_name": "capture-app",
+      "input": "{\"city\":\"Paris\"}",
+      "input_format": "json",
+      "output": "sunny in Paris",
+      "output_format": "text",
+      "input_preview": "{\"city\":\"Paris\"}",
+      "output_preview": "sunny in Paris",
+      "attributes": {
+        "input.mime_type": "application/json",
+        "openinference.span.kind": "TOOL",
+        "output.mime_type": "text/plain",
+        "tool.description": "Get the weather.",
+        "tool.name": "get_weather",
+        "tool.parameters": "{\"city\":\"Paris\"}"
+      },
+      "resource_attributes": {
+        "telemetry.sdk.language": "python",
+        "telemetry.sdk.name": "opentelemetry",
+        "telemetry.sdk.version": "1.45.2"
+      },
+      "scope_name": "openinference.instrumentation.autogen_agentchat",
+      "scope_version": "0.1.29",
+      "conventions": [
+        "openinference"
+      ],
+      "ingest_time": "2026-01-01T00:00:00.000000000Z",
+      "schema_version": 2
+    },
+    {
+      "project_id": "01900000-0000-7000-8000-000000000001",
+      "trace_id": "f3445b28721093fe615c94c1186d0511",
+      "span_id": "021546625c71b0d0",
+      "parent_span_id": "f87a276db2692340",
+      "name": "OpenAIChatCompletionClient.create",
+      "span_kind": "llm",
+      "start_time": "2025-12-31T23:59:50.074000000Z",
+      "end_time": "2025-12-31T23:59:50.108000000Z",
+      "status": "ok",
+      "service_name": "capture-app",
+      "provider": "openai",
+      "request_model": "gpt-4o-mini-2024-07-18",
+      "input_tokens": 131,
+      "output_tokens": 12,
+      "total_tokens": 143,
+      "cost_input": 0.000131,
+      "cost_output": 0.000048,
+      "cost_total": 0.00017900000000000001,
+      "cost_source": "computed",
+      "input": "[{\"role\":\"developer\",\"parts\":[{\"type\":\"text\",\"content\":\"You are a weather bot.\"}]},{\"role\":\"user\",\"parts\":[{\"type\":\"text\",\"content\":\"What is the weather in Paris?\"}]},{\"role\":\"assistant\",\"parts\":[{\"type\":\"tool_call\",\"id\":\"call_weather_1\",\"name\":\"get_weather\",\"arguments\":{\"city\":\"Paris\"}}]},{\"role\":\"tool\",\"parts\":[{\"type\":\"tool_call_response\",\"id\":\"call_weather_1\",\"response\":\"sunny in Paris\",\"name\":\"get_weather\",\"is_error\":false}]}]",
+      "input_format": "messages",
+      "output": "[{\"role\":\"assistant\",\"parts\":[{\"type\":\"text\",\"content\":\"It is sunny in Paris.\"}]}]",
+      "output_format": "messages",
+      "input_preview": "What is the weather in Paris?",
+      "output_preview": "It is sunny in Paris.",
+      "attributes": {
+        "llm.model_name": "gpt-4o-mini-2024-07-18",
+        "llm.token_count.completion": "12",
+        "llm.token_count.prompt": "131",
+        "llm.token_count.total": "143",
+        "openinference.span.kind": "LLM",
+        "output.mime_type": "application/json"
+      },
+      "resource_attributes": {
+        "telemetry.sdk.language": "python",
+        "telemetry.sdk.name": "opentelemetry",
+        "telemetry.sdk.version": "1.45.2"
+      },
+      "scope_name": "openinference.instrumentation.autogen_agentchat",
+      "scope_version": "0.1.29",
+      "conventions": [
+        "openinference"
+      ],
+      "ingest_time": "2026-01-01T00:00:00.000000000Z",
+      "schema_version": 2
+    }
+  ],
+  "media": [],
+  "rejected_spans": 0
+}

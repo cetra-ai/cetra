@@ -247,6 +247,8 @@ mod tests {
             bag: &mut bag,
             events: &[],
             kind,
+            scope: "",
+            conventions: &[],
             warnings: &mut warnings,
         })
     }

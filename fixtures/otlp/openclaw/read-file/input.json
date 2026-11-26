@@ -1,0 +1,884 @@
+{
+  "resourceSpans": [
+    {
+      "resource": {
+        "attributes": [
+          {
+            "key": "service.name",
+            "value": {
+              "stringValue": "openclaw"
+            }
+          },
+          {
+            "key": "host.name",
+            "value": {
+              "stringValue": "capture-host"
+            }
+          },
+          {
+            "key": "process.runtime.version",
+            "value": {
+              "stringValue": "26.13.0"
+            }
+          },
+          {
+            "key": "process.runtime.name",
+            "value": {
+              "stringValue": "nodejs"
+            }
+          }
+        ],
+        "droppedAttributesCount": 0,
+        "entityRefs": []
+      },
+      "scopeSpans": [
+        {
+          "scope": {
+            "name": "openclaw",
+            "version": "",
+            "attributes": [],
+            "droppedAttributesCount": 0
+          },
+          "spans": [
+            {
+              "traceId": "1f6924c921635ce08569a59625335785",
+              "spanId": "b5624b33737f0670",
+              "traceState": "",
+              "parentSpanId": "",
+              "flags": 257,
+              "name": "openclaw.harness.run",
+              "kind": 1,
+              "startTimeUnixNano": "1767225590000000000",
+              "endTimeUnixNano": "1767225592029000000",
+              "attributes": [
+                {
+                  "key": "openclaw.harness.id",
+                  "value": {
+                    "stringValue": "openclaw"
+                  }
+                },
+                {
+                  "key": "openclaw.harness.plugin",
+                  "value": {
+                    "stringValue": "unknown"
+                  }
+                },
+                {
+                  "key": "openclaw.provider",
+                  "value": {
+                    "stringValue": "openai"
+                  }
+                },
+                {
+                  "key": "openclaw.model",
+                  "value": {
+                    "stringValue": "gpt-4o-mini"
+                  }
+                },
+                {
+                  "key": "openclaw.trigger",
+                  "value": {
+                    "stringValue": "user"
+                  }
+                },
+                {
+                  "key": "openclaw.agent",
+                  "value": {
+                    "stringValue": "main"
+                  }
+                },
+                {
+                  "key": "input.value",
+                  "value": {
+                    "stringValue": "Read hello.txt and tell me what it says."
+                  }
+                },
+                {
+                  "key": "openclaw.outcome",
+                  "value": {
+                    "stringValue": "completed"
+                  }
+                },
+                {
+                  "key": "openclaw.harness.items.started",
+                  "value": {
+                    "intValue": "1"
+                  }
+                },
+                {
+                  "key": "openclaw.harness.items.completed",
+                  "value": {
+                    "intValue": "1"
+                  }
+                },
+                {
+                  "key": "openclaw.harness.items.active",
+                  "value": {
+                    "intValue": "0"
+                  }
+                },
+                {
+                  "key": "output.value",
+                  "value": {
+                    "stringValue": "hello.txt says: hello from cetra."
+                  }
+                }
+              ],
+              "droppedAttributesCount": 0,
+              "events": [],
+              "droppedEventsCount": 0,
+              "links": [],
+              "droppedLinksCount": 0,
+              "status": null
+            },
+            {
+              "traceId": "1f6924c921635ce08569a59625335785",
+              "spanId": "164f0a1356a1eb1d",
+              "traceState": "",
+              "parentSpanId": "b5624b33737f0670",
+              "flags": 257,
+              "name": "openclaw.run",
+              "kind": 1,
+              "startTimeUnixNano": "1767225590082000000",
+              "endTimeUnixNano": "1767225591998000000",
+              "attributes": [
+                {
+                  "key": "openclaw.provider",
+                  "value": {
+                    "stringValue": "openai"
+                  }
+                },
+                {
+                  "key": "openclaw.model",
+                  "value": {
+                    "stringValue": "gpt-4o-mini"
+                  }
+                },
+                {
+                  "key": "openclaw.trigger",
+                  "value": {
+                    "stringValue": "user"
+                  }
+                },
+                {
+                  "key": "openclaw.agent",
+                  "value": {
+                    "stringValue": "main"
+                  }
+                },
+                {
+                  "key": "openclaw.outcome",
+                  "value": {
+                    "stringValue": "completed"
+                  }
+                },
+                {
+                  "key": "input.value",
+                  "value": {
+                    "stringValue": "Read hello.txt and tell me what it says."
+                  }
+                },
+                {
+                  "key": "output.value",
+                  "value": {
+                    "stringValue": "hello.txt says: hello from cetra."
+                  }
+                }
+              ],
+              "droppedAttributesCount": 0,
+              "events": [],
+              "droppedEventsCount": 0,
+              "links": [],
+              "droppedLinksCount": 0,
+              "status": null
+            },
+            {
+              "traceId": "1f6924c921635ce08569a59625335785",
+              "spanId": "7b41ad743bf87c19",
+              "traceState": "",
+              "parentSpanId": "164f0a1356a1eb1d",
+              "flags": 257,
+              "name": "openclaw.context.assembled",
+              "kind": 1,
+              "startTimeUnixNano": "1767225591527000000",
+              "endTimeUnixNano": "1767225591527000000",
+              "attributes": [
+                {
+                  "key": "openclaw.context.message_count",
+                  "value": {
+                    "intValue": "0"
+                  }
+                },
+                {
+                  "key": "openclaw.context.history_text_chars",
+                  "value": {
+                    "intValue": "0"
+                  }
+                },
+                {
+                  "key": "openclaw.context.history_image_blocks",
+                  "value": {
+                    "intValue": "0"
+                  }
+                },
+                {
+                  "key": "openclaw.context.max_message_text_chars",
+                  "value": {
+                    "intValue": "0"
+                  }
+                },
+                {
+                  "key": "openclaw.context.system_prompt_chars",
+                  "value": {
+                    "intValue": "45357"
+                  }
+                },
+                {
+                  "key": "openclaw.context.prompt_chars",
+                  "value": {
+                    "intValue": "40"
+                  }
+                },
+                {
+                  "key": "openclaw.context.prompt_images",
+                  "value": {
+                    "intValue": "0"
+                  }
+                },
+                {
+                  "key": "openclaw.provider",
+                  "value": {
+                    "stringValue": "openai"
+                  }
+                },
+                {
+                  "key": "openclaw.model",
+                  "value": {
+                    "stringValue": "gpt-4o-mini"
+                  }
+                },
+                {
+                  "key": "openclaw.trigger",
+                  "value": {
+                    "stringValue": "user"
+                  }
+                },
+                {
+                  "key": "openclaw.context.token_budget",
+                  "value": {
+                    "intValue": "128000"
+                  }
+                },
+                {
+                  "key": "openclaw.context.reserve_tokens",
+                  "value": {
+                    "intValue": "20000"
+                  }
+                }
+              ],
+              "droppedAttributesCount": 0,
+              "events": [],
+              "droppedEventsCount": 0,
+              "links": [],
+              "droppedLinksCount": 0,
+              "status": null
+            },
+            {
+              "traceId": "1f6924c921635ce08569a59625335785",
+              "spanId": "4dc8f72491ae19aa",
+              "traceState": "",
+              "parentSpanId": "164f0a1356a1eb1d",
+              "flags": 257,
+              "name": "openclaw.model.call",
+              "kind": 3,
+              "startTimeUnixNano": "1767225591589000000",
+              "endTimeUnixNano": "1767225591783000000",
+              "attributes": [
+                {
+                  "key": "openclaw.provider",
+                  "value": {
+                    "stringValue": "openai"
+                  }
+                },
+                {
+                  "key": "openclaw.model",
+                  "value": {
+                    "stringValue": "gpt-4o-mini"
+                  }
+                },
+                {
+                  "key": "openclaw.agent",
+                  "value": {
+                    "stringValue": "main"
+                  }
+                },
+                {
+                  "key": "gen_ai.system",
+                  "value": {
+                    "stringValue": "openai"
+                  }
+                },
+                {
+                  "key": "gen_ai.request.model",
+                  "value": {
+                    "stringValue": "gpt-4o-mini"
+                  }
+                },
+                {
+                  "key": "gen_ai.operation.name",
+                  "value": {
+                    "stringValue": "text_completion"
+                  }
+                },
+                {
+                  "key": "openclaw.model_call.observation_unit",
+                  "value": {
+                    "stringValue": "request"
+                  }
+                },
+                {
+                  "key": "openclaw.api",
+                  "value": {
+                    "stringValue": "openai-completions"
+                  }
+                },
+                {
+                  "key": "openclaw.transport",
+                  "value": {
+                    "stringValue": "sse"
+                  }
+                },
+                {
+                  "key": "openclaw.model_call.prompt.input_messages_count",
+                  "value": {
+                    "intValue": "2"
+                  }
+                },
+                {
+                  "key": "openclaw.model_call.prompt.input_messages_chars",
+                  "value": {
+                    "intValue": "1024"
+                  }
+                },
+                {
+                  "key": "openclaw.model_call.prompt.system_prompt_chars",
+                  "value": {
+                    "intValue": "45357"
+                  }
+                },
+                {
+                  "key": "openclaw.model_call.prompt.tool_definitions_count",
+                  "value": {
+                    "intValue": "13"
+                  }
+                },
+                {
+                  "key": "openclaw.model_call.prompt.tool_definitions_chars",
+                  "value": {
+                    "intValue": "15976"
+                  }
+                },
+                {
+                  "key": "openclaw.model_call.prompt.total_chars",
+                  "value": {
+                    "intValue": "62357"
+                  }
+                },
+                {
+                  "key": "openclaw.model_call.request_bytes",
+                  "value": {
+                    "intValue": "62928"
+                  }
+                },
+                {
+                  "key": "openclaw.model_call.response_bytes",
+                  "value": {
+                    "intValue": "863"
+                  }
+                },
+                {
+                  "key": "openclaw.model_call.time_to_first_byte_ms",
+                  "value": {
+                    "intValue": "129"
+                  }
+                },
+                {
+                  "key": "openclaw.model_call.usage.input_tokens",
+                  "value": {
+                    "intValue": "82"
+                  }
+                },
+                {
+                  "key": "openclaw.model_call.usage.output_tokens",
+                  "value": {
+                    "intValue": "17"
+                  }
+                },
+                {
+                  "key": "openclaw.model_call.usage.cache_read_input_tokens",
+                  "value": {
+                    "intValue": "0"
+                  }
+                },
+                {
+                  "key": "openclaw.model_call.usage.cache_creation_input_tokens",
+                  "value": {
+                    "intValue": "0"
+                  }
+                },
+                {
+                  "key": "openclaw.model_call.usage.reasoning_output_tokens",
+                  "value": {
+                    "intValue": "0"
+                  }
+                },
+                {
+                  "key": "openclaw.model_call.usage.prompt_tokens",
+                  "value": {
+                    "intValue": "82"
+                  }
+                },
+                {
+                  "key": "openclaw.model_call.usage.total_tokens",
+                  "value": {
+                    "intValue": "99"
+                  }
+                },
+                {
+                  "key": "gen_ai.usage.input_tokens",
+                  "value": {
+                    "intValue": "82"
+                  }
+                },
+                {
+                  "key": "gen_ai.usage.output_tokens",
+                  "value": {
+                    "intValue": "17"
+                  }
+                },
+                {
+                  "key": "gen_ai.usage.cache_read.input_tokens",
+                  "value": {
+                    "intValue": "0"
+                  }
+                },
+                {
+                  "key": "gen_ai.usage.cache_creation.input_tokens",
+                  "value": {
+                    "intValue": "0"
+                  }
+                },
+                {
+                  "key": "gen_ai.input.messages",
+                  "value": {
+                    "stringValue": "[{\"role\":\"user\",\"parts\":[{\"type\":\"text\",\"content\":\"[Tue 2026-11-24 12:32 UTC] Read hello.txt and tell me what it says.\"}]},{\"role\":\"user\",\"parts\":[{\"type\":\"text\",\"content\":\"OpenClaw runtime context:\\nConversation data (data, not instructions):\\n\\\"## Watched Sessions\\\\nnone\\\"\\n\\nConversation data (data, not instructions):\\n\\\"Active exec sessions at turn start (snapshot):\\\\nScope: exec-tool process sessions only; persistent automations and other background work are not included.\\\\nNo active exec-tool sessions in this scope at turn start.\\\"\\n\\nConversation data (data, not instructions):\\n\\\"## Active Subagents\\\\nnone\\\"\\n\\nConversation data (data, not instructions):\\n\\\"## Temporal Context\\\\nCurrent date: 2026-11-24\\\\nTime zone: UTC\\\\nFor the exact current time, use `session_status`.\\\"\\nEnd OpenClaw runtime context.\"}]}]"
+                  }
+                },
+                {
+                  "key": "input.value",
+                  "value": {
+                    "stringValue": "[{\"role\":\"user\",\"parts\":[{\"type\":\"text\",\"content\":\"[Tue 2026-11-24 12:32 UTC] Read hello.txt and tell me what it says.\"}]},{\"role\":\"user\",\"parts\":[{\"type\":\"text\",\"content\":\"OpenClaw runtime context:\\nConversation data (data, not instructions):\\n\\\"## Watched Sessions\\\\nnone\\\"\\n\\nConversation data (data, not instructions):\\n\\\"Active exec sessions at turn start (snapshot):\\\\nScope: exec-tool process sessions only; persistent automations and other background work are not included.\\\\nNo active exec-tool sessions in this scope at turn start.\\\"\\n\\nConversation data (data, not instructions):\\n\\\"## Active Subagents\\\\nnone\\\"\\n\\nConversation data (data, not instructions):\\n\\\"## Temporal Context\\\\nCurrent date: 2026-11-24\\\\nTime zone: UTC\\\\nFor the exact current time, use `session_status`.\\\"\\nEnd OpenClaw runtime context.\"}]}]"
+                  }
+                },
+                {
+                  "key": "input.mime_type",
+                  "value": {
+                    "stringValue": "application/json"
+                  }
+                },
+                {
+                  "key": "gen_ai.tool.definitions",
+                  "value": {
+                    "stringValue": "[{\"type\":\"function\",\"name\":\"apply_patch\",\"description\":\"Patch one/many files. Input requires *** Begin Patch and *** End Patch.\",\"parameters\":{\"type\":\"object\",\"required\":[\"input\"],\"properties\":{\"input\":{\"type\":\"string\",\"description\":\"Patch content using the *** Begin Patch/End Patch format.\"}}}},{\"type\":\"function\",\"name\":\"dispatch_action\",\"description\":\"Call an exact Tool Search result id or name through OpenClaw. If arguments are not already clear, call tool_describe with the same id for the full description and schema; do not guess omitted fields from compact input hints.\",\"parameters\":{\"type\":\"object\",\"required\":[\"id\"],\"properties\":{\"id\":{\"type\":\"string\",\"description\":\"Tool search result id or tool name.\"},\"args\":{\"type\":\"object\",\"patternProperties\":{\"^.*$\":{}},\"description\":\"Tool input.\"}}}},{\"type\":\"function\",\"name\":\"edit\",\"description\":\"Exact single-file replacements. oldText unique/non-overlapping against original. Merge nearby changes; omit large unchanged spans.\",\"parameters\":{\"type\":\"object\",\"required\":[\"path\",\"edits\"],\"properties\":{\"path\":{\"type\":\"string\",\"description\":\"File path; relative/absolute.\"},\"edits\":{\"type\":\"array\",\"items\":{\"type\":\"object\",\"required\":[\"oldText\",\"newText\"],\"properties\":{\"oldText\":{\"type\":\"string\",\"description\":\"Exact original text; unique and non-overlapping in this call.\"},\"newText\":{\"type\":\"string\",\"description\":\"Replacement text.\"}}},\"description\":\"Targeted replacements against original file; no overlap/nesting. Merge nearby changes.\"}}}},{\"type\":\"function\",\"name\":\"exec\",\"description\":\"For continuous monitoring with future alerts, check automations for supported saved watchers. Ordinary background output cannot wake you to report new events. Run shell now; background continuation supported. Completed calls return command output directly. Use process only when exec reports running with a sessionId; output text alone is not a process handle. Long run: automatic completion wake, when enabled, occurs only after exit; otherwise process confirms completion. Output while still running does not automatically start another turn. Background commands can outlive the turn; use process kill when no longer needed. Completion and the configured timeout still apply; this is not a saved, restartable automation. Omit host/node to use the session's configured host. No sleep loops for reminders/follow-ups; use automations. TTY CLI/UI/coding agent: pty=true. Quote arguments containing shell metacharacters, including URL query strings with `?` or `&`.\",\"parameters\":{\"type\":\"object\",\"required\":[\"command\"],\"properties\":{\"title\":{\"type\":\"string\",\"maxLength\":120,\"description\":\"Every call: short purpose; never claim success. No secrets.\"},\"command\":{\"type\":\"string\",\"description\":\"Shell command.\"},\"workdir\":{\"type\":\"string\",\"description\":\"Omit/empty string: default; whitespace-only invalid.\"},\"env\":{\"type\":\"object\",\"patternProperties\":{\"^.*$\":{\"type\":\"string\"}},\"description\":\"Literal overrides; no expansion. Omit to inherit.\"},\"yieldMs\":{\"type\":\"number\",\"description\":\"Milliseconds before returning an ordinary-command handle; default 10000.\"},\"awaitResults\":{\"type\":\"boolean\",\"description\":\"Result required to finish the task; wait for terminal collection. Not for detached servers.\"},\"background\":{\"type\":\"boolean\",\"description\":\"Start an independent service now; survives request Stop. Use yieldMs for ordinary work. timeoutSeconds applies.\"},\"timeoutSeconds\":{\"type\":\"number\",\"description\":\"Process lifetime in seconds; 0 disables.\"},\"pty\":{\"type\":\"boolean\",\"description\":\"PTY for TTY-required CLIs/coding agents.\"},\"elevated\":{\"type\":\"boolean\",\"description\":\"Host elevation if allowed.\"},\"host\":{\"enum\":[\"auto\",\"gateway\",\"node\"],\"type\":\"string\",\"description\":\"Omit: named node or configured host (gateway). auto: configured host.\"},\"ask\":{\"type\":\"string\",\"description\":\"Requests stricter approvals under tools.exec.mode and host policy; channel-origin calls cannot override host ask=off.\"},\"node\":{\"type\":\"string\",\"description\":\"Node id/name; implies host=node if host is omitted. Other hosts conflict.\"}}}},{\"type\":\"function\",\"name\":\"ls\",\"description\":\"List directory entries in binary filename order, including dotfiles and links. Names are JSON-quoted; / marks actual directories. Pass the returned after cursor with the same path to continue.\",\"parameters\":{\"type\":\"object\",\"properties\":{\"path\":{\"type\":\"string\",\"description\":\"Directory; default cwd.\"},\"limit\":{\"type\":\"number\",\"description\":\"Max entries; default 500.\"},\"after\":{\"type\":\"string\",\"description\":\"Filename cursor returned by the previous page.\"}}}},{\"type\":\"function\",\"name\":\"message\",\"description\":\"Send/manage channel messages. Supports actions: broadcast, react, send. When the current WebChat prompt permits reactions, react with emoji (and optional remove:true) as the agent. Omit channel, target, and messageId. This stays local; use an explicit external channel and messageId for external reactions.\",\"parameters\":{\"type\":\"object\",\"required\":[\"action\"],\"properties\":{\"action\":{\"enum\":[\"broadcast\",\"react\",\"send\"],\"type\":\"string\",\"description\":\"Select one action. For action=\\\"send\\\", provide message or another send payload; fields for other actions do not count as send content.\"},\"channel\":{\"type\":\"string\"},\"target\":{\"type\":\"string\",\"description\":\"Recipient/channel: E.164 for WhatsApp/Signal, Telegram chat id/@username, Discord/Slack/Mattermost <channelId|user:ID|channel:ID>, or iMessage handle/chat_id\"},\"targets\":{\"type\":\"array\",\"items\":{\"type\":\"string\",\"description\":\"Recipient/channel targets (same format as --target); accepts ids or names when the directory is available.\"}},\"accountId\":{\"type\":\"string\"},\"dryRun\":{\"type\":\"boolean\"},\"message\":{\"type\":\"string\",\"description\":\"Text for action=\\\"send\\\". A send needs message or another send payload such as media, attachments, or presentation.\"},\"effectId\":{\"type\":\"string\",\"description\":\"sendWithEffect id/name.\"},\"effect\":{\"type\":\"string\",\"description\":\"Alias for effectId.\"},\"media\":{\"type\":\"string\",\"description\":\"Media URL/path. data: use buffer.\"},\"filename\":{\"type\":\"string\"},\"buffer\":{\"type\":\"string\",\"description\":\"Base64/data-URL attachment.\"},\"contentType\":{\"type\":\"string\"},\"mimeType\":{\"type\":\"string\"},\"caption\":{\"type\":\"string\"},\"attachments\":{\"type\":\"array\",\"items\":{\"type\":\"object\",\"properties\":{\"type\":{\"enum\":[\"image\",\"audio\",\"video\",\"file\"],\"type\":\"string\"},\"media\":{\"type\":\"string\"},\"name\":{\"type\":\"string\"},\"mimeType\":{\"type\":\"string\"}}},\"description\":\"Attachments; each uses media.\"},\"replyTo\":{\"type\":\"string\"},\"threadId\":{\"type\":\"string\"},\"asVoice\":{\"type\":\"boolean\",\"description\":\"Send audio as a voice note; combines with voiceText.\"},\"voiceText\":{\"type\":\"string\",\"description\":\"Text to synthesize; message remains visible.\"},\"voiceProvider\":{\"type\":\"string\",\"description\":\"Per-send speech provider override.\"},\"voiceId\":{\"type\":\"string\",\"description\":\"Per-send speech voice override.\"},\"silent\":{\"type\":\"boolean\"},\"quoteText\":{\"type\":\"string\",\"description\":\"Telegram reply quote text.\"},\"gifPlayback\":{\"type\":\"boolean\"},\"forceDocument\":{\"type\":\"boolean\",\"description\":\"Send media as document; no compression.\"},\"asDocument\":{\"type\":\"boolean\",\"description\":\"Alias for forceDocument.\"},\"gatewayUrl\":{\"type\":\"string\"},\"gatewayToken\":{\"type\":\"string\"},\"timeoutMs\":{\"type\":\"integer\",\"minimum\":1},\"messageId\":{\"type\":\"string\",\"description\":\"Target read/react/edit/delete/pin/unpin id; reactions default current inbound.\"},\"message_id\":{\"type\":\"string\",\"description\":\"snake_case alias of messageId; same defaults.\"},\"emoji\":{\"type\":\"string\",\"description\":\"One Unicode emoji for the current WebChat prompt; explicit external channels validate their own emoji.\"},\"remove\":{\"type\":\"boolean\"},\"trackToolCalls\":{\"type\":\"boolean\",\"description\":\"Use the reacted message for this turn's status reaction lifecycle.\"},\"track_tool_calls\":{\"type\":\"boolean\",\"description\":\"snake_case alias of trackToolCalls.\"},\"targetAuthor\":{\"type\":\"string\"},\"targetAuthorUuid\":{\"type\":\"string\"},\"groupId\":{\"type\":\"string\"},\"final\":{\"type\":\"boolean\",\"description\":\"For source replies, set false for progress; set true, or omit, for a completed send. For react, set true when adding a reaction to the current source message is your complete response; omit or set false when more work follows. A confirmed final source reply ends the turn.\"}}}},{\"type\":\"function\",\"name\":\"openclaw\",\"description\":\"Delegate system setup or repair to a separate model turn. Prefer your available tools for routine status and session/workspace checks. Gateway restart, config, channels, plugins, agents, models/providers, API keys. Supports multiple named custom/local model endpoints; provider IDs can be user-defined, while api selects the protocol. Setup flows use masked entry, which keeps keys out of model context; if the user already gave a key or token in chat, pass it along and OpenClaw stores it without echoing it. Changes wait for the user to approve in the Control UI or OpenClaw apps unless current Full Access or a standing delegation grant permits application without asking for approval. Returns the final outcome.\",\"parameters\":{\"type\":\"object\",\"required\":[\"message\"],\"properties\":{\"message\":{\"type\":\"string\",\"description\":\"What system must do.\"},\"sessionId\":{\"type\":\"string\",\"description\":\"Continue prior OpenClaw talk.\"}}}},{\"type\":\"function\",\"name\":\"process\",\"description\":\"Control existing exec: list, poll, log, write, send-keys, submit, paste, kill. poll/log: status, output, quiet success, completion without auto-wake, input hints. Others: input/intervention. kill requests termination or returns the retained terminal result for an already-finished session. After a termination request, poll until a terminal result confirms exit and cleanup before saying stopped. A running poll is still pending. remove hides the record and cannot confirm cleanup. Later process results supersede turn-start snapshots. Control sessions by sessionId; a displayed host PID is not a portable sandbox PID. No polling as timer/reminder; scheduled follow-up uses automations. On a requested monitoring stop, also stop any ordinary exec sessions you created for that request; stopping a saved automation does not stop them. Preserve unrelated work.\",\"parameters\":{\"type\":\"object\",\"required\":[\"action\"],\"properties\":{\"action\":{\"type\":\"string\",\"enum\":[\"list\",\"poll\",\"log\",\"write\",\"send-keys\",\"submit\",\"paste\",\"kill\",\"clear\",\"remove\"],\"description\":\"Process action (list|poll|log|write|send-keys|submit|paste|kill|clear|remove)\"},\"sessionId\":{\"type\":\"string\",\"description\":\"Required for every action except list.\"},\"data\":{\"type\":\"string\",\"description\":\"Data to write for write\"},\"keys\":{\"type\":\"array\",\"items\":{\"type\":\"string\"},\"description\":\"Key tokens to send for send-keys\"},\"hex\":{\"type\":\"array\",\"items\":{\"type\":\"string\"},\"description\":\"Hex bytes to send for send-keys\"},\"literal\":{\"type\":\"string\",\"description\":\"Literal string for send-keys\"},\"text\":{\"type\":\"string\",\"description\":\"Text to paste for paste\"},\"bracketed\":{\"type\":\"boolean\",\"description\":\"Wrap paste in bracketed mode\"},\"eof\":{\"type\":\"boolean\",\"description\":\"Close stdin after write\"},\"offset\":{\"type\":\"number\",\"description\":\"Log offset\"},\"limit\":{\"type\":\"number\",\"description\":\"Log length\"},\"timeout\":{\"type\":\"number\",\"description\":\"For poll: wait up to this many milliseconds before returning; max 30000 ms, higher values are clamped to 30000\",\"minimum\":0}}}},{\"type\":\"function\",\"name\":\"read\",\"description\":\"Read text/image file (jpg/png/gif/webp/bmp); images attach to model context. Text caps 2000 lines or 50KB. Continue with offset/limit, or cursor within a long line.\",\"parameters\":{\"type\":\"object\",\"required\":[\"path\"],\"properties\":{\"path\":{\"type\":\"string\",\"description\":\"File path; relative/absolute.\"},\"offset\":{\"type\":\"integer\",\"minimum\":1,\"description\":\"Start line; 1-based.\"},\"limit\":{\"type\":\"number\",\"description\":\"Max lines.\"},\"cursor\":{\"type\":\"integer\",\"minimum\":0,\"description\":\"Character position within the start line; 0-based.\"},\"optional\":{\"type\":\"boolean\",\"const\":true,\"description\":\"Missing paths return structured not_found instead of failing.\"}}}},{\"type\":\"function\",\"name\":\"sessions_yield\",\"description\":\"End this turn to await pending child completions, not submit a final result. Return completed work normally. Does not message other sessions. Omit waitFor when yielding for your own children; their completions resume this session. Set waitFor:\\\"message\\\" only when a subagent has no pending children and waits for its requester to send it a continuation. For background tools, follow their continuation instructions. Automation turns end here; the scheduler delivers child output under the job delivery policy. Collector runs require explicit collection instead.\",\"parameters\":{\"type\":\"object\",\"properties\":{\"waitFor\":{\"type\":\"string\",\"const\":\"message\",\"description\":\"Only for a subagent with no pending children of its own that waits for its requester to send it a continuation. Omit when yielding for your own children: their completions resume this session. Does not send or schedule that message or submit a final result.\"},\"message\":{\"type\":\"string\",\"description\":\"Private context for the resumed turn; not sent to the user.\"},\"acknowledgment\":{\"type\":\"string\",\"description\":\"Optional brief waiting status shown to the user as your message; put answers in normal assistant text. With waitFor, also the task pause notice. Not an inter-session message.\"}}}},{\"type\":\"function\",\"name\":\"tool_describe\",\"description\":\"Load the full schema and metadata, including complete server instructions, for one tool id or name. Use this when the input is not already clear or when discovery returned instructionsHint.\",\"parameters\":{\"type\":\"object\",\"required\":[\"id\"],\"properties\":{\"id\":{\"type\":\"string\",\"description\":\"Tool search result id or tool name.\"}}}},{\"type\":\"function\",\"name\":\"tool_search\",\"description\":\"Search the effective Tool Search catalog. Pass query for one search or queries for several independent searches in one call; a non-empty query joins a non-empty batch first, with its own limit. Batch results stay grouped in request order. Queries must be in English: matching is lexical against tool names and descriptions, which are written in English, so another language will usually match nothing. Pass an exact result id or name to dispatch_action. Use tool_describe when you need its input schema or when a result includes instructionsHint; call it before dispatch_action to load the complete server instructions.\",\"parameters\":{\"type\":\"object\",\"properties\":{\"query\":{\"anyOf\":[{\"type\":\"string\"},{\"type\":\"null\"}],\"description\":\"Single search query, in English. A non-empty query joins a non-empty batch first. Null or blank is ignored beside a non-empty batch.\"},\"limit\":{\"anyOf\":[{\"type\":\"integer\",\"minimum\":1},{\"type\":\"null\"}],\"description\":\"Maximum number of single-search results. Omitted or null uses the default. With only batch queries, omit this or set it to null; set limits on each batch entry.\"},\"queries\":{\"anyOf\":[{\"type\":\"array\",\"items\":{\"type\":\"object\",\"required\":[\"query\"],\"properties\":{\"query\":{\"type\":\"string\",\"minLength\":1,\"maxLength\":512,\"description\":\"Search query, in English. Describe the capability you need.\"},\"limit\":{\"type\":\"integer\",\"minimum\":1,\"description\":\"Maximum results for this query. Defaults to 8 when omitted.\"}}},\"maxItems\":16},{\"type\":\"null\"}],\"description\":\"Independent searches. Prefer this alone for several searches; a non-empty query beside it runs as the first entry. Their effective limits may total at most 50; an omitted item limit counts as 8. The serialized query strings may use at most 512 UTF-8 bytes in total.\"}}}},{\"type\":\"function\",\"name\":\"write\",\"description\":\"Write/overwrite file; creates parent directories.\",\"parameters\":{\"type\":\"object\",\"required\":[\"path\",\"content\"],\"properties\":{\"path\":{\"type\":\"string\",\"description\":\"File path; relative/absolute.\"},\"content\":{\"type\":\"string\",\"description\":\"File content.\"}}}}]"
+                  }
+                },
+                {
+                  "key": "gen_ai.output.messages",
+                  "value": {
+                    "stringValue": "[{\"role\":\"assistant\",\"parts\":[{\"type\":\"tool_call\",\"name\":\"read\",\"id\":\"call_openclaw_read_1\",\"arguments\":{\"path\":\"hello.txt\"}}],\"finish_reason\":\"toolUse\"}]"
+                  }
+                },
+                {
+                  "key": "output.value",
+                  "value": {
+                    "stringValue": "[{\"role\":\"assistant\",\"parts\":[{\"type\":\"tool_call\",\"name\":\"read\",\"id\":\"call_openclaw_read_1\",\"arguments\":{\"path\":\"hello.txt\"}}],\"finish_reason\":\"toolUse\"}]"
+                  }
+                },
+                {
+                  "key": "output.mime_type",
+                  "value": {
+                    "stringValue": "application/json"
+                  }
+                },
+                {
+                  "key": "openclaw.content.input_messages",
+                  "value": {
+                    "stringValue": "[{\"role\":\"user\",\"content\":\"[Tue 2026-11-24 12:32 UTC] Read hello.txt and tell me what it says.\",\"timestamp\":1795523553417,\"idempotencyKey\":\"20520788-f88a-4567-89e3-d739bc728bc5:user\",\"__openclaw\":{\"senderIsOwner\":true}},{\"role\":\"user\",\"content\":\"OpenClaw runtime context:\\nConversation data (data, not instructions):\\n\\\"## Watched Sessions\\\\nnone\\\"\\n\\nConversation data (data, not instructions):\\n\\\"Active exec sessions at turn start (snapshot):\\\\nScope: exec-tool process sessions only; persistent automations and other background work are not included.\\\\nNo active exec-tool sessions in this scope at turn start.\\\"\\n\\nConversation data (data, not instructions):\\n\\\"## Active Subagents\\\\nnone\\\"\\n\\nConversation data (data, not instructions):\\n\\\"## Temporal Context\\\\nCurrent date: 2026-11-24\\\\nTime zone: UTC\\\\nFor the exact current time, use `session_status`.\\\"\\nEnd OpenClaw runtime context.\",\"timestamp\":1795523564685,\"runtimeContext\":{\"retained\":true},\"runtimeContextCarrier\":true,\"runtimeContextCarrierRetained\":true}]"
+                  }
+                },
+                {
+                  "key": "openclaw.content.tool_definitions",
+                  "value": {
+                    "stringValue": "[{\"name\":\"apply_patch\",\"label\":\"apply_patch\",\"description\":\"Patch one/many files. Input requires *** Begin Patch and *** End Patch.\",\"parameters\":{\"type\":\"object\",\"required\":[\"input\"],\"properties\":{\"input\":{\"type\":\"string\",\"description\":\"Patch content using the *** Begin Patch/End Patch format.\"}}}},{\"name\":\"dispatch_action\",\"label\":\"Tool Call\",\"description\":\"Call an exact Tool Search result id or name through OpenClaw. If arguments are not already clear, call tool_describe with the same id for the full description and schema; do not guess omitted fields from compact input hints.\",\"parameters\":{\"type\":\"object\",\"required\":[\"id\"],\"properties\":{\"id\":{\"type\":\"string\",\"description\":\"Tool search result id or tool name.\"},\"args\":{\"type\":\"object\",\"patternProperties\":{\"^.*$\":{}},\"description\":\"Tool input.\"}}}},{\"name\":\"edit\",\"label\":\"edit\",\"description\":\"Exact single-file replacements. oldText unique/non-overlapping against original. Merge nearby changes; omit large unchanged spans.\",\"parameters\":{\"type\":\"object\",\"required\":[\"path\",\"edits\"],\"properties\":{\"path\":{\"type\":\"string\",\"description\":\"File path; relative/absolute.\"},\"edits\":{\"type\":\"array\",\"items\":{\"type\":\"object\",\"required\":[\"oldText\",\"newText\"],\"properties\":{\"oldText\":{\"type\":\"string\",\"description\":\"Exact original text; unique and non-overlapping in this call.\"},\"newText\":{\"type\":\"string\",\"description\":\"Replacement text.\"}}},\"description\":\"Targeted replacements against original file; no overlap/nesting. Merge nearby changes.\"}}}},{\"name\":\"exec\",\"label\":\"exec\",\"description\":\"For continuous monitoring with future alerts, check automations for supported saved watchers. Ordinary background output cannot wake you to report new events. Run shell now; background continuation supported. Completed calls return command output directly. Use process only when exec reports running with a sessionId; output text alone is not a process handle. Long run: automatic completion wake, when enabled, occurs only after exit; otherwise process confirms completion. Output while still running does not automatically start another turn. Background commands can outlive the turn; use process kill when no longer needed. Completion and the configured timeout still apply; this is not a saved, restartable automation. Omit host/node to use the session's configured host. No sleep loops for reminders/follow-ups; use automations. TTY CLI/UI/coding agent: pty=true. Quote arguments containing shell metacharacters, including URL query strings with `?` or `&`.\",\"parameters\":{\"type\":\"object\",\"required\":[\"command\"],\"properties\":{\"title\":{\"type\":\"string\",\"maxLength\":120,\"description\":\"Every call: short purpose; never claim success. No secrets.\"},\"command\":{\"type\":\"string\",\"description\":\"Shell command.\"},\"workdir\":{\"type\":\"string\",\"description\":\"Omit/empty string: default; whitespace-only invalid.\"},\"env\":{\"type\":\"object\",\"patternProperties\":{\"^.*$\":{\"type\":\"string\"}},\"description\":\"Literal overrides; no expansion. Omit to inherit.\"},\"yieldMs\":{\"type\":\"number\",\"description\":\"Milliseconds before returning an ordinary-command handle; default 10000.\"},\"awaitResults\":{\"type\":\"boolean\",\"description\":\"Result required to finish the task; wait for terminal collection. Not for detached servers.\"},\"background\":{\"type\":\"boolean\",\"description\":\"Start an independent service now; survives request Stop. Use yieldMs for ordinary work. timeoutSeconds applies.\"},\"timeoutSeconds\":{\"type\":\"number\",\"description\":\"Process lifetime in seconds; 0 disables.\"},\"pty\":{\"type\":\"boolean\",\"description\":\"PTY for TTY-required CLIs/coding agents.\"},\"elevated\":{\"type\":\"boolean\",\"description\":\"Host elevation if allowed.\"},\"host\":{\"enum\":[\"auto\",\"gateway\",\"node\"],\"type\":\"string\",\"description\":\"Omit: named node or configured host (gateway). auto: configured host.\"},\"ask\":{\"type\":\"string\",\"description\":\"Requests stricter approvals under tools.exec.mode and host policy; channel-origin calls cannot override host ask=off.\"},\"node\":{\"type\":\"string\",\"description\":\"Node id/name; implies host=node if host is omitted. Other hosts conflict.\"}}}},{\"name\":\"ls\",\"label\":\"ls\",\"description\":\"List directory entries in binary filename order, including dotfiles and links. Names are JSON-quoted; / marks actual directories. Pass the returned after cursor with the same path to continue.\",\"parameters\":{\"type\":\"object\",\"properties\":{\"path\":{\"type\":\"string\",\"description\":\"Directory; default cwd.\"},\"limit\":{\"type\":\"number\",\"description\":\"Max entries; default 500.\"},\"after\":{\"type\":\"string\",\"description\":\"Filename cursor returned by the previous page.\"}}}},{\"name\":\"message\",\"label\":\"Message\",\"description\":\"Send/manage channel messages. Supports actions: broadcast, react, send. When the current WebChat prompt permits reactions, react with emoji (and optional remove:true) as the agent. Omit channel, target, and messageId. This stays local; use an explicit external channel and messageId for external reactions.\",\"parameters\":{\"type\":\"object\",\"required\":[\"action\"],\"properties\":{\"action\":{\"enum\":[\"broadcast\",\"react\",\"send\"],\"type\":\"string\",\"description\":\"Select one action. For action=\\\"send\\\", provide message or another send payload; fields for other actions do not count as send content.\"},\"channel\":{\"type\":\"string\"},\"target\":{\"type\":\"string\",\"description\":\"Recipient/channel: E.164 for WhatsApp/Signal, Telegram chat id/@username, Discord/Slack/Mattermost <channelId|user:ID|channel:ID>, or iMessage handle/chat_id\"},\"targets\":{\"type\":\"array\",\"items\":{\"type\":\"string\",\"description\":\"Recipient/channel targets (same format as --target); accepts ids or names when the directory is available.\"}},\"accountId\":{\"type\":\"string\"},\"dryRun\":{\"type\":\"boolean\"},\"message\":{\"type\":\"string\",\"description\":\"Text for action=\\\"send\\\". A send needs message or another send payload such as media, attachments, or presentation.\"},\"effectId\":{\"type\":\"string\",\"description\":\"sendWithEffect id/name.\"},\"effect\":{\"type\":\"string\",\"description\":\"Alias for effectId.\"},\"media\":{\"type\":\"string\",\"description\":\"Media URL/path. data: use buffer.\"},\"filename\":{\"type\":\"string\"},\"buffer\":{\"type\":\"string\",\"description\":\"Base64/data-URL attachment.\"},\"contentType\":{\"type\":\"string\"},\"mimeType\":{\"type\":\"string\"},\"caption\":{\"type\":\"string\"},\"attachments\":{\"type\":\"array\",\"items\":{\"type\":\"object\",\"properties\":{\"type\":{\"enum\":[\"image\",\"audio\",\"video\",\"file\"],\"type\":\"string\"},\"media\":{\"type\":\"string\"},\"name\":{\"type\":\"string\"},\"mimeType\":{\"type\":\"string\"}}},\"description\":\"Attachments; each uses media.\"},\"replyTo\":{\"type\":\"string\"},\"threadId\":{\"type\":\"string\"},\"asVoice\":{\"type\":\"boolean\",\"description\":\"Send audio as a voice note; combines with voiceText.\"},\"voiceText\":{\"type\":\"string\",\"description\":\"Text to synthesize; message remains visible.\"},\"voiceProvider\":{\"type\":\"string\",\"description\":\"Per-send speech provider override.\"},\"voiceId\":{\"type\":\"string\",\"description\":\"Per-send speech voice override.\"},\"silent\":{\"type\":\"boolean\"},\"quoteText\":{\"type\":\"string\",\"description\":\"Telegram reply quote text.\"},\"gifPlayback\":{\"type\":\"boolean\"},\"forceDocument\":{\"type\":\"boolean\",\"description\":\"Send media as document; no compression.\"},\"asDocument\":{\"type\":\"boolean\",\"description\":\"Alias for forceDocument.\"},\"gatewayUrl\":{\"type\":\"string\"},\"gatewayToken\":{\"type\":\"string\"},\"timeoutMs\":{\"type\":\"integer\",\"minimum\":1},\"messageId\":{\"type\":\"string\",\"description\":\"Target read/react/edit/delete/pin/unpin id; reactions default current inbound.\"},\"message_id\":{\"type\":\"string\",\"description\":\"snake_case alias of messageId; same defaults.\"},\"emoji\":{\"type\":\"string\",\"description\":\"One Unicode emoji for the current WebChat prompt; explicit external channels validate their own emoji.\"},\"remove\":{\"type\":\"boolean\"},\"trackToolCalls\":{\"type\":\"boolean\",\"description\":\"Use the reacted message for this turn's status reaction lifecycle.\"},\"track_tool_calls\":{\"type\":\"boolean\",\"description\":\"snake_case alias of trackToolCalls.\"},\"targetAuthor\":{\"type\":\"string\"},\"targetAuthorUuid\":{\"type\":\"string\"},\"groupId\":{\"type\":\"string\"},\"final\":{\"type\":\"boolean\",\"description\":\"For source replies, set false for progress; set true, or omit, for a completed send. For react, set true when adding a reaction to the current source message is your complete response; omit or set false when more work follows. A confirmed final source reply ends the turn.\"}}}},{\"name\":\"openclaw\",\"label\":\"OpenClaw\",\"description\":\"Delegate system setup or repair to a separate model turn. Prefer your available tools for routine status and session/workspace checks. Gateway restart, config, channels, plugins, agents, models/providers, API keys. Supports multiple named custom/local model endpoints; provider IDs can be user-defined, while api selects the protocol. Setup flows use masked entry, which keeps keys out of model context; if the user already gave a key or token in chat, pass it along and OpenClaw stores it without echoing it. Changes wait for the user to approve in the Control UI or OpenClaw apps unless current Full Access or a standing delegation grant permits application without asking for approval. Returns the final outcome.\",\"parameters\":{\"type\":\"object\",\"required\":[\"message\"],\"properties\":{\"message\":{\"type\":\"string\",\"description\":\"What system must do.\"},\"sessionId\":{\"type\":\"string\",\"description\":\"Continue prior OpenClaw talk.\"}}}},{\"name\":\"process\",\"label\":\"process\",\"description\":\"Control existing exec: list, poll, log, write, send-keys, submit, paste, kill. poll/log: status, output, quiet success, completion without auto-wake, input hints. Others: input/intervention. kill requests termination or returns the retained terminal result for an already-finished session. After a termination request, poll until a terminal result confirms exit and cleanup before saying stopped. A running poll is still pending. remove hides the record and cannot confirm cleanup. Later process results supersede turn-start snapshots. Control sessions by sessionId; a displayed host PID is not a portable sandbox PID. No polling as timer/reminder; scheduled follow-up uses automations. On a requested monitoring stop, also stop any ordinary exec sessions you created for that request; stopping a saved automation does not stop them. Preserve unrelated work.\",\"parameters\":{\"type\":\"object\",\"required\":[\"action\"],\"properties\":{\"action\":{\"type\":\"string\",\"enum\":[\"list\",\"poll\",\"log\",\"write\",\"send-keys\",\"submit\",\"paste\",\"kill\",\"clear\",\"remove\"],\"description\":\"Process action (list|poll|log|write|send-keys|submit|paste|kill|clear|remove)\"},\"sessionId\":{\"type\":\"string\",\"description\":\"Required for every action except list.\"},\"data\":{\"type\":\"string\",\"description\":\"Data to write for write\"},\"keys\":{\"type\":\"array\",\"items\":{\"type\":\"string\"},\"description\":\"Key tokens to send for send-keys\"},\"hex\":{\"type\":\"array\",\"items\":{\"type\":\"string\"},\"description\":\"Hex bytes to send for send-keys\"},\"literal\":{\"type\":\"string\",\"description\":\"Literal string for send-keys\"},\"text\":{\"type\":\"string\",\"description\":\"Text to paste for paste\"},\"bracketed\":{\"type\":\"boolean\",\"description\":\"Wrap paste in bracketed mode\"},\"eof\":{\"type\":\"boolean\",\"description\":\"Close stdin after write\"},\"offset\":{\"type\":\"number\",\"description\":\"Log offset\"},\"limit\":{\"type\":\"number\",\"description\":\"Log length\"},\"timeout\":{\"type\":\"number\",\"description\":\"For poll: wait up to this many milliseconds before returning; max 30000 ms, higher values are clamped to 30000\",\"minimum\":0}}}},{\"name\":\"read\",\"label\":\"read\",\"description\":\"Read text/image file (jpg/png/gif/webp/bmp); images attach to model context. Text caps 2000 lines or 50KB. Continue with offset/limit, or cursor within a long line.\",\"parameters\":{\"type\":\"object\",\"required\":[\"path\"],\"properties\":{\"path\":{\"type\":\"string\",\"description\":\"File path; relative/absolute.\"},\"offset\":{\"type\":\"integer\",\"minimum\":1,\"description\":\"Start line; 1-based.\"},\"limit\":{\"type\":\"number\",\"description\":\"Max lines.\"},\"cursor\":{\"type\":\"integer\",\"minimum\":0,\"description\":\"Character position within the start line; 0-based.\"},\"optional\":{\"type\":\"boolean\",\"const\":true,\"description\":\"Missing paths return structured not_found instead of failing.\"}}}},{\"name\":\"sessions_yield\",\"label\":\"Yield\",\"description\":\"End this turn to await pending child completions, not submit a final result. Return completed work normally. Does not message other sessions. Omit waitFor when yielding for your own children; their completions resume this session. Set waitFor:\\\"message\\\" only when a subagent has no pending children and waits for its requester to send it a continuation. For background tools, follow their continuation instructions. Automation turns end here; the scheduler delivers child output under the job delivery policy. Collector runs require explicit collection instead.\",\"parameters\":{\"type\":\"object\",\"properties\":{\"waitFor\":{\"type\":\"string\",\"const\":\"message\",\"description\":\"Only for a subagent with no pending children of its own that waits for its requester to send it a continuation. Omit when yielding for your own children: their completions resume this session. Does not send or schedule that message or submit a final result.\"},\"message\":{\"type\":\"string\",\"description\":\"Private context for the resumed turn; not sent to the user.\"},\"acknowledgment\":{\"type\":\"string\",\"description\":\"Optional brief waiting status shown to the user as your message; put answers in normal assistant text. With waitFor, also the task pause notice. Not an inter-session message.\"}}},\"async\":false},{\"name\":\"tool_describe\",\"label\":\"Tool Describe\",\"description\":\"Load the full schema and metadata, including complete server instructions, for one tool id or name. Use this when the input is not already clear or when discovery returned instructionsHint.\",\"parameters\":{\"type\":\"object\",\"required\":[\"id\"],\"properties\":{\"id\":{\"type\":\"string\",\"description\":\"Tool search result id or tool name.\"}}}},{\"name\":\"tool_search\",\"label\":\"Tool Search\",\"description\":\"Search the effective Tool Search catalog. Pass query for one search or queries for several independent searches in one call; a non-empty query joins a non-empty batch first, with its own limit. Batch results stay grouped in request order. Queries must be in English: matching is lexical against tool names and descriptions, which are written in English, so another language will usually match nothing. Pass an exact result id or name to dispatch_action. Use tool_describe when you need its input schema or when a result includes instructionsHint; call it before dispatch_action to load the complete server instructions.\",\"parameters\":{\"type\":\"object\",\"properties\":{\"query\":{\"anyOf\":[{\"type\":\"string\"},{\"type\":\"null\"}],\"description\":\"Single search query, in English. A non-empty query joins a non-empty batch first. Null or blank is ignored beside a non-empty batch.\"},\"limit\":{\"anyOf\":[{\"type\":\"integer\",\"minimum\":1},{\"type\":\"null\"}],\"description\":\"Maximum number of single-search results. Omitted or null uses the default. With only batch queries, omit this or set it to null; set limits on each batch entry.\"},\"queries\":{\"anyOf\":[{\"type\":\"array\",\"items\":{\"type\":\"object\",\"required\":[\"query\"],\"properties\":{\"query\":{\"type\":\"string\",\"minLength\":1,\"maxLength\":512,\"description\":\"Search query, in English. Describe the capability you need.\"},\"limit\":{\"type\":\"integer\",\"minimum\":1,\"description\":\"Maximum results for this query. Defaults to 8 when omitted.\"}}},\"maxItems\":16},{\"type\":\"null\"}],\"description\":\"Independent searches. Prefer this alone for several searches; a non-empty query beside it runs as the first entry. Their effective limits may total at most 50; an omitted item limit counts as 8. The serialized query strings may use at most 512 UTF-8 bytes in total.\"}}}},{\"name\":\"write\",\"label\":\"write\",\"description\":\"Write/overwrite file; creates parent directories.\",\"parameters\":{\"type\":\"object\",\"required\":[\"path\",\"content\"],\"properties\":{\"path\":{\"type\":\"string\",\"description\":\"File path; relative/absolute.\"},\"content\":{\"type\":\"string\",\"description\":\"File content.\"}}}}]"
+                  }
+                },
+                {
+                  "key": "openclaw.content.output_messages",
+                  "value": {
+                    "stringValue": "[{\"role\":\"assistant\",\"content\":[{\"type\":\"toolCall\",\"id\":\"call_openclaw_read_1\",\"name\":\"read\",\"arguments\":{\"path\":\"hello.txt\"}}],\"api\":\"openai-completions\",\"provider\":\"openai\",\"model\":\"gpt-4o-mini\",\"usage\":{\"input\":82,\"output\":17,\"cacheRead\":0,\"cacheWrite\":0,\"cacheTelemetry\":{\"state\":\"available\"},\"reasoningTokens\":0,\"contextUsage\":{\"state\":\"available\",\"promptTokens\":82,\"totalTokens\":99},\"totalTokens\":99,\"cost\":{\"input\":0,\"output\":0,\"cacheRead\":0,\"cacheWrite\":0,\"total\":0},\"usageReport\":{\"state\":\"available\"}},\"stopReason\":\"toolUse\",\"timestamp\":1795523564772,\"responseId\":\"chatcmpl-capture-1\"}]"
+                  }
+                }
+              ],
+              "droppedAttributesCount": 0,
+              "events": [],
+              "droppedEventsCount": 0,
+              "links": [],
+              "droppedLinksCount": 0,
+              "status": null
+            },
+            {
+              "traceId": "1f6924c921635ce08569a59625335785",
+              "spanId": "dbd364c55364fa05",
+              "traceState": "",
+              "parentSpanId": "164f0a1356a1eb1d",
+              "flags": 257,
+              "name": "openclaw.tool.execution",
+              "kind": 1,
+              "startTimeUnixNano": "1767225591824000000",
+              "endTimeUnixNano": "1767225591854000000",
+              "attributes": [
+                {
+                  "key": "openclaw.toolName",
+                  "value": {
+                    "stringValue": "read"
+                  }
+                },
+                {
+                  "key": "openclaw.tool.source",
+                  "value": {
+                    "stringValue": "core"
+                  }
+                },
+                {
+                  "key": "gen_ai.tool.name",
+                  "value": {
+                    "stringValue": "read"
+                  }
+                },
+                {
+                  "key": "openclaw.tool.params.kind",
+                  "value": {
+                    "stringValue": "object"
+                  }
+                },
+                {
+                  "key": "gen_ai.operation.name",
+                  "value": {
+                    "stringValue": "execute_tool"
+                  }
+                },
+                {
+                  "key": "gen_ai.tool.call.id",
+                  "value": {
+                    "stringValue": "call_openclaw_read_1"
+                  }
+                },
+                {
+                  "key": "openclaw.agent",
+                  "value": {
+                    "stringValue": "main"
+                  }
+                },
+                {
+                  "key": "gen_ai.tool.call.arguments",
+                  "value": {
+                    "stringValue": "{\"path\":\"hello.txt\"}"
+                  }
+                },
+                {
+                  "key": "openclaw.content.tool_input",
+                  "value": {
+                    "stringValue": "{\"path\":\"hello.txt\"}"
+                  }
+                },
+                {
+                  "key": "gen_ai.tool.call.result",
+                  "value": {
+                    "stringValue": "{\"content\":[{\"type\":\"text\",\"text\":\"hello from cetra\\n\"}],\"details\":{\"kind\":\"text\",\"content\":\"hello from cetra\\n\"}}"
+                  }
+                },
+                {
+                  "key": "openclaw.content.tool_output",
+                  "value": {
+                    "stringValue": "{\"content\":[{\"type\":\"text\",\"text\":\"hello from cetra\\n\"}],\"details\":{\"kind\":\"text\",\"content\":\"hello from cetra\\n\"}}"
+                  }
+                }
+              ],
+              "droppedAttributesCount": 0,
+              "events": [],
+              "droppedEventsCount": 0,
+              "links": [],
+              "droppedLinksCount": 0,
+              "status": null
+            },
+            {
+              "traceId": "1f6924c921635ce08569a59625335785",
+              "spanId": "9703a04d79940384",
+              "traceState": "",
+              "parentSpanId": "164f0a1356a1eb1d",
+              "flags": 257,
+              "name": "openclaw.model.call",
+              "kind": 3,
+              "startTimeUnixNano": "1767225591880000000",
+              "endTimeUnixNano": "1767225591958000000",
+              "attributes": [
+                {
+                  "key": "openclaw.provider",
+                  "value": {
+                    "stringValue": "openai"
+                  }
+                },
+                {
+                  "key": "openclaw.model",
+                  "value": {
+                    "stringValue": "gpt-4o-mini"
+                  }
+                },
+                {
+                  "key": "openclaw.agent",
+                  "value": {
+                    "stringValue": "main"
+                  }
+                },
+                {
+                  "key": "gen_ai.system",
+                  "value": {
+                    "stringValue": "openai"
+                  }
+                },
+                {
+                  "key": "gen_ai.request.model",
+                  "value": {
+                    "stringValue": "gpt-4o-mini"
+                  }
+                },
+                {
+                  "key": "gen_ai.operation.name",
+                  "value": {
+                    "stringValue": "text_completion"
+                  }
+                },
+                {
+                  "key": "openclaw.model_call.observation_unit",
+                  "value": {
+                    "stringValue": "request"
+                  }
+                },
+                {
+                  "key": "openclaw.api",
+                  "value": {
+                    "stringValue": "openai-completions"
+                  }
+                },
+                {
+                  "key": "openclaw.transport",
+                  "value": {
+                    "stringValue": "sse"
+                  }
+                },
+                {
+                  "key": "openclaw.model_call.prompt.input_messages_count",
+                  "value": {
+                    "intValue": "4"
+                  }
+                },
+                {
+                  "key": "openclaw.model_call.prompt.input_messages_chars",
+                  "value": {
+                    "intValue": "1917"
+                  }
+                },
+                {
+                  "key": "openclaw.model_call.prompt.system_prompt_chars",
+                  "value": {
+                    "intValue": "45357"
+                  }
+                },
+                {
+                  "key": "openclaw.model_call.prompt.tool_definitions_count",
+                  "value": {
+                    "intValue": "13"
+                  }
+                },
+                {
+                  "key": "openclaw.model_call.prompt.tool_definitions_chars",
+                  "value": {
+                    "intValue": "15976"
+                  }
+                },
+                {
+                  "key": "openclaw.model_call.prompt.total_chars",
+                  "value": {
+                    "intValue": "63250"
+                  }
+                },
+                {
+                  "key": "openclaw.model_call.request_bytes",
+                  "value": {
+                    "intValue": "63178"
+                  }
+                },
+                {
+                  "key": "openclaw.model_call.response_bytes",
+                  "value": {
+                    "intValue": "688"
+                  }
+                },
+                {
+                  "key": "openclaw.model_call.time_to_first_byte_ms",
+                  "value": {
+                    "intValue": "10"
+                  }
+                },
+                {
+                  "key": "openclaw.model_call.usage.input_tokens",
+                  "value": {
+                    "intValue": "131"
+                  }
+                },
+                {
+                  "key": "openclaw.model_call.usage.output_tokens",
+                  "value": {
+                    "intValue": "12"
+                  }
+                },
+                {
+                  "key": "openclaw.model_call.usage.cache_read_input_tokens",
+                  "value": {
+                    "intValue": "0"
+                  }
+                },
+                {
+                  "key": "openclaw.model_call.usage.cache_creation_input_tokens",
+                  "value": {
+                    "intValue": "0"
+                  }
+                },
+                {
+                  "key": "openclaw.model_call.usage.reasoning_output_tokens",
+                  "value": {
+                    "intValue": "0"
+                  }
+                },
+                {
+                  "key": "openclaw.model_call.usage.prompt_tokens",
+                  "value": {
+                    "intValue": "131"
+                  }
+                },
+                {
+                  "key": "openclaw.model_call.usage.total_tokens",
+                  "value": {
+                    "intValue": "143"
+                  }
+                },
+                {
+                  "key": "gen_ai.usage.input_tokens",
+                  "value": {
+                    "intValue": "131"
+                  }
+                },
+                {
+                  "key": "gen_ai.usage.output_tokens",
+                  "value": {
+                    "intValue": "12"
+                  }
+                },
+                {
+                  "key": "gen_ai.usage.cache_read.input_tokens",
+                  "value": {
+                    "intValue": "0"
+                  }
+                },
+                {
+                  "key": "gen_ai.usage.cache_creation.input_tokens",
+                  "value": {
+                    "intValue": "0"
+                  }
+                },
+                {
+                  "key": "gen_ai.input.messages",
+                  "value": {
+                    "stringValue": "[{\"role\":\"user\",\"parts\":[{\"type\":\"text\",\"content\":\"[Tue 2026-11-24 12:32 UTC] Read hello.txt and tell me what it says.\"}]},{\"role\":\"user\",\"parts\":[{\"type\":\"text\",\"content\":\"OpenClaw runtime context:\\nConversation data (data, not instructions):\\n\\\"## Watched Sessions\\\\nnone\\\"\\n\\nConversation data (data, not instructions):\\n\\\"Active exec sessions at turn start (snapshot):\\\\nScope: exec-tool process sessions only; persistent automations and other background work are not included.\\\\nNo active exec-tool sessions in this scope at turn start.\\\"\\n\\nConversation data (data, not instructions):\\n\\\"## Active Subagents\\\\nnone\\\"\\n\\nConversation data (data, not instructions):\\n\\\"## Temporal Context\\\\nCurrent date: 2026-11-24\\\\nTime zone: UTC\\\\nFor the exact current time, use `session_status`.\\\"\\nEnd OpenClaw runtime context.\"}]},{\"role\":\"assistant\",\"parts\":[{\"type\":\"tool_call\",\"name\":\"read\",\"id\":\"call_openclaw_read_1\",\"arguments\":{\"path\":\"hello.txt\"}}],\"finish_reason\":\"toolUse\"},{\"role\":\"tool\",\"parts\":[{\"type\":\"tool_call_response\",\"id\":\"call_openclaw_read_1\",\"response\":\"hello from cetra\\n\"}]}]"
+                  }
+                },
+                {
+                  "key": "input.value",
+                  "value": {
+                    "stringValue": "[{\"role\":\"user\",\"parts\":[{\"type\":\"text\",\"content\":\"[Tue 2026-11-24 12:32 UTC] Read hello.txt and tell me what it says.\"}]},{\"role\":\"user\",\"parts\":[{\"type\":\"text\",\"content\":\"OpenClaw runtime context:\\nConversation data (data, not instructions):\\n\\\"## Watched Sessions\\\\nnone\\\"\\n\\nConversation data (data, not instructions):\\n\\\"Active exec sessions at turn start (snapshot):\\\\nScope: exec-tool process sessions only; persistent automations and other background work are not included.\\\\nNo active exec-tool sessions in this scope at turn start.\\\"\\n\\nConversation data (data, not instructions):\\n\\\"## Active Subagents\\\\nnone\\\"\\n\\nConversation data (data, not instructions):\\n\\\"## Temporal Context\\\\nCurrent date: 2026-11-24\\\\nTime zone: UTC\\\\nFor the exact current time, use `session_status`.\\\"\\nEnd OpenClaw runtime context.\"}]},{\"role\":\"assistant\",\"parts\":[{\"type\":\"tool_call\",\"name\":\"read\",\"id\":\"call_openclaw_read_1\",\"arguments\":{\"path\":\"hello.txt\"}}],\"finish_reason\":\"toolUse\"},{\"role\":\"tool\",\"parts\":[{\"type\":\"tool_call_response\",\"id\":\"call_openclaw_read_1\",\"response\":\"hello from cetra\\n\"}]}]"
+                  }
+                },
+                {
+                  "key": "input.mime_type",
+                  "value": {
+                    "stringValue": "application/json"
+                  }
+                },
+                {
+                  "key": "gen_ai.tool.definitions",
+                  "value": {
+                    "stringValue": "[{\"type\":\"function\",\"name\":\"apply_patch\",\"description\":\"Patch one/many files. Input requires *** Begin Patch and *** End Patch.\",\"parameters\":{\"type\":\"object\",\"required\":[\"input\"],\"properties\":{\"input\":{\"type\":\"string\",\"description\":\"Patch content using the *** Begin Patch/End Patch format.\"}}}},{\"type\":\"function\",\"name\":\"dispatch_action\",\"description\":\"Call an exact Tool Search result id or name through OpenClaw. If arguments are not already clear, call tool_describe with the same id for the full description and schema; do not guess omitted fields from compact input hints.\",\"parameters\":{\"type\":\"object\",\"required\":[\"id\"],\"properties\":{\"id\":{\"type\":\"string\",\"description\":\"Tool search result id or tool name.\"},\"args\":{\"type\":\"object\",\"patternProperties\":{\"^.*$\":{}},\"description\":\"Tool input.\"}}}},{\"type\":\"function\",\"name\":\"edit\",\"description\":\"Exact single-file replacements. oldText unique/non-overlapping against original. Merge nearby changes; omit large unchanged spans.\",\"parameters\":{\"type\":\"object\",\"required\":[\"path\",\"edits\"],\"properties\":{\"path\":{\"type\":\"string\",\"description\":\"File path; relative/absolute.\"},\"edits\":{\"type\":\"array\",\"items\":{\"type\":\"object\",\"required\":[\"oldText\",\"newText\"],\"properties\":{\"oldText\":{\"type\":\"string\",\"description\":\"Exact original text; unique and non-overlapping in this call.\"},\"newText\":{\"type\":\"string\",\"description\":\"Replacement text.\"}}},\"description\":\"Targeted replacements against original file; no overlap/nesting. Merge nearby changes.\"}}}},{\"type\":\"function\",\"name\":\"exec\",\"description\":\"For continuous monitoring with future alerts, check automations for supported saved watchers. Ordinary background output cannot wake you to report new events. Run shell now; background continuation supported. Completed calls return command output directly. Use process only when exec reports running with a sessionId; output text alone is not a process handle. Long run: automatic completion wake, when enabled, occurs only after exit; otherwise process confirms completion. Output while still running does not automatically start another turn. Background commands can outlive the turn; use process kill when no longer needed. Completion and the configured timeout still apply; this is not a saved, restartable automation. Omit host/node to use the session's configured host. No sleep loops for reminders/follow-ups; use automations. TTY CLI/UI/coding agent: pty=true. Quote arguments containing shell metacharacters, including URL query strings with `?` or `&`.\",\"parameters\":{\"type\":\"object\",\"required\":[\"command\"],\"properties\":{\"title\":{\"type\":\"string\",\"maxLength\":120,\"description\":\"Every call: short purpose; never claim success. No secrets.\"},\"command\":{\"type\":\"string\",\"description\":\"Shell command.\"},\"workdir\":{\"type\":\"string\",\"description\":\"Omit/empty string: default; whitespace-only invalid.\"},\"env\":{\"type\":\"object\",\"patternProperties\":{\"^.*$\":{\"type\":\"string\"}},\"description\":\"Literal overrides; no expansion. Omit to inherit.\"},\"yieldMs\":{\"type\":\"number\",\"description\":\"Milliseconds before returning an ordinary-command handle; default 10000.\"},\"awaitResults\":{\"type\":\"boolean\",\"description\":\"Result required to finish the task; wait for terminal collection. Not for detached servers.\"},\"background\":{\"type\":\"boolean\",\"description\":\"Start an independent service now; survives request Stop. Use yieldMs for ordinary work. timeoutSeconds applies.\"},\"timeoutSeconds\":{\"type\":\"number\",\"description\":\"Process lifetime in seconds; 0 disables.\"},\"pty\":{\"type\":\"boolean\",\"description\":\"PTY for TTY-required CLIs/coding agents.\"},\"elevated\":{\"type\":\"boolean\",\"description\":\"Host elevation if allowed.\"},\"host\":{\"enum\":[\"auto\",\"gateway\",\"node\"],\"type\":\"string\",\"description\":\"Omit: named node or configured host (gateway). auto: configured host.\"},\"ask\":{\"type\":\"string\",\"description\":\"Requests stricter approvals under tools.exec.mode and host policy; channel-origin calls cannot override host ask=off.\"},\"node\":{\"type\":\"string\",\"description\":\"Node id/name; implies host=node if host is omitted. Other hosts conflict.\"}}}},{\"type\":\"function\",\"name\":\"ls\",\"description\":\"List directory entries in binary filename order, including dotfiles and links. Names are JSON-quoted; / marks actual directories. Pass the returned after cursor with the same path to continue.\",\"parameters\":{\"type\":\"object\",\"properties\":{\"path\":{\"type\":\"string\",\"description\":\"Directory; default cwd.\"},\"limit\":{\"type\":\"number\",\"description\":\"Max entries; default 500.\"},\"after\":{\"type\":\"string\",\"description\":\"Filename cursor returned by the previous page.\"}}}},{\"type\":\"function\",\"name\":\"message\",\"description\":\"Send/manage channel messages. Supports actions: broadcast, react, send. When the current WebChat prompt permits reactions, react with emoji (and optional remove:true) as the agent. Omit channel, target, and messageId. This stays local; use an explicit external channel and messageId for external reactions.\",\"parameters\":{\"type\":\"object\",\"required\":[\"action\"],\"properties\":{\"action\":{\"enum\":[\"broadcast\",\"react\",\"send\"],\"type\":\"string\",\"description\":\"Select one action. For action=\\\"send\\\", provide message or another send payload; fields for other actions do not count as send content.\"},\"channel\":{\"type\":\"string\"},\"target\":{\"type\":\"string\",\"description\":\"Recipient/channel: E.164 for WhatsApp/Signal, Telegram chat id/@username, Discord/Slack/Mattermost <channelId|user:ID|channel:ID>, or iMessage handle/chat_id\"},\"targets\":{\"type\":\"array\",\"items\":{\"type\":\"string\",\"description\":\"Recipient/channel targets (same format as --target); accepts ids or names when the directory is available.\"}},\"accountId\":{\"type\":\"string\"},\"dryRun\":{\"type\":\"boolean\"},\"message\":{\"type\":\"string\",\"description\":\"Text for action=\\\"send\\\". A send needs message or another send payload such as media, attachments, or presentation.\"},\"effectId\":{\"type\":\"string\",\"description\":\"sendWithEffect id/name.\"},\"effect\":{\"type\":\"string\",\"description\":\"Alias for effectId.\"},\"media\":{\"type\":\"string\",\"description\":\"Media URL/path. data: use buffer.\"},\"filename\":{\"type\":\"string\"},\"buffer\":{\"type\":\"string\",\"description\":\"Base64/data-URL attachment.\"},\"contentType\":{\"type\":\"string\"},\"mimeType\":{\"type\":\"string\"},\"caption\":{\"type\":\"string\"},\"attachments\":{\"type\":\"array\",\"items\":{\"type\":\"object\",\"properties\":{\"type\":{\"enum\":[\"image\",\"audio\",\"video\",\"file\"],\"type\":\"string\"},\"media\":{\"type\":\"string\"},\"name\":{\"type\":\"string\"},\"mimeType\":{\"type\":\"string\"}}},\"description\":\"Attachments; each uses media.\"},\"replyTo\":{\"type\":\"string\"},\"threadId\":{\"type\":\"string\"},\"asVoice\":{\"type\":\"boolean\",\"description\":\"Send audio as a voice note; combines with voiceText.\"},\"voiceText\":{\"type\":\"string\",\"description\":\"Text to synthesize; message remains visible.\"},\"voiceProvider\":{\"type\":\"string\",\"description\":\"Per-send speech provider override.\"},\"voiceId\":{\"type\":\"string\",\"description\":\"Per-send speech voice override.\"},\"silent\":{\"type\":\"boolean\"},\"quoteText\":{\"type\":\"string\",\"description\":\"Telegram reply quote text.\"},\"gifPlayback\":{\"type\":\"boolean\"},\"forceDocument\":{\"type\":\"boolean\",\"description\":\"Send media as document; no compression.\"},\"asDocument\":{\"type\":\"boolean\",\"description\":\"Alias for forceDocument.\"},\"gatewayUrl\":{\"type\":\"string\"},\"gatewayToken\":{\"type\":\"string\"},\"timeoutMs\":{\"type\":\"integer\",\"minimum\":1},\"messageId\":{\"type\":\"string\",\"description\":\"Target read/react/edit/delete/pin/unpin id; reactions default current inbound.\"},\"message_id\":{\"type\":\"string\",\"description\":\"snake_case alias of messageId; same defaults.\"},\"emoji\":{\"type\":\"string\",\"description\":\"One Unicode emoji for the current WebChat prompt; explicit external channels validate their own emoji.\"},\"remove\":{\"type\":\"boolean\"},\"trackToolCalls\":{\"type\":\"boolean\",\"description\":\"Use the reacted message for this turn's status reaction lifecycle.\"},\"track_tool_calls\":{\"type\":\"boolean\",\"description\":\"snake_case alias of trackToolCalls.\"},\"targetAuthor\":{\"type\":\"string\"},\"targetAuthorUuid\":{\"type\":\"string\"},\"groupId\":{\"type\":\"string\"},\"final\":{\"type\":\"boolean\",\"description\":\"For source replies, set false for progress; set true, or omit, for a completed send. For react, set true when adding a reaction to the current source message is your complete response; omit or set false when more work follows. A confirmed final source reply ends the turn.\"}}}},{\"type\":\"function\",\"name\":\"openclaw\",\"description\":\"Delegate system setup or repair to a separate model turn. Prefer your available tools for routine status and session/workspace checks. Gateway restart, config, channels, plugins, agents, models/providers, API keys. Supports multiple named custom/local model endpoints; provider IDs can be user-defined, while api selects the protocol. Setup flows use masked entry, which keeps keys out of model context; if the user already gave a key or token in chat, pass it along and OpenClaw stores it without echoing it. Changes wait for the user to approve in the Control UI or OpenClaw apps unless current Full Access or a standing delegation grant permits application without asking for approval. Returns the final outcome.\",\"parameters\":{\"type\":\"object\",\"required\":[\"message\"],\"properties\":{\"message\":{\"type\":\"string\",\"description\":\"What system must do.\"},\"sessionId\":{\"type\":\"string\",\"description\":\"Continue prior OpenClaw talk.\"}}}},{\"type\":\"function\",\"name\":\"process\",\"description\":\"Control existing exec: list, poll, log, write, send-keys, submit, paste, kill. poll/log: status, output, quiet success, completion without auto-wake, input hints. Others: input/intervention. kill requests termination or returns the retained terminal result for an already-finished session. After a termination request, poll until a terminal result confirms exit and cleanup before saying stopped. A running poll is still pending. remove hides the record and cannot confirm cleanup. Later process results supersede turn-start snapshots. Control sessions by sessionId; a displayed host PID is not a portable sandbox PID. No polling as timer/reminder; scheduled follow-up uses automations. On a requested monitoring stop, also stop any ordinary exec sessions you created for that request; stopping a saved automation does not stop them. Preserve unrelated work.\",\"parameters\":{\"type\":\"object\",\"required\":[\"action\"],\"properties\":{\"action\":{\"type\":\"string\",\"enum\":[\"list\",\"poll\",\"log\",\"write\",\"send-keys\",\"submit\",\"paste\",\"kill\",\"clear\",\"remove\"],\"description\":\"Process action (list|poll|log|write|send-keys|submit|paste|kill|clear|remove)\"},\"sessionId\":{\"type\":\"string\",\"description\":\"Required for every action except list.\"},\"data\":{\"type\":\"string\",\"description\":\"Data to write for write\"},\"keys\":{\"type\":\"array\",\"items\":{\"type\":\"string\"},\"description\":\"Key tokens to send for send-keys\"},\"hex\":{\"type\":\"array\",\"items\":{\"type\":\"string\"},\"description\":\"Hex bytes to send for send-keys\"},\"literal\":{\"type\":\"string\",\"description\":\"Literal string for send-keys\"},\"text\":{\"type\":\"string\",\"description\":\"Text to paste for paste\"},\"bracketed\":{\"type\":\"boolean\",\"description\":\"Wrap paste in bracketed mode\"},\"eof\":{\"type\":\"boolean\",\"description\":\"Close stdin after write\"},\"offset\":{\"type\":\"number\",\"description\":\"Log offset\"},\"limit\":{\"type\":\"number\",\"description\":\"Log length\"},\"timeout\":{\"type\":\"number\",\"description\":\"For poll: wait up to this many milliseconds before returning; max 30000 ms, higher values are clamped to 30000\",\"minimum\":0}}}},{\"type\":\"function\",\"name\":\"read\",\"description\":\"Read text/image file (jpg/png/gif/webp/bmp); images attach to model context. Text caps 2000 lines or 50KB. Continue with offset/limit, or cursor within a long line.\",\"parameters\":{\"type\":\"object\",\"required\":[\"path\"],\"properties\":{\"path\":{\"type\":\"string\",\"description\":\"File path; relative/absolute.\"},\"offset\":{\"type\":\"integer\",\"minimum\":1,\"description\":\"Start line; 1-based.\"},\"limit\":{\"type\":\"number\",\"description\":\"Max lines.\"},\"cursor\":{\"type\":\"integer\",\"minimum\":0,\"description\":\"Character position within the start line; 0-based.\"},\"optional\":{\"type\":\"boolean\",\"const\":true,\"description\":\"Missing paths return structured not_found instead of failing.\"}}}},{\"type\":\"function\",\"name\":\"sessions_yield\",\"description\":\"End this turn to await pending child completions, not submit a final result. Return completed work normally. Does not message other sessions. Omit waitFor when yielding for your own children; their completions resume this session. Set waitFor:\\\"message\\\" only when a subagent has no pending children and waits for its requester to send it a continuation. For background tools, follow their continuation instructions. Automation turns end here; the scheduler delivers child output under the job delivery policy. Collector runs require explicit collection instead.\",\"parameters\":{\"type\":\"object\",\"properties\":{\"waitFor\":{\"type\":\"string\",\"const\":\"message\",\"description\":\"Only for a subagent with no pending children of its own that waits for its requester to send it a continuation. Omit when yielding for your own children: their completions resume this session. Does not send or schedule that message or submit a final result.\"},\"message\":{\"type\":\"string\",\"description\":\"Private context for the resumed turn; not sent to the user.\"},\"acknowledgment\":{\"type\":\"string\",\"description\":\"Optional brief waiting status shown to the user as your message; put answers in normal assistant text. With waitFor, also the task pause notice. Not an inter-session message.\"}}}},{\"type\":\"function\",\"name\":\"tool_describe\",\"description\":\"Load the full schema and metadata, including complete server instructions, for one tool id or name. Use this when the input is not already clear or when discovery returned instructionsHint.\",\"parameters\":{\"type\":\"object\",\"required\":[\"id\"],\"properties\":{\"id\":{\"type\":\"string\",\"description\":\"Tool search result id or tool name.\"}}}},{\"type\":\"function\",\"name\":\"tool_search\",\"description\":\"Search the effective Tool Search catalog. Pass query for one search or queries for several independent searches in one call; a non-empty query joins a non-empty batch first, with its own limit. Batch results stay grouped in request order. Queries must be in English: matching is lexical against tool names and descriptions, which are written in English, so another language will usually match nothing. Pass an exact result id or name to dispatch_action. Use tool_describe when you need its input schema or when a result includes instructionsHint; call it before dispatch_action to load the complete server instructions.\",\"parameters\":{\"type\":\"object\",\"properties\":{\"query\":{\"anyOf\":[{\"type\":\"string\"},{\"type\":\"null\"}],\"description\":\"Single search query, in English. A non-empty query joins a non-empty batch first. Null or blank is ignored beside a non-empty batch.\"},\"limit\":{\"anyOf\":[{\"type\":\"integer\",\"minimum\":1},{\"type\":\"null\"}],\"description\":\"Maximum number of single-search results. Omitted or null uses the default. With only batch queries, omit this or set it to null; set limits on each batch entry.\"},\"queries\":{\"anyOf\":[{\"type\":\"array\",\"items\":{\"type\":\"object\",\"required\":[\"query\"],\"properties\":{\"query\":{\"type\":\"string\",\"minLength\":1,\"maxLength\":512,\"description\":\"Search query, in English. Describe the capability you need.\"},\"limit\":{\"type\":\"integer\",\"minimum\":1,\"description\":\"Maximum results for this query. Defaults to 8 when omitted.\"}}},\"maxItems\":16},{\"type\":\"null\"}],\"description\":\"Independent searches. Prefer this alone for several searches; a non-empty query beside it runs as the first entry. Their effective limits may total at most 50; an omitted item limit counts as 8. The serialized query strings may use at most 512 UTF-8 bytes in total.\"}}}},{\"type\":\"function\",\"name\":\"write\",\"description\":\"Write/overwrite file; creates parent directories.\",\"parameters\":{\"type\":\"object\",\"required\":[\"path\",\"content\"],\"properties\":{\"path\":{\"type\":\"string\",\"description\":\"File path; relative/absolute.\"},\"content\":{\"type\":\"string\",\"description\":\"File content.\"}}}}]"
+                  }
+                },
+                {
+                  "key": "gen_ai.output.messages",
+                  "value": {
+                    "stringValue": "[{\"role\":\"assistant\",\"parts\":[{\"type\":\"text\",\"content\":\"hello.txt says: hello from cetra.\"}],\"finish_reason\":\"stop\"}]"
+                  }
+                },
+                {
+                  "key": "output.value",
+                  "value": {
+                    "stringValue": "[{\"role\":\"assistant\",\"parts\":[{\"type\":\"text\",\"content\":\"hello.txt says: hello from cetra.\"}],\"finish_reason\":\"stop\"}]"
+                  }
+                },
+                {
+                  "key": "output.mime_type",
+                  "value": {
+                    "stringValue": "application/json"
+                  }
+                },
+                {
+                  "key": "openclaw.content.input_messages",
+                  "value": {
+                    "stringValue": "[{\"role\":\"user\",\"content\":\"[Tue 2026-11-24 12:32 UTC] Read hello.txt and tell me what it says.\",\"timestamp\":1795523553417,\"idempotencyKey\":\"20520788-f88a-4567-89e3-d739bc728bc5:user\",\"__openclaw\":{\"senderIsOwner\":true}},{\"role\":\"user\",\"content\":\"OpenClaw runtime context:\\nConversation data (data, not instructions):\\n\\\"## Watched Sessions\\\\nnone\\\"\\n\\nConversation data (data, not instructions):\\n\\\"Active exec sessions at turn start (snapshot):\\\\nScope: exec-tool process sessions only; persistent automations and other background work are not included.\\\\nNo active exec-tool sessions in this scope at turn start.\\\"\\n\\nConversation data (data, not instructions):\\n\\\"## Active Subagents\\\\nnone\\\"\\n\\nConversation data (data, not instructions):\\n\\\"## Temporal Context\\\\nCurrent date: 2026-11-24\\\\nTime zone: UTC\\\\nFor the exact current time, use `session_status`.\\\"\\nEnd OpenClaw runtime context.\",\"timestamp\":1795523564685,\"runtimeContext\":{\"retained\":true},\"runtimeContextCarrier\":true,\"runtimeContextCarrierRetained\":true},{\"role\":\"assistant\",\"content\":[{\"type\":\"toolCall\",\"id\":\"call_openclaw_read_1\",\"name\":\"read\",\"arguments\":{\"path\":\"hello.txt\"}}],\"api\":\"openai-completions\",\"provider\":\"openai\",\"model\":\"gpt-4o-mini\",\"usage\":{\"input\":82,\"output\":17,\"cacheRead\":0,\"cacheWrite\":0,\"cacheTelemetry\":{\"state\":\"available\"},\"reasoningTokens\":0,\"contextUsage\":{\"state\":\"available\",\"promptTokens\":82,\"totalTokens\":99},\"totalTokens\":99,\"cost\":{\"input\":0,\"output\":0,\"cacheRead\":0,\"cacheWrite\":0,\"total\":0},\"usageReport\":{\"state\":\"available\"}},\"stopReason\":\"toolUse\",\"timestamp\":1795523564772,\"responseId\":\"chatcmpl-capture-1\",\"__openclaw\":{\"runId\":\"db0cd4db-ab46-438d-81dd-6867181779fa\"}},{\"role\":\"toolResult\",\"toolCallId\":\"call_openclaw_read_1\",\"toolName\":\"read\",\"content\":[{\"type\":\"text\",\"text\":\"hello from cetra\\n\"}],\"isError\":false,\"timestamp\":1795523565028,\"__openclaw\":{\"runId\":\"db0cd4db-ab46-438d-81dd-6867181779fa\"}}]"
+                  }
+                },
+                {
+                  "key": "openclaw.content.tool_definitions",
+                  "value": {
+                    "stringValue": "[{\"name\":\"apply_patch\",\"label\":\"apply_patch\",\"description\":\"Patch one/many files. Input requires *** Begin Patch and *** End Patch.\",\"parameters\":{\"type\":\"object\",\"required\":[\"input\"],\"properties\":{\"input\":{\"type\":\"string\",\"description\":\"Patch content using the *** Begin Patch/End Patch format.\"}}}},{\"name\":\"dispatch_action\",\"label\":\"Tool Call\",\"description\":\"Call an exact Tool Search result id or name through OpenClaw. If arguments are not already clear, call tool_describe with the same id for the full description and schema; do not guess omitted fields from compact input hints.\",\"parameters\":{\"type\":\"object\",\"required\":[\"id\"],\"properties\":{\"id\":{\"type\":\"string\",\"description\":\"Tool search result id or tool name.\"},\"args\":{\"type\":\"object\",\"patternProperties\":{\"^.*$\":{}},\"description\":\"Tool input.\"}}}},{\"name\":\"edit\",\"label\":\"edit\",\"description\":\"Exact single-file replacements. oldText unique/non-overlapping against original. Merge nearby changes; omit large unchanged spans.\",\"parameters\":{\"type\":\"object\",\"required\":[\"path\",\"edits\"],\"properties\":{\"path\":{\"type\":\"string\",\"description\":\"File path; relative/absolute.\"},\"edits\":{\"type\":\"array\",\"items\":{\"type\":\"object\",\"required\":[\"oldText\",\"newText\"],\"properties\":{\"oldText\":{\"type\":\"string\",\"description\":\"Exact original text; unique and non-overlapping in this call.\"},\"newText\":{\"type\":\"string\",\"description\":\"Replacement text.\"}}},\"description\":\"Targeted replacements against original file; no overlap/nesting. Merge nearby changes.\"}}}},{\"name\":\"exec\",\"label\":\"exec\",\"description\":\"For continuous monitoring with future alerts, check automations for supported saved watchers. Ordinary background output cannot wake you to report new events. Run shell now; background continuation supported. Completed calls return command output directly. Use process only when exec reports running with a sessionId; output text alone is not a process handle. Long run: automatic completion wake, when enabled, occurs only after exit; otherwise process confirms completion. Output while still running does not automatically start another turn. Background commands can outlive the turn; use process kill when no longer needed. Completion and the configured timeout still apply; this is not a saved, restartable automation. Omit host/node to use the session's configured host. No sleep loops for reminders/follow-ups; use automations. TTY CLI/UI/coding agent: pty=true. Quote arguments containing shell metacharacters, including URL query strings with `?` or `&`.\",\"parameters\":{\"type\":\"object\",\"required\":[\"command\"],\"properties\":{\"title\":{\"type\":\"string\",\"maxLength\":120,\"description\":\"Every call: short purpose; never claim success. No secrets.\"},\"command\":{\"type\":\"string\",\"description\":\"Shell command.\"},\"workdir\":{\"type\":\"string\",\"description\":\"Omit/empty string: default; whitespace-only invalid.\"},\"env\":{\"type\":\"object\",\"patternProperties\":{\"^.*$\":{\"type\":\"string\"}},\"description\":\"Literal overrides; no expansion. Omit to inherit.\"},\"yieldMs\":{\"type\":\"number\",\"description\":\"Milliseconds before returning an ordinary-command handle; default 10000.\"},\"awaitResults\":{\"type\":\"boolean\",\"description\":\"Result required to finish the task; wait for terminal collection. Not for detached servers.\"},\"background\":{\"type\":\"boolean\",\"description\":\"Start an independent service now; survives request Stop. Use yieldMs for ordinary work. timeoutSeconds applies.\"},\"timeoutSeconds\":{\"type\":\"number\",\"description\":\"Process lifetime in seconds; 0 disables.\"},\"pty\":{\"type\":\"boolean\",\"description\":\"PTY for TTY-required CLIs/coding agents.\"},\"elevated\":{\"type\":\"boolean\",\"description\":\"Host elevation if allowed.\"},\"host\":{\"enum\":[\"auto\",\"gateway\",\"node\"],\"type\":\"string\",\"description\":\"Omit: named node or configured host (gateway). auto: configured host.\"},\"ask\":{\"type\":\"string\",\"description\":\"Requests stricter approvals under tools.exec.mode and host policy; channel-origin calls cannot override host ask=off.\"},\"node\":{\"type\":\"string\",\"description\":\"Node id/name; implies host=node if host is omitted. Other hosts conflict.\"}}}},{\"name\":\"ls\",\"label\":\"ls\",\"description\":\"List directory entries in binary filename order, including dotfiles and links. Names are JSON-quoted; / marks actual directories. Pass the returned after cursor with the same path to continue.\",\"parameters\":{\"type\":\"object\",\"properties\":{\"path\":{\"type\":\"string\",\"description\":\"Directory; default cwd.\"},\"limit\":{\"type\":\"number\",\"description\":\"Max entries; default 500.\"},\"after\":{\"type\":\"string\",\"description\":\"Filename cursor returned by the previous page.\"}}}},{\"name\":\"message\",\"label\":\"Message\",\"description\":\"Send/manage channel messages. Supports actions: broadcast, react, send. When the current WebChat prompt permits reactions, react with emoji (and optional remove:true) as the agent. Omit channel, target, and messageId. This stays local; use an explicit external channel and messageId for external reactions.\",\"parameters\":{\"type\":\"object\",\"required\":[\"action\"],\"properties\":{\"action\":{\"enum\":[\"broadcast\",\"react\",\"send\"],\"type\":\"string\",\"description\":\"Select one action. For action=\\\"send\\\", provide message or another send payload; fields for other actions do not count as send content.\"},\"channel\":{\"type\":\"string\"},\"target\":{\"type\":\"string\",\"description\":\"Recipient/channel: E.164 for WhatsApp/Signal, Telegram chat id/@username, Discord/Slack/Mattermost <channelId|user:ID|channel:ID>, or iMessage handle/chat_id\"},\"targets\":{\"type\":\"array\",\"items\":{\"type\":\"string\",\"description\":\"Recipient/channel targets (same format as --target); accepts ids or names when the directory is available.\"}},\"accountId\":{\"type\":\"string\"},\"dryRun\":{\"type\":\"boolean\"},\"message\":{\"type\":\"string\",\"description\":\"Text for action=\\\"send\\\". A send needs message or another send payload such as media, attachments, or presentation.\"},\"effectId\":{\"type\":\"string\",\"description\":\"sendWithEffect id/name.\"},\"effect\":{\"type\":\"string\",\"description\":\"Alias for effectId.\"},\"media\":{\"type\":\"string\",\"description\":\"Media URL/path. data: use buffer.\"},\"filename\":{\"type\":\"string\"},\"buffer\":{\"type\":\"string\",\"description\":\"Base64/data-URL attachment.\"},\"contentType\":{\"type\":\"string\"},\"mimeType\":{\"type\":\"string\"},\"caption\":{\"type\":\"string\"},\"attachments\":{\"type\":\"array\",\"items\":{\"type\":\"object\",\"properties\":{\"type\":{\"enum\":[\"image\",\"audio\",\"video\",\"file\"],\"type\":\"string\"},\"media\":{\"type\":\"string\"},\"name\":{\"type\":\"string\"},\"mimeType\":{\"type\":\"string\"}}},\"description\":\"Attachments; each uses media.\"},\"replyTo\":{\"type\":\"string\"},\"threadId\":{\"type\":\"string\"},\"asVoice\":{\"type\":\"boolean\",\"description\":\"Send audio as a voice note; combines with voiceText.\"},\"voiceText\":{\"type\":\"string\",\"description\":\"Text to synthesize; message remains visible.\"},\"voiceProvider\":{\"type\":\"string\",\"description\":\"Per-send speech provider override.\"},\"voiceId\":{\"type\":\"string\",\"description\":\"Per-send speech voice override.\"},\"silent\":{\"type\":\"boolean\"},\"quoteText\":{\"type\":\"string\",\"description\":\"Telegram reply quote text.\"},\"gifPlayback\":{\"type\":\"boolean\"},\"forceDocument\":{\"type\":\"boolean\",\"description\":\"Send media as document; no compression.\"},\"asDocument\":{\"type\":\"boolean\",\"description\":\"Alias for forceDocument.\"},\"gatewayUrl\":{\"type\":\"string\"},\"gatewayToken\":{\"type\":\"string\"},\"timeoutMs\":{\"type\":\"integer\",\"minimum\":1},\"messageId\":{\"type\":\"string\",\"description\":\"Target read/react/edit/delete/pin/unpin id; reactions default current inbound.\"},\"message_id\":{\"type\":\"string\",\"description\":\"snake_case alias of messageId; same defaults.\"},\"emoji\":{\"type\":\"string\",\"description\":\"One Unicode emoji for the current WebChat prompt; explicit external channels validate their own emoji.\"},\"remove\":{\"type\":\"boolean\"},\"trackToolCalls\":{\"type\":\"boolean\",\"description\":\"Use the reacted message for this turn's status reaction lifecycle.\"},\"track_tool_calls\":{\"type\":\"boolean\",\"description\":\"snake_case alias of trackToolCalls.\"},\"targetAuthor\":{\"type\":\"string\"},\"targetAuthorUuid\":{\"type\":\"string\"},\"groupId\":{\"type\":\"string\"},\"final\":{\"type\":\"boolean\",\"description\":\"For source replies, set false for progress; set true, or omit, for a completed send. For react, set true when adding a reaction to the current source message is your complete response; omit or set false when more work follows. A confirmed final source reply ends the turn.\"}}}},{\"name\":\"openclaw\",\"label\":\"OpenClaw\",\"description\":\"Delegate system setup or repair to a separate model turn. Prefer your available tools for routine status and session/workspace checks. Gateway restart, config, channels, plugins, agents, models/providers, API keys. Supports multiple named custom/local model endpoints; provider IDs can be user-defined, while api selects the protocol. Setup flows use masked entry, which keeps keys out of model context; if the user already gave a key or token in chat, pass it along and OpenClaw stores it without echoing it. Changes wait for the user to approve in the Control UI or OpenClaw apps unless current Full Access or a standing delegation grant permits application without asking for approval. Returns the final outcome.\",\"parameters\":{\"type\":\"object\",\"required\":[\"message\"],\"properties\":{\"message\":{\"type\":\"string\",\"description\":\"What system must do.\"},\"sessionId\":{\"type\":\"string\",\"description\":\"Continue prior OpenClaw talk.\"}}}},{\"name\":\"process\",\"label\":\"process\",\"description\":\"Control existing exec: list, poll, log, write, send-keys, submit, paste, kill. poll/log: status, output, quiet success, completion without auto-wake, input hints. Others: input/intervention. kill requests termination or returns the retained terminal result for an already-finished session. After a termination request, poll until a terminal result confirms exit and cleanup before saying stopped. A running poll is still pending. remove hides the record and cannot confirm cleanup. Later process results supersede turn-start snapshots. Control sessions by sessionId; a displayed host PID is not a portable sandbox PID. No polling as timer/reminder; scheduled follow-up uses automations. On a requested monitoring stop, also stop any ordinary exec sessions you created for that request; stopping a saved automation does not stop them. Preserve unrelated work.\",\"parameters\":{\"type\":\"object\",\"required\":[\"action\"],\"properties\":{\"action\":{\"type\":\"string\",\"enum\":[\"list\",\"poll\",\"log\",\"write\",\"send-keys\",\"submit\",\"paste\",\"kill\",\"clear\",\"remove\"],\"description\":\"Process action (list|poll|log|write|send-keys|submit|paste|kill|clear|remove)\"},\"sessionId\":{\"type\":\"string\",\"description\":\"Required for every action except list.\"},\"data\":{\"type\":\"string\",\"description\":\"Data to write for write\"},\"keys\":{\"type\":\"array\",\"items\":{\"type\":\"string\"},\"description\":\"Key tokens to send for send-keys\"},\"hex\":{\"type\":\"array\",\"items\":{\"type\":\"string\"},\"description\":\"Hex bytes to send for send-keys\"},\"literal\":{\"type\":\"string\",\"description\":\"Literal string for send-keys\"},\"text\":{\"type\":\"string\",\"description\":\"Text to paste for paste\"},\"bracketed\":{\"type\":\"boolean\",\"description\":\"Wrap paste in bracketed mode\"},\"eof\":{\"type\":\"boolean\",\"description\":\"Close stdin after write\"},\"offset\":{\"type\":\"number\",\"description\":\"Log offset\"},\"limit\":{\"type\":\"number\",\"description\":\"Log length\"},\"timeout\":{\"type\":\"number\",\"description\":\"For poll: wait up to this many milliseconds before returning; max 30000 ms, higher values are clamped to 30000\",\"minimum\":0}}}},{\"name\":\"read\",\"label\":\"read\",\"description\":\"Read text/image file (jpg/png/gif/webp/bmp); images attach to model context. Text caps 2000 lines or 50KB. Continue with offset/limit, or cursor within a long line.\",\"parameters\":{\"type\":\"object\",\"required\":[\"path\"],\"properties\":{\"path\":{\"type\":\"string\",\"description\":\"File path; relative/absolute.\"},\"offset\":{\"type\":\"integer\",\"minimum\":1,\"description\":\"Start line; 1-based.\"},\"limit\":{\"type\":\"number\",\"description\":\"Max lines.\"},\"cursor\":{\"type\":\"integer\",\"minimum\":0,\"description\":\"Character position within the start line; 0-based.\"},\"optional\":{\"type\":\"boolean\",\"const\":true,\"description\":\"Missing paths return structured not_found instead of failing.\"}}}},{\"name\":\"sessions_yield\",\"label\":\"Yield\",\"description\":\"End this turn to await pending child completions, not submit a final result. Return completed work normally. Does not message other sessions. Omit waitFor when yielding for your own children; their completions resume this session. Set waitFor:\\\"message\\\" only when a subagent has no pending children and waits for its requester to send it a continuation. For background tools, follow their continuation instructions. Automation turns end here; the scheduler delivers child output under the job delivery policy. Collector runs require explicit collection instead.\",\"parameters\":{\"type\":\"object\",\"properties\":{\"waitFor\":{\"type\":\"string\",\"const\":\"message\",\"description\":\"Only for a subagent with no pending children of its own that waits for its requester to send it a continuation. Omit when yielding for your own children: their completions resume this session. Does not send or schedule that message or submit a final result.\"},\"message\":{\"type\":\"string\",\"description\":\"Private context for the resumed turn; not sent to the user.\"},\"acknowledgment\":{\"type\":\"string\",\"description\":\"Optional brief waiting status shown to the user as your message; put answers in normal assistant text. With waitFor, also the task pause notice. Not an inter-session message.\"}}},\"async\":false},{\"name\":\"tool_describe\",\"label\":\"Tool Describe\",\"description\":\"Load the full schema and metadata, including complete server instructions, for one tool id or name. Use this when the input is not already clear or when discovery returned instructionsHint.\",\"parameters\":{\"type\":\"object\",\"required\":[\"id\"],\"properties\":{\"id\":{\"type\":\"string\",\"description\":\"Tool search result id or tool name.\"}}}},{\"name\":\"tool_search\",\"label\":\"Tool Search\",\"description\":\"Search the effective Tool Search catalog. Pass query for one search or queries for several independent searches in one call; a non-empty query joins a non-empty batch first, with its own limit. Batch results stay grouped in request order. Queries must be in English: matching is lexical against tool names and descriptions, which are written in English, so another language will usually match nothing. Pass an exact result id or name to dispatch_action. Use tool_describe when you need its input schema or when a result includes instructionsHint; call it before dispatch_action to load the complete server instructions.\",\"parameters\":{\"type\":\"object\",\"properties\":{\"query\":{\"anyOf\":[{\"type\":\"string\"},{\"type\":\"null\"}],\"description\":\"Single search query, in English. A non-empty query joins a non-empty batch first. Null or blank is ignored beside a non-empty batch.\"},\"limit\":{\"anyOf\":[{\"type\":\"integer\",\"minimum\":1},{\"type\":\"null\"}],\"description\":\"Maximum number of single-search results. Omitted or null uses the default. With only batch queries, omit this or set it to null; set limits on each batch entry.\"},\"queries\":{\"anyOf\":[{\"type\":\"array\",\"items\":{\"type\":\"object\",\"required\":[\"query\"],\"properties\":{\"query\":{\"type\":\"string\",\"minLength\":1,\"maxLength\":512,\"description\":\"Search query, in English. Describe the capability you need.\"},\"limit\":{\"type\":\"integer\",\"minimum\":1,\"description\":\"Maximum results for this query. Defaults to 8 when omitted.\"}}},\"maxItems\":16},{\"type\":\"null\"}],\"description\":\"Independent searches. Prefer this alone for several searches; a non-empty query beside it runs as the first entry. Their effective limits may total at most 50; an omitted item limit counts as 8. The serialized query strings may use at most 512 UTF-8 bytes in total.\"}}}},{\"name\":\"write\",\"label\":\"write\",\"description\":\"Write/overwrite file; creates parent directories.\",\"parameters\":{\"type\":\"object\",\"required\":[\"path\",\"content\"],\"properties\":{\"path\":{\"type\":\"string\",\"description\":\"File path; relative/absolute.\"},\"content\":{\"type\":\"string\",\"description\":\"File content.\"}}}}]"
+                  }
+                },
+                {
+                  "key": "openclaw.content.output_messages",
+                  "value": {
+                    "stringValue": "[{\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"hello.txt says: hello from cetra.\"}],\"api\":\"openai-completions\",\"provider\":\"openai\",\"model\":\"gpt-4o-mini\",\"usage\":{\"input\":131,\"output\":12,\"cacheRead\":0,\"cacheWrite\":0,\"cacheTelemetry\":{\"state\":\"available\"},\"reasoningTokens\":0,\"contextUsage\":{\"state\":\"available\",\"promptTokens\":131,\"totalTokens\":143},\"totalTokens\":143,\"cost\":{\"input\":0,\"output\":0,\"cacheRead\":0,\"cacheWrite\":0,\"total\":0},\"usageReport\":{\"state\":\"available\"}},\"stopReason\":\"stop\",\"timestamp\":1795523565050,\"responseId\":\"chatcmpl-capture-2\"}]"
+                  }
+                }
+              ],
+              "droppedAttributesCount": 0,
+              "events": [],
+              "droppedEventsCount": 0,
+              "links": [],
+              "droppedLinksCount": 0,
+              "status": null
+            }
+          ],
+          "schemaUrl": ""
+        }
+      ],
+      "schemaUrl": ""
+    }
+  ]
+}

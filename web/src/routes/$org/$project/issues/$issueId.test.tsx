@@ -98,6 +98,34 @@ it("shows the title, the state, the source, the chart, the examples and the hist
   expect(await within(merged).findByText("Ada Example")).toBeInTheDocument();
 });
 
+it("shows the busiest day's users", async () => {
+  serveIssue();
+  await renderApp(PAGE);
+
+  const users = (await screen.findByText("Users, busiest day")).parentElement as HTMLElement;
+  await waitFor(() => expect(users).toHaveTextContent(/^Users, busiest day3$/));
+});
+
+it("shows a dash for the busiest day's users when no occurrence has a user", async () => {
+  serveIssue();
+  server.use(
+    http.get("/api/v1/projects/:project/issues/:id/occurrences", () =>
+      HttpResponse.json({
+        ...occurrencesFixture,
+        days: occurrencesFixture.days.map((day) => ({ ...day, users: 0 })),
+      }),
+    ),
+  );
+  await renderApp(PAGE);
+
+  expect(await screen.findByRole("img", { name: "Occurrences per day" })).toBeInTheDocument();
+  const users = (await screen.findByText("Users, busiest day")).parentElement as HTMLElement;
+  expect(users).toHaveTextContent(/^Users, busiest day—$/);
+  // The occurrences still count.
+  const total = screen.getByText("Occurrences, 14 days").parentElement as HTMLElement;
+  expect(total).toHaveTextContent(/^Occurrences, 14 days12$/);
+});
+
 it("Resolve sends the state change", async () => {
   serveIssue();
   const bodies = capturePatches();

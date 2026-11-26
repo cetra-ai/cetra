@@ -262,7 +262,10 @@ export function TestPanel({
           : "Runs the saved evaluator.";
 
   return (
-    <section aria-labelledby="test-panel-title" className="flex flex-col gap-4 border-t pt-6">
+    <section
+      aria-labelledby="test-panel-title"
+      className="flex min-w-0 flex-col gap-4 border-t pt-6 @6xl:border-t-0 @6xl:border-l @6xl:pt-0 @6xl:pl-8"
+    >
       <h2 id="test-panel-title" className="text-ui font-medium">
         Test
       </h2>
@@ -371,7 +374,10 @@ export function TestPanel({
 /** What a viewer sees in place of the panel: its heading and why it has no controls. */
 export function TestPanelLocked() {
   return (
-    <section aria-labelledby="test-panel-title" className="flex flex-col gap-2 border-t pt-6">
+    <section
+      aria-labelledby="test-panel-title"
+      className="flex min-w-0 flex-col gap-2 border-t pt-6 @6xl:border-t-0 @6xl:border-l @6xl:pt-0 @6xl:pl-8"
+    >
       <h2 id="test-panel-title" className="text-ui font-medium">
         Test
       </h2>

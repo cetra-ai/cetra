@@ -1,0 +1,100 @@
+---
+title: OpenRouter
+description: "Trace OpenRouter calls with cetra through the OpenAI client, with the provider and the model publisher's price."
+---
+
+import { Tabs, TabItem } from "@astrojs/starlight/components";
+import Backing from "../../../../components/Backing.astro";
+
+Trace OpenRouter model calls with cetra through the OpenAI client.
+
+<Backing fixtures={["openinference/openrouter-chat", "openllmetry/openrouter-chat"]} />
+
+## Install
+
+<Tabs syncKey="lang">
+  <TabItem label="Python">
+
+```bash
+pip install "cetra-sdk[openai]" openai
+```
+
+  </TabItem>
+  <TabItem label="TypeScript">
+
+```bash
+npm install @cetra-ai/sdk @arizeai/openinference-instrumentation-openai openai
+```
+
+  </TabItem>
+</Tabs>
+
+## Set up
+
+<Tabs syncKey="lang">
+  <TabItem label="Python">
+
+{/* untested: calls OpenRouter and needs OPENROUTER_API_KEY */}
+```python
+import os
+
+import cetra
+from openai import OpenAI
+
+cetra.init(instrument=["openai"])
+
+client = OpenAI(base_url="https://openrouter.ai/api/v1", api_key=os.environ["OPENROUTER_API_KEY"])
+response = client.chat.completions.create(
+    model="openai/gpt-4o-mini",
+    messages=[{"role": "user", "content": "What is the capital of France?"}],
+)
+print(response.choices[0].message.content)
+
+cetra.flush()
+```
+
+  </TabItem>
+  <TabItem label="TypeScript">
+
+{/* untested: the imports of the example below */}
+```ts
+import { init } from "@cetra-ai/sdk";
+import { openai } from "@cetra-ai/sdk/openai";
+import OpenAI from "openai";
+```
+
+{/* example:integration-openai */}
+```ts
+init({ apiKey: process.env.CETRA_API_KEY, instrument: [openai(OpenAI)] });
+```
+
+{/* untested: calls OpenRouter and needs OPENROUTER_API_KEY */}
+```ts
+const client = new OpenAI({ baseURL: "https://openrouter.ai/api/v1", apiKey: process.env.OPENROUTER_API_KEY });
+await client.chat.completions.create({
+  model: "openai/gpt-4o-mini",
+  messages: [{ role: "user", content: "What is the capital of France?" }],
+});
+```
+
+  </TabItem>
+</Tabs>
+
+## What you get
+
+- Each chat completion is an `llm` span with the provider `openrouter`.
+- Input and output token counts come from the response.
+- Cost is the model publisher's price, as described under Limits.
+- With `cetra.init(instrument=["openai"])`, the endpoint host is in `server.address`, and cetra names the provider from it.
+
+## Limits
+
+- Cost is the model publisher's price for models named `vendor/model` from OpenAI, Anthropic, Google, Mistral, DeepSeek, Cohere or xAI; OpenRouter's fees are not included. Other models have no built-in price.
+- With plain OpenInference or the official OpenAI instrumentation in Python, the provider shows as `openai`: they do not record the endpoint. Use `cetra.init(instrument=["openai"])` or OpenLLMetry.
+- If a field is missing, look at the span's **Attributes** tab and compare it with [Span attributes](/docs/reference/attributes/).
+
+## Next
+
+- [Traces](/docs/tracing/traces/): read the trace as a tree and a timeline.
+- [Cost and tokens](/docs/tracing/cost-and-tokens/): how cost is computed from the token counts.
+- [Custom model prices](/docs/tracing/cost-and-tokens/#custom-model-prices): price a model the built-in prices do not cover.

@@ -1,0 +1,9 @@
+{
+  "description": "An OpenHands agent run through Laminar: a wrapper llm span with the reported cost sits above a litellm model span, and the agent and tool spans are kept.",
+  "origin": "hand_written",
+  "spec_refs": [
+    "02 § Cost computation",
+    "02 § Mapping tables / Span kind"
+  ],
+  "notes": "hand-written from the M4 spike's OpenHands dump (openhands-sdk 1.62.0, lmnr 0.8.8, LiteLLM 1.105.7, scenario in docs/plans/in-integrations/spikes/m4-python-genai.md § OpenHands). Kept: the conversation.run agent span, two agent.step spans, the llm.openai/gpt-4o-mini wrapper spans (lmnr.span.type LLM, gen_ai.usage.cost, no model or tokens) with their litellm.completion children, and the InvalidToolCall and FinishAction tool spans. The spike's conversation.send_message span is dropped, and the spike's missing root span was replaced by conversation.run as the root (parents rewired). Ids and times are fixed. The system prompt is shortened to one sentence and the tool definition to its first description line; the system prompt is the only long payload in the spike."
+}

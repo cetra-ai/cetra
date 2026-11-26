@@ -184,6 +184,7 @@ fn media_part(mut map: Map<String, Json>, field: &str, image: bool) -> Part {
         Part::Uri {
             modality,
             mime_type,
+            transcript: None,
             uri: payload,
             extra: map,
         }
@@ -191,6 +192,7 @@ fn media_part(mut map: Map<String, Json>, field: &str, image: bool) -> Part {
         Part::Blob {
             modality,
             mime_type,
+            transcript: None,
             content: payload,
             extra: map,
         }

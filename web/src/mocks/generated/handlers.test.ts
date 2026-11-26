@@ -1,7 +1,12 @@
 import { expect, it } from "vitest";
 import type { Schema } from "@/api/types";
 import { createDataset, type Dataset, visibleTraces } from "@/mocks/generated/dataset";
-import { compareUsers, largeHandlers, userIdOfFilter } from "@/mocks/generated/handlers";
+import {
+  compareUsers,
+  largeHandlers,
+  stepsOfFilter,
+  userIdOfFilter,
+} from "@/mocks/generated/handlers";
 import { server } from "@/mocks/node";
 
 const NOW = Date.parse("2026-06-01T00:00:00.000Z");
@@ -276,7 +281,74 @@ it("defines the generated scores so lists can colour them", async () => {
     ["exact", "higher"],
     ["quality", "higher"],
     ["tone", "none"],
+    ["tests_pass", "higher"],
+    ["verdict", "none"],
+    ["resolved", "higher"],
+    ["schema_valid", "higher"],
+    ["fields_correct", "none"],
   ]);
+});
+
+it("serves the story queues' score definitions after the generated ones", async () => {
+  server.use(...largeHandlers(createDataset({ seed: 1, now: NOW, traces: 5 })));
+  const response = await fetch(`${PROJECT}/score-definitions`);
+  const body = (await response.json()) as { data: { id: string }[] };
+  const ids = body.data.map((item) => item.id);
+  const generated = [
+    "01900000-0000-7000-8000-000000000611",
+    "01900000-0000-7000-8000-000000000612",
+    "01900000-0000-7000-8000-000000000615",
+  ];
+  const story = [
+    "01900000-0000-7000-8000-000000570601",
+    "01900000-0000-7000-8000-000000570602",
+    "01900000-0000-7000-8000-000000570603",
+    "01900000-0000-7000-8000-000000570605",
+    "01900000-0000-7000-8000-000000570606",
+  ];
+  const at = (id: string) => ids.indexOf(id);
+  for (const id of generated) {
+    expect(at(id)).toBeGreaterThanOrEqual(0);
+  }
+  expect(at(generated[2] ?? "")).toBeLessThan(at(story[0] ?? ""));
+  expect(ids.slice(-5)).toEqual(story);
+});
+
+it("keeps the fixture queue's review as it was", async () => {
+  const dataset = createDataset({ seed: 1, now: NOW, traces: 5 });
+  server.use(...largeHandlers(dataset));
+  const review = async (id: string) =>
+    (
+      (await (await fetch(`${PROJECT}/annotation-queues/${id}`)).json()) as {
+        definition_ids: string[];
+      }
+    ).definition_ids;
+
+  const correctness = "01900000-0000-7000-8000-000000000611";
+  const relevance = "01900000-0000-7000-8000-000000000612";
+  expect(await review("01900000-0000-7000-8000-000000000a01")).toEqual([correctness, relevance]);
+  expect(await review("01900000-0000-7000-8000-000000570501")).toEqual([correctness, relevance]);
+  expect(await review("01900000-0000-7000-8000-000000570502")).toEqual([
+    "01900000-0000-7000-8000-000000570601",
+    "01900000-0000-7000-8000-000000570602",
+  ]);
+  expect(await review("01900000-0000-7000-8000-000000570503")).toEqual([
+    "01900000-0000-7000-8000-000000570603",
+    "01900000-0000-7000-8000-000000000615",
+  ]);
+
+  const storyItem = (await (
+    await fetch(
+      `${PROJECT}/annotation-queues/01900000-0000-7000-8000-000000570502/items/01900000-0000-7000-8000-000000570512`,
+    )
+  ).json()) as { trace_id: string };
+  expect(storyItem.trace_id).toBe(dataset.traces[4]?.trace_id);
+  const fixtureItem = (await (
+    await fetch(
+      `${PROJECT}/annotation-queues/01900000-0000-7000-8000-000000000a01/items/01900000-0000-7000-8000-000000000a11`,
+    )
+  ).json()) as { trace_id: string };
+  expect(fixtureItem.trace_id).toBe(dataset.traces[0]?.trace_id);
 });
 
 /** A trace the default lists show: no evaluation and no experiment trace. */
@@ -307,6 +379,26 @@ it("reads the user id of a user_id filter only when it has exactly that form", (
   expect(userIdOfFilter(undefined)).toBeUndefined();
 });
 
+it("stepsOfFilter reads the trace ids and kinds", () => {
+  const steps = stepsOfFilter(
+    "trace_id IN ('a1000000000000000000000000000001', 'a1000000000000000000000000000002') AND span_kind IN ('llm', 'tool', 'retriever', 'guardrail')",
+  );
+  expect(steps?.traceIds).toEqual(
+    new Set(["a1000000000000000000000000000001", "a1000000000000000000000000000002"]),
+  );
+  expect(steps?.kinds).toEqual(new Set(["llm", "tool", "retriever", "guardrail"]));
+});
+
+it("stepsOfFilter refuses other filters", () => {
+  expect(stepsOfFilter("user_id = 'x'")).toBeUndefined();
+  expect(stepsOfFilter("trace_id IN ('a1000000000000000000000000000001')")).toBeUndefined();
+  expect(
+    stepsOfFilter("trace_id IN (a1000000000000000000000000000001) AND span_kind IN ('llm')"),
+  ).toBeUndefined();
+  expect(stepsOfFilter("trace_id IN () AND span_kind IN ('llm')")).toBeUndefined();
+  expect(stepsOfFilter(undefined)).toBeUndefined();
+});
+
 it("lists only one user's traces for a user_id filter, and flags other filters as ignored", async () => {
   const dataset = createDataset({ seed: 1, now: NOW, traces: 400 });
   server.use(...largeHandlers(dataset));
@@ -325,9 +417,68 @@ it("lists only one user's traces for a user_id filter, and flags other filters a
   expect(body.data.map((trace) => trace.trace_id).sort()).toEqual(expected);
 
   const other = new URL(`${PROJECT}/traces`);
-  other.searchParams.set("filter", "user_id = 'a' and name = 'b'");
+  other.searchParams.set("filter", "metadata['plan'] = 'pro'");
   const flagged = await fetch(other);
   expect(flagged.headers.get("X-Mock-Filter-Ignored")).toBe("1");
+});
+
+it("still ignores a filter on the spans list other than user_id", async () => {
+  const dataset = createDataset({ seed: 1, now: NOW, traces: 400 });
+  server.use(...largeHandlers(dataset));
+  const url = new URL(`${PROJECT}/spans`);
+  url.searchParams.set("filter", "status = 'error'");
+  const response = await fetch(url);
+  expect(response.status).toBe(200);
+  expect(response.headers.get("X-Mock-Filter-Ignored")).toBe("1");
+});
+
+it("applies a status filter to the trace list", async () => {
+  const dataset = createDataset({ seed: 1, now: NOW, traces: 400 });
+  server.use(...largeHandlers(dataset));
+  const expected = dataset.traces
+    .filter((trace) => isVisible(trace) && trace.status === "error")
+    .map((trace) => trace.trace_id)
+    .sort();
+
+  const url = new URL(`${PROJECT}/traces`);
+  url.searchParams.set("filter", "status = 'error'");
+  url.searchParams.set("limit", "1000");
+  const response = await fetch(url);
+  const body = (await response.json()) as Schema<"TracePage">;
+  expect(response.headers.get("X-Mock-Filter-Ignored")).toBeNull();
+  expect(body.data.map((trace) => trace.trace_id).sort()).toEqual(expected);
+});
+
+it("applies a tags filter combined with a name filter", async () => {
+  const dataset = createDataset({ seed: 1, now: NOW, traces: 400 });
+  server.use(...largeHandlers(dataset));
+
+  const url = new URL(`${PROJECT}/traces`);
+  url.searchParams.set("filter", "tags @> ['retry'] and name = 'coding-agent'");
+  url.searchParams.set("limit", "1000");
+  const response = await fetch(url);
+  const body = (await response.json()) as Schema<"TracePage">;
+  expect(response.headers.get("X-Mock-Filter-Ignored")).toBeNull();
+  expect(body.data.map((trace) => trace.trace_id)).toEqual([dataset.traces[4]?.trace_id]);
+});
+
+it("sorts a filtered list", async () => {
+  const dataset = createDataset({ seed: 1, now: NOW, traces: 400 });
+  server.use(...largeHandlers(dataset));
+
+  const url = new URL(`${PROJECT}/traces`);
+  url.searchParams.set("filter", "tags @> ['voice']");
+  url.searchParams.set("sort", "duration");
+  url.searchParams.set("order", "desc");
+  url.searchParams.set("limit", "1000");
+  const response = await fetch(url);
+  const body = (await response.json()) as Schema<"TracePage">;
+  const durations = body.data.map((trace) => trace.duration_ns);
+  expect(durations.length).toBeGreaterThan(0);
+  expect(durations).toEqual([...durations].sort((left, right) => right - left));
+  for (const trace of body.data) {
+    expect(trace.tags).toContain("voice");
+  }
 });
 
 it("lists only the spans of one user's traces for a user_id filter, without the ignored flag", async () => {
@@ -371,6 +522,69 @@ it("lists only the spans of one user's traces for a user_id filter, without the 
   const byDuration = await allSpans("duration");
   expect(byDuration.flagged).toBe(false);
   expect(byDuration.ids).toEqual(expected);
+});
+
+it("the span list keeps only the listed traces' steps for the steps filter", async () => {
+  const dataset = createDataset({ seed: 1, now: NOW, traces: 400 });
+  server.use(...largeHandlers(dataset));
+  const picked = dataset.traces
+    .filter(
+      (trace) =>
+        isVisible(trace) &&
+        (dataset.traceDetail(trace.trace_id)?.spans ?? []).some(
+          (row) => row.span.span_kind === "llm" || row.span.span_kind === "tool",
+        ),
+    )
+    .slice(0, 2);
+  if (picked.length < 2) {
+    throw new Error("the dataset has two visible traces with llm or tool spans");
+  }
+  const ids = picked.map((trace) => trace.trace_id);
+  const filter = `trace_id IN (${ids.map((id) => `'${id}'`).join(", ")}) AND span_kind IN ('llm', 'tool')`;
+  const expected = picked
+    .flatMap((trace) => dataset.traceDetail(trace.trace_id)?.spans ?? [])
+    .map((row) => row.span)
+    .filter((span) => span.span_kind === "llm" || span.span_kind === "tool")
+    .map((span) => span.span_id)
+    .sort();
+
+  /** Every page of a spans list for the steps filter, and whether any page was flagged. */
+  async function allSteps(sort: string | undefined) {
+    const spans: Schema<"SpanSummary">[] = [];
+    let flagged = false;
+    let cursor: string | null = null;
+    do {
+      const url = new URL(`${PROJECT}/spans`);
+      url.searchParams.set("filter", filter);
+      url.searchParams.set("limit", "1000");
+      if (sort) {
+        url.searchParams.set("sort", sort);
+      }
+      if (cursor) {
+        url.searchParams.set("cursor", cursor);
+      }
+      const response = await fetch(url);
+      flagged ||= response.headers.get("X-Mock-Filter-Ignored") !== null;
+      const body = (await response.json()) as Schema<"SpanPage">;
+      spans.push(...body.data);
+      cursor = body.next_cursor ?? null;
+    } while (cursor);
+    return { spans, flagged };
+  }
+
+  for (const sort of [undefined, "duration"]) {
+    const { spans, flagged } = await allSteps(sort);
+    expect(flagged, String(sort)).toBe(false);
+    expect(
+      spans.some((span) => !ids.includes(span.trace_id)),
+      String(sort),
+    ).toBe(false);
+    expect(
+      spans.every((span) => span.span_kind === "llm" || span.span_kind === "tool"),
+      String(sort),
+    ).toBe(true);
+    expect(spans.map((span) => span.span_id).sort(), String(sort)).toEqual(expected);
+  }
 });
 
 it("honours from and to on the user detail", async () => {
@@ -557,4 +771,23 @@ it("answers a bad field, limit or q as that field's error, and a bad view or sea
     fields: [{ field: "user_id" }],
   });
   expect(sessionsSearch.status).toBe(400);
+});
+
+it("totals the traces the list matches", async () => {
+  const dataset = createDataset({ seed: 1, now: NOW, traces: 400 });
+  server.use(...largeHandlers(dataset));
+  for (const query of ["", "include_eval=true"]) {
+    const list = (await (
+      await fetch(`${PROJECT}/traces?limit=1000${query ? `&${query}` : ""}`)
+    ).json()) as { data: Schema<"TraceSummary">[] };
+    const totals = (await (
+      await fetch(`${PROJECT}/traces/totals${query ? `?${query}` : ""}`)
+    ).json()) as Schema<"TraceTotals">;
+    const cost = list.data.reduce((sum, trace) => sum + (trace.cost_total ?? 0), 0);
+    expect(totals.trace_count, query).toBe(list.data.length);
+    expect(totals.error_trace_count, query).toBe(
+      list.data.filter((trace) => trace.status === "error").length,
+    );
+    expect(Math.abs(totals.cost_total - cost), query).toBeLessThan(1e-9);
+  }
 });

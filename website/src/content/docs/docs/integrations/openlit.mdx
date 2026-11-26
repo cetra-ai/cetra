@@ -1,0 +1,80 @@
+---
+title: OpenLIT
+description: "Send OpenLIT's OpenAI, embedding and vector database spans to cetra over OpenTelemetry, with the content OpenLIT records and the cost priced by cetra."
+---
+
+import Backing from "../../../../components/Backing.astro";
+
+cetra reads the spans OpenLIT writes around your model and vector database calls: the messages, the token counts and the operation of each call, with the content OpenLIT records.
+
+<Backing fixtures={["genai/openlit-chat", "genai/openlit-vector"]} />
+
+## Install
+
+Install OpenLIT next to the libraries it instruments. The fixture was captured with OpenLIT 1.45.0, which needs `openai` below 3.
+
+```bash
+pip install "openlit>=1.37" "openai<3"
+```
+
+## Set up
+
+Call `openlit.init` before your first traced call. OpenLIT reuses the global tracer provider when one exists, and with none it builds its own and exports to `otlp_endpoint`.
+
+{/* untested: the fixture ran this shape against a local stand-in for the OpenAI API with an empty local price table; this sample needs OPENAI_API_KEY, CETRA_API_KEY and a running cetra */}
+```python
+import os
+
+import openlit
+from openai import OpenAI
+
+openlit.init(
+    otlp_endpoint=os.environ["OTEL_EXPORTER_OTLP_ENDPOINT"],
+    otlp_headers=f"Authorization=Bearer {os.environ['CETRA_API_KEY']}",
+    disable_metrics=True,
+    capture_message_content=True,
+    pricing_json="pricing.json",
+    disabled_instrumentors=["httpx", "requests", "urllib3", "aiohttp"],
+)
+
+client = OpenAI(api_key=os.environ["OPENAI_API_KEY"])
+completion = client.chat.completions.create(
+    model="gpt-4o-mini",
+    messages=[{"role": "user", "content": "What's the weather in Paris?"}],
+)
+print(completion.choices[0].message.content)
+```
+
+Set `CETRA_API_KEY` to your `sk-cetra-…` API key. See [Send OpenTelemetry](/docs/get-started/opentelemetry/).
+
+The other `init` arguments matter:
+
+- `capture_message_content=True` keeps the prompts and completions. Without it the spans carry no input and no output.
+- `disabled_instrumentors` turns OpenLIT's HTTP client instrumentors off. Without it, every model call gets a child `POST` span.
+- `disable_metrics=True` keeps the metrics exporter off. OpenLIT also posts log records to `<endpoint>/v1/logs`; cetra accepts that request and discards the records.
+- `pricing_json` points at a local copy of OpenLIT's price table, so OpenLIT fetches nothing at start-up.
+
+OpenLIT also instruments the vector databases. See [Vector databases](/docs/integrations/vector-databases/) for those spans.
+
+## What you get
+
+Each call is one span, and each span is a trace of its own:
+
+- an `llm` span for each chat call, `chat <model>`, with the provider, the request and response models, the token counts, the request parameters, and the input and output messages, including the system instructions;
+- an `embedding` span for each embedding call, `embeddings <model>`, with the input token count.
+
+The cost comes from cetra's price table. OpenLIT writes `gen_ai.usage.cost = 0` when its price table has no row for the model, and cetra reads a reported cost of exactly 0 on a span that counts tokens as no report, then prices the span itself. See [Cost and tokens](/docs/tracing/cost-and-tokens/).
+
+## Limits
+
+- Pin `openlit>=1.37`. Older versions write the content as `gen_ai.content.*` events, which cetra does not read, so their spans have no input and no output.
+- OpenLIT 1.45.0 needs `openai` below 3. The fixture's environment pins the OpenAI client that OpenLIT supports.
+- With the HTTP instrumentors on, each model call gets a child `POST` span. Pass `disabled_instrumentors` as in the sample.
+- OpenLIT fetches its price table from GitHub when `pricing_json` is not set. Whatever the table holds, a model with no row gets a cost of 0 from OpenLIT, and cetra prices the span from its own table.
+- The fixture was captured with OpenLIT 1.45.0 and `openai` 2.54.0, in OpenLIT's own capture environment.
+- If a field is missing, look at the span's **Attributes** tab and compare it with [Span attributes](/docs/reference/attributes/).
+
+## Next
+
+- [Cost and tokens](/docs/tracing/cost-and-tokens/): how the cost is computed when a source reports 0.
+- [Vector databases](/docs/integrations/vector-databases/): OpenLIT's Chroma, Qdrant and Milvus spans.

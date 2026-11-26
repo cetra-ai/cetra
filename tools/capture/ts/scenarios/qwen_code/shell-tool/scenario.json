@@ -1,0 +1,67 @@
+{
+  "description": "Qwen Code 0.28.0 in -p mode with --approval-mode yolo: one run_shell_command call (cat hello.txt), then the answer; traces with prompts.",
+  "spec_refs": ["02 § Coding agents"],
+  "notes": "Qwen Code is a Gemini CLI fork. Its telemetry is set in .qwen/settings.json as IN7.3 writes it, with no hooks; the header line is in .qwen/.env. The model is served by the mock as an OpenAI chat endpoint (OPENAI_BASE_URL). The shell tool is run_shell_command, whose only required parameter is command. Qwen's background memory agents (extraction, dream, skill review) are off: each makes model calls after the answer that the scripted turns do not cover, so the settings's memory block turns them off. span_names keeps the three qwen-code spans: the undici HTTP spans that Qwen's client also emits carry the loopback peer address (network.peer.address 127.0.0.1), which the leak check refuses. Volatile: gen_ai.conversation.id, session.id and qwen-code.prompt_id are random per run. Timing: duration_ms, interaction.duration_ms, gen_ai.response.time_to_first_chunk, ttft_ms, output_tokens_per_second, sampling_ms, request_setup_ms and retry_total_delay_ms are measured; gen_ai.input.messages, gen_ai.output.messages and qwen-code.context.usage differ between runs (the system prompt carries the memory catalog, the date and the token breakdown of the context), so the check ignores their values.",
+  "instrumentation": "@qwen-code/qwen-code",
+  "libraries": ["@qwen-code/qwen-code"],
+  "span_names": ["qwen-code.interaction", "qwen-code.llm_request", "qwen-code.tool"],
+  "timing_attributes": [
+    "duration_ms",
+    "interaction.duration_ms",
+    "gen_ai.response.time_to_first_chunk",
+    "ttft_ms",
+    "output_tokens_per_second",
+    "sampling_ms",
+    "request_setup_ms",
+    "retry_total_delay_ms",
+    "gen_ai.input.messages",
+    "gen_ai.output.messages",
+    "qwen-code.context.usage"
+  ],
+  "volatile_attributes": ["gen_ai.conversation.id", "qwen-code.prompt_id", "session.id"],
+  "turns": [
+    {
+      "api": "openai.chat",
+      "model": "gpt-4o-mini",
+      "message": {
+        "text": null,
+        "reasoning": null,
+        "tool_calls": [
+          {
+            "id": "call_qwen_shell_1",
+            "name": "run_shell_command",
+            "arguments": {
+              "command": "cat hello.txt",
+              "description": "Print hello.txt"
+            }
+          }
+        ]
+      },
+      "finish": "tool_calls",
+      "usage": {
+        "input": 82,
+        "output": 17,
+        "cache_read": 0,
+        "cache_write": 0,
+        "reasoning": 0
+      }
+    },
+    {
+      "api": "openai.chat",
+      "model": "gpt-4o-mini",
+      "message": {
+        "text": "hello.txt says: hello from cetra.",
+        "reasoning": null,
+        "tool_calls": []
+      },
+      "finish": "stop",
+      "usage": {
+        "input": 131,
+        "output": 12,
+        "cache_read": 0,
+        "cache_write": 0,
+        "reasoning": 0
+      }
+    }
+  ]
+}

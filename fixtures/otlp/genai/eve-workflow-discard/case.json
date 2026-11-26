@@ -1,0 +1,9 @@
+{
+  "description": "The Workflow SDK discard (scope workflow, names workflow./step./queue.) around kept eve spans, and a model span under that scope kept too.",
+  "origin": "hand_written",
+  "spec_refs": [
+    "02 § Coding agents",
+    "02 § Mapping tables / Model, provider, usage"
+  ],
+  "notes": "hand-written from the captured genai/eve-agent-tool shapes (eve 1.0.1, @vercel/otel 2.3.0). The Workflow SDK writes workflow.start, step.execute and queue.publish under scope workflow (D-IN-31 item 5); the capture keeps none of them because span_names filters them out, so this case keeps them in the input to pin the discard itself: the summary counts discarded: 3. The eve spans (scope eve.agent: invoke_agent capture-eve and chat gpt-4o-mini with gen_ai.* usage, provider openai.chat mapped to openai) hang off step.execute, whose id the kept spans still reference as a parent, and are kept as in the capture. The last span is the rule's guard: step.generate under scope workflow carries gen_ai.request.model, the shape of a model span a user's own tracer named workflow may write, so the discard must not drop it; it is kept as an llm span with no token counts (cost none, D-B1-7). Ids and times are fixed."
+}

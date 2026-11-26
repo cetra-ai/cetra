@@ -1,0 +1,38 @@
+{
+  "description": "Browser Use 1.0 agent on headless Chromium, one step to done, traced by Pydantic AI's own GenAI spans through plain OpenTelemetry.",
+  "spec_refs": [
+    "02 § Convention detection",
+    "02 § Mapping tables / Span kind",
+    "02 § Mapping tables / Input / output",
+    "02 § Mapping tables / Model, provider, usage",
+    "02 § Normalization rules"
+  ],
+  "notes": "Browser Use 1.0.6 in envs/browser-use, with playwright 1.65.2's Chromium (the binary under target/capture-tools/playwright, passed as executable_path). Its model is browser_use.llm.ChatOpenAI on the mock. Pydantic AI, which Browser Use 1.0 is built on, is instrumented with pydantic_ai.Agent.instrument_all(True) and a plain OpenTelemetry provider (the spike's first line). The agent makes the model call that returns the done action, then stops. The telemetry and cloud sync are switched off in the program (ANONYMIZED_TELEMETRY=false, BROWSER_USE_CLOUD_SYNC=false). Expected: agent, llm, tool. Volatile: the agent-call and conversation ids are uuids per run, and the system instructions and the model request parameters carry one random seven-character token of Browser Use's agent (its prompt and its tool description), so those four attributes are placeholders in the fixture.",
+  "instrumentation": "pydantic-ai-slim",
+  "libraries": [
+    "browser-use",
+    "pydantic-ai-slim",
+    "openai",
+    "opentelemetry-sdk"
+  ],
+  "volatile_attributes": [
+    "gen_ai.agent.call.id",
+    "gen_ai.conversation.id",
+    "gen_ai.system_instructions",
+    "model_request_parameters"
+  ],
+  "turns": [
+    {
+      "api": "openai.chat",
+      "model": "gpt-4o-mini-2024-07-18",
+      "message": {
+        "text": "{\"current_state\": {\"evaluation_previous_goal\": \"Unknown\", \"memory\": \"Start\", \"next_goal\": \"Finish\"}, \"action\": [{\"done\": {\"text\": \"Done.\", \"success\": true}}]}"
+      },
+      "finish": "stop",
+      "usage": {
+        "input": 120,
+        "output": 30
+      }
+    }
+  ]
+}

@@ -1,0 +1,8 @@
+{
+  "private": true,
+  "packageManager": "pnpm@11.28.10",
+  "dependencies": {
+    "@oh-my-pi/pi-coding-agent": "18.22.0",
+    "bun": "1.4.4"
+  }
+}

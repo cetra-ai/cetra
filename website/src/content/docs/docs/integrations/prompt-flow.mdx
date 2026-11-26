@@ -1,0 +1,79 @@
+---
+title: Prompt Flow
+description: "Send Prompt Flow traces to cetra from its own OpenTelemetry setup, with the model calls' tokens and cost. Give the full traces URL."
+---
+
+import Backing from "../../../../components/Backing.astro";
+
+cetra reads the spans of Prompt Flow's `@trace` functions and of the OpenAI calls they make, with the messages, the tokens and the cost of each call.
+
+<Backing fixtures={["promptflow/openai-trace"]} />
+
+## Install
+
+Install Prompt Flow's tracing package and its devkit, which sets up the exporter. The fixture was captured with both at 1.18.5.
+
+```bash
+pip install promptflow-tracing==1.18.5 promptflow-devkit==1.18.5 openai
+```
+
+The fixture also pins `opentelemetry-sdk` to 1.38.0, because `promptflow-tracing` needs a version below 1.39.
+
+## Set up
+
+Prompt Flow traces only when `PF_DISABLE_TRACING` is `false`. Set the exporter variables, with the full traces URL, then start your program.
+
+```bash
+export PF_DISABLE_TRACING=false
+export OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:8080/v1/traces
+export OTEL_EXPORTER_OTLP_HEADERS="Authorization=Bearer <SK_CETRA_KEY>"
+```
+
+Replace `<SK_CETRA_KEY>` with your `sk-cetra-…` API key. See [Send OpenTelemetry](/docs/get-started/opentelemetry/).
+
+{/* untested: the fixture's program is the same shape with a tool call and a fake model; this sample needs OPENAI_API_KEY and a running cetra */}
+```python
+from openai import OpenAI
+from promptflow.tracing import trace
+from promptflow.tracing._start_trace import setup_exporter_from_environ
+
+setup_exporter_from_environ()
+client = OpenAI()
+
+
+@trace
+def answer(question: str) -> str:
+    response = client.chat.completions.create(
+        model="gpt-4o-mini",
+        messages=[{"role": "user", "content": question}],
+    )
+    return response.choices[0].message.content or ""
+
+
+print(answer("What is the weather in Paris?"))
+```
+
+Prompt Flow posts to `OTEL_EXPORTER_OTLP_ENDPOINT` exactly as you give it. Unlike most exporters, it does not add `/v1/traces`, so give the full URL.
+
+## What you get
+
+Each `@trace` function is one `span`, and each chat call inside a traced function is one `llm` span:
+
+- The decorated function that starts the flow is a `span`, with its inputs and its output as JSON text.
+- Each chat call is an `llm` span, with the provider, the response model, the token counts and the cost, which cetra computes from its price table. Its input and output are the messages, including the tool call in the answer.
+- A decorated tool function is a `span`, with its arguments and its result.
+- An embedding call is an `embedding` span with its token counts. No fixture covers it.
+
+## Limits
+
+- Set `PF_DISABLE_TRACING=false`. Without it, `@trace` does nothing and no span is sent.
+- Prompt Flow's `Function` spans are plain `span`s. Prompt Flow has no tool kind: a decorated function can be any code, so cetra does not call it a tool.
+- The fixture covers two chat calls through the OpenAI client, a tool call and then the answer. Other clients and Prompt Flow's own LLM tools were not captured.
+- Prompt Flow's last release at capture time was 1.18.5, of 2026-05-01.
+- The fixture was captured with `promptflow-tracing` and `promptflow-devkit` 1.18.5 and `openai` 3.45.0.
+- If a field is missing, look at the span's **Attributes** tab and compare it with [Span attributes](/docs/reference/attributes/).
+
+## Next
+
+- [Traces](/docs/tracing/traces/): read the trace as a tree and a timeline.
+- [Cost and tokens](/docs/tracing/cost-and-tokens/): how cost is computed from the token counts.

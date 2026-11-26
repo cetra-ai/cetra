@@ -21,7 +21,7 @@ import { FormError } from "@/components/form/form-error";
 import { UpgradeButton } from "@/components/plan/upgrade-button";
 import { useOrgEntitlements } from "@/components/plan/use-org-entitlements";
 import { useProject } from "@/components/shell/project-context";
-import { TimeText } from "@/components/time-text";
+import { TimeText, type TimeTextStyle } from "@/components/time-text";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Label } from "@/components/ui/label";
@@ -38,6 +38,7 @@ import {
 import { conditionSummary, formatAlertValue, formFromRule } from "@/lib/alerts";
 import { shortId } from "@/lib/format";
 import { canManageAlerts } from "@/lib/roles";
+import { type TimeZoneSetting, useTimeZone } from "@/lib/settings";
 
 const CANNOT_MANAGE = "Only project members and above can manage alerts";
 
@@ -58,6 +59,7 @@ export function RuleDetail({
   const canEdit = canManageAlerts(data.role);
   const channels = useQuery(channelsQuery(org, project));
   const upgradeUrl = useOrgEntitlements(org).upgradeUrl;
+  const zone = useTimeZone();
   const events = $api.useInfiniteQuery(
     "get",
     "/api/v1/projects/{project}/alert-rules/{id}/events",
@@ -200,14 +202,18 @@ export function RuleDetail({
         <dt className="text-muted-foreground">Last evaluated</dt>
         <dd>
           {rule.last_evaluated_at ? (
-            <TimeText value={rule.last_evaluated_at} style="datetime" />
+            <TimeText value={rule.last_evaluated_at} style="date-minute" />
           ) : (
             "Never"
           )}
         </dd>
         <dt className="text-muted-foreground">Last fired</dt>
         <dd>
-          {rule.last_fired_at ? <TimeText value={rule.last_fired_at} style="datetime" /> : "Never"}
+          {rule.last_fired_at ? (
+            <TimeText value={rule.last_fired_at} style="date-minute" />
+          ) : (
+            "Never"
+          )}
         </dd>
         <dt className="text-muted-foreground">Channels</dt>
         <dd>
@@ -260,7 +266,7 @@ export function RuleDetail({
                 {history.map((event) => (
                   <TableRow key={event.id}>
                     <TableCell>
-                      <TimeText value={event.created_at} style="datetime" />
+                      <TimeText value={event.created_at} style="date-minute" />
                     </TableCell>
                     <TableCell>
                       <EventKindBadge kind={event.kind} />
@@ -285,9 +291,7 @@ export function RuleDetail({
                       )}
                     </TableCell>
                     <TableCell>
-                      <TimeText value={event.window_from} style="time" />
-                      {" – "}
-                      <TimeText value={event.window_to} style="time" />
+                      <EventWindow from={event.window_from} to={event.window_to} zone={zone} />
                     </TableCell>
                     <TableCell>
                       {event.deliveries.length === 0 ? (
@@ -419,4 +423,29 @@ function DeliveryBadge({ status }: { status: Schema<"DeliveryStatus"> }) {
     case "pending":
       return <Badge variant="outline">Pending</Badge>;
   }
+}
+
+/** An event's window to the minute: "10:00 – 10:05", with the dates when its ends fall on
+ *  different days in the shown zone ("11-18 23:55 – 11-19 00:05"). */
+function EventWindow({ from, to, zone }: { from: string; to: string; zone: TimeZoneSetting }) {
+  const style: TimeTextStyle =
+    calendarDay(from, zone) === calendarDay(to, zone) ? "minute" : "date-minute";
+  return (
+    <>
+      <TimeText value={from} style={style} />
+      {" – "}
+      <TimeText value={to} style={style} />
+    </>
+  );
+}
+
+/** The calendar day of an instant in the zone, or undefined for an unparsable value. */
+function calendarDay(value: string, zone: TimeZoneSetting): string | undefined {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) {
+    return undefined;
+  }
+  return zone === "utc"
+    ? `${date.getUTCFullYear()}-${date.getUTCMonth()}-${date.getUTCDate()}`
+    : `${date.getFullYear()}-${date.getMonth()}-${date.getDate()}`;
 }

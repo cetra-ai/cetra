@@ -1,0 +1,204 @@
+{
+  "spans": [
+    {
+      "project_id": "01900000-0000-7000-8000-000000000001",
+      "trace_id": "31c9773a6f6bc295bdfec6ff828731a6",
+      "span_id": "e7d68a56fb7d62fc",
+      "name": "MCP send tools/call get_weather",
+      "span_kind": "span",
+      "start_time": "2025-12-31T23:59:50.493000000Z",
+      "end_time": "2025-12-31T23:59:50.496000000Z",
+      "status": "unset",
+      "service_name": "capture-app",
+      "attributes": {
+        "jsonrpc.request.id": "2",
+        "mcp.method.name": "tools/call"
+      },
+      "resource_attributes": {
+        "telemetry.sdk.language": "python",
+        "telemetry.sdk.name": "opentelemetry",
+        "telemetry.sdk.version": "1.45.2"
+      },
+      "scope_name": "mcp-python-sdk",
+      "ingest_time": "2026-01-01T00:00:00.000000000Z",
+      "schema_version": 2
+    },
+    {
+      "project_id": "01900000-0000-7000-8000-000000000001",
+      "trace_id": "31c9773a6f6bc295bdfec6ff828731a6",
+      "span_id": "ea27a175449cc745",
+      "parent_span_id": "e7d68a56fb7d62fc",
+      "name": "tools/call get_weather",
+      "span_kind": "tool",
+      "start_time": "2025-12-31T23:59:50.493000000Z",
+      "end_time": "2025-12-31T23:59:50.494000000Z",
+      "status": "unset",
+      "service_name": "capture-app",
+      "operation": "execute_tool",
+      "attributes": {
+        "gen_ai.operation.name": "execute_tool",
+        "gen_ai.tool.name": "get_weather",
+        "jsonrpc.request.id": "2",
+        "mcp.method.name": "tools/call",
+        "mcp.protocol.version": "2026-07-28"
+      },
+      "resource_attributes": {
+        "telemetry.sdk.language": "python",
+        "telemetry.sdk.name": "opentelemetry",
+        "telemetry.sdk.version": "1.45.2"
+      },
+      "scope_name": "mcp-python-sdk",
+      "conventions": [
+        "genai"
+      ],
+      "ingest_time": "2026-01-01T00:00:00.000000000Z",
+      "schema_version": 2
+    },
+    {
+      "project_id": "01900000-0000-7000-8000-000000000001",
+      "trace_id": "7e55d00159c9da0b3cf04f22bf543f9e",
+      "span_id": "11d874ab5afd50de",
+      "parent_span_id": "60336d854610d7d1",
+      "name": "tools/list",
+      "span_kind": "span",
+      "start_time": "2025-12-31T23:59:50.529000000Z",
+      "end_time": "2025-12-31T23:59:50.530000000Z",
+      "status": "unset",
+      "service_name": "capture-app",
+      "attributes": {
+        "jsonrpc.request.id": "4",
+        "mcp.method.name": "tools/list",
+        "mcp.protocol.version": "2026-07-28"
+      },
+      "resource_attributes": {
+        "telemetry.sdk.language": "python",
+        "telemetry.sdk.name": "opentelemetry",
+        "telemetry.sdk.version": "1.45.2"
+      },
+      "scope_name": "mcp-python-sdk",
+      "ingest_time": "2026-01-01T00:00:00.000000000Z",
+      "schema_version": 2
+    },
+    {
+      "project_id": "01900000-0000-7000-8000-000000000001",
+      "trace_id": "7e55d00159c9da0b3cf04f22bf543f9e",
+      "span_id": "60336d854610d7d1",
+      "name": "MCP send tools/list",
+      "span_kind": "span",
+      "start_time": "2025-12-31T23:59:50.529000000Z",
+      "end_time": "2025-12-31T23:59:50.531000000Z",
+      "status": "unset",
+      "service_name": "capture-app",
+      "attributes": {
+        "jsonrpc.request.id": "4",
+        "mcp.method.name": "tools/list"
+      },
+      "resource_attributes": {
+        "telemetry.sdk.language": "python",
+        "telemetry.sdk.name": "opentelemetry",
+        "telemetry.sdk.version": "1.45.2"
+      },
+      "scope_name": "mcp-python-sdk",
+      "ingest_time": "2026-01-01T00:00:00.000000000Z",
+      "schema_version": 2
+    },
+    {
+      "project_id": "01900000-0000-7000-8000-000000000001",
+      "trace_id": "a98511815ecacc7253468e6de435b1da",
+      "span_id": "b7f14481b9dd699a",
+      "name": "MCP send server/discover",
+      "span_kind": "span",
+      "start_time": "2025-12-31T23:59:50.000000000Z",
+      "end_time": "2025-12-31T23:59:50.490000000Z",
+      "status": "unset",
+      "service_name": "capture-app",
+      "attributes": {
+        "jsonrpc.request.id": "1",
+        "mcp.method.name": "server/discover"
+      },
+      "resource_attributes": {
+        "telemetry.sdk.language": "python",
+        "telemetry.sdk.name": "opentelemetry",
+        "telemetry.sdk.version": "1.45.2"
+      },
+      "scope_name": "mcp-python-sdk",
+      "ingest_time": "2026-01-01T00:00:00.000000000Z",
+      "schema_version": 2
+    },
+    {
+      "project_id": "01900000-0000-7000-8000-000000000001",
+      "trace_id": "a98511815ecacc7253468e6de435b1da",
+      "span_id": "b7321d222c38039a",
+      "parent_span_id": "b7f14481b9dd699a",
+      "name": "server/discover",
+      "span_kind": "span",
+      "start_time": "2025-12-31T23:59:50.488000000Z",
+      "end_time": "2025-12-31T23:59:50.488000000Z",
+      "status": "unset",
+      "service_name": "capture-app",
+      "attributes": {
+        "jsonrpc.request.id": "1",
+        "mcp.method.name": "server/discover",
+        "mcp.protocol.version": "2026-07-28"
+      },
+      "resource_attributes": {
+        "telemetry.sdk.language": "python",
+        "telemetry.sdk.name": "opentelemetry",
+        "telemetry.sdk.version": "1.45.2"
+      },
+      "scope_name": "mcp-python-sdk",
+      "ingest_time": "2026-01-01T00:00:00.000000000Z",
+      "schema_version": 2
+    },
+    {
+      "project_id": "01900000-0000-7000-8000-000000000001",
+      "trace_id": "ac7e9c1d89b0fc2e812058cb2e4770f9",
+      "span_id": "57675d2e99fc16ee",
+      "name": "MCP send tools/list",
+      "span_kind": "span",
+      "start_time": "2025-12-31T23:59:50.497000000Z",
+      "end_time": "2025-12-31T23:59:50.499000000Z",
+      "status": "unset",
+      "service_name": "capture-app",
+      "attributes": {
+        "jsonrpc.request.id": "3",
+        "mcp.method.name": "tools/list"
+      },
+      "resource_attributes": {
+        "telemetry.sdk.language": "python",
+        "telemetry.sdk.name": "opentelemetry",
+        "telemetry.sdk.version": "1.45.2"
+      },
+      "scope_name": "mcp-python-sdk",
+      "ingest_time": "2026-01-01T00:00:00.000000000Z",
+      "schema_version": 2
+    },
+    {
+      "project_id": "01900000-0000-7000-8000-000000000001",
+      "trace_id": "ac7e9c1d89b0fc2e812058cb2e4770f9",
+      "span_id": "6b97ea4e4de3c048",
+      "parent_span_id": "57675d2e99fc16ee",
+      "name": "tools/list",
+      "span_kind": "span",
+      "start_time": "2025-12-31T23:59:50.498000000Z",
+      "end_time": "2025-12-31T23:59:50.498000000Z",
+      "status": "unset",
+      "service_name": "capture-app",
+      "attributes": {
+        "jsonrpc.request.id": "3",
+        "mcp.method.name": "tools/list",
+        "mcp.protocol.version": "2026-07-28"
+      },
+      "resource_attributes": {
+        "telemetry.sdk.language": "python",
+        "telemetry.sdk.name": "opentelemetry",
+        "telemetry.sdk.version": "1.45.2"
+      },
+      "scope_name": "mcp-python-sdk",
+      "ingest_time": "2026-01-01T00:00:00.000000000Z",
+      "schema_version": 2
+    }
+  ],
+  "media": [],
+  "rejected_spans": 0
+}

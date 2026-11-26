@@ -1,0 +1,82 @@
+---
+title: Deep Agents
+description: "Trace LangChain Deep Agents with cetra from Python, through the OpenInference LangChain instrumentation."
+---
+
+import { Tabs, TabItem } from "@astrojs/starlight/components";
+import Backing from "../../../../components/Backing.astro";
+
+Trace LangChain Deep Agents with cetra from Python, through the OpenInference LangChain instrumentation. Deep Agents have no instrumentor of their own: the `langchain` one covers them, as it covers [LangChain](/docs/integrations/langchain/) and [LangGraph](/docs/integrations/langgraph/).
+
+<Backing fixtures={["openinference/deepagents-agent"]} />
+
+## Install
+
+<Tabs syncKey="lang">
+  <TabItem label="Python">
+
+```bash
+pip install "cetra-sdk[langchain]" deepagents langchain-openai
+```
+
+  </TabItem>
+</Tabs>
+
+## Set up
+
+<Tabs syncKey="lang">
+  <TabItem label="Python">
+
+{/* untested: calls OpenAI through Deep Agents and needs OPENAI_API_KEY */}
+```python
+import json
+import os
+
+import cetra
+from deepagents import create_deep_agent
+from langchain.tools import tool
+from langchain_core.messages import HumanMessage
+from langchain_openai import ChatOpenAI
+from pydantic import SecretStr
+
+cetra.init(instrument=["langchain"])
+
+
+@tool
+def get_weather(city: str) -> str:
+    """Look up the weather for a city."""
+    return json.dumps({"temperature_c": 18, "conditions": "sunny", "city": city})
+
+
+model = ChatOpenAI(model="gpt-4o-mini", api_key=SecretStr(os.environ["OPENAI_API_KEY"]))
+agent = create_deep_agent(
+    model=model,
+    tools=[get_weather],
+    system_prompt="You are a weather assistant.",
+)
+agent.invoke({"messages": [HumanMessage("What's the weather in Paris?")]})
+
+cetra.flush()
+```
+
+  </TabItem>
+</Tabs>
+
+## What you get
+
+- The run is the LangGraph tree: a `LangGraph` `chain` span as the root, a `chain` span per node (`model`, `tools`), an `llm` span per model call and a `tool` span per tool call.
+- Each model call's token counts and cost, computed from the built-in prices, are on its `llm` span.
+- Deep Agents' built-in file and sub-agent tools are sent with every model call.
+- Nothing in the trace's columns identifies Deep Agents: `ls_integration=deepagents` stays in the root span's metadata.
+
+## Limits
+
+- Middleware steps appear as `agent` spans.
+- The fixture was captured with deepagents 0.7.32, langchain-openai 1.7.3 and openinference-instrumentation-langchain 0.1.81.
+- If a field is missing, look at the span's **Attributes** tab and compare it with [Span attributes](/docs/reference/attributes/).
+
+## Next
+
+- [Traces](/docs/tracing/traces/): read the trace as a tree and a timeline.
+- [Cost and tokens](/docs/tracing/cost-and-tokens/): how cost is computed from the token counts.
+- [Online rules](/docs/evaluation/online-rules/): score these traces automatically.

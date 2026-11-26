@@ -1,0 +1,93 @@
+---
+title: Strands Agents
+description: "Trace Strands Agents with cetra from Python: agent runs, event loop cycles, model calls and tool calls, with their messages."
+---
+
+import { Tabs, TabItem } from "@astrojs/starlight/components";
+import Backing from "../../../../components/Backing.astro";
+
+cetra traces Strands Agents runs as agent, event loop, model call and tool spans, with the messages and the time to first token.
+
+<Backing fixtures={["genai/strands-agent-tool", "genai/strands-agent-tool-latest"]} />
+
+## Install
+
+<Tabs syncKey="lang">
+  <TabItem label="Python">
+
+```bash
+pip install cetra-sdk "strands-agents[openai]"
+```
+
+  </TabItem>
+</Tabs>
+
+## Set up
+
+Strands writes its spans to the global OpenTelemetry tracer provider. Start cetra with `use_global_provider=True` so that it joins that provider. Set `CETRA_API_KEY` to your `sk-cetra-…` key and `OPENAI_API_KEY` to your OpenAI key.
+
+<Tabs syncKey="lang">
+  <TabItem label="Python">
+
+{/* untested: calls OpenAI through Strands and needs CETRA_API_KEY and OPENAI_API_KEY */}
+```python
+import os
+
+import cetra
+from strands import Agent, tool
+from strands.models.openai import OpenAIModel
+
+cetra.init(use_global_provider=True)
+
+
+@tool
+def get_weather(city: str) -> str:
+    """Get the weather."""
+    return f"sunny in {city}"
+
+
+model = OpenAIModel(
+    client_args={"api_key": os.environ["OPENAI_API_KEY"]},
+    model_id="gpt-4o-mini",
+)
+agent = Agent(
+    model=model,
+    tools=[get_weather],
+    name="weather_agent",
+    system_prompt="You are a weather bot.",
+    callback_handler=None,
+    trace_attributes={"session.id": "s1"},
+)
+agent("What is the weather in Paris?")
+
+cetra.flush()
+```
+
+  </TabItem>
+</Tabs>
+
+`trace_attributes` sets the session of the run: `session.id` becomes the cetra session.
+
+Strands has two ways to record message content, and cetra reads both. The default writes events on the spans. Set `OTEL_SEMCONV_STABILITY_OPT_IN=gen_ai_latest_experimental` before you import Strands to use the latest GenAI conventions instead. The fixtures have the messages with either setting.
+
+## What you get
+
+With one tool call, a run produces:
+
+- an `agent` span named `invoke_agent weather_agent`, with the prompt as its input and the answer as its output;
+- a `chain` span named `execute_event_loop_cycle` for each event loop cycle;
+- an `llm` span named `chat` for each model call, with the provider `openai`, the request and response models, the token counts, the cost computed from the built-in prices, the messages, and the time to first token (TTFT) in milliseconds;
+- a `tool` span for each tool call, with the arguments as its input and the result as its output.
+
+## Limits
+
+- The fixtures were captured with `strands-agents` 1.65.0 and the OpenTelemetry SDK 1.45.2.
+- The time to first token comes from Strands' `gen_ai.server.time_to_first_token` attribute.
+- Each event loop cycle is a `chain` span. It is not a model call, so it adds no tokens or cost.
+- If a field is missing, look at the span's **Attributes** tab and compare it with [Span attributes](/docs/reference/attributes/).
+
+## Next
+
+- [Traces](/docs/tracing/traces/): read the trace as a tree and a timeline.
+- [Cost and tokens](/docs/tracing/cost-and-tokens/): how cost is computed from the token counts.
+- [Online rules](/docs/evaluation/online-rules/): score these traces automatically.

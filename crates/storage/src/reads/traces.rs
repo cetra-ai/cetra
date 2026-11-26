@@ -12,6 +12,7 @@ use cetra_column::{
 };
 use cetra_core::enums::SpanStatus;
 use cetra_core::schema::{spans, traces};
+use cetra_query::exec::hash_agg::{AggExpr, AggFunc, HashAgg, HashAggSpec};
 use cetra_query::exec::hash_join::{HashJoinSpec, JoinType, execute_hash_join};
 use cetra_query::exec::sort_window::{WindowFunc, WindowSpec, eval_window_group};
 use cetra_query::exec::streaming::{FilterOp, LimitOp, ProjectOp, TopKSink};
@@ -24,7 +25,8 @@ use cetra_query::{BinaryOp, CompiledFilter, Expr, FilterView, QueryError};
 use crate::engine::traces_source::TraceListMode;
 use crate::query_error::RunError;
 use crate::reads::columns::{
-    active_rows, internal, raw_string_at, raw_time_at, require_col, string_at,
+    active_rows, decimal_to_f64_at, i64_at, internal, raw_string_at, raw_time_at, require_col,
+    string_at,
 };
 use crate::reads::context::{
     DURATION_MS, DURATION_NS, EngineContext, OperatorStream, duration_ns_from_bounds_expr,
@@ -48,6 +50,9 @@ const SPAN_TIES: &[&str] = &[spans::SPAN_ID, spans::TRACE_ID];
 const SPAN_KEY: &[&str] = &[spans::START_TIME, spans::SPAN_ID, spans::TRACE_ID];
 const MAX_FETCH: usize = 64 * MAX_PAGE;
 const SPAN_RANK: &str = "__rn";
+const TOTAL_TRACES: &str = "trace_count";
+const TOTAL_ERRORS: &str = "error_trace_count";
+const TOTAL_COST: &str = "cost_total";
 
 /// Most spans [`trace_detail`] returns for one trace.
 pub const MAX_TRACE_SPANS: usize = 20_000;
@@ -161,6 +166,31 @@ pub struct MatchCountRequest<'a> {
     pub strict_exclusions: bool,
     /// Time allowed for planning and running.
     pub timeout: Duration,
+}
+
+/// The trace list's rows to total (D-C-31): the list's filter, search, window and exclusions,
+/// without sort, cursor or limit.
+#[derive(Debug, Clone, Copy)]
+pub struct TraceTotalsRequest<'a> {
+    /// Filter text. Empty or whitespace means no filter.
+    pub filter: Option<&'a str>,
+    /// Search text. Empty or whitespace means no search.
+    pub search: Option<&'a str>,
+    /// Window and default exclusions.
+    pub scope: ListScope,
+    /// Time allowed for planning and running.
+    pub timeout: Duration,
+}
+
+/// Totals of the trace list's rows (D-C-31).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct TraceTotals {
+    /// Traces the list would page through.
+    pub trace_count: i64,
+    /// Of those, the traces whose `status` is `error`.
+    pub error_trace_count: i64,
+    /// Exact sum of their `cost_total` (D-A2-4); a null cost adds nothing; 0 for no trace.
+    pub cost_total: f64,
 }
 
 /// Span list columns: [`cetra_core::schema::SPANS_LIGHT_COLUMNS`] without
@@ -2381,6 +2411,245 @@ pub async fn match_count(
     Ok(count)
 }
 
+/// Totals of the rows [`trace_list`] would page through for the same filter, search and scope.
+///
+/// # Errors
+///
+/// [`RunError::Invalid`] for filter text; [`RunError::InvalidRequest`] for a search without a
+/// window; [`RunError::Timeout`] past `timeout`; engine failures through `run_with_ctx`
+/// (a non-finite or out-of-range cost fails the sum, as in the widget query).
+pub async fn trace_totals(
+    ctx: &QueryContext,
+    request: TraceTotalsRequest<'_>,
+) -> Result<TraceTotals, RunError> {
+    let ctx = ctx.engine();
+    let compiled = compile_optional_filter(FilterView::Traces, request.filter)?;
+    let search = present(request.search).map(str::to_owned);
+    if search.is_some() && request.scope.window.is_none() {
+        return Err(RunError::InvalidRequest(
+            "search needs a time range".to_owned(),
+        ));
+    }
+    let references_environment = compiled
+        .as_ref()
+        .is_some_and(|filter| filter.references_environment);
+    let scope = request.scope;
+    let ctx_c = ctx.clone();
+
+    let (batches, _) = ctx
+        .run_with_ctx(request.timeout, move |exec_ctx| {
+            let traces_raw = traces_raw_schema().map_err(run_err_to_query)?;
+            let has_scores = compiled.as_ref().is_some_and(|f| !f.scores.is_empty());
+            let mut spec = scoped_traces_spec(&ctx_c, scope, references_environment)
+                .map_err(run_err_to_query)?;
+
+            let (streams, agg_input_schema): (Vec<Box<dyn PartitionStream>>, Arc<Schema>) =
+                if !has_scores {
+                    if let Some(filter) = &compiled {
+                        let rewritten = rewrite_view_expr_for_raw(
+                            &filter.expr,
+                            &traces_raw,
+                            &[traces::TRACE_ID, traces::ROOT_SPAN_ID],
+                            true,
+                        )?;
+                        spec.filters.push(rewritten);
+                        populate_id_lookups(&mut spec);
+                    }
+                    let mut proj_set = BTreeSet::new();
+                    if search.is_some()
+                        && let Some(idx) = traces_raw.index_of(traces::TRACE_ID)
+                    {
+                        proj_set.insert(idx);
+                    }
+                    for name in [traces::STATUS, traces::COST_TOTAL] {
+                        let idx = traces_raw.index_of(name).ok_or_else(|| {
+                            QueryError::internal(format!("traces schema missing {name}"))
+                        })?;
+                        proj_set.insert(idx);
+                    }
+                    spec.projection = Some(proj_set.into_iter().collect());
+                    let scan_schema = ctx_c.traces.projected_schema(&spec)?;
+                    let mut raw_streams = ctx_c.traces.open_partitions(&spec, exec_ctx)?;
+                    if raw_streams.is_empty() {
+                        return Ok(Vec::new());
+                    }
+                    if let Some(text) = &search {
+                        match search_predicate(
+                            &ctx_c,
+                            exec_ctx,
+                            FilterView::Traces,
+                            text,
+                            scope.window,
+                        )
+                        .map_err(run_err_to_query)?
+                        {
+                            SearchPredicate::None => {}
+                            SearchPredicate::Traces { trace_ids, schema } => {
+                                if trace_ids.is_empty() {
+                                    return Ok(Vec::new());
+                                }
+                                let left_key = col_expr_q(&scan_schema, traces::TRACE_ID)?;
+                                let right_key = col_expr_q(&schema, traces::TRACE_ID)?;
+                                let joined = execute_hash_join(
+                                    raw_streams,
+                                    Arc::clone(&scan_schema),
+                                    trace_ids,
+                                    schema,
+                                    HashJoinSpec {
+                                        join_type: JoinType::LeftSemi,
+                                        left_keys: vec![left_key],
+                                        right_keys: vec![right_key],
+                                        null_equals_null: false,
+                                        residual_filter: None,
+                                    },
+                                    exec_ctx,
+                                )?;
+                                raw_streams = vec![joined];
+                            }
+                            SearchPredicate::Spans { .. } => {
+                                return Err(QueryError::internal(
+                                    "unexpected Spans search predicate for Traces",
+                                ));
+                            }
+                        }
+                    }
+                    (raw_streams, scan_schema)
+                } else {
+                    let traces_view = traces_view_schema().map_err(run_err_to_query)?;
+                    let mut raw_streams = ctx_c.traces.open_partitions(&spec, exec_ctx)?;
+                    if raw_streams.is_empty() {
+                        return Ok(Vec::new());
+                    }
+                    if let Some(text) = &search {
+                        match search_predicate(
+                            &ctx_c,
+                            exec_ctx,
+                            FilterView::Traces,
+                            text,
+                            scope.window,
+                        )
+                        .map_err(run_err_to_query)?
+                        {
+                            SearchPredicate::None => {}
+                            SearchPredicate::Traces { trace_ids, schema } => {
+                                if trace_ids.is_empty() {
+                                    return Ok(Vec::new());
+                                }
+                                let left_key = col_expr_q(&traces_raw, traces::TRACE_ID)?;
+                                let right_key = col_expr_q(&schema, traces::TRACE_ID)?;
+                                let joined = execute_hash_join(
+                                    raw_streams,
+                                    Arc::clone(&traces_raw),
+                                    trace_ids,
+                                    schema,
+                                    HashJoinSpec {
+                                        join_type: JoinType::LeftSemi,
+                                        left_keys: vec![left_key],
+                                        right_keys: vec![right_key],
+                                        null_equals_null: false,
+                                        residual_filter: None,
+                                    },
+                                    exec_ctx,
+                                )?;
+                                raw_streams = vec![joined];
+                            }
+                            SearchPredicate::Spans { .. } => {
+                                return Err(QueryError::internal(
+                                    "unexpected Spans search predicate for Traces",
+                                ));
+                            }
+                        }
+                    }
+                    let view_streams: Vec<Box<dyn PartitionStream>> = raw_streams
+                        .into_iter()
+                        .map(|s| {
+                            let proj = traces_view_projection(&traces_raw, exec_ctx.clone())?;
+                            Ok(
+                                Box::new(OperatorStream::new(s, vec![Box::new(proj)], exec_ctx))
+                                    as Box<dyn PartitionStream>,
+                            )
+                        })
+                        .collect::<Result<Vec<_>, QueryError>>()?;
+                    let filtered = match &compiled {
+                        Some(filter) => apply_compiled_filter(
+                            &ctx_c,
+                            exec_ctx,
+                            view_streams,
+                            &traces_view,
+                            filter,
+                        )?,
+                        None => view_streams,
+                    };
+                    (filtered, traces_view)
+                };
+
+            let status_col = col_expr_q(&agg_input_schema, traces::STATUS)?;
+            let cost_col = col_expr_q(&agg_input_schema, traces::COST_TOTAL)?;
+            let is_error_one = Expr::Case {
+                operand: None,
+                when_then: vec![(
+                    Expr::Binary {
+                        left: Box::new(status_col),
+                        op: BinaryOp::Eq,
+                        right: Box::new(Expr::Literal(ScalarValue::Utf8(
+                            SpanStatus::Error.as_str().to_owned(),
+                        ))),
+                        data_type: DataType::Bool,
+                    },
+                    Expr::Literal(ScalarValue::I64(1)),
+                )],
+                else_expr: None,
+                data_type: DataType::I64,
+            };
+
+            let agg_spec = HashAggSpec {
+                group_by: Vec::new(),
+                aggs: vec![
+                    AggExpr {
+                        func: AggFunc::CountStar,
+                        filter: None,
+                        output_name: TOTAL_TRACES.to_owned(),
+                    },
+                    AggExpr {
+                        func: AggFunc::Count(is_error_one),
+                        filter: None,
+                        output_name: TOTAL_ERRORS.to_owned(),
+                    },
+                    AggExpr {
+                        func: AggFunc::SumCostDecimal(cost_col),
+                        filter: None,
+                        output_name: TOTAL_COST.to_owned(),
+                    },
+                ],
+            };
+
+            let spec_c = agg_spec.clone();
+            let schema_c = Arc::clone(&agg_input_schema);
+            let ctx_agg = exec_ctx.clone();
+            let sinks = exec_run_pipeline(
+                exec_ctx,
+                streams,
+                |_| Ok(Vec::new()),
+                move |_| HashAgg::new(spec_c.clone(), Arc::clone(&schema_c), ctx_agg.clone()),
+            )?;
+            HashAgg::merge_sinks(sinks, &agg_spec, &agg_input_schema, exec_ctx)
+        })
+        .await?;
+
+    let Some(batch) = batches.iter().find(|b| b.num_rows() > 0) else {
+        return Ok(TraceTotals {
+            trace_count: 0,
+            error_trace_count: 0,
+            cost_total: 0.0,
+        });
+    };
+    Ok(TraceTotals {
+        trace_count: i64_at(batch, require_col(batch, TOTAL_TRACES)?, 0)?,
+        error_trace_count: i64_at(batch, require_col(batch, TOTAL_ERRORS)?, 0)?,
+        cost_total: decimal_to_f64_at(batch, require_col(batch, TOTAL_COST)?, 0)?.unwrap_or(0.0),
+    })
+}
+
 struct CountSink {
     count: usize,
 }
@@ -3642,5 +3911,158 @@ mod tests {
         };
         assert!(format!("{det:?}").contains("TraceDetailData"));
         assert!(format!("{sp:?}").contains("TraceSpansData"));
+    }
+
+    fn totals_request<'a>(
+        scope: ListScope,
+        filter: Option<&'a str>,
+        search: Option<&'a str>,
+    ) -> TraceTotalsRequest<'a> {
+        TraceTotalsRequest {
+            filter,
+            search,
+            scope,
+            timeout: TIMEOUT,
+        }
+    }
+
+    #[tokio::test]
+    async fn totals_match_the_listed_rows_and_handle_empty_exact_cost_and_errors() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let storage = Storage::open(test_config(dir.path())).await.expect("open");
+        let project: ProjectId = "018f6b4e-7c1a-7c1a-8c1a-000000000009".parse().expect("pid");
+        let mut spans = dataset_spans();
+        for s in &mut spans {
+            s.project_id = project;
+        }
+        storage
+            .append_spans(project, span_rows(&spans))
+            .await
+            .expect("append spans");
+        let ctx = build_context(&storage, project, QueryOptions::new(None, None)).await;
+
+        let day = TimeWindow::new(
+            parse_rfc3339("2026-01-01T00:00:00Z").expect("from"),
+            parse_rfc3339("2026-01-02T00:00:00Z").expect("to"),
+        )
+        .expect("day");
+        let mk_scope = |window: Option<TimeWindow>, include_eval: bool| ListScope {
+            window,
+            include_eval,
+            include_experiments: false,
+        };
+
+        let cases: [(ListScope, Option<&str>, Option<&str>); 5] = [
+            (mk_scope(None, false), None, None),
+            (mk_scope(None, true), None, None),
+            (mk_scope(None, false), Some("status = 'error'"), None),
+            (mk_scope(None, false), Some("cost_total > 0.002"), None),
+            (mk_scope(Some(day), false), None, Some("order")),
+        ];
+        for (index, (case_scope, filter, search)) in cases.into_iter().enumerate() {
+            let mut request = trace_req(case_scope, TraceSort::StartTime, SortOrder::Desc, 1000);
+            request.filter = filter;
+            request.search = search;
+            let page = trace_list(&ctx, request).await.expect("list");
+            let listed_rows = qe_rows(&page.batches);
+            let totals = trace_totals(&ctx, totals_request(case_scope, filter, search))
+                .await
+                .expect("totals");
+            assert_eq!(
+                totals.trace_count,
+                i64::try_from(listed_rows.len()).expect("count"),
+                "case {index}"
+            );
+            let errors = listed_rows
+                .iter()
+                .filter(|row| row["status"] == "error")
+                .count();
+            assert_eq!(
+                totals.error_trace_count,
+                i64::try_from(errors).expect("count"),
+                "case {index}"
+            );
+            let cost: f64 = listed_rows
+                .iter()
+                .map(|row| row["cost_total"].as_f64().unwrap_or(0.0))
+                .sum();
+            assert!(
+                (totals.cost_total - cost).abs() < 1e-12,
+                "case {index}: {} vs {cost}",
+                totals.cost_total
+            );
+            if index == 0 {
+                assert!(totals.trace_count > 0);
+                assert!(totals.error_trace_count > 0);
+            }
+        }
+
+        // Empty result yields zeros.
+        let empty = trace_totals(
+            &ctx,
+            totals_request(mk_scope(None, false), Some("name = 'no such trace'"), None),
+        )
+        .await
+        .expect("empty totals");
+        assert_eq!(
+            empty,
+            TraceTotals {
+                trace_count: 0,
+                error_trace_count: 0,
+                cost_total: 0.0,
+            }
+        );
+
+        // Bad filter and search without window fail cleanly.
+        let bad = trace_totals(
+            &ctx,
+            totals_request(mk_scope(None, false), Some("error_count >"), None),
+        )
+        .await;
+        assert!(matches!(bad, Err(RunError::Invalid(_))), "{bad:?}");
+        let no_window = trace_totals(
+            &ctx,
+            totals_request(mk_scope(None, false), None, Some("order")),
+        )
+        .await;
+        match no_window {
+            Err(RunError::InvalidRequest(message)) => {
+                assert_eq!(message, "search needs a time range");
+            }
+            other => panic!("{other:?}"),
+        }
+
+        // Exact decimal sum (10 * 0.1 == 1.0 exactly, no binary float drift).
+        let exact_project: ProjectId = "018f6b4e-7c1a-7c1a-8c1a-00000000000a".parse().expect("pid");
+        let mut exact_spans: Vec<_> = (1..=10_u16)
+            .map(|trace| {
+                let mut s = span_row(trace, 0, i64::from(trace) * 1_000, 1);
+                s.project_id = exact_project;
+                s.cost_total = Some(0.1);
+                s
+            })
+            .collect();
+        exact_spans[2].status = SpanStatus::Error;
+        storage
+            .append_spans(exact_project, span_rows(&exact_spans))
+            .await
+            .expect("append exact spans");
+        let exact_ctx = build_context(&storage, exact_project, QueryOptions::new(None, None)).await;
+        let exact_totals = trace_totals(
+            &exact_ctx,
+            totals_request(mk_scope(None, false), None, None),
+        )
+        .await
+        .expect("exact totals");
+        assert_eq!(
+            exact_totals,
+            TraceTotals {
+                trace_count: 10,
+                error_trace_count: 1,
+                cost_total: 1.0,
+            }
+        );
+
+        let _ = storage.shutdown().await;
     }
 }

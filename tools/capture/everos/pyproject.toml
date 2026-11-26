@@ -1,0 +1,14 @@
+[project]
+name = "cetra-capture-everos"
+version = "0.0.0"
+requires-python = "==3.13.*"
+# EverOS exports nothing without the `otel` extra (it logs
+# `observability_enabled_but_otel_not_installed` and stays silent), so the extra is
+# part of the pin, not an option.
+dependencies = [
+    "everos[otel]==1.7.0",
+]
+
+[tool.uv]
+package = false
+exclude-newer = "7 days" # D74/D117: no release younger than 7 days

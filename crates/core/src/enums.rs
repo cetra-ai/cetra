@@ -151,6 +151,8 @@ stored_enum! {
         Cetra,
         /// OTel GenAI semantic conventions.
         Genai,
+        /// VoltAgent (`voltagent.*` attributes, or the `@voltagent/` scope).
+        Voltagent,
         /// OpenInference.
         Openinference,
         /// OpenLLMetry (`traceloop.*` and legacy `gen_ai.prompt.*`).

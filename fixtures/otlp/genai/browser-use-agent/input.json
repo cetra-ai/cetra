@@ -1,0 +1,419 @@
+{
+  "resourceSpans": [
+    {
+      "resource": {
+        "attributes": [
+          {
+            "key": "telemetry.sdk.language",
+            "value": {
+              "stringValue": "python"
+            }
+          },
+          {
+            "key": "telemetry.sdk.name",
+            "value": {
+              "stringValue": "opentelemetry"
+            }
+          },
+          {
+            "key": "telemetry.sdk.version",
+            "value": {
+              "stringValue": "1.45.2"
+            }
+          },
+          {
+            "key": "service.name",
+            "value": {
+              "stringValue": "capture-app"
+            }
+          }
+        ],
+        "droppedAttributesCount": 0,
+        "entityRefs": []
+      },
+      "scopeSpans": [
+        {
+          "scope": {
+            "name": "pydantic-ai",
+            "version": "2.66.0",
+            "attributes": [],
+            "droppedAttributesCount": 0
+          },
+          "spans": [
+            {
+              "traceId": "6edf7b83295ac03c793723a563567726",
+              "spanId": "6ac5aea25e95c4ac",
+              "traceState": "",
+              "parentSpanId": "",
+              "flags": 256,
+              "name": "invoke_agent agent",
+              "kind": 1,
+              "startTimeUnixNano": "1767225590000000000",
+              "endTimeUnixNano": "1767225590062000000",
+              "attributes": [
+                {
+                  "key": "model_name",
+                  "value": {
+                    "stringValue": "gpt-4o-mini-2024-07-18"
+                  }
+                },
+                {
+                  "key": "agent_name",
+                  "value": {
+                    "stringValue": "agent"
+                  }
+                },
+                {
+                  "key": "gen_ai.agent.name",
+                  "value": {
+                    "stringValue": "agent"
+                  }
+                },
+                {
+                  "key": "gen_ai.agent.call.id",
+                  "value": {
+                    "stringValue": "capture-volatile-1"
+                  }
+                },
+                {
+                  "key": "gen_ai.conversation.id",
+                  "value": {
+                    "stringValue": "capture-volatile-2"
+                  }
+                },
+                {
+                  "key": "gen_ai.operation.name",
+                  "value": {
+                    "stringValue": "invoke_agent"
+                  }
+                },
+                {
+                  "key": "logfire.msg",
+                  "value": {
+                    "stringValue": "agent run"
+                  }
+                },
+                {
+                  "key": "final_result",
+                  "value": {
+                    "stringValue": "{\"current_state\": {\"evaluation_previous_goal\": \"Unknown\", \"memory\": \"Start\", \"next_goal\": \"Finish\"}, \"action\": [{\"done\": {\"text\": \"Done.\", \"success\": true}}]}"
+                  }
+                },
+                {
+                  "key": "gen_ai.aggregated_usage.input_tokens",
+                  "value": {
+                    "intValue": "120"
+                  }
+                },
+                {
+                  "key": "gen_ai.aggregated_usage.output_tokens",
+                  "value": {
+                    "intValue": "30"
+                  }
+                },
+                {
+                  "key": "gen_ai.aggregated_usage.details.accepted_prediction_tokens",
+                  "value": {
+                    "intValue": "0"
+                  }
+                },
+                {
+                  "key": "gen_ai.aggregated_usage.details.audio_tokens",
+                  "value": {
+                    "intValue": "0"
+                  }
+                },
+                {
+                  "key": "gen_ai.aggregated_usage.details.reasoning_tokens",
+                  "value": {
+                    "intValue": "0"
+                  }
+                },
+                {
+                  "key": "gen_ai.aggregated_usage.details.rejected_prediction_tokens",
+                  "value": {
+                    "intValue": "0"
+                  }
+                },
+                {
+                  "key": "pydantic_ai.all_messages",
+                  "value": {
+                    "stringValue": "[{\"role\":\"user\",\"parts\":[{\"type\":\"text\",\"content\":\"Reply with done.\"}]},{\"role\":\"user\",\"parts\":[{\"type\":\"text\",\"content\":\"Budget nearly exhausted. Deliver the verified result now with finish/finish_from_repl. Reference saved files; explicitly list missing evidence. Do not perform more browser actions. If the task is not fully finished as requested, set success=false; else success=true.\"}]},{\"role\":\"assistant\",\"parts\":[{\"type\":\"text\",\"content\":\"{\\\"current_state\\\": {\\\"evaluation_previous_goal\\\": \\\"Unknown\\\", \\\"memory\\\": \\\"Start\\\", \\\"next_goal\\\": \\\"Finish\\\"}, \\\"action\\\": [{\\\"done\\\": {\\\"text\\\": \\\"Done.\\\", \\\"success\\\": true}}]}\"}],\"finish_reason\":\"stop\"}]"
+                  }
+                },
+                {
+                  "key": "gen_ai.system_instructions",
+                  "value": {
+                    "stringValue": "capture-volatile-3"
+                  }
+                },
+                {
+                  "key": "logfire.json_schema",
+                  "value": {
+                    "stringValue": "{\"type\":\"object\",\"properties\":{\"pydantic_ai.all_messages\":{\"type\":\"array\"},\"gen_ai.system_instructions\":{\"type\":\"array\"},\"final_result\":{\"type\":\"object\"}}}"
+                  }
+                }
+              ],
+              "droppedAttributesCount": 0,
+              "events": [],
+              "droppedEventsCount": 0,
+              "links": [],
+              "droppedLinksCount": 0,
+              "status": null
+            },
+            {
+              "traceId": "6edf7b83295ac03c793723a563567726",
+              "spanId": "fa734c4dd9392dca",
+              "traceState": "",
+              "parentSpanId": "6ac5aea25e95c4ac",
+              "flags": 256,
+              "name": "chat gpt-4o-mini-2024-07-18",
+              "kind": 3,
+              "startTimeUnixNano": "1767225590003000000",
+              "endTimeUnixNano": "1767225590058000000",
+              "attributes": [
+                {
+                  "key": "gen_ai.operation.name",
+                  "value": {
+                    "stringValue": "chat"
+                  }
+                },
+                {
+                  "key": "gen_ai.agent.name",
+                  "value": {
+                    "stringValue": "agent"
+                  }
+                },
+                {
+                  "key": "gen_ai.agent.call.id",
+                  "value": {
+                    "stringValue": "capture-volatile-1"
+                  }
+                },
+                {
+                  "key": "gen_ai.conversation.id",
+                  "value": {
+                    "stringValue": "capture-volatile-2"
+                  }
+                },
+                {
+                  "key": "gen_ai.provider.name",
+                  "value": {
+                    "stringValue": "openai"
+                  }
+                },
+                {
+                  "key": "gen_ai.system",
+                  "value": {
+                    "stringValue": "openai"
+                  }
+                },
+                {
+                  "key": "server.address",
+                  "value": {
+                    "stringValue": "api.openai.com"
+                  }
+                },
+                {
+                  "key": "server.port",
+                  "value": {
+                    "intValue": "443"
+                  }
+                },
+                {
+                  "key": "gen_ai.request.model",
+                  "value": {
+                    "stringValue": "gpt-4o-mini-2024-07-18"
+                  }
+                },
+                {
+                  "key": "model_request_parameters",
+                  "value": {
+                    "stringValue": "capture-volatile-4"
+                  }
+                },
+                {
+                  "key": "gen_ai.tool.definitions",
+                  "value": {
+                    "stringValue": "[{\"type\":\"function\",\"name\":\"python\",\"description\":\"Run Python in the persistent REPL (browser-harness helpers and raw cdp() pre-imported).\\n\\nBrowser helpers are synchronous (do not await them); variables survive calls; the last expression is printed. Cell deadline\\napplies; checkpoint small batches before it. screenshot() returns native images.\",\"parameters\":{\"additionalProperties\":false,\"properties\":{\"code\":{\"type\":\"string\"}},\"required\":[\"code\"],\"type\":\"object\"}},{\"type\":\"function\",\"name\":\"finish_from_repl\",\"description\":\"Deliver an existing value from the persistent REPL without printing or rewriting it. The Python expression must match the result schema of finish; for a string result use json.dumps(records) or an existing text variable. Evaluated once; ends the task after validation.\",\"parameters\":{\"additionalProperties\":false,\"properties\":{\"expression\":{\"type\":\"string\"},\"success\":{\"default\":null,\"description\":\"true only when the result delivers what the task asked for, every value observed in this session; false when blocked, refused, partial, or a requested value was not found (never fill it from memory)\",\"anyOf\":[{\"type\":\"boolean\"},{\"type\":\"null\"}]}},\"required\":[\"expression\"],\"type\":\"object\"}},{\"type\":\"function\",\"name\":\"finish\",\"description\":\"Submit the verified final result. For data already in the REPL, prefer finish_from_repl to avoid rewriting it. This ends the task.\",\"parameters\":{\"additionalProperties\":false,\"properties\":{\"result\":{\"type\":\"string\"},\"success\":{\"default\":null,\"description\":\"true only when the result delivers what the task asked for, every value observed in this session; false when blocked, refused, partial, or a requested value was not found (never fill it from memory)\",\"anyOf\":[{\"type\":\"boolean\"},{\"type\":\"null\"}]}},\"required\":[\"result\"],\"type\":\"object\"}}]"
+                  }
+                },
+                {
+                  "key": "gen_ai.input.messages",
+                  "value": {
+                    "stringValue": "[{\"role\":\"user\",\"parts\":[{\"type\":\"text\",\"content\":\"Reply with done.\"},{\"type\":\"text\",\"content\":\"Budget nearly exhausted. Deliver the verified result now with finish/finish_from_repl. Reference saved files; explicitly list missing evidence. Do not perform more browser actions. If the task is not fully finished as requested, set success=false; else success=true.\"}]}]"
+                  }
+                },
+                {
+                  "key": "gen_ai.output.messages",
+                  "value": {
+                    "stringValue": "[{\"role\":\"assistant\",\"parts\":[{\"type\":\"text\",\"content\":\"{\\\"current_state\\\": {\\\"evaluation_previous_goal\\\": \\\"Unknown\\\", \\\"memory\\\": \\\"Start\\\", \\\"next_goal\\\": \\\"Finish\\\"}, \\\"action\\\": [{\\\"done\\\": {\\\"text\\\": \\\"Done.\\\", \\\"success\\\": true}}]}\"}],\"finish_reason\":\"stop\"}]"
+                  }
+                },
+                {
+                  "key": "gen_ai.system_instructions",
+                  "value": {
+                    "stringValue": "capture-volatile-3"
+                  }
+                },
+                {
+                  "key": "logfire.json_schema",
+                  "value": {
+                    "stringValue": "{\"type\":\"object\",\"properties\":{\"gen_ai.input.messages\":{\"type\":\"array\"},\"gen_ai.output.messages\":{\"type\":\"array\"},\"gen_ai.system_instructions\":{\"type\":\"array\"},\"model_request_parameters\":{\"type\":\"object\"}}}"
+                  }
+                },
+                {
+                  "key": "gen_ai.usage.input_tokens",
+                  "value": {
+                    "intValue": "120"
+                  }
+                },
+                {
+                  "key": "gen_ai.usage.output_tokens",
+                  "value": {
+                    "intValue": "30"
+                  }
+                },
+                {
+                  "key": "gen_ai.usage.details.accepted_prediction_tokens",
+                  "value": {
+                    "intValue": "0"
+                  }
+                },
+                {
+                  "key": "gen_ai.usage.details.audio_tokens",
+                  "value": {
+                    "intValue": "0"
+                  }
+                },
+                {
+                  "key": "gen_ai.usage.details.reasoning_tokens",
+                  "value": {
+                    "intValue": "0"
+                  }
+                },
+                {
+                  "key": "gen_ai.usage.details.rejected_prediction_tokens",
+                  "value": {
+                    "intValue": "0"
+                  }
+                },
+                {
+                  "key": "gen_ai.response.model",
+                  "value": {
+                    "stringValue": "gpt-4o-mini-2024-07-18"
+                  }
+                },
+                {
+                  "key": "operation.cost",
+                  "value": {
+                    "doubleValue": 0.000036
+                  }
+                },
+                {
+                  "key": "gen_ai.response.id",
+                  "value": {
+                    "stringValue": "chatcmpl-capture-1"
+                  }
+                },
+                {
+                  "key": "gen_ai.response.finish_reasons",
+                  "value": {
+                    "arrayValue": {
+                      "values": [
+                        {
+                          "stringValue": "stop"
+                        }
+                      ]
+                    }
+                  }
+                }
+              ],
+              "droppedAttributesCount": 0,
+              "events": [],
+              "droppedEventsCount": 0,
+              "links": [],
+              "droppedLinksCount": 0,
+              "status": null
+            },
+            {
+              "traceId": "6edf7b83295ac03c793723a563567726",
+              "spanId": "beaee9bf0282a08f",
+              "traceState": "",
+              "parentSpanId": "6ac5aea25e95c4ac",
+              "flags": 256,
+              "name": "execute_tool on_text",
+              "kind": 1,
+              "startTimeUnixNano": "1767225590060000000",
+              "endTimeUnixNano": "1767225590061000000",
+              "attributes": [
+                {
+                  "key": "gen_ai.operation.name",
+                  "value": {
+                    "stringValue": "execute_tool"
+                  }
+                },
+                {
+                  "key": "gen_ai.tool.name",
+                  "value": {
+                    "stringValue": "on_text"
+                  }
+                },
+                {
+                  "key": "gen_ai.agent.name",
+                  "value": {
+                    "stringValue": "agent"
+                  }
+                },
+                {
+                  "key": "gen_ai.agent.call.id",
+                  "value": {
+                    "stringValue": "capture-volatile-1"
+                  }
+                },
+                {
+                  "key": "gen_ai.conversation.id",
+                  "value": {
+                    "stringValue": "capture-volatile-2"
+                  }
+                },
+                {
+                  "key": "logfire.msg",
+                  "value": {
+                    "stringValue": "running output function: on_text"
+                  }
+                },
+                {
+                  "key": "gen_ai.tool.call.arguments",
+                  "value": {
+                    "stringValue": "\"{\\\"current_state\\\": {\\\"evaluation_previous_goal\\\": \\\"Unknown\\\", \\\"memory\\\": \\\"Start\\\", \\\"next_goal\\\": \\\"Finish\\\"}, \\\"action\\\": [{\\\"done\\\": {\\\"text\\\": \\\"Done.\\\", \\\"success\\\": true}}]}\""
+                  }
+                },
+                {
+                  "key": "logfire.json_schema",
+                  "value": {
+                    "stringValue": "{\"type\":\"object\",\"properties\":{\"gen_ai.tool.call.arguments\":{\"type\":\"object\"},\"gen_ai.tool.call.result\":{\"type\":\"object\"},\"gen_ai.tool.name\":{}}}"
+                  }
+                },
+                {
+                  "key": "gen_ai.tool.call.result",
+                  "value": {
+                    "stringValue": "{\"current_state\": {\"evaluation_previous_goal\": \"Unknown\", \"memory\": \"Start\", \"next_goal\": \"Finish\"}, \"action\": [{\"done\": {\"text\": \"Done.\", \"success\": true}}]}"
+                  }
+                }
+              ],
+              "droppedAttributesCount": 0,
+              "events": [],
+              "droppedEventsCount": 0,
+              "links": [],
+              "droppedLinksCount": 0,
+              "status": null
+            }
+          ],
+          "schemaUrl": ""
+        }
+      ],
+      "schemaUrl": ""
+    }
+  ]
+}

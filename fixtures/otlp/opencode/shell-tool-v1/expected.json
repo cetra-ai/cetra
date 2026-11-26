@@ -1,0 +1,169 @@
+{
+  "spans": [
+    {
+      "project_id": "01900000-0000-7000-8000-000000000001",
+      "trace_id": "470f49bac28c3a5b32fc6ad18f730df7",
+      "span_id": "5c0bec30cc0f1e2d",
+      "name": "invoke_agent",
+      "span_kind": "agent",
+      "start_time": "2025-12-31T23:59:50.000000000Z",
+      "end_time": "2025-12-31T23:59:54.683000000Z",
+      "status": "ok",
+      "service_name": "opencode",
+      "session_id": "capture-volatile-1",
+      "metadata": {
+        "coding_agent": "opencode"
+      },
+      "operation": "invoke_agent",
+      "attributes": {
+        "gen_ai.conversation.id": "capture-volatile-1",
+        "gen_ai.operation.name": "invoke_agent"
+      },
+      "scope_name": "cetra-opencode",
+      "scope_version": "1",
+      "conventions": [
+        "genai"
+      ],
+      "ingest_time": "2026-01-01T00:00:00.000000000Z",
+      "schema_version": 2
+    },
+    {
+      "project_id": "01900000-0000-7000-8000-000000000001",
+      "trace_id": "470f49bac28c3a5b32fc6ad18f730df7",
+      "span_id": "4c7a537d7d4b3f87",
+      "parent_span_id": "5c0bec30cc0f1e2d",
+      "name": "chat gpt-4o-mini",
+      "span_kind": "llm",
+      "start_time": "2025-12-31T23:59:51.953000000Z",
+      "end_time": "2025-12-31T23:59:54.303000000Z",
+      "status": "ok",
+      "service_name": "opencode",
+      "session_id": "capture-volatile-1",
+      "metadata": {
+        "coding_agent": "opencode"
+      },
+      "provider": "openai",
+      "request_model": "gpt-4o-mini",
+      "operation": "chat",
+      "input_tokens": 82,
+      "output_tokens": 17,
+      "cache_read_tokens": 0,
+      "cache_write_tokens": 0,
+      "reasoning_tokens": 0,
+      "total_tokens": 99,
+      "cost_input": 0.000082,
+      "cost_output": 0.000068,
+      "cost_total": 0.00015000000000000001,
+      "cost_source": "computed",
+      "attributes": {
+        "gen_ai.conversation.id": "capture-volatile-1",
+        "gen_ai.operation.name": "chat",
+        "gen_ai.provider.name": "openai",
+        "gen_ai.request.model": "gpt-4o-mini",
+        "gen_ai.response.finish_reasons": "[\"tool_calls\"]",
+        "gen_ai.usage.cache_creation.input_tokens": "0",
+        "gen_ai.usage.cache_read.input_tokens": "0",
+        "gen_ai.usage.input_tokens": "82",
+        "gen_ai.usage.output_tokens": "17",
+        "gen_ai.usage.reasoning.output_tokens": "0"
+      },
+      "scope_name": "cetra-opencode",
+      "scope_version": "1",
+      "conventions": [
+        "genai"
+      ],
+      "ingest_time": "2026-01-01T00:00:00.000000000Z",
+      "schema_version": 2
+    },
+    {
+      "project_id": "01900000-0000-7000-8000-000000000001",
+      "trace_id": "470f49bac28c3a5b32fc6ad18f730df7",
+      "span_id": "ec1f80374a37fa61",
+      "parent_span_id": "5c0bec30cc0f1e2d",
+      "name": "bash",
+      "span_kind": "tool",
+      "start_time": "2025-12-31T23:59:53.941000000Z",
+      "end_time": "2025-12-31T23:59:54.152000000Z",
+      "status": "ok",
+      "service_name": "opencode",
+      "session_id": "capture-volatile-1",
+      "metadata": {
+        "coding_agent": "opencode"
+      },
+      "operation": "execute_tool",
+      "input": "{\"command\":\"cat hello.txt\"}",
+      "input_format": "json",
+      "output": "hello from cetra\n",
+      "output_format": "text",
+      "input_preview": "{\"command\":\"cat hello.txt\"}",
+      "output_preview": "hello from cetra\n",
+      "attributes": {
+        "cetra.span_name": "execute_tool bash",
+        "gen_ai.conversation.id": "capture-volatile-1",
+        "gen_ai.operation.name": "execute_tool",
+        "gen_ai.tool.call.id": "call_capture_1",
+        "gen_ai.tool.name": "bash"
+      },
+      "scope_name": "cetra-opencode",
+      "scope_version": "1",
+      "conventions": [
+        "genai"
+      ],
+      "ingest_time": "2026-01-01T00:00:00.000000000Z",
+      "schema_version": 2
+    },
+    {
+      "project_id": "01900000-0000-7000-8000-000000000001",
+      "trace_id": "470f49bac28c3a5b32fc6ad18f730df7",
+      "span_id": "80742ff133c2be13",
+      "parent_span_id": "5c0bec30cc0f1e2d",
+      "name": "chat gpt-4o-mini",
+      "span_kind": "llm",
+      "start_time": "2025-12-31T23:59:54.317000000Z",
+      "end_time": "2025-12-31T23:59:54.676000000Z",
+      "status": "ok",
+      "service_name": "opencode",
+      "session_id": "capture-volatile-1",
+      "metadata": {
+        "coding_agent": "opencode"
+      },
+      "provider": "openai",
+      "request_model": "gpt-4o-mini",
+      "operation": "chat",
+      "input_tokens": 131,
+      "output_tokens": 12,
+      "cache_read_tokens": 0,
+      "cache_write_tokens": 0,
+      "reasoning_tokens": 0,
+      "total_tokens": 143,
+      "cost_input": 0.000131,
+      "cost_output": 0.000048,
+      "cost_total": 0.00017900000000000001,
+      "cost_source": "computed",
+      "output": "[{\"role\":\"assistant\",\"parts\":[{\"type\":\"text\",\"content\":\"hello.txt says: hello from cetra\"}],\"finish_reason\":\"stop\"}]",
+      "output_format": "messages",
+      "output_preview": "hello.txt says: hello from cetra",
+      "attributes": {
+        "gen_ai.conversation.id": "capture-volatile-1",
+        "gen_ai.operation.name": "chat",
+        "gen_ai.provider.name": "openai",
+        "gen_ai.request.model": "gpt-4o-mini",
+        "gen_ai.response.finish_reasons": "[\"stop\"]",
+        "gen_ai.usage.cache_creation.input_tokens": "0",
+        "gen_ai.usage.cache_read.input_tokens": "0",
+        "gen_ai.usage.input_tokens": "131",
+        "gen_ai.usage.output_tokens": "12",
+        "gen_ai.usage.reasoning.output_tokens": "0"
+      },
+      "scope_name": "cetra-opencode",
+      "scope_version": "1",
+      "conventions": [
+        "genai"
+      ],
+      "ingest_time": "2026-01-01T00:00:00.000000000Z",
+      "schema_version": 2
+    }
+  ],
+  "media": [],
+  "rejected_spans": 0
+}

@@ -29,7 +29,6 @@ const LIST: &str = "scores";
 const TARGET_KEY: &str = "target_key";
 const RANK: &str = "__rn";
 const TIES: &[&str] = &[scores::SCORE_ID];
-const DAY_NS: i64 = 86_400_000_000_000;
 const BUCKET: &str = "bucket";
 const COUNT: &str = "count";
 const USERS: &str = "users";
@@ -43,7 +42,7 @@ pub const MAX_COUNT_NAMES: usize = 1_000;
 pub struct ScoreNameCount {
     /// Score name.
     pub name: String,
-    /// Start of the UTC day (ns), or `window.from` when `by_day` is false.
+    /// Start of the bucket (ns), or `window.from` when `bucket_ns` is `None`.
     pub bucket_start: i64,
     /// Live scores.
     pub count: u64,
@@ -60,8 +59,10 @@ pub struct ScoreNameCountsRequest<'a> {
     pub names: &'a [String],
     /// `created_at ∈ [from, to)`.
     pub window: TimeWindow,
-    /// `true`: one row per (name, UTC day); `false`: one row per name for the whole window.
-    pub by_day: bool,
+    /// `Some(width)`: one row per (name, bucket), each bucket `[k·width, (k+1)·width)` ns since
+    /// the epoch (`86_400_000_000_000` gives UTC days); `None`: one row per name for the whole
+    /// window. A width must be positive.
+    pub bucket_ns: Option<i64>,
     /// Time allowed for planning and running.
     pub timeout: Duration,
 }
@@ -495,7 +496,7 @@ pub async fn scores_by_id(
     Ok(batches)
 }
 
-/// Live scores per name, in the day or the window of the request, sorted `(name ASC[, bucket ASC])`.
+/// Live scores per name, in each bucket or in the window of the request, sorted `(name ASC[, bucket ASC])`.
 pub async fn score_name_counts(
     ctx: &QueryContext,
     request: ScoreNameCountsRequest<'_>,
@@ -505,6 +506,11 @@ pub async fn score_name_counts(
         return Err(RunError::InvalidRequest(format!(
             "at most {MAX_COUNT_NAMES} names"
         )));
+    }
+    if matches!(request.bucket_ns, Some(width) if width <= 0) {
+        return Err(RunError::InvalidRequest(
+            "the bucket width must be positive".to_owned(),
+        ));
     }
     if request.names.is_empty() {
         return Ok(Vec::new());
@@ -556,7 +562,7 @@ pub async fn score_name_counts(
         limit: None,
     };
 
-    let by_day = request.by_day;
+    let bucket_ns = request.bucket_ns;
     let window_from = request.window.from();
     let scores_source = Arc::clone(&ctx.scores);
 
@@ -577,12 +583,12 @@ pub async fn score_name_counts(
             let user_col = col_expr_q(&scan_schema, scores::USER_ID)?;
 
             let mut group_by = vec![(scores::NAME.to_owned(), name_col)];
-            if by_day {
-                let day_ns = Expr::Literal(ScalarValue::I64(DAY_NS));
+            if let Some(width) = bucket_ns {
+                let width_lit = Expr::Literal(ScalarValue::I64(width));
                 let rem = Expr::Binary {
                     left: Box::new(created_i64.clone()),
                     op: BinaryOp::Mod,
-                    right: Box::new(day_ns),
+                    right: Box::new(width_lit),
                     data_type: DataType::I64,
                 };
                 let bucket_expr = Expr::Binary {
@@ -632,7 +638,7 @@ pub async fn score_name_counts(
     let mut found = Vec::new();
     for batch in &batches {
         let name_col = require_col(batch, scores::NAME)?;
-        let bucket_col = if by_day {
+        let bucket_col = if bucket_ns.is_some() {
             Some(require_col(batch, BUCKET)?)
         } else {
             None
@@ -1211,18 +1217,18 @@ mod tests {
             // 4. score_name_counts
             let names = vec!["issue:err".to_owned(), "tie_score".to_owned()];
             let window = TimeWindow::new(0, 100 * DAY).expect("window");
-            for by_day in [true, false] {
+            for bucket_ns in [Some(DAY), None] {
                 let req = ScoreNameCountsRequest {
                     names: &names,
                     window,
-                    by_day,
+                    bucket_ns,
                     timeout: TIMEOUT,
                 };
                 let counts = score_name_counts(&ctx, req).await.expect("counts");
                 if vf.is_none() {
                     assert!(
                         !counts.is_empty(),
-                        "expected non-empty counts by_day={by_day}"
+                        "expected non-empty counts bucket_ns={bucket_ns:?}"
                     );
                 }
             }
@@ -1274,13 +1280,123 @@ mod tests {
                 ScoreNameCountsRequest {
                     names: &too_many_names,
                     window: TimeWindow::new(0, DAY).expect("w"),
-                    by_day: false,
+                    bucket_ns: None,
                     timeout: TIMEOUT,
                 }
             )
             .await,
             Err(RunError::InvalidRequest(_))
         ));
+        for width in [0, -1] {
+            assert!(matches!(
+                score_name_counts(
+                    &ctx,
+                    ScoreNameCountsRequest {
+                        names: &[],
+                        window: TimeWindow::new(0, DAY).expect("w"),
+                        bucket_ns: Some(width),
+                        timeout: TIMEOUT,
+                    }
+                )
+                .await,
+                Err(RunError::InvalidRequest(_))
+            ));
+        }
+
+        let _ = storage.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn score_name_counts_by_hour_and_non_positive_width() {
+        const HOUR: i64 = 3_600_000_000_000;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let storage = Storage::open(test_config(dir.path())).await.expect("open");
+        let project: ProjectId = "018f6b4e-7c1a-7c1a-8c1a-000000000002".parse().expect("pid");
+
+        let day1 = 10 * DAY;
+        let day2 = 11 * DAY;
+        let mut s1 = score_row(1, 1, day1 + 100, day1 + 100, 1, false, "issue:a");
+        s1.user_id = Some("u1".to_owned());
+        let mut s2 = score_row(2, 1, day1 + HOUR + 5, day1 + HOUR + 5, 2, false, "issue:a");
+        s2.user_id = Some("u2".to_owned());
+        let mut s3 = score_row(3, 1, day2 + 50, day2 + 50, 3, false, "issue:a");
+        s3.user_id = None;
+        let mut s4 = score_row(4, 1, day1 + 400, day1 + 400, 4, false, "issue:b");
+        s4.user_id = Some("u1".to_owned());
+        let mut rows = vec![s1, s2, s3, s4];
+        for r in &mut rows {
+            r.project_id = project;
+        }
+        storage
+            .append_scores(project, score_rows(&rows))
+            .await
+            .expect("append scores");
+
+        let ctx = build_context(&storage, project, QueryOptions::new(None, None)).await;
+        let names = ["issue:a".to_owned(), "issue:b".to_owned()];
+        let window = TimeWindow::new(0, 100 * DAY).expect("window");
+
+        let counts = score_name_counts(
+            &ctx,
+            ScoreNameCountsRequest {
+                names: &names,
+                window,
+                bucket_ns: Some(HOUR),
+                timeout: TIMEOUT,
+            },
+        )
+        .await
+        .expect("by hour");
+        assert_eq!(
+            counts,
+            [
+                ScoreNameCount {
+                    name: "issue:a".to_owned(),
+                    bucket_start: day1,
+                    count: 1,
+                    users: 1,
+                    last_created_at: day1 + 100,
+                },
+                ScoreNameCount {
+                    name: "issue:a".to_owned(),
+                    bucket_start: day1 + HOUR,
+                    count: 1,
+                    users: 1,
+                    last_created_at: day1 + HOUR + 5,
+                },
+                ScoreNameCount {
+                    name: "issue:a".to_owned(),
+                    bucket_start: day2,
+                    count: 1,
+                    users: 0,
+                    last_created_at: day2 + 50,
+                },
+                ScoreNameCount {
+                    name: "issue:b".to_owned(),
+                    bucket_start: day1,
+                    count: 1,
+                    users: 1,
+                    last_created_at: day1 + 400,
+                },
+            ]
+        );
+
+        let none: Vec<String> = Vec::new();
+        for (list, width) in [(&names[..], 0), (&names[..], -1), (&none[..], 0)] {
+            assert!(matches!(
+                score_name_counts(
+                    &ctx,
+                    ScoreNameCountsRequest {
+                        names: list,
+                        window,
+                        bucket_ns: Some(width),
+                        timeout: TIMEOUT,
+                    }
+                )
+                .await,
+                Err(RunError::InvalidRequest(_))
+            ));
+        }
 
         let _ = storage.shutdown().await;
     }

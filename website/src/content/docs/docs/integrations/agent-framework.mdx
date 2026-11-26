@@ -1,0 +1,174 @@
+---
+title: Microsoft Agent Framework
+description: "Trace Microsoft Agent Framework agents and workflows with cetra from Python and .NET: agent runs, model calls, tool calls and workflow steps."
+---
+
+import { Tabs, TabItem } from "@astrojs/starlight/components";
+import Backing from "../../../../components/Backing.astro";
+
+cetra traces Microsoft Agent Framework agent runs and workflows, from the spans the framework writes itself.
+
+<Backing fixtures={["genai/agent-framework-agent-tool", "genai/agent-framework-workflow", "genai/agent-framework-dotnet-tool"]} />
+
+## Install
+
+<Tabs syncKey="lang">
+  <TabItem label="Python">
+
+```bash
+pip install cetra-sdk agent-framework-core agent-framework-openai
+```
+
+  </TabItem>
+  <TabItem label=".NET">
+
+```bash
+dotnet add package Microsoft.Agents.AI --version 1.28.0
+dotnet add package Microsoft.Agents.AI.OpenAI --version 1.28.0
+dotnet add package OpenTelemetry --version 1.21.0
+dotnet add package OpenTelemetry.Exporter.OpenTelemetryProtocol --version 1.21.0
+```
+
+  </TabItem>
+</Tabs>
+
+## Set up
+
+Turn on the framework's instrumentation, then send its spans to cetra.
+
+<Tabs syncKey="lang">
+  <TabItem label="Python">
+
+Agent Framework writes its spans to the global OpenTelemetry tracer provider. Start cetra with `use_global_provider=True` so that it joins that provider, then turn on the framework's instrumentation. Set `CETRA_API_KEY` to your `sk-cetra-…` key and `OPENAI_API_KEY` to your OpenAI key.
+
+{/* untested: calls OpenAI through Agent Framework and needs CETRA_API_KEY and OPENAI_API_KEY */}
+```python
+import asyncio
+import os
+
+import cetra
+from agent_framework import Agent, tool
+from agent_framework.observability import enable_instrumentation
+from agent_framework.openai import OpenAIChatCompletionClient
+
+cetra.init(use_global_provider=True)
+enable_instrumentation(enable_sensitive_data=True)
+
+
+@tool
+def get_weather(city: str) -> str:
+    """Get the weather."""
+    return f"sunny in {city}"
+
+
+client = OpenAIChatCompletionClient(
+    model="gpt-4o-mini",
+    api_key=os.environ["OPENAI_API_KEY"],
+)
+agent = Agent(
+    client=client,
+    name="WeatherAgent",
+    instructions="You are a weather bot.",
+    tools=[get_weather],
+)
+
+
+async def run() -> None:
+    await agent.run("What is the weather in Paris?")
+
+
+asyncio.run(run())
+
+cetra.flush()
+```
+
+`enable_sensitive_data=True` makes the framework record the messages and the tool arguments and results. The sample sets it.
+
+  </TabItem>
+  <TabItem label=".NET">
+
+Call `UseOpenTelemetry` on the agent builder, and listen on the source name you pass it. Export over OTLP/HTTP with the standard variables, and set a service name so your traces are named:
+
+```bash
+export OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:8080
+export OTEL_EXPORTER_OTLP_HEADERS="Authorization=Bearer sk-cetra-…"
+export OTEL_SERVICE_NAME=my-app
+```
+
+Set `OPENAI_API_KEY` to your OpenAI key, then run the agent as usual:
+
+```csharp
+using System.ClientModel;
+using System.ComponentModel;
+using Microsoft.Agents.AI;
+using Microsoft.Extensions.AI;
+using OpenAI;
+using OpenAI.Chat;
+using OpenTelemetry;
+using OpenTelemetry.Trace;
+
+const string SourceName = "my-app";
+
+using var tracerProvider = Sdk.CreateTracerProviderBuilder()
+    .AddSource(SourceName)
+    .AddSource(OpenTelemetryAgent.DefaultSourceName)
+    .AddSource("Experimental.Microsoft.Extensions.AI")
+    .AddOtlpExporter()
+    .Build();
+
+var openAi = new OpenAIClient(
+    new ApiKeyCredential(Environment.GetEnvironmentVariable("OPENAI_API_KEY")!));
+ChatClient chatClient = openAi.GetChatClient("gpt-4o-mini");
+
+[Description("Get the current weather for a city")]
+static string GetWeather([Description("City name")] string city) => $"Sunny in {city}, 21 C";
+
+AIAgent agent = chatClient.AsAIAgent(name: "WeatherAgent", instructions: "You are a weather bot.",
+        tools: [AIFunctionFactory.Create(GetWeather, "get_weather")])
+    .AsBuilder()
+    .UseOpenTelemetry(sourceName: SourceName, configure: o => o.EnableSensitiveData = true)
+    .Build();
+var answer = await agent.RunAsync("What is the weather in Lyon? Use the tool.");
+Console.WriteLine("answer: " + answer.Text);
+```
+
+`EnableSensitiveData = true` makes the framework record the messages and the tool arguments and results. You can leave the code switch out and set `OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT=true` instead; the library's documentation offers that variable as an alternative. The capture used `EnableSensitiveData = true`.
+
+  </TabItem>
+</Tabs>
+
+## What you get
+
+- Python
+
+  - An agent run produces an `invoke_agent` span named after the agent, with the messages and the tool definitions, then a `chat` `llm` span for each model call with the provider, the model, the token counts and the cost, and an `execute_tool` `tool` span for each tool call.
+  - A workflow produces an `invoke_workflow` span. Each executor and each edge group is a `chain` span, and each message the workflow sends is a plain span.
+
+- .NET
+
+  An agent run produces:
+
+  - an `agent` span named `invoke_agent WeatherAgent(<id>)`, where the id in parentheses is the agent's instance id and changes on every run. It carries the input and output messages; its summed token usage is not counted, the `llm` spans carry the tokens;
+  - an `llm` span named `chat gpt-4o-mini` for each model call, with the provider `openai`, the model, the messages, the system instructions, the tool definitions, the token counts and the cost computed from the built-in prices;
+  - a `tool` span named `execute_tool get_weather`, with the arguments as its input and the result as its output.
+
+## Limits
+
+- Python
+  - Workflow steps are `chain` spans. A workflow with no model call has no `llm` span.
+  - The fixtures were captured with `agent-framework-core` 1.26.0 and `agent-framework-openai` 1.18.2, not with the `agent-framework` meta package.
+  - Set `enable_sensitive_data=True` to record content. The sample sets it.
+  - Leave `OTEL_SEMCONV_STABILITY_OPT_IN` unset, or include `gen_ai_latest_experimental` in it. A value without that token (for example `http`) switches the framework to its older GenAI conventions, and the spans then carry no message content.
+- .NET
+  - Content is off by default: set `EnableSensitiveData = true` or `OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT=true` to record the messages and the tool arguments and results.
+  - The agent span's name ends with the agent's instance id, which changes on every run.
+  - OpenTelemetry .NET 1.21.0 ignores `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT`. Set `OTEL_EXPORTER_OTLP_ENDPOINT`, the base URL without the `/v1/traces` path; the exporter appends the path itself.
+  - The capture sent no Authorization header; the header setting above is the library's documented option, not part of the captured run.
+  - The .NET fixture was captured with `Microsoft.Agents.AI` 1.28.0 and OpenTelemetry .NET 1.21.0. It covers one agent run; workflows were not captured.
+- If a field is missing, look at the span's **Attributes** tab and compare it with [Span attributes](/docs/reference/attributes/).
+
+## Next
+
+- [Traces](/docs/tracing/traces/): read the trace as a tree and a timeline.
+- [Cost and tokens](/docs/tracing/cost-and-tokens/): how cost is computed from the token counts.
+- [Online rules](/docs/evaluation/online-rules/): score these traces automatically.

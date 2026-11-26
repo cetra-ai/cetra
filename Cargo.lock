@@ -1166,6 +1166,7 @@ dependencies = [
  "hex",
  "humantime-serde",
  "lz4_flex",
+ "mimalloc",
  "object_store",
  "parquet",
  "proptest",

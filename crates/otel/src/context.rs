@@ -7,7 +7,7 @@
 
 use std::collections::BTreeMap;
 
-use cetra_core::enums::Convention;
+use cetra_core::enums::{Convention, SpanKind};
 use cetra_core::names::{attr, metadata_key};
 use serde_json::Value as Json;
 
@@ -41,8 +41,79 @@ const PROVIDER: &[Source] = &[
 /// Vercel v7 `context` call option, recorded under `ai.settings.`.
 const VERCEL_CONTEXT: &str = "ai.settings.context.";
 
-/// Google ADK sets `gen_ai.system` to its own framework name, not a provider.
-const ADK_FRAMEWORK: &str = "gcp.vertex.agent";
+/// Values of `gen_ai.provider.name` and `gen_ai.system` that name a framework,
+/// never a provider (D-B1-8, D-IN-15, D-IN-23, D-IN-30). Compared after
+/// lowercasing. Sorted (test `framework_names_are_sorted`).
+const FRAMEWORK_NAMES: &[&str] = &[
+    "autogen",
+    "browser_use",
+    "gcp.vertex.agent",
+    "koog",
+    "microsoft.agent_framework",
+    "spring_ai",
+    "strands-agents",
+];
+
+/// Keys that carry the endpoint, in order (D-IN-2). Read with `get`, never consumed.
+const HOST_KEYS: &[&str] = &["server.address", "url.full", "gen_ai.openai.api_base"];
+
+/// Endpoint host → provider (D-IN-2). An entry starting with `*.` matches a host
+/// that ends with the rest preceded by a dot. The first match wins.
+const ENDPOINT_PROVIDERS: &[(&str, &str)] = &[
+    ("openrouter.ai", "openrouter"),
+    ("api.groq.com", "groq"),
+    ("api.x.ai", "x_ai"),
+    ("api.deepseek.com", "deepseek"),
+    ("api.fireworks.ai", "fireworks_ai"),
+    ("api.together.xyz", "together_ai"),
+    ("api-inference.together.ai", "together_ai"),
+    ("api.together.ai", "together_ai"),
+    ("api.novita.ai", "novita"),
+    ("dashscope.aliyuncs.com", "dashscope"),
+    ("dashscope-intl.aliyuncs.com", "dashscope"),
+    ("*.maas.aliyuncs.com", "dashscope"),
+    ("router.huggingface.co", "huggingface"),
+    ("api.cloudflare.com", "cloudflare"),
+    ("*.cloud.databricks.com", "databricks"),
+    ("*.azuredatabricks.net", "databricks"),
+    ("*.gcp.databricks.com", "databricks"),
+    ("api.cerebras.ai", "cerebras"),
+    ("api.perplexity.ai", "perplexity"),
+    ("api.moonshot.ai", "moonshot"),
+    ("api.moonshot.cn", "moonshot"),
+    ("api.z.ai", "zai"),
+    ("open.bigmodel.cn", "zai"),
+    ("api.sambanova.ai", "sambanova"),
+    ("api.studio.nebius.com", "nebius"),
+    ("api.tokenfactory.nebius.com", "nebius"),
+    ("api.mistral.ai", "mistral_ai"),
+    ("*.openai.azure.com", "azure.ai.openai"),
+    // Azure AI Foundry serves several publishers' models; their prices are azure.ai.inference rows.
+    ("*.services.ai.azure.com", "azure.ai.inference"),
+    ("*.cognitiveservices.azure.com", "azure.ai.openai"),
+    ("api.deepinfra.com", "deepinfra"),
+    ("inference.baseten.co", "baseten"),
+    ("*.api.baseten.co", "baseten"),
+    ("api.hyperbolic.xyz", "hyperbolic"),
+    ("integrate.api.nvidia.com", "nvidia_nim"),
+    ("api.minimax.io", "minimax"),
+    ("api.minimaxi.com", "minimax"),
+    ("api.cohere.com", "cohere"),
+    ("api.cohere.ai", "cohere"),
+    ("ollama.com", "ollama"),
+    ("aiplatform.googleapis.com", "gcp.vertex_ai"),
+    ("ark.cn-beijing.volces.com", "volcengine"),
+    ("ark.ap-southeast.bytepluses.com", "byteplus"),
+    ("api.sarvam.ai", "sarvam"),
+    ("qianfan.baidubce.com", "qianfan"),
+    ("api.cometapi.com", "cometapi"),
+    ("api.doubleword.ai", "doubleword"),
+    ("ai-gateway.vercel.sh", "vercel_ai_gateway"),
+    ("oai.helicone.ai", "helicone"),
+    ("ai-gateway.helicone.ai", "helicone"),
+    ("api.portkey.ai", "portkey"),
+    ("gateway.ai.cloudflare.com", "cloudflare_ai_gateway"),
+];
 
 const OPERATION: &[Source] = &[span("gen_ai.operation.name", Convention::Genai)];
 
@@ -72,6 +143,7 @@ const SESSION_ID: &[Source] = &[
         Convention::Laminar,
     ),
     span("gcp.vertex.agent.session_id", Convention::GoogleAdk),
+    span("mirascope.ops.session.id", Convention::Genai),
 ];
 
 const USER_ID: &[Source] = &[
@@ -176,17 +248,32 @@ pub(crate) struct ContextFields {
 }
 
 /// Fill the scalar and context columns. Rule 3: these columns are filled for every kind.
+///
+/// `scope_name` is the span's instrumentation scope name (`""` when absent);
+/// the Mirascope model-prefix rule is gated on it. `conventions` is the
+/// conventions detected on the span; VoltAgent's model and session fills
+/// (D-IN-6) are gated on it.
 pub(crate) fn fill(
     bag: &mut AttrBag<'_>,
     resource: &ResourceView<'_>,
+    scope_name: &str,
+    conventions: &[Convention],
     warnings: &mut Warnings,
 ) -> ContextFields {
     let request_model = string_field(bag, resource, REQUEST_MODEL);
     let response_model = string_field(bag, resource, RESPONSE_MODEL);
-    let provider = provider(bag, resource);
+    // Stripped before `provider` consumes `gen_ai.provider.name`.
+    let request_model = mirascope_model(bag, scope_name, request_model);
+    let response_model = mirascope_model(bag, scope_name, response_model);
+    let request_model = voltagent_model(bag, conventions, request_model);
+    let (request_model, response_model) =
+        promptflow_models(bag, scope_name, request_model, response_model, warnings);
+    let provider = provider(bag, resource, scope_name);
     let operation = string_field(bag, resource, OPERATION);
     let request_params = request_params(bag, warnings);
     let session_id = string_field(bag, resource, SESSION_ID);
+    let session_id = voltagent_session(bag, conventions, session_id);
+    let session_id = pipecat_session(bag, scope_name, session_id);
     let user_id = string_field(bag, resource, USER_ID);
     let environment = string_field(bag, resource, ENVIRONMENT);
     let release = string_field(bag, resource, RELEASE);
@@ -248,20 +335,263 @@ fn prompt(bag: &mut AttrBag<'_>, warnings: &mut Warnings) -> (Option<String>, Op
     (Some(name), version)
 }
 
-/// Rule 12 over [`PROVIDER`]. ADK's `gen_ai.system = gcp.vertex.agent` is
-/// skipped and left unread, so the next source or the price table decides
-/// (D-B1-8).
-fn provider(bag: &mut AttrBag<'_>, resource: &ResourceView<'_>) -> Option<String> {
+/// Rule 12 over [`PROVIDER`]. A `gen_ai.provider.name` or `gen_ai.system` value
+/// that names a framework ([`FRAMEWORK_NAMES`], D-IN-15, D-B1-8, D-IN-23) is
+/// skipped and left unread, so the next source or the price table decides.
+/// On scope `livekit-agents` a host-shaped provider decides first ([`livekit_provider`]).
+fn provider(
+    bag: &mut AttrBag<'_>,
+    resource: &ResourceView<'_>,
+    scope_name: &str,
+) -> Option<String> {
+    if let Some(provider) = livekit_provider(bag, scope_name) {
+        return provider;
+    }
     let sources: Vec<Source> = PROVIDER
         .iter()
         .copied()
-        .filter(|source| {
-            source.key != "gen_ai.system"
-                || bag.get(source.key).and_then(as_str) != Some(ADK_FRAMEWORK)
-        })
+        .filter(|source| !names_framework(bag, source.key))
         .collect();
     first_string(bag, resource, &sources).map(|resolved| {
         canonical_provider(&resolved.value, resolved.source.key == "ai.model.provider")
+    })
+}
+
+/// R-LK-1 (D-IN-5, D-IN-2): on scope `livekit-agents`, a `gen_ai.provider.name`
+/// is a host (LiveKit writes the netloc of its base URL) when it contains `:`,
+/// parses as an IP address, or the endpoint table maps it (`api.openai.com`
+/// is mapped to `openai`). The key is consumed. A mapped host gives its
+/// provider; an unmapped host or IP gives no provider, and no later source is
+/// read. Any other value (`azure.ai.openai`, `gcp.vertex_ai`) is not a host:
+/// `None`, the key is left alone and the normal provider rules read it. No row
+/// is added to [`ENDPOINT_PROVIDERS`].
+fn livekit_provider(bag: &mut AttrBag<'_>, scope_name: &str) -> Option<Option<String>> {
+    if scope_name != "livekit-agents" {
+        return None;
+    }
+    let text = bag.get("gen_ai.provider.name").and_then(as_str)?;
+    let host = host_of(text);
+    let mapped = match host.as_deref() {
+        Some("api.openai.com") => Some("openai"),
+        Some(host) => match_endpoint(host),
+        None => None,
+    };
+    let is_host =
+        text.contains(':') || text.trim().parse::<std::net::IpAddr>().is_ok() || mapped.is_some();
+    if !is_host {
+        return None;
+    }
+    bag.take("gen_ai.provider.name");
+    Some(mapped.map(str::to_owned))
+}
+
+/// Whether `key` is a framework-naming provider key whose value is in
+/// [`FRAMEWORK_NAMES`], compared after lowercasing.
+fn names_framework(bag: &AttrBag<'_>, key: &str) -> bool {
+    matches!(key, "gen_ai.provider.name" | "gen_ai.system")
+        && bag.get(key).and_then(as_str).is_some_and(|value| {
+            FRAMEWORK_NAMES
+                .binary_search(&value.to_lowercase().as_str())
+                .is_ok()
+        })
+}
+
+/// D-IN-23 item 6: on Mirascope spans, a model written `<provider>/<model>` is
+/// stored without that prefix, so cost matches the bare name. The provider is
+/// the raw lowercased `gen_ai.provider.name`, read before rule 12 aliases it.
+/// Nothing is stripped on another scope, or when the prefix differs from the
+/// provider (OpenRouter's `vendor/model`).
+fn mirascope_model(bag: &AttrBag<'_>, scope_name: &str, model: Option<String>) -> Option<String> {
+    let model = model?;
+    if !scope_name.starts_with("mirascope") {
+        return Some(model);
+    }
+    let Some(provider) = bag
+        .get("gen_ai.provider.name")
+        .and_then(as_str)
+        .filter(|provider| !provider.is_empty())
+    else {
+        return Some(model);
+    };
+    let provider = provider.to_lowercase();
+    let bare = model
+        .strip_prefix(provider.as_str())
+        .and_then(|rest| rest.strip_prefix('/'));
+    match bare {
+        Some(bare) if !bare.is_empty() => Some(bare.to_owned()),
+        _ => Some(model),
+    }
+}
+
+/// V3 (D-IN-6): on a `voltagent` span whose model is still empty, `llm.model`
+/// (the `llm` span), then `ai.model.name` (the agent span), fill it. Not rows
+/// in [`REQUEST_MODEL`]: OpenInference and OpenLLMetry use the `llm.` namespace
+/// too, so the keys are read only here (D-IN-23). A key is consumed when it
+/// fills the column.
+fn voltagent_model(
+    bag: &mut AttrBag<'_>,
+    conventions: &[Convention],
+    model: Option<String>,
+) -> Option<String> {
+    if model.is_some() || !conventions.contains(&Convention::Voltagent) {
+        return model;
+    }
+    for key in ["llm.model", "ai.model.name"] {
+        if let Some(text) = bag
+            .get(key)
+            .and_then(as_str)
+            .filter(|text| !text.is_empty())
+        {
+            bag.take(key);
+            return Some(text.to_owned());
+        }
+    }
+    model
+}
+
+/// R-PF-2 (D-IN-5): on scope `promptflow`, only on a span whose `span_type` is
+/// `LLM` or `Embedding`. An empty response model is filled from
+/// `llm.response.model`, an empty request model from the `model` field of the
+/// `inputs` JSON. A key is consumed when it fills its column. `inputs` is
+/// never consumed here: it is the span's input. `span_type` is peeked, since
+/// the kind row has already consumed it.
+fn promptflow_models(
+    bag: &mut AttrBag<'_>,
+    scope_name: &str,
+    request: Option<String>,
+    response: Option<String>,
+    warnings: &mut Warnings,
+) -> (Option<String>, Option<String>) {
+    let model_span = bag
+        .get("span_type")
+        .and_then(as_str)
+        .is_some_and(|text| matches!(text, "LLM" | "Embedding"));
+    if scope_name != "promptflow" || !model_span {
+        return (request, response);
+    }
+    let response = response.or_else(|| {
+        let text = bag
+            .get("llm.response.model")
+            .and_then(as_str)
+            .filter(|text| !text.is_empty())?
+            .to_owned();
+        bag.take("llm.response.model");
+        Some(text)
+    });
+    let request = request.or_else(|| {
+        let value = bag.get("inputs")?;
+        let json = crate::payload::decode_json_text(value, warnings)?;
+        let text = json
+            .get("model")?
+            .as_str()
+            .filter(|text| !text.is_empty())?
+            .to_owned();
+        Some(text)
+    });
+    (request, response)
+}
+
+/// R-PC-3 (D-IN-5): on a span of scope `pipecat.turn` whose session is still
+/// empty, `conversation.id` fills it. Only the `conversation` and `turn` spans
+/// carry the key, so the scope is exact. A key is consumed when it fills the column.
+fn pipecat_session(
+    bag: &mut AttrBag<'_>,
+    scope_name: &str,
+    session: Option<String>,
+) -> Option<String> {
+    if session.is_some() || scope_name != "pipecat.turn" {
+        return session;
+    }
+    let text = bag
+        .get("conversation.id")
+        .and_then(as_str)
+        .filter(|text| !text.is_empty())?;
+    let text = text.to_owned();
+    bag.take("conversation.id");
+    Some(text)
+}
+
+/// V6 (D-IN-6): on a `voltagent` span whose session is still empty,
+/// `conversation.id`, else `voltagent.conversation_id`, fills it. Not rows in
+/// [`SESSION_ID`]: the keys are VoltAgent's, and read only on its spans.
+fn voltagent_session(
+    bag: &mut AttrBag<'_>,
+    conventions: &[Convention],
+    session: Option<String>,
+) -> Option<String> {
+    if session.is_some() || !conventions.contains(&Convention::Voltagent) {
+        return session;
+    }
+    for key in ["conversation.id", "voltagent.conversation_id"] {
+        if let Some(text) = bag
+            .get(key)
+            .and_then(as_str)
+            .filter(|text| !text.is_empty())
+        {
+            bag.take(key);
+            return Some(text.to_owned());
+        }
+    }
+    session
+}
+
+/// The provider after the endpoint rule (D-IN-2, spec 02 § Provider from the endpoint).
+/// `provider` is the value `fill` resolved. Only `llm` and `embedding` spans whose
+/// provider is empty or `openai` change; the host keys stay in `attributes`.
+pub(crate) fn endpoint_provider(
+    bag: &AttrBag<'_>,
+    kind: SpanKind,
+    provider: Option<String>,
+) -> Option<String> {
+    if !matches!(kind, SpanKind::Llm | SpanKind::Embedding) {
+        return provider;
+    }
+    if provider.as_deref().is_some_and(|value| value != "openai") {
+        return provider;
+    }
+    let host = HOST_KEYS
+        .iter()
+        .find_map(|key| bag.get(key).and_then(as_str).and_then(host_of));
+    match host.as_deref().and_then(match_endpoint) {
+        Some(name) => Some(name.to_owned()),
+        None => provider,
+    }
+}
+
+/// The lowercased host of a bare host or a URL: no scheme, user-info, port, path,
+/// query, fragment or trailing dot. `None` when nothing is left.
+fn host_of(value: &str) -> Option<String> {
+    let rest = value.trim();
+    let rest = match rest.find("://") {
+        Some(index) if !rest[..index].contains(['/', '?', '#']) => &rest[index + 3..],
+        _ => rest,
+    };
+    let authority = rest.split(['/', '?', '#']).next().unwrap_or("");
+    let authority = authority
+        .rsplit_once('@')
+        .map_or(authority, |(_, host)| host);
+    let host = if let Some(bracketed) = authority.strip_prefix('[') {
+        bracketed
+            .split_once(']')
+            .map_or(bracketed, |(inside, _)| inside)
+    } else {
+        authority
+            .split_once(':')
+            .map_or(authority, |(name, _)| name)
+    };
+    let host = host.trim_end_matches('.').to_ascii_lowercase();
+    (!host.is_empty()).then_some(host)
+}
+
+fn match_endpoint(host: &str) -> Option<&'static str> {
+    ENDPOINT_PROVIDERS.iter().find_map(|(pattern, provider)| {
+        let matched = match pattern.strip_prefix("*.") {
+            Some(suffix) => host
+                .strip_suffix(suffix)
+                .is_some_and(|head| head.len() > 1 && head.ends_with('.')),
+            None => host == *pattern,
+        };
+        matched.then_some(*provider)
     })
 }
 
@@ -273,8 +603,13 @@ fn string_field(
     first_string(bag, resource, sources).map(|resolved| resolved.value)
 }
 
-fn canonical_provider(value: &str, from_vercel: bool) -> String {
+/// `value` after rule 12: lowercased, then mapped through the alias table. Cost also maps a
+/// model's `prefix/` with it (D-IN-33).
+pub(crate) fn canonical_provider(value: &str, from_vercel: bool) -> String {
     let lower = value.to_lowercase();
+    if lower.starts_with("vertex_ai-") {
+        return "gcp.vertex_ai".to_owned();
+    }
     if let Some(alias) = exact_alias(&lower) {
         return alias.to_owned();
     }
@@ -291,7 +626,9 @@ fn canonical_provider(value: &str, from_vercel: bool) -> String {
 /// well-known list. `google` is `gcp.gen_ai` (any Google GenAI endpoint), not one platform.
 fn exact_alias(value: &str) -> Option<&'static str> {
     Some(match value {
-        "openai.chat" | "openai.responses" => "openai",
+        "openai.chat" | "openai.responses" | "openai:completions" | "openai:responses" => "openai",
+        // Quarkus LangChain4j (D-IN-30).
+        "open_ai" => "openai",
         "anthropic.messages" => "anthropic",
         "xai" => "x_ai",
         "gemini" => "gcp.gemini",
@@ -301,6 +638,17 @@ fn exact_alias(value: &str) -> Option<&'static str> {
         "az.ai.inference" => "azure.ai.inference",
         "mistralai" => "mistral_ai",
         "aws" => "aws.bedrock",
+        "fireworks" => "fireworks_ai",
+        "together" | "togetherai" => "together_ai",
+        "watsonx" | "ibm" => "ibm.watsonx.ai",
+        "oracle" => "oci",
+        "bedrock" => "aws.bedrock",
+        "azure_ai" => "azure.ai.inference",
+        "mistral" => "mistral_ai",
+        "ollama_chat" => "ollama",
+        "cohere_chat" => "cohere",
+        "text-completion-openai" => "openai",
+        "clf_ai_gateway" => "cloudflare_ai_gateway",
         _ => return None,
     })
 }
@@ -650,7 +998,7 @@ mod tests {
         let mut warnings = Warnings::default();
         let mut bag = AttrBag::new(attrs, &mut warnings);
         let view = ResourceView::new(resource_attrs);
-        let fields = fill(&mut bag, &view, &mut warnings);
+        let fields = fill(&mut bag, &view, "", &[], &mut warnings);
         (fields, bag)
     }
 
@@ -658,8 +1006,28 @@ mod tests {
         let mut warnings = Warnings::default();
         let mut bag = AttrBag::new(attrs, &mut warnings);
         let view = ResourceView::new(&[]);
-        let fields = fill(&mut bag, &view, &mut warnings);
+        let fields = fill(&mut bag, &view, "", &[], &mut warnings);
         (fields, bag, warnings)
+    }
+
+    fn filled_in_scope<'a>(scope: &str, attrs: &'a [KeyValue]) -> (ContextFields, AttrBag<'a>) {
+        let mut warnings = Warnings::default();
+        let mut bag = AttrBag::new(attrs, &mut warnings);
+        let view = ResourceView::new(&[]);
+        let fields = fill(&mut bag, &view, scope, &[], &mut warnings);
+        (fields, bag)
+    }
+
+    fn filled_as<'a>(
+        scope: &str,
+        attrs: &'a [KeyValue],
+        conventions: &[Convention],
+    ) -> (ContextFields, AttrBag<'a>) {
+        let mut warnings = Warnings::default();
+        let mut bag = AttrBag::new(attrs, &mut warnings);
+        let view = ResourceView::new(&[]);
+        let fields = fill(&mut bag, &view, scope, conventions, &mut warnings);
+        (fields, bag)
     }
 
     #[test]
@@ -803,6 +1171,259 @@ mod tests {
     }
 
     #[test]
+    fn framework_names_are_sorted() {
+        assert!(FRAMEWORK_NAMES.is_sorted());
+        assert!(FRAMEWORK_NAMES.windows(2).all(|pair| pair[0] != pair[1]));
+    }
+
+    #[test]
+    fn framework_names_in_gen_ai_system_are_skipped() {
+        let attrs = [string_attr("gen_ai.system", "autogen")];
+        let (fields, bag) = filled(&attrs, &[]);
+        assert_eq!(fields.provider, None);
+        assert_eq!(bag.state("gen_ai.system"), Some(Use::Unread));
+
+        let (fields, _) = filled(&[string_attr("gen_ai.system", "AutoGen")], &[]);
+        assert_eq!(fields.provider, None);
+
+        let attrs = [
+            string_attr("gen_ai.system", "spring_ai"),
+            string_attr("llm.provider", "openai"),
+        ];
+        let (fields, bag) = filled(&attrs, &[]);
+        assert_eq!(fields.provider.as_deref(), Some("openai"));
+        assert_eq!(bag.state("gen_ai.system"), Some(Use::Unread));
+    }
+
+    #[test]
+    fn framework_names_in_gen_ai_provider_name_are_skipped_too() {
+        for name in [
+            "strands-agents",
+            "microsoft.agent_framework",
+            "Strands-Agents",
+        ] {
+            let attrs = [string_attr("gen_ai.provider.name", name)];
+            let (fields, bag) = filled(&attrs, &[]);
+            assert_eq!(fields.provider, None, "{name}");
+            assert_eq!(bag.state("gen_ai.provider.name"), Some(Use::Unread));
+        }
+        // Left unread, so the next source decides.
+        let attrs = [
+            string_attr("gen_ai.provider.name", "strands-agents"),
+            string_attr("gen_ai.system", "gcp.vertex.agent"),
+            string_attr("llm.provider", "openai"),
+        ];
+        let (fields, bag) = filled(&attrs, &[]);
+        assert_eq!(fields.provider.as_deref(), Some("openai"));
+        assert_eq!(bag.state("gen_ai.provider.name"), Some(Use::Unread));
+        assert_eq!(bag.state("gen_ai.system"), Some(Use::Unread));
+        assert_eq!(bag.state("llm.provider"), Some(Use::Consumed));
+
+        // A framework name on `gen_ai.system` behind a real provider on
+        // `gen_ai.provider.name` keeps the provider.
+        let attrs = [
+            string_attr("gen_ai.provider.name", "openai"),
+            string_attr("gen_ai.system", "microsoft.agent_framework"),
+        ];
+        let (fields, bag) = filled(&attrs, &[]);
+        assert_eq!(fields.provider.as_deref(), Some("openai"));
+        assert_eq!(bag.state("gen_ai.provider.name"), Some(Use::Consumed));
+    }
+
+    #[test]
+    fn browser_use_is_a_framework_name_never_a_provider() {
+        // R-OL-3 (D-IN-15): OpenLIT writes `gen_ai.provider.name=browser_use`
+        // on its Browser Use spans. It is skipped and left unread.
+        for (key, value) in [
+            ("gen_ai.provider.name", "browser_use"),
+            ("gen_ai.provider.name", "Browser_Use"),
+            ("gen_ai.system", "browser_use"),
+        ] {
+            let attrs = [string_attr(key, value)];
+            let (fields, bag) = filled(&attrs, &[]);
+            assert_eq!(fields.provider, None, "{key}={value}");
+            assert_eq!(bag.state(key), Some(Use::Unread), "{key}={value}");
+        }
+        // The next source decides.
+        let attrs = [
+            string_attr("gen_ai.provider.name", "browser_use"),
+            string_attr("llm.provider", "openai"),
+        ];
+        let (fields, bag) = filled(&attrs, &[]);
+        assert_eq!(fields.provider.as_deref(), Some("openai"));
+        assert_eq!(bag.state("gen_ai.provider.name"), Some(Use::Unread));
+        assert_eq!(bag.state("llm.provider"), Some(Use::Consumed));
+    }
+
+    #[test]
+    fn koog_is_a_framework_not_a_provider() {
+        // D-IN-30 item 4: Koog names itself as the provider on its tool spans.
+        for (key, value) in [
+            ("gen_ai.provider.name", "koog"),
+            ("gen_ai.provider.name", "Koog"),
+            ("gen_ai.system", "koog"),
+        ] {
+            let attrs = [string_attr(key, value)];
+            let (fields, bag) = filled(&attrs, &[]);
+            assert_eq!(fields.provider, None, "{key}={value}");
+            assert_eq!(bag.state(key), Some(Use::Unread), "{key}={value}");
+        }
+        // Left unread, so the next source decides.
+        let attrs = [
+            string_attr("gen_ai.provider.name", "koog"),
+            string_attr("llm.provider", "openai"),
+        ];
+        let (fields, bag) = filled(&attrs, &[]);
+        assert_eq!(fields.provider.as_deref(), Some("openai"));
+        assert_eq!(bag.state("gen_ai.provider.name"), Some(Use::Unread));
+        assert_eq!(bag.state("llm.provider"), Some(Use::Consumed));
+    }
+
+    /// The endpoint rule over one span: the attributes, its kind and the provider
+    /// `fill` resolved.
+    fn endpoint(attrs: &[KeyValue], kind: SpanKind, provider: Option<&str>) -> Option<String> {
+        let mut warnings = Warnings::default();
+        let bag = AttrBag::new(attrs, &mut warnings);
+        endpoint_provider(&bag, kind, provider.map(str::to_owned))
+    }
+
+    #[test]
+    fn host_of_reads_hosts_and_urls() {
+        assert_eq!(host_of("api.groq.com").as_deref(), Some("api.groq.com"));
+        assert_eq!(
+            host_of("https://OpenRouter.ai/api/v1/").as_deref(),
+            Some("openrouter.ai")
+        );
+        assert_eq!(
+            host_of("http://user:pw@api.novita.ai:8443/openai?x=1#f").as_deref(),
+            Some("api.novita.ai")
+        );
+        assert_eq!(
+            host_of("https://x.openai.azure.com./openai").as_deref(),
+            Some("x.openai.azure.com")
+        );
+        assert_eq!(host_of("http://[::1]:11434/v1").as_deref(), Some("::1"));
+        assert_eq!(
+            host_of("api.groq.com/v1?u=http://x").as_deref(),
+            Some("api.groq.com")
+        );
+        assert_eq!(host_of(""), None);
+        assert_eq!(host_of("https://"), None);
+    }
+
+    #[test]
+    fn match_endpoint_uses_exact_hosts_and_label_suffixes() {
+        assert_eq!(match_endpoint("openrouter.ai"), Some("openrouter"));
+        assert_eq!(match_endpoint("api.openrouter.ai"), None);
+        assert_eq!(
+            match_endpoint("res.openai.azure.com"),
+            Some("azure.ai.openai")
+        );
+        assert_eq!(match_endpoint("openai.azure.com"), None);
+        assert_eq!(match_endpoint("evilopenai.azure.com"), None);
+        assert_eq!(
+            match_endpoint("a.b.cloud.databricks.com"),
+            Some("databricks")
+        );
+        assert_eq!(match_endpoint("api.openai.com"), None);
+        assert_eq!(match_endpoint("x.maas.aliyuncs.com"), Some("dashscope"));
+        assert_eq!(
+            match_endpoint("us-central1-aiplatform.googleapis.com"),
+            None
+        );
+        assert_eq!(match_endpoint("model-abc.api.baseten.co"), Some("baseten"));
+        assert_eq!(
+            match_endpoint("res.services.ai.azure.com"),
+            Some("azure.ai.inference")
+        );
+    }
+
+    #[test]
+    fn endpoint_rule_applies_to_llm_and_embedding_spans_only() {
+        let attrs = [string_attr("server.address", "api.groq.com")];
+        for kind in [SpanKind::Llm, SpanKind::Embedding] {
+            assert_eq!(endpoint(&attrs, kind, None).as_deref(), Some("groq"));
+        }
+        for kind in [SpanKind::Tool, SpanKind::Span] {
+            assert_eq!(endpoint(&attrs, kind, None), None);
+        }
+    }
+
+    #[test]
+    fn endpoint_rule_replaces_only_empty_or_openai() {
+        let attrs = [string_attr("server.address", "api.groq.com")];
+        assert_eq!(
+            endpoint(&attrs, SpanKind::Llm, Some("openai")).as_deref(),
+            Some("groq")
+        );
+        assert_eq!(
+            endpoint(&attrs, SpanKind::Llm, Some("anthropic")).as_deref(),
+            Some("anthropic")
+        );
+        assert_eq!(
+            endpoint(&attrs, SpanKind::Llm, None).as_deref(),
+            Some("groq")
+        );
+    }
+
+    #[test]
+    fn endpoint_rule_reads_keys_in_order() {
+        let both = [
+            string_attr("server.address", "api.groq.com"),
+            string_attr("gen_ai.openai.api_base", "https://api.novita.ai/openai/"),
+        ];
+        assert_eq!(
+            endpoint(&both, SpanKind::Llm, None).as_deref(),
+            Some("groq")
+        );
+
+        let url_only = [string_attr(
+            "url.full",
+            "https://api.novita.ai/openai/chat/completions",
+        )];
+        assert_eq!(
+            endpoint(&url_only, SpanKind::Llm, None).as_deref(),
+            Some("novita")
+        );
+
+        let base_only = [string_attr(
+            "gen_ai.openai.api_base",
+            "https://openrouter.ai/api/v1/",
+        )];
+        assert_eq!(
+            endpoint(&base_only, SpanKind::Llm, None).as_deref(),
+            Some("openrouter")
+        );
+
+        let local = [string_attr("server.address", "localhost")];
+        assert_eq!(
+            endpoint(&local, SpanKind::Llm, Some("openai")).as_deref(),
+            Some("openai")
+        );
+
+        let empty_first = [
+            string_attr("server.address", ""),
+            string_attr("url.full", "https://api.x.ai/v1"),
+        ];
+        assert_eq!(
+            endpoint(&empty_first, SpanKind::Llm, None).as_deref(),
+            Some("x_ai")
+        );
+    }
+
+    #[test]
+    fn endpoint_keys_are_not_consumed() {
+        let attrs = [string_attr("server.address", "api.groq.com")];
+        let mut warnings = Warnings::default();
+        let bag = AttrBag::new(&attrs, &mut warnings);
+        assert_eq!(
+            endpoint_provider(&bag, SpanKind::Llm, None).as_deref(),
+            Some("groq")
+        );
+        assert_eq!(bag.state("server.address"), Some(Use::Unread));
+    }
+
+    #[test]
     fn request_model_uses_precedence() {
         let attrs = [
             string_attr("ai.model.id", "vercel"),
@@ -838,6 +1459,75 @@ mod tests {
     }
 
     #[test]
+    fn mirascope_models_lose_their_provider_prefix_under_its_scope() {
+        let attrs = [
+            string_attr("gen_ai.provider.name", "openai"),
+            string_attr("gen_ai.request.model", "openai/gpt-4o-mini"),
+            string_attr("gen_ai.response.model", "openai/gpt-4o-mini"),
+        ];
+        let (fields, _) = filled_in_scope("mirascope.llm", &attrs);
+        assert_eq!(fields.request_model.as_deref(), Some("gpt-4o-mini"));
+        assert_eq!(fields.response_model.as_deref(), Some("gpt-4o-mini"));
+        assert_eq!(fields.provider.as_deref(), Some("openai"));
+
+        // The registered provider id is aliased for the provider column and
+        // stripped raw from the model.
+        let attrs = [
+            string_attr("gen_ai.provider.name", "openai:completions"),
+            string_attr("gen_ai.request.model", "openai:completions/gpt-4o-mini"),
+        ];
+        let (fields, _) = filled_in_scope("mirascope.llm", &attrs);
+        assert_eq!(fields.request_model.as_deref(), Some("gpt-4o-mini"));
+        assert_eq!(fields.provider.as_deref(), Some("openai"));
+
+        // A raw provider spelled with capitals still strips.
+        let attrs = [
+            string_attr("gen_ai.provider.name", "OpenAI"),
+            string_attr("gen_ai.request.model", "openai/gpt-4o-mini"),
+        ];
+        let (fields, _) = filled_in_scope("mirascope.ops", &attrs);
+        assert_eq!(fields.request_model.as_deref(), Some("gpt-4o-mini"));
+
+        // Without the scope the model is stored as read.
+        let attrs = [
+            string_attr("gen_ai.provider.name", "openai"),
+            string_attr("gen_ai.request.model", "openai/gpt-4o-mini"),
+        ];
+        let (fields, _) = filled_in_scope("", &attrs);
+        assert_eq!(fields.request_model.as_deref(), Some("openai/gpt-4o-mini"));
+        let (fields, _) = filled_in_scope("other.framework", &attrs);
+        assert_eq!(fields.request_model.as_deref(), Some("openai/gpt-4o-mini"));
+
+        // No strip when the prefix differs from the provider, or there is no
+        // provider, or the model has no bare name after the slash.
+        let attrs = [
+            string_attr("gen_ai.provider.name", "groq"),
+            string_attr("gen_ai.request.model", "openai/gpt-oss-120b"),
+        ];
+        let (fields, _) = filled_in_scope("mirascope.llm", &attrs);
+        assert_eq!(fields.request_model.as_deref(), Some("openai/gpt-oss-120b"));
+
+        let attrs = [string_attr("gen_ai.request.model", "openai/gpt-4o-mini")];
+        let (fields, _) = filled_in_scope("mirascope.llm", &attrs);
+        assert_eq!(fields.request_model.as_deref(), Some("openai/gpt-4o-mini"));
+
+        // An empty provider value is no provider.
+        let attrs = [
+            string_attr("gen_ai.provider.name", ""),
+            string_attr("gen_ai.request.model", "/gpt-4o-mini"),
+        ];
+        let (fields, _) = filled_in_scope("mirascope.llm", &attrs);
+        assert_eq!(fields.request_model.as_deref(), Some("/gpt-4o-mini"));
+
+        let attrs = [
+            string_attr("gen_ai.provider.name", "openai"),
+            string_attr("gen_ai.request.model", "openai/"),
+        ];
+        let (fields, _) = filled_in_scope("mirascope.llm", &attrs);
+        assert_eq!(fields.request_model.as_deref(), Some("openai/"));
+    }
+
+    #[test]
     fn operation_is_the_gen_ai_name() {
         let attrs = [string_attr("gen_ai.operation.name", "retrieval")];
         let (fields, bag) = filled(&attrs, &[]);
@@ -861,6 +1551,9 @@ mod tests {
         let cases = [
             ("gen_ai.provider.name", "openai.chat", "openai"),
             ("gen_ai.provider.name", "openai.responses", "openai"),
+            // Mirascope's registered provider ids.
+            ("gen_ai.provider.name", "openai:completions", "openai"),
+            ("gen_ai.provider.name", "openai:responses", "openai"),
             ("gen_ai.provider.name", "anthropic.messages", "anthropic"),
             ("gen_ai.provider.name", "xai", "x_ai"),
             ("gen_ai.provider.name", "XAI", "x_ai"),
@@ -898,10 +1591,44 @@ mod tests {
             ("gen_ai.provider.name", "aws", "aws.bedrock"),
             ("ai.model.provider", "gemini", "gcp.gemini"),
             ("ai.model.provider", "azure", "azure.ai.openai"),
+            // LiteLLM and gateway names (D-IN-15).
+            ("gen_ai.provider.name", "fireworks", "fireworks_ai"),
+            ("gen_ai.provider.name", "together", "together_ai"),
+            ("gen_ai.provider.name", "togetherai", "together_ai"),
+            ("gen_ai.provider.name", "watsonx", "ibm.watsonx.ai"),
+            ("gen_ai.provider.name", "ibm", "ibm.watsonx.ai"),
+            ("gen_ai.provider.name", "oracle", "oci"),
+            ("gen_ai.provider.name", "bedrock", "aws.bedrock"),
+            ("gen_ai.provider.name", "azure_ai", "azure.ai.inference"),
+            ("gen_ai.provider.name", "mistral", "mistral_ai"),
+            ("gen_ai.provider.name", "ollama_chat", "ollama"),
+            ("gen_ai.provider.name", "cohere_chat", "cohere"),
+            ("gen_ai.provider.name", "text-completion-openai", "openai"),
+            (
+                "gen_ai.provider.name",
+                "clf_ai_gateway",
+                "cloudflare_ai_gateway",
+            ),
+            (
+                "gen_ai.provider.name",
+                "vertex_ai-anthropic_models",
+                "gcp.vertex_ai",
+            ),
         ];
         for (key, raw, expected) in cases {
             let (fields, _) = filled(&[string_attr(key, raw)], &[]);
             assert_eq!(fields.provider.as_deref(), Some(expected), "{key}={raw}");
+        }
+    }
+
+    #[test]
+    fn open_ai_is_openai() {
+        // D-IN-30 item 4: Quarkus LangChain4j writes `open_ai`.
+        for key in ["gen_ai.provider.name", "gen_ai.system"] {
+            let attrs = [string_attr(key, "open_ai")];
+            let (fields, bag) = filled(&attrs, &[]);
+            assert_eq!(fields.provider.as_deref(), Some("openai"), "{key}");
+            assert_eq!(bag.state(key), Some(Use::Consumed), "{key}");
         }
     }
 
@@ -957,6 +1684,127 @@ mod tests {
 
         let (fields, _) = filled(&[string_attr("gen_ai.conversation.id", "conv")], &[]);
         assert_eq!(fields.session_id.as_deref(), Some("conv"));
+
+        // Mirascope's session is the last source, on every Mirascope span.
+        let attrs = [
+            string_attr("langfuse.session.id", "langfuse"),
+            string_attr("mirascope.ops.session.id", "sess-1"),
+        ];
+        let (fields, bag) = filled(&attrs, &[]);
+        assert_eq!(fields.session_id.as_deref(), Some("langfuse"));
+        assert_eq!(bag.state("mirascope.ops.session.id"), Some(Use::Unread));
+
+        let attrs = [string_attr("mirascope.ops.session.id", "sess-1")];
+        let (fields, bag) = filled(&attrs, &[]);
+        assert_eq!(fields.session_id.as_deref(), Some("sess-1"));
+        assert_eq!(bag.state("mirascope.ops.session.id"), Some(Use::Consumed));
+    }
+
+    #[test]
+    fn voltagent_model_fills_an_empty_request_model_on_voltagent_spans() {
+        // V3 (D-IN-6): `llm.model` on the `llm` span, `ai.model.name` on the
+        // agent span, each after the sources of the table.
+        const VOLTAGENT: &[Convention] = &[Convention::Voltagent];
+        let attrs = [string_attr("llm.model", "gpt-4o-mini")];
+        let (fields, bag) = filled_as("@voltagent/core", &attrs, VOLTAGENT);
+        assert_eq!(fields.request_model.as_deref(), Some("gpt-4o-mini"));
+        assert_eq!(bag.state("llm.model"), Some(Use::Consumed));
+
+        let attrs = [string_attr("ai.model.name", "gpt-4o-mini")];
+        let (fields, bag) = filled_as("@voltagent/core", &attrs, VOLTAGENT);
+        assert_eq!(fields.request_model.as_deref(), Some("gpt-4o-mini"));
+        assert_eq!(bag.state("ai.model.name"), Some(Use::Consumed));
+        // Neither is a response model.
+        assert_eq!(fields.response_model, None);
+
+        // `llm.model` comes first; an empty value is skipped.
+        let attrs = [
+            string_attr("llm.model", "gpt-oss-120b"),
+            string_attr("ai.model.name", "gpt-4o-mini"),
+        ];
+        let (fields, bag) = filled_as("@voltagent/core", &attrs, VOLTAGENT);
+        assert_eq!(fields.request_model.as_deref(), Some("gpt-oss-120b"));
+        assert_eq!(bag.state("ai.model.name"), Some(Use::Unread));
+
+        let attrs = [
+            string_attr("llm.model", ""),
+            string_attr("ai.model.name", "gpt-4o-mini"),
+        ];
+        let (fields, bag) = filled_as("@voltagent/core", &attrs, VOLTAGENT);
+        assert_eq!(fields.request_model.as_deref(), Some("gpt-4o-mini"));
+        assert_eq!(bag.state("llm.model"), Some(Use::Unread));
+
+        // The table's sources win, and leave the VoltAgent keys unread.
+        let attrs = [
+            string_attr("gen_ai.request.model", "genai-model"),
+            string_attr("llm.model", "gpt-4o-mini"),
+        ];
+        let (fields, bag) = filled_as("@voltagent/core", &attrs, VOLTAGENT);
+        assert_eq!(fields.request_model.as_deref(), Some("genai-model"));
+        assert_eq!(bag.state("llm.model"), Some(Use::Unread));
+
+        let attrs = [
+            string_attr("llm.model_name", "openinference-model"),
+            string_attr("llm.model", "gpt-4o-mini"),
+        ];
+        let (fields, bag) = filled_as("@voltagent/core", &attrs, VOLTAGENT);
+        assert_eq!(fields.request_model.as_deref(), Some("openinference-model"));
+        assert_eq!(bag.state("llm.model"), Some(Use::Unread));
+
+        // Without the `voltagent` convention `llm.model` is no model source:
+        // the span stays OpenInference (D-IN-23).
+        let attrs = [
+            string_attr("llm.model", "gpt-4o-mini"),
+            string_attr("ai.model.name", "gpt-4o-mini"),
+        ];
+        for conventions in [vec![], vec![Convention::Openinference, Convention::Vercel]] {
+            let (fields, bag) = filled_as("other.framework", &attrs, &conventions);
+            assert_eq!(fields.request_model, None);
+            assert_eq!(bag.state("llm.model"), Some(Use::Unread));
+            assert_eq!(bag.state("ai.model.name"), Some(Use::Unread));
+        }
+    }
+
+    #[test]
+    fn voltagent_session_fills_an_empty_session_on_voltagent_spans() {
+        // V6 (D-IN-6): `conversation.id`, else `voltagent.conversation_id`.
+        const VOLTAGENT: &[Convention] = &[Convention::Voltagent];
+        let attrs = [string_attr("conversation.id", "conv-1")];
+        let (fields, bag) = filled_as("@voltagent/core", &attrs, VOLTAGENT);
+        assert_eq!(fields.session_id.as_deref(), Some("conv-1"));
+        assert_eq!(bag.state("conversation.id"), Some(Use::Consumed));
+
+        let attrs = [string_attr("voltagent.conversation_id", "conv-2")];
+        let (fields, bag) = filled_as("@voltagent/core", &attrs, VOLTAGENT);
+        assert_eq!(fields.session_id.as_deref(), Some("conv-2"));
+        assert_eq!(bag.state("voltagent.conversation_id"), Some(Use::Consumed));
+
+        let attrs = [
+            string_attr("conversation.id", "conv-1"),
+            string_attr("voltagent.conversation_id", "conv-2"),
+        ];
+        let (fields, bag) = filled_as("@voltagent/core", &attrs, VOLTAGENT);
+        assert_eq!(fields.session_id.as_deref(), Some("conv-1"));
+        assert_eq!(bag.state("voltagent.conversation_id"), Some(Use::Unread));
+
+        // The table's sources win.
+        let attrs = [
+            string_attr("session.id", "otel-session"),
+            string_attr("conversation.id", "conv-1"),
+        ];
+        let (fields, bag) = filled_as("@voltagent/core", &attrs, VOLTAGENT);
+        assert_eq!(fields.session_id.as_deref(), Some("otel-session"));
+        assert_eq!(bag.state("conversation.id"), Some(Use::Unread));
+
+        // Without the `voltagent` convention neither key is a session source.
+        let attrs = [
+            string_attr("conversation.id", "conv-1"),
+            string_attr("voltagent.conversation_id", "conv-2"),
+        ];
+        let (fields, bag) = filled_as("@voltagent/core", &attrs, &[Convention::Openinference]);
+        assert_eq!(fields.session_id, None);
+        assert_eq!(bag.state("conversation.id"), Some(Use::Unread));
+        assert_eq!(bag.state("voltagent.conversation_id"), Some(Use::Unread));
     }
 
     #[test]
@@ -1125,5 +1973,223 @@ mod tests {
         let (fields, bag) = filled(&attrs, &[]);
         assert_eq!(fields.release.as_deref(), Some("sha"));
         assert_eq!(bag.state("lmnr.span.release"), Some(Use::Consumed));
+    }
+
+    #[test]
+    fn endpoint_providers_are_rule_12_fixed_points_and_priced_or_listed() {
+        // LiteLLM has no chat rows for these; the gateways among them are priced by the
+        // publisher's row (D-IN-13).
+        const UNPRICED_ENDPOINT_PROVIDERS: &[&str] = &[
+            "byteplus",
+            "cometapi",
+            "doubleword",
+            "helicone",
+            "huggingface",
+            "nvidia_nim",
+            "openrouter",
+            "portkey",
+            "qianfan",
+        ];
+        let priced: std::collections::BTreeSet<String> = crate::cost::builtin_price_rows()
+            .into_iter()
+            .filter_map(|row| row.provider)
+            .collect();
+        for (_, name) in ENDPOINT_PROVIDERS {
+            assert_eq!(&canonical_provider(name, false), name);
+            assert!(
+                priced.contains(*name) || UNPRICED_ENDPOINT_PROVIDERS.contains(name),
+                "endpoint provider {name} has no built-in row and is not listed as unpriced"
+            );
+        }
+    }
+
+    #[test]
+    fn every_snapshot_provider_is_a_fixed_point_of_rule_12() {
+        for row in crate::cost::builtin_price_rows() {
+            if let Some(provider) = &row.provider {
+                assert_eq!(
+                    &canonical_provider(provider, false),
+                    provider,
+                    "{}",
+                    row.model_name
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn livekit_hosts_in_the_provider_go_through_the_endpoint_table() {
+        let attrs = [
+            string_attr("gen_ai.provider.name", "api.openai.com"),
+            string_attr("gen_ai.request.model", "gpt-4o-mini"),
+        ];
+        let (fields, bag) = filled_in_scope("livekit-agents", &attrs);
+        assert_eq!(fields.provider.as_deref(), Some("openai"));
+        assert_eq!(bag.state("gen_ai.provider.name"), Some(Use::Consumed));
+
+        let attrs = [string_attr("gen_ai.provider.name", "openrouter.ai")];
+        let (fields, _) = filled_in_scope("livekit-agents", &attrs);
+        assert_eq!(fields.provider.as_deref(), Some("openrouter"));
+
+        // An unmapped host leaves the provider empty and is consumed; no later
+        // source of the provider is read.
+        let attrs = [
+            string_attr("gen_ai.provider.name", "127.0.0.1:1234"),
+            string_attr("gen_ai.system", "anthropic"),
+        ];
+        let (fields, bag) = filled_in_scope("livekit-agents", &attrs);
+        assert_eq!(fields.provider, None);
+        assert_eq!(bag.state("gen_ai.provider.name"), Some(Use::Consumed));
+        assert_eq!(bag.state("gen_ai.system"), Some(Use::Unread));
+
+        // A plain provider name is unchanged.
+        let attrs = [string_attr("gen_ai.provider.name", "openai")];
+        let (fields, _) = filled_in_scope("livekit-agents", &attrs);
+        assert_eq!(fields.provider.as_deref(), Some("openai"));
+
+        // Another scope keeps the host string as the provider, as today.
+        let attrs = [string_attr("gen_ai.provider.name", "127.0.0.1:1234")];
+        let (fields, bag) = filled_in_scope("other.scope", &attrs);
+        assert_eq!(fields.provider.as_deref(), Some("127.0.0.1:1234"));
+        assert_eq!(bag.state("gen_ai.provider.name"), Some(Use::Consumed));
+
+        // The endpoint table itself is unchanged (D-IN-2).
+        assert_eq!(match_endpoint("api.openai.com"), None);
+    }
+
+    #[test]
+    fn livekit_values_that_are_not_hosts_keep_their_provider() {
+        // A dotted provider name that no host rule matches is not a host: the
+        // key is left to the normal provider rules.
+        for name in ["azure.ai.openai", "gcp.vertex_ai"] {
+            let attrs = [string_attr("gen_ai.provider.name", name)];
+            let (fields, bag) = filled_in_scope("livekit-agents", &attrs);
+            assert_eq!(fields.provider.as_deref(), Some(name), "{name}");
+            assert_eq!(
+                bag.state("gen_ai.provider.name"),
+                Some(Use::Consumed),
+                "{name}"
+            );
+        }
+
+        // An IP address is a host: unmapped, so no provider, and consumed.
+        let attrs = [
+            string_attr("gen_ai.provider.name", "127.0.0.1"),
+            string_attr("gen_ai.system", "anthropic"),
+        ];
+        let (fields, bag) = filled_in_scope("livekit-agents", &attrs);
+        assert_eq!(fields.provider, None);
+        assert_eq!(bag.state("gen_ai.provider.name"), Some(Use::Consumed));
+        assert_eq!(bag.state("gen_ai.system"), Some(Use::Unread));
+    }
+
+    #[test]
+    fn pipecat_conversation_id_fills_the_session_on_its_turn_scope_only() {
+        let attrs = [string_attr("conversation.id", "conv-1")];
+        let (fields, bag) = filled_in_scope("pipecat.turn", &attrs);
+        assert_eq!(fields.session_id.as_deref(), Some("conv-1"));
+        assert_eq!(bag.state("conversation.id"), Some(Use::Consumed));
+
+        let (fields, bag) = filled_in_scope("pipecat", &attrs);
+        assert_eq!(fields.session_id, None);
+        assert_eq!(bag.state("conversation.id"), Some(Use::Unread));
+
+        let (fields, bag) = filled_in_scope("other.scope", &attrs);
+        assert_eq!(fields.session_id, None);
+        assert_eq!(bag.state("conversation.id"), Some(Use::Unread));
+
+        // `gen_ai.conversation.id` still wins when present.
+        let attrs = [
+            string_attr("gen_ai.conversation.id", "genai-1"),
+            string_attr("conversation.id", "conv-1"),
+        ];
+        let (fields, bag) = filled_in_scope("pipecat.turn", &attrs);
+        assert_eq!(fields.session_id.as_deref(), Some("genai-1"));
+        assert_eq!(bag.state("conversation.id"), Some(Use::Unread));
+    }
+
+    #[test]
+    fn not_given_request_params_are_strings_without_a_warning() {
+        let attrs = [string_attr("gen_ai.request.top_k", "NOT_GIVEN")];
+        let (fields, bag, warnings) = filled_with_warnings(&attrs);
+        assert_eq!(
+            fields.request_params.as_deref(),
+            Some(r#"{"top_k":"NOT_GIVEN"}"#)
+        );
+        assert_eq!(bag.state("gen_ai.request.top_k"), Some(Use::Consumed));
+        assert_eq!(warnings.to_attribute(), None);
+    }
+
+    #[test]
+    fn promptflow_llm_models_fill_from_the_response_and_the_inputs() {
+        // R-PF-2: the response model from `llm.response.model`, the request
+        // model from `inputs.model`. `inputs` stays for the input column.
+        let attrs = [
+            string_attr("span_type", "LLM"),
+            string_attr("llm.response.model", "gpt-4o-mini-2024-07-18"),
+            string_attr("inputs", r#"{"model":"gpt-4o-mini","messages":[]}"#),
+        ];
+        let (fields, bag) = filled_in_scope("promptflow", &attrs);
+        assert_eq!(fields.request_model.as_deref(), Some("gpt-4o-mini"));
+        assert_eq!(
+            fields.response_model.as_deref(),
+            Some("gpt-4o-mini-2024-07-18")
+        );
+        assert_eq!(bag.state("llm.response.model"), Some(Use::Consumed));
+        assert_eq!(bag.state("inputs"), Some(Use::Unread));
+
+        // An embedding span is a model span too.
+        let attrs = [
+            string_attr("span_type", "Embedding"),
+            string_attr("inputs", r#"{"model":"text-embedding-3-small"}"#),
+        ];
+        let (fields, _) = filled_in_scope("promptflow", &attrs);
+        assert_eq!(
+            fields.request_model.as_deref(),
+            Some("text-embedding-3-small")
+        );
+    }
+
+    #[test]
+    fn promptflow_models_keep_the_genai_model_and_skip_other_span_types() {
+        // A model already filled by a higher source is kept.
+        let attrs = [
+            string_attr("span_type", "LLM"),
+            string_attr("gen_ai.request.model", "gpt-4o"),
+            string_attr("gen_ai.response.model", "gpt-4o-2024-08-06"),
+            string_attr("llm.response.model", "other"),
+            string_attr("inputs", r#"{"model":"other"}"#),
+        ];
+        let (fields, bag) = filled_in_scope("promptflow", &attrs);
+        assert_eq!(fields.request_model.as_deref(), Some("gpt-4o"));
+        assert_eq!(fields.response_model.as_deref(), Some("gpt-4o-2024-08-06"));
+        assert_eq!(bag.state("llm.response.model"), Some(Use::Unread));
+
+        // A `Function` span with a `model` in its inputs gets no model.
+        let attrs = [
+            string_attr("span_type", "Function"),
+            string_attr("inputs", r#"{"model":"gpt-4o-mini"}"#),
+        ];
+        let (fields, _) = filled_in_scope("promptflow", &attrs);
+        assert_eq!(fields.request_model, None);
+
+        // Inputs without `model` leave the request model empty.
+        let attrs = [
+            string_attr("span_type", "LLM"),
+            string_attr("inputs", r#"{"messages":[]}"#),
+        ];
+        let (fields, _) = filled_in_scope("promptflow", &attrs);
+        assert_eq!(fields.request_model, None);
+
+        // The same keys on another scope are unchanged.
+        let attrs = [
+            string_attr("span_type", "LLM"),
+            string_attr("llm.response.model", "m-1"),
+            string_attr("inputs", r#"{"model":"m-2"}"#),
+        ];
+        let (fields, bag) = filled_in_scope("other.scope", &attrs);
+        assert_eq!(fields.request_model, None);
+        assert_eq!(fields.response_model, None);
+        assert_eq!(bag.state("llm.response.model"), Some(Use::Unread));
     }
 }

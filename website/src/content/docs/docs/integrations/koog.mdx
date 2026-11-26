@@ -1,0 +1,117 @@
+---
+title: Koog
+description: "Trace Koog agents with cetra from Kotlin through Koog's OpenTelemetry feature: agent runs, graph nodes, model calls and tools."
+---
+
+import Backing from "../../../../components/Backing.astro";
+
+cetra traces Koog agents through Koog's OpenTelemetry feature: the agent build and run, the strategy and graph nodes, each model call and each tool execution in one trace.
+
+<Backing fixtures={["genai/koog-agent-tool"]} />
+
+## Install
+
+```xml
+<dependency>
+    <groupId>ai.koog</groupId>
+    <artifactId>koog-agents-jvm</artifactId>
+    <version>1.3.0</version>
+</dependency>
+<dependency>
+    <groupId>ai.koog</groupId>
+    <artifactId>agents-features-opentelemetry-jvm</artifactId>
+    <version>1.3.0</version>
+</dependency>
+<dependency>
+    <groupId>io.opentelemetry</groupId>
+    <artifactId>opentelemetry-exporter-otlp</artifactId>
+</dependency>
+```
+
+Import the OpenTelemetry BOM 1.61.0 in `dependencyManagement`: that is the version Koog's feature is built against. The tool arguments are kotlinx-serialization classes, so the Kotlin compiler needs the `kotlinx-serialization` plugin; the fixture was built with Kotlin 2.3.21.
+
+## Set up
+
+Install the feature with a synchronous span processor and verbose content:
+
+```kotlin
+import ai.koog.agents.core.agent.AIAgent
+import ai.koog.agents.core.tools.SimpleTool
+import ai.koog.agents.core.tools.ToolRegistry
+import ai.koog.agents.features.opentelemetry.feature.OpenTelemetry
+import ai.koog.prompt.executor.clients.openai.OpenAIClientSettings
+import ai.koog.prompt.executor.clients.openai.OpenAILLMClient
+import ai.koog.prompt.executor.clients.openai.OpenAIModels
+import ai.koog.prompt.executor.llms.MultiLLMPromptExecutor
+import ai.koog.serialization.typeToken
+import io.opentelemetry.exporter.otlp.http.trace.OtlpHttpSpanExporter
+import io.opentelemetry.kotlin.tracing.export.simpleSpanProcessor
+import io.opentelemetry.kotlin.tracing.export.toOtelKotlinSpanExporter
+import kotlinx.coroutines.runBlocking
+import kotlinx.serialization.Serializable
+
+@Serializable
+data class WeatherArgs(val city: String)
+
+class WeatherTool : SimpleTool<WeatherArgs>(
+    argsType = typeToken<WeatherArgs>(),
+    name = "get_weather",
+    description = "Get the current weather for a city",
+) {
+    override suspend fun execute(args: WeatherArgs): String = "Sunny in ${args.city}, 21 C"
+}
+
+fun main() = runBlocking {
+    val client = OpenAILLMClient(
+        apiKey = System.getenv("OPENAI_API_KEY"),
+        settings = OpenAIClientSettings(baseUrl = "https://api.openai.com"),
+    )
+    val agent = AIAgent(
+        promptExecutor = MultiLLMPromptExecutor(client),
+        llmModel = OpenAIModels.Chat.GPT4oMini,
+        systemPrompt = "You are a helpful assistant.",
+        toolRegistry = ToolRegistry { tool(WeatherTool()) },
+    ) {
+        install(OpenTelemetry) {
+            val exporter = OtlpHttpSpanExporter.builder()
+                .setEndpoint("http://localhost:8080/v1/traces")
+                .addHeader("Authorization", "Bearer sk-cetra-…")
+                .build()
+            addSpanProcessor { simpleSpanProcessor(exporter.toOtelKotlinSpanExporter()) }
+            setVerbose(true)
+        }
+    }
+    println("answer: " + agent.run("What is the weather in Lyon? Use the tool."))
+    agent.close()
+}
+```
+
+- The exporter takes the full traces URL.
+- The synchronous span processor sends each span when it ends. With the feature's default batch processor, nothing reached cetra before the process exited in the capture runs; close the agent before your program ends.
+- `setVerbose(true)` records the content of the conversation and the tools. Without it nothing of the content is captured (see Limits).
+- Pass `OpenAIClientSettings(baseUrl = …)`, without a `/v1` suffix, when your provider is OpenAI-compatible and is not OpenAI itself.
+
+## What you get
+
+One agent run with one tool round:
+
+- an `agent` span named `create_agent <session id>` when the agent is built;
+- an `agent` span named `invoke_agent <run id>` for the run, with the system prompt as its input and output and the tool definitions;
+- plain spans for the strategy (`strategy single_run`) and each graph node, such as `node nodeCallLLM`, `node nodeExecuteTool` and `node nodeSendToolResult`;
+- an `llm` span named `chat <model>` for each model call, with the provider `openai`, the model, the input and output messages, the token counts and the cost computed from the built-in prices;
+- a `tool` span named `execute_tool <tool>`, with the arguments as its input and the result as its output.
+
+## Limits
+
+- Without `setVerbose(true)`, Koog masks the content: the message values start with `HIDDEN:` and cetra records no input, output or system prompt. The tool call arguments, tool results and tool definitions are masked as well, and the masked text is what the tool span shows.
+- Koog writes the system prompt under `system_instructions`, without the `gen_ai.` prefix, so cetra does not read it as the system instructions. It stays in the span's attributes.
+- Koog capitalizes the message roles (`System`, `User`, `Assistant`); cetra keeps them as written.
+- The span names carry Koog's session and run ids, so they differ between runs.
+- The fixture was captured with Koog 1.3.0 and OpenTelemetry Java 1.61.0.
+- If a field is missing, look at the span's **Attributes** tab and compare it with [Span attributes](/docs/reference/attributes/).
+
+## Next
+
+- [Send OpenTelemetry](/docs/get-started/opentelemetry/): the endpoint and the headers cetra expects.
+- [Traces](/docs/tracing/traces/): read the trace as a tree and a timeline.
+- [Cost and tokens](/docs/tracing/cost-and-tokens/): how cost is computed from the token counts.

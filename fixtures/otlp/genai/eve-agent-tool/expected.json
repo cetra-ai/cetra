@@ -1,0 +1,388 @@
+{
+  "spans": [
+    {
+      "project_id": "01900000-0000-7000-8000-000000000001",
+      "trace_id": "3f18774f5d9926624c9050c77c84f603",
+      "span_id": "06e278dc494bd271",
+      "name": "invoke_agent capture-eve",
+      "span_kind": "agent",
+      "start_time": "2025-12-31T23:59:50.000000000Z",
+      "end_time": "2025-12-31T23:59:50.277000000Z",
+      "status": "unset",
+      "service_name": "capture-eve",
+      "session_id": "capture-volatile-1",
+      "operation": "invoke_agent",
+      "input": "[{\"role\":\"user\",\"parts\":[{\"type\":\"text\",\"content\":\"Read hello.txt with the read_file tool and say what it says.\"}],\"kind\":\"user\"}]",
+      "input_format": "messages",
+      "output": "[{\"role\":\"assistant\",\"parts\":[{\"type\":\"text\",\"content\":\"hello.txt says: hello from cetra\"}],\"finish_reason\":\"stop\"}]",
+      "output_format": "messages",
+      "input_preview": "Read hello.txt with the read_file tool and say what it says.",
+      "output_preview": "hello.txt says: hello from cetra",
+      "attributes": {
+        "agent.channel.audience": "unknown",
+        "agent.channel.delivery.id": "capture-volatile-2",
+        "agent.channel.delivery.input": "{\"message\":\"Read hello.txt with the read_file tool and say what it says.\"}",
+        "agent.channel.kind": "channel:eve",
+        "agent.channel.name": "eve",
+        "agent.framework.name": "eve",
+        "agent.framework.version": "1.0.1",
+        "agent.name": "capture-eve",
+        "agent.principal.current.id": "local-dev",
+        "agent.principal.current.type": "local-dev",
+        "agent.principal.initiator.id": "local-dev",
+        "agent.principal.initiator.type": "local-dev",
+        "agent.run.id": "capture-volatile-1",
+        "agent.run.type": "session",
+        "agent.session.origin": "channel",
+        "agent.session.title": "Read hello.txt with the read_file tool and say what it says.",
+        "agent.trace.content.input": "true",
+        "agent.trace.content.output": "true",
+        "agent.trace.schema.version": "4",
+        "agent.turn.id": "turn_0",
+        "agent.turn.outcome": "completed",
+        "agent.turn.sequence": "0",
+        "gen_ai.agent.name": "capture-eve",
+        "gen_ai.conversation.id": "capture-volatile-1",
+        "gen_ai.operation.name": "invoke_agent",
+        "gen_ai.usage.input_tokens": "213",
+        "gen_ai.usage.output_tokens": "29",
+        "operation.name": "invoke_agent",
+        "resource.name": "invoke_agent capture-eve"
+      },
+      "resource_attributes": {
+        "cloud.provider": "vercel",
+        "process.runtime.name": "nodejs",
+        "vercel.runtime": "nodejs"
+      },
+      "scope_name": "eve.agent",
+      "scope_version": "1.0.1",
+      "events": [
+        {
+          "time": "2025-12-31T23:59:50.000000000Z",
+          "name": "turn.started"
+        },
+        {
+          "time": "2025-12-31T23:59:50.277000000Z",
+          "name": "turn.completed"
+        }
+      ],
+      "conventions": [
+        "genai"
+      ],
+      "ingest_time": "2026-01-01T00:00:00.000000000Z",
+      "schema_version": 2
+    },
+    {
+      "project_id": "01900000-0000-7000-8000-000000000001",
+      "trace_id": "3f18774f5d9926624c9050c77c84f603",
+      "span_id": "264cea718d290422",
+      "parent_span_id": "06e278dc494bd271",
+      "name": "agent.step",
+      "span_kind": "span",
+      "start_time": "2025-12-31T23:59:50.032000000Z",
+      "end_time": "2025-12-31T23:59:50.137000000Z",
+      "status": "unset",
+      "service_name": "capture-eve",
+      "session_id": "capture-volatile-1",
+      "operation": "workflow",
+      "attributes": {
+        "agent.channel.kind": "channel:eve",
+        "agent.framework.name": "eve",
+        "agent.framework.version": "1.0.1",
+        "agent.model.id": "gpt-4o-mini",
+        "agent.name": "capture-eve",
+        "agent.run.id": "capture-volatile-1",
+        "agent.session.origin": "channel",
+        "agent.step.attempt": "0",
+        "agent.step.index": "0",
+        "agent.trace.schema.version": "4",
+        "agent.turn.id": "turn_0",
+        "agent.usage.cache_read_tokens": "0",
+        "agent.usage.input_tokens": "82",
+        "agent.usage.output_tokens": "17",
+        "gen_ai.conversation.id": "capture-volatile-1",
+        "gen_ai.operation.name": "workflow",
+        "operation.name": "workflow",
+        "resource.name": "agent.step"
+      },
+      "resource_attributes": {
+        "cloud.provider": "vercel",
+        "process.runtime.name": "nodejs",
+        "vercel.runtime": "nodejs"
+      },
+      "scope_name": "eve.agent",
+      "scope_version": "1.0.1",
+      "events": [
+        {
+          "time": "2025-12-31T23:59:50.032000000Z",
+          "name": "step.started"
+        },
+        {
+          "time": "2025-12-31T23:59:50.137000000Z",
+          "name": "step.completed"
+        }
+      ],
+      "links": [
+        {
+          "trace_id": "311e425b7c94f5b2bbe110c697ddaac4",
+          "span_id": "bb4d4b6f8fcc4548",
+          "attributes": "{\"eve.link.type\":\"workflow.delivery\"}"
+        }
+      ],
+      "conventions": [
+        "genai"
+      ],
+      "ingest_time": "2026-01-01T00:00:00.000000000Z",
+      "schema_version": 2
+    },
+    {
+      "project_id": "01900000-0000-7000-8000-000000000001",
+      "trace_id": "3f18774f5d9926624c9050c77c84f603",
+      "span_id": "377621a2006adb6b",
+      "parent_span_id": "264cea718d290422",
+      "name": "chat gpt-4o-mini",
+      "span_kind": "llm",
+      "start_time": "2025-12-31T23:59:50.033000000Z",
+      "end_time": "2025-12-31T23:59:50.121000000Z",
+      "status": "unset",
+      "service_name": "capture-eve",
+      "session_id": "capture-volatile-1",
+      "provider": "openai",
+      "request_model": "gpt-4o-mini",
+      "response_model": "gpt-4o-mini-2024-07-18",
+      "operation": "chat",
+      "input_tokens": 82,
+      "output_tokens": 17,
+      "cache_read_tokens": 0,
+      "total_tokens": 99,
+      "cost_input": 0.000082,
+      "cost_output": 0.000068,
+      "cost_total": 0.00015000000000000001,
+      "cost_source": "computed",
+      "input": "[{\"role\":\"user\",\"parts\":[{\"type\":\"text\",\"content\":\"Read hello.txt with the read_file tool and say what it says.\"}],\"kind\":\"user\"}]",
+      "input_format": "messages",
+      "output": "[{\"role\":\"assistant\",\"parts\":[{\"type\":\"tool_call\",\"id\":\"call_read_file_1\",\"name\":\"read_file\",\"arguments\":{\"path\":\"hello.txt\"}}],\"finish_reason\":\"tool_call\"}]",
+      "output_format": "messages",
+      "input_preview": "Read hello.txt with the read_file tool and say what it says.",
+      "system_instructions": "[{\"content\":\"Instructions (instructions)\\nYou are a helpful assistant. Use the read_file tool when asked to read a file, then answer in one sentence.\\n\\nTasks\\n- A call that returns \\\"Started task <id>\\\" is a task: it keeps working while you continue. Every agent call is a task.\\n- Each result arrives once, in a <task_result> message. Until then you know nothing about it, so don't guess or report its result.\\n- Ending your reply doesn't end your turn. While tasks work, eve holds your turn and calls you again with each result.\\n- If you have nothing to tell the person until a result arrives, call eve__task_wait. Start every independent task first, then wait.\\n- If the person should hear from you now, for example to confirm work is underway when they don't need the result yet, reply. When results arrive, report them without repeating yourself.\\n- Don't redo work you delegated. Never use sleep or shell commands to wait for a task.\\n- To correct or continue an agent, or any task that accepts more input, call its tool again with its taskId. A new message never stops your tasks: answer it if it asks you something, decide whether it changes the work, then keep each task, correct an agent by taskId, or stop a task with eve__task_cancel.\",\"type\":\"text\"}]",
+      "tool_definitions": "[{\"name\":\"bash\",\"description\":\"Execute a shell command in the shared workspace environment. The call waits 60 seconds for the command, or `timeout` seconds from 1 to 120. For builds, installs, and test suites whose full output you need, pass a larger `timeout` instead of shortening or splitting the command. The result is the command's stdout, then any stderr after a `[stderr]` line, or `(no output)`. A command that fails ends with `[exit code: N]` and is reported as an error. A command still running after the wait keeps running in the background, and a final note says how to check on or stop it.\",\"parameters\":{\"type\":\"object\",\"properties\":{\"command\":{\"type\":\"string\",\"description\":\"The shell command to execute.\"},\"timeout\":{\"type\":\"number\",\"description\":\"Seconds to wait for the command before it keeps running in the background. Defaults to 60; values above 120 wait 120, and values below 1 wait 1.\"}},\"required\":[\"command\"],\"additionalProperties\":false}},{\"name\":\"write_file\",\"description\":\"Writes a file to the local filesystem.\\n\\nUsage:\\n- This tool will overwrite the existing file if there is one at the provided path.\\n- If this is an existing file, you MUST use the read_file tool first to read the file's contents. This tool will fail if you did not read the file first.\\n- ALWAYS prefer editing existing files in the codebase. NEVER write new files unless explicitly required.\\n- NEVER proactively create documentation files (*.md) or README files. Only create documentation files if explicitly requested by the User.\\n- Only use emojis if the user explicitly requests it. Avoid writing emojis to files unless asked.\",\"parameters\":{\"type\":\"object\",\"properties\":{\"content\":{\"type\":\"string\",\"description\":\"Complete replacement file contents.\"},\"filePath\":{\"type\":\"string\",\"description\":\"The path to the file to write: absolute, relative to the workspace root, or beginning with $HOME/.\"}},\"required\":[\"content\",\"filePath\"],\"additionalProperties\":false}},{\"name\":\"edit_file\",\"description\":\"Edit a single file using exact text replacement. Every edits[].oldText must match a unique, non-overlapping region of the original file. If two changes affect the same block or nearby lines, merge them into one edit instead of emitting overlapping edits. Do not include large unchanged regions just to connect distant changes.\\n\\nGuidelines:\\n- Use edit_file for targeted changes. Batch changes to one file in a single call.\\n- Each edits[].oldText must exactly and uniquely match the original file. Keep matches short and non-overlapping; merge nearby changes without including large unchanged regions.\",\"parameters\":{\"type\":\"object\",\"properties\":{\"path\":{\"type\":\"string\",\"description\":\"Path to the file to edit (relative or absolute)\"},\"edits\":{\"type\":\"array\",\"items\":{\"type\":\"object\",\"properties\":{\"oldText\":{\"type\":\"string\",\"description\":\"Exact text for one targeted replacement. It must be unique in the original file and must not overlap with any other edits[].oldText in the same call.\"},\"newText\":{\"type\":\"string\",\"description\":\"Replacement text for this targeted edit.\"}},\"required\":[\"oldText\",\"newText\"],\"additionalProperties\":false},\"description\":\"One or more targeted replacements. Each edit is matched against the original file, not incrementally. Do not include overlapping or nested edits. If two changes touch the same block or nearby lines, merge them into one edit instead.\"}},\"required\":[\"path\",\"edits\"],\"additionalProperties\":false}},{\"name\":\"web_fetch\",\"description\":\"Fetch a webpage and return its content in the requested format. Use this to retrieve and analyze content from URLs.\\n\\nUsage notes:\\n- The URL must be a fully-formed valid URL starting with https://\\n- HTML responses are automatically converted to markdown or plain text based on the requested format\\n- Format options: \\\"markdown\\\" (default), \\\"text\\\", or \\\"html\\\"\\n- Default timeout is 30 seconds (max 120 seconds)\\n- Maximum response size is 5 MB; content is further capped at the shared tool-output budget (50 KB / 2000 lines)\\n- This tool is read-only and does not modify any files\",\"parameters\":{\"type\":\"object\",\"properties\":{\"format\":{\"type\":\"string\",\"enum\":[\"markdown\",\"text\",\"html\"],\"description\":\"The format to return the content in (text, markdown, or html). HTML responses are automatically converted to the requested format. Defaults to \\\"markdown\\\".\"},\"timeout\":{\"type\":\"number\",\"description\":\"Optional timeout in seconds, greater than 0. Defaults to 30, max 120.\"},\"url\":{\"type\":\"string\",\"description\":\"The fully-formed URL to fetch content from. Must start with https://.\"}},\"required\":[\"url\"],\"additionalProperties\":false}},{\"name\":\"web_search\"},{\"name\":\"agent\",\"description\":\"Delegate a focused subtask to a copy of yourself. Use it to isolate complex work or split a large task into independent pieces. Each call starts a task, so several agents can work at once: start every independent one before you wait. A new child has fresh history and state but reuses your tools and sandbox, so give parallel writers non-overlapping scopes. In message, state the goal, what to return, and whether it may change files. It does not see this conversation, so put everything it needs in message. To correct or continue an agent task, call this tool again with its taskId; without taskId, each call starts a new agent.\",\"parameters\":{\"type\":\"object\",\"properties\":{\"message\":{\"type\":\"string\",\"description\":\"The message to send to the agent, with everything it needs to do the work.\"},\"taskId\":{\"description\":\"The id of a task this tool started, copied from its \\\"Started task\\\" receipt or the [Tasks] note, to send it this input. Omit it to start a new task.\",\"type\":\"string\"}},\"required\":[\"message\"],\"additionalProperties\":false}},{\"name\":\"read_file\",\"description\":\"Read a text file and return its contents.\",\"parameters\":{\"type\":\"object\",\"properties\":{\"path\":{\"type\":\"string\",\"minLength\":1}},\"required\":[\"path\"],\"additionalProperties\":false}},{\"name\":\"self-modification__agent\",\"description\":\"Delegate here immediately when the user asks to change the self-modification subagent's model, reasoning, or configuration. Also delegate when the user asks to change this eve agent or its authored source. If the requested change references a tool or skill, include the exact identifier. Do not infer source paths; let the child resolve the appropriate file under /source. Delegate the requested change and existing constraints without adding unrequested features, implementation steps, or reporting requirements. Treat requests for persistent changes to future behavior or capabilities as source-modification requests, even when the requester does not mention files or source code. Infer persistence from the request and conversation rather than waiting for phrases such as “modify your source.” For example, asking the agent to stop always doing something, add a capability, or change future responses calls for inspecting and editing the authored source instead of providing a one-turn workaround. Treat questions phrased as whether you can install, add, enable, or connect to a named product or service as requests to extend this eve agent and delegate immediately. Do not assume they refer to device software, ask what kind of installation they mean, or deny them because you lack access to the user's device. The subagent determines whether the request maps to an integration, channel, connection, or other capability, then checks registry availability and any required setup. Delegate questions about which integrations, channels, connections, or capabilities are available to add: the subagent searches the eve registry and reports exact item addresses instead of guessing them. Delegate requests to investigate, diagnose, or optimize the agent's behavior from local traces to this subagent: it can inspect the invoking session's trace and make persistent source changes when warranted. Resolve short follow-ups such as “yes” or “do it” against the preceding conversation. If whether the requested change should persist is genuinely ambiguous, ask one concise clarifying question. If a tool or capability created or changed by this subagent later fails or behaves incorrectly, explain the observed problem and offer to delegate a repair. Do not start the repair until the user confirms. Treat that confirmation as a source-modification request and delegate it immediately, including the exact identifier, failing behavior, expected behavior, and existing constraints. Source edits do not affect the caller’s current turn. After this subagent reports changes, do not invoke edited tools or attempt runtime verification until a new user turn. It does not see this conversation, so put everything it needs in message. To correct or continue an agent task, call this tool again with its taskId; without taskId, each call starts a new agent.\",\"parameters\":{\"type\":\"object\",\"properties\":{\"message\":{\"type\":\"string\",\"description\":\"The message to send to the agent, with everything it needs to do the work.\"},\"taskId\":{\"description\":\"The id of a task this tool started, copied from its \\\"Started task\\\" receipt or the [Tasks] note, to send it this input. Omit it to start a new task.\",\"type\":\"string\"}},\"required\":[\"message\"],\"additionalProperties\":false}},{\"name\":\"eve__task_wait\",\"description\":\"Call eve__task_wait sparingly, only when you deliberately want to withhold a message from the user while waiting for a task result. Tasks keep running and their results reach you without calling eve__task_wait. If the user should hear from you now, reply instead. Wait silently until any of your tasks has a result, a new message arrives, or timeoutSeconds pass. It returns after the first result, which follows in a <task_result> message; wait again only if you still want to withhold a reply until another result arrives. Waiting never stops a task.\",\"parameters\":{\"type\":\"object\",\"properties\":{\"timeoutSeconds\":{\"type\":\"integer\",\"minimum\":1,\"description\":\"Optional. Seconds to wait before returning without a result. There is no upper limit, so set it above 1800 to wait longer than 30 minutes. Omit it to wait up to 30 minutes for a result or a new message, which is almost always right. Don't use short timeouts to check on tasks: results reach you without checking.\"}},\"additionalProperties\":false}},{\"name\":\"eve__task_cancel\",\"description\":\"Stop a task's current work. That work never reports back; if it already had a result, that result is still delivered. Cancelling an agent or one-shot task ends it; start a new task to delegate again. Other tasks that accept more input stay available: call their tool with the taskId to give them new work.\",\"parameters\":{\"type\":\"object\",\"properties\":{\"taskId\":{\"type\":\"string\",\"minLength\":1,\"description\":\"The id of the task to stop, copied from its \\\"Started task\\\" receipt or the [Tasks] note.\"}},\"required\":[\"taskId\"],\"additionalProperties\":false}}]",
+      "attributes": {
+        "agent.run.id": "capture-volatile-1",
+        "agent.trace.schema.version": "4",
+        "agent.turn.id": "turn_0",
+        "ai.response.finish_reason": "tool-calls",
+        "ai.response.tool_calls": "[{\"callId\":\"call_read_file_1\",\"input\":{\"path\":\"hello.txt\"},\"toolName\":\"read_file\"}]",
+        "gen_ai.agent.name": "capture-eve",
+        "gen_ai.conversation.id": "capture-volatile-1",
+        "gen_ai.operation.name": "chat",
+        "gen_ai.provider.name": "openai.chat",
+        "gen_ai.request.model": "gpt-4o-mini",
+        "gen_ai.response.finish_reasons": "[\"tool-calls\"]",
+        "gen_ai.response.id": "chatcmpl-capture-1",
+        "gen_ai.response.model": "gpt-4o-mini-2024-07-18",
+        "gen_ai.usage.cache_read.input_tokens": "0",
+        "gen_ai.usage.input_tokens": "82",
+        "gen_ai.usage.output_tokens": "17",
+        "operation.name": "chat",
+        "resource.name": "chat gpt-4o-mini"
+      },
+      "resource_attributes": {
+        "cloud.provider": "vercel",
+        "process.runtime.name": "nodejs",
+        "vercel.runtime": "nodejs"
+      },
+      "scope_name": "eve.agent",
+      "scope_version": "1.0.1",
+      "conventions": [
+        "genai",
+        "vercel"
+      ],
+      "ingest_time": "2026-01-01T00:00:00.000000000Z",
+      "schema_version": 2
+    },
+    {
+      "project_id": "01900000-0000-7000-8000-000000000001",
+      "trace_id": "3f18774f5d9926624c9050c77c84f603",
+      "span_id": "9e78a2bbde66eec6",
+      "parent_span_id": "264cea718d290422",
+      "name": "execute_tool read_file",
+      "span_kind": "tool",
+      "start_time": "2025-12-31T23:59:50.122000000Z",
+      "end_time": "2025-12-31T23:59:50.133000000Z",
+      "status": "unset",
+      "service_name": "capture-eve",
+      "session_id": "capture-volatile-1",
+      "operation": "execute_tool",
+      "input": "{\"path\":\"hello.txt\"}",
+      "input_format": "json",
+      "output": "{\"path\":\"hello.txt\",\"text\":\"hello from cetra\\n\"}",
+      "output_format": "json",
+      "input_preview": "{\"path\":\"hello.txt\"}",
+      "output_preview": "{\"path\":\"hello.txt\",\"text\":\"hello from cetra\\n\"}",
+      "attributes": {
+        "agent.action.kind": "tool-call",
+        "agent.action.name": "read_file",
+        "agent.action.outcome": "completed",
+        "agent.framework.name": "eve",
+        "agent.framework.version": "1.0.1",
+        "agent.run.id": "capture-volatile-1",
+        "agent.step.attempt": "0",
+        "agent.step.index": "0",
+        "agent.tool.is_framework": "false",
+        "agent.trace.schema.version": "4",
+        "agent.turn.id": "turn_0",
+        "gen_ai.agent.name": "capture-eve",
+        "gen_ai.conversation.id": "capture-volatile-1",
+        "gen_ai.execute_tool.duration": "0.003",
+        "gen_ai.operation.name": "execute_tool",
+        "gen_ai.tool.call.id": "call_read_file_1",
+        "gen_ai.tool.name": "read_file",
+        "gen_ai.tool.type": "function",
+        "operation.name": "execute_tool",
+        "resource.name": "execute_tool read_file"
+      },
+      "resource_attributes": {
+        "cloud.provider": "vercel",
+        "process.runtime.name": "nodejs",
+        "vercel.runtime": "nodejs"
+      },
+      "scope_name": "eve.agent",
+      "scope_version": "1.0.1",
+      "conventions": [
+        "genai"
+      ],
+      "ingest_time": "2026-01-01T00:00:00.000000000Z",
+      "schema_version": 2
+    },
+    {
+      "project_id": "01900000-0000-7000-8000-000000000001",
+      "trace_id": "3f18774f5d9926624c9050c77c84f603",
+      "span_id": "b22ce1e108f4d2cd",
+      "parent_span_id": "06e278dc494bd271",
+      "name": "agent.step",
+      "span_kind": "span",
+      "start_time": "2025-12-31T23:59:50.193000000Z",
+      "end_time": "2025-12-31T23:59:50.275000000Z",
+      "status": "unset",
+      "service_name": "capture-eve",
+      "session_id": "capture-volatile-1",
+      "operation": "workflow",
+      "attributes": {
+        "agent.channel.kind": "channel:eve",
+        "agent.framework.name": "eve",
+        "agent.framework.version": "1.0.1",
+        "agent.model.id": "gpt-4o-mini",
+        "agent.name": "capture-eve",
+        "agent.run.id": "capture-volatile-1",
+        "agent.session.origin": "channel",
+        "agent.step.attempt": "0",
+        "agent.step.index": "1",
+        "agent.trace.schema.version": "4",
+        "agent.turn.id": "turn_0",
+        "agent.usage.cache_read_tokens": "0",
+        "agent.usage.input_tokens": "131",
+        "agent.usage.output_tokens": "12",
+        "gen_ai.conversation.id": "capture-volatile-1",
+        "gen_ai.operation.name": "workflow",
+        "operation.name": "workflow",
+        "resource.name": "agent.step"
+      },
+      "resource_attributes": {
+        "cloud.provider": "vercel",
+        "process.runtime.name": "nodejs",
+        "vercel.runtime": "nodejs"
+      },
+      "scope_name": "eve.agent",
+      "scope_version": "1.0.1",
+      "events": [
+        {
+          "time": "2025-12-31T23:59:50.193000000Z",
+          "name": "step.started"
+        },
+        {
+          "time": "2025-12-31T23:59:50.274000000Z",
+          "name": "step.completed"
+        }
+      ],
+      "links": [
+        {
+          "trace_id": "311e425b7c94f5b2bbe110c697ddaac4",
+          "span_id": "e447e0861f524f06",
+          "attributes": "{\"eve.link.type\":\"workflow.delivery\"}"
+        }
+      ],
+      "conventions": [
+        "genai"
+      ],
+      "ingest_time": "2026-01-01T00:00:00.000000000Z",
+      "schema_version": 2
+    },
+    {
+      "project_id": "01900000-0000-7000-8000-000000000001",
+      "trace_id": "3f18774f5d9926624c9050c77c84f603",
+      "span_id": "9b9a73ab2f565e62",
+      "parent_span_id": "b22ce1e108f4d2cd",
+      "name": "chat gpt-4o-mini",
+      "span_kind": "llm",
+      "start_time": "2025-12-31T23:59:50.194000000Z",
+      "end_time": "2025-12-31T23:59:50.272000000Z",
+      "status": "unset",
+      "service_name": "capture-eve",
+      "session_id": "capture-volatile-1",
+      "provider": "openai",
+      "request_model": "gpt-4o-mini",
+      "response_model": "gpt-4o-mini-2024-07-18",
+      "operation": "chat",
+      "input_tokens": 131,
+      "output_tokens": 12,
+      "cache_read_tokens": 0,
+      "total_tokens": 143,
+      "cost_input": 0.000131,
+      "cost_output": 0.000048,
+      "cost_total": 0.00017900000000000001,
+      "cost_source": "computed",
+      "input": "[{\"role\":\"user\",\"parts\":[{\"type\":\"text\",\"content\":\"Read hello.txt with the read_file tool and say what it says.\"}],\"kind\":\"user\"},{\"role\":\"assistant\",\"parts\":[{\"type\":\"tool_call\",\"id\":\"call_read_file_1\",\"name\":\"read_file\",\"arguments\":{\"path\":\"hello.txt\"}}]},{\"role\":\"tool\",\"parts\":[{\"type\":\"tool_call_response\",\"id\":\"call_read_file_1\",\"response\":{\"path\":\"hello.txt\",\"text\":\"hello from cetra\\n\"}}]}]",
+      "input_format": "messages",
+      "output": "[{\"role\":\"assistant\",\"parts\":[{\"type\":\"text\",\"content\":\"hello.txt says: hello from cetra\"}],\"finish_reason\":\"stop\"}]",
+      "output_format": "messages",
+      "input_preview": "Read hello.txt with the read_file tool and say what it says.",
+      "output_preview": "hello.txt says: hello from cetra",
+      "system_instructions": "[{\"content\":\"Instructions (instructions)\\nYou are a helpful assistant. Use the read_file tool when asked to read a file, then answer in one sentence.\\n\\nTasks\\n- A call that returns \\\"Started task <id>\\\" is a task: it keeps working while you continue. Every agent call is a task.\\n- Each result arrives once, in a <task_result> message. Until then you know nothing about it, so don't guess or report its result.\\n- Ending your reply doesn't end your turn. While tasks work, eve holds your turn and calls you again with each result.\\n- If you have nothing to tell the person until a result arrives, call eve__task_wait. Start every independent task first, then wait.\\n- If the person should hear from you now, for example to confirm work is underway when they don't need the result yet, reply. When results arrive, report them without repeating yourself.\\n- Don't redo work you delegated. Never use sleep or shell commands to wait for a task.\\n- To correct or continue an agent, or any task that accepts more input, call its tool again with its taskId. A new message never stops your tasks: answer it if it asks you something, decide whether it changes the work, then keep each task, correct an agent by taskId, or stop a task with eve__task_cancel.\",\"type\":\"text\"}]",
+      "tool_definitions": "[{\"name\":\"bash\",\"description\":\"Execute a shell command in the shared workspace environment. The call waits 60 seconds for the command, or `timeout` seconds from 1 to 120. For builds, installs, and test suites whose full output you need, pass a larger `timeout` instead of shortening or splitting the command. The result is the command's stdout, then any stderr after a `[stderr]` line, or `(no output)`. A command that fails ends with `[exit code: N]` and is reported as an error. A command still running after the wait keeps running in the background, and a final note says how to check on or stop it.\",\"parameters\":{\"type\":\"object\",\"properties\":{\"command\":{\"type\":\"string\",\"description\":\"The shell command to execute.\"},\"timeout\":{\"type\":\"number\",\"description\":\"Seconds to wait for the command before it keeps running in the background. Defaults to 60; values above 120 wait 120, and values below 1 wait 1.\"}},\"required\":[\"command\"],\"additionalProperties\":false}},{\"name\":\"write_file\",\"description\":\"Writes a file to the local filesystem.\\n\\nUsage:\\n- This tool will overwrite the existing file if there is one at the provided path.\\n- If this is an existing file, you MUST use the read_file tool first to read the file's contents. This tool will fail if you did not read the file first.\\n- ALWAYS prefer editing existing files in the codebase. NEVER write new files unless explicitly required.\\n- NEVER proactively create documentation files (*.md) or README files. Only create documentation files if explicitly requested by the User.\\n- Only use emojis if the user explicitly requests it. Avoid writing emojis to files unless asked.\",\"parameters\":{\"type\":\"object\",\"properties\":{\"content\":{\"type\":\"string\",\"description\":\"Complete replacement file contents.\"},\"filePath\":{\"type\":\"string\",\"description\":\"The path to the file to write: absolute, relative to the workspace root, or beginning with $HOME/.\"}},\"required\":[\"content\",\"filePath\"],\"additionalProperties\":false}},{\"name\":\"edit_file\",\"description\":\"Edit a single file using exact text replacement. Every edits[].oldText must match a unique, non-overlapping region of the original file. If two changes affect the same block or nearby lines, merge them into one edit instead of emitting overlapping edits. Do not include large unchanged regions just to connect distant changes.\\n\\nGuidelines:\\n- Use edit_file for targeted changes. Batch changes to one file in a single call.\\n- Each edits[].oldText must exactly and uniquely match the original file. Keep matches short and non-overlapping; merge nearby changes without including large unchanged regions.\",\"parameters\":{\"type\":\"object\",\"properties\":{\"path\":{\"type\":\"string\",\"description\":\"Path to the file to edit (relative or absolute)\"},\"edits\":{\"type\":\"array\",\"items\":{\"type\":\"object\",\"properties\":{\"oldText\":{\"type\":\"string\",\"description\":\"Exact text for one targeted replacement. It must be unique in the original file and must not overlap with any other edits[].oldText in the same call.\"},\"newText\":{\"type\":\"string\",\"description\":\"Replacement text for this targeted edit.\"}},\"required\":[\"oldText\",\"newText\"],\"additionalProperties\":false},\"description\":\"One or more targeted replacements. Each edit is matched against the original file, not incrementally. Do not include overlapping or nested edits. If two changes touch the same block or nearby lines, merge them into one edit instead.\"}},\"required\":[\"path\",\"edits\"],\"additionalProperties\":false}},{\"name\":\"web_fetch\",\"description\":\"Fetch a webpage and return its content in the requested format. Use this to retrieve and analyze content from URLs.\\n\\nUsage notes:\\n- The URL must be a fully-formed valid URL starting with https://\\n- HTML responses are automatically converted to markdown or plain text based on the requested format\\n- Format options: \\\"markdown\\\" (default), \\\"text\\\", or \\\"html\\\"\\n- Default timeout is 30 seconds (max 120 seconds)\\n- Maximum response size is 5 MB; content is further capped at the shared tool-output budget (50 KB / 2000 lines)\\n- This tool is read-only and does not modify any files\",\"parameters\":{\"type\":\"object\",\"properties\":{\"format\":{\"type\":\"string\",\"enum\":[\"markdown\",\"text\",\"html\"],\"description\":\"The format to return the content in (text, markdown, or html). HTML responses are automatically converted to the requested format. Defaults to \\\"markdown\\\".\"},\"timeout\":{\"type\":\"number\",\"description\":\"Optional timeout in seconds, greater than 0. Defaults to 30, max 120.\"},\"url\":{\"type\":\"string\",\"description\":\"The fully-formed URL to fetch content from. Must start with https://.\"}},\"required\":[\"url\"],\"additionalProperties\":false}},{\"name\":\"web_search\"},{\"name\":\"agent\",\"description\":\"Delegate a focused subtask to a copy of yourself. Use it to isolate complex work or split a large task into independent pieces. Each call starts a task, so several agents can work at once: start every independent one before you wait. A new child has fresh history and state but reuses your tools and sandbox, so give parallel writers non-overlapping scopes. In message, state the goal, what to return, and whether it may change files. It does not see this conversation, so put everything it needs in message. To correct or continue an agent task, call this tool again with its taskId; without taskId, each call starts a new agent.\",\"parameters\":{\"type\":\"object\",\"properties\":{\"message\":{\"type\":\"string\",\"description\":\"The message to send to the agent, with everything it needs to do the work.\"},\"taskId\":{\"description\":\"The id of a task this tool started, copied from its \\\"Started task\\\" receipt or the [Tasks] note, to send it this input. Omit it to start a new task.\",\"type\":\"string\"}},\"required\":[\"message\"],\"additionalProperties\":false}},{\"name\":\"read_file\",\"description\":\"Read a text file and return its contents.\",\"parameters\":{\"type\":\"object\",\"properties\":{\"path\":{\"type\":\"string\",\"minLength\":1}},\"required\":[\"path\"],\"additionalProperties\":false}},{\"name\":\"self-modification__agent\",\"description\":\"Delegate here immediately when the user asks to change the self-modification subagent's model, reasoning, or configuration. Also delegate when the user asks to change this eve agent or its authored source. If the requested change references a tool or skill, include the exact identifier. Do not infer source paths; let the child resolve the appropriate file under /source. Delegate the requested change and existing constraints without adding unrequested features, implementation steps, or reporting requirements. Treat requests for persistent changes to future behavior or capabilities as source-modification requests, even when the requester does not mention files or source code. Infer persistence from the request and conversation rather than waiting for phrases such as “modify your source.” For example, asking the agent to stop always doing something, add a capability, or change future responses calls for inspecting and editing the authored source instead of providing a one-turn workaround. Treat questions phrased as whether you can install, add, enable, or connect to a named product or service as requests to extend this eve agent and delegate immediately. Do not assume they refer to device software, ask what kind of installation they mean, or deny them because you lack access to the user's device. The subagent determines whether the request maps to an integration, channel, connection, or other capability, then checks registry availability and any required setup. Delegate questions about which integrations, channels, connections, or capabilities are available to add: the subagent searches the eve registry and reports exact item addresses instead of guessing them. Delegate requests to investigate, diagnose, or optimize the agent's behavior from local traces to this subagent: it can inspect the invoking session's trace and make persistent source changes when warranted. Resolve short follow-ups such as “yes” or “do it” against the preceding conversation. If whether the requested change should persist is genuinely ambiguous, ask one concise clarifying question. If a tool or capability created or changed by this subagent later fails or behaves incorrectly, explain the observed problem and offer to delegate a repair. Do not start the repair until the user confirms. Treat that confirmation as a source-modification request and delegate it immediately, including the exact identifier, failing behavior, expected behavior, and existing constraints. Source edits do not affect the caller’s current turn. After this subagent reports changes, do not invoke edited tools or attempt runtime verification until a new user turn. It does not see this conversation, so put everything it needs in message. To correct or continue an agent task, call this tool again with its taskId; without taskId, each call starts a new agent.\",\"parameters\":{\"type\":\"object\",\"properties\":{\"message\":{\"type\":\"string\",\"description\":\"The message to send to the agent, with everything it needs to do the work.\"},\"taskId\":{\"description\":\"The id of a task this tool started, copied from its \\\"Started task\\\" receipt or the [Tasks] note, to send it this input. Omit it to start a new task.\",\"type\":\"string\"}},\"required\":[\"message\"],\"additionalProperties\":false}},{\"name\":\"eve__task_wait\",\"description\":\"Call eve__task_wait sparingly, only when you deliberately want to withhold a message from the user while waiting for a task result. Tasks keep running and their results reach you without calling eve__task_wait. If the user should hear from you now, reply instead. Wait silently until any of your tasks has a result, a new message arrives, or timeoutSeconds pass. It returns after the first result, which follows in a <task_result> message; wait again only if you still want to withhold a reply until another result arrives. Waiting never stops a task.\",\"parameters\":{\"type\":\"object\",\"properties\":{\"timeoutSeconds\":{\"type\":\"integer\",\"minimum\":1,\"description\":\"Optional. Seconds to wait before returning without a result. There is no upper limit, so set it above 1800 to wait longer than 30 minutes. Omit it to wait up to 30 minutes for a result or a new message, which is almost always right. Don't use short timeouts to check on tasks: results reach you without checking.\"}},\"additionalProperties\":false}},{\"name\":\"eve__task_cancel\",\"description\":\"Stop a task's current work. That work never reports back; if it already had a result, that result is still delivered. Cancelling an agent or one-shot task ends it; start a new task to delegate again. Other tasks that accept more input stay available: call their tool with the taskId to give them new work.\",\"parameters\":{\"type\":\"object\",\"properties\":{\"taskId\":{\"type\":\"string\",\"minLength\":1,\"description\":\"The id of the task to stop, copied from its \\\"Started task\\\" receipt or the [Tasks] note.\"}},\"required\":[\"taskId\"],\"additionalProperties\":false}}]",
+      "attributes": {
+        "agent.run.id": "capture-volatile-1",
+        "agent.trace.schema.version": "4",
+        "agent.turn.id": "turn_0",
+        "ai.response.finish_reason": "stop",
+        "gen_ai.agent.name": "capture-eve",
+        "gen_ai.conversation.id": "capture-volatile-1",
+        "gen_ai.operation.name": "chat",
+        "gen_ai.provider.name": "openai.chat",
+        "gen_ai.request.model": "gpt-4o-mini",
+        "gen_ai.response.finish_reasons": "[\"stop\"]",
+        "gen_ai.response.id": "chatcmpl-capture-2",
+        "gen_ai.response.model": "gpt-4o-mini-2024-07-18",
+        "gen_ai.usage.cache_read.input_tokens": "0",
+        "gen_ai.usage.input_tokens": "131",
+        "gen_ai.usage.output_tokens": "12",
+        "operation.name": "chat",
+        "resource.name": "chat gpt-4o-mini"
+      },
+      "resource_attributes": {
+        "cloud.provider": "vercel",
+        "process.runtime.name": "nodejs",
+        "vercel.runtime": "nodejs"
+      },
+      "scope_name": "eve.agent",
+      "scope_version": "1.0.1",
+      "conventions": [
+        "genai",
+        "vercel"
+      ],
+      "ingest_time": "2026-01-01T00:00:00.000000000Z",
+      "schema_version": 2
+    }
+  ],
+  "media": [],
+  "rejected_spans": 0
+}

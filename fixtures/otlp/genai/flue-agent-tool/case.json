@@ -1,0 +1,22 @@
+{
+  "description": "Flue agent run with one tool call, exported by @flue/opentelemetry as GenAI spans.",
+  "origin": "captured",
+  "source": {
+    "instrumentation": "@flue/opentelemetry",
+    "instrumentation_version": "2.3.0",
+    "language": "typescript",
+    "libraries": {
+      "@earendil-works/pi-ai": "1.4.0",
+      "@flue/opentelemetry": "2.3.0",
+      "@flue/runtime": "2.3.0"
+    },
+    "captured_at": "2026-11-24T20:14:02Z"
+  },
+  "spec_refs": [
+    "02 § Convention detection",
+    "02 § Mapping tables / Span kind",
+    "02 § Mapping tables / Input / output",
+    "02 § Mapping tables / Model, provider, usage"
+  ],
+  "notes": "Flue 2.3.0: @flue/runtime with @flue/opentelemetry's instrumentation, on @earendil-works/pi-ai 1.4.0 (pinned for Flue; 2.3.0 fails to import with 1.5.x). The app owns the SDK, so the tracer provider is the harness's. The provider is registered with createProvider under id \"openai\", which makes gen_ai.provider.name read \"openai\" exactly, adds openai.api.type and lets cetra compute cost; the model's baseUrl is the mock. The tool input schema is valibot, and the tool reads hello.txt from the working directory. The adapter calls the Chat Completions API at the mock, streamed with stream_options.include_usage; Flue offers its built-in task tool beside read_file on both requests, and the mock answers the first model call with the read_file call and the second with text, so task makes no model call of its own. Expected: invoke_agent Demo (agent), chat gpt-4o-mini (llm, tokens 82/17, cost computed), execute_tool read_file (tool, with arguments and result) and chat gpt-4o-mini (llm, tokens 131/12, cost computed). The root carries no token counts, so nothing is counted twice. Volatile: flue.submission.id, flue.operation.id, flue.turn.id and gen_ai.conversation.id are Flue's timestamp-and-random ids. start() runs without an HTTP surface and no telemetry leaves the process: the mock is the only host."
+}

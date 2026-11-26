@@ -8,17 +8,17 @@ interface Props {
   alt: string;
   /** Text in the window's title bar, e.g. "Traces · Support bot". */
   label?: string;
-  /** Let the frame run past the right edge of the container (hero). */
-  bleed?: boolean;
   /** Fade the bottom of the frame into the band's background. */
   fade?: boolean;
   /** Load eagerly (only the hero). */
   eager?: boolean;
 }
-const { src, alt, label, bleed = false, fade = true, eager = false } = Astro.props;
+const { src, alt, label, fade = true, eager = false } = Astro.props;
+// The screenshots are captured at 2x, so the picture's CSS width is half its file width.
+const cssWidth = Math.round(src.width / 2);
 ---
 
-<figure class:list={["frame", bleed && "frame--bleed", fade && "frame--fade"]}>
+<figure class:list={["frame", fade && "frame--fade"]} style={`--shot-width: ${cssWidth}px`}>
   <div class="bar" aria-hidden="true">
     <span class="dot"></span><span class="dot"></span><span class="dot"></span>
     {label && <span class="label">{label}</span>}
@@ -27,8 +27,8 @@ const { src, alt, label, bleed = false, fade = true, eager = false } = Astro.pro
     <Image
       src={src}
       alt={alt}
-      widths={[720, 1080, 1440, 2160]}
-      sizes="(max-width: 720px) 760px, (min-width: 1200px) 1200px, 100vw"
+      widths={[cssWidth, cssWidth * 2]}
+      sizes={`${cssWidth}px`}
       priority={eager}
     />
   </div>
@@ -36,7 +36,9 @@ const { src, alt, label, bleed = false, fade = true, eager = false } = Astro.pro
 
 <style>
   .frame {
-    margin: 0;
+    margin: 0 auto;
+    width: fit-content;
+    max-width: 100%;
     position: relative;
     border: 1px solid var(--line-strong);
     border-radius: var(--radius-lg);
@@ -45,9 +47,6 @@ const { src, alt, label, bleed = false, fade = true, eager = false } = Astro.pro
       var(--shadow-panel),
       0 0 0 1px rgb(45 212 191 / 0.06);
     overflow: hidden;
-  }
-  .frame--bleed {
-    margin-right: calc(-1 * max(0px, min(160px, (100vw - var(--container)) / 2)));
   }
   .bar {
     display: flex;
@@ -72,7 +71,8 @@ const { src, alt, label, bleed = false, fade = true, eager = false } = Astro.pro
   }
   .frame :global(img) {
     display: block;
-    width: 100%;
+    width: var(--shot-width);
+    max-width: 100%;
     height: auto;
   }
   .frame--fade::after {
@@ -84,15 +84,12 @@ const { src, alt, label, bleed = false, fade = true, eager = false } = Astro.pro
     pointer-events: none;
   }
   @media (max-width: 720px) {
-    .frame--bleed {
-      margin-right: 0;
-    }
     /* Design §4: on phones a screen is a scrollable crop, not a shrunken picture. */
     .scroll {
       overflow-x: auto;
     }
     .scroll :global(img) {
-      width: 760px;
+      width: var(--shot-width);
       max-width: none;
     }
   }

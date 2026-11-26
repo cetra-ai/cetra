@@ -1,0 +1,276 @@
+{
+  "spans": [
+    {
+      "project_id": "01900000-0000-7000-8000-000000000001",
+      "trace_id": "ea096ed33c84513e2142b244a17bdbc1",
+      "span_id": "65e9e769d4537dc0",
+      "name": "promptfoo.test_case",
+      "span_kind": "span",
+      "start_time": "2025-12-31T23:59:50.000000000Z",
+      "end_time": "2025-12-31T23:59:50.361000000Z",
+      "status": "ok",
+      "service_name": "promptfoo",
+      "release": "0.125.1",
+      "attributes": {
+        "promptfoo.eval.id": "capture-volatile-1",
+        "promptfoo.prompt.index": "0",
+        "promptfoo.prompt.label": "What is the capital of {{country}}?",
+        "promptfoo.provider.id": "openai:chat:gpt-4o-mini",
+        "promptfoo.repeat.index": "0",
+        "promptfoo.span.role": "test_case",
+        "promptfoo.test.index": "0",
+        "promptfoo.test.score": "1",
+        "promptfoo.test.success": "true",
+        "promptfoo.test_case.id": "0-0"
+      },
+      "resource_attributes": {
+        "service.version": "0.125.1"
+      },
+      "scope_name": "promptfoo.providers",
+      "scope_version": "1.0.0",
+      "ingest_time": "2026-01-01T00:00:00.000000000Z",
+      "schema_version": 2
+    },
+    {
+      "project_id": "01900000-0000-7000-8000-000000000001",
+      "trace_id": "ea096ed33c84513e2142b244a17bdbc1",
+      "span_id": "87879ad5ef00a638",
+      "parent_span_id": "65e9e769d4537dc0",
+      "name": "openai:chat:gpt-4o-mini",
+      "span_kind": "span",
+      "start_time": "2025-12-31T23:59:50.005000000Z",
+      "end_time": "2025-12-31T23:59:50.161000000Z",
+      "status": "ok",
+      "service_name": "promptfoo",
+      "release": "0.125.1",
+      "attributes": {
+        "promptfoo.cache_hit": "false",
+        "promptfoo.eval.id": "capture-volatile-1",
+        "promptfoo.prompt.label": "What is the capital of {{country}}?",
+        "promptfoo.provider.id": "openai:chat:gpt-4o-mini",
+        "promptfoo.span.role": "target",
+        "promptfoo.target.type": "provider",
+        "promptfoo.test.index": "0"
+      },
+      "resource_attributes": {
+        "service.version": "0.125.1"
+      },
+      "scope_name": "promptfoo.providers",
+      "scope_version": "1.0.0",
+      "ingest_time": "2026-01-01T00:00:00.000000000Z",
+      "schema_version": 2
+    },
+    {
+      "project_id": "01900000-0000-7000-8000-000000000001",
+      "trace_id": "ea096ed33c84513e2142b244a17bdbc1",
+      "span_id": "c6d08ca588da5ba3",
+      "parent_span_id": "87879ad5ef00a638",
+      "name": "chat gpt-4o-mini",
+      "span_kind": "llm",
+      "start_time": "2025-12-31T23:59:50.007000000Z",
+      "end_time": "2025-12-31T23:59:50.161000000Z",
+      "status": "ok",
+      "service_name": "promptfoo",
+      "release": "0.125.1",
+      "provider": "openai",
+      "request_model": "gpt-4o-mini",
+      "operation": "chat",
+      "input_tokens": 20,
+      "output_tokens": 2,
+      "cache_read_tokens": 0,
+      "reasoning_tokens": 0,
+      "total_tokens": 22,
+      "cost_input": 0.00002,
+      "cost_output": 8e-6,
+      "cost_total": 0.000028000000000000003,
+      "cost_source": "computed",
+      "request_params": "{\"max_tokens\":1024,\"temperature\":0}",
+      "attributes": {
+        "gen_ai.operation.name": "chat",
+        "gen_ai.provider.name": "openai",
+        "gen_ai.request.max_tokens": "1024",
+        "gen_ai.request.model": "gpt-4o-mini",
+        "gen_ai.request.temperature": "0",
+        "gen_ai.response.finish_reasons": "[\"stop\"]",
+        "gen_ai.usage.cache_read.input_tokens": "0",
+        "gen_ai.usage.input_tokens": "20",
+        "gen_ai.usage.output_tokens": "2",
+        "gen_ai.usage.reasoning.output_tokens": "0",
+        "openai.api.type": "chat_completions",
+        "promptfoo.cache_hit": "false",
+        "promptfoo.eval.id": "capture-volatile-1",
+        "promptfoo.prompt.label": "What is the capital of {{country}}?",
+        "promptfoo.provider.id": "openai:chat:gpt-4o-mini",
+        "promptfoo.request.body": "What is the capital of France?",
+        "promptfoo.response.body": "Paris",
+        "promptfoo.span.role": "target",
+        "promptfoo.test.index": "0",
+        "promptfoo.usage.accepted_prediction_tokens": "0",
+        "promptfoo.usage.rejected_prediction_tokens": "0",
+        "promptfoo.usage.total_tokens": "22"
+      },
+      "resource_attributes": {
+        "service.version": "0.125.1"
+      },
+      "scope_name": "promptfoo.providers",
+      "scope_version": "1.0.0",
+      "conventions": [
+        "genai"
+      ],
+      "ingest_time": "2026-01-01T00:00:00.000000000Z",
+      "schema_version": 2
+    },
+    {
+      "project_id": "01900000-0000-7000-8000-000000000001",
+      "trace_id": "ea096ed33c84513e2142b244a17bdbc1",
+      "span_id": "8ba6a9df6b65b865",
+      "parent_span_id": "65e9e769d4537dc0",
+      "name": "grader contains",
+      "span_kind": "evaluator",
+      "start_time": "2025-12-31T23:59:50.167000000Z",
+      "end_time": "2025-12-31T23:59:50.168000000Z",
+      "status": "ok",
+      "service_name": "promptfoo",
+      "release": "0.125.1",
+      "attributes": {
+        "gen_ai.evaluation.explanation": "Assertion passed",
+        "gen_ai.evaluation.name": "contains",
+        "gen_ai.evaluation.score.label": "pass",
+        "gen_ai.evaluation.score.value": "1",
+        "promptfoo.eval.id": "capture-volatile-1",
+        "promptfoo.grader.id": "contains",
+        "promptfoo.span.role": "grader",
+        "promptfoo.test.index": "0"
+      },
+      "resource_attributes": {
+        "service.version": "0.125.1"
+      },
+      "scope_name": "promptfoo.providers",
+      "scope_version": "1.0.0",
+      "conventions": [
+        "genai"
+      ],
+      "ingest_time": "2026-01-01T00:00:00.000000000Z",
+      "schema_version": 2
+    },
+    {
+      "project_id": "01900000-0000-7000-8000-000000000001",
+      "trace_id": "ea096ed33c84513e2142b244a17bdbc1",
+      "span_id": "8fc80d568405b405",
+      "parent_span_id": "65e9e769d4537dc0",
+      "name": "grader llm-rubric",
+      "span_kind": "evaluator",
+      "start_time": "2025-12-31T23:59:50.168000000Z",
+      "end_time": "2025-12-31T23:59:50.359000000Z",
+      "status": "ok",
+      "service_name": "promptfoo",
+      "release": "0.125.1",
+      "attributes": {
+        "gen_ai.evaluation.explanation": "The answer names a city.",
+        "gen_ai.evaluation.name": "llm-rubric",
+        "gen_ai.evaluation.score.label": "pass",
+        "gen_ai.evaluation.score.value": "1",
+        "promptfoo.eval.id": "capture-volatile-1",
+        "promptfoo.grader.id": "llm-rubric",
+        "promptfoo.span.role": "grader",
+        "promptfoo.test.index": "0"
+      },
+      "resource_attributes": {
+        "service.version": "0.125.1"
+      },
+      "scope_name": "promptfoo.providers",
+      "scope_version": "1.0.0",
+      "conventions": [
+        "genai"
+      ],
+      "ingest_time": "2026-01-01T00:00:00.000000000Z",
+      "schema_version": 2
+    },
+    {
+      "project_id": "01900000-0000-7000-8000-000000000001",
+      "trace_id": "ea096ed33c84513e2142b244a17bdbc1",
+      "span_id": "31a4ab46838de94f",
+      "parent_span_id": "daa197c348cad1b8",
+      "name": "chat gpt-4o-mini",
+      "span_kind": "llm",
+      "start_time": "2025-12-31T23:59:50.224000000Z",
+      "end_time": "2025-12-31T23:59:50.359000000Z",
+      "status": "ok",
+      "service_name": "promptfoo",
+      "release": "0.125.1",
+      "provider": "openai",
+      "request_model": "gpt-4o-mini",
+      "operation": "chat",
+      "input_tokens": 30,
+      "output_tokens": 8,
+      "cache_read_tokens": 0,
+      "reasoning_tokens": 0,
+      "total_tokens": 38,
+      "cost_input": 0.00003,
+      "cost_output": 0.000032,
+      "cost_total": 0.000062,
+      "cost_source": "computed",
+      "request_params": "{\"max_tokens\":1024,\"temperature\":0}",
+      "attributes": {
+        "gen_ai.operation.name": "chat",
+        "gen_ai.provider.name": "openai",
+        "gen_ai.request.max_tokens": "1024",
+        "gen_ai.request.model": "gpt-4o-mini",
+        "gen_ai.request.temperature": "0",
+        "gen_ai.response.finish_reasons": "[\"stop\"]",
+        "gen_ai.usage.cache_read.input_tokens": "0",
+        "gen_ai.usage.input_tokens": "30",
+        "gen_ai.usage.output_tokens": "8",
+        "gen_ai.usage.reasoning.output_tokens": "0",
+        "openai.api.type": "chat_completions",
+        "promptfoo.cache_hit": "false",
+        "promptfoo.prompt.label": "llm-rubric",
+        "promptfoo.provider.id": "openai:chat:gpt-4o-mini",
+        "promptfoo.request.body": "[{\"role\":\"system\",\"content\":\"You are grading output according to a user-specified rubric. If the statement in the rubric is true, then the output passes the test. You respond with a JSON object with this structure: {reason: string, pass: boolean, score: number}\\n\\nExamples:\\n\\n<Output>Hello world</Output>\\n<Rubric>Content contains a greeting</Rubric>\\n{\\\"reason\\\": \\\"the content contains the word 'Hello'\\\", \\\"pass\\\": true, \\\"score\\\": 1.0}\\n\\n<Output>Avast ye swabs, repel the invaders!</Output>\\n<Rubric>Does not speak like a pirate</Rubric>\\n{\\\"reason\\\": \\\"'avast ye' is a common pirate term\\\", \\\"pass\\\": false, \\\"score\\\": 0.0}\"},{\"role\":\"user\",\"content\":\"<Output>\\nParis\\n</Output>\\n<Rubric>\\nanswers with a city\\n</Rubric>\"}]",
+        "promptfoo.response.body": "{\"pass\": true, \"score\": 1, \"reason\": \"The answer names a city.\"}",
+        "promptfoo.span.role": "grader",
+        "promptfoo.usage.accepted_prediction_tokens": "0",
+        "promptfoo.usage.rejected_prediction_tokens": "0",
+        "promptfoo.usage.total_tokens": "38"
+      },
+      "resource_attributes": {
+        "service.version": "0.125.1"
+      },
+      "scope_name": "promptfoo.providers",
+      "scope_version": "1.0.0",
+      "conventions": [
+        "genai"
+      ],
+      "ingest_time": "2026-01-01T00:00:00.000000000Z",
+      "schema_version": 2
+    },
+    {
+      "project_id": "01900000-0000-7000-8000-000000000001",
+      "trace_id": "ea096ed33c84513e2142b244a17bdbc1",
+      "span_id": "daa197c348cad1b8",
+      "parent_span_id": "8fc80d568405b405",
+      "name": "grader provider openai:chat:gpt-4o-mini",
+      "span_kind": "span",
+      "start_time": "2025-12-31T23:59:50.224000000Z",
+      "end_time": "2025-12-31T23:59:50.359000000Z",
+      "status": "ok",
+      "service_name": "promptfoo",
+      "release": "0.125.1",
+      "attributes": {
+        "promptfoo.cache_hit": "false",
+        "promptfoo.prompt.label": "llm-rubric",
+        "promptfoo.provider.id": "openai:chat:gpt-4o-mini",
+        "promptfoo.span.role": "grader"
+      },
+      "resource_attributes": {
+        "service.version": "0.125.1"
+      },
+      "scope_name": "promptfoo.providers",
+      "scope_version": "1.0.0",
+      "ingest_time": "2026-01-01T00:00:00.000000000Z",
+      "schema_version": 2
+    }
+  ],
+  "media": [],
+  "rejected_spans": 0
+}

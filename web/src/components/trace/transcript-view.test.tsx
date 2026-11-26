@@ -1,14 +1,23 @@
 import { act, fireEvent, screen, waitFor, within } from "@testing-library/react";
 import { HttpResponse, http, passthrough } from "msw";
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it } from "vitest";
 import type { Schema } from "@/api/types";
 import { server } from "@/mocks/node";
+import { STORAGE_PREFIX } from "@/product";
 import { renderApp } from "@/test/render";
+import traceFixture from "../../../../fixtures/api/responses/traces/a1000000000000000000000000000001.json";
 
 const TRACE_1 = "a1000000000000000000000000000001";
+const LLM_CALL = "b100000000000012";
+const LLM_RESULT = "b100000000000014";
+const WIDE_KEY = `${STORAGE_PREFIX}transcript-wide`;
 const TOOL = "b100000000000013";
 const BULK = `a2${"0".repeat(30)}`;
 const BULK_COUNT = 60;
+
+afterEach(() => {
+  localStorage.removeItem(WIDE_KEY);
+});
 
 describe("transcript", () => {
   it("shows the agent section and the LLM and tool turns", async () => {
@@ -25,7 +34,8 @@ describe("transcript", () => {
     ).toBeInTheDocument();
     expect(within(transcript).getAllByText("My order 1234 hasn't arrived.")).toHaveLength(1);
 
-    await user.click(within(transcript).getByRole("button", { name: /get_order_status/ }));
+    const row = await turnRow(transcript, TOOL);
+    await user.click(await waitFor(() => toolLine(row, "get_order_status(")));
     await waitFor(() => {
       expect(router.state.location.search).toMatchObject({ span: TOOL, mode: "transcript" });
     });
@@ -138,11 +148,8 @@ describe("transcript", () => {
       `/acme/support-bot/traces?trace=${TRACE_1}&span=${TOOL}&mode=transcript`,
     );
     const transcript = await screen.findByRole("region", { name: "Transcript" });
-    const toolBlock = within(transcript).getByRole("button", {
-      name: /get_order_status/,
-    }).parentElement;
-    const llmBlock = within(transcript).getAllByRole("button", { name: /claude-sonnet-4-5/ })[0]
-      ?.parentElement;
+    const toolBlock = await turnRow(transcript, TOOL);
+    const llmBlock = await turnRow(transcript, LLM_CALL);
     expect(toolBlock).toHaveAttribute("aria-current", "true");
     expect(toolBlock).toHaveClass("bg-selection", "shadow-[inset_2px_0_0_var(--primary)]");
     expect(llmBlock).not.toHaveAttribute("aria-current");
@@ -259,7 +266,122 @@ describe("transcript", () => {
       within(transcript).getByText("Your order 1234 shipped and arrives tomorrow."),
     ).toBeInTheDocument();
   });
+
+  it("shows a tool turn as one line", async () => {
+    await renderApp(`/acme/support-bot/traces?trace=${TRACE_1}&mode=transcript`);
+    const transcript = await screen.findByRole("region", { name: "Transcript" });
+    const row = await turnRow(transcript, TOOL);
+    const line = await waitFor(() => toolLine(row, "get_order_status("));
+    expect(line.textContent).toBe(
+      'get_order_status(order_id: "1234") → {status: "shipped", eta: "2026-01-02"} · 350ms',
+    );
+    expect(within(transcript).queryByRole("region", { name: "Arguments" })).not.toBeInTheDocument();
+  });
+
+  it("a click on the tool line selects the span and opens it", async () => {
+    const { router, user } = await renderApp(
+      `/acme/support-bot/traces?trace=${TRACE_1}&mode=transcript`,
+    );
+    const transcript = await screen.findByRole("region", { name: "Transcript" });
+    const row = await turnRow(transcript, TOOL);
+    await user.click(await waitFor(() => toolLine(row, "get_order_status(")));
+    await waitFor(() => {
+      expect(router.state.location.search).toMatchObject({ span: TOOL });
+    });
+    expect(within(row).getByRole("region", { name: "Arguments" })).toBeInTheDocument();
+    expect(within(row).getByRole("region", { name: "Result" })).toBeInTheDocument();
+  });
+
+  it("an LLM turn's tool call shows the tool span's duration", async () => {
+    await renderApp(`/acme/support-bot/traces?trace=${TRACE_1}&mode=transcript`);
+    const transcript = await screen.findByRole("region", { name: "Transcript" });
+    const row = await turnRow(transcript, LLM_CALL);
+    const line = await waitFor(() => toolLine(row, "get_order_status("));
+    expect(line.textContent).toBe('get_order_status(order_id: "1234") · 350ms');
+  });
+
+  it("the next LLM turn shows the response as its own line", async () => {
+    await renderApp(`/acme/support-bot/traces?trace=${TRACE_1}&mode=transcript`);
+    const transcript = await screen.findByRole("region", { name: "Transcript" });
+    const row = await turnRow(transcript, LLM_RESULT);
+    const line = await waitFor(() => toolLine(row, 'get_order_status → {status: "shipped"'));
+    expect(line.textContent).toBe('get_order_status → {status: "shipped", eta: "2026-01-02"}');
+  });
+
+  it("a failed tool turn shows its error on the line", async () => {
+    server.use(
+      http.get("/api/v1/projects/:project/traces/:trace_id", ({ params }) => {
+        if (params.trace_id !== TRACE_1) return passthrough();
+        return HttpResponse.json({
+          ...traceFixture,
+          spans: traceFixture.spans.map((row) =>
+            row.span.span_id === TOOL
+              ? {
+                  ...row,
+                  span: { ...row.span, status: "error", status_message: "1 failed, 47 passed" },
+                }
+              : row,
+          ),
+        });
+      }),
+    );
+    await renderApp(`/acme/support-bot/traces?trace=${TRACE_1}&mode=transcript`);
+    const transcript = await screen.findByRole("region", { name: "Transcript" });
+    const row = await turnRow(transcript, TOOL);
+    const line = await waitFor(() => toolLine(row, "get_order_status("));
+    expect(line.textContent).toContain("1 failed, 47 passed");
+    expect(within(line).getByRole("img", { name: "Failed" })).toBeInTheDocument();
+  });
+
+  it("Full width hides the side pane and is remembered", async () => {
+    const url = `/acme/support-bot/traces?trace=${TRACE_1}&mode=transcript`;
+    const first = await renderApp(url);
+    expect(await screen.findByRole("region", { name: "Trace summary" })).toBeInTheDocument();
+
+    await first.user.click(screen.getByRole("button", { name: "Full width" }));
+    expect(screen.getByRole("button", { name: "Full width" })).toHaveAttribute(
+      "aria-pressed",
+      "true",
+    );
+    expect(screen.queryByRole("region", { name: "Trace summary" })).not.toBeInTheDocument();
+    expect(screen.getByRole("region", { name: "Transcript" })).toBeInTheDocument();
+    expect(localStorage.getItem(WIDE_KEY)).toBe("1");
+    first.unmount();
+
+    const second = await renderApp(url);
+    expect(await screen.findByRole("region", { name: "Transcript" })).toBeInTheDocument();
+    expect(screen.queryByRole("region", { name: "Trace summary" })).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Full width" })).toHaveAttribute(
+      "aria-pressed",
+      "true",
+    );
+
+    await second.user.click(screen.getByRole("button", { name: "Full width" }));
+    expect(await screen.findByRole("region", { name: "Trace summary" })).toBeInTheDocument();
+    expect(localStorage.getItem(WIDE_KEY)).toBeNull();
+  });
 });
+
+/** The transcript row of one span, once it is on screen. */
+async function turnRow(transcript: HTMLElement, spanId: string): Promise<HTMLElement> {
+  return waitFor(() => {
+    const row = transcript.querySelector(`[data-turn="${spanId}"]`);
+    if (!(row instanceof HTMLElement)) throw new Error(`no row for ${spanId}`);
+    return row;
+  });
+}
+
+/** The tool line button whose text starts with `prefix`. */
+function toolLine(container: HTMLElement, prefix: string): HTMLElement {
+  const lines = within(container)
+    .getAllByRole("button")
+    .filter((button) => button.textContent?.startsWith(prefix));
+  const [line] = lines;
+  if (lines.length !== 1 || !line) {
+    throw new Error(`expected one line starting with ${prefix}, got ${lines.length}`);
+  }
+  return line;
+}
 
 function bulkTrace(): Schema<"TraceDetail"> {
   const spans: Schema<"TreeSpan">[] = [bulkRow(0, "agent")];

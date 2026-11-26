@@ -776,6 +776,47 @@ pub struct TraceListParams {
     pub include_experiments: bool,
 }
 
+/// Query parameters of `GET /api/v1/projects/{project}/traces/totals`.
+///
+/// The same rows as [`TraceListParams`], without sort, order, limit and cursor.
+///
+/// Spec 09 § Observability data.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, IntoParams)]
+#[serde(deny_unknown_fields)]
+pub struct TraceTotalsParams {
+    /// Filter DSL expression over the `traces` view (spec 05).
+    #[serde(default)]
+    pub filter: Option<String>,
+    /// Full-text search (spec 05 § Full-text search). At most 1,024 bytes (D-G-39).
+    #[serde(default)]
+    pub search: Option<String>,
+    /// Inclusive range start. RFC 3339 or epoch milliseconds.
+    #[serde(default)]
+    pub from: Option<TimeParam>,
+    /// Exclusive range end. RFC 3339 or epoch milliseconds.
+    #[serde(default)]
+    pub to: Option<TimeParam>,
+    /// Include traces from the reserved environments (`cetra-eval`, `cetra-playground`, `cetra-assistant`). Default false. Spec 05 § Default exclusions.
+    #[serde(default)]
+    pub include_eval: bool,
+    /// Include experiment traces. Default false. Spec 05 § Default exclusions.
+    #[serde(default)]
+    pub include_experiments: bool,
+}
+
+/// Totals of the traces a trace list matches (D-C-31).
+///
+/// Spec 09 § Observability data.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ToSchema)]
+pub struct TraceTotals {
+    /// Traces the list would page through.
+    pub trace_count: i64,
+    /// Of those, traces with status `error`.
+    pub error_trace_count: i64,
+    /// Sum of their `cost_total`, USD. 0 when none has a cost.
+    pub cost_total: f64,
+}
+
 /// Query parameters of `GET /api/v1/projects/{project}/traces/stream`.
 ///
 /// Spec 09 § Observability data.

@@ -1,0 +1,59 @@
+{
+  "description": "Hermes Agent 0.23.2 with the hermes-otel 1.33.0 plugin: one read_file call (hello.txt), then the answer; traces with prompts.",
+  "spec_refs": ["02 \u00a7 Coding agents"],
+  "notes": "The telemetry is hermes-otel's, a community plugin installed into Hermes's own environment (D-IN-29 item 7; `cetra agents setup` has no hermes-agent target), configured by .hermes/hermes_otel.yaml with cetra's endpoint and key. The provider is Hermes's custom provider, an OpenAI-compatible endpoint pointed at the mock with the mock key; the spans therefore show provider custom and no cost. Hermes probes the provider beside its turns (POST /api/show, GET /v1/models/gpt-4o-mini, GET /api/v1/models), which the mock answers without a turn. The read tool of the base toolset takes a path relative to the repo. Hermes wraps each model call in an llm.<model> span with no tokens (a chain in cetra's rules) around the api.<model> call that carries them. gen_ai.conversation.id is Hermes's session id, which differs between runs, so it is volatile. The system prompt embeds the repo's git state (the init commit hash differs per run), carried by gen_ai.input.messages and input.value; llm.response.duration_ms and hermes.api.ttfc_ms are measured, so the check ignores their values.",
+  "instrumentation": "hermes-otel",
+  "libraries": ["hermes-agent", "hermes-otel"],
+  "tolerated_probes": ["POST /api/show", "GET /models/<id>"],
+  "timing_attributes": [
+    "gen_ai.input.messages",
+    "input.value",
+    "llm.response.duration_ms",
+    "hermes.api.ttfc_ms"
+  ],
+  "volatile_attributes": ["gen_ai.conversation.id"],
+  "turns": [
+    {
+      "api": "openai.chat",
+      "model": "gpt-4o-mini",
+      "message": {
+        "text": null,
+        "reasoning": null,
+        "tool_calls": [
+          {
+            "id": "call_capture_1",
+            "name": "read_file",
+            "arguments": {
+              "path": "hello.txt"
+            }
+          }
+        ]
+      },
+      "finish": "tool_calls",
+      "usage": {
+        "input": 82,
+        "output": 17,
+        "cache_read": 0,
+        "cache_write": 0,
+        "reasoning": 0
+      }
+    },
+    {
+      "api": "openai.chat",
+      "model": "gpt-4o-mini",
+      "message": {
+        "text": "hello.txt says: hello from cetra",
+        "reasoning": null,
+        "tool_calls": []
+      },
+      "finish": "stop",
+      "usage": {
+        "input": 131,
+        "output": 12,
+        "cache_read": 0,
+        "cache_write": 0,
+        "reasoning": 0
+      }
+    }
+  ]
+}

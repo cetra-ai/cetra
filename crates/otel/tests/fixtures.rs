@@ -207,27 +207,37 @@ fn prices() {
             if span.cost_source != Some(CostSource::Computed) {
                 continue;
             }
-            let Some(model) = model_of(span) else {
+            let models = support::price_models(span);
+            if models.is_empty() {
                 failures.push(format!(
                     "{}: computed cost span {} has no model",
                     label(case),
                     span.span_id
                 ));
                 continue;
-            };
-            let matched = rows.iter().zip(compiled.iter()).any(|(row, pattern)| {
-                price_row_matches(
-                    row,
-                    pattern,
+            }
+            let matched = models.iter().any(|&model| {
+                rows.iter().zip(compiled.iter()).any(|(row, pattern)| {
+                    price_row_matches(
+                        row,
+                        pattern,
+                        model,
+                        span.provider.as_deref(),
+                        span.start_time,
+                    )
+                }) || pick_price_or_publisher(
+                    &rows,
                     model,
                     span.provider.as_deref(),
                     span.start_time,
                 )
+                .is_some()
             });
             if !matched {
                 failures.push(format!(
-                    "{}: no price row matches model {model}",
-                    label(case)
+                    "{}: no price row matches model {}",
+                    label(case),
+                    models.join(", ")
                 ));
             }
         }
@@ -671,12 +681,27 @@ fn check_media(case: &Case, failures: &mut Vec<String>) {
     }
 }
 
+/// Cases whose `llm` and `embedding` spans may carry cost source `none` with no
+/// token counts at all while a price row matches their model. D-B1-7 (cost.rs):
+/// no token count at all is unknown usage, not a free call, so production keeps
+/// `none` for any such span — but only these cases legitimately produce one,
+/// because their instrumentation writes model spans with no counts (Agent Spec's
+/// LangGraph adapter) or the discard rule keeps one on purpose (the eve discard
+/// fixture's `step.generate`). Anywhere else a tokenless model span that a row
+/// prices is a normalization bug, and the check below must catch it.
+const TOKENLESS_COST_NONE_CASES: &[&str] = &[
+    "openinference/agentspec-agent",
+    "genai/eve-workflow-discard",
+];
+
 fn check_cost(label: &str, span: &Span, rows: &[PriceRow], failures: &mut Vec<String>) {
     match span.cost_source {
         Some(CostSource::Computed) => check_computed(label, span, rows, failures),
         Some(CostSource::None) => {
-            let priced = matches!(span.span_kind, SpanKind::Llm | SpanKind::Embedding);
-            let matched = model_of(span).is_some_and(|model| {
+            let tokenless = span.input_tokens.is_none() && span.output_tokens.is_none();
+            let exempt = tokenless && TOKENLESS_COST_NONE_CASES.contains(&label);
+            let carries_cost = matches!(span.span_kind, SpanKind::Llm | SpanKind::Embedding);
+            let matched = support::price_models(span).into_iter().any(|model| {
                 rows.iter().any(|row| {
                     let Ok(pattern) = compile_anchored(&row.match_pattern) else {
                         return false;
@@ -688,9 +713,15 @@ fn check_cost(label: &str, span: &Span, rows: &[PriceRow], failures: &mut Vec<St
                         span.provider.as_deref(),
                         span.start_time,
                     )
-                })
+                }) || pick_price_or_publisher(
+                    rows,
+                    model,
+                    span.provider.as_deref(),
+                    span.start_time,
+                )
+                .is_some()
             });
-            if priced && matched {
+            if carries_cost && !exempt && matched {
                 failures.push(format!(
                     "{label}: {} has cost_source none but a price row matches",
                     span.span_id
@@ -709,17 +740,23 @@ fn check_cost(label: &str, span: &Span, rows: &[PriceRow], failures: &mut Vec<St
 }
 
 fn check_computed(label: &str, span: &Span, rows: &[PriceRow], failures: &mut Vec<String>) {
-    let Some(model) = model_of(span) else {
+    let models = support::price_models(span);
+    if models.is_empty() {
         failures.push(format!(
             "{label}: {} cost_source computed but model is absent",
             span.span_id
         ));
         return;
-    };
-    let Some(row) = pick_price(rows, model, span.provider.as_deref(), span.start_time) else {
+    }
+    let priced_by = models.iter().find_map(|&model| {
+        pick_price_or_publisher(rows, model, span.provider.as_deref(), span.start_time)
+            .map(|row| (model, row))
+    });
+    let Some((_, row)) = priced_by else {
         failures.push(format!(
-            "{label}: {} no price row for model {model}",
-            span.span_id
+            "{label}: {} no price row for model {}",
+            span.span_id,
+            models.join(", ")
         ));
         return;
     };
@@ -863,6 +900,34 @@ fn pick_price<'a>(
     matches.first().copied()
 }
 
+/// `pick_price`, then the gateway fallback of `cost.rs` (D-IN-13), then its prefix rule
+/// (D-IN-33).
+fn pick_price_or_publisher<'a>(
+    rows: &'a [PriceRow],
+    model: &str,
+    provider: Option<&str>,
+    start_time: i64,
+) -> Option<&'a PriceRow> {
+    pick_direct(rows, model, provider, start_time).or_else(|| {
+        let (provider, name) = cetra_otel::prefix_candidate(provider, model)?;
+        pick_direct(rows, name, Some(&provider), start_time)
+    })
+}
+
+/// `pick_price`, then the gateway fallback of `cost.rs` (D-IN-13).
+fn pick_direct<'a>(
+    rows: &'a [PriceRow],
+    model: &str,
+    provider: Option<&str>,
+    start_time: i64,
+) -> Option<&'a PriceRow> {
+    pick_price(rows, model, provider, start_time).or_else(|| {
+        cetra_otel::publisher_candidates(provider?, model)?
+            .into_iter()
+            .find_map(|(publisher, name)| pick_price(rows, &name, Some(publisher), start_time))
+    })
+}
+
 fn price_row_matches(
     row: &PriceRow,
     pattern: &Regex,
@@ -873,25 +938,24 @@ fn price_row_matches(
     if row.valid_from > start_time {
         return false;
     }
-    if let Some(row_provider) = &row.provider
-        && provider.is_some_and(|span_provider| !same_provider(row_provider, span_provider))
-    {
-        return false;
+    if let Some(row_provider) = &row.provider {
+        let provider_matches = match provider {
+            Some(span_provider) => same_provider(row_provider, span_provider),
+            None => !row.model_name.contains('/'),
+        };
+        if !provider_matches {
+            return false;
+        }
     }
     pattern.is_match(model)
 }
 
 /// Mirrors `cost.rs` `same_provider` (D-B1-11): `gcp.gen_ai` prices with either Google
-/// platform, every other provider matches exactly.
+/// platform, every other provider matches exactly. The gateway fallback (D-IN-13) is
+/// `pick_price_or_publisher`, which mirrors `cost.rs` `publisher_row`.
 fn same_provider(row_provider: &str, span_provider: &str) -> bool {
     row_provider == span_provider
         || (span_provider == "gcp.gen_ai" && matches!(row_provider, "gcp.gemini" | "gcp.vertex_ai"))
-}
-
-fn model_of(span: &Span) -> Option<&str> {
-    span.response_model
-        .as_deref()
-        .or(span.request_model.as_deref())
 }
 
 fn check_media_bounds(case: &Case, failures: &mut Vec<String>) {

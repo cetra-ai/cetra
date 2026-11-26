@@ -1,0 +1,539 @@
+{
+  "resourceSpans": [
+    {
+      "resource": {
+        "attributes": [
+          {
+            "key": "telemetry.sdk.language",
+            "value": {
+              "stringValue": "python"
+            }
+          },
+          {
+            "key": "telemetry.sdk.name",
+            "value": {
+              "stringValue": "opentelemetry"
+            }
+          },
+          {
+            "key": "telemetry.sdk.version",
+            "value": {
+              "stringValue": "1.45.2"
+            }
+          },
+          {
+            "key": "service.name",
+            "value": {
+              "stringValue": "capture-app"
+            }
+          }
+        ],
+        "droppedAttributesCount": 0,
+        "entityRefs": []
+      },
+      "scopeSpans": [
+        {
+          "scope": {
+            "name": "opentelemetry.instrumentation.chromadb",
+            "version": "0.63.1",
+            "attributes": [],
+            "droppedAttributesCount": 0
+          },
+          "spans": [
+            {
+              "traceId": "5852e6e2b82c9ef76b19800a10f81efd",
+              "spanId": "39b83570d0733144",
+              "traceState": "",
+              "parentSpanId": "",
+              "flags": 256,
+              "name": "chroma.add",
+              "kind": 1,
+              "startTimeUnixNano": "1767225590000000000",
+              "endTimeUnixNano": "1767225590007000000",
+              "attributes": [
+                {
+                  "key": "db.system",
+                  "value": {
+                    "stringValue": "chroma"
+                  }
+                },
+                {
+                  "key": "db.operation",
+                  "value": {
+                    "stringValue": "add"
+                  }
+                },
+                {
+                  "key": "db.chroma.add.ids_count",
+                  "value": {
+                    "intValue": "2"
+                  }
+                },
+                {
+                  "key": "db.chroma.add.embeddings_count",
+                  "value": {
+                    "intValue": "2"
+                  }
+                },
+                {
+                  "key": "db.chroma.add.documents_count",
+                  "value": {
+                    "intValue": "2"
+                  }
+                }
+              ],
+              "droppedAttributesCount": 0,
+              "events": [],
+              "droppedEventsCount": 0,
+              "links": [],
+              "droppedLinksCount": 0,
+              "status": null
+            },
+            {
+              "traceId": "739c5e9a3e4c8a04c4e8405239504e55",
+              "spanId": "06d20f6ef22af557",
+              "traceState": "",
+              "parentSpanId": "",
+              "flags": 256,
+              "name": "chroma.query",
+              "kind": 1,
+              "startTimeUnixNano": "1767225590008000000",
+              "endTimeUnixNano": "1767225590010000000",
+              "attributes": [
+                {
+                  "key": "db.system",
+                  "value": {
+                    "stringValue": "chroma"
+                  }
+                },
+                {
+                  "key": "db.operation",
+                  "value": {
+                    "stringValue": "query"
+                  }
+                },
+                {
+                  "key": "db.chroma.query.embeddings_count",
+                  "value": {
+                    "intValue": "1"
+                  }
+                },
+                {
+                  "key": "db.chroma.query.n_results",
+                  "value": {
+                    "intValue": "1"
+                  }
+                }
+              ],
+              "droppedAttributesCount": 0,
+              "events": [
+                {
+                  "timeUnixNano": "1767225590010000000",
+                  "name": "db.query.result",
+                  "attributes": [
+                    {
+                      "key": "db.query.result.id",
+                      "value": {
+                        "stringValue": "a"
+                      }
+                    },
+                    {
+                      "key": "db.query.result.distance",
+                      "value": {
+                        "doubleValue": 0.004999999888241291
+                      }
+                    },
+                    {
+                      "key": "db.query.result.document",
+                      "value": {
+                        "stringValue": "sunny"
+                      }
+                    }
+                  ],
+                  "droppedAttributesCount": 0
+                }
+              ],
+              "droppedEventsCount": 0,
+              "links": [],
+              "droppedLinksCount": 0,
+              "status": null
+            },
+            {
+              "traceId": "b86ad857b952e8019df5294e2aeb64cc",
+              "spanId": "22861588ab25e192",
+              "traceState": "",
+              "parentSpanId": "",
+              "flags": 256,
+              "name": "chroma.delete",
+              "kind": 1,
+              "startTimeUnixNano": "1767225590011000000",
+              "endTimeUnixNano": "1767225590012000000",
+              "attributes": [
+                {
+                  "key": "db.system",
+                  "value": {
+                    "stringValue": "chroma"
+                  }
+                },
+                {
+                  "key": "db.operation",
+                  "value": {
+                    "stringValue": "delete"
+                  }
+                },
+                {
+                  "key": "db.chroma.delete.ids_count",
+                  "value": {
+                    "intValue": "1"
+                  }
+                }
+              ],
+              "droppedAttributesCount": 0,
+              "events": [],
+              "droppedEventsCount": 0,
+              "links": [],
+              "droppedLinksCount": 0,
+              "status": null
+            }
+          ],
+          "schemaUrl": ""
+        },
+        {
+          "scope": {
+            "name": "opentelemetry.instrumentation.qdrant",
+            "version": "0.63.1",
+            "attributes": [],
+            "droppedAttributesCount": 0
+          },
+          "spans": [
+            {
+              "traceId": "31623891209710f7beef17b8a53f4238",
+              "spanId": "208a9feb4adfbd2a",
+              "traceState": "",
+              "parentSpanId": "",
+              "flags": 256,
+              "name": "qdrant.upsert",
+              "kind": 3,
+              "startTimeUnixNano": "1767225590018000000",
+              "endTimeUnixNano": "1767225590018000000",
+              "attributes": [
+                {
+                  "key": "db.system",
+                  "value": {
+                    "stringValue": "Qdrant"
+                  }
+                },
+                {
+                  "key": "qdrant.upsert.collection_name",
+                  "value": {
+                    "stringValue": "docs"
+                  }
+                },
+                {
+                  "key": "qdrant.upsert.points_count",
+                  "value": {
+                    "intValue": "2"
+                  }
+                }
+              ],
+              "droppedAttributesCount": 0,
+              "events": [],
+              "droppedEventsCount": 0,
+              "links": [],
+              "droppedLinksCount": 0,
+              "status": {
+                "message": "",
+                "code": 1
+              }
+            },
+            {
+              "traceId": "07ebf8e60611e81c0b7618dcff6339c3",
+              "spanId": "9f6585ff10059b05",
+              "traceState": "",
+              "parentSpanId": "",
+              "flags": 256,
+              "name": "qdrant.query_points",
+              "kind": 3,
+              "startTimeUnixNano": "1767225590018000000",
+              "endTimeUnixNano": "1767225590019000000",
+              "attributes": [
+                {
+                  "key": "db.system",
+                  "value": {
+                    "stringValue": "Qdrant"
+                  }
+                },
+                {
+                  "key": "qdrant.search.collection_name",
+                  "value": {
+                    "stringValue": "docs"
+                  }
+                },
+                {
+                  "key": "db.vector.query.top_k",
+                  "value": {
+                    "intValue": "1"
+                  }
+                }
+              ],
+              "droppedAttributesCount": 0,
+              "events": [],
+              "droppedEventsCount": 0,
+              "links": [],
+              "droppedLinksCount": 0,
+              "status": {
+                "message": "",
+                "code": 1
+              }
+            },
+            {
+              "traceId": "f0c04b7b2958c9e3827e299293ccb51a",
+              "spanId": "62feed7c21af63c6",
+              "traceState": "",
+              "parentSpanId": "",
+              "flags": 256,
+              "name": "qdrant.delete",
+              "kind": 3,
+              "startTimeUnixNano": "1767225590019000000",
+              "endTimeUnixNano": "1767225590019000000",
+              "attributes": [
+                {
+                  "key": "db.system",
+                  "value": {
+                    "stringValue": "Qdrant"
+                  }
+                },
+                {
+                  "key": "qdrant.delete.collection_name",
+                  "value": {
+                    "stringValue": "docs"
+                  }
+                }
+              ],
+              "droppedAttributesCount": 0,
+              "events": [],
+              "droppedEventsCount": 0,
+              "links": [],
+              "droppedLinksCount": 0,
+              "status": {
+                "message": "",
+                "code": 1
+              }
+            }
+          ],
+          "schemaUrl": ""
+        },
+        {
+          "scope": {
+            "name": "opentelemetry.instrumentation.milvus",
+            "version": "0.60.0",
+            "attributes": [],
+            "droppedAttributesCount": 0
+          },
+          "spans": [
+            {
+              "traceId": "3de12f1274fe82f0e65c7ac98a3e621b",
+              "spanId": "accb3726337946a0",
+              "traceState": "",
+              "parentSpanId": "",
+              "flags": 256,
+              "name": "milvus.create_collection",
+              "kind": 1,
+              "startTimeUnixNano": "1767225590184000000",
+              "endTimeUnixNano": "1767225590689000000",
+              "attributes": [
+                {
+                  "key": "db.system",
+                  "value": {
+                    "stringValue": "milvus"
+                  }
+                },
+                {
+                  "key": "db.operation",
+                  "value": {
+                    "stringValue": "create_collection"
+                  }
+                },
+                {
+                  "key": "db.milvus.create_collection.dimension",
+                  "value": {
+                    "intValue": "2"
+                  }
+                }
+              ],
+              "droppedAttributesCount": 0,
+              "events": [],
+              "droppedEventsCount": 0,
+              "links": [],
+              "droppedLinksCount": 0,
+              "status": null
+            },
+            {
+              "traceId": "8b51736438f4b470620a51f8fe110dcc",
+              "spanId": "0cb694252546097a",
+              "traceState": "",
+              "parentSpanId": "",
+              "flags": 256,
+              "name": "milvus.insert",
+              "kind": 1,
+              "startTimeUnixNano": "1767225590690000000",
+              "endTimeUnixNano": "1767225590695000000",
+              "attributes": [
+                {
+                  "key": "db.system",
+                  "value": {
+                    "stringValue": "milvus"
+                  }
+                },
+                {
+                  "key": "db.operation",
+                  "value": {
+                    "stringValue": "insert"
+                  }
+                },
+                {
+                  "key": "db.milvus.insert.data_count",
+                  "value": {
+                    "intValue": "2"
+                  }
+                }
+              ],
+              "droppedAttributesCount": 0,
+              "events": [],
+              "droppedEventsCount": 0,
+              "links": [],
+              "droppedLinksCount": 0,
+              "status": null
+            },
+            {
+              "traceId": "2a76d49ce42c323f4f0093fe8d79ec27",
+              "spanId": "2638b18ae5d74abd",
+              "traceState": "",
+              "parentSpanId": "",
+              "flags": 256,
+              "name": "milvus.search",
+              "kind": 1,
+              "startTimeUnixNano": "1767225590696000000",
+              "endTimeUnixNano": "1767225590697000000",
+              "attributes": [
+                {
+                  "key": "db.system",
+                  "value": {
+                    "stringValue": "milvus"
+                  }
+                },
+                {
+                  "key": "db.operation",
+                  "value": {
+                    "stringValue": "search"
+                  }
+                },
+                {
+                  "key": "db.milvus.search.data_count",
+                  "value": {
+                    "intValue": "1"
+                  }
+                },
+                {
+                  "key": "db.milvus.search.limit",
+                  "value": {
+                    "intValue": "1"
+                  }
+                },
+                {
+                  "key": "db.milvus.search.query_vector_dimension",
+                  "value": {
+                    "stringValue": "[2]"
+                  }
+                },
+                {
+                  "key": "db.milvus.search.result_count",
+                  "value": {
+                    "intValue": "1"
+                  }
+                }
+              ],
+              "droppedAttributesCount": 0,
+              "events": [
+                {
+                  "timeUnixNano": "1767225590697000000",
+                  "name": "db.search.result",
+                  "attributes": [
+                    {
+                      "key": "db.search.query.id",
+                      "value": {
+                        "intValue": "0"
+                      }
+                    },
+                    {
+                      "key": "db.search.result.id",
+                      "value": {
+                        "intValue": "1"
+                      }
+                    },
+                    {
+                      "key": "db.search.result.distance",
+                      "value": {
+                        "stringValue": "0.9970544576644897"
+                      }
+                    },
+                    {
+                      "key": "db.search.result.entity",
+                      "value": {
+                        "stringValue": "{'vector': [0.10000000149011612, 0.20000000298023224], 'text': 'sunny'}"
+                      }
+                    }
+                  ],
+                  "droppedAttributesCount": 0
+                }
+              ],
+              "droppedEventsCount": 0,
+              "links": [],
+              "droppedLinksCount": 0,
+              "status": null
+            },
+            {
+              "traceId": "bd52171ace85755e7575b485b9a1b8ba",
+              "spanId": "13964113cbe54c81",
+              "traceState": "",
+              "parentSpanId": "",
+              "flags": 256,
+              "name": "milvus.delete",
+              "kind": 1,
+              "startTimeUnixNano": "1767225590698000000",
+              "endTimeUnixNano": "1767225590699000000",
+              "attributes": [
+                {
+                  "key": "db.system",
+                  "value": {
+                    "stringValue": "milvus"
+                  }
+                },
+                {
+                  "key": "db.operation",
+                  "value": {
+                    "stringValue": "delete"
+                  }
+                },
+                {
+                  "key": "db.milvus.delete.ids_count",
+                  "value": {
+                    "intValue": "2"
+                  }
+                }
+              ],
+              "droppedAttributesCount": 0,
+              "events": [],
+              "droppedEventsCount": 0,
+              "links": [],
+              "droppedLinksCount": 0,
+              "status": null
+            }
+          ],
+          "schemaUrl": ""
+        }
+      ],
+      "schemaUrl": ""
+    }
+  ]
+}

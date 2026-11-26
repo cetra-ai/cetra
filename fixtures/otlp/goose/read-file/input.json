@@ -1,0 +1,3046 @@
+{
+  "resourceSpans": [
+    {
+      "resource": {
+        "attributes": [
+          {
+            "key": "user.name",
+            "value": {
+              "stringValue": "unknown"
+            }
+          },
+          {
+            "key": "host.name",
+            "value": {
+              "stringValue": "capture-host"
+            }
+          },
+          {
+            "key": "telemetry.sdk.name",
+            "value": {
+              "stringValue": "opentelemetry"
+            }
+          },
+          {
+            "key": "service.name",
+            "value": {
+              "stringValue": "goose"
+            }
+          },
+          {
+            "key": "service.namespace",
+            "value": {
+              "stringValue": "goose"
+            }
+          },
+          {
+            "key": "telemetry.sdk.language",
+            "value": {
+              "stringValue": "rust"
+            }
+          },
+          {
+            "key": "service.version",
+            "value": {
+              "stringValue": "1.59.2"
+            }
+          },
+          {
+            "key": "telemetry.sdk.version",
+            "value": {
+              "stringValue": "0.32.1"
+            }
+          }
+        ],
+        "droppedAttributesCount": 0,
+        "entityRefs": []
+      },
+      "scopeSpans": [
+        {
+          "scope": {
+            "name": "goose",
+            "version": "",
+            "attributes": [],
+            "droppedAttributesCount": 0
+          },
+          "spans": [
+            {
+              "traceId": "dfcc9495523cdababe9d08bfc45e9ce4",
+              "spanId": "52503bfdfdf4ddc3",
+              "traceState": "",
+              "parentSpanId": "",
+              "flags": 257,
+              "name": "reply",
+              "kind": 1,
+              "startTimeUnixNano": "1767225590000000000",
+              "endTimeUnixNano": "1767225590641000000",
+              "attributes": [
+                {
+                  "key": "code.file.path",
+                  "value": {
+                    "stringValue": "crates/goose/src/agents/services.rs"
+                  }
+                },
+                {
+                  "key": "code.module.name",
+                  "value": {
+                    "stringValue": "goose::agents::services"
+                  }
+                },
+                {
+                  "key": "code.line.number",
+                  "value": {
+                    "intValue": "813"
+                  }
+                },
+                {
+                  "key": "thread.id",
+                  "value": {
+                    "intValue": "2"
+                  }
+                },
+                {
+                  "key": "thread.name",
+                  "value": {
+                    "stringValue": "goose-cli-main"
+                  }
+                },
+                {
+                  "key": "target",
+                  "value": {
+                    "stringValue": "goose::agents::services"
+                  }
+                },
+                {
+                  "key": "session.id",
+                  "value": {
+                    "stringValue": "capture-volatile-1"
+                  }
+                },
+                {
+                  "key": "gen_ai.operation.name",
+                  "value": {
+                    "stringValue": "invoke_agent"
+                  }
+                },
+                {
+                  "key": "user_message",
+                  "value": {
+                    "stringValue": "Read hello.txt and tell me what it says."
+                  }
+                },
+                {
+                  "key": "trace_input",
+                  "value": {
+                    "stringValue": "Read hello.txt and tell me what it says."
+                  }
+                },
+                {
+                  "key": "gen_ai.input.messages",
+                  "value": {
+                    "stringValue": "[{\"role\":\"user\",\"content\":\"Read hello.txt and tell me what it says.\"}]"
+                  }
+                },
+                {
+                  "key": "gen_ai.agent.name",
+                  "value": {
+                    "stringValue": "goose"
+                  }
+                },
+                {
+                  "key": "trace_input",
+                  "value": {
+                    "stringValue": "Read hello.txt and tell me what it says."
+                  }
+                },
+                {
+                  "key": "trace_output",
+                  "value": {
+                    "stringValue": "hello.txt says: hello from cetra"
+                  }
+                },
+                {
+                  "key": "gen_ai.output.messages",
+                  "value": {
+                    "stringValue": "[{\"role\":\"assistant\",\"content\":\"hello.txt says: hello from cetra\",\"finish_reason\":\"stop\"}]"
+                  }
+                },
+                {
+                  "key": "gen_ai.usage.input_tokens",
+                  "value": {
+                    "intValue": "213"
+                  }
+                },
+                {
+                  "key": "gen_ai.usage.output_tokens",
+                  "value": {
+                    "intValue": "29"
+                  }
+                },
+                {
+                  "key": "busy_ns",
+                  "value": {
+                    "intValue": "467098609"
+                  }
+                },
+                {
+                  "key": "idle_ns",
+                  "value": {
+                    "intValue": "173883677"
+                  }
+                }
+              ],
+              "droppedAttributesCount": 0,
+              "events": [
+                {
+                  "timeUnixNano": "1767225590015000000",
+                  "name": "Loading config from: \"/capture/target/capture-agents/goose__read-file/home/.config/goose/config.yaml\"",
+                  "attributes": [
+                    {
+                      "key": "level",
+                      "value": {
+                        "stringValue": "DEBUG"
+                      }
+                    },
+                    {
+                      "key": "target",
+                      "value": {
+                        "stringValue": "goose::config::base"
+                      }
+                    },
+                    {
+                      "key": "code.file.path",
+                      "value": {
+                        "stringValue": "crates/goose/src/config/base.rs"
+                      }
+                    },
+                    {
+                      "key": "code.module.name",
+                      "value": {
+                        "stringValue": "goose::config::base"
+                      }
+                    },
+                    {
+                      "key": "code.line.number",
+                      "value": {
+                        "intValue": "541"
+                      }
+                    }
+                  ],
+                  "droppedAttributesCount": 0
+                },
+                {
+                  "timeUnixNano": "1767225590015000000",
+                  "name": "Loading config from: \"/capture/target/capture-agents/goose__read-file/home/.config/goose/config.yaml\"",
+                  "attributes": [
+                    {
+                      "key": "level",
+                      "value": {
+                        "stringValue": "DEBUG"
+                      }
+                    },
+                    {
+                      "key": "target",
+                      "value": {
+                        "stringValue": "goose::config::base"
+                      }
+                    },
+                    {
+                      "key": "code.file.path",
+                      "value": {
+                        "stringValue": "crates/goose/src/config/base.rs"
+                      }
+                    },
+                    {
+                      "key": "code.module.name",
+                      "value": {
+                        "stringValue": "goose::config::base"
+                      }
+                    },
+                    {
+                      "key": "code.line.number",
+                      "value": {
+                        "intValue": "541"
+                      }
+                    }
+                  ],
+                  "droppedAttributesCount": 0
+                },
+                {
+                  "timeUnixNano": "1767225590015000000",
+                  "name": "Loading config from: \"/capture/target/capture-agents/goose__read-file/home/.config/goose/config.yaml\"",
+                  "attributes": [
+                    {
+                      "key": "level",
+                      "value": {
+                        "stringValue": "DEBUG"
+                      }
+                    },
+                    {
+                      "key": "target",
+                      "value": {
+                        "stringValue": "goose::config::base"
+                      }
+                    },
+                    {
+                      "key": "code.file.path",
+                      "value": {
+                        "stringValue": "crates/goose/src/config/base.rs"
+                      }
+                    },
+                    {
+                      "key": "code.module.name",
+                      "value": {
+                        "stringValue": "goose::config::base"
+                      }
+                    },
+                    {
+                      "key": "code.line.number",
+                      "value": {
+                        "intValue": "541"
+                      }
+                    }
+                  ],
+                  "droppedAttributesCount": 0
+                },
+                {
+                  "timeUnixNano": "1767225590015000000",
+                  "name": "Loading config from: \"/capture/target/capture-agents/goose__read-file/home/.config/goose/config.yaml\"",
+                  "attributes": [
+                    {
+                      "key": "level",
+                      "value": {
+                        "stringValue": "DEBUG"
+                      }
+                    },
+                    {
+                      "key": "target",
+                      "value": {
+                        "stringValue": "goose::config::base"
+                      }
+                    },
+                    {
+                      "key": "code.file.path",
+                      "value": {
+                        "stringValue": "crates/goose/src/config/base.rs"
+                      }
+                    },
+                    {
+                      "key": "code.module.name",
+                      "value": {
+                        "stringValue": "goose::config::base"
+                      }
+                    },
+                    {
+                      "key": "code.line.number",
+                      "value": {
+                        "intValue": "541"
+                      }
+                    }
+                  ],
+                  "droppedAttributesCount": 0
+                },
+                {
+                  "timeUnixNano": "1767225590015000000",
+                  "name": "Loading config from: \"/capture/target/capture-agents/goose__read-file/home/.config/goose/config.yaml\"",
+                  "attributes": [
+                    {
+                      "key": "level",
+                      "value": {
+                        "stringValue": "DEBUG"
+                      }
+                    },
+                    {
+                      "key": "target",
+                      "value": {
+                        "stringValue": "goose::config::base"
+                      }
+                    },
+                    {
+                      "key": "code.file.path",
+                      "value": {
+                        "stringValue": "crates/goose/src/config/base.rs"
+                      }
+                    },
+                    {
+                      "key": "code.module.name",
+                      "value": {
+                        "stringValue": "goose::config::base"
+                      }
+                    },
+                    {
+                      "key": "code.line.number",
+                      "value": {
+                        "intValue": "541"
+                      }
+                    }
+                  ],
+                  "droppedAttributesCount": 0
+                },
+                {
+                  "timeUnixNano": "1767225590015000000",
+                  "name": "Loading config from: \"/capture/target/capture-agents/goose__read-file/home/.config/goose/config.yaml\"",
+                  "attributes": [
+                    {
+                      "key": "level",
+                      "value": {
+                        "stringValue": "DEBUG"
+                      }
+                    },
+                    {
+                      "key": "target",
+                      "value": {
+                        "stringValue": "goose::config::base"
+                      }
+                    },
+                    {
+                      "key": "code.file.path",
+                      "value": {
+                        "stringValue": "crates/goose/src/config/base.rs"
+                      }
+                    },
+                    {
+                      "key": "code.module.name",
+                      "value": {
+                        "stringValue": "goose::config::base"
+                      }
+                    },
+                    {
+                      "key": "code.line.number",
+                      "value": {
+                        "intValue": "541"
+                      }
+                    }
+                  ],
+                  "droppedAttributesCount": 0
+                },
+                {
+                  "timeUnixNano": "1767225590015000000",
+                  "name": "Loading config from: \"/capture/target/capture-agents/goose__read-file/home/.config/goose/config.yaml\"",
+                  "attributes": [
+                    {
+                      "key": "level",
+                      "value": {
+                        "stringValue": "DEBUG"
+                      }
+                    },
+                    {
+                      "key": "target",
+                      "value": {
+                        "stringValue": "goose::config::base"
+                      }
+                    },
+                    {
+                      "key": "code.file.path",
+                      "value": {
+                        "stringValue": "crates/goose/src/config/base.rs"
+                      }
+                    },
+                    {
+                      "key": "code.module.name",
+                      "value": {
+                        "stringValue": "goose::config::base"
+                      }
+                    },
+                    {
+                      "key": "code.line.number",
+                      "value": {
+                        "intValue": "541"
+                      }
+                    }
+                  ],
+                  "droppedAttributesCount": 0
+                },
+                {
+                  "timeUnixNano": "1767225590015000000",
+                  "name": "Loading config from: \"/capture/target/capture-agents/goose__read-file/home/.config/goose/config.yaml\"",
+                  "attributes": [
+                    {
+                      "key": "level",
+                      "value": {
+                        "stringValue": "DEBUG"
+                      }
+                    },
+                    {
+                      "key": "target",
+                      "value": {
+                        "stringValue": "goose::config::base"
+                      }
+                    },
+                    {
+                      "key": "code.file.path",
+                      "value": {
+                        "stringValue": "crates/goose/src/config/base.rs"
+                      }
+                    },
+                    {
+                      "key": "code.module.name",
+                      "value": {
+                        "stringValue": "goose::config::base"
+                      }
+                    },
+                    {
+                      "key": "code.line.number",
+                      "value": {
+                        "intValue": "541"
+                      }
+                    }
+                  ],
+                  "droppedAttributesCount": 0
+                },
+                {
+                  "timeUnixNano": "1767225590016000000",
+                  "name": "Loading config from: \"/capture/target/capture-agents/goose__read-file/home/.config/goose/config.yaml\"",
+                  "attributes": [
+                    {
+                      "key": "level",
+                      "value": {
+                        "stringValue": "DEBUG"
+                      }
+                    },
+                    {
+                      "key": "target",
+                      "value": {
+                        "stringValue": "goose::config::base"
+                      }
+                    },
+                    {
+                      "key": "code.file.path",
+                      "value": {
+                        "stringValue": "crates/goose/src/config/base.rs"
+                      }
+                    },
+                    {
+                      "key": "code.module.name",
+                      "value": {
+                        "stringValue": "goose::config::base"
+                      }
+                    },
+                    {
+                      "key": "code.line.number",
+                      "value": {
+                        "intValue": "541"
+                      }
+                    }
+                  ],
+                  "droppedAttributesCount": 0
+                },
+                {
+                  "timeUnixNano": "1767225590022000000",
+                  "name": "Loading config from: \"/capture/target/capture-agents/goose__read-file/home/.config/goose/config.yaml\"",
+                  "attributes": [
+                    {
+                      "key": "level",
+                      "value": {
+                        "stringValue": "DEBUG"
+                      }
+                    },
+                    {
+                      "key": "target",
+                      "value": {
+                        "stringValue": "goose::config::base"
+                      }
+                    },
+                    {
+                      "key": "code.file.path",
+                      "value": {
+                        "stringValue": "crates/goose/src/config/base.rs"
+                      }
+                    },
+                    {
+                      "key": "code.module.name",
+                      "value": {
+                        "stringValue": "goose::config::base"
+                      }
+                    },
+                    {
+                      "key": "code.line.number",
+                      "value": {
+                        "intValue": "541"
+                      }
+                    }
+                  ],
+                  "droppedAttributesCount": 0
+                },
+                {
+                  "timeUnixNano": "1767225590022000000",
+                  "name": "Loading config from: \"/capture/target/capture-agents/goose__read-file/home/.config/goose/config.yaml\"",
+                  "attributes": [
+                    {
+                      "key": "level",
+                      "value": {
+                        "stringValue": "DEBUG"
+                      }
+                    },
+                    {
+                      "key": "target",
+                      "value": {
+                        "stringValue": "goose::config::base"
+                      }
+                    },
+                    {
+                      "key": "code.file.path",
+                      "value": {
+                        "stringValue": "crates/goose/src/config/base.rs"
+                      }
+                    },
+                    {
+                      "key": "code.module.name",
+                      "value": {
+                        "stringValue": "goose::config::base"
+                      }
+                    },
+                    {
+                      "key": "code.line.number",
+                      "value": {
+                        "intValue": "541"
+                      }
+                    }
+                  ],
+                  "droppedAttributesCount": 0
+                },
+                {
+                  "timeUnixNano": "1767225590022000000",
+                  "name": "Loading config from: \"/capture/target/capture-agents/goose__read-file/home/.config/goose/config.yaml\"",
+                  "attributes": [
+                    {
+                      "key": "level",
+                      "value": {
+                        "stringValue": "DEBUG"
+                      }
+                    },
+                    {
+                      "key": "target",
+                      "value": {
+                        "stringValue": "goose::config::base"
+                      }
+                    },
+                    {
+                      "key": "code.file.path",
+                      "value": {
+                        "stringValue": "crates/goose/src/config/base.rs"
+                      }
+                    },
+                    {
+                      "key": "code.module.name",
+                      "value": {
+                        "stringValue": "goose::config::base"
+                      }
+                    },
+                    {
+                      "key": "code.line.number",
+                      "value": {
+                        "intValue": "541"
+                      }
+                    }
+                  ],
+                  "droppedAttributesCount": 0
+                },
+                {
+                  "timeUnixNano": "1767225590022000000",
+                  "name": "Loading config from: \"/capture/target/capture-agents/goose__read-file/home/.config/goose/config.yaml\"",
+                  "attributes": [
+                    {
+                      "key": "level",
+                      "value": {
+                        "stringValue": "DEBUG"
+                      }
+                    },
+                    {
+                      "key": "target",
+                      "value": {
+                        "stringValue": "goose::config::base"
+                      }
+                    },
+                    {
+                      "key": "code.file.path",
+                      "value": {
+                        "stringValue": "crates/goose/src/config/base.rs"
+                      }
+                    },
+                    {
+                      "key": "code.module.name",
+                      "value": {
+                        "stringValue": "goose::config::base"
+                      }
+                    },
+                    {
+                      "key": "code.line.number",
+                      "value": {
+                        "intValue": "541"
+                      }
+                    }
+                  ],
+                  "droppedAttributesCount": 0
+                },
+                {
+                  "timeUnixNano": "1767225590022000000",
+                  "name": "Loading config from: \"/capture/target/capture-agents/goose__read-file/home/.config/goose/config.yaml\"",
+                  "attributes": [
+                    {
+                      "key": "level",
+                      "value": {
+                        "stringValue": "DEBUG"
+                      }
+                    },
+                    {
+                      "key": "target",
+                      "value": {
+                        "stringValue": "goose::config::base"
+                      }
+                    },
+                    {
+                      "key": "code.file.path",
+                      "value": {
+                        "stringValue": "crates/goose/src/config/base.rs"
+                      }
+                    },
+                    {
+                      "key": "code.module.name",
+                      "value": {
+                        "stringValue": "goose::config::base"
+                      }
+                    },
+                    {
+                      "key": "code.line.number",
+                      "value": {
+                        "intValue": "541"
+                      }
+                    }
+                  ],
+                  "droppedAttributesCount": 0
+                },
+                {
+                  "timeUnixNano": "1767225590022000000",
+                  "name": "Loading config from: \"/capture/target/capture-agents/goose__read-file/home/.config/goose/config.yaml\"",
+                  "attributes": [
+                    {
+                      "key": "level",
+                      "value": {
+                        "stringValue": "DEBUG"
+                      }
+                    },
+                    {
+                      "key": "target",
+                      "value": {
+                        "stringValue": "goose::config::base"
+                      }
+                    },
+                    {
+                      "key": "code.file.path",
+                      "value": {
+                        "stringValue": "crates/goose/src/config/base.rs"
+                      }
+                    },
+                    {
+                      "key": "code.module.name",
+                      "value": {
+                        "stringValue": "goose::config::base"
+                      }
+                    },
+                    {
+                      "key": "code.line.number",
+                      "value": {
+                        "intValue": "541"
+                      }
+                    }
+                  ],
+                  "droppedAttributesCount": 0
+                },
+                {
+                  "timeUnixNano": "1767225590022000000",
+                  "name": "Loading config from: \"/capture/target/capture-agents/goose__read-file/home/.config/goose/config.yaml\"",
+                  "attributes": [
+                    {
+                      "key": "level",
+                      "value": {
+                        "stringValue": "DEBUG"
+                      }
+                    },
+                    {
+                      "key": "target",
+                      "value": {
+                        "stringValue": "goose::config::base"
+                      }
+                    },
+                    {
+                      "key": "code.file.path",
+                      "value": {
+                        "stringValue": "crates/goose/src/config/base.rs"
+                      }
+                    },
+                    {
+                      "key": "code.module.name",
+                      "value": {
+                        "stringValue": "goose::config::base"
+                      }
+                    },
+                    {
+                      "key": "code.line.number",
+                      "value": {
+                        "intValue": "541"
+                      }
+                    }
+                  ],
+                  "droppedAttributesCount": 0
+                },
+                {
+                  "timeUnixNano": "1767225590023000000",
+                  "name": "Loading config from: \"/capture/target/capture-agents/goose__read-file/home/.config/goose/config.yaml\"",
+                  "attributes": [
+                    {
+                      "key": "level",
+                      "value": {
+                        "stringValue": "DEBUG"
+                      }
+                    },
+                    {
+                      "key": "target",
+                      "value": {
+                        "stringValue": "goose::config::base"
+                      }
+                    },
+                    {
+                      "key": "code.file.path",
+                      "value": {
+                        "stringValue": "crates/goose/src/config/base.rs"
+                      }
+                    },
+                    {
+                      "key": "code.module.name",
+                      "value": {
+                        "stringValue": "goose::config::base"
+                      }
+                    },
+                    {
+                      "key": "code.line.number",
+                      "value": {
+                        "intValue": "541"
+                      }
+                    }
+                  ],
+                  "droppedAttributesCount": 0
+                },
+                {
+                  "timeUnixNano": "1767225590023000000",
+                  "name": "Loading config from: \"/capture/target/capture-agents/goose__read-file/home/.config/goose/config.yaml\"",
+                  "attributes": [
+                    {
+                      "key": "level",
+                      "value": {
+                        "stringValue": "DEBUG"
+                      }
+                    },
+                    {
+                      "key": "target",
+                      "value": {
+                        "stringValue": "goose::config::base"
+                      }
+                    },
+                    {
+                      "key": "code.file.path",
+                      "value": {
+                        "stringValue": "crates/goose/src/config/base.rs"
+                      }
+                    },
+                    {
+                      "key": "code.module.name",
+                      "value": {
+                        "stringValue": "goose::config::base"
+                      }
+                    },
+                    {
+                      "key": "code.line.number",
+                      "value": {
+                        "intValue": "541"
+                      }
+                    }
+                  ],
+                  "droppedAttributesCount": 0
+                },
+                {
+                  "timeUnixNano": "1767225590023000000",
+                  "name": "Loading config from: \"/capture/target/capture-agents/goose__read-file/home/.config/goose/config.yaml\"",
+                  "attributes": [
+                    {
+                      "key": "level",
+                      "value": {
+                        "stringValue": "DEBUG"
+                      }
+                    },
+                    {
+                      "key": "target",
+                      "value": {
+                        "stringValue": "goose::config::base"
+                      }
+                    },
+                    {
+                      "key": "code.file.path",
+                      "value": {
+                        "stringValue": "crates/goose/src/config/base.rs"
+                      }
+                    },
+                    {
+                      "key": "code.module.name",
+                      "value": {
+                        "stringValue": "goose::config::base"
+                      }
+                    },
+                    {
+                      "key": "code.line.number",
+                      "value": {
+                        "intValue": "541"
+                      }
+                    }
+                  ],
+                  "droppedAttributesCount": 0
+                },
+                {
+                  "timeUnixNano": "1767225590023000000",
+                  "name": "Loading config from: \"/capture/target/capture-agents/goose__read-file/home/.config/goose/config.yaml\"",
+                  "attributes": [
+                    {
+                      "key": "level",
+                      "value": {
+                        "stringValue": "DEBUG"
+                      }
+                    },
+                    {
+                      "key": "target",
+                      "value": {
+                        "stringValue": "goose::config::base"
+                      }
+                    },
+                    {
+                      "key": "code.file.path",
+                      "value": {
+                        "stringValue": "crates/goose/src/config/base.rs"
+                      }
+                    },
+                    {
+                      "key": "code.module.name",
+                      "value": {
+                        "stringValue": "goose::config::base"
+                      }
+                    },
+                    {
+                      "key": "code.line.number",
+                      "value": {
+                        "intValue": "541"
+                      }
+                    }
+                  ],
+                  "droppedAttributesCount": 0
+                },
+                {
+                  "timeUnixNano": "1767225590023000000",
+                  "name": "Loading config from: \"/capture/target/capture-agents/goose__read-file/home/.config/goose/config.yaml\"",
+                  "attributes": [
+                    {
+                      "key": "level",
+                      "value": {
+                        "stringValue": "DEBUG"
+                      }
+                    },
+                    {
+                      "key": "target",
+                      "value": {
+                        "stringValue": "goose::config::base"
+                      }
+                    },
+                    {
+                      "key": "code.file.path",
+                      "value": {
+                        "stringValue": "crates/goose/src/config/base.rs"
+                      }
+                    },
+                    {
+                      "key": "code.module.name",
+                      "value": {
+                        "stringValue": "goose::config::base"
+                      }
+                    },
+                    {
+                      "key": "code.line.number",
+                      "value": {
+                        "intValue": "541"
+                      }
+                    }
+                  ],
+                  "droppedAttributesCount": 0
+                },
+                {
+                  "timeUnixNano": "1767225590023000000",
+                  "name": "Loading config from: \"/capture/target/capture-agents/goose__read-file/home/.config/goose/config.yaml\"",
+                  "attributes": [
+                    {
+                      "key": "level",
+                      "value": {
+                        "stringValue": "DEBUG"
+                      }
+                    },
+                    {
+                      "key": "target",
+                      "value": {
+                        "stringValue": "goose::config::base"
+                      }
+                    },
+                    {
+                      "key": "code.file.path",
+                      "value": {
+                        "stringValue": "crates/goose/src/config/base.rs"
+                      }
+                    },
+                    {
+                      "key": "code.module.name",
+                      "value": {
+                        "stringValue": "goose::config::base"
+                      }
+                    },
+                    {
+                      "key": "code.line.number",
+                      "value": {
+                        "intValue": "541"
+                      }
+                    }
+                  ],
+                  "droppedAttributesCount": 0
+                },
+                {
+                  "timeUnixNano": "1767225590024000000",
+                  "name": "Loading config from: \"/capture/target/capture-agents/goose__read-file/home/.config/goose/config.yaml\"",
+                  "attributes": [
+                    {
+                      "key": "level",
+                      "value": {
+                        "stringValue": "DEBUG"
+                      }
+                    },
+                    {
+                      "key": "target",
+                      "value": {
+                        "stringValue": "goose::config::base"
+                      }
+                    },
+                    {
+                      "key": "code.file.path",
+                      "value": {
+                        "stringValue": "crates/goose/src/config/base.rs"
+                      }
+                    },
+                    {
+                      "key": "code.module.name",
+                      "value": {
+                        "stringValue": "goose::config::base"
+                      }
+                    },
+                    {
+                      "key": "code.line.number",
+                      "value": {
+                        "intValue": "541"
+                      }
+                    }
+                  ],
+                  "droppedAttributesCount": 0
+                },
+                {
+                  "timeUnixNano": "1767225590389000000",
+                  "name": "Loading config from: \"/capture/target/capture-agents/goose__read-file/home/.config/goose/config.yaml\"",
+                  "attributes": [
+                    {
+                      "key": "level",
+                      "value": {
+                        "stringValue": "DEBUG"
+                      }
+                    },
+                    {
+                      "key": "target",
+                      "value": {
+                        "stringValue": "goose::config::base"
+                      }
+                    },
+                    {
+                      "key": "code.file.path",
+                      "value": {
+                        "stringValue": "crates/goose/src/config/base.rs"
+                      }
+                    },
+                    {
+                      "key": "code.module.name",
+                      "value": {
+                        "stringValue": "goose::config::base"
+                      }
+                    },
+                    {
+                      "key": "code.line.number",
+                      "value": {
+                        "intValue": "541"
+                      }
+                    }
+                  ],
+                  "droppedAttributesCount": 0
+                },
+                {
+                  "timeUnixNano": "1767225590390000000",
+                  "name": "Loading config from: \"/capture/target/capture-agents/goose__read-file/home/.config/goose/config.yaml\"",
+                  "attributes": [
+                    {
+                      "key": "level",
+                      "value": {
+                        "stringValue": "DEBUG"
+                      }
+                    },
+                    {
+                      "key": "target",
+                      "value": {
+                        "stringValue": "goose::config::base"
+                      }
+                    },
+                    {
+                      "key": "code.file.path",
+                      "value": {
+                        "stringValue": "crates/goose/src/config/base.rs"
+                      }
+                    },
+                    {
+                      "key": "code.module.name",
+                      "value": {
+                        "stringValue": "goose::config::base"
+                      }
+                    },
+                    {
+                      "key": "code.line.number",
+                      "value": {
+                        "intValue": "541"
+                      }
+                    }
+                  ],
+                  "droppedAttributesCount": 0
+                },
+                {
+                  "timeUnixNano": "1767225590502000000",
+                  "name": "Loading config from: \"/capture/target/capture-agents/goose__read-file/home/.config/goose/config.yaml\"",
+                  "attributes": [
+                    {
+                      "key": "level",
+                      "value": {
+                        "stringValue": "DEBUG"
+                      }
+                    },
+                    {
+                      "key": "target",
+                      "value": {
+                        "stringValue": "goose::config::base"
+                      }
+                    },
+                    {
+                      "key": "code.file.path",
+                      "value": {
+                        "stringValue": "crates/goose/src/config/base.rs"
+                      }
+                    },
+                    {
+                      "key": "code.module.name",
+                      "value": {
+                        "stringValue": "goose::config::base"
+                      }
+                    },
+                    {
+                      "key": "code.line.number",
+                      "value": {
+                        "intValue": "541"
+                      }
+                    }
+                  ],
+                  "droppedAttributesCount": 0
+                },
+                {
+                  "timeUnixNano": "1767225590502000000",
+                  "name": "Loading config from: \"/capture/target/capture-agents/goose__read-file/home/.config/goose/config.yaml\"",
+                  "attributes": [
+                    {
+                      "key": "level",
+                      "value": {
+                        "stringValue": "DEBUG"
+                      }
+                    },
+                    {
+                      "key": "target",
+                      "value": {
+                        "stringValue": "goose::config::base"
+                      }
+                    },
+                    {
+                      "key": "code.file.path",
+                      "value": {
+                        "stringValue": "crates/goose/src/config/base.rs"
+                      }
+                    },
+                    {
+                      "key": "code.module.name",
+                      "value": {
+                        "stringValue": "goose::config::base"
+                      }
+                    },
+                    {
+                      "key": "code.line.number",
+                      "value": {
+                        "intValue": "541"
+                      }
+                    }
+                  ],
+                  "droppedAttributesCount": 0
+                },
+                {
+                  "timeUnixNano": "1767225590502000000",
+                  "name": "Running tool inspector",
+                  "attributes": [
+                    {
+                      "key": "level",
+                      "value": {
+                        "stringValue": "DEBUG"
+                      }
+                    },
+                    {
+                      "key": "target",
+                      "value": {
+                        "stringValue": "goose::tool_inspection"
+                      }
+                    },
+                    {
+                      "key": "inspector_name",
+                      "value": {
+                        "stringValue": "egress"
+                      }
+                    },
+                    {
+                      "key": "tool_count",
+                      "value": {
+                        "stringValue": "1"
+                      }
+                    },
+                    {
+                      "key": "code.file.path",
+                      "value": {
+                        "stringValue": "crates/goose/src/tool_inspection.rs"
+                      }
+                    },
+                    {
+                      "key": "code.module.name",
+                      "value": {
+                        "stringValue": "goose::tool_inspection"
+                      }
+                    },
+                    {
+                      "key": "code.line.number",
+                      "value": {
+                        "intValue": "89"
+                      }
+                    }
+                  ],
+                  "droppedAttributesCount": 0
+                },
+                {
+                  "timeUnixNano": "1767225590505000000",
+                  "name": "Tool inspector completed",
+                  "attributes": [
+                    {
+                      "key": "level",
+                      "value": {
+                        "stringValue": "DEBUG"
+                      }
+                    },
+                    {
+                      "key": "target",
+                      "value": {
+                        "stringValue": "goose::tool_inspection"
+                      }
+                    },
+                    {
+                      "key": "inspector_name",
+                      "value": {
+                        "stringValue": "egress"
+                      }
+                    },
+                    {
+                      "key": "result_count",
+                      "value": {
+                        "stringValue": "0"
+                      }
+                    },
+                    {
+                      "key": "code.file.path",
+                      "value": {
+                        "stringValue": "crates/goose/src/tool_inspection.rs"
+                      }
+                    },
+                    {
+                      "key": "code.module.name",
+                      "value": {
+                        "stringValue": "goose::tool_inspection"
+                      }
+                    },
+                    {
+                      "key": "code.line.number",
+                      "value": {
+                        "intValue": "100"
+                      }
+                    }
+                  ],
+                  "droppedAttributesCount": 0
+                },
+                {
+                  "timeUnixNano": "1767225590505000000",
+                  "name": "No adversary.md found, adversary inspector disabled",
+                  "attributes": [
+                    {
+                      "key": "level",
+                      "value": {
+                        "stringValue": "DEBUG"
+                      }
+                    },
+                    {
+                      "key": "target",
+                      "value": {
+                        "stringValue": "goose::security::adversary_inspector"
+                      }
+                    },
+                    {
+                      "key": "code.file.path",
+                      "value": {
+                        "stringValue": "crates/goose/src/security/adversary_inspector.rs"
+                      }
+                    },
+                    {
+                      "key": "code.module.name",
+                      "value": {
+                        "stringValue": "goose::security::adversary_inspector"
+                      }
+                    },
+                    {
+                      "key": "code.line.number",
+                      "value": {
+                        "intValue": "92"
+                      }
+                    }
+                  ],
+                  "droppedAttributesCount": 0
+                },
+                {
+                  "timeUnixNano": "1767225590505000000",
+                  "name": "Running tool inspector",
+                  "attributes": [
+                    {
+                      "key": "level",
+                      "value": {
+                        "stringValue": "DEBUG"
+                      }
+                    },
+                    {
+                      "key": "target",
+                      "value": {
+                        "stringValue": "goose::tool_inspection"
+                      }
+                    },
+                    {
+                      "key": "inspector_name",
+                      "value": {
+                        "stringValue": "permission"
+                      }
+                    },
+                    {
+                      "key": "tool_count",
+                      "value": {
+                        "stringValue": "1"
+                      }
+                    },
+                    {
+                      "key": "code.file.path",
+                      "value": {
+                        "stringValue": "crates/goose/src/tool_inspection.rs"
+                      }
+                    },
+                    {
+                      "key": "code.module.name",
+                      "value": {
+                        "stringValue": "goose::tool_inspection"
+                      }
+                    },
+                    {
+                      "key": "code.line.number",
+                      "value": {
+                        "intValue": "89"
+                      }
+                    }
+                  ],
+                  "droppedAttributesCount": 0
+                },
+                {
+                  "timeUnixNano": "1767225590505000000",
+                  "name": "Tool inspector completed",
+                  "attributes": [
+                    {
+                      "key": "level",
+                      "value": {
+                        "stringValue": "DEBUG"
+                      }
+                    },
+                    {
+                      "key": "target",
+                      "value": {
+                        "stringValue": "goose::tool_inspection"
+                      }
+                    },
+                    {
+                      "key": "inspector_name",
+                      "value": {
+                        "stringValue": "permission"
+                      }
+                    },
+                    {
+                      "key": "result_count",
+                      "value": {
+                        "stringValue": "1"
+                      }
+                    },
+                    {
+                      "key": "code.file.path",
+                      "value": {
+                        "stringValue": "crates/goose/src/tool_inspection.rs"
+                      }
+                    },
+                    {
+                      "key": "code.module.name",
+                      "value": {
+                        "stringValue": "goose::tool_inspection"
+                      }
+                    },
+                    {
+                      "key": "code.line.number",
+                      "value": {
+                        "intValue": "100"
+                      }
+                    }
+                  ],
+                  "droppedAttributesCount": 0
+                },
+                {
+                  "timeUnixNano": "1767225590505000000",
+                  "name": "Running tool inspector",
+                  "attributes": [
+                    {
+                      "key": "level",
+                      "value": {
+                        "stringValue": "DEBUG"
+                      }
+                    },
+                    {
+                      "key": "target",
+                      "value": {
+                        "stringValue": "goose::tool_inspection"
+                      }
+                    },
+                    {
+                      "key": "inspector_name",
+                      "value": {
+                        "stringValue": "repetition"
+                      }
+                    },
+                    {
+                      "key": "tool_count",
+                      "value": {
+                        "stringValue": "1"
+                      }
+                    },
+                    {
+                      "key": "code.file.path",
+                      "value": {
+                        "stringValue": "crates/goose/src/tool_inspection.rs"
+                      }
+                    },
+                    {
+                      "key": "code.module.name",
+                      "value": {
+                        "stringValue": "goose::tool_inspection"
+                      }
+                    },
+                    {
+                      "key": "code.line.number",
+                      "value": {
+                        "intValue": "89"
+                      }
+                    }
+                  ],
+                  "droppedAttributesCount": 0
+                },
+                {
+                  "timeUnixNano": "1767225590505000000",
+                  "name": "Tool inspector completed",
+                  "attributes": [
+                    {
+                      "key": "level",
+                      "value": {
+                        "stringValue": "DEBUG"
+                      }
+                    },
+                    {
+                      "key": "target",
+                      "value": {
+                        "stringValue": "goose::tool_inspection"
+                      }
+                    },
+                    {
+                      "key": "inspector_name",
+                      "value": {
+                        "stringValue": "repetition"
+                      }
+                    },
+                    {
+                      "key": "result_count",
+                      "value": {
+                        "stringValue": "0"
+                      }
+                    },
+                    {
+                      "key": "code.file.path",
+                      "value": {
+                        "stringValue": "crates/goose/src/tool_inspection.rs"
+                      }
+                    },
+                    {
+                      "key": "code.module.name",
+                      "value": {
+                        "stringValue": "goose::tool_inspection"
+                      }
+                    },
+                    {
+                      "key": "code.line.number",
+                      "value": {
+                        "intValue": "100"
+                      }
+                    }
+                  ],
+                  "droppedAttributesCount": 0
+                },
+                {
+                  "timeUnixNano": "1767225590514000000",
+                  "name": "Loading config from: \"/capture/target/capture-agents/goose__read-file/home/.config/goose/config.yaml\"",
+                  "attributes": [
+                    {
+                      "key": "level",
+                      "value": {
+                        "stringValue": "DEBUG"
+                      }
+                    },
+                    {
+                      "key": "target",
+                      "value": {
+                        "stringValue": "goose::config::base"
+                      }
+                    },
+                    {
+                      "key": "code.file.path",
+                      "value": {
+                        "stringValue": "crates/goose/src/config/base.rs"
+                      }
+                    },
+                    {
+                      "key": "code.module.name",
+                      "value": {
+                        "stringValue": "goose::config::base"
+                      }
+                    },
+                    {
+                      "key": "code.line.number",
+                      "value": {
+                        "intValue": "541"
+                      }
+                    }
+                  ],
+                  "droppedAttributesCount": 0
+                },
+                {
+                  "timeUnixNano": "1767225590520000000",
+                  "name": "Loading config from: \"/capture/target/capture-agents/goose__read-file/home/.config/goose/config.yaml\"",
+                  "attributes": [
+                    {
+                      "key": "level",
+                      "value": {
+                        "stringValue": "DEBUG"
+                      }
+                    },
+                    {
+                      "key": "target",
+                      "value": {
+                        "stringValue": "goose::config::base"
+                      }
+                    },
+                    {
+                      "key": "code.file.path",
+                      "value": {
+                        "stringValue": "crates/goose/src/config/base.rs"
+                      }
+                    },
+                    {
+                      "key": "code.module.name",
+                      "value": {
+                        "stringValue": "goose::config::base"
+                      }
+                    },
+                    {
+                      "key": "code.line.number",
+                      "value": {
+                        "intValue": "541"
+                      }
+                    }
+                  ],
+                  "droppedAttributesCount": 0
+                },
+                {
+                  "timeUnixNano": "1767225590546000000",
+                  "name": "Loading config from: \"/capture/target/capture-agents/goose__read-file/home/.config/goose/config.yaml\"",
+                  "attributes": [
+                    {
+                      "key": "level",
+                      "value": {
+                        "stringValue": "DEBUG"
+                      }
+                    },
+                    {
+                      "key": "target",
+                      "value": {
+                        "stringValue": "goose::config::base"
+                      }
+                    },
+                    {
+                      "key": "code.file.path",
+                      "value": {
+                        "stringValue": "crates/goose/src/config/base.rs"
+                      }
+                    },
+                    {
+                      "key": "code.module.name",
+                      "value": {
+                        "stringValue": "goose::config::base"
+                      }
+                    },
+                    {
+                      "key": "code.line.number",
+                      "value": {
+                        "intValue": "541"
+                      }
+                    }
+                  ],
+                  "droppedAttributesCount": 0
+                },
+                {
+                  "timeUnixNano": "1767225590551000000",
+                  "name": "Loading config from: \"/capture/target/capture-agents/goose__read-file/home/.config/goose/config.yaml\"",
+                  "attributes": [
+                    {
+                      "key": "level",
+                      "value": {
+                        "stringValue": "DEBUG"
+                      }
+                    },
+                    {
+                      "key": "target",
+                      "value": {
+                        "stringValue": "goose::config::base"
+                      }
+                    },
+                    {
+                      "key": "code.file.path",
+                      "value": {
+                        "stringValue": "crates/goose/src/config/base.rs"
+                      }
+                    },
+                    {
+                      "key": "code.module.name",
+                      "value": {
+                        "stringValue": "goose::config::base"
+                      }
+                    },
+                    {
+                      "key": "code.line.number",
+                      "value": {
+                        "intValue": "541"
+                      }
+                    }
+                  ],
+                  "droppedAttributesCount": 0
+                },
+                {
+                  "timeUnixNano": "1767225590551000000",
+                  "name": "Loading config from: \"/capture/target/capture-agents/goose__read-file/home/.config/goose/config.yaml\"",
+                  "attributes": [
+                    {
+                      "key": "level",
+                      "value": {
+                        "stringValue": "DEBUG"
+                      }
+                    },
+                    {
+                      "key": "target",
+                      "value": {
+                        "stringValue": "goose::config::base"
+                      }
+                    },
+                    {
+                      "key": "code.file.path",
+                      "value": {
+                        "stringValue": "crates/goose/src/config/base.rs"
+                      }
+                    },
+                    {
+                      "key": "code.module.name",
+                      "value": {
+                        "stringValue": "goose::config::base"
+                      }
+                    },
+                    {
+                      "key": "code.line.number",
+                      "value": {
+                        "intValue": "541"
+                      }
+                    }
+                  ],
+                  "droppedAttributesCount": 0
+                },
+                {
+                  "timeUnixNano": "1767225590640000000",
+                  "name": "Loading config from: \"/capture/target/capture-agents/goose__read-file/home/.config/goose/config.yaml\"",
+                  "attributes": [
+                    {
+                      "key": "level",
+                      "value": {
+                        "stringValue": "DEBUG"
+                      }
+                    },
+                    {
+                      "key": "target",
+                      "value": {
+                        "stringValue": "goose::config::base"
+                      }
+                    },
+                    {
+                      "key": "code.file.path",
+                      "value": {
+                        "stringValue": "crates/goose/src/config/base.rs"
+                      }
+                    },
+                    {
+                      "key": "code.module.name",
+                      "value": {
+                        "stringValue": "goose::config::base"
+                      }
+                    },
+                    {
+                      "key": "code.line.number",
+                      "value": {
+                        "intValue": "541"
+                      }
+                    }
+                  ],
+                  "droppedAttributesCount": 0
+                }
+              ],
+              "droppedEventsCount": 0,
+              "links": [],
+              "droppedLinksCount": 0,
+              "status": null
+            },
+            {
+              "traceId": "dfcc9495523cdababe9d08bfc45e9ce4",
+              "spanId": "fcc351930c719d36",
+              "traceState": "",
+              "parentSpanId": "52503bfdfdf4ddc3",
+              "flags": 257,
+              "name": "chat",
+              "kind": 1,
+              "startTimeUnixNano": "1767225590390000000",
+              "endTimeUnixNano": "1767225590475000000",
+              "attributes": [
+                {
+                  "key": "code.file.path",
+                  "value": {
+                    "stringValue": "crates/goose-agent/src/inference.rs"
+                  }
+                },
+                {
+                  "key": "code.module.name",
+                  "value": {
+                    "stringValue": "goose_agent::inference"
+                  }
+                },
+                {
+                  "key": "code.line.number",
+                  "value": {
+                    "intValue": "343"
+                  }
+                },
+                {
+                  "key": "thread.id",
+                  "value": {
+                    "intValue": "2"
+                  }
+                },
+                {
+                  "key": "thread.name",
+                  "value": {
+                    "stringValue": "goose-cli-main"
+                  }
+                },
+                {
+                  "key": "target",
+                  "value": {
+                    "stringValue": "goose::state_machine"
+                  }
+                },
+                {
+                  "key": "gen_ai.operation.name",
+                  "value": {
+                    "stringValue": "chat"
+                  }
+                },
+                {
+                  "key": "gen_ai.provider.name",
+                  "value": {
+                    "stringValue": "openai"
+                  }
+                },
+                {
+                  "key": "gen_ai.request.model",
+                  "value": {
+                    "stringValue": "gpt-4o-mini"
+                  }
+                },
+                {
+                  "key": "gen_ai.request.max_tokens",
+                  "value": {
+                    "intValue": "16384"
+                  }
+                },
+                {
+                  "key": "gen_ai.response.model",
+                  "value": {
+                    "stringValue": "gpt-4o-mini"
+                  }
+                },
+                {
+                  "key": "gen_ai.usage.input_tokens",
+                  "value": {
+                    "intValue": "82"
+                  }
+                },
+                {
+                  "key": "gen_ai.usage.output_tokens",
+                  "value": {
+                    "intValue": "17"
+                  }
+                },
+                {
+                  "key": "gen_ai.response.finish_reasons",
+                  "value": {
+                    "stringValue": "[\"tool_calls\"]"
+                  }
+                },
+                {
+                  "key": "gen_ai.response.id",
+                  "value": {
+                    "stringValue": "chatcmpl-capture-2"
+                  }
+                },
+                {
+                  "key": "gen_ai.request.id",
+                  "value": {
+                    "stringValue": "req_capture_2"
+                  }
+                },
+                {
+                  "key": "busy_ns",
+                  "value": {
+                    "intValue": "4062886"
+                  }
+                },
+                {
+                  "key": "idle_ns",
+                  "value": {
+                    "intValue": "81157071"
+                  }
+                }
+              ],
+              "droppedAttributesCount": 0,
+              "events": [
+                {
+                  "timeUnixNano": "1767225590390000000",
+                  "name": "Loading config from: \"/capture/target/capture-agents/goose__read-file/home/.config/goose/config.yaml\"",
+                  "attributes": [
+                    {
+                      "key": "level",
+                      "value": {
+                        "stringValue": "DEBUG"
+                      }
+                    },
+                    {
+                      "key": "target",
+                      "value": {
+                        "stringValue": "goose::config::base"
+                      }
+                    },
+                    {
+                      "key": "code.file.path",
+                      "value": {
+                        "stringValue": "crates/goose/src/config/base.rs"
+                      }
+                    },
+                    {
+                      "key": "code.module.name",
+                      "value": {
+                        "stringValue": "goose::config::base"
+                      }
+                    },
+                    {
+                      "key": "code.line.number",
+                      "value": {
+                        "intValue": "541"
+                      }
+                    }
+                  ],
+                  "droppedAttributesCount": 0
+                }
+              ],
+              "droppedEventsCount": 0,
+              "links": [],
+              "droppedLinksCount": 0,
+              "status": null
+            },
+            {
+              "traceId": "dfcc9495523cdababe9d08bfc45e9ce4",
+              "spanId": "76c15fc1b0f65889",
+              "traceState": "",
+              "parentSpanId": "fcc351930c719d36",
+              "flags": 257,
+              "name": "stream_response_from_provider",
+              "kind": 1,
+              "startTimeUnixNano": "1767225590391000000",
+              "endTimeUnixNano": "1767225590400000000",
+              "attributes": [
+                {
+                  "key": "code.file.path",
+                  "value": {
+                    "stringValue": "crates/goose/src/agents/reply_parts.rs"
+                  }
+                },
+                {
+                  "key": "code.module.name",
+                  "value": {
+                    "stringValue": "goose::agents::reply_parts"
+                  }
+                },
+                {
+                  "key": "code.line.number",
+                  "value": {
+                    "intValue": "226"
+                  }
+                },
+                {
+                  "key": "thread.id",
+                  "value": {
+                    "intValue": "2"
+                  }
+                },
+                {
+                  "key": "thread.name",
+                  "value": {
+                    "stringValue": "goose-cli-main"
+                  }
+                },
+                {
+                  "key": "target",
+                  "value": {
+                    "stringValue": "goose::agents::reply_parts"
+                  }
+                },
+                {
+                  "key": "session.id",
+                  "value": {
+                    "stringValue": "capture-volatile-1"
+                  }
+                },
+                {
+                  "key": "gen_ai.conversation.id",
+                  "value": {
+                    "stringValue": "capture-volatile-1"
+                  }
+                },
+                {
+                  "key": "gen_ai.operation.name",
+                  "value": {
+                    "stringValue": "chat"
+                  }
+                },
+                {
+                  "key": "gen_ai.provider.name",
+                  "value": {
+                    "stringValue": "openai"
+                  }
+                },
+                {
+                  "key": "gen_ai.request.model",
+                  "value": {
+                    "stringValue": "gpt-4o-mini"
+                  }
+                },
+                {
+                  "key": "gen_ai.request.stream",
+                  "value": {
+                    "boolValue": true
+                  }
+                },
+                {
+                  "key": "gen_ai.request.max_tokens",
+                  "value": {
+                    "intValue": "16384"
+                  }
+                },
+                {
+                  "key": "gen_ai.input.messages",
+                  "value": {
+                    "stringValue": "[{\"role\":\"user\",\"parts\":[{\"type\":\"text\",\"content\":\"Read hello.txt and tell me what it says.<turn-context>\\n<current-time>2026-11-24 15:17:00 +00:00</current-time>\\n<working-directory>/capture/target/capture-agents/goose__read-file/repo</working-directory>\\n</turn-context>\"}]}]"
+                  }
+                },
+                {
+                  "key": "gen_ai.response.model",
+                  "value": {
+                    "stringValue": "gpt-4o-mini"
+                  }
+                },
+                {
+                  "key": "gen_ai.usage.input_tokens",
+                  "value": {
+                    "intValue": "82"
+                  }
+                },
+                {
+                  "key": "gen_ai.usage.output_tokens",
+                  "value": {
+                    "intValue": "17"
+                  }
+                },
+                {
+                  "key": "gen_ai.usage.cache_read.input_tokens",
+                  "value": {
+                    "intValue": "0"
+                  }
+                },
+                {
+                  "key": "gen_ai.response.finish_reasons",
+                  "value": {
+                    "stringValue": "[\"tool_calls\"]"
+                  }
+                },
+                {
+                  "key": "gen_ai.response.id",
+                  "value": {
+                    "stringValue": "chatcmpl-capture-2"
+                  }
+                },
+                {
+                  "key": "gen_ai.request.id",
+                  "value": {
+                    "stringValue": "req_capture_2"
+                  }
+                },
+                {
+                  "key": "gen_ai.output.messages",
+                  "value": {
+                    "stringValue": "[{\"role\":\"assistant\",\"parts\":[{\"type\":\"tool_call\",\"id\":\"call_capture_1\",\"name\":\"shell\",\"arguments\":{\"command\":\"cat hello.txt\"}}],\"finish_reason\":\"tool_call\"}]"
+                  }
+                },
+                {
+                  "key": "busy_ns",
+                  "value": {
+                    "intValue": "1117544"
+                  }
+                },
+                {
+                  "key": "idle_ns",
+                  "value": {
+                    "intValue": "7446949"
+                  }
+                }
+              ],
+              "droppedAttributesCount": 0,
+              "events": [
+                {
+                  "timeUnixNano": "1767225590392000000",
+                  "name": "Loading config from: \"/capture/target/capture-agents/goose__read-file/home/.config/goose/config.yaml\"",
+                  "attributes": [
+                    {
+                      "key": "level",
+                      "value": {
+                        "stringValue": "DEBUG"
+                      }
+                    },
+                    {
+                      "key": "target",
+                      "value": {
+                        "stringValue": "goose::config::base"
+                      }
+                    },
+                    {
+                      "key": "code.file.path",
+                      "value": {
+                        "stringValue": "crates/goose/src/config/base.rs"
+                      }
+                    },
+                    {
+                      "key": "code.module.name",
+                      "value": {
+                        "stringValue": "goose::config::base"
+                      }
+                    },
+                    {
+                      "key": "code.line.number",
+                      "value": {
+                        "intValue": "541"
+                      }
+                    }
+                  ],
+                  "droppedAttributesCount": 0
+                },
+                {
+                  "timeUnixNano": "1767225590392000000",
+                  "name": "Loading config from: \"/capture/target/capture-agents/goose__read-file/home/.config/goose/config.yaml\"",
+                  "attributes": [
+                    {
+                      "key": "level",
+                      "value": {
+                        "stringValue": "DEBUG"
+                      }
+                    },
+                    {
+                      "key": "target",
+                      "value": {
+                        "stringValue": "goose::config::base"
+                      }
+                    },
+                    {
+                      "key": "code.file.path",
+                      "value": {
+                        "stringValue": "crates/goose/src/config/base.rs"
+                      }
+                    },
+                    {
+                      "key": "code.module.name",
+                      "value": {
+                        "stringValue": "goose::config::base"
+                      }
+                    },
+                    {
+                      "key": "code.line.number",
+                      "value": {
+                        "intValue": "541"
+                      }
+                    }
+                  ],
+                  "droppedAttributesCount": 0
+                },
+                {
+                  "timeUnixNano": "1767225590392000000",
+                  "name": "Loading config from: \"/capture/target/capture-agents/goose__read-file/home/.config/goose/config.yaml\"",
+                  "attributes": [
+                    {
+                      "key": "level",
+                      "value": {
+                        "stringValue": "DEBUG"
+                      }
+                    },
+                    {
+                      "key": "target",
+                      "value": {
+                        "stringValue": "goose::config::base"
+                      }
+                    },
+                    {
+                      "key": "code.file.path",
+                      "value": {
+                        "stringValue": "crates/goose/src/config/base.rs"
+                      }
+                    },
+                    {
+                      "key": "code.module.name",
+                      "value": {
+                        "stringValue": "goose::config::base"
+                      }
+                    },
+                    {
+                      "key": "code.line.number",
+                      "value": {
+                        "intValue": "541"
+                      }
+                    }
+                  ],
+                  "droppedAttributesCount": 0
+                },
+                {
+                  "timeUnixNano": "1767225590392000000",
+                  "name": "Loading config from: \"/capture/target/capture-agents/goose__read-file/home/.config/goose/config.yaml\"",
+                  "attributes": [
+                    {
+                      "key": "level",
+                      "value": {
+                        "stringValue": "DEBUG"
+                      }
+                    },
+                    {
+                      "key": "target",
+                      "value": {
+                        "stringValue": "goose::config::base"
+                      }
+                    },
+                    {
+                      "key": "code.file.path",
+                      "value": {
+                        "stringValue": "crates/goose/src/config/base.rs"
+                      }
+                    },
+                    {
+                      "key": "code.module.name",
+                      "value": {
+                        "stringValue": "goose::config::base"
+                      }
+                    },
+                    {
+                      "key": "code.line.number",
+                      "value": {
+                        "intValue": "541"
+                      }
+                    }
+                  ],
+                  "droppedAttributesCount": 0
+                },
+                {
+                  "timeUnixNano": "1767225590392000000",
+                  "name": "WAITING_LLM_STREAM_START",
+                  "attributes": [
+                    {
+                      "key": "level",
+                      "value": {
+                        "stringValue": "DEBUG"
+                      }
+                    },
+                    {
+                      "key": "target",
+                      "value": {
+                        "stringValue": "goose::agents::reply_parts"
+                      }
+                    },
+                    {
+                      "key": "code.file.path",
+                      "value": {
+                        "stringValue": "crates/goose/src/agents/reply_parts.rs"
+                      }
+                    },
+                    {
+                      "key": "code.module.name",
+                      "value": {
+                        "stringValue": "goose::agents::reply_parts"
+                      }
+                    },
+                    {
+                      "key": "code.line.number",
+                      "value": {
+                        "intValue": "295"
+                      }
+                    }
+                  ],
+                  "droppedAttributesCount": 0
+                },
+                {
+                  "timeUnixNano": "1767225590400000000",
+                  "name": "WAITING_LLM_STREAM_END",
+                  "attributes": [
+                    {
+                      "key": "level",
+                      "value": {
+                        "stringValue": "DEBUG"
+                      }
+                    },
+                    {
+                      "key": "target",
+                      "value": {
+                        "stringValue": "goose::agents::reply_parts"
+                      }
+                    },
+                    {
+                      "key": "code.file.path",
+                      "value": {
+                        "stringValue": "crates/goose/src/agents/reply_parts.rs"
+                      }
+                    },
+                    {
+                      "key": "code.module.name",
+                      "value": {
+                        "stringValue": "goose::agents::reply_parts"
+                      }
+                    },
+                    {
+                      "key": "code.line.number",
+                      "value": {
+                        "intValue": "306"
+                      }
+                    }
+                  ],
+                  "droppedAttributesCount": 0
+                }
+              ],
+              "droppedEventsCount": 0,
+              "links": [],
+              "droppedLinksCount": 0,
+              "status": null
+            },
+            {
+              "traceId": "dfcc9495523cdababe9d08bfc45e9ce4",
+              "spanId": "0c6fa894efdc6503",
+              "traceState": "",
+              "parentSpanId": "52503bfdfdf4ddc3",
+              "flags": 257,
+              "name": "execute_tool",
+              "kind": 1,
+              "startTimeUnixNano": "1767225590520000000",
+              "endTimeUnixNano": "1767225590531000000",
+              "attributes": [
+                {
+                  "key": "code.file.path",
+                  "value": {
+                    "stringValue": "crates/goose/src/agents/state_machine/ops_toolcalling.rs"
+                  }
+                },
+                {
+                  "key": "code.module.name",
+                  "value": {
+                    "stringValue": "goose::agents::state_machine::ops_toolcalling"
+                  }
+                },
+                {
+                  "key": "code.line.number",
+                  "value": {
+                    "intValue": "149"
+                  }
+                },
+                {
+                  "key": "thread.id",
+                  "value": {
+                    "intValue": "2"
+                  }
+                },
+                {
+                  "key": "thread.name",
+                  "value": {
+                    "stringValue": "goose-cli-main"
+                  }
+                },
+                {
+                  "key": "target",
+                  "value": {
+                    "stringValue": "goose::state_machine"
+                  }
+                },
+                {
+                  "key": "gen_ai.operation.name",
+                  "value": {
+                    "stringValue": "execute_tool"
+                  }
+                },
+                {
+                  "key": "gen_ai.tool.name",
+                  "value": {
+                    "stringValue": "shell"
+                  }
+                },
+                {
+                  "key": "gen_ai.tool.call.id",
+                  "value": {
+                    "stringValue": "call_capture_1"
+                  }
+                },
+                {
+                  "key": "gen_ai.conversation.id",
+                  "value": {
+                    "stringValue": "capture-volatile-1"
+                  }
+                },
+                {
+                  "key": "session.id",
+                  "value": {
+                    "stringValue": "capture-volatile-1"
+                  }
+                },
+                {
+                  "key": "gen_ai.tool.call.arguments",
+                  "value": {
+                    "stringValue": "{\"command\":\"cat hello.txt\"}"
+                  }
+                },
+                {
+                  "key": "gen_ai.tool.call.result",
+                  "value": {
+                    "stringValue": "{\"resultType\":\"complete\",\"content\":[{\"type\":\"text\",\"text\":\"hello from cetra\",\"annotations\":{\"priority\":0.0}}],\"structuredContent\":{\"stdout\":\"hello from cetra\",\"stderr\":\"\",\"exit_code\":0},\"isError\":false}"
+                  }
+                },
+                {
+                  "key": "busy_ns",
+                  "value": {
+                    "intValue": "3609673"
+                  }
+                },
+                {
+                  "key": "idle_ns",
+                  "value": {
+                    "intValue": "6622586"
+                  }
+                }
+              ],
+              "droppedAttributesCount": 0,
+              "events": [
+                {
+                  "timeUnixNano": "1767225590521000000",
+                  "name": "Loading config from: \"/capture/target/capture-agents/goose__read-file/home/.config/goose/config.yaml\"",
+                  "attributes": [
+                    {
+                      "key": "level",
+                      "value": {
+                        "stringValue": "DEBUG"
+                      }
+                    },
+                    {
+                      "key": "target",
+                      "value": {
+                        "stringValue": "goose::config::base"
+                      }
+                    },
+                    {
+                      "key": "code.file.path",
+                      "value": {
+                        "stringValue": "crates/goose/src/config/base.rs"
+                      }
+                    },
+                    {
+                      "key": "code.module.name",
+                      "value": {
+                        "stringValue": "goose::config::base"
+                      }
+                    },
+                    {
+                      "key": "code.line.number",
+                      "value": {
+                        "intValue": "541"
+                      }
+                    }
+                  ],
+                  "droppedAttributesCount": 0
+                },
+                {
+                  "timeUnixNano": "1767225590530000000",
+                  "name": "Loading config from: \"/capture/target/capture-agents/goose__read-file/home/.config/goose/config.yaml\"",
+                  "attributes": [
+                    {
+                      "key": "level",
+                      "value": {
+                        "stringValue": "DEBUG"
+                      }
+                    },
+                    {
+                      "key": "target",
+                      "value": {
+                        "stringValue": "goose::config::base"
+                      }
+                    },
+                    {
+                      "key": "code.file.path",
+                      "value": {
+                        "stringValue": "crates/goose/src/config/base.rs"
+                      }
+                    },
+                    {
+                      "key": "code.module.name",
+                      "value": {
+                        "stringValue": "goose::config::base"
+                      }
+                    },
+                    {
+                      "key": "code.line.number",
+                      "value": {
+                        "intValue": "541"
+                      }
+                    }
+                  ],
+                  "droppedAttributesCount": 0
+                }
+              ],
+              "droppedEventsCount": 0,
+              "links": [],
+              "droppedLinksCount": 0,
+              "status": null
+            },
+            {
+              "traceId": "dfcc9495523cdababe9d08bfc45e9ce4",
+              "spanId": "b3e69f7e65106aa0",
+              "traceState": "",
+              "parentSpanId": "52503bfdfdf4ddc3",
+              "flags": 257,
+              "name": "chat",
+              "kind": 1,
+              "startTimeUnixNano": "1767225590551000000",
+              "endTimeUnixNano": "1767225590627000000",
+              "attributes": [
+                {
+                  "key": "code.file.path",
+                  "value": {
+                    "stringValue": "crates/goose-agent/src/inference.rs"
+                  }
+                },
+                {
+                  "key": "code.module.name",
+                  "value": {
+                    "stringValue": "goose_agent::inference"
+                  }
+                },
+                {
+                  "key": "code.line.number",
+                  "value": {
+                    "intValue": "343"
+                  }
+                },
+                {
+                  "key": "thread.id",
+                  "value": {
+                    "intValue": "2"
+                  }
+                },
+                {
+                  "key": "thread.name",
+                  "value": {
+                    "stringValue": "goose-cli-main"
+                  }
+                },
+                {
+                  "key": "target",
+                  "value": {
+                    "stringValue": "goose::state_machine"
+                  }
+                },
+                {
+                  "key": "gen_ai.operation.name",
+                  "value": {
+                    "stringValue": "chat"
+                  }
+                },
+                {
+                  "key": "gen_ai.provider.name",
+                  "value": {
+                    "stringValue": "openai"
+                  }
+                },
+                {
+                  "key": "gen_ai.request.model",
+                  "value": {
+                    "stringValue": "gpt-4o-mini"
+                  }
+                },
+                {
+                  "key": "gen_ai.request.max_tokens",
+                  "value": {
+                    "intValue": "16384"
+                  }
+                },
+                {
+                  "key": "gen_ai.response.model",
+                  "value": {
+                    "stringValue": "gpt-4o-mini"
+                  }
+                },
+                {
+                  "key": "gen_ai.usage.input_tokens",
+                  "value": {
+                    "intValue": "131"
+                  }
+                },
+                {
+                  "key": "gen_ai.usage.output_tokens",
+                  "value": {
+                    "intValue": "12"
+                  }
+                },
+                {
+                  "key": "gen_ai.response.finish_reasons",
+                  "value": {
+                    "stringValue": "[\"stop\"]"
+                  }
+                },
+                {
+                  "key": "gen_ai.response.id",
+                  "value": {
+                    "stringValue": "chatcmpl-capture-3"
+                  }
+                },
+                {
+                  "key": "gen_ai.request.id",
+                  "value": {
+                    "stringValue": "req_capture_3"
+                  }
+                },
+                {
+                  "key": "busy_ns",
+                  "value": {
+                    "intValue": "5978634"
+                  }
+                },
+                {
+                  "key": "idle_ns",
+                  "value": {
+                    "intValue": "69296734"
+                  }
+                }
+              ],
+              "droppedAttributesCount": 0,
+              "events": [
+                {
+                  "timeUnixNano": "1767225590552000000",
+                  "name": "Loading config from: \"/capture/target/capture-agents/goose__read-file/home/.config/goose/config.yaml\"",
+                  "attributes": [
+                    {
+                      "key": "level",
+                      "value": {
+                        "stringValue": "DEBUG"
+                      }
+                    },
+                    {
+                      "key": "target",
+                      "value": {
+                        "stringValue": "goose::config::base"
+                      }
+                    },
+                    {
+                      "key": "code.file.path",
+                      "value": {
+                        "stringValue": "crates/goose/src/config/base.rs"
+                      }
+                    },
+                    {
+                      "key": "code.module.name",
+                      "value": {
+                        "stringValue": "goose::config::base"
+                      }
+                    },
+                    {
+                      "key": "code.line.number",
+                      "value": {
+                        "intValue": "541"
+                      }
+                    }
+                  ],
+                  "droppedAttributesCount": 0
+                }
+              ],
+              "droppedEventsCount": 0,
+              "links": [],
+              "droppedLinksCount": 0,
+              "status": null
+            },
+            {
+              "traceId": "dfcc9495523cdababe9d08bfc45e9ce4",
+              "spanId": "0fab7e29f7ebf319",
+              "traceState": "",
+              "parentSpanId": "b3e69f7e65106aa0",
+              "flags": 257,
+              "name": "stream_response_from_provider",
+              "kind": 1,
+              "startTimeUnixNano": "1767225590552000000",
+              "endTimeUnixNano": "1767225590557000000",
+              "attributes": [
+                {
+                  "key": "code.file.path",
+                  "value": {
+                    "stringValue": "crates/goose/src/agents/reply_parts.rs"
+                  }
+                },
+                {
+                  "key": "code.module.name",
+                  "value": {
+                    "stringValue": "goose::agents::reply_parts"
+                  }
+                },
+                {
+                  "key": "code.line.number",
+                  "value": {
+                    "intValue": "226"
+                  }
+                },
+                {
+                  "key": "thread.id",
+                  "value": {
+                    "intValue": "2"
+                  }
+                },
+                {
+                  "key": "thread.name",
+                  "value": {
+                    "stringValue": "goose-cli-main"
+                  }
+                },
+                {
+                  "key": "target",
+                  "value": {
+                    "stringValue": "goose::agents::reply_parts"
+                  }
+                },
+                {
+                  "key": "session.id",
+                  "value": {
+                    "stringValue": "capture-volatile-1"
+                  }
+                },
+                {
+                  "key": "gen_ai.conversation.id",
+                  "value": {
+                    "stringValue": "capture-volatile-1"
+                  }
+                },
+                {
+                  "key": "gen_ai.operation.name",
+                  "value": {
+                    "stringValue": "chat"
+                  }
+                },
+                {
+                  "key": "gen_ai.provider.name",
+                  "value": {
+                    "stringValue": "openai"
+                  }
+                },
+                {
+                  "key": "gen_ai.request.model",
+                  "value": {
+                    "stringValue": "gpt-4o-mini"
+                  }
+                },
+                {
+                  "key": "gen_ai.request.stream",
+                  "value": {
+                    "boolValue": true
+                  }
+                },
+                {
+                  "key": "gen_ai.request.max_tokens",
+                  "value": {
+                    "intValue": "16384"
+                  }
+                },
+                {
+                  "key": "gen_ai.input.messages",
+                  "value": {
+                    "stringValue": "[{\"role\":\"user\",\"parts\":[{\"type\":\"text\",\"content\":\"Read hello.txt and tell me what it says.<turn-context>\\n<current-time>2026-11-24 15:17:00 +00:00</current-time>\\n<working-directory>/capture/target/capture-agents/goose__read-file/repo</working-directory>\\n</turn-context>\"}]},{\"role\":\"assistant\",\"parts\":[{\"type\":\"tool_call\",\"id\":\"call_capture_1\",\"name\":\"shell\",\"arguments\":{\"command\":\"cat hello.txt\"}}]},{\"role\":\"tool\",\"parts\":[{\"type\":\"tool_call_response\",\"id\":\"call_capture_1\",\"response\":{\"resultType\":\"complete\",\"content\":[{\"type\":\"text\",\"text\":\"hello from cetra\",\"annotations\":{\"priority\":0.0}}],\"structuredContent\":{\"stdout\":\"hello from cetra\",\"stderr\":\"\",\"exit_code\":0},\"isError\":false}}]}]"
+                  }
+                },
+                {
+                  "key": "gen_ai.response.model",
+                  "value": {
+                    "stringValue": "gpt-4o-mini"
+                  }
+                },
+                {
+                  "key": "gen_ai.usage.input_tokens",
+                  "value": {
+                    "intValue": "131"
+                  }
+                },
+                {
+                  "key": "gen_ai.usage.output_tokens",
+                  "value": {
+                    "intValue": "12"
+                  }
+                },
+                {
+                  "key": "gen_ai.usage.cache_read.input_tokens",
+                  "value": {
+                    "intValue": "0"
+                  }
+                },
+                {
+                  "key": "gen_ai.response.finish_reasons",
+                  "value": {
+                    "stringValue": "[\"stop\"]"
+                  }
+                },
+                {
+                  "key": "gen_ai.response.id",
+                  "value": {
+                    "stringValue": "chatcmpl-capture-3"
+                  }
+                },
+                {
+                  "key": "gen_ai.request.id",
+                  "value": {
+                    "stringValue": "req_capture_3"
+                  }
+                },
+                {
+                  "key": "gen_ai.output.messages",
+                  "value": {
+                    "stringValue": "[{\"role\":\"assistant\",\"parts\":[{\"type\":\"text\",\"content\":\"hello.txt says: hello from cetra\"}],\"finish_reason\":\"stop\"}]"
+                  }
+                },
+                {
+                  "key": "busy_ns",
+                  "value": {
+                    "intValue": "3677905"
+                  }
+                },
+                {
+                  "key": "idle_ns",
+                  "value": {
+                    "intValue": "1831887"
+                  }
+                }
+              ],
+              "droppedAttributesCount": 0,
+              "events": [
+                {
+                  "timeUnixNano": "1767225590552000000",
+                  "name": "Loading config from: \"/capture/target/capture-agents/goose__read-file/home/.config/goose/config.yaml\"",
+                  "attributes": [
+                    {
+                      "key": "level",
+                      "value": {
+                        "stringValue": "DEBUG"
+                      }
+                    },
+                    {
+                      "key": "target",
+                      "value": {
+                        "stringValue": "goose::config::base"
+                      }
+                    },
+                    {
+                      "key": "code.file.path",
+                      "value": {
+                        "stringValue": "crates/goose/src/config/base.rs"
+                      }
+                    },
+                    {
+                      "key": "code.module.name",
+                      "value": {
+                        "stringValue": "goose::config::base"
+                      }
+                    },
+                    {
+                      "key": "code.line.number",
+                      "value": {
+                        "intValue": "541"
+                      }
+                    }
+                  ],
+                  "droppedAttributesCount": 0
+                },
+                {
+                  "timeUnixNano": "1767225590552000000",
+                  "name": "Loading config from: \"/capture/target/capture-agents/goose__read-file/home/.config/goose/config.yaml\"",
+                  "attributes": [
+                    {
+                      "key": "level",
+                      "value": {
+                        "stringValue": "DEBUG"
+                      }
+                    },
+                    {
+                      "key": "target",
+                      "value": {
+                        "stringValue": "goose::config::base"
+                      }
+                    },
+                    {
+                      "key": "code.file.path",
+                      "value": {
+                        "stringValue": "crates/goose/src/config/base.rs"
+                      }
+                    },
+                    {
+                      "key": "code.module.name",
+                      "value": {
+                        "stringValue": "goose::config::base"
+                      }
+                    },
+                    {
+                      "key": "code.line.number",
+                      "value": {
+                        "intValue": "541"
+                      }
+                    }
+                  ],
+                  "droppedAttributesCount": 0
+                },
+                {
+                  "timeUnixNano": "1767225590552000000",
+                  "name": "Loading config from: \"/capture/target/capture-agents/goose__read-file/home/.config/goose/config.yaml\"",
+                  "attributes": [
+                    {
+                      "key": "level",
+                      "value": {
+                        "stringValue": "DEBUG"
+                      }
+                    },
+                    {
+                      "key": "target",
+                      "value": {
+                        "stringValue": "goose::config::base"
+                      }
+                    },
+                    {
+                      "key": "code.file.path",
+                      "value": {
+                        "stringValue": "crates/goose/src/config/base.rs"
+                      }
+                    },
+                    {
+                      "key": "code.module.name",
+                      "value": {
+                        "stringValue": "goose::config::base"
+                      }
+                    },
+                    {
+                      "key": "code.line.number",
+                      "value": {
+                        "intValue": "541"
+                      }
+                    }
+                  ],
+                  "droppedAttributesCount": 0
+                },
+                {
+                  "timeUnixNano": "1767225590552000000",
+                  "name": "Loading config from: \"/capture/target/capture-agents/goose__read-file/home/.config/goose/config.yaml\"",
+                  "attributes": [
+                    {
+                      "key": "level",
+                      "value": {
+                        "stringValue": "DEBUG"
+                      }
+                    },
+                    {
+                      "key": "target",
+                      "value": {
+                        "stringValue": "goose::config::base"
+                      }
+                    },
+                    {
+                      "key": "code.file.path",
+                      "value": {
+                        "stringValue": "crates/goose/src/config/base.rs"
+                      }
+                    },
+                    {
+                      "key": "code.module.name",
+                      "value": {
+                        "stringValue": "goose::config::base"
+                      }
+                    },
+                    {
+                      "key": "code.line.number",
+                      "value": {
+                        "intValue": "541"
+                      }
+                    }
+                  ],
+                  "droppedAttributesCount": 0
+                },
+                {
+                  "timeUnixNano": "1767225590552000000",
+                  "name": "WAITING_LLM_STREAM_START",
+                  "attributes": [
+                    {
+                      "key": "level",
+                      "value": {
+                        "stringValue": "DEBUG"
+                      }
+                    },
+                    {
+                      "key": "target",
+                      "value": {
+                        "stringValue": "goose::agents::reply_parts"
+                      }
+                    },
+                    {
+                      "key": "code.file.path",
+                      "value": {
+                        "stringValue": "crates/goose/src/agents/reply_parts.rs"
+                      }
+                    },
+                    {
+                      "key": "code.module.name",
+                      "value": {
+                        "stringValue": "goose::agents::reply_parts"
+                      }
+                    },
+                    {
+                      "key": "code.line.number",
+                      "value": {
+                        "intValue": "295"
+                      }
+                    }
+                  ],
+                  "droppedAttributesCount": 0
+                },
+                {
+                  "timeUnixNano": "1767225590557000000",
+                  "name": "WAITING_LLM_STREAM_END",
+                  "attributes": [
+                    {
+                      "key": "level",
+                      "value": {
+                        "stringValue": "DEBUG"
+                      }
+                    },
+                    {
+                      "key": "target",
+                      "value": {
+                        "stringValue": "goose::agents::reply_parts"
+                      }
+                    },
+                    {
+                      "key": "code.file.path",
+                      "value": {
+                        "stringValue": "crates/goose/src/agents/reply_parts.rs"
+                      }
+                    },
+                    {
+                      "key": "code.module.name",
+                      "value": {
+                        "stringValue": "goose::agents::reply_parts"
+                      }
+                    },
+                    {
+                      "key": "code.line.number",
+                      "value": {
+                        "intValue": "306"
+                      }
+                    }
+                  ],
+                  "droppedAttributesCount": 0
+                }
+              ],
+              "droppedEventsCount": 0,
+              "links": [],
+              "droppedLinksCount": 0,
+              "status": null
+            }
+          ],
+          "schemaUrl": ""
+        }
+      ],
+      "schemaUrl": ""
+    }
+  ]
+}

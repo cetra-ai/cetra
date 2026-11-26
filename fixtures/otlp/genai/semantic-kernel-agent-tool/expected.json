@@ -1,0 +1,185 @@
+{
+  "spans": [
+    {
+      "project_id": "01900000-0000-7000-8000-000000000001",
+      "trace_id": "5ed8f08cd8f8cf6942e1fada7e5296ad",
+      "span_id": "45342e6c95136eab",
+      "name": "invoke_agent WeatherAgent",
+      "span_kind": "agent",
+      "start_time": "2025-12-31T23:59:50.000000000Z",
+      "end_time": "2025-12-31T23:59:50.110000000Z",
+      "status": "unset",
+      "service_name": "capture-app",
+      "operation": "invoke_agent",
+      "input": "[]",
+      "input_format": "messages",
+      "output": "[{\"role\":\"assistant\",\"name\":\"WeatherAgent\",\"parts\":[{\"type\":\"text\",\"content\":\"It is sunny in Paris.\"}]}]",
+      "output_format": "messages",
+      "output_preview": "It is sunny in Paris.",
+      "tool_definitions": "[{\"type\":\"function\",\"function\":{\"name\":\"WeatherPlugin-get_weather\",\"description\":\"Get the weather\",\"parameters\":{\"type\":\"object\",\"properties\":{\"city\":{\"type\":\"string\"}},\"required\":[\"city\"]}}}]",
+      "attributes": {
+        "gen_ai.agent.id": "capture-volatile-1",
+        "gen_ai.agent.name": "WeatherAgent",
+        "gen_ai.operation.name": "invoke_agent"
+      },
+      "resource_attributes": {
+        "telemetry.sdk.language": "python",
+        "telemetry.sdk.name": "opentelemetry",
+        "telemetry.sdk.version": "1.45.2"
+      },
+      "scope_name": "semantic_kernel.utils.telemetry.agent_diagnostics.decorators",
+      "conventions": [
+        "genai"
+      ],
+      "ingest_time": "2026-01-01T00:00:00.000000000Z",
+      "schema_version": 2
+    },
+    {
+      "project_id": "01900000-0000-7000-8000-000000000001",
+      "trace_id": "5ed8f08cd8f8cf6942e1fada7e5296ad",
+      "span_id": "52fa40ab3c2fb538",
+      "parent_span_id": "79f7cacb18924459",
+      "name": "chat gpt-4o-mini-2024-07-18",
+      "span_kind": "llm",
+      "start_time": "2025-12-31T23:59:50.002000000Z",
+      "end_time": "2025-12-31T23:59:50.071000000Z",
+      "status": "unset",
+      "service_name": "capture-app",
+      "provider": "openai",
+      "request_model": "gpt-4o-mini-2024-07-18",
+      "operation": "chat",
+      "input_tokens": 82,
+      "output_tokens": 17,
+      "total_tokens": 99,
+      "cost_input": 0.000082,
+      "cost_output": 0.000068,
+      "cost_total": 0.00015000000000000001,
+      "cost_source": "computed",
+      "attributes": {
+        "gen_ai.operation.name": "chat",
+        "gen_ai.request.model": "gpt-4o-mini-2024-07-18",
+        "gen_ai.response.finish_reason": "FinishReason.TOOL_CALLS",
+        "gen_ai.response.id": "chatcmpl-capture-1",
+        "gen_ai.system": "openai",
+        "gen_ai.usage.input_tokens": "82",
+        "gen_ai.usage.output_tokens": "17",
+        "server.address": "https://api.openai.com/v1/"
+      },
+      "resource_attributes": {
+        "telemetry.sdk.language": "python",
+        "telemetry.sdk.name": "opentelemetry",
+        "telemetry.sdk.version": "1.45.2"
+      },
+      "scope_name": "semantic_kernel.utils.telemetry.model_diagnostics.decorators",
+      "conventions": [
+        "genai"
+      ],
+      "ingest_time": "2026-01-01T00:00:00.000000000Z",
+      "schema_version": 2
+    },
+    {
+      "project_id": "01900000-0000-7000-8000-000000000001",
+      "trace_id": "5ed8f08cd8f8cf6942e1fada7e5296ad",
+      "span_id": "79f7cacb18924459",
+      "parent_span_id": "45342e6c95136eab",
+      "name": "AutoFunctionInvocationLoop",
+      "span_kind": "span",
+      "start_time": "2025-12-31T23:59:50.002000000Z",
+      "end_time": "2025-12-31T23:59:50.109000000Z",
+      "status": "unset",
+      "service_name": "capture-app",
+      "attributes": {
+        "sk.available_functions": "WeatherPlugin-get_weather"
+      },
+      "resource_attributes": {
+        "telemetry.sdk.language": "python",
+        "telemetry.sdk.name": "opentelemetry",
+        "telemetry.sdk.version": "1.45.2"
+      },
+      "scope_name": "semantic_kernel.connectors.ai.chat_completion_client_base",
+      "ingest_time": "2026-01-01T00:00:00.000000000Z",
+      "schema_version": 2
+    },
+    {
+      "project_id": "01900000-0000-7000-8000-000000000001",
+      "trace_id": "5ed8f08cd8f8cf6942e1fada7e5296ad",
+      "span_id": "b1aae0b7e6eec21d",
+      "parent_span_id": "79f7cacb18924459",
+      "name": "execute_tool WeatherPlugin-get_weather",
+      "span_kind": "tool",
+      "start_time": "2025-12-31T23:59:50.074000000Z",
+      "end_time": "2025-12-31T23:59:50.074000000Z",
+      "status": "unset",
+      "service_name": "capture-app",
+      "operation": "execute_tool",
+      "input": "{\"city\":\"Paris\"}",
+      "input_format": "json",
+      "output": "sunny in Paris",
+      "output_format": "text",
+      "input_preview": "{\"city\":\"Paris\"}",
+      "output_preview": "sunny in Paris",
+      "attributes": {
+        "gen_ai.operation.name": "execute_tool",
+        "gen_ai.tool.call.id": "call_weather_1",
+        "gen_ai.tool.description": "Get the weather",
+        "gen_ai.tool.name": "WeatherPlugin-get_weather"
+      },
+      "resource_attributes": {
+        "telemetry.sdk.language": "python",
+        "telemetry.sdk.name": "opentelemetry",
+        "telemetry.sdk.version": "1.45.2"
+      },
+      "scope_name": "semantic_kernel.functions.kernel_function",
+      "conventions": [
+        "genai"
+      ],
+      "ingest_time": "2026-01-01T00:00:00.000000000Z",
+      "schema_version": 2
+    },
+    {
+      "project_id": "01900000-0000-7000-8000-000000000001",
+      "trace_id": "5ed8f08cd8f8cf6942e1fada7e5296ad",
+      "span_id": "fb2e88e195f0881d",
+      "parent_span_id": "79f7cacb18924459",
+      "name": "chat gpt-4o-mini-2024-07-18",
+      "span_kind": "llm",
+      "start_time": "2025-12-31T23:59:50.075000000Z",
+      "end_time": "2025-12-31T23:59:50.109000000Z",
+      "status": "unset",
+      "service_name": "capture-app",
+      "provider": "openai",
+      "request_model": "gpt-4o-mini-2024-07-18",
+      "operation": "chat",
+      "input_tokens": 131,
+      "output_tokens": 12,
+      "total_tokens": 143,
+      "cost_input": 0.000131,
+      "cost_output": 0.000048,
+      "cost_total": 0.00017900000000000001,
+      "cost_source": "computed",
+      "attributes": {
+        "gen_ai.operation.name": "chat",
+        "gen_ai.request.model": "gpt-4o-mini-2024-07-18",
+        "gen_ai.response.finish_reason": "FinishReason.STOP",
+        "gen_ai.response.id": "chatcmpl-capture-2",
+        "gen_ai.system": "openai",
+        "gen_ai.usage.input_tokens": "131",
+        "gen_ai.usage.output_tokens": "12",
+        "server.address": "https://api.openai.com/v1/"
+      },
+      "resource_attributes": {
+        "telemetry.sdk.language": "python",
+        "telemetry.sdk.name": "opentelemetry",
+        "telemetry.sdk.version": "1.45.2"
+      },
+      "scope_name": "semantic_kernel.utils.telemetry.model_diagnostics.decorators",
+      "conventions": [
+        "genai"
+      ],
+      "ingest_time": "2026-01-01T00:00:00.000000000Z",
+      "schema_version": 2
+    }
+  ],
+  "media": [],
+  "rejected_spans": 0
+}

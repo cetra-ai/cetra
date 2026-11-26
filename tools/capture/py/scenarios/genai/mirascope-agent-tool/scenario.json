@@ -1,0 +1,50 @@
+{
+  "description": "Mirascope call with one tool, traced by Mirascope's ops tracing inside one session.",
+  "spec_refs": [
+    "02 § Convention detection",
+    "02 § Mapping tables / Span kind",
+    "02 § Mapping tables / Model, provider, usage",
+    "02 § Mapping tables / Input / output",
+    "02 § Normalization rules"
+  ],
+  "notes": "ops.configure and ops.instrument_llm on the harness provider, inside ops.session(id sess-1). A @ops.trace function wraps the call, and another wraps the run that resumes the tool loop. The model is openai:completions/gpt-4o-mini-2024-07-18 and the provider is registered at the mock (M4 spike, finding 9). Trace spans are chain spans.",
+  "instrumentation": "mirascope",
+  "libraries": [
+    "mirascope",
+    "opentelemetry-sdk"
+  ],
+  "turns": [
+    {
+      "api": "openai.chat",
+      "model": "gpt-4o-mini-2024-07-18",
+      "message": {
+        "tool_calls": [
+          {
+            "id": "call_weather_1",
+            "name": "get_weather",
+            "arguments": {
+              "city": "Paris"
+            }
+          }
+        ]
+      },
+      "finish": "tool_calls",
+      "usage": {
+        "input": 82,
+        "output": 17
+      }
+    },
+    {
+      "api": "openai.chat",
+      "model": "gpt-4o-mini-2024-07-18",
+      "message": {
+        "text": "It is sunny in Paris."
+      },
+      "finish": "stop",
+      "usage": {
+        "input": 131,
+        "output": 12
+      }
+    }
+  ]
+}

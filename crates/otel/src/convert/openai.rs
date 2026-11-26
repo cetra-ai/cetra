@@ -68,12 +68,26 @@ fn message(value: &Json, index: usize) -> Result<Message, ConvertError> {
             extra: Map::new(),
         });
     } else if let Some(content) = extra.shift_remove("content") {
-        match content_parts(content) {
-            Ok(converted) => parts.extend(converted),
-            Err(content) => {
-                extra.insert("content".to_owned(), content);
+        // Bifrost writes an empty string for the content of an assistant
+        // message that only calls tools; beside tool calls it is no text part
+        // (D-IN-25).
+        let beside_tool_calls = extra
+            .get("tool_calls")
+            .and_then(Json::as_array)
+            .is_some_and(|calls| !calls.is_empty());
+        let empty_content =
+            beside_tool_calls && matches!(&content, Json::String(text) if text.is_empty());
+        if !empty_content {
+            match content_parts(content) {
+                Ok(converted) => parts.extend(converted),
+                Err(content) => {
+                    extra.insert("content".to_owned(), content);
+                }
             }
         }
+    }
+    if let Some(part) = output_audio(&mut extra) {
+        parts.push(part);
     }
     if let Some(calls) = extra.shift_remove("tool_calls") {
         parts.extend(tool_calls(calls));
@@ -159,6 +173,7 @@ fn image_part(map: Map<String, Json>) -> Part {
         Part::Blob {
             modality: Some(Modality::Image),
             mime_type,
+            transcript: None,
             content,
             extra,
         }
@@ -166,6 +181,7 @@ fn image_part(map: Map<String, Json>) -> Part {
         Part::Uri {
             modality: Some(Modality::Image),
             mime_type: None,
+            transcript: None,
             uri: url,
             extra,
         }
@@ -198,9 +214,38 @@ fn audio_part(map: Map<String, Json>) -> Part {
     Part::Blob {
         modality: Some(Modality::Audio),
         mime_type,
+        transcript: None,
         content,
         extra,
     }
+}
+
+/// Chat output audio: `message.audio` with a string `data` becomes an audio
+/// `blob` part with its `transcript`. The format is not in the response, so
+/// `mime_type` stays `None`. Spec 02 § Media extraction. Any other `audio`
+/// value stays in `extra`.
+fn output_audio(extra: &mut Map<String, Json>) -> Option<Part> {
+    let has_data = matches!(
+        extra.get("audio"),
+        Some(Json::Object(audio)) if matches!(audio.get("data"), Some(Json::String(_)))
+    );
+    if !has_data {
+        return None;
+    }
+    let Some(Json::Object(mut audio)) = extra.shift_remove("audio") else {
+        return None;
+    };
+    let Some(Json::String(content)) = audio.shift_remove("data") else {
+        return None;
+    };
+    let transcript = take_string(&mut audio, "transcript");
+    Some(Part::Blob {
+        modality: Some(Modality::Audio),
+        mime_type: None,
+        transcript,
+        content,
+        extra: audio,
+    })
 }
 
 fn audio_body(value: Option<&Json>) -> Option<(String, Option<String>, Map<String, Json>)> {
@@ -255,6 +300,19 @@ fn tool_call(value: Json) -> Part {
     let Json::Object(map) = value else {
         return Part::Unknown(value);
     };
+    // A flattened call (Bifrost): `name` and `args` on the element itself,
+    // no `function` object (D-IN-25). Only when `type` is absent or
+    // `"function"`: a Responses item such as `{"type": "function_call", …}`
+    // is not one and stays unknown.
+    let plain_function = map
+        .get("type")
+        .is_none_or(|kind| kind.as_str() == Some("function"));
+    if plain_function
+        && !map.contains_key("function")
+        && let Some(name) = map.get("name").and_then(Json::as_str).map(str::to_owned)
+    {
+        return flattened_tool_call(map, name);
+    }
     let Some(name) = map
         .get("function")
         .and_then(Json::as_object)
@@ -295,6 +353,28 @@ fn tool_call(value: Json) -> Part {
     }
 }
 
+/// A flattened `tool_calls` element (Bifrost, D-IN-25): `id`, `name` and
+/// `args` on the element itself. `args` is parsed exactly as
+/// `function.arguments` is; every other key stays in `extra`.
+fn flattened_tool_call(mut map: Map<String, Json>, name: String) -> Part {
+    let id = match map.get("id") {
+        Some(Json::String(id)) => Some(id.clone()),
+        _ => None,
+    };
+    if id.is_some() {
+        map.shift_remove("id");
+    }
+    map.shift_remove("type");
+    map.shift_remove("name");
+    let arguments = map.shift_remove("args").map(parse_tool_arguments);
+    Part::ToolCall {
+        id,
+        name,
+        arguments,
+        extra: map,
+    }
+}
+
 fn take_string(map: &mut Map<String, Json>, key: &str) -> Option<String> {
     match map.get(key) {
         Some(Json::String(_)) => match map.shift_remove(key) {
@@ -308,7 +388,7 @@ fn take_string(map: &mut Map<String, Json>, key: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::{ConvertError, openai_messages};
-    use cetra_core::message::messages_to_json;
+    use cetra_core::message::{Modality, Part, messages_to_json};
     use serde_json::json;
 
     fn converted(value: &serde_json::Value) -> String {
@@ -328,6 +408,79 @@ mod tests {
                 r#"{"role":"developer","parts":[{"type":"text","content":"rules"}]}]"#
             )
         );
+    }
+
+    #[test]
+    fn output_audio_becomes_an_audio_blob() {
+        let messages = openai_messages(&json!([{
+            "role": "assistant",
+            "content": null,
+            "audio": {
+                "id": "audio_1",
+                "data": "UklGRg==",
+                "transcript": "Your balance is 42 dollars.",
+                "expires_at": 1767225600
+            }
+        }]))
+        .expect("messages");
+        assert_eq!(messages.len(), 1);
+        let message = &messages[0];
+        assert!(!message.extra.contains_key("audio"), "{:?}", message.extra);
+        let [
+            Part::Blob {
+                modality,
+                mime_type,
+                transcript,
+                content,
+                extra,
+            },
+        ] = message.parts.as_slice()
+        else {
+            panic!("one audio blob: {:?}", message.parts);
+        };
+        assert_eq!(*modality, Some(Modality::Audio));
+        assert_eq!(*mime_type, None);
+        assert_eq!(transcript.as_deref(), Some("Your balance is 42 dollars."));
+        assert_eq!(content, "UklGRg==");
+        assert_eq!(extra.get("id"), Some(&json!("audio_1")));
+        assert_eq!(extra.get("expires_at"), Some(&json!(1767225600)));
+        assert!(!extra.contains_key("data"));
+        assert!(!extra.contains_key("transcript"));
+    }
+
+    #[test]
+    fn output_audio_without_data_stays_in_extra() {
+        let messages = openai_messages(&json!([{
+            "role": "assistant",
+            "content": "hi",
+            "audio": {"id": "audio_1"}
+        }]))
+        .expect("messages");
+        let message = &messages[0];
+        assert_eq!(message.parts.len(), 1);
+        assert_eq!(message.extra.get("audio"), Some(&json!({"id": "audio_1"})));
+    }
+
+    #[test]
+    fn a_non_string_audio_transcript_stays_in_the_part_extra() {
+        let messages = openai_messages(&json!([{
+            "role": "assistant",
+            "content": null,
+            "audio": {"data": "UklGRg==", "transcript": 7}
+        }]))
+        .expect("messages");
+        let message = &messages[0];
+        assert!(!message.extra.contains_key("audio"));
+        let [
+            Part::Blob {
+                transcript, extra, ..
+            },
+        ] = message.parts.as_slice()
+        else {
+            panic!("one audio blob: {:?}", message.parts);
+        };
+        assert_eq!(*transcript, None);
+        assert_eq!(extra.get("transcript"), Some(&json!(7)));
     }
 
     #[test]
@@ -398,6 +551,147 @@ mod tests {
                 r#"{"type":"tool_call","id":"call_3","name":"bare"},"#,
                 r#"{"type":"tool_call","name":"anon","arguments":{"ok":true}},"#,
                 r#""not-a-call"]}]"#
+            )
+        );
+    }
+
+    #[test]
+    fn a_flattened_tool_call_is_a_tool_call_part() {
+        // Bifrost writes `name` and `args` on the element, with no `function`
+        // object (D-IN-25). `args` is parsed as `function.arguments` is.
+        assert_eq!(
+            converted(&json!([{
+                "role": "assistant",
+                "tool_calls": [
+                    {"id": "call_1", "type": "function", "name": "get_weather", "args": "{\"city\":\"Paris\"}"}
+                ]
+            }])),
+            r#"[{"role":"assistant","parts":[{"type":"tool_call","id":"call_1","name":"get_weather","arguments":{"city":"Paris"}}]}]"#
+        );
+        // Every other key stays in `extra`.
+        assert_eq!(
+            converted(&json!([{
+                "role": "assistant",
+                "tool_calls": [
+                    {"id": "call_1", "type": "function", "name": "get_weather", "args": "{}", "index": 0}
+                ]
+            }])),
+            r#"[{"role":"assistant","parts":[{"type":"tool_call","id":"call_1","name":"get_weather","arguments":{},"index":0}]}]"#
+        );
+        // Without `args` there are no arguments.
+        assert_eq!(
+            converted(&json!([{
+                "role": "assistant",
+                "tool_calls": [{"id": "call_1", "type": "function", "name": "ping"}]
+            }])),
+            r#"[{"role":"assistant","parts":[{"type":"tool_call","id":"call_1","name":"ping"}]}]"#
+        );
+        // `args` that is already JSON is kept, and text that is not JSON stays
+        // text, as on the `function` path.
+        assert_eq!(
+            converted(&json!([{
+                "role": "assistant",
+                "tool_calls": [
+                    {"id": "call_1", "name": "ping", "args": {"ok": true}},
+                    {"id": "call_2", "name": "ping", "args": "not json"}
+                ]
+            }])),
+            concat!(
+                r#"[{"role":"assistant","parts":["#,
+                r#"{"type":"tool_call","id":"call_1","name":"ping","arguments":{"ok":true}},"#,
+                r#"{"type":"tool_call","id":"call_2","name":"ping","arguments":"not json"}]}]"#
+            )
+        );
+        // An `id` that is not a string stays in `extra`; no `id`, none.
+        assert_eq!(
+            converted(&json!([{
+                "role": "assistant",
+                "tool_calls": [{"id": 7, "name": "ping"}, {"name": "pong"}]
+            }])),
+            concat!(
+                r#"[{"role":"assistant","parts":["#,
+                r#"{"type":"tool_call","name":"ping","id":7},"#,
+                r#"{"type":"tool_call","name":"pong"}]}]"#
+            )
+        );
+        // A `function` object is still read the old way: its `name` wins over
+        // a top-level one (which stays out of the modelled fields).
+        assert_eq!(
+            converted(&json!([{
+                "role": "assistant",
+                "tool_calls": [
+                    {"id": "call_1", "name": "outer", "function": {"name": "inner", "arguments": "{}"}}
+                ]
+            }])),
+            r#"[{"role":"assistant","parts":[{"type":"tool_call","id":"call_1","name":"inner","arguments":{}}]}]"#
+        );
+    }
+
+    #[test]
+    fn a_responses_function_call_item_stays_unknown() {
+        // A Responses API item is flattened too (`name` and `arguments` on the
+        // element), but its `type` is `function_call`, not absent or
+        // `function`: it is not a Bifrost-style call and stays verbatim.
+        assert_eq!(
+            converted(&json!([{
+                "role": "assistant",
+                "tool_calls": [
+                    {
+                        "type": "function_call",
+                        "call_id": "call_1",
+                        "name": "get_weather",
+                        "arguments": "{\"city\":\"Paris\"}"
+                    }
+                ]
+            }])),
+            concat!(
+                r#"[{"role":"assistant","parts":["#,
+                r#"{"type":"function_call","call_id":"call_1","name":"get_weather","arguments":"{\"city\":\"Paris\"}"}]}]"#
+            )
+        );
+        // A `type` that is not a string is neither absent nor `function`.
+        assert_eq!(
+            converted(&json!([{
+                "role": "assistant",
+                "tool_calls": [{"type": 7, "name": "get_weather", "args": "{}"}]
+            }])),
+            r#"[{"role":"assistant","parts":[{"type":7,"name":"get_weather","args":"{}"}]}]"#
+        );
+    }
+
+    #[test]
+    fn an_empty_content_beside_tool_calls_adds_no_text_part() {
+        assert_eq!(
+            converted(&json!([{
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [
+                    {"id": "call_1", "type": "function", "name": "get_weather", "args": "{\"city\":\"Paris\"}"}
+                ]
+            }])),
+            r#"[{"role":"assistant","parts":[{"type":"tool_call","id":"call_1","name":"get_weather","arguments":{"city":"Paris"}}]}]"#
+        );
+        // Without tool calls the empty string is still a text part, and an
+        // empty array does not count as tool calls.
+        assert_eq!(
+            converted(&json!([{"role": "assistant", "content": ""}])),
+            r#"[{"role":"assistant","parts":[{"type":"text","content":""}]}]"#
+        );
+        assert_eq!(
+            converted(&json!([{"role": "assistant", "content": "", "tool_calls": []}])),
+            r#"[{"role":"assistant","parts":[{"type":"text","content":""}]}]"#
+        );
+        // Text beside tool calls keeps its part.
+        assert_eq!(
+            converted(&json!([{
+                "role": "assistant",
+                "content": "yes",
+                "tool_calls": [{"id": "call_1", "type": "function", "function": {"name": "ping", "arguments": "{}"}}]
+            }])),
+            concat!(
+                r#"[{"role":"assistant","parts":["#,
+                r#"{"type":"text","content":"yes"},"#,
+                r#"{"type":"tool_call","id":"call_1","name":"ping","arguments":{}}]}]"#
             )
         );
     }

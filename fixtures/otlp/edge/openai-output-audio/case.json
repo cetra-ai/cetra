@@ -1,0 +1,13 @@
+{
+  "description": "OpenAI chat output audio: a response message with an audio object (data, transcript, id, expires_at) and no text content, which becomes an audio blob part with its transcript.",
+  "origin": "hand_written",
+  "spec_refs": [
+    "02 § Media extraction",
+    "02 § Normalization rules",
+    "01 § Canonical message format"
+  ],
+  "settings": {
+    "media_min_bytes": 64
+  },
+  "notes": "The response does not name the audio format, so the MIME type is sniffed from the WAV header. The part keeps id and expires_at."
+}

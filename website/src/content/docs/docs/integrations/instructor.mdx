@@ -1,0 +1,80 @@
+---
+title: Instructor
+description: "Trace Instructor structured outputs with cetra from Python, with the model call, its tokens and cost."
+---
+
+import { Tabs, TabItem } from "@astrojs/starlight/components";
+import Backing from "../../../../components/Backing.astro";
+
+Trace Instructor structured outputs with cetra from Python, with the model call, its tokens and cost.
+
+<Backing fixtures={["openinference/instructor-structured-output"]} />
+
+## Install
+
+<Tabs syncKey="lang">
+  <TabItem label="Python">
+
+```bash
+pip install "cetra-sdk[instructor,openai]" instructor
+```
+
+  </TabItem>
+</Tabs>
+
+## Set up
+
+<Tabs syncKey="lang">
+  <TabItem label="Python">
+
+{/* untested: calls OpenAI through Instructor and needs OPENAI_API_KEY */}
+```python
+import os
+
+import cetra
+import instructor
+import openai
+from pydantic import BaseModel
+
+
+class User(BaseModel):
+    """The model extracted from the prompt."""
+
+    name: str
+    age: int
+
+
+cetra.init(instrument=["instructor", "openai"])
+
+client = instructor.from_openai(openai.OpenAI(api_key=os.environ["OPENAI_API_KEY"]))
+user = client.chat.completions.create(
+    model="gpt-4o-mini",
+    response_model=User,
+    messages=[{"role": "user", "content": "Ada is 36."}],
+)
+print(user)
+
+cetra.flush()
+```
+
+  </TabItem>
+</Tabs>
+
+## What you get
+
+- The extraction is a tree: an `instructor.create` `chain` span, with the model call as an `llm` span under it.
+- The `chain` span carries the response model's name and the extracted output. It carries no token counts.
+- The `llm` span carries the messages, the tool definition built from the pydantic model, the token counts and the cost, computed from the built-in prices.
+
+## Limits
+
+- Enable `openai` too, as in the sample: Instructor's own span carries no token counts, so without the OpenAI instrumentor the run has no tokens and no cost.
+- The `instructor` extra needs Python 3.13 or earlier: the OpenInference Instructor instrumentation does not support Python 3.14 yet.
+- The fixture was captured with instructor 1.17.0, openinference-instrumentation-instructor 0.1.35 and openinference-instrumentation-openai 0.1.69.
+- If a field is missing, look at the span's **Attributes** tab and compare it with [Span attributes](/docs/reference/attributes/).
+
+## Next
+
+- [Traces](/docs/tracing/traces/): read the trace as a tree and a timeline.
+- [Cost and tokens](/docs/tracing/cost-and-tokens/): how cost is computed from the token counts.
+- [Online rules](/docs/evaluation/online-rules/): score these traces automatically.

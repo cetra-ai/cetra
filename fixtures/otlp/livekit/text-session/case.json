@@ -1,0 +1,24 @@
+{
+  "description": "LiveKit Agents in text mode: one AgentSession with a get_weather function tool, the OpenAI plugin on the mock, and the framework's own telemetry (content kept).",
+  "origin": "captured",
+  "source": {
+    "instrumentation": "livekit-agents",
+    "instrumentation_version": "1.8.12",
+    "language": "python",
+    "libraries": {
+      "livekit-agents": "1.8.12",
+      "livekit-plugins-openai": "1.8.12",
+      "openai": "3.52.0",
+      "opentelemetry-sdk": "1.45.2"
+    },
+    "captured_at": "2026-11-24T02:40:05Z"
+  },
+  "spec_refs": [
+    "02 § Convention detection",
+    "02 § Mapping tables / Span kind",
+    "02 § Mapping tables / Input / output",
+    "02 § Mapping tables / Model, provider, usage",
+    "02 § Normalization rules"
+  ],
+  "notes": "livekit-agents 1.8.12 and livekit-plugins-openai 1.8.12 in envs/livekit (its own environment: the capture project's beeai pins json-repair below 0.61, and livekit needs 0.63.5, D-IN-26 item 1). No room, no audio: session.run(user_input=...) in text mode. set_tracer_provider(provider, allow_pii=True) keeps the lk.pii.* content. The model is openai.LLM with an openai.AsyncClient whose base URL is https://api.openai.com/v1 and whose transport reaches the mock under that real host (D-IN-3, RealHostAsyncTransport), so the plugin's provider is api.openai.com and the cost is priced. The turns carry that host, which the mock checks. Expected: agent_session chain, start_agent_activity span, agent_turn agent, llm_node chain, llm_request llm, llm_request_run span, function_tool tool, and a second llm_node and llm_request for the answer after the tool. Volatile: the speech and generation ids (LiveKit mints them per run, also on the generation events), and lk.pii.chat_ctx and lk.pii.response.function_calls, whose item ids are random per run (the chat context is therefore replaced by a placeholder in the fixture). Timing: the TTFT and queue-wait values and lk.llm_metrics. The completion start time is an instant (timestamp_attributes)."
+}

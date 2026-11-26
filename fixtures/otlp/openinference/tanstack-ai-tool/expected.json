@@ -1,0 +1,200 @@
+{
+  "spans": [
+    {
+      "project_id": "01900000-0000-7000-8000-000000000001",
+      "trace_id": "abbe13ba7dbfbb886d9438f00230306f",
+      "span_id": "0a67a04cedc36fdb",
+      "name": "ai.chat",
+      "span_kind": "agent",
+      "start_time": "2025-12-31T23:59:50.000000000Z",
+      "end_time": "2025-12-31T23:59:50.211000000Z",
+      "status": "ok",
+      "service_name": "capture-app",
+      "input": "{\"messages\":[{\"role\":\"user\",\"content\":\"Read hello.txt and tell me what it says.\"}],\"systemPrompts\":[],\"toolNames\":[\"read_file\"],\"source\":\"server\",\"streaming\":true}",
+      "input_format": "json",
+      "output": "hello.txt says: hello from cetra",
+      "output_format": "text",
+      "input_preview": "{\"messages\":[{\"role\":\"user\",\"content\":\"Read hello.txt and tell me what it says.\"}],\"systemPrompts\":[],\"toolNames\":[\"read_file\"],\"source\":\"server\",\"streaming\":true}",
+      "output_preview": "hello.txt says: hello from cetra",
+      "attributes": {
+        "input.mime_type": "application/json",
+        "openinference.span.kind": "AGENT",
+        "output.mime_type": "text/plain",
+        "tanstack.ai.duration_ms": "213",
+        "tanstack.ai.request.id": "capture-volatile-1",
+        "tanstack.ai.source": "server",
+        "tanstack.ai.stream.id": "capture-volatile-2",
+        "tanstack.ai.streaming": "true"
+      },
+      "resource_attributes": {
+        "telemetry.sdk.language": "nodejs",
+        "telemetry.sdk.name": "opentelemetry",
+        "telemetry.sdk.version": "2.12.0"
+      },
+      "scope_name": "capture-tanstack-ai",
+      "events": [
+        {
+          "time": "2025-12-31T23:59:50.001000000Z",
+          "name": "tanstack.ai.iteration",
+          "attributes": "{\"iteration\":0,\"tanstack.ai.message.id\":\"capture-volatile-3\"}"
+        },
+        {
+          "time": "2025-12-31T23:59:50.111000000Z",
+          "name": "tanstack.ai.iteration",
+          "attributes": "{\"iteration\":1,\"tanstack.ai.message.id\":\"capture-volatile-4\"}"
+        }
+      ],
+      "conventions": [
+        "openinference"
+      ],
+      "ingest_time": "2026-01-01T00:00:00.000000000Z",
+      "schema_version": 2
+    },
+    {
+      "project_id": "01900000-0000-7000-8000-000000000001",
+      "trace_id": "abbe13ba7dbfbb886d9438f00230306f",
+      "span_id": "1dcc97dcbf5671e1",
+      "parent_span_id": "0a67a04cedc36fdb",
+      "name": "ai.llm 1",
+      "span_kind": "llm",
+      "start_time": "2025-12-31T23:59:50.004000000Z",
+      "end_time": "2025-12-31T23:59:50.100000000Z",
+      "status": "ok",
+      "service_name": "capture-app",
+      "provider": "openai",
+      "request_model": "gpt-4o-mini",
+      "input_tokens": 82,
+      "output_tokens": 17,
+      "total_tokens": 99,
+      "cost_input": 0.000082,
+      "cost_output": 0.000068,
+      "cost_total": 0.00015000000000000001,
+      "cost_source": "computed",
+      "request_params": "{\"model\":\"gpt-4o-mini\"}",
+      "input": "[{\"role\":\"user\",\"parts\":[{\"type\":\"text\",\"content\":\"Read hello.txt and tell me what it says.\"}]}]",
+      "input_format": "messages",
+      "output": "[{\"role\":\"assistant\",\"parts\":[{\"type\":\"function\",\"id\":\"call_read_file_1\",\"function\":{\"arguments\":\"{\\\"path\\\":\\\"hello.txt\\\"}\"}}]}]",
+      "output_format": "messages",
+      "input_preview": "Read hello.txt and tell me what it says.",
+      "tool_definitions": "[{\"type\":\"function\",\"function\":{\"name\":\"read_file\",\"description\":\"Read a file from disk\",\"parameters\":{\"type\":\"object\",\"properties\":{\"path\":{\"type\":\"string\"}},\"required\":[\"path\"]}}}]",
+      "attributes": {
+        "input.mime_type": "application/json",
+        "llm.finish_reason": "tool_calls",
+        "llm.invocation_parameters": "{\"model\":\"gpt-4o-mini\"}",
+        "llm.model_name": "gpt-4o-mini",
+        "llm.provider": "openai",
+        "llm.system": "openai",
+        "llm.token_count.completion": "17",
+        "llm.token_count.prompt": "82",
+        "llm.token_count.total": "99",
+        "openinference.span.kind": "LLM",
+        "output.mime_type": "application/json"
+      },
+      "resource_attributes": {
+        "telemetry.sdk.language": "nodejs",
+        "telemetry.sdk.name": "opentelemetry",
+        "telemetry.sdk.version": "2.12.0"
+      },
+      "scope_name": "capture-tanstack-ai",
+      "conventions": [
+        "openinference"
+      ],
+      "ingest_time": "2026-01-01T00:00:00.000000000Z",
+      "schema_version": 2
+    },
+    {
+      "project_id": "01900000-0000-7000-8000-000000000001",
+      "trace_id": "abbe13ba7dbfbb886d9438f00230306f",
+      "span_id": "d35b35766b931fe4",
+      "parent_span_id": "0a67a04cedc36fdb",
+      "name": "ai.tool read_file",
+      "span_kind": "tool",
+      "start_time": "2025-12-31T23:59:50.108000000Z",
+      "end_time": "2025-12-31T23:59:50.110000000Z",
+      "status": "ok",
+      "service_name": "capture-app",
+      "input": "{\"path\":\"hello.txt\"}",
+      "input_format": "json",
+      "output": "{\"content\":\"hello from cetra\\n\"}",
+      "output_format": "json",
+      "input_preview": "{\"path\":\"hello.txt\"}",
+      "output_preview": "{\"content\":\"hello from cetra\\n\"}",
+      "attributes": {
+        "input.mime_type": "application/json",
+        "openinference.span.kind": "TOOL",
+        "output.mime_type": "application/json",
+        "tanstack.ai.tool.call.id": "call_read_file_1",
+        "tanstack.ai.tool.duration_ms": "1",
+        "tool.description": "Read a file from disk",
+        "tool.name": "read_file",
+        "tool.parameters": "{\"path\":\"hello.txt\"}"
+      },
+      "resource_attributes": {
+        "telemetry.sdk.language": "nodejs",
+        "telemetry.sdk.name": "opentelemetry",
+        "telemetry.sdk.version": "2.12.0"
+      },
+      "scope_name": "capture-tanstack-ai",
+      "conventions": [
+        "openinference"
+      ],
+      "ingest_time": "2026-01-01T00:00:00.000000000Z",
+      "schema_version": 2
+    },
+    {
+      "project_id": "01900000-0000-7000-8000-000000000001",
+      "trace_id": "abbe13ba7dbfbb886d9438f00230306f",
+      "span_id": "63fc6583d9d115f1",
+      "parent_span_id": "0a67a04cedc36fdb",
+      "name": "ai.llm 2",
+      "span_kind": "llm",
+      "start_time": "2025-12-31T23:59:50.112000000Z",
+      "end_time": "2025-12-31T23:59:50.210000000Z",
+      "status": "ok",
+      "service_name": "capture-app",
+      "provider": "openai",
+      "request_model": "gpt-4o-mini",
+      "input_tokens": 131,
+      "output_tokens": 12,
+      "total_tokens": 143,
+      "cost_input": 0.000131,
+      "cost_output": 0.000048,
+      "cost_total": 0.00017900000000000001,
+      "cost_source": "computed",
+      "request_params": "{\"model\":\"gpt-4o-mini\"}",
+      "input": "[{\"role\":\"user\",\"parts\":[{\"type\":\"text\",\"content\":\"Read hello.txt and tell me what it says.\"}]},{\"role\":\"assistant\",\"parts\":[{\"type\":\"tool_call\",\"id\":\"call_read_file_1\",\"name\":\"read_file\",\"arguments\":{\"path\":\"hello.txt\"}}]},{\"role\":\"tool\",\"parts\":[{\"type\":\"tool_call_response\",\"id\":\"call_read_file_1\",\"response\":{\"content\":\"hello from cetra\\n\"}}]}]",
+      "input_format": "messages",
+      "output": "[{\"role\":\"assistant\",\"parts\":[{\"type\":\"text\",\"content\":\"hello.txt says: hello from cetra\"}]}]",
+      "output_format": "messages",
+      "input_preview": "Read hello.txt and tell me what it says.",
+      "output_preview": "hello.txt says: hello from cetra",
+      "tool_definitions": "[{\"type\":\"function\",\"function\":{\"name\":\"read_file\",\"description\":\"Read a file from disk\",\"parameters\":{\"type\":\"object\",\"properties\":{\"path\":{\"type\":\"string\"}},\"required\":[\"path\"]}}}]",
+      "attributes": {
+        "input.mime_type": "application/json",
+        "llm.finish_reason": "stop",
+        "llm.invocation_parameters": "{\"model\":\"gpt-4o-mini\"}",
+        "llm.model_name": "gpt-4o-mini",
+        "llm.provider": "openai",
+        "llm.system": "openai",
+        "llm.token_count.completion": "12",
+        "llm.token_count.prompt": "131",
+        "llm.token_count.total": "143",
+        "openinference.span.kind": "LLM",
+        "output.mime_type": "text/plain"
+      },
+      "resource_attributes": {
+        "telemetry.sdk.language": "nodejs",
+        "telemetry.sdk.name": "opentelemetry",
+        "telemetry.sdk.version": "2.12.0"
+      },
+      "scope_name": "capture-tanstack-ai",
+      "conventions": [
+        "openinference"
+      ],
+      "ingest_time": "2026-01-01T00:00:00.000000000Z",
+      "schema_version": 2
+    }
+  ],
+  "media": [],
+  "rejected_spans": 0
+}

@@ -3,7 +3,9 @@
 //! Rendering is pure. The mock server adds the scripted delays.
 
 pub mod anthropic;
+pub mod cohere;
 pub mod gemini;
+pub mod ollama;
 pub mod openai;
 
 use serde_json::Value;
@@ -59,6 +61,11 @@ impl Ids {
     /// Chat Completions id, `chatcmpl-capture-{n}`.
     pub fn chat_completion(self) -> String {
         format!("chatcmpl-capture-{}", self.turn + 1)
+    }
+
+    /// Cohere Chat id, `cohere-capture-{n}`.
+    pub fn cohere_chat(self) -> String {
+        format!("cohere-capture-{}", self.turn + 1)
     }
 
     /// Responses id, `resp_capture_{n}`.
@@ -141,6 +148,7 @@ mod tests {
     fn ids_are_one_based() {
         let ids = Ids { turn: 0 };
         assert_eq!(ids.chat_completion(), "chatcmpl-capture-1");
+        assert_eq!(ids.cohere_chat(), "cohere-capture-1");
         assert_eq!(ids.response(), "resp_capture_1");
         assert_eq!(ids.message(), "msg_capture_1");
         assert_eq!(ids.reasoning(), "rs_capture_1");

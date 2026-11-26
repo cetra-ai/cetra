@@ -1,0 +1,24 @@
+{
+  "description": "Prompt Flow's @trace functions around two chat calls (a tool call, then the answer), exported through its own OTLP setup.",
+  "origin": "captured",
+  "source": {
+    "instrumentation": "promptflow-tracing",
+    "instrumentation_version": "1.18.5",
+    "language": "python",
+    "libraries": {
+      "openai": "3.45.0",
+      "opentelemetry-sdk": "1.38.0",
+      "promptflow-devkit": "1.18.5",
+      "promptflow-tracing": "1.18.5"
+    },
+    "captured_at": "2026-11-24T02:43:27Z"
+  },
+  "spec_refs": [
+    "02 § Convention detection",
+    "02 § Mapping tables / Span kind",
+    "02 § Mapping tables / Input / output",
+    "02 § Mapping tables / Model, provider, usage",
+    "02 § Normalization rules"
+  ],
+  "notes": "Prompt Flow's tracing (promptflow-tracing 1.18.5, promptflow-devkit 1.18.5) in its own environment: envs/promptflow pins opentelemetry-sdk 1.38.0 because promptflow-tracing needs opentelemetry-sdk<1.39 (D-IN-26 item 1). The program calls setup_exporter_from_environ() from promptflow.tracing._start_trace, the path the docs give, with OTEL_EXPORTER_OTLP_ENDPOINT set to the full traces URL: Prompt Flow posts to that URL as given. The @trace functions are flow (the root, span_type Function) and get_weather (a tool, span_type Function). Prompt Flow's OpenAI injection makes each chat call an LLM span (openai_chat). The mock serves a tool-call turn and a text turn. The client's base URL is the mock, and the scenario reads no content variable."
+}

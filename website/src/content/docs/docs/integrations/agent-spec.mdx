@@ -1,0 +1,120 @@
+---
+title: Agent Spec
+description: "Trace Oracle Agent Spec agents with cetra from Python, through OpenInference's Agent Spec instrumentor: agent runs, model calls and tool calls."
+---
+
+import { Tabs, TabItem } from "@astrojs/starlight/components";
+import Backing from "../../../../components/Backing.astro";
+
+cetra traces Oracle Agent Spec agents from Python, through OpenInference's Agent Spec instrumentor: the agent run, its model calls and its tool calls.
+
+<Backing fixtures={["openinference/agentspec-agent"]} />
+
+## Install
+
+<Tabs syncKey="lang">
+  <TabItem label="Python">
+
+```bash
+pip install "pyagentspec[langgraph]" openinference-instrumentation-agentspec opentelemetry-sdk opentelemetry-exporter-otlp-proto-http
+```
+
+  </TabItem>
+</Tabs>
+
+## Set up
+
+The instrumentor writes its spans to the tracer provider you pass it. Point an OTLP exporter at cetra and pass the provider when you instrument. Set `CETRA_API_KEY` to your `sk-cetra-…` key and `OPENAI_API_KEY` to your OpenAI key.
+
+<Tabs syncKey="lang">
+  <TabItem label="Python">
+
+{/* untested: calls OpenAI through Agent Spec and needs CETRA_API_KEY and OPENAI_API_KEY */}
+```python
+import os
+
+from openinference.instrumentation.agentspec import AgentSpecInstrumentor
+from opentelemetry.exporter.otlp.proto.http.trace_exporter import OTLPSpanExporter
+from opentelemetry.sdk.trace import TracerProvider
+from opentelemetry.sdk.trace.export import BatchSpanProcessor
+from pyagentspec.adapters.langgraph import AgentSpecLoader
+from pyagentspec.agent import Agent
+from pyagentspec.llms import OpenAiConfig
+from pyagentspec.property import StringProperty
+from pyagentspec.tools import ServerTool
+
+provider = TracerProvider()
+provider.add_span_processor(
+    BatchSpanProcessor(
+        OTLPSpanExporter(
+            endpoint="http://<HOST>:8080/v1/traces",
+            headers={"Authorization": f"Bearer {os.environ['CETRA_API_KEY']}"},
+        )
+    )
+)
+AgentSpecInstrumentor().instrument(tracer_provider=provider)
+
+READ_FILE = ServerTool(
+    name="read_file",
+    description="Read a file from the working directory and return its text.",
+    inputs=[StringProperty(title="path")],
+)
+
+
+def read_file(path: str) -> str:
+    """Read a file and return its text."""
+    with open(path, encoding="utf-8") as file:
+        return file.read()
+
+
+llm = OpenAiConfig(
+    name="openai-gpt-4o-mini",
+    model_id="gpt-4o-mini",
+    api_key=os.environ["OPENAI_API_KEY"],
+)
+agent = Agent(
+    name="assistant",
+    description="A general purpose agent that can read files.",
+    llm_config=llm,
+    system_prompt="You are a helpful assistant. Help the user answering politely.",
+    tools=[READ_FILE],
+)
+langgraph_agent = AgentSpecLoader(tool_registry={"read_file": read_file}).load_component(agent)
+response = langgraph_agent.invoke(
+    input={"messages": [{"role": "user", "content": "Read hello.txt and tell me what it says."}]},
+    config={"configurable": {"thread_id": "1"}},
+)
+print(response["messages"][-1].content)
+
+provider.shutdown()  # flushes the spans before the script ends
+```
+
+  </TabItem>
+</Tabs>
+
+The LangGraph adapter runs the agent as a LangGraph graph; `tool_registry` maps each `ServerTool` name to its callable.
+
+## What you get
+
+With one tool call, a run produces:
+
+- an `agent` span named `AgentExecution[assistant]`, with the agent's model and tools as attributes;
+- an `llm` span named `LlmGenerationSpan` for each model call, with the provider `openai`, the model, and the input and output messages;
+- a `tool` span named `ToolExecution[read_file]`, with the call's arguments as its input.
+
+The OpenInference `session.id` becomes the trace's session.
+
+## Limits
+
+- The LangGraph adapter reports no token counts: it writes the string `"null"` into every count it does not know, and cetra reads those as absent, so the model calls carry no tokens and no cost.
+- The adapter ignores `OpenAiConfig.url` and reads `OPENAI_BASE_URL` instead; set that variable to change the model endpoint.
+- The adapter does not export the agent span's parent, so the agent span has a missing parent.
+- The tool span's output is an empty object; the tool's return value is not exported.
+- The fixture was captured with pyagentspec 26.3.1 (with its `langgraph` extra) and openinference-instrumentation-agentspec 0.1.22.
+- If a field is missing, look at the span's **Attributes** tab and compare it with [Span attributes](/docs/reference/attributes/).
+
+## Next
+
+- [Traces](/docs/tracing/traces/): read the trace as a tree and a timeline.
+- [Cost and tokens](/docs/tracing/cost-and-tokens/): how cost is computed from the token counts.
+- [Online rules](/docs/evaluation/online-rules/): score these traces automatically.
