@@ -1150,12 +1150,14 @@ pub(crate) mod tests {
             .join(target)
     }
 
-    /// The IPC payload of one batch of `table`, without its record header.
+    /// The framed batch payload of one batch of `table`, without its outer record header.
     fn ipc_payload(table: Table) -> Vec<u8> {
-        let batch: RecordBatch = match table {
+        let rb: RecordBatch = match table {
             Table::Spans => sample_span_batch(),
             Table::Scores => score_rows(&dataset_scores()),
         };
+        let batch = crate::column_bridge::record_batch_to_column(&rb)
+            .expect("convert test batch to column");
         let mut out = Vec::new();
         encode(1, &batch, &mut out).expect("encode a test batch");
         out[HEADER_LEN..].to_vec()
@@ -1209,6 +1211,21 @@ pub(crate) mod tests {
     #[test]
     fn wal_record_corpus_replays() {
         replay("wal_record", wal_record);
+        let reg_dir =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../../fuzz/regressions/wal_record");
+        for path in sorted_files(&reg_dir) {
+            let data = std::fs::read(&path).expect("read a regression file");
+            for table in [Table::Spans, Table::Scores] {
+                assert!(
+                    matches!(
+                        read_batch(&data, table),
+                        Err(crate::error::WalError::InvalidPayload { .. })
+                    ),
+                    "expected InvalidPayload for legacy regression {}",
+                    path.display()
+                );
+            }
+        }
     }
 
     #[test]

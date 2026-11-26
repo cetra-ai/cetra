@@ -1434,12 +1434,17 @@ impl Storage {
             return Err(AppendError::DiskFull);
         }
         validate_batch(table, &project, &batch)?;
-        let bytes = batch.get_array_memory_size();
+        let col_batch = column_bridge::record_batch_to_column(&batch).map_err(|_| {
+            AppendError::InvalidBatch {
+                reason: "batch conversion failed",
+            }
+        })?;
+        let bytes = col_batch.memory_bytes();
         let adding = u64::try_from(bytes).unwrap_or(u64::MAX);
         if writer.shared().memtable_bytes().saturating_add(adding) > self.hard_limit {
             return Err(AppendError::Backpressure);
         }
-        writer.append(project, batch, bytes).await
+        writer.append(project, col_batch, bytes).await
     }
 
     fn writer(&self, table: Table) -> &WalWriterHandle {
@@ -1827,7 +1832,11 @@ fn recover_table(
 }
 
 /// Inserts one replayed batch into `memtable`, as WAL recovery does. An empty batch is skipped.
-fn replay_batch(memtable: &mut Memtable, seq: u64, batch: RecordBatch) -> Result<(), WalError> {
+fn replay_batch(
+    memtable: &mut Memtable,
+    seq: u64,
+    batch: cetra_column::Batch,
+) -> Result<(), WalError> {
     if batch.num_rows() == 0 {
         return Ok(());
     }
@@ -1980,33 +1989,127 @@ fn spawn_writer(
     })
 }
 
-fn project_of(batch: &RecordBatch) -> Result<ProjectId, WalError> {
+fn project_of(batch: &cetra_column::Batch) -> Result<ProjectId, WalError> {
     let Some(column) = batch.column_by_name(cetra_core::schema::spans::PROJECT_ID) else {
         return Err(WalError::InvalidPayload {
             reason: "batch is missing project_id",
         });
     };
-    let Some(values) = column.as_any().downcast_ref::<StringArray>() else {
+    if column.data_type() != cetra_column::DataType::Utf8 {
         return Err(WalError::InvalidPayload {
             reason: "project_id has an unexpected type",
         });
-    };
-    if values.is_empty() || values.null_count() > 0 {
+    }
+    if batch.num_rows() == 0 {
         return Err(WalError::InvalidPayload {
             reason: "project_id is null",
         });
     }
-    let first = values.value(0);
-    for row in 1..values.len() {
-        if values.value(row) != first {
+    if let cetra_column::Column::Const { value, .. } = column {
+        return match value {
+            cetra_column::ScalarValue::Utf8(first) => {
+                first.parse().map_err(|_| WalError::InvalidPayload {
+                    reason: "invalid project id",
+                })
+            }
+            cetra_column::ScalarValue::Null(_) => Err(WalError::InvalidPayload {
+                reason: "project_id is null",
+            }),
+            _ => Err(WalError::InvalidPayload {
+                reason: "project_id has an unexpected type",
+            }),
+        };
+    }
+
+    let mut first: Option<&str> = None;
+    let mut check_row = |row: usize| -> Result<(), WalError> {
+        let Some(val) = read_utf8(column, row) else {
             return Err(WalError::InvalidPayload {
-                reason: "batch contains more than one project",
+                reason: "project_id is null",
             });
+        };
+        match first {
+            None => first = Some(val),
+            Some(expected) if val != expected => {
+                return Err(WalError::InvalidPayload {
+                    reason: "batch contains more than one project",
+                });
+            }
+            Some(_) => {}
+        }
+        Ok(())
+    };
+    match batch.selection() {
+        cetra_column::Selection::All => {
+            for row in 0..batch.raw_len() {
+                check_row(row)?;
+            }
+        }
+        cetra_column::Selection::Mask(mask) => {
+            for row in mask.iter_ones() {
+                check_row(row)?;
+            }
+        }
+        cetra_column::Selection::Indices(indices) => {
+            for &row in indices {
+                check_row(row as usize)?;
+            }
         }
     }
+    let Some(first) = first else {
+        return Err(WalError::InvalidPayload {
+            reason: "project_id is null",
+        });
+    };
     first.parse().map_err(|_| WalError::InvalidPayload {
         reason: "invalid project id",
     })
+}
+
+fn read_utf8(col: &cetra_column::Column, row: usize) -> Option<&str> {
+    match col {
+        cetra_column::Column::Flat(flat) => {
+            if flat.is_null(row) {
+                return None;
+            }
+            match flat.data() {
+                cetra_column::FlatData::Utf8(u) => u.get(row),
+                _ => None,
+            }
+        }
+        cetra_column::Column::Const { value, len } => {
+            (row < *len).then_some(value).and_then(|v| match v {
+                cetra_column::ScalarValue::Utf8(s) => Some(s.as_str()),
+                _ => None,
+            })
+        }
+        cetra_column::Column::Dict(dict) => {
+            if dict.is_null(row) {
+                return None;
+            }
+            let code = *dict.codes().get(row)? as usize;
+            if dict.values().is_null(code) {
+                return None;
+            }
+            match dict.values().data() {
+                cetra_column::FlatData::Utf8(u) => u.get(code),
+                _ => None,
+            }
+        }
+        cetra_column::Column::Rle(rle) => {
+            if row >= rle.len() {
+                return None;
+            }
+            let run = rle.run_ends().partition_point(|&end| (end as usize) <= row);
+            if rle.values().is_null(run) {
+                return None;
+            }
+            match rle.values().data() {
+                cetra_column::FlatData::Utf8(u) => u.get(run),
+                _ => None,
+            }
+        }
+    }
 }
 
 fn memtable_to_wal(err: &MemtableError) -> WalError {
@@ -3268,7 +3371,8 @@ mod tests {
         let mut newer = b"LWAL".to_vec();
         newer.extend_from_slice(&2_u16.to_le_bytes());
         newer.extend_from_slice(&0_u16.to_le_bytes());
-        wal::encode(9, &spans_at(&[2]), &mut newer).unwrap();
+        let col = column_bridge::record_batch_to_column(&spans_at(&[2])).unwrap();
+        wal::encode(9, &col, &mut newer).unwrap();
         let mut headerless = Vec::new();
         wal::push_framed(&mut headerless, 9, b"not ipc");
         let cases = [
@@ -4718,5 +4822,66 @@ mod tests {
         );
         storage.hooks().release(HookPoint::FlushAfterFreeze);
         storage.shutdown().await.unwrap();
+    }
+
+    #[test]
+    fn project_of_and_replay_batch_handle_all_four_encodings_and_selection() {
+        use cetra_column::{
+            Batch, Column, DictColumn, FlatColumn, FlatData, RleColumn, ScalarValue, Selection,
+            Utf8Data,
+        };
+
+        let base = column_bridge::record_batch_to_column(&spans_at(&[10, 20])).unwrap();
+        let pid_idx = base.schema().index_of(spans::PROJECT_ID).unwrap();
+        let pid_str = project().to_string();
+        let other_str = other_project().to_string();
+
+        // 1. Flat
+        assert_eq!(project_of(&base).unwrap(), project());
+
+        // 2. Const
+        let mut const_cols = base.columns().to_vec();
+        const_cols[pid_idx] = Column::try_new_const(ScalarValue::Utf8(pid_str.clone()), 2).unwrap();
+        let const_batch = Batch::try_new_all(Arc::clone(base.schema()), const_cols, 2).unwrap();
+        assert_eq!(project_of(&const_batch).unwrap(), project());
+
+        // 3. Dict (with Selection::Indices keeping only row 1 so mixed row 0 is ignored)
+        let mut dict_cols = base.columns().to_vec();
+        let dict_vals = FlatColumn::try_new(
+            FlatData::Utf8(
+                Utf8Data::try_from_slices([other_str.as_str(), pid_str.as_str()]).unwrap(),
+            ),
+            None,
+        )
+        .unwrap();
+        dict_cols[pid_idx] =
+            Column::Dict(DictColumn::try_new(dict_vals, vec![0, 1], None).unwrap());
+        let dict_batch = Batch::try_new(
+            Arc::clone(base.schema()),
+            dict_cols,
+            2,
+            Selection::Indices(vec![1]),
+        )
+        .unwrap();
+        assert_eq!(project_of(&dict_batch).unwrap(), project());
+
+        // 4. Rle
+        let mut rle_cols = base.columns().to_vec();
+        let rle_vals = FlatColumn::try_new(
+            FlatData::Utf8(Utf8Data::try_from_slices([pid_str.as_str()]).unwrap()),
+            None,
+        )
+        .unwrap();
+        rle_cols[pid_idx] = Column::Rle(RleColumn::try_new(rle_vals, vec![2]).unwrap());
+        let rle_batch = Batch::try_new_all(Arc::clone(base.schema()), rle_cols, 2).unwrap();
+        assert_eq!(project_of(&rle_batch).unwrap(), project());
+
+        // Replay across all 4 encodings into a memtable.
+        let mut memtable = Memtable::new(Table::Spans);
+        replay_batch(&mut memtable, 1, base).unwrap();
+        replay_batch(&mut memtable, 2, const_batch).unwrap();
+        replay_batch(&mut memtable, 3, dict_batch).unwrap();
+        replay_batch(&mut memtable, 4, rle_batch).unwrap();
+        assert_eq!(memtable.max_seq(), 4);
     }
 }

@@ -9,28 +9,17 @@ use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 use std::time::Instant;
 
-use arrow::array::{Array, AsArray, RecordBatch, UInt32Array};
-use arrow::compute::{concat_batches, take_record_batch};
-use arrow::datatypes::TimestampNanosecondType;
+use cetra_column::{Batch, Column, ColumnError, DataType, FlatData, ScalarValue, Selection};
 use cetra_core::ids::{ProjectId, TraceId};
-use cetra_core::schema::{spans, spans_schema, traces};
+use cetra_core::schema::{spans, traces};
 use chrono::{Datelike, NaiveDate};
-use futures::StreamExt;
-use object_store::path::Path as ObjectPath;
-use parquet::arrow::ProjectionMask;
-#[allow(deprecated)]
-use parquet::arrow::async_reader::ParquetObjectReader;
-use parquet::arrow::async_reader::ParquetRecordBatchStreamBuilder;
-use parquet::file::metadata::ParquetMetaData;
-use parquet::file::statistics::Statistics;
+use object_store::ObjectStore;
 
 use crate::catalog::{Catalog, FileMeta, FileTable, now_ns};
 use crate::error::AnchorError;
 use crate::memtable::{FrozenView, PartitionKey};
 use crate::objects::Objects;
-use crate::unwind::{GuardedStream, decoder_panicked, guard, guard_sync};
 use crate::verify::{VerifyQueue, is_store_error};
-use object_store::ObjectStore;
 
 /// Nanoseconds in a UTC day.
 pub(crate) const DAY_NS: i64 = 86_400_000_000_000;
@@ -54,7 +43,7 @@ pub(crate) struct AnchorPlan {
 /// One output partition and the exact rows assigned to it.
 pub(crate) struct AnchorPartition {
     pub(crate) key: PartitionKey,
-    pub(crate) batch: RecordBatch,
+    pub(crate) batch: Batch,
 }
 
 /// The anchor state of the spans flush task.
@@ -99,52 +88,47 @@ impl Anchors {
         for groups in by_project.values() {
             for (_, batches) in groups {
                 for batch in batches {
-                    let ingest = ingest_column(batch)?;
-                    for row in 0..batch.num_rows() {
-                        if !ingest.is_null(row) {
-                            max_ingest = max_ingest.max(ingest.value(row));
+                    let ingest = ts_column(batch, spans::INGEST_TIME)?;
+                    for_each_active_row(batch, |row| {
+                        if let Some(value) = read_ts(ingest, row) {
+                            max_ingest = max_ingest.max(value);
                         }
-                    }
+                    });
                 }
             }
         }
         let expires = max_ingest.saturating_add(self.window.saturating_mul(2));
 
-        let schema = spans_schema();
+        let schema = FileTable::Spans.column_schema();
         let mut partitions = Vec::new();
         let mut changes = Vec::new();
         for (project, groups) in &by_project {
-            let refs: Vec<&RecordBatch> = groups
+            let refs: Vec<&Batch> = groups
                 .iter()
                 .flat_map(|(_, batches)| batches.iter().map(AsRef::as_ref))
                 .collect();
             if refs.is_empty() {
                 continue;
             }
-            let combined = concat_batches(&schema, refs).map_err(AnchorError::Arrow)?;
-            let trace = combined
-                .column_by_name(spans::TRACE_ID)
-                .and_then(|column| column.as_fixed_size_binary_opt())
-                .ok_or_else(|| AnchorError::column(spans::TRACE_ID))?;
-            let start = combined
-                .column_by_name(spans::START_TIME)
-                .and_then(|column| column.as_primitive_opt::<TimestampNanosecondType>())
-                .ok_or_else(|| AnchorError::column(spans::START_TIME))?;
+            let combined = Batch::concat(Arc::clone(&schema), &refs, None)
+                .map_err(AnchorError::from_column)?;
+            let trace = fixed16_column(&combined, spans::TRACE_ID)?;
+            let start = ts_column(&combined, spans::START_TIME)?;
 
-            let mut by_trace: BTreeMap<Vec<u8>, Vec<u32>> = BTreeMap::new();
+            let mut by_trace: BTreeMap<[u8; 16], Vec<u32>> = BTreeMap::new();
             for row in 0..combined.num_rows() {
-                if trace.is_null(row) || start.is_null(row) {
+                let Some(trace_bytes) = read_fixed16(trace, row) else {
+                    return Err(AnchorError::column(spans::TRACE_ID));
+                };
+                if read_ts(start, row).is_none() {
                     return Err(AnchorError::column(spans::TRACE_ID));
                 }
                 let index = u32::try_from(row).map_err(|_| {
-                    AnchorError::Arrow(arrow::error::ArrowError::ComputeError(
-                        "anchor: too many rows in one flush".to_owned(),
-                    ))
+                    AnchorError::from_column(ColumnError::Overflow {
+                        reason: "anchor: too many rows in one flush",
+                    })
                 })?;
-                by_trace
-                    .entry(trace.value(row).to_vec())
-                    .or_default()
-                    .push(index);
+                by_trace.entry(trace_bytes).or_default().push(index);
             }
 
             let mut assigned: BTreeMap<NaiveDate, Vec<u32>> = BTreeMap::new();
@@ -153,7 +137,7 @@ impl Anchors {
                     .map_err(|_| AnchorError::column(spans::TRACE_ID))?;
                 let min_start = rows
                     .iter()
-                    .map(|row| start.value(usize::try_from(*row).unwrap_or(0)))
+                    .filter_map(|row| read_ts(start, *row as usize))
                     .min()
                     .unwrap_or(0);
                 let existing = self.entries.get(&(*project, trace_id)).map(|e| e.day);
@@ -161,7 +145,9 @@ impl Anchors {
                 let anchor_number = day_number(anchor);
                 let mut near = false;
                 for row in &rows {
-                    let time = start.value(usize::try_from(*row).unwrap_or(0));
+                    let Some(time) = read_ts(start, *row as usize) else {
+                        continue;
+                    };
                     near |= near_midnight(time, self.window);
                     let own = day_of_ns(time);
                     let day = if (day_number(own) - anchor_number).abs() <= 1 {
@@ -188,8 +174,10 @@ impl Anchors {
 
             for (day, mut indices) in assigned {
                 indices.sort_unstable();
-                let batch = take_record_batch(&combined, &UInt32Array::from(indices))
-                    .map_err(AnchorError::Arrow)?;
+                let batch = combined
+                    .with_selection(Selection::Indices(indices))
+                    .and_then(|selected| selected.compact(None))
+                    .map_err(AnchorError::from_column)?;
                 partitions.push(AnchorPartition {
                     key: PartitionKey {
                         project: *project,
@@ -266,9 +254,7 @@ impl Anchors {
         );
         Ok(())
     }
-}
 
-impl Anchors {
     /// Reads the recent row groups of one `traces` file; returns the rows read.
     pub(crate) async fn rebuild_file(
         &mut self,
@@ -276,35 +262,11 @@ impl Anchors {
         store: Arc<dyn ObjectStore>,
         since: i64,
     ) -> Result<usize, AnchorError> {
-        #[allow(deprecated)]
-        let reader = ParquetObjectReader::new(store, ObjectPath::from(file.path.as_str()))
-            .with_file_size(file.size);
-        let builder = guard(ParquetRecordBatchStreamBuilder::new(reader))
-            .await
-            .map_err(AnchorError::parquet)?;
-        let groups = row_groups_to_read(builder.metadata(), since);
-        let mask = ProjectionMask::columns(
-            builder.parquet_schema(),
-            [
-                traces::TRACE_ID,
-                traces::START_TIME,
-                traces::END_TIME,
-                traces::LAST_INGEST_TIME,
-            ],
-        );
-        let stream = guard_sync(move || {
-            builder
-                .with_row_groups(groups)
-                .with_projection(mask)
-                .build()
-        })
-        .map_err(AnchorError::parquet)?;
-        let mut stream = GuardedStream::new(stream, || Err(decoder_panicked()));
+        let batches = crate::file_format::read_trace_anchors(&store, file, since).await?;
         let mut rows = 0_usize;
-        while let Some(batch) = stream.next().await {
-            let batch = batch.map_err(AnchorError::parquet)?;
+        for batch in &batches {
             rows = rows.saturating_add(batch.num_rows());
-            collect_rebuild_rows(self, file, &batch, since)?;
+            collect_rebuild_rows(self, file, batch, since)?;
         }
         Ok(rows)
     }
@@ -313,40 +275,33 @@ impl Anchors {
 fn collect_rebuild_rows(
     anchors: &mut Anchors,
     file: &FileMeta,
-    batch: &RecordBatch,
+    batch: &Batch,
     since: i64,
 ) -> Result<(), AnchorError> {
-    let trace = batch
-        .column_by_name(traces::TRACE_ID)
-        .and_then(|column| column.as_fixed_size_binary_opt())
-        .ok_or_else(|| AnchorError::column(traces::TRACE_ID))?;
-    let start = batch
-        .column_by_name(traces::START_TIME)
-        .and_then(|column| column.as_primitive_opt::<TimestampNanosecondType>())
-        .ok_or_else(|| AnchorError::column(traces::START_TIME))?;
-    let end = batch
-        .column_by_name(traces::END_TIME)
-        .and_then(|column| column.as_primitive_opt::<TimestampNanosecondType>())
-        .ok_or_else(|| AnchorError::column(traces::END_TIME))?;
-    let ingest = batch
-        .column_by_name(traces::LAST_INGEST_TIME)
-        .and_then(|column| column.as_primitive_opt::<TimestampNanosecondType>())
-        .ok_or_else(|| AnchorError::column(traces::LAST_INGEST_TIME))?;
-    for row in 0..batch.num_rows() {
-        if trace.is_null(row) || start.is_null(row) || ingest.is_null(row) {
-            continue;
-        }
-        let last_ingest = ingest.value(row);
+    let trace = fixed16_column(batch, traces::TRACE_ID)?;
+    let start = ts_column(batch, traces::START_TIME)?;
+    let end = ts_column(batch, traces::END_TIME)?;
+    let ingest = ts_column(batch, traces::LAST_INGEST_TIME)?;
+    for_each_active_row(batch, |row| {
+        let Some(trace_bytes) = read_fixed16(trace, row) else {
+            return;
+        };
+        let Some(start_ns) = read_ts(start, row) else {
+            return;
+        };
+        let Some(last_ingest) = read_ts(ingest, row) else {
+            return;
+        };
         // A partial's start_time is the trace's earliest start; a child ending
         // near midnight is only visible through end_time. Without it a trace
         // rooted well before midnight loses its anchor on restart.
-        let near = near_midnight(start.value(row), anchors.window)
-            || (!end.is_null(row) && near_midnight(end.value(row), anchors.window));
+        let near = near_midnight(start_ns, anchors.window)
+            || read_ts(end, row).is_some_and(|e| near_midnight(e, anchors.window));
         if last_ingest < since || !near {
-            continue;
+            return;
         }
-        let Ok(trace_id) = TraceId::from_slice(trace.value(row)) else {
-            continue;
+        let Ok(trace_id) = TraceId::from_slice(&trace_bytes) else {
+            return;
         };
         let expires = last_ingest.saturating_add(anchors.window.saturating_mul(2));
         match anchors.entries.get_mut(&(file.project, trace_id)) {
@@ -366,21 +321,140 @@ fn collect_rebuild_rows(
                 );
             }
         }
-    }
+    });
     Ok(())
 }
 
-fn ingest_column(
-    batch: &RecordBatch,
-) -> Result<&arrow::array::PrimitiveArray<TimestampNanosecondType>, AnchorError> {
-    batch
-        .column_by_name(spans::INGEST_TIME)
-        .and_then(|column| column.as_primitive_opt::<TimestampNanosecondType>())
-        .ok_or_else(|| AnchorError::column(spans::INGEST_TIME))
+fn ts_column<'a>(batch: &'a Batch, name: &'static str) -> Result<&'a Column, AnchorError> {
+    let col = batch
+        .column_by_name(name)
+        .ok_or_else(|| AnchorError::column(name))?;
+    if !matches!(col.data_type(), DataType::TimestampNs { .. }) {
+        return Err(AnchorError::column(name));
+    }
+    Ok(col)
+}
+
+fn fixed16_column<'a>(batch: &'a Batch, name: &'static str) -> Result<&'a Column, AnchorError> {
+    let col = batch
+        .column_by_name(name)
+        .ok_or_else(|| AnchorError::column(name))?;
+    if col.data_type() != DataType::FixedBytes16 {
+        return Err(AnchorError::column(name));
+    }
+    Ok(col)
+}
+
+fn read_ts(col: &Column, row: usize) -> Option<i64> {
+    match col {
+        Column::Flat(flat) => {
+            if flat.is_null(row) {
+                return None;
+            }
+            match flat.data() {
+                FlatData::TimestampNs { values, .. } => values.get(row).copied(),
+                _ => None,
+            }
+        }
+        Column::Const { value, len } => (row < *len).then_some(value).and_then(|val| match val {
+            ScalarValue::TimestampNs { value, .. } => Some(*value),
+            _ => None,
+        }),
+        Column::Dict(dict) => {
+            if dict.is_null(row) {
+                return None;
+            }
+            let code = *dict.codes().get(row)? as usize;
+            if dict.values().is_null(code) {
+                return None;
+            }
+            match dict.values().data() {
+                FlatData::TimestampNs { values, .. } => values.get(code).copied(),
+                _ => None,
+            }
+        }
+        Column::Rle(rle) => {
+            if row >= rle.len() {
+                return None;
+            }
+            let run = rle.run_ends().partition_point(|&end| (end as usize) <= row);
+            if rle.values().is_null(run) {
+                return None;
+            }
+            match rle.values().data() {
+                FlatData::TimestampNs { values, .. } => values.get(run).copied(),
+                _ => None,
+            }
+        }
+    }
+}
+
+fn read_fixed16(col: &Column, row: usize) -> Option<[u8; 16]> {
+    match col {
+        Column::Flat(flat) => {
+            if flat.is_null(row) {
+                return None;
+            }
+            match flat.data() {
+                FlatData::FixedBytes16(values) => values.get(row).copied(),
+                _ => None,
+            }
+        }
+        Column::Const { value, len } => (row < *len).then_some(value).and_then(|val| match val {
+            ScalarValue::FixedBytes16(bytes) => Some(*bytes),
+            _ => None,
+        }),
+        Column::Dict(dict) => {
+            if dict.is_null(row) {
+                return None;
+            }
+            let code = *dict.codes().get(row)? as usize;
+            if dict.values().is_null(code) {
+                return None;
+            }
+            match dict.values().data() {
+                FlatData::FixedBytes16(values) => values.get(code).copied(),
+                _ => None,
+            }
+        }
+        Column::Rle(rle) => {
+            if row >= rle.len() {
+                return None;
+            }
+            let run = rle.run_ends().partition_point(|&end| (end as usize) <= row);
+            if rle.values().is_null(run) {
+                return None;
+            }
+            match rle.values().data() {
+                FlatData::FixedBytes16(values) => values.get(run).copied(),
+                _ => None,
+            }
+        }
+    }
+}
+
+fn for_each_active_row(batch: &Batch, mut f: impl FnMut(usize)) {
+    match batch.selection() {
+        Selection::All => {
+            for row in 0..batch.raw_len() {
+                f(row);
+            }
+        }
+        Selection::Mask(mask) => {
+            for row in mask.iter_ones() {
+                f(row);
+            }
+        }
+        Selection::Indices(indices) => {
+            for &row in indices {
+                f(row as usize);
+            }
+        }
+    }
 }
 
 /// Batches of one project, grouped by their own UTC day.
-type ProjectBatches = Vec<(NaiveDate, Vec<Arc<RecordBatch>>)>;
+type ProjectBatches = Vec<(NaiveDate, Vec<Arc<Batch>>)>;
 
 /// The midnight closest to `t`; exactly noon rounds up.
 fn nearest_midnight(t: i64) -> i64 {
@@ -412,49 +486,19 @@ fn day_of_ns(ns: i64) -> NaiveDate {
         .unwrap_or(NaiveDate::MAX)
 }
 
-/// Row groups whose `last_ingest_time` statistics have a max `>= since`.
-/// A group without usable statistics is read, so the rebuild is conservative.
-fn row_groups_to_read(metadata: &ParquetMetaData, since: i64) -> Vec<usize> {
-    metadata
-        .row_groups()
-        .iter()
-        .enumerate()
-        .filter(|(_, group)| {
-            let chunk = group.columns().iter().find(|column| {
-                column
-                    .column_descr()
-                    .path()
-                    .parts()
-                    .first()
-                    .map(String::as_str)
-                    == Some(traces::LAST_INGEST_TIME)
-            });
-            match chunk.and_then(|column| column.statistics()) {
-                Some(Statistics::Int64(stats)) => stats.max_opt().is_none_or(|max| *max >= since),
-                _ => true,
-            }
-        })
-        .map(|(index, _)| index)
-        .collect()
-}
-
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeMap;
     use std::sync::Arc;
 
-    use arrow::array::{AsArray, FixedSizeBinaryBuilder, RecordBatch, UInt32Array};
-    use arrow::compute::take_record_batch;
-    use arrow::datatypes::{DataType, Field, Schema, TimeUnit, TimestampNanosecondType};
     use cetra_core::batch::spans_to_record_batch;
     use cetra_core::enums::{SpanKind, SpanStatus};
     use cetra_core::ids::{ProjectId, SpanId, TraceId};
     use cetra_core::span::Span;
     use chrono::{Duration as ChronoDuration, NaiveDate};
-    use parquet::arrow::ArrowWriter;
-    use parquet::file::properties::{EnabledStatistics, WriterProperties};
 
     use super::*;
+    use crate::column_bridge::record_batch_to_column;
     use crate::memtable::MemBatch;
 
     const NS_PER_SEC: i64 = 1_000_000_000;
@@ -545,21 +589,22 @@ mod tests {
 
     /// Builds a frozen view partitioned by each row's own UTC day.
     fn view(spans: &[Span]) -> FrozenView {
-        let batch = spans_to_record_batch(spans).unwrap();
-        let starts = batch
-            .column_by_name(spans::START_TIME)
-            .unwrap()
-            .as_primitive::<TimestampNanosecondType>();
+        let batch = record_batch_to_column(&spans_to_record_batch(spans).unwrap()).unwrap();
+        let starts = ts_column(&batch, spans::START_TIME).unwrap();
         let mut by_day: BTreeMap<NaiveDate, Vec<u32>> = BTreeMap::new();
         for row in 0..batch.num_rows() {
+            let start = read_ts(starts, row).unwrap();
             by_day
-                .entry(day_of_ns(starts.value(row)))
+                .entry(day_of_ns(start))
                 .or_default()
                 .push(u32::try_from(row).unwrap());
         }
         let mut partitions = BTreeMap::new();
         for (day, indices) in by_day {
-            let sliced = take_record_batch(&batch, &UInt32Array::from(indices)).unwrap();
+            let sliced = batch
+                .with_selection(Selection::Indices(indices))
+                .and_then(|b| b.compact(None))
+                .unwrap();
             let stored = MemBatch::from_batch(crate::wal::Table::Spans, sliced).unwrap();
             partitions.insert(
                 PartitionKey {
@@ -775,60 +820,5 @@ mod tests {
         );
         a.commit(plan);
         assert_eq!(a.entries.len(), 1);
-    }
-
-    /// Three row groups, with `last_ingest_time` 10, 20 and 30.
-    fn three_row_groups() -> ParquetMetaData {
-        let field = |name: &str, data_type: DataType| Field::new(name, data_type, false);
-        let timestamp = DataType::Timestamp(TimeUnit::Nanosecond, Some("UTC".into()));
-        let schema = Arc::new(Schema::new(vec![
-            field(traces::TRACE_ID, DataType::FixedSizeBinary(16)),
-            field(traces::START_TIME, timestamp.clone()),
-            field(traces::LAST_INGEST_TIME, timestamp),
-        ]));
-        let mut ids = FixedSizeBinaryBuilder::with_capacity(3, 16);
-        let mut starts =
-            arrow::array::TimestampNanosecondBuilder::with_capacity(3).with_timezone("UTC");
-        let mut ingests =
-            arrow::array::TimestampNanosecondBuilder::with_capacity(3).with_timezone("UTC");
-        for (index, ingest) in [10_i64, 20, 30].iter().enumerate() {
-            let mut bytes = [0_u8; 16];
-            bytes[15] = u8::try_from(index + 1).unwrap();
-            ids.append_value(bytes).unwrap();
-            starts.append_value(*ingest);
-            ingests.append_value(*ingest);
-        }
-        let batch = RecordBatch::try_new(
-            Arc::clone(&schema),
-            vec![
-                Arc::new(ids.finish()),
-                Arc::new(starts.finish()),
-                Arc::new(ingests.finish()),
-            ],
-        )
-        .unwrap();
-        let properties = WriterProperties::builder()
-            .set_max_row_group_row_count(Some(1))
-            .set_statistics_enabled(EnabledStatistics::Chunk)
-            .build();
-        let mut buffer = Vec::new();
-        {
-            let mut writer = ArrowWriter::try_new(&mut buffer, schema, Some(properties)).unwrap();
-            writer.write(&batch).unwrap();
-            writer.close().unwrap();
-        }
-        let mut reader = parquet::file::metadata::ParquetMetaDataReader::new();
-        reader.try_parse(&bytes::Bytes::from(buffer)).unwrap();
-        let metadata = reader.finish().unwrap();
-        assert_eq!(metadata.num_row_groups(), 3);
-        metadata
-    }
-
-    #[test]
-    fn row_group_selection_keeps_only_groups_with_a_recent_max() {
-        let metadata = three_row_groups();
-        assert_eq!(row_groups_to_read(&metadata, 0), vec![0, 1, 2]);
-        assert_eq!(row_groups_to_read(&metadata, 20), vec![1, 2]);
-        assert_eq!(row_groups_to_read(&metadata, 31), Vec::<usize>::new());
     }
 }

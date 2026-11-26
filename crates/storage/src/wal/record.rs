@@ -2,20 +2,10 @@
 //!
 //! Spec 03 §1. Integers are little-endian. The checksum covers `seq` as 8
 //! little-endian bytes, then `kind` as one byte, then the payload.
-//!
-//! Called by the segment writer once it exists. The tests in this file cover it until then.
-#![allow(dead_code)]
 
-use std::io::Read;
 use std::ops::Range;
-use std::panic::{AssertUnwindSafe, catch_unwind};
 
-use arrow::array::RecordBatch;
-use arrow::datatypes::Schema;
-use arrow::error::ArrowError;
-use arrow::ipc::reader::StreamReader;
-use arrow::ipc::writer::{IpcWriteOptions, StreamWriter};
-use arrow::ipc::{BodyCompressionMethod, CompressionType, Message};
+use cetra_column::{Batch, Column, FlatData};
 
 use crate::error::WalError;
 use crate::wal::Table;
@@ -30,26 +20,14 @@ pub(crate) const MAX_PAYLOAD: u32 = 256 * 1024 * 1024;
 
 const KIND_BATCH: u8 = 1;
 
-/// Most decompressed bytes one record may declare across its IPC buffers.
-///
-/// The writer rejects a batch over this, so replay never calls acknowledged data
-/// corrupt. A batch is bounded by the memtable's `hard_limit`, which has no upper
-/// bound of its own, not by `ingest.max_request_bytes`, so the cap has to be
-/// enforced on write. Replay treats a larger declared size as corrupt.
-const MAX_DECODED_BYTES: u64 = 1 << 30;
-
-/// LZ4 expands a block by at most about 255 to 1. The slack covers the frame header.
-const LZ4_MAX_RATIO: u64 = 256;
-const LZ4_SLACK: u64 = 64;
-
 /// One step of [`decode_next`].
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) enum Decoded {
-    /// A framed record. `payload` indexes the IPC bytes inside the buffer.
+    /// A framed record. `payload` indexes the batch frame bytes inside the buffer.
     Record {
         /// WAL sequence number.
         seq: u64,
-        /// Byte range of the IPC payload.
+        /// Byte range of the batch frame payload.
         payload: Range<usize>,
         /// Offset of the next record.
         next: usize,
@@ -72,31 +50,31 @@ pub(crate) enum Decoded {
 
 /// Appends one record to `out`.
 ///
-/// The IPC stream is written into its own buffer, then the header and payload
-/// are appended. A payload over [`MAX_PAYLOAD`], or a batch whose decoded size is
-/// over [`MAX_DECODED_BYTES`], is rejected and `out` is unchanged.
-pub(crate) fn encode(seq: u64, batch: &RecordBatch, out: &mut Vec<u8>) -> Result<(), WalError> {
-    encode_within(seq, batch, out, MAX_DECODED_BYTES)
+/// The batch frame is written into its own buffer, then the outer 17-byte header
+/// and payload are appended. A payload over [`MAX_PAYLOAD`], or a batch whose
+/// decoded size exceeds `MAX_DECODED_BYTES`, is rejected and `out` is unchanged.
+pub(crate) fn encode(seq: u64, batch: &Batch, out: &mut Vec<u8>) -> Result<(), WalError> {
+    encode_within(seq, batch, out, cetra_column::frame::MAX_DECODED_BYTES)
 }
 
 /// [`encode`] with the decoded-size cap as a parameter, so a test can use a small one.
 fn encode_within(
     seq: u64,
-    batch: &RecordBatch,
+    batch: &Batch,
     out: &mut Vec<u8>,
-    max_decoded: u64,
+    max_decoded: u32,
 ) -> Result<(), WalError> {
     let mut payload = Vec::new();
-    write_stream(batch.schema().as_ref(), &[batch], &mut payload)?;
-    let len = u32::try_from(payload.len()).unwrap_or(u32::MAX);
-    if len > MAX_PAYLOAD {
+    cetra_column::frame::encode_batch_with_limit(batch, &mut payload, max_decoded)
+        .map_err(WalError::from_column)?;
+    let Ok(len) = u32::try_from(payload.len()) else {
         return Err(WalError::InvalidPayload {
             reason: "payload exceeds 256MiB",
         });
-    }
-    if !ipc_lengths_fit(&payload, max_decoded, Check::Write) {
+    };
+    if len > MAX_PAYLOAD {
         return Err(WalError::InvalidPayload {
-            reason: "decoded size exceeds 1 GiB",
+            reason: "payload exceeds 256MiB",
         });
     }
     let crc = checksum(seq, KIND_BATCH, &payload);
@@ -109,7 +87,7 @@ fn encode_within(
     Ok(())
 }
 
-/// Frames the next record. It checks the length, kind, and checksum, and does not parse IPC.
+/// Frames the next record. It checks the length, kind, and checksum, and does not parse the batch frame.
 pub(crate) fn decode_next(buf: &[u8], offset: usize) -> Decoded {
     if offset == buf.len() {
         return Decoded::End;
@@ -166,252 +144,38 @@ pub(crate) fn decode_next(buf: &[u8], offset: usize) -> Decoded {
     }
 }
 
-/// Reads the single record batch inside a payload.
+/// Reads the single batch inside a payload.
 ///
-/// The stream must contain exactly one batch, and its fields must equal
-/// `table`'s schema fields. Schema-level metadata is not compared.
-///
-/// Declared IPC message sizes are checked against the buffer first. Arrow's
-/// reader allocates a body from the size in the message, so a corrupt length
-/// must be rejected before that call. Buffer extents and LZ4 decompressed sizes
-/// are checked the same way, because Arrow allocates each decompressed buffer
-/// from its 8-byte prefix. A payload that fails any check is an
-/// `invalid ipc stream`.
-pub(crate) fn read_batch(payload: &[u8], table: Table) -> Result<RecordBatch, WalError> {
-    if !ipc_lengths_fit(payload, MAX_DECODED_BYTES, Check::Read) {
+/// Rejects payloads larger than [`MAX_PAYLOAD`], verifies that the decoded
+/// schema matches `table`'s columnar schema, and recursively verifies that
+/// every column (including nested `List` child columns) uses `Column::Flat`.
+pub(crate) fn read_batch(payload: &[u8], table: Table) -> Result<Batch, WalError> {
+    if payload.len() > MAX_PAYLOAD as usize {
         return Err(WalError::InvalidPayload {
-            reason: "invalid ipc stream",
+            reason: "payload exceeds 256MiB",
         });
     }
-    // A panic in Arrow's decoder is a corrupt record (spec 03 §1, track R D-R-17).
-    let cursor = std::io::Cursor::new(payload);
-    let opened = catch_unwind(AssertUnwindSafe(|| StreamReader::try_new(cursor, None)))
-        .map_err(|_| ipc_decoder_panicked())?;
-    let mut reader = opened.map_err(|_| WalError::InvalidPayload {
-        reason: "invalid ipc stream",
-    })?;
-    let Some(first) = next_batch(&mut reader)? else {
+    let batch = cetra_column::frame::decode_batch(payload, Some(&table.column_schema()), None)
+        .map_err(WalError::from_column)?;
+    if !batch.columns().iter().all(is_all_flat) {
         return Err(WalError::InvalidPayload {
-            reason: "ipc stream has no batch",
-        });
-    };
-    let batch = first.map_err(|_| WalError::InvalidPayload {
-        reason: "invalid ipc stream",
-    })?;
-    if next_batch(&mut reader)?.is_some() {
-        return Err(WalError::InvalidPayload {
-            reason: "ipc stream has more than one batch",
-        });
-    }
-    if batch.schema().fields() != table.schema().fields() {
-        return Err(WalError::InvalidPayload {
-            reason: "schema does not match the table",
+            reason: "non-flat column encoding in WAL record",
         });
     }
     Ok(batch)
 }
 
-/// `reader.next()`, with a decoder panic as a corrupt payload.
-fn next_batch<R: Read>(
-    reader: &mut StreamReader<R>,
-) -> Result<Option<Result<RecordBatch, ArrowError>>, WalError> {
-    catch_unwind(AssertUnwindSafe(|| reader.next())).map_err(|_| ipc_decoder_panicked())
-}
-
-fn ipc_decoder_panicked() -> WalError {
-    WalError::InvalidPayload {
-        reason: "ipc decoder panicked",
+fn is_all_flat(col: &Column) -> bool {
+    match col {
+        Column::Flat(fc) => match fc.data() {
+            FlatData::List { values, .. } => is_all_flat(values),
+            _ => true,
+        },
+        Column::Const { .. } | Column::Dict(_) | Column::Rle(_) => false,
     }
 }
 
-/// What [`ipc_lengths_fit`] checks about each LZ4 frame.
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum Check {
-    /// The writer, through [`encode_within`]. It has just compressed these frames
-    /// itself, so the decoded size from each prefix is enough. Decoding every frame
-    /// again would add a decompression to each WAL append, the hot ingest path.
-    Write,
-    /// Replay, through [`read_batch`]. A record read from disk is not trusted, so each
-    /// frame must decode to exactly its prefix's size.
-    Read,
-}
-
-/// Whether every declared length in the payload fits its bytes, and its LZ4 buffers
-/// decode within `max_decoded` in total. Arrow allocates from these lengths, so
-/// this runs before it. `check` decides whether the frames are decoded (see [`Check`]).
-fn ipc_lengths_fit(payload: &[u8], max_decoded: u64, check: Check) -> bool {
-    let mut decoded = 0;
-    let mut offset = 0;
-    while offset < payload.len() {
-        if payload.len() - offset < 4 {
-            return true;
-        }
-        let mut meta_len_bytes = [0; 4];
-        meta_len_bytes.copy_from_slice(&payload[offset..offset + 4]);
-        offset += 4;
-        if meta_len_bytes == [0xff; 4] {
-            if payload.len() - offset < 4 {
-                return true;
-            }
-            meta_len_bytes.copy_from_slice(&payload[offset..offset + 4]);
-            offset += 4;
-        }
-        let meta_len = i32::from_le_bytes(meta_len_bytes);
-        if meta_len == 0 {
-            return true;
-        }
-        let Ok(meta_len) = usize::try_from(meta_len) else {
-            return false;
-        };
-        if meta_len > payload.len() - offset {
-            return false;
-        }
-        let meta = &payload[offset..offset + meta_len];
-        offset += meta_len;
-        let Ok(message) = arrow::ipc::root_as_message(meta) else {
-            return true;
-        };
-        let Ok(body_len) = usize::try_from(message.bodyLength()) else {
-            return false;
-        };
-        if body_len > payload.len() - offset {
-            return false;
-        }
-        if !buffers_fit(
-            &message,
-            &payload[offset..offset + body_len],
-            &mut decoded,
-            max_decoded,
-            check,
-        ) {
-            return false;
-        }
-        offset += body_len;
-    }
-    true
-}
-
-/// Checks the buffers of a record batch message against its body. The message
-/// must be a record batch or a dictionary batch, compressed with LZ4 frames
-/// per buffer, or uncompressed. `decoded` sums the decompressed sizes over the
-/// whole payload, and it must stay within `max_decoded`.
-fn buffers_fit(
-    message: &Message<'_>,
-    body: &[u8],
-    decoded: &mut u64,
-    max_decoded: u64,
-    check: Check,
-) -> bool {
-    let batch = if let Some(batch) = message.header_as_record_batch() {
-        batch
-    } else if let Some(dictionary) = message.header_as_dictionary_batch() {
-        let Some(batch) = dictionary.data() else {
-            return true;
-        };
-        batch
-    } else {
-        return true;
-    };
-    let compressed = match batch.compression() {
-        None => false,
-        Some(compression) => {
-            if compression.codec() != CompressionType::LZ4_FRAME
-                || compression.method() != BodyCompressionMethod::BUFFER
-            {
-                return false;
-            }
-            true
-        }
-    };
-    let Some(buffers) = batch.buffers() else {
-        return true;
-    };
-    for buffer in buffers.iter() {
-        let (Ok(offset), Ok(length)) = (
-            usize::try_from(buffer.offset()),
-            usize::try_from(buffer.length()),
-        ) else {
-            return false;
-        };
-        let Some(end) = offset.checked_add(length) else {
-            return false;
-        };
-        let Some(data) = body.get(offset..end) else {
-            return false;
-        };
-        if compressed && length > 0 && !lz4_buffer_fits(data, decoded, max_decoded, check) {
-            return false;
-        }
-    }
-    true
-}
-
-/// Checks one LZ4 buffer. Its 8-byte prefix is the decompressed size: 0 means
-/// empty, which Arrow allocates nothing for. -1 means stored raw, so its bytes
-/// count toward the total as they are. Any other size must fit the compressed
-/// bytes. On read, its LZ4 frame must also decode to exactly that size.
-fn lz4_buffer_fits(data: &[u8], decoded: &mut u64, max_decoded: u64, check: Check) -> bool {
-    let Some(prefix) = data.first_chunk::<8>() else {
-        return false;
-    };
-    let size = i64::from_le_bytes(*prefix);
-    if size == 0 {
-        return true;
-    }
-    // `first_chunk` succeeded, so `data` holds at least the 8 prefix bytes.
-    let frame = &data[8..];
-    let Ok(compressed) = u64::try_from(frame.len()) else {
-        return false;
-    };
-    let raw = size == -1;
-    let declared = if raw {
-        compressed
-    } else {
-        let Ok(size) = u64::try_from(size) else {
-            return false;
-        };
-        if size
-            > compressed
-                .saturating_mul(LZ4_MAX_RATIO)
-                .saturating_add(LZ4_SLACK)
-        {
-            return false;
-        }
-        size
-    };
-    match decoded.checked_add(declared) {
-        Some(total) if total <= max_decoded => *decoded = total,
-        _ => return false,
-    }
-    raw || check == Check::Write || lz4_frame_decodes_to(frame, declared)
-}
-
-/// Whether `frame` is an LZ4 frame that decodes to exactly `size` bytes. It decodes
-/// into a counting sink, so memory is bounded by the frame's block size rather than
-/// by `size`. It reads one byte past `size`, so a longer frame is caught as well.
-fn lz4_frame_decodes_to(frame: &[u8], size: u64) -> bool {
-    let mut decoder = lz4_flex::frame::FrameDecoder::new(frame).take(size.saturating_add(1));
-    matches!(std::io::copy(&mut decoder, &mut std::io::sink()), Ok(n) if n == size)
-}
-
-fn write_stream(
-    schema: &Schema,
-    batches: &[&RecordBatch],
-    out: &mut Vec<u8>,
-) -> Result<(), WalError> {
-    let options = IpcWriteOptions::default()
-        .try_with_compression(Some(CompressionType::LZ4_FRAME))
-        .map_err(WalError::Encode)?;
-    let mut writer =
-        StreamWriter::try_new_with_options(out, schema, options).map_err(WalError::Encode)?;
-    for batch in batches {
-        writer.write(batch).map_err(WalError::Encode)?;
-    }
-    writer.finish().map_err(WalError::Encode)?;
-    Ok(())
-}
-
-/// Appends one framed record whose payload is not necessarily IPC.
+/// Appends one framed record whose payload is not necessarily a valid batch frame.
 ///
 /// Replay tests use this to build a checksum-valid record that `read_batch` rejects.
 /// The fuzz entries use it to frame segments with a real checksum.
@@ -449,15 +213,18 @@ mod tests {
     use std::collections::BTreeMap;
     use std::sync::Arc;
 
-    use arrow::array::{Int32Array, RecordBatch};
-    use arrow::datatypes::{DataType, Field, Schema};
+    use cetra_column::{
+        DataType, DictColumn, Field, FlatColumn, FlatData, RleColumn, ScalarValue, Schema,
+    };
     use cetra_core::batch::{scores_to_record_batch, spans_to_record_batch};
     use cetra_core::enums::{ScoreSource, SpanKind, SpanStatus};
     use cetra_core::ids::{ProjectId, SpanId, TraceId};
+    use cetra_core::schema::spans as span_cols;
     use cetra_core::score::{Score, ScoreTarget, ScoreValue};
     use cetra_core::span::{Span, SpanEvent};
     use proptest::prelude::*;
 
+    use crate::column_bridge::record_batch_to_column;
     use crate::wal::{sample_span_batch, segment_name};
 
     use super::*;
@@ -582,22 +349,29 @@ mod tests {
         }
     }
 
-    fn spans_batch() -> RecordBatch {
-        spans_to_record_batch(&[span("root", false), span("chat", true)]).unwrap()
+    fn spans_batch() -> Batch {
+        let rb = spans_to_record_batch(&[span("root", false), span("chat", true)]).unwrap();
+        record_batch_to_column(&rb).unwrap()
     }
 
-    fn scores_batch() -> RecordBatch {
-        scores_to_record_batch(&[score(false), score(true)]).unwrap()
+    fn scores_batch() -> Batch {
+        let rb = scores_to_record_batch(&[score(false), score(true)]).unwrap();
+        record_batch_to_column(&rb).unwrap()
     }
 
-    fn round_trip(table: Table, batch: &RecordBatch) {
+    fn sample_span_col_batch() -> Batch {
+        record_batch_to_column(&sample_span_batch()).unwrap()
+    }
+
+    fn round_trip(table: Table, batch: &Batch) {
         let mut buf = Vec::new();
         encode(7, batch, &mut buf).unwrap();
         match decode_next(&buf, 0) {
             Decoded::Record { seq, payload, next } => {
                 assert_eq!(seq, 7);
                 assert_eq!(next, buf.len());
-                assert_eq!(read_batch(&buf[payload], table).unwrap(), *batch);
+                let decoded = read_batch(&buf[payload], table).unwrap();
+                assert!(decoded.semantic_eq(batch));
             }
             other => panic!("expected a record, got {other:?}"),
         }
@@ -680,8 +454,6 @@ mod tests {
 
     #[test]
     fn flipping_one_bit_never_yields_a_record() {
-        // A short payload keeps the exhaustive check cheap. The framing and
-        // checksum do not depend on the IPC bytes being a real batch.
         let payload = [0x5a_u8; 24];
         let seq = 4_u64;
         let mut buf = Vec::new();
@@ -750,123 +522,8 @@ mod tests {
         }
     }
 
-    #[test]
-    fn read_batch_rejects_the_wrong_number_of_batches_and_the_wrong_schema() {
-        let spans = spans_batch();
-        let mut two = Vec::new();
-        write_stream(spans.schema().as_ref(), &[&spans, &spans], &mut two).unwrap();
-        let error = read_batch(&two, Table::Spans).unwrap_err();
-        assert!(error.to_string().contains("more than one batch"));
-
-        let mut zero = Vec::new();
-        write_stream(spans.schema().as_ref(), &[], &mut zero).unwrap();
-        let error = read_batch(&zero, Table::Spans).unwrap_err();
-        assert!(error.to_string().contains("no batch"));
-
-        let schema = Arc::new(Schema::new(vec![Field::new("x", DataType::Int32, false)]));
-        let other = RecordBatch::try_new(
-            Arc::clone(&schema),
-            vec![Arc::new(Int32Array::from(vec![1]))],
-        )
-        .unwrap();
-        let mut wrong = Vec::new();
-        write_stream(schema.as_ref(), &[&other], &mut wrong).unwrap();
-        let error = read_batch(&wrong, Table::Spans).unwrap_err();
-        assert!(error.to_string().contains("schema does not match"));
-    }
-
-    /// Where one record batch sits in an IPC stream payload.
-    struct BatchLayout {
-        /// The message's flatbuffer metadata.
-        meta: Range<usize>,
-        /// The message's body.
-        body: Range<usize>,
-        /// Each buffer's (offset, length), relative to the body.
-        buffers: Vec<(i64, i64)>,
-    }
-
-    /// Walks the stream's messages to its first record batch.
-    fn batch_layout(payload: &[u8]) -> BatchLayout {
-        let mut offset = 0;
-        loop {
-            let mut len = [0; 4];
-            len.copy_from_slice(&payload[offset..offset + 4]);
-            offset += 4;
-            if len == [0xff; 4] {
-                len.copy_from_slice(&payload[offset..offset + 4]);
-                offset += 4;
-            }
-            let meta_len = usize::try_from(i32::from_le_bytes(len)).unwrap();
-            let meta = offset..offset + meta_len;
-            offset += meta_len;
-            let message = arrow::ipc::root_as_message(&payload[meta.clone()]).unwrap();
-            let body_len = usize::try_from(message.bodyLength()).unwrap();
-            let body = offset..offset + body_len;
-            if let Some(batch) = message.header_as_record_batch() {
-                let buffers = batch
-                    .buffers()
-                    .unwrap()
-                    .iter()
-                    .map(|buffer| (buffer.offset(), buffer.length()))
-                    .collect();
-                return BatchLayout {
-                    meta,
-                    body,
-                    buffers,
-                };
-            }
-            offset += body_len;
-        }
-    }
-
-    /// The first buffer that Arrow would decompress: an LZ4 prefix above zero.
-    /// Returns its index, and its absolute position in the payload.
-    fn first_lz4_buffer(payload: &[u8]) -> (usize, usize) {
-        let layout = batch_layout(payload);
-        layout
-            .buffers
-            .iter()
-            .enumerate()
-            .find_map(|(index, (offset, length))| {
-                let at = layout.body.start + usize::try_from(*offset).unwrap();
-                let prefix = i64::from_le_bytes(payload[at..at + 8].try_into().unwrap());
-                (*length > 8 && prefix > 0).then_some((index, at))
-            })
-            .expect("the record has a compressed buffer")
-    }
-
-    /// Overwrites the LZ4 prefix of the first compressed buffer.
-    fn set_first_lz4_prefix(payload: &mut [u8], value: i64) {
-        let (_, at) = first_lz4_buffer(payload);
-        payload[at..at + 8].copy_from_slice(&value.to_le_bytes());
-    }
-
-    /// Overwrites one buffer's length in the flatbuffer metadata. Non-empty
-    /// buffers have distinct offsets, so the (offset, length) pair is unique.
-    fn set_buffer_length(payload: &mut [u8], index: usize, length: i64) {
-        let layout = batch_layout(payload);
-        let (offset, old) = layout.buffers[index];
-        let mut pair = Vec::new();
-        pair.extend_from_slice(&offset.to_le_bytes());
-        pair.extend_from_slice(&old.to_le_bytes());
-        let meta = &payload[layout.meta.clone()];
-        let found: Vec<usize> = meta
-            .windows(16)
-            .enumerate()
-            .filter(|(_, window)| *window == pair.as_slice())
-            .map(|(at, _)| at)
-            .collect();
-        assert_eq!(
-            found.len(),
-            1,
-            "buffer {index} appears once in its metadata"
-        );
-        let at = layout.meta.start + found[0] + 8;
-        payload[at..at + 8].copy_from_slice(&length.to_le_bytes());
-    }
-
     /// The encoded payload of one record, as the segment stores it.
-    fn payload_of(table_batch: &RecordBatch, seq: u64) -> Vec<u8> {
+    fn payload_of(table_batch: &Batch, seq: u64) -> Vec<u8> {
         let mut buf = Vec::new();
         encode(seq, table_batch, &mut buf).unwrap();
         let Decoded::Record { payload, .. } = decode_next(&buf, 0) else {
@@ -875,112 +532,48 @@ mod tests {
         buf[payload].to_vec()
     }
 
-    fn is_invalid_payload(result: &Result<RecordBatch, WalError>) -> bool {
+    fn is_invalid_payload(result: &Result<Batch, WalError>) -> bool {
         matches!(result, Err(WalError::InvalidPayload { .. }))
     }
 
     #[test]
-    fn a_lying_lz4_length_is_a_corrupt_record() {
-        for (table, batch) in [
-            (Table::Spans, spans_batch()),
-            (Table::Scores, scores_batch()),
-        ] {
-            let good = payload_of(&batch, 1);
-            assert!(
-                read_batch(&good, table).is_ok(),
-                "the unmodified record decodes"
-            );
+    fn read_batch_rejects_wrong_schema_and_corrupt_frames() {
+        let empty: &[u8] = &[];
+        assert!(is_invalid_payload(&read_batch(empty, Table::Spans)));
 
-            let mut bad = good.clone();
-            // 1 TiB: the allocation Arrow would make from this prefix.
-            set_first_lz4_prefix(&mut bad, 1 << 40);
-            assert!(!ipc_lengths_fit(&bad, MAX_DECODED_BYTES, Check::Read));
-            assert!(is_invalid_payload(&read_batch(&bad, table)));
-        }
-    }
+        let spans_payload = payload_of(&spans_batch(), 1);
+        assert!(is_invalid_payload(&read_batch(
+            &spans_payload,
+            Table::Scores
+        )));
 
-    #[test]
-    fn an_lz4_size_past_the_ratio_bound_is_corrupt() {
-        let good = payload_of(&spans_batch(), 1);
-        let (index, at) = first_lz4_buffer(&good);
-        let length = usize::try_from(batch_layout(&good).buffers[index].1).unwrap();
-        let bound = u64::try_from(length - 8).unwrap() * LZ4_MAX_RATIO + LZ4_SLACK;
+        let schema = Schema::try_new_arc(vec![Field::new("x", DataType::I64, false)]).unwrap();
+        let col = Column::Flat(FlatColumn::try_new(FlatData::I64(vec![1]), None).unwrap());
+        let wrong = Batch::try_new_all(schema, vec![col], 1).unwrap();
+        let mut wrong_payload = Vec::new();
+        cetra_column::frame::encode_batch(&wrong, &mut wrong_payload).unwrap();
+        assert!(is_invalid_payload(&read_batch(
+            &wrong_payload,
+            Table::Spans
+        )));
 
-        // At the bound the ratio check passes, and the frame check then decides. The
-        // prefix here is not the frame's real size, so that is corrupt; one byte past
-        // the bound is corrupt by the ratio alone.
-        let mut past = good;
-        past[at..at + 8].copy_from_slice(&i64::try_from(bound + 1).unwrap().to_le_bytes());
-        assert!(!ipc_lengths_fit(&past, MAX_DECODED_BYTES, Check::Read));
-    }
-
-    #[test]
-    fn a_stored_raw_or_empty_lz4_buffer_still_fits() {
-        // One short span: every buffer is smaller than an LZ4 frame, so Arrow
-        // stores it raw with the -1 prefix.
-        let payload = payload_of(&sample_span_batch(), 1);
-        let layout = batch_layout(&payload);
-        let raw = layout.buffers.iter().any(|(offset, length)| {
-            let at = layout.body.start + usize::try_from(*offset).unwrap();
-            *length > 0 && i64::from_le_bytes(payload[at..at + 8].try_into().unwrap()) == -1
-        });
-        assert!(raw, "a one-span record stores a buffer raw");
-        assert!(read_batch(&payload, Table::Spans).is_ok());
-
-        // A prefix of 0 is an empty buffer, which needs no allocation.
-        let mut empty = payload_of(&spans_batch(), 1);
-        let (_, at) = first_lz4_buffer(&empty);
-        empty[at..at + 8].copy_from_slice(&0_i64.to_le_bytes());
-        assert!(ipc_lengths_fit(&empty, MAX_DECODED_BYTES, Check::Read));
-    }
-
-    /// The decoded bytes the cap counts for a payload: each LZ4 buffer's declared
-    /// size, or the bytes of a stored-raw buffer.
-    fn decoded_total(payload: &[u8]) -> u64 {
-        let layout = batch_layout(payload);
-        layout
-            .buffers
-            .iter()
-            .map(|(offset, length)| {
-                if *length == 0 {
-                    return 0;
-                }
-                let at = layout.body.start + usize::try_from(*offset).unwrap();
-                match i64::from_le_bytes(payload[at..at + 8].try_into().unwrap()) {
-                    0 => 0,
-                    -1 => u64::try_from(*length - 8).unwrap(),
-                    size => u64::try_from(size).unwrap(),
-                }
-            })
-            .sum()
-    }
-
-    #[test]
-    fn the_decoded_cap_counts_raw_and_lz4_buffers_exactly() {
-        for batch in [spans_batch(), sample_span_batch()] {
-            let payload = payload_of(&batch, 1);
-            let total = decoded_total(&payload);
-            assert!(total > 0);
-            assert!(ipc_lengths_fit(&payload, total, Check::Read));
-            assert!(!ipc_lengths_fit(&payload, total - 1, Check::Read));
-        }
+        let mut flipped = spans_payload;
+        let mid = flipped.len() / 2;
+        flipped[mid] ^= 0xff;
+        assert!(is_invalid_payload(&read_batch(&flipped, Table::Spans)));
     }
 
     #[test]
     fn a_batch_over_the_decoded_cap_is_not_written() {
-        let batch = sample_span_batch();
-        let total = decoded_total(&payload_of(&batch, 1));
-
+        let batch = sample_span_col_batch();
         let mut out = vec![0xaa];
         assert!(matches!(
-            encode_within(1, &batch, &mut out, total - 1),
-            Err(WalError::InvalidPayload {
-                reason: "decoded size exceeds 1 GiB"
-            })
+            encode_within(1, &batch, &mut out, 64),
+            Err(WalError::InvalidPayload { .. })
         ));
         assert_eq!(out, [0xaa], "a rejected batch leaves the buffer as it was");
 
-        encode_within(1, &batch, &mut out, total).unwrap();
+        encode(1, &batch, &mut out).unwrap();
         let Decoded::Record { payload, .. } = decode_next(&out, 1) else {
             panic!("the accepted batch frames after the existing byte");
         };
@@ -988,90 +581,89 @@ mod tests {
     }
 
     #[test]
-    fn an_lz4_prefix_that_disagrees_with_its_frame_is_corrupt() {
-        let good = payload_of(&spans_batch(), 1);
-        let (_, at) = first_lz4_buffer(&good);
-        let claimed = i64::from_le_bytes(good[at..at + 8].try_into().unwrap());
-        assert!(claimed > 1);
-        assert!(ipc_lengths_fit(&good, MAX_DECODED_BYTES, Check::Read));
+    fn read_batch_rejects_top_level_const_u32_max_and_nested_list_const_bombs() {
+        let base = sample_span_col_batch();
+        let schema = Arc::clone(base.schema());
 
-        // A prefix of 1 is far inside the ratio bound, so only the frame check can
-        // see that the frame decodes to more.
-        let mut short = good.clone();
-        short[at..at + 8].copy_from_slice(&1_i64.to_le_bytes());
-        assert!(!ipc_lengths_fit(&short, MAX_DECODED_BYTES, Check::Read));
-        assert!(is_invalid_payload(&read_batch(&short, Table::Spans)));
+        // 1. Top-level Column::Const(len = u32::MAX) across all columns -> ~500B bomb.
+        let mut const_cols = Vec::with_capacity(schema.len());
+        for col in base.columns() {
+            let scalar = col.get_scalar(0).unwrap();
+            const_cols.push(Column::try_new_const(scalar, u32::MAX as usize).unwrap());
+        }
+        let top_bomb =
+            Batch::try_new_all(Arc::clone(&schema), const_cols, u32::MAX as usize).unwrap();
+        let mut top_payload = Vec::new();
+        cetra_column::frame::encode_batch(&top_bomb, &mut top_payload).unwrap();
+        assert!(top_payload.len() < 2048);
+        let err = read_batch(&top_payload, Table::Spans).unwrap_err();
+        assert!(
+            matches!(err, WalError::InvalidPayload { reason } if reason == "non-flat column encoding in WAL record"),
+            "expected non-flat rejection for top-level Const bomb, got {err:?}"
+        );
 
-        // A frame that decodes to less than its prefix claims is corrupt too.
-        let mut long = good;
-        long[at..at + 8].copy_from_slice(&(claimed + 1).to_le_bytes());
-        assert!(!ipc_lengths_fit(&long, MAX_DECODED_BYTES, Check::Read));
-        assert!(is_invalid_payload(&read_batch(&long, Table::Spans)));
+        // 2. Nested FlatData::List { offsets: [0, u32::MAX], values: Const(u32::MAX) } bomb.
+        let tags_idx = schema.index_of(span_cols::TAGS).unwrap();
+        let child = Box::new(
+            Column::try_new_const(ScalarValue::Utf8("x".to_owned()), u32::MAX as usize).unwrap(),
+        );
+        let list_bomb_col = Column::Flat(
+            FlatColumn::try_new(
+                FlatData::List {
+                    offsets: vec![0, u32::MAX],
+                    values: child,
+                    item_type: DataType::Utf8,
+                },
+                None,
+            )
+            .unwrap(),
+        );
+        let mut nested_cols = base.columns().to_vec();
+        nested_cols[tags_idx] = list_bomb_col;
+        let nested_bomb = Batch::try_new_all(Arc::clone(&schema), nested_cols, 1).unwrap();
+        let mut nested_payload = Vec::new();
+        cetra_column::frame::encode_batch(&nested_bomb, &mut nested_payload).unwrap();
+        let err = read_batch(&nested_payload, Table::Spans).unwrap_err();
+        assert!(
+            matches!(err, WalError::InvalidPayload { reason } if reason == "non-flat column encoding in WAL record"),
+            "expected non-flat rejection for nested List(Const) bomb, got {err:?}"
+        );
+
+        // 3. Dict and Rle encodings are also rejected in WAL records.
+        let name_idx = schema.index_of(span_cols::NAME).unwrap();
+        let mut dict_cols = base.columns().to_vec();
+        let dict_vals = FlatColumn::try_new(
+            FlatData::Utf8(cetra_column::Utf8Data::try_from_slices(["root"]).unwrap()),
+            None,
+        )
+        .unwrap();
+        dict_cols[name_idx] = Column::Dict(DictColumn::try_new(dict_vals, vec![0], None).unwrap());
+        let dict_batch = Batch::try_new_all(Arc::clone(&schema), dict_cols, 1).unwrap();
+        let mut dict_payload = Vec::new();
+        cetra_column::frame::encode_batch(&dict_batch, &mut dict_payload).unwrap();
+        assert!(is_invalid_payload(&read_batch(&dict_payload, Table::Spans)));
+
+        let mut rle_cols = base.columns().to_vec();
+        let rle_vals = FlatColumn::try_new(
+            FlatData::Utf8(cetra_column::Utf8Data::try_from_slices(["root"]).unwrap()),
+            None,
+        )
+        .unwrap();
+        rle_cols[name_idx] = Column::Rle(RleColumn::try_new(rle_vals, vec![1]).unwrap());
+        let rle_batch = Batch::try_new_all(schema, rle_cols, 1).unwrap();
+        let mut rle_payload = Vec::new();
+        cetra_column::frame::encode_batch(&rle_batch, &mut rle_payload).unwrap();
+        assert!(is_invalid_payload(&read_batch(&rle_payload, Table::Spans)));
     }
 
     #[test]
-    fn the_write_check_skips_the_frame_decode_and_the_read_check_does_not() {
-        let good = payload_of(&spans_batch(), 1);
-        let (index, at) = first_lz4_buffer(&good);
-        assert!(ipc_lengths_fit(&good, MAX_DECODED_BYTES, Check::Write));
-        assert!(ipc_lengths_fit(&good, MAX_DECODED_BYTES, Check::Read));
-
-        // A prefix of 1 disagrees with the frame the writer left. The write check
-        // only sums prefixes, so it accepts; the read check decodes and rejects.
-        let mut lying = good.clone();
-        lying[at..at + 8].copy_from_slice(&1_i64.to_le_bytes());
-        assert!(ipc_lengths_fit(&lying, MAX_DECODED_BYTES, Check::Write));
-        assert!(!ipc_lengths_fit(&lying, MAX_DECODED_BYTES, Check::Read));
-        assert!(is_invalid_payload(&read_batch(&lying, Table::Spans)));
-
-        // The write check still rejects what needs no decode: a prefix past the
-        // ratio bound.
-        let length = usize::try_from(batch_layout(&good).buffers[index].1).unwrap();
-        let bound = u64::try_from(length - 8).unwrap() * LZ4_MAX_RATIO + LZ4_SLACK;
-        let mut past = good;
-        past[at..at + 8].copy_from_slice(&i64::try_from(bound + 1).unwrap().to_le_bytes());
-        assert!(!ipc_lengths_fit(&past, MAX_DECODED_BYTES, Check::Write));
-    }
-
-    #[test]
-    fn a_buffer_extent_past_the_body_is_corrupt() {
-        let good = payload_of(&spans_batch(), 1);
-        let layout = batch_layout(&good);
-        let index = layout
-            .buffers
-            .iter()
-            .position(|(_, length)| *length > 0)
-            .expect("the record has a non-empty buffer");
-
-        let mut bad = good;
-        set_buffer_length(&mut bad, index, 1 << 40);
-        assert!(!ipc_lengths_fit(&bad, MAX_DECODED_BYTES, Check::Read));
-        assert!(is_invalid_payload(&read_batch(&bad, Table::Spans)));
-    }
-
-    #[test]
-    fn a_zstd_record_is_corrupt() {
-        let batch = spans_batch();
-        let options = IpcWriteOptions::default()
-            .try_with_compression(Some(CompressionType::ZSTD))
-            .unwrap();
-        let mut zstd = Vec::new();
-        let mut writer =
-            StreamWriter::try_new_with_options(&mut zstd, batch.schema().as_ref(), options)
-                .unwrap();
-        writer.write(&batch).unwrap();
-        writer.finish().unwrap();
-        assert!(!ipc_lengths_fit(&zstd, MAX_DECODED_BYTES, Check::Read));
-        assert!(is_invalid_payload(&read_batch(&zstd, Table::Spans)));
-    }
-
-    #[test]
-    fn a_crc_valid_record_with_a_lying_length_is_corrupt_per_skip_corrupt() {
+    fn a_crc_valid_record_with_a_corrupt_frame_is_corrupt_per_skip_corrupt() {
         let good = payload_of(&spans_batch(), 1);
         let mut bad = payload_of(&spans_batch(), 2);
-        set_first_lz4_prefix(&mut bad, 1 << 40);
+        let mid = bad.len() / 2;
+        bad[mid] ^= 0xff;
 
-        // Every frame has a real checksum, so only the IPC check can reject seq 2.
+        // Every outer WAL frame has a real checksum, so only `read_batch` rejects seq 2.
         let mut segment = Vec::new();
         push_framed(&mut segment, 1, &good);
         push_framed(&mut segment, 2, &bad);

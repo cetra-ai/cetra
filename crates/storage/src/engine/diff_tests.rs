@@ -945,7 +945,12 @@ fn traces_source_parity_range_lookup_list_and_two_phase() {
 
     let mut spans_mt = Memtable::new(Table::Spans);
     spans_mt
-        .insert(project(), span_rows(&[t1_s3, t_mem_erased]), 1)
+        .insert(
+            project(),
+            crate::column_bridge::record_batch_to_column(&span_rows(&[t1_s3, t_mem_erased]))
+                .unwrap(),
+            1,
+        )
         .unwrap();
     let raw_spans_mem = spans_mt.snapshot();
 
@@ -1359,7 +1364,11 @@ fn scores_source_parity_against_datafusion() {
 
     let mut scores_mt = Memtable::new(Table::Scores);
     scores_mt
-        .insert(project(), score_rows(&[s1_v2]), 1)
+        .insert(
+            project(),
+            crate::column_bridge::record_batch_to_column(&score_rows(&[s1_v2])).unwrap(),
+            1,
+        )
         .unwrap();
     let raw_scores_mem = scores_mt.snapshot();
 
@@ -1845,7 +1854,13 @@ fn traces_and_scores_source_debug_is_privacy_safe() {
     s.output = Some("top-secret-completion".to_owned());
 
     let mut spans_mt = Memtable::new(Table::Spans);
-    spans_mt.insert(project(), span_rows(&[s]), 1).unwrap();
+    spans_mt
+        .insert(
+            project(),
+            crate::column_bridge::record_batch_to_column(&span_rows(&[s])).unwrap(),
+            1,
+        )
+        .unwrap();
 
     let mut sc = score_row(1, 1, base, base, base, false, "secret-score-name");
     sc.user_id = Some("bob-pii@example.com".to_owned());
@@ -1853,7 +1868,13 @@ fn traces_and_scores_source_debug_is_privacy_safe() {
     sc.reason = Some("secret-score-reason".to_owned());
 
     let mut scores_mt = Memtable::new(Table::Scores);
-    scores_mt.insert(project(), score_rows(&[sc]), 1).unwrap();
+    scores_mt
+        .insert(
+            project(),
+            crate::column_bridge::record_batch_to_column(&score_rows(&[sc])).unwrap(),
+            1,
+        )
+        .unwrap();
 
     let deletion = PendingDeletion {
         id: Uuid::now_v7(),

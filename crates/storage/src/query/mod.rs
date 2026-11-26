@@ -279,7 +279,7 @@ pub(crate) fn rows_for(
     snapshot: &MemSnapshot,
     time_column: &str,
     filters: &[Expr],
-) -> Vec<RecordBatch> {
+) -> Vec<Arc<cetra_column::Batch>> {
     let bounds = time_bounds(filters, time_column);
     if bounds.contradicts() {
         return Vec::new();
@@ -291,7 +291,7 @@ pub(crate) fn rows_for(
         }
         for batch in batches {
             if range_overlaps(batch, &bounds) {
-                selected.push(RecordBatch::clone(&batch.batch));
+                selected.push(Arc::clone(&batch.batch));
             }
         }
     }
@@ -532,7 +532,12 @@ pub(crate) fn overlapping_files(
 pub(crate) fn scan_union(
     scan: &ScanUnion<'_>,
 ) -> datafusion::error::Result<Arc<dyn ExecutionPlan>> {
-    let batches = rows_for(scan.project, scan.snapshot, scan.time_column, scan.filters);
+    let batches: Vec<RecordBatch> =
+        rows_for(scan.project, scan.snapshot, scan.time_column, scan.filters)
+            .into_iter()
+            .map(|b| crate::column_bridge::column_to_record_batch(&b, Some(scan.schema.as_ref())))
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|err| DataFusionError::External(Box::new(err)))?;
     let files = overlapping_files(
         scan.catalog,
         scan.table,
@@ -812,7 +817,6 @@ fn distribute(batches: Vec<RecordBatch>, target: usize) -> Vec<Vec<RecordBatch>>
 mod tests {
     use std::sync::Arc;
 
-    use arrow::array::{Array, TimestampNanosecondArray};
     use cetra_core::ids::ProjectId;
     use datafusion::common::ScalarValue;
     use datafusion::logical_expr::{Cast, Expr, Operator, col, lit};
@@ -995,17 +999,15 @@ mod tests {
         );
     }
 
-    fn start_times(batches: &[RecordBatch]) -> Vec<i64> {
+    fn start_times(batches: &[Arc<cetra_column::Batch>]) -> Vec<i64> {
         let mut times = Vec::new();
         for batch in batches {
-            let column = batch
-                .column_by_name("start_time")
-                .unwrap()
-                .as_any()
-                .downcast_ref::<TimestampNanosecondArray>()
-                .unwrap();
-            for index in 0..column.len() {
-                times.push(column.value(index));
+            let column = batch.column_by_name("start_time").unwrap();
+            for row in 0..batch.num_rows() {
+                match column.get_scalar(row).unwrap() {
+                    cetra_column::ScalarValue::TimestampNs { value, .. } => times.push(value),
+                    other => panic!("expected timestamp, got {other:?}"),
+                }
             }
         }
         times.sort_unstable();
@@ -1025,10 +1027,11 @@ mod tests {
             let mut table = Memtable::new(Table::Spans);
             for (index, day) in days.iter().copied().enumerate() {
                 let start = day * DAY_NS + i64::try_from(index).unwrap() + 1;
+                let batch = crate::column_bridge::record_batch_to_column(&spans_at(&[start])).unwrap();
                 table
                     .insert(
                         project,
-                        spans_at(&[start]),
+                        batch,
                         u64::try_from(index).unwrap_or(u64::MAX),
                     )
                     .unwrap();
