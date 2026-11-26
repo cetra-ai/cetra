@@ -2,20 +2,10 @@
 
 use std::sync::Arc;
 
-use arrow::array::{Array, AsArray};
-use arrow::datatypes::TimestampNanosecondType;
-use datafusion::error::DataFusionError;
-use futures::StreamExt;
 use object_store::ObjectStore;
-use object_store::path::Path as ObjectPath;
-use parquet::arrow::ProjectionMask;
-#[allow(deprecated)]
-use parquet::arrow::async_reader::ParquetObjectReader;
-use parquet::arrow::async_reader::ParquetRecordBatchStreamBuilder;
 
 use crate::catalog::FileMeta;
 use crate::error::CompactionError;
-use crate::unwind::{GuardedStream, decoder_panicked, guard, guard_sync};
 
 /// Rows with `lower <= time < upper`. `None` is unbounded.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -79,47 +69,7 @@ pub(crate) async fn time_values(
     files: &[Arc<FileMeta>],
     column: &str,
 ) -> Result<Vec<i64>, CompactionError> {
-    let mut values = Vec::new();
-    for file in files {
-        #[allow(deprecated)]
-        let reader =
-            ParquetObjectReader::new(Arc::clone(&store), ObjectPath::from(file.path.as_str()))
-                .with_file_size(file.size);
-        let builder = guard(ParquetRecordBatchStreamBuilder::new(reader))
-            .await
-            .map_err(parquet_error)?;
-        let mask = ProjectionMask::columns(builder.parquet_schema(), [column]);
-        let stream =
-            guard_sync(move || builder.with_projection(mask).build()).map_err(parquet_error)?;
-        let mut stream = GuardedStream::new(stream, || Err(decoder_panicked()));
-        while let Some(batch) = stream.next().await {
-            let batch = batch.map_err(parquet_error)?;
-            let Some(times) = batch
-                .column_by_name(column)
-                .and_then(|values| values.as_primitive_opt::<TimestampNanosecondType>())
-            else {
-                return Err(CompactionError::Input {
-                    reason: "missing time column",
-                });
-            };
-            for row in 0..batch.num_rows() {
-                if times.is_null(row) {
-                    return Err(CompactionError::Input {
-                        reason: "missing time column",
-                    });
-                }
-                values.push(times.value(row));
-            }
-        }
-    }
-    values.sort_unstable();
-    Ok(values)
-}
-
-fn parquet_error(source: parquet::errors::ParquetError) -> CompactionError {
-    CompactionError::Read {
-        source: DataFusionError::ParquetError(Box::new(source)),
-    }
+    crate::file_format::read_time_column(&store, files, column).await
 }
 
 #[cfg(test)]

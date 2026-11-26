@@ -6,8 +6,8 @@ use std::io::{Read as _, Seek as _, SeekFrom};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 
-use arrow::array::RecordBatch;
-use cetra_core::schema::{scores_schema, spans_schema};
+use cetra_column::Batch;
+use cetra_query::tombstone::{TombstoneTable, covered_predicate};
 use tokio::sync::Semaphore;
 use tokio::task::JoinSet;
 use uuid::Uuid;
@@ -17,12 +17,13 @@ use crate::compaction::merge::{MergeContext, merge_slice};
 use crate::compaction::plan::{Job, JobKind, Policy, plan};
 use crate::compaction::slice::{slice_count, slices, time_values};
 use crate::counters::CompactionOutcome;
-use crate::deletion::covered_predicate;
+use crate::deletion::to_tombstone_specs;
 use crate::disk::Disk;
 use crate::error::{CommitError, CompactionError, ObjectError};
+use crate::file_format::{BatchFileWriter, write_file_batch};
 use crate::hooks::{HookPoint, Hooks};
 use crate::objects::Objects;
-use crate::parquet::{FileWriter, footer_size_from_tail, time_column, write_file};
+use crate::parquet::{footer_size_from_tail, time_column};
 use crate::read_state::{Published, publish_catalog};
 use crate::verify::{VerifyQueue, may_be_corrupt};
 
@@ -352,21 +353,20 @@ impl Compactor {
         // stays a candidate for the rewriter.
         let tombstones = Arc::clone(&self.published.load().tombstones);
         let known = tombstones.known_seq();
-        let covered = covered_predicate(
-            job.table,
-            &match job.table {
-                FileTable::Spans => spans_schema(),
-                FileTable::Scores => scores_schema(),
-                FileTable::Traces => {
-                    return Err(CompactionError::Input {
-                        reason: "traces are not merged",
-                    });
-                }
-            },
-            &tombstones.for_project(job.project),
-        )
-        .map_err(|_| CompactionError::Deletion {
-            reason: "building the deletion filter",
+        let (tombstone_table, col_schema) = match job.table {
+            FileTable::Spans => (TombstoneTable::Spans, job.table.column_schema()),
+            FileTable::Scores => (TombstoneTable::Scores, job.table.column_schema()),
+            FileTable::Traces => {
+                return Err(CompactionError::Input {
+                    reason: "traces are not merged",
+                });
+            }
+        };
+        let specs = to_tombstone_specs(&tombstones.for_project(job.project));
+        let covered = covered_predicate(tombstone_table, &col_schema, &specs).map_err(|_| {
+            CompactionError::Deletion {
+                reason: "building the deletion filter",
+            }
         })?;
         // A rewrite keeps its input's level: it replaces one file, not a
         // partition. Every other job writes level 1.
@@ -461,7 +461,7 @@ impl Compactor {
             }
 
             let (target, file) = self.objects.create_output(&path).await?;
-            let writer = match FileWriter::new(
+            let writer = match BatchFileWriter::new(
                 job.table,
                 level,
                 file,
@@ -565,9 +565,9 @@ impl Compactor {
                         reason: "traces are not merged",
                     });
                 };
-                let partials: Vec<Arc<RecordBatch>> = partials.into_iter().map(Arc::new).collect();
+                let partials: Vec<Arc<Batch>> = partials;
                 let written = tokio::task::spawn_blocking(move || {
-                    write_file(FileTable::Traces, level, &partials)
+                    write_file_batch(FileTable::Traces, level, &partials)
                 })
                 .await
                 .map_err(|_| CompactionError::Task)??;
@@ -690,7 +690,6 @@ pub(crate) mod tests {
     use cetra_core::batch::scores_to_record_batch;
     use cetra_core::ids::ProjectId;
     use chrono::{Datelike, NaiveDate};
-    use datafusion::execution::context::{SessionConfig, SessionContext};
     use uuid::Uuid;
 
     use crate::Storage;
@@ -837,8 +836,10 @@ pub(crate) mod tests {
             .query(project(), QueryOptions::new(None, None))
             .await
             .unwrap();
-        let ctx =
-            SessionContext::new_with_config_rt(SessionConfig::new(), Arc::clone(&query.runtime));
+        let ctx = datafusion::execution::context::SessionContext::new_with_config_rt(
+            datafusion::execution::context::SessionConfig::new(),
+            Arc::clone(&query.runtime),
+        );
         ctx.register_table("traces", Arc::clone(&query.traces))
             .unwrap();
         ctx.sql(&format!("SELECT {columns} FROM traces"))

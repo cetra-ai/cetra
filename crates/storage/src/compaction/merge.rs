@@ -1,52 +1,41 @@
 //! The streaming k-way merge of one time slice (spec 03 § During a merge).
 //!
-//! The inputs are sorted runs, so DataFusion's `SortPreservingMergeExec`
-//! merges them with one batch per input in memory. Duplicates are collapsed
+//! Inputs are sorted runs (one `ParquetSource` stream per input file, ordered
+//! by `file.id` ascending), merged via a k-way min-heap with one active batch
+//! per input in memory under `compaction.max_memory`. Duplicates are collapsed
 //! per group (a trace for spans, a `created_at` value for scores), so a group
 //! is never split across chunks.
 
+use std::cmp::Ordering;
+use std::collections::BinaryHeap;
 use std::io::Write;
+use std::path::PathBuf;
 use std::sync::Arc;
 
-use arrow::array::{Array, AsArray, RecordBatch};
-use arrow::compute::concat_batches;
-use arrow::datatypes::{DataType, TimestampNanosecondType};
-use cetra_core::schema::{scores, scores_schema, spans, spans_schema};
-use datafusion::common::ScalarValue;
-use datafusion::datasource::physical_plan::ParquetSource;
-use datafusion::error::DataFusionError;
-use datafusion::execution::TaskContext;
-use datafusion::execution::context::SessionConfig;
-use datafusion::execution::memory_pool::MemoryLimit;
-use datafusion::execution::object_store::ObjectStoreUrl;
-use datafusion::execution::runtime_env::RuntimeEnv;
-use datafusion::logical_expr::Operator;
-use datafusion::physical_expr::LexOrdering;
-use datafusion::physical_expr::PhysicalExpr;
-use datafusion::physical_expr::PhysicalSortExpr;
-use datafusion::physical_expr::expressions::{BinaryExpr, Column, Literal};
-use datafusion::physical_plan::ExecutionPlan;
-use datafusion::physical_plan::execute_stream;
-use datafusion::physical_plan::filter::FilterExec;
-use datafusion::physical_plan::sorts::sort_preserving_merge::SortPreservingMergeExec;
-use datafusion_datasource::PartitionedFile;
-use datafusion_datasource::file_groups::FileGroup;
-use datafusion_datasource::file_scan_config::FileScanConfigBuilder;
-use futures::StreamExt;
+use cetra_column::{
+    Batch, CancelToken, Column, DataType, FlatData, GlobalPool, Reservation, ScalarValue, Schema,
+    ScopedPool, Selection,
+};
+use cetra_core::schema::{scores, spans};
+use cetra_query::exec::{
+    ExecContext, ExecMetrics, PartitionStream, ScanSource, ScanSpec, SortKey, SpillManager,
+    TimeRangeHint, WorkerPool, compare_rows_across,
+};
+use cetra_query::tombstone::filter_uncovered;
+use cetra_query::{BinaryOp, EvalContext, Expr, QueryError};
 
 use crate::catalog::{FileMeta, FileTable};
 use crate::compaction::slice::Slice;
 use crate::dedup;
-use crate::deletion::drop_covered;
-use crate::error::CompactionError;
-use crate::objects::OBJECT_STORE_URL;
-use crate::parquet::{FileWriter, sort_columns, time_column};
-use crate::partials::partials_from_spans;
+use crate::error::{CompactionError, query_err_to_df};
+use crate::file_format::BatchFileWriter;
+use crate::parquet::{sort_columns, time_column};
+use crate::partials::partials_from_spans_batch;
+use crate::verify::Suspects;
 
 /// Process-wide settings of the merge, built once at open (M4.6) and by tests.
+#[derive(Debug)]
 pub(crate) struct MergeContext {
-    /// Memory pool `compaction.max_memory` and the object store (`Objects::register`).
-    pub(crate) runtime: Arc<RuntimeEnv>,
     /// Rows per batch read from the inputs, at most. A merge of large rows reads
     /// fewer ([`batch_rows`]).
     pub(crate) batch_size: usize,
@@ -54,37 +43,31 @@ pub(crate) struct MergeContext {
     /// an equal share of the pool when its batch rows are chosen.
     pub(crate) jobs: usize,
     /// Dedicated compaction memory pool (`compaction.max_memory`).
-    #[allow(dead_code)]
-    pub(crate) pool: Arc<cetra_column::GlobalPool>,
+    pub(crate) pool: Arc<GlobalPool>,
     /// Persistent native query runtime (`workers` + `metadata_cache`).
-    #[allow(dead_code)]
     pub(crate) qe_runtime: Arc<crate::QeRuntime>,
     /// Object store handle for native Parquet scans.
-    #[allow(dead_code)]
     pub(crate) store: Arc<dyn object_store::ObjectStore>,
     /// Suspect file queue for native Parquet scans.
-    #[allow(dead_code)]
     pub(crate) verify: Arc<crate::verify::VerifyQueue>,
     /// Tokio runtime handle for async object-store reads from worker threads.
-    #[allow(dead_code)]
     pub(crate) runtime_handle: tokio::runtime::Handle,
 }
 
 impl MergeContext {
-    /// Constructs a [`MergeContext`] with both legacy DataFusion and native engine handles.
+    /// Constructs a [`MergeContext`] with native engine handles.
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
-        runtime: Arc<RuntimeEnv>,
+        _runtime: Arc<datafusion::execution::runtime_env::RuntimeEnv>,
         batch_size: usize,
         jobs: usize,
-        pool: Arc<cetra_column::GlobalPool>,
+        pool: Arc<GlobalPool>,
         qe_runtime: Arc<crate::QeRuntime>,
         store: Arc<dyn object_store::ObjectStore>,
         verify: Arc<crate::verify::VerifyQueue>,
         runtime_handle: tokio::runtime::Handle,
     ) -> Self {
         Self {
-            runtime,
             batch_size,
             jobs,
             pool,
@@ -99,11 +82,66 @@ impl MergeContext {
 /// What `merge_slice` produced.
 pub(crate) struct MergedSlice<W: Write + Send> {
     /// The writer the rows went into.
-    pub(crate) writer: FileWriter<W>,
-    /// `spans` only: one partial batch per emitted chunk (`traces_schema()`).
-    pub(crate) partials: Vec<RecordBatch>,
+    pub(crate) writer: BatchFileWriter<W>,
+    /// `spans` only: one partial batch per emitted chunk (`traces` schema).
+    pub(crate) partials: Vec<Arc<Batch>>,
     /// Rows written to `writer`.
     pub(crate) rows: u64,
+}
+
+/// Per-input stream state held in the k-way merge.
+struct StreamState {
+    input_index: usize,
+    stream: Box<dyn PartitionStream>,
+    res: Reservation,
+    batch: Option<Batch>,
+    key_cols: Arc<Vec<Column>>,
+    active_rows: Vec<u32>,
+    cursor: usize,
+}
+
+impl StreamState {
+    fn current_phys_row(&self) -> Option<u32> {
+        self.active_rows.get(self.cursor).copied()
+    }
+}
+
+/// Min-heap entry for one active stream's head row.
+struct HeapEntry {
+    stream_idx: usize,
+    input_index: usize,
+    phys_row: u32,
+    key_cols: Arc<Vec<Column>>,
+    sort_keys: Arc<Vec<SortKey>>,
+}
+
+impl PartialEq for HeapEntry {
+    fn eq(&self, other: &Self) -> bool {
+        self.cmp(other) == Ordering::Equal
+    }
+}
+
+impl Eq for HeapEntry {}
+
+impl PartialOrd for HeapEntry {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for HeapEntry {
+    fn cmp(&self, other: &Self) -> Ordering {
+        // `BinaryHeap` is a max-heap; reverse so the smallest `(sort_keys, input_index)` pops first.
+        let ord = compare_rows_across(
+            &self.key_cols,
+            self.phys_row as usize,
+            &other.key_cols,
+            other.phys_row as usize,
+            &self.sort_keys,
+        )
+        .then_with(|| self.input_index.cmp(&other.input_index));
+        ord.reverse()
+    }
 }
 
 /// Merges `inputs` (one partition of `table`, `Spans` or `Scores`) restricted
@@ -119,75 +157,568 @@ pub(crate) async fn merge_slice<W: Write + Send + 'static>(
     inputs: &[Arc<FileMeta>],
     slice: Slice,
     drop_deleted: bool,
-    covered: Option<&Arc<dyn PhysicalExpr>>,
-    writer: FileWriter<W>,
+    covered: Option<&Expr>,
+    writer: BatchFileWriter<W>,
 ) -> Result<MergedSlice<W>, CompactionError> {
     if table == FileTable::Traces {
         return Err(CompactionError::Input {
             reason: "traces are not merged",
         });
     }
+    if slice.upper == Some(i64::MIN)
+        || matches!((slice.lower, slice.upper), (Some(lo), Some(hi)) if lo >= hi)
+        || inputs.is_empty()
+    {
+        return Ok(MergedSlice {
+            writer,
+            partials: Vec::new(),
+            rows: 0,
+        });
+    }
+
     let mut files: Vec<&Arc<FileMeta>> = inputs.iter().collect();
     // UUIDv7, so oldest first; ties between equal sort keys keep input order.
     files.sort_unstable_by_key(|file| file.id);
-    let plan = merge_plan(table, &files, slice)?;
-    let task = Arc::new(
-        TaskContext::default()
-            .with_session_config(SessionConfig::new().with_batch_size(batch_rows(ctx, &files)))
-            .with_runtime(Arc::clone(&ctx.runtime)),
-    );
-    let mut stream = execute_stream(Arc::clone(&plan), task).map_err(read_error)?;
 
-    let mut writer = writer;
-    let mut partials = Vec::new();
-    let mut rows = 0_u64;
-    let mut pending: Option<RecordBatch> = None;
-    while let Some(item) = stream.next().await {
-        let batch = item.map_err(read_error)?;
-        let combined = match pending.take() {
-            Some(pending) => {
-                concat_batches(&batch.schema(), [&pending, &batch]).map_err(arrow_error)?
-            }
-            None => batch,
-        };
-        if combined.num_rows() == 0 {
-            continue;
-        }
-        // The first row index whose group equals the last row's group, found by
-        // scanning back from the end: a group's rows are contiguous, but a
-        // group can straddle two batches.
-        let last = combined.num_rows() - 1;
-        let mut split = last;
-        while split > 0 && same_group(table, &combined, split - 1, last)? {
-            split -= 1;
-        }
-        if split > 0 {
-            let chunk = combined.slice(0, split);
-            let tail = combined.slice(split, combined.num_rows() - split);
-            let (next_writer, next_partials, written) =
-                emit_chunk(table, drop_deleted, covered, writer, chunk, partials).await?;
-            writer = next_writer;
-            partials = next_partials;
-            rows = rows.saturating_add(written);
-            pending = Some(tail);
-        } else {
-            pending = Some(combined);
+    let schema = table.column_schema();
+    let sort_keys = Arc::new(sort_keys_for(table, &schema)?);
+    let spec = slice_scan_spec(table, &schema, slice)?;
+    let batch_size = batch_rows(ctx, &files);
+
+    let scoped_pool = ctx
+        .pool
+        .try_admit(0, ctx.pool.limit())
+        .ok_or_else(|| read_error(query_err_to_df(QueryError::TooLarge)))?;
+    let workers = ctx
+        .qe_runtime
+        .workers()
+        .map_err(query_err_to_df)
+        .map_err(read_error)?;
+    let cancel = CancelToken::new();
+    let eval_ctx = EvalContext {
+        now_ns: crate::catalog::now_ns(),
+        cancel: cancel.clone(),
+    };
+    let exec_ctx = ExecContext {
+        pool: Arc::clone(&scoped_pool),
+        eval: eval_ctx.clone(),
+        spill: Arc::new(SpillManager::with_fixed_cap(PathBuf::new(), 0)),
+        workers: Arc::clone(&workers),
+        batch_size,
+        target_partitions: 1,
+        metrics: ExecMetrics::new(),
+    };
+
+    // Open one independent `ParquetSource` stream per input file in `file.id` ascending order.
+    let mut raw_streams: Vec<(usize, Box<dyn PartitionStream>)> = Vec::with_capacity(files.len());
+    for (input_index, file) in files.iter().enumerate() {
+        let source = crate::engine::parquet_source::ParquetSource::new(
+            Arc::clone(&ctx.store),
+            table,
+            Arc::clone(&schema),
+            vec![Arc::clone(file)],
+            Arc::from([]),
+            Arc::clone(&ctx.qe_runtime.metadata_cache),
+            Suspects::new(Arc::clone(&ctx.verify)),
+            ctx.runtime_handle.clone(),
+        );
+        let partitions = source
+            .open_partitions(&spec, &exec_ctx)
+            .map_err(query_err_to_df)
+            .map_err(read_error)?;
+        for stream in partitions {
+            raw_streams.push((input_index, stream));
         }
     }
-    if let Some(tail) = pending
+
+    if raw_streams.is_empty() {
+        return Ok(MergedSlice {
+            writer,
+            partials: Vec::new(),
+            rows: 0,
+        });
+    }
+
+    let initial = pull_all_initial(&workers, &scoped_pool, &cancel, raw_streams).await?;
+
+    let mut streams: Vec<StreamState> = Vec::with_capacity(initial.len());
+    let mut heap: BinaryHeap<HeapEntry> = BinaryHeap::with_capacity(initial.len());
+    for (input_index, stream, mut res, batch_opt) in initial {
+        let Some(batch) = batch_opt else {
+            res.free();
+            continue;
+        };
+        if batch.num_rows() == 0 {
+            res.free();
+            continue;
+        }
+        let key_cols = Arc::new(extract_key_cols(table, &batch)?);
+        let active_rows = batch
+            .selection()
+            .to_indices(batch.raw_len())
+            .map_err(|e| read_error(query_err_to_df(e.into())))?;
+        let Some(&first_phys) = active_rows.first() else {
+            res.free();
+            continue;
+        };
+        let stream_idx = streams.len();
+        heap.push(HeapEntry {
+            stream_idx,
+            input_index,
+            phys_row: first_phys,
+            key_cols: Arc::clone(&key_cols),
+            sort_keys: Arc::clone(&sort_keys),
+        });
+        streams.push(StreamState {
+            input_index,
+            stream,
+            res,
+            batch: Some(batch),
+            key_cols,
+            active_rows,
+            cursor: 0,
+        });
+    }
+
+    let mut writer = writer;
+    let mut partials: Vec<Arc<Batch>> = Vec::new();
+    let mut rows = 0_u64;
+
+    let mut pending: Option<Batch> = None;
+    let mut pending_res = scoped_pool.register("merge_pending", false);
+    let mut chunk_pieces: Vec<Batch> = Vec::new();
+    let mut chunk_res = scoped_pool.register("merge_chunk", false);
+    let mut scratch_res = scoped_pool.register("merge_scratch", false);
+    let mut chunk_picks: Vec<(usize, u32)> = Vec::with_capacity(batch_size);
+    let mut buffered_rows = 0_usize;
+
+    while let Some(top) = heap.pop() {
+        let stream_idx = top.stream_idx;
+        chunk_picks.push((stream_idx, top.phys_row));
+        buffered_rows += 1;
+
+        streams[stream_idx].cursor += 1;
+        if let Some(next_phys) = streams[stream_idx].current_phys_row() {
+            heap.push(HeapEntry {
+                stream_idx,
+                input_index: streams[stream_idx].input_index,
+                phys_row: next_phys,
+                key_cols: Arc::clone(&streams[stream_idx].key_cols),
+                sort_keys: Arc::clone(&sort_keys),
+            });
+        } else {
+            // Stream's current batch is exhausted: materialize any picks referencing it
+            // before dropping its batch and pulling the next one.
+            if let Some(piece) = flush_picks(
+                &schema,
+                &streams,
+                &mut chunk_picks,
+                &mut chunk_res,
+                &mut scratch_res,
+            )? {
+                chunk_pieces.push(piece);
+            }
+            let st = &mut streams[stream_idx];
+            st.batch = None;
+            st.active_rows.clear();
+            st.cursor = 0;
+            let pulled = pull_stream_next(
+                &workers,
+                std::mem::replace(&mut st.stream, Box::new(EmptyStream)),
+                cancel.clone(),
+                std::mem::replace(&mut st.res, scoped_pool.register("merge_empty", false)),
+            )
+            .await?;
+            st.stream = pulled.0;
+            st.res = pulled.1;
+            if let Some(next_batch) = pulled.2
+                && next_batch.num_rows() > 0
+            {
+                let key_cols = Arc::new(extract_key_cols(table, &next_batch)?);
+                let active_rows = next_batch
+                    .selection()
+                    .to_indices(next_batch.raw_len())
+                    .map_err(|e| read_error(query_err_to_df(e.into())))?;
+                if let Some(&first_phys) = active_rows.first() {
+                    st.key_cols = Arc::clone(&key_cols);
+                    st.active_rows = active_rows;
+                    st.batch = Some(next_batch);
+                    heap.push(HeapEntry {
+                        stream_idx,
+                        input_index: st.input_index,
+                        phys_row: first_phys,
+                        key_cols,
+                        sort_keys: Arc::clone(&sort_keys),
+                    });
+                } else {
+                    st.res.free();
+                }
+            }
+        }
+
+        if buffered_rows >= batch_size || heap.is_empty() {
+            if let Some(piece) = flush_picks(
+                &schema,
+                &streams,
+                &mut chunk_picks,
+                &mut chunk_res,
+                &mut scratch_res,
+            )? {
+                chunk_pieces.push(piece);
+            }
+            if chunk_pieces.is_empty() && pending.is_none() {
+                buffered_rows = 0;
+                continue;
+            }
+            let combined = combine_pending_and_pieces(
+                &schema,
+                pending.take(),
+                &mut pending_res,
+                &mut chunk_pieces,
+                &mut chunk_res,
+                &mut scratch_res,
+            )?;
+            buffered_rows = 0;
+            if combined.num_rows() == 0 {
+                scratch_res.free();
+                continue;
+            }
+
+            let last = combined.num_rows() - 1;
+            let same_as_next = match heap.peek() {
+                Some(next) => same_group_with_heap_top(table, &combined, last, next)?,
+                None => false,
+            };
+
+            if !same_as_next {
+                // Entire `combined` ends on a group boundary: emit it all.
+                let chunk_bytes = combined.memory_bytes();
+                chunk_res
+                    .resize(chunk_bytes)
+                    .map_err(|e| read_error(query_err_to_df(e.into())))?;
+                scratch_res.free();
+                let (next_writer, next_partials, written) = emit_chunk(
+                    table,
+                    drop_deleted,
+                    covered,
+                    writer,
+                    combined,
+                    partials,
+                    &eval_ctx,
+                    &mut chunk_res,
+                    &mut scratch_res,
+                )
+                .await?;
+                writer = next_writer;
+                partials = next_partials;
+                rows = rows.saturating_add(written);
+                chunk_res.free();
+                scratch_res.free();
+            } else {
+                // Current group continues into `heap.peek()`: split off completed prefix groups.
+                let mut split = last;
+                while split > 0 && same_group(table, &combined, split - 1, last)? {
+                    split -= 1;
+                }
+                if split > 0 {
+                    let chunk = combined
+                        .slice(0, split)
+                        .map_err(|e| read_error(query_err_to_df(e.into())))?;
+                    let tail = combined
+                        .slice(split, combined.num_rows() - split)
+                        .map_err(|e| read_error(query_err_to_df(e.into())))?;
+                    drop(combined);
+                    scratch_res.free();
+
+                    let tail_bytes = tail.memory_bytes();
+                    pending_res
+                        .resize(tail_bytes)
+                        .map_err(|e| read_error(query_err_to_df(e.into())))?;
+                    pending = Some(tail);
+
+                    let chunk_bytes = chunk.memory_bytes();
+                    chunk_res
+                        .resize(chunk_bytes)
+                        .map_err(|e| read_error(query_err_to_df(e.into())))?;
+                    let (next_writer, next_partials, written) = emit_chunk(
+                        table,
+                        drop_deleted,
+                        covered,
+                        writer,
+                        chunk,
+                        partials,
+                        &eval_ctx,
+                        &mut chunk_res,
+                        &mut scratch_res,
+                    )
+                    .await?;
+                    writer = next_writer;
+                    partials = next_partials;
+                    rows = rows.saturating_add(written);
+                    chunk_res.free();
+                    scratch_res.free();
+                } else {
+                    // Entire `combined` belongs to one straddling group.
+                    let pending_bytes = combined.memory_bytes();
+                    drop(scratch_res);
+                    scratch_res = scoped_pool.register("merge_scratch", false);
+                    pending_res
+                        .resize(pending_bytes)
+                        .map_err(|e| read_error(query_err_to_df(e.into())))?;
+                    pending = Some(combined);
+                }
+            }
+        }
+    }
+
+    if let Some(tail) = pending.take()
         && tail.num_rows() > 0
     {
-        let (next_writer, next_partials, written) =
-            emit_chunk(table, drop_deleted, covered, writer, tail, partials).await?;
+        let (next_writer, next_partials, written) = emit_chunk(
+            table,
+            drop_deleted,
+            covered,
+            writer,
+            tail,
+            partials,
+            &eval_ctx,
+            &mut pending_res,
+            &mut scratch_res,
+        )
+        .await?;
         writer = next_writer;
         partials = next_partials;
         rows = rows.saturating_add(written);
     }
+
+    pending_res.free();
+    chunk_res.free();
+    scratch_res.free();
+    for st in &mut streams {
+        st.batch = None;
+        st.res.free();
+    }
+
     Ok(MergedSlice {
         writer,
         partials,
         rows,
     })
+}
+
+/// Sentinel empty stream used during `std::mem::replace`.
+struct EmptyStream;
+
+impl PartitionStream for EmptyStream {
+    fn next_batch(
+        &mut self,
+        _cancel: &CancelToken,
+        _res: Option<&mut Reservation>,
+    ) -> Result<Option<Batch>, QueryError> {
+        Ok(None)
+    }
+}
+
+type InitialStreamOut = (usize, Box<dyn PartitionStream>, Reservation, Option<Batch>);
+
+async fn pull_all_initial(
+    workers: &Arc<WorkerPool>,
+    scoped_pool: &Arc<ScopedPool>,
+    cancel: &CancelToken,
+    raw_streams: Vec<(usize, Box<dyn PartitionStream>)>,
+) -> Result<Vec<InitialStreamOut>, CompactionError> {
+    let workers = Arc::clone(workers);
+    let scoped_pool = Arc::clone(scoped_pool);
+    let cancel = cancel.clone();
+    tokio::task::spawn_blocking(move || {
+        let tasks: Vec<_> = raw_streams
+            .into_iter()
+            .map(|(input_index, mut stream)| {
+                let pool = Arc::clone(&scoped_pool);
+                let cancel = cancel.clone();
+                move |_worker_idx: usize| -> Result<InitialStreamOut, QueryError> {
+                    let mut res = pool.register("merge_stream", false);
+                    let mut batch_out = None;
+                    loop {
+                        res.free();
+                        match stream.next_batch(&cancel, Some(&mut res))? {
+                            Some(b) if b.is_empty() => continue,
+                            Some(b) => {
+                                batch_out = Some(b);
+                                break;
+                            }
+                            None => {
+                                res.free();
+                                break;
+                            }
+                        }
+                    }
+                    Ok((input_index, stream, res, batch_out))
+                }
+            })
+            .collect();
+        workers
+            .run_scoped(&cancel, tasks)
+            .map_err(query_err_to_df)
+            .map_err(read_error)
+    })
+    .await
+    .map_err(join_error)?
+}
+
+async fn pull_stream_next(
+    workers: &Arc<WorkerPool>,
+    mut stream: Box<dyn PartitionStream>,
+    cancel: CancelToken,
+    mut res: Reservation,
+) -> Result<(Box<dyn PartitionStream>, Reservation, Option<Batch>), CompactionError> {
+    let workers = Arc::clone(workers);
+    tokio::task::spawn_blocking(move || {
+        let task_cancel = cancel.clone();
+        let mut out = workers
+            .run_scoped(
+                &cancel,
+                vec![move |_worker_idx| {
+                    let mut batch_out = None;
+                    loop {
+                        res.free();
+                        match stream.next_batch(&task_cancel, Some(&mut res))? {
+                            Some(b) if b.is_empty() => continue,
+                            Some(b) => {
+                                batch_out = Some(b);
+                                break;
+                            }
+                            None => {
+                                res.free();
+                                break;
+                            }
+                        }
+                    }
+                    Ok((stream, res, batch_out))
+                }],
+            )
+            .map_err(query_err_to_df)
+            .map_err(read_error)?;
+        out.pop().ok_or(CompactionError::Task)
+    })
+    .await
+    .map_err(join_error)?
+}
+
+fn flush_picks(
+    schema: &Arc<Schema>,
+    streams: &[StreamState],
+    picks: &mut Vec<(usize, u32)>,
+    chunk_res: &mut Reservation,
+    scratch_res: &mut Reservation,
+) -> Result<Option<Batch>, CompactionError> {
+    if picks.is_empty() {
+        return Ok(None);
+    }
+    let first_stream = picks[0].0;
+    if picks.iter().all(|&(s, _)| s == first_stream) {
+        let batch = streams[first_stream]
+            .batch
+            .as_ref()
+            .ok_or(CompactionError::Input {
+                reason: "missing stream batch",
+            })?;
+        let indices: Vec<u32> = picks.drain(..).map(|(_, phys)| phys).collect();
+        let selected = batch
+            .with_selection(Selection::Indices(indices))
+            .map_err(|e| read_error(query_err_to_df(e.into())))?;
+        let piece = selected
+            .compact(Some(chunk_res))
+            .map_err(|e| read_error(query_err_to_df(e.into())))?;
+        return Ok(Some(piece));
+    }
+
+    let mut per_stream: Vec<(usize, Vec<u32>)> = Vec::new();
+    let mut stream_pos: Vec<(usize, u32)> = Vec::with_capacity(picks.len());
+    for &(s, phys) in picks.iter() {
+        let slot = match per_stream.iter().position(|(id, _)| *id == s) {
+            Some(pos) => pos,
+            None => {
+                per_stream.push((s, Vec::new()));
+                per_stream.len() - 1
+            }
+        };
+        let local_idx = u32::try_from(per_stream[slot].1.len())
+            .map_err(|_| read_error(query_err_to_df(QueryError::TooLarge)))?;
+        per_stream[slot].1.push(phys);
+        stream_pos.push((slot, local_idx));
+    }
+
+    let mut subs: Vec<Batch> = Vec::with_capacity(per_stream.len());
+    let mut bases: Vec<u32> = Vec::with_capacity(per_stream.len());
+    let mut offset = 0_u32;
+    let mut sub_res = scratch_res.new_empty("merge_sub");
+    for (s, indices) in per_stream {
+        let batch = streams[s].batch.as_ref().ok_or(CompactionError::Input {
+            reason: "missing stream batch",
+        })?;
+        bases.push(offset);
+        offset = offset.saturating_add(
+            u32::try_from(indices.len())
+                .map_err(|_| read_error(query_err_to_df(QueryError::TooLarge)))?,
+        );
+        let selected = batch
+            .with_selection(Selection::Indices(indices))
+            .map_err(|e| read_error(query_err_to_df(e.into())))?;
+        let sub = selected
+            .compact(Some(&mut sub_res))
+            .map_err(|e| read_error(query_err_to_df(e.into())))?;
+        subs.push(sub);
+    }
+
+    let perm: Vec<u32> = stream_pos
+        .into_iter()
+        .map(|(slot, local_idx)| bases[slot] + local_idx)
+        .collect();
+    let sub_refs: Vec<&Batch> = subs.iter().collect();
+    let combined = Batch::concat(Arc::clone(schema), &sub_refs, Some(scratch_res))
+        .map_err(|e| read_error(query_err_to_df(e.into())))?;
+    drop(subs);
+    sub_res.free();
+
+    let reordered = combined
+        .with_selection(Selection::Indices(perm))
+        .map_err(|e| read_error(query_err_to_df(e.into())))?;
+    let piece = reordered
+        .compact(Some(chunk_res))
+        .map_err(|e| read_error(query_err_to_df(e.into())))?;
+    drop(reordered);
+    drop(combined);
+    scratch_res.free();
+    picks.clear();
+    Ok(Some(piece))
+}
+
+fn combine_pending_and_pieces(
+    schema: &Arc<Schema>,
+    pending: Option<Batch>,
+    pending_res: &mut Reservation,
+    chunk_pieces: &mut Vec<Batch>,
+    chunk_res: &mut Reservation,
+    scratch_res: &mut Reservation,
+) -> Result<Batch, CompactionError> {
+    let combined = {
+        let mut refs: Vec<&Batch> =
+            Vec::with_capacity(usize::from(pending.is_some()) + chunk_pieces.len());
+        if let Some(ref p) = pending {
+            refs.push(p);
+        }
+        for piece in chunk_pieces.iter() {
+            refs.push(piece);
+        }
+        Batch::concat(Arc::clone(schema), &refs, Some(scratch_res))
+            .map_err(|e| read_error(query_err_to_df(e.into())))?
+    };
+    drop(pending);
+    pending_res.free();
+    chunk_pieces.clear();
+    chunk_res.free();
+    Ok(combined)
 }
 
 /// Fewest rows per input batch. Below it the per-batch overhead dominates.
@@ -207,9 +738,10 @@ const BATCHES_PER_INPUT: u64 = 4;
 /// size from the largest stored bytes per row among the inputs. Between
 /// `MIN_BATCH_ROWS` and `ctx.batch_size`; `ctx.batch_size` without a finite pool.
 fn batch_rows(ctx: &MergeContext, inputs: &[&Arc<FileMeta>]) -> usize {
-    let MemoryLimit::Finite(limit) = ctx.runtime.memory_pool.memory_limit() else {
+    let limit = ctx.pool.limit();
+    if limit == usize::MAX {
         return ctx.batch_size;
-    };
+    }
     let stored_per_row = inputs
         .iter()
         .filter(|file| file.rows > 0)
@@ -226,192 +758,135 @@ fn batch_rows(ctx: &MergeContext, inputs: &[&Arc<FileMeta>]) -> usize {
     rows.clamp(MIN_BATCH_ROWS, ctx.batch_size.max(MIN_BATCH_ROWS))
 }
 
-/// The streaming plan of one slice: one file group per input, a Parquet scan
-/// per group in the table's sort order, the slice predicate, and one
-/// sort-preserving k-way merge over them. Built by hand; there is no SQL.
-pub(crate) fn merge_plan(
-    table: FileTable,
-    inputs: &[&Arc<FileMeta>],
-    slice: Slice,
-) -> Result<Arc<dyn ExecutionPlan>, CompactionError> {
-    if table == FileTable::Traces {
-        return Err(CompactionError::Input {
-            reason: "traces are not merged",
-        });
-    }
-    let schema = match table {
-        FileTable::Spans => spans_schema(),
-        FileTable::Scores => scores_schema(),
-        FileTable::Traces => unreachable!("rejected above"),
-    };
-    let ordering = ordering_of(table, &schema)?;
-    let bounded = slice.lower.is_some() || slice.upper.is_some();
-    let mut source = ParquetSource::new(Arc::clone(&schema)).with_pushdown_filters(true);
-    let mut filter = None;
-    if bounded {
-        let predicate = slice_predicate(table, &schema, slice)?;
-        // The source predicate only prunes; the `FilterExec` makes the slice
-        // exact, and it keeps the input order.
-        source = source.with_predicate(Arc::clone(&predicate));
-        filter = Some(predicate);
-    }
-    let scan = file_scan(inputs, source, &ordering, None)?;
-    let input: Arc<dyn ExecutionPlan> = match filter {
-        Some(predicate) => Arc::new(
-            FilterExec::try_new(predicate, scan)
-                .map_err(|source| CompactionError::Read { source })?,
-        ),
-        None => scan,
-    };
-    let merge = SortPreservingMergeExec::new(ordering, input).with_round_robin_repartition(false);
-    Ok(Arc::new(merge))
-}
-
-/// The scan over every input, one file per group: a group with several files
-/// would concatenate them, so it would not be sorted.
-///
-/// The declared `ordering` also turns on `preserve_order`. Without it,
-/// DataFusion's file-stream work stealing lets one partition read a sibling's
-/// file after its own, which concatenates two sorted runs into one unsorted
-/// input of the merge. `projection` narrows the output columns; the merge
-/// passes `None`.
-pub(super) fn file_scan(
-    inputs: &[&Arc<FileMeta>],
-    source: ParquetSource,
-    ordering: &LexOrdering,
-    projection: Option<Vec<usize>>,
-) -> Result<Arc<dyn ExecutionPlan>, CompactionError> {
-    let groups: Vec<FileGroup> = inputs
-        .iter()
-        .map(|meta| {
-            let mut file = PartitionedFile::new(meta.path.clone(), meta.size);
-            if let Ok(hint) = usize::try_from(meta.footer_size) {
-                file = file.with_metadata_size_hint(hint);
-            }
-            FileGroup::new(vec![file])
-        })
-        .collect();
-    let url = ObjectStoreUrl::parse(OBJECT_STORE_URL).map_err(read_error)?;
-    let builder = FileScanConfigBuilder::new(url, Arc::new(source))
-        .with_file_groups(groups)
-        .with_output_ordering(vec![ordering.clone()])
-        .with_projection_indices(projection)
-        .map_err(read_error)?;
-    Ok(crate::unwind::guarded_scan(builder.build()))
-}
-
-/// The table's `sort_columns` as physical sort expressions, in the order the
-/// writer declares.
-pub(super) fn ordering_of(
-    table: FileTable,
-    schema: &arrow::datatypes::SchemaRef,
-) -> Result<LexOrdering, CompactionError> {
-    let mut exprs = Vec::new();
+fn sort_keys_for(table: FileTable, schema: &Schema) -> Result<Vec<SortKey>, CompactionError> {
+    let mut keys = Vec::new();
     for name in sort_columns(table) {
-        let index = schema.index_of(name).map_err(|_| CompactionError::Input {
+        let index = schema.index_of(name).ok_or(CompactionError::Input {
             reason: "sort column is missing",
         })?;
-        exprs.push(PhysicalSortExpr {
-            expr: Arc::new(Column::new(name, index)),
-            options: arrow::compute::SortOptions {
-                descending: false,
-                nulls_first: false,
+        let data_type = schema.fields()[index].data_type.clone();
+        keys.push(SortKey {
+            expr: Expr::Column {
+                index,
+                name: (*name).to_owned(),
+                data_type,
             },
+            descending: false,
+            nulls_first: false,
         });
     }
-    LexOrdering::new(exprs).ok_or_else(|| CompactionError::Input {
-        reason: "empty ordering",
+    if keys.is_empty() {
+        return Err(CompactionError::Input {
+            reason: "empty ordering",
+        });
+    }
+    Ok(keys)
+}
+
+fn extract_key_cols(table: FileTable, batch: &Batch) -> Result<Vec<Column>, CompactionError> {
+    let mut cols = Vec::new();
+    for name in sort_columns(table) {
+        let col = batch
+            .column_by_name(name)
+            .ok_or(CompactionError::Input {
+                reason: "sort column is missing",
+            })?
+            .clone();
+        cols.push(col);
+    }
+    Ok(cols)
+}
+
+fn slice_scan_spec(
+    table: FileTable,
+    schema: &Schema,
+    slice: Slice,
+) -> Result<ScanSpec, CompactionError> {
+    let col_name = time_column(table);
+    let col_idx = schema.index_of(col_name).ok_or(CompactionError::Input {
+        reason: "time column is missing",
+    })?;
+    let DataType::TimestampNs { utc } = schema.fields()[col_idx].data_type else {
+        return Err(CompactionError::Input {
+            reason: "time column is missing",
+        });
+    };
+    let col_expr = Expr::Column {
+        index: col_idx,
+        name: col_name.to_owned(),
+        data_type: DataType::TimestampNs { utc },
+    };
+    let mut filters = Vec::new();
+    if let Some(lower) = slice.lower {
+        filters.push(Expr::Binary {
+            left: Box::new(col_expr.clone()),
+            op: BinaryOp::GtEq,
+            right: Box::new(Expr::Literal(ScalarValue::TimestampNs {
+                value: lower,
+                utc,
+            })),
+            data_type: DataType::Bool,
+        });
+    }
+    if let Some(upper) = slice.upper {
+        filters.push(Expr::Binary {
+            left: Box::new(col_expr),
+            op: BinaryOp::Lt,
+            right: Box::new(Expr::Literal(ScalarValue::TimestampNs {
+                value: upper,
+                utc,
+            })),
+            data_type: DataType::Bool,
+        });
+    }
+    let time_range = TimeRangeHint {
+        min_ns: slice.lower,
+        max_ns: slice.upper.and_then(|u| u.checked_sub(1)),
+        around_ns: None,
+    };
+    Ok(ScanSpec {
+        time_range,
+        filters,
+        ..ScanSpec::default()
     })
 }
 
-/// `time >= lower AND time < upper`, either side present only when bounded.
-fn slice_predicate(
-    table: FileTable,
-    schema: &arrow::datatypes::SchemaRef,
-    slice: Slice,
-) -> Result<Arc<dyn PhysicalExpr>, CompactionError> {
-    let name = time_column(table);
-    let index = schema.index_of(name).map_err(|_| CompactionError::Input {
-        reason: "time column is missing",
-    })?;
-    let tz = match schema.field(index).data_type() {
-        DataType::Timestamp(_, tz) => tz.clone(),
-        _ => None,
-    };
-    let column = Arc::new(Column::new(name, index)) as Arc<dyn PhysicalExpr>;
-    let mut bounds = Vec::new();
-    if let Some(lower) = slice.lower {
-        bounds.push(Arc::new(BinaryExpr::new(
-            Arc::clone(&column),
-            Operator::GtEq,
-            Arc::new(Literal::new(ScalarValue::TimestampNanosecond(
-                Some(lower),
-                tz.clone(),
-            ))),
-        )) as Arc<dyn PhysicalExpr>);
-    }
-    if let Some(upper) = slice.upper {
-        bounds.push(Arc::new(BinaryExpr::new(
-            Arc::clone(&column),
-            Operator::Lt,
-            Arc::new(Literal::new(ScalarValue::TimestampNanosecond(
-                Some(upper),
-                tz,
-            ))),
-        )) as Arc<dyn PhysicalExpr>);
-    }
-    let [first, rest @ ..] = bounds.as_slice() else {
-        return Err(CompactionError::Input {
-            reason: "slice has no bounds",
-        });
-    };
-    let mut predicate = Arc::clone(first);
-    for bound in rest {
-        predicate = Arc::new(BinaryExpr::new(predicate, Operator::And, Arc::clone(bound)));
-    }
-    Ok(predicate)
-}
-
-/// Whether rows `left` and `right` of `batch` belong to one group: the same
-/// `trace_id` for spans, the same `created_at` for scores.
+/// Whether rows `left` and `right` of a `Selection::All` batch belong to one group:
+/// the same `trace_id` for spans, the same `created_at` for scores.
 fn same_group(
     table: FileTable,
-    batch: &RecordBatch,
+    batch: &Batch,
     left: usize,
     right: usize,
 ) -> Result<bool, CompactionError> {
     match table {
         FileTable::Spans => {
-            let Some(ids) = batch
+            let col = batch
                 .column_by_name(spans::TRACE_ID)
-                .and_then(|column| column.as_fixed_size_binary_opt())
-            else {
+                .filter(|c| c.data_type() == DataType::FixedBytes16)
+                .ok_or(CompactionError::Input {
+                    reason: "missing group column",
+                })?;
+            let (Some(a), Some(b)) = (read_fixed16(col, left), read_fixed16(col, right)) else {
                 return Err(CompactionError::Input {
                     reason: "missing group column",
                 });
             };
-            if ids.is_null(left) || ids.is_null(right) {
-                return Err(CompactionError::Input {
-                    reason: "missing group column",
-                });
-            }
-            Ok(ids.value(left) == ids.value(right))
+            Ok(a == b)
         }
         FileTable::Scores => {
-            let Some(times) = batch
+            let col = batch
                 .column_by_name(scores::CREATED_AT)
-                .and_then(|column| column.as_primitive_opt::<TimestampNanosecondType>())
-            else {
+                .filter(|c| matches!(c.data_type(), DataType::TimestampNs { .. }))
+                .ok_or(CompactionError::Input {
+                    reason: "missing group column",
+                })?;
+            let (Some(a), Some(b)) = (read_ts(col, left), read_ts(col, right)) else {
                 return Err(CompactionError::Input {
                     reason: "missing group column",
                 });
             };
-            if times.is_null(left) || times.is_null(right) {
-                return Err(CompactionError::Input {
-                    reason: "missing group column",
-                });
-            }
-            Ok(times.value(left) == times.value(right))
+            Ok(a == b)
         }
         FileTable::Traces => Err(CompactionError::Input {
             reason: "traces are not merged",
@@ -419,46 +894,208 @@ fn same_group(
     }
 }
 
+fn same_group_with_heap_top(
+    table: FileTable,
+    batch: &Batch,
+    row: usize,
+    heap_top: &HeapEntry,
+) -> Result<bool, CompactionError> {
+    let top_phys = heap_top.phys_row as usize;
+    match table {
+        FileTable::Spans => {
+            let col = batch
+                .column_by_name(spans::TRACE_ID)
+                .filter(|c| c.data_type() == DataType::FixedBytes16)
+                .ok_or(CompactionError::Input {
+                    reason: "missing group column",
+                })?;
+            let top_col = heap_top.key_cols.first().ok_or(CompactionError::Input {
+                reason: "missing group column",
+            })?;
+            let (Some(a), Some(b)) = (read_fixed16(col, row), read_fixed16(top_col, top_phys))
+            else {
+                return Err(CompactionError::Input {
+                    reason: "missing group column",
+                });
+            };
+            Ok(a == b)
+        }
+        FileTable::Scores => {
+            let col = batch
+                .column_by_name(scores::CREATED_AT)
+                .filter(|c| matches!(c.data_type(), DataType::TimestampNs { .. }))
+                .ok_or(CompactionError::Input {
+                    reason: "missing group column",
+                })?;
+            let top_col = heap_top.key_cols.first().ok_or(CompactionError::Input {
+                reason: "missing group column",
+            })?;
+            let (Some(a), Some(b)) = (read_ts(col, row), read_ts(top_col, top_phys)) else {
+                return Err(CompactionError::Input {
+                    reason: "missing group column",
+                });
+            };
+            Ok(a == b)
+        }
+        FileTable::Traces => Err(CompactionError::Input {
+            reason: "traces are not merged",
+        }),
+    }
+}
+
+fn read_fixed16(col: &Column, row: usize) -> Option<[u8; 16]> {
+    match col {
+        Column::Flat(flat) => {
+            if flat.is_null(row) {
+                return None;
+            }
+            match flat.data() {
+                FlatData::FixedBytes16(values) => values.get(row).copied(),
+                _ => None,
+            }
+        }
+        Column::Const { value, len } => (row < *len).then_some(value).and_then(|val| match val {
+            ScalarValue::FixedBytes16(bytes) => Some(*bytes),
+            _ => None,
+        }),
+        Column::Dict(dict) => {
+            if dict.is_null(row) {
+                return None;
+            }
+            let code = *dict.codes().get(row)? as usize;
+            if dict.values().is_null(code) {
+                return None;
+            }
+            match dict.values().data() {
+                FlatData::FixedBytes16(values) => values.get(code).copied(),
+                _ => None,
+            }
+        }
+        Column::Rle(rle) => {
+            if row >= rle.len() {
+                return None;
+            }
+            let run = rle.run_ends().partition_point(|&end| (end as usize) <= row);
+            if rle.values().is_null(run) {
+                return None;
+            }
+            match rle.values().data() {
+                FlatData::FixedBytes16(values) => values.get(run).copied(),
+                _ => None,
+            }
+        }
+    }
+}
+
+fn read_ts(col: &Column, row: usize) -> Option<i64> {
+    match col {
+        Column::Flat(flat) => {
+            if flat.is_null(row) {
+                return None;
+            }
+            match flat.data() {
+                FlatData::TimestampNs { values, .. } => values.get(row).copied(),
+                _ => None,
+            }
+        }
+        Column::Const { value, len } => (row < *len).then_some(value).and_then(|val| match val {
+            ScalarValue::TimestampNs { value, .. } => Some(*value),
+            _ => None,
+        }),
+        Column::Dict(dict) => {
+            if dict.is_null(row) {
+                return None;
+            }
+            let code = *dict.codes().get(row)? as usize;
+            if dict.values().is_null(code) {
+                return None;
+            }
+            match dict.values().data() {
+                FlatData::TimestampNs { values, .. } => values.get(code).copied(),
+                _ => None,
+            }
+        }
+        Column::Rle(rle) => {
+            if row >= rle.len() {
+                return None;
+            }
+            let run = rle.run_ends().partition_point(|&end| (end as usize) <= row);
+            if rle.values().is_null(run) {
+                return None;
+            }
+            match rle.values().data() {
+                FlatData::TimestampNs { values, .. } => values.get(run).copied(),
+                _ => None,
+            }
+        }
+    }
+}
+
 /// Deduplicates one chunk and writes it, computing the trace partials for
 /// spans. Covered rows are dropped first (spec 03 §7): a chunk left with no
 /// row writes nothing and pushes no partial. The blocking write runs on
 /// `spawn_blocking`.
+#[allow(clippy::too_many_arguments)]
 async fn emit_chunk<W: Write + Send + 'static>(
     table: FileTable,
     drop_deleted: bool,
-    covered: Option<&Arc<dyn PhysicalExpr>>,
-    writer: FileWriter<W>,
-    chunk: RecordBatch,
-    mut partials: Vec<RecordBatch>,
-) -> Result<(FileWriter<W>, Vec<RecordBatch>, u64), CompactionError> {
-    let chunk = match covered {
+    covered: Option<&Expr>,
+    writer: BatchFileWriter<W>,
+    chunk: Batch,
+    mut partials: Vec<Arc<Batch>>,
+    eval_ctx: &EvalContext,
+    chunk_res: &mut Reservation,
+    scratch_res: &mut Reservation,
+) -> Result<(BatchFileWriter<W>, Vec<Arc<Batch>>, u64), CompactionError> {
+    let filtered = match covered {
         Some(predicate) => {
-            let rows = drop_covered(&chunk, predicate).map_err(|_| CompactionError::Deletion {
-                reason: "applying the deletion filter",
-            })?;
-            if rows.num_rows() == 0 {
+            let kept = filter_uncovered(&chunk, predicate, eval_ctx, Some(scratch_res)).map_err(
+                |err| {
+                    if matches!(err, QueryError::TooLarge | QueryError::Cancelled) {
+                        read_error(query_err_to_df(err))
+                    } else {
+                        CompactionError::Deletion {
+                            reason: "applying the deletion filter",
+                        }
+                    }
+                },
+            )?;
+            if kept.num_rows() == 0 {
                 return Ok((writer, partials, 0));
             }
-            rows
+            kept
         }
         None => chunk,
     };
     match table {
         FileTable::Spans => {
-            let rows = dedup::latest_spans(&chunk)?;
-            let partial = partials_from_spans(&rows)?;
+            let rows = dedup::latest_spans_batch(&filtered)?;
+            drop(filtered);
+            chunk_res.free();
+            scratch_res
+                .resize(rows.memory_bytes())
+                .map_err(|e| read_error(query_err_to_df(e.into())))?;
+            let partial = partials_from_spans_batch(&rows)?;
             let written = u64::try_from(rows.num_rows()).unwrap_or(u64::MAX);
             let writer = blocking_write(writer, rows).await?;
-            partials.push(partial);
+            scratch_res.free();
+            partials.push(Arc::new(partial));
             Ok((writer, partials, written))
         }
         FileTable::Scores => {
-            let rows = dedup::latest_scores(&chunk, drop_deleted)?;
+            let rows = dedup::latest_scores_batch(&filtered, drop_deleted)?;
+            drop(filtered);
+            chunk_res.free();
             if rows.num_rows() == 0 {
+                scratch_res.free();
                 return Ok((writer, partials, 0));
             }
+            scratch_res
+                .resize(rows.memory_bytes())
+                .map_err(|e| read_error(query_err_to_df(e.into())))?;
             let written = u64::try_from(rows.num_rows()).unwrap_or(u64::MAX);
             let writer = blocking_write(writer, rows).await?;
+            scratch_res.free();
             Ok((writer, partials, written))
         }
         FileTable::Traces => Err(CompactionError::Input {
@@ -468,9 +1105,9 @@ async fn emit_chunk<W: Write + Send + 'static>(
 }
 
 async fn blocking_write<W: Write + Send + 'static>(
-    mut writer: FileWriter<W>,
-    rows: RecordBatch,
-) -> Result<FileWriter<W>, CompactionError> {
+    mut writer: BatchFileWriter<W>,
+    rows: Batch,
+) -> Result<BatchFileWriter<W>, CompactionError> {
     tokio::task::spawn_blocking(move || writer.write(&rows).map(|()| writer))
         .await
         .map_err(join_error)?
@@ -481,14 +1118,8 @@ fn join_error(_: tokio::task::JoinError) -> CompactionError {
     CompactionError::Task
 }
 
-pub(super) fn read_error(source: DataFusionError) -> CompactionError {
+pub(super) fn read_error(source: datafusion::error::DataFusionError) -> CompactionError {
     CompactionError::Read { source }
-}
-
-fn arrow_error(source: arrow::error::ArrowError) -> CompactionError {
-    CompactionError::Read {
-        source: DataFusionError::External(Box::new(source)),
-    }
 }
 
 #[cfg(test)]
@@ -501,30 +1132,31 @@ mod tests {
     use arrow::compute::{
         SortColumn, SortOptions, concat_batches, lexsort_to_indices, take_record_batch,
     };
+    use cetra_column::Batch;
     use cetra_core::batch::scores_to_record_batch;
     use cetra_core::enums::ScoreSource;
     use cetra_core::ids::ProjectId;
     use cetra_core::schema::{scores, spans, traces};
     use cetra_core::score::{Score, ScoreTarget, ScoreValue};
     use chrono::NaiveDate;
-    use datafusion::execution::memory_pool::GreedyMemoryPool;
-    use datafusion::execution::runtime_env::RuntimeEnvBuilder;
-    use datafusion::physical_plan::displayable;
     use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
     use uuid::Uuid;
 
-    use super::{MergeContext, merge_plan, merge_slice};
-    use crate::catalog::{FileMeta, FileTable};
+    use super::{MergeContext, merge_slice};
+    use crate::catalog::{FileId, FileMeta, FileTable};
+    use crate::column_bridge::{column_to_record_batch, record_batch_to_column};
     use crate::compaction::slice::{Slice, slices, time_values};
     use crate::config::{
         FlushConfig, MemtableConfig, ObjectStoreUrl, QueryConfig, S3Config, StorageConfig,
         WalConfig,
     };
+    use crate::error::CompactionError;
+    use crate::file_format::{BatchFileWriter, write_file_batch};
     use crate::hooks::Hooks;
     use crate::objects::Objects;
-    use crate::parquet::{FileWriter, write_file};
-    use crate::partials::partials_from_spans;
+    use crate::partials::partials_from_spans_batch;
     use crate::test_support::{span_row, span_rows};
+    use crate::verify::may_be_corrupt;
 
     fn project() -> ProjectId {
         "018f6b4e-7c1a-7c1a-8c1a-000000000001".parse().unwrap()
@@ -553,15 +1185,16 @@ mod tests {
         Arc::new(Objects::new(&config, Hooks::default()).await.unwrap())
     }
 
-    /// The merge context of the plan: a 64 MiB greedy pool and the store.
-    fn ctx(objects: &Arc<Objects>, batch_size: usize) -> MergeContext {
-        let runtime = RuntimeEnvBuilder::new()
-            .with_memory_pool(Arc::new(GreedyMemoryPool::new(64 << 20)))
+    fn dummy_df_runtime() -> Arc<datafusion::execution::runtime_env::RuntimeEnv> {
+        datafusion::execution::runtime_env::RuntimeEnvBuilder::new()
             .build_arc()
-            .unwrap();
-        objects.register(&runtime);
+            .unwrap()
+    }
+
+    /// The merge context of the plan: a 64 MiB pool and the store.
+    fn ctx(objects: &Arc<Objects>, batch_size: usize) -> MergeContext {
         MergeContext::new(
-            runtime,
+            dummy_df_runtime(),
             batch_size,
             1,
             cetra_column::GlobalPool::new(64 << 20),
@@ -577,8 +1210,10 @@ mod tests {
         table: FileTable,
         rows: RecordBatch,
     ) -> Arc<FileMeta> {
-        let written = write_file(table, 0, &[Arc::new(rows)]).unwrap();
-        let (path, id) = Objects::table_file_path(table, project(), day(), 0);
+        let col_batch = Arc::new(record_batch_to_column(&rows).unwrap());
+        let written = write_file_batch(table, 0, &[col_batch]).unwrap();
+        let file_day = chrono::DateTime::from_timestamp_nanos(written.min_time).date_naive();
+        let (path, id) = Objects::table_file_path(table, project(), file_day, 0);
         objects
             .put_durable(&path, written.bytes.clone())
             .await
@@ -587,7 +1222,7 @@ mod tests {
             id,
             table,
             project: project(),
-            day: day(),
+            day: file_day,
             level: 0,
             path,
             size: u64::try_from(written.bytes.len()).unwrap_or(u64::MAX),
@@ -611,7 +1246,7 @@ mod tests {
         drop_deleted: bool,
     ) -> (RecordBatch, Vec<RecordBatch>) {
         let sink = tempfile::tempfile().unwrap();
-        let writer = FileWriter::new(table, 1, sink, 0).unwrap();
+        let writer = BatchFileWriter::new(table, 1, sink, 0).unwrap();
         let merged = merge_slice(ctx, table, inputs, slice, drop_deleted, None, writer)
             .await
             .unwrap();
@@ -629,7 +1264,15 @@ mod tests {
             .unwrap()
             .map(|batch| batch.unwrap())
             .collect();
-        (concat_batches(&schema, &batches).unwrap(), merged.partials)
+        let arrow_partials: Vec<RecordBatch> = merged
+            .partials
+            .iter()
+            .map(|p| {
+                column_to_record_batch(p, Some(cetra_core::schema::traces_schema().as_ref()))
+                    .unwrap()
+            })
+            .collect();
+        (concat_batches(&schema, &batches).unwrap(), arrow_partials)
     }
 
     /// `(trace_id, span_id, start_time, ingest_time)` of every row.
@@ -751,7 +1394,7 @@ mod tests {
 
     fn sized(size: u64, rows: u64) -> Arc<FileMeta> {
         Arc::new(FileMeta {
-            id: crate::catalog::FileId(Uuid::now_v7()),
+            id: FileId(Uuid::now_v7()),
             table: FileTable::Spans,
             project: project(),
             day: day(),
@@ -771,12 +1414,6 @@ mod tests {
 
     #[test]
     fn batch_rows_follow_the_pool_share_and_the_row_size() {
-        let pool = |bytes: usize| {
-            RuntimeEnvBuilder::new()
-                .with_memory_pool(Arc::new(GreedyMemoryPool::new(bytes)))
-                .build_arc()
-                .unwrap()
-        };
         let rt = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
@@ -784,7 +1421,7 @@ mod tests {
         let store: Arc<dyn object_store::ObjectStore> =
             Arc::new(object_store::memory::InMemory::new());
         let ctx = MergeContext::new(
-            pool(1 << 30),
+            dummy_df_runtime(),
             8192,
             3,
             cetra_column::GlobalPool::new(1 << 30),
@@ -812,7 +1449,7 @@ mod tests {
         assert_eq!(super::batch_rows(&ctx, &[&empty]), 8192);
         // No finite pool: the configured batch size.
         let unbounded = MergeContext::new(
-            RuntimeEnvBuilder::new().build_arc().unwrap(),
+            dummy_df_runtime(),
             8192,
             3,
             cetra_column::GlobalPool::new(usize::MAX),
@@ -832,16 +1469,12 @@ mod tests {
     async fn a_merge_of_large_rows_fits_the_compaction_pool() {
         let dir = tempfile::tempdir().unwrap();
         let objects = objects(&dir).await;
-        let runtime = RuntimeEnvBuilder::new()
-            .with_memory_pool(Arc::new(GreedyMemoryPool::new(16 << 20)))
-            .build_arc()
-            .unwrap();
-        objects.register(&runtime);
+        let pool = cetra_column::GlobalPool::new(16 << 20);
         let ctx = MergeContext::new(
-            runtime,
+            dummy_df_runtime(),
             8192,
             1,
-            cetra_column::GlobalPool::new(16 << 20),
+            Arc::clone(&pool),
             crate::QeRuntime::for_test(),
             objects.store(),
             Arc::new(crate::verify::VerifyQueue::default()),
@@ -857,6 +1490,55 @@ mod tests {
         let (output, _) = merge_read(&ctx, FileTable::Spans, &inputs, open_slice(), true).await;
 
         assert_eq!(output.num_rows(), 8 * 512, "every span is merged once");
+        assert_eq!(pool.used(), 0, "compaction pool drained cleanly");
+    }
+
+    #[tokio::test]
+    async fn exceeding_compaction_max_memory_fails_with_resources_exhausted() {
+        let dir = tempfile::tempdir().unwrap();
+        let objects = objects(&dir).await;
+        // 1 MiB pool is smaller than 8 active batches of 64 * 8 KiB (~4 MiB).
+        let pool = cetra_column::GlobalPool::new(1 << 20);
+        let ctx = MergeContext::new(
+            dummy_df_runtime(),
+            8192,
+            1,
+            Arc::clone(&pool),
+            crate::QeRuntime::for_test(),
+            objects.store(),
+            Arc::new(crate::verify::VerifyQueue::default()),
+            tokio::runtime::Handle::current(),
+        );
+        let mut inputs = Vec::new();
+        for block in 0..8 {
+            inputs.push(
+                write_input(&objects, FileTable::Spans, big_spans(block, 128, 8 << 10)).await,
+            );
+        }
+
+        let sink = tempfile::tempfile().unwrap();
+        let writer = BatchFileWriter::new(FileTable::Spans, 1, sink, 0).unwrap();
+        let err = match merge_slice(
+            &ctx,
+            FileTable::Spans,
+            &inputs,
+            open_slice(),
+            true,
+            None,
+            writer,
+        )
+        .await
+        {
+            Ok(_) => panic!("expected compaction.max_memory limit error"),
+            Err(err) => err,
+        };
+        assert_eq!(err.read_source(), Some("resources_exhausted"));
+        if let CompactionError::Read { ref source } = err {
+            assert!(!may_be_corrupt(source));
+        } else {
+            panic!("expected CompactionError::Read, got {err:?}");
+        }
+        assert_eq!(pool.used(), 0, "compaction pool rolled back cleanly");
     }
 
     #[tokio::test]
@@ -885,9 +1567,83 @@ mod tests {
         // The partials of all chunks equal the partials of the whole output.
         let combined = concat_batches(&partials[0].schema(), &partials).unwrap();
         let actual = sorted_by_trace(&combined);
-        let expected = sorted_by_trace(&partials_from_spans(&output).unwrap());
+        let out_col = Arc::new(record_batch_to_column(&output).unwrap());
+        let expected_col: Batch = partials_from_spans_batch(&out_col).unwrap();
+        let expected = sorted_by_trace(
+            &column_to_record_batch(
+                &expected_col,
+                Some(cetra_core::schema::traces_schema().as_ref()),
+            )
+            .unwrap(),
+        );
         assert_columns_equal(&actual, &expected);
         assert_eq!(actual.num_rows(), 2, "one partial per trace");
+    }
+
+    #[tokio::test]
+    async fn uuidv7_tie_breaking_preserves_oldest_input_first_order() {
+        let dir = tempfile::tempdir().unwrap();
+        let objects = objects(&dir).await;
+        let ctx = ctx(&objects, 8192);
+
+        // Same (trace_id, span_id, start_time, ingest_time) across two files,
+        // distinguished by `name`. Equal ingest_time keeps the later row in
+        // `(input_index ASC, row_index ASC)` order -> newer UUIDv7 wins even
+        // when inputs are passed in reverse UUIDv7 order.
+        let mut older_span = span_row(0, 1, 1_000, 500);
+        older_span.name = "older-uuidv7".to_owned();
+        let mut newer_span = span_row(0, 1, 1_000, 500);
+        newer_span.name = "newer-uuidv7".to_owned();
+
+        let mut older =
+            (*write_input(&objects, FileTable::Spans, span_rows(&[older_span])).await).clone();
+        let mut newer =
+            (*write_input(&objects, FileTable::Spans, span_rows(&[newer_span])).await).clone();
+        older.id = FileId(Uuid::from_u128(0x018f_0000_0000_7000_8000_0000_0000_0001));
+        newer.id = FileId(Uuid::from_u128(0x018f_0000_0000_7000_8000_0000_0000_0002));
+        let reversed_inputs = vec![Arc::new(newer), Arc::new(older)];
+
+        let (output, _) =
+            merge_read(&ctx, FileTable::Spans, &reversed_inputs, open_slice(), true).await;
+        assert_eq!(output.num_rows(), 1);
+        let names = output
+            .column_by_name(spans::NAME)
+            .unwrap()
+            .as_string::<i32>();
+        assert_eq!(names.value(0), "newer-uuidv7");
+
+        // Also check distinct spans sharing `(trace_id, start_time)` across two files:
+        // rows from the older file (`input_index = 0`) must precede rows from the newer
+        // file (`input_index = 1`) in output order.
+        let f0 = write_input(
+            &objects,
+            FileTable::Spans,
+            span_rows(&[span_row(0, 9, 1_000, 500), span_row(0, 8, 1_000, 500)]),
+        )
+        .await;
+        let f1 = write_input(
+            &objects,
+            FileTable::Spans,
+            span_rows(&[span_row(0, 1, 1_000, 500)]),
+        )
+        .await;
+        let mut f0_meta = (*f0).clone();
+        let mut f1_meta = (*f1).clone();
+        f0_meta.id = FileId(Uuid::from_u128(0x018f_0000_0000_7000_8000_0000_0000_0010));
+        f1_meta.id = FileId(Uuid::from_u128(0x018f_0000_0000_7000_8000_0000_0000_0020));
+        let (tied_out, _) = merge_read(
+            &ctx,
+            FileTable::Spans,
+            &[Arc::new(f1_meta), Arc::new(f0_meta)],
+            open_slice(),
+            true,
+        )
+        .await;
+        let span_ids: Vec<Vec<u8>> = span_tuples(&tied_out).into_iter().map(|t| t.1).collect();
+        // Inside f0, `BatchFileWriter` sorted by `(trace_id, start_time)` preserving span 9 before 8
+        // or stable sort; crucially BOTH spans from f0 (`input_index = 0`) precede span 1 (`input_index = 1`).
+        assert_eq!(span_ids.len(), 3);
+        assert_eq!(span_ids[2], span_bytes(1));
     }
 
     #[tokio::test]
@@ -936,6 +1692,32 @@ mod tests {
                 1
             );
         }
+    }
+
+    #[tokio::test]
+    async fn slice_upper_i64_min_short_circuits_empty() {
+        let dir = tempfile::tempdir().unwrap();
+        let objects = objects(&dir).await;
+        let ctx = ctx(&objects, 8192);
+        let inputs = three_span_inputs(&objects).await;
+        let sink = tempfile::tempfile().unwrap();
+        let writer = BatchFileWriter::new(FileTable::Spans, 1, sink, 0).unwrap();
+        let merged = merge_slice(
+            &ctx,
+            FileTable::Spans,
+            &inputs,
+            Slice {
+                lower: None,
+                upper: Some(i64::MIN),
+            },
+            true,
+            None,
+            writer,
+        )
+        .await
+        .unwrap();
+        assert_eq!(merged.rows, 0);
+        assert!(merged.partials.is_empty());
     }
 
     #[tokio::test]
@@ -1080,63 +1862,5 @@ mod tests {
         let dropped = score_tuples(&dropped);
         assert_eq!(dropped.len(), 1, "{dropped:?}");
         assert_eq!(dropped[0].0, t);
-    }
-
-    #[tokio::test]
-    async fn the_plan_merges_without_sorting() {
-        let dir = tempfile::tempdir().unwrap();
-        let objects = objects(&dir).await;
-        let _ctx = ctx(&objects, 8192);
-        let inputs = three_span_inputs(&objects).await;
-        let ordered: Vec<&Arc<FileMeta>> = inputs.iter().collect();
-        let plan = merge_plan(FileTable::Spans, &ordered, open_slice()).unwrap();
-        let text = displayable(plan.as_ref()).indent(true).to_string();
-        assert!(text.contains("SortPreservingMergeExec"), "{text}");
-        assert!(!text.contains("SortExec"), "{text}");
-    }
-
-    /// Work stealing would let one scan partition read a sibling's file after
-    /// its own, handing the merge an unsorted run. The race is timing
-    /// dependent, so the test checks the scan keeps every file in its own
-    /// partition, for bounded and unbounded slices.
-    #[tokio::test]
-    async fn the_scan_never_moves_a_file_to_another_partition() {
-        use datafusion::datasource::physical_plan::FileScanConfig;
-        use datafusion::datasource::source::DataSourceExec;
-
-        let dir = tempfile::tempdir().unwrap();
-        let objects = objects(&dir).await;
-        let inputs = three_span_inputs(&objects).await;
-        let ordered: Vec<&Arc<FileMeta>> = inputs.iter().collect();
-        let values = time_values(
-            objects.store(),
-            &inputs,
-            crate::parquet::time_column(FileTable::Spans),
-        )
-        .await
-        .unwrap();
-        let bounded = slices(&values, 2)[0];
-        for slice in [open_slice(), bounded] {
-            let plan = merge_plan(FileTable::Spans, &ordered, slice).unwrap();
-            let mut scans = Vec::new();
-            let mut stack = vec![plan];
-            while let Some(node) = stack.pop() {
-                // A GuardExec answers the scan downcast through its delegate; count its scan once.
-                if node.name() == "GuardExec" {
-                    stack.extend(node.children().into_iter().cloned());
-                    continue;
-                }
-                if let Some(scan) = node.downcast_ref::<DataSourceExec>() {
-                    scans.push(
-                        scan.data_source()
-                            .downcast_ref::<FileScanConfig>()
-                            .unwrap()
-                            .preserve_order,
-                    );
-                }
-                stack.extend(node.children().into_iter().cloned());
-            }
-            assert_eq!(scans, vec![true], "{slice:?}");
-        }
     }
 }
