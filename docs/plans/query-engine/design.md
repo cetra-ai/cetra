@@ -1,4 +1,4 @@
-Status: approved (2026-11-25). M1–M3 complete; M4–M5 in progress (M4, M5, M6 plans approved).
+Status: done (2026-11-26). M1–M7 complete: `cetra-column` and `cetra-query` live across the workspace; DataFusion removed completely (`arrow`/`parquet` isolated inside `cetra-storage::file_format` and `engine/parquet_*` until Strata).
 
 # QE · Custom query engine and columnar format — design
 
@@ -330,7 +330,15 @@ None left. Settled with the user: D-QE-11 to D-QE-15 (with D-QE-15's vocabulary 
 
 Milestones run in order. Each gets its own plan written just before it starts, from the code that exists then, and every milestone ends with `just check` green.
 
-### M1 — `cetra-column` data plane and checksummed binary framing
+- [x] **M1** — `cetra-column` data plane and checksummed binary framing
+- [x] **M2** — Vectorized expressions (`expr/`) and Filter DSL parity
+- [x] **M3** — Push-pipeline executor (`exec/`) and `ScanSource`
+- [x] **M4** — Product reads (`reads/`) and performance verification
+- [x] **M5** — Shape B SQL frontend (`sql/`) and exports
+- [x] **M6** — Storage internals, WAL framing and memtable migration
+- [x] **M7** — Atomic workspace cut-over, DataFusion removal, and full verification
+
+### M1 — `cetra-column` data plane and checksummed binary framing *(Done)*
 
 **Delivers:**
 - The `cetra-column` crate (zero `tokio`/Arrow/Parquet/workspace deps): full type system (`Null`, `Bool`, `I64`, `F64`, `Decimal128`, `TimestampNs`, `Date`, `Interval`, `Utf8`, `Binary`, `FixedBytes8`, `FixedBytes16`, `List`, `MapUtf8`, `Events`, `Links`), `Column` (`Flat`, `Const`, `Dict`, `Rle`), `Batch`, `Selection` (`All`, `Mask`, `Indices`), synchronous `MemoryPool` (global cap, query/compaction split, `try_admit`, `FairSpill`), and `CancelToken`.
@@ -341,7 +349,7 @@ Milestones run in order. Each gets its own plan written just before it starts, f
 
 **Leaves out:** expression evaluation, operators, SQL, and any change to `cetra-core` or `cetra-storage` public APIs.
 
-### M2 — Vectorized expressions (`expr/`) and Filter DSL parity
+### M2 — Vectorized expressions (`expr/`) and Filter DSL parity *(Done)*
 
 **Delivers:**
 - The `cetra-query` crate's expression IR, binder, and vectorized batch evaluator over `cetra-column` (preserving `Selection` vectors, reserving every allocation from `MemoryPool`, enforcing division-by-zero / overflow / regex-size / non-finite-cost rules).
@@ -352,7 +360,7 @@ Milestones run in order. Each gets its own plan written just before it starts, f
 
 **Leaves out:** pipeline execution, aggregates, joins, storage scans, and SQL statement planning.
 
-### M3 — Push-pipeline executor (`exec/`) and `ScanSource`
+### M3 — Push-pipeline executor (`exec/`) and `ScanSource` *(Done)*
 
 **Delivers:**
 - The DuckDB-style push-pipeline scheduler on a bounded process-wide CPU worker pool (8 MiB stacks), with cooperative `CancelToken` checks, synchronous worker drain on drop, and `Continue`/`Stop` early termination.
@@ -370,7 +378,7 @@ Milestones run in order. Each gets its own plan written just before it starts, f
 
 **Leaves out:** porting `cetra-storage::reads`, storage maintenance (compaction/deletion/media GC), SQL statement planning, and `cetra-server` SQLite views.
 
-### M4 — Product reads (`reads/`) and performance verification
+### M4 — Product reads (`reads/`) and performance verification *(Done)*
 
 **Delivers:**
 - Every structured read and validation entry point implemented on `cetra-query` + `ScanSource`:
@@ -387,7 +395,7 @@ Milestones run in order. Each gets its own plan written just before it starts, f
 
 **Leaves out:** the SQL console (`POST /sql`), `sql_check`, MCP `query_sql`, storage maintenance, public API cut-over, and deleting DataFusion.
 
-### M5 — Shape B SQL frontend (`sql/`) and exports
+### M5 — Shape B SQL frontend (`sql/`) and exports *(Done)*
 
 **Delivers:**
 - The Shape B SQL frontend in `cetra-query` over `sqlparser` (`GenericDialect`): sandbox validator (preserving all 20 denied functions and 32-table cap), `{name:Type}` parameter binding, binder/typechecker over the 6 views (with time-window and `visible_from` injection), logical plan, rule-based optimizer (constant folding, hex-ID rewrite, projection & map-key pushdown, safety-bounded filter & substring pushdown into `ScanSpec`, `TopK` pushdown), two-column GDPR-redacted `EXPLAIN`, `sql_check`, and push-pipeline compilation.
@@ -399,7 +407,7 @@ Milestones run in order. Each gets its own plan written just before it starts, f
 
 **Leaves out:** storage maintenance migration, switching `cetra-storage::function_catalog()`, removing DataFusion, and removing Arrow from `cetra-core`/`cetra-server`.
 
-### M6 — Storage internals, WAL framing and memtable migration
+### M6 — Storage internals, WAL framing and memtable migration *(Done)*
 
 **Delivers:**
 - Internal migration of all remaining `cetra-storage` subsystems off DataFusion and onto `cetra-column` / `cetra-query` (keeping `cetra-core` and `cetra-storage`'s public Arrow/DataFusion signatures bridged at the crate boundary until M7 so the workspace compiles and passes `just check` cleanly):
@@ -415,7 +423,7 @@ Milestones run in order. Each gets its own plan written just before it starts, f
 
 **Leaves out:** breaking public API changes in `cetra-core`/`cetra-storage`, migrating `cetra-otel`/`cetra-server`/`cetra-cli`/`web/`, deleting DataFusion from `Cargo.toml`, and final docs/spec cut-over.
 
-### M7 — Atomic workspace cut-over, DataFusion removal, and full verification
+### M7 — Atomic workspace cut-over, DataFusion removal, and full verification *(Done)*
 
 **Delivers:**
 - Atomic switch of all cross-crate contracts off Arrow and DataFusion (removing the temporary M1–M6 Arrow bridge):

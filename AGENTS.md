@@ -8,7 +8,7 @@ Instructions for any agent (Claude, Cursor, Codex, …) working in this reposito
 
 What sets it apart is that it runs as **one binary on one machine**, while staying fast at volume:
 - OTLP ingestion;
-- a custom storage engine (WAL → memtable → Parquet files, queried with Apache DataFusion);
+- a custom columnar format (`cetra-column`), storage engine (WAL → memtable → Parquet files), and pure-Rust analytical query engine (`cetra-query`);
 - a SQLite metadata DB;
 - a React UI embedded in the binary;
 - Python and TypeScript SDKs built on OpenTelemetry.
@@ -44,7 +44,7 @@ If the code has to deviate from the spec, update the spec **in the same change**
 
 **Dependencies.**
 - Every version is declared once in the root `Cargo.toml` `[workspace.dependencies]`; crates use `dep = { workspace = true }`.
-- `datafusion`, `arrow`, `parquet` and `object_store` are a pinned family: never bump one without the others. DataFusion picks the majors. Dependabot ignores arrow-side majors; a DataFusion major PR is completed by hand with the arrow, parquet and object_store versions that release requires. `cargo deny` fails on two versions of a family crate.
+- `arrow`, `parquet` and `object_store` are a pinned family (used inside `cetra-storage`; `sqlparser` is pinned independently for `cetra-query`): never bump one family crate without the others. Dependabot moves the `arrow-parquet-family` group together. `cargo deny` fails on two versions of a family crate.
 - Look up real versions (`cargo search`, `cargo info`); never guess one.
 - JS packages use exact versions and respect `minimumReleaseAge`; Python dev tools are pinned by `uv.lock`.
 - `typescript` stays on 5.x while `openapi-typescript` requires it (`.github/dependabot.yml` ignores TypeScript majors).
@@ -103,17 +103,18 @@ If the code has to deviate from the spec, update the spec **in the same change**
 
 ```
 crates/
-  column/    cetra-column   pure-Rust columnar in-memory batches, encodings, memory pool, and binary framing (track QE)
+  column/    cetra-column   pure-Rust columnar in-memory batches, encodings, memory pool,
+                             and binary framing                                       (track QE)
   core/      cetra-core     shared contracts: IDs, enums, names, messages, Span/Score,
-                             Arrow schemas + batch conversion, OpenAPI schemas,
+                             cetra-column schemas + batch conversion, OpenAPI schemas,
                              no config (D59)                                          (spec 01)
   otel/      cetra-otel     OTLP decode, normalization, media, truncation, cost      (spec 02)
   eval/      cetra-eval     evaluator execution: checks, mapping, templates, judges,
                              webhooks, judge traces                                   (spec 06)
   query/     cetra-query    pure-Rust vectorized expressions, Filter DSL, Shape B SQL
-                             planner, and push-pipeline executor                      (track QE)
+                             planner, and push-pipeline executor                      (specs 03, 05)
   storage/   cetra-storage  WAL, memtable, Parquet, catalog (catalog.db), compaction,
-                             deletion, DataFusion providers, filter DSL, SQL sandbox  (specs 03, 05)
+                             deletion, ScanSource adapters, product reads, SQL execution (specs 03, 05)
   token/     cetra-token    signed licence, org and control-plane tokens (Elastic-2.0, D-P-26)
   saml/      cetra-saml     SAML 2.0 SP: IdP metadata, AuthnRequest, response validation (Elastic-2.0, D-SA-14)
   server/    cetra-server   API, auth, metadata DB, evaluation, alerts, email, MCP   (specs 04, 06–09)
@@ -142,13 +143,13 @@ docs/                        decisions, specs, plans, research
 
 **Crate dependency graph (enforced):**
 - `column` depends on no workspace crate.
-- `core` depends on no workspace crate.
+- `core` depends only on `column`.
 - `query` depends only on `column`.
-- `otel` depends only on `core`; `storage` depends on `core` and `column`. **They never depend on each other**, so they can be built in parallel; `server` connects them.
+- `otel` depends only on `core`; `storage` depends on `core`, `column` and `query`. **They never depend on each other**, so they can be built in parallel; `server` connects them.
 - `eval` depends on `core` and `otel`.
 - `token` depends on no workspace crate. `server` and `tools/license` use it, and so does the control plane (by git commit).
 - `saml` depends on no workspace crate. `server` uses it from track SA's M2, and so does the control plane (by git commit).
-- `server` depends on `core`, `otel`, `storage`, `eval` and `token`; `cli` depends on `server`, `core` and `ui`.
+- `server` depends on `core`, `column`, `otel`, `storage`, `eval`, `token` and `saml`; `cli` depends on `server`, `core` and `ui`.
 - `ui` depends on no workspace crate.
 - A `tools/` crate is never a dependency of a shipped crate. It may be a dev-dependency, for tests only: `cetra-cli`'s end-to-end test uses `cetra-capture`'s mock provider (D-I-43).
 
