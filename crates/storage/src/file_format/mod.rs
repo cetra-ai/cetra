@@ -6,7 +6,7 @@
 
 use std::io::Write;
 use std::ops::Range;
-use std::panic::{AssertUnwindSafe, catch_unwind};
+use std::panic::AssertUnwindSafe;
 use std::sync::Arc;
 
 use arrow::datatypes::SchemaRef;
@@ -23,9 +23,11 @@ use object_store::{ObjectStore, ObjectStoreExt};
 use parquet::DecodeResult;
 use parquet::arrow::ArrowSchemaConverter;
 use parquet::arrow::arrow_writer::ArrowWriter;
-use parquet::basic::{Compression, ConvertedType, LogicalType, Type as PhysicalType, ZstdLevel};
+use parquet::basic::{
+    Compression, ConvertedType, LogicalType, TimeUnit, Type as PhysicalType, ZstdLevel,
+};
 use parquet::column::reader::{ColumnReader, ColumnReaderImpl, get_column_reader};
-use parquet::data_type::ByteArrayType;
+use parquet::data_type::{ByteArrayType, FixedLenByteArrayType, Int64Type};
 use parquet::errors::ParquetError;
 use parquet::file::metadata::{
     KeyValue, PageIndexPolicy, ParquetMetaData, ParquetMetaDataPushDecoder, RowGroupMetaData,
@@ -73,6 +75,8 @@ const BLOOM_FPP: f64 = 0.01;
 const MAX_METADATA_DECODE_ROUNDS: usize = 8;
 const VERIFY_COALESCE_BYTES: u64 = 16 * 1024 * 1024;
 const VERIFY_READ_BATCH: usize = 4_096;
+const READ_BATCH_ROWS: usize = 8_192;
+const MAX_ROWS_PER_FILE_BYTE: u64 = 8_192;
 
 #[derive(Debug, Clone, Copy)]
 struct Bounds {
@@ -623,6 +627,14 @@ async fn fetch_ranges_guarded(
     path: &ObjectPath,
     ranges: &[Range<u64>],
 ) -> Result<Vec<Bytes>, ParquetError> {
+    if ranges.is_empty() {
+        return Ok(Vec::new());
+    }
+    if ranges.iter().any(|r| r.start >= r.end) {
+        return Err(ParquetError::General(
+            "empty or inverted byte range".to_owned(),
+        ));
+    }
     let fut = store.get_ranges(path, ranges);
     let caught = AssertUnwindSafe(fut).catch_unwind().await;
     match caught {
@@ -687,7 +699,7 @@ async fn load_metadata(
             }
             DecodeResult::NeedsData(ranges) => {
                 for r in &ranges {
-                    if r.start > r.end || r.end > file_size {
+                    if r.start >= r.end || r.end > file_size {
                         return Err(ParquetError::General(
                             "metadata range out of bounds".to_owned(),
                         ));
@@ -757,17 +769,23 @@ pub(crate) async fn verify_parquet_file(store: &Arc<dyn ObjectStore>, file: &Fil
     let mut total_rows = 0_u64;
     for rg_idx in 0..metadata.num_row_groups() {
         let rg = metadata.row_group(rg_idx);
-        let Ok(rg_rows_u64) = u64::try_from(rg.num_rows()) else {
+        let Ok(rg_rows) = checked_rg_num_rows(rg, file.size) else {
             return Verdict::Corrupt {
                 reason: "decode failed",
             };
         };
-        let Ok(rg_rows) = usize::try_from(rg.num_rows()) else {
+        let rg_rows_u64 = rg_rows as u64;
+        let Some(next_total) = total_rows.checked_add(rg_rows_u64) else {
             return Verdict::Corrupt {
-                reason: "decode failed",
+                reason: "row count differs from the catalog",
             };
         };
-        total_rows = total_rows.saturating_add(rg_rows_u64);
+        if next_total > file.rows {
+            return Verdict::Corrupt {
+                reason: "row count differs from the catalog",
+            };
+        }
+        total_rows = next_total;
 
         let num_cols = rg.num_columns();
         if num_cols != descr.num_columns() {
@@ -779,18 +797,19 @@ pub(crate) async fn verify_parquet_file(store: &Arc<dyn ObjectStore>, file: &Fil
         // Fetch column chunks in coalesced groups bounded by `VERIFY_COALESCE_BYTES`.
         let mut leaf_ranges: Vec<(usize, Range<u64>)> = Vec::with_capacity(num_cols);
         for leaf_idx in 0..num_cols {
-            let (chunk_start, chunk_len) = rg.column(leaf_idx).byte_range();
-            let Some(chunk_end) = chunk_start.checked_add(chunk_len) else {
-                return Verdict::Corrupt {
-                    reason: "decode failed",
-                };
+            let range = match checked_column_byte_range(rg, leaf_idx, file.size) {
+                Ok(range) => range,
+                Err(ref error) => return failed(error),
             };
-            if chunk_end > file.size {
+            if range.is_empty() {
+                if rg_rows == 0 {
+                    continue;
+                }
                 return Verdict::Corrupt {
                     reason: "decode failed",
                 };
             }
-            leaf_ranges.push((leaf_idx, chunk_start..chunk_end));
+            leaf_ranges.push((leaf_idx, range));
         }
 
         let mut cursor = 0usize;
@@ -844,6 +863,61 @@ pub(crate) async fn verify_parquet_file(store: &Arc<dyn ObjectStore>, file: &Fil
     Verdict::Healthy
 }
 
+fn checked_rg_num_rows(rg: &RowGroupMetaData, file_size: u64) -> Result<usize, ParquetError> {
+    let n = rg.num_rows();
+    if n < 0 || n > i64::from(u32::MAX) {
+        return Err(ParquetError::General(
+            "row group row count out of range".to_owned(),
+        ));
+    }
+    let n_u64 = n as u64;
+    if n_u64 > file_size.saturating_mul(MAX_ROWS_PER_FILE_BYTE) {
+        return Err(ParquetError::General(
+            "row group row count exceeds expansion bound".to_owned(),
+        ));
+    }
+    usize::try_from(n_u64)
+        .map_err(|_| ParquetError::General("row group row count out of range".to_owned()))
+}
+
+fn checked_column_byte_range(
+    rg: &RowGroupMetaData,
+    leaf_idx: usize,
+    file_size: u64,
+) -> Result<Range<u64>, ParquetError> {
+    if leaf_idx >= rg.num_columns() {
+        return Err(ParquetError::General("row group missing column".to_owned()));
+    }
+    let col = rg.column(leaf_idx);
+    if col.data_page_offset() < 0
+        || col.dictionary_page_offset().is_some_and(|off| off < 0)
+        || col.compressed_size() < 0
+    {
+        return Err(ParquetError::General(
+            "negative column chunk byte range".to_owned(),
+        ));
+    }
+    let (chunk_start, chunk_len) = guard_sync(|| Ok(col.byte_range()))?;
+    let chunk_end = chunk_start
+        .checked_add(chunk_len)
+        .ok_or_else(|| ParquetError::General("column chunk byte range overflow".to_owned()))?;
+    if chunk_end > file_size {
+        return Err(ParquetError::General(
+            "column chunk extends past file end".to_owned(),
+        ));
+    }
+    Ok(chunk_start..chunk_end)
+}
+
+fn is_timestamp_nanos(col: &ColumnDescPtr) -> bool {
+    col.max_rep_level() == 0
+        && col.physical_type() == PhysicalType::INT64
+        && matches!(
+            col.logical_type_ref(),
+            Some(LogicalType::Timestamp(ts)) if ts.unit == TimeUnit::NANOS
+        )
+}
+
 fn drain_any_column(
     descr: &ColumnDescPtr,
     page_reader: SerializedPageReader<SliceChunkReader>,
@@ -852,29 +926,19 @@ fn drain_any_column(
     let check_utf8 = matches!(descr.logical_type_ref(), Some(LogicalType::String))
         || descr.converted_type() == ConvertedType::UTF8;
     match get_column_reader(descr.clone(), Box::new(page_reader)) {
-        ColumnReader::BoolColumnReader(mut r) => {
-            drain_column_reader(&mut r, descr, expected_rows, false)
-        }
-        ColumnReader::Int32ColumnReader(mut r) => {
-            drain_column_reader(&mut r, descr, expected_rows, false)
-        }
-        ColumnReader::Int64ColumnReader(mut r) => {
-            drain_column_reader(&mut r, descr, expected_rows, false)
-        }
-        ColumnReader::Int96ColumnReader(mut r) => {
-            drain_column_reader(&mut r, descr, expected_rows, false)
-        }
-        ColumnReader::FloatColumnReader(mut r) => {
-            drain_column_reader(&mut r, descr, expected_rows, false)
-        }
+        ColumnReader::BoolColumnReader(mut r) => drain_column_reader(&mut r, descr, expected_rows),
+        ColumnReader::Int32ColumnReader(mut r) => drain_column_reader(&mut r, descr, expected_rows),
+        ColumnReader::Int64ColumnReader(mut r) => drain_column_reader(&mut r, descr, expected_rows),
+        ColumnReader::Int96ColumnReader(mut r) => drain_column_reader(&mut r, descr, expected_rows),
+        ColumnReader::FloatColumnReader(mut r) => drain_column_reader(&mut r, descr, expected_rows),
         ColumnReader::DoubleColumnReader(mut r) => {
-            drain_column_reader(&mut r, descr, expected_rows, false)
+            drain_column_reader(&mut r, descr, expected_rows)
         }
         ColumnReader::ByteArrayColumnReader(mut r) => {
             drain_byte_array_reader(&mut r, descr, expected_rows, check_utf8)
         }
         ColumnReader::FixedLenByteArrayColumnReader(mut r) => {
-            drain_column_reader(&mut r, descr, expected_rows, false)
+            drain_column_reader(&mut r, descr, expected_rows)
         }
     }
 }
@@ -883,7 +947,6 @@ fn drain_column_reader<T: parquet::data_type::DataType>(
     reader: &mut ColumnReaderImpl<T>,
     descr: &ColumnDescPtr,
     expected_rows: usize,
-    _check_utf8: bool,
 ) -> Result<(), ParquetError> {
     let max_def = descr.max_def_level();
     let max_rep = descr.max_rep_level();
@@ -912,13 +975,13 @@ fn drain_column_reader<T: parquet::data_type::DataType>(
     def_levels.clear();
     rep_levels.clear();
     values.clear();
-    let (extra, _, _) = reader.read_records(
+    let (extra, extra_vals, extra_levels) = reader.read_records(
         1,
         (max_def > 0).then_some(&mut def_levels),
         (max_rep > 0).then_some(&mut rep_levels),
         &mut values,
     )?;
-    if extra != 0 {
+    if extra != 0 || extra_vals != 0 || extra_levels != 0 {
         return Err(ParquetError::General(
             "extra records beyond row group count".to_owned(),
         ));
@@ -966,13 +1029,13 @@ fn drain_byte_array_reader(
     def_levels.clear();
     rep_levels.clear();
     values.clear();
-    let (extra, _, _) = reader.read_records(
+    let (extra, extra_vals, extra_levels) = reader.read_records(
         1,
         (max_def > 0).then_some(&mut def_levels),
         (max_rep > 0).then_some(&mut rep_levels),
         &mut values,
     )?;
-    if extra != 0 {
+    if extra != 0 || extra_vals != 0 || extra_levels != 0 {
         return Err(ParquetError::General(
             "extra records beyond row group count".to_owned(),
         ));
@@ -1002,11 +1065,11 @@ pub(crate) async fn read_time_column(
         .map_err(compaction_parquet_error)?;
 
         let descr = meta.file_metadata().schema_descr_ptr();
-        let Some(leaf_idx) = descr.columns().iter().position(|col| {
-            col.path().parts() == [column]
-                && col.max_rep_level() == 0
-                && col.physical_type() == PhysicalType::INT64
-        }) else {
+        let Some(leaf_idx) = descr
+            .columns()
+            .iter()
+            .position(|col| col.path().parts() == [column] && is_timestamp_nanos(col))
+        else {
             return Err(CompactionError::Input {
                 reason: "missing time column",
             });
@@ -1015,34 +1078,25 @@ pub(crate) async fn read_time_column(
 
         for rg_idx in 0..meta.num_row_groups() {
             let rg = meta.row_group(rg_idx);
-            let rg_rows = usize::try_from(rg.num_rows()).map_err(|_| {
-                compaction_parquet_error(ParquetError::General(
-                    "negative row group size".to_owned(),
-                ))
-            })?;
-            let (chunk_start, chunk_len) = rg.column(leaf_idx).byte_range();
-            let chunk_end = chunk_start.checked_add(chunk_len).ok_or_else(|| {
-                compaction_parquet_error(ParquetError::General(
-                    "column chunk byte range overflow".to_owned(),
-                ))
-            })?;
-            if chunk_end > file.size {
+            let rg_rows = checked_rg_num_rows(rg, file.size).map_err(compaction_parquet_error)?;
+            let range = checked_column_byte_range(rg, leaf_idx, file.size)
+                .map_err(compaction_parquet_error)?;
+            if range.is_empty() {
+                if rg_rows == 0 {
+                    continue;
+                }
                 return Err(compaction_parquet_error(ParquetError::General(
-                    "column chunk extends past file end".to_owned(),
+                    "empty column chunk".to_owned(),
                 )));
             }
-            let bufs = fetch_ranges_guarded(
-                store,
-                &path,
-                std::slice::from_ref(&(chunk_start..chunk_end)),
-            )
-            .await
-            .map_err(compaction_parquet_error)?;
+            let bufs = fetch_ranges_guarded(store, &path, std::slice::from_ref(&range))
+                .await
+                .map_err(compaction_parquet_error)?;
             let [bytes]: [Bytes; 1] = bufs.try_into().map_err(|_| {
                 compaction_parquet_error(ParquetError::General("unexpected range count".to_owned()))
             })?;
             let chunk_reader =
-                Arc::new(SliceChunkReader::from_single(chunk_start, bytes, file.size));
+                Arc::new(SliceChunkReader::from_single(range.start, bytes, file.size));
             let col_chunk = rg.column(leaf_idx);
             let max_def = col_descr.max_def_level();
 
@@ -1065,25 +1119,51 @@ pub(crate) async fn read_time_column(
                         "expected Int64 column reader".to_owned(),
                     ));
                 };
-                let mut def_levels = Vec::new();
-                let mut vals = Vec::with_capacity(rg_rows);
-                let (read, _, _) = reader.read_records(
-                    rg_rows,
-                    (max_def > 0).then_some(&mut def_levels),
-                    None,
-                    &mut vals,
-                )?;
-                if read != rg_rows {
+                let initial_cap = rg_rows.min(READ_BATCH_ROWS);
+                let mut def_levels = Vec::with_capacity(if max_def > 0 { initial_cap } else { 0 });
+                let mut chunk_vals = Vec::with_capacity(initial_cap);
+                let mut rg_vals = Vec::with_capacity(initial_cap);
+                let mut total_read = 0usize;
+                while total_read < rg_rows {
+                    def_levels.clear();
+                    chunk_vals.clear();
+                    let need = (rg_rows - total_read).min(READ_BATCH_ROWS);
+                    let (records_read, values_read, levels_read) = reader.read_records(
+                        need,
+                        (max_def > 0).then_some(&mut def_levels),
+                        None,
+                        &mut chunk_vals,
+                    )?;
+                    if records_read == 0 {
+                        return Err(ParquetError::General(
+                            "unexpected EOF reading time column".to_owned(),
+                        ));
+                    }
+                    if max_def > 0 {
+                        if levels_read != records_read || def_levels.len() != records_read {
+                            return Err(ParquetError::General(
+                                "def level count mismatch".to_owned(),
+                            ));
+                        }
+                        if def_levels.iter().any(|&d| d < max_def) {
+                            return Ok(RgTimeOutcome::NullTime);
+                        }
+                    }
+                    if values_read != records_read || chunk_vals.len() != records_read {
+                        return Err(ParquetError::General(
+                            "time column value count mismatch".to_owned(),
+                        ));
+                    }
+                    rg_vals.extend_from_slice(&chunk_vals);
+                    total_read += records_read;
+                }
+                assert_no_trailing_records(&mut reader, max_def)?;
+                if rg_vals.len() != rg_rows {
                     return Err(ParquetError::General(
-                        "unexpected EOF reading time column".to_owned(),
+                        "time column value count mismatch".to_owned(),
                     ));
                 }
-                if max_def > 0
-                    && (def_levels.len() != rg_rows || def_levels.iter().any(|&d| d < max_def))
-                {
-                    return Ok(RgTimeOutcome::NullTime);
-                }
-                Ok(RgTimeOutcome::Ok(vals))
+                Ok(RgTimeOutcome::Ok(rg_vals))
             })
             .map_err(compaction_parquet_error)?;
 
@@ -1128,25 +1208,27 @@ pub(crate) async fn read_trace_anchors(
     .map_err(AnchorError::parquet)?;
 
     let descr = meta.file_metadata().schema_descr_ptr();
-    let find_leaf = |name: &'static str, expected: PhysicalType| -> Result<usize, AnchorError> {
+    let trace_leaf = descr
+        .columns()
+        .iter()
+        .position(|col| {
+            col.path().parts() == [traces::TRACE_ID]
+                && col.max_rep_level() == 0
+                && col.physical_type() == PhysicalType::FIXED_LEN_BYTE_ARRAY
+                && col.type_length() == 16
+        })
+        .ok_or_else(|| AnchorError::column(traces::TRACE_ID))?;
+    let find_ts_leaf = |name: &'static str| -> Result<usize, AnchorError> {
         descr
             .columns()
             .iter()
-            .position(|col| {
-                col.path().parts() == [name]
-                    && col.max_rep_level() == 0
-                    && col.physical_type() == expected
-            })
+            .position(|col| col.path().parts() == [name] && is_timestamp_nanos(col))
             .ok_or_else(|| AnchorError::column(name))
     };
 
-    let trace_leaf = find_leaf(traces::TRACE_ID, PhysicalType::FIXED_LEN_BYTE_ARRAY)?;
-    if descr.column(trace_leaf).type_length() != 16 {
-        return Err(AnchorError::column(traces::TRACE_ID));
-    }
-    let start_leaf = find_leaf(traces::START_TIME, PhysicalType::INT64)?;
-    let end_leaf = find_leaf(traces::END_TIME, PhysicalType::INT64)?;
-    let ingest_leaf = find_leaf(traces::LAST_INGEST_TIME, PhysicalType::INT64)?;
+    let start_leaf = find_ts_leaf(traces::START_TIME)?;
+    let end_leaf = find_ts_leaf(traces::END_TIME)?;
+    let ingest_leaf = find_ts_leaf(traces::LAST_INGEST_TIME)?;
 
     let groups = row_groups_to_read(&meta, since);
     if groups.is_empty() {
@@ -1161,29 +1243,29 @@ pub(crate) async fn read_trace_anchors(
     ])
     .map_err(AnchorError::from_column)?;
 
-    let mut batches = Vec::with_capacity(groups.len());
+    let mut batches = Vec::with_capacity(groups.len().min(READ_BATCH_ROWS));
     for rg_idx in groups {
         let rg = meta.row_group(rg_idx);
-        let rg_rows = usize::try_from(rg.num_rows()).map_err(|_| {
-            AnchorError::parquet(ParquetError::General("negative row count".to_owned()))
-        })?;
+        let rg_rows = checked_rg_num_rows(rg, file.size).map_err(AnchorError::parquet)?;
         let leaves = [trace_leaf, start_leaf, end_leaf, ingest_leaf];
         let mut ranges = Vec::with_capacity(leaves.len());
         for &leaf_idx in &leaves {
-            let (chunk_start, chunk_len) = rg.column(leaf_idx).byte_range();
-            let chunk_end = chunk_start.checked_add(chunk_len).ok_or_else(|| {
-                AnchorError::parquet(ParquetError::General(
-                    "column chunk byte range overflow".to_owned(),
-                ))
-            })?;
-            if chunk_end > file.size {
+            let range =
+                checked_column_byte_range(rg, leaf_idx, file.size).map_err(AnchorError::parquet)?;
+            if range.is_empty() {
+                if rg_rows == 0 {
+                    continue;
+                }
                 return Err(AnchorError::parquet(ParquetError::General(
-                    "column chunk extends past file end".to_owned(),
+                    "empty column chunk".to_owned(),
                 )));
             }
-            ranges.push(chunk_start..chunk_end);
+            ranges.push(range);
         }
-        let mut sorted_ranges = ranges.clone();
+        if rg_rows == 0 {
+            continue;
+        }
+        let mut sorted_ranges = ranges;
         sorted_ranges.sort_by_key(|r| r.start);
         let coalesced = coalesce_ranges(sorted_ranges);
         let bufs = fetch_ranges_guarded(store, &path, &coalesced)
@@ -1191,44 +1273,62 @@ pub(crate) async fn read_trace_anchors(
             .map_err(AnchorError::parquet)?;
         let chunk_reader = Arc::new(SliceChunkReader::from_ranges(file.size, &coalesced, bufs));
 
-        let batch = guard_sync(|| {
-            let trace_col = decode_fixed16_col(
+        let mut rg_batches = guard_sync(|| {
+            let trace_descr = descr.column(trace_leaf);
+            let start_descr = descr.column(start_leaf);
+            let end_descr = descr.column(end_leaf);
+            let ingest_descr = descr.column(ingest_leaf);
+
+            let mut trace_reader = open_fixed16_reader(
                 rg,
                 trace_leaf,
-                &descr.column(trace_leaf),
+                &trace_descr,
                 rg_rows,
                 Arc::clone(&chunk_reader),
             )?;
-            let start_col = decode_ts_col(
+            let mut start_reader = open_ts_reader(
                 rg,
                 start_leaf,
-                &descr.column(start_leaf),
+                &start_descr,
                 rg_rows,
                 Arc::clone(&chunk_reader),
             )?;
-            let end_col = decode_ts_col(
-                rg,
-                end_leaf,
-                &descr.column(end_leaf),
-                rg_rows,
-                Arc::clone(&chunk_reader),
-            )?;
-            let ingest_col = decode_ts_col(
-                rg,
-                ingest_leaf,
-                &descr.column(ingest_leaf),
-                rg_rows,
-                chunk_reader,
-            )?;
-            Batch::try_new_all(
-                Arc::clone(&anchor_schema),
-                vec![trace_col, start_col, end_col, ingest_col],
-                rg_rows,
-            )
-            .map_err(|err| ParquetError::General(err.to_string()))
+            let mut end_reader =
+                open_ts_reader(rg, end_leaf, &end_descr, rg_rows, Arc::clone(&chunk_reader))?;
+            let mut ingest_reader =
+                open_ts_reader(rg, ingest_leaf, &ingest_descr, rg_rows, chunk_reader)?;
+
+            let trace_max_def = trace_descr.max_def_level();
+            let start_max_def = start_descr.max_def_level();
+            let end_max_def = end_descr.max_def_level();
+            let ingest_max_def = ingest_descr.max_def_level();
+
+            let chunk_count = rg_rows.div_ceil(READ_BATCH_ROWS);
+            let mut out_batches = Vec::with_capacity(chunk_count.min(READ_BATCH_ROWS));
+            let mut remaining = rg_rows;
+            while remaining > 0 {
+                let chunk_rows = remaining.min(READ_BATCH_ROWS);
+                let trace_col = decode_fixed16_chunk(&mut trace_reader, trace_max_def, chunk_rows)?;
+                let start_col = decode_ts_chunk(&mut start_reader, start_max_def, chunk_rows)?;
+                let end_col = decode_ts_chunk(&mut end_reader, end_max_def, chunk_rows)?;
+                let ingest_col = decode_ts_chunk(&mut ingest_reader, ingest_max_def, chunk_rows)?;
+                let batch = Batch::try_new_all(
+                    Arc::clone(&anchor_schema),
+                    vec![trace_col, start_col, end_col, ingest_col],
+                    chunk_rows,
+                )
+                .map_err(|err| ParquetError::General(err.to_string()))?;
+                out_batches.push(batch);
+                remaining -= chunk_rows;
+            }
+            assert_no_trailing_records(&mut trace_reader, trace_max_def)?;
+            assert_no_trailing_records(&mut start_reader, start_max_def)?;
+            assert_no_trailing_records(&mut end_reader, end_max_def)?;
+            assert_no_trailing_records(&mut ingest_reader, ingest_max_def)?;
+            Ok(out_batches)
         })
         .map_err(AnchorError::parquet)?;
-        batches.push(batch);
+        batches.append(&mut rg_batches);
     }
     Ok(batches)
 }
@@ -1250,13 +1350,13 @@ fn coalesce_ranges(ranges: Vec<Range<u64>>) -> Vec<Range<u64>> {
     merged
 }
 
-fn decode_fixed16_col(
+fn open_fixed16_reader(
     rg: &RowGroupMetaData,
     leaf_idx: usize,
     descr: &ColumnDescPtr,
     rg_rows: usize,
     chunk_reader: Arc<SliceChunkReader>,
-) -> Result<Column, ParquetError> {
+) -> Result<ColumnReaderImpl<FixedLenByteArrayType>, ParquetError> {
     let page_reader = SerializedPageReader::new_with_properties(
         chunk_reader,
         rg.column(leaf_idx),
@@ -1264,80 +1364,23 @@ fn decode_fixed16_col(
         None,
         Arc::new(ReaderProperties::builder().build()),
     )?;
-    let ColumnReader::FixedLenByteArrayColumnReader(mut reader) =
+    let ColumnReader::FixedLenByteArrayColumnReader(reader) =
         get_column_reader(descr.clone(), Box::new(page_reader))
     else {
         return Err(ParquetError::General(
             "expected FixedLenByteArray column reader".to_owned(),
         ));
     };
-    let max_def = descr.max_def_level();
-    let mut def_levels = Vec::new();
-    let mut dense = Vec::new();
-    let (read, _, _) = reader.read_records(
-        rg_rows,
-        (max_def > 0).then_some(&mut def_levels),
-        None,
-        &mut dense,
-    )?;
-    if read != rg_rows {
-        return Err(ParquetError::General(
-            "unexpected EOF reading fixed16 column".to_owned(),
-        ));
-    }
-    let (out, nulls) = if max_def == 0 {
-        if dense.len() != rg_rows {
-            return Err(ParquetError::General("fixed16 count mismatch".to_owned()));
-        }
-        let mut out = Vec::with_capacity(rg_rows);
-        for item in &dense {
-            let arr: [u8; 16] = item
-                .data()
-                .try_into()
-                .map_err(|_| ParquetError::General("expected 16-byte trace_id".to_owned()))?;
-            out.push(arr);
-        }
-        (out, None)
-    } else {
-        if def_levels.len() != rg_rows {
-            return Err(ParquetError::General("def level count mismatch".to_owned()));
-        }
-        let mut out = Vec::with_capacity(rg_rows);
-        let mut nulls = Bitmap::new_ones(rg_rows);
-        let mut idx = 0usize;
-        for (row, &d) in def_levels.iter().enumerate() {
-            if d == max_def {
-                let item = dense
-                    .get(idx)
-                    .ok_or_else(|| ParquetError::General("missing non-null fixed16".to_owned()))?;
-                idx += 1;
-                let arr: [u8; 16] = item
-                    .data()
-                    .try_into()
-                    .map_err(|_| ParquetError::General("expected 16-byte trace_id".to_owned()))?;
-                out.push(arr);
-            } else {
-                let _ = nulls.set(row, false);
-                out.push([0u8; 16]);
-            }
-        }
-        if idx != dense.len() {
-            return Err(ParquetError::General("trailing fixed16 values".to_owned()));
-        }
-        (out, (!nulls.all_ones()).then_some(nulls))
-    };
-    FlatColumn::try_new(FlatData::FixedBytes16(out), nulls)
-        .map(Column::Flat)
-        .map_err(|err| ParquetError::General(err.to_string()))
+    Ok(reader)
 }
 
-fn decode_ts_col(
+fn open_ts_reader(
     rg: &RowGroupMetaData,
     leaf_idx: usize,
     descr: &ColumnDescPtr,
     rg_rows: usize,
     chunk_reader: Arc<SliceChunkReader>,
-) -> Result<Column, ParquetError> {
+) -> Result<ColumnReaderImpl<Int64Type>, ParquetError> {
     let page_reader = SerializedPageReader::new_with_properties(
         chunk_reader,
         rg.column(leaf_idx),
@@ -1345,58 +1388,37 @@ fn decode_ts_col(
         None,
         Arc::new(ReaderProperties::builder().build()),
     )?;
-    let ColumnReader::Int64ColumnReader(mut reader) =
+    let ColumnReader::Int64ColumnReader(reader) =
         get_column_reader(descr.clone(), Box::new(page_reader))
     else {
         return Err(ParquetError::General(
             "expected Int64 column reader".to_owned(),
         ));
     };
-    let max_def = descr.max_def_level();
-    let mut def_levels = Vec::new();
-    let mut dense = Vec::new();
-    let (read, _, _) = reader.read_records(
-        rg_rows,
-        (max_def > 0).then_some(&mut def_levels),
-        None,
-        &mut dense,
-    )?;
-    if read != rg_rows {
-        return Err(ParquetError::General(
-            "unexpected EOF reading timestamp column".to_owned(),
-        ));
-    }
-    let (out, nulls) = if max_def == 0 {
-        if dense.len() != rg_rows {
-            return Err(ParquetError::General("timestamp count mismatch".to_owned()));
-        }
-        (dense, None)
-    } else {
-        if def_levels.len() != rg_rows {
-            return Err(ParquetError::General("def level count mismatch".to_owned()));
-        }
-        let mut out = Vec::with_capacity(rg_rows);
-        let mut nulls = Bitmap::new_ones(rg_rows);
-        let mut idx = 0usize;
-        for (row, &d) in def_levels.iter().enumerate() {
-            if d == max_def {
-                let v = *dense.get(idx).ok_or_else(|| {
-                    ParquetError::General("missing non-null timestamp".to_owned())
-                })?;
-                idx += 1;
-                out.push(v);
-            } else {
-                let _ = nulls.set(row, false);
-                out.push(0);
-            }
-        }
-        if idx != dense.len() {
-            return Err(ParquetError::General(
-                "trailing timestamp values".to_owned(),
-            ));
-        }
-        (out, (!nulls.all_ones()).then_some(nulls))
-    };
+    Ok(reader)
+}
+
+fn decode_fixed16_chunk(
+    reader: &mut ColumnReaderImpl<FixedLenByteArrayType>,
+    max_def: i16,
+    chunk_rows: usize,
+) -> Result<Column, ParquetError> {
+    let (out, nulls) = decode_records_chunk(reader, max_def, chunk_rows, [0u8; 16], |item| {
+        item.data()
+            .try_into()
+            .map_err(|_| ParquetError::General("expected 16-byte trace_id".to_owned()))
+    })?;
+    FlatColumn::try_new(FlatData::FixedBytes16(out), nulls)
+        .map(Column::Flat)
+        .map_err(|err| ParquetError::General(err.to_string()))
+}
+
+fn decode_ts_chunk(
+    reader: &mut ColumnReaderImpl<Int64Type>,
+    max_def: i16,
+    chunk_rows: usize,
+) -> Result<Column, ParquetError> {
+    let (out, nulls) = decode_records_chunk(reader, max_def, chunk_rows, 0_i64, |&v| Ok(v))?;
     FlatColumn::try_new(
         FlatData::TimestampNs {
             values: out,
@@ -1406,6 +1428,98 @@ fn decode_ts_col(
     )
     .map(Column::Flat)
     .map_err(|err| ParquetError::General(err.to_string()))
+}
+
+fn decode_records_chunk<T, U>(
+    reader: &mut ColumnReaderImpl<T>,
+    max_def: i16,
+    chunk_rows: usize,
+    default_val: U,
+    mut map_val: impl FnMut(&T::T) -> Result<U, ParquetError>,
+) -> Result<(Vec<U>, Option<Bitmap>), ParquetError>
+where
+    T: parquet::data_type::DataType,
+    U: Copy,
+{
+    let mut def_levels = Vec::with_capacity(if max_def > 0 { chunk_rows } else { 0 });
+    let mut dense = Vec::with_capacity(chunk_rows);
+    let mut out = Vec::with_capacity(chunk_rows);
+    let mut nulls = (max_def > 0).then(|| Bitmap::new_ones(chunk_rows));
+    let mut read_so_far = 0usize;
+    while read_so_far < chunk_rows {
+        def_levels.clear();
+        dense.clear();
+        let need = chunk_rows - read_so_far;
+        let (records_read, values_read, levels_read) = reader.read_records(
+            need,
+            (max_def > 0).then_some(&mut def_levels),
+            None,
+            &mut dense,
+        )?;
+        if records_read == 0 {
+            return Err(ParquetError::General(
+                "unexpected EOF reading anchor column".to_owned(),
+            ));
+        }
+        if max_def == 0 {
+            if values_read != records_read || dense.len() != records_read {
+                return Err(ParquetError::General("anchor count mismatch".to_owned()));
+            }
+            for item in &dense {
+                out.push(map_val(item)?);
+            }
+        } else {
+            if levels_read != records_read || def_levels.len() != records_read {
+                return Err(ParquetError::General("def level count mismatch".to_owned()));
+            }
+            let mut idx = 0usize;
+            for (offset, &d) in def_levels.iter().enumerate() {
+                if d == max_def {
+                    let item = dense.get(idx).ok_or_else(|| {
+                        ParquetError::General("missing non-null anchor value".to_owned())
+                    })?;
+                    idx += 1;
+                    out.push(map_val(item)?);
+                } else {
+                    if let Some(ref mut bitmap) = nulls {
+                        let _ = bitmap.set(read_so_far + offset, false);
+                    }
+                    out.push(default_val);
+                }
+            }
+            if idx != dense.len() || idx != values_read {
+                return Err(ParquetError::General("trailing anchor values".to_owned()));
+            }
+        }
+        read_so_far += records_read;
+    }
+    if out.len() != chunk_rows {
+        return Err(ParquetError::General(
+            "anchor chunk length mismatch".to_owned(),
+        ));
+    }
+    let nulls = nulls.filter(|b| !b.all_ones());
+    Ok((out, nulls))
+}
+
+fn assert_no_trailing_records<T: parquet::data_type::DataType>(
+    reader: &mut ColumnReaderImpl<T>,
+    max_def: i16,
+) -> Result<(), ParquetError> {
+    let mut def_levels = Vec::new();
+    let mut values = Vec::new();
+    let (extra, extra_vals, extra_levels) = reader.read_records(
+        1,
+        (max_def > 0).then_some(&mut def_levels),
+        None,
+        &mut values,
+    )?;
+    if extra != 0 || extra_vals != 0 || extra_levels != 0 {
+        return Err(ParquetError::General(
+            "extra records beyond row group count".to_owned(),
+        ));
+    }
+    Ok(())
 }
 
 /// Row groups whose `last_ingest_time` statistics have a max `>= since`.
@@ -1432,12 +1546,6 @@ fn row_groups_to_read(metadata: &ParquetMetaData, since: i64) -> Vec<usize> {
         })
         .map(|(index, _)| index)
         .collect()
-}
-
-/// Captures `catch_unwind` around synchronous Parquet calls in case `guard_sync` is not directly used.
-#[allow(dead_code)]
-fn _guard_sync_marker() {
-    let _ = catch_unwind(AssertUnwindSafe(|| ()));
 }
 
 #[cfg(test)]
@@ -1826,5 +1934,600 @@ mod tests {
             .await
             .unwrap_err();
         assert!(err.is_store_error(), "expected store error, got {err:?}");
+    }
+
+    fn rewrite_parquet_metadata(
+        base_bytes: &Bytes,
+        mutate: impl FnOnce(ParquetMetaData) -> ParquetMetaData,
+    ) -> (Bytes, u64) {
+        let tail: &[u8; 8] = base_bytes[base_bytes.len() - 8..].try_into().unwrap();
+        let old_footer_size =
+            usize::try_from(footer_size_from_tail(tail, base_bytes.len() as u64).unwrap()).unwrap();
+        let footer_start = base_bytes.len() - old_footer_size;
+
+        let mut reader = ParquetMetaDataReader::new().with_page_index_policy(PageIndexPolicy::Skip);
+        reader.try_parse(base_bytes).unwrap();
+        let base_meta = reader.finish().unwrap();
+        let new_meta = mutate(base_meta);
+
+        let mut out = base_bytes[..footer_start].to_vec();
+        parquet::file::metadata::ParquetMetaDataWriter::new(&mut out, &new_meta)
+            .finish()
+            .unwrap();
+        let out_bytes = Bytes::from(out);
+        let new_tail: &[u8; 8] = out_bytes[out_bytes.len() - 8..].try_into().unwrap();
+        let new_footer_size = footer_size_from_tail(new_tail, out_bytes.len() as u64).unwrap();
+        (out_bytes, new_footer_size)
+    }
+
+    fn meta_with_bytes(
+        table: FileTable,
+        path: &str,
+        bytes: &Bytes,
+        footer_size: u64,
+        rows: u64,
+    ) -> FileMeta {
+        FileMeta {
+            id: FileId::new_v7(),
+            table,
+            project: project(),
+            day: day(),
+            level: 0,
+            path: path.to_owned(),
+            size: u64::try_from(bytes.len()).unwrap(),
+            footer_size,
+            rows,
+            min_time: 10,
+            max_time: 100,
+            min_ingest_time: 10,
+            max_ingest_time: 500,
+            fully_merged: false,
+            deletions_applied_seq: 0,
+        }
+    }
+
+    #[tokio::test]
+    async fn negative_offsets_and_truncated_rg_columns_return_corrupt_without_panicking() {
+        let traces_rb = trace_batch(&[span_row(1, 1, 100, 10)]);
+        let traces_col = Arc::new(record_batch_to_column(&traces_rb).unwrap());
+        let written = write_file_batch(FileTable::Traces, 0, &[traces_col]).unwrap();
+
+        let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+
+        // 1. Negative data_page_offset on start_time column -> Corrupt (no panic).
+        let (neg_data_bytes, neg_data_footer) = rewrite_parquet_metadata(&written.bytes, |pm| {
+            let mut rgs = pm.row_groups().to_vec();
+            let rg = rgs.remove(0);
+            let mut cols = rg.columns().to_vec();
+            let start_idx = cols
+                .iter()
+                .position(|c| c.column_descr().path().parts() == [traces::START_TIME])
+                .unwrap();
+            cols[start_idx] = cols[start_idx]
+                .clone()
+                .into_builder()
+                .set_data_page_offset(-1)
+                .build()
+                .unwrap();
+            let new_rg = rg.into_builder().set_column_metadata(cols).build().unwrap();
+            pm.into_builder().set_row_groups(vec![new_rg]).build()
+        });
+        let neg_meta = meta_with_bytes(
+            FileTable::Traces,
+            "tables/traces/neg-data.parquet",
+            &neg_data_bytes,
+            neg_data_footer,
+            written.rows,
+        );
+        store
+            .put(
+                &ObjectPath::from(neg_meta.path.as_str()),
+                PutPayload::from(neg_data_bytes),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            verify_parquet_file(&store, &neg_meta).await,
+            Verdict::Corrupt {
+                reason: "decode failed"
+            }
+        );
+        match read_time_column(&store, &[Arc::new(neg_meta.clone())], traces::START_TIME)
+            .await
+            .unwrap_err()
+        {
+            CompactionError::Read { ref source } => assert!(may_be_corrupt(source)),
+            other => panic!("expected Read error, got {other:?}"),
+        }
+        let err = read_trace_anchors(&store, &neg_meta, 0).await.unwrap_err();
+        assert!(!err.is_store_error(), "expected corrupt error, got {err:?}");
+
+        // 2. Negative compressed_size -> Corrupt (no panic).
+        let (neg_size_bytes, neg_size_footer) = rewrite_parquet_metadata(&written.bytes, |pm| {
+            let mut rgs = pm.row_groups().to_vec();
+            let rg = rgs.remove(0);
+            let mut cols = rg.columns().to_vec();
+            let start_idx = cols
+                .iter()
+                .position(|c| c.column_descr().path().parts() == [traces::START_TIME])
+                .unwrap();
+            cols[start_idx] = cols[start_idx]
+                .clone()
+                .into_builder()
+                .set_total_compressed_size(-16)
+                .build()
+                .unwrap();
+            let new_rg = rg.into_builder().set_column_metadata(cols).build().unwrap();
+            pm.into_builder().set_row_groups(vec![new_rg]).build()
+        });
+        let neg_size_meta = meta_with_bytes(
+            FileTable::Traces,
+            "tables/traces/neg-size.parquet",
+            &neg_size_bytes,
+            neg_size_footer,
+            written.rows,
+        );
+        store
+            .put(
+                &ObjectPath::from(neg_size_meta.path.as_str()),
+                PutPayload::from(neg_size_bytes),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            verify_parquet_file(&store, &neg_size_meta).await,
+            Verdict::Corrupt {
+                reason: "decode failed"
+            }
+        );
+
+        // 3. Truncated rg.columns (fewer columns than schema) -> Corrupt (no panic).
+        let (trunc_cols_bytes, trunc_cols_footer) =
+            rewrite_parquet_metadata(&written.bytes, |pm| {
+                let small_schema = Arc::new(SchemaDescriptor::new(Arc::new(
+                    parquet::schema::types::Type::group_type_builder("schema")
+                        .build()
+                        .unwrap(),
+                )));
+                let new_rg = RowGroupMetaData::builder(small_schema)
+                    .set_num_rows(1)
+                    .set_column_metadata(Vec::new())
+                    .build()
+                    .unwrap();
+                pm.into_builder().set_row_groups(vec![new_rg]).build()
+            });
+        let trunc_meta = meta_with_bytes(
+            FileTable::Traces,
+            "tables/traces/trunc-cols.parquet",
+            &trunc_cols_bytes,
+            trunc_cols_footer,
+            written.rows,
+        );
+        store
+            .put(
+                &ObjectPath::from(trunc_meta.path.as_str()),
+                PutPayload::from(trunc_cols_bytes),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            verify_parquet_file(&store, &trunc_meta).await,
+            Verdict::Corrupt {
+                reason: "decode failed"
+            }
+        );
+        match read_time_column(&store, &[Arc::new(trunc_meta.clone())], traces::START_TIME)
+            .await
+            .unwrap_err()
+        {
+            CompactionError::Read { ref source } => assert!(may_be_corrupt(source)),
+            other => panic!("expected Read error, got {other:?}"),
+        }
+        let err = read_trace_anchors(&store, &trunc_meta, 0)
+            .await
+            .unwrap_err();
+        assert!(!err.is_store_error(), "expected corrupt error, got {err:?}");
+    }
+
+    #[tokio::test]
+    async fn zero_length_byte_range_and_rle_bomb_are_corrupt_not_unavailable() {
+        let traces_rb = trace_batch(&[span_row(1, 1, 100, 10)]);
+        let traces_col = Arc::new(record_batch_to_column(&traces_rb).unwrap());
+        let written = write_file_batch(FileTable::Traces, 0, &[traces_col]).unwrap();
+
+        let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+
+        // 1. Non-empty row group with zero-length column chunk -> Corrupt (NOT Unavailable).
+        let (zero_len_bytes, zero_len_footer) = rewrite_parquet_metadata(&written.bytes, |pm| {
+            let mut rgs = pm.row_groups().to_vec();
+            let rg = rgs.remove(0);
+            let mut cols = rg.columns().to_vec();
+            let start_idx = cols
+                .iter()
+                .position(|c| c.column_descr().path().parts() == [traces::START_TIME])
+                .unwrap();
+            cols[start_idx] = cols[start_idx]
+                .clone()
+                .into_builder()
+                .set_dictionary_page_offset(None)
+                .set_total_compressed_size(0)
+                .build()
+                .unwrap();
+            let new_rg = rg.into_builder().set_column_metadata(cols).build().unwrap();
+            pm.into_builder().set_row_groups(vec![new_rg]).build()
+        });
+        let zero_len_meta = meta_with_bytes(
+            FileTable::Traces,
+            "tables/traces/zero-len.parquet",
+            &zero_len_bytes,
+            zero_len_footer,
+            written.rows,
+        );
+        store
+            .put(
+                &ObjectPath::from(zero_len_meta.path.as_str()),
+                PutPayload::from(zero_len_bytes),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            verify_parquet_file(&store, &zero_len_meta).await,
+            Verdict::Corrupt {
+                reason: "decode failed"
+            }
+        );
+        match read_time_column(
+            &store,
+            &[Arc::new(zero_len_meta.clone())],
+            traces::START_TIME,
+        )
+        .await
+        .unwrap_err()
+        {
+            CompactionError::Read { ref source } => assert!(may_be_corrupt(source)),
+            other => panic!("expected Read error, got {other:?}"),
+        }
+        let err = read_trace_anchors(&store, &zero_len_meta, 0)
+            .await
+            .unwrap_err();
+        assert!(!err.is_store_error(), "expected corrupt error, got {err:?}");
+
+        // 2. Zero-row row group with zero-length column chunks -> skips empty fetches cleanly.
+        let (zero_rg_bytes, zero_rg_footer) = rewrite_parquet_metadata(&written.bytes, |pm| {
+            let mut rgs = pm.row_groups().to_vec();
+            let rg = rgs.remove(0);
+            let cols = rg
+                .columns()
+                .iter()
+                .map(|c| {
+                    c.clone()
+                        .into_builder()
+                        .set_dictionary_page_offset(None)
+                        .set_total_compressed_size(0)
+                        .build()
+                        .unwrap()
+                })
+                .collect();
+            let new_rg = rg
+                .into_builder()
+                .set_num_rows(0)
+                .set_column_metadata(cols)
+                .build()
+                .unwrap();
+            pm.into_builder().set_row_groups(vec![new_rg]).build()
+        });
+        let zero_rg_meta = meta_with_bytes(
+            FileTable::Traces,
+            "tables/traces/zero-rg.parquet",
+            &zero_rg_bytes,
+            zero_rg_footer,
+            0,
+        );
+        store
+            .put(
+                &ObjectPath::from(zero_rg_meta.path.as_str()),
+                PutPayload::from(zero_rg_bytes),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            verify_parquet_file(&store, &zero_rg_meta).await,
+            Verdict::Healthy
+        );
+        assert!(
+            read_time_column(
+                &store,
+                &[Arc::new(zero_rg_meta.clone())],
+                traces::START_TIME
+            )
+            .await
+            .unwrap()
+            .is_empty()
+        );
+        assert!(
+            read_trace_anchors(&store, &zero_rg_meta, 0)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+
+        // 3. RLE-bomb / absurd rg.num_rows() -> rejected immediately without OOM.
+        let (bomb_bytes, bomb_footer) = rewrite_parquet_metadata(&written.bytes, |pm| {
+            let mut rgs = pm.row_groups().to_vec();
+            let rg = rgs.remove(0);
+            let new_rg = rg
+                .into_builder()
+                .set_num_rows(i64::from(u32::MAX))
+                .build()
+                .unwrap();
+            pm.into_builder().set_row_groups(vec![new_rg]).build()
+        });
+        let bomb_meta = meta_with_bytes(
+            FileTable::Traces,
+            "tables/traces/bomb.parquet",
+            &bomb_bytes,
+            bomb_footer,
+            u64::from(u32::MAX),
+        );
+        store
+            .put(
+                &ObjectPath::from(bomb_meta.path.as_str()),
+                PutPayload::from(bomb_bytes),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            verify_parquet_file(&store, &bomb_meta).await,
+            Verdict::Corrupt {
+                reason: "decode failed"
+            }
+        );
+        match read_time_column(&store, &[Arc::new(bomb_meta.clone())], traces::START_TIME)
+            .await
+            .unwrap_err()
+        {
+            CompactionError::Read { ref source } => assert!(may_be_corrupt(source)),
+            other => panic!("expected Read error, got {other:?}"),
+        }
+        let err = read_trace_anchors(&store, &bomb_meta, 0).await.unwrap_err();
+        assert!(!err.is_store_error(), "expected corrupt error, got {err:?}");
+    }
+
+    #[tokio::test]
+    async fn readers_reject_non_nanos_timestamp_and_decode_multi_chunk_row_groups() {
+        let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+
+        // 1. Non-nanosecond timestamp logical type is rejected by both readers.
+        let bad_schema = Arc::new(arrow::datatypes::Schema::new(vec![
+            arrow::datatypes::Field::new(
+                traces::TRACE_ID,
+                arrow::datatypes::DataType::FixedSizeBinary(16),
+                false,
+            ),
+            arrow::datatypes::Field::new(
+                traces::START_TIME,
+                arrow::datatypes::DataType::Timestamp(
+                    arrow::datatypes::TimeUnit::Millisecond,
+                    Some("UTC".into()),
+                ),
+                false,
+            ),
+            arrow::datatypes::Field::new(
+                traces::END_TIME,
+                arrow::datatypes::DataType::Timestamp(
+                    arrow::datatypes::TimeUnit::Nanosecond,
+                    Some("UTC".into()),
+                ),
+                true,
+            ),
+            arrow::datatypes::Field::new(
+                traces::LAST_INGEST_TIME,
+                arrow::datatypes::DataType::Timestamp(
+                    arrow::datatypes::TimeUnit::Nanosecond,
+                    Some("UTC".into()),
+                ),
+                false,
+            ),
+        ]));
+        let bad_rb = RecordBatch::try_new(
+            Arc::clone(&bad_schema),
+            vec![
+                Arc::new(
+                    arrow::array::FixedSizeBinaryArray::try_from_iter(std::iter::once(&[1u8; 16]))
+                        .unwrap(),
+                ),
+                Arc::new(
+                    arrow::array::TimestampMillisecondArray::from(vec![1_000]).with_timezone("UTC"),
+                ),
+                Arc::new(
+                    arrow::array::TimestampNanosecondArray::from(vec![Some(2_000)])
+                        .with_timezone("UTC"),
+                ),
+                Arc::new(
+                    arrow::array::TimestampNanosecondArray::from(vec![3_000]).with_timezone("UTC"),
+                ),
+            ],
+        )
+        .unwrap();
+        let mut bad_buf = Vec::new();
+        let mut aw = ArrowWriter::try_new(&mut bad_buf, bad_schema, None).unwrap();
+        aw.write(&bad_rb).unwrap();
+        aw.close().unwrap();
+        let bad_bytes = Bytes::from(bad_buf);
+        let bad_meta = meta_with_bytes(
+            FileTable::Traces,
+            "tables/traces/bad-ts.parquet",
+            &bad_bytes,
+            8,
+            1,
+        );
+        store
+            .put(
+                &ObjectPath::from(bad_meta.path.as_str()),
+                PutPayload::from(bad_bytes),
+            )
+            .await
+            .unwrap();
+        assert!(matches!(
+            read_time_column(&store, &[Arc::new(bad_meta.clone())], traces::START_TIME)
+                .await
+                .unwrap_err(),
+            CompactionError::Input {
+                reason: "missing time column"
+            }
+        ));
+        assert!(matches!(
+            read_trace_anchors(&store, &bad_meta, 0).await.unwrap_err(),
+            AnchorError::Column {
+                name: traces::START_TIME
+            }
+        ));
+
+        // 2. Multi-chunk (> READ_BATCH_ROWS) single row group decodes in bounded batches.
+        let total = READ_BATCH_ROWS + 808;
+        let spans_vec: Vec<_> = (0..total)
+            .map(|i| {
+                span_row(
+                    u16::try_from(i + 1).unwrap(),
+                    1,
+                    1_000 + i64::try_from(i).unwrap(),
+                    2_000 + i64::try_from(i).unwrap(),
+                )
+            })
+            .collect();
+        let rb = trace_batch(&spans_vec);
+        let col_batch = Arc::new(record_batch_to_column(&rb).unwrap());
+        let written = write_file_batch(FileTable::Traces, 0, &[col_batch]).unwrap();
+        let meta = file_meta(FileTable::Traces, "tables/traces/chunked.parquet", &written);
+        store
+            .put(
+                &ObjectPath::from(meta.path.as_str()),
+                PutPayload::from(written.bytes),
+            )
+            .await
+            .unwrap();
+
+        let times = read_time_column(&store, &[Arc::new(meta.clone())], traces::START_TIME)
+            .await
+            .unwrap();
+        assert_eq!(times.len(), total);
+        assert_eq!(times[0], 1_000);
+        assert_eq!(times[total - 1], 1_000 + i64::try_from(total - 1).unwrap());
+
+        let anchor_batches = read_trace_anchors(&store, &meta, 0).await.unwrap();
+        assert_eq!(anchor_batches.len(), 2);
+        assert_eq!(anchor_batches[0].num_rows(), READ_BATCH_ROWS);
+        assert_eq!(anchor_batches[1].num_rows(), total - READ_BATCH_ROWS);
+        let decoded_total: usize = anchor_batches.iter().map(Batch::num_rows).sum();
+        assert_eq!(decoded_total, total);
+
+        // 3. Multi-chunk (> READ_BATCH_ROWS) with nullable end_time decodes nulls properly.
+        let nullable_schema = Arc::new(arrow::datatypes::Schema::new(vec![
+            arrow::datatypes::Field::new(
+                traces::TRACE_ID,
+                arrow::datatypes::DataType::FixedSizeBinary(16),
+                false,
+            ),
+            arrow::datatypes::Field::new(
+                traces::START_TIME,
+                arrow::datatypes::DataType::Timestamp(
+                    arrow::datatypes::TimeUnit::Nanosecond,
+                    Some("UTC".into()),
+                ),
+                false,
+            ),
+            arrow::datatypes::Field::new(
+                traces::END_TIME,
+                arrow::datatypes::DataType::Timestamp(
+                    arrow::datatypes::TimeUnit::Nanosecond,
+                    Some("UTC".into()),
+                ),
+                true,
+            ),
+            arrow::datatypes::Field::new(
+                traces::LAST_INGEST_TIME,
+                arrow::datatypes::DataType::Timestamp(
+                    arrow::datatypes::TimeUnit::Nanosecond,
+                    Some("UTC".into()),
+                ),
+                false,
+            ),
+        ]));
+        let trace_ids: Vec<[u8; 16]> = (0..total)
+            .map(|i| u128::try_from(i + 1).unwrap().to_be_bytes())
+            .collect();
+        let starts: Vec<i64> = (0..total)
+            .map(|i| 1_000 + i64::try_from(i).unwrap())
+            .collect();
+        let ends: Vec<Option<i64>> = (0..total)
+            .map(|i| (i % 3 != 0).then_some(1_100 + i64::try_from(i).unwrap()))
+            .collect();
+        let ingests: Vec<i64> = (0..total)
+            .map(|i| 2_000 + i64::try_from(i).unwrap())
+            .collect();
+        let nullable_rb = RecordBatch::try_new(
+            Arc::clone(&nullable_schema),
+            vec![
+                Arc::new(
+                    arrow::array::FixedSizeBinaryArray::try_from_iter(
+                        trace_ids.iter().map(|b| b.as_slice()),
+                    )
+                    .unwrap(),
+                ),
+                Arc::new(arrow::array::TimestampNanosecondArray::from(starts).with_timezone("UTC")),
+                Arc::new(arrow::array::TimestampNanosecondArray::from(ends).with_timezone("UTC")),
+                Arc::new(
+                    arrow::array::TimestampNanosecondArray::from(ingests).with_timezone("UTC"),
+                ),
+            ],
+        )
+        .unwrap();
+        let mut nullable_buf = Vec::new();
+        let mut aw = ArrowWriter::try_new(&mut nullable_buf, nullable_schema, None).unwrap();
+        aw.write(&nullable_rb).unwrap();
+        aw.close().unwrap();
+        let nullable_bytes = Bytes::from(nullable_buf);
+        let nullable_meta = meta_with_bytes(
+            FileTable::Traces,
+            "tables/traces/chunked-nullable.parquet",
+            &nullable_bytes,
+            8,
+            u64::try_from(total).unwrap(),
+        );
+        store
+            .put(
+                &ObjectPath::from(nullable_meta.path.as_str()),
+                PutPayload::from(nullable_bytes),
+            )
+            .await
+            .unwrap();
+        let nullable_batches = read_trace_anchors(&store, &nullable_meta, 0).await.unwrap();
+        assert_eq!(nullable_batches.len(), 2);
+        assert_eq!(nullable_batches[0].num_rows(), READ_BATCH_ROWS);
+        assert_eq!(nullable_batches[1].num_rows(), total - READ_BATCH_ROWS);
+        assert!(
+            nullable_batches[0]
+                .column_by_name(traces::END_TIME)
+                .unwrap()
+                .is_null(0)
+        );
+        assert!(
+            !nullable_batches[0]
+                .column_by_name(traces::END_TIME)
+                .unwrap()
+                .is_null(1)
+        );
+        assert!(
+            nullable_batches[1]
+                .column_by_name(traces::END_TIME)
+                .unwrap()
+                .is_null(1)
+        );
+        assert!(
+            !nullable_batches[1]
+                .column_by_name(traces::END_TIME)
+                .unwrap()
+                .is_null(2)
+        );
     }
 }

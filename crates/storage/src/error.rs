@@ -199,7 +199,7 @@ pub enum MemtableError {
 }
 
 impl MemtableError {
-    #[allow(dead_code, clippy::needless_pass_by_value)]
+    #[allow(dead_code)]
     pub(crate) fn from_column(err: cetra_column::ColumnError) -> Self {
         Self::Arrow(ArrowError::ExternalError(Box::new(err)))
     }
@@ -287,9 +287,9 @@ impl WalError {
         }
     }
 
-    #[allow(dead_code, clippy::needless_pass_by_value)]
-    pub(crate) fn from_column(err: cetra_column::ColumnError) -> Self {
-        match err {
+    #[allow(dead_code)]
+    pub(crate) fn from_column(err: &cetra_column::ColumnError) -> Self {
+        match *err {
             cetra_column::ColumnError::InvalidFrame { reason }
             | cetra_column::ColumnError::InvalidBatch { reason }
             | cetra_column::ColumnError::Overflow { reason } => Self::InvalidPayload { reason },
@@ -724,7 +724,7 @@ impl AnchorError {
         Self::Parquet(Box::new(source))
     }
 
-    #[allow(dead_code, clippy::needless_pass_by_value)]
+    #[allow(dead_code)]
     pub(crate) fn from_column(err: cetra_column::ColumnError) -> Self {
         Self::Arrow(ArrowError::ExternalError(Box::new(err)))
     }
@@ -759,7 +759,7 @@ impl PartialsError {
         }
     }
 
-    #[allow(dead_code, clippy::needless_pass_by_value)]
+    #[allow(dead_code)]
     pub(crate) fn from_column(err: cetra_column::ColumnError) -> Self {
         Self::Arrow(ArrowError::ExternalError(Box::new(err)))
     }
@@ -1130,7 +1130,7 @@ impl ParquetWriteError {
         }
     }
 
-    #[allow(dead_code, clippy::needless_pass_by_value)]
+    #[allow(dead_code)]
     pub(crate) fn from_column(err: cetra_column::ColumnError) -> Self {
         Self::Arrow {
             source: ArrowError::ExternalError(Box::new(err)),
