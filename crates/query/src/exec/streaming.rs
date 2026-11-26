@@ -178,6 +178,37 @@ impl ProjectOp {
         }
     }
 
+    /// Creates a [`ProjectOp`] whose output batches conform to `schema` (preserving explicit field nullability).
+    pub fn with_schema(
+        exprs: Vec<Expr>,
+        schema: Arc<Schema>,
+        ctx: ExecContext,
+    ) -> Result<Self, QueryError> {
+        if exprs.len() != schema.fields().len() {
+            return Err(ColumnError::InvalidBatch {
+                reason: "projection expression count does not match schema",
+            }
+            .into());
+        }
+        let mut named = Vec::with_capacity(exprs.len());
+        for (expr, field) in exprs.into_iter().zip(schema.fields()) {
+            if expr.data_type() != field.data_type {
+                return Err(ColumnError::InvalidBatch {
+                    reason: "projection expression type does not match schema field",
+                }
+                .into());
+            }
+            named.push((field.name.clone(), expr));
+        }
+        let scratch = ctx.pool.register("project", false);
+        Ok(Self {
+            exprs: named,
+            ctx,
+            scratch,
+            output_schema: Some(schema),
+        })
+    }
+
     fn output_schema(&mut self) -> Result<Arc<Schema>, QueryError> {
         if let Some(schema) = &self.output_schema {
             return Ok(Arc::clone(schema));
@@ -2414,5 +2445,120 @@ mod tests {
                 descending: true,
             }]
         );
+    }
+
+    #[test]
+    fn project_op_with_schema_preserves_nullability() {
+        let (ctx, _dir) = test_ctx(1024 * 1024, 1);
+        let in_schema = Schema::try_new_arc(vec![
+            Field::new("a", DataType::I64, false),
+            Field::new("b", DataType::Utf8, true),
+        ])
+        .unwrap();
+        let out_schema = Schema::try_new_arc(vec![
+            Field::new("a_out", DataType::I64, false),
+            Field::new("b_out", DataType::Utf8, true),
+        ])
+        .unwrap();
+
+        // Validation errors: count mismatch & type mismatch.
+        assert!(ProjectOp::with_schema(vec![], Arc::clone(&out_schema), ctx.clone()).is_err());
+        assert!(
+            ProjectOp::with_schema(
+                vec![
+                    Expr::Column {
+                        index: 0,
+                        name: "a".to_owned(),
+                        data_type: DataType::I64,
+                    },
+                    Expr::Column {
+                        index: 0,
+                        name: "a".to_owned(),
+                        data_type: DataType::I64,
+                    },
+                ],
+                Arc::clone(&out_schema),
+                ctx.clone(),
+            )
+            .is_err()
+        );
+
+        let mut op = ProjectOp::with_schema(
+            vec![
+                Expr::Column {
+                    index: 0,
+                    name: "a".to_owned(),
+                    data_type: DataType::I64,
+                },
+                Expr::Column {
+                    index: 1,
+                    name: "b".to_owned(),
+                    data_type: DataType::Utf8,
+                },
+            ],
+            Arc::clone(&out_schema),
+            ctx.clone(),
+        )
+        .unwrap();
+
+        let batch = Batch::try_new_all(
+            Arc::clone(&in_schema),
+            vec![
+                Column::Flat(FlatColumn::try_new(FlatData::I64(vec![10, 20]), None).unwrap()),
+                Column::Flat(
+                    FlatColumn::try_new(
+                        FlatData::Utf8(Utf8Data::try_from_slices(["x", ""]).unwrap()),
+                        Some(Bitmap::from_bools(&[true, false])),
+                    )
+                    .unwrap(),
+                ),
+            ],
+            2,
+        )
+        .unwrap();
+
+        let mut emitted = Vec::new();
+        op.push(batch, &mut |b| {
+            emitted.push(b);
+            Ok(ControlFlow::Continue)
+        })
+        .unwrap();
+        assert_eq!(emitted.len(), 1);
+        assert_eq!(emitted[0].schema().as_ref(), out_schema.as_ref());
+        assert!(!emitted[0].schema().fields()[0].nullable);
+        assert!(emitted[0].schema().fields()[1].nullable);
+
+        // Non-null schema field rejects a null value at runtime.
+        let strict_schema =
+            Schema::try_new_arc(vec![Field::new("b_strict", DataType::Utf8, false)]).unwrap();
+        let mut strict_op = ProjectOp::with_schema(
+            vec![Expr::Column {
+                index: 1,
+                name: "b".to_owned(),
+                data_type: DataType::Utf8,
+            }],
+            strict_schema,
+            ctx,
+        )
+        .unwrap();
+        let batch_with_null = Batch::try_new_all(
+            in_schema,
+            vec![
+                Column::Flat(FlatColumn::try_new(FlatData::I64(vec![1]), None).unwrap()),
+                Column::Flat(
+                    FlatColumn::try_new(
+                        FlatData::Utf8(Utf8Data::try_from_slices([""]).unwrap()),
+                        Some(Bitmap::from_bools(&[false])),
+                    )
+                    .unwrap(),
+                ),
+            ],
+            1,
+        )
+        .unwrap();
+        let err = strict_op
+            .push(batch_with_null, &mut |_| Ok(ControlFlow::Continue))
+            .unwrap_err();
+        assert!(matches!(err, QueryError::Column(_)));
     }
 }
