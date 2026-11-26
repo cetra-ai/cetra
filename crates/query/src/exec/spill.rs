@@ -47,6 +47,25 @@ fn reserve_spill_bytes(
     }
 }
 
+const MAX_SPILL_CREATE_ATTEMPTS: usize = 1024;
+const MAX_SCRATCH_BUF_KEEP_CAP: usize = 64 * 1024;
+
+fn trim_scratch_buf(buf: &mut Vec<u8>) {
+    if buf.capacity() > MAX_SCRATCH_BUF_KEEP_CAP {
+        *buf = Vec::new();
+    } else {
+        buf.clear();
+    }
+}
+
+struct ScratchTrimGuard<'a>(&'a mut Vec<u8>);
+
+impl Drop for ScratchTrimGuard<'_> {
+    fn drop(&mut self) {
+        trim_scratch_buf(self.0);
+    }
+}
+
 /// Manages unique temporary spill files inside a root directory (`<data_dir>/tmp/query`).
 /// Implements manual `fmt::Debug` (counters only).
 #[derive(Clone)]
@@ -110,7 +129,7 @@ impl SpillManager {
     pub fn create_file(&self) -> Result<SpillWriter, QueryError> {
         fs::create_dir_all(&self.root).map_err(|e| map_spill_io_err(&e))?;
         let pid = std::process::id();
-        loop {
+        for attempt in 0..MAX_SPILL_CREATE_ATTEMPTS {
             let id = self.next_id.fetch_add(1, Ordering::Relaxed);
             let path = self.root.join(format!("spill-{pid}-{id}.cbm"));
             match OpenOptions::new().write(true).create_new(true).open(&path) {
@@ -125,10 +144,16 @@ impl SpillManager {
                         scratch_buf: Vec::new(),
                     });
                 }
-                Err(err) if err.kind() == ErrorKind::AlreadyExists => continue,
+                Err(err)
+                    if err.kind() == ErrorKind::AlreadyExists
+                        && attempt + 1 < MAX_SPILL_CREATE_ATTEMPTS =>
+                {
+                    continue;
+                }
                 Err(err) => return Err(map_spill_io_err(&err)),
             }
         }
+        Err(QueryError::internal("failed to allocate unique spill file"))
     }
 }
 
@@ -265,9 +290,10 @@ impl SpillAppender {
                 "spill appender is poisoned after write failure",
             ));
         }
-        self.scratch_buf.clear();
-        encode_batch(batch, &mut self.scratch_buf, pool)?;
-        let frame_len = u64::try_from(self.scratch_buf.len()).map_err(|_| QueryError::TooLarge)?;
+        let scratch = ScratchTrimGuard(&mut self.scratch_buf);
+        scratch.0.clear();
+        encode_batch(batch, scratch.0, pool)?;
+        let frame_len = u64::try_from(scratch.0.len()).map_err(|_| QueryError::TooLarge)?;
         reserve_spill_bytes(&self.spilled_bytes, &self.cap, frame_len)?;
 
         let mut file = if !self.created {
@@ -276,7 +302,8 @@ impl SpillAppender {
                 return Err(map_spill_io_err(&err));
             }
             let pid = std::process::id();
-            loop {
+            let mut opened = None;
+            for attempt in 0..MAX_SPILL_CREATE_ATTEMPTS {
                 let id = self.next_id.fetch_add(1, Ordering::Relaxed);
                 let path = self.root.join(format!("spill-{pid}-{id}.cbm"));
                 match OpenOptions::new().write(true).create_new(true).open(&path) {
@@ -287,13 +314,26 @@ impl SpillAppender {
                             spilled_bytes: Arc::clone(&self.spilled_bytes),
                         }));
                         self.created = true;
-                        break f;
+                        opened = Some(f);
+                        break;
                     }
-                    Err(err) if err.kind() == ErrorKind::AlreadyExists => continue,
+                    Err(err)
+                        if err.kind() == ErrorKind::AlreadyExists
+                            && attempt + 1 < MAX_SPILL_CREATE_ATTEMPTS =>
+                    {
+                        continue;
+                    }
                     Err(err) => {
                         self.spilled_bytes.fetch_sub(frame_len, Ordering::AcqRel);
                         return Err(map_spill_io_err(&err));
                     }
+                }
+            }
+            match opened {
+                Some(f) => f,
+                None => {
+                    self.spilled_bytes.fetch_sub(frame_len, Ordering::AcqRel);
+                    return Err(QueryError::internal("failed to allocate unique spill file"));
                 }
             }
         } else {
@@ -310,10 +350,7 @@ impl SpillAppender {
             }
         };
 
-        if let Err(err) = file
-            .write_all(&self.scratch_buf)
-            .and_then(|()| file.flush())
-        {
+        if let Err(err) = file.write_all(scratch.0).and_then(|()| file.flush()) {
             self.poisoned = true;
             self.spilled_bytes.fetch_sub(frame_len, Ordering::AcqRel);
             drop(file);

@@ -121,7 +121,7 @@ pub(crate) enum LikeMatcher {
 }
 
 impl LikeMatcher {
-    pub(crate) fn estimated_bytes(&self) -> usize {
+    pub(crate) fn estimated_bytes(&self, pattern_len: usize) -> usize {
         let extra = match self {
             Self::Any | Self::Empty => 0,
             Self::Exact { lit, ci_regex } => {
@@ -156,7 +156,7 @@ impl LikeMatcher {
                         0
                     }
             }
-            Self::Regex(_) => 1024,
+            Self::Regex(_) => pattern_len.saturating_mul(16).max(1024),
         };
         size_of::<Self>() + extra
     }
@@ -397,11 +397,19 @@ fn eval_like_inner(
         return Ok(null_const(DataType::Bool, len));
     }
 
-    if let Column::Const {
-        value: ScalarValue::Null(_),
-        ..
-    } = pattern
-    {
+    if matches!(
+        input,
+        Column::Const {
+            value: ScalarValue::Null(_),
+            ..
+        }
+    ) || matches!(
+        pattern,
+        Column::Const {
+            value: ScalarValue::Null(_),
+            ..
+        }
+    ) {
         return Ok(null_const(DataType::Bool, len));
     }
 
@@ -415,15 +423,7 @@ fn eval_like_inner(
     if len == 0 {
         return Ok(null_const(DataType::Bool, len));
     }
-    let cached_const: Option<Arc<LikeMatcher>> = match const_pat {
-        Some(pat) => Some(
-            ctx.cache
-                .get_or_insert_like(pat, escape, case_insensitive, || {
-                    LikeMatcher::compile(pat, escape, case_insensitive)
-                })?,
-        ),
-        None => None,
-    };
+    let mut cached_const: Option<Arc<LikeMatcher>> = None;
     let mut last_dyn: Option<(&str, Arc<LikeMatcher>)> = None;
 
     let bm_bytes = bitmap_mem_bytes(len);
@@ -441,7 +441,18 @@ fn eval_like_inner(
         let Some(s) = read_str(input, row) else {
             continue;
         };
-        let matched = if let Some(matcher) = &cached_const {
+        let matched = if let Some(pat) = const_pat {
+            let matcher = match &cached_const {
+                Some(m) => m,
+                None => {
+                    let compiled =
+                        ctx.cache
+                            .get_or_insert_like(pat, escape, case_insensitive, || {
+                                LikeMatcher::compile(pat, escape, case_insensitive)
+                            })?;
+                    cached_const.insert(compiled)
+                }
+            };
             matcher.is_match(s)
         } else {
             let Some(pat) = read_str(pattern, row) else {
@@ -1463,41 +1474,32 @@ fn compile_regex(pat: &str, flags: &str) -> Result<Regex, QueryError> {
 }
 
 enum RegexpCache<'a> {
-    Const(Arc<Regex>),
+    Const(Option<Arc<Regex>>),
     Dynamic {
         last: Option<(&'a str, &'a str, Arc<Regex>)>,
     },
 }
 
 impl<'a> RegexpCache<'a> {
-    fn new(
-        pat_col: &'a Column,
-        flags_col: Option<&'a Column>,
-        ctx: &EvalContext,
-    ) -> Result<Self, QueryError> {
-        let const_pat = match pat_col {
+    fn new(pat_col: &'a Column, flags_col: Option<&'a Column>) -> Self {
+        let is_const_pat = matches!(
+            pat_col,
             Column::Const {
-                value: ScalarValue::Utf8(p),
+                value: ScalarValue::Utf8(_),
                 ..
-            } => Some(p.as_str()),
-            _ => None,
-        };
-        let const_flags = match flags_col {
-            None => Some(""),
-            Some(Column::Const {
-                value: ScalarValue::Utf8(f),
-                ..
-            }) => Some(f.as_str()),
-            _ => None,
-        };
-        match (const_pat, const_flags) {
-            (Some(pat), Some(flags)) => {
-                let re = ctx
-                    .cache
-                    .get_or_insert_regex(pat, flags, || compile_regex(pat, flags))?;
-                Ok(Self::Const(re))
             }
-            _ => Ok(Self::Dynamic { last: None }),
+        );
+        let is_const_flags = matches!(
+            flags_col,
+            None | Some(Column::Const {
+                value: ScalarValue::Utf8(_),
+                ..
+            })
+        );
+        if is_const_pat && is_const_flags {
+            Self::Const(None)
+        } else {
+            Self::Dynamic { last: None }
         }
     }
 
@@ -1508,7 +1510,16 @@ impl<'a> RegexpCache<'a> {
         ctx: &EvalContext,
     ) -> Result<Arc<Regex>, QueryError> {
         match self {
-            Self::Const(re) => Ok(Arc::clone(re)),
+            Self::Const(slot) => {
+                if let Some(re) = slot.as_ref() {
+                    return Ok(Arc::clone(re));
+                }
+                let re = ctx
+                    .cache
+                    .get_or_insert_regex(pat, flags, || compile_regex(pat, flags))?;
+                *slot = Some(Arc::clone(&re));
+                Ok(re)
+            }
             Self::Dynamic { last } => {
                 if let Some((p, f, re)) = last.as_ref()
                     && *p == pat
@@ -1547,6 +1558,13 @@ fn has_null_regexp_arg_type(s_col: &Column, pat_col: &Column, flags_col: Option<
         || matches!(pat_col.data_type(), DataType::Null)
         || flags_col.is_some_and(|c| matches!(c.data_type(), DataType::Null))
         || matches!(
+            s_col,
+            Column::Const {
+                value: ScalarValue::Null(_),
+                ..
+            }
+        )
+        || matches!(
             pat_col,
             Column::Const {
                 value: ScalarValue::Null(_),
@@ -1580,7 +1598,7 @@ fn eval_regexp_like(
         return Ok(null_const(DataType::Bool, len));
     }
 
-    let mut cache = RegexpCache::new(pat_col, flags_col, ctx)?;
+    let mut cache = RegexpCache::new(pat_col, flags_col);
     let bm_bytes = bitmap_mem_bytes(len);
     try_reserve(pool, bm_bytes * 2)?;
     let mut vals = Bitmap::new_zeroed(len);
@@ -1642,7 +1660,7 @@ fn eval_regexp_extract(
         return Ok(null_const(DataType::Utf8, len));
     }
 
-    let mut cache = RegexpCache::new(pat_col, flags_col, ctx)?;
+    let mut cache = RegexpCache::new(pat_col, flags_col);
     try_reserve(pool, checked_varlen_bytes(len, 0, true)?)?;
     let mut offsets = Vec::with_capacity(len + 1);
     offsets.push(0u32);
@@ -2797,5 +2815,38 @@ mod tests {
         .unwrap_err();
         assert!(matches!(oom, QueryError::TooLarge));
         assert_eq!(res.size(), 0);
+
+        // H2-M2: lazy constant regex/LIKE compilation for NULL-input SQL semantics.
+        let null_const_utf8 = Column::Const {
+            value: ScalarValue::Null(DataType::Utf8),
+            len: 3,
+        };
+        let all_null_flat = utf8_col(&[None, None, None]);
+        let invalid_re = const_str("[unclosed", 3);
+
+        for input_col in [&null_const_utf8, &all_null_flat] {
+            let out_like =
+                eval_regexp_like(&[input_col, &invalid_re], 3, None, &ctx(), &mut None, 0).unwrap();
+            assert!((0..3).all(|r| out_like.is_null(r)));
+
+            let out_ext =
+                eval_regexp_extract(&[input_col, &invalid_re], 3, None, &ctx(), &mut None, 0)
+                    .unwrap();
+            assert!((0..3).all(|r| out_ext.is_null(r)));
+
+            let oversized_like_pat = const_str(&"_".repeat(100_000), 3);
+            let like_res = eval_like(
+                input_col,
+                &oversized_like_pat,
+                Some('\\'),
+                false,
+                false,
+                None,
+                &ctx(),
+                None,
+            )
+            .unwrap();
+            assert!((0..3).all(|r| like_res.is_null(r)));
+        }
     }
 }

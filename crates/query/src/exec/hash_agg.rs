@@ -3458,6 +3458,9 @@ impl HashAgg {
 
             let mut part_distinct =
                 new_distinct_spills(&self.acc_kinds, &self.group_types, &self.ctx)?;
+            for slot in part_distinct.iter_mut().flatten() {
+                slot.spilled = true;
+            }
             let layout = AggLayout {
                 group_types: &self.group_types,
                 acc_kinds: &self.acc_kinds,
@@ -3529,7 +3532,7 @@ impl HashAgg {
             for (i, slot_opt) in part_distinct.into_iter().enumerate() {
                 if let (Some(mut src), Some(dst)) = (slot_opt, self.distinct_spills[i].as_mut()) {
                     src.finish_into_files(&self.ctx);
-                    if src.has_spilled() {
+                    if !src.files.is_empty() {
                         dst.spilled = true;
                         dst.files.append(&mut src.files);
                     }
@@ -4114,10 +4117,9 @@ impl PushSink for HashAgg {
                 Ok(compacted) => {
                     drop(batch);
                     let c_bytes = compacted.memory_bytes();
-                    let xfer = compact_res.size().min(c_bytes);
-                    compact_res.free();
                     batch_res.free();
-                    let _ = batch_res.try_grow(xfer);
+                    transfer_or_grow(&mut compact_res, batch_res, c_bytes)?;
+                    compact_res.free();
                     compacted
                 }
                 Err(ColumnError::MemoryLimit { .. }) if self.table.num_groups() > 0 => {
@@ -4232,7 +4234,7 @@ impl PushSink for HashAgg {
                 let cur_unsp: usize = states.iter().map(AccState::unspillable_heap_bytes).sum();
                 if cur_sp.saturating_add(need_sp) > self.res.size() {
                     let add = cur_sp.saturating_add(need_sp) - self.res.size();
-                    if let Err(err) = transfer_or_grow(batch_res, &mut self.res, add) {
+                    if let Err(err) = self.res.try_grow(add) {
                         if matches!(err, ColumnError::MemoryLimit { .. })
                             && flush_global_distinct_sets_inner(
                                 states,
@@ -4245,8 +4247,7 @@ impl PushSink for HashAgg {
                                 states.iter().map(AccState::spillable_heap_bytes).sum();
                             if cur_sp2.saturating_add(need_sp) > self.res.size() {
                                 let add2 = cur_sp2.saturating_add(need_sp) - self.res.size();
-                                if let Err(err2) = transfer_or_grow(batch_res, &mut self.res, add2)
-                                {
+                                if let Err(err2) = self.res.try_grow(add2) {
                                     eval_res.free();
                                     return Err(err2.into());
                                 }
@@ -4276,8 +4277,29 @@ impl PushSink for HashAgg {
             }
             let cur_sp: usize = states.iter().map(AccState::spillable_heap_bytes).sum();
             let cur_unsp: usize = states.iter().map(AccState::unspillable_heap_bytes).sum();
-            self.res.resize(cur_sp)?;
-            self.unspillable_res.resize(cur_unsp)?;
+            if let Err(err) = self.res.resize(cur_sp) {
+                if matches!(err, ColumnError::MemoryLimit { .. })
+                    && flush_global_distinct_sets_inner(
+                        states,
+                        &mut self.distinct_spills,
+                        &mut self.res,
+                        &self.ctx,
+                    )?
+                {
+                    let cur_sp2: usize = states.iter().map(AccState::spillable_heap_bytes).sum();
+                    if let Err(err2) = self.res.resize(cur_sp2) {
+                        eval_res.free();
+                        return Err(err2.into());
+                    }
+                } else {
+                    eval_res.free();
+                    return Err(err.into());
+                }
+            }
+            if let Err(err) = self.unspillable_res.resize(cur_unsp) {
+                eval_res.free();
+                return Err(err.into());
+            }
             eval_res.free();
             return Ok(ControlFlow::Continue);
         }
@@ -4314,7 +4336,6 @@ impl PushSink for HashAgg {
                 &inputs,
                 &layout,
                 &mut group_state,
-                batch_res,
                 &mut spill_sink,
                 &self.ctx,
             );
@@ -4358,6 +4379,17 @@ impl PushSink for HashAgg {
     }
 
     fn finish(&mut self) -> Result<(), QueryError> {
+        if self.any_distinct_spilled() {
+            for i in 0..self.distinct_spills.len() {
+                if self.distinct_spills[i]
+                    .as_ref()
+                    .is_some_and(DistinctSlotSpill::has_spilled)
+                {
+                    self.flush_distinct_slot_idx(i)?;
+                    self.finish_distinct_slot_idx(i);
+                }
+            }
+        }
         if self.spilled && self.table.num_groups() > 0 {
             self.drain_table_to_writers(0)?;
         }
@@ -4564,7 +4596,6 @@ fn fold_grouped_row_with_spill(
     inputs: &GroupedBatchInputs<'_>,
     layout: &AggLayout<'_>,
     state: &mut GroupTableState<'_>,
-    batch_res: &mut Reservation,
     spill_sink: &mut SpillPartitionSink<'_>,
     ctx: &ExecContext,
 ) -> Result<(), QueryError> {
@@ -4617,7 +4648,7 @@ fn fold_grouped_row_with_spill(
                 0
             };
         let sp_ok = if sp_needed_total > state.res.size() {
-            transfer_or_grow(batch_res, state.res, sp_needed_total - state.res.size())
+            state.res.try_grow(sp_needed_total - state.res.size())
         } else {
             Ok(())
         };
@@ -5559,13 +5590,25 @@ fn fold_spill_partition_or_repartition(
                         (0..NUM_SPILL_PARTITIONS).map(|_| None).collect();
 
                     if local_table.num_groups() > 0 {
-                        if let Some(ds) = part_distinct
-                            .as_deref_mut()
-                            .or(owned_local_distinct.as_mut())
+                        let any_local_spilled = owned_local_distinct.as_ref().is_some_and(|ds| {
+                            ds.iter()
+                                .any(|s| s.as_ref().is_some_and(DistinctSlotSpill::has_spilled))
+                        });
+                        if let Some(ds) = part_distinct.as_deref_mut() {
+                            flush_distinct_slots_grouped(
+                                ds,
+                                false,
+                                &mut local_table,
+                                layout.group_types,
+                                &mut local_res,
+                                ctx,
+                            )?;
+                        } else if let Some(ds) = owned_local_distinct.as_mut()
+                            && any_local_spilled
                         {
                             flush_distinct_slots_grouped(
                                 ds,
-                                true,
+                                false,
                                 &mut local_table,
                                 layout.group_types,
                                 &mut local_res,
@@ -5709,7 +5752,7 @@ fn fold_spill_partition_or_repartition(
         if let Some(ds) = part_distinct {
             flush_distinct_slots_grouped(
                 ds,
-                true,
+                false,
                 &mut local_table,
                 layout.group_types,
                 &mut local_res,
@@ -6233,10 +6276,11 @@ fn flush_distinct_slot_grouped(
     let mut drained_groups: Vec<(usize, HashSet<KeyAtom>)> = Vec::new();
     let mut freed = 0usize;
     for (gi, row_states) in table.states.iter_mut().enumerate() {
+        let row_bytes = row_states[slot.agg_idx].spillable_heap_bytes();
         if let AccState::CountDistinct { set, heap_bytes } = &mut row_states[slot.agg_idx]
             && !set.is_empty()
         {
-            freed = freed.saturating_add(*heap_bytes);
+            freed = freed.saturating_add(row_bytes);
             *heap_bytes = 0;
             drained_groups.push((gi, std::mem::take(set)));
         }
@@ -6422,6 +6466,12 @@ fn count_distinct_global_from_files(
     Ok(count)
 }
 
+fn pending_group_entry_bytes(gk: &[KeyAtom]) -> usize {
+    size_of::<(Vec<KeyAtom>, i64)>()
+        + gk.len().saturating_mul(size_of::<KeyAtom>())
+        + gk.iter().map(KeyAtom::heap_bytes).sum::<usize>()
+}
+
 struct DistinctCountPerGroupStream {
     sorted: Box<dyn PartitionStream>,
     group_types: Vec<DataType>,
@@ -6431,6 +6481,7 @@ struct DistinctCountPerGroupStream {
     cur_last_val: Option<KeyAtom>,
     cur_count: i64,
     pending: VecDeque<(Vec<KeyAtom>, i64)>,
+    pending_bytes: usize,
     sorted_eof: bool,
     done: bool,
 }
@@ -6458,6 +6509,7 @@ impl DistinctCountPerGroupStream {
             cur_last_val: None,
             cur_count: 0,
             pending: VecDeque::new(),
+            pending_bytes: 0,
             sorted_eof: false,
             done: false,
         })
@@ -6468,19 +6520,29 @@ impl DistinctCountPerGroupStream {
         res: Option<&mut Reservation>,
         before: usize,
     ) -> Result<Option<Batch>, QueryError> {
-        let take_n = self.pending.len().min(self.ctx.batch_size.max(1));
-        if take_n == 0 {
+        let batch_limit = self.ctx.batch_size.max(1);
+        let frame_cap = target_spill_frame_bytes(&self.ctx);
+        let max_take = self.pending.len().min(batch_limit);
+        if max_take == 0 {
             rollback_res(res, before);
             return Ok(None);
         }
-        let mut keys = Vec::with_capacity(take_n);
-        let mut counts = Vec::with_capacity(take_n);
-        for _ in 0..take_n {
+        let mut keys = Vec::with_capacity(max_take);
+        let mut counts = Vec::with_capacity(max_take);
+        let mut emitted_bytes = 0usize;
+        for _ in 0..max_take {
+            if !keys.is_empty() && emitted_bytes >= frame_cap {
+                break;
+            }
             if let Some((gk, c)) = self.pending.pop_front() {
+                let eb = pending_group_entry_bytes(&gk);
+                self.pending_bytes = self.pending_bytes.saturating_sub(eb);
+                emitted_bytes = emitted_bytes.saturating_add(eb);
                 keys.push(gk);
                 counts.push(c);
             }
         }
+        let take_n = keys.len();
         let mut r = res;
         let mut scratch = r
             .is_none()
@@ -6520,14 +6582,19 @@ impl PartitionStream for DistinctCountPerGroupStream {
     ) -> Result<Option<Batch>, QueryError> {
         let before = res.as_ref().map_or(0, |r| r.size());
         let batch_limit = self.ctx.batch_size.max(1);
+        let frame_cap = target_spill_frame_bytes(&self.ctx);
         loop {
             if cancel.is_cancelled() || self.ctx.eval.cancel.is_cancelled() {
                 self.done = true;
                 self.pending.clear();
+                self.pending_bytes = 0;
                 rollback_res(res, before);
                 return Err(QueryError::Cancelled);
             }
-            if self.pending.len() >= batch_limit || (self.sorted_eof && !self.pending.is_empty()) {
+            if self.pending.len() >= batch_limit
+                || self.pending_bytes >= frame_cap
+                || (self.sorted_eof && !self.pending.is_empty())
+            {
                 return self.emit_pending(res, before);
             }
             if self.done || self.sorted_eof {
@@ -6547,6 +6614,9 @@ impl PartitionStream for DistinctCountPerGroupStream {
                         let dv = read_key_atom(&cols[k], row);
                         if self.cur_group.as_ref() != Some(&gk) {
                             if let Some(prev) = self.cur_group.take() {
+                                self.pending_bytes = self
+                                    .pending_bytes
+                                    .saturating_add(pending_group_entry_bytes(&prev));
                                 self.pending.push_back((prev, self.cur_count));
                             }
                             self.cur_group = Some(gk);
@@ -6567,6 +6637,9 @@ impl PartitionStream for DistinctCountPerGroupStream {
                 None => {
                     in_res.free();
                     if let Some(prev) = self.cur_group.take() {
+                        self.pending_bytes = self
+                            .pending_bytes
+                            .saturating_add(pending_group_entry_bytes(&prev));
                         self.pending.push_back((prev, self.cur_count));
                     }
                     self.sorted_eof = true;
@@ -6704,14 +6777,21 @@ impl PartitionStream for DistinctLeftOuterJoinStream {
                 rollback_res(res.as_deref_mut(), before);
                 return Err(QueryError::Cancelled);
             }
-            let Some(left_batch) = self.left_stream.next_batch(cancel, res.as_deref_mut())? else {
-                self.done = true;
-                for rc in &mut self.right_cursors {
-                    rc.batch = None;
-                    rc.res.free();
+            let left_batch = match self.left_stream.next_batch(cancel, res.as_deref_mut()) {
+                Ok(Some(b)) => b,
+                Ok(None) => {
+                    self.done = true;
+                    for rc in &mut self.right_cursors {
+                        rc.batch = None;
+                        rc.res.free();
+                    }
+                    rollback_res(res.as_deref_mut(), before);
+                    return Ok(None);
                 }
-                rollback_res(res.as_deref_mut(), before);
-                return Ok(None);
+                Err(err) => {
+                    rollback_res(res, before);
+                    return Err(err);
+                }
             };
             if left_batch.is_empty() {
                 drop(left_batch);
@@ -6719,44 +6799,59 @@ impl PartitionStream for DistinctLeftOuterJoinStream {
                 continue;
             }
 
-            let num_group_cols = self.group_types.len();
-            let raw_len = left_batch.raw_len();
-            let left_cols = left_batch.columns();
-            let mut new_counts: Vec<Vec<i64>> = self
-                .right_cursors
-                .iter()
-                .map(|_| vec![0i64; raw_len])
-                .collect();
+            let built = (|| -> Result<Batch, QueryError> {
+                let num_group_cols = self.group_types.len();
+                let raw_len = left_batch.raw_len();
+                let left_cols = left_batch.columns();
+                let mut new_counts: Vec<Vec<i64>> = self
+                    .right_cursors
+                    .iter()
+                    .map(|_| vec![0i64; raw_len])
+                    .collect();
 
-            let active_rows: Vec<usize> = match left_batch.selection() {
-                Selection::All => (0..raw_len).collect(),
-                Selection::Mask(mask) => (0..raw_len).filter(|&r| mask.get(r)).collect(),
-                Selection::Indices(idx) => idx.iter().map(|&i| i as usize).collect(),
-            };
-            for row in active_rows {
-                for (j, rc) in self.right_cursors.iter_mut().enumerate() {
-                    new_counts[j][row] = rc.count_for_group(
-                        left_cols,
-                        row,
-                        num_group_cols,
-                        &self.group_sort_keys,
-                        cancel,
-                    )?;
+                let active_rows: Vec<usize> = match left_batch.selection() {
+                    Selection::All => (0..raw_len).collect(),
+                    Selection::Mask(mask) => (0..raw_len).filter(|&r| mask.get(r)).collect(),
+                    Selection::Indices(idx) => idx.iter().map(|&i| i as usize).collect(),
+                };
+                for row in active_rows {
+                    for (j, rc) in self.right_cursors.iter_mut().enumerate() {
+                        new_counts[j][row] = rc.count_for_group(
+                            left_cols,
+                            row,
+                            num_group_cols,
+                            &self.group_sort_keys,
+                            cancel,
+                        )?;
+                    }
+                }
+
+                let mut out_cols: Vec<Arc<Column>> = left_cols.to_vec();
+                for (j, rc) in self.right_cursors.iter().enumerate() {
+                    let counts = std::mem::take(&mut new_counts[j]);
+                    let col = Column::Flat(FlatColumn::try_new(FlatData::I64(counts), None)?);
+                    out_cols[num_group_cols + rc.agg_idx] = Arc::new(col);
+                }
+                let sel = left_batch.selection().clone();
+                drop(left_batch);
+                Ok(Batch::try_new_shared(
+                    Arc::clone(&self.output_schema),
+                    out_cols,
+                    raw_len,
+                    sel,
+                )?)
+            })();
+
+            match built {
+                Ok(out_batch) => {
+                    reconcile_output(&mut res, before, out_batch.memory_bytes())?;
+                    return Ok(Some(out_batch));
+                }
+                Err(err) => {
+                    rollback_res(res, before);
+                    return Err(err);
                 }
             }
-
-            let mut out_cols: Vec<Arc<Column>> = left_cols.to_vec();
-            for (j, rc) in self.right_cursors.iter().enumerate() {
-                let counts = std::mem::take(&mut new_counts[j]);
-                let col = Column::Flat(FlatColumn::try_new(FlatData::I64(counts), None)?);
-                out_cols[num_group_cols + rc.agg_idx] = Arc::new(col);
-            }
-            let sel = left_batch.selection().clone();
-            drop(left_batch);
-            let out_batch =
-                Batch::try_new_shared(Arc::clone(&self.output_schema), out_cols, raw_len, sel)?;
-            reconcile_output(&mut res, before, out_batch.memory_bytes())?;
-            return Ok(Some(out_batch));
         }
     }
 }
@@ -8586,5 +8681,269 @@ mod tests {
         let out = execute_hash_agg(&src, &ScanSpec::default(), spec, &ctx).unwrap();
         let total_rows: usize = out.iter().map(Batch::num_rows).sum();
         assert_eq!(total_rows, 2);
+    }
+
+    #[test]
+    fn hash_agg_grouped_distinct_spill_with_partition_writers_preserves_counts() {
+        // H3a-B1 (a) single-worker: batch 1 NULLs spill partition_writers, batch 2 normal group g1,
+        // batch 3 skewed g2 spills distinct_spills -> g1 must emit exact count (not 0).
+        let schema = Schema::try_new_arc(vec![
+            Field::new("g", DataType::Utf8, false),
+            Field::new("dv", DataType::I64, true),
+        ])
+        .unwrap();
+
+        let mk_batch = |groups: Vec<String>, vals: Vec<Option<i64>>| -> Batch {
+            let n = groups.len();
+            let g_refs: Vec<&str> = groups.iter().map(String::as_str).collect();
+            let mut valid = Bitmap::new_zeroed(n);
+            let raw_vals: Vec<i64> = vals
+                .iter()
+                .enumerate()
+                .map(|(i, v)| match v {
+                    Some(x) => {
+                        let _ = valid.set(i, true);
+                        *x
+                    }
+                    None => 0,
+                })
+                .collect();
+            Batch::try_new_all(
+                Arc::clone(&schema),
+                vec![
+                    Column::Flat(
+                        FlatColumn::try_new(
+                            FlatData::Utf8(Utf8Data::try_from_slices(g_refs).unwrap()),
+                            None,
+                        )
+                        .unwrap(),
+                    ),
+                    Column::Flat(
+                        FlatColumn::try_new(FlatData::I64(raw_vals), Some(valid)).unwrap(),
+                    ),
+                ],
+                n,
+            )
+            .unwrap()
+        };
+
+        let b1a = mk_batch(
+            (0..200).map(|i| format!("p1_{i:04}")).collect(),
+            vec![None; 200],
+        );
+        let b1b = mk_batch(
+            (200..400).map(|i| format!("p1_{i:04}")).collect(),
+            vec![None; 200],
+        );
+        let b2 = mk_batch(
+            vec!["g1".to_owned(); 7],
+            vec![Some(1), Some(2), Some(2), Some(3), Some(4), Some(5), None],
+        );
+        let b3 = mk_batch(
+            vec!["g2".to_owned(); 2_500],
+            (0..2_500i64).map(Some).collect(),
+        );
+
+        let spec = HashAggSpec {
+            group_by: vec![("g".to_owned(), col_ref(0, "g", DataType::Utf8))],
+            aggs: vec![AggExpr {
+                func: AggFunc::CountDistinct(col_ref(1, "dv", DataType::I64)),
+                filter: None,
+                output_name: "cd".to_owned(),
+            }],
+        };
+
+        let collect_map = |batches: &[Batch]| -> std::collections::BTreeMap<String, i64> {
+            let mut m = std::collections::BTreeMap::new();
+            for b in batches {
+                for r in 0..b.num_rows() {
+                    let ScalarValue::Utf8(g) = b.column(0).unwrap().get_scalar(r).unwrap() else {
+                        panic!("expected Utf8");
+                    };
+                    let ScalarValue::I64(c) = b.column(1).unwrap().get_scalar(r).unwrap() else {
+                        panic!("expected I64");
+                    };
+                    assert!(m.insert(g, c).is_none(), "duplicate group");
+                }
+            }
+            m
+        };
+
+        let single_batches = vec![b1a.clone(), b1b.clone(), b2, b3];
+        let src_single = BatchSource::new(Arc::clone(&schema), single_batches).unwrap();
+        let (mut ctx_single, _dir1) = test_ctx(64 * 1024);
+        ctx_single.target_partitions = 1;
+        let parts_s = src_single
+            .open_partitions(&ScanSpec::default(), &ctx_single)
+            .unwrap();
+        let sinks_s = run_pipeline(&ctx_single, parts_s, |_| Ok(Vec::new()), {
+            let sp = spec.clone();
+            let sc = Arc::clone(&schema);
+            let cx = ctx_single.clone();
+            move |_| HashAgg::new(sp.clone(), Arc::clone(&sc), cx.clone())
+        })
+        .unwrap();
+        assert!(sinks_s[0].spilled);
+        assert!(sinks_s[0].any_distinct_spilled());
+        let out_batches = HashAgg::merge_sinks(sinks_s, &spec, &schema, &ctx_single).unwrap();
+        let out_single = collect_map(&out_batches);
+        assert_eq!(out_single.get("g1"), Some(&5));
+        assert_eq!(out_single.get("g2"), Some(&2_500));
+        assert_eq!(out_single.get("p1_0000"), Some(&0));
+        assert_eq!(out_single.len(), 402);
+        assert_eq!(ctx_single.spill.spilled_bytes(), 0);
+        assert_eq!(ctx_single.pool.reserved(), 0);
+
+        // H3a-B1 (b) multi-worker: worker 0 spills partition_writers (NULLs + normal g1) and
+        // worker 1 spills distinct_spills (skewed g2).
+        let mut p0_g1_groups = Vec::new();
+        let mut p0_g1_vals = Vec::new();
+        for v in [1i64, 2, 2, 3, 4, 5] {
+            p0_g1_groups.push("g1".to_owned());
+            p0_g1_vals.push(Some(v));
+        }
+        // First 3 batches -> partition 0 (400 p1_ NULLs across first 2 batches + g1 in batch 2)
+        // Next 3 batches -> partition 1 (5_000 distinct values for g2 in 2_500 + 2_500 + 0-dup)
+        let multi_batches = vec![
+            b1a,
+            b1b,
+            mk_batch(p0_g1_groups, p0_g1_vals),
+            mk_batch(
+                vec!["g2".to_owned(); 2_500],
+                (0..2_500i64).map(Some).collect(),
+            ),
+            mk_batch(
+                vec!["g2".to_owned(); 2_500],
+                (2_500..5_000i64).map(Some).collect(),
+            ),
+            mk_batch(vec!["g2".to_owned()], vec![Some(0)]),
+        ];
+        let src_multi = BatchSource::new(Arc::clone(&schema), multi_batches).unwrap();
+        let (mut ctx_multi, _dir2) = test_ctx(64 * 1024);
+        ctx_multi.target_partitions = 2;
+        let parts_m = src_multi
+            .open_partitions(&ScanSpec::default(), &ctx_multi)
+            .unwrap();
+        let sinks_m = run_pipeline(&ctx_multi, parts_m, |_| Ok(Vec::new()), {
+            let sp = spec.clone();
+            let sc = Arc::clone(&schema);
+            let cx = ctx_multi.clone();
+            move |_| HashAgg::new(sp.clone(), Arc::clone(&sc), cx.clone())
+        })
+        .unwrap();
+        assert!(sinks_m[0].spilled && !sinks_m[0].any_distinct_spilled());
+        assert!(sinks_m[1].any_distinct_spilled());
+        let out_multi =
+            collect_map(&HashAgg::merge_sinks(sinks_m, &spec, &schema, &ctx_multi).unwrap());
+        assert_eq!(out_multi.get("g1"), Some(&5));
+        assert_eq!(out_multi.get("g2"), Some(&5_000));
+        assert_eq!(out_multi.get("p1_0000"), Some(&0));
+        assert_eq!(out_multi.len(), 402);
+        assert_eq!(ctx_multi.spill.spilled_bytes(), 0);
+        assert_eq!(ctx_multi.pool.reserved(), 0);
+    }
+
+    #[test]
+    fn hash_agg_skewed_1_group_count_distinct_i64_and_fixed16_under_64k() {
+        // H3a-B2: flush_distinct_slot_grouped must free HashSet bucket capacity, not just *heap_bytes.
+        let n_distinct = 50_000usize;
+        let chunk = 256usize;
+
+        // 1. I64 distinct values
+        let schema_i64 = Schema::try_new_arc(vec![
+            Field::new("g", DataType::I64, false),
+            Field::new("v", DataType::I64, false),
+        ])
+        .unwrap();
+        let mut batches_i64 = Vec::new();
+        for start in (0..n_distinct).step_by(chunk) {
+            let end = (start + chunk).min(n_distinct);
+            let len = end - start;
+            batches_i64.push(
+                Batch::try_new_all(
+                    Arc::clone(&schema_i64),
+                    vec![
+                        Column::try_new_const(ScalarValue::I64(1), len).unwrap(),
+                        Column::Flat(
+                            FlatColumn::try_new(
+                                FlatData::I64((start as i64..end as i64).collect()),
+                                None,
+                            )
+                            .unwrap(),
+                        ),
+                    ],
+                    len,
+                )
+                .unwrap(),
+            );
+        }
+        let src_i64 = BatchSource::new(Arc::clone(&schema_i64), batches_i64).unwrap();
+        let spec_i64 = HashAggSpec {
+            group_by: vec![("g".to_owned(), col_ref(0, "g", DataType::I64))],
+            aggs: vec![AggExpr {
+                func: AggFunc::CountDistinct(col_ref(1, "v", DataType::I64)),
+                filter: None,
+                output_name: "cd".to_owned(),
+            }],
+        };
+        let (mut ctx_i64, _d1) = test_ctx(64 * 1024);
+        ctx_i64.target_partitions = 1;
+        let out_i64 = execute_hash_agg(&src_i64, &ScanSpec::default(), spec_i64, &ctx_i64).unwrap();
+        assert_eq!(out_i64.iter().map(Batch::num_rows).sum::<usize>(), 1);
+        assert_eq!(
+            out_i64[0].column(1).unwrap().get_scalar(0).unwrap(),
+            ScalarValue::I64(n_distinct as i64)
+        );
+        assert_eq!(ctx_i64.pool.reserved(), 0);
+
+        // 2. FixedBytes16 distinct values
+        let schema_f16 = Schema::try_new_arc(vec![
+            Field::new("g", DataType::I64, false),
+            Field::new("v", DataType::FixedBytes16, false),
+        ])
+        .unwrap();
+        let mut batches_f16 = Vec::new();
+        for start in (0..n_distinct).step_by(chunk) {
+            let end = (start + chunk).min(n_distinct);
+            let len = end - start;
+            let vals: Vec<[u8; 16]> = (start..end)
+                .map(|i| {
+                    let mut b = [0u8; 16];
+                    b[..8].copy_from_slice(&(i as u64).to_le_bytes());
+                    b
+                })
+                .collect();
+            batches_f16.push(
+                Batch::try_new_all(
+                    Arc::clone(&schema_f16),
+                    vec![
+                        Column::try_new_const(ScalarValue::I64(1), len).unwrap(),
+                        Column::Flat(
+                            FlatColumn::try_new(FlatData::FixedBytes16(vals), None).unwrap(),
+                        ),
+                    ],
+                    len,
+                )
+                .unwrap(),
+            );
+        }
+        let src_f16 = BatchSource::new(Arc::clone(&schema_f16), batches_f16).unwrap();
+        let spec_f16 = HashAggSpec {
+            group_by: vec![("g".to_owned(), col_ref(0, "g", DataType::I64))],
+            aggs: vec![AggExpr {
+                func: AggFunc::CountDistinct(col_ref(1, "v", DataType::FixedBytes16)),
+                filter: None,
+                output_name: "cd".to_owned(),
+            }],
+        };
+        let (mut ctx_f16, _d2) = test_ctx(64 * 1024);
+        ctx_f16.target_partitions = 1;
+        let out_f16 = execute_hash_agg(&src_f16, &ScanSpec::default(), spec_f16, &ctx_f16).unwrap();
+        assert_eq!(out_f16.iter().map(Batch::num_rows).sum::<usize>(), 1);
+        assert_eq!(
+            out_f16[0].column(1).unwrap().get_scalar(0).unwrap(),
+            ScalarValue::I64(n_distinct as i64)
+        );
+        assert_eq!(ctx_f16.pool.reserved(), 0);
     }
 }

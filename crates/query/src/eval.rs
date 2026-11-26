@@ -167,23 +167,18 @@ pub(crate) fn eval_expr_masked(
     let res: Result<Arc<Column>, QueryError> = match expr {
         Expr::Column {
             index, data_type, ..
-        } => {
-            let col = batch.column_arc(*index).ok_or(ColumnError::InvalidBatch {
+        } => match batch.column_arc(*index) {
+            None => Err(ColumnError::InvalidBatch {
                 reason: "column index out of bounds",
-            })?;
-            if col.data_type() != *data_type {
-                return Err(ColumnError::InvalidBatch {
-                    reason: "column data type mismatch",
-                }
-                .into());
             }
-            Ok(Arc::clone(col))
-        }
-        Expr::Literal(val) => {
-            try_reserve(&mut pool, val.heap_bytes())?;
-            let col = Column::try_new_const(val.clone(), raw_len)?;
-            Ok(Arc::new(col))
-        }
+            .into()),
+            Some(col) if col.data_type() != *data_type => Err(ColumnError::InvalidBatch {
+                reason: "column data type mismatch",
+            }
+            .into()),
+            Some(col) => Ok(Arc::clone(col)),
+        },
+        Expr::Literal(val) => eval_literal_const(val, raw_len, pool.as_deref_mut()).map(Arc::new),
         Expr::Unary {
             op,
             expr: inner,
@@ -286,21 +281,18 @@ pub(crate) fn eval_expr_masked(
             escape,
             case_insensitive,
             negated,
-        } => {
-            let val_col = eval_expr_masked(inner, batch, active, ctx, pool.as_deref_mut())?;
-            let pat_col = eval_expr_masked(pattern, batch, active, ctx, pool.as_deref_mut())?;
-            crate::fn_string::eval_like(
-                &val_col,
-                &pat_col,
-                *escape,
-                *case_insensitive,
-                *negated,
-                active,
-                ctx,
-                pool.as_deref_mut(),
-            )
-            .map(Arc::new)
-        }
+        } => eval_like_expr(
+            inner,
+            pattern,
+            *escape,
+            *case_insensitive,
+            *negated,
+            batch,
+            active,
+            ctx,
+            pool.as_deref_mut(),
+        )
+        .map(Arc::new),
         Expr::Call {
             func,
             args,
@@ -331,6 +323,44 @@ pub(crate) fn eval_expr_masked(
             Err(err)
         }
     }
+}
+
+fn eval_literal_const(
+    val: &ScalarValue,
+    raw_len: usize,
+    mut pool: Option<&mut Reservation>,
+) -> Result<Column, QueryError> {
+    try_reserve(&mut pool, val.heap_bytes())?;
+    Ok(Column::try_new_const(val.clone(), raw_len)?)
+}
+
+#[expect(
+    clippy::too_many_arguments,
+    reason = "LIKE expression helper forwards AST fields plus batch/mask/ctx/pool"
+)]
+fn eval_like_expr(
+    inner: &Expr,
+    pattern: &Expr,
+    escape: Option<char>,
+    case_insensitive: bool,
+    negated: bool,
+    batch: &Batch,
+    active: Option<&Bitmap>,
+    ctx: &EvalContext,
+    mut pool: Option<&mut Reservation>,
+) -> Result<Column, QueryError> {
+    let val_col = eval_expr_masked(inner, batch, active, ctx, pool.as_deref_mut())?;
+    let pat_col = eval_expr_masked(pattern, batch, active, ctx, pool.as_deref_mut())?;
+    crate::fn_string::eval_like(
+        &val_col,
+        &pat_col,
+        escape,
+        case_insensitive,
+        negated,
+        active,
+        ctx,
+        pool,
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -968,8 +998,7 @@ fn eval_coalesce_lazy(
     }
 
     let bm_bytes = bitmap_mem_bytes(raw_len);
-    let row_source_bytes =
-        checked_fixed_bytes(raw_len, size_of::<Option<(usize, usize)>>(), false)?;
+    let row_source_bytes = checked_fixed_bytes(raw_len, size_of::<Option<usize>>(), false)?;
     try_reserve(
         &mut pool,
         bm_bytes
@@ -979,7 +1008,7 @@ fn eval_coalesce_lazy(
 
     let mut remaining = active.cloned().unwrap_or_else(|| Bitmap::new_ones(raw_len));
     let mut arg_cols: Vec<Arc<Column>> = Vec::with_capacity(args.len());
-    let mut row_source: Vec<Option<(usize, usize)>> = vec![None; raw_len];
+    let mut row_source: Vec<Option<usize>> = vec![None; raw_len];
 
     for arg in args {
         if remaining.all_zeros() {
@@ -1003,7 +1032,7 @@ fn eval_coalesce_lazy(
                 check_cancel(ctx, &mut pool, before)?;
             }
             if remaining.get(row) && !col.is_null(row) {
-                *slot = Some((col_idx, row));
+                *slot = Some(col_idx);
                 let _ = remaining.set(row, false);
                 any_won = true;
             }
@@ -1025,7 +1054,7 @@ fn eval_coalesce_lazy(
         data_type,
         raw_len,
         |row| match row_source[row] {
-            Some((ci, r)) if !arg_cols[ci].is_null(r) => ElemRef::Col(&arg_cols[ci], r),
+            Some(ci) if !arg_cols[ci].is_null(row) => ElemRef::Col(&arg_cols[ci], row),
             _ => ElemRef::Null,
         },
         &mut pool,
@@ -6801,5 +6830,62 @@ mod tests {
         assert_eq!(out_b.get_scalar(0).unwrap(), ScalarValue::Bool(false));
         let (_, _, _, in_list_cnt, _) = shared_ctx.cache.stats();
         assert_eq!(in_list_cnt, 2);
+    }
+
+    #[test]
+    fn eval_expr_masked_like_pattern_err_rolls_back_reservation() {
+        let schema = Schema::try_new_arc(vec![Field::new("s", DataType::Utf8, false)]).unwrap();
+        let batch = Batch::try_new_all(
+            Arc::clone(&schema),
+            vec![Column::Flat(
+                FlatColumn::try_new(
+                    FlatData::Utf8(Utf8Data::try_from_slices(["hello", "world"]).unwrap()),
+                    None,
+                )
+                .unwrap(),
+            )],
+            2,
+        )
+        .unwrap();
+
+        let like_expr = Expr::Like {
+            expr: Box::new(Expr::Call {
+                func: ScalarFn::Upper,
+                args: vec![Expr::Column {
+                    index: 0,
+                    name: "s".to_owned(),
+                    data_type: DataType::Utf8,
+                }],
+                data_type: DataType::Utf8,
+            }),
+            pattern: Box::new(Expr::Cast {
+                expr: Box::new(Expr::Binary {
+                    left: Box::new(Expr::Literal(ScalarValue::I64(1))),
+                    op: BinaryOp::Div,
+                    right: Box::new(Expr::Literal(ScalarValue::I64(0))),
+                    data_type: DataType::I64,
+                }),
+                target: DataType::Utf8,
+                mode: CastMode::Strict,
+            }),
+            escape: Some('\\'),
+            case_insensitive: false,
+            negated: false,
+        };
+
+        let pool = GlobalPool::standalone(1024 * 1024);
+        let mut res = pool.register("like_rollback", false);
+        res.try_grow(128).unwrap();
+        let before = res.size();
+        let err = eval_expr_masked(
+            &like_expr,
+            &batch,
+            None,
+            &EvalContext::new(0, CancelToken::new()),
+            Some(&mut res),
+        )
+        .unwrap_err();
+        assert!(matches!(err, QueryError::Failed(_)));
+        assert_eq!(res.size(), before);
     }
 }

@@ -293,18 +293,38 @@ impl ExternalSort {
         batch_res: &mut Reservation,
     ) -> Result<(), QueryError> {
         let before = self.res.size();
+        let batch_res_before = batch_res.size();
+        let rollback = |res: &mut Reservation, batch_res: &mut Reservation| {
+            let transferred = batch_res_before.saturating_sub(batch_res.size());
+            let target = before.saturating_add(transferred);
+            if res.size() > target {
+                res.shrink(res.size() - target);
+            }
+            if transferred > 0 {
+                let _ = res.transfer_to(batch_res, transferred);
+            }
+            if res.size() > before {
+                res.shrink(res.size() - before);
+            }
+        };
         let compacted = if batch.selection().is_all(batch.raw_len()) {
             let mem = batch.memory_bytes();
             if let Err(err) = transfer_or_grow(batch_res, &mut self.res, mem) {
-                self.res.shrink(self.res.size().saturating_sub(before));
+                rollback(&mut self.res, batch_res);
                 return Err(err.into());
             }
-            batch.clone().into_with_selection(Selection::All)?
+            match batch.clone().into_with_selection(Selection::All) {
+                Ok(b) => b,
+                Err(err) => {
+                    rollback(&mut self.res, batch_res);
+                    return Err(err.into());
+                }
+            }
         } else {
             match batch.compact(Some(&mut self.res)) {
                 Ok(b) => b,
                 Err(err) => {
-                    self.res.shrink(self.res.size().saturating_sub(before));
+                    rollback(&mut self.res, batch_res);
                     return Err(err.into());
                 }
             }
@@ -314,7 +334,7 @@ impl ExternalSort {
             match eval_extra_sort_keys(&self.keys, &compacted, &self.ctx.eval, &mut self.res) {
                 Ok(ek) => ek,
                 Err(err) => {
-                    self.res.shrink(self.res.size().saturating_sub(before));
+                    rollback(&mut self.res, batch_res);
                     return Err(err);
                 }
             };
@@ -2835,6 +2855,84 @@ fn build_opt_scalar_col(
     eval::build_flat_from_elem_refs(out_dt, &refs, &mut Some(res), eval_ctx, before)
 }
 
+fn col_access_owned_bytes(access: &ColAccess<'_>) -> usize {
+    match access {
+        ColAccess::Borrowed(_) => 0,
+        ColAccess::Owned(col) => col.memory_bytes(),
+    }
+}
+
+fn push_ring_val(
+    ring: &mut VecDeque<Option<ScalarValue>>,
+    val: Option<ScalarValue>,
+    res: &mut Reservation,
+) -> Result<(), QueryError> {
+    let bytes = opt_scalar_bytes(&val);
+    res.try_grow(bytes)?;
+    ring.push_back(val);
+    Ok(())
+}
+
+fn pop_ring_val(
+    ring: &mut VecDeque<Option<ScalarValue>>,
+    res: &mut Reservation,
+) -> Option<Option<ScalarValue>> {
+    let popped = ring.pop_front()?;
+    let bytes = opt_scalar_bytes(&popped);
+    res.shrink(res.size().min(bytes));
+    Some(popped)
+}
+
+fn clear_ring_vals(ring: &mut VecDeque<Option<ScalarValue>>, res: &mut Reservation) {
+    let bytes: usize = ring.iter().map(opt_scalar_bytes).sum();
+    ring.clear();
+    res.shrink(res.size().min(bytes));
+}
+
+fn push_out_val(
+    out_vals: &mut Vec<Option<ScalarValue>>,
+    val: Option<ScalarValue>,
+    res: &mut Reservation,
+) -> Result<(), QueryError> {
+    let bytes = opt_scalar_bytes(&val);
+    res.try_grow(bytes)?;
+    out_vals.push(val);
+    Ok(())
+}
+
+fn update_res_delta(
+    res: &mut Reservation,
+    old_bytes: usize,
+    new_bytes: usize,
+) -> Result<(), QueryError> {
+    if new_bytes > old_bytes {
+        res.try_grow(new_bytes - old_bytes)?;
+    } else if old_bytes > new_bytes {
+        res.shrink(res.size().min(old_bytes - new_bytes));
+    }
+    Ok(())
+}
+
+fn finish_streaming_opt_col(
+    out_dt: &DataType,
+    out_vals: Vec<Option<ScalarValue>>,
+    eval_ctx: &EvalContext,
+    res: &mut Reservation,
+    before: usize,
+    state_before: usize,
+    state_after: usize,
+) -> Result<Column, QueryError> {
+    let out_vals_bytes: usize = out_vals.iter().map(opt_scalar_bytes).sum();
+    let col = build_opt_scalar_col(out_dt, &out_vals, eval_ctx, res, res.size())?;
+    drop(out_vals);
+    res.shrink(res.size().min(out_vals_bytes));
+    let target_before_col = before
+        .saturating_sub(state_before)
+        .saturating_add(state_after);
+    reconcile_output(&mut Some(res), target_before_col, col.memory_bytes())?;
+    Ok(col)
+}
+
 #[expect(
     clippy::too_many_arguments,
     reason = "streaming window spec evaluator needs batch, partition boundaries, peer flags, and reservation"
@@ -2852,6 +2950,7 @@ fn eval_streaming_spec_col(
 ) -> Result<Column, QueryError> {
     let n = batch.num_rows();
     let before = res.size();
+    let state_before = state.heap_bytes();
 
     match (state, &spec.func) {
         (StreamingSpecState::RowNumber, WindowFunc::RowNumber) => {
@@ -2897,6 +2996,8 @@ fn eval_streaming_spec_col(
                 Some(d) => Some(eval_or_borrow(d, batch, eval_ctx, res)?),
                 None => None,
             };
+            let val_bytes = col_access_owned_bytes(&val_access);
+            let def_bytes = def_access.as_ref().map_or(0, col_access_owned_bytes);
             let val_col = val_access.as_col();
             let def_col = def_access.as_ref().map(ColAccess::as_col);
             let mut out_vals: Vec<Option<ScalarValue>> = Vec::with_capacity(n);
@@ -2905,26 +3006,34 @@ fn eval_streaming_spec_col(
                     check_cancel(eval_ctx, &mut Some(res), before)?;
                 }
                 if part_reset[row] {
-                    ring.clear();
+                    clear_ring_vals(ring, res);
                 }
                 let cur_val = (!val_col.is_null(row)).then(|| read_scalar(val_col, row));
                 if *offset == 0 {
-                    out_vals.push(cur_val);
+                    push_out_val(&mut out_vals, cur_val, res)?;
                 } else {
                     let out = if part_row[row] < *offset {
                         def_col.and_then(|dc| (!dc.is_null(row)).then(|| read_scalar(dc, row)))
                     } else {
-                        ring.pop_front().flatten()
+                        pop_ring_val(ring, res).flatten()
                     };
-                    ring.push_back(cur_val);
-                    out_vals.push(out);
+                    push_ring_val(ring, cur_val, res)?;
+                    push_out_val(&mut out_vals, out, res)?;
                 }
             }
             drop(def_access);
             drop(val_access);
-            let col = build_opt_scalar_col(out_dt, &out_vals, eval_ctx, res, before)?;
-            reconcile_output(&mut Some(res), before, col.memory_bytes())?;
-            Ok(col)
+            res.shrink(res.size().min(val_bytes.saturating_add(def_bytes)));
+            let state_after: usize = ring.iter().map(opt_scalar_bytes).sum();
+            finish_streaming_opt_col(
+                out_dt,
+                out_vals,
+                eval_ctx,
+                res,
+                before,
+                state_before,
+                state_after,
+            )
         }
         (
             StreamingSpecState::FrameFirstLast {
@@ -2938,6 +3047,7 @@ fn eval_streaming_spec_col(
             WindowFunc::FirstValue(expr) | WindowFunc::LastValue(expr),
         ) => {
             let val_access = eval_or_borrow(expr, batch, eval_ctx, res)?;
+            let val_bytes = col_access_owned_bytes(&val_access);
             let val_col = val_access.as_col();
             let mut out_vals: Vec<Option<ScalarValue>> = Vec::with_capacity(n);
             for row in 0..n {
@@ -2945,8 +3055,10 @@ fn eval_streaming_spec_col(
                     check_cancel(eval_ctx, &mut Some(res), before)?;
                 }
                 if part_reset[row] {
-                    *first_val = None;
-                    ring.clear();
+                    if let Some(old_fv) = first_val.take() {
+                        res.shrink(res.size().min(opt_scalar_bytes(&old_fv)));
+                    }
+                    clear_ring_vals(ring, res);
                     *ring_start = 0;
                 }
                 let cur_val = (!val_col.is_null(row)).then(|| read_scalar(val_col, row));
@@ -2954,7 +3066,11 @@ fn eval_streaming_spec_col(
                 let out = match (*start, *end) {
                     (FrameBound::UnboundedPreceding, FrameBound::CurrentRow) => {
                         if p_row == 0 {
-                            *first_val = Some(cur_val.clone());
+                            let old_b = first_val.as_ref().map_or(0, opt_scalar_bytes);
+                            let next_fv = Some(cur_val.clone());
+                            let new_b = next_fv.as_ref().map_or(0, opt_scalar_bytes);
+                            update_res_delta(res, old_b, new_b)?;
+                            *first_val = next_fv;
                         }
                         if *is_last {
                             cur_val
@@ -2964,14 +3080,18 @@ fn eval_streaming_spec_col(
                     }
                     (FrameBound::UnboundedPreceding, FrameBound::Preceding(k)) => {
                         if p_row == 0 {
-                            *first_val = Some(cur_val.clone());
+                            let old_b = first_val.as_ref().map_or(0, opt_scalar_bytes);
+                            let next_fv = Some(cur_val.clone());
+                            let new_b = next_fv.as_ref().map_or(0, opt_scalar_bytes);
+                            update_res_delta(res, old_b, new_b)?;
+                            *first_val = next_fv;
                         }
                         let delay = k as usize;
-                        ring.push_back(cur_val);
+                        push_ring_val(ring, cur_val, res)?;
                         if p_row < delay {
                             None
                         } else {
-                            let end_val = ring.pop_front().flatten();
+                            let end_val = pop_ring_val(ring, res).flatten();
                             if *is_last {
                                 end_val
                             } else {
@@ -2980,11 +3100,12 @@ fn eval_streaming_spec_col(
                         }
                     }
                     (FrameBound::CurrentRow, FrameBound::CurrentRow) => cur_val,
+                    (FrameBound::CurrentRow, FrameBound::Preceding(_)) => None,
                     (FrameBound::Preceding(m), _) => {
                         let max_keep = (m as usize) + 1;
-                        ring.push_back(cur_val);
+                        push_ring_val(ring, cur_val, res)?;
                         if ring.len() > max_keep {
-                            ring.pop_front();
+                            pop_ring_val(ring, res);
                             *ring_start += 1;
                         }
                         match stream_frame_bounds(*start, *end, p_row) {
@@ -3001,12 +3122,21 @@ fn eval_streaming_spec_col(
                         ));
                     }
                 };
-                out_vals.push(out);
+                push_out_val(&mut out_vals, out, res)?;
             }
             drop(val_access);
-            let col = build_opt_scalar_col(out_dt, &out_vals, eval_ctx, res, before)?;
-            reconcile_output(&mut Some(res), before, col.memory_bytes())?;
-            Ok(col)
+            res.shrink(res.size().min(val_bytes));
+            let state_after = first_val.as_ref().map_or(0, opt_scalar_bytes)
+                + ring.iter().map(opt_scalar_bytes).sum::<usize>();
+            finish_streaming_opt_col(
+                out_dt,
+                out_vals,
+                eval_ctx,
+                res,
+                before,
+                state_before,
+                state_after,
+            )
         }
         (
             StreamingSpecState::FrameCount {
@@ -3058,6 +3188,7 @@ fn eval_streaming_spec_col(
                             }
                         }
                         (FrameBound::CurrentRow, FrameBound::CurrentRow) => i64::from(non_null),
+                        (FrameBound::CurrentRow, FrameBound::Preceding(_)) => 0,
                         (FrameBound::Preceding(m), _) => {
                             let max_keep = (m as usize) + 1;
                             ring.push_back(non_null);
@@ -3102,6 +3233,7 @@ fn eval_streaming_spec_col(
             WindowFunc::Sum(expr),
         ) => {
             let val_access = eval_or_borrow(expr, batch, eval_ctx, res)?;
+            let val_bytes = col_access_owned_bytes(&val_access);
             let col = val_access.as_col();
             let mut out_vals: Vec<Option<ScalarValue>> = Vec::with_capacity(n);
             for row in 0..n {
@@ -3110,7 +3242,7 @@ fn eval_streaming_spec_col(
                 }
                 if part_reset[row] {
                     acc.reset();
-                    ring.clear();
+                    clear_ring_vals(ring, res);
                     *ring_start = 0;
                 }
                 let cur_val = (!col.is_null(row)).then(|| read_scalar(col, row));
@@ -3122,11 +3254,11 @@ fn eval_streaming_spec_col(
                     }
                     (FrameBound::UnboundedPreceding, FrameBound::Preceding(k)) => {
                         let delay = k as usize;
-                        ring.push_back(cur_val);
+                        push_ring_val(ring, cur_val, res)?;
                         if p_row < delay {
                             None
                         } else {
-                            let old = ring.pop_front().flatten();
+                            let old = pop_ring_val(ring, res).flatten();
                             acc.add_scalar(old.as_ref())?;
                             acc.to_scalar()
                         }
@@ -3136,11 +3268,12 @@ fn eval_streaming_spec_col(
                         acc.add_scalar(cur_val.as_ref())?;
                         acc.to_scalar()
                     }
+                    (FrameBound::CurrentRow, FrameBound::Preceding(_)) => None,
                     (FrameBound::Preceding(m), _) => {
                         let max_keep = (m as usize) + 1;
-                        ring.push_back(cur_val);
+                        push_ring_val(ring, cur_val, res)?;
                         if ring.len() > max_keep {
-                            ring.pop_front();
+                            pop_ring_val(ring, res);
                             *ring_start += 1;
                         }
                         match stream_frame_bounds(*start, *end, p_row) {
@@ -3156,12 +3289,20 @@ fn eval_streaming_spec_col(
                     }
                     _ => return Err(QueryError::internal("non-streamable frame in SUM")),
                 };
-                out_vals.push(out);
+                push_out_val(&mut out_vals, out, res)?;
             }
             drop(val_access);
-            let out_col = build_opt_scalar_col(out_dt, &out_vals, eval_ctx, res, before)?;
-            reconcile_output(&mut Some(res), before, out_col.memory_bytes())?;
-            Ok(out_col)
+            res.shrink(res.size().min(val_bytes));
+            let state_after: usize = ring.iter().map(opt_scalar_bytes).sum();
+            finish_streaming_opt_col(
+                out_dt,
+                out_vals,
+                eval_ctx,
+                res,
+                before,
+                state_before,
+                state_after,
+            )
         }
         (
             StreamingSpecState::FrameAvg {
@@ -3174,6 +3315,7 @@ fn eval_streaming_spec_col(
             WindowFunc::Avg(expr),
         ) => {
             let val_access = eval_or_borrow(expr, batch, eval_ctx, res)?;
+            let val_bytes = col_access_owned_bytes(&val_access);
             let col = val_access.as_col();
             let mut out_vals: Vec<Option<ScalarValue>> = Vec::with_capacity(n);
             for row in 0..n {
@@ -3182,7 +3324,7 @@ fn eval_streaming_spec_col(
                 }
                 if part_reset[row] {
                     acc.reset();
-                    ring.clear();
+                    clear_ring_vals(ring, res);
                     *ring_start = 0;
                 }
                 let cur_val = (!col.is_null(row)).then(|| read_scalar(col, row));
@@ -3194,11 +3336,11 @@ fn eval_streaming_spec_col(
                     }
                     (FrameBound::UnboundedPreceding, FrameBound::Preceding(k)) => {
                         let delay = k as usize;
-                        ring.push_back(cur_val);
+                        push_ring_val(ring, cur_val, res)?;
                         if p_row < delay {
                             None
                         } else {
-                            let old = ring.pop_front().flatten();
+                            let old = pop_ring_val(ring, res).flatten();
                             acc.add_scalar(old.as_ref())?;
                             acc.to_scalar()?
                         }
@@ -3208,11 +3350,12 @@ fn eval_streaming_spec_col(
                         acc.add_scalar(cur_val.as_ref())?;
                         acc.to_scalar()?
                     }
+                    (FrameBound::CurrentRow, FrameBound::Preceding(_)) => None,
                     (FrameBound::Preceding(m), _) => {
                         let max_keep = (m as usize) + 1;
-                        ring.push_back(cur_val);
+                        push_ring_val(ring, cur_val, res)?;
                         if ring.len() > max_keep {
-                            ring.pop_front();
+                            pop_ring_val(ring, res);
                             *ring_start += 1;
                         }
                         match stream_frame_bounds(*start, *end, p_row) {
@@ -3228,12 +3371,20 @@ fn eval_streaming_spec_col(
                     }
                     _ => return Err(QueryError::internal("non-streamable frame in AVG")),
                 };
-                out_vals.push(out);
+                push_out_val(&mut out_vals, out, res)?;
             }
             drop(val_access);
-            let out_col = build_opt_scalar_col(out_dt, &out_vals, eval_ctx, res, before)?;
-            reconcile_output(&mut Some(res), before, out_col.memory_bytes())?;
-            Ok(out_col)
+            res.shrink(res.size().min(val_bytes));
+            let state_after: usize = ring.iter().map(opt_scalar_bytes).sum();
+            finish_streaming_opt_col(
+                out_dt,
+                out_vals,
+                eval_ctx,
+                res,
+                before,
+                state_before,
+                state_after,
+            )
         }
         (
             StreamingSpecState::FrameMinMax {
@@ -3247,6 +3398,7 @@ fn eval_streaming_spec_col(
             WindowFunc::Min(expr) | WindowFunc::Max(expr),
         ) => {
             let val_access = eval_or_borrow(expr, batch, eval_ctx, res)?;
+            let val_bytes = col_access_owned_bytes(&val_access);
             let col = val_access.as_col();
             let mut out_vals: Vec<Option<ScalarValue>> = Vec::with_capacity(n);
             for row in 0..n {
@@ -3254,8 +3406,10 @@ fn eval_streaming_spec_col(
                     check_cancel(eval_ctx, &mut Some(res), before)?;
                 }
                 if part_reset[row] {
-                    *best = None;
-                    ring.clear();
+                    if let Some(old_best) = best.take() {
+                        res.shrink(res.size().min(old_best.heap_bytes()));
+                    }
+                    clear_ring_vals(ring, res);
                     *ring_start = 0;
                 }
                 let cur_val = (!col.is_null(row)).then(|| read_scalar(col, row));
@@ -3267,6 +3421,9 @@ fn eval_streaming_spec_col(
                                 .as_ref()
                                 .is_none_or(|cur| min_max_better(&cand, cur, *is_max));
                             if take {
+                                let old_b = best.as_ref().map_or(0, ScalarValue::heap_bytes);
+                                let new_b = cand.heap_bytes();
+                                update_res_delta(res, old_b, new_b)?;
                                 *best = Some(cand);
                             }
                         }
@@ -3274,15 +3431,18 @@ fn eval_streaming_spec_col(
                     }
                     (FrameBound::UnboundedPreceding, FrameBound::Preceding(k)) => {
                         let delay = k as usize;
-                        ring.push_back(cur_val);
+                        push_ring_val(ring, cur_val, res)?;
                         if p_row < delay {
                             None
                         } else {
-                            if let Some(cand) = ring.pop_front().flatten() {
+                            if let Some(cand) = pop_ring_val(ring, res).flatten() {
                                 let take = best
                                     .as_ref()
                                     .is_none_or(|cur| min_max_better(&cand, cur, *is_max));
                                 if take {
+                                    let old_b = best.as_ref().map_or(0, ScalarValue::heap_bytes);
+                                    let new_b = cand.heap_bytes();
+                                    update_res_delta(res, old_b, new_b)?;
                                     *best = Some(cand);
                                 }
                             }
@@ -3290,11 +3450,12 @@ fn eval_streaming_spec_col(
                         }
                     }
                     (FrameBound::CurrentRow, FrameBound::CurrentRow) => cur_val,
+                    (FrameBound::CurrentRow, FrameBound::Preceding(_)) => None,
                     (FrameBound::Preceding(m), _) => {
                         let max_keep = (m as usize) + 1;
-                        ring.push_back(cur_val);
+                        push_ring_val(ring, cur_val, res)?;
                         if ring.len() > max_keep {
-                            ring.pop_front();
+                            pop_ring_val(ring, res);
                             *ring_start += 1;
                         }
                         match stream_frame_bounds(*start, *end, p_row) {
@@ -3316,12 +3477,21 @@ fn eval_streaming_spec_col(
                     }
                     _ => return Err(QueryError::internal("non-streamable frame in MIN/MAX")),
                 };
-                out_vals.push(out);
+                push_out_val(&mut out_vals, out, res)?;
             }
             drop(val_access);
-            let out_col = build_opt_scalar_col(out_dt, &out_vals, eval_ctx, res, before)?;
-            reconcile_output(&mut Some(res), before, out_col.memory_bytes())?;
-            Ok(out_col)
+            res.shrink(res.size().min(val_bytes));
+            let state_after = best.as_ref().map_or(0, ScalarValue::heap_bytes)
+                + ring.iter().map(opt_scalar_bytes).sum::<usize>();
+            finish_streaming_opt_col(
+                out_dt,
+                out_vals,
+                eval_ctx,
+                res,
+                before,
+                state_before,
+                state_after,
+            )
         }
         _ => Err(QueryError::internal("streaming window state mismatch")),
     }
@@ -5451,8 +5621,15 @@ mod tests {
             .open_partitions(&ScanSpec::default(), &ctx)
             .unwrap()
             .remove(0);
-        let mut win =
-            eval_window_group(input, Arc::clone(&schema), vec![], order_by, specs, &ctx).unwrap();
+        let mut win = eval_window_group(
+            input,
+            Arc::clone(&schema),
+            vec![],
+            order_by.clone(),
+            specs,
+            &ctx,
+        )
+        .unwrap();
         let out = drain_stream(win.as_mut(), &ctx).unwrap();
         drop(win);
         assert_eq!(ctx.spill.spilled_bytes(), 0);
@@ -5510,5 +5687,166 @@ mod tests {
             func: WindowFunc::Rank,
             output_name: "rk".to_owned(),
         }]));
+
+        // H3a-B3: streaming empty frame ROWS BETWEEN 0 PRECEDING AND 2 PRECEDING.
+        let empty_frame = Some((FrameBound::Preceding(0), FrameBound::Preceding(2)));
+        let empty_specs = vec![
+            WindowSpec {
+                partition_by: vec![],
+                order_by: order_by.clone(),
+                frame: empty_frame,
+                func: WindowFunc::Count(None),
+                output_name: "cnt_star".to_owned(),
+            },
+            WindowSpec {
+                partition_by: vec![],
+                order_by: order_by.clone(),
+                frame: empty_frame,
+                func: WindowFunc::Count(Some(col_expr(1, "val", DataType::I64))),
+                output_name: "cnt_expr".to_owned(),
+            },
+            WindowSpec {
+                partition_by: vec![],
+                order_by: order_by.clone(),
+                frame: empty_frame,
+                func: WindowFunc::Sum(col_expr(1, "val", DataType::I64)),
+                output_name: "sum".to_owned(),
+            },
+            WindowSpec {
+                partition_by: vec![],
+                order_by: order_by.clone(),
+                frame: empty_frame,
+                func: WindowFunc::Avg(col_expr(1, "val", DataType::I64)),
+                output_name: "avg".to_owned(),
+            },
+            WindowSpec {
+                partition_by: vec![],
+                order_by: order_by.clone(),
+                frame: empty_frame,
+                func: WindowFunc::Min(col_expr(1, "val", DataType::I64)),
+                output_name: "min".to_owned(),
+            },
+            WindowSpec {
+                partition_by: vec![],
+                order_by: order_by.clone(),
+                frame: empty_frame,
+                func: WindowFunc::Max(col_expr(1, "val", DataType::I64)),
+                output_name: "max".to_owned(),
+            },
+            WindowSpec {
+                partition_by: vec![],
+                order_by: order_by.clone(),
+                frame: empty_frame,
+                func: WindowFunc::FirstValue(col_expr(1, "val", DataType::I64)),
+                output_name: "fv".to_owned(),
+            },
+            WindowSpec {
+                partition_by: vec![],
+                order_by: order_by.clone(),
+                frame: empty_frame,
+                func: WindowFunc::LastValue(col_expr(1, "val", DataType::I64)),
+                output_name: "lv".to_owned(),
+            },
+        ];
+        assert!(specs_are_zero_lookahead_streamable(&empty_specs));
+        let empty_batch = Batch::try_new_all(
+            Arc::clone(&schema),
+            vec![
+                Column::Flat(FlatColumn::try_new(FlatData::I64(vec![1, 2, 3]), None).unwrap()),
+                Column::Flat(FlatColumn::try_new(FlatData::I64(vec![10, 20, 30]), None).unwrap()),
+            ],
+            3,
+        )
+        .unwrap();
+        let empty_src = BatchSource::new(Arc::clone(&schema), vec![empty_batch]).unwrap();
+        let empty_in = empty_src
+            .open_partitions(&ScanSpec::default(), &ctx)
+            .unwrap()
+            .remove(0);
+        let mut empty_win = eval_window_group(
+            empty_in,
+            Arc::clone(&schema),
+            vec![],
+            order_by,
+            empty_specs,
+            &ctx,
+        )
+        .unwrap();
+        let empty_out = drain_stream(empty_win.as_mut(), &ctx).unwrap();
+        drop(empty_win);
+        assert_eq!(ctx.pool.reserved(), 0);
+        assert_eq!(empty_out.len(), 1);
+        for r in 0..3 {
+            assert_eq!(
+                empty_out[0].column(2).unwrap().get_scalar(r).unwrap(),
+                ScalarValue::I64(0)
+            );
+            assert_eq!(
+                empty_out[0].column(3).unwrap().get_scalar(r).unwrap(),
+                ScalarValue::I64(0)
+            );
+            for c in 4..=9 {
+                assert!(
+                    empty_out[0].column(c).unwrap().is_null(r),
+                    "col {c} row {r} not null"
+                );
+            }
+        }
+
+        // H3a-M4: wide Const(Utf8) LAG(..., 4096) hits TooLarge cleanly under tight pool.
+        let tight_dir = tempfile::tempdir().unwrap();
+        let tight_ctx = test_ctx(tight_dir.path(), 512 * 1024, 1024 * 1024);
+        let wide_schema = Schema::try_new_arc(vec![
+            Field::new("k", DataType::I64, false),
+            Field::new("s", DataType::Utf8, false),
+        ])
+        .unwrap();
+        let wide_len = 512usize;
+        let wide_batch = Batch::try_new_all(
+            Arc::clone(&wide_schema),
+            vec![
+                Column::Flat(
+                    FlatColumn::try_new(FlatData::I64((0..wide_len as i64).collect()), None)
+                        .unwrap(),
+                ),
+                Column::try_new_const(ScalarValue::Utf8("x".repeat(4096)), wide_len).unwrap(),
+            ],
+            wide_len,
+        )
+        .unwrap();
+        let wide_src = BatchSource::new(Arc::clone(&wide_schema), vec![wide_batch]).unwrap();
+        let wide_in = wide_src
+            .open_partitions(&ScanSpec::default(), &tight_ctx)
+            .unwrap()
+            .remove(0);
+        let wide_order = vec![SortKey {
+            expr: col_expr(0, "k", DataType::I64),
+            descending: false,
+            nulls_first: false,
+        }];
+        let wide_specs = vec![WindowSpec {
+            partition_by: vec![],
+            order_by: wide_order.clone(),
+            frame: None,
+            func: WindowFunc::Lag {
+                expr: col_expr(1, "s", DataType::Utf8),
+                offset: 4096,
+                default: None,
+            },
+            output_name: "lag_wide".to_owned(),
+        }];
+        let mut wide_win = eval_window_group(
+            wide_in,
+            Arc::clone(&wide_schema),
+            vec![],
+            wide_order,
+            wide_specs,
+            &tight_ctx,
+        )
+        .unwrap();
+        let err = drain_stream(wide_win.as_mut(), &tight_ctx).unwrap_err();
+        drop(wide_win);
+        assert!(matches!(err, QueryError::TooLarge));
+        assert_eq!(tight_ctx.pool.reserved(), 0);
     }
 }

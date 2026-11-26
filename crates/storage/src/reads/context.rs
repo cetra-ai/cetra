@@ -1000,8 +1000,45 @@ impl PartitionStream for OperatorStream {
             }
             if let Some(batch) = self.pending.pop_front() {
                 let bytes = batch.memory_bytes();
-                self.buf_res.shrink(self.buf_res.size().min(bytes));
-                reconcile_res(res, before, bytes)?;
+                let Some(r) = res else {
+                    self.buf_res.shrink(self.buf_res.size().min(bytes));
+                    return Ok(Some(batch));
+                };
+                let Some(target) = before.checked_add(bytes) else {
+                    self.buf_res.free();
+                    self.pending.clear();
+                    rollback_res(Some(r), before);
+                    return Err(QueryError::TooLarge);
+                };
+                let cur = r.size();
+                if target > cur {
+                    let need = target - cur;
+                    let xfer = self.buf_res.size().min(need);
+                    if xfer > 0
+                        && let Err(err) = self.buf_res.transfer_to(r, xfer)
+                    {
+                        self.buf_res.free();
+                        self.pending.clear();
+                        rollback_res(Some(r), before);
+                        return Err(err.into());
+                    }
+                    if need > xfer
+                        && let Err(err) = r.try_grow(need - xfer)
+                    {
+                        self.buf_res.free();
+                        self.pending.clear();
+                        rollback_res(Some(r), before);
+                        return Err(err.into());
+                    }
+                    if bytes > xfer {
+                        self.buf_res.shrink(self.buf_res.size().min(bytes - xfer));
+                    }
+                } else {
+                    if cur > target {
+                        r.shrink(cur - target);
+                    }
+                    self.buf_res.shrink(self.buf_res.size().min(bytes));
+                }
                 return Ok(Some(batch));
             }
             if self.finished_ops {
@@ -1066,30 +1103,6 @@ fn rollback_res(res: Option<&mut Reservation>, before: usize) {
             r.shrink(cur - before);
         }
     }
-}
-
-fn reconcile_res(
-    res: Option<&mut Reservation>,
-    before: usize,
-    target_bytes: usize,
-) -> Result<(), QueryError> {
-    let Some(r) = res else {
-        return Ok(());
-    };
-    let Some(target) = before.checked_add(target_bytes) else {
-        rollback_res(Some(r), before);
-        return Err(QueryError::TooLarge);
-    };
-    let cur = r.size();
-    if target > cur {
-        if let Err(err) = r.try_grow(target - cur) {
-            rollback_res(Some(r), before);
-            return Err(err.into());
-        }
-    } else if target < cur {
-        r.shrink(cur - target);
-    }
-    Ok(())
 }
 
 /// Remaps an expression bound against a view schema to `raw_schema`, converting hex-encoded

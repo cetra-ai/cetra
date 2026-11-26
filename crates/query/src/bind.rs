@@ -819,6 +819,15 @@ fn bind_arith_binary(
                 data_type: DataType::TimestampNs { utc: *utc },
             });
         }
+        (DataType::Null, DataType::TimestampNs { utc }, BinaryOp::Sub) => {
+            let left = coerce_expr(l, &DataType::TimestampNs { utc: *utc }, pos)?;
+            return Ok(Expr::Binary {
+                left: Box::new(left),
+                op: BinaryOp::Sub,
+                right: Box::new(r),
+                data_type: DataType::Interval,
+            });
+        }
         (DataType::Interval, DataType::TimestampNs { .. }, BinaryOp::Sub) => {
             return Err(InvalidQuery::new(
                 "cannot subtract timestamp from interval",
@@ -1005,10 +1014,21 @@ fn bind_between(
     let e = bind_node(expr_ast, resolver, depth + 1)?;
     let l = bind_node(low_ast, resolver, depth + 1)?;
     let h = bind_node(high_ast, resolver, depth + 1)?;
-    let common = coerce_comparison_many(&[&e, &l, &h], pos)?;
-    let expr = Box::new(coerce_expr(e, &common, pos)?);
-    let low = Box::new(coerce_expr(l, &common, pos)?);
-    let high = Box::new(coerce_expr(h, &common, pos)?);
+    let (expr, low, high) =
+        if let Some(null_target) = decimal_comparison_many_overflow_null_target(&[&e, &l, &h]) {
+            (
+                Box::new(coerce_null_operand(e, &null_target, pos)?),
+                Box::new(coerce_null_operand(l, &null_target, pos)?),
+                Box::new(coerce_null_operand(h, &null_target, pos)?),
+            )
+        } else {
+            let common = coerce_comparison_many(&[&e, &l, &h], pos)?;
+            (
+                Box::new(coerce_expr(e, &common, pos)?),
+                Box::new(coerce_expr(l, &common, pos)?),
+                Box::new(coerce_expr(h, &common, pos)?),
+            )
+        };
     Ok(Expr::Between {
         expr,
         low,
@@ -1043,12 +1063,23 @@ fn bind_in_list(
     for it in &items {
         all_refs.push(it);
     }
-    let common = coerce_comparison_many(&all_refs, pos)?;
-    let expr = Box::new(coerce_expr(e, &common, pos)?);
-    let mut coerced_list = Vec::with_capacity(items.len());
-    for it in items {
-        coerced_list.push(coerce_expr(it, &common, pos)?);
-    }
+    let (expr, coerced_list) =
+        if let Some(null_target) = decimal_comparison_many_overflow_null_target(&all_refs) {
+            let expr = Box::new(coerce_null_operand(e, &null_target, pos)?);
+            let mut coerced_list = Vec::with_capacity(items.len());
+            for it in items {
+                coerced_list.push(coerce_null_operand(it, &null_target, pos)?);
+            }
+            (expr, coerced_list)
+        } else {
+            let common = coerce_comparison_many(&all_refs, pos)?;
+            let expr = Box::new(coerce_expr(e, &common, pos)?);
+            let mut coerced_list = Vec::with_capacity(items.len());
+            for it in items {
+                coerced_list.push(coerce_expr(it, &common, pos)?);
+            }
+            (expr, coerced_list)
+        };
     Ok(Expr::InList {
         expr,
         list: coerced_list,
@@ -1145,13 +1176,22 @@ fn bind_case(
             for w in &whens {
                 cmp_refs.push(w);
             }
-            let cmp_dt = coerce_comparison_many(&cmp_refs, pos)?;
-            let op_coerced = coerce_expr(op_expr, &cmp_dt, pos)?;
-            let mut cw = Vec::with_capacity(whens.len());
-            for w in whens {
-                cw.push(coerce_expr(w, &cmp_dt, pos)?);
+            if let Some(null_target) = decimal_comparison_many_overflow_null_target(&cmp_refs) {
+                let op_coerced = coerce_null_operand(op_expr, &null_target, pos)?;
+                let mut cw = Vec::with_capacity(whens.len());
+                for w in whens {
+                    cw.push(coerce_null_operand(w, &null_target, pos)?);
+                }
+                (Some(Box::new(op_coerced)), cw)
+            } else {
+                let cmp_dt = coerce_comparison_many(&cmp_refs, pos)?;
+                let op_coerced = coerce_expr(op_expr, &cmp_dt, pos)?;
+                let mut cw = Vec::with_capacity(whens.len());
+                for w in whens {
+                    cw.push(coerce_expr(w, &cmp_dt, pos)?);
+                }
+                (Some(Box::new(op_coerced)), cw)
             }
-            (Some(Box::new(op_coerced)), cw)
         }
     };
 
@@ -2354,6 +2394,53 @@ fn decimal_comparison_overflows(a: &DataType, b: &DataType) -> bool {
     }
 }
 
+fn decimal_comparison_many_overflows(exprs: &[&Expr]) -> bool {
+    let mut spec: Option<(i16, i16)> = None;
+    let mut has_decimal = false;
+    for ex in exprs {
+        let (int_digits, scale) = match ex.data_type() {
+            DataType::Null => continue,
+            DataType::Decimal128 { precision, scale } => {
+                has_decimal = true;
+                (i16::from(precision) - i16::from(scale), i16::from(scale))
+            }
+            DataType::I64 => (19, 0),
+            _ => return false,
+        };
+        spec = Some(match spec {
+            None => (int_digits, scale),
+            Some((max_int, max_scale)) => (max_int.max(int_digits), max_scale.max(scale)),
+        });
+    }
+    has_decimal
+        && matches!(
+            spec,
+            Some((int_digits, scale)) if int_digits + scale > i16::from(MAX_DECIMAL_PRECISION)
+        )
+}
+
+fn decimal_comparison_many_overflow_null_target(exprs: &[&Expr]) -> Option<DataType> {
+    if !decimal_comparison_many_overflows(exprs) {
+        return None;
+    }
+    exprs
+        .iter()
+        .map(|ex| ex.data_type())
+        .find(|dt| !matches!(dt, DataType::Null))
+}
+
+fn coerce_null_operand(
+    expr: Expr,
+    null_target: &DataType,
+    pos: Option<Position>,
+) -> Result<Expr, InvalidQuery> {
+    if matches!(expr.data_type(), DataType::Null) {
+        coerce_expr(expr, null_target, pos)
+    } else {
+        Ok(expr)
+    }
+}
+
 fn coerce_common_types(
     a: &DataType,
     b: &DataType,
@@ -3415,6 +3502,162 @@ mod tests {
             parse_and_bind("NULL - d", &schema).unwrap().data_type(),
             DataType::I64
         );
+        assert_eq!(
+            parse_and_bind("NULL - ts", &schema).unwrap().data_type(),
+            DataType::Interval
+        );
         assert!(parse_and_bind("iv - d", &schema).is_err());
+
+        // H2-M1: un-narrowed decimal comparison overflow in BETWEEN, IN, simple CASE.
+        let between_wide =
+            parse_and_bind("d30_20 BETWEEN 0 AND 1000000000000000000", &schema).unwrap();
+        let Expr::Between {
+            expr: b_expr,
+            low: b_low,
+            high: b_high,
+            ..
+        } = &between_wide
+        else {
+            panic!("expected Between");
+        };
+        assert_eq!(
+            b_expr.data_type(),
+            DataType::Decimal128 {
+                precision: 30,
+                scale: 20,
+            }
+        );
+        assert_eq!(b_low.data_type(), DataType::I64);
+        assert_eq!(b_high.data_type(), DataType::I64);
+
+        let in_wide = parse_and_bind("d30_20 IN (1000000000000000000)", &schema).unwrap();
+        let Expr::InList {
+            expr: in_expr,
+            list: in_list,
+            ..
+        } = &in_wide
+        else {
+            panic!("expected InList");
+        };
+        assert_eq!(
+            in_expr.data_type(),
+            DataType::Decimal128 {
+                precision: 30,
+                scale: 20,
+            }
+        );
+        assert_eq!(in_list[0].data_type(), DataType::I64);
+
+        let case_wide = parse_and_bind(
+            "CASE d30_20 WHEN 1000000000000000000 THEN 1 ELSE 0 END",
+            &schema,
+        )
+        .unwrap();
+        let Expr::Case {
+            operand: Some(c_op),
+            when_then: c_wt,
+            ..
+        } = &case_wide
+        else {
+            panic!("expected simple Case");
+        };
+        assert_eq!(
+            c_op.data_type(),
+            DataType::Decimal128 {
+                precision: 30,
+                scale: 20,
+            }
+        );
+        assert_eq!(c_wt[0].0.data_type(), DataType::I64);
+
+        // Verify evaluation succeeds without decimal overflow cast error.
+        let dec_scale_mul = 10_i128.pow(20);
+        let eval_batch = cetra_column::Batch::try_new_all(
+            std::sync::Arc::clone(&schema),
+            vec![
+                cetra_column::Column::Flat(
+                    cetra_column::FlatColumn::try_new(
+                        cetra_column::FlatData::Decimal128 {
+                            values: vec![500],
+                            precision: 10,
+                            scale: 2,
+                        },
+                        None,
+                    )
+                    .unwrap(),
+                ),
+                cetra_column::Column::Flat(
+                    cetra_column::FlatColumn::try_new(
+                        cetra_column::FlatData::Decimal128 {
+                            values: vec![10000],
+                            precision: 12,
+                            scale: 4,
+                        },
+                        None,
+                    )
+                    .unwrap(),
+                ),
+                cetra_column::Column::Flat(
+                    cetra_column::FlatColumn::try_new(
+                        cetra_column::FlatData::Decimal128 {
+                            values: vec![5 * dec_scale_mul],
+                            precision: 30,
+                            scale: 20,
+                        },
+                        None,
+                    )
+                    .unwrap(),
+                ),
+                cetra_column::Column::Flat(
+                    cetra_column::FlatColumn::try_new(cetra_column::FlatData::I64(vec![1]), None)
+                        .unwrap(),
+                ),
+                cetra_column::Column::Flat(
+                    cetra_column::FlatColumn::try_new(
+                        cetra_column::FlatData::TimestampNs {
+                            values: vec![1_000_000_000],
+                            utc: true,
+                        },
+                        None,
+                    )
+                    .unwrap(),
+                ),
+                cetra_column::Column::Flat(
+                    cetra_column::FlatColumn::try_new(cetra_column::FlatData::Date(vec![1]), None)
+                        .unwrap(),
+                ),
+                cetra_column::Column::Flat(
+                    cetra_column::FlatColumn::try_new(
+                        cetra_column::FlatData::Interval(vec![cetra_column::Interval::default()]),
+                        None,
+                    )
+                    .unwrap(),
+                ),
+            ],
+            1,
+        )
+        .unwrap();
+        let ctx = crate::EvalContext::new(0, cetra_column::CancelToken::new());
+        assert_eq!(
+            crate::eval_expr(&between_wide, &eval_batch, &ctx, None)
+                .unwrap()
+                .get_scalar(0)
+                .unwrap(),
+            ScalarValue::Bool(true)
+        );
+        assert_eq!(
+            crate::eval_expr(&in_wide, &eval_batch, &ctx, None)
+                .unwrap()
+                .get_scalar(0)
+                .unwrap(),
+            ScalarValue::Bool(false)
+        );
+        assert_eq!(
+            crate::eval_expr(&case_wide, &eval_batch, &ctx, None)
+                .unwrap()
+                .get_scalar(0)
+                .unwrap(),
+            ScalarValue::I64(0)
+        );
     }
 }

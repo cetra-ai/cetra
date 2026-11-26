@@ -243,7 +243,8 @@ pub fn collect_expr_map_projections(
 }
 
 /// Format-agnostic scan specification passed to every [`ScanSource`] (`D-QE-3`).
-#[derive(Debug, Clone, Default)]
+/// Manual `fmt::Debug` redacts filter literal payloads and map key names (`AGENTS.md` § Privacy).
+#[derive(Clone, Default)]
 pub struct ScanSpec {
     /// Projected column indices in the source's full schema (`None` = all columns; `Some(vec![])` = 0-column row-count batch).
     pub projection: Option<Vec<usize>>,
@@ -261,6 +262,21 @@ pub struct ScanSpec {
     pub sort_hints: Vec<SortHint>,
     /// Optional row limit hint (sources may still emit more; upstream `Limit` enforces exactness).
     pub limit: Option<usize>,
+}
+
+impl fmt::Debug for ScanSpec {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ScanSpec")
+            .field("projection", &self.projection)
+            .field("map_projections_len", &self.map_projections.len())
+            .field("time_range", &self.time_range)
+            .field("id_lookups", &self.id_lookups)
+            .field("filters_len", &self.filters.len())
+            .field("substrings", &self.substrings)
+            .field("sort_hints", &self.sort_hints)
+            .field("limit", &self.limit)
+            .finish()
+    }
 }
 
 /// One partition stream pulled synchronously by a CPU worker inside a push pipeline.
@@ -510,6 +526,31 @@ mod tests {
 
     #[test]
     fn batch_source_filters_empty_projection_and_privacy_debug() {
+        let email_eq_expr = Expr::Binary {
+            left: Box::new(Expr::Column {
+                index: 0,
+                name: "email".to_owned(),
+                data_type: DataType::Utf8,
+            }),
+            op: BinaryOp::Eq,
+            right: Box::new(Expr::Literal(ScalarValue::Utf8(
+                "alice@secret.com".to_owned(),
+            ))),
+            data_type: DataType::Bool,
+        };
+        let prompt_like_expr = Expr::Like {
+            expr: Box::new(Expr::Column {
+                index: 1,
+                name: "prompt".to_owned(),
+                data_type: DataType::Utf8,
+            }),
+            pattern: Box::new(Expr::Literal(ScalarValue::Utf8(
+                "%secret-prompt%".to_owned(),
+            ))),
+            escape: Some('\\'),
+            case_insensitive: false,
+            negated: false,
+        };
         let spec_privacy = ScanSpec {
             id_lookups: vec![
                 IdLookupHint::Utf8 {
@@ -525,6 +566,7 @@ mod tests {
                     values: vec![[0xCD; 8]],
                 },
             ],
+            filters: vec![email_eq_expr.clone(), prompt_like_expr.clone()],
             substrings: vec![vec![SubstringHint {
                 column: "input".to_owned(),
                 needle: "secret-prompt-needle".to_owned(),
@@ -534,12 +576,29 @@ mod tests {
         };
         let dbg = format!("{spec_privacy:?}");
         assert!(!dbg.contains("alice-secret-user"), "leaked id in {dbg}");
+        assert!(!dbg.contains("alice@secret.com"), "leaked email in {dbg}");
         assert!(
             !dbg.contains("secret-prompt-needle"),
             "leaked needle in {dbg}"
         );
+        assert!(
+            !dbg.contains("%secret-prompt%"),
+            "leaked like pattern in {dbg}"
+        );
         assert!(dbg.contains("count: 1"));
         assert!(dbg.contains("needle_len: 20"));
+        assert!(dbg.contains("filters_len: 2"));
+
+        let expr_dbg_1 = format!("{email_eq_expr:?}");
+        let expr_dbg_2 = format!("{prompt_like_expr:?}");
+        assert!(
+            !expr_dbg_1.contains("alice@secret.com"),
+            "leaked email in {expr_dbg_1}"
+        );
+        assert!(
+            !expr_dbg_2.contains("%secret-prompt%"),
+            "leaked pattern in {expr_dbg_2}"
+        );
 
         let schema = Schema::try_new_arc(vec![
             Field::new("id", DataType::I64, false),

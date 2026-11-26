@@ -5,7 +5,7 @@
 
 use std::fmt;
 
-use cetra_column::{Batch, DataType, Reservation, ScalarValue, Schema};
+use cetra_column::{Batch, DataType, Reservation, ScalarValue, Schema, Selection};
 
 use crate::eval::{
     bitmap_mem_bytes, eval_filter, pool_size, reconcile_output, rollback_to, try_reserve,
@@ -174,7 +174,11 @@ pub fn filter_uncovered(
     if let Some(res) = pool.as_deref_mut() {
         res.shrink(covered_bytes);
     }
-    if let Err(err) = try_reserve(&mut pool, bitmap_mem_bytes(batch.raw_len())) {
+    let out_sel_bytes = match batch.selection() {
+        Selection::Indices(idx) => idx.len().saturating_mul(size_of::<u32>()),
+        Selection::All | Selection::Mask(_) => bitmap_mem_bytes(batch.raw_len()),
+    };
+    if let Err(err) = try_reserve(&mut pool, out_sel_bytes) {
         rollback_to(&mut pool, before);
         return Err(err);
     }

@@ -1,5 +1,6 @@
 //! Typed expression IR and runtime evaluation context.
 
+use std::borrow::Borrow;
 use std::collections::hash_map::DefaultHasher;
 use std::collections::{BTreeSet, HashMap};
 use std::fmt;
@@ -1086,7 +1087,10 @@ impl fmt::Debug for Expr {
                         .field("name", name)
                         .field("data_type", data_type)
                         .finish()?,
-                    Self::Literal(v) => f.debug_tuple("Literal").field(v).finish()?,
+                    Self::Literal(v) => f
+                        .debug_tuple("Literal")
+                        .field(&format_args!("{}", fmt_scalar_safe(v)))
+                        .finish()?,
                     Self::Unary {
                         op,
                         expr,
@@ -1250,11 +1254,101 @@ pub const MAX_CACHE_ENTRIES: usize = 256;
 /// Global byte cap across all 4 sub-caches in [`EvalCache`] (`4 MiB`).
 pub const MAX_CACHE_BYTES: usize = 4 * 1024 * 1024;
 
-#[derive(Hash, PartialEq, Eq)]
+#[derive(PartialEq, Eq)]
 struct LikeCacheKey {
     pattern: String,
     escape: Option<char>,
     case_insensitive: bool,
+}
+
+trait LikeKey {
+    fn as_tuple(&self) -> (&str, Option<char>, bool);
+}
+
+impl LikeKey for LikeCacheKey {
+    fn as_tuple(&self) -> (&str, Option<char>, bool) {
+        (&self.pattern, self.escape, self.case_insensitive)
+    }
+}
+
+impl LikeKey for (&str, Option<char>, bool) {
+    fn as_tuple(&self) -> (&str, Option<char>, bool) {
+        *self
+    }
+}
+
+impl Hash for LikeCacheKey {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.as_tuple().hash(state);
+    }
+}
+
+impl Hash for dyn LikeKey + '_ {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.as_tuple().hash(state);
+    }
+}
+
+impl PartialEq for dyn LikeKey + '_ {
+    fn eq(&self, other: &Self) -> bool {
+        self.as_tuple() == other.as_tuple()
+    }
+}
+
+impl Eq for dyn LikeKey + '_ {}
+
+impl<'a> Borrow<dyn LikeKey + 'a> for LikeCacheKey {
+    fn borrow(&self) -> &(dyn LikeKey + 'a) {
+        self
+    }
+}
+
+#[derive(PartialEq, Eq)]
+struct RegexCacheKey {
+    pattern: String,
+    flags: String,
+}
+
+trait RegexKey {
+    fn as_pair(&self) -> (&str, &str);
+}
+
+impl RegexKey for RegexCacheKey {
+    fn as_pair(&self) -> (&str, &str) {
+        (&self.pattern, &self.flags)
+    }
+}
+
+impl RegexKey for (&str, &str) {
+    fn as_pair(&self) -> (&str, &str) {
+        *self
+    }
+}
+
+impl Hash for RegexCacheKey {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.as_pair().hash(state);
+    }
+}
+
+impl Hash for dyn RegexKey + '_ {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.as_pair().hash(state);
+    }
+}
+
+impl PartialEq for dyn RegexKey + '_ {
+    fn eq(&self, other: &Self) -> bool {
+        self.as_pair() == other.as_pair()
+    }
+}
+
+impl Eq for dyn RegexKey + '_ {}
+
+impl<'a> Borrow<dyn RegexKey + 'a> for RegexCacheKey {
+    fn borrow(&self) -> &(dyn RegexKey + 'a) {
+        self
+    }
 }
 
 struct InListCacheEntry {
@@ -1275,7 +1369,7 @@ struct InListCache {
 #[derive(Default)]
 pub struct EvalCache {
     like: Mutex<HashMap<LikeCacheKey, Arc<LikeMatcher>>>,
-    regex: Mutex<HashMap<(String, String), Arc<Regex>>>,
+    regex: Mutex<HashMap<RegexCacheKey, Arc<Regex>>>,
     json_path: Mutex<HashMap<String, Arc<JsonPath>>>,
     in_list: Mutex<InListCache>,
     total_bytes: AtomicUsize,
@@ -1334,7 +1428,7 @@ fn hash_scalar_canonical(h: &mut impl Hasher, sv: &ScalarValue) {
             utc.hash(h);
         }
         ScalarValue::Date(d) => d.hash(h),
-        ScalarValue::Interval(iv) => iv.hash(h),
+        ScalarValue::Interval(iv) => iv.canonical_key().hash(h),
         ScalarValue::Utf8(s) => s.hash(h),
         ScalarValue::Binary(b) => b.hash(h),
         ScalarValue::FixedBytes8(b) => b.hash(h),
@@ -1387,30 +1481,34 @@ impl EvalCache {
         case_insensitive: bool,
         compile: impl FnOnce() -> Result<LikeMatcher, QueryError>,
     ) -> Result<Arc<LikeMatcher>, QueryError> {
-        let lookup_key = LikeCacheKey {
-            pattern: pattern.to_owned(),
-            escape,
-            case_insensitive,
-        };
+        let lookup = (pattern, escape, case_insensitive);
         if let Some(hit) = self
             .like
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
-            .get(&lookup_key)
+            .get(&lookup as &dyn LikeKey)
         {
             return Ok(Arc::clone(hit));
         }
 
         let compiled = Arc::new(compile()?);
-        let entry_bytes = size_of::<LikeCacheKey>() + pattern.len() + compiled.estimated_bytes();
+        let entry_bytes =
+            size_of::<LikeCacheKey>() + pattern.len() + compiled.estimated_bytes(pattern.len());
 
         let mut map = self.like.lock().unwrap_or_else(PoisonError::into_inner);
-        if let Some(hit) = map.get(&lookup_key) {
+        if let Some(hit) = map.get(&lookup as &dyn LikeKey) {
             return Ok(Arc::clone(hit));
         }
         if map.len() < MAX_CACHE_ENTRIES && try_reserve_cache_bytes(&self.total_bytes, entry_bytes)
         {
-            map.insert(lookup_key, Arc::clone(&compiled));
+            map.insert(
+                LikeCacheKey {
+                    pattern: pattern.to_owned(),
+                    escape,
+                    case_insensitive,
+                },
+                Arc::clone(&compiled),
+            );
         }
         Ok(compiled)
     }
@@ -1421,30 +1519,36 @@ impl EvalCache {
         flags: &str,
         compile: impl FnOnce() -> Result<Regex, QueryError>,
     ) -> Result<Arc<Regex>, QueryError> {
-        let lookup_key = (pat.to_owned(), flags.to_owned());
+        let lookup = (pat, flags);
         if let Some(hit) = self
             .regex
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
-            .get(&lookup_key)
+            .get(&lookup as &dyn RegexKey)
         {
             return Ok(Arc::clone(hit));
         }
 
         let compiled = Arc::new(compile()?);
-        let entry_bytes = size_of::<(String, String)>()
+        let entry_bytes = size_of::<RegexCacheKey>()
             + pat.len()
             + flags.len()
             + size_of::<Regex>()
             + pat.len().saturating_mul(16).max(512);
 
         let mut map = self.regex.lock().unwrap_or_else(PoisonError::into_inner);
-        if let Some(hit) = map.get(&lookup_key) {
+        if let Some(hit) = map.get(&lookup as &dyn RegexKey) {
             return Ok(Arc::clone(hit));
         }
         if map.len() < MAX_CACHE_ENTRIES && try_reserve_cache_bytes(&self.total_bytes, entry_bytes)
         {
-            map.insert(lookup_key, Arc::clone(&compiled));
+            map.insert(
+                RegexCacheKey {
+                    pattern: pat.to_owned(),
+                    flags: flags.to_owned(),
+                },
+                Arc::clone(&compiled),
+            );
         }
         Ok(compiled)
     }

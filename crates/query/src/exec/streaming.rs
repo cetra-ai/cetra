@@ -311,11 +311,18 @@ pub struct LimitOp {
 
 impl LimitOp {
     /// Creates a [`LimitOp`] skipping `offset` rows and emitting at most `limit` rows.
+    ///
+    /// When `shared_remaining` is `Some`, `offset` MUST be `0` because per-partition offsets
+    /// cannot coordinate globally across concurrent workers.
     pub fn new(
         offset: usize,
         limit: Option<usize>,
         shared_remaining: Option<Arc<AtomicUsize>>,
     ) -> Self {
+        debug_assert!(
+            shared_remaining.is_none() || offset == 0,
+            "LimitOp with shared_remaining requires offset == 0"
+        );
         Self {
             offset_remaining: offset,
             limit_remaining: limit,
@@ -373,6 +380,14 @@ impl PushOperator for LimitOp {
         emit: &mut dyn FnMut(Batch, &mut Reservation) -> Result<ControlFlow, QueryError>,
     ) -> Result<ControlFlow, QueryError> {
         if self.limit_remaining == Some(0) {
+            if self
+                .shared_remaining
+                .as_ref()
+                .is_none_or(|rem| rem.load(AtomicOrdering::Acquire) == 0)
+                && let Some(stop_cancel) = &self.stop_cancel
+            {
+                stop_cancel.cancel();
+            }
             return Ok(ControlFlow::Stop);
         }
 
@@ -389,7 +404,7 @@ impl PushOperator for LimitOp {
         self.offset_remaining = 0;
         let avail = active - skip;
 
-        let (take, exhausted) = if let Some(rem) = &self.shared_remaining {
+        let (take, global_exhausted, local_exhausted) = if let Some(rem) = &self.shared_remaining {
             let max_claim = match self.limit_remaining {
                 Some(l) => avail.min(l),
                 None => avail,
@@ -409,23 +424,27 @@ impl PushOperator for LimitOp {
                 }
             });
             if claimed == 0 {
+                if global_exhausted && let Some(stop_cancel) = &self.stop_cancel {
+                    stop_cancel.cancel();
+                }
                 return Ok(ControlFlow::Stop);
             }
+            let mut local_exhausted = false;
             if let Some(local) = &mut self.limit_remaining {
                 *local -= claimed;
                 if *local == 0 {
-                    global_exhausted = true;
+                    local_exhausted = true;
                 }
             }
-            (claimed, global_exhausted)
+            (claimed, global_exhausted, local_exhausted)
         } else {
             match &mut self.limit_remaining {
                 Some(rem) => {
                     let take = avail.min(*rem);
                     *rem -= take;
-                    (take, *rem == 0)
+                    (take, *rem == 0, *rem == 0)
                 }
-                None => (avail, false),
+                None => (avail, false, false),
             }
         };
 
@@ -435,10 +454,10 @@ impl PushOperator for LimitOp {
 
         let out = slice_active_batch(batch, skip, take)?;
         let flow = emit(out, batch_res)?;
-        if exhausted && let Some(stop_cancel) = &self.stop_cancel {
+        if global_exhausted && let Some(stop_cancel) = &self.stop_cancel {
             stop_cancel.cancel();
         }
-        if flow == ControlFlow::Stop || exhausted {
+        if flow == ControlFlow::Stop || global_exhausted || local_exhausted {
             Ok(ControlFlow::Stop)
         } else {
             Ok(ControlFlow::Continue)
@@ -1465,11 +1484,23 @@ impl PushSink for TopKSink {
         }
 
         if !winner_rows.is_empty() {
+            let batch_res_before = batch_res.size();
             let winner_bytes = winner_rows.capacity().saturating_mul(size_of::<u32>());
             if let Err(err) = self.res.try_grow(winner_bytes) {
                 self.scratch.free();
                 return Err(err.into());
             }
+            let rollback_consume = |this: &mut Self, batch_res: &mut Reservation| {
+                let xfer = batch_res_before.saturating_sub(batch_res.size());
+                if xfer > 0 {
+                    let _ = this.res.transfer_to(batch_res, xfer);
+                }
+                this.scratch.free();
+                let target = kept_bytes(&this.row_batches, &this.key_batches, &this.heap);
+                if this.res.size() > target {
+                    this.res.shrink(this.res.size() - target);
+                }
+            };
             let live_stored_count = self
                 .heap
                 .iter()
@@ -1480,19 +1511,33 @@ impl PushSink for TopKSink {
             if all_rows_won {
                 let batch_bytes = batch.memory_bytes();
                 let key_bytes: usize = key_cols.iter().map(|c| c.memory_bytes()).sum();
-                let needed = batch_bytes.saturating_add(key_bytes);
-                let transfer_res = match transfer_or_grow(batch_res, &mut self.res, needed) {
-                    Ok(()) => Ok(()),
-                    Err(ColumnError::MemoryLimit { .. })
-                        if self.stored_rows > live_stored_count =>
+                let transfer_all = |this: &mut Self,
+                                    batch_res: &mut Reservation|
+                 -> Result<(), QueryError> {
+                    transfer_or_grow(batch_res, &mut this.res, batch_bytes)?;
+                    if let Err(err) = transfer_or_grow(&mut this.scratch, &mut this.res, key_bytes)
                     {
-                        self.compact_kept().inspect_err(|_| self.scratch.free())?;
-                        transfer_or_grow(batch_res, &mut self.res, needed).map_err(QueryError::from)
+                        let xfer = batch_res_before.saturating_sub(batch_res.size());
+                        if xfer > 0 {
+                            let _ = this.res.transfer_to(batch_res, xfer);
+                        }
+                        return Err(err.into());
                     }
-                    Err(err) => Err(err.into()),
+                    Ok(())
+                };
+                let transfer_res = match transfer_all(self, batch_res) {
+                    Ok(()) => Ok(()),
+                    Err(QueryError::TooLarge) if self.stored_rows > live_stored_count => {
+                        if let Err(err) = self.compact_kept() {
+                            rollback_consume(self, batch_res);
+                            return Err(err);
+                        }
+                        transfer_all(self, batch_res)
+                    }
+                    Err(err) => Err(err),
                 };
                 if let Err(err) = transfer_res {
-                    self.scratch.free();
+                    rollback_consume(self, batch_res);
                     return Err(err);
                 }
                 let updated_batch_idx = self.row_batches.len();
@@ -1514,12 +1559,20 @@ impl PushSink for TopKSink {
                     Ok(pair) => pair,
                     Err(QueryError::TooLarge) if self.stored_rows > live_stored_count => {
                         // Evicted rows are holding memory; compact them before failing.
-                        self.compact_kept().inspect_err(|_| self.scratch.free())?;
-                        self.take_winners(&batch, &key_cols, &winner_rows)
-                            .inspect_err(|_| self.scratch.free())?
+                        if let Err(err) = self.compact_kept() {
+                            rollback_consume(self, batch_res);
+                            return Err(err);
+                        }
+                        match self.take_winners(&batch, &key_cols, &winner_rows) {
+                            Ok(pair) => pair,
+                            Err(err) => {
+                                rollback_consume(self, batch_res);
+                                return Err(err);
+                            }
+                        }
                     }
                     Err(err) => {
-                        self.scratch.free();
+                        rollback_consume(self, batch_res);
                         return Err(err);
                     }
                 };
