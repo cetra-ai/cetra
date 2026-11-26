@@ -48,39 +48,15 @@ cetra-ui = { path = "crates/ui" }
 cetra-capture = { path = "tools/capture" }
 
 # --- pinned families (must stay mutually compatible) ---
-# datafusion 55.2.0 depends on arrow/parquet 59.2 and object_store 0.13.2.
+# arrow, parquet 59.2 and object_store 0.13 are a pinned family (AGENTS.md § Dependencies).
 # Those are caret-pinned here, not the newer arrow/parquet 60 or object_store 0.14.
-# `compression` is omitted from DataFusion's default features: it pulls xz, bzip2,
-# gzip, and zstd for DataFusion's own file readers. Parquet readers enable the
-# codecs we accept on the `parquet` pin below.
-# Same release as `datafusion`. `MemorySourceConfig` is not re-exported from the
-# `datafusion` crate; this is the crate that defines it. Keep default features
-# off so the compression codecs DataFusion's own pin excludes stay out.
-datafusion-datasource = { version = "55.2", default-features = false }
-# The `*_expressions` features are the SQL console's function set: it offers every built-in
-# scalar and nested function except a deny-list (spec 05, D-A2-2), so dropping one removes
-# functions users can call. `recursive_protection` guards planning against stack overflow.
-# `datafusion` and `datafusion-common` turn on the default features of `arrow` and `parquet`
-# themselves, so trimming those pins below saves no build time.
-datafusion = { version = "55.2", default-features = false, features = [
-    "nested_expressions",
-    "crypto_expressions",
-    "datetime_expressions",
-    "encoding_expressions",
-    "regex_expressions",
-    "string_expressions",
-    "unicode_expressions",
-    "parquet",
-    "recursive_protection",
-    "sql",
-] }
 arrow = { version = "59.2", default-features = false }
 # parquet 59 has no `flate2` feature. `flate2-zlib-rs` is that release's deflate backend.
 parquet = { version = "59.2", default-features = false }
 object_store = "0.13"
 # Structured fuzz inputs (track R M3). Storage uses it under cfg(fuzzing) and in tests.
 arbitrary = { version = "1.5.0", features = ["derive"] }
-# Bounded LZ4 frame check of WAL IPC buffers (track R M3). The version and features arrow-ipc uses.
+# Bounded LZ4 frame check (track R M3).
 lz4_flex = { version = "0.14.0", default-features = false, features = ["std", "frame"] }
 # catalog.db (D39). `macros` exists for `sqlx::migrate!` only. Queries use the
 # runtime API, not `query!`, so no `DATABASE_URL` is required. `sqlite` bundles
@@ -98,9 +74,9 @@ serde = { version = "1.0", features = ["derive"] }
 serde_json = { version = "1.0", features = ["preserve_order"] }
 # RFC 9535 JSONPath on mapping expressions (D162).
 serde_json_path = "0.7.2"
-# Filter DSL and Shape B SQL parser (D-QE-1). Matches datafusion 55.2's resolved version.
+# Filter DSL and Shape B SQL parser (D-QE-1).
 sqlparser = { version = "0.62.0", features = ["visitor", "recursive-protection"] }
-# Dataset CSV import and export (track J, D-J-6). `csv` is already in the lock as a dependency of arrow-csv.
+# Dataset CSV import and export (track J, D-J-6).
 csv = "1.4.0"
 # Judge prompt templates (D163) and email templates (spec 08; `.html` names auto-escape).
 # Self-contained templates: no macros, imports, or debug.
@@ -151,7 +127,7 @@ rmcp = { version = "3.10.0", default-features = false, features = [
 serde_path_to_error = "0.1.20"
 # Email normalization: trim, NFC, lowercase (P6, D136).
 unicode-normalization = "0.1.26"
-# DataFusion 55's `TableProvider` is an `#[async_trait]` trait.
+# `object_store::ObjectStore` is an `#[async_trait]` trait.
 async-trait = "0.1.92"
 hex = "0.4.3"
 bytes = "1.12"
@@ -258,7 +234,7 @@ zstd = { version = "0.14.3", default-features = false }
 debug = "line-tables-only"
 
 [profile.dev.package."*"]
-opt-level = 2 # DataFusion/Arrow-heavy tests are unusably slow at opt-level 0
+opt-level = 2 # Test suites and crypto/parquet code are slow at opt-level 0
 
 [profile.release]
 lto = "thin"

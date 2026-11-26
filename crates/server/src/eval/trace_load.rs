@@ -5,7 +5,7 @@ use std::collections::BTreeMap;
 use std::fmt;
 use std::time::Duration;
 
-use arrow::record_batch::RecordBatch;
+use cetra_column::Batch;
 use cetra_core::ids::{ProjectId, SpanId, TraceId};
 use cetra_core::names::environment::is_reserved;
 use cetra_core::span::Span;
@@ -143,7 +143,7 @@ async fn load_trace_capped(
         .await
         .map_err(|error| match error {
             QueryError::Busy => LoadError::Busy,
-            QueryError::DataFusion(error) => LoadError::Failed(RunError::Internal(error)),
+            QueryError::Internal(error) => LoadError::Failed(RunError::Internal(error)),
         })?;
     let ctx = QueryContext::new(source, None).map_err(LoadError::Failed)?;
     let trace = trace_id.to_hex();
@@ -164,7 +164,7 @@ async fn load_trace_capped(
         RunError::TooLarge => LoadError::TooLarge,
         error => LoadError::Failed(error),
     })?;
-    let required_rows: usize = data.required.iter().map(RecordBatch::num_rows).sum();
+    let required_rows: usize = data.required.iter().map(Batch::num_rows).sum();
     if required_rows > MAX_REQUIRED {
         return Err(LoadError::TooLarge);
     }

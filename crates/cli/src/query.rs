@@ -100,7 +100,7 @@ struct SqlResult {
     truncated: bool,
 }
 
-/// `SqlColumnInfo`. The Arrow `type` is not needed by the CLI, so it is not read.
+/// `SqlColumnInfo`. The type string is not needed by the CLI, so it is not read.
 #[derive(Deserialize)]
 struct SqlColumn {
     name: String,
@@ -624,7 +624,7 @@ mod tests {
 
     const PROBLEM_400: &str = r#"{"type":"about:blank","title":"Bad Request","status":400,"code":"invalid_filter","detail":"SQL parse error","errors":[{"field":"query","message":"unexpected token","position":{"line":1,"column":8}}]}"#;
     const ONE_ROW: &str =
-        r#"{"columns":[{"name":"n","type":"Int64"}],"rows":[{"n":1}],"truncated":false}"#;
+        r#"{"columns":[{"name":"n","type":"integer"}],"rows":[{"n":1}],"truncated":false}"#;
     const PROJECT: &str = "01900000-0000-7000-8000-000000000001";
 
     fn query_args(argv: &[&str]) -> QueryArgs {
@@ -972,7 +972,7 @@ mod tests {
 
     #[tokio::test]
     async fn query_aligns_mixed_columns_left() {
-        let answer = r#"{"columns":[{"name":"m","type":"Utf8"}],"rows":[{"m":1},{"m":"a"}],"truncated":false}"#;
+        let answer = r#"{"columns":[{"name":"m","type":"string"}],"rows":[{"m":1},{"m":"a"}],"truncated":false}"#;
         let canned = Canned::json(vec![(200, answer.to_owned())]).await;
         let args = query_args(&[
             "SELECT m",
@@ -1360,7 +1360,7 @@ mod tests {
         let (out, _) = execute(
             &server_args(
                 &server,
-                "SELECT [1, 2] AS l, named_struct('k', 'v') AS s",
+                "SELECT [1, 2] AS l, resource_attributes AS s FROM spans",
                 &[],
             ),
             no_credentials,
@@ -1368,7 +1368,10 @@ mod tests {
         )
         .await
         .unwrap();
-        assert_eq!(out, "l      s\n-----  ---------\n[1,2]  {\"k\":\"v\"}\n");
+        assert_eq!(
+            out,
+            "l      s\n-----  ---------------------------------\n[1,2]  {\"telemetry.distro.name\":\"cetra\"}\n"
+        );
         server.stop().await;
     }
 
@@ -1447,22 +1450,18 @@ mod tests {
         let contents = fs::read(&parquet_path).unwrap();
         assert!(contents.starts_with(b"PAR1"));
         assert!(contents.ends_with(b"PAR1"));
-        let builder = parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder::try_new(
-            bytes::Bytes::from(contents),
-        )
-        .unwrap();
-        let names: Vec<String> = builder
-            .schema()
-            .fields()
+        use parquet::file::reader::{FileReader, SerializedFileReader};
+        let reader = SerializedFileReader::new(bytes::Bytes::from(contents)).unwrap();
+        let file_meta = reader.metadata().file_metadata();
+        let names: Vec<String> = file_meta
+            .schema_descr()
+            .root_schema()
+            .get_fields()
             .iter()
-            .map(|field| field.name().clone())
+            .map(|field| field.name().to_owned())
             .collect();
         assert_eq!(names, ["name", "total_tokens"]);
-        let rows: usize = builder
-            .build()
-            .unwrap()
-            .map(|batch| batch.unwrap().num_rows())
-            .sum();
+        let rows = usize::try_from(file_meta.num_rows()).unwrap();
         assert_eq!(rows, 1);
         server.stop().await;
     }

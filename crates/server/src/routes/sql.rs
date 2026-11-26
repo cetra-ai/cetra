@@ -781,7 +781,7 @@ mod tests {
             result.columns[1],
             SqlColumnInfo {
                 name: "spans".to_owned(),
-                data_type: "Int64".to_owned(),
+                data_type: "integer".to_owned(),
             }
         );
         assert!(!result.truncated);
@@ -1242,10 +1242,19 @@ mod tests {
             seeded.project.id,
             ("cookie", &seeded.cookie),
             None,
-            &json!({"query": "SELECT * FROM traces"}),
+            &json!({
+                "query": "SELECT a.span_id, b.span_id AS b_id, c.span_id AS c_id, d.span_id AS d_id \
+                          FROM spans AS a CROSS JOIN spans AS b CROSS JOIN spans AS c \
+                          CROSS JOIN spans AS d ORDER BY a.span_id"
+            }),
         )
         .await;
-        assert_eq!(response.status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(
+            response.status,
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "{}",
+            String::from_utf8_lossy(&response.body)
+        );
         assert_eq!(response.problem().code, ProblemCode::QueryTooLarge);
     }
 
@@ -1489,20 +1498,7 @@ mod tests {
 
     /// The row count and column names of a Parquet file.
     fn read_parquet(bytes: Bytes) -> (Vec<String>, usize) {
-        use datafusion::parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
-        let builder = ParquetRecordBatchReaderBuilder::try_new(bytes).unwrap();
-        let names = builder
-            .schema()
-            .fields()
-            .iter()
-            .map(|field| field.name().clone())
-            .collect();
-        let rows = builder
-            .build()
-            .unwrap()
-            .map(|batch| batch.unwrap().num_rows())
-            .sum();
-        (names, rows)
+        cetra_storage::read_parquet_summary_for_test(bytes).unwrap()
     }
 
     #[test]

@@ -506,7 +506,7 @@ mod tests {
         span.resource_attributes
             .insert("host.name".to_owned(), "box".to_owned());
         span.conventions = vec![cetra_core::enums::Convention::Genai];
-        let batch = cetra_core::batch::spans_to_record_batch(&[span]).unwrap();
+        let batch = cetra_core::batch::spans_to_batch(&[span]).unwrap();
         app.state
             .storage
             .append_spans(seeded.project.id, batch)

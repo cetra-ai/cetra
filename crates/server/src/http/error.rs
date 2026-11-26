@@ -315,7 +315,7 @@ impl From<QueryError> for ApiError {
             QueryError::Busy => Self::Unavailable {
                 detail: "too many queries are running",
             },
-            QueryError::DataFusion(error) => Self::Query(RunError::Internal(error)),
+            QueryError::Internal(error) => Self::Query(RunError::Internal(error)),
         }
     }
 }
@@ -598,8 +598,8 @@ impl StdError for UnsupportedPathType {}
 mod tests {
     use axum::http::StatusCode;
     use axum::http::header::RETRY_AFTER;
+    use cetra_storage::error::engine_error_for_test;
     use cetra_storage::{InvalidQuery, Position};
-    use datafusion::error::DataFusionError;
 
     use super::*;
 
@@ -754,8 +754,8 @@ mod tests {
 
     #[test]
     fn internal_query_error_hides_its_source() {
-        let problem = ApiError::Query(RunError::Internal(DataFusionError::Internal(
-            "secret plan text".into(),
+        let problem = ApiError::Query(RunError::Internal(engine_error_for_test(
+            "secret plan text",
         )))
         .problem();
         assert_eq!(problem.status, 500);

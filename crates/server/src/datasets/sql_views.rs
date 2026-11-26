@@ -6,18 +6,13 @@
 
 use std::sync::Arc;
 
-use arrow::array::{
-    ArrayRef, Int64Array, LargeStringArray, LargeStringBuilder, StringArray,
-    TimestampNanosecondArray,
+use cetra_column::{
+    Batch, Bitmap, Column, ColumnError, DataType, Field, FlatColumn, FlatData, Schema, Utf8Data,
 };
-use arrow::datatypes::{DataType, Field, Schema, TimeUnit};
-use arrow::record_batch::RecordBatch;
 use cetra_core::ids::{OrgId, ProjectId, SpanId, TraceId};
 use cetra_storage::{
     ColumnInfo, ColumnKind, QueryContext, RunError, SqliteView, TimeWindow, ViewColumns, ViewName,
 };
-use datafusion::datasource::TableProvider;
-use datafusion::datasource::memory::MemTable;
 
 use crate::http::AppState;
 use crate::http::error::ApiError;
@@ -35,8 +30,8 @@ pub(crate) const MAX_VIEW_TEXT_BYTES: usize = 256 * 1024 * 1024;
 ///
 /// # Errors
 ///
-/// `query_failed` (400) when a view is over its budget. An internal error when arrow or
-/// DataFusion refuses the table.
+/// `query_failed` (400) when a view is over its budget. An internal error when building or
+/// registering the view fails.
 pub(crate) async fn register(
     state: &AppState,
     ctx: &QueryContext,
@@ -82,8 +77,8 @@ async fn register_with(
                 ViewItems::Rows(rows) => rows,
                 ViewItems::TooLarge => return Err(too_large("dataset_items")),
             };
-        let table = dataset_items_table(&items)?;
-        ctx.register_sqlite_view(SqliteView::DatasetItems, table)
+        let (schema, batches) = dataset_items_batches(&items)?;
+        ctx.register_sqlite_view(SqliteView::DatasetItems, schema, batches)
             .map_err(ApiError::Sql)?;
     }
     if lower.contains("experiment_items") {
@@ -102,8 +97,8 @@ async fn register_with(
             ViewRows::Rows(rows) => rows,
             ViewRows::TooLarge => return Err(too_large("experiment_items")),
         };
-        let table = experiment_items_table(&rows)?;
-        ctx.register_sqlite_view(SqliteView::ExperimentItems, table)
+        let (schema, batches) = experiment_items_batches(&rows)?;
+        ctx.register_sqlite_view(SqliteView::ExperimentItems, schema, batches)
             .map_err(ApiError::Sql)?;
     }
     Ok(())
@@ -267,130 +262,162 @@ fn too_large(view: &str) -> ApiError {
     )))
 }
 
-/// The `dataset_items` table: the items as rows.
-fn dataset_items_table(items: &[ViewItem]) -> Result<Arc<dyn TableProvider>, ApiError> {
-    let fields = vec![
+/// The `dataset_items` schema and batches.
+fn dataset_items_batches(items: &[ViewItem]) -> Result<(Arc<Schema>, Vec<Batch>), ApiError> {
+    let schema = Schema::try_new_arc(vec![
         Field::new("dataset_id", DataType::Utf8, false),
         Field::new("dataset_name", DataType::Utf8, false),
-        Field::new("dataset_version", DataType::Int64, false),
+        Field::new("dataset_version", DataType::I64, false),
         Field::new("item_id", DataType::Utf8, false),
-        Field::new("input", DataType::LargeUtf8, false),
-        Field::new("expected_output", DataType::LargeUtf8, true),
-        Field::new("metadata", DataType::LargeUtf8, false),
+        Field::new("input", DataType::Utf8, false),
+        Field::new("expected_output", DataType::Utf8, true),
+        Field::new("metadata", DataType::Utf8, false),
         Field::new("source_trace_id", DataType::Utf8, true),
         Field::new("source_span_id", DataType::Utf8, true),
-        Field::new("created_at", timestamp(), false),
-    ];
-    let columns: Vec<ArrayRef> = vec![
-        Arc::new(StringArray::from(strings(items, |i| {
-            Some(i.dataset_id.to_string())
-        }))),
-        Arc::new(StringArray::from(strings(items, |i| {
-            Some(i.dataset_name.clone())
-        }))),
-        Arc::new(Int64Array::from(
-            items.iter().map(|i| i.dataset_version).collect::<Vec<_>>(),
-        )),
-        Arc::new(StringArray::from(strings(items, |i| {
-            Some(i.item_id.to_string())
-        }))),
-        Arc::new(large_strings(items, |i| Some(i.input.as_str()))),
-        Arc::new(large_strings(items, |i| i.expected_output.as_deref())),
-        Arc::new(large_strings(items, |i| Some(i.metadata.as_str()))),
-        Arc::new(StringArray::from(strings(items, |i| {
+        Field::new("created_at", DataType::timestamp_utc(), false),
+    ])
+    .map_err(column_err)?;
+    if items.is_empty() {
+        return Ok((schema, Vec::new()));
+    }
+    let columns = vec![
+        owned_strings(items, |i| Some(i.dataset_id.to_string()))?,
+        borrowed_strings(items, |i| Some(i.dataset_name.as_str()))?,
+        i64_col(items.iter().map(|i| i.dataset_version).collect())?,
+        owned_strings(items, |i| Some(i.item_id.to_string()))?,
+        borrowed_strings(items, |i| Some(i.input.as_str()))?,
+        borrowed_strings(items, |i| i.expected_output.as_deref())?,
+        borrowed_strings(items, |i| Some(i.metadata.as_str()))?,
+        owned_strings(items, |i| {
             i.source_trace_id.map(|trace: TraceId| trace.to_string())
-        }))),
-        Arc::new(StringArray::from(strings(items, |i| {
+        })?,
+        owned_strings(items, |i| {
             i.source_span_id.map(|span: SpanId| span.to_string())
-        }))),
-        timestamps(items.iter().map(|i| i.created_at).collect()),
+        })?,
+        ts_col(items.iter().map(|i| i.created_at).collect())?,
     ];
-    table(fields, columns)
+    build_batches(schema, columns, items.len())
 }
 
-/// The `experiment_items` table: the result rows as rows.
-fn experiment_items_table(rows: &[ViewRow]) -> Result<Arc<dyn TableProvider>, ApiError> {
-    let fields = vec![
+/// The `experiment_items` schema and batches.
+fn experiment_items_batches(rows: &[ViewRow]) -> Result<(Arc<Schema>, Vec<Batch>), ApiError> {
+    let schema = Schema::try_new_arc(vec![
         Field::new("experiment_id", DataType::Utf8, false),
         Field::new("experiment_name", DataType::Utf8, false),
         Field::new("dataset_id", DataType::Utf8, true),
-        Field::new("dataset_version", DataType::Int64, false),
+        Field::new("dataset_version", DataType::I64, false),
         Field::new("dataset_item_id", DataType::Utf8, false),
-        Field::new("repetition", DataType::Int64, false),
+        Field::new("repetition", DataType::I64, false),
         Field::new("trace_id", DataType::Utf8, true),
-        Field::new("input", DataType::LargeUtf8, false),
-        Field::new("expected_output", DataType::LargeUtf8, true),
-        Field::new("output", DataType::LargeUtf8, true),
-        Field::new("error", DataType::LargeUtf8, true),
-        Field::new("latency_ns", DataType::Int64, true),
-        Field::new("created_at", timestamp(), false),
-    ];
-    let columns: Vec<ArrayRef> = vec![
-        Arc::new(StringArray::from(strings(rows, |r| {
-            Some(r.experiment_id.to_string())
-        }))),
-        Arc::new(StringArray::from(strings(rows, |r| {
-            Some(r.experiment_name.clone())
-        }))),
-        Arc::new(StringArray::from(strings(rows, |r| {
-            r.dataset_id.map(|id| id.to_string())
-        }))),
-        Arc::new(Int64Array::from(
-            rows.iter().map(|r| r.dataset_version).collect::<Vec<_>>(),
-        )),
-        Arc::new(StringArray::from(strings(rows, |r| {
-            Some(r.dataset_item_id.to_string())
-        }))),
-        Arc::new(Int64Array::from(
-            rows.iter().map(|r| r.repetition).collect::<Vec<_>>(),
-        )),
-        Arc::new(StringArray::from(strings(rows, |r| {
-            r.trace_id.map(|trace: TraceId| trace.to_string())
-        }))),
-        Arc::new(large_strings(rows, |r| Some(r.input.as_str()))),
-        Arc::new(large_strings(rows, |r| r.expected_output.as_deref())),
-        Arc::new(large_strings(rows, |r| r.output.as_deref())),
-        Arc::new(large_strings(rows, |r| r.error.as_deref())),
-        Arc::new(Int64Array::from(
-            rows.iter().map(|r| r.latency_ns).collect::<Vec<_>>(),
-        )),
-        timestamps(rows.iter().map(|r| r.created_at).collect()),
-    ];
-    table(fields, columns)
-}
-
-/// The text of each row, from `value`.
-fn strings<T>(rows: &[T], value: impl Fn(&T) -> Option<String>) -> Vec<Option<String>> {
-    rows.iter().map(value).collect()
-}
-
-/// A `LargeUtf8` column of the text `value` borrows from each row. The builder copies each text
-/// once, so no clone of the rows' text is made.
-fn large_strings<T>(rows: &[T], value: impl Fn(&T) -> Option<&str>) -> LargeStringArray {
-    let text_bytes: usize = rows.iter().filter_map(&value).map(str::len).sum();
-    let mut builder = LargeStringBuilder::with_capacity(rows.len(), text_bytes);
-    for row in rows {
-        builder.append_option(value(row));
+        Field::new("input", DataType::Utf8, false),
+        Field::new("expected_output", DataType::Utf8, true),
+        Field::new("output", DataType::Utf8, true),
+        Field::new("error", DataType::Utf8, true),
+        Field::new("latency_ns", DataType::I64, true),
+        Field::new("created_at", DataType::timestamp_utc(), false),
+    ])
+    .map_err(column_err)?;
+    if rows.is_empty() {
+        return Ok((schema, Vec::new()));
     }
-    builder.finish()
+    let columns = vec![
+        owned_strings(rows, |r| Some(r.experiment_id.to_string()))?,
+        borrowed_strings(rows, |r| Some(r.experiment_name.as_str()))?,
+        owned_strings(rows, |r| r.dataset_id.map(|id| id.to_string()))?,
+        i64_col(rows.iter().map(|r| r.dataset_version).collect())?,
+        owned_strings(rows, |r| Some(r.dataset_item_id.to_string()))?,
+        i64_col(rows.iter().map(|r| r.repetition).collect())?,
+        owned_strings(rows, |r| r.trace_id.map(|trace: TraceId| trace.to_string()))?,
+        borrowed_strings(rows, |r| Some(r.input.as_str()))?,
+        borrowed_strings(rows, |r| r.expected_output.as_deref())?,
+        borrowed_strings(rows, |r| r.output.as_deref())?,
+        borrowed_strings(rows, |r| r.error.as_deref())?,
+        opt_i64_col(rows.iter().map(|r| r.latency_ns))?,
+        ts_col(rows.iter().map(|r| r.created_at).collect())?,
+    ];
+    build_batches(schema, columns, rows.len())
 }
 
-fn timestamp() -> DataType {
-    DataType::Timestamp(TimeUnit::Nanosecond, Some("UTC".into()))
+fn column_err(error: ColumnError) -> ApiError {
+    ApiError::Internal(Box::new(error))
 }
 
-fn timestamps(values: Vec<i64>) -> ArrayRef {
-    Arc::new(TimestampNanosecondArray::from(values).with_timezone("UTC"))
+fn owned_strings<T>(rows: &[T], value: impl Fn(&T) -> Option<String>) -> Result<Column, ApiError> {
+    let mut nulls = Bitmap::new_ones(rows.len());
+    let mut any_null = false;
+    let mut owned = Vec::with_capacity(rows.len());
+    for (idx, row) in rows.iter().enumerate() {
+        if let Some(text) = value(row) {
+            owned.push(text);
+        } else {
+            let _ = nulls.set(idx, false);
+            any_null = true;
+            owned.push(String::new());
+        }
+    }
+    let data = Utf8Data::try_from_slices(owned.iter().map(String::as_str)).map_err(column_err)?;
+    let col =
+        FlatColumn::try_new(FlatData::Utf8(data), any_null.then_some(nulls)).map_err(column_err)?;
+    Ok(Column::Flat(col))
 }
 
-/// One batch of `columns` under `fields`, as a table. A zero-row batch is a valid, empty view.
-fn table(fields: Vec<Field>, columns: Vec<ArrayRef>) -> Result<Arc<dyn TableProvider>, ApiError> {
-    let schema = Arc::new(Schema::new(fields));
-    let batch = RecordBatch::try_new(Arc::clone(&schema), columns)
-        .map_err(|error| ApiError::Internal(Box::new(error)))?;
-    let table = MemTable::try_new(schema, vec![vec![batch]])
-        .map_err(|error| ApiError::Internal(Box::new(error)))?;
-    Ok(Arc::new(table))
+fn borrowed_strings<T>(rows: &[T], value: impl Fn(&T) -> Option<&str>) -> Result<Column, ApiError> {
+    let mut nulls = Bitmap::new_ones(rows.len());
+    let mut any_null = false;
+    let mut slices = Vec::with_capacity(rows.len());
+    for (idx, row) in rows.iter().enumerate() {
+        if let Some(text) = value(row) {
+            slices.push(text);
+        } else {
+            let _ = nulls.set(idx, false);
+            any_null = true;
+            slices.push("");
+        }
+    }
+    let data = Utf8Data::try_from_slices(slices).map_err(column_err)?;
+    let col =
+        FlatColumn::try_new(FlatData::Utf8(data), any_null.then_some(nulls)).map_err(column_err)?;
+    Ok(Column::Flat(col))
+}
+
+fn i64_col(values: Vec<i64>) -> Result<Column, ApiError> {
+    let col = FlatColumn::try_new(FlatData::I64(values), None).map_err(column_err)?;
+    Ok(Column::Flat(col))
+}
+
+fn opt_i64_col(iter: impl ExactSizeIterator<Item = Option<i64>>) -> Result<Column, ApiError> {
+    let len = iter.len();
+    let mut values = Vec::with_capacity(len);
+    let mut nulls = Bitmap::new_ones(len);
+    let mut any_null = false;
+    for (idx, item) in iter.enumerate() {
+        match item {
+            Some(v) => values.push(v),
+            None => {
+                values.push(0);
+                let _ = nulls.set(idx, false);
+                any_null = true;
+            }
+        }
+    }
+    let col = FlatColumn::try_new(FlatData::I64(values), any_null.then_some(nulls))
+        .map_err(column_err)?;
+    Ok(Column::Flat(col))
+}
+
+fn ts_col(values: Vec<i64>) -> Result<Column, ApiError> {
+    let col = FlatColumn::try_new(FlatData::TimestampNs { values, utc: true }, None)
+        .map_err(column_err)?;
+    Ok(Column::Flat(col))
+}
+
+fn build_batches(
+    schema: Arc<Schema>,
+    columns: Vec<Column>,
+    len: usize,
+) -> Result<(Arc<Schema>, Vec<Batch>), ApiError> {
+    let batch = Batch::try_new_all(Arc::clone(&schema), columns, len).map_err(column_err)?;
+    Ok((schema, vec![batch]))
 }
 
 #[cfg(test)]

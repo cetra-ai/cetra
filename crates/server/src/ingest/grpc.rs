@@ -517,8 +517,9 @@ fn elapsed_ms(started: Instant) -> u64 {
 mod tests {
     use crate::test_support::raw_query;
     use bytes::Bytes;
+    use cetra_column::Batch;
     use cetra_otel::decode_json;
-    use datafusion::prelude::SessionContext;
+    use cetra_storage::{QueryContext, SqlRequest};
     use http_body_util::{BodyExt, Full};
     use opentelemetry_proto::tonic::collector::trace::v1::trace_service_server::TraceService;
     use tonic::Code;
@@ -590,34 +591,35 @@ mod tests {
 
     /// Spans in the project, read through the storage query provider.
     async fn stored_spans(app: &TestApp, project: cetra_core::ids::ProjectId) -> usize {
-        let query = raw_query(&app.state.storage, project).await;
-        let ctx = SessionContext::new();
-        ctx.register_table("raw_spans", query.spans)
-            .expect("spans register");
-        ctx.table("raw_spans")
+        raw_query(&app.state.storage, project)
             .await
-            .expect("spans table")
-            .count()
+            .collect_raw_spans()
             .await
-            .expect("count")
+            .expect("collect raw spans")
+            .iter()
+            .map(Batch::num_rows)
+            .sum()
     }
 
-    /// Spans of the project whose stored row matches the SQL `predicate` on `raw_spans`.
+    /// Spans of the project whose stored row matches the SQL `predicate` on `spans`.
     async fn spans_where(
         app: &TestApp,
         project: cetra_core::ids::ProjectId,
         predicate: &str,
     ) -> usize {
-        let query = raw_query(&app.state.storage, project).await;
-        let ctx = SessionContext::new();
-        ctx.register_table("raw_spans", query.spans)
-            .expect("spans register");
-        ctx.sql(&format!("SELECT * FROM raw_spans WHERE {predicate}"))
+        let ctx =
+            QueryContext::new(raw_query(&app.state.storage, project).await, None).expect("context");
+        let json = ctx
+            .sql_json(SqlRequest {
+                query: &format!("SELECT count(*) AS n FROM spans WHERE {predicate}"),
+                params: &serde_json::Map::new(),
+                limit: 1,
+                timeout: std::time::Duration::from_secs(10),
+            })
             .await
-            .expect("sql")
-            .count()
-            .await
-            .expect("count")
+            .expect("sql");
+        let count = json.rows[0]["n"].as_u64().expect("count");
+        usize::try_from(count).expect("count fits usize")
     }
 
     /// The M1 Claude Code export, its placeholder session id replaced by `session`, decoded.

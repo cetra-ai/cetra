@@ -2,15 +2,15 @@
   "columns": [
     {
       "name": "span_kind",
-      "type": "Utf8"
+      "type": "string"
     },
     {
       "name": "spans",
-      "type": "Int64"
+      "type": "integer"
     },
     {
       "name": "first_start",
-      "type": "Timestamp(ns, \"UTC\")"
+      "type": "timestamp"
     }
   ],
   "rows": [
