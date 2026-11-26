@@ -3,6 +3,7 @@
 pub mod error;
 pub mod format;
 pub mod io;
+pub mod payload;
 pub mod simd;
 
 pub use error::StatamError;
@@ -23,5 +24,15 @@ pub use format::{
 pub use io::{
     FileReader, IoCounters, RangeReader, S3_CACHE_BLOCK_BYTES, SimulatedS3Config,
     SimulatedS3Reader, SliceReader,
+};
+pub use payload::{
+    PayloadRefRow,
+    chunker::{
+        CDC_AVG, CDC_MIN, DedupBypassDetector, INLINE_PAYLOAD_THRESHOLD, MAX_CHUNK, MIN_CHUNK,
+        chunk_payload,
+    },
+    decode_payload_refs, encode_payload_refs,
+    pack::{ChunkPackBuilder, ChunkPackReader, PackToc, PackWriteOptions, PackWriteStats},
+    search::{search_pack_chunks, search_pack_rows},
 };
 pub use simd::{FilterOp, Sbbf, TrigramBloom, statam_bloom_hash};
