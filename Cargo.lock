@@ -1282,13 +1282,18 @@ dependencies = [
 name = "cetra-statam"
 version = "0.1.0-rc.2"
 dependencies = [
+ "arrow",
  "blake3",
  "bytes",
  "cetra-column",
  "crc32c",
+ "flate2",
  "lz4_flex",
  "memchr",
+ "parquet",
  "proptest",
+ "rand 0.10.4",
+ "serde_json",
  "tempfile",
  "thiserror 2.0.21",
  "zstd 0.14.4",
