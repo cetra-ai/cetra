@@ -27,7 +27,7 @@ Per-project alert rules over five metrics, evaluated in the background over slid
 ## Evaluation loop
 
 - A tick every 60 s evaluates each enabled rule of an active project and org that was never evaluated or whose `last_evaluated_at + interval − 5 s ≤ now` (`interval` = 60 s for windows ≤ 15 m, 300 s otherwise) (D-K-3).
-- Each evaluation is one aggregate query (`cetra_storage::alert_value`) over `[now − window, now)` (memtable included) through the query context every read uses, so the plan's data-access window applies (D175, D-K-16). At most 4 evaluations run at once, each with a 30 s timeout; a tick waits for the previous one.
+- Each evaluation is one aggregate query (`cetra_storage::alert_value`, executed directly on `cetra-query` push pipelines over `ScanSource`) over `[now − window, now)` (memtable included) through the query context every read uses, so the plan's data-access window applies (D175, D-K-16). At most 4 evaluations run at once, each with a 30 s timeout; a tick waits for the previous one.
 - An evaluation is *insufficient* when the sample count is below `min_count`, *breaching* when it is not insufficient, has a value, and `value <comparator> threshold`, else *clear*. An `issue_occurrences` rule has no `min_count`, so its count is always a value and it is never insufficient.
 
 ```

@@ -43,7 +43,7 @@ Gateway/proxy, custom dashboards, 2FA, message dedup, multi-node, Postgres, Iceb
  OTLP HTTP :8080 ──►│   │                                                    │            │               │
                     │   │ auth / rate limit / metering                       │            ├─► live bus (SSE)
                     │   ▼                                                    │            └─► eval trigger queue
- REST/SSE  :8080 ──►│ api (axum) ─► query engine (DataFusion) ◄── memtable + Parquet files              │
+ REST/SSE  :8080 ──►│ api (axum) ─► cetra-query (push pipelines) ◄── memtable + Parquet files │
  MCP       :8080 ──►│                     ▲                                                              │
  Web UI    :8080 ──►│ static assets       │ catalog (SQLite)                                             │
                     │                                                                                     │
@@ -55,24 +55,31 @@ Gateway/proxy, custom dashboards, 2FA, message dedup, multi-node, Postgres, Iceb
                                    tables/{spans,traces,scores}/… · media/…
 ```
 
-Single tokio runtime. CPU-heavy work (Parquet encode, compaction, DataFusion execution) runs on a dedicated rayon/tokio blocking pool so ingestion latency stays flat.
+Single tokio runtime for I/O. CPU-heavy work (Parquet encode, compaction, `cetra-query` push-pipeline execution on its bounded worker pool) runs off the I/O event loop so ingestion latency stays flat.
 
 ## Crate layout (monorepo)
 
-D52. The earlier split (`cetra-query`, `cetra-meta`, `cetra-auth`, `cetra-alerts`, `cetra-mail`, `cetra-api`, and a `crates/cetra/` binary) is folded in as follows: query lives in `cetra-storage`; meta, auth, alerts, mail and api are modules of `cetra-server`; evaluator execution is the `cetra-eval` crate (D155); the binary is `cetra-cli`. `web/` is embedded into the binary by `cetra-server` (`memory-serve`).
+D52 initially folded query into `cetra-storage`; Track QE (`D-QE-1`, `D-QE-2`, `D-QE-10`) replaced Apache DataFusion and Arrow with dedicated `cetra-column` and `cetra-query` crates. Evaluator execution is `cetra-eval` (D155); the binary is `cetra-cli`; `web/` is embedded into the binary by `cetra-ui` (D-G-18, D-G-35).
 
 ```
 crates/
+  column/    cetra-column   pure-Rust columnar in-memory batches, encodings, memory pool,
+                             and binary framing                                       (Track QE)
   core/      cetra-core     shared contracts: IDs, enums, names, messages, Span/Score,
-                             Arrow schemas + batch conversion, OpenAPI schemas,
+                             cetra-column schemas + batch conversion, OpenAPI schemas,
                              no config (D59)                                          (spec 01)
   otel/      cetra-otel     OTLP decode, normalization, media, truncation, cost      (spec 02)
   eval/      cetra-eval     evaluator execution: checks, mapping, templates, judges,
                              webhooks, judge traces                                   (spec 06)
+  query/     cetra-query    pure-Rust vectorized expressions, Filter DSL, Shape B SQL
+                             planner, and push-pipeline executor                      (spec 05)
   storage/   cetra-storage  WAL, memtable, Parquet, catalog, compaction, deletion,
-                             DataFusion providers, filter DSL, SQL sandbox            (specs 03, 05)
+                             ScanSource adapters, product reads, SQL execution        (specs 03, 05)
+  token/     cetra-token    signed licence, org and control-plane tokens              (Elastic-2.0)
+  saml/      cetra-saml     SAML 2.0 SP: IdP metadata, AuthnRequest, validation       (Elastic-2.0)
   server/    cetra-server   API, auth, metadata DB, evaluation, alerts, email, MCP   (specs 04, 06–09)
   cli/       cetra-cli      the `cetra` binary                                       (spec 09 § CLI)
+  ui/        cetra-ui       the web UI embedded at build time                        (spec 11)
 web/                         React UI (Vite, TanStack, shadcn/ui, pnpm)               (spec 11)
 sdks/python/                 Python SDK (uv)                                           (spec 10)
 sdks/typescript/             TypeScript SDK (pnpm)                                     (spec 10)
@@ -84,10 +91,13 @@ docs/                        decisions, specs, plans, research
 
 Dependency direction:
 
-- `core` depends on no workspace crate.
-- `otel` and `storage` depend only on `core`. They never depend on each other, so they can be built in parallel; `server` connects them.
+- `column` depends on no workspace crate.
+- `core` depends only on `column`.
+- `query` depends only on `column`.
+- `otel` depends only on `core`; `storage` depends on `core`, `column` and `query`. They never depend on each other, so they can be built in parallel; `server` connects them.
 - `eval` depends on `core` and `otel`.
-- `server` depends on `core`, `otel`, `storage` and `eval`; `cli` depends on `server` and `core`.
+- `token`, `saml` and `ui` depend on no workspace crate.
+- `server` depends on `core`, `column`, `otel`, `storage`, `eval`, `token` and `saml`; `cli` depends on `server`, `core` and `ui`.
 
 ## Spec-level choices (reviewed and accepted)
 
@@ -116,8 +126,8 @@ These were made while writing the spec and approved afterwards; S3, S4 and S7 we
 | Topic | Convention |
 |---|---|
 | IDs of entities | UUIDv7, serialized as lowercase hyphenated strings. Public-facing short prefix in API where useful (`org_`, `prj_`… not stored). |
-| Trace / span IDs | OTel: 16-byte trace ID, 8-byte span ID; hex in JSON (lowercase on output, either case accepted on input); `FixedSizeBinary` in Arrow. |
-| Time | Nanoseconds since Unix epoch, UTC. Arrow `Timestamp(Nanosecond, "UTC")`. JSON: RFC 3339 with ns precision. |
+| Trace / span IDs | OTel: 16-byte trace ID, 8-byte span ID; hex in JSON (lowercase on output, either case accepted on input); `FixedBytes16` / `FixedBytes8` in `cetra-column` (`FixedSizeBinary` in Parquet). |
+| Time | Nanoseconds since Unix epoch, UTC. `cetra-column` `TimestampNs { utc: true }` (`TIMESTAMP(NANOS, UTC)` in Parquet). JSON: RFC 3339 with ns precision. |
 | Money | USD as `f64`. Price table stores USD per 1M units. |
 | JSON in columns | UTF-8 strings containing JSON (`input`, `output`, attribute values). |
 | Errors | RFC 7807 `application/problem+json`. |

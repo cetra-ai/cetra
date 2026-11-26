@@ -37,19 +37,19 @@ A single closed enum, `span_kind`, stored as a dictionary-encoded string.
 
 One row per OTel span, after normalization. Columns marked **P** are the "light" projection read by list views; heavy columns are only read when a span/trace is opened or searched.
 
-Type notation in this document: "Utf8 (dict)" means a `Utf8` column in memory that is **dictionary-encoded in Parquet** (low cardinality); it is not an Arrow `Dictionary` type (D62). The Rust structs and Arrow schemas implementing these tables live in `cetra-core` (D60).
+Type notation in this document: "Utf8 (dict)" means a `Utf8` column in `cetra-column` (in memory it may use `Flat` or `Dict` encoding) that is **dictionary-encoded in Parquet** (low cardinality; D62, D-QE-2). The Rust structs, `cetra-column` schemas (`cetra_core::schema`), and `Span`/`Score` → `Batch` conversions live in `cetra-core` (D60, D-QE-2); `cetra-core` and `cetra-otel` have no Arrow dependency. In memory all integers use `I64`; the Parquet writer in `cetra-storage` still encodes `spans.schema_version` as `UInt16` and `traces.partial_count` as `Int32` on disk.
 
-| Column | Arrow type | P | Notes |
+| Column | Type | P | Notes |
 |---|---|---|---|
 | `project_id` | Utf8 (dict) | P | Partition key (constant per file). |
-| `trace_id` | FixedSizeBinary(16) | P | Bloom filter. |
-| `span_id` | FixedSizeBinary(8) | P | |
-| `parent_span_id` | FixedSizeBinary(8), nullable | P | Null ⇒ root of the trace *as received*. |
+| `trace_id` | FixedBytes16 | P | Parquet `FixedSizeBinary(16)`. Bloom filter. |
+| `span_id` | FixedBytes8 | P | Parquet `FixedSizeBinary(8)`. |
+| `parent_span_id` | FixedBytes8, nullable | P | Null ⇒ root of the trace *as received*. |
 | `name` | Utf8 | P | |
 | `span_kind` | Utf8 (dict) | P | Enum above. |
-| `start_time` | Timestamp(ns, UTC) | P | The partition day is the trace's anchor day, the UTC date of this or the day before or after (03 § Trace anchor). |
-| `end_time` | Timestamp(ns, UTC) | P | |
-| `duration_ns` | Int64 | P | `end - start`. |
+| `start_time` | TimestampNs(UTC) | P | The partition day is the trace's anchor day, the UTC date of this or the day before or after (03 § Trace anchor). |
+| `end_time` | TimestampNs(UTC) | P | |
+| `duration_ns` | I64 | P | `end - start`. |
 | `status` | Utf8 (dict) | P | `unset` \| `ok` \| `error`. |
 | `status_message` | Utf8, nullable | P | |
 | `service_name` | Utf8 (dict), nullable | P | Resource `service.name`. |
@@ -58,25 +58,25 @@ Type notation in this document: "Utf8 (dict)" means a `Utf8` column in memory th
 | `environment` | Utf8 (dict), nullable | P | e.g. `production`. Reserved: `cetra-eval` (evaluator executions, 06), `cetra-playground` (playground runs, D-V-22), `cetra-assistant` (assistant turns, D-AS-11), `experiment` default for experiment runs. The reserved set is `cetra_core::names::environment::RESERVED` (D-V-33); each reserved value is hidden by default, not an online-rule target, not a trace an evaluator can load, rewritten when received over OTLP, and not billed (D-V-34). |
 | `release` | Utf8 (dict), nullable | P | Git SHA / version string. |
 | `tags` | List(Utf8) | P | |
-| `metadata` | Map(Utf8, Utf8) | P | User metadata; values are JSON-encoded scalars or strings. Coding-agent spans carry `coding_agent`, `repository` and `branch` (02 § Coding agents). |
+| `metadata` | MapUtf8 | P | `Map(Utf8, Utf8)`; user metadata, values are JSON-encoded scalars or strings. Coding-agent spans carry `coding_agent`, `repository` and `branch` (02 § Coding agents). |
 | `provider` | Utf8 (dict), nullable | P | Normalized lowercase: `openai`, `anthropic`, `gcp.gemini`, `aws.bedrock`, … |
 | `request_model` | Utf8 (dict), nullable | P | |
 | `response_model` | Utf8 (dict), nullable | P | |
 | `model` | Utf8 (dict), nullable | P | `coalesce(response_model, request_model)`, used for cost + grouping. |
 | `prompt_name` | Utf8 (dict), nullable | P | Registry prompt (`cetra.prompt.name`, D-V-15). |
-| `prompt_version` | Int64, nullable | P | Its version, ≥ 1. |
+| `prompt_version` | I64, nullable | P | Its version, ≥ 1. |
 | `operation` | Utf8 (dict), nullable | | GenAI `operation.name` if any. |
-| `input_tokens` | Int64, nullable | P | Includes cached tokens (OTel semantics). |
-| `output_tokens` | Int64, nullable | P | Includes reasoning tokens. |
-| `cache_read_tokens` | Int64, nullable | P | |
-| `cache_write_tokens` | Int64, nullable | P | |
-| `reasoning_tokens` | Int64, nullable | P | |
-| `total_tokens` | Int64, nullable | P | |
-| `cost_input` | Float64, nullable | P | USD. |
-| `cost_output` | Float64, nullable | P | USD. |
-| `cost_total` | Float64, nullable | P | USD; includes cache and reasoning components. |
+| `input_tokens` | I64, nullable | P | Includes cached tokens (OTel semantics). |
+| `output_tokens` | I64, nullable | P | Includes reasoning tokens. |
+| `cache_read_tokens` | I64, nullable | P | |
+| `cache_write_tokens` | I64, nullable | P | |
+| `reasoning_tokens` | I64, nullable | P | |
+| `total_tokens` | I64, nullable | P | |
+| `cost_input` | F64, nullable | P | USD. |
+| `cost_output` | F64, nullable | P | USD. |
+| `cost_total` | F64, nullable | P | USD; includes cache and reasoning components. |
 | `cost_source` | Utf8 (dict), nullable | | `computed` \| `reported` \| `none`. |
-| `ttft_ns` | Int64, nullable | P | Time to first token. |
+| `ttft_ns` | I64, nullable | P | Time to first token. |
 | `request_params` | Utf8 (JSON), nullable | | temperature, top_p, max_tokens, … |
 | `input` | Utf8, nullable | | See *Payloads* below. |
 | `input_format` | Utf8 (dict), nullable | | `messages` \| `json` \| `text`. |
@@ -86,17 +86,17 @@ Type notation in this document: "Utf8 (dict)" means a `Utf8` column in memory th
 | `output_preview` | Utf8, nullable | P | Same. |
 | `system_instructions` | Utf8 (JSON), nullable | | |
 | `tool_definitions` | Utf8 (JSON), nullable | | |
-| `attributes` | Map(Utf8, Utf8) | | All span attributes not consumed by normalization; values JSON-encoded. Includes `cetra.normalize_warning` (02 rule 18) and `cetra.normalize_error`, and `cetra.span_name`, the original name of a coding-agent tool span that was renamed (02 § Coding agents). |
-| `resource_attributes` | Map(Utf8, Utf8) | | Minus `service.name`. |
+| `attributes` | MapUtf8 | | All span attributes not consumed by normalization; values JSON-encoded. Includes `cetra.normalize_warning` (02 rule 18) and `cetra.normalize_error`, and `cetra.span_name`, the original name of a coding-agent tool span that was renamed (02 § Coding agents). |
+| `resource_attributes` | MapUtf8 | | Minus `service.name`. |
 | `scope_name` | Utf8 (dict), nullable | | Instrumentation scope. |
 | `scope_version` | Utf8 (dict), nullable | | |
-| `events` | List(Struct{time: Timestamp, name: Utf8, attributes: Utf8 JSON}) | | Exceptions etc. GenAI message events are consumed. |
-| `links` | List(Struct{trace_id, span_id, attributes JSON}) | | |
+| `events` | Events | | Typed `cetra-column::Events` (Parquet `List(Struct{time: Timestamp, name: Utf8, attributes: Utf8 JSON})`, D-QE-11). Exceptions etc. GenAI message events are consumed. |
+| `links` | Links | | Typed `cetra-column::Links` (Parquet `List(Struct{trace_id, span_id, attributes JSON})`, D-QE-11). |
 | `media_refs` | List(Utf8) | | SHA-256 hex of extracted blobs; used by media GC. |
 | `truncated` | List(Utf8) | | Names of attributes truncated at ingest. |
 | `conventions` | List(Utf8 dict) | | Detected conventions (`genai`, `openinference`, `openllmetry`, `vercel`, `cetra`, …). Debug aid. |
-| `ingest_time` | Timestamp(ns, UTC) | | Server receive time. Used by deletion cut-offs. |
-| `schema_version` | UInt16 | | Row-level normalization version. |
+| `ingest_time` | TimestampNs(UTC) | | Server receive time. Used by deletion cut-offs. |
+| `schema_version` | I64 (UInt16 on disk) | | Row-level normalization version. |
 
 Uniqueness: `(project_id, trace_id, span_id)`. Duplicate re-sends are tolerated at write time and removed at compaction (keep the row with greatest `ingest_time`); queries over not-yet-compacted data may briefly see duplicates — list views de-duplicate by `span_id`. Known limit: `span_list` de-duplicates adjacent copies of a span (same `start_time`, `span_id`, `trace_id`), keeping the newest `ingest_time`. Under the other sorts (`duration`, `cost_total`, `total_tokens`) copies are de-duplicated only when their sort value is also equal. The filter, search and exclusions run before de-duplication, so an older copy that matches is listed when the newest one does not. A re-send that changed `start_time` stays a duplicate until compaction, which keeps copies whose `start_time`s fall in different slices (spec 03 §5, "During a merge").
 
@@ -142,29 +142,29 @@ Rows of `spans` and `traces` are partitioned by the trace's **anchor day** (03 �
 | Column | Type | Merge rule |
 |---|---|---|
 | `project_id` | Utf8 | key |
-| `trace_id` | FixedSizeBinary(16) | key |
-| `start_time` | Timestamp | min |
-| `end_time` | Timestamp | max |
+| `trace_id` | FixedBytes16 | key |
+| `start_time` | TimestampNs(UTC) | min |
+| `end_time` | TimestampNs(UTC) | max |
 | `name` | Utf8 | from root partial (`has_root`), else first non-null |
-| `root_span_id` | FixedSizeBinary(8) | from root partial |
-| `has_root` | Boolean | bool_or |
+| `root_span_id` | FixedBytes8 | from root partial |
+| `has_root` | Bool | bool_or |
 | `status` | Utf8 | `error` if any partial has `error_count > 0`, else root status, else `unset` (no root seen yet) |
 | `session_id` | Utf8 | first non-null (root preferred) |
 | `user_id` | Utf8 | first non-null (root preferred) |
 | `environment` | Utf8 | first non-null |
 | `release` | Utf8 | first non-null |
 | `tags` | List(Utf8) | distinct union |
-| `metadata` | Map | root's metadata, keys from other partials added if absent |
+| `metadata` | MapUtf8 | root's metadata, keys from other partials added if absent |
 | `input_preview` / `output_preview` | Utf8 | root partial; if no root, first `llm` span's |
-| `span_count` | Int64 | sum |
-| `error_count` | Int64 | sum |
-| `llm_count` | Int64 | sum |
-| `input_tokens` … `total_tokens` | Int64 | sum |
-| `cost_total` | Float64 | sum, in integer units of 1e-18 USD so the result does not depend on merge order (D-A2-4) |
+| `span_count` | I64 | sum |
+| `error_count` | I64 | sum |
+| `llm_count` | I64 | sum |
+| `input_tokens` … `total_tokens` | I64 | sum |
+| `cost_total` | F64 | sum, in integer units of 1e-18 USD so the result does not depend on merge order (D-A2-4) |
 | `models` | List(Utf8) | distinct union |
 | `prompts` | List(Utf8) | distinct union of `name@version` (spans with both) |
-| `last_ingest_time` | Timestamp | max |
-| `partial_count` | Int32 | sum (1 per partial; = 1 after full compaction) |
+| `last_ingest_time` | TimestampNs(UTC) | max |
+| `partial_count` | I64 (Int32 on disk) | sum (1 per partial; = 1 after full compaction) |
 
 `duration_ns` is computed at query time as `end_time - start_time`.
 
@@ -190,13 +190,13 @@ Scores are high-volume (online judges can score every trace) and must be joinabl
 | `project_id` | Utf8 | partition |
 | `score_id` | Utf8 (UUID) | LWW key; client-provided or derived deterministically per (target, name, source, author) — 06 |
 | `target` | Utf8 dict | `span` \| `trace` \| `session` |
-| `trace_id` | FixedSizeBinary(16), nullable | set for span/trace targets |
-| `span_id` | FixedSizeBinary(8), nullable | span target |
+| `trace_id` | FixedBytes16, nullable | set for span/trace targets |
+| `span_id` | FixedBytes8, nullable | span target |
 | `session_id` | Utf8, nullable | session target (and copied for trace targets when known) |
 | `user_id` | Utf8, nullable | set when the writer knows it (SDK context, judges, which read the trace); GDPR deletes also match via resolved trace/session IDs, so it is an optimization only |
 | `name` | Utf8 dict | e.g. `hallucination`, `user_feedback` |
 | `data_type` | Utf8 dict | `numeric` \| `boolean` \| `categorical` \| `text` |
-| `value_num` | Float64, nullable | numeric value; boolean as 0/1 |
+| `value_num` | F64, nullable | numeric value; boolean as 0/1 |
 | `value_str` | Utf8, nullable | categorical label or text |
 | `reason` | Utf8, nullable | explanation |
 | `source` | Utf8 dict | `api` \| `sdk` \| `human` \| `end_user` \| `llm_judge` \| `check` \| `webhook` \| `issue` |
@@ -206,11 +206,11 @@ Scores are high-volume (online judges can score every trace) and must be joinabl
 | `dataset_item_id` | Utf8, nullable | |
 | `queue_id` | Utf8, nullable | annotation queue the score was written from (D-AQ-6); not part of the derived id |
 | `author_user_id` | Utf8, nullable | for `human` |
-| `metadata` | Map(Utf8, Utf8) | |
-| `created_at` | Timestamp | partition day |
-| `updated_at` | Timestamp | LWW version |
-| `deleted` | Boolean | |
-| `ingest_time` | Timestamp | |
+| `metadata` | MapUtf8 | |
+| `created_at` | TimestampNs(UTC) | partition day |
+| `updated_at` | TimestampNs(UTC) | LWW version |
+| `deleted` | Bool | |
+| `ingest_time` | TimestampNs(UTC) | |
 
 Score **definitions** (name, type, allowed categories, numeric range, description) live in SQLite and drive the annotation UI; scores are not required to match a definition.
 
