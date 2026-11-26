@@ -1463,6 +1463,19 @@ mod tests {
         assert_eq!(names, ["name", "total_tokens"]);
         let rows = usize::try_from(file_meta.num_rows()).unwrap();
         assert_eq!(rows, 1);
+        let decoded: Vec<Vec<parquet::record::Field>> = reader
+            .get_row_iter(None)
+            .unwrap()
+            .map(|r| {
+                r.unwrap()
+                    .get_column_iter()
+                    .map(|(_name, field)| field.clone())
+                    .collect()
+            })
+            .collect();
+        assert_eq!(decoded.len(), 1);
+        assert!(matches!(&decoded[0][0], parquet::record::Field::Str(s) if s == "chat"));
+        assert!(matches!(decoded[0][1], parquet::record::Field::Long(15)));
         server.stop().await;
     }
 

@@ -864,9 +864,9 @@ fn a_spilling_query_stops_at_min_free() {
         let mut clock = clock_start();
         model_steps(&mut h, &mut model, &mut clock, &seed_ops(), 0);
 
-        // Four chunks of 16 batches (about 25 MiB of Arrow). Each chunk ends with a restart, so the WAL
+        // Four chunks of 16 batches (about 25 MiB of column batches). Each chunk ends with a restart, so the WAL
         // holds at most one chunk. Larger tries failed run 1 as TooLarge: 40 batches per chunk, and
-        // then 20 (a 33 MiB spill that DataFusion's cap counted above the 47 MB above min_free).
+        // then 20 (a 33 MiB spill that the query pool cap counted above the 47 MB above min_free).
         let mut accepted = 0;
         let mut sent: u16 = 0;
         for _ in 0..4 {

@@ -47,7 +47,7 @@ pub(crate) struct EngineContext {
     pub(crate) visible_from: Option<i64>,
     pub(crate) around: Option<i64>,
     pub(crate) force_range_mode: bool,
-    pub(crate) pool: Option<Arc<ScopedPool>>,
+    pub(crate) pool: Arc<ScopedPool>,
     last_metrics: Arc<Mutex<Option<ExecMetrics>>>,
 }
 
@@ -58,7 +58,7 @@ impl fmt::Debug for EngineContext {
             .field("around", &self.around)
             .field("force_range_mode", &self.force_range_mode)
             .field("runtime", &self.runtime)
-            .field("has_pool", &self.pool.is_some())
+            .field("pool_cap", &self.pool.cap())
             .finish_non_exhaustive()
     }
 }
@@ -85,9 +85,9 @@ impl EngineContext {
             .clone()
     }
 
-    /// Returns the pre-admitted [`ScopedPool`], if this context was admitted via [`Storage::query`].
-    pub(crate) fn pool(&self) -> Option<&Arc<ScopedPool>> {
-        self.pool.as_ref()
+    /// Returns the [`ScopedPool`] attached to this context.
+    pub(crate) fn pool(&self) -> &Arc<ScopedPool> {
+        &self.pool
     }
 
     /// Admits a query against `storage`'s [`QeRuntime`] admission pool up front (surfacing
@@ -111,7 +111,7 @@ impl EngineContext {
                 QueryError::Busy => crate::error::QueryError::Busy,
                 other => crate::error::QueryError::Internal(EngineError::from_query(&other)),
             })?;
-        Self::build_from_storage(storage, project, options, Some(pool))
+        Self::build_from_storage(storage, project, options, pool)
             .map_err(crate::error::QueryError::Internal)
     }
 
@@ -122,14 +122,15 @@ impl EngineContext {
         project: ProjectId,
         options: &QueryOptions,
     ) -> Result<Self, RunError> {
-        Self::build_from_storage(storage, project, options, None).map_err(RunError::Internal)
+        let pool = cetra_column::GlobalPool::standalone(storage.qe_runtime.query_memory.cap);
+        Self::build_from_storage(storage, project, options, pool).map_err(RunError::Internal)
     }
 
     fn build_from_storage(
         storage: &Storage,
         project: ProjectId,
         options: &QueryOptions,
-        pool: Option<Arc<ScopedPool>>,
+        pool: Arc<ScopedPool>,
     ) -> Result<Self, EngineError> {
         let handle = tokio::runtime::Handle::try_current()
             .map_err(|_| EngineError::internal("EngineContext requires an active Tokio runtime"))?;
@@ -160,8 +161,9 @@ impl EngineContext {
         verify: &Arc<crate::verify::VerifyQueue>,
         handle: tokio::runtime::Handle,
     ) -> Result<Self, EngineError> {
+        let pool = cetra_column::GlobalPool::standalone(runtime.query_memory.cap);
         Self::build_from_state(
-            state, store, project, options, runtime, lookback, verify, handle, None,
+            state, store, project, options, runtime, lookback, verify, handle, pool,
         )
     }
 
@@ -175,7 +177,7 @@ impl EngineContext {
         lookback: i64,
         verify: &Arc<crate::verify::VerifyQueue>,
         handle: tokio::runtime::Handle,
-        pool: Option<Arc<ScopedPool>>,
+        pool: Arc<ScopedPool>,
     ) -> Result<Self, EngineError> {
         let suspects = Suspects::new(Arc::clone(verify));
         let spans_raw = spans_schema();
@@ -326,8 +328,8 @@ impl EngineContext {
         })
     }
 
-    /// Executes arbitrary synchronous query work on `spawn_blocking` with admission,
-    /// `CancelToken`, `Drop` cancellation guard, and `timeout` worker drain.
+    /// Executes arbitrary synchronous query work on `spawn_blocking` using the attached
+    /// `ScopedPool`, `CancelToken`, `Drop` cancellation guard, and `timeout` worker drain.
     pub(crate) async fn run_with_ctx<T, F>(
         &self,
         timeout: Duration,
@@ -339,37 +341,7 @@ impl EngineContext {
     {
         let deadline = tokio::time::Instant::now() + timeout;
         let workers = self.runtime.workers().map_err(query_err_to_run)?;
-        let pool = match &self.pool {
-            Some(p) => Arc::clone(p),
-            None => {
-                let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
-                if remaining.is_zero() {
-                    return Err(RunError::Timeout);
-                }
-                let admission_wait = self.runtime.query_memory.wait;
-                let wait = admission_wait.min(remaining);
-                match tokio::time::timeout(
-                    remaining,
-                    self.runtime.admission.admit(
-                        self.runtime.query_memory.initial,
-                        self.runtime.query_memory.cap,
-                        wait,
-                    ),
-                )
-                .await
-                {
-                    Ok(Ok(p)) => p,
-                    Ok(Err(QueryError::Busy))
-                        if remaining <= admission_wait
-                            && tokio::time::Instant::now() >= deadline =>
-                    {
-                        return Err(RunError::Timeout);
-                    }
-                    Ok(Err(err)) => return Err(query_err_to_run(err)),
-                    Err(_) => return Err(RunError::Timeout),
-                }
-            }
-        };
+        let pool = Arc::clone(&self.pool);
 
         let cancel = CancelToken::new();
         let cancel_guard = CancelOnDrop(cancel.clone());
@@ -497,6 +469,7 @@ pub(crate) fn query_err_to_run(err: QueryError) -> RunError {
     match err {
         QueryError::TooLarge => RunError::TooLarge,
         QueryError::Cancelled => RunError::Timeout,
+        QueryError::Busy => RunError::Busy,
         QueryError::Invalid(inv) => RunError::Invalid(InvalidQuery {
             message: inv.message,
             position: inv.position.map(|p| Position {
@@ -509,8 +482,7 @@ pub(crate) fn query_err_to_run(err: QueryError) -> RunError {
         err @ (QueryError::Column(_)
         | QueryError::CorruptData(_)
         | QueryError::StorageIo(_)
-        | QueryError::Internal(_)
-        | QueryError::Busy) => RunError::Internal(EngineError::from_query(&err)),
+        | QueryError::Internal(_)) => RunError::Internal(EngineError::from_query(&err)),
     }
 }
 
@@ -539,6 +511,7 @@ pub(crate) fn run_err_to_query(err: RunError) -> QueryError {
         RunError::Failed(msg) => QueryError::Failed(msg),
         RunError::Timeout => QueryError::Cancelled,
         RunError::TooLarge => QueryError::TooLarge,
+        RunError::Busy => QueryError::Busy,
         RunError::Internal(engine_err) => engine_err.to_query_error(),
     }
 }
@@ -1838,10 +1811,7 @@ mod tests {
             query_err_to_run(QueryError::Failed("fail".to_owned())),
             RunError::Failed(ref m) if m == "fail"
         ));
-        assert!(matches!(
-            query_err_to_run(QueryError::Busy),
-            RunError::Internal(_)
-        ));
+        assert!(matches!(query_err_to_run(QueryError::Busy), RunError::Busy));
         assert!(matches!(
             query_err_to_run(QueryError::Internal("boom".to_owned())),
             RunError::Internal(_)
@@ -1940,7 +1910,7 @@ mod tests {
             started: Arc::clone(&started),
             finished: Arc::clone(&finished),
         });
-        ctx.pool = Some(Arc::clone(&pool));
+        ctx.pool = Arc::clone(&pool);
 
         let err = ctx
             .collect_batches(
@@ -2004,7 +1974,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn admit_from_storage_surfaces_busy_and_fallback_distinguishes_timeout_vs_busy() {
+    async fn admit_from_storage_surfaces_busy_and_query_error_maps_busy() {
         let dir = tempfile::tempdir().expect("tempdir");
         let mut cfg = test_storage_config(dir.path());
         cfg.query.admission_wait = Duration::from_millis(40);
@@ -2013,50 +1983,13 @@ mod tests {
             .parse()
             .expect("project");
 
-        // Build a saturated context with a tiny pool and short admission wait.
-        let cap = 2 * 1024 * 1024;
-        let admission = Arc::new(crate::engine::admission::AsyncAdmissionPool::new(cap));
-        let held = admission
-            .admit(cap, cap, Duration::from_secs(1))
-            .await
-            .expect("hold entire pool");
+        // 1. `QueryError::Busy` <-> `RunError::Busy` mappings round-trip cleanly.
+        let run_busy = query_err_to_run(QueryError::Busy);
+        assert!(matches!(run_busy, RunError::Busy), "got {run_busy:?}");
+        assert_eq!(run_busy.kind(), "busy");
+        assert!(matches!(run_err_to_query(run_busy), QueryError::Busy));
 
-        let mut base =
-            EngineContext::from_storage(&storage, project, &QueryOptions::new(None, None))
-                .expect("ctx");
-        base.runtime = QeRuntime::new(
-            Arc::clone(&admission),
-            Arc::clone(&base.runtime.metadata_cache),
-            Arc::clone(&base.runtime.spill),
-            1,
-            crate::QueryMemory {
-                initial: cap,
-                cap,
-                wait: Duration::from_millis(40),
-            },
-        );
-
-        // 1. Caller timeout <= admission_wait -> RunError::Timeout (not Busy).
-        let err_timeout = base
-            .run_with_ctx(Duration::from_millis(15), |_| Ok(()))
-            .await
-            .expect_err("caller timeout shorter than admission_wait");
-        assert!(
-            matches!(err_timeout, RunError::Timeout),
-            "expected Timeout, got {err_timeout:?}"
-        );
-
-        // 2. Caller timeout > admission_wait -> Busy (not Timeout).
-        let err_busy = base
-            .run_with_ctx(Duration::from_millis(200), |_| Ok(()))
-            .await
-            .expect_err("admission_wait expired before caller timeout");
-        assert!(
-            matches!(err_busy, RunError::Internal(_)),
-            "expected Internal(Busy), got {err_busy:?}"
-        );
-
-        // 3. `admit_from_storage` when pool is saturated returns `QueryError::Busy` (HTTP 503).
+        // 2. `admit_from_storage` when pool is saturated returns `QueryError::Busy` (HTTP 503).
         let storage_pool_limit = storage.qe_runtime.admission.limit();
         let storage_held = storage
             .qe_runtime
@@ -2076,7 +2009,6 @@ mod tests {
             matches!(err, crate::error::QueryError::Busy),
             "expected crate::error::QueryError::Busy, got {err:?}"
         );
-        drop(held);
         drop(storage_held);
 
         // Verify admitted context succeeds when pool has room.
@@ -2084,7 +2016,7 @@ mod tests {
             .query(project, QueryOptions::new(None, None))
             .await
             .expect("admit succeeds");
-        assert!(admitted.inner.pool.is_some());
+        assert!(admitted.inner.pool().cap() > 0);
         drop(admitted);
 
         let _ = storage.shutdown().await;

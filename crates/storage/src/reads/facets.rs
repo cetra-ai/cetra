@@ -3,11 +3,12 @@
 use std::cmp::Ordering;
 use std::collections::{BTreeSet, BinaryHeap, HashSet};
 use std::fmt;
-use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
+use std::sync::{Arc, Mutex, PoisonError};
 
 use cetra_column::{
-    Batch, Column, DataType, Field, FlatColumn, FlatData, Reservation, ScalarValue, Schema,
-    Selection, Utf8Data,
+    Batch, Column, DataType, Field, FlatColumn, FlatData, GlobalPool, Reservation, ScalarValue,
+    Schema, Selection, Utf8Data,
 };
 use cetra_core::schema::{spans, traces};
 use cetra_query::exec::hash_join::{HashJoinSpec, JoinType, execute_hash_join};
@@ -574,12 +575,30 @@ fn run_pass1(
         return Ok((done, Vec::new()));
     }
 
-    // Keep headroom on `ScopedPool` so one runaway spillable `HashAgg` cannot starve siblings'
-    // unspillable reservations (`scratch`, `ParquetSource`, or `finalize_value_field` output).
-    let has_value_fields = valid_fields
+    // Allocate one isolated `field_pool` + `parent_res` per value field (total <= 3/4 * pool.cap())
+    // shared across all `P` partition sinks and `combine_pass1_sinks`.
+    let num_value_fields = valid_fields
         .iter()
-        .any(|(_, f)| !matches!(f.field, ParsedField::Number(_)));
-    let _headroom = has_value_fields.then(|| exec_ctx.pool.register("facet_headroom", true));
+        .filter(|(_, f)| !matches!(f.field, ParsedField::Number(_)))
+        .count();
+    let cap = exec_ctx.pool.cap();
+    let three_quarters = (cap / 4).saturating_mul(3) + ((cap % 4) * 3) / 4;
+    let budgets: Vec<Option<Arc<FieldBudget>>> =
+        if let Some(q) = three_quarters.checked_div(num_value_fields) {
+            let per_field_cap = q.max(1);
+            valid_fields
+                .iter()
+                .map(|(_, f)| {
+                    if matches!(f.field, ParsedField::Number(_)) {
+                        None
+                    } else {
+                        Some(Arc::new(FieldBudget::new(exec_ctx, per_field_cap)))
+                    }
+                })
+                .collect()
+        } else {
+            vec![None; valid_fields.len()]
+        };
 
     let sinks = exec_run_pipeline(exec_ctx, streams, |_| Ok(Vec::new()), {
         let fields_c = valid_fields.to_vec();
@@ -587,11 +606,22 @@ fn run_pass1(
         let utf8_c = Arc::clone(&utf8_schema);
         let agg_c = agg_spec.clone();
         let ctx_c = exec_ctx.clone();
-        move |_| FacetFanoutSink::new(view, &fields_c, &schema_c, &utf8_c, &agg_c, ctx_c.clone())
+        let budgets_c = budgets.clone();
+        move |_| {
+            FacetFanoutSink::new(
+                view,
+                &fields_c,
+                &schema_c,
+                &utf8_c,
+                &agg_c,
+                ctx_c.clone(),
+                &budgets_c,
+            )
+        }
     })
     .map_err(query_err_to_run)?;
 
-    combine_pass1_sinks(sinks, valid_fields, &agg_spec, &utf8_schema, exec_ctx)
+    combine_pass1_sinks(sinks, valid_fields, &agg_spec, &utf8_schema, &budgets)
 }
 
 fn combine_pass1_sinks(
@@ -599,7 +629,7 @@ fn combine_pass1_sinks(
     valid_fields: &[(usize, CheckedField)],
     agg_spec: &HashAggSpec,
     utf8_schema: &Arc<Schema>,
-    exec_ctx: &ExecContext,
+    budgets: &[Option<Arc<FieldBudget>>],
 ) -> Result<Pass1Result, RunError> {
     let mut done = Vec::new();
     let mut pending = Vec::new();
@@ -702,24 +732,31 @@ fn combine_pass1_sinks(
                     }
                 }
 
-                if any_too_large {
+                let budget = budgets[pos]
+                    .as_ref()
+                    .ok_or_else(|| internal("missing facet field budget"))?;
+
+                if any_too_large || budget.is_tripped() {
                     drop(field_aggs);
+                    budget.release();
                     done.push((*slot_idx, Err(RunError::TooLarge)));
                     continue;
                 }
 
-                match finalize_value_field(
+                let res = finalize_value_field(
                     field_aggs,
                     agg_spec,
                     utf8_schema,
-                    exec_ctx,
+                    &budget.exec_ctx,
                     ValueFieldMeta {
                         kind,
                         total,
                         missing,
                         limit: checked.limit,
                     },
-                ) {
+                );
+                budget.release();
+                match res {
                     Ok(data) => done.push((*slot_idx, Ok(data))),
                     Err(QueryError::TooLarge) => {
                         done.push((*slot_idx, Err(RunError::TooLarge)));
@@ -994,6 +1031,8 @@ fn open_facets_streams(
             FacetView::Spans => scoped_spans_spec(ctx, scope, references_environment)?,
             FacetView::Sessions => return Err(internal("unreachable sessions branch")),
         };
+        // View projections read full map columns before `apply_compiled_filter` and facet reads.
+        spec.map_projections.clear();
         if let SearchPredicate::Spans {
             filter: s_expr,
             substrings,
@@ -1313,6 +1352,45 @@ enum ValueSource {
     MapValue(usize, String),
 }
 
+struct FieldBudget {
+    exec_ctx: ExecContext,
+    parent_res: Mutex<Option<Reservation>>,
+    tripped: AtomicBool,
+}
+
+impl FieldBudget {
+    fn new(parent_ctx: &ExecContext, per_field_cap: usize) -> Self {
+        let field_pool = GlobalPool::standalone(per_field_cap);
+        let mut exec_ctx = parent_ctx.clone();
+        exec_ctx.pool = field_pool;
+
+        let mut parent_res = parent_ctx.pool.register("facet_field_cap", false);
+        let ok = parent_res.try_grow(per_field_cap).is_ok();
+        Self {
+            exec_ctx,
+            parent_res: Mutex::new(ok.then_some(parent_res)),
+            tripped: AtomicBool::new(!ok),
+        }
+    }
+
+    fn is_tripped(&self) -> bool {
+        self.tripped.load(AtomicOrdering::Acquire)
+    }
+
+    fn trip_too_large(&self) {
+        self.tripped.store(true, AtomicOrdering::Release);
+        self.release();
+    }
+
+    fn release(&self) {
+        let mut guard = self
+            .parent_res
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        *guard = None;
+    }
+}
+
 struct ValueWorkerState {
     source: ValueSource,
     query: Option<(String, String)>,
@@ -1320,6 +1398,7 @@ struct ValueWorkerState {
     missing: u64,
     agg: Option<HashAgg>,
     failed_too_large: bool,
+    budget: Arc<FieldBudget>,
     utf8_schema: Arc<Schema>,
     scratch: Reservation,
     buf_bytes: usize,
@@ -1345,9 +1424,10 @@ impl FacetFanoutSink {
         utf8_schema: &Arc<Schema>,
         agg_spec: &HashAggSpec,
         exec_ctx: ExecContext,
+        budgets: &[Option<Arc<FieldBudget>>],
     ) -> Result<Self, QueryError> {
         let mut states = Vec::with_capacity(fields.len());
-        for (_, checked) in fields {
+        for (pos, (_, checked)) in fields.iter().enumerate() {
             match &checked.field {
                 ParsedField::Number(name) => {
                     let source = NumericSource::resolve(view, input_schema, name)?;
@@ -1392,9 +1472,20 @@ impl FacetFanoutSink {
                             return Err(QueryError::internal("unexpected Number in ValueSource"));
                         }
                     };
-                    let agg =
-                        HashAgg::new(agg_spec.clone(), Arc::clone(utf8_schema), exec_ctx.clone())?;
-                    let scratch = exec_ctx.pool.register("facet_field_scratch", false);
+                    let budget = budgets[pos]
+                        .clone()
+                        .ok_or_else(|| QueryError::internal("missing facet field budget"))?;
+                    let tripped = budget.is_tripped();
+                    let agg = if tripped {
+                        None
+                    } else {
+                        Some(HashAgg::new(
+                            agg_spec.clone(),
+                            Arc::clone(utf8_schema),
+                            budget.exec_ctx.clone(),
+                        )?)
+                    };
+                    let scratch = budget.exec_ctx.pool.register("facet_field_scratch", false);
                     let query = checked
                         .query
                         .as_ref()
@@ -1404,8 +1495,9 @@ impl FacetFanoutSink {
                         query,
                         total: 0,
                         missing: 0,
-                        agg: Some(agg),
-                        failed_too_large: false,
+                        agg,
+                        failed_too_large: tripped,
+                        budget,
                         utf8_schema: Arc::clone(utf8_schema),
                         scratch,
                         buf_bytes: 0,
@@ -1455,7 +1547,9 @@ impl PushSink for FacetFanoutSink {
                     }
                 }
                 FieldWorkerState::Values(st) => {
-                    if st.failed_too_large {
+                    if st.failed_too_large || st.budget.is_tripped() {
+                        st.agg = None;
+                        st.failed_too_large = true;
                         continue;
                     }
                     st.total = st.total.saturating_add(num_rows as u64);
@@ -1466,9 +1560,10 @@ impl PushSink for FacetFanoutSink {
                         st.row_dedup = HashSet::new();
                         match err {
                             QueryError::TooLarge => {
-                                // Drop ONLY this field's HashAgg state so sibling fields proceed.
+                                // Drop ONLY this field's HashAgg state & parent slice so sibling fields proceed.
                                 st.agg = None;
                                 st.failed_too_large = true;
+                                st.budget.trip_too_large();
                             }
                             other => return Err(other),
                         }
@@ -1486,7 +1581,9 @@ impl PushSink for FacetFanoutSink {
                 st.buf_bytes = 0;
                 st.chunk_buf = Vec::new();
                 st.row_dedup = HashSet::new();
-                if st.failed_too_large {
+                if st.failed_too_large || st.budget.is_tripped() {
+                    st.agg = None;
+                    st.failed_too_large = true;
                     continue;
                 }
                 if let Some(agg) = st.agg.as_mut()
@@ -1497,6 +1594,7 @@ impl PushSink for FacetFanoutSink {
                         QueryError::TooLarge => {
                             st.agg = None;
                             st.failed_too_large = true;
+                            st.budget.trip_too_large();
                         }
                         other => return Err(other),
                     }
@@ -1537,8 +1635,7 @@ impl ChunkFlusher<'_> {
         self.chunk_buf.clear();
         let release = *self.buf_bytes;
         *self.buf_bytes = 0;
-        self.scratch
-            .shrink(self.scratch.size().saturating_sub(release));
+        self.scratch.shrink(release);
         let flat = FlatColumn::try_new(FlatData::Utf8(utf8), None)?;
         let mini = Batch::try_new(
             Arc::clone(self.utf8_schema),
@@ -1552,7 +1649,7 @@ impl ChunkFlusher<'_> {
             Some(a) => a.consume(mini, self.scratch),
             None => Err(QueryError::internal("missing facet HashAgg")),
         };
-        self.scratch.free();
+        self.scratch.shrink(bytes);
         res?;
         Ok(())
     }
@@ -1577,7 +1674,7 @@ fn push_value_field_batch(
     } = st;
     chunk_buf.clear();
     if *buf_bytes > 0 {
-        scratch.shrink(scratch.size().saturating_sub(*buf_bytes));
+        scratch.shrink(*buf_bytes);
         *buf_bytes = 0;
     }
     let query_ref = query.as_ref().map(|(q, ql)| (q.as_str(), ql.as_str()));
@@ -1663,7 +1760,7 @@ fn push_value_field_batch(
                     }
                 }
                 if dedup_bytes > 0 {
-                    scratch.shrink(scratch.size().saturating_sub(dedup_bytes));
+                    scratch.shrink(dedup_bytes);
                 }
                 if row_dedup.capacity() > batch_limit.saturating_mul(2) {
                     *row_dedup = HashSet::new();
@@ -2517,12 +2614,12 @@ mod tests {
         let project: ProjectId = "018f6b4e-7c1a-7c1a-8c1a-000000000001".parse().expect("pid");
 
         // Create many distinct long `name` values across multiple batches and only 2 distinct `status` values.
-        for chunk in 0..8_u16 {
-            let mut spans = Vec::with_capacity(500);
-            for i in 0..500_u16 {
-                let t = chunk * 500 + i;
+        for chunk in 0..40_u16 {
+            let mut spans = Vec::with_capacity(100);
+            for i in 0..100_u16 {
+                let t = chunk * 100 + i;
                 let mut s = span_row(t, 0, T0 + i64::from(t) * 1000, T0 + i64::from(t) * 1000);
-                s.name = format!("unique-long-span-name-{t:06}-{}", "x".repeat(64));
+                s.name = format!("unique-long-span-name-{t:06}-{}", "x".repeat(160));
                 s.status = if t % 2 == 0 {
                     SpanStatus::Ok
                 } else {
@@ -2539,8 +2636,8 @@ mod tests {
         let mut ctx =
             EngineContext::from_storage(&storage, project, &QueryOptions::new(None, None))
                 .expect("ctx");
-        // Tight memory pool + 0-byte spill cap so high-cardinality `name` hits TooLarge while low-cardinality `status` succeeds.
-        let cap = 320 * 1024;
+        // Tight memory pool (1/4 headroom covers upstream memtable batches; 3/8 per-field cap trips `name`).
+        let cap = 1024 * 1024;
         let admission = Arc::new(crate::engine::admission::AsyncAdmissionPool::new(cap));
         let spill = Arc::new(SpillManager::with_fixed_cap(dir.path().join("spill"), 0));
         ctx.runtime = QeRuntime::new(
@@ -2554,6 +2651,7 @@ mod tests {
                 wait: Duration::from_secs(1),
             },
         );
+        ctx.pool = GlobalPool::standalone(cap);
 
         let fields = [
             FacetField {
@@ -2746,6 +2844,278 @@ mod tests {
         let dbg = format!("{pf:?} {cf:?}");
         assert!(!dbg.contains("secret_key_xyz"));
         assert!(!dbg.contains("secret_query_abc"));
+
+        let _ = storage.shutdown().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn multi_partition_per_field_isolation_and_pool_release() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let storage = crate::Storage::open(test_config(dir.path()))
+            .await
+            .expect("open");
+        let project: ProjectId = "018f6b4e-7c1a-7c1a-8c1a-000000000001".parse().expect("pid");
+
+        // Flush 4 separate 100-row Parquet files + 36 100-row memtable chunks so `target_partitions = 4`
+        // drives multiple partitions concurrently without exceeding the 1/4 scan headroom.
+        for chunk in 0..40_u16 {
+            let mut spans = Vec::with_capacity(100);
+            for i in 0..100_u16 {
+                let t = chunk * 100 + i;
+                let mut s = span_row(t, 0, T0 + i64::from(t) * 1000, T0 + i64::from(t) * 1000);
+                s.name = format!("unique-multi-part-name-{t:06}-{}", "y".repeat(256));
+                s.status = if t % 2 == 0 {
+                    SpanStatus::Ok
+                } else {
+                    SpanStatus::Error
+                };
+                spans.push(s);
+            }
+            storage
+                .append_spans(project, span_rows(&spans))
+                .await
+                .expect("append");
+            if chunk < 4 {
+                storage
+                    .flush_now(Duration::from_secs(5))
+                    .await
+                    .expect("flush");
+            }
+        }
+
+        let mut ctx =
+            EngineContext::from_storage(&storage, project, &QueryOptions::new(None, None))
+                .expect("ctx");
+        let cap = 2 * 1024 * 1024;
+        let admission = Arc::new(crate::engine::admission::AsyncAdmissionPool::new(cap));
+        let spill = Arc::new(SpillManager::with_fixed_cap(dir.path().join("spill"), 0));
+        ctx.runtime = QeRuntime::new(
+            admission,
+            Arc::clone(&ctx.runtime.metadata_cache),
+            spill,
+            4,
+            QueryMemory {
+                initial: 0,
+                cap,
+                wait: Duration::from_secs(1),
+            },
+        );
+        let pool = GlobalPool::standalone(cap);
+        ctx.pool = Arc::clone(&pool);
+
+        let fields = [
+            FacetField {
+                field: "status",
+                query: None,
+                limit: 10,
+            },
+            FacetField {
+                field: "name",
+                query: None,
+                limit: 10,
+            },
+        ];
+        let res = facets(
+            &QueryContext::from_engine(ctx),
+            FacetsRequest {
+                view: FacetView::Spans,
+                filter: None,
+                search: None,
+                scope: ListScope {
+                    window: None,
+                    include_eval: false,
+                    include_experiments: false,
+                },
+                fields: &fields,
+                timeout: Duration::from_secs(10),
+            },
+        )
+        .await
+        .expect("facets");
+
+        let status_res = res[0].as_ref().expect("status sibling must succeed");
+        assert_eq!(status_res.total, 4000);
+        assert_eq!(status_res.values.len(), 2);
+        assert_eq!(status_res.values[0].count, 2000);
+        assert_eq!(status_res.values[1].count, 2000);
+        assert!(
+            matches!(res[1], Err(RunError::TooLarge)),
+            "high-cardinality field must fail with TooLarge across P=4 partitions, got {:?}",
+            res[1]
+        );
+        assert_eq!(pool.reserved(), 0, "all parent_res slices must be freed");
+
+        let _ = storage.shutdown().await;
+    }
+
+    #[test]
+    fn chunk_flusher_returns_scratch_to_zero_after_flush() {
+        use cetra_column::CancelToken;
+        use cetra_query::EvalContext;
+        use cetra_query::exec::{ExecMetrics, WorkerPool};
+
+        let utf8_schema = single_utf8_schema().expect("schema");
+        let agg_spec = single_utf8_agg_spec(&utf8_schema).expect("agg_spec");
+        let pool = GlobalPool::standalone(1024 * 1024);
+        let dir = tempfile::tempdir().expect("tempdir");
+        let exec_ctx = ExecContext {
+            pool: Arc::clone(&pool),
+            eval: EvalContext::new(T0, CancelToken::new()),
+            spill: Arc::new(SpillManager::with_fixed_cap(dir.path().join("spill"), 0)),
+            workers: Arc::new(WorkerPool::new(1).expect("workers")),
+            batch_size: 2,
+            target_partitions: 1,
+            metrics: ExecMetrics::new(),
+        };
+        let budget = Arc::new(FieldBudget::new(&exec_ctx, 512 * 1024));
+
+        // 1. Scalar Values path with multiple flushes (batch_limit = 2 on 5 rows).
+        let vals_schema =
+            Schema::try_new_arc(vec![Field::new("v", DataType::Utf8, false)]).expect("schema");
+        let vals_col = Column::Flat(
+            FlatColumn::try_new(
+                FlatData::Utf8(
+                    Utf8Data::try_from_slices(["alpha", "beta", "gamma", "delta", "epsilon"])
+                        .expect("utf8"),
+                ),
+                None,
+            )
+            .expect("flat"),
+        );
+        let vals_batch = Batch::try_new_all(vals_schema, vec![vals_col], 5).expect("batch");
+        let mut val_state = ValueWorkerState {
+            source: ValueSource::Values(0),
+            query: None,
+            total: 0,
+            missing: 0,
+            agg: Some(
+                HashAgg::new(
+                    agg_spec.clone(),
+                    Arc::clone(&utf8_schema),
+                    budget.exec_ctx.clone(),
+                )
+                .expect("agg"),
+            ),
+            failed_too_large: false,
+            budget: Arc::clone(&budget),
+            utf8_schema: Arc::clone(&utf8_schema),
+            scratch: budget.exec_ctx.pool.register("test_scratch", false),
+            buf_bytes: 0,
+            chunk_buf: Vec::new(),
+            row_dedup: HashSet::new(),
+        };
+        push_value_field_batch(&mut val_state, &vals_batch, 2).expect("push values");
+        assert_eq!(val_state.scratch.size(), 0);
+        assert_eq!(val_state.buf_bytes, 0);
+
+        // 2. List path with dedup_bytes + mid-row flushes (batch_limit = 2 on 5 unique elements).
+        let list_schema = Schema::try_new_arc(vec![Field::new(
+            "tags",
+            DataType::List(Box::new(DataType::Utf8)),
+            false,
+        )])
+        .expect("schema");
+        let elems = Utf8Data::try_from_slices(["t1", "t2", "t3", "t4", "t5", "t1"]).expect("elems");
+        let elems_col =
+            Column::Flat(FlatColumn::try_new(FlatData::Utf8(elems), None).expect("elems_col"));
+        let list_col = Column::Flat(
+            FlatColumn::try_new(
+                FlatData::List {
+                    item_type: DataType::Utf8,
+                    offsets: vec![0, 6],
+                    values: Box::new(elems_col),
+                },
+                None,
+            )
+            .expect("flat"),
+        );
+        let list_batch = Batch::try_new_all(list_schema, vec![list_col], 1).expect("batch");
+        let mut list_state = ValueWorkerState {
+            source: ValueSource::List(0),
+            query: None,
+            total: 0,
+            missing: 0,
+            agg: Some(
+                HashAgg::new(agg_spec, Arc::clone(&utf8_schema), budget.exec_ctx.clone())
+                    .expect("agg"),
+            ),
+            failed_too_large: false,
+            budget: Arc::clone(&budget),
+            utf8_schema,
+            scratch: budget.exec_ctx.pool.register("test_list_scratch", false),
+            buf_bytes: 0,
+            chunk_buf: Vec::new(),
+            row_dedup: HashSet::new(),
+        };
+        push_value_field_batch(&mut list_state, &list_batch, 2).expect("push list");
+        assert_eq!(list_state.scratch.size(), 0);
+        assert_eq!(list_state.buf_bytes, 0);
+    }
+
+    #[tokio::test]
+    async fn keys_facet_with_map_value_filter_upgrades_to_full_on_parquet() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let storage = crate::Storage::open(test_config(dir.path()))
+            .await
+            .expect("open");
+        let project: ProjectId = "018f6b4e-7c1a-7c1a-8c1a-000000000001".parse().expect("pid");
+
+        let mut s1 = span_row(1, 0, T0 + 1000, T0 + 2000);
+        s1.metadata = BTreeMap::from([
+            ("env".to_owned(), "prod".to_owned()),
+            ("region".to_owned(), "us".to_owned()),
+        ]);
+        let mut s2 = span_row(2, 0, T0 + 3000, T0 + 4000);
+        s2.metadata = BTreeMap::from([
+            ("env".to_owned(), "dev".to_owned()),
+            ("region".to_owned(), "eu".to_owned()),
+        ]);
+        storage
+            .append_spans(project, span_rows(&[s1, s2]))
+            .await
+            .expect("append");
+        storage
+            .flush_now(Duration::from_secs(5))
+            .await
+            .expect("flush");
+
+        let query = storage
+            .query(project, QueryOptions::new(None, None))
+            .await
+            .expect("query");
+        let ctx = QueryContext::new(query, None).expect("ctx");
+        let fields = [FacetField {
+            field: "metadata",
+            query: None,
+            limit: 10,
+        }];
+        let res = facets(
+            &ctx,
+            FacetsRequest {
+                view: FacetView::Spans,
+                filter: Some("metadata['env'] = 'prod'"),
+                search: None,
+                scope: ListScope {
+                    window: None,
+                    include_eval: false,
+                    include_experiments: false,
+                },
+                fields: &fields,
+                timeout: Duration::from_secs(10),
+            },
+        )
+        .await
+        .expect("facets");
+
+        let data = res[0].as_ref().expect("keys facet ok");
+        assert_eq!(data.kind, FacetKind::Keys);
+        assert_eq!(data.total, 1);
+        let got: BTreeMap<&str, u64> = data
+            .values
+            .iter()
+            .map(|e| (e.value.as_str(), e.count))
+            .collect();
+        assert_eq!(got, BTreeMap::from([("env", 1), ("region", 1)]));
 
         let _ = storage.shutdown().await;
     }

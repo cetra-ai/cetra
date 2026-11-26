@@ -149,6 +149,7 @@ fn from_run(error: &RunError, kind: DeletionKind) -> Step {
         RunError::Timeout => Step::Retry("timeout", None),
         RunError::Internal(_) => Step::Retry("internal", None),
         RunError::TooLarge => Step::Retry("too_large", None),
+        RunError::Busy => Step::Retry("busy", None),
         RunError::Failed(_) if kind == DeletionKind::Filter => {
             Step::Fail(FailReason::ResolutionFailed)
         }

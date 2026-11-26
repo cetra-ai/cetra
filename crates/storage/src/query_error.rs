@@ -55,6 +55,11 @@ pub enum RunError {
     /// The server maps this to 422 `query_too_large`.
     #[error("the query needed more memory or temporary disk space than allowed")]
     TooLarge,
+    /// Query admission saturated before execution could start.
+    ///
+    /// The server maps this to 503 `busy`.
+    #[error("query admission busy")]
+    Busy,
     /// The query engine failed on something that is not the caller's fault.
     ///
     /// Logged by kind only.
@@ -71,6 +76,7 @@ impl RunError {
             Self::Failed(_) => "failed",
             Self::Timeout => "timeout",
             Self::TooLarge => "too_large",
+            Self::Busy => "busy",
             Self::Internal(_) => "internal",
         }
     }

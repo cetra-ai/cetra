@@ -121,7 +121,7 @@ struct Counts {
     spans: u64,
     llm_spans: u64,
     payload_bytes: u64,
-    /// Time spent building spans and their `RecordBatch`, summed over writers.
+    /// Time spent building spans and their `Batch`, summed over writers.
     gen_nanos: u64,
     arrow_bytes: u64,
     backpressure: u64,

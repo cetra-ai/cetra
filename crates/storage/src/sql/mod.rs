@@ -936,12 +936,12 @@ pub(crate) fn map_query_error(err: QueryError) -> RunError {
         }),
         QueryError::TooLarge => RunError::TooLarge,
         QueryError::Cancelled => RunError::Timeout,
+        QueryError::Busy => RunError::Busy,
         QueryError::Failed(msg) => RunError::Failed(msg),
         err @ (QueryError::Column(_)
         | QueryError::CorruptData(_)
         | QueryError::StorageIo(_)
-        | QueryError::Internal(_)
-        | QueryError::Busy) => RunError::Internal(EngineError::from_query(&err)),
+        | QueryError::Internal(_)) => RunError::Internal(EngineError::from_query(&err)),
     }
 }
 
@@ -1194,7 +1194,8 @@ mod tests {
         drop(held);
 
         let mapped = map_query_error(QueryError::Busy);
-        assert!(matches!(mapped, RunError::Internal(e) if e.is_busy()));
+        assert!(matches!(mapped, RunError::Busy), "{mapped:?}");
+        assert!(EngineError::from_query(&QueryError::Busy).is_busy());
     }
 
     #[tokio::test]

@@ -1351,4 +1351,92 @@ mod tests {
 
         let _ = storage.shutdown().await;
     }
+
+    #[tokio::test]
+    async fn search_predicate_emits_single_cnf_or_clause() {
+        use std::sync::Mutex;
+
+        #[derive(Debug)]
+        struct RecordingScan {
+            schema: Arc<Schema>,
+            specs: Mutex<Vec<ScanSpec>>,
+        }
+
+        impl ScanSource for RecordingScan {
+            fn schema(&self) -> Arc<Schema> {
+                Arc::clone(&self.schema)
+            }
+
+            fn projected_schema(&self, spec: &ScanSpec) -> Result<Arc<Schema>, QueryError> {
+                match &spec.projection {
+                    Some(indices) => Ok(Arc::new(self.schema.project(indices)?)),
+                    None => Ok(Arc::clone(&self.schema)),
+                }
+            }
+
+            fn open_partitions(
+                &self,
+                spec: &ScanSpec,
+                _ctx: &ExecContext,
+            ) -> Result<Vec<Box<dyn PartitionStream>>, QueryError> {
+                self.specs.lock().expect("lock").push(spec.clone());
+                Ok(Vec::new())
+            }
+
+            fn explain_summary(&self, _spec: &ScanSpec) -> String {
+                "RecordingScan".to_owned()
+            }
+        }
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let storage = crate::Storage::open(test_config(dir.path()))
+            .await
+            .expect("open");
+        let project: ProjectId = "018f6b4e-7c1a-7c1a-8c1a-000000000001".parse().expect("pid");
+        let mut ctx =
+            EngineContext::from_storage(&storage, project, &QueryOptions::new(None, None))
+                .expect("ctx");
+        let recorded = Arc::new(RecordingScan {
+            schema: spans_raw_schema().expect("schema"),
+            specs: Mutex::new(Vec::new()),
+        });
+        ctx.spans = Arc::clone(&recorded) as Arc<dyn ScanSource>;
+
+        let window = TimeWindow::new(0, 1000).expect("window");
+        let ctx_c = ctx.clone();
+        let (spans_hints, _) = ctx
+            .run_with_ctx(Duration::from_secs(5), move |exec_ctx| {
+                let sp =
+                    search_predicate(&ctx_c, exec_ctx, FilterView::Spans, "needle", Some(window))
+                        .map_err(run_err_to_query)?;
+                match sp {
+                    SearchPredicate::Spans { substrings, .. } => Ok(substrings),
+                    _ => Err(QueryError::internal("expected Spans search predicate")),
+                }
+            })
+            .await
+            .expect("spans search_predicate");
+        assert_eq!(spans_hints.len(), 4);
+
+        let ctx_c = ctx.clone();
+        ctx.run_with_ctx(Duration::from_secs(5), move |exec_ctx| {
+            let sp = search_predicate(&ctx_c, exec_ctx, FilterView::Traces, "needle", Some(window))
+                .map_err(run_err_to_query)?;
+            match sp {
+                SearchPredicate::Traces { .. } => Ok(()),
+                _ => Err(QueryError::internal("expected Traces search predicate")),
+            }
+        })
+        .await
+        .expect("traces search_predicate");
+
+        {
+            let specs = recorded.specs.lock().expect("lock");
+            assert_eq!(specs.len(), 1);
+            assert_eq!(specs[0].substrings.len(), 1);
+            assert_eq!(specs[0].substrings[0].len(), 4);
+        }
+
+        let _ = storage.shutdown().await;
+    }
 }

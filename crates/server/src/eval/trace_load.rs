@@ -160,7 +160,7 @@ async fn load_trace_capped(
     )
     .await
     .map_err(|error| match error {
-        RunError::Timeout => LoadError::Busy,
+        RunError::Timeout | RunError::Busy => LoadError::Busy,
         RunError::TooLarge => LoadError::TooLarge,
         error => LoadError::Failed(error),
     })?;

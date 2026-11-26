@@ -884,8 +884,12 @@ mod tests {
                 function.in_filter,
                 expected["in_filter"].as_bool().expect("in_filter")
             );
-            let score = matches!(function.name, "score" | "score_label" | "has_score");
-            assert_eq!(function.in_sql, !score, "{}", function.name);
+            assert_eq!(
+                function.in_sql,
+                expected["in_sql"].as_bool().expect("in_sql"),
+                "{}",
+                function.name
+            );
         }
     }
 }

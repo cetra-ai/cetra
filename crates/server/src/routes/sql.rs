@@ -1496,9 +1496,9 @@ mod tests {
         )
     }
 
-    /// The row count and column names of a Parquet file.
-    fn read_parquet(bytes: Bytes) -> (Vec<String>, usize) {
-        cetra_storage::read_parquet_summary_for_test(bytes).unwrap()
+    /// The column names and decoded row cell strings of a Parquet file.
+    fn read_parquet_rows(bytes: Bytes) -> (Vec<String>, Vec<Vec<String>>) {
+        cetra_storage::read_parquet_rows_for_test(bytes).unwrap()
     }
 
     #[test]
@@ -1610,9 +1610,22 @@ mod tests {
         );
         assert!(response.body.starts_with(b"PAR1"));
         assert!(response.body.ends_with(b"PAR1"));
-        let (names, rows) = read_parquet(response.body);
+        let (names, rows) = read_parquet_rows(response.body);
         assert_eq!(names, ["span_kind", "spans", "first_start"]);
-        assert_eq!(rows, 4);
+        assert_eq!(rows.len(), 4);
+        let expected: SqlQueryResult = serde_json::from_str(EXAMPLE_RESULT).unwrap();
+        for (decoded, exp) in rows.iter().zip(&expected.rows) {
+            let exp_kind = exp["span_kind"].as_str().unwrap();
+            let exp_spans = exp["spans"].as_i64().unwrap().to_string();
+            let exp_ts = chrono::DateTime::parse_from_rfc3339(exp["first_start"].as_str().unwrap())
+                .unwrap()
+                .timestamp_nanos_opt()
+                .unwrap()
+                .to_string();
+            assert_eq!(decoded[0], format!("\"{exp_kind}\""));
+            assert_eq!(decoded[1], exp_spans);
+            assert_eq!(decoded[2], exp_ts);
+        }
 
         let response = post_as(
             &app,
@@ -1623,9 +1636,9 @@ mod tests {
         )
         .await;
         assert_eq!(response.status, StatusCode::OK);
-        let (names, rows) = read_parquet(response.body);
+        let (names, rows) = read_parquet_rows(response.body);
         assert_eq!(names, ["span_id"]);
-        assert_eq!(rows, 0);
+        assert!(rows.is_empty());
     }
 
     #[tokio::test(flavor = "multi_thread")]

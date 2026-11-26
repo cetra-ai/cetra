@@ -297,6 +297,10 @@ fn query_problem(error: &RunError, field: &str, invalid_detail: &str) -> Problem
         RunError::Failed(message) => Problem::new(ProblemCode::QueryFailed, Some(message.clone())),
         RunError::Timeout => Problem::new(ProblemCode::QueryTimeout, Some(error.to_string())),
         RunError::TooLarge => Problem::new(ProblemCode::QueryTooLarge, Some(error.to_string())),
+        RunError::Busy => Problem::new(
+            ProblemCode::Busy,
+            Some("too many queries are running".to_owned()),
+        ),
         RunError::Internal(_) => {
             Problem::new(ProblemCode::Internal, Some("internal error".to_owned()))
         }
@@ -305,7 +309,12 @@ fn query_problem(error: &RunError, field: &str, invalid_detail: &str) -> Problem
 
 impl From<RunError> for ApiError {
     fn from(error: RunError) -> Self {
-        Self::Query(error)
+        match error {
+            RunError::Busy => Self::Unavailable {
+                detail: "too many queries are running",
+            },
+            other => Self::Query(other),
+        }
     }
 }
 
@@ -343,7 +352,13 @@ impl ApiError {
                 headers.insert(header("ratelimit-remaining"), header_u64(0));
                 headers.insert(header("ratelimit-reset"), seconds);
             }
-            Self::Unavailable { .. } => {
+            Self::Unavailable { .. }
+            | Self::Query(RunError::Busy)
+            | Self::Sql(RunError::Busy)
+            | Self::QueryAt {
+                error: RunError::Busy,
+                ..
+            } => {
                 headers.insert(axum::http::header::RETRY_AFTER, header_u64(1));
             }
             Self::RangeNotSatisfiable { size } => {
@@ -769,6 +784,16 @@ mod tests {
         let response = error.into_response();
         assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
         assert_eq!(response.headers().get(RETRY_AFTER).unwrap(), "1");
+
+        let run_err = ApiError::from(RunError::Busy);
+        assert!(matches!(run_err, ApiError::Unavailable { .. }));
+        let run_resp = run_err.into_response();
+        assert_eq!(run_resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(run_resp.headers().get(RETRY_AFTER).unwrap(), "1");
+
+        let sql_resp = ApiError::Sql(RunError::Busy).into_response();
+        assert_eq!(sql_resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(sql_resp.headers().get(RETRY_AFTER).unwrap(), "1");
     }
 
     async fn problem_of(error: ApiError) -> (StatusCode, Problem) {
