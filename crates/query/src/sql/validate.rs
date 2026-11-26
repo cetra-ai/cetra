@@ -8,11 +8,11 @@ use std::collections::HashSet;
 use sqlparser::ast::{
     AccessExpr, CaseWhen, ConnectByKind, DescribeAlias, Distinct, Expr, FunctionArg,
     FunctionArgExpr, FunctionArgumentClause, FunctionArguments, GroupByExpr, HavingBound, Ident,
-    Join, JoinConstraint, JoinOperator, JsonPathElem, LimitClause, NamedWindowExpr, ObjectName,
-    ObjectNamePart, OrderBy, OrderByExpr, OrderByKind, Query, Select, SelectItem,
-    SelectItemQualifiedWildcardKind, SetExpr, SetOperator, SetQuantifier, Spanned, Statement,
-    Subscript, TableFactor, TopQuantity, WildcardAdditionalOptions, WindowFrame, WindowFrameBound,
-    WindowFrameUnits, WindowSpec, WindowType,
+    Join, JoinConstraint, JoinOperator, JsonPathElem, LimitClause, ListAggOnOverflow,
+    NamedWindowExpr, ObjectName, ObjectNamePart, OrderBy, OrderByExpr, OrderByKind, Query, Select,
+    SelectItem, SelectItemQualifiedWildcardKind, SetExpr, SetOperator, SetQuantifier, Spanned,
+    Statement, Subscript, TableFactor, TopQuantity, WildcardAdditionalOptions, WindowFrame,
+    WindowFrameBound, WindowFrameUnits, WindowSpec, WindowType,
 };
 use sqlparser::tokenizer::{Span, Token};
 
@@ -310,6 +310,19 @@ impl<'a> Walk<'a> {
         // Push rights in forward order (so reversed LIFO pops left-to-right), then leftmost leaf on top.
         for &(_, _, right) in &chain {
             stack.push(WorkItem::SetExpr(right));
+        }
+        if matches!(
+            body,
+            SetExpr::Insert(_)
+                | SetExpr::Update(_)
+                | SetExpr::Delete(_)
+                | SetExpr::Merge(_)
+                | SetExpr::Table(_)
+        ) {
+            return Err(InvalidQuery::new(
+                "only SELECT queries are allowed",
+                at(body.span()),
+            ));
         }
         push_set_expr_leaf_children(body, stack);
         Ok(())
@@ -873,6 +886,18 @@ fn push_limit_clause_children<'a>(lc: &'a LimitClause, stack: &mut Vec<WorkItem<
 }
 
 fn push_window_spec_children<'a>(spec: &'a WindowSpec, stack: &mut Vec<WorkItem<'a>>) {
+    if let Some(frame) = &spec.window_frame {
+        if let Some(WindowFrameBound::Preceding(Some(e)) | WindowFrameBound::Following(Some(e))) =
+            &frame.end_bound
+        {
+            stack.push(WorkItem::Expr(e.as_ref()));
+        }
+        if let WindowFrameBound::Preceding(Some(e)) | WindowFrameBound::Following(Some(e)) =
+            &frame.start_bound
+        {
+            stack.push(WorkItem::Expr(e.as_ref()));
+        }
+    }
     for obe in spec.order_by.iter().rev() {
         stack.push(WorkItem::OrderByExpr(obe));
     }
@@ -896,6 +921,12 @@ fn push_function_args_children<'a>(args: &'a FunctionArguments, stack: &mut Vec<
                     FunctionArgumentClause::Limit(e)
                     | FunctionArgumentClause::Having(HavingBound(_, e)) => {
                         stack.push(WorkItem::Expr(e));
+                    }
+                    FunctionArgumentClause::OnOverflow(ListAggOnOverflow::Truncate {
+                        filler: Some(e),
+                        ..
+                    }) => {
+                        stack.push(WorkItem::Expr(e.as_ref()));
                     }
                     FunctionArgumentClause::IgnoreOrRespectNulls(_)
                     | FunctionArgumentClause::OnOverflow(_)
@@ -966,7 +997,7 @@ fn push_expr_children<'a>(expr: &'a Expr, stack: &mut Vec<WorkItem<'a>>) {
         }
         Expr::JsonAccess { value, path } => {
             for elem in path.path.iter().rev() {
-                if let JsonPathElem::Bracket { key } = elem {
+                if let JsonPathElem::Bracket { key } | JsonPathElem::ColonBracket { key } = elem {
                     stack.push(WorkItem::Expr(key));
                 }
             }
@@ -1490,6 +1521,12 @@ mod tests {
             // RANGE / GROUPS window frames in OVER and named WINDOW
             "SELECT sum(duration_ns) OVER (ORDER BY start_time RANGE BETWEEN 1 PRECEDING AND CURRENT ROW) FROM spans",
             "SELECT sum(duration_ns) OVER (ORDER BY start_time GROUPS BETWEEN 1 PRECEDING AND 1 FOLLOWING) FROM spans",
+            // Window frame bound expressions (subquery / denied function)
+            "SELECT sum(duration_ns) OVER (ORDER BY start_time ROWS BETWEEN (SELECT count(*) FROM secret_tbl) PRECEDING AND CURRENT ROW) FROM spans",
+            "SELECT sum(duration_ns) OVER (ORDER BY start_time ROWS BETWEEN repeat('a', 2) PRECEDING AND CURRENT ROW) FROM spans",
+            // Non-SELECT SetExpr (TABLE / DML in CTE)
+            "TABLE secret_tbl",
+            "WITH c AS (DELETE FROM secret_tbl RETURNING *) SELECT 1",
             // MAX_TABLES exceeded across CTE + subqueries + joins
             &format!(
                 "WITH c AS (SELECT 1 FROM {}) SELECT * FROM c CROSS JOIN spans",

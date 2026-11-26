@@ -151,7 +151,7 @@ Closed: `QE-B1` (column side), `QE-B2`, `QE-M3`, `QE-M4` (types side), `QE-M35`,
    - In `is_infallible` (`optimize.rs:557-663`):
      - Return `false` for `BinaryOp::Concat`, `Expr::Like`, `ScalarFn::Concat | ConcatWs | ArrayDistinct | MapKeys | MapValues`, and `Floor | Ceil` on `Decimal128`.
      - **Explicitly return `true` (preserving base-view bloom/range pushdown per R1-B1!)** for:
-       1. `ScalarFn::Encode` when `args[1]` is literal `"hex"` or `"base64"` (case-insensitive) and `is_infallible(&args[0])`;
+       1. `ScalarFn::Encode` when `args[1]` is literal `"hex"` (case-insensitive), `args[0].data_type()` is `FixedBytes8 | FixedBytes16 | Null`, and `is_infallible(&args[0])`;
        2. Lossless/total `Expr::Cast` regardless of `CastMode`: `(I64 -> F64)`, `(TimestampNs { .. } -> I64)`, `(I64 -> TimestampNs { .. })`, `(TimestampNs { .. } -> TimestampNs { .. })`, `(FixedBytes8 | FixedBytes16 -> Binary)`, `(Decimal128 { .. } -> F64)` when `is_infallible(inner)`;
        3. `BinaryOp::Div` on `DataType::F64` when `right` is a finite non-zero `ScalarValue::F64` literal (e.g. `1_000_000.0`) and `is_infallible(left)`.
    - Gate `Project` filter pushdown on every referenced `project_exprs[idx]` being `is_infallible`, and gate `Join` filter pushdown (including `cols.is_empty()` constants) on `is_infallible(&conj)`.

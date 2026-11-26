@@ -58,6 +58,7 @@ struct FoldFlags {
     has_col: bool,
     has_now: bool,
     has_redacted: bool,
+    has_unfoldable: bool,
 }
 
 impl FoldFlags {
@@ -66,11 +67,12 @@ impl FoldFlags {
             has_col: self.has_col || other.has_col,
             has_now: self.has_now || other.has_now,
             has_redacted: self.has_redacted || other.has_redacted,
+            has_unfoldable: self.has_unfoldable || other.has_unfoldable,
         }
     }
 
     fn is_foldable(self) -> bool {
-        !self.has_col && !self.has_now && !self.has_redacted
+        !self.has_col && !self.has_now && !self.has_redacted && !self.has_unfoldable
     }
 }
 
@@ -306,7 +308,7 @@ impl ConstFolder {
         }
     }
 
-    fn try_eval_const(&mut self, expr: Expr, flags: FoldFlags) -> (Expr, FoldFlags) {
+    fn try_eval_const(&mut self, expr: Expr, mut flags: FoldFlags) -> (Expr, FoldFlags) {
         if !flags.is_foldable() {
             return (expr, flags);
         }
@@ -325,6 +327,7 @@ impl ConstFolder {
             };
             return (Expr::Literal(sv), FoldFlags::default());
         }
+        flags.has_unfoldable = true;
         (expr, flags)
     }
 
@@ -907,10 +910,12 @@ fn is_infallible(expr: &Expr) -> bool {
                 else_expr,
                 ..
             } => {
-                if operand
-                    .as_deref()
-                    .is_some_and(|op| contains_decimal(&op.data_type()))
-                {
+                if operand.as_deref().is_some_and(|op| {
+                    contains_decimal(&op.data_type())
+                        || when_then
+                            .iter()
+                            .any(|(w, _)| contains_decimal(&w.data_type()))
+                }) {
                     return false;
                 }
                 if let Some(el) = else_expr {
@@ -938,12 +943,15 @@ fn is_infallible(expr: &Expr) -> bool {
                     if args.len() != 2 {
                         return false;
                     }
+                    let ok_arg = matches!(
+                        args[0].data_type(),
+                        DataType::FixedBytes8 | DataType::FixedBytes16 | DataType::Null
+                    );
                     let ok_fmt = matches!(
                         &args[1],
-                        Expr::Literal(ScalarValue::Utf8(s))
-                            if s.eq_ignore_ascii_case("hex") || s.eq_ignore_ascii_case("base64")
+                        Expr::Literal(ScalarValue::Utf8(s)) if s.eq_ignore_ascii_case("hex")
                     );
-                    if !ok_fmt {
+                    if !ok_arg || !ok_fmt {
                         return false;
                     }
                     stack.push(&args[0]);
@@ -1151,7 +1159,10 @@ fn push_filter(conjuncts: Vec<Expr>, plan: LogicalPlan) -> Result<LogicalPlan, Q
                     }
                     true
                 });
-                if can_push_refs && let Some(sub) = substitute_expr(&conj, &exprs)? {
+                if can_push_refs
+                    && (keep_above.is_empty() || is_infallible(&conj))
+                    && let Some(sub) = substitute_expr(&conj, &exprs)?
+                {
                     push_into.push(sub);
                 } else {
                     keep_above.push(conj);
@@ -2123,7 +2134,9 @@ fn pass4_scan_pushdown(plan: LogicalPlan) -> Result<LogicalPlan, QueryError> {
                         Some(map) => conj.remap_columns(map)?,
                         None => conj.clone(),
                     };
-                    if is_scan_filter_safe(kind, &full_conj, &full_schema) {
+                    if is_scan_filter_safe(kind, &full_conj, &full_schema)
+                        && (keep_above.is_empty() || is_infallible(&full_conj))
+                    {
                         filters.push(full_conj);
                     } else {
                         keep_above.push(conj);
@@ -2322,6 +2335,7 @@ fn is_scan_filter_safe(kind: SqlViewKind, expr: &Expr, full_schema: &Schema) -> 
             let mut cols = BTreeSet::new();
             expr.referenced_columns(&mut cols);
             !cols.is_empty()
+                && is_infallible(expr)
                 && cols.iter().all(|&idx| {
                     full_schema
                         .fields()
@@ -2333,6 +2347,7 @@ fn is_scan_filter_safe(kind: SqlViewKind, expr: &Expr, full_schema: &Schema) -> 
             let mut cols = BTreeSet::new();
             expr.referenced_columns(&mut cols);
             !cols.is_empty()
+                && is_infallible(expr)
                 && cols.iter().all(|&idx| {
                     full_schema.fields().get(idx).is_some_and(|f| {
                         matches!(f.name.as_str(), "created_at" | "trace_id" | "score_id")
@@ -2449,72 +2464,129 @@ fn extract_time_range(filters: &[Expr], full_schema: &Schema, column: &str) -> T
 }
 
 fn walk_time_bounds(bounds: &mut TimeBounds, expr: &Expr, full_schema: &Schema, column: &str) {
-    let mut stack = vec![expr];
-    while let Some(node) = stack.pop() {
-        match node {
-            Expr::Binary {
-                left,
-                op: BinaryOp::And,
-                right,
-                ..
-            } => {
-                stack.push(right);
-                stack.push(left);
-            }
-            Expr::Binary {
-                op: BinaryOp::Or, ..
-            } => {
-                let mut disjuncts = Vec::new();
-                collect_or_disjuncts(node, &mut disjuncts);
-                let mut union: Option<TimeBounds> = None;
-                for disjunct in disjuncts {
-                    if let Expr::Unary {
-                        op: UnaryOp::IsNull,
-                        expr: inner,
+    enum TimeFrame<'a> {
+        And {
+            bounds: TimeBounds,
+            work: Vec<&'a Expr>,
+        },
+        Or {
+            union: Option<TimeBounds>,
+            disjuncts: Vec<&'a Expr>,
+        },
+    }
+
+    let mut frames = vec![TimeFrame::And {
+        bounds: *bounds,
+        work: vec![expr],
+    }];
+
+    while let Some(top) = frames.last_mut() {
+        match top {
+            TimeFrame::And { bounds: cur, work } => {
+                let Some(node) = work.pop() else {
+                    let Some(TimeFrame::And {
+                        bounds: finished, ..
+                    }) = frames.pop()
+                    else {
+                        break;
+                    };
+                    match frames.last_mut() {
+                        Some(TimeFrame::Or { union, .. }) => {
+                            *union = Some(match union.take() {
+                                None => finished,
+                                Some(acc) => acc.union_with(finished),
+                            });
+                        }
+                        None => {
+                            *bounds = finished;
+                            break;
+                        }
+                        Some(TimeFrame::And { .. }) => {}
+                    }
+                    continue;
+                };
+                match node {
+                    Expr::Binary {
+                        left,
+                        op: BinaryOp::And,
+                        right,
                         ..
-                    } = disjunct
-                        && is_schema_column(inner.as_ref(), full_schema, column)
-                    {
-                        continue;
+                    } => {
+                        work.push(right);
+                        work.push(left);
                     }
-                    let mut sep = TimeBounds::default();
-                    walk_time_bounds(&mut sep, disjunct, full_schema, column);
-                    union = Some(match union {
-                        None => sep,
-                        Some(acc) => acc.union_with(sep),
-                    });
-                }
-                if let Some(u) = union {
-                    *bounds = bounds.intersect_with(u);
+                    Expr::Binary {
+                        op: BinaryOp::Or, ..
+                    } => {
+                        let mut disjuncts = Vec::new();
+                        collect_or_disjuncts(node, &mut disjuncts);
+                        disjuncts.reverse();
+                        frames.push(TimeFrame::Or {
+                            union: None,
+                            disjuncts,
+                        });
+                    }
+                    Expr::Binary {
+                        left, op, right, ..
+                    } => {
+                        if is_schema_column(left.as_ref(), full_schema, column) {
+                            if let Some(ns) = expr_timestamp_ns(right) {
+                                apply_time_cmp(cur, *op, ns, true);
+                            }
+                        } else if is_schema_column(right.as_ref(), full_schema, column)
+                            && let Some(ns) = expr_timestamp_ns(left)
+                        {
+                            apply_time_cmp(cur, *op, ns, false);
+                        }
+                    }
+                    Expr::Between {
+                        expr: inner,
+                        low,
+                        high,
+                        negated: false,
+                    } if is_schema_column(inner.as_ref(), full_schema, column) => {
+                        if let Some(lo) = expr_timestamp_ns(low) {
+                            cur.raise_min(lo);
+                        }
+                        if let Some(hi) = expr_timestamp_ns(high) {
+                            cur.lower_max(hi);
+                        }
+                    }
+                    _ => {}
                 }
             }
-            Expr::Binary {
-                left, op, right, ..
+            TimeFrame::Or {
+                union: _,
+                disjuncts,
             } => {
-                if is_schema_column(left.as_ref(), full_schema, column) {
-                    if let Some(ns) = expr_timestamp_ns(right) {
-                        apply_time_cmp(bounds, *op, ns, true);
+                let Some(disjunct) = disjuncts.pop() else {
+                    let Some(TimeFrame::Or { union, .. }) = frames.pop() else {
+                        break;
+                    };
+                    if let Some(u) = union
+                        && let Some(TimeFrame::And {
+                            bounds: parent_bounds,
+                            ..
+                        }) = frames.last_mut()
+                    {
+                        *parent_bounds = parent_bounds.intersect_with(u);
                     }
-                } else if is_schema_column(right.as_ref(), full_schema, column)
-                    && let Some(ns) = expr_timestamp_ns(left)
+                    continue;
+                };
+                if let Expr::Unary {
+                    op: UnaryOp::IsNull,
+                    expr: inner,
+                    ..
+                } = disjunct
+                    && is_schema_column(inner.as_ref(), full_schema, column)
                 {
-                    apply_time_cmp(bounds, *op, ns, false);
+                    continue;
                 }
+                frames.push(TimeFrame::And {
+                    bounds: TimeBounds::default(),
+                    work: vec![disjunct],
+                });
             }
-            Expr::Between {
-                expr: inner,
-                low,
-                high,
-                negated: false,
-            } if is_schema_column(inner.as_ref(), full_schema, column) => {
-                if let Some(lo) = expr_timestamp_ns(low) {
-                    bounds.raise_min(lo);
-                }
-                if let Some(hi) = expr_timestamp_ns(high) {
-                    bounds.lower_max(hi);
-                }
-            }
-            _ => {}
         }
     }
 }
@@ -2908,14 +2980,94 @@ fn collect_expr_map_proj_indices(
     schema: &Schema,
     out: &mut BTreeMap<usize, MapProjection>,
 ) {
-    let mut by_name = BTreeMap::new();
-    collect_expr_map_projections(expr, schema, &mut by_name);
-    if by_name.is_empty() {
-        return;
-    }
-    for (idx, field) in schema.fields().iter().enumerate() {
-        if let Some(proj) = by_name.get(&field.name) {
-            merge_map_proj_idx(out, idx, proj.clone());
+    let mut stack = vec![expr];
+    while let Some(node) = stack.pop() {
+        match node {
+            Expr::Column { index, .. } => {
+                if let Some(field) = schema.fields().get(*index)
+                    && field.data_type == DataType::MapUtf8
+                {
+                    merge_map_proj_idx(out, *index, MapProjection::Full);
+                }
+            }
+            Expr::Literal(_) => {}
+            Expr::MapIndex { map, key } => {
+                if let (Expr::Column { index, .. }, Expr::Literal(ScalarValue::Utf8(k))) =
+                    (map.as_ref(), key.as_ref())
+                    && let Some(field) = schema.fields().get(*index)
+                    && field.data_type == DataType::MapUtf8
+                {
+                    let mut keys = BTreeSet::new();
+                    keys.insert(k.clone());
+                    merge_map_proj_idx(out, *index, MapProjection::Keys(keys));
+                } else {
+                    stack.push(map);
+                    stack.push(key);
+                }
+            }
+            Expr::Call {
+                func: ScalarFn::MapKeys,
+                args,
+                ..
+            } if args.len() == 1 => {
+                if let Expr::Column { index, .. } = &args[0]
+                    && let Some(field) = schema.fields().get(*index)
+                    && field.data_type == DataType::MapUtf8
+                {
+                    merge_map_proj_idx(out, *index, MapProjection::KeysOnly);
+                } else {
+                    stack.push(&args[0]);
+                }
+            }
+            Expr::Unary { expr, .. } | Expr::Cast { expr, .. } => stack.push(expr),
+            Expr::Binary { left, right, .. } => {
+                stack.push(right);
+                stack.push(left);
+            }
+            Expr::Between {
+                expr, low, high, ..
+            } => {
+                stack.push(high);
+                stack.push(low);
+                stack.push(expr);
+            }
+            Expr::InList { expr, list, .. } => {
+                for item in list {
+                    stack.push(item);
+                }
+                stack.push(expr);
+            }
+            Expr::Like { expr, pattern, .. } => {
+                stack.push(pattern);
+                stack.push(expr);
+            }
+            Expr::Case {
+                operand,
+                when_then,
+                else_expr,
+                ..
+            } => {
+                if let Some(el) = else_expr {
+                    stack.push(el);
+                }
+                for (w, t) in when_then {
+                    stack.push(t);
+                    stack.push(w);
+                }
+                if let Some(op) = operand {
+                    stack.push(op);
+                }
+            }
+            Expr::MakeArray { elems, .. } => {
+                for e in elems {
+                    stack.push(e);
+                }
+            }
+            Expr::Call { args, .. } => {
+                for a in args {
+                    stack.push(a);
+                }
+            }
         }
     }
 }
@@ -6003,29 +6155,58 @@ mod tests {
             }));
         }
 
-        // Explicitly infallible forms (R1-B1)
+        // Explicitly infallible forms (R1-B1, H3b-B1)
+        let fb8_col = Expr::Column {
+            index: 0,
+            name: "span_id".to_owned(),
+            data_type: DataType::FixedBytes8,
+        };
         let fb16_col = Expr::Column {
             index: 0,
             name: "trace_id".to_owned(),
             data_type: DataType::FixedBytes16,
         };
-        for fmt in ["hex", "HEX", "base64", "BASE64"] {
+        let null_col = Expr::Column {
+            index: 0,
+            name: "n".to_owned(),
+            data_type: DataType::Null,
+        };
+        let bin_col = Expr::Column {
+            index: 0,
+            name: "b".to_owned(),
+            data_type: DataType::Binary,
+        };
+        for (col, fmt) in [
+            (fb16_col.clone(), "hex"),
+            (fb16_col.clone(), "HEX"),
+            (fb8_col, "hex"),
+            (null_col, "hex"),
+        ] {
             assert!(is_infallible(&Expr::Call {
                 func: ScalarFn::Encode,
-                args: vec![
-                    fb16_col.clone(),
-                    Expr::Literal(ScalarValue::Utf8(fmt.to_owned()))
-                ],
+                args: vec![col, Expr::Literal(ScalarValue::Utf8(fmt.to_owned()))],
                 data_type: DataType::Utf8,
             }));
         }
-        assert!(!is_infallible(&Expr::Call {
-            func: ScalarFn::Encode,
-            args: vec![
-                fb16_col.clone(),
-                Expr::Literal(ScalarValue::Utf8("utf8".to_owned()))
-            ],
-            data_type: DataType::Utf8,
+        for (col, fmt) in [
+            (fb16_col.clone(), "base64"),
+            (fb16_col.clone(), "BASE64"),
+            (fb16_col.clone(), "utf8"),
+            (bin_col, "hex"),
+        ] {
+            assert!(!is_infallible(&Expr::Call {
+                func: ScalarFn::Encode,
+                args: vec![col, Expr::Literal(ScalarValue::Utf8(fmt.to_owned()))],
+                data_type: DataType::Utf8,
+            }));
+        }
+
+        // Case with operand must also reject Decimal128 in WHEN arms (H3b-m2)
+        assert!(!is_infallible(&Expr::Case {
+            operand: Some(Box::new(i64_col.clone())),
+            when_then: vec![(dec_col.clone(), Expr::Literal(ScalarValue::I64(1)))],
+            else_expr: Some(Box::new(Expr::Literal(ScalarValue::I64(0)))),
+            data_type: DataType::I64,
         }));
 
         for (src, dst) in [
@@ -6304,8 +6485,188 @@ mod tests {
 
                 let mapped = map_expr_bottom_up(or_expr, &mut |e| e);
                 assert!(is_infallible(&mapped));
+
+                // Alternating 512-op AND/OR spine in walk_time_bounds (H3b-m1)
+                let ts_schema = Schema::try_new_arc(vec![Field::new(
+                    "start_time",
+                    DataType::timestamp_utc(),
+                    false,
+                )])
+                .unwrap();
+                let ts_col = Expr::Column {
+                    index: 0,
+                    name: "start_time".to_owned(),
+                    data_type: DataType::timestamp_utc(),
+                };
+                let ts_lit = Expr::Literal(ScalarValue::TimestampNs {
+                    value: 100,
+                    utc: true,
+                });
+                let mut alt_expr = bin(ts_col.clone(), BinaryOp::GtEq, ts_lit.clone());
+                for i in 0..512 {
+                    let op = if i % 2 == 0 {
+                        BinaryOp::Or
+                    } else {
+                        BinaryOp::And
+                    };
+                    let leaf = bin(ts_col.clone(), BinaryOp::GtEq, ts_lit.clone());
+                    alt_expr = bin(alt_expr, op, leaf);
+                }
+                let hint = extract_time_range(&[alt_expr], &ts_schema, "start_time");
+                assert_eq!(hint.min_ns, Some(100));
             })
             .unwrap();
         handle.join().unwrap();
+    }
+
+    #[test]
+    fn fallible_conjunct_reordering_prevented_in_project_and_scan() {
+        // Traces: `status = 'ok' AND 1 / (CAST(start_time AS BIGINT) - 1000) > 0`
+        // keeps the fallible conjunct above Scan (both because `status` stays above Scan and
+        // because `is_scan_filter_safe` requires `is_infallible` on Traces/Scores).
+        let traces_plan = bind_and_opt(
+            "SELECT trace_id FROM traces WHERE status = 'ok' AND 1 / (CAST(start_time AS BIGINT) - 1000) > 0",
+        );
+        let LogicalPlan::Scan { filters, .. } = find_first_scan(&traces_plan).unwrap() else {
+            unreachable!()
+        };
+        assert!(
+            filters.is_empty(),
+            "expected fallible conjunct to stay above Traces Scan, got {filters:?}"
+        );
+
+        // Project: `SELECT * FROM (SELECT a.x, 100 / a.y AS bad FROM a) t WHERE bad > 0 AND 100 / t.x > 10`
+        // keeps `100 / t.x > 10` above Project because `bad > 0` stayed above Project.
+        let a_schema = Schema::try_new_arc(vec![
+            Field::new("x", DataType::I64, false),
+            Field::new("y", DataType::I64, false),
+        ])
+        .unwrap();
+        let t_schema = Schema::try_new_arc(vec![
+            Field::new("x", DataType::I64, false),
+            Field::new("bad", DataType::I64, false),
+        ])
+        .unwrap();
+        let bad_proj = Expr::Binary {
+            left: Box::new(Expr::Literal(ScalarValue::I64(100))),
+            op: BinaryOp::Div,
+            right: Box::new(col_expr(&a_schema, "y")),
+            data_type: DataType::I64,
+        };
+        let proj = LogicalPlan::Project {
+            input: Box::new(raw_scan("a", SqlViewKind::Batch, Arc::clone(&a_schema))),
+            exprs: vec![col_expr(&a_schema, "x"), bad_proj],
+            schema: Arc::clone(&t_schema),
+        };
+        let pred = bin(
+            bin(
+                col_expr(&t_schema, "bad"),
+                BinaryOp::Gt,
+                Expr::Literal(ScalarValue::I64(0)),
+            ),
+            BinaryOp::And,
+            bin(
+                Expr::Binary {
+                    left: Box::new(Expr::Literal(ScalarValue::I64(100))),
+                    op: BinaryOp::Div,
+                    right: Box::new(col_expr(&t_schema, "x")),
+                    data_type: DataType::I64,
+                },
+                BinaryOp::Gt,
+                Expr::Literal(ScalarValue::I64(10)),
+            ),
+        );
+        let opt = optimize(LogicalPlan::Filter {
+            input: Box::new(proj),
+            predicate: pred,
+        })
+        .unwrap();
+        let LogicalPlan::Filter {
+            input, predicate, ..
+        } = opt
+        else {
+            panic!("expected Filter above Project, got {opt:?}");
+        };
+        assert_eq!(split_conjuncts(predicate).len(), 2);
+        let LogicalPlan::Project { input, .. } = *input else {
+            panic!("expected Project below Filter");
+        };
+        assert!(matches!(*input, LogicalPlan::Scan { filters, .. } if filters.is_empty()));
+    }
+
+    #[test]
+    fn const_folder_512_failing_chain_is_linear() {
+        let mut folder = ConstFolder::new().unwrap();
+        let big_a = Expr::Literal(ScalarValue::Utf8("a".repeat(40 * 1024)));
+        let big_b = Expr::Literal(ScalarValue::Utf8("b".repeat(40 * 1024)));
+        let mut chain = bin(big_a, BinaryOp::Concat, big_b);
+        for _ in 0..512 {
+            chain = bin(
+                chain,
+                BinaryOp::Concat,
+                Expr::Literal(ScalarValue::Utf8("x".to_owned())),
+            );
+        }
+        let start = std::time::Instant::now();
+        let folded = folder.fold_expr(chain);
+        let elapsed = start.elapsed();
+        assert!(matches!(
+            folded,
+            Expr::Binary {
+                op: BinaryOp::Concat,
+                ..
+            }
+        ));
+        assert!(
+            elapsed < std::time::Duration::from_millis(50),
+            "expected O(N) fold of failing chain in < 50ms, took {elapsed:?}"
+        );
+    }
+
+    #[test]
+    fn self_join_map_projections_keyed_by_column_index() {
+        let plan = bind_and_opt(
+            "SELECT a.trace_id, b.metadata['region'] FROM spans a LEFT JOIN spans b ON a.trace_id = b.trace_id AND a.metadata['env'] = 'prod'",
+        );
+        let mut scans = Vec::new();
+        let mut stack = vec![&plan];
+        while let Some(node) = stack.pop() {
+            match node {
+                LogicalPlan::Scan {
+                    map_projections, ..
+                } => scans.push(map_projections.clone()),
+                LogicalPlan::Filter { input, .. }
+                | LogicalPlan::Project { input, .. }
+                | LogicalPlan::Aggregate { input, .. }
+                | LogicalPlan::Window { input, .. }
+                | LogicalPlan::Sort { input, .. }
+                | LogicalPlan::Limit { input, .. }
+                | LogicalPlan::TopK { input, .. }
+                | LogicalPlan::Distinct { input }
+                | LogicalPlan::Unnest { input, .. }
+                | LogicalPlan::Explain { inner: input, .. } => stack.push(input),
+                LogicalPlan::Join { left, right, .. } => {
+                    stack.push(right);
+                    stack.push(left);
+                }
+                LogicalPlan::Union { inputs, .. } => {
+                    for b in inputs {
+                        stack.push(b);
+                    }
+                }
+                LogicalPlan::Values { .. } | LogicalPlan::EmptyRow { .. } => {}
+            }
+        }
+        assert_eq!(scans.len(), 2);
+        let left_keys: BTreeSet<String> = ["env".to_owned()].into_iter().collect();
+        let right_keys: BTreeSet<String> = ["region".to_owned()].into_iter().collect();
+        assert_eq!(
+            scans[0].get("metadata"),
+            Some(&MapProjection::Keys(left_keys))
+        );
+        assert_eq!(
+            scans[1].get("metadata"),
+            Some(&MapProjection::Keys(right_keys))
+        );
     }
 }
