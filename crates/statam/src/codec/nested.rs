@@ -42,19 +42,22 @@ impl std::hash::Hasher for FastStrHasher {
 }
 
 use cetra_column::{
-    Bitmap, Column, DataType, EventsData, FlatColumn, FlatData, LinksData, MapData, ScalarValue,
-    Utf8Data,
+    BinaryData, Bitmap, Column, DataType, DictColumn, EventsData, FlatColumn, FlatData, LinksData,
+    MapData, ScalarValue, Utf8Data,
 };
 
 use crate::codec::dict::{
-    DictBuilder, FileDict, check_varlen_take_bytes, decode_dict_codes_body, decode_dict_column,
-    encode_dict_codes_body,
+    DICT_PASSTHROUGH_MAX_BYTES, DictBuilder, FileDict, check_varlen_take_bytes,
+    decode_dict_codes_body, decode_dict_column, encode_dict_codes_body, materialize_from_dict,
 };
-use crate::codec::fsst::{decode_fsst_utf8, encode_fsst_body};
+use crate::codec::fsst::{
+    FsstBlockView, decode_fsst_utf8, decode_fsst_utf8_selected, encode_fsst_body,
+};
 use crate::codec::numeric::{
-    decode_const_block, decode_inner_data, decode_rle_block, encode_delta_bitpack_body,
-    encode_for_bitpack_body, encode_plain_body, encode_plain_utf8, read_optional_nulls,
-    try_encode_const_or_null, write_optional_nulls,
+    decode_const_block, decode_inner_data, decode_plain_map_selected, decode_plain_varlen_selected,
+    decode_rle_block, encode_delta_bitpack_body, encode_for_bitpack_body, encode_plain_body,
+    encode_plain_utf8, read_optional_nulls, read_u32_le_at, try_encode_const_or_null,
+    validate_plain_offsets_raw, write_optional_nulls,
 };
 use crate::codec::zonemap::{ZoneMapSummary, compute_zone_map};
 use crate::codec::{EncodedMiniBlock, WriteProfile, preferred_block_codec};
@@ -343,19 +346,123 @@ pub fn shred_map(
     })
 }
 
-/// Reconstructs a full `MapUtf8` [`FlatColumn`] from an optional residual map and
-/// promoted sub-columns.
-///
-/// `ShreddedMap` preserves logical map entries per row (merging sorted promoted keys
-/// with residual entries). When the original map's keys were sorted (e.g. `BTreeMap`-backed
-/// Cetra maps) and `subcols` is in lexicographical key order, the reconstructed column
-/// matches the original under `FlatColumn::semantic_eq`.
-pub fn unshred_map(
+/// Zero-materialization borrowed view over a `Utf8` [`Column`] for `O(1)` per-row indexing
+/// across `Flat`, `Dict`, `Rle`, and `Const` sub-columns.
+enum SubColUtf8Ref<'a> {
+    Flat(&'a Utf8Data, Option<&'a Bitmap>),
+    Dict {
+        dict_vals: &'a Utf8Data,
+        dict_nulls: Option<&'a Bitmap>,
+        codes: &'a [u32],
+        code_nulls: Option<&'a Bitmap>,
+    },
+    Rle {
+        run_vals: &'a Utf8Data,
+        run_nulls: Option<&'a Bitmap>,
+        run_ends: &'a [u32],
+    },
+    Const(Option<&'a str>),
+}
+
+impl<'a> SubColUtf8Ref<'a> {
+    fn from_column(col: &'a Column) -> Result<Self, StatamError> {
+        match col {
+            Column::Flat(fc) => {
+                let FlatData::Utf8(u) = fc.data() else {
+                    return Err(StatamError::SchemaMismatch {
+                        reason: "shredded sub-column values must be Utf8",
+                    });
+                };
+                Ok(Self::Flat(u, fc.nulls()))
+            }
+            Column::Dict(dc) => {
+                let FlatData::Utf8(u) = dc.values().data() else {
+                    return Err(StatamError::SchemaMismatch {
+                        reason: "shredded sub-column values must be Utf8",
+                    });
+                };
+                Ok(Self::Dict {
+                    dict_vals: u,
+                    dict_nulls: dc.values().nulls(),
+                    codes: dc.codes(),
+                    code_nulls: dc.nulls(),
+                })
+            }
+            Column::Rle(rc) => {
+                let FlatData::Utf8(u) = rc.values().data() else {
+                    return Err(StatamError::SchemaMismatch {
+                        reason: "shredded sub-column values must be Utf8",
+                    });
+                };
+                Ok(Self::Rle {
+                    run_vals: u,
+                    run_nulls: rc.values().nulls(),
+                    run_ends: rc.run_ends(),
+                })
+            }
+            Column::Const { value, .. } => match value {
+                ScalarValue::Utf8(s) => Ok(Self::Const(Some(s.as_str()))),
+                ScalarValue::Null(DataType::Utf8) => Ok(Self::Const(None)),
+                _ => Err(StatamError::SchemaMismatch {
+                    reason: "shredded sub-column values must be Utf8",
+                }),
+            },
+        }
+    }
+
+    #[inline]
+    fn get(&self, row: usize) -> &'a str {
+        match self {
+            Self::Flat(u, nulls) => {
+                if nulls.is_some_and(|bm| !bm.get(row)) {
+                    ""
+                } else {
+                    u.get(row).unwrap_or("")
+                }
+            }
+            Self::Dict {
+                dict_vals,
+                dict_nulls,
+                codes,
+                code_nulls,
+            } => {
+                if code_nulls.is_some_and(|bm| !bm.get(row)) {
+                    return "";
+                }
+                let code = codes[row] as usize;
+                if dict_nulls.is_some_and(|bm| !bm.get(code)) {
+                    ""
+                } else {
+                    dict_vals.get(code).unwrap_or("")
+                }
+            }
+            Self::Rle {
+                run_vals,
+                run_nulls,
+                run_ends,
+            } => {
+                let run_idx = run_ends.partition_point(|&end| (end as usize) <= row);
+                if run_nulls.is_some_and(|bm| !bm.get(run_idx)) {
+                    ""
+                } else {
+                    run_vals.get(run_idx).unwrap_or("")
+                }
+            }
+            Self::Const(opt) => opt.unwrap_or(""),
+        }
+    }
+}
+
+type ResidualMapRef<'a> = (&'a MapData, Option<&'a Bitmap>);
+type UnshredInputs<'a> = (Option<ResidualMapRef<'a>>, Vec<SubColUtf8Ref<'a>>);
+type SelectedVarlenResult = (Vec<u32>, Vec<u8>, Option<Bitmap>);
+
+fn validate_unshred_inputs<'a>(
     row_count: usize,
     row_nulls: Option<&Bitmap>,
-    residual: Option<&FlatColumn>,
-    subcols: &[(&str, &ShreddedSubCol)],
-) -> Result<FlatColumn, StatamError> {
+    residual: Option<&'a FlatColumn>,
+    subcols: &[(&'a str, &'a ShreddedSubCol)],
+) -> Result<UnshredInputs<'a>, StatamError> {
     if let Some(bm) = row_nulls
         && bm.len() != row_count
     {
@@ -391,20 +498,105 @@ pub fn unshred_map(
         None => None,
     };
 
-    // Pre-materialize sub-column values for O(1) row lookup.
-    let mut flat_subs: Vec<FlatColumn> = Vec::with_capacity(subcols.len());
+    let mut sub_refs = Vec::with_capacity(subcols.len());
     for (_, sub) in subcols {
-        flat_subs.push(sub.values.materialize(None)?);
+        sub_refs.push(SubColUtf8Ref::from_column(&sub.values)?);
     }
-    let sub_utf8s: Vec<&Utf8Data> = flat_subs
-        .iter()
-        .map(|fc| match fc.data() {
-            FlatData::Utf8(u) => Ok(u),
-            _ => Err(StatamError::SchemaMismatch {
-                reason: "shredded sub-column values must be Utf8",
-            }),
-        })
-        .collect::<Result<Vec<_>, _>>()?;
+
+    Ok((res_map, sub_refs))
+}
+
+#[inline]
+fn merge_unshred_row<'a>(
+    row: usize,
+    subcols: &[(&'a str, &ShreddedSubCol)],
+    sub_refs: &[SubColUtf8Ref<'a>],
+    res_map: Option<(&'a MapData, Option<&Bitmap>)>,
+    out_keys: &mut Vec<&'a str>,
+    out_vals: &mut Vec<&'a str>,
+    out_val_valid: &mut Vec<bool>,
+) {
+    let (res_range_start, res_range_end) = if let Some((rm, _)) = res_map {
+        (rm.offsets()[row] as usize, rm.offsets()[row + 1] as usize)
+    } else {
+        (0, 0)
+    };
+
+    // Merge promoted keys (lexicographically ordered) with residual entries.
+    let mut p_idx = 0usize;
+    let mut r_idx = res_range_start;
+
+    while p_idx < subcols.len() && r_idx < res_range_end {
+        if !subcols[p_idx].1.in_map.get(row) {
+            p_idx += 1;
+            continue;
+        }
+        let pk = subcols[p_idx].0;
+        let rk = res_map
+            .and_then(|(rm, _)| rm.keys().get(r_idx))
+            .unwrap_or("");
+        if pk <= rk {
+            let valid = subcols[p_idx].1.value_null.get(row);
+            let v = if valid { sub_refs[p_idx].get(row) } else { "" };
+            out_keys.push(pk);
+            out_vals.push(v);
+            out_val_valid.push(valid);
+            p_idx += 1;
+        } else if let Some((rm, _)) = res_map {
+            let valid = rm.value_nulls().is_none_or(|bm| bm.get(r_idx));
+            let v = if valid {
+                rm.values().get(r_idx).unwrap_or("")
+            } else {
+                ""
+            };
+            out_keys.push(rk);
+            out_vals.push(v);
+            out_val_valid.push(valid);
+            r_idx += 1;
+        }
+    }
+    while p_idx < subcols.len() {
+        if subcols[p_idx].1.in_map.get(row) {
+            let pk = subcols[p_idx].0;
+            let valid = subcols[p_idx].1.value_null.get(row);
+            let v = if valid { sub_refs[p_idx].get(row) } else { "" };
+            out_keys.push(pk);
+            out_vals.push(v);
+            out_val_valid.push(valid);
+        }
+        p_idx += 1;
+    }
+    if let Some((rm, _)) = res_map {
+        while r_idx < res_range_end {
+            let rk = rm.keys().get(r_idx).unwrap_or("");
+            let valid = rm.value_nulls().is_none_or(|bm| bm.get(r_idx));
+            let v = if valid {
+                rm.values().get(r_idx).unwrap_or("")
+            } else {
+                ""
+            };
+            out_keys.push(rk);
+            out_vals.push(v);
+            out_val_valid.push(valid);
+            r_idx += 1;
+        }
+    }
+}
+
+/// Reconstructs a full `MapUtf8` [`FlatColumn`] from an optional residual map and
+/// promoted sub-columns.
+///
+/// `ShreddedMap` preserves logical map entries per row (merging sorted promoted keys
+/// with residual entries). When the original map's keys were sorted (e.g. `BTreeMap`-backed
+/// Cetra maps) and `subcols` is in lexicographical key order, the reconstructed column
+/// matches the original under `FlatColumn::semantic_eq`.
+pub fn unshred_map(
+    row_count: usize,
+    row_nulls: Option<&Bitmap>,
+    residual: Option<&FlatColumn>,
+    subcols: &[(&str, &ShreddedSubCol)],
+) -> Result<FlatColumn, StatamError> {
+    let (res_map, sub_refs) = validate_unshred_inputs(row_count, row_nulls, residual, subcols)?;
 
     let mut out_offsets = Vec::with_capacity(row_count + 1);
     out_offsets.push(0u32);
@@ -422,79 +614,15 @@ pub fn unshred_map(
             continue;
         }
 
-        let (res_range_start, res_range_end) = if let Some((rm, _)) = res_map {
-            (rm.offsets()[row] as usize, rm.offsets()[row + 1] as usize)
-        } else {
-            (0, 0)
-        };
-
-        // Merge promoted keys (lexicographically ordered) with residual entries.
-        let mut p_idx = 0usize;
-        let mut r_idx = res_range_start;
-
-        while p_idx < subcols.len() && r_idx < res_range_end {
-            if !subcols[p_idx].1.in_map.get(row) {
-                p_idx += 1;
-                continue;
-            }
-            let pk = subcols[p_idx].0;
-            let rk = res_map
-                .and_then(|(rm, _)| rm.keys().get(r_idx))
-                .unwrap_or("");
-            if pk <= rk {
-                let valid = subcols[p_idx].1.value_null.get(row);
-                let v = if valid {
-                    sub_utf8s[p_idx].get(row).unwrap_or("")
-                } else {
-                    ""
-                };
-                out_keys.push(pk);
-                out_vals.push(v);
-                out_val_valid.push(valid);
-                p_idx += 1;
-            } else if let Some((rm, _)) = res_map {
-                let valid = rm.value_nulls().is_none_or(|bm| bm.get(r_idx));
-                let v = if valid {
-                    rm.values().get(r_idx).unwrap_or("")
-                } else {
-                    ""
-                };
-                out_keys.push(rk);
-                out_vals.push(v);
-                out_val_valid.push(valid);
-                r_idx += 1;
-            }
-        }
-        while p_idx < subcols.len() {
-            if subcols[p_idx].1.in_map.get(row) {
-                let pk = subcols[p_idx].0;
-                let valid = subcols[p_idx].1.value_null.get(row);
-                let v = if valid {
-                    sub_utf8s[p_idx].get(row).unwrap_or("")
-                } else {
-                    ""
-                };
-                out_keys.push(pk);
-                out_vals.push(v);
-                out_val_valid.push(valid);
-            }
-            p_idx += 1;
-        }
-        if let Some((rm, _)) = res_map {
-            while r_idx < res_range_end {
-                let rk = rm.keys().get(r_idx).unwrap_or("");
-                let valid = rm.value_nulls().is_none_or(|bm| bm.get(r_idx));
-                let v = if valid {
-                    rm.values().get(r_idx).unwrap_or("")
-                } else {
-                    ""
-                };
-                out_keys.push(rk);
-                out_vals.push(v);
-                out_val_valid.push(valid);
-                r_idx += 1;
-            }
-        }
+        merge_unshred_row(
+            row,
+            subcols,
+            &sub_refs,
+            res_map,
+            &mut out_keys,
+            &mut out_vals,
+            &mut out_val_valid,
+        );
 
         let end_u32 = u32::try_from(out_keys.len()).map_err(|_| StatamError::BoundsExceeded {
             reason: "unshred_map entry count exceeds u32::MAX",
@@ -515,6 +643,89 @@ pub fn unshred_map(
     } else {
         Some(Bitmap::from_bools(&out_row_valid))
     };
+    Ok(FlatColumn::try_new(
+        FlatData::MapUtf8(Box::new(map)),
+        out_nulls,
+    )?)
+}
+
+/// Reconstructs a `MapUtf8` [`FlatColumn`] from an optional residual map and promoted
+/// sub-columns, merging only rows selected by `mask` when `mask` is sparse
+/// (`!mask.all_ones() && mask.count_ones().saturating_mul(16) < row_count`).
+///
+/// Inactive rows receive empty map slices and remain valid.
+pub fn unshred_map_selected(
+    row_count: usize,
+    row_nulls: Option<&Bitmap>,
+    residual: Option<&FlatColumn>,
+    subcols: &[(&str, &ShreddedSubCol)],
+    mask: &Bitmap,
+) -> Result<FlatColumn, StatamError> {
+    if mask.len() != row_count {
+        return Err(StatamError::Corrupt {
+            reason: "selection mask length mismatch",
+        });
+    }
+    if mask.all_ones() || mask.count_ones().saturating_mul(16) >= row_count {
+        return unshred_map(row_count, row_nulls, residual, subcols);
+    }
+
+    let (res_map, sub_refs) = validate_unshred_inputs(row_count, row_nulls, residual, subcols)?;
+
+    let mut out_offsets = Vec::with_capacity(row_count + 1);
+    out_offsets.push(0u32);
+    let mut out_keys: Vec<&str> = Vec::new();
+    let mut out_vals: Vec<&str> = Vec::new();
+    let mut out_val_valid: Vec<bool> = Vec::new();
+    let mut out_nulls: Option<Bitmap> = None;
+
+    for row in mask.iter_ones() {
+        if row >= row_count {
+            break;
+        }
+        let cur_off = out_keys.len() as u32;
+        if out_offsets.len() <= row {
+            out_offsets.resize(row + 1, cur_off);
+        }
+
+        let is_row_null = row_nulls.is_some_and(|bm| !bm.get(row))
+            || res_map.is_some_and(|(_, rn)| rn.is_some_and(|bm| !bm.get(row)));
+        if is_row_null {
+            let bm = out_nulls.get_or_insert_with(|| Bitmap::new_ones(row_count));
+            let _ = bm.set(row, false);
+            out_offsets.push(cur_off);
+            continue;
+        }
+
+        merge_unshred_row(
+            row,
+            subcols,
+            &sub_refs,
+            res_map,
+            &mut out_keys,
+            &mut out_vals,
+            &mut out_val_valid,
+        );
+
+        let end_u32 = u32::try_from(out_keys.len()).map_err(|_| StatamError::BoundsExceeded {
+            reason: "unshred_map entry count exceeds u32::MAX",
+        })?;
+        out_offsets.push(end_u32);
+    }
+
+    let tail_off = out_keys.len() as u32;
+    if out_offsets.len() < row_count + 1 {
+        out_offsets.resize(row_count + 1, tail_off);
+    }
+
+    let keys_data = Utf8Data::try_from_slices(out_keys)?;
+    let vals_data = Utf8Data::try_from_slices(out_vals)?;
+    let val_nulls = if out_val_valid.iter().all(|&b| b) {
+        None
+    } else {
+        Some(Bitmap::from_bools(&out_val_valid))
+    };
+    let map = MapData::try_new(out_offsets, keys_data, vals_data, val_nulls)?;
     Ok(FlatColumn::try_new(
         FlatData::MapUtf8(Box::new(map)),
         out_nulls,
@@ -567,12 +778,7 @@ pub fn decode_single_map_key(
         None
     };
 
-    let flat_vals = subcol.values.materialize(None)?;
-    let FlatData::Utf8(sub_utf8) = flat_vals.data() else {
-        return Err(StatamError::SchemaMismatch {
-            reason: "shredded sub-column values must be Utf8",
-        });
-    };
+    let sub_ref = SubColUtf8Ref::from_column(&subcol.values)?;
 
     let mut out_offsets = Vec::with_capacity(row_count + 1);
     out_offsets.push(0u32);
@@ -592,11 +798,7 @@ pub fn decode_single_map_key(
 
         if subcol.in_map.get(row) {
             let valid = subcol.value_null.get(row);
-            let v = if valid {
-                sub_utf8.get(row).unwrap_or("")
-            } else {
-                ""
-            };
+            let v = if valid { sub_ref.get(row) } else { "" };
             out_keys.push(key);
             out_vals.push(v);
             out_val_valid.push(valid);
@@ -715,8 +917,21 @@ pub(crate) fn encode_shredded_subcol_with_codec(
     Ok((codec, out))
 }
 
-/// Decodes a [`ShreddedSubCol`] encoded by [`encode_shredded_subcol`].
-pub fn decode_shredded_subcol(src: &[u8], row_count: usize) -> Result<ShreddedSubCol, StatamError> {
+struct ParsedSubColHeader<'a> {
+    in_map: Bitmap,
+    value_null: Bitmap,
+    enc: Encoding,
+    flags: u8,
+    min_inline_len: u8,
+    min_inline: [u8; 16],
+    dict: Option<FileDict>,
+    body: &'a [u8],
+}
+
+fn parse_shredded_subcol_header(
+    src: &[u8],
+    row_count: usize,
+) -> Result<ParsedSubColHeader<'_>, StatamError> {
     if row_count
         .checked_mul(4)
         .is_none_or(|b| b > MAX_BLOCK_RAW_BYTES)
@@ -787,23 +1002,92 @@ pub fn decode_shredded_subcol(src: &[u8], row_count: usize) -> Result<ShreddedSu
             reason: "shredded subcol body length mismatch",
         });
     }
-    let body = &rest[pos..];
-
-    let values = decode_child_column(
-        body,
+    Ok(ParsedSubColHeader {
+        in_map,
+        value_null,
         enc,
         flags,
-        row_count,
         min_inline_len,
         min_inline,
+        dict,
+        body: &rest[pos..],
+    })
+}
+
+/// Decodes a [`ShreddedSubCol`] encoded by [`encode_shredded_subcol`].
+pub fn decode_shredded_subcol(src: &[u8], row_count: usize) -> Result<ShreddedSubCol, StatamError> {
+    let hdr = parse_shredded_subcol_header(src, row_count)?;
+    let values = decode_child_column(
+        hdr.body,
+        hdr.enc,
+        hdr.flags,
+        row_count,
+        hdr.min_inline_len,
+        hdr.min_inline,
         &DataType::Utf8,
-        dict.as_ref(),
+        hdr.dict.as_ref(),
         1,
     )?;
 
     Ok(ShreddedSubCol {
-        in_map,
-        value_null,
+        in_map: hdr.in_map,
+        value_null: hdr.value_null,
+        values,
+    })
+}
+
+/// Decodes a [`ShreddedSubCol`] decoding only `mask`-selected rows when sparse
+/// (`!mask.all_ones() && mask.count_ones().saturating_mul(16) < row_count`).
+///
+/// `Dict`, `Rle`, `Const`, and `ConstNull` child encodings are passed through directly
+/// without string expansion; `Fsst` and `Plain` decode only active rows.
+pub fn decode_shredded_subcol_selected(
+    src: &[u8],
+    row_count: usize,
+    mask: &Bitmap,
+) -> Result<ShreddedSubCol, StatamError> {
+    if mask.len() != row_count {
+        return Err(StatamError::Corrupt {
+            reason: "selection mask length mismatch",
+        });
+    }
+    if mask.all_ones() || mask.count_ones().saturating_mul(16) >= row_count {
+        return decode_shredded_subcol(src, row_count);
+    }
+
+    let hdr = parse_shredded_subcol_header(src, row_count)?;
+    let values = if row_count == 0 {
+        Column::Flat(FlatColumn::empty(&DataType::Utf8))
+    } else if hdr.enc == Encoding::Fsst {
+        let (nulls, after_nulls) = read_optional_nulls(hdr.body, row_count, hdr.flags)?;
+        let (u, out_nulls) =
+            decode_fsst_utf8_selected(after_nulls, row_count, mask, nulls.as_ref())?;
+        Column::Flat(FlatColumn::try_new(FlatData::Utf8(u), out_nulls)?)
+    } else if hdr.enc == Encoding::Plain {
+        let (nulls, after_nulls) = read_optional_nulls(hdr.body, row_count, hdr.flags)?;
+        let (offsets, bytes) =
+            decode_plain_varlen_selected(after_nulls, row_count, mask, nulls.as_ref())?;
+        Column::Flat(FlatColumn::try_new(
+            FlatData::Utf8(Utf8Data::try_new(offsets, bytes)?),
+            nulls,
+        )?)
+    } else {
+        decode_child_column(
+            hdr.body,
+            hdr.enc,
+            hdr.flags,
+            row_count,
+            hdr.min_inline_len,
+            hdr.min_inline,
+            &DataType::Utf8,
+            hdr.dict.as_ref(),
+            1,
+        )?
+    };
+
+    Ok(ShreddedSubCol {
+        in_map: hdr.in_map,
+        value_null: hdr.value_null,
         values,
     })
 }
@@ -955,18 +1239,63 @@ pub fn decode_shredded_residual_block(
         )?;
         return Ok(FlatColumn::try_new(data, nulls)?);
     }
+    if entry.encoding != Encoding::ShreddedMap {
+        return Err(StatamError::Corrupt {
+            reason: "incompatible encoding for ShreddedMap residual block",
+        });
+    }
     decode_shredded_residual_with_count(raw_body, row_count, entry.block_flags)
 }
 
-fn decode_shredded_residual_with_count(
+/// Decodes a `ShreddedMap` (or sparse `Plain` `MapUtf8`) residual block, materializing
+/// entries only for rows selected by `mask` when `mask` is sparse
+/// (`!mask.all_ones() && mask.count_ones().saturating_mul(16) < row_count`).
+pub fn decode_shredded_residual_block_selected(
+    raw_body: &[u8],
+    entry: &BlockEntry,
+    mask: &Bitmap,
+) -> Result<FlatColumn, StatamError> {
+    if mask.len() != entry.row_count as usize {
+        return Err(StatamError::Corrupt {
+            reason: "selection mask length mismatch",
+        });
+    }
+    if entry.encoding == Encoding::ConstNull || entry.encoding == Encoding::Const {
+        return Ok(decode_const_block(entry, &DataType::MapUtf8)?.materialize(None)?);
+    }
+    let row_count = entry.row_count as usize;
+    if row_count == 0 || mask.all_ones() || mask.count_ones().saturating_mul(16) >= row_count {
+        return decode_shredded_residual_block(raw_body, entry);
+    }
+    if entry.encoding == Encoding::Plain {
+        let (nulls, body) = read_optional_nulls(raw_body, row_count, entry.block_flags)?;
+        let data = decode_plain_map_selected(body, row_count, mask)?;
+        return Ok(FlatColumn::try_new(data, nulls)?);
+    }
+    if entry.encoding != Encoding::ShreddedMap {
+        return Err(StatamError::Corrupt {
+            reason: "incompatible encoding for ShreddedMap residual block",
+        });
+    }
+    decode_shredded_residual_with_count_selected(raw_body, row_count, entry.block_flags, mask)
+}
+
+struct ParsedShreddedResidual<'a> {
+    row_nulls: Option<Bitmap>,
+    offsets: Vec<u32>,
+    entry_count: usize,
+    key_offsets: Vec<u32>,
+    keys_blob: &'a [u8],
+    key_codes: Vec<u32>,
+    val_nulls: Option<Bitmap>,
+    val_src: &'a [u8],
+}
+
+fn parse_shredded_residual_parts(
     raw_body: &[u8],
     row_count: usize,
     block_flags: u8,
-) -> Result<FlatColumn, StatamError> {
-    if row_count == 0 {
-        return Ok(FlatColumn::empty(&DataType::MapUtf8));
-    }
-
+) -> Result<ParsedShreddedResidual<'_>, StatamError> {
     let (row_nulls, rest) = read_optional_nulls(raw_body, row_count, block_flags)?;
     let (counts, mut rest) = read_packed_counts(rest, row_count)?;
     let (offsets, entry_count) = counts_to_offsets(&counts)?;
@@ -977,10 +1306,16 @@ fn decode_shredded_residual_with_count(
                 reason: "trailing bytes in empty shredded residual",
             });
         }
-        return Ok(FlatColumn::try_new(
-            FlatData::MapUtf8(Box::new(MapData::empty_with_rows(row_count)?)),
+        return Ok(ParsedShreddedResidual {
             row_nulls,
-        )?);
+            offsets,
+            entry_count: 0,
+            key_offsets: Vec::new(),
+            keys_blob: &[],
+            key_codes: Vec::new(),
+            val_nulls: None,
+            val_src: &[],
+        });
     }
 
     if rest.len() < 5 {
@@ -1036,7 +1371,6 @@ fn decode_shredded_residual_with_count(
             reason: "shredded key lengths do not match blob length",
         });
     }
-    let key_dict = Utf8Data::try_new(key_offsets, keys_blob.to_vec())?;
 
     let kcode_bw = rest[0];
     rest = &rest[1..];
@@ -1057,15 +1391,210 @@ fn decode_shredded_residual_with_count(
     }
     rest = &rest[kcode_packed..];
 
-    let (val_nulls, rest) = read_flag_bitmap(rest, entry_count)?;
-    check_varlen_take_bytes(key_dict.offsets(), &key_codes, None)?;
-    let keys_data = key_dict.take(&key_codes, None)?;
-    let vals_data = decode_utf8_fsst_or_plain(rest, entry_count)?;
+    let (val_nulls, val_src) = read_flag_bitmap(rest, entry_count)?;
 
-    let map = MapData::try_new(offsets, keys_data, vals_data, val_nulls)?;
+    Ok(ParsedShreddedResidual {
+        row_nulls,
+        offsets,
+        entry_count,
+        key_offsets,
+        keys_blob,
+        key_codes,
+        val_nulls,
+        val_src,
+    })
+}
+
+fn decode_shredded_residual_with_count(
+    raw_body: &[u8],
+    row_count: usize,
+    block_flags: u8,
+) -> Result<FlatColumn, StatamError> {
+    if row_count == 0 {
+        return Ok(FlatColumn::empty(&DataType::MapUtf8));
+    }
+    let parsed = parse_shredded_residual_parts(raw_body, row_count, block_flags)?;
+    if parsed.entry_count == 0 {
+        return Ok(FlatColumn::try_new(
+            FlatData::MapUtf8(Box::new(MapData::empty_with_rows(row_count)?)),
+            parsed.row_nulls,
+        )?);
+    }
+
+    let key_dict = Utf8Data::try_new(parsed.key_offsets, parsed.keys_blob.to_vec())?;
+    check_varlen_take_bytes(key_dict.offsets(), &parsed.key_codes, None)?;
+    let keys_data = key_dict.take(&parsed.key_codes, None)?;
+    let vals_data = decode_utf8_fsst_or_plain(parsed.val_src, parsed.entry_count)?;
+
+    let map = MapData::try_new(parsed.offsets, keys_data, vals_data, parsed.val_nulls)?;
     Ok(FlatColumn::try_new(
         FlatData::MapUtf8(Box::new(map)),
-        row_nulls,
+        parsed.row_nulls,
+    )?)
+}
+
+fn decode_shredded_residual_with_count_selected(
+    raw_body: &[u8],
+    row_count: usize,
+    block_flags: u8,
+    mask: &Bitmap,
+) -> Result<FlatColumn, StatamError> {
+    if row_count == 0 {
+        return Ok(FlatColumn::empty(&DataType::MapUtf8));
+    }
+    let parsed = parse_shredded_residual_parts(raw_body, row_count, block_flags)?;
+    if parsed.entry_count == 0 {
+        return Ok(FlatColumn::try_new(
+            FlatData::MapUtf8(Box::new(MapData::empty_with_rows(row_count)?)),
+            parsed.row_nulls,
+        )?);
+    }
+
+    // Validate key dictionary UTF-8 boundaries without cloning keys_blob.
+    let keys_str = std::str::from_utf8(parsed.keys_blob)
+        .map_err(|_| StatamError::Column(cetra_column::ColumnError::InvalidUtf8))?;
+    for &o in &parsed.key_offsets {
+        if !keys_str.is_char_boundary(o as usize) {
+            return Err(StatamError::Column(cetra_column::ColumnError::InvalidUtf8));
+        }
+    }
+
+    if parsed.val_src.len() < 5 {
+        return Err(StatamError::Corrupt {
+            reason: "truncated nested utf8 header",
+        });
+    }
+    let val_enc = Encoding::from_u8(parsed.val_src[0])?;
+    let val_len = u32::from_le_bytes([
+        parsed.val_src[1],
+        parsed.val_src[2],
+        parsed.val_src[3],
+        parsed.val_src[4],
+    ]) as usize;
+    let val_body = &parsed.val_src[5..];
+    if val_body.len() != val_len {
+        return Err(StatamError::Corrupt {
+            reason: "nested utf8 payload length mismatch",
+        });
+    }
+
+    enum ValSource<'a> {
+        Fsst(Box<FsstBlockView<'a>>),
+        Plain { off_raw: &'a [u8], data: &'a [u8] },
+    }
+
+    let val_source = match val_enc {
+        Encoding::Fsst => ValSource::Fsst(Box::new(FsstBlockView::parse(
+            val_body,
+            parsed.entry_count,
+        )?)),
+        Encoding::Plain => {
+            let off_count =
+                parsed
+                    .entry_count
+                    .checked_add(1)
+                    .ok_or(StatamError::BoundsExceeded {
+                        reason: "plain varlen offsets count overflow",
+                    })?;
+            let off_bytes = off_count
+                .checked_mul(4)
+                .ok_or(StatamError::BoundsExceeded {
+                    reason: "plain varlen offsets size overflow",
+                })?;
+            if off_bytes > MAX_BLOCK_RAW_BYTES {
+                return Err(StatamError::BoundsExceeded {
+                    reason: "plain varlen offsets size overflow",
+                });
+            }
+            if val_body.len() < off_bytes {
+                return Err(StatamError::Corrupt {
+                    reason: "truncated plain varlen offsets",
+                });
+            }
+            let data_len = val_body.len() - off_bytes;
+            if data_len > MAX_BLOCK_RAW_BYTES {
+                return Err(StatamError::BoundsExceeded {
+                    reason: "plain varlen data exceeds MAX_BLOCK_RAW_BYTES",
+                });
+            }
+            let off_raw = &val_body[..off_bytes];
+            validate_plain_offsets_raw(off_raw, data_len)?;
+            ValSource::Plain {
+                off_raw,
+                data: &val_body[off_bytes..],
+            }
+        }
+        _ => {
+            return Err(StatamError::Corrupt {
+                reason: "unsupported nested utf8 encoding",
+            });
+        }
+    };
+
+    let mut out_offsets = Vec::with_capacity(row_count + 1);
+    out_offsets.push(0u32);
+    let mut out_key_offsets = vec![0u32];
+    let mut out_key_bytes = Vec::new();
+    let mut out_val_offsets = vec![0u32];
+    let mut out_val_bytes = Vec::new();
+    let mut out_val_valid = Vec::new();
+
+    for row in mask.iter_ones() {
+        if row >= row_count {
+            break;
+        }
+        let cur_entries = out_val_valid.len() as u32;
+        if out_offsets.len() <= row {
+            out_offsets.resize(row + 1, cur_entries);
+        }
+        let rs = parsed.offsets[row] as usize;
+        let re = parsed.offsets[row + 1] as usize;
+        for idx in rs..re {
+            let kc = parsed.key_codes[idx] as usize;
+            let ks = parsed.key_offsets[kc] as usize;
+            let ke = parsed.key_offsets[kc + 1] as usize;
+            let klen = ke - ks;
+            if out_key_bytes.len().saturating_add(klen) > MAX_BLOCK_RAW_BYTES {
+                return Err(StatamError::BoundsExceeded {
+                    reason: "shredded residual keys exceed MAX_BLOCK_RAW_BYTES",
+                });
+            }
+            out_key_bytes.extend_from_slice(&parsed.keys_blob[ks..ke]);
+            out_key_offsets.push(out_key_bytes.len() as u32);
+
+            match &val_source {
+                ValSource::Fsst(view) => {
+                    view.decode_row(idx, &mut out_val_bytes)?;
+                }
+                ValSource::Plain { off_raw, data } => {
+                    let vs = read_u32_le_at(off_raw, idx);
+                    let ve = read_u32_le_at(off_raw, idx + 1);
+                    out_val_bytes.extend_from_slice(&data[vs..ve]);
+                }
+            }
+            out_val_offsets.push(out_val_bytes.len() as u32);
+
+            out_val_valid.push(parsed.val_nulls.as_ref().is_none_or(|bm| bm.get(idx)));
+        }
+        out_offsets.push(out_val_valid.len() as u32);
+    }
+
+    let tail_entries = out_val_valid.len() as u32;
+    if out_offsets.len() < row_count + 1 {
+        out_offsets.resize(row_count + 1, tail_entries);
+    }
+
+    let keys_data = Utf8Data::try_new(out_key_offsets, out_key_bytes)?;
+    let vals_data = Utf8Data::try_new(out_val_offsets, out_val_bytes)?;
+    let out_val_nulls = if out_val_valid.iter().all(|&b| b) {
+        None
+    } else {
+        Some(Bitmap::from_bools(&out_val_valid))
+    };
+    let map = MapData::try_new(out_offsets, keys_data, vals_data, out_val_nulls)?;
+    Ok(FlatColumn::try_new(
+        FlatData::MapUtf8(Box::new(map)),
+        parsed.row_nulls,
     )?)
 }
 
@@ -1371,6 +1900,1017 @@ pub(crate) fn encode_nested_column(
             reason: "narrow DataType passed to encode_nested_column",
         }),
     }
+}
+
+/// Decodes a `ListEncoded`, `EventsStruct`, `LinksStruct`, or `ShreddedMap` mini-block,
+/// decoding only `mask`-selected rows when `mask` is sparse
+/// (`!mask.all_ones() && mask.count_ones().saturating_mul(16) < row_count`).
+pub fn decode_nested_column_selected(
+    raw_body: &[u8],
+    entry: &BlockEntry,
+    dt: &DataType,
+    max_depth: usize,
+    mask: &Bitmap,
+) -> Result<Column, StatamError> {
+    if mask.len() != entry.row_count as usize {
+        return Err(StatamError::Corrupt {
+            reason: "selection mask length mismatch",
+        });
+    }
+    if entry.encoding == Encoding::ConstNull || entry.encoding == Encoding::Const {
+        return decode_const_block(entry, dt);
+    }
+
+    let row_count = entry.row_count as usize;
+    if row_count == 0 || mask.all_ones() || mask.count_ones().saturating_mul(16) >= row_count {
+        return decode_nested_column(raw_body, entry, dt, max_depth);
+    }
+
+    match (entry.encoding, dt) {
+        (Encoding::ListEncoded, DataType::List(inner)) => decode_list_body_selected(
+            raw_body,
+            row_count,
+            entry.block_flags,
+            inner,
+            max_depth,
+            mask,
+        ),
+        (Encoding::ShreddedMap, DataType::MapUtf8) => Ok(Column::Flat(
+            decode_shredded_residual_block_selected(raw_body, entry, mask)?,
+        )),
+        (Encoding::EventsStruct, DataType::Events) => {
+            decode_events_body_selected(raw_body, row_count, entry.block_flags, mask)
+        }
+        (Encoding::LinksStruct, DataType::Links) => {
+            decode_links_body_selected(raw_body, row_count, entry.block_flags, mask)
+        }
+        _ => Err(StatamError::Corrupt {
+            reason: "incompatible nested encoding for DataType",
+        }),
+    }
+}
+
+fn build_active_nested_offsets(
+    offsets: &[u32],
+    row_count: usize,
+    mask: &Bitmap,
+) -> (Vec<u32>, usize) {
+    let mut out_offsets = Vec::with_capacity(row_count + 1);
+    out_offsets.push(0u32);
+    let mut active_total = 0u32;
+    for row in mask.iter_ones() {
+        if row >= row_count {
+            break;
+        }
+        if out_offsets.len() <= row {
+            out_offsets.resize(row + 1, active_total);
+        }
+        active_total = active_total.saturating_add(offsets[row + 1] - offsets[row]);
+        out_offsets.push(active_total);
+    }
+    if out_offsets.len() < row_count + 1 {
+        out_offsets.resize(row_count + 1, active_total);
+    }
+    (out_offsets, active_total as usize)
+}
+
+fn decode_selected_utf8_or_binary(
+    body: &[u8],
+    enc: Encoding,
+    total_len: usize,
+    offsets: &[u32],
+    row_count: usize,
+    mask: &Bitmap,
+    nulls: Option<&Bitmap>,
+) -> Result<SelectedVarlenResult, StatamError> {
+    enum Source<'a> {
+        Fsst(Box<FsstBlockView<'a>>),
+        Plain { off_raw: &'a [u8], data: &'a [u8] },
+    }
+
+    let source = match enc {
+        Encoding::Fsst => Source::Fsst(Box::new(FsstBlockView::parse(body, total_len)?)),
+        Encoding::Plain => {
+            let off_count = total_len
+                .checked_add(1)
+                .ok_or(StatamError::BoundsExceeded {
+                    reason: "plain varlen offsets count overflow",
+                })?;
+            let off_bytes = off_count
+                .checked_mul(4)
+                .ok_or(StatamError::BoundsExceeded {
+                    reason: "plain varlen offsets size overflow",
+                })?;
+            if off_bytes > MAX_BLOCK_RAW_BYTES {
+                return Err(StatamError::BoundsExceeded {
+                    reason: "plain varlen offsets size overflow",
+                });
+            }
+            if body.len() < off_bytes {
+                return Err(StatamError::Corrupt {
+                    reason: "truncated plain varlen offsets",
+                });
+            }
+            let data_len = body.len() - off_bytes;
+            if data_len > MAX_BLOCK_RAW_BYTES {
+                return Err(StatamError::BoundsExceeded {
+                    reason: "plain varlen data exceeds MAX_BLOCK_RAW_BYTES",
+                });
+            }
+            let off_raw = &body[..off_bytes];
+            validate_plain_offsets_raw(off_raw, data_len)?;
+            Source::Plain {
+                off_raw,
+                data: &body[off_bytes..],
+            }
+        }
+        _ => {
+            return Err(StatamError::Corrupt {
+                reason: "unsupported varlen encoding",
+            });
+        }
+    };
+
+    let mut out_offsets = vec![0u32];
+    let mut out_bytes = Vec::new();
+    let mut out_nulls: Option<Bitmap> = None;
+    let mut active_idx = 0usize;
+
+    for row in mask.iter_ones() {
+        if row >= row_count {
+            break;
+        }
+        let rs = offsets[row] as usize;
+        let re = offsets[row + 1] as usize;
+        for idx in rs..re {
+            let valid = nulls.is_none_or(|bm| bm.get(idx));
+            if valid {
+                match &source {
+                    Source::Fsst(view) => {
+                        view.decode_row(idx, &mut out_bytes)?;
+                    }
+                    Source::Plain { off_raw, data } => {
+                        let s = read_u32_le_at(off_raw, idx);
+                        let e = read_u32_le_at(off_raw, idx + 1);
+                        if out_bytes.len().saturating_add(e - s) > MAX_BLOCK_RAW_BYTES {
+                            return Err(StatamError::BoundsExceeded {
+                                reason: "active varlen bytes exceed MAX_BLOCK_RAW_BYTES",
+                            });
+                        }
+                        out_bytes.extend_from_slice(&data[s..e]);
+                    }
+                }
+            } else if out_nulls.is_none() {
+                // Lazy-allocate only when an active element is null.
+                let total_active: usize = mask
+                    .iter_ones()
+                    .take_while(|&r| r < row_count)
+                    .map(|r| (offsets[r + 1] - offsets[r]) as usize)
+                    .sum();
+                let mut bm = Bitmap::new_ones(total_active);
+                let _ = bm.set(active_idx, false);
+                out_nulls = Some(bm);
+            } else if let Some(bm) = out_nulls.as_mut() {
+                let _ = bm.set(active_idx, false);
+            }
+            out_offsets.push(out_bytes.len() as u32);
+            active_idx += 1;
+        }
+    }
+
+    Ok((out_offsets, out_bytes, out_nulls))
+}
+
+fn validate_list_child_header(
+    child_enc: Encoding,
+    child_len: usize,
+    inner: &DataType,
+    dict: Option<&FileDict>,
+) -> Result<(), StatamError> {
+    if child_len == 0 && child_enc == Encoding::Plain {
+        return Ok(());
+    }
+    if child_enc == Encoding::Dict {
+        let Some(d) = dict else {
+            return Err(StatamError::Corrupt {
+                reason: "ListEncoded Dict child missing inline dict",
+            });
+        };
+        if d.values().data_type() != *inner {
+            return Err(StatamError::SchemaMismatch {
+                reason: "child FileDict DataType mismatch",
+            });
+        }
+        return Ok(());
+    }
+    let valid = matches!(
+        (child_enc, inner),
+        (Encoding::ConstNull | Encoding::Const, _)
+            | (Encoding::ListEncoded, DataType::List(_))
+            | (Encoding::ShreddedMap | Encoding::Plain, DataType::MapUtf8)
+            | (Encoding::EventsStruct, DataType::Events)
+            | (Encoding::LinksStruct, DataType::Links)
+            | (
+                Encoding::BitpackBool | Encoding::Plain | Encoding::Rle,
+                DataType::Bool
+            )
+            | (
+                Encoding::Plain | Encoding::ForBitpack | Encoding::DeltaBitpack | Encoding::Rle,
+                DataType::I64 | DataType::TimestampNs { .. } | DataType::Date,
+            )
+            | (
+                Encoding::Plain | Encoding::ForBitpack | Encoding::Rle,
+                DataType::Decimal128 { .. },
+            )
+            | (
+                Encoding::Plain | Encoding::Alp | Encoding::Rle,
+                DataType::F64
+            )
+            | (
+                Encoding::Plain | Encoding::Fsst | Encoding::Rle,
+                DataType::Utf8 | DataType::Binary,
+            )
+            | (
+                Encoding::Plain | Encoding::Rle,
+                DataType::Null
+                    | DataType::Interval
+                    | DataType::FixedBytes8
+                    | DataType::FixedBytes16,
+            )
+    );
+    if !valid {
+        return Err(StatamError::Corrupt {
+            reason: "incompatible child encoding for ListEncoded DataType",
+        });
+    }
+    Ok(())
+}
+
+fn decode_list_body_selected(
+    raw_body: &[u8],
+    row_count: usize,
+    block_flags: u8,
+    inner: &DataType,
+    remaining_depth: usize,
+    mask: &Bitmap,
+) -> Result<Column, StatamError> {
+    if remaining_depth == 0 {
+        return Err(StatamError::BoundsExceeded {
+            reason: "DataType::List nesting exceeds MAX_NESTING_DEPTH",
+        });
+    }
+
+    let (row_nulls, rest) = read_optional_nulls(raw_body, row_count, block_flags)?;
+    let (counts, rest) = read_packed_counts(rest, row_count)?;
+    let (offsets, total_child) = counts_to_offsets(&counts)?;
+
+    if rest.len() < 28 {
+        return Err(StatamError::Corrupt {
+            reason: "truncated ListEncoded child header",
+        });
+    }
+    let child_enc = Encoding::from_u8(rest[0])?;
+    let child_flags = rest[1];
+    let child_len = u32::from_le_bytes([rest[2], rest[3], rest[4], rest[5]]) as usize;
+    let child_null_count = u32::from_le_bytes([rest[6], rest[7], rest[8], rest[9]]);
+    let child_min_inline_len = rest[10];
+    if child_len != total_child {
+        return Err(StatamError::Corrupt {
+            reason: "ListEncoded child_len mismatch with sum of counts",
+        });
+    }
+    if child_null_count as usize > child_len || child_min_inline_len > 16 {
+        return Err(StatamError::Corrupt {
+            reason: "invalid ListEncoded child metadata",
+        });
+    }
+    let mut child_min_inline = [0u8; 16];
+    child_min_inline.copy_from_slice(&rest[11..27]);
+    let has_dict = rest[27];
+    let mut pos = 28usize;
+
+    let dict = match has_dict {
+        0 => None,
+        1 => {
+            if rest.len() < pos + 5 {
+                return Err(StatamError::Corrupt {
+                    reason: "truncated ListEncoded inline dict header",
+                });
+            }
+            let sorted = rest[pos] != 0;
+            let dict_len =
+                u32::from_le_bytes([rest[pos + 1], rest[pos + 2], rest[pos + 3], rest[pos + 4]])
+                    as usize;
+            pos += 5;
+            if dict_len > MAX_DICT_BYTES || rest.len().saturating_sub(pos) < dict_len {
+                return Err(StatamError::Corrupt {
+                    reason: "truncated or oversized ListEncoded inline dict",
+                });
+            }
+            let d = FileDict::decode(&rest[pos..pos + dict_len], sorted)?;
+            pos += dict_len;
+            Some(d)
+        }
+        _ => {
+            return Err(StatamError::Corrupt {
+                reason: "invalid ListEncoded has_dict flag",
+            });
+        }
+    };
+
+    if rest.len().saturating_sub(pos) < 4 {
+        return Err(StatamError::Corrupt {
+            reason: "truncated ListEncoded child_body_len",
+        });
+    }
+    let child_body_len =
+        u32::from_le_bytes([rest[pos], rest[pos + 1], rest[pos + 2], rest[pos + 3]]) as usize;
+    pos += 4;
+    if rest.len().saturating_sub(pos) != child_body_len {
+        return Err(StatamError::Corrupt {
+            reason: "ListEncoded child_body_len mismatch",
+        });
+    }
+    let child_body = &rest[pos..];
+
+    validate_list_child_header(child_enc, child_len, inner, dict.as_ref())?;
+
+    let (out_offsets, active_child_count) = build_active_nested_offsets(&offsets, row_count, mask);
+    if active_child_count == 0 {
+        let list_flat = FlatColumn::try_new(
+            FlatData::List {
+                item_type: inner.clone(),
+                offsets: out_offsets,
+                values: Box::new(Column::Flat(FlatColumn::empty(inner))),
+            },
+            row_nulls,
+        )?;
+        return Ok(Column::Flat(list_flat));
+    }
+
+    let compact_child: Option<Column> = match (child_enc, inner) {
+        (Encoding::ConstNull, _) => Some(Column::Const {
+            value: ScalarValue::Null(inner.clone()),
+            len: active_child_count,
+        }),
+        (Encoding::Const, _) => {
+            let mut c = decode_child_column(
+                child_body,
+                child_enc,
+                child_flags,
+                active_child_count,
+                child_min_inline_len,
+                child_min_inline,
+                inner,
+                dict.as_ref(),
+                remaining_depth - 1,
+            )?;
+            if let Column::Const { len, .. } = &mut c {
+                *len = active_child_count;
+            }
+            Some(c)
+        }
+        (Encoding::Dict, _) => {
+            let Some(d) = dict.as_ref() else {
+                return Err(StatamError::Corrupt {
+                    reason: "ListEncoded Dict child missing inline dict",
+                });
+            };
+            if d.values().data_type() != *inner {
+                return Err(StatamError::SchemaMismatch {
+                    reason: "child FileDict DataType mismatch",
+                });
+            }
+            let (c_nulls, after_nulls) = read_optional_nulls(child_body, child_len, child_flags)?;
+            let full_codes =
+                decode_dict_codes_body(after_nulls, child_len, d.len(), c_nulls.as_ref())?;
+            let mut active_codes = Vec::with_capacity(active_child_count);
+            let mut active_nulls = c_nulls
+                .as_ref()
+                .map(|_| Bitmap::new_ones(active_child_count));
+            let mut aidx = 0usize;
+            for row in mask.iter_ones() {
+                if row >= row_count {
+                    break;
+                }
+                let rs = offsets[row] as usize;
+                let re = offsets[row + 1] as usize;
+                for (offset_in_row, &code) in full_codes[rs..re].iter().enumerate() {
+                    let idx = rs + offset_in_row;
+                    if let Some(bm) = c_nulls.as_ref()
+                        && !bm.get(idx)
+                    {
+                        active_codes.push(0);
+                        if let Some(abm) = active_nulls.as_mut() {
+                            let _ = abm.set(aidx, false);
+                        }
+                    } else {
+                        active_codes.push(code);
+                    }
+                    aidx += 1;
+                }
+            }
+            if d.memory_bytes() <= DICT_PASSTHROUGH_MAX_BYTES {
+                let dc = DictColumn::try_new(d.values().clone(), active_codes, active_nulls)?;
+                Some(Column::Dict(dc))
+            } else {
+                Some(Column::Flat(materialize_from_dict(
+                    d.values(),
+                    &active_codes,
+                    active_nulls,
+                )?))
+            }
+        }
+        (Encoding::Plain | Encoding::Fsst, DataType::Utf8) => {
+            let (c_nulls, after_nulls) = read_optional_nulls(child_body, child_len, child_flags)?;
+            let (co, cb, cn) = decode_selected_utf8_or_binary(
+                after_nulls,
+                child_enc,
+                child_len,
+                &offsets,
+                row_count,
+                mask,
+                c_nulls.as_ref(),
+            )?;
+            Some(Column::Flat(FlatColumn::try_new(
+                FlatData::Utf8(Utf8Data::try_new(co, cb)?),
+                cn,
+            )?))
+        }
+        (Encoding::Plain | Encoding::Fsst, DataType::Binary) => {
+            let (c_nulls, after_nulls) = read_optional_nulls(child_body, child_len, child_flags)?;
+            let (co, cb, cn) = decode_selected_utf8_or_binary(
+                after_nulls,
+                child_enc,
+                child_len,
+                &offsets,
+                row_count,
+                mask,
+                c_nulls.as_ref(),
+            )?;
+            Some(Column::Flat(FlatColumn::try_new(
+                FlatData::Binary(BinaryData::try_new(co, cb)?),
+                cn,
+            )?))
+        }
+        (Encoding::Plain, dt)
+            if matches!(
+                dt,
+                DataType::I64
+                    | DataType::TimestampNs { .. }
+                    | DataType::F64
+                    | DataType::Decimal128 { .. }
+                    | DataType::Date
+                    | DataType::Interval
+                    | DataType::FixedBytes8
+                    | DataType::FixedBytes16
+                    | DataType::Null
+            ) =>
+        {
+            let (c_nulls, after_nulls) = read_optional_nulls(child_body, child_len, child_flags)?;
+            let elem_bytes = match dt {
+                DataType::Null => 0usize,
+                DataType::Date => 4,
+                DataType::I64
+                | DataType::TimestampNs { .. }
+                | DataType::F64
+                | DataType::FixedBytes8 => 8,
+                DataType::Decimal128 { .. } | DataType::Interval | DataType::FixedBytes16 => 16,
+                _ => unreachable!(),
+            };
+            let expected =
+                child_len
+                    .checked_mul(elem_bytes)
+                    .ok_or(StatamError::BoundsExceeded {
+                        reason: "ListEncoded child byte size overflow",
+                    })?;
+            if expected > MAX_BLOCK_RAW_BYTES || after_nulls.len() != expected {
+                return Err(StatamError::Corrupt {
+                    reason: "ListEncoded plain child byte length mismatch",
+                });
+            }
+            let mut compact_body = Vec::with_capacity(active_child_count * elem_bytes);
+            let mut active_nulls = c_nulls
+                .as_ref()
+                .map(|_| Bitmap::new_ones(active_child_count));
+            let mut aidx = 0usize;
+            for row in mask.iter_ones() {
+                if row >= row_count {
+                    break;
+                }
+                for idx in offsets[row] as usize..offsets[row + 1] as usize {
+                    if let Some(bm) = c_nulls.as_ref()
+                        && !bm.get(idx)
+                        && let Some(abm) = active_nulls.as_mut()
+                    {
+                        let _ = abm.set(aidx, false);
+                    }
+                    if elem_bytes > 0 {
+                        let s = idx * elem_bytes;
+                        compact_body.extend_from_slice(&after_nulls[s..s + elem_bytes]);
+                    }
+                    aidx += 1;
+                }
+            }
+            let data = decode_inner_data(
+                &compact_body,
+                Encoding::Plain,
+                active_child_count,
+                dt,
+                active_nulls.as_ref(),
+            )?;
+            Some(Column::Flat(FlatColumn::try_new(data, active_nulls)?))
+        }
+        (Encoding::BitpackBool | Encoding::Plain, DataType::Bool) => {
+            let (c_nulls, after_nulls) = read_optional_nulls(child_body, child_len, child_flags)?;
+            let expected = child_len.div_ceil(8);
+            if after_nulls.len() != expected {
+                return Err(StatamError::Corrupt {
+                    reason: "bool block byte length mismatch",
+                });
+            }
+            let full_bm = Bitmap::from_bytes(after_nulls, child_len)?;
+            let mut active_bm = Bitmap::new_zeroed(active_child_count);
+            let mut active_nulls = c_nulls
+                .as_ref()
+                .map(|_| Bitmap::new_ones(active_child_count));
+            let mut aidx = 0usize;
+            for row in mask.iter_ones() {
+                if row >= row_count {
+                    break;
+                }
+                for idx in offsets[row] as usize..offsets[row + 1] as usize {
+                    let is_valid = c_nulls.as_ref().is_none_or(|bm| bm.get(idx));
+                    if !is_valid {
+                        if let Some(abm) = active_nulls.as_mut() {
+                            let _ = abm.set(aidx, false);
+                        }
+                    } else if full_bm.get(idx) {
+                        let _ = active_bm.set(aidx, true);
+                    }
+                    aidx += 1;
+                }
+            }
+            Some(Column::Flat(FlatColumn::try_new(
+                FlatData::Bool(active_bm),
+                active_nulls,
+            )?))
+        }
+        _ => None,
+    };
+
+    let (final_offsets, child_col) = if let Some(c) = compact_child {
+        (out_offsets, c)
+    } else {
+        let full_child = decode_child_column(
+            child_body,
+            child_enc,
+            child_flags,
+            child_len,
+            child_min_inline_len,
+            child_min_inline,
+            inner,
+            dict.as_ref(),
+            remaining_depth - 1,
+        )?;
+        (offsets, full_child)
+    };
+
+    let list_flat = FlatColumn::try_new(
+        FlatData::List {
+            item_type: inner.clone(),
+            offsets: final_offsets,
+            values: Box::new(child_col),
+        },
+        row_nulls,
+    )?;
+    Ok(Column::Flat(list_flat))
+}
+
+fn decode_events_body_selected(
+    raw_body: &[u8],
+    row_count: usize,
+    block_flags: u8,
+    mask: &Bitmap,
+) -> Result<Column, StatamError> {
+    let (row_nulls, rest) = read_optional_nulls(raw_body, row_count, block_flags)?;
+    let (counts, mut rest) = read_packed_counts(rest, row_count)?;
+    let (offsets, event_count) = counts_to_offsets(&counts)?;
+
+    if event_count == 0 {
+        if !rest.is_empty() {
+            return Err(StatamError::Corrupt {
+                reason: "trailing bytes in empty EventsStruct",
+            });
+        }
+        let ev = EventsData::try_new(
+            offsets,
+            Vec::new(),
+            Utf8Data::empty(),
+            Utf8Data::empty(),
+            None,
+        )?;
+        return Ok(Column::Flat(FlatColumn::try_new(
+            FlatData::Events(Box::new(ev)),
+            row_nulls,
+        )?));
+    }
+
+    // 1. Parse times section header & slice.
+    if rest.len() < 5 {
+        return Err(StatamError::Corrupt {
+            reason: "truncated EventsStruct times header",
+        });
+    }
+    let t_enc = Encoding::from_u8(rest[0])?;
+    let t_len = u32::from_le_bytes([rest[1], rest[2], rest[3], rest[4]]) as usize;
+    rest = &rest[5..];
+    if rest.len() < t_len {
+        return Err(StatamError::Corrupt {
+            reason: "truncated EventsStruct times payload",
+        });
+    }
+    let t_body = &rest[..t_len];
+    rest = &rest[t_len..];
+
+    // 2. Parse names section header & slice.
+    if rest.is_empty() {
+        return Err(StatamError::Corrupt {
+            reason: "truncated EventsStruct names header",
+        });
+    }
+    let n_enc = Encoding::from_u8(rest[0])?;
+    rest = &rest[1..];
+    enum NamesSection<'a> {
+        Dict { dict: FileDict, codes_raw: &'a [u8] },
+        Varlen { enc: Encoding, body: &'a [u8] },
+    }
+    let names_sec = if n_enc == Encoding::Dict {
+        if rest.len() < 5 {
+            return Err(StatamError::Corrupt {
+                reason: "truncated EventsStruct names dict header",
+            });
+        }
+        let sorted = rest[0] != 0;
+        let d_len = u32::from_le_bytes([rest[1], rest[2], rest[3], rest[4]]) as usize;
+        rest = &rest[5..];
+        if d_len > MAX_DICT_BYTES || rest.len() < d_len + 4 {
+            return Err(StatamError::Corrupt {
+                reason: "truncated EventsStruct names dict bytes",
+            });
+        }
+        let dict = FileDict::decode(&rest[..d_len], sorted)?;
+        rest = &rest[d_len..];
+        let c_len = u32::from_le_bytes([rest[0], rest[1], rest[2], rest[3]]) as usize;
+        rest = &rest[4..];
+        if rest.len() < c_len {
+            return Err(StatamError::Corrupt {
+                reason: "truncated EventsStruct names codes",
+            });
+        }
+        let codes_raw = &rest[..c_len];
+        rest = &rest[c_len..];
+        NamesSection::Dict { dict, codes_raw }
+    } else {
+        if rest.len() < 4 {
+            return Err(StatamError::Corrupt {
+                reason: "truncated EventsStruct names length",
+            });
+        }
+        let n_len = u32::from_le_bytes([rest[0], rest[1], rest[2], rest[3]]) as usize;
+        rest = &rest[4..];
+        if rest.len() < n_len {
+            return Err(StatamError::Corrupt {
+                reason: "truncated EventsStruct names payload",
+            });
+        }
+        let n_body = &rest[..n_len];
+        rest = &rest[n_len..];
+        NamesSection::Varlen {
+            enc: n_enc,
+            body: n_body,
+        }
+    };
+
+    // 3. Parse attr_nulls & attributes header.
+    let (attr_nulls, rest) = read_flag_bitmap(rest, event_count)?;
+    if rest.len() < 5 {
+        return Err(StatamError::Corrupt {
+            reason: "truncated EventsStruct attrs header",
+        });
+    }
+    let a_enc = Encoding::from_u8(rest[0])?;
+    let a_len = u32::from_le_bytes([rest[1], rest[2], rest[3], rest[4]]) as usize;
+    let a_body = &rest[5..];
+    if a_body.len() != a_len {
+        return Err(StatamError::Corrupt {
+            reason: "EventsStruct attrs length mismatch",
+        });
+    }
+
+    if !matches!(
+        t_enc,
+        Encoding::Plain | Encoding::ForBitpack | Encoding::DeltaBitpack | Encoding::Rle
+    ) {
+        return Err(StatamError::Corrupt {
+            reason: "unsupported EventsStruct times encoding",
+        });
+    }
+    if !matches!(a_enc, Encoding::Fsst | Encoding::Plain) {
+        return Err(StatamError::Corrupt {
+            reason: "unsupported EventsStruct attrs encoding",
+        });
+    }
+    match &names_sec {
+        NamesSection::Dict { dict, .. } => {
+            if dict.values().data_type() != DataType::Utf8 {
+                return Err(StatamError::Corrupt {
+                    reason: "EventsStruct names dict is not Utf8",
+                });
+            }
+        }
+        NamesSection::Varlen { enc, .. } => {
+            if !matches!(enc, Encoding::Fsst | Encoding::Plain) {
+                return Err(StatamError::Corrupt {
+                    reason: "unsupported EventsStruct names encoding",
+                });
+            }
+        }
+    }
+
+    let (out_offsets, active_event_count) = build_active_nested_offsets(&offsets, row_count, mask);
+    if active_event_count == 0 {
+        let ev = EventsData::try_new(
+            out_offsets,
+            Vec::new(),
+            Utf8Data::empty(),
+            Utf8Data::empty(),
+            None,
+        )?;
+        return Ok(Column::Flat(FlatColumn::try_new(
+            FlatData::Events(Box::new(ev)),
+            row_nulls,
+        )?));
+    }
+
+    let active_times = if t_enc == Encoding::Plain {
+        let expected = event_count
+            .checked_mul(8)
+            .ok_or(StatamError::BoundsExceeded {
+                reason: "EventsStruct times overflow",
+            })?;
+        if expected > MAX_BLOCK_RAW_BYTES || t_body.len() != expected {
+            return Err(StatamError::Corrupt {
+                reason: "EventsStruct plain times byte length mismatch",
+            });
+        }
+        let mut out = Vec::with_capacity(active_event_count);
+        for row in mask.iter_ones() {
+            if row >= row_count {
+                break;
+            }
+            for idx in offsets[row] as usize..offsets[row + 1] as usize {
+                let s = idx * 8;
+                out.push(i64::from_le_bytes([
+                    t_body[s],
+                    t_body[s + 1],
+                    t_body[s + 2],
+                    t_body[s + 3],
+                    t_body[s + 4],
+                    t_body[s + 5],
+                    t_body[s + 6],
+                    t_body[s + 7],
+                ]));
+            }
+        }
+        out
+    } else {
+        let times_data = decode_inner_data(t_body, t_enc, event_count, &DataType::I64, None)?;
+        let FlatData::I64(all_times) = times_data else {
+            unreachable!();
+        };
+        let mut out = Vec::with_capacity(active_event_count);
+        for row in mask.iter_ones() {
+            if row >= row_count {
+                break;
+            }
+            out.extend_from_slice(&all_times[offsets[row] as usize..offsets[row + 1] as usize]);
+        }
+        out
+    };
+
+    let active_names = match names_sec {
+        NamesSection::Dict { dict, codes_raw } => {
+            let codes = decode_dict_codes_body(codes_raw, event_count, dict.len(), None)?;
+            let FlatData::Utf8(dict_u) = dict.values().data() else {
+                return Err(StatamError::Corrupt {
+                    reason: "EventsStruct names dict is not Utf8",
+                });
+            };
+            let mut n_offs = vec![0u32];
+            let mut n_bytes = Vec::new();
+            for row in mask.iter_ones() {
+                if row >= row_count {
+                    break;
+                }
+                let rs = offsets[row] as usize;
+                let re = offsets[row + 1] as usize;
+                for &code in &codes[rs..re] {
+                    let s = dict_u.get(code as usize).unwrap_or("");
+                    if n_bytes.len().saturating_add(s.len()) > MAX_BLOCK_RAW_BYTES {
+                        return Err(StatamError::BoundsExceeded {
+                            reason: "EventsStruct active names exceed MAX_BLOCK_RAW_BYTES",
+                        });
+                    }
+                    n_bytes.extend_from_slice(s.as_bytes());
+                    n_offs.push(n_bytes.len() as u32);
+                }
+            }
+            Utf8Data::try_new(n_offs, n_bytes)?
+        }
+        NamesSection::Varlen { enc, body } => {
+            let (no, nb, _) = decode_selected_utf8_or_binary(
+                body,
+                enc,
+                event_count,
+                &offsets,
+                row_count,
+                mask,
+                None,
+            )?;
+            Utf8Data::try_new(no, nb)?
+        }
+    };
+
+    let (ao, ab, _) = decode_selected_utf8_or_binary(
+        a_body,
+        a_enc,
+        event_count,
+        &offsets,
+        row_count,
+        mask,
+        None,
+    )?;
+    let active_attrs = Utf8Data::try_new(ao, ab)?;
+    let active_attr_nulls = if let Some(an) = attr_nulls {
+        let mut out_an = Bitmap::new_ones(active_event_count);
+        let mut any_null = false;
+        let mut aidx = 0usize;
+        for row in mask.iter_ones() {
+            if row >= row_count {
+                break;
+            }
+            for idx in offsets[row] as usize..offsets[row + 1] as usize {
+                if !an.get(idx) {
+                    let _ = out_an.set(aidx, false);
+                    any_null = true;
+                }
+                aidx += 1;
+            }
+        }
+        if any_null { Some(out_an) } else { None }
+    } else {
+        None
+    };
+
+    let ev = EventsData::try_new(
+        out_offsets,
+        active_times,
+        active_names,
+        active_attrs,
+        active_attr_nulls,
+    )?;
+    Ok(Column::Flat(FlatColumn::try_new(
+        FlatData::Events(Box::new(ev)),
+        row_nulls,
+    )?))
+}
+
+fn decode_links_body_selected(
+    raw_body: &[u8],
+    row_count: usize,
+    block_flags: u8,
+    mask: &Bitmap,
+) -> Result<Column, StatamError> {
+    let (row_nulls, rest) = read_optional_nulls(raw_body, row_count, block_flags)?;
+    let (counts, mut rest) = read_packed_counts(rest, row_count)?;
+    let (offsets, link_count) = counts_to_offsets(&counts)?;
+
+    if link_count == 0 {
+        if !rest.is_empty() {
+            return Err(StatamError::Corrupt {
+                reason: "trailing bytes in empty LinksStruct",
+            });
+        }
+        let lk = LinksData::try_new(offsets, Vec::new(), Vec::new(), Utf8Data::empty(), None)?;
+        return Ok(Column::Flat(FlatColumn::try_new(
+            FlatData::Links(Box::new(lk)),
+            row_nulls,
+        )?));
+    }
+
+    let tid_bytes = link_count
+        .checked_mul(16)
+        .ok_or(StatamError::BoundsExceeded {
+            reason: "LinksStruct trace_ids overflow",
+        })?;
+    let sid_bytes = link_count
+        .checked_mul(8)
+        .ok_or(StatamError::BoundsExceeded {
+            reason: "LinksStruct span_ids overflow",
+        })?;
+    let ids_total = tid_bytes
+        .checked_add(sid_bytes)
+        .ok_or(StatamError::BoundsExceeded {
+            reason: "LinksStruct ids total overflow",
+        })?;
+    if ids_total > MAX_BLOCK_RAW_BYTES || rest.len() < ids_total {
+        return Err(StatamError::Corrupt {
+            reason: "truncated LinksStruct ids",
+        });
+    }
+
+    let tids_slice = rest[..tid_bytes].as_chunks::<16>().0;
+    rest = &rest[tid_bytes..];
+    let sids_slice = rest[..sid_bytes].as_chunks::<8>().0;
+    rest = &rest[sid_bytes..];
+
+    let (attr_nulls, rest) = read_flag_bitmap(rest, link_count)?;
+    if rest.len() < 5 {
+        return Err(StatamError::Corrupt {
+            reason: "truncated LinksStruct attrs header",
+        });
+    }
+    let a_enc = Encoding::from_u8(rest[0])?;
+    let a_len = u32::from_le_bytes([rest[1], rest[2], rest[3], rest[4]]) as usize;
+    let a_body = &rest[5..];
+    if a_body.len() != a_len {
+        return Err(StatamError::Corrupt {
+            reason: "LinksStruct attrs length mismatch",
+        });
+    }
+
+    let (out_offsets, active_link_count) = build_active_nested_offsets(&offsets, row_count, mask);
+    if active_link_count == 0 {
+        if !matches!(a_enc, Encoding::Fsst | Encoding::Plain) {
+            return Err(StatamError::Corrupt {
+                reason: "unsupported LinksStruct attrs encoding",
+            });
+        }
+        let lk = LinksData::try_new(out_offsets, Vec::new(), Vec::new(), Utf8Data::empty(), None)?;
+        return Ok(Column::Flat(FlatColumn::try_new(
+            FlatData::Links(Box::new(lk)),
+            row_nulls,
+        )?));
+    }
+
+    let mut active_tids = Vec::with_capacity(active_link_count);
+    let mut active_sids = Vec::with_capacity(active_link_count);
+    for row in mask.iter_ones() {
+        if row >= row_count {
+            break;
+        }
+        let rs = offsets[row] as usize;
+        let re = offsets[row + 1] as usize;
+        active_tids.extend_from_slice(&tids_slice[rs..re]);
+        active_sids.extend_from_slice(&sids_slice[rs..re]);
+    }
+
+    let (ao, ab, _) =
+        decode_selected_utf8_or_binary(a_body, a_enc, link_count, &offsets, row_count, mask, None)?;
+    let active_attrs = Utf8Data::try_new(ao, ab)?;
+    let active_attr_nulls = if let Some(an) = attr_nulls {
+        let mut out_an = Bitmap::new_ones(active_link_count);
+        let mut any_null = false;
+        let mut aidx = 0usize;
+        for row in mask.iter_ones() {
+            if row >= row_count {
+                break;
+            }
+            for idx in offsets[row] as usize..offsets[row + 1] as usize {
+                if !an.get(idx) {
+                    let _ = out_an.set(aidx, false);
+                    any_null = true;
+                }
+                aidx += 1;
+            }
+        }
+        if any_null { Some(out_an) } else { None }
+    } else {
+        None
+    };
+
+    let lk = LinksData::try_new(
+        out_offsets,
+        active_tids,
+        active_sids,
+        active_attrs,
+        active_attr_nulls,
+    )?;
+    Ok(Column::Flat(FlatColumn::try_new(
+        FlatData::Links(Box::new(lk)),
+        row_nulls,
+    )?))
 }
 
 /// Decodes a `ListEncoded`, `EventsStruct`, `LinksStruct`, or `ShreddedMap` mini-block.
@@ -2090,5 +3630,82 @@ fn decode_utf8_fsst_or_plain(src: &[u8], row_count: usize) -> Result<Utf8Data, S
         _ => Err(StatamError::Corrupt {
             reason: "unsupported nested utf8 encoding",
         }),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn selected_nested_zero_active_validates_headers() {
+        let mut mask = Bitmap::new_zeroed(2);
+        let _ = mask.set(1, true);
+
+        // 1. ListEncoded with 0 active children (row 0 has items, row 1 is empty, mask selects row 1).
+        // row_nulls=0, count_bw=1, count_bytes=1 ([0x01] -> counts [1, 0]), child_enc=Dict(6), ...
+        let mut crafted = vec![0u8]; // row_nulls = 0
+        crafted.push(1); // bw = 1
+        crafted.push(0x01); // row 0 count=1, row 1 count=0
+        // 28-byte child header:
+        crafted.push(Encoding::Dict as u8); // child_enc = Dict
+        crafted.push(0); // child_flags
+        crafted.extend_from_slice(&1u32.to_le_bytes()); // child_len = 1
+        crafted.extend_from_slice(&0u32.to_le_bytes()); // child_null_count
+        crafted.push(0); // child_min_inline_len
+        crafted.extend_from_slice(&[0u8; 16]); // child_min_inline
+        crafted.push(0); // has_dict = 0 (missing inline dict!)
+        crafted.extend_from_slice(&0u32.to_le_bytes()); // child_body_len = 0
+        assert!(matches!(
+            decode_list_body_selected(&crafted, 2, 0, &DataType::Utf8, 4, &mask),
+            Err(StatamError::Corrupt { .. })
+        ));
+
+        // Incompatible child_enc (ForBitpack for Utf8) with 0 active children.
+        crafted[3] = Encoding::ForBitpack as u8;
+        assert!(matches!(
+            decode_list_body_selected(&crafted, 2, 0, &DataType::Utf8, 4, &mask),
+            Err(StatamError::Corrupt { .. })
+        ));
+
+        // 2. EventsStruct with 0 active events (row 0 has 1 event, row 1 has 0 events, mask selects row 1).
+        let mut bad_t = vec![0u8, 1u8, 0x01]; // row_nulls=0, bw=1, counts=[1,0]
+        bad_t.push(Encoding::Fsst as u8); // invalid t_enc!
+        bad_t.extend_from_slice(&8u32.to_le_bytes());
+        bad_t.extend_from_slice(&0i64.to_le_bytes());
+        bad_t.push(Encoding::Plain as u8); // n_enc
+        bad_t.extend_from_slice(&0u32.to_le_bytes());
+        bad_t.push(0); // attr_nulls flag = 0
+        bad_t.push(Encoding::Plain as u8); // a_enc
+        bad_t.extend_from_slice(&0u32.to_le_bytes());
+        assert!(matches!(
+            decode_events_body_selected(&bad_t, 2, 0, &mask),
+            Err(StatamError::Corrupt { .. })
+        ));
+
+        // Non-Utf8 NamesSection::Dict with 0 active events:
+        let fixed8_dict = FileDict::from_flat(
+            FlatColumn::try_new(FlatData::FixedBytes8(vec![[42u8; 8]]), None).unwrap(),
+            false,
+        )
+        .unwrap()
+        .encode(Codec::None, 0)
+        .unwrap();
+        let mut bad_dict = vec![0u8, 1u8, 0x01];
+        bad_dict.push(Encoding::Plain as u8);
+        bad_dict.extend_from_slice(&8u32.to_le_bytes());
+        bad_dict.extend_from_slice(&0i64.to_le_bytes());
+        bad_dict.push(Encoding::Dict as u8);
+        bad_dict.push(0); // sorted=false
+        bad_dict.extend_from_slice(&(fixed8_dict.len() as u32).to_le_bytes());
+        bad_dict.extend_from_slice(&fixed8_dict);
+        bad_dict.extend_from_slice(&0u32.to_le_bytes()); // c_len = 0
+        bad_dict.push(0); // attr_nulls flag = 0
+        bad_dict.push(Encoding::Plain as u8);
+        bad_dict.extend_from_slice(&0u32.to_le_bytes());
+        assert!(matches!(
+            decode_events_body_selected(&bad_dict, 2, 0, &mask),
+            Err(StatamError::Corrupt { .. })
+        ));
     }
 }

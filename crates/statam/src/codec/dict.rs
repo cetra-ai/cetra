@@ -921,7 +921,7 @@ pub(crate) fn check_varlen_take_bytes(
     Ok(())
 }
 
-fn materialize_from_dict(
+pub(crate) fn materialize_from_dict(
     dict_values: &FlatColumn,
     codes: &[u32],
     nulls: Option<Bitmap>,

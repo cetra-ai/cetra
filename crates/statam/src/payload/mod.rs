@@ -541,6 +541,347 @@ pub fn decode_payload_refs(
     Ok(out)
 }
 
+enum ScanHistoryEntry<'a> {
+    Inline,
+    Keyframe {
+        raw_pairs: &'a [u8],
+        n_chunks: usize,
+    },
+    Delta {
+        chunks: Vec<(u16, u32)>,
+        depth: u8,
+    },
+    DeltaAtMaxDepth,
+}
+
+#[inline]
+fn validate_pack_chunk(
+    pack_idx: u16,
+    chunk_id: u32,
+    pack_chunk_counts: &[usize],
+) -> Result<(), StatamError> {
+    let max_chunks =
+        pack_chunk_counts
+            .get(pack_idx as usize)
+            .copied()
+            .ok_or(StatamError::Corrupt {
+                reason: "payload ref pack_idx out of bounds",
+            })?;
+    if (chunk_id as usize) >= max_chunks {
+        return Err(StatamError::Corrupt {
+            reason: "payload ref chunk_id out of pack bounds",
+        });
+    }
+    Ok(())
+}
+
+#[inline]
+fn push_scan_history<'a>(
+    history: &mut VecDeque<ScanHistoryEntry<'a>>,
+    entry: ScanHistoryEntry<'a>,
+    recycle_vecs: &mut Vec<Vec<(u16, u32)>>,
+) {
+    if history.len() == MAX_TAIL_SHARE_BACK
+        && let Some(ScanHistoryEntry::Delta { mut chunks, .. }) = history.pop_front()
+    {
+        chunks.clear();
+        recycle_vecs.push(chunks);
+    }
+    history.push_back(entry);
+}
+
+#[inline]
+fn read_raw_pair(raw_pairs: &[u8], idx: usize) -> (u16, u32) {
+    let off = idx * 6;
+    let p = u16::from_le_bytes([raw_pairs[off], raw_pairs[off + 1]]);
+    let c = u32::from_le_bytes([
+        raw_pairs[off + 2],
+        raw_pairs[off + 3],
+        raw_pairs[off + 4],
+        raw_pairs[off + 5],
+    ]);
+    (p, c)
+}
+
+/// Scans a `PayloadRefs` wire block directly when all external packs short-circuit,
+/// validating all wire bounds and chunk references without allocating `PayloadRefRow` vectors.
+pub(crate) fn scan_payload_refs_inline_substring(
+    src: &[u8],
+    row_count: usize,
+    active_mask: &Bitmap,
+    pack_chunk_counts: &[usize],
+    mut match_inline: impl FnMut(&[u8]) -> bool,
+) -> Result<Bitmap, StatamError> {
+    if row_count as u64 > MAX_ROWS_PER_FILE || row_count > MAX_BLOCK_RAW_BYTES / 32 {
+        return Err(StatamError::BoundsExceeded {
+            reason: "payload refs row_count exceeds safe block limit",
+        });
+    }
+
+    let mut cur = RefCursor::new(src);
+    let has_nulls = cur.read_u8()?;
+    let validity = match has_nulls {
+        0 => None,
+        1 => {
+            let bm_bytes = row_count.div_ceil(8);
+            if bm_bytes > cur.remaining() {
+                return Err(StatamError::Corrupt {
+                    reason: "truncated payload refs null bitmap",
+                });
+            }
+            let bm_slice = cur.read_exact(bm_bytes)?;
+            Some(Bitmap::from_bytes(bm_slice, row_count)?)
+        }
+        _ => {
+            return Err(StatamError::Corrupt {
+                reason: "invalid payload refs has_nulls flag",
+            });
+        }
+    };
+
+    let non_null_count = match &validity {
+        Some(bm) => bm.count_ones(),
+        None => row_count,
+    };
+    if non_null_count > cur.remaining() {
+        return Err(StatamError::Corrupt {
+            reason: "truncated payload refs row stream",
+        });
+    }
+
+    let mut results = Bitmap::new_zeroed(row_count);
+    let mut history: VecDeque<ScanHistoryEntry<'_>> = VecDeque::with_capacity(MAX_TAIL_SHARE_BACK);
+    let mut recycle_vecs: Vec<Vec<(u16, u32)>> = Vec::new();
+    let mut total_decoded_bytes: usize = 0;
+
+    for row_idx in 0..row_count {
+        if validity.as_ref().is_some_and(|bm| !bm.get(row_idx)) {
+            continue;
+        }
+
+        let tag = cur.read_u8()?;
+        match tag {
+            TAG_INLINE => {
+                let len = cur.read_u16()? as usize;
+                if len > cur.remaining() {
+                    return Err(StatamError::Corrupt {
+                        reason: "truncated inline payload bytes",
+                    });
+                }
+                total_decoded_bytes =
+                    add_budget(total_decoded_bytes, len, MAX_BATCH_DECODED_BYTES)?;
+                let bytes = cur.read_exact(len)?;
+                if active_mask.get(row_idx) && match_inline(bytes) {
+                    let _ = results.set(row_idx, true);
+                }
+                push_scan_history(&mut history, ScanHistoryEntry::Inline, &mut recycle_vecs);
+            }
+            TAG_KEYFRAME => {
+                let n_chunks = cur.read_u16()? as usize;
+                if n_chunks > MAX_CHUNKS_PER_ROW {
+                    return Err(StatamError::BoundsExceeded {
+                        reason: "keyframe chunk count exceeds MAX_CHUNKS_PER_ROW",
+                    });
+                }
+                let wire_bytes = n_chunks.checked_mul(6).ok_or(StatamError::BoundsExceeded {
+                    reason: "keyframe wire byte size overflow",
+                })?;
+                if wire_bytes > cur.remaining() {
+                    return Err(StatamError::Corrupt {
+                        reason: "truncated keyframe chunk refs",
+                    });
+                }
+                let mem_bytes = n_chunks.checked_mul(size_of::<(u16, u32)>()).ok_or(
+                    StatamError::BoundsExceeded {
+                        reason: "keyframe memory size overflow",
+                    },
+                )?;
+                total_decoded_bytes =
+                    add_budget(total_decoded_bytes, mem_bytes, MAX_BATCH_DECODED_BYTES)?;
+                let raw_pairs = cur.read_exact(wire_bytes)?;
+                for pair in raw_pairs.as_chunks::<6>().0 {
+                    let pack_idx = u16::from_le_bytes([pair[0], pair[1]]);
+                    let chunk_id = u32::from_le_bytes([pair[2], pair[3], pair[4], pair[5]]);
+                    validate_pack_chunk(pack_idx, chunk_id, pack_chunk_counts)?;
+                }
+                push_scan_history(
+                    &mut history,
+                    ScanHistoryEntry::Keyframe {
+                        raw_pairs,
+                        n_chunks,
+                    },
+                    &mut recycle_vecs,
+                );
+            }
+            TAG_DELTA => {
+                let back = cur.read_u8()? as usize;
+                if back == 0 || back > MAX_TAIL_SHARE_BACK {
+                    return Err(StatamError::Corrupt {
+                        reason: "payload ref delta back offset outside 1..=32",
+                    });
+                }
+                if back > history.len() {
+                    return Err(StatamError::Corrupt {
+                        reason: "payload ref delta back offset precedes block start",
+                    });
+                }
+
+                let (parent_len, parent_depth) = match &history[history.len() - back] {
+                    ScanHistoryEntry::Inline => {
+                        return Err(StatamError::Corrupt {
+                            reason: "payload ref delta references inline row",
+                        });
+                    }
+                    ScanHistoryEntry::Keyframe { n_chunks, .. } => (*n_chunks, 0u8),
+                    ScanHistoryEntry::Delta { chunks, depth } => (chunks.len(), *depth),
+                    ScanHistoryEntry::DeltaAtMaxDepth => {
+                        return Err(StatamError::BoundsExceeded {
+                            reason: "payload ref chain depth exceeds MAX_REF_CHAIN_DEPTH",
+                        });
+                    }
+                };
+                if (parent_depth as usize) >= MAX_REF_CHAIN_DEPTH {
+                    return Err(StatamError::BoundsExceeded {
+                        reason: "payload ref chain depth exceeds MAX_REF_CHAIN_DEPTH",
+                    });
+                }
+
+                let keep_prefix = cur.read_u16()? as usize;
+                if keep_prefix > parent_len {
+                    return Err(StatamError::Corrupt {
+                        reason: "payload ref keep_prefix exceeds parent chunk count",
+                    });
+                }
+                let n_new = cur.read_u16()? as usize;
+                let total_chunks =
+                    keep_prefix
+                        .checked_add(n_new)
+                        .ok_or(StatamError::BoundsExceeded {
+                            reason: "payload ref total chunk count overflow",
+                        })?;
+                if total_chunks > MAX_CHUNKS_PER_ROW {
+                    return Err(StatamError::BoundsExceeded {
+                        reason: "row chunks exceed MAX_CHUNKS_PER_ROW",
+                    });
+                }
+                let min_wire = n_new.checked_mul(2).ok_or(StatamError::BoundsExceeded {
+                    reason: "payload ref delta wire size overflow",
+                })?;
+                if min_wire > cur.remaining() {
+                    return Err(StatamError::Corrupt {
+                        reason: "truncated payload ref delta entries",
+                    });
+                }
+                let mem_bytes = total_chunks.checked_mul(size_of::<(u16, u32)>()).ok_or(
+                    StatamError::BoundsExceeded {
+                        reason: "payload ref delta memory size overflow",
+                    },
+                )?;
+                total_decoded_bytes =
+                    add_budget(total_decoded_bytes, mem_bytes, MAX_BATCH_DECODED_BYTES)?;
+
+                let new_depth = parent_depth + 1;
+                let mut prev = if keep_prefix > 0 {
+                    match &history[history.len() - back] {
+                        ScanHistoryEntry::Keyframe { raw_pairs, .. } => {
+                            read_raw_pair(raw_pairs, keep_prefix - 1)
+                        }
+                        ScanHistoryEntry::Delta { chunks, .. } => chunks[keep_prefix - 1],
+                        ScanHistoryEntry::Inline | ScanHistoryEntry::DeltaAtMaxDepth => {
+                            unreachable!()
+                        }
+                    }
+                } else {
+                    (0u16, 0u32)
+                };
+
+                if (new_depth as usize) >= MAX_REF_CHAIN_DEPTH {
+                    for _ in 0..n_new {
+                        let p_delta = zigzag_decode_i64(cur.read_varint_u64()?);
+                        let c_delta = zigzag_decode_i64(cur.read_varint_u64()?);
+                        let next_pack = i64::from(prev.0)
+                            .checked_add(p_delta)
+                            .and_then(|v| u16::try_from(v).ok())
+                            .ok_or(StatamError::Corrupt {
+                                reason: "payload ref pack_idx delta out of u16 range",
+                            })?;
+                        let next_chunk = i64::from(prev.1)
+                            .checked_add(c_delta)
+                            .and_then(|v| u32::try_from(v).ok())
+                            .ok_or(StatamError::Corrupt {
+                                reason: "payload ref chunk_id delta out of u32 range",
+                            })?;
+                        validate_pack_chunk(next_pack, next_chunk, pack_chunk_counts)?;
+                        prev = (next_pack, next_chunk);
+                    }
+                    push_scan_history(
+                        &mut history,
+                        ScanHistoryEntry::DeltaAtMaxDepth,
+                        &mut recycle_vecs,
+                    );
+                } else {
+                    let mut refs = recycle_vecs.pop().unwrap_or_default();
+                    refs.clear();
+                    refs.reserve(total_chunks);
+                    match &history[history.len() - back] {
+                        ScanHistoryEntry::Keyframe { raw_pairs, .. } => {
+                            for idx in 0..keep_prefix {
+                                refs.push(read_raw_pair(raw_pairs, idx));
+                            }
+                        }
+                        ScanHistoryEntry::Delta { chunks, .. } => {
+                            refs.extend_from_slice(&chunks[..keep_prefix]);
+                        }
+                        ScanHistoryEntry::Inline | ScanHistoryEntry::DeltaAtMaxDepth => {
+                            unreachable!()
+                        }
+                    }
+                    for _ in 0..n_new {
+                        let p_delta = zigzag_decode_i64(cur.read_varint_u64()?);
+                        let c_delta = zigzag_decode_i64(cur.read_varint_u64()?);
+                        let next_pack = i64::from(prev.0)
+                            .checked_add(p_delta)
+                            .and_then(|v| u16::try_from(v).ok())
+                            .ok_or(StatamError::Corrupt {
+                                reason: "payload ref pack_idx delta out of u16 range",
+                            })?;
+                        let next_chunk = i64::from(prev.1)
+                            .checked_add(c_delta)
+                            .and_then(|v| u32::try_from(v).ok())
+                            .ok_or(StatamError::Corrupt {
+                                reason: "payload ref chunk_id delta out of u32 range",
+                            })?;
+                        validate_pack_chunk(next_pack, next_chunk, pack_chunk_counts)?;
+                        prev = (next_pack, next_chunk);
+                        refs.push(prev);
+                    }
+                    push_scan_history(
+                        &mut history,
+                        ScanHistoryEntry::Delta {
+                            chunks: refs,
+                            depth: new_depth,
+                        },
+                        &mut recycle_vecs,
+                    );
+                }
+            }
+            _ => {
+                return Err(StatamError::Corrupt {
+                    reason: "unknown payload ref row tag",
+                });
+            }
+        }
+    }
+
+    if !cur.is_eof() {
+        return Err(StatamError::Corrupt {
+            reason: "trailing bytes after payload refs block",
+        });
+    }
+
+    Ok(results)
+}
+
 fn common_prefix_len(a: &[(u16, u32)], b: &[(u16, u32)]) -> usize {
     a.iter().zip(b.iter()).take_while(|(x, y)| x == y).count()
 }

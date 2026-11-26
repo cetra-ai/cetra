@@ -1287,7 +1287,7 @@ pub(crate) fn encode_plain_utf8(u: &Utf8Data) -> Vec<u8> {
 }
 
 /// Decodes a narrow scalar mini-block, decoding only `mask`-selected rows for
-/// encodings that support sparse selective decode (`Fsst`).
+/// encodings that support sparse selective decode (`Fsst`, and sparse `Plain` varlen/map).
 pub(crate) fn decode_narrow_column_selected(
     raw_body: &[u8],
     entry: &BlockEntry,
@@ -1299,19 +1299,23 @@ pub(crate) fn decode_narrow_column_selected(
             reason: "selection mask length mismatch",
         });
     }
+    if entry.encoding == Encoding::ConstNull || entry.encoding == Encoding::Const {
+        return decode_const_block(entry, dt);
+    }
+    let row_count = entry.row_count as usize;
+    if row_count == 0 {
+        if !raw_body.is_empty() {
+            return Err(StatamError::Corrupt {
+                reason: "trailing bytes in empty narrow block",
+            });
+        }
+        return Ok(Column::Flat(FlatColumn::empty(dt)));
+    }
+
     if entry.encoding == Encoding::Fsst
         && matches!(dt, DataType::Utf8 | DataType::Binary)
         && !mask.all_ones()
     {
-        let row_count = entry.row_count as usize;
-        if row_count == 0 {
-            if !raw_body.is_empty() {
-                return Err(StatamError::Corrupt {
-                    reason: "trailing bytes in empty narrow block",
-                });
-            }
-            return Ok(Column::Flat(FlatColumn::empty(dt)));
-        }
         let (nulls, body) = read_optional_nulls(raw_body, row_count, entry.block_flags)?;
         let (data, out_nulls) = match dt {
             DataType::Utf8 => {
@@ -1326,6 +1330,39 @@ pub(crate) fn decode_narrow_column_selected(
         };
         return Ok(Column::Flat(FlatColumn::try_new(data, out_nulls)?));
     }
+
+    if entry.encoding == Encoding::Plain
+        && !mask.all_ones()
+        && mask.count_ones().saturating_mul(16) < row_count
+    {
+        match dt {
+            DataType::Utf8 => {
+                let (nulls, body) = read_optional_nulls(raw_body, row_count, entry.block_flags)?;
+                let (offsets, data_bytes) =
+                    decode_plain_varlen_selected(body, row_count, mask, nulls.as_ref())?;
+                return Ok(Column::Flat(FlatColumn::try_new(
+                    FlatData::Utf8(Utf8Data::try_new(offsets, data_bytes)?),
+                    nulls,
+                )?));
+            }
+            DataType::Binary => {
+                let (nulls, body) = read_optional_nulls(raw_body, row_count, entry.block_flags)?;
+                let (offsets, data_bytes) =
+                    decode_plain_varlen_selected(body, row_count, mask, nulls.as_ref())?;
+                return Ok(Column::Flat(FlatColumn::try_new(
+                    FlatData::Binary(BinaryData::try_new(offsets, data_bytes)?),
+                    nulls,
+                )?));
+            }
+            DataType::MapUtf8 => {
+                let (nulls, body) = read_optional_nulls(raw_body, row_count, entry.block_flags)?;
+                let data = decode_plain_map_selected(body, row_count, mask)?;
+                return Ok(Column::Flat(FlatColumn::try_new(data, nulls)?));
+            }
+            _ => {}
+        }
+    }
+
     decode_narrow_column(raw_body, entry, dt)
 }
 
@@ -1817,6 +1854,277 @@ fn decode_plain_map(body: &[u8], row_count: usize) -> Result<FlatData, StatamErr
     let vals = Utf8Data::try_new(val_offsets, val_bytes)?;
 
     let map = MapData::try_new(offsets, keys, vals, val_nulls)?;
+    Ok(FlatData::MapUtf8(Box::new(map)))
+}
+
+pub(crate) fn validate_plain_offsets_raw(
+    offsets_bytes: &[u8],
+    expected_last: usize,
+) -> Result<(), StatamError> {
+    let chunks = offsets_bytes.as_chunks::<4>().0;
+    let mut prev = 0u32;
+    for (idx, &chunk) in chunks.iter().enumerate() {
+        let v = u32::from_le_bytes(chunk);
+        if (idx == 0 && v != 0) || v < prev {
+            return Err(StatamError::Corrupt {
+                reason: "non-monotonic plain varlen offsets",
+            });
+        }
+        prev = v;
+    }
+    if prev as usize != expected_last {
+        return Err(StatamError::Corrupt {
+            reason: "plain varlen last offset does not match data length",
+        });
+    }
+    Ok(())
+}
+
+#[inline]
+pub(crate) fn read_u32_le_at(raw: &[u8], idx: usize) -> usize {
+    let off = idx * 4;
+    u32::from_le_bytes([raw[off], raw[off + 1], raw[off + 2], raw[off + 3]]) as usize
+}
+
+pub(crate) fn decode_plain_varlen_selected(
+    body: &[u8],
+    row_count: usize,
+    mask: &Bitmap,
+    nulls: Option<&Bitmap>,
+) -> Result<(Vec<u32>, Vec<u8>), StatamError> {
+    if mask.len() != row_count {
+        return Err(StatamError::Corrupt {
+            reason: "selection mask length mismatch",
+        });
+    }
+    if nulls.is_some_and(|bm| bm.len() != row_count) {
+        return Err(StatamError::Corrupt {
+            reason: "null bitmap length mismatch",
+        });
+    }
+    let offsets_count = row_count
+        .checked_add(1)
+        .ok_or(StatamError::BoundsExceeded {
+            reason: "plain varlen offsets count overflow",
+        })?;
+    let offsets_bytes = check_mul(offsets_count, 4, "plain varlen offsets size overflow")?;
+    if body.len() < offsets_bytes {
+        return Err(StatamError::Corrupt {
+            reason: "truncated plain varlen offsets",
+        });
+    }
+    let data_len = body.len() - offsets_bytes;
+    if data_len > MAX_BLOCK_RAW_BYTES {
+        return Err(StatamError::BoundsExceeded {
+            reason: "plain varlen data exceeds MAX_BLOCK_RAW_BYTES",
+        });
+    }
+    let off_raw = &body[..offsets_bytes];
+    validate_plain_offsets_raw(off_raw, data_len)?;
+    let data = &body[offsets_bytes..];
+
+    let mut out_offsets = Vec::with_capacity(row_count + 1);
+    out_offsets.push(0u32);
+    let mut out_bytes = Vec::new();
+    for row in mask.iter_ones() {
+        if row >= row_count {
+            break;
+        }
+        let cur_off = out_bytes.len() as u32;
+        if out_offsets.len() <= row {
+            out_offsets.resize(row + 1, cur_off);
+        }
+        if nulls.is_none_or(|bm| bm.get(row)) {
+            let start = read_u32_le_at(off_raw, row);
+            let end = read_u32_le_at(off_raw, row + 1);
+            out_bytes.extend_from_slice(&data[start..end]);
+        }
+        out_offsets.push(out_bytes.len() as u32);
+    }
+    let tail_off = out_bytes.len() as u32;
+    if out_offsets.len() < row_count + 1 {
+        out_offsets.resize(row_count + 1, tail_off);
+    }
+    Ok((out_offsets, out_bytes))
+}
+
+pub(crate) fn decode_plain_map_selected(
+    body: &[u8],
+    row_count: usize,
+    mask: &Bitmap,
+) -> Result<FlatData, StatamError> {
+    if mask.len() != row_count {
+        return Err(StatamError::Corrupt {
+            reason: "selection mask length mismatch",
+        });
+    }
+    let offsets_count = row_count
+        .checked_add(1)
+        .ok_or(StatamError::BoundsExceeded {
+            reason: "plain map offsets count overflow",
+        })?;
+    let offsets_bytes = check_mul(offsets_count, 4, "plain map offsets size overflow")?;
+    if body.len() < offsets_bytes {
+        return Err(StatamError::Corrupt {
+            reason: "truncated plain map offsets",
+        });
+    }
+    let row_off_raw = &body[..offsets_bytes];
+    let mut prev = 0u32;
+    for (idx, &chunk) in row_off_raw.as_chunks::<4>().0.iter().enumerate() {
+        let v = u32::from_le_bytes(chunk);
+        if (idx == 0 && v != 0) || v < prev {
+            return Err(StatamError::Corrupt {
+                reason: "non-monotonic plain map offsets",
+            });
+        }
+        prev = v;
+    }
+    let entry_count = prev as usize;
+    if entry_count > MAX_BLOCK_RAW_BYTES {
+        return Err(StatamError::BoundsExceeded {
+            reason: "plain map entry_count exceeds MAX_BLOCK_RAW_BYTES",
+        });
+    }
+    let rest = &body[offsets_bytes..];
+    if entry_count == 0 {
+        if !rest.is_empty() {
+            return Err(StatamError::Corrupt {
+                reason: "trailing bytes in empty plain map",
+            });
+        }
+        let map = MapData::try_new(
+            vec![0u32; row_count + 1],
+            Utf8Data::empty(),
+            Utf8Data::empty(),
+            None,
+        )?;
+        return Ok(FlatData::MapUtf8(Box::new(map)));
+    }
+
+    let Some(&has_vn) = rest.first() else {
+        return Err(StatamError::Corrupt {
+            reason: "truncated plain map value_nulls flag",
+        });
+    };
+    let rest = &rest[1..];
+    let (val_nulls, rest) = match has_vn {
+        0 => (None, rest),
+        1 => {
+            let vn_bytes = entry_count.div_ceil(8);
+            if rest.len() < vn_bytes {
+                return Err(StatamError::Corrupt {
+                    reason: "truncated plain map value_nulls bitmap",
+                });
+            }
+            let bm = Bitmap::from_bytes(&rest[..vn_bytes], entry_count)?;
+            (Some(bm), &rest[vn_bytes..])
+        }
+        _ => {
+            return Err(StatamError::Corrupt {
+                reason: "invalid plain map value_nulls flag",
+            });
+        }
+    };
+
+    if rest.len() < 4 {
+        return Err(StatamError::Corrupt {
+            reason: "truncated plain map keys_bytes_len",
+        });
+    }
+    let keys_bytes_len = u32::from_le_bytes([rest[0], rest[1], rest[2], rest[3]]) as usize;
+    if keys_bytes_len > MAX_BLOCK_RAW_BYTES {
+        return Err(StatamError::BoundsExceeded {
+            reason: "plain map keys_bytes_len exceeds MAX_BLOCK_RAW_BYTES",
+        });
+    }
+    let rest = &rest[4..];
+
+    let kv_offsets_count = entry_count
+        .checked_add(1)
+        .ok_or(StatamError::BoundsExceeded {
+            reason: "plain map kv offsets overflow",
+        })?;
+    let kv_offsets_bytes = check_mul(kv_offsets_count, 4, "plain map kv offsets size overflow")?;
+    let keys_total =
+        kv_offsets_bytes
+            .checked_add(keys_bytes_len)
+            .ok_or(StatamError::BoundsExceeded {
+                reason: "plain map keys section overflow",
+            })?;
+    let min_needed =
+        keys_total
+            .checked_add(kv_offsets_bytes)
+            .ok_or(StatamError::BoundsExceeded {
+                reason: "plain map total payload overflow",
+            })?;
+    if rest.len() < min_needed {
+        return Err(StatamError::Corrupt {
+            reason: "truncated plain map keys/values payload",
+        });
+    }
+
+    let key_off_raw = &rest[..kv_offsets_bytes];
+    validate_plain_offsets_raw(key_off_raw, keys_bytes_len)?;
+    let key_blob = &rest[kv_offsets_bytes..keys_total];
+
+    let v_rest = &rest[keys_total..];
+    let val_bytes_len = v_rest.len() - kv_offsets_bytes;
+    if val_bytes_len > MAX_BLOCK_RAW_BYTES {
+        return Err(StatamError::BoundsExceeded {
+            reason: "plain map values exceed MAX_BLOCK_RAW_BYTES",
+        });
+    }
+    let val_off_raw = &v_rest[..kv_offsets_bytes];
+    validate_plain_offsets_raw(val_off_raw, val_bytes_len)?;
+    let val_blob = &v_rest[kv_offsets_bytes..];
+
+    let mut out_offsets = Vec::with_capacity(row_count + 1);
+    out_offsets.push(0u32);
+    let mut out_key_offsets = vec![0u32];
+    let mut out_key_bytes = Vec::new();
+    let mut out_val_offsets = vec![0u32];
+    let mut out_val_bytes = Vec::new();
+    let mut out_val_valid = Vec::new();
+
+    for row in mask.iter_ones() {
+        if row >= row_count {
+            break;
+        }
+        let cur_entries = out_val_valid.len() as u32;
+        if out_offsets.len() <= row {
+            out_offsets.resize(row + 1, cur_entries);
+        }
+        let rs = read_u32_le_at(row_off_raw, row);
+        let re = read_u32_le_at(row_off_raw, row + 1);
+        for idx in rs..re {
+            let ks = read_u32_le_at(key_off_raw, idx);
+            let ke = read_u32_le_at(key_off_raw, idx + 1);
+            out_key_bytes.extend_from_slice(&key_blob[ks..ke]);
+            out_key_offsets.push(out_key_bytes.len() as u32);
+
+            let vs = read_u32_le_at(val_off_raw, idx);
+            let ve = read_u32_le_at(val_off_raw, idx + 1);
+            out_val_bytes.extend_from_slice(&val_blob[vs..ve]);
+            out_val_offsets.push(out_val_bytes.len() as u32);
+
+            out_val_valid.push(val_nulls.as_ref().is_none_or(|bm| bm.get(idx)));
+        }
+        out_offsets.push(out_val_valid.len() as u32);
+    }
+    let tail_entries = out_val_valid.len() as u32;
+    if out_offsets.len() < row_count + 1 {
+        out_offsets.resize(row_count + 1, tail_entries);
+    }
+
+    let keys = Utf8Data::try_new(out_key_offsets, out_key_bytes)?;
+    let vals = Utf8Data::try_new(out_val_offsets, out_val_bytes)?;
+    let out_val_nulls = if out_val_valid.iter().all(|&b| b) {
+        None
+    } else {
+        Some(Bitmap::from_bools(&out_val_valid))
+    };
+    let map = MapData::try_new(out_offsets, keys, vals, out_val_nulls)?;
     Ok(FlatData::MapUtf8(Box::new(map)))
 }
 

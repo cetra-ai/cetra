@@ -160,6 +160,8 @@ pub const MAX_TOTAL_BLOCKS: usize = 4_194_304;
 pub const MAX_BLOCK_RAW_BYTES: usize = 64 * 1024 * 1024;
 /// Maximum uncompressed pack frame size (16 MiB).
 pub const MAX_FRAME_RAW_BYTES: usize = 16 * 1024 * 1024;
+/// Maximum raw `.stpk` trained Zstd dictionary size (256 KiB).
+pub const MAX_PACK_DICT_BYTES: usize = 256 * 1024;
 /// Maximum decompression expansion ratio before rejecting as a zip bomb.
 pub const MAX_DECOMPRESS_RATIO: u64 = 1_024;
 /// Fixed slack bytes added to ratio check for small blocks.
@@ -2170,6 +2172,129 @@ fn decompress_zstd(_stored: &[u8], _raw_len: usize) -> Result<Vec<u8>, StatamErr
     Err(StatamError::UnsupportedFeature { mask: 0x02 })
 }
 
+/// Prepared Zstd bulk compressor bound to a trained `.stpk` dictionary.
+pub struct PackDictCompressor {
+    #[cfg(not(miri))]
+    inner: zstd::bulk::Compressor<'static>,
+    dict_len: usize,
+}
+
+impl fmt::Debug for PackDictCompressor {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("PackDictCompressor")
+            .field("dict_len", &self.dict_len)
+            .finish()
+    }
+}
+
+impl PackDictCompressor {
+    /// Creates a Zstd bulk compressor initialized with a trained `.stpk` dictionary.
+    #[cfg(not(miri))]
+    pub fn new(zstd_level: i32, dict_bytes: &[u8]) -> Result<Self, StatamError> {
+        if dict_bytes.is_empty() {
+            return Err(StatamError::Corrupt {
+                reason: "empty pack dictionary",
+            });
+        }
+        if dict_bytes.len() > MAX_PACK_DICT_BYTES {
+            return Err(StatamError::BoundsExceeded {
+                reason: "pack dictionary exceeds MAX_PACK_DICT_BYTES",
+            });
+        }
+        let inner =
+            zstd::bulk::Compressor::with_dictionary(zstd_level, dict_bytes).map_err(|_| {
+                StatamError::Corrupt {
+                    reason: "zstd dict compressor init failed",
+                }
+            })?;
+        Ok(Self {
+            inner,
+            dict_len: dict_bytes.len(),
+        })
+    }
+
+    /// Returns `StatamError::UnsupportedFeature` under Miri where Zstd C FFI is disabled.
+    #[cfg(miri)]
+    pub fn new(_zstd_level: i32, _dict_bytes: &[u8]) -> Result<Self, StatamError> {
+        Err(StatamError::UnsupportedFeature { mask: 0x02 })
+    }
+}
+
+/// Prepared Zstd decoder dictionary for `.stpk` pack frames.
+pub struct PackDecoderDict {
+    #[cfg(not(miri))]
+    inner: zstd::dict::DecoderDictionary<'static>,
+    dict_len: usize,
+}
+
+impl fmt::Debug for PackDecoderDict {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("PackDecoderDict")
+            .field("dict_len", &self.dict_len)
+            .finish()
+    }
+}
+
+impl PackDecoderDict {
+    /// Prepares a Zstd decoder dictionary from raw trained dictionary bytes.
+    #[cfg(not(miri))]
+    pub fn new(dict_bytes: &[u8]) -> Result<Self, StatamError> {
+        if dict_bytes.is_empty() {
+            return Err(StatamError::Corrupt {
+                reason: "empty pack dictionary",
+            });
+        }
+        if dict_bytes.len() > MAX_PACK_DICT_BYTES {
+            return Err(StatamError::BoundsExceeded {
+                reason: "pack dictionary exceeds MAX_PACK_DICT_BYTES",
+            });
+        }
+        let inner = zstd::dict::DecoderDictionary::try_copy(dict_bytes).map_err(|_| {
+            StatamError::Corrupt {
+                reason: "invalid zstd pack dictionary",
+            }
+        })?;
+        Ok(Self {
+            inner,
+            dict_len: dict_bytes.len(),
+        })
+    }
+
+    /// Returns `StatamError::UnsupportedFeature` under Miri where Zstd C FFI is disabled.
+    #[cfg(miri)]
+    pub fn new(_dict_bytes: &[u8]) -> Result<Self, StatamError> {
+        Err(StatamError::UnsupportedFeature { mask: 0x02 })
+    }
+}
+
+#[cfg(not(miri))]
+fn decompress_zstd_with_dict(
+    stored: &[u8],
+    raw_len: usize,
+    dict: &PackDecoderDict,
+) -> Result<Vec<u8>, StatamError> {
+    let mut decomp =
+        zstd::bulk::Decompressor::with_prepared_dictionary(&dict.inner).map_err(|_| {
+            StatamError::Corrupt {
+                reason: "zstd dict decompressor init failed",
+            }
+        })?;
+    decomp
+        .decompress(stored, raw_len)
+        .map_err(|_| StatamError::Corrupt {
+            reason: "zstd dict decompression failed",
+        })
+}
+
+#[cfg(miri)]
+fn decompress_zstd_with_dict(
+    _stored: &[u8],
+    _raw_len: usize,
+    _dict: &PackDecoderDict,
+) -> Result<Vec<u8>, StatamError> {
+    Err(StatamError::UnsupportedFeature { mask: 0x02 })
+}
+
 /// Metadata returned when writing a framed block or pack frame.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct FramedWriteInfo {
@@ -2282,19 +2407,92 @@ pub fn write_framed_pack_frame(
         reason: "pack frame raw_len overflows u32",
     })?;
     let (actual_codec, stored) = compress_guarded(raw, codec, zstd_level)?;
+    emit_pack_frame_bytes(raw_len, actual_codec, flags, &stored, out)
+}
+
+/// Writes a 16-byte `PF` pack frame header, optionally compressing with `dict_compressor`.
+///
+/// When `dict_compressor` is `Some` and `codec == Codec::Zstd` (non-Miri), compresses `raw`
+/// using the dictionary and sets `PACK_FRAME_FLAG_USES_DICT` if smaller than raw (and within
+/// the decompression ratio guard); otherwise falls back to `Codec::None` with
+/// `PACK_FRAME_FLAG_USES_DICT` cleared.
+pub fn write_framed_pack_frame_with_compressor(
+    raw: &[u8],
+    codec: Codec,
+    flags: u8,
+    zstd_level: i32,
+    dict_compressor: Option<&mut PackDictCompressor>,
+    out: &mut Vec<u8>,
+) -> Result<FramedWriteInfo, StatamError> {
+    if raw.len() > MAX_FRAME_RAW_BYTES {
+        return Err(StatamError::BoundsExceeded {
+            reason: "pack frame raw payload exceeds MAX_FRAME_RAW_BYTES",
+        });
+    }
+    #[cfg(not(miri))]
+    if codec == Codec::Zstd
+        && let Some(comp) = dict_compressor
+    {
+        let raw_len = u32::try_from(raw.len()).map_err(|_| StatamError::BoundsExceeded {
+            reason: "pack frame raw_len overflows u32",
+        })?;
+        let compressed = comp.inner.compress(raw).map_err(|_| StatamError::Corrupt {
+            reason: "zstd dict compression failed",
+        })?;
+        let ratio_ok = (raw.len() as u64)
+            <= (compressed.len() as u64)
+                .saturating_mul(MAX_DECOMPRESS_RATIO)
+                .saturating_add(MAX_DECOMPRESS_SLACK);
+        return if compressed.len() < raw.len() && ratio_ok {
+            emit_pack_frame_bytes(
+                raw_len,
+                Codec::Zstd,
+                flags | PACK_FRAME_FLAG_USES_DICT,
+                &compressed,
+                out,
+            )
+        } else {
+            emit_pack_frame_bytes(
+                raw_len,
+                Codec::None,
+                flags & !PACK_FRAME_FLAG_USES_DICT,
+                raw,
+                out,
+            )
+        };
+    }
+    #[cfg(miri)]
+    let _ = dict_compressor;
+
+    write_framed_pack_frame(
+        raw,
+        codec,
+        flags & !PACK_FRAME_FLAG_USES_DICT,
+        zstd_level,
+        out,
+    )
+}
+
+fn emit_pack_frame_bytes(
+    raw_len: u32,
+    actual_codec: Codec,
+    actual_flags: u8,
+    stored: &[u8],
+    out: &mut Vec<u8>,
+) -> Result<FramedWriteInfo, StatamError> {
     let stored_len = u32::try_from(stored.len()).map_err(|_| StatamError::BoundsExceeded {
         reason: "pack frame stored_len overflows u32",
     })?;
-    let crc = crc32c::crc32c(&stored);
+    let crc = crc32c::crc32c(stored);
 
     out.reserve(PACK_FRAME_HEADER_LEN + stored.len());
     out.extend_from_slice(&PACK_FRAME_MAGIC);
     out.push(actual_codec as u8);
-    out.push(flags);
+    out.push(actual_flags);
     out.extend_from_slice(&raw_len.to_le_bytes());
     out.extend_from_slice(&stored_len.to_le_bytes());
     out.extend_from_slice(&crc.to_le_bytes());
-    out.extend_from_slice(&stored);
+    out.extend_from_slice(stored);
 
     Ok(FramedWriteInfo {
         codec: actual_codec,
@@ -2304,11 +2502,7 @@ pub fn write_framed_pack_frame(
     })
 }
 
-/// Reads, checksum-verifies, and decompresses a framed `.stpk` `PF` pack frame.
-pub fn read_framed_pack_frame(
-    frame: &[u8],
-    max_raw: usize,
-) -> Result<(Codec, u8, Vec<u8>), StatamError> {
+fn parse_verified_pack_frame(frame: &[u8]) -> Result<(Codec, u8, usize, &[u8]), StatamError> {
     if frame.len() < PACK_FRAME_HEADER_LEN {
         return Err(StatamError::Corrupt {
             reason: "truncated pack frame header",
@@ -2348,8 +2542,48 @@ pub fn read_framed_pack_frame(
             context: "pack frame",
         });
     }
+    Ok((codec, flags, raw_len, stored))
+}
+
+/// Reads, checksum-verifies, and decompresses a framed `.stpk` `PF` pack frame.
+pub fn read_framed_pack_frame(
+    frame: &[u8],
+    max_raw: usize,
+) -> Result<(Codec, u8, Vec<u8>), StatamError> {
+    let (codec, flags, raw_len, stored) = parse_verified_pack_frame(frame)?;
     let decompressed = decompress_checked(stored, codec, raw_len, max_raw)?;
     Ok((codec, flags, decompressed))
+}
+
+/// Reads, checksum-verifies, and decompresses a framed `.stpk` `PF` pack frame,
+/// using `dict` when `PACK_FRAME_FLAG_USES_DICT` is set.
+pub fn read_framed_pack_frame_with_dict(
+    frame: &[u8],
+    max_raw: usize,
+    dict: Option<&PackDecoderDict>,
+) -> Result<(Codec, u8, Vec<u8>), StatamError> {
+    let (codec, flags, raw_len, stored) = parse_verified_pack_frame(frame)?;
+    check_decompress_bounds(raw_len, stored.len(), max_raw)?;
+    if (flags & PACK_FRAME_FLAG_USES_DICT) != 0 {
+        if codec != Codec::Zstd {
+            return Err(StatamError::Corrupt {
+                reason: "pack frame dict flag requires zstd codec",
+            });
+        }
+        let dict = dict.ok_or(StatamError::Corrupt {
+            reason: "pack frame requires dictionary but none provided",
+        })?;
+        let decoded = decompress_zstd_with_dict(stored, raw_len, dict)?;
+        if decoded.len() != raw_len {
+            return Err(StatamError::Corrupt {
+                reason: "zstd dict decompressed length mismatch",
+            });
+        }
+        Ok((codec, flags, decoded))
+    } else {
+        let decompressed = decompress_checked(stored, codec, raw_len, max_raw)?;
+        Ok((codec, flags, decompressed))
+    }
 }
 
 fn check_slice_range(
@@ -3140,5 +3374,84 @@ mod tests {
         assert_eq!(pc, Codec::Zstd);
         assert_eq!(pflags, PACK_FRAME_FLAG_USES_DICT);
         assert_eq!(pdecoded, payload);
+    }
+
+    #[cfg(not(miri))]
+    #[test]
+    fn zstd_dict_framed_pack_frame_roundtrip_and_guards() {
+        let mut samples_buf = Vec::new();
+        let mut sample_sizes = Vec::new();
+        for i in 0..128u32 {
+            let s = format!(
+                "{{\"role\":\"assistant\",\"model\":\"gpt-4o\",\"trace\":\"{i:04}\",\"content\":\"structured llm response token alpha beta gamma\"}}"
+            );
+            sample_sizes.push(s.len());
+            samples_buf.extend_from_slice(s.as_bytes());
+        }
+        let dict_bytes =
+            zstd::dict::from_continuous(&samples_buf, &sample_sizes, 32 * 1024).unwrap();
+        let mut comp = PackDictCompressor::new(3, &dict_bytes).unwrap();
+        let dec_dict = PackDecoderDict::new(&dict_bytes).unwrap();
+
+        let payload = samples_buf[..2048].to_vec();
+        let mut framed = Vec::new();
+        let info = write_framed_pack_frame_with_compressor(
+            &payload,
+            Codec::Zstd,
+            0,
+            3,
+            Some(&mut comp),
+            &mut framed,
+        )
+        .unwrap();
+        assert_eq!(info.codec, Codec::Zstd);
+        assert_ne!(framed[3] & PACK_FRAME_FLAG_USES_DICT, 0);
+
+        let (codec, flags, decoded) =
+            read_framed_pack_frame_with_dict(&framed, MAX_FRAME_RAW_BYTES, Some(&dec_dict))
+                .unwrap();
+        assert_eq!(codec, Codec::Zstd);
+        assert_eq!(flags, PACK_FRAME_FLAG_USES_DICT);
+        assert_eq!(decoded, payload);
+
+        // Dict flag without dict must return Corrupt.
+        let err = read_framed_pack_frame_with_dict(&framed, MAX_FRAME_RAW_BYTES, None).unwrap_err();
+        assert!(matches!(err, StatamError::Corrupt { .. }));
+
+        // Dict flag with Codec::None must return Corrupt.
+        let mut bad_codec = framed.clone();
+        bad_codec[2] = Codec::None as u8;
+        let err =
+            read_framed_pack_frame_with_dict(&bad_codec, MAX_FRAME_RAW_BYTES, Some(&dec_dict))
+                .unwrap_err();
+        assert!(matches!(err, StatamError::Corrupt { .. }));
+
+        // Incompressible payload falls back to Codec::None and clears PACK_FRAME_FLAG_USES_DICT.
+        let mut state: u64 = 0xfeed_cafe_1234_5678;
+        let mut random_raw = vec![0u8; 4096];
+        for b in &mut random_raw {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            *b = (state >> 24) as u8;
+        }
+        let mut raw_framed = Vec::new();
+        let raw_info = write_framed_pack_frame_with_compressor(
+            &random_raw,
+            Codec::Zstd,
+            PACK_FRAME_FLAG_USES_DICT,
+            3,
+            Some(&mut comp),
+            &mut raw_framed,
+        )
+        .unwrap();
+        assert_eq!(raw_info.codec, Codec::None);
+        assert_eq!(raw_framed[3] & PACK_FRAME_FLAG_USES_DICT, 0);
+        let (rc, rflags, rdecoded) =
+            read_framed_pack_frame_with_dict(&raw_framed, MAX_FRAME_RAW_BYTES, Some(&dec_dict))
+                .unwrap();
+        assert_eq!(rc, Codec::None);
+        assert_eq!(rflags, 0);
+        assert_eq!(rdecoded, random_raw);
     }
 }

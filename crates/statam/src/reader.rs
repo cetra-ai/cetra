@@ -15,8 +15,9 @@ use memchr::memmem;
 use crate::StatamError;
 use crate::codec::dict::FileDict;
 use crate::codec::nested::{
-    ShreddedSubCol, decode_shredded_residual_block, decode_shredded_subcol, decode_single_map_key,
-    unshred_map,
+    ShreddedSubCol, decode_shredded_residual_block, decode_shredded_residual_block_selected,
+    decode_shredded_subcol, decode_shredded_subcol_selected, decode_single_map_key, unshred_map,
+    unshred_map_selected,
 };
 use crate::codec::{
     ZonePred, ZoneValue, decode_mini_block, decode_mini_block_selected, zone_map_may_match,
@@ -34,8 +35,8 @@ use crate::format::{
 };
 use crate::io::RangeReader;
 use crate::payload::pack::ChunkPackReader;
-use crate::payload::search::{pack_short_circuits_all, search_pack_rows};
-use crate::payload::{PayloadRefRow, decode_payload_refs};
+use crate::payload::search::{pack_short_circuits_all, search_pack_rows_masked};
+use crate::payload::{PayloadRefRow, decode_payload_refs, scan_payload_refs_inline_substring};
 use crate::simd::bloom::{BloomIndex, statam_bloom_hash};
 use crate::simd::filter::{FilterOp, filter_f64, filter_i64, filter_i64_between, filter_u32};
 use crate::simd::trigram::{TrigramBloom, ascii_lowercase_into, extract_trigram_hashes};
@@ -2705,6 +2706,64 @@ impl StatamReader {
                 if is_payload != pass_payload {
                     continue;
                 }
+                if is_payload
+                    && l0_local.is_none()
+                    && !self.meta.schema_meta.pack_ids.is_empty()
+                    && !decoded_p1.contains_key(&cidx)
+                {
+                    let blk = &self.meta.rg_blocks(cidx, rg_idx)[mb_idx];
+                    if blk.encoding == Encoding::ConstNull {
+                        return Ok((Bitmap::new_zeroed(mb_row_count), decoded_p1));
+                    }
+                    let mut all_short_circuit = true;
+                    let mut pack_chunk_counts =
+                        Vec::with_capacity(self.meta.schema_meta.pack_ids.len());
+                    for &pack_id in &self.meta.schema_meta.pack_ids {
+                        let pack = self.resolve_pack(pack_id)?;
+                        if !pack_short_circuits_all(&pack, &sq.needle, sq.case_insensitive)? {
+                            all_short_circuit = false;
+                            break;
+                        }
+                        pack_chunk_counts.push(pack.toc().chunks.len());
+                    }
+                    if all_short_circuit {
+                        let mut needed_by_other = false;
+                        for (j, &(oc, osq)) in subs.iter().enumerate() {
+                            if j != sq_idx && oc == cidx {
+                                for &pack_id in &self.meta.schema_meta.pack_ids {
+                                    let pack = self.resolve_pack(pack_id)?;
+                                    if !pack_short_circuits_all(
+                                        &pack,
+                                        &osq.needle,
+                                        osq.case_insensitive,
+                                    )? {
+                                        needed_by_other = true;
+                                        break;
+                                    }
+                                }
+                                if needed_by_other {
+                                    break;
+                                }
+                            }
+                        }
+                        if !needed_by_other {
+                            let raw = read_block(blk)?;
+                            let mut matcher = Utf8Matcher::new(&sq.needle, sq.case_insensitive);
+                            let bm = scan_payload_refs_inline_substring(
+                                &raw,
+                                mb_row_count,
+                                &mask,
+                                &pack_chunk_counts,
+                                |bytes| matcher.matches(bytes),
+                            )?;
+                            mask = mask.and(&bm)?;
+                            if mask.all_zeros() {
+                                return Ok((mask, decoded_p1));
+                            }
+                            continue;
+                        }
+                    }
+                }
                 self.ensure_p1_col(
                     cidx,
                     rg_idx,
@@ -2878,8 +2937,8 @@ impl StatamReader {
                 continue;
             }
 
-            let mut orig_rows = Vec::new();
-            let mut filtered_refs = Vec::new();
+            let mut pack_mask = Bitmap::new_zeroed(refs.len());
+            let mut any_pack_row = false;
             for &r in &active_chunk_rows {
                 if results.get(r) {
                     continue;
@@ -2887,16 +2946,23 @@ impl StatamReader {
                 if let PayloadRefRow::Chunks(chunks) = &refs[r]
                     && chunks.iter().any(|&(p, _)| p == pack_idx)
                 {
-                    orig_rows.push(r);
-                    filtered_refs.push(refs[r].clone());
+                    let _ = pack_mask.set(r, true);
+                    any_pack_row = true;
                 }
             }
-            if filtered_refs.is_empty() {
+            if !any_pack_row {
                 continue;
             }
-            let bm = search_pack_rows(&pack, &filtered_refs, pack_idx, needle, case_insensitive)?;
+            let bm = search_pack_rows_masked(
+                &pack,
+                refs,
+                &pack_mask,
+                pack_idx,
+                needle,
+                case_insensitive,
+            )?;
             for bit in bm.iter_ones() {
-                let _ = results.set(orig_rows[bit], true);
+                let _ = results.set(bit, true);
             }
         }
 
@@ -3009,7 +3075,7 @@ impl StatamReader {
                     } else {
                         let blk = &self.meta.rg_blocks(sub_pidx, rg_idx)[mb_idx];
                         let raw = read_block(blk)?;
-                        let sub = decode_shredded_subcol(&raw, mb_row_count)?;
+                        let sub = decode_shredded_subcol_selected(&raw, mb_row_count, mask)?;
                         decoded_subs.insert(sub_pidx, sub);
                     }
                 }
@@ -3063,7 +3129,7 @@ impl StatamReader {
                     } else {
                         Vec::new()
                     };
-                    Some(decode_shredded_residual_block(&raw, blk)?)
+                    Some(decode_shredded_residual_block_selected(&raw, blk, mask)?)
                 };
 
                 let flat_map = if let Some(req_keys) = map_keys_by_col.get(&cidx) {
@@ -3096,11 +3162,12 @@ impl StatamReader {
                                 .map(|res| filter_residual_to_keys(res, req_keys))
                                 .transpose()?
                         };
-                        unshred_map(
+                        unshred_map_selected(
                             mb_row_count,
                             pruned_residual.as_ref().and_then(FlatColumn::nulls),
                             pruned_residual.as_ref(),
                             &subpairs,
+                            mask,
                         )?
                     }
                 } else {
@@ -3111,11 +3178,12 @@ impl StatamReader {
                             subpairs.push((ke.key.as_str(), sub));
                         }
                     }
-                    unshred_map(
+                    unshred_map_selected(
                         mb_row_count,
                         residual_flat.as_ref().and_then(FlatColumn::nulls),
                         residual_flat.as_ref(),
                         &subpairs,
+                        mask,
                     )?
                 };
                 out_cols.push(Column::Flat(flat_map));
@@ -4339,6 +4407,9 @@ fn filter_residual_to_keys(
             reason: "filter_residual_to_keys expects MapUtf8",
         });
     };
+    if map.entry_count() == 0 {
+        return Ok(map_col.clone());
+    }
     let n = map_col.len();
     let mut out_offsets = Vec::with_capacity(n + 1);
     out_offsets.push(0u32);
@@ -6472,5 +6543,417 @@ mod tests {
                 reason: "per-RG bloom count does not match num_row_groups",
             })
         ));
+    }
+
+    #[test]
+    fn point_lookup_sparse_decode_parity_l0fast_and_l1compact() {
+        let schema = Schema::try_new_arc(vec![
+            Field::new("trace_id", DataType::FixedBytes16, false),
+            Field::new("span_id", DataType::FixedBytes8, false),
+            Field::new("name", DataType::Utf8, false),
+            Field::new("attributes", DataType::MapUtf8, false),
+            Field::new("tags", DataType::List(Box::new(DataType::Utf8)), false),
+            Field::new("events", DataType::Events, false),
+            Field::new("links", DataType::Links, false),
+            Field::new("parent_span_id", DataType::FixedBytes8, true),
+        ])
+        .unwrap();
+
+        let n = 512usize;
+        let mut tids = Vec::with_capacity(n);
+        let mut sids = Vec::with_capacity(n);
+        let mut names = Vec::with_capacity(n);
+        let mut map_offs = Vec::with_capacity(n + 1);
+        map_offs.push(0u32);
+        let mut m_keys = Vec::new();
+        let mut m_vals = Vec::new();
+        let mut list_offs = Vec::with_capacity(n + 1);
+        list_offs.push(0u32);
+        let mut list_vals = Vec::new();
+        let mut ev_offs = Vec::with_capacity(n + 1);
+        ev_offs.push(0u32);
+        let mut ev_times = Vec::new();
+        let mut ev_names = Vec::new();
+        let mut ev_attrs = Vec::new();
+        let mut lk_offs = Vec::with_capacity(n + 1);
+        lk_offs.push(0u32);
+        let mut lk_tids = Vec::new();
+        let mut lk_sids = Vec::new();
+        let mut lk_attrs = Vec::new();
+
+        let target_tid = {
+            let mut b = [0u8; 16];
+            b[0..8].copy_from_slice(&42u64.to_le_bytes());
+            b
+        };
+
+        for i in 0..n {
+            let mut tid = [0u8; 16];
+            let trace_group = if i == 17 || i == 259 {
+                42usize
+            } else {
+                i + 100
+            };
+            tid[0..8].copy_from_slice(&(trace_group as u64).to_le_bytes());
+            tids.push(tid);
+            sids.push((i as u64).to_be_bytes());
+            names.push(format!("operation-{i:04}-completion"));
+
+            m_keys.push("env".to_owned());
+            m_vals.push(if i % 2 == 0 {
+                "prod".to_owned()
+            } else {
+                "dev".to_owned()
+            });
+            m_keys.push("model".to_owned());
+            m_vals.push(format!("claude-3-5-sonnet-{i:03}"));
+            if i % 4 == 0 || i == 17 || i == 259 {
+                m_keys.push(format!("z_rare_{i}"));
+                m_vals.push(format!("rare_payload_{i:04}"));
+            }
+            map_offs.push(m_keys.len() as u32);
+
+            if i != 17 {
+                list_vals.push("tag_one".to_owned());
+                list_vals.push(format!("tag_{i}"));
+            }
+            list_offs.push(list_vals.len() as u32);
+
+            if i != 259 {
+                ev_times.push(1_700_000_000_000 + i as i64);
+                ev_names.push("gen_ai.content");
+                ev_attrs.push(format!("{{\"step\":{i}}}"));
+            }
+            ev_offs.push(ev_times.len() as u32);
+
+            if i == 17 || i % 5 == 0 {
+                lk_tids.push([i as u8; 16]);
+                lk_sids.push([i as u8; 8]);
+                lk_attrs.push(format!("{{\"link\":{i}}}"));
+            }
+            lk_offs.push(lk_tids.len() as u32);
+        }
+
+        let batch = Batch::try_new_all(
+            Arc::clone(&schema),
+            vec![
+                Column::Flat(FlatColumn::try_new(FlatData::FixedBytes16(tids), None).unwrap()),
+                Column::Flat(FlatColumn::try_new(FlatData::FixedBytes8(sids), None).unwrap()),
+                Column::Flat(
+                    FlatColumn::try_new(
+                        FlatData::Utf8(
+                            Utf8Data::try_from_slices(names.iter().map(String::as_str)).unwrap(),
+                        ),
+                        None,
+                    )
+                    .unwrap(),
+                ),
+                Column::Flat(
+                    FlatColumn::try_new(
+                        FlatData::MapUtf8(Box::new(
+                            MapData::try_new(
+                                map_offs,
+                                Utf8Data::try_from_slices(m_keys.iter().map(String::as_str))
+                                    .unwrap(),
+                                Utf8Data::try_from_slices(m_vals.iter().map(String::as_str))
+                                    .unwrap(),
+                                None,
+                            )
+                            .unwrap(),
+                        )),
+                        None,
+                    )
+                    .unwrap(),
+                ),
+                Column::Flat(
+                    FlatColumn::try_new(
+                        FlatData::List {
+                            item_type: DataType::Utf8,
+                            offsets: list_offs,
+                            values: Box::new(Column::Flat(
+                                FlatColumn::try_new(
+                                    FlatData::Utf8(
+                                        Utf8Data::try_from_slices(
+                                            list_vals.iter().map(String::as_str),
+                                        )
+                                        .unwrap(),
+                                    ),
+                                    None,
+                                )
+                                .unwrap(),
+                            )),
+                        },
+                        None,
+                    )
+                    .unwrap(),
+                ),
+                Column::Flat(
+                    FlatColumn::try_new(
+                        FlatData::Events(Box::new(
+                            EventsData::try_new(
+                                ev_offs,
+                                ev_times,
+                                Utf8Data::try_from_slices(ev_names).unwrap(),
+                                Utf8Data::try_from_slices(ev_attrs.iter().map(String::as_str))
+                                    .unwrap(),
+                                None,
+                            )
+                            .unwrap(),
+                        )),
+                        None,
+                    )
+                    .unwrap(),
+                ),
+                Column::Flat(
+                    FlatColumn::try_new(
+                        FlatData::Links(Box::new(
+                            LinksData::try_new(
+                                lk_offs,
+                                lk_tids,
+                                lk_sids,
+                                Utf8Data::try_from_slices(lk_attrs.iter().map(String::as_str))
+                                    .unwrap(),
+                                None,
+                            )
+                            .unwrap(),
+                        )),
+                        None,
+                    )
+                    .unwrap(),
+                ),
+                Column::Const {
+                    value: ScalarValue::Null(DataType::FixedBytes8),
+                    len: n,
+                },
+            ],
+            n,
+        )
+        .unwrap();
+
+        for profile in [WriteProfile::L0Fast, WriteProfile::L1Compact] {
+            let mut opts = WriteOptions::for_table(TableKind::Spans, profile);
+            opts.mini_block_size = 512;
+            let mut bytes = Vec::new();
+            let mut w = StatamWriter::new(Arc::clone(&schema), opts, None).unwrap();
+            w.write_batch(&batch).unwrap();
+            w.finish(&mut bytes).unwrap();
+
+            let reader = StatamReader::open(Arc::new(SliceReader::new(bytes)), None).unwrap();
+            let res = reader
+                .scan(&ScanRequest {
+                    id_lookups: vec![IdLookup {
+                        column: "trace_id".to_owned(),
+                        values: vec![target_tid.to_vec()],
+                    }],
+                    ..ScanRequest::default()
+                })
+                .unwrap();
+
+            assert_eq!(res.len(), 1);
+            let out = &res[0];
+            let active: Vec<usize> = match out.selection() {
+                Selection::Mask(bm) => bm.iter_ones().collect(),
+                _ => panic!("expected Selection::Mask"),
+            };
+            assert_eq!(active, vec![17, 259]);
+
+            for (cidx, field) in schema.fields().iter().enumerate() {
+                let expected_col = batch.columns()[cidx].materialize(None).unwrap();
+                let got_col = out.columns()[cidx].materialize(None).unwrap();
+                for &r in &active {
+                    assert_eq!(
+                        got_col.is_null(r),
+                        expected_col.is_null(r),
+                        "profile {profile:?} col {} row {r}",
+                        field.name
+                    );
+                    if !expected_col.is_null(r) {
+                        assert_eq!(
+                            got_col.get_scalar(r).unwrap(),
+                            expected_col.get_scalar(r).unwrap(),
+                            "profile {profile:?} col {} row {r}",
+                            field.name
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn inline_only_short_circuit_fast_path_matches_inline_and_validates_chunk_bounds() {
+        let schema = Arc::new(
+            Schema::try_new(vec![
+                Field::new("id", DataType::I64, false),
+                Field::new("input", DataType::Utf8, true),
+            ])
+            .unwrap(),
+        );
+        let pack_id = [0x91u8; 16];
+        let mut opts = WriteOptions::for_table(TableKind::Spans, WriteProfile::L1Compact);
+        opts.payload_cols = vec!["input".to_owned()];
+        opts.pack_id = Some(pack_id);
+        opts.mini_block_size = 64;
+
+        // Build rows with:
+        // - row 0: Inline matching the rare needle
+        // - row 1: Inline non-matching
+        // - row 2: NULL
+        // - rows 3..44: Chunked JSON arrays (emitting both TAG_KEYFRAME and TAG_DELTA)
+        //   with enough unique bytes (>= 1024 B compressed) so TS02 + frame bloom are emitted.
+        let mut ids = Vec::new();
+        let mut inputs: Vec<Option<String>> = Vec::new();
+        ids.push(0i64);
+        inputs.push(Some("hit inline_rare_needle_xyz987 here".to_owned()));
+        ids.push(1i64);
+        inputs.push(Some("other short inline payload".to_owned()));
+        ids.push(2i64);
+        inputs.push(None);
+
+        let shared_msg = format!(
+            "{{\"role\":\"system\",\"content\":\"{}\"}}",
+            "shared_prefix_token_".repeat(20)
+        );
+        let mut msgs = vec![shared_msg];
+        let mut rng: u64 = 0x9e37_79b9_7f4a_7c15;
+        for i in 3..44usize {
+            let mut body = String::with_capacity(320);
+            for _ in 0..32 {
+                rng ^= rng << 13;
+                rng ^= rng >> 7;
+                rng ^= rng << 17;
+                // Limited alphabet ('a'..'f', '0'..'3') keeps trigram bloom density < 72%
+                // while making Zstd compressed stored_len >= 1024 B!
+                let ch = match (rng >> 24) % 10 {
+                    0..=5 => (b'a' + ((rng >> 24) % 6) as u8) as char,
+                    v => (b'0' + (v - 6) as u8) as char,
+                };
+                body.push(ch);
+                body.push_str("_tok_");
+            }
+            msgs.push(format!(
+                "{{\"role\":\"user\",\"turn\":{i:03},\"body\":\"{body}\"}}",
+            ));
+            ids.push(i as i64);
+            inputs.push(Some(format!("[{}]", msgs.join(","))));
+        }
+
+        let input_refs: Vec<Option<&str>> = inputs.iter().map(Option::as_deref).collect();
+        let mut val_bm = Bitmap::new_ones(inputs.len());
+        let _ = val_bm.set(2, false);
+        let input_utf8 =
+            Utf8Data::try_from_slices(input_refs.iter().map(|o| o.unwrap_or(""))).unwrap();
+        let batch = Batch::try_new_all(
+            Arc::clone(&schema),
+            vec![
+                Column::Flat(FlatColumn::try_new(FlatData::I64(ids), None).unwrap()),
+                Column::Flat(
+                    FlatColumn::try_new(FlatData::Utf8(input_utf8), Some(val_bm)).unwrap(),
+                ),
+            ],
+            inputs.len(),
+        )
+        .unwrap();
+
+        let mut pb = ChunkPackBuilder::new(pack_id, test_pack_opts());
+        let mut w = StatamWriter::new(Arc::clone(&schema), opts, Some(&mut pb)).unwrap();
+        w.write_batch(&batch).unwrap();
+        let mut file_bytes = Vec::new();
+        w.finish(&mut file_bytes).unwrap();
+        let mut pack_bytes = Vec::new();
+        pb.finish(&mut pack_bytes).unwrap();
+
+        let pack_s3 = Arc::new(SimulatedS3Reader::from_bytes(
+            pack_bytes,
+            SimulatedS3Config::default(),
+        ));
+        let pack_reader = Arc::new(ChunkPackReader::open(pack_s3.clone()).unwrap());
+        assert!(
+            pack_reader.postscript().trigram_len > 0,
+            "pack must emit TS02 trigram section for short-circuit test"
+        );
+        let mut resolver = InMemoryPackResolver::new();
+        resolver.insert(pack_id, Arc::clone(&pack_reader));
+        let reader = StatamReader::open(
+            Arc::new(SliceReader::new(file_bytes.clone())),
+            Some(Arc::new(resolver)),
+        )
+        .unwrap();
+
+        // Warm open is done; reset counters and verify ZERO .stpk data frames are read!
+        pack_s3.reset_counters();
+        let batches = reader
+            .scan(&ScanRequest {
+                projection: Some(vec![0]),
+                substrings: vec![SubstringQuery {
+                    column: "input".to_owned(),
+                    needle: b"inline_rare_needle_xyz987".to_vec(),
+                    case_insensitive: false,
+                }],
+                ..ScanRequest::default()
+            })
+            .unwrap();
+        let mut matched_ids = Vec::new();
+        for b in &batches {
+            let id_col = b.columns()[0].materialize(None).unwrap();
+            let FlatData::I64(vals) = id_col.data() else {
+                unreachable!();
+            };
+            match b.selection() {
+                Selection::All => matched_ids.extend_from_slice(vals),
+                Selection::Mask(bm) => {
+                    for r in bm.iter_ones() {
+                        matched_ids.push(vals[r]);
+                    }
+                }
+                Selection::Indices(idxs) => {
+                    for &r in idxs {
+                        matched_ids.push(vals[r as usize]);
+                    }
+                }
+            }
+        }
+        assert_eq!(matched_ids, vec![0]);
+        assert!(
+            pack_s3.counters().bytes_requested <= pack_reader.postscript().trigram_len as u64,
+            "short-circuit fast path must read only TS02 trigram section (got {} bytes > {})",
+            pack_s3.counters().bytes_requested,
+            pack_reader.postscript().trigram_len
+        );
+
+        // Verify a short-circuiting pack with fewer chunks still rejects out-of-bounds chunk_id!
+        let mut small_pb = ChunkPackBuilder::new(pack_id, test_pack_opts());
+        let mut filler = Vec::with_capacity(4096);
+        let mut st: u64 = 0x1122_3344_5566_7788;
+        for _ in 0..4096 {
+            st ^= st << 13;
+            st ^= st >> 7;
+            st ^= st << 17;
+            filler.push(b'a' + ((st >> 24) as u8 % 4));
+        }
+        small_pb.intern_chunk(&filler).unwrap();
+        let mut small_pack_bytes = Vec::new();
+        small_pb.finish(&mut small_pack_bytes).unwrap();
+        let small_pack =
+            Arc::new(ChunkPackReader::open(Arc::new(SliceReader::new(small_pack_bytes))).unwrap());
+        let mut small_resolver = InMemoryPackResolver::new();
+        small_resolver.insert(pack_id, small_pack);
+        let bad_reader = StatamReader::open(
+            Arc::new(SliceReader::new(file_bytes)),
+            Some(Arc::new(small_resolver)),
+        )
+        .unwrap();
+        let err = bad_reader
+            .scan(&ScanRequest {
+                projection: Some(vec![0]),
+                substrings: vec![SubstringQuery {
+                    column: "input".to_owned(),
+                    needle: b"inline_rare_needle_xyz987".to_vec(),
+                    case_insensitive: false,
+                }],
+                ..ScanRequest::default()
+            })
+            .unwrap_err();
+        assert!(matches!(err, StatamError::Corrupt { .. }));
     }
 }

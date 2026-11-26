@@ -1202,4 +1202,154 @@ mod tests {
             cetra_column::ScalarValue::Utf8(other_b_payload)
         );
     }
+
+    #[cfg(not(miri))]
+    #[test]
+    fn gdpr_rewrite_purges_dict_compressed_pack_and_strips_dict_section() {
+        let schema = Schema::try_new_arc(vec![
+            Field::new("user_id", DataType::Utf8, false),
+            Field::new("name", DataType::Utf8, false),
+            Field::new("input", DataType::Utf8, true),
+        ])
+        .unwrap();
+
+        let pack_id = [0xD1u8; 16];
+        let pack_opts = PackWriteOptions {
+            codec: Codec::Zstd,
+            zstd_level: 3,
+            target_frame_raw_bytes: 256 * 1024,
+            enable_trigram_skip: true,
+            compress_toc_lz4: true,
+        };
+        let mut pb = ChunkPackBuilder::new_with_dict(pack_id, pack_opts);
+
+        let mut opts = WriteOptions::for_table(TableKind::Spans, WriteProfile::L1Compact);
+        opts.payload_cols = vec!["input".to_owned()];
+        opts.pack_id = Some(pack_id);
+
+        // Write >= 2 MiB of unique payloads so Zstd dictionary training activates (PACK_FLAG_HAS_DICT).
+        let mut rows: Vec<(String, String, String)> = Vec::new();
+        let mut expected_survivors: Vec<String> = Vec::new();
+        let pad = "structured_dict_gdpr_payload_".repeat(70); // ~2030 B
+        for i in 0..1_200u32 {
+            let is_erased = i % 5 == 0;
+            let user_id = if is_erased {
+                "user_erased".to_owned()
+            } else {
+                format!("user_keep_{}", i % 7)
+            };
+            let payload = if is_erased {
+                format!(
+                    "{{\"row\":{i:04},\"secret\":\"ERASED_DICT_PII_{i:04}\",\"pad\":\"{pad}\"}}"
+                )
+            } else {
+                let p = format!(
+                    "{{\"row\":{i:04},\"status\":\"KEEP_DICT_OK_{i:04}\",\"pad\":\"{pad}\"}}"
+                );
+                expected_survivors.push(p.clone());
+                p
+            };
+            rows.push((user_id, format!("span_{i:04}"), payload));
+        }
+
+        let row_refs: Vec<(&str, &str, &str)> = rows
+            .iter()
+            .map(|(u, n, p)| (u.as_str(), n.as_str(), p.as_str()))
+            .collect();
+        let batch = build_gdpr_batch(&schema, &row_refs);
+        let mut file_bytes = Vec::new();
+        {
+            let mut w = StatamWriter::new(Arc::clone(&schema), opts, Some(&mut pb)).unwrap();
+            w.write_batch(&batch).unwrap();
+            w.finish(&mut file_bytes).unwrap();
+        }
+
+        let mut old_pack_bytes = Vec::new();
+        pb.finish(&mut old_pack_bytes).unwrap();
+        let old_pack_reader =
+            ChunkPackReader::open(Arc::new(SliceReader::new(old_pack_bytes.clone()))).unwrap();
+        assert_ne!(
+            old_pack_reader.postscript().flags & PACK_FLAG_HAS_DICT,
+            0,
+            "source >= 2 MiB pack must trigger PACK_FLAG_HAS_DICT"
+        );
+        assert!(old_pack_reader.postscript().dict_len > 0);
+        assert!(
+            old_pack_reader
+                .toc()
+                .frames
+                .iter()
+                .any(|f| (f.flags & PACK_FRAME_FLAG_USES_DICT) != 0)
+        );
+
+        let inputs = vec![GdprFileInput {
+            file_id: "dict_file".to_owned(),
+            reader: Arc::new(SliceReader::new(file_bytes)),
+            write_options: None,
+        }];
+        let mut packs: HashMap<[u8; 16], Arc<dyn RangeReader>> = HashMap::new();
+        packs.insert(pack_id, Arc::new(SliceReader::new(old_pack_bytes)));
+
+        let report = gdpr_rewrite_day(&inputs, &packs, &|b, row| {
+            matches!(
+                b.column_by_name("user_id").and_then(|c| c.get_scalar(row).ok()),
+                Some(cetra_column::ScalarValue::Utf8(ref u)) if u == "user_erased"
+            )
+        })
+        .unwrap();
+
+        assert_eq!(report.new_packs.len(), 1);
+        assert_eq!(report.retired_pack_ids, vec![pack_id]);
+        let new_pack = &report.new_packs[0];
+        let new_pack_reader =
+            ChunkPackReader::open(Arc::new(SliceReader::new(new_pack.bytes.clone()))).unwrap();
+        assert_eq!(
+            new_pack_reader.postscript().flags & PACK_FLAG_HAS_DICT,
+            0,
+            "rewritten pack must unconditionally strip PACK_FLAG_HAS_DICT"
+        );
+        assert_eq!(new_pack_reader.postscript().dict_len, 0);
+        assert_eq!(new_pack_reader.postscript().dict_off, 0);
+        assert!(
+            new_pack_reader
+                .toc()
+                .frames
+                .iter()
+                .all(|f| (f.flags & PACK_FRAME_FLAG_USES_DICT) == 0)
+        );
+
+        // Zero erased bytes in raw and decompressed rewritten pack.
+        assert!(memmem::find(&new_pack.bytes, b"ERASED_DICT_PII_").is_none());
+        for fid in 0..new_pack_reader.toc().frames.len() as u32 {
+            let dec = new_pack_reader.read_frame_decompressed(fid).unwrap();
+            assert!(memmem::find(&dec, b"ERASED_DICT_PII_").is_none());
+        }
+
+        // Verify rewritten .statam file has zero erased bytes and reads back all survivors bit-exact.
+        assert_eq!(report.rewritten_files.len(), 1);
+        let rw = &report.rewritten_files[0];
+        assert!(memmem::find(&rw.bytes, b"user_erased").is_none());
+        assert!(memmem::find(&rw.bytes, b"ERASED_DICT_PII_").is_none());
+
+        let mut resolver = InMemoryPackResolver::new();
+        resolver.insert(new_pack.new_pack_id, Arc::new(new_pack_reader));
+        let reader = StatamReader::open(
+            Arc::new(SliceReader::new(rw.bytes.clone())),
+            Some(Arc::new(resolver)),
+        )
+        .unwrap();
+        reader.verify_full().unwrap();
+
+        let out = reader.scan(&ScanRequest::default()).unwrap();
+        let mut actual_survivors = Vec::new();
+        for b in &out {
+            let col = b.column_by_name("input").unwrap();
+            for r in 0..b.num_rows() {
+                if let cetra_column::ScalarValue::Utf8(s) = col.get_scalar(r).unwrap() {
+                    actual_survivors.push(s);
+                }
+            }
+        }
+        assert_eq!(actual_survivors, expected_survivors);
+    }
 }

@@ -204,20 +204,25 @@ impl Default for WriteOptions {
 impl WriteOptions {
     /// Builds [`WriteOptions`] populated with table-specific defaults per `spec-v0.md`.
     pub fn for_table(table_kind: TableKind, profile: WriteProfile) -> Self {
-        let bloom_cols = match table_kind {
-            TableKind::Spans => vec![
+        let bloom_cols = match (table_kind, profile) {
+            (TableKind::Spans, WriteProfile::L0Fast) => vec![
+                "trace_id".to_owned(),
+                "session_id".to_owned(),
+                "user_id".to_owned(),
+            ],
+            (TableKind::Spans, WriteProfile::L1Compact) => vec![
                 "trace_id".to_owned(),
                 "span_id".to_owned(),
                 "session_id".to_owned(),
                 "user_id".to_owned(),
             ],
-            TableKind::Traces => vec![
+            (TableKind::Traces, _) => vec![
                 "trace_id".to_owned(),
                 "session_id".to_owned(),
                 "user_id".to_owned(),
             ],
-            TableKind::Scores => vec!["trace_id".to_owned(), "score_id".to_owned()],
-            TableKind::Generic => Vec::new(),
+            (TableKind::Scores, _) => vec!["trace_id".to_owned(), "score_id".to_owned()],
+            (TableKind::Generic, _) => Vec::new(),
         };
         let payload_cols = match table_kind {
             TableKind::Spans => vec![
@@ -1103,6 +1108,8 @@ impl<'a> StatamWriter<'a> {
                 sec_blooms.push((cidx, bloom_bytes, false));
             }
         }
+        // Keep smaller secondary blooms hot first; largest blooms spill first under tail budget.
+        sec_blooms.sort_unstable_by_key(|(cidx, bytes, _)| (bytes.len(), *cidx));
 
         let max_lazy_overhead = (trigram_items.len() + dict_items.len() + sec_blooms.len() + 1)
             .saturating_mul(LAZY_INDEX_ENTRY_LEN);
@@ -2058,6 +2065,80 @@ impl<'a> StatamWriter<'a> {
         let dict_clone = self.phys_col_meta[cidx].dict.as_ref().map(Arc::clone);
         let is_wide_row = self.logical_locality[cidx] == LocalityGroup::WideRow;
 
+        // O(1) mini-block fast path for `Column::Const` (all-null or inline <=16B / empty collection).
+        if let Column::Const { value, .. } = col {
+            if value.is_null() || matches!(dt, DataType::Null) {
+                let mut row_off = 0usize;
+                while row_off < rg_rows {
+                    let mb_len = (rg_rows - row_off).min(mb_size);
+                    let mb_u16 = mb_len as u16;
+                    self.phys_col_meta[cidx].null_count_total = self.phys_col_meta[cidx]
+                        .null_count_total
+                        .saturating_add(mb_len as u32);
+                    self.phys_blocks[cidx].push(BlockEntry {
+                        first_row: first_row_u32 + row_off as u32,
+                        row_count: mb_u16,
+                        null_count: mb_u16,
+                        offset: 0,
+                        stored_len: 0,
+                        raw_len: 0,
+                        encoding: Encoding::ConstNull,
+                        codec: Codec::None,
+                        block_flags: BLOCK_FLAG_ALL_NULL | BLOCK_FLAG_HAS_NULLS,
+                        min_inline_len: 0,
+                        max_inline_len: 0,
+                        reserved: [0; 3],
+                        min_inline: [0u8; 16],
+                        max_inline: [0u8; 16],
+                    });
+                    if track_trigram && let Some(list) = self.narrow_trigrams.get_mut(&cidx) {
+                        list.push(None);
+                    }
+                    row_off += mb_len;
+                }
+                return Ok(());
+            }
+
+            let single = Column::Const {
+                value: value.clone(),
+                len: 1,
+            };
+            let template = encode_mini_block_with_locality(
+                &single,
+                &dt,
+                self.options.profile,
+                dict_clone.as_deref(),
+                is_wide_row,
+            )?;
+            if template.encoding == Encoding::Const {
+                let mut row_off = 0usize;
+                while row_off < rg_rows {
+                    let mb_len = (rg_rows - row_off).min(mb_size);
+                    self.phys_blocks[cidx].push(BlockEntry {
+                        first_row: first_row_u32 + row_off as u32,
+                        row_count: mb_len as u16,
+                        null_count: 0,
+                        offset: 0,
+                        stored_len: 0,
+                        raw_len: 0,
+                        encoding: Encoding::Const,
+                        codec: Codec::None,
+                        block_flags: template.block_flags,
+                        min_inline_len: template.min_inline_len,
+                        max_inline_len: template.max_inline_len,
+                        reserved: [0; 3],
+                        min_inline: template.min_inline,
+                        max_inline: template.max_inline,
+                    });
+                    if track_trigram && let Some(list) = self.narrow_trigrams.get_mut(&cidx) {
+                        list.push(None);
+                    }
+                    row_off += mb_len;
+                }
+                return Ok(());
+            }
+        }
+
         let mut row_off = 0usize;
         while row_off < rg_rows {
             let mb_len = (rg_rows - row_off).min(mb_size);
@@ -2799,13 +2880,7 @@ fn build_rg_sbbf(
             return Ok((Sbbf::new_for_ndv(1, BLOOM_FPP), false));
         }
         let mut sbbf = Sbbf::new_for_ndv(non_nulls, bloom_fpp_for_ndv(non_nulls));
-        let mut had_any = false;
-        for row in base_row_off..end {
-            if let Some(h) = flat_row_bloom_hash(f, row) {
-                sbbf.insert_hash(h);
-                had_any = true;
-            }
-        }
+        let had_any = insert_flat_bloom_range(f, base_row_off, end, &mut sbbf);
         return Ok((sbbf, had_any));
     }
 
@@ -3421,6 +3496,158 @@ fn scalar_bloom_hash(val: &ScalarValue) -> Option<u64> {
         ScalarValue::Date(v) => Some(statam_bloom_hash(&v.to_le_bytes())),
         ScalarValue::Decimal128 { value: v, .. } => Some(statam_bloom_hash(&v.to_le_bytes())),
         _ => None,
+    }
+}
+
+fn insert_flat_bloom_range(flat: &FlatColumn, start: usize, end: usize, sbbf: &mut Sbbf) -> bool {
+    if start >= end {
+        return false;
+    }
+    let nulls = flat.nulls();
+    match flat.data() {
+        FlatData::FixedBytes16(v) => match nulls {
+            None => {
+                for item in &v[start..end] {
+                    sbbf.insert_hash(statam_bloom_hash(item));
+                }
+                true
+            }
+            Some(bm) => {
+                let mut had = false;
+                for (i, item) in v[start..end].iter().enumerate() {
+                    if bm.get(start + i) {
+                        sbbf.insert_hash(statam_bloom_hash(item));
+                        had = true;
+                    }
+                }
+                had
+            }
+        },
+        FlatData::FixedBytes8(v) => match nulls {
+            None => {
+                for item in &v[start..end] {
+                    sbbf.insert_hash(statam_bloom_hash(item));
+                }
+                true
+            }
+            Some(bm) => {
+                let mut had = false;
+                for (i, item) in v[start..end].iter().enumerate() {
+                    if bm.get(start + i) {
+                        sbbf.insert_hash(statam_bloom_hash(item));
+                        had = true;
+                    }
+                }
+                had
+            }
+        },
+        FlatData::Utf8(u) => {
+            let offs = u.offsets();
+            let bytes = u.bytes();
+            match nulls {
+                None => {
+                    for r in start..end {
+                        let s = offs[r] as usize;
+                        let e = offs[r + 1] as usize;
+                        sbbf.insert_hash(statam_bloom_hash(&bytes[s..e]));
+                    }
+                    true
+                }
+                Some(bm) => {
+                    let mut had = false;
+                    for r in start..end {
+                        if bm.get(r) {
+                            let s = offs[r] as usize;
+                            let e = offs[r + 1] as usize;
+                            sbbf.insert_hash(statam_bloom_hash(&bytes[s..e]));
+                            had = true;
+                        }
+                    }
+                    had
+                }
+            }
+        }
+        FlatData::Binary(b) => {
+            let offs = b.offsets();
+            let bytes = b.bytes();
+            match nulls {
+                None => {
+                    for r in start..end {
+                        let s = offs[r] as usize;
+                        let e = offs[r + 1] as usize;
+                        sbbf.insert_hash(statam_bloom_hash(&bytes[s..e]));
+                    }
+                    true
+                }
+                Some(bm) => {
+                    let mut had = false;
+                    for r in start..end {
+                        if bm.get(r) {
+                            let s = offs[r] as usize;
+                            let e = offs[r + 1] as usize;
+                            sbbf.insert_hash(statam_bloom_hash(&bytes[s..e]));
+                            had = true;
+                        }
+                    }
+                    had
+                }
+            }
+        }
+        FlatData::I64(v) | FlatData::TimestampNs { values: v, .. } => match nulls {
+            None => {
+                for &x in &v[start..end] {
+                    sbbf.insert_hash(statam_bloom_hash(&x.to_le_bytes()));
+                }
+                true
+            }
+            Some(bm) => {
+                let mut had = false;
+                for (i, &x) in v[start..end].iter().enumerate() {
+                    if bm.get(start + i) {
+                        sbbf.insert_hash(statam_bloom_hash(&x.to_le_bytes()));
+                        had = true;
+                    }
+                }
+                had
+            }
+        },
+        FlatData::Date(v) => match nulls {
+            None => {
+                for &x in &v[start..end] {
+                    sbbf.insert_hash(statam_bloom_hash(&x.to_le_bytes()));
+                }
+                true
+            }
+            Some(bm) => {
+                let mut had = false;
+                for (i, &x) in v[start..end].iter().enumerate() {
+                    if bm.get(start + i) {
+                        sbbf.insert_hash(statam_bloom_hash(&x.to_le_bytes()));
+                        had = true;
+                    }
+                }
+                had
+            }
+        },
+        FlatData::Decimal128 { values, .. } => match nulls {
+            None => {
+                for &x in &values[start..end] {
+                    sbbf.insert_hash(statam_bloom_hash(&x.to_le_bytes()));
+                }
+                true
+            }
+            Some(bm) => {
+                let mut had = false;
+                for (i, &x) in values[start..end].iter().enumerate() {
+                    if bm.get(start + i) {
+                        sbbf.insert_hash(statam_bloom_hash(&x.to_le_bytes()));
+                        had = true;
+                    }
+                }
+                had
+            }
+        },
+        _ => false,
     }
 }
 

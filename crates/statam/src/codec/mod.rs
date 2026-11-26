@@ -37,9 +37,11 @@ pub use fsst::{
     decode_fsst_utf8, encode_fsst_body,
 };
 pub use nested::{
-    ShreddedMapBlocks, ShreddedSubCol, decode_shredded_residual_block, decode_shredded_subcol,
-    decode_single_map_key, encode_shredded_residual_block, encode_shredded_subcol,
-    select_shredded_keys, shred_map, unshred_map,
+    ShreddedMapBlocks, ShreddedSubCol, decode_nested_column_selected,
+    decode_shredded_residual_block, decode_shredded_residual_block_selected,
+    decode_shredded_subcol, decode_shredded_subcol_selected, decode_single_map_key,
+    encode_shredded_residual_block, encode_shredded_subcol, select_shredded_keys, shred_map,
+    unshred_map, unshred_map_selected,
 };
 pub use zonemap::{
     ZoneMapSummary, ZonePred, ZoneValue, compute_zone_map as block_zone_map, zone_map_may_match,
@@ -225,6 +227,60 @@ pub(crate) fn encode_mini_block_with_locality(
         });
     }
 
+    if matches!(
+        dt,
+        DataType::List(_) | DataType::MapUtf8 | DataType::Events | DataType::Links
+    ) {
+        let len = col.len();
+        let null_count_usize = match col {
+            Column::Flat(f) => f.nulls().map_or(0, Bitmap::count_zeros),
+            Column::Const { value, .. } => {
+                if value.is_null() {
+                    len
+                } else {
+                    0
+                }
+            }
+            Column::Dict(d) => (0..d.len()).filter(|&i| d.is_null(i)).count(),
+            Column::Rle(r) => {
+                if !r.has_nulls() {
+                    0
+                } else {
+                    let mut n = 0usize;
+                    let mut prev = 0u32;
+                    for (idx, &end) in r.run_ends().iter().enumerate() {
+                        if r.values().is_null(idx) {
+                            n += (end - prev) as usize;
+                        }
+                        prev = end;
+                    }
+                    n
+                }
+            }
+        };
+        let null_count = u16::try_from(null_count_usize).unwrap_or(u16::MAX);
+        let mut block_flags = if null_count_usize > 0 {
+            BLOCK_FLAG_HAS_NULLS
+        } else {
+            0
+        };
+        if null_count_usize == len {
+            block_flags |= BLOCK_FLAG_ALL_NULL;
+        }
+        let zm = ZoneMapSummary {
+            block_flags,
+            null_count,
+            min_inline_len: 0,
+            max_inline_len: 0,
+            min_inline: [0u8; 16],
+            max_inline: [0u8; 16],
+        };
+        if let Some(inline) = try_encode_const_or_null(col, dt, &zm) {
+            return Ok(inline);
+        }
+        return encode_nested_column(col, dt, profile, MAX_NESTING_DEPTH, Some(&zm));
+    }
+
     let zm = compute_zone_map(col, file_dict.is_some_and(FileDict::is_sorted));
     if let Some(inline) = try_encode_const_or_null(col, dt, &zm) {
         return Ok(inline);
@@ -236,14 +292,7 @@ pub(crate) fn encode_mini_block_with_locality(
         return Ok(dict_block);
     }
 
-    if matches!(
-        dt,
-        DataType::List(_) | DataType::MapUtf8 | DataType::Events | DataType::Links
-    ) {
-        encode_nested_column(col, dt, profile, MAX_NESTING_DEPTH, Some(&zm))
-    } else {
-        encode_narrow_column_with_locality(col, dt, profile, Some(&zm), is_wide_row)
-    }
+    encode_narrow_column_with_locality(col, dt, profile, Some(&zm), is_wide_row)
 }
 
 fn try_encode_with_file_dict(
@@ -406,7 +455,7 @@ pub fn decode_mini_block(
 }
 
 /// Decodes one mini-block, only materializing `mask`-selected rows when the encoding
-/// supports sparse decode (such as `Fsst`).
+/// supports sparse decode (`Fsst`, sparse `Plain` varlen/map, and nested blocks).
 pub fn decode_mini_block_selected(
     raw_body: &[u8],
     entry: &BlockEntry,
@@ -414,14 +463,32 @@ pub fn decode_mini_block_selected(
     file_dict: Option<&FileDict>,
     mask: &Bitmap,
 ) -> Result<Column, StatamError> {
-    if mask.len() != entry.row_count as usize {
+    let row_count = entry.row_count as usize;
+    if mask.len() != row_count {
         return Err(StatamError::Corrupt {
             reason: "selection mask length mismatch",
         });
     }
-    if entry.encoding == Encoding::Fsst && !mask.all_ones() {
-        dt.validate(MAX_NESTING_DEPTH)?;
-        return decode_narrow_column_selected(raw_body, entry, dt, mask);
+    if !mask.all_ones() {
+        if matches!(
+            entry.encoding,
+            Encoding::ListEncoded
+                | Encoding::ShreddedMap
+                | Encoding::EventsStruct
+                | Encoding::LinksStruct
+        ) && mask.count_ones().saturating_mul(16) < row_count
+        {
+            dt.validate(MAX_NESTING_DEPTH)?;
+            return decode_nested_column_selected(raw_body, entry, dt, MAX_NESTING_DEPTH, mask);
+        }
+        if entry.encoding == Encoding::Fsst
+            || (entry.encoding == Encoding::Plain
+                && matches!(dt, DataType::Utf8 | DataType::Binary | DataType::MapUtf8)
+                && mask.count_ones().saturating_mul(16) < row_count)
+        {
+            dt.validate(MAX_NESTING_DEPTH)?;
+            return decode_narrow_column_selected(raw_body, entry, dt, mask);
+        }
     }
     decode_mini_block(raw_body, entry, dt, file_dict)
 }
@@ -1516,6 +1583,9 @@ mod tests {
         assert!(small_dict.memory_bytes() <= DICT_PASSTHROUGH_MAX_BYTES);
 
         // Also test DT01 wire roundtrip!
+        #[cfg(miri)]
+        let dt01 = small_dict.encode(Codec::Lz4, 0).unwrap();
+        #[cfg(not(miri))]
         let dt01 = small_dict.encode(Codec::Zstd, 3).unwrap();
         let small_dict_rt = FileDict::decode(&dt01, true).unwrap();
         assert_eq!(small_dict_rt, small_dict);
@@ -2275,5 +2345,488 @@ mod tests {
             roundtrip_via_frame(&unsorted_col, &DataType::I64, WriteProfile::L0Fast, None);
         assert_eq!(u_enc.encoding, Encoding::ForBitpack);
         assert!(u_dec.semantic_eq(&unsorted_col));
+    }
+
+    fn frame_raw_body(enc: &EncodedMiniBlock, row_count: usize) -> (BlockEntry, Vec<u8>) {
+        let mut framed = Vec::new();
+        let entry = enc
+            .write_framed_entry(0, row_count as u16, 0, 3, &mut framed)
+            .unwrap();
+        let raw_body = if entry.encoding == Encoding::ConstNull || entry.encoding == Encoding::Const
+        {
+            Vec::new()
+        } else {
+            let (_, _, body) = read_framed_block(&framed, MAX_BLOCK_RAW_BYTES).unwrap();
+            body
+        };
+        (entry, raw_body)
+    }
+
+    fn assert_sparse_scalar_parity(col: &Column, full: &Column, sel: &Column, mask: &Bitmap) {
+        let full_flat = full.materialize(None).unwrap();
+        let sel_flat = sel.materialize(None).unwrap();
+        let orig_flat = col.materialize(None).unwrap();
+        assert!(full_flat.semantic_eq(&orig_flat));
+        for row in mask.iter_ones() {
+            assert_eq!(sel_flat.is_null(row), full_flat.is_null(row), "row {row}");
+            if !full_flat.is_null(row) {
+                assert_eq!(
+                    sel_flat.get_scalar(row).unwrap(),
+                    full_flat.get_scalar(row).unwrap(),
+                    "row {row}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn sparse_decode_mini_block_selected_plain_and_nested_parity() {
+        let n = 128usize;
+        let active_rows = [3usize, 27, 64, 120];
+        let mut mask = Bitmap::new_zeroed(n);
+        for &r in &active_rows {
+            let _ = mask.set(r, true);
+        }
+        assert!(mask.count_ones() * 16 < n);
+
+        // 1. Plain Utf8 (L0Fast) with nulls.
+        let mut utf8_strs = Vec::with_capacity(n);
+        let mut utf8_valid = Vec::with_capacity(n);
+        for i in 0..n {
+            if i % 7 == 0 {
+                utf8_strs.push(String::new());
+                utf8_valid.push(false);
+            } else {
+                utf8_strs.push(format!("span-name-{i:04}-abcdef"));
+                utf8_valid.push(true);
+            }
+        }
+        let utf8_col = Column::Flat(
+            FlatColumn::try_new(
+                FlatData::Utf8(
+                    Utf8Data::try_from_slices(utf8_strs.iter().map(String::as_str)).unwrap(),
+                ),
+                Some(Bitmap::from_bools(&utf8_valid)),
+            )
+            .unwrap(),
+        );
+        let enc_u =
+            encode_mini_block(&utf8_col, &DataType::Utf8, WriteProfile::L0Fast, None).unwrap();
+        assert_eq!(enc_u.encoding, Encoding::Plain);
+        let (entry_u, raw_u) = frame_raw_body(&enc_u, n);
+        let full_u = decode_mini_block(&raw_u, &entry_u, &DataType::Utf8, None).unwrap();
+        let sel_u =
+            decode_mini_block_selected(&raw_u, &entry_u, &DataType::Utf8, None, &mask).unwrap();
+        assert_sparse_scalar_parity(&utf8_col, &full_u, &sel_u, &mask);
+
+        // 2. Plain Binary (L0Fast).
+        let bin_col = Column::Flat(
+            FlatColumn::try_new(
+                FlatData::Binary(
+                    BinaryData::try_from_slices(utf8_strs.iter().map(|s| s.as_bytes())).unwrap(),
+                ),
+                Some(Bitmap::from_bools(&utf8_valid)),
+            )
+            .unwrap(),
+        );
+        let enc_b =
+            encode_mini_block(&bin_col, &DataType::Binary, WriteProfile::L0Fast, None).unwrap();
+        assert_eq!(enc_b.encoding, Encoding::Plain);
+        let (entry_b, raw_b) = frame_raw_body(&enc_b, n);
+        let full_b = decode_mini_block(&raw_b, &entry_b, &DataType::Binary, None).unwrap();
+        let sel_b =
+            decode_mini_block_selected(&raw_b, &entry_b, &DataType::Binary, None, &mask).unwrap();
+        assert_sparse_scalar_parity(&bin_col, &full_b, &sel_b, &mask);
+
+        // 3. Plain MapUtf8 (L0Fast).
+        let mut map_offs = Vec::with_capacity(n + 1);
+        map_offs.push(0u32);
+        let mut m_keys = Vec::new();
+        let mut m_vals = Vec::new();
+        let mut m_val_valid = Vec::new();
+        for i in 0..n {
+            if i % 5 != 0 {
+                m_keys.push("env".to_owned());
+                m_vals.push(if i % 2 == 0 {
+                    "prod".to_owned()
+                } else {
+                    "staging".to_owned()
+                });
+                m_val_valid.push(i % 11 != 0);
+                m_keys.push(format!("k{i}"));
+                m_vals.push(format!("v{i}"));
+                m_val_valid.push(true);
+            }
+            map_offs.push(m_keys.len() as u32);
+        }
+        let map_col = Column::Flat(
+            FlatColumn::try_new(
+                FlatData::MapUtf8(Box::new(
+                    MapData::try_new(
+                        map_offs,
+                        Utf8Data::try_from_slices(m_keys.iter().map(String::as_str)).unwrap(),
+                        Utf8Data::try_from_slices(m_vals.iter().map(String::as_str)).unwrap(),
+                        Some(Bitmap::from_bools(&m_val_valid)),
+                    )
+                    .unwrap(),
+                )),
+                Some(Bitmap::from_bools(&utf8_valid)),
+            )
+            .unwrap(),
+        );
+        let enc_m =
+            encode_mini_block(&map_col, &DataType::MapUtf8, WriteProfile::L0Fast, None).unwrap();
+        assert_eq!(enc_m.encoding, Encoding::Plain);
+        let (entry_m, raw_m) = frame_raw_body(&enc_m, n);
+        let full_m = decode_mini_block(&raw_m, &entry_m, &DataType::MapUtf8, None).unwrap();
+        let sel_m =
+            decode_mini_block_selected(&raw_m, &entry_m, &DataType::MapUtf8, None, &mask).unwrap();
+        assert_sparse_scalar_parity(&map_col, &full_m, &sel_m, &mask);
+
+        // 4. List(Utf8) in both L0Fast (Plain) and L1Compact (Dict/Fsst), plus 0-active-item mask.
+        let mut list_offs = Vec::with_capacity(n + 1);
+        list_offs.push(0u32);
+        let mut l_items = Vec::new();
+        for i in 0..n {
+            if !active_rows.contains(&i) || i == 64 {
+                l_items.push(if i % 2 == 0 {
+                    "tag_alpha".to_owned()
+                } else {
+                    "tag_beta".to_owned()
+                });
+                l_items.push(format!("item_{i:03}_payload"));
+            }
+            list_offs.push(l_items.len() as u32);
+        }
+        let list_col = Column::Flat(
+            FlatColumn::try_new(
+                FlatData::List {
+                    item_type: DataType::Utf8,
+                    offsets: list_offs,
+                    values: Box::new(Column::Flat(
+                        FlatColumn::try_new(
+                            FlatData::Utf8(
+                                Utf8Data::try_from_slices(l_items.iter().map(String::as_str))
+                                    .unwrap(),
+                            ),
+                            None,
+                        )
+                        .unwrap(),
+                    )),
+                },
+                None,
+            )
+            .unwrap(),
+        );
+        for profile in [WriteProfile::L0Fast, WriteProfile::L1Compact] {
+            let enc_l = encode_mini_block(
+                &list_col,
+                &DataType::List(Box::new(DataType::Utf8)),
+                profile,
+                None,
+            )
+            .unwrap();
+            let (entry_l, raw_l) = frame_raw_body(&enc_l, n);
+            let full_l = decode_mini_block(
+                &raw_l,
+                &entry_l,
+                &DataType::List(Box::new(DataType::Utf8)),
+                None,
+            )
+            .unwrap();
+            let sel_l = decode_mini_block_selected(
+                &raw_l,
+                &entry_l,
+                &DataType::List(Box::new(DataType::Utf8)),
+                None,
+                &mask,
+            )
+            .unwrap();
+            assert_sparse_scalar_parity(&list_col, &full_l, &sel_l, &mask);
+        }
+
+        // 0 active child items fast path (only rows 3 & 27 have 0 items).
+        let mut zero_list_mask = Bitmap::new_zeroed(n);
+        let _ = zero_list_mask.set(3, true);
+        let _ = zero_list_mask.set(27, true);
+        let enc_l = encode_mini_block(
+            &list_col,
+            &DataType::List(Box::new(DataType::Utf8)),
+            WriteProfile::L1Compact,
+            None,
+        )
+        .unwrap();
+        let (entry_l, raw_l) = frame_raw_body(&enc_l, n);
+        let full_l = decode_mini_block(
+            &raw_l,
+            &entry_l,
+            &DataType::List(Box::new(DataType::Utf8)),
+            None,
+        )
+        .unwrap();
+        let sel_zero_l = decode_mini_block_selected(
+            &raw_l,
+            &entry_l,
+            &DataType::List(Box::new(DataType::Utf8)),
+            None,
+            &zero_list_mask,
+        )
+        .unwrap();
+        assert_sparse_scalar_parity(&list_col, &full_l, &sel_zero_l, &zero_list_mask);
+
+        // 5. EventsStruct in L0Fast and L1Compact (including 0-active-events mask).
+        let mut ev_offs = Vec::with_capacity(n + 1);
+        ev_offs.push(0u32);
+        let mut ev_times = Vec::new();
+        let mut ev_names = Vec::new();
+        let mut ev_attrs = Vec::new();
+        let mut ev_anulls = Vec::new();
+        for i in 0..n {
+            if i != 3 && i != 27 {
+                ev_times.push(1_700_000_000_000 + i as i64 * 10);
+                ev_names.push(if i % 2 == 0 { "llm.token" } else { "tool.call" });
+                ev_attrs.push(format!("{{\"idx\":{i},\"status\":\"ok\"}}"));
+                ev_anulls.push(i % 4 != 0);
+            }
+            ev_offs.push(ev_times.len() as u32);
+        }
+        let ev_col = Column::Flat(
+            FlatColumn::try_new(
+                FlatData::Events(Box::new(
+                    EventsData::try_new(
+                        ev_offs,
+                        ev_times,
+                        Utf8Data::try_from_slices(ev_names).unwrap(),
+                        Utf8Data::try_from_slices(ev_attrs.iter().map(String::as_str)).unwrap(),
+                        Some(Bitmap::from_bools(&ev_anulls)),
+                    )
+                    .unwrap(),
+                )),
+                None,
+            )
+            .unwrap(),
+        );
+        for profile in [WriteProfile::L0Fast, WriteProfile::L1Compact] {
+            let enc_e = encode_mini_block(&ev_col, &DataType::Events, profile, None).unwrap();
+            let (entry_e, raw_e) = frame_raw_body(&enc_e, n);
+            let full_e = decode_mini_block(&raw_e, &entry_e, &DataType::Events, None).unwrap();
+            let sel_e =
+                decode_mini_block_selected(&raw_e, &entry_e, &DataType::Events, None, &mask)
+                    .unwrap();
+            assert_sparse_scalar_parity(&ev_col, &full_e, &sel_e, &mask);
+
+            let sel_zero_e = decode_mini_block_selected(
+                &raw_e,
+                &entry_e,
+                &DataType::Events,
+                None,
+                &zero_list_mask,
+            )
+            .unwrap();
+            assert_sparse_scalar_parity(&ev_col, &full_e, &sel_zero_e, &zero_list_mask);
+        }
+
+        // 6. LinksStruct in L0Fast and L1Compact (including 0-active-links mask).
+        let mut lk_offs = Vec::with_capacity(n + 1);
+        lk_offs.push(0u32);
+        let mut lk_tids = Vec::new();
+        let mut lk_sids = Vec::new();
+        let mut lk_attrs = Vec::new();
+        let mut lk_anulls = Vec::new();
+        for i in 0..n {
+            if i != 3 && i != 27 {
+                lk_tids.push([i as u8; 16]);
+                lk_sids.push([i as u8; 8]);
+                lk_attrs.push(format!("{{\"link\":{i},\"kind\":\"follows_from\"}}"));
+                lk_anulls.push(i % 3 != 0);
+            }
+            lk_offs.push(lk_tids.len() as u32);
+        }
+        let lk_col = Column::Flat(
+            FlatColumn::try_new(
+                FlatData::Links(Box::new(
+                    LinksData::try_new(
+                        lk_offs,
+                        lk_tids,
+                        lk_sids,
+                        Utf8Data::try_from_slices(lk_attrs.iter().map(String::as_str)).unwrap(),
+                        Some(Bitmap::from_bools(&lk_anulls)),
+                    )
+                    .unwrap(),
+                )),
+                None,
+            )
+            .unwrap(),
+        );
+        for profile in [WriteProfile::L0Fast, WriteProfile::L1Compact] {
+            let enc_k = encode_mini_block(&lk_col, &DataType::Links, profile, None).unwrap();
+            let (entry_k, raw_k) = frame_raw_body(&enc_k, n);
+            let full_k = decode_mini_block(&raw_k, &entry_k, &DataType::Links, None).unwrap();
+            let sel_k = decode_mini_block_selected(&raw_k, &entry_k, &DataType::Links, None, &mask)
+                .unwrap();
+            assert_sparse_scalar_parity(&lk_col, &full_k, &sel_k, &mask);
+
+            let sel_zero_k = decode_mini_block_selected(
+                &raw_k,
+                &entry_k,
+                &DataType::Links,
+                None,
+                &zero_list_mask,
+            )
+            .unwrap();
+            assert_sparse_scalar_parity(&lk_col, &full_k, &sel_zero_k, &zero_list_mask);
+        }
+    }
+
+    #[test]
+    fn sparse_shredded_subcol_residual_and_unshred_selected_parity() {
+        let n = 128usize;
+        let active_rows = [2usize, 31, 95];
+        let mut mask = Bitmap::new_zeroed(n);
+        for &r in &active_rows {
+            let _ = mask.set(r, true);
+        }
+
+        let mut offs = Vec::with_capacity(n + 1);
+        offs.push(0u32);
+        let mut keys = Vec::new();
+        let mut vals = Vec::new();
+        let mut val_valid = Vec::new();
+        let mut row_valid = Vec::with_capacity(n);
+        for i in 0..n {
+            if i == 95 {
+                row_valid.push(false);
+                offs.push(keys.len() as u32);
+                continue;
+            }
+            row_valid.push(true);
+            keys.push("env".to_owned());
+            vals.push(if i % 2 == 0 {
+                "prod".to_owned()
+            } else {
+                "dev".to_owned()
+            });
+            val_valid.push(true);
+
+            keys.push("model".to_owned());
+            vals.push(format!("gpt-4o-mini-variant-{i:03}-long-prefix-for-fsst"));
+            val_valid.push(i != 31);
+
+            if i % 3 == 0 || i == 2 || i == 31 {
+                keys.push(format!("rare_{i}"));
+                vals.push(format!("rare_value_{i:03}_abcdefghijklmnopqrstuvwxyz"));
+                val_valid.push(true);
+            }
+            offs.push(keys.len() as u32);
+        }
+        let map_col = FlatColumn::try_new(
+            FlatData::MapUtf8(Box::new(
+                MapData::try_new(
+                    offs,
+                    Utf8Data::try_from_slices(keys.iter().map(String::as_str)).unwrap(),
+                    Utf8Data::try_from_slices(vals.iter().map(String::as_str)).unwrap(),
+                    Some(Bitmap::from_bools(&val_valid)),
+                )
+                .unwrap(),
+            )),
+            Some(Bitmap::from_bools(&row_valid)),
+        )
+        .unwrap();
+
+        let promoted = vec!["env".to_owned(), "model".to_owned()];
+        let shredded = shred_map(&map_col, &promoted).unwrap();
+
+        let sub0_bytes =
+            encode_shredded_subcol(&shredded.sub_cols[0], WriteProfile::L1Compact).unwrap();
+        let sub1_bytes =
+            encode_shredded_subcol(&shredded.sub_cols[1], WriteProfile::L1Compact).unwrap();
+        let sub0_full = decode_shredded_subcol(&sub0_bytes, n).unwrap();
+        let sub1_full = decode_shredded_subcol(&sub1_bytes, n).unwrap();
+        let sub0_sel = decode_shredded_subcol_selected(&sub0_bytes, n, &mask).unwrap();
+        let sub1_sel = decode_shredded_subcol_selected(&sub1_bytes, n, &mask).unwrap();
+
+        let res_enc =
+            encode_shredded_residual_block(&shredded.residual, WriteProfile::L1Compact).unwrap();
+        let (res_entry, res_raw) = frame_raw_body(&res_enc, n);
+        let res_full = decode_shredded_residual_block(&res_raw, &res_entry).unwrap();
+        let res_sel = decode_shredded_residual_block_selected(&res_raw, &res_entry, &mask).unwrap();
+
+        let full_unshred = unshred_map(
+            n,
+            res_full.nulls(),
+            Some(&res_full),
+            &[("env", &sub0_full), ("model", &sub1_full)],
+        )
+        .unwrap();
+        assert!(full_unshred.semantic_eq(&map_col));
+
+        let sel_unshred = unshred_map_selected(
+            n,
+            res_sel.nulls(),
+            Some(&res_sel),
+            &[("env", &sub0_sel), ("model", &sub1_sel)],
+            &mask,
+        )
+        .unwrap();
+        for &r in &active_rows {
+            assert_eq!(sel_unshred.is_null(r), full_unshred.is_null(r), "row {r}");
+            if !full_unshred.is_null(r) {
+                assert_eq!(
+                    sel_unshred.get_scalar(r).unwrap(),
+                    full_unshred.get_scalar(r).unwrap(),
+                    "row {r}"
+                );
+            }
+        }
+
+        // Also exercise Rle and Const sub-columns inside unshred_map_selected.
+        let rle_sub = ShreddedSubCol {
+            in_map: Bitmap::new_ones(n),
+            value_null: Bitmap::new_ones(n),
+            values: Column::Rle(
+                RleColumn::try_new(
+                    FlatColumn::try_new(
+                        FlatData::Utf8(Utf8Data::try_from_slices(["r0", "r1"]).unwrap()),
+                        None,
+                    )
+                    .unwrap(),
+                    vec![64, n as u32],
+                )
+                .unwrap(),
+            ),
+        };
+        let const_sub = ShreddedSubCol {
+            in_map: Bitmap::new_ones(n),
+            value_null: Bitmap::new_ones(n),
+            values: Column::Const {
+                value: ScalarValue::Utf8("const_val".to_owned()),
+                len: n,
+            },
+        };
+        let rle_full = unshred_map(n, None, None, &[("a", &const_sub), ("b", &rle_sub)]).unwrap();
+        let rle_sel =
+            unshred_map_selected(n, None, None, &[("a", &const_sub), ("b", &rle_sub)], &mask)
+                .unwrap();
+        for &r in &active_rows {
+            assert_eq!(
+                rle_sel.get_scalar(r).unwrap(),
+                rle_full.get_scalar(r).unwrap()
+            );
+        }
+
+        // Validation: mismatched mask length must return Err(Corrupt).
+        let bad_mask = Bitmap::new_zeroed(n - 1);
+        assert!(matches!(
+            decode_shredded_subcol_selected(&sub0_bytes, n, &bad_mask),
+            Err(StatamError::Corrupt { .. })
+        ));
+        assert!(matches!(
+            decode_shredded_residual_block_selected(&res_raw, &res_entry, &bad_mask),
+            Err(StatamError::Corrupt { .. })
+        ));
+        assert!(matches!(
+            unshred_map_selected(n, None, None, &[("a", &const_sub)], &bad_mask),
+            Err(StatamError::Corrupt { .. })
+        ));
     }
 }

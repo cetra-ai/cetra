@@ -34,7 +34,7 @@ inefficient_to_string = "warn"
 cetra-column.workspace = true
 crc32c.workspace = true
 lz4_flex.workspace = true
-zstd.workspace = true
+zstd = { workspace = true, features = ["zdict_builder"] }
 blake3.workspace = true
 memchr.workspace = true
 bytes.workspace = true
