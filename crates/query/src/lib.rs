@@ -4,6 +4,7 @@
 //! Pure-Rust vectorized expressions, Filter DSL, and tombstone predicates for Cetra.
 
 pub mod bind;
+pub mod encode;
 pub mod error;
 pub mod eval;
 pub mod exec;
