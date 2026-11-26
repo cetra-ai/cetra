@@ -18,6 +18,7 @@ cetra-column = { path = "../crates/column" }
 cetra-otel = { path = "../crates/otel" }
 cetra-query = { path = "../crates/query" }
 cetra-saml = { path = "../crates/saml" }
+cetra-statam = { path = "../crates/statam" }
 cetra-storage = { path = "../crates/storage" }
 
 [[bin]]
@@ -114,6 +115,13 @@ bench = false
 [[bin]]
 name = "query_expr"
 path = "fuzz_targets/query_expr.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "statam_file"
+path = "fuzz_targets/statam_file.rs"
 test = false
 doc = false
 bench = false
