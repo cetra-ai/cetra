@@ -90,9 +90,16 @@ function eligibleOf(story: StoryId, dataset: Dataset) {
   );
 }
 
-/** The drafts a story's turn makes, in order: the shared Explore chat (support) drafts a dashboard only. */
+/** The drafts a story's turn makes, in order: the shared Explore chat (support) drafts none, it offers a dashboard. */
 function draftKinds(story: Story): string[] {
-  return story.story === "support" ? ["dashboard"] : ["filter", "dashboard"];
+  return story.story === "support" ? [] : ["filter", "dashboard"];
+}
+
+/** The roles of a story chat's stored messages: without a dashboard call, the answer ends it. */
+function storedRoles(story: Story): string[] {
+  return story.turns[0].dashboard === undefined
+    ? ["user", "assistant", "tool", "assistant"]
+    : ["user", "assistant", "tool", "assistant", "tool", "assistant"];
 }
 
 function round2(value: number): number {
@@ -295,16 +302,10 @@ describe("assistant story conversations", () => {
 
       const stored = await detail(story.story, NEW_ID);
       expect(stored.title).toBe(turn.question);
-      expect(stored.message_count).toBe(6);
-      expect(stored.messages.map((message) => message.seq)).toEqual([1, 2, 3, 4, 5, 6]);
-      expect(stored.messages.map((message) => message.role)).toEqual([
-        "user",
-        "assistant",
-        "tool",
-        "assistant",
-        "tool",
-        "assistant",
-      ]);
+      const roles = storedRoles(story);
+      expect(stored.message_count).toBe(roles.length);
+      expect(stored.messages.map((message) => message.seq)).toEqual(roles.map((_, i) => i + 1));
+      expect(stored.messages.map((message) => message.role)).toEqual(roles);
       expect(stored.messages[0]?.parts).toEqual([{ type: "text", content: turn.question }]);
       expect(stored.messages[0]?.context).toEqual({ page: "traces", range: "24h" });
 
@@ -317,8 +318,13 @@ describe("assistant story conversations", () => {
 
       const draftEvent = eventsNamed(events, "draft")[0];
       const storedDraft = assistantAt(bubbles, 1).blocks.find((block) => block.type === "draft");
-      expect(draftEvent).toBeDefined();
-      expect(storedDraft).toMatchObject({ type: "draft", draft: draftEvent?.data.draft });
+      if (draftKinds(story).length === 0) {
+        expect(draftEvent).toBeUndefined();
+        expect(storedDraft).toBeUndefined();
+      } else {
+        expect(draftEvent).toBeDefined();
+        expect(storedDraft).toMatchObject({ type: "draft", draft: draftEvent?.data.draft });
+      }
     }
   });
 
@@ -354,7 +360,7 @@ describe("assistant story conversations", () => {
 
     const support = await listIn("support");
     expect(support.data.map((item) => item.id)).toEqual([firstStory().conversationId, OTHER_ID]);
-    expect(support.data.map((item) => item.message_count)).toEqual([6, 4]);
+    expect(support.data.map((item) => item.message_count)).toEqual([4, 4]);
     for (const item of support.data) {
       expect(item).not.toHaveProperty("messages");
     }
@@ -374,15 +380,15 @@ describe("assistant story conversations", () => {
     expect(after.data[0]).toMatchObject({
       id: NEW_ID,
       title: firstStory().turns[0].question,
-      message_count: 6,
+      message_count: 4,
     });
   });
 
   it("opens a stored story chat directly", async () => {
     for (const story of STORIES) {
       const stored = await detail(story.story, story.conversationId);
-      expect(stored.message_count).toBe(6);
-      expect(stored.messages).toHaveLength(6);
+      expect(stored.message_count).toBe(storedRoles(story).length);
+      expect(stored.messages).toHaveLength(storedRoles(story).length);
 
       const bubbles = bubblesOf(stored.messages);
       expect(bubbles.map((bubble) => bubble.role)).toEqual(["user", "assistant"]);
@@ -390,9 +396,11 @@ describe("assistant story conversations", () => {
 
       const last = assistantAt(bubbles, 1);
       expect(last.traceId).toBe(story.heroTraceId);
-      expect(last.blocks).toContainEqual(
-        expect.objectContaining({ type: "draft", kind: draftKinds(story)[0] }),
-      );
+      if (draftKinds(story).length > 0) {
+        expect(last.blocks).toContainEqual(
+          expect.objectContaining({ type: "draft", kind: draftKinds(story)[0] }),
+        );
+      }
     }
 
     const missing = await fetch(
@@ -428,14 +436,24 @@ describe("assistant story conversations", () => {
     }
   });
 
-  it("each story stores its filter (support has none), then its story dashboard after the answer, and both parse", async () => {
-    const dashboardIds: Record<StoryId, string> = {
-      support: STORY_DASHBOARD_IDS.answerQuality,
+  it("ends the shared Explore chat (support) on an offer to build a dashboard, with no draft", () => {
+    const [turn] = storyNamed("support").turns;
+    expect(turn.dashboard).toBeUndefined();
+    expect(
+      turn.answer.endsWith("Want me to build a dashboard that tracks quality by prompt version?"),
+    ).toBe(true);
+  });
+
+  it("each other story stores its filter, then its story dashboard after the answer, and both parse", async () => {
+    const dashboardIds: Record<Exclude<StoryId, "support">, string> = {
       coding: STORY_DASHBOARD_IDS.codeAgentHealth,
       voice: STORY_DASHBOARD_IDS.voiceLatency,
       extraction: STORY_DASHBOARD_IDS.invoiceExtraction,
     };
     for (const story of STORIES) {
+      if (story.story === "support") {
+        continue;
+      }
       const stored = await detail(story.story, story.conversationId);
       const drafts = stored.messages.flatMap((message) =>
         message.parts.flatMap((part) => (part.type === "draft" ? [part] : [])),
@@ -443,11 +461,9 @@ describe("assistant story conversations", () => {
       expect(drafts.map((part) => part.kind)).toEqual(draftKinds(story));
 
       const dashboard = drafts.at(-1);
-      if (drafts.length === 2) {
-        const parsedFilter = parseDraft("filter", drafts[0]?.draft);
-        expect(parsedFilter?.kind).toBe("filter");
-        expect(parsedFilter?.kind === "filter" && parsedFilter.draft.view).toBe("traces");
-      }
+      const parsedFilter = parseDraft("filter", drafts[0]?.draft);
+      expect(parsedFilter?.kind).toBe("filter");
+      expect(parsedFilter?.kind === "filter" && parsedFilter.draft.view).toBe("traces");
 
       const expected = storyDashboards().find((item) => item.id === dashboardIds[story.story]);
       const parsedDashboard = parseDraft("dashboard", dashboard?.draft);
@@ -660,6 +676,8 @@ describe("assistant story conversations", () => {
 
     expect(events.length).toBeGreaterThan(0);
     expect((await detail("support", NEW_ID)).messages).toEqual([]);
-    expect((await detail(story.story, story.conversationId)).message_count).toBe(6);
+    expect((await detail(story.story, story.conversationId)).message_count).toBe(
+      storedRoles(story).length,
+    );
   });
 });

@@ -9,7 +9,7 @@ const shots = JSON.parse(
 const shotNames = new Set(shots.map((shot) => shot.name));
 const pngDir = new URL("../../assets/screenshots/", import.meta.url);
 
-/** The 12 captions, as the fixed content of plan M15 states them (copy edits touch this table too): one
+/** The 8 captions, as the fixed content of plan M15 states them (copy edits touch this table too): one
  * per story, or one string for a shared picture (M19 retake). */
 const EXPECTED = {
   hero: {
@@ -25,20 +25,15 @@ const EXPECTED = {
     voice: "Hear the caller and the agent, and read what was said, in one voice turn.",
     extraction: "A 200-invoice batch, with its three failed invoices at the top.",
   },
-  explore: "Ask which prompt got worse, and get the numbers, the cause and a dashboard.",
+  explore: "Ask which prompt got worse, and get the numbers and the cause.",
   issues: "Answers that contradict their sources, grouped into one issue with their examples.",
-  evaluate: {
-    support: "Reviewers score each flagged answer in a queue, one by one.",
-    coding: "A code check scores every run, and the rule charts its pass rate by the hour.",
-    voice: "Write the judge's question once, then test it on a real call.",
-    extraction: "Version 4 lifts vat_number from 91% to 96% on 300 invoices.",
-  },
+  evaluate: "Version 4 lifts vat_number from 91% to 96% on 300 invoices.",
   prompts: "Run two prompt versions on the same question, and see which one answers right.",
   alert: "Know when the error rate, a score, the cost or an issue crosses your line.",
 };
 
 /** The pictures shared by every story (M19 retake): the same shot, no story picker. */
-const SHARED = ["explore", "issues", "prompts", "alert"];
+const SHARED = ["explore", "issues", "evaluate", "prompts", "alert"];
 const PANELS = 4 * (7 - SHARED.length) + SHARED.length;
 
 test("the four stories are in the fixed order", () => {
@@ -91,7 +86,7 @@ test("every shot is in screenshots.json and has a PNG", () => {
   assert.equal(shotName("trace", "support"), "marketing-trace-page");
   assert.equal(shotName("trace", "voice"), "marketing-trace-page-voice");
   assert.equal(shotName("evaluate", "support"), "marketing-evaluate");
-  assert.equal(shotName("evaluate", "coding"), "marketing-evaluate-coding");
+  assert.equal(shotName("evaluate", "coding"), "marketing-evaluate");
   assert.equal(shotName("issues", "voice"), "marketing-issue");
 });
 

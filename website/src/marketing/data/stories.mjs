@@ -16,7 +16,8 @@ export const STORIES = /** @type {const} */ ([
  * @typedef {object} PictureContent
  * @property {string} alt     what the picture shows, one sentence, for screen readers
  * @property {string} caption one line under the picture
- * @property {number} [start] where a picture taller than its frame starts, in CSS px of the shot from its top
+ * @property {number} [start] makes the picture scroll: its frame is as tall as the chapter's tallest other picture,
+ * and it opens `start` CSS px from its top (the coding transcript, which is much taller than the others)
  */
 
 /**
@@ -26,8 +27,6 @@ export const STORIES = /** @type {const} */ ([
  * @property {string} base    the shot's base name in screenshots.json
  * @property {string | Record<string, string>} label the Frame's title-bar text; one per story when a record
  * @property {Record<string, PictureContent>} [stories] keyed by story id; absent for a shared picture
- * @property {number} [frameHeight] the height, in CSS px, of the frame every story's picture sits in: a taller
- * picture scrolls inside it and a shorter one sits at its top, so switching stories never moves the page
  * @property {PictureContent} [shared] one picture for every story, shown without the story picker: the
  * shot is `base` itself (the chapter's pages look the same in every story, M19 retake)
  */
@@ -66,7 +65,6 @@ export const PICTURES = [
   },
   {
     id: "trace",
-    frameHeight: 630,
     section: "Trace",
     base: "marketing-trace-page",
     label: {
@@ -101,8 +99,8 @@ export const PICTURES = [
     base: "marketing-assistant",
     label: "Assistant",
     shared: {
-      alt: "The assistant's window: the question which prompts got worse this week, a SQL step, the answer that kb-answer v13 dropped correctness from 0.85 to 0.78 with 62% of its downvotes quoting the old pricing page, and a dashboard card.",
-      caption: "Ask which prompt got worse, and get the numbers, the cause and a dashboard.",
+      alt: "The assistant's window: the question which prompts got worse this week, a SQL step, the answer that kb-answer v13 dropped correctness from 0.85 to 0.78 with 62% of its downvotes quoting the old pricing page, and an offer to build a dashboard.",
+      caption: "Ask which prompt got worse, and get the numbers and the cause.",
     },
   },
   {
@@ -117,32 +115,12 @@ export const PICTURES = [
   },
   {
     id: "evaluate",
-    frameHeight: 630,
     section: "Evaluate",
     base: "marketing-evaluate",
-    label: {
-      support: "Annotation queue",
-      coding: "Online rule",
-      voice: "LLM judge",
-      extraction: "Experiments",
-    },
-    stories: {
-      support: {
-        alt: "An annotation queue's review of a support conversation: its four turns on the left, the progress 4 of 25 done, and the form filled in with correctness 0.3 and its reason, tone friendly and policy No.",
-        caption: "Reviewers score each flagged answer in a queue, one by one.",
-      },
-      coding: {
-        alt: "The online rule Tests pass after the patch: its evaluator, target and 100% sample rate, 411 runs scored in the last 24 hours, and its scores at 66% over the same hours.",
-        caption: "A code check scores every run, and the rule charts its pass rate by the hour.",
-      },
-      voice: {
-        alt: "The LLM judge Reads the booking back on its Configuration tab: its question about the booking, a test on one trace, and the result false, with the reason that the agent never read the booking back.",
-        caption: "Write the judge's question once, then test it on a real call.",
-      },
-      extraction: {
-        alt: "The comparison of extract-invoice versions 3 and 4 on 300 invoices: total passes 99% against 97%, vat_number 96% against 91%, and cost $0.72 against $0.63.",
-        caption: "Version 4 lifts vat_number from 91% to 96% on 300 invoices.",
-      },
+    label: "Experiments",
+    shared: {
+      alt: "The comparison of extract-invoice versions 3 and 4 on 300 invoices: total passes 99% against 97%, vat_number 96% against 91%, and cost $0.72 against $0.63.",
+      caption: "Version 4 lifts vat_number from 91% to 96% on 300 invoices.",
     },
   },
   {

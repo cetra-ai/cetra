@@ -304,8 +304,11 @@ type TurnSpec = {
   /** The filter card the turn drafts before its answer; the shared Explore picture's turn has none (M19 retake). */
   draft?: { kind: "filter"; draft: Fields };
   answer: string;
-  /** The story's dashboard draft, which the turn drafts after its answer with a second call. */
-  dashboard: Fields;
+  /**
+   * The story's dashboard draft, which the turn drafts after its answer with a second call. The shared Explore
+   * picture's turn has none: its answer ends by offering one.
+   */
+  dashboard?: Fields;
 };
 
 const USAGE = { input: 1400, output: 160 };
@@ -315,8 +318,30 @@ function turnSummaryOf(spec: TurnSpec) {
   return { size_bytes: JSON.stringify(spec.result).length, rows: spec.rows };
 }
 
-function dashboardSummaryOf(spec: TurnSpec) {
-  return { size_bytes: JSON.stringify(spec.dashboard).length };
+function dashboardSummaryOf(dashboard: Fields) {
+  return { size_bytes: JSON.stringify(dashboard).length };
+}
+
+/** The stream events of a turn's dashboard call, after its answer; none for a turn without one. */
+function dashboardEvents(dashboard: Fields | undefined): StreamEvent[] {
+  if (dashboard === undefined) {
+    return [];
+  }
+  return [
+    {
+      event: "tool_call",
+      data: { id: DASHBOARD_CALL_ID, name: "draft_dashboard", arguments: dashboard },
+    },
+    {
+      event: "tool_result",
+      data: { id: DASHBOARD_CALL_ID, ok: true, summary: dashboardSummaryOf(dashboard) },
+    },
+    {
+      event: "draft",
+      data: { id: `draft_${DASHBOARD_CALL_ID}`, kind: "dashboard", draft: dashboard },
+    },
+    { event: "text", data: { delta: DASHBOARD_CLOSING } },
+  ];
 }
 
 function storyEvents(spec: TurnSpec, traceId: string, turnId: number): StreamEvent[] {
@@ -338,27 +363,77 @@ function storyEvents(spec: TurnSpec, traceId: string, turnId: number): StreamEve
           } satisfies StreamEvent,
         ]),
     { event: "text", data: { delta: spec.answer } },
-    {
-      event: "tool_call",
-      data: { id: DASHBOARD_CALL_ID, name: "draft_dashboard", arguments: spec.dashboard },
-    },
-    {
-      event: "tool_result",
-      data: { id: DASHBOARD_CALL_ID, ok: true, summary: dashboardSummaryOf(spec) },
-    },
-    {
-      event: "draft",
-      data: { id: `draft_${DASHBOARD_CALL_ID}`, kind: "dashboard", draft: spec.dashboard },
-    },
-    { event: "text", data: { delta: DASHBOARD_CLOSING } },
+    ...dashboardEvents(spec.dashboard),
     {
       event: "done",
-      data: { finish_reason: "stop", usage: USAGE, cost_usd: COST_USD, steps: 2 },
+      data: {
+        finish_reason: "stop",
+        usage: USAGE,
+        cost_usd: COST_USD,
+        steps: spec.dashboard === undefined ? 1 : 2,
+      },
     },
   ];
 }
 
-/** The stored messages of a story turn: question, call, result with its draft (if any), answer, dashboard. */
+/** The stored messages of a turn's dashboard call (seq 4 to 6); only the answer (seq 4) for a turn without one. */
+function dashboardMessages(
+  spec: TurnSpec,
+  reply: { status: string; turn_trace_id: string; created_at: string },
+): StoredMessage[] {
+  const { dashboard } = spec;
+  if (dashboard === undefined) {
+    return [
+      { seq: 4, role: "assistant", parts: [{ type: "text", content: spec.answer }], ...reply },
+    ];
+  }
+  return [
+    {
+      seq: 4,
+      role: "assistant",
+      parts: [
+        { type: "text", content: spec.answer },
+        {
+          type: "tool_call",
+          id: DASHBOARD_CALL_ID,
+          name: "draft_dashboard",
+          arguments: dashboard,
+        },
+      ],
+      ...reply,
+    },
+    {
+      seq: 5,
+      role: "tool",
+      parts: [
+        {
+          type: "tool_result",
+          id: DASHBOARD_CALL_ID,
+          name: "draft_dashboard",
+          ok: true,
+          result: { status: "drafted" },
+          ...dashboardSummaryOf(dashboard),
+          stubbed: false,
+        },
+        {
+          type: "draft",
+          id: `draft_${DASHBOARD_CALL_ID}`,
+          kind: "dashboard",
+          draft: dashboard,
+        },
+      ],
+      ...reply,
+    },
+    {
+      seq: 6,
+      role: "assistant",
+      parts: [{ type: "text", content: DASHBOARD_CLOSING }],
+      ...reply,
+    },
+  ];
+}
+
+/** The stored messages of a story turn: question, call, result with its draft (if any), answer, dashboard (if any). */
 function storyMessages(
   spec: TurnSpec,
   traceId: string,
@@ -414,48 +489,7 @@ function storyMessages(
       ],
       ...reply,
     },
-    {
-      seq: 4,
-      role: "assistant",
-      parts: [
-        { type: "text", content: spec.answer },
-        {
-          type: "tool_call",
-          id: DASHBOARD_CALL_ID,
-          name: "draft_dashboard",
-          arguments: spec.dashboard,
-        },
-      ],
-      ...reply,
-    },
-    {
-      seq: 5,
-      role: "tool",
-      parts: [
-        {
-          type: "tool_result",
-          id: DASHBOARD_CALL_ID,
-          name: "draft_dashboard",
-          ok: true,
-          result: { status: "drafted" },
-          ...dashboardSummaryOf(spec),
-          stubbed: false,
-        },
-        {
-          type: "draft",
-          id: `draft_${DASHBOARD_CALL_ID}`,
-          kind: "dashboard",
-          draft: spec.dashboard,
-        },
-      ],
-      ...reply,
-    },
-    {
-      seq: 6,
-      role: "assistant",
-      parts: [{ type: "text", content: DASHBOARD_CLOSING }],
-      ...reply,
-    },
+    ...dashboardMessages(spec, reply),
   ];
 }
 
@@ -548,17 +582,16 @@ export const STORIES: Story[] = [
           ],
         },
         rows: 2,
-        dashboard: dashboardDraft(STORY_DASHBOARD_IDS.answerQuality),
         answer: [
-          "**kb-answer v13** is the prompt that got worse this week. It shipped with release v2.14 on Tuesday at 14:00:",
+          "**kb-answer v13** got worse. It shipped with release v2.14 on Tuesday:",
           "",
           "- correctness 0.85 → **0.78** over **1,317** answers",
           "- thumbs-down 8% → **15%**",
-          "- cost per answer flat, $0.0064 → $0.0065",
+          "- cost flat, $0.0064 → $0.0065",
           "",
-          '**62%** of its downvoted answers (**41** of 66) quote `pricing-2025.md`: v13 dropped the line "Use only the current pricing page", so the old page now wins retrieval ties.',
+          "**62%** of its downvotes (**41** of 66) quote the old `pricing-2025.md`.",
           "",
-          "Compare v12 and v13 in the playground before you move the `production` label back.",
+          "Want me to build a dashboard that tracks quality by prompt version?",
         ].join("\n"),
       },
     ],
