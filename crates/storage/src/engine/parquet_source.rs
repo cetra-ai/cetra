@@ -5558,12 +5558,12 @@ mod tests {
         rt: &tokio::runtime::Runtime,
         store: &Arc<dyn ObjectStore>,
         path: &str,
-        file_id: FileId,
         table: FileTable,
         day: NaiveDate,
         batches: &[RecordBatch],
         props: WriterProperties,
     ) -> Arc<FileMeta> {
+        let file_id = FileId::new_v7();
         let mut buf = Vec::new();
         let schema = batches[0].schema();
         let mut writer = ArrowWriter::try_new(&mut buf, schema, Some(props)).expect("arrow writer");
@@ -5576,7 +5576,7 @@ mod tests {
         let size = buf.len() as u64;
         let footer_size = if buf.len() >= 8 {
             let tail: [u8; 8] = buf[buf.len() - 8..].try_into().expect("tail");
-            footer_size_from_tail(&tail, size).unwrap_or(8) as u64
+            footer_size_from_tail(&tail, size).unwrap_or(8)
         } else {
             8
         };
@@ -5819,7 +5819,6 @@ mod tests {
             &rt,
             &store,
             "nested_nulls.parquet",
-            FileId::new_v7(),
             FileTable::Spans,
             day,
             &[nested_rb],
@@ -6088,7 +6087,7 @@ mod tests {
         let tail: [u8; 8] = patched_buf[patched_buf.len() - 8..]
             .try_into()
             .expect("tail");
-        let footer_size = footer_size_from_tail(&tail, size).expect("footer size") as u64;
+        let footer_size = footer_size_from_tail(&tail, size).expect("footer size");
         let file_id = FileId::new_v7();
         let path = "spans/zero_bloom.parquet";
         rt.block_on(store.put(&ObjectPath::from(path), PutPayload::from(patched_buf)))
@@ -6184,7 +6183,6 @@ mod tests {
             &rt,
             &store,
             "nan.parquet",
-            FileId::new_v7(),
             FileTable::Spans,
             day,
             &[rb_nan, rb_hi],
@@ -6324,10 +6322,11 @@ mod tests {
         let file_id = FileId::new_v7();
         let handle = rt.handle().clone();
         rt.block_on(async move {
+            let range = 0..8;
             let err = fetch_ranges(
                 &store,
                 &ObjectPath::from("missing.parquet"),
-                &[0..8],
+                std::slice::from_ref(&range),
                 &CancelToken::new(),
                 &handle,
             )

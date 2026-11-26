@@ -566,7 +566,7 @@ mod tests {
 
         let ctx = EvalContext {
             now_ns: 0,
-            cancel: cetra_column::CancelToken::new(),
+            cancel: CancelToken::new(),
         };
         let out = apply_tombstones_and_filters(batch, None, &filters, &ctx, Some(&mut res), before)
             .unwrap();
