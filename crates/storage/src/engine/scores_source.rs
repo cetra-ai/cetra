@@ -16,7 +16,7 @@ use cetra_query::exec::{
     ExecContext, IdLookupHint, PartitionStream, ScanSource, ScanSpec, SortKey, TimeRangeHint,
     run_pipeline,
 };
-use cetra_query::{BinaryOp, EvalContext, Expr, QueryError, eval_filter};
+use cetra_query::{BinaryOp, EvalContext, Expr, QueryError, UnaryOp, eval_filter};
 use chrono::NaiveDate;
 use object_store::ObjectStore;
 
@@ -123,18 +123,16 @@ impl ScanSource for ScoresSource {
 
         let created_at_idx = schema_col_idx(&self.schema, scores::CREATED_AT)?;
         let score_id_idx = schema_col_idx(&self.schema, scores::SCORE_ID)?;
-        let trace_id_idx = schema_col_idx(&self.schema, scores::TRACE_ID)?;
         let updated_at_idx = schema_col_idx(&self.schema, scores::UPDATED_AT)?;
         let ingest_time_idx = schema_col_idx(&self.schema, scores::INGEST_TIME)?;
         let deleted_idx = schema_col_idx(&self.schema, scores::DELETED)?;
 
-        // Mandatory pushdown safety invariant (`QE-M15`): ONLY immutable columns
-        // (`created_at`, `score_id`, `trace_id`) and their `IdLookupHint`s are pushed below
-        // LWW dedup (still keeping `around_ns: None`).
-        let pushed_immutable = immutable_pushdown_conjuncts(
-            &spec.filters,
-            &[created_at_idx, score_id_idx, trace_id_idx],
-        );
+        // Mandatory pushdown safety invariant (`QE-M15`, H4a): ONLY immutable columns
+        // (`created_at`, `score_id`) and their infallible `IdLookupHint`s are pushed below
+        // LWW dedup (explicit `score_id` upserts may change `target`/`trace_id`, so `trace_id`
+        // must remain post-LWW; still keeping `around_ns: None`).
+        let pushed_immutable =
+            immutable_pushdown_conjuncts(&spec.filters, &[created_at_idx, score_id_idx]);
         let pushed_id_lookups: Vec<IdLookupHint> = spec
             .id_lookups
             .iter()
@@ -144,7 +142,7 @@ impl ScanSource for ScoresSource {
                     | IdLookupHint::Fixed8 { column, .. }
                     | IdLookupHint::Utf8 { column, .. } => column.as_str(),
                 };
-                matches!(col, scores::SCORE_ID | scores::TRACE_ID)
+                col == scores::SCORE_ID
             })
             .cloned()
             .collect();
@@ -225,7 +223,7 @@ impl ScanSource for ScoresSource {
             }
         };
 
-        // Push immutable `created_at` bounds + `created_at`/`score_id`/`trace_id` filters & hints below LWW dedup.
+        // Push immutable `created_at` bounds + infallible `created_at`/`score_id` filters & hints below LWW dedup.
         let inner_spec = ScanSpec {
             projection: Some(scan_indices),
             map_projections: spec.map_projections.clone(),
@@ -390,6 +388,81 @@ fn immutable_pushdown_conjuncts(filters: &[Expr], allowed_cols: &[usize]) -> Vec
     out
 }
 
+fn is_infallible_pushdown(expr: &Expr) -> bool {
+    let mut stack = vec![expr];
+    while let Some(node) = stack.pop() {
+        match node {
+            Expr::Column { .. } | Expr::Literal(_) => {}
+            Expr::Unary {
+                op:
+                    UnaryOp::Not
+                    | UnaryOp::IsNull
+                    | UnaryOp::IsNotNull
+                    | UnaryOp::IsTrue
+                    | UnaryOp::IsFalse
+                    | UnaryOp::IsNotTrue
+                    | UnaryOp::IsNotFalse,
+                expr,
+                ..
+            } => {
+                stack.push(expr);
+            }
+            Expr::Binary {
+                left,
+                op:
+                    BinaryOp::Eq
+                    | BinaryOp::NotEq
+                    | BinaryOp::Lt
+                    | BinaryOp::LtEq
+                    | BinaryOp::Gt
+                    | BinaryOp::GtEq
+                    | BinaryOp::IsDistinctFrom
+                    | BinaryOp::IsNotDistinctFrom
+                    | BinaryOp::And
+                    | BinaryOp::Or,
+                right,
+                ..
+            } => {
+                if matches!(left.data_type(), DataType::Decimal128 { .. })
+                    || matches!(right.data_type(), DataType::Decimal128 { .. })
+                {
+                    return false;
+                }
+                stack.push(right);
+                stack.push(left);
+            }
+            Expr::Between {
+                expr, low, high, ..
+            } => {
+                if matches!(expr.data_type(), DataType::Decimal128 { .. })
+                    || matches!(low.data_type(), DataType::Decimal128 { .. })
+                    || matches!(high.data_type(), DataType::Decimal128 { .. })
+                {
+                    return false;
+                }
+                stack.push(high);
+                stack.push(low);
+                stack.push(expr);
+            }
+            Expr::InList { expr, list, .. } => {
+                if matches!(expr.data_type(), DataType::Decimal128 { .. })
+                    || list
+                        .iter()
+                        .any(|e| matches!(e.data_type(), DataType::Decimal128 { .. }))
+                {
+                    return false;
+                }
+                for item in list {
+                    stack.push(item);
+                }
+                stack.push(expr);
+            }
+            _ => return false,
+        }
+    }
+    true
+}
+
 fn collect_allowed_conjuncts(expr: &Expr, allowed_cols: &[usize], out: &mut Vec<Expr>) {
     if let Expr::Binary {
         left,
@@ -404,7 +477,10 @@ fn collect_allowed_conjuncts(expr: &Expr, allowed_cols: &[usize], out: &mut Vec<
     }
     let mut cols = BTreeSet::new();
     expr.referenced_columns(&mut cols);
-    if !cols.is_empty() && cols.iter().all(|idx| allowed_cols.contains(idx)) {
+    if !cols.is_empty()
+        && cols.iter().all(|idx| allowed_cols.contains(idx))
+        && is_infallible_pushdown(expr)
+    {
         out.push(expr.clone());
     }
 }
@@ -683,4 +759,269 @@ fn truncate_batch_rows(batch: Batch, take: usize) -> Result<Batch, QueryError> {
         Selection::Indices(idx) => Selection::Indices(idx[..take].to_vec()),
     };
     Ok(batch.into_with_selection(new_sel)?)
+}
+
+#[cfg(test)]
+mod tests {
+    use cetra_column::{Column, FlatColumn, FlatData, GlobalPool, ScalarValue, Utf8Data};
+    use cetra_core::ids::TraceId;
+    use cetra_query::exec::{CollectSink, ExecMetrics, SpillManager, WorkerPool};
+    use cetra_query::{CastMode, ScalarFn};
+    use object_store::memory::InMemory;
+
+    use super::*;
+    use crate::engine::day_start_ns;
+    use crate::memtable::Memtable;
+    use crate::test_support::{score_row, score_rows};
+    use crate::verify::VerifyQueue;
+
+    fn test_project() -> ProjectId {
+        "018f6b4e-7c1a-7c1a-8c1a-000000000001".parse().unwrap()
+    }
+
+    fn test_trace_id(tag: u8) -> TraceId {
+        TraceId::from_bytes([tag; 16]).unwrap()
+    }
+
+    fn make_exec_ctx(dir: &std::path::Path) -> ExecContext {
+        ExecContext {
+            pool: GlobalPool::standalone(16 * 1024 * 1024),
+            eval: EvalContext::new(0, CancelToken::new()),
+            spill: Arc::new(SpillManager::with_fixed_cap(dir.to_path_buf(), 0)),
+            workers: Arc::new(WorkerPool::new(1).unwrap()),
+            batch_size: 16,
+            target_partitions: 1,
+            metrics: ExecMetrics::default(),
+        }
+    }
+
+    fn run_scores(
+        source: &ScoresSource,
+        spec: &ScanSpec,
+        ctx: &ExecContext,
+    ) -> Result<Vec<Batch>, QueryError> {
+        let streams = source.open_partitions(spec, ctx)?;
+        let pool = Arc::clone(&ctx.pool);
+        let sinks = run_pipeline(
+            ctx,
+            streams,
+            |_| Ok(Vec::new()),
+            move |_| Ok(CollectSink::new(&pool)),
+        )?;
+        Ok(sinks
+            .into_iter()
+            .flat_map(CollectSink::into_batches)
+            .collect())
+    }
+
+    #[test]
+    fn cast_score_id_stays_post_lww_and_does_not_fail_on_deleted_non_numeric_row() {
+        let schema = scores_schema();
+        let score_id_idx = schema.index_of(scores::SCORE_ID).unwrap();
+        let created_at_idx = schema.index_of(scores::CREATED_AT).unwrap();
+        let trace_id_idx = schema.index_of(scores::TRACE_ID).unwrap();
+
+        let cast_filter = Expr::Binary {
+            left: Box::new(Expr::Cast {
+                expr: Box::new(Expr::Column {
+                    index: score_id_idx,
+                    name: scores::SCORE_ID.to_owned(),
+                    data_type: DataType::Utf8,
+                }),
+                target: DataType::I64,
+                mode: CastMode::Strict,
+            }),
+            op: BinaryOp::Eq,
+            right: Box::new(Expr::Literal(ScalarValue::I64(1))),
+            data_type: DataType::Bool,
+        };
+        let trace_filter = Expr::Binary {
+            left: Box::new(Expr::Column {
+                index: trace_id_idx,
+                name: scores::TRACE_ID.to_owned(),
+                data_type: DataType::FixedBytes16,
+            }),
+            op: BinaryOp::Eq,
+            right: Box::new(Expr::Literal(ScalarValue::FixedBytes16(
+                *test_trace_id(1).as_bytes(),
+            ))),
+            data_type: DataType::Bool,
+        };
+        let created_filter = Expr::Binary {
+            left: Box::new(Expr::Column {
+                index: created_at_idx,
+                name: scores::CREATED_AT.to_owned(),
+                data_type: DataType::timestamp_utc(),
+            }),
+            op: BinaryOp::GtEq,
+            right: Box::new(Expr::Literal(ScalarValue::TimestampNs {
+                value: 0,
+                utc: true,
+            })),
+            data_type: DataType::Bool,
+        };
+        let call_filter = Expr::Binary {
+            left: Box::new(Expr::Call {
+                func: ScalarFn::Length,
+                args: vec![Expr::Column {
+                    index: score_id_idx,
+                    name: scores::SCORE_ID.to_owned(),
+                    data_type: DataType::Utf8,
+                }],
+                data_type: DataType::I64,
+            }),
+            op: BinaryOp::Gt,
+            right: Box::new(Expr::Literal(ScalarValue::I64(0))),
+            data_type: DataType::Bool,
+        };
+
+        let pushed = immutable_pushdown_conjuncts(
+            &[
+                cast_filter.clone(),
+                trace_filter,
+                created_filter.clone(),
+                call_filter,
+            ],
+            &[created_at_idx, score_id_idx],
+        );
+        assert_eq!(pushed, vec![created_filter]);
+
+        let day = NaiveDate::from_ymd_opt(2026, 1, 1).unwrap();
+        let t0 = day_start_ns(day).unwrap();
+        let base = score_rows(&[
+            score_row(1, 1, t0, 100, 100, false, "acc"),
+            score_row(2, 1, t0, 100, 100, false, "acc"),
+            score_row(2, 1, t0, 200, 200, true, "acc"),
+        ]);
+        let (_, mut cols, raw_len, sel) = base.into_parts();
+        cols[score_id_idx] = Arc::new(Column::Flat(
+            FlatColumn::try_new(
+                FlatData::Utf8(
+                    Utf8Data::try_from_slices(["1", "not-a-number", "not-a-number"]).unwrap(),
+                ),
+                None,
+            )
+            .unwrap(),
+        ));
+        let batch = Batch::try_new_shared(Arc::clone(&schema), cols, raw_len, sel).unwrap();
+
+        let mut mem = Memtable::new(Table::Scores);
+        mem.insert(test_project(), batch, 1).unwrap();
+
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let source = ScoresSource::new(
+            Arc::new(InMemory::new()),
+            test_project(),
+            Vec::new(),
+            mem.snapshot(),
+            None,
+            Arc::from([]),
+            Arc::new(FileMetadataCache::new(1024 * 1024)),
+            Suspects::new(Arc::new(VerifyQueue::default())),
+            rt.handle().clone(),
+        )
+        .unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = make_exec_ctx(dir.path());
+        let spec = ScanSpec {
+            projection: Some(vec![score_id_idx]),
+            filters: vec![cast_filter],
+            ..Default::default()
+        };
+        let out = run_scores(&source, &spec, &ctx).unwrap();
+        let total: usize = out.iter().map(Batch::num_rows).sum();
+        assert_eq!(total, 1);
+        let b = out[0].compact(None).unwrap();
+        assert_eq!(read_str_at(b.column(0).unwrap(), 0), Some("1"));
+    }
+
+    #[test]
+    fn trace_id_upsert_is_not_pushed_below_lww() {
+        let schema = scores_schema();
+        let score_id_idx = schema.index_of(scores::SCORE_ID).unwrap();
+        let trace_id_idx = schema.index_of(scores::TRACE_ID).unwrap();
+
+        let day = NaiveDate::from_ymd_opt(2026, 1, 1).unwrap();
+        let t0 = day_start_ns(day).unwrap();
+        let old_trace = *test_trace_id(1).as_bytes();
+        let mut old_row = score_row(10, 1, t0, 100, 100, false, "acc");
+        old_row.target = cetra_core::score::ScoreTarget::Trace {
+            trace_id: test_trace_id(1),
+        };
+        let mut new_row = score_row(10, 2, t0, 200, 200, false, "acc");
+        new_row.target = cetra_core::score::ScoreTarget::Trace {
+            trace_id: test_trace_id(2),
+        };
+        let batch = score_rows(&[old_row, new_row]);
+
+        let mut mem = Memtable::new(Table::Scores);
+        mem.insert(test_project(), batch, 1).unwrap();
+
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let source = ScoresSource::new(
+            Arc::new(InMemory::new()),
+            test_project(),
+            Vec::new(),
+            mem.snapshot(),
+            None,
+            Arc::from([]),
+            Arc::new(FileMetadataCache::new(1024 * 1024)),
+            Suspects::new(Arc::new(VerifyQueue::default())),
+            rt.handle().clone(),
+        )
+        .unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = make_exec_ctx(dir.path());
+
+        let spec_old = ScanSpec {
+            projection: Some(vec![score_id_idx]),
+            id_lookups: vec![IdLookupHint::Fixed16 {
+                column: scores::TRACE_ID.to_owned(),
+                values: vec![old_trace],
+            }],
+            filters: vec![Expr::Binary {
+                left: Box::new(Expr::Column {
+                    index: trace_id_idx,
+                    name: scores::TRACE_ID.to_owned(),
+                    data_type: DataType::FixedBytes16,
+                }),
+                op: BinaryOp::Eq,
+                right: Box::new(Expr::Literal(ScalarValue::FixedBytes16(old_trace))),
+                data_type: DataType::Bool,
+            }],
+            ..Default::default()
+        };
+        let out_old = run_scores(&source, &spec_old, &ctx).unwrap();
+        let total_old: usize = out_old.iter().map(Batch::num_rows).sum();
+        assert_eq!(total_old, 0, "superseded trace_id must not match after LWW");
+
+        let new_trace = *test_trace_id(2).as_bytes();
+        let spec_new = ScanSpec {
+            projection: Some(vec![score_id_idx]),
+            id_lookups: vec![IdLookupHint::Fixed16 {
+                column: scores::TRACE_ID.to_owned(),
+                values: vec![new_trace],
+            }],
+            filters: vec![Expr::Binary {
+                left: Box::new(Expr::Column {
+                    index: trace_id_idx,
+                    name: scores::TRACE_ID.to_owned(),
+                    data_type: DataType::FixedBytes16,
+                }),
+                op: BinaryOp::Eq,
+                right: Box::new(Expr::Literal(ScalarValue::FixedBytes16(new_trace))),
+                data_type: DataType::Bool,
+            }],
+            ..Default::default()
+        };
+        let out_new = run_scores(&source, &spec_new, &ctx).unwrap();
+        let total_new: usize = out_new.iter().map(Batch::num_rows).sum();
+        assert_eq!(total_new, 1, "latest upserted trace_id must match");
+    }
 }

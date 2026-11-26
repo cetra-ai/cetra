@@ -960,12 +960,18 @@ impl PartitionSortStream {
         )
         .with_max_merge_way(self.max_merge_way);
 
+        let mut remaining_bytes: usize = self.in_mem.iter().map(Batch::memory_bytes).sum();
         for batch in self.in_mem.drain(..) {
             if cancel.is_cancelled() {
                 self.in_mem_res.free();
                 return Err(QueryError::Cancelled);
             }
+            remaining_bytes = remaining_bytes.saturating_sub(batch.memory_bytes());
             sort.consume(batch, &mut self.in_mem_res)?;
+            let excess = self.in_mem_res.size().saturating_sub(remaining_bytes);
+            if excess > 0 {
+                self.in_mem_res.shrink(excess);
+            }
         }
         self.in_mem_res.free();
 
@@ -1853,7 +1859,7 @@ mod tests {
                 filters: vec![Expr::Binary {
                     left: Box::new(col_expr(&schema, scores::SCORE_ID)),
                     op: cetra_query::BinaryOp::Eq,
-                    right: Box::new(Expr::Literal(ScalarValue::Utf8(target_sid))),
+                    right: Box::new(Expr::Literal(ScalarValue::Utf8(target_sid.clone()))),
                     data_type: DataType::Bool,
                 }],
                 ..Default::default()
@@ -1874,8 +1880,33 @@ mod tests {
                 "File B should fetch bloom + data pages: {b_reads:?}"
             );
 
-            // 2. Query by `trace_id = trace(20)` via `IdLookupHint`: File A min/max (trace(10)..trace(30)) overlaps,
+            // 2. Query by `score_id = Uuid(1010)` via `IdLookupHint`: File A min/max overlaps,
             // so bloom filter MUST prune File A!
+            path_reads.lock().unwrap().clear();
+            let sid_hint_spec = ScanSpec {
+                id_lookups: vec![cetra_query::exec::IdLookupHint::Utf8 {
+                    column: scores::SCORE_ID.to_owned(),
+                    values: vec![target_sid],
+                }],
+                ..Default::default()
+            };
+            let out_sid_hint = run_source(&scores_src, &sid_hint_spec, &ctx).unwrap();
+            let total_sid_hint: usize = out_sid_hint.iter().map(Batch::num_rows).sum();
+            assert_eq!(total_sid_hint, 50);
+            let reads_after_sid_hint = path_reads.lock().unwrap().clone();
+            let a_sid_hint_reads = reads_after_sid_hint
+                .get(path_a)
+                .cloned()
+                .unwrap_or_default();
+            assert_eq!(
+                a_sid_hint_reads.len(),
+                1,
+                "File A should fetch ONLY its score_id bloom filter (1 range): {a_sid_hint_reads:?}"
+            );
+
+            // 3. Query by `trace_id = trace(20)`: `trace_id` is NOT pushed pre-LWW (explicit
+            // `score_id` upserts can change `trace_id`), so `ScoresSource` evaluates it post-LWW
+            // and returns the 50 matching rows.
             path_reads.lock().unwrap().clear();
             let ScoreTarget::Trace {
                 trace_id: target_tid,
@@ -1888,18 +1919,19 @@ mod tests {
                     column: scores::TRACE_ID.to_owned(),
                     values: vec![*target_tid.as_bytes()],
                 }],
+                filters: vec![Expr::Binary {
+                    left: Box::new(col_expr(&schema, scores::TRACE_ID)),
+                    op: cetra_query::BinaryOp::Eq,
+                    right: Box::new(Expr::Literal(ScalarValue::FixedBytes16(
+                        *target_tid.as_bytes(),
+                    ))),
+                    data_type: DataType::Bool,
+                }],
                 ..Default::default()
             };
             let out_tid = run_source(&scores_src, &tid_spec, &ctx).unwrap();
             let total_tid: usize = out_tid.iter().map(Batch::num_rows).sum();
             assert_eq!(total_tid, 50);
-            let reads_after_tid = path_reads.lock().unwrap().clone();
-            let a_tid_reads = reads_after_tid.get(path_a).cloned().unwrap_or_default();
-            assert_eq!(
-                a_tid_reads.len(),
-                1,
-                "File A should fetch ONLY its trace_id bloom filter (1 range): {a_tid_reads:?}"
-            );
         }
 
         #[test]

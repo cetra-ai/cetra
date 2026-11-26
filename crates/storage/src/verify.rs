@@ -23,14 +23,18 @@ pub(crate) fn is_corrupt_store_error(err: &object_store::Error) -> bool {
     if matches!(err, object_store::Error::NotFound { .. }) {
         return true;
     }
-    let mut cur: Option<&(dyn std::error::Error + 'static)> = Some(err);
-    while let Some(src) = cur {
-        if let Some(io_err) = src.downcast_ref::<std::io::Error>()
-            && io_err.kind() == std::io::ErrorKind::UnexpectedEof
-        {
-            return true;
+    if let object_store::Error::Generic { store, .. } = err
+        && (*store == "LocalFileSystem" || *store == "InMemory")
+    {
+        let mut cur: Option<&(dyn std::error::Error + 'static)> = Some(err);
+        while let Some(src) = cur {
+            if let Some(io_err) = src.downcast_ref::<std::io::Error>()
+                && io_err.kind() == std::io::ErrorKind::UnexpectedEof
+            {
+                return true;
+            }
+            cur = src.source();
         }
-        cur = src.source();
     }
     false
 }
@@ -284,6 +288,33 @@ mod tests {
             Box::new(missing())
         )));
         assert!(!is_store_error(&parquet_error()));
+    }
+
+    #[test]
+    fn unexpected_eof_is_corrupt_only_on_local_or_in_memory_stores() {
+        let s3_eof = object_store::Error::Generic {
+            store: "S3",
+            source: Box::new(std::io::Error::new(
+                std::io::ErrorKind::UnexpectedEof,
+                "tls close",
+            )),
+        };
+        assert!(!is_corrupt_store_error(&s3_eof));
+        assert!(is_store_error(&ParquetError::External(Box::new(s3_eof))));
+
+        for store_name in ["LocalFileSystem", "InMemory"] {
+            let local_eof = object_store::Error::Generic {
+                store: store_name,
+                source: Box::new(std::io::Error::new(
+                    std::io::ErrorKind::UnexpectedEof,
+                    "truncated file",
+                )),
+            };
+            assert!(is_corrupt_store_error(&local_eof));
+            assert!(!is_store_error(&ParquetError::External(Box::new(
+                local_eof
+            ))));
+        }
     }
 
     #[test]

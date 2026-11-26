@@ -489,13 +489,30 @@ impl ScanPlan {
             .map(|(column, keys)| BloomLookup { column, keys })
             .collect();
 
+        let mut map_projections = spec.map_projections.clone();
+        if !map_projections.is_empty() {
+            let mut filter_maps = BTreeMap::new();
+            for filter in &spec.filters {
+                cetra_query::exec::source::collect_expr_map_projections(
+                    filter,
+                    schema,
+                    &mut filter_maps,
+                );
+            }
+            for (col, proj) in filter_maps {
+                if let Some(existing) = map_projections.get_mut(&col) {
+                    existing.merge(proj);
+                }
+            }
+        }
+
         Ok(Self {
             projection: spec.projection.clone(),
             projected_schema,
             output_cols,
             filter_cols,
             filters: spec.filters.clone(),
-            map_projections: spec.map_projections.clone(),
+            map_projections,
             constraints,
             bloom_lookups,
             limit: spec.limit,
@@ -2274,6 +2291,9 @@ impl DictUtf8LeafDecoder {
                     ) && dict_flat.is_some() =>
                     {
                         let max_rep = self.descr.max_rep_level();
+                        if max_rep > 0 && !page_reader.at_record_boundary()? {
+                            break page;
+                        }
                         let max_def = self.descr.max_def_level();
                         let n = *num_values as usize;
                         if max_rep == 0 && n > self.rg_num_rows {
@@ -4947,6 +4967,14 @@ fn await_prefetch(
     cancel: &CancelToken,
     runtime: &tokio::runtime::Handle,
 ) -> Result<(BTreeMap<usize, LeafReader>, Reservation), QueryError> {
+    if cancel.is_cancelled() {
+        return Err(QueryError::Cancelled);
+    }
+    if tokio::runtime::Handle::try_current().is_ok() {
+        return Err(QueryError::internal(
+            "cannot block on parquet I/O inside tokio runtime",
+        ));
+    }
     let PrefetchedRg {
         rg_idx: _,
         mut handle,
@@ -4957,14 +4985,6 @@ fn await_prefetch(
     let Some(mut handle) = handle.take() else {
         return Err(corrupt_err(file.id, suspects));
     };
-    if cancel.is_cancelled() {
-        return Err(QueryError::Cancelled);
-    }
-    if tokio::runtime::Handle::try_current().is_ok() {
-        return Err(QueryError::internal(
-            "cannot block on parquet I/O inside tokio runtime",
-        ));
-    }
     let cancel_token = cancel.clone();
     let res = runtime.block_on(async move {
         let notify = Arc::new(tokio::sync::Notify::new());
@@ -4988,6 +5008,7 @@ fn await_prefetch(
                 joined = &mut handle => {
                     return match joined {
                         Ok(r) => r,
+                        Err(je) if je.is_cancelled() => Err(FetchError::Cancelled),
                         Err(_) => Err(FetchError::Corrupt),
                     };
                 }
@@ -5460,15 +5481,59 @@ impl PartitionStream for ParquetPartitionStream {
                         return Err(corrupt_err(file_id, &self.suspects));
                     }
                 };
-                reconcile_res(res.as_deref_mut(), before, p1_batch.memory_bytes())?;
-                let filtered = apply_tombstones_and_filters(
+                let p1_bytes = p1_batch.memory_bytes();
+                match reconcile_res(res.as_deref_mut(), before, p1_bytes) {
+                    Ok(()) => {}
+                    Err(QueryError::TooLarge)
+                        if self
+                            .active_file
+                            .as_mut()
+                            .and_then(|af| af.prefetch.take())
+                            .is_some() =>
+                    {
+                        reconcile_res(res.as_deref_mut(), before, p1_bytes)?;
+                    }
+                    Err(e) => return Err(e),
+                }
+                let p1_retry = self
+                    .active_file
+                    .as_ref()
+                    .is_some_and(|af| af.prefetch.is_some())
+                    .then(|| p1_batch.clone());
+                let filtered = match apply_tombstones_and_filters(
                     p1_batch,
                     tombstone_pred.as_ref(),
                     &phase1_filters,
                     &eval_ctx,
                     res.as_deref_mut(),
                     before,
-                )?;
+                ) {
+                    Ok(b) => {
+                        drop(p1_retry);
+                        b
+                    }
+                    Err(QueryError::TooLarge)
+                        if self
+                            .active_file
+                            .as_mut()
+                            .and_then(|af| af.prefetch.take())
+                            .is_some() =>
+                    {
+                        let Some(retry_batch) = p1_retry else {
+                            return Err(QueryError::TooLarge);
+                        };
+                        reconcile_res(res.as_deref_mut(), before, retry_batch.memory_bytes())?;
+                        apply_tombstones_and_filters(
+                            retry_batch,
+                            tombstone_pred.as_ref(),
+                            &phase1_filters,
+                            &eval_ctx,
+                            res.as_deref_mut(),
+                            before,
+                        )?
+                    }
+                    Err(e) => return Err(e),
+                };
                 if filtered.is_empty() {
                     reconcile_res(res.as_deref_mut(), before, 0)?;
                     continue;
@@ -7851,6 +7916,296 @@ pub(crate) mod tests {
         assert_eq!(
             narrow_kept_ranges(&[0..5, 10..20, 30..40], 12),
             vec![12..20, 30..40]
+        );
+    }
+
+    #[test]
+    fn v1_offset_index_less_split_dict_list_utf8_reads_all_rows() {
+        use arrow::array::{Int64Array, ListBuilder, StringBuilder};
+        use arrow::datatypes::{
+            DataType as ArrowDataType, Field as ArrowField, Schema as ArrowSchema,
+        };
+        use parquet::file::properties::{EnabledStatistics, WriterVersion};
+        use parquet::file::reader::{FileReader, SerializedFileReader};
+
+        let mut list_builder = ListBuilder::new(StringBuilder::new());
+        // Row 0: 256 distinct tags so the dictionary-encoded record spans multiple small V1 DataPages.
+        let r0_tags: Vec<String> = (0..256).map(|i| format!("tag-{i:03}")).collect();
+        for t in &r0_tags {
+            list_builder.values().append_value(t);
+        }
+        list_builder.append(true);
+        // Row 1: empty list.
+        list_builder.append(true);
+        // Row 2: NULL list.
+        list_builder.append(false);
+        // Row 3: repeated dictionary values.
+        for t in ["tag-000", "tag-005", "tag-alpha"] {
+            list_builder.values().append_value(t);
+        }
+        list_builder.append(true);
+        // Row 4: 8 tags.
+        let r4_tags: Vec<String> = (0..8).map(|i| format!("tail-{i}")).collect();
+        for t in &r4_tags {
+            list_builder.values().append_value(t);
+        }
+        list_builder.append(true);
+
+        let list_arr = Arc::new(list_builder.finish());
+        let id_arr = Arc::new(Int64Array::from(vec![0, 1, 2, 3, 4]));
+        let arrow_schema = Arc::new(ArrowSchema::new(vec![
+            ArrowField::new("id", ArrowDataType::Int64, false),
+            ArrowField::new("tags", list_arr.data_type().clone(), true),
+        ]));
+        let rb = RecordBatch::try_new(Arc::clone(&arrow_schema), vec![id_arr, list_arr]).unwrap();
+
+        let props = WriterProperties::builder()
+            .set_writer_version(WriterVersion::PARQUET_1_0)
+            .set_dictionary_enabled(true)
+            .set_data_page_size_limit(32)
+            .set_write_batch_size(16)
+            .set_statistics_enabled(EnabledStatistics::None)
+            .set_offset_index_disabled(true)
+            .build();
+        let mut raw = Vec::new();
+        let mut writer = ArrowWriter::try_new(&mut raw, arrow_schema, Some(props)).unwrap();
+        writer.write(&rb).unwrap();
+        writer.close().unwrap();
+
+        let bytes = Bytes::from(raw);
+        let parsed_meta = parquet::file::metadata::ParquetMetaDataReader::new()
+            .with_page_index_policy(PageIndexPolicy::Optional)
+            .parse_and_finish(&bytes)
+            .unwrap();
+        assert!(
+            parsed_meta.offset_index().is_none(),
+            "expected OffsetIndex-less V1 file"
+        );
+        let reader = SerializedFileReader::new(bytes.clone()).unwrap();
+        let mut pr = reader
+            .get_row_group(0)
+            .unwrap()
+            .get_column_page_reader(1)
+            .unwrap();
+        let mut data_pages = 0usize;
+        let mut saw_split_boundary = false;
+        while let Some(page) = pr.get_next_page().unwrap() {
+            if matches!(page, Page::DataPage { .. }) {
+                data_pages += 1;
+                if !pr.at_record_boundary().unwrap() {
+                    saw_split_boundary = true;
+                }
+            }
+        }
+        assert!(
+            data_pages >= 2 && saw_split_boundary,
+            "expected >=2 V1 DataPages with a split record boundary (pages={data_pages}, split={saw_split_boundary})"
+        );
+
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let path = ObjectPath::from("v1_split_dict_tags.parquet");
+        rt.block_on(store.put(&path, PutPayload::from(bytes.clone())))
+            .unwrap();
+        let file_meta = Arc::new(FileMeta {
+            id: FileId::new_v7(),
+            table: FileTable::Spans,
+            project: "018f6b4e-7c1a-7c1a-8c1a-000000000001".parse().unwrap(),
+            day: NaiveDate::from_ymd_opt(2026, 1, 1).unwrap(),
+            level: 0,
+            path: path.to_string(),
+            size: bytes.len() as u64,
+            footer_size: footer_size_from_tail(
+                &bytes[bytes.len() - 8..].try_into().unwrap(),
+                bytes.len() as u64,
+            )
+            .unwrap(),
+            rows: 5,
+            min_time: 0,
+            max_time: 0,
+            min_ingest_time: 0,
+            max_ingest_time: 0,
+            fully_merged: true,
+            deletions_applied_seq: 0,
+        });
+        let schema = Schema::try_new_arc(vec![
+            Field::new("id", DataType::I64, false),
+            Field::new("tags", DataType::List(Box::new(DataType::Utf8)), true),
+        ])
+        .unwrap();
+        let source = ParquetSource::new(
+            store,
+            FileTable::Spans,
+            Arc::clone(&schema),
+            vec![file_meta],
+            Arc::from([]),
+            Arc::new(MetadataCache::new(1024 * 1024)),
+            Suspects::new(Arc::new(VerifyQueue::default())),
+            rt.handle().clone(),
+        );
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = ExecContext {
+            pool: GlobalPool::standalone(16 * 1024 * 1024),
+            eval: EvalContext::new(0, CancelToken::new()),
+            spill: Arc::new(SpillManager::with_fixed_cap(dir.path().to_path_buf(), 0)),
+            workers: Arc::new(WorkerPool::new(1).unwrap()),
+            batch_size: 16,
+            target_partitions: 1,
+            metrics: ExecMetrics::default(),
+        };
+
+        let batches = run_source(&source, &ScanSpec::default(), &ctx).unwrap();
+        let total: usize = batches.iter().map(Batch::num_rows).sum();
+        assert_eq!(total, 5);
+        let b = &batches[0];
+        let expected_list = |vals: &[&str]| ScalarValue::List {
+            item_type: DataType::Utf8,
+            values: vals
+                .iter()
+                .map(|s| ScalarValue::Utf8((*s).to_owned()))
+                .collect(),
+        };
+        let r0_refs: Vec<&str> = r0_tags.iter().map(String::as_str).collect();
+        let r4_refs: Vec<&str> = r4_tags.iter().map(String::as_str).collect();
+        assert_eq!(
+            b.column(1).unwrap().get_scalar(0).unwrap(),
+            expected_list(&r0_refs)
+        );
+        assert_eq!(
+            b.column(1).unwrap().get_scalar(1).unwrap(),
+            expected_list(&[])
+        );
+        assert_eq!(
+            b.column(1).unwrap().get_scalar(2).unwrap(),
+            ScalarValue::Null(DataType::List(Box::new(DataType::Utf8)))
+        );
+        assert_eq!(
+            b.column(1).unwrap().get_scalar(3).unwrap(),
+            expected_list(&["tag-000", "tag-005", "tag-alpha"])
+        );
+        assert_eq!(
+            b.column(1).unwrap().get_scalar(4).unwrap(),
+            expected_list(&r4_refs)
+        );
+    }
+
+    #[test]
+    fn await_prefetch_cancel_aborts_and_join_cancelled_is_not_corrupt() {
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(1)
+            .enable_all()
+            .build()
+            .unwrap();
+        let file = FileMeta {
+            id: FileId::new_v7(),
+            table: FileTable::Spans,
+            project: "018f6b4e-7c1a-7c1a-8c1a-000000000001".parse().unwrap(),
+            day: NaiveDate::from_ymd_opt(2026, 1, 1).unwrap(),
+            level: 0,
+            path: "prefetch.parquet".to_owned(),
+            size: 1024,
+            footer_size: 128,
+            rows: 1,
+            min_time: 0,
+            max_time: 0,
+            min_ingest_time: 0,
+            max_ingest_time: 0,
+            fully_merged: true,
+            deletions_applied_seq: 0,
+        };
+        let pool = GlobalPool::standalone(1024 * 1024);
+
+        // Case 1: Pre-cancelled token drops PrefetchedRg (aborting handle) without reporting corrupt.
+        let queue = Arc::new(VerifyQueue::default());
+        let suspects = Suspects::new(Arc::clone(&queue));
+        let (tx, rx) = tokio::sync::oneshot::channel::<()>();
+        struct DropSignal(Option<tokio::sync::oneshot::Sender<()>>);
+        impl Drop for DropSignal {
+            fn drop(&mut self) {
+                if let Some(tx) = self.0.take() {
+                    let _ = tx.send(());
+                }
+            }
+        }
+        let handle = rt.spawn(async move {
+            let _sig = DropSignal(Some(tx));
+            tokio::time::sleep(Duration::from_secs(60)).await;
+            Ok(Vec::new())
+        });
+        let prefetch = PrefetchedRg {
+            rg_idx: 0,
+            handle: AbortJoinHandle(Some(handle)),
+            coalesced: Vec::new(),
+            per_leaf_plan: Vec::new(),
+            io_res: pool.register("prefetch", false),
+        };
+        let cancel = CancelToken::new();
+        cancel.cancel();
+        let err = await_prefetch(prefetch, &file, &suspects, &cancel, rt.handle()).unwrap_err();
+        assert!(matches!(err, QueryError::Cancelled));
+        assert!(queue.take(10).is_empty());
+        rt.block_on(async {
+            let _ = tokio::time::timeout(Duration::from_secs(2), rx).await;
+        });
+
+        // Case 2: Aborted JoinHandle (e.g. Tokio runtime shutdown) yields Cancelled, not Corrupt.
+        let queue2 = Arc::new(VerifyQueue::default());
+        let suspects2 = Suspects::new(Arc::clone(&queue2));
+        let handle2 = rt.spawn(async {
+            tokio::time::sleep(Duration::from_secs(60)).await;
+            Ok(Vec::new())
+        });
+        handle2.abort();
+        let prefetch2 = PrefetchedRg {
+            rg_idx: 0,
+            handle: AbortJoinHandle(Some(handle2)),
+            coalesced: Vec::new(),
+            per_leaf_plan: Vec::new(),
+            io_res: pool.register("prefetch", false),
+        };
+        let err2 = await_prefetch(
+            prefetch2,
+            &file,
+            &suspects2,
+            &CancelToken::new(),
+            rt.handle(),
+        )
+        .unwrap_err();
+        assert!(matches!(err2, QueryError::Cancelled));
+        assert!(queue2.take(10).is_empty());
+    }
+
+    #[test]
+    fn scan_plan_upgrades_keys_only_when_filtering_on_map_values() {
+        let schema = spans_schema();
+        let attrs_idx = schema.index_of(spans::ATTRIBUTES).unwrap();
+        let spec = ScanSpec {
+            projection: Some(vec![attrs_idx]),
+            map_projections: [(spans::ATTRIBUTES.to_owned(), MapProjection::KeysOnly)]
+                .into_iter()
+                .collect(),
+            filters: vec![Expr::Binary {
+                left: Box::new(Expr::MapIndex {
+                    map: Box::new(Expr::Column {
+                        index: attrs_idx,
+                        name: spans::ATTRIBUTES.to_owned(),
+                        data_type: DataType::MapUtf8,
+                    }),
+                    key: Box::new(Expr::Literal(ScalarValue::Utf8("secret_key".to_owned()))),
+                }),
+                op: BinaryOp::Eq,
+                right: Box::new(Expr::Literal(ScalarValue::Utf8("secret_val".to_owned()))),
+                data_type: DataType::Bool,
+            }],
+            ..Default::default()
+        };
+        let plan = ScanPlan::compile(FileTable::Spans, &schema, &spec).unwrap();
+        assert_eq!(
+            plan.map_projections.get(spans::ATTRIBUTES),
+            Some(&MapProjection::Full)
         );
     }
 }

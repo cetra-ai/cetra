@@ -2349,9 +2349,10 @@ fn is_scan_filter_safe(kind: SqlViewKind, expr: &Expr, full_schema: &Schema) -> 
             !cols.is_empty()
                 && is_infallible(expr)
                 && cols.iter().all(|&idx| {
-                    full_schema.fields().get(idx).is_some_and(|f| {
-                        matches!(f.name.as_str(), "created_at" | "trace_id" | "score_id")
-                    })
+                    full_schema
+                        .fields()
+                        .get(idx)
+                        .is_some_and(|f| matches!(f.name.as_str(), "created_at" | "score_id"))
                 })
         }
         SqlViewKind::Sessions => false,
@@ -6250,10 +6251,11 @@ mod tests {
             data_type: DataType::F64,
         }));
 
-        // trace_id = '<32 hex>' pushes IdLookupHint::Fixed16 into Scan for spans, traces, and scores!
+        // trace_id = '<32 hex>' pushes IdLookupHint::Fixed16 into Scan for spans and traces;
+        // scores restricts pushdown to created_at and score_id (since upserts can change trace_id).
         let trace_hex = "0102030405060708090a0b0c0d0e0f10";
         let expected_bytes: [u8; 16] = hex::decode(trace_hex).unwrap().try_into().unwrap();
-        for view in ["spans", "traces", "scores"] {
+        for view in ["spans", "traces"] {
             let sql = format!("SELECT trace_id FROM {view} WHERE trace_id = '{trace_hex}'");
             let plan = bind_and_opt(&sql);
             let LogicalPlan::Scan { id_lookups, .. } = find_first_scan(&plan).expect("Scan node")
@@ -6269,6 +6271,36 @@ mod tests {
                 "missing trace_id IdLookupHint for {view}: {plan:?}"
             );
         }
+        let scores_trace_plan = bind_and_opt(&format!(
+            "SELECT trace_id FROM scores WHERE trace_id = '{trace_hex}'"
+        ));
+        let LogicalPlan::Scan {
+            id_lookups: scores_trace_hints,
+            ..
+        } = find_first_scan(&scores_trace_plan).expect("Scores Scan node")
+        else {
+            unreachable!()
+        };
+        assert!(
+            scores_trace_hints.is_empty(),
+            "scores trace_id filter must not push pre-LWW: {scores_trace_hints:?}"
+        );
+        let scores_id_plan = bind_and_opt("SELECT score_id FROM scores WHERE score_id = 'score-1'");
+        let LogicalPlan::Scan {
+            id_lookups: scores_id_hints,
+            ..
+        } = find_first_scan(&scores_id_plan).expect("Scores Scan node")
+        else {
+            unreachable!()
+        };
+        assert_eq!(
+            scores_id_hints,
+            &vec![IdLookupHint::Utf8 {
+                column: "score_id".to_owned(),
+                values: vec!["score-1".to_owned()],
+            }],
+            "missing score_id IdLookupHint for scores: {scores_id_plan:?}"
+        );
 
         // duration_ms > 5.0 on spans pushes down into Scan.filters
         let ms_plan = bind_and_opt("SELECT name FROM spans WHERE duration_ms > 5.0");
