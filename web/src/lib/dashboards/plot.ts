@@ -58,6 +58,9 @@ export function splitField(query: WidgetQuery, groupBy: Groups | undefined): str
   return query.breakdown?.field ?? groupBy;
 }
 
+/** Aggregates whose value over no rows is 0: a bucket without rows plots at 0 for them. */
+const ADDITIVE: ReadonlySet<string> = new Set(["count", "count_distinct", "sum"]);
+
 /**
  * The series of a time chart. The colour of an error measure (`where` is exactly
  * `status = 'error'`) is the error colour. A model keeps the colour of its place in `ranking`
@@ -75,12 +78,16 @@ export function seriesPlot(
   const byModel = field !== undefined && MODEL_FIELDS.includes(field);
   const columns: PlotColumn[] = [];
   const pointMaps = new Map<string, Map<number, { value?: number; rows: number }>>();
+  const additive = new Set<string>();
   for (const series of answer.series) {
     const measure = query.measures[series.measure];
     if (!measure) {
       continue;
     }
     const key = columnKey(series.measure, series.group, series.other);
+    if (ADDITIVE.has(measure.agg)) {
+      additive.add(key);
+    }
     const group = series.other ? null : series.group;
     const color = colorOf(measure, group, byModel, colors, columns.length);
     columns.push({
@@ -106,8 +113,11 @@ export function seriesPlot(
       const row: ChartRow = { time };
       for (const column of columns) {
         const point = pointMaps.get(column.key)?.get(time);
-        row[column.key] = point?.value ?? null;
-        row[`${column.key}__rows`] = point?.rows ?? null;
+        // A bucket without rows has no point (spec 05): a count or sum over no rows is 0, so it is drawn at 0
+        // rather than as a gap, and a stacked chart stays whole. Other aggregates have no value there.
+        const empty = point === undefined && additive.has(column.key);
+        row[column.key] = empty ? 0 : (point?.value ?? null);
+        row[`${column.key}__rows`] = empty ? 0 : (point?.rows ?? null);
       }
       return row;
     });

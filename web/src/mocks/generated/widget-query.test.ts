@@ -128,7 +128,7 @@ it("lets a filter that names environment reach the evaluation traces", async () 
 
 it("refuses a filter it cannot evaluate, with invalid_filter", async () => {
   const answer = await ask({
-    query: { source: "traces", filter: "metadata['team'] = 'a'", measures: [{ agg: "count" }] },
+    query: { source: "traces", filter: "attributes['team'] = 'a'", measures: [{ agg: "count" }] },
   });
   expect(answer.status).toBe(400);
   expect(answer.json).toMatchObject({
@@ -165,4 +165,69 @@ it("ranks a dashboard split's groups by the first measure, keeps 20 and has no o
   expect(rows).toEqual((breakdown.json as { rows: unknown[] }).rows);
   const values = rows.map((row) => row.values[0] ?? 0);
   expect([...values].sort((left, right) => right - left)).toEqual(values);
+});
+
+/** The in-range visible traces' `user.plan`, decoded from its JSON string. */
+function plansInRange(): string[] {
+  return visibleTraces(dataset.traces, false, false)
+    .filter((trace) => inRange(trace.start_time))
+    .flatMap((trace) => {
+      const raw = trace.metadata?.["user.plan"];
+      return raw === undefined ? [] : [JSON.parse(raw) as string];
+    });
+}
+
+it("breaks down by a metadata key, decoding JSON-encoded values", async () => {
+  const plans = plansInRange();
+  expect(plans.length).toBeGreaterThan(0);
+  const answer = await ask({
+    query: {
+      source: "traces",
+      measures: [{ agg: "count" }],
+      breakdown: { field: "metadata['user.plan']", limit: 20, other: false },
+    },
+  });
+  expect(answer.status).toBe(200);
+  const rows = (answer.json as { rows: { group?: string; values: number[] }[] }).rows;
+  const expected = new Map<string, number>();
+  for (const plan of plans) {
+    expected.set(plan, (expected.get(plan) ?? 0) + 1);
+  }
+  expect(new Map(rows.map((row) => [row.group ?? "", row.values[0] ?? 0]))).toEqual(expected);
+});
+
+it("filters on a metadata key, and a missing key is null", async () => {
+  const plans = plansInRange();
+  const plan = plans[0] ?? "";
+  const equal = await ask({
+    query: {
+      source: "traces",
+      filter: `metadata['user.plan'] = '${plan}'`,
+      measures: [{ agg: "count" }],
+    },
+  });
+  expect(equal.status).toBe(200);
+  expect((equal.json as { rows: { values: number[] }[] }).rows[0]?.values[0]).toBe(
+    plans.filter((candidate) => candidate === plan).length,
+  );
+  const missing = await ask({
+    query: {
+      source: "traces",
+      filter: "metadata['repository'] IS NOT NULL",
+      measures: [{ agg: "count" }],
+    },
+  });
+  expect(missing.status).toBe(200);
+  expect((missing.json as { rows: { values: number[] }[] }).rows[0]?.values[0]).toBe(0);
+});
+
+it("refuses a metadata breakdown on scores", async () => {
+  const answer = await ask({
+    query: {
+      source: "scores",
+      measures: [{ agg: "count" }],
+      breakdown: { field: "metadata['user.plan']" },
+    },
+  });
+  expect(answer.status).toBe(400);
 });

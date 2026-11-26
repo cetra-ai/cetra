@@ -65,7 +65,8 @@ async function main(): Promise<void> {
         const dataset = createDataset({
           seed: 1,
           now,
-          traces: project.story === "support" ? 5_000 : 2_000,
+          // The coding project has more runs, so its Coding agents dashboard has some in every bucket of a week.
+          traces: { support: 5_000, coding: 8_000, voice: 2_000, extraction: 2_000 }[project.story],
           profile: profiles[project.story],
         });
         worker.use(

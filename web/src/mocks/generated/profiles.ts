@@ -1,10 +1,80 @@
 import {
   CODING_SHOWCASE,
   EXTRACTION_SHOWCASE,
+  mix,
   type Profile,
   scoreUuid,
   VOICE_SHOWCASE,
 } from "./dataset";
+import { mulberry32 } from "./random";
+
+/**
+ * The repositories of the coding agent's runs, as `cetra agents setup` reports them (`metadata.repository`), with each
+ * one's weight a week ago and today: `chromium` grows from a fifth of the runs to almost half. The homepage's coding-agents
+ * card shows their cost per day.
+ */
+export const CODING_REPOSITORIES: readonly (readonly [string, number, number])[] = [
+  ["github.com/sebastiencs/chromium", 0.18, 0.48],
+  ["github.com/sebastiencs/linux", 0.26, 0.22],
+  ["github.com/sebastiencs/kubernetes", 0.22, 0.14],
+  ["github.com/sebastiencs/postgres", 0.2, 0.1],
+  ["github.com/sebastiencs/react", 0.14, 0.06],
+];
+
+/** The coding agents of those runs (`metadata.coding_agent`), with their shares. */
+export const CODING_AGENTS: readonly (readonly [string, number])[] = [
+  ["claude-code", 0.6],
+  ["codex", 0.25],
+  ["gemini-cli", 0.15],
+];
+
+/** Salt of the repository and agent draws, so they differ from every other draw of the generator. */
+const CODING_METADATA_SALT = 0x3c6ef372;
+const DAY_MS = 86_400_000;
+/** The days the adoption ramp spans: the homepage card shows the last 7 days. */
+const RAMP_DAYS = 7;
+
+/** The value whose cumulative weight first exceeds `roll` times the total weight. */
+function pickWeighted(choices: readonly (readonly [string, number])[], roll: number): string {
+  const total = choices.reduce((sum, [, weight]) => sum + weight, 0);
+  let cumulative = 0;
+  for (const [value, weight] of choices) {
+    cumulative += weight;
+    if (roll * total < cumulative) {
+      return value;
+    }
+  }
+  return choices[choices.length - 1]?.[0] ?? "";
+}
+
+/**
+ * The share of runs `ageMs` old that come from a coding agent set up with `cetra agents setup`: adoption grows
+ * from 30% a month ago to all of them a day ago. The generator puts 55% of its runs in the last day, so a run
+ * under a day old carries a repository with a probability that keeps that day level with the one before.
+ */
+function taggedShare(ageMs: number): number {
+  const days = ageMs / DAY_MS;
+  if (days < 1) {
+    return 0.03;
+  }
+  return 0.4 + 0.6 * Math.max(0, 1 - (days - 1) / (RAMP_DAYS - 1));
+}
+
+/** The repository and coding agent of the coding agent's run `index`, `ageMs` old; none for an untagged run. */
+export function codingTraceMetadata(index: number, ageMs: number): Record<string, string> {
+  const rng = mulberry32(mix(CODING_METADATA_SALT, index));
+  if (rng() >= taggedShare(ageMs)) {
+    return {};
+  }
+  const recent = Math.max(0, Math.min(1, 1 - ageMs / (RAMP_DAYS * DAY_MS)));
+  const repositories = CODING_REPOSITORIES.map(
+    ([name, then, now]) => [name, then + (now - then) * recent] as const,
+  );
+  return {
+    repository: pickWeighted(repositories, rng()),
+    coding_agent: pickWeighted(CODING_AGENTS, rng()),
+  };
+}
 
 /** The coding agent's generation (M16): long runs with tool calls, failing tests and developer users. */
 export const CODING_PROFILE: Profile = {
@@ -57,6 +127,7 @@ export const CODING_PROFILE: Profile = {
   sessions: { kind: "pool", share: 0.3, pool: 60, prefix: "task-" },
   turnGap: { min: 60_000, max: 1_800_000 },
   users: { kind: "pool", share: 1, pool: 12, prefix: "dev-", label: "Developer" },
+  traceMetadata: codingTraceMetadata,
   bigFirstTrace: false,
   turns: [
     {

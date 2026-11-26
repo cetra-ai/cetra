@@ -252,6 +252,18 @@
     "clip": "main"
   },
   {
+    "name": "marketing-coding-cost",
+    "path": "/acme/code-agent/dashboard/01900000-0000-7000-8000-000000570405?range=7d",
+    "waitFor": "Cost by repository",
+    "waitAfter": "github.com/sebastiencs/chromium",
+    "theme": "dark",
+    "viewport": {
+      "width": 1332,
+      "height": 800
+    },
+    "clip": "section[aria-label=\"Cost by repository\"]"
+  },
+  {
     "name": "marketing-playground",
     "path": "/acme/support-bot/playground?prompt=support-reply&version=2&compare=3",
     "waitFor": "Run all",

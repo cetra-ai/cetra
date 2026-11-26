@@ -117,6 +117,54 @@ describe("seriesPlot", () => {
     expect(plot.rows.at(-1)).toMatchObject({ m0: 9, m0__rows: 1 });
   });
 
+  it("draws a sum or a count at 0 in a bucket without rows, and keeps a gap for an average", () => {
+    const query: WidgetQuery = {
+      source: "traces",
+      measures: [
+        { agg: "sum", field: "cost_total" },
+        { agg: "count" },
+        { agg: "count_distinct", field: "user_id" },
+        { agg: "avg", field: "cost_total" },
+      ],
+    };
+    const points = [
+      { time: H1, value: 2, rows: 2 },
+      { time: H3, value: 4, rows: 1 },
+    ];
+    const plot = seriesPlot(
+      query,
+      answer([0, 1, 2, 3].map((measure) => ({ measure, other: false, points }))),
+    );
+    expect(plot.rows[1]).toMatchObject({
+      m0: 0,
+      m0__rows: 0,
+      m1: 0,
+      m1__rows: 0,
+      m2: 0,
+      m2__rows: 0,
+      m3: null,
+      m3__rows: null,
+    });
+  });
+
+  it("draws a missing group of a stacked sum at 0 where another group has rows", () => {
+    const query: WidgetQuery = {
+      source: "traces",
+      measures: [{ agg: "sum", field: "cost_total" }],
+      breakdown: { field: "release", limit: 5, other: false },
+    };
+    const plot = seriesPlot(
+      query,
+      answer([
+        { measure: 0, group: "v1", other: false, points: [{ time: H1, value: 1, rows: 1 }] },
+        { measure: 0, group: "v2", other: false, points: [{ time: H3, value: 3, rows: 1 }] },
+      ]),
+    );
+    const [v1, v2] = plot.columns.map((column) => column.key);
+    expect(plot.rows[0]?.[v2 ?? ""]).toBe(0);
+    expect(plot.rows.at(-1)?.[v1 ?? ""]).toBe(0);
+  });
+
   it("takes the buckets of every series", () => {
     const query: WidgetQuery = { source: "traces", measures: [{ agg: "count" }] };
     const plot = seriesPlot(

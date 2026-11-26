@@ -756,6 +756,11 @@ export type Profile = {
   /** Scores of a generated trace. */
   scores: (index: number, errored: boolean) => Schema<"ScoreBrief">[];
   showcases: readonly Showcase[];
+  /**
+   * More metadata of a generated trace, from its index and its age in ms; absent: none. It draws nothing from the
+   * trace's generator, so adding it moves no other value.
+   */
+  traceMetadata?: (index: number, ageMs: number) => Record<string, string>;
   /** Changes for chosen generated traces, by index; absent: none (M17). */
   marks?: (
     traces: readonly Schema<"TraceSummary">[],
@@ -1156,6 +1161,9 @@ function traceSummary(
   }
   if (user) {
     Object.assign(metadata, userTraceMetadata(user, profile));
+  }
+  if (profile.traceMetadata) {
+    Object.assign(metadata, profile.traceMetadata(index, ageMs));
   }
   const traceId = `a${index.toString(16).padStart(31, "0")}`;
   return {

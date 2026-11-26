@@ -18,6 +18,7 @@ export const STORY_DASHBOARD_IDS = {
   codeAgentHealth: "01900000-0000-7000-8000-000000570402",
   voiceLatency: "01900000-0000-7000-8000-000000570403",
   invoiceExtraction: "01900000-0000-7000-8000-000000570404",
+  codingAgents: "01900000-0000-7000-8000-000000570405",
 } as const;
 
 /** The story of each story dashboard, by dashboard id: the dashboard is served in that story's project only. */
@@ -26,6 +27,7 @@ export const STORY_DASHBOARD_STORIES: Readonly<Record<string, StoryId>> = {
   [STORY_DASHBOARD_IDS.codeAgentHealth]: "coding",
   [STORY_DASHBOARD_IDS.voiceLatency]: "voice",
   [STORY_DASHBOARD_IDS.invoiceExtraction]: "extraction",
+  [STORY_DASHBOARD_IDS.codingAgents]: "coding",
 };
 
 /** The 2x2 grid of a story dashboard: widgets 0 and 1 on the first row, 2 and 3 on the second. */
@@ -40,10 +42,18 @@ function chart(
   slot: 0 | 1 | 2 | 3,
   id: string,
   title: string,
-  type: "line" | "bar" | "bar_h" | "number",
+  type: "line" | "bar" | "bar_h" | "number" | "area",
   query: WidgetQuery,
+  stacked = false,
 ): Widget {
-  return { id, title, layout: { ...SLOTS[slot] }, kind: "chart", chart: { type }, query };
+  return {
+    id,
+    title,
+    layout: { ...SLOTS[slot] },
+    kind: "chart",
+    chart: stacked ? { type, stacked } : { type },
+    query,
+  };
 }
 
 function dashboard(id: string, name: string, description: string, widgets: Widget[]): Dashboard {
@@ -61,6 +71,8 @@ function dashboard(id: string, name: string, description: string, widgets: Widge
 }
 
 const VOICE = "tags @> ['voice']";
+/** The runs `cetra agents setup` reported (spec 02 § Coding agents). */
+const REPOSITORY = "metadata['repository'] IS NOT NULL";
 const BILLING = "tags @> ['billing']";
 
 /** The story dashboards, in story order. Fresh objects on every call. */
@@ -168,6 +180,36 @@ export function storyDashboards(): Dashboard[] {
           filter: BILLING,
           measures: [{ agg: "count", label: "Invoices" }],
           breakdown: { field: "models", limit: 5 },
+        }),
+      ],
+    ),
+    dashboard(
+      STORY_DASHBOARD_IDS.codingAgents,
+      "Coding agents",
+      "What the coding agents cost, by repository and by agent.",
+      [
+        // Two rows taller than a slot: its legend of five long repository names takes three lines.
+        {
+          ...chart(
+            0,
+            "cost-by-repository",
+            "Cost by repository",
+            "area",
+            {
+              source: "traces",
+              filter: REPOSITORY,
+              measures: [{ agg: "sum", field: "cost_total", label: "Cost" }],
+              breakdown: { field: "metadata['repository']", limit: 5, other: false },
+            },
+            true,
+          ),
+          layout: { x: 0, y: 0, w: 30, h: 8 },
+        },
+        chart(1, "cost-by-coding-agent", "Cost by coding agent", "bar_h", {
+          source: "traces",
+          filter: REPOSITORY,
+          measures: [{ agg: "sum", field: "cost_total", label: "Cost" }],
+          breakdown: { field: "metadata['coding_agent']", limit: 5, other: false },
         }),
       ],
     ),

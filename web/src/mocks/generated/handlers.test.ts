@@ -434,7 +434,7 @@ it("lists only one user's traces for a user_id filter, and flags other filters a
   expect(body.data.map((trace) => trace.trace_id).sort()).toEqual(expected);
 
   const other = new URL(`${PROJECT}/traces`);
-  other.searchParams.set("filter", "metadata['plan'] = 'pro'");
+  other.searchParams.set("filter", "attributes['plan'] = 'pro'");
   const flagged = await fetch(other);
   expect(flagged.headers.get("X-Mock-Filter-Ignored")).toBe("1");
 });

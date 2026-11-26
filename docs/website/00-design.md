@@ -147,7 +147,7 @@ Copy here is **direction**, not final wording; M2 drafts it and reviews it with 
    4. Get alerted (error rate, cost, latency, score).
 
    Each shows a dark screenshot of that screen. **Since M8 (§9.7) there are six:** Trace; Explore, with the in-app assistant as its screenshot; Issues (problems find you); Evaluate, with annotation queues as its screenshot; Prompts and the playground; Alert.
-5b. **Coding agents** *(M8)*. "See what your coding agents cost": Claude Code, Codex, Gemini CLI and Copilot traced with one `cetra agents setup` command, cost per person, repository and branch. A terminal visual, like §6.6.
+5b. **Coding agents** *(M8)*. "See what your coding agents cost": Claude Code, Codex, Gemini CLI and Copilot traced with one `cetra agents setup` command, cost per person, repository and branch. The visual is a real dashboard card, "Cost by repository": the coding agents' cost over the last 7 days as a stacked area per repository, growing, with `chromium` taking a growing share, over the repositories `github.com/sebastiencs/{chromium,linux,kubernetes,postgres,react}` (the user, 2026-11-26). The coding project's mock has 8,000 runs so that every 6-hour bucket has some.
 6. **Your agents can read it too.** MCP and SQL: a coding agent querying production traces, shown as a terminal next to the UI. This uses the user's earlier idea, as a section, not the hero. Since M8 it also offers `cetra-cli init` and the docs MCP.
 7. **Integrations.** A logo grid of frameworks and SDKs, each linking to its docs page; "and anything that speaks OpenTelemetry".
 8. **Your data, your rules.** Self-host by default, no telemetry (to confirm in the code before stating it), retention and GDPR deletion, open Parquet files. Links to Security.

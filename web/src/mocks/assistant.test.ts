@@ -451,7 +451,8 @@ describe("assistant story conversations", () => {
       extraction: STORY_DASHBOARD_IDS.invoiceExtraction,
     };
     for (const story of STORIES) {
-      if (story.story === "support") {
+      const id = story.story;
+      if (id === "support") {
         continue;
       }
       const stored = await detail(story.story, story.conversationId);
@@ -465,7 +466,7 @@ describe("assistant story conversations", () => {
       expect(parsedFilter?.kind).toBe("filter");
       expect(parsedFilter?.kind === "filter" && parsedFilter.draft.view).toBe("traces");
 
-      const expected = storyDashboards().find((item) => item.id === dashboardIds[story.story]);
+      const expected = storyDashboards().find((item) => item.id === dashboardIds[id]);
       const parsedDashboard = parseDraft("dashboard", dashboard?.draft);
       expect(parsedDashboard?.kind).toBe("dashboard");
       expect(parsedDashboard?.kind === "dashboard" && parsedDashboard.draft.name).toBe(

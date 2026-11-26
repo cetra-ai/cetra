@@ -12,6 +12,20 @@ type BarRow = {
   values: (number | null)[];
 };
 
+/** Width of one character of the axis font (11 px monospace), measured. */
+const AXIS_CHAR_PX = 7;
+/** The label column's bounds, px: a long label (`github.com/acme/data-pipelines`) gets room, up to a cap. */
+const LABEL_MIN_PX = 48;
+const LABEL_MAX_PX = 240;
+/** Room right of the plot for half of the last tick's label (`$300.00`), which is centred on the edge. */
+const RIGHT_MARGIN_PX = 28;
+
+/** The width of the label column for these group names: the longest one, within the bounds. */
+export function labelWidth(names: readonly string[]): number {
+  const longest = names.reduce((max, name) => Math.max(max, name.length), 0);
+  return Math.min(LABEL_MAX_PX, Math.max(LABEL_MIN_PX, Math.ceil(longest * AXIS_CHAR_PX) + 12));
+}
+
 /**
  * One horizontal bar per group, sized by the first measure. The tooltip lists every measure.
  * `colorOf` gives a group's colour (the model colours of the dashboard); the other group, which
@@ -41,7 +55,11 @@ export function WidgetBarH({
       initialDimension={{ width: 640, height: 160 }}
       className="aspect-auto min-h-0 w-full flex-1"
     >
-      <BarChart data={rows} layout="vertical" margin={{ top: 4, right: 12, left: 0, bottom: 0 }}>
+      <BarChart
+        data={rows}
+        layout="vertical"
+        margin={{ top: 4, right: RIGHT_MARGIN_PX, left: 0, bottom: 0 }}
+      >
         <CartesianGrid stroke="var(--border)" strokeOpacity={0.7} horizontal={false} />
         <XAxis
           type="number"
@@ -55,7 +73,7 @@ export function WidgetBarH({
         <YAxis
           type="category"
           dataKey="name"
-          width={112}
+          width={labelWidth(rows.map((row) => row.name))}
           tick={AXIS_TICK}
           axisLine={false}
           tickLine={false}

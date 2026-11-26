@@ -109,6 +109,7 @@ it("the story dashboards have the planned ids, names and widget titles", () => {
     codeAgentHealth: "01900000-0000-7000-8000-000000570402",
     voiceLatency: "01900000-0000-7000-8000-000000570403",
     invoiceExtraction: "01900000-0000-7000-8000-000000570404",
+    codingAgents: "01900000-0000-7000-8000-000000570405",
   });
   const dashboards = storyDashboards();
   expect(dashboards.map((dashboard) => dashboard.id)).toEqual([
@@ -116,13 +117,15 @@ it("the story dashboards have the planned ids, names and widget titles", () => {
     "01900000-0000-7000-8000-000000570402",
     "01900000-0000-7000-8000-000000570403",
     "01900000-0000-7000-8000-000000570404",
+    "01900000-0000-7000-8000-000000570405",
   ]);
-  expect(new Set(dashboards.map((dashboard) => dashboard.id)).size).toBe(4);
+  expect(new Set(dashboards.map((dashboard) => dashboard.id)).size).toBe(5);
   expect(dashboards.map((dashboard) => dashboard.name)).toEqual([
     "Prompt quality by version",
     "Code agent health",
     "Voice latency",
     "Invoice extraction",
+    "Coding agents",
   ]);
   expect(dashboards.map((dashboard) => dashboard.definition.widgets.map((w) => w.title))).toEqual([
     [
@@ -134,6 +137,7 @@ it("the story dashboards have the planned ids, names and widget titles", () => {
     ["Failed runs per day", "Error rate", "Cost per run", "p95 duration"],
     ["p95 reply time", "Reply time by day", "Calls over 3 s", "Calls per day"],
     ["Invoices per day", "Schema check failures", "Cost per invoice", "Invoices by model"],
+    ["Cost by repository", "Cost by coding agent"],
   ]);
   for (const dashboard of dashboards) {
     for (const widget of dashboard.definition.widgets) {
@@ -182,11 +186,14 @@ it("the browser mock store lists the story dashboards after the fixture one", as
     }
     const list = await fetch(`${baseOf(story)}/dashboards`);
     const body = (await list.json()) as { data: { name: string }[] };
-    expect(body.data.map((item) => item.name)).toEqual([dashboard.name, "Support overview"].sort());
+    const inStory = storyDashboards()
+      .filter((candidate) => STORY_DASHBOARD_STORIES[candidate.id] === story)
+      .map((candidate) => candidate.name);
+    expect(body.data.map((item) => item.name)).toEqual([...inStory, "Support overview"].sort());
 
     const one = await fetch(`${baseOf(story)}/dashboards/${dashboard.id}`);
     const stored = (await one.json()) as Dashboard;
-    expect(stored.definition.widgets).toHaveLength(4);
+    expect(stored.definition.widgets).toHaveLength(dashboard.definition.widgets.length);
     expect(stored.name).toBe(dashboard.name);
   }
 });
@@ -303,5 +310,30 @@ it("the hero traces are counted", () => {
     }
     const predicate = filter === undefined ? undefined : tracePredicate(filter);
     expect(predicate?.(trace)).toBe(true);
+  }
+});
+
+it("the coding agents dashboard's cost by repository sums each repository's cost from the runs' metadata", async () => {
+  const coding = datasetOf("coding", 5000);
+  server.use(...largeHandlers(coding));
+  const byRepository = storyDashboard(STORY_DASHBOARD_IDS.codingAgents).definition.widgets[0];
+  if (byRepository === undefined) {
+    throw new Error("no widget");
+  }
+  const answer = await ask(byRepository, "total");
+  expect(answer.status).toBe(200);
+  const body = answer.json as { rows: { group?: string; values: number[] }[] };
+  const expected = new Map<string, number>();
+  for (const trace of inRangeTraces(coding)) {
+    const repository = trace.metadata?.repository;
+    if (repository !== undefined) {
+      expected.set(repository, (expected.get(repository) ?? 0) + (trace.cost_total ?? 0));
+    }
+  }
+  expect(body.rows.map((row) => row.group)).toEqual(
+    [...expected.entries()].sort((left, right) => right[1] - left[1]).map(([name]) => name),
+  );
+  for (const row of body.rows) {
+    expect(row.values[0]).toBeCloseTo(expected.get(row.group ?? "") ?? Number.NaN, 6);
   }
 });

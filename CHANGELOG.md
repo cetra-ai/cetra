@@ -64,6 +64,8 @@ with an `### Upgrade notes` section (https://cetra.sh/docs/self-hosting/upgrade/
 
 ### Fixed
 
+- Dashboard charts draw a count or a sum at 0 in a bucket with no rows instead of leaving a gap, so a stacked chart of sparse data no longer breaks apart.
+- A dashboard's horizontal bar chart sizes its label column to the longest label, so repository names such as `github.com/acme/data-pipelines` are no longer cut, and the last value on its axis is no longer clipped; time charts keep their last time label whole too.
 - When an org has its own single sign-on, the login page's email step links to the password form ("Sign in with a password instead"), so instance admins and members of a domain whose sign-on is not enforced can still use their password. After an org's provider refuses to sign in an instance admin, the page shows the password form.
 - The top bar's search button no longer runs its label into the `Ctrl+K` shortcut on Linux and Windows.
 - OpenRouter, Vercel AI Gateway, Helicone, Portkey and Cloudflare AI Gateway spans are priced by the model publisher's price, and the built-in prices include Groq, Novita, Nebius, DeepInfra, Baseten, Hyperbolic and Together models that were missing.

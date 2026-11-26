@@ -1,7 +1,13 @@
 import { expect, it } from "vitest";
 import type { Schema } from "@/api/types";
 import { createDataset, type Dataset, EXTRACTION_SHOWCASE, type Profile } from "./dataset";
-import { CODING_PROFILE, EXTRACTION_PROFILE, VOICE_PROFILE } from "./profiles";
+import {
+  CODING_PROFILE,
+  CODING_REPOSITORIES,
+  codingTraceMetadata,
+  EXTRACTION_PROFILE,
+  VOICE_PROFILE,
+} from "./profiles";
 
 const NOW = Date.parse("2026-11-19T12:00:00Z");
 const SEED = 1;
@@ -200,4 +206,50 @@ it("profiles are deterministic", () => {
   for (const profile of [CODING_PROFILE, VOICE_PROFILE, EXTRACTION_PROFILE]) {
     expect(build(profile).traces).toEqual(build(profile).traces);
   }
+});
+
+/** Every coding run, with its age in days and its repository when it has one. */
+function codingRuns(): { days: number; repository?: string }[] {
+  const dataset = createDataset({ seed: SEED, now: NOW, traces: 8000, profile: CODING_PROFILE });
+  return dataset.traces.map((trace) => ({
+    days: (NOW - Date.parse(trace.start_time)) / DAY_MS,
+    ...(trace.metadata?.repository === undefined ? {} : { repository: trace.metadata.repository }),
+  }));
+}
+
+it("tags coding runs with a known repository and agent, or with neither", () => {
+  const names = new Set(CODING_REPOSITORIES.map(([name]) => name));
+  for (let index = 0; index < 500; index += 1) {
+    const metadata = codingTraceMetadata(index, 3 * DAY_MS);
+    if (metadata.repository === undefined) {
+      expect(metadata).toEqual({});
+      continue;
+    }
+    expect(names.has(metadata.repository)).toBe(true);
+    expect(["claude-code", "codex", "gemini-cli"]).toContain(metadata.coding_agent);
+  }
+});
+
+it("tags a growing share of the week's runs, and grows web's share", () => {
+  const runs = codingRuns();
+  const between = (from: number, to: number) =>
+    runs.filter((run) => run.days >= from && run.days < to);
+  const tagged = (list: { repository?: string }[]) =>
+    list.filter((run) => run.repository !== undefined);
+  const early = between(5, 7);
+  const late = between(1, 3);
+  const share = (list: { repository?: string }[]) => tagged(list).length / list.length;
+  expect(share(late)).toBeGreaterThan(share(early) + 0.25);
+  const webShare = (list: { repository?: string }[]) =>
+    tagged(list).filter((run) => run.repository === "github.com/sebastiencs/chromium").length /
+    tagged(list).length;
+  expect(webShare(between(0, 3))).toBeGreaterThan(webShare(between(10, 30)) + 0.15);
+});
+
+it("keeps the last day's tagged runs level with the day before", () => {
+  const runs = codingRuns().filter((run) => run.repository !== undefined);
+  const lastDay = runs.filter((run) => run.days < 1).length;
+  const dayBefore = runs.filter((run) => run.days >= 1 && run.days < 2).length;
+  expect(lastDay).toBeGreaterThan(dayBefore * 0.5);
+  expect(lastDay).toBeLessThan(dayBefore * 2);
 });
