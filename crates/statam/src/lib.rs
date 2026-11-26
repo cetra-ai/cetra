@@ -1,10 +1,18 @@
 //! Statam v0 native columnar storage format, `.stpk` chunk packs, and range I/O.
 
+pub mod codec;
 pub mod error;
 pub mod format;
 pub mod io;
 pub mod simd;
 
+pub use codec::{
+    DICT_PASSTHROUGH_MAX_BYTES, DictBuilder, EncodedMiniBlock, FsstBlockView, FsstTable,
+    ShreddedMapBlocks, ShreddedSubCol, WriteProfile, ZoneMapSummary, ZonePred, ZoneValue,
+    block_zone_map, decode_mini_block, decode_shredded_residual_block, decode_shredded_subcol,
+    decode_single_map_key, encode_mini_block, encode_shredded_residual_block,
+    encode_shredded_subcol, select_shredded_keys, shred_map, unshred_map, zone_map_may_match,
+};
 pub use error::StatamError;
 pub use format::{
     BLOCK_ENTRY_LEN, BLOCK_FRAME_HEADER_LEN, BLOCK_MAGIC, BLOOM_MAGIC, CHECKSUM_ALG_CRC32C,
