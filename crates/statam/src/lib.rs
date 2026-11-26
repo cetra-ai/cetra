@@ -1,0 +1,25 @@
+//! Statam v0 native columnar storage format, `.stpk` chunk packs, and range I/O.
+
+pub mod error;
+pub mod format;
+pub mod io;
+
+pub use error::StatamError;
+pub use format::{
+    BLOCK_ENTRY_LEN, BLOCK_FRAME_HEADER_LEN, BLOCK_MAGIC, BLOOM_MAGIC, CHECKSUM_ALG_CRC32C,
+    CHUNK_LOC_LEN, COLUMN_DIR_ENTRY_LEN, Codec, ColumnDirEntry, DEFAULT_TAIL_HINT, DICT_MAGIC,
+    Encoding, FILE_HEADER_LEN, FILE_MAGIC, FORMAT_VERSION, FRAME_ENTRY_LEN, FileHeader,
+    FileSchemaMeta, FrameEntry, LAZY_INDEX_ENTRY_LEN, LazyIndexEntry, LazyIndexKind, LocalityGroup,
+    MAX_BATCH_DECODED_BYTES, MAX_BLOCK_RAW_BYTES, MAX_BLOOM_BYTES, MAX_CHUNKS_PER_ROW, MAX_COLUMNS,
+    MAX_DECOMPRESS_RATIO, MAX_DECOMPRESS_SLACK, MAX_DICT_BYTES, MAX_FRAME_RAW_BYTES,
+    MAX_HOT_TAIL_BYTES, MAX_NESTING_DEPTH, MAX_REF_CHAIN_DEPTH, MAX_ROW_GROUPS,
+    MAX_ROW_PAYLOAD_BYTES, MAX_ROWS_PER_FILE, MAX_SHREDDED_KEYS, MAX_TOTAL_BLOCKS, MINI_BLOCK_SIZE,
+    PACK_FRAME_HEADER_LEN, PACK_FRAME_MAGIC, PACK_HEADER_LEN, PACK_MAGIC, PACK_POSTSCRIPT_LEN,
+    PACK_POSTSCRIPT_MAGIC, POSTSCRIPT_LEN, POSTSCRIPT_MAGIC, PackHeader, PackPostscript,
+    Postscript, ROW_GROUP_ENTRY_LEN, ROW_GROUP_SIZE, RowGroupEntry, ShreddedMapDir,
+    ShreddedMapKeyEntry, TableKind,
+};
+pub use io::{
+    FileReader, IoCounters, RangeReader, S3_CACHE_BLOCK_BYTES, SimulatedS3Config,
+    SimulatedS3Reader, SliceReader,
+};

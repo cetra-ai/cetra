@@ -1279,6 +1279,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "cetra-statam"
+version = "0.1.0-rc.2"
+dependencies = [
+ "blake3",
+ "bytes",
+ "cetra-column",
+ "crc32c",
+ "lz4_flex",
+ "memchr",
+ "proptest",
+ "tempfile",
+ "thiserror 2.0.21",
+ "zstd 0.14.4",
+]
+
+[[package]]
 name = "cetra-storage"
 version = "0.1.0-rc.2"
 dependencies = [
