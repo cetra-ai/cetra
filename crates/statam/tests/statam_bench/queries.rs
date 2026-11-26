@@ -1261,29 +1261,198 @@ fn run_statam_query(
     Ok(total)
 }
 
+enum I64ColView<'a> {
+    Const(Option<i64>),
+    FlatNonNull(&'a [i64]),
+    FlatNull(&'a [i64], &'a cetra_column::Bitmap),
+    Other(&'a Column),
+}
+
+impl<'a> I64ColView<'a> {
+    fn from_col(col: &'a Column) -> Self {
+        match col {
+            Column::Const { value, .. } => match value {
+                cetra_column::ScalarValue::I64(v) => Self::Const(Some(*v)),
+                cetra_column::ScalarValue::TimestampNs { value, .. } => Self::Const(Some(*value)),
+                _ => Self::Const(None),
+            },
+            Column::Flat(f) => {
+                let vals = match f.data() {
+                    FlatData::I64(v) | FlatData::TimestampNs { values: v, .. } => v.as_slice(),
+                    _ => return Self::Other(col),
+                };
+                match f.nulls() {
+                    None => Self::FlatNonNull(vals),
+                    Some(bm) => Self::FlatNull(vals, bm),
+                }
+            }
+            _ => Self::Other(col),
+        }
+    }
+
+    #[inline]
+    fn get_or_zero(&self, row: usize) -> i64 {
+        match self {
+            Self::Const(v) => v.unwrap_or(0),
+            Self::FlatNonNull(v) => v[row],
+            Self::FlatNull(v, bm) => {
+                if bm.get(row) {
+                    v[row]
+                } else {
+                    0
+                }
+            }
+            Self::Other(c) => read_i64_at(c, row).unwrap_or(0),
+        }
+    }
+}
+
+enum F64ColView<'a> {
+    Const(f64),
+    FlatNonNull(&'a [f64]),
+    FlatNull(&'a [f64], &'a cetra_column::Bitmap),
+    Other(&'a Column),
+}
+
+impl<'a> F64ColView<'a> {
+    fn from_col(col: &'a Column) -> Self {
+        match col {
+            Column::Const { value, .. } => match value {
+                cetra_column::ScalarValue::F64(v) if !v.is_nan() => Self::Const(*v),
+                _ => Self::Const(0.0),
+            },
+            Column::Flat(f) => {
+                let FlatData::F64(vals) = f.data() else {
+                    return Self::Other(col);
+                };
+                match f.nulls() {
+                    None => Self::FlatNonNull(vals.as_slice()),
+                    Some(bm) => Self::FlatNull(vals.as_slice(), bm),
+                }
+            }
+            _ => Self::Other(col),
+        }
+    }
+
+    #[inline]
+    fn get_valid_or_zero(&self, row: usize) -> f64 {
+        match self {
+            Self::Const(v) => *v,
+            Self::FlatNonNull(v) => {
+                let c = v[row];
+                if c.is_nan() { 0.0 } else { c }
+            }
+            Self::FlatNull(v, bm) => {
+                if bm.get(row) {
+                    let c = v[row];
+                    if c.is_nan() { 0.0 } else { c }
+                } else {
+                    0.0
+                }
+            }
+            Self::Other(c) => read_f64_at(c, row).filter(|v| !v.is_nan()).unwrap_or(0.0),
+        }
+    }
+}
+
 fn agg_statam_batch(b: &Batch, agg: &mut BTreeMap<(i64, String), (usize, f64, i64)>) {
-    let ts_col = &b.columns()[0];
+    let ts_view = I64ColView::from_col(&b.columns()[0]);
     let model_col = &b.columns()[1];
-    let tok_col = &b.columns()[2];
-    let cost_col = &b.columns()[3];
-    let mut cache: HashMap<&str, usize> = HashMap::new();
-    let mut keys: Vec<(i64, String)> = Vec::new();
+    let tok_view = I64ColView::from_col(&b.columns()[2]);
+    let cost_view = F64ColView::from_col(&b.columns()[3]);
 
+    match model_col {
+        Column::Dict(d) => {
+            if let FlatData::Utf8(dict_utf8) = d.values().data() {
+                let codes = d.codes();
+                let nulls = d.nulls();
+                let mut local: HashMap<(i64, u32), (usize, f64, i64)> = HashMap::new();
+                for_each_active_row(b.selection(), b.raw_len(), |row| {
+                    let bucket = ts_view.get_or_zero(row) / HOUR_NS;
+                    let code = if nulls.is_some_and(|bm| !bm.get(row)) {
+                        u32::MAX
+                    } else {
+                        codes[row]
+                    };
+                    let tok = tok_view.get_or_zero(row);
+                    let cost = cost_view.get_valid_or_zero(row);
+                    let entry = local.entry((bucket, code)).or_insert((0, 0.0, 0));
+                    entry.0 += 1;
+                    entry.1 += cost;
+                    entry.2 += tok;
+                });
+
+                let mut resolved_names: Vec<Option<String>> = vec![None; dict_utf8.len()];
+                for ((bucket, code), (cnt, cost_sum, tok_sum)) in local {
+                    let model_name = if code == u32::MAX {
+                        "unknown".to_owned()
+                    } else {
+                        let idx = code as usize;
+                        if let Some(slot) = resolved_names.get_mut(idx) {
+                            if let Some(cached) = slot {
+                                cached.clone()
+                            } else {
+                                let s = dict_utf8.get(idx).unwrap_or("unknown").to_owned();
+                                *slot = Some(s.clone());
+                                s
+                            }
+                        } else {
+                            "unknown".to_owned()
+                        }
+                    };
+                    let entry = agg.entry((bucket, model_name)).or_insert((0, 0.0, 0));
+                    entry.0 += cnt;
+                    entry.1 += cost_sum;
+                    entry.2 += tok_sum;
+                }
+                return;
+            }
+        }
+        Column::Const { value, .. } => {
+            let model_str = match value {
+                cetra_column::ScalarValue::Utf8(s) => s.as_str(),
+                _ => "unknown",
+            };
+            let mut local: HashMap<i64, (usize, f64, i64)> = HashMap::new();
+            for_each_active_row(b.selection(), b.raw_len(), |row| {
+                let bucket = ts_view.get_or_zero(row) / HOUR_NS;
+                let tok = tok_view.get_or_zero(row);
+                let cost = cost_view.get_valid_or_zero(row);
+                let entry = local.entry(bucket).or_insert((0, 0.0, 0));
+                entry.0 += 1;
+                entry.1 += cost;
+                entry.2 += tok;
+            });
+            for (bucket, (cnt, cost_sum, tok_sum)) in local {
+                let entry = agg
+                    .entry((bucket, model_str.to_owned()))
+                    .or_insert((0, 0.0, 0));
+                entry.0 += cnt;
+                entry.1 += cost_sum;
+                entry.2 += tok_sum;
+            }
+            return;
+        }
+        _ => {}
+    }
+
+    let mut local: HashMap<(i64, &str), (usize, f64, i64)> = HashMap::new();
     for_each_active_row(b.selection(), b.raw_len(), |row| {
-        let ts = read_i64_at(ts_col, row).unwrap_or(0);
-        let bucket = ts / HOUR_NS;
+        let bucket = ts_view.get_or_zero(row) / HOUR_NS;
         let model = read_str_at(model_col, row).unwrap_or("unknown");
-        let tok = read_i64_at(tok_col, row).unwrap_or(0);
-        let cost = read_f64_at(cost_col, row)
-            .filter(|v| !v.is_nan())
-            .unwrap_or(0.0);
-
-        let entry = agg.entry((bucket, model.to_owned())).or_insert((0, 0.0, 0));
+        let tok = tok_view.get_or_zero(row);
+        let cost = cost_view.get_valid_or_zero(row);
+        let entry = local.entry((bucket, model)).or_insert((0, 0.0, 0));
         entry.0 += 1;
         entry.1 += cost;
         entry.2 += tok;
-        let _ = (&mut cache, &mut keys);
     });
+    for ((bucket, model), (cnt, cost_sum, tok_sum)) in local {
+        let entry = agg.entry((bucket, model.to_owned())).or_insert((0, 0.0, 0));
+        entry.0 += cnt;
+        entry.1 += cost_sum;
+        entry.2 += tok_sum;
+    }
 }
 
 fn topk_statam_batch(b: &Batch, topk: &mut BinaryHeap<Reverse<(i64, usize)>>) {

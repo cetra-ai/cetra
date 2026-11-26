@@ -19,8 +19,10 @@ pub const PACK_POSTSCRIPT_MAGIC: [u8; 4] = *b"0KPS";
 pub const BLOCK_MAGIC: [u8; 2] = *b"SB";
 /// Magic bytes at offset 0 of a framed `.stpk` pack frame.
 pub const PACK_FRAME_MAGIC: [u8; 2] = *b"PF";
-/// Magic bytes at offset 0 of a Split-Block Bloom Filter section.
+/// Magic bytes at offset 0 of a Split-Block Bloom Filter section (`BF01`, single filter).
 pub const BLOOM_MAGIC: [u8; 4] = *b"BF01";
+/// Magic bytes at offset 0 of a per-Row-Group Split-Block Bloom Filter section (`BF02`).
+pub const BLOOM_RG_MAGIC: [u8; 4] = *b"BF02";
 /// Magic bytes at offset 0 of a file-level Dictionary section.
 pub const DICT_MAGIC: [u8; 4] = *b"DT01";
 
@@ -32,7 +34,9 @@ pub const CHECKSUM_ALG_CRC32C: u8 = 1;
 pub const DEFAULT_TAIL_HINT: u32 = 1 << 20;
 
 /// Target rows per PAX Row Group.
-pub const ROW_GROUP_SIZE: usize = 16_384;
+pub const ROW_GROUP_SIZE: usize = 65_536;
+/// Hard upper bound on rows per PAX Row Group (`RowGroupEntry::row_count`).
+pub const MAX_ROW_GROUP_SIZE: usize = 131_072;
 /// Target rows per Mini-Block.
 pub const MINI_BLOCK_SIZE: usize = 4_096;
 
@@ -1204,7 +1208,7 @@ impl ColumnDirEntry {
 pub struct RowGroupEntry {
     /// Starting global row index in file.
     pub first_row: u32,
-    /// Number of rows in this row group (`<= ROW_GROUP_SIZE`).
+    /// Number of rows in this row group (`<= MAX_ROW_GROUP_SIZE`).
     pub row_count: u32,
     /// Absolute offset of Core locality group slice.
     pub core_offset: u64,
@@ -1246,9 +1250,9 @@ impl RowGroupEntry {
             });
         }
         let row_count = read_u32_le(buf, 4);
-        if (row_count as usize) > ROW_GROUP_SIZE {
+        if (row_count as usize) > MAX_ROW_GROUP_SIZE {
             return Err(StatamError::BoundsExceeded {
-                reason: "row group row_count exceeds ROW_GROUP_SIZE",
+                reason: "row group row_count exceeds MAX_ROW_GROUP_SIZE",
             });
         }
         let core_offset = read_u64_le(buf, 8);

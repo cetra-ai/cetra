@@ -1,5 +1,6 @@
 //! Streaming PAX Row-Group writer for `.statam` files (`L0Fast` & `L1Compact`).
 
+use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::io::Write;
@@ -11,8 +12,8 @@ use cetra_column::{
 
 use crate::StatamError;
 use crate::codec::dict::{DictBuilder, DictValueKind, FileDict};
-use crate::codec::nested::{encode_shredded_subcol, select_shredded_keys, shred_map};
-use crate::codec::{EncodedMiniBlock, WriteProfile, encode_mini_block};
+use crate::codec::nested::{encode_shredded_subcol_with_codec, select_shredded_keys, shred_map};
+use crate::codec::{EncodedMiniBlock, WriteProfile, encode_mini_block_with_locality};
 use crate::format::{
     BLOCK_ENTRY_LEN, BLOCK_FLAG_ALL_NULL, BLOCK_FLAG_HAS_NULLS, BlockEntry, CHECKSUM_ALG_CRC32C,
     COL_FLAG_BLOOM_IN_HOT_TAIL, COL_FLAG_DICT_IN_HOT_TAIL, COL_FLAG_DICT_SORTED,
@@ -22,14 +23,17 @@ use crate::format::{
     FLAG_HAS_TRIGRAM_INDEX, FLAG_HOT_TAIL_LZ4, FLAG_L1_COMPACT, FORMAT_VERSION, FileHeader,
     FileSchemaMeta, LAZY_INDEX_ENTRY_LEN, LazyIndexEntry, LazyIndexKind, LocalityGroup,
     MAX_BLOCK_RAW_BYTES, MAX_COLUMNS, MAX_FRAME_RAW_BYTES, MAX_HOT_TAIL_BYTES, MAX_PACK_REFS,
-    MAX_ROW_GROUPS, MAX_ROWS_PER_FILE, MAX_TOTAL_BLOCKS, MINI_BLOCK_SIZE, POSTSCRIPT_LEN,
-    Postscript, ROW_GROUP_ENTRY_LEN, ROW_GROUP_SIZE, RowGroupEntry, ShreddedMapDir,
+    MAX_ROW_GROUP_SIZE, MAX_ROW_GROUPS, MAX_ROWS_PER_FILE, MAX_TOTAL_BLOCKS, MINI_BLOCK_SIZE,
+    POSTSCRIPT_LEN, Postscript, ROW_GROUP_ENTRY_LEN, ROW_GROUP_SIZE, RowGroupEntry, ShreddedMapDir,
     ShreddedMapKeyEntry, TableKind, encode_schema, write_framed_block, write_framed_pack_frame,
 };
 use crate::payload::chunker::{DedupBypassDetector, INLINE_PAYLOAD_THRESHOLD, chunk_payload};
 use crate::payload::pack::ChunkPackBuilder;
-use crate::payload::{PayloadRefRow, encode_payload_refs};
-use crate::simd::bloom::{Sbbf, statam_bloom_hash};
+use crate::payload::{
+    PayloadRefRow, encode_payload_refs, encode_payload_refs_l0_direct,
+    encode_payload_refs_l0_from_utf8,
+};
+use crate::simd::bloom::{BloomIndex, Sbbf, statam_bloom_hash};
 use crate::simd::trigram::{
     MAX_TRIGRAM_BLOOM_BYTES, MIN_TRIGRAM_BLOOM_BYTES, TrigramBloom, extract_trigram_hashes,
 };
@@ -44,8 +48,8 @@ const MIN_NARROW_TRIGRAM_STORED_BYTES: usize = 2560;
 const HOT_DICT_MAX_BYTES: usize = 8 * 1024;
 /// Target SBBF false-positive probability.
 const BLOOM_FPP: f64 = 0.01;
-/// Target uncompressed bytes per L0 local payload `PF` frame (64 KiB).
-const L0_PAYLOAD_FRAME_TARGET_BYTES: usize = 64 * 1024;
+/// Target uncompressed bytes per L0 local payload `PF` frame (256 KiB).
+const L0_PAYLOAD_FRAME_TARGET_BYTES: usize = 256 * 1024;
 /// Magic bytes for the local L0 payload directory inside `l0_payload_offset`.
 pub(crate) const L0_PAYLOAD_DIR_MAGIC: [u8; 4] = *b"L0P1";
 /// Magic bytes for a per-block narrow-column trigram section.
@@ -60,6 +64,36 @@ type PrechunkedRefs<'a> = (
     &'a HashMap<usize, Vec<PayloadRefRow>>,
     &'a HashMap<(usize, u32), Vec<u8>>,
 );
+
+/// Hot Analytics `Core` columns written FIRST at `core_offset` so every RG's analytics
+/// columns + shredded sub-columns pack inside the first 1 MiB `ReadCache` block.
+const HOT_ANALYTICS_CORE_COLS: &[&str] = &[
+    "start_time",
+    "created_at",
+    "status",
+    "span_kind",
+    "model",
+    "name",
+    "cost_total",
+    "total_tokens",
+    "duration_ns",
+    "environment",
+    "provider",
+    "service_name",
+    "release",
+];
+
+/// High-frequency ID / trailing `Core` columns written at the back of `Core`.
+const ID_CORE_COLS: &[&str] = &[
+    "trace_id",
+    "span_id",
+    "parent_span_id",
+    "user_id",
+    "session_id",
+    "score_id",
+    "end_time",
+    "ingest_time",
+];
 
 const WIDE_ROW_COL_NAMES: &[&str] = &[
     "input_preview",
@@ -83,8 +117,12 @@ const HIGH_CARDINALITY_ID_COLS: &[&str] = &["trace_id", "span_id", "parent_span_
 const KNOWN_LOW_CARD_DICT_COLS: &[&str] = &[
     "name",
     "kind",
+    "status",
     "status_code",
+    "target",
     "model",
+    "request_model",
+    "response_model",
     "provider",
     "operation",
     "finish_reason",
@@ -101,6 +139,11 @@ const KNOWN_LOW_CARD_DICT_COLS: &[&str] = &[
     "sdk_name",
     "data_type",
     "source",
+    "cost_source",
+    "input_format",
+    "output_format",
+    "scope_name",
+    "scope_version",
 ];
 
 /// Configuration options for [`StatamWriter`].
@@ -120,11 +163,11 @@ pub struct WriteOptions {
     pub payload_cols: Vec<String>,
     /// Narrow `Utf8` column names receiving per-block `TrigramBloom` in `L1Compact` when not dict-encoded.
     pub narrow_trigram_cols: Vec<String>,
-    /// Rows per PAX Row Group (default: `ROW_GROUP_SIZE = 16_384`).
+    /// Rows per PAX Row Group (default: `65_536` for Spans/Traces/Generic, `32_768` for Scores).
     pub row_group_size: usize,
     /// Rows per Mini-Block (default: `MINI_BLOCK_SIZE = 4_096`).
     pub mini_block_size: usize,
-    /// Zstd compression level when `profile == L1Compact` (default: `3`).
+    /// Zstd compression level when `profile == L1Compact` (default: `1`).
     pub zstd_level: i32,
     /// Whether to LZ4-compress the Hot Tail body when smaller (default: `true`).
     pub compress_hot_tail_lz4: bool,
@@ -169,6 +212,10 @@ impl WriteOptions {
             (TableKind::Spans, WriteProfile::L1Compact) => vec!["name".to_owned()],
             _ => Vec::new(),
         };
+        let row_group_size = match table_kind {
+            TableKind::Scores => 32_768,
+            TableKind::Spans | TableKind::Traces | TableKind::Generic => ROW_GROUP_SIZE,
+        };
 
         Self {
             profile,
@@ -178,9 +225,9 @@ impl WriteOptions {
             hot_bloom_col: Some("trace_id".to_owned()),
             payload_cols,
             narrow_trigram_cols,
-            row_group_size: ROW_GROUP_SIZE,
+            row_group_size,
             mini_block_size: MINI_BLOCK_SIZE,
-            zstd_level: 3,
+            zstd_level: 1,
             compress_hot_tail_lz4: true,
             pack_id: None,
         }
@@ -248,8 +295,9 @@ pub struct StatamWriter<'a> {
     wide_bytes: u64,
     l0_payload_bytes: u64,
 
-    // Per-column bloom hash accumulators (keyed by logical column index).
-    bloom_hashes: HashMap<usize, Vec<u64>>,
+    // Per-column per-RG SBBF bloom accumulators (keyed by logical column index).
+    bloom_rgs: HashMap<usize, Vec<Sbbf>>,
+    bloom_has_values: HashMap<usize, bool>,
     // Per-column W4 bypass detectors (keyed by logical column index).
     bypass_detectors: HashMap<usize, DedupBypassDetector>,
     // Per-column trigram blooms for narrow_trigram_cols (keyed by logical column index).
@@ -297,9 +345,9 @@ impl<'a> StatamWriter<'a> {
                 reason: "schema column count exceeds MAX_COLUMNS",
             });
         }
-        if options.row_group_size == 0 || options.row_group_size > ROW_GROUP_SIZE {
+        if options.row_group_size == 0 || options.row_group_size > MAX_ROW_GROUP_SIZE {
             return Err(StatamError::BoundsExceeded {
-                reason: "row_group_size must be in 1..=ROW_GROUP_SIZE",
+                reason: "row_group_size must be in 1..=MAX_ROW_GROUP_SIZE",
             });
         }
         if options.mini_block_size == 0 || options.mini_block_size > MINI_BLOCK_SIZE {
@@ -343,11 +391,13 @@ impl<'a> StatamWriter<'a> {
         }
 
         let mut bloom_col_set = HashSet::new();
-        let mut bloom_hashes = HashMap::new();
+        let mut bloom_rgs = HashMap::new();
+        let mut bloom_has_values = HashMap::new();
         for name in &options.bloom_cols {
             if let Some(idx) = schema.index_of(name) {
                 bloom_col_set.insert(idx);
-                bloom_hashes.insert(idx, Vec::new());
+                bloom_rgs.insert(idx, Vec::new());
+                bloom_has_values.insert(idx, false);
             }
         }
         let hot_bloom_col_idx = options
@@ -356,7 +406,8 @@ impl<'a> StatamWriter<'a> {
             .and_then(|name| schema.index_of(name));
         if let Some(idx) = hot_bloom_col_idx {
             bloom_col_set.insert(idx);
-            bloom_hashes.entry(idx).or_default();
+            bloom_rgs.entry(idx).or_default();
+            bloom_has_values.entry(idx).or_insert(false);
         }
 
         let mut narrow_trigram_col_set = HashSet::new();
@@ -403,7 +454,8 @@ impl<'a> StatamWriter<'a> {
             core_bytes: 0,
             wide_bytes: 0,
             l0_payload_bytes: 0,
-            bloom_hashes,
+            bloom_rgs,
+            bloom_has_values,
             bypass_detectors: HashMap::new(),
             narrow_trigrams,
             max_chunk_id_seen: HashMap::new(),
@@ -443,9 +495,23 @@ impl<'a> StatamWriter<'a> {
         };
 
         let total = active_batch.raw_len();
+        let rg_size = self.options.row_group_size;
         let mut offset = 0usize;
         while offset < total {
-            let space = self.options.row_group_size - self.rg_buf_rows;
+            if self.rg_buf_rows == 0 && total - offset >= rg_size {
+                if offset == 0 && total == rg_size {
+                    self.flush_rg_columns(active_batch.columns(), rg_size, None)?;
+                } else {
+                    let mut rg_cols = Vec::with_capacity(active_batch.columns().len());
+                    for col in active_batch.columns() {
+                        rg_cols.push(col.slice(offset, rg_size)?);
+                    }
+                    self.flush_rg_columns(&rg_cols, rg_size, None)?;
+                }
+                offset += rg_size;
+                continue;
+            }
+            let space = rg_size - self.rg_buf_rows;
             let take = (total - offset).min(space);
             for (col_idx, col) in active_batch.columns().iter().enumerate() {
                 let piece = if offset == 0 && take == total {
@@ -458,7 +524,7 @@ impl<'a> StatamWriter<'a> {
             self.rg_buf_rows += take;
             offset += take;
 
-            if self.rg_buf_rows == self.options.row_group_size {
+            if self.rg_buf_rows == rg_size {
                 self.flush_row_group()?;
             }
         }
@@ -918,6 +984,29 @@ impl<'a> StatamWriter<'a> {
         if rg_rows == 0 {
             return Ok(());
         }
+
+        // Concatenate each logical column's buffered slices for this RG.
+        let mut rg_cols = Vec::with_capacity(self.schema.len());
+        for (cidx, pieces) in self.rg_buf_cols.iter_mut().enumerate() {
+            let dt = &self.schema.fields()[cidx].data_type;
+            let combined = concat_rg_column(dt, pieces, rg_rows)?;
+            pieces.clear();
+            rg_cols.push(combined);
+        }
+        self.rg_buf_rows = 0;
+
+        self.flush_rg_columns(&rg_cols, rg_rows, prechunked)
+    }
+
+    fn flush_rg_columns(
+        &mut self,
+        rg_cols: &[Column],
+        rg_rows: usize,
+        prechunked: Option<PrechunkedRefs<'_>>,
+    ) -> Result<(), StatamError> {
+        if rg_rows == 0 {
+            return Ok(());
+        }
         if self.rg_entries.len() >= MAX_ROW_GROUPS {
             return Err(StatamError::BoundsExceeded {
                 reason: "row group count exceeds MAX_ROW_GROUPS",
@@ -935,27 +1024,21 @@ impl<'a> StatamWriter<'a> {
                 reason: "row_group first_row overflows u32",
             })?;
 
-        // Concatenate each logical column's buffered slices for this RG.
-        let mut rg_cols = Vec::with_capacity(self.schema.len());
-        for (cidx, pieces) in self.rg_buf_cols.iter_mut().enumerate() {
-            let dt = &self.schema.fields()[cidx].data_type;
-            let combined = concat_rg_column(dt, pieces, rg_rows)?;
-            pieces.clear();
-            rg_cols.push(combined);
-        }
-        self.rg_buf_rows = 0;
-
-        // Collect SBBF bloom hashes across this RG.
+        // Build per-RG SBBF bloom filters immediately (never accumulate file-wide Vec<u64>).
         let bloom_indices: Vec<usize> = self.bloom_col_set.iter().copied().collect();
         for cidx in bloom_indices {
-            if let Some(hashes) = self.bloom_hashes.get_mut(&cidx) {
-                collect_column_bloom_hashes(&rg_cols[cidx], hashes)?;
+            let (sbbf, had_any) = build_rg_sbbf(&rg_cols[cidx], self.options.profile)?;
+            if had_any {
+                self.bloom_has_values.insert(cidx, true);
+            }
+            if let Some(rgs) = self.bloom_rgs.get_mut(&cidx) {
+                rgs.push(sbbf);
             }
         }
 
         // RG0 initialization: promote ShreddedMap keys (L1Compact) & seed FileDicts.
         if !self.rg0_initialized {
-            self.init_rg0(&rg_cols)?;
+            self.init_rg0(rg_cols)?;
             self.rg0_initialized = true;
         }
 
@@ -971,10 +1054,15 @@ impl<'a> StatamWriter<'a> {
 
         let core_offset = self.cur_data_offset;
         let mb_size = self.options.mini_block_size;
+        let schema = Arc::clone(&self.schema);
+        let fields = schema.fields();
 
-        // Phase A: Encode Core logical columns.
+        // Phase A1: Hot Analytics Core columns written FIRST at `core_offset`.
         for (cidx, rg_col) in rg_cols.iter().enumerate() {
             if self.logical_locality[cidx] != LocalityGroup::Core {
+                continue;
+            }
+            if !HOT_ANALYTICS_CORE_COLS.contains(&fields[cidx].name.as_str()) {
                 continue;
             }
             self.encode_rg_scalar_or_nested_col(
@@ -988,7 +1076,7 @@ impl<'a> StatamWriter<'a> {
             )?;
         }
 
-        // Phase B: Encode ShreddedMap sub-columns (in Core!) and residual blocks (in WideRow!).
+        // Phase B: ShreddedMap sub-columns (in Analytics Core front!) and deferred WideRow residuals.
         let num_shredded = self.shredded_maps.len();
         let mut deferred_wide_residuals: Vec<(usize, Vec<EncodedMiniBlock>, Vec<u16>)> = Vec::new();
         for s_idx in 0..num_shredded {
@@ -1011,8 +1099,14 @@ impl<'a> StatamWriter<'a> {
             while row_off < rg_rows {
                 let mb_len = (rg_rows - row_off).min(mb_size);
                 let mb_first_row = first_row_u32 + row_off as u32;
-                let sliced = rg_cols[logical_col].slice(row_off, mb_len)?;
-                let flat = sliced.materialize(None)?;
+                let sliced_owned;
+                let sliced = if row_off == 0 && mb_len == rg_rows {
+                    &rg_cols[logical_col]
+                } else {
+                    sliced_owned = rg_cols[logical_col].slice(row_off, mb_len)?;
+                    &sliced_owned
+                };
+                let flat = as_flat_cow(sliced)?;
                 let shredded = shred_map(&flat, &promoted_keys)?;
 
                 for (k_idx, &sub_pidx) in sub_col_indices.iter().enumerate() {
@@ -1021,13 +1115,15 @@ impl<'a> StatamWriter<'a> {
                             .residual_count
                             .saturating_add(shredded.residual_counts[k_idx]);
 
-                    let sub_raw =
-                        encode_shredded_subcol(&shredded.sub_cols[k_idx], self.options.profile)?;
+                    let (sub_codec, sub_raw) = encode_shredded_subcol_with_codec(
+                        &shredded.sub_cols[k_idx],
+                        self.options.profile,
+                    )?;
                     let blk_off = core_offset + core_buf.len() as u64;
                     let info = write_framed_block(
                         Encoding::ShreddedMap,
                         &sub_raw,
-                        preferred_codec,
+                        sub_codec,
                         zstd_level,
                         &mut core_buf,
                     )?;
@@ -1063,6 +1159,45 @@ impl<'a> StatamWriter<'a> {
             }
 
             deferred_wide_residuals.push((logical_col, mb_residuals, mb_row_counts));
+        }
+
+        // Phase A2: Remaining non-ID Core columns.
+        for (cidx, rg_col) in rg_cols.iter().enumerate() {
+            if self.logical_locality[cidx] != LocalityGroup::Core {
+                continue;
+            }
+            let name = fields[cidx].name.as_str();
+            if HOT_ANALYTICS_CORE_COLS.contains(&name) || ID_CORE_COLS.contains(&name) {
+                continue;
+            }
+            self.encode_rg_scalar_or_nested_col(
+                cidx,
+                rg_col,
+                first_row_u32,
+                mb_size,
+                core_offset,
+                zstd_level,
+                &mut core_buf,
+            )?;
+        }
+
+        // Phase A3: ID Core columns at the back of Core.
+        for (cidx, rg_col) in rg_cols.iter().enumerate() {
+            if self.logical_locality[cidx] != LocalityGroup::Core {
+                continue;
+            }
+            if !ID_CORE_COLS.contains(&fields[cidx].name.as_str()) {
+                continue;
+            }
+            self.encode_rg_scalar_or_nested_col(
+                cidx,
+                rg_col,
+                first_row_u32,
+                mb_size,
+                core_offset,
+                zstd_level,
+                &mut core_buf,
+            )?;
         }
 
         let core_len = u32::try_from(core_buf.len()).map_err(|_| StatamError::BoundsExceeded {
@@ -1182,7 +1317,7 @@ impl<'a> StatamWriter<'a> {
                 if field.data_type != DataType::MapUtf8 {
                     continue;
                 }
-                let flat = rg_cols[cidx].materialize(None)?;
+                let flat = as_flat_cow(&rg_cols[cidx])?;
                 let FlatData::MapUtf8(map) = flat.data() else {
                     continue;
                 };
@@ -1239,15 +1374,12 @@ impl<'a> StatamWriter<'a> {
             if HIGH_CARDINALITY_ID_COLS.contains(&field.name.as_str()) {
                 continue;
             }
-            if self.options.profile == WriteProfile::L0Fast {
-                let is_known_low_card = KNOWN_LOW_CARD_DICT_COLS.contains(&field.name.as_str());
-                let is_core_utf8 = self.logical_locality[cidx] == LocalityGroup::Core
-                    && field.data_type == DataType::Utf8;
-                if !is_known_low_card && !is_core_utf8 {
-                    continue;
-                }
+            if self.options.profile == WriteProfile::L0Fast
+                && !KNOWN_LOW_CARD_DICT_COLS.contains(&field.name.as_str())
+            {
+                continue;
             }
-            let flat = rg_cols[cidx].materialize(None)?;
+            let flat = as_flat_cow(&rg_cols[cidx])?;
             let builder = match self.options.profile {
                 WriteProfile::L0Fast => DictBuilder::l0_fast(),
                 WriteProfile::L1Compact => DictBuilder::l1_compact(),
@@ -1288,13 +1420,26 @@ impl<'a> StatamWriter<'a> {
         let rg_rows = col.len();
         let track_trigram = self.narrow_trigram_col_set.contains(&cidx);
         let dict_clone = self.phys_col_meta[cidx].dict.as_ref().map(Arc::clone);
+        let is_wide_row = self.logical_locality[cidx] == LocalityGroup::WideRow;
 
         let mut row_off = 0usize;
         while row_off < rg_rows {
             let mb_len = (rg_rows - row_off).min(mb_size);
             let mb_first_row = first_row_u32 + row_off as u32;
-            let sliced = col.slice(row_off, mb_len)?;
-            let enc = encode_mini_block(&sliced, &dt, self.options.profile, dict_clone.as_deref())?;
+            let sliced_owned;
+            let sliced = if row_off == 0 && mb_len == rg_rows {
+                col
+            } else {
+                sliced_owned = col.slice(row_off, mb_len)?;
+                &sliced_owned
+            };
+            let enc = encode_mini_block_with_locality(
+                sliced,
+                &dt,
+                self.options.profile,
+                dict_clone.as_deref(),
+                is_wide_row,
+            )?;
 
             if enc.encoding == Encoding::Dict {
                 self.phys_col_meta[cidx].used_dict_encoding = true;
@@ -1319,7 +1464,7 @@ impl<'a> StatamWriter<'a> {
                     && enc.encoding != Encoding::Const
                     && enc.encoding != Encoding::ConstNull
                 {
-                    build_narrow_trigram_for_mb(&sliced, entry.stored_len as usize)
+                    build_narrow_trigram_for_mb(sliced, entry.stored_len as usize)
                 } else {
                     None
                 };
@@ -1348,10 +1493,92 @@ impl<'a> StatamWriter<'a> {
         l0_local: &mut LocalL0PayloadBuilder,
     ) -> Result<(), StatamError> {
         let rg_rows = col.len();
+        if prechunked.is_none()
+            && (self.options.profile == WriteProfile::L0Fast || self.pack_builder.is_none())
+        {
+            let fc = as_flat_cow(col)?;
+            let FlatData::Utf8(u) = fc.data() else {
+                return Err(StatamError::SchemaMismatch {
+                    reason: "ExternalPayload column must be DataType::Utf8",
+                });
+            };
+            let col_nulls = fc.nulls();
+            let mut raw_body = Vec::new();
+            let mut row_off = 0usize;
+            while row_off < rg_rows {
+                let mb_len = (rg_rows - row_off).min(mb_size);
+                let mb_first_row = first_row_u32 + row_off as u32;
+                raw_body.clear();
+                let null_count = encode_payload_refs_l0_from_utf8(
+                    u,
+                    col_nulls,
+                    row_off,
+                    mb_len,
+                    INLINE_PAYLOAD_THRESHOLD,
+                    L0_LOCAL_PACK_IDX,
+                    |slice| l0_local.add_chunk(slice),
+                    &mut raw_body,
+                )?;
+                self.phys_col_meta[cidx].null_count_total = self.phys_col_meta[cidx]
+                    .null_count_total
+                    .saturating_add(u32::from(null_count));
+                if usize::from(null_count) == mb_len {
+                    self.phys_blocks[cidx].push(BlockEntry {
+                        first_row: mb_first_row,
+                        row_count: mb_len as u16,
+                        null_count,
+                        offset: 0,
+                        stored_len: 0,
+                        raw_len: 0,
+                        encoding: Encoding::ConstNull,
+                        codec: Codec::None,
+                        block_flags: BLOCK_FLAG_ALL_NULL | BLOCK_FLAG_HAS_NULLS,
+                        min_inline_len: 0,
+                        max_inline_len: 0,
+                        reserved: [0; 3],
+                        min_inline: [0; 16],
+                        max_inline: [0; 16],
+                    });
+                } else {
+                    let blk_off = base_offset + wide_buf.len() as u64;
+                    let info = write_framed_block(
+                        Encoding::PayloadRefs,
+                        &raw_body,
+                        preferred_codec,
+                        zstd_level,
+                        wide_buf,
+                    )?;
+                    let block_flags = if null_count > 0 {
+                        BLOCK_FLAG_HAS_NULLS
+                    } else {
+                        0
+                    };
+                    self.phys_blocks[cidx].push(BlockEntry {
+                        first_row: mb_first_row,
+                        row_count: mb_len as u16,
+                        null_count,
+                        offset: blk_off,
+                        stored_len: info.stored_len,
+                        raw_len: info.raw_len,
+                        encoding: Encoding::PayloadRefs,
+                        codec: info.codec,
+                        block_flags,
+                        min_inline_len: 0,
+                        max_inline_len: 0,
+                        reserved: [0; 3],
+                        min_inline: [0; 16],
+                        max_inline: [0; 16],
+                    });
+                }
+                row_off += mb_len;
+            }
+            return Ok(());
+        }
+
         let flat = if prechunked.is_some() {
             None
         } else {
-            Some(col.materialize(None)?)
+            Some(as_flat_cow(col)?)
         };
 
         let mut row_off = 0usize;
@@ -1428,7 +1655,11 @@ impl<'a> StatamWriter<'a> {
                 });
             } else {
                 let mut raw_body = Vec::new();
-                encode_payload_refs(&ref_rows, &mut raw_body)?;
+                if self.options.profile == WriteProfile::L0Fast {
+                    encode_payload_refs_l0_direct(&ref_rows, &mut raw_body)?;
+                } else {
+                    encode_payload_refs(&ref_rows, &mut raw_body)?;
+                }
                 let blk_off = base_offset + wide_buf.len() as u64;
                 let info = write_framed_block(
                     Encoding::PayloadRefs,
@@ -1505,9 +1736,9 @@ impl<'a> StatamWriter<'a> {
                 let mut refs = Vec::new();
 
                 if bypassed {
-                    // W4 incompressible bypass: skip CDC hashing, dedup map, Zstd, and trigrams.
-                    for slice in bytes.chunks(MAX_FRAME_RAW_BYTES.min(64 * 1024)) {
-                        let cid = pb.append_raw_uncompressed_bypass(slice)?;
+                    // W4 bypass: skip CDC hashing, dedup map, and trigrams (Zstd-1 guarded -> Codec::None if incompressible).
+                    for slice in bytes.chunks(MAX_FRAME_RAW_BYTES.min(256 * 1024)) {
+                        let cid = pb.append_raw_bypass(slice)?;
                         refs.push((0u16, cid));
                     }
                 } else {
@@ -1554,26 +1785,14 @@ impl<'a> StatamWriter<'a> {
         &mut self,
         cidx: usize,
     ) -> Result<Option<Vec<u8>>, StatamError> {
-        let Some(mut hashes) = self.bloom_hashes.remove(&cidx) else {
+        let Some(rgs) = self.bloom_rgs.remove(&cidx) else {
             return Ok(None);
         };
-        if hashes.is_empty() {
+        let has_any = self.bloom_has_values.remove(&cidx).unwrap_or(false);
+        if !has_any || rgs.is_empty() {
             return Ok(None);
         }
-        let skip_dedup = self.options.profile == WriteProfile::L0Fast
-            && matches!(
-                self.schema.fields()[cidx].name.as_str(),
-                "span_id" | "score_id"
-            );
-        if !skip_dedup {
-            hashes.sort_unstable();
-            hashes.dedup();
-        }
-        let mut sbbf = Sbbf::new_for_ndv(hashes.len(), BLOOM_FPP);
-        for h in hashes {
-            sbbf.insert_hash(h);
-        }
-        Ok(Some(sbbf.to_bytes()))
+        Ok(Some(BloomIndex::PerRowGroup(rgs).to_bytes()))
     }
 
     fn take_and_build_primary_bloom(
@@ -1581,50 +1800,67 @@ impl<'a> StatamWriter<'a> {
         cidx: usize,
         avail_bytes: usize,
     ) -> Result<Option<(Vec<u8>, bool)>, StatamError> {
-        let Some(mut hashes) = self.bloom_hashes.remove(&cidx) else {
+        let Some(rgs) = self.bloom_rgs.remove(&cidx) else {
             return Ok(None);
         };
-        if hashes.is_empty() {
+        let has_any = self.bloom_has_values.remove(&cidx).unwrap_or(false);
+        if !has_any || rgs.is_empty() {
             return Ok(None);
         }
+        let bytes = BloomIndex::PerRowGroup(rgs).to_bytes();
+        let fits_hot = bytes.len() <= avail_bytes;
+        Ok(Some((bytes, fits_hot)))
+    }
+}
+
+#[inline]
+fn as_flat_cow(col: &Column) -> Result<Cow<'_, FlatColumn>, StatamError> {
+    match col {
+        Column::Flat(fc) => Ok(Cow::Borrowed(fc)),
+        other => Ok(Cow::Owned(other.materialize(None)?)),
+    }
+}
+
+fn build_rg_sbbf(col: &Column, profile: WriteProfile) -> Result<(Sbbf, bool), StatamError> {
+    if col.is_empty() {
+        return Ok((Sbbf::new_for_ndv(1, BLOOM_FPP), false));
+    }
+
+    // Fast path for L0Fast Flat columns: estimate ndv = non-null count without sorting Vec<u64>.
+    if profile == WriteProfile::L0Fast
+        && let Column::Flat(f) = col
+    {
+        let non_nulls = f
+            .len()
+            .saturating_sub(f.nulls().map_or(0, |bm| bm.count_zeros()));
+        if non_nulls == 0 {
+            return Ok((Sbbf::new_for_ndv(1, BLOOM_FPP), false));
+        }
+        let mut sbbf = Sbbf::new_for_ndv(non_nulls, BLOOM_FPP);
+        let mut had_any = false;
+        for row in 0..f.len() {
+            if let Some(h) = flat_row_bloom_hash(f, row) {
+                sbbf.insert_hash(h);
+                had_any = true;
+            }
+        }
+        return Ok((sbbf, had_any));
+    }
+
+    let mut hashes = Vec::new();
+    collect_column_bloom_hashes(col, &mut hashes)?;
+    if hashes.is_empty() {
+        return Ok((Sbbf::new_for_ndv(1, BLOOM_FPP), false));
+    }
+    if profile == WriteProfile::L1Compact {
         hashes.sort_unstable();
         hashes.dedup();
-        let ndv = hashes.len();
-
-        let default_sbbf = Sbbf::new_for_ndv(ndv, BLOOM_FPP);
-        if default_sbbf.encoded_len() <= avail_bytes {
-            let mut sbbf = default_sbbf;
-            for h in hashes {
-                sbbf.insert_hash(h);
-            }
-            return Ok(Some((sbbf.to_bytes(), true)));
-        }
-
-        if avail_bytes >= 32 * 1024 && Sbbf::new_for_ndv(ndv, 0.50).encoded_len() <= avail_bytes {
-            let mut lo = BLOOM_FPP;
-            let mut hi = 0.50;
-            for _ in 0..24 {
-                let mid = 0.5 * (lo + hi);
-                if Sbbf::new_for_ndv(ndv, mid).encoded_len() <= avail_bytes {
-                    hi = mid;
-                } else {
-                    lo = mid;
-                }
-            }
-            let mut sbbf = Sbbf::new_for_ndv(ndv, hi);
-            for h in hashes {
-                sbbf.insert_hash(h);
-            }
-            return Ok(Some((sbbf.to_bytes(), true)));
-        }
-
-        // Cannot fit inside 1 MiB Hot Tail even at FPP 0.50 -> spill at full FPP to Lazy Index.
-        let mut sbbf = default_sbbf;
-        for h in hashes {
-            sbbf.insert_hash(h);
-        }
-        Ok(Some((sbbf.to_bytes(), false)))
     }
+    let mut sbbf = Sbbf::new_for_ndv(hashes.len(), BLOOM_FPP);
+    for h in hashes {
+        sbbf.insert_hash(h);
+    }
+    Ok((sbbf, true))
 }
 
 #[derive(Default)]
@@ -1773,9 +2009,9 @@ fn concat_rg_column(
 
     let mut flats = Vec::with_capacity(pieces.len());
     for p in pieces {
-        flats.push(p.materialize(None)?);
+        flats.push(as_flat_cow(p)?);
     }
-    let flat_refs: Vec<&FlatColumn> = flats.iter().collect();
+    let flat_refs: Vec<&FlatColumn> = flats.iter().map(Cow::as_ref).collect();
     let merged = concat_flat_columns(dt, &flat_refs, total_rows)?;
     Ok(Column::Flat(merged))
 }
@@ -1985,10 +2221,10 @@ pub(crate) fn concat_flat_columns(
                             reason: "list concat child length overflow",
                         },
                     )?;
-                    child_flats.push(values.materialize(None)?);
+                    child_flats.push(as_flat_cow(values)?);
                 }
             }
-            let child_refs: Vec<&FlatColumn> = child_flats.iter().collect();
+            let child_refs: Vec<&FlatColumn> = child_flats.iter().map(Cow::as_ref).collect();
             let merged_child = concat_flat_columns(inner, &child_refs, total_child)?;
             FlatData::List {
                 item_type: (**inner).clone(),
@@ -2223,7 +2459,7 @@ fn build_narrow_trigram_for_mb(col: &Column, stored_len: usize) -> Option<Vec<u8
     if stored_len < MIN_NARROW_TRIGRAM_STORED_BYTES || col.is_empty() {
         return None;
     }
-    let flat = col.materialize(None).ok()?;
+    let flat = as_flat_cow(col).ok()?;
     let FlatData::Utf8(u) = flat.data() else {
         return None;
     };
@@ -2730,12 +2966,30 @@ mod tests {
             .toc()
             .frames
             .iter()
-            .filter(|f| f.codec == Codec::None && f.filter_len == 0)
+            .filter(|f| f.filter_len == 0)
             .collect();
         assert!(
             !bypass_frames.is_empty(),
-            "W4 bypass must emit raw Codec::None frames with filter_len == 0"
+            "W4 bypass must omit trigram blooms (filter_len == 0)"
         );
+
+        // Also verify append_raw_bypass falls back to Codec::None on truly incompressible bytes.
+        let mut raw_pb = ChunkPackBuilder::new([0x66u8; 16], pack_opts);
+        let mut incomp = vec![0u8; 20 * 1024];
+        let mut s = 0x9e37_79b9_7f4a_7c15u64;
+        for b in &mut incomp {
+            s ^= s << 13;
+            s ^= s >> 7;
+            s ^= s << 17;
+            *b = (s >> 24) as u8;
+        }
+        raw_pb.append_raw_bypass(&incomp).unwrap();
+        let mut raw_pack_bytes = Vec::new();
+        raw_pb.finish(&mut raw_pack_bytes).unwrap();
+        let raw_pack_reader =
+            ChunkPackReader::open(Arc::new(SliceReader::new(raw_pack_bytes))).unwrap();
+        assert_eq!(raw_pack_reader.toc().frames[0].codec, Codec::None);
+        assert_eq!(raw_pack_reader.toc().frames[0].filter_len, 0);
 
         let mut resolver = InMemoryPackResolver::new();
         resolver.insert(pack_id, pack_reader);

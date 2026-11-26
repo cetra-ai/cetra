@@ -34,7 +34,7 @@ use crate::io::RangeReader;
 use crate::payload::pack::ChunkPackReader;
 use crate::payload::search::search_pack_rows;
 use crate::payload::{PayloadRefRow, decode_payload_refs};
-use crate::simd::bloom::{Sbbf, statam_bloom_hash};
+use crate::simd::bloom::{BloomIndex, statam_bloom_hash};
 use crate::simd::filter::{FilterOp, filter_f64, filter_i64, filter_i64_between, filter_u32};
 use crate::simd::trigram::{TrigramBloom, ascii_lowercase_into, extract_trigram_hashes};
 use crate::writer::{L0_LOCAL_PACK_IDX, L0_PAYLOAD_DIR_MAGIC, NARROW_TRIGRAM_MAGIC};
@@ -710,8 +710,8 @@ impl StatamFileMeta {
         self.rg_dir.len()
     }
 
-    /// Decodes a Hot-Tail-resident SBBF bloom for physical column `pidx`, if present.
-    pub fn hot_bloom(&self, pidx: usize) -> Result<Option<Sbbf>, StatamError> {
+    /// Decodes a Hot-Tail-resident SBBF bloom index (`BF01`/`BF02`) for physical column `pidx`, if present.
+    pub fn hot_bloom(&self, pidx: usize) -> Result<Option<BloomIndex>, StatamError> {
         let Some(cd) = self.col_dir.get(pidx) else {
             return Ok(None);
         };
@@ -720,7 +720,9 @@ impl StatamFileMeta {
         }
         let start = cd.bloom_offset as usize;
         let end = start + cd.bloom_len as usize;
-        Ok(Some(Sbbf::from_bytes(&self.hot_bloom_bytes[start..end])?))
+        Ok(Some(BloomIndex::from_bytes(
+            &self.hot_bloom_bytes[start..end],
+        )?))
     }
 
     /// Decodes a Hot-Tail-resident `FileDict` for physical column `pidx`, if present.
@@ -854,7 +856,7 @@ fn validate_block_in_rg(
 
 #[derive(Default)]
 struct ReaderCaches {
-    blooms: HashMap<usize, Sbbf>,
+    blooms: HashMap<usize, BloomIndex>,
     dicts: HashMap<usize, Arc<FileDict>>,
     narrow_trigrams: HashMap<usize, Vec<Option<TrigramBloom>>>,
     packs: HashMap<[u8; 16], Arc<ChunkPackReader>>,
@@ -1103,8 +1105,19 @@ impl StatamReader {
             keys.dedup();
         }
 
-        // Step 1: File-level SBBF bloom check for id_lookups.
-        if !self.check_blooms(&resolved_lookups)? {
+        // Step 1: Precompute lookup hashes once and check file-level SBBF blooms.
+        let lookup_hashes: Vec<(usize, Vec<u64>)> = resolved_lookups
+            .iter()
+            .map(|&(cidx, lk)| {
+                let hashes = lk
+                    .values
+                    .iter()
+                    .map(|v| statam_bloom_hash(v))
+                    .collect::<Vec<_>>();
+                (cidx, hashes)
+            })
+            .collect();
+        if !lookup_hashes.is_empty() && !self.check_blooms(&lookup_hashes)? {
             return Ok(Vec::new());
         }
 
@@ -1211,6 +1224,22 @@ impl StatamReader {
                 && emitted_rows >= lim
             {
                 break;
+            }
+
+            if !lookup_hashes.is_empty() {
+                let guard = self.caches.lock().unwrap_or_else(|p| p.into_inner());
+                let mut rg_may_match = true;
+                for (cidx, hashes) in &lookup_hashes {
+                    if let Some(bloom) = guard.blooms.get(cidx)
+                        && !bloom.rg_may_contain_any_hash(rg_idx, hashes)
+                    {
+                        rg_may_match = false;
+                        break;
+                    }
+                }
+                if !rg_may_match {
+                    continue;
+                }
             }
 
             let rg = &self.meta.rg_dir[rg_idx];
@@ -1361,20 +1390,21 @@ impl StatamReader {
         Ok(out_batches)
     }
 
-    fn check_blooms(&self, lookups: &[(usize, &IdLookup)]) -> Result<bool, StatamError> {
+    fn check_blooms(&self, lookups_with_hashes: &[(usize, Vec<u64>)]) -> Result<bool, StatamError> {
         let mut missing_lazy: Vec<(usize, LazyIndexEntry)> = Vec::new();
         {
             let guard = self.caches.lock().unwrap_or_else(|p| p.into_inner());
-            for &(cidx, _) in lookups {
-                let cd = &self.meta.col_dir[cidx];
+            for (cidx, _) in lookups_with_hashes {
+                let cd = &self.meta.col_dir[*cidx];
                 if cd.bloom_len > 0
-                    && !guard.blooms.contains_key(&cidx)
+                    && !guard.blooms.contains_key(cidx)
+                    && !missing_lazy.iter().any(|&(m, _)| m == *cidx)
                     && let Some(entry) =
                         self.meta.lazy_dir.iter().find(|e| {
-                            e.kind == LazyIndexKind::Bloom && e.phys_col_id as usize == cidx
+                            e.kind == LazyIndexKind::Bloom && e.phys_col_id as usize == *cidx
                         })
                 {
-                    missing_lazy.push((cidx, *entry));
+                    missing_lazy.push((*cidx, *entry));
                 }
             }
         }
@@ -1402,21 +1432,17 @@ impl StatamReader {
                         context: "lazy bloom filter",
                     });
                 }
-                let sbbf = Sbbf::from_bytes(&bytes)?;
-                guard.blooms.insert(cidx, sbbf);
+                let bloom = BloomIndex::from_bytes(&bytes)?;
+                guard.blooms.insert(cidx, bloom);
             }
         }
 
         let guard = self.caches.lock().unwrap_or_else(|p| p.into_inner());
-        for &(cidx, lk) in lookups {
-            if let Some(sbbf) = guard.blooms.get(&cidx) {
-                let any_hit = lk
-                    .values
-                    .iter()
-                    .any(|v| sbbf.contains_hash(statam_bloom_hash(v)));
-                if !any_hit {
-                    return Ok(false);
-                }
+        for (cidx, hashes) in lookups_with_hashes {
+            if let Some(bloom) = guard.blooms.get(cidx)
+                && !bloom.contains_any_hash(hashes)
+            {
+                return Ok(false);
             }
         }
         Ok(true)
@@ -1836,17 +1862,48 @@ impl StatamReader {
             subs,
         );
 
-        // Single contiguous RG byte range fetch!
-        let mut need_wide = false;
+        // Single tightest contiguous RG byte range fetch covering only needed blocks!
         let mut need_l0_payload = false;
+        let mut min_off = u64::MAX;
+        let mut max_end = 0u64;
         for &pidx in plan.all_phys_cols() {
-            if self.meta.col_dir[pidx].locality_group != LocalityGroup::Core {
-                need_wide = true;
-            }
             if self.meta.col_dir[pidx].locality_group == LocalityGroup::ExternalPayload
                 && rg.l0_payload_len > 0
             {
                 need_l0_payload = true;
+            }
+            let blks = self.meta.rg_blocks(pidx, rg_idx);
+            let is_map = self
+                .meta
+                .schema_meta
+                .schema
+                .fields()
+                .get(pidx)
+                .is_some_and(|f| f.data_type == DataType::MapUtf8);
+            let in_phase1 = plan.phase1_phys_cols.contains(&pidx);
+            for &mb_idx in surviving_mbs {
+                if is_map
+                    && plan.phase2_map_fast_path.contains(&(mb_idx, pidx))
+                    && (!in_phase1 || plan.phase1_map_fast_path.contains(&(mb_idx, pidx)))
+                {
+                    continue;
+                }
+                let blk = &blks[mb_idx];
+                if blk.stored_len > 0 {
+                    let total = (BLOCK_FRAME_HEADER_LEN as u64)
+                        .checked_add(u64::from(blk.stored_len))
+                        .ok_or(StatamError::BoundsExceeded {
+                            reason: "point block length overflow",
+                        })?;
+                    let end = blk
+                        .offset
+                        .checked_add(total)
+                        .ok_or(StatamError::BoundsExceeded {
+                            reason: "point block end overflow",
+                        })?;
+                    min_off = min_off.min(blk.offset);
+                    max_end = max_end.max(end);
+                }
             }
         }
 
@@ -1865,25 +1922,21 @@ impl StatamReader {
             self.ensure_dicts_loaded(&dict_cols)?;
         }
 
-        let range_start = rg.core_offset;
-        let range_end = if need_l0_payload {
-            rg.l0_payload_offset
+        if need_l0_payload {
+            let l0_end = rg
+                .l0_payload_offset
                 .checked_add(u64::from(rg.l0_payload_len))
                 .ok_or(StatamError::BoundsExceeded {
                     reason: "point RG l0_payload end overflow",
-                })?
-        } else if need_wide {
-            rg.wide_offset.checked_add(u64::from(rg.wide_len)).ok_or(
-                StatamError::BoundsExceeded {
-                    reason: "point RG wide end overflow",
-                },
-            )?
+                })?;
+            min_off = min_off.min(rg.l0_payload_offset);
+            max_end = max_end.max(l0_end);
+        }
+
+        let (range_start, range_end) = if max_end > min_off {
+            (min_off, max_end)
         } else {
-            rg.core_offset.checked_add(u64::from(rg.core_len)).ok_or(
-                StatamError::BoundsExceeded {
-                    reason: "point RG core end overflow",
-                },
-            )?
+            (0u64, 0u64)
         };
         let expected_range_len =
             range_end
@@ -5718,7 +5771,7 @@ mod tests {
 
         let mut opts = WriteOptions::for_table(TableKind::Generic, WriteProfile::L1Compact);
         opts.sort_cols = vec![0];
-        // Default 16,384 RG size -> 20,000 rows produces 2 RGs (16,384 + 3,616) and multiple MBs.
+        opts.row_group_size = 16_384;
 
         let n = 20_000usize;
         let ts: Vec<i64> = (0..n as i64).map(|i| 1_000_000 + i).collect();

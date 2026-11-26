@@ -628,6 +628,16 @@ pub fn encode_shredded_subcol(
     sub: &ShreddedSubCol,
     profile: WriteProfile,
 ) -> Result<Vec<u8>, StatamError> {
+    let (_, bytes) = encode_shredded_subcol_with_codec(sub, profile)?;
+    Ok(bytes)
+}
+
+/// Encodes one [`ShreddedSubCol`] and returns its preferred outer compression codec
+/// (`Codec::None` when `Dict`/`Const`/`ConstNull`/`Rle`, else `Lz4`/`Zstd`).
+pub(crate) fn encode_shredded_subcol_with_codec(
+    sub: &ShreddedSubCol,
+    profile: WriteProfile,
+) -> Result<(Codec, Vec<u8>), StatamError> {
     let mut out = Vec::new();
     encode_bitmap_mode(&sub.in_map, &mut out);
     encode_bitmap_mode(&sub.value_null, &mut out);
@@ -647,7 +657,15 @@ pub fn encode_shredded_subcol(
     }
     out.extend_from_slice(&(child_payload.body.len() as u32).to_le_bytes());
     out.extend_from_slice(&child_payload.body);
-    Ok(out)
+
+    let codec = match child_payload.encoding {
+        Encoding::Dict | Encoding::Const | Encoding::ConstNull | Encoding::Rle => Codec::None,
+        _ => match profile {
+            WriteProfile::L0Fast => Codec::Lz4,
+            WriteProfile::L1Compact => Codec::Zstd,
+        },
+    };
+    Ok((codec, out))
 }
 
 /// Decodes a [`ShreddedSubCol`] encoded by [`encode_shredded_subcol`].
@@ -1937,7 +1955,7 @@ fn encode_utf8_fsst_or_plain(
     u: &Utf8Data,
     profile: WriteProfile,
 ) -> Result<(Encoding, Vec<u8>), StatamError> {
-    if profile == WriteProfile::L1Compact {
+    if profile == WriteProfile::L1Compact && u.bytes().len() <= 16 * 1024 {
         let mut slices = Vec::with_capacity(u.len());
         for i in 0..u.len() {
             slices.push(u.get(i).map_or(&[][..], str::as_bytes));

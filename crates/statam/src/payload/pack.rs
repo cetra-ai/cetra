@@ -4,7 +4,7 @@ use std::collections::{BTreeSet, HashMap};
 use std::fmt;
 use std::io::Write;
 use std::ops::Range;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use bytes::Bytes;
 
@@ -28,16 +28,16 @@ pub const EDGE_LEN: usize = 63;
 /// `(head_63, tail_63)` edge bytes for one chunk.
 pub type ChunkEdge = (Vec<u8>, Vec<u8>);
 
-/// Minimum compressed frame length required to emit a trigram bloom (`< 2560` omitted).
-const MIN_FRAME_FOR_TRIGRAM: usize = 2560;
+/// Minimum compressed frame length required to emit a trigram bloom (`< 1024` omitted).
+const MIN_FRAME_FOR_TRIGRAM: usize = 1024;
 /// Maximum trigram bloom bit density (`> 50%` saturated blooms are omitted).
 const MAX_TRIGRAM_DENSITY: f64 = 0.50;
 /// 1 MiB `ReadCache` boundary guard threshold: pad if `< 16 KiB` left in current 1 MiB block.
 const BOUNDARY_GUARD_THRESHOLD: usize = 16_384;
 /// 1 MiB `ReadCache` boundary guard max frame size (`< 64 KiB`).
 const BOUNDARY_GUARD_MAX_FRAME: usize = 65_536;
-/// Default target raw bytes per `.stpk` frame (64 KiB).
-const DEFAULT_TARGET_FRAME_RAW_BYTES: usize = 64 * 1024;
+/// Default target raw bytes per `.stpk` frame (256 KiB).
+const DEFAULT_TARGET_FRAME_RAW_BYTES: usize = 256 * 1024;
 
 /// Configuration options for [`ChunkPackBuilder`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -46,7 +46,7 @@ pub struct PackWriteOptions {
     pub codec: Codec,
     /// Zstd compression level when `codec == Codec::Zstd` (default: `3`).
     pub zstd_level: i32,
-    /// Target uncompressed frame size in bytes (default: `64 KiB`).
+    /// Target uncompressed frame size in bytes (default: `256 KiB`).
     pub target_frame_raw_bytes: usize,
     /// Whether to emit adaptive per-frame trigram skip filters (default: `true`).
     pub enable_trigram_skip: bool,
@@ -242,9 +242,10 @@ impl ChunkPackBuilder {
         Ok(chunk_id)
     }
 
-    /// Appends a raw chunk directly in incompressible `W4` bypass mode (`Codec::None`,
-    /// no deduplication map lookup, and no trigram bloom extraction).
-    pub fn append_raw_uncompressed_bypass(&mut self, bytes: &[u8]) -> Result<u32, StatamError> {
+    /// Appends a raw chunk directly in `W4` bypass mode: skips CDC chunking,
+    /// deduplication map lookup, and trigram bloom extraction, while compressing
+    /// frames with `Codec::Zstd(1)` (automatically falling back to `Codec::None` if incompressible).
+    pub fn append_raw_bypass(&mut self, bytes: &[u8]) -> Result<u32, StatamError> {
         if bytes.len() > MAX_FRAME_RAW_BYTES {
             return Err(StatamError::BoundsExceeded {
                 reason: "chunk length exceeds MAX_FRAME_RAW_BYTES",
@@ -677,7 +678,7 @@ impl ChunkPackBuilder {
 
         let mut framed = Vec::new();
         let (frame_codec, zstd_level) = if self.cur_is_bypass {
-            (Codec::None, 0)
+            (default_bypass_codec(), 1)
         } else {
             (self.options.codec, self.options.zstd_level)
         };
@@ -751,16 +752,10 @@ impl ChunkPackBuilder {
         hashes.dedup();
         let unique_tris = hashes.len();
 
-        let max_bytes = (stored_len / 10).min(MAX_TRIGRAM_BLOOM_BYTES);
-        if max_bytes < MIN_TRIGRAM_BLOOM_BYTES {
-            return Ok((0, 0));
-        }
+        let max_bytes = (stored_len / 6).clamp(MIN_TRIGRAM_BLOOM_BYTES, MAX_TRIGRAM_BLOOM_BYTES);
         let cap_pow2 = 1usize << (usize::BITS as usize - 1 - max_bytes.leading_zeros() as usize);
         let desired = unique_tris
-            .saturating_mul(10)
-            .checked_div(8)
-            .unwrap_or(MIN_TRIGRAM_BLOOM_BYTES)
-            .max(MIN_TRIGRAM_BLOOM_BYTES)
+            .clamp(MIN_TRIGRAM_BLOOM_BYTES, cap_pow2)
             .next_power_of_two()
             .min(cap_pow2);
 
@@ -781,6 +776,16 @@ impl ChunkPackBuilder {
         self.trigram_buf.extend_from_slice(bloom.as_bytes());
         Ok((off, len))
     }
+}
+
+#[cfg(not(miri))]
+fn default_bypass_codec() -> Codec {
+    Codec::Zstd
+}
+
+#[cfg(miri)]
+fn default_bypass_codec() -> Codec {
+    Codec::Lz4
 }
 
 #[cfg(not(miri))]
@@ -809,6 +814,8 @@ pub struct ChunkPackReader {
     reader: Arc<dyn RangeReader>,
     toc: PackToc,
     data_end: u64,
+    trigram_cache: OnceLock<Vec<Option<TrigramBloom>>>,
+    edge_cache: OnceLock<Vec<ChunkEdge>>,
 }
 
 impl fmt::Debug for ChunkPackReader {
@@ -968,6 +975,8 @@ impl ChunkPackReader {
                 chunks,
             },
             data_end,
+            trigram_cache: OnceLock::new(),
+            edge_cache: OnceLock::new(),
         })
     }
 
@@ -1086,8 +1095,17 @@ impl ChunkPackReader {
         Ok(out)
     }
 
-    /// Reads and validates the per-frame trigram bloom filters (`None` where omitted).
+    /// Reads and validates the per-frame trigram bloom filters (`None` where omitted), cached per reader.
     pub fn read_trigram_section(&self) -> Result<Vec<Option<TrigramBloom>>, StatamError> {
+        if let Some(cached) = self.trigram_cache.get() {
+            return Ok(cached.clone());
+        }
+        let out = self.read_trigram_section_uncached()?;
+        let _ = self.trigram_cache.set(out.clone());
+        Ok(out)
+    }
+
+    fn read_trigram_section_uncached(&self) -> Result<Vec<Option<TrigramBloom>>, StatamError> {
         let ps = &self.toc.postscript;
         if ps.trigram_len == 0 {
             return Ok(vec![None; self.toc.frames.len()]);
@@ -1138,8 +1156,17 @@ impl ChunkPackReader {
         Ok(out)
     }
 
-    /// Reads and decodes the `EdgeTable` returning `(head_63, tail_63)` per unique chunk.
+    /// Reads and decodes the `EdgeTable` returning `(head_63, tail_63)` per unique chunk, cached per reader.
     pub fn read_edge_table(&self) -> Result<Vec<ChunkEdge>, StatamError> {
+        if let Some(cached) = self.edge_cache.get() {
+            return Ok(cached.clone());
+        }
+        let edges = self.read_edge_table_uncached()?;
+        let _ = self.edge_cache.set(edges.clone());
+        Ok(edges)
+    }
+
+    fn read_edge_table_uncached(&self) -> Result<Vec<ChunkEdge>, StatamError> {
         let ps = &self.toc.postscript;
         let chunk_count = ps.chunk_count as usize;
         if chunk_count == 0 {

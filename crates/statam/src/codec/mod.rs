@@ -16,8 +16,8 @@ use crate::StatamError;
 use crate::codec::dict::{FileDict, decode_dict_column, encode_dict_codes_body};
 use crate::codec::nested::{decode_nested_column, encode_nested_column};
 use crate::codec::numeric::{
-    decode_const_block, decode_narrow_column, encode_narrow_column, read_optional_nulls,
-    try_encode_const_or_null, write_optional_nulls,
+    decode_const_block, decode_narrow_column, encode_narrow_column_with_locality,
+    read_optional_nulls, try_encode_const_or_null, write_optional_nulls,
 };
 use crate::codec::zonemap::compute_zone_map;
 use crate::format::{
@@ -157,6 +157,16 @@ pub fn encode_mini_block(
     profile: WriteProfile,
     file_dict: Option<&FileDict>,
 ) -> Result<EncodedMiniBlock, StatamError> {
+    encode_mini_block_with_locality(col, dt, profile, file_dict, false)
+}
+
+pub(crate) fn encode_mini_block_with_locality(
+    col: &Column,
+    dt: &DataType,
+    profile: WriteProfile,
+    file_dict: Option<&FileDict>,
+    is_wide_row: bool,
+) -> Result<EncodedMiniBlock, StatamError> {
     dt.validate(MAX_NESTING_DEPTH)?;
     if col.data_type() != *dt {
         return Err(StatamError::SchemaMismatch {
@@ -189,7 +199,7 @@ pub fn encode_mini_block(
     }
 
     if let Some(dict) = file_dict
-        && let Some(dict_block) = try_encode_with_file_dict(col, dict, profile, &zm)?
+        && let Some(dict_block) = try_encode_with_file_dict(col, dict, &zm)?
     {
         return Ok(dict_block);
     }
@@ -200,14 +210,13 @@ pub fn encode_mini_block(
     ) {
         encode_nested_column(col, dt, profile, MAX_NESTING_DEPTH, Some(&zm))
     } else {
-        encode_narrow_column(col, dt, profile, Some(&zm))
+        encode_narrow_column_with_locality(col, dt, profile, Some(&zm), is_wide_row)
     }
 }
 
 fn try_encode_with_file_dict(
     col: &Column,
     dict: &FileDict,
-    profile: WriteProfile,
     zm: &ZoneMapSummary,
 ) -> Result<Option<EncodedMiniBlock>, StatamError> {
     if col.data_type() != dict.values().data_type() {
@@ -265,11 +274,6 @@ fn try_encode_with_file_dict(
         (0u8, 0u8)
     };
 
-    let preferred_codec = match profile {
-        WriteProfile::L0Fast => Codec::Lz4,
-        WriteProfile::L1Compact => Codec::Zstd,
-    };
-
     Ok(Some(EncodedMiniBlock {
         encoding: Encoding::Dict,
         block_flags,
@@ -279,7 +283,7 @@ fn try_encode_with_file_dict(
         min_inline,
         max_inline,
         raw_body: raw,
-        preferred_codec,
+        preferred_codec: Codec::None,
     }))
 }
 

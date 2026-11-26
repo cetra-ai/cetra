@@ -478,6 +478,17 @@ pub(crate) fn encode_narrow_column(
     profile: WriteProfile,
     precomputed_zm: Option<&ZoneMapSummary>,
 ) -> Result<EncodedMiniBlock, StatamError> {
+    encode_narrow_column_with_locality(col, dt, profile, precomputed_zm, false)
+}
+
+/// Encodes a narrow scalar [`Column`] with `is_wide_row` hint to skip FSST on `WideRow` strings.
+pub(crate) fn encode_narrow_column_with_locality(
+    col: &Column,
+    dt: &DataType,
+    profile: WriteProfile,
+    precomputed_zm: Option<&ZoneMapSummary>,
+    is_wide_row: bool,
+) -> Result<EncodedMiniBlock, StatamError> {
     if col.is_empty() {
         return Ok(EncodedMiniBlock {
             encoding: Encoding::Plain,
@@ -518,7 +529,7 @@ pub(crate) fn encode_narrow_column(
         }
     };
 
-    let preferred_codec = match profile {
+    let plain_codec = match profile {
         WriteProfile::L0Fast => Codec::Lz4,
         WriteProfile::L1Compact => Codec::Zstd,
     };
@@ -539,7 +550,7 @@ pub(crate) fn encode_narrow_column(
                 min_inline: zm.min_inline,
                 max_inline: zm.max_inline,
                 raw_body: raw,
-                preferred_codec,
+                preferred_codec: Codec::None,
             })
         }
         DataType::I64 | DataType::TimestampNs { .. } | DataType::Date => {
@@ -574,6 +585,11 @@ pub(crate) fn encode_narrow_column(
             write_optional_nulls(flat.nulls(), &mut raw);
             raw.extend_from_slice(&inner_body);
 
+            let block_codec = if enc == Encoding::Plain {
+                plain_codec
+            } else {
+                Codec::None
+            };
             Ok(EncodedMiniBlock {
                 encoding: enc,
                 block_flags: zm.block_flags,
@@ -583,7 +599,7 @@ pub(crate) fn encode_narrow_column(
                 min_inline: zm.min_inline,
                 max_inline: zm.max_inline,
                 raw_body: raw,
-                preferred_codec,
+                preferred_codec: block_codec,
             })
         }
         DataType::Decimal128 { .. } => {
@@ -595,6 +611,11 @@ pub(crate) fn encode_narrow_column(
             let mut raw = Vec::new();
             write_optional_nulls(flat.nulls(), &mut raw);
             raw.extend_from_slice(&inner_body);
+            let block_codec = if enc == Encoding::Plain {
+                plain_codec
+            } else {
+                Codec::None
+            };
             Ok(EncodedMiniBlock {
                 encoding: enc,
                 block_flags: zm.block_flags,
@@ -604,7 +625,7 @@ pub(crate) fn encode_narrow_column(
                 min_inline: zm.min_inline,
                 max_inline: zm.max_inline,
                 raw_body: raw,
-                preferred_codec,
+                preferred_codec: block_codec,
             })
         }
         DataType::F64 => {
@@ -625,6 +646,11 @@ pub(crate) fn encode_narrow_column(
             let mut raw = Vec::new();
             write_optional_nulls(flat.nulls(), &mut raw);
             raw.extend_from_slice(&inner_body);
+            let block_codec = if enc == Encoding::Plain {
+                plain_codec
+            } else {
+                Codec::None
+            };
             Ok(EncodedMiniBlock {
                 encoding: enc,
                 block_flags: zm.block_flags,
@@ -634,11 +660,19 @@ pub(crate) fn encode_narrow_column(
                 min_inline: zm.min_inline,
                 max_inline: zm.max_inline,
                 raw_body: raw,
-                preferred_codec,
+                preferred_codec: block_codec,
             })
         }
         DataType::Utf8 | DataType::Binary => {
-            let (enc, inner_body) = if profile == WriteProfile::L1Compact {
+            let raw_varlen_bytes = match flat.data() {
+                FlatData::Utf8(u) => u.bytes().len(),
+                FlatData::Binary(b) => b.bytes().len(),
+                _ => 0,
+            };
+            let (enc, inner_body) = if profile == WriteProfile::L1Compact
+                && !is_wide_row
+                && raw_varlen_bytes <= 16 * 1024
+            {
                 let slices = extract_varlen_slices(flat)?;
                 if let Some(fsst) = encode_fsst_body(&slices)? {
                     (Encoding::Fsst, fsst)
@@ -651,6 +685,11 @@ pub(crate) fn encode_narrow_column(
             let mut raw = Vec::new();
             write_optional_nulls(flat.nulls(), &mut raw);
             raw.extend_from_slice(&inner_body);
+            let block_codec = if enc == Encoding::Plain {
+                plain_codec
+            } else {
+                Codec::None
+            };
             Ok(EncodedMiniBlock {
                 encoding: enc,
                 block_flags: zm.block_flags,
@@ -660,7 +699,7 @@ pub(crate) fn encode_narrow_column(
                 min_inline: zm.min_inline,
                 max_inline: zm.max_inline,
                 raw_body: raw,
-                preferred_codec,
+                preferred_codec: block_codec,
             })
         }
         DataType::Interval | DataType::FixedBytes8 | DataType::FixedBytes16 | DataType::Null => {
@@ -676,7 +715,7 @@ pub(crate) fn encode_narrow_column(
                 min_inline: zm.min_inline,
                 max_inline: zm.max_inline,
                 raw_body: raw,
-                preferred_codec,
+                preferred_codec: plain_codec,
             })
         }
         DataType::List(_) | DataType::MapUtf8 | DataType::Events | DataType::Links => {
@@ -847,11 +886,6 @@ fn try_encode_rle(
         block_flags |= BLOCK_FLAG_HAS_NULLS;
     }
 
-    let preferred_codec = match profile {
-        WriteProfile::L0Fast => Codec::Lz4,
-        WriteProfile::L1Compact => Codec::Zstd,
-    };
-
     Ok(Some(EncodedMiniBlock {
         encoding: Encoding::Rle,
         block_flags,
@@ -861,7 +895,7 @@ fn try_encode_rle(
         min_inline: zm.min_inline,
         max_inline: zm.max_inline,
         raw_body: raw,
-        preferred_codec,
+        preferred_codec: Codec::None,
     }))
 }
 
@@ -896,10 +930,17 @@ fn encode_rle_inner(
             Ok((Encoding::Plain, encode_plain_body(run_values)?))
         }
         DataType::Utf8 | DataType::Binary => {
-            if profile == WriteProfile::L1Compact {
-                let slices = extract_varlen_slices(run_values)?;
-                if let Some(fsst) = encode_fsst_body(&slices)? {
-                    return Ok((Encoding::Fsst, fsst));
+            if profile == WriteProfile::L1Compact && !run_values.is_empty() {
+                let raw_bytes = match run_values.data() {
+                    FlatData::Utf8(u) => u.bytes().len(),
+                    FlatData::Binary(b) => b.bytes().len(),
+                    _ => 0,
+                };
+                if raw_bytes <= 16 * 1024 {
+                    let slices = extract_varlen_slices(run_values)?;
+                    if let Some(fsst) = encode_fsst_body(&slices)? {
+                        return Ok((Encoding::Fsst, fsst));
+                    }
                 }
             }
             Ok((Encoding::Plain, encode_plain_body(run_values)?))

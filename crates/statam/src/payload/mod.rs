@@ -7,17 +7,19 @@ pub mod search;
 use std::collections::VecDeque;
 use std::fmt;
 
-use cetra_column::Bitmap;
+use cetra_column::{Bitmap, Utf8Data};
 
 use crate::StatamError;
 use crate::format::{
-    MAX_BATCH_DECODED_BYTES, MAX_BLOCK_RAW_BYTES, MAX_CHUNKS_PER_ROW, MAX_REF_CHAIN_DEPTH,
-    MAX_ROWS_PER_FILE,
+    MAX_BATCH_DECODED_BYTES, MAX_BLOCK_RAW_BYTES, MAX_CHUNKS_PER_ROW, MAX_FRAME_RAW_BYTES,
+    MAX_REF_CHAIN_DEPTH, MAX_ROWS_PER_FILE,
 };
 use crate::simd::bitpack::{zigzag_decode_i64, zigzag_encode_i64};
 
-/// Maximum lookback distance (`1..=32`) for `PayloadRefs` tail-sharing delta rows.
+/// Maximum lookback distance (`1..=32`) allowed by the wire decoder for `PayloadRefs` delta rows.
 const MAX_TAIL_SHARE_BACK: usize = 32;
+/// Encoder lookback window (`1..=8`) for fast `PayloadRefs` tail-sharing.
+const ENCODE_TAIL_SHARE_BACK: usize = 8;
 /// Tag for inline payload bytes (`<= 256 B`, or up to `u16::MAX`).
 const TAG_INLINE: u8 = 0;
 /// Tag for keyframe chunk reference list.
@@ -72,7 +74,7 @@ pub fn encode_payload_refs(rows: &[PayloadRefRow], out: &mut Vec<u8>) -> Result<
         out.extend_from_slice(&validity.to_bytes());
     }
 
-    let mut history: RefHistory = VecDeque::with_capacity(MAX_TAIL_SHARE_BACK);
+    let mut history: RefHistory = VecDeque::with_capacity(ENCODE_TAIL_SHARE_BACK);
     let mut scratch_delta = Vec::new();
 
     for row in rows {
@@ -85,7 +87,7 @@ pub fn encode_payload_refs(rows: &[PayloadRefRow], out: &mut Vec<u8>) -> Result<
                 out.push(TAG_INLINE);
                 out.extend_from_slice(&len.to_le_bytes());
                 out.extend_from_slice(bytes);
-                push_history(&mut history, None);
+                push_history_capped(&mut history, None, ENCODE_TAIL_SHARE_BACK);
             }
             PayloadRefRow::Chunks(chunks) => {
                 if chunks.len() > MAX_CHUNKS_PER_ROW {
@@ -94,21 +96,25 @@ pub fn encode_payload_refs(rows: &[PayloadRefRow], out: &mut Vec<u8>) -> Result<
                     });
                 }
 
-                // Search lookback window (1..=32) for longest shared prefix with chain depth < 15.
+                // Search lookback window (1..=8) for longest shared prefix with chain depth < 15.
                 let mut best: Option<(usize, usize, u8)> = None;
-                let max_back = history.len().min(MAX_TAIL_SHARE_BACK);
+                let max_back = history.len().min(ENCODE_TAIL_SHARE_BACK);
+                let cur_len = chunks.len();
                 for back in 1..=max_back {
                     if let Some((prev_chunks, prev_depth)) = &history[history.len() - back] {
                         if (*prev_depth as usize) >= MAX_REF_CHAIN_DEPTH {
                             continue;
                         }
                         let lcp = common_prefix_len(prev_chunks, chunks).min(u16::MAX as usize);
-                        let n_new = chunks.len() - lcp;
+                        let n_new = cur_len - lcp;
                         if lcp > 0
                             && n_new <= u16::MAX as usize
                             && best.is_none_or(|(_, best_lcp, _)| lcp > best_lcp)
                         {
                             best = Some((back, lcp, *prev_depth + 1));
+                            if lcp == cur_len.min(prev_chunks.len()) {
+                                break;
+                            }
                         }
                     }
                 }
@@ -137,7 +143,11 @@ pub fn encode_payload_refs(rows: &[PayloadRefRow], out: &mut Vec<u8>) -> Result<
                         out.extend_from_slice(&(keep_prefix as u16).to_le_bytes());
                         out.extend_from_slice(&((chunks.len() - keep_prefix) as u16).to_le_bytes());
                         out.extend_from_slice(&scratch_delta);
-                        push_history(&mut history, Some((chunks.clone(), new_depth)));
+                        push_history_capped(
+                            &mut history,
+                            Some((chunks.clone(), new_depth)),
+                            ENCODE_TAIL_SHARE_BACK,
+                        );
                         wrote_delta = true;
                     }
                 }
@@ -153,13 +163,164 @@ pub fn encode_payload_refs(rows: &[PayloadRefRow], out: &mut Vec<u8>) -> Result<
                         out.extend_from_slice(&pack_idx.to_le_bytes());
                         out.extend_from_slice(&chunk_id.to_le_bytes());
                     }
-                    push_history(&mut history, Some((chunks.clone(), 0)));
+                    push_history_capped(
+                        &mut history,
+                        Some((chunks.clone(), 0)),
+                        ENCODE_TAIL_SHARE_BACK,
+                    );
                 }
             }
         }
     }
 
     Ok(())
+}
+
+/// Fast `L0Fast` encoder emitting `TAG_INLINE` / `TAG_KEYFRAME` directly without tail-sharing.
+pub fn encode_payload_refs_l0_direct(
+    rows: &[PayloadRefRow],
+    out: &mut Vec<u8>,
+) -> Result<(), StatamError> {
+    if rows.len() as u64 > MAX_ROWS_PER_FILE {
+        return Err(StatamError::BoundsExceeded {
+            reason: "payload refs row count exceeds MAX_ROWS_PER_FILE",
+        });
+    }
+
+    let has_nulls = rows.iter().any(|r| matches!(r, PayloadRefRow::Null));
+    out.push(u8::from(has_nulls));
+    if has_nulls {
+        let mut validity = Bitmap::new_zeroed(rows.len());
+        for (i, row) in rows.iter().enumerate() {
+            if !matches!(row, PayloadRefRow::Null) {
+                let _ = validity.set(i, true);
+            }
+        }
+        out.extend_from_slice(&validity.to_bytes());
+    }
+
+    for row in rows {
+        match row {
+            PayloadRefRow::Null => {}
+            PayloadRefRow::Inline(bytes) => {
+                let len = u16::try_from(bytes.len()).map_err(|_| StatamError::BoundsExceeded {
+                    reason: "inline payload length exceeds u16::MAX",
+                })?;
+                out.push(TAG_INLINE);
+                out.extend_from_slice(&len.to_le_bytes());
+                out.extend_from_slice(bytes);
+            }
+            PayloadRefRow::Chunks(chunks) => {
+                if chunks.len() > MAX_CHUNKS_PER_ROW {
+                    return Err(StatamError::BoundsExceeded {
+                        reason: "row chunks exceed MAX_CHUNKS_PER_ROW",
+                    });
+                }
+                let n_chunks =
+                    u16::try_from(chunks.len()).map_err(|_| StatamError::BoundsExceeded {
+                        reason: "keyframe chunk count exceeds u16::MAX",
+                    })?;
+                out.push(TAG_KEYFRAME);
+                out.extend_from_slice(&n_chunks.to_le_bytes());
+                for &(pack_idx, chunk_id) in chunks {
+                    out.extend_from_slice(&pack_idx.to_le_bytes());
+                    out.extend_from_slice(&chunk_id.to_le_bytes());
+                }
+            }
+        }
+    }
+
+    Ok(())
+}
+
+/// Zero-copy `L0Fast` streaming encoder directly from a `Utf8Data` slice into `out`.
+///
+/// Returns the mini-block's `null_count`. When all `mb_len` rows are null, `out` is left empty.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn encode_payload_refs_l0_from_utf8<F>(
+    u: &Utf8Data,
+    col_nulls: Option<&Bitmap>,
+    row_off: usize,
+    mb_len: usize,
+    inline_threshold: usize,
+    l0_pack_idx: u16,
+    mut add_chunk: F,
+    out: &mut Vec<u8>,
+) -> Result<u16, StatamError>
+where
+    F: FnMut(&[u8]) -> Result<u32, StatamError>,
+{
+    if mb_len as u64 > MAX_ROWS_PER_FILE {
+        return Err(StatamError::BoundsExceeded {
+            reason: "payload refs row count exceeds MAX_ROWS_PER_FILE",
+        });
+    }
+
+    let mut null_count = 0usize;
+    if let Some(bm) = col_nulls {
+        for r in row_off..row_off + mb_len {
+            if !bm.get(r) {
+                null_count += 1;
+            }
+        }
+    }
+    let null_count_u16 = u16::try_from(null_count).unwrap_or(u16::MAX);
+    if null_count == mb_len {
+        return Ok(null_count_u16);
+    }
+
+    let has_nulls = null_count > 0;
+    out.push(u8::from(has_nulls));
+    if let Some(bm) = col_nulls
+        && has_nulls
+    {
+        let mut validity = Bitmap::new_zeroed(mb_len);
+        for i in 0..mb_len {
+            if bm.get(row_off + i) {
+                let _ = validity.set(i, true);
+            }
+        }
+        out.extend_from_slice(&validity.to_bytes());
+    }
+
+    let offsets = u.offsets();
+    let all_bytes = u.bytes();
+    for r in row_off..row_off + mb_len {
+        if col_nulls.is_some_and(|bm| !bm.get(r)) {
+            continue;
+        }
+        let s = offsets[r] as usize;
+        let e = offsets[r + 1] as usize;
+        let bytes = &all_bytes[s..e];
+        if bytes.len() <= inline_threshold {
+            let len = u16::try_from(bytes.len()).map_err(|_| StatamError::BoundsExceeded {
+                reason: "inline payload length exceeds u16::MAX",
+            })?;
+            out.push(TAG_INLINE);
+            out.extend_from_slice(&len.to_le_bytes());
+            out.extend_from_slice(bytes);
+        } else {
+            let n_chunks_usize = bytes.len().div_ceil(MAX_FRAME_RAW_BYTES);
+            if n_chunks_usize > MAX_CHUNKS_PER_ROW {
+                return Err(StatamError::BoundsExceeded {
+                    reason: "row chunks exceed MAX_CHUNKS_PER_ROW",
+                });
+            }
+            let n_chunks =
+                u16::try_from(n_chunks_usize).map_err(|_| StatamError::BoundsExceeded {
+                    reason: "keyframe chunk count exceeds u16::MAX",
+                })?;
+            out.push(TAG_KEYFRAME);
+            out.extend_from_slice(&n_chunks.to_le_bytes());
+            for slice in bytes.chunks(MAX_FRAME_RAW_BYTES) {
+                let cid = add_chunk(slice)?;
+                out.extend_from_slice(&l0_pack_idx.to_le_bytes());
+                out.extend_from_slice(&cid.to_le_bytes());
+            }
+        }
+    }
+
+    Ok(null_count_u16)
 }
 
 /// Decodes `row_count` [`PayloadRefRow`] entries from `src`, enforcing chain-depth,
@@ -384,11 +545,15 @@ fn common_prefix_len(a: &[(u16, u32)], b: &[(u16, u32)]) -> usize {
     a.iter().zip(b.iter()).take_while(|(x, y)| x == y).count()
 }
 
-fn push_history(history: &mut RefHistory, entry: RefHistoryEntry) {
-    if history.len() == MAX_TAIL_SHARE_BACK {
+fn push_history_capped(history: &mut RefHistory, entry: RefHistoryEntry, cap: usize) {
+    if history.len() == cap {
         history.pop_front();
     }
     history.push_back(entry);
+}
+
+fn push_history(history: &mut RefHistory, entry: RefHistoryEntry) {
+    push_history_capped(history, entry, MAX_TAIL_SHARE_BACK);
 }
 
 fn add_budget(current: usize, delta: usize, max_bytes: usize) -> Result<usize, StatamError> {
@@ -642,5 +807,42 @@ mod tests {
             ),
             Err(StatamError::BoundsExceeded { .. })
         ));
+    }
+
+    #[test]
+    fn payload_refs_l0_direct_and_utf8_streaming_roundtrip() {
+        let rows = vec![
+            PayloadRefRow::Inline(b"tiny".to_vec()),
+            PayloadRefRow::Null,
+            PayloadRefRow::Chunks(vec![(0xFFFF, 0)]),
+            PayloadRefRow::Inline(b"also short".to_vec()),
+        ];
+        let mut direct = Vec::new();
+        encode_payload_refs_l0_direct(&rows, &mut direct).unwrap();
+        let decoded = decode_payload_refs(&direct, rows.len(), MAX_BATCH_DECODED_BYTES).unwrap();
+        assert_eq!(decoded, rows);
+
+        let long = "Z".repeat(300);
+        let u = Utf8Data::try_from_slices(["tiny", "", long.as_str(), "also short"]).unwrap();
+        let nulls = Bitmap::from_bools(&[true, false, true, true]);
+        let mut streamed = Vec::new();
+        let mut next_cid = 0u32;
+        let nc = encode_payload_refs_l0_from_utf8(
+            &u,
+            Some(&nulls),
+            0,
+            4,
+            256,
+            0xFFFF,
+            |_slice| {
+                let cid = next_cid;
+                next_cid += 1;
+                Ok(cid)
+            },
+            &mut streamed,
+        )
+        .unwrap();
+        assert_eq!(nc, 1);
+        assert_eq!(streamed, direct);
     }
 }

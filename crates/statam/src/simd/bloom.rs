@@ -4,6 +4,7 @@
 
 use std::fmt;
 
+use crate::format::{BLOOM_RG_MAGIC, MAX_ROW_GROUPS};
 use crate::{BLOOM_MAGIC, MAX_BLOOM_BYTES, StatamError};
 
 /// Parquet Split-Block Bloom Filter 8-lane salt constants.
@@ -232,6 +233,158 @@ impl Sbbf {
     }
 }
 
+/// File-level (`BF01`) or per-Row-Group (`BF02`) SBBF bloom index.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BloomIndex {
+    /// Legacy single file-wide SBBF (`BF01`).
+    File(Sbbf),
+    /// Per-Row-Group SBBF array (`BF02`).
+    PerRowGroup(Vec<Sbbf>),
+}
+
+impl BloomIndex {
+    /// Returns `true` if any Row Group (or the file filter) may contain at least one hash in `hashes`.
+    #[inline]
+    pub fn contains_any_hash(&self, hashes: &[u64]) -> bool {
+        if hashes.is_empty() {
+            return false;
+        }
+        match self {
+            Self::File(sbbf) => hashes.iter().any(|&h| sbbf.contains_hash(h)),
+            Self::PerRowGroup(rgs) => rgs
+                .iter()
+                .any(|sbbf| hashes.iter().any(|&h| sbbf.contains_hash(h))),
+        }
+    }
+
+    /// Returns `true` if Row Group `rg_idx` may contain at least one hash in `hashes`.
+    #[inline]
+    pub fn rg_may_contain_any_hash(&self, rg_idx: usize, hashes: &[u64]) -> bool {
+        if hashes.is_empty() {
+            return false;
+        }
+        match self {
+            Self::File(sbbf) => hashes.iter().any(|&h| sbbf.contains_hash(h)),
+            Self::PerRowGroup(rgs) => rgs
+                .get(rg_idx)
+                .is_none_or(|sbbf| hashes.iter().any(|&h| sbbf.contains_hash(h))),
+        }
+    }
+
+    /// Serializes as `BF01` (`File`) or `BF02` (`PerRowGroup`).
+    pub fn to_bytes(&self) -> Vec<u8> {
+        match self {
+            Self::File(sbbf) => sbbf.to_bytes(),
+            Self::PerRowGroup(rgs) => {
+                let num_rgs = rgs.len();
+                let header_and_lens = SBBF_HEADER_LEN + num_rgs * 4;
+                let payload_sum: usize = rgs.iter().map(Sbbf::encoded_len).sum();
+                let mut out = Vec::with_capacity(header_and_lens + payload_sum);
+                out.extend_from_slice(&BLOOM_RG_MAGIC);
+                out.extend_from_slice(&(num_rgs as u32).to_le_bytes());
+                out.extend_from_slice(&[0u8; 4]);
+                for rg in rgs {
+                    out.extend_from_slice(&(rg.encoded_len() as u32).to_le_bytes());
+                }
+                for rg in rgs {
+                    out.extend_from_slice(&rg.to_bytes());
+                }
+                let crc = crc32c::crc32c(&out[SBBF_HEADER_LEN..]);
+                out[8..12].copy_from_slice(&crc.to_le_bytes());
+                out
+            }
+        }
+    }
+
+    /// Decodes either a `BF01` file-wide bloom or a `BF02` per-RG bloom index.
+    pub fn from_bytes(src: &[u8]) -> Result<Self, StatamError> {
+        if src.len() < SBBF_HEADER_LEN {
+            return Err(StatamError::Corrupt {
+                reason: "truncated bloom index header",
+            });
+        }
+        if src.len() > MAX_BLOOM_BYTES {
+            return Err(StatamError::BoundsExceeded {
+                reason: "bloom index exceeds MAX_BLOOM_BYTES",
+            });
+        }
+
+        if src[0..4] == BLOOM_MAGIC {
+            return Ok(Self::File(Sbbf::from_bytes(src)?));
+        }
+        if src[0..4] != BLOOM_RG_MAGIC {
+            return Err(StatamError::Corrupt {
+                reason: "invalid bloom index magic",
+            });
+        }
+
+        let num_rgs = u32::from_le_bytes([src[4], src[5], src[6], src[7]]) as usize;
+        if num_rgs == 0 {
+            return Err(StatamError::Corrupt {
+                reason: "zero-row-group bloom index",
+            });
+        }
+        if num_rgs > MAX_ROW_GROUPS {
+            return Err(StatamError::BoundsExceeded {
+                reason: "per-rg bloom num_rgs exceeds MAX_ROW_GROUPS",
+            });
+        }
+
+        let lens_bytes = num_rgs.checked_mul(4).ok_or(StatamError::BoundsExceeded {
+            reason: "per-rg bloom length table overflow",
+        })?;
+        let data_start =
+            SBBF_HEADER_LEN
+                .checked_add(lens_bytes)
+                .ok_or(StatamError::BoundsExceeded {
+                    reason: "per-rg bloom header size overflow",
+                })?;
+        if data_start > src.len() {
+            return Err(StatamError::Corrupt {
+                reason: "truncated per-rg bloom length table",
+            });
+        }
+
+        let expected_crc = u32::from_le_bytes([src[8], src[9], src[10], src[11]]);
+        let actual_crc = crc32c::crc32c(&src[SBBF_HEADER_LEN..]);
+        if expected_crc != actual_crc {
+            return Err(StatamError::ChecksumMismatch {
+                context: "per-rg bloom index",
+            });
+        }
+
+        let mut sum_len: usize = 0;
+        for &chunk in src[SBBF_HEADER_LEN..data_start].as_chunks::<4>().0 {
+            let entry_len = u32::from_le_bytes(chunk) as usize;
+            if entry_len < SBBF_HEADER_LEN {
+                return Err(StatamError::Corrupt {
+                    reason: "per-rg bloom entry shorter than BF01 header",
+                });
+            }
+            sum_len = sum_len
+                .checked_add(entry_len)
+                .ok_or(StatamError::BoundsExceeded {
+                    reason: "per-rg bloom total length overflow",
+                })?;
+        }
+        if sum_len > MAX_BLOOM_BYTES || data_start.checked_add(sum_len) != Some(src.len()) {
+            return Err(StatamError::Corrupt {
+                reason: "per-rg bloom total length mismatch",
+            });
+        }
+
+        let mut rgs = Vec::with_capacity(num_rgs);
+        let mut pos = data_start;
+        for &chunk in src[SBBF_HEADER_LEN..data_start].as_chunks::<4>().0 {
+            let entry_len = u32::from_le_bytes(chunk) as usize;
+            let end = pos + entry_len;
+            rgs.push(Sbbf::from_bytes(&src[pos..end])?);
+            pos = end;
+        }
+        Ok(Self::PerRowGroup(rgs))
+    }
+}
+
 #[inline]
 fn block_insert_scalar(block: &mut [u32], key: u32) {
     for (slot, &salt) in block.iter_mut().zip(&SBBF_SALT) {
@@ -377,6 +530,61 @@ mod tests {
         oversized[4..8].copy_from_slice(&too_many_blocks.to_le_bytes());
         assert!(matches!(
             Sbbf::from_bytes(&oversized),
+            Err(StatamError::BoundsExceeded { .. })
+        ));
+    }
+
+    #[test]
+    fn bloom_index_bf01_and_bf02_roundtrip_and_bounds_checks() {
+        let mut bf0 = Sbbf::new_for_ndv(64, 0.01);
+        let mut bf1 = Sbbf::new_for_ndv(64, 0.01);
+        let h_rg0 = statam_bloom_hash(b"trace-rg0");
+        let h_rg1 = statam_bloom_hash(b"trace-rg1");
+        let h_absent = statam_bloom_hash(b"trace-none");
+        bf0.insert_hash(h_rg0);
+        bf1.insert_hash(h_rg1);
+
+        // BF01 compatibility through BloomIndex
+        let b1 = bf0.to_bytes();
+        let idx1 = BloomIndex::from_bytes(&b1).unwrap();
+        assert!(matches!(idx1, BloomIndex::File(_)));
+        assert!(idx1.contains_any_hash(&[h_rg0]));
+        assert!(idx1.rg_may_contain_any_hash(0, &[h_rg0]));
+
+        // BF02 roundtrip and per-RG pruning
+        let idx2 = BloomIndex::PerRowGroup(vec![bf0, bf1]);
+        let b2 = idx2.to_bytes();
+        assert_eq!(&b2[0..4], &BLOOM_RG_MAGIC);
+        let dec2 = BloomIndex::from_bytes(&b2).unwrap();
+        assert_eq!(dec2, idx2);
+        assert!(dec2.contains_any_hash(&[h_rg0]));
+        assert!(dec2.contains_any_hash(&[h_rg1]));
+        assert!(!dec2.contains_any_hash(&[h_absent]));
+        assert!(dec2.rg_may_contain_any_hash(0, &[h_rg0]));
+        assert!(!dec2.rg_may_contain_any_hash(1, &[h_rg0]));
+        assert!(dec2.rg_may_contain_any_hash(1, &[h_rg1]));
+        assert!(!dec2.rg_may_contain_any_hash(0, &[h_rg1]));
+
+        // Corruption & bounds checks
+        let mut bad_crc = b2;
+        *bad_crc.last_mut().unwrap() ^= 1;
+        assert!(matches!(
+            BloomIndex::from_bytes(&bad_crc),
+            Err(StatamError::ChecksumMismatch { .. })
+        ));
+
+        let mut zero_rgs = [0u8; 12];
+        zero_rgs[0..4].copy_from_slice(&BLOOM_RG_MAGIC);
+        assert!(matches!(
+            BloomIndex::from_bytes(&zero_rgs),
+            Err(StatamError::Corrupt { .. })
+        ));
+
+        let mut huge_rgs = [0u8; 12];
+        huge_rgs[0..4].copy_from_slice(&BLOOM_RG_MAGIC);
+        huge_rgs[4..8].copy_from_slice(&((MAX_ROW_GROUPS + 1) as u32).to_le_bytes());
+        assert!(matches!(
+            BloomIndex::from_bytes(&huge_rgs),
             Err(StatamError::BoundsExceeded { .. })
         ));
     }

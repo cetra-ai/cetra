@@ -18,7 +18,7 @@ pub const ALP_MAX_EXP: u8 = 18;
 const ALP_MAX_SAFE_INT: f64 = (1i64 << 52) as f64;
 
 /// Maximum sample size used to select `(exp, fac)`.
-const ALP_SAMPLE_LIMIT: usize = 64;
+const ALP_SAMPLE_LIMIT: usize = 32;
 
 /// Powers of 10 (`10^0 ..= 10^18`).
 const POW10: [f64; 19] = [
@@ -92,8 +92,29 @@ fn pick_best_params(values: &[f64], nulls: Option<&Bitmap>) -> (u8, u8) {
     let mut best_exp = 0u8;
     let mut best_fac = 0u8;
 
+    // Fast path: test common decimal scaling `(exp, fac = 0)` for `exp = 0..=10` first.
+    for exp in 0..=10u8 {
+        let mut hits = 0usize;
+        for &v in sample_slice {
+            if try_scale_exact(v, exp, 0).is_some() {
+                hits += 1;
+            }
+        }
+        if hits > best_hits || (hits == best_hits && hits > 0 && exp < best_exp) {
+            best_hits = hits;
+            best_exp = exp;
+            best_fac = 0;
+        }
+        if best_hits == sample_count {
+            return (best_exp, 0);
+        }
+    }
+
     for exp in 0..=ALP_MAX_EXP {
         for fac in 0..=exp {
+            if fac == 0 && exp <= 10 {
+                continue;
+            }
             let mut hits = 0usize;
             for &v in sample_slice {
                 if try_scale_exact(v, exp, fac).is_some() {
