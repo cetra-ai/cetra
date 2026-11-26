@@ -7,6 +7,7 @@ pub(crate) mod admission;
 mod diff_tests;
 pub(crate) mod mem_source;
 pub(crate) mod metadata_cache;
+pub(crate) mod parquet_export;
 pub(crate) mod parquet_source;
 pub(crate) mod scores_source;
 pub(crate) mod traces_source;
