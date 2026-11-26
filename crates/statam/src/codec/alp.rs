@@ -169,7 +169,7 @@ fn pick_best_params(values: &[f64], nulls: Option<&Bitmap>) -> (u8, u8, bool) {
 /// Encodes an `f64` block body (without leading row null bitmap) using ALP.
 ///
 /// Returns `Ok(None)` if `values` is empty, `values.len() > 65_536`, exception rate
-/// exceeds 25%, or the encoded body is not strictly smaller than raw `values.len() * 8`.
+/// exceeds 25%, or the encoded body is not `< 75%` of raw `values.len() * 8`.
 pub fn encode_alp_body(
     values: &[f64],
     nulls: Option<&Bitmap>,

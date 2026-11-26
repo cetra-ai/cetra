@@ -49,7 +49,7 @@ pub use zonemap::{
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum WriteProfile {
     /// Fast self-contained single-pass profile (`Const`, `Rle`, `ForBitpack`/`DeltaBitpack` via
-    /// 32-element monotonicity sample, `BitpackBool`, bounded `Dict <= 4096`, `Plain + Zstd(-3)/Lz4`).
+    /// 32-element monotonicity sample, `BitpackBool`, bounded `Dict <= 512`, `Plain + Zstd(-5)/Lz4`).
     L0Fast,
     /// Full compression cascade (`+ sorted Dict`, `Alp`, `Fsst`, `ShreddedMap`, `Zstd(3)`).
     L1Compact,
@@ -258,13 +258,7 @@ fn try_encode_with_file_dict(
 
     let owned_flat;
     let (codes, nulls_opt) = match col {
-        Column::Dict(d)
-            if d.values() == dict.values() && d.nulls().is_none()
-                || matches!(col, Column::Dict(d) if d.values() == dict.values()) =>
-        {
-            let Column::Dict(d) = col else { unreachable!() };
-            (d.codes().to_vec(), d.nulls().cloned())
-        }
+        Column::Dict(d) if d.values() == dict.values() => (d.codes().to_vec(), d.nulls().cloned()),
         _ => {
             let flat = match col {
                 Column::Flat(f) => f,
@@ -420,6 +414,11 @@ pub fn decode_mini_block_selected(
     file_dict: Option<&FileDict>,
     mask: &Bitmap,
 ) -> Result<Column, StatamError> {
+    if mask.len() != entry.row_count as usize {
+        return Err(StatamError::Corrupt {
+            reason: "selection mask length mismatch",
+        });
+    }
     if entry.encoding == Encoding::Fsst && !mask.all_ones() {
         dt.validate(MAX_NESTING_DEPTH)?;
         return decode_narrow_column_selected(raw_body, entry, dt, mask);

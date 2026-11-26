@@ -1294,6 +1294,11 @@ pub(crate) fn decode_narrow_column_selected(
     dt: &DataType,
     mask: &Bitmap,
 ) -> Result<Column, StatamError> {
+    if mask.len() != entry.row_count as usize {
+        return Err(StatamError::Corrupt {
+            reason: "selection mask length mismatch",
+        });
+    }
     if entry.encoding == Encoding::Fsst
         && matches!(dt, DataType::Utf8 | DataType::Binary)
         && !mask.all_ones()

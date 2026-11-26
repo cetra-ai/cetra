@@ -854,6 +854,11 @@ impl PackHeader {
         if flags & PACK_FLAG_ENCRYPTED != 0 {
             return Err(StatamError::EncryptionRequired);
         }
+        if (flags & PACK_FLAG_TOC_LZ4 != 0) && (flags & PACK_FLAG_TOC_ZSTD != 0) {
+            return Err(StatamError::Corrupt {
+                reason: "conflicting pack TOC compression flags",
+            });
+        }
         let mut pack_id = [0u8; 16];
         pack_id.copy_from_slice(&buf[12..28]);
         let enc_envelope_offset = read_u64_le(buf, 28);
@@ -3045,6 +3050,22 @@ mod tests {
         assert!(matches!(
             RowGroupEntry::decode(&overflow_rg),
             Err(StatamError::BoundsExceeded { .. })
+        ));
+
+        // 9. PackHeader rejects conflicting TOC compression flags (`LZ4 | ZSTD`).
+        let conflicting_hdr = PackHeader {
+            format_version: FORMAT_VERSION,
+            flags: PACK_FLAG_TOC_LZ4 | PACK_FLAG_TOC_ZSTD,
+            required_features: 0,
+            pack_id: [0x11; 16],
+            enc_envelope_offset: 0,
+            enc_envelope_len: 0,
+            reserved: 0,
+        }
+        .encode();
+        assert!(matches!(
+            PackHeader::decode(&conflicting_hdr),
+            Err(StatamError::Corrupt { .. })
         ));
     }
 

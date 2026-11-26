@@ -10,7 +10,7 @@ use crate::StatamError;
 use crate::codec::WriteProfile;
 use crate::format::{
     Codec, Encoding, FLAG_L1_COMPACT, LocalityGroup, MAX_BATCH_DECODED_BYTES, PACK_FLAG_HAS_DICT,
-    PACK_FLAG_HAS_TRIGRAM, PACK_FLAG_TOC_LZ4, PACK_FRAME_FLAG_USES_DICT,
+    PACK_FLAG_HAS_TRIGRAM, PACK_FLAG_TOC_LZ4, PACK_FLAG_TOC_ZSTD, PACK_FRAME_FLAG_USES_DICT,
 };
 use crate::io::RangeReader;
 use crate::payload::pack::{ChunkPackBuilder, ChunkPackReader, PackWriteOptions, PackWriteStats};
@@ -293,7 +293,8 @@ pub fn gdpr_rewrite_day(
             target_frame_raw_bytes: 64 * 1024,
             enable_trigram_skip: (toc.postscript.flags & PACK_FLAG_HAS_TRIGRAM) != 0
                 || toc.frames.iter().any(|f| f.filter_len > 0),
-            compress_toc_lz4: (toc.postscript.flags & PACK_FLAG_TOC_LZ4) != 0,
+            compress_toc_lz4: (toc.postscript.flags & (PACK_FLAG_TOC_LZ4 | PACK_FLAG_TOC_ZSTD))
+                != 0,
         };
         let mut builder = ChunkPackBuilder::new(new_pack_id, pack_opts);
 
@@ -828,6 +829,16 @@ mod tests {
         let new_pack = &report.new_packs[0];
         let new_pack_reader =
             ChunkPackReader::open(Arc::new(SliceReader::new(new_pack.bytes.clone()))).unwrap();
+        assert_ne!(
+            old_pack_reader.postscript().flags & (PACK_FLAG_TOC_LZ4 | PACK_FLAG_TOC_ZSTD),
+            0,
+            "source pack must have compressed TOC"
+        );
+        assert_ne!(
+            new_pack_reader.postscript().flags & (PACK_FLAG_TOC_LZ4 | PACK_FLAG_TOC_ZSTD),
+            0,
+            "rewritten pack must retain compressed TOC flag"
+        );
 
         // Proof 1: Verbatim raw frame copy check for Frame 2!
         let old_f2_raw = old_pack_reader.read_frame_raw(2).unwrap();

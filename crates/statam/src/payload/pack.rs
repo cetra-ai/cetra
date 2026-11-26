@@ -54,11 +54,11 @@ pub struct PackWriteOptions {
     pub codec: Codec,
     /// Zstd compression level when `codec == Codec::Zstd` (default: `3`).
     pub zstd_level: i32,
-    /// Target uncompressed frame size in bytes (default: `512 KiB`).
+    /// Target uncompressed frame size in bytes (default: `1 MiB`).
     pub target_frame_raw_bytes: usize,
     /// Whether to emit adaptive per-frame trigram skip filters (default: `true`).
     pub enable_trigram_skip: bool,
-    /// Whether to LZ4-compress the Pack TOC body when smaller (default: `true`).
+    /// Whether to compress the Pack TOC body (`Zstd` delta-coded or `Lz4`) when smaller (default: `true`).
     pub compress_toc_lz4: bool,
 }
 
@@ -1392,46 +1392,42 @@ impl ChunkPackReader {
             });
         }
 
-        let (edge_blooms, min_frame_off) = if section.starts_with(&TRIGRAM_SECTION_MAGIC) {
-            if section.len() < TS02_HEADER_LEN {
-                return Err(StatamError::Corrupt {
-                    reason: "truncated TS02 trigram header",
-                });
-            }
-            let edge_bytes = read_u32_le(&section, 4) as usize;
-            let reserved = read_u32_le(&section, 8);
-            if reserved != 0 {
-                return Err(StatamError::Corrupt {
-                    reason: "non-zero reserved field in TS02 trigram header",
-                });
-            }
-            if !(MIN_TRIGRAM_BLOOM_BYTES..=MAX_TRIGRAM_BLOOM_BYTES).contains(&edge_bytes)
-                || !edge_bytes.is_power_of_two()
-            {
-                return Err(StatamError::Corrupt {
-                    reason: "invalid TS02 edge bloom length",
-                });
-            }
-            let prefix_len = TS02_HEADER_LEN
-                .checked_add(edge_bytes.saturating_mul(2))
-                .ok_or(StatamError::BoundsExceeded {
-                    reason: "TS02 prefix length overflow",
-                })?;
-            if section.len() < prefix_len {
-                return Err(StatamError::Corrupt {
-                    reason: "truncated TS02 edge trigram blooms",
-                });
-            }
-            let tail_bloom = TrigramBloom::from_bytes(
-                section[TS02_HEADER_LEN..TS02_HEADER_LEN + edge_bytes].to_vec(),
-            )?;
-            let head_bloom = TrigramBloom::from_bytes(
-                section[TS02_HEADER_LEN + edge_bytes..prefix_len].to_vec(),
-            )?;
-            (Some((tail_bloom, head_bloom)), prefix_len)
-        } else {
-            (None, 0usize)
-        };
+        if section.len() < TS02_PREFIX_LEN || section[0..4] != TRIGRAM_SECTION_MAGIC {
+            return Err(StatamError::Corrupt {
+                reason: "invalid trigram section magic",
+            });
+        }
+        let edge_bytes = read_u32_le(&section, 4) as usize;
+        let reserved = read_u32_le(&section, 8);
+        if reserved != 0 {
+            return Err(StatamError::Corrupt {
+                reason: "non-zero reserved field in TS02 trigram header",
+            });
+        }
+        if !(MIN_TRIGRAM_BLOOM_BYTES..=MAX_TRIGRAM_BLOOM_BYTES).contains(&edge_bytes)
+            || !edge_bytes.is_power_of_two()
+        {
+            return Err(StatamError::Corrupt {
+                reason: "invalid TS02 edge bloom length",
+            });
+        }
+        let prefix_len = TS02_HEADER_LEN
+            .checked_add(edge_bytes.saturating_mul(2))
+            .ok_or(StatamError::BoundsExceeded {
+                reason: "TS02 prefix length overflow",
+            })?;
+        if section.len() < prefix_len {
+            return Err(StatamError::Corrupt {
+                reason: "truncated TS02 edge trigram blooms",
+            });
+        }
+        let tail_bloom = TrigramBloom::from_bytes(
+            section[TS02_HEADER_LEN..TS02_HEADER_LEN + edge_bytes].to_vec(),
+        )?;
+        let head_bloom =
+            TrigramBloom::from_bytes(section[TS02_HEADER_LEN + edge_bytes..prefix_len].to_vec())?;
+        let edge_blooms = Some((tail_bloom, head_bloom));
+        let min_frame_off = prefix_len;
 
         let mut frame_blooms = Vec::with_capacity(self.toc.frames.len());
         for frame in &self.toc.frames {

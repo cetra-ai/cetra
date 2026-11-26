@@ -15,7 +15,7 @@ struct FastSliceHasher(u64);
 impl std::hash::Hasher for FastSliceHasher {
     #[inline]
     fn write(&mut self, bytes: &[u8]) {
-        let mut h = self.0;
+        let mut h = self.0 ^ (bytes.len() as u64).wrapping_mul(0x9e37_79b9_7f4a_7c15);
         let (chunks, rem) = bytes.as_chunks::<8>();
         for &c in chunks {
             let v = u64::from_le_bytes(c);

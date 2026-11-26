@@ -24,10 +24,11 @@ use crate::format::{
     DEFAULT_TAIL_HINT, Encoding, FILE_HEADER_LEN, FLAG_HAS_PACK_REFS, FLAG_HAS_SHREDDED_MAPS,
     FLAG_HAS_TRIGRAM_INDEX, FLAG_HOT_TAIL_LZ4, FLAG_L1_COMPACT, FORMAT_VERSION, FileHeader,
     FileSchemaMeta, LAZY_INDEX_ENTRY_LEN, LazyIndexEntry, LazyIndexKind, LocalityGroup,
-    MAX_BLOCK_RAW_BYTES, MAX_COLUMNS, MAX_FRAME_RAW_BYTES, MAX_HOT_TAIL_BYTES, MAX_MINI_BLOCK_SIZE,
-    MAX_PACK_REFS, MAX_ROW_GROUP_SIZE, MAX_ROW_GROUPS, MAX_ROWS_PER_FILE, MAX_TOTAL_BLOCKS,
-    POSTSCRIPT_LEN, Postscript, ROW_GROUP_ENTRY_LEN, ROW_GROUP_SIZE, RowGroupEntry, ShreddedMapDir,
-    ShreddedMapKeyEntry, TableKind, encode_schema, write_framed_block, write_framed_pack_frame,
+    MAX_BLOCK_RAW_BYTES, MAX_BLOOM_BYTES, MAX_COLUMNS, MAX_FRAME_RAW_BYTES, MAX_HOT_TAIL_BYTES,
+    MAX_MINI_BLOCK_SIZE, MAX_PACK_REFS, MAX_ROW_GROUP_SIZE, MAX_ROW_GROUPS, MAX_ROWS_PER_FILE,
+    MAX_TOTAL_BLOCKS, POSTSCRIPT_LEN, Postscript, ROW_GROUP_ENTRY_LEN, ROW_GROUP_SIZE,
+    RowGroupEntry, ShreddedMapDir, ShreddedMapKeyEntry, TableKind, encode_schema,
+    write_framed_block, write_framed_pack_frame,
 };
 use crate::payload::chunker::{
     DedupBypassDetector, INLINE_PAYLOAD_THRESHOLD, chunk_json_array_continuation, chunk_payload,
@@ -181,9 +182,9 @@ pub struct WriteOptions {
     pub payload_cols: Vec<String>,
     /// Narrow `Utf8` column names receiving per-block `TrigramBloom` in `L1Compact` when not dict-encoded.
     pub narrow_trigram_cols: Vec<String>,
-    /// Rows per PAX Row Group (default: `131_072` for Spans/Traces/Generic, `65_536` for Scores).
+    /// Rows per PAX Row Group (default: `131_072`).
     pub row_group_size: usize,
-    /// Rows per Mini-Block (default: `4_096` for `L1Compact`, `16_384` for `L0Fast`).
+    /// Rows per Mini-Block (default: `32_768`).
     pub mini_block_size: usize,
     /// Zstd compression level (`-5` for `L0Fast`, `3` for `L1Compact`).
     pub zstd_level: i32,
@@ -420,7 +421,9 @@ impl<'a> StatamWriter<'a> {
         let mut bloom_rgs = HashMap::new();
         let mut bloom_has_values = HashMap::new();
         for name in &options.bloom_cols {
-            if let Some(idx) = schema.index_of(name) {
+            if let Some(idx) = schema.index_of(name)
+                && logical_locality[idx] != LocalityGroup::ExternalPayload
+            {
                 bloom_col_set.insert(idx);
                 bloom_rgs.insert(idx, Vec::new());
                 bloom_has_values.insert(idx, false);
@@ -429,7 +432,8 @@ impl<'a> StatamWriter<'a> {
         let hot_bloom_col_idx = options
             .hot_bloom_col
             .as_deref()
-            .and_then(|name| schema.index_of(name));
+            .and_then(|name| schema.index_of(name))
+            .filter(|&idx| logical_locality[idx] != LocalityGroup::ExternalPayload);
         if let Some(idx) = hot_bloom_col_idx {
             bloom_col_set.insert(idx);
             bloom_rgs.entry(idx).or_default();
@@ -880,8 +884,11 @@ impl<'a> StatamWriter<'a> {
                 reason: "write_batch_with_prechunked_refs requires Selection::All",
             });
         }
+        if prechunked.is_empty() {
+            return self.write_batch(batch);
+        }
 
-        if self.rg_buf_rows > 0 && !prechunked.is_empty() {
+        if self.rg_buf_rows > 0 {
             self.flush_row_group()?;
         }
 
@@ -1317,7 +1324,7 @@ impl<'a> StatamWriter<'a> {
         let mut rg_cols = Vec::with_capacity(self.schema.len());
         for (cidx, pieces) in self.rg_buf_cols.iter_mut().enumerate() {
             if pieces.is_empty()
-                && self.options.profile == WriteProfile::L0Fast
+                && (self.options.profile == WriteProfile::L0Fast || self.pack_builder.is_some())
                 && self.logical_locality[cidx] == LocalityGroup::ExternalPayload
             {
                 rg_cols.push(Column::Flat(FlatColumn::empty(&DataType::Utf8)));
@@ -2464,7 +2471,7 @@ impl<'a> StatamWriter<'a> {
         let mut out = Vec::with_capacity(mb_len);
         let mut chunk_scratch = Vec::new();
         let mut prefix_mru: Vec<PayloadPrefixCacheEntry> = Vec::with_capacity(2);
-        let mut prefix_table: Vec<Option<PayloadPrefixCacheEntry>> = vec![None; 4096];
+        let mut prefix_table: Vec<Option<PayloadPrefixCacheEntry>> = Vec::new();
         let mut exact_cache: [Option<PayloadExactCacheEntry>; 64] = std::array::from_fn(|_| None);
 
         for r in row_off..row_off + mb_len {
@@ -2567,7 +2574,11 @@ impl<'a> StatamWriter<'a> {
                     };
 
                     if !need_sample {
-                        let table_hit = prefix_slot.and_then(|slot| prefix_table[slot].as_ref());
+                        let table_hit = if !prefix_table.is_empty() {
+                            prefix_slot.and_then(|slot| prefix_table[slot].as_ref())
+                        } else {
+                            None
+                        };
                         for (idx_in_iter, (prev_row_idx, prefix_byte_len, prefix_refs)) in
                             prefix_mru.iter().rev().chain(table_hit).enumerate()
                         {
@@ -2652,6 +2663,9 @@ impl<'a> StatamWriter<'a> {
                         }
                         let entry = (r, prefix_byte_len, prefix_refs.to_vec());
                         if let Some(slot) = prefix_slot {
+                            if prefix_table.is_empty() {
+                                prefix_table = vec![None; 4096];
+                            }
                             prefix_table[slot] = Some(entry.clone());
                         }
                         prefix_mru.push(entry);
@@ -2686,7 +2700,11 @@ impl<'a> StatamWriter<'a> {
         if !has_any || rgs.is_empty() {
             return Ok(None);
         }
-        Ok(Some(BloomIndex::PerRowGroup(rgs).to_bytes()))
+        let bytes = BloomIndex::PerRowGroup(rgs).to_bytes();
+        if bytes.len() > MAX_BLOOM_BYTES {
+            return Ok(None);
+        }
+        Ok(Some(bytes))
     }
 
     fn take_and_build_primary_bloom(
@@ -2702,6 +2720,9 @@ impl<'a> StatamWriter<'a> {
             return Ok(None);
         }
         let bytes = BloomIndex::PerRowGroup(rgs).to_bytes();
+        if bytes.len() > MAX_BLOOM_BYTES {
+            return Ok(None);
+        }
         let fits_hot = bytes.len() <= avail_bytes;
         Ok(Some((bytes, fits_hot)))
     }
@@ -4025,5 +4046,114 @@ mod tests {
             0,
             "small FileDict must remain in Hot Tail when compressed Hot Tail <= 960 KiB"
         );
+    }
+
+    #[test]
+    fn write_batch_with_empty_prechunked_after_partial_rg_preserves_external_payloads() {
+        use crate::payload::pack::PackWriteOptions;
+        use crate::reader::{InMemoryPackResolver, PackResolver};
+
+        let schema = Schema::try_new_arc(vec![
+            Field::new("id", DataType::I64, false),
+            Field::new("input", DataType::Utf8, true),
+        ])
+        .unwrap();
+
+        let make_batch = |ids: &[i64], payloads: &[&str]| {
+            Batch::try_new_all(
+                Arc::clone(&schema),
+                vec![
+                    Column::Flat(FlatColumn::try_new(FlatData::I64(ids.to_vec()), None).unwrap()),
+                    Column::Flat(
+                        FlatColumn::try_new(
+                            FlatData::Utf8(
+                                Utf8Data::try_from_slices(payloads.iter().copied()).unwrap(),
+                            ),
+                            None,
+                        )
+                        .unwrap(),
+                    ),
+                ],
+                ids.len(),
+            )
+            .unwrap()
+        };
+
+        let p0 = format!("partial_l0_0_{}", "a".repeat(600));
+        let p1 = "inline_1".to_owned();
+        let p2 = format!("prechunked_empty_2_{}", "b".repeat(700));
+        let p3 = format!("prechunked_empty_3_{}", "c".repeat(800));
+        let b1 = make_batch(&[0, 1], &[&p0, &p1]);
+        let b2 = make_batch(&[2, 3], &[&p2, &p3]);
+        let expected = [p0, p1, p2, p3];
+
+        // 1. L0Fast: partial RG via write_batch + write_batch_with_prechunked_refs with empty map.
+        let mut l0_opts = WriteOptions::for_table(TableKind::Spans, WriteProfile::L0Fast);
+        l0_opts.payload_cols = vec!["input".to_owned()];
+        l0_opts.row_group_size = 8;
+        l0_opts.mini_block_size = 4;
+
+        let mut l0_bytes = Vec::new();
+        let mut w0 = StatamWriter::new(Arc::clone(&schema), l0_opts, None).unwrap();
+        w0.write_batch(&b1).unwrap();
+        w0.write_batch_with_prechunked_refs(&b2, &HashMap::new(), &HashMap::new())
+            .unwrap();
+        w0.finish(&mut l0_bytes).unwrap();
+
+        let r0 = StatamReader::open(Arc::new(SliceReader::new(l0_bytes)), None).unwrap();
+        r0.verify_full().unwrap();
+        let out0 = r0.scan(&ScanRequest::default()).unwrap();
+        assert_eq!(out0.len(), 1);
+        assert_eq!(out0[0].num_rows(), 4);
+        for (idx, exp) in expected.iter().enumerate() {
+            assert_eq!(
+                out0[0].column(1).unwrap().get_scalar(idx).unwrap(),
+                ScalarValue::Utf8(exp.clone())
+            );
+        }
+
+        // 2. L1Compact with ChunkPackBuilder: partial RG via write_batch + empty prechunked.
+        let pack_id = [0x5Au8; 16];
+        let mut pb = ChunkPackBuilder::new(
+            pack_id,
+            PackWriteOptions {
+                codec: default_l1_codec(),
+                zstd_level: 3,
+                target_frame_raw_bytes: 16 * 1024,
+                enable_trigram_skip: true,
+                compress_toc_lz4: true,
+            },
+        );
+        let mut l1_opts = WriteOptions::for_table(TableKind::Spans, WriteProfile::L1Compact);
+        l1_opts.payload_cols = vec!["input".to_owned()];
+        l1_opts.row_group_size = 8;
+        l1_opts.mini_block_size = 4;
+        l1_opts.pack_id = Some(pack_id);
+
+        let mut l1_bytes = Vec::new();
+        {
+            let mut w1 = StatamWriter::new(Arc::clone(&schema), l1_opts, Some(&mut pb)).unwrap();
+            w1.write_batch(&b1).unwrap();
+            w1.write_batch_with_prechunked_refs(&b2, &HashMap::new(), &HashMap::new())
+                .unwrap();
+            w1.finish(&mut l1_bytes).unwrap();
+        }
+        let mut pack_bytes = Vec::new();
+        pb.finish(&mut pack_bytes).unwrap();
+        let mut resolver = InMemoryPackResolver::new();
+        resolver.insert_bytes(pack_id, pack_bytes).unwrap();
+        let resolver: Arc<dyn PackResolver> = Arc::new(resolver);
+
+        let r1 = StatamReader::open(Arc::new(SliceReader::new(l1_bytes)), Some(resolver)).unwrap();
+        r1.verify_full().unwrap();
+        let out1 = r1.scan(&ScanRequest::default()).unwrap();
+        assert_eq!(out1.len(), 1);
+        assert_eq!(out1[0].num_rows(), 4);
+        for (idx, exp) in expected.iter().enumerate() {
+            assert_eq!(
+                out1[0].column(1).unwrap().get_scalar(idx).unwrap(),
+                ScalarValue::Utf8(exp.clone())
+            );
+        }
     }
 }

@@ -86,7 +86,7 @@ impl Sbbf {
         // Standard 8-probe split-block sizing with 1.25x Poisson load-variance margin.
         let denom = -(1.0 - clamped_fpp.powf(1.0 / 8.0)).ln();
         let bits = ((8.0 * ndv_f / denom) * 1.25).ceil();
-        let max_blocks = MAX_BLOOM_BYTES / 32;
+        let max_blocks = (MAX_BLOOM_BYTES - SBBF_HEADER_LEN) / 32;
         let num_blocks = if bits.is_finite() && bits > 0.0 {
             ((bits as usize).div_ceil(256)).clamp(1, max_blocks)
         } else {
@@ -181,6 +181,11 @@ impl Sbbf {
                 reason: "truncated bloom filter header",
             });
         }
+        if buf.len() > MAX_BLOOM_BYTES {
+            return Err(StatamError::BoundsExceeded {
+                reason: "bloom filter exceeds MAX_BLOOM_BYTES",
+            });
+        }
         if buf[0..4] != BLOOM_MAGIC {
             return Err(StatamError::Corrupt {
                 reason: "invalid bloom filter magic",
@@ -194,16 +199,15 @@ impl Sbbf {
         }
         let payload_bytes = num_blocks
             .checked_mul(32)
-            .filter(|&b| b <= MAX_BLOOM_BYTES)
+            .ok_or(StatamError::BoundsExceeded {
+                reason: "bloom filter byte length overflow",
+            })?;
+        let total_len = SBBF_HEADER_LEN
+            .checked_add(payload_bytes)
+            .filter(|&len| len <= MAX_BLOOM_BYTES)
             .ok_or(StatamError::BoundsExceeded {
                 reason: "bloom filter exceeds MAX_BLOOM_BYTES",
             })?;
-        let total_len =
-            SBBF_HEADER_LEN
-                .checked_add(payload_bytes)
-                .ok_or(StatamError::BoundsExceeded {
-                    reason: "bloom filter byte length overflow",
-                })?;
         if buf.len() != total_len {
             return Err(StatamError::Corrupt {
                 reason: "bloom filter byte length mismatch",
@@ -526,12 +530,13 @@ mod tests {
 
         let mut oversized = [0u8; 12];
         oversized[0..4].copy_from_slice(&BLOOM_MAGIC);
-        let too_many_blocks = (MAX_BLOOM_BYTES / 32 + 1) as u32;
+        let too_many_blocks = (MAX_BLOOM_BYTES / 32) as u32;
         oversized[4..8].copy_from_slice(&too_many_blocks.to_le_bytes());
         assert!(matches!(
             Sbbf::from_bytes(&oversized),
             Err(StatamError::BoundsExceeded { .. })
         ));
+        assert!(Sbbf::new_for_ndv(usize::MAX, 1e-6).encoded_len() <= MAX_BLOOM_BYTES);
     }
 
     #[test]

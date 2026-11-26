@@ -796,6 +796,16 @@ impl<'a> FsstBlockView<'a> {
         nulls: Option<&Bitmap>,
     ) -> Result<FsstSelectedRows, StatamError> {
         let row_count = self.len();
+        if mask.len() != row_count {
+            return Err(StatamError::Corrupt {
+                reason: "selection mask length mismatch",
+            });
+        }
+        if nulls.is_some_and(|bm| bm.len() != row_count) {
+            return Err(StatamError::Corrupt {
+                reason: "null bitmap length mismatch",
+            });
+        }
         if row_count == 0 {
             return Ok((vec![0], Vec::new(), None));
         }
@@ -895,4 +905,45 @@ pub fn decode_fsst_binary_selected(
     let view = FsstBlockView::parse(src, row_count)?;
     let (offsets, bytes, out_nulls) = view.decode_selected(mask, nulls)?;
     Ok((BinaryData::try_new(offsets, bytes)?, out_nulls))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn decode_selected_rejects_mismatched_mask_and_nulls_lengths() {
+        let rows = [
+            b"{\"role\":\"assistant\",\"model\":\"claude\"}".as_slice(),
+            b"{\"role\":\"assistant\",\"model\":\"claude-3\"}".as_slice(),
+            b"{\"role\":\"assistant\",\"model\":\"claude-3.5\"}".as_slice(),
+            b"{\"role\":\"assistant\",\"model\":\"claude-4\"}".as_slice(),
+        ];
+        let body = encode_fsst_body(&rows).unwrap().unwrap();
+        let view = FsstBlockView::parse(&body, rows.len()).unwrap();
+
+        let short_mask = Bitmap::new_ones(rows.len() - 1);
+        assert!(matches!(
+            view.decode_selected(&short_mask, None),
+            Err(StatamError::Corrupt {
+                reason: "selection mask length mismatch",
+            })
+        ));
+        let long_mask = Bitmap::new_ones(rows.len() + 1);
+        assert!(matches!(
+            view.decode_selected(&long_mask, None),
+            Err(StatamError::Corrupt {
+                reason: "selection mask length mismatch",
+            })
+        ));
+
+        let valid_mask = Bitmap::new_ones(rows.len());
+        let bad_nulls = Bitmap::new_ones(rows.len() + 1);
+        assert!(matches!(
+            view.decode_selected(&valid_mask, Some(&bad_nulls)),
+            Err(StatamError::Corrupt {
+                reason: "null bitmap length mismatch",
+            })
+        ));
+    }
 }

@@ -182,8 +182,8 @@ impl TrigramBloom {
             let mask0 = (word >> 16) as u8;
             let idx1 = ((word >> 32) as usize) & byte_mask;
             let mask1 = (word >> 48) as u8;
-            // SAFETY: caller ensures `byte_mask == bits.len() - 1` and `bits.len()` is a power of two,
-            // so `idx0 < bits.len()` and `idx1 < bits.len()`.
+            // SAFETY: caller ensures `byte_mask == bits.len() - 1` and `bits.len()` is a power of two
+            // (`<= MAX_TRIGRAM_BLOOM_BYTES == 4096`), so `idx0 < bits.len()` and `idx1 < bits.len()`.
             unsafe {
                 *ptr.add(idx0) |= mask0;
                 *ptr.add(idx1) |= mask1;
@@ -191,6 +191,7 @@ impl TrigramBloom {
         }
 
         debug_assert!(self.bits.len().is_power_of_two());
+        debug_assert!(self.bits.len() <= MAX_TRIGRAM_BLOOM_BYTES);
         let byte_mask = self.bits.len() - 1;
         let bit_mask = (self.bits.len() * 8) - 1;
         let bits = &mut self.bits;
@@ -235,7 +236,7 @@ impl TrigramBloom {
             let v1 = _mm256_or_si256(idx1_vec, _mm256_slli_epi32(mask1_vec, 16));
             let v2 = _mm256_or_si256(idx2_vec, _mm256_slli_epi32(mask2_vec, 16));
 
-            // SAFETY: `ptr` points to `bits` of length `byte_mask + 1` (power of two).
+            // SAFETY: `ptr` points to `bits` of length `byte_mask + 1` (power of two, `<= 4096`).
             unsafe {
                 set_two_lanes(ptr, byte_mask, _mm256_extract_epi64::<0>(v1) as u64);
                 set_two_lanes(ptr, byte_mask, _mm256_extract_epi64::<1>(v1) as u64);

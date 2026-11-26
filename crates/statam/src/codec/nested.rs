@@ -12,7 +12,7 @@ struct FastStrHasher(u64);
 impl std::hash::Hasher for FastStrHasher {
     #[inline]
     fn write(&mut self, bytes: &[u8]) {
-        let mut h = self.0;
+        let mut h = self.0 ^ (bytes.len() as u64).wrapping_mul(0x9e37_79b9_7f4a_7c15);
         let (chunks, rem) = bytes.as_chunks::<8>();
         for &c in chunks {
             let v = u64::from_le_bytes(c);
@@ -686,7 +686,7 @@ pub fn encode_shredded_subcol(
 }
 
 /// Encodes one [`ShreddedSubCol`] and returns its preferred outer compression codec
-/// (`Codec::None` when `Dict`/`Const`/`ConstNull`/`Rle`, else `Lz4`/`Zstd`).
+/// (`Lz4` in `L0Fast` when `raw_len >= 64`, `Zstd`/`Lz4` in `L1Compact`, else `Codec::None`).
 pub(crate) fn encode_shredded_subcol_with_codec(
     sub: &ShreddedSubCol,
     profile: WriteProfile,

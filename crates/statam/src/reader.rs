@@ -722,9 +722,15 @@ impl StatamFileMeta {
         }
         let start = cd.bloom_offset as usize;
         let end = start + cd.bloom_len as usize;
-        Ok(Some(BloomIndex::from_bytes(
-            &self.hot_bloom_bytes[start..end],
-        )?))
+        let bloom = BloomIndex::from_bytes(&self.hot_bloom_bytes[start..end])?;
+        if let BloomIndex::PerRowGroup(rgs) = &bloom
+            && rgs.len() != self.rg_dir.len()
+        {
+            return Err(StatamError::Corrupt {
+                reason: "per-RG bloom count does not match num_row_groups",
+            });
+        }
+        Ok(Some(bloom))
     }
 
     /// Decodes a Hot-Tail-resident `FileDict` for physical column `pidx`, if present.
@@ -1435,6 +1441,13 @@ impl StatamReader {
                     });
                 }
                 let bloom = BloomIndex::from_bytes(&bytes)?;
+                if let BloomIndex::PerRowGroup(rgs) = &bloom
+                    && rgs.len() != self.meta.rg_dir.len()
+                {
+                    return Err(StatamError::Corrupt {
+                        reason: "per-RG bloom count does not match num_row_groups",
+                    });
+                }
                 guard.blooms.insert(cidx, bloom);
             }
         }
@@ -6333,5 +6346,131 @@ mod tests {
         let out = concat_scanned_batches(&proj_schema, &res);
         assert_eq!(out.num_rows(), n);
         assert!(pack_s3.counters().gets <= 1);
+    }
+
+    #[test]
+    fn corrupt_bf02_bloom_count_mismatch_returns_corrupt_error() {
+        use crate::format::POSTSCRIPT_MAGIC;
+        use crate::simd::bloom::Sbbf;
+
+        let schema = Schema::try_new_arc(vec![
+            Field::new("trace_id", DataType::FixedBytes16, false),
+            Field::new("v", DataType::I64, false),
+        ])
+        .unwrap();
+
+        let n = 8usize;
+        let tids: Vec<[u8; 16]> = (0..n).map(|i| [(i + 1) as u8; 16]).collect();
+        let vals: Vec<i64> = (0..n as i64).collect();
+        let batch = Batch::try_new_all(
+            Arc::clone(&schema),
+            vec![
+                Column::Flat(FlatColumn::try_new(FlatData::FixedBytes16(tids), None).unwrap()),
+                Column::Flat(FlatColumn::try_new(FlatData::I64(vals), None).unwrap()),
+            ],
+            n,
+        )
+        .unwrap();
+
+        // 1. Hot-tail BF02 with rgs.len() != num_row_groups rejected by hot_bloom & StatamReader::open.
+        let mut hot_opts = WriteOptions::for_table(TableKind::Spans, WriteProfile::L0Fast);
+        hot_opts.row_group_size = 4;
+        hot_opts.mini_block_size = 4;
+        hot_opts.compress_hot_tail_lz4 = false;
+        hot_opts.bloom_cols = vec!["trace_id".to_owned()];
+        hot_opts.hot_bloom_col = Some("trace_id".to_owned());
+
+        let mut hot_bytes = Vec::new();
+        let mut wh = StatamWriter::new(Arc::clone(&schema), hot_opts, None).unwrap();
+        wh.write_batch(&batch).unwrap();
+        wh.finish(&mut hot_bytes).unwrap();
+
+        let hot_reader =
+            StatamReader::open(Arc::new(SliceReader::new(hot_bytes.clone())), None).unwrap();
+        assert_eq!(hot_reader.meta().num_row_groups(), 2);
+        let mut bad_meta = hot_reader.meta().clone();
+        let mut single_rg = Sbbf::new_for_ndv(4, 0.01);
+        single_rg.insert_bytes(&[1u8; 16]);
+        let bad_bf02 = BloomIndex::PerRowGroup(vec![single_rg]).to_bytes();
+        bad_meta.hot_bloom_bytes = Bytes::from(bad_bf02.clone());
+        bad_meta.col_dir[0].bloom_offset = 0;
+        bad_meta.col_dir[0].bloom_len = bad_bf02.len() as u32;
+        assert!(matches!(
+            bad_meta.hot_bloom(0),
+            Err(StatamError::Corrupt {
+                reason: "per-RG bloom count does not match num_row_groups",
+            })
+        ));
+
+        // 2. Lazy BF02 with rgs.len() != num_row_groups rejected by check_blooms on scan.
+        let mut lazy_opts = WriteOptions::for_table(TableKind::Spans, WriteProfile::L0Fast);
+        lazy_opts.row_group_size = 4;
+        lazy_opts.mini_block_size = 4;
+        lazy_opts.compress_hot_tail_lz4 = false;
+        lazy_opts.bloom_cols = vec!["trace_id".to_owned()];
+        lazy_opts.hot_bloom_col = None;
+
+        let mut lazy_bytes = Vec::new();
+        let mut wl = StatamWriter::new(Arc::clone(&schema), lazy_opts, None).unwrap();
+        wl.write_batch(&batch).unwrap();
+        wl.finish(&mut lazy_bytes).unwrap();
+
+        let ps_off = lazy_bytes.len() - POSTSCRIPT_LEN;
+        let mut ps = Postscript::decode(&lazy_bytes[ps_off..]).unwrap();
+        assert_eq!(ps.flags & FLAG_HOT_TAIL_LZ4, 0);
+        let orig_hot_body_start = lazy_bytes.len() - ps.hot_tail_len as usize;
+        let orig_raw_body_len = ps.hot_tail_raw_len as usize;
+
+        // Place the 1-RG BF02 right before the Hot Tail, clear hot_bloom flag on col 0,
+        // and append a LazyIndexEntry pointing to the corrupt BF02.
+        let mut raw_body = lazy_bytes[orig_hot_body_start..ps_off].to_vec();
+        let col0_off = ps.col_dir_off as usize;
+        let mut cd0 =
+            ColumnDirEntry::decode(&raw_body[col0_off..col0_off + COLUMN_DIR_ENTRY_LEN]).unwrap();
+        cd0.col_flags &= !COL_FLAG_BLOOM_IN_HOT_TAIL;
+        cd0.bloom_offset = 0;
+        cd0.bloom_len = bad_bf02.len() as u32;
+        raw_body[col0_off..col0_off + COLUMN_DIR_ENTRY_LEN].copy_from_slice(&cd0.encode());
+
+        let lazy_bloom_off = orig_hot_body_start as u64;
+        let lazy_entry = LazyIndexEntry {
+            phys_col_id: 0,
+            kind: LazyIndexKind::Bloom,
+            reserved: [0u8; 3],
+            offset: lazy_bloom_off,
+            len: bad_bf02.len() as u32,
+            crc32c: crc32c::crc32c(&bad_bf02),
+        };
+        raw_body.extend_from_slice(&lazy_entry.encode());
+
+        ps.lazy_dir_off = orig_raw_body_len as u32;
+        ps.lazy_dir_len = LAZY_INDEX_ENTRY_LEN as u32;
+        ps.hot_tail_raw_len = raw_body.len() as u32;
+        ps.hot_tail_len = (raw_body.len() + POSTSCRIPT_LEN) as u32;
+        ps.hot_tail_crc32c = crc32c::crc32c(&raw_body);
+        let ps_encoded = ps.encode();
+        assert_eq!(&ps_encoded[POSTSCRIPT_LEN - 4..], &POSTSCRIPT_MAGIC);
+
+        let mut patched_lazy = Vec::new();
+        patched_lazy.extend_from_slice(&lazy_bytes[..orig_hot_body_start]);
+        patched_lazy.extend_from_slice(&bad_bf02);
+        patched_lazy.extend_from_slice(&raw_body);
+        patched_lazy.extend_from_slice(&ps_encoded);
+
+        let lazy_reader =
+            StatamReader::open(Arc::new(SliceReader::new(patched_lazy)), None).unwrap();
+        let scan_res = lazy_reader.scan(&ScanRequest {
+            id_lookups: vec![IdLookup {
+                column: "trace_id".to_owned(),
+                values: vec![vec![1u8; 16]],
+            }],
+            ..ScanRequest::default()
+        });
+        assert!(matches!(
+            scan_res,
+            Err(StatamError::Corrupt {
+                reason: "per-RG bloom count does not match num_row_groups",
+            })
+        ));
     }
 }

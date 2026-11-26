@@ -189,7 +189,7 @@ Every non-inline data block starts with **16 B**: `magic: b"SB"`, `encoding: u8`
 | `2` | `Rle` | All scalars, `FixedBytes8/16`, `Interval` | `Column::Rle` | `num_runs: u32`, run-level validity bitmap (`num_runs.div_ceil(8)` B if `HAS_NULLS`), FastLanes-packed `run_ends: [u32; num_runs]`, encoded run values (using inner scalar encoding). |
 | `3` | `ForBitpack` | `I64`, `TimestampNs`, `Date`, `Decimal128` (when `max-min <= u64::MAX`) | `Column::Flat` | Optional row null bitmap (`row_count.div_ceil(8)` B), `base: i64` (or `i128` for `Decimal128`), `bit_width: u8`, FastLanes-1024 full tiles (`count / 1024`) + compact scalar bitpack tail (`count % 1024` — zero padding!). |
 | `4` | `DeltaBitpack` | `TimestampNs`, `I64`, `Date` | `Column::Flat` | Optional row null bitmap, `is_zigzag: u8`, per-1024-tile bases + `bit_width: u8` + FastLanes-1024 `04261537` transposed deltas + scalar tail (`count % 1024`). |
-| `5` | `Alp` | `F64` | `Column::Flat(F64)` | Optional row null bitmap, `exp: u8`, `fac: u8`, `exc_count: u16`, `ForBitpack` of scaled `i64`s, `[u16; exc_count]` positions, `[u64; exc_count]` exact IEEE-754 bits (`NaN`, `±inf`, `-0.0` bit-exact!). |
+| `5` | `Alp` | `F64` | `Column::Flat(F64)` | Optional row null bitmap, `exp: u8` (`exp & 0x7F <= 18`, bit 7 `ALP_DIV_MODE_FLAG = 0x80` = exact division mode, `div_mode && (exp & 0x7F) == 0` invalid), `fac: u8`, `exc_count: u16`, `ForBitpack` of scaled `i64`s, `[u16; exc_count]` positions, `[u64; exc_count]` exact IEEE-754 bits (`NaN`, `±inf`, `-0.0` bit-exact!). |
 | `6` | `Dict` | `Utf8`, `Binary`, `FixedBytes8/16` | `Column::Dict` (≤ 256 KiB dict) or `Flat` | Optional row null bitmap, `sub_enc: u8 (0=ForBitpack, 1=Rle)` over `u32` codes into the column's file-level dictionary. |
 | `7` | `Fsst` | `Utf8`, `Binary` | `Column::Flat` | Optional row null bitmap, `sym_count: u8 (<=255)`, `[u8; sym_count]` symbol lengths (1..=8), concatenated symbol bytes, FastLanes-packed compressed string lengths (`u32`), concatenated FSST-coded bytes (`0xFF` = literal escape). |
 | `8` | `BitpackBool` | `Bool` | `Column::Flat(Bool)` | Optional row null bitmap, exact `row_count.div_ceil(8)` packed LE bytes (matches `Bitmap::from_bytes`). |
@@ -232,8 +232,7 @@ Every non-inline data block starts with **16 B**: `magic: b"SB"`, `encoding: u8`
   edge_head_bloom: [u8; 4096] (ASCII-lowercased trigrams of every chunk's head_63),
   followed by per-frame lowercase ASCII trigram bloom filters with `filter_off` relative to section start;
   filter_bytes = clamp(next_pow2(unique_trigrams), 256, min(4096, stored_len / 6));
-  omitted (filter_len = 0) if stored_len < 1024 or bit density > 50%;
-  readers also support legacy raw format without `TS02` header)
+  omitted (filter_len = 0) if stored_len < 1024 or bit density > 50%; `TS02` magic required when `trigram_len > 0`)
 [EdgeTable] (Zstd-3 compressed: per unique chunk [u8 head_len, head_bytes (<=63), u8 tail_len, tail_bytes (<=63)])
 [DictSection] (optional, 0 B by default)
 [Optional AEAD Envelope] (0 B when !ENCRYPTED)
@@ -285,7 +284,7 @@ Every non-inline data block starts with **16 B**: `magic: b"SB"`, `encoding: u8`
 
 **Bounded `L1Compact` Streaming:** `StatamWriter` buffers at most **1 Row Group (`131,072` rows)** at a time. RG0 determines the `ShreddedMap` promoted keys (`<= 64`, `>= 5%` presence) and initial sorted file-level dicts (`<= 16,384` entries). In RG1..G-1, unseen map keys spill to residual (updating `residual_count`), and unseen string values in dict-encoded columns fall back to `Fsst`/`Plain` for that mini-block — guaranteeing bounded O(1 RG) RAM even on multi-hundred-MB compactions.
 
-*(Profile table: `L0Fast` = self-contained, FastLanes + Rle (64-element sample) + Const + bounded hash-dict ≤ 512 + Plain MapUtf8 + `Lz4` on `>= 64 B` varlen/nested/`Plain`/`PayloadRefs` + `Zstd(-5)`/`Lz4(<1 KiB)` on 512 KiB local frames + `Codec::None` on fixed-width/For/Delta/BitpackBool/Rle/Dict + AVX2 SBBF, no map shredding / no FSST / no trigrams / no `.stpk`; `L1Compact` = full cascade + ALP + sorted Dict + FSST + ShreddedMap + `Zstd(19)` on all non-inline mini-block encodings and shredded sub-columns + Structural JSON/FastCDC + BLAKE3-128 `.stpk` `Zstd(9)` 512 KiB frames + `TS02` trigram + edge table.)*
+*(Profile table: `L0Fast` = self-contained, FastLanes + Rle (64-element sample) + Const + bounded hash-dict ≤ 512 + Plain MapUtf8 + `Lz4` on `>= 64 B` varlen/nested/`Plain`/`PayloadRefs` + `Zstd(-5)`/`Lz4(<1 KiB)` on 512 KiB local frames + `Codec::None` on fixed-width/For/Delta/BitpackBool/Rle/Dict + AVX2 SBBF, no map shredding / no FSST / no trigrams / no `.stpk`; `L1Compact` = full cascade + ALP + sorted Dict + FSST + ShreddedMap + `Zstd(3)` on all non-inline mini-block encodings and shredded sub-columns + Structural JSON/FastCDC + BLAKE3-128 `.stpk` `Zstd(3)` 1 MiB frames + `TS02` trigram + edge table.)*
 
 ---
 
@@ -298,7 +297,7 @@ Every non-inline data block starts with **16 B**: `magic: b"SB"`, `encoding: u8`
   - `MAX_HOT_TAIL_BYTES = 16 MiB` (writer targets `<= 1 MiB`)
   - `MAX_COLUMNS = 1,024`, `MAX_NESTING_DEPTH = 8`, `MAX_ROW_GROUPS = 262,144`, `MAX_TOTAL_BLOCKS = 4,194,304`
   - `MAX_BLOCK_RAW_BYTES = 64 MiB`, `MAX_FRAME_RAW_BYTES = 16 MiB`, `MAX_DECOMPRESS_RATIO = 1,024× + 16,384 B`
-  - `MAX_SHREDDED_KEYS = 64`, `MAX_REF_CHAIN_DEPTH = 15`, `MAX_CHUNKS_PER_ROW = 65,536`
+  - `MAX_SHREDDED_KEYS = 64`, `MAX_REF_CHAIN_DEPTH = 15`, `MAX_CHUNKS_PER_ROW = 65,535` (`u16::MAX`)
   - `MAX_ROW_PAYLOAD_BYTES = 64 MiB`, `MAX_BATCH_DECODED_BYTES = 256 MiB` (defeats dedup/tail-sharing amplification bombs!)
   - `MAX_DICT_BYTES = 32 MiB`, `MAX_BLOOM_BYTES = 32 MiB`
   - Every table allocation MUST check `count.checked_mul(entry_size) <= Some(remaining_bytes)` BEFORE allocating!
