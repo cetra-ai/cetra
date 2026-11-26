@@ -3,6 +3,7 @@
 pub mod error;
 pub mod format;
 pub mod io;
+pub mod simd;
 
 pub use error::StatamError;
 pub use format::{
@@ -23,3 +24,4 @@ pub use io::{
     FileReader, IoCounters, RangeReader, S3_CACHE_BLOCK_BYTES, SimulatedS3Config,
     SimulatedS3Reader, SliceReader,
 };
+pub use simd::{FilterOp, Sbbf, TrigramBloom, statam_bloom_hash};
