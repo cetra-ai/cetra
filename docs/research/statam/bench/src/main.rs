@@ -9,22 +9,14 @@
     clippy::too_many_lines
 )]
 
-mod queries;
-mod report;
-mod s3_parquet;
-mod schema;
-mod strata_bench;
-mod vortex_bench;
-mod workloads;
-
-use queries::{
+use statam_bench7::queries::{
     bench_tiny_flushes, encode_scores_workload, encode_spans_workload, parse_enabled_formats,
     run_all_queries,
 };
-use report::{GateCheck, QueryBenchRow, WriteBenchRow, render_markdown_report};
-use schema::BenchResult;
-use vortex_bench::new_vortex_session;
-use workloads::{BenchScale, generate_all_workloads};
+use statam_bench7::report::{GateCheck, QueryBenchRow, WriteBenchRow, render_markdown_report};
+use statam_bench7::schema::{self, BenchResult};
+use statam_bench7::vortex_bench::new_vortex_session;
+use statam_bench7::workloads::{BenchScale, generate_all_workloads};
 
 fn machine_summary() -> String {
     let arch = std::env::consts::ARCH;
@@ -250,39 +242,47 @@ fn evaluate_gates(
     ]
 }
 
-fn parse_cli_args() -> BenchResult<usize> {
+fn parse_positive_threads(flag: &str, val: &str) -> BenchResult<usize> {
+    let parsed = val
+        .parse::<usize>()
+        .map_err(|_| format!("invalid {flag} value '{val}' (expected integer >= 1)"))?;
+    if parsed == 0 {
+        return Err(format!("{flag} must be >= 1").into());
+    }
+    Ok(parsed)
+}
+
+fn parse_cli_args() -> BenchResult<(usize, usize)> {
     let mut statam_write_threads = 1usize;
+    let mut statam_read_threads = 1usize;
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
         if let Some(val) = arg.strip_prefix("--statam-write-threads=") {
-            statam_write_threads = val.parse::<usize>().map_err(|_| {
-                format!("invalid --statam-write-threads value '{val}' (expected integer >= 1)")
-            })?;
-            if statam_write_threads == 0 {
-                return Err("--statam-write-threads must be >= 1".into());
-            }
+            statam_write_threads = parse_positive_threads("--statam-write-threads", val)?;
         } else if arg == "--statam-write-threads" {
             let val = args
                 .next()
                 .ok_or("--statam-write-threads requires an integer argument")?;
-            statam_write_threads = val.parse::<usize>().map_err(|_| {
-                format!("invalid --statam-write-threads value '{val}' (expected integer >= 1)")
-            })?;
-            if statam_write_threads == 0 {
-                return Err("--statam-write-threads must be >= 1".into());
-            }
+            statam_write_threads = parse_positive_threads("--statam-write-threads", &val)?;
+        } else if let Some(val) = arg.strip_prefix("--statam-read-threads=") {
+            statam_read_threads = parse_positive_threads("--statam-read-threads", val)?;
+        } else if arg == "--statam-read-threads" {
+            let val = args
+                .next()
+                .ok_or("--statam-read-threads requires an integer argument")?;
+            statam_read_threads = parse_positive_threads("--statam-read-threads", &val)?;
         } else {
             return Err(format!(
-                "unknown argument '{arg}' (supported: --statam-write-threads <N>)"
+                "unknown argument '{arg}' (supported: --statam-write-threads <N>, --statam-read-threads <N>)"
             )
             .into());
         }
     }
-    Ok(statam_write_threads)
+    Ok((statam_write_threads, statam_read_threads))
 }
 
 async fn run_suite() -> BenchResult<()> {
-    let write_threads = parse_cli_args()?;
+    let (write_threads, read_threads) = parse_cli_args()?;
     let scale = BenchScale::from_env();
     let enabled = parse_enabled_formats()?;
     let warm_runs = if scale == BenchScale::Quick { 5 } else { 10 };
@@ -348,17 +348,68 @@ async fn run_suite() -> BenchResult<()> {
     write_rows.extend(w4_tiny);
 
     let mut query_rows = Vec::new();
-    query_rows.extend(run_all_queries(&w1, true, &enabled, warm_runs, &vortex_session).await?);
-    query_rows.extend(run_all_queries(&w2, true, &enabled, warm_runs, &vortex_session).await?);
-    query_rows.extend(run_all_queries(&w3_sp, false, &enabled, warm_runs, &vortex_session).await?);
-    query_rows.extend(run_all_queries(&w3_sc, false, &enabled, warm_runs, &vortex_session).await?);
-    query_rows.extend(run_all_queries(&w4, true, &enabled, warm_runs, &vortex_session).await?);
+    query_rows.extend(
+        run_all_queries(
+            &w1,
+            true,
+            &enabled,
+            warm_runs,
+            &vortex_session,
+            read_threads,
+        )
+        .await?,
+    );
+    query_rows.extend(
+        run_all_queries(
+            &w2,
+            true,
+            &enabled,
+            warm_runs,
+            &vortex_session,
+            read_threads,
+        )
+        .await?,
+    );
+    query_rows.extend(
+        run_all_queries(
+            &w3_sp,
+            false,
+            &enabled,
+            warm_runs,
+            &vortex_session,
+            read_threads,
+        )
+        .await?,
+    );
+    query_rows.extend(
+        run_all_queries(
+            &w3_sc,
+            false,
+            &enabled,
+            warm_runs,
+            &vortex_session,
+            read_threads,
+        )
+        .await?,
+    );
+    query_rows.extend(
+        run_all_queries(
+            &w4,
+            true,
+            &enabled,
+            warm_runs,
+            &vortex_session,
+            read_threads,
+        )
+        .await?,
+    );
 
     let gates = evaluate_gates(&enabled, &write_rows, &query_rows);
     let md = render_markdown_report(
         scale.label(),
         &machine_summary(),
         write_threads,
+        read_threads,
         &enabled,
         &write_rows,
         &query_rows,

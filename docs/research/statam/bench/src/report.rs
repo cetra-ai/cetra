@@ -1,46 +1,47 @@
 use std::fmt::Write;
 
 #[derive(Debug, Clone)]
-pub(crate) struct WriteBenchRow {
-    pub(crate) workload: String,
-    pub(crate) format: String,
-    pub(crate) raw_bytes: u64,
-    pub(crate) stored_bytes: u64,
-    pub(crate) write_ms: f64,
-    pub(crate) write_mib_s: f64,
+pub struct WriteBenchRow {
+    pub workload: String,
+    pub format: String,
+    pub raw_bytes: u64,
+    pub stored_bytes: u64,
+    pub write_ms: f64,
+    pub write_mib_s: f64,
 }
 
 #[derive(Debug, Clone)]
-pub(crate) struct QueryBenchRow {
-    pub(crate) workload: String,
-    pub(crate) query: String,
-    pub(crate) format: String,
-    pub(crate) rows_matched: usize,
-    pub(crate) local_ms: f64,
-    pub(crate) local_p95_ms: f64,
-    pub(crate) s3_ms: f64,
-    pub(crate) s3_gets: u64,
-    pub(crate) s3_bytes: u64,
-    pub(crate) cold_open_gets: Option<u64>,
-    pub(crate) cold_open_tail_bytes: Option<u64>,
+pub struct QueryBenchRow {
+    pub workload: String,
+    pub query: String,
+    pub format: String,
+    pub rows_matched: usize,
+    pub local_ms: f64,
+    pub local_p95_ms: f64,
+    pub s3_ms: f64,
+    pub s3_gets: u64,
+    pub s3_bytes: u64,
+    pub cold_open_gets: Option<u64>,
+    pub cold_open_tail_bytes: Option<u64>,
 }
 
 #[derive(Debug, Clone)]
-pub(crate) struct GateCheck {
-    pub(crate) id: u8,
-    pub(crate) name: &'static str,
-    pub(crate) passed: bool,
-    pub(crate) detail: String,
+pub struct GateCheck {
+    pub id: u8,
+    pub name: &'static str,
+    pub passed: bool,
+    pub detail: String,
 }
 
-pub(crate) fn format_kib(bytes: u64) -> String {
+pub fn format_kib(bytes: u64) -> String {
     format!("{:.1}", bytes as f64 / 1024.0)
 }
 
-pub(crate) fn render_markdown_report(
+pub fn render_markdown_report(
     scale: &str,
     machine_info: &str,
     statam_write_threads: usize,
+    statam_read_threads: usize,
     enabled_formats: &[&str],
     write_rows: &[WriteBenchRow],
     query_rows: &[QueryBenchRow],
@@ -53,6 +54,7 @@ pub(crate) fn render_markdown_report(
     );
     let _ = writeln!(out, "\n- **Host:** {machine_info}");
     let _ = writeln!(out, "- **Statam Write Threads:** `{statam_write_threads}`");
+    let _ = writeln!(out, "- **Statam Read Threads:** `{statam_read_threads}`");
     let _ = writeln!(out, "- **Formats:** `{}`", enabled_formats.join("`, `"));
     let _ = writeln!(
         out,

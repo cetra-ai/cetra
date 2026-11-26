@@ -21,15 +21,15 @@ use crate::queries::agg_pq_filtered_batch;
 use crate::schema::{BenchResult, TableKindBench, arrow_spans_schema};
 use crate::workloads::{ABSENT_NEEDLE, DAY_START, HOUR_NS, RARE_NEEDLE};
 
-pub(crate) struct RangeObjectStore<R: RangeReader + 'static> {
+pub struct RangeObjectStore<R: RangeReader + 'static> {
     files: HashMap<ObjectPath, Arc<R>>,
 }
 
-pub(crate) type SliceObjectStore = RangeObjectStore<SliceReader>;
-pub(crate) type SimS3ObjectStore = RangeObjectStore<SimulatedS3Reader>;
+pub type SliceObjectStore = RangeObjectStore<SliceReader>;
+pub type SimS3ObjectStore = RangeObjectStore<SimulatedS3Reader>;
 
 impl<R: RangeReader + 'static> RangeObjectStore<R> {
-    pub(crate) fn new(files: HashMap<ObjectPath, Arc<R>>) -> Self {
+    pub fn new(files: HashMap<ObjectPath, Arc<R>>) -> Self {
         Self { files }
     }
 }
@@ -178,7 +178,7 @@ impl<R: RangeReader + 'static> ObjectStore for RangeObjectStore<R> {
     }
 }
 
-pub(crate) fn write_strata_files(
+pub fn write_strata_files(
     table: TableKindBench,
     batches: &[RecordBatch],
 ) -> BenchResult<(Vec<Bytes>, f64)> {
@@ -209,7 +209,7 @@ fn object_paths(count: usize) -> BenchResult<Vec<ObjectPath>> {
     Ok(paths)
 }
 
-pub(crate) async fn open_strata_local(files: &[Bytes]) -> BenchResult<Vec<Arc<StrataFile>>> {
+pub async fn open_strata_local(files: &[Bytes]) -> BenchResult<Vec<Arc<StrataFile>>> {
     let paths = object_paths(files.len())?;
     let mut map = HashMap::with_capacity(files.len());
     for (p, b) in paths.iter().zip(files) {
@@ -225,7 +225,7 @@ pub(crate) async fn open_strata_local(files: &[Bytes]) -> BenchResult<Vec<Arc<St
     Ok(opened)
 }
 
-pub(crate) async fn run_strata_query_s3(
+pub async fn run_strata_query_s3(
     files: &[Bytes],
     s3_cfg: SimulatedS3Config,
     table: TableKindBench,
@@ -260,7 +260,7 @@ pub(crate) async fn run_strata_query_s3(
     Ok((matched, gets, bytes, s3_ms))
 }
 
-pub(crate) async fn run_strata_query(
+pub async fn run_strata_query(
     files: &[Arc<StrataFile>],
     table: TableKindBench,
     qname: &str,
@@ -281,11 +281,7 @@ pub(crate) async fn run_strata_query(
             TableKindBench::Scores => {
                 let req = make_scan_req(
                     vec![],
-                    Some(Predicate::Cmp(
-                        3,
-                        CmpOp::Eq,
-                        Lit::Bytes(absent.to_vec()),
-                    )),
+                    Some(Predicate::Cmp(3, CmpOp::Eq, Lit::Bytes(absent.to_vec()))),
                     ScanKind::Point,
                 );
                 collect_row_count(files, &req).await
@@ -419,7 +415,11 @@ pub(crate) async fn run_strata_query(
     }
 }
 
-fn make_scan_req(projection: Vec<usize>, predicate: Option<Predicate>, kind: ScanKind) -> ScanRequest {
+pub fn make_scan_req(
+    projection: Vec<usize>,
+    predicate: Option<Predicate>,
+    kind: ScanKind,
+) -> ScanRequest {
     ScanRequest {
         projection,
         predicate,
@@ -432,7 +432,7 @@ fn make_scan_req(projection: Vec<usize>, predicate: Option<Predicate>, kind: Sca
     }
 }
 
-async fn collect_row_count(files: &[Arc<StrataFile>], req: &ScanRequest) -> BenchResult<usize> {
+pub async fn collect_row_count(files: &[Arc<StrataFile>], req: &ScanRequest) -> BenchResult<usize> {
     let mut total = 0usize;
     for f in files {
         let batches = f.scan(req).await?;

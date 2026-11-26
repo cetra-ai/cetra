@@ -24,16 +24,16 @@ use crate::schema::BenchResult;
 /// Wraps [`SimulatedS3Reader`] for [`parquet::file::reader::ChunkReader`], ensuring Parquet
 /// footer/index/bloom/page reads go through the exact same 1 MiB `ReadCache` and S3 cost model.
 #[derive(Clone)]
-pub(crate) struct SimS3ChunkReader {
+pub struct SimS3ChunkReader {
     inner: Arc<SimulatedS3Reader>,
 }
 
 impl SimS3ChunkReader {
-    pub(crate) fn new(inner: Arc<SimulatedS3Reader>) -> Self {
+    pub fn new(inner: Arc<SimulatedS3Reader>) -> Self {
         Self { inner }
     }
 
-    pub(crate) fn s3(&self) -> &SimulatedS3Reader {
+    pub fn s3(&self) -> &SimulatedS3Reader {
         &self.inner
     }
 }
@@ -44,7 +44,7 @@ impl Length for SimS3ChunkReader {
     }
 }
 
-pub(crate) struct SimS3Read {
+pub struct SimS3Read {
     inner: Arc<SimulatedS3Reader>,
     pos: u64,
     file_len: u64,
@@ -110,13 +110,13 @@ impl ChunkReader for SimS3ChunkReader {
 }
 
 #[derive(Clone)]
-pub(crate) enum PqFilter {
+pub enum PqFilter {
     EqBytes { col: String, val: Vec<u8> },
     EqStr { col: String, val: String },
     I64Between { col: String, lo: i64, hi: i64 },
 }
 
-pub(crate) fn open_parquet_builder(
+pub fn open_parquet_builder(
     reader: &SimS3ChunkReader,
     with_page_index: bool,
 ) -> BenchResult<ParquetRecordBatchReaderBuilder<SimS3ChunkReader>> {
@@ -131,7 +131,7 @@ pub(crate) fn open_parquet_builder(
     )?)
 }
 
-fn find_leaf_idx(descr: &SchemaDescriptor, name: &str) -> Option<usize> {
+pub fn find_leaf_idx(descr: &SchemaDescriptor, name: &str) -> Option<usize> {
     descr
         .columns()
         .iter()
@@ -310,7 +310,7 @@ fn intersect_ranges(a: &[Range<usize>], b: &[Range<usize>]) -> Vec<Range<usize>>
 }
 
 /// Checks RG min/max + SBBF bloom filters and returns surviving `(rg_idx, kept_ranges)`.
-pub(crate) fn prune_parquet_rgs_and_pages(
+pub fn prune_parquet_rgs_and_pages(
     reader: &SimS3ChunkReader,
     meta: &ParquetMetaData,
     filters: &[PqFilter],
@@ -350,7 +350,7 @@ pub(crate) fn prune_parquet_rgs_and_pages(
     Ok(surviving)
 }
 
-pub(crate) fn execute_parquet_scan(
+pub fn execute_parquet_scan(
     reader: &SimS3ChunkReader,
     with_page_index: bool,
     proj_roots: &[usize],

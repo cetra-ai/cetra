@@ -185,4 +185,67 @@ Added opt-in `WriteOptions::write_threads` and `PackWriteOptions::write_threads`
 | `W4_1row_avg` | `statam_l0` | 3.9 | **0.07** | **0.08** | **0.08** | 0 regression | **12.8× faster** | **4.0× faster** |
 | `W4_1row_avg` | `statam_l1` | 4.4 | **0.12** | **0.12** | **0.12** | 0 regression | **8.5× faster** | **2.7× faster** |
 
-**Stage 3 Status:** `crates/storage`, `crates/core`, `crates/column`, and `crates/query` remain **completely untouched** per the Stage 2/Stage 3 gate. Ready for user sign-off on Stage 3 (`cetra-storage` integration).
+---
+
+## 8. Pass 8 — Sparse `PayloadRefs` Decode + Parallel Reads (`read_threads`) + `take_rows`
+
+Added zero-wire-change sparse `PayloadRefs` decoding (`decode_payload_refs_selected` with 32-slot ring buffer + non-null ordinal `480`-row lookback window, zero heap allocation for skipped rows), streamlined chunk resolution, `ScanRequest::read_threads` (parallel `.stpk` frame substring scan + parallel Phase-2 column decode), and `StatamReader::take_rows` (`101` unit tests + `2` `fuzz_replay` tests passing, 7th `inherit` cold review completed with all blocker/majors/minors fixed).
+
+| Workload / Query | Format | Pass 6b (`1R`) | Pass 8 (`1R`) | Pass 8 (`8R`) | Speedup vs Pass 6b | vs Competitors |
+|---|---|---:|---:|---:|---:|---|
+| `W1` `point_lookup_full` | `statam_l1` | 18.98 ms | **12.52 ms** | **8.28 ms** | **2.29×** | Beats **Vortex** (`9.83 ms`), **77×** faster than `pq_cetra` |
+| `W1` `point_lookup_full` | `statam_l0` | 14.08 ms | **9.14 ms** | **6.83 ms** | **2.06×** | Beats **Vortex** (`9.83 ms`) even on `1R` |
+| `W2` `point_lookup_full` | `statam_l1` | 6.92 ms | **4.43 ms** | **3.64 ms** | **1.90×** | **4.7×** faster than Vortex, **19×** faster than `pq_cetra` |
+| `W2` `point_lookup_full` | `statam_l0` | 3.69 ms | **2.08 ms** | **1.68 ms** | **2.20×** | Near Strata (`1.49 ms`) |
+| `W3_spans` `point_lookup_full` | `statam_l1` | 5.19 ms | 7.24 ms | **1.44 ms** | **3.60×** | **5.9×** faster than Vortex (`8.51 ms`), **111×** faster than `pq_cetra` |
+| `W3_spans` `point_lookup_narrow` | `statam_l1` | 1.16 ms | 1.16 ms | **0.53 ms** | **2.19×** | **4.3×** faster than Vortex, **40×** faster than `pq_cetra` |
+| `W3_spans` `top_k_list` | `statam_l1` | 10.98 ms | 10.49 ms | **5.41 ms** | **2.03×** | **3.1×** faster than Vortex, **4.6×** faster than `pq_cetra` |
+| `W3_scores` `point_lookup_narrow` | `statam_l1` | 1.63 ms | 1.52 ms | **0.89 ms** | **1.82×** | **#1 of all 7 formats** (beats Vortex `1.12 ms`) |
+| `W4` `point_lookup_full` | `statam_l1` / `l0` | 5.31 / 4.01 ms | — | **1.86 / 1.08 ms** | **2.85× / 3.72×** | `l0` beats Strata (`1.80 ms`), **#1 of 7** |
+| `W4` `substring_rare` / `absent` | `statam_l1` | 17.77 / 17.38 ms | — | **4.60 / 4.26 ms** | **3.86× / 4.08×** | **8.3×–9.0×** faster than `pq_cetra` & Vortex |
+
+---
+
+## 9. External Industry Benchmarks (Parquet & Vortex Suites, `precision-5770-vm`)
+
+Benchmarked via `docs/research/statam/bench/src/bin/{external_bench,peak_mem_bench}.rs` across **100% row-count parity** on all enabled formats (`pq_default`, `pq_tuned`, `vortex 0.95.0`, `strata` PR #158, `statam_l0`, `statam_l1`).
+
+### 9.1 Storage Size & Write Speed (Statam `8W`)
+
+| Suite | `pq_default` | `pq_tuned` | `vortex` | `strata` *(20T)* | `statam_l0` *(8T)* | `statam_l1` *(8T)* |
+|---|---:|---:|---:|---:|---:|---:|
+| **ClickBench `hits_1.parquet` (`100k × 105`)** | 8,960 KiB · 273 ms | 9,253 KiB · 351 ms | **7,128 KiB** · 106 ms | 9,149 KiB · 892 ms | 13,966 KiB · **62.7 ms** | 8,033 KiB (-10.4% vs pq) · 305 ms |
+| **Parquet Row-Filter (`100k × 10`)** | 1,259 KiB · 31.1 ms | 1,360 KiB · 32.6 ms | **894 KiB** · 19.3 ms | 1,085 KiB · 74.6 ms | 1,690 KiB · **8.01 ms** | 1,032 KiB (-18.0% vs pq) · 8.18 ms |
+| **Vortex Random-Access (`250k × 12`)** | 12,893 KiB · 214 ms | 14,519 KiB · 252 ms | 9,912 KiB · 65.1 ms | 10,608 KiB · 581 ms | 17,935 KiB · **42.0 ms** | **9,447 KiB (#1 of 6!)** · 191 ms |
+
+### 9.2 Query Highlights (Local Warm CPU & Simulated S3)
+
+| Suite / Query | Matched | `pq_default` | `pq_tuned` | `vortex` | `strata` | `statam_l1 (1R)` | `statam_l1 (8R)` | S3 Winner |
+|---|---:|---:|---:|---:|---:|---:|---:|---|
+| `ClickBench` `CB_Q1` (`AdvEngineID <> 0`) | 43 | 0.343 ms | 0.370 ms | 0.216 ms | 0.701 ms | 0.017 ms | **0.009 ms** | `statam_l0` (`66.4 ms`, 2 GETs) |
+| `ClickBench` `CB_Q10` (`MobilePhoneModel <> ''`) | 1,995 | 0.977 ms | 1.104 ms | 0.897 ms | 1.196 ms | 0.398 ms | **0.170 ms** (`l0` 0.058) | `pq_default` / `statam_l1` (`103 ms`, 3 GETs) |
+| `ClickBench` `CB_Q12` (`SearchPhrase <> ''`) | 1,081 | 1.189 ms | 1.332 ms | 1.058 ms | 1.308 ms | 0.578 ms | **0.282 ms** (`l0` 0.138) | `pq_default` / `statam_l1` (`103 ms`, 3 GETs) |
+| `ClickBench` `CB_Q20` (`UserID = X`, 4 cols) | 6 | 3.124 ms | 1.737 ms | 3.406 ms | **0.163 ms** | 1.897 ms | 1.170 ms | **`statam_l1` (`78.4 ms`, 2 GETs)** |
+| `ClickBench` `CB_Q23_like` (`Title LIKE '%Google%'`) | 3 | 8.062 ms | 8.469 ms | 8.945 ms | **4.053 ms** | 13.240 ms | 13.270 ms | `strata` (`109 ms`) / `statam_l1` (`113 ms`, 3.9 MiB) |
+| `ClickBench` `CB_Q24` (`URL <> ''`, 100k rows) | 100,000 | 15.218 ms | 15.888 ms | 2.427 ms | **1.746 ms** | 39.804 ms *(FSST)* | 39.494 ms (`l0` 6.84) | **`statam_l1` (`78.4 ms`, 2 GETs)** |
+| `ClickBench` `CB_Q39_range` (`CounterID + EventTime`) | 25,002 | 3.566 ms | 3.868 ms | 1.974 ms | 1.942 ms | 0.478 ms | **0.467 ms** (`l0` 0.399) | `pq_default` (`67.5 ms`) / `statam_l1` (`78.4 ms`) |
+| `ClickBench` `CB_wide_point` (**all 105 cols**) | 6 | 10.705 ms | 6.477 ms | 13.548 ms | **1.574 ms** | 7.628 ms | 1.691 ms (`l0` 1.597) | **`statam_l1` (`128.4 ms`, 2 GETs)** |
+| `RowFilter` `RF_pt_0_001pct` | 1 | 2.194 ms | 0.630 ms | 0.989 ms | **0.154 ms** | 0.649 ms | 0.387 ms (`l0` 0.192) | `vortex` / `statam_l1` (`35.1 ms`, 1 GET) |
+| `RowFilter` `RF_sel_1pct_unclustered` | 1,000 | 3.014 ms | 3.461 ms | 2.094 ms | 1.951 ms | 2.109 ms | **1.277 ms** (`l0` 0.662) | `vortex` / `statam_l1` (`35.1 ms`, 1 GET) |
+| `RowFilter` `RF_mod_10pct_unclustered` | 10,000 | 4.273 ms | 4.689 ms | 2.499 ms | 2.341 ms | 2.237 ms | **1.407 ms** (`l0` 0.962) | `vortex` / `statam_l1` (`35.1 ms`, 1 GET) |
+| `RowFilter` `RF_unsel_99pct_unclustered` | 99,000 | 4.819 ms | 5.519 ms | 2.370 ms | 1.888 ms | 2.164 ms | **1.263 ms** (`l0` 0.710) | `vortex` / `statam_l1` (`35.1 ms`, 1 GET) |
+| `RandomAccess` `RA_take_100` *(scattered)* | 100 | 41.076 ms | 38.919 ms | 23.769 ms | N/A | **22.020 ms** | **8.077 ms** | **`statam_l1` (`192.3 ms`, 4 GETs)** vs Vortex `321.8 ms` (9 GETs) |
+| `RandomAccess` `RA_take_1000` *(scattered)* | 1,000 | 43.164 ms | 47.564 ms | 26.580 ms | N/A | **22.458 ms** | **8.090 ms** | **`statam_l1` (`192.3 ms`, 4 GETs)** vs Vortex `321.8 ms` (9 GETs) |
+
+### 9.3 Process-Wide Peak Memory (`TrackingAllocator`, Peak Delta MiB / Total Alloc MiB)
+
+| Workload / Op | `pq_cetra` | `vortex` | `strata` *(20T)* | `statam_l0 (1T / 8T)` | `statam_l1 (1T / 8T)` |
+|---|---:|---:|---:|---:|---:|
+| **`W1_agents` Write** *(858 MiB raw)* | **37.5** / 5,969 | 975.7 / 41,698 | 927.9 / 1,157 | 115.0 / 1,142 · 115.0 / 3,558 | **64.5 / 342** · **77.0 / 344** |
+| **`W1_agents` Point Lookup** *(110 rows, 56 cols)* | 1,321.8 / 3,446 | 18.5 / 25.0 | **6.8 / 9.3** | 22.9 / 47.6 | **17.6 / 38.0** *(75× less than pq)* |
+| **`W1_agents` Substring Rare** *(12 hits / 858 MiB)* | 1,269.4 / 3,343 | 507.4 / 841.2 | **7.0 / 14.2** | 1,650.3 / 1,652 | **22.0 / 45.3** *(58× less than pq, 23× less than Vortex)* |
+| **`W1_agents` Full Scan** *(52 analytics cols)* | 32.9 / 67.9 | 14.2 / 39.3 | 33.3 / 68.0 | **14.1 / 23.7** | **14.3 / 31.4** |
+| **`W3_spans` Write** *(250k × 55)* | **32.7** / 756 | 113.8 / 2,526 | 71.9 / 863 | 146.1 / 751 · 143.9 / 817 | 97.6 / **639** · 103.5 / **653** |
+| **`W3_spans` Point Lookup** *(4 rows, 56 cols)* | 194.1 / 380.6 | 7.2 / 14.2 | **0.95 / 1.8** | 8.8 / 20.3 | **7.7 / 17.4** *(25× less than pq)* |
+
+**Stage 3 Status:** `crates/storage`, `crates/core`, `crates/column`, and `crates/query` remain **completely untouched** per the Stage 2/Stage 3 gate. Awaiting explicit user go-ahead for Stage 3 (`cetra-storage` integration).

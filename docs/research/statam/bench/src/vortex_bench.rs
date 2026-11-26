@@ -43,12 +43,12 @@ use crate::queries::{contains_ascii_ci, push_topk};
 use crate::schema::{BenchResult, TableKindBench};
 use crate::workloads::{ABSENT_NEEDLE, DAY_START, HOUR_NS, RARE_NEEDLE};
 
-pub(crate) struct SimS3VortexRead {
+pub struct SimS3VortexRead {
     reader: Arc<dyn RangeReader>,
 }
 
 impl SimS3VortexRead {
-    pub(crate) fn new(reader: Arc<dyn RangeReader>) -> Self {
+    pub fn new(reader: Arc<dyn RangeReader>) -> Self {
         Self { reader }
     }
 }
@@ -85,11 +85,11 @@ impl VortexReadAt for SimS3VortexRead {
     }
 }
 
-pub(crate) fn new_vortex_session() -> VortexSession {
+pub fn new_vortex_session() -> VortexSession {
     VortexSession::default().with_tokio()
 }
 
-pub(crate) fn arrow59_to_arrow60(batch59: &RecordBatch59) -> BenchResult<RecordBatch60> {
+pub fn arrow59_to_arrow60(batch59: &RecordBatch59) -> BenchResult<RecordBatch60> {
     let mut ipc_buf = Vec::new();
     {
         let mut writer =
@@ -198,7 +198,7 @@ fn replace_maps_with_lists(batch: &RecordBatch60) -> BenchResult<RecordBatch60> 
     )?)
 }
 
-pub(crate) fn vortex_compatible_batch(
+pub fn vortex_compatible_batch(
     session: &VortexSession,
     batch: &RecordBatch60,
 ) -> BenchResult<RecordBatch60> {
@@ -232,19 +232,25 @@ pub(crate) fn vortex_compatible_batch(
     }
 }
 
-pub(crate) async fn write_vortex_files(
+pub fn prepare_vortex_batches(
     session: &VortexSession,
     batches59: &[RecordBatch59],
-) -> BenchResult<(Vec<Bytes>, f64)> {
+) -> BenchResult<Vec<RecordBatch60>> {
     let mut prepared = Vec::with_capacity(batches59.len());
     for b59 in batches59 {
         let b60 = arrow59_to_arrow60(b59)?;
         prepared.push(vortex_compatible_batch(session, &b60)?);
     }
+    Ok(prepared)
+}
 
+pub async fn write_vortex_prepared(
+    session: &VortexSession,
+    prepared: &[RecordBatch60],
+) -> BenchResult<(Vec<Bytes>, f64)> {
     let t0 = Instant::now();
     let mut out = Vec::with_capacity(prepared.len());
-    for b60 in &prepared {
+    for b60 in prepared {
         let schema = b60.schema();
         let dtype = session.arrow().from_arrow_schema(schema.as_ref())?;
         let mut chunks = Vec::new();
@@ -270,7 +276,15 @@ pub(crate) async fn write_vortex_files(
     Ok((out, t0.elapsed().as_secs_f64() * 1000.0))
 }
 
-pub(crate) async fn open_vortex_local(
+pub async fn write_vortex_files(
+    session: &VortexSession,
+    batches59: &[RecordBatch59],
+) -> BenchResult<(Vec<Bytes>, f64)> {
+    let prepared = prepare_vortex_batches(session, batches59)?;
+    write_vortex_prepared(session, &prepared).await
+}
+
+pub async fn open_vortex_local(
     session: &VortexSession,
     files: &[Bytes],
 ) -> BenchResult<Vec<VortexFile>> {
@@ -285,7 +299,7 @@ pub(crate) async fn open_vortex_local(
     Ok(opened)
 }
 
-pub(crate) async fn run_vortex_query_s3(
+pub async fn run_vortex_query_s3(
     session: &VortexSession,
     files: &[Bytes],
     s3_cfg: SimulatedS3Config,
@@ -332,7 +346,7 @@ fn binary_scalar(bytes: &[u8]) -> Scalar {
     Scalar::binary(ByteBuffer::copy_from(bytes), Nullability::NonNullable)
 }
 
-fn chunk_to_record_batch(
+pub fn chunk_to_record_batch(
     session: &VortexSession,
     chunk: vortex::array::ArrayRef,
 ) -> BenchResult<RecordBatch60> {
@@ -341,7 +355,7 @@ fn chunk_to_record_batch(
     Ok(RecordBatch60::from(arrow.as_struct().clone()))
 }
 
-fn str_value_at<'a>(arr: &'a dyn Array60, idx: usize) -> Option<&'a str> {
+pub fn str_value_at<'a>(arr: &'a dyn Array60, idx: usize) -> Option<&'a str> {
     if arr.is_null(idx) {
         return None;
     }
@@ -354,7 +368,7 @@ fn str_value_at<'a>(arr: &'a dyn Array60, idx: usize) -> Option<&'a str> {
     }
 }
 
-pub(crate) async fn run_vortex_query(
+pub async fn run_vortex_query(
     session: &VortexSession,
     files: &[VortexFile],
     table: TableKindBench,

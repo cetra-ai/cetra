@@ -15,12 +15,12 @@ use crate::schema::{
     BenchResult, ScoreRow, SpanEventRow, SpanLinkRow, SpanRow, sort_scores, sort_spans,
 };
 
-pub(crate) const NS: i64 = 1_000_000_000;
-pub(crate) const DAY_START: i64 = 1_772_409_600 * NS; // 2026-03-02T00:00:00Z
-pub(crate) const HOUR_NS: i64 = 3_600 * NS;
-pub(crate) const DAY_NS: i64 = 24 * HOUR_NS;
-pub(crate) const RARE_NEEDLE: &str = "zqxj_rare_needle";
-pub(crate) const ABSENT_NEEDLE: &str = "never_present_xyz987";
+pub const NS: i64 = 1_000_000_000;
+pub const DAY_START: i64 = 1_772_409_600 * NS; // 2026-03-02T00:00:00Z
+pub const HOUR_NS: i64 = 3_600 * NS;
+pub const DAY_NS: i64 = 24 * HOUR_NS;
+pub const RARE_NEEDLE: &str = "zqxj_rare_needle";
+pub const ABSENT_NEEDLE: &str = "never_present_xyz987";
 
 const PROJECT_ID: &str = "018f6b4e-7c1a-7c1a-8c1a-000000000001";
 
@@ -56,20 +56,20 @@ const TAGS: [&str; 8] = [
 ];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum BenchScale {
+pub enum BenchScale {
     Quick,
     Full,
 }
 
 impl BenchScale {
-    pub(crate) fn from_env() -> Self {
+    pub fn from_env() -> Self {
         match std::env::var("STATAM_BENCH_SCALE").as_deref() {
             Ok("quick") | Ok("QUICK") => Self::Quick,
             _ => Self::Full,
         }
     }
 
-    pub(crate) fn label(self) -> &'static str {
+    pub fn label(self) -> &'static str {
         match self {
             Self::Quick => "quick",
             Self::Full => "full",
@@ -77,16 +77,16 @@ impl BenchScale {
     }
 }
 
-pub(crate) struct WorkloadData {
-    pub(crate) w1_spans: Vec<SpanRow>,
-    pub(crate) w2_slices: Vec<Vec<SpanRow>>,
-    pub(crate) w3_spans: Vec<SpanRow>,
-    pub(crate) w3_scores: Vec<ScoreRow>,
-    pub(crate) w4_spans: Vec<SpanRow>,
-    pub(crate) w4_tiny_flushes: Vec<Vec<SpanRow>>,
+pub struct WorkloadData {
+    pub w1_spans: Vec<SpanRow>,
+    pub w2_slices: Vec<Vec<SpanRow>>,
+    pub w3_spans: Vec<SpanRow>,
+    pub w3_scores: Vec<ScoreRow>,
+    pub w4_spans: Vec<SpanRow>,
+    pub w4_tiny_flushes: Vec<Vec<SpanRow>>,
 }
 
-pub(crate) fn generate_all_workloads(scale: BenchScale) -> BenchResult<WorkloadData> {
+pub fn generate_all_workloads(scale: BenchScale) -> BenchResult<WorkloadData> {
     let (w1_target, w2_per_slice, w3_spans_n, w3_scores_n, w4_n) = match scale {
         BenchScale::Quick => (1_800usize, 450usize, 25_000usize, 12_000usize, 1_500usize),
         BenchScale::Full => (
@@ -285,7 +285,7 @@ fn pseudo_code_diff(rng: &mut SmallRng, lines: usize) -> String {
     out
 }
 
-fn plant_rare_needle(rows: &mut [SpanRow], count: usize) {
+pub fn plant_rare_needle(rows: &mut [SpanRow], count: usize) {
     if rows.is_empty() {
         return;
     }
@@ -454,7 +454,7 @@ fn generate_w1_agent_trajectories(target_rows: usize) -> Vec<SpanRow> {
     rows
 }
 
-fn load_swe_trajectories(dir: &Path, target_rows: usize) -> BenchResult<Vec<SpanRow>> {
+pub fn load_swe_trajectories(dir: &Path, target_rows: usize) -> BenchResult<Vec<SpanRow>> {
     let mut paths: Vec<_> = std::fs::read_dir(dir)?
         .filter_map(|e| e.ok().map(|e| e.path()))
         .filter(|p| p.extension().and_then(|e| e.to_str()) == Some("parquet"))
@@ -785,7 +785,7 @@ fn load_oasst2_slices(path: &Path, per_slice: usize) -> BenchResult<Vec<Vec<Span
     Ok(slices)
 }
 
-fn generate_w3_narrow_spans(count: usize) -> Vec<SpanRow> {
+pub fn generate_w3_narrow_spans(count: usize) -> Vec<SpanRow> {
     let mut rng = SmallRng::seed_from_u64(0x5733_0001);
     let mut rows: Vec<SpanRow> = Vec::with_capacity(count);
     for i in 0..count {

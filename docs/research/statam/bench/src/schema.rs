@@ -2,9 +2,10 @@ use std::collections::BTreeMap;
 use std::sync::{Arc, LazyLock};
 
 use arrow::array::{
-    ArrayRef, BooleanBuilder, FixedSizeBinaryBuilder, Float64Builder, Int64Builder, ListBuilder,
-    MapBuilder, RecordBatch, StringBuilder, StructBuilder, TimestampNanosecondBuilder,
-    UInt16Builder,
+    Array, ArrayRef, BinaryArray, BooleanArray, BooleanBuilder, FixedSizeBinaryBuilder,
+    Float64Array, Float64Builder, Int64Array, Int64Builder, ListBuilder, MapBuilder, RecordBatch,
+    StringArray, StringBuilder, StructBuilder, TimestampNanosecondBuilder, UInt16Builder,
+    UInt64Array,
 };
 use arrow::datatypes::{
     DataType as ArrowType, Field as ArrowField, Fields as ArrowFields, Schema as ArrowSchema,
@@ -21,9 +22,9 @@ use parquet::file::metadata::SortingColumn;
 use parquet::file::properties::{EnabledStatistics, WriterProperties, WriterVersion};
 use parquet::schema::types::{ColumnPath, SchemaDescriptor};
 
-pub(crate) type BenchResult<T> = Result<T, Box<dyn std::error::Error + Send + Sync>>;
+pub type BenchResult<T> = Result<T, Box<dyn std::error::Error + Send + Sync>>;
 
-pub(crate) const SPANS_DICTIONARY_COLUMNS: &[&str] = &[
+pub const SPANS_DICTIONARY_COLUMNS: &[&str] = &[
     "project_id",
     "span_kind",
     "status",
@@ -44,124 +45,124 @@ pub(crate) const SPANS_DICTIONARY_COLUMNS: &[&str] = &[
     "conventions",
 ];
 
-pub(crate) const SCORES_DICTIONARY_COLUMNS: &[&str] = &["target", "name", "data_type", "source"];
+pub const SCORES_DICTIONARY_COLUMNS: &[&str] = &["target", "name", "data_type", "source"];
 
-pub(crate) const SPANS_BLOOM_COLUMNS: &[&str] = &["trace_id", "session_id", "user_id"];
-pub(crate) const SCORES_BLOOM_COLUMNS: &[&str] = &["trace_id", "score_id"];
+pub const SPANS_BLOOM_COLUMNS: &[&str] = &["trace_id", "session_id", "user_id"];
+pub const SCORES_BLOOM_COLUMNS: &[&str] = &["trace_id", "score_id"];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum TableKindBench {
+pub enum TableKindBench {
     Spans,
     Scores,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum ParquetVariant {
+pub enum ParquetVariant {
     Default,
     Tuned,
     Cetra,
 }
 
 #[derive(Clone)]
-pub(crate) struct SpanEventRow {
-    pub(crate) time: i64,
-    pub(crate) name: String,
-    pub(crate) attributes: Option<String>,
+pub struct SpanEventRow {
+    pub time: i64,
+    pub name: String,
+    pub attributes: Option<String>,
 }
 
 #[derive(Clone)]
-pub(crate) struct SpanLinkRow {
-    pub(crate) trace_id: [u8; 16],
-    pub(crate) span_id: [u8; 8],
-    pub(crate) attributes: Option<String>,
+pub struct SpanLinkRow {
+    pub trace_id: [u8; 16],
+    pub span_id: [u8; 8],
+    pub attributes: Option<String>,
 }
 
 #[derive(Clone)]
-pub(crate) struct SpanRow {
-    pub(crate) project_id: String,
-    pub(crate) trace_id: [u8; 16],
-    pub(crate) span_id: [u8; 8],
-    pub(crate) parent_span_id: Option<[u8; 8]>,
-    pub(crate) name: String,
-    pub(crate) span_kind: String,
-    pub(crate) start_time: i64,
-    pub(crate) end_time: i64,
-    pub(crate) duration_ns: i64,
-    pub(crate) status: String,
-    pub(crate) status_message: Option<String>,
-    pub(crate) service_name: Option<String>,
-    pub(crate) session_id: Option<String>,
-    pub(crate) user_id: Option<String>,
-    pub(crate) environment: Option<String>,
-    pub(crate) release: Option<String>,
-    pub(crate) tags: Vec<String>,
-    pub(crate) metadata: BTreeMap<String, Option<String>>,
-    pub(crate) provider: Option<String>,
-    pub(crate) request_model: Option<String>,
-    pub(crate) response_model: Option<String>,
-    pub(crate) model: Option<String>,
-    pub(crate) prompt_name: Option<String>,
-    pub(crate) prompt_version: Option<i64>,
-    pub(crate) operation: Option<String>,
-    pub(crate) input_tokens: Option<i64>,
-    pub(crate) output_tokens: Option<i64>,
-    pub(crate) cache_read_tokens: Option<i64>,
-    pub(crate) cache_write_tokens: Option<i64>,
-    pub(crate) reasoning_tokens: Option<i64>,
-    pub(crate) total_tokens: Option<i64>,
-    pub(crate) cost_input: Option<f64>,
-    pub(crate) cost_output: Option<f64>,
-    pub(crate) cost_total: Option<f64>,
-    pub(crate) cost_source: Option<String>,
-    pub(crate) ttft_ns: Option<i64>,
-    pub(crate) request_params: Option<String>,
-    pub(crate) input: Option<String>,
-    pub(crate) input_format: Option<String>,
-    pub(crate) output: Option<String>,
-    pub(crate) output_format: Option<String>,
-    pub(crate) input_preview: Option<String>,
-    pub(crate) output_preview: Option<String>,
-    pub(crate) system_instructions: Option<String>,
-    pub(crate) tool_definitions: Option<String>,
-    pub(crate) attributes: BTreeMap<String, Option<String>>,
-    pub(crate) resource_attributes: BTreeMap<String, Option<String>>,
-    pub(crate) scope_name: Option<String>,
-    pub(crate) scope_version: Option<String>,
-    pub(crate) events: Vec<SpanEventRow>,
-    pub(crate) links: Vec<SpanLinkRow>,
-    pub(crate) media_refs: Vec<String>,
-    pub(crate) truncated: Vec<String>,
-    pub(crate) conventions: Vec<String>,
-    pub(crate) ingest_time: i64,
-    pub(crate) schema_version: u16,
+pub struct SpanRow {
+    pub project_id: String,
+    pub trace_id: [u8; 16],
+    pub span_id: [u8; 8],
+    pub parent_span_id: Option<[u8; 8]>,
+    pub name: String,
+    pub span_kind: String,
+    pub start_time: i64,
+    pub end_time: i64,
+    pub duration_ns: i64,
+    pub status: String,
+    pub status_message: Option<String>,
+    pub service_name: Option<String>,
+    pub session_id: Option<String>,
+    pub user_id: Option<String>,
+    pub environment: Option<String>,
+    pub release: Option<String>,
+    pub tags: Vec<String>,
+    pub metadata: BTreeMap<String, Option<String>>,
+    pub provider: Option<String>,
+    pub request_model: Option<String>,
+    pub response_model: Option<String>,
+    pub model: Option<String>,
+    pub prompt_name: Option<String>,
+    pub prompt_version: Option<i64>,
+    pub operation: Option<String>,
+    pub input_tokens: Option<i64>,
+    pub output_tokens: Option<i64>,
+    pub cache_read_tokens: Option<i64>,
+    pub cache_write_tokens: Option<i64>,
+    pub reasoning_tokens: Option<i64>,
+    pub total_tokens: Option<i64>,
+    pub cost_input: Option<f64>,
+    pub cost_output: Option<f64>,
+    pub cost_total: Option<f64>,
+    pub cost_source: Option<String>,
+    pub ttft_ns: Option<i64>,
+    pub request_params: Option<String>,
+    pub input: Option<String>,
+    pub input_format: Option<String>,
+    pub output: Option<String>,
+    pub output_format: Option<String>,
+    pub input_preview: Option<String>,
+    pub output_preview: Option<String>,
+    pub system_instructions: Option<String>,
+    pub tool_definitions: Option<String>,
+    pub attributes: BTreeMap<String, Option<String>>,
+    pub resource_attributes: BTreeMap<String, Option<String>>,
+    pub scope_name: Option<String>,
+    pub scope_version: Option<String>,
+    pub events: Vec<SpanEventRow>,
+    pub links: Vec<SpanLinkRow>,
+    pub media_refs: Vec<String>,
+    pub truncated: Vec<String>,
+    pub conventions: Vec<String>,
+    pub ingest_time: i64,
+    pub schema_version: u16,
 }
 
 #[derive(Clone)]
-pub(crate) struct ScoreRow {
-    pub(crate) project_id: String,
-    pub(crate) score_id: String,
-    pub(crate) target: String,
-    pub(crate) trace_id: Option<[u8; 16]>,
-    pub(crate) span_id: Option<[u8; 8]>,
-    pub(crate) session_id: Option<String>,
-    pub(crate) user_id: Option<String>,
-    pub(crate) name: String,
-    pub(crate) data_type: String,
-    pub(crate) value_num: Option<f64>,
-    pub(crate) value_str: Option<String>,
-    pub(crate) reason: Option<String>,
-    pub(crate) source: String,
-    pub(crate) evaluator_id: Option<String>,
-    pub(crate) rule_id: Option<String>,
-    pub(crate) experiment_id: Option<String>,
-    pub(crate) dataset_item_id: Option<String>,
-    pub(crate) queue_id: Option<String>,
-    pub(crate) author_user_id: Option<String>,
-    pub(crate) metadata: BTreeMap<String, Option<String>>,
-    pub(crate) created_at: i64,
-    pub(crate) updated_at: i64,
-    pub(crate) deleted: bool,
-    pub(crate) ingest_time: i64,
+pub struct ScoreRow {
+    pub project_id: String,
+    pub score_id: String,
+    pub target: String,
+    pub trace_id: Option<[u8; 16]>,
+    pub span_id: Option<[u8; 8]>,
+    pub session_id: Option<String>,
+    pub user_id: Option<String>,
+    pub name: String,
+    pub data_type: String,
+    pub value_num: Option<f64>,
+    pub value_str: Option<String>,
+    pub reason: Option<String>,
+    pub source: String,
+    pub evaluator_id: Option<String>,
+    pub rule_id: Option<String>,
+    pub experiment_id: Option<String>,
+    pub dataset_item_id: Option<String>,
+    pub queue_id: Option<String>,
+    pub author_user_id: Option<String>,
+    pub metadata: BTreeMap<String, Option<String>>,
+    pub created_at: i64,
+    pub updated_at: i64,
+    pub deleted: bool,
+    pub ingest_time: i64,
 }
 
 fn arrow_ts() -> ArrowType {
@@ -397,23 +398,23 @@ static COL_SCORES_SCHEMA: LazyLock<Arc<ColSchema>> = LazyLock::new(|| {
     .unwrap_or_else(|e| panic!("invalid scores col schema: {e}"))
 });
 
-pub(crate) fn arrow_spans_schema() -> SchemaRef {
+pub fn arrow_spans_schema() -> SchemaRef {
     Arc::clone(&ARROW_SPANS_SCHEMA)
 }
 
-pub(crate) fn arrow_scores_schema() -> SchemaRef {
+pub fn arrow_scores_schema() -> SchemaRef {
     Arc::clone(&ARROW_SCORES_SCHEMA)
 }
 
-pub(crate) fn col_spans_schema() -> Arc<ColSchema> {
+pub fn col_spans_schema() -> Arc<ColSchema> {
     Arc::clone(&COL_SPANS_SCHEMA)
 }
 
-pub(crate) fn col_scores_schema() -> Arc<ColSchema> {
+pub fn col_scores_schema() -> Arc<ColSchema> {
     Arc::clone(&COL_SCORES_SCHEMA)
 }
 
-pub(crate) fn sort_spans(rows: &mut [SpanRow]) {
+pub fn sort_spans(rows: &mut [SpanRow]) {
     rows.sort_by(|a, b| {
         a.trace_id
             .cmp(&b.trace_id)
@@ -421,11 +422,11 @@ pub(crate) fn sort_spans(rows: &mut [SpanRow]) {
     });
 }
 
-pub(crate) fn sort_scores(rows: &mut [ScoreRow]) {
+pub fn sort_scores(rows: &mut [ScoreRow]) {
     rows.sort_by_key(|r| r.created_at);
 }
 
-pub(crate) fn parquet_writer_props(
+pub fn parquet_writer_props(
     variant: ParquetVariant,
     table: TableKindBench,
     schema: &ArrowSchema,
@@ -553,7 +554,280 @@ fn find_leaf_path(descriptor: &SchemaDescriptor, name: &str) -> Option<ColumnPat
     find_leaf_index(descriptor, name).map(|i| descriptor.columns()[i as usize].path().clone())
 }
 
-pub(crate) fn spans_to_arrow(rows: &[SpanRow]) -> BenchResult<RecordBatch> {
+pub fn generic_parquet_writer_props(
+    variant: ParquetVariant,
+    schema: &ArrowSchema,
+    rows: usize,
+    bloom_cols: &[&str],
+    sort_cols: &[&str],
+    tuned_rg_rows: usize,
+) -> BenchResult<WriterProperties> {
+    let zstd = Compression::ZSTD(ZstdLevel::try_new(3)?);
+    let descriptor = ArrowSchemaConverter::new().convert(schema)?;
+
+    match variant {
+        ParquetVariant::Default => Ok(WriterProperties::builder()
+            .set_writer_version(WriterVersion::PARQUET_1_0)
+            .set_compression(zstd)
+            .set_max_row_group_row_count(Some(1_000_000))
+            .set_data_page_size_limit(1 << 20)
+            .set_data_page_row_count_limit(20_000)
+            .set_statistics_enabled(EnabledStatistics::Page)
+            .set_offset_index_disabled(false)
+            .set_dictionary_enabled(true)
+            .build()),
+        ParquetVariant::Tuned => {
+            let mut b = WriterProperties::builder()
+                .set_writer_version(WriterVersion::PARQUET_2_0)
+                .set_compression(zstd)
+                .set_max_row_group_row_count(Some(tuned_rg_rows))
+                .set_data_page_size_limit(64 << 10)
+                .set_data_page_row_count_limit(8_192)
+                .set_statistics_enabled(EnabledStatistics::Page)
+                .set_offset_index_disabled(false);
+            let ndv = (rows / 4).clamp(1, 131_072) as u64;
+            for name in bloom_cols {
+                if let Some(p) = find_leaf_path(&descriptor, name) {
+                    b = b
+                        .set_column_bloom_filter_enabled(p.clone(), true)
+                        .set_column_bloom_filter_fpp(p.clone(), 0.01)
+                        .set_column_bloom_filter_max_ndv(p, ndv);
+                }
+            }
+            Ok(b.build())
+        }
+        ParquetVariant::Cetra => {
+            let mut sorting = Vec::new();
+            for name in sort_cols {
+                if let Some(idx) = find_leaf_index(&descriptor, name) {
+                    sorting.push(SortingColumn {
+                        column_idx: idx,
+                        descending: false,
+                        nulls_first: false,
+                    });
+                }
+            }
+            let mut b = WriterProperties::builder()
+                .set_writer_version(WriterVersion::PARQUET_1_0)
+                .set_compression(zstd)
+                .set_dictionary_enabled(true)
+                .set_data_page_size_limit(1 << 20)
+                .set_data_page_row_count_limit(20_000)
+                .set_statistics_enabled(EnabledStatistics::Page)
+                .set_offset_index_disabled(false)
+                .set_max_row_group_row_count(None);
+            if !sorting.is_empty() {
+                b = b.set_sorting_columns(Some(sorting));
+            }
+            let ndv = rows.clamp(1, 100_000) as u64;
+            for name in bloom_cols {
+                if let Some(p) = find_leaf_path(&descriptor, name) {
+                    b = b
+                        .set_column_bloom_filter_enabled(p.clone(), true)
+                        .set_column_bloom_filter_fpp(p.clone(), 0.01)
+                        .set_column_bloom_filter_max_ndv(p, ndv);
+                }
+            }
+            Ok(b.build())
+        }
+    }
+}
+
+pub fn normalize_arrow_batch(batch: &RecordBatch) -> BenchResult<RecordBatch> {
+    let schema = batch.schema();
+    let mut out_fields = Vec::with_capacity(schema.fields().len());
+    let mut out_cols = Vec::with_capacity(batch.num_columns());
+
+    for (field, col) in schema.fields().iter().zip(batch.columns()) {
+        let (target_dt, casted_col): (ArrowType, ArrayRef) = match field.data_type() {
+            ArrowType::Boolean => (ArrowType::Boolean, Arc::clone(col)),
+            ArrowType::Int64 => (ArrowType::Int64, Arc::clone(col)),
+            ArrowType::Float64 => (ArrowType::Float64, Arc::clone(col)),
+            ArrowType::Utf8 => (ArrowType::Utf8, Arc::clone(col)),
+            ArrowType::Binary | ArrowType::BinaryView | ArrowType::LargeBinary => {
+                let bin_cast = if *field.data_type() == ArrowType::Binary {
+                    Arc::clone(col)
+                } else {
+                    arrow::compute::cast(col, &ArrowType::Binary)?
+                };
+                let bin_arr = bin_cast
+                    .as_any()
+                    .downcast_ref::<BinaryArray>()
+                    .ok_or("expected BinaryArray")?;
+                let mut sb =
+                    StringBuilder::with_capacity(bin_arr.len(), bin_arr.value_data().len());
+                for i in 0..bin_arr.len() {
+                    if bin_arr.is_null(i) {
+                        sb.append_null();
+                    } else {
+                        sb.append_value(String::from_utf8_lossy(bin_arr.value(i)));
+                    }
+                }
+                (ArrowType::Utf8, Arc::new(sb.finish()))
+            }
+            ArrowType::Int8
+            | ArrowType::Int16
+            | ArrowType::Int32
+            | ArrowType::UInt8
+            | ArrowType::UInt16
+            | ArrowType::UInt32
+            | ArrowType::Date32
+            | ArrowType::Date64
+            | ArrowType::Timestamp(_, _) => (
+                ArrowType::Int64,
+                arrow::compute::cast(col, &ArrowType::Int64)?,
+            ),
+            ArrowType::UInt64 => {
+                let u64_arr = col
+                    .as_any()
+                    .downcast_ref::<UInt64Array>()
+                    .ok_or("expected UInt64Array")?;
+                let mut b = Int64Builder::with_capacity(u64_arr.len());
+                for i in 0..u64_arr.len() {
+                    if u64_arr.is_null(i) {
+                        b.append_null();
+                    } else {
+                        b.append_value(u64_arr.value(i) as i64);
+                    }
+                }
+                (ArrowType::Int64, Arc::new(b.finish()))
+            }
+            ArrowType::Float32 => (
+                ArrowType::Float64,
+                arrow::compute::cast(col, &ArrowType::Float64)?,
+            ),
+            ArrowType::Utf8View | ArrowType::LargeUtf8 => (
+                ArrowType::Utf8,
+                arrow::compute::cast(col, &ArrowType::Utf8)?,
+            ),
+            ArrowType::FixedSizeBinary(_) => (
+                ArrowType::Binary,
+                arrow::compute::cast(col, &ArrowType::Binary)?,
+            ),
+            other => {
+                return Err(format!(
+                    "unsupported Arrow type '{}' on column '{}'",
+                    other,
+                    field.name()
+                )
+                .into());
+            }
+        };
+        out_fields.push(ArrowField::new(
+            field.name(),
+            target_dt,
+            field.is_nullable(),
+        ));
+        out_cols.push(casted_col);
+    }
+
+    Ok(RecordBatch::try_new(
+        Arc::new(ArrowSchema::new(out_fields)),
+        out_cols,
+    )?)
+}
+
+fn array_null_bitmap(arr: &dyn Array) -> Option<Bitmap> {
+    if arr.null_count() == 0 {
+        return None;
+    }
+    let valid: Vec<bool> = (0..arr.len()).map(|i| !arr.is_null(i)).collect();
+    Some(Bitmap::from_bools(&valid))
+}
+
+pub fn arrow_to_cetra_batch(batch: &RecordBatch) -> BenchResult<Batch> {
+    let schema = batch.schema();
+    let mut col_fields = Vec::with_capacity(schema.fields().len());
+    let mut cols = Vec::with_capacity(batch.num_columns());
+
+    for (field, arr) in schema.fields().iter().zip(batch.columns()) {
+        let nulls = array_null_bitmap(arr.as_ref());
+        let (col_dt, col) = match field.data_type() {
+            ArrowType::Boolean => {
+                let ba = arr
+                    .as_any()
+                    .downcast_ref::<BooleanArray>()
+                    .ok_or("expected BooleanArray")?;
+                let bools: Vec<bool> = (0..ba.len())
+                    .map(|i| !ba.is_null(i) && ba.value(i))
+                    .collect();
+                (
+                    ColType::Bool,
+                    Column::Flat(FlatColumn::try_new(
+                        FlatData::Bool(Bitmap::from_bools(&bools)),
+                        nulls,
+                    )?),
+                )
+            }
+            ArrowType::Int64 => {
+                let ia = arr
+                    .as_any()
+                    .downcast_ref::<Int64Array>()
+                    .ok_or("expected Int64Array")?;
+                (
+                    ColType::I64,
+                    Column::Flat(FlatColumn::try_new(
+                        FlatData::I64(ia.values().to_vec()),
+                        nulls,
+                    )?),
+                )
+            }
+            ArrowType::Float64 => {
+                let fa = arr
+                    .as_any()
+                    .downcast_ref::<Float64Array>()
+                    .ok_or("expected Float64Array")?;
+                (
+                    ColType::F64,
+                    Column::Flat(FlatColumn::try_new(
+                        FlatData::F64(fa.values().to_vec()),
+                        nulls,
+                    )?),
+                )
+            }
+            ArrowType::Utf8 => {
+                let sa = arr
+                    .as_any()
+                    .downcast_ref::<StringArray>()
+                    .ok_or("expected StringArray")?;
+                let data = Utf8Data::try_from_slices(
+                    (0..sa.len()).map(|i| if sa.is_null(i) { "" } else { sa.value(i) }),
+                )?;
+                (
+                    ColType::Utf8,
+                    Column::Flat(FlatColumn::try_new(FlatData::Utf8(data), nulls)?),
+                )
+            }
+            ArrowType::Binary => {
+                let ba = arr
+                    .as_any()
+                    .downcast_ref::<BinaryArray>()
+                    .ok_or("expected BinaryArray")?;
+                let data = BinaryData::try_from_slices(
+                    (0..ba.len()).map(|i| if ba.is_null(i) { &[][..] } else { ba.value(i) }),
+                )?;
+                (
+                    ColType::Binary,
+                    Column::Flat(FlatColumn::try_new(FlatData::Binary(data), nulls)?),
+                )
+            }
+            other => {
+                return Err(format!(
+                    "arrow_to_cetra_batch expects normalized types, got {other} on '{}'",
+                    field.name()
+                )
+                .into());
+            }
+        };
+        col_fields.push(ColField::new(field.name(), col_dt, field.is_nullable()));
+        cols.push(col);
+    }
+
+    let col_schema = ColSchema::try_new_arc(col_fields)?;
+    Ok(Batch::try_new_all(col_schema, cols, batch.num_rows())?)
+}
+
+pub fn spans_to_arrow(rows: &[SpanRow]) -> BenchResult<RecordBatch> {
     let n = rows.len();
     let mut project_id = StringBuilder::with_capacity(n, n * 36);
     let mut trace_id = FixedSizeBinaryBuilder::with_capacity(n, 16);
@@ -820,7 +1094,7 @@ pub(crate) fn spans_to_arrow(rows: &[SpanRow]) -> BenchResult<RecordBatch> {
     Ok(RecordBatch::try_new(arrow_spans_schema(), cols)?)
 }
 
-pub(crate) fn scores_to_arrow(rows: &[ScoreRow]) -> BenchResult<RecordBatch> {
+pub fn scores_to_arrow(rows: &[ScoreRow]) -> BenchResult<RecordBatch> {
     let n = rows.len();
     let mut project_id = StringBuilder::with_capacity(n, n * 36);
     let mut score_id = StringBuilder::with_capacity(n, n * 36);
@@ -922,7 +1196,7 @@ fn append_arrow_map(
     Ok(())
 }
 
-pub(crate) fn spans_to_cetra_batch(rows: &[SpanRow]) -> BenchResult<Batch> {
+pub fn spans_to_cetra_batch(rows: &[SpanRow]) -> BenchResult<Batch> {
     let n = rows.len();
     let cols = vec![
         col_utf8(rows.iter().map(|r| r.project_id.as_str()))?,
@@ -985,7 +1259,7 @@ pub(crate) fn spans_to_cetra_batch(rows: &[SpanRow]) -> BenchResult<Batch> {
     Ok(Batch::try_new_all(col_spans_schema(), cols, n)?)
 }
 
-pub(crate) fn scores_to_cetra_batch(rows: &[ScoreRow]) -> BenchResult<Batch> {
+pub fn scores_to_cetra_batch(rows: &[ScoreRow]) -> BenchResult<Batch> {
     let n = rows.len();
     let cols = vec![
         col_utf8(rows.iter().map(|r| r.project_id.as_str()))?,

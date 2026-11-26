@@ -42,7 +42,7 @@ use crate::vortex_bench::{
 };
 use crate::workloads::{ABSENT_NEEDLE, DAY_START, HOUR_NS, RARE_NEEDLE};
 
-pub(crate) const ALL_FORMATS: [&str; 7] = [
+pub const ALL_FORMATS: [&str; 7] = [
     "pq_default",
     "pq_tuned",
     "pq_cetra",
@@ -52,7 +52,7 @@ pub(crate) const ALL_FORMATS: [&str; 7] = [
     "statam_l1",
 ];
 
-pub(crate) fn parse_enabled_formats() -> BenchResult<Vec<&'static str>> {
+pub fn parse_enabled_formats() -> BenchResult<Vec<&'static str>> {
     let Ok(raw) = std::env::var("BENCH_FORMATS") else {
         return Ok(ALL_FORMATS.to_vec());
     };
@@ -84,17 +84,17 @@ pub(crate) fn parse_enabled_formats() -> BenchResult<Vec<&'static str>> {
         .collect())
 }
 
-const PACK_ID: [u8; 16] = *b"statam_bench_pk1";
+pub const PACK_ID: [u8; 16] = *b"statam_bench_pk1";
 
 #[derive(Clone)]
-struct SimS3PackResolver {
+pub struct SimS3PackResolver {
     pack_id: [u8; 16],
     s3: Arc<SimulatedS3Reader>,
     opened: Arc<Mutex<Option<Arc<ChunkPackReader>>>>,
 }
 
 impl SimS3PackResolver {
-    fn new(pack_id: [u8; 16], s3: Arc<SimulatedS3Reader>) -> Self {
+    pub fn new(pack_id: [u8; 16], s3: Arc<SimulatedS3Reader>) -> Self {
         Self {
             pack_id,
             s3,
@@ -102,7 +102,7 @@ impl SimS3PackResolver {
         }
     }
 
-    fn reset_opened(&self) {
+    pub fn reset_opened(&self) {
         let mut guard = self.opened.lock().unwrap_or_else(|p| p.into_inner());
         *guard = None;
     }
@@ -124,19 +124,19 @@ impl PackResolver for SimS3PackResolver {
     }
 }
 
-pub(crate) struct EncodedWorkload {
-    pub(crate) name: String,
-    pub(crate) table: TableKindBench,
-    pub(crate) pq_default: Vec<Bytes>,
-    pub(crate) pq_tuned: Vec<Bytes>,
-    pub(crate) pq_cetra: Vec<Bytes>,
-    pub(crate) vortex: Vec<Bytes>,
-    pub(crate) strata: Vec<Bytes>,
-    pub(crate) statam_l0: Vec<Bytes>,
-    pub(crate) statam_l1: Vec<Bytes>,
-    pub(crate) statam_l1_pack: Option<Bytes>,
-    pub(crate) sample_trace_id: [u8; 16],
-    pub(crate) write_rows: Vec<WriteBenchRow>,
+pub struct EncodedWorkload {
+    pub name: String,
+    pub table: TableKindBench,
+    pub pq_default: Vec<Bytes>,
+    pub pq_tuned: Vec<Bytes>,
+    pub pq_cetra: Vec<Bytes>,
+    pub vortex: Vec<Bytes>,
+    pub strata: Vec<Bytes>,
+    pub statam_l0: Vec<Bytes>,
+    pub statam_l1: Vec<Bytes>,
+    pub statam_l1_pack: Option<Bytes>,
+    pub sample_trace_id: [u8; 16],
+    pub write_rows: Vec<WriteBenchRow>,
 }
 
 fn spans_raw_bytes(slices: &[&[SpanRow]]) -> u64 {
@@ -166,7 +166,7 @@ fn scores_raw_bytes(rows: &[ScoreRow]) -> u64 {
         .sum()
 }
 
-fn write_parquet_files(
+pub fn write_parquet_files(
     variant: ParquetVariant,
     table: TableKindBench,
     schema: &SchemaRef,
@@ -200,7 +200,7 @@ fn write_parquet_files(
     Ok((out, t0.elapsed().as_secs_f64() * 1000.0))
 }
 
-fn write_statam_files(
+pub fn write_statam_files(
     profile: WriteProfile,
     table: TableKindBench,
     batches: &[Batch],
@@ -270,7 +270,7 @@ fn sum_bytes(bs: &[Bytes]) -> u64 {
     bs.iter().map(|b| b.len() as u64).sum()
 }
 
-pub(crate) async fn encode_spans_workload(
+pub async fn encode_spans_workload(
     name: &str,
     slices: &[&[SpanRow]],
     enabled: &[&str],
@@ -307,7 +307,7 @@ pub(crate) async fn encode_spans_workload(
     .await
 }
 
-pub(crate) async fn encode_scores_workload(
+pub async fn encode_scores_workload(
     name: &str,
     rows: &[ScoreRow],
     enabled: &[&str],
@@ -476,7 +476,7 @@ async fn encode_workload_inner(
     })
 }
 
-pub(crate) async fn bench_tiny_flushes(
+pub async fn bench_tiny_flushes(
     flushes: &[Vec<SpanRow>],
     enabled: &[&str],
     vortex_session: &VortexSession,
@@ -581,12 +581,13 @@ pub(crate) async fn bench_tiny_flushes(
     Ok(out)
 }
 
-pub(crate) async fn run_all_queries(
+pub async fn run_all_queries(
     wl: &EncodedWorkload,
     include_substrings: bool,
     enabled: &[&str],
     warm_runs: usize,
     vortex_session: &VortexSession,
+    read_threads: usize,
 ) -> BenchResult<Vec<QueryBenchRow>> {
     let mut rows = Vec::new();
     let queries: &[(&str, bool)] = match wl.table {
@@ -625,14 +626,22 @@ pub(crate) async fn run_all_queries(
 
     for &(qname, is_cold_open) in queries {
         rows.extend(
-            run_query_across_formats(wl, qname, is_cold_open, enabled, warm_runs, vortex_session)
-                .await?,
+            run_query_across_formats(
+                wl,
+                qname,
+                is_cold_open,
+                enabled,
+                warm_runs,
+                vortex_session,
+                read_threads,
+            )
+            .await?,
         );
     }
     Ok(rows)
 }
 
-fn summarize_timings(times: &mut [f64]) -> (f64, f64) {
+pub fn summarize_timings(times: &mut [f64]) -> (f64, f64) {
     times.sort_by(|a, b| a.total_cmp(b));
     let median = times[times.len() / 2];
     let p95_idx = ((times.len() as f64) * 0.95).ceil().max(1.0) as usize - 1;
@@ -640,7 +649,7 @@ fn summarize_timings(times: &mut [f64]) -> (f64, f64) {
     (median, p95)
 }
 
-fn measure_local_ms<F: FnMut() -> BenchResult<usize>>(
+pub fn measure_local_ms<F: FnMut() -> BenchResult<usize>>(
     mut f: F,
     runs: usize,
 ) -> BenchResult<(usize, f64, f64)> {
@@ -658,7 +667,7 @@ fn measure_local_ms<F: FnMut() -> BenchResult<usize>>(
     Ok((expected, med, p95))
 }
 
-async fn measure_local_async_ms<F, Fut>(mut f: F, runs: usize) -> BenchResult<(usize, f64, f64)>
+pub async fn measure_local_async_ms<F, Fut>(mut f: F, runs: usize) -> BenchResult<(usize, f64, f64)>
 where
     F: FnMut() -> Fut,
     Fut: Future<Output = BenchResult<usize>>,
@@ -677,7 +686,7 @@ where
     Ok((expected, med, p95))
 }
 
-fn check_parity(
+pub fn check_parity(
     expected_matches: &mut Option<usize>,
     wl_name: &str,
     qname: &str,
@@ -704,6 +713,7 @@ async fn run_query_across_formats(
     enabled: &[&str],
     warm_runs: usize,
     vortex_session: &VortexSession,
+    read_threads: usize,
 ) -> BenchResult<Vec<QueryBenchRow>> {
     let s3_cfg = SimulatedS3Config::default();
     let mut results = Vec::with_capacity(enabled.len());
@@ -878,7 +888,15 @@ async fn run_query_across_formats(
             })
             .collect::<Result<_, _>>()?;
         let (matched, local_ms, local_p95_ms) = measure_local_ms(
-            || run_statam_query(&warm_readers, wl.table, qname, wl.sample_trace_id),
+            || {
+                run_statam_query(
+                    &warm_readers,
+                    wl.table,
+                    qname,
+                    wl.sample_trace_id,
+                    read_threads,
+                )
+            },
             warm_runs,
         )?;
 
@@ -912,7 +930,13 @@ async fn run_query_across_formats(
             .map(|f| StatamReader::open(Arc::clone(f) as Arc<dyn RangeReader>, pack_dyn.clone()))
             .collect::<Result<_, _>>()?;
 
-        let s3_matched = run_statam_query(&s3_statam_readers, wl.table, qname, wl.sample_trace_id)?;
+        let s3_matched = run_statam_query(
+            &s3_statam_readers,
+            wl.table,
+            qname,
+            wl.sample_trace_id,
+            read_threads,
+        )?;
         if s3_matched != matched {
             return Err(format!("{fmt} {qname}: s3 {s3_matched} != local {matched}").into());
         }
@@ -953,7 +977,7 @@ async fn run_query_across_formats(
     Ok(results)
 }
 
-fn run_pq_query_local(
+pub fn run_pq_query_local(
     files: &[Bytes],
     metas: &[ArrowReaderMetadata],
     table: TableKindBench,
@@ -1334,7 +1358,7 @@ fn eval_pq_batches(
     Ok(matched)
 }
 
-pub(crate) fn agg_pq_filtered_batch(
+pub fn agg_pq_filtered_batch(
     b: &RecordBatch,
     agg: &mut BTreeMap<(i64, String), (usize, f64, i64)>,
 ) -> BenchResult<()> {
@@ -1389,7 +1413,7 @@ fn topk_pq_filtered_batch(
     Ok(())
 }
 
-pub(crate) fn push_topk(heap: &mut BinaryHeap<Reverse<(i64, usize)>>, ts: i64, row_id: usize) {
+pub fn push_topk(heap: &mut BinaryHeap<Reverse<(i64, usize)>>, ts: i64, row_id: usize) {
     if heap.len() < 50 {
         heap.push(Reverse((ts, row_id)));
     } else if let Some(&Reverse((min_ts, _))) = heap.peek()
@@ -1400,7 +1424,7 @@ pub(crate) fn push_topk(heap: &mut BinaryHeap<Reverse<(i64, usize)>>, ts: i64, r
     }
 }
 
-pub(crate) fn contains_ascii_ci(haystack: &[u8], needle_lower: &[u8]) -> bool {
+pub fn contains_ascii_ci(haystack: &[u8], needle_lower: &[u8]) -> bool {
     if needle_lower.is_empty() {
         return true;
     }
@@ -1419,16 +1443,17 @@ pub(crate) fn contains_ascii_ci(haystack: &[u8], needle_lower: &[u8]) -> bool {
     false
 }
 
-fn run_statam_query(
+pub fn run_statam_query(
     readers: &[StatamReader],
     table: TableKindBench,
     qname: &str,
     sample_tid: [u8; 16],
+    read_threads: usize,
 ) -> BenchResult<usize> {
     let (t_lo, t_hi) = (DAY_START + 8 * HOUR_NS, DAY_START + 14 * HOUR_NS);
     let (top_lo, top_hi) = (DAY_START + 6 * HOUR_NS, DAY_START + 18 * HOUR_NS);
 
-    let req = match (table, qname) {
+    let mut req = match (table, qname) {
         (_, "cold_open_prune") => ScanRequest {
             projection: Some(vec![]),
             id_lookups: vec![IdLookup::eq("trace_id", [0xAAu8; 16])],
@@ -1520,6 +1545,7 @@ fn run_statam_query(
         },
         _ => ScanRequest::default(),
     };
+    req.read_threads = read_threads;
 
     let mut total = 0usize;
     let mut agg: BTreeMap<(i64, String), (usize, f64, i64)> = BTreeMap::new();
