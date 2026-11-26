@@ -3,9 +3,12 @@
 pub mod codec;
 pub mod error;
 pub mod format;
+pub mod gdpr;
 pub mod io;
 pub mod payload;
+pub mod reader;
 pub mod simd;
+pub mod writer;
 
 pub use codec::{
     DICT_PASSTHROUGH_MAX_BYTES, DictBuilder, EncodedMiniBlock, FsstBlockView, FsstTable,
@@ -29,6 +32,10 @@ pub use format::{
     Postscript, ROW_GROUP_ENTRY_LEN, ROW_GROUP_SIZE, RowGroupEntry, ShreddedMapDir,
     ShreddedMapKeyEntry, TableKind,
 };
+pub use gdpr::{
+    GdprFileInput, GdprRewriteReport, GdprRewriteResult, GdprRewriteStats, RewrittenPackFile,
+    RewrittenStatamFile, gdpr_rewrite_day,
+};
 pub use io::{
     FileReader, IoCounters, RangeReader, S3_CACHE_BLOCK_BYTES, SimulatedS3Config,
     SimulatedS3Reader, SliceReader,
@@ -43,4 +50,9 @@ pub use payload::{
     pack::{ChunkPackBuilder, ChunkPackReader, PackToc, PackWriteOptions, PackWriteStats},
     search::{search_pack_chunks, search_pack_rows},
 };
+pub use reader::{
+    CoalesceMode, IdLookup, InMemoryPackResolver, PackResolver, Predicate, ScanRequest,
+    StatamFileMeta, StatamReader, SubstringQuery, TimeRange,
+};
 pub use simd::{FilterOp, Sbbf, TrigramBloom, statam_bloom_hash};
+pub use writer::{L0_LOCAL_PACK_IDX, StatamWriter, WriteOptions, WriteStats};
