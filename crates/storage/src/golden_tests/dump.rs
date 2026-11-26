@@ -978,7 +978,7 @@ mod tests {
     };
     use cetra_column::{
         Batch, Bitmap, Column, DataType as ColDataType, DictColumn, Field as ColField, FlatColumn,
-        FlatData, RleColumn, ScalarValue, Schema as ColSchema, Selection, Utf8Data,
+        FlatData, RleColumn, ScalarValue, Schema as ColSchema, Selection,
     };
     use serde_json::Value;
 
@@ -1279,7 +1279,5 @@ mod tests {
             idx_rows[1],
             serde_json::json!({"c": "const-v", "d": 10, "r": "0101010101010101"})
         );
-
-        let _ = Utf8Data::empty();
     }
 }

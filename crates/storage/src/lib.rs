@@ -56,7 +56,6 @@ pub(crate) mod disk;
 #[allow(dead_code)] // wired in QE3.7 and M4
 pub(crate) mod engine;
 pub mod error;
-#[allow(dead_code)] // wired in QE6.2–QE6.4
 pub(crate) mod file_format;
 mod filter;
 pub(crate) mod flush;
@@ -601,26 +600,9 @@ impl Storage {
             tombstones,
             projects,
         }));
-        // Compaction gets a runtime of its own, so its memory pool is
-        // independent of the query runtime's.
+        // Compaction gets a memory pool of its own, independent of the query runtime's.
         let compactor = {
             let memory = usize::try_from(config.compaction.max_memory.0).unwrap_or(usize::MAX);
-            // The merge never spills, so the compaction runtime has no spill directory: a
-            // spill would fail, and would not be capped by the query spill limit.
-            let runtime = RuntimeEnvBuilder::new()
-                .with_memory_pool(Arc::new(
-                    datafusion::execution::memory_pool::GreedyMemoryPool::new(memory),
-                ))
-                .with_disk_manager_builder(
-                    datafusion::execution::disk_manager::DiskManagerBuilder::default()
-                        .with_mode(datafusion::execution::disk_manager::DiskManagerMode::Disabled),
-                )
-                .build_arc()
-                .map_err(|error| {
-                    tracing::error!(%error, "building the compaction runtime");
-                    OpenError::Runtime
-                })?;
-            objects.register(&runtime);
             let compaction_pool = cetra_column::GlobalPool::new(memory);
             Arc::new(compaction::job::Compactor::new(
                 Arc::clone(&committer),
@@ -629,7 +611,6 @@ impl Storage {
                 Arc::clone(&verify),
                 Arc::clone(&published),
                 compaction::merge::MergeContext::new(
-                    runtime,
                     8192,
                     config.compaction.threads,
                     compaction_pool,
@@ -714,7 +695,6 @@ impl Storage {
             Arc::clone(&committer),
             Arc::clone(&objects),
             Arc::clone(&published),
-            Arc::clone(&runtime),
             target_partitions,
             lookback,
             share_hooks(&hooks),
@@ -2147,7 +2127,11 @@ fn validate_batch(
             reason: "batch has no rows",
         });
     }
-    if batch.schema().fields() != table.schema().fields() {
+    let expected_schema = match table {
+        Table::Spans => cetra_core::schema::spans_schema(),
+        Table::Scores => cetra_core::schema::scores_schema(),
+    };
+    if batch.schema().fields() != expected_schema.fields() {
         return Err(AppendError::InvalidBatch {
             reason: "batch schema does not match the table",
         });

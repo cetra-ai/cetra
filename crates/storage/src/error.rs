@@ -199,7 +199,6 @@ pub enum MemtableError {
 }
 
 impl MemtableError {
-    #[allow(dead_code)]
     pub(crate) fn from_column(err: cetra_column::ColumnError) -> Self {
         Self::Arrow(ArrowError::ExternalError(Box::new(err)))
     }
@@ -287,7 +286,6 @@ impl WalError {
         }
     }
 
-    #[allow(dead_code)]
     pub(crate) fn from_column(err: &cetra_column::ColumnError) -> Self {
         match *err {
             cetra_column::ColumnError::InvalidFrame { reason }
@@ -724,12 +722,10 @@ impl AnchorError {
         Self::Parquet(Box::new(source))
     }
 
-    #[allow(dead_code)]
     pub(crate) fn from_column(err: cetra_column::ColumnError) -> Self {
         Self::Arrow(ArrowError::ExternalError(Box::new(err)))
     }
 
-    #[allow(dead_code)]
     pub(crate) fn is_store_error(&self) -> bool {
         matches!(self, Self::Parquet(err) if crate::verify::is_store_error(err))
     }
@@ -759,7 +755,6 @@ impl PartialsError {
         }
     }
 
-    #[allow(dead_code)]
     pub(crate) fn from_column(err: cetra_column::ColumnError) -> Self {
         Self::Arrow(ArrowError::ExternalError(Box::new(err)))
     }
@@ -821,6 +816,13 @@ pub enum CompactionError {
 }
 
 impl CompactionError {
+    /// Bridges a native [`cetra_query::QueryError`] into [`Self::Read`].
+    pub(crate) fn from_query(err: cetra_query::QueryError) -> Self {
+        Self::Read {
+            source: query_err_to_df(err),
+        }
+    }
+
     /// The variant name in snake case. The job failure logs print this instead
     /// of the error text: a DataFusion error raised by a plan that holds the
     /// covered-row predicate may quote its literals (spec 03 §7).
@@ -1130,7 +1132,6 @@ impl ParquetWriteError {
         }
     }
 
-    #[allow(dead_code)]
     pub(crate) fn from_column(err: cetra_column::ColumnError) -> Self {
         Self::Arrow {
             source: ArrowError::ExternalError(Box::new(err)),
@@ -1140,7 +1141,6 @@ impl ParquetWriteError {
 
 /// Maps a native `cetra_query::QueryError` into a legacy `DataFusionError` while
 /// preserving `may_be_corrupt` and `ResourcesExhausted` until M7 removes DataFusion.
-#[allow(dead_code)]
 pub(crate) fn query_err_to_df(err: cetra_query::QueryError) -> datafusion::error::DataFusionError {
     match err {
         cetra_query::QueryError::TooLarge => {

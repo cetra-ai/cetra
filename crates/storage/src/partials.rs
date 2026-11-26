@@ -1,12 +1,9 @@
 //! Trace partials and the merge operator (spec 01 § Trace, D152).
 //!
-//! [`partials_from_spans`] builds one partial per trace of a spans batch.
+//! [`partials_from_spans_batch`] builds one partial per trace of a spans batch.
 //! [`TraceMerger`] merges partials into traces, accumulating only the columns a
 //! query asks for. Both build the same [`TraceAcc`] and use the same output
 //! builder; there is no SQL `GROUP BY trace_id` in storage code.
-//!
-//! Nothing calls this from `Storage` yet. Flush uses it in M3.3, queries in M3.6.
-#![allow(dead_code)]
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::mem::size_of;
@@ -27,7 +24,9 @@ use cetra_column::{
 };
 use cetra_core::enums::{SpanKind, SpanStatus};
 use cetra_core::ids::TraceId;
-use cetra_core::schema::{spans, spans_schema, traces, traces_schema};
+#[cfg(test)]
+use cetra_core::schema::spans_schema;
+use cetra_core::schema::{spans, traces, traces_schema};
 
 use crate::error::PartialsError;
 
@@ -197,6 +196,7 @@ impl MergeColumns {
         self.input.iter().map(|column| column.name()).collect()
     }
 
+    #[cfg(test)]
     fn all() -> Self {
         Self {
             output: Column::ALL.to_vec(),
@@ -386,7 +386,6 @@ enum Acc {
     /// USD in units of 1e-18, summed exactly so the merge order does not matter (D-A2-4).
     Usd(i128),
     Bool(bool),
-    Str(String),
     RankedStr(Ranked<String>),
     RankedBytes(Ranked<Vec<u8>>),
     StrSet(BTreeSet<String>),
@@ -726,6 +725,7 @@ impl TraceMerger {
     }
 
     /// Number of traces accumulated so far.
+    #[cfg(test)]
     pub(crate) fn len(&self) -> usize {
         self.traces.len()
     }
@@ -743,6 +743,7 @@ impl TraceMerger {
 
 /// One partial per trace of `spans` (spans schema, one project, any row order).
 /// Rows: `traces_schema()`, sorted by `(start_time, trace_id)`, `partial_count = 1`.
+#[cfg(test)]
 pub(crate) fn partials_from_spans(spans: &RecordBatch) -> Result<RecordBatch, PartialsError> {
     let schema = spans_schema();
     let mut readers: HashMap<&'static str, Reader<'_>> = HashMap::new();
@@ -1243,7 +1244,6 @@ fn build_col_column(column: Column, traces: &[(TraceId, TraceAcc)]) -> Result<Co
             for (i, (_, acc)) in traces.iter().enumerate() {
                 match &acc.values[slot_idx] {
                     Some(Acc::RankedStr(ranked)) => vals.push(ranked.value.as_str()),
-                    Some(Acc::Str(text)) => vals.push(text.as_str()),
                     _ => {
                         let _ = nulls.set(i, false);
                         vals.push("");
@@ -1487,6 +1487,7 @@ const DIRECT: &[(&str, Column)] = &[
     (spans::COST_TOTAL, Column::CostTotal),
 ];
 
+#[cfg(test)]
 fn value(
     readers: &HashMap<&'static str, Reader<'_>>,
     name: &'static str,
@@ -1498,6 +1499,7 @@ fn value(
         .ok_or_else(|| PartialsError::column(name))
 }
 
+#[cfg(test)]
 fn append_span(
     acc: &mut TraceAcc,
     readers: &HashMap<&'static str, Reader<'_>>,
@@ -1697,7 +1699,6 @@ impl Builder {
         match self {
             Self::Str(builder) => match acc {
                 Some(Acc::RankedStr(ranked)) => builder.append_value(&ranked.value),
-                Some(Acc::Str(text)) => builder.append_value(text),
                 _ => builder.append_null(),
             },
             Self::Fixed16(builder) => match acc {

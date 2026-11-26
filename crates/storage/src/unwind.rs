@@ -3,7 +3,6 @@
 //! suspects, and verification can quarantine them.
 
 use std::fmt;
-use std::future::Future;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::pin::Pin;
 use std::sync::Arc;
@@ -30,7 +29,7 @@ use datafusion::physical_plan::{
     SortOrderPushdownResult, StatisticsArgs,
 };
 use datafusion_datasource::source::DataSourceExec;
-use futures::{FutureExt, Stream};
+use futures::Stream;
 use parquet::errors::ParquetError;
 
 /// The error a caught decoder panic becomes. `verify::may_be_corrupt` treats
@@ -44,16 +43,6 @@ pub(crate) fn guard_sync<T>(
     f: impl FnOnce() -> Result<T, ParquetError>,
 ) -> Result<T, ParquetError> {
     catch_unwind(AssertUnwindSafe(f)).unwrap_or_else(|_| Err(decoder_panicked()))
-}
-
-/// Polls `future`, turning a panic into `Err(decoder_panicked())`.
-pub(crate) async fn guard<T>(
-    future: impl Future<Output = Result<T, ParquetError>>,
-) -> Result<T, ParquetError> {
-    AssertUnwindSafe(future)
-        .catch_unwind()
-        .await
-        .unwrap_or_else(|_| Err(decoder_panicked()))
 }
 
 /// A stream whose panics become one `on_panic()` item, after which it ends.

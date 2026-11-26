@@ -197,9 +197,6 @@ impl PartitionStream for MemPartitionStream {
                 continue;
             }
 
-            let batch = Batch::clone(&mem_batch.batch);
-            reconcile_res(res.as_deref_mut(), before, batch.memory_bytes())?;
-
             let covering = applicable(&self.deletions, None, mem_batch.min_ingest_time);
             let tombstone_pred = if covering.is_empty() {
                 None
@@ -213,6 +210,25 @@ impl PartitionStream for MemPartitionStream {
                     }
                 }
             };
+
+            if self.filters.is_empty()
+                && tombstone_pred.is_none()
+                && let Some(indices) = &self.projection
+            {
+                reconcile_res(res.as_deref_mut(), before, mem_batch.bytes)?;
+                let projected = match mem_batch.batch.project(indices) {
+                    Ok(b) => b,
+                    Err(err) => {
+                        rollback_res(res, before);
+                        return Err(err.into());
+                    }
+                };
+                reconcile_res(res, before, projected.memory_bytes())?;
+                return Ok(Some(projected));
+            }
+
+            reconcile_res(res.as_deref_mut(), before, mem_batch.bytes)?;
+            let batch = Batch::clone(&mem_batch.batch);
 
             let mut filtered = apply_tombstones_and_filters(
                 batch,

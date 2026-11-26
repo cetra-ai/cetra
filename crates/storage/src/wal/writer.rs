@@ -202,6 +202,7 @@ impl WalWriterHandle {
     }
 
     /// Clones the queue sender. Dropping every clone is what ends the task.
+    #[cfg(test)]
     fn sender(&self) -> Option<mpsc::Sender<AppendRequest>> {
         self.tx
             .lock()
@@ -318,7 +319,7 @@ pub(crate) fn spawn(mut params: WriterParams) -> WalWriterHandle {
 
 struct Prepared {
     project: ProjectId,
-    batch: Batch,
+    batch: Option<Batch>,
     bytes: usize,
     rows: usize,
     seq: u64,
@@ -730,7 +731,7 @@ async fn run(
                     prepared.push(Prepared {
                         project: request.project,
                         rows: request.batch.num_rows(),
-                        batch: request.batch,
+                        batch: Some(request.batch),
                         bytes: request.bytes,
                         seq,
                         ack: request.ack,
@@ -808,7 +809,7 @@ async fn run(
 
         let inserted = match hooks.fail(HookPoint::AfterWalSync) {
             Some(err) => Err(err),
-            None => insert_all(&shared, &prepared, flush_max_bytes).map_err(io::Error::other),
+            None => insert_all(&shared, &mut prepared, flush_max_bytes).map_err(io::Error::other),
         };
         if let Err(err) = inserted {
             tracing::error!(
@@ -864,7 +865,7 @@ async fn run(
 
 fn insert_all(
     shared: &WriterShared,
-    prepared: &[Prepared],
+    prepared: &mut [Prepared],
     flush_max_bytes: u64,
 ) -> Result<(), crate::error::MemtableError> {
     let notify = {
@@ -873,7 +874,12 @@ fn insert_all(
             .lock()
             .unwrap_or_else(PoisonError::into_inner);
         for item in prepared {
-            memtable.insert(item.project, item.batch.clone(), item.seq)?;
+            let batch = item.batch.take().ok_or_else(|| {
+                crate::error::MemtableError::from_column(cetra_column::ColumnError::InvalidBatch {
+                    reason: "prepared WAL batch already consumed",
+                })
+            })?;
+            memtable.insert(item.project, batch, item.seq)?;
         }
         let bytes = u64::try_from(memtable.bytes()).unwrap_or(u64::MAX);
         let active = u64::try_from(memtable.active_bytes()).unwrap_or(u64::MAX);
