@@ -3,12 +3,12 @@
 use std::cmp::Ordering;
 use std::collections::{BTreeSet, BinaryHeap, HashSet};
 use std::fmt;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
-use std::sync::{Arc, Mutex, PoisonError};
 
 use cetra_column::{
-    Batch, Column, DataType, Field, FlatColumn, FlatData, GlobalPool, Reservation, ScalarValue,
-    Schema, Selection, Utf8Data,
+    Batch, Column, DataType, Field, FlatColumn, FlatData, Reservation, ScalarValue, Schema,
+    Selection, Utf8Data,
 };
 use cetra_core::schema::{spans, traces};
 use cetra_query::exec::hash_join::{HashJoinSpec, JoinType, execute_hash_join};
@@ -575,30 +575,37 @@ fn run_pass1(
         return Ok((done, Vec::new()));
     }
 
-    // Allocate one isolated `field_pool` + `parent_res` per value field (total <= 3/4 * pool.cap())
+    // Allocate one demand-allocated child `ScopedPool` per value field (total cap <= 3/4 * available)
     // shared across all `P` partition sinks and `combine_pass1_sinks`.
     let num_value_fields = valid_fields
         .iter()
         .filter(|(_, f)| !matches!(f.field, ParsedField::Number(_)))
         .count();
-    let cap = exec_ctx.pool.cap();
-    let three_quarters = (cap / 4).saturating_mul(3) + ((cap % 4) * 3) / 4;
-    let budgets: Vec<Option<Arc<FieldBudget>>> =
-        if let Some(q) = three_quarters.checked_div(num_value_fields) {
-            let per_field_cap = q.max(1);
-            valid_fields
-                .iter()
-                .map(|(_, f)| {
-                    if matches!(f.field, ParsedField::Number(_)) {
-                        None
-                    } else {
-                        Some(Arc::new(FieldBudget::new(exec_ctx, per_field_cap)))
-                    }
-                })
-                .collect()
-        } else {
-            vec![None; valid_fields.len()]
-        };
+    let available = exec_ctx.pool.cap().saturating_sub(exec_ctx.pool.reserved());
+    let three_quarters = (available / 4).saturating_mul(3) + ((available % 4) * 3) / 4;
+    let per_field_cap = three_quarters / num_value_fields.max(1);
+    let budgets: Vec<Option<Arc<FieldBudget>>> = valid_fields
+        .iter()
+        .map(|(_, f)| {
+            if matches!(f.field, ParsedField::Number(_)) {
+                None
+            } else {
+                Some(Arc::new(FieldBudget::new(exec_ctx, per_field_cap)))
+            }
+        })
+        .collect();
+
+    if !budgets.is_empty()
+        && budgets
+            .iter()
+            .all(|b| b.as_ref().is_some_and(|budget| budget.is_tripped()))
+    {
+        let done = valid_fields
+            .iter()
+            .map(|(slot_idx, _)| (*slot_idx, Err(RunError::TooLarge)))
+            .collect();
+        return Ok((done, Vec::new()));
+    }
 
     let sinks = exec_run_pipeline(exec_ctx, streams, |_| Ok(Vec::new()), {
         let fields_c = valid_fields.to_vec();
@@ -738,7 +745,6 @@ fn combine_pass1_sinks(
 
                 if any_too_large || budget.is_tripped() {
                     drop(field_aggs);
-                    budget.release();
                     done.push((*slot_idx, Err(RunError::TooLarge)));
                     continue;
                 }
@@ -755,7 +761,6 @@ fn combine_pass1_sinks(
                         limit: checked.limit,
                     },
                 );
-                budget.release();
                 match res {
                     Ok(data) => done.push((*slot_idx, Ok(data))),
                     Err(QueryError::TooLarge) => {
@@ -1354,22 +1359,18 @@ enum ValueSource {
 
 struct FieldBudget {
     exec_ctx: ExecContext,
-    parent_res: Mutex<Option<Reservation>>,
     tripped: AtomicBool,
 }
 
 impl FieldBudget {
     fn new(parent_ctx: &ExecContext, per_field_cap: usize) -> Self {
-        let field_pool = GlobalPool::standalone(per_field_cap);
+        let field_pool = parent_ctx.pool.child("facet_field", per_field_cap);
         let mut exec_ctx = parent_ctx.clone();
         exec_ctx.pool = field_pool;
 
-        let mut parent_res = parent_ctx.pool.register("facet_field_cap", false);
-        let ok = parent_res.try_grow(per_field_cap).is_ok();
         Self {
             exec_ctx,
-            parent_res: Mutex::new(ok.then_some(parent_res)),
-            tripped: AtomicBool::new(!ok),
+            tripped: AtomicBool::new(per_field_cap == 0),
         }
     }
 
@@ -1379,15 +1380,6 @@ impl FieldBudget {
 
     fn trip_too_large(&self) {
         self.tripped.store(true, AtomicOrdering::Release);
-        self.release();
-    }
-
-    fn release(&self) {
-        let mut guard = self
-            .parent_res
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner);
-        *guard = None;
     }
 }
 
@@ -2159,6 +2151,7 @@ mod tests {
     use cetra_core::names::{environment, metadata_key};
     use std::time::Duration;
 
+    use cetra_column::GlobalPool;
     use cetra_core::score::{Score, ScoreValue};
     use cetra_core::span::Span;
     use cetra_query::exec::SpillManager;
@@ -3116,6 +3109,203 @@ mod tests {
             .map(|e| (e.value.as_str(), e.count))
             .collect();
         assert_eq!(got, BTreeMap::from([("env", 1), ("region", 1)]));
+
+        let _ = storage.shutdown().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn concurrent_facets_on_small_global_pool_succeed_without_starvation() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let storage = crate::Storage::open(test_config(dir.path()))
+            .await
+            .expect("open");
+        let project: ProjectId = "018f6b4e-7c1a-7c1a-8c1a-000000000001".parse().expect("pid");
+
+        let mut spans = Vec::with_capacity(100);
+        for t in 0..100_u16 {
+            let mut s = span_row(t, 0, T0 + i64::from(t) * 1000, T0 + i64::from(t) * 1000);
+            s.name = format!("op-{}", t % 5);
+            s.environment = Some(if t % 2 == 0 { "prod" } else { "dev" }.to_owned());
+            s.status = if t % 3 == 0 {
+                SpanStatus::Error
+            } else {
+                SpanStatus::Ok
+            };
+            spans.push(s);
+        }
+        storage
+            .append_spans(project, span_rows(&spans))
+            .await
+            .expect("append");
+
+        // Shared GlobalPool where total == cap == 2 MiB: eager 3/4 locking would fail the 2nd query.
+        let cap = 2 * 1024 * 1024;
+        let global = GlobalPool::new(cap);
+        let scope1 = global.try_admit(0, cap).expect("admit 1");
+        let scope2 = global.try_admit(0, cap).expect("admit 2");
+
+        let mut ctx1 =
+            EngineContext::from_storage(&storage, project, &QueryOptions::new(None, None))
+                .expect("ctx1");
+        ctx1.pool = scope1;
+        let mut ctx2 = ctx1.clone();
+        ctx2.pool = scope2;
+
+        let fields = [
+            FacetField {
+                field: "status",
+                query: None,
+                limit: 10,
+            },
+            FacetField {
+                field: "name",
+                query: None,
+                limit: 10,
+            },
+            FacetField {
+                field: "environment",
+                query: None,
+                limit: 10,
+            },
+        ];
+        let req = FacetsRequest {
+            view: FacetView::Spans,
+            filter: None,
+            search: None,
+            scope: ListScope {
+                window: None,
+                include_eval: false,
+                include_experiments: false,
+            },
+            fields: &fields,
+            timeout: Duration::from_secs(10),
+        };
+
+        let q1 = QueryContext::from_engine(ctx1);
+        let q2 = QueryContext::from_engine(ctx2);
+        let (r1, r2) = tokio::join!(facets(&q1, req), facets(&q2, req));
+        let res1 = r1.expect("first facets query must succeed");
+        let res2 = r2.expect("second concurrent facets query must succeed");
+        for slot in res1.iter().chain(res2.iter()) {
+            let data = slot.as_ref().expect("value facet must succeed");
+            assert_eq!(data.total, 100);
+        }
+        drop(q1);
+        drop(q2);
+        assert_eq!(global.used(), 0);
+
+        let _ = storage.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn tiny_or_exhausted_pool_trips_only_value_fields_without_failing_request() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let storage = crate::Storage::open(test_config(dir.path()))
+            .await
+            .expect("open");
+        let project: ProjectId = "018f6b4e-7c1a-7c1a-8c1a-000000000001".parse().expect("pid");
+
+        let s1 = span_row(1, 0, T0 + 1000, T0 + 2000);
+        storage
+            .append_spans(project, span_rows(&[s1]))
+            .await
+            .expect("append");
+
+        // 1. Tiny pool (cap = 4, 4 value fields -> per_field_cap = 0):
+        //    value fields trip to TooLarge immediately without failing the whole request.
+        let mut ctx1 =
+            EngineContext::from_storage(&storage, project, &QueryOptions::new(None, None))
+                .expect("ctx1");
+        let tiny_pool = GlobalPool::standalone(4);
+        ctx1.pool = Arc::clone(&tiny_pool);
+
+        let fields = [
+            FacetField {
+                field: "status",
+                query: None,
+                limit: 10,
+            },
+            FacetField {
+                field: "name",
+                query: None,
+                limit: 10,
+            },
+            FacetField {
+                field: "environment",
+                query: None,
+                limit: 10,
+            },
+            FacetField {
+                field: "release",
+                query: None,
+                limit: 10,
+            },
+            FacetField {
+                field: "nonexistent",
+                query: None,
+                limit: 10,
+            },
+        ];
+        let res1 = facets(
+            &QueryContext::from_engine(ctx1),
+            FacetsRequest {
+                view: FacetView::Spans,
+                filter: None,
+                search: None,
+                scope: ListScope {
+                    window: None,
+                    include_eval: false,
+                    include_experiments: false,
+                },
+                fields: &fields,
+                timeout: Duration::from_secs(10),
+            },
+        )
+        .await
+        .expect("tiny pool must not fail the whole request");
+        for (i, slot) in res1[..4].iter().enumerate() {
+            assert!(
+                matches!(slot, Err(RunError::TooLarge)),
+                "value field {i} should fail with TooLarge, got {slot:?}"
+            );
+        }
+        assert!(matches!(res1[4], Err(RunError::InvalidRequest(_))));
+        assert_eq!(tiny_pool.reserved(), 0);
+
+        // 2. Exhausted pool (available == 0): value fields fail with TooLarge without failing request.
+        let mut ctx2 =
+            EngineContext::from_storage(&storage, project, &QueryOptions::new(None, None))
+                .expect("ctx2");
+        let full_pool = GlobalPool::standalone(1024);
+        let mut held = full_pool.register("pre_reserved", false);
+        held.try_grow(1024).expect("reserve full pool");
+        ctx2.pool = Arc::clone(&full_pool);
+
+        let res2 = facets(
+            &QueryContext::from_engine(ctx2),
+            FacetsRequest {
+                view: FacetView::Spans,
+                filter: None,
+                search: None,
+                scope: ListScope {
+                    window: None,
+                    include_eval: false,
+                    include_experiments: false,
+                },
+                fields: &fields[..4],
+                timeout: Duration::from_secs(10),
+            },
+        )
+        .await
+        .expect("available == 0 must not fail the whole request");
+        for (i, slot) in res2.iter().enumerate() {
+            assert!(
+                matches!(slot, Err(RunError::TooLarge)),
+                "value field {i} should fail with TooLarge when available == 0, got {slot:?}"
+            );
+        }
+        drop(held);
+        assert_eq!(full_pool.reserved(), 0);
 
         let _ = storage.shutdown().await;
     }

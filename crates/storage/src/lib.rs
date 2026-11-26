@@ -137,50 +137,8 @@ pub(crate) mod wal;
 #[doc(hidden)]
 pub mod fuzz_entry;
 
-/// Reads Parquet schema column names and total row count for test assertions.
 #[doc(hidden)]
-pub fn read_parquet_summary_for_test(bytes: bytes::Bytes) -> Result<(Vec<String>, usize), String> {
-    use parquet::file::reader::{FileReader as _, SerializedFileReader};
-    let reader = SerializedFileReader::new(bytes).map_err(|e| e.to_string())?;
-    let file_meta = reader.metadata().file_metadata();
-    let names = file_meta
-        .schema_descr()
-        .root_schema()
-        .get_fields()
-        .iter()
-        .map(|field| field.name().to_owned())
-        .collect();
-    let rows = usize::try_from(file_meta.num_rows()).map_err(|e| e.to_string())?;
-    Ok((names, rows))
-}
-
-/// Reads Parquet schema column names and decoded row cell strings across all row groups for tests.
-#[doc(hidden)]
-pub fn read_parquet_rows_for_test(
-    bytes: bytes::Bytes,
-) -> Result<(Vec<String>, Vec<Vec<String>>), String> {
-    use parquet::file::reader::{FileReader as _, SerializedFileReader};
-    let reader = SerializedFileReader::new(bytes).map_err(|e| e.to_string())?;
-    let file_meta = reader.metadata().file_metadata();
-    let names = file_meta
-        .schema_descr()
-        .root_schema()
-        .get_fields()
-        .iter()
-        .map(|field| field.name().to_owned())
-        .collect();
-    let mut rows = Vec::new();
-    let iter = reader.get_row_iter(None).map_err(|e| e.to_string())?;
-    for row_res in iter {
-        let row = row_res.map_err(|e| e.to_string())?;
-        let cells = row
-            .get_column_iter()
-            .map(|(_name, field)| field.to_string())
-            .collect();
-        rows.push(cells);
-    }
-    Ok((names, rows))
-}
+pub use file_format::read_parquet_rows_for_test;
 
 #[cfg(test)]
 mod crash_tests;

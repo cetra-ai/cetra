@@ -511,7 +511,7 @@ async fn query_loop(storage: &Storage, which: usize, stop: &AtomicBool) -> Count
         match tokio::time::timeout(QUERY_TIMEOUT, run_query(storage, which)).await {
             Err(_elapsed) => counts.timeout += 1,
             Ok(Ok(())) => counts.queries_ok += 1,
-            Ok(Err(QueryFailure::Busy)) => counts.busy += 1,
+            Ok(Err(QueryFailure::Busy | QueryFailure::Run(RunError::Busy))) => counts.busy += 1,
             Ok(Err(QueryFailure::Run(RunError::TooLarge))) => counts.too_large += 1,
             Ok(Err(QueryFailure::Run(RunError::Timeout))) => counts.timeout += 1,
             Ok(Err(QueryFailure::Run(other))) => {

@@ -1769,6 +1769,31 @@ fn row_groups_to_read(metadata: &ParquetMetaData, since: i64) -> Vec<usize> {
         .collect()
 }
 
+/// Reads Parquet schema column names and decoded row cell strings across all row groups for tests.
+pub fn read_parquet_rows_for_test(bytes: Bytes) -> Result<(Vec<String>, Vec<Vec<String>>), String> {
+    use parquet::file::reader::{FileReader as _, SerializedFileReader};
+    let reader = SerializedFileReader::new(bytes).map_err(|e| e.to_string())?;
+    let file_meta = reader.metadata().file_metadata();
+    let names = file_meta
+        .schema_descr()
+        .root_schema()
+        .get_fields()
+        .iter()
+        .map(|field| field.name().to_owned())
+        .collect();
+    let mut rows = Vec::new();
+    let iter = reader.get_row_iter(None).map_err(|e| e.to_string())?;
+    for row_res in iter {
+        let row = row_res.map_err(|e| e.to_string())?;
+        let cells = row
+            .get_column_iter()
+            .map(|(_name, field)| field.to_string())
+            .collect();
+        rows.push(cells);
+    }
+    Ok((names, rows))
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeMap;

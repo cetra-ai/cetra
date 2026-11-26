@@ -122,6 +122,7 @@ struct PoolState {
     spillable: usize,
     spillable_consumers: usize,
     held: usize,
+    parent: Option<Reservation>,
 }
 
 impl PoolState {
@@ -198,16 +199,31 @@ impl ScopedPool {
             size: 0,
         }
     }
+
+    /// Creates a child [`ScopedPool`] capped at `cap` that lazily reserves bytes from `self`.
+    ///
+    /// The child starts holding 0 bytes in `self`. Growth is checked against `cap` (and child
+    /// `FairSpill` shares) first, then charged lazily to `self`.
+    pub fn child(self: &Arc<Self>, name: &'static str, cap: usize) -> Arc<ScopedPool> {
+        let parent_res = self.register(name, false);
+        Arc::new(Self {
+            shared: Arc::clone(&self.shared),
+            initial: 0,
+            cap,
+            state: Mutex::new(PoolState {
+                parent: Some(parent_res),
+                ..PoolState::default()
+            }),
+        })
+    }
 }
 
 impl Drop for ScopedPool {
     fn drop(&mut self) {
-        let held = self
-            .state
-            .get_mut()
-            .unwrap_or_else(PoisonError::into_inner)
-            .held;
-        self.shared.give_back(held);
+        let state = self.state.get_mut().unwrap_or_else(PoisonError::into_inner);
+        if state.parent.is_none() {
+            self.shared.give_back(state.held);
+        }
     }
 }
 
@@ -279,12 +295,16 @@ impl Reservation {
 
         let delta = next.saturating_sub(state.held);
 
-        if delta > 0 && !self.pool.shared.try_take(delta) {
-            return Err(ColumnError::MemoryLimit {
-                kind: MemoryLimitKind::GlobalPool,
-                requested: delta,
-                limit: self.pool.shared.limit(),
-            });
+        if delta > 0 {
+            if let Some(parent_res) = state.parent.as_mut() {
+                parent_res.try_grow(delta)?;
+            } else if !self.pool.shared.try_take(delta) {
+                return Err(ColumnError::MemoryLimit {
+                    kind: MemoryLimitKind::GlobalPool,
+                    requested: delta,
+                    limit: self.pool.shared.limit(),
+                });
+            }
         }
 
         state.held = state.held.max(next);
@@ -295,7 +315,8 @@ impl Reservation {
         Ok(())
     }
 
-    /// Releases `bytes.min(self.size)` bytes, returning surplus above `initial` to `GlobalPool`.
+    /// Releases `bytes.min(self.size)` bytes, returning surplus above `initial` to `GlobalPool`
+    /// or the parent [`ScopedPool`].
     pub fn shrink(&mut self, bytes: usize) {
         let actual = bytes.min(self.size);
         if actual == 0 {
@@ -313,7 +334,15 @@ impl Reservation {
             let keep = state.used.max(self.pool.initial);
             let freed = state.held.saturating_sub(keep);
             state.held -= freed;
-            freed
+
+            if let Some(parent_res) = state.parent.as_mut() {
+                if freed > 0 {
+                    parent_res.shrink(freed);
+                }
+                0
+            } else {
+                freed
+            }
         };
 
         if freed > 0 {
@@ -412,7 +441,15 @@ impl Drop for Reservation {
             let keep = state.used.max(self.pool.initial);
             let freed = state.held.saturating_sub(keep);
             state.held -= freed;
-            freed
+
+            if let Some(parent_res) = state.parent.as_mut() {
+                if freed > 0 {
+                    parent_res.shrink(freed);
+                }
+                0
+            } else {
+                freed
+            }
         };
 
         if freed > 0 {
@@ -656,5 +693,162 @@ mod tests {
         assert!(matches!(err, ColumnError::InvalidBatch { .. }));
         let err = scan_res.transfer_to(&mut other_res, 0).unwrap_err();
         assert!(matches!(err, ColumnError::InvalidBatch { .. }));
+    }
+
+    #[test]
+    fn child_pool_reserves_lazily_and_enforces_child_parent_and_global_caps() {
+        let released = Arc::new(AtomicUsize::new(0));
+        let rc = Arc::clone(&released);
+        let global = GlobalPool::with_release_hook(500, move || {
+            rc.fetch_add(1, Ordering::SeqCst);
+        });
+        let parent = global.try_admit(0, 400).expect("admit");
+        let child = parent.child("facet_field", 250);
+
+        // Creating a child reserves 0 bytes in parent and GlobalPool.
+        assert_eq!(child.cap(), 250);
+        assert_eq!(child.reserved(), 0);
+        assert_eq!(parent.reserved(), 0);
+        assert_eq!(global.used(), 0);
+
+        // Child grows lazily on parent and GlobalPool.
+        let mut r1 = child.register("r1", false);
+        r1.try_grow(150).expect("grow 150");
+        assert_eq!(child.reserved(), 150);
+        assert_eq!(parent.reserved(), 150);
+        assert_eq!(global.used(), 150);
+
+        // Child cap (250) enforced independently before parent/GlobalPool.
+        let err = r1.try_grow(101).unwrap_err();
+        assert!(matches!(
+            err,
+            ColumnError::MemoryLimit {
+                kind: MemoryLimitKind::QueryCap,
+                requested: 251,
+                limit: 250,
+            }
+        ));
+        assert_eq!(r1.size(), 150);
+        assert_eq!(parent.reserved(), 150);
+        assert_eq!(global.used(), 150);
+
+        // Parent cap (400) enforced when sibling in parent consumes headroom.
+        let mut p_res = parent.register("scan", false);
+        p_res.try_grow(200).expect("parent scan 200");
+        assert_eq!(parent.reserved(), 350);
+        assert_eq!(global.used(), 350);
+
+        let err = r1.try_grow(60).unwrap_err();
+        assert!(matches!(
+            err,
+            ColumnError::MemoryLimit {
+                kind: MemoryLimitKind::QueryCap,
+                requested: 410,
+                limit: 400,
+            }
+        ));
+        assert_eq!(r1.size(), 150);
+        assert_eq!(child.reserved(), 150);
+        assert_eq!(parent.reserved(), 350);
+        assert_eq!(global.used(), 350);
+
+        // GlobalPool cap (500) enforced when another root scope holds global headroom.
+        p_res.free();
+        assert_eq!(parent.reserved(), 150);
+        let other = global.try_admit(0, 400).expect("admit other");
+        let mut other_res = other.register("other", false);
+        other_res.try_grow(320).expect("other grow 320");
+        assert_eq!(global.used(), 470);
+
+        let err = r1.try_grow(50).unwrap_err();
+        assert!(matches!(
+            err,
+            ColumnError::MemoryLimit {
+                kind: MemoryLimitKind::GlobalPool,
+                requested: 50,
+                limit: 500,
+            }
+        ));
+        assert_eq!(r1.size(), 150);
+        assert_eq!(child.reserved(), 150);
+        assert_eq!(parent.reserved(), 150);
+        assert_eq!(global.used(), 470);
+
+        drop(other_res);
+        drop(other);
+        assert_eq!(global.used(), 150);
+
+        // Shrink and Drop return lazily reserved bytes back to 0.
+        r1.shrink(50);
+        assert_eq!(child.reserved(), 100);
+        assert_eq!(parent.reserved(), 100);
+        assert_eq!(global.used(), 100);
+
+        drop(r1);
+        assert_eq!(child.reserved(), 0);
+        assert_eq!(parent.reserved(), 0);
+        assert_eq!(global.used(), 0);
+
+        drop(child);
+        drop(parent);
+        assert_eq!(global.used(), 0);
+        assert!(released.load(Ordering::SeqCst) > 0);
+    }
+
+    #[test]
+    fn child_pool_supports_fair_spill_and_transfer_to() {
+        let global = GlobalPool::new(1000);
+        let parent = global.try_admit(100, 600).expect("admit with initial 100");
+        let child = parent.child("child", 300);
+        assert_eq!(global.used(), 100);
+        assert_eq!(parent.reserved(), 0);
+
+        let mut unspillable = child.register("u", false);
+        let mut s1 = child.register("s1", true);
+        let mut s2 = child.register("s2", true);
+
+        unspillable.try_grow(100).expect("u grow 100");
+        assert_eq!(child.spill_share(), 100);
+        // Parent's initial 100 already covers child's 100 bytes in GlobalPool.
+        assert_eq!(parent.reserved(), 100);
+        assert_eq!(global.used(), 100);
+
+        s1.try_grow(100).expect("s1 grow 100");
+        assert_eq!(parent.reserved(), 200);
+        assert_eq!(global.used(), 200);
+
+        let err = s1.try_grow(1).unwrap_err();
+        assert!(matches!(
+            err,
+            ColumnError::MemoryLimit {
+                kind: MemoryLimitKind::SpillShare,
+                requested: 101,
+                limit: 100,
+            }
+        ));
+
+        // Transfer inside the same child pool leaves parent/GlobalPool untouched.
+        unspillable.transfer_to(&mut s2, 100).expect("transfer");
+        assert_eq!(unspillable.size(), 0);
+        assert_eq!(s2.size(), 100);
+        assert_eq!(child.reserved(), 200);
+        assert_eq!(parent.reserved(), 200);
+        assert_eq!(global.used(), 200);
+        assert_eq!(child.spill_share(), 150);
+
+        // Cross-pool transfer between child and parent fails with InvalidBatch.
+        let mut p_res = parent.register("p", false);
+        let err = s2.transfer_to(&mut p_res, 10).unwrap_err();
+        assert!(matches!(err, ColumnError::InvalidBatch { .. }));
+
+        drop(s1);
+        drop(s2);
+        drop(unspillable);
+        drop(child);
+        assert_eq!(parent.reserved(), 0);
+        assert_eq!(global.used(), 100);
+        drop(p_res);
+        drop(parent);
+        assert_eq!(global.used(), 0);
     }
 }

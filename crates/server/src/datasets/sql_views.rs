@@ -935,5 +935,22 @@ mod tests {
         let (_, big_exp_batches) = experiment_items_batches(&big_rows).expect("big exp batches");
         assert_eq!(big_exp_batches.len(), 3);
         assert!(big_exp_batches.iter().all(|b| b.num_rows() == 1));
+
+        // 3. Empty slice returns zero batches.
+        let (_, empty_ds_batches) = dataset_items_batches(&[]).expect("empty dataset batches");
+        assert!(empty_ds_batches.is_empty());
+        let (_, empty_exp_batches) = experiment_items_batches(&[]).expect("empty exp batches");
+        assert!(empty_exp_batches.is_empty());
+
+        // 4. Single > 8 MiB text-row stays in one 1-row batch.
+        let huge_item = [make_item(0, 9 * 1024 * 1024)];
+        let (_, huge_ds_batches) = dataset_items_batches(&huge_item).expect("huge dataset batch");
+        assert_eq!(huge_ds_batches.len(), 1);
+        assert_eq!(huge_ds_batches[0].num_rows(), 1);
+
+        let huge_row = [make_row(0, 9 * 1024 * 1024)];
+        let (_, huge_exp_batches) = experiment_items_batches(&huge_row).expect("huge exp batch");
+        assert_eq!(huge_exp_batches.len(), 1);
+        assert_eq!(huge_exp_batches[0].num_rows(), 1);
     }
 }
