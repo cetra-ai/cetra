@@ -137,7 +137,7 @@ it("the story dashboards have the planned ids, names and widget titles", () => {
     ["Failed runs per day", "Error rate", "Cost per run", "p95 duration"],
     ["p95 reply time", "Reply time by day", "Calls over 3 s", "Calls per day"],
     ["Invoices per day", "Schema check failures", "Cost per invoice", "Invoices by model"],
-    ["Cost by repository", "Cost by coding agent"],
+    ["Cost by repository", "Cost by coding agent", "Cost per repository"],
   ]);
   for (const dashboard of dashboards) {
     for (const widget of dashboard.definition.widgets) {
@@ -207,7 +207,7 @@ it("the large mock answers every widget of every story dashboard with data", asy
     server.use(...largeHandlers(datasetOf(story, 5000)));
     for (const widget of dashboard.definition.widgets) {
       const type = widget.chart?.type;
-      if (type === "bar_h") {
+      if (type === "bar_h" || type === "table") {
         const answer = await ask(widget, "total");
         expect(answer.status).toBe(200);
         const body = answer.json as { shape: string; rows: { values: unknown[] }[] };

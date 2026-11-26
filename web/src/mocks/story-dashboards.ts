@@ -211,6 +211,20 @@ export function storyDashboards(): Dashboard[] {
           measures: [{ agg: "sum", field: "cost_total", label: "Cost" }],
           breakdown: { field: "metadata['coding_agent']", limit: 5, other: false },
         }),
+        // Under the chart: each repository's cost over the range, with its share of the total.
+        {
+          id: "cost-per-repository",
+          title: "Cost per repository",
+          layout: { x: 0, y: 8, w: 30, h: 4 },
+          kind: "chart",
+          chart: { type: "table", share: true },
+          query: {
+            source: "traces",
+            filter: REPOSITORY,
+            measures: [{ agg: "sum", field: "cost_total", label: "Cost" }],
+            breakdown: { field: "metadata['repository']", limit: 5, other: false },
+          },
+        },
       ],
     ),
   ];

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { checkClipRect, checkStorage } from "./screenshot-checks.mjs";
+import { checkClip, checkClipRect, checkStorage } from "./screenshot-checks.mjs";
 
 test("a shot without a storage map passes", () => {
   assert.doesNotThrow(() => checkStorage([{ name: "a" }]));
@@ -90,4 +90,16 @@ test("a shot with both clip and clipRect is rejected, naming the shot", () => {
       ]),
     /shot "bad-shot": a shot has clip or clipRect, not both/,
   );
+});
+
+test("a clip is one selector or a list of at least two", () => {
+  assert.doesNotThrow(() =>
+    checkClip([{ name: "a", clip: "main" }, { name: "b", clip: ["#one", "#two"] }, { name: "c" }]),
+  );
+});
+
+test("a clip list of one, an empty selector or a non-string is rejected, naming the shot", () => {
+  for (const clip of [["#one"], ["#one", ""], [1, "#two"], "", 3]) {
+    assert.throws(() => checkClip([{ name: "bad-shot", clip }]), /shot "bad-shot"/);
+  }
 });

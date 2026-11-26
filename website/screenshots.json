@@ -259,9 +259,12 @@
     "theme": "dark",
     "viewport": {
       "width": 1332,
-      "height": 800
+      "height": 1100
     },
-    "clip": "section[aria-label=\"Cost by repository\"]"
+    "clip": [
+      "section[aria-label=\"Cost by repository\"]",
+      "section[aria-label=\"Cost per repository\"]"
+    ]
   },
   {
     "name": "marketing-playground",

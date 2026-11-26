@@ -8,7 +8,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { chromium } from "playwright";
 import { portIsFree } from "./port-free.mjs";
-import { checkClipRect, checkStorage } from "./screenshot-checks.mjs";
+import { checkClip, checkClipRect, checkStorage } from "./screenshot-checks.mjs";
 
 const SITE = dirname(dirname(fileURLToPath(import.meta.url)));
 const ROOT = dirname(SITE);
@@ -58,6 +58,21 @@ async function startServer() {
   throw new Error(`the web dev server did not start:\n${output}`);
 }
 
+/** The smallest rectangle of the window around the first element of each selector, in whole CSS px. */
+async function unionOf(page, selectors) {
+  const boxes = [];
+  for (const selector of selectors) {
+    const box = await page.locator(selector).first().boundingBox();
+    if (!box) throw new Error(`clip: no visible element for ${selector}`);
+    boxes.push(box);
+  }
+  const x = Math.floor(Math.min(...boxes.map((box) => box.x)));
+  const y = Math.floor(Math.min(...boxes.map((box) => box.y)));
+  const right = Math.ceil(Math.max(...boxes.map((box) => box.x + box.width)));
+  const bottom = Math.ceil(Math.max(...boxes.map((box) => box.y + box.height)));
+  return { x, y, width: right - x, height: bottom - y };
+}
+
 async function shoot(context, shot) {
   const page = await context.newPage();
   // A marketing shot sets its own window size; the docs' shots keep the context's 1440×900.
@@ -104,9 +119,12 @@ async function shoot(context, shot) {
     });
     const path = join(OUT, `${shot.name}.png`);
     const options = { path, animations: "disabled", caret: "hide" };
-    // `clip` captures one element (the panel a section talks about) instead of the window;
-    // `clipRect` captures a rectangle of the window in CSS px (a window over the page).
-    if (shot.clip) await page.locator(shot.clip).first().screenshot(options);
+    // `clip` captures one element (the panel a section talks about) instead of the window, or the
+    // smallest rectangle around several (two cards of a dashboard); `clipRect` captures a rectangle
+    // of the window in CSS px (a window over the page).
+    if (Array.isArray(shot.clip))
+      await page.screenshot({ ...options, clip: await unionOf(page, shot.clip) });
+    else if (shot.clip) await page.locator(shot.clip).first().screenshot(options);
     else if (shot.clipRect) await page.screenshot({ ...options, clip: shot.clipRect });
     else await page.screenshot({ ...options, fullPage: false });
     console.log(`wrote ${path}`);
@@ -122,6 +140,7 @@ if (selected.length !== (names.length || shots.length)) {
   throw new Error(`unknown shot name in: ${names.join(", ")}`);
 }
 checkStorage(selected);
+checkClip(selected);
 checkClipRect(selected);
 mkdirSync(OUT, { recursive: true });
 

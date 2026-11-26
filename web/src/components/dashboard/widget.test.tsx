@@ -579,7 +579,7 @@ describe("other widgets", () => {
     expect(onModel).toHaveBeenCalledWith("model-a");
   });
 
-  it("shows a model's full name in the title of its row, and gives the first column two fifths", async () => {
+  it("shows a model's full name in the title of its row, and gives the value columns a fixed width", async () => {
     const name = "claude-haiku-4-5-20251001-extended-context";
     answer(() => totalAnswer([{ group: name, other: false, values: [3] }]));
     renderWidget(
@@ -594,7 +594,8 @@ describe("other widgets", () => {
     );
     const cell = await screen.findByTitle(name);
     expect(cell.tagName).toBe("TD");
-    expect(screen.getByRole("columnheader", { name: "model" })).toHaveClass("w-2/5");
+    expect(screen.getByRole("columnheader", { name: "model" })).not.toHaveClass("w-2/5");
+    expect(screen.getByRole("columnheader", { name: "Cost" })).toHaveClass("w-32");
   });
 
   it("shows a heading as a second-level title, with no card", () => {
