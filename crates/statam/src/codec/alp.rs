@@ -14,6 +14,10 @@ use crate::{MAX_BLOCK_RAW_BYTES, StatamError};
 /// Maximum `exp` / `fac` index in ALP (`0..=18`).
 pub const ALP_MAX_EXP: u8 = 18;
 
+/// Bit flag in the stored `exp` header byte indicating exact division by `10^exp`
+/// (`(scaled * 10^fac) / 10^exp`) instead of multiplication by `10^-exp`.
+const ALP_DIV_MODE_FLAG: u8 = 0x80;
+
 /// Maximum exact integer magnitude representable cleanly in ALP (`2^52`).
 const ALP_MAX_SAFE_INT: f64 = (1i64 << 52) as f64;
 
@@ -33,7 +37,7 @@ const FRAC10: [f64; 19] = [
 ];
 
 #[inline]
-fn try_scale_exact(v: f64, exp: u8, fac: u8) -> Option<i64> {
+fn try_scale_exact(v: f64, exp: u8, fac: u8, div_mode: bool) -> Option<i64> {
     if !v.is_finite() {
         return None;
     }
@@ -46,7 +50,7 @@ fn try_scale_exact(v: f64, exp: u8, fac: u8) -> Option<i64> {
         return None;
     }
     let scaled = rounded as i64;
-    let recon = (scaled as f64) * POW10[usize::from(fac)] * FRAC10[usize::from(exp)];
+    let recon = unscale(scaled, exp, fac, div_mode);
     if recon.to_bits() == v.to_bits() {
         Some(scaled)
     } else {
@@ -55,11 +59,15 @@ fn try_scale_exact(v: f64, exp: u8, fac: u8) -> Option<i64> {
 }
 
 #[inline]
-fn unscale(scaled: i64, exp: u8, fac: u8) -> f64 {
-    (scaled as f64) * POW10[usize::from(fac)] * FRAC10[usize::from(exp)]
+fn unscale(scaled: i64, exp: u8, fac: u8, div_mode: bool) -> f64 {
+    if div_mode {
+        ((scaled as f64) * POW10[usize::from(fac)]) / POW10[usize::from(exp)]
+    } else {
+        (scaled as f64) * POW10[usize::from(fac)] * FRAC10[usize::from(exp)]
+    }
 }
 
-fn pick_best_params(values: &[f64], nulls: Option<&Bitmap>) -> (u8, u8) {
+fn pick_best_params(values: &[f64], nulls: Option<&Bitmap>) -> (u8, u8, bool) {
     let mut samples = [0.0f64; ALP_SAMPLE_LIMIT];
     let mut sample_count = 0usize;
 
@@ -84,19 +92,21 @@ fn pick_best_params(values: &[f64], nulls: Option<&Bitmap>) -> (u8, u8) {
         }
     }
     if sample_count == 0 {
-        return (0, 0);
+        return (0, 0, false);
     }
 
     let sample_slice = &samples[..sample_count];
     let mut best_hits = 0usize;
     let mut best_exp = 0u8;
     let mut best_fac = 0u8;
+    let mut best_div = false;
 
-    // Fast path: test common decimal scaling `(exp, fac = 0)` for `exp = 0..=10` first.
+    // Fast path: test common decimal scaling `(exp, fac = 0)` for `exp = 0..=10` first,
+    // preferring multiplication mode when equal and falling back to exact `/ POW10[exp]`.
     for exp in 0..=10u8 {
         let mut hits = 0usize;
         for &v in sample_slice {
-            if try_scale_exact(v, exp, 0).is_some() {
+            if try_scale_exact(v, exp, 0, false).is_some() {
                 hits += 1;
             }
         }
@@ -104,9 +114,28 @@ fn pick_best_params(values: &[f64], nulls: Option<&Bitmap>) -> (u8, u8) {
             best_hits = hits;
             best_exp = exp;
             best_fac = 0;
+            best_div = false;
         }
         if best_hits == sample_count {
-            return (best_exp, 0);
+            return (best_exp, 0, false);
+        }
+    }
+
+    for exp in 1..=10u8 {
+        let mut hits = 0usize;
+        for &v in sample_slice {
+            if try_scale_exact(v, exp, 0, true).is_some() {
+                hits += 1;
+            }
+        }
+        if hits > best_hits {
+            best_hits = hits;
+            best_exp = exp;
+            best_fac = 0;
+            best_div = true;
+        }
+        if best_hits == sample_count {
+            return (best_exp, 0, true);
         }
     }
 
@@ -117,7 +146,7 @@ fn pick_best_params(values: &[f64], nulls: Option<&Bitmap>) -> (u8, u8) {
             }
             let mut hits = 0usize;
             for &v in sample_slice {
-                if try_scale_exact(v, exp, fac).is_some() {
+                if try_scale_exact(v, exp, fac, false).is_some() {
                     hits += 1;
                 }
             }
@@ -125,15 +154,16 @@ fn pick_best_params(values: &[f64], nulls: Option<&Bitmap>) -> (u8, u8) {
                 best_hits = hits;
                 best_exp = exp;
                 best_fac = fac;
+                best_div = false;
             }
             if best_hits == sample_count {
                 // Found a parameter pair with 100% sample match; prefer smaller exp.
-                return (best_exp, best_fac);
+                return (best_exp, best_fac, false);
             }
         }
     }
 
-    (best_exp, best_fac)
+    (best_exp, best_fac, best_div)
 }
 
 /// Encodes an `f64` block body (without leading row null bitmap) using ALP.
@@ -156,21 +186,21 @@ pub fn encode_alp_body(
         return Ok(None);
     }
 
-    let (exp, fac) = pick_best_params(values, nulls);
+    let (exp, fac, div_mode) = pick_best_params(values, nulls);
 
     let mut scaled_vals = vec![0i64; values.len()];
     let mut exc_pos: Vec<u16> = Vec::new();
     let mut exc_bits: Vec<u64> = Vec::new();
     let mut first_exact: Option<i64> = None;
 
-    // 25% exception budget over non-null values.
+    // 25% exception budget over non-null values; size check below rejects unbeneficial blocks.
     let max_exceptions = valid_count / 4;
 
     for (i, &v) in values.iter().enumerate() {
         if nulls.is_some_and(|bm| !bm.get(i)) {
             continue;
         }
-        if let Some(s) = try_scale_exact(v, exp, fac) {
+        if let Some(s) = try_scale_exact(v, exp, fac, div_mode) {
             scaled_vals[i] = s;
             if first_exact.is_none() {
                 first_exact = Some(s);
@@ -216,7 +246,12 @@ pub fn encode_alp_body(
     //   exp: u8 | fac: u8 | exc_count: u16 | base: i64 | bit_width: u8 |
     //   packed_deltas | [u16; exc_count] | [u64; exc_count]
     let mut out = Vec::with_capacity(13 + exc_pos.len() * 10);
-    out.push(exp);
+    let exp_byte = if div_mode {
+        exp | ALP_DIV_MODE_FLAG
+    } else {
+        exp
+    };
+    out.push(exp_byte);
     out.push(fac);
     out.extend_from_slice(&exc_count.to_le_bytes());
     out.extend_from_slice(&min_scaled.to_le_bytes());
@@ -229,7 +264,7 @@ pub fn encode_alp_body(
         out.extend_from_slice(&bits.to_le_bytes());
     }
 
-    if out.len() >= values.len() * 8 {
+    if out.len().saturating_mul(4) >= values.len().saturating_mul(8 * 3) {
         return Ok(None);
     }
 
@@ -266,9 +301,10 @@ pub fn decode_alp_body(
         });
     }
 
-    let exp = src[0];
+    let div_mode = (src[0] & ALP_DIV_MODE_FLAG) != 0;
+    let exp = src[0] & !ALP_DIV_MODE_FLAG;
     let fac = src[1];
-    if exp > ALP_MAX_EXP || fac > exp {
+    if exp > ALP_MAX_EXP || fac > exp || (div_mode && exp == 0) {
         return Err(StatamError::Corrupt {
             reason: "invalid alp exp/fac parameters",
         });
@@ -314,7 +350,7 @@ pub fn decode_alp_body(
     let mut out = Vec::with_capacity(count);
     for &d in &deltas {
         let scaled = base.wrapping_add(d as i64);
-        out.push(unscale(scaled, exp, fac));
+        out.push(unscale(scaled, exp, fac, div_mode));
     }
 
     let pos_section = &exc_slice[..exc_count * 2];

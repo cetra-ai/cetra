@@ -18,7 +18,9 @@ use crate::codec::nested::{
     ShreddedSubCol, decode_shredded_residual_block, decode_shredded_subcol, decode_single_map_key,
     unshred_map,
 };
-use crate::codec::{ZonePred, ZoneValue, decode_mini_block, zone_map_may_match};
+use crate::codec::{
+    ZonePred, ZoneValue, decode_mini_block, decode_mini_block_selected, zone_map_may_match,
+};
 use crate::format::{
     BLOCK_ENTRY_LEN, BLOCK_FLAG_HAS_NAN, BLOCK_FLAG_MIN_MAX_VALID, BLOCK_FRAME_HEADER_LEN,
     BlockEntry, CHECKSUM_ALG_CRC32C, COL_FLAG_BLOOM_IN_HOT_TAIL, COL_FLAG_DICT_IN_HOT_TAIL,
@@ -3130,7 +3132,7 @@ impl StatamReader {
             } else {
                 None
             };
-            let col = decode_mini_block(&raw, blk, dt, dict.as_deref())?;
+            let col = decode_mini_block_selected(&raw, blk, dt, dict.as_deref(), mask)?;
             if *dt == DataType::MapUtf8
                 && let Some(req_keys) = map_keys_by_col.get(&cidx)
             {

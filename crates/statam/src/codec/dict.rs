@@ -7,6 +7,42 @@
 use std::cmp::Ordering;
 use std::collections::HashMap;
 use std::fmt;
+use std::hash::BuildHasherDefault;
+
+#[derive(Default)]
+struct FastSliceHasher(u64);
+
+impl std::hash::Hasher for FastSliceHasher {
+    #[inline]
+    fn write(&mut self, bytes: &[u8]) {
+        let mut h = self.0;
+        let (chunks, rem) = bytes.as_chunks::<8>();
+        for &c in chunks {
+            let v = u64::from_le_bytes(c);
+            h = (h ^ v).wrapping_mul(0x9e37_79b9_7f4a_7c15);
+        }
+        if !rem.is_empty() {
+            let mut tail = [0u8; 8];
+            tail[..rem.len()].copy_from_slice(rem);
+            let v = u64::from_le_bytes(tail);
+            h = (h ^ v).wrapping_mul(0x9e37_79b9_7f4a_7c15);
+        }
+        self.0 = h;
+    }
+
+    #[inline]
+    fn write_usize(&mut self, i: usize) {
+        self.0 = (self.0 ^ (i as u64)).wrapping_mul(0x9e37_79b9_7f4a_7c15);
+    }
+
+    #[inline]
+    fn finish(&self) -> u64 {
+        let mut z = self.0;
+        z = (z ^ (z >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+        z = (z ^ (z >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+        z ^ (z >> 31)
+    }
+}
 
 use cetra_column::{
     BinaryData, Bitmap, Column, DataType, DictColumn, FlatColumn, FlatData, Utf8Data,
@@ -188,8 +224,9 @@ impl FileDict {
         let nulls = col.nulls();
         let mut codes = Vec::with_capacity(n);
 
-        if !self.sorted {
-            let mut map: HashMap<&[u8], u32> = HashMap::with_capacity(self.len());
+        if !self.sorted || (n >= 128 && self.len() >= 16) {
+            let mut map: HashMap<&[u8], u32, BuildHasherDefault<FastSliceHasher>> =
+                HashMap::with_capacity_and_hasher(self.len(), BuildHasherDefault::default());
             for i in 0..self.len() {
                 if let Some(b) = self.entry_bytes(i as u32) {
                     map.insert(b, i as u32);
@@ -400,8 +437,11 @@ pub enum DictBuildMode {
         /// Maximum distinct entries before bailing out.
         max_entries: usize,
     },
-    /// Full lexicographically sorted dictionary.
-    L1Compact,
+    /// Lexicographically sorted dictionary (`<= max_entries`, default unbounded).
+    L1Compact {
+        /// Maximum distinct entries before bailing out.
+        max_entries: usize,
+    },
 }
 
 /// Builds a [`FileDict`] and row codes from a [`FlatColumn`].
@@ -430,7 +470,16 @@ impl DictBuilder {
     /// Creates an `L1Compact` sorted dictionary builder.
     pub fn l1_compact() -> Self {
         Self {
-            mode: DictBuildMode::L1Compact,
+            mode: DictBuildMode::L1Compact {
+                max_entries: usize::MAX,
+            },
+        }
+    }
+
+    /// Creates an `L1Compact` sorted dictionary builder with a custom entry cap.
+    pub fn l1_with_max(max_entries: usize) -> Self {
+        Self {
+            mode: DictBuildMode::L1Compact { max_entries },
         }
     }
 
@@ -449,11 +498,12 @@ impl DictBuilder {
         let nulls = col.nulls();
 
         let max_entries = match self.mode {
-            DictBuildMode::L0Fast { max_entries } => max_entries,
-            DictBuildMode::L1Compact => usize::MAX,
+            DictBuildMode::L0Fast { max_entries } | DictBuildMode::L1Compact { max_entries } => {
+                max_entries
+            }
         };
 
-        let mut seen: HashMap<&[u8], u32> = HashMap::new();
+        let mut seen: HashMap<&[u8], u32, BuildHasherDefault<FastSliceHasher>> = HashMap::default();
         let mut unique: Vec<&[u8]> = Vec::new();
         let mut codes = Vec::with_capacity(n);
         let mut any_valid = false;
@@ -487,7 +537,7 @@ impl DictBuilder {
             return Ok(None);
         }
 
-        let sorted = matches!(self.mode, DictBuildMode::L1Compact);
+        let sorted = matches!(self.mode, DictBuildMode::L1Compact { .. });
         if sorted {
             let mut order: Vec<u32> = (0..unique.len() as u32).collect();
             order.sort_unstable_by(|&a, &b| unique[a as usize].cmp(unique[b as usize]));

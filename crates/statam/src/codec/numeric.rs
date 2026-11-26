@@ -7,7 +7,10 @@ use cetra_column::{
 };
 
 use crate::codec::alp::{decode_alp_body, encode_alp_body};
-use crate::codec::fsst::{decode_fsst_binary, decode_fsst_utf8, encode_fsst_body};
+use crate::codec::fsst::{
+    decode_fsst_binary, decode_fsst_binary_selected, decode_fsst_utf8, decode_fsst_utf8_selected,
+    encode_fsst_body,
+};
 use crate::codec::zonemap::{ZoneMapSummary, compute_zone_map};
 use crate::codec::{EncodedMiniBlock, WriteProfile, preferred_block_codec};
 use crate::format::{
@@ -550,31 +553,16 @@ pub(crate) fn encode_narrow_column_with_locality(
             })
         }
         DataType::I64 | DataType::TimestampNs { .. } | DataType::Date => {
-            let (enc, inner_body) = match profile {
-                WriteProfile::L0Fast => {
-                    if is_monotonic_sample_32(flat) {
-                        if let Some(db) = encode_delta_bitpack_body(flat)? {
-                            (Encoding::DeltaBitpack, db)
-                        } else {
-                            (Encoding::Plain, encode_plain_body(flat)?)
-                        }
-                    } else if let Some(fb) = encode_for_bitpack_body(flat)? {
-                        (Encoding::ForBitpack, fb)
-                    } else {
-                        (Encoding::Plain, encode_plain_body(flat)?)
-                    }
+            let (enc, inner_body) = if is_monotonic_sample_32(flat) {
+                if let Some(db) = encode_delta_bitpack_body(flat)? {
+                    (Encoding::DeltaBitpack, db)
+                } else {
+                    (Encoding::Plain, encode_plain_body(flat)?)
                 }
-                WriteProfile::L1Compact => {
-                    let for_body = encode_for_bitpack_body(flat)?;
-                    let delta_body = encode_delta_bitpack_body(flat)?;
-
-                    match (for_body, delta_body) {
-                        (Some(fb), Some(db)) if db.len() < fb.len() => (Encoding::DeltaBitpack, db),
-                        (Some(fb), _) => (Encoding::ForBitpack, fb),
-                        (None, Some(db)) => (Encoding::DeltaBitpack, db),
-                        (None, None) => (Encoding::Plain, encode_plain_body(flat)?),
-                    }
-                }
+            } else if let Some(fb) = encode_for_bitpack_body(flat)? {
+                (Encoding::ForBitpack, fb)
+            } else {
+                (Encoding::Plain, encode_plain_body(flat)?)
             };
 
             let raw = prepend_optional_nulls(flat.nulls(), inner_body);
@@ -648,8 +636,8 @@ pub(crate) fn encode_narrow_column_with_locality(
                 _ => 0,
             };
             let (enc, inner_body) = if profile == WriteProfile::L1Compact
-                && !is_wide_row
-                && raw_varlen_bytes <= 16 * 1024
+                && (256..=8 * 1024 * 1024).contains(&raw_varlen_bytes)
+                && (!is_wide_row || raw_varlen_bytes >= 16 * 1024)
             {
                 let slices = extract_varlen_slices(flat)?;
                 if let Some(fsst) = encode_fsst_body(&slices)? {
@@ -836,7 +824,7 @@ fn try_encode_rle(
             (single, vec![*len as u32])
         }
         Column::Flat(f) => {
-            if profile == WriteProfile::L0Fast && !has_runs_sample_64(f) {
+            if !has_runs_sample_64(f) {
                 return Ok(None);
             }
             let Some((vals, ends)) = compute_flat_runs(f)? else {
@@ -1296,6 +1284,44 @@ pub(crate) fn encode_plain_utf8(u: &Utf8Data) -> Vec<u8> {
     }
     out.extend_from_slice(u.bytes());
     out
+}
+
+/// Decodes a narrow scalar mini-block, decoding only `mask`-selected rows for
+/// encodings that support sparse selective decode (`Fsst`).
+pub(crate) fn decode_narrow_column_selected(
+    raw_body: &[u8],
+    entry: &BlockEntry,
+    dt: &DataType,
+    mask: &Bitmap,
+) -> Result<Column, StatamError> {
+    if entry.encoding == Encoding::Fsst
+        && matches!(dt, DataType::Utf8 | DataType::Binary)
+        && !mask.all_ones()
+    {
+        let row_count = entry.row_count as usize;
+        if row_count == 0 {
+            if !raw_body.is_empty() {
+                return Err(StatamError::Corrupt {
+                    reason: "trailing bytes in empty narrow block",
+                });
+            }
+            return Ok(Column::Flat(FlatColumn::empty(dt)));
+        }
+        let (nulls, body) = read_optional_nulls(raw_body, row_count, entry.block_flags)?;
+        let (data, out_nulls) = match dt {
+            DataType::Utf8 => {
+                let (u, n) = decode_fsst_utf8_selected(body, row_count, mask, nulls.as_ref())?;
+                (FlatData::Utf8(u), n)
+            }
+            DataType::Binary => {
+                let (b, n) = decode_fsst_binary_selected(body, row_count, mask, nulls.as_ref())?;
+                (FlatData::Binary(b), n)
+            }
+            _ => unreachable!(),
+        };
+        return Ok(Column::Flat(FlatColumn::try_new(data, out_nulls)?));
+    }
+    decode_narrow_column(raw_body, entry, dt)
 }
 
 /// Decodes a narrow scalar mini-block (`ConstNull`, `Const`, `Rle`, `ForBitpack`,

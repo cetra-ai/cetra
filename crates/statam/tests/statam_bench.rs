@@ -105,7 +105,10 @@ fn evaluate_gates(write_rows: &[WriteBenchRow], query_rows: &[QueryBenchRow]) ->
             g2_ok = false;
         }
         let spd = cet.write_ms / l0.write_ms.max(0.001);
-        g2_notes.push(format!("{wl}: L0 {spd:.2}x"));
+        let l1_note = find_write(write_rows, wl, "statam_l1")
+            .map(|l1| format!(", L1 {:.2}x", cet.write_ms / l1.write_ms.max(0.001)))
+            .unwrap_or_default();
+        g2_notes.push(format!("{wl}: L0 {spd:.2}x{l1_note}"));
     }
 
     // Gate 3: Read latency (L1Compact faster than all Parquet baselines on W1-W3 queries)

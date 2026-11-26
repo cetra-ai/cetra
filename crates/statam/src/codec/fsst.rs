@@ -8,8 +8,9 @@
 
 use std::collections::HashMap;
 use std::fmt;
+use std::hash::BuildHasherDefault;
 
-use cetra_column::{BinaryData, Utf8Data};
+use cetra_column::{BinaryData, Bitmap, Utf8Data};
 
 use crate::simd::bitpack::{min_bits_u32, pack_u32, packed_bytes_len, unpack_u32};
 use crate::{MAX_BLOCK_RAW_BYTES, StatamError};
@@ -153,9 +154,34 @@ impl FsstTable {
             return Self::empty();
         }
 
+        let mut round0_end = 0usize;
+        let mut round0_bytes = 0usize;
+        while round0_end < samples.len() && round0_bytes < 16 * 1024 {
+            round0_bytes += samples[round0_end].len();
+            round0_end += 1;
+        }
+        let round0_samples = &samples[..round0_end.max(1)];
+
         let mut table = Self::empty();
-        for _round in 0..3 {
-            table = train_round(&table, &samples);
+        for round in 0..3 {
+            let cur_samples = if round == 0 { round0_samples } else { &samples };
+            table = train_round(&table, cur_samples);
+            if round == 1 && total_sampled >= 8 * 1024 {
+                let mut probe_raw = 0usize;
+                let mut probe_coded = Vec::with_capacity(2048);
+                for &s in samples.iter().take(64) {
+                    if probe_raw >= 4 * 1024 {
+                        break;
+                    }
+                    probe_raw += s.len();
+                    table.encode_row(s, &mut probe_coded);
+                }
+                if probe_raw > 0
+                    && probe_raw.saturating_mul(100) < probe_coded.len().saturating_mul(104)
+                {
+                    return Self::empty();
+                }
+            }
         }
 
         // Final pruning pass: drop unused symbols and fill spare slots with frequent literals.
@@ -332,9 +358,53 @@ fn token_bytes(table: &FsstTable, token: u16) -> ([u8; FSST_MAX_SYM_LEN], u8) {
     }
 }
 
+#[derive(Default)]
+struct FastU32Hasher(u64);
+
+impl std::hash::Hasher for FastU32Hasher {
+    #[inline]
+    fn write(&mut self, bytes: &[u8]) {
+        let mut v = 0u64;
+        for &b in bytes {
+            v = v.wrapping_mul(0x9e37_79b9_7f4a_7c15) ^ u64::from(b);
+        }
+        self.0 = v;
+    }
+
+    #[inline]
+    fn write_u32(&mut self, i: u32) {
+        self.0 = u64::from(i).wrapping_mul(0x9e37_79b9_7f4a_7c15);
+    }
+
+    #[inline]
+    fn finish(&self) -> u64 {
+        self.0 ^ (self.0 >> 32)
+    }
+}
+
+#[derive(Default)]
+struct FastBytesKeyHasher(u64);
+
+impl std::hash::Hasher for FastBytesKeyHasher {
+    #[inline]
+    fn write(&mut self, bytes: &[u8]) {
+        let mut h = 0xcbf2_9ce4_8422_2325u64;
+        for &b in bytes {
+            h ^= u64::from(b);
+            h = h.wrapping_mul(0x0100_0000_01b3);
+        }
+        self.0 = h;
+    }
+
+    #[inline]
+    fn finish(&self) -> u64 {
+        self.0
+    }
+}
+
 fn train_round(table: &FsstTable, samples: &[&[u8]]) -> FsstTable {
     let mut count1 = vec![0u32; 512];
-    let mut count2: HashMap<u32, u32> = HashMap::new();
+    let mut count2: HashMap<u32, u32, BuildHasherDefault<FastU32Hasher>> = HashMap::default();
 
     for &sample in samples {
         let mut pos = 0usize;
@@ -360,7 +430,11 @@ fn train_round(table: &FsstTable, samples: &[&[u8]]) -> FsstTable {
     }
 
     // Collect deduplicated candidate symbols with their estimated byte gain.
-    let mut candidates: HashMap<(u8, [u8; FSST_MAX_SYM_LEN]), u64> = HashMap::new();
+    let mut candidates: HashMap<
+        (u8, [u8; FSST_MAX_SYM_LEN]),
+        u64,
+        BuildHasherDefault<FastBytesKeyHasher>,
+    > = HashMap::default();
 
     for (tok, &cnt) in count1.iter().enumerate() {
         if cnt == 0 {
@@ -431,6 +505,9 @@ fn finalize_table(table: &FsstTable, samples: &[&[u8]]) -> FsstTable {
         }
     }
 
+    let total_sample_bytes: usize = samples.iter().map(|s| s.len()).sum();
+    let min_multi_gain = (total_sample_bytes / 1024).clamp(16, 64);
+
     let mut entries = Vec::with_capacity(FSST_MAX_SYMBOLS);
     let mut has_len1 = [false; 256];
     for (code, &hits) in sym_hits.iter().enumerate() {
@@ -438,6 +515,12 @@ fn finalize_table(table: &FsstTable, samples: &[&[u8]]) -> FsstTable {
             continue;
         }
         let sl = table.symbol_slice(code);
+        if sl.len() >= 2 && (hits as usize).saturating_mul(sl.len() - 1) < min_multi_gain {
+            for &b in sl {
+                lit_hits[usize::from(b)] = lit_hits[usize::from(b)].saturating_add(hits);
+            }
+            continue;
+        }
         let mut bytes = [0u8; FSST_MAX_SYM_LEN];
         bytes[..sl.len()].copy_from_slice(sl);
         if sl.len() == 1 {
@@ -490,6 +573,24 @@ pub fn encode_fsst_body(values: &[&[u8]]) -> Result<Option<Vec<u8>>, StatamError
         return Ok(None);
     }
 
+    // Fast-reject incompressible columns (e.g. W4 random IDs) on a 64-row sample before
+    // encoding the entire mini-block.
+    if values.len() > 128 {
+        let mut sample_raw = 0usize;
+        let mut sample_coded = Vec::with_capacity(4096);
+        let step = (values.len() / 64).max(1);
+        for &row in values.iter().step_by(step).take(64) {
+            if !row.is_empty() {
+                sample_raw += row.len();
+                table.encode_row(row, &mut sample_coded);
+            }
+        }
+        if sample_raw > 0 && sample_raw.saturating_mul(100) < sample_coded.len().saturating_mul(112)
+        {
+            return Ok(None);
+        }
+    }
+
     let mut row_lens = Vec::with_capacity(values.len());
     let mut coded_bytes = Vec::with_capacity(raw_data_bytes / 2 + 16);
     for &row in values {
@@ -516,6 +617,9 @@ pub fn encode_fsst_body(values: &[&[u8]]) -> Result<Option<Vec<u8>>, StatamError
 
     Ok(Some(out))
 }
+
+/// Decoded `(offsets, raw_bytes, optional_null_bitmap)` returned by [`FsstBlockView::decode_selected`].
+pub type FsstSelectedRows = (Vec<u32>, Vec<u8>, Option<Bitmap>);
 
 /// Zero-copy view over an FSST-encoded block supporting O(1) single-row decode.
 #[derive(Clone)]
@@ -683,6 +787,76 @@ impl<'a> FsstBlockView<'a> {
         }
         Ok((out_offsets, out_bytes))
     }
+
+    /// Decodes only rows where `mask.get(row)` is true (and non-null per `nulls`).
+    /// Unselected or null rows receive empty slices and `false` in the returned null bitmap.
+    pub fn decode_selected(
+        &self,
+        mask: &Bitmap,
+        nulls: Option<&Bitmap>,
+    ) -> Result<FsstSelectedRows, StatamError> {
+        let row_count = self.len();
+        if row_count == 0 {
+            return Ok((vec![0], Vec::new(), None));
+        }
+
+        let mut total_decoded = 0usize;
+        for row in mask.iter_ones() {
+            if row >= row_count {
+                break;
+            }
+            if nulls.is_some_and(|bm| !bm.get(row)) {
+                continue;
+            }
+            let start = self.offsets[row] as usize;
+            let end = self.offsets[row + 1] as usize;
+            let row_decoded = self.table.validated_decoded_len(&self.coded[start..end])?;
+            total_decoded =
+                total_decoded
+                    .checked_add(row_decoded)
+                    .ok_or(StatamError::BoundsExceeded {
+                        reason: "fsst total decoded size overflow",
+                    })?;
+            if total_decoded > MAX_BLOCK_RAW_BYTES {
+                return Err(StatamError::BoundsExceeded {
+                    reason: "fsst decoded size exceeds MAX_BLOCK_RAW_BYTES",
+                });
+            }
+        }
+        let _ = u32::try_from(total_decoded).map_err(|_| StatamError::BoundsExceeded {
+            reason: "fsst decoded size exceeds u32::MAX",
+        })?;
+
+        let mut out_offsets = Vec::with_capacity(row_count + 1);
+        out_offsets.push(0u32);
+        let mut out_bytes = Vec::with_capacity(total_decoded);
+        let mut out_nulls = Bitmap::new_zeroed(row_count);
+        for row in mask.iter_ones() {
+            if row >= row_count {
+                break;
+            }
+            let cur_off = out_bytes.len() as u32;
+            if out_offsets.len() <= row {
+                out_offsets.resize(row + 1, cur_off);
+            }
+            if nulls.is_none_or(|bm| bm.get(row)) {
+                let start = self.offsets[row] as usize;
+                let end = self.offsets[row + 1] as usize;
+                self.table.decode_row_checked(
+                    &self.coded[start..end],
+                    &mut out_bytes,
+                    total_decoded,
+                )?;
+                let _ = out_nulls.set(row, true);
+            }
+            out_offsets.push(out_bytes.len() as u32);
+        }
+        let tail_off = out_bytes.len() as u32;
+        if out_offsets.len() < row_count + 1 {
+            out_offsets.resize(row_count + 1, tail_off);
+        }
+        Ok((out_offsets, out_bytes, Some(out_nulls)))
+    }
 }
 
 /// Decodes an FSST-encoded block body into [`Utf8Data`].
@@ -697,4 +871,28 @@ pub fn decode_fsst_binary(src: &[u8], row_count: usize) -> Result<BinaryData, St
     let view = FsstBlockView::parse(src, row_count)?;
     let (offsets, bytes) = view.decode_all()?;
     Ok(BinaryData::try_new(offsets, bytes)?)
+}
+
+/// Decodes only `mask`-selected rows of an FSST-encoded block body into `(Utf8Data, nulls)`.
+pub fn decode_fsst_utf8_selected(
+    src: &[u8],
+    row_count: usize,
+    mask: &Bitmap,
+    nulls: Option<&Bitmap>,
+) -> Result<(Utf8Data, Option<Bitmap>), StatamError> {
+    let view = FsstBlockView::parse(src, row_count)?;
+    let (offsets, bytes, out_nulls) = view.decode_selected(mask, nulls)?;
+    Ok((Utf8Data::try_new(offsets, bytes)?, out_nulls))
+}
+
+/// Decodes only `mask`-selected rows of an FSST-encoded block body into `(BinaryData, nulls)`.
+pub fn decode_fsst_binary_selected(
+    src: &[u8],
+    row_count: usize,
+    mask: &Bitmap,
+    nulls: Option<&Bitmap>,
+) -> Result<(BinaryData, Option<Bitmap>), StatamError> {
+    let view = FsstBlockView::parse(src, row_count)?;
+    let (offsets, bytes, out_nulls) = view.decode_selected(mask, nulls)?;
+    Ok((BinaryData::try_new(offsets, bytes)?, out_nulls))
 }

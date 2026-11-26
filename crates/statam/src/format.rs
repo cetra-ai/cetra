@@ -99,9 +99,14 @@ pub const PACK_FLAG_TOC_LZ4: u16 = 0x0002;
 pub const PACK_FLAG_HAS_TRIGRAM: u16 = 0x0004;
 /// Pack contains a trained dictionary section.
 pub const PACK_FLAG_HAS_DICT: u16 = 0x0008;
+/// Pack TOC body uses Zstd compression with delta-encoded `ChunkLoc` offsets.
+pub const PACK_FLAG_TOC_ZSTD: u16 = 0x0010;
 /// Mask of all recognized `.stpk` pack flags in v1.
-pub const KNOWN_PACK_FLAGS: u16 =
-    PACK_FLAG_ENCRYPTED | PACK_FLAG_TOC_LZ4 | PACK_FLAG_HAS_TRIGRAM | PACK_FLAG_HAS_DICT;
+pub const KNOWN_PACK_FLAGS: u16 = PACK_FLAG_ENCRYPTED
+    | PACK_FLAG_TOC_LZ4
+    | PACK_FLAG_HAS_TRIGRAM
+    | PACK_FLAG_HAS_DICT
+    | PACK_FLAG_TOC_ZSTD;
 
 /// Pack frame flag: frame compressed using trained dictionary.
 pub const PACK_FRAME_FLAG_USES_DICT: u8 = 0x01;
@@ -155,9 +160,9 @@ pub const MAX_BLOCK_RAW_BYTES: usize = 64 * 1024 * 1024;
 /// Maximum uncompressed pack frame size (16 MiB).
 pub const MAX_FRAME_RAW_BYTES: usize = 16 * 1024 * 1024;
 /// Maximum decompression expansion ratio before rejecting as a zip bomb.
-pub const MAX_DECOMPRESS_RATIO: u64 = 16_384;
+pub const MAX_DECOMPRESS_RATIO: u64 = 1_024;
 /// Fixed slack bytes added to ratio check for small blocks.
-pub const MAX_DECOMPRESS_SLACK: u64 = 4_096;
+pub const MAX_DECOMPRESS_SLACK: u64 = 16_384;
 /// Maximum promoted keys per shredded `MapUtf8` column.
 pub const MAX_SHREDDED_KEYS: usize = 64;
 /// Maximum delta tail-sharing chain depth in `PayloadRefs`.
@@ -989,6 +994,11 @@ impl PackPostscript {
         if flags & PACK_FLAG_ENCRYPTED != 0 {
             return Err(StatamError::EncryptionRequired);
         }
+        if (flags & PACK_FLAG_TOC_LZ4 != 0) && (flags & PACK_FLAG_TOC_ZSTD != 0) {
+            return Err(StatamError::Corrupt {
+                reason: "conflicting pack TOC compression flags",
+            });
+        }
 
         let toc_stored_len = read_u32_le(buf, 0);
         let toc_raw_len = read_u32_le(buf, 4);
@@ -1005,12 +1015,13 @@ impl PackPostscript {
             });
         }
         let stored_body_len = (toc_stored_len as usize) - PACK_POSTSCRIPT_LEN;
-        if flags & PACK_FLAG_TOC_LZ4 == 0 && (toc_raw_len as usize) != stored_body_len {
+        let toc_compressed = flags & (PACK_FLAG_TOC_LZ4 | PACK_FLAG_TOC_ZSTD) != 0;
+        if !toc_compressed && (toc_raw_len as usize) != stored_body_len {
             return Err(StatamError::Corrupt {
                 reason: "uncompressed toc_raw_len mismatch",
             });
         }
-        if flags & PACK_FLAG_TOC_LZ4 != 0 {
+        if toc_compressed {
             check_decompress_bounds(toc_raw_len as usize, stored_body_len, MAX_HOT_TAIL_BYTES)?;
         }
 
@@ -2091,8 +2102,29 @@ pub fn check_decompress_bounds(
 
 #[cfg(not(miri))]
 fn compress_zstd(raw: &[u8], level: i32) -> Result<Vec<u8>, StatamError> {
-    zstd::bulk::compress(raw, level).map_err(|_| StatamError::Corrupt {
-        reason: "zstd compression failed",
+    use std::cell::RefCell;
+    thread_local! {
+        static COMP: RefCell<Option<(i32, zstd::bulk::Compressor<'static>)>> =
+            const { RefCell::new(None) };
+    }
+    COMP.with(|cell| {
+        let mut guard = cell.borrow_mut();
+        let needs_new = match guard.as_ref() {
+            Some((cached_lvl, _)) => *cached_lvl != level,
+            None => true,
+        };
+        if needs_new {
+            let comp = zstd::bulk::Compressor::new(level).map_err(|_| StatamError::Corrupt {
+                reason: "zstd compressor init failed",
+            })?;
+            *guard = Some((level, comp));
+        }
+        let (_, comp) = guard.as_mut().ok_or(StatamError::Corrupt {
+            reason: "zstd compressor missing",
+        })?;
+        comp.compress(raw).map_err(|_| StatamError::Corrupt {
+            reason: "zstd compression failed",
+        })
     })
 }
 
@@ -2103,8 +2135,27 @@ fn compress_zstd(_raw: &[u8], _level: i32) -> Result<Vec<u8>, StatamError> {
 
 #[cfg(not(miri))]
 fn decompress_zstd(stored: &[u8], raw_len: usize) -> Result<Vec<u8>, StatamError> {
-    zstd::bulk::decompress(stored, raw_len).map_err(|_| StatamError::Corrupt {
-        reason: "zstd decompression failed",
+    use std::cell::RefCell;
+    thread_local! {
+        static DECOMP: RefCell<Option<zstd::bulk::Decompressor<'static>>> =
+            const { RefCell::new(None) };
+    }
+    DECOMP.with(|cell| {
+        let mut guard = cell.borrow_mut();
+        if guard.is_none() {
+            let decomp = zstd::bulk::Decompressor::new().map_err(|_| StatamError::Corrupt {
+                reason: "zstd decompressor init failed",
+            })?;
+            *guard = Some(decomp);
+        }
+        let decomp = guard.as_mut().ok_or(StatamError::Corrupt {
+            reason: "zstd decompressor missing",
+        })?;
+        decomp
+            .decompress(stored, raw_len)
+            .map_err(|_| StatamError::Corrupt {
+                reason: "zstd decompression failed",
+            })
     })
 }
 

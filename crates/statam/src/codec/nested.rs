@@ -4,6 +4,42 @@
 
 use std::collections::HashMap;
 use std::fmt;
+use std::hash::BuildHasherDefault;
+
+#[derive(Default)]
+struct FastStrHasher(u64);
+
+impl std::hash::Hasher for FastStrHasher {
+    #[inline]
+    fn write(&mut self, bytes: &[u8]) {
+        let mut h = self.0;
+        let (chunks, rem) = bytes.as_chunks::<8>();
+        for &c in chunks {
+            let v = u64::from_le_bytes(c);
+            h = (h ^ v).wrapping_mul(0x9e37_79b9_7f4a_7c15);
+        }
+        if !rem.is_empty() {
+            let mut tail = [0u8; 8];
+            tail[..rem.len()].copy_from_slice(rem);
+            let v = u64::from_le_bytes(tail);
+            h = (h ^ v).wrapping_mul(0x9e37_79b9_7f4a_7c15);
+        }
+        self.0 = h;
+    }
+
+    #[inline]
+    fn write_usize(&mut self, i: usize) {
+        self.0 = (self.0 ^ (i as u64)).wrapping_mul(0x9e37_79b9_7f4a_7c15);
+    }
+
+    #[inline]
+    fn finish(&self) -> u64 {
+        let mut z = self.0;
+        z = (z ^ (z >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+        z = (z ^ (z >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+        z ^ (z >> 31)
+    }
+}
 
 use cetra_column::{
     Bitmap, Column, DataType, EventsData, FlatColumn, FlatData, LinksData, MapData, ScalarValue,
@@ -85,11 +121,19 @@ pub fn select_shredded_keys(map: &MapData) -> Vec<String> {
         return Vec::new();
     }
 
-    let mut counts: HashMap<&str, (usize, usize)> = HashMap::new();
+    let mut counts: HashMap<&str, (usize, usize), BuildHasherDefault<FastStrHasher>> =
+        HashMap::default();
     let offsets = map.offsets();
     let keys = map.keys();
 
-    for row in 0..total_rows {
+    let step = if total_rows > 8_192 {
+        (total_rows / 4_096).max(1)
+    } else {
+        1
+    };
+    let mut sampled_rows = 0usize;
+    for row in (0..total_rows).step_by(step) {
+        sampled_rows += 1;
         let start = offsets[row] as usize;
         let end = offsets[row + 1] as usize;
         for idx in start..end {
@@ -112,7 +156,7 @@ pub fn select_shredded_keys(map: &MapData) -> Vec<String> {
     let mut hot: Vec<(&str, usize)> = counts
         .into_iter()
         .filter_map(|(k, (cnt, _))| {
-            (cnt.saturating_mul(SHRED_MIN_PCT_DENOM) >= total_rows).then_some((k, cnt))
+            (cnt.saturating_mul(SHRED_MIN_PCT_DENOM) >= sampled_rows).then_some((k, cnt))
         })
         .collect();
 
@@ -154,7 +198,8 @@ pub fn shred_map(
 
     let row_count = col.len();
     let k_count = promoted_keys.len();
-    let mut key_to_idx: HashMap<&str, usize> = HashMap::with_capacity(k_count);
+    let mut key_to_idx: HashMap<&str, usize, BuildHasherDefault<FastStrHasher>> =
+        HashMap::with_capacity_and_hasher(k_count, BuildHasherDefault::default());
     for (idx, k) in promoted_keys.iter().enumerate() {
         if key_to_idx.insert(k.as_str(), idx).is_some() {
             return Err(StatamError::SchemaMismatch {
@@ -198,6 +243,7 @@ pub fn shred_map(
         let start = map_offsets[row] as usize;
         let end = map_offsets[row + 1] as usize;
         touched.clear();
+        let mut any_spill = false;
 
         for idx in start..end {
             let k = map_keys.get(idx).unwrap_or("");
@@ -207,6 +253,11 @@ pub fn shred_map(
                     first_entry_idx[pidx] = idx;
                 }
                 row_counts[pidx] = row_counts[pidx].saturating_add(1);
+                if row_counts[pidx] > 1 {
+                    any_spill = true;
+                }
+            } else {
+                any_spill = true;
             }
         }
 
@@ -228,22 +279,24 @@ pub fn shred_map(
         }
 
         // Emit rare keys and duplicate promoted keys into residual in original order.
-        for idx in start..end {
-            let k = map_keys.get(idx).unwrap_or("");
-            let spill = match key_to_idx.get(k) {
-                None => true,
-                Some(&pidx) => row_counts[pidx] > 1,
-            };
-            if spill {
-                let is_valid = map_val_nulls.is_none_or(|bm| bm.get(idx));
-                let v = if is_valid {
-                    map_vals.get(idx).unwrap_or("")
-                } else {
-                    ""
+        if any_spill {
+            for idx in start..end {
+                let k = map_keys.get(idx).unwrap_or("");
+                let spill = match key_to_idx.get(k) {
+                    None => true,
+                    Some(&pidx) => row_counts[pidx] > 1,
                 };
-                res_keys.push(k);
-                res_vals.push(v);
-                res_val_valid.push(is_valid);
+                if spill {
+                    let is_valid = map_val_nulls.is_none_or(|bm| bm.get(idx));
+                    let v = if is_valid {
+                        map_vals.get(idx).unwrap_or("")
+                    } else {
+                        ""
+                    };
+                    res_keys.push(k);
+                    res_vals.push(v);
+                    res_val_valid.push(is_valid);
+                }
             }
         }
 
@@ -817,7 +870,7 @@ fn encode_shredded_residual_block_with_zm(
     let entry_count = map.entry_count();
     if entry_count > 0 {
         // Build compact key dictionary for this mini-block.
-        let mut key_map: HashMap<&str, u32> = HashMap::new();
+        let mut key_map: HashMap<&str, u32, BuildHasherDefault<FastStrHasher>> = HashMap::default();
         let mut unique_keys: Vec<&str> = Vec::new();
         let mut key_codes = Vec::with_capacity(entry_count);
         for idx in 0..entry_count {

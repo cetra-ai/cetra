@@ -34,8 +34,8 @@ Statam defines **two immutable binary file types** backed by an abstract byte-ra
 
 1. **Data File (`.statam`):** Stores one sorted table slice (`spans` 56 cols, `traces` 30 cols, `scores` 24 cols, or generic `cetra_column::Schema`) in **PAX Row Groups (131,072 rows, capped at `MAX_ROW_GROUP_SIZE = 262,144`)** composed of **Mini-Blocks (32,768 rows in both `L1Compact` and `L0Fast`, capped at `MAX_MINI_BLOCK_SIZE = 65,535`)**, with Core columns tiered at `core_offset` (small analytics -> `start_time`/`created_at` -> `metadata` shredded sub-columns -> ID Core cols -> Tier-2 analytics -> remaining shredded sub-columns -> cold Core cols), and a **Self-Sufficient Hot Tail (LZ4-compressible, target ≤ 1 MiB)** containing Postscript, Schema, fixed-width Column Directory, RowGroup & Block Zone Maps, Sort-Key Index, Hot Bloom (`trace_id`), and small File-Level Dictionaries.
    - `WriteProfile::L0Fast`: 100% self-contained single file; fast single-pass encodings (`Const`, `Rle` with 64-element early run sample, FastLanes `ForBitpack`/`DeltaBitpack`, bounded `Dict <= 512`, `Plain` for `MapUtf8`, `Lz4` on `>= 64 B` varlen/nested/`Plain`/`PayloadRefs`, `Codec::None` on fixed-width/`ForBitpack`/`DeltaBitpack`/`BitpackBool`/`Rle`/`Dict`, `Zstd(-5)` on `>= 1 KiB` 512 KiB local payload frames, AVX2 SBBF).
-   - `WriteProfile::L1Compact`: Bounded-memory (1-RG streaming, RG0-seeded) full encoding cascade (`Const`, `Rle`, sorted `Dict <= 16,384`, FastLanes `DeltaBitpack`/`ForBitpack`, `Alp`, `Fsst` on small Core strings `<= 16 KiB`, `ShreddedMap`, `Zstd(19)` on all non-inline mini-block encodings and shredded sub-columns), adaptive trigram skip indexes, and shared per-`(project_id, day)` immutable **Chunk Packs (`.stpk`)**.
-2. **Chunk Pack (`.stpk`, L1 only):** Immutable content-addressed payload store scoped strictly to one `(project_id, day)`, keyed by **BLAKE3-128** (`[u8; 16]`). Packs unique chunks into 512 KiB raw `Zstd(9)` frames (guarded on `W4` bypass with single-chunk empty `EdgeTable` entries; 1 MiB `ReadCache` boundary-guarded for `< 32 KiB` frames within `< 8 KiB` of boundary), with a compact read-path TOC (LZ4-compressible, 16 B hashes kept in a separate compaction-only section so read-path TOC stays tiny!), `TS02` trigram skip section (4 KiB edge tail/head blooms + adaptive per-frame blooms), `head_63 + tail_63` edge table, and optional `DictSection`.
+   - `WriteProfile::L1Compact`: Bounded-memory (1-RG streaming, RG0-seeded) full encoding cascade (`Const`, `Rle`, sorted `Dict <= 16,384` for Core / `<= 4,096` for WideRow, FastLanes `DeltaBitpack`/`ForBitpack`, `Alp` with exact decimal division mode, `Fsst`, `ShreddedMap`, `Zstd(3)` on all non-inline mini-block encodings and shredded sub-columns), adaptive trigram skip indexes, and shared per-`(project_id, day)` immutable **Chunk Packs (`.stpk`)**.
+2. **Chunk Pack (`.stpk`, L1 only):** Immutable content-addressed payload store scoped strictly to one `(project_id, day)`, keyed by **BLAKE3-128** (`[u8; 16]`). Packs unique chunks into 1 MiB raw `Zstd(3)` frames (guarded on `W4` bypass with single-chunk empty `EdgeTable` entries; 1 MiB `ReadCache` boundary-guarded for `< 32 KiB` frames within `< 8 KiB` of boundary), with a compact read-path TOC (LZ4 or Zstd-3 delta-coded `ChunkLoc`s, 16 B hashes kept in a separate compaction-only section so read-path TOC stays tiny!), `TS02` trigram skip section (4 KiB edge tail/head blooms + adaptive per-frame blooms), `head_63 + tail_63` edge table, and optional `DictSection`.
 
 ### Public Crate API (`crates/statam`)
 - **Profiles & Options:** `WriteProfile::{L0Fast, L1Compact}`, `WriteOptions`, `TableKind::{Generic, Spans, Traces, Scores}`.
@@ -220,7 +220,7 @@ Every non-inline data block starts with **16 B**: `magic: b"SB"`, `encoding: u8`
   pack_id: [u8; 16], enc_envelope_offset: u64, enc_envelope_len: u32,
   reserved: u32=0, header_crc32c: u32
 
-[Frames 0..F-1]  (target 512 KiB raw Zstd(9); 1 MiB ReadCache boundary guard for < 32 KiB frames:
+[Frames 0..F-1]  (target 1 MiB raw Zstd(3); 1 MiB ReadCache boundary guard for < 32 KiB frames:
   if cur_off % 1MiB leaves < 8 KiB before next 1 MiB boundary and frame < 32 KiB, pad to 1 MiB)
   FrameHeader (16 B): magic b"PF", codec u8 (0=None,1=Lz4,2=Zstd), flags u8 (0x01 USES_DICT),
   raw_len u32, stored_len u32, crc32c u32
@@ -237,7 +237,7 @@ Every non-inline data block starts with **16 B**: `magic: b"SB"`, `encoding: u8`
 [EdgeTable] (Zstd-3 compressed: per unique chunk [u8 head_len, head_bytes (<=63), u8 tail_len, tail_bytes (<=63)])
 [DictSection] (optional, 0 B by default)
 [Optional AEAD Envelope] (0 B when !ENCRYPTED)
-[Pack TOC Body] (LZ4-compressible when TOC_LZ4 set):
+[Pack TOC Body] (LZ4-compressed when `PACK_FLAG_TOC_LZ4` set, or Zstd(3) delta-coded `ChunkLoc` offsets when `PACK_FLAG_TOC_ZSTD = 0x0010` set):
   [FrameEntry; frame_count] (40 B each: offset:u64, stored_len:u32, raw_len:u32, codec:u8, flags:u8,
     dict_id:u16, first_chunk_id:u32, chunk_count:u32, filter_off:u32, filter_len:u32, crc32c:u32)
   [ChunkLoc; chunk_count]   (12 B each: frame_id:u32, offset_in_frame:u32, raw_len:u32)
@@ -297,7 +297,7 @@ Every non-inline data block starts with **16 B**: `magic: b"SB"`, `encoding: u8`
   - `MAX_ROWS_PER_FILE = u32::MAX as u64`
   - `MAX_HOT_TAIL_BYTES = 16 MiB` (writer targets `<= 1 MiB`)
   - `MAX_COLUMNS = 1,024`, `MAX_NESTING_DEPTH = 8`, `MAX_ROW_GROUPS = 262,144`, `MAX_TOTAL_BLOCKS = 4,194,304`
-  - `MAX_BLOCK_RAW_BYTES = 64 MiB`, `MAX_FRAME_RAW_BYTES = 16 MiB`, `MAX_DECOMPRESS_RATIO = 16,384× + 4,096 B`
+  - `MAX_BLOCK_RAW_BYTES = 64 MiB`, `MAX_FRAME_RAW_BYTES = 16 MiB`, `MAX_DECOMPRESS_RATIO = 1,024× + 16,384 B`
   - `MAX_SHREDDED_KEYS = 64`, `MAX_REF_CHAIN_DEPTH = 15`, `MAX_CHUNKS_PER_ROW = 65,536`
   - `MAX_ROW_PAYLOAD_BYTES = 64 MiB`, `MAX_BATCH_DECODED_BYTES = 256 MiB` (defeats dedup/tail-sharing amplification bombs!)
   - `MAX_DICT_BYTES = 32 MiB`, `MAX_BLOOM_BYTES = 32 MiB`

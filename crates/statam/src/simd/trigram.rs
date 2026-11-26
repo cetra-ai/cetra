@@ -123,15 +123,144 @@ impl TrigramBloom {
 
     /// ASCII-lowercases `bytes` and inserts every 3-byte trigram into the filter.
     pub fn insert_bytes(&mut self, bytes: &[u8]) {
-        if bytes.len() < 3 {
+        if bytes.len() < 3 || !self.bits.len().is_power_of_two() {
             return;
         }
-        let mut lowered = Vec::new();
-        ascii_lowercase_into(bytes, &mut lowered);
+        #[cfg(all(target_arch = "x86_64", not(miri)))]
+        {
+            if bytes.len() >= 16 && std::arch::is_x86_feature_detected!("avx2") {
+                // SAFETY: `is_x86_feature_detected!("avx2")` verified above and
+                // `self.bits.len()` is a non-zero power of two in `256..=4096`.
+                unsafe {
+                    self.insert_bytes_avx2(bytes);
+                }
+                return;
+            }
+        }
+        self.insert_bytes_scalar(bytes);
+    }
+
+    /// ASCII-lowercases `bytes` and inserts every 3-byte trigram into the filter
+    /// (zero-copy direct insertion; `scratch` is cleared and left unused).
+    pub fn insert_bytes_with_scratch(&mut self, bytes: &[u8], scratch: &mut Vec<u8>) {
+        scratch.clear();
+        self.insert_bytes(bytes);
+    }
+
+    #[inline]
+    fn insert_bytes_scalar(&mut self, bytes: &[u8]) {
+        if bytes.len() < 3 || !self.bits.len().is_power_of_two() {
+            return;
+        }
+        let byte_mask = self.bits.len() - 1;
         let bit_mask = (self.bits.len() * 8) - 1;
-        for w in lowered.windows(3) {
-            let h = trigram_hash(w[0], w[1], w[2]);
-            self.set_hash_bits(h, bit_mask);
+        let bits = &mut self.bits;
+        let mut i = 0usize;
+        let end = bytes.len() - 2;
+        while i < end {
+            let h = trigram_hash(
+                bytes[i].to_ascii_lowercase(),
+                bytes[i + 1].to_ascii_lowercase(),
+                bytes[i + 2].to_ascii_lowercase(),
+            );
+            let p1 = (h as usize) & bit_mask;
+            let p2 = (h.rotate_right(16) as usize) & bit_mask;
+            bits[(p1 >> 3) & byte_mask] |= 1u8 << (p1 & 7);
+            bits[(p2 >> 3) & byte_mask] |= 1u8 << (p2 & 7);
+            i += 1;
+        }
+    }
+
+    #[cfg(all(target_arch = "x86_64", not(miri)))]
+    #[target_feature(enable = "avx2")]
+    unsafe fn insert_bytes_avx2(&mut self, bytes: &[u8]) {
+        use std::arch::x86_64::*;
+
+        #[inline(always)]
+        unsafe fn set_two_lanes(ptr: *mut u8, byte_mask: usize, word: u64) {
+            let idx0 = (word as usize) & byte_mask;
+            let mask0 = (word >> 16) as u8;
+            let idx1 = ((word >> 32) as usize) & byte_mask;
+            let mask1 = (word >> 48) as u8;
+            // SAFETY: caller ensures `byte_mask == bits.len() - 1` and `bits.len()` is a power of two,
+            // so `idx0 < bits.len()` and `idx1 < bits.len()`.
+            unsafe {
+                *ptr.add(idx0) |= mask0;
+                *ptr.add(idx1) |= mask1;
+            }
+        }
+
+        debug_assert!(self.bits.len().is_power_of_two());
+        let byte_mask = self.bits.len() - 1;
+        let bit_mask = (self.bits.len() * 8) - 1;
+        let bits = &mut self.bits;
+        let ptr = bits.as_mut_ptr();
+
+        let offset_128 = _mm_set1_epi8(0x3Fi8);
+        let upper_128 = _mm_set1_epi8(-102i8);
+        let bit20_128 = _mm_set1_epi8(0x20i8);
+        let shuf_mask = _mm256_setr_epi8(
+            0, 1, 2, -1, 1, 2, 3, -1, 2, 3, 4, -1, 3, 4, 5, -1, 4, 5, 6, -1, 5, 6, 7, -1, 6, 7, 8,
+            -1, 7, 8, 9, -1,
+        );
+        let c1 = _mm256_set1_epi32(0x85eb_ca6bu32 as i32);
+        let c2 = _mm256_set1_epi32(0xc2b2_ae35u32 as i32);
+        let mask_v = _mm256_set1_epi32(bit_mask as i32);
+        let ones_v = _mm256_set1_epi32(1);
+        let seven_v = _mm256_set1_epi32(7);
+
+        let mut i = 0usize;
+        while i + 16 <= bytes.len() {
+            // SAFETY: `i + 16 <= bytes.len()`, so unaligned 16-byte load is within bounds.
+            let v = unsafe { _mm_loadu_si128(bytes.as_ptr().add(i) as *const __m128i) };
+            let shifted = _mm_add_epi8(v, offset_128);
+            let is_upper = _mm_cmpgt_epi8(upper_128, shifted);
+            let lowered = _mm_or_si128(v, _mm_and_si128(is_upper, bit20_128));
+            let broad = _mm256_broadcastsi128_si256(lowered);
+            let mut x = _mm256_shuffle_epi8(broad, shuf_mask);
+
+            x = _mm256_xor_si256(x, _mm256_srli_epi32(x, 16));
+            x = _mm256_mullo_epi32(x, c1);
+            x = _mm256_xor_si256(x, _mm256_srli_epi32(x, 13));
+            x = _mm256_mullo_epi32(x, c2);
+            x = _mm256_xor_si256(x, _mm256_srli_epi32(x, 16));
+
+            let p1_vec = _mm256_and_si256(x, mask_v);
+            let p2_vec = _mm256_and_si256(_mm256_srli_epi32(x, 16), mask_v);
+            let idx1_vec = _mm256_srli_epi32(p1_vec, 3);
+            let mask1_vec = _mm256_sllv_epi32(ones_v, _mm256_and_si256(p1_vec, seven_v));
+            let idx2_vec = _mm256_srli_epi32(p2_vec, 3);
+            let mask2_vec = _mm256_sllv_epi32(ones_v, _mm256_and_si256(p2_vec, seven_v));
+
+            let v1 = _mm256_or_si256(idx1_vec, _mm256_slli_epi32(mask1_vec, 16));
+            let v2 = _mm256_or_si256(idx2_vec, _mm256_slli_epi32(mask2_vec, 16));
+
+            // SAFETY: `ptr` points to `bits` of length `byte_mask + 1` (power of two).
+            unsafe {
+                set_two_lanes(ptr, byte_mask, _mm256_extract_epi64::<0>(v1) as u64);
+                set_two_lanes(ptr, byte_mask, _mm256_extract_epi64::<1>(v1) as u64);
+                set_two_lanes(ptr, byte_mask, _mm256_extract_epi64::<2>(v1) as u64);
+                set_two_lanes(ptr, byte_mask, _mm256_extract_epi64::<3>(v1) as u64);
+                set_two_lanes(ptr, byte_mask, _mm256_extract_epi64::<0>(v2) as u64);
+                set_two_lanes(ptr, byte_mask, _mm256_extract_epi64::<1>(v2) as u64);
+                set_two_lanes(ptr, byte_mask, _mm256_extract_epi64::<2>(v2) as u64);
+                set_two_lanes(ptr, byte_mask, _mm256_extract_epi64::<3>(v2) as u64);
+            }
+            i += 8;
+        }
+
+        let end = bytes.len() - 2;
+        while i < end {
+            let h = trigram_hash(
+                bytes[i].to_ascii_lowercase(),
+                bytes[i + 1].to_ascii_lowercase(),
+                bytes[i + 2].to_ascii_lowercase(),
+            );
+            let p1 = (h as usize) & bit_mask;
+            let p2 = (h.rotate_right(16) as usize) & bit_mask;
+            bits[(p1 >> 3) & byte_mask] |= 1u8 << (p1 & 7);
+            bits[(p2 >> 3) & byte_mask] |= 1u8 << (p2 & 7);
+            i += 1;
         }
     }
 
@@ -164,6 +293,22 @@ impl TrigramBloom {
     pub fn bit_density(&self) -> f64 {
         let ones: usize = self.bits.iter().map(|b| b.count_ones() as usize).sum();
         (ones as f64) / ((self.bits.len() * 8) as f64)
+    }
+
+    /// Folds the filter in half by OR-ing the upper half into the lower half.
+    ///
+    /// Valid when `self.bits.len() > MIN_TRIGRAM_BLOOM_BYTES`; the result is bit-identical
+    /// to inserting the same trigrams directly into a half-sized [`TrigramBloom`].
+    pub fn fold_half(&self) -> Self {
+        if self.bits.len() <= MIN_TRIGRAM_BLOOM_BYTES {
+            return self.clone();
+        }
+        let half = self.bits.len() / 2;
+        let mut out = Vec::with_capacity(half);
+        for i in 0..half {
+            out.push(self.bits[i] | self.bits[i + half]);
+        }
+        Self { bits: out }
     }
 }
 
@@ -275,6 +420,29 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn trigram_bloom_fold_half_matches_direct_half_sized_insert() {
+        let sample =
+            b"{\"role\":\"assistant\",\"content\":\"Tool call trace: Bearer TOKEN_ABC_12345\"}";
+        let mut big = TrigramBloom::new(4096);
+        big.insert_bytes(sample);
+
+        let folded_2048 = big.fold_half();
+        let mut direct_2048 = TrigramBloom::new(2048);
+        direct_2048.insert_bytes(sample);
+        assert_eq!(folded_2048.as_bytes(), direct_2048.as_bytes());
+
+        let folded_1024 = folded_2048.fold_half();
+        let mut direct_1024 = TrigramBloom::new(1024);
+        direct_1024.insert_bytes(sample);
+        assert_eq!(folded_1024.as_bytes(), direct_1024.as_bytes());
+
+        let folded_256 = folded_1024.fold_half().fold_half();
+        let mut direct_256 = TrigramBloom::new(256);
+        direct_256.insert_bytes(sample);
+        assert_eq!(folded_256.as_bytes(), direct_256.as_bytes());
+    }
+
     proptest! {
         #[test]
         fn proptest_ascii_lowercase_parity(bytes in prop::collection::vec(any::<u8>(), 0..=512)) {
@@ -302,6 +470,19 @@ mod tests {
                     prop_assert!(tb.may_contain_hashes(&hashes));
                 }
             }
+        }
+
+        #[test]
+        fn proptest_trigram_bloom_simd_scalar_parity(
+            bytes in prop::collection::vec(any::<u8>(), 0..=512),
+            cap_shift in 0usize..=4,
+        ) {
+            let cap = 256usize << cap_shift;
+            let mut simd = TrigramBloom::new(cap);
+            let mut scalar = TrigramBloom::new(cap);
+            simd.insert_bytes(&bytes);
+            scalar.insert_bytes_scalar(&bytes);
+            prop_assert_eq!(simd.as_bytes(), scalar.as_bytes());
         }
     }
 }

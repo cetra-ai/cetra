@@ -16,8 +16,9 @@ use crate::StatamError;
 use crate::codec::dict::{FileDict, decode_dict_column, encode_dict_codes_body};
 use crate::codec::nested::{decode_nested_column, encode_nested_column};
 use crate::codec::numeric::{
-    decode_const_block, decode_narrow_column, encode_narrow_column_with_locality,
-    read_optional_nulls, try_encode_const_or_null, write_optional_nulls,
+    decode_const_block, decode_narrow_column, decode_narrow_column_selected,
+    encode_narrow_column_with_locality, read_optional_nulls, try_encode_const_or_null,
+    write_optional_nulls,
 };
 use crate::codec::zonemap::compute_zone_map;
 use crate::format::{
@@ -410,6 +411,22 @@ pub fn decode_mini_block(
     decode_narrow_column(raw_body, entry, dt)
 }
 
+/// Decodes one mini-block, only materializing `mask`-selected rows when the encoding
+/// supports sparse decode (such as `Fsst`).
+pub fn decode_mini_block_selected(
+    raw_body: &[u8],
+    entry: &BlockEntry,
+    dt: &DataType,
+    file_dict: Option<&FileDict>,
+    mask: &Bitmap,
+) -> Result<Column, StatamError> {
+    if entry.encoding == Encoding::Fsst && !mask.all_ones() {
+        dt.validate(MAX_NESTING_DEPTH)?;
+        return decode_narrow_column_selected(raw_body, entry, dt, mask);
+    }
+    decode_mini_block(raw_body, entry, dt, file_dict)
+}
+
 #[cfg(test)]
 mod tests {
     use cetra_column::{
@@ -489,6 +506,17 @@ mod tests {
                 orig.to_bits(),
                 "bit-exact mismatch at index {i}"
             );
+        }
+
+        // Verify `(0..=100) / 100.0` (exact IEEE-754 division mode) produces zero exceptions.
+        let dec_div: Vec<f64> = (0..1024).map(|i| ((i % 101) as f64) / 100.0).collect();
+        let enc_div = encode_alp_body(&dec_div, None)
+            .unwrap()
+            .expect("decimal fractions / 100.0 must compress with ALP");
+        assert_eq!(u16::from_le_bytes([enc_div[2], enc_div[3]]), 0);
+        let dec_out = decode_alp_body(&enc_div, dec_div.len(), None).unwrap();
+        for (i, (&orig, &dec)) in dec_div.iter().zip(&dec_out).enumerate() {
+            assert_eq!(dec.to_bits(), orig.to_bits(), "div_mode mismatch at {i}");
         }
 
         // Verify full mini-block cascade selects Plain for L0Fast and ALP for L1Compact.
@@ -602,6 +630,76 @@ mod tests {
         corrupt.push(1); // row_lens[0] = 1
         corrupt.push(0xFF); // truncated escape!
         assert!(decode_fsst_binary(&corrupt, 1).is_err());
+    }
+
+    #[test]
+    fn fsst_decode_selected_matches_full_decode_on_active_rows() {
+        let mut vals: Vec<Option<String>> = Vec::with_capacity(200);
+        for i in 0..200 {
+            if i % 7 == 0 {
+                vals.push(None);
+            } else {
+                vals.push(Some(format!(
+                    "{{\"role\":\"assistant\",\"step\":{i},\"model\":\"claude-3-5-sonnet\",\"id\":\"018f6b4e-{i:08x}\"}}"
+                )));
+            }
+        }
+        let mut nulls = Bitmap::new_ones(vals.len());
+        let mut raw_strs = Vec::with_capacity(vals.len());
+        for (i, opt) in vals.iter().enumerate() {
+            match opt {
+                Some(s) => raw_strs.push(s.as_str()),
+                None => {
+                    let _ = nulls.set(i, false);
+                    raw_strs.push("");
+                }
+            }
+        }
+        let col = Column::Flat(
+            FlatColumn::try_new(
+                FlatData::Utf8(Utf8Data::try_from_slices(raw_strs).unwrap()),
+                Some(nulls),
+            )
+            .unwrap(),
+        );
+        let enc = encode_mini_block(&col, &DataType::Utf8, WriteProfile::L1Compact, None).unwrap();
+        assert_eq!(enc.encoding, Encoding::Fsst);
+        let mut framed = Vec::new();
+        let entry = enc
+            .write_framed_entry(0, vals.len() as u16, 0, 3, &mut framed)
+            .unwrap();
+        let (_, _, raw_body) = read_framed_block(&framed, MAX_BLOCK_RAW_BYTES).unwrap();
+
+        let mut mask = Bitmap::new_zeroed(vals.len());
+        for idx in [1usize, 7, 15, 64, 140, 199] {
+            let _ = mask.set(idx, true);
+        }
+        let sel_col = decode_mini_block_selected(&raw_body, &entry, &DataType::Utf8, None, &mask)
+            .unwrap()
+            .materialize(None)
+            .unwrap();
+        let full_col = decode_mini_block(&raw_body, &entry, &DataType::Utf8, None)
+            .unwrap()
+            .materialize(None)
+            .unwrap();
+        let FlatData::Utf8(sel_u) = sel_col.data() else {
+            panic!("expected Utf8");
+        };
+        let FlatData::Utf8(full_u) = full_col.data() else {
+            panic!("expected Utf8");
+        };
+        for r in 0..vals.len() {
+            let sel_valid = sel_col.nulls().is_none_or(|b| b.get(r));
+            let full_valid = full_col.nulls().is_none_or(|b| b.get(r));
+            if mask.get(r) {
+                assert_eq!(sel_valid, full_valid);
+                if sel_valid {
+                    assert_eq!(sel_u.get(r), full_u.get(r));
+                }
+            } else {
+                assert!(!sel_valid);
+            }
+        }
     }
 
     fn build_all_16_types_columns() -> Vec<(DataType, Column)> {

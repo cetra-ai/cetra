@@ -72,32 +72,50 @@ pub fn chunk_payload<'a>(data: &'a [u8], out: &mut Vec<&'a [u8]>) {
 }
 
 fn chunk_json_array<'a>(data: &'a [u8], open_bracket_idx: usize, out: &mut Vec<&'a [u8]>) {
+    chunk_json_array_from(data, open_bracket_idx + 1, out);
+}
+
+/// Continues JSON-array structural chunking from an already-closed top-level element
+/// boundary (e.g., `,` right after a cached prefix).
+pub(crate) fn chunk_json_array_continuation<'a>(suffix: &'a [u8], out: &mut Vec<&'a [u8]>) {
+    out.clear();
+    chunk_json_array_from(suffix, 0, out);
+}
+
+fn chunk_json_array_from<'a>(data: &'a [u8], start_idx: usize, out: &mut Vec<&'a [u8]>) {
     let mut chunk_start = 0usize;
     let mut depth = 1usize;
     let mut in_string = false;
-    let mut escaped = false;
     let mut elem_active = false;
-    let mut i = open_bracket_idx + 1;
+    let mut i = start_idx;
 
     while i < data.len() {
-        let b = data[i];
         if in_string {
-            if escaped {
-                escaped = false;
-            } else if b == b'\\' {
-                escaped = true;
-            } else if b == b'"' {
-                in_string = false;
-                if depth == 1 {
-                    let end = i + 1;
-                    if end - chunk_start >= MIN_CHUNK {
-                        fastcdc_emit(&data[chunk_start..end], out);
-                        chunk_start = end;
-                    }
-                    elem_active = false;
+            let Some(rel) = memchr::memchr2(b'"', b'\\', &data[i..]) else {
+                break;
+            };
+            let hit_idx = i + rel;
+            if data[hit_idx] == b'\\' {
+                if hit_idx + 1 < data.len() {
+                    i = hit_idx + 2;
+                    continue;
                 }
+                break;
             }
-        } else {
+            in_string = false;
+            if depth == 1 {
+                let end = hit_idx + 1;
+                if end - chunk_start >= MIN_CHUNK {
+                    fastcdc_emit(&data[chunk_start..end], out);
+                    chunk_start = end;
+                }
+                elem_active = false;
+            }
+            i = hit_idx + 1;
+            continue;
+        }
+        let b = data[i];
+        {
             match b {
                 b'"' => {
                     in_string = true;
@@ -363,6 +381,69 @@ mod tests {
         assert_eq!(small_chunks.len(), 2);
         assert!(small_chunks[0].len() >= MIN_CHUNK);
         assert!(small_chunks[1].ends_with(b"]"));
+    }
+
+    #[test]
+    fn chunker_continuation_matches_full_chunk_payload_for_cumulative_arrays() {
+        let m0 = format!("{{\"role\":\"user\",\"content\":\"{}\"}}", "A".repeat(300));
+        let m1 = format!(
+            "{{\"role\":\"assistant\",\"content\":\"{}\"}}",
+            "B".repeat(320)
+        );
+        // Include an oversized (> 8 KiB) element to exercise FastCDC inside continuation.
+        let m2_big = format!(
+            "{{\"role\":\"tool\",\"content\":\"{}\"}}",
+            "C123456789".repeat(1_200)
+        );
+        let m3_small = "{\"role\":\"user\",\"content\":\"ok\"}".to_owned();
+        let m4 = format!(
+            "{{\"role\":\"assistant\",\"content\":\"{}\"}}",
+            "D".repeat(400)
+        );
+
+        let turns = [
+            format!("[{m0}]"),
+            format!("[{m0},{m1}]"),
+            format!("[{m0},{m1},{m2_big}]"),
+            format!("[{m0},{m1},{m2_big},{m3_small}]"),
+            format!("[{m0},{m1},{m2_big},{m3_small},{m4}]"),
+        ];
+
+        let mut prev_bytes: Option<Vec<u8>> = None;
+        let mut prev_chunks: Vec<Vec<u8>> = Vec::new();
+        let mut cont_scratch: Vec<&[u8]> = Vec::new();
+        let mut full_scratch: Vec<&[u8]> = Vec::new();
+
+        for cur_str in &turns {
+            let cur = cur_str.as_bytes();
+            chunk_payload(cur, &mut full_scratch);
+            assert_chunk_invariants(cur, &full_scratch);
+
+            if let Some(prev) = &prev_bytes
+                && let Some(last_chunk) = prev_chunks.last().map(Vec::as_slice)
+                && (last_chunk == b"]".as_slice() || last_chunk.starts_with(b","))
+                && prev_chunks.len() >= 2
+                && prev.ends_with(b"]")
+                && prev.len() > last_chunk.len()
+            {
+                let prefix_len = prev.len() - last_chunk.len();
+                assert_eq!(cur[prefix_len], b',');
+                chunk_json_array_continuation(&cur[prefix_len..], &mut cont_scratch);
+
+                let mut combined: Vec<&[u8]> = prev_chunks[..prev_chunks.len() - 1]
+                    .iter()
+                    .map(Vec::as_slice)
+                    .collect();
+                combined.extend(cont_scratch.iter().copied());
+                assert_eq!(
+                    combined, full_scratch,
+                    "continuation must produce 100% identical chunks"
+                );
+            }
+
+            prev_bytes = Some(cur.to_vec());
+            prev_chunks = full_scratch.iter().map(|s| s.to_vec()).collect();
+        }
     }
 
     #[test]

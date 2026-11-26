@@ -29,7 +29,9 @@ use crate::format::{
     POSTSCRIPT_LEN, Postscript, ROW_GROUP_ENTRY_LEN, ROW_GROUP_SIZE, RowGroupEntry, ShreddedMapDir,
     ShreddedMapKeyEntry, TableKind, encode_schema, write_framed_block, write_framed_pack_frame,
 };
-use crate::payload::chunker::{DedupBypassDetector, INLINE_PAYLOAD_THRESHOLD, chunk_payload};
+use crate::payload::chunker::{
+    DedupBypassDetector, INLINE_PAYLOAD_THRESHOLD, chunk_json_array_continuation, chunk_payload,
+};
 use crate::payload::pack::ChunkPackBuilder;
 use crate::payload::{
     PayloadRefRow, encode_payload_refs, encode_payload_refs_l0_direct,
@@ -66,6 +68,8 @@ type PrechunkedRefs<'a> = (
     &'a HashMap<usize, Vec<PayloadRefRow>>,
     &'a HashMap<(usize, u32), Vec<u8>>,
 );
+type PayloadPrefixCacheEntry = (usize, usize, Vec<(u16, u32)>);
+type PayloadExactCacheEntry = (usize, Vec<(u16, u32)>);
 
 /// Tier-1A small Hot Analytics `Core` columns written FIRST at `core_offset`.
 const HOT_ANALYTICS_TIER1_SMALL_COLS: &[&str] = &[
@@ -73,8 +77,6 @@ const HOT_ANALYTICS_TIER1_SMALL_COLS: &[&str] = &[
     "span_kind",
     "model",
     "name",
-    "cost_total",
-    "total_tokens",
     "data_type",
     "value_num",
     "value_str",
@@ -83,6 +85,10 @@ const HOT_ANALYTICS_TIER1_SMALL_COLS: &[&str] = &[
 /// Tier-1B Timestamp `Core` columns placed immediately before `metadata` shredded sub-columns
 /// so `start_time`/`created_at`, `metadata.*`, and `trace_id` pack contiguously in the first block.
 const HOT_ANALYTICS_TIER1_TIME_COLS: &[&str] = &["start_time", "created_at"];
+
+/// Analytics numeric columns placed immediately after `trace_id` and before `span_id`
+/// so `map_key_lookup` skips them while `time_bucket_agg` still avoids reading `span_id`.
+const HOT_ANALYTICS_POST_TRACE_COLS: &[&str] = &["cost_total", "total_tokens"];
 
 /// Tier-2 Hot Analytics `Core` columns written immediately after `ID_CORE_COLS`.
 const HOT_ANALYTICS_TIER2_COLS: &[&str] = &[
@@ -179,7 +185,7 @@ pub struct WriteOptions {
     pub row_group_size: usize,
     /// Rows per Mini-Block (default: `4_096` for `L1Compact`, `16_384` for `L0Fast`).
     pub mini_block_size: usize,
-    /// Zstd compression level (`-3` for `L0Fast`, `3` for `L1Compact`).
+    /// Zstd compression level (`-5` for `L0Fast`, `3` for `L1Compact`).
     pub zstd_level: i32,
     /// Whether to LZ4-compress the Hot Tail body when smaller (default: `true`).
     pub compress_hot_tail_lz4: bool,
@@ -228,7 +234,7 @@ impl WriteOptions {
         let mini_block_size = 32_768;
         let zstd_level = match profile {
             WriteProfile::L0Fast => -5,
-            WriteProfile::L1Compact => 19,
+            WriteProfile::L1Compact => 3,
         };
 
         Self {
@@ -522,6 +528,7 @@ impl<'a> StatamWriter<'a> {
         let total = active_batch.raw_len();
         let rg_size = self.options.row_group_size;
         let is_l0_fast = self.options.profile == WriteProfile::L0Fast;
+        let is_l1_pack = !is_l0_fast && self.pack_builder.is_some();
         let mut offset = 0usize;
         while offset < total {
             if self.rg_buf_rows == 0 && total - offset >= rg_size {
@@ -541,6 +548,10 @@ impl<'a> StatamWriter<'a> {
             for (col_idx, col) in active_batch.columns().iter().enumerate() {
                 if is_l0_fast && self.logical_locality[col_idx] == LocalityGroup::ExternalPayload {
                     self.append_l0_payload_slice(col_idx, col, offset, take)?;
+                } else if is_l1_pack
+                    && self.logical_locality[col_idx] == LocalityGroup::ExternalPayload
+                {
+                    self.append_l1_payload_slice(col_idx, col, offset, take)?;
                 } else {
                     let piece = if offset == 0 && take == total {
                         col.clone()
@@ -712,6 +723,137 @@ impl<'a> StatamWriter<'a> {
             for r in offset + pos..offset + take {
                 push_row_ref(r, &mut self.pending_l0_local, &mut partial)?;
             }
+            self.pending_l0_partial.insert(cidx, partial);
+        }
+
+        Ok(())
+    }
+
+    fn append_l1_payload_slice(
+        &mut self,
+        cidx: usize,
+        col: &Column,
+        offset: usize,
+        take: usize,
+    ) -> Result<(), StatamError> {
+        if take == 0 {
+            return Ok(());
+        }
+        let mb_size = self.options.mini_block_size;
+
+        if let Column::Const { value, .. } = col
+            && value.is_null()
+        {
+            let mut pos = 0usize;
+            {
+                let partial = self.pending_l0_partial.entry(cidx).or_default();
+                if !partial.is_empty() {
+                    let fill = (mb_size - partial.len()).min(take);
+                    partial.resize(partial.len() + fill, PayloadRefRow::Null);
+                    pos += fill;
+                    if partial.len() == mb_size {
+                        let null_count_usize = partial
+                            .iter()
+                            .filter(|r| matches!(r, PayloadRefRow::Null))
+                            .count();
+                        let null_count = u16::try_from(null_count_usize).unwrap_or(u16::MAX);
+                        let raw_body = if null_count_usize == mb_size {
+                            Vec::new()
+                        } else {
+                            let mut rb = Vec::new();
+                            encode_payload_refs(partial, &mut rb)?;
+                            rb
+                        };
+                        self.pending_l0_mbs.entry(cidx).or_default().push((
+                            mb_size as u16,
+                            null_count,
+                            raw_body,
+                        ));
+                        partial.clear();
+                    }
+                }
+            }
+            while take - pos >= mb_size {
+                let mb_u16 = mb_size as u16;
+                self.pending_l0_mbs
+                    .entry(cidx)
+                    .or_default()
+                    .push((mb_u16, mb_u16, Vec::new()));
+                pos += mb_size;
+            }
+            if pos < take {
+                let partial = self.pending_l0_partial.entry(cidx).or_default();
+                partial.resize(partial.len() + (take - pos), PayloadRefRow::Null);
+            }
+            return Ok(());
+        }
+
+        let fc = as_flat_cow(col)?;
+        let mut pos = 0usize;
+        let has_partial = self
+            .pending_l0_partial
+            .get(&cidx)
+            .is_some_and(|p| !p.is_empty());
+        if has_partial {
+            let mut partial = self.pending_l0_partial.remove(&cidx).unwrap_or_default();
+            let fill = (mb_size - partial.len()).min(take);
+            let mut dummy_l0 = LocalL0PayloadBuilder::new(self.options.zstd_level);
+            let rows = self.build_payload_ref_rows(cidx, &fc, offset, fill, &mut dummy_l0)?;
+            partial.extend(rows);
+            pos += fill;
+            if partial.len() == mb_size {
+                let null_count_usize = partial
+                    .iter()
+                    .filter(|r| matches!(r, PayloadRefRow::Null))
+                    .count();
+                let null_count = u16::try_from(null_count_usize).unwrap_or(u16::MAX);
+                let raw_body = if null_count_usize == mb_size {
+                    Vec::new()
+                } else {
+                    let mut rb = Vec::new();
+                    encode_payload_refs(&partial, &mut rb)?;
+                    rb
+                };
+                self.pending_l0_mbs.entry(cidx).or_default().push((
+                    mb_size as u16,
+                    null_count,
+                    raw_body,
+                ));
+            } else {
+                self.pending_l0_partial.insert(cidx, partial);
+            }
+        }
+
+        while take - pos >= mb_size {
+            let mut dummy_l0 = LocalL0PayloadBuilder::new(self.options.zstd_level);
+            let refs =
+                self.build_payload_ref_rows(cidx, &fc, offset + pos, mb_size, &mut dummy_l0)?;
+            let null_count_usize = refs
+                .iter()
+                .filter(|r| matches!(r, PayloadRefRow::Null))
+                .count();
+            let null_count = u16::try_from(null_count_usize).unwrap_or(u16::MAX);
+            let raw_body = if null_count_usize == mb_size {
+                Vec::new()
+            } else {
+                let mut rb = Vec::new();
+                encode_payload_refs(&refs, &mut rb)?;
+                rb
+            };
+            self.pending_l0_mbs.entry(cidx).or_default().push((
+                mb_size as u16,
+                null_count,
+                raw_body,
+            ));
+            pos += mb_size;
+        }
+
+        if pos < take {
+            let mut dummy_l0 = LocalL0PayloadBuilder::new(self.options.zstd_level);
+            let refs =
+                self.build_payload_ref_rows(cidx, &fc, offset + pos, take - pos, &mut dummy_l0)?;
+            let mut partial = self.pending_l0_partial.remove(&cidx).unwrap_or_default();
+            partial.extend(refs);
             self.pending_l0_partial.insert(cidx, partial);
         }
 
@@ -1218,23 +1360,37 @@ impl<'a> StatamWriter<'a> {
                 reason: "row_group first_row overflows u32",
             })?;
 
+        // RG0 initialization: promote ShreddedMap keys (L1Compact) & seed FileDicts
+        // BEFORE building RG0 blooms so dict-encoded columns hash only unique dict entries.
+        let is_rg0 = !self.rg0_initialized;
+        if is_rg0 {
+            self.init_rg0(rg_cols, base_row_off, rg_rows)?;
+            self.rg0_initialized = true;
+        }
+
         // Build per-RG SBBF bloom filters immediately (never accumulate file-wide Vec<u64>).
         let bloom_indices: Vec<usize> = self.bloom_col_set.iter().copied().collect();
         for cidx in bloom_indices {
-            let (sbbf, had_any) =
-                build_rg_sbbf(&rg_cols[cidx], base_row_off, rg_rows, self.options.profile)?;
+            let col_name = self.schema.fields()[cidx].name.as_str();
+            let rg0_dict = if is_rg0 {
+                self.phys_col_meta[cidx].dict.as_deref()
+            } else {
+                None
+            };
+            let (sbbf, had_any) = build_rg_sbbf(
+                &rg_cols[cidx],
+                base_row_off,
+                rg_rows,
+                self.options.profile,
+                col_name,
+                rg0_dict,
+            )?;
             if had_any {
                 self.bloom_has_values.insert(cidx, true);
             }
             if let Some(rgs) = self.bloom_rgs.get_mut(&cidx) {
                 rgs.push(sbbf);
             }
-        }
-
-        // RG0 initialization: promote ShreddedMap keys (L1Compact) & seed FileDicts.
-        if !self.rg0_initialized {
-            self.init_rg0(rg_cols, base_row_off, rg_rows)?;
-            self.rg0_initialized = true;
         }
 
         let zstd_level = self.options.zstd_level;
@@ -1312,12 +1468,55 @@ impl<'a> StatamWriter<'a> {
             &mut deferred_wide_residuals,
         )?;
 
-        // Tier 3: ID Core columns immediately after `metadata.*` (`trace_id`, `span_id`, `score_id`, ...).
+        // Tier 3a: `trace_id` immediately after `metadata.*`.
         for (cidx, rg_col) in rg_cols.iter().enumerate() {
             if self.logical_locality[cidx] != LocalityGroup::Core {
                 continue;
             }
-            if !ID_CORE_COLS.contains(&fields[cidx].name.as_str()) {
+            if fields[cidx].name != "trace_id" {
+                continue;
+            }
+            self.encode_rg_scalar_or_nested_col(
+                cidx,
+                rg_col,
+                base_row_off,
+                rg_rows,
+                first_row_u32,
+                mb_size,
+                core_offset,
+                zstd_level,
+                &mut core_buf,
+            )?;
+        }
+
+        // Tier 3b: `cost_total` & `total_tokens` after `trace_id` and before `span_id`.
+        for (cidx, rg_col) in rg_cols.iter().enumerate() {
+            if self.logical_locality[cidx] != LocalityGroup::Core {
+                continue;
+            }
+            if !HOT_ANALYTICS_POST_TRACE_COLS.contains(&fields[cidx].name.as_str()) {
+                continue;
+            }
+            self.encode_rg_scalar_or_nested_col(
+                cidx,
+                rg_col,
+                base_row_off,
+                rg_rows,
+                first_row_u32,
+                mb_size,
+                core_offset,
+                zstd_level,
+                &mut core_buf,
+            )?;
+        }
+
+        // Tier 3c: Remaining ID Core columns (`span_id`, `score_id`, `parent_span_id`, ...).
+        for (cidx, rg_col) in rg_cols.iter().enumerate() {
+            if self.logical_locality[cidx] != LocalityGroup::Core {
+                continue;
+            }
+            let name = fields[cidx].name.as_str();
+            if name == "trace_id" || !ID_CORE_COLS.contains(&name) {
                 continue;
             }
             self.encode_rg_scalar_or_nested_col(
@@ -1376,6 +1575,7 @@ impl<'a> StatamWriter<'a> {
             let name = fields[cidx].name.as_str();
             if HOT_ANALYTICS_TIER1_SMALL_COLS.contains(&name)
                 || HOT_ANALYTICS_TIER1_TIME_COLS.contains(&name)
+                || HOT_ANALYTICS_POST_TRACE_COLS.contains(&name)
                 || HOT_ANALYTICS_TIER2_COLS.contains(&name)
                 || ID_CORE_COLS.contains(&name)
             {
@@ -1703,9 +1903,21 @@ impl<'a> StatamWriter<'a> {
                 &sliced_owned
             };
             let flat = as_flat_cow(col_ref)?;
+            let is_known_low_card = KNOWN_LOW_CARD_DICT_COLS.contains(&field.name.as_str());
+            let is_core = self.logical_locality[cidx] == LocalityGroup::Core;
+            let max_entries = match self.options.profile {
+                WriteProfile::L0Fast => 512,
+                WriteProfile::L1Compact => {
+                    if is_known_low_card || is_core {
+                        16_384
+                    } else {
+                        4_096
+                    }
+                }
+            };
             let builder = match self.options.profile {
-                WriteProfile::L0Fast => DictBuilder::l0_with_max(512),
-                WriteProfile::L1Compact => DictBuilder::l1_compact(),
+                WriteProfile::L0Fast => DictBuilder::l0_with_max(max_entries),
+                WriteProfile::L1Compact => DictBuilder::l1_with_max(max_entries),
             };
             let Some((dict, codes)) = builder.build(&flat)? else {
                 continue;
@@ -1713,11 +1925,6 @@ impl<'a> StatamWriter<'a> {
             let non_null_rows = flat
                 .len()
                 .saturating_sub(flat.nulls().map_or(0, |bm| bm.count_zeros()));
-            let is_known_low_card = KNOWN_LOW_CARD_DICT_COLS.contains(&field.name.as_str());
-            let max_entries = match self.options.profile {
-                WriteProfile::L0Fast => 512,
-                WriteProfile::L1Compact => 16_384,
-            };
             let ratio_den = if dict.len() > 4_096 { 4 } else { 2 };
             let low_ndv = if is_known_low_card {
                 dict.len() <= max_entries
@@ -1756,7 +1963,28 @@ impl<'a> StatamWriter<'a> {
         let dt = self.schema.fields()[cidx].data_type.clone();
         let track_trigram = self.narrow_trigram_col_set.contains(&cidx);
         let precomputed_rg0 = self.rg0_dict_codes.remove(&cidx);
-        if let Some((rg0_codes, rg0_nulls)) = precomputed_rg0 {
+        let precomputed_rg_n = if precomputed_rg0.is_none()
+            && rg_rows >= 256
+            && let Some(dict) = self.phys_col_meta[cidx].dict.as_deref()
+        {
+            let rg_slice_owned;
+            let rg_slice = if base_row_off == 0 && rg_rows == col.len() {
+                col
+            } else {
+                rg_slice_owned = col.slice(base_row_off, rg_rows)?;
+                &rg_slice_owned
+            };
+            if let Ok(flat) = as_flat_cow(rg_slice)
+                && let Some(codes) = dict.try_map_column(&flat)?
+            {
+                Some((codes, flat.nulls().cloned()))
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+        if let Some((rg0_codes, rg0_nulls)) = precomputed_rg0.or(precomputed_rg_n) {
             let mut row_off = 0usize;
             while row_off < rg_rows {
                 let mb_len = (rg_rows - row_off).min(mb_size);
@@ -1886,7 +2114,6 @@ impl<'a> StatamWriter<'a> {
         l0_local: &mut LocalL0PayloadBuilder,
     ) -> Result<(), StatamError> {
         if prechunked.is_none()
-            && self.options.profile == WriteProfile::L0Fast
             && (self.pending_l0_mbs.contains_key(&cidx)
                 || self.pending_l0_partial.contains_key(&cidx))
         {
@@ -1904,7 +2131,11 @@ impl<'a> StatamWriter<'a> {
                     Vec::new()
                 } else {
                     let mut rb = Vec::new();
-                    encode_payload_refs_l0_direct(&partial, &mut rb)?;
+                    if self.options.profile == WriteProfile::L0Fast {
+                        encode_payload_refs_l0_direct(&partial, &mut rb)?;
+                    } else {
+                        encode_payload_refs(&partial, &mut rb)?;
+                    }
                     rb
                 };
                 mbs.push((mb_len as u16, null_count, raw_body));
@@ -2232,6 +2463,9 @@ impl<'a> StatamWriter<'a> {
         let nulls = flat.nulls();
         let mut out = Vec::with_capacity(mb_len);
         let mut chunk_scratch = Vec::new();
+        let mut prefix_mru: Vec<PayloadPrefixCacheEntry> = Vec::with_capacity(2);
+        let mut prefix_table: Vec<Option<PayloadPrefixCacheEntry>> = vec![None; 4096];
+        let mut exact_cache: [Option<PayloadExactCacheEntry>; 64] = std::array::from_fn(|_| None);
 
         for r in row_off..row_off + mb_len {
             if nulls.is_some_and(|bm| !bm.get(r)) {
@@ -2264,28 +2498,166 @@ impl<'a> StatamWriter<'a> {
                         refs.push((0u16, cid));
                     }
                 } else {
-                    chunk_payload(bytes, &mut chunk_scratch);
-                    let detector = self.bypass_detectors.entry(cidx).or_default();
-                    let need_sample = !detector.is_decided();
-                    for &chunk in &chunk_scratch {
-                        let cid = pb.intern_chunk(chunk)?;
-                        if need_sample {
-                            let is_hit = match self.max_chunk_id_seen.get(&cidx).copied() {
-                                Some(max_cid) => cid <= max_cid,
-                                None => false,
-                            };
-                            let max_entry = self.max_chunk_id_seen.entry(cidx).or_insert(cid);
-                            if cid > *max_entry {
-                                *max_entry = cid;
-                            }
-                            let stored_len = if chunk.len() > 32 {
-                                lz4_flex::block::compress(chunk).len().min(chunk.len())
-                            } else {
-                                chunk.len()
-                            };
-                            detector.record(is_hit, chunk.len(), stored_len);
+                    let need_sample = !self
+                        .bypass_detectors
+                        .get(&cidx)
+                        .is_some_and(DedupBypassDetector::is_decided);
+                    let exact_slot = if !need_sample && bytes.len() >= 16 {
+                        let mut h = (bytes.len() as u64).wrapping_mul(0x9e37_79b9_7f4a_7c15);
+                        let h0 = u64::from_le_bytes([
+                            bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6],
+                            bytes[7],
+                        ]);
+                        let h1 = u64::from_le_bytes([
+                            bytes[8], bytes[9], bytes[10], bytes[11], bytes[12], bytes[13],
+                            bytes[14], bytes[15],
+                        ]);
+                        let t0 = bytes.len() - 16;
+                        let h2 = u64::from_le_bytes([
+                            bytes[t0],
+                            bytes[t0 + 1],
+                            bytes[t0 + 2],
+                            bytes[t0 + 3],
+                            bytes[t0 + 4],
+                            bytes[t0 + 5],
+                            bytes[t0 + 6],
+                            bytes[t0 + 7],
+                        ]);
+                        let t1 = bytes.len() - 8;
+                        let h3 = u64::from_le_bytes([
+                            bytes[t1],
+                            bytes[t1 + 1],
+                            bytes[t1 + 2],
+                            bytes[t1 + 3],
+                            bytes[t1 + 4],
+                            bytes[t1 + 5],
+                            bytes[t1 + 6],
+                            bytes[t1 + 7],
+                        ]);
+                        h = (h ^ h0).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+                        h = (h ^ h1).wrapping_mul(0x94d0_49bb_1331_11eb);
+                        h = (h ^ h2).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+                        h = (h ^ h3).wrapping_mul(0x94d0_49bb_1331_11eb);
+                        h ^= h >> 31;
+                        Some((h as usize) & 63)
+                    } else {
+                        None
+                    };
+
+                    if let Some(slot) = exact_slot
+                        && let Some((prev_row, prev_refs)) = &exact_cache[slot]
+                        && u.get(*prev_row).unwrap_or("").as_bytes() == bytes
+                    {
+                        out.push(PayloadRefRow::Chunks(prev_refs.clone()));
+                        continue;
+                    }
+
+                    let mut cache_hit = false;
+                    let mut mru_hit = false;
+                    let prefix_slot = if !need_sample && bytes.len() >= 128 {
+                        let mut h = 0x517c_c1b7_2722_0a95u64;
+                        for &chunk in bytes[..128].as_chunks::<8>().0 {
+                            let v = u64::from_le_bytes(chunk);
+                            h = (h ^ v).wrapping_mul(0x9e37_79b9_7f4a_7c15);
                         }
-                        refs.push((0u16, cid));
+                        h ^= h >> 31;
+                        Some((h as usize) & 4095)
+                    } else {
+                        None
+                    };
+
+                    if !need_sample {
+                        let table_hit = prefix_slot.and_then(|slot| prefix_table[slot].as_ref());
+                        for (idx_in_iter, (prev_row_idx, prefix_byte_len, prefix_refs)) in
+                            prefix_mru.iter().rev().chain(table_hit).enumerate()
+                        {
+                            let prefix_len = *prefix_byte_len;
+                            if bytes.len() > prefix_len + 1 && bytes[prefix_len] == b',' {
+                                let prev_bytes = u.get(*prev_row_idx).unwrap_or("").as_bytes();
+                                if prev_bytes.len() >= prefix_len {
+                                    let edge = prefix_len.min(8);
+                                    if bytes[..edge] == prev_bytes[..edge]
+                                        && bytes[prefix_len - edge..prefix_len]
+                                            == prev_bytes[prefix_len - edge..prefix_len]
+                                        && bytes[..prefix_len] == prev_bytes[..prefix_len]
+                                    {
+                                        refs.extend_from_slice(prefix_refs);
+                                        chunk_json_array_continuation(
+                                            &bytes[prefix_len..],
+                                            &mut chunk_scratch,
+                                        );
+                                        for &chunk in &chunk_scratch {
+                                            let cid = pb.intern_chunk(chunk)?;
+                                            refs.push((0u16, cid));
+                                        }
+                                        cache_hit = true;
+                                        mru_hit = idx_in_iter < prefix_mru.len();
+                                        break;
+                                    }
+                                }
+                            }
+                        }
+                        if !cache_hit
+                            && let Some((prefix_len, prefix_refs)) = pb.lookup_prefix(bytes)
+                        {
+                            refs.extend_from_slice(prefix_refs);
+                            chunk_json_array_continuation(&bytes[prefix_len..], &mut chunk_scratch);
+                            for &chunk in &chunk_scratch {
+                                let cid = pb.intern_chunk(chunk)?;
+                                refs.push((0u16, cid));
+                            }
+                            cache_hit = true;
+                        }
+                    }
+
+                    if !cache_hit {
+                        chunk_payload(bytes, &mut chunk_scratch);
+                        let detector = self.bypass_detectors.entry(cidx).or_default();
+                        let need_sample = !detector.is_decided();
+                        for &chunk in &chunk_scratch {
+                            let cid = pb.intern_chunk(chunk)?;
+                            if need_sample {
+                                let is_hit = match self.max_chunk_id_seen.get(&cidx).copied() {
+                                    Some(max_cid) => cid <= max_cid,
+                                    None => false,
+                                };
+                                let max_entry = self.max_chunk_id_seen.entry(cidx).or_insert(cid);
+                                if cid > *max_entry {
+                                    *max_entry = cid;
+                                }
+                                let stored_len = if chunk.len() > 32 {
+                                    lz4_flex::block::compress(chunk).len().min(chunk.len())
+                                } else {
+                                    chunk.len()
+                                };
+                                detector.record(is_hit, chunk.len(), stored_len);
+                            }
+                            refs.push((0u16, cid));
+                        }
+                    }
+
+                    if let Some(&last_chunk) = chunk_scratch.last()
+                        && (last_chunk == b"]".as_slice() || last_chunk.starts_with(b","))
+                        && refs.len() >= 2
+                        && bytes.ends_with(b"]")
+                        && bytes.len() > last_chunk.len()
+                    {
+                        if prefix_mru.len() == 2 {
+                            prefix_mru.remove(0);
+                        }
+                        let prefix_byte_len = bytes.len() - last_chunk.len();
+                        let prefix_refs = &refs[..refs.len() - 1];
+                        if !mru_hit && !need_sample {
+                            pb.insert_prefix(&bytes[..prefix_byte_len], prefix_refs);
+                        }
+                        let entry = (r, prefix_byte_len, prefix_refs.to_vec());
+                        if let Some(slot) = prefix_slot {
+                            prefix_table[slot] = Some(entry.clone());
+                        }
+                        prefix_mru.push(entry);
+                    }
+                    if let Some(slot) = exact_slot {
+                        exact_cache[slot] = Some((r, refs.clone()));
                     }
                 }
                 out.push(PayloadRefRow::Chunks(refs));
@@ -2348,13 +2720,34 @@ fn build_rg_sbbf(
     base_row_off: usize,
     rg_rows: usize,
     profile: WriteProfile,
+    col_name: &str,
+    rg0_dict: Option<&FileDict>,
 ) -> Result<(Sbbf, bool), StatamError> {
     if rg_rows == 0 || col.is_empty() {
         return Ok((Sbbf::new_for_ndv(1, BLOOM_FPP), false));
     }
 
-    // Fast path for L0Fast Flat columns: estimate ndv = non-null count without sorting Vec<u64>.
-    if profile == WriteProfile::L0Fast
+    // RG0 dict shortcut: hash only the unique dictionary entries directly.
+    if let Some(dict) = rg0_dict {
+        let dict_len = dict.len();
+        if dict_len == 0 {
+            return Ok((Sbbf::new_for_ndv(1, BLOOM_FPP), false));
+        }
+        let mut sbbf = Sbbf::new_for_ndv(dict_len, BLOOM_FPP);
+        let mut had_any = false;
+        let dict_vals = dict.values();
+        for idx in 0..dict_len {
+            if let Some(h) = flat_row_bloom_hash(dict_vals, idx) {
+                sbbf.insert_hash(h);
+                had_any = true;
+            }
+        }
+        return Ok((sbbf, had_any));
+    }
+
+    // Fast path for L0Fast Flat columns and unique ID columns (`span_id`, `score_id`):
+    // estimate ndv = non-null count without sorting Vec<u64>.
+    if (profile == WriteProfile::L0Fast || matches!(col_name, "span_id" | "score_id"))
         && let Column::Flat(f) = col
     {
         let end = base_row_off + rg_rows;
@@ -2964,9 +3357,13 @@ fn collect_column_bloom_hashes(col: &Column, out: &mut Vec<u64>) -> Result<(), S
             }
         }
         Column::Flat(f) => {
+            let mut prev_h: Option<u64> = None;
             for row in 0..n {
-                if let Some(h) = flat_row_bloom_hash(f, row) {
+                if let Some(h) = flat_row_bloom_hash(f, row)
+                    && Some(h) != prev_h
+                {
                     out.push(h);
+                    prev_h = Some(h);
                 }
             }
         }

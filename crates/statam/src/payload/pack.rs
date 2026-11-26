@@ -2,6 +2,7 @@
 
 use std::collections::{BTreeSet, HashMap};
 use std::fmt;
+use std::hash::BuildHasherDefault;
 use std::io::Write;
 use std::ops::Range;
 use std::sync::{Arc, OnceLock};
@@ -13,14 +14,12 @@ use crate::format::{
     CHUNK_LOC_LEN, ChunkLoc, Codec, DEFAULT_TAIL_HINT, FORMAT_VERSION, FRAME_ENTRY_LEN, FrameEntry,
     MAX_BLOCK_RAW_BYTES, MAX_BLOOM_BYTES, MAX_FRAME_RAW_BYTES, MAX_HOT_TAIL_BYTES, MAX_PACK_CHUNKS,
     MAX_PACK_FRAMES, PACK_FLAG_HAS_DICT, PACK_FLAG_HAS_TRIGRAM, PACK_FLAG_TOC_LZ4,
-    PACK_FRAME_FLAG_USES_DICT, PACK_FRAME_HEADER_LEN, PACK_FRAME_MAGIC, PACK_HEADER_LEN,
-    PACK_POSTSCRIPT_LEN, PackHeader, PackPostscript, compress_guarded, decompress_checked,
-    read_framed_pack_frame, write_framed_pack_frame,
+    PACK_FLAG_TOC_ZSTD, PACK_FRAME_FLAG_USES_DICT, PACK_FRAME_HEADER_LEN, PACK_FRAME_MAGIC,
+    PACK_HEADER_LEN, PACK_POSTSCRIPT_LEN, PackHeader, PackPostscript, compress_guarded,
+    decompress_checked, read_framed_pack_frame, write_framed_pack_frame,
 };
 use crate::io::{RangeReader, S3_CACHE_BLOCK_BYTES};
-use crate::simd::trigram::{
-    MAX_TRIGRAM_BLOOM_BYTES, MIN_TRIGRAM_BLOOM_BYTES, TrigramBloom, extract_trigram_hashes,
-};
+use crate::simd::trigram::{MAX_TRIGRAM_BLOOM_BYTES, MIN_TRIGRAM_BLOOM_BYTES, TrigramBloom};
 
 /// Maximum head/tail edge bytes stored per chunk in `EdgeTable`.
 pub const EDGE_LEN: usize = 63;
@@ -45,15 +44,15 @@ const MAX_TRIGRAM_DENSITY: f64 = 0.50;
 const BOUNDARY_GUARD_THRESHOLD: usize = 8_192;
 /// 1 MiB `ReadCache` boundary guard max frame size (`< 32 KiB`).
 const BOUNDARY_GUARD_MAX_FRAME: usize = 32_768;
-/// Default target raw bytes per `.stpk` frame (512 KiB).
-const DEFAULT_TARGET_FRAME_RAW_BYTES: usize = 512 * 1024;
+/// Default target raw bytes per `.stpk` frame (1 MiB).
+const DEFAULT_TARGET_FRAME_RAW_BYTES: usize = 1024 * 1024;
 
 /// Configuration options for [`ChunkPackBuilder`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PackWriteOptions {
     /// Compression codec for pack frames (default: `Codec::Zstd`).
     pub codec: Codec,
-    /// Zstd compression level when `codec == Codec::Zstd` (default: `9`).
+    /// Zstd compression level when `codec == Codec::Zstd` (default: `3`).
     pub zstd_level: i32,
     /// Target uncompressed frame size in bytes (default: `512 KiB`).
     pub target_frame_raw_bytes: usize,
@@ -67,7 +66,7 @@ impl Default for PackWriteOptions {
     fn default() -> Self {
         Self {
             codec: Codec::Zstd,
-            zstd_level: 9,
+            zstd_level: 3,
             target_frame_raw_bytes: DEFAULT_TARGET_FRAME_RAW_BYTES,
             enable_trigram_skip: true,
             compress_toc_lz4: true,
@@ -100,13 +99,70 @@ pub struct PackWriteStats {
     pub toc_stored_bytes: u32,
 }
 
+#[derive(Default)]
+struct Hash16IdentityHasher(u64);
+
+impl std::hash::Hasher for Hash16IdentityHasher {
+    #[inline]
+    fn write(&mut self, bytes: &[u8]) {
+        if bytes.len() >= 8 {
+            self.0 = u64::from_le_bytes([
+                bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7],
+            ]);
+        } else {
+            let mut acc = 0u64;
+            for &b in bytes {
+                acc = acc.rotate_left(8) ^ u64::from(b);
+            }
+            self.0 = acc;
+        }
+    }
+
+    #[inline]
+    fn finish(&self) -> u64 {
+        self.0
+    }
+}
+
+#[derive(Clone, Copy)]
+struct InlineEdge {
+    len: u8,
+    bytes: [u8; EDGE_LEN],
+}
+
+impl InlineEdge {
+    #[inline]
+    fn empty() -> Self {
+        Self {
+            len: 0,
+            bytes: [0u8; EDGE_LEN],
+        }
+    }
+
+    #[inline]
+    fn from_slice(s: &[u8]) -> Self {
+        let len = s.len().min(EDGE_LEN);
+        let mut bytes = [0u8; EDGE_LEN];
+        bytes[..len].copy_from_slice(&s[..len]);
+        Self {
+            len: len as u8,
+            bytes,
+        }
+    }
+
+    #[inline]
+    fn as_slice(&self) -> &[u8] {
+        &self.bytes[..usize::from(self.len)]
+    }
+}
+
 #[derive(Clone)]
 struct PendingChunk {
     hash16: [u8; 16],
     offset_in_frame: u32,
     raw_len: u32,
-    head: Vec<u8>,
-    tail: Vec<u8>,
+    head: InlineEdge,
+    tail: InlineEdge,
 }
 
 impl fmt::Debug for PendingChunk {
@@ -114,23 +170,42 @@ impl fmt::Debug for PendingChunk {
         f.debug_struct("PendingChunk")
             .field("offset_in_frame", &self.offset_in_frame)
             .field("raw_len", &self.raw_len)
-            .field("head_len", &self.head.len())
-            .field("tail_len", &self.tail.len())
+            .field("head_len", &self.head.len)
+            .field("tail_len", &self.tail.len)
             .finish()
     }
 }
 
 /// Streaming builder for an immutable `.stpk` chunk pack.
+#[derive(Clone)]
+struct PackPrefixEntry {
+    head_hash: u64,
+    prefix_len: u32,
+    prefix_blake3: [u8; 32],
+    prefix_refs: Vec<(u16, u32)>,
+}
+
+#[inline]
+fn fast_head_hash_128(bytes: &[u8]) -> u64 {
+    let mut h = 0x517c_c1b7_2722_0a95u64;
+    for &chunk in bytes[..128].as_chunks::<8>().0 {
+        let v = u64::from_le_bytes(chunk);
+        h = (h ^ v).wrapping_mul(0x9e37_79b9_7f4a_7c15);
+    }
+    h ^= h >> 31;
+    h
+}
+
 pub struct ChunkPackBuilder {
     pack_id: [u8; 16],
     options: PackWriteOptions,
     /// Holds the 48-byte header placeholder followed by framed data and alignment padding.
     buf: Vec<u8>,
-    dedup: HashMap<[u8; 16], u32>,
+    dedup: HashMap<[u8; 16], u32, BuildHasherDefault<Hash16IdentityHasher>>,
     frames: Vec<FrameEntry>,
     chunk_locs: Vec<ChunkLoc>,
     hashes: Vec<[u8; 16]>,
-    edges: Vec<(Vec<u8>, Vec<u8>)>,
+    edges: Vec<(InlineEdge, InlineEdge)>,
     trigram_buf: Vec<u8>,
     cur_raw: Vec<u8>,
     cur_chunks: Vec<PendingChunk>,
@@ -138,6 +213,7 @@ pub struct ChunkPackBuilder {
     dedup_hits: u64,
     raw_chunk_bytes: u64,
     stored_frame_bytes: u64,
+    prefix_cache: Vec<Option<PackPrefixEntry>>,
 }
 
 impl fmt::Debug for ChunkPackBuilder {
@@ -166,7 +242,7 @@ impl ChunkPackBuilder {
             pack_id,
             options,
             buf: vec![0u8; PACK_HEADER_LEN],
-            dedup: HashMap::new(),
+            dedup: HashMap::default(),
             frames: Vec::new(),
             chunk_locs: Vec::new(),
             hashes: Vec::new(),
@@ -178,7 +254,50 @@ impl ChunkPackBuilder {
             dedup_hits: 0,
             raw_chunk_bytes: 0,
             stored_frame_bytes: 0,
+            prefix_cache: Vec::new(),
         }
+    }
+
+    /// Looks up a previously interned cumulative JSON-array prefix across batches/files.
+    pub(crate) fn lookup_prefix(&self, bytes: &[u8]) -> Option<(usize, &[(u16, u32)])> {
+        if self.prefix_cache.is_empty() || bytes.len() < 128 {
+            return None;
+        }
+        let head_hash = fast_head_hash_128(bytes);
+        let slot = (head_hash as usize) & 4095;
+        let entry = self.prefix_cache[slot].as_ref()?;
+        let plen = entry.prefix_len as usize;
+        if entry.head_hash != head_hash || bytes.len() <= plen + 1 || bytes[plen] != b',' {
+            return None;
+        }
+        let digest = blake3::hash(&bytes[..plen]);
+        if *digest.as_bytes() == entry.prefix_blake3 {
+            Some((plen, &entry.prefix_refs))
+        } else {
+            None
+        }
+    }
+
+    /// Stores a verified cumulative JSON-array prefix in the cross-file cache.
+    pub(crate) fn insert_prefix(&mut self, prefix: &[u8], prefix_refs: &[(u16, u32)]) {
+        if prefix.len() < 128 {
+            return;
+        }
+        let Ok(prefix_len) = u32::try_from(prefix.len()) else {
+            return;
+        };
+        if self.prefix_cache.is_empty() {
+            self.prefix_cache = vec![None; 4096];
+        }
+        let head_hash = fast_head_hash_128(prefix);
+        let slot = (head_hash as usize) & 4095;
+        let prefix_blake3 = *blake3::hash(prefix).as_bytes();
+        self.prefix_cache[slot] = Some(PackPrefixEntry {
+            head_hash,
+            prefix_len,
+            prefix_blake3,
+            prefix_refs: prefix_refs.to_vec(),
+        });
     }
 
     /// Returns the 128-bit pack identifier.
@@ -231,8 +350,8 @@ impl ChunkPackBuilder {
         })?;
 
         self.cur_raw.extend_from_slice(bytes);
-        let head = bytes[..bytes.len().min(EDGE_LEN)].to_vec();
-        let tail = bytes[bytes.len().saturating_sub(EDGE_LEN)..].to_vec();
+        let head = InlineEdge::from_slice(&bytes[..bytes.len().min(EDGE_LEN)]);
+        let tail = InlineEdge::from_slice(&bytes[bytes.len().saturating_sub(EDGE_LEN)..]);
 
         self.cur_chunks.push(PendingChunk {
             hash16,
@@ -303,11 +422,11 @@ impl ChunkPackBuilder {
         self.cur_raw.extend_from_slice(bytes);
         let (head, tail) = if record_edge {
             (
-                bytes[..bytes.len().min(EDGE_LEN)].to_vec(),
-                bytes[bytes.len().saturating_sub(EDGE_LEN)..].to_vec(),
+                InlineEdge::from_slice(&bytes[..bytes.len().min(EDGE_LEN)]),
+                InlineEdge::from_slice(&bytes[bytes.len().saturating_sub(EDGE_LEN)..]),
             )
         } else {
-            (Vec::new(), Vec::new())
+            (InlineEdge::empty(), InlineEdge::empty())
         };
 
         self.cur_chunks.push(PendingChunk {
@@ -488,7 +607,8 @@ impl ChunkPackBuilder {
             });
             self.hashes.push(hash16);
             self.dedup.entry(hash16).or_insert(chunk_id);
-            self.edges.push((head.clone(), tail.clone()));
+            self.edges
+                .push((InlineEdge::from_slice(head), InlineEdge::from_slice(tail)));
             self.raw_chunk_bytes = self.raw_chunk_bytes.saturating_add(u64::from(raw_len));
             remapped.push(chunk_id);
         }
@@ -528,8 +648,8 @@ impl ChunkPackBuilder {
             let mut edge_tail_bloom = TrigramBloom::new(EDGE_TRIGRAM_BLOOM_BYTES);
             let mut edge_head_bloom = TrigramBloom::new(EDGE_TRIGRAM_BLOOM_BYTES);
             for (head, tail) in &self.edges {
-                edge_tail_bloom.insert_bytes(tail);
-                edge_head_bloom.insert_bytes(head);
+                edge_tail_bloom.insert_bytes(tail.as_slice());
+                edge_head_bloom.insert_bytes(head.as_slice());
             }
 
             let prefix_u32 =
@@ -574,10 +694,12 @@ impl ChunkPackBuilder {
         let (edge_table_off, edge_table_len) = if !self.edges.is_empty() {
             let mut raw_edges = Vec::with_capacity(self.edges.len().saturating_mul(16));
             for (head, tail) in &self.edges {
-                raw_edges.push(head.len() as u8);
-                raw_edges.extend_from_slice(head);
-                raw_edges.push(tail.len() as u8);
-                raw_edges.extend_from_slice(tail);
+                let hs = head.as_slice();
+                let ts = tail.as_slice();
+                raw_edges.push(hs.len() as u8);
+                raw_edges.extend_from_slice(hs);
+                raw_edges.push(ts.len() as u8);
+                raw_edges.extend_from_slice(ts);
             }
             let edge_codec = default_edge_codec();
             write_framed_pack_frame(
@@ -622,10 +744,53 @@ impl ChunkPackBuilder {
                 reason: "toc_raw_len overflows u32",
             })?;
 
-        let (toc_codec, toc_stored) = if self.options.compress_toc_lz4 {
-            compress_guarded(&toc_raw, Codec::Lz4, 0)?
+        let (toc_flag, toc_stored) = if self.options.compress_toc_lz4 {
+            #[cfg(not(miri))]
+            let try_zstd = self.options.codec == Codec::Zstd;
+            #[cfg(miri)]
+            let try_zstd = false;
+
+            if try_zstd {
+                let mut toc_delta = Vec::with_capacity(toc_raw_len_usize);
+                for f in &self.frames {
+                    toc_delta.extend_from_slice(&f.encode());
+                }
+                let mut prev_frame = u32::MAX;
+                let mut prev_end = 0u32;
+                for c in &self.chunk_locs {
+                    let off_delta = if c.frame_id == prev_frame {
+                        c.offset_in_frame.wrapping_sub(prev_end)
+                    } else {
+                        c.offset_in_frame
+                    };
+                    prev_frame = c.frame_id;
+                    prev_end = c.offset_in_frame.wrapping_add(c.raw_len);
+                    toc_delta.extend_from_slice(
+                        &ChunkLoc {
+                            frame_id: c.frame_id,
+                            offset_in_frame: off_delta,
+                            raw_len: c.raw_len,
+                        }
+                        .encode(),
+                    );
+                }
+                let (c, s) = compress_guarded(&toc_delta, Codec::Zstd, self.options.zstd_level)?;
+                if c == Codec::Zstd {
+                    (PACK_FLAG_TOC_ZSTD, s)
+                } else {
+                    (0, toc_raw)
+                }
+            } else {
+                let (c, s) = compress_guarded(&toc_raw, Codec::Lz4, 0)?;
+                let flag = if c == Codec::Lz4 {
+                    PACK_FLAG_TOC_LZ4
+                } else {
+                    0
+                };
+                (flag, s)
+            }
         } else {
-            (Codec::None, toc_raw)
+            (0, toc_raw)
         };
         let toc_stored_len = toc_stored
             .len()
@@ -641,10 +806,7 @@ impl ChunkPackBuilder {
         }
         let toc_crc32c = crc32c::crc32c(&toc_stored);
 
-        let mut flags = 0u16;
-        if toc_codec == Codec::Lz4 {
-            flags |= PACK_FLAG_TOC_LZ4;
-        }
+        let mut flags = toc_flag;
         if trigram_len > 0 {
             flags |= PACK_FLAG_HAS_TRIGRAM;
         }
@@ -796,29 +958,33 @@ impl ChunkPackBuilder {
     }
 
     fn build_frame_trigram_filter(&mut self, stored_len: usize) -> Result<(u32, u32), StatamError> {
-        let mut hashes = Vec::new();
+        let max_bytes = (stored_len / 6).clamp(MIN_TRIGRAM_BLOOM_BYTES, MAX_TRIGRAM_BLOOM_BYTES);
+        let cap_pow2 = 1usize << (usize::BITS as usize - 1 - max_bytes.leading_zeros() as usize);
+        let mut bloom = TrigramBloom::new(cap_pow2);
+        let mut scanned_bytes = 0usize;
+        let mut next_check_bytes = 64 * 1024;
         for c in &self.cur_chunks {
             let start = c.offset_in_frame as usize;
             let end = start + c.raw_len as usize;
-            extract_trigram_hashes(&self.cur_raw[start..end], false, &mut hashes);
+            bloom.insert_bytes(&self.cur_raw[start..end]);
+            scanned_bytes += end - start;
+            if scanned_bytes >= next_check_bytes {
+                if bloom.bit_density() > MAX_TRIGRAM_DENSITY {
+                    return Ok((0, 0));
+                }
+                next_check_bytes = scanned_bytes + 64 * 1024;
+            }
         }
-        if hashes.is_empty() {
+
+        let mut density = bloom.bit_density();
+        if density == 0.0 {
             return Ok((0, 0));
         }
-        hashes.sort_unstable();
-        hashes.dedup();
-        let unique_tris = hashes.len();
-
-        let max_bytes = (stored_len / 6).clamp(MIN_TRIGRAM_BLOOM_BYTES, MAX_TRIGRAM_BLOOM_BYTES);
-        let cap_pow2 = 1usize << (usize::BITS as usize - 1 - max_bytes.leading_zeros() as usize);
-        let desired = unique_tris
-            .clamp(MIN_TRIGRAM_BLOOM_BYTES, cap_pow2)
-            .next_power_of_two()
-            .min(cap_pow2);
-
-        let mut bloom = TrigramBloom::new(desired);
-        bloom.insert_hashes(&hashes);
-        if bloom.bit_density() > MAX_TRIGRAM_DENSITY {
+        while bloom.as_bytes().len() > MIN_TRIGRAM_BLOOM_BYTES && density < 0.12 {
+            bloom = bloom.fold_half();
+            density = bloom.bit_density();
+        }
+        if density > MAX_TRIGRAM_DENSITY {
             return Ok((0, 0));
         }
 
@@ -962,7 +1128,10 @@ impl ChunkPackReader {
             });
         }
 
-        let toc_codec = if ps.flags & PACK_FLAG_TOC_LZ4 != 0 {
+        let is_zstd_toc = (ps.flags & PACK_FLAG_TOC_ZSTD) != 0;
+        let toc_codec = if is_zstd_toc {
+            Codec::Zstd
+        } else if ps.flags & PACK_FLAG_TOC_LZ4 != 0 {
             Codec::Lz4
         } else {
             Codec::None
@@ -1009,9 +1178,14 @@ impl ChunkPackReader {
         }
 
         let mut chunks = Vec::with_capacity(chunk_count);
+        let mut prev_frame = u32::MAX;
+        let mut prev_end = 0u32;
         for idx in 0..chunk_count {
             let off = frames_bytes + idx * CHUNK_LOC_LEN;
-            let loc = ChunkLoc::decode(&toc_raw[off..off + CHUNK_LOC_LEN])?;
+            let mut loc = ChunkLoc::decode(&toc_raw[off..off + CHUNK_LOC_LEN])?;
+            if is_zstd_toc && loc.frame_id == prev_frame {
+                loc.offset_in_frame = prev_end.wrapping_add(loc.offset_in_frame);
+            }
             let frame = frames
                 .get(loc.frame_id as usize)
                 .ok_or(StatamError::Corrupt {
@@ -1027,6 +1201,8 @@ impl ChunkPackReader {
                     reason: "chunk span exceeds owning frame raw_len",
                 });
             }
+            prev_frame = loc.frame_id;
+            prev_end = end;
             chunks.push(loc);
         }
 
