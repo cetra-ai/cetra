@@ -782,18 +782,18 @@ fn mix64(mut x: u64) -> u64 {
     x
 }
 
-fn hash_cols_row(cols: &[&Column], row: usize, salt: u64) -> u64 {
+fn hash_cols_row(cols: &[&Column], row: usize, mix_round: u64) -> u64 {
     let mut h = DefaultHasher::new();
-    salt.hash(&mut h);
+    mix_round.hash(&mut h);
     for col in cols {
         hash_col_row(col, row, &mut h);
     }
-    mix64(h.finish() ^ salt.wrapping_mul(0x9E37_79B9_7F4A_7C15))
+    mix64(h.finish() ^ mix_round.wrapping_mul(0x9E37_79B9_7F4A_7C15))
 }
 
-fn hash_atoms(atoms: &[KeyAtom], salt: u64) -> u64 {
+fn hash_atoms(atoms: &[KeyAtom], mix_round: u64) -> u64 {
     let mut h = DefaultHasher::new();
-    salt.hash(&mut h);
+    mix_round.hash(&mut h);
     for atom in atoms {
         if atom.is_null() {
             0u8.hash(&mut h);
@@ -815,7 +815,7 @@ fn hash_atoms(atoms: &[KeyAtom], salt: u64) -> u64 {
             }
         }
     }
-    mix64(h.finish() ^ salt.wrapping_mul(0x9E37_79B9_7F4A_7C15))
+    mix64(h.finish() ^ mix_round.wrapping_mul(0x9E37_79B9_7F4A_7C15))
 }
 
 fn compare_non_null_atoms(a: &KeyAtom, b: &KeyAtom, dt: &DataType) -> Result<Ordering, QueryError> {
@@ -3754,7 +3754,7 @@ impl HashAgg {
         }
     }
 
-    fn drain_table_to_writers(&mut self, salt: u64) -> Result<(), QueryError> {
+    fn drain_table_to_writers(&mut self, mix_round: u64) -> Result<(), QueryError> {
         flush_distinct_slots_grouped(
             &mut self.distinct_spills,
             true,
@@ -3779,7 +3779,7 @@ impl HashAgg {
         drain_group_table_to_writers(
             &layout,
             &mut group_state,
-            salt,
+            mix_round,
             frame_cap,
             &self.ctx,
             &mut self.partition_writers,
@@ -4760,7 +4760,7 @@ fn fold_partial_batch_into_table(
     start_row: usize,
     layout: &AggLayout<'_>,
     state: &mut GroupTableState<'_>,
-    salt: u64,
+    mix_round: u64,
     headroom: usize,
     eval_ctx: &EvalContext,
 ) -> Result<Option<usize>, QueryError> {
@@ -4773,7 +4773,7 @@ fn fold_partial_batch_into_table(
         if (row & CANCEL_CHECK_MASK) == 0 && eval_ctx.cancel.is_cancelled() {
             return Err(QueryError::Cancelled);
         }
-        let hash = hash_cols_row(group_cols, row, salt);
+        let hash = hash_cols_row(group_cols, row, mix_round);
         let existing_gi = state.table.lookup_by_cols(hash, group_cols, row);
 
         let mut need_sp = 0usize;
@@ -5018,7 +5018,7 @@ fn write_partial_chunk(
 fn drain_group_table_to_writers(
     layout: &AggLayout<'_>,
     state: &mut GroupTableState<'_>,
-    salt: u64,
+    mix_round: u64,
     frame_cap_bytes: usize,
     ctx: &ExecContext,
     writers: &mut [Option<SpillAppender>],
@@ -5040,7 +5040,7 @@ fn drain_group_table_to_writers(
     let mut buckets: Vec<Vec<usize>> = (0..NUM_SPILL_PARTITIONS).map(|_| Vec::new()).collect();
     for (gi, key) in keys.iter().enumerate() {
         if let Some(k) = key {
-            let h = hash_atoms(k, salt);
+            let h = hash_atoms(k, mix_round);
             let p = (h as usize) & (NUM_SPILL_PARTITIONS - 1);
             buckets[p].push(gi);
         }
@@ -5164,7 +5164,7 @@ fn route_partial_batch_to_writers(
     batch: &Batch,
     start_row: usize,
     num_group_cols: usize,
-    salt: u64,
+    mix_round: u64,
     frame_cap_bytes: usize,
     ctx: &ExecContext,
     writers: &mut [Option<SpillAppender>],
@@ -5180,7 +5180,7 @@ fn route_partial_batch_to_writers(
         if (row & CANCEL_CHECK_MASK) == 0 && ctx.eval.cancel.is_cancelled() {
             return Err(QueryError::Cancelled);
         }
-        let h = hash_cols_row(group_cols, row, salt);
+        let h = hash_cols_row(group_cols, row, mix_round);
         let p = (h as usize) & (NUM_SPILL_PARTITIONS - 1);
         part_rows[p].push(row as u32);
     }
@@ -5585,7 +5585,7 @@ fn fold_spill_partition_or_repartition(
                         return Err(QueryError::TooLarge);
                     }
                     let next_depth = depth + 1;
-                    let salt = next_depth as u64;
+                    let mix_round = next_depth as u64;
                     let mut sub_writers: Vec<Option<SpillAppender>> =
                         (0..NUM_SPILL_PARTITIONS).map(|_| None).collect();
 
@@ -5623,7 +5623,7 @@ fn fold_spill_partition_or_repartition(
                         drain_group_table_to_writers(
                             layout,
                             &mut group_state,
-                            salt,
+                            mix_round,
                             frame_cap,
                             ctx,
                             &mut sub_writers,
@@ -5633,7 +5633,7 @@ fn fold_spill_partition_or_repartition(
                         &batch,
                         failed_row,
                         layout.group_types.len(),
-                        salt,
+                        mix_round,
                         frame_cap,
                         ctx,
                         &mut sub_writers,
@@ -5649,7 +5649,7 @@ fn fold_spill_partition_or_repartition(
                             &rem_batch,
                             0,
                             layout.group_types.len(),
-                            salt,
+                            mix_round,
                             frame_cap,
                             ctx,
                             &mut sub_writers,
@@ -7857,14 +7857,14 @@ mod tests {
 
         for col in &cols {
             for r in 0..col.len() {
-                for salt in [0u64, 1, 2, 42] {
-                    let h_col = hash_cols_row(&[col], r, salt);
+                for mix_round in [0u64, 1, 2, 42] {
+                    let h_col = hash_cols_row(&[col], r, mix_round);
                     let atom = read_key_atom(col, r);
-                    let h_atom = hash_atoms(&[atom], salt);
+                    let h_atom = hash_atoms(&[atom], mix_round);
                     assert_eq!(
                         h_col,
                         h_atom,
-                        "hash mismatch for {:?} row {r} salt {salt}",
+                        "hash mismatch for {:?} row {r} round {mix_round}",
                         col.data_type()
                     );
                 }

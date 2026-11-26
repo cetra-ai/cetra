@@ -1354,10 +1354,7 @@ mod tests {
             .unwrap_or_else(|| panic!("missing column {name}"))
         {
             Column::Flat(fc) => fc,
-            other => panic!(
-                "expected Flat column for {name}, got {:?}",
-                other.data_type()
-            ),
+            _ => panic!("expected Flat column for {name}"),
         }
     }
 
@@ -1372,7 +1369,7 @@ mod tests {
         }
         match flat.data() {
             FlatData::Utf8(u) => u.get(row),
-            other => panic!("expected Utf8 for {name}, got {:?}", other.data_type()),
+            _ => panic!("expected Utf8 for {name}"),
         }
     }
 
@@ -1381,7 +1378,7 @@ mod tests {
         assert!(!flat.is_null(row), "{name} row {row} is null");
         match flat.data() {
             FlatData::I64(v) => v[row],
-            other => panic!("expected I64 for {name}, got {:?}", other.data_type()),
+            _ => panic!("expected I64 for {name}"),
         }
     }
 
@@ -1390,7 +1387,7 @@ mod tests {
         assert!(!flat.is_null(row), "{name} row {row} is null");
         match flat.data() {
             FlatData::F64(v) => v[row],
-            other => panic!("expected F64 for {name}, got {:?}", other.data_type()),
+            _ => panic!("expected F64 for {name}"),
         }
     }
 
@@ -1399,7 +1396,7 @@ mod tests {
         assert!(!flat.is_null(row), "{name} row {row} is null");
         match flat.data() {
             FlatData::Bool(bm) => bm.get(row),
-            other => panic!("expected Bool for {name}, got {:?}", other.data_type()),
+            _ => panic!("expected Bool for {name}"),
         }
     }
 
@@ -1411,10 +1408,7 @@ mod tests {
         match flat.data() {
             FlatData::FixedBytes8(v) => Some(&v[row]),
             FlatData::FixedBytes16(v) => Some(&v[row]),
-            other => panic!(
-                "expected FixedBytes for {name}, got {:?}",
-                other.data_type()
-            ),
+            _ => panic!("expected FixedBytes for {name}"),
         }
     }
 
@@ -1435,7 +1429,7 @@ mod tests {
                 let end = offsets[row + 1] as usize;
                 (start..end).map(|i| u.get(i).unwrap().to_owned()).collect()
             }
-            other => panic!("expected List for {name}, got {:?}", other.data_type()),
+            _ => panic!("expected List for {name}"),
         }
     }
 
@@ -1452,10 +1446,7 @@ mod tests {
             FlatData::Links(l) => {
                 assert!(l.get(row).unwrap().is_empty());
             }
-            other => panic!(
-                "expected List/Events/Links for {name}, got {:?}",
-                other.data_type()
-            ),
+            _ => panic!("expected List/Events/Links for {name}"),
         }
     }
 
@@ -1464,7 +1455,7 @@ mod tests {
         assert!(!flat.is_null(row));
         match flat.data() {
             FlatData::MapUtf8(m) => m.get(row).unwrap(),
-            other => panic!("expected MapUtf8 for {name}, got {:?}", other.data_type()),
+            _ => panic!("expected MapUtf8 for {name}"),
         }
     }
 
@@ -1476,7 +1467,7 @@ mod tests {
         let flat = flat_col(batch, schema::spans::EVENTS);
         match flat.data() {
             FlatData::Events(e) => e.get(row).unwrap().into_iter().map(|ev| ev.name).collect(),
-            other => panic!("expected Events, got {:?}", other.data_type()),
+            _ => panic!("expected Events"),
         }
     }
 
@@ -1489,7 +1480,7 @@ mod tests {
                 .into_iter()
                 .map(|lk| SpanId::from_bytes(lk.span_id).unwrap())
                 .collect(),
-            other => panic!("expected Links, got {:?}", other.data_type()),
+            _ => panic!("expected Links"),
         }
     }
 }
