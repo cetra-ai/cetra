@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import { ALWAYS_NOINDEX, MARKETING_ROUTES } from "../src/marketing/routes.mjs";
 import {
+  checkDarkModeOptOut,
   checkPage,
   checkSitemap,
   listedRoutes,
@@ -36,14 +37,48 @@ function page({
   canonical = '<link rel="canonical" href="https://cetra.sh/x/">',
   robots = '<meta name="robots" content="noindex">',
   ogImage = '<meta property="og:image" content="https://cetra.sh/og.png">',
+  darkMode = '<meta name="darkreader-lock"><meta name="color-scheme" content="dark">',
   body = "<h1>A</h1>",
 } = {}) {
-  return `<!doctype html><html ${htmlAttrs}><head>${title}${description}${canonical}${robots}${ogImage}</head><body>${body}</body></html>`;
+  return `<!doctype html><html ${htmlAttrs}><head>${title}${description}${canonical}${robots}${ogImage}${darkMode}</head><body>${body}</body></html>`;
 }
 
 // Every built file the page links to, /og.png included.
 const built = new Set(["/og.png"]);
 const noindex = { noindex: true, distFiles: built };
+
+describe("checkDarkModeOptOut", () => {
+  it("accepts the lock with a dark or a light and dark scheme", () => {
+    assert.deepEqual(checkDarkModeOptOut(page()), []);
+    const both = '<meta name="darkreader-lock"><meta name="color-scheme" content="light dark">';
+    assert.deepEqual(checkDarkModeOptOut(page({ darkMode: both })), []);
+  });
+  it("reports a missing lock and a missing scheme", () => {
+    assert.deepEqual(checkDarkModeOptOut(page({ darkMode: "" })), [
+      "darkreader-lock meta missing",
+      "color-scheme meta must include dark",
+    ]);
+  });
+  it("reports a light-only scheme", () => {
+    const light = '<meta name="darkreader-lock"><meta name="color-scheme" content="light">';
+    assert.deepEqual(checkDarkModeOptOut(page({ darkMode: light })), [
+      "color-scheme meta must include dark",
+    ]);
+  });
+  it("ignores metas inside a script", () => {
+    const scripted =
+      '<script>"<meta name=darkreader-lock>"</script><meta name="color-scheme" content="dark">';
+    assert.deepEqual(checkDarkModeOptOut(page({ darkMode: scripted })), [
+      "darkreader-lock meta missing",
+    ]);
+  });
+  it("checkPage includes its findings", () => {
+    assert.deepEqual(checkPage("/x/", page({ darkMode: "" }), noindex), [
+      "darkreader-lock meta missing",
+      "color-scheme meta must include dark",
+    ]);
+  });
+});
 
 describe("checkPage", () => {
   it("a valid page has no findings", () => {

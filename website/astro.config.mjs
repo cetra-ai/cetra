@@ -22,6 +22,12 @@ export default defineConfig({
       description:
         "Open-source LLM observability and evaluation that runs as one binary on one machine.",
       favicon: "/favicon.svg",
+      // The docs have their own light and dark themes: Dark Reader turns itself off, and browsers'
+      // automatic dark mode skips the pages before Starlight's theme script sets `color-scheme`.
+      head: [
+        { tag: "meta", attrs: { name: "darkreader-lock" } },
+        { tag: "meta", attrs: { name: "color-scheme", content: "light dark" } },
+      ],
       customCss: ["./src/styles/custom.css"],
       components: {
         // "On this page" as wide as the left sidebar (Starlight's grows with the window).
