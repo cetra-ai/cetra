@@ -7,23 +7,35 @@
 
 use std::collections::HashSet;
 use std::num::NonZeroUsize;
+use std::ops::Range;
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
-use arrow::array::{Array, ListArray, RecordBatch, StringArray};
 use bytes::Bytes;
+use cetra_column::{
+    Batch, CancelToken, Column, DataType, FlatData, GlobalPool, ScalarValue, Selection,
+};
 use cetra_core::ids::ProjectId;
-use datafusion::error::DataFusionError;
-use datafusion::execution::context::{SessionConfig, SessionContext};
-use datafusion::execution::runtime_env::RuntimeEnv;
+use cetra_core::schema::spans;
+use cetra_query::exec::streaming::UnionSource;
+use cetra_query::exec::{
+    ControlFlow, DEFAULT_BATCH_SIZE, ExecContext, ExecMetrics, PushSink, ScanSource, ScanSpec,
+    SpillManager, run_pipeline,
+};
+use cetra_query::{EvalContext, QueryError};
+use chrono::NaiveDate;
 
-use crate::catalog::Committer;
-use crate::error::{MediaError, QueryError};
+use crate::catalog::{Committer, FileMeta, FileTable, now_ns};
+use crate::deletion::project_snapshot;
+use crate::engine::mem_source::MemtableSource;
+use crate::engine::parquet_source::ParquetSource;
+use crate::error::{MediaError, query_err_to_df};
 use crate::hooks::{HookPoint, Hooks};
 use crate::objects::Objects;
 use crate::read_state::Published;
-use crate::verify::VerifyQueue;
-use crate::{QueryOptions, project_query};
+use crate::verify::{Suspects, VerifyQueue};
+use crate::wal::Table;
 
 /// One extracted media blob (spec 02 § Media).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -72,18 +84,12 @@ pub(crate) struct MediaGc {
     pub(crate) committer: Arc<Committer>,
     pub(crate) objects: Arc<Objects>,
     pub(crate) published: Arc<Published>,
-    pub(crate) runtime: Arc<RuntimeEnv>,
-    pub(crate) target_partitions: NonZeroUsize,
-    /// `query.trace_lookback` in ns, for [`project_query`].
-    pub(crate) lookback: i64,
     pub(crate) hooks: Hooks,
     /// The suspects of the live-set query go here (spec 03 §10).
     pub(crate) verify: Arc<VerifyQueue>,
     /// Persistent native query runtime (`workers` + `metadata_cache`).
-    #[allow(dead_code)]
     pub(crate) qe_runtime: Arc<crate::QeRuntime>,
     /// Tokio runtime handle for async object-store reads from worker threads.
-    #[allow(dead_code)]
     pub(crate) runtime_handle: tokio::runtime::Handle,
 }
 
@@ -94,15 +100,15 @@ impl std::fmt::Debug for MediaGc {
 }
 
 impl MediaGc {
-    /// Constructs a [`MediaGc`] with both legacy DataFusion and native engine handles.
+    /// Constructs a [`MediaGc`] with native engine handles (accepting legacy args until M7).
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
         committer: Arc<Committer>,
         objects: Arc<Objects>,
         published: Arc<Published>,
-        runtime: Arc<RuntimeEnv>,
-        target_partitions: NonZeroUsize,
-        lookback: i64,
+        _runtime: Arc<datafusion::execution::runtime_env::RuntimeEnv>,
+        _target_partitions: NonZeroUsize,
+        _lookback: i64,
         hooks: Hooks,
         verify: Arc<VerifyQueue>,
         qe_runtime: Arc<crate::QeRuntime>,
@@ -112,9 +118,6 @@ impl MediaGc {
             committer,
             objects,
             published,
-            runtime,
-            target_partitions,
-            lookback,
             hooks,
             verify,
             qe_runtime,
@@ -254,77 +257,312 @@ impl MediaGc {
     }
 
     /// Every hash the project's `spans` rows reference, from one published
-    /// snapshot through the query providers (spec 03 §9).
+    /// snapshot through the native query sources (spec 03 §9).
     async fn live_set(&self, project: ProjectId) -> Result<HashSet<String>, MediaError> {
         let state = self.published.load();
-        let query = project_query(
-            &state,
-            project,
-            QueryOptions::new(None, None),
-            &self.runtime,
-            self.target_partitions,
-            self.lookback,
-            &self.verify,
-        )
-        .map_err(|error| match error {
-            QueryError::DataFusion(error) => MediaError::Query(error),
-            // `live_set` calls `project_query` directly, not `Storage::query`,
-            // so no admission happens here.
-            QueryError::Busy => MediaError::Query(DataFusionError::Internal(
-                "query admission in the media collection".to_owned(),
-            )),
-        })?;
-        let context = SessionContext::new_with_config_rt(
-            SessionConfig::new().with_target_partitions(self.target_partitions.get()),
-            Arc::clone(&self.runtime),
-        );
-        let batches = context
-            .read_table(Arc::clone(&query.spans))
-            .map_err(MediaError::from)?
-            .select_columns(&["media_refs"])
-            .map_err(MediaError::from)?
-            .collect()
-            .await
-            .map_err(|error| {
-                query.suspects.report(&error);
-                MediaError::from(error)
-            })?;
-        let mut live = HashSet::new();
-        for batch in &batches {
-            insert_media_refs(batch, &mut live)?;
+        if state.projects.is_dropped(project) {
+            return Ok(HashSet::new());
         }
+
+        let deletions = state.tombstones.for_project(project);
+        let keep_from = state.projects.keep_from(project);
+        let file_keep_from = keep_from.unwrap_or(NaiveDate::MIN);
+        let files: Vec<Arc<FileMeta>> = state
+            .catalog
+            .files(FileTable::Spans, project, file_keep_from..=NaiveDate::MAX)
+            .cloned()
+            .collect();
+
+        let has_late = keep_from.is_some_and(|keep| {
+            state
+                .spans
+                .partitions
+                .keys()
+                .any(|key| key.project == project && key.day < keep)
+        });
+        let spans_snapshot = if deletions.is_empty() && !has_late {
+            Arc::clone(&state.spans)
+        } else {
+            project_snapshot(Table::Spans, &state.spans, project, keep_from, &deletions).map_err(
+                |err| match err {
+                    crate::error::QueryError::DataFusion(e) => MediaError::Query(e),
+                    crate::error::QueryError::Busy => {
+                        MediaError::Query(query_err_to_df(QueryError::Busy))
+                    }
+                },
+            )?
+        };
+
+        let schema = FileTable::Spans.column_schema();
+        let media_refs_idx = schema.index_of(spans::MEDIA_REFS).ok_or_else(|| {
+            query_err_to_media(QueryError::internal("spans schema missing media_refs"))
+        })?;
+
+        let suspects = Suspects::new(Arc::clone(&self.verify));
+        let parquet_source = ParquetSource::new(
+            self.objects.store(),
+            FileTable::Spans,
+            Arc::clone(&schema),
+            files,
+            Arc::clone(&deletions),
+            Arc::clone(&self.qe_runtime.metadata_cache),
+            suspects,
+            self.runtime_handle.clone(),
+        );
+        let mem_source =
+            MemtableSource::new(Table::Spans, project, keep_from, spans_snapshot, deletions)
+                .map_err(query_err_to_media)?;
+        let union = UnionSource::new(schema, vec![Arc::new(parquet_source), Arc::new(mem_source)])
+            .map_err(query_err_to_media)?;
+
+        let workers = self.qe_runtime.workers().map_err(query_err_to_media)?;
+        let target_partitions = self.qe_runtime.target_partitions.max(1);
+        let cancel = CancelToken::new();
+        let cancel_guard = CancelOnDrop(cancel.clone());
+
+        let live = tokio::task::spawn_blocking(move || -> Result<HashSet<String>, QueryError> {
+            let pool = GlobalPool::standalone(usize::MAX);
+            let spill = Arc::new(SpillManager::with_fixed_cap(PathBuf::new(), 0));
+            let exec_ctx = ExecContext {
+                pool,
+                eval: EvalContext {
+                    now_ns: now_ns(),
+                    cancel,
+                },
+                spill,
+                workers,
+                batch_size: DEFAULT_BATCH_SIZE,
+                target_partitions,
+                metrics: ExecMetrics::new(),
+            };
+            let spec = ScanSpec {
+                projection: Some(vec![media_refs_idx]),
+                ..ScanSpec::default()
+            };
+            let partitions = union.open_partitions(&spec, &exec_ctx)?;
+            if partitions.is_empty() {
+                return Ok(HashSet::new());
+            }
+            let sinks = run_pipeline(
+                &exec_ctx,
+                partitions,
+                |_| Ok(Vec::new()),
+                |_| Ok(MediaRefSink::default()),
+            )?;
+            let mut merged = HashSet::new();
+            for sink in sinks {
+                if merged.is_empty() {
+                    merged = sink.live;
+                } else {
+                    merged.extend(sink.live);
+                }
+            }
+            Ok(merged)
+        })
+        .await
+        .map_err(|_| query_err_to_media(QueryError::internal("media GC scan task failed")))?
+        .map_err(query_err_to_media)?;
+
+        drop(cancel_guard);
         Ok(live)
     }
 }
 
+struct CancelOnDrop(CancelToken);
+
+impl Drop for CancelOnDrop {
+    fn drop(&mut self) {
+        self.0.cancel();
+    }
+}
+
+fn query_err_to_media(err: QueryError) -> MediaError {
+    MediaError::Query(query_err_to_df(err))
+}
+
+#[derive(Default)]
+struct MediaRefSink {
+    live: HashSet<String>,
+}
+
+impl PushSink for MediaRefSink {
+    fn consume(&mut self, batch: Batch) -> Result<ControlFlow, QueryError> {
+        insert_media_refs(&batch, &mut self.live)?;
+        Ok(ControlFlow::Continue)
+    }
+}
+
 /// Every string of `batch`'s single `media_refs` list column into `live`.
-fn insert_media_refs(batch: &RecordBatch, live: &mut HashSet<String>) -> Result<(), MediaError> {
-    let not_a_list = || {
-        MediaError::Query(DataFusionError::Internal(
-            "the media_refs column is not a string list".to_owned(),
-        ))
-    };
-    let column = batch
-        .column(0)
-        .as_any()
-        .downcast_ref::<ListArray>()
-        .ok_or_else(not_a_list)?;
-    for row in 0..batch.num_rows() {
-        if column.is_null(row) {
-            continue;
+fn insert_media_refs(batch: &Batch, live: &mut HashSet<String>) -> Result<(), QueryError> {
+    if batch.is_empty() {
+        return Ok(());
+    }
+    let not_a_list = || QueryError::internal("the media_refs column is not a string list");
+    let col = batch.column(0).ok_or_else(not_a_list)?;
+
+    if let Column::Const { value, len } = col {
+        if *len < batch.raw_len() {
+            return Err(not_a_list());
         }
-        let values = column.value(row);
-        let strings = values
-            .as_any()
-            .downcast_ref::<StringArray>()
-            .ok_or_else(not_a_list)?;
-        for index in 0..strings.len() {
-            if !strings.is_null(index) {
-                live.insert(strings.value(index).to_owned());
+        return match value {
+            ScalarValue::Null(DataType::List(inner))
+                if matches!(inner.as_ref(), DataType::Utf8) =>
+            {
+                Ok(())
+            }
+            ScalarValue::Null(DataType::Null) => Ok(()),
+            ScalarValue::List { item_type, values } if *item_type == DataType::Utf8 => {
+                for sv in values {
+                    match sv {
+                        ScalarValue::Null(_) => {}
+                        ScalarValue::Utf8(s) => {
+                            if !live.contains(s.as_str()) {
+                                live.insert(s.clone());
+                            }
+                        }
+                        _ => return Err(not_a_list()),
+                    }
+                }
+                Ok(())
+            }
+            _ => Err(not_a_list()),
+        };
+    }
+
+    let mut visit = |phys_row: usize| -> Result<(), QueryError> {
+        let (flat, flat_row) = match col {
+            Column::Flat(flat) => {
+                if flat.is_null(phys_row) {
+                    return Ok(());
+                }
+                (flat, phys_row)
+            }
+            Column::Dict(dict) => {
+                if dict.is_null(phys_row) {
+                    return Ok(());
+                }
+                let code = *dict.codes().get(phys_row).ok_or_else(not_a_list)? as usize;
+                (dict.values(), code)
+            }
+            Column::Rle(rle) => {
+                let run = rle
+                    .run_ends()
+                    .partition_point(|&end| (end as usize) <= phys_row);
+                if rle.values().is_null(run) {
+                    return Ok(());
+                }
+                (rle.values(), run)
+            }
+            Column::Const { .. } => return Err(not_a_list()),
+        };
+        match flat.data() {
+            FlatData::List {
+                item_type,
+                offsets,
+                values,
+            } if *item_type == DataType::Utf8 => {
+                let start = *offsets.get(flat_row).ok_or_else(not_a_list)? as usize;
+                let end = *offsets.get(flat_row + 1).ok_or_else(not_a_list)? as usize;
+                insert_utf8_elements(values.as_ref(), start..end, live)
+            }
+            _ => Err(not_a_list()),
+        }
+    };
+
+    match batch.selection() {
+        Selection::All => {
+            for phys_row in 0..batch.raw_len() {
+                visit(phys_row)?;
+            }
+        }
+        Selection::Mask(mask) => {
+            for phys_row in mask.iter_ones() {
+                visit(phys_row)?;
+            }
+        }
+        Selection::Indices(indices) => {
+            for &phys_row in indices {
+                visit(phys_row as usize)?;
             }
         }
     }
     Ok(())
+}
+
+fn insert_utf8_elements(
+    values: &Column,
+    range: Range<usize>,
+    live: &mut HashSet<String>,
+) -> Result<(), QueryError> {
+    if range.is_empty() {
+        return Ok(());
+    }
+    let not_a_list = || QueryError::internal("the media_refs column is not a string list");
+    match values {
+        Column::Flat(flat) => match flat.data() {
+            FlatData::Utf8(utf8) => {
+                for idx in range {
+                    if !flat.is_null(idx) {
+                        let s = utf8.get(idx).ok_or_else(not_a_list)?;
+                        if !live.contains(s) {
+                            live.insert(s.to_owned());
+                        }
+                    }
+                }
+                Ok(())
+            }
+            FlatData::Null(len) if range.end <= *len => Ok(()),
+            _ => Err(not_a_list()),
+        },
+        Column::Const { value, len } => {
+            if range.end > *len {
+                return Err(not_a_list());
+            }
+            match value {
+                ScalarValue::Null(_) => Ok(()),
+                ScalarValue::Utf8(s) => {
+                    if !live.contains(s.as_str()) {
+                        live.insert(s.clone());
+                    }
+                    Ok(())
+                }
+                _ => Err(not_a_list()),
+            }
+        }
+        Column::Dict(dict) => match dict.values().data() {
+            FlatData::Utf8(utf8) => {
+                for idx in range {
+                    if !dict.is_null(idx) {
+                        let code = *dict.codes().get(idx).ok_or_else(not_a_list)? as usize;
+                        let s = utf8.get(code).ok_or_else(not_a_list)?;
+                        if !live.contains(s) {
+                            live.insert(s.to_owned());
+                        }
+                    }
+                }
+                Ok(())
+            }
+            _ => Err(not_a_list()),
+        },
+        Column::Rle(rle) => match rle.values().data() {
+            FlatData::Utf8(utf8) => {
+                for idx in range {
+                    if idx >= rle.len() {
+                        return Err(not_a_list());
+                    }
+                    let run = rle.run_ends().partition_point(|&end| (end as usize) <= idx);
+                    if !rle.values().is_null(run) {
+                        let s = utf8.get(run).ok_or_else(not_a_list)?;
+                        if !live.contains(s) {
+                            live.insert(s.to_owned());
+                        }
+                    }
+                }
+                Ok(())
+            }
+            _ => Err(not_a_list()),
+        },
+    }
 }
 
 #[cfg(test)]
@@ -945,5 +1183,297 @@ mod tests {
             Err(MediaError::NotFound)
         ));
         storage.shutdown().await.unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn live_set_short_circuits_on_dropped_project() {
+        let dir = tempfile::tempdir().unwrap();
+        let storage = Storage::open(config_in(dir.path())).await.unwrap();
+        let blob = blob_of(b"dropped-project-blob", "image/png");
+        let sha = blob.sha256;
+        storage.put_media(project(), blob).await.unwrap();
+        let time = at(0, 0, 0);
+        let mut span = span_row(1, 0, time, time);
+        span.media_refs = vec![hex::encode(sha)];
+        storage
+            .append_spans(project(), span_rows(&[span]))
+            .await
+            .unwrap();
+        assert!(!storage.media.live_set(project()).await.unwrap().is_empty());
+
+        storage
+            .published
+            .replace(|state| crate::read_state::ReadState {
+                projects: Arc::new(state.projects.with_dropped(project())),
+                ..state.clone()
+            });
+        assert!(storage.media.live_set(project()).await.unwrap().is_empty());
+        storage.shutdown().await.unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn live_set_respects_keep_from_retention_in_files_and_memtable() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = config_in(dir.path());
+        let storage = Storage::open(config.clone()).await.unwrap();
+        let old_blob = blob_of(b"old-day-blob", "image/png");
+        let new_blob = blob_of(b"new-day-blob", "image/png");
+        let mem_old_blob = blob_of(b"mem-old-day-blob", "image/png");
+        let old_sha = old_blob.sha256;
+        let new_sha = new_blob.sha256;
+        let mem_old_sha = mem_old_blob.sha256;
+        storage.put_media(project(), old_blob).await.unwrap();
+        storage.put_media(project(), new_blob).await.unwrap();
+        storage.put_media(project(), mem_old_blob).await.unwrap();
+
+        let day1 = at(0, 0, 0);
+        let day2 = day1 + 86_400_000_000_000;
+        let mut s1 = span_row(1, 0, day1, day1);
+        s1.media_refs = vec![hex::encode(old_sha)];
+        let mut s2 = span_row(2, 0, day2, day2);
+        s2.media_refs = vec![hex::encode(new_sha)];
+        storage
+            .append_spans(project(), span_rows(&[s1, s2]))
+            .await
+            .unwrap();
+        storage.shutdown().await.unwrap();
+
+        let storage = Storage::open(config).await.unwrap();
+        // Add a late memtable span on day1 as well.
+        let mut s3 = span_row(3, 0, day1, day1);
+        s3.media_refs = vec![hex::encode(mem_old_sha)];
+        storage
+            .append_spans(project(), span_rows(&[s3]))
+            .await
+            .unwrap();
+
+        let keep_day = chrono::DateTime::from_timestamp_nanos(day2).date_naive();
+        storage.apply_retention(project(), keep_day).await.unwrap();
+
+        let live = storage.media.live_set(project()).await.unwrap();
+        assert!(!live.contains(&hex::encode(old_sha)));
+        assert!(!live.contains(&hex::encode(mem_old_sha)));
+        assert!(live.contains(&hex::encode(new_sha)));
+
+        let report = storage.collect_media(now_ns() + 2 * HOUR_NS).await.unwrap();
+        assert_eq!(report.deleted, 2);
+        assert!(
+            storage
+                .get_media(project(), &new_sha, None, None)
+                .await
+                .is_ok()
+        );
+        storage.shutdown().await.unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn live_set_respects_pending_tombstones_across_files_and_memtable() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = config_in(dir.path());
+        let storage = Storage::open(config.clone()).await.unwrap();
+        let file_blob = blob_of(b"file-tombstoned-blob", "image/png");
+        let mem_blob = blob_of(b"mem-tombstoned-blob", "image/png");
+        let kept_blob = blob_of(b"kept-blob", "image/png");
+        let file_sha = file_blob.sha256;
+        let mem_sha = mem_blob.sha256;
+        let kept_sha = kept_blob.sha256;
+        storage.put_media(project(), file_blob).await.unwrap();
+        storage.put_media(project(), mem_blob).await.unwrap();
+        storage.put_media(project(), kept_blob).await.unwrap();
+
+        let time = at(0, 0, 0);
+        let mut file_span = span_row(1, 0, time, time);
+        file_span.media_refs = vec![hex::encode(file_sha)];
+        let file_trace = file_span.trace_id;
+        let mut kept_span = span_row(2, 0, time, time);
+        kept_span.media_refs = vec![hex::encode(kept_sha)];
+        storage
+            .append_spans(project(), span_rows(&[file_span, kept_span]))
+            .await
+            .unwrap();
+        storage.shutdown().await.unwrap();
+
+        let storage = Storage::open(config).await.unwrap();
+        let mut mem_span = span_row(3, 0, time, time);
+        mem_span.media_refs = vec![hex::encode(mem_sha)];
+        let mem_trace = mem_span.trace_id;
+        storage
+            .append_spans(project(), span_rows(&[mem_span]))
+            .await
+            .unwrap();
+
+        storage
+            .register_deletion(Deletion {
+                id: Uuid::now_v7(),
+                project: project(),
+                cutoff: time + 1,
+                scope: DeletionScope::Traces {
+                    trace_ids: vec![file_trace, mem_trace],
+                },
+            })
+            .await
+            .unwrap();
+
+        let live = storage.media.live_set(project()).await.unwrap();
+        assert!(!live.contains(&hex::encode(file_sha)));
+        assert!(!live.contains(&hex::encode(mem_sha)));
+        assert!(live.contains(&hex::encode(kept_sha)));
+        storage.shutdown().await.unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn live_set_reports_corrupt_parquet_file_as_suspect() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = config_in(dir.path());
+        let storage = Storage::open(config.clone()).await.unwrap();
+        let blob = blob_of(b"corrupt-file-media", "image/png");
+        let sha = blob.sha256;
+        storage.put_media(project(), blob).await.unwrap();
+        let time = at(0, 0, 0);
+        let mut span = span_row(1, 0, time, time);
+        span.media_refs = vec![hex::encode(sha)];
+        storage
+            .append_spans(project(), span_rows(&[span]))
+            .await
+            .unwrap();
+        storage.shutdown().await.unwrap();
+
+        let storage = Storage::open(config).await.unwrap();
+        let file = storage.catalog_files(crate::catalog::FileTable::Spans)[0].clone();
+        let obj_path = dir.path().join("objects").join(&file.path);
+        let mut bytes = std::fs::read(&obj_path).unwrap();
+        let len = bytes.len();
+        bytes[len - 4..].fill(0xFF);
+        std::fs::write(&obj_path, bytes).unwrap();
+
+        let err = storage
+            .media
+            .live_set(project())
+            .await
+            .expect_err("corrupt file must fail live_set");
+        assert!(matches!(err, MediaError::Query(_)));
+        assert_eq!(storage.verify_queue().take(10), vec![file.id]);
+        storage.shutdown().await.unwrap();
+    }
+
+    #[test]
+    fn insert_media_refs_handles_all_encodings_and_selections() {
+        use std::collections::HashSet;
+
+        use cetra_column::{
+            Batch, Bitmap, Column, DataType, DictColumn, Field, FlatColumn, FlatData, RleColumn,
+            ScalarValue, Schema, Selection, Utf8Data,
+        };
+
+        let list_dt = DataType::List(Box::new(DataType::Utf8));
+        let schema = Schema::try_new_arc(vec![Field::new("media_refs", list_dt, true)]).unwrap();
+
+        // 1. Flat list with Dict child Utf8 + Selection::Mask
+        let dict_child_vals = FlatColumn::try_new(
+            FlatData::Utf8(Utf8Data::try_from_slices(["a", "b"]).unwrap()),
+            None,
+        )
+        .unwrap();
+        let dict_child = Column::Dict(
+            DictColumn::try_new(
+                dict_child_vals,
+                vec![0, 1, 0],
+                Some(Bitmap::from_bools(&[true, false, true])),
+            )
+            .unwrap(),
+        );
+        let flat_list = Column::Flat(
+            FlatColumn::try_new(
+                FlatData::List {
+                    item_type: DataType::Utf8,
+                    offsets: vec![0, 2, 3, 3],
+                    values: Box::new(dict_child),
+                },
+                Some(Bitmap::from_bools(&[true, true, false])),
+            )
+            .unwrap(),
+        );
+        let b1 = Batch::try_new(
+            Arc::clone(&schema),
+            vec![flat_list],
+            3,
+            Selection::Mask(Bitmap::from_bools(&[true, false, true])),
+        )
+        .unwrap();
+        let mut live = HashSet::new();
+        super::insert_media_refs(&b1, &mut live).unwrap();
+        assert_eq!(live, HashSet::from(["a".to_owned()]));
+
+        // 2. Const list
+        let const_list = Column::Const {
+            value: ScalarValue::List {
+                item_type: DataType::Utf8,
+                values: vec![
+                    ScalarValue::Utf8("c1".to_owned()),
+                    ScalarValue::Null(DataType::Utf8),
+                    ScalarValue::Utf8("c2".to_owned()),
+                ],
+            },
+            len: 2,
+        };
+        let b2 = Batch::try_new_all(Arc::clone(&schema), vec![const_list], 2).unwrap();
+        live.clear();
+        super::insert_media_refs(&b2, &mut live).unwrap();
+        assert_eq!(live, HashSet::from(["c1".to_owned(), "c2".to_owned()]));
+
+        // 3. Dict list with Rle child Utf8 + Selection::Indices
+        let rle_child_vals = FlatColumn::try_new(
+            FlatData::Utf8(Utf8Data::try_from_slices(["r1", "r2"]).unwrap()),
+            None,
+        )
+        .unwrap();
+        let rle_child = Column::Rle(RleColumn::try_new(rle_child_vals, vec![2, 3]).unwrap());
+        let dict_list_vals = FlatColumn::try_new(
+            FlatData::List {
+                item_type: DataType::Utf8,
+                offsets: vec![0, 1, 3],
+                values: Box::new(rle_child),
+            },
+            None,
+        )
+        .unwrap();
+        let dict_list = Column::Dict(
+            DictColumn::try_new(
+                dict_list_vals,
+                vec![0, 1, 0],
+                Some(Bitmap::from_bools(&[true, true, false])),
+            )
+            .unwrap(),
+        );
+        let b3 = Batch::try_new(
+            Arc::clone(&schema),
+            vec![dict_list],
+            3,
+            Selection::Indices(vec![1, 2]),
+        )
+        .unwrap();
+        live.clear();
+        super::insert_media_refs(&b3, &mut live).unwrap();
+        assert_eq!(live, HashSet::from(["r1".to_owned(), "r2".to_owned()]));
+
+        // 4. Rle list with Const child Utf8
+        let const_child = Column::Const {
+            value: ScalarValue::Utf8("k".to_owned()),
+            len: 2,
+        };
+        let rle_list_vals = FlatColumn::try_new(
+            FlatData::List {
+                item_type: DataType::Utf8,
+                offsets: vec![0, 2, 2],
+                values: Box::new(const_child),
+            },
+            Some(Bitmap::from_bools(&[true, false])),
+        )
+        .unwrap();
+        let rle_list = Column::Rle(RleColumn::try_new(rle_list_vals, vec![2, 4]).unwrap());
+        let b4 = Batch::try_new_all(schema, vec![rle_list], 4).unwrap();
+        live.clear();
+        super::insert_media_refs(&b4, &mut live).unwrap();
+        assert_eq!(live, HashSet::from(["k".to_owned()]));
     }
 }
