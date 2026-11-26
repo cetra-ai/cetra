@@ -12,8 +12,9 @@ use crate::codec::{
     ZonePred, ZoneValue, decode_mini_block, decode_mini_block_selected, decode_mini_block_take,
 };
 use crate::format::{
-    BlockEntry, Codec, Encoding, MAX_BATCH_DECODED_BYTES, MAX_BLOCK_RAW_BYTES, MAX_FRAME_RAW_BYTES,
-    PackDecoderDict, decode_schema, read_framed_block_cow, read_framed_pack_frame_with_dict,
+    BlockEntry, Codec, Encoding, KNOWN_BLOCK_FLAGS, MAX_BATCH_DECODED_BYTES, MAX_BLOCK_RAW_BYTES,
+    MAX_FRAME_RAW_BYTES, PackDecoderDict, decode_schema, read_framed_block_cow,
+    read_framed_pack_frame_with_dict,
 };
 use crate::gdpr::{GdprFileInput, gdpr_rewrite_day};
 use crate::io::{RangeReader, SliceReader};
@@ -125,7 +126,7 @@ fn exercise_direct_mini_block_decoders(data: &[u8]) {
     } else {
         (u16::from_le_bytes([data[4], data[5]]) as usize % (row_count + 1)) as u16
     };
-    let block_flags = data[6] & 0x1F;
+    let block_flags = data[6] & KNOWN_BLOCK_FLAGS;
     let inline_len = data[7].min(16);
     let body = &data[8..];
     let mut min_inline = [0u8; 16];
@@ -1541,6 +1542,165 @@ pub(crate) mod tests {
         let mut dict_pack_bytes = Vec::new();
         dict_pb.finish(&mut dict_pack_bytes).unwrap();
         write("seed-20-stpk-zstd-dict", &dict_pack_bytes);
+
+        // 21: 1,030-row L1Compact file with ~60 B strings + List<Utf8> triggering BLOCK_FLAG_FSST_SUBCHUNKED.
+        let fsst_n = 1_030usize;
+        let fsst_schema = Schema::try_new_arc(vec![
+            Field::new("id", DataType::I64, false),
+            Field::new("url", DataType::Utf8, true),
+            Field::new("tags_list", DataType::List(Box::new(DataType::Utf8)), true),
+        ])
+        .unwrap();
+        let fsst_ids: Vec<i64> = (0..fsst_n as i64).collect();
+        let mut url_strings = Vec::with_capacity(fsst_n);
+        let mut url_valid = Vec::with_capacity(fsst_n);
+        let mut list_offsets = Vec::with_capacity(fsst_n + 1);
+        list_offsets.push(0u32);
+        let mut list_items = Vec::with_capacity(fsst_n);
+        for i in 0..fsst_n {
+            let h1 = (i as u32).wrapping_mul(2654435761);
+            let h2 = (i as u32).wrapping_mul(2246822519);
+            if i % 37 == 0 {
+                url_strings.push(String::new());
+                url_valid.push(false);
+            } else {
+                url_strings.push(format!(
+                    "https://observability.cetra.sh/api/v1/traces/span_{i:06}/req_{h1:08x}/event_{:03}",
+                    i % 97
+                ));
+                url_valid.push(true);
+            }
+            list_items.push(format!(
+                "https://cdn.cetra.sh/assets/service_worker/chunk_{i:06}_{h2:08x}_region_{:02}.js",
+                i % 31
+            ));
+            list_offsets.push(list_items.len() as u32);
+        }
+        let fsst_batch = Batch::try_new_all(
+            Arc::clone(&fsst_schema),
+            vec![
+                Column::Flat(FlatColumn::try_new(FlatData::I64(fsst_ids), None).unwrap()),
+                Column::Flat(
+                    FlatColumn::try_new(
+                        FlatData::Utf8(
+                            Utf8Data::try_from_slices(
+                                url_strings.iter().map(String::as_str).collect::<Vec<_>>(),
+                            )
+                            .unwrap(),
+                        ),
+                        Some(Bitmap::from_bools(&url_valid)),
+                    )
+                    .unwrap(),
+                ),
+                Column::Flat(
+                    FlatColumn::try_new(
+                        FlatData::List {
+                            item_type: DataType::Utf8,
+                            offsets: list_offsets,
+                            values: Box::new(Column::Flat(
+                                FlatColumn::try_new(
+                                    FlatData::Utf8(
+                                        Utf8Data::try_from_slices(
+                                            list_items
+                                                .iter()
+                                                .map(String::as_str)
+                                                .collect::<Vec<_>>(),
+                                        )
+                                        .unwrap(),
+                                    ),
+                                    None,
+                                )
+                                .unwrap(),
+                            )),
+                        },
+                        None,
+                    )
+                    .unwrap(),
+                ),
+            ],
+            fsst_n,
+        )
+        .unwrap();
+        let mut fsst_opts = WriteOptions::for_table(TableKind::Generic, WriteProfile::L1Compact);
+        fsst_opts.sort_cols = vec![0];
+        let fsst_bytes = write_statam_bytes(&fsst_schema, &[&fsst_batch], fsst_opts);
+        let fsst_meta =
+            StatamFileMeta::read_from(&SliceReader::new(fsst_bytes.clone()), None).unwrap();
+        assert_ne!(
+            fsst_meta.rg_blocks(1, 0)[0].block_flags & crate::format::BLOCK_FLAG_FSST_SUBCHUNKED,
+            0,
+            "seed-21 must trigger BLOCK_FLAG_FSST_SUBCHUNKED"
+        );
+        write("seed-21-fsst-subchunked-l1", &fsst_bytes);
+
+        // 22: Paired `.statam` + `.stpk` with `DataType::Binary` in `payload_cols` (dedicated blob frames).
+        let blob_schema = Schema::try_new_arc(vec![
+            Field::new("id", DataType::I64, false),
+            Field::new("blob", DataType::Binary, true),
+        ])
+        .unwrap();
+        let mut comp_blob = Vec::with_capacity(36 * 1024);
+        while comp_blob.len() < 36 * 1024 {
+            comp_blob
+                .extend_from_slice(b"PDF-object-stream-repetitive-binary-payload-0123456789\n");
+        }
+        let mut small_raw_blob = Vec::with_capacity(2_048);
+        let mut prng = 0x1234_5678_9abc_def0u64;
+        for _ in 0..2_048 {
+            prng ^= prng << 13;
+            prng ^= prng >> 7;
+            prng ^= prng << 17;
+            small_raw_blob.push((prng & 0xFF) as u8);
+        }
+        let blob_slices: Vec<&[u8]> = vec![
+            &[],
+            &[],
+            b"inline-bin-16b!!",
+            &small_raw_blob,
+            &comp_blob,
+            &comp_blob[..33 * 1024],
+        ];
+        let blob_nulls = Bitmap::from_bools(&[false, true, true, true, true, true]);
+        let blob_batch = Batch::try_new_all(
+            Arc::clone(&blob_schema),
+            vec![
+                Column::Flat(
+                    FlatColumn::try_new(FlatData::I64(vec![0, 1, 2, 3, 4, 5]), None).unwrap(),
+                ),
+                Column::Flat(
+                    FlatColumn::try_new(
+                        FlatData::Binary(BinaryData::try_from_slices(blob_slices).unwrap()),
+                        Some(blob_nulls),
+                    )
+                    .unwrap(),
+                ),
+            ],
+            6,
+        )
+        .unwrap();
+        let blob_pack_id = [0x62u8; 16];
+        let mut blob_opts = WriteOptions::for_table(TableKind::Generic, WriteProfile::L1Compact);
+        blob_opts.payload_cols = vec!["blob".to_owned()];
+        blob_opts.pack_id = Some(blob_pack_id);
+        let mut blob_pb = ChunkPackBuilder::new(blob_pack_id, PackWriteOptions::default());
+        let mut blob_statam = Vec::new();
+        {
+            let mut w = StatamWriter::new(
+                std::io::Cursor::new(&mut blob_statam),
+                Arc::clone(&blob_schema),
+                blob_opts,
+                Some(&mut blob_pb),
+            )
+            .unwrap();
+            w.write_batch(&blob_batch).unwrap();
+            w.finish().unwrap();
+        }
+        let mut blob_pack = Vec::new();
+        blob_pb.finish(&mut blob_pack).unwrap();
+        write(
+            "seed-22-binary-blobs-stpk",
+            &encode_paired_seed(&blob_statam, &blob_pack),
+        );
     }
 
     /// Writes the seed corpus for `statam_file` (`just fuzz-seed`).

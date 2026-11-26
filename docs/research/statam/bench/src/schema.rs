@@ -2,10 +2,11 @@ use std::collections::BTreeMap;
 use std::sync::{Arc, LazyLock};
 
 use arrow::array::{
-    Array, ArrayRef, BinaryArray, BooleanArray, BooleanBuilder, FixedSizeBinaryBuilder,
-    Float64Array, Float64Builder, Int64Array, Int64Builder, ListBuilder, MapBuilder, RecordBatch,
-    StringArray, StringBuilder, StructBuilder, TimestampNanosecondBuilder, UInt16Builder,
-    UInt64Array,
+    Array, ArrayRef, BinaryArray, BooleanArray, BooleanBuilder, Date32Array, Decimal128Array,
+    FixedSizeBinaryBuilder, Float32Array, Float64Array, Float64Builder, Int32Array, Int64Array,
+    Int64Builder, ListArray, ListBuilder, MapArray, MapBuilder, RecordBatch, StringArray,
+    StringBuilder, StructBuilder, TimestampNanosecondArray, TimestampNanosecondBuilder,
+    UInt16Builder, UInt64Array,
 };
 use arrow::datatypes::{
     DataType as ArrowType, Field as ArrowField, Fields as ArrowFields, Schema as ArrowSchema,
@@ -735,90 +736,245 @@ fn array_null_bitmap(arr: &dyn Array) -> Option<Bitmap> {
     Some(Bitmap::from_bools(&valid))
 }
 
+fn arrow_array_to_cetra_column(
+    field_name: &str,
+    arr: &dyn Array,
+) -> BenchResult<(ColType, Column)> {
+    let nulls = array_null_bitmap(arr);
+    match arr.data_type() {
+        ArrowType::Boolean => {
+            let ba = arr
+                .as_any()
+                .downcast_ref::<BooleanArray>()
+                .ok_or("expected BooleanArray")?;
+            let bools: Vec<bool> = (0..ba.len())
+                .map(|i| !ba.is_null(i) && ba.value(i))
+                .collect();
+            Ok((
+                ColType::Bool,
+                Column::Flat(FlatColumn::try_new(
+                    FlatData::Bool(Bitmap::from_bools(&bools)),
+                    nulls,
+                )?),
+            ))
+        }
+        ArrowType::Int64 => {
+            let ia = arr
+                .as_any()
+                .downcast_ref::<Int64Array>()
+                .ok_or("expected Int64Array")?;
+            Ok((
+                ColType::I64,
+                Column::Flat(FlatColumn::try_new(
+                    FlatData::I64(ia.values().to_vec()),
+                    nulls,
+                )?),
+            ))
+        }
+        ArrowType::Int32 => {
+            let ia = arr
+                .as_any()
+                .downcast_ref::<Int32Array>()
+                .ok_or("expected Int32Array")?;
+            let vals: Vec<i64> = ia.values().iter().map(|&v| i64::from(v)).collect();
+            Ok((
+                ColType::I64,
+                Column::Flat(FlatColumn::try_new(FlatData::I64(vals), nulls)?),
+            ))
+        }
+        ArrowType::Float64 => {
+            let fa = arr
+                .as_any()
+                .downcast_ref::<Float64Array>()
+                .ok_or("expected Float64Array")?;
+            Ok((
+                ColType::F64,
+                Column::Flat(FlatColumn::try_new(
+                    FlatData::F64(fa.values().to_vec()),
+                    nulls,
+                )?),
+            ))
+        }
+        ArrowType::Float32 => {
+            let fa = arr
+                .as_any()
+                .downcast_ref::<Float32Array>()
+                .ok_or("expected Float32Array")?;
+            let vals: Vec<f64> = fa.values().iter().map(|&v| f64::from(v)).collect();
+            Ok((
+                ColType::F64,
+                Column::Flat(FlatColumn::try_new(FlatData::F64(vals), nulls)?),
+            ))
+        }
+        ArrowType::Date32 => {
+            let da = arr
+                .as_any()
+                .downcast_ref::<Date32Array>()
+                .ok_or("expected Date32Array")?;
+            Ok((
+                ColType::Date,
+                Column::Flat(FlatColumn::try_new(
+                    FlatData::Date(da.values().to_vec()),
+                    nulls,
+                )?),
+            ))
+        }
+        ArrowType::Decimal128(precision, scale) => {
+            let dec = arr
+                .as_any()
+                .downcast_ref::<Decimal128Array>()
+                .ok_or("expected Decimal128Array")?;
+            Ok((
+                ColType::Decimal128 {
+                    precision: *precision,
+                    scale: *scale,
+                },
+                Column::Flat(FlatColumn::try_new(
+                    FlatData::Decimal128 {
+                        values: dec.values().to_vec(),
+                        precision: *precision,
+                        scale: *scale,
+                    },
+                    nulls,
+                )?),
+            ))
+        }
+        ArrowType::Timestamp(TimeUnit::Nanosecond, tz) => {
+            let ta = arr
+                .as_any()
+                .downcast_ref::<TimestampNanosecondArray>()
+                .ok_or("expected TimestampNanosecondArray")?;
+            let utc = tz.is_some();
+            Ok((
+                ColType::TimestampNs { utc },
+                Column::Flat(FlatColumn::try_new(
+                    FlatData::TimestampNs {
+                        values: ta.values().to_vec(),
+                        utc,
+                    },
+                    nulls,
+                )?),
+            ))
+        }
+        ArrowType::Utf8 => {
+            let sa = arr
+                .as_any()
+                .downcast_ref::<StringArray>()
+                .ok_or("expected StringArray")?;
+            let data = Utf8Data::try_from_slices(
+                (0..sa.len()).map(|i| if sa.is_null(i) { "" } else { sa.value(i) }),
+            )?;
+            Ok((
+                ColType::Utf8,
+                Column::Flat(FlatColumn::try_new(FlatData::Utf8(data), nulls)?),
+            ))
+        }
+        ArrowType::Binary => {
+            let ba = arr
+                .as_any()
+                .downcast_ref::<BinaryArray>()
+                .ok_or("expected BinaryArray")?;
+            let data = BinaryData::try_from_slices(
+                (0..ba.len()).map(|i| if ba.is_null(i) { &[][..] } else { ba.value(i) }),
+            )?;
+            Ok((
+                ColType::Binary,
+                Column::Flat(FlatColumn::try_new(FlatData::Binary(data), nulls)?),
+            ))
+        }
+        ArrowType::List(_) => {
+            let la = arr
+                .as_any()
+                .downcast_ref::<ListArray>()
+                .ok_or("expected ListArray")?;
+            let raw_offsets = la.value_offsets();
+            let base = raw_offsets[0] as usize;
+            let end = raw_offsets[la.len()] as usize;
+            let mut offsets = Vec::with_capacity(la.len() + 1);
+            for &o in raw_offsets.iter().take(la.len() + 1) {
+                offsets.push(u32::try_from((o as usize) - base)?);
+            }
+            let child_slice = la.values().slice(base, end - base);
+            let (item_type, child_col) =
+                arrow_array_to_cetra_column(field_name, child_slice.as_ref())?;
+            Ok((
+                ColType::List(Box::new(item_type.clone())),
+                Column::Flat(FlatColumn::try_new(
+                    FlatData::List {
+                        item_type,
+                        offsets,
+                        values: Box::new(child_col),
+                    },
+                    nulls,
+                )?),
+            ))
+        }
+        ArrowType::Map(_, _) => {
+            let ma = arr
+                .as_any()
+                .downcast_ref::<MapArray>()
+                .ok_or("expected MapArray")?;
+            let raw_offsets = ma.value_offsets();
+            let base = raw_offsets[0] as usize;
+            let end = raw_offsets[ma.len()] as usize;
+            let mut offsets = Vec::with_capacity(ma.len() + 1);
+            for &o in raw_offsets.iter().take(ma.len() + 1) {
+                offsets.push(u32::try_from((o as usize) - base)?);
+            }
+            let keys_arr = ma
+                .keys()
+                .as_any()
+                .downcast_ref::<StringArray>()
+                .ok_or("expected StringArray for Map keys")?;
+            let vals_arr = ma
+                .values()
+                .as_any()
+                .downcast_ref::<StringArray>()
+                .ok_or("expected StringArray for Map values")?;
+            let kd = Utf8Data::try_from_slices((base..end).map(|i| {
+                if keys_arr.is_null(i) {
+                    ""
+                } else {
+                    keys_arr.value(i)
+                }
+            }))?;
+            let vd = Utf8Data::try_from_slices((base..end).map(|i| {
+                if vals_arr.is_null(i) {
+                    ""
+                } else {
+                    vals_arr.value(i)
+                }
+            }))?;
+            let mut any_val_null = false;
+            let mut val_valid = Vec::with_capacity(end - base);
+            for i in base..end {
+                let ok = !vals_arr.is_null(i);
+                if !ok {
+                    any_val_null = true;
+                }
+                val_valid.push(ok);
+            }
+            let vnulls = any_val_null.then(|| Bitmap::from_bools(&val_valid));
+            let md = MapData::try_new(offsets, kd, vd, vnulls)?;
+            Ok((
+                ColType::MapUtf8,
+                Column::Flat(FlatColumn::try_new(FlatData::MapUtf8(Box::new(md)), nulls)?),
+            ))
+        }
+        other => Err(format!(
+            "arrow_to_cetra_batch expects supported types, got {other} on '{field_name}'"
+        )
+        .into()),
+    }
+}
+
 pub fn arrow_to_cetra_batch(batch: &RecordBatch) -> BenchResult<Batch> {
     let schema = batch.schema();
     let mut col_fields = Vec::with_capacity(schema.fields().len());
     let mut cols = Vec::with_capacity(batch.num_columns());
 
     for (field, arr) in schema.fields().iter().zip(batch.columns()) {
-        let nulls = array_null_bitmap(arr.as_ref());
-        let (col_dt, col) = match field.data_type() {
-            ArrowType::Boolean => {
-                let ba = arr
-                    .as_any()
-                    .downcast_ref::<BooleanArray>()
-                    .ok_or("expected BooleanArray")?;
-                let bools: Vec<bool> = (0..ba.len())
-                    .map(|i| !ba.is_null(i) && ba.value(i))
-                    .collect();
-                (
-                    ColType::Bool,
-                    Column::Flat(FlatColumn::try_new(
-                        FlatData::Bool(Bitmap::from_bools(&bools)),
-                        nulls,
-                    )?),
-                )
-            }
-            ArrowType::Int64 => {
-                let ia = arr
-                    .as_any()
-                    .downcast_ref::<Int64Array>()
-                    .ok_or("expected Int64Array")?;
-                (
-                    ColType::I64,
-                    Column::Flat(FlatColumn::try_new(
-                        FlatData::I64(ia.values().to_vec()),
-                        nulls,
-                    )?),
-                )
-            }
-            ArrowType::Float64 => {
-                let fa = arr
-                    .as_any()
-                    .downcast_ref::<Float64Array>()
-                    .ok_or("expected Float64Array")?;
-                (
-                    ColType::F64,
-                    Column::Flat(FlatColumn::try_new(
-                        FlatData::F64(fa.values().to_vec()),
-                        nulls,
-                    )?),
-                )
-            }
-            ArrowType::Utf8 => {
-                let sa = arr
-                    .as_any()
-                    .downcast_ref::<StringArray>()
-                    .ok_or("expected StringArray")?;
-                let data = Utf8Data::try_from_slices(
-                    (0..sa.len()).map(|i| if sa.is_null(i) { "" } else { sa.value(i) }),
-                )?;
-                (
-                    ColType::Utf8,
-                    Column::Flat(FlatColumn::try_new(FlatData::Utf8(data), nulls)?),
-                )
-            }
-            ArrowType::Binary => {
-                let ba = arr
-                    .as_any()
-                    .downcast_ref::<BinaryArray>()
-                    .ok_or("expected BinaryArray")?;
-                let data = BinaryData::try_from_slices(
-                    (0..ba.len()).map(|i| if ba.is_null(i) { &[][..] } else { ba.value(i) }),
-                )?;
-                (
-                    ColType::Binary,
-                    Column::Flat(FlatColumn::try_new(FlatData::Binary(data), nulls)?),
-                )
-            }
-            other => {
-                return Err(format!(
-                    "arrow_to_cetra_batch expects normalized types, got {other} on '{}'",
-                    field.name()
-                )
-                .into());
-            }
-        };
+        let (col_dt, col) = arrow_array_to_cetra_column(field.name(), arr.as_ref())?;
         col_fields.push(ColField::new(field.name(), col_dt, field.is_nullable()));
         cols.push(col);
     }

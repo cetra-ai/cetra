@@ -151,12 +151,16 @@ pub const BLOCK_FLAG_MIN_MAX_VALID: u8 = 0x04;
 pub const BLOCK_FLAG_HAS_NAN: u8 = 0x08;
 /// Constant empty `List`/`MapUtf8`/`Events`/`Links` collection.
 pub const BLOCK_FLAG_CONST_EMPTY_COLLECTION: u8 = 0x10;
+/// `Encoding::Fsst` mini-block uses 256-row adaptive `LZ4`/`Zstd`/`None` sub-chunks
+/// (`outer codec = Codec::None`, `raw_len == stored_len`).
+pub const BLOCK_FLAG_FSST_SUBCHUNKED: u8 = 0x20;
 /// Mask of all recognized mini-block flags in v1.
 pub const KNOWN_BLOCK_FLAGS: u8 = BLOCK_FLAG_HAS_NULLS
     | BLOCK_FLAG_ALL_NULL
     | BLOCK_FLAG_MIN_MAX_VALID
     | BLOCK_FLAG_HAS_NAN
-    | BLOCK_FLAG_CONST_EMPTY_COLLECTION;
+    | BLOCK_FLAG_CONST_EMPTY_COLLECTION
+    | BLOCK_FLAG_FSST_SUBCHUNKED;
 
 // --- Hard Untrusted-Input Bounds (spec-v0.md §7) ---
 
@@ -176,6 +180,12 @@ pub const MAX_TOTAL_BLOCKS: usize = 4_194_304;
 pub const MAX_BLOCK_RAW_BYTES: usize = 64 * 1024 * 1024;
 /// Maximum uncompressed pack frame size (16 MiB).
 pub const MAX_FRAME_RAW_BYTES: usize = 16 * 1024 * 1024;
+/// Minimum binary blob length (`32 KiB`) that receives its own dedicated 1-blob-per-frame `PF` frame.
+pub const BLOB_DEDICATED_FRAME_BYTES: usize = 32 * 1024;
+/// Maximum byte slice per `.stpk` / L0 blob chunk (`4 MiB <= MAX_FRAME_RAW_BYTES`).
+pub const BLOB_MAX_CHUNK_BYTES: usize = 4 * 1024 * 1024;
+/// Target uncompressed frame size (`64 KiB`) for batched small (`< 32 KiB`) binary blobs.
+pub const BLOB_SMALL_FRAME_TARGET_BYTES: usize = 64 * 1024;
 /// Maximum raw `.stpk` trained Zstd dictionary size (256 KiB).
 pub const MAX_PACK_DICT_BYTES: usize = 256 * 1024;
 /// Maximum decompression expansion ratio before rejecting as a zip bomb.
@@ -1460,6 +1470,11 @@ impl BlockEntry {
                 reason: "unknown block directory flags",
             });
         }
+        if (block_flags & BLOCK_FLAG_FSST_SUBCHUNKED) != 0 && encoding != Encoding::Fsst {
+            return Err(StatamError::Corrupt {
+                reason: "BLOCK_FLAG_FSST_SUBCHUNKED set on non-Fsst encoding",
+            });
+        }
         let min_inline_len = buf[27];
         let max_inline_len = buf[28];
         if min_inline_len > 16 || max_inline_len > 16 {
@@ -2616,13 +2631,15 @@ pub fn read_framed_block(
 }
 
 /// Writes a 16-byte `PF` pack frame header followed by the guarded compressed payload,
-/// enforcing `max_raw` as the upper bound on `raw.len()`.
-pub fn write_framed_pack_frame_with_limit(
+/// enforcing `max_raw` as the upper bound on `raw.len()` and requiring at least
+/// `min_savings_pct` compression savings when `min_savings_pct > 0 && raw.len() >= 1024`.
+pub fn write_framed_pack_frame_with_limit_min_savings(
     raw: &[u8],
     codec: Codec,
     flags: u8,
     zstd_level: i32,
     max_raw: usize,
+    min_savings_pct: u8,
     out: &mut Vec<u8>,
 ) -> Result<FramedWriteInfo, StatamError> {
     if flags != 0 {
@@ -2638,8 +2655,43 @@ pub fn write_framed_pack_frame_with_limit(
     let raw_len = u32::try_from(raw.len()).map_err(|_| StatamError::BoundsExceeded {
         reason: "pack frame raw_len overflows u32",
     })?;
-    let (actual_codec, stored) = compress_guarded(raw, codec, zstd_level)?;
+    let (actual_codec, stored) =
+        compress_guarded_min_savings(raw, codec, zstd_level, min_savings_pct)?;
     emit_pack_frame_bytes(raw_len, actual_codec, flags, &stored, out)
+}
+
+/// Writes a 16-byte `PF` pack frame header followed by the guarded compressed payload,
+/// enforcing `max_raw` as the upper bound on `raw.len()`.
+pub fn write_framed_pack_frame_with_limit(
+    raw: &[u8],
+    codec: Codec,
+    flags: u8,
+    zstd_level: i32,
+    max_raw: usize,
+    out: &mut Vec<u8>,
+) -> Result<FramedWriteInfo, StatamError> {
+    write_framed_pack_frame_with_limit_min_savings(raw, codec, flags, zstd_level, max_raw, 0, out)
+}
+
+/// Writes a 16-byte `PF` pack frame header followed by the guarded compressed payload,
+/// requiring at least `min_savings_pct` compression savings when `min_savings_pct > 0 && raw.len() >= 1024`.
+pub fn write_framed_pack_frame_with_min_savings(
+    raw: &[u8],
+    codec: Codec,
+    flags: u8,
+    zstd_level: i32,
+    min_savings_pct: u8,
+    out: &mut Vec<u8>,
+) -> Result<FramedWriteInfo, StatamError> {
+    write_framed_pack_frame_with_limit_min_savings(
+        raw,
+        codec,
+        flags,
+        zstd_level,
+        MAX_FRAME_RAW_BYTES,
+        min_savings_pct,
+        out,
+    )
 }
 
 /// Writes a 16-byte `PF` pack frame header followed by the guarded compressed payload.
@@ -2653,17 +2705,14 @@ pub fn write_framed_pack_frame(
     write_framed_pack_frame_with_limit(raw, codec, flags, zstd_level, MAX_FRAME_RAW_BYTES, out)
 }
 
-/// Writes a 16-byte `PF` pack frame header, optionally compressing with `dict_compressor`.
-///
-/// When `dict_compressor` is `Some` and `codec == Codec::Zstd` (non-Miri), compresses `raw`
-/// using the dictionary and sets `PACK_FRAME_FLAG_USES_DICT` if smaller than raw (and within
-/// the decompression ratio guard); otherwise falls back to `Codec::None` with
-/// `PACK_FRAME_FLAG_USES_DICT` cleared.
-pub fn write_framed_pack_frame_with_compressor(
+/// Writes a 16-byte `PF` pack frame header, optionally compressing with `dict_compressor`
+/// and requiring at least `min_savings_pct` compression savings when `min_savings_pct > 0 && raw.len() >= 1024`.
+pub fn write_framed_pack_frame_with_compressor_min_savings(
     raw: &[u8],
     codec: Codec,
     flags: u8,
     zstd_level: i32,
+    min_savings_pct: u8,
     dict_compressor: Option<&mut PackDictCompressor>,
     out: &mut Vec<u8>,
 ) -> Result<FramedWriteInfo, StatamError> {
@@ -2691,7 +2740,14 @@ pub fn write_framed_pack_frame_with_compressor(
             <= (compressed.len() as u64)
                 .saturating_mul(MAX_DECOMPRESS_RATIO)
                 .saturating_add(MAX_DECOMPRESS_SLACK);
-        return if compressed.len().saturating_add(16) < raw.len() && ratio_ok {
+        let savings_ok = if min_savings_pct > 0 && raw.len() >= 1024 {
+            let keep_pct = u64::from(100u8.saturating_sub(min_savings_pct));
+            (compressed.len() as u64).saturating_mul(100)
+                <= (raw.len() as u64).saturating_mul(keep_pct)
+        } else {
+            true
+        };
+        return if compressed.len().saturating_add(16) < raw.len() && ratio_ok && savings_ok {
             emit_pack_frame_bytes(
                 raw_len,
                 Codec::Zstd,
@@ -2712,11 +2768,37 @@ pub fn write_framed_pack_frame_with_compressor(
     #[cfg(miri)]
     let _ = dict_compressor;
 
-    write_framed_pack_frame(
+    write_framed_pack_frame_with_min_savings(
         raw,
         codec,
         flags & !PACK_FRAME_FLAG_USES_DICT,
         zstd_level,
+        min_savings_pct,
+        out,
+    )
+}
+
+/// Writes a 16-byte `PF` pack frame header, optionally compressing with `dict_compressor`.
+///
+/// When `dict_compressor` is `Some` and `codec == Codec::Zstd` (non-Miri), compresses `raw`
+/// using the dictionary and sets `PACK_FRAME_FLAG_USES_DICT` if smaller than raw (and within
+/// the decompression ratio guard); otherwise falls back to `Codec::None` with
+/// `PACK_FRAME_FLAG_USES_DICT` cleared.
+pub fn write_framed_pack_frame_with_compressor(
+    raw: &[u8],
+    codec: Codec,
+    flags: u8,
+    zstd_level: i32,
+    dict_compressor: Option<&mut PackDictCompressor>,
+    out: &mut Vec<u8>,
+) -> Result<FramedWriteInfo, StatamError> {
+    write_framed_pack_frame_with_compressor_min_savings(
+        raw,
+        codec,
+        flags,
+        zstd_level,
+        0,
+        dict_compressor,
         out,
     )
 }

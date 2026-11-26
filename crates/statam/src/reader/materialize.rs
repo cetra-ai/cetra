@@ -216,6 +216,7 @@ impl StatamReader {
         let decode_payload_col = |cidx: usize,
                                   cached: Option<DecodedPhase1>|
          -> Result<Column, StatamError> {
+            let dt = &fields[cidx].data_type;
             match cached {
                 Some(DecodedPhase1::SelectedPayloadRefs(selected)) => {
                     reconstruct_payload_column_selected(
@@ -223,16 +224,17 @@ impl StatamReader {
                         &selected,
                         mask,
                         resolved_chunks,
+                        dt,
                     )
                 }
                 Some(DecodedPhase1::FlatPayloadRefs(refs)) => {
-                    reconstruct_payload_column_from_flat(&refs, mask, resolved_chunks)
+                    reconstruct_payload_column_from_flat(&refs, mask, resolved_chunks, dt)
                 }
                 _ => {
                     let blk = &self.meta.rg_blocks(cidx, rg_idx)[mb_idx];
                     if blk.encoding == Encoding::ConstNull {
                         return Ok(Column::try_new_const(
-                            ScalarValue::Null(DataType::Utf8),
+                            ScalarValue::Null(dt.clone()),
                             mb_row_count,
                         )?);
                     }
@@ -249,11 +251,12 @@ impl StatamReader {
                             &selected,
                             mask,
                             resolved_chunks,
+                            dt,
                         )
                     } else {
                         let refs =
                             decode_payload_refs_flat(&raw, mb_row_count, MAX_BATCH_DECODED_BYTES)?;
-                        reconstruct_payload_column_from_flat(&refs, mask, resolved_chunks)
+                        reconstruct_payload_column_from_flat(&refs, mask, resolved_chunks, dt)
                     }
                 }
             }
@@ -345,17 +348,11 @@ impl StatamReader {
                 }
             }
 
-            let task_work_bytes: usize = if touches_payload {
-                MIN_PARALLEL_WORK_BYTES
-            } else {
-                parallel_tasks
-                    .iter()
-                    .map(|&(_, cidx, _)| self.meta.rg_blocks(cidx, rg_idx)[mb_idx].raw_len as usize)
-                    .fold(0usize, usize::saturating_add)
-            };
-            if parallel_tasks.len() >= 4
-                && (touches_payload || task_work_bytes >= MIN_PARALLEL_WORK_BYTES)
-            {
+            let task_work_bytes: usize = parallel_tasks
+                .iter()
+                .map(|&(_, cidx, _)| self.meta.rg_blocks(cidx, rg_idx)[mb_idx].raw_len as usize)
+                .fold(0usize, usize::saturating_add);
+            if parallel_tasks.len() >= 4 && task_work_bytes >= MIN_PARALLEL_WORK_BYTES {
                 let decoded_cols =
                     parallel_map_in_order(parallel_tasks, threads, |(pos, cidx, dict)| {
                         let col = self.decode_uncached_p2_non_payload_col(
@@ -725,6 +722,7 @@ impl StatamReader {
                                        mask: &Bitmap,
                                        u32_idx: &[u32]|
          -> Result<Column, StatamError> {
+            let dt = &fields[cidx].data_type;
             let is_sparse_payload =
                 !mask.all_ones() && mask.count_ones().saturating_mul(8) < mb_row_count;
             let full_col = match cached {
@@ -734,16 +732,17 @@ impl StatamReader {
                         &selected,
                         mask,
                         resolved_chunks,
+                        dt,
                     )?
                 }
                 Some(DecodedPhase1::FlatPayloadRefs(refs)) => {
-                    reconstruct_payload_column_from_flat(&refs, mask, resolved_chunks)?
+                    reconstruct_payload_column_from_flat(&refs, mask, resolved_chunks, dt)?
                 }
                 _ => {
                     let blk = &self.meta.rg_blocks(cidx, rg_idx)[mb_idx];
                     if blk.encoding == Encoding::ConstNull {
                         return Ok(Column::Const {
-                            value: ScalarValue::Null(DataType::Utf8),
+                            value: ScalarValue::Null(dt.clone()),
                             len: local_indices.len(),
                         });
                     }
@@ -760,11 +759,12 @@ impl StatamReader {
                             &selected,
                             mask,
                             resolved_chunks,
+                            dt,
                         )?
                     } else {
                         let refs =
                             decode_payload_refs_flat(&raw, mb_row_count, MAX_BATCH_DECODED_BYTES)?;
-                        reconstruct_payload_column_from_flat(&refs, mask, resolved_chunks)?
+                        reconstruct_payload_column_from_flat(&refs, mask, resolved_chunks, dt)?
                     }
                 }
             };
@@ -879,17 +879,11 @@ impl StatamReader {
                 }
             }
 
-            let task_work_bytes: usize = if touches_payload {
-                MIN_PARALLEL_WORK_BYTES
-            } else {
-                parallel_tasks
-                    .iter()
-                    .map(|&(_, cidx, _)| self.meta.rg_blocks(cidx, rg_idx)[mb_idx].raw_len as usize)
-                    .fold(0usize, usize::saturating_add)
-            };
-            if parallel_tasks.len() >= 4
-                && (touches_payload || task_work_bytes >= MIN_PARALLEL_WORK_BYTES)
-            {
+            let task_work_bytes: usize = parallel_tasks
+                .iter()
+                .map(|&(_, cidx, _)| self.meta.rg_blocks(cidx, rg_idx)[mb_idx].raw_len as usize)
+                .fold(0usize, usize::saturating_add);
+            if parallel_tasks.len() >= 4 && task_work_bytes >= MIN_PARALLEL_WORK_BYTES {
                 let decoded_cols =
                     parallel_map_in_order(parallel_tasks, threads, |(pos, cidx, dict)| {
                         let col = decode_non_payload_take(cidx, dict.as_deref())?;

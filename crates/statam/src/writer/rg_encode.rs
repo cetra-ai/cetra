@@ -16,7 +16,8 @@ use crate::codec::{
 use crate::format::{
     BLOCK_FLAG_ALL_NULL, BLOCK_FLAG_HAS_NULLS, BlockEntry, Codec, Encoding, LocalityGroup,
     MAX_BATCH_DECODED_BYTES, MAX_BLOOM_BYTES, MAX_COLUMNS, MAX_FRAME_RAW_BYTES, MAX_ROW_GROUPS,
-    MAX_ROWS_PER_FILE, RowGroupEntry, ShreddedMapDir, ShreddedMapKeyEntry, write_framed_block,
+    MAX_ROW_PAYLOAD_BYTES, MAX_ROWS_PER_FILE, RowGroupEntry, ShreddedMapDir, ShreddedMapKeyEntry,
+    write_framed_block,
 };
 use crate::parallel::parallel_map_in_order;
 use crate::payload::chunker::{
@@ -24,7 +25,7 @@ use crate::payload::chunker::{
 };
 use crate::payload::{
     PayloadRefRow, encode_payload_refs, encode_payload_refs_l0_direct,
-    encode_payload_refs_l0_from_utf8,
+    encode_payload_refs_l0_from_bytes,
 };
 use crate::simd::bloom::{BloomIndex, Sbbf, statam_bloom_hash};
 use crate::simd::trigram::{MAX_TRIGRAM_BLOOM_BYTES, MIN_TRIGRAM_BLOOM_BYTES, TrigramBloom};
@@ -1171,10 +1172,14 @@ impl<'a, W: Write + Seek> StatamWriter<'a, W> {
             }
 
             let fc = as_flat_cow(col)?;
-            let FlatData::Utf8(u) = fc.data() else {
-                return Err(StatamError::SchemaMismatch {
-                    reason: "ExternalPayload column must be DataType::Utf8",
-                });
+            let (offsets, all_bytes, is_binary): (&[u32], &[u8], bool) = match fc.data() {
+                FlatData::Utf8(u) => (u.offsets(), u.bytes(), false),
+                FlatData::Binary(b) => (b.offsets(), b.bytes(), true),
+                _ => {
+                    return Err(StatamError::SchemaMismatch {
+                        reason: "ExternalPayload column must be DataType::Utf8 or DataType::Binary",
+                    });
+                }
             };
             let col_nulls = fc.nulls();
             let mut raw_body = Vec::new();
@@ -1183,14 +1188,24 @@ impl<'a, W: Write + Seek> StatamWriter<'a, W> {
                 let mb_len = (rg_rows - row_off).min(mb_size);
                 let mb_first_row = first_row_u32 + row_off as u32;
                 raw_body.clear();
-                let null_count = encode_payload_refs_l0_from_utf8(
-                    u,
+                let null_count = encode_payload_refs_l0_from_bytes(
+                    offsets,
+                    all_bytes,
                     col_nulls,
                     base_row_off + row_off,
                     mb_len,
                     INLINE_PAYLOAD_THRESHOLD,
                     L0_LOCAL_PACK_IDX,
-                    |slice| l0_local.add_chunk(slice),
+                    |bytes, cids| {
+                        if is_binary {
+                            l0_local.add_blob_into(bytes, cids)
+                        } else {
+                            for slice in bytes.chunks(MAX_FRAME_RAW_BYTES) {
+                                cids.push(l0_local.add_chunk(slice)?);
+                            }
+                            Ok(())
+                        }
+                    },
                     &mut raw_body,
                 )?;
                 self.phys_col_meta[cidx].null_count_total = self.phys_col_meta[cidx]
@@ -1285,8 +1300,16 @@ impl<'a, W: Write + Seek> StatamWriter<'a, W> {
                                             },
                                         )?;
                                         let bytes = l0_src.read_chunk(cid)?;
-                                        let new_cid = l0_local.add_chunk(bytes)?;
-                                        out_refs.push((L0_LOCAL_PACK_IDX, new_cid));
+                                        if self.schema.fields()[cidx].data_type == DataType::Binary
+                                        {
+                                            let new_cids = l0_local.add_blob(bytes)?;
+                                            for new_cid in new_cids {
+                                                out_refs.push((L0_LOCAL_PACK_IDX, new_cid));
+                                            }
+                                        } else {
+                                            let new_cid = l0_local.add_chunk(bytes)?;
+                                            out_refs.push((L0_LOCAL_PACK_IDX, new_cid));
+                                        }
                                     } else {
                                         self.uses_external_pack = true;
                                         out_refs.push((pidx, cid));
@@ -1386,12 +1409,49 @@ impl<'a, W: Write + Seek> StatamWriter<'a, W> {
         mb_len: usize,
         l0_local: &mut LocalL0PayloadBuilder,
     ) -> Result<Vec<PayloadRefRow>, StatamError> {
+        let nulls = flat.nulls();
+        if let FlatData::Binary(b) = flat.data() {
+            let mut out = Vec::with_capacity(mb_len);
+            for r in row_off..row_off + mb_len {
+                if nulls.is_some_and(|bm| !bm.get(r)) {
+                    out.push(PayloadRefRow::Null);
+                    continue;
+                }
+                let bytes = b.get(r).unwrap_or(&[]);
+                if bytes.len() > MAX_ROW_PAYLOAD_BYTES {
+                    return Err(StatamError::BoundsExceeded {
+                        reason: "row payload exceeds MAX_ROW_PAYLOAD_BYTES",
+                    });
+                }
+                if bytes.len() <= INLINE_PAYLOAD_THRESHOLD {
+                    out.push(PayloadRefRow::Inline(bytes.to_vec()));
+                    continue;
+                }
+                if self.options.profile == WriteProfile::L1Compact
+                    && let Some(pb) = self.pack_builder.as_deref_mut()
+                {
+                    self.uses_external_pack = true;
+                    let cids = pb.append_blob(bytes)?;
+                    // Skip `mark_boundary_chunks`: Binary blobs never emit or use `EdgeTable`.
+                    let refs = cids.into_iter().map(|cid| (0u16, cid)).collect();
+                    out.push(PayloadRefRow::Chunks(refs));
+                } else {
+                    let cids = l0_local.add_blob(bytes)?;
+                    let refs = cids
+                        .into_iter()
+                        .map(|cid| (L0_LOCAL_PACK_IDX, cid))
+                        .collect();
+                    out.push(PayloadRefRow::Chunks(refs));
+                }
+            }
+            return Ok(out);
+        }
+
         let FlatData::Utf8(u) = flat.data() else {
             return Err(StatamError::SchemaMismatch {
-                reason: "ExternalPayload column must be DataType::Utf8",
+                reason: "ExternalPayload column must be DataType::Utf8 or DataType::Binary",
             });
         };
-        let nulls = flat.nulls();
         let mut out = Vec::with_capacity(mb_len);
         let mut chunk_scratch = Vec::new();
         let mut boundary_cids_scratch: Vec<u32> = Vec::new();
@@ -1406,6 +1466,11 @@ impl<'a, W: Write + Seek> StatamWriter<'a, W> {
             }
             let s = u.get(r).unwrap_or("");
             let bytes = s.as_bytes();
+            if bytes.len() > MAX_ROW_PAYLOAD_BYTES {
+                return Err(StatamError::BoundsExceeded {
+                    reason: "row payload exceeds MAX_ROW_PAYLOAD_BYTES",
+                });
+            }
             if bytes.len() <= INLINE_PAYLOAD_THRESHOLD {
                 out.push(PayloadRefRow::Inline(bytes.to_vec()));
                 continue;

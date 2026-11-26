@@ -34,6 +34,7 @@ use crate::io::RangeReader;
 use crate::payload::pack::ChunkPackReader;
 use crate::simd::bloom::{BloomIndex, statam_bloom_hash};
 use crate::simd::trigram::TrigramBloom;
+use crate::writer::{concat_column_refs, estimate_column_bytes};
 
 use eval::{Utf8Matcher, is_always_false_pred, is_supported_id_lookup_type};
 #[cfg(test)]
@@ -476,9 +477,11 @@ impl StatamReader {
                 .ok_or(StatamError::SchemaMismatch {
                     reason: "id_lookup column not found in schema",
                 })?;
-            if !is_supported_id_lookup_type(&schema.fields()[cidx].data_type) {
+            if !is_supported_id_lookup_type(&schema.fields()[cidx].data_type)
+                || self.meta.col_dir[cidx].locality_group == LocalityGroup::ExternalPayload
+            {
                 return Err(StatamError::SchemaMismatch {
-                    reason: "id_lookup on unsupported column data type",
+                    reason: "id_lookup on unsupported column data type or ExternalPayload column",
                 });
             }
             if lk.values.is_empty() {
@@ -497,6 +500,13 @@ impl StatamReader {
             if pred.map_key.is_some() && schema.fields()[cidx].data_type != DataType::MapUtf8 {
                 return Err(StatamError::SchemaMismatch {
                     reason: "map_key predicate on non-MapUtf8 column",
+                });
+            }
+            if self.meta.col_dir[cidx].locality_group == LocalityGroup::ExternalPayload
+                && !matches!(pred.pred, ZonePred::IsNull | ZonePred::IsNotNull)
+            {
+                return Err(StatamError::SchemaMismatch {
+                    reason: "value predicate not supported on ExternalPayload column",
                 });
             }
             if is_always_false_pred(&pred.pred) {
@@ -794,7 +804,9 @@ impl StatamReader {
     /// column projection, using coalesced range reads and sparse decoding per touched mini-block.
     ///
     /// Out-of-bounds indices (`>= row_count`) are ignored; valid indices are deduplicated and
-    /// returned in ascending file order as one [`Batch`] per touched mini-block.
+    /// returned in ascending file order, coalesced into compact [`Batch`]es bounded by both
+    /// `<= 65_536` rows and `<= 64 MiB` estimated bytes per batch (or one 0-column [`Batch`]
+    /// when `projection` is `Some(&[])`).
     pub fn take_rows(
         &self,
         row_indices: &[u64],
@@ -1073,6 +1085,19 @@ impl StatamReader {
             out_batches.append(&mut rg_batches);
         }
 
+        if out_batches.len() > 1 {
+            if proj_indices.is_empty() {
+                let total_rows: usize = out_batches.iter().map(Batch::num_rows).sum();
+                return Ok(vec![Batch::try_new(
+                    Arc::clone(&proj_schema),
+                    Vec::new(),
+                    total_rows,
+                    Selection::All,
+                )?]);
+            }
+            out_batches = coalesce_take_batches(&proj_schema, out_batches)?;
+        }
+
         Ok(out_batches)
     }
 
@@ -1250,7 +1275,7 @@ impl StatamReader {
             read_framed_block_checked_cow(frame, blk, MAX_BLOCK_RAW_BYTES)
         };
 
-        let mut active_mbs = self.eval_phase1_mbs(
+        let active_mbs = self.eval_phase1_mbs(
             rg_idx,
             surviving_mbs,
             &plan,
@@ -1270,23 +1295,14 @@ impl StatamReader {
             return Ok(Vec::new());
         }
 
-        let rg_resolved_chunks = self.resolve_rg_payload_chunks(
-            rg_idx,
-            &mut active_mbs,
-            proj_indices,
-            l0_parsed.as_ref(),
-            &block_lookup,
-            read_threads,
-        )?;
-
-        self.materialize_phase2_mbs(
+        self.resolve_and_materialize_phase2_mbs(
             rg_idx,
             active_mbs,
             &plan,
             proj_indices,
             proj_schema,
             map_keys_by_col,
-            &rg_resolved_chunks,
+            l0_parsed.as_ref(),
             &block_lookup,
             read_threads,
         )
@@ -1347,8 +1363,8 @@ impl StatamReader {
 
         let mut p1_l0_needed = false;
         if rg.l0_payload_len > 0 {
-            for &pidx in &plan.phase1_phys_cols {
-                if self.meta.col_dir[pidx].locality_group == LocalityGroup::ExternalPayload {
+            for &(cidx, _) in subs {
+                if self.meta.col_dir[cidx].locality_group == LocalityGroup::ExternalPayload {
                     p1_l0_needed = true;
                     break;
                 }
@@ -1392,7 +1408,7 @@ impl StatamReader {
         };
 
         // Evaluate Phase 1 on each surviving mini-block (in parallel across MBs when read_threads > 1).
-        let mut active_mbs = self.eval_phase1_mbs(
+        let active_mbs = self.eval_phase1_mbs(
             rg_idx,
             surviving_mbs,
             &plan,
@@ -1431,7 +1447,11 @@ impl StatamReader {
 
         // Phase 2: Coalesce and fetch ONLY remaining projected columns for active mini-blocks!
         let mut p2_ranges = Vec::new();
-        let mut p2_l0_needed = false;
+        let p2_l0_needed = rg.l0_payload_len > 0
+            && !p1_l0_needed
+            && proj_indices.iter().any(|&cidx| {
+                self.meta.col_dir[cidx].locality_group == LocalityGroup::ExternalPayload
+            });
         for (mb_idx, _, _) in &active_mbs {
             for &pidx in &plan.phase2_only_phys_cols {
                 // Skip residual blocks on mini-blocks where Phase 2 projection skips residual!
@@ -1460,12 +1480,6 @@ impl StatamReader {
                             reason: "Phase 2 block end overflow",
                         })?;
                     p2_ranges.push((blk.offset, end));
-                }
-                if self.meta.col_dir[pidx].locality_group == LocalityGroup::ExternalPayload
-                    && rg.l0_payload_len > 0
-                    && !p1_l0_needed
-                {
-                    p2_l0_needed = true;
                 }
             }
         }
@@ -1504,25 +1518,16 @@ impl StatamReader {
                 read_framed_block_checked_cow(frame, blk, MAX_BLOCK_RAW_BYTES)
             };
 
-        // Coalesce all .stpk / L0 chunk reads across ALL active mini-blocks and ALL projected
-        // ExternalPayload columns in this RG into ONE scan call per pack!
-        let rg_resolved_chunks = self.resolve_rg_payload_chunks(
-            rg_idx,
-            &mut active_mbs,
-            proj_indices,
-            l0_ref,
-            &p2_lookup,
-            read_threads,
-        )?;
-
-        self.materialize_phase2_mbs(
+        // Coalesce all .stpk / L0 chunk reads across active mini-blocks and projected
+        // ExternalPayload columns in wave-bounded batches (<= 128 MiB per wave).
+        self.resolve_and_materialize_phase2_mbs(
             rg_idx,
             active_mbs,
             &plan,
             proj_indices,
             proj_schema,
             map_keys_by_col,
-            &rg_resolved_chunks,
+            l0_ref,
             &p2_lookup,
             read_threads,
         )
@@ -1667,10 +1672,11 @@ impl StatamReader {
         for (cidx, field) in fields.iter().enumerate() {
             let cd = &self.meta.col_dir[cidx];
             if cd.locality_group == LocalityGroup::ExternalPayload {
-                cols.push(Column::try_new_const(
-                    ScalarValue::Utf8(String::new()),
-                    rg_rows,
-                )?);
+                let placeholder = match field.data_type {
+                    DataType::Binary => ScalarValue::Binary(Vec::new()),
+                    _ => ScalarValue::Utf8(String::new()),
+                };
+                cols.push(Column::try_new_const(placeholder, rg_rows)?);
                 continue;
             }
 
@@ -1776,4 +1782,88 @@ fn truncate_batch_selection_tail(batch: &Batch, keep: usize) -> Result<Batch, St
         }
     };
     Ok(batch.with_selection(new_sel)?)
+}
+
+/// Maximum rows coalesced into a single output [`Batch`] by [`StatamReader::take_rows`].
+const TAKE_COALESCE_MAX_ROWS: usize = 65_536;
+/// Maximum estimated decoded bytes coalesced into a single output [`Batch`] by
+/// [`StatamReader::take_rows`] (`64 MiB`, keeping large-blob takes well below
+/// `MAX_BATCH_DECODED_BYTES` and `u32::MAX` offsets).
+const TAKE_COALESCE_MAX_BYTES: usize = 64 * 1024 * 1024;
+
+fn estimate_batch_bytes(batch: &Batch) -> usize {
+    batch
+        .columns()
+        .iter()
+        .map(estimate_column_bytes)
+        .fold(0usize, usize::saturating_add)
+}
+
+fn flush_take_run(
+    proj_schema: &Arc<Schema>,
+    run: &mut Vec<Batch>,
+    run_rows: usize,
+    out: &mut Vec<Batch>,
+) -> Result<(), StatamError> {
+    if run.is_empty() {
+        return Ok(());
+    }
+    if run.len() == 1
+        && let Some(only) = run.pop()
+    {
+        out.push(only);
+        return Ok(());
+    }
+    let fields = proj_schema.fields();
+    let mut merged_cols = Vec::with_capacity(fields.len());
+    let mut col_refs: Vec<&Column> = Vec::with_capacity(run.len());
+    for (c, field) in fields.iter().enumerate() {
+        col_refs.clear();
+        for b in run.iter() {
+            let col = b.column(c).ok_or(StatamError::Corrupt {
+                reason: "missing column during take_rows coalescing",
+            })?;
+            col_refs.push(col);
+        }
+        merged_cols.push(concat_column_refs(&field.data_type, &col_refs, run_rows)?);
+    }
+    run.clear();
+    out.push(Batch::try_new(
+        Arc::clone(proj_schema),
+        merged_cols,
+        run_rows,
+        Selection::All,
+    )?);
+    Ok(())
+}
+
+fn coalesce_take_batches(
+    proj_schema: &Arc<Schema>,
+    batches: Vec<Batch>,
+) -> Result<Vec<Batch>, StatamError> {
+    let mut out = Vec::new();
+    let mut cur_run: Vec<Batch> = Vec::new();
+    let mut cur_rows = 0usize;
+    let mut cur_bytes = 0usize;
+
+    for batch in batches {
+        let b_rows = batch.num_rows();
+        let b_bytes = estimate_batch_bytes(&batch);
+        let exceeds_rows = cur_rows
+            .checked_add(b_rows)
+            .is_none_or(|r| r > TAKE_COALESCE_MAX_ROWS);
+        let exceeds_bytes = cur_bytes
+            .checked_add(b_bytes)
+            .is_none_or(|b| b > TAKE_COALESCE_MAX_BYTES);
+        if !cur_run.is_empty() && (exceeds_rows || exceeds_bytes) {
+            flush_take_run(proj_schema, &mut cur_run, cur_rows, &mut out)?;
+            cur_rows = 0;
+            cur_bytes = 0;
+        }
+        cur_rows = cur_rows.saturating_add(b_rows);
+        cur_bytes = cur_bytes.saturating_add(b_bytes);
+        cur_run.push(batch);
+    }
+    flush_take_run(proj_schema, &mut cur_run, cur_rows, &mut out)?;
+    Ok(out)
 }

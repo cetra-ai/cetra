@@ -1,10 +1,13 @@
 //! Local L0 and external `.stpk` payload parsing, chunk resolution, substring scan, and reconstruction.
 
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::sync::Arc;
 
 use bytes::Bytes;
-use cetra_column::{Bitmap, Column, DataType, FlatColumn, FlatData, ScalarValue, Utf8Data};
+use cetra_column::{
+    Batch, BinaryData, Bitmap, Column, DataType, FlatColumn, FlatData, ScalarValue, Schema,
+    Utf8Data,
+};
 
 use crate::StatamError;
 use crate::format::{
@@ -22,18 +25,25 @@ use crate::writer::{L0_LOCAL_PACK_IDX, L0_PAYLOAD_DIR_MAGIC};
 
 use super::StatamReader;
 use super::eval::Utf8Matcher;
-use super::plan::{BlockReader, DecodedPhase1};
+use super::plan::{ActiveMiniBlock, BlockReader, DecodedPhase1, RgIoPlan};
+
+/// Maximum projected `ExternalPayload` bytes resolved in a single Phase-2 wave (`128 MiB`).
+const PHASE2_PAYLOAD_WAVE_TARGET_BYTES: usize = MAX_BATCH_DECODED_BYTES / 2;
 
 impl StatamReader {
-    pub(super) fn resolve_rg_payload_chunks<'a>(
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn resolve_and_materialize_phase2_mbs<'a>(
         &self,
         rg_idx: usize,
-        active_mbs: &mut [(usize, Bitmap, HashMap<usize, DecodedPhase1>)],
+        mut active_mbs: Vec<ActiveMiniBlock>,
+        plan: &RgIoPlan,
         proj_indices: &[usize],
+        proj_schema: &Arc<Schema>,
+        map_keys_by_col: &HashMap<usize, Vec<String>>,
         l0_local: Option<&ParsedL0Payload<'_>>,
         read_block: &BlockReader<'a>,
         read_threads: usize,
-    ) -> Result<HashMap<(u16, u32), Bytes>, StatamError> {
+    ) -> Result<Vec<Batch>, StatamError> {
         let mut proj_payload_cols: Vec<usize> = proj_indices
             .iter()
             .copied()
@@ -42,16 +52,112 @@ impl StatamReader {
             })
             .collect();
         if proj_payload_cols.is_empty() {
-            return Ok(HashMap::new());
+            return self.materialize_phase2_mbs(
+                rg_idx,
+                active_mbs,
+                plan,
+                proj_indices,
+                proj_schema,
+                map_keys_by_col,
+                &HashMap::new(),
+                read_block,
+                read_threads,
+            );
         }
         proj_payload_cols.sort_unstable();
         proj_payload_cols.dedup();
 
-        let mut by_pack: HashMap<u16, BTreeSet<u32>> = HashMap::new();
+        // Decode all projected ExternalPayload `PayloadRefs` mini-blocks once.
+        self.ensure_rg_payload_refs_decoded(
+            rg_idx,
+            &mut active_mbs,
+            &proj_payload_cols,
+            read_block,
+        )?;
+
+        // Partition active rows across `active_mbs` into sequential waves of <= 128 MiB so
+        // 1-RG large-blob tables (e.g. `blobs_2k` 368 MiB) scan safely within `MAX_BATCH_DECODED_BYTES`
+        // while still rejecting any single row exceeding `MAX_ROW_PAYLOAD_BYTES` or `MAX_BATCH_DECODED_BYTES`.
+        let waves = self.partition_payload_waves(&active_mbs, &proj_payload_cols, l0_local)?;
+        if waves.len() <= 1 {
+            let resolved = self.resolve_rg_payload_chunks(
+                rg_idx,
+                &mut active_mbs,
+                proj_indices,
+                l0_local,
+                read_block,
+                read_threads,
+            )?;
+            return self.materialize_phase2_mbs(
+                rg_idx,
+                active_mbs,
+                plan,
+                proj_indices,
+                proj_schema,
+                map_keys_by_col,
+                &resolved,
+                read_block,
+                read_threads,
+            );
+        }
+
+        let mut last_wave_for_pos = vec![0usize; active_mbs.len()];
+        for (wave_idx, wave) in waves.iter().enumerate() {
+            for &(pos, _) in wave {
+                last_wave_for_pos[pos] = wave_idx;
+            }
+        }
+        let mut active_slots: Vec<Option<ActiveMiniBlock>> =
+            active_mbs.into_iter().map(Some).collect();
+        let mut out_batches = Vec::with_capacity(waves.len());
+
+        for (wave_idx, wave) in waves.into_iter().enumerate() {
+            let mut wave_mbs = Vec::with_capacity(wave.len());
+            for (pos, sub_mask) in wave {
+                if last_wave_for_pos[pos] == wave_idx {
+                    if let Some((mb_idx, _, decoded_p1)) = active_slots[pos].take() {
+                        wave_mbs.push((mb_idx, sub_mask, decoded_p1));
+                    }
+                } else if let Some((mb_idx, _, decoded_p1)) = active_slots[pos].as_ref() {
+                    wave_mbs.push((*mb_idx, sub_mask, clone_decoded_p1_for_wave(decoded_p1)));
+                }
+            }
+            let resolved = self.resolve_rg_payload_chunks(
+                rg_idx,
+                &mut wave_mbs,
+                proj_indices,
+                l0_local,
+                read_block,
+                read_threads,
+            )?;
+            let mut wave_batches = self.materialize_phase2_mbs(
+                rg_idx,
+                wave_mbs,
+                plan,
+                proj_indices,
+                proj_schema,
+                map_keys_by_col,
+                &resolved,
+                read_block,
+                read_threads,
+            )?;
+            out_batches.append(&mut wave_batches);
+        }
+
+        Ok(out_batches)
+    }
+
+    fn ensure_rg_payload_refs_decoded<'a>(
+        &self,
+        rg_idx: usize,
+        active_mbs: &mut [ActiveMiniBlock],
+        proj_payload_cols: &[usize],
+        read_block: &BlockReader<'a>,
+    ) -> Result<(), StatamError> {
         for (mb_idx, mask, decoded_p1) in active_mbs.iter_mut() {
             let mb_row_count = self.meta.rg_blocks(0, rg_idx)[*mb_idx].row_count as usize;
             let is_sparse = !mask.all_ones() && mask.count_ones().saturating_mul(8) < mb_row_count;
-            for &cidx in &proj_payload_cols {
+            for &cidx in proj_payload_cols {
                 if let std::collections::hash_map::Entry::Vacant(e) = decoded_p1.entry(cidx) {
                     let blk = &self.meta.rg_blocks(cidx, rg_idx)[*mb_idx];
                     if blk.encoding == Encoding::ConstNull {
@@ -84,6 +190,280 @@ impl StatamReader {
                         }
                     }
                 }
+            }
+        }
+        Ok(())
+    }
+
+    #[allow(clippy::type_complexity)]
+    fn partition_payload_waves(
+        &self,
+        active_mbs: &[ActiveMiniBlock],
+        proj_payload_cols: &[usize],
+        l0_local: Option<&ParsedL0Payload<'_>>,
+    ) -> Result<Vec<Vec<(usize, Bitmap)>>, StatamError> {
+        let mut pack_cache: HashMap<u16, Arc<ChunkPackReader>> = HashMap::new();
+        let mut resolve_chunk_and_frame = |pidx: u16,
+                                           cid: u32|
+         -> Result<(usize, u32, usize), StatamError> {
+            if pidx == L0_LOCAL_PACK_IDX {
+                let l0 = l0_local.ok_or(StatamError::Corrupt {
+                    reason: "missing L0 local payload region",
+                })?;
+                let loc = l0.chunks.get(cid as usize).ok_or(StatamError::Corrupt {
+                    reason: "L0 chunk_id out of bounds",
+                })?;
+                let (_, _, f_raw) = l0.frames[loc.frame_id as usize];
+                Ok((loc.raw_len as usize, loc.frame_id, f_raw as usize))
+            } else {
+                let pack = match pack_cache.entry(pidx) {
+                    std::collections::hash_map::Entry::Occupied(o) => Arc::clone(o.get()),
+                    std::collections::hash_map::Entry::Vacant(v) => {
+                        let pack_id = *self.meta.schema_meta.pack_ids.get(pidx as usize).ok_or(
+                            StatamError::Corrupt {
+                                reason: "payload ref pack_idx out of bounds",
+                            },
+                        )?;
+                        let resolved = self.resolve_pack(pack_id)?;
+                        v.insert(Arc::clone(&resolved));
+                        resolved
+                    }
+                };
+                let toc = pack.toc();
+                let loc = toc.chunks.get(cid as usize).ok_or(StatamError::Corrupt {
+                    reason: "chunk_id out of bounds",
+                })?;
+                let f_raw = toc.frames[loc.frame_id as usize].raw_len as usize;
+                Ok((loc.raw_len as usize, loc.frame_id, f_raw))
+            }
+        };
+
+        let num_pcols = proj_payload_cols.len();
+        let mut waves: Vec<Vec<(usize, Bitmap)>> = Vec::new();
+        let mut cur_wave: Vec<(usize, Bitmap)> = Vec::new();
+        let mut wave_seen_chunks: HashSet<(u16, u32)> = HashSet::new();
+        let mut wave_seen_frames: HashSet<(u16, u32)> = HashSet::new();
+        let mut wave_chunk_bytes = 0usize;
+        let mut wave_frame_bytes = 0usize;
+        let mut wave_col_decoded = vec![0usize; num_pcols];
+
+        let mut row_col_bytes = vec![0usize; num_pcols];
+        let mut row_chunks: Vec<(u16, u32, usize, u32, usize)> = Vec::new();
+        let mut row_unique_chunks: HashSet<(u16, u32)> = HashSet::new();
+        let mut row_unique_frames: HashSet<(u16, u32)> = HashSet::new();
+        let mut seen_new_chunks: HashSet<(u16, u32)> = HashSet::new();
+        let mut seen_new_frames: HashSet<(u16, u32)> = HashSet::new();
+
+        for (pos, (_, mask, decoded_p1)) in active_mbs.iter().enumerate() {
+            let mb_row_count = mask.len();
+            for r in mask.iter_ones() {
+                row_col_bytes.fill(0);
+                row_chunks.clear();
+                row_unique_chunks.clear();
+                row_unique_frames.clear();
+                let mut row_unique_chunk_bytes = 0usize;
+                let mut row_unique_frame_bytes = 0usize;
+
+                for (col_pos, &cidx) in proj_payload_cols.iter().enumerate() {
+                    let mut col_row_len = 0usize;
+                    match decoded_p1.get(&cidx) {
+                        Some(DecodedPhase1::FlatPayloadRefs(refs)) => match refs.row_kind(r) {
+                            FLAT_REF_INLINE => {
+                                col_row_len = refs.inline_bytes(r).len();
+                            }
+                            FLAT_REF_CHUNKS => {
+                                let (ps, cs) = refs.chunk_refs(r);
+                                for (&pidx, &cid) in ps.iter().zip(cs.iter()) {
+                                    let (clen, fid, flen) = resolve_chunk_and_frame(pidx, cid)?;
+                                    col_row_len = col_row_len.checked_add(clen).ok_or(
+                                        StatamError::BoundsExceeded {
+                                            reason: "row payload byte size overflow",
+                                        },
+                                    )?;
+                                    if col_row_len > MAX_ROW_PAYLOAD_BYTES {
+                                        return Err(StatamError::BoundsExceeded {
+                                            reason: "reconstructed row payload exceeds MAX_ROW_PAYLOAD_BYTES",
+                                        });
+                                    }
+                                    if row_unique_chunks.insert((pidx, cid)) {
+                                        row_unique_chunk_bytes = row_unique_chunk_bytes
+                                            .checked_add(clen)
+                                            .ok_or(StatamError::BoundsExceeded {
+                                                reason: "row chunk decoded bytes overflow",
+                                            })?;
+                                        if row_unique_chunk_bytes > MAX_BATCH_DECODED_BYTES {
+                                            return Err(StatamError::BoundsExceeded {
+                                                reason: "single row chunk bytes exceed MAX_BATCH_DECODED_BYTES",
+                                            });
+                                        }
+                                    }
+                                    if row_unique_frames.insert((pidx, fid)) {
+                                        row_unique_frame_bytes = row_unique_frame_bytes
+                                            .checked_add(flen)
+                                            .ok_or(StatamError::BoundsExceeded {
+                                                reason: "row frame decoded bytes overflow",
+                                            })?;
+                                        if row_unique_frame_bytes > MAX_BATCH_DECODED_BYTES {
+                                            return Err(StatamError::BoundsExceeded {
+                                                reason: "single row frame bytes exceed MAX_BATCH_DECODED_BYTES",
+                                            });
+                                        }
+                                    }
+                                    row_chunks.push((pidx, cid, clen, fid, flen));
+                                }
+                            }
+                            _ => {}
+                        },
+                        Some(DecodedPhase1::SelectedPayloadRefs(selected)) => {
+                            if let Ok(idx) = selected.binary_search_by_key(&r, |&(row, _)| row) {
+                                match &selected[idx].1 {
+                                    PayloadRefRow::Null => {}
+                                    PayloadRefRow::Inline(b) => {
+                                        col_row_len = b.len();
+                                    }
+                                    PayloadRefRow::Chunks(chunks) => {
+                                        for &(pidx, cid) in chunks {
+                                            let (clen, fid, flen) =
+                                                resolve_chunk_and_frame(pidx, cid)?;
+                                            col_row_len = col_row_len.checked_add(clen).ok_or(
+                                                StatamError::BoundsExceeded {
+                                                    reason: "row payload byte size overflow",
+                                                },
+                                            )?;
+                                            if col_row_len > MAX_ROW_PAYLOAD_BYTES {
+                                                return Err(StatamError::BoundsExceeded {
+                                                    reason: "reconstructed row payload exceeds MAX_ROW_PAYLOAD_BYTES",
+                                                });
+                                            }
+                                            if row_unique_chunks.insert((pidx, cid)) {
+                                                row_unique_chunk_bytes = row_unique_chunk_bytes
+                                                    .checked_add(clen)
+                                                    .ok_or(StatamError::BoundsExceeded {
+                                                        reason: "row chunk decoded bytes overflow",
+                                                    })?;
+                                                if row_unique_chunk_bytes > MAX_BATCH_DECODED_BYTES
+                                                {
+                                                    return Err(StatamError::BoundsExceeded {
+                                                        reason: "single row chunk bytes exceed MAX_BATCH_DECODED_BYTES",
+                                                    });
+                                                }
+                                            }
+                                            if row_unique_frames.insert((pidx, fid)) {
+                                                row_unique_frame_bytes = row_unique_frame_bytes
+                                                    .checked_add(flen)
+                                                    .ok_or(StatamError::BoundsExceeded {
+                                                        reason: "row frame decoded bytes overflow",
+                                                    })?;
+                                                if row_unique_frame_bytes > MAX_BATCH_DECODED_BYTES
+                                                {
+                                                    return Err(StatamError::BoundsExceeded {
+                                                        reason: "single row frame bytes exceed MAX_BATCH_DECODED_BYTES",
+                                                    });
+                                                }
+                                            }
+                                            row_chunks.push((pidx, cid, clen, fid, flen));
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        _ => {}
+                    }
+                    row_col_bytes[col_pos] = col_row_len;
+                }
+
+                // Compute incremental bytes if added to `cur_wave`.
+                let mut delta_chunk_bytes = 0usize;
+                let mut delta_frame_bytes = 0usize;
+                if !cur_wave.is_empty() {
+                    seen_new_chunks.clear();
+                    seen_new_frames.clear();
+                    for &(pidx, cid, clen, fid, flen) in &row_chunks {
+                        if !wave_seen_chunks.contains(&(pidx, cid))
+                            && seen_new_chunks.insert((pidx, cid))
+                        {
+                            delta_chunk_bytes = delta_chunk_bytes.saturating_add(clen);
+                        }
+                        if !wave_seen_frames.contains(&(pidx, fid))
+                            && seen_new_frames.insert((pidx, fid))
+                        {
+                            delta_frame_bytes = delta_frame_bytes.saturating_add(flen);
+                        }
+                    }
+                    let exceeds_wave =
+                        wave_chunk_bytes.saturating_add(delta_chunk_bytes)
+                            > PHASE2_PAYLOAD_WAVE_TARGET_BYTES
+                            || wave_frame_bytes.saturating_add(delta_frame_bytes)
+                                > PHASE2_PAYLOAD_WAVE_TARGET_BYTES
+                            || wave_col_decoded.iter().zip(row_col_bytes.iter()).any(
+                                |(&w, &rb)| w.saturating_add(rb) > PHASE2_PAYLOAD_WAVE_TARGET_BYTES,
+                            );
+                    if exceeds_wave {
+                        waves.push(std::mem::take(&mut cur_wave));
+                        wave_seen_chunks.clear();
+                        wave_seen_frames.clear();
+                        wave_chunk_bytes = 0;
+                        wave_frame_bytes = 0;
+                        wave_col_decoded.fill(0);
+                    }
+                }
+
+                for &(pidx, cid, clen, fid, flen) in &row_chunks {
+                    if wave_seen_chunks.insert((pidx, cid)) {
+                        wave_chunk_bytes = wave_chunk_bytes.saturating_add(clen);
+                    }
+                    if wave_seen_frames.insert((pidx, fid)) {
+                        wave_frame_bytes = wave_frame_bytes.saturating_add(flen);
+                    }
+                }
+                for (w, &rb) in wave_col_decoded.iter_mut().zip(row_col_bytes.iter()) {
+                    *w = w.saturating_add(rb);
+                }
+
+                if cur_wave.last().is_some_and(|(p, _)| *p == pos) {
+                    if let Some((_, sub_mask)) = cur_wave.last_mut() {
+                        let _ = sub_mask.set(r, true);
+                    }
+                } else {
+                    let mut sub_mask = Bitmap::new_zeroed(mb_row_count);
+                    let _ = sub_mask.set(r, true);
+                    cur_wave.push((pos, sub_mask));
+                }
+            }
+        }
+        if !cur_wave.is_empty() {
+            waves.push(cur_wave);
+        }
+        Ok(waves)
+    }
+
+    pub(super) fn resolve_rg_payload_chunks<'a>(
+        &self,
+        rg_idx: usize,
+        active_mbs: &mut [(usize, Bitmap, HashMap<usize, DecodedPhase1>)],
+        proj_indices: &[usize],
+        l0_local: Option<&ParsedL0Payload<'_>>,
+        read_block: &BlockReader<'a>,
+        read_threads: usize,
+    ) -> Result<HashMap<(u16, u32), Bytes>, StatamError> {
+        let mut proj_payload_cols: Vec<usize> = proj_indices
+            .iter()
+            .copied()
+            .filter(|&cidx| {
+                self.meta.col_dir[cidx].locality_group == LocalityGroup::ExternalPayload
+            })
+            .collect();
+        if proj_payload_cols.is_empty() {
+            return Ok(HashMap::new());
+        }
+        proj_payload_cols.sort_unstable();
+        proj_payload_cols.dedup();
+
+        self.ensure_rg_payload_refs_decoded(rg_idx, active_mbs, &proj_payload_cols, read_block)?;
+
+        let mut by_pack: HashMap<u16, BTreeSet<u32>> = HashMap::new();
+        for (_, mask, decoded_p1) in active_mbs.iter() {
+            for &cidx in &proj_payload_cols {
                 match decoded_p1.get(&cidx) {
                     Some(DecodedPhase1::FlatPayloadRefs(refs)) => {
                         for r in mask.iter_ones() {
@@ -96,7 +476,10 @@ impl StatamReader {
                         }
                     }
                     Some(DecodedPhase1::SelectedPayloadRefs(selected)) => {
-                        for (_, row) in selected {
+                        for (r, row) in selected {
+                            if !mask.get(*r) {
+                                continue;
+                            }
                             if let PayloadRefRow::Chunks(chunks) = row {
                                 for &(pidx, cid) in chunks {
                                     by_pack.entry(pidx).or_default().insert(cid);
@@ -389,7 +772,45 @@ impl StatamReader {
     }
 }
 
-fn append_payload_row_to_utf8(
+fn clone_decoded_p1_for_wave(src: &HashMap<usize, DecodedPhase1>) -> HashMap<usize, DecodedPhase1> {
+    let mut out = HashMap::with_capacity(src.len());
+    for (&k, v) in src {
+        match v {
+            DecodedPhase1::Col(c) => {
+                out.insert(k, DecodedPhase1::Col(c.clone()));
+            }
+            DecodedPhase1::FlatPayloadRefs(r) => {
+                out.insert(k, DecodedPhase1::FlatPayloadRefs(r.clone()));
+            }
+            DecodedPhase1::SelectedPayloadRefs(s) => {
+                out.insert(k, DecodedPhase1::SelectedPayloadRefs(s.clone()));
+            }
+            DecodedPhase1::ShreddedSub(_) => {}
+        }
+    }
+    out
+}
+
+fn finish_payload_column(
+    dt: &DataType,
+    offsets: Vec<u32>,
+    data_bytes: Vec<u8>,
+    nulls: Bitmap,
+) -> Result<Column, StatamError> {
+    let flat_data = match dt {
+        DataType::Binary => FlatData::Binary(BinaryData::try_new(offsets, data_bytes)?),
+        DataType::Utf8 => FlatData::Utf8(Utf8Data::try_new(offsets, data_bytes)?),
+        _ => {
+            return Err(StatamError::SchemaMismatch {
+                reason: "ExternalPayload column must be DataType::Utf8 or DataType::Binary",
+            });
+        }
+    };
+    let nulls_opt = if nulls.all_ones() { None } else { Some(nulls) };
+    Ok(Column::Flat(FlatColumn::try_new(flat_data, nulls_opt)?))
+}
+
+fn append_payload_row_to_bytes(
     row: &PayloadRefRow,
     row_idx: usize,
     nulls: &mut Bitmap,
@@ -417,7 +838,7 @@ fn append_payload_row_to_utf8(
             }
             let next_off = u32::try_from(data_bytes.len() + bytes.len()).map_err(|_| {
                 StatamError::BoundsExceeded {
-                    reason: "utf8 payload column exceeds u32::MAX",
+                    reason: "payload column exceeds u32::MAX",
                 }
             })?;
             data_bytes.extend_from_slice(bytes);
@@ -458,7 +879,7 @@ fn append_payload_row_to_utf8(
             }
             let next_off =
                 u32::try_from(start_pos + row_len).map_err(|_| StatamError::BoundsExceeded {
-                    reason: "utf8 payload column exceeds u32::MAX",
+                    reason: "payload column exceeds u32::MAX",
                 })?;
             offsets.push(next_off);
         }
@@ -470,6 +891,7 @@ pub(super) fn reconstruct_payload_column_from_flat(
     refs: &FlatPayloadRefs,
     active_mask: &Bitmap,
     resolved_chunks: &HashMap<(u16, u32), Bytes>,
+    dt: &DataType,
 ) -> Result<Column, StatamError> {
     let row_count = refs.len();
     let all_active_null = active_mask
@@ -477,7 +899,7 @@ pub(super) fn reconstruct_payload_column_from_flat(
         .all(|r| refs.row_kind(r) == FLAT_REF_NULL);
     if all_active_null {
         return Ok(Column::try_new_const(
-            ScalarValue::Null(DataType::Utf8),
+            ScalarValue::Null(dt.clone()),
             row_count,
         )?);
     }
@@ -514,7 +936,7 @@ pub(super) fn reconstruct_payload_column_from_flat(
                 data_bytes.extend_from_slice(bytes);
                 let next_off =
                     u32::try_from(data_bytes.len()).map_err(|_| StatamError::BoundsExceeded {
-                        reason: "utf8 payload column exceeds u32::MAX",
+                        reason: "payload column exceeds u32::MAX",
                     })?;
                 offsets.push(next_off);
             }
@@ -554,7 +976,7 @@ pub(super) fn reconstruct_payload_column_from_flat(
                 }
                 let next_off = u32::try_from(start_pos + row_len).map_err(|_| {
                     StatamError::BoundsExceeded {
-                        reason: "utf8 payload column exceeds u32::MAX",
+                        reason: "payload column exceeds u32::MAX",
                     }
                 })?;
                 offsets.push(next_off);
@@ -565,12 +987,7 @@ pub(super) fn reconstruct_payload_column_from_flat(
         }
     }
 
-    let utf8 = Utf8Data::try_new(offsets, data_bytes)?;
-    let nulls_opt = if nulls.all_ones() { None } else { Some(nulls) };
-    Ok(Column::Flat(FlatColumn::try_new(
-        FlatData::Utf8(utf8),
-        nulls_opt,
-    )?))
+    finish_payload_column(dt, offsets, data_bytes, nulls)
 }
 
 pub(super) fn reconstruct_payload_column_selected(
@@ -578,13 +995,14 @@ pub(super) fn reconstruct_payload_column_selected(
     selected: &[(usize, PayloadRefRow)],
     active_mask: &Bitmap,
     resolved_chunks: &HashMap<(u16, u32), Bytes>,
+    dt: &DataType,
 ) -> Result<Column, StatamError> {
     let all_active_null = selected
         .iter()
         .all(|(r, row)| !active_mask.get(*r) || matches!(row, PayloadRefRow::Null));
     if all_active_null {
         return Ok(Column::try_new_const(
-            ScalarValue::Null(DataType::Utf8),
+            ScalarValue::Null(dt.clone()),
             row_count,
         )?);
     }
@@ -604,7 +1022,7 @@ pub(super) fn reconstruct_payload_column_selected(
                 offsets.push(data_bytes.len() as u32);
                 continue;
             }
-            append_payload_row_to_utf8(
+            append_payload_row_to_bytes(
                 row,
                 r,
                 &mut nulls,
@@ -618,12 +1036,7 @@ pub(super) fn reconstruct_payload_column_selected(
         }
     }
 
-    let utf8 = Utf8Data::try_new(offsets, data_bytes)?;
-    let nulls_opt = if nulls.all_ones() { None } else { Some(nulls) };
-    Ok(Column::Flat(FlatColumn::try_new(
-        FlatData::Utf8(utf8),
-        nulls_opt,
-    )?))
+    finish_payload_column(dt, offsets, data_bytes, nulls)
 }
 
 pub(super) struct ParsedL0Payload<'a> {

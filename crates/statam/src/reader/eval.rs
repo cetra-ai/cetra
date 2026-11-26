@@ -8,20 +8,21 @@ use memchr::memmem;
 
 use crate::StatamError;
 use crate::codec::dict::{FileDict, decode_dict_codes_body};
-use crate::codec::fsst::FsstBlockView;
+use crate::codec::fsst::{FsstBlockView, FsstSubchunkedView};
 use crate::codec::nested::{
     ShreddedSubCol, decode_shredded_residual_block, decode_shredded_subcol, decode_single_map_key,
 };
 use crate::codec::numeric::read_optional_nulls;
 use crate::codec::{ZonePred, ZoneValue, decode_mini_block, zone_map_always_matches};
 use crate::format::{
-    BLOCK_FLAG_CONST_EMPTY_COLLECTION, BLOCK_FLAG_HAS_NAN, BlockEntry, COL_FLAG_IS_SHREDDED_SUBCOL,
-    Encoding, LocalityGroup, MAX_BATCH_DECODED_BYTES, MAX_BLOCK_RAW_BYTES,
+    BLOCK_FLAG_CONST_EMPTY_COLLECTION, BLOCK_FLAG_FSST_SUBCHUNKED, BLOCK_FLAG_HAS_NAN, BlockEntry,
+    COL_FLAG_IS_SHREDDED_SUBCOL, Encoding, LocalityGroup, MAX_BATCH_DECODED_BYTES,
+    MAX_BLOCK_RAW_BYTES,
 };
 use crate::parallel::{MAX_PARALLEL_THREADS, parallel_map_in_order};
 use crate::payload::search::{pack_short_circuits_all, unicode_lowercase_context_free_into};
 use crate::payload::{
-    FlatPayloadRefs, decode_payload_refs_flat, scan_payload_refs_inline_substring,
+    FLAT_REF_NULL, FlatPayloadRefs, decode_payload_refs_flat, scan_payload_refs_inline_substring,
 };
 use crate::simd::bitpack::{packed_bytes_len, unpack_u32};
 use crate::simd::filter::{FilterOp, filter_f64, filter_i64, filter_i64_between, filter_u32};
@@ -208,8 +209,15 @@ impl StatamReader {
                 &mut decoded_p1,
             )?;
             let DecodedPhase1::Col(col) = &decoded_p1[&cidx] else {
-                return Err(StatamError::Corrupt {
-                    reason: "unexpected Phase 1 decoded type for id_lookup",
+                return Err(match &decoded_p1[&cidx] {
+                    DecodedPhase1::FlatPayloadRefs(_) | DecodedPhase1::SelectedPayloadRefs(_) => {
+                        StatamError::SchemaMismatch {
+                            reason: "id_lookup not supported on ExternalPayload column",
+                        }
+                    }
+                    _ => StatamError::Corrupt {
+                        reason: "unexpected Phase 1 decoded type for id_lookup",
+                    },
                 });
             };
             let bm = eval_id_lookup(col, &fields[cidx].data_type, &lk.values)?;
@@ -309,16 +317,21 @@ impl StatamReader {
                         read_block,
                         &mut decoded_p1,
                     )?;
-                    let DecodedPhase1::Col(col) = &decoded_p1[&cidx] else {
-                        return Err(StatamError::Corrupt {
-                            reason: "expected scalar/nested Column in Phase 1",
-                        });
+                    let bm = match &decoded_p1[&cidx] {
+                        DecodedPhase1::Col(col) => eval_column_pred(
+                            col,
+                            &pred.pred,
+                            (blk.block_flags & BLOCK_FLAG_HAS_NAN) != 0,
+                        )?,
+                        DecodedPhase1::FlatPayloadRefs(refs) => {
+                            eval_payload_refs_pred(refs, &pred.pred)?
+                        }
+                        _ => {
+                            return Err(StatamError::Corrupt {
+                                reason: "expected scalar/nested Column or FlatPayloadRefs in Phase 1",
+                            });
+                        }
                     };
-                    let bm = eval_column_pred(
-                        col,
-                        &pred.pred,
-                        (blk.block_flags & BLOCK_FLAG_HAS_NAN) != 0,
-                    )?;
                     mask = mask.and(&bm)?;
                     if mask.all_zeros() {
                         return Ok((mask, decoded_p1));
@@ -639,6 +652,33 @@ pub(super) fn id_lookup_zone_pred(dt: &DataType, values: &[Vec<u8>]) -> Option<Z
             zvals.push(to_zval(v)?);
         }
         Some(ZonePred::In(zvals))
+    }
+}
+
+fn eval_payload_refs_pred(refs: &FlatPayloadRefs, pred: &ZonePred) -> Result<Bitmap, StatamError> {
+    let n = refs.len();
+    match pred {
+        ZonePred::IsNull => {
+            let mut bm = Bitmap::new_zeroed(n);
+            for r in 0..n {
+                if refs.row_kind(r) == FLAT_REF_NULL {
+                    let _ = bm.set(r, true);
+                }
+            }
+            Ok(bm)
+        }
+        ZonePred::IsNotNull => {
+            let mut bm = Bitmap::new_zeroed(n);
+            for r in 0..n {
+                if refs.row_kind(r) != FLAT_REF_NULL {
+                    let _ = bm.set(r, true);
+                }
+            }
+            Ok(bm)
+        }
+        _ => Err(StatamError::SchemaMismatch {
+            reason: "value predicate not supported on ExternalPayload column",
+        }),
     }
 }
 
@@ -1259,6 +1299,15 @@ pub(super) fn eval_utf8_block_substring_raw(
         }
         Encoding::Fsst => {
             let (nulls, body) = read_optional_nulls(raw, mb_row_count, blk.block_flags)?;
+            if (blk.block_flags & BLOCK_FLAG_FSST_SUBCHUNKED) != 0 {
+                let view = FsstSubchunkedView::parse(body, mb_row_count)?;
+                if needle.is_empty() {
+                    return Ok(nulls.unwrap_or_else(|| Bitmap::new_ones(mb_row_count)));
+                }
+                let mut matcher = Utf8Matcher::new(needle, case_insensitive);
+                return view
+                    .eval_substring(active_mask, nulls.as_ref(), |slice| matcher.matches(slice));
+            }
             let view = FsstBlockView::parse(body, mb_row_count)?;
             if needle.is_empty() {
                 return Ok(nulls.unwrap_or_else(|| Bitmap::new_ones(mb_row_count)));

@@ -7,12 +7,12 @@ pub mod search;
 use std::collections::VecDeque;
 use std::fmt;
 
-use cetra_column::{Bitmap, Utf8Data};
+use cetra_column::Bitmap;
 
 use crate::StatamError;
 use crate::format::{
-    MAX_BATCH_DECODED_BYTES, MAX_BLOCK_RAW_BYTES, MAX_CHUNKS_PER_ROW, MAX_FRAME_RAW_BYTES,
-    MAX_REF_CHAIN_DEPTH, MAX_ROWS_PER_FILE,
+    MAX_BATCH_DECODED_BYTES, MAX_BLOCK_RAW_BYTES, MAX_CHUNKS_PER_ROW, MAX_REF_CHAIN_DEPTH,
+    MAX_ROW_PAYLOAD_BYTES, MAX_ROWS_PER_FILE,
 };
 use crate::simd::bitpack::{zigzag_decode_i64, zigzag_encode_i64};
 
@@ -233,22 +233,23 @@ pub fn encode_payload_refs_l0_direct(
     Ok(())
 }
 
-/// Zero-copy `L0Fast` streaming encoder directly from a `Utf8Data` slice into `out`.
+/// Zero-copy `L0Fast` streaming encoder directly from `(offsets, all_bytes)` (`Utf8Data` or `BinaryData`) into `out`.
 ///
 /// Returns the mini-block's `null_count`. When all `mb_len` rows are null, `out` is left empty.
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn encode_payload_refs_l0_from_utf8<F>(
-    u: &Utf8Data,
+pub(crate) fn encode_payload_refs_l0_from_bytes<F>(
+    offsets: &[u32],
+    all_bytes: &[u8],
     col_nulls: Option<&Bitmap>,
     row_off: usize,
     mb_len: usize,
     inline_threshold: usize,
     l0_pack_idx: u16,
-    mut add_chunk: F,
+    mut append_row_chunks: F,
     out: &mut Vec<u8>,
 ) -> Result<u16, StatamError>
 where
-    F: FnMut(&[u8]) -> Result<u32, StatamError>,
+    F: FnMut(&[u8], &mut Vec<u32>) -> Result<(), StatamError>,
 {
     if mb_len as u64 > MAX_ROWS_PER_FILE {
         return Err(StatamError::BoundsExceeded {
@@ -283,8 +284,7 @@ where
         out.extend_from_slice(&validity.to_bytes());
     }
 
-    let offsets = u.offsets();
-    let all_bytes = u.bytes();
+    let mut row_cids = Vec::new();
     for r in row_off..row_off + mb_len {
         if col_nulls.is_some_and(|bm| !bm.get(r)) {
             continue;
@@ -292,6 +292,11 @@ where
         let s = offsets[r] as usize;
         let e = offsets[r + 1] as usize;
         let bytes = &all_bytes[s..e];
+        if bytes.len() > MAX_ROW_PAYLOAD_BYTES {
+            return Err(StatamError::BoundsExceeded {
+                reason: "row payload exceeds MAX_ROW_PAYLOAD_BYTES",
+            });
+        }
         if bytes.len() <= inline_threshold {
             let len = u16::try_from(bytes.len()).map_err(|_| StatamError::BoundsExceeded {
                 reason: "inline payload length exceeds u16::MAX",
@@ -300,20 +305,20 @@ where
             out.extend_from_slice(&len.to_le_bytes());
             out.extend_from_slice(bytes);
         } else {
-            let n_chunks_usize = bytes.len().div_ceil(MAX_FRAME_RAW_BYTES);
-            if n_chunks_usize > MAX_CHUNKS_PER_ROW {
+            row_cids.clear();
+            append_row_chunks(bytes, &mut row_cids)?;
+            if row_cids.len() > MAX_CHUNKS_PER_ROW {
                 return Err(StatamError::BoundsExceeded {
                     reason: "row chunks exceed MAX_CHUNKS_PER_ROW",
                 });
             }
             let n_chunks =
-                u16::try_from(n_chunks_usize).map_err(|_| StatamError::BoundsExceeded {
+                u16::try_from(row_cids.len()).map_err(|_| StatamError::BoundsExceeded {
                     reason: "keyframe chunk count exceeds u16::MAX",
                 })?;
             out.push(TAG_KEYFRAME);
             out.extend_from_slice(&n_chunks.to_le_bytes());
-            for slice in bytes.chunks(MAX_FRAME_RAW_BYTES) {
-                let cid = add_chunk(slice)?;
+            for &cid in &row_cids {
                 out.extend_from_slice(&l0_pack_idx.to_le_bytes());
                 out.extend_from_slice(&cid.to_le_bytes());
             }
@@ -2257,21 +2262,24 @@ mod tests {
         assert_eq!(decoded, rows);
 
         let long = "Z".repeat(300);
-        let u = Utf8Data::try_from_slices(["tiny", "", long.as_str(), "also short"]).unwrap();
+        let u = cetra_column::Utf8Data::try_from_slices(["tiny", "", long.as_str(), "also short"])
+            .unwrap();
         let nulls = Bitmap::from_bools(&[true, false, true, true]);
         let mut streamed = Vec::new();
         let mut next_cid = 0u32;
-        let nc = encode_payload_refs_l0_from_utf8(
-            &u,
+        let nc = encode_payload_refs_l0_from_bytes(
+            u.offsets(),
+            u.bytes(),
             Some(&nulls),
             0,
             4,
             256,
             0xFFFF,
-            |_slice| {
+            |_slice, cids| {
                 let cid = next_cid;
                 next_cid += 1;
-                Ok(cid)
+                cids.push(cid);
+                Ok(())
             },
             &mut streamed,
         )

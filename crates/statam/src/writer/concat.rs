@@ -2,62 +2,277 @@
 
 use std::borrow::Cow;
 
-use cetra_column::{BinaryData, Column, DataType, FlatColumn, FlatData, Utf8Data};
+use cetra_column::{BinaryData, Column, DataType, FlatColumn, FlatData, ScalarValue, Utf8Data};
 
 use crate::StatamError;
 
 use super::rg_encode::as_flat_cow;
 
-pub(super) fn estimate_column_bytes(col: &Column) -> usize {
-    match col {
-        Column::Const { .. } => 64,
-        Column::Dict(d) => d.codes().len().saturating_mul(4),
-        Column::Rle(r) => r.run_ends().len().saturating_mul(12),
-        Column::Flat(f) => {
-            let null_bytes = f.nulls().map_or(0, |bm| bm.len().div_ceil(8));
-            let data_bytes = match f.data() {
-                FlatData::Null(_) => 0,
-                FlatData::Bool(b) => b.len().div_ceil(8),
-                FlatData::I64(v) | FlatData::TimestampNs { values: v, .. } => {
-                    v.len().saturating_mul(8)
-                }
-                FlatData::F64(v) => v.len().saturating_mul(8),
-                FlatData::Date(v) => v.len().saturating_mul(4),
-                FlatData::Decimal128 { values: v, .. } => v.len().saturating_mul(16),
-                FlatData::Interval(v) => v.len().saturating_mul(16),
-                FlatData::FixedBytes8(v) => v.len().saturating_mul(8),
-                FlatData::FixedBytes16(v) => v.len().saturating_mul(16),
-                FlatData::Utf8(u) => u.bytes().len().saturating_add(u.len().saturating_mul(4)),
-                FlatData::Binary(b) => b.bytes().len().saturating_add(b.len().saturating_mul(4)),
-                FlatData::List {
-                    offsets, values, ..
-                } => offsets
-                    .len()
-                    .saturating_mul(4)
-                    .saturating_add(estimate_column_bytes(values)),
-                FlatData::MapUtf8(m) => m
-                    .offsets()
-                    .len()
-                    .saturating_mul(4)
-                    .saturating_add(m.keys().bytes().len())
-                    .saturating_add(m.values().bytes().len())
-                    .saturating_add(m.entry_count().saturating_mul(8)),
-                FlatData::Events(e) => e
-                    .offsets()
-                    .len()
-                    .saturating_mul(4)
-                    .saturating_add(e.event_count().saturating_mul(8))
-                    .saturating_add(e.names().bytes().len())
-                    .saturating_add(e.attributes().bytes().len()),
-                FlatData::Links(l) => l
-                    .offsets()
-                    .len()
-                    .saturating_mul(4)
-                    .saturating_add(l.link_count().saturating_mul(24))
-                    .saturating_add(l.attributes().bytes().len()),
-            };
-            data_bytes.saturating_add(null_bytes)
+fn scalar_byte_len(v: &ScalarValue) -> usize {
+    match v {
+        ScalarValue::Null(_) | ScalarValue::Bool(_) => 1,
+        ScalarValue::Date(_) => 4,
+        ScalarValue::I64(_)
+        | ScalarValue::F64(_)
+        | ScalarValue::TimestampNs { .. }
+        | ScalarValue::FixedBytes8(_) => 8,
+        ScalarValue::Decimal128 { .. }
+        | ScalarValue::Interval(_)
+        | ScalarValue::FixedBytes16(_) => 16,
+        ScalarValue::Utf8(s) => s.len().saturating_add(4),
+        ScalarValue::Binary(b) => b.len().saturating_add(4),
+        ScalarValue::List { values, .. } => values
+            .iter()
+            .map(scalar_byte_len)
+            .fold(4usize, usize::saturating_add),
+        ScalarValue::MapUtf8(entries) => entries.iter().fold(4usize, |acc, (k, val)| {
+            acc.saturating_add(k.len())
+                .saturating_add(val.as_ref().map_or(0, String::len))
+                .saturating_add(8)
+        }),
+        ScalarValue::Events(events) => events.iter().fold(4usize, |acc, e| {
+            acc.saturating_add(8)
+                .saturating_add(e.name.len())
+                .saturating_add(e.attributes.as_ref().map_or(0, String::len))
+        }),
+        ScalarValue::Links(links) => links.iter().fold(4usize, |acc, l| {
+            acc.saturating_add(24)
+                .saturating_add(l.attributes.as_ref().map_or(0, String::len))
+        }),
+    }
+}
+
+fn estimate_flat_column_bytes(f: &FlatColumn) -> usize {
+    let null_bytes = f.nulls().map_or(0, |bm| bm.len().div_ceil(8));
+    let data_bytes = match f.data() {
+        FlatData::Null(_) => 0,
+        FlatData::Bool(b) => b.len().div_ceil(8),
+        FlatData::I64(v) | FlatData::TimestampNs { values: v, .. } => v.len().saturating_mul(8),
+        FlatData::F64(v) => v.len().saturating_mul(8),
+        FlatData::Date(v) => v.len().saturating_mul(4),
+        FlatData::Decimal128 { values: v, .. } => v.len().saturating_mul(16),
+        FlatData::Interval(v) => v.len().saturating_mul(16),
+        FlatData::FixedBytes8(v) => v.len().saturating_mul(8),
+        FlatData::FixedBytes16(v) => v.len().saturating_mul(16),
+        FlatData::Utf8(u) => u.bytes().len().saturating_add(u.len().saturating_mul(4)),
+        FlatData::Binary(b) => b.bytes().len().saturating_add(b.len().saturating_mul(4)),
+        FlatData::List {
+            offsets, values, ..
+        } => offsets
+            .len()
+            .saturating_mul(4)
+            .saturating_add(estimate_column_bytes(values)),
+        FlatData::MapUtf8(m) => m
+            .offsets()
+            .len()
+            .saturating_mul(4)
+            .saturating_add(m.keys().bytes().len())
+            .saturating_add(m.values().bytes().len())
+            .saturating_add(m.entry_count().saturating_mul(8)),
+        FlatData::Events(e) => e
+            .offsets()
+            .len()
+            .saturating_mul(4)
+            .saturating_add(e.event_count().saturating_mul(8))
+            .saturating_add(e.names().bytes().len())
+            .saturating_add(e.attributes().bytes().len()),
+        FlatData::Links(l) => l
+            .offsets()
+            .len()
+            .saturating_mul(4)
+            .saturating_add(l.link_count().saturating_mul(24))
+            .saturating_add(l.attributes().bytes().len()),
+    };
+    data_bytes.saturating_add(null_bytes)
+}
+
+fn estimate_flat_slice_bytes(f: &FlatColumn, offset: usize, len: usize) -> usize {
+    if len == 0 {
+        return 0;
+    }
+    let null_bytes = if f.has_nulls() { len.div_ceil(8) } else { 0 };
+    let end = offset.saturating_add(len);
+    let data_bytes = match f.data() {
+        FlatData::Null(_) => 0,
+        FlatData::Bool(_) => len.div_ceil(8),
+        FlatData::I64(_)
+        | FlatData::TimestampNs { .. }
+        | FlatData::F64(_)
+        | FlatData::FixedBytes8(_) => len.saturating_mul(8),
+        FlatData::Date(_) => len.saturating_mul(4),
+        FlatData::Decimal128 { .. } | FlatData::Interval(_) | FlatData::FixedBytes16(_) => {
+            len.saturating_mul(16)
         }
+        FlatData::Utf8(u) => {
+            let offs = u.offsets();
+            let s = offs.get(offset).copied().unwrap_or(0) as usize;
+            let e = offs.get(end).copied().unwrap_or(0) as usize;
+            e.saturating_sub(s).saturating_add(len.saturating_mul(4))
+        }
+        FlatData::Binary(b) => {
+            let offs = b.offsets();
+            let s = offs.get(offset).copied().unwrap_or(0) as usize;
+            let e = offs.get(end).copied().unwrap_or(0) as usize;
+            e.saturating_sub(s).saturating_add(len.saturating_mul(4))
+        }
+        FlatData::List {
+            offsets, values, ..
+        } => {
+            let s = offsets.get(offset).copied().unwrap_or(0) as usize;
+            let e = offsets.get(end).copied().unwrap_or(0) as usize;
+            let child_len = e.saturating_sub(s);
+            len.saturating_mul(4)
+                .saturating_add(estimate_column_slice_bytes(values, s, child_len))
+        }
+        FlatData::MapUtf8(m) => {
+            let offs = m.offsets();
+            let es = offs.get(offset).copied().unwrap_or(0) as usize;
+            let ee = offs.get(end).copied().unwrap_or(0) as usize;
+            let k_offs = m.keys().offsets();
+            let v_offs = m.values().offsets();
+            let ks = k_offs.get(es).copied().unwrap_or(0) as usize;
+            let ke = k_offs.get(ee).copied().unwrap_or(0) as usize;
+            let vs = v_offs.get(es).copied().unwrap_or(0) as usize;
+            let ve = v_offs.get(ee).copied().unwrap_or(0) as usize;
+            len.saturating_mul(4)
+                .saturating_add(ke.saturating_sub(ks))
+                .saturating_add(ve.saturating_sub(vs))
+                .saturating_add(ee.saturating_sub(es).saturating_mul(8))
+        }
+        FlatData::Events(e) => {
+            let offs = e.offsets();
+            let es = offs.get(offset).copied().unwrap_or(0) as usize;
+            let ee = offs.get(end).copied().unwrap_or(0) as usize;
+            let n_offs = e.names().offsets();
+            let a_offs = e.attributes().offsets();
+            let ns = n_offs.get(es).copied().unwrap_or(0) as usize;
+            let ne = n_offs.get(ee).copied().unwrap_or(0) as usize;
+            let as_ = a_offs.get(es).copied().unwrap_or(0) as usize;
+            let ae = a_offs.get(ee).copied().unwrap_or(0) as usize;
+            len.saturating_mul(4)
+                .saturating_add(ee.saturating_sub(es).saturating_mul(8))
+                .saturating_add(ne.saturating_sub(ns))
+                .saturating_add(ae.saturating_sub(as_))
+        }
+        FlatData::Links(l) => {
+            let offs = l.offsets();
+            let es = offs.get(offset).copied().unwrap_or(0) as usize;
+            let ee = offs.get(end).copied().unwrap_or(0) as usize;
+            let a_offs = l.attributes().offsets();
+            let as_ = a_offs.get(es).copied().unwrap_or(0) as usize;
+            let ae = a_offs.get(ee).copied().unwrap_or(0) as usize;
+            len.saturating_mul(4)
+                .saturating_add(ee.saturating_sub(es).saturating_mul(24))
+                .saturating_add(ae.saturating_sub(as_))
+        }
+    };
+    data_bytes.saturating_add(null_bytes)
+}
+
+pub(crate) fn estimate_column_bytes(col: &Column) -> usize {
+    match col {
+        Column::Const { value, len } => scalar_byte_len(value).saturating_mul(*len),
+        Column::Dict(d) => {
+            let codes = d.codes();
+            let vals = d.values();
+            let mat_bytes = match vals.data() {
+                FlatData::Null(_) => 0,
+                FlatData::Bool(_) => codes.len().div_ceil(8),
+                FlatData::I64(_)
+                | FlatData::TimestampNs { .. }
+                | FlatData::F64(_)
+                | FlatData::FixedBytes8(_) => codes.len().saturating_mul(8),
+                FlatData::Date(_) => codes.len().saturating_mul(4),
+                FlatData::Decimal128 { .. } | FlatData::Interval(_) | FlatData::FixedBytes16(_) => {
+                    codes.len().saturating_mul(16)
+                }
+                FlatData::Utf8(u) => {
+                    let offs = u.offsets();
+                    let bytes: usize = codes
+                        .iter()
+                        .map(|&c| {
+                            let i = c as usize;
+                            offs.get(i + 1)
+                                .copied()
+                                .unwrap_or(0)
+                                .saturating_sub(offs.get(i).copied().unwrap_or(0))
+                                as usize
+                        })
+                        .fold(0usize, usize::saturating_add);
+                    bytes.saturating_add(codes.len().saturating_mul(4))
+                }
+                FlatData::Binary(b) => {
+                    let offs = b.offsets();
+                    let bytes: usize = codes
+                        .iter()
+                        .map(|&c| {
+                            let i = c as usize;
+                            offs.get(i + 1)
+                                .copied()
+                                .unwrap_or(0)
+                                .saturating_sub(offs.get(i).copied().unwrap_or(0))
+                                as usize
+                        })
+                        .fold(0usize, usize::saturating_add);
+                    bytes.saturating_add(codes.len().saturating_mul(4))
+                }
+                _ => codes
+                    .iter()
+                    .map(|&c| estimate_flat_slice_bytes(vals, c as usize, 1))
+                    .fold(0usize, usize::saturating_add),
+            };
+            let null_bytes = if d.nulls().is_some() || vals.has_nulls() {
+                codes.len().div_ceil(8)
+            } else {
+                0
+            };
+            codes
+                .len()
+                .saturating_mul(4)
+                .saturating_add(mat_bytes)
+                .saturating_add(null_bytes)
+        }
+        Column::Rle(r) => {
+            let vals = r.values();
+            let run_ends = r.run_ends();
+            let total_rows = r.len();
+            let mat_bytes = match vals.data() {
+                FlatData::Null(_) => 0,
+                FlatData::Bool(_) => total_rows.div_ceil(8),
+                FlatData::I64(_)
+                | FlatData::TimestampNs { .. }
+                | FlatData::F64(_)
+                | FlatData::FixedBytes8(_) => total_rows.saturating_mul(8),
+                FlatData::Date(_) => total_rows.saturating_mul(4),
+                FlatData::Decimal128 { .. } | FlatData::Interval(_) | FlatData::FixedBytes16(_) => {
+                    total_rows.saturating_mul(16)
+                }
+                _ => {
+                    let mut prev = 0usize;
+                    let mut sum = 0usize;
+                    for (run_idx, &end) in run_ends.iter().enumerate() {
+                        let end_usize = end as usize;
+                        let run_len = end_usize.saturating_sub(prev);
+                        prev = end_usize;
+                        sum = sum.saturating_add(
+                            estimate_flat_slice_bytes(vals, run_idx, 1).saturating_mul(run_len),
+                        );
+                    }
+                    sum
+                }
+            };
+            let null_bytes = if vals.has_nulls() {
+                total_rows.div_ceil(8)
+            } else {
+                0
+            };
+            run_ends
+                .len()
+                .saturating_mul(12)
+                .saturating_add(mat_bytes)
+                .saturating_add(null_bytes)
+        }
+        Column::Flat(f) => estimate_flat_column_bytes(f),
     }
 }
 
@@ -76,89 +291,11 @@ pub(super) fn estimate_column_slice_bytes(col: &Column, offset: usize, len: usiz
                 .saturating_mul(len)
                 .div_ceil(total)
         }
-        Column::Flat(f) => {
-            let null_bytes = if f.has_nulls() { len.div_ceil(8) } else { 0 };
-            let end = offset.saturating_add(len);
-            let data_bytes = match f.data() {
-                FlatData::Null(_) => 0,
-                FlatData::Bool(_) => len.div_ceil(8),
-                FlatData::I64(_)
-                | FlatData::TimestampNs { .. }
-                | FlatData::F64(_)
-                | FlatData::FixedBytes8(_) => len.saturating_mul(8),
-                FlatData::Date(_) => len.saturating_mul(4),
-                FlatData::Decimal128 { .. } | FlatData::Interval(_) | FlatData::FixedBytes16(_) => {
-                    len.saturating_mul(16)
-                }
-                FlatData::Utf8(u) => {
-                    let offs = u.offsets();
-                    let s = offs.get(offset).copied().unwrap_or(0) as usize;
-                    let e = offs.get(end).copied().unwrap_or(0) as usize;
-                    e.saturating_sub(s).saturating_add(len.saturating_mul(4))
-                }
-                FlatData::Binary(b) => {
-                    let offs = b.offsets();
-                    let s = offs.get(offset).copied().unwrap_or(0) as usize;
-                    let e = offs.get(end).copied().unwrap_or(0) as usize;
-                    e.saturating_sub(s).saturating_add(len.saturating_mul(4))
-                }
-                FlatData::List {
-                    offsets, values, ..
-                } => {
-                    let s = offsets.get(offset).copied().unwrap_or(0) as usize;
-                    let e = offsets.get(end).copied().unwrap_or(0) as usize;
-                    let child_len = e.saturating_sub(s);
-                    len.saturating_mul(4)
-                        .saturating_add(estimate_column_slice_bytes(values, s, child_len))
-                }
-                FlatData::MapUtf8(m) => {
-                    let offs = m.offsets();
-                    let es = offs.get(offset).copied().unwrap_or(0) as usize;
-                    let ee = offs.get(end).copied().unwrap_or(0) as usize;
-                    let k_offs = m.keys().offsets();
-                    let v_offs = m.values().offsets();
-                    let ks = k_offs.get(es).copied().unwrap_or(0) as usize;
-                    let ke = k_offs.get(ee).copied().unwrap_or(0) as usize;
-                    let vs = v_offs.get(es).copied().unwrap_or(0) as usize;
-                    let ve = v_offs.get(ee).copied().unwrap_or(0) as usize;
-                    len.saturating_mul(4)
-                        .saturating_add(ke.saturating_sub(ks))
-                        .saturating_add(ve.saturating_sub(vs))
-                        .saturating_add(ee.saturating_sub(es).saturating_mul(8))
-                }
-                FlatData::Events(e) => {
-                    let offs = e.offsets();
-                    let es = offs.get(offset).copied().unwrap_or(0) as usize;
-                    let ee = offs.get(end).copied().unwrap_or(0) as usize;
-                    let n_offs = e.names().offsets();
-                    let a_offs = e.attributes().offsets();
-                    let ns = n_offs.get(es).copied().unwrap_or(0) as usize;
-                    let ne = n_offs.get(ee).copied().unwrap_or(0) as usize;
-                    let as_ = a_offs.get(es).copied().unwrap_or(0) as usize;
-                    let ae = a_offs.get(ee).copied().unwrap_or(0) as usize;
-                    len.saturating_mul(4)
-                        .saturating_add(ee.saturating_sub(es).saturating_mul(8))
-                        .saturating_add(ne.saturating_sub(ns))
-                        .saturating_add(ae.saturating_sub(as_))
-                }
-                FlatData::Links(l) => {
-                    let offs = l.offsets();
-                    let es = offs.get(offset).copied().unwrap_or(0) as usize;
-                    let ee = offs.get(end).copied().unwrap_or(0) as usize;
-                    let a_offs = l.attributes().offsets();
-                    let as_ = a_offs.get(es).copied().unwrap_or(0) as usize;
-                    let ae = a_offs.get(ee).copied().unwrap_or(0) as usize;
-                    len.saturating_mul(4)
-                        .saturating_add(ee.saturating_sub(es).saturating_mul(24))
-                        .saturating_add(ae.saturating_sub(as_))
-                }
-            };
-            data_bytes.saturating_add(null_bytes)
-        }
+        Column::Flat(f) => estimate_flat_slice_bytes(f, offset, len),
     }
 }
 
-pub(super) fn concat_rg_column(
+pub(crate) fn concat_rg_column(
     dt: &DataType,
     pieces: &mut Vec<Column>,
     total_rows: usize,
@@ -168,10 +305,22 @@ pub(super) fn concat_rg_column(
     {
         return Ok(only);
     }
+    let refs: Vec<&Column> = pieces.iter().collect();
+    concat_column_refs(dt, &refs, total_rows)
+}
+
+pub(crate) fn concat_column_refs(
+    dt: &DataType,
+    pieces: &[&Column],
+    total_rows: usize,
+) -> Result<Column, StatamError> {
+    if pieces.len() == 1 {
+        return Ok(pieces[0].clone());
+    }
     // Preserve Column::Const if every piece is an identical Const.
     if let Some(Column::Const {
         value: first_val, ..
-    }) = pieces.first()
+    }) = pieces.first().copied()
         && pieces
             .iter()
             .all(|p| matches!(p, Column::Const { value, .. } if value.semantic_eq(first_val)))
@@ -180,7 +329,7 @@ pub(super) fn concat_rg_column(
     }
 
     let mut flats = Vec::with_capacity(pieces.len());
-    for p in pieces {
+    for &p in pieces {
         flats.push(as_flat_cow(p)?);
     }
     let flat_refs: Vec<&FlatColumn> = flats.iter().map(Cow::as_ref).collect();

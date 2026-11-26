@@ -8,14 +8,16 @@ use cetra_column::{
 
 use crate::codec::alp::{decode_alp_body, encode_alp_body};
 use crate::codec::fsst::{
-    decode_fsst_binary, decode_fsst_binary_selected, decode_fsst_binary_take, decode_fsst_utf8,
-    decode_fsst_utf8_selected, decode_fsst_utf8_take, encode_fsst_body,
+    decode_fsst_binary, decode_fsst_binary_selected_with_flag, decode_fsst_binary_subchunked,
+    decode_fsst_binary_take, decode_fsst_utf8, decode_fsst_utf8_selected_with_flag,
+    decode_fsst_utf8_subchunked, decode_fsst_utf8_take, encode_fsst_body,
+    encode_fsst_body_adaptive,
 };
 use crate::codec::zonemap::{ZoneMapSummary, compute_zone_map};
 use crate::codec::{EncodedMiniBlock, WriteProfile, preferred_block_codec};
 use crate::format::{
-    BLOCK_FLAG_ALL_NULL, BLOCK_FLAG_CONST_EMPTY_COLLECTION, BLOCK_FLAG_HAS_NULLS, BlockEntry,
-    Codec, Encoding,
+    BLOCK_FLAG_ALL_NULL, BLOCK_FLAG_CONST_EMPTY_COLLECTION, BLOCK_FLAG_FSST_SUBCHUNKED,
+    BLOCK_FLAG_HAS_NULLS, BlockEntry, Codec, Encoding,
 };
 use crate::simd::bitpack::{
     delta_bases_len, delta_decode_i64, delta_decode_i64_indices, delta_encode_i64, min_bits_u32,
@@ -624,24 +626,30 @@ pub(crate) fn encode_narrow_column_with_locality(
                 FlatData::Binary(b) => b.bytes().len(),
                 _ => 0,
             };
-            let (enc, inner_body) = if profile == WriteProfile::L1Compact
+            let (enc, inner_body, is_subchunked) = if profile == WriteProfile::L1Compact
                 && (256..=8 * 1024 * 1024).contains(&raw_varlen_bytes)
                 && !is_wide_row
             {
                 let slices = extract_varlen_slices(flat)?;
-                if let Some(fsst) = encode_fsst_body(&slices)? {
-                    (Encoding::Fsst, fsst)
+                if let Some((fsst, subchunked)) = encode_fsst_body_adaptive(&slices, profile)? {
+                    (Encoding::Fsst, fsst, subchunked)
                 } else {
-                    (Encoding::Plain, encode_plain_body(flat)?)
+                    (Encoding::Plain, encode_plain_body(flat)?, false)
                 }
             } else {
-                (Encoding::Plain, encode_plain_body(flat)?)
+                (Encoding::Plain, encode_plain_body(flat)?, false)
             };
             let raw = prepend_optional_nulls(flat.nulls(), inner_body);
-            let block_codec = preferred_block_codec(profile, raw.len(), true);
+            let mut block_flags = zm.block_flags;
+            let block_codec = if is_subchunked {
+                block_flags |= BLOCK_FLAG_FSST_SUBCHUNKED;
+                Codec::None
+            } else {
+                preferred_block_codec(profile, raw.len(), true)
+            };
             Ok(EncodedMiniBlock {
                 encoding: enc,
-                block_flags: zm.block_flags,
+                block_flags,
                 null_count: zm.null_count,
                 min_inline_len: zm.min_inline_len,
                 max_inline_len: zm.max_inline_len,
@@ -1307,13 +1315,28 @@ pub(crate) fn decode_narrow_column_selected(
         && !mask.all_ones()
     {
         let (nulls, body) = read_optional_nulls(raw_body, row_count, entry.block_flags)?;
+        let subchunked = (entry.block_flags & BLOCK_FLAG_FSST_SUBCHUNKED) != 0;
         let (data, out_nulls) = match dt {
             DataType::Utf8 => {
-                let (u, n) = decode_fsst_utf8_selected(body, row_count, mask, nulls.as_ref())?;
+                let (u, n) = decode_fsst_utf8_selected_with_flag(
+                    body,
+                    row_count,
+                    mask,
+                    nulls.as_ref(),
+                    subchunked,
+                    MAX_BLOCK_RAW_BYTES,
+                )?;
                 (FlatData::Utf8(u), n)
             }
             DataType::Binary => {
-                let (b, n) = decode_fsst_binary_selected(body, row_count, mask, nulls.as_ref())?;
+                let (b, n) = decode_fsst_binary_selected_with_flag(
+                    body,
+                    row_count,
+                    mask,
+                    nulls.as_ref(),
+                    subchunked,
+                    MAX_BLOCK_RAW_BYTES,
+                )?;
                 (FlatData::Binary(b), n)
             }
             _ => unreachable!(),
@@ -2023,15 +2046,18 @@ pub(crate) fn decode_narrow_column_take(
             FlatData::Binary(BinaryData::try_new(offsets, bytes)?)
         }
         (Encoding::Fsst, DataType::Utf8) => {
-            let (u, fsst_nulls) = decode_fsst_utf8_take(body, row_count, indices, nulls.as_ref())?;
+            let subchunked = (entry.block_flags & BLOCK_FLAG_FSST_SUBCHUNKED) != 0;
+            let (u, fsst_nulls) =
+                decode_fsst_utf8_take(body, row_count, indices, nulls.as_ref(), subchunked)?;
             return Ok(Some(Column::Flat(FlatColumn::try_new(
                 FlatData::Utf8(u),
                 fsst_nulls,
             )?)));
         }
         (Encoding::Fsst, DataType::Binary) => {
+            let subchunked = (entry.block_flags & BLOCK_FLAG_FSST_SUBCHUNKED) != 0;
             let (b, fsst_nulls) =
-                decode_fsst_binary_take(body, row_count, indices, nulls.as_ref())?;
+                decode_fsst_binary_take(body, row_count, indices, nulls.as_ref(), subchunked)?;
             return Ok(Some(Column::Flat(FlatColumn::try_new(
                 FlatData::Binary(b),
                 fsst_nulls,
@@ -2224,6 +2250,26 @@ pub(crate) fn decode_narrow_column(
     }
 
     let (nulls, body) = read_optional_nulls(raw_body, row_count, entry.block_flags)?;
+    if entry.encoding == Encoding::Fsst && (entry.block_flags & BLOCK_FLAG_FSST_SUBCHUNKED) != 0 {
+        let data = match dt {
+            DataType::Utf8 => FlatData::Utf8(decode_fsst_utf8_subchunked(
+                body,
+                row_count,
+                MAX_BLOCK_RAW_BYTES,
+            )?),
+            DataType::Binary => FlatData::Binary(decode_fsst_binary_subchunked(
+                body,
+                row_count,
+                MAX_BLOCK_RAW_BYTES,
+            )?),
+            _ => {
+                return Err(StatamError::Corrupt {
+                    reason: "incompatible encoding for DataType",
+                });
+            }
+        };
+        return Ok(Column::Flat(FlatColumn::try_new(data, nulls)?));
+    }
     let flat = decode_inner_flat(body, entry.encoding, row_count, dt, nulls)?;
     Ok(Column::Flat(flat))
 }

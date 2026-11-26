@@ -24,8 +24,9 @@ use crate::codec::numeric::{
 };
 use crate::codec::zonemap::{compute_zone_map, count_col_nulls};
 use crate::format::{
-    BLOCK_FLAG_ALL_NULL, BLOCK_FLAG_HAS_NULLS, BLOCK_FLAG_MIN_MAX_VALID, BlockEntry, Codec,
-    Encoding, MAX_NESTING_DEPTH, write_framed_block_with_min_savings,
+    BLOCK_FLAG_ALL_NULL, BLOCK_FLAG_FSST_SUBCHUNKED, BLOCK_FLAG_HAS_NULLS,
+    BLOCK_FLAG_MIN_MAX_VALID, BlockEntry, Codec, Encoding, KNOWN_BLOCK_FLAGS, MAX_NESTING_DEPTH,
+    write_framed_block_with_min_savings,
 };
 
 pub use alp::{ALP_MAX_EXP, decode_alp_body, encode_alp_body};
@@ -35,8 +36,9 @@ pub use dict::{
     encode_dict_codes_body as encode_dict_codes,
 };
 pub use fsst::{
-    FSST_ESCAPE, FSST_MAX_SYM_LEN, FSST_MAX_SYMBOLS, FsstBlockView, FsstTable, decode_fsst_binary,
-    decode_fsst_binary_selected, decode_fsst_utf8, decode_fsst_utf8_selected, encode_fsst_body,
+    FSST_ESCAPE, FSST_MAX_SYM_LEN, FSST_MAX_SYMBOLS, FSST_SUBCHUNK_ROWS, FsstBlockView, FsstTable,
+    decode_fsst_binary, decode_fsst_binary_selected, decode_fsst_utf8, decode_fsst_utf8_selected,
+    encode_fsst_body,
 };
 pub use nested::{
     ShreddedMapBlocks, ShreddedSubCol, decode_nested_column_selected,
@@ -400,6 +402,21 @@ pub(crate) fn encode_dict_codes_precomputed(
     })
 }
 
+#[inline]
+fn validate_block_entry_flags(entry: &BlockEntry) -> Result<(), StatamError> {
+    if (entry.block_flags & !KNOWN_BLOCK_FLAGS) != 0 {
+        return Err(StatamError::Corrupt {
+            reason: "unknown block directory flags",
+        });
+    }
+    if (entry.block_flags & BLOCK_FLAG_FSST_SUBCHUNKED) != 0 && entry.encoding != Encoding::Fsst {
+        return Err(StatamError::Corrupt {
+            reason: "BLOCK_FLAG_FSST_SUBCHUNKED set on non-Fsst encoding",
+        });
+    }
+    Ok(())
+}
+
 /// Decodes one mini-block from its decompressed `raw_body` and [`BlockEntry`].
 ///
 /// For `Dict` blocks, emits `Column::Dict` directly when `dict.memory_bytes() <= 256 KiB`,
@@ -410,6 +427,7 @@ pub fn decode_mini_block(
     dt: &DataType,
     file_dict: Option<&FileDict>,
 ) -> Result<Column, StatamError> {
+    validate_block_entry_flags(entry)?;
     dt.validate(MAX_NESTING_DEPTH)?;
 
     if entry.encoding == Encoding::ConstNull || entry.encoding == Encoding::Const {
@@ -463,6 +481,7 @@ pub fn decode_mini_block_selected(
     file_dict: Option<&FileDict>,
     mask: &Bitmap,
 ) -> Result<Column, StatamError> {
+    validate_block_entry_flags(entry)?;
     let row_count = entry.row_count as usize;
     if mask.len() != row_count {
         return Err(StatamError::Corrupt {
@@ -532,6 +551,7 @@ pub(crate) fn decode_mini_block_take(
     file_dict: Option<&FileDict>,
     indices: &[usize],
 ) -> Result<Column, StatamError> {
+    validate_block_entry_flags(entry)?;
     dt.validate(MAX_NESTING_DEPTH)?;
     let row_count = entry.row_count as usize;
     if indices
@@ -4005,5 +4025,227 @@ mod tests {
         let dup_indices = vec![0usize; 300];
         let err = decode_mini_block_take(&raw_body, &entry, &DataType::Utf8, None, &dup_indices);
         assert!(matches!(err, Err(StatamError::BoundsExceeded { .. })));
+    }
+
+    #[test]
+    fn subchunked_fsst_nested_and_shredded_subcol_roundtrip_and_flag_validation() {
+        let n = 1_200usize;
+        let strings: Vec<String> = (0..n)
+            .map(|i| {
+                format!(
+                    "https://observability.cetra.sh/api/v1/spans/trace_{i:06}/events/node_{:03}/req_{:08x}/meta_{:06x}",
+                    i % 89,
+                    (i as u32).wrapping_mul(2654435761),
+                    (i as u32).wrapping_mul(2246822519) & 0x00FF_FFFF
+                )
+            })
+            .collect();
+        let str_refs: Vec<&str> = strings.iter().map(String::as_str).collect();
+        let nulls = Bitmap::from_bools(&(0..n).map(|i| i % 23 != 0).collect::<Vec<_>>());
+
+        // 1. Top-level narrow Utf8: sets BLOCK_FLAG_FSST_SUBCHUNKED and outer Codec::None.
+        let utf8_col = Column::Flat(
+            FlatColumn::try_new(
+                FlatData::Utf8(Utf8Data::try_from_slices(str_refs.clone()).unwrap()),
+                Some(nulls.clone()),
+            )
+            .unwrap(),
+        );
+        let (enc_u, entry_u, dec_u) =
+            roundtrip_via_frame(&utf8_col, &DataType::Utf8, WriteProfile::L1Compact, None);
+        assert_eq!(enc_u.encoding, Encoding::Fsst);
+        assert_ne!(enc_u.block_flags & BLOCK_FLAG_FSST_SUBCHUNKED, 0);
+        assert_eq!(entry_u.codec, Codec::None);
+        assert_eq!(entry_u.raw_len, entry_u.stored_len);
+        assert!(dec_u.semantic_eq(&utf8_col));
+
+        // 2. List<Utf8> and List<List<Utf8>>: outer preferred_codec == Codec::None, sparse & take parity.
+        let list_offsets: Vec<u32> = (0..=n as u32).collect();
+        let list_col = Column::Flat(
+            FlatColumn::try_new(
+                FlatData::List {
+                    item_type: DataType::Utf8,
+                    offsets: list_offsets.clone(),
+                    values: Box::new(utf8_col.clone()),
+                },
+                None,
+            )
+            .unwrap(),
+        );
+        let list_dt = DataType::List(Box::new(DataType::Utf8));
+        let (enc_l, entry_l, dec_l) =
+            roundtrip_via_frame(&list_col, &list_dt, WriteProfile::L1Compact, None);
+        assert_eq!(enc_l.encoding, Encoding::ListEncoded);
+        assert_eq!(enc_l.block_flags & BLOCK_FLAG_FSST_SUBCHUNKED, 0);
+        assert_eq!(entry_l.codec, Codec::None);
+        assert_eq!(entry_l.raw_len, entry_l.stored_len);
+        assert!(dec_l.semantic_eq(&list_col));
+
+        let mut sparse_mask = Bitmap::new_zeroed(n);
+        for r in [0usize, 23, 255, 256, 512, 1029] {
+            let _ = sparse_mask.set(r, true);
+        }
+        let sel_l =
+            decode_mini_block_selected(&enc_l.raw_body, &entry_l, &list_dt, None, &sparse_mask)
+                .unwrap();
+        let sel_l_flat = sel_l.materialize(None).unwrap();
+        let orig_l_flat = list_col.materialize(None).unwrap();
+        for r in [0usize, 23, 255, 256, 512, 1029] {
+            assert_eq!(
+                sel_l_flat.get_scalar(r).unwrap(),
+                orig_l_flat.get_scalar(r).unwrap(),
+                "List<Utf8> sparse mismatch at row {r}"
+            );
+        }
+
+        // Nested List<List<Utf8>> also propagates outer Codec::None.
+        let list2_col = Column::Flat(
+            FlatColumn::try_new(
+                FlatData::List {
+                    item_type: list_dt.clone(),
+                    offsets: list_offsets,
+                    values: Box::new(list_col),
+                },
+                None,
+            )
+            .unwrap(),
+        );
+        let list2_dt = DataType::List(Box::new(list_dt.clone()));
+        let (enc_l2, entry_l2, dec_l2) =
+            roundtrip_via_frame(&list2_col, &list2_dt, WriteProfile::L1Compact, None);
+        assert_eq!(enc_l2.encoding, Encoding::ListEncoded);
+        assert_eq!(entry_l2.codec, Codec::None);
+        assert!(dec_l2.semantic_eq(&list2_col));
+
+        // 3. ShreddedSubCol with sub-chunked FSST values: outer codec == Codec::None + selected parity.
+        let sub = ShreddedSubCol {
+            in_map: Bitmap::new_ones(n),
+            value_null: nulls,
+            values: utf8_col,
+        };
+        let (sub_codec, sub_raw) =
+            nested::encode_shredded_subcol_with_codec(&sub, WriteProfile::L1Compact).unwrap();
+        assert_eq!(sub_codec, Codec::None);
+        let dec_sub = decode_shredded_subcol(&sub_raw, n).unwrap();
+        assert!(dec_sub.values.semantic_eq(&sub.values));
+        let dec_sub_sel = decode_shredded_subcol_selected(&sub_raw, n, &sparse_mask).unwrap();
+        let sel_sub_flat = dec_sub_sel.values.materialize(None).unwrap();
+        let orig_sub_flat = sub.values.materialize(None).unwrap();
+        for r in [0usize, 23, 255, 256, 512, 1029] {
+            assert_eq!(
+                sel_sub_flat.get_scalar(r).unwrap(),
+                orig_sub_flat.get_scalar(r).unwrap(),
+                "ShreddedSubCol sparse mismatch at row {r}"
+            );
+        }
+
+        // 4. Reject BLOCK_FLAG_FSST_SUBCHUNKED on non-Fsst encodings everywhere.
+        let bad_entry = BlockEntry {
+            first_row: 0,
+            row_count: 4,
+            null_count: 0,
+            offset: 0,
+            stored_len: 0,
+            raw_len: 0,
+            encoding: Encoding::Plain,
+            codec: Codec::None,
+            block_flags: BLOCK_FLAG_FSST_SUBCHUNKED,
+            min_inline_len: 0,
+            max_inline_len: 0,
+            reserved: [0; 3],
+            min_inline: [0; 16],
+            max_inline: [0; 16],
+        };
+        let encoded_be = bad_entry.encode();
+        assert!(matches!(
+            BlockEntry::decode(&encoded_be),
+            Err(StatamError::Corrupt {
+                reason: "BLOCK_FLAG_FSST_SUBCHUNKED set on non-Fsst encoding",
+            })
+        ));
+        assert!(matches!(
+            decode_mini_block(&[], &bad_entry, &DataType::Utf8, None),
+            Err(StatamError::Corrupt {
+                reason: "BLOCK_FLAG_FSST_SUBCHUNKED set on non-Fsst encoding",
+            })
+        ));
+        assert!(matches!(
+            decode_mini_block_selected(
+                &[],
+                &bad_entry,
+                &DataType::Utf8,
+                None,
+                &Bitmap::new_ones(4)
+            ),
+            Err(StatamError::Corrupt {
+                reason: "BLOCK_FLAG_FSST_SUBCHUNKED set on non-Fsst encoding",
+            })
+        ));
+        assert!(matches!(
+            decode_mini_block_take(&[], &bad_entry, &DataType::Utf8, None, &[0, 1]),
+            Err(StatamError::Corrupt {
+                reason: "BLOCK_FLAG_FSST_SUBCHUNKED set on non-Fsst encoding",
+            })
+        ));
+
+        // ListEncoded child header with BLOCK_FLAG_FSST_SUBCHUNKED on Plain child -> Corrupt.
+        let mut bad_list = vec![1u8, 0x01]; // count_bw=1, counts=[1, 0]
+        bad_list.push(Encoding::Plain as u8);
+        bad_list.push(BLOCK_FLAG_FSST_SUBCHUNKED);
+        bad_list.extend_from_slice(&1u32.to_le_bytes()); // child_len=1
+        bad_list.extend_from_slice(&0u32.to_le_bytes()); // child_null_count=0
+        bad_list.push(0); // min_inline_len
+        bad_list.extend_from_slice(&[0u8; 16]);
+        bad_list.push(0); // has_dict=0
+        bad_list.extend_from_slice(&0u32.to_le_bytes()); // body_len=0
+        let list_entry = BlockEntry {
+            first_row: 0,
+            row_count: 2,
+            null_count: 0,
+            offset: 0,
+            stored_len: bad_list.len() as u32,
+            raw_len: bad_list.len() as u32,
+            encoding: Encoding::ListEncoded,
+            codec: Codec::None,
+            block_flags: 0,
+            min_inline_len: 0,
+            max_inline_len: 0,
+            reserved: [0; 3],
+            min_inline: [0; 16],
+            max_inline: [0; 16],
+        };
+        assert!(matches!(
+            decode_mini_block(&bad_list, &list_entry, &list_dt, None),
+            Err(StatamError::Corrupt {
+                reason: "BLOCK_FLAG_FSST_SUBCHUNKED set on non-Fsst ListEncoded child",
+            })
+        ));
+
+        // ShreddedSubCol header with BLOCK_FLAG_FSST_SUBCHUNKED on Plain or unknown flag bit -> Corrupt.
+        let build_bad_subcol = |enc: u8, flags: u8| -> Vec<u8> {
+            let mut buf = vec![1u8, 1u8]; // in_map=all_ones, value_null=all_ones
+            buf.push(enc);
+            buf.push(flags);
+            buf.push(0); // min_inline_len
+            buf.extend_from_slice(&[0u8; 16]);
+            buf.push(0); // has_dict=0
+            buf.extend_from_slice(&0u32.to_le_bytes()); // body_len=0
+            buf
+        };
+        assert!(matches!(
+            decode_shredded_subcol(
+                &build_bad_subcol(Encoding::Plain as u8, BLOCK_FLAG_FSST_SUBCHUNKED),
+                2
+            ),
+            Err(StatamError::Corrupt {
+                reason: "BLOCK_FLAG_FSST_SUBCHUNKED set on non-Fsst shredded subcol",
+            })
+        ));
+        assert!(matches!(
+            decode_shredded_subcol(&build_bad_subcol(Encoding::Fsst as u8, 0x40), 2),
+            Err(StatamError::Corrupt {
+                reason: "unknown shredded subcol flags",
+            })
+        ));
     }
 }

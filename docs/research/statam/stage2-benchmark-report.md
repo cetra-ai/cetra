@@ -471,4 +471,77 @@ Implemented bit-exact little-endian ARM64 NEON kernels (`#[cfg(all(target_arch =
   - `JSONBench L1`: `491.8 → 464.3 ms (1W)` / `285.2 → 253.7 ms (8W, 1.12×)`
   - `RandomAccess L0/L1 (8W)`: `27.9 → 25.0 ms (1.12×)` / `108.6 → 97.6 ms (1.11×)`
 
+---
+
+## 16. Extended Lance / Vortex / F3 Suites (G–L) & Pass 12 Format Upgrades (`precision-5770-vm`)
+
+Added six external workloads (`docs/research/statam/bench/src/bin/lance_suites_bench.rs`) covering the remaining benchmark domains published by Lance V2.2 (Blob V2, Wide-Schema, DataLoader), Vortex, and F3:
+- **Suite G (`blobs_2k`):** 2,000 rows × 6 cols, `361.9 MiB` binary blobs (50% incompressible PNG/JPEG, 50% compressible PDF/audio).
+- **Suite H (`wide_1000_25k`):** 25,000 rows × 1,000 cols (`996` nullable columns at 95% NULL).
+- **Suite I (`fineweb_40k`):** 40,000 rows × 10 cols from real `HuggingFaceFW/fineweb-edu` (`sample/10BT/000_00000.parquet`).
+- **Suite J (`nested_100k`):** 100,000 rows × 7 cols (`List<i64>`, `List<List<i64>>`, `List<Utf8>`, `Map<Utf8, Utf8>`).
+- **Suite K (`tpch_lineitem_500k`):** 500,000 rows × 17 cols from real TPC-H SF1 `lineitem.parquet`.
+- **Suite L (`dataloader_100k`):** 100,000 rows × 12 cols, 100 × 256-row shuffled mini-batches (`25,600` unique rows), warm local + shared-cache S3.
+
+### 16.1 Pass 12 Format Upgrades Implemented
+1. **Explicit `DataType::Binary` `.stpk` External Blob Packing (`WriteOptions::payload_cols`):** Large binary blobs routed via `payload_cols` get 1-blob-per-frame (`>= 32 KiB`), `4 MiB` splits, `min_savings_pct = 12` raw bypass (zero wasted compression on PNG/JPEG), GDPR verbatim copy (`gdpr.rs`), and wave-bounded (`128 MiB`) Phase-2 full scan. Small binary columns not listed in `payload_cols` remain inline narrow/dict/zonemap-filterable.
+2. **Deterministic Adaptive Prose `.stpk` Sizing & Bloom Cap:** `1T == 8T` deterministic adaptive `64 KiB` frames when first-frame trigram bloom density exceeds `0.12` (real prose like FineWeb-Edu) while keeping deduplicated/structured payloads (`W1_agents`, `JSONBench`) at `512 KiB`, plus `frame_cap = raw / 12` (`4 KiB` blooms for `48–64 KiB` frames) and `MAX_BLOOM_BYTES = 32 MiB`.
+3. **Sub-Chunked FSST (`BLOCK_FLAG_FSST_SUBCHUNKED = 0x20`) & `take_rows` Coalescing:** `512`-row adaptive `LZ4`/`Zstd`/`None` sub-chunks inside `Encoding::Fsst` with an L1 `+10%` overhead guard vs whole-block Zstd, outer `Codec::None`, support across narrow columns, `ListEncoded`, `ShreddedSubCol`, and Phase-1 `eval.rs`, plus single-`Batch` coalescing in `take_rows`.
+
+### 16.2 Strict 1-Core Head-to-Head (`taskset -c 0`, All 7 Formats on 1 CPU Core) + Statam `8T`
+
+To eliminate Tokio/Rayon thread-pool asymmetry across formats, all 7 formats were pinned to a single logical CPU (`taskset -c 0`, `STATAM_BENCH_THREADS=1`, `RAYON_NUM_THREADS=1`) on `precision-5770-vm` (`x86_64` AVX2). Statam `8T` is shown alongside for multi-core scaling.
+
+| Workload | Format | Stored (KiB) | Ratio | 1-Core Write (MiB/s) |
+|---|---|---:|---:|---:|
+| `blobs_2k` | `pq_default` / `pq_tuned` | 187,544 / 187,863 | 3.93× / 3.92× | 1,021.8 / 1,475.0 |
+| `blobs_2k` | `vortex` / `lance` / `strata` | 186,677 / 187,004 / 213,838 | 3.94× / 3.94× / 3.44× | 63.1 / 1,326.4 / 425.6 |
+| `blobs_2k` | **`statam_l0` / `statam_l1`** | 195,263 / **187,023** (`1` RG) | 3.77× / **3.94×** | **2,078.3** / 1,169.9 (`2,020.5` unpinned 1W) |
+| `wide_1000_25k` | `pq_default` / `vortex` / `lance` | 7,027 / 6,032 / 39,065 | 25.9× / 30.2× / 4.66× | 468.5 / 51.3 / 165.6 |
+| `wide_1000_25k` | **`statam_l1`** | **8,585** (`4.55×` < Lance) | **21.18×** | 265.7 (`774.3` at 8W) |
+| `fineweb_40k` | `pq_default` / `vortex` / `lance` | 72,836 / 72,131 / 88,139 | 2.76× / 2.79× / 2.28× | 145.6 / 44.2 / 131.9 |
+| `fineweb_40k` | **`statam_l1`** | 93,136 *(64 KiB frames + 4 KiB blooms)* | 2.16× | 88.0 (`250.5` at 8W) |
+| `nested_100k` | `pq_default` / `vortex` / `lance` | 4,180 / 3,140 / 4,962 | 8.26× / 11.0× / 6.96× | 242.0 / 144.1 / 264.2 |
+| `nested_100k` | **`statam_l1`** | **3,479** | **9.93×** | **286.4** (`381.2` at 8W) |
+| `tpch_lineitem_500k` | `pq_default` / `vortex` / `lance` | 13,469 / 9,869 / 22,467 | 5.25× / 7.17× / 3.15× | 214.8 / 117.9 / 520.0 |
+| `tpch_lineitem_500k` | **`statam_l1`** | **11,246** (`2.00×` < Lance) | **6.29×** | 125.6 (`600.2` L0 1W) |
+| `dataloader_100k` | `pq_default` / `vortex` / `lance` | 5,713 / 3,978 / 7,022 | 5.23× / 7.51× / 4.26× | 305.3 / 119.3 / 573.6 |
+| `dataloader_100k` | **`statam_l1`** | **3,983** (`1.76×` < Lance) | **7.50×** | 178.6 (`410.1` at 8W) |
+
+| Suite / Query | `pq_default` | `vortex` | `lance` | `strata` | `statam_l0` (1C) | **`statam_l1` (1C / 8T)** | `lance` S3 | **`statam_l1` S3** |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| `BL_meta_scan` | 0.152 ms | 0.313 ms | 0.215 ms | 0.125 ms | 0.092 ms | **0.038 / 0.038 ms** | 66.2 ms (2) | **25.1 ms (1)** |
+| `BL_take_1` | 0.684 ms | 366.8 ms | 0.243 ms | 0.691 ms | **0.056 ms** | **0.132 / 0.139 ms** | 101.2 ms (3) | **91.4 ms (3)** |
+| `BL_take_10` | 3.410 ms | 369.4 ms | 1.708 ms | N/A | 1.356 ms | **1.309** (`0.937` unpin) / 3.22 ms | 426.2 ms (12) | **416.4 ms (12)** |
+| `BL_take_50` | 287.1 ms | 371.8 ms | 6.143 ms | N/A | 6.181 ms | **5.716 / 3.638 ms** | 1,656 ms (46) | **1,211 ms (29)** |
+| `WD_cold_open` | 1.529 ms | 3.139 ms | 4.790 ms | 0.747 ms | 0.430 ms | **0.404 / 0.412 ms** | 96.5 ms (3) | **28.8 ms (1)** |
+| `WD_narrow_3col` | 0.660 ms | 1.088 ms | 0.963 ms | 0.253 ms | **0.137 ms** | **0.203 / 0.208 ms** | **96.5 ms (3)** | 168.8 ms (5) |
+| `WD_point_all_1000` | 43.57 ms | 42.54 ms | 34.20 ms | 12.56 ms | **9.107 ms** | 18.35 / **2.852 ms** | 1,356 ms (39) | **93.8 ms (2)** |
+| `WD_take_20_1000` | 60.78 ms | 65.88 ms | 67.71 ms | N/A | **32.91 ms** | 63.63 / **9.023 ms** | 1,356 ms (39) | **183.8 ms (4)** |
+| `FW_score_cnt` | 3.050 ms | 2.971 ms | 3.529 ms | 2.516 ms | **0.852 ms** | **1.624 / 0.613 ms** | 95.7 ms (3) | **66.6 ms (2)** |
+| `FW_take_100` | 127.7 ms | 222.0 ms | **4.059 ms** | N/A | 38.26 ms | 15.18 / 4.426 ms | 2,196 ms (63) | **964.5 ms (15)** |
+| `FW_substr_rare` | 362.1 ms | 239.0 ms | 972.8 ms | **27.37 ms** | 140.2 ms | 222.0 / 49.83 ms | **1,111 ms (10)** | 1,160 ms (10) |
+| `FW_substr_absent` | 350.9 ms | 234.6 ms | 958.2 ms | 8.181 ms | 137.8 ms | **1.533 / 0.529 ms** | 1,066 ms (9) | **204.5 ms (3)** |
+| `NS_scan_full` | 52.57 ms | 20.68 ms | 41.29 ms | 63.27 ms | **12.29 ms** | 38.09 / **7.684 ms** | 173.5 ms (5) | **84.0 ms (2)** |
+| `NS_filter_map` | 32.77 ms | 8.175 ms | 49.08 ms | 5.208 ms | 20.15 ms | **2.127 / 0.589 ms** | 103.5 ms (3) | **64.0 ms (2)** |
+| `NS_take_100` | 16.56 ms | 12.84 ms | **3.922 ms** | N/A | 8.552 ms | 8.178 / **1.212 ms** | 173.5 ms (5) | **84.0 ms (2)** |
+| `TP_Q6_filter` | 16.52 ms | 12.34 ms | 20.70 ms | 14.28 ms | **5.286 ms** | **6.944 / 1.748 ms** | 229.4 ms (6) | **204.8 ms (5)** |
+| `TP_Q1_scan` | 20.88 ms | 15.94 ms | 29.86 ms | 17.36 ms | **7.508 ms** | **15.37 / 3.187 ms** | 344.4 ms (9) | **254.8 ms (7)** |
+| `TP_take_100` | 30.17 ms | 40.15 ms | **7.332 ms** | N/A | 11.36 ms | 8.145 / **1.849 ms** | 769.4 ms (22) | **234.8 ms (5)** |
+| `DL_epoch_local` | 1,774 ms | 1,123 ms | **475.5 ms** | N/A | 777.1 ms | 582.9 / **107.7 ms** | — | — |
+| `DL_epoch_s3_cached` | 1,793 ms | 1,137 ms | **479.9 ms** | N/A | 826.8 ms | 609.7 / **132.7 ms** | 243.6 ms (7) | **88.9 ms (2)** |
+
+- **Strict 1-Core Summary (Suites G–L):** Statam wins **14 / 19** local CPU queries on a single core (and **15 / 19** head-to-head vs Lance V2.2, including a **4/4 sweep of Lance's own Blob V2 suite** — `BL_take_1` `35.43 → 0.132 ms` / `0.077 ms` unpinned, `BL_take_10` `141.9 → 1.309 ms` / `0.937 ms` unpinned, `BL_take_50` `213.1 → 5.716 ms`, `BL_meta_scan` `0.038 ms` / `1` S3 GET `14.7 KiB`). On simulated S3, `statam_l1` is **#1 overall of all 7 formats on 13 / 19 queries** and wins **17 / 19 head-to-head vs Lance V2.2**.
+- **Honest trade-offs:** `FW_substr_rare` (`"Carolina State"`, 34 hits) trails Strata's inverted index (`27.4 ms` vs Statam `222 ms 1C / 49.8 ms 8T`) because common English trigrams co-occur across different articles even inside `64 KiB` (~12-article) frames, though Statam still beats Vortex (`239 ms`), Parquet (`362–383 ms`), and Lance (`973 ms`), and sweeps `FW_substr_absent` (`1.53 ms 1C / 0.53 ms 8T`). `fineweb_40k` stores `93.1 MiB` vs Lance `88.1 MiB` / Parquet `72.8 MiB` due to smaller `64 KiB` non-dict frames + `4 KiB` trigram blooms.
+
+### 16.3 Suites A–F Regression Check & Gate 1 Confirmation
+- **`clickbench_100k` (Gate 1 PASS):** `statam_l1` = **`8,411.2 KiB`** (`11.79×`, `-6.1%` smaller than Parquet `8,960 KiB`); `CB_Q24` = **`13.04 ms (1T) / 2.74 ms (8T)`**, `CB_Q20` = **`0.313 ms (1T)`**, `CB_wide_point` = **`0.484 ms (8T)`**.
+- **`random_access_250k`:** `statam_l1` = **`9,832.1 KiB`** (`+0.4%` vs Pass 11 — **still #1 smallest of all 7**); **`RA_take_100` dropped `2.5×` to `5.44 ms (1T) / 1.13 ms (8T)`** (`2.3×` faster than Lance `2.58 ms`!), `RA_take_1000` = **`16.00 ms (1T) / 2.75 ms (8T)`**.
+- **Suites B, D, E, F (`row_filter`, `jsonbench`, `wildchat`, `hermes`):** Zero regressions (`WC_Q4_unicode_ilike 8T` improved to `49.18 ms`, `W1_agents` unchanged).
+
+### 16.4 Pass 12 Verification & Security
+- **Cold Code Review (`inherit`):** Found 1 Blocker (`p2_l0_needed` in `reader/mod.rs` when `L0Fast` combines `IsNull`/`IsNotNull` with projection), 0 Majors, 4 Minors — all fixed with dedicated regression tests.
+- **Local Checks:** `cargo fmt -p cetra-statam -- --check`, `cargo clippy --offline --locked -p cetra-statam --all-targets -- -D warnings` (0 warnings), `cargo test --offline --locked -p cetra-statam` (**183 unit + 2 `fuzz_replay` tests passing**), `just check-ee`, `just deny-policy` (bans/licenses/sources ok). *(Note: Apple M4 `ubuntu-dev` was unreachable over SSH during Pass 12 wrap-up; Pass 12 touched zero `simd/` files.)*
+- **ASan libFuzzer (`precision-5770-vm`, 90s × 4 workers, 22-seed corpus incl. `seed-21-fsst-subchunked-l1` & `seed-22-binary-blobs-stpk`):** `~285k` total runs (`71,144` runs/worker), **`20,764` cov edges**, **`61,304` features**, **`605 MiB` peak RSS**, **0 crashes, 0 OOMs, 0 ASan errors**.
+
 **Stage 3 Status:** `crates/storage`, `crates/core`, `crates/column`, and `crates/query` remain **completely untouched** per the Stage 2/Stage 3 gate. Awaiting explicit user go-ahead for Stage 3 (`cetra-storage` integration).

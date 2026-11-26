@@ -18,7 +18,8 @@ use crate::codec::dict::{
     sum_varlen_take_bytes,
 };
 use crate::codec::fsst::{
-    FsstBlockView, decode_fsst_utf8, decode_fsst_utf8_selected, encode_fsst_body,
+    FsstBlockView, FsstSubchunkedView, decode_fsst_binary_subchunked, decode_fsst_utf8,
+    decode_fsst_utf8_selected_with_flag, decode_fsst_utf8_subchunked, encode_fsst_body,
 };
 use crate::codec::numeric::{
     decode_const_block, decode_inner_data, decode_plain_map_selected, decode_plain_varlen_selected,
@@ -28,7 +29,10 @@ use crate::codec::numeric::{
 };
 use crate::codec::zonemap::{ZoneMapSummary, compute_zone_map, count_col_nulls};
 use crate::codec::{EncodedMiniBlock, WriteProfile, preferred_block_codec};
-use crate::format::{BLOCK_FLAG_HAS_NULLS, BlockEntry, Codec, Encoding, MAX_SHREDDED_KEYS};
+use crate::format::{
+    BLOCK_FLAG_FSST_SUBCHUNKED, BLOCK_FLAG_HAS_NULLS, BlockEntry, Codec, Encoding,
+    KNOWN_BLOCK_FLAGS, MAX_SHREDDED_KEYS,
+};
 use crate::simd::bitpack::{min_bits_u32, pack_u32, packed_bytes_len, unpack_u32};
 use crate::{MAX_BLOCK_RAW_BYTES, MAX_DICT_BYTES, StatamError};
 
@@ -880,7 +884,11 @@ pub(crate) fn encode_shredded_subcol_with_codec(
     out.extend_from_slice(&(child_payload.body.len() as u32).to_le_bytes());
     out.extend_from_slice(&child_payload.body);
 
-    let codec = preferred_block_codec(profile, out.len(), true);
+    let codec = if child_payload.has_subchunked_fsst {
+        Codec::None
+    } else {
+        preferred_block_codec(profile, out.len(), true)
+    };
     Ok((codec, out))
 }
 
@@ -916,6 +924,16 @@ fn parse_shredded_subcol_header(
     }
     let enc = Encoding::from_u8(rest[0])?;
     let flags = rest[1];
+    if (flags & !KNOWN_BLOCK_FLAGS) != 0 {
+        return Err(StatamError::Corrupt {
+            reason: "unknown shredded subcol flags",
+        });
+    }
+    if (flags & BLOCK_FLAG_FSST_SUBCHUNKED) != 0 && enc != Encoding::Fsst {
+        return Err(StatamError::Corrupt {
+            reason: "BLOCK_FLAG_FSST_SUBCHUNKED set on non-Fsst shredded subcol",
+        });
+    }
     let min_inline_len = rest[2];
     if min_inline_len > 16 {
         return Err(StatamError::Corrupt {
@@ -1035,9 +1053,26 @@ pub fn decode_shredded_subcol_selected(
         }
         Column::Flat(FlatColumn::empty(&DataType::Utf8))
     } else if hdr.enc == Encoding::Fsst {
+        let mut budget = MAX_BLOCK_RAW_BYTES;
         let (nulls, after_nulls) = read_optional_nulls(hdr.body, row_count, hdr.flags)?;
-        let (u, out_nulls) =
-            decode_fsst_utf8_selected(after_nulls, row_count, mask, nulls.as_ref())?;
+        let base_bytes = row_count
+            .div_ceil(8)
+            .saturating_mul(2 + usize::from(nulls.is_some()))
+            .saturating_add(row_count.saturating_add(1).saturating_mul(4));
+        debit_budget(
+            &mut budget,
+            base_bytes,
+            "shredded subcol exceeds MAX_BLOCK_RAW_BYTES",
+        )?;
+        let subchunked = (hdr.flags & BLOCK_FLAG_FSST_SUBCHUNKED) != 0;
+        let (u, out_nulls) = decode_fsst_utf8_selected_with_flag(
+            after_nulls,
+            row_count,
+            mask,
+            nulls.as_ref(),
+            subchunked,
+            budget,
+        )?;
         Column::Flat(FlatColumn::try_new(FlatData::Utf8(u), out_nulls)?)
     } else if hdr.enc == Encoding::Plain {
         let (nulls, after_nulls) = read_optional_nulls(hdr.body, row_count, hdr.flags)?;
@@ -1737,6 +1772,17 @@ pub(crate) fn encode_nested_column(
     remaining_depth: usize,
     precomputed_zm: Option<&ZoneMapSummary>,
 ) -> Result<EncodedMiniBlock, StatamError> {
+    encode_nested_column_inner(col, dt, profile, remaining_depth, precomputed_zm)
+        .map(|(block, _)| block)
+}
+
+fn encode_nested_column_inner(
+    col: &Column,
+    dt: &DataType,
+    profile: WriteProfile,
+    remaining_depth: usize,
+    precomputed_zm: Option<&ZoneMapSummary>,
+) -> Result<(EncodedMiniBlock, bool), StatamError> {
     if col.is_empty() {
         let enc = match dt {
             DataType::List(_) => Encoding::ListEncoded,
@@ -1749,17 +1795,20 @@ pub(crate) fn encode_nested_column(
                 });
             }
         };
-        return Ok(EncodedMiniBlock {
-            encoding: enc,
-            block_flags: 0,
-            null_count: 0,
-            min_inline_len: 0,
-            max_inline_len: 0,
-            min_inline: [0u8; 16],
-            max_inline: [0u8; 16],
-            raw_body: Vec::new(),
-            preferred_codec: Codec::None,
-        });
+        return Ok((
+            EncodedMiniBlock {
+                encoding: enc,
+                block_flags: 0,
+                null_count: 0,
+                min_inline_len: 0,
+                max_inline_len: 0,
+                min_inline: [0u8; 16],
+                max_inline: [0u8; 16],
+                raw_body: Vec::new(),
+                preferred_codec: Codec::None,
+            },
+            false,
+        ));
     }
 
     let owned_zm;
@@ -1768,7 +1817,7 @@ pub(crate) fn encode_nested_column(
         None => {
             owned_zm = compute_zone_map(col);
             if let Some(inline) = try_encode_const_or_null(col, dt, &owned_zm) {
-                return Ok(inline);
+                return Ok((inline, false));
             }
             &owned_zm
         }
@@ -1836,18 +1885,26 @@ pub(crate) fn encode_nested_column(
             raw.extend_from_slice(&(child_payload.body.len() as u32).to_le_bytes());
             raw.extend_from_slice(&child_payload.body);
 
-            let preferred_codec = preferred_block_codec(profile, raw.len(), true);
-            Ok(EncodedMiniBlock {
-                encoding: Encoding::ListEncoded,
-                block_flags: zm.block_flags,
-                null_count: zm.null_count,
-                min_inline_len: 0,
-                max_inline_len: 0,
-                min_inline: [0u8; 16],
-                max_inline: [0u8; 16],
-                raw_body: raw,
-                preferred_codec,
-            })
+            let has_subchunked_fsst = child_payload.has_subchunked_fsst;
+            let preferred_codec = if has_subchunked_fsst {
+                Codec::None
+            } else {
+                preferred_block_codec(profile, raw.len(), true)
+            };
+            Ok((
+                EncodedMiniBlock {
+                    encoding: Encoding::ListEncoded,
+                    block_flags: zm.block_flags,
+                    null_count: zm.null_count,
+                    min_inline_len: 0,
+                    max_inline_len: 0,
+                    min_inline: [0u8; 16],
+                    max_inline: [0u8; 16],
+                    raw_body: raw,
+                    preferred_codec,
+                },
+                has_subchunked_fsst,
+            ))
         }
         DataType::MapUtf8 => {
             if profile == WriteProfile::L0Fast {
@@ -1862,19 +1919,25 @@ pub(crate) fn encode_nested_column(
                     encode_plain_body(flat)?
                 };
                 let preferred_codec = preferred_block_codec(profile, raw.len(), true);
-                Ok(EncodedMiniBlock {
-                    encoding: Encoding::Plain,
-                    block_flags: zm.block_flags,
-                    null_count: zm.null_count,
-                    min_inline_len: 0,
-                    max_inline_len: 0,
-                    min_inline: [0u8; 16],
-                    max_inline: [0u8; 16],
-                    raw_body: raw,
-                    preferred_codec,
-                })
+                Ok((
+                    EncodedMiniBlock {
+                        encoding: Encoding::Plain,
+                        block_flags: zm.block_flags,
+                        null_count: zm.null_count,
+                        min_inline_len: 0,
+                        max_inline_len: 0,
+                        min_inline: [0u8; 16],
+                        max_inline: [0u8; 16],
+                        raw_body: raw,
+                        preferred_codec,
+                    },
+                    false,
+                ))
             } else {
-                encode_shredded_residual_block_with_zm(flat, profile, Some(zm))
+                Ok((
+                    encode_shredded_residual_block_with_zm(flat, profile, Some(zm))?,
+                    false,
+                ))
             }
         }
         DataType::Events => {
@@ -1952,17 +2015,20 @@ pub(crate) fn encode_nested_column(
             }
 
             let preferred_codec = preferred_block_codec(profile, raw.len(), true);
-            Ok(EncodedMiniBlock {
-                encoding: Encoding::EventsStruct,
-                block_flags: zm.block_flags,
-                null_count: zm.null_count,
-                min_inline_len: 0,
-                max_inline_len: 0,
-                min_inline: [0u8; 16],
-                max_inline: [0u8; 16],
-                raw_body: raw,
-                preferred_codec,
-            })
+            Ok((
+                EncodedMiniBlock {
+                    encoding: Encoding::EventsStruct,
+                    block_flags: zm.block_flags,
+                    null_count: zm.null_count,
+                    min_inline_len: 0,
+                    max_inline_len: 0,
+                    min_inline: [0u8; 16],
+                    max_inline: [0u8; 16],
+                    raw_body: raw,
+                    preferred_codec,
+                },
+                false,
+            ))
         }
         DataType::Links => {
             let FlatData::Links(lk) = flat.data() else {
@@ -2004,17 +2070,20 @@ pub(crate) fn encode_nested_column(
             }
 
             let preferred_codec = preferred_block_codec(profile, raw.len(), true);
-            Ok(EncodedMiniBlock {
-                encoding: Encoding::LinksStruct,
-                block_flags: zm.block_flags,
-                null_count: zm.null_count,
-                min_inline_len: 0,
-                max_inline_len: 0,
-                min_inline: [0u8; 16],
-                max_inline: [0u8; 16],
-                raw_body: raw,
-                preferred_codec,
-            })
+            Ok((
+                EncodedMiniBlock {
+                    encoding: Encoding::LinksStruct,
+                    block_flags: zm.block_flags,
+                    null_count: zm.null_count,
+                    min_inline_len: 0,
+                    max_inline_len: 0,
+                    min_inline: [0u8; 16],
+                    max_inline: [0u8; 16],
+                    raw_body: raw,
+                    preferred_codec,
+                },
+                false,
+            ))
         }
         _ => Err(StatamError::SchemaMismatch {
             reason: "narrow DataType passed to encode_nested_column",
@@ -2094,15 +2163,57 @@ fn build_active_nested_offsets(
     (out_offsets, active_total as usize)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn decode_selected_utf8_or_binary(
     body: &[u8],
     enc: Encoding,
+    flags: u8,
     total_len: usize,
     offsets: &[u32],
     row_count: usize,
     mask: &Bitmap,
     nulls: Option<&Bitmap>,
+    budget: &mut usize,
 ) -> Result<SelectedVarlenResult, StatamError> {
+    if enc == Encoding::Fsst && (flags & BLOCK_FLAG_FSST_SUBCHUNKED) != 0 {
+        let active_count: usize = mask
+            .iter_ones()
+            .take_while(|&r| r < row_count)
+            .map(|r| (offsets[r + 1] - offsets[r]) as usize)
+            .sum();
+        let offs_bytes = active_count
+            .checked_add(1)
+            .and_then(|n| n.checked_mul(4))
+            .ok_or(StatamError::BoundsExceeded {
+                reason: "active varlen offsets overflow",
+            })?;
+        let nulls_bytes = if nulls.is_some() {
+            active_count.div_ceil(8)
+        } else {
+            0
+        };
+        let base_bytes =
+            offs_bytes
+                .checked_add(nulls_bytes)
+                .ok_or(StatamError::BoundsExceeded {
+                    reason: "active varlen metadata overflow",
+                })?;
+        debit_budget(
+            budget,
+            base_bytes,
+            "active varlen bytes exceed MAX_BLOCK_RAW_BYTES",
+        )?;
+        let view = FsstSubchunkedView::parse(body, total_len)?;
+        let (out_offsets, out_bytes, out_nulls) =
+            view.decode_ranges(offsets, row_count, mask, nulls, *budget)?;
+        debit_budget(
+            budget,
+            out_bytes.len(),
+            "active varlen bytes exceed MAX_BLOCK_RAW_BYTES",
+        )?;
+        return Ok((out_offsets, out_bytes, out_nulls));
+    }
+
     enum Source<'a> {
         Fsst(Box<FsstBlockView<'a>>),
         Plain { off_raw: &'a [u8], data: &'a [u8] },
@@ -2292,6 +2403,16 @@ fn parse_list_child_header(
     }
     let child_enc = Encoding::from_u8(rest[0])?;
     let child_flags = rest[1];
+    if (child_flags & !KNOWN_BLOCK_FLAGS) != 0 {
+        return Err(StatamError::Corrupt {
+            reason: "unknown ListEncoded child flags",
+        });
+    }
+    if (child_flags & BLOCK_FLAG_FSST_SUBCHUNKED) != 0 && child_enc != Encoding::Fsst {
+        return Err(StatamError::Corrupt {
+            reason: "BLOCK_FLAG_FSST_SUBCHUNKED set on non-Fsst ListEncoded child",
+        });
+    }
     let child_len = u32::from_le_bytes([rest[2], rest[3], rest[4], rest[5]]) as usize;
     let child_null_count = u32::from_le_bytes([rest[6], rest[7], rest[8], rest[9]]);
     let child_min_inline_len = rest[10];
@@ -2656,11 +2777,13 @@ fn decode_list_body_selected(
             let (co, cb, cn) = decode_selected_utf8_or_binary(
                 after_nulls,
                 child_enc,
+                child_flags,
                 child_len,
                 &offsets,
                 row_count,
                 mask,
                 c_nulls.as_ref(),
+                &mut budget,
             )?;
             Some(Column::Flat(FlatColumn::try_new(
                 FlatData::Utf8(Utf8Data::try_new(co, cb)?),
@@ -2672,11 +2795,13 @@ fn decode_list_body_selected(
             let (co, cb, cn) = decode_selected_utf8_or_binary(
                 after_nulls,
                 child_enc,
+                child_flags,
                 child_len,
                 &offsets,
                 row_count,
                 mask,
                 c_nulls.as_ref(),
+                &mut budget,
             )?;
             Some(Column::Flat(FlatColumn::try_new(
                 FlatData::Binary(BinaryData::try_new(co, cb)?),
@@ -3061,27 +3186,33 @@ fn decode_events_body_selected(
             Utf8Data::try_new(n_offs, n_bytes)?
         }
         NamesSection::Varlen { enc, body } => {
+            let mut budget = MAX_BLOCK_RAW_BYTES;
             let (no, nb, _) = decode_selected_utf8_or_binary(
                 body,
                 enc,
+                0,
                 event_count,
                 &offsets,
                 row_count,
                 mask,
                 None,
+                &mut budget,
             )?;
             Utf8Data::try_new(no, nb)?
         }
     };
 
+    let mut attr_budget = MAX_BLOCK_RAW_BYTES;
     let (ao, ab, _) = decode_selected_utf8_or_binary(
         a_body,
         a_enc,
+        0,
         event_count,
         &offsets,
         row_count,
         mask,
         None,
+        &mut attr_budget,
     )?;
     let active_attrs = Utf8Data::try_new(ao, ab)?;
     let active_attr_nulls = if let Some(an) = attr_nulls {
@@ -3208,8 +3339,18 @@ fn decode_links_body_selected(
         active_sids.extend_from_slice(&sids_slice[rs..re]);
     }
 
-    let (ao, ab, _) =
-        decode_selected_utf8_or_binary(a_body, a_enc, link_count, &offsets, row_count, mask, None)?;
+    let mut attr_budget = MAX_BLOCK_RAW_BYTES;
+    let (ao, ab, _) = decode_selected_utf8_or_binary(
+        a_body,
+        a_enc,
+        0,
+        link_count,
+        &offsets,
+        row_count,
+        mask,
+        None,
+        &mut attr_budget,
+    )?;
     let active_attrs = Utf8Data::try_new(ao, ab)?;
     let active_attr_nulls = if let Some(an) = attr_nulls {
         let mut out_an = Bitmap::new_ones(active_link_count);
@@ -3526,6 +3667,48 @@ fn decode_child_column(
                 });
             }
             let (nulls, after_nulls) = read_optional_nulls(body, len, flags)?;
+            if enc == Encoding::Fsst && (flags & BLOCK_FLAG_FSST_SUBCHUNKED) != 0 {
+                let nulls_bytes = if nulls.is_some() { len.div_ceil(8) } else { 0 };
+                let offs_bytes = len.checked_add(1).and_then(|n| n.checked_mul(4)).ok_or(
+                    StatamError::BoundsExceeded {
+                        reason: "nested child exceeds MAX_BLOCK_RAW_BYTES",
+                    },
+                )?;
+                let base_bytes =
+                    nulls_bytes
+                        .checked_add(offs_bytes)
+                        .ok_or(StatamError::BoundsExceeded {
+                            reason: "nested child exceeds MAX_BLOCK_RAW_BYTES",
+                        })?;
+                debit_budget(
+                    budget,
+                    base_bytes,
+                    "nested child exceeds MAX_BLOCK_RAW_BYTES",
+                )?;
+                let (data, data_bytes) = match dt {
+                    DataType::Utf8 => {
+                        let u = decode_fsst_utf8_subchunked(after_nulls, len, *budget)?;
+                        let n = u.bytes().len();
+                        (FlatData::Utf8(u), n)
+                    }
+                    DataType::Binary => {
+                        let b = decode_fsst_binary_subchunked(after_nulls, len, *budget)?;
+                        let n = b.bytes().len();
+                        (FlatData::Binary(b), n)
+                    }
+                    _ => {
+                        return Err(StatamError::Corrupt {
+                            reason: "incompatible encoding for DataType",
+                        });
+                    }
+                };
+                debit_budget(
+                    budget,
+                    data_bytes,
+                    "nested child exceeds MAX_BLOCK_RAW_BYTES",
+                )?;
+                return Ok(Column::Flat(FlatColumn::try_new(data, nulls)?));
+            }
             let data = decode_inner_data(after_nulls, enc, len, dt, nulls.as_ref())?;
             let flat = FlatColumn::try_new(data, nulls)?;
             debit_budget(
@@ -3545,6 +3728,7 @@ struct ChildEncodedPayload {
     min_inline: [u8; 16],
     inline_dict: Option<(bool, Vec<u8>)>,
     body: Vec<u8>,
+    has_subchunked_fsst: bool,
 }
 
 fn encode_child_column_payload(
@@ -3561,6 +3745,7 @@ fn encode_child_column_payload(
             min_inline: [0u8; 16],
             inline_dict: None,
             body: Vec::new(),
+            has_subchunked_fsst: false,
         });
     }
 
@@ -3586,6 +3771,7 @@ fn encode_child_column_payload(
             min_inline: [0u8; 16],
             inline_dict: Some((dict.is_sorted(), dict_bytes)),
             body,
+            has_subchunked_fsst: false,
         });
     }
 
@@ -3618,17 +3804,20 @@ fn encode_child_column_payload(
                 min_inline: [0u8; 16],
                 inline_dict: Some((dict.is_sorted(), dict_bytes)),
                 body,
+                has_subchunked_fsst: false,
             });
         }
     }
 
-    let enc_block = if matches!(
+    let (enc_block, has_subchunked_fsst) = if matches!(
         dt,
         DataType::List(_) | DataType::MapUtf8 | DataType::Events | DataType::Links
     ) {
-        encode_nested_column(col, dt, profile, remaining_depth, None)?
+        encode_nested_column_inner(col, dt, profile, remaining_depth, None)?
     } else {
-        crate::codec::numeric::encode_narrow_column(col, dt, profile, None)?
+        let block = crate::codec::numeric::encode_narrow_column(col, dt, profile, None)?;
+        let sub = (block.block_flags & BLOCK_FLAG_FSST_SUBCHUNKED) != 0;
+        (block, sub)
     };
     Ok(ChildEncodedPayload {
         encoding: enc_block.encoding,
@@ -3637,6 +3826,7 @@ fn encode_child_column_payload(
         min_inline: enc_block.min_inline,
         inline_dict: None,
         body: enc_block.raw_body,
+        has_subchunked_fsst,
     })
 }
 

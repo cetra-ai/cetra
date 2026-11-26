@@ -24,20 +24,20 @@ use crate::format::{
     FLAG_HAS_PACK_REFS, FLAG_HAS_SHREDDED_MAPS, FLAG_HAS_TRIGRAM_INDEX, FLAG_HOT_TAIL_LZ4,
     FLAG_L1_COMPACT, FORMAT_VERSION, FileHeader, FileSchemaMeta, LAZY_INDEX_ENTRY_LEN,
     LocalityGroup, MAX_BATCH_DECODED_BYTES, MAX_COLUMNS, MAX_FRAME_RAW_BYTES, MAX_MINI_BLOCK_SIZE,
-    MAX_PACK_REFS, MAX_ROW_GROUP_SIZE, MAX_TOTAL_BLOCKS, MINI_BLOCK_SIZE, POSTSCRIPT_LEN,
-    Postscript, ROW_GROUP_ENTRY_LEN, ROW_GROUP_SIZE, RowGroupEntry, ShreddedMapDir, TableKind,
-    encode_schema,
+    MAX_PACK_REFS, MAX_ROW_GROUP_SIZE, MAX_ROW_PAYLOAD_BYTES, MAX_TOTAL_BLOCKS, MINI_BLOCK_SIZE,
+    POSTSCRIPT_LEN, Postscript, ROW_GROUP_ENTRY_LEN, ROW_GROUP_SIZE, RowGroupEntry, ShreddedMapDir,
+    TableKind, encode_schema,
 };
 use crate::payload::chunker::{DedupBypassDetector, INLINE_PAYLOAD_THRESHOLD};
 use crate::payload::pack::ChunkPackBuilder;
 use crate::payload::{
     PayloadRefRow, encode_payload_refs, encode_payload_refs_l0_direct,
-    encode_payload_refs_l0_from_utf8,
+    encode_payload_refs_l0_from_bytes,
 };
 use crate::simd::bloom::Sbbf;
 
-pub(crate) use concat::concat_flat_columns;
-use concat::{concat_rg_column, estimate_column_bytes, estimate_column_slice_bytes};
+pub(crate) use concat::{concat_column_refs, concat_flat_columns, estimate_column_bytes};
+use concat::{concat_rg_column, estimate_column_slice_bytes};
 pub use l0_payload::L0_LOCAL_PACK_IDX;
 pub(crate) use l0_payload::L0_PAYLOAD_DIR_MAGIC;
 use l0_payload::LocalL0PayloadBuilder;
@@ -163,7 +163,7 @@ pub struct WriteOptions {
     pub bloom_cols: Vec<String>,
     /// Primary bloom column placed directly inside the Hot Tail (default: `Some("trace_id")`).
     pub hot_bloom_col: Option<String>,
-    /// Heavy `Utf8` column names stored as `ExternalPayload` (`PayloadRefs`).
+    /// Heavy `Utf8` or `Binary` column names stored as `ExternalPayload` (`PayloadRefs`).
     pub payload_cols: Vec<String>,
     /// Narrow `Utf8` column names receiving per-block `TrigramBloom` in `L1Compact` when not dict-encoded.
     pub narrow_trigram_cols: Vec<String>,
@@ -439,23 +439,41 @@ impl<'a, W: Write + Seek> StatamWriter<'a, W> {
             });
         }
 
+        for &sc in &options.sort_cols {
+            if logical_locality[sc as usize] == LocalityGroup::ExternalPayload {
+                return Err(StatamError::SchemaMismatch {
+                    reason: "sort column cannot be an ExternalPayload column",
+                });
+            }
+        }
+
         let mut bloom_col_set = HashSet::new();
         let mut bloom_rgs = HashMap::new();
         let mut bloom_has_values = HashMap::new();
         for name in &options.bloom_cols {
-            if let Some(idx) = schema.index_of(name)
-                && logical_locality[idx] != LocalityGroup::ExternalPayload
-            {
+            if let Some(idx) = schema.index_of(name) {
+                if logical_locality[idx] == LocalityGroup::ExternalPayload {
+                    return Err(StatamError::SchemaMismatch {
+                        reason: "bloom column cannot be an ExternalPayload column",
+                    });
+                }
                 bloom_col_set.insert(idx);
                 bloom_rgs.insert(idx, Vec::new());
                 bloom_has_values.insert(idx, false);
             }
         }
-        let hot_bloom_col_idx = options
+        let hot_bloom_col_idx = match options
             .hot_bloom_col
             .as_deref()
             .and_then(|name| schema.index_of(name))
-            .filter(|&idx| logical_locality[idx] != LocalityGroup::ExternalPayload);
+        {
+            Some(idx) if logical_locality[idx] == LocalityGroup::ExternalPayload => {
+                return Err(StatamError::SchemaMismatch {
+                    reason: "hot_bloom_col cannot be an ExternalPayload column",
+                });
+            }
+            other => other,
+        };
         if let Some(idx) = hot_bloom_col_idx {
             bloom_col_set.insert(idx);
             bloom_rgs.entry(idx).or_default();
@@ -729,14 +747,21 @@ impl<'a, W: Write + Seek> StatamWriter<'a, W> {
                         let end = offs.get(offset + len).copied().unwrap_or(0) as usize;
                         end.saturating_sub(start)
                     }
+                    FlatData::Binary(b) => {
+                        let offs = b.offsets();
+                        let start = offs.get(offset).copied().unwrap_or(0) as usize;
+                        let end = offs.get(offset + len).copied().unwrap_or(0) as usize;
+                        end.saturating_sub(start)
+                    }
                     _ => 0,
                 },
                 Column::Const { value, .. } => match value {
                     ScalarValue::Utf8(s) => s.len().saturating_mul(len),
+                    ScalarValue::Binary(b) => b.len().saturating_mul(len),
                     _ => 0,
                 },
-                Column::Dict(d) => {
-                    if let FlatData::Utf8(u) = d.values().data() {
+                Column::Dict(d) => match d.values().data() {
+                    FlatData::Utf8(u) => {
                         let codes = d.codes();
                         let end = (offset + len).min(codes.len());
                         let mut acc = 0usize;
@@ -746,12 +771,22 @@ impl<'a, W: Write + Seek> StatamWriter<'a, W> {
                             }
                         }
                         acc
-                    } else {
-                        0
                     }
-                }
-                Column::Rle(r) => {
-                    if let FlatData::Utf8(u) = r.values().data() {
+                    FlatData::Binary(b) => {
+                        let codes = d.codes();
+                        let end = (offset + len).min(codes.len());
+                        let mut acc = 0usize;
+                        for &code in &codes[offset.min(end)..end] {
+                            if let Some(s) = b.get(code as usize) {
+                                acc = acc.saturating_add(s.len());
+                            }
+                        }
+                        acc
+                    }
+                    _ => 0,
+                },
+                Column::Rle(r) => match r.values().data() {
+                    FlatData::Utf8(u) => {
                         let mut acc = 0usize;
                         let mut run_start = 0usize;
                         let slice_end = offset.saturating_add(len);
@@ -770,10 +805,29 @@ impl<'a, W: Write + Seek> StatamWriter<'a, W> {
                             }
                         }
                         acc
-                    } else {
-                        0
                     }
-                }
+                    FlatData::Binary(b) => {
+                        let mut acc = 0usize;
+                        let mut run_start = 0usize;
+                        let slice_end = offset.saturating_add(len);
+                        for (run_idx, &run_end_u32) in r.run_ends().iter().enumerate() {
+                            let run_end = run_end_u32 as usize;
+                            let lo = run_start.max(offset);
+                            let hi = run_end.min(slice_end);
+                            if hi > lo
+                                && let Some(s) = b.get(run_idx)
+                            {
+                                acc = acc.saturating_add(s.len().saturating_mul(hi - lo));
+                            }
+                            run_start = run_end;
+                            if run_start >= slice_end {
+                                break;
+                            }
+                        }
+                        acc
+                    }
+                    _ => 0,
+                },
             };
             sum = sum.saturating_add(col_bytes);
         }
@@ -859,10 +913,14 @@ impl<'a, W: Write + Seek> StatamWriter<'a, W> {
         }
 
         let fc = as_flat_cow(col)?;
-        let FlatData::Utf8(u) = fc.data() else {
-            return Err(StatamError::SchemaMismatch {
-                reason: "ExternalPayload column must be DataType::Utf8",
-            });
+        let (offsets, all_bytes, is_binary): (&[u32], &[u8], bool) = match fc.data() {
+            FlatData::Utf8(u) => (u.offsets(), u.bytes(), false),
+            FlatData::Binary(b) => (b.offsets(), b.bytes(), true),
+            _ => {
+                return Err(StatamError::SchemaMismatch {
+                    reason: "ExternalPayload column must be DataType::Utf8 or DataType::Binary",
+                });
+            }
         };
         let col_nulls = fc.nulls();
         let mut pos = 0usize;
@@ -875,9 +933,23 @@ impl<'a, W: Write + Seek> StatamWriter<'a, W> {
                 dst.push(PayloadRefRow::Null);
                 return Ok(());
             }
-            let bytes = u.get(r).unwrap_or("").as_bytes();
+            let s = offsets[r] as usize;
+            let e = offsets[r + 1] as usize;
+            let bytes = &all_bytes[s..e];
+            if bytes.len() > MAX_ROW_PAYLOAD_BYTES {
+                return Err(StatamError::BoundsExceeded {
+                    reason: "row payload exceeds MAX_ROW_PAYLOAD_BYTES",
+                });
+            }
             if bytes.len() <= INLINE_PAYLOAD_THRESHOLD {
                 dst.push(PayloadRefRow::Inline(bytes.to_vec()));
+            } else if is_binary {
+                let cids = local.add_blob(bytes)?;
+                let refs = cids
+                    .into_iter()
+                    .map(|cid| (L0_LOCAL_PACK_IDX, cid))
+                    .collect();
+                dst.push(PayloadRefRow::Chunks(refs));
             } else {
                 let mut refs = Vec::new();
                 for slice in bytes.chunks(MAX_FRAME_RAW_BYTES) {
@@ -927,14 +999,24 @@ impl<'a, W: Write + Seek> StatamWriter<'a, W> {
 
         while take - pos >= mb_size {
             let mut raw_body = Vec::new();
-            let null_count = encode_payload_refs_l0_from_utf8(
-                u,
+            let null_count = encode_payload_refs_l0_from_bytes(
+                offsets,
+                all_bytes,
                 col_nulls,
                 offset + pos,
                 mb_size,
                 INLINE_PAYLOAD_THRESHOLD,
                 L0_LOCAL_PACK_IDX,
-                |slice| self.pending_l0_local.add_chunk(slice),
+                |bytes, cids| {
+                    if is_binary {
+                        self.pending_l0_local.add_blob_into(bytes, cids)
+                    } else {
+                        for slice in bytes.chunks(MAX_FRAME_RAW_BYTES) {
+                            cids.push(self.pending_l0_local.add_chunk(slice)?);
+                        }
+                        Ok(())
+                    }
+                },
                 &mut raw_body,
             )?;
             self.pending_l0_mbs.entry(cidx).or_default().push((
@@ -1516,10 +1598,10 @@ impl<'a, W: Write + Seek> StatamWriter<'a, W> {
         // Concatenate each logical column's buffered slices for this RG.
         let mut rg_cols = Vec::with_capacity(self.schema.len());
         for (cidx, pieces) in self.rg_buf_cols.iter_mut().enumerate() {
+            let dt = &self.schema.fields()[cidx].data_type;
             if pieces.is_empty() && self.logical_locality[cidx] == LocalityGroup::ExternalPayload {
-                rg_cols.push(Column::Flat(FlatColumn::empty(&DataType::Utf8)));
+                rg_cols.push(Column::Flat(FlatColumn::empty(dt)));
             } else {
-                let dt = &self.schema.fields()[cidx].data_type;
                 let combined = concat_rg_column(dt, pieces, rg_rows)?;
                 pieces.clear();
                 rg_cols.push(combined);
@@ -1536,7 +1618,9 @@ fn classify_locality_group(
     field: &cetra_column::Field,
     payload_names: &HashSet<&str>,
 ) -> LocalityGroup {
-    if field.data_type == DataType::Utf8 && payload_names.contains(field.name.as_str()) {
+    if matches!(field.data_type, DataType::Utf8 | DataType::Binary)
+        && payload_names.contains(field.name.as_str())
+    {
         return LocalityGroup::ExternalPayload;
     }
     if WIDE_ROW_COL_NAMES.contains(&field.name.as_str())

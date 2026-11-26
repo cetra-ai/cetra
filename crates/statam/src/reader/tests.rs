@@ -4492,3 +4492,1166 @@ fn m12_sort_desc_hint_unsorted_safety_point_head_and_scan_coalescing() {
     let expected_tail10: Vec<i64> = (54..64).map(|i| 10_000 + i * 10).collect();
     assert_eq!(u_ts_sorted, expected_tail10);
 }
+
+#[test]
+fn binary_external_payload_end_to_end_l0_l1_stpk_predicates_and_gdpr() {
+    use crate::format::{BLOB_MAX_CHUNK_BYTES, Codec};
+    use crate::gdpr::{GdprFileInput, gdpr_rewrite_day};
+    use cetra_column::BinaryData;
+
+    let schema = Arc::new(
+        Schema::try_new(vec![
+            Field::new("id", DataType::I64, false),
+            Field::new("user_id", DataType::Utf8, false),
+            Field::new("blob", DataType::Binary, true),
+        ])
+        .unwrap(),
+    );
+
+    // 1. Validate StatamWriter::new rejects payload_cols overlapping sort_cols / bloom_cols / hot_bloom_col.
+    {
+        let mut bad_sort = WriteOptions::for_table(TableKind::Generic, WriteProfile::L1Compact);
+        bad_sort.payload_cols = vec!["blob".to_owned()];
+        bad_sort.sort_cols = vec![2];
+        let mut buf = Vec::new();
+        assert!(matches!(
+            StatamWriter::new(
+                std::io::Cursor::new(&mut buf),
+                Arc::clone(&schema),
+                bad_sort,
+                None
+            ),
+            Err(StatamError::SchemaMismatch { .. })
+        ));
+
+        let mut bad_bloom = WriteOptions::for_table(TableKind::Generic, WriteProfile::L1Compact);
+        bad_bloom.payload_cols = vec!["blob".to_owned()];
+        bad_bloom.bloom_cols = vec!["blob".to_owned()];
+        assert!(matches!(
+            StatamWriter::new(
+                std::io::Cursor::new(&mut buf),
+                Arc::clone(&schema),
+                bad_bloom,
+                None
+            ),
+            Err(StatamError::SchemaMismatch { .. })
+        ));
+
+        let mut bad_hot = WriteOptions::for_table(TableKind::Generic, WriteProfile::L1Compact);
+        bad_hot.payload_cols = vec!["blob".to_owned()];
+        bad_hot.hot_bloom_col = Some("blob".to_owned());
+        assert!(matches!(
+            StatamWriter::new(
+                std::io::Cursor::new(&mut buf),
+                Arc::clone(&schema),
+                bad_hot,
+                None
+            ),
+            Err(StatamError::SchemaMismatch { .. })
+        ));
+    }
+
+    // Build mixed Binary blobs:
+    // row 0: NULL (u_keep)
+    // row 1: 0 B inline (u_keep)
+    // row 2: 16 B inline with invalid UTF-8 bytes (u_keep)
+    // row 3: 12 KiB small blob (< 32 KiB, batched) (u_keep)
+    // row 4: 64 KiB incompressible PNG-like blob (>= 32 KiB -> dedicated Codec::None frame) (u_keep)
+    // row 5: 256 KiB compressible PDF-like blob (>= 32 KiB -> dedicated Zstd/Lz4 frame) (u_erase)
+    // row 6: 5 MiB multi-chunk blob (> 4 MiB -> splits into 2 dedicated frames at BLOB_MAX_CHUNK_BYTES) (u_keep)
+    let mut png_64k = vec![0u8; 64 * 1024];
+    png_64k[..8].copy_from_slice(b"\x89PNG\r\n\x1a\n");
+    let mut state = 0x517c_c1b7_2722_0a95u64;
+    for b in &mut png_64k[8..] {
+        state ^= state << 13;
+        state ^= state >> 7;
+        state ^= state << 17;
+        *b = (state & 0xFF) as u8;
+    }
+
+    let mut pdf_256k = Vec::with_capacity(256 * 1024);
+    let mut pdf_obj = 0u32;
+    while pdf_256k.len() < 256 * 1024 {
+        let entry = format!(
+            "%PDF-1.7 obj={pdf_obj:05} page={} hash={:08x} << /Type /Catalog /Text (compressible_binary_pdf_payload) >>\n",
+            pdf_obj % 64,
+            pdf_obj.wrapping_mul(2_654_435_761)
+        );
+        let b = entry.as_bytes();
+        let take = b.len().min(256 * 1024 - pdf_256k.len());
+        pdf_256k.extend_from_slice(&b[..take]);
+        pdf_obj += 1;
+    }
+
+    let mut big_5m = vec![0xA5u8; BLOB_MAX_CHUNK_BYTES + 1024 * 1024];
+    for (i, chunk) in big_5m.chunks_mut(1024).enumerate() {
+        let tag = (i as u32).to_le_bytes();
+        chunk[..4].copy_from_slice(&tag);
+        chunk[4] = 0xFF; // non-UTF-8 byte
+    }
+
+    let small_12k = vec![0xFEu8; 12 * 1024];
+    let inline_16 = vec![
+        0xFF, 0x00, 0xFE, 0x80, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12,
+    ];
+    let expected_blobs: Vec<Option<Vec<u8>>> = vec![
+        None,
+        Some(Vec::new()),
+        Some(inline_16),
+        Some(small_12k),
+        Some(png_64k),
+        Some(pdf_256k),
+        Some(big_5m),
+    ];
+    let user_ids = [
+        "u_keep", "u_keep", "u_keep", "u_keep", "u_keep", "u_erase", "u_keep",
+    ];
+
+    let mut ids = Vec::new();
+    let mut uid_offs = vec![0u32];
+    let mut uid_bytes = Vec::new();
+    let mut blob_offs = vec![0u32];
+    let mut blob_bytes = Vec::new();
+    let mut blob_nulls = Bitmap::new_ones(expected_blobs.len());
+    for (r, (uid, blob_opt)) in user_ids.iter().zip(expected_blobs.iter()).enumerate() {
+        ids.push(r as i64);
+        uid_bytes.extend_from_slice(uid.as_bytes());
+        uid_offs.push(uid_bytes.len() as u32);
+        match blob_opt {
+            Some(b) => blob_bytes.extend_from_slice(b),
+            None => {
+                let _ = blob_nulls.set(r, false);
+            }
+        }
+        blob_offs.push(blob_bytes.len() as u32);
+    }
+
+    let batch = Batch::try_new_all(
+        Arc::clone(&schema),
+        vec![
+            Column::Flat(FlatColumn::try_new(FlatData::I64(ids), None).unwrap()),
+            Column::Flat(
+                FlatColumn::try_new(
+                    FlatData::Utf8(Utf8Data::try_new(uid_offs, uid_bytes).unwrap()),
+                    None,
+                )
+                .unwrap(),
+            ),
+            Column::Flat(
+                FlatColumn::try_new(
+                    FlatData::Binary(BinaryData::try_new(blob_offs, blob_bytes).unwrap()),
+                    Some(blob_nulls),
+                )
+                .unwrap(),
+            ),
+        ],
+        expected_blobs.len(),
+    )
+    .unwrap();
+
+    // 2. L0Fast write & read parity (1T == 4T bit-exact).
+    let write_l0 = |threads: usize| -> Vec<u8> {
+        let mut opts = WriteOptions::for_table(TableKind::Generic, WriteProfile::L0Fast);
+        opts.payload_cols = vec!["blob".to_owned()];
+        opts.write_threads = threads;
+        let mut buf = Vec::new();
+        let mut w = StatamWriter::new(
+            std::io::Cursor::new(&mut buf),
+            Arc::clone(&schema),
+            opts,
+            None,
+        )
+        .unwrap();
+        w.write_batch(&batch).unwrap();
+        w.finish().unwrap();
+        buf
+    };
+    let l0_1t = write_l0(1);
+    let l0_4t = write_l0(4);
+    assert_eq!(l0_1t, l0_4t, "L0Fast Binary 1T == 4T must be bit-exact");
+    let l0_reader = StatamReader::open(Arc::new(SliceReader::new(l0_1t)), None).unwrap();
+    l0_reader.verify_full().unwrap();
+    let l0_scanned =
+        concat_scanned_batches(&schema, &l0_reader.scan(&ScanRequest::default()).unwrap());
+    let l0_bin = l0_scanned.column(2).unwrap().materialize(None).unwrap();
+    for (r, exp) in expected_blobs.iter().enumerate() {
+        let actual = l0_bin.get_scalar(r).unwrap();
+        match exp {
+            None => assert_eq!(actual, ScalarValue::Null(DataType::Binary)),
+            Some(b) => assert_eq!(actual, ScalarValue::Binary(b.clone())),
+        }
+    }
+
+    // 3. L1Compact + .stpk write (1T == 4T bit-exact).
+    let pack_id = [0xB1u8; 16];
+    let write_l1 = |threads: usize| -> (Vec<u8>, Vec<u8>) {
+        let pack_opts = PackWriteOptions {
+            write_threads: threads,
+            ..PackWriteOptions::default()
+        };
+        let mut pb = ChunkPackBuilder::new(pack_id, pack_opts);
+        let mut opts = WriteOptions::for_table(TableKind::Generic, WriteProfile::L1Compact);
+        opts.payload_cols = vec!["blob".to_owned()];
+        opts.pack_id = Some(pack_id);
+        opts.write_threads = threads;
+        let mut file_buf = Vec::new();
+        {
+            let mut w = StatamWriter::new(
+                std::io::Cursor::new(&mut file_buf),
+                Arc::clone(&schema),
+                opts,
+                Some(&mut pb),
+            )
+            .unwrap();
+            w.write_batch(&batch).unwrap();
+            w.finish().unwrap();
+        }
+        let mut pack_buf = Vec::new();
+        pb.finish(&mut pack_buf).unwrap();
+        (file_buf, pack_buf)
+    };
+    let (l1_1t, pack_1t) = write_l1(1);
+    let (l1_4t, pack_4t) = write_l1(4);
+    assert_eq!(l1_1t, l1_4t, "L1Compact Binary .statam 1T == 4T bit-exact");
+    assert_eq!(
+        pack_1t, pack_4t,
+        "L1Compact Binary .stpk 1T == 4T bit-exact"
+    );
+
+    // Inspect pack frame layout:
+    // frame 0: 12 KiB small blob (1 chunk)
+    // frame 1: 64 KiB PNG blob (1 dedicated chunk, Codec::None)
+    // frame 2: 256 KiB PDF blob (1 dedicated chunk, compressed)
+    // frame 3: 4 MiB first slice of 5 MiB blob (1 dedicated chunk)
+    // frame 4: 1 MiB second slice of 5 MiB blob (1 dedicated chunk)
+    let pack_s3 = Arc::new(SimulatedS3Reader::from_bytes(
+        pack_1t.clone(),
+        SimulatedS3Config::default(),
+    ));
+    let pack_reader =
+        Arc::new(ChunkPackReader::open(Arc::clone(&pack_s3) as Arc<dyn RangeReader>).unwrap());
+    assert_eq!(pack_reader.postscript().edge_table_len, 0);
+    assert_eq!(pack_reader.toc().frames.len(), 5);
+    assert_eq!(pack_reader.toc().frames[1].chunk_count, 1);
+    assert_eq!(pack_reader.toc().frames[1].codec, Codec::None);
+    assert_eq!(pack_reader.toc().frames[2].chunk_count, 1);
+    assert_ne!(pack_reader.toc().frames[2].codec, Codec::None);
+    assert_eq!(pack_reader.toc().frames[3].chunk_count, 1);
+    assert_eq!(
+        pack_reader.toc().frames[3].raw_len as usize,
+        BLOB_MAX_CHUNK_BYTES
+    );
+    assert_eq!(pack_reader.toc().frames[4].chunk_count, 1);
+    assert_eq!(pack_reader.toc().frames[4].raw_len as usize, 1024 * 1024);
+
+    let mut resolver = InMemoryPackResolver::new();
+    resolver.insert(pack_id, Arc::clone(&pack_reader));
+    let reader = StatamReader::open(
+        Arc::new(SliceReader::new(l1_1t.clone())),
+        Some(Arc::new(resolver)),
+    )
+    .unwrap();
+    reader.verify_full().unwrap();
+
+    // 4. Metadata-only scan reads 0 bytes from `.stpk`.
+    pack_s3.reset_counters();
+    let meta_only = reader
+        .scan(&ScanRequest {
+            projection: Some(vec![0, 1]),
+            ..ScanRequest::default()
+        })
+        .unwrap();
+    assert_eq!(meta_only.iter().map(Batch::num_rows).sum::<usize>(), 7);
+    assert_eq!(pack_s3.counters().gets, 0);
+
+    // 5. Phase-1 IsNull / IsNotNull on ExternalPayload Binary reads 0 bytes from `.stpk`.
+    pack_s3.reset_counters();
+    let null_rows = reader
+        .scan(&ScanRequest {
+            projection: Some(vec![0]),
+            predicates: vec![Predicate::new("blob", ZonePred::IsNull)],
+            ..ScanRequest::default()
+        })
+        .unwrap();
+    assert_eq!(null_rows.iter().map(Batch::num_rows).sum::<usize>(), 1);
+    assert_eq!(pack_s3.counters().gets, 0);
+
+    let non_null_rows = reader
+        .scan(&ScanRequest {
+            projection: Some(vec![0]),
+            predicates: vec![Predicate::new("blob", ZonePred::IsNotNull)],
+            ..ScanRequest::default()
+        })
+        .unwrap();
+    assert_eq!(non_null_rows.iter().map(Batch::num_rows).sum::<usize>(), 6);
+    assert_eq!(pack_s3.counters().gets, 0);
+
+    // 6. Reject SubstringQuery / IdLookup / value Predicate on Binary ExternalPayload with SchemaMismatch.
+    assert!(matches!(
+        reader.scan(&ScanRequest {
+            substrings: vec![SubstringQuery::like("blob", b"PNG")],
+            ..ScanRequest::default()
+        }),
+        Err(StatamError::SchemaMismatch { .. })
+    ));
+    assert!(matches!(
+        reader.scan(&ScanRequest {
+            id_lookups: vec![IdLookup::eq("blob", b"abc")],
+            ..ScanRequest::default()
+        }),
+        Err(StatamError::SchemaMismatch { .. })
+    ));
+    assert!(matches!(
+        reader.scan(&ScanRequest {
+            predicates: vec![Predicate::new(
+                "blob",
+                ZonePred::Eq(ZoneValue::Bytes(b"abc".to_vec())),
+            )],
+            ..ScanRequest::default()
+        }),
+        Err(StatamError::SchemaMismatch { .. })
+    ));
+
+    // 7. Full scan & take_rows parity.
+    let full = concat_scanned_batches(&schema, &reader.scan(&ScanRequest::default()).unwrap());
+    let full_bin = full.column(2).unwrap().materialize(None).unwrap();
+    for (r, exp) in expected_blobs.iter().enumerate() {
+        match exp {
+            None => assert_eq!(
+                full_bin.get_scalar(r).unwrap(),
+                ScalarValue::Null(DataType::Binary)
+            ),
+            Some(b) => assert_eq!(
+                full_bin.get_scalar(r).unwrap(),
+                ScalarValue::Binary(b.clone())
+            ),
+        }
+    }
+    let taken = reader.take_rows(&[0, 2, 4, 6], None, 2).unwrap();
+    let taken_merged = concat_scanned_batches(&schema, &taken);
+    assert_eq!(taken_merged.num_rows(), 4);
+    let taken_bin = taken_merged.column(2).unwrap().materialize(None).unwrap();
+    for (pos, &row_idx) in [0usize, 2, 4, 6].iter().enumerate() {
+        match &expected_blobs[row_idx] {
+            None => assert_eq!(
+                taken_bin.get_scalar(pos).unwrap(),
+                ScalarValue::Null(DataType::Binary)
+            ),
+            Some(b) => assert_eq!(
+                taken_bin.get_scalar(pos).unwrap(),
+                ScalarValue::Binary(b.clone())
+            ),
+        }
+    }
+
+    // 8. GDPR rewrite: erases u_erase (row 5 = 256 KiB PDF frame), copies all 4 surviving frames verbatim!
+    let inputs = vec![GdprFileInput {
+        file_id: "blobs_file".to_owned(),
+        reader: Arc::new(SliceReader::new(l1_1t)),
+        write_options: None,
+    }];
+    let mut packs_map: HashMap<[u8; 16], Arc<dyn RangeReader>> = HashMap::new();
+    packs_map.insert(pack_id, Arc::new(SliceReader::new(pack_1t)));
+    let gdpr_res = gdpr_rewrite_day(&inputs, &packs_map, &|b, r| {
+        matches!(
+            b.column_by_name("user_id").unwrap().get_scalar(r).unwrap(),
+            ScalarValue::Utf8(s) if s == "u_erase"
+        )
+    })
+    .unwrap();
+    assert_eq!(gdpr_res.stats.frames_dropped, 1);
+    assert_eq!(gdpr_res.stats.frames_copied_verbatim, 4);
+    assert_eq!(gdpr_res.stats.frames_rewritten, 0);
+    assert_eq!(gdpr_res.new_packs.len(), 1);
+    let new_pack = &gdpr_res.new_packs[0];
+    let new_pack_r = Arc::new(
+        ChunkPackReader::open(Arc::new(SliceReader::new(new_pack.bytes.clone()))).unwrap(),
+    );
+    // Surviving PNG frame (frame 1 in new pack) retains Codec::None and 1-blob-per-frame.
+    assert_eq!(new_pack_r.toc().frames[1].codec, Codec::None);
+    assert_eq!(new_pack_r.toc().frames[1].chunk_count, 1);
+    assert_eq!(new_pack_r.postscript().edge_table_len, 0);
+
+    let mut new_resolver = InMemoryPackResolver::new();
+    new_resolver.insert(new_pack.new_pack_id, new_pack_r);
+    let new_reader = StatamReader::open(
+        Arc::new(SliceReader::new(gdpr_res.rewritten_files[0].bytes.clone())),
+        Some(Arc::new(new_resolver)),
+    )
+    .unwrap();
+    assert_eq!(
+        new_reader.meta().col_dir[2].locality_group,
+        LocalityGroup::ExternalPayload
+    );
+    let surviving_out =
+        concat_scanned_batches(&schema, &new_reader.scan(&ScanRequest::default()).unwrap());
+    assert_eq!(surviving_out.num_rows(), 6);
+    let surv_bin = surviving_out.column(2).unwrap().materialize(None).unwrap();
+    let expected_surviving: Vec<&Option<Vec<u8>>> = expected_blobs
+        .iter()
+        .enumerate()
+        .filter(|&(i, _)| i != 5)
+        .map(|(_, b)| b)
+        .collect();
+    for (pos, exp) in expected_surviving.iter().enumerate() {
+        match exp {
+            None => assert_eq!(
+                surv_bin.get_scalar(pos).unwrap(),
+                ScalarValue::Null(DataType::Binary)
+            ),
+            Some(b) => assert_eq!(
+                surv_bin.get_scalar(pos).unwrap(),
+                ScalarValue::Binary(b.clone())
+            ),
+        }
+    }
+}
+
+#[test]
+fn binary_external_payload_wave_bounded_full_scan_splits_1rg_above_256_mib() {
+    use cetra_column::BinaryData;
+
+    // 1 RG, 1 MB with 540 rows x 512 KiB compressible binary blobs = 270 MiB (> 256 MiB MAX_BATCH_DECODED_BYTES).
+    // Full scan must succeed via wave-bounded Phase-2 execution (<= 128 MiB per wave) without BoundsExceeded!
+    const NUM_ROWS: usize = 540;
+    const BLOB_LEN: usize = 512 * 1024;
+
+    let schema = Arc::new(
+        Schema::try_new(vec![
+            Field::new("id", DataType::I64, false),
+            Field::new("blob", DataType::Binary, false),
+        ])
+        .unwrap(),
+    );
+
+    let ids: Vec<i64> = (0..NUM_ROWS as i64).collect();
+    let mut offsets = Vec::with_capacity(NUM_ROWS + 1);
+    offsets.push(0u32);
+    let mut data = vec![0u8; NUM_ROWS * BLOB_LEN];
+    for r in 0..NUM_ROWS {
+        let base = r * BLOB_LEN;
+        data[base..base + 4].copy_from_slice(&(r as u32).to_le_bytes());
+        data[base + BLOB_LEN - 4..base + BLOB_LEN]
+            .copy_from_slice(&((r as u32) ^ 0xA5A5_5A5A).to_le_bytes());
+        offsets.push(((r + 1) * BLOB_LEN) as u32);
+    }
+    let batch = Batch::try_new_all(
+        Arc::clone(&schema),
+        vec![
+            Column::Flat(FlatColumn::try_new(FlatData::I64(ids), None).unwrap()),
+            Column::Flat(
+                FlatColumn::try_new(
+                    FlatData::Binary(BinaryData::try_new(offsets, data).unwrap()),
+                    None,
+                )
+                .unwrap(),
+            ),
+        ],
+        NUM_ROWS,
+    )
+    .unwrap();
+
+    let pack_id = [0xB2u8; 16];
+    let pack_opts = PackWriteOptions {
+        zstd_level: 1,
+        ..PackWriteOptions::default()
+    };
+    let mut pb = ChunkPackBuilder::new(pack_id, pack_opts);
+    let mut opts = WriteOptions::for_table(TableKind::Generic, WriteProfile::L1Compact);
+    opts.payload_cols = vec!["blob".to_owned()];
+    opts.pack_id = Some(pack_id);
+    let mut file_buf = Vec::new();
+    {
+        let mut w = StatamWriter::new(
+            std::io::Cursor::new(&mut file_buf),
+            Arc::clone(&schema),
+            opts,
+            Some(&mut pb),
+        )
+        .unwrap();
+        w.write_batch(&batch).unwrap();
+        w.finish().unwrap();
+    }
+    let mut pack_buf = Vec::new();
+    pb.finish(&mut pack_buf).unwrap();
+
+    let mut resolver = InMemoryPackResolver::new();
+    resolver.insert_bytes(pack_id, pack_buf).unwrap();
+    let reader = StatamReader::open(
+        Arc::new(SliceReader::new(file_buf)),
+        Some(Arc::new(resolver)),
+    )
+    .unwrap();
+    assert_eq!(reader.meta().rg_dir.len(), 1);
+
+    let batches = reader.scan(&ScanRequest::default()).unwrap();
+    assert!(
+        batches.len() >= 3,
+        "expected >= 3 waves of <= 128 MiB for 270 MiB 1-RG scan, got {}",
+        batches.len()
+    );
+    let mut seen_rows = 0usize;
+    let mut total_blob_bytes = 0usize;
+    for b in &batches {
+        let compact = b.compact(None).unwrap();
+        let id_col = compact.column(0).unwrap().materialize(None).unwrap();
+        let blob_col = compact.column(1).unwrap().materialize(None).unwrap();
+        let FlatData::I64(id_vals) = id_col.data() else {
+            panic!("expected I64");
+        };
+        let FlatData::Binary(bin_vals) = blob_col.data() else {
+            panic!("expected Binary");
+        };
+        for (i, &id_val) in id_vals.iter().enumerate().take(compact.num_rows()) {
+            let expected_id = seen_rows as i64;
+            assert_eq!(id_val, expected_id);
+            let slice = bin_vals.get(i).unwrap();
+            assert_eq!(slice.len(), BLOB_LEN);
+            assert_eq!(&slice[..4], &(seen_rows as u32).to_le_bytes());
+            assert_eq!(
+                &slice[BLOB_LEN - 4..],
+                &((seen_rows as u32) ^ 0xA5A5_5A5A).to_le_bytes()
+            );
+            total_blob_bytes += slice.len();
+            seen_rows += 1;
+        }
+    }
+    assert_eq!(seen_rows, NUM_ROWS);
+    assert_eq!(total_blob_bytes, NUM_ROWS * BLOB_LEN);
+}
+
+#[test]
+fn subchunked_fsst_e2e_scan_take_and_eval_utf8_substring_parity() {
+    let schema = Arc::new(
+        Schema::try_new(vec![
+            Field::new("id", DataType::I64, false),
+            Field::new("url", DataType::Utf8, true),
+            Field::new("tags", DataType::List(Box::new(DataType::Utf8)), true),
+            Field::new("attrs", DataType::MapUtf8, true),
+        ])
+        .unwrap(),
+    );
+
+    let n = 1_200usize;
+    let ids: Vec<i64> = (0..n as i64).collect();
+    let mut urls = Vec::with_capacity(n);
+    let mut url_valid = Vec::with_capacity(n);
+    let mut list_offsets = Vec::with_capacity(n + 1);
+    list_offsets.push(0u32);
+    let mut list_vals = Vec::with_capacity(n);
+    let mut map_offsets = Vec::with_capacity(n + 1);
+    map_offsets.push(0u32);
+    let mut map_keys = Vec::with_capacity(n);
+    let mut map_vals = Vec::with_capacity(n);
+
+    for i in 0..n {
+        let h1 = (i as u32).wrapping_mul(2654435761);
+        let h2 = (i as u32).wrapping_mul(2246822519);
+        if i % 31 == 0 {
+            urls.push(String::new());
+            url_valid.push(false);
+        } else {
+            urls.push(format!(
+                "https://observability.cetra.sh/api/v1/traces/span_{i:06}/req_{h1:08x}/op_{}",
+                if i % 43 == 0 {
+                    "AlertSpike"
+                } else {
+                    "steady_flow"
+                }
+            ));
+            url_valid.push(true);
+        }
+        list_vals.push(format!(
+            "https://cdn.cetra.sh/workers/module_{i:06}/hash_{h1:08x}_{h2:08x}/bundle_{:02}.js",
+            i % 29
+        ));
+        list_offsets.push(list_vals.len() as u32);
+        map_keys.push("endpoint".to_owned());
+        map_vals.push(format!(
+            "https://gateway.cetra.sh/v2/projects/proj_{i:06}/tok_{h1:08x}_{h2:08x}/route_{:02}",
+            i % 37
+        ));
+        map_offsets.push(map_keys.len() as u32);
+    }
+
+    let batch = Batch::try_new_all(
+        Arc::clone(&schema),
+        vec![
+            Column::Flat(FlatColumn::try_new(FlatData::I64(ids), None).unwrap()),
+            Column::Flat(
+                FlatColumn::try_new(
+                    FlatData::Utf8(
+                        Utf8Data::try_from_slices(
+                            urls.iter().map(String::as_str).collect::<Vec<_>>(),
+                        )
+                        .unwrap(),
+                    ),
+                    Some(Bitmap::from_bools(&url_valid)),
+                )
+                .unwrap(),
+            ),
+            Column::Flat(
+                FlatColumn::try_new(
+                    FlatData::List {
+                        item_type: DataType::Utf8,
+                        offsets: list_offsets,
+                        values: Box::new(Column::Flat(
+                            FlatColumn::try_new(
+                                FlatData::Utf8(
+                                    Utf8Data::try_from_slices(
+                                        list_vals.iter().map(String::as_str).collect::<Vec<_>>(),
+                                    )
+                                    .unwrap(),
+                                ),
+                                None,
+                            )
+                            .unwrap(),
+                        )),
+                    },
+                    None,
+                )
+                .unwrap(),
+            ),
+            Column::Flat(
+                FlatColumn::try_new(
+                    FlatData::MapUtf8(Box::new(
+                        MapData::try_new(
+                            map_offsets,
+                            Utf8Data::try_from_slices(
+                                map_keys.iter().map(String::as_str).collect::<Vec<_>>(),
+                            )
+                            .unwrap(),
+                            Utf8Data::try_from_slices(
+                                map_vals.iter().map(String::as_str).collect::<Vec<_>>(),
+                            )
+                            .unwrap(),
+                            None,
+                        )
+                        .unwrap(),
+                    )),
+                    None,
+                )
+                .unwrap(),
+            ),
+        ],
+        n,
+    )
+    .unwrap();
+
+    let write_with = |profile: WriteProfile| -> Vec<u8> {
+        let mut opts = WriteOptions::for_table(TableKind::Generic, profile);
+        opts.sort_cols = vec![0];
+        let mut buf = Vec::new();
+        let mut w = StatamWriter::new(
+            std::io::Cursor::new(&mut buf),
+            Arc::clone(&schema),
+            opts,
+            None,
+        )
+        .unwrap();
+        w.write_batch(&batch).unwrap();
+        w.finish().unwrap();
+        buf
+    };
+
+    let l0_bytes = write_with(WriteProfile::L0Fast);
+    let l1_bytes = write_with(WriteProfile::L1Compact);
+
+    let r_l0 = StatamReader::open(Arc::new(SliceReader::new(l0_bytes)), None).unwrap();
+    let r_l1 = StatamReader::open(Arc::new(SliceReader::new(l1_bytes)), None).unwrap();
+    r_l1.verify_full().unwrap();
+
+    // Verify `url` uses BLOCK_FLAG_FSST_SUBCHUNKED with outer Codec::None, and `tags` & shredded subcol use Codec::None.
+    let url_blk = &r_l1.meta().rg_blocks(1, 0)[0];
+    assert_eq!(url_blk.encoding, Encoding::Fsst);
+    assert_ne!(
+        url_blk.block_flags & crate::format::BLOCK_FLAG_FSST_SUBCHUNKED,
+        0
+    );
+    assert_eq!(url_blk.codec, Codec::None);
+    assert_eq!(url_blk.raw_len, url_blk.stored_len);
+    let list_blk = &r_l1.meta().rg_blocks(2, 0)[0];
+    assert_eq!(list_blk.encoding, Encoding::ListEncoded);
+    assert_eq!(list_blk.codec, Codec::None);
+    let sub_pidx = r_l1.meta().schema_meta.shredded_maps[0].keys[0].sub_col_idx as usize;
+    assert_eq!(r_l1.meta().rg_blocks(sub_pidx, 0)[0].codec, Codec::None);
+
+    // Substring queries: LIKE, ILIKE, and empty needle parity between L0Fast and L1Compact.
+    for req in [
+        ScanRequest {
+            substrings: vec![SubstringQuery::like("url", b"AlertSpike")],
+            ..Default::default()
+        },
+        ScanRequest {
+            substrings: vec![SubstringQuery::ilike("url", b"alertspike")],
+            ..Default::default()
+        },
+        ScanRequest {
+            substrings: vec![SubstringQuery::like("url", b"")],
+            ..Default::default()
+        },
+    ] {
+        let b0 = concat_scanned_batches(&schema, &r_l0.scan(&req).unwrap());
+        let b1 = concat_scanned_batches(&schema, &r_l1.scan(&req).unwrap());
+        assert_eq!(b0.num_rows(), b1.num_rows());
+        for c in 0..schema.len() {
+            assert!(b0.column(c).unwrap().semantic_eq(b1.column(c).unwrap()));
+        }
+    }
+
+    // Verify eval_utf8_block_substring_raw short-circuits empty needle without decompressing sub-chunks.
+    let mut raw_empty_test = vec![1u8, 1u8, b'a']; // FsstTable: 1 sym 'a'
+    raw_empty_test.extend_from_slice(&2u16.to_le_bytes()); // subchunk_rows = 2
+    raw_empty_test.extend_from_slice(&1u16.to_le_bytes()); // num_chunks = 1
+    raw_empty_test.push(Codec::Lz4 as u8);
+    raw_empty_test.extend_from_slice(&16u32.to_le_bytes()); // raw_len = 16
+    raw_empty_test.extend_from_slice(&4u32.to_le_bytes()); // stored_end = 4
+    raw_empty_test.extend_from_slice(&[0xFF, 0xFF, 0xFF, 0xFF]); // intentionally corrupt LZ4 payload
+    let fake_blk = BlockEntry {
+        first_row: 0,
+        row_count: 2,
+        null_count: 0,
+        offset: 0,
+        stored_len: raw_empty_test.len() as u32,
+        raw_len: raw_empty_test.len() as u32,
+        encoding: Encoding::Fsst,
+        codec: Codec::None,
+        block_flags: crate::format::BLOCK_FLAG_FSST_SUBCHUNKED,
+        min_inline_len: 0,
+        max_inline_len: 0,
+        reserved: [0; 3],
+        min_inline: [0; 16],
+        max_inline: [0; 16],
+    };
+    let empty_hit = eval_utf8_block_substring_raw(
+        &raw_empty_test,
+        &fake_blk,
+        2,
+        &Bitmap::new_ones(2),
+        b"",
+        false,
+        None,
+        None,
+    )
+    .unwrap();
+    assert!(empty_hit.all_ones());
+    // Non-empty needle actually decompresses and fails on the corrupt LZ4 payload.
+    assert!(
+        eval_utf8_block_substring_raw(
+            &raw_empty_test,
+            &fake_blk,
+            2,
+            &Bitmap::new_ones(2),
+            b"a",
+            false,
+            None,
+            None,
+        )
+        .is_err()
+    );
+
+    // Scattered take parity across L0Fast and L1Compact (coalesced into 1 Batch).
+    let indices = [0u64, 31, 255, 256, 511, 512, 767, 768, 1023, 1024, 1199];
+    let t0 = r_l0.take_rows(&indices, None, 1).unwrap();
+    let t1 = r_l1.take_rows(&indices, None, 2).unwrap();
+    assert_eq!(t0.len(), 1);
+    assert_eq!(t1.len(), 1);
+    assert_eq!(t1[0].num_rows(), indices.len());
+    for c in 0..schema.len() {
+        assert!(
+            t0[0]
+                .column(c)
+                .unwrap()
+                .semantic_eq(t1[0].column(c).unwrap())
+        );
+    }
+}
+
+#[test]
+fn take_rows_coalescing_single_batch_empty_proj_and_64mib_cap() {
+    // 1. Multi-MB scattered take across Const, ConstNull, Flat, List<Utf8>, Binary -> 1 Batch.
+    let schema = Arc::new(
+        Schema::try_new(vec![
+            Field::new("id", DataType::I64, false),
+            Field::new("const_tag", DataType::Utf8, false),
+            Field::new("all_null", DataType::I64, true),
+            Field::new("tags", DataType::List(Box::new(DataType::Utf8)), true),
+            Field::new("bin", DataType::Binary, true),
+        ])
+        .unwrap(),
+    );
+    let n = 600usize;
+    let ids: Vec<i64> = (0..n as i64).collect();
+    let const_col = Column::try_new_const(ScalarValue::Utf8("steady".to_owned()), n).unwrap();
+    let null_col = Column::try_new_const(ScalarValue::Null(DataType::I64), n).unwrap();
+    let list_offsets: Vec<u32> = (0..=n as u32).collect();
+    let list_items: Vec<String> = (0..n).map(|i| format!("tag_{i}")).collect();
+    let list_col = Column::Flat(
+        FlatColumn::try_new(
+            FlatData::List {
+                item_type: DataType::Utf8,
+                offsets: list_offsets,
+                values: Box::new(Column::Flat(
+                    FlatColumn::try_new(
+                        FlatData::Utf8(
+                            Utf8Data::try_from_slices(
+                                list_items.iter().map(String::as_str).collect::<Vec<_>>(),
+                            )
+                            .unwrap(),
+                        ),
+                        None,
+                    )
+                    .unwrap(),
+                )),
+            },
+            None,
+        )
+        .unwrap(),
+    );
+    let bins: Vec<Vec<u8>> = (0..n).map(|i| vec![(i & 0xFF) as u8; 32]).collect();
+    let bin_col = Column::Flat(
+        FlatColumn::try_new(
+            FlatData::Binary(
+                BinaryData::try_from_slices(bins.iter().map(Vec::as_slice).collect::<Vec<_>>())
+                    .unwrap(),
+            ),
+            None,
+        )
+        .unwrap(),
+    );
+    let batch = Batch::try_new_all(
+        Arc::clone(&schema),
+        vec![
+            Column::Flat(FlatColumn::try_new(FlatData::I64(ids), None).unwrap()),
+            const_col,
+            null_col,
+            list_col,
+            bin_col,
+        ],
+        n,
+    )
+    .unwrap();
+
+    let mut opts = WriteOptions::for_table(TableKind::Generic, WriteProfile::L1Compact);
+    opts.row_group_size = 200;
+    opts.mini_block_size = 64;
+    let mut file_buf = Vec::new();
+    {
+        let mut w = StatamWriter::new(
+            std::io::Cursor::new(&mut file_buf),
+            Arc::clone(&schema),
+            opts,
+            None,
+        )
+        .unwrap();
+        w.write_batch(&batch).unwrap();
+        w.finish().unwrap();
+    }
+    let reader = StatamReader::open(Arc::new(SliceReader::new(file_buf)), None).unwrap();
+    assert!(reader.meta().rg_dir.len() >= 3);
+
+    let scattered = [5u64, 70, 140, 210, 350, 480, 599];
+    let taken = reader.take_rows(&scattered, None, 2).unwrap();
+    assert_eq!(
+        taken.len(),
+        1,
+        "multi-RG/multi-MB small take must coalesce into 1 Batch"
+    );
+    assert_eq!(taken[0].num_rows(), scattered.len());
+    assert!(matches!(taken[0].selection(), Selection::All));
+    assert!(matches!(taken[0].column(1).unwrap(), Column::Const { .. }));
+    assert!(matches!(taken[0].column(2).unwrap(), Column::Const { .. }));
+
+    // Empty projection -> 1 empty-column Batch with exact row count.
+    let taken_empty = reader.take_rows(&scattered, Some(&[]), 1).unwrap();
+    assert_eq!(taken_empty.len(), 1);
+    assert!(taken_empty[0].columns().is_empty());
+    assert_eq!(taken_empty[0].num_rows(), scattered.len());
+    assert!(matches!(taken_empty[0].selection(), Selection::All));
+
+    // 2. Large-blob take respects the 64 MiB coalescing byte cap without overflow.
+    #[cfg(not(miri))]
+    {
+        let blob_schema = Arc::new(
+            Schema::try_new(vec![
+                Field::new("id", DataType::I64, false),
+                Field::new("blob", DataType::Binary, false),
+            ])
+            .unwrap(),
+        );
+        const BLOB_ROWS: usize = 5;
+        const BLOB_SIZE: usize = 20 * 1024 * 1024; // 5 * 20 MiB = 100 MiB > 64 MiB cap
+        let mut blob_bytes = Vec::with_capacity(BLOB_ROWS * BLOB_SIZE);
+        let mut blob_offs = Vec::with_capacity(BLOB_ROWS + 1);
+        blob_offs.push(0u32);
+        for r in 0..BLOB_ROWS {
+            let start = blob_bytes.len();
+            blob_bytes.resize(
+                start + BLOB_SIZE,
+                (r as u8).wrapping_mul(17).wrapping_add(3),
+            );
+            blob_bytes[start..start + 4].copy_from_slice(&(r as u32).to_le_bytes());
+            blob_offs.push(blob_bytes.len() as u32);
+        }
+        let blob_batch = Batch::try_new_all(
+            Arc::clone(&blob_schema),
+            vec![
+                Column::Flat(
+                    FlatColumn::try_new(FlatData::I64((0..BLOB_ROWS as i64).collect()), None)
+                        .unwrap(),
+                ),
+                Column::Flat(
+                    FlatColumn::try_new(
+                        FlatData::Binary(BinaryData::try_new(blob_offs, blob_bytes).unwrap()),
+                        None,
+                    )
+                    .unwrap(),
+                ),
+            ],
+            BLOB_ROWS,
+        )
+        .unwrap();
+
+        let pack_id = [0xC3u8; 16];
+        let mut pb = ChunkPackBuilder::new(
+            pack_id,
+            PackWriteOptions {
+                zstd_level: 1,
+                ..PackWriteOptions::default()
+            },
+        );
+        let mut b_opts = WriteOptions::for_table(TableKind::Generic, WriteProfile::L1Compact);
+        b_opts.payload_cols = vec!["blob".to_owned()];
+        b_opts.pack_id = Some(pack_id);
+        b_opts.mini_block_size = 1; // 5 separate MBs -> triggers coalescing across MBs
+        let mut b_file = Vec::new();
+        {
+            let mut w = StatamWriter::new(
+                std::io::Cursor::new(&mut b_file),
+                Arc::clone(&blob_schema),
+                b_opts,
+                Some(&mut pb),
+            )
+            .unwrap();
+            w.write_batch(&blob_batch).unwrap();
+            w.finish().unwrap();
+        }
+        let mut b_pack = Vec::new();
+        pb.finish(&mut b_pack).unwrap();
+
+        let mut resolver = InMemoryPackResolver::new();
+        resolver.insert_bytes(pack_id, b_pack).unwrap();
+        let b_reader =
+            StatamReader::open(Arc::new(SliceReader::new(b_file)), Some(Arc::new(resolver)))
+                .unwrap();
+        let big_taken = b_reader.take_rows(&[0, 1, 2, 3, 4], None, 1).unwrap();
+        // 3 * 20 MiB = 60 MiB <= 64 MiB (batch 0), 2 * 20 MiB = 40 MiB <= 64 MiB (batch 1) => 2 batches!
+        assert_eq!(
+            big_taken.len(),
+            2,
+            "100 MiB take across 5 x 20 MiB MBs must split at 64 MiB cap into 2 batches, got {}",
+            big_taken.len()
+        );
+        assert_eq!(big_taken[0].num_rows(), 3);
+        assert_eq!(big_taken[1].num_rows(), 2);
+        let mut seen = 0u32;
+        for b in &big_taken {
+            let bin_col = b.column(1).unwrap().materialize(None).unwrap();
+            let FlatData::Binary(bd) = bin_col.data() else {
+                panic!("expected Binary");
+            };
+            for i in 0..b.num_rows() {
+                let s = bd.get(i).unwrap();
+                assert_eq!(s.len(), BLOB_SIZE);
+                assert_eq!(&s[..4], &seen.to_le_bytes());
+                seen += 1;
+            }
+        }
+        assert_eq!(seen, BLOB_ROWS as u32);
+    }
+}
+
+#[test]
+fn l0_external_payload_is_not_null_filter_and_project_fetches_l0_region() {
+    let schema = Arc::new(
+        Schema::try_new(vec![
+            Field::new("id", DataType::I64, false),
+            Field::new("blob", DataType::Binary, true),
+            Field::new("body", DataType::Utf8, true),
+        ])
+        .unwrap(),
+    );
+    let n = 32usize;
+    let ids: Vec<i64> = (0..n as i64).collect();
+    let mut blobs: Vec<Vec<u8>> = Vec::with_capacity(n);
+    let mut blob_valid = Vec::with_capacity(n);
+    let mut bodies: Vec<String> = Vec::with_capacity(n);
+    let mut body_valid = Vec::with_capacity(n);
+    for i in 0..n {
+        if i % 3 == 0 {
+            blobs.push(Vec::new());
+            blob_valid.push(false);
+        } else {
+            // > inline threshold so chunks live in the Row Group's L0 payload region.
+            let mut b = vec![(i as u8).wrapping_mul(13).wrapping_add(7); 2_048];
+            b[0..4].copy_from_slice(&(i as u32).to_le_bytes());
+            blobs.push(b);
+            blob_valid.push(true);
+        }
+        if i % 4 == 0 {
+            bodies.push(String::new());
+            body_valid.push(false);
+        } else {
+            bodies.push(format!(
+                "l0-external-payload-utf8-row-{i:04}-{}",
+                "abcdefghij".repeat(200)
+            ));
+            body_valid.push(true);
+        }
+    }
+    let batch = Batch::try_new_all(
+        Arc::clone(&schema),
+        vec![
+            Column::Flat(FlatColumn::try_new(FlatData::I64(ids), None).unwrap()),
+            Column::Flat(
+                FlatColumn::try_new(
+                    FlatData::Binary(
+                        BinaryData::try_from_slices(
+                            blobs.iter().map(Vec::as_slice).collect::<Vec<_>>(),
+                        )
+                        .unwrap(),
+                    ),
+                    Some(Bitmap::from_bools(&blob_valid)),
+                )
+                .unwrap(),
+            ),
+            Column::Flat(
+                FlatColumn::try_new(
+                    FlatData::Utf8(
+                        Utf8Data::try_from_slices(
+                            bodies.iter().map(String::as_str).collect::<Vec<_>>(),
+                        )
+                        .unwrap(),
+                    ),
+                    Some(Bitmap::from_bools(&body_valid)),
+                )
+                .unwrap(),
+            ),
+        ],
+        n,
+    )
+    .unwrap();
+
+    let mut opts = WriteOptions::for_table(TableKind::Generic, WriteProfile::L0Fast);
+    opts.payload_cols = vec!["blob".to_owned(), "body".to_owned()];
+    let mut file_buf = Vec::new();
+    {
+        let mut w = StatamWriter::new(
+            std::io::Cursor::new(&mut file_buf),
+            Arc::clone(&schema),
+            opts,
+            None,
+        )
+        .unwrap();
+        w.write_batch(&batch).unwrap();
+        w.finish().unwrap();
+    }
+
+    let reader = StatamReader::open(Arc::new(SliceReader::new(file_buf)), None).unwrap();
+    assert!(
+        reader.meta().rg_dir[0].l0_payload_len > 0,
+        "L0Fast payload chunks must populate rg.l0_payload_len"
+    );
+
+    // Binary ExternalPayload filtered with IsNotNull in Phase 1 AND projected in Phase 2.
+    let expected_blob_rows: Vec<usize> = (0..n).filter(|&i| blob_valid[i]).collect();
+    for mode in [CoalesceMode::Scan, CoalesceMode::Auto] {
+        let req = ScanRequest {
+            projection: None,
+            predicates: vec![Predicate::new("blob", ZonePred::IsNotNull)],
+            coalesce_mode: mode,
+            ..Default::default()
+        };
+        let batches = reader.scan(&req).unwrap();
+        let merged = concat_scanned_batches(&schema, &batches);
+        assert_eq!(merged.num_rows(), expected_blob_rows.len());
+        let id_col = merged.column(0).unwrap().materialize(None).unwrap();
+        let blob_col = merged.column(1).unwrap().materialize(None).unwrap();
+        let body_col = merged.column(2).unwrap().materialize(None).unwrap();
+        let FlatData::I64(got_ids) = id_col.data() else {
+            panic!("expected I64");
+        };
+        let FlatData::Binary(got_blobs) = blob_col.data() else {
+            panic!("expected Binary");
+        };
+        let FlatData::Utf8(got_bodies) = body_col.data() else {
+            panic!("expected Utf8");
+        };
+        for (pos, &orig_row) in expected_blob_rows.iter().enumerate() {
+            assert_eq!(got_ids[pos], orig_row as i64);
+            assert!(!blob_col.is_null(pos));
+            assert_eq!(got_blobs.get(pos).unwrap(), blobs[orig_row].as_slice());
+            assert_eq!(!body_col.is_null(pos), body_valid[orig_row]);
+            if body_valid[orig_row] {
+                assert_eq!(got_bodies.get(pos).unwrap(), bodies[orig_row].as_str());
+            }
+        }
+    }
+
+    // Utf8 ExternalPayload filtered with IsNotNull in Phase 1 AND projected in Phase 2.
+    let expected_body_rows: Vec<usize> = (0..n).filter(|&i| body_valid[i]).collect();
+    for mode in [CoalesceMode::Scan, CoalesceMode::Auto] {
+        let req = ScanRequest {
+            projection: None,
+            predicates: vec![Predicate::new("body", ZonePred::IsNotNull)],
+            coalesce_mode: mode,
+            ..Default::default()
+        };
+        let batches = reader.scan(&req).unwrap();
+        let merged = concat_scanned_batches(&schema, &batches);
+        assert_eq!(merged.num_rows(), expected_body_rows.len());
+        let id_col = merged.column(0).unwrap().materialize(None).unwrap();
+        let body_col = merged.column(2).unwrap().materialize(None).unwrap();
+        let FlatData::I64(got_ids) = id_col.data() else {
+            panic!("expected I64");
+        };
+        let FlatData::Utf8(got_bodies) = body_col.data() else {
+            panic!("expected Utf8");
+        };
+        for (pos, &orig_row) in expected_body_rows.iter().enumerate() {
+            assert_eq!(got_ids[pos], orig_row as i64);
+            assert!(!body_col.is_null(pos));
+            assert_eq!(got_bodies.get(pos).unwrap(), bodies[orig_row].as_str());
+        }
+    }
+}
+
+#[test]
+fn estimate_column_bytes_is_conservative_for_const_dict_and_rle() {
+    use cetra_column::{DictColumn, RleColumn};
+
+    let big = vec![0xABu8; 1024 * 1024]; // 1 MiB
+    let const_col = Column::try_new_const(ScalarValue::Binary(big.clone()), 100).unwrap();
+    assert!(
+        estimate_column_bytes(&const_col) >= 100 * 1024 * 1024,
+        "Const binary estimate must scale with len * value size"
+    );
+
+    let dict_vals = FlatColumn::try_new(
+        FlatData::Binary(BinaryData::try_from_slices(vec![big.as_slice()]).unwrap()),
+        None,
+    )
+    .unwrap();
+    let dict_col =
+        Column::Dict(DictColumn::try_new(dict_vals.clone(), vec![0u32; 100], None).unwrap());
+    assert!(
+        estimate_column_bytes(&dict_col) >= 100 * 1024 * 1024,
+        "Dict binary estimate must account for materialized bytes"
+    );
+
+    let rle_col = Column::Rle(RleColumn::try_new(dict_vals, vec![100u32]).unwrap());
+    assert!(
+        estimate_column_bytes(&rle_col) >= 100 * 1024 * 1024,
+        "Rle binary estimate must account for materialized bytes"
+    );
+}

@@ -152,13 +152,13 @@ pub fn gdpr_rewrite_day(
     let mut pack_readers: HashMap<[u8; 16], Arc<ChunkPackReader>> =
         HashMap::with_capacity(packs.len());
     let mut live_chunks: HashMap<[u8; 16], Bitmap> = HashMap::with_capacity(packs.len());
-    let mut boundary_old_chunks: HashMap<[u8; 16], Bitmap> = HashMap::with_capacity(packs.len());
+    let mut boundary_utf8_chunks: HashMap<[u8; 16], Bitmap> = HashMap::with_capacity(packs.len());
     for (&pack_id, pack_reader) in packs {
         let opened = Arc::new(ChunkPackReader::open(Arc::clone(pack_reader))?);
         let chunk_count = opened.toc().chunks.len();
         pack_readers.insert(pack_id, opened);
         live_chunks.insert(pack_id, Bitmap::new_zeroed(chunk_count));
-        boundary_old_chunks.insert(pack_id, Bitmap::new_zeroed(chunk_count));
+        boundary_utf8_chunks.insert(pack_id, Bitmap::new_zeroed(chunk_count));
     }
 
     // Step 1: Identify surviving rows across all files & mark live chunks per pack.
@@ -215,11 +215,12 @@ pub fn gdpr_rewrite_day(
                         }
                     }
 
+                    let is_utf8_col = meta.schema().fields()[cidx].data_type == DataType::Utf8;
                     let mut surviving_refs = Vec::with_capacity(surviving_indices.len());
                     for &idx in &surviving_indices {
                         let row_ref = &all_rg_refs[idx as usize];
                         if let PayloadRefRow::Chunks(refs) = row_ref {
-                            let is_multi_chunk = refs.len() > 1;
+                            let is_multi_chunk_utf8 = is_utf8_col && refs.len() > 1;
                             for &(pidx, cid) in refs {
                                 if pidx != L0_LOCAL_PACK_IDX {
                                     let pack_id = *meta
@@ -238,8 +239,8 @@ pub fn gdpr_rewrite_day(
                                         });
                                     }
                                     let _ = bm.set(cid as usize, true);
-                                    if is_multi_chunk
-                                        && let Some(b_bm) = boundary_old_chunks.get_mut(&pack_id)
+                                    if is_multi_chunk_utf8
+                                        && let Some(b_bm) = boundary_utf8_chunks.get_mut(&pack_id)
                                     {
                                         let _ = b_bm.set(cid as usize, true);
                                     }
@@ -314,7 +315,7 @@ pub fn gdpr_rewrite_day(
         };
         let mut builder = ChunkPackBuilder::new(new_pack_id, pack_opts);
         builder.enable_boundary_tracking();
-        let boundary_old = &boundary_old_chunks[&old_pack_id];
+        let boundary_utf8 = &boundary_utf8_chunks[&old_pack_id];
 
         let hashes = pack.read_hash_table()?;
         let has_hashes = hashes.len() == total_chunks;
@@ -341,13 +342,19 @@ pub fn gdpr_rewrite_day(
                     continue;
                 }
 
-                let edges_ok = edges.len() == total_chunks
-                    && (first_cid..first_cid + cnt).all(|cid| {
-                        let loc = toc.chunks[cid];
-                        !(boundary_old.get(cid)
-                            && loc.raw_len > 0
-                            && (edges[cid].0.is_empty() || edges[cid].1.is_empty()))
-                    });
+                let has_utf8_boundary_in_frame =
+                    (first_cid..first_cid + cnt).any(|cid| boundary_utf8.get(cid));
+                let edges_ok = if edges.is_empty() {
+                    !has_utf8_boundary_in_frame
+                } else {
+                    edges.len() == total_chunks
+                        && (first_cid..first_cid + cnt).all(|cid| {
+                            let loc = toc.chunks[cid];
+                            !(boundary_utf8.get(cid)
+                                && loc.raw_len > 0
+                                && (edges[cid].0.is_empty() || edges[cid].1.is_empty()))
+                        })
+                };
 
                 if live_in_frame == cnt
                     && frame_has_no_slack(&toc.chunks[first_cid..first_cid + cnt], f_entry.raw_len)
@@ -363,7 +370,13 @@ pub fn gdpr_rewrite_day(
                         })
                         .collect();
                     let filter_slice = trigrams[fid].as_ref().map(|b| b.as_bytes()).unwrap_or(&[]);
-                    let edge_slice = &edges[first_cid..first_cid + cnt];
+                    let empty_edges: Vec<(Vec<u8>, Vec<u8>)>;
+                    let edge_slice = if edges.is_empty() {
+                        empty_edges = vec![(Vec::new(), Vec::new()); cnt];
+                        &empty_edges[..]
+                    } else {
+                        &edges[first_cid..first_cid + cnt]
+                    };
 
                     let new_cids = builder.append_raw_frame(
                         &raw_frame,
@@ -375,7 +388,7 @@ pub fn gdpr_rewrite_day(
                     for (offset, new_cid) in new_cids.into_iter().enumerate() {
                         let old_cid = first_cid + offset;
                         chunk_remap[old_cid] = Some(new_cid);
-                        if boundary_old.get(old_cid) {
+                        if boundary_utf8.get(old_cid) {
                             builder.mark_boundary_chunk(new_cid);
                         }
                     }
@@ -394,7 +407,7 @@ pub fn gdpr_rewrite_day(
                             })?;
                             let new_cid = builder.intern_chunk(slice)?;
                             *slot = Some(new_cid);
-                            if boundary_old.get(old_cid) {
+                            if boundary_utf8.get(old_cid) {
                                 builder.mark_boundary_chunk(new_cid);
                             }
                         } else {
@@ -437,7 +450,7 @@ pub fn gdpr_rewrite_day(
                     })?;
                     let new_cid = builder.intern_chunk(slice)?;
                     chunk_remap[old_cid] = Some(new_cid);
-                    if boundary_old.get(old_cid) {
+                    if boundary_utf8.get(old_cid) {
                         builder.mark_boundary_chunk(new_cid);
                     }
                 }
@@ -712,7 +725,7 @@ fn derive_write_options_from_meta(meta: &crate::reader::StatamFileMeta) -> Write
         .iter()
         .enumerate()
         .filter(|&(i, f)| {
-            f.data_type == DataType::Utf8
+            matches!(f.data_type, DataType::Utf8 | DataType::Binary)
                 && meta.col_dir[i].locality_group == LocalityGroup::ExternalPayload
         })
         .map(|(_, f)| f.name.clone())
