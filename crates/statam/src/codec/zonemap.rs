@@ -23,7 +23,7 @@ use crate::format::{
 };
 
 /// Zone-map metadata computed for one mini-block.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 pub struct ZoneMapSummary {
     /// `BLOCK_FLAG_*` bitmask (`HAS_NULLS`, `ALL_NULL`, `MIN_MAX_VALID`, `HAS_NAN`).
     pub block_flags: u8,
@@ -37,6 +37,17 @@ pub struct ZoneMapSummary {
     pub min_inline: [u8; 16],
     /// Upper bound.
     pub max_inline: [u8; 16],
+}
+
+impl fmt::Debug for ZoneMapSummary {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ZoneMapSummary")
+            .field("block_flags", &self.block_flags)
+            .field("null_count", &self.null_count)
+            .field("min_inline_len", &self.min_inline_len)
+            .field("max_inline_len", &self.max_inline_len)
+            .finish()
+    }
 }
 
 impl ZoneMapSummary {

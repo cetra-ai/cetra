@@ -1,6 +1,7 @@
 //! Immutable content-addressed `.stpk` chunk pack builder and reader.
 
 use std::collections::{BTreeSet, HashMap};
+use std::fmt;
 use std::io::Write;
 use std::ops::Range;
 use std::sync::Arc;
@@ -10,11 +11,11 @@ use bytes::Bytes;
 use crate::StatamError;
 use crate::format::{
     CHUNK_LOC_LEN, ChunkLoc, Codec, DEFAULT_TAIL_HINT, FORMAT_VERSION, FRAME_ENTRY_LEN, FrameEntry,
-    MAX_BLOCK_RAW_BYTES, MAX_FRAME_RAW_BYTES, MAX_HOT_TAIL_BYTES, MAX_PACK_CHUNKS, MAX_PACK_FRAMES,
-    PACK_FLAG_HAS_DICT, PACK_FLAG_HAS_TRIGRAM, PACK_FLAG_TOC_LZ4, PACK_FRAME_FLAG_USES_DICT,
-    PACK_FRAME_HEADER_LEN, PACK_FRAME_MAGIC, PACK_HEADER_LEN, PACK_POSTSCRIPT_LEN, PackHeader,
-    PackPostscript, compress_guarded, decompress_checked, read_framed_pack_frame,
-    write_framed_pack_frame,
+    MAX_BLOCK_RAW_BYTES, MAX_BLOOM_BYTES, MAX_FRAME_RAW_BYTES, MAX_HOT_TAIL_BYTES, MAX_PACK_CHUNKS,
+    MAX_PACK_FRAMES, PACK_FLAG_HAS_DICT, PACK_FLAG_HAS_TRIGRAM, PACK_FLAG_TOC_LZ4,
+    PACK_FRAME_FLAG_USES_DICT, PACK_FRAME_HEADER_LEN, PACK_FRAME_MAGIC, PACK_HEADER_LEN,
+    PACK_POSTSCRIPT_LEN, PackHeader, PackPostscript, compress_guarded, decompress_checked,
+    read_framed_pack_frame, write_framed_pack_frame,
 };
 use crate::io::{RangeReader, S3_CACHE_BLOCK_BYTES};
 use crate::simd::trigram::{
@@ -90,7 +91,7 @@ pub struct PackWriteStats {
     pub toc_stored_bytes: u32,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 struct PendingChunk {
     hash16: [u8; 16],
     offset_in_frame: u32,
@@ -99,8 +100,18 @@ struct PendingChunk {
     tail: Vec<u8>,
 }
 
+impl fmt::Debug for PendingChunk {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("PendingChunk")
+            .field("offset_in_frame", &self.offset_in_frame)
+            .field("raw_len", &self.raw_len)
+            .field("head_len", &self.head.len())
+            .field("tail_len", &self.tail.len())
+            .finish()
+    }
+}
+
 /// Streaming builder for an immutable `.stpk` chunk pack.
-#[derive(Debug)]
 pub struct ChunkPackBuilder {
     pack_id: [u8; 16],
     options: PackWriteOptions,
@@ -119,9 +130,28 @@ pub struct ChunkPackBuilder {
     stored_frame_bytes: u64,
 }
 
+impl fmt::Debug for ChunkPackBuilder {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ChunkPackBuilder")
+            .field("options", &self.options)
+            .field("buf_len", &self.buf.len())
+            .field("frame_count", &self.frames.len())
+            .field("chunk_count", &self.chunk_locs.len())
+            .field("trigram_buf_len", &self.trigram_buf.len())
+            .field("cur_raw_len", &self.cur_raw.len())
+            .field("cur_chunk_count", &self.cur_chunks.len())
+            .field("dedup_hits", &self.dedup_hits)
+            .field("raw_chunk_bytes", &self.raw_chunk_bytes)
+            .field("stored_frame_bytes", &self.stored_frame_bytes)
+            .finish()
+    }
+}
+
 impl ChunkPackBuilder {
     /// Creates a new `.stpk` pack builder for `pack_id`.
-    pub fn new(pack_id: [u8; 16], options: PackWriteOptions) -> Self {
+    pub fn new(pack_id: [u8; 16], mut options: PackWriteOptions) -> Self {
+        options.target_frame_raw_bytes =
+            options.target_frame_raw_bytes.clamp(1, MAX_FRAME_RAW_BYTES);
         Self {
             pack_id,
             options,
@@ -662,11 +692,7 @@ impl ChunkPackBuilder {
             .min(cap_pow2);
 
         let mut bloom = TrigramBloom::new(desired);
-        for c in &self.cur_chunks {
-            let start = c.offset_in_frame as usize;
-            let end = start + c.raw_len as usize;
-            bloom.insert_bytes(&self.cur_raw[start..end]);
-        }
+        bloom.insert_hashes(&hashes);
         if bloom.bit_density() > MAX_TRIGRAM_DENSITY {
             return Ok((0, 0));
         }
@@ -712,8 +738,8 @@ pub struct ChunkPackReader {
     data_end: u64,
 }
 
-impl std::fmt::Debug for ChunkPackReader {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl fmt::Debug for ChunkPackReader {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("ChunkPackReader")
             .field("file_len", &self.reader.file_len())
             .field("frame_count", &self.toc.frames.len())
@@ -993,6 +1019,11 @@ impl ChunkPackReader {
         if ps.trigram_len == 0 {
             return Ok(vec![None; self.toc.frames.len()]);
         }
+        if (ps.trigram_len as usize) > MAX_BLOOM_BYTES {
+            return Err(StatamError::BoundsExceeded {
+                reason: "pack trigram_len exceeds MAX_BLOOM_BYTES",
+            });
+        }
 
         let start = ps.trigram_off;
         let end =
@@ -1001,6 +1032,12 @@ impl ChunkPackReader {
                 .ok_or(StatamError::BoundsExceeded {
                     reason: "trigram section range overflow",
                 })?;
+        let file_bound = self.data_end.min(self.reader.file_len());
+        if start < PACK_HEADER_LEN as u64 || end > file_bound {
+            return Err(StatamError::Corrupt {
+                reason: "trigram section out of pack bounds",
+            });
+        }
         let section = self.reader.read_range(start..end)?;
         if section.len() != ps.trigram_len as usize {
             return Err(StatamError::Corrupt {
@@ -1040,6 +1077,11 @@ impl ChunkPackReader {
                 reason: "missing edge table for non-empty chunk pack",
             });
         }
+        if (ps.edge_table_len as usize) > MAX_BLOCK_RAW_BYTES {
+            return Err(StatamError::BoundsExceeded {
+                reason: "pack edge_table_len exceeds MAX_BLOCK_RAW_BYTES",
+            });
+        }
 
         let start = ps.edge_table_off;
         let end =
@@ -1048,6 +1090,12 @@ impl ChunkPackReader {
                 .ok_or(StatamError::BoundsExceeded {
                     reason: "edge table range overflow",
                 })?;
+        let file_bound = self.data_end.min(self.reader.file_len());
+        if start < PACK_HEADER_LEN as u64 || end > file_bound {
+            return Err(StatamError::Corrupt {
+                reason: "edge table out of pack bounds",
+            });
+        }
         let framed = self.reader.read_range(start..end)?;
         let (_, _, raw) = read_framed_pack_frame(&framed, MAX_BLOCK_RAW_BYTES)?;
 
@@ -1164,9 +1212,19 @@ fn validate_trailer_sections(ps: &PackPostscript, data_end: u64) -> Result<(), S
         check_pack_range(ps.hash_table_off, hash_bytes, min_off, data_end)?;
     }
     if ps.trigram_len > 0 {
+        if (ps.trigram_len as usize) > MAX_BLOOM_BYTES {
+            return Err(StatamError::BoundsExceeded {
+                reason: "pack trigram_len exceeds MAX_BLOOM_BYTES",
+            });
+        }
         check_pack_range(ps.trigram_off, u64::from(ps.trigram_len), min_off, data_end)?;
     }
     if ps.edge_table_len > 0 {
+        if (ps.edge_table_len as usize) > MAX_BLOCK_RAW_BYTES {
+            return Err(StatamError::BoundsExceeded {
+                reason: "pack edge_table_len exceeds MAX_BLOCK_RAW_BYTES",
+            });
+        }
         check_pack_range(
             ps.edge_table_off,
             u64::from(ps.edge_table_len),
@@ -1197,6 +1255,11 @@ fn validate_frame_entry(
     ps: &PackPostscript,
     data_end: u64,
 ) -> Result<(), StatamError> {
+    if (entry.stored_len as usize) > MAX_FRAME_RAW_BYTES + 1024 {
+        return Err(StatamError::BoundsExceeded {
+            reason: "pack frame stored_len exceeds MAX_FRAME_RAW_BYTES + 1024",
+        });
+    }
     let total_len = (PACK_FRAME_HEADER_LEN as u64)
         .checked_add(u64::from(entry.stored_len))
         .ok_or(StatamError::BoundsExceeded {
@@ -1531,5 +1594,41 @@ mod tests {
         assert_eq!(r.toc().frames[1].filter_len, 0);
         let blooms = r.read_trigram_section().unwrap();
         assert_eq!(blooms, vec![None, None]);
+    }
+
+    #[test]
+    fn pack_clamps_target_frame_bytes_and_rejects_oversized_sections() {
+        // target_frame_raw_bytes = 0 is clamped to 1 (flushes each non-empty chunk).
+        let opts_zero = PackWriteOptions {
+            codec: test_codec(),
+            target_frame_raw_bytes: 0,
+            ..PackWriteOptions::default()
+        };
+        let b_zero = ChunkPackBuilder::new([9u8; 16], opts_zero);
+        assert_eq!(b_zero.options.target_frame_raw_bytes, 1);
+
+        let opts_huge = PackWriteOptions {
+            codec: test_codec(),
+            target_frame_raw_bytes: usize::MAX,
+            ..PackWriteOptions::default()
+        };
+        let b_huge = ChunkPackBuilder::new([10u8; 16], opts_huge);
+        assert_eq!(b_huge.options.target_frame_raw_bytes, MAX_FRAME_RAW_BYTES);
+
+        // Crafted trailer with trigram_off + trigram_len > file_len rejected on open before read_range.
+        let mut b = ChunkPackBuilder::new([11u8; 16], PackWriteOptions::default());
+        b.intern_chunk(&vec![b'z'; 512]).unwrap();
+        let mut bytes = Vec::new();
+        b.finish(&mut bytes).unwrap();
+
+        let ps_start = bytes.len() - PACK_POSTSCRIPT_LEN;
+        let mut ps = PackPostscript::decode(&bytes[ps_start..]).unwrap();
+        ps.trigram_off = bytes.len() as u64;
+        ps.trigram_len = 256;
+        bytes[ps_start..].copy_from_slice(&ps.encode());
+        assert!(matches!(
+            ChunkPackReader::open(Arc::new(SliceReader::new(bytes))),
+            Err(StatamError::Corrupt { .. })
+        ));
     }
 }

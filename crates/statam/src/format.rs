@@ -1,5 +1,6 @@
 //! Statam v0 binary wire format constants, structs, schema codecs, and framing.
 
+use std::fmt;
 use std::sync::Arc;
 
 use cetra_column::{DataType, Field, Schema};
@@ -155,8 +156,8 @@ pub const MAX_DECOMPRESS_SLACK: u64 = 4_096;
 pub const MAX_SHREDDED_KEYS: usize = 64;
 /// Maximum delta tail-sharing chain depth in `PayloadRefs`.
 pub const MAX_REF_CHAIN_DEPTH: usize = 15;
-/// Maximum chunks referenced by a single row payload.
-pub const MAX_CHUNKS_PER_ROW: usize = 65_536;
+/// Maximum chunks referenced by a single row payload (`u16::MAX` to match wire `u16` counts).
+pub const MAX_CHUNKS_PER_ROW: usize = u16::MAX as usize;
 /// Maximum reconstructed bytes for a single row payload (64 MiB).
 pub const MAX_ROW_PAYLOAD_BYTES: usize = 64 * 1024 * 1024;
 /// Maximum reconstructed bytes across one batch's `PayloadRefs` column (256 MiB).
@@ -1071,6 +1072,16 @@ impl PackPostscript {
                 reason: "pack dict_len exceeds MAX_DICT_BYTES",
             });
         }
+        if (trigram_len as usize) > MAX_BLOOM_BYTES {
+            return Err(StatamError::BoundsExceeded {
+                reason: "pack trigram_len exceeds MAX_BLOOM_BYTES",
+            });
+        }
+        if (edge_table_len as usize) > MAX_BLOCK_RAW_BYTES {
+            return Err(StatamError::BoundsExceeded {
+                reason: "pack edge_table_len exceeds MAX_BLOCK_RAW_BYTES",
+            });
+        }
 
         Ok(Self {
             toc_stored_len,
@@ -1244,7 +1255,13 @@ impl RowGroupEntry {
         let core_len = read_u32_le(buf, 16);
         let wide_len = read_u32_le(buf, 20);
         let wide_offset = read_u64_le(buf, 24);
-        if wide_offset != core_offset.saturating_add(u64::from(core_len)) {
+        let expected_wide_offset =
+            core_offset
+                .checked_add(u64::from(core_len))
+                .ok_or(StatamError::BoundsExceeded {
+                    reason: "row group core_offset + core_len overflow",
+                })?;
+        if wide_offset != expected_wide_offset {
             return Err(StatamError::Corrupt {
                 reason: "row group wide_offset not contiguous with core_offset + core_len",
             });
@@ -1270,7 +1287,7 @@ impl RowGroupEntry {
 }
 
 /// 64-byte Mini-Block Directory Entry (including inline 16-byte min/max zone map).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 pub struct BlockEntry {
     /// Starting row index relative to the file.
     pub first_row: u32,
@@ -1300,6 +1317,24 @@ pub struct BlockEntry {
     pub min_inline: [u8; 16],
     /// Inline upper bound (`0..max_inline_len`).
     pub max_inline: [u8; 16],
+}
+
+impl fmt::Debug for BlockEntry {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("BlockEntry")
+            .field("first_row", &self.first_row)
+            .field("row_count", &self.row_count)
+            .field("null_count", &self.null_count)
+            .field("offset", &self.offset)
+            .field("stored_len", &self.stored_len)
+            .field("raw_len", &self.raw_len)
+            .field("encoding", &self.encoding)
+            .field("codec", &self.codec)
+            .field("block_flags", &self.block_flags)
+            .field("min_inline_len", &self.min_inline_len)
+            .field("max_inline_len", &self.max_inline_len)
+            .finish()
+    }
 }
 
 impl BlockEntry {
@@ -1342,6 +1377,12 @@ impl BlockEntry {
                 reason: "mini-block null_count exceeds row_count",
             });
         }
+        let stored_len = read_u32_le(buf, 16);
+        if (stored_len as usize) > MAX_BLOCK_RAW_BYTES + 1024 {
+            return Err(StatamError::BoundsExceeded {
+                reason: "mini-block stored_len exceeds MAX_BLOCK_RAW_BYTES + 1024",
+            });
+        }
         let raw_len = read_u32_le(buf, 20);
         if (raw_len as usize) > MAX_BLOCK_RAW_BYTES {
             return Err(StatamError::BoundsExceeded {
@@ -1369,7 +1410,7 @@ impl BlockEntry {
             row_count,
             null_count,
             offset: read_u64_le(buf, 8),
-            stored_len: read_u32_le(buf, 16),
+            stored_len,
             raw_len,
             encoding,
             codec,
@@ -1435,6 +1476,12 @@ impl FrameEntry {
                 reason: "invalid pack frame entry length",
             });
         }
+        let stored_len = read_u32_le(buf, 8);
+        if (stored_len as usize) > MAX_FRAME_RAW_BYTES + 1024 {
+            return Err(StatamError::BoundsExceeded {
+                reason: "pack frame stored_len exceeds MAX_FRAME_RAW_BYTES + 1024",
+            });
+        }
         let raw_len = read_u32_le(buf, 12);
         if (raw_len as usize) > MAX_FRAME_RAW_BYTES {
             return Err(StatamError::BoundsExceeded {
@@ -1444,7 +1491,7 @@ impl FrameEntry {
         let codec = Codec::from_u8(buf[16])?;
         Ok(Self {
             offset: read_u64_le(buf, 0),
-            stored_len: read_u32_le(buf, 8),
+            stored_len,
             raw_len,
             codec,
             flags: buf[17],
@@ -2832,6 +2879,110 @@ mod tests {
         assert!(matches!(
             decode_schema(&fake_schema).unwrap_err(),
             StatamError::Corrupt { .. }
+        ));
+
+        // 5. BlockEntry::stored_len > MAX_BLOCK_RAW_BYTES + 1024 rejected.
+        let bad_block = BlockEntry {
+            first_row: 0,
+            row_count: 1,
+            null_count: 0,
+            offset: 0,
+            stored_len: (MAX_BLOCK_RAW_BYTES + 1025) as u32,
+            raw_len: 100,
+            encoding: Encoding::Plain,
+            codec: Codec::None,
+            block_flags: 0,
+            min_inline_len: 0,
+            max_inline_len: 0,
+            reserved: [0; 3],
+            min_inline: [0; 16],
+            max_inline: [0; 16],
+        }
+        .encode();
+        assert!(matches!(
+            BlockEntry::decode(&bad_block),
+            Err(StatamError::BoundsExceeded { .. })
+        ));
+
+        // 6. FrameEntry::stored_len > MAX_FRAME_RAW_BYTES + 1024 rejected.
+        let bad_frame = FrameEntry {
+            offset: PACK_HEADER_LEN as u64,
+            stored_len: (MAX_FRAME_RAW_BYTES + 1025) as u32,
+            raw_len: 100,
+            codec: Codec::None,
+            flags: 0,
+            dict_id: 0,
+            first_chunk_id: 0,
+            chunk_count: 1,
+            filter_off: 0,
+            filter_len: 0,
+            crc32c: 0,
+        }
+        .encode();
+        assert!(matches!(
+            FrameEntry::decode(&bad_frame),
+            Err(StatamError::BoundsExceeded { .. })
+        ));
+
+        // 7. PackPostscript trigram_len > MAX_BLOOM_BYTES and edge_table_len > MAX_BLOCK_RAW_BYTES rejected.
+        let base_pps = PackPostscript {
+            toc_stored_len: PACK_POSTSCRIPT_LEN as u32,
+            toc_raw_len: 0,
+            format_version: FORMAT_VERSION,
+            flags: 0,
+            required_features: 0,
+            pack_id: [0; 16],
+            frame_count: 0,
+            chunk_count: 0,
+            hash_table_off: 0,
+            trigram_off: 0,
+            trigram_len: 0,
+            edge_table_len: 0,
+            edge_table_off: 0,
+            dict_off: 0,
+            dict_len: 0,
+            enc_envelope_offset: 0,
+            enc_envelope_len: 0,
+            reserved: 0,
+            toc_crc32c: 0,
+        };
+        assert!(matches!(
+            PackPostscript::decode(
+                &PackPostscript {
+                    trigram_len: (MAX_BLOOM_BYTES + 1) as u32,
+                    ..base_pps
+                }
+                .encode()
+            ),
+            Err(StatamError::BoundsExceeded { .. })
+        ));
+        assert!(matches!(
+            PackPostscript::decode(
+                &PackPostscript {
+                    edge_table_len: (MAX_BLOCK_RAW_BYTES + 1) as u32,
+                    ..base_pps
+                }
+                .encode()
+            ),
+            Err(StatamError::BoundsExceeded { .. })
+        ));
+
+        // 8. RowGroupEntry core_offset + core_len overflow rejected (no saturating_add).
+        let overflow_rg = RowGroupEntry {
+            first_row: 0,
+            row_count: 1,
+            core_offset: u64::MAX - 4,
+            core_len: 16,
+            wide_len: 0,
+            wide_offset: u64::MAX,
+            l0_payload_offset: 0,
+            l0_payload_len: 0,
+            rg_flags: 0,
+        }
+        .encode();
+        assert!(matches!(
+            RowGroupEntry::decode(&overflow_rg),
+            Err(StatamError::BoundsExceeded { .. })
         ));
     }
 

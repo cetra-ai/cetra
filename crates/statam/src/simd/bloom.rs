@@ -2,6 +2,8 @@
 
 #![allow(unsafe_code)]
 
+use std::fmt;
+
 use crate::{BLOOM_MAGIC, MAX_BLOOM_BYTES, StatamError};
 
 /// Parquet Split-Block Bloom Filter 8-lane salt constants.
@@ -56,10 +58,19 @@ pub fn statam_bloom_hash(bytes: &[u8]) -> u64 {
 }
 
 /// Parquet-compatible 256-bit Split-Block Bloom Filter (`8 × u32` per block).
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct Sbbf {
     words: Vec<u32>,
     num_blocks: usize,
+}
+
+impl fmt::Debug for Sbbf {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Sbbf")
+            .field("num_blocks", &self.num_blocks)
+            .field("byte_len", &(self.num_blocks * 32))
+            .finish()
+    }
 }
 
 impl Sbbf {

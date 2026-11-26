@@ -2,6 +2,8 @@
 
 #![allow(unsafe_code)]
 
+use std::fmt;
+
 use crate::StatamError;
 
 /// Minimum allowed byte length for a [`TrigramBloom`] bitset.
@@ -66,9 +68,17 @@ pub fn extract_trigram_hashes(bytes: &[u8], ascii_only: bool, out: &mut Vec<u32>
 }
 
 /// Adaptive power-of-two byte-sized trigram bloom filter (`256..=4096` bytes).
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct TrigramBloom {
     bits: Vec<u8>,
+}
+
+impl fmt::Debug for TrigramBloom {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("TrigramBloom")
+            .field("byte_len", &self.bits.len())
+            .finish()
+    }
 }
 
 impl TrigramBloom {
@@ -102,6 +112,15 @@ impl TrigramBloom {
         &self.bits
     }
 
+    /// Inserts precomputed 32-bit trigram hashes into the filter.
+    #[inline]
+    pub fn insert_hashes(&mut self, hashes: &[u32]) {
+        let bit_mask = (self.bits.len() * 8) - 1;
+        for &h in hashes {
+            self.set_hash_bits(h, bit_mask);
+        }
+    }
+
     /// ASCII-lowercases `bytes` and inserts every 3-byte trigram into the filter.
     pub fn insert_bytes(&mut self, bytes: &[u8]) {
         if bytes.len() < 3 {
@@ -112,11 +131,16 @@ impl TrigramBloom {
         let bit_mask = (self.bits.len() * 8) - 1;
         for w in lowered.windows(3) {
             let h = trigram_hash(w[0], w[1], w[2]);
-            let p1 = (h as usize) & bit_mask;
-            let p2 = (h.rotate_right(16) as usize) & bit_mask;
-            self.bits[p1 >> 3] |= 1u8 << (p1 & 7);
-            self.bits[p2 >> 3] |= 1u8 << (p2 & 7);
+            self.set_hash_bits(h, bit_mask);
         }
+    }
+
+    #[inline]
+    fn set_hash_bits(&mut self, h: u32, bit_mask: usize) {
+        let p1 = (h as usize) & bit_mask;
+        let p2 = (h.rotate_right(16) as usize) & bit_mask;
+        self.bits[p1 >> 3] |= 1u8 << (p1 & 7);
+        self.bits[p2 >> 3] |= 1u8 << (p2 & 7);
     }
 
     /// Returns `true` if all `hashes` may be present (`false` guarantees at least one is absent).
@@ -216,6 +240,16 @@ mod tests {
         let mut tb = TrigramBloom::new(256);
         tb.insert_bytes(b"Authorization: Bearer SECRET_TOKEN_123");
         assert!(tb.bit_density() > 0.0 && tb.bit_density() < 0.5);
+
+        let mut tb_from_hashes = TrigramBloom::new(256);
+        let mut all_tris = Vec::new();
+        extract_trigram_hashes(
+            b"Authorization: Bearer SECRET_TOKEN_123",
+            false,
+            &mut all_tris,
+        );
+        tb_from_hashes.insert_hashes(&all_tris);
+        assert_eq!(tb_from_hashes, tb);
 
         let mut needle_hashes = Vec::new();
         extract_trigram_hashes(b"bearer secret", true, &mut needle_hashes);

@@ -841,15 +841,60 @@ pub fn decode_dict_column(
     Ok(Column::Flat(flat))
 }
 
+pub(crate) fn check_varlen_take_bytes(
+    offsets: &[u32],
+    codes: &[u32],
+    nulls: Option<&Bitmap>,
+) -> Result<(), StatamError> {
+    let mut total_bytes: usize = 0;
+    for (i, &c) in codes.iter().enumerate() {
+        if nulls.is_none_or(|bm| bm.get(i)) {
+            let idx = c as usize;
+            if idx + 1 >= offsets.len() {
+                return Err(StatamError::Corrupt {
+                    reason: "dict code out of bounds",
+                });
+            }
+            let item_len = (offsets[idx + 1] - offsets[idx]) as usize;
+            total_bytes = total_bytes
+                .checked_add(item_len)
+                .ok_or(StatamError::BoundsExceeded {
+                    reason: "materialized dict byte length overflow",
+                })?;
+            if total_bytes > MAX_BLOCK_RAW_BYTES {
+                return Err(StatamError::BoundsExceeded {
+                    reason: "materialized dict bytes exceed MAX_BLOCK_RAW_BYTES",
+                });
+            }
+        }
+    }
+    Ok(())
+}
+
 fn materialize_from_dict(
     dict_values: &FlatColumn,
     codes: &[u32],
     nulls: Option<Bitmap>,
 ) -> Result<FlatColumn, StatamError> {
     let data = match dict_values.data() {
-        FlatData::Utf8(u) => FlatData::Utf8(u.take(codes, nulls.as_ref())?),
-        FlatData::Binary(b) => FlatData::Binary(b.take(codes, nulls.as_ref())?),
+        FlatData::Utf8(u) => {
+            check_varlen_take_bytes(u.offsets(), codes, nulls.as_ref())?;
+            FlatData::Utf8(u.take(codes, nulls.as_ref())?)
+        }
+        FlatData::Binary(b) => {
+            check_varlen_take_bytes(b.offsets(), codes, nulls.as_ref())?;
+            FlatData::Binary(b.take(codes, nulls.as_ref())?)
+        }
         FlatData::FixedBytes8(v) => {
+            if codes
+                .len()
+                .checked_mul(8)
+                .is_none_or(|bytes| bytes > MAX_BLOCK_RAW_BYTES)
+            {
+                return Err(StatamError::BoundsExceeded {
+                    reason: "materialized Fixed8 dict exceeds MAX_BLOCK_RAW_BYTES",
+                });
+            }
             let mut out = Vec::with_capacity(codes.len());
             for (i, &c) in codes.iter().enumerate() {
                 if nulls.as_ref().is_some_and(|bm| !bm.get(i)) {
@@ -861,6 +906,15 @@ fn materialize_from_dict(
             FlatData::FixedBytes8(out)
         }
         FlatData::FixedBytes16(v) => {
+            if codes
+                .len()
+                .checked_mul(16)
+                .is_none_or(|bytes| bytes > MAX_BLOCK_RAW_BYTES)
+            {
+                return Err(StatamError::BoundsExceeded {
+                    reason: "materialized Fixed16 dict exceeds MAX_BLOCK_RAW_BYTES",
+                });
+            }
             let mut out = Vec::with_capacity(codes.len());
             for (i, &c) in codes.iter().enumerate() {
                 if nulls.as_ref().is_some_and(|bm| !bm.get(i)) {

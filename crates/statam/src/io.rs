@@ -34,9 +34,17 @@ pub trait RangeReader: Send + Sync {
 }
 
 /// Zero-copy in-memory [`RangeReader`] backed by [`Bytes`].
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct SliceReader {
     data: Bytes,
+}
+
+impl fmt::Debug for SliceReader {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("SliceReader")
+            .field("len", &self.data.len())
+            .finish()
+    }
 }
 
 impl SliceReader {

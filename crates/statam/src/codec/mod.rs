@@ -8,6 +8,8 @@ pub mod nested;
 pub mod numeric;
 pub mod zonemap;
 
+use std::fmt;
+
 use cetra_column::{Column, DataType, FlatColumn};
 
 use crate::StatamError;
@@ -44,15 +46,15 @@ pub use zonemap::{
 /// Encoding and compression profile controlling speed vs. density trade-offs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum WriteProfile {
-    /// Fast self-contained single-pass profile (`Const`, `Rle`, `ForBitpack`/`DeltaBitpack`,
-    /// fast ALP check, `BitpackBool`, bounded `Dict <= 4096`, `Plain + Lz4`).
+    /// Fast self-contained single-pass profile (`Const`, `Rle`, `ForBitpack`/`DeltaBitpack` via
+    /// 32-element monotonicity sample, `BitpackBool`, bounded `Dict <= 4096`, `Plain + Lz4`).
     L0Fast,
     /// Full compression cascade (`+ sorted Dict`, `Alp`, `Fsst`, `ShreddedMap`, `Zstd(3)`).
     L1Compact,
 }
 
 /// Encoded mini-block payload and metadata prior to framing and outer compression.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct EncodedMiniBlock {
     /// Chosen column encoding (`0..=13`).
     pub encoding: Encoding,
@@ -72,6 +74,20 @@ pub struct EncodedMiniBlock {
     pub raw_body: Vec<u8>,
     /// Preferred outer compression codec (`Codec::None` for inline blocks).
     pub preferred_codec: Codec,
+}
+
+impl fmt::Debug for EncodedMiniBlock {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("EncodedMiniBlock")
+            .field("encoding", &self.encoding)
+            .field("block_flags", &self.block_flags)
+            .field("null_count", &self.null_count)
+            .field("min_inline_len", &self.min_inline_len)
+            .field("max_inline_len", &self.max_inline_len)
+            .field("raw_body_len", &self.raw_body.len())
+            .field("preferred_codec", &self.preferred_codec)
+            .finish()
+    }
 }
 
 impl EncodedMiniBlock {
@@ -182,9 +198,9 @@ pub fn encode_mini_block(
         dt,
         DataType::List(_) | DataType::MapUtf8 | DataType::Events | DataType::Links
     ) {
-        encode_nested_column(col, dt, profile, MAX_NESTING_DEPTH)
+        encode_nested_column(col, dt, profile, MAX_NESTING_DEPTH, Some(&zm))
     } else {
-        encode_narrow_column(col, dt, profile)
+        encode_narrow_column(col, dt, profile, Some(&zm))
     }
 }
 
@@ -402,11 +418,15 @@ mod tests {
             );
         }
 
-        // Verify full mini-block cascade selects ALP for L0Fast and L1Compact.
+        // Verify full mini-block cascade selects Plain for L0Fast and ALP for L1Compact.
         let col = Column::Flat(FlatColumn::try_new(FlatData::F64(vals.clone()), None).unwrap());
         for profile in [WriteProfile::L0Fast, WriteProfile::L1Compact] {
             let (enc, _, dec_col) = roundtrip_via_frame(&col, &DataType::F64, profile, None);
-            assert_eq!(enc.encoding, Encoding::Alp);
+            let expected_enc = match profile {
+                WriteProfile::L0Fast => Encoding::Plain,
+                WriteProfile::L1Compact => Encoding::Alp,
+            };
+            assert_eq!(enc.encoding, expected_enc);
             let Column::Flat(dec_flat) = dec_col else {
                 panic!("expected Flat F64");
             };
@@ -1524,5 +1544,566 @@ mod tests {
         };
         assert!(decode_mini_block(&[0, 0, 0, 0], &bad_rle_entry, &DataType::I64, None).is_err());
         assert!(decode_mini_block(&[10, 0, 0, 0], &bad_rle_entry, &DataType::I64, None).is_err());
+    }
+
+    #[test]
+    fn const_preserves_nan_neg_zero_and_all_same_dict_values_bit_exact() {
+        let qnan = f64::from_bits(0x7ff8_0000_0000_1234);
+        let neg_zero = -0.0f64;
+
+        // 1. All-NaN Flat & Rle F64 round-trip bit-exact via Encoding::Const.
+        let nan_flat =
+            Column::Flat(FlatColumn::try_new(FlatData::F64(vec![qnan; 16]), None).unwrap());
+        let nan_rle = Column::Rle(
+            RleColumn::try_new(
+                FlatColumn::try_new(FlatData::F64(vec![qnan]), None).unwrap(),
+                vec![16],
+            )
+            .unwrap(),
+        );
+        for col in [&nan_flat, &nan_rle] {
+            let (enc, entry, dec) =
+                roundtrip_via_frame(col, &DataType::F64, WriteProfile::L1Compact, None);
+            assert_eq!(enc.encoding, Encoding::Const);
+            assert_ne!(entry.block_flags & BLOCK_FLAG_HAS_NAN, 0);
+            assert_eq!(entry.block_flags & BLOCK_FLAG_MIN_MAX_VALID, 0);
+            let Column::Const {
+                value: ScalarValue::F64(got),
+                len,
+            } = dec
+            else {
+                panic!("expected Const F64");
+            };
+            assert_eq!(len, 16);
+            assert_eq!(got.to_bits(), qnan.to_bits());
+        }
+
+        // 2. All--0.0 Flat & Rle F64 round-trip bit-exact via Encoding::Const + zone map matches 0.0.
+        let nz_flat =
+            Column::Flat(FlatColumn::try_new(FlatData::F64(vec![neg_zero; 16]), None).unwrap());
+        let nz_rle = Column::Rle(
+            RleColumn::try_new(
+                FlatColumn::try_new(FlatData::F64(vec![neg_zero]), None).unwrap(),
+                vec![16],
+            )
+            .unwrap(),
+        );
+        for col in [&nz_flat, &nz_rle] {
+            let (enc, entry, dec) =
+                roundtrip_via_frame(col, &DataType::F64, WriteProfile::L0Fast, None);
+            assert_eq!(enc.encoding, Encoding::Const);
+            let Column::Const {
+                value: ScalarValue::F64(got),
+                ..
+            } = dec
+            else {
+                panic!("expected Const F64");
+            };
+            assert_eq!(got.to_bits(), neg_zero.to_bits());
+            assert!(zone_map_may_match(
+                &entry,
+                &DataType::F64,
+                0,
+                &ZonePred::Eq(ZoneValue::F64(0.0)),
+                None
+            ));
+        }
+
+        // 3. All-same-code Column::Dict (Utf8, FixedBytes8, FixedBytes16) round-trip bit-exact.
+        let utf8_dict_vals = FlatColumn::try_new(
+            FlatData::Utf8(Utf8Data::try_from_slices(["unused", "openai"]).unwrap()),
+            None,
+        )
+        .unwrap();
+        let utf8_dict_col =
+            Column::Dict(DictColumn::try_new(utf8_dict_vals, vec![1; 12], None).unwrap());
+        let (u_enc, u_entry, u_dec) = roundtrip_via_frame(
+            &utf8_dict_col,
+            &DataType::Utf8,
+            WriteProfile::L1Compact,
+            None,
+        );
+        assert_eq!(u_enc.encoding, Encoding::Const);
+        assert!(u_dec.semantic_eq(&utf8_dict_col));
+        assert!(zone_map_may_match(
+            &u_entry,
+            &DataType::Utf8,
+            0,
+            &ZonePred::Eq(ZoneValue::Bytes(b"openai".to_vec())),
+            None
+        ));
+        assert!(!zone_map_may_match(
+            &u_entry,
+            &DataType::Utf8,
+            0,
+            &ZonePred::Eq(ZoneValue::Bytes(b"anthropic".to_vec())),
+            None
+        ));
+
+        let f8_val = [1u8, 2, 3, 4, 5, 6, 7, 8];
+        let f8_dict_vals =
+            FlatColumn::try_new(FlatData::FixedBytes8(vec![[0u8; 8], f8_val]), None).unwrap();
+        let f8_dict_col =
+            Column::Dict(DictColumn::try_new(f8_dict_vals, vec![1; 10], None).unwrap());
+        let (f8_enc, _, f8_dec) = roundtrip_via_frame(
+            &f8_dict_col,
+            &DataType::FixedBytes8,
+            WriteProfile::L0Fast,
+            None,
+        );
+        assert_eq!(f8_enc.encoding, Encoding::Const);
+        assert!(f8_dec.semantic_eq(&f8_dict_col));
+
+        let f16_val = [0xAAu8; 16];
+        let f16_dict_vals =
+            FlatColumn::try_new(FlatData::FixedBytes16(vec![[0u8; 16], f16_val]), None).unwrap();
+        let f16_dict_col =
+            Column::Dict(DictColumn::try_new(f16_dict_vals, vec![1; 10], None).unwrap());
+        let (f16_enc, _, f16_dec) = roundtrip_via_frame(
+            &f16_dict_col,
+            &DataType::FixedBytes16,
+            WriteProfile::L0Fast,
+            None,
+        );
+        assert_eq!(f16_enc.encoding, Encoding::Const);
+        assert!(f16_dec.semantic_eq(&f16_dict_col));
+    }
+
+    #[test]
+    fn list_with_over_65535_child_items_roundtrips_cleanly() {
+        // 1,000 list rows * 70 items = 70,000 child items (> u16::MAX = 65,535).
+        let rows = 1_000usize;
+        let per_row = 70usize;
+        let total = rows * per_row;
+        let offsets: Vec<u32> = (0..=rows).map(|r| (r * per_row) as u32).collect();
+
+        // 1. List(I64) with Rle child (> 65,535 items)
+        let rle_child = Column::Rle(
+            RleColumn::try_new(
+                FlatColumn::try_new(FlatData::I64(vec![10, 20]), None).unwrap(),
+                vec![35_000, total as u32],
+            )
+            .unwrap(),
+        );
+        let list_i64 = Column::Flat(
+            FlatColumn::try_new(
+                FlatData::List {
+                    item_type: DataType::I64,
+                    offsets: offsets.clone(),
+                    values: Box::new(rle_child),
+                },
+                None,
+            )
+            .unwrap(),
+        );
+        let (_, _, dec_i64) = roundtrip_via_frame(
+            &list_i64,
+            &DataType::List(Box::new(DataType::I64)),
+            WriteProfile::L0Fast,
+            None,
+        );
+        assert!(dec_i64.semantic_eq(&list_i64));
+
+        // 2. List(Utf8) with 70,000 child items
+        let strs: Vec<&str> = (0..total)
+            .map(|i| if i % 2 == 0 { "tag_a" } else { "tag_b" })
+            .collect();
+        let utf8_child = Column::Flat(
+            FlatColumn::try_new(
+                FlatData::Utf8(Utf8Data::try_from_slices(strs).unwrap()),
+                None,
+            )
+            .unwrap(),
+        );
+        let list_utf8 = Column::Flat(
+            FlatColumn::try_new(
+                FlatData::List {
+                    item_type: DataType::Utf8,
+                    offsets,
+                    values: Box::new(utf8_child),
+                },
+                None,
+            )
+            .unwrap(),
+        );
+        let (_, _, dec_utf8) = roundtrip_via_frame(
+            &list_utf8,
+            &DataType::List(Box::new(DataType::Utf8)),
+            WriteProfile::L1Compact,
+            None,
+        );
+        assert!(dec_utf8.semantic_eq(&list_utf8));
+    }
+
+    #[test]
+    fn rejects_dict_residual_and_events_amplification_bombs_before_take() {
+        // 1. Large FileDict (> 256 KiB) referencing 300 KiB entry 300 times => 90 MiB > MAX_BLOCK_RAW_BYTES.
+        let big_str = "A".repeat(300 * 1024);
+        let big_dict_flat = FlatColumn::try_new(
+            FlatData::Utf8(Utf8Data::try_from_slices([big_str.as_str()]).unwrap()),
+            None,
+        )
+        .unwrap();
+        let big_dict = FileDict::from_flat(big_dict_flat, false).unwrap();
+        assert!(big_dict.memory_bytes() > DICT_PASSTHROUGH_MAX_BYTES);
+        let codes = vec![0u32; 300];
+        let mut dict_body = Vec::new();
+        dict_body.extend_from_slice(&encode_dict_codes_body(&codes, None).unwrap());
+        let err = decode_dict_column(&dict_body, 300, None, &big_dict).unwrap_err();
+        assert!(matches!(err, StatamError::BoundsExceeded { .. }));
+
+        // 2. ShreddedMap residual bomb: 1 key of 100 KiB repeated 1,000 times => 100 MiB > 64 MiB.
+        let big_key = "K".repeat(100 * 1024);
+        let mut res_raw = Vec::new();
+        // 1 row with count = 1000
+        res_raw.push(10); // cnt_bw = 10
+        crate::simd::bitpack::pack_u32(&[1000], 10, &mut res_raw).unwrap();
+        res_raw.extend_from_slice(&1u32.to_le_bytes()); // num_keys = 1
+        res_raw.push(17); // klen_bw = 17
+        crate::simd::bitpack::pack_u32(&[big_key.len() as u32], 17, &mut res_raw).unwrap();
+        res_raw.extend_from_slice(&(big_key.len() as u32).to_le_bytes());
+        res_raw.extend_from_slice(big_key.as_bytes());
+        res_raw.push(0); // kcode_bw = 0 (all code 0!)
+        res_raw.push(0); // val_nulls flag = 0
+        res_raw.push(Encoding::Plain as u8);
+        let empty_vals = vec![0u8; 1001 * 4]; // 1000 empty strings -> offsets all 0
+        res_raw.extend_from_slice(&(empty_vals.len() as u32).to_le_bytes());
+        res_raw.extend_from_slice(&empty_vals);
+        let res_entry = BlockEntry {
+            first_row: 0,
+            row_count: 1,
+            null_count: 0,
+            offset: 0,
+            stored_len: 0,
+            raw_len: res_raw.len() as u32,
+            encoding: Encoding::ShreddedMap,
+            codec: Codec::None,
+            block_flags: 0,
+            min_inline_len: 0,
+            max_inline_len: 0,
+            reserved: [0; 3],
+            min_inline: [0; 16],
+            max_inline: [0; 16],
+        };
+        let err = decode_shredded_residual_block(&res_raw, &res_entry).unwrap_err();
+        assert!(matches!(err, StatamError::BoundsExceeded { .. }));
+
+        // 3. EventsStruct names dict bomb: 1 name of 100 KiB repeated 1,000 times => 100 MiB > 64 MiB.
+        let mut ev_raw = Vec::new();
+        ev_raw.push(10); // len_bw = 10
+        crate::simd::bitpack::pack_u32(&[1000], 10, &mut ev_raw).unwrap();
+        // times: Plain 1000 * 8 bytes of 0
+        ev_raw.push(Encoding::Plain as u8);
+        ev_raw.extend_from_slice(&((1000 * 8) as u32).to_le_bytes());
+        ev_raw.extend(std::iter::repeat_n(0u8, 1000 * 8));
+        // names: Dict with 100 KiB entry, codes all 0
+        let ev_dict_flat = FlatColumn::try_new(
+            FlatData::Utf8(Utf8Data::try_from_slices([big_key.as_str()]).unwrap()),
+            None,
+        )
+        .unwrap();
+        let ev_dict = FileDict::from_flat(ev_dict_flat, false).unwrap();
+        let ev_dict_bytes = ev_dict.encode(Codec::None, 0).unwrap();
+        let ev_codes = encode_dict_codes_body(&vec![0u32; 1000], None).unwrap();
+        ev_raw.push(Encoding::Dict as u8);
+        ev_raw.push(0); // sorted = false
+        ev_raw.extend_from_slice(&(ev_dict_bytes.len() as u32).to_le_bytes());
+        ev_raw.extend_from_slice(&ev_dict_bytes);
+        ev_raw.extend_from_slice(&(ev_codes.len() as u32).to_le_bytes());
+        ev_raw.extend_from_slice(&ev_codes);
+        ev_raw.push(0); // attr_nulls flag = 0
+        ev_raw.push(Encoding::Plain as u8);
+        ev_raw.extend_from_slice(&(empty_vals.len() as u32).to_le_bytes());
+        ev_raw.extend_from_slice(&empty_vals);
+        let ev_entry = BlockEntry {
+            encoding: Encoding::EventsStruct,
+            raw_len: ev_raw.len() as u32,
+            ..res_entry
+        };
+        let err = decode_mini_block(&ev_raw, &ev_entry, &DataType::Events, None).unwrap_err();
+        assert!(matches!(err, StatamError::BoundsExceeded { .. }));
+    }
+
+    #[test]
+    fn debug_redacts_all_payload_and_inline_bytes() {
+        use crate::io::SliceReader;
+        use crate::payload::PayloadRefRow;
+        use crate::payload::pack::{ChunkPackBuilder, PackWriteOptions};
+        use crate::simd::{Sbbf, TrigramBloom};
+
+        let secret = b"SUPER_SECRET_PII";
+        let mut inline16 = [0u8; 16];
+        inline16.copy_from_slice(secret);
+
+        let emb = EncodedMiniBlock {
+            encoding: Encoding::Const,
+            block_flags: BLOCK_FLAG_MIN_MAX_VALID,
+            null_count: 0,
+            min_inline_len: 16,
+            max_inline_len: 16,
+            min_inline: inline16,
+            max_inline: inline16,
+            raw_body: secret.to_vec(),
+            preferred_codec: Codec::None,
+        };
+        let be = BlockEntry {
+            first_row: 0,
+            row_count: 1,
+            null_count: 0,
+            offset: 0,
+            stored_len: 0,
+            raw_len: 0,
+            encoding: Encoding::Const,
+            codec: Codec::None,
+            block_flags: BLOCK_FLAG_MIN_MAX_VALID,
+            min_inline_len: 16,
+            max_inline_len: 16,
+            reserved: [0; 3],
+            min_inline: inline16,
+            max_inline: inline16,
+        };
+        let zm = ZoneMapSummary {
+            block_flags: BLOCK_FLAG_MIN_MAX_VALID,
+            null_count: 0,
+            min_inline_len: 16,
+            max_inline_len: 16,
+            min_inline: inline16,
+            max_inline: inline16,
+        };
+        let pr = PayloadRefRow::Inline(secret.to_vec());
+        let mut builder = ChunkPackBuilder::new([1u8; 16], PackWriteOptions::default());
+        builder.intern_chunk(secret).unwrap();
+        let sr = SliceReader::new(secret.to_vec());
+
+        // Construct Sbbf & TrigramBloom directly containing the marker bytes.
+        let mut bf_raw = Vec::new();
+        bf_raw.extend_from_slice(&crate::BLOOM_MAGIC);
+        bf_raw.extend_from_slice(&1u32.to_le_bytes());
+        let mut bf_payload = Vec::with_capacity(32);
+        bf_payload.extend_from_slice(secret);
+        bf_payload.extend_from_slice(secret);
+        let bf_crc = crc32c::crc32c(&bf_payload);
+        bf_raw.extend_from_slice(&bf_crc.to_le_bytes());
+        bf_raw.extend_from_slice(&bf_payload);
+        let sbbf = Sbbf::from_bytes(&bf_raw).unwrap();
+
+        let mut tb_bytes = Vec::with_capacity(256);
+        for _ in 0..16 {
+            tb_bytes.extend_from_slice(secret);
+        }
+        let tb = TrigramBloom::from_bytes(tb_bytes).unwrap();
+
+        let outputs = [
+            format!("{emb:?}"),
+            format!("{be:?}"),
+            format!("{zm:?}"),
+            format!("{pr:?}"),
+            format!("{builder:?}"),
+            format!("{sr:?}"),
+            format!("{sbbf:?}"),
+            format!("{tb:?}"),
+        ];
+
+        for dbg in outputs {
+            assert!(!dbg.contains("SUPER_SECRET_PII"), "leaked text in {dbg}");
+            assert!(
+                !dbg.contains("83, 85, 80, 69, 82"),
+                "leaked decimal ASCII bytes in {dbg}"
+            );
+        }
+    }
+
+    fn map_rows_logical_eq(a: &FlatColumn, b: &FlatColumn) -> bool {
+        if a.len() != b.len() {
+            return false;
+        }
+        for row in 0..a.len() {
+            if a.is_null(row) != b.is_null(row) {
+                return false;
+            }
+            if a.is_null(row) {
+                continue;
+            }
+            let (Ok(ScalarValue::MapUtf8(mut ea)), Ok(ScalarValue::MapUtf8(mut eb))) =
+                (a.get_scalar(row), b.get_scalar(row))
+            else {
+                return false;
+            };
+            ea.sort();
+            eb.sort();
+            if ea != eb {
+                return false;
+            }
+        }
+        true
+    }
+
+    #[test]
+    fn shredded_map_sorted_exact_semantic_eq_unsorted_logical_eq_and_validation() {
+        // 1. Sorted map (like Cetra's BTreeMap-backed attributes) round-trips with exact semantic_eq.
+        let sorted_map = MapData::try_new(
+            vec![0, 3, 5, 7],
+            Utf8Data::try_from_slices(["env", "model", "rare_a", "env", "model", "env", "rare_b"])
+                .unwrap(),
+            Utf8Data::try_from_slices(["prod", "gpt-4o", "1", "dev", "claude", "prod", "2"])
+                .unwrap(),
+            None,
+        )
+        .unwrap();
+        let sorted_col =
+            FlatColumn::try_new(FlatData::MapUtf8(Box::new(sorted_map)), None).unwrap();
+        let promoted = vec!["env".to_owned(), "model".to_owned()];
+        let shredded = shred_map(&sorted_col, &promoted).unwrap();
+        let sub_refs: Vec<(&str, &ShreddedSubCol)> = promoted
+            .iter()
+            .map(String::as_str)
+            .zip(shredded.sub_cols.iter())
+            .collect();
+        let unshredded = unshred_map(
+            sorted_col.len(),
+            sorted_col.nulls(),
+            Some(&shredded.residual),
+            &sub_refs,
+        )
+        .unwrap();
+        assert!(unshredded.semantic_eq(&sorted_col));
+
+        // 2. Unsorted map preserves logical entries (map_rows_logical_eq).
+        let unsorted_map = MapData::try_new(
+            vec![0, 3],
+            Utf8Data::try_from_slices(["rare_z", "model", "env"]).unwrap(),
+            Utf8Data::try_from_slices(["9", "gpt-4o", "prod"]).unwrap(),
+            None,
+        )
+        .unwrap();
+        let unsorted_col =
+            FlatColumn::try_new(FlatData::MapUtf8(Box::new(unsorted_map)), None).unwrap();
+        let sh_u = shred_map(&unsorted_col, &promoted).unwrap();
+        let sub_u_refs: Vec<(&str, &ShreddedSubCol)> = promoted
+            .iter()
+            .map(String::as_str)
+            .zip(sh_u.sub_cols.iter())
+            .collect();
+        let un_u = unshred_map(
+            unsorted_col.len(),
+            unsorted_col.nulls(),
+            Some(&sh_u.residual),
+            &sub_u_refs,
+        )
+        .unwrap();
+        assert!(map_rows_logical_eq(&un_u, &unsorted_col));
+
+        // 3. M2: decode_single_map_key rejects residual_count > 0 && residual.is_none(),
+        //    row_nulls len mismatch, and residual len mismatch.
+        assert!(matches!(
+            decode_single_map_key(
+                sorted_col.len(),
+                None,
+                "env",
+                &shredded.sub_cols[0],
+                1,
+                None
+            ),
+            Err(StatamError::Corrupt { .. })
+        ));
+        let bad_nulls = Bitmap::new_ones(sorted_col.len() + 1);
+        assert!(matches!(
+            decode_single_map_key(
+                sorted_col.len(),
+                Some(&bad_nulls),
+                "env",
+                &shredded.sub_cols[0],
+                0,
+                None
+            ),
+            Err(StatamError::Corrupt { .. })
+        ));
+        let bad_res = FlatColumn::empty(&DataType::MapUtf8);
+        assert!(matches!(
+            decode_single_map_key(
+                sorted_col.len(),
+                None,
+                "env",
+                &shredded.sub_cols[0],
+                1,
+                Some(&bad_res)
+            ),
+            Err(StatamError::Corrupt { .. })
+        ));
+    }
+
+    #[test]
+    fn child_dict_type_mismatch_rejected_and_const_long_string_uses_1_run_rle_and_l0fast_choices() {
+        // 1. M3: ShreddedSubCol with Dict whose inline dict is FixedBytes8 instead of Utf8 must fail!
+        let sub = ShreddedSubCol {
+            in_map: Bitmap::new_ones(4),
+            value_null: Bitmap::new_ones(4),
+            values: Column::Flat(
+                FlatColumn::try_new(
+                    FlatData::Utf8(Utf8Data::try_from_slices(["a", "b", "a", "b"]).unwrap()),
+                    None,
+                )
+                .unwrap(),
+            ),
+        };
+        let encoded_sub = encode_shredded_subcol(&sub, WriteProfile::L0Fast).unwrap();
+        // Rebuild payload with FixedBytes8 inline dict instead of Utf8.
+        let bad_dict_vals =
+            FlatColumn::try_new(FlatData::FixedBytes8(vec![[1u8; 8], [2u8; 8]]), None).unwrap();
+        let bad_dict = FileDict::from_flat(bad_dict_vals, false).unwrap();
+        let bad_dict_bytes = bad_dict.encode(Codec::None, 0).unwrap();
+        let codes_bytes = encode_dict_codes_body(&[0, 1, 0, 1], None).unwrap();
+        let mut forged = vec![
+            1, // in_map all ones
+            1, // value_null all ones
+            Encoding::Dict as u8,
+            0, // flags
+            0, // min_inline_len
+        ];
+        forged.extend_from_slice(&[0u8; 16]);
+        forged.push(1); // has_dict = 1
+        forged.push(0); // sorted = false
+        forged.extend_from_slice(&(bad_dict_bytes.len() as u32).to_le_bytes());
+        forged.extend_from_slice(&bad_dict_bytes);
+        forged.extend_from_slice(&(codes_bytes.len() as u32).to_le_bytes());
+        forged.extend_from_slice(&codes_bytes);
+        assert_ne!(encoded_sub, forged);
+        assert!(matches!(
+            decode_shredded_subcol(&forged, 4),
+            Err(StatamError::SchemaMismatch { .. })
+        ));
+
+        // 2. M4: 4,096-row constant 32-byte string encodes as 1-run Rle (both Flat and Const).
+        let long_s = "constant_string_exceeding_16_byt";
+        assert_eq!(long_s.len(), 32);
+        let flat_long = Column::Flat(
+            FlatColumn::try_new(
+                FlatData::Utf8(Utf8Data::try_from_slices(vec![long_s; 4096]).unwrap()),
+                None,
+            )
+            .unwrap(),
+        );
+        let const_long = Column::Const {
+            value: ScalarValue::Utf8(long_s.to_owned()),
+            len: 4096,
+        };
+        for col in [&flat_long, &const_long] {
+            let (enc, _, dec) =
+                roundtrip_via_frame(col, &DataType::Utf8, WriteProfile::L0Fast, None);
+            assert_eq!(enc.encoding, Encoding::Rle);
+            assert!(enc.raw_body.len() < 128);
+            assert!(dec.semantic_eq(col));
+        }
+
+        // 3. M5: L0Fast picks ForBitpack for unsorted I64 and DeltaBitpack for monotonic I64.
+        let unsorted: Vec<i64> = (0..64)
+            .map(|i| if i % 2 == 0 { 1000 + i } else { 10 + i })
+            .collect();
+        let unsorted_col =
+            Column::Flat(FlatColumn::try_new(FlatData::I64(unsorted), None).unwrap());
+        let (u_enc, _, u_dec) =
+            roundtrip_via_frame(&unsorted_col, &DataType::I64, WriteProfile::L0Fast, None);
+        assert_eq!(u_enc.encoding, Encoding::ForBitpack);
+        assert!(u_dec.semantic_eq(&unsorted_col));
     }
 }

@@ -5,12 +5,14 @@ pub mod pack;
 pub mod search;
 
 use std::collections::VecDeque;
+use std::fmt;
 
 use cetra_column::Bitmap;
 
 use crate::StatamError;
 use crate::format::{
-    MAX_BATCH_DECODED_BYTES, MAX_CHUNKS_PER_ROW, MAX_REF_CHAIN_DEPTH, MAX_ROWS_PER_FILE,
+    MAX_BATCH_DECODED_BYTES, MAX_BLOCK_RAW_BYTES, MAX_CHUNKS_PER_ROW, MAX_REF_CHAIN_DEPTH,
+    MAX_ROWS_PER_FILE,
 };
 use crate::simd::bitpack::{zigzag_decode_i64, zigzag_encode_i64};
 
@@ -27,7 +29,7 @@ type RefHistoryEntry = Option<(Vec<(u16, u32)>, u8)>;
 type RefHistory = VecDeque<RefHistoryEntry>;
 
 /// One logical row in a `PayloadRefs` column block.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub enum PayloadRefRow {
     /// SQL NULL payload.
     Null,
@@ -35,6 +37,19 @@ pub enum PayloadRefRow {
     Inline(Vec<u8>),
     /// Sequence of `(pack_idx, chunk_id)` references into `.stpk` packs (or `0xFFFF` for L0 local).
     Chunks(Vec<(u16, u32)>),
+}
+
+impl fmt::Debug for PayloadRefRow {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Null => f.write_str("Null"),
+            Self::Inline(bytes) => f.debug_struct("Inline").field("len", &bytes.len()).finish(),
+            Self::Chunks(chunks) => f
+                .debug_struct("Chunks")
+                .field("count", &chunks.len())
+                .finish(),
+        }
+    }
 }
 
 /// Encodes `rows` using null-bitmap prefix + tail-sharing keyframe/delta compression.
@@ -154,12 +169,23 @@ pub fn decode_payload_refs(
     row_count: usize,
     max_batch_bytes: usize,
 ) -> Result<Vec<PayloadRefRow>, StatamError> {
-    if row_count as u64 > MAX_ROWS_PER_FILE {
+    if row_count as u64 > MAX_ROWS_PER_FILE || row_count > MAX_BLOCK_RAW_BYTES / 32 {
         return Err(StatamError::BoundsExceeded {
-            reason: "payload refs row_count exceeds MAX_ROWS_PER_FILE",
+            reason: "payload refs row_count exceeds safe block limit",
         });
     }
     let effective_max = max_batch_bytes.min(MAX_BATCH_DECODED_BYTES);
+    let row_vec_bytes =
+        row_count
+            .checked_mul(size_of::<PayloadRefRow>())
+            .ok_or(StatamError::BoundsExceeded {
+                reason: "payload refs row vector size overflow",
+            })?;
+    if row_vec_bytes > effective_max {
+        return Err(StatamError::BoundsExceeded {
+            reason: "payload refs row vector exceeds max_batch_bytes",
+        });
+    }
 
     let mut cur = RefCursor::new(src);
     let has_nulls = cur.read_u8()?;
@@ -598,6 +624,23 @@ mod tests {
         assert!(matches!(
             decode_payload_refs(&[0, TAG_INLINE, 0, 0], 1_000_000, MAX_BATCH_DECODED_BYTES),
             Err(StatamError::Corrupt { .. })
+        ));
+
+        // 6. All-null bitmap bomb with huge row_count or exceeding effective_max rejected before alloc.
+        let zero_bm = vec![0u8; 1 + 10_000usize.div_ceil(8)];
+        let mut all_null_bomb = vec![1u8];
+        all_null_bomb.extend_from_slice(&zero_bm[1..]);
+        assert!(matches!(
+            decode_payload_refs(&all_null_bomb, 10_000, 64 * 1024),
+            Err(StatamError::BoundsExceeded { .. })
+        ));
+        assert!(matches!(
+            decode_payload_refs(
+                &[1, 0, 0, 0],
+                MAX_BLOCK_RAW_BYTES / 32 + 1,
+                MAX_BATCH_DECODED_BYTES
+            ),
+            Err(StatamError::BoundsExceeded { .. })
         ));
     }
 }

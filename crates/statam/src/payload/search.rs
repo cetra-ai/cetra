@@ -286,6 +286,7 @@ fn search_short_needle_rows(
     let edges = pack.read_edge_table()?;
     let mut matched_pairs = HashSet::new();
     let mut combined = Vec::with_capacity(126);
+    let is_unicode_ilike = matches!(matcher, NeedleMatcher::UnicodeIlike { .. });
 
     for (left_cid, right_cid) in distinct_pairs {
         let left_tail = &edges
@@ -302,8 +303,13 @@ fn search_short_needle_rows(
             .0;
 
         combined.clear();
-        combined.extend_from_slice(left_tail);
-        combined.extend_from_slice(right_head);
+        if is_unicode_ilike {
+            combined.extend_from_slice(trim_leading_utf8_continuations(left_tail));
+            combined.extend_from_slice(trim_trailing_incomplete_utf8(right_head));
+        } else {
+            combined.extend_from_slice(left_tail);
+            combined.extend_from_slice(right_head);
+        }
         if matcher.matches(&combined) {
             matched_pairs.insert((left_cid, right_cid));
         }
@@ -395,6 +401,46 @@ fn search_long_needle_rows(
     Ok(())
 }
 
+fn trim_leading_utf8_continuations(bytes: &[u8]) -> &[u8] {
+    let mut start = 0usize;
+    while start < bytes.len() && (bytes[start] & 0xC0) == 0x80 {
+        start += 1;
+    }
+    &bytes[start..]
+}
+
+fn trim_trailing_incomplete_utf8(bytes: &[u8]) -> &[u8] {
+    let len = bytes.len();
+    if len == 0 {
+        return bytes;
+    }
+    let mut cont = 0usize;
+    while cont < 3 && cont < len && (bytes[len - 1 - cont] & 0xC0) == 0x80 {
+        cont += 1;
+    }
+    if cont == len {
+        return bytes;
+    }
+    let lead_idx = len - 1 - cont;
+    let lead = bytes[lead_idx];
+    let expected_len = if lead < 0x80 {
+        1
+    } else if matches!(lead, 0xC2..=0xDF) {
+        2
+    } else if matches!(lead, 0xE0..=0xEF) {
+        3
+    } else if matches!(lead, 0xF0..=0xF4) {
+        4
+    } else {
+        return bytes;
+    };
+    if cont + 1 < expected_len {
+        &bytes[..lead_idx]
+    } else {
+        bytes
+    }
+}
+
 fn filter_candidates_by_trigram(
     pack: &ChunkPackReader,
     chunk_ids: &[u32],
@@ -405,6 +451,11 @@ fn filter_candidates_by_trigram(
         return Ok(Vec::new());
     }
     if pack.toc().postscript.trigram_len == 0 {
+        return Ok(chunk_ids.to_vec());
+    }
+    // Unicode `ILIKE` with non-ASCII needles can expand/fold characters (e.g. `İ -> i\u{0307}`,
+    // `K -> k`) via `str::to_lowercase()`, so skip trigram bloom pruning completely.
+    if case_insensitive && !needle.is_ascii() {
         return Ok(chunk_ids.to_vec());
     }
 
@@ -663,5 +714,82 @@ mod tests {
         let rows = vec![PayloadRefRow::Chunks(vec![(0, cid_l), (0, cid_r)])];
         let bm = search_pack_rows(&pack, &rows, 0, b"SPLIT_HERE!", false).unwrap();
         assert_eq!(bm.iter_ones().collect::<Vec<_>>(), vec![0]);
+    }
+
+    #[test]
+    fn unicode_ilike_skips_bloom_for_non_ascii_and_clipped_edge_avoids_fffd_false_positive() {
+        let opts = PackWriteOptions {
+            codec: test_codec(),
+            zstd_level: 3,
+            target_frame_raw_bytes: 10 * 1024,
+            enable_trigram_skip: true,
+            compress_toc_lz4: true,
+        };
+        let mut builder = ChunkPackBuilder::new([0x88u8; 16], opts);
+
+        // Build >= 2560 B compressed frame with low trigram density so bloom IS emitted:
+        // Chunk 0 contains "i\u{0307}" (lowercase decomposition of 'İ') and "kelvin_k" (lowercase 'K')
+        // inside a high-entropy ASCII alphabet that omits many trigrams.
+        let mut state: u64 = 0x1357_2468_9abc_def1;
+        let mut c0 = Vec::with_capacity(11 * 1024);
+        for _ in 0..10_000 {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            c0.push(b'a' + ((state >> 24) as u8 % 4));
+        }
+        c0.extend_from_slice("prefix_i\u{0307}_mid_k_suffix".as_bytes());
+        let cid0 = builder.intern_chunk(&c0).unwrap();
+
+        // Chunk 1 & Chunk 2: boundary test where a 4-byte emoji '🚀' is clipped right across the
+        // 63-byte edge of left_tail AND another '🚀' is clipped at the 63-byte edge of right_head!
+        // Left chunk: 200 'x' + '🚀' (4 bytes) + 61 'y' => total 265 B.
+        // Last 63 bytes of left_chunk start at byte 202 = 2nd continuation byte of '🚀' ([0x9A, 0x80] || 61*'y')!
+        let mut left_clipped = vec![b'x'; 200];
+        left_clipped.extend_from_slice("🚀".as_bytes());
+        left_clipped.extend_from_slice(&[b'y'; 61]);
+        assert!(std::str::from_utf8(&left_clipped).is_ok());
+
+        // Right chunk: 61 'z' + '🚀' (4 bytes) + 200 'w' => total 265 B.
+        // First 63 bytes of right_chunk end at byte 63 = 61*'z' || [0xF0, 0x9F] (incomplete trailing '🚀')!
+        let mut right_clipped = vec![b'z'; 61];
+        right_clipped.extend_from_slice("🚀".as_bytes());
+        right_clipped.extend_from_slice(&[b'w'; 200]);
+        assert!(std::str::from_utf8(&right_clipped).is_ok());
+
+        // Also a pair that ACTUALLY contains a real U+FFFD at the boundary!
+        let mut left_real_fffd = vec![b'p'; 250];
+        left_real_fffd.extend_from_slice("\u{FFFD}".as_bytes());
+        let right_real_fffd = vec![b'q'; 260];
+
+        let cid_l = builder.intern_chunk(&left_clipped).unwrap();
+        let cid_r = builder.intern_chunk(&right_clipped).unwrap();
+        let cid_fl = builder.intern_chunk(&left_real_fffd).unwrap();
+        let cid_fr = builder.intern_chunk(&right_real_fffd).unwrap();
+
+        let mut pack_bytes = Vec::new();
+        builder.finish(&mut pack_bytes).unwrap();
+        let pack = ChunkPackReader::open(Arc::new(SliceReader::new(pack_bytes))).unwrap();
+        let blooms = pack.read_trigram_section().unwrap();
+        assert!(blooms[0].is_some(), "frame 0 must emit trigram bloom");
+
+        let rows = vec![
+            PayloadRefRow::Chunks(vec![(0, cid0)]),
+            PayloadRefRow::Chunks(vec![(0, cid_l), (0, cid_r)]),
+            PayloadRefRow::Chunks(vec![(0, cid_fl), (0, cid_fr)]),
+        ];
+
+        // Unicode ILIKE with 'İ' (U+0130) -> to_lowercase() == "i\u{0307}" MUST match row 0!
+        let bm_i_dot = search_pack_rows(&pack, &rows, 0, "prefix_İ_mid".as_bytes(), true).unwrap();
+        assert_eq!(bm_i_dot.iter_ones().collect::<Vec<_>>(), vec![0]);
+
+        // Unicode ILIKE with 'K' (U+212A Kelvin sign) -> to_lowercase() == "k" MUST match row 0!
+        let bm_kelvin = search_pack_rows(&pack, &rows, 0, "mid_K_suffix".as_bytes(), true).unwrap();
+        assert_eq!(bm_kelvin.iter_ones().collect::<Vec<_>>(), vec![0]);
+
+        // Searching ILIKE for U+FFFD MUST NOT false-positive on row 1's clipped '🚀' edges,
+        // while still matching row 2's genuine U+FFFD!
+        let bm_fffd = search_pack_rows(&pack, &rows, 0, "\u{FFFD}".as_bytes(), true).unwrap();
+        assert_eq!(bm_fffd.iter_ones().collect::<Vec<_>>(), vec![2]);
     }
 }

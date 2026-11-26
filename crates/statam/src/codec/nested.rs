@@ -11,14 +11,16 @@ use cetra_column::{
 };
 
 use crate::codec::dict::{
-    DictBuilder, FileDict, decode_dict_codes_body, decode_dict_column, encode_dict_codes_body,
+    DictBuilder, FileDict, check_varlen_take_bytes, decode_dict_codes_body, decode_dict_column,
+    encode_dict_codes_body,
 };
 use crate::codec::fsst::{decode_fsst_utf8, encode_fsst_body};
 use crate::codec::numeric::{
-    decode_const_block, decode_inner_flat, encode_delta_bitpack_body, encode_for_bitpack_body,
-    encode_plain_body, read_optional_nulls, try_encode_const_or_null, write_optional_nulls,
+    decode_const_block, decode_inner_data, decode_rle_block, encode_delta_bitpack_body,
+    encode_for_bitpack_body, encode_plain_body, encode_plain_utf8, read_optional_nulls,
+    try_encode_const_or_null, write_optional_nulls,
 };
-use crate::codec::zonemap::compute_zone_map;
+use crate::codec::zonemap::{ZoneMapSummary, compute_zone_map};
 use crate::codec::{EncodedMiniBlock, WriteProfile};
 use crate::format::{BLOCK_FLAG_HAS_NULLS, BlockEntry, Codec, Encoding, MAX_SHREDDED_KEYS};
 use crate::simd::bitpack::{min_bits_u32, pack_u32, packed_bytes_len, unpack_u32};
@@ -124,6 +126,12 @@ pub fn select_shredded_keys(map: &MapData) -> Vec<String> {
 
 /// Shreds a `MapUtf8` [`FlatColumn`] into `promoted_keys.len()` [`ShreddedSubCol`]s
 /// plus a compact residual `MapUtf8` column containing only rare and duplicate keys.
+///
+/// `ShreddedMap` preserves logical map entries per row (lexicographically sorted promoted
+/// keys merged with residual entries). Sorted input maps (such as Cetra's `BTreeMap`-backed
+/// `attributes`, `metadata`, and `resource_attributes`) round-trip with exact
+/// `FlatColumn::semantic_eq` when `promoted_keys` is sorted; unsorted input maps preserve
+/// logical key-value pairs per row.
 pub fn shred_map(
     col: &FlatColumn,
     promoted_keys: &[String],
@@ -284,6 +292,11 @@ pub fn shred_map(
 
 /// Reconstructs a full `MapUtf8` [`FlatColumn`] from an optional residual map and
 /// promoted sub-columns.
+///
+/// `ShreddedMap` preserves logical map entries per row (merging sorted promoted keys
+/// with residual entries). When the original map's keys were sorted (e.g. `BTreeMap`-backed
+/// Cetra maps) and `subcols` is in lexicographical key order, the reconstructed column
+/// matches the original under `FlatColumn::semantic_eq`.
 pub fn unshred_map(
     row_count: usize,
     row_nulls: Option<&Bitmap>,
@@ -466,6 +479,13 @@ pub fn decode_single_map_key(
     residual_count: u32,
     residual: Option<&FlatColumn>,
 ) -> Result<FlatColumn, StatamError> {
+    if let Some(bm) = row_nulls
+        && bm.len() != row_count
+    {
+        return Err(StatamError::Corrupt {
+            reason: "decode_single_map_key row_nulls length mismatch",
+        });
+    }
     if subcol.in_map.len() != row_count
         || subcol.value_null.len() != row_count
         || subcol.values.len() != row_count
@@ -476,10 +496,20 @@ pub fn decode_single_map_key(
     }
 
     let res_map = if residual_count > 0 {
-        residual.and_then(|fc| match fc.data() {
-            FlatData::MapUtf8(m) => Some((m.as_ref(), fc.nulls())),
-            _ => None,
-        })
+        let fc = residual.ok_or(StatamError::Corrupt {
+            reason: "missing residual map for key with non-zero residual_count",
+        })?;
+        if fc.len() != row_count {
+            return Err(StatamError::Corrupt {
+                reason: "shredded residual row count mismatch",
+            });
+        }
+        let FlatData::MapUtf8(m) = fc.data() else {
+            return Err(StatamError::SchemaMismatch {
+                reason: "shredded residual is not MapUtf8",
+            });
+        };
+        Some((m.as_ref(), fc.nulls()))
     } else {
         None
     };
@@ -699,7 +729,6 @@ pub fn decode_shredded_subcol(src: &[u8], row_count: usize) -> Result<ShreddedSu
         enc,
         flags,
         row_count,
-        0,
         min_inline_len,
         min_inline,
         &DataType::Utf8,
@@ -719,9 +748,14 @@ pub fn encode_shredded_residual_block(
     col: &FlatColumn,
     profile: WriteProfile,
 ) -> Result<EncodedMiniBlock, StatamError> {
-    let as_col = Column::Flat(col.clone());
-    let zm = compute_zone_map(&as_col, false);
+    encode_shredded_residual_block_with_zm(col, profile, None)
+}
 
+fn encode_shredded_residual_block_with_zm(
+    col: &FlatColumn,
+    profile: WriteProfile,
+    precomputed_zm: Option<&ZoneMapSummary>,
+) -> Result<EncodedMiniBlock, StatamError> {
     if col.is_empty() {
         return Ok(EncodedMiniBlock {
             encoding: Encoding::ShreddedMap,
@@ -736,9 +770,18 @@ pub fn encode_shredded_residual_block(
         });
     }
 
-    if let Some(inline) = try_encode_const_or_null(&as_col, &DataType::MapUtf8, &zm) {
-        return Ok(inline);
-    }
+    let owned_zm;
+    let zm = match precomputed_zm {
+        Some(z) => z,
+        None => {
+            let as_col = Column::Flat(col.clone());
+            owned_zm = compute_zone_map(&as_col, false);
+            if let Some(inline) = try_encode_const_or_null(&as_col, &DataType::MapUtf8, &owned_zm) {
+                return Ok(inline);
+            }
+            &owned_zm
+        }
+    };
 
     let FlatData::MapUtf8(map) = col.data() else {
         return Err(StatamError::SchemaMismatch {
@@ -830,12 +873,19 @@ pub fn decode_shredded_residual_block(
     if entry.encoding == Encoding::ConstNull || entry.encoding == Encoding::Const {
         return Ok(decode_const_block(entry, &DataType::MapUtf8)?.materialize(None)?);
     }
-    let row_count = entry.row_count as usize;
+    decode_shredded_residual_with_count(raw_body, entry.row_count as usize, entry.block_flags)
+}
+
+fn decode_shredded_residual_with_count(
+    raw_body: &[u8],
+    row_count: usize,
+    block_flags: u8,
+) -> Result<FlatColumn, StatamError> {
     if row_count == 0 {
         return Ok(FlatColumn::empty(&DataType::MapUtf8));
     }
 
-    let (row_nulls, rest) = read_optional_nulls(raw_body, row_count, entry.block_flags)?;
+    let (row_nulls, rest) = read_optional_nulls(raw_body, row_count, block_flags)?;
     let (counts, mut rest) = read_packed_counts(rest, row_count)?;
     let (offsets, entry_count) = counts_to_offsets(&counts)?;
 
@@ -926,6 +976,7 @@ pub fn decode_shredded_residual_block(
     rest = &rest[kcode_packed..];
 
     let (val_nulls, rest) = read_flag_bitmap(rest, entry_count)?;
+    check_varlen_take_bytes(key_dict.offsets(), &key_codes, None)?;
     let keys_data = key_dict.take(&key_codes, None)?;
     let vals_data = decode_utf8_fsst_or_plain(rest, entry_count)?;
 
@@ -957,9 +1008,8 @@ pub(crate) fn encode_nested_column(
     dt: &DataType,
     profile: WriteProfile,
     remaining_depth: usize,
+    precomputed_zm: Option<&ZoneMapSummary>,
 ) -> Result<EncodedMiniBlock, StatamError> {
-    let zm = compute_zone_map(col, false);
-
     if col.is_empty() {
         let enc = match dt {
             DataType::List(_) => Encoding::ListEncoded,
@@ -985,9 +1035,17 @@ pub(crate) fn encode_nested_column(
         });
     }
 
-    if let Some(inline) = try_encode_const_or_null(col, dt, &zm) {
-        return Ok(inline);
-    }
+    let owned_zm;
+    let zm = match precomputed_zm {
+        Some(z) => z,
+        None => {
+            owned_zm = compute_zone_map(col, false);
+            if let Some(inline) = try_encode_const_or_null(col, dt, &owned_zm) {
+                return Ok(inline);
+            }
+            &owned_zm
+        }
+    };
 
     let owned_flat;
     let flat = match col {
@@ -1064,7 +1122,7 @@ pub(crate) fn encode_nested_column(
                 preferred_codec,
             })
         }
-        DataType::MapUtf8 => encode_shredded_residual_block(flat, profile),
+        DataType::MapUtf8 => encode_shredded_residual_block_with_zm(flat, profile, Some(zm)),
         DataType::Events => {
             let FlatData::Events(ev) = flat.data() else {
                 return Err(StatamError::SchemaMismatch {
@@ -1342,7 +1400,6 @@ fn decode_list_body(
         child_enc,
         child_flags,
         child_len,
-        child_null_count,
         child_min_inline_len,
         child_min_inline,
         inner,
@@ -1367,7 +1424,6 @@ fn decode_child_column(
     enc: Encoding,
     flags: u8,
     len: usize,
-    null_count: u32,
     min_inline_len: u8,
     min_inline: [u8; 16],
     dt: &DataType,
@@ -1413,6 +1469,11 @@ fn decode_child_column(
                 reason: "ListEncoded Dict child missing inline dict",
             });
         };
+        if d.values().data_type() != *dt {
+            return Err(StatamError::SchemaMismatch {
+                reason: "child FileDict DataType mismatch",
+            });
+        }
         let (nulls, after_nulls) = read_optional_nulls(body, len, flags)?;
         return decode_dict_column(after_nulls, len, nulls, d);
     }
@@ -1421,57 +1482,21 @@ fn decode_child_column(
         DataType::List(inner) if enc == Encoding::ListEncoded => {
             decode_list_body(body, len, flags, inner, remaining_depth)
         }
-        DataType::MapUtf8 | DataType::Events | DataType::Links => {
-            let fake = BlockEntry {
-                first_row: 0,
-                row_count: u16::try_from(len).map_err(|_| StatamError::BoundsExceeded {
-                    reason: "nested child exceeds u16 row_count",
-                })?,
-                null_count: u16::try_from(null_count).unwrap_or(u16::MAX),
-                offset: 0,
-                stored_len: 0,
-                raw_len: 0,
-                encoding: enc,
-                codec: Codec::None,
-                block_flags: flags,
-                min_inline_len,
-                max_inline_len: min_inline_len,
-                reserved: [0; 3],
-                min_inline,
-                max_inline: min_inline,
-            };
-            decode_nested_column(body, &fake, dt, remaining_depth)
-        }
+        DataType::MapUtf8 if enc == Encoding::ShreddedMap => Ok(Column::Flat(
+            decode_shredded_residual_with_count(body, len, flags)?,
+        )),
+        DataType::Events if enc == Encoding::EventsStruct => decode_events_body(body, len, flags),
+        DataType::Links if enc == Encoding::LinksStruct => decode_links_body(body, len, flags),
+        DataType::MapUtf8 | DataType::Events | DataType::Links => Err(StatamError::Corrupt {
+            reason: "incompatible nested encoding for DataType",
+        }),
         _ => {
             if enc == Encoding::Rle {
-                let fake = BlockEntry {
-                    first_row: 0,
-                    row_count: u16::try_from(len).map_err(|_| StatamError::BoundsExceeded {
-                        reason: "Rle list child exceeds u16 row_count",
-                    })?,
-                    null_count: u16::try_from(null_count).unwrap_or(u16::MAX),
-                    offset: 0,
-                    stored_len: 0,
-                    raw_len: 0,
-                    encoding: enc,
-                    codec: Codec::None,
-                    block_flags: flags,
-                    min_inline_len,
-                    max_inline_len: min_inline_len,
-                    reserved: [0; 3],
-                    min_inline,
-                    max_inline: min_inline,
-                };
-                return crate::codec::numeric::decode_narrow_column(body, &fake, dt);
+                return decode_rle_block(body, len, flags, dt);
             }
             let (nulls, after_nulls) = read_optional_nulls(body, len, flags)?;
-            Ok(Column::Flat(decode_inner_flat(
-                after_nulls,
-                enc,
-                len,
-                dt,
-                nulls,
-            )?))
+            let data = decode_inner_data(after_nulls, enc, len, dt, nulls.as_ref())?;
+            Ok(Column::Flat(FlatColumn::try_new(data, nulls)?))
         }
     }
 }
@@ -1562,9 +1587,9 @@ fn encode_child_column_payload(
         dt,
         DataType::List(_) | DataType::MapUtf8 | DataType::Events | DataType::Links
     ) {
-        encode_nested_column(col, dt, profile, remaining_depth)?
+        encode_nested_column(col, dt, profile, remaining_depth, None)?
     } else {
-        crate::codec::numeric::encode_narrow_column(col, dt, profile)?
+        crate::codec::numeric::encode_narrow_column(col, dt, profile, None)?
     };
     Ok(ChildEncodedPayload {
         encoding: enc_block.encoding,
@@ -1665,8 +1690,8 @@ fn decode_events_body(
             reason: "truncated EventsStruct times payload",
         });
     }
-    let times_col = decode_inner_flat(&rest[..t_len], t_enc, event_count, &DataType::I64, None)?;
-    let FlatData::I64(times) = times_col.data().clone() else {
+    let times_data = decode_inner_data(&rest[..t_len], t_enc, event_count, &DataType::I64, None)?;
+    let FlatData::I64(times) = times_data else {
         unreachable!();
     };
     rest = &rest[t_len..];
@@ -1709,6 +1734,7 @@ fn decode_events_body(
                 reason: "EventsStruct names dict is not Utf8",
             });
         };
+        check_varlen_take_bytes(dict_u.offsets(), &codes, None)?;
         dict_u.take(&codes, None)?
     } else {
         if rest.len() < 4 {
@@ -1723,9 +1749,9 @@ fn decode_events_body(
                 reason: "truncated EventsStruct names payload",
             });
         }
-        let n_col = decode_inner_flat(&rest[..n_len], n_enc, event_count, &DataType::Utf8, None)?;
+        let n_data = decode_inner_data(&rest[..n_len], n_enc, event_count, &DataType::Utf8, None)?;
         rest = &rest[n_len..];
-        let FlatData::Utf8(u) = n_col.data().clone() else {
+        let FlatData::Utf8(u) = n_data else {
             unreachable!();
         };
         u
@@ -1746,8 +1772,8 @@ fn decode_events_body(
             reason: "EventsStruct attrs length mismatch",
         });
     }
-    let a_col = decode_inner_flat(rest, a_enc, event_count, &DataType::Utf8, None)?;
-    let FlatData::Utf8(attributes) = a_col.data().clone() else {
+    let a_data = decode_inner_data(rest, a_enc, event_count, &DataType::Utf8, None)?;
+    let FlatData::Utf8(attributes) = a_data else {
         unreachable!();
     };
 
@@ -1821,8 +1847,8 @@ fn decode_links_body(
             reason: "LinksStruct attrs length mismatch",
         });
     }
-    let a_col = decode_inner_flat(rest, a_enc, link_count, &DataType::Utf8, None)?;
-    let FlatData::Utf8(attributes) = a_col.data().clone() else {
+    let a_data = decode_inner_data(rest, a_enc, link_count, &DataType::Utf8, None)?;
+    let FlatData::Utf8(attributes) = a_data else {
         unreachable!();
     };
 
@@ -1920,8 +1946,7 @@ fn encode_utf8_fsst_or_plain(
             return Ok((Encoding::Fsst, fsst));
         }
     }
-    let flat = FlatColumn::try_new(FlatData::Utf8(u.clone()), None)?;
-    Ok((Encoding::Plain, encode_plain_body(&flat)?))
+    Ok((Encoding::Plain, encode_plain_utf8(u)))
 }
 
 fn decode_utf8_fsst_or_plain(src: &[u8], row_count: usize) -> Result<Utf8Data, StatamError> {
@@ -1941,8 +1966,8 @@ fn decode_utf8_fsst_or_plain(src: &[u8], row_count: usize) -> Result<Utf8Data, S
     match enc {
         Encoding::Fsst => decode_fsst_utf8(body, row_count),
         Encoding::Plain => {
-            let flat = decode_inner_flat(body, Encoding::Plain, row_count, &DataType::Utf8, None)?;
-            let FlatData::Utf8(u) = flat.data().clone() else {
+            let data = decode_inner_data(body, Encoding::Plain, row_count, &DataType::Utf8, None)?;
+            let FlatData::Utf8(u) = data else {
                 unreachable!();
             };
             Ok(u)
