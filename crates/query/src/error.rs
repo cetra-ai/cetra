@@ -38,6 +38,9 @@ impl InvalidQuery {
 /// Errors returned by `cetra-query`.
 #[derive(Debug, Error)]
 pub enum QueryError {
+    /// Caller request parameter outside the query text is invalid (`400 bad_request`).
+    #[error("{0}")]
+    InvalidRequest(String),
     /// Parse, grammar, schema, or type error (400 `invalid_filter`).
     #[error("{0}")]
     Invalid(#[from] InvalidQuery),
@@ -71,6 +74,11 @@ impl From<ColumnError> for QueryError {
 }
 
 impl QueryError {
+    /// Builds `QueryError::InvalidRequest`, capping `message` at [`MESSAGE_CAP`].
+    pub fn invalid_request(message: impl AsRef<str>) -> Self {
+        Self::InvalidRequest(cap_message(message.as_ref()))
+    }
+
     /// Builds `QueryError::Failed`, capping `message` at [`MESSAGE_CAP`].
     pub fn failed(message: impl AsRef<str>) -> Self {
         Self::Failed(cap_message(message.as_ref()))
@@ -92,4 +100,25 @@ pub fn cap_message(text: &str) -> String {
         end -= 1;
     }
     text[..end].to_owned()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn invalid_request_caps_utf8_message() {
+        let short = QueryError::invalid_request("missing parameter");
+        assert!(matches!(short, QueryError::InvalidRequest(ref m) if m == "missing parameter"));
+
+        // Multi-byte UTF-8 character straddling MESSAGE_CAP boundary.
+        let prefix = "a".repeat(MESSAGE_CAP - 1);
+        let long = format!("{prefix}é");
+        let capped = QueryError::invalid_request(&long);
+        let QueryError::InvalidRequest(msg) = capped else {
+            panic!("expected InvalidRequest");
+        };
+        assert_eq!(msg.len(), MESSAGE_CAP - 1);
+        assert_eq!(msg, prefix);
+    }
 }

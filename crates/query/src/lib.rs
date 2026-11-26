@@ -15,6 +15,7 @@ pub mod fn_time;
 #[doc(hidden)]
 pub mod fuzz_entry;
 pub mod ir;
+pub mod sql;
 pub mod text;
 pub mod tombstone;
 

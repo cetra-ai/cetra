@@ -2,15 +2,15 @@
 
 use std::cmp::Ordering;
 use std::collections::hash_map::DefaultHasher;
-use std::collections::{BTreeSet, HashSet};
+use std::collections::{BTreeSet, HashSet, VecDeque};
 use std::fmt;
 use std::hash::{Hash, Hasher};
 use std::mem::size_of;
 use std::sync::Arc;
 
 use cetra_column::{
-    Batch, Bitmap, COST_DECIMAL_PRECISION, COST_DECIMAL_SCALE, Column, ColumnError, DataType,
-    Field, Interval, MAX_NESTING_DEPTH, Reservation, ScalarValue, Schema, Selection,
+    Batch, Bitmap, COST_DECIMAL_PRECISION, COST_DECIMAL_SCALE, CancelToken, Column, ColumnError,
+    DataType, Field, Interval, MAX_NESTING_DEPTH, Reservation, ScalarValue, Schema, Selection,
 };
 
 use crate::error::{InvalidQuery, QueryError};
@@ -23,7 +23,7 @@ use crate::ir::{EvalContext, Expr};
 
 use super::pipeline::{ControlFlow, ExecContext, PushSink, run_pipeline};
 use super::sort_key::SortKey;
-use super::source::{ScanSource, ScanSpec};
+use super::source::{PartitionStream, ScanSource, ScanSpec};
 use super::spill::{SpillFile, SpillWriter};
 
 const NUM_SPILL_PARTITIONS: usize = 32;
@@ -440,6 +440,13 @@ pub enum AggFunc {
         /// Value expression (e.g. `user_id`).
         value: Expr,
         /// Sort keys (e.g. `(start_time ASC, trace_id ASC)`).
+        order_by: Vec<SortKey>,
+    },
+    /// First `value` ordered by `order_by`, preserving `NULL` when the winning row's `value` is `NULL`.
+    FirstByOrder {
+        /// Value expression.
+        value: Expr,
+        /// Sort keys.
         order_by: Vec<SortKey>,
     },
     /// Dedicated `sessions` internal aggregate: sorted distinct union of `List(Utf8)` (empty `[]` on empty).
@@ -1116,6 +1123,10 @@ enum AccKind {
         value_type: DataType,
         order_by: Vec<SortKey>,
     },
+    FirstByOrder {
+        value_type: DataType,
+        order_by: Vec<SortKey>,
+    },
     TagUnion,
 }
 
@@ -1157,9 +1168,8 @@ impl AccKind {
             Self::ArrayAgg { input_type, .. } => {
                 Field::new(name, DataType::List(Box::new(input_type.clone())), true)
             }
-            Self::FirstNonNullByOrder { value_type, .. } => {
-                Field::new(name, value_type.clone(), true)
-            }
+            Self::FirstNonNullByOrder { value_type, .. }
+            | Self::FirstByOrder { value_type, .. } => Field::new(name, value_type.clone(), true),
             Self::TagUnion => Field::new(name, DataType::List(Box::new(DataType::Utf8)), false),
         }
     }
@@ -1246,6 +1256,30 @@ impl AccKind {
                 }
                 fields
             }
+            Self::FirstByOrder {
+                value_type,
+                order_by,
+            } => {
+                let mut fields = Vec::with_capacity(2 + order_by.len());
+                fields.push(Field::new(
+                    format!("a_{agg_idx}_has"),
+                    DataType::Bool,
+                    false,
+                ));
+                fields.push(Field::new(
+                    format!("a_{agg_idx}_val"),
+                    value_type.clone(),
+                    true,
+                ));
+                for (k_idx, key) in order_by.iter().enumerate() {
+                    fields.push(Field::new(
+                        format!("a_{agg_idx}_k_{k_idx}"),
+                        key.expr.data_type(),
+                        true,
+                    ));
+                }
+                fields
+            }
             Self::TagUnion => vec![Field::new(
                 format!("a_{agg_idx}_tags"),
                 DataType::List(Box::new(DataType::Utf8)),
@@ -1258,6 +1292,7 @@ impl AccKind {
         match self {
             Self::AvgFloat(_) | Self::AvgDecimal { .. } => 2,
             Self::FirstNonNullByOrder { order_by, .. } => 1 + order_by.len(),
+            Self::FirstByOrder { order_by, .. } => 2 + order_by.len(),
             _ => 1,
         }
     }
@@ -1288,6 +1323,10 @@ impl AccKind {
                 heap_bytes: 0,
             },
             Self::FirstNonNullByOrder { .. } => AccState::FirstNonNullByOrder {
+                best: None,
+                heap_bytes: 0,
+            },
+            Self::FirstByOrder { .. } => AccState::FirstByOrder {
                 best: None,
                 heap_bytes: 0,
             },
@@ -1334,6 +1373,10 @@ enum AccState {
         best: Option<(KeyAtom, Vec<KeyAtom>)>,
         heap_bytes: usize,
     },
+    FirstByOrder {
+        best: Option<(KeyAtom, Vec<KeyAtom>)>,
+        heap_bytes: usize,
+    },
     TagUnion {
         tags: BTreeSet<String>,
         heap_bytes: usize,
@@ -1348,7 +1391,8 @@ impl AccState {
             }
             Self::Min(Some(k)) | Self::Max(Some(k)) => k.heap_bytes(),
             Self::ApproxPercentile(sk) => sk.heap_bytes(),
-            Self::FirstNonNullByOrder { best, heap_bytes } => {
+            Self::FirstNonNullByOrder { best, heap_bytes }
+            | Self::FirstByOrder { best, heap_bytes } => {
                 best.as_ref()
                     .map_or(0, |(_, ks)| ks.capacity() * size_of::<KeyAtom>())
                     + *heap_bytes
@@ -1427,16 +1471,16 @@ impl AccState {
                 if val_col.is_null(row) {
                     (0, 0)
                 } else {
-                    let mut est =
-                        col_row_heap_estimate(val_col, row) + order_by.len() * size_of::<KeyAtom>();
-                    for col in inputs.iter().skip(1) {
-                        if !col.is_null(row) {
-                            est += col_row_heap_estimate(col, row);
-                        }
-                    }
-                    (est, 0)
+                    (
+                        estimate_first_by_order_bytes(val_col, &inputs[1..], row, order_by.len()),
+                        0,
+                    )
                 }
             }
+            (Self::FirstByOrder { .. }, AccKind::FirstByOrder { order_by, .. }) => (
+                estimate_first_by_order_bytes(inputs[0], &inputs[1..], row, order_by.len()),
+                0,
+            ),
             (Self::TagUnion { .. }, _) => {
                 let col = inputs[0];
                 if col.is_null(row) {
@@ -1514,14 +1558,30 @@ impl AccState {
                 if val_col.is_null(row) {
                     (0, 0)
                 } else {
-                    let mut est = col_row_heap_estimate(val_col, row)
-                        + (partial_cols.len().saturating_sub(1)) * size_of::<KeyAtom>();
-                    for col in partial_cols.iter().skip(1) {
-                        if !col.is_null(row) {
-                            est += col_row_heap_estimate(col, row);
-                        }
-                    }
-                    (est, 0)
+                    (
+                        estimate_first_by_order_bytes(
+                            val_col,
+                            &partial_cols[1..],
+                            row,
+                            partial_cols.len().saturating_sub(1),
+                        ),
+                        0,
+                    )
+                }
+            }
+            Self::FirstByOrder { .. } => {
+                if read_bool(partial_cols[0], row) != Some(true) {
+                    (0, 0)
+                } else {
+                    (
+                        estimate_first_by_order_bytes(
+                            partial_cols[1],
+                            &partial_cols[2..],
+                            row,
+                            partial_cols.len().saturating_sub(2),
+                        ),
+                        0,
+                    )
                 }
             }
             Self::TagUnion { .. } => {
@@ -1702,27 +1762,11 @@ impl AccState {
             ) => {
                 let val_col = inputs[0];
                 if !val_col.is_null(row) {
-                    let order_cols = &inputs[1..];
-                    let replace = match best {
-                        None => true,
-                        Some((_, cur_keys)) => {
-                            compare_order_keys(order_cols, row, cur_keys, order_by)?
-                                == Ordering::Less
-                        }
-                    };
-                    if replace {
-                        let new_val = read_key_atom(val_col, row);
-                        let mut new_keys = Vec::with_capacity(order_cols.len());
-                        let mut new_bytes = new_val.heap_bytes();
-                        for oc in order_cols {
-                            let ka = read_key_atom(oc, row);
-                            new_bytes += ka.heap_bytes();
-                            new_keys.push(ka);
-                        }
-                        *best = Some((new_val, new_keys));
-                        *heap_bytes = new_bytes;
-                    }
+                    update_first_by_order(best, heap_bytes, val_col, &inputs[1..], row, order_by)?;
                 }
+            }
+            (Self::FirstByOrder { best, heap_bytes }, AccKind::FirstByOrder { order_by, .. }) => {
+                update_first_by_order(best, heap_bytes, inputs[0], &inputs[1..], row, order_by)?;
             }
             (Self::TagUnion { tags, heap_bytes }, AccKind::TagUnion) => {
                 let col = inputs[0];
@@ -1918,26 +1962,26 @@ impl AccState {
             ) => {
                 let val_col = partial_cols[0];
                 if !val_col.is_null(row) {
-                    let order_cols = &partial_cols[1..];
-                    let replace = match best {
-                        None => true,
-                        Some((_, cur_keys)) => {
-                            compare_order_keys(order_cols, row, cur_keys, order_by)?
-                                == Ordering::Less
-                        }
-                    };
-                    if replace {
-                        let new_val = read_key_atom(val_col, row);
-                        let mut new_keys = Vec::with_capacity(order_cols.len());
-                        let mut new_bytes = new_val.heap_bytes();
-                        for oc in order_cols {
-                            let ka = read_key_atom(oc, row);
-                            new_bytes += ka.heap_bytes();
-                            new_keys.push(ka);
-                        }
-                        *best = Some((new_val, new_keys));
-                        *heap_bytes = new_bytes;
-                    }
+                    update_first_by_order(
+                        best,
+                        heap_bytes,
+                        val_col,
+                        &partial_cols[1..],
+                        row,
+                        order_by,
+                    )?;
+                }
+            }
+            (Self::FirstByOrder { best, heap_bytes }, AccKind::FirstByOrder { order_by, .. }) => {
+                if read_bool(partial_cols[0], row) == Some(true) {
+                    update_first_by_order(
+                        best,
+                        heap_bytes,
+                        partial_cols[1],
+                        &partial_cols[2..],
+                        row,
+                        order_by,
+                    )?;
                 }
             }
             (Self::TagUnion { tags, heap_bytes }, AccKind::TagUnion) => {
@@ -2062,10 +2106,13 @@ impl AccState {
             (
                 Self::FirstNonNullByOrder { best, .. },
                 AccKind::FirstNonNullByOrder { value_type, .. },
-            ) => Ok(match best {
-                Some((val, _)) => val.to_scalar(value_type),
-                None => ScalarValue::Null(value_type.clone()),
-            }),
+            )
+            | (Self::FirstByOrder { best, .. }, AccKind::FirstByOrder { value_type, .. }) => {
+                Ok(match best {
+                    Some((val, _)) => val.to_scalar(value_type),
+                    None => ScalarValue::Null(value_type.clone()),
+                })
+            }
             (Self::TagUnion { tags, .. }, AccKind::TagUnion) => {
                 let items = tags.iter().cloned().map(ScalarValue::Utf8).collect();
                 Ok(ScalarValue::List {
@@ -2198,6 +2245,28 @@ impl AccState {
                     }
                 }
             },
+            (
+                Self::FirstByOrder { best, .. },
+                AccKind::FirstByOrder {
+                    value_type,
+                    order_by,
+                },
+            ) => match best {
+                Some((val, keys)) => {
+                    out.push(ScalarValue::Bool(true));
+                    out.push(val.to_scalar(value_type));
+                    for (k_atom, key_spec) in keys.iter().zip(order_by) {
+                        out.push(k_atom.to_scalar(&key_spec.expr.data_type()));
+                    }
+                }
+                None => {
+                    out.push(ScalarValue::Bool(false));
+                    out.push(ScalarValue::Null(value_type.clone()));
+                    for key_spec in order_by {
+                        out.push(ScalarValue::Null(key_spec.expr.data_type()));
+                    }
+                }
+            },
             (Self::TagUnion { tags, .. }, AccKind::TagUnion) => {
                 let items = tags.iter().cloned().map(ScalarValue::Utf8).collect();
                 out.push(ScalarValue::List {
@@ -2208,6 +2277,53 @@ impl AccState {
             _ => {}
         }
     }
+}
+
+fn estimate_first_by_order_bytes(
+    val_col: &Column,
+    order_cols: &[&Column],
+    row: usize,
+    key_count: usize,
+) -> usize {
+    let mut est = key_count * size_of::<KeyAtom>();
+    if !val_col.is_null(row) {
+        est += col_row_heap_estimate(val_col, row);
+    }
+    for col in order_cols {
+        if !col.is_null(row) {
+            est += col_row_heap_estimate(col, row);
+        }
+    }
+    est
+}
+
+fn update_first_by_order(
+    best: &mut Option<(KeyAtom, Vec<KeyAtom>)>,
+    heap_bytes: &mut usize,
+    val_col: &Column,
+    order_cols: &[&Column],
+    row: usize,
+    order_by: &[SortKey],
+) -> Result<(), QueryError> {
+    let replace = match best {
+        None => true,
+        Some((_, cur_keys)) => {
+            compare_order_keys(order_cols, row, cur_keys, order_by)? == Ordering::Less
+        }
+    };
+    if replace {
+        let new_val = read_key_atom(val_col, row);
+        let mut new_keys = Vec::with_capacity(order_cols.len());
+        let mut new_bytes = new_val.heap_bytes();
+        for oc in order_cols {
+            let ka = read_key_atom(oc, row);
+            new_bytes += ka.heap_bytes();
+            new_keys.push(ka);
+        }
+        *best = Some((new_val, new_keys));
+        *heap_bytes = new_bytes;
+    }
+    Ok(())
 }
 
 fn exact_percentile_sorted(sorted: &[f64], quantile: f64) -> Result<f64, QueryError> {
@@ -2731,6 +2847,21 @@ fn resolve_acc_kind(agg: &AggExpr, schema: &Schema) -> Result<AccKind, QueryErro
                 order_by: order_by.clone(),
             })
         }
+        AggFunc::FirstByOrder { value, order_by } => {
+            validate_expr_against_schema(value, schema)?;
+            for key in order_by {
+                validate_expr_against_schema(&key.expr, schema)?;
+                if !is_sortable_type(&key.expr.data_type()) {
+                    return Err(
+                        InvalidQuery::new("FirstByOrder sort key is not orderable", None).into(),
+                    );
+                }
+            }
+            Ok(AccKind::FirstByOrder {
+                value_type: value.data_type(),
+                order_by: order_by.clone(),
+            })
+        }
         AggFunc::TagUnion(expr) => {
             validate_expr_against_schema(expr, schema)?;
             let DataType::List(inner) = expr.data_type() else {
@@ -2845,6 +2976,180 @@ impl HashAgg {
         })
     }
 
+    /// Combines multiple per-worker [`HashAgg`] sinks into finalized output [`Batch`]es.
+    ///
+    /// When `sinks` is empty and `spec.group_by.is_empty()`, emits the 1-row default global-agg batch.
+    pub fn merge_sinks(
+        sinks: Vec<Self>,
+        spec: &HashAggSpec,
+        input_schema: &Schema,
+        ctx: &ExecContext,
+    ) -> Result<Vec<Batch>, QueryError> {
+        let combined = Self::combine_sinks_into(sinks, spec, input_schema, ctx)?;
+        combined.into_batches()
+    }
+
+    /// Combines multiple per-worker [`HashAgg`] sinks into a streaming [`PartitionStream`] of
+    /// finalized output [`Batch`]es (one spill partition at a time without materializing all groups).
+    pub fn combine_sinks_to_stream(
+        sinks: Vec<Self>,
+        spec: &HashAggSpec,
+        input_schema: &Schema,
+        ctx: &ExecContext,
+    ) -> Result<Box<dyn PartitionStream>, QueryError> {
+        let combined = Self::combine_sinks_into(sinks, spec, input_schema, ctx)?;
+        combined.into_stream()
+    }
+
+    fn combine_sinks_into(
+        mut sinks: Vec<Self>,
+        spec: &HashAggSpec,
+        input_schema: &Schema,
+        ctx: &ExecContext,
+    ) -> Result<Self, QueryError> {
+        for sink in &sinks {
+            if sink.input_schema.as_ref() != input_schema {
+                return Err(ColumnError::InvalidBatch {
+                    reason: "HashAgg sink input schema does not match",
+                }
+                .into());
+            }
+            if sink.spec != *spec {
+                return Err(InvalidQuery::new("HashAgg sink spec does not match", None).into());
+            }
+        }
+        let Some(mut combined) = sinks.pop() else {
+            return Self::new(spec.clone(), Arc::new(input_schema.clone()), ctx.clone());
+        };
+        if sinks.is_empty() {
+            return Ok(combined);
+        }
+
+        let partial_schema = combined.partial_schema();
+        while let Some(sink) = sinks.pop() {
+            if !sink.spilled {
+                sink.drain_in_memory_into(&mut combined)?;
+            } else {
+                let spill_files = sink.finish_into_spill_files()?;
+                let mut reader_res = ctx.pool.register("hash_agg_combine_read", false);
+                let mut max_frame_bytes = target_spill_frame_bytes(ctx);
+                for file in spill_files {
+                    let mut reader = file.open_reader(Arc::clone(&partial_schema))?;
+                    loop {
+                        if combined.table.num_groups() > 0 {
+                            if let Err(ColumnError::MemoryLimit { .. }) =
+                                reader_res.try_grow(max_frame_bytes)
+                            {
+                                reader_res.free();
+                                combined.drain_table_to_writers(0)?;
+                            } else {
+                                reader_res.shrink(max_frame_bytes);
+                            }
+                        }
+                        let Some(b) = reader.next_batch(Some(&mut reader_res))? else {
+                            break;
+                        };
+                        max_frame_bytes = max_frame_bytes.max(b.memory_bytes());
+                        combined.consume_partial_batch(&b)?;
+                        drop(b);
+                        reader_res.free();
+                    }
+                }
+            }
+        }
+        Ok(combined)
+    }
+
+    /// Consumes this [`HashAgg`] sink and streams finalized groups as a [`PartitionStream`].
+    pub fn into_stream(mut self) -> Result<Box<dyn PartitionStream>, QueryError> {
+        let batch_size = self.ctx.batch_size.max(1);
+        if let Some(states) = self.global_states.take() {
+            return Ok(Box::new(HashAggStream {
+                group_types: self.group_types,
+                acc_kinds: self.acc_kinds,
+                partial_schema: self.partial_schema,
+                output_schema: self.output_schema,
+                ctx: self.ctx,
+                batch_size,
+                active: Some(HashAggInMemoryRows {
+                    keys: Vec::new(),
+                    states: vec![Some(states)],
+                    pos: 0,
+                    res: self.res,
+                    unspillable_res: self.unspillable_res,
+                }),
+                tasks: VecDeque::new(),
+                done: false,
+            }));
+        }
+
+        if !self.spilled {
+            self.table.slots = Vec::new();
+            self.table.hashes = Vec::new();
+            let keys: Vec<Option<Vec<KeyAtom>>> = std::mem::take(&mut self.table.keys)
+                .into_iter()
+                .map(Some)
+                .collect();
+            let states: Vec<Option<Vec<AccState>>> = std::mem::take(&mut self.table.states)
+                .into_iter()
+                .map(Some)
+                .collect();
+            self.table.spillable_bytes = 0;
+            self.table.unspillable_bytes = 0;
+            let active = if states.is_empty() {
+                self.res.free();
+                self.unspillable_res.free();
+                None
+            } else {
+                shrink_res_to_remaining(&keys, &states, &mut self.res, &mut self.unspillable_res);
+                Some(HashAggInMemoryRows {
+                    keys,
+                    states,
+                    pos: 0,
+                    res: self.res,
+                    unspillable_res: self.unspillable_res,
+                })
+            };
+            return Ok(Box::new(HashAggStream {
+                group_types: self.group_types,
+                acc_kinds: self.acc_kinds,
+                partial_schema: self.partial_schema,
+                output_schema: self.output_schema,
+                ctx: self.ctx,
+                batch_size,
+                active,
+                tasks: VecDeque::new(),
+                done: false,
+            }));
+        }
+
+        if self.table.num_groups() > 0 {
+            self.drain_table_to_writers(0)?;
+        }
+        let writers = std::mem::take(&mut self.partition_writers);
+        let mut tasks = VecDeque::new();
+        for w in writers.into_iter().flatten() {
+            let f = w.finish()?;
+            if f.byte_len() > 0 {
+                tasks.push_back(HashAggSpillTask { file: f, depth: 0 });
+            }
+        }
+        self.res.free();
+        self.unspillable_res.free();
+
+        Ok(Box::new(HashAggStream {
+            group_types: self.group_types,
+            acc_kinds: self.acc_kinds,
+            partial_schema: self.partial_schema,
+            output_schema: self.output_schema,
+            ctx: self.ctx,
+            batch_size,
+            active: None,
+            tasks,
+            done: false,
+        }))
+    }
+
     /// Output schema of finalized batches produced by [`HashAgg::into_batches`].
     pub fn output_schema(&self) -> Arc<Schema> {
         Arc::clone(&self.output_schema)
@@ -2928,138 +3233,37 @@ impl HashAgg {
         depth: usize,
         out: &mut Vec<Batch>,
     ) -> Result<(), QueryError> {
-        let mut reader = file.open_reader(Arc::clone(&self.partial_schema))?;
-        let mut reader_res = self.ctx.pool.register("hash_agg_merge_read", false);
-        let mut local_table = GroupTable::new(self.acc_kinds.clone());
-        let mut local_res = self.ctx.pool.register("hash_agg_merge", true);
-        let mut local_unsp = self.ctx.pool.register("hash_agg_merge_unsp", false);
-        let frame_cap = target_spill_frame_bytes(&self.ctx);
-        let mut max_batch_bytes = frame_cap;
         let layout = AggLayout {
             group_types: &self.group_types,
             acc_kinds: &self.acc_kinds,
             partial_schema: &self.partial_schema,
             output_schema: &self.output_schema,
         };
-
-        while let Some(batch) = reader.next_batch(Some(&mut reader_res))? {
-            if self.ctx.eval.cancel.is_cancelled() {
-                return Err(QueryError::Cancelled);
+        match fold_spill_partition_or_repartition(&layout, &self.ctx, file, depth)? {
+            FoldPartitionResult::Empty => Ok(()),
+            FoldPartitionResult::Ready(mut mem) => {
+                let keys: Vec<Vec<KeyAtom>> = mem.keys.into_iter().flatten().collect();
+                let states: Vec<Vec<AccState>> = mem.states.into_iter().flatten().collect();
+                mem.unspillable_res.free();
+                mem.res.free();
+                let batches = emit_chunked_output_batches(
+                    &layout,
+                    &keys,
+                    &states,
+                    self.ctx.batch_size.max(1),
+                    &self.ctx.eval,
+                    &mut mem.res,
+                )?;
+                out.extend(batches);
+                Ok(())
             }
-            max_batch_bytes = max_batch_bytes.max(batch.memory_bytes());
-            let headroom = max_batch_bytes.saturating_sub(reader_res.size());
-            let mut group_state = GroupTableState {
-                table: &mut local_table,
-                res: &mut local_res,
-                unspillable_res: &mut local_unsp,
-            };
-            let fold_res = fold_partial_batch_into_table(
-                &batch,
-                &layout,
-                &mut group_state,
-                depth as u64,
-                headroom,
-                &self.ctx.eval,
-            );
-            match fold_res {
-                Ok(None) => {
-                    drop(batch);
-                    reader_res.free();
+            FoldPartitionResult::Repartitioned(sub_tasks) => {
+                for task in sub_tasks {
+                    self.merge_spill_partition(task.file, task.depth, out)?;
                 }
-                Ok(Some(failed_row)) => {
-                    if depth >= MAX_REPARTITION_DEPTH {
-                        return Err(QueryError::TooLarge);
-                    }
-                    // Salted re-partitioning at depth + 1.
-                    let next_depth = depth + 1;
-                    let salt = next_depth as u64;
-                    let mut sub_writers: Vec<Option<SpillWriter>> =
-                        (0..NUM_SPILL_PARTITIONS).map(|_| None).collect();
-
-                    if local_table.num_groups() > 0 {
-                        let mut group_state = GroupTableState {
-                            table: &mut local_table,
-                            res: &mut local_res,
-                            unspillable_res: &mut local_unsp,
-                        };
-                        drain_group_table_to_writers(
-                            &layout,
-                            &mut group_state,
-                            salt,
-                            frame_cap,
-                            &self.ctx,
-                            &mut sub_writers,
-                        )?;
-                    }
-                    // Route only the unfolded tail of `batch` (starting at `failed_row`),
-                    // plus remaining batches from `reader`.
-                    route_partial_batch_to_writers(
-                        &batch,
-                        failed_row,
-                        self.group_types.len(),
-                        salt,
-                        frame_cap,
-                        &self.ctx,
-                        &mut sub_writers,
-                    )?;
-                    drop(batch);
-                    reader_res.free();
-
-                    while let Some(rem_batch) = reader.next_batch(Some(&mut reader_res))? {
-                        route_partial_batch_to_writers(
-                            &rem_batch,
-                            0,
-                            self.group_types.len(),
-                            salt,
-                            frame_cap,
-                            &self.ctx,
-                            &mut sub_writers,
-                        )?;
-                        drop(rem_batch);
-                        reader_res.free();
-                    }
-
-                    drop(reader);
-                    drop(file);
-                    drop(local_res);
-                    drop(local_unsp);
-                    drop(reader_res);
-
-                    let mut sub_files = Vec::new();
-                    for w in sub_writers.into_iter().flatten() {
-                        let f = w.finish()?;
-                        if f.byte_len() > 0 {
-                            sub_files.push(f);
-                        }
-                    }
-                    for sf in sub_files {
-                        self.merge_spill_partition(sf, next_depth, out)?;
-                    }
-                    return Ok(());
-                }
-                Err(err) => return Err(err),
+                Ok(())
             }
         }
-
-        drop(reader);
-        drop(file);
-        drop(reader_res);
-
-        let keys = std::mem::take(&mut local_table.keys);
-        let states = std::mem::take(&mut local_table.states);
-        local_table.clear_and_free(&mut local_res, &mut local_unsp);
-        if !keys.is_empty() {
-            let batches = emit_chunked_output_batches(
-                &layout,
-                &keys,
-                &states,
-                self.ctx.batch_size.max(1),
-                &self.ctx.eval,
-                &mut local_res,
-            )?;
-            out.extend(batches);
-        }
-        Ok(())
     }
 
     fn ensure_partition_writers(&mut self) {
@@ -3506,54 +3710,37 @@ pub fn execute_hash_agg(
         return agg.into_batches();
     }
 
-    let mut sinks = run_pipeline(ctx, partitions, |_| Ok(Vec::new()), {
+    let sinks = run_pipeline(ctx, partitions, |_| Ok(Vec::new()), {
         let spec_c = agg_spec.clone();
         let schema_c = Arc::clone(&input_schema);
         let ctx_c = ctx.clone();
         move |_| HashAgg::new(spec_c.clone(), Arc::clone(&schema_c), ctx_c.clone())
     })?;
 
-    let Some(mut combined) = sinks.pop() else {
-        let agg = HashAgg::new(agg_spec, input_schema, ctx.clone())?;
-        return agg.into_batches();
-    };
-    if sinks.is_empty() {
-        return combined.into_batches();
+    HashAgg::merge_sinks(sinks, &agg_spec, &input_schema, ctx)
+}
+
+/// Runs arbitrary input `partitions` in parallel into per-worker [`HashAgg`] sinks and returns a
+/// streaming [`PartitionStream`] of finalized groups.
+pub fn execute_hash_agg_streams(
+    partitions: Vec<Box<dyn PartitionStream>>,
+    input_schema: Arc<Schema>,
+    spec: HashAggSpec,
+    ctx: &ExecContext,
+) -> Result<Box<dyn PartitionStream>, QueryError> {
+    if partitions.is_empty() {
+        let agg = HashAgg::new(spec, input_schema, ctx.clone())?;
+        return agg.into_stream();
     }
 
-    let partial_schema = combined.partial_schema();
-    while let Some(sink) = sinks.pop() {
-        if !sink.spilled {
-            sink.drain_in_memory_into(&mut combined)?;
-        } else {
-            let spill_files = sink.finish_into_spill_files()?;
-            let mut reader_res = ctx.pool.register("hash_agg_combine_read", false);
-            let mut max_frame_bytes = target_spill_frame_bytes(ctx);
-            for file in spill_files {
-                let mut reader = file.open_reader(Arc::clone(&partial_schema))?;
-                loop {
-                    if combined.table.num_groups() > 0 {
-                        if let Err(ColumnError::MemoryLimit { .. }) =
-                            reader_res.try_grow(max_frame_bytes)
-                        {
-                            reader_res.free();
-                            combined.drain_table_to_writers(0)?;
-                        } else {
-                            reader_res.shrink(max_frame_bytes);
-                        }
-                    }
-                    let Some(b) = reader.next_batch(Some(&mut reader_res))? else {
-                        break;
-                    };
-                    max_frame_bytes = max_frame_bytes.max(b.memory_bytes());
-                    combined.consume_partial_batch(&b)?;
-                    drop(b);
-                    reader_res.free();
-                }
-            }
-        }
-    }
-    combined.into_batches()
+    let sinks = run_pipeline(ctx, partitions, |_| Ok(Vec::new()), {
+        let spec_c = spec.clone();
+        let schema_c = Arc::clone(&input_schema);
+        let ctx_c = ctx.clone();
+        move |_| HashAgg::new(spec_c.clone(), Arc::clone(&schema_c), ctx_c.clone())
+    })?;
+
+    HashAgg::combine_sinks_to_stream(sinks, &spec, &input_schema, ctx)
 }
 
 // ---------------------------------------------------------------------------
@@ -3636,7 +3823,8 @@ fn evaluate_batch_inputs(
             | AggFunc::TagUnion(e) => {
                 cols.push(eval_one_input(e, batch, active_mask, eval_ctx, eval_res)?);
             }
-            AggFunc::FirstNonNullByOrder { value, order_by } => {
+            AggFunc::FirstNonNullByOrder { value, order_by }
+            | AggFunc::FirstByOrder { value, order_by } => {
                 cols.push(eval_one_input(
                     value,
                     batch,
@@ -4353,12 +4541,32 @@ fn build_output_batch(
     eval_ctx: &EvalContext,
     res: &mut Reservation,
 ) -> Result<Batch, QueryError> {
+    build_output_batch_opt(
+        output_schema,
+        group_types,
+        acc_kinds,
+        keys,
+        states,
+        eval_ctx,
+        Some(res),
+    )
+}
+
+fn build_output_batch_opt(
+    output_schema: Arc<Schema>,
+    group_types: &[DataType],
+    acc_kinds: &[AccKind],
+    keys: &[Vec<KeyAtom>],
+    states: &[Vec<AccState>],
+    eval_ctx: &EvalContext,
+    mut res: Option<&mut Reservation>,
+) -> Result<Batch, QueryError> {
     let num_rows = states.len();
     let mut columns = Vec::with_capacity(output_schema.len());
 
     for (g_idx, dt) in group_types.iter().enumerate() {
         let scalars: Vec<ScalarValue> = keys.iter().map(|k| k[g_idx].to_scalar(dt)).collect();
-        let col = build_column_from_scalars(dt, &scalars, eval_ctx, res)?;
+        let col = build_column_from_scalars_opt(dt, &scalars, eval_ctx, res.as_deref_mut())?;
         columns.push(col);
     }
 
@@ -4368,7 +4576,12 @@ fn build_output_batch(
         for row_states in states {
             scalars.push(row_states[agg_idx].finalize_scalar(kind)?);
         }
-        let col = build_column_from_scalars(&field.data_type, &scalars, eval_ctx, res)?;
+        let col = build_column_from_scalars_opt(
+            &field.data_type,
+            &scalars,
+            eval_ctx,
+            res.as_deref_mut(),
+        )?;
         columns.push(col);
     }
 
@@ -4381,7 +4594,16 @@ fn build_column_from_scalars(
     eval_ctx: &EvalContext,
     res: &mut Reservation,
 ) -> Result<Column, QueryError> {
-    let before = res.size();
+    build_column_from_scalars_opt(dt, scalars, eval_ctx, Some(res))
+}
+
+fn build_column_from_scalars_opt(
+    dt: &DataType,
+    scalars: &[ScalarValue],
+    eval_ctx: &EvalContext,
+    mut res: Option<&mut Reservation>,
+) -> Result<Column, QueryError> {
+    let before = res.as_ref().map_or(0, |r| r.size());
     let refs: Vec<ElemRef<'_>> = scalars
         .iter()
         .map(|sv| {
@@ -4392,10 +4614,326 @@ fn build_column_from_scalars(
             }
         })
         .collect();
-    let mut opt_res = Some(res);
-    let col = build_flat_from_elem_refs(dt, &refs, &mut opt_res, eval_ctx, before)?;
-    reconcile_output(&mut opt_res, before, col.memory_bytes())?;
+    let col = build_flat_from_elem_refs(dt, &refs, &mut res, eval_ctx, before)?;
+    reconcile_output(&mut res, before, col.memory_bytes())?;
     Ok(col)
+}
+
+struct HashAggSpillTask {
+    file: SpillFile,
+    depth: usize,
+}
+
+struct HashAggInMemoryRows {
+    keys: Vec<Option<Vec<KeyAtom>>>,
+    states: Vec<Option<Vec<AccState>>>,
+    pos: usize,
+    res: Reservation,
+    unspillable_res: Reservation,
+}
+
+enum FoldPartitionResult {
+    Empty,
+    Ready(HashAggInMemoryRows),
+    Repartitioned(Vec<HashAggSpillTask>),
+}
+
+fn fold_spill_partition_or_repartition(
+    layout: &AggLayout<'_>,
+    ctx: &ExecContext,
+    file: SpillFile,
+    depth: usize,
+) -> Result<FoldPartitionResult, QueryError> {
+    let mut reader = file.open_reader(Arc::clone(layout.partial_schema))?;
+    let mut reader_res = ctx.pool.register("hash_agg_merge_read", false);
+    let mut local_table = GroupTable::new(layout.acc_kinds.to_vec());
+    let mut local_res = ctx.pool.register("hash_agg_merge", true);
+    let mut local_unsp = ctx.pool.register("hash_agg_merge_unsp", false);
+    let frame_cap = target_spill_frame_bytes(ctx);
+    let mut max_batch_bytes = frame_cap;
+
+    while let Some(batch) = reader.next_batch(Some(&mut reader_res))? {
+        if ctx.eval.cancel.is_cancelled() {
+            return Err(QueryError::Cancelled);
+        }
+        max_batch_bytes = max_batch_bytes.max(batch.memory_bytes());
+        let headroom = max_batch_bytes.saturating_sub(reader_res.size());
+        let mut group_state = GroupTableState {
+            table: &mut local_table,
+            res: &mut local_res,
+            unspillable_res: &mut local_unsp,
+        };
+        let fold_res = fold_partial_batch_into_table(
+            &batch,
+            layout,
+            &mut group_state,
+            depth as u64,
+            headroom,
+            &ctx.eval,
+        );
+        match fold_res {
+            Ok(None) => {
+                drop(batch);
+                reader_res.free();
+            }
+            Ok(Some(failed_row)) => {
+                if depth >= MAX_REPARTITION_DEPTH {
+                    return Err(QueryError::TooLarge);
+                }
+                let next_depth = depth + 1;
+                let salt = next_depth as u64;
+                let mut sub_writers: Vec<Option<SpillWriter>> =
+                    (0..NUM_SPILL_PARTITIONS).map(|_| None).collect();
+
+                if local_table.num_groups() > 0 {
+                    let mut group_state = GroupTableState {
+                        table: &mut local_table,
+                        res: &mut local_res,
+                        unspillable_res: &mut local_unsp,
+                    };
+                    drain_group_table_to_writers(
+                        layout,
+                        &mut group_state,
+                        salt,
+                        frame_cap,
+                        ctx,
+                        &mut sub_writers,
+                    )?;
+                }
+                route_partial_batch_to_writers(
+                    &batch,
+                    failed_row,
+                    layout.group_types.len(),
+                    salt,
+                    frame_cap,
+                    ctx,
+                    &mut sub_writers,
+                )?;
+                drop(batch);
+                reader_res.free();
+
+                while let Some(rem_batch) = reader.next_batch(Some(&mut reader_res))? {
+                    route_partial_batch_to_writers(
+                        &rem_batch,
+                        0,
+                        layout.group_types.len(),
+                        salt,
+                        frame_cap,
+                        ctx,
+                        &mut sub_writers,
+                    )?;
+                    drop(rem_batch);
+                    reader_res.free();
+                }
+
+                drop(reader);
+                drop(file);
+                drop(local_res);
+                drop(local_unsp);
+                drop(reader_res);
+
+                let mut sub_tasks = Vec::new();
+                for w in sub_writers.into_iter().flatten() {
+                    let f = w.finish()?;
+                    if f.byte_len() > 0 {
+                        sub_tasks.push(HashAggSpillTask {
+                            file: f,
+                            depth: next_depth,
+                        });
+                    }
+                }
+                return Ok(FoldPartitionResult::Repartitioned(sub_tasks));
+            }
+            Err(err) => return Err(err),
+        }
+    }
+
+    drop(reader);
+    drop(file);
+    drop(reader_res);
+
+    local_table.slots = Vec::new();
+    local_table.hashes = Vec::new();
+    let keys: Vec<Option<Vec<KeyAtom>>> = std::mem::take(&mut local_table.keys)
+        .into_iter()
+        .map(Some)
+        .collect();
+    let states: Vec<Option<Vec<AccState>>> = std::mem::take(&mut local_table.states)
+        .into_iter()
+        .map(Some)
+        .collect();
+    local_table.spillable_bytes = 0;
+    local_table.unspillable_bytes = 0;
+    if states.is_empty() {
+        local_res.free();
+        local_unsp.free();
+        return Ok(FoldPartitionResult::Empty);
+    }
+    shrink_res_to_remaining(&keys, &states, &mut local_res, &mut local_unsp);
+    Ok(FoldPartitionResult::Ready(HashAggInMemoryRows {
+        keys,
+        states,
+        pos: 0,
+        res: local_res,
+        unspillable_res: local_unsp,
+    }))
+}
+
+struct HashAggStream {
+    group_types: Vec<DataType>,
+    acc_kinds: Vec<AccKind>,
+    partial_schema: Arc<Schema>,
+    output_schema: Arc<Schema>,
+    ctx: ExecContext,
+    batch_size: usize,
+    active: Option<HashAggInMemoryRows>,
+    tasks: VecDeque<HashAggSpillTask>,
+    done: bool,
+}
+
+impl fmt::Debug for HashAggStream {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("HashAggStream")
+            .field("groups", &self.group_types.len())
+            .field("aggs", &self.acc_kinds.len())
+            .field("pending_tasks", &self.tasks.len())
+            .field("done", &self.done)
+            .finish()
+    }
+}
+
+impl HashAggStream {
+    fn cleanup(&mut self) {
+        if let Some(mut mem) = self.active.take() {
+            mem.keys.clear();
+            mem.states.clear();
+            mem.res.free();
+            mem.unspillable_res.free();
+        }
+        self.tasks.clear();
+        self.done = true;
+    }
+}
+
+impl PartitionStream for HashAggStream {
+    fn next_batch(
+        &mut self,
+        cancel: &CancelToken,
+        mut res: Option<&mut Reservation>,
+    ) -> Result<Option<Batch>, QueryError> {
+        let before = res.as_ref().map_or(0, |r| r.size());
+        loop {
+            if cancel.is_cancelled() {
+                self.cleanup();
+                rollback_res(res, before);
+                return Err(QueryError::Cancelled);
+            }
+            if self.done {
+                rollback_res(res, before);
+                return Ok(None);
+            }
+            if let Some(mem) = self.active.as_mut() {
+                if mem.pos < mem.states.len() {
+                    let end = (mem.pos + self.batch_size).min(mem.states.len());
+                    let is_last = end == mem.states.len();
+                    let mut chunk_keys = if self.group_types.is_empty() {
+                        Vec::new()
+                    } else {
+                        Vec::with_capacity(end - mem.pos)
+                    };
+                    let mut chunk_states = Vec::with_capacity(end - mem.pos);
+                    for i in mem.pos..end {
+                        if !self.group_types.is_empty()
+                            && let Some(k) = mem.keys[i].take()
+                        {
+                            chunk_keys.push(k);
+                        }
+                        if let Some(s) = mem.states[i].take() {
+                            chunk_states.push(s);
+                        }
+                    }
+                    mem.pos = end;
+
+                    let (chunk_sp, chunk_unsp) = chunk_owned_bytes(&chunk_keys, &chunk_states);
+                    let built = build_output_batch_opt(
+                        Arc::clone(&self.output_schema),
+                        &self.group_types,
+                        &self.acc_kinds,
+                        &chunk_keys,
+                        &chunk_states,
+                        &self.ctx.eval,
+                        None,
+                    );
+                    drop(chunk_keys);
+                    drop(chunk_states);
+
+                    if is_last {
+                        mem.res.free();
+                        mem.unspillable_res.free();
+                        self.active = None;
+                    } else {
+                        mem.res.shrink(chunk_sp);
+                        mem.unspillable_res.shrink(chunk_unsp);
+                    }
+
+                    let batch = match built {
+                        Ok(b) => b,
+                        Err(err) => {
+                            self.cleanup();
+                            rollback_res(res, before);
+                            return Err(err);
+                        }
+                    };
+                    if let Err(err) = reconcile_output(&mut res, before, batch.memory_bytes()) {
+                        self.cleanup();
+                        rollback_res(res, before);
+                        return Err(err);
+                    }
+                    return Ok(Some(batch));
+                }
+                mem.res.free();
+                mem.unspillable_res.free();
+                self.active = None;
+            }
+
+            let Some(task) = self.tasks.pop_front() else {
+                self.done = true;
+                rollback_res(res, before);
+                return Ok(None);
+            };
+            let layout = AggLayout {
+                group_types: &self.group_types,
+                acc_kinds: &self.acc_kinds,
+                partial_schema: &self.partial_schema,
+                output_schema: &self.output_schema,
+            };
+            match fold_spill_partition_or_repartition(&layout, &self.ctx, task.file, task.depth) {
+                Ok(FoldPartitionResult::Empty) => {}
+                Ok(FoldPartitionResult::Ready(mem)) => {
+                    self.active = Some(mem);
+                }
+                Ok(FoldPartitionResult::Repartitioned(sub_tasks)) => {
+                    for st in sub_tasks.into_iter().rev() {
+                        self.tasks.push_front(st);
+                    }
+                }
+                Err(err) => {
+                    self.cleanup();
+                    rollback_res(res, before);
+                    return Err(err);
+                }
+            }
+        }
+    }
+}
+
+fn rollback_res(res: Option<&mut Reservation>, before: usize) {
+    if let Some(r) = res {
+        let cur = r.size();
+        if cur > before {
+            r.shrink(cur - before);
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -5669,5 +6207,270 @@ mod tests {
             exact_percentile_sorted(&[f64::NEG_INFINITY, f64::NEG_INFINITY], 0.25).unwrap(),
             f64::NEG_INFINITY
         );
+    }
+
+    #[test]
+    fn first_by_order_preserves_null_and_combines_sinks_to_stream() {
+        let schema = Schema::try_new_arc(vec![
+            Field::new("grp", DataType::Utf8, false),
+            Field::new("ord", DataType::I64, true),
+            Field::new("val", DataType::Utf8, true),
+            Field::new("ok", DataType::Bool, false),
+        ])
+        .unwrap();
+
+        let make_batch = |rows: &[(&str, Option<i64>, Option<&str>, bool)]| -> Batch {
+            let grps: Vec<&str> = rows.iter().map(|r| r.0).collect();
+            let ords: Vec<i64> = rows.iter().map(|r| r.1.unwrap_or(0)).collect();
+            let ord_nulls: Vec<bool> = rows.iter().map(|r| r.1.is_some()).collect();
+            let vals: Vec<&str> = rows.iter().map(|r| r.2.unwrap_or("")).collect();
+            let val_nulls: Vec<bool> = rows.iter().map(|r| r.2.is_some()).collect();
+            let oks: Vec<bool> = rows.iter().map(|r| r.3).collect();
+            Batch::try_new_all(
+                Arc::clone(&schema),
+                vec![
+                    Column::Flat(
+                        FlatColumn::try_new(
+                            FlatData::Utf8(Utf8Data::try_from_slices(grps).unwrap()),
+                            None,
+                        )
+                        .unwrap(),
+                    ),
+                    Column::Flat(
+                        FlatColumn::try_new(
+                            FlatData::I64(ords),
+                            Some(Bitmap::from_bools(&ord_nulls)),
+                        )
+                        .unwrap(),
+                    ),
+                    Column::Flat(
+                        FlatColumn::try_new(
+                            FlatData::Utf8(Utf8Data::try_from_slices(vals).unwrap()),
+                            Some(Bitmap::from_bools(&val_nulls)),
+                        )
+                        .unwrap(),
+                    ),
+                    Column::Flat(
+                        FlatColumn::try_new(FlatData::Bool(Bitmap::from_bools(&oks)), None)
+                            .unwrap(),
+                    ),
+                ],
+                rows.len(),
+            )
+            .unwrap()
+        };
+
+        // Partition 1:
+        // - "g_null_win": ord=1 has val=NULL (must win over ord=2!)
+        // - "g_val_win": ord=2 has val=NULL
+        // - "g_filt": ok=false (no matching row in partition 1, so state has best=None)
+        // - "g_null_ord_win": ord=NULL (nulls_first=true) has val=NULL (must beat ord=10 in P2!)
+        let b1 = make_batch(&[
+            ("g_null_win", Some(1), None, true),
+            ("g_null_win", Some(2), Some("later"), true),
+            ("g_val_win", Some(2), None, true),
+            ("g_filt", Some(1), Some("ignored"), false),
+            ("g_null_ord_win", None, None, true),
+        ]);
+        // Partition 2:
+        // - "g_null_win": ord=0? No, ord=5 has val="even_later"
+        // - "g_val_win": ord=1 has val="winner"
+        // - "g_filt": ok=true, ord=5 has val="from_p2" (must NOT be beaten by P1's None!)
+        // - "g_null_ord_win": ord=10 has val="ten"
+        let b2 = make_batch(&[
+            ("g_null_win", Some(5), Some("even_later"), true),
+            ("g_val_win", Some(1), Some("winner"), true),
+            ("g_filt", Some(5), Some("from_p2"), true),
+            ("g_null_ord_win", Some(10), Some("ten"), true),
+        ]);
+
+        let spec = HashAggSpec {
+            group_by: vec![("grp".to_owned(), col_ref(0, "grp", DataType::Utf8))],
+            aggs: vec![
+                AggExpr {
+                    func: AggFunc::FirstByOrder {
+                        value: col_ref(2, "val", DataType::Utf8),
+                        order_by: vec![SortKey {
+                            expr: col_ref(1, "ord", DataType::I64),
+                            descending: false,
+                            nulls_first: true,
+                        }],
+                    },
+                    filter: None,
+                    output_name: "first_any".to_owned(),
+                },
+                AggExpr {
+                    func: AggFunc::FirstByOrder {
+                        value: col_ref(2, "val", DataType::Utf8),
+                        order_by: vec![SortKey {
+                            expr: col_ref(1, "ord", DataType::I64),
+                            descending: false,
+                            nulls_first: true,
+                        }],
+                    },
+                    filter: Some(col_ref(3, "ok", DataType::Bool)),
+                    output_name: "first_filt".to_owned(),
+                },
+            ],
+        };
+
+        let (ctx, _dir) = test_ctx(8 * 1024 * 1024);
+        let src = BatchSource::new(Arc::clone(&schema), vec![b1, b2]).unwrap();
+        let parts = src.open_partitions(&ScanSpec::default(), &ctx).unwrap();
+        let mut stream =
+            execute_hash_agg_streams(parts, Arc::clone(&schema), spec.clone(), &ctx).unwrap();
+
+        let mut res = ctx.pool.register("test_stream", false);
+        res.try_grow(128).unwrap();
+        let before = res.size();
+        let mut out_batches = Vec::new();
+        while let Some(b) = stream.next_batch(&ctx.eval.cancel, Some(&mut res)).unwrap() {
+            assert_eq!(res.size(), before + b.memory_bytes());
+            res.shrink(b.memory_bytes());
+            out_batches.push(b);
+        }
+        assert_eq!(res.size(), before);
+        res.free();
+        assert_eq!(ctx.pool.reserved(), 0);
+
+        let mut map = std::collections::BTreeMap::new();
+        for b in &out_batches {
+            for r in 0..b.num_rows() {
+                let ScalarValue::Utf8(g) = b.column(0).unwrap().get_scalar(r).unwrap() else {
+                    panic!("expected grp");
+                };
+                let v1 = b.column(1).unwrap().get_scalar(r).unwrap();
+                let v2 = b.column(2).unwrap().get_scalar(r).unwrap();
+                map.insert(g, (v1, v2));
+            }
+        }
+        assert_eq!(
+            map.get("g_null_win"),
+            Some(&(
+                ScalarValue::Null(DataType::Utf8),
+                ScalarValue::Null(DataType::Utf8),
+            ))
+        );
+        assert_eq!(
+            map.get("g_val_win"),
+            Some(&(
+                ScalarValue::Utf8("winner".to_owned()),
+                ScalarValue::Utf8("winner".to_owned()),
+            ))
+        );
+        assert_eq!(
+            map.get("g_filt"),
+            Some(&(
+                ScalarValue::Utf8("ignored".to_owned()),
+                ScalarValue::Utf8("from_p2".to_owned()),
+            ))
+        );
+        assert_eq!(
+            map.get("g_null_ord_win"),
+            Some(&(
+                ScalarValue::Null(DataType::Utf8),
+                ScalarValue::Null(DataType::Utf8),
+            ))
+        );
+
+        // Empty sinks on global agg emits 1-row default global-agg batch via both merge_sinks and combine_sinks_to_stream.
+        let global_spec = HashAggSpec {
+            group_by: Vec::new(),
+            aggs: vec![
+                AggExpr {
+                    func: AggFunc::CountStar,
+                    filter: None,
+                    output_name: "cnt".to_owned(),
+                },
+                AggExpr {
+                    func: AggFunc::FirstByOrder {
+                        value: col_ref(2, "val", DataType::Utf8),
+                        order_by: vec![SortKey {
+                            expr: col_ref(1, "ord", DataType::I64),
+                            descending: false,
+                            nulls_first: false,
+                        }],
+                    },
+                    filter: None,
+                    output_name: "first_v".to_owned(),
+                },
+            ],
+        };
+        let merged = HashAgg::merge_sinks(Vec::new(), &global_spec, &schema, &ctx).unwrap();
+        assert_eq!(merged.len(), 1);
+        assert_eq!(merged[0].num_rows(), 1);
+        assert_eq!(
+            merged[0].column(0).unwrap().get_scalar(0).unwrap(),
+            ScalarValue::I64(0)
+        );
+        assert_eq!(
+            merged[0].column(1).unwrap().get_scalar(0).unwrap(),
+            ScalarValue::Null(DataType::Utf8)
+        );
+
+        let mut g_stream =
+            HashAgg::combine_sinks_to_stream(Vec::new(), &global_spec, &schema, &ctx).unwrap();
+        let g_b = g_stream
+            .next_batch(&ctx.eval.cancel, None)
+            .unwrap()
+            .unwrap();
+        assert_eq!(g_b.num_rows(), 1);
+        assert!(
+            g_stream
+                .next_batch(&ctx.eval.cancel, None)
+                .unwrap()
+                .is_none()
+        );
+        drop(merged);
+        drop(g_b);
+        drop(g_stream);
+
+        // Spilled streaming path: high-cardinality groups under tight pool + small batch_size.
+        let (tight_ctx, _tight_dir) = test_ctx(96 * 1024);
+        let mut tight_ctx = tight_ctx;
+        tight_ctx.batch_size = 64;
+        let big_rows: Vec<(String, Option<i64>, Option<String>, bool)> = (0..1500)
+            .map(|i| {
+                (
+                    format!("g_{:04}", i % 400),
+                    Some(1500 - i),
+                    if i % 3 == 0 {
+                        None
+                    } else {
+                        Some(format!("v_{i}"))
+                    },
+                    true,
+                )
+            })
+            .collect();
+        let big_refs: Vec<(&str, Option<i64>, Option<&str>, bool)> = big_rows
+            .iter()
+            .map(|(g, o, v, ok)| (g.as_str(), *o, v.as_deref(), *ok))
+            .collect();
+        let big_batches: Vec<Batch> = big_refs.chunks(250).map(make_batch).collect();
+        let big_src = BatchSource::new(Arc::clone(&schema), big_batches).unwrap();
+        let big_parts = big_src
+            .open_partitions(&ScanSpec::default(), &tight_ctx)
+            .unwrap();
+        let mut big_stream =
+            execute_hash_agg_streams(big_parts, Arc::clone(&schema), spec, &tight_ctx).unwrap();
+        let mut total_groups = 0usize;
+        let mut g0_vals = None;
+        while let Some(b) = big_stream.next_batch(&tight_ctx.eval.cancel, None).unwrap() {
+            total_groups += b.num_rows();
+            for r in 0..b.num_rows() {
+                if b.column(0).unwrap().get_scalar(r).unwrap()
+                    == ScalarValue::Utf8("g_0000".to_owned())
+                {
+                    g0_vals = Some(b.column(1).unwrap().get_scalar(r).unwrap());
+                }
+            }
+        }
+        assert_eq!(total_groups, 400);
+        // For g_0000, i in {0, 400, 800, 1200}: smallest ord = 1500 - 1200 = 300 (i=1200, 1200 % 3 == 0 -> NULL!).
+        assert_eq!(g0_vals, Some(ScalarValue::Null(DataType::Utf8)));
+        drop(big_stream);
+        assert_eq!(tight_ctx.pool.reserved(), 0);
+        assert_eq!(tight_ctx.spill.spilled_bytes(), 0);
     }
 }

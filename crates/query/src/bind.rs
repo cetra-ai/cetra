@@ -46,9 +46,52 @@ impl fmt::Debug for CompiledFilter {
     }
 }
 
+/// Column and `$k` placeholder resolver hook allowing [`bind_expr_with`] to be reused by both
+/// Filter DSL (`Schema`) and Shape B SQL (`sql/binder.rs`) without duplicating scalar binding.
+pub(crate) trait ExprResolver {
+    /// Resolves a 1-or-more-part column identifier (e.g. `col` or `t.col`).
+    fn resolve_ident(&self, parts: &[Ident]) -> Result<Expr, InvalidQuery>;
+
+    /// Resolves a `$k` placeholder token (e.g. `"$1"`), or rejects it when disallowed.
+    fn resolve_placeholder(&self, name: &str, pos: Option<Position>) -> Result<Expr, InvalidQuery>;
+}
+
+impl ExprResolver for Schema {
+    fn resolve_ident(&self, parts: &[Ident]) -> Result<Expr, InvalidQuery> {
+        match parts {
+            [ident] | [_, ident] => bind_ident(ident, self),
+            [] => Err(InvalidQuery::new("empty identifier", None)),
+            _ => Err(InvalidQuery::new(
+                "qualified column names with more than two parts are not supported",
+                at_ident(&parts[0]),
+            )),
+        }
+    }
+
+    fn resolve_placeholder(
+        &self,
+        _name: &str,
+        pos: Option<Position>,
+    ) -> Result<Expr, InvalidQuery> {
+        Err(InvalidQuery::new("placeholders are not allowed", pos))
+    }
+}
+
 /// Binds a `sqlparser::ast::Expr` against `schema` into a typed [`Expr`] IR.
 pub fn bind_expr(ast: &SqlExpr, schema: &Schema) -> Result<Expr, InvalidQuery> {
     bind_node(ast, schema, 0)
+}
+
+/// Binds a `sqlparser::ast::Expr` using a custom [`ExprResolver`] into a typed [`Expr`] IR.
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "used by sql/binder.rs in QE5.2")
+)]
+pub(crate) fn bind_expr_with(
+    ast: &SqlExpr,
+    resolver: &dyn ExprResolver,
+) -> Result<Expr, InvalidQuery> {
+    bind_node(ast, resolver, 0)
 }
 
 /// Parses, validates, and binds a Filter DSL string end-to-end against `view`'s base `schema`.
@@ -78,7 +121,11 @@ pub fn compile_filter(
     })
 }
 
-fn bind_node(ast: &SqlExpr, schema: &Schema, depth: usize) -> Result<Expr, InvalidQuery> {
+fn bind_node(
+    ast: &SqlExpr,
+    resolver: &dyn ExprResolver,
+    depth: usize,
+) -> Result<Expr, InvalidQuery> {
     let pos = at(ast);
     if depth > MAX_BIND_DEPTH {
         return Err(InvalidQuery::new(
@@ -87,22 +134,16 @@ fn bind_node(ast: &SqlExpr, schema: &Schema, depth: usize) -> Result<Expr, Inval
         ));
     }
     match ast {
-        SqlExpr::Identifier(ident) => bind_ident(ident, schema),
-        SqlExpr::CompoundIdentifier(idents) => match idents.as_slice() {
-            [ident] | [_, ident] => bind_ident(ident, schema),
-            _ => Err(InvalidQuery::new(
-                "qualified column names with more than two parts are not supported",
-                pos,
-            )),
-        },
-        SqlExpr::Value(vws) => bind_value(&vws.value, pos),
+        SqlExpr::Identifier(ident) => resolver.resolve_ident(std::slice::from_ref(ident)),
+        SqlExpr::CompoundIdentifier(idents) => resolver.resolve_ident(idents),
+        SqlExpr::Value(vws) => bind_value(&vws.value, resolver, pos),
         SqlExpr::TypedString(ts) => bind_typed_string(ts, pos),
         SqlExpr::Interval(iv) => bind_interval(iv, pos),
-        SqlExpr::Nested(inner) => bind_node(inner, schema, depth + 1),
-        SqlExpr::UnaryOp { op, expr } => bind_unary(*op, expr, schema, pos, depth),
-        SqlExpr::BinaryOp { .. } => bind_binary_spine(ast, schema, depth),
+        SqlExpr::Nested(inner) => bind_node(inner, resolver, depth + 1),
+        SqlExpr::UnaryOp { op, expr } => bind_unary(*op, expr, resolver, pos, depth),
+        SqlExpr::BinaryOp { .. } => bind_binary_spine(ast, resolver, depth),
         SqlExpr::IsNull(inner) | SqlExpr::IsUnknown(inner) => {
-            let e = bind_node(inner, schema, depth + 1)?;
+            let e = bind_node(inner, resolver, depth + 1)?;
             Ok(Expr::Unary {
                 op: UnaryOp::IsNull,
                 expr: Box::new(e),
@@ -110,34 +151,41 @@ fn bind_node(ast: &SqlExpr, schema: &Schema, depth: usize) -> Result<Expr, Inval
             })
         }
         SqlExpr::IsNotNull(inner) | SqlExpr::IsNotUnknown(inner) => {
-            let e = bind_node(inner, schema, depth + 1)?;
+            let e = bind_node(inner, resolver, depth + 1)?;
             Ok(Expr::Unary {
                 op: UnaryOp::IsNotNull,
                 expr: Box::new(e),
                 data_type: DataType::Bool,
             })
         }
-        SqlExpr::IsTrue(inner) => bind_is_bool(inner, UnaryOp::IsTrue, schema, pos, depth),
-        SqlExpr::IsFalse(inner) => bind_is_bool(inner, UnaryOp::IsFalse, schema, pos, depth),
-        SqlExpr::IsNotTrue(inner) => bind_is_bool(inner, UnaryOp::IsNotTrue, schema, pos, depth),
-        SqlExpr::IsNotFalse(inner) => bind_is_bool(inner, UnaryOp::IsNotFalse, schema, pos, depth),
+        SqlExpr::IsTrue(inner) => bind_is_bool(inner, UnaryOp::IsTrue, resolver, pos, depth),
+        SqlExpr::IsFalse(inner) => bind_is_bool(inner, UnaryOp::IsFalse, resolver, pos, depth),
+        SqlExpr::IsNotTrue(inner) => bind_is_bool(inner, UnaryOp::IsNotTrue, resolver, pos, depth),
+        SqlExpr::IsNotFalse(inner) => {
+            bind_is_bool(inner, UnaryOp::IsNotFalse, resolver, pos, depth)
+        }
         SqlExpr::IsDistinctFrom(left, right) => {
-            bind_distinct(left, right, BinaryOp::IsDistinctFrom, schema, pos, depth)
+            bind_distinct(left, right, BinaryOp::IsDistinctFrom, resolver, pos, depth)
         }
-        SqlExpr::IsNotDistinctFrom(left, right) => {
-            bind_distinct(left, right, BinaryOp::IsNotDistinctFrom, schema, pos, depth)
-        }
+        SqlExpr::IsNotDistinctFrom(left, right) => bind_distinct(
+            left,
+            right,
+            BinaryOp::IsNotDistinctFrom,
+            resolver,
+            pos,
+            depth,
+        ),
         SqlExpr::Between {
             expr,
             negated,
             low,
             high,
-        } => bind_between(expr, low, high, *negated, schema, pos, depth),
+        } => bind_between(expr, low, high, *negated, resolver, pos, depth),
         SqlExpr::InList {
             expr,
             list,
             negated,
-        } => bind_in_list(expr, list, *negated, schema, pos, depth),
+        } => bind_in_list(expr, list, *negated, resolver, pos, depth),
         SqlExpr::Like {
             negated,
             any,
@@ -151,7 +199,7 @@ fn bind_node(ast: &SqlExpr, schema: &Schema, depth: usize) -> Result<Expr, Inval
             false,
             *negated,
             *any,
-            schema,
+            resolver,
             pos,
             depth,
         ),
@@ -168,7 +216,7 @@ fn bind_node(ast: &SqlExpr, schema: &Schema, depth: usize) -> Result<Expr, Inval
             true,
             *negated,
             *any,
-            schema,
+            resolver,
             pos,
             depth,
         ),
@@ -190,7 +238,7 @@ fn bind_node(ast: &SqlExpr, schema: &Schema, depth: usize) -> Result<Expr, Inval
                 CastKind::TryCast | CastKind::SafeCast => CastMode::Try,
             };
             let target = bind_sql_type(data_type, pos)?;
-            let inner = bind_node(expr, schema, depth + 1)?;
+            let inner = bind_node(expr, resolver, depth + 1)?;
             let src_dt = inner.data_type();
             if !can_cast(&src_dt, &target) {
                 return Err(InvalidQuery::new(
@@ -217,16 +265,16 @@ fn bind_node(ast: &SqlExpr, schema: &Schema, depth: usize) -> Result<Expr, Inval
             operand.as_deref(),
             conditions,
             else_result.as_deref(),
-            schema,
+            resolver,
             pos,
             depth,
         ),
-        SqlExpr::Array(arr) => bind_array(&arr.elem, schema, pos, depth),
+        SqlExpr::Array(arr) => bind_array(&arr.elem, resolver, pos, depth),
         SqlExpr::CompoundFieldAccess { root, access_chain } => {
-            bind_compound_access(root, access_chain, schema, pos, depth)
+            bind_compound_access(root, access_chain, resolver, pos, depth)
         }
         SqlExpr::JsonAccess { value, path } => {
-            bind_json_access(value, &path.path, schema, pos, depth)
+            bind_json_access(value, &path.path, resolver, pos, depth)
         }
         SqlExpr::Ceil { expr, field } => {
             if !matches!(
@@ -238,7 +286,7 @@ fn bind_node(ast: &SqlExpr, schema: &Schema, depth: usize) -> Result<Expr, Inval
                     pos,
                 ));
             }
-            let arg = bind_node(expr, schema, depth + 1)?;
+            let arg = bind_node(expr, resolver, depth + 1)?;
             bind_floor_ceil(ScalarFn::Ceil, arg, pos)
         }
         SqlExpr::Floor { expr, field } => {
@@ -251,7 +299,7 @@ fn bind_node(ast: &SqlExpr, schema: &Schema, depth: usize) -> Result<Expr, Inval
                     pos,
                 ));
             }
-            let arg = bind_node(expr, schema, depth + 1)?;
+            let arg = bind_node(expr, resolver, depth + 1)?;
             bind_floor_ceil(ScalarFn::Floor, arg, pos)
         }
         SqlExpr::Substring {
@@ -260,18 +308,18 @@ fn bind_node(ast: &SqlExpr, schema: &Schema, depth: usize) -> Result<Expr, Inval
             substring_for,
             ..
         } => {
-            let s = coerce_to_utf8_from_utf8_or_null(bind_node(expr, schema, depth + 1)?, pos)?;
+            let s = coerce_to_utf8_from_utf8_or_null(bind_node(expr, resolver, depth + 1)?, pos)?;
             let Some(from) = substring_from else {
                 return Err(InvalidQuery::new(
                     "substring requires a start position",
                     pos,
                 ));
             };
-            let start = coerce_to_i64_from_i64_or_null(bind_node(from, schema, depth + 1)?, pos)?;
+            let start = coerce_to_i64_from_i64_or_null(bind_node(from, resolver, depth + 1)?, pos)?;
             let mut args = vec![s, start];
             if let Some(len_expr) = substring_for {
                 args.push(coerce_to_i64_from_i64_or_null(
-                    bind_node(len_expr, schema, depth + 1)?,
+                    bind_node(len_expr, resolver, depth + 1)?,
                     pos,
                 )?);
             }
@@ -292,18 +340,18 @@ fn bind_node(ast: &SqlExpr, schema: &Schema, depth: usize) -> Result<Expr, Inval
                 Some(TrimWhereField::Leading) => ScalarFn::Ltrim,
                 Some(TrimWhereField::Trailing) => ScalarFn::Rtrim,
             };
-            let s = coerce_to_utf8_from_utf8_or_null(bind_node(expr, schema, depth + 1)?, pos)?;
+            let s = coerce_to_utf8_from_utf8_or_null(bind_node(expr, resolver, depth + 1)?, pos)?;
             let mut args = vec![s];
             if let Some(what) = trim_what {
                 args.push(coerce_to_utf8_from_utf8_or_null(
-                    bind_node(what, schema, depth + 1)?,
+                    bind_node(what, resolver, depth + 1)?,
                     pos,
                 )?);
             } else if let Some(chars) = trim_characters {
                 match chars.as_slice() {
                     [] => {}
                     [ch] => args.push(coerce_to_utf8_from_utf8_or_null(
-                        bind_node(ch, schema, depth + 1)?,
+                        bind_node(ch, resolver, depth + 1)?,
                         pos,
                     )?),
                     _ => {
@@ -321,8 +369,9 @@ fn bind_node(ast: &SqlExpr, schema: &Schema, depth: usize) -> Result<Expr, Inval
             })
         }
         SqlExpr::Position { expr: sub, r#in: s } => {
-            let hay = coerce_to_utf8_from_utf8_or_null(bind_node(s, schema, depth + 1)?, pos)?;
-            let needle = coerce_to_utf8_from_utf8_or_null(bind_node(sub, schema, depth + 1)?, pos)?;
+            let hay = coerce_to_utf8_from_utf8_or_null(bind_node(s, resolver, depth + 1)?, pos)?;
+            let needle =
+                coerce_to_utf8_from_utf8_or_null(bind_node(sub, resolver, depth + 1)?, pos)?;
             Ok(Expr::Call {
                 func: ScalarFn::Strpos,
                 args: vec![hay, needle],
@@ -330,10 +379,10 @@ fn bind_node(ast: &SqlExpr, schema: &Schema, depth: usize) -> Result<Expr, Inval
             })
         }
         SqlExpr::Extract { field, expr, .. } => {
-            let src = bind_node(expr, schema, depth + 1)?;
+            let src = bind_node(expr, resolver, depth + 1)?;
             bind_extract(field.to_string(), src, pos)
         }
-        SqlExpr::Function(func) => bind_function(func, schema, pos, depth),
+        SqlExpr::Function(func) => bind_function(func, resolver, pos, depth),
         _ => Err(InvalidQuery::new("unsupported SQL expression", pos)),
     }
 }
@@ -370,7 +419,11 @@ fn bind_ident(ident: &Ident, schema: &Schema) -> Result<Expr, InvalidQuery> {
     })
 }
 
-fn bind_value(value: &Value, pos: Option<Position>) -> Result<Expr, InvalidQuery> {
+fn bind_value(
+    value: &Value,
+    resolver: &dyn ExprResolver,
+    pos: Option<Position>,
+) -> Result<Expr, InvalidQuery> {
     match value {
         Value::Number(s, _) => {
             if let Ok(i) = s.parse::<i64>() {
@@ -398,7 +451,7 @@ fn bind_value(value: &Value, pos: Option<Position>) -> Result<Expr, InvalidQuery
             "double-quoted strings are not allowed",
             pos,
         )),
-        Value::Placeholder(_) => Err(InvalidQuery::new("placeholders are not allowed", pos)),
+        Value::Placeholder(name) => resolver.resolve_placeholder(name, pos),
         Value::DollarQuotedString(_) => Err(InvalidQuery::new(
             "dollar-quoted strings are not allowed",
             pos,
@@ -507,7 +560,7 @@ fn bind_interval(iv: &Interval, pos: Option<Position>) -> Result<Expr, InvalidQu
 fn bind_unary(
     op: UnaryOperator,
     inner_ast: &SqlExpr,
-    schema: &Schema,
+    resolver: &dyn ExprResolver,
     pos: Option<Position>,
     depth: usize,
 ) -> Result<Expr, InvalidQuery> {
@@ -518,7 +571,7 @@ fn bind_unary(
     {
         return Ok(Expr::Literal(ScalarValue::I64(i64::MIN)));
     }
-    let inner = bind_node(inner_ast, schema, depth + 1)?;
+    let inner = bind_node(inner_ast, resolver, depth + 1)?;
     let dt = inner.data_type();
     match op {
         UnaryOperator::Not => {
@@ -586,11 +639,11 @@ fn bind_unary(
 fn bind_is_bool(
     inner_ast: &SqlExpr,
     op: UnaryOp,
-    schema: &Schema,
+    resolver: &dyn ExprResolver,
     pos: Option<Position>,
     depth: usize,
 ) -> Result<Expr, InvalidQuery> {
-    let inner = bind_node(inner_ast, schema, depth + 1)?;
+    let inner = bind_node(inner_ast, resolver, depth + 1)?;
     let dt = inner.data_type();
     if !matches!(dt, DataType::Bool | DataType::Null) {
         return Err(InvalidQuery::new(
@@ -609,12 +662,12 @@ fn bind_distinct(
     left_ast: &SqlExpr,
     right_ast: &SqlExpr,
     op: BinaryOp,
-    schema: &Schema,
+    resolver: &dyn ExprResolver,
     pos: Option<Position>,
     depth: usize,
 ) -> Result<Expr, InvalidQuery> {
-    let l = bind_node(left_ast, schema, depth + 1)?;
-    let r = bind_node(right_ast, schema, depth + 1)?;
+    let l = bind_node(left_ast, resolver, depth + 1)?;
+    let r = bind_node(right_ast, resolver, depth + 1)?;
     let common = coerce_comparison_pair(&l, &r, pos)?;
     let left = coerce_expr(l, &common, pos)?;
     let right = coerce_expr(r, &common, pos)?;
@@ -626,16 +679,20 @@ fn bind_distinct(
     })
 }
 
-fn bind_binary_spine(ast: &SqlExpr, schema: &Schema, depth: usize) -> Result<Expr, InvalidQuery> {
+fn bind_binary_spine(
+    ast: &SqlExpr,
+    resolver: &dyn ExprResolver,
+    depth: usize,
+) -> Result<Expr, InvalidQuery> {
     let mut spine: Vec<(&BinaryOperator, &SqlExpr, Option<Position>)> = Vec::new();
     let mut cur = ast;
     while let SqlExpr::BinaryOp { left, op, right } = cur {
         spine.push((op, right.as_ref(), at(cur)));
         cur = left.as_ref();
     }
-    let mut acc = bind_node(cur, schema, depth + 1)?;
+    let mut acc = bind_node(cur, resolver, depth + 1)?;
     for (op, right_ast, pos) in spine.into_iter().rev() {
-        let r = bind_node(right_ast, schema, depth + 1)?;
+        let r = bind_node(right_ast, resolver, depth + 1)?;
         acc = bind_binary_op(acc, op, r, pos)?;
     }
     Ok(acc)
@@ -858,13 +915,13 @@ fn bind_between(
     low_ast: &SqlExpr,
     high_ast: &SqlExpr,
     negated: bool,
-    schema: &Schema,
+    resolver: &dyn ExprResolver,
     pos: Option<Position>,
     depth: usize,
 ) -> Result<Expr, InvalidQuery> {
-    let e = bind_node(expr_ast, schema, depth + 1)?;
-    let l = bind_node(low_ast, schema, depth + 1)?;
-    let h = bind_node(high_ast, schema, depth + 1)?;
+    let e = bind_node(expr_ast, resolver, depth + 1)?;
+    let l = bind_node(low_ast, resolver, depth + 1)?;
+    let h = bind_node(high_ast, resolver, depth + 1)?;
     let common = coerce_comparison_many(&[&e, &l, &h], pos)?;
     let expr = Box::new(coerce_expr(e, &common, pos)?);
     let low = Box::new(coerce_expr(l, &common, pos)?);
@@ -881,11 +938,11 @@ fn bind_in_list(
     expr_ast: &SqlExpr,
     list_asts: &[SqlExpr],
     negated: bool,
-    schema: &Schema,
+    resolver: &dyn ExprResolver,
     pos: Option<Position>,
     depth: usize,
 ) -> Result<Expr, InvalidQuery> {
-    let e = bind_node(expr_ast, schema, depth + 1)?;
+    let e = bind_node(expr_ast, resolver, depth + 1)?;
     if list_asts.is_empty() {
         return Ok(Expr::InList {
             expr: Box::new(e),
@@ -896,7 +953,7 @@ fn bind_in_list(
     }
     let mut items = Vec::with_capacity(list_asts.len());
     for item_ast in list_asts {
-        items.push(bind_node(item_ast, schema, depth + 1)?);
+        items.push(bind_node(item_ast, resolver, depth + 1)?);
     }
     let mut all_refs: Vec<&Expr> = Vec::with_capacity(items.len() + 1);
     all_refs.push(&e);
@@ -928,7 +985,7 @@ fn bind_like(
     case_insensitive: bool,
     negated: bool,
     any: bool,
-    schema: &Schema,
+    resolver: &dyn ExprResolver,
     pos: Option<Position>,
     depth: usize,
 ) -> Result<Expr, InvalidQuery> {
@@ -938,8 +995,8 @@ fn bind_like(
             pos,
         ));
     }
-    let expr = coerce_to_utf8_from_utf8_or_null(bind_node(expr_ast, schema, depth + 1)?, pos)?;
-    let pattern = coerce_to_utf8_from_utf8_or_null(bind_node(pat_ast, schema, depth + 1)?, pos)?;
+    let expr = coerce_to_utf8_from_utf8_or_null(bind_node(expr_ast, resolver, depth + 1)?, pos)?;
+    let pattern = coerce_to_utf8_from_utf8_or_null(bind_node(pat_ast, resolver, depth + 1)?, pos)?;
     let escape = match escape_val {
         None => Some('\\'),
         Some(Value::SingleQuotedString(s)) => {
@@ -972,22 +1029,22 @@ fn bind_case(
     operand_ast: Option<&SqlExpr>,
     conditions: &[sqlparser::ast::CaseWhen],
     else_ast: Option<&SqlExpr>,
-    schema: &Schema,
+    resolver: &dyn ExprResolver,
     pos: Option<Position>,
     depth: usize,
 ) -> Result<Expr, InvalidQuery> {
     let op_bound = match operand_ast {
-        Some(op) => Some(bind_node(op, schema, depth + 1)?),
+        Some(op) => Some(bind_node(op, resolver, depth + 1)?),
         None => None,
     };
     let mut whens = Vec::with_capacity(conditions.len());
     let mut thens = Vec::with_capacity(conditions.len());
     for cw in conditions {
-        whens.push(bind_node(&cw.condition, schema, depth + 1)?);
-        thens.push(bind_node(&cw.result, schema, depth + 1)?);
+        whens.push(bind_node(&cw.condition, resolver, depth + 1)?);
+        thens.push(bind_node(&cw.result, resolver, depth + 1)?);
     }
     let else_bound = match else_ast {
-        Some(el) => Some(bind_node(el, schema, depth + 1)?),
+        Some(el) => Some(bind_node(el, resolver, depth + 1)?),
         None => None,
     };
 
@@ -1041,13 +1098,13 @@ fn bind_case(
 
 fn bind_array(
     elems_ast: &[SqlExpr],
-    schema: &Schema,
+    resolver: &dyn ExprResolver,
     pos: Option<Position>,
     depth: usize,
 ) -> Result<Expr, InvalidQuery> {
     let mut bound = Vec::with_capacity(elems_ast.len());
     for el in elems_ast {
-        bound.push(bind_node(el, schema, depth + 1)?);
+        bound.push(bind_node(el, resolver, depth + 1)?);
     }
     let refs: Vec<&Expr> = bound.iter().collect();
     let item_type = if refs.is_empty() {
@@ -1092,21 +1149,24 @@ fn bind_array(
 fn bind_compound_access(
     root: &SqlExpr,
     access_chain: &[AccessExpr],
-    schema: &Schema,
+    resolver: &dyn ExprResolver,
     pos: Option<Position>,
     depth: usize,
 ) -> Result<Expr, InvalidQuery> {
-    let (mut cur, subscripts) = if matches!(root, SqlExpr::Identifier(_))
+    let (mut cur, subscripts) = if let SqlExpr::Identifier(tbl) = root
         && let Some(AccessExpr::Dot(SqlExpr::Identifier(col))) = access_chain.first()
     {
-        (bind_ident(col, schema)?, &access_chain[1..])
+        (
+            resolver.resolve_ident(&[tbl.clone(), col.clone()])?,
+            &access_chain[1..],
+        )
     } else {
-        (bind_node(root, schema, depth + 1)?, access_chain)
+        (bind_node(root, resolver, depth + 1)?, access_chain)
     };
     for access in subscripts {
         match access {
             AccessExpr::Subscript(Subscript::Index { index }) => {
-                let idx_expr = bind_node(index, schema, depth + 1)?;
+                let idx_expr = bind_node(index, resolver, depth + 1)?;
                 match cur.data_type() {
                     DataType::MapUtf8 => {
                         let key = coerce_to_utf8_from_utf8_or_null(idx_expr, pos)?;
@@ -1145,16 +1205,16 @@ fn bind_compound_access(
 fn bind_json_access(
     value: &SqlExpr,
     path: &[JsonPathElem],
-    schema: &Schema,
+    resolver: &dyn ExprResolver,
     pos: Option<Position>,
     depth: usize,
 ) -> Result<Expr, InvalidQuery> {
-    let mut cur = coerce_to_utf8_from_utf8_or_null(bind_node(value, schema, depth + 1)?, pos)?;
+    let mut cur = coerce_to_utf8_from_utf8_or_null(bind_node(value, resolver, depth + 1)?, pos)?;
     for elem in path {
         let key_expr = match elem {
             JsonPathElem::Dot { key, .. } => Expr::Literal(ScalarValue::Utf8(key.clone())),
             JsonPathElem::Bracket { key } | JsonPathElem::ColonBracket { key } => {
-                let bound_key = bind_node(key, schema, depth + 1)?;
+                let bound_key = bind_node(key, resolver, depth + 1)?;
                 match bound_key.data_type() {
                     DataType::Utf8 | DataType::I64 => bound_key,
                     DataType::Null => coerce_expr(bound_key, &DataType::Utf8, pos)?,
@@ -1204,7 +1264,7 @@ fn bind_floor_ceil(func: ScalarFn, arg: Expr, pos: Option<Position>) -> Result<E
 
 fn bind_function(
     function: &Function,
-    schema: &Schema,
+    resolver: &dyn ExprResolver,
     pos: Option<Position>,
     depth: usize,
 ) -> Result<Expr, InvalidQuery> {
@@ -1236,7 +1296,7 @@ fn bind_function(
                 pos,
             ));
         };
-        args.push(bind_node(expr, schema, depth + 1)?);
+        args.push(bind_node(expr, resolver, depth + 1)?);
     }
 
     let canonical = match raw_name.as_str() {
@@ -2027,7 +2087,7 @@ fn validate_extract_source(
 // Type coercion helpers
 // ---------------------------------------------------------------------------
 
-fn expect_bool_or_null(expr: Expr, pos: Option<Position>) -> Result<Expr, InvalidQuery> {
+pub(crate) fn expect_bool_or_null(expr: Expr, pos: Option<Position>) -> Result<Expr, InvalidQuery> {
     let dt = expr.data_type();
     if !matches!(dt, DataType::Bool | DataType::Null) {
         return Err(InvalidQuery::new(
@@ -2141,7 +2201,7 @@ fn coerce_comparison_pair(
     coerce_comparison_many(&[l, r], pos)
 }
 
-fn coerce_comparison_many(
+pub(crate) fn coerce_comparison_many(
     exprs: &[&Expr],
     pos: Option<Position>,
 ) -> Result<DataType, InvalidQuery> {
@@ -2155,7 +2215,10 @@ fn coerce_comparison_many(
     Ok(dt)
 }
 
-fn coerce_common_many(exprs: &[&Expr], pos: Option<Position>) -> Result<DataType, InvalidQuery> {
+pub(crate) fn coerce_common_many(
+    exprs: &[&Expr],
+    pos: Option<Position>,
+) -> Result<DataType, InvalidQuery> {
     let Some(first) = exprs.first() else {
         return Ok(DataType::Null);
     };
@@ -2360,7 +2423,11 @@ fn can_coerce_scalar_to(sv: &ScalarValue, target: &DataType) -> bool {
     }
 }
 
-fn coerce_expr(expr: Expr, target: &DataType, pos: Option<Position>) -> Result<Expr, InvalidQuery> {
+pub(crate) fn coerce_expr(
+    expr: Expr,
+    target: &DataType,
+    pos: Option<Position>,
+) -> Result<Expr, InvalidQuery> {
     let src_dt = expr.data_type();
     if src_dt == *target {
         return Ok(expr);
@@ -2446,7 +2513,7 @@ fn coerce_expr(expr: Expr, target: &DataType, pos: Option<Position>) -> Result<E
     }
 }
 
-fn can_cast(src: &DataType, target: &DataType) -> bool {
+pub(crate) fn can_cast(src: &DataType, target: &DataType) -> bool {
     if src == target || matches!(src, DataType::Null) || matches!(target, DataType::Null) {
         return true;
     }
@@ -2494,7 +2561,10 @@ fn can_cast(src: &DataType, target: &DataType) -> bool {
     }
 }
 
-fn bind_sql_type(dt: &SqlDataType, pos: Option<Position>) -> Result<DataType, InvalidQuery> {
+pub(crate) fn bind_sql_type(
+    dt: &SqlDataType,
+    pos: Option<Position>,
+) -> Result<DataType, InvalidQuery> {
     match dt {
         SqlDataType::Boolean | SqlDataType::Bool => Ok(DataType::Bool),
         SqlDataType::BigInt(None)
@@ -2556,12 +2626,12 @@ fn bind_sql_type(dt: &SqlDataType, pos: Option<Position>) -> Result<DataType, In
     }
 }
 
-fn at(spanned: &impl Spanned) -> Option<Position> {
+pub(crate) fn at(spanned: &impl Spanned) -> Option<Position> {
     let start = spanned.span().start;
     at_location(start.line, start.column)
 }
 
-fn at_ident(ident: &Ident) -> Option<Position> {
+pub(crate) fn at_ident(ident: &Ident) -> Option<Position> {
     at_location(ident.span.start.line, ident.span.start.column)
 }
 
@@ -3067,5 +3137,52 @@ mod tests {
             "{}",
             err.message
         );
+    }
+
+    #[test]
+    fn expr_resolver_resolves_qualified_idents_map_subscript_and_placeholders() {
+        struct MockSqlResolver;
+        impl ExprResolver for MockSqlResolver {
+            fn resolve_ident(&self, parts: &[Ident]) -> Result<Expr, InvalidQuery> {
+                match parts {
+                    [tbl, col] if tbl.value == "s" && col.value == "name" => Ok(Expr::Column {
+                        index: 0,
+                        name: "name".to_owned(),
+                        data_type: DataType::Utf8,
+                    }),
+                    [tbl, col] if tbl.value == "s" && col.value == "meta" => Ok(Expr::Column {
+                        index: 1,
+                        name: "meta".to_owned(),
+                        data_type: DataType::MapUtf8,
+                    }),
+                    _ => Err(InvalidQuery::new("unknown column", at_ident(&parts[0]))),
+                }
+            }
+
+            fn resolve_placeholder(
+                &self,
+                name: &str,
+                pos: Option<Position>,
+            ) -> Result<Expr, InvalidQuery> {
+                match name {
+                    "$1" => Ok(Expr::Literal(ScalarValue::Utf8("bound".to_owned()))),
+                    _ => Err(InvalidQuery::new(
+                        format!("unknown placeholder {name}"),
+                        pos,
+                    )),
+                }
+            }
+        }
+
+        let sql = "lower(s.name) = $1 AND s.meta['env'] = 'prod'";
+        let tokens = tokenize(sql, &SQL_LIMITS, TextKind::Sql).unwrap();
+        let mut p = parser(tokens);
+        let ast = p.parse_expr().unwrap();
+        expect_end(&mut p, sql).unwrap();
+        let bound = bind_expr_with(&ast, &MockSqlResolver).unwrap();
+        assert_eq!(bound.data_type(), DataType::Bool);
+        let plan_str = bound.fmt_plan();
+        assert!(plan_str.contains("lower(name)"), "{plan_str}");
+        assert!(plan_str.contains("meta[<utf8:3>]"), "{plan_str}");
     }
 }

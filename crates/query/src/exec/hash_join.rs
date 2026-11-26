@@ -45,6 +45,11 @@ pub enum JoinType {
     LeftSemi,
     /// Left anti-join (emits each non-matching left row once; output schema is `left` only).
     LeftAnti,
+    /// Null-aware left anti-join for SQL `NOT IN (SELECT ...)`:
+    /// - if the build side has any `NULL` key, emits 0 rows;
+    /// - else if the build side is non-empty, drops left rows with `NULL` key and emits unmatched non-null left rows;
+    /// - else (build side is empty), emits all left rows including those with `NULL` key.
+    LeftAntiNullAware,
     /// Cartesian product (empty keys; unspillable build buffer).
     Cross,
 }
@@ -66,12 +71,15 @@ pub struct HashJoinSpec {
 
 /// Computes the output schema of a join between `left` and `right`.
 ///
-/// - [`JoinType::LeftSemi`] / [`JoinType::LeftAnti`]: returns `left` schema only.
+/// - [`JoinType::LeftSemi`] / [`JoinType::LeftAnti`] / [`JoinType::LeftAntiNullAware`]: returns `left` schema only.
 /// - [`JoinType::Inner`] / [`JoinType::Cross`]: concatenates `left` + `right` unchanged.
 /// - [`JoinType::Left`] / [`JoinType::Right`] / [`JoinType::Full`]: concatenates `left` + `right`,
 ///   widening non-matching side(s) to `nullable: true`.
 pub fn join_output_schema(join_type: JoinType, left: &Schema, right: &Schema) -> Arc<Schema> {
-    if matches!(join_type, JoinType::LeftSemi | JoinType::LeftAnti) {
+    if matches!(
+        join_type,
+        JoinType::LeftSemi | JoinType::LeftAnti | JoinType::LeftAntiNullAware
+    ) {
         return Arc::new(left.clone());
     }
     let widen_left = matches!(join_type, JoinType::Right | JoinType::Full);
@@ -107,7 +115,10 @@ pub fn execute_hash_join(
     validate_spec(&spec, &left_schema, &right_schema)?;
 
     let output_schema = join_output_schema(spec.join_type, &left_schema, &right_schema);
-    let combined_schema = if matches!(spec.join_type, JoinType::LeftSemi | JoinType::LeftAnti) {
+    let combined_schema = if matches!(
+        spec.join_type,
+        JoinType::LeftSemi | JoinType::LeftAnti | JoinType::LeftAntiNullAware
+    ) {
         join_output_schema(JoinType::Inner, &left_schema, &right_schema)
     } else {
         Arc::clone(&output_schema)
@@ -181,6 +192,18 @@ fn validate_spec(
         return Err(QueryError::failed(
             "hash join requires equal non-empty left and right key lists",
         ));
+    }
+    if spec.join_type == JoinType::LeftAntiNullAware {
+        if spec.null_equals_null {
+            return Err(QueryError::failed(
+                "LeftAntiNullAware join cannot have null_equals_null = true",
+            ));
+        }
+        if spec.residual_filter.is_some() {
+            return Err(QueryError::failed(
+                "LeftAntiNullAware join does not support residual filter",
+            ));
+        }
     }
 
     for (lk, rk) in spec.left_keys.iter().zip(&spec.right_keys) {
@@ -874,6 +897,7 @@ fn take_batch_rows(
 
 struct PartitionSink<'a> {
     null_equals_null: bool,
+    drop_null_keys: bool,
     seed: u64,
     writers: &'a mut [Option<SpillWriter>; NUM_JOIN_PARTITIONS],
     spill: &'a SpillManager,
@@ -892,7 +916,9 @@ fn partition_batch_into_writers(
 
     for r in 0..batch.num_rows() {
         if !sink.null_equals_null && row_has_null_key(key_cols, r) {
-            bypassed.push(r as u32);
+            if !sink.drop_null_keys {
+                bypassed.push(r as u32);
+            }
             continue;
         }
         let h = hash_key_row(key_cols, r, sink.seed);
@@ -964,7 +990,10 @@ fn build_unmatched_left_batch(
     for c in left_batch.columns() {
         cols.push(Column::Flat(c.take(left_indices, res.as_deref_mut())?));
     }
-    if !matches!(join_type, JoinType::LeftSemi | JoinType::LeftAnti) {
+    if !matches!(
+        join_type,
+        JoinType::LeftSemi | JoinType::LeftAnti | JoinType::LeftAntiNullAware
+    ) {
         for f in &output_schema.fields()[left_batch.columns().len()..] {
             cols.push(Column::try_new_const(
                 ScalarValue::Null(f.data_type.clone()),
@@ -1544,6 +1573,7 @@ impl HashJoinStream {
         st.buffered_rows = 0;
         let mut sink = PartitionSink {
             null_equals_null,
+            drop_null_keys: false,
             seed,
             writers: &mut st.build_writers,
             spill,
@@ -1615,6 +1645,20 @@ impl HashJoinStream {
                             non_null_idx.push(r as u32);
                         }
                     }
+                }
+
+                if self.spec.join_type == JoinType::LeftAntiNullAware && !null_idx.is_empty() {
+                    // SQL `NOT IN (SELECT ...)` with any NULL on the RHS emits 0 probe rows.
+                    drop(key_cols_eval);
+                    drop(batch);
+                    st.buffered_batches.clear();
+                    st.buffered_computed_keys.clear();
+                    st.build_writers = new_writer_array();
+                    st.build_res.free();
+                    self.scratch_res.free();
+                    self.pull_res.free();
+                    self.phase = Phase::Done;
+                    return Ok(());
                 }
 
                 if emit_null_build && !null_idx.is_empty() {
@@ -1760,6 +1804,7 @@ impl HashJoinStream {
                         )?;
                         let mut sink = PartitionSink {
                             null_equals_null: self.spec.null_equals_null,
+                            drop_null_keys: false,
                             seed,
                             writers: &mut st.build_writers,
                             spill: &self.ctx.spill,
@@ -1776,6 +1821,7 @@ impl HashJoinStream {
                     resolve_key_refs(&self.right_key_evals, &non_null_batch, &non_null_keys)?;
                 let mut sink = PartitionSink {
                     null_equals_null: self.spec.null_equals_null,
+                    drop_null_keys: false,
                     seed,
                     writers: &mut st.build_writers,
                     spill: &self.ctx.spill,
@@ -1799,7 +1845,10 @@ impl HashJoinStream {
                 st.build_res.free();
                 if matches!(
                     self.spec.join_type,
-                    JoinType::Left | JoinType::Full | JoinType::LeftAnti
+                    JoinType::Left
+                        | JoinType::Full
+                        | JoinType::LeftAnti
+                        | JoinType::LeftAntiNullAware
                 ) {
                     self.phase = Phase::PassThroughLeft(left_streams);
                 } else {
@@ -1842,6 +1891,7 @@ impl HashJoinStream {
                 Err(ColumnError::MemoryLimit { .. }) if st.buffered_rows > 0 => {
                     let mut sink = PartitionSink {
                         null_equals_null: self.spec.null_equals_null,
+                        drop_null_keys: false,
                         seed,
                         writers: &mut st.build_writers,
                         spill: &self.ctx.spill,
@@ -1923,7 +1973,7 @@ impl HashJoinStream {
         let frame_budget = self.frame_budget();
         let emit_unmatched_left = matches!(
             self.spec.join_type,
-            JoinType::Left | JoinType::Full | JoinType::LeftAnti
+            JoinType::Left | JoinType::Full | JoinType::LeftAnti | JoinType::LeftAntiNullAware
         );
 
         while let Some(batch) =
@@ -1940,6 +1990,7 @@ impl HashJoinStream {
                 let krefs = resolve_key_refs(&self.left_key_evals, &batch, &key_cols_eval)?;
                 let mut sink = PartitionSink {
                     null_equals_null: self.spec.null_equals_null,
+                    drop_null_keys: self.spec.join_type == JoinType::LeftAntiNullAware,
                     seed,
                     writers: &mut st.probe_writers,
                     spill: &self.ctx.spill,
@@ -2010,6 +2061,7 @@ impl HashJoinStream {
         {
             let mut build_sink = PartitionSink {
                 null_equals_null: self.spec.null_equals_null,
+                drop_null_keys: false,
                 seed: next_seed,
                 writers: &mut sub_build_writers,
                 spill: &self.ctx.spill,
@@ -2040,6 +2092,7 @@ impl HashJoinStream {
                 let krefs = resolve_key_refs(&self.right_key_evals, &batch, &key_cols_eval)?;
                 let mut build_sink = PartitionSink {
                     null_equals_null: self.spec.null_equals_null,
+                    drop_null_keys: false,
                     seed: next_seed,
                     writers: &mut sub_build_writers,
                     spill: &self.ctx.spill,
@@ -2074,6 +2127,7 @@ impl HashJoinStream {
                     let krefs = resolve_key_refs(&self.right_key_evals, &rem, &rem_keys)?;
                     let mut build_sink = PartitionSink {
                         null_equals_null: self.spec.null_equals_null,
+                        drop_null_keys: false,
                         seed: next_seed,
                         writers: &mut sub_build_writers,
                         spill: &self.ctx.spill,
@@ -2100,7 +2154,7 @@ impl HashJoinStream {
 
         let emit_unmatched_left = matches!(
             self.spec.join_type,
-            JoinType::Left | JoinType::Full | JoinType::LeftAnti
+            JoinType::Left | JoinType::Full | JoinType::LeftAnti | JoinType::LeftAntiNullAware
         );
         let emit_unmatched_build = matches!(self.spec.join_type, JoinType::Right | JoinType::Full);
 
@@ -2127,6 +2181,7 @@ impl HashJoinStream {
                 let krefs = resolve_key_refs(&self.left_key_evals, &pbatch, &pkeys)?;
                 let mut probe_sink = PartitionSink {
                     null_equals_null: self.spec.null_equals_null,
+                    drop_null_keys: self.spec.join_type == JoinType::LeftAntiNullAware,
                     seed: next_seed,
                     writers: &mut sub_probe_writers,
                     spill: &self.ctx.spill,
@@ -2386,10 +2441,13 @@ impl HashJoinStream {
             return Ok(());
         };
         let eval_ctx = self.eval_ctx(cancel);
-        let include_right = !matches!(self.spec.join_type, JoinType::LeftSemi | JoinType::LeftAnti);
+        let include_right = !matches!(
+            self.spec.join_type,
+            JoinType::LeftSemi | JoinType::LeftAnti | JoinType::LeftAntiNullAware
+        );
         let emit_unmatched_left = matches!(
             self.spec.join_type,
-            JoinType::Left | JoinType::Full | JoinType::LeftAnti
+            JoinType::Left | JoinType::Full | JoinType::LeftAnti | JoinType::LeftAntiNullAware
         );
 
         loop {
@@ -2473,7 +2531,9 @@ impl HashJoinStream {
                     }
                     if cur.active_bucket_next.is_none() {
                         if !self.spec.null_equals_null && row_has_null_key(&l_krefs, lr) {
-                            if emit_unmatched_left {
+                            if emit_unmatched_left
+                                && self.spec.join_type != JoinType::LeftAntiNullAware
+                            {
                                 pairs.push((lr as u32, None));
                             }
                             cur.next_row += 1;
@@ -2531,7 +2591,7 @@ impl HashJoinStream {
                                 cur.active_bucket_next = None;
                                 break;
                             }
-                            JoinType::LeftAnti => {
+                            JoinType::LeftAnti | JoinType::LeftAntiNullAware => {
                                 cur.active_bucket_next = None;
                                 break;
                             }
@@ -2573,8 +2633,10 @@ impl HashJoinStream {
                     if (lr & CANCEL_CHECK_MASK) == 0 {
                         self.check_cancel(cancel)?;
                     }
-                    if matches!(self.spec.join_type, JoinType::LeftSemi | JoinType::LeftAnti)
-                        && cur.row_matched[lr]
+                    if matches!(
+                        self.spec.join_type,
+                        JoinType::LeftSemi | JoinType::LeftAnti | JoinType::LeftAntiNullAware
+                    ) && cur.row_matched[lr]
                     {
                         cur.active_bucket_next = None;
                         cur.row_chain_done[lr] = true;
@@ -2669,7 +2731,7 @@ impl HashJoinStream {
                                     semi_left.push(lr);
                                 }
                             }
-                            JoinType::LeftAnti | JoinType::Cross => {}
+                            JoinType::LeftAnti | JoinType::LeftAntiNullAware | JoinType::Cross => {}
                         }
                     }
 
@@ -4153,5 +4215,140 @@ mod tests {
             }
         }
         assert_eq!(ctx.pool.reserved(), 0);
+    }
+
+    #[test]
+    fn left_anti_null_aware_semantics_and_spill() {
+        let (ctx, _dir) = make_ctx(8 * 1024 * 1024, 16 * 1024 * 1024);
+        let schema = Schema::try_new_arc(vec![
+            Field::new("k", DataType::I64, true),
+            Field::new("v", DataType::I64, false),
+        ])
+        .unwrap();
+
+        let make_batch = |rows: &[(Option<i64>, i64)]| -> Batch {
+            let ks: Vec<i64> = rows.iter().map(|(k, _)| k.unwrap_or(0)).collect();
+            let k_nulls: Vec<bool> = rows.iter().map(|(k, _)| k.is_some()).collect();
+            let vs: Vec<i64> = rows.iter().map(|(_, v)| *v).collect();
+            Batch::try_new_all(
+                Arc::clone(&schema),
+                vec![
+                    Column::Flat(
+                        FlatColumn::try_new(FlatData::I64(ks), Some(Bitmap::from_bools(&k_nulls)))
+                            .unwrap(),
+                    ),
+                    Column::Flat(FlatColumn::try_new(FlatData::I64(vs), None).unwrap()),
+                ],
+                rows.len(),
+            )
+            .unwrap()
+        };
+
+        let run_anti =
+            |left_batches: Vec<Batch>, right_batches: Vec<Batch>, run_ctx: &ExecContext| {
+                let l_src = BatchSource::new(Arc::clone(&schema), left_batches).unwrap();
+                let r_src = BatchSource::new(Arc::clone(&schema), right_batches).unwrap();
+                let stream = execute_hash_join(
+                    l_src
+                        .open_partitions(&ScanSpec::default(), run_ctx)
+                        .unwrap(),
+                    Arc::clone(&schema),
+                    r_src
+                        .open_partitions(&ScanSpec::default(), run_ctx)
+                        .unwrap(),
+                    Arc::clone(&schema),
+                    HashJoinSpec {
+                        join_type: JoinType::LeftAntiNullAware,
+                        left_keys: vec![col_expr(0, "k", DataType::I64)],
+                        right_keys: vec![col_expr(0, "k", DataType::I64)],
+                        null_equals_null: false,
+                        residual_filter: None,
+                    },
+                    run_ctx,
+                )
+                .unwrap();
+                extract_two_col_rows(&drain_stream(stream, &run_ctx.eval.cancel).unwrap())
+            };
+
+        let left = make_batch(&[(Some(1), 10), (Some(2), 20), (None, 30)]);
+
+        // 1. Empty RHS -> emits ALL LHS rows including NULL key!
+        assert_eq!(
+            run_anti(vec![left.clone()], vec![], &ctx),
+            vec![(None, Some(30)), (Some(1), Some(10)), (Some(2), Some(20))]
+        );
+
+        // 2. RHS contains ANY NULL key -> emits 0 rows (even when non-null LHS keys don't match)!
+        let right_with_null = make_batch(&[(Some(99), 1), (None, 2)]);
+        assert_eq!(
+            run_anti(vec![left.clone()], vec![right_with_null], &ctx),
+            vec![]
+        );
+
+        // 3. Non-empty non-null RHS -> drops NULL LHS key, emits unmatched non-null LHS rows!
+        let right_no_null = make_batch(&[(Some(1), 100), (Some(3), 300)]);
+        assert_eq!(
+            run_anti(vec![left], vec![right_no_null], &ctx),
+            vec![(Some(2), Some(20))]
+        );
+
+        // 4. Spilled Grace-hash path under tight pool:
+        //    (a) non-null RHS: drops LHS NULLs and unmatched non-nulls emit cleanly
+        //    (b) RHS with late NULL after spilling: short-circuits to 0 rows & frees spill!
+        let (tight_ctx, _tight_dir) = make_ctx(80 * 1024, 8 * 1024 * 1024);
+        let big_left_rows: Vec<(Option<i64>, i64)> = (0..1200)
+            .map(|i| {
+                if i % 100 == 0 {
+                    (None, i)
+                } else {
+                    (Some(i), i * 10)
+                }
+            })
+            .collect();
+        let big_right_rows: Vec<(Option<i64>, i64)> = (0..1000)
+            .filter(|i| i % 2 == 0)
+            .map(|i| (Some(i), i))
+            .collect();
+        let l_chunks: Vec<Batch> = big_left_rows.chunks(200).map(make_batch).collect();
+        let r_chunks: Vec<Batch> = big_right_rows.chunks(200).map(make_batch).collect();
+
+        let mut spilled_rows = run_anti(l_chunks.clone(), r_chunks.clone(), &tight_ctx);
+        spilled_rows.sort();
+        let mut expected: Vec<(Option<i64>, Option<i64>)> = (0..1200)
+            .filter(|i| i % 100 != 0 && (*i >= 1000 || i % 2 != 0))
+            .map(|i| (Some(i), Some(i * 10)))
+            .collect();
+        expected.sort();
+        assert_eq!(spilled_rows, expected);
+        assert_eq!(tight_ctx.pool.reserved(), 0);
+        assert_eq!(tight_ctx.spill.spilled_bytes(), 0);
+
+        // (b) Late NULL in RHS after spilling earlier non-null batches -> 0 rows!
+        let mut r_with_late_null = r_chunks;
+        r_with_late_null.push(make_batch(&[(None, -1)]));
+        assert_eq!(run_anti(l_chunks, r_with_late_null, &tight_ctx), vec![]);
+        assert_eq!(tight_ctx.pool.reserved(), 0);
+        assert_eq!(tight_ctx.spill.spilled_bytes(), 0);
+
+        // Invalid specs rejected cleanly.
+        let l_src = BatchSource::empty(Arc::clone(&schema));
+        let r_src = BatchSource::empty(Arc::clone(&schema));
+        assert!(
+            execute_hash_join(
+                l_src.open_partitions(&ScanSpec::default(), &ctx).unwrap(),
+                Arc::clone(&schema),
+                r_src.open_partitions(&ScanSpec::default(), &ctx).unwrap(),
+                Arc::clone(&schema),
+                HashJoinSpec {
+                    join_type: JoinType::LeftAntiNullAware,
+                    left_keys: vec![col_expr(0, "k", DataType::I64)],
+                    right_keys: vec![col_expr(0, "k", DataType::I64)],
+                    null_equals_null: true,
+                    residual_filter: None,
+                },
+                &ctx,
+            )
+            .is_err()
+        );
     }
 }
