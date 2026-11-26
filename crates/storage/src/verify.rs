@@ -7,19 +7,11 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use arrow::error::ArrowError;
 use datafusion::error::DataFusionError;
-use futures::StreamExt;
-use object_store::path::Path as ObjectPath;
-use object_store::{ObjectStore, ObjectStoreExt};
-use parquet::arrow::arrow_reader::ArrowReaderOptions;
-#[allow(deprecated)]
-use parquet::arrow::async_reader::ParquetObjectReader;
-use parquet::arrow::async_reader::ParquetRecordBatchStreamBuilder;
+use object_store::ObjectStore;
 use parquet::errors::ParquetError;
-use parquet::file::metadata::PageIndexPolicy;
 
 use crate::catalog::{self, FileId, FileMeta};
 use crate::query_error::root;
-use crate::unwind::{GuardedStream, decoder_panicked, guard, guard_sync};
 
 /// Whether `error` may come from a corrupt Parquet file rather than the object
 /// store or the query (spec 03 §10). False positives only cost a verification.
@@ -230,61 +222,7 @@ pub(crate) enum Verdict {
 
 /// Reads `file` whole from `store`: every row group, every column.
 pub(crate) async fn verify_file(store: &Arc<dyn ObjectStore>, file: &FileMeta) -> Verdict {
-    let path = ObjectPath::from(file.path.as_str());
-    match store.head(&path).await {
-        Ok(meta) => {
-            if meta.size != file.size {
-                return Verdict::Corrupt {
-                    reason: "size differs from the catalog",
-                };
-            }
-        }
-        Err(object_store::Error::NotFound { .. }) => {
-            return Verdict::Corrupt {
-                reason: "missing object",
-            };
-        }
-        Err(_) => return Verdict::Unavailable,
-    }
-    let failed = |error: &ParquetError| {
-        if is_store_error(error) {
-            Verdict::Unavailable
-        } else {
-            Verdict::Corrupt {
-                reason: "decode failed",
-            }
-        }
-    };
-    #[allow(deprecated)]
-    let reader = ParquetObjectReader::new(Arc::clone(store), path).with_file_size(file.size);
-    let options = ArrowReaderOptions::new().with_page_index_policy(PageIndexPolicy::Required);
-    let builder = match guard(ParquetRecordBatchStreamBuilder::new_with_options(
-        reader, options,
-    ))
-    .await
-    {
-        Ok(builder) => builder,
-        Err(error) => return failed(&error),
-    };
-    let mut stream = match guard_sync(move || builder.build()) {
-        Ok(stream) => GuardedStream::new(stream, || Err(decoder_panicked())),
-        Err(error) => return failed(&error),
-    };
-    let mut rows = 0_u64;
-    while let Some(batch) = stream.next().await {
-        match batch {
-            Ok(batch) => {
-                rows = rows.saturating_add(u64::try_from(batch.num_rows()).unwrap_or(u64::MAX));
-            }
-            Err(error) => return failed(&error),
-        }
-    }
-    if rows != file.rows {
-        return Verdict::Corrupt {
-            reason: "row count differs from the catalog",
-        };
-    }
-    Verdict::Healthy
+    crate::file_format::verify_parquet_file(store, file).await
 }
 
 #[cfg(test)]
@@ -294,7 +232,8 @@ mod tests {
     use arrow::error::ArrowError;
     use bytes::Bytes;
     use datafusion::error::DataFusionError;
-    use object_store::PutPayload;
+    use object_store::path::Path as ObjectPath;
+    use object_store::{ObjectStoreExt, PutPayload};
     use parquet::errors::ParquetError;
     use uuid::Uuid;
 

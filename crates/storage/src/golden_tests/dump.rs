@@ -2,15 +2,21 @@
 //! and `reads`, with the request values `model_tests/observe.rs` uses, on an explicit window,
 //! every page followed. A dump runs on a copy of a directory only.
 
+use std::fmt::Write as _;
 use std::fs;
 use std::future::Future;
 use std::path::Path;
 use std::time::Duration;
 
 use arrow::array::RecordBatch;
+use cetra_column::{
+    Batch, Column, EventsData, FlatColumn, FlatData, Interval, LinksData, MapData, ScalarValue,
+    Selection,
+};
 use cetra_core::ids::ProjectId;
-use cetra_core::schema::{scores, spans, traces};
-use serde_json::{Map, Value, json};
+use cetra_core::schema::{event_field, link_field, scores, spans, traces};
+use chrono::{DateTime, NaiveDate, SecondsFormat};
+use serde_json::{Map, Number, Value, json};
 use sha2::{Digest, Sha256};
 use sqlx::sqlite::{SqliteConnectOptions, SqliteRow};
 use sqlx::{Connection, Row, SqliteConnection};
@@ -62,31 +68,345 @@ fn rows(batches: &[RecordBatch], columns: &[&str]) -> Vec<Value> {
         if batch.num_rows() == 0 {
             continue;
         }
-        let indexes: Vec<usize> = columns
-            .iter()
-            .map(|name| {
-                batch
-                    .schema()
-                    .index_of(name)
-                    .unwrap_or_else(|_| panic!("the read result has a {name} column"))
-            })
-            .collect();
-        let projected = batch
-            .project(&indexes)
-            .expect("project the columns of a read result");
-        let mut writer = arrow::json::ArrayWriter::new(Vec::new());
-        writer
-            .write(&projected)
-            .expect("write a read result as JSON");
-        writer.finish().expect("finish the JSON of a read result");
-        let Value::Array(values) =
-            serde_json::from_slice(&writer.into_inner()).expect("the JSON of a read result")
-        else {
-            panic!("the JSON writer returns an array");
-        };
-        out.extend(values.into_iter().map(sorted_keys));
+        let col_batch = crate::column_bridge::record_batch_to_column(batch)
+            .expect("convert a read result to cetra_column::Batch");
+        out.extend(batch_rows(&col_batch, columns));
     }
     out
+}
+
+/// The rows of `batch`, projected to `columns` by name, as JSON objects in order.
+/// Matches `arrow::json::ArrayWriter` (`explicit_nulls = false`) across all encodings and selections.
+fn batch_rows(batch: &Batch, columns: &[&str]) -> Vec<Value> {
+    if batch.is_empty() {
+        return Vec::new();
+    }
+    let indices: Vec<usize> = columns
+        .iter()
+        .map(|name| {
+            batch
+                .schema()
+                .index_of(name)
+                .unwrap_or_else(|| panic!("the read result has a {name} column"))
+        })
+        .collect();
+    let projected = batch
+        .project(&indices)
+        .expect("project the columns of a read result");
+    let mut out = Vec::with_capacity(projected.num_rows());
+    let fields = projected.schema().fields();
+    let cols = projected.columns();
+    let mut push_row = |phys_row: usize| {
+        let mut map = Map::new();
+        for (field, col) in fields.iter().zip(cols) {
+            if col.is_null(phys_row) {
+                continue;
+            }
+            map.insert(field.name.clone(), cell_to_json(col, phys_row));
+        }
+        out.push(sorted_keys(Value::Object(map)));
+    };
+    match projected.selection() {
+        Selection::All => {
+            for phys_row in 0..projected.raw_len() {
+                push_row(phys_row);
+            }
+        }
+        Selection::Mask(mask) => {
+            for phys_row in mask.iter_ones() {
+                push_row(phys_row);
+            }
+        }
+        Selection::Indices(indices) => {
+            for &phys_row in indices {
+                push_row(phys_row as usize);
+            }
+        }
+    }
+    out
+}
+
+fn resolve_flat(col: &Column, phys_row: usize) -> (&FlatColumn, usize) {
+    match col {
+        Column::Flat(flat) => (flat, phys_row),
+        Column::Dict(dict) => (dict.values(), dict.codes()[phys_row] as usize),
+        Column::Rle(rle) => {
+            let run = rle
+                .run_ends()
+                .partition_point(|&end| (end as usize) <= phys_row);
+            (rle.values(), run)
+        }
+        Column::Const { .. } => unreachable!("Const handled by caller"),
+    }
+}
+
+fn cell_to_json(col: &Column, phys_row: usize) -> Value {
+    if col.is_null(phys_row) {
+        return Value::Null;
+    }
+    if let Column::Const { value, .. } = col {
+        return scalar_to_json(value);
+    }
+    let (flat, flat_row) = resolve_flat(col, phys_row);
+    flat_to_json(flat, flat_row)
+}
+
+fn flat_to_json(flat: &FlatColumn, row: usize) -> Value {
+    if flat.is_null(row) {
+        return Value::Null;
+    }
+    match flat.data() {
+        FlatData::Null(_) => Value::Null,
+        FlatData::Bool(bm) => Value::Bool(bm.get(row)),
+        FlatData::I64(vals) => Value::Number(Number::from(vals[row])),
+        FlatData::F64(vals) => Number::from_f64(vals[row]).map_or(Value::Null, Value::Number),
+        FlatData::Decimal128 { values, scale, .. } => decimal_to_json(values[row], *scale),
+        FlatData::TimestampNs { values, utc } => timestamp_to_json(values[row], *utc),
+        FlatData::Date(vals) => date_to_json(vals[row]),
+        FlatData::Interval(vals) => interval_to_json(vals[row]),
+        FlatData::Utf8(utf8) => {
+            Value::String(utf8.get(row).expect("utf8 row index in bounds").to_owned())
+        }
+        FlatData::Binary(bin) => Value::String(hex::encode(
+            bin.get(row).expect("binary row index in bounds"),
+        )),
+        FlatData::FixedBytes8(vals) => Value::String(hex::encode(vals[row])),
+        FlatData::FixedBytes16(vals) => Value::String(hex::encode(vals[row])),
+        FlatData::List {
+            offsets, values, ..
+        } => {
+            let start = offsets[row] as usize;
+            let end = offsets[row + 1] as usize;
+            Value::Array((start..end).map(|idx| cell_to_json(values, idx)).collect())
+        }
+        FlatData::MapUtf8(data) => map_flat_to_json(data, row),
+        FlatData::Events(data) => events_flat_to_json(data, row),
+        FlatData::Links(data) => links_flat_to_json(data, row),
+    }
+}
+
+fn scalar_to_json(value: &ScalarValue) -> Value {
+    match value {
+        ScalarValue::Null(_) => Value::Null,
+        ScalarValue::Bool(b) => Value::Bool(*b),
+        ScalarValue::I64(n) => Value::Number(Number::from(*n)),
+        ScalarValue::F64(x) => Number::from_f64(*x).map_or(Value::Null, Value::Number),
+        ScalarValue::Decimal128 { value, scale, .. } => decimal_to_json(*value, *scale),
+        ScalarValue::TimestampNs { value, utc } => timestamp_to_json(*value, *utc),
+        ScalarValue::Date(days) => date_to_json(*days),
+        ScalarValue::Interval(iv) => interval_to_json(*iv),
+        ScalarValue::Utf8(s) => Value::String(s.clone()),
+        ScalarValue::Binary(b) => Value::String(hex::encode(b)),
+        ScalarValue::FixedBytes8(b) => Value::String(hex::encode(b)),
+        ScalarValue::FixedBytes16(b) => Value::String(hex::encode(b)),
+        ScalarValue::List { values, .. } => {
+            Value::Array(values.iter().map(scalar_to_json).collect())
+        }
+        ScalarValue::MapUtf8(entries) => {
+            let mut map = Map::new();
+            for (k, v) in entries {
+                if let Some(val) = v {
+                    map.insert(k.clone(), Value::String(val.clone()));
+                }
+            }
+            Value::Object(map)
+        }
+        ScalarValue::Events(items) => Value::Array(
+            items
+                .iter()
+                .map(|ev| event_to_json(ev.time, &ev.name, ev.attributes.as_deref()))
+                .collect(),
+        ),
+        ScalarValue::Links(items) => Value::Array(
+            items
+                .iter()
+                .map(|lk| link_to_json(&lk.trace_id, &lk.span_id, lk.attributes.as_deref()))
+                .collect(),
+        ),
+    }
+}
+
+fn map_flat_to_json(data: &MapData, row: usize) -> Value {
+    let start = data.offsets()[row] as usize;
+    let end = data.offsets()[row + 1] as usize;
+    let mut map = Map::new();
+    for idx in start..end {
+        if data.value_nulls().is_some_and(|bm| !bm.get(idx)) {
+            continue;
+        }
+        let key = data.keys().get(idx).expect("map key in bounds");
+        let val = data.values().get(idx).expect("map value in bounds");
+        map.insert(key.to_owned(), Value::String(val.to_owned()));
+    }
+    Value::Object(map)
+}
+
+fn events_flat_to_json(data: &EventsData, row: usize) -> Value {
+    let start = data.offsets()[row] as usize;
+    let end = data.offsets()[row + 1] as usize;
+    let mut items = Vec::with_capacity(end - start);
+    for idx in start..end {
+        let time = data.times()[idx];
+        let name = data.names().get(idx).expect("event name in bounds");
+        let attrs = if data.attribute_nulls().is_some_and(|bm| !bm.get(idx)) {
+            None
+        } else {
+            Some(data.attributes().get(idx).expect("event attrs in bounds"))
+        };
+        items.push(event_to_json(time, name, attrs));
+    }
+    Value::Array(items)
+}
+
+fn event_to_json(time: i64, name: &str, attrs: Option<&str>) -> Value {
+    let mut map = Map::new();
+    map.insert(event_field::TIME.to_owned(), timestamp_to_json(time, true));
+    map.insert(event_field::NAME.to_owned(), Value::String(name.to_owned()));
+    if let Some(a) = attrs {
+        map.insert(
+            event_field::ATTRIBUTES.to_owned(),
+            Value::String(a.to_owned()),
+        );
+    }
+    Value::Object(map)
+}
+
+fn links_flat_to_json(data: &LinksData, row: usize) -> Value {
+    let start = data.offsets()[row] as usize;
+    let end = data.offsets()[row + 1] as usize;
+    let mut items = Vec::with_capacity(end - start);
+    for idx in start..end {
+        let tid = &data.trace_ids()[idx];
+        let sid = &data.span_ids()[idx];
+        let attrs = if data.attribute_nulls().is_some_and(|bm| !bm.get(idx)) {
+            None
+        } else {
+            Some(data.attributes().get(idx).expect("link attrs in bounds"))
+        };
+        items.push(link_to_json(tid, sid, attrs));
+    }
+    Value::Array(items)
+}
+
+fn link_to_json(trace_id: &[u8; 16], span_id: &[u8; 8], attrs: Option<&str>) -> Value {
+    let mut map = Map::new();
+    map.insert(
+        link_field::TRACE_ID.to_owned(),
+        Value::String(hex::encode(trace_id)),
+    );
+    map.insert(
+        link_field::SPAN_ID.to_owned(),
+        Value::String(hex::encode(span_id)),
+    );
+    if let Some(a) = attrs {
+        map.insert(
+            link_field::ATTRIBUTES.to_owned(),
+            Value::String(a.to_owned()),
+        );
+    }
+    Value::Object(map)
+}
+
+fn timestamp_to_json(ns: i64, utc: bool) -> Value {
+    let dt = DateTime::from_timestamp_nanos(ns);
+    if utc {
+        Value::String(dt.to_rfc3339_opts(SecondsFormat::AutoSi, true))
+    } else {
+        Value::String(format!("{:?}", dt.naive_utc()))
+    }
+}
+
+fn date_to_json(days: i32) -> Value {
+    let ce = days
+        .checked_add(719_163)
+        .expect("date days within NaiveDate range");
+    let date = NaiveDate::from_num_days_from_ce_opt(ce).expect("valid NaiveDate");
+    Value::String(format!("{date:?}"))
+}
+
+fn interval_to_json(iv: Interval) -> Value {
+    if iv.months == 0 && iv.days == 0 && iv.nanos == 0 {
+        return Value::String("0 secs".to_owned());
+    }
+    let mut out = String::new();
+    let mut prefix = "";
+    if iv.months != 0 {
+        let _ = write!(out, "{prefix}{} mons", iv.months);
+        prefix = " ";
+    }
+    if iv.days != 0 {
+        let _ = write!(out, "{prefix}{} days", iv.days);
+        prefix = " ";
+    }
+    if iv.nanos != 0 {
+        let secs = iv.nanos / 1_000_000_000;
+        let mins = secs / 60;
+        let hours = mins / 60;
+        let rem_secs = secs - (mins * 60);
+        let rem_mins = mins - (hours * 60);
+        let rem_nanos = iv.nanos % 1_000_000_000;
+        if hours != 0 {
+            let _ = write!(out, "{prefix}{hours} hours");
+            prefix = " ";
+        }
+        if rem_mins != 0 {
+            let _ = write!(out, "{prefix}{rem_mins} mins");
+            prefix = " ";
+        }
+        if rem_secs != 0 || rem_nanos != 0 {
+            let sign = if rem_secs < 0 || rem_nanos < 0 {
+                "-"
+            } else {
+                ""
+            };
+            let _ = write!(
+                out,
+                "{prefix}{sign}{}.{:09} secs",
+                rem_secs.unsigned_abs(),
+                rem_nanos.unsigned_abs()
+            );
+        }
+    }
+    Value::String(out)
+}
+
+fn decimal_to_json(value: i128, scale: i8) -> Value {
+    let text = if scale == 0 {
+        value.to_string()
+    } else if scale < 0 {
+        if value == 0 {
+            "0".to_owned()
+        } else {
+            let mut s = value.to_string();
+            for _ in 0..usize::from(scale.unsigned_abs()) {
+                s.push('0');
+            }
+            s
+        }
+    } else {
+        let neg = value < 0;
+        let digits = value.unsigned_abs().to_string();
+        let sc = scale as usize;
+        let mut out = String::with_capacity(digits.len() + sc + 3);
+        if neg {
+            out.push('-');
+        }
+        if digits.len() <= sc {
+            out.push_str("0.");
+            for _ in 0..(sc - digits.len()) {
+                out.push('0');
+            }
+            out.push_str(&digits);
+        } else {
+            let split = digits.len() - sc;
+            out.push_str(&digits[..split]);
+            out.push('.');
+            out.push_str(&digits[split..]);
+        }
+        out
+    };
+    let num: Number = serde_json::from_str(&text).expect("decimal formats as JSON number");
+    Value::Number(num)
 }
 
 /// The `trace_id` values of JSON rows, in order.
@@ -639,4 +959,327 @@ pub(super) fn expected_of(dir: &Path) -> Value {
         .expect("the dump is an object")
         .insert("catalog".to_owned(), catalog);
     expected
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use arrow::array::{
+        Array, ArrayRef, BinaryArray, BooleanArray, Date32Array, Decimal128Array, DictionaryArray,
+        FixedSizeBinaryArray, Float64Array, Int32Array, Int64Array, IntervalMonthDayNanoArray,
+        ListArray, MapArray, RecordBatch, RunArray, StringArray, StructArray,
+        TimestampNanosecondArray,
+    };
+    use arrow::buffer::{NullBuffer, OffsetBuffer};
+    use arrow::datatypes::{
+        DataType as ArrowDataType, Field as ArrowField, Fields, IntervalMonthDayNano, IntervalUnit,
+        Schema as ArrowSchema, TimeUnit,
+    };
+    use cetra_column::{
+        Batch, Bitmap, Column, DataType as ColDataType, DictColumn, Field as ColField, FlatColumn,
+        FlatData, RleColumn, ScalarValue, Schema as ColSchema, Selection, Utf8Data,
+    };
+    use serde_json::Value;
+
+    use super::{batch_rows, rows, sorted_keys};
+
+    fn arrow_writer_rows(batch: &RecordBatch) -> Vec<Value> {
+        let mut writer = arrow::json::ArrayWriter::new(Vec::new());
+        writer.write(batch).expect("arrow json write");
+        writer.finish().expect("arrow json finish");
+        let Value::Array(values) =
+            serde_json::from_slice(&writer.into_inner()).expect("parse arrow json")
+        else {
+            panic!("ArrayWriter must emit a JSON array");
+        };
+        values.into_iter().map(sorted_keys).collect()
+    }
+
+    #[test]
+    fn batch_json_formatter_matches_arrow_array_writer_across_all_types() {
+        let trace_a = [0x11_u8; 16];
+        let trace_b = [0xab_u8; 16];
+        let span_a = [0x01_u8; 8];
+        let span_b = [0xfe_u8; 8];
+
+        let map_entries_fields = Fields::from(vec![
+            ArrowField::new("keys", ArrowDataType::Utf8, false),
+            ArrowField::new("values", ArrowDataType::Utf8, true),
+        ]);
+        let map_field = Arc::new(ArrowField::new(
+            "entries",
+            ArrowDataType::Struct(map_entries_fields.clone()),
+            false,
+        ));
+        let map_struct = StructArray::try_new(
+            map_entries_fields,
+            vec![
+                Arc::new(StringArray::from(vec!["z", "a", "null_val"])) as ArrayRef,
+                Arc::new(StringArray::from(vec![Some("1"), Some("2"), None])) as ArrayRef,
+            ],
+            None,
+        )
+        .unwrap();
+        let map_arr = MapArray::try_new(
+            Arc::clone(&map_field),
+            OffsetBuffer::new(vec![0, 3, 3, 3].into()),
+            map_struct,
+            Some(NullBuffer::from(vec![true, true, false])),
+            false,
+        )
+        .unwrap();
+
+        let list_arr = ListArray::try_new(
+            Arc::new(ArrowField::new("item", ArrowDataType::Utf8, true)),
+            OffsetBuffer::new(vec![0, 2, 2, 2].into()),
+            Arc::new(StringArray::from(vec![Some("tag1"), None])),
+            Some(NullBuffer::from(vec![true, true, false])),
+        )
+        .unwrap();
+
+        let event_fields = Fields::from(vec![
+            ArrowField::new(
+                "time",
+                ArrowDataType::Timestamp(TimeUnit::Nanosecond, Some("UTC".into())),
+                false,
+            ),
+            ArrowField::new("name", ArrowDataType::Utf8, false),
+            ArrowField::new("attributes", ArrowDataType::Utf8, true),
+        ]);
+        let events_struct = StructArray::try_new(
+            event_fields.clone(),
+            vec![
+                Arc::new(
+                    TimestampNanosecondArray::from(vec![1_770_717_600_000_000_000_i64])
+                        .with_timezone("UTC"),
+                ) as ArrayRef,
+                Arc::new(StringArray::from(vec!["evt"])) as ArrayRef,
+                Arc::new(StringArray::from(vec![Option::<&str>::None])) as ArrayRef,
+            ],
+            None,
+        )
+        .unwrap();
+        let events_arr = ListArray::try_new(
+            Arc::new(ArrowField::new(
+                "item",
+                ArrowDataType::Struct(event_fields),
+                false,
+            )),
+            OffsetBuffer::new(vec![0, 1, 1, 1].into()),
+            Arc::new(events_struct),
+            Some(NullBuffer::from(vec![true, true, false])),
+        )
+        .unwrap();
+
+        let link_fields = Fields::from(vec![
+            ArrowField::new("trace_id", ArrowDataType::FixedSizeBinary(16), false),
+            ArrowField::new("span_id", ArrowDataType::FixedSizeBinary(8), false),
+            ArrowField::new("attributes", ArrowDataType::Utf8, true),
+        ]);
+        let links_struct = StructArray::try_new(
+            link_fields.clone(),
+            vec![
+                Arc::new(
+                    FixedSizeBinaryArray::try_from_iter([trace_a.as_slice()].into_iter()).unwrap(),
+                ) as ArrayRef,
+                Arc::new(
+                    FixedSizeBinaryArray::try_from_iter([span_a.as_slice()].into_iter()).unwrap(),
+                ) as ArrayRef,
+                Arc::new(StringArray::from(vec![Some("{\"k\":1}")])) as ArrayRef,
+            ],
+            None,
+        )
+        .unwrap();
+        let links_arr = ListArray::try_new(
+            Arc::new(ArrowField::new(
+                "item",
+                ArrowDataType::Struct(link_fields),
+                false,
+            )),
+            OffsetBuffer::new(vec![0, 1, 1, 1].into()),
+            Arc::new(links_struct),
+            Some(NullBuffer::from(vec![true, true, false])),
+        )
+        .unwrap();
+
+        let dict_arr: DictionaryArray<arrow::datatypes::Int32Type> =
+            vec![Some("ok"), None, Some("error")].into_iter().collect();
+        let run_arr = RunArray::try_new(
+            &Int32Array::from(vec![2, 3]),
+            &StringArray::from(vec![Some("rle-a"), Some("rle-b")]),
+        )
+        .unwrap();
+
+        let schema = Arc::new(ArrowSchema::new(vec![
+            ArrowField::new("b", ArrowDataType::Boolean, true),
+            ArrowField::new("i", ArrowDataType::Int64, true),
+            ArrowField::new("f", ArrowDataType::Float64, true),
+            ArrowField::new("dec", ArrowDataType::Decimal128(38, 18), true),
+            ArrowField::new(
+                "ts_utc",
+                ArrowDataType::Timestamp(TimeUnit::Nanosecond, Some("UTC".into())),
+                true,
+            ),
+            ArrowField::new(
+                "ts_naive",
+                ArrowDataType::Timestamp(TimeUnit::Nanosecond, None),
+                true,
+            ),
+            ArrowField::new("d", ArrowDataType::Date32, true),
+            ArrowField::new(
+                "iv",
+                ArrowDataType::Interval(IntervalUnit::MonthDayNano),
+                true,
+            ),
+            ArrowField::new("s", ArrowDataType::Utf8, true),
+            ArrowField::new("bin", ArrowDataType::Binary, true),
+            ArrowField::new("tid", ArrowDataType::FixedSizeBinary(16), true),
+            ArrowField::new("sid", ArrowDataType::FixedSizeBinary(8), true),
+            ArrowField::new("tags", list_arr.data_type().clone(), true),
+            ArrowField::new("attrs", map_arr.data_type().clone(), true),
+            ArrowField::new("events", events_arr.data_type().clone(), true),
+            ArrowField::new("links", links_arr.data_type().clone(), true),
+            ArrowField::new("dict_col", dict_arr.data_type().clone(), true),
+            ArrowField::new("rle_col", run_arr.data_type().clone(), true),
+        ]));
+
+        let batch = RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(BooleanArray::from(vec![Some(true), Some(false), None])),
+                Arc::new(Int64Array::from(vec![Some(-42), Some(0), None])),
+                Arc::new(Float64Array::from(vec![Some(1.25), Some(0.0), None])),
+                Arc::new(
+                    Decimal128Array::from(vec![
+                        Some(123_450_000_000_000_000_i128),
+                        Some(-1_000_000_000_000_000_000_i128),
+                        None,
+                    ])
+                    .with_precision_and_scale(38, 18)
+                    .unwrap(),
+                ),
+                Arc::new(
+                    TimestampNanosecondArray::from(vec![
+                        Some(1_770_717_600_000_000_000_i64), // 2026-02-10T10:00:00Z
+                        Some(1_770_717_600_100_000_001_i64), // .100000001Z
+                        None,
+                    ])
+                    .with_timezone("UTC"),
+                ),
+                Arc::new(TimestampNanosecondArray::from(vec![
+                    Some(1_770_717_600_000_000_000_i64),
+                    Some(1_770_717_600_100_000_000_i64),
+                    None,
+                ])),
+                Arc::new(Date32Array::from(vec![Some(20_494), Some(0), None])),
+                Arc::new(IntervalMonthDayNanoArray::from(vec![
+                    Some(IntervalMonthDayNano::new(0, 0, 0)),
+                    Some(IntervalMonthDayNano::new(14, -2, -1_500_000_000)),
+                    None,
+                ])),
+                Arc::new(StringArray::from(vec![
+                    Some("hello\n\"world\""),
+                    Some(""),
+                    None,
+                ])),
+                Arc::new(BinaryArray::from(vec![
+                    Some(b"\x00\xff".as_slice()),
+                    Some(b"".as_slice()),
+                    None,
+                ])),
+                Arc::new(
+                    FixedSizeBinaryArray::try_from_sparse_iter_with_size(
+                        [Some(trace_a.as_slice()), Some(trace_b.as_slice()), None].into_iter(),
+                        16,
+                    )
+                    .unwrap(),
+                ),
+                Arc::new(
+                    FixedSizeBinaryArray::try_from_sparse_iter_with_size(
+                        [Some(span_a.as_slice()), Some(span_b.as_slice()), None].into_iter(),
+                        8,
+                    )
+                    .unwrap(),
+                ),
+                Arc::new(list_arr),
+                Arc::new(map_arr),
+                Arc::new(events_arr),
+                Arc::new(links_arr),
+                Arc::new(dict_arr),
+                Arc::new(run_arr),
+            ],
+        )
+        .unwrap();
+
+        let batch_schema = batch.schema();
+        let col_names: Vec<&str> = batch_schema
+            .fields()
+            .iter()
+            .map(|f| f.name().as_str())
+            .collect();
+        let actual = rows(std::slice::from_ref(&batch), &col_names);
+        let expected = arrow_writer_rows(&batch);
+        assert_eq!(actual, expected);
+        assert_eq!(
+            actual[0]["ts_utc"],
+            Value::String("2026-02-10T10:00:00Z".to_owned())
+        );
+    }
+
+    #[test]
+    fn batch_json_formatter_handles_const_dict_rle_and_selections() {
+        let schema = ColSchema::try_new_arc(vec![
+            ColField::new("c", ColDataType::Utf8, true),
+            ColField::new("d", ColDataType::I64, true),
+            ColField::new("r", ColDataType::FixedBytes8, true),
+        ])
+        .unwrap();
+        let const_col = Column::Const {
+            value: ScalarValue::Utf8(String::from("const-v")),
+            len: 4,
+        };
+        let dict_vals = FlatColumn::try_new(FlatData::I64(vec![10, 20]), None).unwrap();
+        let dict_col = Column::Dict(
+            DictColumn::try_new(
+                dict_vals,
+                vec![0, 1, 0, 1],
+                Some(Bitmap::from_bools(&[true, false, true, true])),
+            )
+            .unwrap(),
+        );
+        let rle_vals = FlatColumn::try_new(
+            FlatData::FixedBytes8(vec![[0x01; 8], [0x02; 8]]),
+            Some(Bitmap::from_bools(&[true, false])),
+        )
+        .unwrap();
+        let rle_col = Column::Rle(RleColumn::try_new(rle_vals, vec![2, 4]).unwrap());
+
+        let base =
+            Batch::try_new_all(Arc::clone(&schema), vec![const_col, dict_col, rle_col], 4).unwrap();
+
+        let masked = base
+            .with_selection(Selection::Mask(Bitmap::from_bools(&[
+                false, true, true, false,
+            ])))
+            .unwrap();
+        let mask_rows = batch_rows(&masked, &["c", "d", "r"]);
+        assert_eq!(mask_rows.len(), 2);
+        assert_eq!(
+            mask_rows[0],
+            serde_json::json!({"c": "const-v", "r": "0101010101010101"})
+        );
+        assert_eq!(mask_rows[1], serde_json::json!({"c": "const-v", "d": 10}));
+
+        let indexed = base.with_selection(Selection::Indices(vec![3, 0])).unwrap();
+        let idx_rows = batch_rows(&indexed, &["c", "d", "r"]);
+        assert_eq!(idx_rows.len(), 2);
+        assert_eq!(idx_rows[0], serde_json::json!({"c": "const-v", "d": 20}));
+        assert_eq!(
+            idx_rows[1],
+            serde_json::json!({"c": "const-v", "d": 10, "r": "0101010101010101"})
+        );
+
+        let _ = Utf8Data::empty();
+    }
 }
