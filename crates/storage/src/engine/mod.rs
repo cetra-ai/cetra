@@ -10,6 +10,9 @@ pub(crate) mod metadata_cache;
 pub(crate) mod parquet_export;
 pub(crate) mod parquet_source;
 pub(crate) mod scores_source;
+pub(crate) mod sql;
+#[cfg(test)]
+mod sql_diff_tests;
 pub(crate) mod traces_source;
 
 use std::sync::Arc;

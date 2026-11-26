@@ -1,0 +1,1 @@
+SELECT name, count(*) FILTER (WHERE status = 'error') AS errs, percentile_cont(0.5) WITHIN GROUP (ORDER BY duration_ms DESC) AS p50 FROM spans GROUP BY name
