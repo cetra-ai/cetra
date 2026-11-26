@@ -123,7 +123,7 @@ website/                          (one Astro project, one Cloudflare Pages proje
 | Docs | `/docs/` | Existing (track W) | — |
 | Demo | `https://demo.cetra.sh` | The web demo on sample data (D-C-22, §9.6) | — |
 
-The header holds Product (anchors on the homepage), Pricing, Docs, Compare, GitHub with its star count, Log in, and the "Try the demo" button. The footer holds every page, the licence, the status page if one exists, and contact.
+The header holds Product (the homepage, at its top; the user, 2026-11-26), Pricing, Docs, Compare, GitHub with its star count, Log in, and the "Try the demo" button. The footer holds every page, the licence, the status page if one exists, and contact.
 
 ## 6. Homepage, section by section
 
