@@ -53,7 +53,7 @@ pub fn explain_batch(
     )?)
 }
 
-fn fmt_indent(depth: usize, out: &mut String) {
+pub(super) fn fmt_indent(depth: usize, out: &mut String) {
     for _ in 0..depth {
         out.push_str("  ");
     }
@@ -277,11 +277,11 @@ fn fmt_node(plan: &LogicalPlan, depth: usize, out: &mut String) {
     }
 }
 
-fn has_time_range(tr: TimeRangeHint) -> bool {
+pub(super) fn has_time_range(tr: TimeRangeHint) -> bool {
     tr.min_ns.is_some() || tr.max_ns.is_some() || tr.around_ns.is_some()
 }
 
-fn fmt_sort_key(key: &SortKey) -> String {
+pub(super) fn fmt_sort_key(key: &SortKey) -> String {
     let dir = if key.descending { "DESC" } else { "ASC" };
     let nulls = if key.nulls_first {
         "NULLS FIRST"
@@ -291,7 +291,7 @@ fn fmt_sort_key(key: &SortKey) -> String {
     format!("{} {dir} {nulls}", key.expr.fmt_plan())
 }
 
-fn fmt_agg(agg: &AggExpr) -> String {
+pub(super) fn fmt_agg(agg: &AggExpr) -> String {
     let base = match &agg.func {
         AggFunc::CountStar => "count(*)".to_owned(),
         AggFunc::Count(e) => format!("count({})", e.fmt_plan()),
@@ -340,7 +340,7 @@ fn fmt_agg(agg: &AggExpr) -> String {
     format!("{with_filter} AS {}", agg.output_name)
 }
 
-fn fmt_window_spec(spec: &WindowSpec) -> String {
+pub(super) fn fmt_window_spec(spec: &WindowSpec) -> String {
     let f = match &spec.func {
         WindowFunc::RowNumber => "row_number()".to_owned(),
         WindowFunc::Rank => "rank()".to_owned(),
