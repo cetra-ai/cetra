@@ -2957,6 +2957,7 @@ pub struct HashAgg {
     spilled: bool,
     partition_writers: Vec<Option<SpillAppender>>,
     distinct_spills: Vec<Option<DistinctSlotSpill>>,
+    max_batch_bytes: usize,
     res: Reservation,
     unspillable_res: Reservation,
 }
@@ -3042,6 +3043,7 @@ impl HashAgg {
             spilled: false,
             partition_writers: Vec::new(),
             distinct_spills,
+            max_batch_bytes: 0,
             res,
             unspillable_res,
         })
@@ -4089,6 +4091,49 @@ impl HashAgg {
         }
         files
     }
+
+    /// Leaves enough pool headroom after a batch or finished partition so sibling workers'
+    /// unspillable `scan_res` / `eval_res` reservations cannot starve on `QueryCap`, including
+    /// when `partitions.len() > workers.num_workers()` and completed sinks await combine.
+    fn enforce_post_batch_headroom(&mut self) -> Result<(), QueryError> {
+        if self.res.size() == 0 || self.max_batch_bytes == 0 {
+            return Ok(());
+        }
+        let cap = self.ctx.pool.cap();
+        let workers = self.ctx.workers.num_workers().max(1);
+        let headroom = self
+            .max_batch_bytes
+            .saturating_mul(workers.saturating_add(1));
+        if self.ctx.pool.reserved().saturating_add(headroom) <= cap {
+            return Ok(());
+        }
+        if let Some(states) = self.global_states.as_mut() {
+            let _ = flush_global_distinct_sets_inner(
+                states,
+                &mut self.distinct_spills,
+                &mut self.res,
+                &self.ctx,
+            )?;
+            return Ok(());
+        }
+        if self.table.num_groups() > 0 {
+            let _ = flush_distinct_slots_grouped(
+                &mut self.distinct_spills,
+                false,
+                &mut self.table,
+                &self.group_types,
+                &mut self.res,
+                &self.ctx,
+            )?;
+            if self.res.size() > 0
+                && self.table.num_groups() > 0
+                && self.ctx.pool.reserved().saturating_add(headroom) > cap
+            {
+                self.drain_table_to_writers(0)?;
+            }
+        }
+        Ok(())
+    }
 }
 
 impl PushSink for HashAgg {
@@ -4109,6 +4154,7 @@ impl PushSink for HashAgg {
         if batch.is_empty() {
             return Ok(ControlFlow::Continue);
         }
+        self.max_batch_bytes = self.max_batch_bytes.max(batch.memory_bytes());
 
         // Compact sparse batches upfront per Cross-cutting invariant #7.
         let batch = if batch.num_rows().saturating_mul(4) < batch.raw_len() {
@@ -4300,7 +4346,13 @@ impl PushSink for HashAgg {
                 eval_res.free();
                 return Err(err.into());
             }
+            drop(group_cols);
+            drop(agg_inputs);
+            drop(evaled);
+            drop(batch);
             eval_res.free();
+            batch_res.free();
+            self.enforce_post_batch_headroom()?;
             return Ok(ControlFlow::Continue);
         }
 
@@ -4337,6 +4389,7 @@ impl PushSink for HashAgg {
                 &layout,
                 &mut group_state,
                 &mut spill_sink,
+                self.max_batch_bytes,
                 &self.ctx,
             );
             if let Err(err) = res {
@@ -4350,6 +4403,7 @@ impl PushSink for HashAgg {
         drop(evaled);
         drop(batch);
         eval_res.free();
+        batch_res.free();
 
         // Keep reservation synced cleanly, and if already spilled, drain `table` to release 100% of HashMap RAM.
         if self.spilled && self.table.num_groups() > 0 {
@@ -4368,11 +4422,13 @@ impl PushSink for HashAgg {
                     )? {
                         self.drain_table_to_writers(0)?;
                     }
+                    self.enforce_post_batch_headroom()?;
                     return Ok(ControlFlow::Continue);
                 }
                 Err(err) => return Err(err.into()),
             }
             self.unspillable_res.resize(self.table.unspillable_bytes)?;
+            self.enforce_post_batch_headroom()?;
         }
 
         Ok(ControlFlow::Continue)
@@ -4393,6 +4449,7 @@ impl PushSink for HashAgg {
         if self.spilled && self.table.num_groups() > 0 {
             self.drain_table_to_writers(0)?;
         }
+        self.enforce_post_batch_headroom()?;
         Ok(())
     }
 }
@@ -4597,6 +4654,7 @@ fn fold_grouped_row_with_spill(
     layout: &AggLayout<'_>,
     state: &mut GroupTableState<'_>,
     spill_sink: &mut SpillPartitionSink<'_>,
+    max_batch_bytes: usize,
     ctx: &ExecContext,
 ) -> Result<(), QueryError> {
     let hash = hash_cols_row(inputs.group_cols, row, 0);
@@ -4639,14 +4697,26 @@ fn fold_grouped_row_with_spill(
         let sp_needed_total = state.table.spillable_bytes.saturating_add(need_sp);
         let unsp_needed_total = state.table.unspillable_bytes.saturating_add(need_unsp);
 
-        // Leave a small spill-share headroom when multiple workers share a tight pool so a
-        // parallel worker starting a fresh GroupTable cannot be starved at 0 groups.
-        let spill_headroom =
-            if ctx.workers.num_workers() > 1 && state.table.num_groups() >= 16 && !table_drained {
-                (ctx.pool.spill_share() / 8).min(4096)
-            } else {
-                0
-            };
+        // Leave spill-share and pool-wide headroom when multiple workers share a tight pool so
+        // sibling workers' unspillable `scan_res` / fresh `GroupTable` allocations cannot starve.
+        let workers = ctx.workers.num_workers().max(1);
+        let spill_headroom = if workers > 1 && state.table.num_groups() >= 16 && !table_drained {
+            (ctx.pool.spill_share() / 8).min(4096)
+        } else {
+            0
+        };
+        let other_workers_headroom = if workers > 1
+            && state.res.size() >= 4096
+            && state.table.num_groups() > 0
+            && !table_drained
+        {
+            max_batch_bytes
+                .saturating_mul(workers - 1)
+                .saturating_add(4096)
+                .min(ctx.pool.cap() / 2)
+        } else {
+            0
+        };
         let sp_ok = if sp_needed_total > state.res.size() {
             state.res.try_grow(sp_needed_total - state.res.size())
         } else {
@@ -4660,6 +4730,18 @@ fn fold_grouped_row_with_spill(
                 }
                 Err(err) => Err(err),
             }
+        } else {
+            sp_ok
+        };
+        let sp_ok = if sp_ok.is_ok()
+            && other_workers_headroom > 0
+            && ctx.pool.reserved().saturating_add(other_workers_headroom) > ctx.pool.cap()
+        {
+            Err(ColumnError::MemoryLimit {
+                kind: cetra_column::MemoryLimitKind::QueryCap,
+                requested: ctx.pool.reserved().saturating_add(other_workers_headroom),
+                limit: ctx.pool.cap(),
+            })
         } else {
             sp_ok
         };

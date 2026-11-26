@@ -1351,10 +1351,10 @@ mod tests {
     fn flat_col<'a>(batch: &'a Batch, name: &str) -> &'a FlatColumn {
         match batch
             .column_by_name(name)
-            .unwrap_or_else(|| panic!("missing column {name}"))
+            .unwrap_or_else(|| panic!("missing column"))
         {
             Column::Flat(fc) => fc,
-            _ => panic!("expected Flat column for {name}"),
+            _ => panic!("expected Flat column"),
         }
     }
 
@@ -1369,34 +1369,34 @@ mod tests {
         }
         match flat.data() {
             FlatData::Utf8(u) => u.get(row),
-            _ => panic!("expected Utf8 for {name}"),
+            _ => panic!("expected Utf8 column"),
         }
     }
 
     fn i64_at(batch: &Batch, name: &str, row: usize) -> i64 {
         let flat = flat_col(batch, name);
-        assert!(!flat.is_null(row), "{name} row {row} is null");
+        assert!(!flat.is_null(row), "row {row} is null");
         match flat.data() {
             FlatData::I64(v) => v[row],
-            _ => panic!("expected I64 for {name}"),
+            _ => panic!("expected I64 column"),
         }
     }
 
     fn f64_at(batch: &Batch, name: &str, row: usize) -> f64 {
         let flat = flat_col(batch, name);
-        assert!(!flat.is_null(row), "{name} row {row} is null");
+        assert!(!flat.is_null(row), "row {row} is null");
         match flat.data() {
             FlatData::F64(v) => v[row],
-            _ => panic!("expected F64 for {name}"),
+            _ => panic!("expected F64 column"),
         }
     }
 
     fn bool_at(batch: &Batch, name: &str, row: usize) -> bool {
         let flat = flat_col(batch, name);
-        assert!(!flat.is_null(row), "{name} row {row} is null");
+        assert!(!flat.is_null(row), "row {row} is null");
         match flat.data() {
             FlatData::Bool(bm) => bm.get(row),
-            _ => panic!("expected Bool for {name}"),
+            _ => panic!("expected Bool column"),
         }
     }
 
@@ -1408,28 +1408,28 @@ mod tests {
         match flat.data() {
             FlatData::FixedBytes8(v) => Some(&v[row]),
             FlatData::FixedBytes16(v) => Some(&v[row]),
-            _ => panic!("expected FixedBytes for {name}"),
+            _ => panic!("expected FixedBytes column"),
         }
     }
 
     fn list_at(batch: &Batch, name: &str, row: usize) -> Vec<String> {
         let flat = flat_col(batch, name);
-        assert!(!flat.is_null(row), "{name} is null");
+        assert!(!flat.is_null(row), "list value is null");
         match flat.data() {
             FlatData::List {
                 offsets, values, ..
             } => {
                 let Column::Flat(child) = values.as_ref() else {
-                    panic!("expected Flat list child for {name}");
+                    panic!("expected Flat list child");
                 };
                 let FlatData::Utf8(u) = child.data() else {
-                    panic!("expected Utf8 list child for {name}");
+                    panic!("expected Utf8 list child");
                 };
                 let start = offsets[row] as usize;
                 let end = offsets[row + 1] as usize;
                 (start..end).map(|i| u.get(i).unwrap().to_owned()).collect()
             }
-            _ => panic!("expected List for {name}"),
+            _ => panic!("expected List column"),
         }
     }
 
@@ -1446,7 +1446,7 @@ mod tests {
             FlatData::Links(l) => {
                 assert!(l.get(row).unwrap().is_empty());
             }
-            _ => panic!("expected List/Events/Links for {name}"),
+            _ => panic!("expected List/Events/Links column"),
         }
     }
 
@@ -1455,7 +1455,7 @@ mod tests {
         assert!(!flat.is_null(row));
         match flat.data() {
             FlatData::MapUtf8(m) => m.get(row).unwrap(),
-            _ => panic!("expected MapUtf8 for {name}"),
+            _ => panic!("expected MapUtf8 column"),
         }
     }
 
