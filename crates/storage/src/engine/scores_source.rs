@@ -6,8 +6,7 @@ use std::collections::BTreeSet;
 use std::sync::Arc;
 
 use cetra_column::{
-    Batch, Bitmap, CancelToken, Column, ColumnError, DataType, FlatData, Reservation, ScalarValue,
-    Schema, Selection,
+    Batch, Bitmap, CancelToken, ColumnError, DataType, Reservation, Schema, Selection,
 };
 use cetra_core::ids::ProjectId;
 use cetra_core::schema::{scores, scores_schema};
@@ -29,11 +28,12 @@ use super::mem_source::MemtableSource;
 use super::metadata_cache::MetadataCache;
 use super::parquet_source::ParquetSource;
 use super::{
-    TimeBounds, cap_partitions, extract_time_bounds, read_str_at, reconcile_res, rollback_res,
+    TimeBounds, cap_partitions, extract_time_bounds, read_bool_at, read_str_at, reconcile_res,
+    rollback_res,
 };
 
 /// Native [`ScanSource`] for the `scores` table with LWW deduplication per `score_id`.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub(crate) struct ScoresSource {
     store: Arc<dyn ObjectStore>,
     project: ProjectId,
@@ -45,6 +45,25 @@ pub(crate) struct ScoresSource {
     metadata_cache: Arc<MetadataCache>,
     suspects: Suspects,
     runtime: tokio::runtime::Handle,
+}
+
+impl std::fmt::Debug for ScoresSource {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let mem_batches: usize = self
+            .scores_mem
+            .partitions
+            .iter()
+            .filter(|(key, _)| key.project == self.project)
+            .map(|(_, batches)| batches.len())
+            .sum();
+        f.debug_struct("ScoresSource")
+            .field("files", &self.files.len())
+            .field("mem_batches", &mem_batches)
+            .field("keep_from", &self.keep_from)
+            .field("deletions", &self.deletions.len())
+            .field("schema_len", &self.schema.len())
+            .finish_non_exhaustive()
+    }
 }
 
 impl ScoresSource {
@@ -375,7 +394,14 @@ impl PartitionStream for ScoresDedupStream {
                 break;
             }
 
-            let Some(batch) = self.input.next_batch(cancel, Some(&mut self.scratch_res))? else {
+            let Some(batch) = (match self.input.next_batch(cancel, Some(&mut self.scratch_res)) {
+                Ok(opt) => opt,
+                Err(err) => {
+                    self.scratch_res.free();
+                    rollback_res(res, before);
+                    return Err(err);
+                }
+            }) else {
                 self.done = true;
                 break;
             };
@@ -403,6 +429,12 @@ impl PartitionStream for ScoresDedupStream {
                 }
             };
             drop(keep_mask);
+            if let Err(err) = reconcile_res(Some(&mut self.scratch_res), 0, filtered.memory_bytes())
+            {
+                self.scratch_res.free();
+                rollback_res(res, before);
+                return Err(err);
+            }
             if filtered.is_empty() {
                 self.scratch_res.free();
                 continue;
@@ -427,6 +459,13 @@ impl PartitionStream for ScoresDedupStream {
                     }
                 };
                 drop(mask);
+                if let Err(err) =
+                    reconcile_res(Some(&mut self.scratch_res), 0, filtered.memory_bytes())
+                {
+                    self.scratch_res.free();
+                    rollback_res(res, before);
+                    return Err(err);
+                }
                 if filtered.is_empty() {
                     break;
                 }
@@ -451,6 +490,13 @@ impl PartitionStream for ScoresDedupStream {
                             return Err(err);
                         }
                     };
+                    if let Err(err) =
+                        reconcile_res(Some(&mut self.scratch_res), 0, filtered.memory_bytes())
+                    {
+                        self.scratch_res.free();
+                        rollback_res(res, before);
+                        return Err(err);
+                    }
                 }
             }
 
@@ -463,11 +509,17 @@ impl PartitionStream for ScoresDedupStream {
                         return Err(err.into());
                     }
                 };
+                if let Err(err) =
+                    reconcile_res(Some(&mut self.scratch_res), 0, filtered.memory_bytes())
+                {
+                    self.scratch_res.free();
+                    rollback_res(res, before);
+                    return Err(err);
+                }
             }
 
             if filtered.num_rows().saturating_mul(4) < filtered.raw_len() {
-                self.scratch_res.free();
-                filtered = match filtered.compact(Some(&mut self.scratch_res)) {
+                let compacted = match filtered.compact(Some(&mut self.scratch_res)) {
                     Ok(b) => b,
                     Err(err) => {
                         self.scratch_res.free();
@@ -475,6 +527,8 @@ impl PartitionStream for ScoresDedupStream {
                         return Err(err.into());
                     }
                 };
+                drop(filtered);
+                filtered = compacted;
             }
 
             let out_bytes = filtered.memory_bytes();
@@ -511,7 +565,7 @@ impl ScoresDedupStream {
                 return Ok(());
             }
             *prev = Some(sid.to_owned());
-            if !read_bool_at(deleted_col, row).unwrap_or(false) {
+            if read_bool_at(deleted_col, row) == Some(false) {
                 let _ = keep.set(row, true);
             }
             Ok(())
@@ -545,55 +599,6 @@ impl ScoresDedupStream {
         }
 
         Ok(keep)
-    }
-}
-
-fn read_bool_at(col: &Column, row: usize) -> Option<bool> {
-    match col {
-        Column::Flat(f) => {
-            if f.is_null(row) {
-                return None;
-            }
-            match f.data() {
-                FlatData::Bool(bm) => Some(bm.get(row)),
-                _ => None,
-            }
-        }
-        Column::Const { value, len } => {
-            if row >= *len {
-                return None;
-            }
-            match value {
-                ScalarValue::Bool(b) => Some(*b),
-                _ => None,
-            }
-        }
-        Column::Dict(d) => {
-            if d.is_null(row) {
-                return None;
-            }
-            let code = *d.codes().get(row)? as usize;
-            if d.values().is_null(code) {
-                return None;
-            }
-            match d.values().data() {
-                FlatData::Bool(bm) => Some(bm.get(code)),
-                _ => None,
-            }
-        }
-        Column::Rle(r) => {
-            if row >= r.len() {
-                return None;
-            }
-            let phys = r.run_ends().partition_point(|&end| (end as usize) <= row);
-            if r.values().is_null(phys) {
-                return None;
-            }
-            match r.values().data() {
-                FlatData::Bool(bm) => Some(bm.get(phys)),
-                _ => None,
-            }
-        }
     }
 }
 

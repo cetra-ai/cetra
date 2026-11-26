@@ -695,7 +695,7 @@ fn parquet_source_parity_against_datafusion_spans_traces_scores() {
         vec![f_score0, f_score1],
         Arc::clone(&deletions),
         Arc::clone(&cache),
-        suspects,
+        suspects.clone(),
         rt.handle().clone(),
     );
     let score_spec = ScanSpec {
@@ -728,6 +728,86 @@ fn parquet_source_parity_against_datafusion_spans_traces_scores() {
         &native_raw_scores,
         &df_scores,
         "scores with session tombstone",
+    );
+
+    // Traces ParquetSource raw parity (`f_trace0` / `f_trace1`, tombstones + around_ns lookup).
+    let trace_schema = Arc::new(
+        crate::column_bridge::arrow_schema_to_column(&cetra_core::schema::traces_schema()).unwrap(),
+    );
+    let trace_src = ParquetSource::new(
+        Arc::clone(&store),
+        FileTable::Traces,
+        Arc::clone(&trace_schema),
+        vec![f_trace0, f_trace1],
+        Arc::clone(&deletions),
+        Arc::clone(&cache),
+        suspects,
+        rt.handle().clone(),
+    );
+    let trace_spec = ScanSpec {
+        projection: Some(vec![
+            trace_schema.index_of(traces::TRACE_ID).unwrap(),
+            trace_schema.index_of(traces::USER_ID).unwrap(),
+            trace_schema.index_of(traces::STATUS).unwrap(),
+            trace_schema.index_of(traces::SPAN_COUNT).unwrap(),
+        ]),
+        ..Default::default()
+    };
+    let native_raw_traces = run_source(&trace_src, &trace_spec, &exec).unwrap();
+    let df_raw_traces = df_provider_sql(
+        &rt,
+        &state,
+        &runtime,
+        QueryOptions::new(None, None),
+        0,
+        "traces",
+        "SELECT trace_id, user_id, status, span_count FROM traces",
+    );
+    assert_unordered_parity(
+        &native_raw_traces,
+        &df_raw_traces,
+        "traces parquet raw with tombstone",
+    );
+
+    let trace_lookup_spec = ScanSpec {
+        projection: Some(vec![
+            trace_schema.index_of(traces::TRACE_ID).unwrap(),
+            trace_schema.index_of(traces::USER_ID).unwrap(),
+        ]),
+        time_range: TimeRangeHint {
+            min_ns: None,
+            max_ns: None,
+            around_ns: Some(base + DAY_NS + 300),
+        },
+        id_lookups: vec![IdLookupHint::Fixed16 {
+            column: traces::TRACE_ID.to_owned(),
+            values: vec![t3_bytes],
+        }],
+        filters: vec![Expr::Binary {
+            left: Box::new(col_expr(&trace_schema, traces::TRACE_ID)),
+            op: BinaryOp::Eq,
+            right: Box::new(Expr::Literal(ScalarValue::FixedBytes16(t3_bytes))),
+            data_type: DataType::Bool,
+        }],
+        ..Default::default()
+    };
+    let native_trace_lookup = run_source(&trace_src, &trace_lookup_spec, &exec).unwrap();
+    let df_trace_lookup = df_provider_sql(
+        &rt,
+        &state,
+        &runtime,
+        QueryOptions::new(Some(base + DAY_NS + 300), None),
+        0,
+        "traces",
+        &format!(
+            "SELECT trace_id, user_id FROM traces WHERE trace_id = arrow_cast(X'{}', 'FixedSizeBinary(16)')",
+            trace_id(3).to_hex()
+        ),
+    );
+    assert_unordered_parity(
+        &native_trace_lookup,
+        &df_trace_lookup,
+        "traces parquet lookup + around_ns",
     );
 }
 
@@ -1495,18 +1575,19 @@ fn spill_under_tight_memory_traces_and_scores() {
         source: &dyn ScanSource,
         spec: &ScanSpec,
         ctx: &ExecContext,
-    ) -> Result<usize, QueryError> {
+    ) -> Result<(usize, u64), QueryError> {
         let partitions = source.open_partitions(spec, ctx)?;
         if partitions.is_empty() {
-            return Ok(0);
+            return Ok((0, 0));
         }
+        let spilled_after_open = ctx.spill.spilled_bytes();
         let sinks = run_pipeline(
             ctx,
             partitions,
             |_| Ok(Vec::new()),
             |_| Ok(RowCountSink { rows: 0 }),
         )?;
-        Ok(sinks.into_iter().map(|s| s.rows).sum())
+        Ok((sinks.into_iter().map(|s| s.rows).sum(), spilled_after_open))
     }
 
     let rt = tokio::runtime::Builder::new_multi_thread()
@@ -1605,8 +1686,13 @@ fn spill_under_tight_memory_traces_and_scores() {
         ]),
         ..Default::default()
     };
-    let total_traces = count_source_rows(&traces_src, &t_spec, &tight_trace_ctx).unwrap();
+    let (total_traces, trace_spilled_bytes) =
+        count_source_rows(&traces_src, &t_spec, &tight_trace_ctx).unwrap();
     assert_eq!(total_traces, 200);
+    assert!(
+        trace_spilled_bytes > 0,
+        "expected TracesSource ExternalSort to spill under tight 96 KiB pool"
+    );
     assert_eq!(tight_trace_ctx.spill.spilled_bytes(), 0);
     assert_eq!(tight_trace_ctx.pool.reserved(), 0);
 
@@ -1634,8 +1720,13 @@ fn spill_under_tight_memory_traces_and_scores() {
         ]),
         ..Default::default()
     };
-    let total_scores = count_source_rows(&scores_src, &s_spec, &tight_score_ctx).unwrap();
+    let (total_scores, score_spilled_bytes) =
+        count_source_rows(&scores_src, &s_spec, &tight_score_ctx).unwrap();
     assert_eq!(total_scores, 200);
+    assert!(
+        score_spilled_bytes > 0,
+        "expected ScoresSource ExternalSort to spill under tight 96 KiB pool"
+    );
     assert_eq!(tight_score_ctx.spill.spilled_bytes(), 0);
     assert_eq!(tight_score_ctx.pool.reserved(), 0);
 }
@@ -1733,4 +1824,141 @@ fn cancel_token_aborts_and_drains_synchronously_with_admission() {
     drop(cancel_ctx);
     drop(scoped);
     assert_eq!(admission.used(), 0);
+}
+
+#[test]
+fn traces_and_scores_source_debug_is_privacy_safe() {
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+    let cache = Arc::new(MetadataCache::new(1024));
+    let suspects = Suspects::new(Arc::new(VerifyQueue::default()));
+    let base = 20_000 * DAY_NS;
+
+    let mut s = span_row(1, 1, base, base + 100);
+    s.name = "secret-span-name".to_owned();
+    s.user_id = Some("alice-pii@example.com".to_owned());
+    s.session_id = Some("secret-session-xyz".to_owned());
+    s.input = Some("top-secret-prompt-content".to_owned());
+    s.output = Some("top-secret-completion".to_owned());
+
+    let mut spans_mt = Memtable::new(Table::Spans);
+    spans_mt.insert(project(), span_rows(&[s]), 1).unwrap();
+
+    let mut sc = score_row(1, 1, base, base, base, false, "secret-score-name");
+    sc.user_id = Some("bob-pii@example.com".to_owned());
+    sc.session_id = Some("secret-score-session".to_owned());
+    sc.reason = Some("secret-score-reason".to_owned());
+
+    let mut scores_mt = Memtable::new(Table::Scores);
+    scores_mt.insert(project(), score_rows(&[sc]), 1).unwrap();
+
+    let deletion = PendingDeletion {
+        id: Uuid::now_v7(),
+        seq: 1,
+        project: project(),
+        cutoff: base + 1_000,
+        registered_at: base + 1_000,
+        trace_ids: HashSet::new(),
+        users: ["erased-user-pii".to_owned()].into_iter().collect(),
+        sessions: ["erased-session-xyz".to_owned()].into_iter().collect(),
+    };
+    let tombstones = Tombstones::default().with(deletion);
+    let deletions = tombstones.for_project(project());
+
+    let traces_src = TracesSource::new(
+        Arc::clone(&store),
+        project(),
+        Vec::new(),
+        spans_mt.snapshot(),
+        60_000_000_000,
+        Arc::clone(&deletions),
+        Arc::clone(&cache),
+        suspects.clone(),
+        rt.handle().clone(),
+    )
+    .unwrap();
+    let widening_src = traces_src
+        .clone()
+        .with_list_mode(TraceListMode::Widening { fetch: 10 });
+    let schema = traces_src.schema();
+    let two_phase_src = traces_src.clone().with_list_mode(TraceListMode::TwoPhase {
+        sort_keys: vec![SortKey {
+            expr: col_expr(&schema, traces::COST_TOTAL),
+            descending: true,
+            nulls_first: false,
+        }],
+        limit: 10,
+        offset: 0,
+    });
+
+    let scores_src = ScoresSource::new(
+        store,
+        project(),
+        Vec::new(),
+        scores_mt.snapshot(),
+        None,
+        deletions,
+        cache,
+        suspects,
+        rt.handle().clone(),
+    )
+    .unwrap();
+
+    let forbidden = [
+        "secret-span-name",
+        "alice-pii@example.com",
+        "secret-session-xyz",
+        "top-secret-prompt-content",
+        "top-secret-completion",
+        "secret-score-name",
+        "bob-pii@example.com",
+        "secret-score-session",
+        "secret-score-reason",
+        "erased-user-pii",
+        "erased-session-xyz",
+    ];
+
+    for dbg in [
+        format!("{traces_src:?}"),
+        format!("{widening_src:?}"),
+        format!("{two_phase_src:?}"),
+    ] {
+        assert!(dbg.contains("TracesSource"), "missing struct name: {dbg}");
+        assert!(dbg.contains("files: 0"), "missing file count: {dbg}");
+        assert!(dbg.contains("mem_batches: 1"), "missing mem count: {dbg}");
+        assert!(
+            dbg.contains("deletions: 1"),
+            "missing deletion count: {dbg}"
+        );
+        for secret in forbidden {
+            assert!(!dbg.contains(secret), "Debug leaked `{secret}`: {dbg}");
+        }
+    }
+
+    let scores_dbg = format!("{scores_src:?}");
+    assert!(
+        scores_dbg.contains("ScoresSource"),
+        "missing struct name: {scores_dbg}"
+    );
+    assert!(
+        scores_dbg.contains("files: 0"),
+        "missing file count: {scores_dbg}"
+    );
+    assert!(
+        scores_dbg.contains("mem_batches: 1"),
+        "missing mem count: {scores_dbg}"
+    );
+    assert!(
+        scores_dbg.contains("deletions: 1"),
+        "missing deletion count: {scores_dbg}"
+    );
+    for secret in forbidden {
+        assert!(
+            !scores_dbg.contains(secret),
+            "Debug leaked `{secret}`: {scores_dbg}"
+        );
+    }
 }
