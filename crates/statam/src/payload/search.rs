@@ -8,8 +8,10 @@ use memchr::memmem;
 
 use crate::StatamError;
 use crate::format::MAX_ROW_PAYLOAD_BYTES;
-use crate::payload::PayloadRefRow;
 use crate::payload::pack::ChunkPackReader;
+use crate::payload::{
+    FLAT_REF_CHUNKS, FLAT_REF_INLINE, FLAT_REF_NULL, FlatPayloadRefs, PayloadRefRow,
+};
 use crate::simd::trigram::{TrigramBloom, ascii_lowercase_into, extract_trigram_hashes};
 
 /// Maximum needle byte length guaranteed to span at most two adjacent `>= 256 B` chunks
@@ -145,11 +147,12 @@ pub fn search_pack_rows(
     needle: &[u8],
     case_insensitive: bool,
 ) -> Result<Bitmap, StatamError> {
-    search_pack_rows_impl(pack, row_refs, None, pack_idx, needle, case_insensitive, 1)
+    search_pack_rows_impl(pack, &row_refs, None, pack_idx, needle, case_insensitive, 1)
 }
 
 /// Exact row-level substring search restricted to rows active in `active_mask`,
 /// using up to `read_threads` workers for `.stpk` frame decompression and substring scanning.
+#[cfg(test)]
 pub(crate) fn search_pack_rows_masked_with_threads(
     pack: &ChunkPackReader,
     row_refs: &[PayloadRefRow],
@@ -161,13 +164,243 @@ pub(crate) fn search_pack_rows_masked_with_threads(
 ) -> Result<Bitmap, StatamError> {
     search_pack_rows_impl(
         pack,
-        row_refs,
+        &row_refs,
         Some(active_mask),
         pack_idx,
         needle,
         case_insensitive,
         read_threads,
     )
+}
+
+/// Zero-allocation exact row-level substring search over [`FlatPayloadRefs`] restricted to
+/// rows active in `active_mask`.
+pub(crate) fn search_pack_rows_flat_masked_with_threads(
+    pack: &ChunkPackReader,
+    row_refs: &FlatPayloadRefs,
+    active_mask: &Bitmap,
+    pack_idx: u16,
+    needle: &[u8],
+    case_insensitive: bool,
+    read_threads: usize,
+) -> Result<Bitmap, StatamError> {
+    search_pack_rows_impl(
+        pack,
+        &row_refs,
+        Some(active_mask),
+        pack_idx,
+        needle,
+        case_insensitive,
+        read_threads,
+    )
+}
+
+#[derive(PartialEq, Eq, Hash)]
+enum SeqKey<'a> {
+    Interleaved(&'a [(u16, u32)]),
+    Split(&'a [u16], &'a [u32]),
+}
+
+trait PayloadRefSource {
+    fn row_count(&self) -> usize;
+    fn is_null(&self, row: usize) -> bool;
+    fn inline_bytes(&self, row: usize) -> Option<&[u8]>;
+    fn for_each_chunk(
+        &self,
+        row: usize,
+        f: &mut impl FnMut(u16, u32) -> Result<(), StatamError>,
+    ) -> Result<(), StatamError>;
+    fn any_chunk(&self, row: usize, f: impl FnMut(u16, u32) -> bool) -> bool;
+    fn for_each_adjacent_pair_in_pack(
+        &self,
+        row: usize,
+        pack_idx: u16,
+        f: &mut impl FnMut(u32, u32),
+    );
+    fn any_adjacent_pair_in_pack(
+        &self,
+        row: usize,
+        pack_idx: u16,
+        f: impl FnMut(u32, u32) -> bool,
+    ) -> bool;
+    fn seq_key(&self, row: usize) -> Option<SeqKey<'_>>;
+}
+
+impl PayloadRefSource for &[PayloadRefRow] {
+    #[inline]
+    fn row_count(&self) -> usize {
+        self.len()
+    }
+
+    #[inline]
+    fn is_null(&self, row: usize) -> bool {
+        matches!(self[row], PayloadRefRow::Null)
+    }
+
+    #[inline]
+    fn inline_bytes(&self, row: usize) -> Option<&[u8]> {
+        match &self[row] {
+            PayloadRefRow::Inline(bytes) => Some(bytes),
+            _ => None,
+        }
+    }
+
+    #[inline]
+    fn for_each_chunk(
+        &self,
+        row: usize,
+        f: &mut impl FnMut(u16, u32) -> Result<(), StatamError>,
+    ) -> Result<(), StatamError> {
+        if let PayloadRefRow::Chunks(refs) = &self[row] {
+            for &(p, cid) in refs {
+                f(p, cid)?;
+            }
+        }
+        Ok(())
+    }
+
+    #[inline]
+    fn any_chunk(&self, row: usize, mut f: impl FnMut(u16, u32) -> bool) -> bool {
+        if let PayloadRefRow::Chunks(refs) = &self[row] {
+            refs.iter().any(|&(p, cid)| f(p, cid))
+        } else {
+            false
+        }
+    }
+
+    #[inline]
+    fn for_each_adjacent_pair_in_pack(
+        &self,
+        row: usize,
+        pack_idx: u16,
+        f: &mut impl FnMut(u32, u32),
+    ) {
+        if let PayloadRefRow::Chunks(refs) = &self[row]
+            && refs.len() > 1
+        {
+            for w in refs.windows(2) {
+                if w[0].0 == pack_idx && w[1].0 == pack_idx {
+                    f(w[0].1, w[1].1);
+                }
+            }
+        }
+    }
+
+    #[inline]
+    fn any_adjacent_pair_in_pack(
+        &self,
+        row: usize,
+        pack_idx: u16,
+        mut f: impl FnMut(u32, u32) -> bool,
+    ) -> bool {
+        if let PayloadRefRow::Chunks(refs) = &self[row]
+            && refs.len() > 1
+        {
+            refs.windows(2)
+                .any(|w| w[0].0 == pack_idx && w[1].0 == pack_idx && f(w[0].1, w[1].1))
+        } else {
+            false
+        }
+    }
+
+    #[inline]
+    fn seq_key(&self, row: usize) -> Option<SeqKey<'_>> {
+        match &self[row] {
+            PayloadRefRow::Chunks(refs) => Some(SeqKey::Interleaved(refs.as_slice())),
+            _ => None,
+        }
+    }
+}
+
+impl PayloadRefSource for &FlatPayloadRefs {
+    #[inline]
+    fn row_count(&self) -> usize {
+        self.len()
+    }
+
+    #[inline]
+    fn is_null(&self, row: usize) -> bool {
+        self.row_kind(row) == FLAT_REF_NULL
+    }
+
+    #[inline]
+    fn inline_bytes(&self, row: usize) -> Option<&[u8]> {
+        (self.row_kind(row) == FLAT_REF_INLINE).then(|| FlatPayloadRefs::inline_bytes(self, row))
+    }
+
+    #[inline]
+    fn for_each_chunk(
+        &self,
+        row: usize,
+        f: &mut impl FnMut(u16, u32) -> Result<(), StatamError>,
+    ) -> Result<(), StatamError> {
+        if self.row_kind(row) == FLAT_REF_CHUNKS {
+            let (ps, cs) = self.chunk_refs(row);
+            for (&p, &cid) in ps.iter().zip(cs.iter()) {
+                f(p, cid)?;
+            }
+        }
+        Ok(())
+    }
+
+    #[inline]
+    fn any_chunk(&self, row: usize, mut f: impl FnMut(u16, u32) -> bool) -> bool {
+        if self.row_kind(row) == FLAT_REF_CHUNKS {
+            let (ps, cs) = self.chunk_refs(row);
+            ps.iter().zip(cs.iter()).any(|(&p, &cid)| f(p, cid))
+        } else {
+            false
+        }
+    }
+
+    #[inline]
+    fn for_each_adjacent_pair_in_pack(
+        &self,
+        row: usize,
+        pack_idx: u16,
+        f: &mut impl FnMut(u32, u32),
+    ) {
+        if self.row_kind(row) == FLAT_REF_CHUNKS {
+            let (ps, cs) = self.chunk_refs(row);
+            if ps.len() > 1 {
+                for i in 0..ps.len() - 1 {
+                    if ps[i] == pack_idx && ps[i + 1] == pack_idx {
+                        f(cs[i], cs[i + 1]);
+                    }
+                }
+            }
+        }
+    }
+
+    #[inline]
+    fn any_adjacent_pair_in_pack(
+        &self,
+        row: usize,
+        pack_idx: u16,
+        mut f: impl FnMut(u32, u32) -> bool,
+    ) -> bool {
+        if self.row_kind(row) == FLAT_REF_CHUNKS {
+            let (ps, cs) = self.chunk_refs(row);
+            if ps.len() > 1 {
+                for i in 0..ps.len() - 1 {
+                    if ps[i] == pack_idx && ps[i + 1] == pack_idx && f(cs[i], cs[i + 1]) {
+                        return true;
+                    }
+                }
+            }
+        }
+        false
+    }
+
+    #[inline]
+    fn seq_key(&self, row: usize) -> Option<SeqKey<'_>> {
+        if self.row_kind(row) == FLAT_REF_CHUNKS {
+            let (ps, cs) = self.chunk_refs(row);
+            Some(SeqKey::Split(ps, cs))
+        } else {
+            None
+        }
+    }
 }
 
 fn visit_active_rows(
@@ -190,23 +423,24 @@ fn visit_active_rows(
     Ok(())
 }
 
-fn search_pack_rows_impl(
+fn search_pack_rows_impl<S: PayloadRefSource>(
     pack: &ChunkPackReader,
-    row_refs: &[PayloadRefRow],
+    row_refs: &S,
     active_mask: Option<&Bitmap>,
     pack_idx: u16,
     needle: &[u8],
     case_insensitive: bool,
     read_threads: usize,
 ) -> Result<Bitmap, StatamError> {
-    let mut results = Bitmap::new_zeroed(row_refs.len());
+    let row_count = row_refs.row_count();
+    let mut results = Bitmap::new_zeroed(row_count);
     if active_mask.is_some_and(Bitmap::all_zeros) {
         return Ok(results);
     }
 
     if needle.is_empty() {
-        visit_active_rows(row_refs.len(), active_mask, |idx| {
-            if !matches!(row_refs[idx], PayloadRefRow::Null) {
+        visit_active_rows(row_count, active_mask, |idx| {
+            if !row_refs.is_null(idx) {
                 let _ = results.set(idx, true);
             }
             Ok(())
@@ -216,25 +450,32 @@ fn search_pack_rows_impl(
 
     let mut matcher = NeedleMatcher::new(needle, case_insensitive);
     let pack_chunk_count = pack.toc().chunks.len();
+    let no_edges = pack.postscript().edge_table_len == 0;
 
     if pack_short_circuits_all(pack, needle, case_insensitive)? {
-        visit_active_rows(row_refs.len(), active_mask, |row_idx| {
-            match &row_refs[row_idx] {
-                PayloadRefRow::Null => {}
-                PayloadRefRow::Inline(bytes) => {
-                    if matcher.matches(bytes) {
-                        let _ = results.set(row_idx, true);
-                    }
+        visit_active_rows(row_count, active_mask, |row_idx| {
+            if let Some(bytes) = row_refs.inline_bytes(row_idx) {
+                if matcher.matches(bytes) {
+                    let _ = results.set(row_idx, true);
                 }
-                PayloadRefRow::Chunks(refs) => {
-                    for &(p, cid) in refs {
-                        if p == pack_idx && (cid as usize) >= pack_chunk_count {
+            } else {
+                let mut pack_refs = 0usize;
+                row_refs.for_each_chunk(row_idx, &mut |p, cid| {
+                    if p == pack_idx {
+                        if (cid as usize) >= pack_chunk_count {
                             return Err(StatamError::Corrupt {
                                 reason: "payload ref chunk_id out of pack bounds",
                             });
                         }
+                        pack_refs += 1;
+                        if no_edges && pack_refs > 1 {
+                            return Err(StatamError::Corrupt {
+                                reason: "multi-chunk row references pack without edge table",
+                            });
+                        }
                     }
-                }
+                    Ok(())
+                })?;
             }
             Ok(())
         })?;
@@ -244,31 +485,28 @@ fn search_pack_rows_impl(
     let mut chunk_rows = Vec::new();
     let mut needed_bits = vec![0u64; pack_chunk_count.div_ceil(64)];
 
-    visit_active_rows(row_refs.len(), active_mask, |row_idx| {
-        match &row_refs[row_idx] {
-            PayloadRefRow::Null => {}
-            PayloadRefRow::Inline(bytes) => {
-                if matcher.matches(bytes) {
-                    let _ = results.set(row_idx, true);
-                }
+    visit_active_rows(row_count, active_mask, |row_idx| {
+        if let Some(bytes) = row_refs.inline_bytes(row_idx) {
+            if matcher.matches(bytes) {
+                let _ = results.set(row_idx, true);
             }
-            PayloadRefRow::Chunks(refs) => {
-                let mut has_pack = false;
-                for &(p, cid) in refs {
-                    if p == pack_idx {
-                        let cid_usize = cid as usize;
-                        if cid_usize >= pack_chunk_count {
-                            return Err(StatamError::Corrupt {
-                                reason: "payload ref chunk_id out of pack bounds",
-                            });
-                        }
-                        bitset_set(&mut needed_bits, cid_usize);
-                        has_pack = true;
+        } else if !row_refs.is_null(row_idx) {
+            let mut has_pack = false;
+            row_refs.for_each_chunk(row_idx, &mut |p, cid| {
+                if p == pack_idx {
+                    let cid_usize = cid as usize;
+                    if cid_usize >= pack_chunk_count {
+                        return Err(StatamError::Corrupt {
+                            reason: "payload ref chunk_id out of pack bounds",
+                        });
                     }
+                    bitset_set(&mut needed_bits, cid_usize);
+                    has_pack = true;
                 }
-                if has_pack {
-                    chunk_rows.push(row_idx);
-                }
+                Ok(())
+            })?;
+            if has_pack {
+                chunk_rows.push(row_idx);
             }
         }
         Ok(())
@@ -278,7 +516,15 @@ fn search_pack_rows_impl(
         return Ok(results);
     }
 
-    if needle.len() <= MAX_EDGE_NEEDLE_LEN {
+    let max_match_bytes = if case_insensitive && !needle.is_ascii() {
+        let uni_lower = std::str::from_utf8(needle).ok().map(str::to_lowercase);
+        let nl: &[u8] = uni_lower.as_deref().map_or(needle, str::as_bytes);
+        max_unicode_haystack_match_bytes(nl)
+    } else {
+        needle.len()
+    };
+
+    if max_match_bytes <= MAX_EDGE_NEEDLE_LEN {
         search_short_needle_rows(
             pack,
             row_refs,
@@ -309,9 +555,9 @@ fn search_pack_rows_impl(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn search_short_needle_rows(
+fn search_short_needle_rows<S: PayloadRefSource>(
     pack: &ChunkPackReader,
-    row_refs: &[PayloadRefRow],
+    row_refs: &S,
     pack_idx: u16,
     pack_chunk_count: usize,
     needle: &[u8],
@@ -322,15 +568,28 @@ fn search_short_needle_rows(
     needed_bits: &[u64],
     results: &mut Bitmap,
 ) -> Result<(), StatamError> {
-    let skip_boundary = if needle.len() >= 5
-        && (!case_insensitive || needle.is_ascii())
-        && pack.toc().postscript.trigram_len > 0
-    {
-        let ts = pack.trigram_section_cached()?;
-        pack_rejects_boundary_pigeonhole(ts.edge_blooms.as_ref(), needle, case_insensitive)
-    } else {
-        false
-    };
+    if pack.postscript().edge_table_len == 0 {
+        for &row_idx in chunk_rows {
+            let mut pack_refs = 0usize;
+            row_refs.for_each_chunk(row_idx, &mut |p, _| {
+                if p == pack_idx {
+                    pack_refs += 1;
+                    if pack_refs > 1 {
+                        return Err(StatamError::Corrupt {
+                            reason: "multi-chunk row references pack without edge table",
+                        });
+                    }
+                }
+                Ok(())
+            })?;
+        }
+    }
+
+    let skip_boundary = pack.postscript().edge_table_len == 0
+        || (needle.len() >= 5 && pack.toc().postscript.trigram_len > 0 && {
+            let ts = pack.trigram_section_cached()?;
+            pack_rejects_boundary_pigeonhole(ts.edge_blooms.as_ref(), needle, case_insensitive)
+        });
 
     // Step A: Interior matches via frame-level trigram bloom pruning + flat-bitset chunk scan.
     let surviving_chunks = filter_needed_bits_by_trigram(
@@ -372,11 +631,9 @@ fn search_short_needle_rows(
     if skip_boundary {
         if any_matched {
             for &row_idx in chunk_rows {
-                if let PayloadRefRow::Chunks(refs) = &row_refs[row_idx]
-                    && refs
-                        .iter()
-                        .any(|&(p, cid)| p == pack_idx && bitset_get(&matched_bits, cid as usize))
-                {
+                if row_refs.any_chunk(row_idx, |p, cid| {
+                    p == pack_idx && bitset_get(&matched_bits, cid as usize)
+                }) {
                     let _ = results.set(row_idx, true);
                 }
             }
@@ -387,15 +644,12 @@ fn search_short_needle_rows(
     let mut remaining_owned = Vec::new();
     let remaining_rows: &[usize] = if any_matched {
         for &row_idx in chunk_rows {
-            if let PayloadRefRow::Chunks(refs) = &row_refs[row_idx] {
-                let hit = refs
-                    .iter()
-                    .any(|&(p, cid)| p == pack_idx && bitset_get(&matched_bits, cid as usize));
-                if hit {
-                    let _ = results.set(row_idx, true);
-                } else {
-                    remaining_owned.push(row_idx);
-                }
+            if row_refs.any_chunk(row_idx, |p, cid| {
+                p == pack_idx && bitset_get(&matched_bits, cid as usize)
+            }) {
+                let _ = results.set(row_idx, true);
+            } else {
+                remaining_owned.push(row_idx);
             }
         }
         &remaining_owned
@@ -407,42 +661,39 @@ fn search_short_needle_rows(
         return Ok(());
     }
 
-    // Step B: Cross-chunk boundary matches using EdgeTable (0 extra data frame reads).
+    // Step B: Cross-chunk boundary matches using FlatEdgeTable (0 extra data frame reads).
     let mut distinct_pairs: HashSet<(u32, u32), BuildHasherDefault<FastPairHasher>> =
         HashSet::default();
     for &row_idx in remaining_rows {
-        if let PayloadRefRow::Chunks(refs) = &row_refs[row_idx] {
-            for w in refs.windows(2) {
-                if w[0].0 == pack_idx && w[1].0 == pack_idx {
-                    distinct_pairs.insert((w[0].1, w[1].1));
-                }
-            }
-        }
+        row_refs.for_each_adjacent_pair_in_pack(row_idx, pack_idx, &mut |l, r| {
+            distinct_pairs.insert((l, r));
+        });
     }
 
     if distinct_pairs.is_empty() {
         return Ok(());
     }
 
-    let edges = pack.read_edge_table()?;
+    let edges = pack.read_edge_table_flat()?;
+    let edge_count = edges.len();
     let mut matched_pairs: HashSet<(u32, u32), BuildHasherDefault<FastPairHasher>> =
         HashSet::default();
     let mut combined = Vec::with_capacity(126);
     let is_unicode_ilike = matches!(matcher, NeedleMatcher::UnicodeIlike { .. });
 
     for (left_cid, right_cid) in distinct_pairs {
-        let left_tail = &edges
-            .get(left_cid as usize)
-            .ok_or(StatamError::Corrupt {
+        if (left_cid as usize) >= edge_count {
+            return Err(StatamError::Corrupt {
                 reason: "left chunk_id missing from edge table",
-            })?
-            .1;
-        let right_head = &edges
-            .get(right_cid as usize)
-            .ok_or(StatamError::Corrupt {
+            });
+        }
+        if (right_cid as usize) >= edge_count {
+            return Err(StatamError::Corrupt {
                 reason: "right chunk_id missing from edge table",
-            })?
-            .0;
+            });
+        }
+        let left_tail = edges.tail(left_cid);
+        let right_head = edges.head(right_cid);
 
         combined.clear();
         if is_unicode_ilike {
@@ -459,15 +710,10 @@ fn search_short_needle_rows(
 
     if !matched_pairs.is_empty() {
         for &row_idx in remaining_rows {
-            if let PayloadRefRow::Chunks(refs) = &row_refs[row_idx] {
-                let hit = refs.windows(2).any(|w| {
-                    w[0].0 == pack_idx
-                        && w[1].0 == pack_idx
-                        && matched_pairs.contains(&(w[0].1, w[1].1))
-                });
-                if hit {
-                    let _ = results.set(row_idx, true);
-                }
+            if row_refs.any_adjacent_pair_in_pack(row_idx, pack_idx, |l, r| {
+                matched_pairs.contains(&(l, r))
+            }) {
+                let _ = results.set(row_idx, true);
             }
         }
     }
@@ -476,9 +722,9 @@ fn search_short_needle_rows(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn search_long_needle_rows(
+fn search_long_needle_rows<S: PayloadRefSource>(
     pack: &ChunkPackReader,
-    row_refs: &[PayloadRefRow],
+    row_refs: &S,
     pack_idx: u16,
     read_threads: usize,
     matcher: &mut NeedleMatcher,
@@ -501,14 +747,14 @@ fn search_long_needle_rows(
             pack.read_chunks(&all_needed)?
         };
 
-    let mut seq_cache: HashMap<&[(u16, u32)], bool> = HashMap::new();
+    let mut seq_cache: HashMap<SeqKey<'_>, bool> = HashMap::new();
     let mut scratch_buf = Vec::new();
 
     for &row_idx in chunk_rows {
-        let PayloadRefRow::Chunks(refs) = &row_refs[row_idx] else {
+        let Some(key) = row_refs.seq_key(row_idx) else {
             continue;
         };
-        if let Some(&cached) = seq_cache.get(refs.as_slice()) {
+        if let Some(&cached) = seq_cache.get(&key) {
             if cached {
                 let _ = results.set(row_idx, true);
             }
@@ -520,7 +766,10 @@ fn search_long_needle_rows(
         let mut hit = false;
         scratch_buf.clear();
 
-        for &(p, cid) in refs {
+        row_refs.for_each_chunk(row_idx, &mut |p, cid| {
+            if hit {
+                return Ok(());
+            }
             if p == pack_idx {
                 let chunk = fetched.get(&cid).ok_or(StatamError::Corrupt {
                     reason: "missing fetched chunk during long-needle reconstruction",
@@ -539,16 +788,16 @@ fn search_long_needle_rows(
             } else if !scratch_buf.is_empty() {
                 if matcher.matches(&scratch_buf) {
                     hit = true;
-                    break;
                 }
                 scratch_buf.clear();
             }
-        }
+            Ok(())
+        })?;
         if !hit && !scratch_buf.is_empty() {
             hit = matcher.matches(&scratch_buf);
         }
 
-        seq_cache.insert(refs.as_slice(), hit);
+        seq_cache.insert(key, hit);
         if hit {
             let _ = results.set(row_idx, true);
         }
@@ -597,26 +846,113 @@ fn trim_trailing_incomplete_utf8(bytes: &[u8]) -> &[u8] {
     }
 }
 
+/// Soundly extracts ASCII-lowercased trigram hashes for `ILIKE` pruning.
+///
+/// - If `needle.is_ascii()`, extracts all lowercased trigrams as before.
+/// - If `!needle.is_ascii()`, splits `needle` into contiguous pure-ASCII byte slices excluding
+///   `'k'`, `'K'`, `'s'`, `'S'` (the only ASCII letters reachable from non-ASCII scalars under
+///   lowercase/case-folding: `U+212A` `K` -> `'k'`, `U+017F` `ſ` -> `'S'`), and trims a trailing
+///   `'i'`/`'I'` when the run reaches the end of `needle` or precedes `"\u{0307}"` (since
+///   `U+0130` `İ` -> `"i\u{0307}"`).
+pub fn extract_ilike_trigram_hashes(needle: &[u8]) -> Vec<u32> {
+    if needle.is_ascii() {
+        let mut out = Vec::new();
+        extract_trigram_hashes(needle, true, &mut out);
+        return out;
+    }
+    extract_unicode_ilike_trigram_hashes_in_slice(needle, 0, needle.len())
+}
+
+fn extract_unicode_ilike_trigram_hashes_in_slice(
+    full: &[u8],
+    start: usize,
+    end: usize,
+) -> Vec<u32> {
+    let mut out = Vec::new();
+    let end = end.min(full.len());
+    let mut i = start.min(end);
+    while i < end {
+        while i < end && !is_safe_ilike_ascii_byte(full[i]) {
+            i += 1;
+        }
+        let run_start = i;
+        while i < end && is_safe_ilike_ascii_byte(full[i]) {
+            i += 1;
+        }
+        let mut run = &full[run_start..i];
+        if (i == full.len() || full[i..].starts_with(&[0xCC, 0x87]))
+            && matches!(run.last(), Some(b'i' | b'I'))
+        {
+            run = &run[..run.len() - 1];
+        }
+        if run.len() >= 3 {
+            extract_trigram_hashes(run, true, &mut out);
+        }
+    }
+    out
+}
+
+#[inline]
+fn is_safe_ilike_ascii_byte(b: u8) -> bool {
+    b < 0x80 && !matches!(b, b'k' | b'K' | b's' | b'S')
+}
+
+#[inline]
+fn extract_needle_trigram_hashes(needle: &[u8], case_insensitive: bool) -> Vec<u32> {
+    if case_insensitive {
+        extract_ilike_trigram_hashes(needle)
+    } else {
+        let mut out = Vec::new();
+        extract_trigram_hashes(needle, false, &mut out);
+        out
+    }
+}
+
+fn max_unicode_haystack_match_bytes(nl: &[u8]) -> usize {
+    let mut total = nl.len();
+    for &b in nl {
+        if matches!(b, b'k' | b'K') {
+            total = total.saturating_add(2);
+        } else if (0xC2..=0xDF).contains(&b) {
+            total = total.saturating_add(1);
+        }
+    }
+    total
+}
+
 pub(crate) fn pack_rejects_boundary_pigeonhole(
     edge_blooms: Option<&(TrigramBloom, TrigramBloom)>,
     needle: &[u8],
     case_insensitive: bool,
 ) -> bool {
-    if needle.len() < 5
-        || needle.len() > MAX_EDGE_NEEDLE_LEN
-        || (case_insensitive && !needle.is_ascii())
-    {
-        return false;
-    }
     let Some((tail_bloom, head_bloom)) = edge_blooms else {
         return false;
     };
-    let n = needle.len();
-    let half = n.div_ceil(2);
-    let mut prefix_hashes = Vec::new();
-    extract_trigram_hashes(&needle[..half], case_insensitive, &mut prefix_hashes);
-    let mut suffix_hashes = Vec::new();
-    extract_trigram_hashes(&needle[n - half..], case_insensitive, &mut suffix_hashes);
+    if !case_insensitive || needle.is_ascii() {
+        if needle.len() < 5 || needle.len() > MAX_EDGE_NEEDLE_LEN {
+            return false;
+        }
+        let n = needle.len();
+        let half = n.div_ceil(2);
+        let prefix_hashes = extract_needle_trigram_hashes(&needle[..half], case_insensitive);
+        let suffix_hashes = extract_needle_trigram_hashes(&needle[n - half..], case_insensitive);
+        let tail_may = tail_bloom.may_contain_hashes(&prefix_hashes);
+        let head_may = head_bloom.may_contain_hashes(&suffix_hashes);
+        return !tail_may && !head_may;
+    }
+
+    if needle.len() > MAX_EDGE_NEEDLE_LEN {
+        return false;
+    }
+    let uni_lower = std::str::from_utf8(needle).ok().map(str::to_lowercase);
+    let nl: &[u8] = uni_lower.as_deref().map_or(needle, str::as_bytes);
+    if nl.len() < 5 || max_unicode_haystack_match_bytes(nl) > MAX_EDGE_NEEDLE_LEN {
+        return false;
+    }
+    let half = nl.len().div_ceil(2);
+    let prefix_hashes = extract_unicode_ilike_trigram_hashes_in_slice(nl, 0, half);
+    let suffix_hashes =
+        extract_unicode_ilike_trigram_hashes_in_slice(nl, nl.len() - half, nl.len());
     let tail_may = tail_bloom.may_contain_hashes(&prefix_hashes);
     let head_may = head_bloom.may_contain_hashes(&suffix_hashes);
     !tail_may && !head_may
@@ -627,21 +963,23 @@ pub(crate) fn pack_short_circuits_all(
     needle: &[u8],
     case_insensitive: bool,
 ) -> Result<bool, StatamError> {
-    if needle.len() < 5
-        || needle.len() > MAX_EDGE_NEEDLE_LEN
-        || (case_insensitive && !needle.is_ascii())
-        || pack.toc().postscript.trigram_len == 0
-    {
+    if pack.toc().postscript.trigram_len == 0 {
+        return Ok(false);
+    }
+
+    let no_edges = pack.postscript().edge_table_len == 0;
+    if !no_edges && (needle.len() < 5 || needle.len() > MAX_EDGE_NEEDLE_LEN) {
         return Ok(false);
     }
 
     let ts = pack.trigram_section_cached()?;
-    if !pack_rejects_boundary_pigeonhole(ts.edge_blooms.as_ref(), needle, case_insensitive) {
+    if !no_edges
+        && !pack_rejects_boundary_pigeonhole(ts.edge_blooms.as_ref(), needle, case_insensitive)
+    {
         return Ok(false);
     }
 
-    let mut hashes = Vec::new();
-    extract_trigram_hashes(needle, case_insensitive, &mut hashes);
+    let hashes = extract_needle_trigram_hashes(needle, case_insensitive);
     if hashes.is_empty() {
         return Ok(false);
     }
@@ -714,12 +1052,11 @@ fn filter_needed_bits_by_trigram(
     if pack_chunk_count == 0 {
         return Ok(Vec::new());
     }
-    if pack.toc().postscript.trigram_len == 0 || (case_insensitive && !needle.is_ascii()) {
+    if pack.toc().postscript.trigram_len == 0 {
         return Ok(collect_set_bits(needed_bits));
     }
 
-    let mut hashes = Vec::new();
-    extract_trigram_hashes(needle, case_insensitive, &mut hashes);
+    let hashes = extract_needle_trigram_hashes(needle, case_insensitive);
     if hashes.is_empty() {
         return Ok(collect_set_bits(needed_bits));
     }
@@ -809,14 +1146,8 @@ fn filter_candidates_by_trigram(
     if pack.toc().postscript.trigram_len == 0 {
         return Ok(chunk_ids.to_vec());
     }
-    // Unicode `ILIKE` with non-ASCII needles can expand/fold characters (e.g. `İ -> i\u{0307}`,
-    // `K -> k`) via `str::to_lowercase()`, so skip trigram bloom pruning completely.
-    if case_insensitive && !needle.is_ascii() {
-        return Ok(chunk_ids.to_vec());
-    }
 
-    let mut hashes = Vec::new();
-    extract_trigram_hashes(needle, case_insensitive, &mut hashes);
+    let hashes = extract_needle_trigram_hashes(needle, case_insensitive);
     if hashes.is_empty() {
         return Ok(chunk_ids.to_vec());
     }
@@ -880,6 +1211,7 @@ mod tests {
             enable_trigram_skip: true,
             compress_toc_lz4: true,
             write_threads: 1,
+            ..PackWriteOptions::default()
         };
         let mut builder = ChunkPackBuilder::new([0x55u8; 16], opts);
 
@@ -1024,6 +1356,7 @@ mod tests {
             enable_trigram_skip: true,
             compress_toc_lz4: true,
             write_threads: 1,
+            ..PackWriteOptions::default()
         };
         let mut builder = ChunkPackBuilder::new([0x77u8; 16], opts);
 
@@ -1084,6 +1417,7 @@ mod tests {
             enable_trigram_skip: true,
             compress_toc_lz4: true,
             write_threads: 1,
+            ..PackWriteOptions::default()
         };
         let mut builder = ChunkPackBuilder::new([0x88u8; 16], opts);
 
@@ -1166,6 +1500,7 @@ mod tests {
             enable_trigram_skip: true,
             compress_toc_lz4: true,
             write_threads: 1,
+            ..PackWriteOptions::default()
         };
         let mut builder = ChunkPackBuilder::new([0x42u8; 16], opts);
 
@@ -1316,6 +1651,7 @@ mod tests {
             enable_trigram_skip: true,
             compress_toc_lz4: true,
             write_threads: 1,
+            ..PackWriteOptions::default()
         };
         let mut builder = ChunkPackBuilder::new([0x77u8; 16], opts);
         let mut rows = Vec::new();
@@ -1376,6 +1712,7 @@ mod tests {
             enable_trigram_skip: true,
             compress_toc_lz4: false,
             write_threads: 1,
+            ..PackWriteOptions::default()
         };
         let mut builder = ChunkPackBuilder::new([0x88u8; 16], opts);
 
@@ -1442,5 +1779,277 @@ mod tests {
         let rows = vec![PayloadRefRow::Chunks(vec![(0, 0)])];
         let bm = search_pack_rows(&crafted_pack, &rows, 0, b"ALPHA_NEEDLE_99", false).unwrap();
         assert_eq!(bm.iter_ones().collect::<Vec<_>>(), vec![0]);
+    }
+
+    #[test]
+    fn exhaustive_unicode_ilike_ascii_run_soundness() {
+        // Mathematically prove across ALL Unicode scalar values 0..=0x10FFFF that NO non-ASCII
+        // scalar has `c.to_lowercase()` producing any byte allowed inside an extracted ASCII run
+        // (excluding 'k'/'K'/'s'/'S' and trailing 'i'/'I' before U+0307/EOF).
+        for cp in 0u32..=0x10_FFFF {
+            let Some(c) = char::from_u32(cp) else {
+                continue;
+            };
+            if c.is_ascii() {
+                continue;
+            }
+            for lc in c.to_lowercase() {
+                if lc.is_ascii() {
+                    let b = lc as u8;
+                    let is_allowed_mid = is_safe_ilike_ascii_byte(b);
+                    let is_i_with_combining_dot =
+                        b == b'i' && c.to_lowercase().collect::<String>() == "i\u{0307}";
+                    assert!(
+                        !is_allowed_mid || is_i_with_combining_dot,
+                        "non-ASCII U+{cp:04X} ({c}) lowercases to unsafe ASCII byte 0x{b:02X}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn unicode_ilike_trigram_pruning_alienacion_and_flat_search_parity() {
+        use crate::payload::decode_payload_refs_flat;
+
+        let mut builder = ChunkPackBuilder::new(
+            [0xA1u8; 16],
+            PackWriteOptions {
+                target_frame_raw_bytes: 8 * 1024,
+                codec: Codec::None,
+                zstd_level: 1,
+                enable_trigram_skip: true,
+                compress_toc_lz4: false,
+                write_threads: 1,
+                ..PackWriteOptions::default()
+            },
+        );
+        builder.enable_boundary_tracking();
+
+        // Build >= 2560 B frame 0 with low trigram density containing "Alienación" and "ALIENACIÓN",
+        // followed by a separate frame 1 without "alienac" so trigram pruning skips frame 1.
+        let mut frame0_match = Vec::with_capacity(4096);
+        let mut state = 0x1234_5678_9abc_def0u64;
+        for _ in 0..4000 {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            frame0_match.push(b'q' + ((state >> 24) as u8 % 4));
+        }
+        frame0_match.extend_from_slice(" ... Alienación en progreso ... ".as_bytes());
+        let cid0 = builder.intern_chunk(&frame0_match).unwrap();
+
+        let mut frame0_upper = frame0_match.clone();
+        let len_u = frame0_upper.len();
+        frame0_upper.truncate(len_u - " ... Alienación en progreso ... ".len());
+        frame0_upper.extend_from_slice(" ... ALIENACIÓN TOTAL ... ".as_bytes());
+        let cid1 = builder.intern_chunk(&frame0_upper).unwrap();
+
+        let mut frame1_absent = Vec::with_capacity(4096);
+        for _ in 0..4096 {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            frame1_absent.push(b'm' + ((state >> 24) as u8 % 4));
+        }
+        let cid2 = builder.intern_chunk(&frame1_absent).unwrap();
+        assert_eq!((cid0, cid1, cid2), (0, 1, 2));
+
+        let mut pack_bytes = Vec::new();
+        builder.finish(&mut pack_bytes).unwrap();
+        let s3 = Arc::new(SimulatedS3Reader::from_bytes(
+            pack_bytes,
+            SimulatedS3Config::default(),
+        ));
+        let pack = ChunkPackReader::open(s3.clone()).unwrap();
+        assert_eq!(pack.postscript().edge_table_len, 0);
+
+        let hashes = extract_ilike_trigram_hashes("Alienación".as_bytes());
+        assert!(!hashes.is_empty());
+
+        let rows = vec![
+            PayloadRefRow::Chunks(vec![(0, 0)]),
+            PayloadRefRow::Chunks(vec![(0, 1)]),
+            PayloadRefRow::Chunks(vec![(0, 2)]),
+            PayloadRefRow::Inline("Sin Alienación aquí".as_bytes().to_vec()),
+            PayloadRefRow::Null,
+        ];
+        let mut encoded = Vec::new();
+        crate::payload::encode_payload_refs(&rows, &mut encoded).unwrap();
+        let flat = decode_payload_refs_flat(&encoded, rows.len(), 64 * 1024).unwrap();
+        let mask = Bitmap::new_ones(rows.len());
+
+        for needle in ["Alienación".as_bytes(), "ALIENACIÓN".as_bytes()] {
+            let bm_rows = search_pack_rows(&pack, &rows, 0, needle, true).unwrap();
+            let bm_flat =
+                search_pack_rows_flat_masked_with_threads(&pack, &flat, &mask, 0, needle, true, 1)
+                    .unwrap();
+            assert_eq!(bm_rows.iter_ones().collect::<Vec<_>>(), vec![0, 1, 3]);
+            assert_eq!(bm_flat.iter_ones().collect::<Vec<_>>(), vec![0, 1, 3]);
+        }
+
+        // Verify absent Unicode ILIKE needle short-circuits completely when edge_table_len == 0.
+        let before = s3.counters();
+        let bm_absent = search_pack_rows_flat_masked_with_threads(
+            &pack,
+            &flat,
+            &mask,
+            0,
+            "Desaparición".as_bytes(),
+            true,
+            1,
+        )
+        .unwrap();
+        let after = s3.counters();
+        assert!(bm_absent.all_zeros());
+        assert_eq!(
+            after.gets - before.gets,
+            0,
+            "absent Unicode ILIKE with cached trigram section must read 0 extra frames/EdgeTable"
+        );
+    }
+
+    #[test]
+    fn unicode_ilike_boundary_pigeonhole_repros_and_expansion_gt_64() {
+        let build_pack_and_search =
+            |left_suffix: &[u8], right_prefix: &[u8], needle: &[u8]| -> Vec<usize> {
+                let mut builder = ChunkPackBuilder::new(
+                    [0xB2u8; 16],
+                    PackWriteOptions {
+                        target_frame_raw_bytes: 16 * 1024,
+                        codec: Codec::None,
+                        zstd_level: 1,
+                        enable_trigram_skip: true,
+                        compress_toc_lz4: false,
+                        write_threads: 1,
+                        ..PackWriteOptions::default()
+                    },
+                );
+                let mut left = vec![b'q'; 2048];
+                left.extend_from_slice(left_suffix);
+                let mut right = right_prefix.to_vec();
+                right.extend_from_slice(&vec![b'm'; 2048]);
+
+                let lc = builder.intern_chunk(&left).unwrap();
+                let rc = builder.intern_chunk(&right).unwrap();
+                let mut pack_bytes = Vec::new();
+                builder.finish(&mut pack_bytes).unwrap();
+
+                let pack = ChunkPackReader::open(Arc::new(SimulatedS3Reader::from_bytes(
+                    pack_bytes,
+                    SimulatedS3Config::default(),
+                )))
+                .unwrap();
+                let edge_blooms = pack.read_edge_trigram_blooms().unwrap();
+                assert!(
+                    !pack_rejects_boundary_pigeonhole(edge_blooms.as_ref(), needle, true),
+                    "pigeonhole must not reject boundary match for needle {:?}",
+                    String::from_utf8_lossy(needle)
+                );
+
+                let rows = vec![PayloadRefRow::Chunks(vec![(0, lc), (0, rc)])];
+                let bm = search_pack_rows(&pack, &rows, 0, needle, true).unwrap();
+                bm.iter_ones().collect()
+            };
+
+        // Repro A: needle = "abkdfédef" vs boundary "...abKdfÉd" || "ef..."
+        assert_eq!(
+            build_pack_and_search(
+                "ab\u{212A}df\u{00C9}d".as_bytes(),
+                b"ef",
+                "abkdfédef".as_bytes(),
+            ),
+            vec![0]
+        );
+
+        // Repro B: needle = "xabcİdef" vs boundary "...xabcİd" || "ef..."
+        assert_eq!(
+            build_pack_and_search(
+                "xabc\u{0130}d".as_bytes(),
+                b"ef",
+                "xabc\u{0130}def".as_bytes(),
+            ),
+            vec![0]
+        );
+
+        // Repro C: needle = "abcİdef" vs boundary "...abcİd" || "ef..."
+        assert_eq!(
+            build_pack_and_search(
+                "abc\u{0130}d".as_bytes(),
+                b"ef",
+                "abc\u{0130}def".as_bytes(),
+            ),
+            vec![0]
+        );
+
+        // Repro #5: needle = "kkkkkkkkkkkkkkkkkkkkkké" (24 B) vs "K".repeat(22) + "é" (68 B, split 65/3)
+        let haystack = format!("{}\u{00E9}", "\u{212A}".repeat(22));
+        let hb = haystack.as_bytes();
+        assert_eq!(hb.len(), 68);
+        let needle_k = format!("{}é", "k".repeat(22));
+        assert_eq!(needle_k.len(), 24);
+        assert_eq!(
+            build_pack_and_search(&hb[..65], &hb[65..], needle_k.as_bytes()),
+            vec![0]
+        );
+    }
+
+    #[test]
+    fn multi_chunk_row_rejects_pack_without_edge_table() {
+        let mut builder = ChunkPackBuilder::new(
+            [0xC3u8; 16],
+            PackWriteOptions {
+                target_frame_raw_bytes: 8 * 1024,
+                codec: Codec::None,
+                zstd_level: 1,
+                enable_trigram_skip: true,
+                compress_toc_lz4: false,
+                write_threads: 1,
+                ..PackWriteOptions::default()
+            },
+        );
+        builder.enable_boundary_tracking();
+
+        let mut chunk0 = Vec::with_capacity(4096);
+        let mut state = 0x9876_5432_10fe_dcba_u64;
+        for _ in 0..4096 {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            chunk0.push(b'a' + ((state >> 24) as u8 % 4));
+        }
+        let mut chunk1 = chunk0.clone();
+        chunk1[0] = b'z';
+        let cid0 = builder.intern_chunk(&chunk0).unwrap();
+        let cid1 = builder.intern_chunk(&chunk1).unwrap();
+
+        let mut pack_bytes = Vec::new();
+        builder.finish(&mut pack_bytes).unwrap();
+        let pack = ChunkPackReader::open(Arc::new(SimulatedS3Reader::from_bytes(
+            pack_bytes,
+            SimulatedS3Config::default(),
+        )))
+        .unwrap();
+        assert_eq!(pack.postscript().edge_table_len, 0);
+
+        let rows = vec![PayloadRefRow::Chunks(vec![(0, cid0), (0, cid1)])];
+
+        // Short-circuit path (absent needle, trigram bloom rejects frame).
+        let err_short = search_pack_rows(&pack, &rows, 0, b"XYZ_ABSENT_999", false).unwrap_err();
+        assert!(matches!(
+            err_short,
+            StatamError::Corrupt {
+                reason: "multi-chunk row references pack without edge table",
+            }
+        ));
+
+        // Non-short-circuit path (`needle.len() < 5`, enters `search_short_needle_rows`).
+        let err_non_sc = search_pack_rows(&pack, &rows, 0, b"ab", false).unwrap_err();
+        assert!(matches!(
+            err_non_sc,
+            StatamError::Corrupt {
+                reason: "multi-chunk row references pack without edge table",
+            }
+        ));
     }
 }

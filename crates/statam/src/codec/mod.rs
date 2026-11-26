@@ -10,31 +10,34 @@ pub mod zonemap;
 
 use std::fmt;
 
-use cetra_column::{Bitmap, Column, DataType, FlatColumn};
+use cetra_column::{
+    BinaryData, Bitmap, Column, DataType, FlatColumn, FlatData, RleColumn, ScalarValue, Utf8Data,
+};
 
 use crate::StatamError;
 use crate::codec::dict::{FileDict, decode_dict_column, encode_dict_codes_body};
 use crate::codec::nested::{decode_nested_column, encode_nested_column};
 use crate::codec::numeric::{
-    decode_const_block, decode_narrow_column, decode_narrow_column_selected,
-    encode_narrow_column_with_locality, read_optional_nulls, try_encode_const_or_null,
-    write_optional_nulls,
+    decode_const_block, decode_inner_flat, decode_narrow_column, decode_narrow_column_selected,
+    decode_plain_varlen_selected, encode_narrow_column_with_locality, read_optional_nulls,
+    try_encode_const_or_null, write_optional_nulls,
 };
 use crate::codec::zonemap::compute_zone_map;
 use crate::format::{
     BLOCK_FLAG_ALL_NULL, BLOCK_FLAG_HAS_NULLS, BLOCK_FLAG_MIN_MAX_VALID, BlockEntry, Codec,
     Encoding, MAX_NESTING_DEPTH, write_framed_block,
 };
+use crate::simd::bitpack::{packed_bytes_len, unpack_u32};
 
 pub use alp::{ALP_MAX_EXP, decode_alp_body, encode_alp_body};
 pub use dict::{
     DICT_HEADER_LEN, DICT_PASSTHROUGH_MAX_BYTES, DictBuildMode, DictBuilder, DictValueKind,
-    FileDict as CodecFileDict, L0_DICT_MAX_ENTRIES, decode_dict_codes_body,
+    FileDict as CodecFileDict, L0_DICT_MAX_ENTRIES, decode_dict_codes_body, decode_dict_selected,
     encode_dict_codes_body as encode_dict_codes,
 };
 pub use fsst::{
     FSST_ESCAPE, FSST_MAX_SYM_LEN, FSST_MAX_SYMBOLS, FsstBlockView, FsstTable, decode_fsst_binary,
-    decode_fsst_utf8, encode_fsst_body,
+    decode_fsst_binary_selected, decode_fsst_utf8, decode_fsst_utf8_selected, encode_fsst_body,
 };
 pub use nested::{
     ShreddedMapBlocks, ShreddedSubCol, decode_nested_column_selected,
@@ -456,7 +459,7 @@ pub fn decode_mini_block(
 }
 
 /// Decodes one mini-block, only materializing `mask`-selected rows when the encoding
-/// supports sparse decode (`Fsst`, sparse `Plain` varlen/map, and nested blocks).
+/// supports sparse decode (`Fsst`, `Dict`, `Rle`, sparse `Plain` varlen/map, and nested blocks).
 pub fn decode_mini_block_selected(
     raw_body: &[u8],
     entry: &BlockEntry,
@@ -471,6 +474,33 @@ pub fn decode_mini_block_selected(
         });
     }
     if !mask.all_ones() {
+        if entry.encoding == Encoding::Dict {
+            dt.validate(MAX_NESTING_DEPTH)?;
+            if row_count == 0 {
+                if !raw_body.is_empty() {
+                    return Err(StatamError::Corrupt {
+                        reason: "trailing bytes in empty mini-block",
+                    });
+                }
+                return Ok(Column::Flat(FlatColumn::empty(dt)));
+            }
+            let Some(dict) = file_dict else {
+                return Err(StatamError::Corrupt {
+                    reason: "Dict mini-block requires FileDict",
+                });
+            };
+            if dict.values().data_type() != *dt {
+                return Err(StatamError::SchemaMismatch {
+                    reason: "FileDict DataType mismatch",
+                });
+            }
+            let (nulls, after_nulls) = read_optional_nulls(raw_body, row_count, entry.block_flags)?;
+            return decode_dict_selected(after_nulls, row_count, nulls, dict, mask);
+        }
+        if entry.encoding == Encoding::Rle && mask.count_ones().saturating_mul(16) < row_count {
+            dt.validate(MAX_NESTING_DEPTH)?;
+            return decode_rle_block_selected(raw_body, entry, dt, mask);
+        }
         if matches!(
             entry.encoding,
             Encoding::ListEncoded
@@ -492,6 +522,138 @@ pub fn decode_mini_block_selected(
         }
     }
     decode_mini_block(raw_body, entry, dt, file_dict)
+}
+
+fn decode_rle_block_selected(
+    raw_body: &[u8],
+    entry: &BlockEntry,
+    dt: &DataType,
+    mask: &Bitmap,
+) -> Result<Column, StatamError> {
+    let row_count = entry.row_count as usize;
+    if row_count == 0 {
+        if !raw_body.is_empty() {
+            return Err(StatamError::Corrupt {
+                reason: "trailing bytes in empty narrow block",
+            });
+        }
+        return Ok(Column::Flat(FlatColumn::empty(dt)));
+    }
+    if raw_body.len() < 4 {
+        return Err(StatamError::Corrupt {
+            reason: "truncated Rle num_runs",
+        });
+    }
+    let num_runs =
+        u32::from_le_bytes([raw_body[0], raw_body[1], raw_body[2], raw_body[3]]) as usize;
+    if num_runs == 0 || num_runs > row_count {
+        return Err(StatamError::Corrupt {
+            reason: "invalid Rle num_runs",
+        });
+    }
+    if num_runs
+        .checked_mul(4)
+        .is_none_or(|b| b > crate::MAX_BLOCK_RAW_BYTES)
+    {
+        return Err(StatamError::BoundsExceeded {
+            reason: "Rle num_runs exceeds MAX_BLOCK_RAW_BYTES",
+        });
+    }
+    let (run_nulls, after_nulls) =
+        read_optional_nulls(&raw_body[4..], num_runs, entry.block_flags)?;
+    let Some(&re_bw) = after_nulls.first() else {
+        return Err(StatamError::Corrupt {
+            reason: "truncated Rle run_ends bit_width",
+        });
+    };
+    if re_bw > 32 {
+        return Err(StatamError::Corrupt {
+            reason: "invalid Rle run_ends bit_width",
+        });
+    }
+    let re_bytes = packed_bytes_len(num_runs, re_bw)?;
+    if after_nulls.len() < 1 + re_bytes + 1 {
+        return Err(StatamError::Corrupt {
+            reason: "truncated Rle body",
+        });
+    }
+    let mut run_ends = Vec::with_capacity(num_runs);
+    unpack_u32(
+        &after_nulls[1..1 + re_bytes],
+        num_runs,
+        re_bw,
+        &mut run_ends,
+    )?;
+    let mut prev = 0u32;
+    for &end in &run_ends {
+        if end <= prev || (end as usize) > row_count {
+            return Err(StatamError::Corrupt {
+                reason: "invalid Rle run_ends monotonicity",
+            });
+        }
+        prev = end;
+    }
+    if prev as usize != row_count {
+        return Err(StatamError::Corrupt {
+            reason: "Rle run_ends do not sum to row_count",
+        });
+    }
+
+    let inner_enc = Encoding::from_u8(after_nulls[1 + re_bytes])?;
+    let inner_body = &after_nulls[1 + re_bytes + 1..];
+
+    let mut run_mask = Bitmap::new_zeroed(num_runs);
+    let mut run_idx = 0usize;
+    for row in mask.iter_ones() {
+        if row >= row_count {
+            break;
+        }
+        while (run_ends[run_idx] as usize) <= row {
+            run_idx += 1;
+        }
+        let _ = run_mask.set(run_idx, true);
+    }
+
+    let selected_runs = run_mask.count_ones();
+    let run_values = match (inner_enc, dt) {
+        (Encoding::Fsst, DataType::Utf8) => {
+            let (u, n) =
+                decode_fsst_utf8_selected(inner_body, num_runs, &run_mask, run_nulls.as_ref())?;
+            FlatColumn::try_new(FlatData::Utf8(u), n)?
+        }
+        (Encoding::Fsst, DataType::Binary) => {
+            let (b, n) =
+                decode_fsst_binary_selected(inner_body, num_runs, &run_mask, run_nulls.as_ref())?;
+            FlatColumn::try_new(FlatData::Binary(b), n)?
+        }
+        (Encoding::Plain, DataType::Utf8) if selected_runs.saturating_mul(4) < num_runs => {
+            let (offsets, data_bytes) =
+                decode_plain_varlen_selected(inner_body, num_runs, &run_mask, run_nulls.as_ref())?;
+            FlatColumn::try_new(
+                FlatData::Utf8(Utf8Data::try_new(offsets, data_bytes)?),
+                run_nulls,
+            )?
+        }
+        (Encoding::Plain, DataType::Binary) if selected_runs.saturating_mul(4) < num_runs => {
+            let (offsets, data_bytes) =
+                decode_plain_varlen_selected(inner_body, num_runs, &run_mask, run_nulls.as_ref())?;
+            FlatColumn::try_new(
+                FlatData::Binary(BinaryData::try_new(offsets, data_bytes)?),
+                run_nulls,
+            )?
+        }
+        _ => decode_inner_flat(inner_body, inner_enc, num_runs, dt, run_nulls)?,
+    };
+
+    if selected_runs == 0 {
+        return Ok(Column::Const {
+            value: ScalarValue::Null(dt.clone()),
+            len: row_count,
+        });
+    }
+
+    let rle = RleColumn::try_new(run_values, run_ends)?;
+    Ok(Column::Rle(rle))
 }
 
 #[cfg(test)]
@@ -2827,6 +2989,154 @@ mod tests {
         ));
         assert!(matches!(
             unshred_map_selected(n, None, None, &[("a", &const_sub)], &bad_mask),
+            Err(StatamError::Corrupt { .. })
+        ));
+    }
+
+    #[test]
+    fn sparse_decode_mini_block_selected_dict_and_rle_parity() {
+        let n = 512usize;
+        let empty_mask = Bitmap::new_zeroed(n);
+        let mut one_mask = Bitmap::new_zeroed(n);
+        let _ = one_mask.set(173, true);
+        let mut scattered_mask = Bitmap::new_zeroed(n);
+        for idx in [0usize, 17, 128, 333, 511] {
+            let _ = scattered_mask.set(idx, true);
+        }
+        let all_mask = Bitmap::new_ones(n);
+
+        // 1. Dict (Utf8) with large dictionary (> 256 KiB) and nulls.
+        let pad = "d".repeat(4096);
+        let dict_vals: Vec<String> = (0..70).map(|k| format!("dict-val-{k:03}-{pad}")).collect();
+        let big_dict = FileDict::from_flat(
+            FlatColumn::try_new(
+                FlatData::Utf8(
+                    Utf8Data::try_from_slices(dict_vals.iter().map(String::as_str)).unwrap(),
+                ),
+                None,
+            )
+            .unwrap(),
+            true,
+        )
+        .unwrap();
+        assert!(big_dict.memory_bytes() > DICT_PASSTHROUGH_MAX_BYTES);
+
+        let mut dict_rows = Vec::with_capacity(n);
+        let mut dict_valid = Vec::with_capacity(n);
+        for i in 0..n {
+            if i % 9 == 0 {
+                dict_rows.push(String::new());
+                dict_valid.push(false);
+            } else {
+                dict_rows.push(dict_vals[i % dict_vals.len()].clone());
+                dict_valid.push(true);
+            }
+        }
+        let dict_col = Column::Flat(
+            FlatColumn::try_new(
+                FlatData::Utf8(
+                    Utf8Data::try_from_slices(dict_rows.iter().map(String::as_str)).unwrap(),
+                ),
+                Some(Bitmap::from_bools(&dict_valid)),
+            )
+            .unwrap(),
+        );
+        let enc_dict = encode_mini_block(
+            &dict_col,
+            &DataType::Utf8,
+            WriteProfile::L1Compact,
+            Some(&big_dict),
+        )
+        .unwrap();
+        assert_eq!(enc_dict.encoding, Encoding::Dict);
+        let (entry_dict, raw_dict) = frame_raw_body(&enc_dict, n);
+        let full_dict =
+            decode_mini_block(&raw_dict, &entry_dict, &DataType::Utf8, Some(&big_dict)).unwrap();
+        for mask in [&empty_mask, &one_mask, &scattered_mask, &all_mask] {
+            let sel = decode_mini_block_selected(
+                &raw_dict,
+                &entry_dict,
+                &DataType::Utf8,
+                Some(&big_dict),
+                mask,
+            )
+            .unwrap();
+            assert_sparse_scalar_parity(&dict_col, &full_dict, &sel, mask);
+        }
+
+        // 2. Rle(Utf8) with Plain inner (L0Fast) and Fsst inner (L1Compact), including null runs.
+        let num_runs = 64usize;
+        let run_len = (n / num_runs) as u32;
+        let mut run_strs = Vec::with_capacity(num_runs);
+        let mut run_valid = Vec::with_capacity(num_runs);
+        let mut run_ends = Vec::with_capacity(num_runs);
+        for r in 0..num_runs {
+            run_ends.push(((r + 1) as u32) * run_len);
+            if r % 8 == 0 {
+                run_strs.push(String::new());
+                run_valid.push(false);
+            } else {
+                run_strs.push(format!(
+                    "{{\"run\":{r},\"provider\":\"anthropic\",\"model\":\"claude-3-5-sonnet\",\"tag\":\"rle-{r:03}\"}}"
+                ));
+                run_valid.push(true);
+            }
+        }
+        let rle_vals = FlatColumn::try_new(
+            FlatData::Utf8(Utf8Data::try_from_slices(run_strs.iter().map(String::as_str)).unwrap()),
+            Some(Bitmap::from_bools(&run_valid)),
+        )
+        .unwrap();
+        let rle_col = Column::Rle(RleColumn::try_new(rle_vals, run_ends).unwrap());
+        for profile in [WriteProfile::L0Fast, WriteProfile::L1Compact] {
+            let enc_rle = encode_mini_block(&rle_col, &DataType::Utf8, profile, None).unwrap();
+            assert_eq!(enc_rle.encoding, Encoding::Rle);
+            let (entry_rle, raw_rle) = frame_raw_body(&enc_rle, n);
+            let full_rle = decode_mini_block(&raw_rle, &entry_rle, &DataType::Utf8, None).unwrap();
+            for mask in [&empty_mask, &one_mask, &scattered_mask, &all_mask] {
+                let sel =
+                    decode_mini_block_selected(&raw_rle, &entry_rle, &DataType::Utf8, None, mask)
+                        .unwrap();
+                assert_sparse_scalar_parity(&rle_col, &full_rle, &sel, mask);
+            }
+        }
+    }
+
+    #[test]
+    fn decode_rle_block_selected_empty_mask_validates_inner_enc_and_body() {
+        let row_count = 32usize;
+        let empty_mask = Bitmap::new_zeroed(row_count);
+        let run_vals = FlatColumn::try_new(
+            FlatData::Utf8(Utf8Data::try_from_slices(["alpha", "beta", "gamma", "delta"]).unwrap()),
+            None,
+        )
+        .unwrap();
+        let rle_col = Column::Rle(RleColumn::try_new(run_vals, vec![8, 16, 24, 32]).unwrap());
+        let enc_rle =
+            encode_mini_block(&rle_col, &DataType::Utf8, WriteProfile::L0Fast, None).unwrap();
+        let mut framed = Vec::new();
+        let entry = enc_rle
+            .write_framed_entry(0, row_count as u16, 0, 3, &mut framed)
+            .unwrap();
+        let (_, _, raw) = read_framed_block(&framed, MAX_BLOCK_RAW_BYTES).unwrap();
+
+        // Find the inner_enc byte position in raw: 4 (num_runs) + 1 (re_bw) + packed_bytes(4, re_bw).
+        let re_bw = raw[4];
+        let re_bytes = packed_bytes_len(4, re_bw).unwrap();
+        let inner_enc_pos = 4 + 1 + re_bytes;
+
+        // 1. Incompatible inner_enc for Utf8 must be rejected even with empty mask.
+        let mut bad_enc = raw.clone();
+        bad_enc[inner_enc_pos] = Encoding::Alp as u8;
+        assert!(matches!(
+            decode_mini_block_selected(&bad_enc, &entry, &DataType::Utf8, None, &empty_mask),
+            Err(StatamError::Corrupt { .. })
+        ));
+
+        // 2. Truncated inner_body must be rejected even with empty mask.
+        let truncated = &raw[..inner_enc_pos + 3];
+        assert!(matches!(
+            decode_mini_block_selected(truncated, &entry, &DataType::Utf8, None, &empty_mask),
             Err(StatamError::Corrupt { .. })
         ));
     }

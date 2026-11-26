@@ -190,7 +190,7 @@ pub struct WriteOptions {
     pub narrow_trigram_cols: Vec<String>,
     /// Rows per PAX Row Group (default: `131_072`).
     pub row_group_size: usize,
-    /// Rows per Mini-Block (default: `32_768`).
+    /// Rows per Mini-Block (default: `8_192`).
     pub mini_block_size: usize,
     /// Zstd compression level (`-5` for `L0Fast`, `3` for `L1Compact`).
     pub zstd_level: i32,
@@ -245,7 +245,7 @@ impl WriteOptions {
             _ => Vec::new(),
         };
         let row_group_size = ROW_GROUP_SIZE;
-        let mini_block_size = 32_768;
+        let mini_block_size = 8_192;
         let zstd_level = match profile {
             WriteProfile::L0Fast => -5,
             WriteProfile::L1Compact => 3,
@@ -468,6 +468,10 @@ impl<'a> StatamWriter<'a> {
             }
         }
 
+        let mut pack_builder = pack_builder;
+        if let Some(pb) = pack_builder.as_deref_mut() {
+            pb.enable_boundary_tracking();
+        }
         let pack_ids = match (&pack_builder, options.pack_id) {
             (Some(_), Some(id)) => vec![id],
             _ => Vec::new(),
@@ -2857,6 +2861,7 @@ impl<'a> StatamWriter<'a> {
         let nulls = flat.nulls();
         let mut out = Vec::with_capacity(mb_len);
         let mut chunk_scratch = Vec::new();
+        let mut boundary_cids_scratch: Vec<u32> = Vec::new();
         let mut prefix_mru: Vec<PayloadPrefixCacheEntry> = Vec::with_capacity(2);
         let mut prefix_table: Vec<Option<PayloadPrefixCacheEntry>> = Vec::new();
         let mut exact_cache: [Option<PayloadExactCacheEntry>; 64] = std::array::from_fn(|_| None);
@@ -3060,6 +3065,11 @@ impl<'a> StatamWriter<'a> {
                     if let Some(slot) = exact_slot {
                         exact_cache[slot] = Some((r, refs.clone()));
                     }
+                }
+                if refs.len() > 1 {
+                    boundary_cids_scratch.clear();
+                    boundary_cids_scratch.extend(refs.iter().map(|&(_, cid)| cid));
+                    pb.mark_boundary_chunks(&boundary_cids_scratch);
                 }
                 out.push(PayloadRefRow::Chunks(refs));
             } else {
@@ -4944,7 +4954,9 @@ mod tests {
     use super::*;
     use crate::io::SliceReader;
     use crate::payload::pack::{ChunkPackReader, PackWriteOptions};
-    use crate::reader::{InMemoryPackResolver, PackResolver, ScanRequest, StatamReader};
+    use crate::reader::{
+        InMemoryPackResolver, PackResolver, ScanRequest, StatamReader, SubstringQuery,
+    };
 
     #[test]
     fn l0fast_skips_widerow_dict_probing_and_narrow_trigram_skips_dict() {
@@ -5070,6 +5082,7 @@ mod tests {
             enable_trigram_skip: true,
             compress_toc_lz4: true,
             write_threads: 1,
+            emit_hash_table: true,
         };
         let mut pb = ChunkPackBuilder::new(pack_id, pack_opts);
         let mut file_bytes = Vec::new();
@@ -5271,6 +5284,7 @@ mod tests {
                 enable_trigram_skip: true,
                 compress_toc_lz4: true,
                 write_threads: 1,
+                emit_hash_table: true,
             },
         );
         let mut l1_opts = WriteOptions::for_table(TableKind::Spans, WriteProfile::L1Compact);
@@ -5772,5 +5786,277 @@ mod tests {
             scanned[0].column(4).unwrap().get_scalar(0).unwrap(),
             ScalarValue::Utf8(inputs[0].clone())
         );
+    }
+
+    #[test]
+    fn writer_single_chunk_only_omits_edge_table_and_preserves_substring_parity() {
+        let schema = Schema::try_new_arc(vec![
+            Field::new("id", DataType::I64, false),
+            Field::new("input", DataType::Utf8, true),
+        ])
+        .unwrap();
+
+        let n = 64usize;
+        let ids: Vec<i64> = (0..n as i64).collect();
+        let payloads: Vec<String> = (0..n)
+            .map(|i| {
+                let marker = if i % 16 == 5 {
+                    "NeedleSingleAlpha"
+                } else {
+                    "OtherSingleText"
+                };
+                format!(
+                    "{{\"row\":{i:04},\"tag\":\"{marker}\",\"pad\":\"{}\"}}",
+                    "x".repeat(420)
+                )
+            })
+            .collect();
+        let p_refs: Vec<&str> = payloads.iter().map(String::as_str).collect();
+        let batch = Batch::try_new_all(
+            Arc::clone(&schema),
+            vec![
+                Column::Flat(FlatColumn::try_new(FlatData::I64(ids), None).unwrap()),
+                Column::Flat(
+                    FlatColumn::try_new(
+                        FlatData::Utf8(Utf8Data::try_from_slices(p_refs).unwrap()),
+                        None,
+                    )
+                    .unwrap(),
+                ),
+            ],
+            n,
+        )
+        .unwrap();
+
+        let pack_id = [0x71u8; 16];
+        let mut opts = WriteOptions::for_table(TableKind::Spans, WriteProfile::L1Compact);
+        assert_eq!(opts.mini_block_size, 8_192);
+        opts.pack_id = Some(pack_id);
+        opts.payload_cols = vec!["input".to_owned()];
+
+        let mut pb = ChunkPackBuilder::new(pack_id, PackWriteOptions::default());
+        let mut statam_bytes = Vec::new();
+        {
+            let mut w = StatamWriter::new(Arc::clone(&schema), opts, Some(&mut pb)).unwrap();
+            w.write_batch(&batch).unwrap();
+            w.finish(&mut statam_bytes).unwrap();
+        }
+        let mut pack_bytes = Vec::new();
+        let pack_stats = pb.finish(&mut pack_bytes).unwrap();
+        assert_eq!(pack_stats.edge_table_bytes, 0);
+
+        let pack_reader =
+            Arc::new(ChunkPackReader::open(Arc::new(SliceReader::new(pack_bytes))).unwrap());
+        assert_eq!(pack_reader.postscript().edge_table_len, 0);
+
+        let mut resolver = InMemoryPackResolver::new();
+        resolver.insert(pack_id, pack_reader);
+        let reader = StatamReader::open(
+            Arc::new(SliceReader::new(statam_bytes)),
+            Some(Arc::new(resolver)),
+        )
+        .unwrap();
+        reader.verify_full().unwrap();
+
+        let like_hits = reader
+            .scan(&ScanRequest {
+                substrings: vec![SubstringQuery {
+                    column: "input".to_owned(),
+                    needle: b"NeedleSingleAlpha".to_vec(),
+                    case_insensitive: false,
+                }],
+                ..ScanRequest::default()
+            })
+            .unwrap();
+        let like_rows: usize = like_hits.iter().map(Batch::num_rows).sum();
+        assert_eq!(like_rows, 4);
+
+        let ilike_hits = reader
+            .scan(&ScanRequest {
+                substrings: vec![SubstringQuery {
+                    column: "input".to_owned(),
+                    needle: b"needlesinglealpha".to_vec(),
+                    case_insensitive: true,
+                }],
+                ..ScanRequest::default()
+            })
+            .unwrap();
+        let ilike_rows: usize = ilike_hits.iter().map(Batch::num_rows).sum();
+        assert_eq!(ilike_rows, 4);
+
+        let miss_hits = reader
+            .scan(&ScanRequest {
+                substrings: vec![SubstringQuery {
+                    column: "input".to_owned(),
+                    needle: b"NotPresentAnywhere".to_vec(),
+                    case_insensitive: false,
+                }],
+                ..ScanRequest::default()
+            })
+            .unwrap();
+        assert_eq!(miss_hits.iter().map(Batch::num_rows).sum::<usize>(), 0);
+    }
+
+    #[test]
+    fn writer_mixed_single_and_multi_chunk_zeros_non_boundary_edges_and_matches_seams() {
+        let schema = Schema::try_new_arc(vec![
+            Field::new("id", DataType::I64, false),
+            Field::new("input", DataType::Utf8, true),
+        ])
+        .unwrap();
+
+        let n = 100usize;
+        let ids: Vec<i64> = (0..n as i64).collect();
+        let mut payloads = Vec::with_capacity(n);
+        for i in 0..96usize {
+            payloads.push(format!(
+                "{{\"single_id\":{i:04},\"marker\":\"ONLY_SINGLE_{i:04}\",\"pad\":\"{}\"}}",
+                "a".repeat(500)
+            ));
+        }
+        // Multi-chunk JSON array rows (including continuation) with a seam-spanning needle:
+        // element 0 ends with `SEAM_LEFT`, element 1 starts with `SEAM_RIGHT`, so the seam
+        // contains `SEAM_LEFT"},{"role":"assistant","txt":"SEAM_RIGHT`.
+        let json_prefix = format!(
+            "[{{\"role\":\"user\",\"txt\":\"{}SEAM_LEFT\"}}",
+            "u".repeat(300)
+        );
+        payloads.push(format!(
+            "{json_prefix},{{\"role\":\"assistant\",\"txt\":\"SEAM_RIGHT{}\"}}]",
+            "v".repeat(300)
+        ));
+        payloads.push(format!(
+            "{json_prefix},{{\"role\":\"assistant\",\"txt\":\"SEAM_RIGHT_CONT{}\"}}]",
+            "w".repeat(300)
+        ));
+        // Also add > MAX_CHUNK (~80 KiB) plain-text multi-chunk rows spanning CDC seams.
+        let big_a = format!("{}BIG_CDC_PART_A", "c".repeat(45_000));
+        let big_b = format!("BIG_CDC_PART_B{}", "d".repeat(45_000));
+        payloads.push(format!("{big_a}{big_b}"));
+        payloads.push(format!(
+            "{{\"single_tail\":true,\"pad\":\"{}\"}}",
+            "z".repeat(450)
+        ));
+
+        let p_refs: Vec<&str> = payloads.iter().map(String::as_str).collect();
+        let batch = Batch::try_new_all(
+            Arc::clone(&schema),
+            vec![
+                Column::Flat(FlatColumn::try_new(FlatData::I64(ids), None).unwrap()),
+                Column::Flat(
+                    FlatColumn::try_new(
+                        FlatData::Utf8(Utf8Data::try_from_slices(p_refs).unwrap()),
+                        None,
+                    )
+                    .unwrap(),
+                ),
+            ],
+            n,
+        )
+        .unwrap();
+
+        let pack_id = [0x72u8; 16];
+        let mut opts = WriteOptions::for_table(TableKind::Spans, WriteProfile::L1Compact);
+        opts.pack_id = Some(pack_id);
+        opts.payload_cols = vec!["input".to_owned()];
+
+        let mut pb = ChunkPackBuilder::new(pack_id, PackWriteOptions::default());
+        let mut statam_bytes = Vec::new();
+        {
+            let mut w = StatamWriter::new(Arc::clone(&schema), opts, Some(&mut pb)).unwrap();
+            w.write_batch(&batch).unwrap();
+            w.finish(&mut statam_bytes).unwrap();
+        }
+        let mut pack_bytes = Vec::new();
+        let pack_stats = pb.finish(&mut pack_bytes).unwrap();
+        assert!(pack_stats.edge_table_bytes > 0);
+
+        let pack_reader =
+            Arc::new(ChunkPackReader::open(Arc::new(SliceReader::new(pack_bytes))).unwrap());
+        let flat_edges = pack_reader.read_edge_table_flat().unwrap();
+        assert_eq!(flat_edges.len(), pack_stats.chunk_count as usize);
+
+        // First 96 chunks belong exclusively to single-chunk rows -> edges must be zeroed.
+        let mut zeroed_count = 0usize;
+        let mut non_zero_count = 0usize;
+        for cid in 0..pack_stats.chunk_count {
+            if flat_edges.head(cid).is_empty() && flat_edges.tail(cid).is_empty() {
+                zeroed_count += 1;
+            } else {
+                non_zero_count += 1;
+            }
+        }
+        assert!(
+            zeroed_count >= 96,
+            "expected >= 96 zeroed non-boundary chunks, got {zeroed_count}"
+        );
+        assert!(
+            non_zero_count >= 4,
+            "expected boundary chunks to keep non-empty edges"
+        );
+
+        // Compare edge_table_bytes against a pack with full untracked edges for the same chunks.
+        let mut baseline_pb = ChunkPackBuilder::new(pack_id, PackWriteOptions::default());
+        for cid in 0..pack_stats.chunk_count {
+            let chunk = pack_reader.read_chunks(&[cid]).unwrap();
+            baseline_pb.intern_chunk(&chunk[&cid]).unwrap();
+        }
+        let mut baseline_bytes = Vec::new();
+        let baseline_stats = baseline_pb.finish(&mut baseline_bytes).unwrap();
+        assert!(
+            pack_stats.edge_table_bytes < baseline_stats.edge_table_bytes,
+            "tracked mixed edge_table_bytes ({}) should be smaller than untracked ({})",
+            pack_stats.edge_table_bytes,
+            baseline_stats.edge_table_bytes
+        );
+
+        let mut resolver = InMemoryPackResolver::new();
+        resolver.insert(pack_id, pack_reader);
+        let reader = StatamReader::open(
+            Arc::new(SliceReader::new(statam_bytes)),
+            Some(Arc::new(resolver)),
+        )
+        .unwrap();
+        reader.verify_full().unwrap();
+
+        // Seam-spanning LIKE & ILIKE across JSON array element boundaries must match rows 96 & 97.
+        let seam_needle = b"SEAM_LEFT\"},{\"role\":\"assistant\",\"txt\":\"SEAM_RIGHT";
+        let seam_like = reader
+            .scan(&ScanRequest {
+                substrings: vec![SubstringQuery {
+                    column: "input".to_owned(),
+                    needle: seam_needle.to_vec(),
+                    case_insensitive: false,
+                }],
+                ..ScanRequest::default()
+            })
+            .unwrap();
+        assert_eq!(seam_like.iter().map(Batch::num_rows).sum::<usize>(), 2);
+
+        let seam_ilike_needle = b"seam_left\"},{\"ROLE\":\"ASSISTANT\",\"txt\":\"seam_right";
+        let seam_ilike = reader
+            .scan(&ScanRequest {
+                substrings: vec![SubstringQuery {
+                    column: "input".to_owned(),
+                    needle: seam_ilike_needle.to_vec(),
+                    case_insensitive: true,
+                }],
+                ..ScanRequest::default()
+            })
+            .unwrap();
+        assert_eq!(seam_ilike.iter().map(Batch::num_rows).sum::<usize>(), 2);
+
+        // Large multi-chunk row (row 98) must match at both interior and across any CDC boundary.
+        let big_like = reader
+            .scan(&ScanRequest {
+                substrings: vec![SubstringQuery {
+                    column: "input".to_owned(),
+                    needle: b"BIG_CDC_PART_ABIG_CDC_PART_B".to_vec(),
+                    case_insensitive: false,
+                }],
+                ..ScanRequest::default()
+            })
+            .unwrap();
+        assert_eq!(big_like.iter().map(Batch::num_rows).sum::<usize>(), 1);
     }
 }

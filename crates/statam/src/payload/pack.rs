@@ -30,6 +30,55 @@ pub const EDGE_LEN: usize = 63;
 /// `(head_63, tail_63)` edge bytes for one chunk.
 pub type ChunkEdge = (Vec<u8>, Vec<u8>);
 
+/// Compact, zero-per-chunk-allocation representation of a pack's `EdgeTable`.
+#[derive(Clone)]
+pub struct FlatEdgeTable {
+    head_data: Vec<u8>,
+    head_offs: Vec<u32>,
+    tail_data: Vec<u8>,
+    tail_offs: Vec<u32>,
+}
+
+impl fmt::Debug for FlatEdgeTable {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("FlatEdgeTable")
+            .field("chunk_count", &self.len())
+            .field("head_bytes", &self.head_data.len())
+            .field("tail_bytes", &self.tail_data.len())
+            .finish()
+    }
+}
+
+impl FlatEdgeTable {
+    #[inline]
+    pub fn len(&self) -> usize {
+        self.head_offs.len().saturating_sub(1)
+    }
+
+    #[inline]
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    #[inline]
+    pub fn head(&self, cid: u32) -> &[u8] {
+        let idx = cid as usize;
+        if idx.checked_add(1).is_none_or(|n| n >= self.head_offs.len()) {
+            return &[];
+        }
+        &self.head_data[self.head_offs[idx] as usize..self.head_offs[idx + 1] as usize]
+    }
+
+    #[inline]
+    pub fn tail(&self, cid: u32) -> &[u8] {
+        let idx = cid as usize;
+        if idx.checked_add(1).is_none_or(|n| n >= self.tail_offs.len()) {
+            return &[];
+        }
+        &self.tail_data[self.tail_offs[idx] as usize..self.tail_offs[idx + 1] as usize]
+    }
+}
+
 /// Magic bytes at offset 0 of a `TS02` TrigramSkipSection header.
 pub const TRIGRAM_SECTION_MAGIC: [u8; 4] = *b"TS02";
 /// Fixed 12-byte header size preceding the two edge trigram blooms in `TS02`.
@@ -43,8 +92,8 @@ const MAX_TRIGRAM_DENSITY: f64 = 0.72;
 const BOUNDARY_GUARD_THRESHOLD: usize = 8_192;
 /// 1 MiB `ReadCache` boundary guard max frame size (`< 32 KiB`).
 const BOUNDARY_GUARD_MAX_FRAME: usize = 32_768;
-/// Default target raw bytes per `.stpk` frame (1 MiB).
-const DEFAULT_TARGET_FRAME_RAW_BYTES: usize = 1024 * 1024;
+/// Default target raw bytes per `.stpk` frame (512 KiB).
+const DEFAULT_TARGET_FRAME_RAW_BYTES: usize = 512 * 1024;
 /// Minimum unique raw frame bytes buffered before triggering streaming Zstd dict training (2 MiB).
 const DICT_TRAIN_MIN_RAW: usize = 2 * 1024 * 1024;
 /// Target trained Zstd dictionary size (64 KiB).
@@ -63,7 +112,7 @@ pub struct PackWriteOptions {
     pub codec: Codec,
     /// Zstd compression level when `codec == Codec::Zstd` (default: `3`).
     pub zstd_level: i32,
-    /// Target uncompressed frame size in bytes (default: `1 MiB`).
+    /// Target uncompressed frame size in bytes (default: `512 KiB`).
     pub target_frame_raw_bytes: usize,
     /// Whether to emit adaptive per-frame trigram skip filters (default: `true`).
     pub enable_trigram_skip: bool,
@@ -71,6 +120,8 @@ pub struct PackWriteOptions {
     pub compress_toc_lz4: bool,
     /// Number of worker threads for parallel frame compression and trigram building (default: `1`).
     pub write_threads: usize,
+    /// Whether to emit the compaction-only `ChunkHashTable` (default: `true`).
+    pub emit_hash_table: bool,
 }
 
 impl Default for PackWriteOptions {
@@ -82,6 +133,7 @@ impl Default for PackWriteOptions {
             enable_trigram_skip: true,
             compress_toc_lz4: true,
             write_threads: 1,
+            emit_hash_table: true,
         }
     }
 }
@@ -237,6 +289,9 @@ pub struct ChunkPackBuilder {
     raw_chunk_bytes: u64,
     stored_frame_bytes: u64,
     prefix_cache: Vec<Option<PackPrefixEntry>>,
+    track_boundary_chunks: bool,
+    has_any_boundary: bool,
+    boundary_chunks: Vec<bool>,
 }
 
 impl fmt::Debug for ChunkPackBuilder {
@@ -260,6 +315,8 @@ impl fmt::Debug for ChunkPackBuilder {
             .field("dedup_hits", &self.dedup_hits)
             .field("raw_chunk_bytes", &self.raw_chunk_bytes)
             .field("stored_frame_bytes", &self.stored_frame_bytes)
+            .field("track_boundary_chunks", &self.track_boundary_chunks)
+            .field("has_any_boundary", &self.has_any_boundary)
             .finish()
     }
 }
@@ -308,6 +365,44 @@ impl ChunkPackBuilder {
             raw_chunk_bytes: 0,
             stored_frame_bytes: 0,
             prefix_cache: Vec::new(),
+            track_boundary_chunks: false,
+            has_any_boundary: false,
+            boundary_chunks: Vec::new(),
+        }
+    }
+
+    /// Enables boundary-chunk tracking so single-chunk-only packs omit `EdgeTable`
+    /// and mixed packs zero non-boundary chunk edges.
+    pub fn enable_boundary_tracking(&mut self) {
+        if !self.track_boundary_chunks {
+            let existing = self.chunk_locs.len()
+                + self.pre_dict_chunk_count
+                + self.pending_frame_chunks
+                + self.cur_chunks.len();
+            if existing > 0 {
+                self.has_any_boundary = true;
+                self.boundary_chunks.fill(true);
+                self.boundary_chunks.resize(existing, true);
+            }
+            self.track_boundary_chunks = true;
+        }
+    }
+
+    /// Marks all `chunk_ids` as belonging to a multi-chunk row (`chunk_ids.len() > 1`).
+    pub fn mark_boundary_chunks(&mut self, chunk_ids: &[u32]) {
+        if chunk_ids.len() <= 1 {
+            return;
+        }
+        self.has_any_boundary = true;
+        for &cid in chunk_ids {
+            let idx = cid as usize;
+            if idx >= MAX_PACK_CHUNKS {
+                continue;
+            }
+            if idx >= self.boundary_chunks.len() {
+                self.boundary_chunks.resize(idx + 1, false);
+            }
+            self.boundary_chunks[idx] = true;
         }
     }
 
@@ -718,12 +813,17 @@ impl ChunkPackBuilder {
         let mut cur_off = self.buf.len() as u64;
 
         // 1. ChunkHashTable (compaction-only: [[u8; 16]; chunk_count])
-        let hash_table_off = cur_off;
-        let mut hash_table_bytes = Vec::with_capacity(self.hashes.len().saturating_mul(16));
-        for h in &self.hashes {
-            hash_table_bytes.extend_from_slice(h);
-        }
-        cur_off = cur_off.saturating_add(hash_table_bytes.len() as u64);
+        let (hash_table_off, hash_table_bytes) = if self.options.emit_hash_table {
+            let off = cur_off;
+            let mut bytes = Vec::with_capacity(self.hashes.len().saturating_mul(16));
+            for h in &self.hashes {
+                bytes.extend_from_slice(h);
+            }
+            cur_off = cur_off.saturating_add(bytes.len() as u64);
+            (off, bytes)
+        } else {
+            (0u64, Vec::new())
+        };
 
         // 2. TrigramSkipSection (`TS02`: 12 B header + 2 * edge_bloom_bytes + per-frame blooms)
         let mut trigram_section = Vec::new();
@@ -736,7 +836,12 @@ impl ChunkPackBuilder {
             let prefix_len = TS02_HEADER_LEN + 2 * edge_bloom_bytes;
             let mut edge_tail_bloom = TrigramBloom::new(edge_bloom_bytes);
             let mut edge_head_bloom = TrigramBloom::new(edge_bloom_bytes);
-            for (head, tail) in &self.edges {
+            for (cid, (head, tail)) in self.edges.iter().enumerate() {
+                if self.track_boundary_chunks
+                    && !self.boundary_chunks.get(cid).copied().unwrap_or(false)
+                {
+                    continue;
+                }
                 edge_tail_bloom.insert_bytes(tail.as_slice());
                 edge_head_bloom.insert_bytes(head.as_slice());
             }
@@ -780,15 +885,29 @@ impl ChunkPackBuilder {
 
         // 3. EdgeTable (Zstd-3 compressed `PF`-framed payload)
         let mut edge_framed = Vec::new();
-        let (edge_table_off, edge_table_len) = if !self.edges.is_empty() {
-            let mut raw_edges = Vec::with_capacity(self.edges.len().saturating_mul(16));
-            for (head, tail) in &self.edges {
-                let hs = head.as_slice();
-                let ts = tail.as_slice();
-                raw_edges.push(hs.len() as u8);
-                raw_edges.extend_from_slice(hs);
-                raw_edges.push(ts.len() as u8);
-                raw_edges.extend_from_slice(ts);
+        let emit_edge_table =
+            !self.edges.is_empty() && (!self.track_boundary_chunks || self.has_any_boundary);
+        let (edge_table_off, edge_table_len) = if emit_edge_table {
+            let cap = if self.track_boundary_chunks {
+                self.edges.len().saturating_mul(2)
+            } else {
+                self.edges.len().saturating_mul(16)
+            };
+            let mut raw_edges = Vec::with_capacity(cap);
+            for (cid, (head, tail)) in self.edges.iter().enumerate() {
+                if self.track_boundary_chunks
+                    && !self.boundary_chunks.get(cid).copied().unwrap_or(false)
+                {
+                    raw_edges.push(0);
+                    raw_edges.push(0);
+                } else {
+                    let hs = head.as_slice();
+                    let ts = tail.as_slice();
+                    raw_edges.push(hs.len() as u8);
+                    raw_edges.extend_from_slice(hs);
+                    raw_edges.push(ts.len() as u8);
+                    raw_edges.extend_from_slice(ts);
+                }
             }
             let edge_codec = default_edge_codec();
             write_framed_pack_frame(
@@ -1342,7 +1461,10 @@ fn build_frame_trigram_bloom(
     chunks: &[PendingChunk],
     stored_len: usize,
 ) -> Option<TrigramBloom> {
-    let max_bytes = (stored_len / 6).clamp(MIN_TRIGRAM_BLOOM_BYTES, MAX_TRIGRAM_BLOOM_BYTES);
+    let frame_cap = (raw.len() / 32).clamp(MIN_TRIGRAM_BLOOM_BYTES, MAX_TRIGRAM_BLOOM_BYTES);
+    let max_bytes = (stored_len / 6)
+        .min(frame_cap)
+        .clamp(MIN_TRIGRAM_BLOOM_BYTES, MAX_TRIGRAM_BLOOM_BYTES);
     let cap_pow2 = 1usize << (usize::BITS as usize - 1 - max_bytes.leading_zeros() as usize);
     let mut bloom = TrigramBloom::new(cap_pow2);
     let mut scanned_bytes = 0usize;
@@ -1449,7 +1571,7 @@ pub struct ChunkPackReader {
     inline_dict_framed: Option<Bytes>,
     dict_cache: OnceLock<Option<Arc<PackDecoderDict>>>,
     trigram_cache: OnceLock<TrigramSectionData>,
-    edge_cache: OnceLock<Vec<ChunkEdge>>,
+    edge_table_cache: OnceLock<Arc<FlatEdgeTable>>,
 }
 
 impl fmt::Debug for ChunkPackReader {
@@ -1672,7 +1794,7 @@ impl ChunkPackReader {
             inline_dict_framed,
             dict_cache: OnceLock::new(),
             trigram_cache: OnceLock::new(),
-            edge_cache: OnceLock::new(),
+            edge_table_cache: OnceLock::new(),
         })
     }
 
@@ -2149,25 +2271,24 @@ impl ChunkPackReader {
         })
     }
 
-    /// Reads and decodes the `EdgeTable` returning `(head_63, tail_63)` per unique chunk, cached per reader.
-    pub fn read_edge_table(&self) -> Result<Vec<ChunkEdge>, StatamError> {
-        if let Some(cached) = self.edge_cache.get() {
-            return Ok(cached.clone());
+    /// Reads and decodes the `EdgeTable` into a compact [`FlatEdgeTable`], cached per reader.
+    pub fn read_edge_table_flat(&self) -> Result<Arc<FlatEdgeTable>, StatamError> {
+        if let Some(cached) = self.edge_table_cache.get() {
+            return Ok(Arc::clone(cached));
         }
-        let edges = self.read_edge_table_uncached()?;
-        let _ = self.edge_cache.set(edges.clone());
-        Ok(edges)
+        let table = Arc::new(self.read_edge_table_flat_uncached()?);
+        let _ = self.edge_table_cache.set(Arc::clone(&table));
+        Ok(self.edge_table_cache.get().map_or(table, Arc::clone))
     }
 
-    fn read_edge_table_uncached(&self) -> Result<Vec<ChunkEdge>, StatamError> {
+    fn read_edge_table_flat_uncached(&self) -> Result<FlatEdgeTable, StatamError> {
         let ps = &self.toc.postscript;
-        let chunk_count = ps.chunk_count as usize;
-        if chunk_count == 0 {
-            return Ok(Vec::new());
-        }
         if ps.edge_table_len == 0 {
-            return Err(StatamError::Corrupt {
-                reason: "missing edge table for non-empty chunk pack",
+            return Ok(FlatEdgeTable {
+                head_data: Vec::new(),
+                head_offs: vec![0],
+                tail_data: Vec::new(),
+                tail_offs: vec![0],
             });
         }
         if (ps.edge_table_len as usize) > MAX_BLOCK_RAW_BYTES {
@@ -2190,8 +2311,14 @@ impl ChunkPackReader {
             });
         }
         let framed = self.reader.read_range(start..end)?;
+        if framed.len() != ps.edge_table_len as usize {
+            return Err(StatamError::Corrupt {
+                reason: "short read on pack edge table",
+            });
+        }
         let (_, _, raw) = read_framed_pack_frame(&framed, MAX_BLOCK_RAW_BYTES)?;
 
+        let chunk_count = ps.chunk_count as usize;
         // Each chunk entry needs at least 2 bytes (head_len: u8 + tail_len: u8).
         let min_bytes = chunk_count
             .checked_mul(2)
@@ -2204,7 +2331,14 @@ impl ChunkPackReader {
             });
         }
 
-        let mut edges = Vec::with_capacity(chunk_count);
+        let data_bytes_est = raw.len().saturating_sub(min_bytes) / 2;
+        let mut head_data = Vec::with_capacity(data_bytes_est);
+        let mut tail_data = Vec::with_capacity(data_bytes_est);
+        let mut head_offs = Vec::with_capacity(chunk_count.saturating_add(1));
+        let mut tail_offs = Vec::with_capacity(chunk_count.saturating_add(1));
+        head_offs.push(0);
+        tail_offs.push(0);
+
         let mut pos = 0usize;
         for _ in 0..chunk_count {
             let head_len = *raw.get(pos).ok_or(StatamError::Corrupt {
@@ -2219,12 +2353,15 @@ impl ChunkPackReader {
             let head_end = pos.checked_add(head_len).ok_or(StatamError::Corrupt {
                 reason: "edge table head slice overflow",
             })?;
-            let head = raw
-                .get(pos..head_end)
-                .ok_or(StatamError::Corrupt {
-                    reason: "truncated edge table head bytes",
-                })?
-                .to_vec();
+            let head_slice = raw.get(pos..head_end).ok_or(StatamError::Corrupt {
+                reason: "truncated edge table head bytes",
+            })?;
+            head_data.extend_from_slice(head_slice);
+            let head_off =
+                u32::try_from(head_data.len()).map_err(|_| StatamError::BoundsExceeded {
+                    reason: "edge table head_data exceeds u32",
+                })?;
+            head_offs.push(head_off);
             pos = head_end;
 
             let tail_len = *raw.get(pos).ok_or(StatamError::Corrupt {
@@ -2239,21 +2376,44 @@ impl ChunkPackReader {
             let tail_end = pos.checked_add(tail_len).ok_or(StatamError::Corrupt {
                 reason: "edge table tail slice overflow",
             })?;
-            let tail = raw
-                .get(pos..tail_end)
-                .ok_or(StatamError::Corrupt {
-                    reason: "truncated edge table tail bytes",
-                })?
-                .to_vec();
+            let tail_slice = raw.get(pos..tail_end).ok_or(StatamError::Corrupt {
+                reason: "truncated edge table tail bytes",
+            })?;
+            tail_data.extend_from_slice(tail_slice);
+            let tail_off =
+                u32::try_from(tail_data.len()).map_err(|_| StatamError::BoundsExceeded {
+                    reason: "edge table tail_data exceeds u32",
+                })?;
+            tail_offs.push(tail_off);
             pos = tail_end;
-
-            edges.push((head, tail));
         }
 
         if pos != raw.len() {
             return Err(StatamError::Corrupt {
                 reason: "trailing bytes in edge table",
             });
+        }
+
+        Ok(FlatEdgeTable {
+            head_data,
+            head_offs,
+            tail_data,
+            tail_offs,
+        })
+    }
+
+    /// Reads and decodes the `EdgeTable` returning `(head_63, tail_63)` per unique chunk, cached per reader.
+    pub fn read_edge_table(&self) -> Result<Vec<ChunkEdge>, StatamError> {
+        let flat = self.read_edge_table_flat()?;
+        if flat.is_empty() {
+            return Ok(vec![
+                (Vec::new(), Vec::new());
+                self.toc.postscript.chunk_count as usize
+            ]);
+        }
+        let mut edges = Vec::with_capacity(flat.len());
+        for cid in 0..flat.len() as u32 {
+            edges.push((flat.head(cid).to_vec(), flat.tail(cid).to_vec()));
         }
         Ok(edges)
     }
@@ -2262,7 +2422,7 @@ impl ChunkPackReader {
     pub fn read_hash_table(&self) -> Result<Vec<[u8; 16]>, StatamError> {
         let ps = &self.toc.postscript;
         let chunk_count = ps.chunk_count as usize;
-        if chunk_count == 0 {
+        if chunk_count == 0 || ps.hash_table_off == 0 {
             return Ok(Vec::new());
         }
         let table_bytes = chunk_count
@@ -2305,7 +2465,7 @@ fn validate_trailer_sections(
             .ok_or(StatamError::BoundsExceeded {
                 reason: "hash table size overflow",
             })?;
-    if ps.chunk_count > 0 {
+    if ps.chunk_count > 0 && ps.hash_table_off != 0 {
         let end = check_pack_range(ps.hash_table_off, hash_bytes, min_off, data_end)?;
         sections.push((ps.hash_table_off, end));
     }
@@ -2546,6 +2706,7 @@ mod tests {
             enable_trigram_skip: true,
             compress_toc_lz4: true,
             write_threads: 1,
+            emit_hash_table: true,
         };
         let mut builder = ChunkPackBuilder::new(pack_id, opts);
 
@@ -2741,6 +2902,7 @@ mod tests {
             enable_trigram_skip: true,
             compress_toc_lz4: false,
             write_threads: 1,
+            emit_hash_table: true,
         };
         let mut b = ChunkPackBuilder::new([4u8; 16], opts);
 
@@ -2811,7 +2973,7 @@ mod tests {
     #[test]
     fn ts02_trigram_section_uses_8kib_edge_blooms_and_reads_4kib_edge_blooms_dynamically() {
         let mut b = ChunkPackBuilder::new([12u8; 16], PackWriteOptions::default());
-        assert_eq!(b.options.target_frame_raw_bytes, 1024 * 1024);
+        assert_eq!(b.options.target_frame_raw_bytes, 512 * 1024);
 
         // Emit enough distinct chunks so compressed frame >= 1024 B (`MIN_FRAME_FOR_TRIGRAM`)
         // while keeping total raw < 256 KiB (1 frame), trigram density < 72%, and
@@ -3279,6 +3441,7 @@ mod tests {
                 enable_trigram_skip: true,
                 compress_toc_lz4: true,
                 write_threads: threads,
+                emit_hash_table: true,
             };
             let mut pb = ChunkPackBuilder::new(pack_id, opts);
             let mut state: u64 = 0x1234_5678_9abc_def0;
@@ -3355,6 +3518,7 @@ mod tests {
                 enable_trigram_skip: true,
                 compress_toc_lz4: true,
                 write_threads: threads,
+                emit_hash_table: true,
             };
             let mut pb = ChunkPackBuilder::new(pack_id, opts);
             for i in 0..10usize {
@@ -3400,6 +3564,7 @@ mod tests {
                     enable_trigram_skip: true,
                     compress_toc_lz4: true,
                     write_threads: threads,
+                    emit_hash_table: true,
                 };
                 let mut pb = ChunkPackBuilder::new_with_dict(pack_id, opts);
                 for i in 0..count {
@@ -3438,5 +3603,275 @@ mod tests {
             let got = dict_reader.read_chunks(&all_ids).unwrap();
             assert_eq!(got.len(), all_ids.len());
         }
+    }
+
+    #[test]
+    fn flat_edge_table_caches_matches_edges_and_rejects_corruption() {
+        let opts = PackWriteOptions {
+            codec: test_codec(),
+            target_frame_raw_bytes: 16 * 1024,
+            ..PackWriteOptions::default()
+        };
+        let mut pb = ChunkPackBuilder::new([0x41u8; 16], opts);
+        let chunks = [
+            b"short_chunk".to_vec(),
+            b"HEAD_0123456789_middle_content_abcdefghijklmnopqrstuvwxyz_TAIL_9876543210".repeat(4),
+            vec![b'M'; 128],
+        ];
+        for c in &chunks {
+            pb.intern_chunk(c).unwrap();
+        }
+        let mut pack_bytes = Vec::new();
+        pb.finish(&mut pack_bytes).unwrap();
+
+        let reader = ChunkPackReader::open(Arc::new(SliceReader::new(pack_bytes.clone()))).unwrap();
+        let flat1 = reader.read_edge_table_flat().unwrap();
+        let flat2 = reader.read_edge_table_flat().unwrap();
+        assert!(Arc::ptr_eq(&flat1, &flat2));
+        assert_eq!(flat1.len(), chunks.len());
+        assert!(!flat1.is_empty());
+        assert_eq!(flat1.head(999), &[]);
+        assert_eq!(flat1.tail(999), &[]);
+
+        let legacy = reader.read_edge_table().unwrap();
+        assert_eq!(legacy.len(), chunks.len());
+        for (cid, (exp_h, exp_t)) in legacy.iter().enumerate() {
+            assert_eq!(flat1.head(cid as u32), exp_h.as_slice());
+            assert_eq!(flat1.tail(cid as u32), exp_t.as_slice());
+        }
+
+        // Corrupt edge_table_len out of bounds.
+        let mut bad_oob = pack_bytes.clone();
+        let ps_start = bad_oob.len() - PACK_POSTSCRIPT_LEN;
+        let mut ps = PackPostscript::decode(&bad_oob[ps_start..]).unwrap();
+        ps.edge_table_off = bad_oob.len() as u64;
+        ps.edge_table_len = 64;
+        bad_oob[ps_start..].copy_from_slice(&ps.encode());
+        assert!(matches!(
+            ChunkPackReader::open(Arc::new(SliceReader::new(bad_oob))),
+            Err(StatamError::Corrupt { .. })
+        ));
+
+        // Corrupt EdgeTable PF frame CRC -> read_edge_table_flat returns ChecksumMismatch.
+        let mut bad_crc = pack_bytes;
+        let ps_ok = reader.postscript();
+        bad_crc[ps_ok.edge_table_off as usize + PACK_FRAME_HEADER_LEN] ^= 0xFF;
+        let r_bad_crc = ChunkPackReader::open(Arc::new(SliceReader::new(bad_crc))).unwrap();
+        assert!(matches!(
+            r_bad_crc.read_edge_table_flat(),
+            Err(StatamError::ChecksumMismatch { .. })
+        ));
+    }
+
+    #[test]
+    fn boundary_tracking_omits_dead_edge_table_and_zeros_non_boundary_chunks() {
+        let opts = PackWriteOptions {
+            codec: Codec::None,
+            target_frame_raw_bytes: 32 * 1024,
+            enable_trigram_skip: true,
+            ..PackWriteOptions::default()
+        };
+
+        // 1. Single-chunk-only pack with boundary tracking -> edge_table_len == 0.
+        let mut single_pb = ChunkPackBuilder::new([0x51u8; 16], opts);
+        single_pb.enable_boundary_tracking();
+        for i in 0..80u32 {
+            let chunk = format!(
+                "{{\"single\":{i:04},\"body\":\"{}\"}}",
+                "single_chunk_only_text_".repeat(20)
+            );
+            let cid = single_pb.intern_chunk(chunk.as_bytes()).unwrap();
+            single_pb.mark_boundary_chunks(&[cid]);
+        }
+        let mut single_bytes = Vec::new();
+        let single_stats = single_pb.finish(&mut single_bytes).unwrap();
+        assert_eq!(single_stats.edge_table_bytes, 0);
+
+        let single_reader = ChunkPackReader::open_with_tail_hint(
+            Arc::new(SliceReader::new(single_bytes)),
+            Some(256),
+        )
+        .unwrap();
+        assert_eq!(single_reader.postscript().edge_table_len, 0);
+        assert_eq!(single_reader.postscript().edge_table_off, 0);
+        let flat_empty = single_reader.read_edge_table_flat().unwrap();
+        assert!(flat_empty.is_empty());
+        assert_eq!(flat_empty.len(), 0);
+        assert_eq!(flat_empty.head(0), &[]);
+        assert_eq!(flat_empty.tail(0), &[]);
+        assert!(Arc::ptr_eq(
+            &flat_empty,
+            &single_reader.read_edge_table_flat().unwrap()
+        ));
+        assert_eq!(
+            single_reader.read_edge_table().unwrap().len(),
+            single_stats.chunk_count as usize
+        );
+        let bloom_may_match = |b: &TrigramBloom, needle: &[u8]| -> bool {
+            let mut hashes = Vec::new();
+            crate::simd::trigram::extract_trigram_hashes(needle, false, &mut hashes);
+            b.may_contain_hashes(&hashes)
+        };
+        if let Some((tail_b, head_b)) = single_reader.read_edge_trigram_blooms().unwrap() {
+            assert!(tail_b.as_bytes().iter().all(|&b| b == 0));
+            assert!(head_b.as_bytes().iter().all(|&b| b == 0));
+            assert!(!bloom_may_match(&tail_b, b"single_chunk"));
+            assert!(!bloom_may_match(&head_b, b"single_chunk"));
+        }
+
+        // 2. Mixed single-chunk + multi-chunk pack -> non-boundary edges zeroed, boundary preserved,
+        //    and edge trigram blooms exclude non-boundary-only trigrams.
+        let mut mixed_pb = ChunkPackBuilder::new([0x52u8; 16], opts);
+        mixed_pb.enable_boundary_tracking();
+        let mut non_boundary_cids = Vec::new();
+        let words = [
+            "alpha", "bravo", "charlie", "delta", "echo", "foxtrot", "golf", "hotel", "india",
+            "juliet", "kilo", "lima", "mike", "november", "oscar", "papa",
+        ];
+        for i in 0..80u32 {
+            let mut body = String::with_capacity(420);
+            for w in 0..50usize {
+                body.push_str(words[(i as usize + w * 3) % words.len()]);
+                body.push(' ');
+            }
+            let chunk = format!("NONBND_{i:04}_{body}_ZQX");
+            let cid = mixed_pb.intern_chunk(chunk.as_bytes()).unwrap();
+            non_boundary_cids.push(cid);
+        }
+        let b_left = format!("{}BND_TAIL_EDGE", "left_pad_".repeat(20));
+        let b_right = format!("BND_HEAD_EDGE{}", "right_pad_".repeat(20));
+        let cid_l = mixed_pb.intern_chunk(b_left.as_bytes()).unwrap();
+        let cid_r = mixed_pb.intern_chunk(b_right.as_bytes()).unwrap();
+        mixed_pb.mark_boundary_chunks(&[cid_l, cid_r]);
+
+        let mut mixed_bytes = Vec::new();
+        let mixed_stats = mixed_pb.finish(&mut mixed_bytes).unwrap();
+        assert!(mixed_stats.edge_table_bytes > 0);
+
+        let mixed_reader = ChunkPackReader::open(Arc::new(SliceReader::new(mixed_bytes))).unwrap();
+        let flat_mixed = mixed_reader.read_edge_table_flat().unwrap();
+        assert_eq!(flat_mixed.len(), mixed_stats.chunk_count as usize);
+        for &cid in &non_boundary_cids {
+            assert_eq!(flat_mixed.head(cid), &[]);
+            assert_eq!(flat_mixed.tail(cid), &[]);
+        }
+        assert_eq!(flat_mixed.head(cid_l), &b_left.as_bytes()[..EDGE_LEN]);
+        assert_eq!(
+            flat_mixed.tail(cid_l),
+            &b_left.as_bytes()[b_left.len() - EDGE_LEN..]
+        );
+        assert_eq!(flat_mixed.head(cid_r), &b_right.as_bytes()[..EDGE_LEN]);
+        assert_eq!(
+            flat_mixed.tail(cid_r),
+            &b_right.as_bytes()[b_right.len() - EDGE_LEN..]
+        );
+
+        let (tail_b, head_b) = mixed_reader.read_edge_trigram_blooms().unwrap().unwrap();
+        assert!(!bloom_may_match(&head_b, b"NONBND"));
+        assert!(!bloom_may_match(&tail_b, b"ZQX"));
+        assert!(bloom_may_match(&tail_b, b"BND_TAIL_EDGE"));
+        assert!(bloom_may_match(&head_b, b"BND_HEAD_EDGE"));
+    }
+
+    #[test]
+    fn emit_hash_table_false_omits_hash_table_and_rejects_corrupt_nonzero_offset() {
+        let pack_id = [0x61u8; 16];
+        let base_opts = PackWriteOptions {
+            codec: test_codec(),
+            emit_hash_table: true,
+            ..PackWriteOptions::default()
+        };
+        let no_hash_opts = PackWriteOptions {
+            emit_hash_table: false,
+            ..base_opts
+        };
+
+        let mut pb_with = ChunkPackBuilder::new(pack_id, base_opts);
+        let mut pb_without = ChunkPackBuilder::new(pack_id, no_hash_opts);
+        for i in 0..32u32 {
+            let chunk = format!("hash_opt_chunk_{i:04}_{}", "data_".repeat(40));
+            pb_with.intern_chunk(chunk.as_bytes()).unwrap();
+            pb_without.intern_chunk(chunk.as_bytes()).unwrap();
+        }
+        let mut bytes_with = Vec::new();
+        let stats_with = pb_with.finish(&mut bytes_with).unwrap();
+        let mut bytes_without = Vec::new();
+        let stats_without = pb_without.finish(&mut bytes_without).unwrap();
+
+        assert_eq!(
+            stats_with.total_bytes - stats_without.total_bytes,
+            u64::from(stats_with.chunk_count) * 16
+        );
+
+        let reader = ChunkPackReader::open_with_tail_hint(
+            Arc::new(SliceReader::new(bytes_without.clone())),
+            Some(128),
+        )
+        .unwrap();
+        assert_eq!(reader.postscript().hash_table_off, 0);
+        assert!(reader.read_hash_table().unwrap().is_empty());
+
+        let got = reader.read_chunks(&[0, 15, 31]).unwrap();
+        assert_eq!(got.len(), 3);
+
+        // Corrupt non-zero hash_table_off (< PACK_HEADER_LEN or out of bounds) must still be rejected.
+        let mut bad_low = bytes_without.clone();
+        let ps_start = bad_low.len() - PACK_POSTSCRIPT_LEN;
+        let mut ps = PackPostscript::decode(&bad_low[ps_start..]).unwrap();
+        ps.hash_table_off = 8;
+        bad_low[ps_start..].copy_from_slice(&ps.encode());
+        assert!(matches!(
+            ChunkPackReader::open(Arc::new(SliceReader::new(bad_low))),
+            Err(StatamError::Corrupt { .. })
+        ));
+
+        let mut bad_high = bytes_without;
+        ps.hash_table_off = bad_high.len() as u64;
+        bad_high[ps_start..].copy_from_slice(&ps.encode());
+        assert!(matches!(
+            ChunkPackReader::open(Arc::new(SliceReader::new(bad_high))),
+            Err(StatamError::Corrupt { .. })
+        ));
+    }
+
+    #[test]
+    fn flat_edge_table_debug_is_private_and_midstream_boundary_tracking_preserves_existing_edges() {
+        let mut pb = ChunkPackBuilder::new(
+            [0x73u8; 16],
+            PackWriteOptions {
+                codec: test_codec(),
+                enable_trigram_skip: true,
+                ..PackWriteOptions::default()
+            },
+        );
+        let pre_chunk = format!("SECRET_PRE_HEAD_{}_SECRET_PRE_TAIL", "payload_".repeat(40));
+        let cid0 = pb.intern_chunk(pre_chunk.as_bytes()).unwrap();
+        // Enable boundary tracking mid-stream after chunks have already been interned.
+        pb.enable_boundary_tracking();
+        let post_chunk = format!("POST_ONLY_CHUNK_{}", "data_".repeat(40));
+        let cid1 = pb.intern_chunk(post_chunk.as_bytes()).unwrap();
+
+        let mut bytes = Vec::new();
+        let stats = pb.finish(&mut bytes).unwrap();
+        assert!(stats.edge_table_bytes > 0);
+
+        let reader = ChunkPackReader::open(Arc::new(SliceReader::new(bytes))).unwrap();
+        let flat = reader.read_edge_table_flat().unwrap();
+        assert_eq!(flat.head(cid0), &pre_chunk.as_bytes()[..EDGE_LEN]);
+        assert_eq!(
+            flat.tail(cid0),
+            &pre_chunk.as_bytes()[pre_chunk.len() - EDGE_LEN..]
+        );
+        assert_eq!(flat.head(cid1), &[]);
+        assert_eq!(flat.tail(cid1), &[]);
+        assert_eq!(flat.head(u32::MAX), &[]);
+        assert_eq!(flat.tail(u32::MAX), &[]);
+
+        let dbg = format!("{flat:?}");
+        assert!(dbg.contains("chunk_count"));
+        assert!(dbg.contains("head_bytes"));
+        assert!(dbg.contains("tail_bytes"));
+        assert!(!dbg.contains("SECRET_PRE_HEAD"));
+        assert!(!dbg.contains("SECRET_PRE_TAIL"));
     }
 }

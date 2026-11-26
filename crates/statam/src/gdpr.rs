@@ -295,11 +295,13 @@ pub fn gdpr_rewrite_day(
                 || toc.frames.iter().any(|f| f.filter_len > 0),
             compress_toc_lz4: (toc.postscript.flags & (PACK_FLAG_TOC_LZ4 | PACK_FLAG_TOC_ZSTD))
                 != 0,
+            emit_hash_table: toc.postscript.hash_table_off != 0,
             write_threads: 1,
         };
         let mut builder = ChunkPackBuilder::new(new_pack_id, pack_opts);
 
         let hashes = pack.read_hash_table()?;
+        let has_hashes = hashes.len() == total_chunks;
         let trigrams = pack.read_trigram_section()?;
         let edges = pack.read_edge_table()?;
         let mut chunk_remap = vec![None; total_chunks];
@@ -319,7 +321,10 @@ pub fn gdpr_rewrite_day(
                         .bytes_purged
                         .saturating_add(u64::from(toc.chunks[cid].raw_len));
                 }
-            } else if live_in_frame == cnt && (f_entry.flags & PACK_FRAME_FLAG_USES_DICT) == 0 {
+            } else if live_in_frame == cnt
+                && has_hashes
+                && (f_entry.flags & PACK_FRAME_FLAG_USES_DICT) == 0
+            {
                 let raw_frame = pack.read_frame_raw(fid as u32)?;
                 let chunk_meta: Vec<([u8; 16], u32, u32)> = (first_cid..first_cid + cnt)
                     .map(|cid| {
@@ -664,6 +669,7 @@ mod tests {
             target_frame_raw_bytes: 16 * 1024,
             enable_trigram_skip: true,
             compress_toc_lz4: true,
+            emit_hash_table: true,
             write_threads: 1,
         }
     }
@@ -1222,6 +1228,7 @@ mod tests {
             target_frame_raw_bytes: 256 * 1024,
             enable_trigram_skip: true,
             compress_toc_lz4: true,
+            emit_hash_table: true,
             write_threads: 1,
         };
         let mut pb = ChunkPackBuilder::new_with_dict(pack_id, pack_opts);

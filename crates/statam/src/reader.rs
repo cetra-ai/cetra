@@ -13,35 +13,42 @@ use cetra_column::{
 use memchr::memmem;
 
 use crate::StatamError;
-use crate::codec::dict::FileDict;
+use crate::codec::dict::{FileDict, decode_dict_codes_body};
+use crate::codec::fsst::FsstBlockView;
 use crate::codec::nested::{
     ShreddedSubCol, decode_shredded_residual_block, decode_shredded_residual_block_selected,
     decode_shredded_subcol, decode_shredded_subcol_selected, decode_single_map_key, unshred_map,
     unshred_map_selected,
 };
+use crate::codec::numeric::read_optional_nulls;
 use crate::codec::{
     ZonePred, ZoneValue, decode_mini_block, decode_mini_block_selected, zone_map_always_matches,
     zone_map_may_match,
 };
 use crate::format::{
-    BLOCK_ENTRY_LEN, BLOCK_FLAG_HAS_NAN, BLOCK_FLAG_MIN_MAX_VALID, BLOCK_FRAME_HEADER_LEN,
-    BlockEntry, CHECKSUM_ALG_CRC32C, COL_FLAG_BLOOM_IN_HOT_TAIL, COL_FLAG_DICT_IN_HOT_TAIL,
-    COL_FLAG_DICT_SORTED, COL_FLAG_HAS_FILE_DICT, COL_FLAG_HAS_TRIGRAM_INDEX,
-    COL_FLAG_IS_SHREDDED_SUBCOL, COLUMN_DIR_ENTRY_LEN, ChunkLoc, Codec, ColumnDirEntry,
-    DEFAULT_TAIL_HINT, Encoding, FILE_HEADER_LEN, FLAG_HOT_TAIL_LZ4, FileHeader, FileSchemaMeta,
-    LAZY_INDEX_ENTRY_LEN, LazyIndexEntry, LazyIndexKind, LocalityGroup, MAX_BATCH_DECODED_BYTES,
-    MAX_BLOCK_RAW_BYTES, MAX_FRAME_RAW_BYTES, MAX_HOT_TAIL_BYTES, MAX_ROW_PAYLOAD_BYTES,
-    POSTSCRIPT_LEN, Postscript, ROW_GROUP_ENTRY_LEN, RowGroupEntry, decode_schema,
-    decompress_checked, read_framed_block, read_framed_pack_frame,
+    BLOCK_ENTRY_LEN, BLOCK_FLAG_CONST_EMPTY_COLLECTION, BLOCK_FLAG_HAS_NAN,
+    BLOCK_FLAG_MIN_MAX_VALID, BLOCK_FRAME_HEADER_LEN, BlockEntry, CHECKSUM_ALG_CRC32C,
+    COL_FLAG_BLOOM_IN_HOT_TAIL, COL_FLAG_DICT_IN_HOT_TAIL, COL_FLAG_DICT_SORTED,
+    COL_FLAG_HAS_FILE_DICT, COL_FLAG_HAS_TRIGRAM_INDEX, COL_FLAG_IS_SHREDDED_SUBCOL,
+    COLUMN_DIR_ENTRY_LEN, ChunkLoc, Codec, ColumnDirEntry, DEFAULT_TAIL_HINT, Encoding,
+    FILE_HEADER_LEN, FLAG_HOT_TAIL_LZ4, FileHeader, FileSchemaMeta, LAZY_INDEX_ENTRY_LEN,
+    LazyIndexEntry, LazyIndexKind, LocalityGroup, MAX_BATCH_DECODED_BYTES, MAX_BLOCK_RAW_BYTES,
+    MAX_FRAME_RAW_BYTES, MAX_HOT_TAIL_BYTES, MAX_ROW_PAYLOAD_BYTES, POSTSCRIPT_LEN, Postscript,
+    ROW_GROUP_ENTRY_LEN, RowGroupEntry, decode_schema, decompress_checked, read_framed_block,
+    read_framed_pack_frame,
 };
 use crate::io::RangeReader;
 use crate::parallel::{MAX_WRITE_THREADS, parallel_map_in_order};
 use crate::payload::pack::ChunkPackReader;
-use crate::payload::search::{pack_short_circuits_all, search_pack_rows_masked_with_threads};
-use crate::payload::{
-    PayloadRefRow, decode_payload_refs, decode_payload_refs_selected,
-    scan_payload_refs_inline_substring,
+use crate::payload::search::{
+    extract_ilike_trigram_hashes, pack_short_circuits_all,
+    search_pack_rows_flat_masked_with_threads,
 };
+use crate::payload::{
+    FLAT_REF_CHUNKS, FLAT_REF_INLINE, FLAT_REF_NULL, FlatPayloadRefs, PayloadRefRow,
+    decode_payload_refs_flat, decode_payload_refs_selected, scan_payload_refs_inline_substring,
+};
+use crate::simd::bitpack::{packed_bytes_len, unpack_u32};
 use crate::simd::bloom::{BloomIndex, statam_bloom_hash};
 use crate::simd::filter::{FilterOp, filter_f64, filter_i64, filter_i64_between, filter_u32};
 use crate::simd::trigram::{TrigramBloom, ascii_lowercase_into, extract_trigram_hashes};
@@ -2089,15 +2096,14 @@ impl StatamReader {
                             }
                         } else if let Some(tri_vec) = caches.narrow_trigrams.get(&cidx) {
                             let global_mb_idx = self.global_mb_idx(cidx, rg_idx, mb_idx);
-                            if let Some(Some(bloom)) = tri_vec.get(global_mb_idx)
-                                && (!sq.case_insensitive || sq.needle.is_ascii())
-                            {
-                                let mut hashes = Vec::new();
-                                extract_trigram_hashes(
-                                    &sq.needle,
-                                    sq.case_insensitive,
-                                    &mut hashes,
-                                );
+                            if let Some(Some(bloom)) = tri_vec.get(global_mb_idx) {
+                                let hashes = if sq.case_insensitive {
+                                    extract_ilike_trigram_hashes(&sq.needle)
+                                } else {
+                                    let mut h = Vec::new();
+                                    extract_trigram_hashes(&sq.needle, false, &mut h);
+                                    h
+                                };
                                 if !hashes.is_empty() && !bloom.may_contain_hashes(&hashes) {
                                     keep = false;
                                     break;
@@ -2609,10 +2615,9 @@ impl StatamReader {
                                 mask.iter_ones().map(|r| (r, PayloadRefRow::Null)).collect();
                             e.insert(DecodedPhase1::SelectedPayloadRefs(selected));
                         } else {
-                            e.insert(DecodedPhase1::PayloadRefs(vec![
-                                PayloadRefRow::Null;
-                                mb_row_count
-                            ]));
+                            e.insert(DecodedPhase1::FlatPayloadRefs(FlatPayloadRefs::all_null(
+                                mb_row_count,
+                            )));
                         }
                     } else {
                         let raw = read_block(blk)?;
@@ -2625,17 +2630,21 @@ impl StatamReader {
                             )?;
                             e.insert(DecodedPhase1::SelectedPayloadRefs(selected));
                         } else {
-                            let refs =
-                                decode_payload_refs(&raw, mb_row_count, MAX_BATCH_DECODED_BYTES)?;
-                            e.insert(DecodedPhase1::PayloadRefs(refs));
+                            let refs = decode_payload_refs_flat(
+                                &raw,
+                                mb_row_count,
+                                MAX_BATCH_DECODED_BYTES,
+                            )?;
+                            e.insert(DecodedPhase1::FlatPayloadRefs(refs));
                         }
                     }
                 }
                 match decoded_p1.get(&cidx) {
-                    Some(DecodedPhase1::PayloadRefs(refs)) => {
+                    Some(DecodedPhase1::FlatPayloadRefs(refs)) => {
                         for r in mask.iter_ones() {
-                            if let PayloadRefRow::Chunks(chunks) = &refs[r] {
-                                for &(pidx, cid) in chunks {
+                            if refs.row_kind(r) == FLAT_REF_CHUNKS {
+                                let (ps, cs) = refs.chunk_refs(r);
+                                for (&pidx, &cid) in ps.iter().zip(cs.iter()) {
                                     by_pack.entry(pidx).or_default().insert(cid);
                                 }
                             }
@@ -3176,6 +3185,8 @@ impl StatamReader {
                     let mut all_short_circuit = true;
                     let mut pack_chunk_counts =
                         Vec::with_capacity(self.meta.schema_meta.pack_ids.len());
+                    let mut pack_has_edges =
+                        Vec::with_capacity(self.meta.schema_meta.pack_ids.len());
                     for &pack_id in &self.meta.schema_meta.pack_ids {
                         let pack = self.resolve_pack(pack_id)?;
                         if !pack_short_circuits_all(&pack, &sq.needle, sq.case_insensitive)? {
@@ -3183,6 +3194,7 @@ impl StatamReader {
                             break;
                         }
                         pack_chunk_counts.push(pack.toc().chunks.len());
+                        pack_has_edges.push(pack.postscript().edge_table_len > 0);
                     }
                     if all_short_circuit {
                         let mut needed_by_other = false;
@@ -3212,7 +3224,54 @@ impl StatamReader {
                                 mb_row_count,
                                 &mask,
                                 &pack_chunk_counts,
+                                &pack_has_edges,
                                 |bytes| matcher.matches(bytes),
+                            )?;
+                            mask = mask.and(&bm)?;
+                            if mask.all_zeros() {
+                                return Ok((mask, decoded_p1));
+                            }
+                            continue;
+                        }
+                    }
+                }
+                if !is_payload && !decoded_p1.contains_key(&cidx) {
+                    let blk = &self.meta.rg_blocks(cidx, rg_idx)[mb_idx];
+                    if matches!(
+                        blk.encoding,
+                        Encoding::ConstNull
+                            | Encoding::Const
+                            | Encoding::Rle
+                            | Encoding::Plain
+                            | Encoding::Fsst
+                            | Encoding::Dict
+                    ) {
+                        let dict_bm = dict_sub_bitmaps.get(sq_idx).and_then(Option::as_ref);
+                        let dict = if blk.encoding == Encoding::Dict {
+                            self.get_cached_dict(cidx)
+                        } else {
+                            None
+                        };
+                        if blk.encoding != Encoding::Dict
+                            || (dict.is_some() && (dict_bm.is_some() || sq.needle.is_empty()))
+                        {
+                            let raw =
+                                if matches!(blk.encoding, Encoding::ConstNull | Encoding::Const)
+                                    || blk.stored_len == 0
+                                {
+                                    Vec::new()
+                                } else {
+                                    read_block(blk)?
+                                };
+                            let bm = eval_utf8_block_substring_raw(
+                                &raw,
+                                blk,
+                                mb_row_count,
+                                &mask,
+                                &sq.needle,
+                                sq.case_insensitive,
+                                dict_bm,
+                                dict.as_deref(),
                             )?;
                             mask = mask.and(&bm)?;
                             if mask.all_zeros() {
@@ -3238,7 +3297,7 @@ impl StatamReader {
                         sq.case_insensitive,
                         dict_sub_bitmaps.get(sq_idx).and_then(Option::as_ref),
                     )?,
-                    DecodedPhase1::PayloadRefs(refs) => self.eval_payload_refs_substring(
+                    DecodedPhase1::FlatPayloadRefs(refs) => self.eval_payload_refs_substring(
                         refs,
                         &mask,
                         &sq.needle,
@@ -3283,11 +3342,11 @@ impl StatamReader {
             DecodedPhase1::ShreddedSub(sub)
         } else if cd.locality_group == LocalityGroup::ExternalPayload {
             if blk.encoding == Encoding::ConstNull {
-                DecodedPhase1::PayloadRefs(vec![PayloadRefRow::Null; mb_row_count])
+                DecodedPhase1::FlatPayloadRefs(FlatPayloadRefs::all_null(mb_row_count))
             } else {
                 let raw = read_block(blk)?;
-                let refs = decode_payload_refs(&raw, mb_row_count, MAX_BATCH_DECODED_BYTES)?;
-                DecodedPhase1::PayloadRefs(refs)
+                let refs = decode_payload_refs_flat(&raw, mb_row_count, MAX_BATCH_DECODED_BYTES)?;
+                DecodedPhase1::FlatPayloadRefs(refs)
             }
         } else if self
             .meta
@@ -3324,7 +3383,7 @@ impl StatamReader {
 
     fn eval_payload_refs_substring(
         &self,
-        refs: &[PayloadRefRow],
+        refs: &FlatPayloadRefs,
         active_mask: &Bitmap,
         needle: &[u8],
         case_insensitive: bool,
@@ -3337,7 +3396,7 @@ impl StatamReader {
         }
         if needle.is_empty() {
             for i in active_mask.iter_ones() {
-                if !matches!(refs[i], PayloadRefRow::Null) {
+                if refs.row_kind(i) != FLAT_REF_NULL {
                     let _ = results.set(i, true);
                 }
             }
@@ -3351,16 +3410,17 @@ impl StatamReader {
         let mut active_chunk_rows = Vec::new();
 
         for i in active_mask.iter_ones() {
-            match &refs[i] {
-                PayloadRefRow::Null => {}
-                PayloadRefRow::Inline(bytes) => {
-                    if matcher.matches(bytes) {
+            match refs.row_kind(i) {
+                FLAT_REF_NULL => {}
+                FLAT_REF_INLINE => {
+                    if matcher.matches(refs.inline_bytes(i)) {
                         let _ = results.set(i, true);
                     }
                 }
-                PayloadRefRow::Chunks(chunks) => {
+                FLAT_REF_CHUNKS => {
                     active_chunk_rows.push(i);
-                    for &(pidx, _) in chunks {
+                    let (ps, _) = refs.chunk_refs(i);
+                    for &pidx in ps {
                         if pidx == L0_LOCAL_PACK_IDX {
                             has_l0_chunks = true;
                         } else {
@@ -3368,6 +3428,7 @@ impl StatamReader {
                         }
                     }
                 }
+                _ => {}
             }
         }
 
@@ -3383,12 +3444,21 @@ impl StatamReader {
             let pack = self.resolve_pack(pack_id)?;
             if pack_short_circuits_all(&pack, needle, case_insensitive)? {
                 let pack_chunk_count = pack.toc().chunks.len();
+                let no_edges = pack.postscript().edge_table_len == 0;
                 for &r in &active_chunk_rows {
-                    if let PayloadRefRow::Chunks(chunks) = &refs[r] {
-                        for &(p, cid) in chunks {
-                            if p == pack_idx && (cid as usize) >= pack_chunk_count {
+                    let (ps, cs) = refs.chunk_refs(r);
+                    let mut pack_refs = 0usize;
+                    for (&p, &cid) in ps.iter().zip(cs.iter()) {
+                        if p == pack_idx {
+                            if (cid as usize) >= pack_chunk_count {
                                 return Err(StatamError::Corrupt {
                                     reason: "payload ref chunk_id out of pack bounds",
+                                });
+                            }
+                            pack_refs += 1;
+                            if no_edges && pack_refs > 1 {
+                                return Err(StatamError::Corrupt {
+                                    reason: "multi-chunk row references pack without edge table",
                                 });
                             }
                         }
@@ -3403,9 +3473,8 @@ impl StatamReader {
                 if results.get(r) {
                     continue;
                 }
-                if let PayloadRefRow::Chunks(chunks) = &refs[r]
-                    && chunks.iter().any(|&(p, _)| p == pack_idx)
-                {
+                let (ps, _) = refs.chunk_refs(r);
+                if ps.contains(&pack_idx) {
                     let _ = pack_mask.set(r, true);
                     any_pack_row = true;
                 }
@@ -3413,7 +3482,7 @@ impl StatamReader {
             if !any_pack_row {
                 continue;
             }
-            let bm = search_pack_rows_masked_with_threads(
+            let bm = search_pack_rows_flat_masked_with_threads(
                 &pack,
                 refs,
                 &pack_mask,
@@ -3436,11 +3505,10 @@ impl StatamReader {
                 if results.get(r) {
                     continue;
                 }
-                if let PayloadRefRow::Chunks(chunks) = &refs[r] {
-                    for &(pidx, cid) in chunks {
-                        if pidx == L0_LOCAL_PACK_IDX {
-                            needed_cids.insert(cid);
-                        }
+                let (ps, cs) = refs.chunk_refs(r);
+                for (&pidx, &cid) in ps.iter().zip(cs.iter()) {
+                    if pidx == L0_LOCAL_PACK_IDX {
+                        needed_cids.insert(cid);
                     }
                 }
             }
@@ -3452,23 +3520,22 @@ impl StatamReader {
                     if results.get(r) {
                         continue;
                     }
-                    if let PayloadRefRow::Chunks(chunks) = &refs[r] {
-                        buf.clear();
-                        for &(pidx, cid) in chunks {
-                            if pidx == L0_LOCAL_PACK_IDX
-                                && let Some(c) = chunk_map.get(&cid)
-                            {
-                                if buf.len().saturating_add(c.len()) > MAX_ROW_PAYLOAD_BYTES {
-                                    return Err(StatamError::BoundsExceeded {
-                                        reason: "L0 payload exceeds MAX_ROW_PAYLOAD_BYTES",
-                                    });
-                                }
-                                buf.extend_from_slice(c);
+                    let (ps, cs) = refs.chunk_refs(r);
+                    buf.clear();
+                    for (&pidx, &cid) in ps.iter().zip(cs.iter()) {
+                        if pidx == L0_LOCAL_PACK_IDX
+                            && let Some(c) = chunk_map.get(&cid)
+                        {
+                            if buf.len().saturating_add(c.len()) > MAX_ROW_PAYLOAD_BYTES {
+                                return Err(StatamError::BoundsExceeded {
+                                    reason: "L0 payload exceeds MAX_ROW_PAYLOAD_BYTES",
+                                });
                             }
+                            buf.extend_from_slice(c);
                         }
-                        if matcher.matches(&buf) {
-                            let _ = results.set(r, true);
-                        }
+                    }
+                    if matcher.matches(&buf) {
+                        let _ = results.set(r, true);
                     }
                 }
             }
@@ -3566,50 +3633,51 @@ impl StatamReader {
         let is_sparse_payload =
             !mask.all_ones() && mask.count_ones().saturating_mul(8) < mb_row_count;
 
-        let decode_payload_col =
-            |cidx: usize, cached: Option<DecodedPhase1>| -> Result<Column, StatamError> {
-                match cached {
-                    Some(DecodedPhase1::SelectedPayloadRefs(selected)) => {
+        let decode_payload_col = |cidx: usize,
+                                  cached: Option<DecodedPhase1>|
+         -> Result<Column, StatamError> {
+            match cached {
+                Some(DecodedPhase1::SelectedPayloadRefs(selected)) => {
+                    reconstruct_payload_column_selected(
+                        mb_row_count,
+                        &selected,
+                        mask,
+                        resolved_chunks,
+                    )
+                }
+                Some(DecodedPhase1::FlatPayloadRefs(refs)) => {
+                    reconstruct_payload_column_from_flat(&refs, mask, resolved_chunks)
+                }
+                _ => {
+                    let blk = &self.meta.rg_blocks(cidx, rg_idx)[mb_idx];
+                    if blk.encoding == Encoding::ConstNull {
+                        return Ok(Column::try_new_const(
+                            ScalarValue::Null(DataType::Utf8),
+                            mb_row_count,
+                        )?);
+                    }
+                    let raw = read_block(blk)?;
+                    if is_sparse_payload {
+                        let selected = decode_payload_refs_selected(
+                            &raw,
+                            mb_row_count,
+                            mask,
+                            MAX_BATCH_DECODED_BYTES,
+                        )?;
                         reconstruct_payload_column_selected(
                             mb_row_count,
                             &selected,
                             mask,
                             resolved_chunks,
                         )
-                    }
-                    Some(DecodedPhase1::PayloadRefs(refs)) => {
-                        reconstruct_payload_column_from_map(&refs, mask, resolved_chunks)
-                    }
-                    _ => {
-                        let blk = &self.meta.rg_blocks(cidx, rg_idx)[mb_idx];
-                        if blk.encoding == Encoding::ConstNull {
-                            return Ok(Column::try_new_const(
-                                ScalarValue::Null(DataType::Utf8),
-                                mb_row_count,
-                            )?);
-                        }
-                        let raw = read_block(blk)?;
-                        if is_sparse_payload {
-                            let selected = decode_payload_refs_selected(
-                                &raw,
-                                mb_row_count,
-                                mask,
-                                MAX_BATCH_DECODED_BYTES,
-                            )?;
-                            reconstruct_payload_column_selected(
-                                mb_row_count,
-                                &selected,
-                                mask,
-                                resolved_chunks,
-                            )
-                        } else {
-                            let refs =
-                                decode_payload_refs(&raw, mb_row_count, MAX_BATCH_DECODED_BYTES)?;
-                            reconstruct_payload_column_from_map(&refs, mask, resolved_chunks)
-                        }
+                    } else {
+                        let refs =
+                            decode_payload_refs_flat(&raw, mb_row_count, MAX_BATCH_DECODED_BYTES)?;
+                        reconstruct_payload_column_from_flat(&refs, mask, resolved_chunks)
                     }
                 }
-            };
+            }
+        };
 
         let out_cols = if threads <= 1 {
             let mut out_cols = Vec::with_capacity(proj_indices.len());
@@ -4227,15 +4295,15 @@ fn append_payload_row_to_utf8(
     Ok(())
 }
 
-fn reconstruct_payload_column_from_map(
-    refs: &[PayloadRefRow],
+fn reconstruct_payload_column_from_flat(
+    refs: &FlatPayloadRefs,
     active_mask: &Bitmap,
     resolved_chunks: &HashMap<(u16, u32), Vec<u8>>,
 ) -> Result<Column, StatamError> {
     let row_count = refs.len();
     let all_active_null = active_mask
         .iter_ones()
-        .all(|r| matches!(refs[r], PayloadRefRow::Null));
+        .all(|r| refs.row_kind(r) == FLAT_REF_NULL);
     if all_active_null {
         return Ok(Column::try_new_const(
             ScalarValue::Null(DataType::Utf8),
@@ -4249,20 +4317,81 @@ fn reconstruct_payload_column_from_map(
     let mut nulls = Bitmap::new_zeroed(row_count);
     let mut total_decoded = 0usize;
 
-    for (r, row) in refs.iter().enumerate() {
+    for r in 0..row_count {
         if !active_mask.get(r) {
             offsets.push(data_bytes.len() as u32);
             continue;
         }
-        append_payload_row_to_utf8(
-            row,
-            r,
-            &mut nulls,
-            &mut offsets,
-            &mut data_bytes,
-            &mut total_decoded,
-            resolved_chunks,
-        )?;
+        match refs.row_kind(r) {
+            FLAT_REF_NULL => {
+                offsets.push(data_bytes.len() as u32);
+            }
+            FLAT_REF_INLINE => {
+                let bytes = refs.inline_bytes(r);
+                total_decoded =
+                    total_decoded
+                        .checked_add(bytes.len())
+                        .ok_or(StatamError::BoundsExceeded {
+                            reason: "decoded payload column overflows usize",
+                        })?;
+                if total_decoded > MAX_BATCH_DECODED_BYTES {
+                    return Err(StatamError::BoundsExceeded {
+                        reason: "decoded payload column exceeds MAX_BATCH_DECODED_BYTES",
+                    });
+                }
+                let _ = nulls.set(r, true);
+                data_bytes.extend_from_slice(bytes);
+                let next_off =
+                    u32::try_from(data_bytes.len()).map_err(|_| StatamError::BoundsExceeded {
+                        reason: "utf8 payload column exceeds u32::MAX",
+                    })?;
+                offsets.push(next_off);
+            }
+            FLAT_REF_CHUNKS => {
+                let _ = nulls.set(r, true);
+                let start_pos = data_bytes.len();
+                let mut row_len = 0usize;
+                let (ps, cs) = refs.chunk_refs(r);
+                for (&pidx, &cid) in ps.iter().zip(cs.iter()) {
+                    let chunk = resolved_chunks
+                        .get(&(pidx, cid))
+                        .ok_or(StatamError::Corrupt {
+                            reason: "missing resolved payload chunk during column reconstruction",
+                        })?;
+                    row_len =
+                        row_len
+                            .checked_add(chunk.len())
+                            .ok_or(StatamError::BoundsExceeded {
+                                reason: "row payload byte size overflow",
+                            })?;
+                    if row_len > MAX_ROW_PAYLOAD_BYTES {
+                        return Err(StatamError::BoundsExceeded {
+                            reason: "reconstructed row payload exceeds MAX_ROW_PAYLOAD_BYTES",
+                        });
+                    }
+                    total_decoded = total_decoded.checked_add(chunk.len()).ok_or(
+                        StatamError::BoundsExceeded {
+                            reason: "decoded payload column overflows usize",
+                        },
+                    )?;
+                    if total_decoded > MAX_BATCH_DECODED_BYTES {
+                        return Err(StatamError::BoundsExceeded {
+                            reason: "decoded payload column exceeds MAX_BATCH_DECODED_BYTES",
+                        });
+                    }
+                    data_bytes.extend_from_slice(chunk);
+                }
+                let next_off = u32::try_from(start_pos + row_len).map_err(|_| {
+                    StatamError::BoundsExceeded {
+                        reason: "utf8 payload column exceeds u32::MAX",
+                    }
+                })?;
+                offsets.push(next_off);
+            }
+            _ => {
+                offsets.push(data_bytes.len() as u32);
+            }
+        }
     }
 
     let utf8 = Utf8Data::try_new(offsets, data_bytes)?;
@@ -4346,7 +4475,7 @@ type ActiveMiniBlock = (usize, Bitmap, HashMap<usize, DecodedPhase1>);
 enum DecodedPhase1 {
     Col(Column),
     ShreddedSub(ShreddedSubCol),
-    PayloadRefs(Vec<PayloadRefRow>),
+    FlatPayloadRefs(FlatPayloadRefs),
     SelectedPayloadRefs(Vec<(usize, PayloadRefRow)>),
 }
 
@@ -5237,6 +5366,380 @@ fn filter_residual_to_keys(
     )?)
 }
 
+/// Evaluates a `Utf8` mini-block substring filter directly over raw encoded block bytes.
+///
+/// Bits outside `active_mask` are unspecified; caller must intersect with `active_mask`.
+#[allow(clippy::too_many_arguments)]
+fn eval_utf8_block_substring_raw(
+    raw: &[u8],
+    blk: &BlockEntry,
+    mb_row_count: usize,
+    active_mask: &Bitmap,
+    needle: &[u8],
+    case_insensitive: bool,
+    dict_sub_bitmap: Option<&Bitmap>,
+    file_dict: Option<&FileDict>,
+) -> Result<Bitmap, StatamError> {
+    if active_mask.len() != mb_row_count {
+        return Err(StatamError::Corrupt {
+            reason: "active_mask length mismatch in raw substring eval",
+        });
+    }
+    if mb_row_count == 0 {
+        if !matches!(blk.encoding, Encoding::ConstNull | Encoding::Const) && !raw.is_empty() {
+            return Err(StatamError::Corrupt {
+                reason: "trailing bytes in empty narrow block",
+            });
+        }
+        return Ok(Bitmap::new_zeroed(0));
+    }
+    if active_mask.all_zeros() {
+        return Ok(Bitmap::new_zeroed(mb_row_count));
+    }
+
+    match blk.encoding {
+        Encoding::ConstNull => Ok(Bitmap::new_zeroed(mb_row_count)),
+        Encoding::Const => {
+            if blk.null_count != 0 {
+                return Err(StatamError::Corrupt {
+                    reason: "Const block cannot have non-zero null_count",
+                });
+            }
+            if (blk.block_flags & BLOCK_FLAG_CONST_EMPTY_COLLECTION) != 0 {
+                return Err(StatamError::Corrupt {
+                    reason: "CONST_EMPTY_COLLECTION set on non-collection DataType",
+                });
+            }
+            let inline_len = usize::from(blk.min_inline_len);
+            if inline_len > 16 {
+                return Err(StatamError::Corrupt {
+                    reason: "invalid Const Utf8 inline length",
+                });
+            }
+            let bytes = &blk.min_inline[..inline_len];
+            let s = std::str::from_utf8(bytes).map_err(|_| StatamError::Corrupt {
+                reason: "invalid UTF-8 in Const Utf8 inline",
+            })?;
+            let hit = needle.is_empty()
+                || Utf8Matcher::new(needle, case_insensitive).matches(s.as_bytes());
+            Ok(if hit {
+                Bitmap::new_ones(mb_row_count)
+            } else {
+                Bitmap::new_zeroed(mb_row_count)
+            })
+        }
+        Encoding::Plain => {
+            let (nulls, body) = read_optional_nulls(raw, mb_row_count, blk.block_flags)?;
+            let (off_raw, data) = parse_plain_varlen_slices(body, mb_row_count)?;
+            if needle.is_empty() {
+                return Ok(nulls.unwrap_or_else(|| Bitmap::new_ones(mb_row_count)));
+            }
+            let mut matcher = Utf8Matcher::new(needle, case_insensitive);
+            let mut out = Bitmap::new_zeroed(mb_row_count);
+            for row in active_mask.iter_ones() {
+                if row >= mb_row_count {
+                    break;
+                }
+                if nulls.as_ref().is_none_or(|bm| bm.get(row)) {
+                    let start = read_u32_le_at(off_raw, row);
+                    let end = read_u32_le_at(off_raw, row + 1);
+                    if matcher.matches(&data[start..end]) {
+                        let _ = out.set(row, true);
+                    }
+                }
+            }
+            Ok(out)
+        }
+        Encoding::Fsst => {
+            let (nulls, body) = read_optional_nulls(raw, mb_row_count, blk.block_flags)?;
+            let view = FsstBlockView::parse(body, mb_row_count)?;
+            if needle.is_empty() {
+                return Ok(nulls.unwrap_or_else(|| Bitmap::new_ones(mb_row_count)));
+            }
+            let mut matcher = Utf8Matcher::new(needle, case_insensitive);
+            let mut scratch = Vec::new();
+            let mut out = Bitmap::new_zeroed(mb_row_count);
+            for row in active_mask.iter_ones() {
+                if row >= mb_row_count {
+                    break;
+                }
+                if nulls.as_ref().is_none_or(|bm| bm.get(row)) {
+                    let slice = view.decode_row_into(row, &mut scratch)?;
+                    if matcher.matches(slice) {
+                        let _ = out.set(row, true);
+                    }
+                }
+            }
+            Ok(out)
+        }
+        Encoding::Rle => {
+            if raw.len() < 4 {
+                return Err(StatamError::Corrupt {
+                    reason: "truncated Rle num_runs",
+                });
+            }
+            let num_runs = u32::from_le_bytes([raw[0], raw[1], raw[2], raw[3]]) as usize;
+            if num_runs == 0 || num_runs > mb_row_count {
+                return Err(StatamError::Corrupt {
+                    reason: "invalid Rle num_runs",
+                });
+            }
+            if num_runs
+                .checked_mul(4)
+                .is_none_or(|b| b > MAX_BLOCK_RAW_BYTES)
+            {
+                return Err(StatamError::BoundsExceeded {
+                    reason: "Rle num_runs exceeds MAX_BLOCK_RAW_BYTES",
+                });
+            }
+            let (run_nulls, after_nulls) =
+                read_optional_nulls(&raw[4..], num_runs, blk.block_flags)?;
+            let Some(&re_bw) = after_nulls.first() else {
+                return Err(StatamError::Corrupt {
+                    reason: "truncated Rle run_ends bit_width",
+                });
+            };
+            if re_bw > 32 {
+                return Err(StatamError::Corrupt {
+                    reason: "invalid Rle run_ends bit_width",
+                });
+            }
+            let re_bytes = packed_bytes_len(num_runs, re_bw)?;
+            if after_nulls.len() < 1 + re_bytes + 1 {
+                return Err(StatamError::Corrupt {
+                    reason: "truncated Rle body",
+                });
+            }
+            let mut run_ends = Vec::with_capacity(num_runs);
+            unpack_u32(
+                &after_nulls[1..1 + re_bytes],
+                num_runs,
+                re_bw,
+                &mut run_ends,
+            )?;
+            let mut prev = 0u32;
+            for &end in &run_ends {
+                if end <= prev || (end as usize) > mb_row_count {
+                    return Err(StatamError::Corrupt {
+                        reason: "invalid Rle run_ends monotonicity",
+                    });
+                }
+                prev = end;
+            }
+            if prev as usize != mb_row_count {
+                return Err(StatamError::Corrupt {
+                    reason: "Rle run_ends do not sum to row_count",
+                });
+            }
+
+            let inner_enc = Encoding::from_u8(after_nulls[1 + re_bytes])?;
+            let inner_body = &after_nulls[1 + re_bytes + 1..];
+            let mut out_words = vec![0u64; mb_row_count.div_ceil(64)];
+            let active_words = active_mask.words();
+            let mut matcher = Utf8Matcher::new(needle, case_insensitive);
+
+            match inner_enc {
+                Encoding::Plain => {
+                    let (off_raw, data) = parse_plain_varlen_slices(inner_body, num_runs)?;
+                    let mut run_start = 0usize;
+                    for (run_idx, &end_u32) in run_ends.iter().enumerate() {
+                        let run_end = end_u32 as usize;
+                        if run_nulls.as_ref().is_none_or(|bm| bm.get(run_idx))
+                            && range_has_any_one(active_words, run_start, run_end)
+                        {
+                            let start = read_u32_le_at(off_raw, run_idx);
+                            let end = read_u32_le_at(off_raw, run_idx + 1);
+                            if needle.is_empty() || matcher.matches(&data[start..end]) {
+                                set_bit_range(&mut out_words, run_start, run_end);
+                            }
+                        }
+                        run_start = run_end;
+                    }
+                }
+                Encoding::Fsst => {
+                    let view = FsstBlockView::parse(inner_body, num_runs)?;
+                    let mut scratch = Vec::new();
+                    let mut run_start = 0usize;
+                    for (run_idx, &end_u32) in run_ends.iter().enumerate() {
+                        let run_end = end_u32 as usize;
+                        if run_nulls.as_ref().is_none_or(|bm| bm.get(run_idx))
+                            && range_has_any_one(active_words, run_start, run_end)
+                        {
+                            let hit = if needle.is_empty() {
+                                true
+                            } else {
+                                let slice = view.decode_row_into(run_idx, &mut scratch)?;
+                                matcher.matches(slice)
+                            };
+                            if hit {
+                                set_bit_range(&mut out_words, run_start, run_end);
+                            }
+                        }
+                        run_start = run_end;
+                    }
+                }
+                _ => {
+                    return Err(StatamError::Corrupt {
+                        reason: "incompatible Rle inner encoding for Utf8",
+                    });
+                }
+            }
+            Ok(Bitmap::from_words(out_words, mb_row_count)?)
+        }
+        Encoding::Dict => {
+            let Some(dict) = file_dict else {
+                return Err(StatamError::Corrupt {
+                    reason: "Dict mini-block requires FileDict",
+                });
+            };
+            if dict.values().data_type() != DataType::Utf8 {
+                return Err(StatamError::SchemaMismatch {
+                    reason: "FileDict DataType mismatch",
+                });
+            }
+            let (nulls, body) = read_optional_nulls(raw, mb_row_count, blk.block_flags)?;
+            let codes = decode_dict_codes_body(body, mb_row_count, dict.len(), nulls.as_ref())?;
+            if needle.is_empty() {
+                return Ok(nulls.unwrap_or_else(|| Bitmap::new_ones(mb_row_count)));
+            }
+            let Some(code_bm) = dict_sub_bitmap else {
+                return Err(StatamError::Corrupt {
+                    reason: "missing dict_sub_bitmap for Dict substring",
+                });
+            };
+            if code_bm.len() != dict.len() {
+                return Err(StatamError::Corrupt {
+                    reason: "dict_sub_bitmap length mismatch",
+                });
+            }
+            if code_bm.all_zeros() {
+                return Ok(Bitmap::new_zeroed(mb_row_count));
+            }
+            if code_bm.all_ones() {
+                return Ok(nulls.unwrap_or_else(|| Bitmap::new_ones(mb_row_count)));
+            }
+            let mut out = Bitmap::new_zeroed(mb_row_count);
+            for row in active_mask.iter_ones() {
+                if row >= mb_row_count {
+                    break;
+                }
+                if nulls.as_ref().is_none_or(|bm| bm.get(row)) && code_bm.get(codes[row] as usize) {
+                    let _ = out.set(row, true);
+                }
+            }
+            Ok(out)
+        }
+        _ => Err(StatamError::Corrupt {
+            reason: "unsupported encoding for raw Utf8 substring eval",
+        }),
+    }
+}
+
+#[inline]
+fn read_u32_le_at(raw: &[u8], idx: usize) -> usize {
+    let off = idx * 4;
+    u32::from_le_bytes([raw[off], raw[off + 1], raw[off + 2], raw[off + 3]]) as usize
+}
+
+fn parse_plain_varlen_slices(body: &[u8], row_count: usize) -> Result<(&[u8], &[u8]), StatamError> {
+    let offsets_count = row_count
+        .checked_add(1)
+        .ok_or(StatamError::BoundsExceeded {
+            reason: "plain varlen offsets count overflow",
+        })?;
+    let offsets_bytes = offsets_count
+        .checked_mul(4)
+        .ok_or(StatamError::BoundsExceeded {
+            reason: "plain varlen offsets size overflow",
+        })?;
+    if offsets_bytes > MAX_BLOCK_RAW_BYTES {
+        return Err(StatamError::BoundsExceeded {
+            reason: "plain varlen offsets exceed MAX_BLOCK_RAW_BYTES",
+        });
+    }
+    if body.len() < offsets_bytes {
+        return Err(StatamError::Corrupt {
+            reason: "truncated plain varlen offsets",
+        });
+    }
+    let data_len = body.len() - offsets_bytes;
+    if data_len > MAX_BLOCK_RAW_BYTES {
+        return Err(StatamError::BoundsExceeded {
+            reason: "plain varlen data exceeds MAX_BLOCK_RAW_BYTES",
+        });
+    }
+    let off_raw = &body[..offsets_bytes];
+    let mut prev = 0usize;
+    for (idx, &chunk) in off_raw.as_chunks::<4>().0.iter().enumerate() {
+        let v = u32::from_le_bytes(chunk) as usize;
+        if (idx == 0 && v != 0) || v < prev || v > data_len {
+            return Err(StatamError::Corrupt {
+                reason: "invalid plain varlen offsets",
+            });
+        }
+        prev = v;
+    }
+    if prev != data_len {
+        return Err(StatamError::Corrupt {
+            reason: "plain varlen final offset mismatch",
+        });
+    }
+    Ok((off_raw, &body[offsets_bytes..]))
+}
+
+#[inline]
+fn range_has_any_one(words: &[u64], start: usize, end: usize) -> bool {
+    if start >= end {
+        return false;
+    }
+    let first_w = start >> 6;
+    let last_w = (end - 1) >> 6;
+    let start_mask = !0u64 << (start & 63);
+    let end_rem = end & 63;
+    let end_mask = if end_rem == 0 {
+        !0u64
+    } else {
+        (1u64 << end_rem) - 1
+    };
+    if first_w == last_w {
+        return (words[first_w] & start_mask & end_mask) != 0;
+    }
+    if (words[first_w] & start_mask) != 0 {
+        return true;
+    }
+    for &w in &words[first_w + 1..last_w] {
+        if w != 0 {
+            return true;
+        }
+    }
+    (words[last_w] & end_mask) != 0
+}
+
+#[inline]
+fn set_bit_range(words: &mut [u64], start: usize, end: usize) {
+    if start >= end {
+        return;
+    }
+    let first_w = start >> 6;
+    let last_w = (end - 1) >> 6;
+    let start_mask = !0u64 << (start & 63);
+    let end_rem = end & 63;
+    let end_mask = if end_rem == 0 {
+        !0u64
+    } else {
+        (1u64 << end_rem) - 1
+    };
+    if first_w == last_w {
+        words[first_w] |= start_mask & end_mask;
+        return;
+    }
+    words[first_w] |= start_mask;
+    for w in &mut words[first_w + 1..last_w] {
+        *w = !0u64;
+    }
+    words[last_w] |= end_mask;
+}
+
 fn eval_utf8_substring(
     col: &Column,
     needle: &[u8],
@@ -5487,6 +5990,7 @@ mod tests {
             enable_trigram_skip: true,
             compress_toc_lz4: true,
             write_threads: 1,
+            ..PackWriteOptions::default()
         }
     }
 
@@ -8238,5 +8742,622 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn raw_utf8_phase1_substring_parity_and_unicode_narrow_trigram_pruning() {
+        use crate::codec::{WriteProfile, encode_mini_block};
+        use crate::format::read_framed_block;
+
+        let n = 128usize;
+        let mut active = Bitmap::new_zeroed(n);
+        for r in [0usize, 5, 17, 63, 64, 99, 127] {
+            let _ = active.set(r, true);
+        }
+
+        // Helper to test parity between eval_utf8_block_substring_raw and full decode + eval_utf8_substring.
+        let check_raw_parity = |col: &Column, profile: WriteProfile, dict: Option<&FileDict>| {
+            let enc = encode_mini_block(col, &DataType::Utf8, profile, dict).unwrap();
+            let mut framed = Vec::new();
+            let entry = enc
+                .write_framed_entry(0, n as u16, 0, 3, &mut framed)
+                .unwrap();
+            let raw = if entry.stored_len == 0 {
+                Vec::new()
+            } else {
+                read_framed_block(&framed, MAX_BLOCK_RAW_BYTES).unwrap().2
+            };
+            let decoded = decode_mini_block(&raw, &entry, &DataType::Utf8, dict).unwrap();
+
+            for (needle, ci) in [
+                ("Google".as_bytes(), false),
+                ("google".as_bytes(), true),
+                ("Alienación".as_bytes(), true),
+                ("ALIENACIÓN".as_bytes(), true),
+                ("".as_bytes(), false),
+                ("absent_token_xyz".as_bytes(), true),
+            ] {
+                let dict_bm = dict.map(|d| {
+                    let mut matcher = Utf8Matcher::new(needle, ci);
+                    let mut bm = Bitmap::new_zeroed(d.len());
+                    if let FlatData::Utf8(u) = d.values().data() {
+                        for i in 0..u.len() {
+                            if let Some(s) = u.get(i)
+                                && matcher.matches(s.as_bytes())
+                            {
+                                let _ = bm.set(i, true);
+                            }
+                        }
+                    }
+                    bm
+                });
+                let expected = eval_utf8_substring(&decoded, needle, ci, dict_bm.as_ref()).unwrap();
+                let expected_masked = expected.and(&active).unwrap();
+                let got_raw = eval_utf8_block_substring_raw(
+                    &raw,
+                    &entry,
+                    n,
+                    &active,
+                    needle,
+                    ci,
+                    dict_bm.as_ref(),
+                    dict,
+                )
+                .unwrap();
+                let got_masked = got_raw.and(&active).unwrap();
+                assert_eq!(
+                    got_masked, expected_masked,
+                    "encoding={:?} ci={ci} mismatch",
+                    entry.encoding
+                );
+            }
+        };
+
+        // ConstNull, Const, Plain, Fsst, Rle(Plain), Rle(Fsst), Dict
+        check_raw_parity(
+            &Column::Const {
+                value: ScalarValue::Null(DataType::Utf8),
+                len: n,
+            },
+            WriteProfile::L1Compact,
+            None,
+        );
+        check_raw_parity(
+            &Column::Const {
+                value: ScalarValue::Utf8("Google".to_owned()),
+                len: n,
+            },
+            WriteProfile::L1Compact,
+            None,
+        );
+
+        let mut strs = Vec::with_capacity(n);
+        let mut valid = Vec::with_capacity(n);
+        for i in 0..n {
+            if i % 11 == 0 {
+                strs.push(String::new());
+                valid.push(false);
+            } else if i % 5 == 0 {
+                strs.push(format!(
+                    "{{\"title\":\"Google Search {i}\",\"tag\":\"Alienación\"}}"
+                ));
+                valid.push(true);
+            } else {
+                strs.push(format!(
+                    "{{\"title\":\"Other Entry {i}\",\"tag\":\"ALIENACIÓN {i}\"}}"
+                ));
+                valid.push(true);
+            }
+        }
+        let flat_col = Column::Flat(
+            FlatColumn::try_new(
+                FlatData::Utf8(Utf8Data::try_from_slices(strs.iter().map(String::as_str)).unwrap()),
+                Some(Bitmap::from_bools(&valid)),
+            )
+            .unwrap(),
+        );
+        check_raw_parity(&flat_col, WriteProfile::L0Fast, None);
+        check_raw_parity(&flat_col, WriteProfile::L1Compact, None);
+
+        // Rle(Plain) and Rle(Fsst)
+        let mut rle_vals = Vec::new();
+        let mut rle_valid = Vec::new();
+        let mut rle_ends = Vec::new();
+        for r in 0..16usize {
+            rle_ends.push(((r + 1) * 8) as u32);
+            if r == 3 {
+                rle_vals.push(String::new());
+                rle_valid.push(false);
+            } else if r % 4 == 0 {
+                rle_vals.push(format!(
+                    "Google News Run {r} Alienación long repeated payload {r}"
+                ));
+                rle_valid.push(true);
+            } else {
+                rle_vals.push(format!(
+                    "Plain Run {r} ALIENACIÓN long repeated payload {r}"
+                ));
+                rle_valid.push(true);
+            }
+        }
+        let rle_col = Column::Rle(
+            RleColumn::try_new(
+                FlatColumn::try_new(
+                    FlatData::Utf8(
+                        Utf8Data::try_from_slices(rle_vals.iter().map(String::as_str)).unwrap(),
+                    ),
+                    Some(Bitmap::from_bools(&rle_valid)),
+                )
+                .unwrap(),
+                rle_ends,
+            )
+            .unwrap(),
+        );
+        check_raw_parity(&rle_col, WriteProfile::L0Fast, None);
+        check_raw_parity(&rle_col, WriteProfile::L1Compact, None);
+
+        // Dict
+        let dict = FileDict::from_flat(
+            FlatColumn::try_new(
+                FlatData::Utf8(
+                    Utf8Data::try_from_slices(["Google", "Alienación", "ALIENACIÓN", "other"])
+                        .unwrap(),
+                ),
+                None,
+            )
+            .unwrap(),
+            true,
+        )
+        .unwrap();
+        let mut d_strs = Vec::with_capacity(n);
+        let mut d_valid = Vec::with_capacity(n);
+        for i in 0..n {
+            if i % 13 == 0 {
+                d_strs.push(String::new());
+                d_valid.push(false);
+            } else {
+                d_strs.push(["Google", "Alienación", "ALIENACIÓN", "other"][i % 4].to_owned());
+                d_valid.push(true);
+            }
+        }
+        let dict_col = Column::Flat(
+            FlatColumn::try_new(
+                FlatData::Utf8(
+                    Utf8Data::try_from_slices(d_strs.iter().map(String::as_str)).unwrap(),
+                ),
+                Some(Bitmap::from_bools(&d_valid)),
+            )
+            .unwrap(),
+        );
+        check_raw_parity(&dict_col, WriteProfile::L1Compact, Some(&dict));
+
+        // End-to-end StatamReader query with narrow trigram index + Unicode ILIKE + projection.
+        let schema = Arc::new(
+            Schema::try_new(vec![
+                Field::new("ts", DataType::TimestampNs { utc: true }, false),
+                Field::new("title", DataType::Utf8, false),
+            ])
+            .unwrap(),
+        );
+        let total = 2000usize;
+        let mut ts_vals = Vec::with_capacity(total);
+        let mut titles = Vec::with_capacity(total);
+        let mut expected_rows = Vec::new();
+        for i in 0..total {
+            ts_vals.push(1_700_000_000_000_000_000i64 + i as i64 * 1_000_000);
+            if i == 1500 {
+                titles.push("Proyecto Alienación Especial - 1500".to_owned());
+                expected_rows.push(i);
+            } else if i == 1501 {
+                titles.push("PROYECTO ALIENACIÓN TOTAL - 1501".to_owned());
+                expected_rows.push(i);
+            } else {
+                titles.push(format!("qqq mmm qqq mmm title {i:04}"));
+            }
+        }
+        let batch = Batch::try_new_all(
+            Arc::clone(&schema),
+            vec![
+                Column::Flat(
+                    FlatColumn::try_new(
+                        FlatData::TimestampNs {
+                            values: ts_vals,
+                            utc: true,
+                        },
+                        None,
+                    )
+                    .unwrap(),
+                ),
+                Column::Flat(
+                    FlatColumn::try_new(
+                        FlatData::Utf8(
+                            Utf8Data::try_from_slices(titles.iter().map(String::as_str)).unwrap(),
+                        ),
+                        None,
+                    )
+                    .unwrap(),
+                ),
+            ],
+            total,
+        )
+        .unwrap();
+
+        let opts = WriteOptions {
+            profile: WriteProfile::L1Compact,
+            mini_block_size: 256,
+            row_group_size: 2000,
+            narrow_trigram_cols: vec!["title".to_owned()],
+            ..WriteOptions::default()
+        };
+        let mut file_bytes = Vec::new();
+        let mut writer = StatamWriter::new(Arc::clone(&schema), opts, None).unwrap();
+        writer.write_batch(&batch).unwrap();
+        writer.finish(&mut file_bytes).unwrap();
+
+        let s3 = Arc::new(SimulatedS3Reader::from_bytes(
+            file_bytes,
+            SimulatedS3Config::default(),
+        ));
+        let reader = StatamReader::open(s3 as Arc<dyn RangeReader>, None).unwrap();
+        for needle in ["Alienación".as_bytes(), "ALIENACIÓN".as_bytes()] {
+            let req = ScanRequest {
+                projection: Some(vec![0, 1]),
+                substrings: vec![SubstringQuery::ilike("title", needle)],
+                ..ScanRequest::default()
+            };
+            let scanned = reader.scan(&req).unwrap();
+            let combined = concat_scanned_batches(&schema, &scanned);
+            assert_eq!(combined.num_rows(), expected_rows.len());
+            let FlatData::TimestampNs { values, .. } = combined
+                .column(0)
+                .unwrap()
+                .materialize(None)
+                .unwrap()
+                .data()
+                .clone()
+            else {
+                panic!("expected TimestampNs");
+            };
+            let expected_ts: Vec<i64> = expected_rows
+                .iter()
+                .map(|&i| 1_700_000_000_000_000_000i64 + i as i64 * 1_000_000)
+                .collect();
+            assert_eq!(values, expected_ts);
+        }
+    }
+
+    #[test]
+    fn raw_utf8_block_substring_rejects_corrupt_const_plain_fsst_and_dict() {
+        use crate::codec::{WriteProfile, encode_mini_block};
+        use crate::format::read_framed_block;
+
+        let n = 16usize;
+        let active = Bitmap::new_ones(n);
+
+        // 1. Const: reject BLOCK_FLAG_CONST_EMPTY_COLLECTION and invalid UTF-8.
+        let mut const_entry = BlockEntry {
+            first_row: 0,
+            row_count: n as u16,
+            null_count: 0,
+            offset: 0,
+            stored_len: 0,
+            raw_len: 0,
+            encoding: Encoding::Const,
+            codec: Codec::None,
+            block_flags: BLOCK_FLAG_CONST_EMPTY_COLLECTION,
+            min_inline_len: 0,
+            max_inline_len: 0,
+            reserved: [0; 3],
+            min_inline: [0; 16],
+            max_inline: [0; 16],
+        };
+        assert!(matches!(
+            eval_utf8_block_substring_raw(&[], &const_entry, n, &active, b"", false, None, None),
+            Err(StatamError::Corrupt { .. })
+        ));
+        const_entry.block_flags = 0;
+        const_entry.min_inline_len = 2;
+        const_entry.min_inline[..2].copy_from_slice(&[0xFF, 0xFE]);
+        assert!(matches!(
+            eval_utf8_block_substring_raw(&[], &const_entry, n, &active, b"", false, None, None),
+            Err(StatamError::Corrupt { .. })
+        ));
+
+        // 2. Plain & FSST: truncated body must be rejected even when needle is empty!
+        let plain_vals: Vec<String> = (0..n).map(|i| format!("alpha_row_{i:02}")).collect();
+        let plain_col = Column::Flat(
+            FlatColumn::try_new(
+                FlatData::Utf8(
+                    Utf8Data::try_from_slices(plain_vals.iter().map(String::as_str)).unwrap(),
+                ),
+                None,
+            )
+            .unwrap(),
+        );
+        let plain_enc =
+            encode_mini_block(&plain_col, &DataType::Utf8, WriteProfile::L0Fast, None).unwrap();
+        let mut plain_framed = Vec::new();
+        let plain_entry = plain_enc
+            .write_framed_entry(0, n as u16, 0, 3, &mut plain_framed)
+            .unwrap();
+        assert_eq!(plain_entry.encoding, Encoding::Plain);
+        let plain_raw = read_framed_block(&plain_framed, MAX_BLOCK_RAW_BYTES)
+            .unwrap()
+            .2;
+        assert!(matches!(
+            eval_utf8_block_substring_raw(
+                &plain_raw[..4],
+                &plain_entry,
+                n,
+                &active,
+                b"",
+                false,
+                None,
+                None
+            ),
+            Err(StatamError::Corrupt { .. })
+        ));
+
+        let fsst_vals: Vec<String> = (0..64)
+            .map(|i| format!("{{\"role\":\"assistant\",\"message\":\"hello world {i:04}\"}}"))
+            .collect();
+        let fsst_col = Column::Flat(
+            FlatColumn::try_new(
+                FlatData::Utf8(
+                    Utf8Data::try_from_slices(fsst_vals.iter().map(String::as_str)).unwrap(),
+                ),
+                None,
+            )
+            .unwrap(),
+        );
+        let fsst_enc =
+            encode_mini_block(&fsst_col, &DataType::Utf8, WriteProfile::L1Compact, None).unwrap();
+        let mut fsst_framed = Vec::new();
+        let fsst_entry = fsst_enc
+            .write_framed_entry(0, 64, 0, 3, &mut fsst_framed)
+            .unwrap();
+        assert_eq!(fsst_entry.encoding, Encoding::Fsst);
+        let fsst_raw = read_framed_block(&fsst_framed, MAX_BLOCK_RAW_BYTES)
+            .unwrap()
+            .2;
+        let active64 = Bitmap::new_ones(64);
+        assert!(matches!(
+            eval_utf8_block_substring_raw(
+                &fsst_raw[..8],
+                &fsst_entry,
+                64,
+                &active64,
+                b"",
+                false,
+                None,
+                None
+            ),
+            Err(StatamError::Corrupt { .. })
+        ));
+
+        // 3. Dict: missing FileDict rejected; out-of-bounds code rejected even for empty needle,
+        // all_zeros code_bm, and all_ones code_bm.
+        let dict = FileDict::from_flat(
+            FlatColumn::try_new(
+                FlatData::Utf8(Utf8Data::try_from_slices(["alpha", "beta"]).unwrap()),
+                None,
+            )
+            .unwrap(),
+            true,
+        )
+        .unwrap();
+        let dict_vals: Vec<&str> = (0..n).map(|i| ["alpha", "beta"][i % 2]).collect();
+        let dict_col = Column::Flat(
+            FlatColumn::try_new(
+                FlatData::Utf8(Utf8Data::try_from_slices(dict_vals).unwrap()),
+                None,
+            )
+            .unwrap(),
+        );
+        let dict_enc = encode_mini_block(
+            &dict_col,
+            &DataType::Utf8,
+            WriteProfile::L1Compact,
+            Some(&dict),
+        )
+        .unwrap();
+        let mut dict_framed = Vec::new();
+        let dict_entry = dict_enc
+            .write_framed_entry(0, n as u16, 0, 3, &mut dict_framed)
+            .unwrap();
+        assert_eq!(dict_entry.encoding, Encoding::Dict);
+        let dict_raw = read_framed_block(&dict_framed, MAX_BLOCK_RAW_BYTES)
+            .unwrap()
+            .2;
+
+        // Missing FileDict rejected.
+        assert!(matches!(
+            eval_utf8_block_substring_raw(
+                &dict_raw,
+                &dict_entry,
+                n,
+                &active,
+                b"",
+                false,
+                None,
+                None
+            ),
+            Err(StatamError::Corrupt {
+                reason: "Dict mini-block requires FileDict",
+            })
+        ));
+
+        // Craft a dict block body with out-of-bounds code 99 (>= dict.len() == 2).
+        let mut bad_dict_raw = Vec::new();
+        bad_dict_raw.push(0u8); // sub_enc = ForBitpack
+        bad_dict_raw.extend_from_slice(&99u32.to_le_bytes()); // base = 99
+        bad_dict_raw.push(0u8); // bw = 0
+        let all_zeros_bm = Bitmap::new_zeroed(dict.len());
+        let all_ones_bm = Bitmap::new_ones(dict.len());
+        for (needle, bm) in [
+            (b"".as_slice(), None),
+            (b"zz".as_slice(), Some(&all_zeros_bm)),
+            (b"a".as_slice(), Some(&all_ones_bm)),
+        ] {
+            assert!(matches!(
+                eval_utf8_block_substring_raw(
+                    &bad_dict_raw,
+                    &dict_entry,
+                    n,
+                    &active,
+                    needle,
+                    false,
+                    bm,
+                    Some(&dict),
+                ),
+                Err(StatamError::Corrupt {
+                    reason: "dict code out of bounds",
+                })
+            ));
+        }
+    }
+
+    #[test]
+    fn reader_rejects_multi_chunk_payload_referencing_pack_without_edge_table() {
+        use crate::payload::pack::ChunkPackBuilder;
+        use crate::payload::{PayloadRefRow, encode_payload_refs};
+
+        let pack_id = [0xD4u8; 16];
+        let schema = Arc::new(
+            Schema::try_new(vec![
+                Field::new("ts", DataType::TimestampNs { utc: true }, false),
+                Field::new("body", DataType::Utf8, true),
+            ])
+            .unwrap(),
+        );
+        // Build a pseudo-random > 16 KiB payload so StatamWriter splits it into >= 2 chunks in `.stpk`.
+        let mut state = 0x1357_2468_abcd_ef01_u64;
+        let mut big = String::with_capacity(20 * 1024);
+        for _ in 0..(20 * 1024) {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            big.push((b'a' + ((state >> 24) as u8 % 4)) as char);
+        }
+        let batch = Batch::try_new_all(
+            Arc::clone(&schema),
+            vec![
+                Column::Flat(
+                    FlatColumn::try_new(
+                        FlatData::TimestampNs {
+                            values: vec![1_700_000_000_000_000_000, 1_700_000_000_001_000_000],
+                            utc: true,
+                        },
+                        None,
+                    )
+                    .unwrap(),
+                ),
+                Column::Flat(
+                    FlatColumn::try_new(
+                        FlatData::Utf8(
+                            Utf8Data::try_from_slices(["short_ok", big.as_str()]).unwrap(),
+                        ),
+                        None,
+                    )
+                    .unwrap(),
+                ),
+            ],
+            2,
+        )
+        .unwrap();
+
+        let pack_opts = PackWriteOptions {
+            target_frame_raw_bytes: 8 * 1024,
+            codec: Codec::None,
+            zstd_level: 1,
+            enable_trigram_skip: true,
+            compress_toc_lz4: false,
+            write_threads: 1,
+            ..PackWriteOptions::default()
+        };
+        let mut pb = ChunkPackBuilder::new(pack_id, pack_opts);
+        let opts = WriteOptions {
+            profile: WriteProfile::L1Compact,
+            payload_cols: vec!["body".to_owned()],
+            pack_id: Some(pack_id),
+            ..WriteOptions::default()
+        };
+        let mut file_bytes = Vec::new();
+        let mut writer = StatamWriter::new(Arc::clone(&schema), opts, Some(&mut pb)).unwrap();
+        writer.write_batch(&batch).unwrap();
+        writer.finish(&mut file_bytes).unwrap();
+        let mut valid_pack_bytes = Vec::new();
+        pb.finish(&mut valid_pack_bytes).unwrap();
+        let valid_pack =
+            ChunkPackReader::open(Arc::new(SliceReader::new(valid_pack_bytes))).unwrap();
+        let chunk_count = valid_pack.toc().chunks.len();
+        assert!(chunk_count >= 2);
+
+        // Build a paired `.stpk` with the exact same `pack_id` and `chunk_count` but `edge_table_len == 0`.
+        let mut no_edge_pb = ChunkPackBuilder::new(pack_id, pack_opts);
+        no_edge_pb.enable_boundary_tracking();
+        for cid in 0..chunk_count as u32 {
+            let mut c = Vec::with_capacity(4096);
+            c.extend_from_slice(&cid.to_le_bytes());
+            for _ in 4..4096 {
+                state ^= state << 13;
+                state ^= state >> 7;
+                state ^= state << 17;
+                c.push(b'a' + ((state >> 24) as u8 % 4));
+            }
+            no_edge_pb.intern_chunk(&c).unwrap();
+        }
+        let mut no_edge_bytes = Vec::new();
+        no_edge_pb.finish(&mut no_edge_bytes).unwrap();
+        let no_edge_pack =
+            Arc::new(ChunkPackReader::open(Arc::new(SliceReader::new(no_edge_bytes))).unwrap());
+        assert_eq!(no_edge_pack.postscript().edge_table_len, 0);
+
+        let mut resolver = InMemoryPackResolver::new();
+        resolver.insert(pack_id, Arc::clone(&no_edge_pack));
+        let reader = StatamReader::open(
+            Arc::new(SliceReader::new(file_bytes)),
+            Some(Arc::new(resolver)),
+        )
+        .unwrap();
+
+        // End-to-end StatamReader::scan takes the inline short-circuit path (`scan_payload_refs_inline_substring`)
+        // and must reject the 2-chunk row referencing the edge-table-less pack.
+        let err_scan = reader
+            .scan(&ScanRequest {
+                projection: Some(vec![0]),
+                substrings: vec![SubstringQuery::like("body", "XYZ_ABSENT_999")],
+                ..ScanRequest::default()
+            })
+            .unwrap_err();
+        assert!(matches!(
+            err_scan,
+            StatamError::Corrupt {
+                reason: "multi-chunk row references pack without edge table",
+            }
+        ));
+
+        // Direct `eval_payload_refs_substring` short-circuit loop also rejects the 2-chunk row.
+        let mut ref_bytes = Vec::new();
+        encode_payload_refs(
+            &[
+                PayloadRefRow::Inline(b"short_ok".to_vec()),
+                PayloadRefRow::Chunks(vec![(0, 0), (0, 1)]),
+            ],
+            &mut ref_bytes,
+        )
+        .unwrap();
+        let crafted_flat =
+            decode_payload_refs_flat(&ref_bytes, 2, MAX_BATCH_DECODED_BYTES).unwrap();
+        let mask = Bitmap::new_ones(2);
+        let err_eval = reader
+            .eval_payload_refs_substring(&crafted_flat, &mask, b"XYZ_ABSENT_999", false, None, 1)
+            .unwrap_err();
+        assert!(matches!(
+            err_eval,
+            StatamError::Corrupt {
+                reason: "multi-chunk row references pack without edge table",
+            }
+        ));
     }
 }

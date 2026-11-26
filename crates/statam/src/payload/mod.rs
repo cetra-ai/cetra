@@ -541,6 +541,399 @@ pub fn decode_payload_refs(
     Ok(out)
 }
 
+/// Row kind tag in [`FlatPayloadRefs`] representing SQL NULL.
+pub const FLAT_REF_NULL: u8 = 0;
+/// Row kind tag in [`FlatPayloadRefs`] representing an inline payload slice.
+pub const FLAT_REF_INLINE: u8 = 1;
+/// Row kind tag in [`FlatPayloadRefs`] representing `.stpk`/L0 chunk references.
+pub const FLAT_REF_CHUNKS: u8 = 2;
+
+/// Zero-per-row-allocation CSR representation of a decoded `PayloadRefs` mini-block.
+#[derive(Clone, PartialEq, Eq)]
+pub struct FlatPayloadRefs {
+    row_kinds: Vec<u8>,
+    chunk_offsets: Vec<u32>,
+    inline_offsets: Vec<u32>,
+    row_pack_idxs: Vec<u16>,
+    chunk_ids: Vec<u32>,
+    inline_data: Vec<u8>,
+}
+
+impl fmt::Debug for FlatPayloadRefs {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("FlatPayloadRefs")
+            .field("row_count", &self.row_kinds.len())
+            .field("total_chunks", &self.chunk_ids.len())
+            .field("inline_bytes", &self.inline_data.len())
+            .finish()
+    }
+}
+
+impl FlatPayloadRefs {
+    /// Constructs an all-NULL `FlatPayloadRefs` of `row_count` rows.
+    pub fn all_null(row_count: usize) -> Self {
+        Self {
+            row_kinds: vec![FLAT_REF_NULL; row_count],
+            chunk_offsets: vec![0u32; row_count + 1],
+            inline_offsets: vec![0u32; row_count + 1],
+            row_pack_idxs: Vec::new(),
+            chunk_ids: Vec::new(),
+            inline_data: Vec::new(),
+        }
+    }
+
+    /// Number of logical rows.
+    #[inline]
+    pub fn len(&self) -> usize {
+        self.row_kinds.len()
+    }
+
+    /// True when `len() == 0`.
+    #[inline]
+    pub fn is_empty(&self) -> bool {
+        self.row_kinds.is_empty()
+    }
+
+    /// Row kind tag (`FLAT_REF_NULL`, `FLAT_REF_INLINE`, or `FLAT_REF_CHUNKS`).
+    #[inline]
+    pub fn row_kind(&self, row: usize) -> u8 {
+        self.row_kinds[row]
+    }
+
+    /// Inline payload slice for `row` (empty if `row` is Null or Chunks).
+    #[inline]
+    pub fn inline_bytes(&self, row: usize) -> &[u8] {
+        let start = self.inline_offsets[row] as usize;
+        let end = self.inline_offsets[row + 1] as usize;
+        &self.inline_data[start..end]
+    }
+
+    /// `(pack_idxs, chunk_ids)` slices for `row` (empty slices if `row` is Null or Inline).
+    #[inline]
+    pub fn chunk_refs(&self, row: usize) -> (&[u16], &[u32]) {
+        let start = self.chunk_offsets[row] as usize;
+        let end = self.chunk_offsets[row + 1] as usize;
+        (&self.row_pack_idxs[start..end], &self.chunk_ids[start..end])
+    }
+
+    /// Converts to `Vec<PayloadRefRow>` (for test parity verification).
+    pub fn to_rows(&self) -> Vec<PayloadRefRow> {
+        let mut out = Vec::with_capacity(self.row_kinds.len());
+        for r in 0..self.row_kinds.len() {
+            match self.row_kinds[r] {
+                FLAT_REF_NULL => out.push(PayloadRefRow::Null),
+                FLAT_REF_INLINE => out.push(PayloadRefRow::Inline(self.inline_bytes(r).to_vec())),
+                FLAT_REF_CHUNKS => {
+                    let (ps, cs) = self.chunk_refs(r);
+                    let refs = ps.iter().copied().zip(cs.iter().copied()).collect();
+                    out.push(PayloadRefRow::Chunks(refs));
+                }
+                _ => out.push(PayloadRefRow::Null),
+            }
+        }
+        out
+    }
+}
+
+struct FlatRefHistory {
+    entries: [Option<(u32, u32, u8)>; MAX_TAIL_SHARE_BACK],
+    len: usize,
+    write_idx: usize,
+}
+
+impl FlatRefHistory {
+    fn new() -> Self {
+        Self {
+            entries: [None; MAX_TAIL_SHARE_BACK],
+            len: 0,
+            write_idx: 0,
+        }
+    }
+
+    #[inline]
+    fn push(&mut self, entry: Option<(u32, u32, u8)>) {
+        self.entries[self.write_idx] = entry;
+        self.write_idx = (self.write_idx + 1) % MAX_TAIL_SHARE_BACK;
+        if self.len < MAX_TAIL_SHARE_BACK {
+            self.len += 1;
+        }
+    }
+
+    #[inline]
+    fn get_back(&self, back: usize) -> Option<(u32, u32, u8)> {
+        let idx = (self.write_idx + MAX_TAIL_SHARE_BACK - back) % MAX_TAIL_SHARE_BACK;
+        self.entries[idx]
+    }
+}
+
+/// Decodes `row_count` payload reference entries from `raw` into flat CSR arrays with
+/// **zero per-row heap allocations**, enforcing the exact same bounds and delta-chain
+/// invariants as [`decode_payload_refs`].
+pub fn decode_payload_refs_flat(
+    raw: &[u8],
+    row_count: usize,
+    max_decoded_bytes: usize,
+) -> Result<FlatPayloadRefs, StatamError> {
+    if row_count as u64 > MAX_ROWS_PER_FILE || row_count > MAX_BLOCK_RAW_BYTES / 32 {
+        return Err(StatamError::BoundsExceeded {
+            reason: "payload refs row_count exceeds safe block limit",
+        });
+    }
+    let effective_max = max_decoded_bytes.min(MAX_BATCH_DECODED_BYTES);
+    let row_vec_bytes =
+        row_count
+            .checked_mul(size_of::<PayloadRefRow>())
+            .ok_or(StatamError::BoundsExceeded {
+                reason: "payload refs row vector size overflow",
+            })?;
+    if row_vec_bytes > effective_max {
+        return Err(StatamError::BoundsExceeded {
+            reason: "payload refs row vector exceeds max_batch_bytes",
+        });
+    }
+
+    let mut cur = RefCursor::new(raw);
+    let has_nulls = cur.read_u8()?;
+    let validity = match has_nulls {
+        0 => None,
+        1 => {
+            let bm_bytes = row_count.div_ceil(8);
+            if bm_bytes > cur.remaining() {
+                return Err(StatamError::Corrupt {
+                    reason: "truncated payload refs null bitmap",
+                });
+            }
+            let bm_slice = cur.read_exact(bm_bytes)?;
+            Some(Bitmap::from_bytes(bm_slice, row_count)?)
+        }
+        _ => {
+            return Err(StatamError::Corrupt {
+                reason: "invalid payload refs has_nulls flag",
+            });
+        }
+    };
+
+    let non_null_count = match &validity {
+        Some(bm) => bm.count_ones(),
+        None => row_count,
+    };
+    if non_null_count > cur.remaining() {
+        return Err(StatamError::Corrupt {
+            reason: "truncated payload refs row stream",
+        });
+    }
+
+    let mut row_kinds = Vec::with_capacity(row_count);
+    let mut chunk_offsets = Vec::with_capacity(row_count + 1);
+    chunk_offsets.push(0u32);
+    let mut inline_offsets = Vec::with_capacity(row_count + 1);
+    inline_offsets.push(0u32);
+    let mut row_pack_idxs: Vec<u16> = Vec::new();
+    let mut chunk_ids: Vec<u32> = Vec::new();
+    let mut inline_data: Vec<u8> = Vec::new();
+
+    let mut history = FlatRefHistory::new();
+    let mut total_decoded_bytes: usize = 0;
+
+    for row_idx in 0..row_count {
+        if validity.as_ref().is_some_and(|bm| !bm.get(row_idx)) {
+            row_kinds.push(FLAT_REF_NULL);
+            chunk_offsets.push(chunk_ids.len() as u32);
+            inline_offsets.push(inline_data.len() as u32);
+            continue;
+        }
+
+        let tag = cur.read_u8()?;
+        match tag {
+            TAG_INLINE => {
+                let len = cur.read_u16()? as usize;
+                if len > cur.remaining() {
+                    return Err(StatamError::Corrupt {
+                        reason: "truncated inline payload bytes",
+                    });
+                }
+                total_decoded_bytes = add_budget(total_decoded_bytes, len, effective_max)?;
+                let bytes = cur.read_exact(len)?;
+                inline_data.extend_from_slice(bytes);
+                let inline_end =
+                    u32::try_from(inline_data.len()).map_err(|_| StatamError::BoundsExceeded {
+                        reason: "flat inline_data exceeds u32::MAX",
+                    })?;
+                history.push(None);
+                row_kinds.push(FLAT_REF_INLINE);
+                chunk_offsets.push(chunk_ids.len() as u32);
+                inline_offsets.push(inline_end);
+            }
+            TAG_KEYFRAME => {
+                let n_chunks = cur.read_u16()? as usize;
+                if n_chunks > MAX_CHUNKS_PER_ROW {
+                    return Err(StatamError::BoundsExceeded {
+                        reason: "keyframe chunk count exceeds MAX_CHUNKS_PER_ROW",
+                    });
+                }
+                let wire_bytes = n_chunks.checked_mul(6).ok_or(StatamError::BoundsExceeded {
+                    reason: "keyframe wire byte size overflow",
+                })?;
+                if wire_bytes > cur.remaining() {
+                    return Err(StatamError::Corrupt {
+                        reason: "truncated keyframe chunk refs",
+                    });
+                }
+                let mem_bytes = n_chunks.checked_mul(size_of::<(u16, u32)>()).ok_or(
+                    StatamError::BoundsExceeded {
+                        reason: "keyframe memory size overflow",
+                    },
+                )?;
+                total_decoded_bytes = add_budget(total_decoded_bytes, mem_bytes, effective_max)?;
+
+                let start_idx =
+                    u32::try_from(chunk_ids.len()).map_err(|_| StatamError::BoundsExceeded {
+                        reason: "flat chunk_ids exceeds u32::MAX",
+                    })?;
+                row_pack_idxs.reserve(n_chunks);
+                chunk_ids.reserve(n_chunks);
+                for _ in 0..n_chunks {
+                    let pack_idx = cur.read_u16()?;
+                    let chunk_id = cur.read_u32()?;
+                    row_pack_idxs.push(pack_idx);
+                    chunk_ids.push(chunk_id);
+                }
+                let end_idx =
+                    u32::try_from(chunk_ids.len()).map_err(|_| StatamError::BoundsExceeded {
+                        reason: "flat chunk_ids exceeds u32::MAX",
+                    })?;
+                history.push(Some((start_idx, n_chunks as u32, 0)));
+                row_kinds.push(FLAT_REF_CHUNKS);
+                chunk_offsets.push(end_idx);
+                inline_offsets.push(inline_data.len() as u32);
+            }
+            TAG_DELTA => {
+                let back = cur.read_u8()? as usize;
+                if back == 0 || back > MAX_TAIL_SHARE_BACK {
+                    return Err(StatamError::Corrupt {
+                        reason: "payload ref delta back offset outside 1..=32",
+                    });
+                }
+                if back > history.len {
+                    return Err(StatamError::Corrupt {
+                        reason: "payload ref delta back offset precedes block start",
+                    });
+                }
+                let Some((parent_start, parent_len, parent_depth)) = history.get_back(back) else {
+                    return Err(StatamError::Corrupt {
+                        reason: "payload ref delta references inline row",
+                    });
+                };
+                if (parent_depth as usize) >= MAX_REF_CHAIN_DEPTH {
+                    return Err(StatamError::BoundsExceeded {
+                        reason: "payload ref chain depth exceeds MAX_REF_CHAIN_DEPTH",
+                    });
+                }
+
+                let keep_prefix = cur.read_u16()? as usize;
+                if keep_prefix > parent_len as usize {
+                    return Err(StatamError::Corrupt {
+                        reason: "payload ref keep_prefix exceeds parent chunk count",
+                    });
+                }
+                let n_new = cur.read_u16()? as usize;
+                let total_chunks =
+                    keep_prefix
+                        .checked_add(n_new)
+                        .ok_or(StatamError::BoundsExceeded {
+                            reason: "payload ref total chunk count overflow",
+                        })?;
+                if total_chunks > MAX_CHUNKS_PER_ROW {
+                    return Err(StatamError::BoundsExceeded {
+                        reason: "row chunks exceed MAX_CHUNKS_PER_ROW",
+                    });
+                }
+                let min_wire = n_new.checked_mul(2).ok_or(StatamError::BoundsExceeded {
+                    reason: "payload ref delta wire size overflow",
+                })?;
+                if min_wire > cur.remaining() {
+                    return Err(StatamError::Corrupt {
+                        reason: "truncated payload ref delta entries",
+                    });
+                }
+                let mem_bytes = total_chunks.checked_mul(size_of::<(u16, u32)>()).ok_or(
+                    StatamError::BoundsExceeded {
+                        reason: "payload ref delta memory size overflow",
+                    },
+                )?;
+                total_decoded_bytes = add_budget(total_decoded_bytes, mem_bytes, effective_max)?;
+
+                let cur_start =
+                    u32::try_from(chunk_ids.len()).map_err(|_| StatamError::BoundsExceeded {
+                        reason: "flat chunk_ids exceeds u32::MAX",
+                    })?;
+                row_pack_idxs.reserve(total_chunks);
+                chunk_ids.reserve(total_chunks);
+
+                let p_start = parent_start as usize;
+                let p_end = p_start + keep_prefix;
+                row_pack_idxs.extend_from_within(p_start..p_end);
+                chunk_ids.extend_from_within(p_start..p_end);
+
+                let mut prev = if keep_prefix > 0 {
+                    (row_pack_idxs[p_end - 1], chunk_ids[p_end - 1])
+                } else {
+                    (0u16, 0u32)
+                };
+                for _ in 0..n_new {
+                    let p_delta = zigzag_decode_i64(cur.read_varint_u64()?);
+                    let c_delta = zigzag_decode_i64(cur.read_varint_u64()?);
+                    let next_pack = i64::from(prev.0)
+                        .checked_add(p_delta)
+                        .and_then(|v| u16::try_from(v).ok())
+                        .ok_or(StatamError::Corrupt {
+                            reason: "payload ref pack_idx delta out of u16 range",
+                        })?;
+                    let next_chunk = i64::from(prev.1)
+                        .checked_add(c_delta)
+                        .and_then(|v| u32::try_from(v).ok())
+                        .ok_or(StatamError::Corrupt {
+                            reason: "payload ref chunk_id delta out of u32 range",
+                        })?;
+                    prev = (next_pack, next_chunk);
+                    row_pack_idxs.push(prev.0);
+                    chunk_ids.push(prev.1);
+                }
+
+                let end_idx =
+                    u32::try_from(chunk_ids.len()).map_err(|_| StatamError::BoundsExceeded {
+                        reason: "flat chunk_ids exceeds u32::MAX",
+                    })?;
+                let new_depth = parent_depth + 1;
+                history.push(Some((cur_start, total_chunks as u32, new_depth)));
+                row_kinds.push(FLAT_REF_CHUNKS);
+                chunk_offsets.push(end_idx);
+                inline_offsets.push(inline_data.len() as u32);
+            }
+            _ => {
+                return Err(StatamError::Corrupt {
+                    reason: "unknown payload ref row tag",
+                });
+            }
+        }
+    }
+
+    if !cur.is_eof() {
+        return Err(StatamError::Corrupt {
+            reason: "trailing bytes after payload refs block",
+        });
+    }
+
+    Ok(FlatPayloadRefs {
+        row_kinds,
+        chunk_offsets,
+        inline_offsets,
+        row_pack_idxs,
+        chunk_ids,
+        inline_data,
+    })
+}
+
 /// Sparsely decodes only `mask`-active `(row_idx, PayloadRefRow)` entries from `src`,
 /// skipping inactive rows outside the `MAX_REF_CHAIN_DEPTH * MAX_TAIL_SHARE_BACK` (`480`)
 /// non-null transitive history window with zero per-row heap allocation.
@@ -1054,6 +1447,28 @@ fn validate_pack_chunk(
 }
 
 #[inline]
+fn record_pack_ref_in_row(
+    pack_idx: u16,
+    pack_has_edges: &[bool],
+    pack_counts: &mut [u32],
+    touched_packs: &mut Vec<u16>,
+) -> Result<(), StatamError> {
+    let pidx = pack_idx as usize;
+    if !pack_has_edges[pidx] {
+        if pack_counts[pidx] == 0 {
+            touched_packs.push(pack_idx);
+        }
+        pack_counts[pidx] += 1;
+        if pack_counts[pidx] > 1 {
+            return Err(StatamError::Corrupt {
+                reason: "multi-chunk row references pack without edge table",
+            });
+        }
+    }
+    Ok(())
+}
+
+#[inline]
 fn push_scan_history<'a>(
     history: &mut VecDeque<ScanHistoryEntry<'a>>,
     entry: ScanHistoryEntry<'a>,
@@ -1088,8 +1503,14 @@ pub(crate) fn scan_payload_refs_inline_substring(
     row_count: usize,
     active_mask: &Bitmap,
     pack_chunk_counts: &[usize],
+    pack_has_edges: &[bool],
     mut match_inline: impl FnMut(&[u8]) -> bool,
 ) -> Result<Bitmap, StatamError> {
+    if pack_has_edges.len() != pack_chunk_counts.len() {
+        return Err(StatamError::Corrupt {
+            reason: "pack metadata length mismatch in payload refs scan",
+        });
+    }
     if row_count as u64 > MAX_ROWS_PER_FILE || row_count > MAX_BLOCK_RAW_BYTES / 32 {
         return Err(StatamError::BoundsExceeded {
             reason: "payload refs row_count exceeds safe block limit",
@@ -1131,6 +1552,13 @@ pub(crate) fn scan_payload_refs_inline_substring(
     let mut history: VecDeque<ScanHistoryEntry<'_>> = VecDeque::with_capacity(MAX_TAIL_SHARE_BACK);
     let mut recycle_vecs: Vec<Vec<(u16, u32)>> = Vec::new();
     let mut total_decoded_bytes: usize = 0;
+    let any_no_edges = pack_has_edges.iter().any(|&has| !has);
+    let mut pack_counts = if any_no_edges {
+        vec![0u32; pack_has_edges.len()]
+    } else {
+        Vec::new()
+    };
+    let mut touched_packs: Vec<u16> = Vec::new();
 
     for row_idx in 0..row_count {
         if validity.as_ref().is_some_and(|bm| !bm.get(row_idx)) {
@@ -1177,10 +1605,24 @@ pub(crate) fn scan_payload_refs_inline_substring(
                 total_decoded_bytes =
                     add_budget(total_decoded_bytes, mem_bytes, MAX_BATCH_DECODED_BYTES)?;
                 let raw_pairs = cur.read_exact(wire_bytes)?;
+                let check_edges = any_no_edges && n_chunks > 1;
                 for pair in raw_pairs.as_chunks::<6>().0 {
                     let pack_idx = u16::from_le_bytes([pair[0], pair[1]]);
                     let chunk_id = u32::from_le_bytes([pair[2], pair[3], pair[4], pair[5]]);
                     validate_pack_chunk(pack_idx, chunk_id, pack_chunk_counts)?;
+                    if check_edges {
+                        record_pack_ref_in_row(
+                            pack_idx,
+                            pack_has_edges,
+                            &mut pack_counts,
+                            &mut touched_packs,
+                        )?;
+                    }
+                }
+                if check_edges {
+                    for p in touched_packs.drain(..) {
+                        pack_counts[p as usize] = 0;
+                    }
                 }
                 push_scan_history(
                     &mut history,
@@ -1274,6 +1716,35 @@ pub(crate) fn scan_payload_refs_inline_substring(
                 };
 
                 if (new_depth as usize) >= MAX_REF_CHAIN_DEPTH {
+                    let check_edges = any_no_edges && total_chunks > 1;
+                    if check_edges && keep_prefix > 0 {
+                        match &history[history.len() - back] {
+                            ScanHistoryEntry::Keyframe { raw_pairs, .. } => {
+                                for idx in 0..keep_prefix {
+                                    let (p, _) = read_raw_pair(raw_pairs, idx);
+                                    record_pack_ref_in_row(
+                                        p,
+                                        pack_has_edges,
+                                        &mut pack_counts,
+                                        &mut touched_packs,
+                                    )?;
+                                }
+                            }
+                            ScanHistoryEntry::Delta { chunks, .. } => {
+                                for &(p, _) in &chunks[..keep_prefix] {
+                                    record_pack_ref_in_row(
+                                        p,
+                                        pack_has_edges,
+                                        &mut pack_counts,
+                                        &mut touched_packs,
+                                    )?;
+                                }
+                            }
+                            ScanHistoryEntry::Inline | ScanHistoryEntry::DeltaAtMaxDepth => {
+                                unreachable!()
+                            }
+                        }
+                    }
                     for _ in 0..n_new {
                         let p_delta = zigzag_decode_i64(cur.read_varint_u64()?);
                         let c_delta = zigzag_decode_i64(cur.read_varint_u64()?);
@@ -1290,7 +1761,20 @@ pub(crate) fn scan_payload_refs_inline_substring(
                                 reason: "payload ref chunk_id delta out of u32 range",
                             })?;
                         validate_pack_chunk(next_pack, next_chunk, pack_chunk_counts)?;
+                        if check_edges {
+                            record_pack_ref_in_row(
+                                next_pack,
+                                pack_has_edges,
+                                &mut pack_counts,
+                                &mut touched_packs,
+                            )?;
+                        }
                         prev = (next_pack, next_chunk);
+                    }
+                    if check_edges {
+                        for p in touched_packs.drain(..) {
+                            pack_counts[p as usize] = 0;
+                        }
                     }
                     push_scan_history(
                         &mut history,
@@ -1332,6 +1816,19 @@ pub(crate) fn scan_payload_refs_inline_substring(
                         validate_pack_chunk(next_pack, next_chunk, pack_chunk_counts)?;
                         prev = (next_pack, next_chunk);
                         refs.push(prev);
+                    }
+                    if any_no_edges && refs.len() > 1 {
+                        for &(p, _) in &refs {
+                            record_pack_ref_in_row(
+                                p,
+                                pack_has_edges,
+                                &mut pack_counts,
+                                &mut touched_packs,
+                            )?;
+                        }
+                        for p in touched_packs.drain(..) {
+                            pack_counts[p as usize] = 0;
+                        }
                     }
                     push_scan_history(
                         &mut history,
@@ -1908,5 +2405,121 @@ mod tests {
             decode_payload_refs_selected(&bad_skip_kp1, 2, &empty_2, MAX_BATCH_DECODED_BYTES),
             Err(StatamError::Corrupt { .. })
         ));
+    }
+
+    #[test]
+    fn decode_payload_refs_flat_matches_decode_payload_refs_bit_for_bit() {
+        let mut rows = Vec::with_capacity(600);
+        for i in 0..600usize {
+            match i % 7 {
+                0 => rows.push(PayloadRefRow::Null),
+                1 => rows.push(PayloadRefRow::Inline(
+                    format!("inline-row-{i}").into_bytes(),
+                )),
+                _ => {
+                    let base = (i / 10) as u32;
+                    let mut chunks = vec![(0, base), (0, base + 1), (0, base + 2)];
+                    if i % 3 == 0 {
+                        chunks.push((1, i as u32));
+                    }
+                    rows.push(PayloadRefRow::Chunks(chunks));
+                }
+            }
+        }
+        let mut encoded = Vec::new();
+        encode_payload_refs(&rows, &mut encoded).unwrap();
+        let expected = decode_payload_refs(&encoded, rows.len(), MAX_BATCH_DECODED_BYTES).unwrap();
+        let flat = decode_payload_refs_flat(&encoded, rows.len(), MAX_BATCH_DECODED_BYTES).unwrap();
+        assert_eq!(flat.len(), expected.len());
+        assert_eq!(flat.to_rows(), expected);
+
+        // Also test explicit 15-hop TAG_DELTA chain with ring-buffer wraparound (>32 rows) and L0 direct.
+        let mut chain_rows = Vec::new();
+        let mut cur = vec![(0u16, 10u32), (0, 11)];
+        for step in 0..80u32 {
+            if step % 15 == 0 {
+                cur = vec![(0, 100 + step), (0, 101 + step)];
+            } else {
+                cur.push((0, 200 + step));
+            }
+            if step % 9 == 4 {
+                chain_rows.push(PayloadRefRow::Null);
+            } else if step % 9 == 8 {
+                chain_rows.push(PayloadRefRow::Inline(b"tiny".to_vec()));
+            } else {
+                chain_rows.push(PayloadRefRow::Chunks(cur.clone()));
+            }
+        }
+        let mut chain_enc = Vec::new();
+        encode_payload_refs(&chain_rows, &mut chain_enc).unwrap();
+        let chain_expected =
+            decode_payload_refs(&chain_enc, chain_rows.len(), MAX_BATCH_DECODED_BYTES).unwrap();
+        let chain_flat =
+            decode_payload_refs_flat(&chain_enc, chain_rows.len(), MAX_BATCH_DECODED_BYTES)
+                .unwrap();
+        assert_eq!(chain_flat.to_rows(), chain_expected);
+
+        let mut l0_enc = Vec::new();
+        encode_payload_refs_l0_direct(&rows, &mut l0_enc).unwrap();
+        let l0_expected =
+            decode_payload_refs(&l0_enc, rows.len(), MAX_BATCH_DECODED_BYTES).unwrap();
+        let l0_flat =
+            decode_payload_refs_flat(&l0_enc, rows.len(), MAX_BATCH_DECODED_BYTES).unwrap();
+        assert_eq!(l0_flat.to_rows(), l0_expected);
+
+        // Bounds & corruption parity.
+        let truncated = &encoded[..encoded.len() - 1];
+        assert!(decode_payload_refs_flat(truncated, rows.len(), MAX_BATCH_DECODED_BYTES).is_err());
+        let mut trailing = encoded.clone();
+        trailing.push(0);
+        assert!(decode_payload_refs_flat(&trailing, rows.len(), MAX_BATCH_DECODED_BYTES).is_err());
+    }
+
+    #[test]
+    fn scan_payload_refs_inline_rejects_multi_chunk_row_without_edge_table() {
+        // Keyframe 2-chunk row referencing pack 0 with pack_has_edges[0] == false.
+        let kf_rows = vec![PayloadRefRow::Chunks(vec![(0, 0), (0, 1)])];
+        let mut kf_enc = Vec::new();
+        encode_payload_refs(&kf_rows, &mut kf_enc).unwrap();
+        let mask1 = Bitmap::new_ones(1);
+        let err = scan_payload_refs_inline_substring(&kf_enc, 1, &mask1, &[4], &[false], |_| false)
+            .unwrap_err();
+        assert!(matches!(
+            err,
+            StatamError::Corrupt {
+                reason: "multi-chunk row references pack without edge table",
+            }
+        ));
+
+        // Delta row extending a 1-chunk parent to 2 chunks in pack 0 where !pack_has_edges[0].
+        let delta_rows = vec![
+            PayloadRefRow::Chunks(vec![(0, 0)]),
+            PayloadRefRow::Chunks(vec![(0, 0), (0, 1)]),
+        ];
+        let mut delta_enc = Vec::new();
+        encode_payload_refs(&delta_rows, &mut delta_enc).unwrap();
+        let mask2 = Bitmap::new_ones(2);
+        let err_delta =
+            scan_payload_refs_inline_substring(&delta_enc, 2, &mask2, &[4], &[false], |_| false)
+                .unwrap_err();
+        assert!(matches!(
+            err_delta,
+            StatamError::Corrupt {
+                reason: "multi-chunk row references pack without edge table",
+            }
+        ));
+
+        // Single-chunk rows succeed when !pack_has_edges[0].
+        let ok_rows = vec![
+            PayloadRefRow::Chunks(vec![(0, 0)]),
+            PayloadRefRow::Inline(b"hello needle".to_vec()),
+        ];
+        let mut ok_enc = Vec::new();
+        encode_payload_refs(&ok_rows, &mut ok_enc).unwrap();
+        let bm = scan_payload_refs_inline_substring(&ok_enc, 2, &mask2, &[4], &[false], |b| {
+            b.windows(6).any(|w| w == b"needle")
+        })
+        .unwrap();
+        assert_eq!(bm.iter_ones().collect::<Vec<_>>(), vec![1]);
     }
 }

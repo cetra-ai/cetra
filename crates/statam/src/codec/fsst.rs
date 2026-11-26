@@ -920,6 +920,30 @@ impl<'a> FsstBlockView<'a> {
         Ok(())
     }
 
+    /// Decodes a single row into `scratch` (reusing `scratch.len()` without zero-fill resizing
+    /// across calls) and returns the decoded byte slice for that row.
+    pub fn decode_row_into<'b>(
+        &self,
+        row_idx: usize,
+        scratch: &'b mut Vec<u8>,
+    ) -> Result<&'b [u8], StatamError> {
+        if row_idx >= self.len() {
+            return Err(StatamError::Corrupt {
+                reason: "fsst decode_row index out of bounds",
+            });
+        }
+        let start = self.offsets[row_idx] as usize;
+        let end = self.offsets[row_idx + 1] as usize;
+        let mut pos = 0usize;
+        self.table.decode_row_fast(
+            &self.coded[start..end],
+            scratch,
+            &mut pos,
+            MAX_BLOCK_RAW_BYTES,
+        )?;
+        Ok(&scratch[..pos])
+    }
+
     /// Decodes all rows into `(offsets, bytes)`, enforcing `MAX_BLOCK_RAW_BYTES`.
     pub fn decode_all(&self) -> Result<(Vec<u32>, Vec<u8>), StatamError> {
         let row_count = self.len();
@@ -1316,6 +1340,70 @@ mod tests {
                     reason: "fsst decoded size exceeds MAX_BLOCK_RAW_BYTES",
                 })
             ));
+        }
+    }
+
+    #[test]
+    fn decode_fsst_selected_and_row_into_parity_across_masks() {
+        let mut owned = Vec::with_capacity(64);
+        let mut valid_bits = Vec::with_capacity(64);
+        for i in 0..64usize {
+            if i % 5 == 0 {
+                owned.push(String::new());
+                valid_bits.push(false);
+            } else {
+                owned.push(format!(
+                    "{{\"role\":\"assistant\",\"turn\":{i},\"model\":\"claude-3-5-sonnet\",\"text\":\"hello world {i}\"}}"
+                ));
+                valid_bits.push(true);
+            }
+        }
+        let refs: Vec<&[u8]> = owned.iter().map(String::as_bytes).collect();
+        let body = encode_fsst_body(&refs).unwrap().unwrap();
+        let nulls = Bitmap::from_bools(&valid_bits);
+        let all_nulls = Bitmap::new_zeroed(refs.len());
+
+        let full_u = decode_fsst_utf8(&body, refs.len()).unwrap();
+        let full_b = decode_fsst_binary(&body, refs.len()).unwrap();
+        let view = FsstBlockView::parse(&body, refs.len()).unwrap();
+
+        let empty_mask = Bitmap::new_zeroed(refs.len());
+        let mut one_mask = Bitmap::new_zeroed(refs.len());
+        let _ = one_mask.set(17, true);
+        let mut scattered_mask = Bitmap::new_zeroed(refs.len());
+        for idx in [0usize, 1, 5, 17, 32, 63] {
+            let _ = scattered_mask.set(idx, true);
+        }
+        let all_mask = Bitmap::new_ones(refs.len());
+
+        let mut scratch = Vec::new();
+        for (name, mask, row_nulls) in [
+            ("empty", &empty_mask, Some(&nulls)),
+            ("one_row", &one_mask, Some(&nulls)),
+            ("scattered_with_nulls", &scattered_mask, Some(&nulls)),
+            ("scattered_no_nulls", &scattered_mask, None),
+            ("all_null", &scattered_mask, Some(&all_nulls)),
+            ("all_selected", &all_mask, Some(&nulls)),
+        ] {
+            let (sel_u, sel_u_nulls) =
+                decode_fsst_utf8_selected(&body, refs.len(), mask, row_nulls).unwrap();
+            let (sel_b, sel_b_nulls) =
+                decode_fsst_binary_selected(&body, refs.len(), mask, row_nulls).unwrap();
+            let u_nulls = sel_u_nulls.unwrap();
+            let b_nulls = sel_b_nulls.unwrap();
+            assert_eq!(sel_u.len(), refs.len(), "{name}");
+            assert_eq!(sel_b.len(), refs.len(), "{name}");
+            for (r, &expected_slice) in refs.iter().enumerate() {
+                let expected_valid = mask.get(r) && row_nulls.is_none_or(|bm| bm.get(r));
+                assert_eq!(u_nulls.get(r), expected_valid, "{name} row {r}");
+                assert_eq!(b_nulls.get(r), expected_valid, "{name} row {r}");
+                if expected_valid {
+                    assert_eq!(sel_u.get(r), full_u.get(r), "{name} row {r}");
+                    assert_eq!(sel_b.get(r), full_b.get(r), "{name} row {r}");
+                    let slice = view.decode_row_into(r, &mut scratch).unwrap();
+                    assert_eq!(slice, expected_slice, "{name} row {r}");
+                }
+            }
         }
     }
 }
